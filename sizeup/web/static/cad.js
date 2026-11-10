@@ -1152,8 +1152,12 @@ function radioRow(t, ctx = {}) {
     meta.append(acts);
   }
   // HPN Tower (#257): the written form (sizeup/atc_normalize.py: "RNAV Yankee 34", "TWORF"), what was heard on hover
-  const shown = t.atc_text || t.text;
+  // a unit's status words put back after its callsign (sizeup/cad/statusrepair.py: "is fine" -> en route), heard on hover
+  const shown = t.atc_text || t.fixed_text || t.text;
   const txt = el("div", "txt" + (shown ? "" : " muted"), shown || sttSaid(t));
+  if (t.fixed_text && !t.atc_text) {
+    txt.title = `As transcribed: ${t.text}\n` + (t.fixes || []).map((x) => `“${x.heard}” → ${x.to}`).join("\n");
+  }
   if (t.atc_text) {
     const fixes = (t.atc_snaps || []).map((x) => `“${x.from}” → ${x.to} (on ADS-B)`);
     txt.title = `As transcribed: ${t.text}` + (fixes.length ? `\nCallsign matched to ADS-B: ${fixes.join(", ")}` : "");
@@ -1614,7 +1618,7 @@ function renderRadio(inc) {
   }
   const one = {
     key: (x) => x.key,
-    sig: (x) => x.kind === "radio" ? JSON.stringify([x.t.text, x.t.atc_text, x.t.atc_weak, x.t.atc_snaps, x.t.status, x.t.rig, x.t.why, x.t.link_kept, x.t.has_audio, talkSig(x.t.rig),
+    sig: (x) => x.kind === "radio" ? JSON.stringify([x.t.text, x.t.fixed_text, x.t.atc_text, x.t.atc_weak, x.t.atc_snaps, x.t.status, x.t.rig, x.t.why, x.t.link_kept, x.t.has_audio, talkSig(x.t.rig),
                                                      x.t.alt_text, x.t.rerun_at, (x.t.events || []).map((e) => [e.id, e.why]), cad.txRev,
                                                      emSig(x.t), atcSig(x.t)])
       : JSON.stringify([x.e.text, x.e.units]),

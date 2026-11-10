@@ -213,6 +213,7 @@ class Cad:
         self.hints = StatusHints(self.store, lambda: self.lists, channels=s.tactical,
                                  talkgroups=tuple(dict.fromkeys((*s.incident_talkgroups, *s.airport_talkgroups))), log=log)
         self.comms.on_text = self._on_text
+        self.comms.fix = self.hints.decorate             # the Radio rows: misheard status words put back, heard on hover
         # Incident sources, ranked (#297, sizeup/cad/sources.py): external CAD feeds first, the paging decoder the backup;
         # which may make an incident, whose fields win, the possible-incoming notices. The app starts its ticker.
         self.sources = Sources(self, clock=clock, log=log)

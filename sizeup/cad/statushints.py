@@ -8,6 +8,12 @@
               out of service, incident command); a phrase is skipped when it is negated ("not on location yet"), a
               question ("is Engine 64 responding?"), a condition ("advise when on location"), an order ("go to
               staging"), a time to come ("on location in 2 minutes"), or said of someone else ("PD is on location")
+    misheard  the status words speech-to-text turns into ordinary ones right after our callsign ("Engine 61 is fine",
+              "Ladder 31 around 1412", "Engine 61 on vacation") are put back first (sizeup/cad/statusrepair.py); the
+              suggestion keeps the heard words ("en route (heard “is fine”)") and the whole transcript as heard
+    number    a bare number before the phrase ("64 on scene") is the talker's unit only when its radio is that unit (E64);
+              a chief's 4-digit number one digit off ("2381 on location" from 2391's radio) is his too
+    list      units named one after another, then one status ("2391, Engine 61, Ladder 31 on location"): each of them
     who       a unit of ours (PCFD's and Rye Brook's fire units, the chiefs 239x: sizeup/cad/feed.py load_cfg) named right
               before the phrase ("Engine 64 on location", "60 Control copies, 2391 responding"), else the talker when
               its radio is one of ours (the registry's rig), else the unit that called ("Engine 64 to 60 Control, on
@@ -43,6 +49,7 @@ from pathlib import Path
 
 from sizeup.cad.feed import load_cfg, unit_forms
 from sizeup.cad.lists import ListsError
+from sizeup.cad.statusrepair import repair
 from sizeup.cad.store import TZ, CadError
 
 EXPIRE_S = 300
@@ -82,11 +89,14 @@ CSV_COLUMNS = ["Heard", "Unit", "Suggested", "Was", "Phrase", "Said", "Transcrip
 # (intent, regex). Each is a phrase as said on the air; the checks around it (lead_in, the guards) decide whether it
 # is a unit telling its status.
 ROUTE = r"(?:en|in)[\s-]?route"
+CLOCK_AFTER = r"\s*(?:(?:[01]\d|2[0-3]):?[0-5]\d|\d:[0-5]\d)(?!\d)"     # a readback's time: "en route 1412"
 PHRASES: list[tuple[str, re.Pattern]] = [(i, re.compile(p, re.I)) for i, p in (
     ("enroute", r"\bresponding\b(?!\s+(?:units?|compan(?:y|ies)|apparatus|crews?|members|personnel|to\s+(?:the\s+)?"
                 r"(?:hospital|ER)\b))"),
-    ("enroute", rf"\b{ROUTE}\b(?!\s*\d)"),               # not "in Route 1"
+    ("enroute", rf"\b{ROUTE}\b(?!(?!{CLOCK_AFTER})\s*\d)"),   # not "in Route 1"; "en route 1412" (a readback)
     ("onscene", r"\bon[\s-](?:the\s+)?(?:location|scene)\b"),
+    ("onscene", r"\bat[\s-](?:the\s+)?(?:location|scene)\b(?!\s+of\b)"),
+    ("onscene", r"\barriving\b(?!\s+(?:shortly|soon|momentarily|in|on|at)\b)"),   # "arriving on location": that one
     ("onscene", r"\barrived\b(?!\s+at\s+(?:the\s+)?(?:hospital|ER)\b)"),
     ("staging", r"\b(?:in|at)\s+(?:the\s+)?staging\b"),
     ("staging", r"\bstaged\b"),
@@ -139,7 +149,8 @@ class Found:
     said: str
     units: list[str]                 # the units of ours the sentence names as doing it ([] = the talker / caller)
     explicit: bool = False
-    lead: str = ""                   # unit | first | start | control
+    lead: str = ""                   # unit | first | start | control | number
+    number: str = ""                 # lead "number": the bare number said ("64 on scene"), the talker's own or nothing
 
 
 @dataclass
@@ -183,6 +194,11 @@ class Phrases:
         self.units = [(c, re.compile(r"(?<![\w])(?:" + "|".join(unit_forms(c, sp)) + r")(?![\w])", re.I))
                       for c, sp in units.items()]
         self.codes = set(units)
+        self.spoken = dict(units)
+
+    def repair(self, text: str) -> tuple[str, list[dict]]:
+        """The text with misheard status words after our callsigns put back (sizeup/cad/statusrepair.py)."""
+        return repair(text, self.named, self.spoken)
 
     def named(self, text: str) -> list[tuple[int, int, str]]:
         """(start, end, code) of every unit of ours the text names, in order (the longest at a place)."""
@@ -200,12 +216,19 @@ class Phrases:
 
     def find(self, text: str) -> list[Found]:
         out: list[Found] = []
+        listed: list[str] = []          # the units of ours a run of clauses has only named so far ("Engine 61, Ladder 31,")
         for m in CLAUSE.finditer(text or ""):
             clause = m.group(0)
             body = clause.rstrip()
             if not body.strip() or body.endswith("?") or QUESTION_START.match(body):
+                listed = []
                 continue
             named = self.named(clause)
+            only = self._only_units(clause, named)
+            if only is not None:
+                listed += [c for c in only if c not in listed]
+                continue
+            before, listed = listed, []
             hits = sorted(((x.start(), x.end(), i) for i, rx in PHRASES for x in rx.finditer(clause)), key=lambda h: (h[0], -h[1]))
             taken, last_end = [], 0
             for s, e, intent in hits:
@@ -214,9 +237,23 @@ class Phrases:
                 taken.append((s, e, intent))
                 f = self._one(clause, s, e, intent, named, last_end)
                 if f is not None:
+                    if before and last_end == 0 and (f.lead == "start" or (f.lead == "unit" and named and named[0][2] == f.units[0]
+                                                                           and not clause[:named[0][0]].strip(" ,"))):
+                        # a list said before it, one status for all: "2391, Engine 61, Ladder 31 on location" (each
+                        # unit once; the speaker naming himself first is one of them)
+                        f.units = before + [u for u in f.units if u not in before]
+                        f.lead = "unit"
                     out.append(f)
                     last_end = e
         return out
+
+    @staticmethod
+    def _only_units(clause: str, named) -> list[str] | None:
+        """The units of ours a clause is nothing but ("Engine 61", "23 91 and Ladder 31"), else None."""
+        if not named:
+            return None
+        rest = "".join(clause[a:b] for a, b in zip([0] + [e for _, e, _ in named], [s for s, _, _ in named] + [len(clause)]))
+        return [c for _, _, c in named] if re.fullmatch(r"[\s,.;&-]*(?:(?:and|&)[\s,]*)*", rest, re.I) else None
 
     def _one(self, clause: str, s: int, e: int, intent: str, named, since: int) -> Found | None:
         before, after = clause[since:s], clause[e:]
@@ -236,8 +273,9 @@ class Phrases:
         if intent == "staging" and lead[0] not in ("unit", "first"):
             return None                                     # "Staging on King Street": where staging is, not who is in it
         said = " ".join(clause.strip(" ,").split())
-        return Found(intent, " ".join(clause[s:e].split()).lower(), said[:SAID_MAX], lead[1],
-                     bool(EXPLICIT.search(clause[since:e])), lead[0])
+        number = lead[1][0] if lead[0] == "number" else ""
+        return Found(intent, " ".join(clause[s:e].split()).lower(), said[:SAID_MAX], [] if number else lead[1],
+                     bool(EXPLICIT.search(clause[since:e])), lead[0], number)
 
     def _lead(self, clause: str, since: int, s: int, named) -> tuple[str, list[str]] | None:
         """Who the words right before the phrase say it is: ('unit', [codes]) for units of ours named there (a run:
@@ -261,6 +299,8 @@ class Phrases:
             return ("unit", run) if run else None
         if CONTROL_END.search(clause[since:rest_end]):
             return ("first", []) if first else ("control", [])
+        if m := re.fullmatch(r"\s*(?:the\s+)?(\d{2,4})", clause[since:rest_end]):
+            return ("number", [m.group(1)])                 # "64 on scene": a unit by its number alone (the talker's?)
         return None
 
 
@@ -291,6 +331,21 @@ class StatusHints:
                 self.cfg = Cfg(False)
             self.phrases = Phrases(self.cfg.units)
             self._for = L
+
+    def decorate(self, rows: list[dict]) -> list[dict]:
+        """Each row on our fire channels whose status words were put back (statusrepair.py): "fixed_text" (shown) and
+        "fixes" [{heard, to}] (on hover); the row's own text stays what speech-to-text wrote."""
+        self._refresh()
+        if not self.cfg.enabled:
+            return rows
+        for r in rows:
+            if r.get("kind", "radio") != "radio" or not r.get("text"):
+                continue
+            if r.get("channel") in self.cfg.channels or (r.get("talkgroup") is not None and r["talkgroup"] in self.cfg.talkgroups):
+                fixed, fixes = self.phrases.repair(r["text"])
+                if fixes:
+                    r["fixed_text"], r["fixes"] = fixed, fixes
+        return rows
 
     # -- what a status phrase means, in this department's codes ----------------------------------------------------
 
@@ -347,16 +402,24 @@ class StatusHints:
 
     def _read(self, t: dict) -> dict[str, tuple[Found, str]]:
         """unit code -> (what was said of it, who: named | talker | caller), the last phrase for each unit."""
-        text = t["text"]
+        text, fixes = self.phrases.repair(t["text"])
         rigs = [r.strip() for r in (t["rig"] or "").split(",") if r.strip()]
         talker = rigs[0] if len(rigs) == 1 and rigs[0] in self.phrases.codes else ""
         known_other = bool(t["dispatcher"]) or (bool(rigs) and not talker)
         caller = "" if known_other or talker else self.phrases.caller(text)
         out: dict[str, tuple[Found, str]] = {}
         for f in self.phrases.find(text):
+            heard = [x["heard"] for x in fixes if x["to"].lower() == f.phrase]
+            if heard:                              # the status words as heard: kept with the suggestion, for audit
+                f.phrase = f"{f.phrase} (heard “{heard[0]}”)"
             if f.units:
                 for u in f.units:
                     out[u] = (f, "named")
+            elif f.lead == "number":               # its number alone: only the talker's own (its radio says who)
+                own = re.sub(r"\D", "", talker)
+                if talker and (own == f.number or (len(own) == len(f.number) == 4               # a chief's number
+                                                   and sum(x != y for x, y in zip(own, f.number)) == 1)):  # one digit off
+                    out[talker] = (f, "talker")
             elif f.lead in ("start", "first", "control"):
                 if talker:
                     out[talker] = (f, "talker")

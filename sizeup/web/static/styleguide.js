@@ -201,6 +201,10 @@
       alt_text: "Engine 60 on location nothing showing",
       events: [{ id: -1, number: "26-000002", type: "ALARM", subtype: "COMM", address: "1 Gateway Plz", why: "unit", unit: "E60" }] },
       { scope: "sg" }));
+    // a unit's status words put back after its callsign (sizeup/cad/statusrepair.py): the heard text on hover
+    tx.append(radioRow({ id: "sg-fix", start: now - 70, end: now - 68, rig: "L31", channel: "Fire/EMS 15", has_audio: false,
+      text: "Ladder 31 is fine.", fixed_text: "Ladder 31 en route.", fixes: [{ heard: "is fine", to: "en route" }],
+      model: "aws-transcribe", events: [] }, { scope: "sg" }));
     // the phone pre-alert row (prealert.js), read-only here
     const pa = el("ol", "pa-list");
     PreAlert.column(pa, null, { time: now, open: [{ id: -1, test: false, source: "Tapout HQ phone", at: now - 42, title: "STATION PHONE RINGING",
