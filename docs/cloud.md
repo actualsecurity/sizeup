@@ -1603,9 +1603,16 @@ length: the feed doesn't say how many cars a train has (see *What the feed gives
 many cars are drawn. The heading is the line's own over about a train's length there. A click
 on a train: line and destination, direction (*Toward New York* / *Toward New Haven*), next stop and time,
 track, delay, status, reported or estimated (*Stale · hh:mm:ss* up top in the warning colour on an old feed); on a
-station or the line: the catenary note (*12.5 kV AC catenary + third rail at stations. Treat all wires as live until
-Metro-North confirms de-energized and grounded.*; the same hazard as the county *Railroads* layer,
-whose drawing of the tracks stays where it is in *County GIS*).
+station or the line: the catenary on one line, *⚡ 12.5 kV catenary + 3rd rail · treat as live*, with the full note
+(*12.5 kV AC catenary + third rail at stations. Treat all wires as live until Metro-North confirms de-energized and
+grounded.*) on hover and in the ⓘ (#375; the same hazard as the county *Railroads* layer, whose drawing of the tracks
+stays where it is in *County GIS*). A click on a train also **follows** it (`mapfollow.js`, as aircraft and our
+rigs): centred at street zoom and kept centred as it glides, a chip at the foot (*Following 9901 · NH west · 67 mph
+· 3 s ago*, ✕); any pan of the viewer's (a mouse or one-finger drag, the arrow keys, a sideways trackpad swipe),
+Recenter or ✕ lets go, a zoom keeps it. The box stays live while open: each new fix's speed, lateness, next stop and
+track, the place line (the milepost where the train is drawn now: with #374's poles, the pole and GIS milepost at the
+drawn position, else TrainTime's milepost carried along with it), the fix's age, the subtitle and the ⓘ, once a
+second. A GPS fix over 15 s old: the train is drawn hollow and the box and chip say *Predicted · N s ago*.
 
 **Trains approaching.** Under an open event's map, for an event within **150 m of the tracks or a
 station** (measured against the line's GTFS shape and the stations): the next trains each way in the next
@@ -1781,10 +1788,22 @@ the trains when it moves.
 drawn on its own direction's track at that distance, so never off it) and filtered along it
 (`trains.along_filter`: an alpha-beta filter on distance against the fix's own time, the feed's speed blended
 in): never backwards (a miss behind holds the train), a smooth speed. Under about 1 mph it is stopped and stays
-put through GPS jitter. The page carries a fix on along the track at that speed for at most 10 s
-(`TT_HORIZON_S`, about two fast polls), never past the next stop, and meets the next fix forward only or by
-holding (motion.js `Motion.rail` / `railFollow`, the same tracker as before). A fix no newer than the last one
-changes nothing. The distance along the line comes from the projection, not `turf.location_mp`: the projection
+put through GPS jitter; the first stopped fix after it moved is taken as where it stopped (forward only), and the
+same position again with a newer time counts as stopped whatever speed it says. The filter also sends its
+acceleration (`a`, from the feed's own speeds). Where a train stops mid-track matters more than a smooth glide
+(#375: "if a train stops mid track we want to know where accurately"), so the page carries a fix on gently: at its
+full speed for 8 s of the fix's age, then slowing as v·e^-(age-8)/5 (at most 13·v on, however old; never past the
+next stop; nothing after 30 s, `TT_HORIZON_S`); a speed falling faster than 0.2 m/s² is braked at that rate to a
+stop (s0 + v·t + ½·a·t²). Fixes are 3 to 16 s old when read and read every 5 s (median about 6 s), so most of
+the time a train runs at its full speed. A train that brakes at a service rate (0.75 m/s²) right after its last
+moving fix, with no fix until it has stopped, is drawn at most about 63 m past where it stopped (at about 22 mph;
+at 52 mph not past it at all); the old 30 s at full speed drew it up to 337 m past. With the feed's real cadence
+(a fix every 3 s, 3 to 16 s late) it is drawn under 10 m past. The drawn train keeps a speed of its own that
+closes on the prediction (the train's speed plus the gap over 3 s, eased in over 1 s), so a new fix changes its
+pace, not its position; it goes back only to where a fix says it stopped: up to 30 m eased back (at most 20 m/s),
+more put there at once and ringed for a moment, never a long slide backwards (motion.js `Motion.rail` /
+`railFollow`; `tests/test_train_live.py` holds it to the measured shape). A fix no newer than the last one changes
+nothing. The distance along the line comes from the projection, not `turf.location_mp`: the projection
 is in the same geometry the train is drawn on, while turf counts along each train's own route (see above) and
 would have to be calibrated to it. The milepost shown is turf's when the train's route starts (eastbound) or
 ends (westbound) at Grand Central; otherwise, for a train drawn at TrainTime's position, the distance along our
@@ -1798,8 +1817,9 @@ gains its cars (actual / scheduled, fleet), occupancy and per-car load and passe
 milepost, next stop and its track (posted or planned), OTP, held / cancelled; the branch's alerts go with
 the layer. A train TrainTime has and GTFS-realtime hasn't is drawn from TrainTime alone when its position
 is good. The train's box: one data line (e.g. *NH west · 6 cars (M8) · 11 min late · MP 23.0 · next Rye trk
-3*), the cars as load bars (each car on hover), source and time in the footer; its route line is drawn
-while the box is open. Port Chester's and Rye's boxes list their next departures.
+3*), then *Predicted · 52 mph · 3 s ago* (or *Reported*, *Stopped*), the cars as load bars (each car on hover),
+source and time in the footer; its route is drawn thin and dashed while the box is open (TrainTime's line is a few
+metres off the rails: a route, not a track; the tracks themselves are #371). Port Chester's and Rye's boxes list their next departures.
 
 **Validation and fallback.** Each record is checked field by field; one missing a required field (train
 number, run date, railroad, lat / lon / timestamp, direction) or with the wrong type is dropped, and an odd
@@ -1917,7 +1937,9 @@ A click: what it is (the feed's ICAO
 type designator; the FAA registry's make and model, marked so; the airline from FAA JO 7340.2), what it is
 doing (the approach, the distance to go; the ETA as distance / speed, labelled an estimate; never from a
 stale position), altitude, vertical rate, speed, squawk, registration, and how it was located (ADS-B, MLAT
-or TIS-B). The box lists emergencies first, then HPN's movements (arriving, departing, on the ground: a click
+or TIS-B). It stays live while open (#375, `mapfollow.js` `LiveInfo`, shared with the trains): each new fix, the
+distance from where the mark is glided now, and the fix's age in the foot (*adsb.lol · 2 s ago*), once a second,
+only the lines that changed swapped. The box lists emergencies first, then HPN's movements (arriving, departing, on the ground: a click
 opens one), how many are low in the area, the source and its licence and the feed's time; "No new aircraft
 data since ..." when the hub stops answering.
 

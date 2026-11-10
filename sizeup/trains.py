@@ -983,7 +983,7 @@ class Model:
                 **({"trk": ev["trk"], "trk_src": ev["src"], "trk_at": ev["name"]} if ev and how == "said" else {}),
                 **({"lane_at": ev["name"]} if ev and how == "held" else {}),
                 **self.ref.at_s(s),
-                **({"v_fix": fix["v"]} if fix is not None and fix.get("v") is not None else {})}
+                **({"v_fix": fix["v"], "a_fix": fix.get("a") or 0.0} if fix is not None and fix.get("v") is not None else {})}
 
     def facts(self, t: dict, now: float) -> dict:
         """What the panel and the click box say of a train: its line, destination, next stop, delay, track."""
@@ -1063,6 +1063,7 @@ class Model:
         rec_v = p.get("v_fix")
         if fix and isinstance(rec_v, (int, float)):
             out["v"] = round(rec_v, 2)                   # m/s, filtered (along_filter): the page carries it on at this
+            out["a"] = round(p.get("a_fix") or 0.0, 2)   # m/s^2: falling, the page brakes it to a stop (#375)
         return out
 
     def near(self, lat: float, lon: float) -> dict | None:
@@ -1222,26 +1223,41 @@ AB_ALPHA = 0.5                   # how much of a fix's miss moves the position
 AB_BETA = 0.2                    # ... and the speed
 AB_FEED = 0.5                    # the feed's own speed's share of the speed
 STOP_MPS = 0.5                   # slower than this (about 1 mph): stopped, held where it is
-STOP_JITTER_M = 150.0            # a stopped train's fix less than this ahead (or any behind): GPS jitter, it stays put
-TT_HORIZON_S = 10.0              # a GPS fix is carried on at most this long past its time (about two fast polls)
+STOP_JITTER_M = 150.0            # a train already stopped: a fix less than this ahead (or any behind) is GPS jitter, it
+                                 # stays put. The first stopped fix after it moved is taken as it is (forward only).
+A_MIN, A_MAX = -1.5, 1.0         # the filter's acceleration (m/s^2), clamped: past a service brake is noise
+A_BRAKE = -0.2                   # falling faster than this (m/s^2): braking (the page brakes it too: motion.js RAIL_BRAKE_A)
+TT_HORIZON_S = 30.0              # a GPS fix is carried on at most this long past its time; the page's own soft horizon
+                                 # (motion.js RAIL_FULL_S / RAIL_DECAY_S) slows it well before: TrainTime's fixes are 3
+                                 # to 16 s old when read (measured, #375) and read every 5 s
 
 
-def along_filter(last: dict | None, s: float, d: int, t: float, v_feed: float | None) -> tuple[float, float]:
-    """(s, v m/s) for a new GPS fix measured at s (on the line) at time t, from the train's last filtered fix
-    {s, v, fix_at} (None: none, or too old): predicted on at its speed, corrected by AB_ALPHA / AB_BETA of the miss,
-    the feed's speed blended in; never backwards (a miss behind is held at the last position: GPS jitter, or a
-    late fix), never a negative speed; stopped (the feed's speed under STOP_MPS): put, unless the fix is more than
-    STOP_JITTER_M ahead."""
+def along_filter(last: dict | None, s: float, d: int, t: float, v_feed: float | None) -> tuple[float, float, float]:
+    """(s, v m/s, a m/s^2) for a new GPS fix measured at s (on the line) at time t, from the train's last filtered fix
+    {s, v, a, vf, fix_at} (None: none, or too old): predicted on at its speed (braking at a when it was, to a stop at
+    most), corrected by AB_ALPHA / AB_BETA of the miss, the feed's speed blended in; never backwards (a miss behind
+    is held at the last position: GPS jitter, or a late fix), never a negative speed. a: the change in the feed's
+    own speed (vf) since the last fix, else in the filtered one (the page brakes the train on it when it is falling,
+    #375). Stopped (the feed's speed under STOP_MPS): a train that was moving is put
+    where the fix says (forward only: the first stopped fix is where it stopped); one already stopped stays put
+    unless the fix is more than STOP_JITTER_M ahead."""
     vf = v_feed if isinstance(v_feed, (int, float)) and v_feed >= 0 else None
     if last is not None and last.get("v") is not None and t <= last["fix_at"]:
-        return last["s"], last["v"]                      # not newer than the last: no change
+        return last["s"], last["v"], last.get("a") or 0.0          # not newer than the last: no change
     if last is None or last.get("v") is None or t - last["fix_at"] > RESET_S:
-        return s, (0.0 if vf is not None and vf < STOP_MPS else (vf or 0.0))
+        return s, (0.0 if vf is not None and vf < STOP_MPS else (vf or 0.0)), 0.0
     dt = t - last["fix_at"]
     u_last, u_meas = last["s"] * d, s * d
-    if vf is not None and vf < STOP_MPS:                 # stopped: put, unless the fix is well ahead
-        return (last["s"], 0.0) if u_meas - u_last <= STOP_JITTER_M else (s, 0.0)
-    u_pred = u_last + last["v"] * dt
+    if vf is not None and vf < STOP_MPS:
+        if last["v"] >= STOP_MPS:                        # it was moving: it stopped here (never back)
+            return max(u_last, u_meas) * d, 0.0, 0.0
+        return (last["s"], 0.0, 0.0) if u_meas - u_last <= STOP_JITTER_M else (s, 0.0, 0.0)   # already stopped: jitter
+    a_last = last.get("a") or 0.0
+    if a_last < 0:                                       # braking: on at that rate, to a stop at most
+        tb = min(dt, last["v"] / -a_last)
+        u_pred = u_last + last["v"] * tb + 0.5 * a_last * tb * tb
+    else:
+        u_pred = u_last + last["v"] * dt
     miss = u_meas - u_pred
     u = u_pred + AB_ALPHA * miss
     v = max(0.0, last["v"] + AB_BETA * miss / dt)
@@ -1249,7 +1265,12 @@ def along_filter(last: dict | None, s: float, d: int, t: float, v_feed: float | 
         v = (1 - AB_FEED) * v + AB_FEED * vf
     if u < u_last:                                       # never backwards: hold
         u = u_last
-    return u * d, v
+    vf_last = last.get("vf")
+    dv = vf - vf_last if vf is not None and isinstance(vf_last, (int, float)) else v - last["v"]
+    a = min(A_MAX, max(A_MIN, dv / dt))
+    if vf is not None and a < A_BRAKE:                   # braking: the feed's own speed (TrainTime's agrees with distance
+        v = vf                                           # over time to 0.1 %), not the filter's, which lags it
+    return u * d, v, a
 
 
 class Tracker:
@@ -1326,12 +1347,14 @@ class Tracker:
             if last is not None and abs(s - last["s"]) <= CLUSTER_M and src == "gtfs":
                 rec.update(raw=raw, ok=True, present=True)   # back at (or a hair from) its last good fix: the same one
                 continue
-            v = None
+            v = a = vf = None
             if src == "traintime":                       # along the track, filtered (along_filter)
-                s, v = along_filter(last, s, d, fix_at, p.get("speed"))
+                # the same position again, newer: it hasn't moved, whatever its speed says (#375)
+                vf = 0.0 if last is not None and last["raw"] == raw else p.get("speed")
+                s, v, a = along_filter(last, s, d, fix_at, vf)
             self.fixes[tid] = {"raw": raw, "ok": True, "present": True, "lat": raw[0], "lon": raw[1], "s": s, "d": d,
                                "bearing": p.get("bearing"), "fix_at": fix_at, "first_read": first and src == "gtfs", "src": src,
-                               "v": v}
+                               "v": v, "a": a, "vf": vf}
             if not first and src == "gtfs":              # one we saw appear: a point of the MTA's (GPS fixes are anywhere)
                 self.points.learn(raw[0], raw[1], s, d, at)
         for tid in [k for k in self.fixes if k not in seen]:

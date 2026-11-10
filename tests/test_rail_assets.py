@@ -486,7 +486,7 @@ def test_the_data_sources_row_and_the_s3_copy():
 def test_the_page_draws_the_numbered_track_and_the_poles_box():
     js = (Path(__file__).resolve().parent.parent / "sizeup" / "web" / "static" / "trains.js").read_text()
     assert "const own = runAt(tracks, t.lane, t.s);" in js and "function refAt(rr, s)" in js
-    assert "placeLine(t, this.drawnS(t), d.railref)" in js and "`Pole: CB ${at.pole}" in js and "nearest" not in js.split("function placeRow")[1][:900]
+    assert js.count("placeRow(t, w, d.railref)") == 3 and "`Pole: CB ${at.pole}" in js and "nearest" not in js.split("function placeRow")[1][:900]
     assert "d.tracks = had.tracks; d.railref = had.railref;" in js and 'keys() { return [[KEY, false], [REF_KEY, false]]; }' in js
     assert 'RAILREF = "/api/cad/trains/railref"' in js and '"Poles · mileposts"' in js
     assert 'id: "tr-line-label", type: "symbol", source: SRC_LINE, filter: ["has", "trk"]' in js         # each track numbered
@@ -527,24 +527,26 @@ def test_the_box_reads_the_pole_and_milepost_at_the_drawn_s_and_falls_back_with_
     t = {"s": 3000.0, "trk": "2", "trk_src": "posted", "trk_at": "Rye", "lane": "2", "lane_how": "said", "pole": "230", "mp": 21.2}
     out = page(tmp_path, """
 const P = TrainLayer.placeRow;
-out.drawn = P(IN.t, 3420, IN.rr);
-out.hub = P(IN.t, IN.t.s, IN.rr);
-out.empty = P(IN.t, 3420, { poles: [], mps: [] });
-out.none = P(IN.t, 3420, undefined);
-out.ttOnly = P({ s: 3000, mp: 27.3 }, 3420, { poles: [], mps: [] });
-out.held = P({ ...IN.t, trk: undefined, lane_how: "held", lane_at: "Rye" }, 3420, IN.rr);
-out.outer = P({ s: 3000, lane: "4", lane_how: "outer" }, 3420, IN.rr);
-out.nothing = P({ s: 3000 }, 3420, { poles: [], mps: [] });
+out.drawn = P(IN.t, { s: 3420 }, IN.rr);
+out.hub = P(IN.t, {}, IN.rr);
+out.empty = P(IN.t, { s: 3420 }, { poles: [], mps: [] });
+out.none = P(IN.t, { s: 3420 }, undefined);
+out.ttOnly = P({ s: 3000, mp: 27.3 }, { s: 3420 }, { poles: [], mps: [] });
+out.held = P({ ...IN.t, trk: undefined, lane_how: "held", lane_at: "Rye" }, { s: 3420 }, IN.rr);
+out.outer = P({ s: 3000, lane: "4", lane_how: "outer" }, { s: 3420 }, IN.rr);
+out.nothing = P({ s: 3000 }, { s: 3420 }, { poles: [], mps: [] });
+out.carried = P({ s: 3000, mp: 27.3, pos_src: "traintime" }, { s: 3000 + 1609.344 }, { poles: [], mps: [] });   // #378's mpAt
 """, {"t": t, "rr": rr})
     at = model.ref.at_s(3420)
     assert out["drawn"]["text"] == f"Trk 2 · near pole {at['pole']} · MP {at['mp']:.1f}" and at["pole"] == "234"
     assert out["hub"]["text"] == "Trk 2 · near pole 230 · MP 21.2"
     assert out["drawn"]["title"].startswith("Track 2: posted for Rye\nPole: CB 234")
     assert out["empty"]["text"] == out["none"]["text"] == "Trk 2 · near pole 230 · MP 21.2"   # the hub's own
-    assert out["ttOnly"] == {"k": "place", "text": "MP 27.3", "title": "Milepost from Grand Central"}
+    assert out["ttOnly"] == {"k": "place", "text": "MP 27.3", "title": "Milepost from Grand Central, where the train is drawn"}
     assert out["held"]["text"].startswith("Trk 2? · ") and out["held"]["title"].startswith("Track: last said for Rye\n")
     assert "Trk" not in out["outer"]["text"] and out["outer"]["title"].startswith("Track not known; drawn on outer track\n")
     assert out["nothing"] is None
+    assert out["carried"]["text"] == "MP\u00a028.3"                         # no GIS milepost: the hub's, carried to the drawn s
 
 
 @pytest.mark.skipif(NODE is None, reason="node not installed")
