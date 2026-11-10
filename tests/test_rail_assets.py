@@ -713,22 +713,27 @@ out.said = run("said"); out.held = run("held"); out.outer = run("outer"); out.st
 
 @pytest.mark.skipif(NODE is None, reason="node not installed")
 def test_the_page_draws_each_structure_as_a_tick_with_a_tag_beyond_its_end(tmp_path):
-    """TrainTime's look: the hub's tick as a line, the number at its first end on a yellow tag that sits beyond it
-    (east-west tick: left or right of the end; north-south: above or below); no tick: the tag at the structure."""
+    """TrainTime's look: the hub's tick as a line, the number on a yellow tag that sits beyond its east end (a
+    milepost's label reads to the west of it: at the west end the two collided and the tag was left out; north-south:
+    the first end, above or below it); no tick: the tag at the structure. The tags outrank the mileposts' labels."""
     out = page(tmp_path, """
 out.f = TrainLayer.poleFeatures([{ id: "236", lon: -73.70, lat: 41.0, tick: [[-73.70, 41.00008], [-73.70, 40.99992]] },
                                  { id: "237", lon: -73.69, lat: 41.0, tick: [[-73.69011, 41.0], [-73.68989, 41.0]] },
-                                 { id: "238", lon: -73.68, lat: 41.0 }]);
+                                 { id: "238", lon: -73.68, lat: 41.0 },
+                                 { id: "239", lon: -73.67, lat: 41.0, tick: [[-73.66989, 41.00002], [-73.67011, 40.99998]] }]);
 """, {})
     f = out["f"]
     assert [(x["geometry"]["type"], x["properties"]["kind"], x["properties"]["id"]) for x in f] == [
         ("LineString", "pole", "236"), ("Point", "pole-tag", "236"), ("LineString", "pole", "237"), ("Point", "pole-tag", "237"),
-        ("Point", "pole-tag", "238")]
+        ("Point", "pole-tag", "238"), ("LineString", "pole", "239"), ("Point", "pole-tag", "239")]
     assert f[1]["geometry"]["coordinates"] == [-73.70, 41.00008] and f[1]["properties"]["anchor"] == "bottom"   # above the north end
-    assert f[3]["geometry"]["coordinates"] == [-73.69011, 41.0] and f[3]["properties"]["anchor"] == "right"    # left of the west end
+    assert f[3]["geometry"]["coordinates"] == [-73.68989, 41.0] and f[3]["properties"]["anchor"] == "left"     # right of the east end
     assert f[4]["geometry"]["coordinates"] == [-73.68, 41.0]
+    assert f[6]["geometry"]["coordinates"] == [-73.66989, 41.00002] and f[6]["properties"]["anchor"] == "left"   # east end first
     js = (Path(__file__).resolve().parent.parent / "sizeup" / "web" / "static" / "trains.js").read_text()
     pole = js[js.index('map.addLayer({ id: "tr-pole", type: "line"'):js.index('map.addLayer({ id: "tr-mp"')]
+    pole += js[js.index('map.addLayer({ id: "tr-pole-label"'):js.index("for (const id of CLICKABLE)")]
+    assert js.index('id: "tr-mp-label"') < js.index('id: "tr-pole-label"')   # placed later in the stack: placed first, wins
     assert pole.count("minzoom: POLE_ZOOM") == 2 and "const POLE_ZOOM = 16" in js and 'POLE_TAG = "#F2D13A"' in js
     assert '"icon-image": POLE_CHIP, "icon-text-fit": "both"' in pole and '"text-optional": false' in pole
     assert "allow-overlap" not in pole and "ignore-placement" not in pole            # a tag that would overlap: left out

@@ -47,7 +47,8 @@
 //   Poles · MP   (#371) a second box in the group, "Poles · mileposts" (key "railref", off by default, kept per
 //                viewer like every layer: maplayers.js): each catenary structure as Metro-North's TrainTime draws it,
 //                a thin line square across the tracks (the hub's "tick") with its number on a yellow tag at one
-//                end, from zoom 16 (POLE_ZOOM; a tag that would overlap another is left out), the mileposts (whole
+//                end (its east end: a milepost's label reads to the west of it), from zoom 16 (POLE_ZOOM; a tag
+//                that would overlap another is left out; a tag outranks a milepost's label), the mileposts (whole
 //                miles from zoom 12, tenths from 15), from GET /api/cad/trains/railref once while on. A train's
 //                box and the event's panel say "near pole 249 · MP 25.3" when the hub knows them (within 150 m of
 //                the line).
@@ -484,15 +485,18 @@ window.TrainLayer = (() => {
   }
 
   // The structures for the map (#374): each one's tick across the tracks (the hub's, square to them there) and its
-  // tag's point at the first end, anchored so the tag sits beyond the end (screen axes: east right, north up); a
-  // structure the hub has no tick for: its tag at its point.
+  // tag's point at its east end (the first, if it runs north-south), anchored so the tag sits beyond the end (screen
+  // axes: east right, north up); a structure the hub has no tick for: its tag at its point. East, because a
+  // milepost's label reads to the west of it (tr-mp-label) and Metro-North's mileposts stand by the tracks' middle,
+  // 2 in 3 within 30 m of a structure: a tag at the west end collided with the label and was left out.
   function poleFeatures(poles) {
     const out = [];
     for (const p of poles || []) {
       const t = Array.isArray(p.tick) && p.tick.length === 2 ? p.tick : null;
       if (t) out.push({ type: "Feature", geometry: { type: "LineString", coordinates: t }, properties: { kind: "pole", id: p.id } });
-      const [x, y] = t ? t[0] : [p.lon, p.lat];
-      const dx = t ? (t[0][0] - t[1][0]) * Math.cos(t[0][1] * RAD) : 1, dy = t ? t[0][1] - t[1][1] : 0;
+      const [e, o] = t ? (t[1][0] > t[0][0] ? [t[1], t[0]] : t) : [];
+      const [x, y] = t ? e : [p.lon, p.lat];
+      const dx = t ? (e[0] - o[0]) * Math.cos(e[1] * RAD) : 1, dy = t ? e[1] - o[1] : 0;
       const [anchor, off] = Math.abs(dx) >= Math.abs(dy) ? (dx >= 0 ? ["left", [0.4, 0]] : ["right", [-0.4, 0]])
         : dy >= 0 ? ["bottom", [0, -0.3]] : ["top", [0, 0.3]];
       out.push(pt(x, y, { kind: "pole-tag", id: p.id, anchor, off }));
@@ -625,20 +629,22 @@ window.TrainLayer = (() => {
       const isMp = ["==", ["get", "kind"], "mp"], isPole = ["==", ["get", "kind"], "pole"];
       const mpZoom = ["any", ["get", "whole"], [">=", ["zoom"], 15]];
       // each structure as TrainTime draws it: a thin light line square across the tracks, its number on a yellow tag
-      // just past one end; from POLE_ZOOM, where they don't crowd. A tag that would overlap another is left out.
+      // just past its east end (poleFeatures); from POLE_ZOOM, where they don't crowd. A tag that would overlap another is
+      // left out.
       if (!map.hasImage(POLE_CHIP)) { const img = chipImage(POLE_TAG); if (img) map.addImage(POLE_CHIP, img, CHIP_OPTS); }
       map.addLayer({ id: "tr-pole", type: "line", source: SRC_REF, filter: isPole, minzoom: POLE_ZOOM, layout: { ...vis, "line-cap": "butt" },
                      paint: { "line-color": text, "line-opacity": 0.85, "line-width": ["interpolate", ["linear"], ["zoom"], POLE_ZOOM, 1, 19, 2] } }, before);
-      map.addLayer({ id: "tr-pole-label", type: "symbol", source: SRC_REF, filter: ["==", ["get", "kind"], "pole-tag"], minzoom: POLE_ZOOM,
-                     layout: { ...vis, ...label(["get", "id"], 10, { "text-anchor": ["get", "anchor"], "text-offset": ["get", "off"],
-                                                                     "text-optional": false, "icon-image": POLE_CHIP, "icon-text-fit": "both",
-                                                                     "icon-text-fit-padding": [1, 3, 0, 3] }) },
-                     paint: { "text-color": POLE_INK } }, before);
       map.addLayer({ id: "tr-mp", type: "circle", source: SRC_REF, filter: ["all", isMp, ["get", "whole"]], minzoom: 12, layout: vis,
                      paint: { "circle-radius": 3, "circle-color": warn, "circle-stroke-color": HALO, "circle-stroke-width": 1 } }, before);
       map.addLayer({ id: "tr-mp-label", type: "symbol", source: SRC_REF, filter: ["all", isMp, mpZoom], minzoom: 12,
                      layout: { ...vis, ...label(["get", "label"], 10, { "text-anchor": "right", "text-offset": [-0.6, 0] }) },
                      paint: { "text-color": warn, "text-halo-color": HALO, "text-halo-width": 1.4 } }, before);
+      // after the milepost labels: placed first, so a tag outranks a milepost label it would overlap
+      map.addLayer({ id: "tr-pole-label", type: "symbol", source: SRC_REF, filter: ["==", ["get", "kind"], "pole-tag"], minzoom: POLE_ZOOM,
+                     layout: { ...vis, ...label(["get", "id"], 10, { "text-anchor": ["get", "anchor"], "text-offset": ["get", "off"],
+                                                                     "text-optional": false, "icon-image": POLE_CHIP, "icon-text-fit": "both",
+                                                                     "icon-text-fit-padding": [1, 3, 0, 3] }) },
+                     paint: { "text-color": POLE_INK } }, before);
       for (const id of CLICKABLE) {
         map.on("mouseenter", id, () => { map.getCanvas().style.cursor = "pointer"; });
         map.on("mouseleave", id, () => { map.getCanvas().style.cursor = ""; });

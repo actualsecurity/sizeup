@@ -1890,8 +1890,10 @@ Trains group of the Layers box (`railref`; off until a viewer turns it on, then 
 layer, and per event on an event's map), drawn from `GET /api/cad/trains/railref`. Each structure is drawn as
 Metro-North's TrainTime draws it: a thin light line square to the tracks (their bearing there, from the
 numbered tracks within 30 m), across all of them and 3 m past the outer ones (no track near: 9 m each side,
-square to the line), with its number on a yellow tag just past one end; from zoom 16, and a tag that would
-overlap another is left out. Whole mileposts from 12, tenths from 15.
+square to the line), with its number on a yellow tag just past its east end (a milepost's label reads to the
+west of its post, and the posts stand by the tracks' middle, mostly within 30 m of a structure); from zoom 16. A
+tag outranks a milepost's label; a tag that would overlap another tag is left out. Whole mileposts from 12,
+tenths from 15.
 
 A 429 or a refusal (401 / 403) rests 30 min (Data sources says *resting*); other failures back off 5 min
 doubling to 6 h; the copy we had stays.
