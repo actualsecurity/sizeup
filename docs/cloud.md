@@ -1856,8 +1856,9 @@ Rye station to just past Greenwich: 4 main tracks, 149 catenary structures (CB-1
 tenth mileposts; over the layer's area 9 numbered tracks, 453 structures, 224 mileposts. OpenStreetMap has the
 four tracks (`railway:track_ref`) but **no catenary numbers** and mileposts only every few miles, so it isn't
 used. Fetched **monthly** by the Data sources registry (*Metro-North tracks, poles, mileposts (MTA GIS)*), one
-layer at a time, an envelope query for the area only (the tracks thinned server-side to ~0.5 m: ~340 KB in
-all), kept in `trains/rail_assets.json` and S3.
+layer at a time, an envelope query for the area only (the tracks thinned server-side to ~10 cm, so they are
+straight or smoothly curved at street zoom: ~480 KB read in all, ~130 KB kept), kept in `trains/rail_assets.json`
+and S3. A copy thinned otherwise (the first one, at 0.5 m) is used but due again.
 
 **Track:** each track is measured along the static feed's line (its `s`), so the motion code keeps one
 distance and only the drawing changes. Each feature (and each part of one) is its own run, broken where it
@@ -1876,12 +1877,21 @@ tell. A track we have no line for (Stamford's 5) is ignored. The box: *Trk 2 · 
 drawn with a dashed stripe down its body (faded is for a stale feed only). No GIS milepost where it is drawn:
 the train's own (TrainTime's, or the line's).
 
+**Smooth tracks (#374):** a run keeps the service's own point order (turned to run up the line, its `s` held
+where it steps back). Sorted by `s`, it zig-zagged wherever the static line's kinks put nearby points' `s` out of
+order. The service's few digitising slips (hairpins doubling back 3-9 m, 1 cm steps at right angles) are dropped
+(a vertex turning more than 45°), and the page gets the tracks to 1 cm (at 1 m, tracks 4 m apart wobble).
+
 **Poles and mileposts:** the nearest structure along the line (within 150 m), and the milepost read off the
 two either side (straight between; a milepost out of order along the line is left out). A train's box, and
 the event's *Trains approaching* panel for an incident within 150 m of the line, say them (a train's at the
-point it is drawn now: the layer sends each pole's and milepost's `s`). *Poles ·
-mileposts* in the Trains group of the Layers box draws them (`GET /api/cad/trains/railref`): pole numbers from
-zoom 15 (labels from 16), whole mileposts from 12, tenths from 15.
+point it is drawn now: the layer sends each pole's and milepost's `s`). *Poles · mileposts* is a layer in the
+Trains group of the Layers box (`railref`; off until a viewer turns it on, then kept per viewer like every
+layer, and per event on an event's map), drawn from `GET /api/cad/trains/railref`. Each structure is drawn as
+Metro-North's TrainTime draws it: a thin light line square to the tracks (their bearing there, from the
+numbered tracks within 30 m), across all of them and 3 m past the outer ones (no track near: 9 m each side,
+square to the line), with its number on a yellow tag just past one end; from zoom 16, and a tag that would
+overlap another is left out. Whole mileposts from 12, tenths from 15.
 
 A 429 or a refusal (401 / 403) rests 30 min (Data sources says *resting*); other failures back off 5 min
 doubling to 6 h; the copy we had stays.

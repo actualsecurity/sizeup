@@ -105,7 +105,8 @@ HTTP (sizeup/web/server.py; any signed-in person, GET only):
     GET /api/cad/trains/route?key=A>B   a train's route line from MTA TrainTime (#362): {key, runs: [[[lon, lat]...]]}
     GET /api/cad/trains/departures?station=2PC   a station's next departures from MTA TrainTime /countdown (#362)
     GET /api/cad/trains/railref         the poles and mileposts layer (#371, sizeup/railassets.py): {source, at, error,
-                                        poles: [{id, lon, lat}], mileposts: [{mp, lon, lat, whole}]}
+                                        poles: [{id, lon, lat, tick}], mileposts: [{mp, lon, lat, whole}]}; tick: the
+                                        structure's line square across the tracks, [[lon, lat] x2] (#374)
   A train also carries lane (the numbered track it is drawn on) and lane_how (said | held | outer: how sure), trk /
   trk_src / trk_at (its track and who said it, posted | planned | mta, at which stop; only within TRACK_NEAR_M of that
   stop), lane_at (held: the stop whose word it is), pole and mp (#371); the layer
@@ -175,6 +176,7 @@ PASSED_M = 50.0                  # a reported position this far beyond the point
 SIMPLIFY_M = 3.0
 HEADING_M = 150.0                # a train's heading: the line's direction over this much of it (about a train long)
 DP = 5                           # decimals of a position the page gets (about 1 m)
+DP_TRACK = 7                     # a numbered track's (1 cm: at 1 m, tracks 4 m apart wobble apart and together, #374)
 MILE_M = 1609.344
 MAX_CARS = 16
 FALLBACK_MPS = 20.0             # a pair of stations no train runs between: about 45 mph
@@ -1797,7 +1799,7 @@ class Trains:
             # reads them at the train's drawn s
             keep = lambda c: lo - 1500 <= c <= hi + 1500
             out["tracks"] = {k: runs for k, lanes in m.track_lanes.items()
-                             if (runs := [r for r in ([[round(a, DP), round(b, DP), round(c, 1)] for a, b, c in lane.coords if keep(c)]
+                             if (runs := [r for r in ([[round(a, DP_TRACK), round(b, DP_TRACK), round(c, 1)] for a, b, c in lane.coords if keep(c)]
                                                       for lane in lanes) if len(r) >= 2])}
             out["railref"] = {"poles": [[round(x, 1), i] for x, i in m.ref.poles if keep(x)],
                               "mps": [[round(x, 1), v] for x, v in m.ref.mps if keep(x)]}
@@ -1860,7 +1862,8 @@ class Trains:
                 return 400, b'{"error":"lat, lon: numbers"}', JSON, {}
             return 200, json.dumps(self.near(lat, lon), separators=(",", ":")).encode(), JSON, {}
         if path == RAILREF_PATH:                         # the poles and mileposts layer (#371)
-            return 200, json.dumps(self.assets.layer(), separators=(",", ":")).encode(), JSON, {}
+            m = self.model
+            return 200, json.dumps(self.assets.layer(m.ref.ticks if m is not None else None), separators=(",", ":")).encode(), JSON, {}
         if path == ROUTE_PATH:                           # {key, runs: [[[lon, lat]...]...]} clipped to the area; runs [] when none
             key = one("key")
             if not re.fullmatch(r"[0-9A-Z]{2,4}>[0-9A-Z]{2,4}", key):

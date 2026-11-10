@@ -44,10 +44,13 @@
 //                one), numbered from zoom 17. A train lies along the track the hub puts it on ("lane": the track
 //                posted or planned for the stop it left or is going to, kept until another stop says otherwise;
 //                else its direction's outer track). "Trk 2" in its box only near the stop that said so ("trk").
-//   Poles · MP   (#371) a second box in the group, "Poles · mileposts" (key "railref", off by default): the catenary
-//                structures' numbers from street zoom, the mileposts (whole miles from zoom 12, tenths from 15), from
-//                GET /api/cad/trains/railref once while on. A train's box and the event's panel say "near pole 249 ·
-//                MP 25.3" when the hub knows them (within 150 m of the line).
+//   Poles · MP   (#371) a second box in the group, "Poles · mileposts" (key "railref", off by default, kept per
+//                viewer like every layer: maplayers.js): each catenary structure as Metro-North's TrainTime draws it,
+//                a thin line square across the tracks (the hub's "tick") with its number on a yellow tag at one
+//                end, from zoom 16 (POLE_ZOOM; a tag that would overlap another is left out), the mileposts (whole
+//                miles from zoom 12, tenths from 15), from GET /api/cad/trains/railref once while on. A train's
+//                box and the event's panel say "near pole 249 · MP 25.3" when the hub knows them (within 150 m of
+//                the line).
 //   Data         only ever from the hub: GET /api/cad/trains and /api/cad/trains/near (sizeup/trains.py). The
 //                browser never talks to the MTA. The MTA's terms: we say where the data is from, that times
 //                may not be real time, and the feed's time.
@@ -66,6 +69,7 @@ window.TrainLayer = (() => {
   const BACKOFF_MS = [10000, 60000];         // a failed poll: 10 s doubling to a minute
   const SRC_LINE = "tr-line", SRC_ST = "tr-stations", SRC_TR = "tr-trains", SRC_CARS = "tr-cars", SRC_ROUTE = "tr-route";
   const SRC_REF = "tr-railref", REF_IDS = ["tr-pole", "tr-pole-label", "tr-mp", "tr-mp-label"];
+  const POLE_ZOOM = 16, POLE_TAG = "#F2D13A", POLE_INK = "#1B1B1B", POLE_CHIP = "tr-pole-chip";   // TrainTime's look
   const CAR_IDS = ["tr-car-case", "tr-cab-case", "tr-car", "tr-cab", "tr-unsure", "tr-gap"];
   const IDS = ["tr-line", "tr-line-label", "tr-route", "tr-station", "tr-station-label", ...CAR_IDS, "tr-snap", "tr-train", "tr-train-label"];
   const MAX_CARS = 16;
@@ -479,6 +483,36 @@ window.TrainLayer = (() => {
     return n;
   }
 
+  // The structures for the map (#374): each one's tick across the tracks (the hub's, square to them there) and its
+  // tag's point at the first end, anchored so the tag sits beyond the end (screen axes: east right, north up); a
+  // structure the hub has no tick for: its tag at its point.
+  function poleFeatures(poles) {
+    const out = [];
+    for (const p of poles || []) {
+      const t = Array.isArray(p.tick) && p.tick.length === 2 ? p.tick : null;
+      if (t) out.push({ type: "Feature", geometry: { type: "LineString", coordinates: t }, properties: { kind: "pole", id: p.id } });
+      const [x, y] = t ? t[0] : [p.lon, p.lat];
+      const dx = t ? (t[0][0] - t[1][0]) * Math.cos(t[0][1] * RAD) : 1, dy = t ? t[0][1] - t[1][1] : 0;
+      const [anchor, off] = Math.abs(dx) >= Math.abs(dy) ? (dx >= 0 ? ["left", [0.4, 0]] : ["right", [-0.4, 0]])
+        : dy >= 0 ? ["bottom", [0, -0.3]] : ["top", [0, 0.3]];
+      out.push(pt(x, y, { kind: "pole-tag", id: p.id, anchor, off }));
+    }
+    return out;
+  }
+  // a tag behind a label (icon-text-fit), in one colour: rounded corners kept, the middle stretched
+  const CHIP_OPTS = { pixelRatio: 2, stretchX: [[6, 18]], stretchY: [[6, 18]], content: [5, 5, 19, 19] };
+  function chipImage(color) {
+    const S = 24, c = document.createElement("canvas");
+    c.width = c.height = S;
+    const g = c.getContext && c.getContext("2d");
+    if (!g) return null;
+    g.fillStyle = color;
+    g.beginPath();
+    if (g.roundRect) g.roundRect(1, 1, S - 2, S - 2, 4); else g.rect(1, 1, S - 2, S - 2);
+    g.fill();
+    return g.getImageData(0, 0, S, S);
+  }
+
   class TrainMap {
     constructor(control) {
       this.control = control;
@@ -590,11 +624,16 @@ window.TrainLayer = (() => {
       map.addSource(SRC_REF, { type: "geojson", data: fc([]), attribution: "Metro-North GIS" });
       const isMp = ["==", ["get", "kind"], "mp"], isPole = ["==", ["get", "kind"], "pole"];
       const mpZoom = ["any", ["get", "whole"], [">=", ["zoom"], 15]];
-      map.addLayer({ id: "tr-pole", type: "circle", source: SRC_REF, filter: isPole, minzoom: 15, layout: vis,
-                     paint: { "circle-radius": 2.5, "circle-color": line, "circle-stroke-color": HALO, "circle-stroke-width": 1 } }, before);
-      map.addLayer({ id: "tr-pole-label", type: "symbol", source: SRC_REF, filter: isPole, minzoom: 16,
-                     layout: { ...vis, ...label(["get", "id"], 10, { "text-anchor": "left", "text-offset": [0.5, 0] }) },
-                     paint: { "text-color": line, "text-halo-color": HALO, "text-halo-width": 1.4 } }, before);
+      // each structure as TrainTime draws it: a thin light line square across the tracks, its number on a yellow tag
+      // just past one end; from POLE_ZOOM, where they don't crowd. A tag that would overlap another is left out.
+      if (!map.hasImage(POLE_CHIP)) { const img = chipImage(POLE_TAG); if (img) map.addImage(POLE_CHIP, img, CHIP_OPTS); }
+      map.addLayer({ id: "tr-pole", type: "line", source: SRC_REF, filter: isPole, minzoom: POLE_ZOOM, layout: { ...vis, "line-cap": "butt" },
+                     paint: { "line-color": text, "line-opacity": 0.85, "line-width": ["interpolate", ["linear"], ["zoom"], POLE_ZOOM, 1, 19, 2] } }, before);
+      map.addLayer({ id: "tr-pole-label", type: "symbol", source: SRC_REF, filter: ["==", ["get", "kind"], "pole-tag"], minzoom: POLE_ZOOM,
+                     layout: { ...vis, ...label(["get", "id"], 10, { "text-anchor": ["get", "anchor"], "text-offset": ["get", "off"],
+                                                                     "text-optional": false, "icon-image": POLE_CHIP, "icon-text-fit": "both",
+                                                                     "icon-text-fit-padding": [1, 3, 0, 3] }) },
+                     paint: { "text-color": POLE_INK } }, before);
       map.addLayer({ id: "tr-mp", type: "circle", source: SRC_REF, filter: ["all", isMp, ["get", "whole"]], minzoom: 12, layout: vis,
                      paint: { "circle-radius": 3, "circle-color": warn, "circle-stroke-color": HALO, "circle-stroke-width": 1 } }, before);
       map.addLayer({ id: "tr-mp-label", type: "symbol", source: SRC_REF, filter: ["all", isMp, mpZoom], minzoom: 12,
@@ -640,7 +679,7 @@ window.TrainLayer = (() => {
       if (this.refShown === r) return;
       this.refShown = r;
       this.map.getSource(SRC_REF).setData(fc([
-        ...(r.poles || []).map((p) => pt(p.lon, p.lat, { kind: "pole", id: p.id })),
+        ...poleFeatures(r.poles),
         ...(r.mileposts || []).map((m) => pt(m.lon, m.lat, { kind: "mp", whole: !!m.whole, label: m.whole ? `MP ${m.mp}` : m.mp.toFixed(1) }))]));
     }
     // The trains where motion.js has them now (each answer, then every ANIMATE_MS while one moves): each train's
@@ -1027,5 +1066,5 @@ window.TrainLayer = (() => {
     host.append(foot);
   }
 
-  return { panel, load, maps, data: () => store.data, KEY, placeRow, onTrack };
+  return { panel, load, maps, data: () => store.data, KEY, REF_KEY, placeRow, onTrack, poleFeatures };
 })();

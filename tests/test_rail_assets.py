@@ -106,13 +106,35 @@ def test_what_lies_outside_the_area_or_in_another_shape_is_left_out():
     assert R.parse({}, BBOX) == {"tracks": {}, "poles": [], "mileposts": []}
 
 
-def along_line(line, s0: float, s1: float) -> dict:
-    """The four layers laid along a real line (trains.Line) from s0 to s1: tracks 3, 1, 2, 4 offset to its left (going
-    up the line, north here), a portal every 100 m numbered from 200, a milepost every tenth from MP 25.0 at s0."""
+def smooth_line(line, s0: float, s1: float, step: float = 10.0, half: float = 150.0, passes: int = 3):
+    """off(s, m) -> [lon, lat]: m metres to the left (going up the line) of a smooth curve through a real line
+    (trains.Line) from s0 to s1. The static feed's line is a coarse polyline with kinks of 4 to 11 degrees every
+    60 to 200 m; tracks offset square to its segments jump at each kink (#374's squiggly screenshots). Its points
+    every step metres are averaged over +-half, passes times (about a Gaussian), and offset square to that."""
+    ss = [s0 - 3 * half + k * step for k in range(int((s1 - s0 + 6 * half) // step) + 1)]
+    pts = [T._xy(*line.at(s)[1::-1]) for s in ss]
+    w = int(half // step)
+    for _ in range(passes):
+        pts = [(sum(q[0] for q in pts[max(0, i - w):i + w + 1]) / len(pts[max(0, i - w):i + w + 1]),
+                sum(q[1] for q in pts[max(0, i - w):i + w + 1]) / len(pts[max(0, i - w):i + w + 1])) for i in range(len(pts))]
+
     def off(s, m):
-        lat, lon, b = line.at(s)
-        return [lon - math.cos(math.radians(b)) * m * DLON, lat + math.sin(math.radians(b)) * m * DLAT]
-    steps = [s0 + k * 20 for k in range(int((s1 - s0) // 20) + 1)]
+        f = (s - ss[0]) / step
+        i = max(1, min(len(pts) - 2, int(f)))
+        t = min(1.0, max(0.0, f - i))
+        x, y = pts[i][0] + t * (pts[i + 1][0] - pts[i][0]), pts[i][1] + t * (pts[i + 1][1] - pts[i][1])
+        ux, uy = pts[i + 1][0] - pts[i - 1][0], pts[i + 1][1] - pts[i - 1][1]
+        n = math.hypot(ux, uy)
+        return [(x - uy / n * m) / T.MX, (y + ux / n * m) / T.MY]
+    return off
+
+
+def along_line(line, s0: float, s1: float) -> dict:
+    """The four layers laid along a real line (trains.Line) from s0 to s1, smoothly (smooth_line): tracks 3, 1, 2, 4
+    to its left (going up the line, north here), a portal every 100 m numbered from 200, a milepost every tenth from
+    MP 25.0 at s0."""
+    off = smooth_line(line, s0, s1)
+    steps = [s0 + k * 5 for k in range(int((s1 - s0) // 5) + 1)]
     tracks = [gj("LineString", [off(x, OFF[n]) for x in steps], LineCode="NHL", TrkName=n, TrkType="Main Line") for n in OFF]
     poles = [gj("LineString", [off(s0 + k * 100, 12), off(s0 + k * 100, -12)], LineCode="NHL", CB_ID=f"CB-{200 + k}")
              for k in range(int((s1 - s0) // 100) + 1)]
@@ -170,6 +192,112 @@ def test_a_track_whose_s_jumps_more_than_its_step_is_two_runs():
     assert [c[2] for r in runs for c in r] == sorted(c[2] for r in runs for c in r)
     whole = R.RailRef({"tracks": {"1": [[[east(x), LAT + 25 * DLAT] for x in range(0, 3601, 100)]]}}, line)
     assert len(whole.tracks["1"]) == 1                                                  # (all on one leg: one run)
+
+
+# ---- smooth tracks and the structures' ticks (#374) -----------------------------------------------------------------
+
+
+def turns(run) -> list[float]:
+    """The degrees a run [[lon, lat, ...]] turns at each inner point, left positive."""
+    P = [T._xy(c[0], c[1]) for c in run]
+    out = []
+    for i in range(1, len(P) - 1):
+        h1 = math.atan2(P[i][1] - P[i - 1][1], P[i][0] - P[i - 1][0])
+        h2 = math.atan2(P[i + 1][1] - P[i][1], P[i + 1][0] - P[i][0])
+        out.append(math.degrees((h2 - h1 + math.pi) % (2 * math.pi) - math.pi))
+    return out
+
+
+def smooth(run) -> tuple[float, float]:
+    """(the most a run turns at one point, the most that changes from one point to the next): a zig-zag turns
+    one way, then the other."""
+    t = turns(run)
+    return max(map(abs, t)), max(abs(a - b) for a, b in zip(t, t[1:]))
+
+
+def heading(a, b) -> float:
+    (ax, ay), (bx, by) = T._xy(*a[:2]), T._xy(*b[:2])
+    return math.degrees(math.atan2(bx - ax, by - ay)) % 180      # an undirected line's, 0..180 from north
+
+
+def test_the_tracks_laid_along_the_real_line_are_smooth_as_the_page_gets_them(tmp_path):
+    """#374 "these lines look super squiggly": the static feed's line kinks 4 to 11 degrees every 60 to 200 m, so
+    tracks laid square to its segments zig-zagged (the PR's screenshots). Laid along a smooth curve through it, a
+    point every 5 m, and sent at DP_TRACK (1 cm; at 1 m, tracks 4 m apart wobble), no track turns more than 1.5
+    degrees at a point (the line's own curves here) nor changes its turn by more than 1.5 degrees from
+    one point to the next, and the four stay 4 m apart. Square to the line's own segments: an 8 degree zig-zag."""
+    static = T.parse_static((FIX / "gtfsmnr.zip").read_bytes())
+    line = Model(static).line
+    pc = next(st["ch"] for st in static["stations"].values() if st.get("code") == "2PC")
+    m = Model(static, T.DEFAULT_BBOX, None, R.parse(along_line(line, pc - 2500, pc + 2500), T.DEFAULT_BBOX))
+    for k, lanes in m.track_lanes.items():
+        sent = [[round(a, T.DP_TRACK), round(b, T.DP_TRACK)] for a, b, _ in lanes[0].coords]
+        most, change = smooth(sent)
+        assert len(lanes) == 1 and most < 1.5 and change < 1.5, k
+    for s in range(int(pc - 2000), int(pc + 2000), 50):
+        p1, p2 = m.track_at("1", s), m.track_at("2", s)
+        assert 3.6 < T.metres(*p1, *p2) < 4.4
+    square = lambda x: [line.at(x)[1] - math.cos(math.radians(line.at(x)[2])) * 6 * DLON,
+                        line.at(x)[0] + math.sin(math.radians(line.at(x)[2])) * 6 * DLAT]
+    assert smooth([square(x) for x in range(int(pc - 2400), int(pc + 2400), 20)])[1] > 6     # the old screenshots' way
+
+
+def test_a_tracks_points_keep_their_own_order_never_sorted_by_s():
+    """The other way to a zig-zag: points sorted by their s on a line that isn't clean. Here the line doubles back
+    8 m every 200 m (as a schedule's shape can) and a straight track runs beside it: there the points' s come out of
+    order, and sorted by s the track went back and forth. Kept in the service's order (s held where it steps back),
+    it stays straight, and a train still finds its place on it."""
+    line = T.Line([(round(east(x), 7), LAT + y * DLAT)
+                   for k in range(10) for x, y in ((k * 200, 0), (k * 200 + 100, 0), (k * 200 + 92, 3), (k * 200 + 200, 0))])
+    run = [[round(east(x), 7), LAT + 1.5 * DLAT] for x in range(0, 2001, 3)]
+    ref = R.RailRef({"tracks": {"1": [run]}}, line)
+    [out] = ref.tracks["1"]
+    assert [c[:2] for c in out] == [c for c in run if any(c == o[:2] for o in out)] and len(out) > len(run) * 0.9
+    assert smooth(out)[0] < 0.5 and [c[2] for c in out] == sorted(c[2] for c in out)
+    lane = T.Lane(out)
+    xs = [lane.at(x)[1] for x in range(int(out[0][2]) + 1, int(out[-1][2]), 25)]
+    assert lane.coords == out and xs == sorted(xs) and len(xs) > 50
+    by_s = sorted(([c[0], c[1], line.project(c[1], c[0])[1]] for c in run), key=lambda c: c[2])
+    assert smooth(by_s)[0] > 90                                                      # (sorted by s: back and forth)
+
+
+def test_the_services_digitising_slips_are_dropped():
+    """The service's main tracks have a few hairpins doubling back 3 to 9 m and 1 cm steps at right angles: gone,
+    the rest of the track as it was."""
+    run = [[east(x), LAT] for x in range(0, 201, 10)]
+    spiked = run[:8] + [[east(64), LAT], [east(72), LAT]] + run[8:]         # back 6 m, then on again
+    stepped = run[:5] + [[east(40), LAT + 0.01 * DLAT]] + [[c[0], c[1] + 0.01 * DLAT] for c in run[5:]]
+    for bad in (spiked, stepped):
+        out = R._clean(bad)
+        assert smooth(out)[0] < 1 and len(out) >= len(run) - 1
+    assert R._clean(run) == run
+
+
+def test_each_structure_is_a_tick_square_across_all_four_tracks():
+    """TrainTime's look: a line square to the tracks through the structure, across all four and 3 m past the outer
+    ones (6 m each side of the line here: 18 m), its first end to the left going up the line (north here)."""
+    ref = Model(static(), BBOX, None, R.parse(layers(), BBOX)).ref
+    assert len(ref.ticks) == len(ref.poles) == 82
+    for (a, b) in (ref.ticks[i] for _, i in ref.poles):
+        assert abs(heading(a, b) - 0) < 0.5 or abs(heading(a, b) - 180) < 0.5          # north-south: square to the tracks
+        assert T.metres(a[1], a[0], b[1], b[0]) == pytest.approx(18, abs=0.2) and a[1] > b[1]
+    ref = R.RailRef({"poles": R.parse(layers(), BBOX)["poles"]}, Model(static()).line)   # no tracks: square to the line
+    a, b = ref.ticks["210"]
+    assert abs(heading(a, b) - 0) < 0.5 and T.metres(a[1], a[0], b[1], b[0]) == pytest.approx(2 * R.TICK_HALF_M, abs=0.2)
+
+
+def test_along_the_real_line_each_tick_is_square_to_the_tracks_there():
+    static = T.parse_static((FIX / "gtfsmnr.zip").read_bytes())
+    line = Model(static).line
+    pc = next(st["ch"] for st in static["stations"].values() if st.get("code") == "2PC")
+    m = Model(static, T.DEFAULT_BBOX, None, R.parse(along_line(line, pc - 2000, pc + 2000), T.DEFAULT_BBOX))
+    [run] = m.ref.tracks["2"]
+    for s, i in m.ref.poles:
+        a, b = m.ref.ticks[i]
+        k = min(range(1, len(run) - 1), key=lambda j: abs(run[j][2] - s))
+        trk = heading(run[k - 1], run[k + 1])
+        assert abs((heading(a, b) - trk) % 180 - 90) < 2, i                        # square to track 2 there
+        assert T.metres(a[1], a[0], b[1], b[0]) == pytest.approx(18, abs=1)          # across all four, 3 m past
 
 
 # ---- the train on its numbered track ----------------------------------------------------------------------------
@@ -404,6 +532,11 @@ def test_the_provider_reads_each_layer_in_our_area_pages_and_keeps_a_copy(tmp_pa
     assert b.doc is not None and b.st["at"] == NOW                      # a restart: the copy, nothing fetched
     assert not b.refresh() and b.st["error"] == "HTTP 500" and b.counts()["poles"] == 82   # a failure keeps the copy
     assert b.st["next"] == NOW + 9 + R.BACKOFF_S[0]
+    assert "maxAllowableOffset=1e-06" in next(u for u, _ in f.calls if "/6/query" in u)    # 10 cm (#374)
+    old = json.loads((tmp_path / R.CACHE_NAME).read_text()) | {"thin": 0.000005}            # thinned to 0.5 m: due again
+    (tmp_path / R.CACHE_NAME).write_text(json.dumps(old))
+    c = R.RailAssets(True, BBOX, tmp_path, fetch=Fetch(fail=500), log=lambda m: None, clock=lambda: NOW + 9)
+    assert c.doc is not None and c.st["at"] is None and c.counts()["poles"] == 82
 
 
 def test_the_whole_mileposts_are_asked_for_under_either_line_code():
@@ -467,6 +600,7 @@ def test_the_trains_layer_sends_the_numbered_tracks_and_the_poles(tmp_path, monk
     assert "tracks" not in same and "railref" not in same
     ref = json.loads(tr.get(T.RAILREF_PATH, "")[1])
     assert len(ref["poles"]) == 12 and ref["source"] == R.SOURCE and tr.handles(T.RAILREF_PATH)
+    assert all(len(p["tick"]) == 2 and p["tick"] == tr.model.ref.ticks[p["id"]] for p in ref["poles"])   # each one's tick (#374)
     # a restart: the copy read, the model built with it
     again = Trains(rt_url="https://mta.example/rt", gtfs_url="https://mta.example/gtfs.zip", cache_dir=tmp_path / "trains",
                    fetch=feed, log=lambda m: None, clock=lambda: clock[0], traintime=False, assets_fetch=Fetch(fail=500))
@@ -572,3 +706,88 @@ out.said = run("said"); out.held = run("held"); out.outer = run("outer"); out.st
     # the GTFS-only box: the next stop's track said as the next stop's, never as the drawn one
     assert "`Next ${t.next_stop}${t.next_time ? ` ${hm(t.next_time)}` : \"\"}${t.track ? ` trk\\u00a0${t.track}` : \"\"}`" in js
     assert "`Trk ${t.track}`" not in js
+
+
+# ---- the poles' look and their layer (#374) -------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_the_page_draws_each_structure_as_a_tick_with_a_tag_beyond_its_end(tmp_path):
+    """TrainTime's look: the hub's tick as a line, the number at its first end on a yellow tag that sits beyond it
+    (east-west tick: left or right of the end; north-south: above or below); no tick: the tag at the structure."""
+    out = page(tmp_path, """
+out.f = TrainLayer.poleFeatures([{ id: "236", lon: -73.70, lat: 41.0, tick: [[-73.70, 41.00008], [-73.70, 40.99992]] },
+                                 { id: "237", lon: -73.69, lat: 41.0, tick: [[-73.69011, 41.0], [-73.68989, 41.0]] },
+                                 { id: "238", lon: -73.68, lat: 41.0 }]);
+""", {})
+    f = out["f"]
+    assert [(x["geometry"]["type"], x["properties"]["kind"], x["properties"]["id"]) for x in f] == [
+        ("LineString", "pole", "236"), ("Point", "pole-tag", "236"), ("LineString", "pole", "237"), ("Point", "pole-tag", "237"),
+        ("Point", "pole-tag", "238")]
+    assert f[1]["geometry"]["coordinates"] == [-73.70, 41.00008] and f[1]["properties"]["anchor"] == "bottom"   # above the north end
+    assert f[3]["geometry"]["coordinates"] == [-73.69011, 41.0] and f[3]["properties"]["anchor"] == "right"    # left of the west end
+    assert f[4]["geometry"]["coordinates"] == [-73.68, 41.0]
+    js = (Path(__file__).resolve().parent.parent / "sizeup" / "web" / "static" / "trains.js").read_text()
+    pole = js[js.index('map.addLayer({ id: "tr-pole", type: "line"'):js.index('map.addLayer({ id: "tr-mp"')]
+    assert pole.count("minzoom: POLE_ZOOM") == 2 and "const POLE_ZOOM = 16" in js and 'POLE_TAG = "#F2D13A"' in js
+    assert '"icon-image": POLE_CHIP, "icon-text-fit": "both"' in pole and '"text-optional": false' in pole
+    assert "allow-overlap" not in pole and "ignore-placement" not in pole            # a tag that would overlap: left out
+    assert 'type: "circle", source: SRC_REF, filter: isPole' not in js                # no dots any more
+
+
+MAPS = r"""
+const fs = require("fs");
+global.window = global;
+const store = JSON.parse(process.argv[4] || "{}");
+global.localStorage = { getItem: (k) => (k in store ? store[k] : null), setItem: (k, v) => { store[k] = String(v); },
+                        removeItem: (k) => { delete store[k]; } };
+const el = () => { const n = { children: [], dataset: {}, style: {}, classList: { add() {}, remove() {}, toggle() {}, contains: () => false },
+  listeners: {}, hidden: false, append(...c) { this.children.push(...c); }, replaceChildren(...c) { this.children = c; },
+  setAttribute() {}, addEventListener(t, f) { (this.listeners[t] = this.listeners[t] || []).push(f); },
+  querySelector: () => null, querySelectorAll: () => [], contains: () => false, focus() {}, getContext: () => null };
+  return n; };
+global.document = { visibilityState: "visible", addEventListener() {}, documentElement: {}, createElement: el, activeElement: null };
+global.getComputedStyle = () => ({ getPropertyValue: () => "" });
+global.fetch = () => new Promise(() => {});
+global.CSS = { escape: (s) => s, supports: () => false };
+global.performance = { now: () => 0 };
+global.setInterval = () => 0;
+const map = { on() {}, once() {}, off() {}, isStyleLoaded: () => false, loaded: () => false, getZoom: () => 17, getLayer: () => null,
+              getSource: () => null, getStyle: () => ({ layers: [] }), getContainer: () => ({}), getCanvas: () => ({ style: {} }) };
+eval(fs.readFileSync(process.argv[2], "utf8"));
+eval(fs.readFileSync(process.argv[3], "utf8"));
+const control = MapLayers.attach(map, el(), el(), {});
+const tm = control.groups[0];
+const find = (n, key) => { if (n.dataset && n.dataset.key === key) return n; for (const c of n.children || []) { const f = find(c, key); if (f) return f; } return null; };
+const out = { on: control.on(TrainLayer.REF_KEY, false), keys: tm.keys(), effective: control.effective()[TrainLayer.REF_KEY] };
+const box = find(tm.panel(), TrainLayer.REF_KEY);
+out.checked = box.checked;
+out.boxes = (function count(n) { return (n.dataset && n.dataset.key === TrainLayer.REF_KEY ? 1 : 0) + (n.children || []).reduce((a, c) => a + count(c), 0); })(tm.panel());
+if (process.argv[5] === "tick") { box.checked = true; for (const f of box.listeners.change) f(); }
+out.after = control.on(TrainLayer.REF_KEY, false);
+out.store = store;
+console.log(JSON.stringify(out));
+"""
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_poles_and_mileposts_is_a_layer_off_by_default_and_kept_per_viewer(tmp_path):
+    """#374 "set it as a layer so it's not always shown": "Poles · mileposts" is a box in the map's Layers control
+    (maplayers.js, the Trains group's keys), off for a viewer who never chose, and their choice kept
+    (localStorage "sizeup.mapLayers", as every layer's): ticked, it is on again on the next page; one box only."""
+    h = tmp_path / "maps.js"
+    h.write_text(MAPS)
+    static = Path(__file__).resolve().parent.parent / "sizeup" / "web" / "static"
+
+    def run(store, act=""):
+        r = subprocess.run([NODE, str(h), str(static / "maplayers.js"), str(static / "trains.js"), json.dumps(store), act],
+                           capture_output=True, text=True, timeout=60)
+        assert r.returncode == 0, r.stderr
+        return json.loads(r.stdout.strip().splitlines()[-1])
+    first = run({})
+    assert first["on"] is False and first["effective"] is False and first["checked"] is False and first["boxes"] == 1
+    assert ["railref", False] in first["keys"]
+    ticked = run({}, "tick")
+    assert ticked["after"] is True and json.loads(ticked["store"]["sizeup.mapLayers"])["overview"]["railref"] is True
+    again = run(ticked["store"])
+    assert again["on"] is True and again["checked"] is True

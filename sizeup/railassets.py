@@ -23,8 +23,8 @@ catenary numbers (no railway=catenary_mast / power=catenary_mast with a ref here
 
 Fetched monthly by the Data sources registry (sizeup/datasources.py, in the quiet hours; Refresh now there), one layer
 at a time with our User-Agent, only what lies in the area (a server-side envelope query; the tracks thinned
-server-side to about half a metre, maxAllowableOffset). Kept in the state dir (trains/rail_assets.json; a copy in S3,
-sizeup/cachesync.py), so a restart fetches nothing. With none (never fetched, or the source down): trains on their
+server-side to about 10 cm, maxAllowableOffset: straight, or smoothly curved, at street zoom). Kept in the state
+dir (trains/rail_assets.json; a copy in S3, sizeup/cachesync.py), so a restart fetches nothing. With none (never fetched, or the source down): trains on their
 direction's outer track as before (data/mnr_tracks.json), and no pole or milepost anywhere. Never raises.
 """
 
@@ -50,7 +50,7 @@ LAYERS = {"tracks": (6, "LineCode='NHL' AND TrkType='Main Line'", "TrkName"),
           "mileposts": (2, "LineCode IN ('NHL','NHV')", "PointName"),     # the whole miles: NHV in some of the service's copies
           "tenths": (3, "LineCode='NHL'", "Name")}
 MARGIN_DEG = 0.01                       # asked for this far beyond the area (about 1 km)
-THIN_DEG = 0.000005                     # the tracks thinned server-side to about this (half a metre)
+THIN_DEG = 0.000001                     # the tracks thinned server-side to about this (10 cm; ~70 KB of tracks cached)
 PAGE = 1000                             # the service's maxRecordCount
 MAX_PAGES = 10
 MAX_BYTES = 24 * 1024 * 1024            # one answer (the four main tracks are the whole line: ~3 MB unthinned)
@@ -65,6 +65,11 @@ MP_SLACK_M = 400.0                      # a point this far beyond the first / la
 LANE_OFF_M = 40.0                       # a track's point further than this from the line: not this line's
 TRACK_GAP_M = 100.0                     # a track's s jumping this much more than the step itself: two runs
 RATE_LIMITED_S = 1800.0                 # a 429 / 401 / 403: rest this long
+KINK_DEG = 45.0                         # a main track's vertex turning more than this: a digitising slip, dropped
+DUP_M = 0.3                             # a track's point this close to the one before: the same point
+TICK_NEAR_M = 30.0                      # a track this close to a structure is one it spans
+TICK_PAST_M = 3.0                       # a structure's tick runs this far past its outer tracks
+TICK_HALF_M = 9.0                       # with no track near: this far each side of it
 
 
 def _num(v) -> float | None:
@@ -173,6 +178,39 @@ def query_url(layer: int, where: str, bbox, offset: int = 0, thin: bool = False)
 # ---- reading it off: a point's pole and milepost; the tracks along the line's s ------------------------------------
 
 
+def _clean(run) -> list:
+    """A track's run without its digitising slips: a point on top of the one before (DUP_M), and a vertex where the
+    line turns more than KINK_DEG (the service's main tracks have a few hairpins doubling back 3 to 9 m and 1 cm
+    steps at right angles; a real main track turns a few degrees between points 10 cm off a straight)."""
+    from sizeup.trains import _xy
+    out: list = []
+    for p in run:
+        if out and math.dist(_xy(*out[-1][:2]), _xy(*p[:2])) < DUP_M:
+            continue
+        out.append(p)
+        while len(out) >= 3 and _turn(*(_xy(*q[:2]) for q in out[-3:])) > KINK_DEG:
+            del out[-2]
+    return out
+
+
+def _turn(a, b, c) -> float:
+    """Degrees the line a -> b -> c turns at b (0 straight on, 180 straight back)."""
+    h1, h2 = math.atan2(b[1] - a[1], b[0] - a[0]), math.atan2(c[1] - b[1], c[0] - b[0])
+    return abs(math.degrees((h2 - h1 + math.pi) % (2 * math.pi) - math.pi))
+
+
+def _oriented(run: list) -> list:
+    """A run [[lon, lat, s]...] in its own order (never re-sorted: sorting points by their s on the static feed's line
+    zig-zags the track wherever that line's kinks make the s of points a few metres apart come out of order), turned
+    to run up the line, its s made non-decreasing (a point whose s steps back keeps the s before it)."""
+    if run[-1][2] < run[0][2]:
+        run = run[::-1]
+    for i in range(1, len(run)):
+        if run[i][2] < run[i - 1][2]:
+            run[i][2] = run[i - 1][2]
+    return run
+
+
 class _Grid:
     """The line's segments by 200 m cell (a projection of thousands of points without walking the whole line each)."""
     CELL = 200.0
@@ -235,18 +273,20 @@ class RailRef:
         grid = _Grid(line) if line is not None and len(getattr(line, "xy", [])) >= 2 else None
         self.tracks: dict[str, list[list[list[float]]]] = {}
         self.poles: list[tuple[float, str]] = []
+        self.ticks: dict[str, list[list[float]]] = {}     # each structure's tick across the tracks (_tick)
         self.mps: list[tuple[float, float]] = []
         if grid is None:
             return
-        # each track a list of runs [[lon, lat, s]...] in s order: each feature's part on its own (two features, or two
-        # parts of one, are never joined: a gap between them is a gap, never a chord across it), broken where it
-        # leaves the line or its s jumps more than its own length (TRACK_GAP_M slack) from one point to the next
+        # each track a list of runs [[lon, lat, s]...] up the line, in the service's own point order (_oriented): each
+        # feature's part on its own (two features, or two parts of one, are never joined: a gap between them is a gap,
+        # never a chord across it), broken where it leaves the line or its s jumps more than its own length
+        # (TRACK_GAP_M slack) from one point to the next
         from sizeup.trains import metres
         for num, runs in (doc.get("tracks") or {}).items():
             out = []
             for run in runs:
                 cur: list[list[float]] = []
-                for lon, lat in run:
+                for lon, lat in _clean(run):
                     d, s = grid.project(lat, lon)
                     jump = cur and abs(s - cur[-1][2]) > metres(lat, lon, cur[-1][1], cur[-1][0]) + TRACK_GAP_M
                     if d > LANE_OFF_M or jump:
@@ -255,13 +295,15 @@ class RailRef:
                     if d <= LANE_OFF_M:
                         cur.append([lon, lat, round(s, 1)])
                 out.append(cur)
-            out = [sorted(r, key=lambda c: c[2]) for r in out if len(r) >= 2]
+            out = [r for r in map(_oriented, (r for r in out if len(r) >= 2)) if r[-1][2] > r[0][2]]
             if out:
                 self.tracks[num] = sorted(out, key=lambda r: r[0][2])
+        self._run_s = {k: [(r, [c[2] for c in r]) for r in runs] for k, runs in self.tracks.items()}
         for p in doc.get("poles") or []:
             d, s = grid.project(p["lat"], p["lon"])
             if d <= NEAR_M:
                 self.poles.append((s, p["id"]))
+                self.ticks[p["id"]] = self._tick(p["lon"], p["lat"], s)
         self.poles.sort()
         pairs = []
         for m in doc.get("mileposts") or []:
@@ -277,6 +319,49 @@ class RailRef:
 
     def __bool__(self) -> bool:
         return bool(self.tracks or self.poles or self.mps)
+
+    def _tick(self, lon: float, lat: float, s: float) -> list[list[float]]:
+        """A catenary structure as Metro-North's TrainTime draws it: a line square to the tracks through it (their
+        bearing there), across every track within TICK_NEAR_M and TICK_PAST_M past the outer ones; [[lon, lat] x2],
+        the first end the one to the left going up the line. No track near: square to the line, TICK_HALF_M each side."""
+        from sizeup.trains import MX, MY, _xy
+        cx, cy = _xy(lon, lat)
+        near = []                                         # (x, y, ux, uy): each track's nearest point and its heading
+        for runs in self._run_s.values():
+            best = None
+            for run, ss in runs:
+                if not ss[0] - 80 <= s <= ss[-1] + 80:
+                    continue
+                lo = max(0, bisect.bisect_left(ss, s - 80) - 1)
+                hi = min(len(run) - 1, bisect.bisect_right(ss, s + 80))
+                for i in range(lo, hi):
+                    (ax, ay), (bx, by) = _xy(*run[i][:2]), _xy(*run[i + 1][:2])
+                    dx, dy = bx - ax, by - ay
+                    L = math.hypot(dx, dy)
+                    if L == 0:
+                        continue
+                    t = max(0.0, min(1.0, ((cx - ax) * dx + (cy - ay) * dy) / (L * L)))
+                    px, py = ax + t * dx, ay + t * dy
+                    d = math.hypot(px - cx, py - cy)
+                    if d <= TICK_NEAR_M and (best is None or d < best[0]):
+                        best = (d, px, py, dx / L, dy / L)
+            if best:
+                near.append(best[1:])
+        if near:
+            ux, uy = near[0][2], near[0][3]
+            ux, uy = (sum(n[2] if n[2] * ux + n[3] * uy >= 0 else -n[2] for n in near),
+                      sum(n[3] if n[2] * ux + n[3] * uy >= 0 else -n[3] for n in near))
+            L = math.hypot(ux, uy) or 1.0
+            ux, uy = ux / L, uy / L
+            offs = [(x - cx) * -uy + (y - cy) * ux for x, y, _, _ in near]
+            a, b = min(offs) - TICK_PAST_M, max(offs) + TICK_PAST_M
+        else:
+            b_deg = self.line.heading(s)                  # degrees from north, the way s grows
+            ux, uy = math.sin(math.radians(b_deg)), math.cos(math.radians(b_deg))
+            a, b = -TICK_HALF_M, TICK_HALF_M
+        # (-uy, ux) is the left going up the line: the first end there
+        end = lambda o: [round((cx - uy * o) / MX, 7), round((cy + ux * o) / MY, 7)]
+        return [end(b), end(a)]
 
     def mp_at(self, s: float) -> float | None:
         """The milepost at s (one decimal); None off the stretch the mileposts cover (MP_SLACK_M beyond its ends)."""
@@ -403,7 +488,7 @@ class RailAssets:
         except Exception as e:  # never the trains' thread
             return self._failed(now, f"{type(e).__name__}: {e}")
         with self._lock:
-            self.doc = doc | {"at": now, "source": SOURCE, "link": LINK}
+            self.doc = doc | {"at": now, "source": SOURCE, "link": LINK, "thin": THIN_DEG}
             self.st.update(at=now, error="", fails=0, bytes=size)
         c = self.counts()
         self.log(f"trains: {SOURCE}: {c['tracks']} tracks, {c['poles']} catenary structures, {c['mileposts']} mileposts in our area")
@@ -436,7 +521,7 @@ class RailAssets:
             if not isinstance(at, (int, float)) or not isinstance(doc.get("tracks"), dict) or not isinstance(doc.get("poles"), list):
                 raise ValueError("not our shape")
             self.doc = doc
-            self.st.update(at=at)
+            self.st.update(at=at if doc.get("thin") == THIN_DEG else None)   # thinned otherwise: due again (still drawn)
         except (OSError, ValueError, TypeError, AttributeError) as e:
             self.log(f"trains: {f.name} not read ({type(e).__name__}); fetched again")
 
@@ -458,10 +543,12 @@ class RailAssets:
         except OSError as e:
             self.log(f"trains: {self.file.name} not saved ({type(e).__name__}: {e})")
 
-    def layer(self) -> dict:
-        """GET /api/cad/trains/railref: the poles and mileposts to draw ({poles: [{id, lon, lat}], mileposts: [...]})."""
-        d = self.doc or {}
+    def layer(self, ticks: dict | None = None) -> dict:
+        """GET /api/cad/trains/railref: the poles and mileposts to draw ({poles: [{id, lon, lat, tick}], mileposts:
+        [...]}); tick: the structure's line across the tracks (RailRef.ticks, [[lon, lat] x2]) when it is by the line."""
+        d, ticks = self.doc or {}, ticks or {}
         return {"source": SOURCE, "link": LINK, "at": self.st["at"], "error": self.st["error"],
-                "poles": [{"id": p["id"], "lon": p["lon"], "lat": p["lat"]} for p in d.get("poles") or []],
+                "poles": [{"id": p["id"], "lon": p["lon"], "lat": p["lat"], **({"tick": ticks[p["id"]]} if p["id"] in ticks else {})}
+                          for p in d.get("poles") or []],
                 "mileposts": [{"mp": m["mp"], "lon": m["lon"], "lat": m["lat"], "whole": float(m["mp"]).is_integer()}
                               for m in d.get("mileposts") or []]}
