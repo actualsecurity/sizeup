@@ -981,3 +981,74 @@ def test_single_engine_taxi_clears_only_its_own_words():
     said = lambda x: {a.kind for a, _w in W.abnormal(W.fuzzy(atc.normalize(normalize(x))))}   # noqa: E731
     assert "engine" not in said("number two engine shut down, single engine taxi to the ramp")
     assert "engine" in said("we had an engine failure on the approach, single engine taxi to the ramp")
+
+
+# -- round 3 of #372: one rule for whose trouble it is; the alert window; the cancel ----------------------------------------
+
+
+@pytest.mark.parametrize("text", [
+    f"{B}, we have traffic for you, emergency aircraft on final",
+    f"{B}, hold short runway three four, we'll call you, emergency aircraft on final",
+    f"{B}, hold short, emergency aircraft, they were on a two mile final",
+    f"{B}, well, hold short, emergency aircraft with a gear problem",
+    f"{B}, hold short runway three four, emergency aircraft on final",
+])
+def test_a_controller_s_we_is_not_the_ground_aircraft_s_trouble(text):
+    w = with_ground_b()
+    w.atc(0, text)
+    assert all(t.callsign != "N456CD" or not t.abn for t in w.w.tracks.values())
+    assert w.atc(20, f"Westchester tower, {B}, we'll run the checklist") is None and w.open() == []
+
+
+@pytest.mark.parametrize("norm, own", [
+    ("n123ab we ve lost an engine request emergency equipment", True),
+    ("n123ab we have a flap problem", True),
+    ("n123ab our left engine failed", True),
+    ("n456cd we have traffic for you emergency aircraft on final", False),
+    ("n456cd we have an emergency aircraft on final", False),
+    ("n456cd well hold short emergency aircraft with a gear problem", False),
+])
+def test_own_trouble_is_a_first_person_trouble_phrase(norm, own):
+    assert W.own_trouble(norm, W.abnormal(norm)) is own
+
+
+@pytest.mark.parametrize("minutes", [6, 8, 15])
+@pytest.mark.parametrize("county_first", [True, False])
+def test_an_alert_2_county_event_joins_within_20_minutes(minutes, county_first):
+    w = World()
+    s = minutes * 60
+    if county_first:
+        w.feed(0, "C-8", "AIRPORT ALERT 2", "WESTCHESTER COUNTY AIRPORT", units=("E64",))
+        a = w.radio(s, ALERT2)
+    else:                                                           # dispatched that long before, seen after it
+        a = w.radio(s, ALERT2)
+        w.feed(s + 30, "C-8", "AIRPORT ALERT 2", "WESTCHESTER COUNTY AIRPORT", dispatched=0, units=("E64",))
+    _one_incident(w, a)
+
+
+@pytest.mark.parametrize("minutes", [8, 15])
+def test_an_alert_2_page_joins_within_20_minutes(minutes):
+    w = World()
+    a = w.radio(minutes * 60, ALERT2)
+    w.at(0)
+    w.page(0, PAGE2)
+    _one_incident(w, a)
+
+
+def test_an_untyped_airport_event_8_minutes_before_is_separate():
+    w = World()
+    iid = w.feed(0, "C-9", "AIRPORT", "WESTCHESTER COUNTY AIRPORT", units=("E64",))
+    a = w.radio(8 * 60, ALERT2)
+    assert len(w.incidents()) == 2 and w.alerts.get(a["id"])["incident_id"] != iid
+    v = World()                                                     # ... and the other way
+    b = v.radio(8 * 60, ALERT2)
+    v.feed(8 * 60 + 30, "C-9", "AIRPORT", "WESTCHESTER COUNTY AIRPORT", dispatched=0, units=("E64",))
+    assert len(v.incidents()) == 2 and v.alerts.get(b["id"])["incident_id"] == v.incidents()[0]["id"]
+
+
+def test_a_county_event_dispatched_before_the_cancel_still_joins():
+    w = World()
+    a = w.radio(0, ALERT2)
+    w.radio(300, "60 Control, car 9901, alert level 2 canceled, aircraft landed without incident")
+    iid = w.feed(400, "C-10", "AIRPORT ALERT 2", "WESTCHESTER COUNTY AIRPORT", dispatched=120, units=("E64",))
+    assert iid == w.alerts.get(a["id"])["incident_id"] and len(w.incidents()) == 1
