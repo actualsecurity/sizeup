@@ -7,11 +7,14 @@ mostly without a callsign. This watch keeps a short memory per aircraft instead.
 
     the aircraft    the talker of each airband transmission: the ATC talker record when the app has one
                     (sizeup/atc_talkers.py: the callsign heard, matched to ADS-B, or its exchange's subject), else the
-                    callsign heard (sizeup/atc.py attribute), else the aircraft heard on the channel within EXCHANGE_S
+                    callsign heard (sizeup/atc.py attribute), else the LAST aircraft named on the channel (any: an
+                    exchange never reaches past another aircraft) when this watch follows it, within EXCHANGE_S
                     (EXCHANGE_ABN_S for one with a go-around or an abnormal phrase already: a pilot's "we have to run a
-                    checklist" after the controller called them), else the one aircraft whose track just went around.
-                    A go-around or abnormal phrase with nobody named waits ORPHAN_S for the next aircraft named on the
-                    channel ("Westchester tower, we're going around, we have a flat", then the controller's answer)
+                    checklist" after the controller called them), else (a go-around or abnormal phrase heard, nothing
+                    about the ground in it) the one airborne aircraft whose track just went around. Otherwise it waits
+                    ORPHAN_S for the next aircraft named on the channel that can be it: airborne (never one on the
+                    ground or departing), and no other aircraft's track went around; ambiguous: it stays unassigned.
+                    "Traffic going around" said to another aircraft is not that aircraft's go-around
     go-around       "go around", "going around", "missed approach", "going missed" (GO_AROUND); or the aircraft's own
                     track: arriving in the last ADSB_ARRIVING_S, now near / departing / low and not descending (the
                     Aircraft layer's PhaseMemory, #279: a climb after an approach)
@@ -48,7 +51,8 @@ mostly without a callsign. This watch keeps a short memory per aircraft instead.
 
     declared        "alert level 1/2/3" ("alert 2", "alert level two", "alert II"; misheard "alert level won / to / tree"
                     only with the airport in it) with the airport in it: HPN, the airport, a runway, a final, an aircraft
-                    or its type, "declaring"; never with another airport named ("Danbury airport"; ours: airport_names).
+                    or its type, "declaring"; never with another airport of OTHER_AIRPORTS named and none of ours ("Danbury
+                    airport"; ours: [atc] airport_names, "west chester" too: speech-to-text splits it).
                     The type, the problem, the runway and the final distance as heard: "HPN Alert 1 · standby · Citation
                     · flaps · 5 mi final RWY 16". A drill is marked so and never makes an incident. Without the airport
                     in it, only a change of the open alert ("upgrade / go to / now an alert 2", "downgraded to an alert
@@ -210,9 +214,30 @@ def abnormal(norm: str) -> list[tuple[Abn, str]]:
     return out
 
 
+# another aircraft's go-around told to this one ("hold short, traffic going around"): not this one's
+OTHERS_GO_AROUND = re.compile(r"\b(?:traffic|aircraft|jet|company|preceding|the (?:\w+ )?(?:ahead|in front)|cessna|citation|"
+                              r"(?:a|the) \w+) (?:is |was )?(?:going around|went around|on the go around|on the missed)\b|"
+                              r"\bfor (?:the |a )?(?:go around|missed approach)\b")
+# a no-callsign transmission from the ground (a leak at the ramp): never an airborne aircraft's by the track alone
+GROUND_CUE = re.compile(r"\b(?:taxi\w*|ramp|gate|parking|hold(?:ing)? short|on the ground|fbo|back to the (?:ramp|gate|"
+                        r"hangar)|stop(?:ped)? on|blocking)\b")
+
+
 def go_around(norm: str) -> str:
-    m = GO_AROUND.search(norm)
+    m = GO_AROUND.search(OTHERS_GO_AROUND.sub(" ", norm))
     return m.group(0) if m else ""
+
+
+def airborne(plane: dict | None, went_around: bool = False) -> bool | None:
+    """Whether an aircraft can be the one with the go-around or the problem in the air: on the ground, or departing
+    (unless its own track went around), it can't; None: no ADS-B to say."""
+    if not plane:
+        return None
+    if plane.get("alt") == "ground" or plane.get("phase") in ("ground", "other_ground"):
+        return False
+    if plane.get("phase") == "departing" and not went_around:
+        return False
+    return True
 
 
 # -- frequencies ------------------------------------------------------------------------------------------------------
@@ -433,17 +458,15 @@ CAR = re.compile(r"\bcar (\d{2,5})\b")                 # the airport car that de
 DRILL = re.compile(r"\b(?:drill|exercise|tabletop|simulated|this is a test)\b")
 OTHER_AIRPORTS = re.compile(r"\b(?:danbury|teterboro|laguardia|la guardia|kennedy|jfk|newark|stewart|bradley|islip|macarthur|"
                             r"oxford|sikorsky|tweed|bridgeport|poughkeepsie|dutchess|sullivan|republic|farmingdale)\b")
-_NOT_A_NAME = {"westchester", "county", "the", "hpn", "plains", "our", "an", "a", "to", "at", "from", "of", "for", "this",
-               "that", "the", "into", "in", "on", "by", "near"}
+OUR_AIRPORT = ("westchester", "west chester", "hpn", "white plains")    # [atc] airport_names: ours (STT splits one)
 
 
-def other_airport(norm: str, ours: Iterable[str] = ("westchester", "hpn", "white plains")) -> bool:
-    """Another airport named ("Danbury airport has an alert 1"), and not ours: not HPN's alert."""
+def other_airport(norm: str, ours: Iterable[str] = OUR_AIRPORT) -> bool:
+    """Another airport named from OTHER_AIRPORTS ("Danbury airport has an alert 1"), and none of ours: not HPN's alert.
+    Only those names: "airport car 4417", "the airport alert" and an unknown "<word> airport" stay ours."""
     if any(re.search(rf"\b{re.escape(o)}\b", norm) for o in ours):
         return False
-    if OTHER_AIRPORTS.search(norm):
-        return True
-    return any(m.group(1) not in _NOT_A_NAME for m in re.finditer(r"\b(\w+) (?:county |municipal |regional )?airport\b", norm))
+    return bool(OTHER_AIRPORTS.search(norm))
 
 
 FINAL = re.compile(r"\b(?P<n>\d{1,2}|one|two|three|four|five|six|seven|eight|nine|ten|twelve|fifteen)[ -]?(?:mile|miles|mi)"
@@ -501,7 +524,7 @@ def declaration(text: str, context: bool = True) -> dict | None:
     it isn't one: no level, a cancel, another airport, or nothing about the airport or an aircraft in it (context=False:
     the caller knows the airport's alert is open)."""
     norm = airport._norm(text)
-    if other_airport(norm):
+    if other_airport(norm, OUR_AIRPORT):
         return None
     ctx = has_context(norm)
     change = CHANGE.search(norm)
@@ -542,7 +565,7 @@ class AirportWatch:
         self.aircraft: Callable[[], list[dict]] = lambda: []
         self.incident_levels: frozenset[int] = frozenset(INCIDENT_LEVELS)
         self.enabled = True                               # [atc] enabled (the app's)
-        self.airport_names: tuple[str, ...] = ("westchester", "hpn", "white plains")   # ours, when another is named too
+        self.airport_names: tuple[str, ...] = OUR_AIRPORT    # ours, when another is named too ([atc] airport_names)
         self.cad = getattr(alerts, "cad", None)
         self.store = getattr(alerts, "store", None)
         self._index: atc.TelephonyIndex | None = None
@@ -555,8 +578,10 @@ class AirportWatch:
         self.raised = 0
 
     def configure(self, channels: Iterable = (), aircraft: Callable[[], list[dict]] | None = None,
-                  incident_levels: Iterable[int] = (2, 3), enabled: bool = True) -> None:
+                  incident_levels: Iterable[int] = (2, 3), enabled: bool = True,
+                  airport_names: Iterable[str] = OUR_AIRPORT) -> None:
         self.enabled = bool(enabled)
+        self.airport_names = tuple(dict.fromkeys(str(x).lower().strip() for x in airport_names if str(x).strip()))
         self.channels = Channels(channels)
         self.airband |= {c.label for c in self.channels.air}
         if aircraft is not None:
@@ -600,38 +625,45 @@ class AirportWatch:
     # -- who ---------------------------------------------------------------------------------------------------------
 
     def _who(self, ch: str, text: str, rec: dict | None, planes: list[dict], at: float,
-             keen: bool = False) -> tuple[str, str | None, dict]:
-        """(callsign, hex, the plane): the talker record's aircraft, else the callsign heard, else the channel's last."""
+             keen: bool = False, ground: bool = False) -> tuple[str, str | None, dict, str]:
+        """(callsign, hex, the plane, how): the talker record's aircraft or the callsign heard ("named"), else the last
+        aircraft named on the channel when it is one this watch follows and nobody else was named since ("exchange"),
+        else (keen: a go-around or an abnormal phrase heard; not ground: nothing says it is on the ground) the one
+        airborne aircraft whose track just went around ("adsb"); else nobody (the transmission waits, an orphan)."""
         ac = (rec or {}).get("aircraft") or None
         if not ac and (rec or {}).get("exchange"):
             ex = rec["exchange"]
             ac = {"callsign": ex.get("subject"), "hex": ex.get("hex") or None} if ex.get("subject") else None
         if ac and ac.get("callsign"):
             h = ac.get("hex") or None
-            return str(ac["callsign"]).upper(), h, next((p for p in planes if h and p.get("hex") == h), {})
+            return str(ac["callsign"]).upper(), h, next((p for p in planes if h and p.get("hex") == h), {}), \
+                ("named" if (rec or {}).get("aircraft") else "exchange")
         att = atc.attribute(text, self.index, atc_scope.planes_for(ch, planes))
         if att is not None and not att.after_number:
             if att.hex is not None and att.confidence >= 0.4:
-                return (att.callsign or att.spoken).upper(), att.hex, next((p for p in planes if p.get("hex") == att.hex), {})
+                return (att.callsign or att.spoken).upper(), att.hex, \
+                    next((p for p in planes if p.get("hex") == att.hex), {}), "named"
             if att.spoken:
                 tr = next((t for t in self.tracks.values() if _same(t.callsign, att.spoken)), None)
                 if tr is not None:
-                    return tr.callsign, tr.hex, next((p for p in planes if tr.hex and p.get("hex") == tr.hex), {})
+                    return tr.callsign, tr.hex, next((p for p in planes if tr.hex and p.get("hex") == tr.hex), {}), "named"
                 if not att.spoken.startswith("…"):
-                    return att.spoken.upper(), None, {}
-        last = self._last.get(ch)
-        if last and last[1] in self.tracks:
-            tr = self.tracks[last[1]]
-            gap = EXCHANGE_ABN_S if (tr.goaround or tr.abn) else EXCHANGE_S   # the aircraft in trouble keeps talking
-            if at - last[0] <= gap:
-                return tr.callsign, tr.hex, next((p for p in planes if tr.hex and p.get("hex") == tr.hex), {})
-        if keen:                                         # nobody named: the one aircraft whose track just went around
+                    return att.spoken.upper(), None, {}, "named"
+        last = self._last.get(ch)                        # (when, callsign, hex) of the LAST aircraft named, any
+        if last:
+            tr = self._track(last[1], last[2], {}, create=False)
+            if tr is not None:
+                gap = EXCHANGE_ABN_S if (tr.goaround or tr.abn) else EXCHANGE_S   # the aircraft in trouble keeps talking
+                if at - last[0] <= gap:
+                    return tr.callsign, tr.hex, next((p for p in planes if tr.hex and p.get("hex") == tr.hex), {}), "exchange"
+        if keen and not ground:                          # nobody named: the one airborne aircraft whose track went around
             ga = [p for p in atc_scope.planes_for(ch, planes) if p.get("hex") in self._adsb_ga
-                  and 0 <= at - self._adsb_ga[p["hex"]] <= ADSB_ARRIVING_S and (p.get("flight") or p.get("reg"))]
+                  and 0 <= at - self._adsb_ga[p["hex"]] <= ADSB_ARRIVING_S and (p.get("flight") or p.get("reg"))
+                  and airborne(p, True)]
             if len(ga) == 1:
                 p = ga[0]
-                return str(p.get("flight") or p.get("reg")).strip().upper(), p["hex"], p
-        return "", None, {}
+                return str(p.get("flight") or p.get("reg")).strip().upper(), p["hex"], p, "adsb"
+        return "", None, {}, ""
 
     def _track(self, cs: str, h: str | None, plane: dict, create: bool) -> Track | None:
         tr = None
@@ -673,7 +705,10 @@ class AirportWatch:
         with self._lock:
             self._observe(planes, now)
             self._forget(now)
-            cs, h, plane = self._who(ch, text, rec, planes, at, keen=bool(ga or not practice))
+            keen = not practice and bool(ga or abnormal(norm) or (FLAT_END.search(norm) and self._orphans_on(ch, at)))
+            cs, h, plane, how = self._who(ch, text, rec, planes, at, keen=keen, ground=bool(GROUND_CUE.search(norm)))
+            if how == "named":                            # every aircraft named: an exchange never reaches past it
+                self._last[ch] = (at, cs, h)
             tr = self._track(cs, h, plane, create=False) if cs else None
             if FLAT_END.search(norm) and (ga or (tr is not None and any(0 <= at - g <= EXCHANGE_ABN_S for g in tr.goaround))
                                           or self._orphans_on(ch, at)):
@@ -689,7 +724,7 @@ class AirportWatch:
                 if hits or ga:                            # nobody named: the next aircraft named (or ADS-B's go-around)
                     self._orphans.setdefault(ch, []).append((at, snip, hits, ga))
                 return None
-            orphans = self._take_orphans(ch, at)
+            orphans = self._take_orphans(ch, at, cs, h, plane) if how == "named" else []
             tr = self._track(cs, h, plane, create=bool(hits or ga or orphans or practice))
             if tr is None:
                 return None
@@ -697,7 +732,6 @@ class AirportWatch:
                 tr.adsb_ga = self._adsb_ga[tr.hex]
             if plane:
                 tr.seen_at, tr.dist = now, plane.get("dist") if isinstance(plane.get("dist"), (int, float)) else tr.dist
-            self._last[ch] = (at, tr.key())
             tr.last_at = at
             if practice:
                 tr.practice_at = at
@@ -720,9 +754,22 @@ class AirportWatch:
     def _orphans_on(self, ch: str, at: float) -> bool:
         return any(0 <= at - o[0] <= ORPHAN_S for o in self._orphans.get(ch, ()))
 
-    def _take_orphans(self, ch: str, at: float) -> list:
-        got = [o for o in self._orphans.pop(ch, []) if 0 <= at - o[0] <= ORPHAN_S]
-        return got
+    def _take_orphans(self, ch: str, at: float, cs: str, h: str | None, plane: dict) -> list:
+        """The waiting no-callsign transmissions, for the aircraft just named, when it can be theirs: airborne
+        (never one on the ground or departing), and no OTHER aircraft's track just went around (that one is likelier:
+        they wait). Not this one's: they stay, until ORPHAN_S."""
+        waiting = [o for o in self._orphans.get(ch, []) if 0 <= at - o[0] <= ORPHAN_S]
+        self._orphans[ch] = waiting
+        if not waiting:
+            return []
+        mine = bool(h) and 0 <= at - self._adsb_ga.get(h, -1e9) <= ADSB_ARRIVING_S
+        if airborne(plane, mine) is False:
+            return []
+        others = [x for x, t in self._adsb_ga.items() if x != h and 0 <= at - t <= ADSB_ARRIVING_S]
+        if others and not mine:
+            return []
+        self._orphans[ch] = []
+        return waiting
 
     def _forget(self, now: float) -> None:
         for k in [k for k, tr in self.tracks.items() if tr.alert_id is None and now - tr.last_at > KEEP_S]:

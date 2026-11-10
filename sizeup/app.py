@@ -693,7 +693,7 @@ class App:
         # ... and the ones that build up over several transmissions (#369, sizeup/airport_watch.py): an abnormal
         # go-around followed through its frequency changes (_atc, _atc_view), "alert level N" on 60 Control (the CAD's)
         self.cad.airport_watch.configure(cfg.channels, self._atc_aircraft, cfg.atc_alert_level_incident,
-                                         enabled=cfg.atc_enabled)
+                                         enabled=cfg.atc_enabled, airport_names=cfg.atc_airport_names)
         # The emergency window (alarms.Windows): the button's talkgroup and radio kept this long, Record off or on
         self.cad.alarms.windows.keep_s = cfg.p25_emergency_window_min * 60
         self.cad.alarms.on_clear = self._all_clear_sent

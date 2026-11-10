@@ -290,6 +290,8 @@ heartbeat_stale_min = 90             # no heartbeat (or restart) this long: "Tap
 # max_per_hour = 8                   # new pre-alerts an hour at most (more: added to the latest open one)
 # alert_level_incident = [2, 3]      # #369: 60 Control's "alert level N": these levels (PCFD responds) also make a
 #                                    #   queued Airport incident (never dispatched); the others (Alert 1) a standby pre-alert
+# airport_names = ["westchester", "west chester", "hpn", "white plains"]   # ours: an alert naming another airport
+#                                    #   (Danbury, Teterboro ...) and none of these is not HPN's
 
 # [alerts]: our own ntfy topics for pushes that page a person (sizeup/notify.py), two kinds:
 #   ntfy_topic    the alarms: the emergency buttons (P25, MDC, FleetSync), a mayday heard on our fire channels

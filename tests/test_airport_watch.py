@@ -258,6 +258,62 @@ def test_an_unnamed_go_around_goes_to_the_one_aircraft_whose_track_went_around()
     assert a is not None and a["data"]["aircraft"][0]["hex"] == "a0b1c2"
 
 
+GROUND_B = {"hex": "b0b0b0", "flight": "EJA22", "type": "C56X", "lat": 41.068, "lon": -73.708, "alt": "ground", "gs": 10,
+            "trk": 160, "vr": 0, "phase": "ground", "rwy": "16", "dist": 0.4}
+B = "Execjet two two"
+
+
+def with_ground_b() -> World:
+    w = World()
+    w.planes.append(dict(GROUND_B))
+    return w
+
+
+def test_an_unnamed_go_around_never_goes_to_an_aircraft_on_the_ground():
+    """The tower first answers another aircraft, on the ground ("hold short, traffic going around"): the unnamed
+    go-around waits for the airborne one."""
+    w = with_ground_b()
+    w.tick(0)
+    w.atc(30, "Westchester tower, we're going around, we have a flat")
+    assert w.atc(40, f"{B}, hold short runway one six, traffic going around") is None
+    assert w.atc(50, f"hold short one six, {B}") is None
+    a = w.atc(60, "Flexjet six one eight, roger, fly runway heading, climb and maintain three thousand")
+    assert a is not None and [x["callsign"] for x in a["data"]["aircraft"]] == ["LXJ618"]
+    assert all(t.callsign != "EJA22" or not (t.goaround or t.abn) for t in w.w.tracks.values())
+
+
+def test_an_exchange_never_reaches_past_another_aircraft_named():
+    w = with_ground_b()
+    w.tick(0)
+    a = w.atc(30, "Flexjet six one eight going around, we have a flap failure")
+    w.atc(60, f"{B}, runway one six, line up and wait")
+    w.atc(70, f"line up and wait one six, {B}")
+    w.atc(90, "uh tower we've got an unsafe gear indication, we need to run a checklist, we'll taxi back")
+    assert "gear" not in lines(w.alerts.get(a["id"]))["Heard"]           # not the go-around aircraft's
+    assert len(w.open()) == 1
+
+
+def test_a_ground_problem_is_never_the_airborne_go_around_s():
+    w = with_ground_b()
+    w.tick(0)
+    w.tick(20, phase="near", vr=1800, alt=1900)                    # the airborne one's track went around
+    assert w.atc(60, "tower, we've got a hydraulic leak indication, we need to run the checklist, we'll go back to "
+                     "the ramp") is None
+    assert w.open() == []
+
+
+def test_the_track_s_go_around_wins_over_another_airborne_aircraft_named_next():
+    w = World()
+    w.planes.append({"hex": "c1c1c1", "flight": "JBU77", "type": "A320", "lat": 41.12, "lon": -73.73, "alt": 2400, "gs": 150,
+                     "trk": 160, "vr": -600, "phase": "arriving", "rwy": "16", "dist": 4.0})
+    w.tick(0)
+    w.tick(20, phase="near", vr=1800, alt=1900)                    # LXJ618's track went around, JetBlue's didn't
+    a = w.atc(30, "Westchester tower, we're going around, we have a flat")
+    assert a is not None and [x["callsign"] for x in a["data"]["aircraft"]] == ["LXJ618"]
+    b = w.atc(40, "JetBlue seven seven, continue, number two")
+    assert b is None and len(w.open()) == 1
+
+
 def test_one_transmission_with_several_kinds_is_enough():
     w = World()
     a = w.atc(0, "Flexjet six one eight, we have a gear unsafe indication, we'll run the checklist and may divert")
@@ -564,6 +620,10 @@ def test_accepted_alert_takes_a_later_level_only_for_the_same_aircraft():
 
 
 @pytest.mark.parametrize("text, level", [
+    ("60 Control, airport car 4417, declaring an alert level 1 for a Citation, flap issues, 5 mile final runway 16", 1),
+    ("car 4417 airport alert level 2, Citation, gear problem, runway 34", 2),
+    ("all units responding airport alert 2 runway 34", 2),
+    ("60 Control, car 4417, alert 1 at West Chester airport, Citation on final runway 16", 1),
     ("60 Control, car 4417, declaring an alert to for a Citation on runway 16", 2),
     ("60 Control, car 4417, alert level won for a Citation runway 16", 1),
     ("60 Control, car 4417, alert level tree, aircraft on a 3 mile final runway 34", 3),
@@ -576,6 +636,7 @@ def test_misheard_levels_with_the_airport_in_it(text, level):
 def test_another_airport_and_a_drill():
     w = World()
     assert w.radio(0, "60 Control, be advised Danbury airport has an alert 1 for a Cessna, no response needed", tg=301) is None
+    assert w.radio(20, "60 Control, Teterboro has an alert level 2 for a Gulfstream, runway 6, FYI only", tg=301) is None
     a = w.radio(60, "60 Control, car 4417, this is a drill, alert level 2 drill at the airport, runway 16")
     assert a["data"].get("drill") and w.incidents() == []          # a drill: never an incident
 

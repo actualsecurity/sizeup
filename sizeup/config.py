@@ -229,6 +229,7 @@ class Config:
     atc_expire_min: float = 30.0       # an open pre-alert nobody answered: expired after this
     atc_max_per_hour: int = 8          # new pre-alerts an hour at most (more: added to the latest open one)
     atc_alert_level_incident: tuple = (2, 3)   # #369: 60 Control's "alert level N" at these levels also makes a queued incident
+    atc_airport_names: tuple = ("westchester", "west chester", "hpn", "white plains")   # #369: our airport, as said
     # [roads] (sizeup/roads.py, #73, #86, #188): the highway layers on the CAD maps: the Thruway's public feeds
     # and the county's cameras (on by default), and 511NY's on CARS: its public signs (on by default), the API's
     # events and the CARS-Hub's CCTV feed with 511NY's username and password (env SIZEUP_511NY_USER / SIZEUP_511NY_PASS, the
@@ -672,7 +673,7 @@ def _schedule(raw, mhz: float, where: str) -> tuple[tuple[int, float], ...]:
 def _atc(data: dict, base: Path) -> dict:
     """[atc] -> Config fields (#233). No section: on, data/atc/rules.json, the defaults."""
     a = _take(data.get("atc", {}), "atc", {"enabled", "rules", "context", "context_s", "dedupe_min", "expire_min",
-                                         "max_per_hour", "alert_level_incident"})
+                                         "max_per_hour", "alert_level_incident", "airport_names"})
     on = a.get("enabled", True)
     if not isinstance(on, bool):
         raise ConfigError("atc.enabled: true or false")
@@ -694,7 +695,10 @@ def _atc(data: dict, base: Path) -> dict:
     lv = a.get("alert_level_incident", [2, 3])
     if not isinstance(lv, list) or any(isinstance(x, bool) or x not in (1, 2, 3) for x in lv):
         raise ConfigError("atc.alert_level_incident: a list of alert levels (1, 2, 3), e.g. [2, 3] (the default); [] = pre-alerts only")
-    return dict(atc_enabled=on, atc_rules=rules, atc_context=int(nums["context"]), atc_context_s=float(nums["context_s"]),
+    names = a.get("airport_names", ["westchester", "west chester", "hpn", "white plains"])
+    if not isinstance(names, list) or not names or any(not isinstance(x, str) or not x.strip() for x in names):
+        raise ConfigError('atc.airport_names: a list of names, e.g. ["westchester", "west chester", "hpn", "white plains"]')
+    return dict(atc_enabled=on, atc_airport_names=tuple(x.lower().strip() for x in names), atc_rules=rules, atc_context=int(nums["context"]), atc_context_s=float(nums["context_s"]),
                 atc_dedupe_min=float(nums["dedupe_min"]), atc_expire_min=float(nums["expire_min"]),
                 atc_max_per_hour=int(nums["max_per_hour"]), atc_alert_level_incident=tuple(sorted(set(lv))))
 
