@@ -104,7 +104,7 @@ _NATURES: tuple[tuple[re.Pattern, str, bool], ...] = (          # (pattern, as s
     (re.compile(r"\bbird strike\b|\bstruck a bird\b|\bhit a bird\b"), "bird strike", True),
     (re.compile(r"\b(?:fuel emergency|low fuel|minimum fuel|min fuel)\b"), "low fuel", False),
     (re.compile(r"\b(?:de)?pressurization\b|\bcabin pressure\b"), "pressurization", True),
-    (re.compile(r"\bflaps? (?:failure|problem|issue|stuck)\b|\bno flaps\b"), "flap problem", True),
+    (re.compile(r"\bflaps? (?:failure|fail|problems?|issues?|stuck)\b|\bno flaps\b"), "flap problem", True),
     (re.compile(r"\bmedical (?:emergency )?on board\b|\bsick passenger\b|\bpassenger (?:unresponsive|unconscious)\b"), "medical on board", True),
     (re.compile(r"\belectrical (?:failure|problem|issue|fire)\b|\blost electrical\b"), "electrical problem", False),
     (re.compile(r"\b(?:blew|blown) (?:a )?tires?\b|\bflat tire\b"), "blown tire", False),
