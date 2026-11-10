@@ -530,7 +530,7 @@ def test_the_map_leaves_the_trains_layers_stations_to_it():
     assert 'const NOT_TRAINS = ["!", ["boolean", ["get", "_trains"], false]];' in js
     assert "window.TrainLayer && TrainLayer.KEY) && this.control.on(TrainLayer.KEY, false)" in js
     assert "if (l.trains_field) this.map.setFilter(id, trains ? NOT_TRAINS : null);" in js
-    assert "return { panel, load, maps, data: () => store.data, KEY };" in (STATIC / "trains.js").read_text()
+    assert "return { panel, load, maps, data: () => store.data, KEY," in (STATIC / "trains.js").read_text()   # (+ placeRow, onTrack: #371 tests)
 
 
 def test_the_county_fire_stations_leave_out_our_own_departments():
