@@ -421,8 +421,8 @@ def from_page(incident_type: str, category: str, text: str) -> tuple[str, str, s
         return "RESCUE", "", ""
     if incident_type in ("Smoke / odor", "Investigation"):
         return "INVEST", "", ""
-    if incident_type == "Mutual aid":
-        return "MA", "", ""
+    if incident_type == "Mutual aid":           # a standby / cover (#365: the county feed's Mutual Aid / Standby)
+        return "MA", "STANDBY" if has("standby", "stand by", "cover assignment", "coverage") else "", ""
     if incident_type == "Lockout":
         return "SERVICE", "", ""
     if incident_type == "Water condition":
