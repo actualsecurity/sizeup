@@ -108,7 +108,7 @@ let group = null;
 window.MapLayers = { addGroup: (g) => { group = g; } };
 const host = new El("div"), info = new El("div");
 info.hidden = true;
-const control = { map, host, info, on: () => true, panel: { hidden: true }, renderPanel() {}, close() {},
+const control = { map, host, info, on: (k) => k === "trains", panel: { hidden: true }, renderPanel() {}, close() {},
   showInfo(title, sub, lines, foot) {
     const body = new El("div"); body.className = "ml-lines";
     for (const l of lines) body.append(typeof l === "string" ? Object.assign(new El("div"), { textContent: l }) : l);

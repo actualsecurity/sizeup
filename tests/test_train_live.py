@@ -53,7 +53,7 @@ const map = {
   getStyle: () => ({ glyphs: "x", layers: [] }), on() {}, once() {}, isStyleLoaded: () => true, loaded: () => true,
   getContainer: () => ({ offsetParent: {} }), getCanvas: () => ({ style: {} }),
 };
-const control = { map, on: () => true, panel: { hidden: true }, renderPanel() {} };
+const control = { map, on: (k) => k === "trains", panel: { hidden: true }, renderPanel() {} };
 const flush = () => new Promise((r) => setImmediate(r));
 (async () => {
   const out = { frames: [] };
