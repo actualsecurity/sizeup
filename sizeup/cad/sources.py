@@ -26,9 +26,10 @@ sizeup/sources/runner.py (they come here as "source_event" / "source_health" thr
                towns. It joins when that incident is the only open one on that street in SAME_CALL_S, unless both
                types are known and differ, or both name units, none in common and the types differ (noted). Two or more open on that street: never joined,
                "possibly the same" on every one. The rest of "match" (same call, attach, the source's own) still holds
-    doubled    (#365) a house number heard doubled ("17, 17 Example Lane" read as "1717 Example Lane") against its half
-               on that street: joins under the same terms as "street only" (within SAME_CALL_S, types not different,
-               units not disjoint), and never while an incident at the number as written is open (then noted)
+    doubled    (#365) a house number a page's speech-to-text heard doubled ("17, 17 Example Lane" read as "1717 Example
+               Lane"; two digits a half at least, 11 is never 1) against its half on that street: joins under the same
+               terms as "street only" (within SAME_CALL_S, types not different, units not disjoint), never while an
+               incident at the number as written is open (then noted). A feed's typed number is never halved
     same call  a match must also be the same call (SAME_CALL_S): a page joins a feed's incident only when the feed's
                dispatch is within 5 min of it (the same type is not enough), and never one the feed has in service. A
                feed event never joins an incident made after it ended, nor one made more than SAME_CALL_S after its
@@ -53,8 +54,8 @@ sizeup/sources/runner.py (they come here as "source_event" / "source_health" thr
                it is still queued AND that same source made it (its report then moves onto the event); otherwise a note
     closed     the feed closed an event (its in-service or cleared time): a queued incident only that event made, and
                nobody touched, is dismissed; any other gets the timeline line. A page's own card still queued for that
-               call (untouched, the same place, a doubled number or street only, no other type, within SAME_CALL_S)
-               moves onto it and is dismissed (#365, _sweep_pages)
+               call moves onto it and is dismissed (#365, _sweepable): untouched, no "possibly the same" note on
+               another open incident, and its page matched again now takes this incident, for the same call
     stale      the station sends the ids still in each feed's snapshot ("source_seen"): an open report the feed no
                longer lists is noted once on its incident and flagged in Settings > Health
     address    a feed's location is shown (and said) as its street part (shown_location); the addresses a feed put on
@@ -362,33 +363,26 @@ def street_of(s: str) -> tuple[bool, tuple] | None:
 
 def halved(s: str) -> str | None:
     """A house number heard doubled ("17, 17 Example Lane" read as "1717 Example Lane"): the location with its half
-    ("17 Example Lane"); None when the number isn't an exact doubling (abab -> ab)."""
+    ("17 Example Lane"); None when the number isn't an exact doubling (abab -> ab) of at least two digits each (11 is
+    never 1). Only ever for a page's (speech-to-text) location, never a feed's typed one (same_place_halved)."""
     part = street_part(s)
     m = re.match(r"(\d+)(\s.*)$", part)
     if not m:
         return None
     n = m.group(1)
     h = len(n) // 2
-    if len(n) < 2 or len(n) % 2 or n[:h] != n[h:] or n[0] == "0":
+    if len(n) < 4 or len(n) % 2 or n[:h] != n[h:] or n[0] == "0":
         return None
     return n[:h] + m.group(2)
 
 
-def same_place_halved(a: str, b: str) -> bool:
-    """Not the same place as written, but the same once one side's doubled house number is halved (#365)."""
+def same_place_halved(a: str, b: str, heard_a: bool = True, heard_b: bool = True) -> bool:
+    """Not the same place as written, but the same once one side's doubled house number is halved (#365). heard_x: that
+    location came from a page (speech-to-text); a feed's typed number is never halved."""
     if same_place(a, b):
         return False
-    ha, hb = halved(a), halved(b)
+    ha, hb = halved(a) if heard_a else None, halved(b) if heard_b else None
     return bool((ha and same_place(ha, b)) or (hb and same_place(a, hb)))
-
-
-def _one_call_place(a: str, b: str) -> bool:
-    """Two locations one call may have had: the same place, a doubled house number and its half, or a street with no
-    number and a numbered address on it (#365)."""
-    if same_place(a, b) or same_place_halved(a, b):
-        return True
-    sa, sb = street_of(a), street_of(b)
-    return bool(sa and sb and sa[1] == sb[1] and sa[0] != sb[0] and _towns_agree(a, b))
 
 
 def _towns_agree(a: str, b: str) -> bool:
@@ -575,7 +569,8 @@ class Sources:
             common = units_match(units, on)
             theirs = [x for x in (inc["address"], inc["place_address"], inc["geo_label"]) if place_key(x) is not None]
             same = here and bool(theirs) and any(same_place(location, x) for x in theirs)
-            half = here and not same and any(same_place_halved(location, x) for x in theirs)
+            heard = inc["source"] == PAGE_SOURCE and not self._has_feed(inc["id"])   # its location is a page's
+            half = here and not same and any(same_place_halved(location, x, source == PAGING, heard) for x in theirs)
             if inc["id"] in taken:                           # this source has it already: another call there, noted
                 if not same:
                     continue
@@ -771,6 +766,8 @@ class Sources:
                 return into["incident_id"] if into else None
             prev = json.loads(rep["data"]) if rep else None
             if rep and rep["incident_id"]:
+                closing = data["closed"] and not (prev or {}).get("closed")
+                cards = self._sweepable(rep["incident_id"]) if closing else []   # while the call is still open here
                 self._put(ev.source, ev.event_id, rank, label, seen, data)
                 if rep["gone_at"] is not None:                # listed again
                     with self.store.tx() as db:
@@ -780,7 +777,7 @@ class Sources:
                 self._merge(ev.source, ev.event_id, rep["incident_id"], data, label)
                 if data["closed"] and not (prev or {}).get("closed"):
                     self._feed_closed(rep["incident_id"], ev.source, ev.event_id, label)
-                    self._sweep_pages(rep["incident_id"])
+                    self._sweep_pages(rep["incident_id"], cards)
                 return rep["incident_id"]
             at = min(data["times"].values()) if data["times"] else seen
             inc = self._alias_incident(ev.source, data)
@@ -1129,25 +1126,42 @@ class Sources:
                     n += 1
             return "possibly", n
 
-    def _sweep_pages(self, iid: int) -> int:
-        """A feed closed the event on this incident: a page's own card left queued for that call (#365: it never
-        joined) moves onto it and is dismissed, when it is untouched by anyone (_touched_page), was made within
-        SAME_CALL_S of it at that place (the same place, a doubled house number or street only) and its type isn't
-        another one. How many."""
+    def _sweepable(self, iid: int) -> list[dict]:
+        """A feed is closing the event on this incident (still open here): the page cards left queued for that call
+        (#365: they never joined). Only a page's own card, untouched by anyone (_touched_page), with no "possibly the
+        same" note on another open incident, whose page matched again now (match_all, its own card left out) takes
+        THIS incident as the one to attach to, for the same call (_page_same_call)."""
         inc = self.store.incident(iid)
-        mine = [x for x in (inc["address"], inc["place_address"], inc["geo_label"]) if place_key(x) is not None]
-        n = 0
+        out = []
         with self._lock:
             for p in self.store.q("SELECT * FROM incidents WHERE status = 'queued' AND source = ? AND id != ? AND "
-                                  "created_at BETWEEN ? AND ?", (PAGE_SOURCE, iid, inc["created_at"] - SAME_CALL_S,
-                                                                 inc["created_at"] + SAME_CALL_S)):
+                                  "created_at BETWEEN ? AND ?", (PAGE_SOURCE, iid, inc["created_at"] - MATCH_WINDOW_S,
+                                                                 inc["created_at"] + MATCH_WINDOW_S)):
                 rep = self.store.one("SELECT * FROM source_reports WHERE source = ? AND incident_id = ?", (PAGING, p["id"]))
                 if rep is None or self._has_feed(p["id"]) or self._touched_page(p["id"], p["source_ref"]):
                     continue
-                if p["type"] and inc["type"] and p["type"] != inc["type"]:
-                    continue
-                theirs = [x for x in (p["address"], p["place_address"], p["geo_label"]) if place_key(x) is not None]
-                if not any(_one_call_place(a, b) for a in mine for b in theirs):
+                others = self.store.q(f"SELECT * FROM incidents WHERE id NOT IN (?, ?) AND status IN "
+                                      f"({','.join('?' * len(OPEN))})", (iid, p["id"], *OPEN))
+                if any(self._noted(p["id"], o) for o in others):
+                    continue                                 # possibly another open call: a person decides
+                d = json.loads(rep["data"] or "{}")
+                typ = str((d.get("f") or {}).get("type") or p["type"] or "")
+                best, _ = self.match_all(PAGING, rep["first_seen"], d.get("location") or p["address"],
+                                         d.get("units") or [], typ, exclude=p["id"])
+                if best is not None and best["id"] == iid and self._page_same_call(best, rep["first_seen"], typ):
+                    out.append(p)
+        return out
+
+    def _sweep_pages(self, iid: int, cards: list[dict]) -> int:
+        """The feed closed the event on this incident: each card _sweepable() found before the close moves onto it and
+        is dismissed, when still queued and untouched. How many."""
+        inc = self.store.incident(iid)
+        n = 0
+        with self._lock:
+            for p in cards:
+                p = self.store.incident(p["id"])
+                rep = self.store.one("SELECT * FROM source_reports WHERE source = ? AND incident_id = ?", (PAGING, p["id"]))
+                if p["status"] != "queued" or rep is None or self._touched_page(p["id"], p["source_ref"]):
                     continue
                 with self.store.tx() as db:
                     db.execute("UPDATE source_reports SET incident_id = ? WHERE source = ? AND ref = ?", (iid, PAGING, rep["ref"]))

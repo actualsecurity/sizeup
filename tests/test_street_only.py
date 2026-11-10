@@ -428,7 +428,9 @@ def test_halved():
     assert halved("1717 Example Lane") == "17 Example Lane" and halved("4545 EXAMPLE LN") == "45 EXAMPLE LN"
     assert halved("1212 Example Ln Apt 3") == "12 Example Ln"
     assert halved("1718 Example Lane") is None and halved("17 Example Lane") is None and halved("0101 Example Ln") is None
+    assert halved("11 Example Ave") is None and halved("22 Example Ave") is None             # a half of one digit: never
     assert same_place_halved("1717 Example Lane", "17 EXAMPLE LN") and same_place_halved("17 EXAMPLE LN", "1717 Example Lane")
+    assert not same_place_halved("1717 EXAMPLE LN", "17 Example Lane", heard_a=False)        # a feed's typed number
     assert not same_place_halved("1717 Example Lane", "17 SAMPLE LN") and not same_place_halved("17 Example Ln", "17 Example Ln")
 
 
@@ -490,3 +492,45 @@ def test_an_untouched_page_card_left_queued_is_swept_when_the_feed_closes_the_ca
     assert rig.cad.store.incident(p)["status"] == "dismissed"
     assert rig.cad.store.one("SELECT incident_id FROM source_reports WHERE source = 'paging' AND ref = 'old'")["incident_id"] == a
     assert rig.cad.store.incident(worked)["status"] == "queued"                  # a card a person worked: left alone
+
+
+def page_at(where: str) -> str:
+    return (f"Port Chester Fire Department, Engine 60, respond to {where}, a residential alarm. Time out 1432.")
+
+
+@pytest.mark.parametrize("feed,heard", [("11 EXAMPLE AVE", "1 Example Avenue"), ("1010 EXAMPLE AVE", "10 Example Avenue")])
+def test_a_feeds_typed_number_is_never_halved(tmp_path, feed, heard):
+    rig = Rig(tmp_path)
+    a = feed_event(rig, location=feed, units=("E60",), typ="ALARM/RESD")
+    rig.at(30)
+    assert rig.page("p1", page_at(heard))["id"] != a
+
+
+def test_a_page_card_at_10_never_takes_the_feeds_1010(tmp_path):
+    rig = Rig(tmp_path)
+    p = rig.page("p1", page_at("10 Example Avenue"))["id"]
+    rig.at(40)
+    a = feed_event(rig, location="1010 EXAMPLE AVE", units=("E60",), typ="ALARM/RESD", dt=20)
+    assert a != p and rig.cad.store.incident(p)["address"].lower().startswith("10 example av")
+
+
+def test_the_doubled_page_still_joins_after_the_halving_limits(tmp_path):
+    rig = Rig(tmp_path)
+    a = feed_event(rig, location="17 EXAMPLE LN", units=("E60",), typ="ALARM/RESD")
+    rig.at(30)
+    assert rig.page("p1", DOUBLED)["id"] == a
+
+
+def test_a_street_only_card_stays_when_one_of_two_alarms_on_the_street_closes(tmp_path):
+    rig = Rig(tmp_path)
+    a = feed_event(rig, "A1", "9 EXAMPLE TER", ("E62",), typ="ALARM/RESD")
+    b = feed_event(rig, "A2", "40 EXAMPLE TER", ("E63",), typ="ALARM/RESD", dt=20)
+    rig.cad.store.accept(a, "Lt. Test")
+    rig.at(60)
+    p = rig.page("p1", PAGE_NO_UNITS)["id"]
+    assert p not in (a, b) and possibly(rig, p, a) and possibly(rig, p, b)
+    rig.at(600)
+    rig.feed.change("A1", times={"in_service": T0 + 590}, closed=True)
+    rig.poll()
+    assert rig.cad.store.incident(p)["status"] == "queued"
+    assert rig.cad.store.one("SELECT incident_id FROM source_reports WHERE source = 'paging'")["incident_id"] == p
