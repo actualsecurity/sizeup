@@ -1120,7 +1120,9 @@ AB_BETA = 0.2                    # ... and the speed
 AB_FEED = 0.5                    # the feed's own speed's share of the speed
 STOP_MPS = 0.5                   # slower than this (about 1 mph): stopped, held where it is
 STOP_JITTER_M = 150.0            # a stopped train's fix less than this ahead (or any behind): GPS jitter, it stays put
-TT_HORIZON_S = 10.0              # a GPS fix is carried on at most this long past its time (about two fast polls)
+TT_HORIZON_S = 30.0              # a GPS fix is carried on at most this long past its time. TrainTime's fixes are
+                                 # 3 to 16 s old when read (measured, #375) and read every 5 s: 10 s ran out before
+                                 # the next one came, and the train stood still for seconds between fixes
 
 
 def along_filter(last: dict | None, s: float, d: int, t: float, v_feed: float | None) -> tuple[float, float]:

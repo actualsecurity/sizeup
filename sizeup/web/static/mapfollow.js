@@ -5,8 +5,9 @@
 //                        (cadmap.js: no refitting meanwhile; the map's other follower lets go), pan(lonlat) keeps it
 //                        centred (eased over PAN_MS, at most every PAN_MS, only once it is a pixel off, never over a
 //                        zoom: a moveend at most 4 times a second), chip(text, tip, flags) the "Following ..." chip at
-//                        the foot of the map with ✕. A drag (not a pinch), Recenter (sizeup:recenter), ✕ or stop()
-//                        lets go; zooming is round the centre (the mark) meanwhile. takeMap(map): a pick or a focus
+//                        the foot of the map with ✕. Any pan of the viewer's (a mouse or one-finger drag, the
+//                        arrow keys, a sideways trackpad swipe), Recenter (sizeup:recenter), ✕ or stop() lets go (a
+//                        pinch or the wheel zooms and keeps following); zooming is round the centre (the mark) meanwhile. takeMap(map): a pick or a focus
 //                        (centred and ringed, not followed) lets every follower on that map go.
 //   MapFollow.Lights     one per layer: the mark picked from a list or a chip (pick: ringed for HIGHLIGHT_MS once
 //                        centred) and the ones whose row or card is hovered (hover: a wider ring).
@@ -44,10 +45,31 @@ window.MapFollow = (() => {
       this.id = "";
       this.panAt = 0;
       this.chipEl = null;
-      map.on("dragstart", (e) => {             // a pinch is two fingers: a zoom round the mark, still following
-        const t = e && e.originalEvent && e.originalEvent.touches;
-        if (!(t && t.length > 1) && !map.isZooming()) this.stop();
+      // Any pan of the viewer's lets go at once; a zoom (a pinch, the wheel, +/-) keeps following round the mark (#375).
+      // MapLibre's own events carry the viewer's input as originalEvent; our eases carry none. While a finger or the
+      // mouse is down on the map no pan is eased (grab): an easeTo resets MapLibre's gestures, so a press-and-hold
+      // drag never got to its dragstart and the map stayed on the mark.
+      this.grab = false;
+      map.on("dragstart", (e) => { if (userPan(e && e.originalEvent)) this.stop(); });
+      map.on("movestart", (e) => {             // the arrow keys pan (+ and - zoom)
+        const o = e && e.originalEvent;
+        if (o && o.type === "keydown" && /^Arrow/.test(o.key || "")) this.stop();
       });
+      let box = null;
+      try { box = map.getCanvasContainer ? map.getCanvasContainer() : null; } catch (_) { /* a stand-in map */ }
+      if (box && box.addEventListener) {
+        const down = () => { this.grab = true; };
+        const up = (ev) => { if (!(ev && ev.touches && ev.touches.length)) this.grab = false; };
+        box.addEventListener("mousedown", down);
+        box.addEventListener("touchstart", down, { passive: true });
+        for (const [k, o] of [["mouseup", false], ["touchend", { passive: true }], ["touchcancel", { passive: true }], ["blur", false]]) {
+          try { window.addEventListener(k, up, o); } catch (_) { /* no window */ }
+        }
+        // a sideways two-finger swipe on a trackpad (the wheel's x): a pan to the viewer; MapLibre zooms on the wheel's y
+        box.addEventListener("wheel", (ev) => {
+          if (!ev.ctrlKey && Math.abs(ev.deltaX || 0) > 2 * Math.abs(ev.deltaY || 0)) this.stop();
+        }, { passive: true });
+      }
       map.on("sizeup:recenter", () => this.stop());
       map.on("sizeup:follow", (e) => { if (e && e.follower && e.follower !== this) this.stop(); });   // one at a time
       map.on("sizeup:takemap", () => this.stop());   // a pick or a focus (centred, ringed) takes the map from any follower
@@ -57,7 +79,7 @@ window.MapFollow = (() => {
       if (!id) return;
       this.id = id;
       for (const z of [this.map.scrollZoom, this.map.touchZoomRotate]) {     // zoom round the centre (the mark) meanwhile
-        try { if (z.isEnabled()) z.enable({ around: "center" }); } catch (_) { /* an older MapLibre */ }
+        try { if (z.isEnabled()) { if (z.disable) z.disable(); z.enable({ around: "center" }); } } catch (_) { /* an older MapLibre */ }
       }
       this.map.fire("sizeup:follow", { follower: this });
       if (at && typeof at.lon === "number" && typeof at.lat === "number") {
@@ -69,7 +91,7 @@ window.MapFollow = (() => {
       if (!this.id) return;
       this.id = "";
       for (const z of [this.map.scrollZoom, this.map.touchZoomRotate]) {
-        try { if (z.isEnabled()) z.enable(); } catch (_) { /* */ }
+        try { if (z.isEnabled()) { if (z.disable) z.disable(); z.enable(); } } catch (_) { /* */ }
       }
       if (this.chipEl) this.chipEl.hidden = true;
       if (this.opts.onStop) this.opts.onStop();
@@ -79,6 +101,7 @@ window.MapFollow = (() => {
       if (!this.id || !lonlat) return false;
       const now = performance.now();
       const ours = now < (this.panAt || 0) + PAN_MS + 60;                    // moving: our last pan, finishing
+      if (this.grab) return false;                                           // the viewer's finger or mouse is down
       if (!(now - (this.panAt || 0) >= PAN_MS && !this.map.isZooming() && (!this.map.isMoving() || ours))) return false;
       const [lon, lat] = lonlat, p = this.map.project([lon, lat]), c = this.map.project(this.map.getCenter());
       if (Math.hypot(p.x - c.x, p.y - c.y) < 1) return false;
@@ -142,6 +165,13 @@ window.MapFollow = (() => {
   // the first of these maps on screen (each {map}: a MapLibre map)
   function shownMap(maps) {
     return [...maps].find((m) => { try { return !!m.map.getContainer().offsetParent; } catch (_) { return false; } }) || null;
+  }
+
+  // a drag of the viewer's: a mouse, or one finger (two are a pinch: a zoom round the mark)
+  function userPan(o) {
+    if (!o) return false;
+    const t = o.touches;
+    return !(t && t.length > 1);
   }
 
   const takeMap = (map) => { try { map.fire("sizeup:takemap"); } catch (_) { /* */ } };

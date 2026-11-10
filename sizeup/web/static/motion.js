@@ -13,8 +13,8 @@
 //                 re-acquired target and jumps.
 //   trains        Motion.rail (below): a train moves in one number, s, its distance along the line on its own
 //                 direction's track, on the hub's run profile (profile_s, ported 1:1 from sizeup/trains.py) and
-//                 never past the hub's bounds; Motion.railFollow replaces the eased lon/lat offset with a
-//                 correction along the track (never across it, never backwards).
+//                 never past the hub's bounds; Motion.railFollow replaces the eased lon/lat offset with a speed
+//                 along the track that closes on the prediction (never across it, never backwards, no steps).
 //
 // Nothing fake: the prediction is only ever between a real fix and the next one, at most horizonS after its fix; a
 // fix older than the layer's stale age is drawn where it really was (eased back there), never moved on.
@@ -168,7 +168,7 @@ window.Motion = (() => {
     let lim = typeof fix.hold === "number" ? fix.hold : s0;
     if (typeof fix.stop === "number" && (lim - fix.stop) * d > 0 && (fix.stop - s0) * d >= 0) lim = fix.stop;
     if ((lim - s0) * d < 0) lim = s0;
-    const out = { s: s0, v: 0, d, train: fix.train, lim, moving: false };
+    const out = { s: s0, v: 0, d, train: fix.train, lim, moving: false, est: fix.fixAt == null && fix.mode === "estimated" };
     if (fix.mode === "stopped") {
       // standing at its stop: may stay drawn up to the stop's mark (where it was carried before it stopped), not moved
       if (typeof fix.stop === "number" && (fix.stop - s0) * d >= 0 && (fix.stop - s0) * d <= STOP_ZONE_M) out.lim = fix.stop;
@@ -196,41 +196,56 @@ window.Motion = (() => {
   // without a prediction (the feed stale): where the hub has it, its fix
   const railRest = (fix) => ({ ...rail(fix, 0), s: fix.s, v: 0, moving: false });
 
-  // Corrections along the track (Tracker's follow), each frame from where it was drawn last (it.shown):
+  // Corrections along the track (Tracker's follow), each frame from where it was drawn last (it.shown) at the speed it
+  // was drawn at (it.u), so the train never steps, stops or lunges between fixes (#375):
   //   jump         drawn at the new position at once: nothing drawn yet, more than JUMP_M away, the other way,
-  //                or another train number (a turn-back at Stamford).
+  //                or another train number (a turn-back at Stamford); the first real fix of a train drawn on our
+  //                estimate (the estimate was a guess: no chase across it).
   //   stale        frozen where it is: nothing moves on old data.
   //   past lim     drawn beyond where this fix allows (its hold point, or its stop): brought back along the track.
-  //   ahead        the prediction is behind what is drawn: held there (never slid back) until the prediction meets it.
-  //   behind       a new fix ahead of what is drawn: caught up along the track in about CATCH_S, closing at most
-  //                CATCH_MAX_MPS faster than the train itself, then on with the prediction.
-  const JUMP_M = 2000, CATCH_S = 1.75, CATCH_MAX_MPS = 400, CATCH_MIN_MPS = 5, SNUG_M = 3;
-  const chaseAt = (gap) => Math.min(CATCH_MAX_MPS, Math.max(CATCH_MIN_MPS, gap / CATCH_S));
+  //   otherwise    on at a speed that closes on the prediction: the train's own speed plus the gap over TAU_S (less
+  //                when drawn ahead of it, but while the train runs never under SLOW_SHARE of its speed: slowed,
+  //                not stopped; held, it comes to rest; never backwards), the drawn speed easing onto that over
+  //                RAMP_S (no step in speed either), at most CATCH_MAX_MPS faster than the train; never past lim.
+  // (Measured on the live shape, #375: fixes reach the page 5 to 16 s old every 5 s, with ±10 m of GPS noise; the
+  // old catch-up in CATCH_S ran at up to 140 m/s after each stall.)
+  const JUMP_M = 2000, TAU_S = 3, RAMP_S = 1, CATCH_MAX_MPS = 30, SLOW_SHARE = 0.3, CATCH_S = 1.75, CATCH_MIN_MPS = 5, SNUG_M = 3, FRAME_MAX_S = 1;
+  const chaseAt = (gap) => Math.min(400, Math.max(CATCH_MIN_MPS, gap / CATCH_S));
   function railFollow(it, tg, now) {
-    const sh = it.shown, dt = it.lastAt ? Math.max(0, (now - it.lastAt) / 1000) : 0;
+    const sh = it.shown, dt = it.lastAt ? Math.min(FRAME_MAX_S, Math.max(0, (now - it.lastAt) / 1000)) : 0;
     it.lastAt = now;
     const d = tg.d;
-    if (!sh || sh.d !== d || sh.train !== tg.train || !(Math.abs(tg.s - sh.s) <= JUMP_M)) { it.chase = 0; return tg; }
-    if (it.stale) { it.chase = 0; return { ...sh, v: 0, moving: false }; }
+    if (!sh || sh.d !== d || sh.train !== tg.train || !(Math.abs(tg.s - sh.s) <= JUMP_M) || (sh.est && !tg.est)) {
+      it.chase = 0; it.u = Math.max(0, tg.v || 0); return tg;
+    }
+    if (it.stale) { it.chase = 0; it.u = 0; return { ...sh, v: 0, moving: false }; }
     const over = (sh.s - tg.lim) * d;
     if (over > 0.5) {                                                  // beyond this fix's limit: back to it
-      if (it.fresh || !it.chase) it.chase = chaseAt(over);
-      const step = it.chase * dt;
-      if (step >= over) { it.chase = 0; return { ...tg, s: tg.lim, v: 0 }; }
+      it.u = 0;
+      if (it.fresh || !it.back) it.back = chaseAt(over);
+      it.chase = 1;
+      const step = it.back * dt;
+      if (step >= over) { it.chase = 0; it.back = 0; return { ...tg, s: tg.lim, v: 0 }; }
       return { ...tg, s: sh.s - d * step, v: 0 };
     }
-    const gap = (tg.s - sh.s) * d;
-    if (gap <= 0) { it.chase = 0; return { ...tg, s: sh.s, v: 0 }; }    // wait for the prediction to meet it
-    if (it.fresh && gap > SNUG_M) it.chase = chaseAt(gap);
-    if (!it.chase) return tg;
-    const step = (Math.max(0, tg.v || 0) + it.chase) * dt;
-    if (step >= gap) { it.chase = 0; return tg; }
-    return { ...tg, s: sh.s + d * step };
+    it.back = 0;
+    const gap = (tg.s - sh.s) * d, v = Math.max(0, tg.v || 0);
+    const want = Math.max(tg.moving ? SLOW_SHARE * v : 0, Math.min(v + CATCH_MAX_MPS, v + gap / TAU_S));
+    let u = typeof it.u === "number" ? it.u : v;
+    u += (want - u) * Math.min(1, dt / RAMP_S);
+    if (u < 0.01 && want === 0) u = 0;
+    let s = sh.s + d * u * dt;
+    const room = (tg.lim - sh.s) * d;
+    if (u * dt >= room) { s = tg.lim; u = 0; }                       // never past this fix's limit
+    if (!v && Math.abs(gap) <= 0.05) { s = tg.s; u = 0; }             // settled on a held train
+    it.u = u;
+    it.chase = u > 0.01 || gap > SNUG_M ? 1 : 0;                       // busy: still moving, or behind
+    return { ...tg, s, v: u };
   }
   // the trains' tracker: no horizon of its own (rail stops at `until`), stale with the feed (staleS: the hub's)
   const railTracker = (opts) => new Tracker(rail, { horizonS: Infinity, staleS: 60, ...opts, rest: railRest, follow: railFollow });
 
   return { tracker: (predict, opts) => new Tracker(predict, opts), arc, metres, wrap180,
            profileS, profileT, rail, railFollow, railTracker,
-           RAIL: { JUMP_M, CATCH_S, CATCH_MAX_MPS, CATCH_MIN_MPS, SNUG_M, STOP_ZONE_M } };
+           RAIL: { JUMP_M, TAU_S, RAMP_S, CATCH_MAX_MPS, SLOW_SHARE, CATCH_S, CATCH_MIN_MPS, SNUG_M, STOP_ZONE_M } };
 })();

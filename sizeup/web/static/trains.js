@@ -22,13 +22,17 @@
 //                the aircraft's tracker with the trains' predictor): in s, its distance along the line, on the
 //                hub's run profile (profile_s, ported 1:1), never past hold_s (its next known reporting point),
 //                never past its next stop, never backwards, never after predict_until; then it is held. A train
-//                stopped at a station stays there until the hub says it left. A new report is caught up along
-//                the track (never across it); one behind what is drawn holds the train until the prediction
-//                meets it; a big jump, the other way or another train number is drawn at once. A feed older
+//                stopped at a station stays there until the hub says it left. The drawn train keeps a speed of
+//                its own that closes on the prediction along the track (never across it, never backwards): a new
+//                report changes its pace, not its position (#375); a big jump, the other way, another train
+//                number or the first real report of an estimated train is drawn at once. A feed older
 //                than the hub's stale_s (or one the hub calls stale): frozen and drawn faded. Redrawn about 10
 //                times a second (ANIMATE_MS) only while one moves, a map has the layer on and the page is
 //                visible: one setData for the cars and one for the labels a frame, none when nothing changed.
 //                The click box says "predicted" while the train is drawn ahead of the MTA's report.
+//   Follow       a click on a train also follows it (mapfollow.js, as aircraft and rigs): centred and kept centred as
+//                it glides, a "Following 1595 · NH west · 67 mph · 3 s ago" chip with ✕; its box stays live while
+//                open (each new fix, the milepost where it is drawn, the fix's age once a second) (#375).
 //   Panel        TrainLayer.panel(inc, host) (cadmap.js, under the event's map): for an event within 150 m of
 //                the tracks or a station, the next trains each way in the next 15 minutes at the nearest
 //                station (or the event's point on the tracks): minutes away, stops or passes, delay, track;
@@ -56,6 +60,10 @@ window.TrainLayer = (() => {
   const CLICKABLE = ["tr-train", "tr-car", "tr-cab", "tr-gap", "tr-station", "tr-line"];
   const TRAIN_HIT = ["tr-train", "tr-car", "tr-cab", "tr-gap"];
   const HALO = "#15181B";
+  const CATENARY_LINE = "\u26A1 12.5 kV catenary + 3rd rail \u00B7 treat as live";   // the hub's full text in the ⓘ (#375)
+  const MILE_M = 1609.344;
+  const AGE_MS = 1000;                       // an open train box and the follow chip: their ages once a second
+  const FOLLOW_ZOOM = 15;                    // a train followed: centred at least this close (its cars to scale)
 
   function h(tag, cls, text) {
     const n = document.createElement(tag);
@@ -329,16 +337,24 @@ window.TrainLayer = (() => {
   // ---- MTA TrainTime in the train's box (#362): one data line, the cars as load bars (details on hover) ------------
   const LOADS = { EMPTY: [1, "Empty"], MANY_SEATS: [2, "Many seats"], FEW_SEATS: [3, "Few seats"], SRO: [4, "Standing"], NO_DATA: [0, ""] };
   const routes = new Map();                   // route key -> its line's runs (the hub's, clipped to our area)
-  function headline(t) {                      // "NH east · 6 cars (M8) · 11 min late · MP 25.4 · next Port Chester trk 2"
+  // the milepost where the train is drawn now (w: trains.js's drawn {s}): the hub's, carried along the line with it
+  function mpAt(t, w) {
+    if (typeof t.mp !== "number") return null;
+    const ds = w && typeof w.s === "number" && typeof t.s === "number" && t.pos_src === "traintime" ? w.s - t.s : 0;
+    return t.mp + ds / MILE_M;                  // mileposts count from Grand Central, as s does toward New Haven
+  }
+  const dirWord = (t) => (t.d > 0 ? "east" : t.d < 0 ? "west" : "");
+  const mph = (t) => (t.tt && typeof t.tt.speed_mph === "number" && t.pos_src === "traintime" ? `${Math.round(t.tt.speed_mph)} mph` : "");
+  function headline(t, w) {                   // "NH east · 6 cars (M8) · 11 min late · MP 25.4 · next Port Chester trk 2"
     const tt = t.tt || {};
-    const dir = t.d > 0 ? "east" : t.d < 0 ? "west" : "";
+    const dir = dirWord(t), mp = mpAt(t, w);
     const fleet = tt.fleet ? (/DIESEL/.test(tt.fleet) ? "diesel" : tt.fleet) : "";
     const n = tt.cars, sched = tt.cars_sched && tt.cars_sched !== n ? `/${tt.cars_sched}` : "";
     const cars = n ? `${n}${sched} car${n === 1 && !sched ? "" : "s"}${fleet ? ` (${fleet})` : ""}` : "";
     const nx = tt.next;
     const trk = nx && nx.track ? ` trk\u00a0${nx.track}${nx.posted ? "" : " planned"}` : "";
     return [[tt.branch, dir].filter(Boolean).join(" "), cars, late(tt.late_s != null ? tt.late_s : t.delay_s),
-            typeof t.mp === "number" ? `MP\u00a0${t.mp.toFixed(1)}` : "", nx ? `next ${nx.name}${trk}` : t.next_stop ? `next ${t.next_stop}` : ""]
+            mp !== null ? `MP\u00a0${mp.toFixed(1)}` : "", nx ? `next ${nx.name}${trk}` : t.next_stop ? `next ${t.next_stop}` : ""]
       .filter(Boolean).join(" · ");
   }
   function carBars(tt) {
@@ -358,6 +374,31 @@ window.TrainLayer = (() => {
     return row;
   }
 
+  // how old the train's position is now: its GPS fix's time (TrainTime) or the feed's, on the hub's clock, plus the time
+  // since the answer came ("3 s ago")
+  function fixAge(t, d) {
+    const at = typeof t.fix_at === "number" ? t.fix_at : d.at;
+    if (typeof at !== "number" || typeof d.now !== "number") return "";
+    const ms = (d.now - at) * 1000 + Math.max(0, Date.now() - store.at);
+    return `${window.MapFollow ? MapFollow.ago(ms) : `${Math.max(0, Math.round(ms / 1000))} s`} ago`;
+  }
+  // the follow chip: "Following 1595 · NH west · 67 mph · 3 s ago"
+  const followText = (t, d) => [`Following ${t.train}`, [t.tt && t.tt.branch, dirWord(t)].filter(Boolean).join(" "), mph(t), fixAge(t, d)]
+    .filter(Boolean).join(" \u00b7 ");
+  // the catenary on one line, its full text on hover (and in the box's ⓘ)
+  function catenaryLine(d) {
+    const n = h("div", "tr-cat", CATENARY_LINE);
+    if (d && d.catenary) n.title = d.catenary;
+    return n;
+  }
+  function rowEl(r) {
+    const n = r.el ? r.el() : h("div", r.cls || "", r.text);
+    if (r.k === "cat") n.className = "tr-cat";
+    if (r.title) n.title = r.title;
+    return n;
+  }
+  const rowSig = (r) => `${r.k}\u0001${r.sig !== undefined ? r.sig : `${r.text}\u0002${r.title || ""}\u0002${r.cls || ""}`}`;
+
   class TrainMap {
     constructor(control) {
       this.control = control;
@@ -366,8 +407,16 @@ window.TrainLayer = (() => {
       maps.add(this);
       store.subs.add(() => this.sync());
       this.map.on("click", (e) => this.clicked(e));
+      this.live = null;                       // the open train box, kept up to date (#375): {id, body, foot, sigs}
+      this.ticker = null;
+      this.at = new Map();                    // id -> [lon, lat]: each train's middle as last drawn
+      // following a train (mapfollow.js, as aircraft and rigs): a click follows it; any pan of the viewer's, Recenter or
+      // ✕ lets go
+      this.fol = window.MapFollow && control.host ? new MapFollow.Follower(this.map, control.host, {
+        cls: "ac-follow", textCls: "ac-follow-t", icon: "gis-train", onStop: () => this.ticking() }) : null;
       if (this.isOn()) kick();
     }
+    get following() { return (this.fol && this.fol.id) || ""; }
     isOn() { return this.control.on(KEY, false); }
     keys() { return [[KEY, false]]; }
     refresh() { this.sync(); kick(); }
@@ -393,10 +442,11 @@ window.TrainLayer = (() => {
       const vis = { visibility: "none" };
       map.addLayer({ id: "tr-line", type: "line", source: SRC_LINE, layout: { ...vis, "line-cap": "round", "line-join": "round" },
                      paint: { "line-color": line, "line-width": ["interpolate", ["linear"], ["zoom"], 10, 1.5, 15, 3], "line-opacity": 0.8 } }, before);
-      // the clicked train's own route (MTA TrainTime's line, #362) while its box is open
-      map.addLayer({ id: "tr-route", type: "line", source: SRC_ROUTE, layout: { ...vis, "line-cap": "round", "line-join": "round" },
-                     paint: { "line-color": token("--info", "#5AA9E6"), "line-width": ["interpolate", ["linear"], ["zoom"], 10, 2.5, 15, 5],
-                              "line-opacity": 0.85 } }, before);
+      // the clicked train's own route (MTA TrainTime's line, #362) while its box is open: thin and dashed, a route and
+      // not a track (TrainTime's line is a few metres off the rails; the tracks themselves are #371)
+      map.addLayer({ id: "tr-route", type: "line", source: SRC_ROUTE, layout: { ...vis, "line-cap": "butt", "line-join": "round" },
+                     paint: { "line-color": token("--info", "#5AA9E6"), "line-width": ["interpolate", ["linear"], ["zoom"], 10, 1, 15, 1.5],
+                              "line-dasharray": [3, 3], "line-opacity": 0.7 } }, before);
       map.addLayer({ id: "tr-station", type: "circle", source: SRC_ST, layout: vis,
                      paint: { "circle-radius": ["interpolate", ["linear"], ["zoom"], 10, 3, 15, 6], "circle-color": line,
                               "circle-stroke-color": HALO, "circle-stroke-width": 1.5 } }, before);
@@ -464,7 +514,8 @@ window.TrainLayer = (() => {
         }
         if (d.trains !== this.trains) { this.trains = d.trains; this.sig = ""; }   // a new answer: draw it
         this.draw(true, Date.now());
-      }
+        this.tick();                            // the open box and the follow chip: this answer's facts
+      } else if (!on && this.following) this.fol.stop();
       this.panelChanged();
     }
     // The trains where motion.js has them now (each answer, then every ANIMATE_MS while one moves): each train's
@@ -490,6 +541,7 @@ window.TrainLayer = (() => {
       if (sig === this.sig) return;                                          // nothing moved: no setData
       this.sig = sig;
       const cars = [];
+      this.at = new Map();
       this.map.getSource(SRC_TR).setData(fc((d.trains || []).map((x) => {
         const w = drawn.get(x.id), t = { ...x, s: w.s, ds: typeof x.s === "number" ? w.s - x.s : 0, stale: w.stale };
         const on = onTrack(t, this.line, this.lanes);
@@ -497,10 +549,12 @@ window.TrainLayer = (() => {
         const half = on ? (z) => trackHalf(t, z) : (z) => iconHalf(t, z === SCALE_TO ? sizeAt(SCALE_TO) : MIN_SIZE);
         const [anchor, off_lo] = labelPlace(t.bearing, ...half(SCALE_FROM)), off_hi = labelPlace(t.bearing, ...half(SCALE_TO))[1];
         const [lon, lat] = on ? on.mid : [t.lon, t.lat];
+        this.at.set(x.id, [lon, lat]);
         return pt(lon, lat, { id: t.id, train: t.train, towards: towards(t), bearing: t.bearing || 0, estimated: !!t.estimated,
                               stale: w.stale, onTrack: !!on, icon: on ? "" : ensureIcon(this.map, t), anchor, off_lo, off_hi });
       })));
       this.map.getSource(SRC_CARS).setData(fc(cars));
+      if (this.following && this.at.has(this.following)) this.fol.pan(this.at.get(this.following));   // kept centred
     }
     panelChanged() { if (!this.control.panel.hidden) this.control.renderPanel(); }
     // where the train is drawn (#278: a short phrase on the box; the method in its "i"): reported (the MTA's time for
@@ -512,7 +566,7 @@ window.TrainLayer = (() => {
       const at = t.fix_at ? `${t.fix_age_unknown ? "by " : ""}${hm(t.fix_at, true)}` : "";
       let say, why;
       if (!t.estimated) {
-        say = w.ahead ? `Predicted from ${at}` : `Reported ${at}${t.mode === "stopped" ? " · stopped" : ""}`;
+        say = w.ahead ? (at ? `Predicted from ${at}` : "Predicted") : `Reported ${at}${t.mode === "stopped" ? " · stopped" : ""}`;
         why = w.ahead ? `Predicted: on its run since the MTA's report, ${upTo}` : "Reported by the MTA";
       } else {
         say = t.mode === "stopped" ? "Estimated · at station" : "Estimated";
@@ -520,7 +574,10 @@ window.TrainLayer = (() => {
           : "Estimated: on its run between its stations, by the MTA's times";
       }
       if (w.stale) why += ". Feed out of date: held where it was";
-      return { say: say.trim(), why, stale: w.stale ? `Stale${d.at ? ` · ${hm(d.at, true)}` : ""}` : "" };
+      // the short word for the TrainTime box (its age beside it, live)
+      const word = t.estimated ? (t.mode === "stopped" ? "Estimated · at station" : "Estimated") : w.ahead ? "Predicted"
+        : t.mode === "stopped" ? "Stopped" : "Reported";
+      return { say: say.replace(/\s+/g, " ").trim(), word, why, stale: w.stale ? `Stale${d.at ? ` · ${hm(d.at, true)}` : ""}` : "" };
     }
 
     clicked(e) {
@@ -530,7 +587,8 @@ window.TrainLayer = (() => {
       if (!hits.length) return;
       const f = hits.find((x) => TRAIN_HIT.includes(x.layer.id)) || hits.find((x) => x.layer.id === "tr-station") || hits[0];
       e.originalEvent && e.originalEvent.stopPropagation();
-      setTimeout(() => this.show(f), 0);
+      const train = TRAIN_HIT.includes(f.layer.id) ? f.properties.id : "";
+      setTimeout(() => { if (train) this.follow(train); this.show(f); }, 0);   // a train: followed, as an aircraft is
     }
 
     show(f) {
@@ -539,65 +597,119 @@ window.TrainLayer = (() => {
       const credit = `${d.label || "MTA"}. ${d.disclaimer || "Times may not be real time"}.`;
       const icon = window.Icon ? Icon("gis-train") : null;
       this.control.close();
-      if (TRAIN_HIT.includes(f.layer.id)) {
-        const t = (d.trains || []).find((x) => x.id === f.properties.id);
-        if (!t) return;
-        const lines = [];
-        const pos = this.where(t, d);
-        if (pos.stale) lines.push(h("div", "warn", pos.stale));      // #278: up top, in the warning colour
-        if (t.tt) return this.showTT(t, d, pos, icon, credit);       // MTA TrainTime's facts (#362)
-        lines.push([t.dir_label, t.next_stop ? `Next ${t.next_stop}${t.next_time ? ` ${hm(t.next_time)}` : ""}` : "", t.track ? `Trk ${t.track}` : ""]
-          .filter(Boolean).join(" · "));
-        const said = (t.status || "").toLowerCase();         // the MTA's word, unless the delay already says it
-        const status = [late(t.delay_s), said && said !== "on-time" && !(said === "late" && t.delay_s > 0) ? t.status : "",
-                        pos.say, t.cars ? `${t.cars} car${t.cars === 1 ? "" : "s"}` : ""].filter(Boolean).join(" · ");
-        if (status) lines.push(status);
-        lines.push(d.catenary);
-        const tip = [pos.why, t.cars ? "Cars: from the MTA" : `Cars: not given by the MTA (drawn as ${LOOK_CARS})`, credit].join("\n");
-        this.control.showInfo(`Train ${t.train}`, `${t.line ? `${t.line} Line` : "Metro-North"} → ${t.headsign}`, lines, foot, "", icon, tip);
-        return;
-      }
+      if (TRAIN_HIT.includes(f.layer.id)) { this.showTrain(f.properties.id); return; }
       if (f.layer.id === "tr-station") {
         const s = (d.stations || []).find((x) => x.id === f.properties.id);
         const tto = d.traintime && d.traintime.state !== "off";
         const deps = s && tto && DEP_STATIONS.includes(s.code) ? h("div", "tr-deps", "Departures…") : null;
-        this.control.showInfo(s ? `${s.name} station` : "Station", "New Haven Line", [...(deps ? [deps] : []), d.catenary],
-                              deps ? "MTA TrainTime" : foot, "", icon, credit);
+        this.control.showInfo(s ? `${s.name} station` : "Station", "New Haven Line", [...(deps ? [deps] : []), catenaryLine(d)],
+                              deps ? "MTA TrainTime" : foot, "", icon, [d.catenary, credit].filter(Boolean).join("\n"));
         if (deps) { const stop = this.departures(s.code, deps); this.watchInfo(deps, stop); }
         return;
       }
-      this.control.showInfo("New Haven Line", "Metro-North", [d.catenary], foot, "", icon, credit);
+      this.control.showInfo("New Haven Line", "Metro-North", [catenaryLine(d)], foot, "", icon, [d.catenary, credit].filter(Boolean).join("\n"));
     }
 
-    // A train with MTA TrainTime's facts (#362): one data line, held / cancelled up top, the cars' load as bars, the
-    // branch's alerts; its route drawn while the box is open. Source and time in the footer, the rest on hover.
-    showTT(t, d, pos, icon, credit) {
-      const tt = t.tt, lines = [];
-      if (pos.stale) lines.push(h("div", "warn", pos.stale));
-      if (tt.canceled || tt.held) lines.push(h("div", "warn", tt.canceled ? "Cancelled" : "Held"));
-      const head = h("div", "", headline(t));
-      if (tt.next && tt.next.track) head.title = `Track ${tt.next.track} at ${tt.next.name}: ${tt.next.posted ? "posted" : "planned, not posted yet"}`
-        + (tt.next.track_change ? " (track change)" : "");
-      lines.push(head);
-      const spd = typeof tt.speed_mph === "number" && t.pos_src === "traintime" ? `${Math.round(tt.speed_mph)} mph` : "";
-      lines.push([pos.say.replace(/ (by )?\d\d:\d\d(:\d\d)?/, ""), spd].filter(Boolean).join(" · "));   // its time: in the footer
-      const bars = carBars(tt);
-      if (bars) lines.push(bars);
+    // A train's box (#278, #362), kept up to date while it is open (#375): each new answer's facts and, each second, where
+    // it is drawn now (its milepost) and how old its fix is. With MTA TrainTime's facts: one data line, held / cancelled
+    // up top, the cars' load as bars, the branch's alerts; its route drawn (dashed) while the box is open. Source and
+    // time in the footer, the rest on hover.
+    showTrain(id) {
+      const d = store.data, t = d && (d.trains || []).find((x) => x.id === id);
+      if (!t) return;
+      const v = this.trainView(t, d);
+      this.control.close();
+      this.control.showInfo(`Train ${t.train}`, v.sub, v.rows.map(rowEl), v.foot, "", window.Icon ? Icon("gis-train") : null, v.tip);
+      const info = this.control.info;
+      const body = info && info.querySelector ? info.querySelector(".ml-lines") : null;
+      const foot = info && info.querySelector ? info.querySelector(".ml-foot") : null;
+      this.live = body ? { id, body, foot, footText: v.foot, sigs: v.rows.map(rowSig) } : null;
+      this.showRoute(t.tt ? t.tt.route : "");
+      if (body) this.watchInfo(body, () => { this.live = null; this.showRoute(""); this.ticking(); });
+      this.ticking();
+    }
+    // the box's lines for train t now: [{k (which line), text | el (an element), title, cls}], its subtitle, foot and tip
+    trainView(t, d) {
+      const pos = this.where(t, d), w = (this.drawn && this.drawn.get(t.id)) || {};
+      const credit = `${d.label || "MTA"}. ${d.disclaimer || "Times may not be real time"}.`;
+      const sub = `${t.line ? `${t.line} Line` : "Metro-North"}${t.headsign ? ` \u2192 ${t.headsign}` : ""}`;
+      const rows = [];
+      if (pos.stale) rows.push({ k: "stale", text: pos.stale, cls: "warn" });            // #278: up top, in the warning colour
+      const cat = { k: "cat", text: CATENARY_LINE, title: d.catenary || "" };
+      if (!t.tt) {
+        rows.push({ k: "next", text: [t.dir_label, t.next_stop ? `Next ${t.next_stop}${t.next_time ? ` ${hm(t.next_time)}` : ""}` : "", t.track ? `Trk ${t.track}` : ""]
+          .filter(Boolean).join(" \u00b7 ") });
+        const said = (t.status || "").toLowerCase();         // the MTA's word, unless the delay already says it
+        const status = [late(t.delay_s), said && said !== "on-time" && !(said === "late" && t.delay_s > 0) ? t.status : "",
+                        pos.say, t.cars ? `${t.cars} car${t.cars === 1 ? "" : "s"}` : ""].filter(Boolean).join(" \u00b7 ");
+        if (status) rows.push({ k: "status", text: status });
+        rows.push(cat);
+        const foot = ["MTA", d.at ? hm(d.at, true) : ""].filter(Boolean).join(" \u00b7 ");
+        const tip = [pos.why, t.cars ? "Cars: from the MTA" : `Cars: not given by the MTA (drawn as ${LOOK_CARS})`, d.catenary, credit]
+          .filter(Boolean).join("\n");
+        return { sub, rows, foot, tip };
+      }
+      const tt = t.tt, gps = t.pos_src === "traintime";
+      if (tt.canceled || tt.held) rows.push({ k: "flag", text: tt.canceled ? "Cancelled" : "Held", cls: "warn" });
+      rows.push({ k: "head", text: headline(t, w), title: tt.next && tt.next.track
+        ? `Track ${tt.next.track} at ${tt.next.name}: ${tt.next.posted ? "posted" : "planned, not posted yet"}${tt.next.track_change ? " (track change)" : ""}` : "" });
+      rows.push({ k: "pos", text: [pos.word, mph(t), fixAge(t, d)].filter(Boolean).join(" \u00b7 ") });
+      if ((tt.car_loads || []).length) rows.push({ k: "bars", sig: JSON.stringify([tt.car_loads, tt.occupancy, tt.pax]), el: () => carBars(tt) });
       const al = d.alerts || [];
       if (al.length) {
-        const a = h("div", "tr-alert", `${al[0].status ? `${al[0].status}: ` : ""}${al[0].header}${al.length > 1 ? ` (+${al.length - 1})` : ""}`);
-        a.title = al.map((x) => `${x.status ? `${x.status}: ` : ""}${x.header}`).join("\n");
-        lines.push(a);
+        rows.push({ k: "alert", cls: "tr-alert", text: `${al[0].status ? `${al[0].status}: ` : ""}${al[0].header}${al.length > 1 ? ` (+${al.length - 1})` : ""}`,
+                    title: al.map((x) => `${x.status ? `${x.status}: ` : ""}${x.header}`).join("\n") });
       }
-      lines.push(d.catenary);
-      const gps = t.pos_src === "traintime";
-      const foot = [gps ? `MTA TrainTime (${(tt.loc_src || "").toLowerCase() || "?"})` : "MTA", hm(gps ? tt.loc_at : d.at, true)].filter(Boolean).join(" · ");
+      rows.push(cat);
+      const foot = [gps ? `MTA TrainTime (${(tt.loc_src || "").toLowerCase() || "?"})` : "MTA", hm(gps ? tt.loc_at : d.at, true)].filter(Boolean).join(" \u00b7 ");
       const tip = [pos.why, gps ? "Position, speed and cars: MTA TrainTime" : "Position: MTA GTFS-realtime; cars: MTA TrainTime",
-                   "TrainTime is an undocumented MTA API; GTFS-realtime is used when it fails", credit].join("\n");
-      this.control.showInfo(`Train ${t.train}`, `${t.line ? `${t.line} Line` : "Metro-North"}${t.headsign ? ` → ${t.headsign}` : ""}`,
-                            lines, foot, "", icon, tip);
-      this.showRoute(tt.route);
-      this.watchInfo(head, () => this.showRoute(""));
+                   "TrainTime is an undocumented MTA API; GTFS-realtime is used when it fails", d.catenary, credit].filter(Boolean).join("\n");
+      return { sub, rows, foot, tip };
+    }
+    // the open box again, in place: only the lines that changed (no focus moved, no flicker); gone from the answer:
+    // it keeps what it last said
+    refreshInfo() {
+      const lv = this.live, info = this.control.info;
+      if (!lv) return;
+      if (!info || info.hidden || !info.contains(lv.body)) { this.live = null; return; }
+      const d = store.data, t = d && (d.trains || []).find((x) => x.id === lv.id);
+      if (!t) return;
+      const v = this.trainView(t, d), sigs = v.rows.map(rowSig), kids = [...lv.body.children];
+      const same = kids.length === sigs.length && sigs.every((x, i) => x.split("\u0001")[0] === (lv.sigs[i] || "").split("\u0001")[0]);
+      if (same) sigs.forEach((x, i) => { if (x !== lv.sigs[i]) kids[i].replaceWith(rowEl(v.rows[i])); });
+      else lv.body.replaceChildren(...v.rows.map(rowEl));
+      lv.sigs = sigs;
+      if (lv.foot && v.foot !== lv.footText && lv.foot.firstChild && lv.foot.firstChild.nodeType === 3) {
+        lv.foot.firstChild.nodeValue = v.foot;
+        lv.footText = v.foot;
+      }
+    }
+    // follow a train (mapfollow.js): centred, zoomed in to its cars, kept centred as it glides; the chip at the foot
+    follow(id) {
+      if (!this.fol || !id) return;
+      if (window.MapFollow && MapFollow.takeMap) MapFollow.takeMap(this.map);   // any other follower on this map lets go
+      const at = this.at.get(id);
+      this.fol.start(id, at ? { lon: at[0], lat: at[1] } : null, FOLLOW_ZOOM);
+      this.sig = "";
+      this.draw(true);
+      this.tick();
+    }
+    unfollow() { if (this.fol) this.fol.stop(); }
+    // once a second while a box is open or a train followed (and with each answer): the box's lines, the chip's words
+    tick() {
+      this.refreshInfo();
+      const id = this.following;
+      if (id) {
+        const d = store.data, t = d && (d.trains || []).find((x) => x.id === id);
+        if (!t) this.fol.stop();                                       // gone from the line: let go
+        else this.fol.chip(followText(t, d), headline(t, this.drawn && this.drawn.get(t.id)), { stale: !!(this.drawn && (this.drawn.get(t.id) || {}).stale) });
+      }
+      this.ticking();
+    }
+    ticking() {
+      const want = !!(this.live || this.following);
+      if (want && !this.ticker) this.ticker = setInterval(() => this.tick(), AGE_MS);
+      else if (!want && this.ticker) { clearInterval(this.ticker); this.ticker = null; }
     }
     // the box closed, or shows something else now: fn() once
     watchInfo(node, fn) {

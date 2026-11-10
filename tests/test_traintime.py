@@ -19,6 +19,7 @@ import pytest
 
 from sizeup import datasources
 from sizeup import traintime as TT
+from sizeup import trains as TRAINS
 from sizeup.config import ConfigError, load
 from sizeup.trains import DEMAND_S, Model, Trains, parse_feed, parse_static
 from tests.test_trains import GTFS, NOW, Clock, msg
@@ -656,7 +657,7 @@ def test_noisy_gps_moves_forward_only_on_the_track_at_a_smooth_speed(tmp_path, m
     vs = [t["v"] for t in run[3:]]
     assert all(abs(v - 20.0) < 4.0 for v in vs)                                     # a steady speed, not the jitter
     assert max(abs(b - a) for a, b in zip(vs, vs[1:])) < 2.0
-    assert all(t["mode"] == "reported" for t in run[1:]) and run[-1]["predict_until"] == run[-1]["fix_at"] + 10.0
+    assert all(t["mode"] == "reported" for t in run[1:]) and run[-1]["predict_until"] == run[-1]["fix_at"] + TRAINS.TT_HORIZON_S
 
 
 def test_a_stopped_train_stays_put_through_gps_jitter(tmp_path, model):

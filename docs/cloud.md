@@ -1603,9 +1603,14 @@ length: the feed doesn't say how many cars a train has (see *What the feed gives
 many cars are drawn. The heading is the line's own over about a train's length there. A click
 on a train: line and destination, direction (*Toward New York* / *Toward New Haven*), next stop and time,
 track, delay, status, reported or estimated (*Stale · hh:mm:ss* up top in the warning colour on an old feed); on a
-station or the line: the catenary note (*12.5 kV AC catenary + third rail at stations. Treat all wires as live until
-Metro-North confirms de-energized and grounded.*; the same hazard as the county *Railroads* layer,
-whose drawing of the tracks stays where it is in *County GIS*).
+station or the line: the catenary on one line, *⚡ 12.5 kV catenary + 3rd rail · treat as live*, with the full note
+(*12.5 kV AC catenary + third rail at stations. Treat all wires as live until Metro-North confirms de-energized and
+grounded.*) on hover and in the ⓘ (#375; the same hazard as the county *Railroads* layer, whose drawing of the tracks
+stays where it is in *County GIS*). A click on a train also **follows** it (`mapfollow.js`, as aircraft and our
+rigs): centred at street zoom and kept centred as it glides, a chip at the foot (*Following 1595 · NH west · 67 mph
+· 3 s ago*, ✕); any pan of the viewer's (a mouse or one-finger drag, the arrow keys, a sideways trackpad swipe),
+Recenter or ✕ lets go, a zoom keeps it. The box stays live while open: each new fix's speed, lateness, next stop and
+track, the milepost where the train is drawn now, and the fix's age, once a second.
 
 **Trains approaching.** Under an open event's map, for an event within **150 m of the tracks or a
 station** (measured against the line's GTFS shape and the stations): the next trains each way in the next
@@ -1781,9 +1786,12 @@ the trains when it moves.
 drawn on its own direction's track at that distance, so never off it) and filtered along it
 (`trains.along_filter`: an alpha-beta filter on distance against the fix's own time, the feed's speed blended
 in): never backwards (a miss behind holds the train), a smooth speed. Under about 1 mph it is stopped and stays
-put through GPS jitter. The page carries a fix on along the track at that speed for at most 10 s
-(`TT_HORIZON_S`, about two fast polls), never past the next stop, and meets the next fix forward only or by
-holding (motion.js `Motion.rail` / `railFollow`, the same tracker as before). A fix no newer than the last one
+put through GPS jitter. The page carries a fix on along the track at that speed for at most 30 s
+(`TT_HORIZON_S`: fixes are 3 to 16 s old when read and read every 5 s, measured 2026-11-09, #375; 10 s ran out
+before the next fix and the train stood still), never past the next stop. The drawn train keeps a speed of its
+own that closes on the prediction (the train's speed plus the gap over 3 s, eased in over 1 s, never below 0), so
+a new fix changes its pace, never its position (motion.js `Motion.rail` / `railFollow`; `tests/test_train_live.py`
+holds it to the measured shape: no backward step, no stall, no frame step over twice the train's own). A fix no newer than the last one
 changes nothing. The distance along the line comes from the projection, not `turf.location_mp`: the projection
 is in the same geometry the train is drawn on, while turf counts along each train's own route (see above) and
 would have to be calibrated to it. The milepost shown is turf's when the train's route starts (eastbound) or
@@ -1798,8 +1806,9 @@ gains its cars (actual / scheduled, fleet), occupancy and per-car load and passe
 milepost, next stop and its track (posted or planned), OTP, held / cancelled; the branch's alerts go with
 the layer. A train TrainTime has and GTFS-realtime hasn't is drawn from TrainTime alone when its position
 is good. The train's box: one data line (e.g. *NH west · 6 cars (M8) · 11 min late · MP 23.0 · next Rye trk
-3*), the cars as load bars (each car on hover), source and time in the footer; its route line is drawn
-while the box is open. Port Chester's and Rye's boxes list their next departures.
+3*), then *Predicted · 52 mph · 3 s ago* (or *Reported*, *Stopped*), the cars as load bars (each car on hover),
+source and time in the footer; its route is drawn thin and dashed while the box is open (TrainTime's line is a few
+metres off the rails: a route, not a track; the tracks themselves are #371). Port Chester's and Rye's boxes list their next departures.
 
 **Validation and fallback.** Each record is checked field by field; one missing a required field (train
 number, run date, railroad, lat / lon / timestamp, direction) or with the wrong type is dropped, and an odd

@@ -202,7 +202,9 @@ out.b = drive("b", 0, 30, 1);
     assert set(out["b"]) == {fix()["s"]}                                               # stale from the start: at its fix
 
 
-def test_a_new_fix_ahead_is_caught_up_along_the_track_in_under_two_seconds(tmp_path):
+def test_a_new_fix_ahead_is_caught_up_along_the_track_smoothly(tmp_path):
+    """#375: no lunge. The drawn train speeds up gently (its pace eased in over RAMP_S, at most CATCH_MAX_MPS over the
+    train's own) and settles on the new fix, never past it."""
     f = fix(until=NOW + 300, hold=PC)
     out = node(tmp_path, TRACK + """
 tk.set("a", { ...IN.f, at: at(0) }, at(0));
@@ -211,19 +213,23 @@ const g = { ...IN.f, s: IN.f.s + 600, t0: IN.f.t0 + 1, fixAt: IN.f.t0 + 1, at: a
 const before = tk.where("a", at(1));
 tk.set("a", g, at(1));
 out.from = before.s;
-out.path = drive("a", 1.1, 4);
-out.target = []; for (let t = 1.1; t <= 4 + 1e-9; t += 0.1) out.target.push(Motion.rail(g, t - 1).s);
+out.path = drive("a", 1.1, 60);
+out.target = Motion.rail(g, 0).s;
+out.busy = tk.busy();
 """, {"f": f, "lag": None})
     # (lag None: no prediction from the new fix; it waits at its fix, 600 m on)
-    path, target = out["path"], out["target"]
-    assert all(b >= a for a, b in zip([out["from"]] + path, path))                      # always forward
-    assert path[0] - out["from"] < 600 / 2                                               # not a jump
-    caught = next(i for i, (p, q) in enumerate(zip(path, target)) if abs(p - q) < 1e-6)
-    assert 1.2 <= (caught + 1) * 0.1 <= 2.0                                             # ~1.75 s
-    assert all(abs(p - q) < 1e-6 for p, q in zip(path[caught:], target[caught:]))
+    path, target = [out["from"]] + out["path"], out["target"]
+    steps = [b - a for a, b in zip(path, path[1:])]
+    assert min(steps) >= 0 and max(path) <= target                                   # always forward, never past it
+    assert steps[0] < 5                                                              # not a jump
+    assert max(abs(b - a) for a, b in zip(steps, steps[1:])) <= 0.6                 # its pace eased: <= 6 m/s a frame
+    assert max(steps) <= (30 + 20) * 0.1                                             # at most CATCH_MAX_MPS over its speed
+    assert path[-1] == target and out["busy"] is False                               # settled on it, at rest
 
 
-def test_a_new_fix_behind_holds_the_train_until_the_prediction_meets_it(tmp_path):
+def test_a_new_fix_behind_slows_the_train_never_back_never_stopped(tmp_path):
+    """#375: drawn ahead of a new fix's prediction, the train slows (never under SLOW_SHARE of its speed while it
+    runs) until the prediction meets it: no step back, and no standing still while the train runs."""
     f = fix(until=NOW + 300, hold=PC)
     out = node(tmp_path, TRACK + """
 tk.set("a", { ...IN.f, at: at(0) }, at(0));
@@ -233,14 +239,16 @@ const g = { ...IN.f, s: drawn - 150, t0: IN.f.t0 + 10, fixAt: IN.f.t0 + 10, at: 
 g.lag = g.fixAt - Motion.profileT(g.s, g.seg);
 tk.set("a", g, at(10));
 out.drawn = drawn;
-out.path = drive("a", 10.1, 30);
-out.target = []; for (let t = 10.1; t <= 30 + 1e-9; t += 0.1) out.target.push(Motion.rail(g, t - 10).s);
+out.path = drive("a", 10.1, 40);
+out.target = []; for (let t = 10.1; t <= 40 + 1e-9; t += 0.1) out.target.push(Motion.rail(g, t - 10));
 """, {"f": f})
     path, target, drawn = out["path"], out["target"], out["drawn"]
-    assert all(b >= a for a, b in zip([drawn] + path, path))                             # never slid back
-    meet = next(i for i, q in enumerate(target) if q >= drawn)
-    assert set(path[:meet]) == {drawn}                                                   # held until the prediction meets it
-    assert all(abs(p - q) < 1e-6 for p, q in zip(path[meet + 1:], target[meet + 1:]))    # then on with it
+    steps = [b - a for a, b in zip([drawn] + path, path)]
+    assert min(steps) >= 0                                                           # never slid back
+    moving = [i for i, q in enumerate(target) if q["moving"] and q["v"] > 1]
+    assert all(steps[i] > 0 for i in moving)                                         # never stood still while it runs
+    meet = next(i for i, (p, q) in enumerate(zip(path, target)) if abs(p - q["s"]) < 2)
+    assert meet * 0.1 < 20 and all(abs(p - q["s"]) < 3 for p, q in zip(path[meet:], target[meet:]))   # then on with it
 
 
 def test_drawn_beyond_a_new_fixs_limit_it_is_brought_back_along_the_track(tmp_path):
@@ -277,7 +285,7 @@ def test_the_aircraft_tracker_is_unchanged_without_the_hooks():
     mo = (STATIC / "motion.js").read_text()
     assert "if (this.follow) {" in mo and "this.rest ? this.rest(it.fix)" in mo and "p.moving !== false" in mo
     assert "railTracker = (opts) => new Tracker(rail, { horizonS: Infinity, staleS: 60, ...opts, rest: railRest, follow: railFollow })" in mo
-    assert "JUMP_M = 2000, CATCH_S = 1.75" in mo
+    assert "JUMP_M = 2000, TAU_S = 3, RAMP_S = 1" in mo
 
 
 # ---- the layer's frames (trains.js in node, a fake map) --------------------------------------------------------------
