@@ -1607,10 +1607,12 @@ station or the line: the catenary on one line, *⚡ 12.5 kV catenary + 3rd rail 
 (*12.5 kV AC catenary + third rail at stations. Treat all wires as live until Metro-North confirms de-energized and
 grounded.*) on hover and in the ⓘ (#375; the same hazard as the county *Railroads* layer, whose drawing of the tracks
 stays where it is in *County GIS*). A click on a train also **follows** it (`mapfollow.js`, as aircraft and our
-rigs): centred at street zoom and kept centred as it glides, a chip at the foot (*Following 1595 · NH west · 67 mph
+rigs): centred at street zoom and kept centred as it glides, a chip at the foot (*Following 9901 · NH west · 67 mph
 · 3 s ago*, ✕); any pan of the viewer's (a mouse or one-finger drag, the arrow keys, a sideways trackpad swipe),
 Recenter or ✕ lets go, a zoom keeps it. The box stays live while open: each new fix's speed, lateness, next stop and
-track, the milepost where the train is drawn now, and the fix's age, once a second.
+track, the place line (the milepost where the train is drawn now: with #374's poles, the pole and GIS milepost at the
+drawn position, else TrainTime's milepost carried along with it), the fix's age, the subtitle and the ⓘ, once a
+second. A GPS fix over 15 s old: the train is drawn hollow and the box and chip say *Predicted · N s ago*.
 
 **Trains approaching.** Under an open event's map, for an event within **150 m of the tracks or a
 station** (measured against the line's GTFS shape and the stations): the next trains each way in the next
@@ -1786,13 +1788,22 @@ the trains when it moves.
 drawn on its own direction's track at that distance, so never off it) and filtered along it
 (`trains.along_filter`: an alpha-beta filter on distance against the fix's own time, the feed's speed blended
 in): never backwards (a miss behind holds the train), a smooth speed. Under about 1 mph it is stopped and stays
-put through GPS jitter. The page carries a fix on along the track at that speed for at most 30 s
-(`TT_HORIZON_S`: fixes are 3 to 16 s old when read and read every 5 s, measured 2026-11-09, #375; 10 s ran out
-before the next fix and the train stood still), never past the next stop. The drawn train keeps a speed of its
-own that closes on the prediction (the train's speed plus the gap over 3 s, eased in over 1 s, never below 0), so
-a new fix changes its pace, never its position (motion.js `Motion.rail` / `railFollow`; `tests/test_train_live.py`
-holds it to the measured shape: no backward step, no stall, no frame step over twice the train's own). A fix no newer than the last one
-changes nothing. The distance along the line comes from the projection, not `turf.location_mp`: the projection
+put through GPS jitter; the first stopped fix after it moved is taken as where it stopped (forward only), and the
+same position again with a newer time counts as stopped whatever speed it says. The filter also sends its
+acceleration (`a`, from the feed's own speeds). Where a train stops mid-track matters more than a smooth glide
+(#375: "if a train stops mid track we want to know where accurately"), so the page carries a fix on gently: at its
+full speed for 8 s of the fix's age, then slowing as v·e^-(age-8)/5 (at most 13·v on, however old; never past the
+next stop; nothing after 30 s, `TT_HORIZON_S`); a speed falling faster than 0.2 m/s² is braked at that rate to a
+stop (s0 + v·t + ½·a·t²). Fixes are 3 to 16 s old when read and read every 5 s (median about 6 s), so most of
+the time a train runs at its full speed. A train that brakes at a service rate (0.75 m/s²) right after its last
+moving fix, with no fix until it has stopped, is drawn at most about 63 m past where it stopped (at about 22 mph;
+at 52 mph not past it at all); the old 30 s at full speed drew it up to 337 m past. With the feed's real cadence
+(a fix every 3 s, 3 to 16 s late) it is drawn under 10 m past. The drawn train keeps a speed of its own that
+closes on the prediction (the train's speed plus the gap over 3 s, eased in over 1 s), so a new fix changes its
+pace, not its position; it goes back only to where a fix says it stopped: up to 30 m eased back (at most 20 m/s),
+more put there at once and ringed for a moment, never a long slide backwards (motion.js `Motion.rail` /
+`railFollow`; `tests/test_train_live.py` holds it to the measured shape). A fix no newer than the last one changes
+nothing. The distance along the line comes from the projection, not `turf.location_mp`: the projection
 is in the same geometry the train is drawn on, while turf counts along each train's own route (see above) and
 would have to be calibrated to it. The milepost shown is turf's when the train's route starts (eastbound) or
 ends (westbound) at Grand Central; otherwise, for a train drawn at TrainTime's position, the distance along our

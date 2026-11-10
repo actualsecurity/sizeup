@@ -673,14 +673,41 @@ def test_a_stopped_train_stays_put_through_gps_jitter(tmp_path, model):
 
 def test_the_along_track_filter():
     from sizeup.trains import along_filter
-    assert along_filter(None, 1000.0, 1, NOW, 20.0) == (1000.0, 20.0)
+    assert along_filter(None, 1000.0, 1, NOW, 20.0) == (1000.0, 20.0, 0.0)
     last = {"s": 1000.0, "v": 20.0, "fix_at": NOW}
-    s, v = along_filter(last, 1060.0, 1, NOW + 5, 20.0)                             # 40 m short of where it should be
-    assert s == pytest.approx(1080.0) and 18.0 < v < 20.0
-    assert along_filter(last, 980.0, 1, NOW + 5, 0.0) == (1000.0, 0.0)              # stopped, 20 m back: jitter, put
+    s, v, a = along_filter(last, 1060.0, 1, NOW + 5, 20.0)                          # 40 m short of where it should be
+    assert s == pytest.approx(1080.0) and 18.0 < v < 20.0 and a == pytest.approx((v - 20.0) / 5)
     assert along_filter(last, 990.0, 1, NOW + 1, 20.0)[0] >= 1000.0                 # a miss behind: held, never back
-    s, v = along_filter({"s": 5000.0, "v": 10.0, "fix_at": NOW}, 4950.0, -1, NOW + 5, 10.0)
+    s, v, a = along_filter({"s": 5000.0, "v": 10.0, "fix_at": NOW}, 4950.0, -1, NOW + 5, 10.0)
     assert s == pytest.approx(4950.0) and v == pytest.approx(10.0)                  # westbound: s falls as it goes
+
+
+def test_the_first_stopped_fix_is_where_it_stopped_later_ones_are_jitter():
+    """#375: a train that was moving and now reports under STOP_MPS is put where the fix says (forward only), not held
+    up to STOP_JITTER_M short of it; once stopped, a fix less than STOP_JITTER_M ahead (or any behind) is jitter."""
+    from sizeup.trains import STOP_JITTER_M, along_filter
+    moving = {"s": 1000.0, "v": 20.0, "a": -0.75, "fix_at": NOW}
+    assert along_filter(moving, 1090.0, 1, NOW + 5, 0.0) == (1090.0, 0.0, 0.0)       # 90 m on: there, not held 90 m short
+    assert along_filter(moving, 980.0, 1, NOW + 5, 0.0) == (1000.0, 0.0, 0.0)        # behind: never back
+    assert along_filter({**moving, "s": 5000.0}, 4910.0, -1, NOW + 5, 0.0)[0] == 4910.0   # westbound too
+    stopped = {"s": 1090.0, "v": 0.0, "a": 0.0, "fix_at": NOW + 5}
+    assert along_filter(stopped, 1090.0 + STOP_JITTER_M - 10, 1, NOW + 10, 0.0) == (1090.0, 0.0, 0.0)   # jitter: put
+    assert along_filter(stopped, 1070.0, 1, NOW + 10, 0.0) == (1090.0, 0.0, 0.0)
+    assert along_filter(stopped, 1090.0 + STOP_JITTER_M + 10, 1, NOW + 10, 0.0)[0] == 1090.0 + STOP_JITTER_M + 10
+
+
+def test_the_filter_sends_its_braking():
+    """#375: the speed falling between fixes is sent as a (m/s^2, from the feed's own speeds), and while braking the
+    feed's speed is the train's (the filter's lags it) and the next prediction brakes too."""
+    from sizeup.trains import along_filter
+    last = {"s": 1000.0, "v": 20.0, "vf": 20.0, "a": 0.0, "fix_at": NOW}
+    s, v, a = along_filter(last, 1000.0 + 20 * 4 - 0.375 * 16, 1, NOW + 4, 17.0)     # braking at 0.75 m/s^2
+    assert a == pytest.approx(-0.75) and v == 17.0
+    last = {"s": s, "v": v, "vf": 17.0, "a": a, "fix_at": NOW + 4}
+    s2, v2, a2 = along_filter(last, s + 17 * 4 - 0.375 * 16, 1, NOW + 8, 14.0)
+    assert s2 == pytest.approx(s + 17 * 4 - 0.375 * 16, abs=0.5) and a2 == pytest.approx(-0.75)   # predicted braking: no miss
+    s3, v3, a3 = along_filter({"s": 1000.0, "v": 20.0, "fix_at": NOW}, 1100.0, 1, NOW + 5, 21.0)
+    assert a3 >= 0                                                                  # (no feed speed before: the filter's)
 
 
 # ---- review (#366): newer positions only, old fixes, midnight, staleness per train ---------------------------------
@@ -700,8 +727,8 @@ def test_a_newer_gtfs_position_is_kept():
 def test_an_equal_or_older_gps_fix_changes_nothing(tmp_path):
     from sizeup.trains import along_filter
     last = {"s": 1000.0, "v": 20.0, "fix_at": NOW}
-    assert along_filter(last, 1200.0, 1, NOW, 20.0) == (1000.0, 20.0)                # the same time
-    assert along_filter(last, 900.0, 1, NOW - 5, 20.0) == (1000.0, 20.0)             # older
+    assert along_filter(last, 1200.0, 1, NOW, 20.0) == (1000.0, 20.0, 0.0)           # the same time
+    assert along_filter(last, 900.0, 1, NOW - 5, 20.0) == (1000.0, 20.0, 0.0)        # older
     tr, clock, fetch = provider(tmp_path)
     tr.tick()
     looking(tr, clock)
@@ -715,6 +742,30 @@ def test_an_equal_or_older_gps_fix_changes_nothing(tmp_path):
     view(tr, clock)
     tr.tt.tick()
     assert tr.track.fixes["9901"]["s"] == first["s"] and tr.track.fixes["9901"]["fix_at"] == first["fix_at"]
+
+
+def test_the_same_position_again_with_a_newer_time_is_a_stopped_train(tmp_path):
+    """#375: a GPS fix repeated exactly (lat/lon) with a newer timestamp hasn't moved, whatever speed it says: v = 0."""
+    tr, clock, fetch = provider(tmp_path)
+    tr.tick()
+    looking(tr, clock)
+    doc = json.loads(LOC)
+    x = next(r for r in doc if r.get("train_num") == "9901")
+    x["location"].update(timestamp=int(clock.t) - 4, speed=30.0)
+    fetch.loc = json.dumps(doc).encode()
+    tr.refresh_rt()
+    tr.tt.tick()
+    assert tr.track.fixes["9901"]["v"] > 0
+    first = dict(tr.track.fixes["9901"])
+    clock.t += 5
+    x["location"].update(timestamp=int(clock.t) - 4)                                 # the same lat/lon, newer, "30 mph"
+    fetch.loc = json.dumps(doc).encode()
+    view(tr, clock)
+    tr.tt.tick()
+    rec = tr.track.fixes["9901"]
+    assert rec["fix_at"] > first["fix_at"] and rec["v"] == 0.0 and rec["s"] == first["s"]
+    t = {x["train"]: x for x in tr.public()["trains"]}["9901"]
+    assert t["mode"] == "stopped" and t["v"] == 0.0
 
 
 def test_just_after_midnight_the_service_date_matches(tmp_path):

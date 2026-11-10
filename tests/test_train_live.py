@@ -2,8 +2,10 @@
 Tracker and along_filter) answers every 5 s as it does live, and the page's own trains.js + motion.js (in node, a
 map stand-in, the page's 5 s poll) draw it every 100 ms frame. The feed has the shape measured from the real API on
 2026-11-09 (24 polls, 9 New Haven Line trains): a GPS fix every 3 s, each 3 to 16 s old when read, with GPS noise;
-the train runs at a steady 52 mph. Before #375 the page carried a fix on for only 10 s past its time (TT_HORIZON_S),
-so the train stood still for seconds between fixes and then lunged on at up to 140 m/s.
+the train runs at a steady 52 mph, or brakes to a stop mid-track. Before #375 the page carried a fix on for only 10 s
+past its time (TT_HORIZON_S), so the train stood still for seconds between fixes and then lunged on at up to 140 m/s;
+then for 30 s at its full speed, so a train that stopped mid-track was drawn hundreds of metres past where it stood.
+Now: full speed for 8 s of a fix's age, then slowing; braked to a stop when its speed falls.
 
 No MTA: conftest keeps TrainTime's address off, and every feed here is the test's (tests/test_traintime.py Fetch)."""
 
@@ -72,16 +74,31 @@ const flush = () => new Promise((r) => setImmediate(r));
 """
 
 
-def drive(tmp_path, horizon=None):
-    """(frames [[t, drawn s]], truth(t)): the hub's answers over RUN_S, drawn by the page."""
+def steady(dt):
+    """(progress m, speed m/s) dt seconds into the run: a steady V."""
+    return V * dt, V
+
+
+def braking(at_s, b=0.75):
+    """A train at V that brakes at b m/s^2 (a service brake) from at_s seconds into the run to a stop mid-track."""
+    def go(dt):
+        if dt <= at_s:
+            return V * dt, V
+        u = min(dt - at_s, V / b)
+        return V * at_s + V * u - 0.5 * b * u * u, max(0.0, V - b * u)
+    return go
+
+
+def drive(tmp_path, run=steady, run_s=RUN_S):
+    """(frames [[t, drawn s]], truth(t)): the hub's answers over run_s, drawn by the page. run(dt) -> (progress, speed)."""
     tr, clock, fetch = provider(tmp_path)
     model = Model(parse_static(GTFS), tracks=json.loads(T.TRACKS_FILE.read_text()))
     recs = json.loads(LOC)
     mover = next(r for r in recs if r["train_num"] == "9901")          # westbound: s falls
     _, s0 = model.line.project(mover["location"]["latitude"], mover["location"]["longitude"])
     t0, rnd = clock.t, random.Random(375)
-    noise = [rnd.gauss(0, NOISE_M) for _ in range(RUN_S)]
-    truth = lambda t: s0 - V * (t - t0)
+    noise = [rnd.gauss(0, NOISE_M) for _ in range(run_s)]
+    truth = lambda t: s0 - run(t - t0)[0]
 
     def feed(now):                                                    # the newest GPS fix published by now
         k = int((now - t0) // GPS_EVERY_S)
@@ -90,30 +107,24 @@ def drive(tmp_path, horizon=None):
         ts = t0 + GPS_EVERY_S * k
         lat, lon, _ = model.line.at(truth(ts) + noise[k])
         loc = {**mover["location"], "latitude": round(lat, 6), "longitude": round(lon, 6), "timestamp": int(ts),
-               "speed": round(V * 3600 / 1609.344, 1)}
+               "speed": round(run(ts - t0)[1] * 3600 / 1609.344, 1)}
         return json.dumps([{**r, "location": loc} if r is mover else r for r in recs]).encode()
 
-    if horizon is not None:
-        old, T.TT_HORIZON_S = T.TT_HORIZON_S, horizon
-    try:
-        answers = []
-        tr.get("/api/cad/trains", "")                                 # a page has the layer on: TrainTime every 5 s
-        for step in range(RUN_S):
-            clock.t = t0 + step
-            fetch.loc = feed(clock.t)
-            tr.tick()
-            tr.tt.tick()
-            body = tr.get("/api/cad/trains", "")[1].decode()
-            answers.append({"t": clock.t, "body": body})
-        d = json.loads(answers[-1]["body"])
-        tid = next(t["id"] for t in d["trains"] if t["train"] == "9901")
-        assert next(t for t in d["trains"] if t["train"] == "9901")["pos_src"] == "traintime"
-    finally:
-        if horizon is not None:
-            T.TT_HORIZON_S = old
+    answers = []
+    tr.get("/api/cad/trains", "")                                     # a page has the layer on: TrainTime every 5 s
+    for step in range(run_s):
+        clock.t = t0 + step
+        fetch.loc = feed(clock.t)
+        tr.tick()
+        tr.tt.tick()
+        body = tr.get("/api/cad/trains", "")[1].decode()
+        answers.append({"t": clock.t, "body": body})
+    d = json.loads(answers[-1]["body"])
+    tid = next(t["id"] for t in d["trains"] if t["train"] == "9901")
+    assert next(t for t in d["trains"] if t["train"] == "9901")["pos_src"] == "traintime"
     h, f = tmp_path / "live.js", tmp_path / "in.json"
     h.write_text(LIVE)
-    f.write_text(json.dumps({"answers": answers, "start": t0 + 1, "end": t0 + RUN_S, "id": tid}))
+    f.write_text(json.dumps({"answers": answers, "start": t0 + 1, "end": t0 + run_s, "id": tid}))
     r = subprocess.run([NODE, str(h), str(STATIC / "motion.js"), str(STATIC / "trains.js"), str(f)], capture_output=True,
                        text=True, timeout=120)
     assert r.returncode == 0, r.stderr
@@ -140,12 +151,24 @@ def test_a_train_on_traintime_glides_at_its_speed_with_no_steps_stalls_or_backwa
     assert m["back"] >= 0                                   # never a step back
     assert m["stall_s"] <= 0.1                              # never stands still while it runs (one frame of rounding)
     assert m["max_step"] <= 2 * V * 0.1                     # no lunge: at most twice its speed in a frame
-    assert m["dv"] <= 3.0                                   # its pace changes gently (m/s a frame; the drawn s is rounded to
+    assert m["dv"] <= 4.5                                   # its pace changes gently (m/s a frame; the drawn s is rounded to
                                                             # 0.1 m, ±1 m/s): no step at a fix (the old catch-up: 20)
-    assert m["err"] <= 60                                   # and it is where the train is (GPS noise ±10 m, fixes 3-16 s old)
+    assert m["err"] <= 75                                   # and it is near where the train is (GPS noise ±10 m, fixes 3-16
+                                                            # s old: past 8 s of age it is drawn slowing, so a little behind)
 
 
-def test_the_old_ten_second_horizon_stalled_between_fixes(tmp_path):
-    """The live shape against the old TT_HORIZON_S: the measurement this fix is for, kept so a shorter horizon fails."""
-    m = measure(*drive(tmp_path, horizon=10.0))
-    assert m["stall_s"] >= 1.0 and m["dv"] > 10
+@pytest.mark.parametrize("brake_at", [15, 21, 27, 33])
+def test_a_train_braking_to_a_stop_mid_track_is_drawn_where_it_stopped(tmp_path, brake_at):
+    """#375: "if a train stops mid track we want to know where accurately". At 52 mph, a service brake (0.75 m/s^2) right
+    after a fix, to a stop 360 m on, mid-track; the feed's fixes still 3-16 s old: drawn at most 60 m past where it
+    stopped (measured: under 10 m; the old 30 s horizon at its full speed: over 300 m), no long slide back, and it
+    ends where the GPS says it stopped."""
+    frames, truth = drive(tmp_path, run=braking(brake_at), run_s=brake_at + 65)
+    stop = truth(frames[0][0] + 10_000)
+    fr = [(t, s) for t, s in frames if s is not None]
+    past = max(stop - s for _, s in fr)                     # westbound: past the stop is a lower s
+    back = max(b[1] - a[1] for a, b in zip(fr, fr[1:]))     # a step back (east) in one frame
+    assert past <= 60
+    assert back <= 3.0                                      # no slide or jump back (BACK_MAX_MPS 20: 2 m a frame)
+    assert abs(fr[-1][1] - stop) <= 25                      # at rest where it stopped (GPS noise ±10 m)
+    assert fr[-1][1] == fr[-20][1]                          # and still

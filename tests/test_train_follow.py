@@ -158,11 +158,14 @@ const rows = () => info.find("ml-lines")[0].children.map((c) => [c.textContent, 
   out.chip = host.find("ac-follow-t")[0].textContent;
   out.rows = rows();
   out.route = layers["tr-route"].paint;
-  T += 3000; m.tick();                // 3 s on: the ages
+  const box = m.live, own = box.refresh.bind(box);
+  let n = 0; box.refresh = () => { n++; own(); };
+  m.tick(); out.tickRefreshes = n;                                // the chip's second: not the box again (its own)
+  T += 3000; box.refresh(); m.tick();  // 3 s on: the ages (the box by its own second, the chip by the layer's)
   out.rows3 = rows(); out.chip3 = host.find("ac-follow-t")[0].textContent;
   answer = IN.answers[1]; T = IN.answers[1].got;               // the next fix: faster, further on
   await TrainLayer.load(); await flush();
-  out.rowsNext = rows(); out.chipNext = host.find("ac-follow-t")[0].textContent;
+  out.rowsNext = rows(); out.chipNext = host.find("ac-follow-t")[0].textContent; out.chipTip = host.find("ac-follow-t")[0].title || "";
   map.emit("dragstart", { originalEvent: { type: "mousemove" } });                // a mouse drag lets go
   out.afterDrag = [m.following, host.find("ac-follow")[0].hidden];
   console.log(JSON.stringify(out)); process.exit(0);
@@ -181,8 +184,11 @@ const rows = () => info.find("ml-lines")[0].children.map((c) => [c.textContent, 
     assert age(o["rows3"]) == age(o["rows"]) + 3 and o["chip3"] != o["chip"]                  # the age, live
     nxt = next(r[0] for r in o["rowsNext"] if "mph" in r[0])
     assert "61 mph" in nxt and " 61 mph " in o["chipNext"]                                    # the next fix, without reopening
-    assert any(p.startswith("MP\u00a0") for p in o["rowsNext"][0][0].split(" · "))           # (the milepost: where it is drawn)
+    assert not any("MP\u00a0" in r[0] for r in o["rowsNext"] if " west" in r[0])            # the headline: no milepost ...
+    place = [r for r in o["rowsNext"] if r[0].startswith("MP\u00a0")]
+    assert len(place) == 1 and "where the train is drawn" in place[0][1]                   # ... the place row has it
     assert o["afterDrag"] == ["", True]
+    assert o["tickRefreshes"] == 0                                                           # one refresh a second, not two
 
 
 # ---- an aircraft's box, live too (MapFollow.LiveInfo, shared with the trains) ----------------------------------------
@@ -243,3 +249,74 @@ def test_an_aircrafts_box_updates_from_each_fix_and_its_age_ticks(tmp_path):
     nm = lambda ls: next(x for x in ls if " nm" in x)
     assert nm(o["first"]) and nm(o["later"])                                                 # (from the glided position)
     assert o["open"] and o["closed"]
+
+
+# ---- a GPS fix gone old: hollow, "Predicted · N s ago"; the box's ⓘ and subtitle kept up too (#375) -------------------
+
+@needs_node
+def test_an_old_gps_fix_draws_the_train_hollow_and_says_predicted(tmp_path):
+    a = answers(tmp_path)
+    t0 = next(t for t in a[0]["body"]["trains"] if t["train"] == "9901")
+    from tests.test_train_motion import STATIC
+    o = run_node(tmp_path, [], f"const STATIC = {json.dumps(str(STATIC) + '/')};\n" + LOAD_TRAINS + r"""
+const flush = () => new Promise((r) => setTimeout(r, 0));
+const rows = () => info.find("ml-lines")[0].children.map((c) => c.textContent);
+let fc = null;
+(async () => {
+  const m = group.attach(control);
+  await TrainLayer.load(); await flush();
+  sources["tr-trains"].setData = (x) => { fc = x; };
+  m.sig = ""; m.draw(true, T);
+  const mine = () => fc.features.find((f) => f.properties.id === IN.id).properties;
+  out.fresh = mine().estimated;
+  map.emit("click", { point: { x: 1, y: 1 }, originalEvent: { stopPropagation() {} } });
+  await flush(); await flush();
+  out.rows = rows(); out.chip = host.find("ac-follow-t")[0].textContent;
+  T += 20000;                                                    // 20 s on, no newer fix: well over 15 s old
+  m.draw(false, T); m.live.refresh(); m.tick();
+  out.old = mine().estimated;
+  out.rowsOld = rows(); out.chipOld = host.find("ac-follow-t")[0].textContent;
+  console.log(JSON.stringify(out)); process.exit(0);
+})();
+""", {"answers": [{**x["body"], "got": x["got"]} for x in a], "got": a[0]["got"], "id": t0["id"]})
+    assert o["fresh"] is False and o["old"] is True                                          # filled, then hollow
+    pos = lambda rs: next(r for r in rs if r.endswith(" s ago"))
+    assert pos(o["rows"]).split(" · ")[0] in ("Reported", "Predicted") and "mph" in pos(o["rows"])
+    old = pos(o["rowsOld"]).split(" · ")
+    assert old[0] == "Predicted" and len(old) == 2 and int(old[1].split(" ")[0]) > 15         # "Predicted · 24 s ago"
+    assert " · Predicted · " in o["chipOld"] and "mph" not in o["chipOld"] and o["chipOld"].endswith(" s ago")
+
+
+@needs_node
+def test_a_live_box_keeps_its_tip_and_subtitle_up_to_date(tmp_path):
+    """MapFollow.LiveInfo: the ⓘ (Help.info: data-help and title) and the subtitle follow view(), so the tip never keeps
+    saying "Predicted" once a real fix has come; the button itself stays (no rebuild)."""
+    o = run_node(tmp_path, ["help.js", "mapfollow.js"], r"""
+El.prototype.querySelector = function (sel) { return this.find(sel.slice(1))[0] || null; };
+El.prototype.replaceWith = function (n) { const p = this.parent, i = p.children.indexOf(this); p.children[i] = n; n.parent = p; };
+const info = new El("div");
+info.nodeType = 1;
+const control = { info, showInfo(title, sub, lines, foot, cls, icon, tip) {
+  const head = new El("div"), s = new El("span"); s.className = "dim small ml-subtitle"; s.textContent = sub; head.append(s);
+  const body = new El("div"); body.className = "ml-lines";
+  for (const l of lines) body.append(typeof l === "string" ? Object.assign(new El("div"), { textContent: l }) : l);
+  const f = new El("div"); f.className = "dim small ml-foot";
+  f.append({ nodeType: 3, nodeValue: foot || "", get textContent() { return this.nodeValue; } });
+  Object.defineProperty(f, "firstChild", { get: () => f.children[0] });
+  f.append(Help.info(tip));
+  info.replaceChildren(); info.append(head, body, f); info.hidden = false;
+} };
+let v = { title: "Train 9901", sub: "New Haven Line", lines: ["Predicted · 18 s ago"], foot: "MTA", tip: "Predicted: no position from the MTA for over 15 s" };
+const box = new MapFollow.LiveInfo(control, () => v);
+const help = () => info.find("help")[0];
+const b0 = help();
+out.before = [help().title, help().dataset.help, info.find("ml-subtitle")[0].textContent];
+v = { ...v, sub: "New Haven Line → Grand Central", lines: ["Reported · 52 mph · 3 s ago"], tip: "Reported by the MTA" };
+box.refresh();
+out.after = [help().title, help().dataset.help, info.find("ml-subtitle")[0].textContent, info.find("ml-lines")[0].children[0].textContent];
+out.same = help() === b0;
+box.stop();
+""")
+    assert o["before"] == ["Predicted: no position from the MTA for over 15 s"] * 2 + ["New Haven Line"]
+    assert o["after"] == ["Reported by the MTA", "Reported by the MTA", "New Haven Line → Grand Central", "Reported · 52 mph · 3 s ago"]
+    assert o["same"] is True

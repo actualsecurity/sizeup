@@ -13,9 +13,9 @@
 //                        centred) and the ones whose row or card is hovered (hover: a wider ring).
 //   MapFollow.shownMap   the first of a layer's maps on screen.
 //   MapFollow.LiveInfo   a mark's box kept up to date while it is open (trains, aircraft; #375): view() gives its
-//                        lines and foot again once a second (LIVE_MS) and on refresh() (a new fix); only the lines
-//                        that changed are swapped, in place (no rebuild, no focus moved). Shut, or another box shown
-//                        in it: it stops (onClose).
+//                        lines, foot, subtitle and ⓘ again once a second (LIVE_MS) and on refresh() (a new fix);
+//                        only what changed is swapped, in place (no rebuild, no focus moved): the ⓘ's text, not
+//                        the button. Shut, or another box shown in it: it stops (onClose).
 //
 // No drawing here: each layer draws its own ring (aircraft: a GeoJSON source; units: their chips' classes).
 "use strict";
@@ -187,6 +187,8 @@ window.MapFollow = (() => {
       this.body = info && info.querySelector ? info.querySelector(".ml-lines") : null;
       this.footEl = info && info.querySelector ? info.querySelector(".ml-foot") : null;
       this.footText = v.foot || "";
+      this.subText = v.sub || "";
+      this.tipText = v.tip || "";
       if (!this.body) return;
       this.sigs = [...this.body.children].map((n) => lineSig(n));
       this.timer = setInterval(() => this.refresh(), opts.ms || LIVE_MS);
@@ -208,6 +210,12 @@ window.MapFollow = (() => {
       this.sigs = sigs;
       const f = this.footEl, t = v.foot || "";
       if (f && t !== this.footText && f.firstChild && f.firstChild.nodeType === 3) { f.firstChild.nodeValue = t; this.footText = t; }
+      // the subtitle and the ⓘ (Help.info: its text is the button's data-help and title), so they never keep saying
+      // what an older fix was ("Predicted" once a real fix has come)
+      const sub = v.sub || "", sEl = sub !== this.subText && info.querySelector ? info.querySelector(".ml-subtitle") : null;
+      if (sEl) { sEl.textContent = sub; this.subText = sub; }
+      const tip = v.tip || "", b = tip !== this.tipText && f && f.querySelector ? f.querySelector(".help") : null;
+      if (b) { b.title = tip; if (b.dataset) b.dataset.help = tip; this.tipText = tip; }
     }
     stop() {
       if (!this.timer) return;
