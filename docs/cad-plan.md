@@ -121,6 +121,14 @@ are referenced from there. M1 is built.
     heading and speed (glide.js, as aircraft are). Up to 300 s (`POSITION_MAX_AGE_S`) it is stale: hollow, faded, its
     age on the chip. Older, the rig is placed by its status again. Follow and the rings work the same with or without
     a fix. `Cad._feed_position(fix)` feeds one in for tests and local dev only.
+  - **The probable path (#360).** Each rig going to a call (dispatched or responding) gets a route by road from its fix,
+    or from its status position (its station, or where it was returning), to the call's point, drawn dashed in its
+    status colour from its mark; the follow chip adds "~3 min · 1.2 mi". The road graph is OpenStreetMap's roads for
+    the firehouses plus 12 km (`sizeup/roadgraph.py`, Settings > Data sources "Road graph (routes)", monthly; cached
+    and kept in S3 like the GIS layers); routing is A* in-process (`sizeup/cad/routes.py`). One-ways are honoured
+    except a short wrong-way final stretch; closures in effect now are avoided. Re-routed when a fix is more than
+    50 m off the path, or after 3 fixes heading away. The recommendation's estimates use the route's time where there
+    is one, else the straight-line model. The numbers are in Settings > Dispatch. No traffic, signals or turn costs.
 
 ## Open questions for the department
 
