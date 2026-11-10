@@ -1851,6 +1851,63 @@ Tests: `tests/test_traintime.py` on a **synthetic** fixture with the API's shape
 parse, validation, the merge, fallback, a change of shape, back-off, route lines and departures. No test
 reaches the MTA (`tests/conftest.py`).
 
+### Numbered tracks, catenary poles, mileposts (#371)
+
+> "Snap each train to its numbered track ... Show the track in the popup ('Trk 2') ... catenary structure (pole)
+> numbers and mileposts ... An incident near the tracks shows the nearest pole and milepost: useful for telling
+> Metro-North where crews are." (GitHub #371)
+
+`sizeup/railassets.py`. **Source:** Metro-North's own GIS, a public ArcGIS Online feature service of the MTA's
+(`ROWAccessPoints/FeatureServer`, no key): layer 6 *MNR Railroad Track* (`TrkName` 1..4 on the main line here),
+7 *Catenary Bridge* (`CB_ID`, e.g. `CB-249`), 2 *Milepost* (`LineCode` NHV or NHL: both asked for) and 3
+*Tenth Milepost*. Coverage checked 2026-11-09,
+Rye station to just past Greenwich: 4 main tracks, 149 catenary structures (CB-185..CB-317), 8 whole and 65
+tenth mileposts; over the layer's area 9 numbered tracks, 453 structures, 224 mileposts. OpenStreetMap has the
+four tracks (`railway:track_ref`) but **no catenary numbers** and mileposts only every few miles, so it isn't
+used. Fetched **monthly** by the Data sources registry (*Metro-North tracks, poles, mileposts (MTA GIS)*), one
+layer at a time, an envelope query for the area only (the tracks thinned server-side to ~10 cm, so they are
+straight or smoothly curved at street zoom: ~480 KB read in all, ~130 KB kept), kept in `trains/rail_assets.json`
+and S3. A copy thinned otherwise (the first one, at 0.5 m) is used but due again.
+
+**Track:** each track is measured along the static feed's line (its `s`), so the motion code keeps one
+distance and only the drawing changes. Each feature (and each part of one) is its own run, broken where it
+leaves the line: nothing is drawn across a gap. A train's track is the one said for the stop it last left or
+the one it is going to, whichever is nearer, and only within 1.5 km of that stop: TrainTime's posted track
+(`sign_track`) over its planned one (`t2s_track`) over GTFS-realtime's. The hub remembers it per train
+(by number, forgotten an hour after it was last drawn, so a merge flipping between TrainTime and GTFS-realtime
+doesn't move it) and changes it only on better stop-track evidence: for the same stop an equal or better word
+(the same track from a weaker source keeps the stronger one), for another stop only one ahead of the old one in
+the direction of travel. Between stations it is held, up to 4 km from the stop that said it (beyond, an express
+may have crossed over). Nothing says: the direction's outer track (4 outbound, 3 inbound), only so the train
+lies on a drawn track; not known. No GPS guess: the tracks are 4 m apart, closer than a phone-grade fix can
+tell. A track we have no line for (Stamford's 5) is ignored. The box: *Trk 2 · near pole 249 · MP 25.3* within
+1.5 km of the stop that said it (who said it, for which stop, on hover); *Trk 2?* held ("Track: last said for
+<stop>"); no number on the outer default ("Track not known; drawn on outer track"). A held or default train is
+drawn with a dashed stripe down its body (faded is for a stale feed only). No GIS milepost where it is drawn:
+the train's own (TrainTime's, or the line's).
+
+**Smooth tracks (#374):** a run keeps the service's own point order (turned to run up the line, its `s` held
+where it steps back). Sorted by `s`, it zig-zagged wherever the static line's kinks put nearby points' `s` out of
+order. The service's few digitising slips (hairpins doubling back 3-9 m, 1 cm steps at right angles) are dropped
+(a vertex turning more than 45°), and the page gets the tracks to 1 cm (at 1 m, tracks 4 m apart wobble).
+
+**Poles and mileposts:** the nearest structure along the line (within 150 m), and the milepost read off the
+two either side (straight between; a milepost out of order along the line is left out). A train's box, and
+the event's *Trains approaching* panel for an incident within 150 m of the line, say them (a train's at the
+point it is drawn now: the layer sends each pole's and milepost's `s`). *Poles · mileposts* is a layer in the
+Trains group of the Layers box (`railref`; off until a viewer turns it on, then kept per viewer like every
+layer, and per event on an event's map), drawn from `GET /api/cad/trains/railref`. Each structure is drawn as
+Metro-North's TrainTime draws it: a thin light line square to the tracks (their bearing there, from the
+numbered tracks within 30 m), across all of them and 3 m past the outer ones (no track near: 9 m each side,
+square to the line), with its number on a yellow tag just past one end; from zoom 16, and a tag that would
+overlap another is left out. Whole mileposts from 12, tenths from 15.
+
+A 429 or a refusal (401 / 403) rests 30 min (Data sources says *resting*); other failures back off 5 min
+doubling to 6 h; the copy we had stays.
+
+Tests: `tests/test_rail_assets.py`, all synthetic geometry (four parallel tracks, a portal every 100 m, a
+milepost every tenth, also laid along the recorded static feed's line); no Metro-North features in the repo.
+
 ## Aircraft near HPN (shortfinal's picture)
 
 > "can we pull in the shortfinal components into this as additional layers? the way we implemented the data
@@ -2279,6 +2336,7 @@ kept gzipped in the same bucket, `s3://$LITESTREAM_BUCKET/$LITESTREAM_PATH/cache
 | `roadprojects.json` | road projects & closures | at most hourly |
 | `trains/static.json`, `trains/points.json` | Metro-North's stations and line; the reporting points learned | at once; at most hourly |
 | `trains/traintime_routes.json` | Metro-North route lines from MTA TrainTime, clipped to the area (#362) | at once |
+| `trains/rail_assets.json` | Metro-North's numbered tracks, catenary poles and mileposts in the area (#371) | at once |
 | `aircraft/faa_registry.sqlite` | the FAA registry as built (~weekly) | at once |
 
 On start (in the background after the CAD serves, #251: `App.start_layers` → `_load_layers`, before the

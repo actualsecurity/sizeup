@@ -104,6 +104,14 @@ HTTP (sizeup/web/server.py; any signed-in person, GET only):
                                         delay_s, track, status}, soonest first, at most PER_DIR a direction
     GET /api/cad/trains/route?key=A>B   a train's route line from MTA TrainTime (#362): {key, runs: [[[lon, lat]...]]}
     GET /api/cad/trains/departures?station=2PC   a station's next departures from MTA TrainTime /countdown (#362)
+    GET /api/cad/trains/railref         the poles and mileposts layer (#371, sizeup/railassets.py): {source, at, error,
+                                        poles: [{id, lon, lat, tick}], mileposts: [{mp, lon, lat, whole}]}; tick: the
+                                        structure's line square across the tracks, [[lon, lat] x2] (#374)
+  A train also carries lane (the numbered track it is drawn on) and lane_how (said | held | outer: how sure), trk /
+  trk_src / trk_at (its track and who said it, posted | planned | mta, at which stop; only within TRACK_NEAR_M of that
+  stop), lane_at (held: the stop whose word it is), pole and mp (#371); the layer
+  "tracks": {"1": [[[lon, lat, s]...] run...]} beside the lanes and "railref": {poles: [[s, id]], mps: [[s, mp]]};
+  the event's ref pole / mp.
 
 MTA TrainTime (sizeup/traintime.py, #362): an undocumented MTA API with GPS positions, speed, consist, per-car load,
 milepost, posted track and OTP. While it reads well it is merged into the feed above by train number and run date
@@ -131,6 +139,7 @@ from urllib.parse import parse_qs
 from urllib.request import Request, urlopen
 
 from sizeup import USER_AGENT as UA
+from sizeup import railassets
 from sizeup import traintime
 
 SOURCE = "MTA"
@@ -167,6 +176,7 @@ PASSED_M = 50.0                  # a reported position this far beyond the point
 SIMPLIFY_M = 3.0
 HEADING_M = 150.0                # a train's heading: the line's direction over this much of it (about a train long)
 DP = 5                           # decimals of a position the page gets (about 1 m)
+DP_TRACK = 7                     # a numbered track's (1 cm: at 1 m, tracks 4 m apart wobble apart and together, #374)
 MILE_M = 1609.344
 MAX_CARS = 16
 FALLBACK_MPS = 20.0             # a pair of stations no train runs between: about 45 mph
@@ -209,6 +219,12 @@ SEED_POINTS = ROOT / "data" / "mnr_reporting_points.json"
 TRACKS_FILE = ROOT / "data" / "mnr_tracks.json"       # each direction's own track (tools/fetch_train_tracks.py)
 LANE_OFF_M = 40.0                # a lane's point further than this from the line: not measured on this line
 LANE_SLIP_M = 30.0               # nor one whose s is this far from where it projects
+TRACK_NEAR_M = 1500.0            # a stop's track says which track a train is on only this close to the stop (#371)
+TRACK_HOLD_M = 4000.0            # a stop's track held no further than this from the stop (an express may cross over beyond)
+TRACK_RANK = {"posted": 3, "planned": 2, "mta": 1}  # whose word for a stop's track wins: TrainTime's posted, planned, GTFS-rt
+OUTER_TRACK = {1: "4", -1: "3"}  # the direction's outer track: where the MTA's stops put trains here (fetch_train_tracks.py)
+TRACK_MEM_S = 3600.0             # a train's remembered track forgotten this long after it was last drawn
+RAILREF_PATH = "/api/cad/trains/railref"           # the poles and mileposts layer (#371)
 
 
 # ---- a small protobuf reader: the few GTFS-realtime fields we need --------------------------------------
@@ -693,9 +709,10 @@ class Lane:
 
 class Model:
     """The static feed's line and stations, ready to place trains on (each direction on its own track when tracks,
-    data/mnr_tracks.json's, fit this line)."""
+    data/mnr_tracks.json's, fit this line; each train on its own numbered track when Metro-North's track geometry is
+    here, sizeup/railassets.py, #371), and the poles and mileposts along it."""
 
-    def __init__(self, static: dict, bbox=DEFAULT_BBOX, tracks: dict | None = None):
+    def __init__(self, static: dict, bbox=DEFAULT_BBOX, tracks: dict | None = None, assets: dict | None = None):
         self.static = static
         self.line = Line([tuple(p) for p in static["line"]])
         self.stations: dict[str, dict] = static["stations"]
@@ -719,6 +736,14 @@ class Model:
             lane = Lane(coords) if len(coords) >= 2 else None
             if lane is not None and self._fits(lane):
                 self.lanes[d] = lane
+        # Metro-North's numbered tracks, poles and mileposts measured along this line (#371); none: as before
+        self.ref = railassets.RailRef(assets, self.line)
+        self.track_lanes: dict[str, list[Lane]] = {}           # each track's runs (a gap between two: no track there)
+        for num, runs in self.ref.tracks.items():
+            lanes = [lane for lane in map(Lane, runs) if self._fits(lane)]
+            if lanes:
+                self.track_lanes[num] = lanes
+        self.by_code = {st["code"]: st["ch"] for st in self.stations.values() if st.get("code")}
 
     def _fits(self, lane: Lane) -> bool:
         """The lane was measured on this line: a few of its points are where their s says, beside it."""
@@ -729,10 +754,77 @@ class Model:
                 return False
         return True
 
-    def where(self, d: int, s: float) -> tuple[float, float]:
-        """(lat, lon) a train going d is drawn at, s along the line: on its direction's track, else on the line."""
-        p = self.lanes[d].at(s) if d in self.lanes else None
+    def where(self, d: int, s: float, trk: str = "") -> tuple[float, float]:
+        """(lat, lon) a train going d is drawn at, s along the line: on its numbered track (trk, #371), else on its
+        direction's track, else on the line."""
+        p = self.track_at(trk, s) if trk else None
+        if p is None and d in self.lanes:
+            p = self.lanes[d].at(s)
         return p if p is not None else self.line.at(s)[:2]
+
+    def track_at(self, trk: str, s: float) -> tuple[float, float] | None:
+        """(lat, lon) of numbered track trk at s; None where we have no line of it (a gap, or beyond its ends)."""
+        for lane in self.track_lanes.get(trk, ()):
+            p = lane.at(s)
+            if p is not None:
+                return p
+        return None
+
+    def track_evidence(self, t: dict, anchors: list, p: int | None, n: int | None, s: float) -> dict | None:
+        """What says which numbered track a train at s is on (#371): the track at the stop it last left or the one it
+        is going to, only within TRACK_NEAR_M of that stop (between stations it may have crossed over), the nearer
+        stop's; for one stop, MTA TrainTime's posted track (sign_track) over its planned one (t2s_track) over
+        GTFS-realtime's ("mta"). {trk, src, ch (the stop's s), name}; None when nothing near says (no GPS guess: the
+        tracks are 4 m apart, closer than a phone-grade fix can tell)."""
+        if not self.track_lanes:
+            return None
+        num = lambda v: str(int(v)) if isinstance(v, str) and v.strip().isdigit() else (v or "").strip() if isinstance(v, str) else ""
+        cands = []
+        tt = t.get("tt") or {}
+        for x in (tt.get("prev"), tt.get("next")):
+            if x and x.get("track") and x.get("code") in self.by_code:
+                cands.append((num(x["track"]), "posted" if x.get("posted") else "planned", self.by_code[x["code"]], x.get("name") or x["code"]))
+        for k in (p, n):
+            if k is not None and anchors[k][0].get("track"):
+                st = anchors[k][0]
+                cands.append((num(st["track"]), "mta", anchors[k][1], self.stops.get(st["stop_id"], st["stop_id"])))
+        ok = [c for c in cands if abs(c[2] - s) <= TRACK_NEAR_M and self.track_at(c[0], s) is not None]
+        if not ok:
+            return None
+        trk, src, ch, name = min(ok, key=lambda c: (round(abs(c[2] - s)), -TRACK_RANK[c[1]]))
+        return {"trk": trk, "src": src, "ch": ch, "name": name}
+
+    def which_track(self, t: dict, anchors: list, p: int | None, n: int | None, s: float, d: int,
+                    mem: dict | None = None) -> tuple[str, dict | None, str]:
+        """(the numbered track the train is drawn on, the evidence it is drawn by or None, how sure: "said" | "held" |
+        "outer") (#371). "said": within TRACK_NEAR_M of the stop that said it; "held": the last stop's word, kept up to
+        TRACK_HOLD_M from that stop (beyond, an express may have crossed over: not held); "outer": nothing says, so the
+        direction's outer track (3 inbound, 4 outbound), only so it lies on a drawn track (an express may well be on
+        an inner one): not known. mem: what we remember of this train (Tracker.trk_mem): its track changes only on
+        better stop-track evidence (_better), so a merge flipping between TrainTime and GTFS-realtime doesn't move it.
+        ("", None, "") with no numbered track here."""
+        if not self.track_lanes:
+            return "", None, ""
+        ev = self.track_evidence(t, anchors, p, n, s)
+        if mem is not None:
+            old = mem.get("ev")
+            if ev is not None and (old is None or self._better(ev, old, d)):
+                mem["ev"] = ev
+            ev = mem.get("ev")
+        if ev is not None and abs(ev["ch"] - s) <= TRACK_HOLD_M and self.track_at(ev["trk"], s) is not None:
+            return ev["trk"], ev, "said" if abs(ev["ch"] - s) <= TRACK_NEAR_M else "held"
+        outer = OUTER_TRACK.get(d, "")
+        return (outer, None, "outer") if self.track_at(outer, s) is not None else ("", None, "")
+
+    @staticmethod
+    def _better(ev: dict, old: dict, d: int) -> bool:
+        """New stop-track evidence replaces what a train's track was drawn by (#371): for the same stop, only an equal or
+        better word (posted over planned over GTFS-realtime; the same track from a weaker source keeps the stronger
+        one); another stop's, only when that stop is ahead of the old one in the direction of travel (a merge
+        alternating TrainTime's next stop with GTFS-realtime's last one would flip it back and forth)."""
+        if round(ev["ch"]) == round(old["ch"]):
+            return TRACK_RANK[ev["src"]] >= TRACK_RANK[old["src"]]
+        return (ev["ch"] - old["ch"]) * d > 0 if d in (1, -1) else True
 
     @staticmethod
     def _interp(x: float, xs: list[float], ys: list[float]) -> float:
@@ -820,7 +912,8 @@ class Model:
                 return "too fast"
         return ""
 
-    def place(self, t: dict, anchors: list, d: int, now: float, fix: dict | None, points: Points | None = None) -> dict | None:
+    def place(self, t: dict, anchors: list, d: int, now: float, fix: dict | None, points: Points | None = None,
+              mem: dict | None = None) -> dict | None:
         """Where the train is drawn, and how far the page may carry it on: {s, lat, lon, bearing, mode, estimated,
         fix_at, fix_age_unknown, next, prev_s, hold_s, hold_kind, predict_until, segment, lag_s}; None when it
         isn't on the line now.
@@ -859,7 +952,8 @@ class Model:
                 s, mode = nxt[1], "stopped"              # at its first stop, or the feed says it is at the next
             else:
                 s, mode = prev[1], "stopped"             # the feed hasn't said it left
-        lat, lon = self.where(d, s)                      # on its own direction's track
+        lane, ev, how = self.which_track(t, anchors, p, n, s, d, mem)
+        lat, lon = self.where(d, s, lane)                # on its own numbered track, else its direction's
         hold_s, kind = s, "stop"
         if mode != "stopped":
             stop = nxt[1] if nxt is not None else None
@@ -887,6 +981,10 @@ class Model:
                 "hold_kind": kind, "predict_until": (fix["fix_at"] + (TT_HORIZON_S if fix.get("src") == "traintime" else PREDICT_S)
                                                      if fix is not None else None),
                 "segment": seg, "lag_s": round(lag, 1) if lag is not None else None,
+                **({"lane": lane, "lane_how": how} if lane else {}),
+                **({"trk": ev["trk"], "trk_src": ev["src"], "trk_at": ev["name"]} if ev and how == "said" else {}),
+                **({"lane_at": ev["name"]} if ev and how == "held" else {}),
+                **self.ref.at_s(s),
                 **({"v_fix": fix["v"], "a_fix": fix.get("a") or 0.0} if fix is not None and fix.get("v") is not None else {})}
 
     def facts(self, t: dict, now: float) -> dict:
@@ -925,13 +1023,17 @@ class Model:
         if track is None:
             track = Tracker()
             track.update(self, feed, now)
+        for k in [k for k, v in track.trk_mem.items() if now - v.get("seen", now) > TRACK_MEM_S]:
+            del track.trk_mem[k]
         out: dict[str, dict] = {}
         for t in feed.get("trains", {}).values():
             if not self.ours_train(t, now) or not t["stops"] and not t.get("pos"):
                 continue
             anchors = self.anchors(t)
             d = self.direction(t, anchors)
-            p = self.place(t, anchors, d, now, track.fix(t["id"]), track.points)
+            mem = track.trk_mem.setdefault(t["train"], {})   # its track across reads and sources (#371)
+            mem["seen"] = now
+            p = self.place(t, anchors, d, now, track.fix(t["id"]), track.points, mem)
             if p is None or not self.in_area(p["s"], 200.0):
                 continue
             key, label = DIRS[d]
@@ -946,13 +1048,14 @@ class Model:
 
     def tt_facts(self, t: dict, p: dict, now: float | None = None) -> dict:
         """What MTA TrainTime adds to a train (#362): "tt" (sizeup/traintime.py facts), its car count as "cars", and
-        "mp": the railroad milepost from TrainTime's turf, else from where we place it on the line (miles from Grand
-        Central); "pos_src": whose position it is drawn at."""
+        "mp": the railroad milepost read off Metro-North's mileposts where we draw it (#371), else from TrainTime's
+        turf, else from where we place it on the line (miles from Grand Central); "pos_src": whose position it is
+        drawn at."""
         tt = t.get("tt")
         if not tt:
             return {}
         fix = p.get("fix_at") is not None and (t.get("pos") or {}).get("src") == "traintime"
-        mp = tt.get("mp")
+        mp = p.get("mp") if p.get("mp") is not None else tt.get("mp")
         out = {"tt": tt, "pos_src": "traintime" if fix else "gtfs",
                "mp": mp if mp is not None else (round(p["s"] / MILE_M, 1) if fix else None)}
         if tt.get("cars"):
@@ -967,20 +1070,22 @@ class Model:
 
     def near(self, lat: float, lon: float) -> dict | None:
         """The event's reference point on the line: the station when one is within NEAR_M, else the nearest point
-        of the tracks when within NEAR_M; None when neither."""
+        of the tracks when within NEAR_M; None when neither. Either way, when the point is within NEAR_M of the line:
+        the nearest catenary structure ("pole") and the milepost ("mp") there (#371), when known."""
         dist, ch = self.line.project(lat, lon)
+        loc = self.ref.at_s(ch) if dist <= NEAR_M else {}
         st = min(self.stations.values(), key=lambda s: metres(lat, lon, s["lat"], s["lon"]), default=None)
         st_m = metres(lat, lon, st["lat"], st["lon"]) if st else math.inf
         if st is not None and st_m <= NEAR_M:
             return {"kind": "station", "name": st["name"], "station": st["id"], "ch": st["ch"], "m": round(st_m),
-                    "lat": st["lat"], "lon": st["lon"]}
+                    "lat": st["lat"], "lon": st["lon"]} | loc
         if dist > NEAR_M:
             return None
         by_ch = min(self.stations.values(), key=lambda s: abs(s["ch"] - ch))
         p = self.line.at(ch)
         return {"kind": "track", "name": by_ch["name"], "station": by_ch["id"], "ch": round(ch, 1), "m": round(dist),
                 "station_m": round(abs(by_ch["ch"] - ch)), "side": "east" if ch > by_ch["ch"] else "west",
-                "lat": round(p[0], 6), "lon": round(p[1], 6)}
+                "lat": round(p[0], 6), "lon": round(p[1], 6)} | loc
 
     def eta(self, t: dict, ref: dict, anchors: list, d: int, now: float, pch: float | None = None) -> dict | None:
         """When the train reaches the reference point: its predicted time there when it stops at that station,
@@ -1179,6 +1284,7 @@ class Tracker:
         self.points = points if points is not None else Points()
         self.log = log
         self.fixes: dict[str, dict] = {}
+        self.trk_mem: dict[str, dict] = {}               # train number -> {ev, seen}: its numbered track (#371)
         self.at: float | None = None
         self.rejected = 0
         self.why: dict[str, int] = {}
@@ -1293,7 +1399,8 @@ class Trains:
                  cache_dir: str | Path | None = None, fetch: Callable | None = None,
                  log: Callable[[str], None] = print, clock: Callable[[], float] = time.time, every_s: float = RT_EVERY_S,
                  seed: str | Path | None = SEED_POINTS, tracks: str | Path | None = TRACKS_FILE,
-                 traintime: bool = True, tt_url: str = "", tt_every_s: float = 5.0, tt_fetch: Callable | None = None):
+                 traintime: bool = True, tt_url: str = "", tt_every_s: float = 5.0, tt_fetch: Callable | None = None,
+                 rail_assets: bool = True, assets_fetch: Callable | None = None):
         from sizeup import traintime as tt
         self.enabled = bool(enabled)
         self.every_s = max(RT_EVERY_RANGE_S[0], min(RT_EVERY_RANGE_S[1], float(every_s)))
@@ -1331,6 +1438,10 @@ class Trains:
         self.track = Tracker(self.points, log)
         self.tracks = self._read_json(tracks) if tracks and self.enabled else None
         self._points_saved = 0.0
+        self.geo_at = 0.0                                 # the model last rebuilt with new tracks, poles, mileposts (#371)
+        # Metro-North's numbered tracks, catenary structures and mileposts (sizeup/railassets.py, #371): monthly
+        self.assets = railassets.RailAssets(bool(rail_assets) and self.enabled, self.bbox, Path(cache_dir) if cache_dir else None,
+                                            fetch=assets_fetch, log=log, clock=clock, on_update=self._assets_updated)
         # MTA TrainTime (sizeup/traintime.py, #362): GPS, consist, load, milepost, track, OTP; GTFS-realtime the fallback
         self.tt = tt.TrainTime(bool(traintime) and self.enabled, tt_url, tt_every_s, self.bbox,
                                Path(cache_dir) if cache_dir else None, fetch=tt_fetch, log=log, clock=clock,
@@ -1543,7 +1654,7 @@ class Trains:
             if code != 200:
                 raise HTTPError(self.gtfs_url, code, f"HTTP {code}", None, None)
             static = parse_static(body)
-            model = Model(static, self.bbox, self.tracks)
+            model = Model(static, self.bbox, self.tracks, self.assets.doc)
             if not model.area_stations:
                 raise ValueError("no New Haven Line station in the area")
         except HTTPError as e:
@@ -1572,13 +1683,35 @@ class Trains:
             at = doc.get("at")
             if not isinstance(at, (int, float)) or at > self.clock() + 60:
                 return
-            model = Model(doc["static"], self.bbox, self.tracks)
+            model = Model(doc["static"], self.bbox, self.tracks, self.assets.doc)
             if not model.area_stations:
                 return
             self.model = model
             self.st.update(at=at, next=at + STATIC_EVERY_S, modified=str(doc.get("modified", "")))
         except (OSError, ValueError, TypeError, KeyError, AttributeError) as e:
             self.log(f"trains: cache {self.cache.name} not read ({type(e).__name__}); fetching afresh")
+
+    def refresh_assets(self) -> bool:
+        """Metro-North's tracks, poles and mileposts now (the Data sources registry, monthly). Never raises."""
+        return self.assets.refresh()
+
+    def _assets_updated(self) -> None:
+        """New tracks, poles or mileposts: the model again with them (the line and stations as they are)."""
+        m = self.model
+        if m is None:
+            return
+        model = Model(m.static, self.bbox, self.tracks, self.assets.doc)
+        with self._fresh:
+            self.model = model
+            self.track.rebase(model)
+            self.geo_at = self.clock()
+        self.log(f"trains: {len(model.track_lanes)} numbered tracks on the line ({', '.join(sorted(model.track_lanes, key=int))}), "
+                 f"{len(model.ref.poles)} poles, {len(model.ref.mps)} mileposts")
+
+    def static_key(self) -> float | None:
+        """What the page's ?have= names: the line and stations it holds, and the tracks with them (#371)."""
+        at = self.st["at"]
+        return None if at is None else max(at, self.geo_at)
 
     def _read_json(self, f: str | Path) -> dict | None:
         try:
@@ -1642,19 +1775,19 @@ class Trains:
 
     def _base(self) -> dict:
         return {"configured": self.configured, "note": self.why_not(), "source": SOURCE, "label": LABEL, "link": LINK_URL,
-                "terms": TERMS_URL, "disclaimer": DISCLAIMER, **self.status(), "static_at": self.st["at"],
+                "terms": TERMS_URL, "disclaimer": DISCLAIMER, **self.status(), "static_at": self.static_key(),
                 "profile": {"accel": ACCEL, "decel": DECEL, "vmax": VMAX, "predict_s": PREDICT_S, "stale_s": STALE_S}}
 
     def public(self, have: float | None = None) -> dict:
         """The layer: the line and stations in our area, the trains on it now. have: the static_at the page
         already holds the line and stations of: then only the trains (the line doesn't change between them)."""
-        out = self._base() | {"line": [], "stations": [], "lanes": {}, "trains": [], "catenary": CATENARY, "bbox": list(self.bbox),
-                              "now": self.clock()}
+        out = self._base() | {"line": [], "stations": [], "lanes": {}, "tracks": {}, "railref": {}, "trains": [], "catenary": CATENARY,
+                              "bbox": list(self.bbox), "now": self.clock()}
         m = self.model
         if m is None:
             return out
-        if have is not None and self.st["at"] is not None and have == self.st["at"]:
-            del out["line"], out["stations"], out["lanes"]
+        if have is not None and self.st["at"] is not None and have == self.static_key():
+            del out["line"], out["stations"], out["lanes"], out["tracks"], out["railref"]
             out["static_same"] = True
         else:
             lo, hi = m.area
@@ -1662,6 +1795,14 @@ class Trains:
             out["stations"] = [{k: s[k] for k in ("id", "name", "code", "lat", "lon", "url")} for s in m.area_stations]
             out["lanes"] = {DIRS[d][0]: [[round(a, DP), round(b, DP), round(c, 1)] for a, b, c in lane.coords
                                          if lo - 1500 <= c <= hi + 1500] for d, lane in m.lanes.items()}
+            # each numbered track's runs (#371): a train is drawn on its "lane"; the poles' and mileposts' s, so the page
+            # reads them at the train's drawn s
+            keep = lambda c: lo - 1500 <= c <= hi + 1500
+            out["tracks"] = {k: runs for k, lanes in m.track_lanes.items()
+                             if (runs := [r for r in ([[round(a, DP_TRACK), round(b, DP_TRACK), round(c, 1)] for a, b, c in lane.coords if keep(c)]
+                                                      for lane in lanes) if len(r) >= 2])}
+            out["railref"] = {"poles": [[round(x, 1), i] for x, i in m.ref.poles if keep(x)],
+                              "mps": [[round(x, 1), v] for x, v in m.ref.mps if keep(x)]}
         with self._lock:
             out["trains"] = m.trains(self.view, self.clock(), self.track)
         if self.tt.active():
@@ -1692,7 +1833,7 @@ class Trains:
                 "at": s["at"], "bad": s["bad"], "dropped": s["dropped_total"], "fallback": "GTFS-realtime"}
 
     def handles(self, path: str) -> bool:
-        return path in ("/api/cad/trains", NEAR_PATH, ROUTE_PATH, DEPARTURES_PATH)
+        return path in ("/api/cad/trains", NEAR_PATH, ROUTE_PATH, DEPARTURES_PATH, RAILREF_PATH)
 
     def area_codes(self) -> dict[str, str]:
         """The stations on the map: {stop code: name} (2PC Port Chester, 2RY Rye...)."""
@@ -1720,6 +1861,9 @@ class Trains:
             except ValueError:
                 return 400, b'{"error":"lat, lon: numbers"}', JSON, {}
             return 200, json.dumps(self.near(lat, lon), separators=(",", ":")).encode(), JSON, {}
+        if path == RAILREF_PATH:                         # the poles and mileposts layer (#371)
+            m = self.model
+            return 200, json.dumps(self.assets.layer(m.ref.ticks if m is not None else None), separators=(",", ":")).encode(), JSON, {}
         if path == ROUTE_PATH:                           # {key, runs: [[[lon, lat]...]...]} clipped to the area; runs [] when none
             key = one("key")
             if not re.fullmatch(r"[0-9A-Z]{2,4}>[0-9A-Z]{2,4}", key):

@@ -13,6 +13,7 @@ them for minutes. This keeps a gzip copy of each in the same bucket, under the s
         trains/static.json        Metro-North's stations and line (sizeup/trains.py)
         trains/points.json        the train reporting points learned (sizeup/trains.py)
         trains/traintime_routes.json   Metro-North route lines from MTA TrainTime (sizeup/traintime.py, #362)
+        trains/rail_assets.json   Metro-North's tracks, catenary poles and mileposts (sizeup/railassets.py, #371)
         aircraft/faa_registry.sqlite   the FAA registry as built (sizeup/aircraft.py)
         roadgraph.json            the road graph for the rigs' routes (sizeup/roadgraph.py)
 
@@ -64,6 +65,7 @@ FILES: tuple[tuple[re.Pattern, float], ...] = (
     (re.compile(r"trains/static\.json"), 0.0),
     (re.compile(r"trains/points\.json"), 3600.0),
     (re.compile(r"trains/traintime_routes\.json"), 0.0),
+    (re.compile(r"trains/rail_assets\.json"), 0.0),    # Metro-North's tracks, poles, mileposts (sizeup/railassets.py, #371)
     (re.compile(r"aircraft/faa_registry\.sqlite"), 0.0),
     (re.compile(r"roadgraph\.json"), 0.0),               # the road graph (sizeup/roadgraph.py, #360): rebuilt monthly
 )

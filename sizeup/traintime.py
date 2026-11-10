@@ -256,6 +256,11 @@ def next_stop(rec: dict) -> dict | None:
     return next((s for s in rec.get("stops") or [] if s["status"] != "DEPARTED" and s["type"] != "EMPLOYEE"), None)
 
 
+def prev_stop(rec: dict) -> dict | None:
+    """The last stop it has left (passengers' stops), for the track it left on (#371)."""
+    return next((s for s in reversed(rec.get("stops") or []) if s["status"] == "DEPARTED" and s["type"] != "EMPLOYEE"), None)
+
+
 def route_key(rec: dict) -> str:
     """The route a train runs, by its first and last stop ("2SM>0NY"): its line on the map."""
     st = rec.get("stops") or []
@@ -269,7 +274,7 @@ def passengers(rec: dict) -> int | None:
 
 def facts(rec: dict, stations: dict[str, str] | None = None) -> dict:
     """What the popup shows of a train from this source (the hub adds these to the train as "tt")."""
-    nx = next_stop(rec)
+    nx, pv = next_stop(rec), prev_stop(rec)
     names = stations or {}
     return {"src": SOURCE, "loc_src": rec["loc_src"], "loc_at": rec["loc_at"], "speed_mph": rec["speed_mph"],
             "heading": rec["heading"], "mp": milepost(rec), "route_mp": rec["route_mp"], "branch": rec["branch_id"],
@@ -279,6 +284,8 @@ def facts(rec: dict, stations: dict[str, str] | None = None) -> dict:
             "late_s": rec["late_s"], "held": rec["held"], "canceled": rec["canceled"],
             "next": {"code": nx["code"], "name": names.get(nx["code"], nx["code"]), "track": nx["track"], "posted": nx["posted"],
                      "track_change": nx["track_change"], "sched": nx["sched"], "status": nx["status"]} if nx else None,
+            "prev": ({"code": pv["code"], "name": names.get(pv["code"], pv["code"]), "track": pv["track"], "posted": pv["posted"]}
+                     if pv and pv["track"] else None),
             "route": route_key(rec)}
 
 

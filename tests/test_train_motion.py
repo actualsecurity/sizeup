@@ -332,7 +332,7 @@ const map = {
   getContainer: () => ({ offsetParent: {} }), getCanvas: () => ({ style: {} }),
 };
 let on = true;
-const control = { map, on: () => on, panel: { hidden: true }, renderPanel() {} };
+const control = { map, on: (k) => k === "trains" && on, panel: { hidden: true }, renderPanel() {} };
 const flush = () => new Promise((r) => setImmediate(r));
 async function advance(ms, step = 100) {
   const end = now + ms;

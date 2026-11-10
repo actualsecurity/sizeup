@@ -3163,7 +3163,8 @@ class App:
     def _reread_caches(self) -> None:
         """The small providers read their caches when they were made, before cachesync put a new task's back: again."""
         for name, fn in (("roads", lambda: self.roads._load()), ("roadwork", lambda: self.roadwork._load()),
-                         ("trains", lambda: (self.trains._load(), self.trains._load_points(None), self.trains.tt._load_routes())),
+                         ("trains", lambda: (self.trains._load(), self.trains._load_points(None), self.trains.tt._load_routes(),
+                                             self.trains.assets.reload())),
                          ("weather", lambda: self.weather._load()),
                          ("aircraft", lambda: self.aircraft.registry.con is None and self.aircraft.registry._open())):
             try:
