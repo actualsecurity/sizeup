@@ -82,14 +82,22 @@ MAX_SPEED_MS = 100.0            # m/s; faster is no fire apparatus (360 km/h): i
 EPOCH_MIN, EPOCH_MAX = 1e9, 1e10   # plausible epoch seconds (2001-2286): milliseconds (1.7e12) are refused
 RECENT_S = 6 * 3600.0           # cleared calls looked at for a return trip (the longest window allowed)
 AT_HOME_KM = 0.15               # an AVL fix this close to its station: in quarters (turnout counts)
-LOOK = {"free": "available", "oos": "oos", "dispatched": "dispatched", "": "dispatched", "enroute": "responding",
-        "onscene": "onscene"}
+LOOK = {"free": "available", "oos": "oos", "dispatched": "dispatched", "enroute": "responding", "onscene": "onscene"}
+# Every other role is committed to a call (role '' in data/cad_lists.json: acknowledged, staging, out at, call back,
+# dispatched by other agency; or one not known here): drawn as dispatched, an active rig (#376: chips longest).
+ACTIVE_LOOK = "dispatched"
+
+
+def look_of(role: str | None) -> str:
+    """A status role -> the marker's look: available (idle) | oos | dispatched | responding | onscene (active)."""
+    return LOOK.get(role or "", ACTIVE_LOOK)
 SNIPPET = 160
 # Rigs decluttered by zoom (#376; drawn by cadmap.js): below detail_zoom an idle rig is a dot (two or more idle at one
 # firehouse: one badge, "HQ · 6"), below active_zoom an active one (on a call) a strong dot. Settings > System > Map
-# display; the wall board (/monitor, read from across the room, always showing the whole area) has its own pair.
+# display; the wall board (/monitor, read from across the room, always showing the whole area) has its own pair. A map
+# on its automatic frame (the area or the call, not moved by hand) keeps every active rig a full chip whatever its zoom.
 DISPLAY_SECTION = "map_display"
-DISPLAY_DEFAULTS = {"detail_zoom": 15.0, "active_zoom": 12.0, "board_detail_zoom": 16.0, "board_active_zoom": 10.0}
+DISPLAY_DEFAULTS = {"detail_zoom": 15.0, "active_zoom": 10.0, "board_detail_zoom": 16.0, "board_active_zoom": 10.0}
 DISPLAY_LABELS = {"detail_zoom": "Idle rigs: chips from zoom", "active_zoom": "Active rigs: chips from zoom",
                   "board_detail_zoom": "Wall board, idle: chips from zoom",
                   "board_active_zoom": "Wall board, active: chips from zoom"}
@@ -280,7 +288,7 @@ def place(unit: dict, role: str, station: dict | None = None, incident: dict | N
     line_to: [lon, lat] | None, station, home_line (the line is to its station: thin)}; a "position"
     one also has its fix's at, age (s), stale, and heading / speed / source when the fix has them."""
     fire = is_fire(unit) if fire is None else fire
-    look = LOOK.get(role, "dispatched")
+    look = look_of(role)
     inc_ll = _ll(incident)
     if incident is None and not fire:
         return None                                  # EMS / police / agencies: only while on an event

@@ -656,6 +656,8 @@ class Editor:
                 raise CadError(str(e)) from None
         else:
             raise CadError("action: set or reset")
+        if v == cur:                                    # nothing changes: nothing written, nothing audited
+            return {"ok": True, "map_display": self.mapd_page()}
         out = self._commit([(MAPD_SECTION, key, REMOVE if v == d else v)], op,
                            [("system", f"{MAPD_SECTION}/{key}", f"{cur:g}", f"{v:g}")])
         return {**out, "map_display": self.mapd_page()}

@@ -58,7 +58,6 @@
      status color (active: larger, ringed; out of service: smallest, faint), opening to its chip under the pointer;
      a firehouse's idle rigs one badge ("HQ · 6"); a rig in a badge hidden (its marker kept) */
   .cm-rig.act:not(.hl, .hot, .talking) { z-index: 4; }
-  .cm-rig.look-oos:not(.followed, .hl, .hot, .talking) { z-index: 2; }
   .cm-rig.folded { display: none; }
   .cm-rig.rig-dot { padding: 0; inline-size: var(--s-2); block-size: var(--s-2); border-radius: 50%; font-size: 0; line-height: 0;
                     border-color: rgba(17, 19, 21, 0.85); box-shadow: 0 0 2px rgba(0, 0, 0, 0.7); }
@@ -72,7 +71,7 @@
   }
   .cm-rig.rig-dot:hover > * { display: inline; }
   .cm-badge {
-    z-index: 2; min-block-size: 0; padding: 0 var(--s-1); font: 700 var(--fs-2xs)/var(--lh-2xs) var(--mono); white-space: nowrap;
+    z-index: 2;   /* under every rig: the firehouse's other marks fan over the top, never under it */ min-block-size: 0; padding: 0 var(--s-1); font: 700 var(--fs-2xs)/var(--lh-2xs) var(--mono); white-space: nowrap;
     color: var(--text); background: color-mix(in srgb, var(--panel) 90%, transparent); border: var(--bw) solid var(--c, var(--line-strong));
     border-inline-start-width: var(--s-1); border-radius: var(--radius-s); box-shadow: 0 1px 4px rgba(0, 0, 0, 0.7); cursor: zoom-in;
   }

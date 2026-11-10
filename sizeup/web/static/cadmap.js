@@ -41,9 +41,12 @@
 // Decluttered by zoom (#376; the zooms: state.map.display, Settings > System > Map display, mapview.py DISPLAY_DEFAULTS):
 //
 //   idle (available, in quarters, returning)   below detail_zoom a dot; two or more idle at one firehouse: one badge
-//                                              there, "HQ · 6" (its tooltip lists them; a click zooms to detail_zoom)
+//                                              under it, "HQ · 6" (its tooltip lists them; a click zooms to detail_zoom),
+//                                              the firehouse's other marks over the top
 //   active (on a call: dispatched, responding, on location, staging ...)   full chips down to active_zoom (never
-//                                              above detail_zoom), drawn over the rest; below it a strong dot
+//                                              above detail_zoom), drawn over the rest; below it a strong dot (a stale
+//                                              fix's dot not faded); on the map's automatic frame (the area or the
+//                                              call, not moved by hand: RigMap.userMoved) always full chips
 //   out of service                             below detail_zoom the smallest, faintest dot
 //   followed, picked, transmitting, its row hovered   always the full chip; a dot under the pointer opens to its chip
 //
@@ -87,10 +90,10 @@ window.CadMap = (() => {
   }
 
   // ---- decluttered by zoom (#376) ----------------------------------------------------------------------------------
-  const ZOOMS = { detail_zoom: 15, active_zoom: 12, board_detail_zoom: 16, board_active_zoom: 10 };   // mapview.py's
-  const ACTIVE_LOOKS = new Set(["dispatched", "responding", "onscene"]);
-  // act: on a call (drawn over the rest, chips longest), oos: out of service (smallest), idle: the rest
-  const rigClass = (m) => (m.incident_id || ACTIVE_LOOKS.has(m.look) ? "act" : m.look === "oos" ? "oos" : "idle");
+  const ZOOMS = { detail_zoom: 15, active_zoom: 10, board_detail_zoom: 16, board_active_zoom: 10 };   // mapview.py's
+  // by the hub's look (mapview.look_of): idle "available", out of service "oos", every other look (dispatched,
+  // responding, onscene: committed to a call) active: drawn over the rest, chips longest
+  const rigClass = (m) => (m.look === "available" ? "idle" : m.look === "oos" ? "oos" : "act");
   // {detail, active}: this map's zooms (the wall board's own pair); active never above detail
   function zoomsOf(M, board) {
     const d = (M && M.display) || {}, p = board ? "board_" : "";
@@ -98,8 +101,9 @@ window.CadMap = (() => {
     const detail = z("detail_zoom");
     return { detail, active: Math.min(z("active_zoom"), detail) };
   }
-  // the band a zoom is in: {detail: chips for all, active: chips for the active}
-  const bandOf = (zoom, Z) => ({ detail: zoom >= Z.detail, active: zoom >= Z.active });
+  // the band a zoom is in: {detail: chips for all, active: chips for the active}; auto: the map on its automatic frame
+  // (the area or the call, not moved by hand): the active rigs full at any zoom
+  const bandOf = (zoom, Z, auto) => ({ detail: zoom >= Z.detail, active: !!auto || zoom >= Z.active });
   // Each marker's size in this band: "full" | "dot" | "folded" (in its firehouse's badge), and the badges (station name
   // -> its idle markers, two or more). lit(m): followed, picked, transmitting or its row hovered: always full.
   function declutter(markers, band, lit) {
@@ -326,6 +330,7 @@ window.CadMap = (() => {
       this.chips = new Map();
       this.badges = new Map();         // station name -> its badge (#376): {marker, el, sig}
       this.band = null;                // the zoom band the rigs are laid out for (#376): set on zoomend and a new state
+      this.auto = () => false;         // RigMap: on its automatic frame (not moved by hand)
       this.data = null;
       this.focus = null;
       this.lineSig = "";
@@ -380,16 +385,19 @@ window.CadMap = (() => {
       else { map.once("load", tryInit); map.once("idle", tryInit); }
       map.on("zoom", () => {
         const far = map.getZoom() < FAR_ZOOM;
-        if (far !== this.far) { this.far = far; opts.host.classList.toggle("cm-far", far); this.draw(); }
+        if (far !== this.far) { this.far = far; opts.host.classList.toggle("cm-far", far); this.setBand(); this.draw(); }
       });
-      map.on("zoomend", () => { if (this.setBand()) this.draw(); });   // #376: laid out again only if the band changed
+      // #376: laid out again only if the band changed; moveend too: a drag takes the map off its automatic frame
+      const settle = () => { if (this.setBand()) this.draw(); };
+      map.on("zoomend", settle);
+      map.on("moveend", settle);
     }
 
     // the zoom band for the rigs' sizes (#376), from the map's zoom now and this map's zooms; true if it changed
     setBand() {
       let zoom;
       try { zoom = this.map.getZoom(); } catch (_) { return false; }
-      const b = bandOf(zoom, zoomsOf(this.data && this.data.map, this.opts.board));
+      const b = bandOf(zoom, zoomsOf(this.data && this.data.map, this.opts.board), this.auto());
       const changed = !this.band || b.detail !== this.band.detail || b.active !== this.band.active;
       this.band = b;
       return changed;
@@ -514,18 +522,20 @@ window.CadMap = (() => {
           const n = list.length, deg = Math.PI / 180;
           const dots = list.every((m) => size(m) === "dot"), gap = dots ? DOT_W : RING_GAP * k;
           const sum = list.reduce((a, m) => a + wOf(m), 0), w = Math.max(...list.map(wOf));
-          if (m0.place === "station") {
-            const badge = !!(sizes && sizes.badges.has(m0.station));
-            r = Math.max(ring ? r + gap : dots && !badge ? DOT_R : STATION_R * k, sum / (2 * Math.PI));
+          const badge = m0.place === "station" && !!(sizes && sizes.badges.has(m0.station));
+          if (m0.place === "station" && !badge) {
+            r = Math.max(ring ? r + gap : dots ? DOT_R : STATION_R * k, sum / (2 * Math.PI));
             list.forEach((m, i) => {
-              const a = (badge ? -1 : 1) * Math.PI / 2 + (2 * Math.PI * i) / n + (ring ? Math.PI / n : 0);
+              const a = Math.PI / 2 + (2 * Math.PI * i) / n + (ring ? Math.PI / n : 0);
               out.set(m.unit, [Math.round(r * Math.cos(a)), Math.round(r * Math.sin(a) * 0.82)]);
             });
             return;
           }
-          const step = n > 1 ? Math.min(270 / (n - 1), 62) * deg : 0;       // centred on the top, 270° at most
+          // a call's: an arc centred on the top, 270° at most; a firehouse with a badge under it: 180° (#376: the lower
+          // arc left to the badge, nothing under it)
+          const step = n > 1 ? Math.min((badge ? 180 : 270) / (n - 1), 62) * deg : 0;
           const need = step ? w / (2 * Math.sin(step / 2)) : 0;                // neighbours a chip apart
-          r = Math.max(ring ? r + gap : dots ? DOT_R : INC_R * k, need);
+          r = Math.max(ring ? r + gap : badge ? STATION_R * k : dots ? DOT_R : INC_R * k, need);
           list.forEach((m, i) => {
             const a = -Math.PI / 2 + (i - (n - 1) / 2) * step;
             out.set(m.unit, [Math.round(r * Math.cos(a)), Math.round(r * Math.sin(a) * 0.82)]);
@@ -556,7 +566,7 @@ window.CadMap = (() => {
         if (fx) this.hasFix = true;
         const age = fx && fx.stale ? agoS(fx.age) : "";
         const sig = JSON.stringify([m.lon, m.lat, off, m.look, m.ring, m.place, st.bg, talk, m.tag, m.station, m.incident_number,
-          m.returning_from, onFocus, !!this.focus, this.far, age, fx && Math.round(fx.fade * 20), lit, m.source, sz]);
+          m.returning_from, onFocus, !!this.focus, this.far, age, fx && Math.round(fx.fade * 20), lit, m.source, sz, cl]);
         let rec = this.chips.get(m.unit);
         if (!rec) {
           const e = h("button", "cm-rig");
@@ -577,7 +587,8 @@ window.CadMap = (() => {
           + (this.focus && m.incident_id && !onFocus ? " other" : "") + (onFocus ? " mine" : "")
           + (fx && fx.stale ? " stale" : "") + (lit[0] ? " hl" : "") + (lit[1] ? " hot" : "") + (lit[2] ? " followed" : "");
         e.style.setProperty("--c", st.bg || "#9AA3AD");
-        e.style.opacity = fx && fx.stale ? String(Math.round(fx.fade * 100) / 100) : "";
+        // a stale fix fades; not an active rig's dot (#376: it stays plain to see)
+        e.style.opacity = fx && fx.stale && !(sz === "dot" && cl === "act") ? String(Math.round(fx.fade * 100) / 100) : "";
         e.replaceChildren(h("span", "n", m.unit));
         if (m.tag) e.append(h("span", "tag", m.tag));
         if (age) e.append(h("span", "age", age));
@@ -599,8 +610,7 @@ window.CadMap = (() => {
     drawBadges(badges, M, lists) {
       for (const [name, list] of badges) {
         const short = shortOf(M, name), units = list.map((m) => m.unit);
-        const color = statusOf(lists, list[0].status).bg || "";
-        const sig = JSON.stringify([short, units, list[0].lon, list[0].lat, color]);
+        const sig = JSON.stringify([short, units, list[0].lon, list[0].lat]);
         let rec = this.badges.get(name);
         if (!rec) {
           const e = h("button", "cm-badge");
@@ -619,8 +629,7 @@ window.CadMap = (() => {
         if (rec.sig === sig) continue;
         rec.sig = sig;
         const e = rec.el;
-        e.replaceChildren(`${short} · ${units.length}`);
-        e.style.setProperty("--c", color || "#9AA3AD");
+        e.replaceChildren(`${short} · ${units.length}`);                   // neutral: its units' statuses may differ
         e.title = `${name}: ${units.join(", ")}`;
         e.setAttribute("aria-label", e.title);
         rec.marker.setLngLat([list[0].lon, list[0].lat]);
@@ -846,6 +855,7 @@ window.CadMap = (() => {
       };
       btn("Recenter", opts.manual ? "Back to the location" : "Back to the call and its rigs", () => {
         this.userMoved = false;
+        if (this.layer.setBand()) this.layer.draw();  // #376: the automatic frame again: active rigs full
         this.map.fire("sizeup:recenter");             // an aircraft being followed (aircraft.js) is let go
         if (opts.onRecenter) opts.onRecenter(); else this.fit(true);
       }, "locate");
@@ -870,6 +880,7 @@ window.CadMap = (() => {
       this.map.on("movestart", (e) => { if (e.originalEvent) this.userMoved = true; });
       this.map.on("sizeup:follow", () => { this.userMoved = true; });   // following an aircraft: no refit until Recenter
       this.layer = new RigLayer(this.map, { ...opts, host });
+      this.layer.auto = () => !this.userMoved;        // #376: on the automatic frame, every active rig a full chip
       // following a rig (#358, mapfollow.js): not on the new call's map (its owner moves it), nor the wall board's
       this.fol = !opts.manual && opts.follow !== false && window.MapFollow
         ? new MapFollow.Follower(this.map, host, { cls: "ac-follow cm-follow", textCls: "ac-follow-t", icon: "locate",
@@ -918,6 +929,7 @@ window.CadMap = (() => {
         const following = !!(this.fol && this.fol.id);   // #358: never refit under a follow
         if (!following) { if (!this.userMoved && !this.opts.manual) this.fit(!first); }
       }
+      if (this.layer.setBand()) this.layer.draw();    // #376: framed again (another call, the calls changed)
     }
 
     // a rig followed (centred, zoomed in, kept centred; ringed for a while) or only picked (centred, ringed)
