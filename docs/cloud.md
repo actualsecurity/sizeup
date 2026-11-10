@@ -1880,7 +1880,10 @@ the train's own (TrainTime's, or the line's).
 **Smooth tracks (#374):** a run keeps the service's own point order (turned to run up the line, its `s` held
 where it steps back). Sorted by `s`, it zig-zagged wherever the static line's kinks put nearby points' `s` out of
 order. The service's few digitising slips (hairpins doubling back 3-9 m, 1 cm steps at right angles) are dropped
-(a vertex turning more than 45°), and the page gets the tracks to 1 cm (at 1 m, tracks 4 m apart wobble).
+(a vertex turning more than 45°), and the page gets the tracks to 1 cm (at 1 m, tracks 4 m apart wobble). From
+zoom 15 the basemap's own rail line (OpenStreetMap's, drawn dashed between our tracks) is masked out of a
+corridor around them (`within`, on the style's `rail` layer while the trains layer is on); it stays elsewhere
+and zoomed out.
 
 **Poles and mileposts:** the nearest structure along the line (within 150 m), and the milepost read off the
 two either side (straight between; a milepost out of order along the line is left out). A train's box, and
