@@ -250,6 +250,7 @@ def units_match(a, b) -> set[str]:
 TOWNS: tuple[tuple[str, ...], ...] = ()      # known town names as word tuples, longest first (set_towns)
 TOWN_OF: dict[tuple[str, ...], str] = {}       # ... and the town each one means (an alias's town)
 TOWN_NAME: dict[tuple[str, ...], str] = {}     # a listed town's own spelling, for display ("Sample Village")
+LISTED: frozenset = frozenset()                # the listed towns' keys (geo_town_order), not the aliases
 EXT = {"ext": "ext", "extension": "ext", "extn": "ext"}
 PLACE_ABBR = {"st": "saint", "mt": "mount", "ft": "fort"}   # a place's name: "@ST PAUL CHURCH" = "@SAINT PAUL CHURCH"
 
@@ -257,10 +258,11 @@ PLACE_ABBR = {"st": "saint", "mt": "mount", "ft": "fort"}   # a place's name: "@
 def set_towns(names, aliases: dict | None = None) -> None:
     """The towns a location may end with ("12 King St <town>"): the lists' geo_town_order and geo_town_aliases. Only
     these are dropped as a town (two different ones named: two places); any other trailing word stays."""
-    global TOWNS, TOWN_OF, TOWN_NAME
+    global TOWNS, TOWN_OF, TOWN_NAME, LISTED
     key = lambda n: tuple(re.findall(r"[a-z0-9]+", str(n).lower()))
     TOWN_OF = {key(n): str(n).lower() for n in names if key(n)}
     TOWN_NAME = {key(n): str(n).strip() for n in names if key(n) and str(n).strip() != str(n).strip().lower()}
+    LISTED = frozenset(key(n) for n in names if key(n))
     for a, town in (aliases or {}).items():
         if key(a):
             TOWN_OF[key(a)] = str(town).lower()
@@ -360,6 +362,15 @@ def _town_shown(words) -> str:
     return TOWN_NAME.get(key) or proper_case(" ".join(words))
 
 
+def _title_town(words) -> str:
+    """The town a title shows: as _town_shown, but none for a "Town of ..." alias that is not a listed town itself (a
+    town can hold villages of its own: the address may be in one of them, not the town's own name)."""
+    key = tuple(re.findall(r"[a-z0-9]+", " ".join(words).lower()))
+    if key[:2] == ("town", "of") and key not in LISTED:
+        return ""
+    return _town_shown(words)
+
+
 def _split_town(part: str) -> tuple[str, str]:
     """('12 EXAMPLE AVE', 'Sample Village') for a street part ending with a known town ('12 EXAMPLE AVE sample village');
     the town is split off only when a word that is not a number is left before it."""
@@ -368,7 +379,7 @@ def _split_town(part: str) -> tuple[str, str]:
         n = len(t)
         if len(toks) > n and tuple(w.lower() for w in toks[-n:]) == t \
                 and any(not re.fullmatch(r"\d+[a-z]?", w, re.I) for w in toks[:-n]):
-            return " ".join(toks[:-n]), _town_shown(toks[-n:])
+            return " ".join(toks[:-n]), _title_town(toks[-n:])
     return part, ""
 
 
@@ -381,7 +392,7 @@ def _town_text(s: str) -> str:
                  *(t.replace("_", " ") for t in re.findall(r"\b[A-Za-z0-9]+(?:_[A-Za-z0-9]+)+\b", head))]:
         words = re.findall(r"[A-Za-z0-9]+", part)
         if words and tuple(w.lower() for w in words) in TOWN_OF:
-            return _town_shown(words)
+            return _title_town(words)
     return ""
 
 
@@ -441,7 +452,8 @@ def proper_case(s: str) -> str:
     out, at = [], 0
     for i, m in enumerate(words):
         gap, w = s[at:m.start()], m.group(0)
-        first = i == 0 or bool(re.search(r"[@:/&(\[;,]", gap)) or gap == " - "
+        first = (i == 0 or bool(re.search(r"[@:/&(\[;,]", gap)) or gap == " - "    # a name starts: "12 The Crossway"
+                 or (gap == " " and bool(re.fullmatch(r"\d+[a-z]?", words[i - 1].group(0), re.I))))
         prev = words[i - 1].group(0) if i and not gap.strip() else ""
         nxt = words[i + 1].group(0) if i + 1 < len(words) and s[m.end():words[i + 1].start()] in (" ", "-") else ""
         out.append(gap + (_case_word(w, first, prev, nxt) if w in (w.upper(), w.lower()) else w))

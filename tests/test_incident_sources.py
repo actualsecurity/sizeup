@@ -1787,6 +1787,9 @@ def test_an_open_late_earlier_call_10_min_before_stays_separate(tmp_path):
     ("12 EXAMPLE AVE : @SAMPLE PARK - SAMPLE VILLAGE", "12 Example Ave : @Sample Park - Sample Village"),
     ("12 example ave", "12 Example Ave"), ("12 McExample Ave", "12 McExample Ave"),
     ("12 EXAMPLE AVE SAMPLE_TOWN", "12 Example Ave Sample Town"), ("12 EXAMPLE AVE TOWN_OF_SAMPLE", "12 Example Ave Town of Sample"),
+    ("12 THE CROSSWAY", "12 The Crossway"), ("1 ON THE GREEN", "1 On the Green"), ("12A THE SAMPLE", "12A The Sample"),
+    ("SAMPLE AVE / THE CROSSWAY", "Sample Ave / The Crossway"), ("SAMPLE AVE & THE MALL", "Sample Ave & The Mall"),
+    ("@THE SAMPLE CLUB", "@The Sample Club"), ("12 SAMPLE OF THE ARTS", "12 Sample of the Arts"),
     ("", ""),
 ])
 def test_proper_case(raw, shown):
@@ -1864,3 +1867,29 @@ def test_an_old_title_in_raw_case_stays_until_the_feed_moves_it(tmp_path):
     rig.feed.put("A1", type="ALARM/COMM", location="14 EXAMPLE AVE", units=("E60", "L31"), times={"dispatched": T0})
     rig.poll()
     assert rig.incidents()[0]["address"] == "14 Example Ave"
+
+
+@pytest.fixture
+def synthetic_towns():
+    """Made-up towns: two listed (one of them a "Town of ..."), a "Town of ..." alias and a hamlet alias."""
+    saved = (src.TOWNS, src.TOWN_OF, src.TOWN_NAME, src.LISTED)
+    src.set_towns(["Sampleton", "Exampleville", "Town of Otherton"],
+                  {"town of sampleton": "Sampleton", "hamletburg": "Exampleville"})
+    yield
+    src.TOWNS, src.TOWN_OF, src.TOWN_NAME, src.LISTED = saved
+
+
+def test_a_town_of_alias_is_never_a_title_s_town(synthetic_towns):
+    """A town can hold villages of its own: "TOWN_OF_SAMPLETON" (an alias) may be one of them, so the title names none;
+    a listed town is shown, a "Town of ..." one too, and the remark keeps the county's words."""
+    shown = src.shown_location
+    assert shown("12 EXAMPLE AVE TOWN_OF_SAMPLETON") == "12 Example Ave"
+    assert shown("12 EXAMPLE AVE TOWN OF SAMPLETON") == "12 Example Ave"
+    assert shown("12 EXAMPLE AVE, TOWN OF SAMPLETON") == "12 Example Ave"
+    assert shown("12 EXAMPLE AVE SAMPLETON") == "12 Example Ave, Sampleton"
+    assert shown("12 EXAMPLE AVE TOWN_OF_OTHERTON") == "12 Example Ave, Town of Otherton"
+    assert shown("12 EXAMPLE AVE HAMLETBURG") == "12 Example Ave, Hamletburg"
+    assert src.proper_case("12 EXAMPLE AVE TOWN_OF_SAMPLETON") == "12 Example Ave Town of Sampleton"
+    # matching still reads the alias as its town
+    assert same_place("12 EXAMPLE AVE TOWN_OF_SAMPLETON", shown("12 EXAMPLE AVE SAMPLETON"))
+    assert not same_place("12 EXAMPLE AVE TOWN_OF_SAMPLETON", "12 EXAMPLE AVE EXAMPLEVILLE")
