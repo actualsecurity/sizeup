@@ -1807,6 +1807,7 @@ class Trains:
             out["trains"] = m.trains(self.view, self.clock(), self.track)
         if self.tt.active():
             out["alerts"] = list(self.tt.alerts)
+            out["branch_alerts"] = dict(self.tt.branch_alerts)
         return out
 
     def stations(self) -> list[dict]:

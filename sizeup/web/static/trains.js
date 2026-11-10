@@ -484,7 +484,7 @@ window.TrainLayer = (() => {
   function alertRow(k, label, list, isLine) {
     const a = list[0], st = (a.status || "").toLowerCase().replace(/^some\s+/, "");
     const said = isLine && a.about ? (a.brief || "").replace(/ \([^)]*\)$/, "") : a.brief;     // another train's: no cause
-    const what = [isLine && st && st !== "good service" ? st : "", [isLine ? a.about : "", said || a.header].filter(Boolean).join(" ")]
+    const what = [isLine && st && st !== "good service" ? st : "", [isLine ? a.about : "", said || "see alert"].filter(Boolean).join(" ")]
       .filter(Boolean).join(" \u00b7 ");
     const text = `${label}: ${what}`, rest = list.slice(1);
     return { k, cls: "tr-alert", text, title: alertFull(a), el: () => {
@@ -858,7 +858,8 @@ window.TrainLayer = (() => {
       // Metro-North's alerts (#385): the hub's plain text (never HTML). Those that name this train as "This train"; the
       // rest as the line's, labelled with the train they name; one line each, the full text and the others on hover
       const mine = tt.alerts || [], heads = new Set(mine.map((x) => x.header));
-      const line = (d.alerts || []).filter((x) => !heads.has(x.header));
+      const own = d.branch_alerts && tt.branch && d.branch_alerts[tt.branch];      // its own branch's, else the New Haven Line's
+      const line = (own || d.alerts || []).filter((x) => !heads.has(x.header));
       if (mine.length) rows.push(alertRow("alert-this", "This train", mine, false));
       if (line.length) rows.push(alertRow("alert-line", "Line", line, true));
       rows.push(cat);
