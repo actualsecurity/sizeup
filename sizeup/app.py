@@ -690,6 +690,10 @@ class App:
                 log(f"atc: airport pre-alerts from {', '.join(airband)} ({len(self.atc.rules.rules)} rules)")
             except (OSError, ValueError, KeyError) as e:
                 log(f"atc: WARNING the pre-alert rules didn't load ({type(e).__name__}: {e}): no HPN ATC pre-alerts")
+        # ... and the ones that build up over several transmissions (#369, sizeup/airport_watch.py): an abnormal
+        # go-around followed through its frequency changes (_atc, _atc_view), "alert level N" on 60 Control (the CAD's)
+        self.cad.airport_watch.configure(cfg.channels, self._atc_aircraft, cfg.atc_alert_level_incident,
+                                         enabled=cfg.atc_enabled)
         # The emergency window (alarms.Windows): the button's talkgroup and radio kept this long, Record off or on
         self.cad.alarms.windows.keep_s = cfg.p25_emergency_window_min * 60
         self.cad.alarms.on_clear = self._all_clear_sent
@@ -961,12 +965,20 @@ class App:
                 log(f"atc: {t.id}: {type(e).__name__}: {e}")
         # ... and who is talking (#252, sizeup/atc_talkers.py: the callsign heard, matched to ADS-B; speech-derived)
         talkers = getattr(self.cad, "atc_talkers", None)
+        rec = None
         if talkers is not None and talkers.handles(t.source):
             try:
-                talkers.heard({"id": t.id, "source": t.source, "start": t.start, "end": t.end, "text": txt,
-                               "carrier_db": getattr(t, "carrier_db", None)})
+                rec = talkers.heard({"id": t.id, "source": t.source, "start": t.start, "end": t.end, "text": txt,
+                                     "carrier_db": getattr(t, "carrier_db", None)})
             except Exception as e:  # never stops the monitor
                 log(f"atc talkers: {t.id}: {type(e).__name__}: {e}")
+        # ... and an abnormal go-around built up over several transmissions (#369, sizeup/airport_watch.py)
+        aw = getattr(self.cad, "airport_watch", None)
+        if aw is not None and aw.enabled and self._kind.get(t.source) == "airband":
+            try:
+                aw.heard_atc({"id": t.id, "source": t.source, "start": t.start, "end": t.end, "text": txt}, rec)
+            except Exception as e:  # never stops the monitor
+                log(f"airport watch: {t.id}: {type(e).__name__}: {e}")
 
     def _keep_source(self, cid: str, audio: np.ndarray | None) -> None:
         """The exact audio speech-to-text was given (before the listening filter), kept with the
@@ -2103,6 +2115,12 @@ class App:
     def _atc_view(self, view, now) -> None:
         """A new Aircraft layer picture on the CAD of record: to the ATC talkers, and a look at the vocabulary (#257)."""
         self.cad.atc_talkers.observe(view, now)
+        aw = getattr(self.cad, "airport_watch", None)
+        if aw is not None and aw.enabled:
+            try:                     # an open pre-alert's aircraft followed (#369): kept open, ended when it lands
+                aw.tick(self._atc_aircraft(), now)
+            except Exception as e:  # noqa: BLE001 - the aircraft layer goes on
+                log(f"airport watch: {type(e).__name__}: {e}")
         r = getattr(self, "atc_refresh", None)
         if r is not None:
             try:

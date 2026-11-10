@@ -48,6 +48,10 @@ sizeup/sources/runner.py (they come here as "source_event" / "source_health" thr
     logs       our incident ids and the source's label only: never the feed's ids, types, locations or an exception's text
     measure    each report's first-seen time; per incident and source the earliest, and the lead over paging
     trigger    paging tones, a radio pre-alert, the phone ring: poke() tells the adapters to poll now
+    alert      an airport alert level 2 / 3 declared on the fire radio makes a queued Airport incident (#369,
+               sizeup/airport_watch.py, ALERT_SOURCE): the county's event or the page for the airport attaches to it
+               (alert_incident) when nothing else matches, the same rules after that (a feed's fields win, 60 Control
+               mode tracks it)
     incoming   pre-alerts never make an incident: a transmission on the 60 Control feed's talkgroups that names us and is
                dispatch opening a call to us, or announces one ("incoming additional alarm", "stand by for a page"), is
                a "possible incoming" notice for INCOMING_S (the phone pre-alert has its own list)
@@ -70,6 +74,7 @@ from sizeup.sources import EXTRA_SHOWN, HEALTH_STATES, SOURCE_ID, TIME_KEYS, Fee
 PAGING, PAGING_RANK, PAGING_LABEL = "paging", 1000, "Paging"
 FEED_SOURCE = "CAD feed"               # incidents.source of one an external feed made
 PAGE_SOURCE = "60 Control page"
+ALERT_SOURCE = "60 Control radio"     # incidents.source of an airport alert level declared on the fire radio (#369)
 MATCH_WINDOW_S = 20 * 60.0
 SAME_CALL_S = 5 * 60.0                 # a report's dispatch this close to an incident's creation: the same call
 SAME_CALL_BEFORE_S = 60.0              # ... and an event first seen closed or old: dispatched at most this before it
@@ -667,6 +672,10 @@ class Sources:
                 inc, similar = self.match(ev.source, at, data["location"], data["units"], typ)
                 if inc is not None and not self._same_call(inc, data, now):
                     inc, similar = None, inc                 # another call there (one that ended before, an old one)
+                if inc is None:                              # the airport alert 60 Control declared on the radio (#369)
+                    al = self.alert_incident(ev.source, at, typ, data["location"])
+                    if al is not None:
+                        inc, similar = al, None
             if inc is not None:
                 if inc["source"] == "manual":                # a person typed its type and location: theirs stand
                     self.mark_manual(inc["id"], [f for f, k in (("type", "type"), ("location", "address")) if inc[k]])
@@ -934,12 +943,31 @@ class Sources:
             inc, similar = self.match(PAGING, at, location, units, typ)
             if inc is not None and self._has_feed(inc["id"]) and not self._page_same_call(inc, at, typ):
                 inc, similar = None, inc                     # another call there: the page's own incident, noted
+            if not (inc is not None and self._has_feed(inc["id"])):
+                al = self.alert_incident(PAGING, at, typ, location)      # the alert level declared on the radio (#369)
+                if al is not None:
+                    self._put(PAGING, ref, PAGING_RANK, PAGING_LABEL, at, rec, incident_id=al["id"])
+                    self._page_attached(al, rec)
+                    return "attached", al["id"]
             if inc is not None and self._has_feed(inc["id"]):
                 self._put(PAGING, ref, PAGING_RANK, PAGING_LABEL, at, rec, incident_id=inc["id"])
                 self._page_attached(inc, rec)
                 return "attached", inc["id"]
             self._put(PAGING, ref, PAGING_RANK, PAGING_LABEL, at, rec)
             return "create", inc or similar
+
+    def alert_incident(self, source: str, at: float, typ: str, location: str) -> dict | None:
+        """The open Airport incident an alert level declared on the fire radio made (#369, source ALERT_SOURCE), within
+        MATCH_WINDOW_S before this report, that this source has no report on yet: a county event or a page for the
+        airport (its type Airport, or the airport in its location) attaches to it instead of making another."""
+        from sizeup.cad import airport
+        if typ != airport.TYPE and not airport._AIRPORT.search(airport._norm(location)):
+            return None
+        return self.store.one(
+            f"SELECT * FROM incidents i WHERE i.source = ? AND i.type = ? AND i.status IN ({','.join('?' * len(OPEN))}) "
+            "AND i.created_at BETWEEN ? AND ? AND NOT EXISTS (SELECT 1 FROM source_reports r WHERE r.incident_id = i.id "
+            "AND r.source = ?) ORDER BY i.created_at DESC LIMIT 1",
+            (ALERT_SOURCE, airport.TYPE, *OPEN, at - MATCH_WINDOW_S, at + SAME_CALL_S, source))
 
     def _page_same_call(self, inc: dict, at: float, typ: str) -> bool:
         """A page joins a feed's incident only for the same call: the feed's dispatch within SAME_CALL_S of the page (the

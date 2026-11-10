@@ -144,7 +144,11 @@ def vocabulary_suggestions(units: dict, streets: list[str], top_streets: int = 6
     from sizeup.transcribe import street_spoken
     out: list[str] = ["60 Control", "Port Chester", "Rye Brook", "Fire EMS 15", "Port Chester Fire", "Rye Brook Fire",
                       "Westchester", "Fireground", "Fireground 1", "Fireground 2", "Battalion 15", "Airport Incident",
-                      "Command", "Mayday", "Tower Ladder", "Ladder", "Engine", "Rescue", "Marine", "Utility"]
+                      "Command", "Mayday", "Tower Ladder", "Ladder", "Engine", "Rescue", "Marine", "Utility",
+                      # the airport's alerts as 60 Control declares them (#369, sizeup/airport_watch.py)
+                      "alert level one", "alert level two", "alert level three", "Westchester County Airport", "HPN",
+                      "flaps", "flap issues", "landing gear", "runway one six", "runway three four", "mile final",
+                      "landed without incident"]
     for code, u in units.items():
         s = (u or {}).get("spoken") if isinstance(u, dict) else None
         if s and s not in out:
