@@ -24,6 +24,13 @@ share links to neither; a unit counts only for the one incident it is on; a feed
 never matches by text; more than MAX_PER_TX incidents for one transmission: none. A link a person removes (one click on
 the incident's radio card) is never put back (radio_link_exclusions).
 
+Units added later (#370): when an incident gains units (its feed lists them, the radio or a person puts them on), the
+transmissions from its dispatch (the feed's "dispatched" time, else the page's, else when it was made) less
+UNITS_LEAD_S until now are matched again for those units (units_soon: off the caller's thread, one worker). For that
+incident a unit counts then whenever it was put on (until it cleared); every guard above still holds, and a
+transmission already on it is never linked twice. A feed's department entries (Sources.department_units) are never a
+unit.
+
 Retention: a mention or fireground link doesn't keep its audio or its row past the normal unlinked retention until a
 person keeps it ("Keep" on the radio card: radio_link_kept, sizeup/cad/comms.py AUTO_UNSURE).
 """
@@ -31,6 +38,8 @@ person keeps it ("Keep" on the radio card: radio_link_kept, sizeup/cad/comms.py 
 from __future__ import annotations
 
 import json
+import math
+import queue
 import re
 import threading
 import time
@@ -43,6 +52,16 @@ LEAD_S = 120.0
 MAX_PER_TX = 3
 BACKFILL_MAX = 300
 BOARD_TTL_S = 30.0
+UNITS_LEAD_S = 60.0                     # the units backfill starts this long before the incident's dispatch (#370)
+UNITS_MAX_BACK_S = 3600.0               # ... and never more than this before the incident was made
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS radiolog_units (   -- the units each incident's radio log was matched again for (#370)
+  incident_id INTEGER NOT NULL,
+  unit TEXT NOT NULL,
+  at REAL NOT NULL,
+  PRIMARY KEY (incident_id, unit)
+);
+"""
 WORD = re.compile(r"[a-z0-9]+")
 NUM = re.compile(r"\d{1,5}[a-z]?")
 UNIT_WORDS = {"engine", "ladder", "tower", "rescue", "truck", "utility", "marine", "squad", "medic", "ambulance", "alpha",
@@ -172,6 +191,10 @@ class RadioLog:
         self.inline = False                              # tests: the backfill runs on the caller's thread
         self._board: tuple[float, dict] | None = None
         self._rx: dict[tuple[str, str], re.Pattern] = {}
+        self._q: queue.Queue | None = None
+        self._qlock = threading.Lock()
+        with self.store.lock:
+            self.store.db.executescript(SCHEMA)
 
     def _channels(self) -> tuple[set, set]:
         """(talkgroups, FM channels) our dispatch and fire traffic is on."""
@@ -228,7 +251,14 @@ class RadioLog:
                                   f"AND merged_into = '' ORDER BY rank, first_seen", (*part, PAGING)):
                 feeds.setdefault(r["incident_id"], []).append(json.loads(r["data"] or "{}"))
         return {"tgs": tgs, "fm": fm, "paging": set(self.cad.s.paging), "tactical": set(self.cad.s.tactical),
-                "board": self.board(), "incs": incs, "assigns": assigns, "feeds": feeds}
+                "board": self.board(), "incs": incs, "assigns": assigns, "feeds": feeds, "depts": self._depts(), "since": {}}
+
+    def _depts(self) -> set[str]:
+        """A feed's department entries (Sources.department_units, #370): never a unit here."""
+        try:
+            return {_key(k) for k in self.cad.sources.department_units()}
+        except Exception:  # noqa: BLE001
+            return set()
 
     def fireground(self, iid: int, ctx: dict | None = None) -> str:
         """The incident's working fireground channel when known: its external CAD feed says it (extra "fireground", a
@@ -245,11 +275,15 @@ class RadioLog:
 
     def _units_on(self, ctx: dict, iid: int, at: float) -> set[str]:
         """The board units attached to the incident at that time: its assignments (from LEAD_S before put on, until
-        cleared) and the units its feed lists that are board units (exactly)."""
+        cleared; for the incident a units backfill is for, ctx["since"], whenever put on) and the units its feed lists
+        that are board units (exactly; never a department entry)."""
+        late = at >= ctx.get("since", {}).get(iid, math.inf)
         out = {r["name"] for r in ctx["assigns"].get(iid, [])
-               if r["assigned_at"] <= at + LEAD_S and (r["cleared_at"] is None or r["cleared_at"] >= at)}
+               if (late or r["assigned_at"] <= at + LEAD_S) and (r["cleared_at"] is None or r["cleared_at"] >= at)}
         for d in ctx["feeds"].get(iid, []):
             for u in d.get("units") or []:
+                if _key(u) in ctx.get("depts", ()):
+                    continue
                 b = ctx["board"].get(_key(u))
                 if b:
                     out.add(b[0])
@@ -266,7 +300,8 @@ class RadioLog:
             if t["channel"] not in ctx["fm"]:
                 return {}
             paging = t["channel"] in ctx["paging"]
-        incs = [i for i in ctx["incs"] if i["created_at"] <= t["start"] + LEAD_S
+        since = ctx.get("since", {})
+        incs = [i for i in ctx["incs"] if (i["created_at"] <= t["start"] + LEAD_S or since.get(i["id"], math.inf) <= t["start"])
                 and (i["closed_at"] is None or i["closed_at"] >= t["start"])]
         if not incs:
             return {}
@@ -356,6 +391,90 @@ class RadioLog:
             run()
         else:
             threading.Thread(target=run, name="radiolog-backfill", daemon=True).start()
+
+    # -- units added later (#370) ---------------------------------------------------------------------------------------
+
+    def dispatched_at(self, iid: int) -> float:
+        """The incident's dispatch: its feed's "dispatched" time (the best-ranked report that has one), else its page's
+        time, else when it was made."""
+        for r in self.store.q("SELECT data FROM source_reports WHERE incident_id = ? AND source != ? AND merged_into = '' "
+                              "ORDER BY rank, first_seen", (iid, PAGING)):
+            t = (json.loads(r["data"] or "{}").get("times") or {}).get("dispatched")
+            if isinstance(t, (int, float)) and t > 0:
+                return float(t)
+        p = self.store.one("SELECT MIN(first_seen) AS t FROM source_reports WHERE incident_id = ? AND source = ?", (iid, PAGING))
+        if p and p["t"] is not None:
+            return float(p["t"])
+        return float(self.store.incident(iid)["created_at"])
+
+    def units_of(self, iid: int, ctx: dict) -> set[str]:
+        """Every board unit listed (by its feeds) or put on the incident, whenever (department entries never)."""
+        out = {r["name"] for r in self.store.q("SELECT u.name FROM assignments a JOIN units u ON u.id = a.unit_id "
+                                               "WHERE a.incident_id = ?", (iid,))}
+        for r in self.store.q("SELECT data FROM source_reports WHERE incident_id = ? AND source != ? AND merged_into = ''",
+                              (iid, PAGING)):
+            for u in json.loads(r["data"] or "{}").get("units") or []:
+                b = ctx["board"].get(_key(u))
+                if b and _key(u) not in ctx["depts"]:
+                    out.add(b[0])
+        return out
+
+    def backfill_units(self, iid: int) -> list[str]:
+        """The units the incident gained since last time: the transmissions from its dispatch less UNITS_LEAD_S until
+        now matched again, linked to it when they name one of those units (every guard as ever; never twice)."""
+        inc = self.store.incident(iid)
+        if inc["status"] == "dismissed":
+            return []
+        lo = max(self.dispatched_at(iid) - UNITS_LEAD_S, inc["created_at"] - UNITS_MAX_BACK_S)
+        hi = self.cad.clock() + 1
+        done = {r["unit"] for r in self.store.q("SELECT unit FROM radiolog_units WHERE incident_id = ?", (iid,))}
+        new = self.units_of(iid, {"board": self.board(), "depts": self._depts()}) - done
+        if not new:
+            return []
+        ctx = self.context(lo, hi)
+        with self.store.tx() as db:
+            for u in sorted(new):
+                db.execute("INSERT OR IGNORE INTO radiolog_units (incident_id, unit, at) VALUES (?, ?, ?)", (iid, u, hi))
+        rows = self.store.q("SELECT * FROM radio_traffic WHERE start >= ? AND start <= ? ORDER BY start LIMIT ?",
+                            (lo, hi, BACKFILL_MAX))
+        if len(rows) >= BACKFILL_MAX:
+            self.cad.log(f"CAD: radio log units backfill for event {iid}: the first {BACKFILL_MAX} transmissions only")
+        ctx["since"] = {iid: lo}
+        spoken = {code: sp for code, sp in ctx["board"].values()}
+        rxs = [self._unit_rx(u, spoken.get(u, "")) for u in sorted(new)]
+        out = []
+        for t in rows:
+            if not any(rx.search(t["text"] or "") for rx in rxs):
+                continue                                 # about none of the new units
+            f = self.matches(t, ctx)
+            if iid in f and f[iid][0] == "mention" and self._link(t["id"], {iid: f[iid]}):
+                out.append(t["id"])
+        return out
+
+    def units_soon(self, iid: int | None) -> None:
+        """The units backfill for this incident on the worker (never on a request's or the feed's thread); inline for
+        tests."""
+        if not iid:
+            return
+        if self.inline:
+            self._units_run(iid)
+            return
+        with self._qlock:
+            if self._q is None:
+                self._q = queue.Queue()
+                threading.Thread(target=self._units_worker, name="radiolog-units", daemon=True).start()
+        self._q.put(iid)
+
+    def _units_worker(self) -> None:
+        while True:
+            iid = self._q.get()
+            self._units_run(iid)
+
+    def _units_run(self, iid: int) -> None:
+        try:
+            self.backfill_units(iid)
+        except Exception as e:  # noqa: BLE001
+            self.cad.log(f"CAD: radio log units backfill: {type(e).__name__}")
 
     def keep(self, tid: str, iid: int, operator: str = "", undo: bool = False) -> dict:
         """A person confirms an automatic mention / fireground link (its audio and row then kept like the event's), or

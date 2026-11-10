@@ -34,6 +34,7 @@ from sizeup.cad.newids import NewIds
 from sizeup.cad.statushints import StatusHints
 from sizeup.cad.sources import PAGING_RANK, Sources
 from sizeup.cad.radiolog import RadioLog
+from sizeup.cad.scope import Scope
 from sizeup.cad.radios import Registry, RadioError, is_pcfd
 from sizeup.cad import settings as settings_mod
 from sizeup.cad import lists as lists_mod
@@ -219,6 +220,11 @@ class Cad:
         self.auto = AutoDispatch(self, clock=clock, log=log)
         self.sources.on_possibly = self.auto.possibly
         self.radiolog = RadioLog(self)
+        # A unit put on an incident (by a person, the feed or the radio): the radio log again for it, back to the
+        # incident's dispatch (#370), off this thread
+        self.store.on_assigned = lambda iid, names: self.radiolog.units_soon(iid)
+        # Full department or specific units (#370, sizeup/cad/scope.py): from the page, then the feed
+        self.scope = Scope(self)
         # FG1 radio IDs nobody has named yet (#163): "Radio 1234 (MDC) on FG1: who is this?" on the console.
         self.newids = NewIds(self)
         # The emergency button and a mayday heard on our fire channels (sizeup/cad/alarms.py, #128): the app feeds it
@@ -384,11 +390,19 @@ class Cad:
             self.auto.decorate(incs)                      # #311: each automatic step, its source and its undo
         except Exception as e:  # noqa: BLE001
             self.log(f"CAD: dispatch mode: {type(e).__name__}")
+        try:
+            self.scope.decorate(incs)                     # #370: full department or specific units
+        except Exception as e:  # noqa: BLE001
+            self.log(f"CAD: dispatch scope: {type(e).__name__}")
         return incs
 
     def source_event(self, d: dict) -> int | None:
         """A "source_event" on the CAD of record (#297), then the dispatch mode's part (#311). The incident id."""
         iid = self.sources.on_event(d)
+        try:
+            self.scope.on_feed(iid)                       # full department or specific units (#370)
+        except Exception as e:  # noqa: BLE001 - the report stands whatever this does
+            self.log(f"CAD: dispatch scope: {type(e).__name__}")
         self.auto.on_feed(iid)
         return iid
 
@@ -1727,12 +1741,15 @@ class Cad:
             at = (inc.page_starts or [inc.opened])[0]
             how, got = self.sources.page(str(inc.id), at, f["address"] or heard, list(inc.units or []), data)
             if how == "attached":
+                self._page_scope(got, inc)
                 self.auto.on_page(got)                 # 60 Control mode: "paged" on a tracked incident (#311)
                 return self.store.incident(got)
             iid = self._create_from_page(data)
             self.sources.created_by_page(str(inc.id), iid, got)
+            self._page_scope(iid, inc)
             return self.store.incident(iid)
         self.comms.link_pages(old["id"], getattr(inc, "pages", []))  # a repeat of the page: on it too, accepted or not
+        self._page_scope(old["id"], inc)
         if old["status"] != "queued":
             return old
         auth = self.sources.authority(old["id"])
@@ -1748,6 +1765,13 @@ class Cad:
         if not old["type"] and typ:                    # the repeat said what it is
             fill.update(type=typ, subtype=sub, type_note=note)
         return self.store.update_incident(old["id"], fill, log=False)
+
+    def _page_scope(self, iid: int, inc) -> None:
+        """Full department or specific units, as the page says it (#370; a feed's stands)."""
+        try:
+            self.scope.on_page(iid, inc)
+        except Exception as e:  # noqa: BLE001 - the page stands whatever this does
+            self.log(f"CAD: dispatch scope: {type(e).__name__}")
 
     def _create_from_page(self, data: dict) -> int:
         """A page's queued event (from_monitor's fields)."""

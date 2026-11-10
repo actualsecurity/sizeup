@@ -400,6 +400,7 @@ class Store:
         self.lock = threading.RLock()
         self.rev = 0          # bumped on every change: the page refetches nothing, it's pushed
         self.migrated: list[str] = []      # what a migration did, for the log
+        self.on_assigned = None            # fn(incident id, [unit names]): units just put on it (assign); never raises here
         self._migrate()
 
     def _migrate(self) -> None:
@@ -1255,6 +1256,11 @@ class Store:
                 self._event(db, iid, "status", "Event status: active", operator, at=now)
             if attach and added and not quiet:
                 self._event(db, iid, "attach", f"Attached {', '.join(added)}", operator, at=now)
+        if added and self.on_assigned is not None:
+            try:
+                self.on_assigned(iid, added)
+            except Exception:  # noqa: BLE001 - the assignment stands whatever a listener does
+                pass
         return moved
 
     DISPATCH_KINDS = {"dispatch": "Dispatch", "add-on": "Add-on dispatch", "upgrade": "Upgrade"}

@@ -50,6 +50,8 @@ Reset to default = drop the override (one item, or a whole section).
     datasources                    key a data source ("gis:hydrants", "aircraft:registry") -> off | hourly | daily | weekly |
                                    monthly: how often the registry refreshes it (#186, Settings > Data sources;
                                    sizeup/datasources.py); not set: the source's default
+    department_units               key a feed's department entry code -> the department it pages ("Port Chester FD"):
+                                   a whole department, never a unit (#370, sizeup/cad/sources.py; admins, no panel)
 
 Codes never change (they are stored on events and exported): a rename changes the name only. An
 item in use can't be deleted, only retired (named on old events, off the pick lists). Every change
@@ -103,6 +105,10 @@ ATC_SECTION, ATC_KEYS = "atc", {"identify": "Identify ATC talkers", "map": "Show
                                  # #257 (sizeup/atc_vocab.py): the sizeup-atc vocabulary refreshed from the operators seen
                                  "vocab": "Refresh the ATC vocabulary from the traffic"}
 PAGE_SECTION[ATC_SECTION] = "system"
+# A feed's department entries (#370, sizeup/cad/sources.py department_units): key the code as the feed writes it ->
+# the department ("Port Chester FD"). The hub's own (never in the repo): set by admins (POST, no panel), audited as Dispatch.
+DEPT_SECTION = "department_units"
+PAGE_SECTION[DEPT_SECTION] = "dispatch"
 # The push topics by kind (sizeup/notify.py Pushes): Settings > System > Push notifications, audited as System.
 NOTIFY_SECTION = "notify"
 PAGE_SECTION[NOTIFY_SECTION] = "system"
@@ -649,6 +655,25 @@ class Editor:
                            [("system", f"{ATC_SECTION}/{key}", "on" if cur else "off", "on" if v else "off")])
         return {**out, "atc": self.atc_page()}
 
+    @staticmethod
+    def _dept_value(key, value) -> tuple[str, str]:
+        return _text(key, "key", 24), _text(value, "value", 60)
+
+    def _dept_op(self, action: str, body: dict, op: str) -> dict:
+        """set {key: a feed's department entry code, value: the department} | reset {key}: admins (#370)."""
+        cur = self.section(DEPT_SECTION)
+        if action == "reset":
+            key = _text(body.get("key"), "key", 24)
+            if key not in cur:
+                raise CadError(f"{key} is not a department entry")
+            return self._commit([(DEPT_SECTION, key, REMOVE)], op, [("dispatch", f"{DEPT_SECTION}/{key}", cur[key], "unset")])
+        if action != "set":
+            raise CadError("action: set or reset")
+        key, v = self._dept_value(body.get("key"), body.get("value"))
+        if cur.get(key) == v:
+            return {"ok": True}
+        return self._commit([(DEPT_SECTION, key, v)], op, [("dispatch", f"{DEPT_SECTION}/{key}", cur.get(key, "unset"), v)])
+
     def _unit_rows(self, L, ov: dict) -> dict:
         o, used = ov.get("units", {}), self.usage("units")
         base_on = {c for c, _, _ in self.base.board_units()}
@@ -745,7 +770,7 @@ class Editor:
               "dispatch": self._dispatch_op, "users": self._users_op, "runcards": self._cards_op,
               "import": self._import_op, "channels": self._channels_op, "stt": self._stt_op,
               "places": self._places_op, TONES_SECTION: self._tones_op, WALL_SECTION: self._wall_op, DS_SECTION: self._ds_op,
-              NOTIFY_SECTION: self._notify_op, ATC_SECTION: self._atc_op, ERR_SECTION: self._errors_op, MUTE_SECTION: self._mutes_op, "alarms": lambda a, b, o: self.cad.alarms.settings_op(a, b, o)}.get(section)
+              NOTIFY_SECTION: self._notify_op, ATC_SECTION: self._atc_op, ERR_SECTION: self._errors_op, MUTE_SECTION: self._mutes_op, DEPT_SECTION: self._dept_op, "alarms": lambda a, b, o: self.cad.alarms.settings_op(a, b, o)}.get(section)
         if fn is None:
             raise CadError(f"no settings section {section!r}")
         if section in ("users", "import"):
@@ -2269,6 +2294,11 @@ class Editor:
                 del ov[MUTE_SECTION][k]                   # over already: not brought back
             else:
                 ov[MUTE_SECTION][k] = m
+        for k, v in (ov.get(DEPT_SECTION) or {}).items():     # a feed's department entries (#370)
+            try:
+                self._dept_value(k, v)
+            except CadError as e:
+                raise CadError(f"overrides.{DEPT_SECTION}.{e}") from None
         st = ov.get("stt") or {}
         if set(st) - {"vocabulary", "aws_monthly_limit_usd"}:
             raise CadError("overrides.stt: vocabulary and aws_monthly_limit_usd only")

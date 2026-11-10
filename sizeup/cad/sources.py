@@ -46,6 +46,9 @@ sizeup/sources/runner.py (they come here as "source_event" / "source_health" thr
     address    a feed's location is shown (and said) as its street part (shown_location); the addresses a feed put on
                an incident are recorded (feed_addresses) so a push never carries them (alarms.push_address)
     logs       our incident ids and the source's label only: never the feed's ids, types, locations or an exception's text
+    departments a feed's department entries (department_units(): {code: department}, Settings' "department_units"
+               over the data file's; #370) are a whole department paged, never a unit: never a unit in common here,
+               never dispatched (automode.py), the incident's "Full department" label (sizeup/cad/scope.py)
     measure    each report's first-seen time; per incident and source the earliest, and the lead over paging
     trigger    paging tones, a radio pre-alert, the phone ring: poke() tells the adapters to poll now
     incoming   pre-alerts never make an incident: a transmission on the 60 Control feed's talkgroups that names us and is
@@ -165,6 +168,25 @@ def set_unit_aliases(aliases: dict | None) -> None:
                     if isinstance(k, str) and isinstance(v, str) and norm_unit(k) and norm_unit(v)}
 
 
+DEPARTMENT_CODES: set[str] = set()  # a feed's department entries ("department_units": a whole department, not a unit),
+                                     # as dept_code() writes them (set_department_codes): never a unit in common
+
+
+def dept_code(u) -> str:
+    """A department entry's code compared as written: spaces, dashes and case aside (never shortened as norm_unit)."""
+    return re.sub(r"[\s-]+", "", str(u or "")).upper()
+
+
+def set_department_codes(codes) -> None:
+    global DEPARTMENT_CODES
+    DEPARTMENT_CODES = {dept_code(k) for k in codes or () if isinstance(k, str) and dept_code(k)}
+
+
+def drop_departments(units) -> list[str]:
+    """A unit list without its department entries (#370)."""
+    return [u for u in units or () if dept_code(u) not in DEPARTMENT_CODES]
+
+
 def _unit(x: str) -> str:
     n = norm_unit(x)
     return UNIT_ALIASES.get(n, n)
@@ -172,7 +194,8 @@ def _unit(x: str) -> str:
 
 def units_match(a, b) -> set[str]:
     """The units two lists have in common (normalised, a feed's code through UNIT_ALIASES); a bare number matches a unit
-    with that number."""
+    with that number. A department entry is never one (#370)."""
+    a, b = drop_departments(a), drop_departments(b)
     na, nb = {_unit(x) for x in a if _unit(x)}, {_unit(x) for x in b if _unit(x)}
     out = na & nb
     for x in na:
@@ -389,25 +412,41 @@ class Sources:
             set_towns(getattr(L, "geo_town_order", ()), getattr(L, "geo_town_aliases", {}))
             self._towns_for = L
         set_unit_aliases(self.feed_unit_aliases())
+        set_department_codes(self.department_units())
 
-    def feed_unit_aliases(self) -> dict[str, str]:
-        """The data file's "feed_unit_aliases" {feed code: board code}: the one place they are read (matching here, the
-        dispatch mode's units, #311), again whenever the file changes."""
+    def _data_file(self, name: str) -> dict[str, str]:
+        """A {str: str} map from the data file, read again whenever the file changes."""
         path = getattr(self.cad.lists, "path", None)
         try:
             key = (path, Path(path).stat().st_mtime_ns) if path else None
         except OSError:
             key = None
-        if key != getattr(self, "_aliases_key", ()):
+        if key != getattr(self, "_file_key", ()):
             try:
                 d = json.loads(Path(path).read_text()) if key else {}
             except (OSError, ValueError):
                 d = {}
-            a = d.get("feed_unit_aliases") if isinstance(d, dict) else None
-            self._aliases = {k: v for k, v in (a.items() if isinstance(a, dict) else ())
-                             if isinstance(k, str) and isinstance(v, str)}
-            self._aliases_key = key
-        return dict(self._aliases)
+            self._file = d if isinstance(d, dict) else {}
+            self._file_key = key
+        a = self._file.get(name)
+        return {k: v for k, v in (a.items() if isinstance(a, dict) else ()) if isinstance(k, str) and isinstance(v, str)}
+
+    def feed_unit_aliases(self) -> dict[str, str]:
+        """The data file's "feed_unit_aliases" {feed code: board code}: the one place they are read (matching here, the
+        dispatch mode's units, #311), again whenever the file changes."""
+        return self._data_file("feed_unit_aliases")
+
+    def department_units(self) -> dict[str, str]:
+        """A feed's department entries {code: department name} (#370): a code in its unit list that means a whole
+        department was paged, not one unit. The data file's "department_units", under Settings' (section
+        "department_units": the hub's own, never in the repo)."""
+        out = self._data_file("department_units")
+        try:
+            out.update({k: v for k, v in self.cad.settings.section("department_units").items()
+                        if isinstance(k, str) and isinstance(v, str)})
+        except AttributeError:
+            pass
+        return out
 
     # -- health and tiers ----------------------------------------------------------------------------------------------
 
@@ -490,6 +529,7 @@ class Sources:
         """(the open incident this report may attach to, else the one it is possibly the same as): see the module's
         "match". Whether it may attach there is also the caller's (see "attach")."""
         self._towns()
+        units = drop_departments(units)                      # a department entry says nothing about which call (#370)
         taken = {r["incident_id"] for r in self.store.q(
             "SELECT incident_id FROM source_reports WHERE source = ? AND incident_id IS NOT NULL", (source,))}
         here = place_key(location) is not None
@@ -498,7 +538,7 @@ class Sources:
         places = 0
         for inc in self.store.q(f"SELECT * FROM incidents WHERE created_at BETWEEN ? AND ? AND status IN "
                                 f"({','.join('?' * len(OPEN))})", (at - MATCH_WINDOW_S, at + MATCH_WINDOW_S, *OPEN)):
-            on = self._units_of(inc["id"])
+            on = drop_departments(self._units_of(inc["id"]))
             common = units_match(units, on)
             theirs = [x for x in (inc["address"], inc["place_address"], inc["geo_label"]) if place_key(x) is not None]
             same = here and bool(theirs) and any(same_place(location, x) for x in theirs)
