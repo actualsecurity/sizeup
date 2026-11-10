@@ -140,10 +140,10 @@ def check_map(prefs) -> dict:
 
 # the unit status words (sizeup/cad/statushints.py PHRASES), as said on the air
 STATUS_WORDS = ("en route", "responding", "on location", "on scene", "arrived", "in service", "back in service",
-                "available", "returning", "in quarters", "out of service", "staging")
+                "available", "returning", "in quarters", "out of service", "staging", "in the area")
 # a few of them in radio phrasing, with a unit of each kind: the phrase as a whole is what AWS hears ("Engine 61 en route")
 STATUS_SAID_BY = {"E61": "en route", "E62": "on location", "L31": "responding", "R41": "en route", "2391": "on location",
-                  "2394": "en route", "TL2": "in service"}
+                  "2394": "en route", "TL2": "in service", "E64": "in the area"}
 
 
 def vocabulary_suggestions(units: dict, streets: list[str], top_streets: int = 60) -> list[str]:

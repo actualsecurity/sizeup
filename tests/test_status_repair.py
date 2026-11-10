@@ -179,3 +179,17 @@ def test_a_chiefs_own_number_one_digit_off_from_his_radio():
     assert {u: f.intent for u, (f, _) in h._read(row).items()} == {"2391": "onscene"}
     assert h._read(dict(row, rig="E61")) == {}                                     # someone else's radio: nobody
     assert h._read(dict(row, text="2491 on location.", rig="E61")) == {}
+
+
+@pytest.mark.parametrize("text,units", [
+    ("Engine 61 in the area", ["E61"]), ("Engine 61 is in the vicinity.", ["E61"]), ("Ladder 31 on the block", ["L31"]),
+    ("Engine 61 pulling up.", ["E61"]), ("Engine 61, Ladder 31 in the area", ["E61", "L31"]),
+])
+def test_in_the_area_is_on_location(text, units):
+    assert found(text) == [("onscene", units)]          # no arriving status in cad_lists.json: on location
+
+
+@pytest.mark.parametrize("text", ["Lots of smoke in the area", "Engine 61 in the area of King Street",
+                                  "PD is in the area", "Engine 61 pulling up the hydrant", "In the area of the park"])
+def test_in_the_area_said_of_a_place_is_not_a_status(text):
+    assert found(text) == []

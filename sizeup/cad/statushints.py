@@ -97,6 +97,10 @@ PHRASES: list[tuple[str, re.Pattern]] = [(i, re.compile(p, re.I)) for i, p in (
     ("onscene", r"\bon[\s-](?:the\s+)?(?:location|scene)\b"),
     ("onscene", r"\bat[\s-](?:the\s+)?(?:location|scene)\b(?!\s+of\b)"),
     ("onscene", r"\barriving\b(?!\s+(?:shortly|soon|momentarily|in|on|at)\b)"),   # "arriving on location": that one
+    # near the scene: the department has no "arriving" status, so on location (said only by the unit itself: NEAR)
+    ("onscene", r"\bin\s+the\s+(?:area|vicinity)\b(?!\s+of\b)"),
+    ("onscene", r"\bon\s+the\s+block\b(?!\s+of\b)"),
+    ("onscene", r"\bpulling\s+up\b(?!\s+(?:the|a|an|hose|lines?|to\s+the\s+hydrant)\b)"),
     ("onscene", r"\barrived\b(?!\s+at\s+(?:the\s+)?(?:hospital|ER)\b)"),
     ("staging", r"\b(?:in|at)\s+(?:the\s+)?staging\b"),
     ("staging", r"\bstaged\b"),
@@ -113,6 +117,7 @@ PHRASES: list[tuple[str, re.Pattern]] = [(i, re.compile(p, re.I)) for i, p in (
                 r"[\w'-]+\s+){0,3}?command\b(?!\s+(?:post|channel|frequency|vehicle|van|bus|unit|staff|board|officer|"
                 r"center|centre|level|structure|is|will)\b)"),
 )]
+NEAR = re.compile(r"in\s+the\s+(?:area|vicinity)|on\s+the\s+block|pulling\s+up", re.I)
 # The words that may stand between whoever is talking and the phrase ("Engine 64 is now on location").
 FILLER = (r"is|are|am|was|were|now|currently|just|also|already|be|been|being|will|shall|have|has|had|gonna|going|to|"
           r"and|still|back|arriving|arrived|placing|place|placed|putting|put|ourselves|myself|itself|going|"
@@ -270,7 +275,9 @@ class Phrases:
                 return None                                 # "Clear." alone: a room, a search, the channel...
             if re.search(r"(?<![\w'])(?:all|loud\s+and|search|primary|secondary)\s*$", clause[since:s], re.I):
                 return None
-        if intent == "staging" and lead[0] not in ("unit", "first"):
+        if NEAR.match(clause[s:e]) and lead[0] not in ("unit", "first", "number"):
+            return None                                     # "lots of smoke in the area": a place, not a unit's status
+        if intent == "staging" and lead[0] not in ("unit", "first", "number"):
             return None                                     # "Staging on King Street": where staging is, not who is in it
         said = " ".join(clause.strip(" ,").split())
         number = lead[1][0] if lead[0] == "number" else ""

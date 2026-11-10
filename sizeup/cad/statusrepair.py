@@ -55,7 +55,7 @@ MISHEARD: list[tuple[str, re.Pattern]] = [(to, re.compile(p, re.I)) for to, p in
 # the status said (as the parser reads it): a misheard callsign is put back only before one of these
 STATUS_SAID = re.compile(r"(?:(?:is|was|now)\s+)?(?:responding|en[\s-]?route|in[\s-]?route|on\s+(?:the\s+)?(?:location|"
                          r"scene)|arrived|arriving|in\s+service|back\s+in\s+service|available|returning|"
-                         r"out\s+of\s+service|staging|staged|in\s+quarters)\b", re.I)
+                         r"out\s+of\s+service|staging|staged|in\s+quarters|in\s+the\s+area)\b", re.I)
 
 # the apparatus word misheard (#: the board's code letter): "and she's 63" for "Engine 63"
 APPARATUS_MISHEARD = {
