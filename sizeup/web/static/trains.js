@@ -59,7 +59,7 @@ window.TrainLayer = (() => {
   const SRC_LINE = "tr-line", SRC_ST = "tr-stations", SRC_TR = "tr-trains", SRC_CARS = "tr-cars", SRC_ROUTE = "tr-route";
   const SRC_REF = "tr-railref", REF_IDS = ["tr-pole", "tr-pole-label", "tr-mp", "tr-mp-label"];
   const CAR_IDS = ["tr-car-case", "tr-cab-case", "tr-car", "tr-cab", "tr-gap"];
-  const IDS = ["tr-line", "tr-route", "tr-station", "tr-station-label", ...CAR_IDS, "tr-train", "tr-train-label"];
+  const IDS = ["tr-line", "tr-line-label", "tr-route", "tr-station", "tr-station-label", ...CAR_IDS, "tr-train", "tr-train-label"];
   const MAX_CARS = 16;
   const CLICKABLE = ["tr-train", "tr-car", "tr-cab", "tr-gap", "tr-station", "tr-line"];
   const TRAIN_HIT = ["tr-train", "tr-car", "tr-cab", "tr-gap"];
@@ -430,7 +430,12 @@ window.TrainLayer = (() => {
                                                         "text-optional": true, ...extra } : {});
       const vis = { visibility: "none" };
       map.addLayer({ id: "tr-line", type: "line", source: SRC_LINE, layout: { ...vis, "line-cap": "round", "line-join": "round" },
-                     paint: { "line-color": line, "line-width": ["interpolate", ["linear"], ["zoom"], 10, 1.5, 15, 3], "line-opacity": 0.8 } }, before);
+                     paint: { "line-color": line, "line-opacity": 0.8,     // four tracks 4 m apart (#371): thin enough to tell apart
+                              "line-width": ["interpolate", ["linear"], ["zoom"], 10, ["case", ["has", "trk"], 1, 1.5],
+                                             15, ["case", ["has", "trk"], 1.2, 3], 18, ["case", ["has", "trk"], 2, 3]] } }, before);
+      map.addLayer({ id: "tr-line-label", type: "symbol", source: SRC_LINE, filter: ["has", "trk"], minzoom: 17,      // its number
+                     layout: { ...vis, ...label(["get", "trk"], 10, { "symbol-placement": "line", "symbol-spacing": 400 }) },
+                     paint: { "text-color": line, "text-halo-color": HALO, "text-halo-width": 1.4 } }, before);
       // the clicked train's own route (MTA TrainTime's line, #362) while its box is open
       map.addLayer({ id: "tr-route", type: "line", source: SRC_ROUTE, layout: { ...vis, "line-cap": "round", "line-join": "round" },
                      paint: { "line-color": token("--info", "#5AA9E6"), "line-width": ["interpolate", ["linear"], ["zoom"], 10, 2.5, 15, 5],
@@ -512,7 +517,7 @@ window.TrainLayer = (() => {
           this.tracks = d.tracks && Object.keys(d.tracks).length ? d.tracks : null;   // the numbered tracks (#371)
           this.sig = "";                        // the cars lie along it: lay them again
           const ln = (coords, dir) => ({ type: "Feature", geometry: { type: "LineString", coordinates: coords.map((c) => [c[0], c[1]]) }, properties: { dir } });
-          const drawn = this.tracks ? Object.entries(this.tracks).map(([k, c]) => ln(c, k))          // every numbered track
+          const drawn = this.tracks ? Object.entries(this.tracks).map(([k, c]) => ({ ...ln(c, k), properties: { trk: k } }))   // every numbered track
             : this.lanes ? [ln(this.lanes.outbound, "outbound"), ln(this.lanes.inbound, "inbound")]   // each way's own track
             : d.line && d.line.length > 1 ? [ln(d.line, "")] : [];
           this.map.getSource(SRC_LINE).setData(fc(drawn));
@@ -684,7 +689,7 @@ window.TrainLayer = (() => {
         if (this.routeKey !== key) return;
         src.setData(fc((runs || []).map((r) => ({ type: "Feature", geometry: { type: "LineString", coordinates: r }, properties: {} }))));
       };
-      if (!key) { src.setData(fc([])); return; }
+      if (!key || this.tracks) { src.setData(fc([])); return; }   // the real tracks drawn (#371): a route line isn't one
       if (routes.has(key)) { draw(routes.get(key)); return; }
       fetch(`${ROUTE}?key=${encodeURIComponent(key)}`, { credentials: "same-origin" })
         .then((r) => (r.ok ? r.json() : null))

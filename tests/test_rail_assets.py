@@ -319,4 +319,6 @@ def test_the_page_draws_the_numbered_track_and_the_poles_box():
     assert "const own = tracks && t.trk ? tracks[t.trk] : null;" in js
     assert "d.tracks = had.tracks" in js and 'keys() { return [[KEY, false], [REF_KEY, false]]; }' in js
     assert 'RAILREF = "/api/cad/trains/railref"' in js and '"Poles · mileposts"' in js
+    assert 'id: "tr-line-label", type: "symbol", source: SRC_LINE, filter: ["has", "trk"]' in js         # each track numbered
+    assert "if (!key || this.tracks) { src.setData(fc([])); return; }" in js                       # no route line posing as a track
     assert "`Trk\\u00a0${t.trk}`" in js and "`near pole ${t.pole}`" in js and "refText(d.ref)" in js
