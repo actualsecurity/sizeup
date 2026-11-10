@@ -69,7 +69,7 @@ sizeup/sources/runner.py (they come here as "source_event" / "source_health" thr
     alert      an airport alert level 2 / 3 declared on the fire radio makes a queued Airport incident (#369,
                sizeup/airport_watch.py, ALERT_SOURCE): the county's event or the page for the airport attaches to it
                (alert_incident) when nothing else matches, the same rules after that (a feed's fields win, 60 Control
-               mode tracks it)
+               mode tracks it); never one naming another aircraft (a type or a tail both said: other_aircraft, #380)
     incoming   pre-alerts never make an incident: a transmission on the 60 Control feed's talkgroups that names us and is
                dispatch opening a call to us, or announces one ("incoming additional alarm", "stand by for a page"), is
                a "possible incoming" notice for INCOMING_S (the phone pre-alert has its own list)
@@ -175,6 +175,18 @@ INCOMING = re.compile(r"\b(?:incoming|stand\s*-?\s*by\s+for|standby\s+for)\b[^.?
 def _is_alert(sub: str) -> bool:
     """An airport alert's subtype (#369): ALERT-1/2/3."""
     return str(sub or "").startswith("ALERT-")
+
+
+def heard_aircraft(data: dict) -> str:
+    """The aircraft a report names (#380): a page's (its fields' acft_type), a feed's (its type and comments, read as a
+    page's are: sizeup/cad/airport.py fields); "" when it names none."""
+    from sizeup.cad import airport
+    f = data.get("f")
+    if isinstance(f, dict):
+        return str(f.get("acft_type") or "")
+    text = " ".join([str(data.get("type") or "")] + [str(c[1]) for c in data.get("comments") or []
+                                                      if isinstance(c, (list, tuple)) and len(c) > 1])
+    return airport.fields(text).get("acft_type", "")
 
 
 def norm_unit(u: str) -> str:
@@ -859,7 +871,7 @@ class Sources:
                 if inc is not None and not self._same_call(inc, data, now):
                     inc, similar = None, [inc]               # another call there (one that ended before, an old one)
                 if inc is None:                              # the airport alert 60 Control declared on the radio (#369)
-                    al = self.alert_incident(ev.source, at, typ, data["location"], sub)
+                    al = self.alert_incident(ev.source, at, typ, data["location"], sub, heard_aircraft(data))
                     if al is not None and self._same_call(al, data, now, ALERT_WINDOW_S if _is_alert(sub) else SAME_CALL_S):
                         inc, similar = al, []
             if inc is not None:
@@ -917,7 +929,9 @@ class Sources:
         open or not. An event first seen closed (or in service) only when dispatched at most SAME_CALL_BEFORE_S before
         the incident's creation and SAME_CALL_S after; one first seen open but late (an outage) within SAME_CALL_S
         either way: the same call, recovered. before_s: how long before the incident an open event may be dispatched
-        (ALERT_WINDOW_S for an airport alert's: #369)."""
+        (ALERT_WINDOW_S for an airport alert's: #369). Never one naming another aircraft (#380: other_aircraft)."""
+        if self.other_aircraft(inc, heard_aircraft(data)):
+            return False
         made = inc["created_at"]
         ended = (data.get("times") or {}).get("in_service")      # the event's own (a unit's may be an early cancel)
         if ended is not None and ended < made:
@@ -1164,7 +1178,7 @@ class Sources:
                 inc, similar = None, [inc]                   # another call there: the page's own incident, noted
             if not (inc is not None and self._has_feed(inc["id"])):
                 al = self.alert_incident(PAGING, at, typ, location,      # the alert level declared on the radio (#369)
-                                         str((data.get("f") or {}).get("subtype") or ""))
+                                         str((data.get("f") or {}).get("subtype") or ""), heard_aircraft(data))
                 if al is not None:
                     self._put(PAGING, ref, PAGING_RANK, PAGING_LABEL, at, rec, incident_id=al["id"])
                     self._page_attached(al, rec)
@@ -1176,23 +1190,44 @@ class Sources:
             self._put(PAGING, ref, PAGING_RANK, PAGING_LABEL, at, rec)
             return "create", ([inc] if inc is not None else similar)
 
-    def alert_incident(self, source: str, at: float, typ: str, location: str, sub: str = "") -> dict | None:
+    def aircraft_named(self, inc: dict) -> list[str]:
+        """The aircraft an incident names: its own (acft_type: the alert level's, a page's) and each report's on it."""
+        names = [str(inc.get("acft_type") or "")] + [
+            heard_aircraft(json.loads(r["data"] or "{}"))
+            for r in self.store.q("SELECT data FROM source_reports WHERE incident_id = ?", (inc["id"],))]
+        return [n for n in names if n]
+
+    def other_aircraft(self, inc: dict, said: str) -> bool:
+        """An Airport incident for another aircraft than the one a report or a declaration names (#380): both name one
+        (a type or a tail) and every one the incident names differs (sizeup/airport_watch.py other_aircraft). Either
+        unknown: not known to differ (the same call may still join)."""
+        from sizeup.airport_watch import other_aircraft
+        from sizeup.cad import airport
+        if not said or inc.get("type") != airport.TYPE:
+            return False
+        names = self.aircraft_named(inc)
+        return bool(names) and all(other_aircraft(n, said) for n in names)
+
+    def alert_incident(self, source: str, at: float, typ: str, location: str, sub: str = "",
+                       aircraft: str = "") -> dict | None:
         """The open Airport incident an alert level declared on the fire radio made (#369, source ALERT_SOURCE), that this
         source has no report on yet: a county event (also the same call, _same_call) or a page of the Airport type
         attaches to it instead of making another. When: made within MATCH_WINDOW_S before this report or SAME_CALL_S
         after it (60 Control often opens its event before or while the car talks, and speech-to-text lags); a report
         that is an alert already (ALERT-*) within ALERT_WINDOW_S either way. Never a report dispatched after 60 Control
-        canceled that alert (another call); one dispatched before the cancel, seen late, is still the same call."""
+        canceled that alert (another call); one dispatched before the cancel, seen late, is still the same call. Never
+        one for another aircraft than the report names (aircraft: a type or a tail; #380, other_aircraft)."""
         from sizeup.cad import airport
         if typ != airport.TYPE:                          # an Airport / alert / aircraft type: never an EMS call at the terminal
             return None
         after = ALERT_WINDOW_S if _is_alert(sub) else SAME_CALL_S
-        return self.store.one(
+        rows = self.store.q(
             f"SELECT * FROM incidents i WHERE i.source = ? AND i.type = ? AND i.status IN ({','.join('?' * len(OPEN))}) "
             "AND i.created_at BETWEEN ? AND ? AND NOT EXISTS (SELECT 1 FROM source_reports r WHERE r.incident_id = i.id "
             "AND r.source = ?) AND NOT EXISTS (SELECT 1 FROM airport_alerts a WHERE a.incident_id = i.id AND "
-            "a.status = 'ended' AND a.note LIKE '60 Control:%' AND a.outcome_at < ?) ORDER BY i.created_at DESC LIMIT 1",
+            "a.status = 'ended' AND a.note LIKE '60 Control:%' AND a.outcome_at < ?) ORDER BY i.created_at DESC",
             (ALERT_SOURCE, airport.TYPE, *OPEN, at - MATCH_WINDOW_S, at + after, source, at))
+        return next((r for r in rows if not self.other_aircraft(r, aircraft)), None)
 
     def _page_same_call(self, inc: dict, at: float, typ: str) -> bool:
         """A page joins a feed's incident only for the same call: the feed's dispatch within SAME_CALL_S of the page (the
@@ -1231,7 +1266,7 @@ class Sources:
                 inc, similar = None, [inc]
             if not (inc is not None and self._has_feed(inc["id"])):
                 al = self.alert_incident(PAGING, at, typ, location,      # the alert level declared on the radio (#369)
-                                         str((data.get("f") or {}).get("subtype") or ""))
+                                         str((data.get("f") or {}).get("subtype") or ""), heard_aircraft(data))
                 if al is not None and al["id"] != iid:
                     inc = al
             if inc is not None and (self._has_feed(inc["id"]) or inc["source"] == ALERT_SOURCE) \
@@ -1278,7 +1313,8 @@ class Sources:
                     out.append(p)
                 elif inc["source"] == ALERT_SOURCE:          # the airport alert level's incident (#369): as page() joins it
                     al = self.alert_incident(PAGING, rep["first_seen"], typ, d.get("location") or p["address"],
-                                             str((d.get("f") or {}).get("subtype") or p["subtype"] or ""))
+                                             str((d.get("f") or {}).get("subtype") or p["subtype"] or ""),
+                                             heard_aircraft(d) or str(p.get("acft_type") or ""))
                     if al is not None and al["id"] == iid:
                         out.append(p)
         return out

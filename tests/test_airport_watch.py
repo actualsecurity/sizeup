@@ -1052,3 +1052,197 @@ def test_a_county_event_dispatched_before_the_cancel_still_joins():
     w.radio(300, "60 Control, car 9901, alert level 2 canceled, aircraft landed without incident")
     iid = w.feed(400, "C-10", "AIRPORT ALERT 2", "WESTCHESTER COUNTY AIRPORT", dispatched=120, units=("E64",))
     assert iid == w.alerts.get(a["id"])["incident_id"] and len(w.incidents()) == 1
+
+
+# -- #380: whose trouble (another aircraft's words, a pilot's "be advised"), the smoke indication, two aircraft ---------------
+
+C = "November seven eight nine echo foxtrot"
+AIR_C = {"hex": "c0c0c0", "flight": "N789EF", "type": "C25B", "lat": 41.0, "lon": -73.68, "alt": 2500, "gs": 150,
+         "trk": 340, "vr": -500, "phase": "arriving", "rwy": "34", "dist": 6.0}
+
+
+def with_air_c() -> World:
+    w = World()
+    w.planes.append(dict(AIR_C))
+    return w
+
+
+def _abn(w: World, cs: str) -> set:
+    return {x[1] for t in w.w.tracks.values() if t.callsign == cs for x in t.abn}
+
+
+@pytest.mark.parametrize("text", [
+    f"{C}, extend downwind, the aircraft ahead has a gear problem on final",
+    f"{C}, number two following a King Air with a hydraulic failure on final",
+    f"{C}, extend downwind, a Citation with a gear problem is on final",
+    f"{C}, continue, traffic ahead, he's got a hydraulic failure, I'll call your base",
+    f"{C}, they have a gear problem on the King Air on final, expect a short delay",
+    f"{C}, the Citation has a flap problem, plan the long runway",
+    f"{C}, reduce speed, the airplane in front of you has an engine failure",
+])
+def test_the_controller_s_words_about_another_aircraft_never_alert_the_airborne_one(text):
+    w = with_air_c()
+    assert w.atc(0, text) is None
+    assert w.atc(40, text) is None                                  # said twice: still not its own
+    assert _abn(w, "N789EF") == set() and w.open() == []
+
+
+@pytest.mark.parametrize("text, kind", [
+    (f"{C}, we have a gear problem", "gear"),
+    (f"{C}, we've got a hydraulic failure, number two following the traffic ahead", "hydraulics"),
+    (f"{C}, our gear won't come down, the aircraft ahead can go first", "gear"),
+    (f"{C}, mayday mayday, hydraulic failure, following a King Air with a gear problem", "hydraulics"),
+])
+def test_the_same_words_as_its_own_trouble_still_alert(text, kind):
+    w = with_air_c()
+    w.atc(0, text)
+    a = w.atc(40, text)
+    assert a is not None and [x["callsign"] for x in a["data"]["aircraft"]] == ["N789EF"] and kind in _abn(w, "N789EF")
+
+
+@pytest.mark.parametrize("text, own", [
+    ("November one two three alpha bravo, be advised, hydraulic failure, request the long runway", True),
+    ("November one two three alpha bravo, be advised, engine failure, we'd like runway three four", True),
+    ("November one two three alpha bravo, be advised, flap problem, unable to land on one six", True),
+    ("November one two three alpha bravo, be advised, the aircraft ahead has a hydraulic failure, request "
+     "you extend downwind", False),
+    ("November one two three alpha bravo, be advised, traffic is a King Air with a gear problem, unable "
+     "the visual", False),
+])
+def test_a_pilot_s_be_advised_with_a_request_is_its_own(text, own):
+    w = World()
+    w.atc(0, text)
+    assert bool(_abn(w, "N123AB")) is own
+    if own:
+        assert w.atc(40, text) is not None
+
+
+def test_be_advised_alone_is_no_longer_an_advisory():
+    norm = "n123ab be advised hydraulic failure request the long runway"
+    assert W.aimed_elsewhere(norm, True, {"alt": 2000, "phase": "arriving"}, W.abnormal(norm)) is False
+    other = "n123ab be advised the aircraft ahead has a hydraulic failure request you extend downwind"
+    assert W.aimed_elsewhere(other, True, {"alt": 2000, "phase": "arriving"}, W.abnormal(other)) is True
+
+
+@pytest.mark.parametrize("text", ["we have a smoke indication", "caution, we have a smoke indication",
+                                  "we've got a smoke light in the aft lav", "smoke warning in the cargo hold"])
+def test_a_smoke_indication_light_or_warning_is_smoke(text):
+    norm = W.fuzzy(atc.normalize(normalize(text)))
+    assert "smoke" in {a.kind for a, _w in W.abnormal(norm)}
+
+
+def test_a_pilot_s_caution_smoke_indication_is_its_own():
+    w = World()
+    text = "November one two three alpha bravo, caution, we have a smoke indication, request the long runway"
+    norm = W.fuzzy(atc.normalize(normalize(text)))
+    assert W.own_trouble(norm, W.abnormal(norm))
+    w.atc(0, text)
+    a = w.atc(40, text)
+    assert a is not None and "smoke" in _abn(w, "N123AB")
+
+
+@pytest.mark.parametrize("a, b, differ", [
+    ("Citation", "King Air", True),
+    ("C68A", "King Air", True),
+    ("Citation N123AB", "Citation N456CD", True),
+    ("Citation", "Cessna Citation X", False),
+    ("King Air", "Beechcraft", False),
+    ("Citation", "business jet", False),
+    ("", "King Air", False),
+    ("N123AB", "King Air", False),
+    ("Citation", "Zephyrcraft 9", False),                          # a maker not known: unknown, never different
+    # an ADS-B type code and the name for the same aircraft: one
+    ("C56X", "Citation", False), ("C68A", "Citation", False), ("G450", "Gulfstream", False), ("GLF4", "Gulfstream", False),
+    ("BE20", "King Air", False),
+    ("PC12", "Pilatus", False), ("PC-12", "Pilatus", False), ("LJ45", "Lear", False), ("CL35", "Challenger", False),
+    ("GLEX", "Global Express", False), ("Global", "Bombardier", False), ("Hawker", "Beechcraft", False),
+    ("E55P", "Phenom", False),
+])
+def test_other_aircraft(a, b, differ):
+    assert W.other_aircraft(a, b) is differ and W.other_aircraft(b, a) is differ
+
+
+KING_AIR2 = "60 Control, car 9901, declaring an alert level 2 for a King Air, runway 16"
+
+
+@pytest.mark.parametrize("decl, joins", [(KING_AIR2, False), (ALERT2, True),
+                                         ("60 Control, car 9901, declaring an alert level 2 at the airport, runway 34",
+                                          True)])
+def test_a_county_alert_for_another_aircraft_15_minutes_before_is_another_call(decl, joins):
+    w = World()
+    iid = w.feed(0, "C-11", "AIRPORT ALERT 2", "WESTCHESTER COUNTY AIRPORT", units=("E64",),
+                 comments=((w.t0 + 30, "CITATION GEAR PROBLEM 5 MI FINAL"),))
+    a = w.radio(15 * 60, decl)
+    assert (w.alerts.get(a["id"])["incident_id"] == iid) is joins
+    assert len(w.incidents()) == (1 if joins else 2)
+
+
+@pytest.mark.parametrize("decl, joins", [(KING_AIR2, False), (ALERT2, True)])
+def test_a_page_for_another_aircraft_is_another_call(decl, joins):
+    w = World()
+    p = w.page(0, PAGE2.replace("airport alert 2,", "airport alert 2, a Citation with a gear problem,"))
+    a = w.radio(15 * 60, decl)
+    assert (w.alerts.get(a["id"])["incident_id"] == p["id"]) is joins
+
+
+@pytest.mark.parametrize("comment, joins", [("KING AIR HYDRAULIC FAILURE", False), ("CITATION GEAR", True), ("", True)])
+def test_a_county_event_for_another_aircraft_after_the_declaration_is_another_call(comment, joins):
+    w = World()
+    a = w.radio(0, ALERT2)
+    kw = {"comments": ((w.t0 + 15 * 60, comment),)} if comment else {}
+    iid = w.feed(15 * 60 + 30, "C-12", "AIRPORT ALERT 2", "WESTCHESTER COUNTY AIRPORT", units=("E64",), **kw)
+    assert (iid == w.alerts.get(a["id"])["incident_id"]) is joins
+    assert len(w.incidents()) == (1 if joins else 2)
+
+
+def test_two_tails_said_and_different_never_join():
+    """The same type, another tail: another aircraft."""
+    w = World()
+    w.feed(0, "C-13", "AIRPORT ALERT 2", "WESTCHESTER COUNTY AIRPORT", units=("E64",),
+           comments=((w.t0 + 30, "CITATION N456CD UNSAFE GEAR"),))
+    a = w.radio(10 * 60, "60 Control, car 9901, declaring an alert level 2 for a Citation N123AB, runway 34")
+    assert len(w.incidents()) == 2 and w.alerts.get(a["id"])["incident_id"] != w.incidents()[0]["id"]
+
+
+# -- #381 review: a code and a name are one aircraft; pronouns; a pilot's request ---------------------------------------
+
+
+@pytest.mark.parametrize("decl, comment", [
+    ("60 Control, car 9901, declaring an alert level 2 at the airport, runway 34", "CITATION GEAR PROBLEM"),   # ADS-B C68A
+    ("60 Control, car 9901, declaring an alert level 2 for a Gulfstream, runway 34", "G450 GEAR PROBLEM"),
+    ("60 Control, car 9901, declaring an alert level 2 for a Pilatus, runway 34", "PC12 GEAR PROBLEM"),
+])
+def test_the_main_chain_with_a_code_and_a_name_is_one_incident(decl, comment):
+    """The tower's pre-alert (ADS-B: C68A) -> 60 Control's declaration (its type from ADS-B when it says none) -> the
+    county's event naming the same aircraft by name: one incident."""
+    w = World()
+    w.atc(0, "November one two three alpha bravo going around")
+    t = w.atc(20, "November one two three alpha bravo, we have a flap fail indication, we'll run the checklist")
+    assert t is not None
+    a = w.radio(120, decl)
+    iid = w.feed(300, "C-14", "AIRPORT ALERT 2", "WESTCHESTER COUNTY AIRPORT", units=("E64",),
+                 comments=((w.t0 + 290, f"ALERT 2 {comment}"),))
+    inc = _one_incident(w, a)
+    assert iid == inc["id"]
+
+
+@pytest.mark.parametrize("text, kind", [
+    ("November one two three alpha bravo, they're reporting smoke in the cabin", "smoke"),
+    ("November one two three alpha bravo, a Citation with a gear problem, request the long runway", "gear"),
+    ("November one two three alpha bravo, he's got a flap problem up here, we'd like to hold", "flaps"),
+])
+def test_a_pilot_s_own_crew_or_aircraft_is_its_own(text, kind):
+    w = World()
+    w.atc(0, text)
+    assert kind in _abn(w, "N123AB")
+
+
+@pytest.mark.parametrize("text", [
+    f"{C}, traffic ahead, they're reporting smoke in the cabin",
+    f"{C}, number two following a Citation, he's got a gear problem, request you extend downwind",
+    f"{C}, a Citation with a gear problem is on a three mile final, unable the visual",
+])
+def test_a_pronoun_or_a_request_with_another_aircraft_said_is_not_its_own(text):
+    w = with_air_c()
+    w.atc(0, text)
+    assert w.atc(40, text) is None and _abn(w, "N789EF") == set()

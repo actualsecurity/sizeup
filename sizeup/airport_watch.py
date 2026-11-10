@@ -16,13 +16,16 @@ mostly without a callsign. This watch keeps a short memory per aircraft instead.
                     ground or departing), and no other aircraft's track went around; ambiguous: it stays unassigned.
                     "Traffic going around" said to another aircraft is not that aircraft's go-around, and a controller's
                     words TO an aircraft about another one ("<callsign>, hold short, emergency aircraft on final", a traffic
-                    advisory) are not that aircraft's abnormal phrases (aimed_elsewhere; never its own trouble: "mayday",
-                    "we've lost ...", "our ...", "request emergency equipment", "your left brake": #353)
+                    advisory, "the aircraft ahead has a gear problem", "following a King Air with a hydraulic failure")
+                    are not that aircraft's abnormal phrases (aimed_elsewhere; never its own trouble: "mayday", "we've
+                    lost ...", "our ...", "request emergency equipment", "your left brake": #353; a pilot's "be advised,
+                    hydraulic failure, request ..." is its own: #380)
     go-around       "go around", "going around", "missed approach", "going missed" (GO_AROUND); or the aircraft's own
                     track: arriving in the last ADSB_ARRIVING_S, now near / departing / low and not descending (the
                     Aircraft layer's PhaseMemory, #279: a climb after an approach)
-    abnormal        ABNORMAL. Strong (the aircraft is in trouble): flaps, gear, hydraulics, engine, smoke on board,
-                    declaring / an emergency, souls on board, low / minimum fuel. Weak: a checklist being run, divert / "a
+    abnormal        ABNORMAL. Strong (the aircraft is in trouble): flaps, gear, hydraulics, engine, smoke on board (a
+                    smoke indication / light / warning too), declaring / an emergency, souls on board, low / minimum
+                    fuel. Weak: a checklist being run, divert / "a
                     different airport", fuel remaining, unable to land / extend, a "fail indication", troubleshooting,
                     "some airspace". What a normal flight says never counts: "flaps 20", "gear down", "checklist
                     complete", the before / after takeoff checklist, "divert around the weather", "unable to maintain
@@ -79,6 +82,7 @@ mostly without a callsign. This watch keeps a short memory per aircraft instead.
                     alert one within ALERT_WINDOW_S, an untyped Airport one within SAME_CALL_S, no alert level on it
                     yet), and one that comes after attaches (alert_incident; an alert one dispatched up to 20 min
                     before the declaration, an untyped one 5 min; never one dispatched after 60 Control's cancel).
+                    Never two that name different aircraft (a type or a tail both said: other_aircraft, #380).
                     Alert 1 is never an incident: not as a setting, and the county's or the page's "AIRPORT ALERT 1"
                     joins the standby pre-alert (standby(); the county's never pushed); its card says Acknowledge (no event).
                     An upgrade (1 -> 2) escalates the same pre-alert into the incident; a cancel ends a pre-alert and is a
@@ -168,6 +172,7 @@ _ABN = [
     ("smoke", "smoke", True,      # on board: smoke off the field (a brush fire) is sizeup/atc.py's
      r"smoke (?:in|on) (?:the |our )?(?:cockpit|cabin|flight deck|aircraft|airplane|plane|lav\w*|galley)|smoke on ?board|"
      r"(?:we have|we ve got|we got|we re getting|getting) (?:some )?smoke|fumes|burning smell|smell (?:of )?(?:smoke|burning)|"
+     r"smoke (?:indication|light|warning|detector|alarm)|"     # "we have a smoke indication" (#380)
      r"(?:engine|apu|brake|brakes|wheel|electrical) fire|fire (?:light|warning|indication|bell)|(?:we re|we are) on fire", ""),
     ("emergency", "emergency", True,
      r"declar\w* (?:an |a )?(?:emergency|mayday)|(?:we have|we re|we are|have) an emergency|emergency (?:aircraft|landing|"
@@ -254,11 +259,28 @@ GROUND_CUE = re.compile(r"\b(?:taxi\w*|ramp|gate|parking|hold(?:ing)? short|on t
 
 
 # A controller's words TO an aircraft about another one (aimed_elsewhere): a traffic advisory or a hold-short to it
-# ("hold short, emergency aircraft on final", "traffic for you, an aircraft with a gear problem on final"). A pilot's
-# "traffic permitting" is its own phrase, never one.
-ADVISORY = re.compile(r"\b(?:traffic|caution|be advised|hold(?:ing)? short|for you|emergency (?:aircraft|traffic|in progress)|"
+# ("hold short, emergency aircraft on final", "traffic for you, an aircraft with a gear problem on final"), or words
+# about another aircraft (OTHER_MARK, CRAFT_WITH). A pilot's "traffic permitting" is its own phrase, never one; neither
+# is "be advised" (#380: a pilot's "be advised, hydraulic failure, request ..." is its own).
+ADVISORY = re.compile(r"\b(?:traffic|caution|hold(?:ing)? short|for you|emergency (?:aircraft|traffic|in progress)|"
                       r"(?:an|the|another) (?:aircraft|airplane|jet) (?:with|declaring|on (?:a )?(?:\w+ )?(?:mile )?final)|"
                       r"(?:equipment|trucks?|crash crew) (?:rolling|on|crossing|responding))\b")
+_TYPE = airport._TYPES.pattern.replace("(?P<t>", "(?:")                 # "king air", "citation", "gulfstream g 450" ...
+_CRAFT = rf"(?:aircraft|airplane|plane|jet|traffic|helicopter|{_TYPE})"
+# words about another aircraft, said outright (#380): "traffic", "the aircraft ahead", "in front of you", "following a
+# King Air", "a Citation on a two mile final", "emergency aircraft", "hold short", "the Citation has ...". A pronoun alone
+# ("he's", "they're reporting smoke in the cabin": a pilot's own crew) never is
+OTHER_MARK = re.compile(rf"\b(?:traffic|in front of you|following (?:a|an|the)|hold(?:ing)? short|"
+                        rf"emergency (?:aircraft|traffic|in progress)|"
+                        rf"the (?:\w+ )?(?:aircraft|airplane|plane|jet|traffic|{_TYPE}) (?:\w+ )?(?:ahead|in front)|"
+                        rf"(?:{_CRAFT}|is) on (?:a )?(?:\w+ )?(?:mile )?final|"     # "... is on a three mile final"
+                        rf"the {_CRAFT} (?:has|had|is reporting|reports|reported|declared))\b")
+# ... and "a Citation with a gear problem": another aircraft's, unless the pilot asks for something (PILOT_ASKS)
+CRAFT_WITH = re.compile(rf"\b(?:a|an|the|another) (?:\w+ )?{_CRAFT} with (?:a|an|some|the|no|low)\b")
+# a pilot asking for something ("request the long runway", "we'd like to hold", "unable"): with no other aircraft said
+# outright (OTHER_MARK), the trouble in it is its own ("be advised, hydraulic failure, request ..."; "a Citation with a
+# gear problem, request ..."); a controller's "request you ..." is not one
+PILOT_ASKS = re.compile(r"\b(?:request(?:ing)?(?! you\b)|we ?d like|we would like|we ?ll need|we need|we want|unable)\b")
 NOT_ADVISORY = re.compile(r"\btraffic permitting\b")
 # Whose trouble it is: an emergency of its own (#353: never silenced), the controller's words about it ("your left
 # brake is smoking"), or a first-person trouble phrase next to the abnormal words (own_trouble). A bare "we" is
@@ -268,8 +290,8 @@ YOURS = re.compile(r"\byour (?:\w+ ){0,2}(?:brakes?|engines?|gear|flaps?|wheels?
                    r"airplane)\b|\byou (?:have|ve got|got|re on|are on) (?:a |an |some )?(?:\w+ )?(?:smoke|fire|fuel|flames?|leak)\b")
 # right before the abnormal words: "we've lost (an engine)", "we have a (flap problem)", "we've got (smoke)", "our
 # (left engine failed)", "we're getting (smoke)"
-OWN_LEAD = re.compile(r"\b(?:we ve lost|we have lost|we lost|i ve lost|i lost|we ve got|we got|we have|we ve|weve|i have|"
-                      r"i ve|ive|we re (?:getting|losing|showing|seeing|having)|we are (?:getting|losing|showing|seeing|"
+OWN_LEAD = re.compile(r"\b(?:we ?ve lost|we have lost|we lost|i ?ve lost|i lost|we ?ve got|we got|i ?ve got|we have|we ve|"
+                      r"weve|i have|i ve|ive|we re (?:getting|losing|showing|seeing|having)|we are (?:getting|losing|showing|seeing|"
                       r"having)|our|my)(?: (?:a|an|some|the|no|number \w+|left|right|one|two|main|nose))*\s*$")
 OWN_REQUEST = re.compile(r"\brequest(?:ing)? (?:the )?(?:emergency )?(?:equipment|trucks|crash crew|arff|fire trucks)\b")
 THIRD = re.compile(r"\b(?:emergency|an emergency) (?:aircraft|traffic|in progress)\b|^(?:aircraft|traffic)\b")
@@ -293,14 +315,21 @@ def aimed_elsewhere(norm: str, called_first: bool, plane: dict | None, hits: Seq
     """A controller's words TO the named aircraft whose abnormal phrases are not its own: called first (a controller
     calls the aircraft; a pilot ends with its callsign, or starts with the facility), none of its own trouble in it
     (OWN_EMERGENCY, YOURS, own_trouble), and an advisory in it (ADVISORY: "traffic", "emergency aircraft", "caution",
-    "hold short", "for you"), or the aircraft on the ground on ADS-B. One rule, whoever says "we": "N123AB, we've lost an
-    engine, request emergency equipment" is its own; "N456CD, we have traffic for you, emergency aircraft on final" is
-    not."""
+    "hold short", "for you"; OTHER_MARK: "the aircraft ahead", "following a King Air"; CRAFT_WITH: "a Citation with a
+    gear problem"), or the aircraft on the ground on ADS-B. A request ("request the long runway", "we'd like",
+    "unable") with no other aircraft said outright (OTHER_MARK) is the pilot's own, "be advised" or not. One rule, whoever says "we": "N123AB, we've lost an engine, request
+    emergency equipment" is its own; "N456CD, we have traffic for you, emergency aircraft on final" is not."""
     if not called_first:                                # the aircraft's own transmission, or unknown
         return False
     if OWN_EMERGENCY.search(norm) or YOURS.search(norm) or own_trouble(norm, hits):
         return False
-    return bool(ADVISORY.search(NOT_ADVISORY.sub(" ", norm)) or airborne(plane) is False)
+    # (the controller's words about it win over another aircraft's in one sentence: "your brake is smoking, the
+    # traffic ahead ..." is its own; YOURS above)
+    said = NOT_ADVISORY.sub(" ", norm)
+    marked = OTHER_MARK.search(said)
+    if PILOT_ASKS.search(said) and not marked:
+        return False                                    # "be advised, hydraulic failure, request the long runway"
+    return bool(marked or CRAFT_WITH.search(said) or ADVISORY.search(said) or airborne(plane) is False)
 
 
 def go_around(norm: str) -> str:
@@ -492,6 +521,55 @@ def type_fits(said: str, code: str) -> bool | None:
         if k in s:
             return any(c.startswith(x) for x in codes)
     return None
+
+
+# (family, its names said, its ICAO type codes' starts): a type said or an ADS-B code resolved to who makes it, so a
+# code and a name for one aircraft ("C68A", "Citation"; "G450", "Gulfstream"; "BE20", "King Air") are never two (#380)
+FAMILIES = [(f, re.compile(rf"\b(?:{n})\b"), re.compile(rf"(?:{c})[a-z0-9]*$")) for f, n, c in (
+    ("cessna", r"cessna|citation|caravan|skyhawk|skylane|mustang|cj ?\d|latitude|longitude|sovereign", r"c\d"),
+    ("beech", r"beech\w*|king ?air|bonanza|baron|premier|hawker", r"be\d|b35|h25|ha4|prm"),
+    ("gulfstream", r"gulfstream|g ?[1-8]\d0|g ?[ivx]+", r"glf|g15|g28|g[1-8]\d0|ga\dc"),
+    ("bombardier", r"bombardier|challenger|global(?: express)?|crj ?\d*|learjet|lear", r"cl\d|glex|gl\d|crj|lj"),
+    ("embraer", r"embraer|phenom|praetor|legacy|erj ?\d*|e ?1[79]\d", r"e5[05]|e54|e35|e1[3-9]|e75|e29"),
+    ("pilatus", r"pilatus|pc ?(?:6|12|24)", r"pc\d"),
+    ("dassault", r"dassault|falcon", r"fa\d|f2th|f900"),
+    ("cirrus", r"cirrus|sr ?2[02]|vision jet", r"sr2|sf5"),
+    ("piper", r"piper|cherokee|archer|arrow|saratoga|malibu|meridian|seneca|navajo|cheyenne|cub", r"pa\d|p28|p32|p46"),
+    ("boeing", r"boeing|b ?7[0-9]7|7[0-9]7", r"b7\d"),
+    ("airbus", r"airbus|a ?3[0-8]0|a ?2[12]\d", r"a3\d|a2\d"),
+    ("mooney", r"mooney", r"m20"),
+    ("diamond", r"diamond|da ?[0-9]{2}", r"da\d|dv2"),
+    ("robinson", r"robinson|r ?(?:22|44|66)", r"r22|r44|r66"),
+    ("sikorsky", r"sikorsky|black hawk|s ?76|s ?92", r"s76|s92|h60"),
+    ("bell", r"bell", r"b06|b4\d"),
+)]
+
+
+def family(said: str) -> frozenset[str]:
+    """Who makes the aircraft a name or an ADS-B type code says: {"cessna"} for "Citation" and "C68A"; empty when unknown
+    (a generic "business jet", a make not in FAMILIES)."""
+    t = airport._TAIL.sub(" ", airport._norm(said or ""))
+    out = {f for f, names, _c in FAMILIES if names.search(t)}
+    if not out:                                         # an ICAO type code ("c68a", "glf4", "be20", "pc12")
+        for tok in [t.replace(" ", "")] + t.split():
+            if 2 <= len(tok) <= 4 and tok.isalnum():
+                out |= {f for f, _n, codes in FAMILIES if codes.match(tok)}
+    return frozenset(out)
+
+
+def other_aircraft(a: str, b: str) -> bool:
+    """Two reports name different aircraft (#380: never one call): both say a tail ("N123AB") and it differs, or both
+    resolve to a known maker (family: a name or an ADS-B code) and they share none ("King Air" and "Citation"). Either
+    unknown, generic or of an unknown maker: not known to differ (they may join). "C68A" and "Citation", "G450" and
+    "Gulfstream", "Global" and "Bombardier": one aircraft."""
+    a, b = airport._norm(a or ""), airport._norm(b or "")
+    if not a or not b:
+        return False
+    ta, tb = airport._TAIL.search(a), airport._TAIL.search(b)
+    if ta and tb:
+        return ta.group(0) != tb.group(0)
+    fa, fb = family(a), family(b)
+    return bool(fa and fb and not fa & fb)
 
 
 # -- the watch ----------------------------------------------------------------------------------------------------------
@@ -1380,24 +1458,26 @@ class AirportWatch:
         except Exception as e:  # noqa: BLE001 - never in the way
             self.log(f"airport watch: poll now: {type(e).__name__}")
 
-    def _open_event(self, at: float) -> dict | None:
+    def _open_event(self, at: float, aircraft: str = "") -> dict | None:
         """The open Airport incident the county's feed or a page (or a person, from a pre-alert) made for this call
         already: the alert level is that one's, never a second incident. The same call only: an alert already (subtype
         ALERT-*) made within ALERT_WINDOW_S of the declaration, or one not typed further ('') within SAME_CALL_S, with no
         alert level on it yet (an unrelated Airport call, a fuel spill 18 min before, is another call). Not one an
-        earlier alert level made (after a cancel, a new declaration is a new alert)."""
+        earlier alert level made (after a cancel, a new declaration is a new alert), nor one for another aircraft than the
+        declaration names (#380: a type or a tail both said and different; Sources.other_aircraft)."""
         from sizeup.cad.sources import ALERT_SOURCE, ALERT_WINDOW_S, FEED_SOURCE, PAGE_SOURCE, SAME_CALL_S
         from sizeup.cad.store import OPEN
         alerts = tuple(airport.ALERTS.values())
-        return self.store.one(
+        rows = self.store.q(
             f"SELECT * FROM incidents i WHERE i.type = ? AND i.status IN ({','.join('?' * len(OPEN))}) AND i.source != ? "
             f"AND ((i.subtype IN ({','.join('?' * len(alerts))}) AND i.created_at BETWEEN ? AND ?) "
             "OR (i.subtype = '' AND i.created_at BETWEEN ? AND ?)) "
             "AND (i.source IN (?, ?) OR EXISTS (SELECT 1 FROM airport_alerts a WHERE a.incident_id = i.id)) "
             "AND NOT EXISTS (SELECT 1 FROM airport_alerts a WHERE a.incident_id = i.id AND a.data LIKE '%\"alert_level\"%') "
-            "ORDER BY i.created_at DESC LIMIT 1",
+            "ORDER BY i.created_at DESC",
             (airport.TYPE, *OPEN, ALERT_SOURCE, *alerts, at - ALERT_WINDOW_S, at + ALERT_WINDOW_S,
              at - SAME_CALL_S, at + SAME_CALL_S, FEED_SOURCE, PAGE_SOURCE))
+        return next((r for r in rows if not self.cad.sources.other_aircraft(r, aircraft)), None)
 
     def _incident(self, row: dict, d: dict, title: str, text: str, at: float) -> dict | None:
         """An alert level PCFD responds to ([atc] alert_level_incident, Alert 2 and 3 by default): a queued Airport incident
@@ -1415,7 +1495,7 @@ class AirportWatch:
                 with cad.store.tx() as db:
                     cad.store._event(db, inc["id"], "prealert", f"60 Control: {title.removeprefix('HPN ')}: “{text[:200]}”", at=at)
                 return self.alerts.get(row["id"])
-            inc = self._open_event(at)
+            inc = self._open_event(at, d.get("type") or "")
             if inc is not None:                           # the county's event or the page came first: that one
                 iid = inc["id"]
                 if inc["subtype"] in ("", *airport.ALERTS.values()) and inc["subtype"] != sub and not cad.sources._has_feed(iid):
