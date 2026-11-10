@@ -855,7 +855,7 @@ window.CadMap = (() => {
       };
       btn("Recenter", opts.manual ? "Back to the location" : "Back to the call and its rigs", () => {
         this.userMoved = false;
-        if (this.layer.setBand()) this.layer.draw();  // #376: the automatic frame again: active rigs full
+        if (this.layer.setBand && this.layer.setBand()) this.layer.draw();  // #376: the automatic frame again: active rigs full
         this.map.fire("sizeup:recenter");             // an aircraft being followed (aircraft.js) is let go
         if (opts.onRecenter) opts.onRecenter(); else this.fit(true);
       }, "locate");
@@ -929,7 +929,7 @@ window.CadMap = (() => {
         const following = !!(this.fol && this.fol.id);   // #358: never refit under a follow
         if (!following) { if (!this.userMoved && !this.opts.manual) this.fit(!first); }
       }
-      if (this.layer.setBand()) this.layer.draw();    // #376: framed again (another call, the calls changed)
+      if (this.layer.setBand && this.layer.setBand()) this.layer.draw();    // #376: framed again (another call, the calls changed)
     }
 
     // a rig followed (centred, zoomed in, kept centred; ringed for a while) or only picked (centred, ringed)
