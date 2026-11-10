@@ -571,8 +571,10 @@ class AirportAlerts:
         """Expire the open ones nobody answered in expire_s (from the last addition)."""
         now = self.clock() if now is None else now
         with self._lock:
-            old = self.store.q("SELECT id, at, title FROM airport_alerts WHERE status = 'open' AND updated_at < ?",
-                               (now - self.expire_s,))
+            old = self.store.q("SELECT a.id, a.at, a.title, a.data, i.status AS inc FROM airport_alerts a LEFT JOIN incidents i "
+                               "ON i.id = a.incident_id WHERE a.status = 'open' AND a.updated_at < ?", (now - self.expire_s,))
+            # an alert level whose incident is open stays (#369): it is what the event is about, and never a second one
+            old = [r for r in old if not (r["inc"] in ("queued", "pending", "active") and '"alert_level"' in (r["data"] or ""))]
             if not old:
                 return 0
             with self.store.tx() as db:

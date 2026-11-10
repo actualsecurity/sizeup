@@ -134,12 +134,14 @@ def test_mis_hearings_are_fixed_first(heard, fixed):
     ("we have to run a checklist, stand by", {"checklist"}),
     ("we may have to go to a different airport", {"divert"}),
     ("we're declaring an emergency", {"emergency"}),
-    ("say souls on board and fuel remaining", {"souls", "fuel"}),
+    ("say souls on board and fuel remaining", {"souls", "fuel_left"}),
+    ("minimum fuel, we're declaring an emergency", {"fuel", "emergency"}),
     ("engine failure on the right side", {"engine"}),
     ("can we get a block of airspace to troubleshoot", {"problem"}),
 ])
 def test_abnormal_phrases(text, kinds):
-    got = {a.kind for a, _w in W.abnormal(W.fuzzy(normalize(text).lower().replace(",", "")))}
+    from sizeup import atc
+    got = {a.kind for a, _w in W.abnormal(W.fuzzy(atc.normalize(normalize(text))))}
     assert kinds <= got, got
 
 
@@ -165,6 +167,10 @@ def test_normal_words_are_not_abnormal(text):
     ("contact approach one two four point six five", 124.65),
     ("climb and maintain three thousand", None),
     ("runway three four cleared to land", None),
+    ("altimeter two niner niner two", None),
+    ("29.92, Flexjet 618", None),                     # an altimeter read back, not 129.92
+    ("30.01 Flexjet 618", None),
+    ("contact approach one three two point five four zero", 132.54),     # an 8.33 kHz channel name
 ])
 def test_frequencies_heard_and_read_back(text, mhz):
     from sizeup import atc
@@ -225,6 +231,60 @@ def test_repeated_abnormal_phrases_alone_are_a_pre_alert():
     assert a is not None and a["title"] == "HPN ATC: abnormal · gear, checklist, divert · LXJ618 (C68A)"
 
 
+@pytest.mark.parametrize("gap", [20, 50, 70, 90])
+@pytest.mark.parametrize("named", [True, False])
+def test_the_shape_of_a_real_one_cut_off_and_unnamed(gap, named):
+    """The pilot's go-around cut off at "a flat" (with or without its callsign), the controller's answer naming it,
+    then, gap seconds on, the problem with no callsign: one pre-alert, then the hand-off."""
+    w = World()
+    w.tick(0)
+    first = ("Flexjet six one eight, we're going to go around, we have a flat." if named
+             else "Westchester tower, we're going to go around, we have a flat.")
+    w.atc(30, first)
+    b = w.atc(40, "Flexjet six one eight, roger, fly runway heading, climb and maintain three thousand")
+    assert b is not None and b["kind"] == "abnormal" and lines(b)["Heard"].startswith("go-around · flaps")
+    c = w.atc(40 + gap, "we just had a flap fail indication, we may have to go to a different airport, we'll run a "
+                        "checklist, can we get some airspace at three thousand")
+    assert c is not None and c["id"] == b["id"] and "checklist" in lines(c)["Heard"]
+    e = w.atc(60 + gap, "twenty point eight, Flexjet six one eight")
+    assert lines(e)["Where"] == "NY App 120.8" and len(w.open()) == 1
+
+
+def test_an_unnamed_go_around_goes_to_the_one_aircraft_whose_track_went_around():
+    w = World()
+    w.tick(0)
+    w.tick(20, phase="near", vr=1500, alt=1800)
+    a = w.atc(30, "we're going around, we've got a flap failure")
+    assert a is not None and a["data"]["aircraft"][0]["hex"] == "a0b1c2"
+
+
+def test_one_transmission_with_several_kinds_is_enough():
+    w = World()
+    a = w.atc(0, "Flexjet six one eight, we have a gear unsafe indication, we'll run the checklist and may divert")
+    assert a is not None and a["title"] == "HPN ATC: abnormal · gear, checklist, divert · LXJ618 (C68A)"
+
+
+def test_an_unnamed_problem_too_long_before_anyone_is_named_is_dropped():
+    w = World()
+    w.atc(0, "Westchester tower, we're going around, we have a flap failure")
+    assert w.atc(120, "Flexjet six one eight, roger, climb and maintain three thousand") is None
+
+
+def test_a_late_clip_raises_nothing_but_still_joins_an_open_one():
+    w = World()
+    w.at(5 * 3600)
+    old = w.w.heard_atc({"id": "old", "source": "HPN Tower", "start": w.t0, "end": w.t0 + 3,
+                         "text": normalize("Flexjet six one eight going around, we have a flap failure")})
+    assert old is None and w.open() == []
+    assert w.w.heard_radio({"id": "r-old", "channel": "Fire/EMS 15", "talkgroup": 307, "start": w.t0,
+                            "text": "60 Control, car 4417, declaring an alert level 2 for a Citation, runway 34"}) is None
+    assert w.incidents() == [] and w.push.sent == []
+    a = w.atc(5 * 3600 + 10, "Flexjet six one eight going around, we have a flap failure")
+    late = w.w.heard_atc({"id": "late", "source": "HPN Tower", "start": w.clock.t - 900, "end": w.clock.t - 897,
+                          "text": normalize("Flexjet six one eight, we're running the checklist")})
+    assert late["id"] == a["id"] and late["data"]["snippets"][-1]["id"] == "late"
+
+
 @pytest.mark.parametrize("seq", [
     ["Flexjet six one eight, go around, traffic on the runway", "going around, Flexjet six one eight",
      "Flexjet six one eight, fly runway heading, climb and maintain two thousand",
@@ -233,6 +293,30 @@ def test_repeated_abnormal_phrases_alone_are_a_pre_alert():
      "Flexjet six one eight, contact New York approach one two zero point eight", "twenty point eight, Flexjet six one eight"],
     ["Flexjet six one eight, before takeoff checklist complete, ready for departure one six",
      "Flexjet six one eight, runway one six, cleared for takeoff", "checklist complete, rolling, Flexjet six one eight"],
+    # a weather miss and the alternate; a missed approach and a divert for the weather
+    ["Flexjet six one eight, going around, wind shear on short final", "Flexjet six one eight, roger, climb and maintain "
+     "three thousand", "Flexjet six one eight, we'd like to go to our alternate", "Flexjet six one eight, contact New York "
+     "approach one two zero point eight"],
+    ["Flexjet six one eight, missed approach, couldn't see the runway", "Flexjet six one eight, we're going to divert"],
+    # training: a practice single-engine approach, flapless practice
+    ["Westchester tower, Flexjet six one eight, practice single engine approach, low approach then the missed",
+     "Flexjet six one eight, at the missed approach point execute the published missed",
+     "Flexjet six one eight, we are flapless on this one, just practice"],
+    # unable to keep visual separation; the fuel question; a wind issue; the after-takeoff checklist
+    ["Flexjet six one eight, go around, traffic on the runway", "going around, Flexjet six one eight",
+     "Flexjet six one eight, unable to maintain visual separation with the traffic"],
+    ["Flexjet six one eight, go around, the jet didn't clear", "Flexjet six one eight, say fuel remaining",
+     "two hours of fuel, Flexjet six one eight"],
+    ["Flexjet six one eight, going around", "Flexjet six one eight, we have an issue with the wind, request runway one six"],
+    ["Flexjet six one eight, go around", "going around, Flexjet six one eight",
+     "Flexjet six one eight, we'll run the after takeoff checklist and call you back"],
+    # a brush fire's smoke reported twice (sizeup/atc.py's, not the aircraft's)
+    ["Westchester tower, Flexjet six one eight, there's smoke off the departure end, looks like a brush fire",
+     "Flexjet six one eight, thanks, where's the smoke", "about a mile south of the field, lot of smoke, Flexjet six one eight"],
+    # routine words around the field
+    ["Flexjet six one eight, fire up when ready", "Flexjet six one eight, engine start approved",
+     "gear down, cleared to land three four, Flexjet six one eight", "Flexjet six one eight, unable higher",
+     "we'd like to divert around the weather to the west, Flexjet six one eight"],
 ])
 def test_normal_traffic_and_a_routine_hand_off_raise_nothing(seq):
     w = World()
@@ -386,7 +470,7 @@ def test_tower_first_then_60_control_attaches():
     a = w.radio(600, "60 Control, car 4417, declaring an alert level 1 for a Citation with flap issues, 5 mile final runway 16")
     assert a["id"] == t["id"] and a["source"] == "atc" and a["kind"] == "alert_level"
     assert a["title"] == "HPN Alert 1 · standby · Citation · flaps · 5 mi final RWY 16"
-    assert a["data"]["aircraft"][0]["hex"] == "a0b1c2" and lines(a)["Alert"].startswith("Alert 1 · standby · Citation")
+    assert a["data"]["aircraft"][0]["hex"] == "a0b1c2" and lines(a)["Alert"].startswith("declared ")
     assert [p[2] for p in w.push.sent] == [4, 5]                  # pushed again, at the top priority
     b = w.atc(700, "Westchester tower, Flexjet six one eight on the visual one six")
     assert b["title"] == a["title"] and "Alert" in lines(b) and len(w.open()) == 1
@@ -417,6 +501,93 @@ def test_alert_in_other_fire_radio_never_counts(text, channel, tg):
     assert w.cad.state()["airport_alerts"]["items"] == []
 
 
+@pytest.mark.parametrize("text", [
+    "60 Control, Engine 61, the alarm company says the alert was canceled, we're returning",
+    "60 Control, Engine 61, the medic alert was cancelled",
+    "Rescue 40, the patient is down safely from the ladder",
+    "Ladder 31, the victim is down safely, we're coming off the roof",
+    "60 Control, Engine 64, alert level 2 heat advisory in effect, we're back in quarters",
+    "all units, county alert two for the storm, stand by",
+])
+def test_unrelated_fire_radio_never_ends_or_changes_an_open_alert(text):
+    w = World()
+    a = w.radio(0, "60 Control, car 4417, declaring an alert level 2 for a Citation, runway 34")
+    t = World()
+    t.atc(0, "Flexjet six one eight going around, we have a flap failure")
+    assert w.radio(120, text) is None and t.radio(120, text) is None
+    assert [(x["id"], x["status"], x["title"]) for x in w.open()] == [(a["id"], "open", a["title"])]
+    assert len(t.open()) == 1 and [i["subtype"] for i in w.incidents()] == ["ALERT-2"]
+
+
+def test_a_cancel_said_with_an_upgrade_is_the_upgrade():
+    w = World()
+    a = w.radio(0, DECLARE)
+    b = w.radio(120, "60 Control, car 4417, cancel the alert 1, we're upgrading to an alert level 2, smoke in the cabin")
+    assert b["id"] == a["id"] and b["status"] == "open" and b["title"].startswith("HPN Alert 2 · Citation · smoke")
+    assert [i["subtype"] for i in w.incidents()] == ["ALERT-2"]
+
+
+def test_a_downgrade_changes_the_level_and_closes_nothing():
+    w = World()
+    w.radio(0, "60 Control, car 4417, declaring an alert level 2 for a Citation, runway 34")
+    b = w.radio(300, "60 Control, car 4417, the alert has been downgraded to an alert level 1")
+    assert b["title"].startswith("HPN Alert 1 · standby") and lines(b)["Alert"].startswith("Alert 2 → 1 ")
+    assert [(i["subtype"], i["status"]) for i in w.incidents()] == [("ALERT-1", "queued")]
+
+
+def test_a_new_declaration_after_a_cancel_is_a_new_alert():
+    w = World()
+    a = w.radio(0, "60 Control, car 4417, declaring an alert level 2 for a Citation, runway 34")
+    w.radio(600, "60 Control, car 4417, alert level 2 canceled, aircraft landed without incident")
+    b = w.radio(3000, "60 Control, car 4417, declaring an alert level 2 for a Citation, runway 16")
+    assert b["id"] != a["id"] and b["status"] == "open" and len(w.incidents()) == 2 and len(w.push.sent) == 2
+
+
+def test_an_alert_with_an_open_incident_never_expires():
+    w = World()
+    w.alerts.expire_s = 600.0
+    a = w.radio(0, "60 Control, car 4417, declaring an alert level 2 for a Citation, runway 34")
+    w.at(2100)
+    assert [x["id"] for x in w.open()] == [a["id"]]
+    b = w.radio(2160, "60 Control, car 4417, still holding the alert level 2 for the Citation, runway 34")
+    assert b["id"] == a["id"] and len(w.incidents()) == 1
+
+
+def test_accepted_alert_takes_a_later_level_only_for_the_same_aircraft():
+    w = World()
+    a = w.radio(0, "60 Control, car 4417, declaring an alert level 2 for a Citation, runway 34")
+    w.alerts.accept(a["id"], {"operator": "Lt. Test"})
+    b = w.radio(300, "60 Control, car 4417, the Citation is now an alert level 3, runway 34")
+    assert b["id"] == a["id"] and [i["subtype"] for i in w.incidents()] == ["ALERT-3"]
+    c = w.radio(900, "60 Control, car 4417, declaring an alert level 2 for a King Air, runway 16")
+    assert c["id"] != a["id"] and len(w.incidents()) == 2
+
+
+@pytest.mark.parametrize("text, level", [
+    ("60 Control, car 4417, declaring an alert to for a Citation on runway 16", 2),
+    ("60 Control, car 4417, alert level won for a Citation runway 16", 1),
+    ("60 Control, car 4417, alert level tree, aircraft on a 3 mile final runway 34", 3),
+])
+def test_misheard_levels_with_the_airport_in_it(text, level):
+    a = World().radio(0, text)
+    assert a is not None and a["title"].startswith(f"HPN Alert {level}")
+
+
+def test_another_airport_and_a_drill():
+    w = World()
+    assert w.radio(0, "60 Control, be advised Danbury airport has an alert 1 for a Cessna, no response needed", tg=301) is None
+    a = w.radio(60, "60 Control, car 4417, this is a drill, alert level 2 drill at the airport, runway 16")
+    assert a["data"].get("drill") and w.incidents() == []          # a drill: never an incident
+
+
+def test_an_ems_call_at_the_terminal_never_joins_the_alert_incident():
+    w = World()
+    w.radio(0, "60 Control, car 4417, declaring an alert level 2 for a Citation, runway 34")
+    iid = w.feed(300, "C-9", "EMS SICK PERSON", "WESTCHESTER COUNTY AIRPORT TERMINAL", units=("E60",))
+    assert len(w.incidents()) == 2 and iid != w.incidents()[0]["id"]
+    assert w.feed(400, "C-10", "AIRPORT ALERT 2", "WESTCHESTER COUNTY AIRPORT", units=("E64",)) == w.incidents()[0]["id"]
+
+
 def test_the_cad_hears_60_control_through_the_comms_log():
     w = World()
     w.cad.comms.record({"id": "307-1-call_1-t1", "start": w.at(0), "end": w.at(8), "source": "Fire/EMS 15",
@@ -445,6 +616,7 @@ def test_the_vocabularies_have_the_words():
     v = json.loads((ROOT / "data" / "atc" / "vocabulary.json").read_text())
     for word in ("flaps", "landing gear", "hydraulic", "go around", "missed approach", "checklist", "divert", "alert level"):
         assert word in v["phrases"], word
+    assert not {"flaps", "checklist", "divert", "hydraulics"} & set(v["prompt"].lower().replace(",", " ").split())
     fire = vocabulary_suggestions({}, [])
     for word in ("alert level one", "alert level two", "alert level three", "flaps", "landing gear", "runway three four",
                  "mile final"):

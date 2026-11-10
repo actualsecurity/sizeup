@@ -674,7 +674,7 @@ class Sources:
                     inc, similar = None, inc                 # another call there (one that ended before, an old one)
                 if inc is None:                              # the airport alert 60 Control declared on the radio (#369)
                     al = self.alert_incident(ev.source, at, typ, data["location"])
-                    if al is not None:
+                    if al is not None and self._same_call(al, data, now):
                         inc, similar = al, None
             if inc is not None:
                 if inc["source"] == "manual":                # a person typed its type and location: theirs stand
@@ -957,17 +957,17 @@ class Sources:
             return "create", inc or similar
 
     def alert_incident(self, source: str, at: float, typ: str, location: str) -> dict | None:
-        """The open Airport incident an alert level declared on the fire radio made (#369, source ALERT_SOURCE), within
-        MATCH_WINDOW_S before this report, that this source has no report on yet: a county event or a page for the
-        airport (its type Airport, or the airport in its location) attaches to it instead of making another."""
+        """The open Airport incident an alert level declared on the fire radio made (#369, source ALERT_SOURCE), made
+        within MATCH_WINDOW_S before this report, that this source has no report on yet: a county event (also the same
+        call, _same_call) or a page of the Airport type attaches to it instead of making another."""
         from sizeup.cad import airport
-        if typ != airport.TYPE and not airport._AIRPORT.search(airport._norm(location)):
+        if typ != airport.TYPE:                          # an Airport / alert / aircraft type: never an EMS call at the terminal
             return None
         return self.store.one(
             f"SELECT * FROM incidents i WHERE i.source = ? AND i.type = ? AND i.status IN ({','.join('?' * len(OPEN))}) "
             "AND i.created_at BETWEEN ? AND ? AND NOT EXISTS (SELECT 1 FROM source_reports r WHERE r.incident_id = i.id "
             "AND r.source = ?) ORDER BY i.created_at DESC LIMIT 1",
-            (ALERT_SOURCE, airport.TYPE, *OPEN, at - MATCH_WINDOW_S, at + SAME_CALL_S, source))
+            (ALERT_SOURCE, airport.TYPE, *OPEN, at - MATCH_WINDOW_S, at + SAME_CALL_BEFORE_S, source))
 
     def _page_same_call(self, inc: dict, at: float, typ: str) -> bool:
         """A page joins a feed's incident only for the same call: the feed's dispatch within SAME_CALL_S of the page (the
