@@ -13,9 +13,11 @@ Source: Metro-North's own GIS, published by the MTA as a public ArcGIS Online fe
 
 Checked 2026-11-09 (Rye station to just past Greenwich, about 40.975..41.04 N, 73.70..73.59 W): 4 main tracks, 149
 catenary structures (CB-185 to CB-317, some with A / B / X suffixes), 8 whole and 65 tenth mileposts (MP 23 to 30).
-Over the layer's area ([trains] bbox, Mount Vernon East to Stamford): 10 main-line track features, 426 structures, 20
-whole and 187 tenth mileposts. The service was last edited in 2017; the data has no licence statement (a public
-service of the MTA's: we say where it is from, keep a copy on our own server and serve our pages from it).
+Over the layer's area ([trains] bbox, Mount Vernon East to Stamford, plus MARGIN_DEG, as one refresh reads it): 9
+numbered tracks, 453 structures and 224 mileposts (whole and tenths). The service was last edited in 2017; the data
+has no licence statement (a public service of the MTA's: we say where it is from, keep a copy on our own server and
+serve our pages from it). The whole mileposts say LineCode NHV in some of the service's copies, the rest NHL: both
+are asked for.
 OpenStreetMap has the four tracks too (railway:track_ref 1..4, the same order: 3, 1, 2, 4 from north to south) but no
 catenary numbers (no railway=catenary_mast / power=catenary_mast with a ref here) and mileposts only every few miles.
 
@@ -45,7 +47,7 @@ ATTRIBUTION = "Data: MTA Metro-North Railroad GIS"
 CACHE_NAME = "rail_assets.json"         # in the trains cache dir (state dir trains/; sizeup/cachesync.py FILES)
 LAYERS = {"tracks": (6, "LineCode='NHL' AND TrkType='Main Line'", "TrkName"),
           "poles": (7, "LineCode='NHL'", "CB_ID"),
-          "mileposts": (2, "LineCode='NHL'", "PointName"),
+          "mileposts": (2, "LineCode IN ('NHL','NHV')", "PointName"),     # the whole miles: NHV in some of the service's copies
           "tenths": (3, "LineCode='NHL'", "Name")}
 MARGIN_DEG = 0.01                       # asked for this far beyond the area (about 1 km)
 THIN_DEG = 0.000005                     # the tracks thinned server-side to about this (half a metre)
@@ -61,6 +63,8 @@ POLE_M = 150.0                          # the nearest structure further along th
 MP_FIT_M = 60.0                         # a milepost further than this from the line isn't on it
 MP_SLACK_M = 400.0                      # a point this far beyond the first / last milepost: still read off them
 LANE_OFF_M = 40.0                       # a track's point further than this from the line: not this line's
+TRACK_GAP_M = 100.0                     # a track's s jumping this much more than the step itself: two runs
+RATE_LIMITED_S = 1800.0                 # a 429 / 401 / 403: rest this long
 
 
 def _num(v) -> float | None:
@@ -229,20 +233,31 @@ class RailRef:
         doc = doc or {}
         self.line = line
         grid = _Grid(line) if line is not None and len(getattr(line, "xy", [])) >= 2 else None
-        self.tracks: dict[str, list[list[float]]] = {}
+        self.tracks: dict[str, list[list[list[float]]]] = {}
         self.poles: list[tuple[float, str]] = []
         self.mps: list[tuple[float, float]] = []
         if grid is None:
             return
+        # each track a list of runs [[lon, lat, s]...] in s order: each feature's part on its own (two features, or two
+        # parts of one, are never joined: a gap between them is a gap, never a chord across it), broken where it
+        # leaves the line or its s jumps more than its own length (TRACK_GAP_M slack) from one point to the next
+        from sizeup.trains import metres
         for num, runs in (doc.get("tracks") or {}).items():
-            coords = []
+            out = []
             for run in runs:
+                cur: list[list[float]] = []
                 for lon, lat in run:
                     d, s = grid.project(lat, lon)
+                    jump = cur and abs(s - cur[-1][2]) > metres(lat, lon, cur[-1][1], cur[-1][0]) + TRACK_GAP_M
+                    if d > LANE_OFF_M or jump:
+                        out.append(cur)
+                        cur = []
                     if d <= LANE_OFF_M:
-                        coords.append([lon, lat, round(s, 1)])
-            if len(coords) >= 2:
-                self.tracks[num] = sorted(coords, key=lambda c: c[2])
+                        cur.append([lon, lat, round(s, 1)])
+                out.append(cur)
+            out = [sorted(r, key=lambda c: c[2]) for r in out if len(r) >= 2]
+            if out:
+                self.tracks[num] = sorted(out, key=lambda r: r[0][2])
         for p in doc.get("poles") or []:
             d, s = grid.project(p["lat"], p["lon"])
             if d <= NEAR_M:
@@ -378,6 +393,10 @@ class RailAssets:
             if not doc["tracks"] and not doc["poles"] and not doc["mileposts"]:
                 raise ValueError("nothing in our area (the layers changed?)")
         except HTTPError as e:
+            if e.code == 429:
+                return self._failed(now, f"rate limit (HTTP {e.code})", RATE_LIMITED_S)
+            if e.code in (401, 403):
+                return self._failed(now, f"refused (HTTP {e.code})", RATE_LIMITED_S)
             return self._failed(now, f"HTTP {e.code}")
         except (URLError, OSError, ValueError, KeyError, TypeError) as e:
             return self._failed(now, f"{type(e).__name__}: {getattr(e, 'reason', e)}")
@@ -392,9 +411,10 @@ class RailAssets:
         self._updated()
         return True
 
-    def _failed(self, now: float, why: str) -> bool:
+    def _failed(self, now: float, why: str, rest: float | None = None) -> bool:
+        """A failure: back off (a rate limit or a refusal: rest, which Data sources shows as resting)."""
         self.st["fails"] += 1
-        wait = min(BACKOFF_S[1], BACKOFF_S[0] * 2 ** min(self.st["fails"] - 1, 30))
+        wait = rest if rest is not None else min(BACKOFF_S[1], BACKOFF_S[0] * 2 ** min(self.st["fails"] - 1, 30))
         self.st.update(error=why, next=now + wait)
         self.log(f"trains: {SOURCE}: {why}; the copy we have stays")
         return False

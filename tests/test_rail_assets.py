@@ -1,16 +1,17 @@
 """Metro-North's numbered tracks, catenary poles and mileposts (GitHub #371, sizeup/railassets.py): the train on its own
 numbered track from the stops' tracks, "near pole N · MP x.x" for a train or an incident by the line, the layer.
 
-Synthetic geometry: a straight line east along 41.0 N with four parallel tracks (3, 1, 2, 4 from north to south, 4 m
-apart, as on the New Haven Line here), a catenary structure every 100 m and a milepost every tenth of a mile. Real
-shapes: tests/fixtures/mta/railassets/ (a few features of each layer by Port Chester, from Metro-North's public GIS
-service, 2026-11-09), measured against the recorded static feed's line.
+All geometry is synthetic (no Metro-North features in the repo): a straight line east along 41.0 N with four parallel
+tracks (3, 1, 2, 4 from north to south, 4 m apart, as on the New Haven Line here), a catenary structure every 100 m and
+a milepost every tenth of a mile; and the same laid along the recorded static feed's own line by Port Chester, in the
+service's shape (GeoJSON features with its field names; the whole mileposts LineCode NHV, as some of its copies have).
 """
 
 from __future__ import annotations
 
 import json
 import math
+import re
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
@@ -55,7 +56,7 @@ def layers() -> dict:
     poles = [gj("LineString", [[east(x), LAT + 12 * DLAT], [east(x), LAT - 12 * DLAT]], LineCode="NHL", CB_ID=f"CB-{200 + i}",
                 CB_ID2=f"0{200 + i}") for i, x in enumerate(range(0, int(LEN_M) + 1, 100))]
     poles.append(gj("LineString", [[east(50), LAT + 12 * DLAT], [east(50), LAT - 12 * DLAT]], LineCode="NHL", CB_ID="CB-243A"))
-    whole = [gj("Point", [east(MP0_CH + k * 1609.344), LAT + 20 * DLAT], PointName=str(int(MP0) + k), LineCode="NHL") for k in range(5)]
+    whole = [gj("Point", [east(MP0_CH + k * 1609.344), LAT + 20 * DLAT], PointName=str(int(MP0) + k), LineCode="NHV") for k in range(5)]
     tenths = [gj("Point", [east(MP0_CH + k * 160.9344), LAT + 20 * DLAT], Name=f"{MP0 + k / 10:.1f}", Label=f".{k % 10}",
                  LineCode="NHL") for k in range(1, 40) if k % 10]
     return {"tracks": tracks, "poles": poles, "mileposts": whole, "tenths": tenths}
@@ -103,22 +104,52 @@ def test_what_lies_outside_the_area_or_in_another_shape_is_left_out():
     assert R.parse({}, BBOX) == {"tracks": {}, "poles": [], "mileposts": []}
 
 
-def test_the_real_layers_by_port_chester_fit_the_mtas_line():
-    """The service's own shapes (a few of each by Port Chester): its four main tracks lie 3, 1, 2, 4 from north to south
-    along the static feed's line, the tenth mileposts 0.1 mile apart along it, and Port Chester is about MP 25.5."""
-    lay = {k: json.loads((FIX / "railassets" / f"{k}.geojson").read_text())["features"] for k in ("tracks", "poles", "mileposts", "tenths")}
-    d = R.parse(lay, T.DEFAULT_BBOX)
-    m = Model(T.parse_static((FIX / "gtfsmnr.zip").read_bytes()), T.DEFAULT_BBOX, None, d)
-    assert sorted(m.track_lanes) == ["1", "2", "3", "4"]
-    s = m.by_code["2PC"]                                                # Port Chester
-    north = sorted(m.track_lanes, key=lambda k: -m.track_lanes[k].at(s)[0])
-    assert north == ["3", "1", "2", "4"]
+def along_line(line, s0: float, s1: float) -> dict:
+    """The four layers laid along a real line (trains.Line) from s0 to s1: tracks 3, 1, 2, 4 offset to its left (going
+    up the line, north here), a portal every 100 m numbered from 200, a milepost every tenth from MP 25.0 at s0."""
+    def off(s, m):
+        lat, lon, b = line.at(s)
+        return [lon - math.cos(math.radians(b)) * m * DLON, lat + math.sin(math.radians(b)) * m * DLAT]
+    steps = [s0 + k * 20 for k in range(int((s1 - s0) // 20) + 1)]
+    tracks = [gj("LineString", [off(x, OFF[n]) for x in steps], LineCode="NHL", TrkName=n, TrkType="Main Line") for n in OFF]
+    poles = [gj("LineString", [off(s0 + k * 100, 12), off(s0 + k * 100, -12)], LineCode="NHL", CB_ID=f"CB-{200 + k}")
+             for k in range(int((s1 - s0) // 100) + 1)]
+    mps = [(k, s0 + k * 160.9344) for k in range(int((s1 - s0) // 160.9344) + 1)]
+    whole = [gj("Point", off(x, 20), PointName=str(25 + k // 10), LineCode="NHV") for k, x in mps if k % 10 == 0]
+    tenths = [gj("Point", off(x, 20), Name=f"{25 + k / 10:.1f}", LineCode="NHL") for k, x in mps if k % 10]
+    return {"tracks": tracks, "poles": poles, "mileposts": whole, "tenths": tenths}
+
+
+def test_laid_along_the_mtas_line_the_tracks_lie_3_1_2_4_and_the_tenths_a_tenth_apart():
+    """Measured along the recorded static feed's line (the projection and splitting a real copy goes through): the
+    four tracks in the New Haven Line's order from north to south by Port Chester, the tenths 160.9 m apart."""
+    static = T.parse_static((FIX / "gtfsmnr.zip").read_bytes())
+    line = Model(static).line
+    pc = next(st["ch"] for st in static["stations"].values() if st.get("code") == "2PC")
+    d = R.parse(along_line(line, pc - 1200, pc + 1200), T.DEFAULT_BBOX)
+    m = Model(static, T.DEFAULT_BBOX, None, d)
+    assert sorted(m.track_lanes) == ["1", "2", "3", "4"] and all(len(v) == 1 for v in m.track_lanes.values())
+    for s in (pc - 1000, pc, pc + 1000):
+        assert sorted(m.track_lanes, key=lambda k: -m.track_at(k, s)[0]) == ["3", "1", "2", "4"]
     gaps = [b - a for (a, _), (b, _) in zip(m.ref.mps, m.ref.mps[1:])]
-    assert len(m.ref.mps) >= 10 and all(150 < g < 172 for g in gaps)  # a tenth of a mile is 160.9 m
-    assert m.ref.mp_at(s) == pytest.approx(25.5, abs=0.15)
-    assert m.ref.poles and all(R.POLE.fullmatch(i) for _, i in m.ref.poles)
-    pole_s, pole = m.ref.poles[0]
-    assert m.ref.pole_at(pole_s + 10) == (pole, pytest.approx(10, abs=0.01))
+    assert len(m.ref.mps) == 15 and all(158 < g < 164 for g in gaps)   # a tenth of a mile is 160.9 m
+    assert m.ref.mp_at(pc) == pytest.approx(25.7, abs=0.06) and m.ref.pole_at(pc) == ("212", pytest.approx(0, abs=1))
+
+
+def test_a_track_with_a_gap_is_two_runs_and_nothing_is_drawn_across_it():
+    lay = layers()
+    lay["tracks"][1] = gj("MultiLineString", [[[east(x), LAT + OFF["1"] * DLAT] for x in range(0, 3001, 250)],
+                                              [[east(x), LAT + OFF["1"] * DLAT] for x in range(5000, 8001, 250)]],
+                          LineCode="NHL", TrkName="1", TrkType="Main Line")              # two parts: 2 km missing between
+    lay["tracks"][3]["geometry"]["coordinates"][16][1] += 100 * DLAT                    # track 4: a point off the line (4000 m)
+    lay["tracks"].append(gj("LineString", [[east(x), LAT + OFF["2"] * DLAT] for x in range(8000, 7000, -250)],
+                            LineCode="NHL", TrkName="2"))                                # a second feature, drawn backwards
+    m = Model(static(), BBOX, None, R.parse(lay, BBOX))
+    assert [(round(l.s[0]), round(l.s[-1])) for l in m.track_lanes["1"]] == [(0, 3000), (5000, 8000)]
+    assert m.track_at("1", 2000) is not None and m.track_at("1", 4000) is None and m.track_at("1", 5500) is not None
+    assert m.where(1, 4000, "1") == pytest.approx(m.line.at(4000)[:2])  # in the gap: not a chord across it
+    assert len(m.track_lanes["2"]) == 2 and all(l.s == sorted(l.s) for l in m.track_lanes["2"])
+    assert [(round(l.s[0]), round(l.s[-1])) for l in m.track_lanes["4"]] == [(0, 3750), (4250, 8000)] and m.track_at("4", 4000) is None
 
 
 # ---- the train on its numbered track ----------------------------------------------------------------------------
@@ -132,47 +163,68 @@ def anchors(ta="", tb=""):
     return [({"stop_id": "A", "track": ta, "status": "Departed"}, A_CH), ({"stop_id": "B", "track": tb, "status": ""}, B_CH)]
 
 
-def test_the_track_comes_from_the_stops_either_side(model):
-    a = anchors()
+def track(model, t, s, a=None, d=1, mem=None):
+    lane, ev = model.which_track(t, a or anchors(), 0, 1, s, d, mem)
+    return lane, (ev["trk"], ev["src"], ev["name"]) if ev else None
+
+
+def test_the_track_comes_from_the_stop_either_side_within_a_mile(model):
     t = {"tt": {"prev": stop("2RY", "2"), "next": stop("2PC", "2")}}
-    assert model.which_track(t, a, 0, 1, 3000) == ("2", "posted")
-    # left on 1 (planned), going to 4 (posted): the nearer station's
+    assert track(model, t, 2500) == ("2", ("2", "posted", "2RY"))
+    # left on 1 (planned), going to 4 (posted): the nearer stop's, only within TRACK_NEAR_M of it
     t = {"tt": {"prev": stop("2RY", "1", posted=False), "next": stop("2PC", "4")}}
-    assert model.which_track(t, a, 0, 1, 2500) == ("1", "planned")
-    assert model.which_track(t, a, 0, 1, 5500) == ("4", "posted")
-    # only the next stop's known; leading zeros as the MTA may write them
-    assert model.which_track({"tt": {"prev": None, "next": stop("2PC", "03")}}, a, 0, 1, 2500) == ("3", "posted")
-    # no TrainTime: GTFS-realtime's track at the stops
-    assert model.which_track({}, anchors("4", "4"), 0, 1, 3000) == ("4", "mta")
-    # a track we have no line for (Stamford's 5), and no position: none
-    assert model.which_track({"tt": {"next": stop("2PC", "5")}}, a, 0, 1, 3000) == ("", "")
+    assert track(model, t, 2500) == ("1", ("1", "planned", "2RY"))
+    assert track(model, t, 5500) == ("4", ("4", "posted", "2PC"))
+    assert track(model, t, 4000, d=-1) == ("3", None)                   # 2 km from both: its direction's outer track
+    assert track(model, t, 4000, d=1) == ("4", None)
+    assert track(model, {"tt": {"next": stop("2PC", "03")}}, 5000) == ("3", ("3", "posted", "2PC"))   # leading zero
+    assert track(model, {}, 5000, anchors("4", "2")) == ("2", ("2", "mta", "Port Chester"))         # GTFS-realtime's
+    # one stop, two words: TrainTime's posted over GTFS-realtime's
+    assert track(model, {"tt": {"next": stop("2PC", "1")}}, 5000, anchors("", "2")) == ("1", ("1", "posted", "2PC"))
+    assert track(model, {"tt": {"next": stop("2PC", "5")}}, 5000) == ("4", None)   # no line of track 5 here
 
 
-def test_with_no_stop_track_a_gps_fix_takes_the_nearest_track(model):
-    s = 3000
-    lat2 = LAT + OFF["2"] * DLAT + 0.8 * DLAT                           # GPS by track 2
-    t = {"tt": {"next": stop("2PC", "")}, "pos": {"src": "traintime", "lat": lat2, "lon": east(s)}}
-    assert model.which_track(t, anchors(), 0, 1, s) == ("2", "nearest")
-    far = dict(t, pos={"src": "traintime", "lat": LAT + 60 * DLAT, "lon": east(s)})
-    assert model.which_track(far, anchors(), 0, 1, s) == ("", "")      # too far from any track: not a guess
-    gtfs = dict(t, pos={"src": "gtfs", "lat": lat2, "lon": east(s)})  # a reporting point, not a GPS fix: no
-    assert model.which_track(gtfs, anchors(), 0, 1, s) == ("", "")
+def test_no_gps_guess_between_tracks_4_m_apart(model):
+    """#371 review: the tracks are closer than a phone-grade GPS fix can tell; a fix by track 2 with no stop's word
+    is drawn on the direction's outer track, never "nearest"."""
+    t = {"tt": {"next": stop("2PC", "")}, "pos": {"src": "traintime", "lat": LAT + OFF["2"] * DLAT, "lon": east(3000)}}
+    assert track(model, t, 3000) == ("4", None) and track(model, t, 3000, d=-1) == ("3", None)
+    assert not hasattr(T, "NEAREST_TRACK_M")
+
+
+def test_a_trains_track_holds_until_a_stop_says_otherwise(model):
+    mem = {}
+    posted2 = {"tt": {"prev": stop("2RY", "2"), "next": stop("2PC", "")}}
+    assert track(model, posted2, 2500, mem=mem) == ("2", ("2", "posted", "2RY"))
+    assert track(model, {}, 4000, mem=mem) == ("2", None)               # between stations: still 2, no "Trk" shown
+    # the merge flips to GTFS-realtime, which says 4 for Rye: a weaker word for the same stop: it stays on 2
+    assert track(model, {}, 2600, anchors("4", ""), mem=mem) == ("2", ("2", "posted", "2RY"))
+    # Port Chester's track (another stop's word): it moves
+    assert track(model, {}, 5200, anchors("", "1"), mem=mem) == ("1", ("1", "mta", "Port Chester"))
+    assert track(model, {"tt": {"next": stop("2PC", "3")}}, 5300, mem=mem) == ("3", ("3", "posted", "2PC"))   # a better word
+    assert track(model, {}, 5300, anchors("", "1"), mem=mem) == ("3", ("3", "posted", "2PC"))
 
 
 def test_a_train_is_drawn_on_its_numbered_track_with_its_pole_and_milepost(model):
     feed = {"timestamp": NOW, "trains": {"1234": {
         "id": "1234", "train": "1234", "trip_id": "x", "route_id": "", "start_date": "", "delay": None, "vstatus": "IN_TRANSIT_TO",
-        "vstop": "B", "pos": {"lat": LAT, "lon": east(4000), "ts": NOW},
+        "vstop": "B", "pos": {"lat": LAT, "lon": east(5000), "ts": NOW},
         "stops": [{"stop_id": "A", "arr": NOW - 200, "dep": NOW - 180, "delay": 0, "track": "2", "status": "Departed"},
                   {"stop_id": "B", "arr": NOW + 200, "dep": NOW + 220, "delay": 0, "track": "2", "status": ""}]}}}
-    (x,) = model.trains(feed, NOW)
-    assert x["trk"] == "2" and x["trk_src"] == "mta" and x["d"] == 1
-    assert x["lat"] == pytest.approx(LAT + OFF["2"] * DLAT, abs=2e-6)   # on track 2, not the line
+    tracker = T.Tracker()
+    tracker.update(model, feed, NOW)
+    (x,) = model.trains(feed, NOW, tracker)
+    assert x["lane"] == "2" and (x["trk"], x["trk_src"], x["trk_at"]) == ("2", "mta", "Port Chester") and x["d"] == 1
+    assert x["lat"] == pytest.approx(LAT + OFF["2"] * DLAT, abs=6e-6)   # on track 2, not the line (to the page's 5 decimals)
     assert x["pole"] == str(200 + round(x["s"] / 100)) and x["mp"] == pytest.approx(MP0 + (x["s"] - MP0_CH) / T.MILE_M, abs=0.051)
-    for st in feed["trains"]["1234"]["stops"]:                        # no track known: its direction's (here: the line)
+    assert tracker.trk_mem["1234"]["ev"]["trk"] == "2"
+    fresh = json.loads(json.dumps(feed))
+    for st in fresh["trains"]["1234"]["stops"]:                        # no track known, nothing remembered: the outer one
         st["track"] = ""
-    (y,) = model.trains(feed, NOW)
-    assert "trk" not in y and abs(y["lat"] - LAT) < 1e-6 and "pole" in y
+    (y,) = model.trains(fresh, NOW)
+    assert y["lane"] == "4" and "trk" not in y and y["lat"] == pytest.approx(LAT + OFF["4"] * DLAT, abs=6e-6)
+    (z,) = model.trains(fresh, NOW, tracker)                            # remembered: still on 2
+    assert z["lane"] == "2"
 
 
 # ---- the nearest pole and milepost ------------------------------------------------------------------------------
@@ -205,7 +257,7 @@ def test_a_stray_milepost_is_left_out(doc):
 def test_with_no_assets_trains_are_drawn_as_before_and_nothing_says_a_pole():
     m = Model(static(), BBOX)
     assert m.track_lanes == {} and not m.ref and m.ref.at(LAT, east(3000)) == {}
-    assert m.which_track({"tt": {"next": stop("2PC", "2")}}, anchors(), 0, 1, 3000) == ("", "")
+    assert m.which_track({"tt": {"next": stop("2PC", "2")}}, anchors(), 0, 1, 5000, 1, {}) == ("", None)
     assert m.where(1, 3000, "2") == pytest.approx(m.line.at(3000)[:2])
     assert "pole" not in m.near(LAT + 30 * DLAT, east(3000)) and R.label({}) == ""
     assert R.RailRef(None, None).at(LAT, LON0) == {} and R.RailRef({"tracks": {"1": []}}, m.line).tracks == {}
@@ -220,6 +272,17 @@ def test_with_no_assets_trains_are_drawn_as_before_and_nothing_says_a_pole():
 # ---- the provider: fetched, kept, served ---------------------------------------------------------------------------
 
 
+def where_ok(where: str, props: dict) -> bool:
+    """The service's WHERE as we send it: "F='v'", "F IN ('a','b')", joined by AND."""
+    for part in re.split(r"\s+AND\s+", where.strip()):
+        m = re.fullmatch(r"(\w+)\s*=\s*'([^']*)'", part) or re.fullmatch(r"(\w+)\s+IN\s+\(([^)]*)\)", part)
+        assert m, part
+        ok = [v.strip().strip("'") for v in m.group(2).split(",")] if " IN " in part else [m.group(2)]
+        if props.get(m.group(1)) not in ok:
+            return False
+    return True
+
+
 class Fetch:
     def __init__(self, lay=None, fail=0, page=None):
         self.lay, self.fail, self.page, self.calls = lay or layers(), fail, page, []
@@ -232,7 +295,7 @@ class Fetch:
         q = parse_qs(urlsplit(url).query)
         layer = int(urlsplit(url).path.split("/")[-2])
         key = {v[0]: k for k, v in R.LAYERS.items()}[layer]
-        feats, off = self.lay[key], int(q["resultOffset"][0])
+        feats, off = [f for f in self.lay[key] if where_ok(q["where"][0], f["properties"])], int(q["resultOffset"][0])
         n = self.page or len(feats) or 1
         body = {"type": "FeatureCollection", "features": feats[off:off + n]}
         if off + n < len(feats):
@@ -253,11 +316,29 @@ def test_the_provider_reads_each_layer_in_our_area_pages_and_keeps_a_copy(tmp_pa
     assert a.counts() == {"tracks": 4, "poles": 82, "mileposts": 41}
     lay = a.layer()
     assert len(lay["poles"]) == 82 and set(lay["poles"][0]) == {"id", "lon", "lat"}
-    assert sum(m["whole"] for m in lay["mileposts"]) == 5
+    assert sum(m["whole"] for m in lay["mileposts"]) == 5              # the whole miles (LineCode NHV) through our WHERE
     b = R.RailAssets(True, BBOX, tmp_path, fetch=Fetch(fail=500), log=lambda m: None, clock=lambda: NOW + 9)
     assert b.doc is not None and b.st["at"] == NOW                      # a restart: the copy, nothing fetched
     assert not b.refresh() and b.st["error"] == "HTTP 500" and b.counts()["poles"] == 82   # a failure keeps the copy
     assert b.st["next"] == NOW + 9 + R.BACKOFF_S[0]
+
+
+def test_the_whole_mileposts_are_asked_for_under_either_line_code():
+    """#371 review: the service's whole mileposts (layer 2) say LineCode NHV, the rest NHL."""
+    assert where_ok(R.LAYERS["mileposts"][1], {"LineCode": "NHV"}) and where_ok(R.LAYERS["mileposts"][1], {"LineCode": "NHL"})
+    assert not where_ok("LineCode='NHL'", {"LineCode": "NHV"})          # (what we asked before)
+    assert where_ok(R.LAYERS["tracks"][1], {"LineCode": "NHL", "TrkType": "Main Line"})
+    assert not where_ok(R.LAYERS["tracks"][1], {"LineCode": "NHL", "TrkType": "Siding"})
+
+
+def test_a_rate_limit_or_refusal_rests_and_data_sources_says_so(tmp_path):
+    from sizeup import datasources
+    clock = [float(NOW)]
+    a = R.RailAssets(True, BBOX, tmp_path, fetch=Fetch(fail=429), log=lambda m: None, clock=lambda: clock[0])
+    assert not a.refresh() and "rate limit" in a.st["error"] and a.st["next"] == NOW + R.RATE_LIMITED_S
+    assert "resting" in datasources._resting(a.st, lambda: clock[0])
+    b = R.RailAssets(True, BBOX, tmp_path, fetch=Fetch(fail=403), log=lambda m: None, clock=lambda: clock[0])
+    assert not b.refresh() and "refused" in b.st["error"] and datasources._resting(b.st, lambda: clock[0])
 
 
 def test_an_answer_with_nothing_of_ours_or_an_error_is_refused(tmp_path):
@@ -281,7 +362,9 @@ def test_the_trains_layer_sends_the_numbered_tracks_and_the_poles(tmp_path, monk
     the tracks in the layer, the poles and mileposts at /api/cad/trains/railref; none: empty."""
     gtfs = (FIX / "gtfsmnr.zip").read_bytes()
     feed = lambda url, timeout, limit, headers=None: (200, {}, gtfs)
-    lay = {k: json.loads((FIX / "railassets" / f"{k}.geojson").read_text())["features"] for k in ("tracks", "poles", "mileposts", "tenths")}
+    static = T.parse_static(gtfs)
+    pc = next(st["ch"] for st in static["stations"].values() if st.get("code") == "2PC")
+    lay = along_line(Model(static).line, pc - 550, pc + 550)
     clock = [float(NOW)]
     tr = Trains(rt_url="https://mta.example/rt", gtfs_url="https://mta.example/gtfs.zip", cache_dir=tmp_path / "trains", fetch=feed,
                 log=lambda m: None, clock=lambda: clock[0], traintime=False, assets_fetch=Fetch(lay=lay))
@@ -294,8 +377,11 @@ def test_the_trains_layer_sends_the_numbered_tracks_and_the_poles(tmp_path, monk
     assert sorted(tr.model.track_lanes) == ["1", "2", "3", "4"] and (tmp_path / "trains" / R.CACHE_NAME).is_file()
     d2 = json.loads(tr.get("/api/cad/trains", f"have={key}")[1])        # the page's copy is old now: sent again
     assert "static_same" not in d2 and sorted(d2["tracks"]) == ["1", "2", "3", "4"]
-    assert all(len(v) > 3 and [c[2] for c in v] == sorted(c[2] for c in v) for v in d2["tracks"].values())
-    assert "tracks" not in json.loads(tr.get("/api/cad/trains", f"have={d2['static_at']}")[1])
+    assert all(len(runs) == 1 and len(r) > 3 and [c[2] for c in r] == sorted(c[2] for c in r) for runs in d2["tracks"].values() for r in runs)
+    rr = d2["railref"]                                                  # the poles' and mileposts' s: read at the drawn s
+    assert len(rr["poles"]) == 12 and rr["poles"][0][1] == "200" and [s for s, _ in rr["mps"]] == sorted(s for s, _ in rr["mps"])
+    same = json.loads(tr.get("/api/cad/trains", f"have={d2['static_at']}")[1])
+    assert "tracks" not in same and "railref" not in same
     ref = json.loads(tr.get(T.RAILREF_PATH, "")[1])
     assert len(ref["poles"]) == 12 and ref["source"] == R.SOURCE and tr.handles(T.RAILREF_PATH)
     # a restart: the copy read, the model built with it
@@ -316,9 +402,10 @@ def test_the_data_sources_row_and_the_s3_copy():
 
 def test_the_page_draws_the_numbered_track_and_the_poles_box():
     js = (Path(__file__).resolve().parent.parent / "sizeup" / "web" / "static" / "trains.js").read_text()
-    assert "const own = tracks && t.trk ? tracks[t.trk] : null;" in js
-    assert "d.tracks = had.tracks" in js and 'keys() { return [[KEY, false], [REF_KEY, false]]; }' in js
+    assert "const own = runAt(tracks, t.lane, t.s);" in js and "function refAt(rr, s)" in js
+    assert "placeLine(t, this.drawnS(t), d.railref)" in js and "`Pole: CB ${at.pole}" in js and "nearest" not in js.split("function placeLine")[1][:900]
+    assert "d.tracks = had.tracks; d.railref = had.railref;" in js and 'keys() { return [[KEY, false], [REF_KEY, false]]; }' in js
     assert 'RAILREF = "/api/cad/trains/railref"' in js and '"Poles · mileposts"' in js
     assert 'id: "tr-line-label", type: "symbol", source: SRC_LINE, filter: ["has", "trk"]' in js         # each track numbered
     assert "if (!key || this.tracks) { src.setData(fc([])); return; }" in js                       # no route line posing as a track
-    assert "`Trk\\u00a0${t.trk}`" in js and "`near pole ${t.pole}`" in js and "refText(d.ref)" in js
+    assert "`Trk\\u00a0${t.trk}`" in js and "`near pole ${at.pole}`" in js and "refText(d.ref)" in js

@@ -106,8 +106,10 @@ HTTP (sizeup/web/server.py; any signed-in person, GET only):
     GET /api/cad/trains/departures?station=2PC   a station's next departures from MTA TrainTime /countdown (#362)
     GET /api/cad/trains/railref         the poles and mileposts layer (#371, sizeup/railassets.py): {source, at, error,
                                         poles: [{id, lon, lat}], mileposts: [{mp, lon, lat, whole}]}
-  A train also carries trk / trk_src (its numbered track and how we know it: posted | planned | mta | nearest),
-  pole and mp (#371), and the layer "tracks": {"1": [[lon, lat, s]...]} beside the lanes; the event's ref pole / mp.
+  A train also carries lane (the numbered track it is drawn on), trk / trk_src / trk_at (its track and who said it,
+  posted | planned | mta, at which stop; only within TRACK_NEAR_M of that stop), pole and mp (#371); the layer
+  "tracks": {"1": [[[lon, lat, s]...] run...]} beside the lanes and "railref": {poles: [[s, id]], mps: [[s, mp]]};
+  the event's ref pole / mp.
 
 MTA TrainTime (sizeup/traintime.py, #362): an undocumented MTA API with GPS positions, speed, consist, per-car load,
 milepost, posted track and OTP. While it reads well it is merged into the feed above by train number and run date
@@ -214,7 +216,10 @@ SEED_POINTS = ROOT / "data" / "mnr_reporting_points.json"
 TRACKS_FILE = ROOT / "data" / "mnr_tracks.json"       # each direction's own track (tools/fetch_train_tracks.py)
 LANE_OFF_M = 40.0                # a lane's point further than this from the line: not measured on this line
 LANE_SLIP_M = 30.0               # nor one whose s is this far from where it projects
-NEAREST_TRACK_M = 15.0           # a GPS fix this close to a numbered track, no station's track known: on it (#371)
+TRACK_NEAR_M = 1500.0            # a stop's track says which track a train is on only this close to the stop (#371)
+TRACK_RANK = {"posted": 3, "planned": 2, "mta": 1}  # whose word for a stop's track wins: TrainTime's posted, planned, GTFS-rt
+OUTER_TRACK = {1: "4", -1: "3"}  # the direction's outer track: where the MTA's stops put trains here (fetch_train_tracks.py)
+TRACK_MEM_S = 3600.0             # a train's remembered track forgotten this long after it was last drawn
 RAILREF_PATH = "/api/cad/trains/railref"           # the poles and mileposts layer (#371)
 
 
@@ -729,11 +734,11 @@ class Model:
                 self.lanes[d] = lane
         # Metro-North's numbered tracks, poles and mileposts measured along this line (#371); none: as before
         self.ref = railassets.RailRef(assets, self.line)
-        self.track_lanes: dict[str, Lane] = {}
-        for num, coords in self.ref.tracks.items():
-            lane = Lane(coords)
-            if self._fits(lane):
-                self.track_lanes[num] = lane
+        self.track_lanes: dict[str, list[Lane]] = {}           # each track's runs (a gap between two: no track there)
+        for num, runs in self.ref.tracks.items():
+            lanes = [lane for lane in map(Lane, runs) if self._fits(lane)]
+            if lanes:
+                self.track_lanes[num] = lanes
         self.by_code = {st["code"]: st["ch"] for st in self.stations.values() if st.get("code")}
 
     def _fits(self, lane: Lane) -> bool:
@@ -748,38 +753,64 @@ class Model:
     def where(self, d: int, s: float, trk: str = "") -> tuple[float, float]:
         """(lat, lon) a train going d is drawn at, s along the line: on its numbered track (trk, #371), else on its
         direction's track, else on the line."""
-        p = self.track_lanes[trk].at(s) if trk in self.track_lanes else None
+        p = self.track_at(trk, s) if trk else None
         if p is None and d in self.lanes:
             p = self.lanes[d].at(s)
         return p if p is not None else self.line.at(s)[:2]
 
-    def which_track(self, t: dict, anchors: list, p: int | None, n: int | None, s: float) -> tuple[str, str]:
-        """(track, how we know) for a train at s (#371): the track at the stop it last left or the one it is going to,
-        whichever is nearer along the line: MTA TrainTime's posted track (sign_track), else its planned one
-        (t2s_track), else GTFS-realtime's track for that stop ("mta"); with none, a GPS fix within NEAREST_TRACK_M
-        of a numbered track ("nearest"). ("", "") when there is no numbered track here or none of those says."""
+    def track_at(self, trk: str, s: float) -> tuple[float, float] | None:
+        """(lat, lon) of numbered track trk at s; None where we have no line of it (a gap, or beyond its ends)."""
+        for lane in self.track_lanes.get(trk, ()):
+            p = lane.at(s)
+            if p is not None:
+                return p
+        return None
+
+    def track_evidence(self, t: dict, anchors: list, p: int | None, n: int | None, s: float) -> dict | None:
+        """What says which numbered track a train at s is on (#371): the track at the stop it last left or the one it
+        is going to, only within TRACK_NEAR_M of that stop (between stations it may have crossed over), the nearer
+        stop's; for one stop, MTA TrainTime's posted track (sign_track) over its planned one (t2s_track) over
+        GTFS-realtime's ("mta"). {trk, src, ch (the stop's s), name}; None when nothing near says (no GPS guess: the
+        tracks are 4 m apart, closer than a phone-grade fix can tell)."""
         if not self.track_lanes:
-            return "", ""
-        here = lambda k: k in self.track_lanes and self.track_lanes[k].at(s) is not None
-        num = lambda v: str(int(v)) if isinstance(v, str) and v.strip().isdigit() else (v or "").strip()
+            return None
+        num = lambda v: str(int(v)) if isinstance(v, str) and v.strip().isdigit() else (v or "").strip() if isinstance(v, str) else ""
         cands = []
         tt = t.get("tt") or {}
         for x in (tt.get("prev"), tt.get("next")):
             if x and x.get("track") and x.get("code") in self.by_code:
-                cands.append((abs(self.by_code[x["code"]] - s), num(x["track"]), "posted" if x.get("posted") else "planned"))
-        if not any(here(c[1]) for c in cands):
-            cands = [(abs(anchors[k][1] - s), num(anchors[k][0].get("track")), "mta")
-                     for k in (p, n) if k is not None and anchors[k][0].get("track")]
-        cands = [c for c in cands if here(c[1])]
-        if cands:
-            _, trk, src = min(cands)
-            return trk, src
-        pos = t.get("pos") or {}
-        if pos.get("src") == "traintime":
-            near = [(metres(pos["lat"], pos["lon"], *q), k) for k, lane in self.track_lanes.items() if (q := lane.at(s)) is not None]
-            if near and min(near)[0] <= NEAREST_TRACK_M:
-                return min(near)[1], "nearest"
-        return "", ""
+                cands.append((num(x["track"]), "posted" if x.get("posted") else "planned", self.by_code[x["code"]], x.get("name") or x["code"]))
+        for k in (p, n):
+            if k is not None and anchors[k][0].get("track"):
+                st = anchors[k][0]
+                cands.append((num(st["track"]), "mta", anchors[k][1], self.stops.get(st["stop_id"], st["stop_id"])))
+        ok = [c for c in cands if abs(c[2] - s) <= TRACK_NEAR_M and self.track_at(c[0], s) is not None]
+        if not ok:
+            return None
+        trk, src, ch, name = min(ok, key=lambda c: (round(abs(c[2] - s)), -TRACK_RANK[c[1]]))
+        return {"trk": trk, "src": src, "ch": ch, "name": name}
+
+    def which_track(self, t: dict, anchors: list, p: int | None, n: int | None, s: float, d: int,
+                    mem: dict | None = None) -> tuple[str, dict | None]:
+        """(the numbered track the train is drawn on, the evidence shown for it or None) (#371). mem: what we remember
+        of this train (Tracker.trk_mem): its track changes only on new stop-track evidence (another stop's, or a
+        better word for the same stop: posted over planned over GTFS-realtime), so a merge flipping between
+        TrainTime and GTFS-realtime, or a stretch between stations, doesn't move it. Never any evidence: the
+        direction's outer track (3 inbound, 4 outbound), so it lies on a drawn track. "Trk N" (the evidence) only
+        within TRACK_NEAR_M of the stop that said it. ("", None) with no numbered track here."""
+        if not self.track_lanes:
+            return "", None
+        ev = self.track_evidence(t, anchors, p, n, s)
+        if mem is not None:
+            old = mem.get("ev")
+            if ev is not None and (old is None or round(ev["ch"]) != round(old["ch"]) or ev["trk"] == old["trk"]
+                                   or TRACK_RANK[ev["src"]] >= TRACK_RANK[old["src"]]):
+                mem["ev"] = ev
+            ev = mem.get("ev")
+        if ev is not None and self.track_at(ev["trk"], s) is not None:
+            return ev["trk"], (ev if abs(ev["ch"] - s) <= TRACK_NEAR_M else None)
+        outer = OUTER_TRACK.get(d, "")
+        return (outer if self.track_at(outer, s) is not None else ""), None
 
     @staticmethod
     def _interp(x: float, xs: list[float], ys: list[float]) -> float:
@@ -867,7 +898,8 @@ class Model:
                 return "too fast"
         return ""
 
-    def place(self, t: dict, anchors: list, d: int, now: float, fix: dict | None, points: Points | None = None) -> dict | None:
+    def place(self, t: dict, anchors: list, d: int, now: float, fix: dict | None, points: Points | None = None,
+              mem: dict | None = None) -> dict | None:
         """Where the train is drawn, and how far the page may carry it on: {s, lat, lon, bearing, mode, estimated,
         fix_at, fix_age_unknown, next, prev_s, hold_s, hold_kind, predict_until, segment, lag_s}; None when it
         isn't on the line now.
@@ -906,8 +938,8 @@ class Model:
                 s, mode = nxt[1], "stopped"              # at its first stop, or the feed says it is at the next
             else:
                 s, mode = prev[1], "stopped"             # the feed hasn't said it left
-        trk, trk_src = self.which_track(t, anchors, p, n, s)
-        lat, lon = self.where(d, s, trk)                 # on its own numbered track, else its direction's
+        lane, ev = self.which_track(t, anchors, p, n, s, d, mem)
+        lat, lon = self.where(d, s, lane)                # on its own numbered track, else its direction's
         hold_s, kind = s, "stop"
         if mode != "stopped":
             stop = nxt[1] if nxt is not None else None
@@ -935,7 +967,8 @@ class Model:
                 "hold_kind": kind, "predict_until": (fix["fix_at"] + (TT_HORIZON_S if fix.get("src") == "traintime" else PREDICT_S)
                                                      if fix is not None else None),
                 "segment": seg, "lag_s": round(lag, 1) if lag is not None else None,
-                **({"trk": trk, "trk_src": trk_src} if trk else {}), **self.ref.at_s(s),
+                **({"lane": lane} if lane else {}), **({"trk": ev["trk"], "trk_src": ev["src"], "trk_at": ev["name"]} if ev else {}),
+                **self.ref.at_s(s),
                 **({"v_fix": fix["v"]} if fix is not None and fix.get("v") is not None else {})}
 
     def facts(self, t: dict, now: float) -> dict:
@@ -974,13 +1007,17 @@ class Model:
         if track is None:
             track = Tracker()
             track.update(self, feed, now)
+        for k in [k for k, v in track.trk_mem.items() if now - v.get("seen", now) > TRACK_MEM_S]:
+            del track.trk_mem[k]
         out: dict[str, dict] = {}
         for t in feed.get("trains", {}).values():
             if not self.ours_train(t, now) or not t["stops"] and not t.get("pos"):
                 continue
             anchors = self.anchors(t)
             d = self.direction(t, anchors)
-            p = self.place(t, anchors, d, now, track.fix(t["id"]), track.points)
+            mem = track.trk_mem.setdefault(t["train"], {})   # its track across reads and sources (#371)
+            mem["seen"] = now
+            p = self.place(t, anchors, d, now, track.fix(t["id"]), track.points, mem)
             if p is None or not self.in_area(p["s"], 200.0):
                 continue
             key, label = DIRS[d]
@@ -1210,6 +1247,7 @@ class Tracker:
         self.points = points if points is not None else Points()
         self.log = log
         self.fixes: dict[str, dict] = {}
+        self.trk_mem: dict[str, dict] = {}               # train number -> {ev, seen}: its numbered track (#371)
         self.at: float | None = None
         self.rejected = 0
         self.why: dict[str, int] = {}
@@ -1704,13 +1742,13 @@ class Trains:
     def public(self, have: float | None = None) -> dict:
         """The layer: the line and stations in our area, the trains on it now. have: the static_at the page
         already holds the line and stations of: then only the trains (the line doesn't change between them)."""
-        out = self._base() | {"line": [], "stations": [], "lanes": {}, "tracks": {}, "trains": [], "catenary": CATENARY,
+        out = self._base() | {"line": [], "stations": [], "lanes": {}, "tracks": {}, "railref": {}, "trains": [], "catenary": CATENARY,
                               "bbox": list(self.bbox), "now": self.clock()}
         m = self.model
         if m is None:
             return out
         if have is not None and self.st["at"] is not None and have == self.static_key():
-            del out["line"], out["stations"], out["lanes"], out["tracks"]
+            del out["line"], out["stations"], out["lanes"], out["tracks"], out["railref"]
             out["static_same"] = True
         else:
             lo, hi = m.area
@@ -1718,9 +1756,14 @@ class Trains:
             out["stations"] = [{k: s[k] for k in ("id", "name", "code", "lat", "lon", "url")} for s in m.area_stations]
             out["lanes"] = {DIRS[d][0]: [[round(a, DP), round(b, DP), round(c, 1)] for a, b, c in lane.coords
                                          if lo - 1500 <= c <= hi + 1500] for d, lane in m.lanes.items()}
-            # each numbered track (#371): a train with "trk" is drawn on its own
-            out["tracks"] = {k: [[round(a, DP), round(b, DP), round(c, 1)] for a, b, c in lane.coords if lo - 1500 <= c <= hi + 1500]
-                             for k, lane in m.track_lanes.items()}
+            # each numbered track's runs (#371): a train is drawn on its "lane"; the poles' and mileposts' s, so the page
+            # reads them at the train's drawn s
+            keep = lambda c: lo - 1500 <= c <= hi + 1500
+            out["tracks"] = {k: runs for k, lanes in m.track_lanes.items()
+                             if (runs := [r for r in ([[round(a, DP), round(b, DP), round(c, 1)] for a, b, c in lane.coords if keep(c)]
+                                                      for lane in lanes) if len(r) >= 2])}
+            out["railref"] = {"poles": [[round(x, 1), i] for x, i in m.ref.poles if keep(x)],
+                              "mps": [[round(x, 1), v] for x, v in m.ref.mps if keep(x)]}
         with self._lock:
             out["trains"] = m.trains(self.view, self.clock(), self.track)
         if self.tt.active():
