@@ -94,14 +94,14 @@ def test_the_reader_reads_varints_negatives_floats_and_nested_messages():
 def test_a_built_feed_gives_the_trip_update_and_the_vehicle_merged():
     stu = lambda sid, t, delay, track, status: msg((4, sid), (2, msg((1, delay), (2, t))), (3, msg((1, delay), (2, t))),
                                                    (1005, msg((1, track), (2, status))))
-    tu = msg((1, msg((1, "T1"), (3, "20261014"), (5, "3"))), (3, msg((1, "1350"), (2, "1350"))),
+    tu = msg((1, msg((1, "T1"), (3, "20261014"), (5, "3"))), (3, msg((1, "9950"), (2, "9950"))),
              (2, stu("114", NOW + 60, 120, "3", "On-Time")), (2, stu("115", NOW + 300, 120, "3", "On-Time")), (2, msg((4, "116"), (5, 1))))
-    vp = msg((1, msg((1, "T1"))), (2, msg((1, 40.99), (2, -73.68), (3, 60.0))), (5, NOW), (8, msg((1, "1350"), (2, "1350"))))
+    vp = msg((1, msg((1, "T1"))), (2, msg((1, 40.99), (2, -73.68), (3, 60.0))), (5, NOW), (8, msg((1, "9950"), (2, "9950"))))
     body = msg((1, msg((1, "2.0"), (3, NOW))), (2, msg((1, "a"), (3, tu))), (2, msg((1, "b"), (4, vp))),
                (2, msg((1, "gone"), (2, 1), (3, tu))))
     f = parse_feed(body)
-    assert f["timestamp"] == NOW and list(f["trains"]) == ["1350"]
-    t = f["trains"]["1350"]
+    assert f["timestamp"] == NOW and list(f["trains"]) == ["9950"]
+    t = f["trains"]["9950"]
     assert t["route_id"] == "3" and t["start_date"] == "20261014"
     assert [s["stop_id"] for s in t["stops"]] == ["114", "115"]            # the SKIPPED stop left out
     assert t["stops"][0] == {"stop_id": "114", "arr": NOW + 60, "dep": NOW + 60, "delay": 120, "track": "3", "status": "On-Time"}
@@ -136,20 +136,20 @@ def test_what_a_vehicle_position_carries_no_bearing_and_no_car_count(feed):
 
 def test_a_car_count_comes_only_from_the_feed(model):
     """Should the MTA add multi_carriage_details (one per car), that count goes to the map; without it, none."""
-    tu = msg((1, msg((1, "T1"), (5, "3"))), (3, msg((1, "1350"), (2, "1350"))),
+    tu = msg((1, msg((1, "T1"), (5, "3"))), (3, msg((1, "9950"), (2, "9950"))),
              (2, msg((4, "114"), (2, msg((2, NOW + 60))))), (2, msg((4, "115"), (2, msg((2, NOW + 300))))))
 
     def feed_with(*cars):
-        vp = msg((1, msg((1, "T1"))), (2, msg((1, 40.98612), (2, -73.68225))), (5, NOW), (8, msg((1, "1350"), (2, "1350"))),
+        vp = msg((1, msg((1, "T1"))), (2, msg((1, 40.98612), (2, -73.68225))), (5, NOW), (8, msg((1, "9950"), (2, "9950"))),
                  *[(11, msg((1, f"c{i}"), (5, i))) for i in cars])
         return parse_feed(msg((1, msg((1, "2.0"), (3, NOW))), (2, msg((1, "a"), (3, tu), (4, vp)))))
     f = feed_with(*range(1, 9))
-    assert f["trains"]["1350"]["cars"] == 8
+    assert f["trains"]["9950"]["cars"] == 8
     [t] = model.trains(f, NOW)
-    assert t["train"] == "1350" and t["cars"] == 8
+    assert t["train"] == "9950" and t["cars"] == 8
     [u] = model.trains(feed_with(), NOW)
     assert "cars" not in u
-    assert feed_with(*range(40))["trains"]["1350"]["cars"] == T.MAX_CARS
+    assert feed_with(*range(40))["trains"]["9950"]["cars"] == T.MAX_CARS
 
 
 # ---- the static feed: the line, its stations, the run times ------------------------------------------------------
@@ -692,13 +692,13 @@ def replay(model, n=None, log=None, points=None):
 
 
 def test_the_vehicle_status_and_the_stop_it_means_are_read(feed):
-    vp = lambda *extra: msg((1, msg((1, "T1"))), (2, msg((1, 40.99), (2, -73.68))), (5, NOW), (8, msg((1, "1350"), (2, "1350"))), *extra)
+    vp = lambda *extra: msg((1, msg((1, "T1"))), (2, msg((1, 40.99), (2, -73.68))), (5, NOW), (8, msg((1, "9950"), (2, "9950"))), *extra)
     body = lambda v: msg((1, msg((1, "2.0"), (3, NOW))), (2, msg((1, "b"), (4, v))))
-    t = parse_feed(body(vp((4, 1), (7, "115"))))["trains"]["1350"]
+    t = parse_feed(body(vp((4, 1), (7, "115"))))["trains"]["9950"]
     assert t["vstatus"] == "STOPPED_AT" and t["vstop"] == "115"
-    assert parse_feed(body(vp((4, 0), (7, "114"))))["trains"]["1350"]["vstatus"] == "INCOMING_AT"
-    assert parse_feed(body(vp((4, 2))))["trains"]["1350"]["vstatus"] == "IN_TRANSIT_TO"
-    t = parse_feed(body(vp()))["trains"]["1350"]
+    assert parse_feed(body(vp((4, 0), (7, "114"))))["trains"]["9950"]["vstatus"] == "INCOMING_AT"
+    assert parse_feed(body(vp((4, 2))))["trains"]["9950"]["vstatus"] == "IN_TRANSIT_TO"
+    t = parse_feed(body(vp()))["trains"]["9950"]
     assert t["vstatus"] == "" and t["vstop"] == ""                               # not given: not guessed (proto's default)
     a, b = feed["trains"]["1553"], feed["trains"]["1551"]
     assert (a["vstatus"], a["vstop"]) == ("INCOMING_AT", "124") and (b["vstatus"], b["vstop"]) == ("IN_TRANSIT_TO", "1")
@@ -761,7 +761,7 @@ def test_fix_at_is_the_feed_time_a_position_first_appeared(model):
     assert tk.fix("1540") is None
 
 
-def train_at(model, s, stops, vstatus="IN_TRANSIT_TO", vstop="", n="1350", pos=True):
+def train_at(model, s, stops, vstatus="IN_TRANSIT_TO", vstop="", n="9950", pos=True):
     lat, lon, _ = model.line.at(s)
     return {"id": n, "train": n, "trip_id": "T" + n, "route_id": "3", "start_date": "", "delay": None,
             "pos": {"lat": round(lat, 6), "lon": round(lon, 6), "bearing": None, "ts": NOW} if pos else None,
@@ -798,7 +798,7 @@ def test_hold_s_is_the_next_known_reporting_point_never_past_the_next_stop(model
     seg = p["segment"]
     assert (seg["from"], seg["to"], seg["t_dep"], seg["t_arr"]) == (st["Rye"]["id"], st["Port Chester"]["id"], NOW - 60, NOW + 120)
     # inbound from the same spot: the next point the other way
-    p = place(train_at(model, s0, inn, vstop=st["Rye"]["id"], n="1351"), pts)
+    p = place(train_at(model, s0, inn, vstop=st["Rye"]["id"], n="9951"), pts)
     assert p["hold_kind"] == "reporting_point" and p["hold_s"] == pytest.approx(rye + 300, abs=0.1)
     # the next point is past the next stop: the stop
     p = place(train_at(model, pc - 400, out, vstop=st["Port Chester"]["id"]), pts)
@@ -848,16 +848,16 @@ def test_a_train_the_feed_follows_leaves_a_stop_only_when_the_feed_says_so(model
              (st["Port Chester"]["id"], "On-Time", NOW + 100)]
     t = train_at(model, 0, stops, vstatus="", pos=False)
     t["stops"][0]["status"] = "Departed"
-    [x] = model.trains({"timestamp": NOW, "trains": {"1350": t}}, NOW)
+    [x] = model.trains({"timestamp": NOW, "trains": {"9950": t}}, NOW)
     # by its times it left Rye 200 s ago, but the MTA hasn't said so: at Rye, not on the way
     assert x["mode"] == "stopped" and x["s"] == pytest.approx(st["Rye"]["ch"], abs=0.1) and x["segment"]["to"] == st["Rye"]["id"]
     t["stops"][1]["status"] = "Departed"                     # now it has: on its run to Port Chester, as timed
-    [x] = model.trains({"timestamp": NOW, "trains": {"1350": t}}, NOW)
+    [x] = model.trains({"timestamp": NOW, "trains": {"9950": t}}, NOW)
     seg = x["segment"]
     assert x["mode"] == "estimated" and (seg["from"], seg["to"]) == (st["Rye"]["id"], st["Port Chester"]["id"])
     assert st["Rye"]["ch"] < x["s"] < st["Port Chester"]["ch"] and x["hold_s"] == pytest.approx(st["Port Chester"]["ch"], abs=0.1)
     t["stops"][2]["status"] = "Arrived"                      # the feed says it is there, ahead of its time
-    [x] = model.trains({"timestamp": NOW, "trains": {"1350": t}}, NOW)
+    [x] = model.trains({"timestamp": NOW, "trains": {"9950": t}}, NOW)
     assert x["mode"] == "stopped" and x["s"] == pytest.approx(st["Port Chester"]["ch"], abs=0.1)
 
 
@@ -874,21 +874,21 @@ def test_reporting_points_are_learned_one_per_place_and_known_once_seen_again(mo
     st = {s["name"]: s for s in model.area_stations}
     t = train_at(model, st["Port Chester"]["ch"] + 170, [(st["Greenwich"]["id"], "Departed", NOW - 300),
                  (st["Port Chester"]["id"], "Arrived", NOW - 10), (st["Rye"]["id"], "On-Time", NOW + 200)],
-                 vstatus="STOPPED_AT", vstop=st["Port Chester"]["id"], n="1371")
+                 vstatus="STOPPED_AT", vstop=st["Port Chester"]["id"], n="9971")
     tk = T.Tracker()
-    tk.update(model, {"timestamp": NOW, "trains": {"1371": t}}, NOW)
+    tk.update(model, {"timestamp": NOW, "trains": {"9971": t}}, NOW)
     for k, (lat, lon) in enumerate((STAMFORD_BOGUS, OFF_LINE_BOGUS)):
         bad = dict(t, pos={"lat": lat, "lon": lon, "bearing": None, "ts": NOW}, vstatus="INCOMING_AT", vstop=st["Rye"]["id"])
-        tk.update(model, {"timestamp": NOW + 12 * (k + 1), "trains": {"1371": bad}}, NOW + 12 * (k + 1))
+        tk.update(model, {"timestamp": NOW + 12 * (k + 1), "trains": {"9971": bad}}, NOW + 12 * (k + 1))
     assert len(tk.points) == 0 and tk.rejected == 2 and set(tk.why) == {"behind the stop it left", "off the line"}
     # an 11.6 km jump in a couple of minutes, all within the stretch its stops allow: too fast
     far = train_at(model, st["Stamford"]["ch"] - 200, [(st["Stamford"]["id"], "Departed", NOW - 60), (st["Rye"]["id"], "On-Time", NOW + 900)],
-                   vstatus="", n="1371")
+                   vstatus="", n="9971")
     tk = T.Tracker()
-    tk.update(model, {"timestamp": NOW, "trains": {"1371": far}}, NOW)
-    assert tk.fix("1371") is not None
+    tk.update(model, {"timestamp": NOW, "trains": {"9971": far}}, NOW)
+    assert tk.fix("9971") is not None
     lat, lon, _ = model.line.at(st["Port Chester"]["ch"] + 170)
-    tk.update(model, {"timestamp": NOW + 133, "trains": {"1371": dict(far, pos={"lat": lat, "lon": lon, "bearing": None, "ts": NOW})}}, NOW + 133)
+    tk.update(model, {"timestamp": NOW + 133, "trains": {"9971": dict(far, pos={"lat": lat, "lon": lon, "bearing": None, "ts": NOW})}}, NOW + 133)
     assert tk.why == {"too fast": 1}
 
 

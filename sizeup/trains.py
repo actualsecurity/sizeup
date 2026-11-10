@@ -207,6 +207,8 @@ CLUSTER_M = 25.0                 # fixes this close along the line: the same poi
 POINT_KNOWN_N = 2                # a point seen this many times (by new fixes, not re-reads) is known
 POINT_AHEAD_M = 3000.0           # a known point further ahead than this: none (fall back)
 HOLD_FALLBACK_M = 1500.0
+HOLD_FALLBACK_TT_M = 2500.0      # a GPS fix (TrainTime): carried on at its speed for up to RAIL_CRUISE_S (motion.js), then
+                                 # eased to a stop: at 80 mph about 1.9 km, so the fallback never stops it short
 POINTS_SAVE_S = 300.0
 PREDICT_S = 120.0                # the page carries a train on at most this long past its fix
 STALE_S = 60.0                   # a feed this old: the page freezes the trains where they were
@@ -960,7 +962,8 @@ class Model:
             if fix is not None:
                 # a GPS fix (TrainTime, #362) isn't at one of the MTA's reporting points: the fallback distance
                 ahead = points.ahead(s, d) if points is not None and fix.get("src", "gtfs") == "gtfs" else None
-                hold_s, kind = (ahead, "reporting_point") if ahead is not None else (s + d * HOLD_FALLBACK_M, "fallback")
+                fall = HOLD_FALLBACK_TT_M if fix.get("src") == "traintime" else HOLD_FALLBACK_M
+                hold_s, kind = (ahead, "reporting_point") if ahead is not None else (s + d * fall, "fallback")
                 if stop is not None and (hold_s - stop) * d > 0:
                     hold_s, kind = stop, "stop"
             elif stop is not None:
@@ -985,7 +988,8 @@ class Model:
                 **({"trk": ev["trk"], "trk_src": ev["src"], "trk_at": ev["name"]} if ev and how == "said" else {}),
                 **({"lane_at": ev["name"]} if ev and how == "held" else {}),
                 **self.ref.at_s(s),
-                **({"v_fix": fix["v"], "a_fix": fix.get("a") or 0.0} if fix is not None and fix.get("v") is not None else {})}
+                **({"v_fix": fix["v"], "a_fix": fix.get("a") or 0.0, "v_gps": fix.get("vf_raw"), "v_moved": fix.get("moved"),
+                    "v_bad": fix.get("bad") or ""} if fix is not None and fix.get("v") is not None else {})}
 
     def facts(self, t: dict, now: float) -> dict:
         """What the panel and the click box say of a train: its line, destination, next stop, delay, track."""
@@ -1066,6 +1070,11 @@ class Model:
         if fix and isinstance(rec_v, (int, float)):
             out["v"] = round(rec_v, 2)                   # m/s, filtered (along_filter): the page carries it on at this
             out["a"] = round(p.get("a_fix") or 0.0, 2)   # m/s^2: falling, the page brakes it to a stop (#375)
+            # the speed's basis, for the box's hover (#390): the GPS reading and the distance moved over time (m/s)
+            out["v_basis"] = {k: (round(p[f], 2) if isinstance(p.get(f), (int, float)) else None)
+                              for k, f in (("gps", "v_gps"), ("moved", "v_moved"))} | {"bad": p.get("v_bad") or ""}
+        if fix:
+            out["dyn"] = consist(tt.get("fleet"), tt.get("cars"))   # what the consist can do: motion.js's limits
         return out
 
     def near(self, lat: float, lon: float) -> dict | None:
@@ -1229,9 +1238,90 @@ STOP_JITTER_M = 150.0            # a train already stopped: a fix less than this
                                  # stays put. The first stopped fix after it moved is taken as it is (forward only).
 A_MIN, A_MAX = -1.5, 1.0         # the filter's acceleration (m/s^2), clamped: past a service brake is noise
 A_BRAKE = -0.2                   # falling faster than this (m/s^2): braking (the page brakes it too: motion.js RAIL_BRAKE_A)
-TT_HORIZON_S = 30.0              # a GPS fix is carried on at most this long past its time; the page's own soft horizon
-                                 # (motion.js RAIL_FULL_S / RAIL_DECAY_S) slows it well before: TrainTime's fixes are 3
-                                 # to 16 s old when read (measured, #375) and read every 5 s
+TT_HORIZON_S = 75.0              # a GPS fix is carried on at most this long past its time (predict_until). The page runs it
+                                 # on at its speed (no slowing on age alone) for RAIL_CRUISE_S (30 s: TrainTime's fixes are
+                                 # 3 to 16 s old when read, measured #375, read every 5 s), then eases it to a stop; the
+                                 # hub's own limits come first (POS_MAX_AGE_S 40 s: GTFS-realtime's position; STALE_S)
+# The feed's speed, checked against the distance moved (speed_check): two GPS fixes' s, along the real track geometry,
+# over their own times. TrainTime's GPS speed agrees with that to 0.1 % on 2,900 measured pairs (traintime.py), so a
+# reading that disagrees with both the distance moved and the last reading is a bad reading, not a change of speed.
+A_PHYS = 1.5                     # m/s^2: no train's speed changes faster (an M7's emergency brake is 3.2 mph/s, 1.43)
+MOVED_NOISE_M = 14.0             # two GPS fixes' along-track error (about 10 m each, #375), in the distance moved
+MOVED_MIN_S = 2.0                # fixes closer in time than this: no speed from the distance moved
+SPEED_TOL = 1.5                  # m/s: two readings this close agree (and a speed jump this much over A_PHYS dt is allowed)
+
+
+# What a consist can do (#390): the drawn train never speeds up or slows down faster than its consist can (motion.js
+# railFollow). Per fleet (TrainTime's consist "fleet"): a0, the starting acceleration (m/s^2), tapering at speed as
+# power / mass (pw, W/kg = m^2/s^3: a(v) = min(a0, pw / v)); b, its full service brake (the drawn train's limit);
+# bs, an ordinary stop's braking (the page brakes a prediction into a scheduled stop at this); vmax, its service speed.
+#   M8 (Kawasaki EMU, New Haven Line): 2.0 mph/s starting acceleration, 0.89 m/s^2 (Univ. of New Haven field trial of
+#        the M8 against its rated 2.0 mph/s); eight 200 kW (270 hp) motors a married pair of ~64 t cars: 12.4 W/kg;
+#        80 mph in Metro-North service (en.wikipedia.org/wiki/M8_(railcar)). No published brake rate: the M7's below.
+#   M7 / M7A (Bombardier EMU): 2 mph/s acceleration; 3.0 mph/s service, 3.2 mph/s emergency braking; 80 mph in
+#        service (en.wikipedia.org/wiki/M7_(railcar)); its power per kg taken as the M8's (no published figure).
+#   Diesel push-pull (GE P32AC-DM + coaches): 275.8 kN starting tractive effort, 2.39 MW, 124.5 t
+#        (en.wikipedia.org/wiki/GE_Genesis); coaches (Shoreliners) about 50 t each (an assumption: no published
+#        weight); 1.0 m/s^2 braking assumed for a loco-hauled train. A longer train is heavier: slower to accelerate.
+# An EMU's every car is motored, so its length doesn't change what it can do; a diesel's does (one locomotive).
+# An ordinary stop is braked at about 0.8 m/s^2 (the run profile's DECEL is 0.75). Unknown fleet: the M8 (the line's
+# usual train), which is the quickest here, so the limits never hold the drawn train back from the real one.
+MPHS = 0.44704                   # 1 mph/s in m/s^2
+_EMU = {"a0": round(2.0 * MPHS, 2), "pw": 12.4, "b": round(3.0 * MPHS, 2), "bs": 0.8, "vmax": round(80 * MPHS, 1)}
+CONSISTS = {"M8": _EMU, "M7": _EMU, "M7A": _EMU}
+DIESEL_LOCO = {"te": 275_800.0, "p": 2_390_000.0, "kg": 124_466.0}
+COACH_KG = 50_000.0
+DIESEL_CARS = 6                  # coaches when the feed doesn't say
+
+
+def consist(fleet: str | None, cars: int | None) -> dict:
+    """{a0, pw, b, bs, vmax}: what this consist can do (CONSISTS)."""
+    f = (fleet or "").upper()
+    if "DIESEL" in f:
+        n = cars - 1 if isinstance(cars, int) and cars > 1 else DIESEL_CARS   # the locomotive is one of the "cars"
+        m = DIESEL_LOCO["kg"] + n * COACH_KG
+        return {"a0": round(DIESEL_LOCO["te"] / m, 3), "pw": round(DIESEL_LOCO["p"] / m, 2), "b": 1.0, "bs": 0.8,
+                "vmax": _EMU["vmax"]}
+    return dict(CONSISTS.get(f, _EMU))
+
+
+def speed_check(last: dict | None, s: float, d: int, t: float, vf: float | None, gps: bool) -> dict:
+    """The feed's speed reading vf (m/s) at a fix at s (time t) against the train's last fix {s_raw, fix_at, vf, gps,
+    vf_held, a}: {"vf": the speed to use, "moved": the speed from the distance moved along the track (GPS fixes both,
+    MOVED_MIN_S apart; else None), "bad": "" | "speed" | "position", "brake": a fall in speed may be braked on}.
+      - the distance moved says the train ran at about the last reading, not this one: a bad speed reading; the last
+        reading stands ("speed").
+      - the speed changed faster than any train can (A_PHYS) and nothing moved confirms it: held too, until a second
+        reading agrees (#379: one bad reading is no stop).
+      - the reading steady but the distance moved disagrees: the position is off ("position"); the speed stands.
+    A fall in speed is braked on (brake) only when the distance moved agrees with it, or the reading before was
+    falling too, or two readings agree."""
+    out = {"vf": vf, "moved": None, "bad": "", "brake": False, "fell": False}
+    if last is None or last.get("s_raw") is None or not (t > last.get("fix_at", t)):
+        return out
+    dt = t - last["fix_at"]
+    if gps and last.get("gps") and dt >= MOVED_MIN_S:
+        out["moved"] = max(0.0, (s - last["s_raw"]) * d / dt)
+    vl = last.get("vf")
+    if vf is None or not isinstance(vl, (int, float)):
+        return out
+    moved, tol = out["moved"], (max(SPEED_TOL, 2 * MOVED_NOISE_M / dt + 0.1 * max(vf, vl)) if dt else SPEED_TOL)
+    agrees = moved is not None and abs(moved - (vf + vl) / 2) <= tol      # a steady change of speed over the interval
+    jump = abs(vf - vl) > A_PHYS * dt + SPEED_TOL
+    held = last.get("vf_held")                                          # a reading held back last time
+    second = isinstance(held, (int, float)) and abs(vf - held) <= SPEED_TOL
+    if moved is not None and not agrees and abs(moved - vl) <= tol and abs(vf - vl) > tol and not second:
+        out.update(vf=vl, bad="speed")                                  # it ran on at the last reading
+    elif jump and not agrees and not second:
+        out.update(vf=vl, bad="speed")                                  # faster than any train: wait for a second one
+    elif moved is not None and not agrees and abs(vf - vl) <= SPEED_TOL:
+        out["bad"] = "position"
+    falling = vf < vl - SPEED_TOL / 3
+    out["fell"] = falling
+    out["brake"] = not out["bad"] and falling and (agrees or second or bool(last.get("fell")))
+    if out["bad"] == "speed":
+        out["held"] = vf
+    return out
 
 
 def along_filter(last: dict | None, s: float, d: int, t: float, v_feed: float | None) -> tuple[float, float, float]:
@@ -1255,7 +1345,10 @@ def along_filter(last: dict | None, s: float, d: int, t: float, v_feed: float | 
             return max(u_last, u_meas) * d, 0.0, 0.0
         return (last["s"], 0.0, 0.0) if u_meas - u_last <= STOP_JITTER_M else (s, 0.0, 0.0)   # already stopped: jitter
     a_last = last.get("a") or 0.0
-    if a_last < 0:                                       # braking: on at that rate, to a stop at most
+    vf_last = last.get("vf")
+    if vf is not None and isinstance(vf_last, (int, float)):
+        u_pred = u_last + (vf_last + vf) / 2 * dt        # the feed's two speeds (checked: speed_check), their mean (#390)
+    elif a_last < 0:                                     # braking: on at that rate, to a stop at most
         tb = min(dt, last["v"] / -a_last)
         u_pred = u_last + last["v"] * tb + 0.5 * a_last * tb * tb
     else:
@@ -1267,7 +1360,6 @@ def along_filter(last: dict | None, s: float, d: int, t: float, v_feed: float | 
         v = (1 - AB_FEED) * v + AB_FEED * vf
     if u < u_last:                                       # never backwards: hold
         u = u_last
-    vf_last = last.get("vf")
     dv = vf - vf_last if vf is not None and isinstance(vf_last, (int, float)) else v - last["v"]
     a = min(A_MAX, max(A_MIN, dv / dt))
     if vf is not None and a < A_BRAKE:                   # braking: the feed's own speed (TrainTime's agrees with distance
@@ -1350,13 +1442,24 @@ class Tracker:
                 rec.update(raw=raw, ok=True, present=True)   # back at (or a hair from) its last good fix: the same one
                 continue
             v = a = vf = None
+            chk: dict = {}
+            s_raw, gps = s, p.get("loc", "GPS") == "GPS"
             if src == "traintime":                       # along the track, filtered (along_filter)
-                # the same position again, newer: it hasn't moved, whatever its speed says (#375)
-                vf = 0.0 if last is not None and last["raw"] == raw else p.get("speed")
+                if last is not None and last["raw"] == raw and gps and last.get("gps", True):
+                    # the same GPS position again, newer: it hasn't moved, whatever its speed says (#375). (A SIGNAL
+                    # location is a fixed point: the same one again says nothing, #379.)
+                    vf, chk = 0.0, {"moved": 0.0, "brake": True}
+                else:
+                    chk = speed_check(last, s, d, fix_at, p.get("speed"), gps)
+                    vf = chk["vf"]
                 s, v, a = along_filter(last, s, d, fix_at, vf)
+                if a < A_BRAKE and not chk.get("brake"):
+                    a = 0.0                              # a fall nothing confirms: not braked on (#379)
             self.fixes[tid] = {"raw": raw, "ok": True, "present": True, "lat": raw[0], "lon": raw[1], "s": s, "d": d,
                                "bearing": p.get("bearing"), "fix_at": fix_at, "first_read": first and src == "gtfs", "src": src,
-                               "v": v, "a": a, "vf": vf}
+                               "v": v, "a": a, "vf": vf, "s_raw": s_raw, "gps": gps, "vf_raw": p.get("speed"),
+                               "moved": chk.get("moved"), "bad": chk.get("bad", ""), "fell": chk.get("fell", False),
+                               "vf_held": chk.get("held")}
             if not first and src == "gtfs":              # one we saw appear: a point of the MTA's (GPS fixes are anywhere)
                 self.points.learn(raw[0], raw[1], s, d, at)
         for tid in [k for k in self.fixes if k not in seen]:

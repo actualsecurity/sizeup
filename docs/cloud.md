@@ -1621,7 +1621,7 @@ rigs): centred at street zoom and kept centred as it glides, a chip at the foot 
 Recenter or ✕ lets go, a zoom keeps it. The box stays live while open: each new fix's speed, lateness, next stop and
 track, the place line (the milepost where the train is drawn now: with #374's poles, the pole and GIS milepost at the
 drawn position, else TrainTime's milepost carried along with it), the fix's age, the subtitle and the ⓘ, once a
-second. A GPS fix over 15 s old: the train is drawn hollow and the box and chip say *Predicted · N s ago*.
+second. A GPS fix over 30 s old: the train is drawn hollow and the box and chip say *Predicted · N s ago*.
 
 **Trains approaching.** Under an open event's map, for an event within **150 m of the tracks or a
 station** (measured against the line's GTFS shape and the stations): the next trains each way in the next
@@ -1798,20 +1798,30 @@ drawn on its own direction's track at that distance, so never off it) and filter
 (`trains.along_filter`: an alpha-beta filter on distance against the fix's own time, the feed's speed blended
 in): never backwards (a miss behind holds the train), a smooth speed. Under about 1 mph it is stopped and stays
 put through GPS jitter; the first stopped fix after it moved is taken as where it stopped (forward only), and the
-same position again with a newer time counts as stopped whatever speed it says. The filter also sends its
-acceleration (`a`, from the feed's own speeds). Where a train stops mid-track matters more than a smooth glide
-(#375: "if a train stops mid track we want to know where accurately"), so the page carries a fix on gently: at its
-full speed for 8 s of the fix's age, then slowing as v·e^-(age-8)/5 (at most 13·v on, however old; never past the
-next stop; nothing after 30 s, `TT_HORIZON_S`); a speed falling faster than 0.2 m/s² is braked at that rate to a
-stop (s0 + v·t + ½·a·t²). Fixes are 3 to 16 s old when read and read every 5 s (median about 6 s), so most of
-the time a train runs at its full speed. A train that brakes at a service rate (0.75 m/s²) right after its last
-moving fix, with no fix until it has stopped, is drawn at most about 63 m past where it stopped (at about 22 mph;
-at 52 mph not past it at all); the old 30 s at full speed drew it up to 337 m past. With the feed's real cadence
-(a fix every 3 s, 3 to 16 s late) it is drawn under 10 m past. The drawn train keeps a speed of its own that
-closes on the prediction (the train's speed plus the gap over 3 s, eased in over 1 s), so a new fix changes its
-pace, not its position; it goes back only to where a fix says it stopped: up to 30 m eased back (at most 20 m/s),
-more put there at once and ringed for a moment, never a long slide backwards (motion.js `Motion.rail` /
-`railFollow`; `tests/test_train_live.py` holds it to the measured shape). A fix no newer than the last one changes
+same GPS position again with a newer time counts as stopped whatever speed it says (a SIGNAL location, a fixed point,
+does not: #379). Each speed reading is checked against the distance moved along the track between two GPS fixes over
+their own times (`trains.speed_check`): a reading that disagrees with that and with the last reading, or changes
+faster than any train can (1.5 m/s²), is set aside until a second reading agrees (#379: one bad reading is no stop),
+and a fall in speed is braked on only when the distance moved agrees or two readings fall. The filter also sends its
+acceleration (`a`), the speed's basis (`v_basis`: the box's hover says *45 mph (GPS 44 · moved 45)*) and what the
+consist can do (`dyn`, `trains.consist`: per fleet, M8 / M7 / diesel push-pull, with their published figures and
+sources in the code; an EMU's limits don't depend on its length, a diesel's do). The page runs a fix on at its
+speed, with no slowing on age alone (#390: slowing from 8 s of age made a steady 45 mph train go quick, slow,
+hollow and quick again), and slows only on evidence: a confirmed fall in speed (braked at that rate, at most the
+consist's brake, to a stop, which becomes its limit), its next scheduled stop (braked into it at an ordinary stop's
+0.8 m/s²), or no news (a fix over 30 s old, twice the oldest a fix normally is when read, eased to a stop). Drawn
+hollow (*Predicted · N s ago*) only past 30 s. The drawn train keeps a speed of its own that closes on the
+prediction: the train's speed plus the gap over 6 s, within ±15 % of its speed (+0.5 m/s) for gaps under 30 m and
+more beyond, never faster than the consist can speed up or brake, its change eased (1.5 m/s³), so a new fix's error
+is absorbed over a few seconds with no surge; more than 400 m behind a new fix, or ahead of where a new fix says it
+stops by more than it could brake for, it is put there at once and ringed. It goes back only to where a fix says it
+stopped: up to 30 m eased back (at most 20 m/s), more put there at once and ringed for a moment, never a long slide
+backwards. Measured with synthetic fixes at the real cadence (a fix every 3 to 12 s, 3 to 16 s old when read, ±10 m
+GPS noise): a steady 45 mph train is drawn at 40-50 mph (coefficient of variation 0.03-0.06; #378's: 0-110 mph,
+0.45-0.69, hollow 6-12 % of the time), never hollow. The trade-off: a train that stops mid-track with no fix at all
+between its last moving one and the stop is drawn on at its speed until the stopped fix (at 45 mph about 340 m past;
+#378's slowing kept that near 60 m), then put back, ringed; with fixes coming, braking shows in the next one, and
+it is drawn 0-170 m past depending on how long that takes (`Motion.rail` / `railFollow`; `tests/test_train_live.py` holds it to the measured shape). A fix no newer than the last one changes
 nothing. The distance along the line comes from the projection, not `turf.location_mp`: the projection
 is in the same geometry the train is drawn on, while turf counts along each train's own route (see above) and
 would have to be calibrated to it. The milepost shown is turf's when the train's route starts (eastbound) or

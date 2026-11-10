@@ -768,6 +768,103 @@ def test_the_same_position_again_with_a_newer_time_is_a_stopped_train(tmp_path):
     assert t["mode"] == "stopped" and t["v"] == 0.0
 
 
+def test_the_same_signal_location_again_is_not_a_stop(tmp_path):
+    """#379: a SIGNAL location is a fixed point (a signal's), so the same one again with a newer time says nothing about
+    whether the train moved: its speed stands, it isn't stopped."""
+    tr, clock, fetch = provider(tmp_path)
+    tr.tick()
+    looking(tr, clock)
+    doc = json.loads(LOC)
+    x = next(r for r in doc if r.get("train_num") == "9901")
+    x["location"].update(timestamp=int(clock.t) - 4, speed=30.0, source="SIGNAL")
+    fetch.loc = json.dumps(doc).encode()
+    tr.refresh_rt()
+    tr.tt.tick()
+    clock.t += 5
+    x["location"].update(timestamp=int(clock.t) - 4)                                 # the same signal, newer, "30 mph"
+    fetch.loc = json.dumps(doc).encode()
+    view(tr, clock)
+    tr.tt.tick()
+    rec = tr.track.fixes["9901"]
+    assert rec["v"] > 10 and rec["vf"] == pytest.approx(30 * 0.44704) and rec["gps"] is False   # (the filter blends)
+    assert {x["train"]: x for x in tr.public()["trains"]}["9901"]["mode"] != "stopped"
+
+
+def test_a_speed_reading_is_checked_against_the_distance_moved():
+    """#379, #390: the GPS speed (m/s) against the distance moved along the track over the two fixes' own times. One bad
+    reading (0 at 20 m/s, the train still 100 m on in 5 s) is set aside and not braked on; a second that agrees is
+    taken; a fall the distance moved agrees with is braked on; a steady reading with a jumpy position flags the
+    position; a fall with no position to check it by (a SIGNAL location) is braked on only once two readings fall."""
+    from sizeup.trains import speed_check
+    last = {"s_raw": 1000.0, "fix_at": NOW, "vf": 20.0, "gps": True, "a": 0.0}
+    r = speed_check(last, 1100.0, 1, NOW + 5, 0.0, True)
+    assert r["bad"] == "speed" and r["vf"] == 20.0 and r["moved"] == pytest.approx(20.0) and not r["brake"]
+    second = {**last, "s_raw": 1100.0, "fix_at": NOW + 5, "vf_held": r["held"]}
+    r2 = speed_check(second, 1105.0, 1, NOW + 10, 0.2, True)                         # it did stop: the second agrees
+    assert r2["bad"] == "" and r2["vf"] == 0.2 and r2["brake"]
+    r3 = speed_check(last, 1000.0 + 5 * 18.5, 1, NOW + 5, 17.0, True)                # 20 -> 17, 92.5 m: braking, confirmed
+    assert r3["bad"] == "" and r3["vf"] == 17.0 and r3["brake"]
+    r4 = speed_check(last, 1160.0, 1, NOW + 5, 20.0, True)                           # steady 20, but 160 m in 5 s
+    assert r4["bad"] == "position" and r4["vf"] == 20.0
+    sig = {**last, "gps": False}
+    r5 = speed_check(sig, 1100.0, 1, NOW + 5, 17.0, False)
+    assert r5["moved"] is None and r5["fell"] and not r5["brake"]                    # one falling reading: not yet
+    r6 = speed_check({**sig, "vf": 17.0, "fell": True, "fix_at": NOW + 5}, 1100.0, 1, NOW + 10, 14.0, False)
+    assert r6["brake"]                                                               # two in a row: braking
+    r7 = speed_check({**last, "gps": False}, 1100.0, 1, NOW + 5, 0.0, False)         # 20 -> 0 in 5 s: no train can
+    assert r7["bad"] == "speed" and r7["vf"] == 20.0
+
+
+def test_one_bad_speed_reading_is_no_stop_on_the_hub(tmp_path, model):
+    """#379: a train at 20 m/s with one reading of 0 is neither stopped nor braked (the page draws it on); the next
+    reading at 20 carries on."""
+    tr, clock, fetch = provider(tmp_path)
+    tr.tick()
+    doc = json.loads(LOC)
+    x = next(r for r in doc if r.get("train_num") == "9902")
+    out = []
+    for k, mph in enumerate((44.7, 44.7, 44.7, 0.0, 44.7, 44.7)):
+        lat, lon, _ = model.line.at(39000.0 + 100.0 * k)
+        x["location"].update(latitude=round(lat, 6), longitude=round(lon, 6), source="GPS", timestamp=int(clock.t) - 2, speed=mph)
+        fetch.loc = json.dumps(doc).encode()
+        view(tr, clock)
+        tr.refresh_rt()
+        tr.tt.poll()
+        out.append({t["train"]: t for t in tr.public()["trains"]}["9902"])
+        clock.t += 5
+    bad = out[3]
+    assert bad["mode"] == "reported" and bad["v"] > 15 and bad["a"] >= TRAINS.A_BRAKE
+    assert bad["v_basis"]["bad"] == "speed" and bad["v_basis"]["gps"] == 0.0 and bad["v_basis"]["moved"] == pytest.approx(20.0, abs=1)
+    assert all(t["mode"] == "reported" and t["v"] > 15 for t in out)
+
+
+def test_what_a_consist_can_do():
+    """#390: per fleet, with sources in trains.py: an EMU (M8, M7) by its rated figures whatever its length; a diesel
+    push-pull slower to accelerate the longer (heavier) it is; an unknown fleet as the M8 (the quickest: the drawn train
+    is never held back from the real one). The page gets it as each TrainTime train's dyn."""
+    from sizeup.trains import consist
+    m8 = consist("M8", 8)
+    assert m8 == consist("M8", 4) == consist("", None) == consist("XYZ", 6)
+    assert m8["a0"] == pytest.approx(0.89, abs=0.01) and m8["b"] == pytest.approx(1.34, abs=0.01)
+    assert m8["vmax"] == pytest.approx(35.8, abs=0.1) and 0.7 <= m8["bs"] <= 0.9
+    assert m8["pw"] / 30.0 < m8["a0"]                                                # tapering at speed
+    d5, d9 = consist("MNR_DIESEL", 5), consist("MNR_DIESEL", 9)
+    assert d9["a0"] < d5["a0"] < m8["a0"] and d9["pw"] < d5["pw"]
+    assert consist("M7A", 6)["b"] == pytest.approx(3.0 * 0.44704, abs=0.01)
+
+
+def test_a_traintime_train_tells_the_page_its_consist_and_speed_basis(tmp_path):
+    tr, clock, fetch = provider(tmp_path)
+    tr.tick()
+    looking(tr, clock)
+    tr.refresh_rt()
+    tr.tt.tick()
+    t = {x["train"]: x for x in tr.public()["trains"]}["9901"]
+    assert t["pos_src"] == "traintime" and t["dyn"] == TRAINS.consist("M8", 6)
+    assert t["v_basis"] == {"gps": round(52.3 * 0.44704, 2), "moved": None, "bad": ""}
+    assert t["hold_kind"] != "fallback" or (t["hold_s"] - t["s"]) * t["d"] == pytest.approx(TRAINS.HOLD_FALLBACK_TT_M, abs=0.2)
+
+
 def test_just_after_midnight_the_service_date_matches(tmp_path):
     """A train that left at 23:50 runs on past midnight: GTFS-realtime's start_date and TrainTime's run_date are both
     the service date (the day before), so it still merges; a date that doesn't line up is logged once."""

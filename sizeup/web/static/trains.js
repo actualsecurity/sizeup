@@ -64,7 +64,8 @@ window.TrainLayer = (() => {
   const POLL_MS = 5000, PANEL_MS = 30000;
   const ANIMATE_MS = 100;                    // ~10 redraws a second while a train moves (motion.js)
   const PREDICTED_M = 5;                     // drawn this far ahead of the MTA's report: "predicted"
-  const OLD_FIX_S = 15;                      // a GPS fix older than this: drawn hollow, "Predicted · N s ago" (#375)
+  const OLD_FIX_S = 30;                      // a GPS fix older than this: drawn hollow, "Predicted · N s ago" (#375): twice
+                                             // the oldest a fix normally is when read (16 s), so a steady train never is (#390)
   const STALE_OPACITY = 0.45;                // a train frozen on an old feed: faded
   const BACKOFF_MS = [10000, 60000];         // a failed poll: 10 s doubling to a minute
   const SRC_LINE = "tr-line", SRC_ST = "tr-stations", SRC_TR = "tr-trains", SRC_CARS = "tr-cars", SRC_ROUTE = "tr-route";
@@ -170,7 +171,8 @@ window.TrainLayer = (() => {
              until: typeof t.predict_until === "number" ? t.predict_until : d.at + (prof.predict_s || 120),
              seg: t.segment ? { accel: prof.accel, decel: prof.decel, vmax: prof.vmax, ...t.segment } : null, lag: t.lag_s,
              v: t.pos_src === "traintime" && typeof t.v === "number" ? t.v : null,    // GPS speed, m/s (MTA TrainTime, #362)
-             a: t.pos_src === "traintime" && typeof t.a === "number" ? t.a : 0 };     // and its change, m/s^2 (#375)
+             a: t.pos_src === "traintime" && typeof t.a === "number" ? t.a : 0,       // and its change, m/s^2 (#375)
+             dyn: t.dyn || null };                                                   // what its consist can do (#390)
   }
   function moved(d, got) {
     if (!d) return;
@@ -367,7 +369,19 @@ window.TrainLayer = (() => {
     return t.mp + ds / MILE_M;                  // mileposts count from Grand Central, as s does toward New Haven
   }
   const dirWord = (t) => (t.d > 0 ? "east" : t.d < 0 ? "west" : "");
-  const mph = (t) => (t.tt && typeof t.tt.speed_mph === "number" && t.pos_src === "traintime" ? `${Math.round(t.tt.speed_mph)} mph` : "");
+  // its speed: the hub's (the GPS reading checked against the distance moved, trains.py speed_check), else the reading
+  const mphOf = (t) => (t.pos_src !== "traintime" ? null : typeof t.v === "number" ? t.v / 0.44704
+    : t.tt && typeof t.tt.speed_mph === "number" ? t.tt.speed_mph : null);
+  const mph = (t) => { const v = mphOf(t); return v === null ? "" : `${Math.round(v)} mph`; };
+  // its basis, for the hover (#390): "45 mph (GPS 44 · moved 45)", and which one the hub set aside
+  function speedBasis(t) {
+    const v = mphOf(t), b = t.v_basis;
+    if (v === null || !b) return "";
+    const n = (x) => (typeof x === "number" ? Math.round(x / 0.44704) : null);
+    const parts = [n(b.gps) !== null ? `GPS ${n(b.gps)}${b.bad === "speed" ? " set aside" : ""}` : "",
+                   n(b.moved) !== null ? `moved ${n(b.moved)}${b.bad === "position" ? " set aside" : ""}` : ""].filter(Boolean);
+    return `${Math.round(v)} mph${parts.length ? ` (${parts.join(" \u00b7 ")})` : ""}`;
+  }
   function headline(t) {                      // "NH east · 6 cars (M8) · 11 min late · next Port Chester trk 2"
     const tt = t.tt || {};
     const dir = dirWord(t);
@@ -468,7 +482,7 @@ window.TrainLayer = (() => {
   // a GPS fix (TrainTime) gone old: the train is drawn on a prediction, not where it was seen (#375)
   const oldFix = (t, d, now) => t.pos_src === "traintime" && !t.estimated && typeof t.fix_at === "number" && fixAgeS(t, d, now) > OLD_FIX_S;
   // the follow chip: "Following 9901 · NH west · 67 mph · 3 s ago"; its fix over OLD_FIX_S old: "Following 9901 · NH west ·
-  // Predicted · 17 s ago"
+  // Predicted · 34 s ago"
   const followText = (t, d) => [`Following ${t.train}`, [t.tt && t.tt.branch, dirWord(t)].filter(Boolean).join(" "),
                                  oldFix(t, d) ? "Predicted" : mph(t), fixAge(t, d)].filter(Boolean).join(" \u00b7 ");
   // the catenary on one line, its full text on hover (and in the box's ⓘ)
@@ -735,7 +749,7 @@ window.TrainLayer = (() => {
       const pred = w.ahead || w.old;
       if (!t.estimated) {
         say = pred ? (at ? `Predicted from ${at}` : "Predicted") : `Reported ${at}${t.mode === "stopped" ? " · stopped" : ""}`;
-        why = w.old ? `Predicted: no position from the MTA for over ${OLD_FIX_S} s; carried on from its last, slowing, ${upTo} (drawn hollow)`
+        why = w.old ? `Predicted: no position from the MTA for over ${OLD_FIX_S} s; carried on from its last, easing to a stop, ${upTo} (drawn hollow)`
           : w.ahead ? `Predicted: on its run since the MTA's report, ${upTo}` : "Reported by the MTA";
       } else {
         say = t.mode === "stopped" ? "Estimated · at station" : "Estimated";
@@ -832,7 +846,8 @@ window.TrainLayer = (() => {
         ? `Track ${tt.next.track} at ${tt.next.name}: ${tt.next.posted ? "posted" : "planned, not posted yet"}${tt.next.track_change ? " (track change)" : ""}` : "" });
       const place = placeRow(t, w, d.railref);
       if (place) rows.push(place);
-      rows.push({ k: "pos", text: [pos.word, w.old ? "" : mph(t), fixAge(t, d)].filter(Boolean).join(" \u00b7 ") });   // old: "Predicted · 17 s ago"
+      rows.push({ k: "pos", text: [pos.word, w.old ? "" : mph(t), fixAge(t, d)].filter(Boolean).join(" \u00b7 "),   // old: "Predicted · 34 s ago"
+                  title: speedBasis(t) });
       if ((tt.car_loads || []).length) rows.push({ k: "bars", sig: JSON.stringify([tt.car_loads, tt.occupancy, tt.pax]), el: () => carBars(tt) });
       const al = d.alerts || [];
       if (al.length) {

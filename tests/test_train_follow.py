@@ -272,25 +272,41 @@ let fc = null;
   map.emit("click", { point: { x: 1, y: 1 }, originalEvent: { stopPropagation() {} } });
   await flush(); await flush();
   out.rows = rows(); out.chip = host.find("ac-follow-t")[0].textContent;
-  T += 20000;                                                    // 20 s on, no newer fix: well over 15 s old
+  out.titles = info.find("ml-lines")[0].children.map((c) => c.title || "");
+  T += 12000;                                                    // 12 s on, no newer fix: older, still a normal age (#390)
+  m.draw(false, T); m.live.refresh(); m.tick();
+  out.mid = mine().estimated; out.rowsMid = rows();
+  T += 20000;                                                    // 32 s on: well over 30 s old
   m.draw(false, T); m.live.refresh(); m.tick();
   out.old = mine().estimated;
   out.rowsOld = rows(); out.chipOld = host.find("ac-follow-t")[0].textContent;
   console.log(JSON.stringify(out)); process.exit(0);
 })();
 """, {"answers": [{**x["body"], "got": x["got"]} for x in a], "got": a[0]["got"], "id": t0["id"]})
-    assert o["fresh"] is False and o["old"] is True                                          # filled, then hollow
+    assert o["fresh"] is False and o["mid"] is False and o["old"] is True                    # filled, then hollow
+    import re
+    assert any(re.fullmatch(r"\d+ mph \(GPS \d+( · moved \d+)?\)", x) for x in o["titles"])   # its speed's basis (#390)
     pos = lambda rs: next(r for r in rs if r.endswith(" s ago"))
+    mid = pos(o["rowsMid"]).split(" · ")
+    assert "mph" in mid[1] and int(mid[-1].split(" ")[0]) > 15                               # "Predicted · 45 mph · 19 s ago"
     assert pos(o["rows"]).split(" · ")[0] in ("Reported", "Predicted") and "mph" in pos(o["rows"])
     old = pos(o["rowsOld"]).split(" · ")
-    assert old[0] == "Predicted" and len(old) == 2 and int(old[1].split(" ")[0]) > 15         # "Predicted · 24 s ago"
+    assert old[0] == "Predicted" and len(old) == 2 and int(old[1].split(" ")[0]) > 30         # "Predicted · 39 s ago"
     assert " · Predicted · " in o["chipOld"] and "mph" not in o["chipOld"] and o["chipOld"].endswith(" s ago")
 
 
 @needs_node
 def test_a_live_box_keeps_its_tip_and_subtitle_up_to_date(tmp_path):
     """MapFollow.LiveInfo: the ⓘ (Help.info: data-help and title) and the subtitle follow view(), so the tip never keeps
-    saying "Predicted" once a real fix has come; the button itself stays (no rebuild)."""
+    saying "Predicted" once a real fix has come; the button itself stays (no rebuild); an ⓘ open at the time shows the
+    new words too (#379: Help.update)."""
+    pre = r"""
+const docOn = {};
+document.addEventListener = (t, f) => { (docOn[t] = docOn[t] || []).push(f); };
+document.body = new El("body"); document.documentElement.clientWidth = 900; global.innerHeight = 800;
+El.prototype.getBoundingClientRect = () => ({ left: 10, top: 10, bottom: 30 });
+El.prototype.closest = function () { return this.tagName === "BUTTON" && this.classList.contains("help") ? this : null; };
+"""
     o = run_node(tmp_path, ["help.js", "mapfollow.js"], r"""
 El.prototype.querySelector = function (sel) { return this.find(sel.slice(1))[0] || null; };
 El.prototype.replaceWith = function (n) { const p = this.parent, i = p.children.indexOf(this); p.children[i] = n; n.parent = p; };
@@ -306,17 +322,23 @@ const control = { info, showInfo(title, sub, lines, foot, cls, icon, tip) {
   f.append(Help.info(tip));
   info.replaceChildren(); info.append(head, body, f); info.hidden = false;
 } };
-let v = { title: "Train 9901", sub: "New Haven Line", lines: ["Predicted · 18 s ago"], foot: "MTA", tip: "Predicted: no position from the MTA for over 15 s" };
+let v = { title: "Train 9901", sub: "New Haven Line", lines: ["Predicted · 38 s ago"], foot: "MTA", tip: "Predicted: no position from the MTA for over 30 s" };
 const box = new MapFollow.LiveInfo(control, () => v);
 const help = () => info.find("help")[0];
 const b0 = help();
 out.before = [help().title, help().dataset.help, info.find("ml-subtitle")[0].textContent];
+for (const f of docOn.click) f({ target: b0, preventDefault() {}, stopPropagation() {} });     // the ⓘ opened
+const pop = document.body.children[0];
+out.popBefore = [pop.hidden, pop.textContent];
 v = { ...v, sub: "New Haven Line → Grand Central", lines: ["Reported · 52 mph · 3 s ago"], tip: "Reported by the MTA" };
 box.refresh();
+out.popAfter = [pop.hidden, pop.textContent];
 out.after = [help().title, help().dataset.help, info.find("ml-subtitle")[0].textContent, info.find("ml-lines")[0].children[0].textContent];
 out.same = help() === b0;
 box.stop();
-""")
-    assert o["before"] == ["Predicted: no position from the MTA for over 15 s"] * 2 + ["New Haven Line"]
+""", pre=pre)
+    assert o["before"] == ["Predicted: no position from the MTA for over 30 s"] * 2 + ["New Haven Line"]
     assert o["after"] == ["Reported by the MTA", "Reported by the MTA", "New Haven Line → Grand Central", "Reported · 52 mph · 3 s ago"]
     assert o["same"] is True
+    assert o["popBefore"] == [False, "Predicted: no position from the MTA for over 30 s"]
+    assert o["popAfter"] == [False, "Reported by the MTA"]                                  # the open ⓘ's words too
