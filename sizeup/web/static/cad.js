@@ -506,14 +506,6 @@ function callLive(o) {
 }
 const txNow = (name) => { const t = window.Radio && Radio.talkingFor(name); return !!t && !t.ended; };
 
-// Full department or specific units (#370, sizeup/cad/scope.py): from the page, then the feed (whose stands)
-const scopeTip = (s) => `${s.label}\nFrom ${s.source === "feed" ? "the county feed" : "the page"}`;
-function scopeChip(inc) {
-  if (!inc.scope) return null;
-  const c = el("span", "chip scope", inc.scope.label);
-  c.title = scopeTip(inc.scope);
-  return c;
-}
 function queueItem() {
   const li = el("li", "qi item");
   li.tabIndex = 0;
@@ -542,8 +534,11 @@ function fillQueueItem(li, inc) {
   else t.classList.add("warn");
   type.append(t);
   if (inc.joint_call) type.append(el("span", "chip joint", inc.joint_call));
-  const sc = scopeChip(inc);
-  if (sc) type.append(sc);
+  if (inc.scope) {                    // full department or specific units (#370)
+    const sc = el("span", "chip scope", inc.scope.label);
+    sc.title = `${inc.scope.label}\nFrom ${inc.scope.source === "feed" ? "the county feed" : "the page"}`;
+    type.append(sc);
+  }
   const addr = el("div", "qa" + (inc.address ? "" : " dim"), inc.address || "No location");
   li.replaceChildren(head, type, addr);
   const ap = airportLine(inc);
@@ -625,7 +620,7 @@ function renderQueue() {
   const byAge = (a, b) => a.created_at - b.created_at;        // oldest first
   const sig = (i) => JSON.stringify([i.status, i.number, i.type, i.subtype, i.address, i.id === cad.sel, i.emergency,
     i.until_at, i.disposition, i.type_note, unconfirmed(i), i.joint_call, openAssignments(i).map((a) => [a.name, a.status, txNow(a.name)]),
-    i.closed_at, cad.listSig.length, canDo("dispatch"), airportLine(i), queueExtra(i), i.scope && [i.scope.label, i.scope.source]]);
+    i.closed_at, cad.listSig.length, canDo("dispatch"), airportLine(i), i.scope && [i.scope.label, i.scope.source], queueExtra(i)]);
   const opts = { key: (i) => String(i.id), sig, make: queueItem, fill: fillQueueItem };
   syncList($("#q-queued"), all.filter((i) => i.status === "queued").sort(byAge), { ...opts, empty: "None" });
   syncList($("#q-pending"), all.filter((i) => i.status === "pending" && i.emergency).sort(byAge),
@@ -710,7 +705,10 @@ function renderDetail() {
   if (inc.joint_call) stBadge($("#d-joint"), inc.joint_call, "#6AA6E8");
   const scope = $("#d-scope");
   show(scope, !!inc.scope);
-  if (inc.scope) { stBadge(scope, inc.scope.label, "#9AA3AD"); scope.title = scopeTip(inc.scope); }
+  if (inc.scope) {                    // full department or specific units (#370, sizeup/cad/scope.py)
+    stBadge(scope, inc.scope.label, "#9AA3AD");
+    scope.title = `${inc.scope.label}\nFrom ${inc.scope.source === "feed" ? "the county feed" : "the page"}`;
+  }
   setText($("#d-source"), inc.source === "manual" ? "Manual" : inc.feed && inc.source === "CAD feed" ? inc.feed.label : inc.source);
   show($("#d-accept"), inc.status === "queued");
   show($("#d-dismiss"), inc.status === "queued");
