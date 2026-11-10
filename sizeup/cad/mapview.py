@@ -82,19 +82,67 @@ MAX_SPEED_MS = 100.0            # m/s; faster is no fire apparatus (360 km/h): i
 EPOCH_MIN, EPOCH_MAX = 1e9, 1e10   # plausible epoch seconds (2001-2286): milliseconds (1.7e12) are refused
 RECENT_S = 6 * 3600.0           # cleared calls looked at for a return trip (the longest window allowed)
 AT_HOME_KM = 0.15               # an AVL fix this close to its station: in quarters (turnout counts)
-LOOK = {"free": "available", "oos": "oos", "dispatched": "dispatched", "": "dispatched", "enroute": "responding",
-        "onscene": "onscene"}
+LOOK = {"free": "available", "oos": "oos", "dispatched": "dispatched", "enroute": "responding", "onscene": "onscene"}
+# Every other role is committed to a call (role '' in data/cad_lists.json: acknowledged, staging, out at, call back,
+# dispatched by other agency; or one not known here): drawn as dispatched, an active rig (#376: chips longest).
+ACTIVE_LOOK = "dispatched"
+
+
+def look_of(role: str | None) -> str:
+    """A status role -> the marker's look: available (idle) | oos | dispatched | responding | onscene (active)."""
+    return LOOK.get(role or "", ACTIVE_LOOK)
 SNIPPET = 160
+# Rigs decluttered by zoom (#376; drawn by cadmap.js): below detail_zoom an idle rig is a dot (two or more idle at one
+# firehouse: one badge, "HQ · 6"), below active_zoom an active one (on a call) a strong dot. Settings > System > Map
+# display; the wall board (/monitor, read from across the room, always showing the whole area) has its own pair. A map
+# on its automatic frame (the area or the call, not moved by hand) keeps every active rig a full chip whatever its zoom.
+DISPLAY_SECTION = "map_display"
+DISPLAY_DEFAULTS = {"detail_zoom": 15.0, "active_zoom": 10.0, "board_detail_zoom": 16.0, "board_active_zoom": 10.0}
+DISPLAY_LABELS = {"detail_zoom": "Idle rigs: chips from zoom", "active_zoom": "Active rigs: chips from zoom",
+                  "board_detail_zoom": "Wall board, idle: chips from zoom",
+                  "board_active_zoom": "Wall board, active: chips from zoom"}
+DISPLAY_LIMITS = (8.0, 20.0)
+# An active rig's zoom no later than this (the console's and the wall board's): a rig on a call never a dot at the zooms
+# the area is watched at (#376: Settings can't hide the responding rigs)
+ACTIVE_MAX = 12.0
+
+
+def display_limits(key: str) -> tuple[float, float]:
+    """The zooms one map display setting may take: an active one capped at ACTIVE_MAX."""
+    lo, hi = DISPLAY_LIMITS
+    return (lo, min(hi, ACTIVE_MAX)) if key.endswith("active_zoom") else (lo, hi)
 
 
 def load_firehouses(path: str | Path | None = None) -> list[dict]:
-    """data/firehouses.json: [{name, address, ll: [lon, lat]}]; [] if it can't be read."""
+    """data/firehouses.json: [{name, address, ll: [lon, lat], short?}]; [] if it can't be read."""
     try:
         fh = json.loads(Path(path or FIREHOUSES).read_text())["firehouses"]
     except (OSError, ValueError, KeyError, TypeError):
         return []
-    return [{"name": str(f["name"]), "address": str(f.get("address") or ""), "ll": [float(f["ll"][0]), float(f["ll"][1])]}
+    return [{"name": str(f["name"]), "address": str(f.get("address") or ""), "ll": [float(f["ll"][0]), float(f["ll"][1])],
+             **({"short": str(f["short"])[:12]} if f.get("short") else {})}      # the map's badge (#376): "HQ · 6"
             for f in fh if isinstance(f, dict) and f.get("name") and isinstance(f.get("ll"), list) and len(f["ll"]) == 2]
+
+
+def display_value(key: str, v) -> float:
+    """One map display zoom (#376), checked: a number within display_limits(key). Raises ValueError."""
+    if key not in DISPLAY_DEFAULTS:
+        raise ValueError(f"{', '.join(DISPLAY_DEFAULTS)} only")
+    lo, hi = display_limits(key)
+    if not _num(v) or not lo <= v <= hi:
+        raise ValueError(f"{key}: a zoom from {lo:g} to {hi:g}")
+    return round(float(v), 2)
+
+
+def display_zooms(ov: dict | None = None) -> dict:
+    """The map display zooms in effect (state["map"]["display"]): the Settings overrides over DISPLAY_DEFAULTS."""
+    out = dict(DISPLAY_DEFAULTS)
+    for k, v in (ov or {}).items():
+        try:
+            out[k] = display_value(k, v)
+        except ValueError:
+            pass                                    # a bad stored value: the default (import and set refuse them)
+    return out
 
 
 def is_fire(unit: dict) -> bool:
@@ -244,17 +292,17 @@ def place(unit: dict, role: str, station: dict | None = None, incident: dict | N
     fire:     drawn by default (is_fire); None = from the unit
     clear:    its latest cleared call (locate()): a recent one draws it on its way home
 
-    Returns None (not drawn) or {unit, id, kind, status, look, place: station|incident|position|returning,
+    Returns None (not drawn) or {unit, id, kind, status, status_at, look, place: station|incident|position|returning,
     group, lon, lat, ring: 0 (inner) | 1 (outer, not there yet), incident_id, incident_number,
     line_to: [lon, lat] | None, station, home_line (the line is to its station: thin)}; a "position"
     one also has its fix's at, age (s), stale, and heading / speed / source when the fix has them."""
     fire = is_fire(unit) if fire is None else fire
-    look = LOOK.get(role, "dispatched")
+    look = look_of(role)
     inc_ll = _ll(incident)
     if incident is None and not fire:
         return None                                  # EMS / police / agencies: only while on an event
     spec = {"unit": unit["name"], "id": unit.get("id"), "kind": unit.get("kind", ""), "status": unit.get("status", ""),
-            "look": look, "place": "", "group": "", "lon": None, "lat": None, "ring": 0,
+            "status_at": unit.get("status_at"), "look": look, "place": "", "group": "", "lon": None, "lat": None, "ring": 0,
             "incident_id": incident["id"] if incident else None,
             "incident_number": (incident or {}).get("number") or "",
             "line_to": None, "station": station["name"] if station else "", "home_line": False}
@@ -282,10 +330,11 @@ def place(unit: dict, role: str, station: dict | None = None, incident: dict | N
 
 def map_slice(units: list[dict], incidents: list[dict], role, firehouses: list[dict],
               positions: dict | None = None, now: float = 0.0, joint=lambda code: "",
-              clears: dict | None = None, params: eta.Params | None = None) -> dict:
-    """state["map"]: {stations, markers, unset, incidents}. units: Store.units(); incidents: the
+              clears: dict | None = None, params: eta.Params | None = None, display: dict | None = None) -> dict:
+    """state["map"]: {stations, markers, unset, incidents, avl, display}. units: Store.units(); incidents: the
     state's; role(status) -> role; joint(code) -> 'RB' tag for a joint-response unit; clears: unit id ->
-    its latest cleared call (Store.recent_clears); params: the ETA settings."""
+    its latest cleared call (Store.recent_clears); params: the ETA settings; display: the map display zooms
+    (display_zooms(), #376)."""
     positions, clears = positions or {}, clears or {}
     by_name = {f["name"]: f for f in firehouses}
     open_incs = {i["id"]: i for i in incidents if i["status"] in ("queued", "pending", "active")}
@@ -318,7 +367,8 @@ def map_slice(units: list[dict], incidents: list[dict], role, firehouses: list[d
              "lat": i["lat"], "lon": i["lon"]}
             for i in open_incs.values() if i.get("lat") is not None and i.get("lon") is not None]
     return {"stations": firehouses, "markers": markers, "unset": unset, "incidents": pins,
-            "avl": {"stale_s": POSITION_STALE_S, "max_age_s": POSITION_MAX_AGE_S, "horizon_s": POSITION_HORIZON_S}}
+            "avl": {"stale_s": POSITION_STALE_S, "max_age_s": POSITION_MAX_AGE_S, "horizon_s": POSITION_HORIZON_S},
+            "display": dict(display) if display else display_zooms()}
 
 
 def locations(units: list[dict], incidents: list[dict], role, firehouses: list[dict], positions: dict | None = None,
