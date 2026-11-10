@@ -926,3 +926,58 @@ def test_a_flapping_level_is_pushed_and_polled_once():
     w.radio(90 + W.REPUSH_S, "60 Control, car 9901, downgraded to an alert level 1")
     w.radio(120 + W.REPUSH_S, "60 Control, car 9901, upgrade to an alert level 2")
     assert len(w.push.sent) == 3 and len(w.polls) == 3
+
+
+# -- the re-review of #372 --------------------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("first, then", [
+    ("November one two three alpha bravo, we've lost an engine, request emergency equipment",
+     "November one two three alpha bravo, we'll run the checklist"),
+    ("November one two three alpha bravo, engine failure, traffic permitting we'd like the long runway",
+     "November one two three alpha bravo, souls on board four"),
+])
+def test_a_pilot_saying_its_own_callsign_first_is_never_silenced(first, then):
+    w = World()
+    w.atc(0, first)
+    assert any(t.callsign == "N123AB" and "engine" in {x[1] for x in t.abn} for t in w.w.tracks.values())
+    a = w.atc(20, then)
+    assert a is not None and [x["callsign"] for x in a["data"]["aircraft"]] == ["N123AB"]
+
+
+def test_the_alternate_alone_is_not_the_weather():
+    w = World()
+    w.atc(0, "November one two three alpha bravo going around")
+    a = w.atc(20, "November one two three alpha bravo, we have a fail indication, we'll run the checklist, we may go "
+                  "to our alternate")
+    assert a is not None and a["title"].startswith("HPN ATC: go-around")
+    t = World()                                                     # the tower's wind in a clearance is not either
+    t.atc(0, "November one two three alpha bravo, wind three three zero at eight, go around")
+    assert t.atc(20, "November one two three alpha bravo, we'll run the checklist and divert") is not None
+
+
+def test_an_unrelated_airport_call_earlier_is_not_the_alert_s():
+    w = World()
+    iid = w.feed(0, "C-5", "AIRPORT FUEL SPILL", "WESTCHESTER COUNTY AIRPORT", units=("E64",))
+    a = w.radio(18 * 60, ALERT2)
+    assert len(w.incidents()) == 2 and w.alerts.get(a["id"])["incident_id"] != iid
+    v = World()                                                     # an alert's, only once
+    v.feed(0, "C-6", "AIRPORT ALERT 2", "WESTCHESTER COUNTY AIRPORT", units=("E64",))
+    b = v.radio(60, ALERT2)
+    v.radio(300, "60 Control, car 9901, alert level 2 canceled, aircraft landed without incident")
+    c = v.radio(400, "60 Control, car 9901, declaring an alert level 2 for a King Air, runway 16")
+    assert c["id"] != b["id"] and len(v.incidents()) == 2
+
+
+def test_a_county_event_after_the_cancel_is_another_call():
+    w = World()
+    a = w.radio(0, ALERT2)
+    w.radio(300, "60 Control, car 9901, alert level 2 canceled, aircraft landed without incident")
+    iid = w.feed(400, "C-7", "AIRPORT ALERT 2", "WESTCHESTER COUNTY AIRPORT", units=("E64",))
+    assert iid != w.alerts.get(a["id"])["incident_id"] and len(w.incidents()) == 2
+
+
+def test_single_engine_taxi_clears_only_its_own_words():
+    said = lambda x: {a.kind for a, _w in W.abnormal(W.fuzzy(atc.normalize(normalize(x))))}   # noqa: E731
+    assert "engine" not in said("number two engine shut down, single engine taxi to the ramp")
+    assert "engine" in said("we had an engine failure on the approach, single engine taxi to the ramp")

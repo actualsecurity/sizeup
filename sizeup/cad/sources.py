@@ -1114,15 +1114,17 @@ class Sources:
         """The open Airport incident an alert level declared on the fire radio made (#369, source ALERT_SOURCE), made
         within MATCH_WINDOW_S before this report or SAME_CALL_S after it (60 Control often opens its event before or while
         the car talks, and speech-to-text lags: a county event dispatched 2 min before the declaration is the same call),
-        that this source has no report on yet: a county event (also the same call, _same_call) or a page of the Airport
-        type attaches to it instead of making another."""
+        that this source has no report on yet, and whose alert 60 Control has not canceled (a new county event after
+        the cancel is another call): a county event (also the same call, _same_call) or a page of the Airport type
+        attaches to it instead of making another."""
         from sizeup.cad import airport
         if typ != airport.TYPE:                          # an Airport / alert / aircraft type: never an EMS call at the terminal
             return None
         return self.store.one(
             f"SELECT * FROM incidents i WHERE i.source = ? AND i.type = ? AND i.status IN ({','.join('?' * len(OPEN))}) "
             "AND i.created_at BETWEEN ? AND ? AND NOT EXISTS (SELECT 1 FROM source_reports r WHERE r.incident_id = i.id "
-            "AND r.source = ?) ORDER BY i.created_at DESC LIMIT 1",
+            "AND r.source = ?) AND NOT EXISTS (SELECT 1 FROM airport_alerts a WHERE a.incident_id = i.id AND "
+            "a.status = 'ended' AND a.note LIKE '60 Control:%') ORDER BY i.created_at DESC LIMIT 1",
             (ALERT_SOURCE, airport.TYPE, *OPEN, at - MATCH_WINDOW_S, at + SAME_CALL_S, source))
 
     def _page_same_call(self, inc: dict, at: float, typ: str) -> bool:
