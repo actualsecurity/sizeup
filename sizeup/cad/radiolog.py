@@ -468,7 +468,8 @@ class RadioLog:
     def _starts(self, iid: int, units, hi: float) -> dict[str, float]:
         """Each unit's window start: its own dispatch (the feed's unit_times dispatched for it; else the call's when
         it was put on within LISTED_NEAR_S of it; else when it was put on, or now) less UNITS_LEAD_S, never more than
-        UNITS_MAX_BACK_S before hi."""
+        UNITS_MAX_BACK_S before hi. A full department paged (sizeup/cad/scope.py): every unit but another department's
+        (mutual aid) from the call's dispatch, whenever it came."""
         board = self.board()
         own: dict[str, float] = {}
         for r in self.store.q("SELECT data FROM source_reports WHERE incident_id = ? AND source != ? AND merged_into = '' "
@@ -481,15 +482,27 @@ class RadioLog:
             "SELECT u.name, MIN(a.assigned_at) AS t FROM assignments a JOIN units u ON u.id = a.unit_id "
             "WHERE a.incident_id = ? GROUP BY u.name", (iid,))}
         call = self.dispatched_at(iid)
+        scope = getattr(self.cad, "scope", None)
+        full = scope is not None and scope.full(iid)
+        aid = {r["name"] for r in self.store.q("SELECT name FROM units WHERE mutual_aid = 1")} if full else set()
         out = {}
         for u in units:
-            if u in own:
+            if full and u not in aid:
+                d = min(own.get(u, call), call)          # the department was paged at the call's dispatch
+            elif u in own:
                 d = own[u]
             else:
                 came = put.get(u) or hi
                 d = call if came - call <= LISTED_NEAR_S else came
             out[u] = max(d - UNITS_LEAD_S, hi - UNITS_MAX_BACK_S)
         return out
+
+    def widen(self, iid: int) -> None:
+        """The call became a full department (sizeup/cad/scope.py): its units matched again from the call's dispatch
+        (_starts), never linking anything twice."""
+        with self.store.tx() as db:
+            db.execute("DELETE FROM radiolog_units WHERE incident_id = ?", (iid,))
+        self.units_soon(iid)
 
     def unit_removed(self, iid: int, unit: str) -> int:
         """A unit taken off the incident before it went: its mention links there that no person kept are removed (the

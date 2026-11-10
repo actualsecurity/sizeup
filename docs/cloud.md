@@ -884,8 +884,10 @@ Incidents come in from ranked sources. The interface is in `sizeup/sources/__ini
   the radio log is matched again for those units from its dispatch (the feed's dispatched time, else the page's, else
   when it was made) less a minute, on a worker. Every guard holds; nothing is linked twice.
 - **Full department or specific units (#370, `sizeup/cad/scope.py`):** the page sets it first (its departments' tones
-  and a call type: "Full department (<dept>)"; apparatus named: "Specific units"). The feed's unit list confirms or
-  overrides it, and a disagreement is a timeline line. A feed's department entries are configured on the hub
+  and a call type: "Full department (<dept>)"; apparatus named: "Specific units"). The page is the dispatch: its
+  reading stands on every path, and the latest page wins (an upgrade to the full department widens the radio log's
+  backfill to every unit from the call's dispatch). The feed's unit list is the label only when no page was heard; a
+  disagreement is one timeline line ("Page: all PCFD · feed: units"). A feed's department entries are configured on the hub
   (`POST /api/cad/settings/department_units {action: set, key: <code>, value: <department>}`, admins; never in the
   repo). They are never a unit: never dispatched (the timeline says "<dept> paged"; our department's accepts the call)
   and never a unit in common between two reports.

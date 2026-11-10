@@ -109,7 +109,8 @@ def test_full_department_from_the_page_tones(rig):
     inc = rig.page(text=FULL_PAGE)
     assert rig.cad.full(inc["id"])["scope"] == {"kind": "full", "departments": ["Port Chester FD"],
                                                  "short": "Full dept", "label": "Full department (Port Chester FD)",
-                                                 "paged": "Paged: full department (Port Chester FD)", "source": "page"}
+                                                 "paged": "Paged: full department (Port Chester FD)", "source": "page",
+                                                 "feed": ""}
     rig.at(600)                                                        # two departments' tones on one page
     m = rig.monitor.on_page("p2", ["Port Chester FD", "Rye Brook FD (est.)"],
                             parse(FULL_PAGE.replace("12 Example Avenue", "400 Sample Street")), at=rig.clock.t)
@@ -130,7 +131,8 @@ def test_specific_units_from_a_page_naming_apparatus(rig):
     assert rig.cad.full(inc["id"])["scope"]["short"] == "Specific units"
 
 
-def test_the_feed_overrides_the_page_and_the_disagreement_is_noted(rig):
+def test_the_page_stands_over_the_feed_and_the_disagreement_is_noted(rig):
+    """#370 review: the page is the dispatch. Page first (all PCFD), then the feed listing apparatus: still Full dept."""
     rig.mode("pcfd")
     inc = rig.page(text=FULL_PAGE)
     rig.at(30)
@@ -138,14 +140,17 @@ def test_the_feed_overrides_the_page_and_the_disagreement_is_noted(rig):
     rig.poll()
     assert rig.iid() == inc["id"]                                      # attached to the page's incident
     s = rig.cad.full(inc["id"])["scope"]
-    assert (s["label"], s["source"]) == ("Specific units", "feed")
-    assert "Feed: units · page: all PCFD" in events(rig, inc["id"])
+    assert (s["short"], s["source"], s["feed"]) == ("Full dept", "page", "units")
+    assert events(rig, inc["id"]).count("Feed: units · page: all PCFD") == 1
+    rig.at(45)
+    rig.change(units=("E60", "L31"))                                   # the feed again: never changes it, noted once
+    assert rig.cad.full(inc["id"])["scope"]["short"] == "Full dept"
+    assert sum("· page:" in e for e in events(rig, inc["id"])) == 1
     rig.at(60)
-    rig.page(pid="p2", text=FULL_PAGE)                                 # the page again: the feed's stands
-    assert rig.cad.full(inc["id"])["scope"]["label"] == "Specific units"
+    rig.page(pid="p2", text=FULL_PAGE)                                 # the page again: its one line on the feed's call
     tones = [e["text"] for e in rig.cad.store.q("SELECT text FROM events WHERE incident_id = ? AND kind = 'tones'",
                                                 (inc["id"],))]
-    assert tones.count("Page: all PCFD · feed: units") == 1            # the repeat on the feed's call: its one line
+    assert tones.count("Page: all PCFD · feed: units") == 1
     rig.at(90)
     rig.page(pid="p3", text=FULL_PAGE)                                 # and once only
     assert sum(e.startswith("Page: ") for e in events(rig, inc["id"])) == 1
@@ -159,19 +164,25 @@ def test_a_feed_department_entry_confirms_the_page(rig):
     rig.feed.put("A1", type="ALARM/COMM", location=ADDR, units=("DPTA",), times={"dispatched": T0})
     rig.poll()
     s = rig.cad.full(inc["id"])["scope"]
-    assert (s["label"], s["source"]) == ("Full department (Port Chester FD)", "feed")
-    assert not any("· page:" in e for e in events(rig, inc["id"]))     # agreed: nothing to note
+    assert (s["label"], s["source"], s["feed"]) == ("Full department (Port Chester FD)", "page", "")
+    assert not any("· page:" in e or "· feed:" in e for e in events(rig, inc["id"]))     # agreed: nothing to note
 
 
-def test_a_page_heard_after_the_feed_never_changes_its_label(rig):
+def test_a_page_heard_after_the_feed_sets_the_label(rig):
+    """The feed first (apparatus: Specific units), then the page for the whole department: Full dept, noted."""
     rig.mode("pcfd")
     rig.feed.put("A1", type="ALARM/COMM", location=ADDR, units=("E60",), times={"dispatched": T0})
     rig.poll()
+    iid = rig.iid()
+    assert rig.cad.full(iid)["scope"]["short"] == "Specific units"     # no page yet: the feed's
     rig.at(20)
     rig.page(text=FULL_PAGE)
-    iid = rig.iid()
-    assert rig.cad.full(iid)["scope"]["label"] == "Specific units"
+    s = rig.cad.full(iid)["scope"]
+    assert (s["short"], s["source"], s["feed"]) == ("Full dept", "page", "units")
     assert "Page: all PCFD · feed: units" in events(rig, iid)
+    rig.at(40)
+    rig.change(units=("E60", "E61"))                                   # a later feed report never takes it back
+    assert rig.cad.full(iid)["scope"]["short"] == "Full dept"
 
 
 # -- a department entry in 60 Control mode ------------------------------------------------------------------------------
@@ -408,7 +419,7 @@ def test_a_street_only_page_attaching_to_a_feed_incident_gets_its_label_in_one_l
     rig.at(40)
     assert rig.page("p1", PAGE_NO_UNITS)["id"] == a                    # street only: joins it
     s = rig.cad.full(a)["scope"]
-    assert (s["short"], s["source"]) == ("Specific units", "feed")              # the feed's stands
+    assert (s["short"], s["source"], s["feed"]) == ("Full dept", "page", "units")   # the page stands
     tones = lines(rig, a, "tones")
     assert "Page: all PCFD · feed: units" in tones                     # one line for who the page paged
     assert not any(x.startswith(("Tones:", "Units named")) for x in tones)
@@ -426,7 +437,7 @@ def test_department_entries_never_block_a_street_only_join(tmp_path):
     a = feed_event(rig, units=("DPTA",))                               # only the department entry listed
     rig.at(30)
     assert rig.page("p1", PAGE_ST)["id"] == a and len(open_incidents(rig)) == 1   # the page names Engine 60, Ladder 31
-    assert rig.cad.full(a)["scope"]["short"] == "Full dept"             # the feed's department entry stands
+    assert rig.cad.full(a)["scope"]["short"] == "Specific units"        # the page named apparatus: it stands
 
 
 def test_a_page_card_moved_onto_the_feeds_incident_takes_its_reading(tmp_path):
@@ -492,3 +503,102 @@ def test_the_attach_path_writes_exactly_one_line(tmp_path):
     rig.at(60)
     rig.page("p2", PAGE_ST)
     assert [x for x in tone_lines(rig, a) if x.startswith("Page: ")] == ["Page: PCFD · units Engine 60, Ladder 31"]
+
+
+# -- #370 review: the page wins ---------------------------------------------------------------------------------------
+
+UNITS_PAGE = ("Port Chester Fire Department, Engine 60, respond to an activated fire alarm. 12 Example Avenue, cross of "
+              "Sample Street. Time out 1432.")
+
+
+def scope_of(rig, iid: int) -> tuple:
+    s = rig.cad.full(iid)["scope"]
+    return (s["short"], s["source"], s["feed"]) if s else None
+
+
+def test_a_card_moved_onto_a_feed_call_with_apparatus_keeps_the_pages_full_department(tmp_path):
+    from tests.test_street_only import PAGE_NO_UNITS, feed_event
+    rig = AutoRig(tmp_path)
+    rig.mode("pcfd")
+    a = feed_event(rig, units=("E62",))                                # the feed: apparatus
+    rig.at(20)
+    first = rig.page("p1", "Port Chester Fire Department, respond to a CO alarm. Time out 1432.")["id"]
+    assert first != a and scope_of(rig, first)[0] == "Full dept"
+    rig.at(50)
+    assert rig.page("p2", PAGE_NO_UNITS)["id"] == a                    # rematch_page: moved onto it
+    assert scope_of(rig, a) == ("Full dept", "page", "units")
+
+
+def test_a_swept_card_keeps_the_pages_full_department(tmp_path):
+    from tests.test_incident_sources import Rig
+    from tests.test_street_only import feed_event
+    rig = Rig(tmp_path)
+    a = feed_event(rig, location="17 EXAMPLE LN", units=("E60",), typ="ALARM/RESD")
+    rig.cad.scope.on_feed(a)                                           # (this rig applies the feed without the CAD's hook)
+    assert scope_of(rig, a) == ("Specific units", "feed", "")
+    p = rig.cad.store.create_incident(type="ALARM", address="1717 Example Lane", source="60 Control page",
+                                      source_ref="monitor:old", status="queued")
+    rig.cad.sources._put("paging", "old", 1000, "Paging", T0 + 30, {"location": "1717 Example Lane"}, incident_id=p)
+    rig.cad.scope._reading(p, "full", ["Port Chester FD"], line="Page: all PCFD")
+    rig.at(600)
+    rig.feed.change("A1", times={"in_service": T0 + 590}, closed=True)
+    rig.poll()
+    assert rig.cad.store.incident(p)["status"] == "dismissed"
+    assert scope_of(rig, a) == ("Full dept", "page", "units")
+
+
+@pytest.mark.parametrize("closed", [False, True])
+def test_a_later_page_upgrades_and_the_latest_page_wins(rig, closed):
+    rig.mode("pcfd")
+    inc = rig.page(text=UNITS_PAGE)                                    # Engine 60 named: specific units
+    iid = inc["id"]
+    assert scope_of(rig, iid) == ("Specific units", "page", "")
+    if closed:
+        rig.cad.store.accept(iid, "Lt. Test")
+        rig.cad.store.close(iid, "COMPLETE", "Lt. Test")               # a quiet call, still the page's
+    rig.at(120)
+    rig.page(pid="p2", text=FULL_PAGE)                                 # upgraded: the full department
+    assert scope_of(rig, iid) == ("Full dept", "page", "")
+    assert "Page: units → all PCFD" in events(rig, iid)
+    rig.at(200)
+    rig.page(pid="p3", text=UNITS_PAGE)                                # the latest page wins, both ways
+    assert scope_of(rig, iid) == ("Specific units", "page", "")
+    assert "Page: all PCFD → units" in events(rig, iid)
+
+
+def test_the_feed_never_overrides_a_page_in_either_order(rig):
+    depts(rig, DPTA="Port Chester FD")
+    rig.mode("pcfd")
+    inc = rig.page(text=UNITS_PAGE)                                    # the page: specific units
+    rig.at(30)
+    rig.feed.put("A1", type="ALARM/COMM", location=ADDR, units=("DPTA",), times={"dispatched": T0})
+    rig.poll()                                                         # the feed: the whole department
+    assert scope_of(rig, inc["id"]) == ("Specific units", "page", "all PCFD")
+    assert "Feed: all PCFD · page: units" in events(rig, inc["id"])
+
+
+def test_full_department_after_the_fact_widens_the_backfill_without_dispatching_twice(rig):
+    rig.created(units=("E60",))                                        # 60 Control mode: accepted, E60 dispatched
+    iid = rig.iid()
+    assert scope_of(rig, iid) == ("Specific units", "feed", "")
+    rig.radio("307-1-call_1-t0", T0 + 100, "60 Control, Engine 61 copy")   # E61 on no call yet
+    rig.at(280)
+    rig.change(units=("E60", "E61"), unit_times={"E61": {"dispatched": T0 + 280}})
+    assert "307-1-call_1-t0" not in rig.links(iid)                     # E61's own window: T0 + 220 on
+    before = rig.cad.store.q("SELECT unit_id, dispatched_at FROM assignments WHERE incident_id = ? ORDER BY id", (iid,))
+    rig.at(290)
+    rig.page(text=FULL_PAGE)                                           # the page: the full department
+    assert scope_of(rig, iid) == ("Full dept", "page", "units")
+    assert rig.links(iid)["307-1-call_1-t0"] == ("mention", "E61")     # the department from the call's dispatch
+    assert rig.cad.store.q("SELECT unit_id, dispatched_at FROM assignments WHERE incident_id = ? ORDER BY id",
+                           (iid,)) == before                           # nothing dispatched again
+
+
+def test_a_row_from_before_the_page_won_shows_the_page(rig):
+    """A row #370 left with the feed's label over a page's reading: the page's is shown, and the feed's kept as the feed's."""
+    inc = rig.page(text=FULL_PAGE)
+    with rig.cad.store.tx() as db:
+        db.execute("UPDATE dispatch_scope SET kind = 'units', departments = '[]', source = 'feed', feed = '' "
+                   "WHERE incident_id = ?", (inc["id"],))
+    assert scope_of(rig, inc["id"]) == ("Full dept", "page", "units")
+    assert rig.cad.scope.full(inc["id"])
