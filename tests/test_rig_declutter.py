@@ -118,18 +118,18 @@ zoomTo(15.5); out.z155 = snap();
 zoomTo(10); out.z10 = snap();
 out.reused = chip("E60").el === els[0] && chip("E63").el === els[1];
 zoomTo(13); const b = L.badges.get("PCFD Headquarters"); out.badgeEl = b.el.className; out.badgeC = b.el.style["--c"] || null;
-b.el.fire("click"); out.ease = rec.eases.slice(-1)[0];
+b.el.fire("click"); out.pop = [L.pop.hidden, L.stationOpen, rec.eases.length];
 """, page_state())
-    hq = ["PCFD Headquarters", "HQ · 2", "PCFD Headquarters: E60, E61"]
+    hq = ["PCFD Headquarters", "2", "PCFD Headquarters: E60, E61"]
     assert o["z13"] == {"E60": "folded", "E61": "folded", "E62": "dot", "E63": "full", "L31": "full", "badges": [hq]}
     assert o["act"] == [True, True, False]
     assert o["z95"] == {"E60": "folded", "E61": "folded", "E62": "dot", "E63": "dot", "L31": "dot", "badges": [hq]}
     assert o["z155"] == {"E60": "full", "E61": "full", "E62": "full", "E63": "full", "L31": "full", "badges": []}
     assert o["z10"]["E63"] == "full" and o["z10"]["E60"] == "folded"                  # active_zoom itself: full
     assert o["reused"] is True                                                      # the same markers throughout
-    assert "cm-badge" in o["badgeEl"] and o["ease"]["zoom"] == 15                     # a click: to detail_zoom
+    assert "cm-badge" in o["badgeEl"] and o["pop"][:2] == [False, "PCFD Headquarters"]   # a click: its rigs (#384)
     assert o["badgeC"] is None                                                      # neutral, not one unit's status colour
-    assert o["off"]["E63"][1] < 0 and o["off"]["E62"][1] <= 0                       # over the top: nothing under the badge
+    assert o["off"]["E63"][1] > 0 and o["off"]["E62"][1] >= 0                       # #384: under, clear of the count chip
 
 
 @needs_node
@@ -150,7 +150,7 @@ Date.now = real;
     assert o["hovered"]["E63"] == "full" and o["hovered"]["L31"] == "dot"
     assert o["talking"]["E62"] == "full"
     assert o["after"] == {"E60": "folded", "E61": "folded", "E62": "dot", "E63": "dot", "L31": "dot",
-                          "badges": [["PCFD Headquarters", "HQ · 2", "PCFD Headquarters: E60, E61"]]}
+                          "badges": [["PCFD Headquarters", "2", "PCFD Headquarters: E60, E61"]]}
 
 
 @needs_node

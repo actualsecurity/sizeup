@@ -86,6 +86,22 @@ LOOK = {"free": "available", "oos": "oos", "dispatched": "dispatched", "enroute"
 # Every other role is committed to a call (role '' in data/cad_lists.json: acknowledged, staging, out at, call back,
 # dispatched by other agency; or one not known here): drawn as dispatched, an active rig (#376: chips longest).
 ACTIVE_LOOK = "dispatched"
+# A rig's icon on the maps by apparatus type (#384; drawn by cadmap.js / cadmap.css): from its kind in
+# data/cad_lists.json; a code-only chief's car (CHIEF239: kind "other") by its code. Anything else (marine, EMS, police,
+# agencies, code-only units): the generic mark.
+ICONS = ("engine", "ladder", "tower", "rescue", "suv", "other")
+ICON_OF_KIND = {"engine": "engine", "ladder": "ladder", "tower": "tower", "rescue": "rescue", "chief": "suv", "utility": "suv"}
+
+
+def icon_of(unit: dict) -> str:
+    """A unit {name, kind?} -> its map icon: engine | ladder | tower | rescue | suv (chiefs', duty and utility cars) |
+    other."""
+    kind = unit.get("kind") or ""
+    if kind in ICON_OF_KIND:
+        return ICON_OF_KIND[kind]
+    if kind in ("", "other") and str(unit.get("name") or "").upper().startswith("CHIEF"):
+        return "suv"
+    return "other"
 
 
 def look_of(role: str | None) -> str:
@@ -93,9 +109,10 @@ def look_of(role: str | None) -> str:
     return LOOK.get(role or "", ACTIVE_LOOK)
 SNIPPET = 160
 # Rigs decluttered by zoom (#376; drawn by cadmap.js): below detail_zoom an idle rig is a dot (two or more idle at one
-# firehouse: one badge, "HQ · 6"), below active_zoom an active one (on a call) a strong dot. Settings > System > Map
-# display; the wall board (/monitor, read from across the room, always showing the whole area) has its own pair. A map
-# on its automatic frame (the area or the call, not moved by hand) keeps every active rig a full chip whatever its zoom.
+# firehouse: one count chip on its icon, "6": #384), below active_zoom an active one (on a call) a strong dot. Settings >
+# System > Map display; the wall board (/monitor, read from across the room, always showing the whole area) has its own
+# pair. A map on its automatic frame (the area or the call, not moved by hand) keeps every active rig a full chip whatever
+# its zoom.
 DISPLAY_SECTION = "map_display"
 DISPLAY_DEFAULTS = {"detail_zoom": 15.0, "active_zoom": 10.0, "board_detail_zoom": 16.0, "board_active_zoom": 10.0}
 DISPLAY_LABELS = {"detail_zoom": "Idle rigs: chips from zoom", "active_zoom": "Active rigs: chips from zoom",
@@ -120,7 +137,7 @@ def load_firehouses(path: str | Path | None = None) -> list[dict]:
     except (OSError, ValueError, KeyError, TypeError):
         return []
     return [{"name": str(f["name"]), "address": str(f.get("address") or ""), "ll": [float(f["ll"][0]), float(f["ll"][1])],
-             **({"short": str(f["short"])[:12]} if f.get("short") else {})}      # the map's badge (#376): "HQ · 6"
+             **({"short": str(f["short"])[:12]} if f.get("short") else {})}      # a short name (#376)
             for f in fh if isinstance(f, dict) and f.get("name") and isinstance(f.get("ll"), list) and len(f["ll"]) == 2]
 
 
@@ -292,8 +309,8 @@ def place(unit: dict, role: str, station: dict | None = None, incident: dict | N
     fire:     drawn by default (is_fire); None = from the unit
     clear:    its latest cleared call (locate()): a recent one draws it on its way home
 
-    Returns None (not drawn) or {unit, id, kind, status, status_at, look, place: station|incident|position|returning,
-    group, lon, lat, ring: 0 (inner) | 1 (outer, not there yet), incident_id, incident_number,
+    Returns None (not drawn) or {unit, id, kind, icon (icon_of: #384), status, status_at, look,
+    place: station|incident|position|returning, group, lon, lat, ring: 0 (inner) | 1 (outer, not there yet), incident_id, incident_number,
     line_to: [lon, lat] | None, station, home_line (the line is to its station: thin)}; a "position"
     one also has its fix's at, age (s), stale, and heading / speed / source when the fix has them."""
     fire = is_fire(unit) if fire is None else fire
@@ -301,8 +318,8 @@ def place(unit: dict, role: str, station: dict | None = None, incident: dict | N
     inc_ll = _ll(incident)
     if incident is None and not fire:
         return None                                  # EMS / police / agencies: only while on an event
-    spec = {"unit": unit["name"], "id": unit.get("id"), "kind": unit.get("kind", ""), "status": unit.get("status", ""),
-            "status_at": unit.get("status_at"), "look": look, "place": "", "group": "", "lon": None, "lat": None, "ring": 0,
+    spec = {"unit": unit["name"], "id": unit.get("id"), "kind": unit.get("kind", ""), "icon": icon_of(unit),
+            "status": unit.get("status", ""), "status_at": unit.get("status_at"), "look": look, "place": "", "group": "", "lon": None, "lat": None, "ring": 0,
             "incident_id": incident["id"] if incident else None,
             "incident_number": (incident or {}).get("number") or "",
             "line_to": None, "station": station["name"] if station else "", "home_line": False}
