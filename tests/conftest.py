@@ -141,6 +141,9 @@ def _trains_stay_local(monkeypatch):
         assert host in ("127.0.0.1", "localhost", "::1"), f"a test tried to reach {host} (trains: fixtures only)"
         return real(req, *a, **kw)
     monkeypatch.setattr(trains, "urlopen", local_only)
+    import sizeup.traintime as traintime                 # MTA TrainTime (#362): the same, its address off
+    monkeypatch.setattr(traintime, "BASE_URL", "")
+    monkeypatch.setattr(traintime, "urlopen", local_only)
 
 
 @pytest.fixture(autouse=True)

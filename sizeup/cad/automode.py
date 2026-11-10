@@ -20,7 +20,9 @@ record (the hub, or all-in-one), on top of the incident sources (sizeup/cad/sour
                incident (sources.py): it stays queued for a person, said once on its timeline. When a person accepts
                one that waited, the units the feed lists then are dispatched at the feed's dispatched time (their
                statuses come with the feed's next changes and the radio, never replayed)
-      paged    a page attached to it (the paging decoder's report): "Paged 14:31:02" at the tone time (source radio)
+      paged    a page attached to it (the paging decoder's report): "Paged 14:31:02" at the tone time (source radio);
+               still queued, the page accepts it as a feed report would. The units the page names that are exactly
+               on our boards are dispatched at the page's time, by the units rules below (#365)
       units    each unit the feed newly lists that is ours is dispatched at the feed's dispatched time: matched exactly
                against the board's codes and spoken names (spaces and dashes aside), or the data file's
                "feed_unit_aliases" {feed code: board code}; codes that match none are listed on the timeline, never
@@ -294,16 +296,34 @@ class AutoDispatch:
                 db.execute("UPDATE auto_incidents SET open_srcs = ? WHERE incident_id = ?", (json.dumps(sorted(srcs)), iid))
         return src in srcs
 
-    def on_page(self, iid: int | None) -> None:
-        """A page attached to an incident a feed has: "paged" on a tracked one, in 60 Control mode."""
+    def on_page(self, iid: int | None, units=(), at: float | None = None) -> None:
+        """A page attached to an incident a feed has, in 60 Control mode, on a tracked one: still queued, it is taken as a
+        feed report would take it (a page attached: accepted when it has a type); then "paged", and the units the page
+        names that are exactly on our boards (as _ours: codes, spoken names, aliases) are dispatched at the page's time
+        (#365; _assign: never twice, never a cleared one back, never off another open call)."""
         if not iid:
             return
         try:
             with self._lock:
                 if self.mode() == "60control" and self.tracked(iid):
                     inc = self.store.incident(iid)
+                    if inc["status"] == "queued":
+                        data, label, src = self._best(iid)
+                        row = self._tracking(iid)
+                        if data is not None and row is not None and (not row["seen_src"] or row["seen_src"] == src):
+                            self._apply(iid, json.loads(row["seen"] or "{}"), data, label, self._seen_open(iid, src, data))
+                            with self.store.tx() as db:
+                                db.execute("UPDATE auto_incidents SET seen = ?, seen_src = ? WHERE incident_id = ?",
+                                           (json.dumps(data, separators=(",", ":")), src, iid))
+                        inc = self.store.incident(iid)
                     if inc["status"] in ("pending", "active"):
                         self._paged(iid)
+                        ours = self._ours()
+                        for name in units or ():
+                            u = ours.get(_key(name))
+                            if u is not None:
+                                self._assign(iid, u, at, "Paging · auto", f"dispatched (named on the page {_hm(at)})"
+                                             if at else "dispatched (named on the page)")
         except Exception as e:  # noqa: BLE001
             self.log(f"CAD: dispatch mode: {type(e).__name__}")
 

@@ -40,7 +40,7 @@ GET  /api/cad/gis, /api/cad/gis/<key>[?bbox=]
                                the county GIS layers' catalog and each layer's GeoJSON (sizeup/gis.py, #91)
 GET  /api/cad/roadprojects, /api/cad/roadprojects/near?lat=&lon=&address=&from=&to=
                                road projects & closures on the maps, and those near an event (sizeup/roadprojects.py, #185)
-GET  /api/cad/trains, /api/cad/trains/near?lat=&lon=
+GET  /api/cad/trains, /api/cad/trains/near?lat=&lon=, /api/cad/trains/route?key=, /api/cad/trains/departures?station=
                                Metro-North's trains on the map, and those approaching an event (sizeup/trains.py, #131)
 GET  /api/cad/weather[/speech?id=, /radar/frames, /radar/<frame>/<z>/<x>/<y>.png]
                                NWS alerts, conditions, radar tiles, NOAA tides (sizeup/weather.py, #132)

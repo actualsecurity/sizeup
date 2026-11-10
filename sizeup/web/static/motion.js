@@ -153,7 +153,8 @@ window.Motion = (() => {
   // The train predictor. fix (trains.js, from one answer of the hub's): {s, d (+1 toward New Haven, -1 toward New
   // York), train, mode (reported | estimated | stopped), t0 (the feed's time, epoch s, the hub's clock), at (t0 on
   // this browser's clock, ms), fixAt (when the MTA's position first appeared; null: our estimate), hold (hold_s),
-  // stop (the next stop's s), until (predict_until; an estimate: t0 + the hub's predict_s), seg, lag (lag_s)}.
+  // stop (the next stop's s), until (predict_until; an estimate: t0 + the hub's predict_s), seg, lag (lag_s), v (a GPS
+  // fix's speed, m/s: MTA TrainTime, #362; it then runs on at that speed instead of the run's profile)}.
   // dt: seconds since t0. Returns {s, v, d, train, lim, moving}; lim: the furthest it may be drawn on this fix.
   //   stopped     where the hub has it (at the station): not moved until the hub says it left (its mode flips and
   //               a segment comes), never on the timetable alone.
@@ -173,8 +174,17 @@ window.Motion = (() => {
       if (typeof fix.stop === "number" && (fix.stop - s0) * d >= 0 && (fix.stop - s0) * d <= STOP_ZONE_M) out.lim = fix.stop;
       return out;
     }
-    if (!fix.seg || (fix.fixAt != null && typeof fix.lag !== "number")) return out;
     const T = fix.t0 + dt, until = typeof fix.until === "number" ? fix.until : fix.t0;
+    if (typeof fix.v === "number" && fix.v > 0 && fix.fixAt != null) {
+      // a GPS fix with its speed (MTA TrainTime, #362): on along the track at that speed from when it was taken
+      let s = s0 + d * fix.v * Math.max(0, Math.min(T, until) - fix.fixAt), v = fix.v;
+      if ((s - lim) * d >= 0) { s = lim; v = 0; }                     // held at its limit
+      out.s = s;
+      out.v = T < until ? v : 0;
+      out.moving = T < until && (lim - s) * d > 0;
+      return out;
+    }
+    if (!fix.seg || (fix.fixAt != null && typeof fix.lag !== "number")) return out;
     let [s, v] = profileS(Math.min(T, until) - (fix.fixAt != null ? fix.lag : 0), fix.seg);
     if ((s - s0) * d < 0) { s = s0; v = 0; }                         // never behind its fix
     if ((s - lim) * d >= 0) { s = lim; v = 0; }                       // held at its limit

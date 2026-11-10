@@ -3574,6 +3574,10 @@ function onState(data) {
   if (changed) cad.dbAt = 0;
   if (cad.who && data.users_rev !== undefined && cad.usersRev !== undefined && data.users_rev !== cad.usersRev) loadWho(true);   // Settings > Users changed: a role?
   cad.usersRev = data.users_rev;
+  if (data.trains_rev != null && data.trains_rev !== cad.trainsRev) {   // a new train read (#362): the layer reloads now
+    cad.trainsRev = data.trains_rev;
+    window.dispatchEvent(new CustomEvent("sizeup:trains", { detail: data.trains_rev }));
+  }
   renderConn();
   renderCloud();
   renderTalking();

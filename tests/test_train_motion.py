@@ -376,3 +376,47 @@ def test_the_layer_draws_one_setdata_a_source_a_frame_and_none_when_nothing_move
             else:
                 assert w["s"] == t["s"]
             assert w["ahead"] == (not t["estimated"] and t["mode"] != "stopped" and (w["s"] - t["s"]) * t["d"] > 5)
+
+
+def test_a_gps_fix_runs_on_at_its_own_speed(tmp_path):
+    """MTA TrainTime (#362): a GPS fix with its speed (v, m/s) is carried on at that speed from when it was taken, not on
+    the run's profile; never past hold_s or the next stop, never after predict_until; no speed: held at its fix."""
+    f = fix(v=20.0, fixAt=NOW - 4, hold=PC - 300, until=NOW + 200)
+    out = node(tmp_path, SWEEP + "out.r = sweep(IN.f, 200, 0.5); out.still = sweep(IN.still, 4);",
+               {"f": f, "still": fix(v=0.0, seg=None)})
+    ss = [p["s"] for p in out["r"]]
+    assert ss[0] == pytest.approx(f["s"] + 20.0 * 4, abs=1e-6)                       # 4 s since the fix at 20 m/s
+    assert ss[2] == pytest.approx(f["s"] + 20.0 * 5, abs=1e-6)
+    assert all(b >= a for a, b in zip(ss, ss[1:])) and max(ss) == f["hold"]        # never past hold_s
+    assert out["r"][0]["moving"] and out["r"][0]["v"] == 20.0
+    assert all(p["s"] == out["still"][0]["s"] and not p["moving"] for p in out["still"])
+
+
+def test_noisy_gps_fixes_glide_forward_along_the_track_and_a_stop_stays_put(tmp_path):
+    """MTA TrainTime (#362): noisy GPS fixes every 5 s, filtered on the hub (trains.along_filter), drawn by the page's
+    tracker: forward only, no jumps, at about the feed's speed; stopped: not moved."""
+    import random
+    rnd, fixes, last, s_true = random.Random(3), [], None, 39000.0
+    for k in range(16):
+        stopped = k >= 10
+        t = NOW + 5 * k
+        s, v = T.along_filter(last, s_true + rnd.uniform(-40, 40), 1, t, 0.0 if stopped else 20.0 + rnd.uniform(-1, 1))
+        last = {"s": s, "v": v, "fix_at": t}
+        fixes.append({"s": round(s, 1), "d": 1, "train": "9902", "mode": "stopped" if v == 0 else "reported", "t0": t, "k": k,
+                      "fixAt": t, "hold": s + 1500, "stop": 60000, "until": t + T.TT_HORIZON_S, "seg": None, "lag": None, "v": v})
+        s_true += 0 if stopped else 100.0
+    out = node(tmp_path, TRACK + """
+const path = [];
+for (const f of IN.fixes) {
+  tk.set("a", { ...f, at: at(f.k * 5) }, at(f.k * 5));
+  path.push(...drive("a", f.k * 5, f.k * 5 + 4.9));
+}
+out.path = path;
+""", {"fixes": fixes})
+    path = out["path"]
+    steps = [b - a for a, b in zip(path, path[1:])]
+    assert min(steps) >= 0                                                               # never a step back
+    assert max(steps) < 8.0                                                              # no jumps (20 m/s is 2 m a frame)
+    moving = path[50:450]
+    assert (moving[-1] - moving[0]) / 40.0 == pytest.approx(20.0, rel=0.25)              # about the feed's speed
+    assert len(set(path[-40:])) == 1                                                     # stopped: put

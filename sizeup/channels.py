@@ -148,7 +148,9 @@ def vocabulary_suggestions(units: dict, streets: list[str], top_streets: int = 6
                       # the airport's alerts as 60 Control declares them (#369, sizeup/airport_watch.py)
                       "alert level one", "alert level two", "alert level three", "Westchester County Airport", "HPN",
                       "flaps", "flap issues", "landing gear", "runway one six", "runway three four", "mile final",
-                      "landed without incident"]
+                      "landed without incident",
+                      # #365: Fire/EMS 15 heard "carbon dioxide"; C.O. is AWS's spelling of an acronym said letter by letter
+                      "carbon monoxide", "carbon monoxide detector activation", "C.O. detector", "C.O. alarm"]
     for code, u in units.items():
         s = (u or {}).get("spoken") if isinstance(u, dict) else None
         if s and s not in out:
