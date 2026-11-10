@@ -448,6 +448,7 @@ class StationHealth:
         self._gaps_saved = 0.0
         self._adsb_said: tuple | None = None         # (cause, holder) of the station's ADS-B decoder as last logged (#262)
         self.sources: Callable[[], dict] | None = None   # the incident sources' panel (#297, sizeup/cad/sources.py)
+        self.feeds: Callable[[], list] | None = None     # map feeds with a fallback (#362: MTA TrainTime -> GTFS-realtime)
         self._stt_oldest = 0.0                       # the whisper backlog's oldest clip's wait, as last reported
         self._stt_ok_since: float | None = None      # the whisper backlog under STT_CLEAR_S since (its hysteresis, #300)
         self._clear_at: dict[str, float] = {}        # an alert's real clear time when it clears later than that
@@ -1181,7 +1182,11 @@ class StationHealth:
             sources = self.sources() if self.sources is not None else None    # incident sources (#297)
         except Exception as e:  # noqa: BLE001 - never in the way of the rest of the panel
             sources = {"error": type(e).__name__}
-        return {"health": self.model(now), "sources": sources, "alerts": [dict(a, pushed=a["key"] in pushed_now) for a in self.alerts()],
+        try:
+            feeds = self.feeds() if self.feeds is not None else None
+        except Exception as e:  # noqa: BLE001 - never in the way of the rest of the panel
+            feeds = [{"label": "feeds", "state": "error", "why": type(e).__name__}]
+        return {"health": self.model(now), "sources": sources, "feeds": feeds, "alerts": [dict(a, pushed=a["key"] in pushed_now) for a in self.alerts()],
                 "history": [{k: h.get(k) for k in ("key", "severity", "title", "text", "since", "cleared", "pushed", "who")}
                             for h in hist],
                 "notify": {"on": bool(n is not None and n.enabled),

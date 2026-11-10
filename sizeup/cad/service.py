@@ -281,6 +281,8 @@ class Cad:
         # Settings > Data sources (#186): the hub's data pulls (sizeup/datasources.py DataSources); the app sets it.
         # None: no data sources here (GET /api/cad/datasources says so).
         self.datasources = None
+        # Metro-North's trains (#362): a counter that moves with each new read; the page reloads the layer when it does
+        self.trains_rev: Callable[[], int | None] = lambda: None
         # GET /api/cad/tones (#80): the pairs named from the console and the names to pick from; the app sets it.
         self.tone_names: Callable[[], dict] = lambda: {"named": self.settings.tone_rows(), "names": list(s.monitor_departments),
                                                         "ours": list(s.monitor_departments)}
@@ -348,7 +350,13 @@ class Cad:
                     talking=self.live(), paging=self.paging(), cloud=self.cloud(), prealert=self.prealert_state(now),
                     airport_alerts=self.airport_alerts_state(now),
                     status_hints=self.status_hints(), alarms=self.alarms_state(now), radio_ids=self.radio_ids(now),
-                    sources=self.sources_state(now))
+                    sources=self.sources_state(now), trains_rev=self._trains_rev())
+
+    def _trains_rev(self) -> int | None:
+        try:
+            return self.trains_rev()
+        except Exception:  # noqa: BLE001 - never breaks the console
+            return None
 
     def sources_state(self, now: float | None = None) -> dict | None:
         """The incident sources (#297): the tiers, the acting primary, the possible-incoming notices (never breaks the

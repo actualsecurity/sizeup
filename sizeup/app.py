@@ -622,6 +622,10 @@ class App:
         self.trains = prov["trains"]
         # one station, one mark (#162): the county's Train stations leave out the ones the Trains layer draws
         self.gis.train_stations = self.trains.stations
+        # TrainTime's fast rate for an active incident near the line (#362); each new read pushed (trains_rev)
+        self.trains.hot_points = lambda: [(r["lat"], r["lon"]) for r in self.cad.store.q(
+            "SELECT lat, lon FROM incidents WHERE status = 'active' AND lat IS NOT NULL AND lon IS NOT NULL")]
+        self.cad.trains_rev = lambda: self.trains.rev
         # Aircraft near HPN (sizeup/aircraft.py, #155): shortfinal's PCFD-focused picture, read by the CAD of record
         # while someone looks at the Aircraft layer. It never opens a dongle: a receiver's aircraft.json is only read.
         self.aircraft = prov["aircraft"]
@@ -3112,7 +3116,7 @@ class App:
     def _reread_caches(self) -> None:
         """The small providers read their caches when they were made, before cachesync put a new task's back: again."""
         for name, fn in (("roads", lambda: self.roads._load()), ("roadwork", lambda: self.roadwork._load()),
-                         ("trains", lambda: (self.trains._load(), self.trains._load_points(None))),
+                         ("trains", lambda: (self.trains._load(), self.trains._load_points(None), self.trains.tt._load_routes())),
                          ("weather", lambda: self.weather._load()),
                          ("aircraft", lambda: self.aircraft.registry.con is None and self.aircraft.registry._open())):
             try:
@@ -3334,6 +3338,7 @@ def make_server(app: App, fence=None, listener=None) -> WebServer:
         app.prealert.on_change = server.poke             # so is the phone ringing
     app.cad.alarms.on_change = server.poke               # and an emergency alarm (#128)
     app.cad.airport_alerts.on_change = server.poke       # and an airport pre-alert (#233)
+    app.trains.on_change = server.poke                   # and Metro-North's trains, each TrainTime read (#362)
     return server
 
 

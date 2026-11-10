@@ -510,6 +510,7 @@ def trains_sources(trains) -> list[Source]:
     """Metro-North (sizeup/trains.py): the static GTFS (stations, line; the MTA updates it about weekly) daily in the
     quiet hours, on the registry's schedule; the realtime positions on the provider's own while someone looks."""
     from sizeup import trains as t
+    from sizeup import traintime as tt
 
     def off() -> dict | None:
         return None if trains.configured else {"on": False, "why": trains.why_not()}
@@ -523,6 +524,20 @@ def trains_sources(trains) -> list[Source]:
     def rt() -> dict:
         return off() or {"at": trains.rt["at"], "error": trains.rt["error"], "n": trains.rt["n"],
                          "next": trains.rt["next"] if trains.clock() - trains.asked <= t.DEMAND_S else None}
+
+    def traintime() -> dict:
+        """#362: the poll; a fallback (bad polls in a row, or the shape changed) is this row's error."""
+        if not trains.tt.enabled:
+            return off() or {"on": False, "why": "off ([trains] traintime = false)"}
+        s = trains.tt.status()
+        note = f"{s['dropped']} records dropped (shape)" if s["dropped"] else ""
+        return {"at": s["at"], "n": s["n"], "bytes": s["bytes"] or None, "next": s["next"], "note": note,
+                "error": s["why"] if s["state"] == "fallback" else s["error"]}
+
+    def routes() -> dict:
+        if not trains.tt.enabled:
+            return off() or {"on": False, "why": "off ([trains] traintime = false)"}
+        return {"at": trains.tt.geo["at"], "error": trains.tt.geo["error"], "n": len(trains.tt.routes)}
     return [
         Source("trains:static", "Metro-North stations and line (GTFS)", "Transit", t.SOURCE, t.LINK_URL, f"Data: {t.SOURCE}",
                static, trains.refresh_static, every="daily", hold=_hold(trains.st), quiet=True, min_gap_s=600.0,
@@ -530,6 +545,13 @@ def trains_sources(trains) -> list[Source]:
         Source("trains:rt", "Metro-North live positions (GTFS-realtime)", "Transit", t.SOURCE, t.LINK_URL, f"Data: {t.SOURCE}",
                rt, trains.refresh_rt, builtin=f"{trains.every_s:g} s while viewed (layer or event near the line)",
                blocked=lambda: _resting(trains.rt, trains.clock)),
+        Source("trains:traintime", "Metro-North GPS, cars, load (MTA TrainTime)", "Transit", tt.SOURCE, tt.BASE_URL,
+               f"Data: {t.SOURCE}", traintime, trains.tt.poll,
+               builtin=f"{trains.tt.every_s:g} s while viewed; undocumented API, GTFS-realtime the fallback",
+               blocked=lambda: _resting(trains.tt.st, trains.clock)),
+        Source("trains:traintime-routes", "Metro-North route lines (MTA TrainTime)", "Transit", tt.SOURCE, tt.BASE_URL,
+               f"Data: {t.SOURCE}", routes, trains.tt.refresh_routes, builtin="daily, or when a route is missing",
+               min_gap_s=600.0, blocked=lambda: _resting(trains.tt.geo, trains.clock)),
     ]
 
 

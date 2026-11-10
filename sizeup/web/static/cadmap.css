@@ -221,6 +221,19 @@
   .tr-what { min-inline-size: 0; overflow-wrap: anywhere; }
   .tr-est { color: var(--info); font-style: italic; }
   .tr-none, .tr-note { padding-inline: var(--s-1); }
+  /* a train's cars in its box (trains.js, #362, MTA TrainTime): one bar a car, front first, filled by its load */
+  .tr-load { display: flex; align-items: center; gap: var(--s-2); }
+  .tr-cars { display: inline-flex; align-items: flex-end; gap: var(--s-0); }
+  .tr-car { display: inline-flex; align-items: flex-end; inline-size: var(--s-2); block-size: var(--s-4);
+    background: var(--line); border-radius: var(--radius-s); overflow: hidden; }
+  .tr-car > span { inline-size: 100%; block-size: 0; background: var(--ok); }
+  .tr-car.l1 > span { block-size: 25%; }
+  .tr-car.l2 > span { block-size: 50%; }
+  .tr-car.l3 > span { block-size: 75%; background: var(--warn); }
+  .tr-car.l4 > span { block-size: 100%; background: var(--err); }
+  .tr-car.loco { background: var(--line-strong); }
+  .tr-alert { color: var(--warn); }
+  .tr-deps { display: flex; flex-direction: column; gap: var(--s-0); font-variant-numeric: tabular-nums; }
   /* the Aircraft group (aircraft.js, #155): HPN's movements, one row each (a click opens the aircraft), emergencies first */
   .ac-list { display: flex; flex-direction: column; }
   .ac-row { display: flex; justify-content: flex-start; align-items: baseline; gap: var(--s-2); inline-size: 100%;

@@ -12,6 +12,7 @@ them for minutes. This keeps a gzip copy of each in the same bucket, under the s
         roadprojects.json         road projects & closures (sizeup/roadprojects.py)
         trains/static.json        Metro-North's stations and line (sizeup/trains.py)
         trains/points.json        the train reporting points learned (sizeup/trains.py)
+        trains/traintime_routes.json   Metro-North route lines from MTA TrainTime (sizeup/traintime.py, #362)
         aircraft/faa_registry.sqlite   the FAA registry as built (sizeup/aircraft.py)
 
     restore()   on start, before the providers read their caches (sizeup/app.py): every copy whose file is missing
@@ -61,6 +62,7 @@ FILES: tuple[tuple[re.Pattern, float], ...] = (
     (re.compile(r"roadprojects\.json"), 3600.0),
     (re.compile(r"trains/static\.json"), 0.0),
     (re.compile(r"trains/points\.json"), 3600.0),
+    (re.compile(r"trains/traintime_routes\.json"), 0.0),
     (re.compile(r"aircraft/faa_registry\.sqlite"), 0.0),
 )
 DIRS = ("", "gis", "trains", "aircraft")    # the folders of the state dir those are in
