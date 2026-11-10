@@ -17,6 +17,7 @@ timings, measured: the comment at the foot of the constants below.
 Graph: the cache file read into flat arrays (no per-edge objects), a 200 m grid of edges for snapping, and:
 
     snap(lon, lat)        the nearest edge point (motorways need to be clearly nearer: a house beside I-95 is on its street)
+    target(lon, lat, call) where a call is on the roads, and the highways a route to it may use (Highways, below)
     route(a, b, ...)      A* from a point to a point: [lon, lat] coords, metres, seconds (pure Python)
     to_one(origins, b)    one reverse Dijkstra from b: seconds and metres from many points (the recommendation)
     penalties(items, now) the edges near road closures in effect now: blocked (a full or ramp closure) or slowed
@@ -26,6 +27,15 @@ last block, at WRONGWAY_MPH, when it saves a loop around the block (never on a h
 Starts and calls are snapped onto the largest connected part of the graph (an island has no way in or out). Speeds by road class (highway / arterial / local,
 Settings > Dispatch) times the emergency factor; the partial edges at either end are never blocked (the rig is
 there, the call is there). A rig with a heading pays UTURN_S to start the other way along its street.
+
+Highways (user, 2026-11-10: "unless it's a highway call it's unlikely a rig would ever take a highway to get to a
+normal call"): a call that is not on a highway keeps the rig on local streets. Motorways (I-95, I-287, I-684) and
+their ramps cost LIMITED_SLOW times as much (a last resort: never quicker than the streets beside them); parkways
+(the Hutch, the Merritt, the Bronx River ...: no commercial vehicles) and their ramps are shut. A highway call
+(highway_call(): its address or cross streets name a highway, the Thruway, an exit or a mile marker; or its point
+lands on one, more readily for an MVA) is put on that highway's carriageway in its direction (NB / SB / EB / WB,
+else the nearest), and may use the motorways, and the parkway it names. Seconds are always driving time: the factor
+only steers the choice. The partial edges at either end are never factored (a rig on I-95 is there).
 
 Everything shown from this is an estimate: no traffic, no signals, no turn costs.
 """
@@ -86,6 +96,36 @@ HIGHWAY_CLOSED = 3.0                  # a motorway / trunk mainline edge under a
 MAINLINE = {0, 1}                     # (its ramps are short: a closed ramp stays shut)
 PARALLEL_DEG = 35.0                   # an edge this close to the closure line's bearing runs along it
 SLOW = {"lanes": 1.5, "alternating": 1.6, "detour": 1.3}   # a partial closure: the edge this much slower
+# Limited-access roads (the module doc's "Highways"): a motorway and its ramps; a parkway (a motorway or trunk named
+# Parkway / Pkwy) and its ramps. A trunk not named a parkway (Kensico Circle, NY 9A) is an ordinary road.
+LIMITED_SLOW = 6.0                    # a motorway or its ramps on a call that is not on one: this much costlier
+PARKWAY_RE = re.compile(r"\b(parkway|pkwy)\b", re.I)
+HWCALL_SNAP_M = 500.0                 # a call naming a highway: snapped onto it when it is this near
+MVA_MOTORWAY_SNAP_M = 15.0            # an MVA / vehicle fire: a motorway need only be this much nearer (MOTORWAY_SNAP_M)
+DIRS = {"N": 0.0, "E": 90.0, "S": 180.0, "W": 270.0}
+LINKS = {7, 8}                        # motorway_link, trunk_link
+# a highway's name, ref or a call's words for it -> its key ("I 95" / "I-95" / "New England Thruway" -> i95)
+HW_NAMES = (
+    (re.compile(r"\bI[- ]?95\b|\bINTERSTATE[- ]?95\b|\bNEW ENGLAND (THRUWAY|THWY|EXPRESSWAY|EXPWY)\b"), "i95"),
+    (re.compile(r"\bI[- ]?287\b|\bINTERSTATE[- ]?287\b|\bCROSS[- ]?WESTCHESTER\b|\bCWE\b"), "i287"),
+    (re.compile(r"\bI[- ]?684\b|\bINTERSTATE[- ]?684\b"), "i684"),
+    (re.compile(r"\bI[- ]?87\b|\bINTERSTATE[- ]?87\b"), "i87"),
+    (re.compile(r"\bHUTCH|\bHRP\b"), "hutch"),
+    (re.compile(r"\bMERRITT\b|\bCT[- ]?15\b"), "merritt"),
+    (re.compile(r"\bSPRAIN\b"), "sprain"),
+    (re.compile(r"\bSAW ?MILL\b"), "sawmill"),
+    (re.compile(r"\bBRONX RIVER P"), "bronxriver"),
+    (re.compile(r"\bTACONIC\b"), "taconic"),
+    (re.compile(r"\bCROSS COUNTY\b"), "crosscounty"),
+)
+# a call's words only: "Thruway" alone (the NYS Thruway here: I-95, I-287, I-87); "95 NB" without the I
+CALL_NAMES = (
+    (re.compile(r"\bTHRUWAY\b|\bTHWY\b"), ("i95", "i287", "i87")),
+    (re.compile(r"(?<![\d-])\b(95|287|684)\s*(?:[NSEW]/?B|(?:NORTH|SOUTH|EAST|WEST)\s*BOUND)\b"), None),
+)
+CALL_ANY = re.compile(r"\bEXIT\s*\d|\bMM\s*\d|\bMILE\s*MARKER|\bMILEPOST\b")   # on a highway, which one not said
+CALL_DIR = re.compile(r"\b([NSEW])/?B\b|\b(NORTH|SOUTH|EAST|WEST)\s*BOUND\b")
+VEHICLE_TYPES = ("MVA", "MVF")
 # Measured 2026-11-09 (12 km ring, bbox -73.819 40.888 -73.517 41.144, an M-series Mac): Overpass answered 28 MB in
 # 56 s; built into 41,623 nodes and 52,744 edges in 0.5 s, a 5.6 MB file (1.7 MB gzipped in S3); read into a Graph in
 # 0.4 s, ~20 MB held (45 MB peak while reading). A route (a firehouse to a point within ~6 km): median 2 ms, p95 6 ms,
@@ -204,6 +244,44 @@ def build(doc: dict, bbox=None, at: float | None = None) -> dict:
             "classes": list(CLASSES), "names": names, "nodes": nodes, "edges": edges, "shape": shape}
 
 
+def hw_keys(text: str) -> frozenset:
+    """The highways a name or ref names: "New England Thruway; I 95" -> {"i95"}."""
+    t = (text or "").upper()
+    return frozenset(k for rx, k in HW_NAMES if rx.search(t))
+
+
+class Call(tuple):
+    """What a call says about being on a highway: (keys: the highways it names, with "*" whenever it is on one;
+    dir: "N" | "E" | "S" | "W" | None; vehicle: an MVA or a vehicle fire). Hashable: part of a route's cache key."""
+    __slots__ = ()
+
+    def __new__(cls, keys=frozenset(), dir=None, vehicle=False):
+        return tuple.__new__(cls, (frozenset(keys), dir, bool(vehicle)))
+
+    keys = property(lambda s: s[0])
+    dir = property(lambda s: s[1])
+    vehicle = property(lambda s: s[2])
+
+
+LOCAL = Call()
+
+
+def highway_call(*texts: str, typ: str = "") -> Call:
+    """A call's location words (address, cross streets) and its type -> Call. "I-95 NB @ Exit 21" ->
+    ({i95, *}, "N"); "Hutch SB" -> ({hutch, *}, "S"); "Exit 9" -> ({*}); "100 Example Ave" -> LOCAL."""
+    t = " ".join(x for x in texts if x).upper()
+    keys = set(hw_keys(t))
+    for rx, ks in CALL_NAMES:
+        m = rx.search(t)
+        if m:
+            keys.update(ks if ks else ("i" + m.group(1),))
+    if keys or CALL_ANY.search(t):
+        keys.add("*")
+    d = CALL_DIR.search(t) if keys else None
+    way = (d.group(1) or d.group(2)[0]) if d else None
+    return Call(keys, way, (typ or "").upper() in VEHICLE_TYPES)
+
+
 def street_key(name: str) -> str:
     from sizeup.roadprojects import street_key as sk
     return sk(name)
@@ -268,6 +346,7 @@ class Graph:
         self.main = bytes(1 if r == big else 0 for r in roots)       # node -> on the largest component
         self.components = len(sizes)
         self.max_pops = n + 16                                        # a settled node is never popped twice
+        self._limited()
         self.grid: dict[tuple[int, int], list[int]] = {}
         for e in range(m):
             cells = set()
@@ -278,6 +357,74 @@ class Graph:
                         cells.add((cx, cy))
             for c in cells:
                 self.grid.setdefault(c, []).append(e)
+
+    def _limited(self) -> None:
+        """Each edge's kind (self.ekind: an index into self.kinds, [(limited, highway keys)]; 0: an ordinary road):
+        limited 1, a motorway or its ramps; 2, a parkway or its ramps. A ramp (unnamed, mostly) takes the keys of the
+        mainlines its run of ramps touches, and is a parkway's when every one of them is a parkway."""
+        kinds: list[tuple[int, frozenset]] = [(0, frozenset())]
+        kind_ix = {kinds[0]: 0}
+        ekind = array("H", bytes(2 * self.m))
+
+        def kind(lim: int, keys: frozenset) -> int:
+            k = (lim, keys)
+            if k not in kind_ix:
+                kind_ix[k] = len(kinds)
+                kinds.append(k)
+            return kind_ix[k]
+        main_of: dict[int, list[tuple[int, frozenset]]] = {}             # node -> the mainlines through it
+        for e in range(self.m):
+            c = self.ecls[e]
+            if c not in MAINLINE:
+                continue
+            park = bool(PARKWAY_RE.search(self.name(e)))
+            if c == 1 and not park:
+                continue                                              # an ordinary trunk road
+            lim, keys = (2 if park else 1), hw_keys(self.name(e))
+            ekind[e] = kind(lim, keys)
+            for nd in (self.ea[e], self.eb[e]):
+                main_of.setdefault(nd, []).append((lim, keys))
+        seen = bytearray(self.m)
+        for e0 in range(self.m):
+            if seen[e0] or self.ecls[e0] not in LINKS:
+                continue
+            run, stack, touch = [], [e0], []
+            seen[e0] = 1
+            while stack:                                              # the run of ramps joined end to end
+                e = stack.pop()
+                run.append(e)
+                for nd in (self.ea[e], self.eb[e]):
+                    touch.extend(main_of.get(nd, ()))
+                    for code in self.adj[nd]:
+                        f = code >> 1
+                        if not seen[f] and self.ecls[f] in LINKS:
+                            seen[f] = 1
+                            stack.append(f)
+            keys = frozenset().union(*(k for _, k in touch)) if touch else frozenset()
+            park = bool(touch) and all(lim == 2 for lim, _ in touch)
+            if not touch and all(self.ecls[e] == 8 for e in run):
+                continue                                              # an ordinary trunk road's ramps
+            k = kind(2 if park else 1, keys)
+            for e in run:
+                ekind[e] = k
+        self.ekind, self.kinds = ekind, kinds
+
+    def limited(self, e: int) -> int:
+        """0: an ordinary road; 1: a motorway or its ramps; 2: a parkway or its ramps."""
+        return self.kinds[self.ekind[e]][0]
+
+    def factors(self, keys: frozenset | None) -> list[float]:
+        """Cost factor by kind for a call: keys None (a call on no highway): motorways LIMITED_SLOW, parkways shut;
+        a highway call (its keys): motorways as they are, a parkway only when the call names it."""
+        out = []
+        for lim, ks in self.kinds:
+            if lim == 0:
+                out.append(1.0)
+            elif lim == 2:
+                out.append(1.0 if keys and ks & keys else math.inf)
+            else:
+                out.append(1.0 if keys is not None else LIMITED_SLOW)
+        return out
 
     # -- geometry ------------------------------------------------------------------------------------------
 
@@ -331,7 +478,54 @@ class Graph:
                 out.update(self.grid.get((cx, cy), ()))
         return out
 
-    def snap(self, lon: float, lat: float, max_m: float = SNAP_M) -> dict | None:
+    def target(self, lon: float, lat: float, call: Call | None = None) -> tuple[dict | None, frozenset | None]:
+        """Where a call is on the roads, and the highways a route to it may use (None: none, factors()).
+
+        A call naming a highway (call.keys) is put on that highway's carriageway within HWCALL_SNAP_M, the one
+        running its way (call.dir, within 90°) when it says, else the nearest; it may use the highways (any motorway,
+        and the parkways it names). A call naming none is snapped as usual (an MVA or vehicle fire with a smaller
+        lead for the motorway, MVA_MOTORWAY_SNAP_M), and is a highway call only when it lands on one."""
+        call = call or LOCAL
+        if call.keys:
+            s = self.snap_highway(lon, lat, call.keys, call.dir)
+            s = s or self.snap(lon, lat)
+            return s, call.keys | (self.kinds[self.ekind[s["edge"]]][1] if s else frozenset())
+        s = self.snap(lon, lat, motorway_m=MVA_MOTORWAY_SNAP_M if call.vehicle else MOTORWAY_SNAP_M)
+        if s is not None and self.ekind[s["edge"]]:
+            return s, frozenset({"*"}) | self.kinds[self.ekind[s["edge"]]][1]
+        return s, None
+
+    def snap_highway(self, lon: float, lat: float, keys: frozenset, way: str | None,
+                     max_m: float = HWCALL_SNAP_M) -> dict | None:
+        """The nearest point on a highway mainline the keys name (only "*": any limited mainline but a parkway),
+        on the carriageway running `way` (N/E/S/W, within 90°) when there is one; None: none within max_m."""
+        x, y = self.to_xy(lon, lat)
+        named = keys - {"*"}
+        want = DIRS.get(way) if way else None
+        best = {True: None, False: None}                              # by: runs the call's way
+        for e in self.near_edges(x, y, max_m):
+            k = self.ekind[e]
+            if not k or self.ecls[e] not in MAINLINE or not self.main[self.ea[e]]:
+                continue
+            lim, ks = self.kinds[k]
+            if (named and not ks & named) or (not named and lim == 2):
+                continue
+            d, off, i, t = self._onto(self.xy(e), x, y)
+            if d > max_m:
+                continue
+            ok = want is None or abs((self.bearing(e, i) - want + 180) % 360 - 180) < 90
+            if best[ok] is None or d < best[ok][0]:
+                best[ok] = (d, e, off, i, t)
+        got = best[True] or best[False]
+        if got is None:
+            return None
+        d, e, off, i, t = got
+        pts = self.ll(e)
+        (x1, y1), (x2, y2) = pts[i], pts[i + 1]
+        return {"edge": e, "off": min(off, self.elen[e]), "d": d, "len": self.elen[e],
+                "lon": x1 + (x2 - x1) * t, "lat": y1 + (y2 - y1) * t, "seg": i}
+
+    def snap(self, lon: float, lat: float, max_m: float = SNAP_M, motorway_m: float = MOTORWAY_SNAP_M) -> dict | None:
         """The nearest point on a road: {edge, off (m from a), d (m away), len, lon, lat}; None when none within
         max_m. A motorway or trunk (or its ramps) only when it is MOTORWAY_SNAP_M nearer than any other road. Only
         roads on the largest connected component (self.main)."""
@@ -345,7 +539,7 @@ class Graph:
                 d, off, i, t = self._onto(pts, x, y)
                 if d > max_m:
                     continue
-                score = d + (MOTORWAY_SNAP_M if self.ecls[e] in HIGHWAY else 0.0)
+                score = d + (motorway_m if self.ecls[e] in HIGHWAY else 0.0)
                 if best is None or score < best[0]:
                     best = (score, e, d, off, i, t)
             if best is not None and best[0] <= r:
@@ -520,14 +714,18 @@ class Graph:
         return None
 
     def route(self, a, b, params, pen: dict | None = None, heading: float | None = None,
-              wrongway_m: float = 60.0) -> dict | None:
+              wrongway_m: float = 60.0, call: Call | None = None) -> dict | None:
         """The fastest way from [lon, lat] a to [lon, lat] b: {coords: [[lon, lat], ...] (a's road point to b's),
-        m (metres), s (seconds), pops}; None: no road near either, or no way (closed in)."""
-        sa, sb = self.snap(a[0], a[1]), self.snap(b[0], b[1])
+        m (metres), s (seconds: driving, without the highway factors), pops, way, highway (the call is on one)};
+        None: no road near either, or no way (closed in). call: what the call says about highways (target(),
+        factors()): a call on none keeps the rig off them."""
+        sa = self.snap(a[0], a[1])
+        sb, keys = self.target(b[0], b[1], call)
         if sa is None or sb is None:
             return None
         pen = pen or {}
         spm = self.spm(params)
+        kf, ekind = self.factors(keys), self.ekind
         goals = self._goals(sb, spm, pen, wrongway_m)
         best_s, best = math.inf, None
         direct = self._direct(sa, sb, spm, pen, wrongway_m)
@@ -567,6 +765,8 @@ class Graph:
                 else:
                     o = eb[e]
                 p = pen.get(e, 1.0)
+                if ekind[e]:
+                    p *= kf[ekind[e]]
                 if p == math.inf:
                     continue
                 g2 = g + elen[e] * spm[ecls[e]] * p
@@ -577,7 +777,10 @@ class Graph:
         if best is None:
             return None
         coords = self._path(sa, sb, best, prev, start_of, goals)
-        return {"coords": coords, "m": _metres(coords), "s": best_s, "pops": pops, "way": self._way(best, prev, goals)}
+        way = self._way(best, prev, goals)
+        extra = sum(elen[e] * spm[ecls[e]] * pen.get(e, 1.0) * (kf[ekind[e]] - 1.0) for e, _ in way if ekind[e])
+        return {"coords": coords, "m": _metres(coords), "s": best_s - extra, "pops": pops, "way": way,
+                "highway": keys is not None}
 
     @staticmethod
     def _way(best, prev, goals) -> list[tuple[int, int]]:
@@ -652,14 +855,16 @@ class Graph:
         return out
 
     def to_one(self, origins: dict, b, params, pen: dict | None = None, wrongway_m: float = 60.0,
-               max_s: float = 1800.0) -> dict:
+               max_s: float = 1800.0, call: Call | None = None) -> dict:
         """Seconds and metres to [lon, lat] b from each origin, in one reverse Dijkstra: {key: (s, m)} for the
-        origins with a way (a key missing: no road near it, or none within max_s). origins: {key: [lon, lat]}."""
-        sb = self.snap(b[0], b[1])
+        origins with a way (a key missing: no road near it, or none within max_s). origins: {key: [lon, lat]}.
+        call: as route()'s; the seconds are driving time (without the highway factors)."""
+        sb, keys = self.target(b[0], b[1], call)
         if sb is None:
             return {}
         pen = pen or {}
         spm = self.spm(params)
+        kf, ekind = self.factors(keys), self.ekind
         goals = self._goals(sb, spm, pen, wrongway_m)
         snaps = {k: self.snap(ll[0], ll[1]) for k, ll in origins.items()}
         want: dict[int, list] = {}
@@ -674,9 +879,10 @@ class Graph:
                 want.setdefault(n, []).append((k, sec, m))
         dist: dict[int, float] = {}
         metres: dict[int, float] = {}
+        real: dict[int, float] = {}                           # driving seconds (dist: with the highway factors)
         heap = []
         for n, (s, m, _) in goals.items():
-            dist[n], metres[n] = s, m
+            dist[n], metres[n], real[n] = s, m, s
             heap.append((s, n))
         heapq.heapify(heap)
         left = set(want)
@@ -697,20 +903,23 @@ class Graph:
                         continue
                     o = eb[e]                                 # n is a: drive b -> a into n (two-way only)
                 p = pen.get(e, 1.0)
-                if p == math.inf:
+                f = kf[ekind[e]] if ekind[e] else 1.0
+                if p == math.inf or f == math.inf:
                     continue
-                g2 = g + elen[e] * spm[ecls[e]] * p
+                g2 = g + elen[e] * spm[ecls[e]] * p * f
                 if g2 < dist.get(o, math.inf):
                     dist[o] = g2
                     metres[o] = metres[n] + elen[e]
+                    real[o] = real[n] + elen[e] * spm[ecls[e]] * p
                     heapq.heappush(heap, (g2, o))
+        best_of = {k: v[0] for k, v in out.items()}           # the cost each one's estimate was chosen by
         for n, rows in want.items():
             if n not in dist or dist[n] > max_s:
                 continue
             for k, sec, m in rows:
-                v = (sec + dist[n], m + metres[n])
-                if k not in out or v[0] < out[k][0]:
-                    out[k] = v
+                if k not in out or sec + dist[n] < best_of.get(k, math.inf):
+                    best_of[k] = sec + dist[n]
+                    out[k] = (sec + real[n], m + metres[n])
         return out
 
 
