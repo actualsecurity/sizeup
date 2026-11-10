@@ -880,6 +880,15 @@ Incidents come in from ranked sources. The interface is in `sizeup/sources/__ini
   its place, or is on its fireground channel when the feed names one. Only our dispatch and fire channels count, with the
   guards listed in `radiolog.py`. One click removes it. These links don't extend the audio's retention until a person
   keeps them ("Keep", `POST /api/cad/incident/<id>/keep`).
+- **Units added later (#370):** when an incident gains units (the feed lists them, the radio or a person puts them on),
+  the radio log is matched again for those units from its dispatch (the feed's dispatched time, else the page's, else
+  when it was made) less a minute, on a worker. Every guard holds; nothing is linked twice.
+- **Full department or specific units (#370, `sizeup/cad/scope.py`):** the page sets it first (its departments' tones
+  and a call type: "Full department (<dept>)"; apparatus named: "Specific units"). The feed's unit list confirms or
+  overrides it, and a disagreement is a timeline line. A feed's department entries are configured on the hub
+  (`POST /api/cad/settings/department_units {action: set, key: <code>, value: <department>}`, admins; never in the
+  repo). They are never a unit: never dispatched (the timeline says "<dept> paged"; our department's accepts the call)
+  and never a unit in common between two reports.
 
 ## Highway layers: cameras, incidents, signs, mileposts (the Thruway, 511NY)
 

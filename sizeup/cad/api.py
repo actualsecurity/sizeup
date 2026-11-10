@@ -198,6 +198,9 @@ POST /api/cad/settings/atc                {action: set {key: identify | map | vo
                                           talking on HPN Tower (#252, sizeup/atc_talkers.py) on the rows / the map; admins
 POST /api/cad/settings/hub_errors         {action: set {key: on | per_signature | total, value} | reset {key}}: the hub's own
                                           error spikes to the status topic (#285, sizeup/errwatch.py); admins
+POST /api/cad/settings/department_units  {action: set {key: a feed's department entry code, value: the department,
+                                          accepts?: true} | reset {key}}: a whole department paged, never a unit
+                                          (#370; accepts: it accepts a call alone in 60 Control mode); admins
 POST /api/cad/settings/map_display        {action: set {key: detail_zoom | active_zoom | board_detail_zoom |
                                           board_active_zoom, value: a zoom} | reset {key}}: below it a rig is drawn small on
                                           the maps (#376, sizeup/cad/mapview.py); admins

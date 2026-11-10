@@ -3211,6 +3211,7 @@ class App:
     def start_sources(self) -> None:
         """The incident sources (#297): the CAD's ticker (held reports, promotion) and this machine's adapters."""
         self.cad.sources.start()
+        self.cad.radiolog.start()                 # open calls' units matched again (#370: what a restart left)
         if self.cfg.cloud_role == "hub":         # station only: the hub gets their events through the outbox
             return
         from sizeup.sources.runner import SourceRunner, context_for, load_adapters, require_station
@@ -3305,6 +3306,7 @@ class App:
         if self.sources_runner is not None:
             self.sources_runner.stop()
         self.cad.sources.stop()
+        self.cad.radiolog.stop()
         self.stop_layers()
 
     def _weather_voice(self, text: str) -> tuple[str | None, str]:

@@ -74,8 +74,8 @@ def test_the_feed_first_then_the_street_only_page_attaches_and_enriches_it(tmp_p
     assert any(x.startswith("Page ") and "attached" in x for x in rig.feed_lines(a))
     tones = lines(rig, a, "tones")
     assert any(x.startswith("60 Control page ") and "Example Terrace" in x for x in tones)  # its transcript
-    assert "Tones: Port Chester FD" in tones
-    assert "Units named on the page: Engine 60, Ladder 31" in tones
+    assert "Page: PCFD · units Engine 60, Ladder 31" in tones                    # one line: who it paged (#370)
+    assert not any(x.startswith(("Tones:", "Units named")) for x in tones)
     assert rig.cad.store.one("SELECT incident_id FROM source_reports WHERE source = 'paging'")["incident_id"] == a
     # 60 Control mode: accepted, the units on it, paged
     full = rig.cad.full(a)
@@ -216,7 +216,7 @@ def test_pcfd_mode_attaches_and_enriches_but_dispatches_nothing(pcfd):
     assert pcfd.page("p1", PAGE_ST)["id"] == a and len(open_incidents(pcfd)) == 1
     full = pcfd.cad.full(a)
     assert full["status"] == "queued" and not full["assignments"]
-    assert "Units named on the page: Engine 60, Ladder 31" in lines(pcfd, a, "tones")
+    assert "Page: PCFD · units Engine 60, Ladder 31" in lines(pcfd, a, "tones")
     assert full["cross_street"] == "Sample Avenue And Specimen Street"
 
 

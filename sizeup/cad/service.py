@@ -34,6 +34,8 @@ from sizeup.cad.newids import NewIds
 from sizeup.cad.statushints import StatusHints
 from sizeup.cad.sources import PAGING_RANK, Sources
 from sizeup.cad.radiolog import RadioLog
+from sizeup.cad import scope as scope_mod
+from sizeup.cad.scope import Scope
 from sizeup.cad.radios import Registry, RadioError, is_pcfd
 from sizeup.cad import settings as settings_mod
 from sizeup.cad import lists as lists_mod
@@ -220,6 +222,13 @@ class Cad:
         self.auto = AutoDispatch(self, clock=clock, log=log)
         self.sources.on_possibly = self.auto.possibly
         self.radiolog = RadioLog(self)
+        # A unit put on an incident (by a person, the feed or the radio): the radio log again for it, back to the
+        # incident's dispatch (#370), off this thread
+        self.store.on_assigned = lambda iid, names: self.radiolog.units_soon(iid)
+        self.store.on_unassigned = self.radiolog.units_soon     # ... taken off before it went: its mentions there go
+        # Full department or specific units (#370, sizeup/cad/scope.py): from the page, then the feed
+        self.scope = Scope(self)
+        self.sources.on_page_moved = self.scope.move
         # FG1 radio IDs nobody has named yet (#163): "Radio 1234 (MDC) on FG1: who is this?" on the console.
         self.newids = NewIds(self)
         # The emergency button and a mayday heard on our fire channels (sizeup/cad/alarms.py, #128): the app feeds it
@@ -405,11 +414,19 @@ class Cad:
             self.auto.decorate(incs)                      # #311: each automatic step, its source and its undo
         except Exception as e:  # noqa: BLE001
             self.log(f"CAD: dispatch mode: {type(e).__name__}")
+        try:
+            self.scope.decorate(incs)                     # #370: full department or specific units
+        except Exception as e:  # noqa: BLE001
+            self.log(f"CAD: dispatch scope: {type(e).__name__}")
         return incs
 
     def source_event(self, d: dict) -> int | None:
         """A "source_event" on the CAD of record (#297), then the dispatch mode's part (#311). The incident id."""
         iid = self.sources.on_event(d)
+        try:
+            self.scope.on_feed(iid)                       # full department or specific units (#370)
+        except Exception as e:  # noqa: BLE001 - the report stands whatever this does
+            self.log(f"CAD: dispatch scope: {type(e).__name__}")
         self.auto.on_feed(iid)
         return iid
 
@@ -1750,7 +1767,7 @@ class Cad:
             at = (inc.page_starts or [inc.opened])[0]
             how, got = self.sources.page(str(inc.id), at, f["address"] or heard, list(inc.units or []), data)
             if how == "attached":
-                self._page_enrich(got, inc, f, lines)
+                self._page_enrich(got, inc, f, lines)         # its scope too (#370)
                 self.auto.on_page(got, list(inc.units or []), at)   # 60 Control mode: "paged", its units (#311, #365)
                 return self.store.incident(got)
             if (typ, sub) == (airport.TYPE, "ALERT-1"):  # an HPN Alert 1 is a standby pre-alert, never an incident (#369)
@@ -1761,6 +1778,7 @@ class Cad:
                 return None
             iid = self._create_from_page(data)
             self.sources.created_by_page(str(inc.id), iid, got)
+            self._page_scope(iid, inc)
             return self.store.incident(iid)
         self.comms.link_pages(old["id"], getattr(inc, "pages", []))  # a repeat of the page: on it too, accepted or not
         at = (inc.page_starts or [inc.opened])[0]
@@ -1770,12 +1788,14 @@ class Cad:
             how, got = self.sources.rematch_page(str(inc.id), old["id"], at, f["address"] or heard,
                                                  list(inc.units or []), data)
             if how == "attached":
-                self._page_enrich(got, inc, f, lines)
+                self._page_enrich(got, inc, f, lines)     # its scope too (#370)
                 self.auto.on_page(got, list(inc.units or []), at)
                 return self.store.incident(got)
-        if self.sources._has_feed(old["id"]):          # a feed's incident: the repeat enriches it (#365)
+        if self.sources._has_feed(old["id"]):          # a feed's incident: the repeat enriches it (#365), its scope (#370)
             self._page_enrich(old["id"], inc, f, lines)
             self.auto.on_page(old["id"], list(inc.units or []), at)
+        else:
+            self._page_scope(old["id"], inc)
         if old["status"] != "queued":
             return old
         auth = self.sources.authority(old["id"])
@@ -1792,21 +1812,32 @@ class Cad:
             fill.update(type=typ, subtype=sub, type_note=note)
         return self.store.update_incident(old["id"], fill, log=False)
 
+    def _page_scope(self, iid: int, inc, note: bool = True) -> tuple[str, bool]:
+        """Full department or specific units, as the page says it (#370; a feed's stands): (the feed's own label when
+        it says otherwise ("units"), else ""; whether the page's reading is new there). note: that disagreement is a
+        timeline line of its own."""
+        try:
+            return self.scope.on_page(iid, inc, note=note)
+        except Exception as e:  # noqa: BLE001 - the page stands whatever this does
+            self.log(f"CAD: dispatch scope: {type(e).__name__}")
+            return "", True
+
     def _page_enrich(self, iid: int, inc, f: dict, lines: list[str]) -> None:
         """A page on an incident a feed has (#365): never a card of its own, it enriches that one. Its clip is on it
         (Sources._page_attached, comms.link_pages); on the timeline (kind "tones"), once each: its transcript lines
-        ("60 Control page 14:31: ..."), the departments its tones named and the units it named (in 60 Control mode
-        AutoDispatch.on_page dispatches those on our boards; in PCFD mode they stay a line for a person). Its cross
-        streets fill the incident's when it has none and no person set its location. The feed's type and location stand: the page's are only noted
-        (Sources._page_attached)."""
+        ("60 Control page 14:31: ...") and one line for who it paged (#370, scope.page_line: "Page: all PCFD", "Page:
+        PCFD · units Engine 60, Ladder 31", with " · feed: units" when the feed's label says otherwise). In 60
+        Control mode AutoDispatch.on_page dispatches the units it named that are on our boards; in PCFD mode they stay
+        that line for a person. Its cross streets fill the incident's when it has none and no person set its
+        location. The feed's type and location stand: the page's are only noted (Sources._page_attached)."""
         cur = self.store.incident(iid)
         have = {e["text"] for e in self.store.q("SELECT text FROM events WHERE incident_id = ? AND kind = 'tones'", (iid,))}
         depts = list(dict.fromkeys([*(getattr(inc, "tone_departments", None) or []), *(getattr(inc, "departments", None) or [])]))
+        feed, _ = self._page_scope(iid, inc, note=False)
         texts = [x[:2000] for x in lines]
-        if depts:
-            texts.append(f"Tones: {', '.join(depts)}")
-        if inc.units:
-            texts.append(f"Units named on the page: {', '.join(inc.units)}")
+        said = scope_mod.page_line(depts, list(inc.units or []), getattr(inc, "tone_departments", ()), inc.incident_type, feed)
+        if said:                                       # once: deduped on its text below
+            texts.append(said)
         new = [x for x in dict.fromkeys(texts) if x not in have]
         if new:
             with self.store.tx() as db:

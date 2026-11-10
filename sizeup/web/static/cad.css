@@ -748,6 +748,7 @@
   .chip.edited { --c: var(--ok); }
   .chip.confirmed { --c: var(--info); }         /* the department's own card (#105) */
   .chip.joint { --c: var(--info); }
+  .chip.scope { --c: var(--dim); }            /* full department / specific units (#370) */
   .chip.live { --c: var(--err); }
 
   /* ---- the wall board (/monitor, board.js): the Overview, the feed, pages and units; nothing to press ---

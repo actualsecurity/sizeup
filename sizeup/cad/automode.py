@@ -20,6 +20,10 @@ record (the hub, or all-in-one), on top of the incident sources (sizeup/cad/sour
                incident (sources.py): it stays queued for a person, said once on its timeline. When a person accepts
                one that waited, the units the feed lists then are dispatched at the feed's dispatched time (their
                statuses come with the feed's next changes and the radio, never replayed)
+      depts    a feed's department entry (Sources.department_units: a code that means a whole department, #370) is never
+               dispatched as a unit, nor counted as one (the one-unit rule below counts apparatus only): "<department>
+               paged" on the timeline when first listed. Alone it never accepts a call (a page attached does), unless
+               the entry is set to ("accepts": true) and the department is ours (the monitor departments)
       paged    a page attached to it (the paging decoder's report): "Paged 14:31:02" at the tone time (source radio);
                still queued, the page accepts it as a feed report would. The units the page names that are exactly
                on our boards are dispatched at the page's time, by the units rules below (#365)
@@ -238,6 +242,7 @@ class AutoDispatch:
             self.log(f"CAD: dispatch mode: {type(e).__name__}")
         if first:                                        # the radio log's backfill: after, outside the lock (M3)
             self.cad.radiolog.backfill_soon(iid)
+        self.cad.radiolog.units_soon(iid)                # units it lists now: their radio since dispatch (#370)
 
     def _on_feed(self, iid: int) -> bool:
         """True: the first report on this incident."""
@@ -332,9 +337,18 @@ class AutoDispatch:
         them (Sources.feed_unit_aliases: one source of truth, again when the file changes)."""
         return {_key(k): str(v) for k, v in self.cad.sources.feed_unit_aliases().items()}
 
+    def _depts(self) -> dict[str, str]:
+        """A feed's department entry code (as _key writes it) -> the department (#370)."""
+        return {_key(k): v for k, v in self.cad.sources.department_units().items() if _key(k)}
+
+    def _our_dept(self, name: str) -> bool:
+        from sizeup.radio.tones import base_name
+        return base_name(name) in set(self.cad.s.monitor_departments) | set(self.cad.monitor_names)
+
     def _ours(self) -> dict[str, dict]:
         """A feed's unit code as written -> our board unit (the fire response: PCFD and the joint response): the board
-        code or its spoken name, exactly (spaces, dashes and case aside), or an alias. Nothing looser (M1)."""
+        code or its spoken name, exactly (spaces, dashes and case aside), or an alias. Nothing looser (M1). Never a
+        department entry (#370)."""
         units = [u for u in self.store.units() if u["response"] == "fire" and u["board"]]
         out: dict[str, dict] = {}
         for u in units:
@@ -345,6 +359,8 @@ class AutoDispatch:
         for k, code in self._aliases().items():
             if code in by:
                 out[k] = by[code]
+        for k in self._depts():
+            out.pop(k, None)
         return out
 
     def _held(self, iid: int, why: str, op: str) -> None:
@@ -371,7 +387,9 @@ class AutoDispatch:
         inc = self.store.incident(iid)
         ours = self._ours()
         units = list(new.get("units") or [])
-        mine = [n for n in units if _key(n) in ours]
+        depts = self._depts()
+        accepts = {_key(k) for k in self.cad.sources.department_accepts()}
+        mine = [n for n in units if _key(n) in ours or _key(n) in accepts and self._our_dept(depts[_key(n)])]
         if inc["status"] == "queued":
             paged = self.store.one("SELECT 1 AS x FROM source_reports WHERE incident_id = ? AND source = ?", (iid, PAGING))
             same = self._possibly_open(iid)
@@ -399,7 +417,13 @@ class AutoDispatch:
         uts, outs = new.get("unit_times") or {}, old.get("unit_times") or {}
         had = set(old.get("units") or [])
         fresh = [n for n in units if n not in had]
-        unknown = [n for n in fresh if _key(n) not in ours]
+        unknown = [n for n in fresh if _key(n) not in ours and _key(n) not in depts]
+        for name in fresh:                               # a department entry: that department paged, never a unit
+            if _key(name) in depts:
+                t = (uts.get(name) or {}).get("dispatched") or times.get("dispatched")
+                with self.store.tx() as db:
+                    self.store._event(db, iid, "auto", f"{depts[_key(name)]} paged" + (f" (county {_hm(t)})" if t else ""),
+                                      op, at=t or self.clock())
         if unknown:
             with self.store.tx() as db:
                 self.store._event(db, iid, "auto", f"{label} units not on our boards (not dispatched): {', '.join(unknown)}", op)
@@ -408,7 +432,8 @@ class AutoDispatch:
             if u is not None:
                 t = (uts.get(name) or {}).get("dispatched") or times.get("dispatched")
                 self._assign(iid, u, t, op, f"dispatched (county {_hm(t)})" if t else "dispatched (county)")
-        single = units[0] if len(units) == 1 and _key(units[0]) in ours and not uts.get(units[0]) else None
+        rigs = [n for n in units if _key(n) not in depts]                      # apparatus only (#370)
+        single = rigs[0] if len(rigs) == 1 and _key(rigs[0]) in ours and not uts.get(rigs[0]) else None
         for name in dict.fromkeys([*uts, *([single] if single else [])]):
             u = ours.get(_key(name))
             if u is None:
@@ -790,6 +815,7 @@ class AutoDispatch:
                         with self.store.tx() as db:
                             db.execute(f"UPDATE assignments SET {s['col']} = NULL WHERE id = ?", (a["id"],))
                 self.mark_units(iid, [u["name"]], operator)
+                self.cad.radiolog.units_soon(iid)        # taken off: its unkept mentions there go too (#370)
             now = self.clock()
             with self.store.tx() as db:
                 db.execute("UPDATE auto_steps SET undone_at = ?, undone_by = ? WHERE id = ?", (now, operator, sid))
