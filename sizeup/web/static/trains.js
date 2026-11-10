@@ -376,17 +376,24 @@ window.TrainLayer = (() => {
     return out;
   }
   // "Trk 2 · near pole 249 · MP 25.3" for a train drawn at s (the pole and milepost where it is drawn now, not where
-  // the hub last placed it); who said the track, and for which stop, on hover. A small function: one line or a row.
+  // the hub last placed it); who said the track, and for which stop, on hover. placeRow: the line as data ({k, text,
+  // title}, or null: a box's row); placeLine: as an element.
   const TRK_WHO = { posted: "posted", planned: "planned", mta: "MTA" };
-  function placeLine(t, s, rr) {
+  function placeRow(t, s, rr) {
     const at = rr && rr.poles ? refAt(rr, s) : { pole: t.pole, mp: t.mp };
-    const txt = [t.trk ? `Trk\u00a0${t.trk}` : "", at.pole ? `near pole ${at.pole}` : "",
-                 typeof at.mp === "number" ? `MP\u00a0${at.mp.toFixed(1)}` : ""].filter(Boolean).join(" · ");
-    if (!txt) return null;
-    const n = h("div", "", txt);
-    n.title = [t.trk ? `Track ${t.trk}: ${TRK_WHO[t.trk_src] || "the MTA's"} for ${t.trk_at || "its stop"}` : "",
-               at.pole ? `Pole: CB ${at.pole} (catenary structure, Metro-North GIS)` : "",
-               typeof at.mp === "number" ? "Milepost from Grand Central" : ""].filter(Boolean).join("\n");
+    const text = [t.trk ? `Trk\u00a0${t.trk}` : "", at.pole ? `near pole ${at.pole}` : "",
+                  typeof at.mp === "number" ? `MP\u00a0${at.mp.toFixed(1)}` : ""].filter(Boolean).join(" · ");
+    if (!text) return null;
+    const title = [t.trk ? `Track ${t.trk}: ${TRK_WHO[t.trk_src] || "the MTA's"} for ${t.trk_at || "its stop"}` : "",
+                   at.pole ? `Pole: CB ${at.pole} (catenary structure, Metro-North GIS)` : "",
+                   typeof at.mp === "number" ? "Milepost from Grand Central" : ""].filter(Boolean).join("\n");
+    return { k: "place", text, title };
+  }
+  function placeLine(t, s, rr) {
+    const r = placeRow(t, s, rr);
+    if (!r) return null;
+    const n = h("div", "", r.text);
+    n.title = r.title;
     return n;
   }
   function refText(ref) {                     // the event's panel (#371): "pole 249 · MP 25.3"

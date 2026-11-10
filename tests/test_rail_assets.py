@@ -403,7 +403,7 @@ def test_the_data_sources_row_and_the_s3_copy():
 def test_the_page_draws_the_numbered_track_and_the_poles_box():
     js = (Path(__file__).resolve().parent.parent / "sizeup" / "web" / "static" / "trains.js").read_text()
     assert "const own = runAt(tracks, t.lane, t.s);" in js and "function refAt(rr, s)" in js
-    assert "placeLine(t, this.drawnS(t), d.railref)" in js and "`Pole: CB ${at.pole}" in js and "nearest" not in js.split("function placeLine")[1][:900]
+    assert "placeLine(t, this.drawnS(t), d.railref)" in js and "`Pole: CB ${at.pole}" in js and "nearest" not in js.split("function placeRow")[1][:900]
     assert "d.tracks = had.tracks; d.railref = had.railref;" in js and 'keys() { return [[KEY, false], [REF_KEY, false]]; }' in js
     assert 'RAILREF = "/api/cad/trains/railref"' in js and '"Poles · mileposts"' in js
     assert 'id: "tr-line-label", type: "symbol", source: SRC_LINE, filter: ["has", "trk"]' in js         # each track numbered
