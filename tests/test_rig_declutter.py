@@ -51,6 +51,15 @@ def test_map_display_settings_are_set_reset_audited_and_checked():
             raise AssertionError(bad)
         except Exception as e:  # noqa: BLE001
             assert "a zoom from 8 to 20" in str(e), bad
+    out = c.settings.post("map_display", {"action": "set", "key": "active_zoom", "value": 12, **OP})     # the most
+    assert out["map_display"]["active_zoom"]["max"] == out["map_display"]["board_active_zoom"]["max"] == mapview.ACTIVE_MAX == 12
+    for key in ("active_zoom", "board_active_zoom"):          # an active rig can't be made a dot at the zooms watched
+        try:
+            c.settings.post("map_display", {"action": "set", "key": key, "value": 12.5, **OP})
+            raise AssertionError(key)
+        except Exception as e:  # noqa: BLE001
+            assert "a zoom from 8 to 12" in str(e), key
+    c.settings.post("map_display", {"action": "reset", "key": "active_zoom", **OP})
     ex = c.settings.export()
     assert ex["overrides"]["map_display"] == {"detail_zoom": 14.5}
     c.settings.post("map_display", {"action": "set", "key": "detail_zoom", "value": 14.5, **OP})    # the same: no entry
@@ -58,13 +67,16 @@ def test_map_display_settings_are_set_reset_audited_and_checked():
     c.settings.post("map_display", {"action": "reset", "key": "detail_zoom", **OP})
     assert c.state()["map"]["display"]["detail_zoom"] == 15.0 and "map_display" not in c.settings.overrides()
     audit = [(a["key"], a["old"], a["new"]) for a in reversed(c.settings.audit_log("system")) if a["key"].startswith("map_display/")]
-    assert audit == [("map_display/detail_zoom", "15", "14.5"), ("map_display/detail_zoom", "14.5", "15")]
-    ex["overrides"]["map_display"] = {"detail_zoom": 99}
-    try:
-        c.settings.post("import", {"action": "dry_run", "settings": ex, **OP})
-        raise AssertionError("imported")
-    except Exception as e:  # noqa: BLE001
-        assert "map_display" in str(e)
+    assert audit == [("map_display/detail_zoom", "15", "14.5"), ("map_display/active_zoom", "10", "12"),
+                     ("map_display/active_zoom", "12", "10"), ("map_display/detail_zoom", "14.5", "15")]
+    for bad in ({"detail_zoom": 99}, {"active_zoom": 13}):
+        ex["overrides"]["map_display"] = bad
+        try:
+            c.settings.post("import", {"action": "dry_run", "settings": ex, **OP})
+            raise AssertionError(bad)
+        except Exception as e:  # noqa: BLE001
+            assert "map_display" in str(e), bad
+    assert mapview.display_zooms({"active_zoom": 15, "board_active_zoom": 13})["active_zoom"] == 10.0   # stored: refused
 
 
 # ---- the page, in node --------------------------------------------------------------------------------------------------
@@ -146,7 +158,8 @@ def test_the_zooms_come_from_the_state_and_the_wall_board_has_its_own(tmp_path):
     o = run(tmp_path, SNAP + r"""
 zoomTo(13); out.dflt = snap();
 setMap({ ...IN.map, display: { ...IN.map.display, detail_zoom: 12.5 } }); out.edited = snap();
-setMap({ ...IN.map, display: { ...IN.map.display, detail_zoom: 14, active_zoom: 18 } }); out.capped = [kind("E63"), CadMap.zoomsOf(cad.state.map)];
+setMap({ ...IN.map, display: { ...IN.map.display, detail_zoom: 11, active_zoom: 12 } }); out.capped = [kind("E63"), CadMap.zoomsOf(cad.state.map)];
+setMap({ ...IN.map, display: { ...IN.map.display, detail_zoom: 18, active_zoom: 15 } }); out.max = [kind("E63"), CadMap.zoomsOf(cad.state.map)];
 const bh = new El("div");
 const b = new CadMap.RigMap(bh, { scene: { home: { center: [-73.68, 41.02], zoom: 13 }, firehouses: [] }, pins: true,
                                   editable: () => false, onPick: () => {}, follow: false, board: true });
@@ -158,7 +171,8 @@ b.map.zoom = 9.5; b.map.emit("zoomend"); out.board95 = [bk("E60"), bk("E63")];
 """, page_state())
     assert o["dflt"]["E60"] == "folded"
     assert o["edited"]["E60"] == "full" and o["edited"]["badges"] == []
-    assert o["capped"][0] == "dot" and o["capped"][1] == {"detail": 14, "active": 14}     # active never later than idle
+    assert o["capped"] == ["full", {"detail": 11, "active": 11}]                     # active never later than idle
+    assert o["max"] == ["full", {"detail": 18, "active": 12}]                       # nor than ACTIVE_MAX (a stored 15)
     assert o["board13"] == ["folded", "full", "full"]
     assert o["board155"] == ["folded", "full"]
     assert o["board95"] == ["folded", "dot"]
@@ -277,3 +291,71 @@ zoomTo(14); out.chip = [kind("E63"), chip("E63").el.style.opacity];
 """, with_now(data, age=200))
     assert o["dot"] == ["dot", True, ""]
     assert o["chip"][0] == "full" and 0.35 <= float(o["chip"][1]) < 1                # a chip still fades as before
+
+
+@needs_node
+def test_the_automatic_frame_not_the_zoom_keeps_active_rigs_full(tmp_path):
+    """active_zoom at its most (12): the Overview's automatic frame lands under it (about 11.4) and the active rigs stay
+    full chips only because the frame is automatic; moved by hand to 11.8: dots; Recenter: full again at once (before
+    the frame's animation ends: its events are held back here); a hand move again, then the calls change (framed
+    again, as Recenter): full."""
+    data = page_state(bbox=AREA_BBOX)
+    data["map"]["display"]["active_zoom"] = 12.0
+    o = run(tmp_path, SNAP + FIT + r"""
+rm.opts.scene.home.bounds = IN.bbox;
+rm.canvas.clientWidth = rm.map.container.clientWidth = 733; rm.canvas.clientHeight = rm.map.container.clientHeight = 790;
+// the frame's zoom set as the animation starts; its zoomend / moveend held back (they come later, if at all)
+rm.map.fitBounds = (b, opt) => { const em = rm.map.emit; rm.map.emit = () => {}; fitTo(rm.map, b, opt); rm.map.emit = em; };
+const pan = (z) => { rm.map.emit("movestart", { originalEvent: {} }); rm.map.zoom = z; rm.map.emit("moveend"); rm.map.emit("zoomend"); };
+const both = () => [kind("E63"), kind("L31")];
+rm.userMoved = false; rm.fit(false); rm.map.emit("moveend"); rm.map.emit("zoomend");
+out.auto = [Math.round(rm.map.zoom * 10) / 10, ...both(), kind("E60")];
+pan(11.8); out.moved = [rm.userMoved, ...both()];
+host.find("cm-btn")[0].fire("click"); out.recenter = [rm.userMoved, Math.round(rm.map.zoom * 10) / 10, ...both()];
+pan(11.8); out.moved2 = both();
+const p0 = IN.map.incidents[0];
+let draws = 0; const draw0 = L.draw.bind(L); L.draw = () => { draws++; draw0(); };
+setMap({ ...IN.map, incidents: [...IN.map.incidents, { ...p0, id: p0.id + 1, number: "26-999999", lat: 41.012, lon: -73.672 }] });
+out.calls = [rm.userMoved, ...both(), draws];                 // drawn once, in the band of the new frame
+""", data)
+    assert 11 <= o["auto"][0] < 12 and o["auto"][1:] == ["full", "full", "folded"]
+    assert o["moved"] == [True, "dot", "dot"]
+    assert o["recenter"][0] is False and o["recenter"][1] < 12 and o["recenter"][2:] == ["full", "full"]
+    assert o["moved2"] == ["dot", "dot"]
+    assert o["calls"] == [False, "full", "full", 1]
+
+
+def test_a_marker_carries_its_status_time():
+    clock = Clock()
+    c = Cad(Settings(), log=lambda m: None, clock=clock)
+    uid = lambda n: next(u["id"] for u in c.store.units() if u["name"] == n)  # noqa: E731
+    for name in ("E60", "E63"):
+        c.unit_station(uid(name), {"station": c.firehouses[0]["name"], **OP})
+    clock.t += 30
+    inc = c.create({"type": "ALARM", "address": "100 Example Ave", "lat": 41.0085, "lon": -73.6600, **OP})
+    c.attach(inc["id"], {"unit_ids": [uid("E63")], "status": "RS", **OP})
+    units = {u["name"]: u for u in c.store.units()}
+    assert units["E63"]["status_at"] == clock.t != units["E60"]["status_at"]
+    ms = {m["unit"]: m for m in c.state()["map"]["markers"]}
+    assert {"E60", "E63"} <= set(ms) and all(m["status_at"] == units[n]["status_at"] for n, m in ms.items())
+
+
+@needs_node
+def test_a_rig_just_made_active_is_full_for_a_minute(tmp_path):
+    """Below active_zoom (moved by hand): E63's status set 10 s ago (just dispatched): a full chip, L31's an hour ago: a
+    dot; an idle rig just set (E60) stays in its badge. When E63's minute runs out it is laid out again: a dot."""
+    data = page_state()
+    import time as _t
+    now = _t.time()
+    for m in data["map"]["markers"]:
+        m["status_at"] = {"E63": now - 10, "E60": now - 5}.get(m["unit"], now - 3600)
+    o = run(tmp_path, SNAP + r"""
+zoomTo(9.5); out.fresh = snap(); out.timer = L.freshT ? L.freshT._idleTimeout : null;
+out.ring = cls("E63").some((c) => ["hl", "hot", "followed"].includes(c));
+const real = Date.now; Date.now = () => real() + 51000;
+L.freshT._onTimeout(); out.later = snap(); out.timer2 = L.freshT;
+Date.now = real;
+""", data)
+    assert o["fresh"]["E63"] == "full" and o["fresh"]["L31"] == "dot" and o["fresh"]["E60"] == "folded"
+    assert 49_000 <= o["timer"] <= 50_100 and o["ring"] is False                    # no ring: only its size
+    assert o["later"]["E63"] == "dot" and o["timer2"] == 0

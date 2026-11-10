@@ -636,8 +636,8 @@ class Editor:
         """Settings > System > Map display (#376): each zoom, its default and whether it is edited."""
         e = ((self.overrides() if ov is None else ov).get(MAPD_SECTION) or {})
         z = mapview.display_zooms(e)
-        lo, hi = mapview.DISPLAY_LIMITS
-        return {k: {"label": mapview.DISPLAY_LABELS[k], "value": z[k], "default": d, "edited": k in e, "min": lo, "max": hi}
+        return {k: {"label": mapview.DISPLAY_LABELS[k], "value": z[k], "default": d, "edited": k in e,
+                    "min": mapview.display_limits(k)[0], "max": mapview.display_limits(k)[1]}
                 for k, d in mapview.DISPLAY_DEFAULTS.items()}
 
     def _mapd_op(self, action: str, body: dict, op: str) -> dict:

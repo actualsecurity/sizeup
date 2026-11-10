@@ -44,9 +44,10 @@
 //                                              under it, "HQ · 6" (its tooltip lists them; a click zooms to detail_zoom),
 //                                              the firehouse's other marks over the top
 //   active (on a call: dispatched, responding, on location, staging ...)   full chips down to active_zoom (never
-//                                              above detail_zoom), drawn over the rest; below it a strong dot (a stale
-//                                              fix's dot not faded); on the map's automatic frame (the area or the
-//                                              call, not moved by hand: RigMap.userMoved) always full chips
+//                                              above detail_zoom nor ACTIVE_MAX), drawn over the rest; below it a
+//                                              strong dot (a stale fix's dot not faded); on the map's automatic frame
+//                                              (the area or the call, not moved by hand: RigMap.userMoved), and for
+//                                              FRESH_S after its status changed (newly dispatched ...), a full chip
 //   out of service                             below detail_zoom the smallest, faintest dot
 //   followed, picked, transmitting, its row hovered   always the full chip; a dot under the pointer opens to its chip
 //
@@ -91,6 +92,8 @@ window.CadMap = (() => {
 
   // ---- decluttered by zoom (#376) ----------------------------------------------------------------------------------
   const ZOOMS = { detail_zoom: 15, active_zoom: 10, board_detail_zoom: 16, board_active_zoom: 10 };   // mapview.py's
+  const ACTIVE_MAX = 12;               // mapview.ACTIVE_MAX: an active rig full from this zoom at the latest
+  const FRESH_S = 60;                  // s: a rig just made active (dispatched, responding, on location) full this long
   // by the hub's look (mapview.look_of): idle "available", out of service "oos", every other look (dispatched,
   // responding, onscene: committed to a call) active: drawn over the rest, chips longest
   const rigClass = (m) => (m.look === "available" ? "idle" : m.look === "oos" ? "oos" : "act");
@@ -99,7 +102,7 @@ window.CadMap = (() => {
     const d = (M && M.display) || {}, p = board ? "board_" : "";
     const z = (k) => (typeof d[p + k] === "number" && Number.isFinite(d[p + k]) ? d[p + k] : ZOOMS[p + k]);
     const detail = z("detail_zoom");
-    return { detail, active: Math.min(z("active_zoom"), detail) };
+    return { detail, active: Math.min(z("active_zoom"), detail, ACTIVE_MAX) };
   }
   // the band a zoom is in: {detail: chips for all, active: chips for the active}; auto: the map on its automatic frame
   // (the area or the call, not moved by hand): the active rigs full at any zoom
@@ -123,6 +126,9 @@ window.CadMap = (() => {
     }
     return { size, badges };
   }
+  // s left of an active rig's FRESH_S since its status changed (0: not fresh); the hub's status_at, on the hub's clock
+  const freshLeft = (m) => (rigClass(m) === "act" && typeof m.status_at === "number"
+    ? Math.max(0, FRESH_S - Math.max(0, nowS() - m.status_at)) : 0);
   // a firehouse's short name for its badge: data/firehouses.json "short", else its first word
   const shortOf = (M, name) => (((M && M.stations) || []).find((s) => s.name === name) || {}).short || String(name).split(/\s+/)[0];
 
@@ -403,10 +409,12 @@ window.CadMap = (() => {
       return changed;
     }
 
-    update(data, focus) {
+    // opt.draw false: the data only (RigMap.update draws once, after it has framed the map)
+    update(data, focus, opt) {
       this.data = data;
       this.focus = focus || null;
       feedGlide(data && data.map);
+      if (opt && opt.draw === false) return;
       this.setBand();                  // the zooms may have changed (Settings > System > Map display)
       this.draw();
     }
@@ -550,7 +558,15 @@ window.CadMap = (() => {
       const lits = new Map(markers.map((m) => [m.unit, [...(lights ? [lights.isPicked(m.unit), lights.hovered(m.unit)] : [false, false]),
                                                          !!this.fol && this.fol.id === m.unit, talkState(m.unit)]]));
       if (!this.band) this.setBand();
-      const sizes = declutter(markers, this.band, (m) => lits.get(m.unit).some(Boolean));   // #376: lit ones full
+      // #376: lit ones full; so is a rig just made active (FRESH_S), laid out again when the last of those runs out
+      let soonest = 0;
+      const sizes = declutter(markers, this.band, (m) => {
+        const left = freshLeft(m);
+        if (left > 0) soonest = soonest ? Math.min(soonest, left) : left;
+        return left > 0 || lits.get(m.unit).some(Boolean);
+      });
+      clearTimeout(this.freshT);
+      this.freshT = soonest ? setTimeout(() => this.draw(), Math.ceil(soonest * 1000) + 50) : 0;
       const offs = this.offsets(markers, sizes);
       const seen = new Set();
       const M = this.data && this.data.map;
@@ -904,7 +920,7 @@ window.CadMap = (() => {
         this.map.resize();
         if (this.canvas.clientWidth) this.fitKey = null;
       }
-      this.layer.update(data, focus);
+      this.layer.update(data, focus, { draw: false });  // #376: drawn once below, in the band of the frame it ends on
       this.focus = focus || null;
       if (this.roads && this.roads.focus) this.roads.focus(this.focus);     // an event at the airport: its layer on (#87)
       this.note.textContent = note || "";
@@ -929,7 +945,7 @@ window.CadMap = (() => {
         const following = !!(this.fol && this.fol.id);   // #358: never refit under a follow
         if (!following) { if (!this.userMoved && !this.opts.manual) this.fit(!first); }
       }
-      if (this.layer.setBand && this.layer.setBand()) this.layer.draw();    // #376: framed again (another call, the calls changed)
+      if (this.layer.setBand) { this.layer.setBand(); this.layer.draw(); }   // #376: framed again (another call, the calls changed)
     }
 
     // a rig followed (centred, zoomed in, kept centred; ringed for a while) or only picked (centred, ringed)

@@ -1718,7 +1718,7 @@ function sHubErrors(e) {
 function sMapDisplay(d) {
   const card = sCard(sCardHead("Map display", "",
     sHelp("Below these zooms an idle rig is a dot (two or more at a firehouse: one badge, \u201cHQ \u00b7 6\u201d) and a rig on a "
-      + "call a strong dot; a rig on a call stays full while the map keeps its own frame (not moved by hand). Active never later than idle. Followed, picked, talking or hovered rigs always show in full. "
+      + "call a strong dot; a rig on a call stays full while the map keeps its own frame (not moved by hand), and for a minute after its status changes. Active never later than idle, nor than 12. Followed, picked, talking or hovered rigs always show in full. "
       + "Zoom 12: the whole village; 15: a few blocks.")));
   card.id = "s-map-display";
   for (const key of ["detail_zoom", "active_zoom", "board_detail_zoom", "board_active_zoom"]) {
