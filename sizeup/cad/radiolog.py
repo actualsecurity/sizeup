@@ -59,12 +59,18 @@ BOARD_TTL_S = 30.0
 UNITS_LEAD_S = 60.0                     # the units backfill starts this long before the incident's dispatch (#370)
 UNITS_MAX_BACK_S = 3600.0               # ... and never more than this before now
 LISTED_NEAR_S = 300.0                   # a unit put on this soon after the call's dispatch: dispatched with the call
+# A full department paged (sizeup/cad/scope.py): its own units put on (or listed) this soon after the call's dispatch
+# answered that page and count from it. 15 min covers the department's members turning out from home and the
+# firehouses and the last rigs going responding; a unit added later is an add-on, with its own window (#373: never
+# its "back in quarters" chatter from before).
+WIDEN_S = 900.0
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS radiolog_units (   -- the units each incident's radio log was matched again for (#370)
   incident_id INTEGER NOT NULL,
   unit TEXT NOT NULL,
   since REAL NOT NULL,                  -- the unit's window start: it counts there from then on
-  at REAL NOT NULL,
+  at REAL NOT NULL,                     -- when it was first matched (about when it came)
+  again INTEGER NOT NULL DEFAULT 0,     -- to match again with a new window (the call became a full department)
   PRIMARY KEY (incident_id, unit)
 );
 CREATE TABLE IF NOT EXISTS radiolog_backfill (   -- the links a units backfill made (#370): removed with the unit
@@ -72,6 +78,7 @@ CREATE TABLE IF NOT EXISTS radiolog_backfill (   -- the links a units backfill m
   incident_id INTEGER NOT NULL,
   unit TEXT NOT NULL,
   at REAL NOT NULL,
+  widened INTEGER NOT NULL DEFAULT 0,   -- linked only because the call was a full department (taken back if not)
   PRIMARY KEY (traffic_id, incident_id)
 );
 """
@@ -209,6 +216,10 @@ class RadioLog:
         self._stopped = False
         with self.store.lock:
             self.store.db.executescript(SCHEMA)
+            for table, col in (("radiolog_units", "again INTEGER NOT NULL DEFAULT 0"),
+                               ("radiolog_backfill", "widened INTEGER NOT NULL DEFAULT 0")):
+                if col.split()[0] not in {c[1] for c in self.store.db.execute(f"PRAGMA table_info({table})")}:
+                    self.store.db.execute(f"ALTER TABLE {table} ADD COLUMN {col}")
 
     def _channels(self) -> tuple[set, set]:
         """(talkgroups, FM channels) our dispatch and fire traffic is on."""
@@ -369,7 +380,7 @@ class RadioLog:
                 out.setdefault(fg[0], ("fireground", t["channel"]))
         return out if len(out) <= MAX_PER_TX else {}     # more than that: it isn't about one call
 
-    def _link(self, tid: str, found: dict[int, tuple[str, str]], backfill: bool = False) -> list[int]:
+    def _link(self, tid: str, found: dict[int, tuple[str, str]], backfill: bool = False, widened: bool = False) -> list[int]:
         """Links made by words (any path): a transmission on at most MAX_PER_TX incidents that way, a unit mention on
         one incident only; backfill: recorded as the units backfill's (radiolog_backfill)."""
         got = []
@@ -388,8 +399,8 @@ class RadioLog:
                 if db.total_changes != before:
                     got.append(iid)
                     if backfill:
-                        db.execute("INSERT OR IGNORE INTO radiolog_backfill (traffic_id, incident_id, unit, at) "
-                                   "VALUES (?, ?, ?, ?)", (tid, iid, unit, self.cad.clock()))
+                        db.execute("INSERT OR IGNORE INTO radiolog_backfill (traffic_id, incident_id, unit, at, widened) "
+                                   "VALUES (?, ?, ?, ?, ?)", (tid, iid, unit, self.cad.clock(), int(widened)))
         if got:
             self.cad.comms.rev += 1
         return got
@@ -465,11 +476,12 @@ class RadioLog:
                     listed.add(b[0])
         return out | (listed - off)
 
-    def _starts(self, iid: int, units, hi: float) -> dict[str, float]:
+    def _starts(self, iid: int, units, hi: float, widen: bool = True) -> dict[str, float]:
         """Each unit's window start: its own dispatch (the feed's unit_times dispatched for it; else the call's when
-        it was put on within LISTED_NEAR_S of it; else when it was put on, or now) less UNITS_LEAD_S, never more than
-        UNITS_MAX_BACK_S before hi. A full department paged (sizeup/cad/scope.py): every unit but another department's
-        (mutual aid) from the call's dispatch, whenever it came."""
+        it was put on within LISTED_NEAR_S of it; else when it was put on, or first matched, or now) less
+        UNITS_LEAD_S, never more than UNITS_MAX_BACK_S before hi. widen, and a full department paged
+        (sizeup/cad/scope.py): a fire unit of a paged department (units.department, '' = the home department; never
+        another's, mutual aid or an agency) that came within WIDEN_S of the call's dispatch counts from it."""
         board = self.board()
         own: dict[str, float] = {}
         for r in self.store.q("SELECT data FROM source_reports WHERE incident_id = ? AND source != ? AND merged_into = '' "
@@ -481,28 +493,62 @@ class RadioLog:
         put = {r["name"]: r["t"] for r in self.store.q(
             "SELECT u.name, MIN(a.assigned_at) AS t FROM assignments a JOIN units u ON u.id = a.unit_id "
             "WHERE a.incident_id = ? GROUP BY u.name", (iid,))}
+        first = {r["unit"]: r["at"] for r in self.store.q("SELECT unit, at FROM radiolog_units WHERE incident_id = ?", (iid,))}
         call = self.dispatched_at(iid)
-        scope = getattr(self.cad, "scope", None)
-        full = scope is not None and scope.full(iid)
-        aid = {r["name"] for r in self.store.q("SELECT name FROM units WHERE mutual_aid = 1")} if full else set()
+        members = self._paged_units(iid) if widen else set()
         out = {}
         for u in units:
-            if full and u not in aid:
-                d = min(own.get(u, call), call)          # the department was paged at the call's dispatch
+            came = put.get(u) or first.get(u) or hi
+            if u in members and came - call <= WIDEN_S:
+                d = min(own.get(u, call), call)          # its department was paged at the call's dispatch
             elif u in own:
                 d = own[u]
             else:
-                came = put.get(u) or hi
                 d = call if came - call <= LISTED_NEAR_S else came
             out[u] = max(d - UNITS_LEAD_S, hi - UNITS_MAX_BACK_S)
         return out
 
+    def _paged_units(self, iid: int) -> set[str]:
+        """The board's fire units of the departments paged in full on this call (sizeup/cad/scope.py paged; a unit's
+        department '' is the home department's)."""
+        from sizeup.cad.lists import HOME_DEPARTMENT
+        from sizeup.cad.scope import dept_key
+        scope = getattr(self.cad, "scope", None)
+        keys = {dept_key(d) for d in (scope.paged(iid) if scope is not None else [])} - {""}
+        if not keys:
+            return set()
+        return {u["name"] for u in self.store.units() if u["response"] == "fire" and not u["mutual_aid"]
+                and dept_key(u["department"] or HOME_DEPARTMENT) in keys}
+
     def widen(self, iid: int) -> None:
-        """The call became a full department (sizeup/cad/scope.py): its units matched again from the call's dispatch
-        (_starts), never linking anything twice."""
+        """The call became a full department (sizeup/cad/scope.py): its units matched again (marked, never forgotten:
+        a unit taken off meanwhile is still seen as removed) with their new windows (_starts); nothing twice. Only
+        on an open call."""
+        if self.store.incident(iid)["status"] not in ("queued", "pending", "active"):
+            return
         with self.store.tx() as db:
-            db.execute("DELETE FROM radiolog_units WHERE incident_id = ?", (iid,))
+            db.execute("UPDATE radiolog_units SET again = 1 WHERE incident_id = ?", (iid,))
         self.units_soon(iid)
+
+    def narrow(self, iid: int) -> int:
+        """Not a full department any more (a later page): the links only widening made that no person kept are taken
+        off, and each unit's window is its own again. How many links went."""
+        with self.store.tx() as db:
+            n = db.execute("DELETE FROM radio_links WHERE incident_id = ? AND why = 'mention' AND traffic_id IN "
+                           "(SELECT traffic_id FROM radiolog_backfill WHERE incident_id = ? AND widened = 1) AND NOT EXISTS "
+                           "(SELECT 1 FROM radio_link_kept k WHERE k.traffic_id = radio_links.traffic_id "
+                           "AND k.incident_id = radio_links.incident_id)", (iid, iid)).rowcount
+            db.execute("DELETE FROM radiolog_backfill WHERE incident_id = ? AND widened = 1 AND NOT EXISTS (SELECT 1 FROM "
+                       "radio_links l WHERE l.traffic_id = radiolog_backfill.traffic_id AND l.incident_id = ?)", (iid, iid))
+        rows = [r["unit"] for r in self.store.q("SELECT unit FROM radiolog_units WHERE incident_id = ?", (iid,))]
+        if rows:
+            starts = self._starts(iid, rows, self.cad.clock() + 1, widen=False)
+            with self.store.tx() as db:
+                for u, t0 in starts.items():
+                    db.execute("UPDATE radiolog_units SET since = ? WHERE incident_id = ? AND unit = ?", (t0, iid, u))
+        if n:
+            self.cad.comms.rev += 1
+        return n
 
     def unit_removed(self, iid: int, unit: str) -> int:
         """A unit taken off the incident before it went: its mention links there that no person kept are removed (the
@@ -540,14 +586,17 @@ class RadioLog:
         if inc["status"] not in ("queued", "pending", "active"):
             return []
         hi = self.cad.clock() + 1
-        done = {r["unit"] for r in self.store.q("SELECT unit FROM radiolog_units WHERE incident_id = ?", (iid,))}
+        rows = {r["unit"]: r["again"] for r in self.store.q("SELECT unit, again FROM radiolog_units WHERE incident_id = ?",
+                                                             (iid,))}
+        done = set(rows)
         now_on = self.units_of(iid, {"board": self.board(), "depts": self._depts()})
         for u in sorted(done - now_on):
             self.unit_removed(iid, u)
-        new = now_on - done
+        new = (now_on - done) | {u for u in now_on & done if rows[u]}      # new, or to match again (widened)
         if not new:
             return []
         starts = self._starts(iid, new, hi)
+        own = self._starts(iid, new, hi, widen=False)    # without the full department: a link before this is widening's
         lo = min(starts.values())
         ctx = self.context(lo, hi)
         for u, t0 in starts.items():
@@ -565,11 +614,13 @@ class RadioLog:
             if not names:
                 continue                                 # about none of the new units (in its window)
             f = self.matches(t, ctx).get(iid)
-            if f and f[0] == "mention" and f[1] in names and self._link(t["id"], {iid: f}, backfill=True):
+            if f and f[0] == "mention" and f[1] in names and self._link(
+                    t["id"], {iid: f}, backfill=True, widened=t["start"] < own.get(f[1], 0)):
                 out.append(t["id"])
         with self.store.tx() as db:                      # done only now: a failure above is tried again next time
             for u in sorted(new):
-                db.execute("INSERT OR REPLACE INTO radiolog_units (incident_id, unit, since, at) VALUES (?, ?, ?, ?)",
+                db.execute("INSERT INTO radiolog_units (incident_id, unit, since, at, again) VALUES (?, ?, ?, ?, 0) "
+                           "ON CONFLICT(incident_id, unit) DO UPDATE SET since = excluded.since, again = 0",
                            (iid, u, starts[u], hi))
         return out
 
