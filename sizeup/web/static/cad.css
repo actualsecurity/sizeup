@@ -111,7 +111,8 @@
   .aa-snip.ctx { color: var(--text-2); }
   .aa-t { flex: none; color: var(--dim); font-size: var(--fs-xs); line-height: var(--lh-xs); }
   .aa-q { min-inline-size: 0; overflow-wrap: anywhere; }
-  .aa-btns { display: flex; gap: var(--s-1); justify-content: flex-end; }
+  .aa-btns { display: flex; gap: var(--s-1); justify-content: flex-end; align-items: center; }
+  .aa-ack { color: var(--text-2); font-size: var(--fs-xs); margin-right: auto; }
   /* an aircraft emergency's pre-alert (#235, ADS-B): its details and its alarm's state */
   .aa.aa-drill { border-color: var(--info); background: color-mix(in srgb, var(--info) 10%, var(--raised)); animation: none; }
   .aa-alarm { color: var(--warn); font-size: var(--fs-xs); line-height: var(--lh-xs); }

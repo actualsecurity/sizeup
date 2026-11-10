@@ -9,7 +9,9 @@
 //              click follows it on the map (aircraft.js AircraftLayer.follow). Every aircraft an open card names is
 //              ringed on the map in its colour (AircraftLayer.alerts), wider while the card is hovered or focused
 //   location   the words heard, and the approximate point's reason (always marked approximate) or "not placed"
-//   Accept     a new PENDING event (never a dispatch: a person dispatches from it); Dismiss: nothing to it
+//   Accept     a new PENDING event (never a dispatch: a person dispatches from it); an alert level's own queued event
+//              when it has one (#369: Alert 2 / 3); Dismiss: nothing to it
+//   Acknowledge  an HPN Alert 1 (#369: a standby, never an incident): seen, no event; it stays open
 //
 //   details    (#235, an aircraft emergency on ADS-B) what is known: aircraft, operator, emergency, altitude,
 //              position, phase, source, time; and its emergency alarm's state (open / acknowledged by): one event,
@@ -151,9 +153,17 @@ window.AirportAlerts = (() => {
     if (deps.readonly) return li;
     const row = el("div", "aa-btns");
     const busy = st.busy.has(a.id);
-    const acc = el("button", "mini primary", busy ? "…" : "Accept");
+    const lvl = Number((d.alert_level || {}).level || 0);
+    const standby = lvl === 1 && !a.incident_id;          // an Alert 1: a standby, never an event (#369)
+    const acc = el("button", standby ? "mini" : "mini primary", busy ? "…" : standby ? "Acknowledge" : "Accept");
     acc.type = "button";
-    acc.title = "Make a pending event from it (nothing is dispatched)";
+    acc.title = standby ? "Seen: Alert 1 is a standby, no event is made"
+      : a.incident_id ? "Take its queued event (nothing is dispatched)"
+      : "Make a pending event from it (nothing is dispatched)";
+    if (standby && d.acknowledged) {
+      row.append(el("span", "aa-ack", `Acknowledged${d.acknowledged.by ? ` · ${d.acknowledged.by}` : ""}`));
+      acc.hidden = true;
+    }
     const dis = el("button", "mini pa-dismiss", busy ? "…" : "Dismiss");
     dis.type = "button";
     dis.title = "Nothing to it: take it off the list (logged)";
@@ -164,12 +174,13 @@ window.AirportAlerts = (() => {
       acc.disabled = dis.disabled = true;
       try {
         const r = await deps.api("POST", `/api/cad/airport-alert/${a.id}/${what}`, { operator: deps.operator() });
-        if (what === "accept" && r && r.incident) {
+        if (what === "accept" && r && r.acknowledged) UI.toast("Acknowledged · standby", "ok");
+        else if (what === "accept" && r && r.incident) {
           UI.toast(`Event ${r.incident.number || r.incident.id} pending · not dispatched`, "ok");
           if (deps.select) deps.select(r.incident.id);
         }
       } catch (err) {
-        UI.toast(`${what === "accept" ? "Accept" : "Dismiss"} failed: ${err.message}`, "err");
+        UI.toast(`${what === "accept" ? (standby ? "Acknowledge" : "Accept") : "Dismiss"} failed: ${err.message}`, "err");
       } finally {
         st.busy.delete(a.id);
       }
@@ -187,7 +198,8 @@ window.AirportAlerts = (() => {
     if (window.AircraftLayer && AircraftLayer.alerts) AircraftLayer.alerts(items);    // ringed on the map while open
     list.hidden = !items.length;
     const sig = JSON.stringify(items.map((a) => [a.id, a.title, a.count, a.confidence, st.busy.has(a.id), st.playing,
-                                                 (a.data || {}).lines, alarmWord(a.data || {}, deps.alarms)]));
+                                                 (a.data || {}).lines, alarmWord(a.data || {}, deps.alarms),
+                                                 a.incident_id, (a.data || {}).acknowledged]));
     if (list._sig === sig) return;
     list._sig = sig;
     if (st.hovered && window.AircraftLayer && AircraftLayer.hover) AircraftLayer.hover([]);   // the hovered card is redrawn

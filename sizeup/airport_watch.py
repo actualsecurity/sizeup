@@ -14,7 +14,10 @@ mostly without a callsign. This watch keeps a short memory per aircraft instead.
                     about the ground in it) the one airborne aircraft whose track just went around. Otherwise it waits
                     ORPHAN_S for the next aircraft named on the channel that can be it: airborne (never one on the
                     ground or departing), and no other aircraft's track went around; ambiguous: it stays unassigned.
-                    "Traffic going around" said to another aircraft is not that aircraft's go-around
+                    "Traffic going around" said to another aircraft is not that aircraft's go-around, and a controller's
+                    words TO an aircraft about another one ("<callsign>, hold short, emergency aircraft on final", a traffic
+                    advisory) are not that aircraft's abnormal phrases (aimed_elsewhere; never "mayday", "we're declaring",
+                    "your left brake": #353)
     go-around       "go around", "going around", "missed approach", "going missed" (GO_AROUND); or the aircraft's own
                     track: arriving in the last ADSB_ARRIVING_S, now near / departing / low and not descending (the
                     Aircraft layer's PhaseMemory, #279: a climb after an approach)
@@ -24,14 +27,16 @@ mostly without a callsign. This watch keeps a short memory per aircraft instead.
                     "some airspace". What a normal flight says never counts: "flaps 20", "gear down", "checklist
                     complete", the before / after takeoff checklist, "divert around the weather", "unable to maintain
                     visual separation", a brush fire's smoke (sizeup/atc.py's). Training ("practice", "low approach")
-                    counts for nothing. Mis-hearings are fixed first (fuzzy(): "flat fail" -> flap fail, "flats" ->
+                    counts for nothing, and neither do weak phrases alone around the weather's words (WEATHER: "unable to
+                    land with this weather, divert to our alternate", "single engine taxi" on the ground). Mis-hearings are fixed first (fuzzy(): "flat fail" -> flap fail, "flats" ->
                     flaps, "go round"; a go-around cut off at "we have a flat" is a flap problem)
     the pre-alert   source "atc", kind "abnormal", subject acft:<callsign> (the same one sizeup/atc.py's rules make for the
                     aircraft, so the two never show twice):
                       a go-around (words or track) and a strong phrase, or two kinds, from the aircraft within WINDOW_S
                       one transmission with two strong kinds, or three kinds with one strong
                       two transmissions or more with abnormal phrases (one of them strong) within WINDOW_S
-                    A clip that started over STALE_S ago (a re-run, a late delivery) raises nothing (added to an open one)
+                    A clip that started over STALE_S ago (a re-run, a late delivery) raises nothing (added to an open one);
+                    a re-run of a transmission heard before replaces what it said (never stacks on it)
                     confidence: conf(); escalated (added to it, higher) on each further abnormal transmission and when
                     the track confirms the go-around. Every later transmission of the aircraft, on any of our airband
                     channels, is added to it while it is open
@@ -69,12 +74,21 @@ mostly without a callsign. This watch keeps a short memory per aircraft instead.
                     Airport incident at the airport (never dispatched), which the county's event or the 60 Control page
                     attaches to when it comes (sizeup/cad/sources.py alert_incident; in 60 Control mode the county's
                     event makes it tracked). [atc] alert_level_incident = [2, 3] (the default) says which levels make one.
+                    One incident per call: the county's event or the page that came first is the one (_open_event), and
+                    one that comes after attaches (alert_incident; dispatched up to SAME_CALL_S before the declaration
+                    too). Alert 1 is never an incident: not as a setting, and the county's or the page's "AIRPORT ALERT 1"
+                    joins the standby pre-alert (standby(); the county's never pushed); its card says Acknowledge (no event).
                     An upgrade (1 -> 2) escalates the same pre-alert into the incident; a cancel ends a pre-alert and is a
                     line on an incident's timeline (never closes it). An alert with its incident open never expires; one
-                    a person accepted takes a later level only for the same aircraft (type)
+                    a person accepted takes a later level for the same aircraft (type), or with no type said, a repeat of
+                    its level within MATCH_WINDOW_S. The level is kept per transmission (_said): a re-run (re-transcription)
+                    replaces its own, so a misheard higher first reading comes back down (an incident it made alone taken
+                    back)
     first           both kinds poll the county's feed at once (Sources.poke: the station's sources_poll_now), so its
                     event comes as early as it can; ATC's is a "possible incoming" (the earliest warning, never an
-                    incident), 60 Control's the highest (pushed at the top priority, listed first) in either dispatch mode
+                    incident), 60 Control's the highest (pushed at the top priority, listed first) in either dispatch mode.
+                    A level pushed (and polled for) again only above any pushed, or REPUSH_S after (1 -> 2 -> 1 -> 2: once).
+                    Not [atc] enabled's: that setting is the airband's (heard_atc, tick)
 
 Never anything outside the CAD of record: the app feeds it there only (App._atc, Cad._on_text, the Aircraft layer's
 on_view)."""
@@ -110,6 +124,7 @@ INCIDENT_LEVELS = (2, 3)        # the alert levels PCFD responds to (the departm
 ATTACH_S = 60 * 60.0            # a tower pre-alert updated this recently can take the alert level
 MHZ_TOL = 0.006
 RETURN_S = 60.0                 # heard on the tower this long after a hand-off: back (sooner, only with its words)
+REPUSH_S = 5 * 60.0             # an alert level pushed (and the feed polled) again: a level above any pushed, or this long after
 
 _FIX = [   # speech-to-text mis-hearings, on atc.normalize() text
     (re.compile(r"\bflat(?=\s+(?:fail|failure|failed|fault|indication|problem|problems|issue|issues|stuck|asymmetry|"
@@ -143,7 +158,8 @@ _ABN = [
     ("engine", "engine", True,
      r"engine (?:\w+ )?(?:fail|failure|failed|out|problem|problems|issue|issues|fire|shut ?down|shutdown|vibration|surge|"
      r"surging|rough|loss|quit|chip)|lost (?:an |the |one |our |number (?:one|two|1|2) )?engine|single engine (?:approach|"
-     r"landing)|flame ?out|loss of (?:power|thrust)", ""),
+     r"landing)|flame ?out|loss of (?:power|thrust)",
+     r"^.*\bsingle engine taxi.*$|shut ?down (?:for|to) (?:the )?taxi"),   # ground ops: an engine shut down to taxi
     ("smoke", "smoke", True,      # on board: smoke off the field (a brush fire) is sizeup/atc.py's
      r"smoke (?:in|on) (?:the |our )?(?:cockpit|cabin|flight deck|aircraft|airplane|plane|lav\w*|galley)|smoke on ?board|"
      r"(?:we have|we ve got|we got|we re getting|getting) (?:some )?smoke|fumes|burning smell|smell (?:of )?(?:smoke|burning)|"
@@ -166,14 +182,22 @@ _ABN = [
      r"divert\w*|diversion|(?:a |to |the )?different airport|another airport|alternate airport|"
      r"go(?:ing)? to (?:our |the )?alternate|land (?:somewhere )?else",
      r"divert\w* (?:around|from|left|right)|deviat\w*|alternate (?:taxiway|runway|route|frequency)|another airport (?:in the "
-     r"area )?reports?|(?:diverting|diverted|came) from"),
+     r"area )?reports?|(?:diverting|diverted|came) from|divert\w* (?:\w+ ){0,3}?(?:for|because of|due to) (?:the )?"
+     r"(?:weather|wx|visibility|ceilings?|minimums|fog|wind ?shear)"),
     ("unable", "unable", False,
-     r"unable (?:to )?(?:land|extend|retract|lower|raise|get (?:the )?(?:gear|flaps?)|hold altitude|control)", ""),
+     r"unable (?:to )?(?:land|extend|retract|lower|raise|get (?:the )?(?:gear|flaps?)|hold altitude|control)",
+     r"unable (?:to )?land (?:\w+ ){0,4}?(?:weather|wx|visibility|ceilings?|minimums|mins|fog|wind ?shear|crosswind|tailwind|"
+     r"conditions)"),
     ("problem", "a problem", False,
      r"(?:fail|failure) indication|(?:we ve|we have|we got|we ve got|got) (?:a |an |some )?(?:problem|indication|"
      r"malfunction)|troubleshoot\w*|(?:some|block of|a block of) airspace|work(?:ing)? (?:the |a |this |our )?"
      r"(?:problem|issue)", r"problem with (?:the |our |my )?(?:clearance|flight plan|route|wind|weather)"),
 ]
+# the weather's plan, not trouble: a miss for the weather and a trip to the alternate (weak phrases alone: quiet, _story)
+WEATHER = re.compile(r"\b(?:weather|wx|minimums|below mins|visibility|ceilings?|fog|wind ?shear|crosswind|tailwind|"
+                     r"(?:no|not) (?:\w+ )?(?:runway|lights|field) (?:in sight|insight)|(?:runway|field|lights) not in sight|"
+                     r"(?:couldn t|could not|didn t|did not|can t|cannot) (?:\w+ )?(?:see|get|find) (?:the )?(?:runway|lights|field)|"
+                     r"(?:our|the|my) alternate(?! (?:taxiway|runway|route|frequency)))\b")
 # training, not trouble: an exchange that says so counts for nothing (a practice single-engine approach, a low approach)
 PRACTICE = re.compile(r"\b(?:practice|training|low approach|touch and go|the option|simulated|check ?ride)\b")
 FLAT_END = re.compile(r"\b(?:have|got|with) (?:a |some )?flats?$")    # "...go around, we have a flat." (cut off)
@@ -223,6 +247,36 @@ GROUND_CUE = re.compile(r"\b(?:taxi\w*|ramp|gate|parking|hold(?:ing)? short|on t
                         r"hangar)|stop(?:ped)? on|blocking)\b")
 
 
+# a controller's traffic advisory or instruction to an aircraft, about another one ("hold short, emergency aircraft on
+# final", "traffic is an emergency aircraft on a five mile final"): its abnormal words are not the named aircraft's
+ADVISORY = re.compile(r"\b(?:traffic|caution|be advised|emergency (?:aircraft|traffic|in progress|vehicles?|equipment|trucks?)|"
+                      r"(?:an|the|another) (?:aircraft|airplane|jet) (?:with|declaring|on (?:a )?(?:\w+ )?(?:mile )?final)|"
+                      r"(?:equipment|trucks?|crash crew) (?:rolling|on|crossing|responding))\b")
+# ... unless it is theirs: an emergency of its own (#353: never silenced), the controller's words about it ("your left
+# brake is smoking"), or (no advisory in it) the aircraft's own words ("we have ...")
+OWN_EMERGENCY = re.compile(r"\b(?:may ?day|pan pan|(?:we re|we are|we|i m|i am) (?:\w+ )?declar\w*)\b")
+YOURS = re.compile(r"\byour (?:\w+ ){0,2}(?:brakes?|engines?|gear|flaps?|wheels?|tires?|hydraulics?|smoke|fire|aircraft|"
+                   r"airplane)\b|\byou (?:have|ve got|got|re on|are on) (?:a |an |some )?(?:\w+ )?(?:smoke|fire|fuel|flames?|leak)\b")
+FIRST_PERSON = re.compile(r"\b(?:we|we re|we ve|we have|we are|we got|our|i m|i have|i ve|my)\b")
+
+
+def aimed_elsewhere(norm: str, called_first: bool, plane: dict | None) -> bool:
+    """A controller's words TO the named aircraft whose abnormal phrases are about another one: the callsign first (the
+    controller calls it; a pilot ends with it, or starts with the facility), and a traffic advisory in it, or (none of
+    the aircraft's own words in it) a ground instruction ("hold short", "taxi") or the aircraft on the ground on ADS-B.
+    Never when it is theirs: "mayday", "we're declaring" (#353: an aircraft's own emergency words are never
+    silenced), the controller's words about it ("your left brake is smoking")."""
+    if not called_first:                                # the aircraft's own transmission, or unknown
+        return False
+    if OWN_EMERGENCY.search(norm) or YOURS.search(norm):
+        return False
+    if ADVISORY.search(norm):
+        return True
+    if FIRST_PERSON.search(norm):
+        return False
+    return bool(GROUND_CUE.search(norm) or airborne(plane) is False)
+
+
 def go_around(norm: str) -> str:
     m = GO_AROUND.search(OTHERS_GO_AROUND.sub(" ", norm))
     return m.group(0) if m else ""
@@ -254,6 +308,13 @@ _FACILITY = re.compile(r"\b(?P<f>approach|departure|center|centre|ground|tower|c
 _RETURN = re.compile(r"\b(?:on the (?:visual|ils|rnav|localizer|gps|approach)|tower\b|with you|westchester tower)")
 
 
+# a number said after these words, or before these, is never a frequency ("runway 34, three miles" is not 134.3)
+NOT_FREQ_BEFORE = frozenset(("altimeter", "squawk", "heading", "wind", "maintain", "climb", "descend", "runway", "runways",
+                             "rwy", "final", "miles", "mile", "speed", "altitude", "level", "number", "turn", "fly", "radial"))
+NOT_FREQ_AFTER = frozenset(("mile", "miles", "mi", "dme", "knots", "knot", "kts", "feet", "foot", "ft", "thousand",
+                            "hundred", "degrees", "final", "left", "right", "center", "heading", "oclock"))
+
+
 def _num(tokens: str) -> int | None:
     parts = tokens.split()
     if all(p.isdigit() for p in parts):
@@ -282,8 +343,11 @@ def frequency(norm: str) -> tuple[float, int] | None:
             w += 100
         mhz = float(f"{w}.{fr}")
         before = norm[:m.start()].split()[-1:]
-        if before and before[0] in ("altimeter", "squawk", "heading", "wind", "maintain", "climb", "descend"):
-            continue                                     # "altimeter 29.92", not a frequency
+        if before and before[0] in NOT_FREQ_BEFORE:
+            continue                                     # "altimeter 29.92", "runway 34, 3 miles": not a frequency
+        after = norm[m.end():].split()[:1]
+        if after and after[0] in NOT_FREQ_AFTER:
+            continue                                     # "... 34 3 miles", "... 30 5 knots"
         if 118.0 <= mhz <= 137.0 and channel_spacing(mhz, eight33=len(fr) == 3):
             return round(mhz, 3), m.start()
     return None
@@ -413,6 +477,8 @@ class Track:
     hex: str | None = None
     type: str = ""
     goaround: list = field(default_factory=list)          # times (words)
+    ga_tx: dict = field(default_factory=dict)            # transmission id -> its go-around's time (a re-run replaces it)
+    weather: list = field(default_factory=list)          # (at, tid): the weather's words (a miss for the weather)
     adsb_ga: float | None = None                         # the track's go-around (climb after approach)
     abn: list = field(default_factory=list)              # (at, kind, label, strong, tid)
     snippets: list = field(default_factory=list)
@@ -454,7 +520,7 @@ CANCEL = re.compile(r"\balert\b(?:\s+\w+){0,3}?\s+(?:is\s+|has been\s+|been\s+|w
 # a cancel is the airport's only with the aircraft or the airport in it (or the open alert's own level)
 CANCEL_CONTEXT = re.compile(r"\b(?:aircraft|airplane|plane|jet|helicopter|pilot|flight|hpn|airport|westchester|runway|"
                             r"tower|arff)\b")
-CAR = re.compile(r"\bcar (\d{2,5})\b")                 # the airport car that declares it ("car 4417")
+CAR = re.compile(r"\bcar (\d{2,5})\b")                 # the airport car that declares it ("car 9901")
 DRILL = re.compile(r"\b(?:drill|exercise|tabletop|simulated|this is a test)\b")
 OTHER_AIRPORTS = re.compile(r"\b(?:danbury|teterboro|laguardia|la guardia|kennedy|jfk|newark|stewart|bradley|islip|macarthur|"
                             r"oxford|sikorsky|tweed|bridgeport|poughkeepsie|dutchess|sullivan|republic|farmingdale)\b")
@@ -463,7 +529,7 @@ OUR_AIRPORT = ("westchester", "west chester", "hpn", "white plains")    # [atc] 
 
 def other_airport(norm: str, ours: Iterable[str] = OUR_AIRPORT) -> bool:
     """Another airport named from OTHER_AIRPORTS ("Danbury airport has an alert 1"), and none of ours: not HPN's alert.
-    Only those names: "airport car 4417", "the airport alert" and an unknown "<word> airport" stay ours."""
+    Only those names: "airport car 9901", "the airport alert" and an unknown "<word> airport" stay ours."""
     if any(re.search(rf"\b{re.escape(o)}\b", norm) for o in ours):
         return False
     return bool(OTHER_AIRPORTS.search(norm))
@@ -564,7 +630,8 @@ class AirportWatch:
         self.channels = Channels(())
         self.aircraft: Callable[[], list[dict]] = lambda: []
         self.incident_levels: frozenset[int] = frozenset(INCIDENT_LEVELS)
-        self.enabled = True                               # [atc] enabled (the app's)
+        self.enabled = True                               # [atc] enabled (the app's): the airband side only (heard_atc,
+                                                          # tick); 60 Control's alert levels (heard_radio) always
         self.airport_names: tuple[str, ...] = OUR_AIRPORT    # ours, when another is named too ([atc] airport_names)
         self.cad = getattr(alerts, "cad", None)
         self.store = getattr(alerts, "store", None)
@@ -573,7 +640,9 @@ class AirportWatch:
         self._last: dict[str, tuple[float, str]] = {}   # channel -> (when, track key): the exchange
         self._arriving: dict[str, float] = {}           # hex -> last seen arriving (the track's go-around)
         self._adsb_ga: dict[str, float] = {}            # hex -> when its track showed a go-around
-        self._orphans: dict[str, list] = {}             # channel -> [(at, snippet, hits, go-around)]: nobody named yet
+        self._orphans: dict[str, list] = {}             # channel -> [(at, snippet, hits, go-around, weather)]: nobody named yet
+        self._atc_seen: dict[str, float] = {}           # airband transmission id -> when: a re-run replaces it
+        self._said: dict[str, dict] = {}                # fire-radio transmission id -> {row, level, change, at}: per tx
         self._lock = threading.RLock()
         self.raised = 0
 
@@ -586,7 +655,8 @@ class AirportWatch:
         self.airband |= {c.label for c in self.channels.air}
         if aircraft is not None:
             self.aircraft = aircraft
-        self.incident_levels = frozenset(int(x) for x in incident_levels)
+        # Alert 1 is a standby (the department): never an incident, whatever the setting says (config.py rejects it)
+        self.incident_levels = frozenset(int(x) for x in incident_levels if int(x) in INCIDENT_LEVELS)
 
     @property
     def index(self) -> atc.TelephonyIndex:
@@ -702,9 +772,14 @@ class AirportWatch:
         practice = bool(PRACTICE.search(norm))
         ga = "" if practice else go_around(norm)
         planes = self._planes()
+        tid = str(t.get("id") or "")
         with self._lock:
             self._observe(planes, now)
             self._forget(now)
+            if tid and tid in self._atc_seen and not stale:   # a re-run: it replaces what that transmission said before
+                self._unsay(tid)
+            if tid:
+                self._atc_seen[tid] = now
             keen = not practice and bool(ga or abnormal(norm) or (FLAT_END.search(norm) and self._orphans_on(ch, at)))
             cs, h, plane, how = self._who(ch, text, rec, planes, at, keen=keen, ground=bool(GROUND_CUE.search(norm)))
             if how == "named":                            # every aircraft named: an exchange never reaches past it
@@ -714,6 +789,9 @@ class AirportWatch:
                                           or self._orphans_on(ch, at)):
                 norm = FLAT_END.sub(lambda m: m.group(0).rsplit(" ", 1)[0] + " flap problem", norm)   # cut off: "a flat"
             hits = [] if practice else abnormal(norm)
+            if hits and cs and how != "adsb" and aimed_elsewhere(norm, self._called_first(text), plane):
+                hits = []                                 # the controller's words to it about another aircraft
+            wx = not practice and bool(WEATHER.search(norm))
             snip = {"id": str(t.get("id") or ""), "at": at, "channel": ch, "text": text[:400],
                     "hits": [w for _a, w in hits] + ([ga] if ga else []), "context": not (hits or ga)}
             if stale:
@@ -722,7 +800,7 @@ class AirportWatch:
                 return None
             if not cs:
                 if hits or ga:                            # nobody named: the next aircraft named (or ADS-B's go-around)
-                    self._orphans.setdefault(ch, []).append((at, snip, hits, ga))
+                    self._orphans.setdefault(ch, []).append((at, snip, hits, ga, wx))
                 return None
             orphans = self._take_orphans(ch, at, cs, h, plane) if how == "named" else []
             tr = self._track(cs, h, plane, create=bool(hits or ga or orphans or practice))
@@ -737,9 +815,13 @@ class AirportWatch:
                 tr.practice_at = at
             if atc_scope.facility(ch) == "tower" and not tr.home:
                 tr.home = ch
-            for o_at, o_snip, o_hits, o_ga in orphans + [(at, snip, hits, ga)]:
+            for o_at, o_snip, o_hits, o_ga, o_wx in orphans + [(at, snip, hits, ga, wx)]:
                 if o_ga:
                     tr.goaround.append(o_at)
+                    if o_snip["id"]:
+                        tr.ga_tx[o_snip["id"]] = o_at
+                if o_wx:
+                    tr.weather.append((o_at, o_snip["id"]))
                 for a, _w in o_hits:
                     tr.abn.append((o_at, a.kind, a.label, a.strong, o_snip["id"]))
                 if o_hits or o_ga or (orphans and o_snip is snip):     # (the one that named it: context)
@@ -750,6 +832,26 @@ class AirportWatch:
                     self._more(tr, o[1], True, False)
                 return self._more(tr, snip, bool(hits or ga or orphans), moved)
             return self._maybe_raise(tr, ch, at)
+
+    def _called_first(self, text: str) -> bool:
+        """The transmission starts with a callsign (the controller calling an aircraft; a pilot ends with it)."""
+        try:
+            ms = atc.find_mentions(text, self.index)
+        except Exception:  # noqa: BLE001
+            return False
+        return bool(ms) and min(m.start for m in ms) == 0
+
+    def _unsay(self, tid: str) -> None:
+        """A re-run of transmission tid (a re-transcription): what it said before is taken back, so the new reading
+        replaces it (never stacks on it)."""
+        for tr in self.tracks.values():
+            tr.abn = [x for x in tr.abn if x[4] != tid]
+            tr.weather = [x for x in tr.weather if x[1] != tid]
+            g = tr.ga_tx.pop(tid, None)
+            if g is not None and g in tr.goaround:
+                tr.goaround.remove(g)
+        for ch, waiting in self._orphans.items():
+            self._orphans[ch] = [o for o in waiting if o[1]["id"] != tid]
 
     def _orphans_on(self, ch: str, at: float) -> bool:
         return any(0 <= at - o[0] <= ORPHAN_S for o in self._orphans.get(ch, ()))
@@ -774,6 +876,10 @@ class AirportWatch:
     def _forget(self, now: float) -> None:
         for k in [k for k, tr in self.tracks.items() if tr.alert_id is None and now - tr.last_at > KEEP_S]:
             del self.tracks[k]
+        for memo, keep in ((self._atc_seen, KEEP_S), (self._said, LEVEL_KEEP_S)):
+            if len(memo) > 200:
+                for k in [k for k, v in memo.items() if now - (v if isinstance(v, float) else v["seen"]) > keep]:
+                    del memo[k]
 
     def _handoff(self, tr: Track, ch: str, norm: str, at: float) -> bool:
         """A frequency change for the aircraft of an open pre-alert, or the aircraft heard elsewhere: its Where. True
@@ -817,6 +923,8 @@ class AirportWatch:
         kind = lambda k: "divert" if k == "fuel_left" else k        # noqa: E731
         kinds = {kind(x[1]) for x in abn}
         strong = {x[1] for x in abn if x[3]}
+        if not strong and any(abs(at - w[0]) <= WINDOW_S for w in tr.weather):
+            return None                                   # a miss for the weather, the alternate: the weather's plan
         by_tx: dict[str, list] = {}
         for x in abn:
             by_tx.setdefault(x[4], []).append(x)
@@ -993,18 +1101,23 @@ class AirportWatch:
 
     def heard_radio(self, t: dict) -> dict | None:
         """One fire-radio transcript {id, channel, talkgroup, start, text}: an alert level declared, changed or canceled.
-        A declaration is read before a cancel ("cancel the alert 1, upgrading to an alert level 2" is an upgrade)."""
+        A declaration is read before a cancel ("cancel the alert 1, upgrading to an alert level 2" is an upgrade). Not
+        [atc] enabled's: 60 Control's alert levels are the fire radio's (that setting is the airband's). A re-run of a
+        transmission (a re-transcription, Comms.record) replaces what it said before: the level is kept per
+        transmission (_said), so a misheard higher first reading comes back down."""
         text = str(t.get("text") or "").strip()
-        if not self.enabled or not text or not self.handles_radio(str(t.get("channel") or ""), t.get("talkgroup")):
+        if not text or not self.handles_radio(str(t.get("channel") or ""), t.get("talkgroup")):
             return None
         at = float(t.get("start") or self.clock())
+        tid = str(t.get("id") or "")
         norm = airport._norm(text)
-        if other_airport(norm, self.airport_names):
-            return None
         with self._lock:
+            rerun = self._said.get(tid) if tid else None
+            if other_airport(norm, self.airport_names):
+                return self._reheard(rerun, t, text, at, None, False) if rerun else None
             cur = self._level_row()
             prev = int(((cur or {}).get("data", {}).get("alert_level") or {}).get("level") or 0)
-            if self.clock() - at > STALE_S:              # a re-run or a late clip: on the open one at most
+            if rerun is None and self.clock() - at > STALE_S:     # a late clip: on the open one at most
                 if cur is not None:
                     self.alerts.add_to(cur["id"], self._quiet(cur, self._snip(t, text, at, [])))
                 return None
@@ -1022,14 +1135,131 @@ class AirportWatch:
                     (bool(t.get("talker")) and t.get("talker") == was.get("talker"))
                 if not ctx and not (cur is not None and same and (change or n == prev)):
                     n = None
+            if rerun is not None:
+                return self._reheard(rerun, t, text, at, n, change)
             if n is not None:
                 d = {"level": n, **facts(norm), "drill": bool(DRILL.search(norm)),
                      "car": car.group(1) if car else "", "talker": str(t.get("talker") or "")}
-                return self._declared(t, text, at, d, change)
+                out = self._declared(t, text, at, d, change)
+                self._remember(tid, out, n, change, at)
+                return out
             if CANCEL.search(norm) and ((cur is not None and lv and lv[0] == prev)
                                         or CANCEL_CONTEXT.search(norm) or airport._TYPES.search(norm)):
                 return self._cancel(t, text, at)
             return None
+
+    def standby(self, label: str, ref: str, text: str, at: float, push: bool = True) -> dict | None:
+        """The county's event or a page for an HPN Alert 1 (sources.py, Cad.from_monitor): never an incident (the
+        department: Alert 1 is a standby). It is the Alert 1 pre-alert: added to the open one (or the open alert of a
+        higher level), else the standby pre-alert raised from it. push=False (the county's feed: its details stay in
+        the CAD): never pushed nor polled for; 60 Control's own declaration of it pushes later."""
+        norm = airport._norm(text)
+        with self._lock:
+            t = {"id": "", "channel": label, "start": at, "text": text}
+            d = {"level": 1, **facts(norm), "drill": bool(DRILL.search(norm)), "car": "", "talker": ""}
+            out = self._declared(t, text, at, d, push=push)
+            self._remember(f"{label}:{ref}", out, 1, False, at)
+            return out
+
+    def _remember(self, tid: str, row: dict | None, n: int, change: bool, at: float) -> None:
+        if tid and row is not None:
+            self._said[tid] = {"row": row["id"], "level": n, "change": change, "at": at, "seen": self.clock()}
+        if len(self._said) > 200:
+            now = self.clock()
+            for k in [k for k, v in self._said.items() if now - v["seen"] > LEVEL_KEEP_S]:
+                del self._said[k]
+
+    def _row_level(self, rid: int) -> int | None:
+        """The alert level its transmissions say, in order: the first; then a change sets it, a repeat never lowers it."""
+        lvl = None
+        for e in sorted((e for e in self._said.values() if e["row"] == rid and e["level"]), key=lambda e: e["at"]):
+            lvl = e["level"] if lvl is None or e["change"] else max(lvl, e["level"])
+        return lvl
+
+    def _reheard(self, e: dict, t: dict, text: str, at: float, n: int | None, change: bool) -> dict | None:
+        """A re-run of a transmission this watch read before (e): its corrected text on the pre-alert, and when the level
+        it says changed, the alert's level from its transmissions as they read now (up or down); an incident the
+        misheard level made alone is taken back (Alert 1: never an incident)."""
+        row = self._row(e["row"])
+        if row is None:
+            return None
+        snip = self._snip(t, text, at, [f"alert level {n}"] if n else [])
+        if row["status"] == "open":
+            self.alerts.add_to(row["id"], self._quiet(row, snip))
+        if n == e["level"] and change == e["change"]:
+            return self._row(row["id"])
+        e.update(level=n, change=change, seen=self.clock())
+        was = row["data"].get("alert_level") or {}
+        p = int(was.get("level") or 0)
+        lv = self._row_level(row["id"])
+        if lv is None:                                   # never an alert level after all
+            if row["status"] == "open" and row["source"] == "radio":
+                self._unmake(row, "re-heard: no alert level in it")
+                return self.alerts.end_id(row["id"], "re-heard: no alert level in it")
+            return self._row(row["id"])
+        if lv == p:
+            return self._row(row["id"])
+        d = dict(was, level=lv)
+        title = level_title(d)
+        hm = datetime.fromtimestamp(at, TZ).strftime("%H:%M")
+        line = ["Alert", f"re-heard: Alert {p} → {lv} {hm} · {str(t.get('channel') or '60 Control')}"]
+        if row["status"] == "open":
+            lines = [x for x in (row["data"].get("lines") or []) if x[0] != "Alert"] + [line]
+            self.alerts.update_id(row["id"], title=title, lines=lines, data={
+                "alert_level": d, "event": {"type": airport.TYPE, "subtype": airport.ALERTS.get(str(lv), "")}})
+            if lv > p:
+                self._escalated(row["id"], lv)
+        out = self._row(row["id"]) or row
+        self.log(f"airport watch: re-heard: {title} (pre-alert #{out['id']})")
+        if out.get("incident_id"):
+            if lv in self.incident_levels or not (out["status"] == "open" and self._unmake(out, f"re-heard as Alert {lv}")):
+                self._incident(out, d, title, text, at)
+        elif out["status"] == "open" and lv in self.incident_levels and not d.get("drill"):
+            self._incident(out, d, title, text, at)
+        return self._row(row["id"])
+
+    def _unmake(self, row: dict, why: str) -> bool:
+        """The queued incident this open pre-alert's level made, taken back (dismissed, the pre-alert off it): only one
+        it made alone (ALERT_SOURCE, its source_ref), no county event or page on it, nobody has worked on it."""
+        from sizeup.cad.sources import ALERT_SOURCE
+        iid = row.get("incident_id")
+        if not iid or self.store is None:
+            return False
+        try:
+            inc = self.store.incident(iid)
+            if inc["status"] != "queued" or inc["source"] != ALERT_SOURCE \
+                    or (inc["source_ref"] or "").split(":")[:2] != ["alert-level", str(row["id"])] \
+                    or self.store.one("SELECT 1 AS x FROM source_reports WHERE incident_id = ? LIMIT 1", (iid,)) \
+                    or self.cad.sources._touched_page(iid, inc["source_ref"]):
+                return False
+            self.store.dismiss(iid, operator="60 Control radio", reason=why)
+            with self.store.tx() as db:
+                db.execute("UPDATE airport_alerts SET incident_id = NULL WHERE id = ?", (row["id"],))
+            fresh = self._row(row["id"])
+            if fresh is not None and fresh["status"] == "open":
+                self.alerts.update_id(row["id"], lines=[x for x in (fresh["data"].get("lines") or []) if x[0] != "Event"])
+            self.log(f"airport watch: event {iid} dismissed ({why})")
+            return True
+        except Exception as e:  # noqa: BLE001 - the pre-alert stays
+            self.log(f"airport watch: {why}: {type(e).__name__}: {e}")
+            return False
+
+    def _escalated(self, pid: int, n: int) -> bool:
+        """It is an alert now, or a higher one: pushed again at the top priority and the county's feed polled at once
+        (Sources.poke). Not again for a level already pushed within REPUSH_S (1 -> 2 -> 1 -> 2: one push, one poll)."""
+        row = self._row(pid)
+        if row is None:
+            return False
+        al = row["data"].get("alert_level") or {}
+        now = self.clock()
+        top, last = int(al.get("top") or 0), float(al.get("pushed_at") or 0.0)
+        if n <= top and now - last < REPUSH_S:
+            return False
+        if row["status"] == "open":
+            self.alerts.update_id(pid, data={"alert_level": dict(al, top=max(top, n), pushed_at=now)})
+            self.alerts.repush(pid)
+        self._poke(f"airport alert level {n}")
+        return True
 
     def _quiet(self, row: dict, snip: dict) -> AirportAlert:
         return AirportAlert(source="radio", kind="alert_level", subject="alert-level", title="",
@@ -1058,7 +1288,7 @@ class AirportWatch:
         ch = str(t.get("channel") or "")
         return {"id": str(t.get("id") or ""), "at": at, "channel": ch, "text": text[:400], "hits": hits, "context": False}
 
-    def _declared(self, t: dict, text: str, at: float, d: dict, change: bool = False) -> dict | None:
+    def _declared(self, t: dict, text: str, at: float, d: dict, change: bool = False, push: bool = True) -> dict | None:
         """An alert level said: a new pre-alert, the tower's taking it, a readback (nothing new), or a change of level
         (up: escalated, pushed again, an incident at the levels that make one; down: the title and the incident's
         subtype follow, nothing closed)."""
@@ -1070,6 +1300,7 @@ class AirportWatch:
             # a readback or a repeat: the facts said before stand where this one says none
             d = {k: (v if v not in ("", None) else prev.get(k, v)) for k, v in d.items()}
             d["drill"] = bool(prev.get("drill") or d.get("drill"))
+            d.update({k: prev[k] for k in ("top", "pushed_at") if k in prev})     # what was pushed (_escalated)
             if not change:
                 d["level"] = max(int(d["level"]), p)
         target = cur or self._tower_row(d)
@@ -1086,16 +1317,19 @@ class AirportWatch:
                          event={"type": "AIRPORT", "subtype": airport.ALERTS.get(str(n), "")})
         if target is not None:
             if p == n and cur is not None:               # a readback, a repeat: added, nothing else
-                return self.alerts.add_to(target["id"], self._quiet(target, dict(snip, context=False)))
+                out = self.alerts.add_to(target["id"], self._quiet(target, dict(snip, context=False)))
+                if push and out is not None and not prev.get("pushed_at"):
+                    self._escalated(out["id"], n)        # first said on the radio (the feed's came quietly): pushed
+                return out
             a.lines = [x for x in (target["data"].get("lines") or []) if x[0] not in ("Alert", "Status")] + [line]
             out = self.alerts.add_to(target["id"], a)
             if out is None:
                 return None
             out = self.alerts.update_id(out["id"], title=title, data={"alert_level": d, "event": a.event}) or out
-            if n > p:
-                self.alerts.repush(out["id"])            # it is an alert now (or a higher one): pushed again
+            if n > p and push:
+                self._escalated(out["id"], n)            # it is an alert now (or a higher one): pushed again, polled
         else:
-            took = self._taken_level(d, title, text, at)
+            took = self._taken_level(d, title, text, at, change)
             if took is not None:                          # a person accepted it already: its event follows
                 return took
             a.lines, a.push = [line], False               # pushed below, once its level is on it (the top priority)
@@ -1103,10 +1337,10 @@ class AirportWatch:
             if out is None:
                 return None
             out = self.alerts.update_id(out["id"], data={"alert_level": d}) or out
-            self.alerts.repush(out["id"])                 # raised with its level: pushed at the top priority
+            if push:
+                self._escalated(out["id"], n)             # raised with its level: pushed at the top priority, polled
+        out = self.alerts.get(out["id"])
         self.log(f"airport watch: {title} (pre-alert #{out['id']})")
-        if n > p:
-            self._poke(f"airport alert level {n}")
         if out.get("incident_id"):                        # its event follows the level, up or down (never closed)
             out = self._incident(out, d, title, text, at) or out
         elif n > p and n in self.incident_levels and not d.get("drill"):
@@ -1120,19 +1354,47 @@ class AirportWatch:
         except Exception as e:  # noqa: BLE001 - never in the way
             self.log(f"airport watch: poll now: {type(e).__name__}")
 
+    def _open_event(self, at: float) -> dict | None:
+        """The open Airport incident the county's feed or a page (or a person, from a pre-alert) made for this call
+        already, within MATCH_WINDOW_S: the alert level is that one's, never a second incident. Not one an earlier
+        alert level made (after a cancel, a new declaration is a new alert)."""
+        from sizeup.cad.sources import ALERT_SOURCE, FEED_SOURCE, MATCH_WINDOW_S, PAGE_SOURCE
+        from sizeup.cad.store import OPEN
+        return self.store.one(
+            f"SELECT * FROM incidents i WHERE i.type = ? AND i.status IN ({','.join('?' * len(OPEN))}) AND i.source != ? "
+            "AND i.created_at BETWEEN ? AND ? AND (i.source IN (?, ?) OR EXISTS (SELECT 1 FROM airport_alerts a WHERE "
+            "a.incident_id = i.id)) ORDER BY i.created_at DESC LIMIT 1",
+            (airport.TYPE, *OPEN, ALERT_SOURCE, at - MATCH_WINDOW_S, at + MATCH_WINDOW_S, FEED_SOURCE, PAGE_SOURCE))
+
     def _incident(self, row: dict, d: dict, title: str, text: str, at: float) -> dict | None:
         """An alert level PCFD responds to ([atc] alert_level_incident, Alert 2 and 3 by default): a queued Airport incident
         at the airport (never dispatched), the pre-alert on it and still shown. One already made: its subtype raised and a
-        line on its timeline. The county's event or the page attaches to it when it comes (Sources.alert_incident); in 60
-        Control mode the county's event makes it a tracked incident (sizeup/cad/automode.py)."""
+        line on its timeline. One the county's feed or a page made for it already (_open_event): that one (one incident,
+        whichever came first). The county's event or the page attaches to it when it comes (Sources.alert_incident); in
+        60 Control mode the county's event makes it a tracked incident (sizeup/cad/automode.py)."""
         cad, sub = self.cad, airport.ALERTS.get(str(d["level"]), "")
         try:
             if row.get("incident_id"):
                 inc = cad.store.incident(row["incident_id"])
-                if inc["status"] in ("queued", "pending", "active") and inc["subtype"] != sub:
+                if inc["status"] in ("queued", "pending", "active") and inc["subtype"] != sub \
+                        and not cad.sources._has_feed(inc["id"]):    # the county's fields win
                     cad.store.update_incident(inc["id"], {"subtype": sub}, "60 Control radio")
                 with cad.store.tx() as db:
                     cad.store._event(db, inc["id"], "prealert", f"60 Control: {title.removeprefix('HPN ')}: “{text[:200]}”", at=at)
+                return self.alerts.get(row["id"])
+            inc = self._open_event(at)
+            if inc is not None:                           # the county's event or the page came first: that one
+                iid = inc["id"]
+                if inc["subtype"] in ("", *airport.ALERTS.values()) and inc["subtype"] != sub and not cad.sources._has_feed(iid):
+                    cad.store.update_incident(iid, {"subtype": sub}, "60 Control radio")
+                with cad.store.tx() as db:
+                    cad.store._event(db, iid, "prealert", f"60 Control: {title.removeprefix('HPN ')}: “{text[:200]}”", at=at)
+                self.alerts._link([row["id"]], iid, inc.get("number") or "")
+                state = "queued · not dispatched" if inc["status"] == "queued" else inc["status"]
+                lines = [x for x in (row["data"].get("lines") or []) if x[0] != "Event"] + [
+                    ["Event", f"{inc.get('number') or f'event {iid}'} · {state}"]]
+                self.alerts.update_id(row["id"], lines=lines)
+                self.log(f"airport watch: {title}: on event {iid} ({inc['source']})")
                 return self.alerts.get(row["id"])
             from sizeup.cad.airport_alerts import remarks
             f = {"type": airport.TYPE, "subtype": sub, "received_via": "RADIO", "emergency": True,
@@ -1143,7 +1405,10 @@ class AirportWatch:
                 f["acft_nature"] = d["problem"][:60]
             airport.default_location(f)
             from sizeup.cad.sources import ALERT_SOURCE
-            iid = cad.store.create_incident(**f, source=ALERT_SOURCE, source_ref=f"alert-level:{row['id']}", status="queued")
+            ref = f"alert-level:{row['id']}"
+            if cad.store.by_source_ref(ref) is not None:   # one a re-run took back (_unmake): another
+                ref = f"{ref}:{int(self.clock())}"
+            iid = cad.store.create_incident(**f, source=ALERT_SOURCE, source_ref=ref, status="queued")
             inc = cad.store.incident(iid)
             with cad.store.tx() as db:
                 cad.store._event(db, iid, "prealert", f"60 Control: {title.removeprefix('HPN ')}: “{text[:200]}” · queued, "
@@ -1158,22 +1423,30 @@ class AirportWatch:
             self.log(f"airport watch: alert level {d['level']}: no event ({type(e).__name__}: {e})")
             return None
 
-    def _taken_level(self, d: dict, title: str, text: str, at: float) -> dict | None:
-        """The alert level's pre-alert a person accepted (or that expired) for the same aircraft, its event still
-        open: this level is that event's (subtype, a line), not a second one. An ended (canceled) one never: a
-        declaration after a cancel is a new alert."""
-        if self.store is None or not d.get("type"):
+    def _taken_level(self, d: dict, title: str, text: str, at: float, change: bool = False) -> dict | None:
+        """The alert level's pre-alert a person accepted (or that expired), its event still open: this level is that
+        event's (subtype, a line), not a second one. For the same aircraft (type); with no type said, a repeat of its
+        level (or a change said) within MATCH_WINDOW_S of the last word on it ("alert level 2 at the airport, runway 34"
+        again after Accept). An ended (canceled) one never: a declaration after a cancel is a new alert."""
+        from sizeup.cad.sources import MATCH_WINDOW_S
+        if self.store is None:
             return None
+        now = self.clock()
         for r in self.store.q("SELECT a.id FROM airport_alerts a JOIN incidents i ON i.id = a.incident_id WHERE "
                               "a.status IN ('accepted', 'expired') AND a.data LIKE '%\"alert_level\"%' AND a.updated_at >= ? "
                               "AND i.status IN ('queued', 'pending', 'active') ORDER BY a.id DESC",
-                              (self.clock() - LEVEL_KEEP_S,)):
+                              (now - LEVEL_KEEP_S,)):
             row = self.alerts.get(r["id"])
             was = row["data"].get("alert_level") or {}
-            types = [was.get("type", "")] + [(x or {}).get("type", "") for x in row["data"].get("aircraft") or []]
-            if not any(t and (t.lower() == d["type"].lower() or type_fits(d["type"], t) or type_fits(t, d["type"]))
-                       for t in types):
-                continue
+            if d.get("type"):
+                types = [was.get("type", "")] + [(x or {}).get("type", "") for x in row["data"].get("aircraft") or []]
+                if not any(t and (t.lower() == d["type"].lower() or type_fits(d["type"], t) or type_fits(t, d["type"]))
+                           for t in types):
+                    continue
+            else:
+                last = max(float(row.get("updated_at") or 0), float(row.get("outcome_at") or 0))
+                if now - last > MATCH_WINDOW_S or not (change or int(d["level"]) == int(was.get("level") or 0)):
+                    continue
             inc = self.store.incident(row["incident_id"])
             if int(d["level"]) in self.incident_levels or inc["subtype"] in airport.ALERTS.values():
                 self._incident(row, d, title, text, at)

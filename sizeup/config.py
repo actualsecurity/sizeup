@@ -696,8 +696,9 @@ def _atc(data: dict, base: Path) -> dict:
             raise ConfigError(f"atc.{k}: a number from {lo:g} to {hi:g}")
         nums[k] = v
     lv = a.get("alert_level_incident", [2, 3])
-    if not isinstance(lv, list) or any(isinstance(x, bool) or x not in (1, 2, 3) for x in lv):
-        raise ConfigError("atc.alert_level_incident: a list of alert levels (1, 2, 3), e.g. [2, 3] (the default); [] = pre-alerts only")
+    if not isinstance(lv, list) or any(isinstance(x, bool) or x not in (2, 3) for x in lv):
+        raise ConfigError("atc.alert_level_incident: a list of alert levels 2 and 3, e.g. [2, 3] (the default); [] = pre-alerts "
+                          "only. Never 1: an Alert 1 is a standby pre-alert, never an incident")
     names = a.get("airport_names", ["westchester", "west chester", "hpn", "white plains"])
     if not isinstance(names, list) or not names or any(not isinstance(x, str) or not x.strip() for x in names):
         raise ConfigError('atc.airport_names: a list of names, e.g. ["westchester", "west chester", "hpn", "white plains"]')

@@ -813,6 +813,8 @@ class Sources:
                 if rep is None:
                     self.log(f"incident sources: {label}: an event recorded only (closed)")
                 return None
+            if self._standby(ev.source, ev.event_id, data, label, at, prev if rep else None):
+                return None                                  # an HPN Alert 1: the standby pre-alert, never an incident
             iid = self._create_feed(ev.source, ev.event_id, data, label)
             if disp is not None and now - disp > MATCH_WINDOW_S:  # still open, first seen late (an outage, a first run)
                 with self.store.tx() as db:
@@ -821,6 +823,24 @@ class Sources:
                 self._possibly(iid, other)
             self._merge(ev.source, ev.event_id, iid, data, label)
             return iid
+
+    def _standby(self, source: str, ref: str, data: dict, label: str, at: float, prev: dict | None) -> bool:
+        """A county event for an HPN Alert 1 that joined no incident: never an incident of its own (the department: an
+        Alert 1 is a standby pre-alert, #369), so never one 60 Control mode takes as active either. It goes to the airport
+        watch's Alert 1 pre-alert (sizeup/airport_watch.py standby: the open one, or one raised from it; never pushed:
+        the county's details stay in the CAD), once per type it says; recorded here with no incident, so the event
+        makes one when it becomes an Alert 2 / 3."""
+        typ, sub = (self.cad.map_type(data["type"], label)[:2] if data["type"] else ("", ""))
+        if (typ, sub) != ("AIRPORT", "ALERT-1"):
+            return False
+        watch = getattr(self.cad, "airport_watch", None)
+        if watch is not None and (prev or {}).get("type") != data["type"]:
+            try:
+                watch.standby(label, ref, f"{label}: {data['type']}", at, push=False)
+            except Exception as e:  # noqa: BLE001 - the feed goes on
+                self.log(f"incident sources: {label}: Alert 1 standby: {type(e).__name__}")
+        self.log(f"incident sources: {label}: an Alert 1 (standby): no incident")
+        return True
 
     @staticmethod
     def _disp(data: dict) -> float | None:
@@ -1092,8 +1112,10 @@ class Sources:
 
     def alert_incident(self, source: str, at: float, typ: str, location: str) -> dict | None:
         """The open Airport incident an alert level declared on the fire radio made (#369, source ALERT_SOURCE), made
-        within MATCH_WINDOW_S before this report, that this source has no report on yet: a county event (also the same
-        call, _same_call) or a page of the Airport type attaches to it instead of making another."""
+        within MATCH_WINDOW_S before this report or SAME_CALL_S after it (60 Control often opens its event before or while
+        the car talks, and speech-to-text lags: a county event dispatched 2 min before the declaration is the same call),
+        that this source has no report on yet: a county event (also the same call, _same_call) or a page of the Airport
+        type attaches to it instead of making another."""
         from sizeup.cad import airport
         if typ != airport.TYPE:                          # an Airport / alert / aircraft type: never an EMS call at the terminal
             return None
@@ -1101,7 +1123,7 @@ class Sources:
             f"SELECT * FROM incidents i WHERE i.source = ? AND i.type = ? AND i.status IN ({','.join('?' * len(OPEN))}) "
             "AND i.created_at BETWEEN ? AND ? AND NOT EXISTS (SELECT 1 FROM source_reports r WHERE r.incident_id = i.id "
             "AND r.source = ?) ORDER BY i.created_at DESC LIMIT 1",
-            (ALERT_SOURCE, airport.TYPE, *OPEN, at - MATCH_WINDOW_S, at + SAME_CALL_BEFORE_S, source))
+            (ALERT_SOURCE, airport.TYPE, *OPEN, at - MATCH_WINDOW_S, at + SAME_CALL_S, source))
 
     def _page_same_call(self, inc: dict, at: float, typ: str) -> bool:
         """A page joins a feed's incident only for the same call: the feed's dispatch within SAME_CALL_S of the page (the
@@ -1124,7 +1146,7 @@ class Sources:
     def rematch_page(self, ref: str, iid: int, at: float, location: str, units, data: dict) -> tuple[str, int | None]:
         """A repeat of a page that made its own incident (iid) with less than it says now (#365: the tones half, a
         first reading with no location or units): matched again. When it now joins an incident a feed has (the same
-        call) and its own is still queued, made by it and untouched by anyone, its report moves there and its own is
+        call), or the airport alert level's (alert_incident, as page() does: #369), and its own is still queued, made by it and untouched by anyone, its report moves there and its own is
         dismissed: one card ("attached", that id). Otherwise each one it may be the same as is noted, once
         ("possibly", n noted)."""
         units = list(units or [])
@@ -1138,7 +1160,12 @@ class Sources:
             inc, similar = self.match_all(PAGING, at, location, units, typ, exclude=iid)
             if inc is not None and self._has_feed(inc["id"]) and not self._page_same_call(inc, at, typ):
                 inc, similar = None, [inc]
-            if inc is not None and self._has_feed(inc["id"]) and not self._touched_page(iid, data.get("ref") or ""):
+            if not (inc is not None and self._has_feed(inc["id"])):
+                al = self.alert_incident(PAGING, at, typ, location)      # the alert level declared on the radio (#369)
+                if al is not None and al["id"] != iid:
+                    inc = al
+            if inc is not None and (self._has_feed(inc["id"]) or inc["source"] == ALERT_SOURCE) \
+                    and not self._touched_page(iid, data.get("ref") or ""):
                 self._put(PAGING, ref, PAGING_RANK, PAGING_LABEL, at, rec)
                 with self.store.tx() as db:
                     db.execute("UPDATE source_reports SET incident_id = ? WHERE source = ? AND ref = ?", (inc["id"], PAGING, ref))
@@ -1178,6 +1205,10 @@ class Sources:
                                          d.get("units") or [], typ, exclude=p["id"])
                 if best is not None and best["id"] == iid and self._page_same_call(best, rep["first_seen"], typ):
                     out.append(p)
+                elif inc["source"] == ALERT_SOURCE:          # the airport alert level's incident (#369): as page() joins it
+                    al = self.alert_incident(PAGING, rep["first_seen"], typ, d.get("location") or p["address"])
+                    if al is not None and al["id"] == iid:
+                        out.append(p)
         return out
 
     def _sweep_pages(self, iid: int, cards: list[dict]) -> int:

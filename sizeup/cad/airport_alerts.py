@@ -533,10 +533,23 @@ class AirportAlerts:
         return self.get(pid)
 
     def accept(self, pid: int, body: dict) -> dict:
-        """POST /api/cad/airport-alert/<id>/accept {operator}: a new PENDING event from it (never a dispatch)."""
+        """POST /api/cad/airport-alert/<id>/accept {operator}: a new PENDING event from it (never a dispatch). An HPN
+        Alert 1 with no event (#369: a standby, never an incident): acknowledged instead (the card's "Acknowledge"),
+        no event made; it stays open (an upgrade, a hand-off, the cancel still find it)."""
         op = _who(body)
         with self._lock:
             r = self.get(self._open(pid)["id"])
+            lv = r["data"].get("alert_level") or {}
+            if lv and int(lv.get("level") or 0) == 1 and not r["incident_id"]:
+                now = self.clock()
+                d = dict(r["data"], acknowledged={"by": op, "at": now})
+                with self.store.tx() as db:
+                    db.execute("UPDATE airport_alerts SET operator = ?, data = ? WHERE id = ? AND status = 'open'",
+                               (op, json.dumps(d), pid))
+                    self._event(db, f"Airport pre-alert {_hms(r['at'])} acknowledged: {r['title']} · standby, no event",
+                                operator=op, at=now)
+                self.on_change()
+                return dict(self.get(pid), acknowledged=True)
             if r["incident_id"] and r["data"].get("alert_level"):    # #369: an alert level made its event: that one
                 inc = self.cad.store.incident(r["incident_id"])
                 now = self.clock()

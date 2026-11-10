@@ -1752,6 +1752,12 @@ class Cad:
                 self._page_enrich(got, inc, f, lines)
                 self.auto.on_page(got, list(inc.units or []), at)   # 60 Control mode: "paged", its units (#311, #365)
                 return self.store.incident(got)
+            if (typ, sub) == (airport.TYPE, "ALERT-1"):  # an HPN Alert 1 is a standby pre-alert, never an incident (#369)
+                try:
+                    self.airport_watch.standby("60 Control page", str(inc.id), " ".join(inc.page_text)[:400], at)
+                except Exception as e:  # noqa: BLE001 - the monitor goes on
+                    self.log(f"CAD: Alert 1 page: {type(e).__name__}: {e}")
+                return None
             iid = self._create_from_page(data)
             self.sources.created_by_page(str(inc.id), iid, got)
             return self.store.incident(iid)
