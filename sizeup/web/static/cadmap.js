@@ -38,6 +38,23 @@
 // near): the straight line, as before. Redrawn with the call line, on the frames that move a mark: nothing here keeps
 // the frame loop running.
 //
+// Decluttered by zoom (#376; the zooms: state.map.display, Settings > System > Map display, mapview.py DISPLAY_DEFAULTS):
+//
+//   idle (available, in quarters, returning)   below detail_zoom a dot; two or more idle at one firehouse: one badge
+//                                              under it, "HQ · 6" (its tooltip lists them; a click zooms to detail_zoom),
+//                                              the firehouse's other marks over the top
+//   active (on a call: dispatched, responding, on location, staging ...)   full chips down to active_zoom (never
+//                                              above detail_zoom nor ACTIVE_MAX), drawn over the rest; below it a
+//                                              strong dot (a stale fix's dot not faded); on the map's automatic frame
+//                                              (the area or the call, not moved by hand: RigMap.userMoved), and for
+//                                              FRESH_S after its status changed (newly dispatched ...), a full chip
+//   out of service                             below detail_zoom the smallest, faintest dot
+//   followed, picked, transmitting, its row hovered   always the full chip; a dot under the pointer opens to its chip
+//
+// The wall board has its own pair (board_*). Laid out again only on zoomend (the band crossed) and on a new state,
+// never on the frames: tick() moves marks, it never re-sizes or re-fans them. Markers are kept and re-used: a rig in a
+// badge keeps its marker, hidden (folded), so a Follow or a pick still finds it.
+//
 // Highway layers (cameras, incidents, signs, mileposts, exits) and their Layers button: maplayers.js,
 // attached to every RigMap; the event's "Cameras nearby" row from detail().
 //
@@ -47,6 +64,8 @@
 
 window.CadMap = (() => {
   const STATION_R = 34, INC_R = 30, RING_GAP = 24, CHIP_W = 48;   // px: the fan-out around an anchor
+  const DOT_R = 16, DOT_W = 14;        // px: the fan-out of dots only (#376)
+  const BADGE_DY = 22;                 // px: a firehouse's badge under its icon (#376); the rest fan out from the top
   const FAR_ZOOM = 13.6;               // below this: smaller chips, tighter rings
   const FOCUS_MAX_ZOOM = 16.3;
   const LINE = "#E0A030", HOME_LINE = "#AEB6C0";      // to a call | a returning rig's way home (thin)
@@ -70,6 +89,48 @@ window.CadMap = (() => {
     const t = window.Radio && Radio.talkingFor(name);
     return t ? (t.ended ? "talked" : "talking") : "";
   }
+
+  // ---- decluttered by zoom (#376) ----------------------------------------------------------------------------------
+  const ZOOMS = { detail_zoom: 15, active_zoom: 10, board_detail_zoom: 16, board_active_zoom: 10 };   // mapview.py's
+  const ACTIVE_MAX = 12;               // mapview.ACTIVE_MAX: an active rig full from this zoom at the latest
+  const FRESH_S = 60;                  // s: a rig just made active (dispatched, responding, on location) full this long
+  // by the hub's look (mapview.look_of): idle "available", out of service "oos", every other look (dispatched,
+  // responding, onscene: committed to a call) active: drawn over the rest, chips longest
+  const rigClass = (m) => (m.look === "available" ? "idle" : m.look === "oos" ? "oos" : "act");
+  // {detail, active}: this map's zooms (the wall board's own pair); active never above detail
+  function zoomsOf(M, board) {
+    const d = (M && M.display) || {}, p = board ? "board_" : "";
+    const z = (k) => (typeof d[p + k] === "number" && Number.isFinite(d[p + k]) ? d[p + k] : ZOOMS[p + k]);
+    const detail = z("detail_zoom");
+    return { detail, active: Math.min(z("active_zoom"), detail, ACTIVE_MAX) };
+  }
+  // the band a zoom is in: {detail: chips for all, active: chips for the active}; auto: the map on its automatic frame
+  // (the area or the call, not moved by hand): the active rigs full at any zoom
+  const bandOf = (zoom, Z, auto) => ({ detail: zoom >= Z.detail, active: !!auto || zoom >= Z.active });
+  // Each marker's size in this band: "full" | "dot" | "folded" (in its firehouse's badge), and the badges (station name
+  // -> its idle markers, two or more). lit(m): followed, picked, transmitting or its row hovered: always full.
+  function declutter(markers, band, lit) {
+    const size = new Map(), idle = new Map(), badges = new Map();
+    for (const m of markers) {
+      const c = rigClass(m), full = !!(lit && lit(m)) || (c === "act" ? band.active : band.detail);
+      size.set(m.unit, full ? "full" : "dot");
+      if (!full && c === "idle" && m.place === "station" && m.station) {
+        if (!idle.has(m.station)) idle.set(m.station, []);
+        idle.get(m.station).push(m);
+      }
+    }
+    for (const [st, list] of idle) {
+      if (list.length < 2) continue;
+      badges.set(st, list);
+      for (const m of list) size.set(m.unit, "folded");
+    }
+    return { size, badges };
+  }
+  // s left of an active rig's FRESH_S since its status changed (0: not fresh); the hub's status_at, on the hub's clock
+  const freshLeft = (m) => (rigClass(m) === "act" && typeof m.status_at === "number"
+    ? Math.max(0, FRESH_S - Math.max(0, nowS() - m.status_at)) : 0);
+  // a firehouse's short name for its badge: data/firehouses.json "short", else its first word
+  const shortOf = (M, name) => (((M && M.stations) || []).find((s) => s.name === name) || {}).short || String(name).split(/\s+/)[0];
 
   // ---- our units followed and lit up (#358): one state for every map ----------------------------------------------
   const UNIT_ZOOM = 15;                // a rig followed or picked: centred at least this close
@@ -273,6 +334,9 @@ window.CadMap = (() => {
       this.opts = opts;
       this.pins = new Map();
       this.chips = new Map();
+      this.badges = new Map();         // station name -> its badge (#376): {marker, el, sig}
+      this.band = null;                // the zoom band the rigs are laid out for (#376): set on zoomend and a new state
+      this.auto = () => false;         // RigMap: on its automatic frame (not moved by hand)
       this.data = null;
       this.focus = null;
       this.lineSig = "";
@@ -327,14 +391,31 @@ window.CadMap = (() => {
       else { map.once("load", tryInit); map.once("idle", tryInit); }
       map.on("zoom", () => {
         const far = map.getZoom() < FAR_ZOOM;
-        if (far !== this.far) { this.far = far; opts.host.classList.toggle("cm-far", far); this.draw(); }
+        if (far !== this.far) { this.far = far; opts.host.classList.toggle("cm-far", far); this.setBand(); this.draw(); }
       });
+      // #376: laid out again only if the band changed; moveend too: a drag takes the map off its automatic frame
+      const settle = () => { if (this.setBand()) this.draw(); };
+      map.on("zoomend", settle);
+      map.on("moveend", settle);
     }
 
-    update(data, focus) {
+    // the zoom band for the rigs' sizes (#376), from the map's zoom now and this map's zooms; true if it changed
+    setBand() {
+      let zoom;
+      try { zoom = this.map.getZoom(); } catch (_) { return false; }
+      const b = bandOf(zoom, zoomsOf(this.data && this.data.map, this.opts.board), this.auto());
+      const changed = !this.band || b.detail !== this.band.detail || b.active !== this.band.active;
+      this.band = b;
+      return changed;
+    }
+
+    // opt.draw false: the data only (RigMap.update draws once, after it has framed the map)
+    update(data, focus, opt) {
       this.data = data;
       this.focus = focus || null;
       feedGlide(data && data.map);
+      if (opt && opt.draw === false) return;
+      this.setBand();                  // the zooms may have changed (Settings > System > Map display)
       this.draw();
     }
 
@@ -428,10 +509,14 @@ window.CadMap = (() => {
     // Each anchor's chips on rings around it: on location (ring 0) close in, not-there-yet (ring 1) outside.
     // At a firehouse a full ring from the bottom (its name is drawn to the right); at a call an arc over
     // the top and sides, leaving the bottom for the call's label.
-    offsets(markers) {
-      const k = this.far ? 0.72 : 1, w = CHIP_W * k;
+    // #376: sizes (declutter()): a folded rig takes no place; a dot is DOT_W wide; around a badge, the chips' radius.
+    offsets(markers, sizes) {
+      const k = this.far ? 0.72 : 1;
+      const size = (m) => (sizes ? sizes.size.get(m.unit) : "full");
+      const wOf = (m) => (size(m) === "dot" ? DOT_W : CHIP_W * k);
       const groups = new Map();
       for (const m of markers) {
+        if (size(m) === "folded") continue;
         if (!groups.has(m.group)) groups.set(m.group, [[], []]);
         groups.get(m.group)[m.ring ? 1 : 0].push(m);
       }
@@ -443,17 +528,22 @@ window.CadMap = (() => {
           const m0 = list[0];
           if (m0.place === "position" || m0.place === "returning") { list.forEach((m) => out.set(m.unit, [0, 0])); return; }
           const n = list.length, deg = Math.PI / 180;
-          if (m0.place === "station") {
-            r = Math.max(ring ? r + RING_GAP * k : STATION_R * k, (n * w) / (2 * Math.PI));
+          const dots = list.every((m) => size(m) === "dot"), gap = dots ? DOT_W : RING_GAP * k;
+          const sum = list.reduce((a, m) => a + wOf(m), 0), w = Math.max(...list.map(wOf));
+          const badge = m0.place === "station" && !!(sizes && sizes.badges.has(m0.station));
+          if (m0.place === "station" && !badge) {
+            r = Math.max(ring ? r + gap : dots ? DOT_R : STATION_R * k, sum / (2 * Math.PI));
             list.forEach((m, i) => {
               const a = Math.PI / 2 + (2 * Math.PI * i) / n + (ring ? Math.PI / n : 0);
               out.set(m.unit, [Math.round(r * Math.cos(a)), Math.round(r * Math.sin(a) * 0.82)]);
             });
             return;
           }
-          const step = n > 1 ? Math.min(270 / (n - 1), 62) * deg : 0;       // centred on the top, 270° at most
+          // a call's: an arc centred on the top, 270° at most; a firehouse with a badge under it: 180° (#376: the lower
+          // arc left to the badge, nothing under it)
+          const step = n > 1 ? Math.min((badge ? 180 : 270) / (n - 1), 62) * deg : 0;
           const need = step ? w / (2 * Math.sin(step / 2)) : 0;                // neighbours a chip apart
-          r = Math.max(ring ? r + RING_GAP * k : INC_R * k, need);
+          r = Math.max(ring ? r + gap : badge ? STATION_R * k : dots ? DOT_R : INC_R * k, need);
           list.forEach((m, i) => {
             const a = -Math.PI / 2 + (i - (n - 1) / 2) * step;
             out.set(m.unit, [Math.round(r * Math.cos(a)), Math.round(r * Math.sin(a) * 0.82)]);
@@ -464,23 +554,35 @@ window.CadMap = (() => {
     }
 
     drawChips(markers, lists) {
-      const offs = this.offsets(markers);
+      // the rings (#358): picked (for a while), its row hovered (wider), followed (plain); transmitting: talk
+      const lits = new Map(markers.map((m) => [m.unit, [...(lights ? [lights.isPicked(m.unit), lights.hovered(m.unit)] : [false, false]),
+                                                         !!this.fol && this.fol.id === m.unit, talkState(m.unit)]]));
+      if (!this.band) this.setBand();
+      // #376: lit ones full; so is a rig just made active (FRESH_S), laid out again when the last of those runs out
+      let soonest = 0;
+      const sizes = declutter(markers, this.band, (m) => {
+        const left = freshLeft(m);
+        if (left > 0) soonest = soonest ? Math.min(soonest, left) : left;
+        return left > 0 || lits.get(m.unit).some(Boolean);
+      });
+      clearTimeout(this.freshT);
+      this.freshT = soonest ? setTimeout(() => this.draw(), Math.ceil(soonest * 1000) + 50) : 0;
+      const offs = this.offsets(markers, sizes);
       const seen = new Set();
       const M = this.data && this.data.map;
       this.hasFix = false;
       for (const m of markers) {
         seen.add(m.unit);
         const st = statusOf(lists, m.status);
-        const talk = talkState(m.unit);
+        const [picked, hot, followed, talk] = lits.get(m.unit), lit = [picked, hot, followed];
+        const sz = sizes.size.get(m.unit), cl = rigClass(m);
         const off = offs.get(m.unit) || [0, 0];
         const onFocus = !!this.focus && m.incident_id === this.focus.id;
         const fx = fixAge(m, M);                               // a live fix: its age, stale (hollow, faded, aged)
         if (fx) this.hasFix = true;
         const age = fx && fx.stale ? agoS(fx.age) : "";
-        // the rings (#358): picked (for a while), its row hovered (wider), followed (plain); transmitting: talk
-        const lit = lights ? [lights.isPicked(m.unit), lights.hovered(m.unit), !!this.fol && this.fol.id === m.unit] : [false, false, false];
         const sig = JSON.stringify([m.lon, m.lat, off, m.look, m.ring, m.place, st.bg, talk, m.tag, m.station, m.incident_number,
-          m.returning_from, onFocus, !!this.focus, this.far, age, fx && Math.round(fx.fade * 20), lit, m.source]);
+          m.returning_from, onFocus, !!this.focus, this.far, age, fx && Math.round(fx.fade * 20), lit, m.source, sz, cl]);
         let rec = this.chips.get(m.unit);
         if (!rec) {
           const e = h("button", "cm-rig");
@@ -497,10 +599,12 @@ window.CadMap = (() => {
         const e = rec.el;
         const keep = [...e.classList].filter((c) => c.startsWith("maplibregl-")).join(" ");   // the marker's own
         e.className = `${keep} cm-rig look-${m.look} at-${m.place}` + (m.ring ? " outer" : "") + (talk ? ` ${talk}` : "")
+          + (cl === "act" ? " act" : "") + (sz === "dot" ? " rig-dot" : sz === "folded" ? " folded" : "")
           + (this.focus && m.incident_id && !onFocus ? " other" : "") + (onFocus ? " mine" : "")
           + (fx && fx.stale ? " stale" : "") + (lit[0] ? " hl" : "") + (lit[1] ? " hot" : "") + (lit[2] ? " followed" : "");
         e.style.setProperty("--c", st.bg || "#9AA3AD");
-        e.style.opacity = fx && fx.stale ? String(Math.round(fx.fade * 100) / 100) : "";
+        // a stale fix fades; not an active rig's dot (#376: it stays plain to see)
+        e.style.opacity = fx && fx.stale && !(sz === "dot" && cl === "act") ? String(Math.round(fx.fade * 100) / 100) : "";
         e.replaceChildren(h("span", "n", m.unit));
         if (m.tag) e.append(h("span", "tag", m.tag));
         if (age) e.append(h("span", "age", age));
@@ -514,6 +618,39 @@ window.CadMap = (() => {
         rec.marker.setLngLat(this.where(m)).setOffset(off);
       }
       for (const [name, rec] of this.chips) if (!seen.has(name)) { rec.marker.remove(); this.chips.delete(name); }
+      this.drawBadges(sizes.badges, M, lists);
+    }
+
+    // #376: a firehouse's idle rigs below detail_zoom as one badge, "HQ · 6", under the firehouse; its tooltip lists them,
+    // a click zooms there to detail_zoom (their chips)
+    drawBadges(badges, M, lists) {
+      for (const [name, list] of badges) {
+        const short = shortOf(M, name), units = list.map((m) => m.unit);
+        const sig = JSON.stringify([short, units, list[0].lon, list[0].lat]);
+        let rec = this.badges.get(name);
+        if (!rec) {
+          const e = h("button", "cm-badge");
+          e.type = "button";
+          e.addEventListener("click", (ev) => {
+            ev.stopPropagation();
+            const r = this.badges.get(name);
+            if (!r) return;
+            const ll = r.marker.getLngLat(), z = zoomsOf(this.data && this.data.map, this.opts.board).detail;
+            try { this.map.easeTo({ center: [ll.lng, ll.lat], zoom: Math.max(this.map.getZoom(), z), duration: 500 }); } catch (_) { /* */ }
+          });
+          rec = { marker: new maplibregl.Marker({ element: e, anchor: "center" }).setLngLat([list[0].lon, list[0].lat])
+                    .setOffset([0, BADGE_DY]).addTo(this.map), el: e, sig: "" };
+          this.badges.set(name, rec);
+        }
+        if (rec.sig === sig) continue;
+        rec.sig = sig;
+        const e = rec.el;
+        e.replaceChildren(`${short} · ${units.length}`);                   // neutral: its units' statuses may differ
+        e.title = `${name}: ${units.join(", ")}`;
+        e.setAttribute("aria-label", e.title);
+        rec.marker.setLngLat([list[0].lon, list[0].lat]);
+      }
+      for (const [name, rec] of this.badges) if (!badges.has(name)) { rec.marker.remove(); this.badges.delete(name); }
     }
 
     drawLines(markers, lists) {
@@ -734,6 +871,7 @@ window.CadMap = (() => {
       };
       btn("Recenter", opts.manual ? "Back to the location" : "Back to the call and its rigs", () => {
         this.userMoved = false;
+        if (this.layer.setBand && this.layer.setBand()) this.layer.draw();  // #376: the automatic frame again: active rigs full
         this.map.fire("sizeup:recenter");             // an aircraft being followed (aircraft.js) is let go
         if (opts.onRecenter) opts.onRecenter(); else this.fit(true);
       }, "locate");
@@ -758,6 +896,7 @@ window.CadMap = (() => {
       this.map.on("movestart", (e) => { if (e.originalEvent) this.userMoved = true; });
       this.map.on("sizeup:follow", () => { this.userMoved = true; });   // following an aircraft: no refit until Recenter
       this.layer = new RigLayer(this.map, { ...opts, host });
+      this.layer.auto = () => !this.userMoved;        // #376: on the automatic frame, every active rig a full chip
       // following a rig (#358, mapfollow.js): not on the new call's map (its owner moves it), nor the wall board's
       this.fol = !opts.manual && opts.follow !== false && window.MapFollow
         ? new MapFollow.Follower(this.map, host, { cls: "ac-follow cm-follow", textCls: "ac-follow-t", icon: "locate",
@@ -781,7 +920,7 @@ window.CadMap = (() => {
         this.map.resize();
         if (this.canvas.clientWidth) this.fitKey = null;
       }
-      this.layer.update(data, focus);
+      this.layer.update(data, focus, { draw: false });  // #376: drawn once below, in the band of the frame it ends on
       this.focus = focus || null;
       if (this.roads && this.roads.focus) this.roads.focus(this.focus);     // an event at the airport: its layer on (#87)
       this.note.textContent = note || "";
@@ -806,6 +945,7 @@ window.CadMap = (() => {
         const following = !!(this.fol && this.fol.id);   // #358: never refit under a follow
         if (!following) { if (!this.userMoved && !this.opts.manual) this.fit(!first); }
       }
+      if (this.layer.setBand) { this.layer.setBand(); this.layer.draw(); }   // #376: framed again (another call, the calls changed)
     }
 
     // a rig followed (centred, zoomed in, kept centred; ringed for a while) or only picked (centred, ringed)
@@ -1093,7 +1233,8 @@ window.CadMap = (() => {
     if (mapsOk()) {
       if (!views.overview) {
         views.overview = new RigMap($("#ov-map"), { scene: cad.scene, pins: true, unset: !BOARD, editable: () => canDo("admin") && !BOARD, operator,
-                                                    onPick: (id) => selectIncident(id), layers: "overview", follow: !BOARD });
+                                                    onPick: (id) => selectIncident(id), layers: "overview", follow: !BOARD,
+                                                    board: BOARD });       // the wall board's own zooms (#376)
       }
       views.overview.update(mapData(), null, "");
     } else setText($("#ov-map"), "No map");
@@ -1119,5 +1260,5 @@ window.CadMap = (() => {
 
   const detailMap = () => views.detail;   // the working event's map, for its resize handles (incident-map.js, #210)
   return { RigLayer, RigMap, detail, detailMap, place, overview, goOverview, openBig, closeBig, areaBounds, areaCalls, AREA_KM,
-           followUnit, focusUnit, hoverUnits, onMap, lights, routeFrom };
+           followUnit, focusUnit, hoverUnits, onMap, lights, routeFrom, declutter, zoomsOf, rigClass };
 })();

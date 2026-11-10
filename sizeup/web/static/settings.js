@@ -1628,6 +1628,7 @@ function sSystem(panel) {
     about, station, alarms, pushes,
     ...(sy && S.data.atc ? [sAtcTalkers(S.data.atc)] : []),
     ...(sy && S.data.hub_errors && sIsHub() ? [sHubErrors(S.data.hub_errors)] : []),
+    ...(sy && S.data.map_display ? [sMapDisplay(S.data.map_display)] : []),
     sCard(sCardHead("Records"), recs, counts),
     ...(S.data.camera_wall ? [sCameraWall(S.data.camera_wall)] : []),
     sCard(sCardHead("Data file"), file),
@@ -1707,6 +1708,33 @@ function sHubErrors(e) {
     row.append(el("span", "s-eta-l", v.label), n, sState(v.edited ? "edited" : "default"), el("span", "spacer"));
     if (v.edited && canDo("admin")) row.append(sBtn("Reset", `Default: ${v.default}`,
       () => sPost("hub_errors", { action: "reset", key }, `${v.label}: ${v.default}`)));
+    card.append(row);
+  }
+  return card;
+}
+
+// The rigs on the maps by zoom (#376, cadmap.js declutter; sizeup/cad/mapview.py DISPLAY_DEFAULTS): below each zoom a
+// rig is a dot (idle at a firehouse: one badge). The console's maps and the wall board's. Admins.
+function sMapDisplay(d) {
+  const card = sCard(sCardHead("Map display", "",
+    sHelp("Below these zooms an idle rig is a dot (two or more at a firehouse: one badge, \u201cHQ \u00b7 6\u201d) and a rig on a "
+      + "call a strong dot; a rig on a call stays full while the map keeps its own frame (not moved by hand), and for a minute after its status changes. Active never later than idle, nor than 12. Followed, picked, talking or hovered rigs always show in full. "
+      + "Zoom 12: the whole village; 15: a few blocks.")));
+  card.id = "s-map-display";
+  for (const key of ["detail_zoom", "active_zoom", "board_detail_zoom", "board_active_zoom"]) {
+    const v = d[key];
+    if (!v) continue;
+    const n = el("input", "s-num");
+    n.type = "number"; n.min = String(v.min); n.max = String(v.max); n.step = "0.5";
+    n.value = String(v.value);
+    n.disabled = !canDo("admin");
+    n.setAttribute("aria-label", v.label);
+    n.addEventListener("change", () => sPost("map_display", { action: "set", key, value: Number(n.value) },
+      `${v.label}: ${n.value}`));
+    const row = el("div", "row");
+    row.append(el("span", "s-eta-l", v.label), n, sState(v.edited ? "edited" : "default"), el("span", "spacer"));
+    if (v.edited && canDo("admin")) row.append(sBtn("Reset", `Default: ${v.default}`,
+      () => sPost("map_display", { action: "reset", key }, `${v.label}: ${v.default}`)));
     card.append(row);
   }
   return card;

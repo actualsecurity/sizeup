@@ -8,6 +8,8 @@ and one component for every source, so each new source only says what it saw:
            watch, from our receiver or adsb.lol / adsb.fi), through the same raise_alert() with source "adsb", beside the
            emergency alarm (#169) that already pushes (AircraftPreAlerts, below): one pre-alert per emergency, its
            details brought up to date while it lasts (update()), ended when it ends (end())
+    radio  60 Control's fire radio (#369, sizeup/airport_watch.py): "alert level 1/2/3" declared for the airport; added to
+           the tower's pre-alert for the same aircraft when one is open (add_to), ended by "alert canceled" / "landed"
 
 The model (AirportAlert, what a source hands in):
 
@@ -69,7 +71,7 @@ from typing import Callable
 
 from sizeup.cad.store import TZ, CadError, OPERATOR_MAX
 
-SOURCES = {"atc": "HPN ATC", "adsb": "ADS-B"}
+SOURCES = {"atc": "HPN ATC", "adsb": "ADS-B", "radio": "60 Control"}
 KEEP_S = 90 * 24 * 3600
 LIST_S = 24 * 3600
 GROUP_S = 90.0                 # the same group (ATC: the channel) this recently: the same exchange, one pre-alert
@@ -330,8 +332,9 @@ class AirportAlerts:
         if loc.get("basis"):
             body.append(("approx. location: " if loc.get("lat") is not None else "location: ") + loc["basis"])
         body.append(f"alert {conf_text(r['confidence'])} · not dispatched · accept or dismiss in the CAD")
+        prio = 5 if d.get("alert_level") else 4          # an alert level declared (#369): the top priority
         try:
-            return bool(n.send(r["title"], " · ".join(b for b in body if b), 4, ("airplane", "warning"),
+            return bool(n.send(r["title"], " · ".join(b for b in body if b), prio, ("airplane", "warning"),
                                (self.public_url.rstrip("/") + "/cad") if self.public_url else ""))
         except Exception as e:  # noqa: BLE001 - a push never stops the pre-alert
             self.log(f"airport pre-alert: push: {type(e).__name__}: {e}")
@@ -380,6 +383,73 @@ class AirportAlerts:
                 self._event(db, f"Airport pre-alert {_hms(row['at'])} ended: {why}", iid=row["incident_id"], at=now)
         self.on_change()
         return self.get(row["id"])
+
+    # -- by id (#369: sizeup/airport_watch.py follows one pre-alert across sources and channels) -------------------------
+
+    def open_rows(self, within_s: float | None = None) -> list[dict]:
+        """The open pre-alerts (updated within within_s), newest first."""
+        now = self.clock()
+        if within_s is None:
+            return self._rows("a.status = 'open'", (), 50)
+        return self._rows("a.status = 'open' AND a.updated_at >= ?", (now - float(within_s),), 50)
+
+    def add_to(self, pid: int, a: AirportAlert) -> dict | None:
+        """a added to open pre-alert pid (its snippets, aircraft, lines; its title when it ranks higher), whatever its
+        source or subject. None: pid isn't open."""
+        with self._lock:
+            row = self.store.one("SELECT * FROM airport_alerts WHERE id = ? AND status = 'open'", (int(pid),))
+            if row is None:
+                return None
+            out = self._add(row, a, self.clock())
+        self.on_change()
+        return out
+
+    def update_id(self, pid: int, *, lines: list | None = None, aircraft: list | None = None,
+                  data: dict | None = None, title: str | None = None) -> dict | None:
+        """Open pre-alert pid's details in place (lines, aircraft, data keys, title); it stays open (updated_at: now, so
+        it doesn't expire while what it is about goes on). None: not open."""
+        with self._lock:
+            row = self.store.one("SELECT * FROM airport_alerts WHERE id = ? AND status = 'open'", (int(pid),))
+            if row is None:
+                return None
+            d = json.loads(row["data"] or "{}")
+            before = json.dumps([row["title"], d], sort_keys=True)
+            if lines is not None:
+                d["lines"] = _lines(lines)
+            if aircraft is not None:
+                d["aircraft"] = aircraft[:MAX_AIRCRAFT]
+            d.update(data or {})
+            t = row["title"] if title is None else title[:200]
+            changed = before != json.dumps([t, d], sort_keys=True)
+            with self.store.tx() as db:
+                db.execute("UPDATE airport_alerts SET updated_at = ?, title = ?, data = ? WHERE id = ?",
+                           (self.clock(), t, json.dumps(d), row["id"]))
+        if changed:
+            self.on_change()
+        return self.get(row["id"])
+
+    def end_id(self, pid: int, why: str) -> dict | None:
+        """Open pre-alert pid is over ("60 Control: alert canceled", "ADS-B: landed at HPN"): status "ended"."""
+        with self._lock:
+            row = self.store.one("SELECT * FROM airport_alerts WHERE id = ? AND status = 'open'", (int(pid),))
+            if row is None:
+                return None
+            now = self.clock()
+            with self.store.tx() as db:
+                db.execute("UPDATE airport_alerts SET status = 'ended', outcome_at = ?, note = ? WHERE id = ?",
+                           (now, why[:200], row["id"]))
+                self._event(db, f"Airport pre-alert {_hms(row['at'])} ended: {why}", iid=row["incident_id"], at=now)
+        self.log(f"airport pre-alert #{row['id']} ended: {why}")
+        self.on_change()
+        return self.get(row["id"])
+
+    def repush(self, pid: int) -> bool:
+        """Pushed again: it became more serious (#369: an alert level declared for it). Once per call."""
+        try:
+            r = self.get(int(pid))
+        except CadError:
+            return False
+        return self._push(r)
 
     def _open_airport_events(self) -> list[dict]:
         return self.store.q("SELECT id, number FROM incidents WHERE status NOT IN ('closed', 'dismissed') AND type = 'AIRPORT' "
@@ -463,10 +533,33 @@ class AirportAlerts:
         return self.get(pid)
 
     def accept(self, pid: int, body: dict) -> dict:
-        """POST /api/cad/airport-alert/<id>/accept {operator}: a new PENDING event from it (never a dispatch)."""
+        """POST /api/cad/airport-alert/<id>/accept {operator}: a new PENDING event from it (never a dispatch). An HPN
+        Alert 1 with no event (#369: a standby, never an incident): acknowledged instead (the card's "Acknowledge"),
+        no event made; it stays open (an upgrade, a hand-off, the cancel still find it)."""
         op = _who(body)
         with self._lock:
             r = self.get(self._open(pid)["id"])
+            lv = r["data"].get("alert_level") or {}
+            if lv and int(lv.get("level") or 0) == 1 and not r["incident_id"]:
+                now = self.clock()
+                d = dict(r["data"], acknowledged={"by": op, "at": now})
+                with self.store.tx() as db:
+                    db.execute("UPDATE airport_alerts SET operator = ?, data = ? WHERE id = ? AND status = 'open'",
+                               (op, json.dumps(d), pid))
+                    self._event(db, f"Airport pre-alert {_hms(r['at'])} acknowledged: {r['title']} · standby, no event",
+                                operator=op, at=now)
+                self.on_change()
+                return dict(self.get(pid), acknowledged=True)
+            if r["incident_id"] and r["data"].get("alert_level"):    # #369: an alert level made its event: that one
+                inc = self.cad.store.incident(r["incident_id"])
+                now = self.clock()
+                with self.store.tx() as db:
+                    db.execute("UPDATE airport_alerts SET status = 'accepted', outcome_at = ?, operator = ? WHERE id = ? "
+                               "AND status = 'open'", (now, op, pid))
+                    self._event(db, f"Airport pre-alert {_hms(r['at'])} accepted: {r['title']} · its event",
+                                iid=inc["id"], operator=op, at=now)
+                self.on_change()
+                return dict(self.get(pid), incident=inc)
             d = r["data"]
             ev = d.get("event") or {}
             loc = d.get("location") or {}
@@ -491,8 +584,10 @@ class AirportAlerts:
         """Expire the open ones nobody answered in expire_s (from the last addition)."""
         now = self.clock() if now is None else now
         with self._lock:
-            old = self.store.q("SELECT id, at, title FROM airport_alerts WHERE status = 'open' AND updated_at < ?",
-                               (now - self.expire_s,))
+            old = self.store.q("SELECT a.id, a.at, a.title, a.data, i.status AS inc FROM airport_alerts a LEFT JOIN incidents i "
+                               "ON i.id = a.incident_id WHERE a.status = 'open' AND a.updated_at < ?", (now - self.expire_s,))
+            # an alert level whose incident is open stays (#369): it is what the event is about, and never a second one
+            old = [r for r in old if not (r["inc"] in ("queued", "pending", "active") and '"alert_level"' in (r["data"] or ""))]
             if not old:
                 return 0
             with self.store.tx() as db:
@@ -533,7 +628,10 @@ class AirportAlerts:
         self.tick(now)
         items = self._rows("a.at >= ? OR a.status = 'open'", (now - LIST_S,), 50)
         # (no clock in it: the console's stream sends only what changed, and an idle one must stay tiny)
-        return {"items": items, "open": [r for r in items if r["status"] == "open"], "expire_s": self.expire_s}
+        # an alert level declared on 60 Control first (#369: the highest), then the newest
+        opened = sorted((r for r in items if r["status"] == "open"),
+                        key=lambda r: -int((r["data"].get("alert_level") or {}).get("level") or 0))
+        return {"items": items, "open": opened, "expire_s": self.expire_s}
 
 
 def _who(body: dict) -> str:

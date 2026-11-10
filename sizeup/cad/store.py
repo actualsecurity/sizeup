@@ -54,7 +54,8 @@ OPERATOR_MAX = 320
 SCHEMA_VERSION = 10        # 6-9 unused (other branches); v10: the department's own codes
 
 OPEN = ("queued", "pending", "active")
-SOURCES = ("manual", "60 Control page", "CAD feed")    # CAD feed: an external incident source (#297)
+SOURCES = ("manual", "60 Control page", "CAD feed", "60 Control radio")    # CAD feed: an external incident source (#297);
+# 60 Control radio: an airport alert level declared on the fire radio (#369, sizeup/airport_watch.py)
 ON_TIMES = {"dispatched": "dispatched_at", "enroute": "enroute_at", "onscene": "onscene_at"}
 
 SCHEMA = """
@@ -106,7 +107,7 @@ CREATE TABLE incidents (
   acft_fuel TEXT NOT NULL DEFAULT '',   -- "12,000 lb"
   acft_cargo TEXT NOT NULL DEFAULT '',  -- dangerous goods: "none", "lithium batteries"
   map_layers TEXT NOT NULL DEFAULT '',  -- this event's map layer set (#111): JSON {layer: on}, '' = the viewer's default
-  source TEXT NOT NULL,                 -- manual | 60 Control page
+  source TEXT NOT NULL,                 -- manual | 60 Control page | CAD feed | 60 Control radio
   source_ref TEXT UNIQUE,               -- the monitor incident id (dedupe)
   status TEXT NOT NULL,                 -- queued | pending | active | closed | dismissed
   created_at REAL NOT NULL, accepted_at REAL, closed_at REAL

@@ -145,6 +145,10 @@ def vocabulary_suggestions(units: dict, streets: list[str], top_streets: int = 6
     out: list[str] = ["60 Control", "Port Chester", "Rye Brook", "Fire EMS 15", "Port Chester Fire", "Rye Brook Fire",
                       "Westchester", "Fireground", "Fireground 1", "Fireground 2", "Battalion 15", "Airport Incident",
                       "Command", "Mayday", "Tower Ladder", "Ladder", "Engine", "Rescue", "Marine", "Utility",
+                      # the airport's alerts as 60 Control declares them (#369, sizeup/airport_watch.py)
+                      "alert level one", "alert level two", "alert level three", "Westchester County Airport", "HPN",
+                      "flaps", "flap issues", "landing gear", "runway one six", "runway three four", "mile final",
+                      "landed without incident",
                       # #365: Fire/EMS 15 heard "carbon dioxide"; C.O. is AWS's spelling of an acronym said letter by letter
                       "carbon monoxide", "carbon monoxide detector activation", "C.O. detector", "C.O. alarm"]
     for code, u in units.items():
