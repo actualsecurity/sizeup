@@ -93,9 +93,17 @@ ICONS = ("engine", "ladder", "tower", "rescue", "suv", "other")
 ICON_OF_KIND = {"engine": "engine", "ladder": "ladder", "tower": "tower", "rescue": "rescue", "chief": "suv", "utility": "suv"}
 
 
+def is_placeholder(unit: dict) -> bool:
+    """A department placeholder, not apparatus (DPT239, DPT266 ...: from the county feed): never on the maps, in a
+    firehouse's count or rig list, never followed, no icon (#384, the user's rule)."""
+    return str(unit.get("name") or unit.get("unit") or "").strip().upper().startswith("DPT")
+
+
 def icon_of(unit: dict) -> str:
     """A unit {name, kind?} -> its map icon: engine | ladder | tower | rescue | suv (chiefs', duty and utility cars) |
-    other."""
+    other; a department placeholder (is_placeholder): "" (none: it is never drawn)."""
+    if is_placeholder(unit):
+        return ""
     kind = unit.get("kind") or ""
     if kind in ICON_OF_KIND:
         return ICON_OF_KIND[kind]
@@ -313,6 +321,8 @@ def place(unit: dict, role: str, station: dict | None = None, incident: dict | N
     place: station|incident|position|returning, group, lon, lat, ring: 0 (inner) | 1 (outer, not there yet), incident_id, incident_number,
     line_to: [lon, lat] | None, station, home_line (the line is to its station: thin)}; a "position"
     one also has its fix's at, age (s), stale, and heading / speed / source when the fix has them."""
+    if is_placeholder(unit):
+        return None                                  # a department placeholder (DPT239): not apparatus, never drawn
     fire = is_fire(unit) if fire is None else fire
     look = look_of(role)
     inc_ll = _ll(incident)
@@ -357,8 +367,8 @@ def map_slice(units: list[dict], incidents: list[dict], role, firehouses: list[d
     open_incs = {i["id"]: i for i in incidents if i["status"] in ("queued", "pending", "active")}
     markers, unset = [], []
     for u in units:
-        if not (u.get("board") or u.get("incident_id")):
-            continue
+        if not (u.get("board") or u.get("incident_id")) or is_placeholder(u):
+            continue                                 # (a department placeholder: never drawn nor listed, #384)
         inc = open_incs.get(u.get("incident_id"))
         st = by_name.get(u.get("station") or "")
         m = place(u, role(u["status"]), st, inc, positions.get(u["name"]), now, clear=clears.get(u["id"]), params=params)

@@ -142,6 +142,10 @@ window.CadMap = (() => {
   // a rig's icon by apparatus type (#384): the hub's (mapview.icon_of), else the generic mark
   const ICONS = new Set(["engine", "ladder", "tower", "rescue", "suv", "other"]);
   const iconOf = (m) => (m && ICONS.has(m.icon) ? m.icon : "other");
+  // a department placeholder (DPT239 ...: mapview.is_placeholder), not apparatus: the hub never sends one; if one comes,
+  // it is never drawn, counted, listed or followed
+  const placeholder = (m) => /^DPT/i.test(String((m && m.unit) || "").trim());
+  const drawable = (M) => ((M && M.markers) || []).filter((m) => !placeholder(m));
   const ICON_NAMES = { engine: "engine", ladder: "ladder", tower: "tower ladder", rescue: "rescue", suv: "car", other: "" };
   const CLASS_ORDER = { act: 0, idle: 1, oos: 2 };
 
@@ -249,7 +253,7 @@ window.CadMap = (() => {
     });
   }
   const onMap = (name) => !!(typeof cad !== "undefined" && cad && cad.state && cad.state.map
-                             && (cad.state.map.markers || []).some((m) => m.unit === name));
+                             && drawable(cad.state.map).some((m) => m.unit === name));
   // the map to show a rig on: the large one if open, else the first on screen that follows (never the new call's or
   // the wall board's)
   function shownRigMap() {
@@ -436,8 +440,8 @@ window.CadMap = (() => {
       if (!this.ready || !this.data || !this.data.map) return;
       const M = this.data.map, lists = this.data.lists;
       if (this.opts.pins) this.drawPins(M.incidents || [], lists);
-      this.drawChips(M.markers || [], lists);
-      this.drawLines(M.markers || [], lists);
+      this.drawChips(drawable(M), lists);
+      this.drawLines(drawable(M), lists);
       if (this.unsetBox) this.drawUnset(M.unset || []);
       this.followTick(true);
       animate();
@@ -468,7 +472,7 @@ window.CadMap = (() => {
       // the call lines and routes with them, at most LINE_MS apart (setData re-tiles the source; the age timer's
       // redraw puts them on the settled marks)
       if (moved && this.data && this.data.map && Date.now() - (this.linesAt || 0) >= LINE_MS) {
-        this.drawLines(this.data.map.markers || [], this.data.lists);
+        this.drawLines(drawable(this.data.map), this.data.lists);
       }
       this.followTick(false);
     }
@@ -685,7 +689,7 @@ window.CadMap = (() => {
 
     // #384: a firehouse's rigs (home station), active first, then idle, then out of service, each in the hub's order
     stationRigs(name) {
-      const ms = (this.data && this.data.map && this.data.map.markers) || [];
+      const ms = drawable(this.data && this.data.map);
       return ms.map((m, i) => [m, i]).filter(([m]) => m.station === name)
         .sort((a, b) => CLASS_ORDER[rigClass(a[0])] - CLASS_ORDER[rigClass(b[0])] || a[1] - b[1]).map(([m]) => m);
     }

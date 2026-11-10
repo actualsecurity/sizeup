@@ -31,12 +31,15 @@ def test_each_apparatus_class_has_its_icon_and_everything_else_the_generic_one()
     units = json.loads((ROOT / "data" / "cad_lists.json").read_text())["units"]
     want = {"E60": "engine", "E14": "engine", "L31": "ladder", "L30": "ladder", "TL2": "tower", "R40": "rescue",
             "2391": "suv", "2398": "suv", "2661": "suv", "U65": "suv", "U42": "suv", "CHIEF239": "suv",
-            "M40": "other", "DPT239": "other", "239EOC": "other", "77A1": "other", "PCPD": "other", "239_Eng": "other"}
+            "M40": "other", "DPT239": "", "239EOC": "other", "77A1": "other", "PCPD": "other", "239_Eng": "other"}
     for code, icon in want.items():
         assert mapview.icon_of({"name": code, **units[code]}) == icon, code
     by_kind = {"engine": "engine", "ladder": "ladder", "tower": "tower", "rescue": "rescue", "chief": "suv", "utility": "suv"}
     for code, u in units.items():                          # every unit on the board: by its kind, a known icon
         icon = mapview.icon_of({"name": code, **u})
+        if code.upper().startswith("DPT"):                   # a department placeholder: no icon, never drawn
+            assert icon == "", code
+            continue
         assert icon in mapview.ICONS, code
         named = u.get("kind") in ("", "other", None) and code.upper().startswith("CHIEF")   # CHIEF239: a chief's car
         assert icon == by_kind.get(u.get("kind"), "suv" if named else "other"), code
@@ -327,3 +330,49 @@ def test_the_page_wires_it():
     assert "BADGE_AT = [0, -13]" in js
     style = (STATIC / "map-style.js").read_text()
     assert '"icon-offset": [0, -13]' in style                     # the same place as the chip
+
+
+# ---- department placeholders (DPT239 ...): never on the map (the user's rule) --------------------------------------------
+
+
+def test_department_placeholders_are_never_drawn_listed_or_given_an_icon():
+    c = Cad(Settings(), log=lambda m: None, clock=Clock())
+    uid = lambda n: next(u["id"] for u in c.store.units() if u["name"] == n)  # noqa: E731
+    hq = c.firehouses[0]["name"]
+    for n in ("DPT239", "DPT266", "E60", "E61"):
+        c.unit_station(uid(n), {"station": hq, **OP})
+    inc = c.create({"type": "ALARM", "address": "100 Example Ave", "lat": 41.0085, "lon": -73.6600, **OP})
+    c.attach(inc["id"], {"unit_ids": [uid("DPT239"), uid("L31")], "status": "OL", **OP})
+    m = c.state()["map"]
+    names = [x["unit"] for x in m["markers"]] + [x["unit"] for x in m["unset"]]
+    assert "L31" in names and "E60" in names
+    assert not any(n.upper().startswith("DPT") for n in names)                 # on a call, housed: neither
+    for code in ("DPT239", "DPT266", "dpt7700", "DPT242"):
+        u = {"name": code, "kind": "other"}
+        assert mapview.is_placeholder(u) and mapview.icon_of(u) == ""
+        assert mapview.place(u, "onscene", {"name": hq, "ll": [-73.66692, 41.00253]},
+                             {"id": 1, "lat": 41.0, "lon": -73.67}, None, 0.0, fire=True) is None
+    assert not mapview.is_placeholder({"name": "CHIEF239"}) and not mapview.is_placeholder({"name": "239EOC"})
+
+
+@needs_node
+def test_a_placeholder_that_reaches_the_page_is_ignored(tmp_path):
+    """An older hub's (or a feed's) DPT marker at HQ and at the call: no chip, not in the count, not in the list, not
+    followable."""
+    data = page_state()
+    e60 = next(m for m in data["map"]["markers"] if m["unit"] == "E60")
+    l31 = next(m for m in data["map"]["markers"] if m["unit"] == "L31")
+    data["map"]["markers"] += [dict(e60, unit="DPT239", id=9001, kind="other", icon="other"),
+                               dict(l31, unit="DPT266", id=9002, kind="other", icon="other", station=e60["station"])]
+    o = run(tmp_path, SNAP + r"""
+zoomTo(13);
+out.chips = [L.chips.has("DPT239"), L.chips.has("DPT266")];
+out.count = L.badges.get(IN.hq).el.textContent;
+clickHouse(IN.hq); out.rows = rows().map((r) => r.dataset.unit);
+out.follow = [CadMap.followUnit("DPT239"), CadMap.focusUnit("DPT266"), rm.followUnit("DPT239")];
+zoomTo(15.5); out.full = L.chips.has("DPT239");
+""", data)
+    assert o["chips"] == [False, False] and o["full"] is False
+    assert o["count"] == "4"                                                    # 2391, E60, E61, TL2 only
+    assert not any(u.startswith("DPT") for u in o["rows"]) and len(o["rows"]) == 7
+    assert o["follow"] == [False, False, False]
