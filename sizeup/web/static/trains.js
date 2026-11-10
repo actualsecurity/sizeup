@@ -387,17 +387,15 @@ window.TrainLayer = (() => {
     .filter(Boolean).join(" \u00b7 ");
   // the catenary on one line, its full text on hover (and in the box's ⓘ)
   function catenaryLine(d) {
-    const n = h("div", "tr-cat", CATENARY_LINE);
+    const n = h("div", "", CATENARY_LINE);
     if (d && d.catenary) n.title = d.catenary;
     return n;
   }
-  function rowEl(r) {
+  function rowEl(r) {                         // a box line: an element (its words, tooltip, class)
     const n = r.el ? r.el() : h("div", r.cls || "", r.text);
-    if (r.k === "cat") n.className = "tr-cat";
     if (r.title) n.title = r.title;
     return n;
   }
-  const rowSig = (r) => `${r.k}\u0001${r.sig !== undefined ? r.sig : `${r.text}\u0002${r.title || ""}\u0002${r.cls || ""}`}`;
 
   class TrainMap {
     constructor(control) {
@@ -407,7 +405,7 @@ window.TrainLayer = (() => {
       maps.add(this);
       store.subs.add(() => this.sync());
       this.map.on("click", (e) => this.clicked(e));
-      this.live = null;                       // the open train box, kept up to date (#375): {id, body, foot, sigs}
+      this.live = null;                       // the open train box, kept up to date (#375): a MapFollow.LiveInfo
       this.ticker = null;
       this.at = new Map();                    // id -> [lon, lat]: each train's middle as last drawn
       // following a train (mapfollow.js, as aircraft and rigs): a click follows it; any pan of the viewer's, Recenter or
@@ -615,18 +613,24 @@ window.TrainLayer = (() => {
     // up top, the cars' load as bars, the branch's alerts; its route drawn (dashed) while the box is open. Source and
     // time in the footer, the rest on hover.
     showTrain(id) {
-      const d = store.data, t = d && (d.trains || []).find((x) => x.id === id);
-      if (!t) return;
-      const v = this.trainView(t, d);
+      const old = this.live;
+      this.live = null;
+      if (old) old.stop();
+      const view = () => {
+        const d = store.data, t = d && (d.trains || []).find((x) => x.id === id);
+        if (!t) return null;                       // gone from the answer: the box keeps what it last said
+        const v = this.trainView(t, d);
+        return { title: `Train ${t.train}`, sub: v.sub, lines: v.rows.map(rowEl), foot: v.foot,
+                 icon: window.Icon ? Icon("gis-train") : null, tip: v.tip, route: t.tt ? t.tt.route : "" };
+      };
+      const first = view();
+      if (!first) return;
       this.control.close();
-      this.control.showInfo(`Train ${t.train}`, v.sub, v.rows.map(rowEl), v.foot, "", window.Icon ? Icon("gis-train") : null, v.tip);
-      const info = this.control.info;
-      const body = info && info.querySelector ? info.querySelector(".ml-lines") : null;
-      const foot = info && info.querySelector ? info.querySelector(".ml-foot") : null;
-      this.live = body ? { id, body, foot, footText: v.foot, sigs: v.rows.map(rowSig) } : null;
-      this.showRoute(t.tt ? t.tt.route : "");
-      if (body) this.watchInfo(body, () => { this.live = null; this.showRoute(""); this.ticking(); });
-      this.ticking();
+      const box = new MapFollow.LiveInfo(this.control, view, { onClose: () => {
+        if (this.live === box) { this.live = null; this.showRoute(""); }
+      } });
+      this.live = box.open ? box : null;
+      this.showRoute(first.route);
     }
     // the box's lines for train t now: [{k (which line), text | el (an element), title, cls}], its subtitle, foot and tip
     trainView(t, d) {
@@ -666,24 +670,6 @@ window.TrainLayer = (() => {
                    "TrainTime is an undocumented MTA API; GTFS-realtime is used when it fails", d.catenary, credit].filter(Boolean).join("\n");
       return { sub, rows, foot, tip };
     }
-    // the open box again, in place: only the lines that changed (no focus moved, no flicker); gone from the answer:
-    // it keeps what it last said
-    refreshInfo() {
-      const lv = this.live, info = this.control.info;
-      if (!lv) return;
-      if (!info || info.hidden || !info.contains(lv.body)) { this.live = null; return; }
-      const d = store.data, t = d && (d.trains || []).find((x) => x.id === lv.id);
-      if (!t) return;
-      const v = this.trainView(t, d), sigs = v.rows.map(rowSig), kids = [...lv.body.children];
-      const same = kids.length === sigs.length && sigs.every((x, i) => x.split("\u0001")[0] === (lv.sigs[i] || "").split("\u0001")[0]);
-      if (same) sigs.forEach((x, i) => { if (x !== lv.sigs[i]) kids[i].replaceWith(rowEl(v.rows[i])); });
-      else lv.body.replaceChildren(...v.rows.map(rowEl));
-      lv.sigs = sigs;
-      if (lv.foot && v.foot !== lv.footText && lv.foot.firstChild && lv.foot.firstChild.nodeType === 3) {
-        lv.foot.firstChild.nodeValue = v.foot;
-        lv.footText = v.foot;
-      }
-    }
     // follow a train (mapfollow.js): centred, zoomed in to its cars, kept centred as it glides; the chip at the foot
     follow(id) {
       if (!this.fol || !id) return;
@@ -697,7 +683,7 @@ window.TrainLayer = (() => {
     unfollow() { if (this.fol) this.fol.stop(); }
     // once a second while a box is open or a train followed (and with each answer): the box's lines, the chip's words
     tick() {
-      this.refreshInfo();
+      if (this.live) this.live.refresh();
       const id = this.following;
       if (id) {
         const d = store.data, t = d && (d.trains || []).find((x) => x.id === id);
@@ -707,7 +693,7 @@ window.TrainLayer = (() => {
       this.ticking();
     }
     ticking() {
-      const want = !!(this.live || this.following);
+      const want = !!this.following;                 // (an open box refreshes itself: MapFollow.LiveInfo)
       if (want && !this.ticker) this.ticker = setInterval(() => this.tick(), AGE_MS);
       else if (!want && this.ticker) { clearInterval(this.ticker); this.ticker = null; }
     }

@@ -158,7 +158,7 @@ const rows = () => info.find("ml-lines")[0].children.map((c) => [c.textContent, 
   out.chip = host.find("ac-follow-t")[0].textContent;
   out.rows = rows();
   out.route = layers["tr-route"].paint;
-  T += 3000; m.tick();                                         // 3 s on: the ages
+  T += 3000; m.tick();                // 3 s on: the ages
   out.rows3 = rows(); out.chip3 = host.find("ac-follow-t")[0].textContent;
   answer = IN.answers[1]; T = IN.answers[1].got;               // the next fix: faster, further on
   await TrainLayer.load(); await flush();
@@ -183,3 +183,63 @@ const rows = () => info.find("ml-lines")[0].children.map((c) => [c.textContent, 
     assert "61 mph" in nxt and " 61 mph " in o["chipNext"]                                    # the next fix, without reopening
     assert any(p.startswith("MP\u00a0") for p in o["rowsNext"][0][0].split(" · "))           # (the milepost: where it is drawn)
     assert o["afterDrag"] == ["", True]
+
+
+# ---- an aircraft's box, live too (MapFollow.LiveInfo, shared with the trains) ----------------------------------------
+
+LIVE_BOX = r"""
+let T = Date.now();
+Date.now = () => T;
+El.prototype.querySelector = function (sel) { return this.find(sel.slice(1))[0] || null; };
+El.prototype.replaceWith = function (n) { const p = this.parent, i = p.children.indexOf(this); p.children[i] = n; n.parent = p; };
+const info = new El("div");
+info.hidden = true;
+control.info = info;
+control.showInfo = (title, sub, lines, foot) => {
+  const body = new El("div"); body.className = "ml-lines";
+  for (const l of lines) body.append(typeof l === "string" ? Object.assign(new El("div"), { textContent: l }) : l);
+  const f = new El("div"); f.className = "dim small ml-foot";
+  f.append({ nodeType: 3, nodeValue: foot || "", get textContent() { return this.nodeValue; } });
+  Object.defineProperty(f, "firstChild", { get: () => f.children[0] });
+  info.replaceChildren(); info.append(new El("div"), body, f); info.hidden = false;
+};
+const lines = () => info.find("ml-lines")[0].children.map((c) => (typeof c === "string" ? c : c.textContent));
+const foot = () => info.find("ml-foot")[0].textContent;
+"""
+
+
+@needs_node
+def test_an_aircrafts_box_updates_from_each_fix_and_its_age_ticks(tmp_path):
+    from tests.test_aircraft_follow import LOADED, MAP, hub_answer, map_input
+    d, ly, clock = hub_answer()
+    a = next(x for x in d["aircraft"] if x["alt"] != "ground" and (x["gs"] or 0) > 60 and x["age"] < 5 and x.get("dist") is not None)
+    d2 = json.loads(json.dumps(d))
+    b = next(x for x in d2["aircraft"] if x["hex"] == a["hex"])
+    b.update(alt=a["alt"] + 700, gs=a["gs"] + 25, vr=1500, sq="4321", trk=(a["trk"] or 0) + 10, dist=round(a["dist"] + 0.4, 2))
+    o = run_node(tmp_path, ["motion.js", "glide.js", "mapfollow.js", "aircraft.js"], LOADED + r"""
+(async () => {
+  IN.d.fetched = T / 1000;                                       // read now (this test's clock)
+  await AircraftLayer.load(); await flush();
+  const hex = IN.hex;
+  control.map.queryRenderedFeatures = () => [{ properties: { hex } }];
+  m.clicked({ point: [0, 0], originalEvent: { stopPropagation() {} } });
+  await flush();
+  out.first = lines(); out.foot = foot();
+  T += 3000; m.live.refresh();                                   // 3 s on: the age, the glided distance
+  out.later = lines(); out.foot3 = foot();
+  IN.d = IN.d2; IN.d.fetched = T / 1000;                         // the next fix
+  await AircraftLayer.load(); await flush();
+  out.next = lines(); out.open = !!m.live;
+  info.hidden = true; m.live.refresh();                          // shut: it stops
+  out.closed = m.live === null;
+  console.log(JSON.stringify(out)); process.exit(0);
+})();
+""", {**map_input(d, hex=a["hex"], layerOn=True), "d2": map_input(d2)["d"]}, pre=MAP + LIVE_BOX)
+    age = lambda f: int(f.split(" · ")[-1].split(" ")[0])
+    assert o["foot"].endswith(" s ago") and age(o["foot3"]) == age(o["foot"]) + 3          # the age, live
+    alt = lambda ls: next(x for x in ls if " ft" in x)
+    assert alt(o["first"]) != alt(o["next"]) and f"{a['alt'] + 700:,} ft" in alt(o["next"]) and "fpm" in alt(o["next"])
+    assert f"{a['gs'] + 25} kt" in alt(o["next"]) and any("Sqk 4321" in x for x in o["next"])
+    nm = lambda ls: next(x for x in ls if " nm" in x)
+    assert nm(o["first"]) and nm(o["later"])                                                 # (from the glided position)
+    assert o["open"] and o["closed"]

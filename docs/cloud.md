@@ -1879,7 +1879,9 @@ A click: what it is (the feed's ICAO
 type designator; the FAA registry's make and model, marked so; the airline from FAA JO 7340.2), what it is
 doing (the approach, the distance to go; the ETA as distance / speed, labelled an estimate; never from a
 stale position), altitude, vertical rate, speed, squawk, registration, and how it was located (ADS-B, MLAT
-or TIS-B). The box lists emergencies first, then HPN's movements (arriving, departing, on the ground: a click
+or TIS-B). It stays live while open (#375, `mapfollow.js` `LiveInfo`, shared with the trains): each new fix, the
+distance from where the mark is glided now, and the fix's age in the foot (*adsb.lol · 2 s ago*), once a second,
+only the lines that changed swapped. The box lists emergencies first, then HPN's movements (arriving, departing, on the ground: a click
 opens one), how many are low in the area, the source and its licence and the feed's time; "No new aircraft
 data since ..." when the hub stops answering.
 

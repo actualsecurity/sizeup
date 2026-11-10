@@ -27,7 +27,8 @@
 //                move together.
 //   Click        follows it (Follow, below), and its box: what it is (the feed's type, the FAA registry's make and
 //                model), what it is doing, how it was located, and whether the mark is where it was reported or an
-//                estimate between reports.
+//                estimate between reports. The box stays live while open (#375, mapfollow.js LiveInfo): each new
+//                fix, the distance from where the mark is glided now, the fix's age ("2 s ago") in the foot.
 //   Box          the group's note: emergencies first, the HPN movements (arriving, departing, on the ground),
 //                how many are low in the area, each feed (our receiver, adsb.lol, adsb.fi) with how many it gave and
 //                which is primary or resting, the credits and licence, the feed's time, our receiver's state.
@@ -175,6 +176,12 @@ window.AircraftLayer = (() => {
     return (a.age || 0) + since;
   }
   const staleS = (d) => (d && d.stale_s) || 15;
+  // its distance from HPN (the hub's a.dist: from the airport reference point) where it is drawn now (glided), in nm
+  const ARP = { lat: 41.0669531, lon: -73.7075661 };          // sizeup/aircraft.py ARP
+  function distNow(a, stale) {
+    const at = !stale && glide && window.Motion ? glide.where(a.hex, Date.now()) : null;
+    return at && typeof at.lat === "number" ? Motion.metres(ARP, at) / 1852 : a.dist;
+  }
   // shortfinal's fade (TrackStore.alpha): full until stale, then down to a quarter by the time the hub drops it
   function alpha(d, age) {
     const s = staleS(d), drop = (d && d.drop_s) || 60;
@@ -416,6 +423,7 @@ window.AircraftLayer = (() => {
       maps.add(this);
       store.subs.add(() => this.sync());
       this.map.on("click", (e) => this.clicked(e));
+      this.live = null;                     // the open box, kept up to date (#375): a MapFollow.LiveInfo
       // following (mapfollow.js): a drag (not a pinch), Recenter (cadmap.js), ✕ or a unit followed lets it go
       this.fol = new MapFollow.Follower(this.map, control.host, { cls: "ac-follow", textCls: "ac-follow-t", icon: "aircraft",
                                                                  onStop: () => this.draw(true) });
@@ -536,6 +544,7 @@ window.AircraftLayer = (() => {
       try { this.add(); } catch (e) { console.error("aircraft layer", e); return; }
       const d = store.data, on = this.isOn();
       if (!on) this.unfollow();                      // the layer off (unticked, or its alert gone): nothing to follow
+      if (this.live) this.live.refresh();            // an open box: this answer's facts (#375)
       for (const id of IDS) if (this.map.getLayer(id)) this.map.setLayoutProperty(id, "visibility", on ? "visible" : "none");
       if (on && d) this.draw(true);
       this.panelChanged();
@@ -647,10 +656,23 @@ window.AircraftLayer = (() => {
     //   2,300 ft ↑1,800 fpm · 180 kt · 277°
     //   Sqk 1234 · N000XX · Example Air
     //   adsb.fi · 10:21:46                              ⓘ  (where the position came from, how, and the caveats)
+    // the box, kept up to date while it is open (#375, MapFollow.LiveInfo): each new fix and, once a second, the glided
+    // position's distance and the fix's age
     show(hex) {
       const d = store.data;
       const a = ((d && d.aircraft) || []).find((x) => x.hex === hex);
       if (!a) { this.showLost(hex); return; }
+      const old = this.live;
+      this.live = null;
+      if (old) old.stop();
+      this.control.close();
+      const box = new MapFollow.LiveInfo(this.control, () => this.view(hex), { onClose: () => { if (this.live === box) this.live = null; } });
+      this.live = box.open ? box : null;
+    }
+    view(hex) {
+      const d = store.data;
+      const a = ((d && d.aircraft) || []).find((x) => x.hex === hex);
+      if (!a) return null;                                     // gone: the box keeps what it last said
       const age = ageNow(d, a), stale = age > staleS(d);
       const has = (v) => v !== null && v !== undefined;
       const lines = [];
@@ -660,7 +682,8 @@ window.AircraftLayer = (() => {
       if (stale) lines.push(h("div", "warn", `Stale · ${hms(fixAt)}`));
       const ph = PHASE[a.phase] || PHASE.low;
       const where = a.phase !== "arriving" ? "" : a.appr ? a.appr : a.rwy ? `RWY ${a.rwy}` : "";
-      lines.push([ph.text, where, has(a.dist) ? `${a.dist.toFixed(1)} nm` : "", has(a.eta) ? `ETA ${eta(a.eta)}` : ""]
+      const dist = has(a.dist) ? distNow(a, stale) : null;
+      lines.push([ph.text, where, dist !== null ? `${dist.toFixed(1)} nm` : "", has(a.eta) ? `ETA ${eta(a.eta)}` : ""]
         .filter(Boolean).join(" · "));
       const vs = !has(a.vr) || a.alt === "ground" ? "" : Math.abs(a.vr) <= 300 ? "level"
         : `${a.vr > 0 ? "↑" : "↓"}${Math.abs(a.vr).toLocaleString("en-US")} fpm`;
@@ -671,7 +694,7 @@ window.AircraftLayer = (() => {
       if (ids.length) lines.push(ids.join(" · "));
       lines.push(...this.heardLines(d, a));
       const what = [a.model, a.type, a.kind].filter(Boolean);
-      const foot = [SRC_NAME[a.src] || a.src || "", d.at ? hms(d.at) : ""].filter(Boolean).join(" · ");
+      const foot = [SRC_NAME[a.src] || a.src || "", `${ago(age * 1000)} ago`].filter(Boolean).join(" · ");   // its age, live
       // the method and the caveats: hover or tap the "i"
       const between = glide && glide.estimated(a.hex) && !stale;
       const tip = [
@@ -685,9 +708,8 @@ window.AircraftLayer = (() => {
         PHASE_TIP,
         [d.credit ? `Data: ${d.credit}` : "", (d.registry && d.registry.credit) || ""].filter(Boolean).join(" · "),
       ].filter(Boolean).join("\n");
-      const icon = window.Icon ? Icon("aircraft") : null;
-      this.control.close();
-      this.control.showInfo(callsign(a), what.join(" · "), lines, foot, a.emerg ? "ac-emerg" : "", icon, tip);
+      return { title: callsign(a), sub: what.join(" · "), lines, foot, cls: a.emerg ? "ac-emerg" : "",
+               icon: window.Icon ? Icon("aircraft") : null, tip };
     }
 
     // an alerted one not on the map now: where it was last, and when

@@ -12,6 +12,10 @@
 //   MapFollow.Lights     one per layer: the mark picked from a list or a chip (pick: ringed for HIGHLIGHT_MS once
 //                        centred) and the ones whose row or card is hovered (hover: a wider ring).
 //   MapFollow.shownMap   the first of a layer's maps on screen.
+//   MapFollow.LiveInfo   a mark's box kept up to date while it is open (trains, aircraft; #375): view() gives its
+//                        lines and foot again once a second (LIVE_MS) and on refresh() (a new fix); only the lines
+//                        that changed are swapped, in place (no rebuild, no focus moved). Shut, or another box shown
+//                        in it: it stops (onClose).
 //
 // No drawing here: each layer draws its own ring (aircraft: a GeoJSON source; units: their chips' classes).
 "use strict";
@@ -22,6 +26,7 @@ window.MapFollow = (() => {
   const EASE_MS = 600;                      // the first move onto it
   const HIGHLIGHT_MS = 12000;               // a picked mark, ringed this long once centred
   const STOP_TIP = "A drag or Recenter stops following";
+  const LIVE_MS = 1000;                     // an open box's lines (its ages) refreshed this often
 
   function h(tag, cls, text) {
     const n = document.createElement(tag);
@@ -162,6 +167,57 @@ window.MapFollow = (() => {
     hoveredIds() { return this.hot ? this.hot.split(" ") : []; }
   }
 
+  // what a box line shows: an element's class, words and tooltips (its own and its children's); a string as it is
+  function lineSig(n, depth = 0) {
+    if (!n || typeof n !== "object") return String(n);
+    const kids = n.children && depth < 3 ? [...n.children].map((c) => (c && typeof c === "object" ? lineSig(c, depth + 1) : "")).join("\u0002") : "";
+    return `${n.className || ""}\u0001${depth ? "" : n.textContent || ""}\u0001${n.title || ""}\u0001${kids}`;
+  }
+  const lineNode = (l) => (l && typeof l === "object" ? l : h("div", "", l));      // as maplayers.js showInfo makes a line
+
+  class LiveInfo {
+    // control: a map's MapLayers control (showInfo, info); view() -> {title, sub, lines, foot, cls, icon, tip} | null
+    // (null: the mark is gone; the box keeps what it last said); opts {ms, onClose()}
+    constructor(control, view, opts = {}) {
+      Object.assign(this, { control, view, opts, timer: 0, body: null, footEl: null, sigs: [], mo: null });
+      const v = view();
+      if (!v) return;
+      control.showInfo(v.title, v.sub, v.lines, v.foot, v.cls || "", v.icon || null, v.tip || "");
+      const info = control.info;
+      this.body = info && info.querySelector ? info.querySelector(".ml-lines") : null;
+      this.footEl = info && info.querySelector ? info.querySelector(".ml-foot") : null;
+      this.footText = v.foot || "";
+      if (!this.body) return;
+      this.sigs = [...this.body.children].map((n) => lineSig(n));
+      this.timer = setInterval(() => this.refresh(), opts.ms || LIVE_MS);
+      if (window.MutationObserver && info.nodeType) {          // shut, or another box: stop at once
+        this.mo = new MutationObserver(() => { if (info.hidden || !info.contains(this.body)) this.stop(); });
+        this.mo.observe(info, { attributes: true, attributeFilter: ["hidden"], childList: true });
+      }
+    }
+    get open() { return !!this.timer; }
+    refresh() {
+      if (!this.timer) return;
+      const info = this.control.info;
+      if (!info || info.hidden || !info.contains(this.body)) { this.stop(); return; }
+      const v = this.view();
+      if (!v) return;
+      const nodes = v.lines.map(lineNode), sigs = nodes.map((n) => lineSig(n)), kids = [...this.body.children];
+      if (kids.length === nodes.length) nodes.forEach((n, i) => { if (sigs[i] !== this.sigs[i]) kids[i].replaceWith(n); });
+      else this.body.replaceChildren(...nodes);
+      this.sigs = sigs;
+      const f = this.footEl, t = v.foot || "";
+      if (f && t !== this.footText && f.firstChild && f.firstChild.nodeType === 3) { f.firstChild.nodeValue = t; this.footText = t; }
+    }
+    stop() {
+      if (!this.timer) return;
+      clearInterval(this.timer);
+      this.timer = 0;
+      if (this.mo) { this.mo.disconnect(); this.mo = null; }
+      if (this.opts.onClose) this.opts.onClose();
+    }
+  }
+
   // the first of these maps on screen (each {map}: a MapLibre map)
   function shownMap(maps) {
     return [...maps].find((m) => { try { return !!m.map.getContainer().offsetParent; } catch (_) { return false; } }) || null;
@@ -176,5 +232,5 @@ window.MapFollow = (() => {
 
   const takeMap = (map) => { try { map.fire("sizeup:takemap"); } catch (_) { /* */ } };
 
-  return { Follower, Lights, shownMap, takeMap, ago, FOLLOW_ZOOM, PAN_MS, EASE_MS, HIGHLIGHT_MS };
+  return { Follower, Lights, LiveInfo, shownMap, takeMap, ago, LIVE_MS, FOLLOW_ZOOM, PAN_MS, EASE_MS, HIGHLIGHT_MS };
 })();
