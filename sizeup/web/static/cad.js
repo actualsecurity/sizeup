@@ -490,7 +490,8 @@ function isOpen(inc) {
   return ["queued", "pending", "active"].includes(inc.status);
 }
 function incTitle(inc) {
-  return inc.number || (inc.status === "queued" ? (inc.source === "CAD feed" ? (inc.feed && inc.feed.label) || "CAD feed" : "Page") : "—");
+  return inc.number || (inc.status === "queued" ? (inc.source === "CAD feed" ? (inc.feed && inc.feed.label) || "CAD feed"
+    : inc.source === "60 Control radio" ? "Alert" : "Page") : "—");      // #369: an alert level declared on the radio
 }
 // An open call's summary (state.overview, sizeup/cad/mapview.py overview): its units, the newest transmission and
 // note, the channels its traffic comes over; null for a closed one.
@@ -718,7 +719,8 @@ function renderDetail() {
   if (!(inc.status === "pending" || inc.status === "active")) show($("#close-form"), false);
   show($("#d-queued"), inc.status === "queued");
   if (inc.status === "queued") {
-    setText($("#d-qhead"), `${inc.feed && inc.source === "CAD feed" ? inc.feed.label : "60 Control page"}: set type, then Accept or Dismiss`);
+    const qsrc = inc.feed && inc.source === "CAD feed" ? inc.feed.label : inc.source === "60 Control radio" ? "60 Control radio" : "60 Control page";
+    setText($("#d-qhead"), `${qsrc}: set type, then Accept or Dismiss`);
     setText($("#d-qnote"), inc.type_note || "");
     const ts = $("#d-acc-type");
     const key = `${inc.type || ""}/${inc.subtype || ""}`;
