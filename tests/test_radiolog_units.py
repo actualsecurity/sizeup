@@ -20,10 +20,11 @@ def rig(tmp_path):
     return AutoRig(tmp_path)
 
 
-def depts(rig, **codes) -> None:
-    """The hub's own department entry codes (Settings, never the repo)."""
+def depts(rig, accepts=(), **codes) -> None:
+    """The hub's own department entry codes (Settings, never the repo); accepts: those that accept a call alone."""
     for k, v in codes.items():
-        rig.cad.settings.post("department_units", {"action": "set", "key": k, "value": v, "operator": "Admin"})
+        rig.cad.settings.post("department_units", {"action": "set", "key": k, "value": v, "accepts": k in accepts,
+                                                   "operator": "Admin"})
 
 
 def link_rows(rig, iid: int) -> list[tuple]:
@@ -107,14 +108,16 @@ def test_the_dispatch_time_is_the_feeds_else_the_page_else_made(rig):
 def test_full_department_from_the_page_tones(rig):
     inc = rig.page(text=FULL_PAGE)
     assert rig.cad.full(inc["id"])["scope"] == {"kind": "full", "departments": ["Port Chester FD"],
-                                                 "label": "Full department (Port Chester FD)", "source": "page"}
+                                                 "short": "All PCFD", "label": "Full department (Port Chester FD)",
+                                                 "source": "page"}
     rig.at(600)                                                        # two departments' tones on one page
     m = rig.monitor.on_page("p2", ["Port Chester FD", "Rye Brook FD (est.)"],
                             parse(FULL_PAGE.replace("12 Example Avenue", "400 Sample Street")), at=rig.clock.t)
     two = rig.cad.from_monitor(m)
-    assert rig.cad.full(two["id"])["scope"]["label"] == "Full department (Port Chester FD, Rye Brook FD)"
+    s = rig.cad.full(two["id"])["scope"]
+    assert (s["short"], s["label"]) == ("All PCFD, RBFD", "Full department (Port Chester FD, Rye Brook FD)")
     queued = {i["id"]: i for i in rig.cad.state()["incidents"]}
-    assert queued[inc["id"]]["scope"]["label"] == "Full department (Port Chester FD)"   # on the queue card too
+    assert queued[inc["id"]]["scope"]["short"] == "All PCFD"          # on the queue card too
 
 
 def test_no_label_from_tones_without_a_call_type(rig):
@@ -124,7 +127,7 @@ def test_no_label_from_tones_without_a_call_type(rig):
 
 def test_specific_units_from_a_page_naming_apparatus(rig):
     inc = rig.page(text=PAGE)                                          # Engine 60, Ladder 31
-    assert rig.cad.full(inc["id"])["scope"]["label"] == "Specific units"
+    assert rig.cad.full(inc["id"])["scope"]["short"] == "Units"
 
 
 def test_the_feed_overrides_the_page_and_the_disagreement_is_noted(rig):
@@ -136,11 +139,11 @@ def test_the_feed_overrides_the_page_and_the_disagreement_is_noted(rig):
     assert rig.iid() == inc["id"]                                      # attached to the page's incident
     s = rig.cad.full(inc["id"])["scope"]
     assert (s["label"], s["source"]) == ("Specific units", "feed")
-    assert "County feed: Specific units (page: Full department (Port Chester FD))" in events(rig, inc["id"])
+    assert "Feed: units · page: all PCFD" in events(rig, inc["id"])
     rig.at(60)
     rig.page(pid="p2", text=FULL_PAGE)                                 # the page again: the feed's stands
     assert rig.cad.full(inc["id"])["scope"]["label"] == "Specific units"
-    assert sum("page: Full department" in e or "Page: Full department" in e for e in events(rig, inc["id"])) == 1
+    assert sum("page: all PCFD" in e or "Page: all PCFD" in e for e in events(rig, inc["id"])) == 1
 
 
 def test_a_feed_department_entry_confirms_the_page(rig):
@@ -152,7 +155,7 @@ def test_a_feed_department_entry_confirms_the_page(rig):
     rig.poll()
     s = rig.cad.full(inc["id"])["scope"]
     assert (s["label"], s["source"]) == ("Full department (Port Chester FD)", "feed")
-    assert not any("(page:" in e for e in events(rig, inc["id"]))      # agreed: nothing to note
+    assert not any("· page:" in e for e in events(rig, inc["id"]))     # agreed: nothing to note
 
 
 def test_a_page_heard_after_the_feed_never_changes_its_label(rig):
@@ -163,19 +166,19 @@ def test_a_page_heard_after_the_feed_never_changes_its_label(rig):
     rig.page(text=FULL_PAGE)
     iid = rig.iid()
     assert rig.cad.full(iid)["scope"]["label"] == "Specific units"
-    assert "Page: Full department (Port Chester FD) (feed: Specific units)" in events(rig, iid)
+    assert "Page: all PCFD · feed: units" in events(rig, iid)
 
 
 # -- a department entry in 60 Control mode ------------------------------------------------------------------------------
 
 
 def test_a_department_entry_is_never_dispatched(rig, monkeypatch):
-    depts(rig, DPTA="Port Chester FD", DPTB="Elsewhere FD")
+    depts(rig, accepts=("DPTA",), DPTA="Port Chester FD", DPTB="Elsewhere FD")
     monkeypatch.setattr(rig.cad.auto, "_aliases", lambda: {"DPTA": "E60"})   # even a code also aliased to a unit
     assert rig.cad.auto.mode() == "60control"
     rig.created(units=("DPTA", "DPTB"))
     inc = rig.inc()
-    assert inc["status"] == "pending" and inc["number"]               # our department paged: our call, accepted
+    assert inc["status"] == "pending" and inc["number"]               # our department's entry set to accept
     assert inc["assignments"] == []                                    # no unit for it
     ev = events(rig, inc["id"])
     assert any(e.startswith("Port Chester FD paged") for e in ev) and any(e.startswith("Elsewhere FD paged") for e in ev)
@@ -206,3 +209,184 @@ def test_department_entries_are_a_hub_setting(rig):
     assert any(r["key"] == "department_units/DPTA" for r in audit)
     rig.cad.settings.post("department_units", {"action": "reset", "key": "DPTA", "operator": "Admin"})
     assert rig.cad.sources.department_units() == {}
+
+
+# -- review fixes: each unit's own window, removal, the caps, late transcripts --------------------------------------------
+
+
+def test_an_add_on_unit_gets_only_its_own_radio_not_its_earlier_chatter(rig):
+    rig.created(units=("E60",))                                        # dispatched at T0, accepted
+    iid = rig.iid()
+    for tid, at, text in (("307-1-call_1-t0", T0 + 600, "Engine 61 back in quarters"),
+                          ("307-2-call_2-t0", T0 + 1200, "Engine 61 available"),
+                          ("307-3-call_3-t0", T0 + 1300, "Engine 62 back in quarters"),
+                          ("307-4-call_4-t0", T0 + 1460, "Engine 62 copy, en route"),
+                          ("307-5-call_5-t0", T0 + 2390, "60 Control, Engine 61 copy")):
+        rig.radio(tid, at, text)
+    rig.at(2400)                                                       # 40 min in: added on
+    rig.change(units=("E60", "E61", "E62"), unit_times={"E62": {"dispatched": T0 + 1500}})
+    links = rig.links(iid)
+    assert "307-5-call_5-t0" in links and "307-4-call_4-t0" in links   # its own dispatch less a minute on
+    assert not {"307-1-call_1-t0", "307-2-call_2-t0", "307-3-call_3-t0"} & set(links)
+    since = {r["unit"]: r["since"] for r in rig.cad.store.q("SELECT * FROM radiolog_units WHERE incident_id = ?", (iid,))}
+    assert since["E61"] == T0 + 2400 - 60 and since["E62"] == T0 + 1500 - 60 and since["E60"] == T0 - 60
+
+
+def test_the_cap_keeps_the_newest_on_our_channels(rig, monkeypatch):
+    import sizeup.cad.radiolog as rl
+    monkeypatch.setattr(rl, "BACKFILL_MAX", 3)
+    rig.feed.put("A1", type="ALARM/COMM", location=ADDR, units=(), times={"dispatched": T0})
+    rig.poll()
+    iid = rig.iid()
+    for k in range(4):                                                 # older traffic on our channel
+        rig.radio(f"307-{k}-call_{k}-t0", T0 + k, "nothing to say")
+    rig.radio("307-9-call_9-t0", T0 + 60, "Engine 63 responding")
+    for k in range(6):                                                 # newer, on someone else's channel
+        rig.radio(f"999-{k}-call_{k}-t0", T0 + 70 + k, "words", tg=999, source="PD 1")
+    rig.at(120)
+    rig.change(units=("E63",))
+    assert "307-9-call_9-t0" in rig.links(iid)
+
+
+def test_a_unit_is_marked_done_only_once_its_links_are_made(rig, monkeypatch):
+    rig.mode("pcfd")
+    rig.feed.put("A1", type="ALARM/COMM", location=ADDR, units=(), times={"dispatched": T0})
+    rig.poll()
+    iid = rig.iid()
+    rig.radio("307-1-call_1-t0", T0 + 20, "Engine 63 responding")
+    real = rig.cad.radiolog._link
+    monkeypatch.setattr(rig.cad.radiolog, "_link", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("db busy")))
+    rig.at(60)
+    rig.change(units=("E63",))
+    assert rig.cad.store.q("SELECT * FROM radiolog_units WHERE incident_id = ?", (iid,)) == []
+    monkeypatch.setattr(rig.cad.radiolog, "_link", real)
+    rig.cad.radiolog.units_soon(iid)                                   # tried again
+    assert "307-1-call_1-t0" in rig.links(iid)
+
+
+def test_an_undone_dispatch_takes_its_unkept_mentions_off(rig):
+    rig.created(units=("E60",))
+    iid = rig.iid()
+    rig.radio("307-1-call_1-t0", T0 + 20, "60 Control to Engine 60, copy")
+    rig.radio("307-2-call_2-t0", T0 + 30, "Engine 60, copy that")
+    rig.cad.radiolog.keep("307-2-call_2-t0", iid, "Lt. Test")         # a person kept this one
+    assert {"307-1-call_1-t0", "307-2-call_2-t0"} <= set(rig.links(iid))
+    step = rig.step("assign", "E60")
+    rig.cad.auto_undo(iid, {"step": step["id"], "operator": "Lt. Test"})
+    assert set(rig.links(iid)) == {"307-2-call_2-t0"}
+    assert rig.cad.store.q("SELECT * FROM radiolog_units WHERE incident_id = ? AND unit = 'E60'", (iid,)) == []
+
+
+def test_a_unit_cleared_before_it_went_or_dropped_by_the_feed_loses_its_mentions(rig):
+    rig.mode("pcfd")
+    a = rig.cad.create({"type": "STRU", "address": "40 Other Rd", "operator": "Lt. Test"})
+    rig.cad.dispatch(a["id"], {"unit_ids": [rig.uid("E60"), rig.uid("E61")], "operator": "Lt. Test"})
+    rig.radio("307-1-call_1-t0", T0 + 20, "60 Control to Engine 60, copy")
+    rig.radio("307-2-call_2-t0", T0 + 25, "60 Control to Engine 61, copy")
+    rig.cad.unit_status(rig.uid("E61"), {"status": "RS", "operator": "Lt. Test"})       # E61 went ...
+    rig.cad.unit_status(rig.uid("E61"), {"status": "AV", "operator": "Lt. Test"})       # ... and cleared: kept
+    rig.cad.unit_status(rig.uid("E60"), {"status": "AV", "operator": "Lt. Test"})       # E60 never went: off
+    assert set(rig.links(a["id"])) == {"307-2-call_2-t0"}
+
+    rig.feed.put("A1", type="ALARM/COMM", location=ADDR, units=("E62",), times={"dispatched": rig.clock.t})
+    rig.poll()
+    iid = rig.iid()
+    rig.radio("307-3-call_3-t0", rig.clock.t + 5, "Engine 62, copy")
+    assert "307-3-call_3-t0" in rig.links(iid)
+    rig.change(units=())                                               # the feed drops it
+    assert "307-3-call_3-t0" not in rig.links(iid)
+
+
+def test_link_caps_hold_across_every_path(rig):
+    rig.mode("pcfd")
+    incs = [rig.cad.create({"type": "STRU", "address": f"{n} Other Rd", "operator": "Lt. Test"})["id"] for n in (40, 41, 42, 43)]
+    rig.radio("307-1-call_1-t0", T0 + 20, "nothing to say")
+    log = rig.cad.radiolog
+    assert log._link("307-1-call_1-t0", {incs[0]: ("mention", "E60")}) == [incs[0]]
+    assert log._link("307-1-call_1-t0", {incs[1]: ("mention", "E60")}) == []         # one unit mention, one call
+    assert log._link("307-1-call_1-t0", {incs[1]: ("mention", "address"), incs[2]: ("mention", "place")}) == incs[1:3]
+    assert log._link("307-1-call_1-t0", {incs[3]: ("mention", "E61")}) == []          # a fourth: never
+    assert len(rig.cad.store.q("SELECT * FROM radio_links WHERE traffic_id = '307-1-call_1-t0'")) == 3
+
+
+def test_a_late_transcript_links_from_the_units_window(rig):
+    rig.mode("pcfd")
+    rig.feed.put("A1", type="ALARM/COMM", location=ADDR, units=(), times={"dispatched": T0})
+    rig.poll()
+    iid = rig.iid()
+    rig.radio("307-1-call_1-t0", T0 + 20, "")                          # its words come later
+    rig.at(120)
+    rig.cad.accept(iid, {"operator": "Lt. Test"})
+    rig.cad.dispatch(iid, {"unit_ids": [rig.uid("E63")], "operator": "Lt. Test"})
+    rig.cad.comms.retext("307-1-call_1-t0", "Engine 63 responding", "done")
+    assert rig.links(iid)["307-1-call_1-t0"] == ("mention", "E63")
+
+
+def test_a_dismissed_call_still_owns_its_units(rig):
+    rig.mode("pcfd")
+    rig.feed.put("B1", type="ALARM/COMM", location="400 Sample St", units=("E63",), times={"dispatched": T0})
+    rig.poll()
+    b = rig.iid("B1")
+    a = rig.cad.create({"type": "STRU", "address": "40 Other Rd", "operator": "Lt. Test"})
+    rig.cad.dispatch(a["id"], {"unit_ids": [rig.uid("E63")], "operator": "Lt. Test"})
+    assert rig.radio("307-1-call_1-t0", T0 + 20, "60 Control to Engine 63, copy") == []   # which call? neither
+    rig.at(60)
+    rig.cad.dismiss(b, {"operator": "Lt. Test", "reason": "not ours"})
+    with rig.cad.store.tx() as db:
+        db.execute("DELETE FROM radiolog_units")
+    rig.cad.radiolog.units_soon(a["id"])                               # matched again after: B still owned it then
+    assert "307-1-call_1-t0" not in rig.links(a["id"]) and "307-1-call_1-t0" not in rig.links(b)
+
+
+def test_restart_picks_the_work_up_again_and_stop_ends_it(rig):
+    rig.mode("pcfd")
+    rig.feed.put("A1", type="ALARM/COMM", location=ADDR, units=("E63",), times={"dispatched": T0})
+    rig.poll()
+    iid = rig.iid()
+    rig.radio("307-1-call_1-t0", T0 + 20, "Engine 63 responding")
+    with rig.cad.store.tx() as db:                                     # as if it went down before the work was done
+        db.execute("DELETE FROM radio_links")
+        db.execute("DELETE FROM radiolog_units")
+    rig.cad.radiolog.start()
+    assert "307-1-call_1-t0" in rig.links(iid)
+    rig.cad.radiolog.stop()
+    with rig.cad.store.tx() as db:
+        db.execute("DELETE FROM radiolog_units")
+    rig.cad.radiolog.units_soon(iid)
+    assert rig.cad.store.q("SELECT * FROM radiolog_units") == []
+
+
+# -- review fixes: department entries ----------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("dept, accepts, taken", [("Port Chester FD", False, False), ("Port Chester FD", True, True),
+                                                  ("Rye Brook FD", False, False), ("Rye Brook FD", True, True),
+                                                  ("Elsewhere FD", True, False)])
+def test_a_department_entry_alone_accepts_only_when_set_to_and_ours(rig, dept, accepts, taken):
+    depts(rig, accepts=("DPTA",) if accepts else (), DPTA=dept)
+    rig.created(units=("DPTA",))
+    assert (rig.inc()["status"] != "queued") is taken
+
+
+def test_a_department_entry_and_a_page_accept(rig):
+    depts(rig, DPTA="Port Chester FD")
+    rig.created(units=("DPTA",))
+    assert rig.inc()["status"] == "queued"
+    rig.at(20)
+    rig.page(text=FULL_PAGE)                                           # our tones heard
+    rig.change(comments=((T0 + 25, "units requested"),))
+    assert rig.inc()["status"] == "pending"
+
+
+def test_a_department_entry_is_never_a_board_units_code(rig):
+    from sizeup.cad.store import CadError
+    with pytest.raises(CadError, match="unit E60"):
+        depts(rig, **{"e-60": "Port Chester FD"})
+
+
+def test_the_one_unit_rule_counts_apparatus_only(rig):
+    depts(rig, accepts=("DPTA",), DPTA="Port Chester FD")
+    rig.created(units=("DPTA", "E60"))
+    rig.at(60)
+    rig.change(times={"dispatched": T0, "responding": T0 + 55})
+    assert rig.status("E60") == "RS"

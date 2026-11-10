@@ -7,12 +7,16 @@ its queue card (inc["scope"]).
     feed   an external CAD feed's unit list (its best-ranked report): a department entry (Sources.department_units:
            a code that means a whole department) -> "Full department (<dept>)" for each one listed, apparatus with
            none -> "Specific units". The feed is the record of truth: it confirms or overrides the page's label, and
-           a page heard after it never changes it. A disagreement is a line on the timeline (kind "feed")
+           a page heard after it never changes it. A disagreement is a line on the timeline (kind "feed"):
+           "Feed: units · page: all PCFD"
+
+Shown short ("All PCFD", "Units"; short()), the departments' names in its hover (label()).
 """
 
 from __future__ import annotations
 
 import json
+import re
 
 from sizeup.cad.sources import PAGING, dept_code
 from sizeup.radio.tones import base_name
@@ -35,6 +39,29 @@ def label(kind: str, departments) -> str:
     if kind == FULL:
         return f"Full department ({', '.join(departments)})" if departments else "Full department"
     return "Specific units" if kind == UNITS else ""
+
+
+def abbrev(name: str) -> str:
+    """'Port Chester FD' -> 'PCFD'; a tone book entity 'Port Chester · Fire' -> 'PCFD'; 'Rye Brook' -> 'RB'."""
+    place, _, service = str(name or "").partition(" · ")
+    words = re.findall(r"[A-Za-z0-9]+", place)
+    out = "".join(w if w.isupper() and len(w) > 1 else w[0].upper() for w in words)
+    if service:
+        out += "FD" if service.split(" · ")[0] == "Fire" else "".join(w[0].upper() for w in re.findall(r"[A-Za-z]+", service))
+    return out or str(name or "")
+
+
+def short(kind: str, departments) -> str:
+    """'All PCFD' / 'All PCFD, RBFD' / 'Units'."""
+    if kind == FULL:
+        return "All " + ", ".join(abbrev(d) for d in departments) if departments else "All"
+    return "Units" if kind == UNITS else ""
+
+
+def _said(kind: str, departments) -> str:
+    """As the timeline says it: 'units', 'all PCFD'."""
+    t = short(kind, departments)
+    return t[:1].lower() + t[1:]
 
 
 def from_page(tone_departments, units, incident_type: str) -> tuple[str, list[str]] | None:
@@ -64,9 +91,6 @@ class Scope:
         with self.store.lock:
             self.store.db.executescript(SCHEMA)
 
-    def _row(self, iid: int) -> dict | None:
-        return self.store.one("SELECT * FROM dispatch_scope WHERE incident_id = ?", (iid,))
-
     def on_page(self, iid: int | None, inc) -> None:
         """A page (the monitor's incident: its tones, the apparatus it named, its type) made or reached this incident."""
         if not iid:
@@ -76,21 +100,21 @@ class Scope:
             return
         kind, depts = got
         reading = json.dumps([kind, depts])
-        r = self._row(iid)
         now = self.store.clock()
         with self.store.tx() as db:
-            if r is None:
-                db.execute("INSERT INTO dispatch_scope (incident_id, kind, departments, source, at, page) VALUES (?, ?, ?, 'page', ?, ?)",
-                           (iid, kind, json.dumps(depts), now, reading))
-            elif r["source"] == "page":
-                if r["page"] != reading:
-                    db.execute("UPDATE dispatch_scope SET kind = ?, departments = ?, at = ?, page = ? WHERE incident_id = ?",
-                               (kind, json.dumps(depts), now, reading, iid))
-            elif r["page"] != reading:                      # the feed's stands; a page that says otherwise is noted
-                db.execute("UPDATE dispatch_scope SET page = ? WHERE incident_id = ?", (reading, iid))
-                if (kind, depts) != (r["kind"], json.loads(r["departments"])):
-                    self.store._event(db, iid, "feed", f"Page: {label(kind, depts)} (feed: "
-                                      f"{label(r['kind'], json.loads(r['departments']))})", at=now)
+            r = db.execute("SELECT * FROM dispatch_scope WHERE incident_id = ?", (iid,)).fetchone()
+            if r is not None and r["page"] == reading:
+                return
+            # the page's reading, and its label unless the feed's stands (one upsert: never two rows, never a race)
+            db.execute("INSERT INTO dispatch_scope (incident_id, kind, departments, source, at, page) VALUES (?, ?, ?, 'page', ?, ?) "
+                       "ON CONFLICT(incident_id) DO UPDATE SET page = excluded.page, "
+                       "kind = CASE WHEN source = 'feed' THEN kind ELSE excluded.kind END, "
+                       "departments = CASE WHEN source = 'feed' THEN departments ELSE excluded.departments END, "
+                       "at = CASE WHEN source = 'feed' THEN at ELSE excluded.at END",
+                       (iid, kind, json.dumps(depts), now, reading))
+            if r is not None and r["source"] == "feed" and (kind, depts) != (r["kind"], json.loads(r["departments"])):
+                self.store._event(db, iid, "feed", f"Page: {_said(kind, depts)} · feed: "
+                                  f"{_said(r['kind'], json.loads(r['departments']))}", at=now)
 
     def on_feed(self, iid: int | None) -> None:
         """A feed's report applied to this incident: its unit list confirms or overrides the label."""
@@ -104,18 +128,17 @@ class Scope:
         if got is None:
             return
         kind, depts = got
-        r = self._row(iid)
-        if r is not None and r["source"] == "feed" and (r["kind"], json.loads(r["departments"])) == (kind, depts):
-            return
         now = self.store.clock()
-        name = rep["label"] or "County feed"
         with self.store.tx() as db:
+            r = db.execute("SELECT * FROM dispatch_scope WHERE incident_id = ?", (iid,)).fetchone()
+            if r is not None and r["source"] == "feed" and (r["kind"], json.loads(r["departments"])) == (kind, depts):
+                return
             db.execute("INSERT INTO dispatch_scope (incident_id, kind, departments, source, at) VALUES (?, ?, ?, 'feed', ?) "
                        "ON CONFLICT(incident_id) DO UPDATE SET kind = excluded.kind, departments = excluded.departments, "
                        "source = 'feed', at = excluded.at", (iid, kind, json.dumps(depts), now))
             if r is not None and r["source"] == "page" and (kind, depts) != (r["kind"], json.loads(r["departments"])):
-                self.store._event(db, iid, "feed", f"{name}: {label(kind, depts)} (page: "
-                                  f"{label(r['kind'], json.loads(r['departments']))})", at=now)
+                self.store._event(db, iid, "feed", f"Feed: {_said(kind, depts)} · page: "
+                                  f"{_said(r['kind'], json.loads(r['departments']))}", at=now)
 
     def decorate(self, incs: list[dict]) -> list[dict]:
         """inc["scope"] = {kind, departments, label, source} or None."""
@@ -128,6 +151,6 @@ class Scope:
         for inc in incs:
             r = rows.get(inc["id"])
             depts = json.loads(r["departments"]) if r else []
-            inc["scope"] = {"kind": r["kind"], "departments": depts, "label": label(r["kind"], depts),
-                            "source": r["source"]} if r else None
+            inc["scope"] = {"kind": r["kind"], "departments": depts, "short": short(r["kind"], depts),
+                            "label": label(r["kind"], depts), "source": r["source"]} if r else None
         return incs

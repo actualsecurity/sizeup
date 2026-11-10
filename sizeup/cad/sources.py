@@ -414,8 +414,8 @@ class Sources:
         set_unit_aliases(self.feed_unit_aliases())
         set_department_codes(self.department_units())
 
-    def _data_file(self, name: str) -> dict[str, str]:
-        """A {str: str} map from the data file, read again whenever the file changes."""
+    def _data_file(self, name: str, values=str) -> dict:
+        """A {str: values} map from the data file, read again whenever the file changes."""
         path = getattr(self.cad.lists, "path", None)
         try:
             key = (path, Path(path).stat().st_mtime_ns) if path else None
@@ -429,24 +429,39 @@ class Sources:
             self._file = d if isinstance(d, dict) else {}
             self._file_key = key
         a = self._file.get(name)
-        return {k: v for k, v in (a.items() if isinstance(a, dict) else ()) if isinstance(k, str) and isinstance(v, str)}
+        return {k: v for k, v in (a.items() if isinstance(a, dict) else ()) if isinstance(k, str) and isinstance(v, values)}
 
     def feed_unit_aliases(self) -> dict[str, str]:
         """The data file's "feed_unit_aliases" {feed code: board code}: the one place they are read (matching here, the
         dispatch mode's units, #311), again whenever the file changes."""
         return self._data_file("feed_unit_aliases")
 
-    def department_units(self) -> dict[str, str]:
-        """A feed's department entries {code: department name} (#370): a code in its unit list that means a whole
-        department was paged, not one unit. The data file's "department_units", under Settings' (section
-        "department_units": the hub's own, never in the repo)."""
-        out = self._data_file("department_units")
+    def _department_entries(self) -> dict[str, dict]:
+        """{code: {"name": department, "accepts": bool}}: the data file's "department_units", under Settings' (section
+        "department_units": the hub's own, never in the repo). A value is the department's name, or {"name",
+        "accepts"}."""
+        raw = self._data_file("department_units", (str, dict))
         try:
-            out.update({k: v for k, v in self.cad.settings.section("department_units").items()
-                        if isinstance(k, str) and isinstance(v, str)})
+            raw.update(self.cad.settings.section("department_units"))
         except AttributeError:
             pass
+        out = {}
+        for k, v in raw.items():
+            if isinstance(v, str):
+                v = {"name": v}
+            if isinstance(k, str) and k.strip() and isinstance(v, dict) and isinstance(v.get("name"), str) and v["name"].strip():
+                out[k] = {"name": v["name"].strip(), "accepts": v.get("accepts") is True}
         return out
+
+    def department_units(self) -> dict[str, str]:
+        """A feed's department entries {code: department name} (#370): a code in its unit list that means a whole
+        department was paged, not one unit."""
+        return {k: v["name"] for k, v in self._department_entries().items()}
+
+    def department_accepts(self) -> set[str]:
+        """The department entry codes set to accept a call by themselves in 60 Control mode ("accepts": true; default
+        off: a department entry alone never does, a page attached does)."""
+        return {k for k, v in self._department_entries().items() if v["accepts"]}
 
     # -- health and tiers ----------------------------------------------------------------------------------------------
 

@@ -401,6 +401,7 @@ class Store:
         self.rev = 0          # bumped on every change: the page refetches nothing, it's pushed
         self.migrated: list[str] = []      # what a migration did, for the log
         self.on_assigned = None            # fn(incident id, [unit names]): units just put on it (assign); never raises here
+        self.on_unassigned = None          # fn(incident id): a unit just taken off it (cleared, moved); never raises here
         self._migrate()
 
     def _migrate(self) -> None:
@@ -834,6 +835,8 @@ class Store:
                 text, relieved = self._take_command(db, iid, uid, u["name"], operator, now)
             self._event(db, iid, "status", f"{text}. {why}" if why else text, operator, uid, now)
             self._history(db, uid, u["status"], status, iid, operator, now, note if role == "oos" else "")
+        if a is not None and role in ("free", "oos"):
+            self._unassigned(a["incident_id"])
         out = self.unit(uid)
         if relieved:
             out["command_from"] = relieved
@@ -867,7 +870,16 @@ class Store:
                     db.execute("UPDATE assignments SET cleared_at = ? WHERE id = ?", (now, a["id"]))
                     self._event(db, a["incident_id"], "status", f"{u['name']} off this call ({L.status_phrase(status)} elsewhere)",
                                 operator, uid, now)
+            if a is not None:
+                self._unassigned(a["incident_id"])
         return self.set_unit_status(uid, status, operator, note, why)
+
+    def _unassigned(self, iid) -> None:
+        if iid and self.on_unassigned is not None:
+            try:
+                self.on_unassigned(iid)
+            except Exception:  # noqa: BLE001 - the change stands whatever a listener does
+                pass
 
     def return_statuses(self) -> tuple[str, ...]:
         """What a cleared unit can go back to a still-open call as: the responding / on-location statuses."""
@@ -1222,7 +1234,7 @@ class Store:
         time stamped and Disp left empty ("2395 added responding (not dispatched)")."""
         now = self.clock()
         dispatched = self.lists.status_for("dispatched")
-        moved, added = [], []
+        moved, added, left = [], [], []
         with self.tx() as db:
             for uid in unit_ids:
                 u = db.execute("SELECT * FROM units WHERE id = ?", (uid,)).fetchone()
@@ -1234,6 +1246,7 @@ class Store:
                     db.execute("UPDATE assignments SET cleared_at = ? WHERE id = ?", (now, a["id"]))
                     self._event(db, a["incident_id"], "status", f"{u['name']} reassigned to another event", operator, uid, now)
                     moved.append(f"{u['name']} (from {a['number']})")
+                    left.append(a["incident_id"])
                 cur = db.execute("INSERT INTO assignments (incident_id, unit_id, dispatched_at, assigned_at) VALUES (?, ?, ?, ?)",
                                  (iid, uid, None if attach or status else now, now))
                 if status:
@@ -1256,6 +1269,8 @@ class Store:
                 self._event(db, iid, "status", "Event status: active", operator, at=now)
             if attach and added and not quiet:
                 self._event(db, iid, "attach", f"Attached {', '.join(added)}", operator, at=now)
+        for old in dict.fromkeys(left):
+            self._unassigned(old)
         if added and self.on_assigned is not None:
             try:
                 self.on_assigned(iid, added)

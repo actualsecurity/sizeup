@@ -223,6 +223,7 @@ class Cad:
         # A unit put on an incident (by a person, the feed or the radio): the radio log again for it, back to the
         # incident's dispatch (#370), off this thread
         self.store.on_assigned = lambda iid, names: self.radiolog.units_soon(iid)
+        self.store.on_unassigned = self.radiolog.units_soon     # ... taken off before it went: its mentions there go
         # Full department or specific units (#370, sizeup/cad/scope.py): from the page, then the feed
         self.scope = Scope(self)
         # FG1 radio IDs nobody has named yet (#163): "Radio 1234 (MDC) on FG1: who is this?" on the console.

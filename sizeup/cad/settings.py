@@ -50,8 +50,9 @@ Reset to default = drop the override (one item, or a whole section).
     datasources                    key a data source ("gis:hydrants", "aircraft:registry") -> off | hourly | daily | weekly |
                                    monthly: how often the registry refreshes it (#186, Settings > Data sources;
                                    sizeup/datasources.py); not set: the source's default
-    department_units               key a feed's department entry code -> the department it pages ("Port Chester FD"):
-                                   a whole department, never a unit (#370, sizeup/cad/sources.py; admins, no panel)
+    department_units               key a feed's department entry code -> the department it pages ("Port Chester FD"), or
+                                   {"name", "accepts": true}: a whole department, never a unit (#370,
+                                   sizeup/cad/sources.py; admins, no panel); never a board unit's code
 
 Codes never change (they are stored on events and exported): a rename changes the name only. An
 item in use can't be deleted, only retired (named on old events, off the pick lists). Every change
@@ -106,7 +107,8 @@ ATC_SECTION, ATC_KEYS = "atc", {"identify": "Identify ATC talkers", "map": "Show
                                  "vocab": "Refresh the ATC vocabulary from the traffic"}
 PAGE_SECTION[ATC_SECTION] = "system"
 # A feed's department entries (#370, sizeup/cad/sources.py department_units): key the code as the feed writes it ->
-# the department ("Port Chester FD"). The hub's own (never in the repo): set by admins (POST, no panel), audited as Dispatch.
+# the department ("Port Chester FD"), or {"name", "accepts": true} (it accepts a call alone in 60 Control mode). The
+# hub's own (never in the repo): set by admins (POST, no panel), audited as Dispatch. Never a board unit's code.
 DEPT_SECTION = "department_units"
 PAGE_SECTION[DEPT_SECTION] = "dispatch"
 # The push topics by kind (sizeup/notify.py Pushes): Settings > System > Push notifications, audited as System.
@@ -655,12 +657,22 @@ class Editor:
                            [("system", f"{ATC_SECTION}/{key}", "on" if cur else "off", "on" if v else "off")])
         return {**out, "atc": self.atc_page()}
 
-    @staticmethod
-    def _dept_value(key, value) -> tuple[str, str]:
-        return _text(key, "key", 24), _text(value, "value", 60)
+    def _dept_value(self, key, value, accepts=None) -> tuple[str, object]:
+        """(code, the stored value: the name, or {"name", "accepts": true}). A board unit's code is refused."""
+        if isinstance(value, dict):
+            value, accepts = value.get("name"), value.get("accepts")
+        key, name = _text(key, "key", 24), _text(value, "value", 60)
+        if accepts is not None and not isinstance(accepts, bool):
+            raise CadError("accepts: true or false")
+        k = re.sub(r"[\s-]+", "", key).upper()
+        clash = next((u["name"] for u in self.store.units()
+                      if k in {re.sub(r"[\s-]+", "", str(x or "")).upper() for x in (u["name"], u["spoken"])}), None)
+        if clash:
+            raise CadError(f"{key}: the code of unit {clash}, not a department entry")
+        return key, ({"name": name, "accepts": True} if accepts else name)
 
     def _dept_op(self, action: str, body: dict, op: str) -> dict:
-        """set {key: a feed's department entry code, value: the department} | reset {key}: admins (#370)."""
+        """set {key: a feed's department entry code, value: the department, accepts?: true} | reset {key}: admins (#370)."""
         cur = self.section(DEPT_SECTION)
         if action == "reset":
             key = _text(body.get("key"), "key", 24)
@@ -669,7 +681,7 @@ class Editor:
             return self._commit([(DEPT_SECTION, key, REMOVE)], op, [("dispatch", f"{DEPT_SECTION}/{key}", cur[key], "unset")])
         if action != "set":
             raise CadError("action: set or reset")
-        key, v = self._dept_value(body.get("key"), body.get("value"))
+        key, v = self._dept_value(body.get("key"), body.get("value"), body.get("accepts"))
         if cur.get(key) == v:
             return {"ok": True}
         return self._commit([(DEPT_SECTION, key, v)], op, [("dispatch", f"{DEPT_SECTION}/{key}", cur.get(key, "unset"), v)])

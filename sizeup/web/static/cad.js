@@ -535,7 +535,7 @@ function fillQueueItem(li, inc) {
   type.append(t);
   if (inc.joint_call) type.append(el("span", "chip joint", inc.joint_call));
   if (inc.scope) {                    // full department or specific units (#370)
-    const sc = el("span", "chip scope", inc.scope.label);
+    const sc = el("span", "chip scope", inc.scope.short);
     sc.title = `${inc.scope.label}\nFrom ${inc.scope.source === "feed" ? "the county feed" : "the page"}`;
     type.append(sc);
   }
@@ -620,7 +620,7 @@ function renderQueue() {
   const byAge = (a, b) => a.created_at - b.created_at;        // oldest first
   const sig = (i) => JSON.stringify([i.status, i.number, i.type, i.subtype, i.address, i.id === cad.sel, i.emergency,
     i.until_at, i.disposition, i.type_note, unconfirmed(i), i.joint_call, openAssignments(i).map((a) => [a.name, a.status, txNow(a.name)]),
-    i.closed_at, cad.listSig.length, canDo("dispatch"), airportLine(i), i.scope && [i.scope.label, i.scope.source], queueExtra(i)]);
+    i.closed_at, cad.listSig.length, canDo("dispatch"), airportLine(i), i.scope && [i.scope.short, i.scope.label, i.scope.source], queueExtra(i)]);
   const opts = { key: (i) => String(i.id), sig, make: queueItem, fill: fillQueueItem };
   syncList($("#q-queued"), all.filter((i) => i.status === "queued").sort(byAge), { ...opts, empty: "None" });
   syncList($("#q-pending"), all.filter((i) => i.status === "pending" && i.emergency).sort(byAge),
@@ -706,7 +706,7 @@ function renderDetail() {
   const scope = $("#d-scope");
   show(scope, !!inc.scope);
   if (inc.scope) {                    // full department or specific units (#370, sizeup/cad/scope.py)
-    stBadge(scope, inc.scope.label, "#9AA3AD");
+    stBadge(scope, inc.scope.short, "#9AA3AD");
     scope.title = `${inc.scope.label}\nFrom ${inc.scope.source === "feed" ? "the county feed" : "the page"}`;
   }
   setText($("#d-source"), inc.source === "manual" ? "Manual" : inc.feed && inc.source === "CAD feed" ? inc.feed.label : inc.source);
