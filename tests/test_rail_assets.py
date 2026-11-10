@@ -548,17 +548,25 @@ out.nothing = P({ s: 3000 }, 3420, { poles: [], mps: [] });
 
 
 @pytest.mark.skipif(NODE is None, reason="node not installed")
-def test_a_train_on_a_held_or_default_track_is_drawn_fainter(tmp_path, model):
+def test_a_train_on_a_held_or_default_track_is_dashed_not_faded(tmp_path, model):
+    """#374 re-review: an unsure track (held, or the outer default) is a dashed stripe down the body at full opacity;
+    faded stays for a stale feed alone, and a stale train has no cab over its body (a brighter cab at partial
+    opacity)."""
     tracks = {k: [[[round(a, 7), round(b, 7), round(c, 1)] for a, b, c in lane.coords] for lane in lanes]
               for k, lanes in model.track_lanes.items()}
     out = page(tmp_path, """
-const run = (how) => TrainLayer.onTrack({ id: "x", s: 3000, d: 1, lane: "2", lane_how: how, lat: 41, lon: -73.7, bearing: 90 },
-                                          null, null, IN.tracks).cars.map((f) => f.properties.unsure);
-out.said = run("said"); out.held = run("held"); out.outer = run("outer");
+const run = (how, stale) => TrainLayer.onTrack({ id: "x", s: 3000, d: 1, lane: "2", lane_how: how, stale, lat: 41, lon: -73.7, bearing: 90 },
+                                                 null, null, IN.tracks).cars.map((f) => [f.properties.kind, f.properties.unsure]);
+out.said = run("said"); out.held = run("held"); out.outer = run("outer"); out.stale = run("said", true);
 """, {"tracks": tracks})
-    assert not any(out["said"]) and all(out["held"]) and all(out["outer"])
+    assert not any(u for _, u in out["said"]) and all(u for _, u in out["held"]) and all(u for _, u in out["outer"])
+    assert [k for k, _ in out["said"]][:2] == ["body", "cab"] and "cab" not in [k for k, _ in out["stale"]]
     js = (Path(__file__).resolve().parent.parent / "sizeup" / "web" / "static" / "trains.js").read_text()
-    assert '["==", ["get", "unsure"], true], UNSURE_OPACITY' in js   # (the icon's features have none)
+    assert 'const fade = ["case", ["get", "stale"], STALE_OPACITY, 1];' in js and "UNSURE_OPACITY" not in js
+    unsure = js[js.index('id: "tr-unsure"'):js.index('id: "tr-gap"')]
+    assert '["==", ["get", "unsure"], true]' in unsure and '"line-dasharray"' in unsure    # (the icon's features have none)
+    assert js.index('id: "tr-cab", type') < js.index('id: "tr-unsure"') < js.index('id: "tr-gap"') and '"tr-unsure", "tr-gap"]' in js
+    assert '"Hollow: estimated · faded: stale feed · dashed: track not certain "' in js
     # the GTFS-only box: the next stop's track said as the next stop's, never as the drawn one
     assert "`Next ${t.next_stop}${t.next_time ? ` ${hm(t.next_time)}` : \"\"}${t.track ? ` trk\\u00a0${t.track}` : \"\"}`" in js
     assert "`Trk ${t.track}`" not in js

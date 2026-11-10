@@ -1853,7 +1853,8 @@ lies on a drawn track; not known. No GPS guess: the tracks are 4 m apart, closer
 tell. A track we have no line for (Stamford's 5) is ignored. The box: *Trk 2 · near pole 249 · MP 25.3* within
 1.5 km of the stop that said it (who said it, for which stop, on hover); *Trk 2?* held ("Track: last said for
 <stop>"); no number on the outer default ("Track not known; drawn on outer track"). A held or default train is
-drawn fainter. No GIS milepost where it is drawn: the train's own (TrainTime's, or the line's).
+drawn with a dashed stripe down its body (faded is for a stale feed only). No GIS milepost where it is drawn:
+the train's own (TrainTime's, or the line's).
 
 **Poles and mileposts:** the nearest structure along the line (within 150 m), and the milepost read off the
 two either side (straight between; a milepost out of order along the line is left out). A train's box, and

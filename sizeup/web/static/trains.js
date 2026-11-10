@@ -56,11 +56,10 @@ window.TrainLayer = (() => {
   const ANIMATE_MS = 100;                    // ~10 redraws a second while a train moves (motion.js)
   const PREDICTED_M = 5;                     // drawn this far ahead of the MTA's report: "predicted"
   const STALE_OPACITY = 0.45;                // a train frozen on an old feed: faded
-  const UNSURE_OPACITY = 0.6;                // on a numbered track no stop near says (held, or the outer default, #371)
   const BACKOFF_MS = [10000, 60000];         // a failed poll: 10 s doubling to a minute
   const SRC_LINE = "tr-line", SRC_ST = "tr-stations", SRC_TR = "tr-trains", SRC_CARS = "tr-cars", SRC_ROUTE = "tr-route";
   const SRC_REF = "tr-railref", REF_IDS = ["tr-pole", "tr-pole-label", "tr-mp", "tr-mp-label"];
-  const CAR_IDS = ["tr-car-case", "tr-cab-case", "tr-car", "tr-cab", "tr-gap"];
+  const CAR_IDS = ["tr-car-case", "tr-cab-case", "tr-car", "tr-cab", "tr-unsure", "tr-gap"];
   const IDS = ["tr-line", "tr-line-label", "tr-route", "tr-station", "tr-station-label", ...CAR_IDS, "tr-train", "tr-train-label"];
   const MAX_CARS = 16;
   const CLICKABLE = ["tr-train", "tr-car", "tr-cab", "tr-gap", "tr-station", "tr-line"];
@@ -332,6 +331,7 @@ window.TrainLayer = (() => {
     const part = (a, b, kind) => ({ type: "Feature", geometry: { type: "LineString", coordinates: piece(tr, Math.min(a, b), Math.max(a, b)) },
                                     properties: { id: t.id, estimated: !!t.estimated, stale: !!t.stale, unsure, kind } });
     const cars = [part(s, s + back * len, "body"), part(s, s + back * M_PER_CAR, "cab")];
+    if (t.stale) cars.pop();                  // faded: no cab over the body (two layers at partial opacity: a brighter cab)
     for (let k = 1; k < n; k++) cars.push(part(s + back * (k * M_PER_CAR - GAP_M / 2), s + back * (k * M_PER_CAR + GAP_M / 2), "gap"));
     return { cars, mid: toLonLat(tr, along(tr, s + (back * len) / 2)[1]) };
   }
@@ -488,8 +488,7 @@ window.TrainLayer = (() => {
       // estimate; the front car's nose rounded (the cab); the cars' ends as thin gaps across it from GAP_ZOOM. Every
       // outline under every body, so the cab's outline never shows on the car behind it.
       const dark = token("--bg", HALO);
-      const fade = ["case", ["get", "stale"], STALE_OPACITY, ["==", ["get", "unsure"], true], UNSURE_OPACITY, 1];   // frozen on an old feed, or on a
-                                                                       // track nothing near says (#371): fainter
+      const fade = ["case", ["get", "stale"], STALE_OPACITY, 1];        // frozen on an old feed: faded
       const carW = ["interpolate", ["linear"], ["zoom"], 10, 4, 15, 6, 17, 9, 19, 28];
       const caseW = ["interpolate", ["linear"], ["zoom"], 10, 7, 15, 9, 17, 12, 19, 32];
       const part = (kind) => ["==", ["get", "kind"], kind];
@@ -502,6 +501,12 @@ window.TrainLayer = (() => {
                      paint: { "line-color": ["case", ["get", "estimated"], dark, warn], "line-width": carW, "line-opacity": fade } }, before);
       map.addLayer({ id: "tr-cab", type: "line", source: SRC_CARS, filter: part("cab"), layout: lay("round"),
                      paint: { "line-color": ["case", ["get", "estimated"], dark, warn], "line-width": carW, "line-opacity": fade } }, before);
+      // on a numbered track no stop near says (held, or the outer default, #371): a dashed stripe down the body, at full
+      // opacity (faded is for a stale feed only)
+      map.addLayer({ id: "tr-unsure", type: "line", source: SRC_CARS, filter: ["all", part("body"), ["==", ["get", "unsure"], true]],
+                     layout: lay("butt"), paint: { "line-color": ["case", ["get", "estimated"], warn, dark], "line-dasharray": [2, 1.5],
+                                                   "line-width": ["interpolate", ["linear"], ["zoom"], 10, 1.2, 15, 2, 17, 3, 19, 9],
+                                                   "line-opacity": fade } }, before);
       map.addLayer({ id: "tr-gap", type: "line", source: SRC_CARS, filter: part("gap"), minzoom: GAP_ZOOM, layout: lay("butt"),
                      paint: { "line-color": ["case", ["get", "estimated"], warn, HALO], "line-width": carW, "line-opacity": fade } }, before);
       // a train off the line: an icon lying flat along its heading, to scale once zoomed in (ICON_SIZE)
@@ -801,10 +806,11 @@ window.TrainLayer = (() => {
       const n = (d.trains || []).length;
       const span = (d.stations || []).length > 1 ? ` · ${d.stations[0].name}–${d.stations[d.stations.length - 1].name}` : "";
       box.append(h("div", "ml-note", `${n} train${n === 1 ? "" : "s"}${span}`));
-      // the legend on screen (hollow, faded = stale); the method behind an "i" (a tap on a tablet)
-      const legend = h("div", "ml-note", "Hollow: estimated · faded: stale, held ");
+      // the legend on screen (hollow: estimated, faded: stale, dashed: track not certain); the method behind an "i"
+      const legend = h("div", "ml-note", "Hollow: estimated · faded: stale feed · dashed: track not certain ");
       const how = "Between reports a train runs on along its track, never past its next reporting point or stop; "
         + "faded: the feed is out of date and it is held where it was. "
+        + (this.tracks ? "Dashed: no stop near says its track (last said for an earlier stop, or not known: drawn on the outer track). " : "")
         + ((d.trains || []).some((t) => t.cars) ? "Cars as the MTA gives them." : `Drawn as ${LOOK_CARS} cars (the MTA doesn't say).`)
         + ` ${d.disclaimer || ""}.`;
       if (window.Help && Help.info) legend.append(Help.info(how, "How trains are drawn")); else legend.title = how;
