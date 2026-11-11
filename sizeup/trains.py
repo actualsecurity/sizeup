@@ -107,7 +107,7 @@ HTTP (sizeup/web/server.py; any signed-in person, GET only):
     GET /api/cad/trains/railref         the poles and mileposts layer (#371, sizeup/railassets.py): {source, at, error,
                                         poles: [{id, lon, lat, tick}], mileposts: [{mp, lon, lat, whole}]}; tick: the
                                         structure's line square across the tracks, [[lon, lat] x2] (#374)
-  A train also carries lane (the numbered track it is drawn on) and lane_how (said | held | outer: how sure), trk /
+  A train also carries lane (the numbered track it is drawn on) and lane_how (said | held | outer | inner: how sure), trk /
   trk_src / trk_at (its track and who said it, posted | planned | mta, at which stop; only within TRACK_NEAR_M of that
   stop), lane_at (held: the stop whose word it is), pole and mp (#371); the layer
   "tracks": {"1": [[[lon, lat, s]...] run...]} beside the lanes and "railref": {poles: [[s, id]], mps: [[s, mp]]};
@@ -225,6 +225,8 @@ TRACK_NEAR_M = 1500.0            # a stop's track says which track a train is on
 TRACK_HOLD_M = 4000.0            # a stop's track held no further than this from the stop (an express may cross over beyond)
 TRACK_RANK = {"posted": 3, "planned": 2, "mta": 1}  # whose word for a stop's track wins: TrainTime's posted, planned, GTFS-rt
 OUTER_TRACK = {1: "4", -1: "3"}  # the direction's outer track: where the MTA's stops put trains here (fetch_train_tracks.py)
+INNER_TRACK = {1: "2", -1: "1"}  # its inner (express) track: next to the outer one (3, 1, 2, 4 north to south here)
+AT_STOP_M = 200.0                # a train this close to a station is at it (an express's default track, #451)
 TRACK_MEM_S = 3600.0             # a train's remembered track forgotten this long after it was last drawn
 RAILREF_PATH = "/api/cad/trains/railref"           # the poles and mileposts layer (#371)
 
@@ -799,10 +801,11 @@ class Model:
     def which_track(self, t: dict, anchors: list, p: int | None, n: int | None, s: float, d: int,
                     mem: dict | None = None) -> tuple[str, dict | None, str]:
         """(the numbered track the train is drawn on, the evidence it is drawn by or None, how sure: "said" | "held" |
-        "outer") (#371). "said": within TRACK_NEAR_M of the stop that said it; "held": the last stop's word, kept up to
-        TRACK_HOLD_M from that stop (beyond, an express may have crossed over: not held); "outer": nothing says, so the
-        direction's outer track (3 inbound, 4 outbound), only so it lies on a drawn track (an express may well be on
-        an inner one): not known. mem: what we remember of this train (Tracker.trk_mem): its track changes only on
+        "outer" | "inner") (#371). "said": within TRACK_NEAR_M of the stop that said it; "held": the last stop's word, kept up
+        to TRACK_HOLD_M from that stop (beyond, an express may have crossed over: not held); "outer": nothing says, so the
+        direction's outer track (3 inbound, 4 outbound), only so it lies on a drawn track: not known; "inner": nothing
+        says and it skips the next station ahead (express_here), so the direction's inner, express track (1 inbound,
+        2 outbound, #451): not known either. mem: what we remember of this train (Tracker.trk_mem): its track changes only on
         better stop-track evidence (_better), so a merge flipping between TrainTime and GTFS-realtime doesn't move it.
         ("", None, "") with no numbered track here."""
         if not self.track_lanes:
@@ -815,8 +818,21 @@ class Model:
             ev = mem.get("ev")
         if ev is not None and abs(ev["ch"] - s) <= TRACK_HOLD_M and self.track_at(ev["trk"], s) is not None:
             return ev["trk"], ev, "said" if abs(ev["ch"] - s) <= TRACK_NEAR_M else "held"
+        if n is not None and self.express_here(anchors[n][1], s, d):
+            inner = INNER_TRACK.get(d, "")
+            if self.track_at(inner, s) is not None:
+                return inner, None, "inner"
         outer = OUTER_TRACK.get(d, "")
         return (outer, None, "outer") if self.track_at(outer, s) is not None else ("", None, "")
+
+    def express_here(self, next_ch: float, s: float, d: int) -> bool:
+        """A train at s going d runs express through here (#451): its next stop (next_ch) is ahead, not at it, and
+        beyond the nearest station ahead of it, which it skips. Only for the default track: its next stop's posted
+        track says nothing of the track it is on now (it may cross over before it), so never more than this."""
+        if d not in (1, -1) or (next_ch - s) * d <= AT_STOP_M:
+            return False
+        ahead = [st["ch"] for st in self.stations.values() if (st["ch"] - s) * d > AT_STOP_M]
+        return bool(ahead) and (next_ch - min(ahead, key=lambda c: (c - s) * d)) * d > AT_STOP_M
 
     @staticmethod
     def _better(ev: dict, old: dict, d: int) -> bool:

@@ -44,7 +44,9 @@
 //   Tracks       (#371) the line's four tracks (the hub's "tracks", Metro-North's GIS, in runs: a gap is drawn as
 //                one), numbered from zoom 17. A train lies along the track the hub puts it on ("lane": the track
 //                posted or planned for the stop it left or is going to, kept until another stop says otherwise;
-//                else its direction's outer track). "Trk 2" in its box only near the stop that said so ("trk").
+//                else its direction's outer track, or its inner one for an express skipping the next station,
+//                #451). "Trk 2" in its box only near the stop that said so ("trk"); "Trk 2?" held; else "track not
+//                known". The next stop's track reads with the stop, "next Rye (trk 2)", never as the train's.
 //                From zoom 15 the basemap's own rail line (OpenStreetMap's) is hidden where they are drawn
 //                (railMask): it ran between them.
 //   Poles · MP   (#371) a second box in the group, "Poles · mileposts" (key "railref", off by default, kept per
@@ -355,7 +357,7 @@ window.TrainLayer = (() => {
     const f = frontOf(t, line, lanes, tracks);
     if (!f) return null;
     const { tr, s, back } = f, n = carsOf(t), len = n * M_PER_CAR;
-    const unsure = !!f.own && t.lane_how !== "said";          // on a numbered track nothing near says (held, or the outer default, #371)
+    const unsure = !!f.own && t.lane_how !== "said";          // on a numbered track nothing near says (held, or the outer/inner default, #371, #451)
     const part = (a, b, kind) => ({ type: "Feature", geometry: { type: "LineString", coordinates: piece(tr, Math.min(a, b), Math.max(a, b)) },
                                     properties: { id: t.id, estimated: !!t.estimated, stale: !!t.stale, dim: !!t.dim, op: t.op == null ? 1 : t.op, unsure, kind } });
     const cars = [part(s, s + back * len, "body"), part(s, s + back * M_PER_CAR, "cab")];
@@ -389,14 +391,14 @@ window.TrainLayer = (() => {
                    n(b.moved) !== null ? `moved ${n(b.moved)}${b.bad === "position" ? " set aside" : ""}` : ""].filter(Boolean);
     return `${Math.round(v)} mph${parts.length ? ` (${parts.join(" \u00b7 ")})` : ""}`;
   }
-  function headline(t) {                      // "NH east · 6 cars (M8) · 11 min late · next Port Chester trk 2"
+  function headline(t) {                      // "NH east · 6 cars (M8) · 11 min late · next Port Chester (trk 2)"
     const tt = t.tt || {};
     const dir = dirWord(t);
     const fleet = tt.fleet ? (/DIESEL/.test(tt.fleet) ? "diesel" : tt.fleet) : "";
     const n = tt.cars, sched = tt.cars_sched && tt.cars_sched !== n ? `/${tt.cars_sched}` : "";
     const cars = n ? `${n}${sched} car${n === 1 && !sched ? "" : "s"}${fleet ? ` (${fleet})` : ""}` : "";
     const nx = tt.next;
-    const trk = nx && nx.track ? ` trk\u00a0${nx.track}${nx.posted ? "" : " planned"}` : "";
+    const trk = nx && nx.track ? ` (trk\u00a0${nx.track}${nx.posted ? "" : " planned"})` : "";   // the stop's, not the train's (#451)
     return [[tt.branch, dir].filter(Boolean).join(" "), cars, late(tt.late_s != null ? tt.late_s : t.delay_s),
             nx ? `next ${nx.name}${trk}` : t.next_stop ? `next ${t.next_stop}` : ""]
       .filter(Boolean).join(" · ");
@@ -435,12 +437,14 @@ window.TrainLayer = (() => {
     const s = w && typeof w.s === "number" ? w.s : t.s;
     const g = refAt(rr, s), mp = g.mp ?? mpAt(t, w), at = { pole: g.pole ?? t.pole, mp: typeof mp === "number" ? mp : undefined };
     const held = !t.trk && t.lane && t.lane_how === "held";
-    const text = [t.trk ? `Trk\u00a0${t.trk}` : held ? `Trk\u00a0${t.lane}?` : "", at.pole ? `near pole ${at.pole}` : "",
+    const guess = !t.trk && t.lane && (t.lane_how === "outer" || t.lane_how === "inner");    // the default: not known (#451)
+    const text = [t.trk ? `Trk\u00a0${t.trk}` : held ? `Trk\u00a0${t.lane}?` : guess ? "track not known" : "", at.pole ? `near pole ${at.pole}` : "",
                   typeof at.mp === "number" ? `MP\u00a0${at.mp.toFixed(1)}` : ""].filter(Boolean).join(" · ");
     if (!text) return null;
     const title = [t.trk ? `Track ${t.trk}: ${TRK_WHO[t.trk_src] || "the MTA's"} for ${t.trk_at || "its stop"}`
                    : held ? `Track: last said for ${t.lane_at || "its last stop"}`
-                   : t.lane && t.lane_how === "outer" ? "Track not known; drawn on outer track" : "",
+                   : guess && t.lane_how === "inner" ? `Track not known; drawn on express track ${t.lane} (skips the next station)`
+                   : guess ? `Track not known; drawn on outer track ${t.lane}` : "",
                    at.pole ? `Pole: CB ${at.pole} (catenary structure, Metro-North GIS)` : "",
                    typeof at.mp === "number" ? "Milepost from Grand Central, where the train is drawn" : ""].filter(Boolean).join("\n");
     return { k: "place", text, title };
@@ -694,7 +698,7 @@ window.TrainLayer = (() => {
                      paint: { "line-color": ["case", ["get", "estimated"], dark, warn], "line-width": carW, "line-opacity": fade } }, before);
       map.addLayer({ id: "tr-cab", type: "line", source: SRC_CARS, filter: part("cab"), layout: lay("round"),
                      paint: { "line-color": ["case", ["get", "estimated"], dark, warn], "line-width": carW, "line-opacity": fade } }, before);
-      // on a numbered track no stop near says (held, or the outer default, #371): a dashed stripe down the body, at full
+      // on a numbered track no stop near says (held, or the outer/inner default, #371, #451): a dashed stripe down the body, at full
       // opacity (faded is for a stale feed only)
       map.addLayer({ id: "tr-unsure", type: "line", source: SRC_CARS, filter: ["all", part("body"), ["==", ["get", "unsure"], true]],
                      layout: lay("butt"), paint: { "line-color": ["case", ["get", "estimated"], warn, dark], "line-dasharray": [2, 1.5],
@@ -931,7 +935,7 @@ window.TrainLayer = (() => {
       if (pos.stale) rows.push({ k: "stale", text: pos.stale, cls: "warn" });            // #278: up top, in the warning colour
       const cat = { k: "cat", text: CATENARY_LINE, title: d.catenary || "" };
       if (!t.tt) {
-        rows.push({ k: "next", text: [t.dir_label, t.next_stop ? `Next ${t.next_stop}${t.next_time ? ` ${hm(t.next_time)}` : ""}${t.track ? ` trk\u00a0${t.track}` : ""}` : ""]
+        rows.push({ k: "next", text: [t.dir_label, t.next_stop ? `Next ${t.next_stop}${t.next_time ? ` ${hm(t.next_time)}` : ""}${t.track ? ` (trk\u00a0${t.track})` : ""}` : ""]
           .filter(Boolean).join(" \u00b7 ") });
         const place = placeRow(t, w, d.railref);
         if (place) rows.push(place);
@@ -1190,5 +1194,5 @@ window.TrainLayer = (() => {
     host.append(foot);
   }
 
-  return { panel, load, maps, data: () => store.data, KEY, REF_KEY, placeRow, onTrack, poleFeatures, trackCorridor, railFilter, TrainMap };
+  return { panel, load, maps, data: () => store.data, KEY, REF_KEY, headline, placeRow, onTrack, poleFeatures, trackCorridor, railFilter, TrainMap };
 })();
