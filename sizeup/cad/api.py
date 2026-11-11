@@ -272,12 +272,9 @@ DS_READERS = ("admin", "dispatcher")      # who may see Settings > Data sources 
 ADMIN_READS = {
     "/api/cad/notify": "the push topics' names are secret",                  # Settings > System > Push notifications
     "/api/cad/health": "station health is for admins (Settings > Health)",   # #203: off the header, on an admin tab
-<<<<<<< HEAD
-    "/api/cad/search.csv": "the search export is for admins",                # #403: many calls at once, off the hub
-=======
     "/api/cad/perf": "the hub's CPU and memory are for admins (Settings > Health)",          # #425 (sizeup/perf.py)
     "/api/cad/perf/profile": "the hub's CPU profile is for admins (Settings > Health)",
->>>>>>> origin/main
+    "/api/cad/search.csv": "the search export is for admins",                # #403: many calls at once, off the hub
 }
 
 # Who may POST what (enforced only with a verified sign-in, see above): "dispatch" = dispatchers and
