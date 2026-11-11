@@ -282,4 +282,8 @@ def test_an_earlier_builds_triggers_are_taken_off_at_the_start(tmp_path):
     again = cad(tmp_path, c.clockref, airband=("Tower",))
     assert not again.store.q("SELECT name FROM sqlite_master WHERE type = 'trigger'")
     assert again.record_traffic(tx("fg-after", c.clockref.t + 60, rig="E63")) == [c.inc["id"]]
-    assert again.comms.changes_floor > 0 and not again.comms.changes_broken
+    assert not again.comms.changes_broken
+    dump = lambda db: "\n".join(db.iterdump())             # noqa: E731
+    before = dump(again.store.db)
+    again.store.db.close()
+    assert dump(cad(tmp_path, c.clockref, airband=("Tower",)).store.db) == before       # a start writes nothing

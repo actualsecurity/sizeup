@@ -378,7 +378,7 @@ class Cad:
         units = [dict(u, position=pos[u["name"]]) if u["name"] in pos else u for u in st["units"]] if pos else st["units"]
         # comms_rev: what GET /api/cad/comms calls its rev; the Radio view and the board ask again only when it moves (#137)
         return dict(st, units=units, map=self.map_slice(units, st["incidents"], pos, now), time=now, rev=rev,
-                    comms_rev=f"{self.comms.rev}.{rev}",
+                    comms_rev=self.comms.rev_for(),
                     talking=self.live(), paging=self.paging(), cloud=self.cloud(), prealert=self.prealert_state(now),
                     airport_alerts=self.airport_alerts_state(now),
                     status_hints=self.status_hints(), alarms=self.alarms_state(now), radio_ids=self.radio_ids(now),
@@ -1421,14 +1421,16 @@ class Cad:
         main_tgs = [tg for tg in self.comms.talkgroups() if self.main_tg(tg)]
         # (+ whether this reader may be shown another P25 system's rows, #419: an answer is never another reader's)
         context = self.comms._sees_context()
-        key = (now_rev, context, tuple(pcfd), tuple(main_tgs),
+        # (kept by the log's and the store's own counters, not the reader's rev: a setting changed is a new answer)
+        mark = (self.comms.rev, self.store.rev)
+        key = (mark, context, tuple(pcfd), tuple(main_tgs),
                tuple(sorted((k, tuple(v)) for k, v in q.items() if k != "rev")))
         hit = self._comms_cache.get(key)
         if hit is not None and time.monotonic() - hit[0] < COMMS_CACHE_S:
             return {**hit[1], "talking": talking}
         if any((q.get(k) or [""])[0].strip() for k in COMMS_PAGE_PARAMS):
             out = self._comms_page(q, one, when, pcfd, main_tgs, now_rev, context)
-            return {**self._comms_keep(key, now_rev, out), "talking": talking}
+            return {**self._comms_keep(key, mark, out), "talking": talking}
         try:
             limit = max(1, min(int(one("limit") or OTHER_LIMIT), MAX_ROWS))
             main_limit = max(1, min(int(one("main_limit") or MAIN_LIMIT), MAX_ROWS))
@@ -1451,7 +1453,7 @@ class Cad:
                "events": [{"id": r["id"], "number": r["number"], "type": r["type"], "address": r["address"]}
                           for r in self.store.q("SELECT DISTINCT i.id, i.number, i.type, i.address FROM radio_links l "
                                                 "JOIN incidents i ON i.id = l.incident_id ORDER BY i.id DESC LIMIT 100")]}
-        return {**self._comms_keep(key, now_rev, out), "talking": talking}
+        return {**self._comms_keep(key, mark, out), "talking": talking}
 
     def _talking(self) -> list[dict]:
         """Who is talking now, as a reader of the radio log is told: never a talker on another P25 system for a reader
@@ -1465,8 +1467,8 @@ class Cad:
             or (sourcekeys.parse(str(e.get("source") or "")) or (sourcekeys.COUNTY, 0))[0] != sourcekeys.COUNTY
             or (e.get("tg") is not None and not e.get("p25_system") and int(e["tg"]) in theirs))]
 
-    def _comms_keep(self, key, now_rev: str, out: dict) -> dict:
-        kept = {k: v for k, v in self._comms_cache.items() if k[0] == now_rev}     # an older rev's: never asked again
+    def _comms_keep(self, key, mark, out: dict) -> dict:
+        kept = {k: v for k, v in self._comms_cache.items() if k[0] == mark}     # an older rev's: never asked again
         if len(kept) >= COMMS_CACHE_N:
             kept = {}
         kept[key] = (time.monotonic(), out)
@@ -1561,8 +1563,9 @@ class Cad:
                 live.add(sourcekeys.p25(str(e.get("p25_system") or sourcekeys.COUNTY), int(e["tg"])))
             elif e.get("channel"):
                 live.update((f"fm:{e['channel']}", f"air:{e['channel']}"))
+        mark = (self.comms.rev, self.store.rev, minute)
         hit = self._sources_cache.get(bool(context))
-        if hit is None or hit[0] != rev:
+        if hit is None or hit[0] != mark:
             county = sourcekeys.COUNTY
             labels = {"analog": "Analog", "airband": "Airband", **{str(k): str(v) for k, v in self.source_systems().items()}}
             info = {str(r.get("source")): r for r in self.source_rows() if r.get("source")}
@@ -1598,7 +1601,7 @@ class Cad:
             order = {"analog": 1, "airband": 3}
             out.sort(key=lambda r: (0 if r["system"] == county else order.get(r["system"], 2), r["system"],
                                     not r["ours"], r["group"], r["name"]))
-            hit = self._sources_cache[bool(context)] = (rev, out)
+            hit = self._sources_cache[bool(context)] = (mark, out)
         shown = {r["key"] for r in hit[1]}
         live_keys = sorted(live & shown)
         if q and (q.get("rev") or [""])[0] == rev:
