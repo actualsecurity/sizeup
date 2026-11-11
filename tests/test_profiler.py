@@ -374,7 +374,8 @@ def test_a_profile_stops_on_time_and_is_bounded(busy, quiet, monkeypatch):
     took = time.perf_counter() - t0
     assert 0.9 < took < 20 and 0.9 < out["seconds"] < 4 and out["asked_s"] == 1.0     # (loose: a loaded machine, and the
                                                                                        # whole suite's threads in this process)
-    assert out["stacks"] <= 3 + 9 and out["stacks_dropped"] > 0 and out["stacks_truncated"] > 0      # 3, and one "(other stacks)" a thread
+    # 3 stacks, then one "(other stacks)" a thread group at most (and one for a group never caught): whatever else runs
+    assert out["stacks"] <= 3 + 2 * len(out["threads"]) and out["stacks_dropped"] > 0 and out["stacks_truncated"] > 0
     assert len(out["folded"].splitlines()) == 2 and out["folded_dropped"] == out["stacks"] - 2
     assert any("(other stacks)" in x["fn"] for x in out["self"])
     assert all(line.count(";") <= 4 + 1 for line in out["folded"].splitlines())                        # 4 frames and "(deeper)"
