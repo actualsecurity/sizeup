@@ -31,9 +31,15 @@ def test_each_apparatus_class_has_its_icon_and_everything_else_the_generic_one()
     units = json.loads((ROOT / "data" / "cad_lists.json").read_text())["units"]
     want = {"E60": "engine", "E14": "engine", "L31": "ladder", "L30": "ladder", "TL2": "tower", "R40": "rescue",
             "2391": "suv", "2398": "suv", "2661": "suv", "U65": "suv", "U42": "suv", "CHIEF239": "suv",
-            "M40": "other", "DPT239": "", "239EOC": "other", "77A1": "other", "PCPD": "other", "239_Eng": "other"}
+            "M40": "other", "DPT239": "", "239EOC": "other", "77A1": "other", "PCPD": "other", "239_Eng": "other",
+            "AP7": "engine", "AP11": "engine", "AP17": "engine"}                   # the airport's ARFF crash trucks
     for code, icon in want.items():
         assert mapview.icon_of({"name": code, **units[code]}) == icon, code
+    # board-only codes (no units entry: kind "agency"): battalion and fire coordinators' cars; fire marshals generic
+    boards = {c for b in json.loads((ROOT / "data" / "cad_lists.json").read_text())["unit_boards"] for c in b.get("units") or [] if c}
+    for code, icon in {"BAT10": "suv", "BAT19": "suv", "FC1": "suv", "FC2": "suv", "FM1": "other", "FM42": "other"}.items():
+        assert code in boards and code not in units, code
+        assert mapview.icon_of({"name": code, "kind": "agency"}) == icon, code
     by_kind = {"engine": "engine", "ladder": "ladder", "tower": "tower", "rescue": "rescue", "chief": "suv", "utility": "suv"}
     for code, u in units.items():                          # every unit on the board: by its kind, a known icon
         icon = mapview.icon_of({"name": code, **u})
@@ -41,8 +47,10 @@ def test_each_apparatus_class_has_its_icon_and_everything_else_the_generic_one()
             assert icon == "", code
             continue
         assert icon in mapview.ICONS, code
-        named = u.get("kind") in ("", "other", None) and code.upper().startswith("CHIEF")   # CHIEF239: a chief's car
-        assert icon == by_kind.get(u.get("kind"), "suv" if named else "other"), code
+        by_code = "other"
+        if u.get("kind") in ("", "other", None):                                  # CHIEF239: a chief's car; AP7: ARFF
+            by_code = "suv" if code.upper().startswith("CHIEF") else "engine" if re.match(r"^AP\d+$", code) else "other"
+        assert icon == by_kind.get(u.get("kind"), by_code), code
     # an older or odd unit: no kind, a new kind, a code-only chief's car with no kind
     assert mapview.icon_of({"name": "X1"}) == mapview.icon_of({"name": "X1", "kind": "hovercraft"}) == "other"
     assert mapview.icon_of({"name": "CHIEF999", "kind": ""}) == "suv"
@@ -142,8 +150,8 @@ zoomTo(15.5); out.after = [L.badges.size, rm.map.sources.firehouses.data.feature
     text, cls, off, title, aria = o["badge"]
     hq = page_state()["hq"]
     assert text == "4" and "cm-badge" in cls                      # the idle ones at HQ: a count, nothing more
-    assert title.startswith(f"{hq}: ") and sorted(title.split(": ")[1].split(", ")) == ["2391", "E60", "E61", "TL2"]
-    assert aria == f"{hq}, 4 rigs in quarters"
+    assert title.startswith(f"{hq}\n4 in quarters: ") and sorted(title.split(": ")[1].split(", ")) == ["2391", "E60", "E61", "TL2"]
+    assert aria == f"{hq}, 4 in quarters"
     assert off == [0, -13]                                        # on top of the icon, not under it
     css = (STATIC / "cadmap.css").read_text()
     rule = css[css.index("  .cm-badge {"):css.index("  .cm-badge:hover")]
@@ -203,7 +211,7 @@ out.chip = [L.pop.hidden, rows().map((r) => r.dataset.unit)];
 clickHouse("Brooksville Engine & Hose #5"); out.none = [L.pop.find("cm-pop-head")[0].textContent, rows().length];
 """, page_state())
     hidden, head, rows = o["house"]
-    assert hidden is False and head == f"{page_state()['hq']} 7 rigs"
+    assert hidden is False and head == f"{page_state()['hq']} 7 rigs · 4 in quarters · 2 on calls · 1 OOS"
     # active first (on a call), then available, then out of service; each with its type and status, in its status colour
     assert [r[0] for r in rows] == ["E63", "L31", "2391", "E60", "E61", "TL2", "E62"]
     assert [r[1] for r in rows] == ["cm-ty ty-engine", "cm-ty ty-ladder", "cm-ty ty-suv", "cm-ty ty-engine", "cm-ty ty-engine",
@@ -419,3 +427,53 @@ def test_is_placeholder_uses_lists_placeholder_where_it_exists():
     assert mapview.is_placeholder({"unit": "DPT239"}) and not mapview.is_placeholder({"name": "E60"})
     assert mapview.place({"name": "X9", "kind": "engine"}, "free", {"name": "HQ", "ll": [-73.67, 41.0]}, lists=WithIt()) is None
     assert mapview.locate({"name": "X9"}, "free", {"name": "HQ", "ll": [-73.67, 41.0]}, lists=WithIt()) is None
+
+
+def test_call_pins_over_the_count_chips_and_rigs_over_both():
+    css = (STATIC / "cadmap.css").read_text()
+    z = lambda sel: int(re.search(re.escape(sel) + r" \{[^}]*?z-index: (\d+)", css).group(1))  # noqa: E731
+    assert z(".cm-badge") < z(".cm-pin") < z(".cm-rig")
+
+
+@needs_node
+def test_the_list_closes_when_the_calls_change_or_on_a_map_click(tmp_path):
+    """Never left over the wall board: a change in the open calls closes it; a click on the map (off a firehouse)
+    closes it; a pan or a zoom doesn't, nor a click on a firehouse (that one opens its list)."""
+    o = run(tmp_path, SNAP + r"""
+zoomTo(13); clickHouse(IN.hq);
+rm.map.emit("movestart", { originalEvent: {} }); rm.map.emit("moveend"); rm.map.emit("zoomend");
+setMap({ ...IN.map }); out.panned = [L.pop.hidden, L.stationOpen];
+rm.map.emit("click", { point: { x: 1, y: 1 } }); out.clicked = [L.pop.hidden, L.stationOpen];
+clickHouse(IN.se); out.house = [L.pop.hidden, L.stationOpen];
+const p0 = IN.map.incidents[0];
+setMap({ ...IN.map, incidents: [...IN.map.incidents, { ...p0, id: p0.id + 1, number: "26-999999", lat: 41.012, lon: -73.672 }] });
+out.calls = [L.pop.hidden, L.stationOpen];
+// another box (the station picker, a rig's) is not closed by a map click
+L.openInfo(cad.state.map.markers.find((m) => m.unit === "E60")); rm.map.emit("click", { point: { x: 1, y: 1 } });
+out.info = L.pop.hidden;
+""", page_state())
+    hq, se = page_state()["hq"], page_state()["se"]
+    assert o["panned"] == [False, hq]
+    assert o["clicked"] == [True, None]
+    assert o["house"] == [False, se]
+    assert o["calls"] == [True, None]
+    assert o["info"] is False
+
+
+@needs_node
+def test_a_refresh_keeps_the_focused_row_and_the_hover_ring(tmp_path):
+    o = run(tmp_path, SNAP + r"""
+Object.defineProperty(document, "activeElement", { get: () => focused, configurable: true });
+zoomTo(13); clickHouse(IN.hq);
+rowOf("E61").focus();
+rowOf("TL2").fire("mouseenter");
+const moved = IN.map.markers.map((m) => (m.unit === "E60" ? { ...m, status: "DP", look: "dispatched" } : m));
+setMap({ ...IN.map, markers: moved });
+out.kept = [focused && focused.dataset.unit, focused === rowOf("E61"), cls("TL2").includes("hot"), kind("TL2")];
+// the hovered rig leaves the firehouse's list (moved to another home): its ring cleared; the focused row gone: the box
+const gone = moved.filter((m) => !["TL2", "E61"].includes(m.unit));
+setMap({ ...IN.map, markers: gone });
+out.gone = [L.hoverRow, CadMap.lights.hovered("TL2"), focused === L.pop, L.stationOpen === IN.hq];
+""", page_state())
+    assert o["kept"] == ["E61", True, True, "full"]
+    assert o["gone"] == ["", False, True, True]

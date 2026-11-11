@@ -67,6 +67,7 @@ from __future__ import annotations
 
 import functools
 import json
+import re
 from pathlib import Path
 
 from sizeup.cad import eta
@@ -88,7 +89,7 @@ LOOK = {"free": "available", "oos": "oos", "dispatched": "dispatched", "enroute"
 # dispatched by other agency; or one not known here): drawn as dispatched, an active rig (#376: chips longest).
 ACTIVE_LOOK = "dispatched"
 # A rig's icon on the maps by apparatus type (#384; drawn by cadmap.js / cadmap.css): from its kind in
-# data/cad_lists.json; a code-only chief's car (CHIEF239: kind "other") by its code. Anything else (marine, EMS, police,
+# data/cad_lists.json; else by its code (ICON_BY_CODE). Anything else (marine, EMS, police,
 # agencies, code-only units): the generic mark.
 ICONS = ("engine", "ladder", "tower", "rescue", "suv", "other")
 ICON_OF_KIND = {"engine": "engine", "ladder": "ladder", "tower": "tower", "rescue": "rescue", "chief": "suv", "utility": "suv"}
@@ -117,16 +118,24 @@ def is_placeholder(unit, lists=None) -> bool:
     return code.strip().upper().startswith("DPT")
 
 
-def icon_of(unit: dict) -> str:
+# By code where the kind doesn't say (code-only or board-only units): the airport's ARFF crash trucks (AP7, AP11, AP17:
+# fire apparatus) as engines; battalion and fire coordinators' cars (BAT10-19, FC1, FC2) and CHIEF239 as cars
+ICON_BY_CODE = ((re.compile(r"^AP\d+$"), "engine"), (re.compile(r"^(BAT|FC)\d+$"), "suv"), (re.compile(r"^CHIEF"), "suv"))
+
+
+def icon_of(unit: dict, lists=None) -> str:
     """A unit {name, kind?} -> its map icon: engine | ladder | tower | rescue | suv (chiefs', duty and utility cars) |
-    other; a department placeholder (is_placeholder): "" (none: it is never drawn)."""
-    if is_placeholder(unit):
+    other; a department placeholder (is_placeholder, by the CAD's lists): "" (none: it is never drawn)."""
+    if is_placeholder(unit, lists):
         return ""
     kind = unit.get("kind") or ""
     if kind in ICON_OF_KIND:
         return ICON_OF_KIND[kind]
-    if kind in ("", "other") and str(unit.get("name") or "").upper().startswith("CHIEF"):
-        return "suv"
+    if kind in ("", "other", "agency"):
+        code = str(unit.get("name") or "").strip().upper()
+        for pat, icon in ICON_BY_CODE:
+            if pat.match(code):
+                return icon
     return "other"
 
 
@@ -348,7 +357,7 @@ def place(unit: dict, role: str, station: dict | None = None, incident: dict | N
     inc_ll = _ll(incident)
     if incident is None and not fire:
         return None                                  # EMS / police / agencies: only while on an event
-    spec = {"unit": unit["name"], "id": unit.get("id"), "kind": unit.get("kind", ""), "icon": icon_of(unit),
+    spec = {"unit": unit["name"], "id": unit.get("id"), "kind": unit.get("kind", ""), "icon": icon_of(unit, lists),
             "status": unit.get("status", ""), "status_at": unit.get("status_at"), "look": look, "place": "", "group": "", "lon": None, "lat": None, "ring": 0,
             "incident_id": incident["id"] if incident else None,
             "incident_number": (incident or {}).get("number") or "",

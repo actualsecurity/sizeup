@@ -148,6 +148,13 @@ window.CadMap = (() => {
   const drawable = (M) => ((M && M.markers) || []).filter((m) => !placeholder(m));
   const ICON_NAMES = { engine: "engine", ladder: "ladder", tower: "tower ladder", rescue: "rescue", suv: "car", other: "" };
   const CLASS_ORDER = { act: 0, idle: 1, oos: 2 };
+  // a firehouse's list's head (#384): "11 rigs · 7 in quarters · 2 on calls · 2 OOS", the parts that are not 0
+  function stationCounts(rigs) {
+    if (!rigs.length) return "No rigs";
+    const n = (c) => rigs.filter((m) => rigClass(m) === c).length;
+    return [`${rigs.length} rig${rigs.length === 1 ? "" : "s"}`, n("idle") && `${n("idle")} in quarters`,
+            n("act") && `${n("act")} on call${n("act") === 1 ? "" : "s"}`, n("oos") && `${n("oos")} OOS`].filter(Boolean).join(" · ");
+  }
 
   // ---- our units followed and lit up (#358): one state for every map ----------------------------------------------
   const UNIT_ZOOM = 15;                // a rig followed or picked: centred at least this close
@@ -558,8 +565,8 @@ window.CadMap = (() => {
             return;
           }
           // a call's: an arc centred on the top, 270° at most; a firehouse with a count chip on top of its icon
-          // (#384): 180° centred on the bottom, clear of the chip
-          const step = n > 1 ? Math.min((badge ? 180 : 270) / (n - 1), 62) * deg : 0;
+          // (#384): 140° centred on the bottom, clear of the chip and of the name's places either side
+          const step = n > 1 ? Math.min((badge ? 140 : 270) / (n - 1), 62) * deg : 0;
           const need = step ? w / (2 * Math.sin(step / 2)) : 0;                // neighbours a chip apart
           r = Math.max(ring ? r + gap : badge ? (dots ? DOT_R : STATION_R * k) : dots ? DOT_R : INC_R * k, need);
           list.forEach((m, i) => {
@@ -661,8 +668,8 @@ window.CadMap = (() => {
         rec.sig = sig;
         const e = rec.el;
         e.replaceChildren(String(units.length));                         // neutral: its units' statuses may differ
-        e.title = `${name}: ${units.join(", ")}`;
-        e.setAttribute("aria-label", `${name}, ${units.length} rigs in quarters`);
+        e.title = `${name}\n${units.length} in quarters: ${units.join(", ")}`;
+        e.setAttribute("aria-label", `${name}, ${units.length} in quarters`);
         rec.marker.setLngLat([list[0].lon, list[0].lat]);
       }
       for (const [name, rec] of this.badges) if (!badges.has(name)) { rec.marker.remove(); this.badges.delete(name); }
@@ -703,10 +710,15 @@ window.CadMap = (() => {
     openStation(name, refresh) {
       if (!this.data || !this.data.map) return;
       const lists = this.data.lists, rigs = this.stationRigs(name);
+      // a refresh: the row focused (by its unit) focused again; the row hovered: its ring kept, or cleared if it went
+      const act = typeof document !== "undefined" ? document.activeElement : null;
+      const focusUnit_ = refresh && act && this.pop.contains(act) && act.dataset ? act.dataset.unit || "" : "";
+      if (!refresh) this.hoverRow = "";
+      else if (this.hoverRow && !rigs.some((m) => m.unit === this.hoverRow)) { this.hoverRow = ""; hoverUnits([]); }
       this.stationSig = this.listSig(rigs);
       const go = this.onFollow || this.onFocus;
       const head = h("div", "cm-pop-head");
-      head.append(h("b", "", name), " ", h("span", "dim small", rigs.length ? `${rigs.length} rig${rigs.length === 1 ? "" : "s"}` : "No rigs"));
+      head.append(h("b", "", name), " ", h("span", "dim small", stationCounts(rigs)));
       const list = h("div", "cm-st-list");
       for (const m of rigs) {
         const st = statusOf(lists, m.status);
@@ -720,8 +732,8 @@ window.CadMap = (() => {
                    go ? (this.onFollow ? "click: follow" : "click: show") : ""].filter(Boolean).join(", ");
         b.disabled = !go || !this.chips.has(m.unit);
         b.addEventListener("click", (e) => { e.stopPropagation(); this.closePicker(); go(m.unit); });
-        b.addEventListener("mouseenter", () => hoverUnits([m.unit]));
-        b.addEventListener("mouseleave", () => hoverUnits([]));
+        b.addEventListener("mouseenter", () => { this.hoverRow = m.unit; hoverUnits([m.unit]); });
+        b.addEventListener("mouseleave", () => { this.hoverRow = ""; hoverUnits([]); });
         list.append(b);
       }
       const row = h("div", "row");
@@ -736,7 +748,12 @@ window.CadMap = (() => {
       this.pop.replaceChildren(head, list, row);
       this.pop.hidden = false;
       this.stationOpen = name;
-      if (refresh) return;
+      if (refresh) {
+        const again = focusUnit_ && [...list.children].find((r) => r.dataset.unit === focusUnit_);
+        if (again && !again.disabled) again.focus({ preventScroll: true });
+        else if (focusUnit_) this.pop.focus({ preventScroll: true });           // its row went: Escape still works
+        return;
+      }
       this.pop.tabIndex = -1;
       this.pop.focus({ preventScroll: true });          // Escape closes it (the pop's keydown); Tab: its rows
     }
@@ -926,6 +943,7 @@ window.CadMap = (() => {
     closePicker() {
       if (this.stationOpen) hoverUnits([]);
       this.stationOpen = null;
+      this.hoverRow = "";
       this.pop.hidden = true;
       this.pop.replaceChildren();
     }
@@ -997,6 +1015,15 @@ window.CadMap = (() => {
         this.layer.fhSig = null;
         this.layer.syncFirehouses(new Set(this.layer.badges.keys()));
       });
+      // #384: a click on the map (not a pan or a zoom: MapLibre's click), off a firehouse, closes a firehouse's list
+      this.map.on("click", (e) => {
+        if (!this.layer.stationOpen) return;
+        let hit = e && e.features ? e.features.length : 0;
+        if (!hit && e && e.point) {
+          try { hit = this.map.queryRenderedFeatures(e.point, { layers: ["firehouse"] }).length; } catch (_) { /* */ }
+        }
+        if (!hit) this.layer.closePicker();
+      });
       // #384: a firehouse (its icon or its name) clicked: its rigs
       this.map.on("click", "firehouse", (e) => {
         const f = e && e.features && e.features[0];
@@ -1050,7 +1077,10 @@ window.CadMap = (() => {
       }
       const key = JSON.stringify(this.focus ? this.layer.focusKey() : this.framePoints());
       if (!this.focus) {                              // no call open: the calls changed, so all of them again, as
-        if (this.callsKey !== undefined && key !== this.callsKey) this.userMoved = false;   // Recenter does (#218)
+        if (this.callsKey !== undefined && key !== this.callsKey) {
+          this.userMoved = false;                     // Recenter does (#218)
+          if (this.layer.stationOpen) this.layer.closePicker();   // #384: a firehouse's list never left over the calls
+        }
         this.callsKey = key;                          // (a view switch or a resize leaves a map the viewer moved)
       } else this.callsKey = undefined;
       if (key !== this.fitKey && this.canvas.clientWidth) {

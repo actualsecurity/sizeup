@@ -120,7 +120,7 @@ out.reused = chip("E60").el === els[0] && chip("E63").el === els[1];
 zoomTo(13); const b = L.badges.get("PCFD Headquarters"); out.badgeEl = b.el.className; out.badgeC = b.el.style["--c"] || null;
 b.el.fire("click"); out.pop = [L.pop.hidden, L.stationOpen, rec.eases.length];
 """, page_state())
-    hq = ["PCFD Headquarters", "2", "PCFD Headquarters: E60, E61"]
+    hq = ["PCFD Headquarters", "2", "PCFD Headquarters\n2 in quarters: E60, E61"]
     assert o["z13"] == {"E60": "folded", "E61": "folded", "E62": "dot", "E63": "full", "L31": "full", "badges": [hq]}
     assert o["act"] == [True, True, False]
     assert o["z95"] == {"E60": "folded", "E61": "folded", "E62": "dot", "E63": "dot", "L31": "dot", "badges": [hq]}
@@ -150,7 +150,7 @@ Date.now = real;
     assert o["hovered"]["E63"] == "full" and o["hovered"]["L31"] == "dot"
     assert o["talking"]["E62"] == "full"
     assert o["after"] == {"E60": "folded", "E61": "folded", "E62": "dot", "E63": "dot", "L31": "dot",
-                          "badges": [["PCFD Headquarters", "2", "PCFD Headquarters: E60, E61"]]}
+                          "badges": [["PCFD Headquarters", "2", "PCFD Headquarters\n2 in quarters: E60, E61"]]}
 
 
 @needs_node

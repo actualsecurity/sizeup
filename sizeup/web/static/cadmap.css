@@ -76,7 +76,7 @@
   /* #384: a firehouse's idle rigs folded into one count chip on top of its icon ("6"), the size of a rig's mark;
      neutral (its units' statuses may differ). map-style.js's "firehouse-badge" keeps the firehouse's name clear of it */
   .cm-badge {
-    z-index: 2;   /* under every rig: the firehouse's other marks fan over the top */
+    z-index: 1;   /* under every rig and every call's pin (#384: a call's label never hidden by it) */
     display: inline-flex; align-items: center; justify-content: center; min-inline-size: var(--s-4); block-size: var(--s-4); min-block-size: 0;
     padding: 0 var(--s-0); font: 700 var(--fs-2xs)/1 var(--font); font-variant-numeric: tabular-nums; color: #fff;
     background: rgba(17, 19, 21, 0.92); border: var(--bw) solid rgba(255, 255, 255, 0.85); border-radius: var(--s-2);
@@ -112,7 +112,7 @@
   .cm-st-row.oos .n { text-decoration: line-through; }
 
   /* the other calls: a dot in the type color, labelled; dimmed while another one is open */
-  .cm-pin { z-index: 1; min-block-size: 0; padding: 0; border: 0; background: none; cursor: pointer; font: 700 var(--fs-2xs)/var(--lh-2xs) var(--font); }
+  .cm-pin { z-index: 2; min-block-size: 0; padding: 0; border: 0; background: none; cursor: pointer; font: 700 var(--fs-2xs)/var(--lh-2xs) var(--font); }
   .cm-pin:hover { background: none; }
   .cm-pin .dot { display: block; inline-size: calc(var(--s-3) + var(--s-0)); block-size: calc(var(--s-3) + var(--s-0)); border-radius: 50%;
     background: var(--c); border: 2px solid #fff; box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.7); }
