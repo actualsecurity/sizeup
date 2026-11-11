@@ -1777,12 +1777,11 @@ function statusChoices(u, where) {
 // Follow a rig on the map (#358, cadmap.js): its unit-board row and its row on an incident, while it is on the map;
 // hovering (or focusing) either row rings it wider there. Only on a map already on screen: never a view switch (a new
 // call's draft, an edit form); no map showing it: the button flashes instead.
-// a department placeholder (DPT239 ...: mapview.is_placeholder) is never followed nor recommended (#384); it may still
-// be on an incident's assigned list. TODO: the lists' placeholder test once no-dept-units (#400) is on main.
+// a department placeholder (DPT239 ...: its unit row's placeholder flag, #400; mapview.is_placeholder) is never followed
+// nor recommended (#384); it may still be on an incident's assigned list
 function placeholderUnit(name) {
   const u = ((cad.state && cad.state.units) || []).find((x) => x.name === name);
-  if (u && typeof u.placeholder === "boolean") return u.placeholder;          // the hub's own flag (#400) first
-  return /^DPT/i.test(String(name || "").trim());
+  return !!(u && u.placeholder);
 }
 const onMap = (name) => !placeholderUnit(name) && !!(window.CadMap && CadMap.onMap && CadMap.onMap(name));
 const FLASH_MS = 1200;

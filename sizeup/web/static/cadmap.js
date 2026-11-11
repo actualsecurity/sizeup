@@ -142,10 +142,15 @@ window.CadMap = (() => {
   // a rig's icon by apparatus type (#384): the hub's (mapview.icon_of), else the generic mark
   const ICONS = new Set(["engine", "ladder", "tower", "rescue", "suv", "other"]);
   const iconOf = (m) => (m && ICONS.has(m.icon) ? m.icon : "other");
-  // a department placeholder (DPT239 ...: mapview.is_placeholder), not apparatus: the hub never sends one; if one comes,
-  // it is never drawn, counted, listed or followed
-  const placeholder = (m) => /^DPT/i.test(String((m && m.unit) || "").trim());
-  const drawable = (M) => ((M && M.markers) || []).filter((m) => !placeholder(m));
+  // a department placeholder (DPT239 ...: its unit row's placeholder flag, #400; mapview.is_placeholder), not apparatus:
+  // the hub never sends one; if one comes (flagged on its marker or its unit row), it is never drawn, counted, listed or
+  // followed
+  function drawable(M) {
+    const ms = (M && M.markers) || [];
+    const units = typeof cad !== "undefined" && cad && cad.state && cad.state.units;
+    const ph = new Set((units || []).filter((u) => u.placeholder).map((u) => u.name));
+    return ph.size || ms.some((m) => m.placeholder) ? ms.filter((m) => !m.placeholder && !ph.has(m.unit)) : ms;
+  }
   const ICON_NAMES = { engine: "engine", ladder: "ladder", tower: "tower ladder", rescue: "rescue", suv: "car", other: "" };
   const CLASS_ORDER = { act: 0, idle: 1, oos: 2 };
   // the numbers of the open calls a rig is on (#384: the hub's incident_numbers; an older hub: its one call)
