@@ -1411,7 +1411,8 @@ class Cad:
                 raise CadError(f"{k}: unix seconds") from None
         rev = one("rev")
         talking = self._talking()
-        now_rev = f"{self.comms.rev}.{self.store.rev}"
+        # (as this reader may know it: not moved by another P25 system's traffic for one who may not see it, #419)
+        now_rev = self.comms.rev_for()
         if rev and rev == now_rev:
             return {"unchanged": True, "rev": rev, "talking": talking}
         # The same filters at the same revs (every screen asks when comms_rev moves; a filter tried again): the answer
@@ -1549,7 +1550,7 @@ class Cad:
         context = self.comms._sees_context()
         now = self.clock()
         minute = int(now // 60)
-        rev = f"{self.comms.rev}.{self.store.rev}.{minute}.{int(bool(context))}"
+        rev = f"{self.comms.rev_for(context)}.{minute}.{int(bool(context))}"
         live = set()
         for e in self._talking():
             if e.get("ended"):

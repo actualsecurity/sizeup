@@ -92,58 +92,35 @@ CHANGES_KEPT = 50000                  # radio_changes rows kept (prune): a curso
 EM_WINDOW_S = 12 * 3600               # the sources' emergency mark: unacknowledged ones this recent
 # Every change to what a row of the Radio page shows, in order (#415 ?changed=): the transmission itself (new, its
 # transcript, a re-run, the alternative text, pruned), its links to incidents, a link kept, its alarm (raised, seen,
-# cleared), and a note tagged with a unit ('note-<id>'). Written by triggers, so no writer can forget; seq only grows
-# and SQLite has one writer at a time, so a reader that has seen seq N has seen everything up to N.
-# system: the row's own, written with the change (also for a row since deleted): a reader who may not see another P25
-# system's traffic is never told that one of its rows changed or went (its id says its talkgroup, time and frequency).
-# '?': a change of a link, a kept mark or an alarm (the triggers name no other table): whose it is, is read from the
-# row and from its other entries when it is asked for (Comms.page).
+# cleared), and a note tagged with a unit ('note-...').
 #
-# The log is a convenience and the radio log is the record: a change-log failure never costs a write. A write that
-# fails is retried once with these triggers taken off (Comms._guard, the store's Db.guard); the log is then "broken"
-# (every ?changed= answers reload: the page asks afresh, as it does every 30 s anyway) until the next start rebuilds it.
-CHANGES_TABLE = """
+# The radio log is the record and this log is a convenience, so NOTHING on the write path depends on it: no trigger,
+# no retry. A write site says which row it changed (Comms.touch, inside its transaction); the entries are written
+# only after that transaction has committed, as their own statement in their own try (Comms.flush_changes, called by
+# the store's tx()). Rolled back: the notes are dropped with it. A failure to write an entry is caught, logged once,
+# and marks the log broken (every ?changed= answers reload) until an entry can be written again; it is never raised
+# and never repeats a write. A write site that forgets to touch costs a late update on the page (its 30 s page is
+# the backstop), never a row: tests/test_comms_changes.py walks every writer and fails for one that doesn't.
+#
+# seq only grows and SQLite has one writer at a time, so a reader that has seen seq N has seen everything up to N.
+# system: the row's own, read when the entry is written (given by the writer for a row it deleted). A reader who may
+# not see another P25 system's traffic is never told that one of its rows changed or went (its id says its
+# talkgroup, time and frequency), and their cursor doesn't move with it. NULL: not known: nobody's but a reader's
+# who may see everything.
+CHANGES_SCHEMA = """
 CREATE TABLE IF NOT EXISTS radio_changes (
   seq INTEGER PRIMARY KEY AUTOINCREMENT,
   traffic_id TEXT NOT NULL,
-  system TEXT,                          -- the transmission's system (sizeup/sourcekeys.py); '' a note; '?' see above
+  system TEXT,                          -- the transmission's system (sizeup/sourcekeys.py); '' a note
   gone INTEGER NOT NULL DEFAULT 0       -- 1: the transmission was deleted
 );
 CREATE INDEX IF NOT EXISTS radio_changes_id ON radio_changes(traffic_id);
+CREATE INDEX IF NOT EXISTS radio_changes_system ON radio_changes(system, seq);
 """
-CHANGES_SCHEMA = CHANGES_TABLE + """CREATE TRIGGER IF NOT EXISTS radio_changes_t_ins AFTER INSERT ON radio_traffic BEGIN
-  INSERT INTO radio_changes (traffic_id, system) VALUES (NEW.id, NEW.system); END;
-CREATE TRIGGER IF NOT EXISTS radio_changes_t_upd AFTER UPDATE ON radio_traffic BEGIN
-  INSERT INTO radio_changes (traffic_id, system) VALUES (NEW.id, NEW.system); END;
-CREATE TRIGGER IF NOT EXISTS radio_changes_t_del AFTER DELETE ON radio_traffic BEGIN
-  INSERT INTO radio_changes (traffic_id, system, gone) VALUES (OLD.id, OLD.system, 1); END;
-CREATE TRIGGER IF NOT EXISTS radio_changes_l_ins AFTER INSERT ON radio_links BEGIN
-  INSERT INTO radio_changes (traffic_id, system) VALUES (NEW.traffic_id, '?'); END;
-CREATE TRIGGER IF NOT EXISTS radio_changes_l_del AFTER DELETE ON radio_links BEGIN
-  INSERT INTO radio_changes (traffic_id, system) VALUES (OLD.traffic_id, '?'); END;
-CREATE TRIGGER IF NOT EXISTS radio_changes_k_ins AFTER INSERT ON radio_link_kept BEGIN
-  INSERT INTO radio_changes (traffic_id, system) VALUES (NEW.traffic_id, '?'); END;
-CREATE TRIGGER IF NOT EXISTS radio_changes_k_del AFTER DELETE ON radio_link_kept BEGIN
-  INSERT INTO radio_changes (traffic_id, system) VALUES (OLD.traffic_id, '?'); END;
-CREATE TRIGGER IF NOT EXISTS radio_changes_l_upd AFTER UPDATE ON radio_links BEGIN
-  INSERT INTO radio_changes (traffic_id, system) VALUES (NEW.traffic_id, '?'); END;
-CREATE TRIGGER IF NOT EXISTS radio_changes_n_ins AFTER INSERT ON events WHEN NEW.kind = 'note' AND NEW.units != '' BEGIN
-  INSERT INTO radio_changes (traffic_id, system) VALUES ('note-' || NEW.id, ''); END;
-CREATE TRIGGER IF NOT EXISTS radio_changes_n_upd AFTER UPDATE ON events WHEN NEW.kind = 'note' BEGIN
-  INSERT INTO radio_changes (traffic_id, system) VALUES ('note-' || NEW.id, ''); END;
-CREATE TRIGGER IF NOT EXISTS radio_changes_n_del AFTER DELETE ON events WHEN OLD.kind = 'note' BEGIN
-  INSERT INTO radio_changes (traffic_id, system, gone) VALUES ('note-' || OLD.id, '', 1); END;
-"""
-ALARM_CHANGES_SCHEMA = """
-CREATE TRIGGER IF NOT EXISTS radio_changes_a_ins AFTER INSERT ON alarms BEGIN
-  INSERT INTO radio_changes (traffic_id, system) VALUES (NEW.traffic_id, '?'); END;
-CREATE TRIGGER IF NOT EXISTS radio_changes_a_upd AFTER UPDATE ON alarms BEGIN
-  INSERT INTO radio_changes (traffic_id, system) VALUES (NEW.traffic_id, '?'); END;
-CREATE TRIGGER IF NOT EXISTS radio_changes_a_del AFTER DELETE ON alarms BEGIN
-  INSERT INTO radio_changes (traffic_id, system) VALUES (OLD.traffic_id, '?'); END;
-"""
-CHANGE_TRIGGERS = ("radio_changes_t_ins", "radio_changes_t_upd", "radio_changes_t_del", "radio_changes_l_ins", "radio_changes_l_del", "radio_changes_k_ins", "radio_changes_k_del",
-                   "radio_changes_l_upd", "radio_changes_n_ins", "radio_changes_n_upd", "radio_changes_n_del", "radio_changes_a_ins", "radio_changes_a_upd", "radio_changes_a_del")
+# The triggers an earlier build of this branch hung on the tables: taken off at every start
+OLD_CHANGE_TRIGGERS = tuple(f"radio_changes_{t}_{w}" for t, ws in (("t", "ins upd del"), ("l", "ins upd del"), ("k", "ins del"),
+                                                                    ("n", "ins upd del"), ("a", "ins upd del")) for w in ws.split())
+CHANGES_RETRY_S = 60.0                # a broken change log is tried again after this long
 CHANGES_TRIM_EVERY = 500              # the change log is trimmed to CHANGES_KEPT every this many transmissions logged
 ID_NOTES = ("none", "undecoded", "weak")    # why an FG1 key-up has no radio ID (radio_traffic.id_note, #163)
 RELINK_MAX = 2000                           # a radio just named: at most this many of its unnamed transmissions
@@ -222,8 +199,11 @@ class Comms:
         self.names_ours = None  # text -> [our unit codes] (the feed's matcher, #115): a page not ours naming them
         self.on_text = None     # traffic id -> None: a transcript arrived or changed (status suggestions, #37)
         self._revs: dict = {}   # name -> (rev, value): what _per_rev made
-        self._alarm_triggers = False     # the alarms' changes go to radio_changes too (_alarm_changes)
-        self.changes_broken = False      # the change log failed a write and was taken off (until the next start)
+        self.changes_broken = False      # an entry couldn't be written: every ?changed= answers reload (flush_changes)
+        self.changes_floor = 0           # cursors below this are told to reload (the log has a gap before it)
+        self._pending: list = []         # (id, system | None, gone) touched in the open transaction
+        self._retry_at = 0.0             # a broken log: when to try writing to it again
+        self._said_broken = False
         self.log = lambda m: None        # set by the CAD
         self._logged = 0                 # transmissions logged since the change log was last trimmed
         with self.store.lock:
@@ -237,6 +217,7 @@ class Comms:
         try:
             with self.store.tx() as db:
                 db.execute("DELETE FROM radio_links WHERE why = 'channel'")
+                self.touch_reset()
         except Exception:
             pass                # no comms tables yet (a fresh store migrates first)
 
@@ -299,6 +280,7 @@ class Comms:
                 db.execute('UPDATE radio_traffic SET source = ?, system = ?, "group" = ?, service = ?, ours = ?, dept = ?, '
                            "tier = ? WHERE id = ?", (*src, tid))
                 self._count(db, skey, start, max(0.0, float(t.get("end") or start) - start))
+            self.touch(tid)
             if other:
                 # Another system's units never put traffic on our incidents by a rule (#415): no unit, airport or
                 # dispatcher link. Only a person's own link does (link()).
@@ -321,10 +303,10 @@ class Comms:
                 self._dispatcher_links(db, tid, call_id, turn, bool(disp), links)
             self.rev += 1
             out = sorted(r[0] for r in db.execute("SELECT incident_id FROM radio_links WHERE traffic_id = ?", (tid,)))
-            self._logged += 1
-            if self._logged >= CHANGES_TRIM_EVERY:
-                self._logged = 0
-                self._trim_changes(db)
+        self._logged += 1
+        if self._logged >= CHANGES_TRIM_EVERY:
+            self._logged = 0
+            self._trim_changes()
         self._heard(tid)
         return out
 
@@ -348,6 +330,7 @@ class Comms:
         if not labels:
             return 0
         with self.store.tx() as db:
+            self.touch_reset()
             return db.execute("UPDATE radio_traffic SET source = 'air:' || channel, system = 'airband', service = 'air', "
                               f"ours = 0 WHERE talkgroup IS NULL AND system != 'airband' AND channel IN "
                               f"({','.join('?' * len(labels))})", labels).rowcount
@@ -460,13 +443,13 @@ class Comms:
                     if why == "unit":
                         self._auto(db, s["id"], iid, "dispatcher", unit)
 
-    @staticmethod
-    def _auto(db, tid: str, iid: int, why: str, unit: str) -> None:
+    def _auto(self, db, tid: str, iid: int, why: str, unit: str) -> None:
         """An auto link, unless a person took this transmission off that event (radio_link_exclusions)."""
         db.execute("INSERT OR IGNORE INTO radio_links (traffic_id, incident_id, why, unit) SELECT ?, ?, ?, ? "
                    "WHERE NOT EXISTS (SELECT 1 FROM radio_link_exclusions WHERE traffic_id = ? AND incident_id = ?)",
                    (tid, iid, why, unit, tid, iid))
 
+        self.touch(tid)
     def relink(self, system: str, radio_id: str, unit: str) -> list[int]:
         """A radio ID just named (the new-ID prompt, sizeup/cad/newids.py, or Settings > Radios): each of its
         transmissions logged with no rig (newest RELINK_MAX) gets that rig, and goes on the events the unit was on
@@ -488,6 +471,7 @@ class Comms:
             for r in rows:
                 db.execute("UPDATE radio_traffic SET rig = ?, id_note = '', updated_at = ? WHERE id = ?",
                            (unit, self.clock(), r["id"]))
+                self.touch(r["id"])
                 mine: dict[int, tuple[str, str]] = {}
                 for e in db.execute(self.ON_EVENT_BY_UNIT, (unit, r["start"], r["start"])).fetchall():
                     mine[e["incident_id"]] = ("unit", unit)
@@ -531,6 +515,7 @@ class Comms:
                 n += db.execute("INSERT OR IGNORE INTO radio_links (traffic_id, incident_id, why, unit) SELECT ?, ?, 'page', '' "
                                 "WHERE NOT EXISTS (SELECT 1 FROM radio_link_exclusions WHERE traffic_id = ? AND incident_id = ?)",
                                 (pid, iid, pid, iid)).rowcount
+                self.touch(pid)
             if n:
                 self.rev += 1
         return n
@@ -546,6 +531,7 @@ class Comms:
             old = db.execute("SELECT why FROM radio_links WHERE traffic_id = ? AND incident_id = ?", (tid, iid)).fetchone()
             if old is not None:
                 return {"linked": False, "why": old["why"]}
+            self.touch(tid)
             db.execute("DELETE FROM radio_link_exclusions WHERE traffic_id = ? AND incident_id = ?", (tid, iid))
             db.execute("INSERT INTO radio_links (traffic_id, incident_id, why, unit) VALUES (?, ?, 'manual', ?)",
                        (tid, iid, operator))
@@ -567,6 +553,7 @@ class Comms:
             old = db.execute("SELECT why, unit FROM radio_links WHERE traffic_id = ? AND incident_id = ?", (tid, iid)).fetchone()
             if old is None:
                 return {"unlinked": False, "why": ""}
+            self.touch(tid)
             db.execute("DELETE FROM radio_links WHERE traffic_id = ? AND incident_id = ?", (tid, iid))
             db.execute("DELETE FROM radio_link_kept WHERE traffic_id = ? AND incident_id = ?", (tid, iid))
             auto = old["why"] != "manual"
@@ -584,6 +571,7 @@ class Comms:
         """New text for a transmission. alt {text, model}: the other engine's transcript, kept to compare
         ("both": Amazon Transcribe's is the text, whisper's the alternative)."""
         with self.store.tx() as db:
+            self.touch(tid)
             if alt is not None:
                 db.execute("UPDATE radio_traffic SET alt_text = ?, alt_model = ? WHERE id = ?",
                            (str(alt.get("text") or ""), str(alt.get("model") or ""), tid))
@@ -598,6 +586,7 @@ class Comms:
     def set_alt(self, tid: str, alt: dict) -> bool:
         """The other engine's text ("both"), the transcript left as it is."""
         with self.store.tx() as db:
+            self.touch(tid)
             n = db.execute("UPDATE radio_traffic SET alt_text = ?, alt_model = ?, updated_at = ? WHERE id = ?",
                            (str(alt.get("text") or ""), str(alt.get("model") or ""), self.clock(), tid)).rowcount
             if n:
@@ -608,6 +597,7 @@ class Comms:
         """A re-run (re-transcribe) is over: when, and what came of it (changed | same | failed: why),
         even when the text is the same, so the page that asked sees it end."""
         with self.store.tx() as db:
+            self.touch(tid)
             n = db.execute("UPDATE radio_traffic SET rerun_at = ?, rerun_result = ?, updated_at = ? WHERE id = ?",
                            (self.clock(), result, self.clock(), tid)).rowcount
             if n:
@@ -618,11 +608,18 @@ class Comms:
         cutoff = self.clock() - KEEP_UNLINKED_S
         with self.store.tx() as db:
             db.execute("DELETE FROM radio_activity WHERE minute < ?", (int(cutoff // 60),))
-            self._trim_changes(db)
             db.execute("UPDATE radio_activity SET radios = '' WHERE radios != '' AND minute < ?",
                        (int((self.clock() - ACTIVITY_RADIOS_S) // 60),))
-            return db.execute(f"DELETE FROM radio_traffic WHERE start < ? AND id NOT IN (SELECT l.traffic_id FROM radio_links l "
-                              f"WHERE {SURE_LINK})", (cutoff,)).rowcount
+            going = f"start < ? AND id NOT IN (SELECT l.traffic_id FROM radio_links l WHERE {SURE_LINK})"
+            gone = db.execute(f"SELECT id, system FROM radio_traffic WHERE {going} LIMIT ?", (cutoff, CHANGES_MAX + 1)).fetchall()
+            if len(gone) > CHANGES_MAX:
+                self.touch_reset()                      # a big clear-out: the pages ask afresh
+            else:
+                for r in gone:
+                    self.touch(r["id"], r["system"], gone=True)
+            n = db.execute(f"DELETE FROM radio_traffic WHERE {going}", (cutoff,)).rowcount
+        self._trim_changes()
+        return n
 
     def kept_for_events(self, ids: list[str]) -> set[str]:
         """Of these clip ids, the ones whose audio is a record (the hub's audio retention, #251): on a CAD event
@@ -656,6 +653,7 @@ class Comms:
                     new.append(dict(t, names=names, ours=bool(is_ours(names))))
                 if new != tones:
                     db.execute("UPDATE radio_traffic SET tones = ?, updated_at = ? WHERE id = ?", (json.dumps(new), self.clock(), r["id"]))
+                    self.touch(r["id"])
                     n += 1
         if n:
             self.rev += 1
@@ -784,86 +782,131 @@ class Comms:
         return [(fm, list(not_main))] + [("t.talkgroup = ? AND t.system IN ('', ?)", [int(tg), sources.COUNTY])
                                          for tg in main_tgs]
 
-    # ---- the change log (radio_changes): never in the way of a write --------------------------------------------
+    # ---- the change log (radio_changes): told after the write, never part of it ----------------------------------
 
     def _open_changes(self) -> None:
-        """The change log and its triggers, at the start: made, or made again when it isn't whole (a start after it was
-        taken off, an older shape, a table that can't be written). If even that fails: no log, no triggers."""
+        """The change log at the start: made, or made again when it is an older shape. An earlier build's triggers are
+        taken off. Every cursor from before this start is told to reload (changes_floor). Failing: no log, no harm."""
         db = self.store.db
-        db.guard = self._guard
+        self.store.after_commit, self.store.after_rollback, self.store.touch = self.flush_changes, self._forget_changes, self.touch
         with self.store.lock:
             try:
-                cols = {r[1] for r in sqlite3.Connection.execute(db, "PRAGMA table_info(radio_changes)")}
-                whole = not cols or {"seq", "traffic_id", "system", "gone"} <= cols
-                if whole and cols:
-                    whole = self._changes_writable(db)
-                if not whole:
-                    self._drop_change_triggers(db)
-                    sqlite3.Connection.execute(db, "DROP TABLE IF EXISTS radio_changes")
+                for name in OLD_CHANGE_TRIGGERS:
+                    db.execute(f"DROP TRIGGER IF EXISTS {name}")
+                cols = {r[1] for r in db.execute("PRAGMA table_info(radio_changes)")}
+                if cols and not {"seq", "traffic_id", "system", "gone"} <= cols:
+                    db.execute("DROP TABLE radio_changes")
                 db.executescript(CHANGES_SCHEMA)
+                top = db.execute("SELECT MAX(seq) FROM radio_changes").fetchone()[0] or 0
+                # a marker, so seq moves past everything a page from before this start may hold
+                db.execute("INSERT INTO radio_changes (traffic_id, system) VALUES ('start', NULL)")
+                self.changes_floor = int(top) + 1
                 self.changes_broken = False
-            except sqlite3.Error as e:
-                self._changes_off(db, f"could not be made ({type(e).__name__}: {e})")
+            except Exception as e:  # noqa: BLE001 - the radio log itself is what matters
+                self._changes_off(f"could not be made ({type(e).__name__}: {e})")
 
-    @staticmethod
-    def _changes_writable(db) -> bool:
-        """Whether a row can be written to the change log now (tried, and taken back)."""
-        try:
-            sqlite3.Connection.execute(db, "SAVEPOINT radio_changes_probe")
-            try:
-                sqlite3.Connection.execute(db, "INSERT INTO radio_changes (traffic_id, system) VALUES ('probe', '')")
-            finally:
-                sqlite3.Connection.execute(db, "ROLLBACK TO radio_changes_probe")
-                sqlite3.Connection.execute(db, "RELEASE radio_changes_probe")
-            return True
-        except sqlite3.Error:
-            return False
-
-    @staticmethod
-    def _drop_change_triggers(db) -> None:
-        for name in CHANGE_TRIGGERS:
-            sqlite3.Connection.execute(db, f"DROP TRIGGER IF EXISTS {name}")
-
-    def _changes_off(self, db, why: str) -> None:
+    def _changes_off(self, why: str) -> None:
         self.changes_broken = True
+        self._retry_at = time.monotonic() + CHANGES_RETRY_S
+        if not self._said_broken:
+            self._said_broken = True
+            try:
+                self.log(f"CAD: the Radio page's change log is off ({why}); pages ask afresh instead. Nothing of the radio "
+                         "log is lost")
+            except Exception:  # noqa: BLE001
+                pass
+
+    def touch(self, tid, system: str | None = None, gone: bool = False) -> None:
+        """A row of the Radio page changed in the transaction now open: remembered, and written to the change log once
+        that transaction has committed (flush_changes; dropped if it is rolled back). system: only for a row this
+        writer deleted (it can't be read afterwards). Never raises."""
         try:
-            self._drop_change_triggers(db)
-        except sqlite3.Error:
-            pass
-        try:
-            self.log(f"CAD: the Radio page's change log is off until the next start: {why}. Nothing of the radio log is lost")
-        except Exception:  # noqa: BLE001 - a log line must not cost the write either
+            self._pending.append((str(tid), system, bool(gone)))
+        except Exception:  # noqa: BLE001
             pass
 
-    def _guard(self, db, error) -> bool:
-        """A write failed (the store's Db.guard). True when the change log was at fault: its triggers are off now and
-        the write is to be run once more. The log is at fault when a row can't be written to it; any other failure is
-        the write's own and is raised as it was."""
-        if self.changes_broken or self._changes_writable(db):
-            return False
-        self._changes_off(db, f"a write failed on it ({type(error).__name__}: {error})")
-        return True
+    def touch_reset(self) -> None:
+        """Many rows changed at once, or which ones isn't known: every page asks afresh (one entry, and the floor)."""
+        self.touch("reset", None)
 
-    def _trim_changes(self, db) -> None:
-        """The change log held to its newest CHANGES_KEPT (a range on its key): at the start and every
-        CHANGES_TRIM_EVERY transmissions."""
-        if self.changes_broken:
+    def note_change(self, tid, system: str | None = None, gone: bool = False) -> None:
+        """touch() for a writer outside the store's tx(): written now, unless a transaction is open (then with it)."""
+        self.touch(tid, system, gone)
+        try:
+            if not self.store.db.in_transaction:
+                self.flush_changes()
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _forget_changes(self) -> None:
+        self._pending = []
+
+    def flush_changes(self) -> None:
+        """The change notes of the transaction just committed, written to the log: its own statements, after the fact.
+        Any failure is caught here: the log is marked broken (readers reload) and tried again in CHANGES_RETRY_S.
+        Nothing is raised and no write is repeated: what the notes are about is already stored."""
+        notes, self._pending = self._pending, []
+        if not notes:
             return
         try:
-            sqlite3.Connection.execute(db, "DELETE FROM radio_changes WHERE seq <= (SELECT MAX(seq) FROM radio_changes) - ?",
-                                       (CHANGES_KEPT,))
-        except sqlite3.Error:
+            db = self.store.db
+            with self.store.lock:
+                rows = []
+                for tid, system, gone in dict.fromkeys(notes):
+                    if system is None and tid not in ("reset", "start") and not tid.startswith("note-"):
+                        r = db.execute("SELECT system FROM radio_traffic WHERE id = ?", (tid,)).fetchone()
+                        system = r[0] if r is not None else None
+                    elif tid.startswith("note-"):
+                        system = ""
+                    rows.append((tid, system, int(gone)))
+                if self.changes_broken and time.monotonic() < self._retry_at:
+                    return
+                if db.in_transaction:                   # (never from tx(); a caller's own transaction: with it)
+                    db.executemany("INSERT INTO radio_changes (traffic_id, system, gone) VALUES (?, ?, ?)", rows)
+                else:
+                    db.execute("BEGIN")
+                    try:
+                        db.executemany("INSERT INTO radio_changes (traffic_id, system, gone) VALUES (?, ?, ?)", rows)
+                        top = db.execute("SELECT MAX(seq) FROM radio_changes").fetchone()[0] or 0
+                        db.execute("COMMIT")
+                    except BaseException:
+                        try:
+                            db.execute("ROLLBACK")
+                        except Exception:  # noqa: BLE001
+                            pass
+                        raise
+                    if self.changes_broken or any(r[0] == "reset" for r in rows):
+                        # written again after a gap, or a reset: what was missed can't be told: older cursors reload
+                        self.changes_floor = int(top)
+                        self.changes_broken = self._said_broken = False
+        except Exception as e:  # noqa: BLE001 - never the writer's problem
+            self._changes_off(f"an entry could not be written ({type(e).__name__}: {e})")
+
+    def _trim_changes(self) -> None:
+        """The change log held to its newest CHANGES_KEPT (a range on its key): at the start and every
+        CHANGES_TRIM_EVERY transmissions. Its own statement, after the write; a failure is only a longer log."""
+        try:
+            with self.store.lock:
+                if not self.store.db.in_transaction:
+                    self.store.db.execute("DELETE FROM radio_changes WHERE seq <= (SELECT MAX(seq) FROM radio_changes) - ?",
+                                          (CHANGES_KEPT,))
+        except Exception:  # noqa: BLE001
             pass
 
-    def _alarm_changes(self) -> None:
-        """The alarms' changes into radio_changes too, once the alarms table is there (it is made after this)."""
-        if not self._alarm_triggers and not self.changes_broken and has_alarms(self.store):
-            with self.store.lock:
-                try:
-                    self.store.db.executescript(ALARM_CHANGES_SCHEMA)
-                except sqlite3.Error as e:
-                    self._changes_off(self.store.db, f"its alarm triggers could not be made ({type(e).__name__}: {e})")
-            self._alarm_triggers = True
+    def rev_for(self, sees: bool | None = None) -> str:
+        """The radio log's rev as this reader may know it. One who may see everything: the log's and the store's own
+        counters. One who may not see another P25 system's traffic: the newest change they may see (every writer notes
+        its change, with its row's system), so that system's activity never moves it; with no change log: the half
+        minute (their page asks afresh that often anyway)."""
+        if self._sees_context() if sees is None else sees:
+            return f"{self.rev}.{self.store.rev}"
+        if not self.changes_broken:
+            try:
+                r = self.store.one(f"SELECT MAX(seq) AS m FROM radio_changes WHERE system IN {sources.OURS_SQL}") or {}
+                return f"o{int(r.get('m') or 0)}.{self.changes_floor}"
+            except sqlite3.Error:
+                pass
+        return f"t{int(self.clock() // 30)}"
 
     def page(self, main_tgs, not_main=(), *, view: str = "", system: str = "", group: str = "", source=(),
              service: str = "", tier: str = "", dept: str = "", safety: bool = False, mute=(),
@@ -898,12 +941,15 @@ class Comms:
         srcs = list(dict.fromkeys(str(x) for x in source if x))[:SOURCES_MAX]
         muted = [] if srcs else list(dict.fromkeys(str(x) for x in mute if x))[:MUTE_MAX]
         sees = self._sees_context() if context is None else bool(context)
-        self._alarm_changes()
         try:
             ends = {} if self.changes_broken else self.store.one("SELECT MIN(seq) AS lo, MAX(seq) AS hi FROM radio_changes") or {}
+            hi = int(ends.get("hi") or 0)
+            # the cursor a reader is given: over the entries they may see (another system's activity never moves it)
+            cursor = hi if sees or not hi else int((self.store.one(
+                f"SELECT MAX(seq) AS m FROM radio_changes WHERE system IN {sources.OURS_SQL}") or {}).get("m") or 0)
+            cursor = max(cursor, min(hi, self.changes_floor))
         except sqlite3.Error:
-            ends = {}
-        cursor = int(ends.get("hi") or 0)
+            ends, hi, cursor = {}, 0, 0
         narrowed = bool(srcs or system or group or service or tier or dept or safety or view in SERVICE_VIEWS)
         out = {"rows": [], "older": False, "newer": False, "next": "", "cursor": cursor, "reload": False, "gone": []}
 
@@ -968,20 +1014,21 @@ class Comms:
         if changed is not None:
             changed = int(changed)
             lo = int(ends.get("lo") or 0)
-            if self.changes_broken or changed > cursor or (lo and changed < lo - 1):
-                return {**out, "reload": True}                   # no log now, another database's cursor, or older than is kept
+            if self.changes_broken or changed > hi or changed < self.changes_floor or (lo and changed < lo - 1):
+                return {**out, "reload": True}                   # no log now, a gap, another database's cursor, or older than is kept
             # Another system's changes are not this reader's to know of: not as rows, not as `gone`, not in the count
-            # (an id with any entry of another system's, or of none: a new row is first written with no system and
-            # given its own right after, in the same transaction: radio_changes_id)
-            # and a link's or an alarm's change ('?'): by the row it is on)
-            ours = sources.OURS_SQL[:-1] + ", '?')"
+            # (nor an id with any entry of another system's, or of none: radio_changes_id)
+            ours = sources.OURS_SQL
             mine = "" if sees else (
                 f" AND c.system IN {ours} AND NOT EXISTS (SELECT 1 FROM radio_changes x WHERE x.traffic_id = c.traffic_id "
                 f"AND (x.system IS NULL OR x.system NOT IN {ours})) AND NOT EXISTS (SELECT 1 FROM radio_traffic t "
-                f"WHERE t.id = c.traffic_id AND t.system NOT IN {sources.OURS_SQL})")
+                f"WHERE t.id = c.traffic_id AND t.system NOT IN {ours})")
             ids = [r["traffic_id"] for r in self.store.q(
                 f"SELECT DISTINCT c.traffic_id FROM radio_changes c WHERE c.seq > ? AND c.seq <= ?{mine} LIMIT ?",
-                (changed, cursor, CHANGES_MAX + 1))]
+                (changed, hi, CHANGES_MAX + 1))]
+            ids = [i for i in ids if i != "start"]
+            if "reset" in ids:
+                return {**out, "reload": True}
             if len(ids) > CHANGES_MAX or (notes_ok and any(i.startswith("note-") for i in ids)):
                 return {**out, "reload": True}
             ids = [i for i in ids if not i.startswith("note-")]
