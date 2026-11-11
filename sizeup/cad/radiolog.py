@@ -48,6 +48,7 @@ import re
 import threading
 import time
 
+from sizeup import sourcekeys as sources
 from sizeup.cad.comms import AUTO_UNSURE, Comms
 from sizeup.cad.feed import unit_forms
 from sizeup.cad.sources import ABBR, INTERSECTION, NOISE, PAGING, SUFFIXES, _street, place_key, same_place, street_part
@@ -329,6 +330,8 @@ class RadioLog:
     def matches(self, t: dict, ctx: dict | None = None) -> dict[int, tuple[str, str]]:
         """incident id -> (why, unit) for this transmission (see the module's rules)."""
         ctx = ctx or self.context(t["start"], t["start"])
+        if t["talkgroup"] is not None and (t.get("system") or sources.COUNTY) != sources.COUNTY:
+            return {}                       # another P25 system's traffic (#409): never on our incident by a rule
         if t["talkgroup"] is not None:
             if t["talkgroup"] not in ctx["tgs"]:
                 return {}

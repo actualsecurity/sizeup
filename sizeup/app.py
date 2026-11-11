@@ -80,6 +80,7 @@ from sizeup.radio.livepage import HOLD_S, LivePaging
 from sizeup.radio import sdr as sdr_lookup
 from sizeup.radio import adsbd
 from sizeup.radio import recorder as trunk_recorder
+from sizeup.radio import systems as p25_systems
 from sizeup.radio.page import Page, PageHold, assemble, decode_tones, page_from_dict, recording_note
 from sizeup.radio.tap import LiveTap
 from sizeup.cad import tonelist
@@ -88,6 +89,7 @@ from sizeup.talkers import talker_prompt
 from sizeup import channels
 from sizeup.stt import HIGH, LIVE, LOW, RERUN, SHED, URGENT, Transcriber, WhisperClient, radio_voice, wav_bytes
 from sizeup.talkgroups import TalkgroupPrefs
+from sizeup import sourcekeys as sources, tiers
 from sizeup.tts import TtsService
 from sizeup.web.server import WebServer
 from sizeup.procenv import child_env
@@ -114,6 +116,14 @@ def geo_of(m) -> dict | None:
 # Channels renamed by an update (#275, sizeup/cloud/configupdate.py "airband-names"): a dongle's job saved under the old
 # name (state/sdr_modes.json) is the renamed channel's.
 RENAMED = {"NY Approach": "NY App 126.4/120.8", "NY Approach 124.65": "NY App 124.65"}
+def traffic_key(t) -> str:
+    """Where a transmission's speech-to-text choices are (sizeup/channels.py): its channel, "tg:<n>" for the county
+    system's talkgroup, "p25:<system>:<n>" for another system's (#409)."""
+    if t.talkgroup is None:
+        return t.source
+    return sources.channel_key(getattr(t, "system", ""), t.talkgroup)
+
+
 P25_MODE = P25_JOB         # the shared-dongle mode that runs trunk-recorder ("Fire/EMS 15")
 OFF_MODE = "Off"           # the shared dongle released for other programs (sizeup keeps running)
 SWITCH_PAUSE_S = 1.0       # between stopping one program on the shared dongle and starting the next
@@ -414,10 +424,11 @@ class App:
         self._load_pages()
         self.tg = TalkgroupPrefs(cfg.p25_tg_info or {k: {"name": v} for k, v in cfg.p25_talkgroups.items()},
                                  set(cfg.p25_incident_talkgroups),
-                                 (self.clips_dir.parent / "talkgroups.json") if self.clips_dir else None)
+                                 (self.clips_dir.parent / "talkgroups.json") if self.clips_dir else None,
+                                 others={x.name: x.talkgroups for x in cfg.p25_systems})   # (#409: MTA MRRS)
         for t in list(self.store.loose) + [t for i in self.store.incidents for t in i.traffic]:
             if t.talkgroup is not None:
-                self.tg.seed(t.talkgroup, t.end)
+                self.tg.seed(t.talkgroup, t.end, getattr(t, "system", ""))
         self._last_tones_only: Page | None = None
         self.pagehold = PageHold(self.plan)   # paging: a page waits out its continuation window
         self.receivers = [make_receiver(cfg, c, c.device, self._segment, self._heard_elsewhere) for c in cfg.channels]
@@ -440,7 +451,19 @@ class App:
         self._listed: list[str] = [sd for sd in (list(cfg.sdrs) or ([cfg.shared_device] if cfg.shared_device else []))
                                    if not self._sdr_ignored(sd)]
         self.shared = bool(self._listed) or cfg.sdr_auto
-        self.modes = [c.label for c in cfg.channels] + ([P25_MODE] if self.recorder else [])
+        # More P25 systems (#409, sizeup/radio/systems.py: MTA MRRS): each its own trunk-recorder, on the sources a
+        # dongle was given for in Settings > Radios (one job per source; never auto-assigned). None on the hub.
+        self.systems: dict[str, p25_systems.Runtime] = {}
+        if cfg.p25_recorder and cfg.p25_dir:
+            for sysd in cfg.p25_systems:
+                self.systems[sysd.name] = p25_systems.Runtime(
+                    sysd, trunk_recorder.make_system(sysd.name, sysd.label, cfg.p25_recorder, sysd.dir, log), self.tg,
+                    self._call_system, log, self.clips_dir.parent if self.clips_dir else None,
+                    on_activity=self._p25_activity)
+        self._sys_jobs: dict[str, tuple[p25_systems.Runtime, int]] = {
+            x.job: (rt, x.index) for rt in self.systems.values() for x in rt.system.sources}
+        self._booting = False                 # start(): each system's dongles are handed over together
+        self.modes = [c.label for c in cfg.channels] + ([P25_MODE] if self.recorder else []) + list(self._sys_jobs)
         if self.shared:
             self.modes.append(OFF_MODE)
         first = cfg.start_mode if cfg.start_mode in self.modes else (self.modes[0] if self.modes else OFF_MODE)
@@ -1367,6 +1390,73 @@ class App:
                     self._transcribed(t)
         self._drop_recorder_files(call, keep_record)  # sizeup's clip is the one copy kept
 
+    def _call_system(self, rt, call: Call) -> None:
+        """A finished call on another P25 system (#409, sizeup/radio/systems.py), by its talkgroup's tier
+        (sizeup/tiers.py). Context only: never Main, never on our incident; its radio IDs are another system's, so
+        never looked up in our registry (no rig) nor learned into it; its emergency flags raise none of our alarms."""
+        name, tg = rt.system.name, call.talkgroup
+        tier = self.tg.tier(tg, name)
+        if tier not in tiers.RECORDED:               # off, or encrypted (never recorded: nothing to keep)
+            self.tg.seen(tg, dropped=True, system=name)
+            self._drop_recorder_files(call, False)
+            return
+        self.tg.seen(tg, system=name)
+        info = rt.system.talkgroups.get(tg, {})
+        key = sources.channel_key(name, tg)
+        eng = "off" if tier == tiers.RECORD else channels.effective(
+            dict(self.channel_pref(key), transcribe=True), self.aws_ok(key)[0])
+        if call.audio is not None:
+            for pc in split_turns(call):
+                t = Traffic(pc.id, call.label, pc.start, pc.end, "", status="pending", unit=pc.talker,
+                            talkgroup=call.talkgroup, rig="", radio_id=", ".join(src for src, _t in pc.pairs if src))
+                t.fm = False  # type: ignore[attr-defined]
+                # the row's source (#415): its system, never a talkgroup number alone; context, so never "ours"
+                t.system, t.tier, t.ours = name, tier, False  # type: ignore[attr-defined]
+                t.source_key = sources.p25(name, tg)  # type: ignore[attr-defined]
+                t.group, t.service = info.get("group") or "", info.get("service") or "other"  # type: ignore[attr-defined]
+                t.dept = info.get("department") or ""  # type: ignore[attr-defined]
+                self._keep_clip(t.id, radio_voice(pc.audio, deemph=False), processed=True)
+                self._keep_source(t.id, pc.audio)
+                if pc.stt:
+                    self._stt(t, pc.audio, eng, key)
+                else:
+                    t.raw, t.confidence, t.status, t.model = "", None, "no_speech", ""  # type: ignore[attr-defined]
+                    t.stt = ""  # type: ignore[attr-defined]
+                    self._transcribed(t)
+        self._drop_recorder_files(call, False)
+
+    def _p25_activity(self, source: str, minute: int, calls: int, radios: list[str]) -> None:
+        """A minute's key-ups on an encrypted talkgroup (#409): to the radio log's activity table (the hub's, from a
+        station). Never a transmission row: nothing of it is recorded."""
+        if self.forwarding():
+            return self._emit("activity", {"source": source, "minute": minute, "calls": calls, "radios": radios})
+        try:
+            self.cad.comms.activity(source, minute, calls, radios)
+        except Exception as e:  # noqa: BLE001 - the CAD must never stop the monitor
+            log(f"CAD: could not log activity on {source}: {type(e).__name__}: {e}")
+
+    def talkgroups_state(self) -> list[dict]:
+        """TalkgroupPrefs.state(), each row with a tier: its own (another system's), else what its switches amount to
+        (sizeup/tiers.py derived; "tier_set": False: changed by Record / Transcribe, not by a tier)."""
+        rows = self.tg.state()
+        for r in rows:
+            r["tier_set"] = r["tier"] is not None
+            if r["tier"] is None:
+                r["tier"] = tiers.derived(r["record"], self.channel_pref(r["key"])["transcribe"],
+                                          r["encrypted"])
+        return rows
+
+    def p25_systems_state(self) -> list[dict]:
+        """state()["p25_systems"] (#409): each other system with its jobs and dongles, what runs, its control channel,
+        the unknown talkgroups seen on it and its encrypted activity. [] with none (the hub shows its station's)."""
+        return [rt.state(self.assign) for rt in self.systems.values()]
+
+    def set_talkgroup_tier(self, tg: int, tier: str, system: str = "") -> str | None:
+        err = self.tg.set_tier(int(tg), str(tier), system)
+        if not err:
+            log(f"talkgroup {system}:{tg} ({self.tg.name(int(tg), system)}): tier={self.tg.tier(int(tg), system)}")
+        return err
+
     def _p25_ours(self, call: Call, turns) -> bool:
         """The flag is ours (alarms.counts_as_ours): its talkgroup is one of our fire channels, or the radio that
         flagged is on one of our rigs. Never second-guessed (Windows.flag)."""
@@ -1501,7 +1591,11 @@ class App:
             item.text = getattr(item, "raw", "")
             # attach: the station's talkgroup choice when this came from one (hub); pairs: P25 talkers
             attach = item.__dict__.pop("attach", None)
-            attach = (item.talkgroup is None or self.tg.main(item.talkgroup)) if attach is None else bool(attach)
+            other = getattr(item, "system", "")          # another P25 system's (#409): never attached
+            attach = (not other and (item.talkgroup is None or self.tg.main(item.talkgroup))) if attach is None \
+                else bool(attach) and not other
+            if item.talkgroup is not None:
+                item.ours = attach  # type: ignore[attr-defined]   (in "Our calls", #415: the station's Main choice)
             pairs = item.__dict__.pop("pairs", None)
             if item.status == "no_speech":
                 # A key-up with nothing said (mic click): still shown, as who keyed and when, with
@@ -1516,7 +1610,8 @@ class App:
             self._emit("traffic", dict(item.as_dict(), attach=attach, pairs=pairs), item.id)
             self.store.on_traffic(item, attach=attach)
             self._to_cad(item)
-            self._alarm(item)
+            if not getattr(item, "system", ""):      # another system's traffic (#409) raises none of our alarms
+                self._alarm(item)
             self._atc(item)
             if item.status != "no_speech":
                 log(f"{item.source}: {'[' + item.unit + '] ' if item.unit else ''}{item.text or '(' + item.status + ')'}")
@@ -1701,10 +1796,31 @@ class App:
                                      "id_note": getattr(t, "id_note", ""),
                                      # the emergency button (#128), its raw call record, kept by its window
                                      "emergency": bool(getattr(t, "emergency", False)),
-                                     "evidence": getattr(t, "evidence", None), "kept": getattr(t, "kept", "")},
+                                     "evidence": getattr(t, "evidence", None), "kept": getattr(t, "kept", ""),
+                                     # #409: the P25 system it was heard on ("": the county's, or FM) and its tier
+                                     **self._row_source(t)},
                                     replace=replace)
         except Exception as e:  # the CAD must never stop the monitor
             log(f"CAD: could not log a transmission: {type(e).__name__}: {e}")
+
+    def _row_source(self, t: Traffic) -> dict:
+        """A transmission's source for the radio log (#409 / #415, sizeup/sourcekeys.py): {source_key, system, group,
+        service, ours, dept, tier}. Another P25 system's row carries its own (App._call_system); the county's
+        talkgroups and the analog channels are worked out here."""
+        if getattr(t, "system", ""):
+            return {"source_key": getattr(t, "source_key", ""), "system": t.system, "group": getattr(t, "group", ""),
+                    "service": getattr(t, "service", ""), "ours": False, "dept": getattr(t, "dept", ""),
+                    "tier": getattr(t, "tier", "")}
+        if t.talkgroup is None:
+            kind = next((c.kind for c in self.cfg.channels if c.label == t.source), "")
+            air = kind == "airband"
+            return {"source_key": sources.fm(t.source, kind), "system": "airband" if air else "analog",
+                    "group": "Airband" if air else "Analog", "service": sources.service(kind=kind or "traffic"),
+                    "ours": not air, "dept": "", "tier": ""}
+        info = self.tg.info.get(t.talkgroup, {})
+        return {"source_key": sources.p25(self.tg.county, t.talkgroup), "system": self.tg.county,
+                "group": info.get("group") or "", "service": sources.service(info.get("group") or ""),
+                "ours": bool(getattr(t, "ours", self.tg.main(t.talkgroup))), "dept": "", "tier": ""}
 
     def _backfill(self) -> None:
         """Traffic saved before radio IDs were tied to rigs: the rig from its talker text, and every
@@ -1835,7 +1951,7 @@ class App:
         t = next((t for t in list(self.store.loose) + [t for i in self.store.incidents for t in i.traffic] if t.id == cid), None)
         if t is None:
             return None, ""
-        return t, channels.tg_key(t.talkgroup) if t.talkgroup is not None else t.source
+        return t, traffic_key(t)
 
     def _rerun_pcm(self, item) -> np.ndarray | None:
         """A recording as Amazon Transcribe takes it (int16, 8 kHz), or None."""
@@ -1896,7 +2012,7 @@ class App:
         keys: dict[str, str] = {}           # live: each one's channel, for its class (_stt_priority)
         for t in traffic:
             if (want is None or t.id in want) and t.id not in busy and t.id not in seen:
-                keys[t.id] = channels.tg_key(t.talkgroup) if t.talkgroup is not None else t.source
+                keys[t.id] = traffic_key(t)
                 got = self._rerun_audio(t.id, getattr(t, "fm", self._kind.get(t.source) != "airband"))
                 if got:
                     low = speech_seconds(got[0]) < MIN_SPEECH_S  # same mic-click rule as the live pass
@@ -2018,7 +2134,11 @@ class App:
         """{record, transcribe, engine} for "FG1" / "South 2" / "tg:307" (a talkgroup's record is its own switch)."""
         p = channels.pref(key, self._chan_ov, self.cfg.stt_aws_channels, self.cfg.stt_record_only)
         if channels.is_tg(key):
-            p["record"] = self.tg.record(int(key[3:]))
+            tsys, tgn = channels.tg_of(key)
+            p["record"] = self.tg.record(tgn, tsys)
+            tier = self.tg.tier(tgn, tsys)
+            if tier is not None:                 # another system's talkgroup (#409): Transcribe is its tier's
+                p["transcribe"] = tier in tiers.TRANSCRIBED
         return p
 
     def aws_ok(self, key: str | None = None) -> tuple[bool, str]:
@@ -2066,7 +2186,10 @@ class App:
             return URGENT
         if key in AIRBAND_FIRST:
             return HIGH
-        if channels.is_tg(key) and not self.tg.main(int(key[3:])):
+        if channels.is_tg(key) and (tier := self.tg.tier(*channels.tg_of(key)[::-1])) is not None:
+            # another system's talkgroup (#409): by its tier, never ahead of our own traffic
+            return LIVE if tier == tiers.ALERT else LOW
+        if channels.is_tg(key) and not self.tg.main(*channels.tg_of(key)[::-1]):
             return LOW
         return LIVE
 
@@ -2379,7 +2502,21 @@ class App:
                 "fm": [{"key": c.label, "kind": c.kind, "mhz": c.mhz,
                         **({"schedule": plan_text(c)} if getattr(c, "schedule", ()) or getattr(c, "also", ()) else {})}
                        for c in self.cfg.channels],
-                "sync": self.channels_sync(), "aws": self.aws_status()}
+                "sync": self.channels_sync(), "aws": self.aws_status(), "tiers": self.tiers_state()}
+
+    def tiers_state(self) -> dict:
+        """The talkgroup tiers (#409, sizeup/tiers.py): how long each tier's audio is kept ([storage] tier_keep_days)
+        and the storage that comes to, from the audio logged per tier in the last 7 days (worked out every 10 minutes)."""
+        days = self.cfg.tier_keep_days
+        at, per_day = getattr(self, "_tier_audio", (0.0, {}))
+        if time.monotonic() - at > 600 or not at:
+            try:
+                per_day = self.cad.comms.audio_per_day() if self.cfg.p25_systems else {}
+            except Exception:  # noqa: BLE001 - an estimate, never in the way of the state
+                per_day = {}
+            self._tier_audio = (time.monotonic(), per_day)
+        return {"keep_days": days, "labels": tiers.LABELS,
+                "storage": tiers.storage(per_day, days, self.cfg.audio_keep_hours)}
 
     # -- state --------------------------------------------------------------------------------------
 
@@ -2635,6 +2772,9 @@ class App:
         """The dongle the program for `mode` (its rtl_fm, or trunk-recorder) is running on, if any."""
         if mode == P25_MODE:
             return self.recorder.on() if self.recorder is not None else None
+        if mode in self._sys_jobs:
+            rt, k = self._sys_jobs[mode]
+            return rt.recorder.source_on(k)
         r = self._receiver(mode)
         return getattr(r.device, "serial", None) if r is not None and not r._stop.is_set() else None
 
@@ -2761,7 +2901,8 @@ class App:
             if m == OFF_MODE or self.set_by.get(sd) != "auto" or self._program_on(m) != sd:
                 self._failing.discard(sd)
                 continue
-            r = self.recorder if m == P25_MODE else self._receiver(m)
+            r = self.recorder if m == P25_MODE else self._sys_jobs[m][0].recorder if m in self._sys_jobs \
+                else self._receiver(m)
             st = r.status() if r is not None else {}
             if st.get("state") == "down" and st.get("restarts", 0) >= SDR_FAILING_RESTARTS:
                 if sd not in self._failing:
@@ -2855,6 +2996,9 @@ class App:
         if mode == P25_MODE:
             self.recorder.device_fn, self.recorder.device_name = self._dongle(serial), self.sdr_name(serial)
             self.recorder.start()
+        elif mode in self._sys_jobs:                # one source of another system (#409): its trunk-recorder (re)starts
+            rt, k = self._sys_jobs[mode]
+            rt.recorder.give(k, self._dongle(serial), mode, apply=not self._booting)
         else:
             r = self._receiver(mode)
             if r is not None:
@@ -2890,6 +3034,9 @@ class App:
         if on is None or on == serial:
             if mode == P25_MODE:
                 self.recorder.stop(why)
+            elif mode in self._sys_jobs:
+                rt, k = self._sys_jobs[mode]
+                rt.recorder.take(k, why)                 # the system runs on with its other source(s), or stops
             elif mode != OFF_MODE:
                 r = self._receiver(mode)
                 if r is not None:
@@ -2945,11 +3092,21 @@ class App:
                 self.switching = False
         return None
 
-    def set_talkgroup(self, tg: int, record: bool | None = None, main: bool | None = None) -> str | None:
-        """POST /api/talkgroup: record = keep its calls; main = main list + attach to our incident."""
+    def set_talkgroup(self, tg: int, record: bool | None = None, main: bool | None = None,
+                      tier: str | None = None, system: str = "") -> str | None:
+        """POST /api/talkgroup: record = keep its calls; main = main list + attach to our incident. Another system's
+        talkgroup (#409: `system`, "" = the county's): tier = alert | text | record | off | activity."""
         if not self.p25:
             return "no P25 configured"
-        self.tg.set(int(tg), record, main)
+        system = "" if system == self.tg.county else str(system or "")
+        if system and not self.tg.known(int(tg), system):
+            return f"no talkgroup {tg} on {system}"
+        if tier is not None:
+            return self.set_talkgroup_tier(tg, tier, system)
+        self.tg.set(int(tg), record, main, system)
+        if system:
+            log(f"talkgroup {system}:{tg} ({self.tg.name(int(tg), system)}): tier={self.tg.tier(int(tg), system)}")
+            return None
         log(f"talkgroup {tg} ({self.tg.name(int(tg))}): record={self.tg.record(int(tg))} main={self.tg.main(int(tg))}")
         return None
 
@@ -3006,6 +3163,8 @@ class App:
                 else:
                     st["detail"] = rs["detail"] + (" · " + st["detail"] if st.get("detail") else "")
             out.append(st)
+        for rt in self.systems.values():                # (#409) one row per other system
+            out.append(rt.status(self.assign.values()))
         out.append({"label": "STT", "mhz": None, "state": self.whisper.state, "detail": self.whisper.detail,
                     "open": False, "quieting_db": None, "restarts": 0, "last_heard": None})
         engine = self.cfg.dispatch_tts_engine
@@ -3035,7 +3194,8 @@ class App:
         st = {"time": time.time(), "radios": self.radio_status(), **self.store.state(), "pages": pages, "sdr": self.sdr(),
               "storage": getattr(self, "storage", None),
               "rerun": dict(self.rerun, pending=len(self._rerun_ids)),
-              "talkgroups": self.tg.state() if self.p25 else [],
+              "talkgroups": self.talkgroups_state() if self.p25 else [],
+              "p25_systems": self.p25_systems_state(),
               "talking": self.live.state(),
               "paging": self.paging_state(),
               "prealert": self.cad.prealert_state(),
@@ -3082,11 +3242,20 @@ class App:
         threading.Thread(target=self.cad.place_index, name="places", daemon=True).start()   # built before the first "@"
         threading.Thread(target=self._watch_fm, name="talking", daemon=True).start()
         if self.shared:
-            for sd, m in list(self.assign.items()):  # each dongle runs what was picked for it
-                if not self._start_mode(m, sd):         # held by shortfinal now: don't fight for it
-                    self.assign[sd] = OFF_MODE
-                    self.set_by.pop(sd, None)
+            self._booting = True
+            try:
+                for sd, m in list(self.assign.items()):  # each dongle runs what was picked for it
+                    if not self._start_mode(m, sd):         # held by shortfinal now: don't fight for it
+                        self.assign[sd] = OFF_MODE
+                        self.set_by.pop(sd, None)
+            finally:
+                self._booting = False
             self._save_modes()
+            for rt in self.systems.values():            # (#409) each system once, on all the dongles it has
+                if rt.recorder.sources:
+                    rt.recorder.start()
+                elif getattr(rt.recorder, "unit", False):
+                    rt.recorder.stop(f"no dongle on {rt.system.label}")
             if getattr(self.recorder, "unit", False) and P25_MODE not in self.assign.values():
                 # trunk-recorder's own service may still run what the sizeup before this one asked: no dongle has it now
                 self.recorder.stop(f"no dongle on {P25_MODE}")
@@ -3101,6 +3270,8 @@ class App:
                 self.recorder.start()
         if self.p25:
             self.p25.start()
+        for rt in self.systems.values():
+            rt.ingest.start()
         if self.vocab is not None and self.vocab.state()["state"] == "PENDING":
             self.vocab.poll()
         if getattr(self, "atc_vocab", None) is not None and self.atc_vocab.state()["state"] == "PENDING":
@@ -3291,6 +3462,12 @@ class App:
             self.recorder.shutdown()           # its own service (the station) keeps running: the next sizeup adopts it
         if self.p25:
             self.p25.stop()
+        for rt in self.systems.values():
+            rt.recorder.shutdown()
+            rt.ingest.stop()
+            rt.activity.flush(everything=True)
+            rt.activity.save()
+        self.tg.save_unknown()
         for sd in list(self.assign):
             claims.release(sd)
         self.whisper.stop()

@@ -42,7 +42,8 @@ import re
 
 ENGINES = ("local", "aws", "both")
 FIELDS = ("record", "transcribe", "engine")
-KEY = re.compile(r"tg:\d{1,9}|[A-Za-z0-9][A-Za-z0-9 ./_-]{0,39}")
+# "tg:307": the county system's talkgroup; "p25:<system>:<tg>": another P25 system's (#409, sizeup/sourcekeys.py)
+KEY = re.compile(r"tg:\d{1,9}|p25:[a-z][a-z0-9_-]{0,23}:\d{1,9}|[A-Za-z0-9][A-Za-z0-9 ./_-]{0,39}")
 DEFAULT_AWS = ("South 2", "FG1", "FG2", "tg:307")
 DEFAULT_RECORD_ONLY: tuple[str, ...] = ()
 SECTION = "channels"
@@ -53,7 +54,16 @@ def tg_key(tg: int) -> str:
 
 
 def is_tg(key: str) -> bool:
-    return key.startswith("tg:")
+    return key.startswith(("tg:", "p25:"))
+
+
+def tg_of(key: str) -> tuple[str, int]:
+    """(system, talkgroup) of a talkgroup's key: system "" for the county's ("tg:307")."""
+    from sizeup import sourcekeys as sources
+    got = sources.parse(key)
+    if got is None:
+        raise ValueError(f"not a talkgroup key: {key!r}")
+    return ("" if key.startswith("tg:") else got[0]), got[1]
 
 
 def defaults(key: str, aws_channels=DEFAULT_AWS, record_only=DEFAULT_RECORD_ONLY) -> dict:

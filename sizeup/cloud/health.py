@@ -322,6 +322,14 @@ def station_metrics(app, metrics: Metrics) -> dict:
         jobs[st.get("label", "?")] = {"state": st.get("state"), "restarts": st.get("restarts", 0),
                                       "detail": str(st.get("detail") or "")[:200],
                                       "expected": (not shared) or st.get("label") in assigned}
+    for rt in (getattr(app, "systems", None) or {}).values():      # (#409) each other P25 system's dongle jobs
+        try:
+            rs = rt.recorder.status()
+        except Exception:  # noqa: BLE001
+            continue
+        for job in rt.system.jobs:
+            jobs[job] = {"state": rs.get("state") if job in assigned else "off", "restarts": rs.get("restarts", 0),
+                         "detail": str(rs.get("detail") or "")[:200], "expected": (not shared) or job in assigned}
     rec = getattr(app, "recorder", None)
     if rec is not None and getattr(app, "p25", None) is not None:
         rs = rec.status()

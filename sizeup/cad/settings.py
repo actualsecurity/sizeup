@@ -1544,7 +1544,9 @@ class Editor:
             for key, v in vals.items():
                 if channels_mod.is_tg(key) and "record" in v:
                     rec = v.pop("record")
-                    err = ctx.set_talkgroup(int(key[3:]), rec) if ctx is not None else "no talkgroups here"
+                    tsys, tgn = channels_mod.tg_of(key)       # (#409) another system's: with its system
+                    err = "no talkgroups here" if ctx is None else (
+                        ctx.set_talkgroup(tgn, rec, None, None, tsys) if tsys else ctx.set_talkgroup(tgn, rec))
                     if err:
                         raise CadError(err)
                 if not v:

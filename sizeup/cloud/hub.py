@@ -80,7 +80,7 @@ from typing import Callable
 from sizeup import channels
 from sizeup import tz
 from sizeup import app as app_mod
-from sizeup.app import AIRBAND_FIRST, CLIP_ID, RENAMED, STT_FIRST, App, AwsJob, channels_model
+from sizeup.app import AIRBAND_FIRST, CLIP_ID, RENAMED, STT_FIRST, App, AwsJob, channels_model, traffic_key
 from sizeup.cad.dispatcher import AudioUnavailable
 from sizeup.cad.radios import fm_system
 from sizeup.cloud.autoupdate import describe
@@ -661,6 +661,9 @@ class HubApp(App):
             if d.get("system") in ("mdc", "p25", "fleetsync"):
                 self.radios.heard(d["system"], str(d.get("radio_id") or ""), str(d.get("alias") or ""), d.get("at"),
                                   str(d.get("channel") or ""))
+        elif kind == "activity":                      # key-ups on an encrypted talkgroup (#409): counted, never rows
+            self.cad.comms.activity(str(d.get("source") or ""), int(d.get("minute") or 0), int(d.get("calls") or 0),
+                                    [str(x)[:12] for x in (d.get("radios") or [])][:40])
         else:
             self.hub.log(f"hub: ignoring event type {kind!r} (a newer station?)")
 
@@ -705,7 +708,9 @@ class HubApp(App):
         t = Traffic.from_dict({k: v for k, v in d.items() if EXTRA.fullmatch(str(k))})
         ids = [x.strip() for x in (t.radio_id or "").split(",") if x.strip()]
         pairs = d.get("pairs")
-        if t.talkgroup is None:
+        if getattr(t, "system", ""):                   # another P25 system's radio IDs (#409): never our registry's
+            t.rig = ""
+        elif t.talkgroup is None:
             t.rig = self.radios.rig_mdc(ids)
         elif isinstance(pairs, list):
             t.rig = self.radios.rig_p25([(str(p[0]), str(p[1])) for p in pairs if isinstance(p, list) and len(p) == 2])
@@ -733,7 +738,7 @@ class HubApp(App):
             self.audio.put(tid, audio, "clip", at=float(d.get("end") or time.time()))
         # with the station's extras (raw, confidence, model, attach, pairs, ...): plain names only
         t = self._traffic_of(d)
-        key = channels.tg_key(t.talkgroup) if t.talkgroup is not None else t.source
+        key = traffic_key(t)
         if d.get("transcript_pending") == "aws":            # the station skipped whisper: Amazon Transcribe here
             return self._aws_from_clip(t, audio, key)
         self._transcribed(t)
@@ -846,7 +851,7 @@ class HubApp(App):
             out = [(p, p.label, "page") for p in self.pages if p.status == "pending" and getattr(p, "stt", "") == "aws"]
         for t in list(self.store.loose) + [t for i in self.store.incidents for t in i.traffic]:
             if t.status == "pending" and getattr(t, "stt", "") == "aws":
-                out.append((t, channels.tg_key(t.talkgroup) if t.talkgroup is not None else t.source, "traffic"))
+                out.append((t, traffic_key(t), "traffic"))
         return out
 
     def _aws_recover(self) -> int:
@@ -952,7 +957,7 @@ class HubApp(App):
         now = time.time() if now is None else now
         with self._lock:
             pages = [(p, p.label, "page") for p in self.pages]
-        items = pages + [(t, channels.tg_key(t.talkgroup) if t.talkgroup is not None else t.source, "traffic")
+        items = pages + [(t, traffic_key(t), "traffic")
                          for t in list(self.store.loose) + [t for i in self.store.incidents for t in i.traffic]]
         todo = [(it, key, kind) for it, key, kind in items
                 if it.end > now - RESEND_S and (it.status == "pending" or (it.status in ("error", "skipped") and not getattr(it, "text", "")
@@ -1077,6 +1082,8 @@ class HubApp(App):
     def state(self) -> dict:
         st = super().state()
         st["talkgroups"] = self.hub.talkgroups
+        systems = (self.hub.status or {}).get("p25_systems")
+        st["p25_systems"] = systems if isinstance(systems, list) else []      # (#409) the station's other P25 systems
         st["rerun"] = self.hub.rerun()
         st["cloud"] = self.hub.cad_cloud()
         return st
@@ -1111,7 +1118,10 @@ class HubApp(App):
         """Settings > Radios here: the station's ADS-B dongle is named (or unnamed) on the station (#235)."""
         return self._switch("set_adsb_receiver", serial or "")
 
-    def set_talkgroup(self, tg: int, record: bool | None = None, main: bool | None = None) -> str | None:
+    def set_talkgroup(self, tg: int, record: bool | None = None, main: bool | None = None,
+                      tier: str | None = None, system: str = "") -> str | None:
+        if tier is not None or system:                 # (#409: a station from before this refuses the extra arguments)
+            return self._switch("set_talkgroup", int(tg), record, main, tier, str(system or ""))
         return self._switch("set_talkgroup", int(tg), record, main)
 
     def _all_clear_sent(self, a: dict) -> None:
@@ -1215,7 +1225,9 @@ class HubApp(App):
         cfg = self.cfg
         quiet = self.offpeak(now)
         days = cfg.audio_keep_event_days
-        n = self.audio.prune_clips(now - cfg.audio_keep_hours * 3600, kept=self.cad.comms.kept_for_events,
+        comms = self.cad.comms            # a record, or still inside its tier's own retention (#409, sizeup/tiers.py)
+        n = self.audio.prune_clips(now - cfg.audio_keep_hours * 3600,
+                                   kept=lambda ids: comms.kept_for_events(ids) | comms.kept_for_tier(ids, cfg.tier_keep_days),
                                    kept_older_than=(now - days * 86400) if days else None, batch=cfg.audio_prune_batch,
                                    pause_s=0.05 if background else 0.0, max_rows=None if quiet else 10 * cfg.audio_prune_batch)
         over = getattr(self.audio, "over_cap", 0)

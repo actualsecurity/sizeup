@@ -102,6 +102,14 @@ class ControlChannel:
                 "retunes": self.retunes, "last_retune": self.last_retune}
 
 
+def make_system(name: str, label: str, command: str, workdir: str,
+                on_event: Callable[[str], None] = lambda m: None) -> SystemRecorder:
+    """The recorder of one more system (#409; workdir: its own directory, <recorder_dir>/systems/<name>)."""
+    if os.environ.get(UNIT_ENV) == "1":
+        return SystemUnitRecorder(name, label, command, workdir, on_event)
+    return SystemRecorder(name, label, command, workdir, on_event)
+
+
 def make(command: str, workdir: str, on_event: Callable[[str], None] = lambda m: None) -> TrunkRecorder:
     """The recorder for this process: the station's service when its unit says so, else a child of sizeup."""
     if os.environ.get(UNIT_ENV) == "1":
@@ -483,3 +491,158 @@ class UnitRecorder(TrunkRecorder):
             f = None
         if f is not None:
             f.close()
+
+
+class _Sources:
+    """A SystemRecorder's device_fn: {source index: the dongle's current index}, or None (and why) while one of its
+    dongles can't be opened (not plugged in, or its serial shared by two)."""
+
+    def __init__(self, rec):
+        self.rec, self.why = rec, ""
+
+    def __call__(self) -> dict | None:
+        out, self.why = {}, ""
+        for i, (fn, _job) in sorted(self.rec.sources.items()):
+            dev = fn()
+            if dev is None:
+                self.rec.device_name = getattr(fn, "label", "") or getattr(fn, "serial", "")
+                self.why = getattr(fn, "why", "")
+                return None
+            out[i] = dev
+        return out or None
+
+
+class SystemRecorder(TrunkRecorder):
+    """One more system's trunk-recorder (GitHub #409, sizeup/radio/systems.py), a child of sizeup (the Mac, a bench).
+    It runs in the system's own directory on the sources of its config.json that have a dongle:
+
+        give(index, finder, job)   source `index` gets a dongle (finder: the app's _dongle(serial)); it (re)starts
+        take(index)                that source's dongle goes; it restarts on the rest, or stops with none left
+        source_on(index)           the serial that source runs on, None when it has none
+
+    Never auto-assigned, never the county's trunk-recorder: its own process, log and capture directory."""
+
+    def __init__(self, name: str, label: str, command: str, workdir: str,
+                 on_event: Callable[[str], None] = lambda m: None):
+        super().__init__(" ".join(shlex.quote(a) for a in [*trunkrecd.without_config(shlex.split(os.path.expanduser(command))),
+                                                           "--config=config.json"]), workdir, on_event)
+        self.name, self.label = name, label
+        self.sources: dict[int, tuple[Callable, str]] = {}       # source index -> (dongle finder, its job)
+        self.device_fn, self.device_name = _Sources(self), label
+
+    def _argv_for(self, dev=None) -> list[str]:
+        self.left_out = []
+        return trunkrecd.system_runtime_argv(self.argv, self.workdir, dev or {})
+
+    def source_on(self, index: int) -> str | None:
+        got = self.sources.get(index)
+        return getattr(got[0], "serial", None) if got else None
+
+    def on(self) -> str | None:
+        return trunkrecd.sources_sdr({i: {"sdr": getattr(fn, "serial", "")} for i, (fn, _j) in self.sources.items()}) or None
+
+    def _apply(self, why: str) -> None:
+        TrunkRecorder.stop(self, why)
+        if self.sources:
+            TrunkRecorder.start(self)
+
+    def give(self, index: int, finder: Callable, job: str, apply: bool = True) -> None:
+        """apply False: only noted (the app's start hands a system all its dongles, then start()s it once)."""
+        self.sources[index] = (finder, job)
+        if apply:
+            self._apply(f"{job} on SDR {getattr(finder, 'label', '')}")
+
+    def take(self, index: int, why: str = "off") -> None:
+        if self.sources.pop(index, None) is not None:
+            self._apply(why)
+
+    def start(self) -> SystemRecorder:
+        if self.sources:
+            TrunkRecorder.start(self)
+        return self
+
+    def status(self) -> dict:
+        return dict(super().status(), label=self.label, system=self.name)
+
+
+class SystemUnitRecorder(SystemRecorder, UnitRecorder):
+    """The same on the Linux station: sizeup-trunk-recorder's SystemSupervisor runs it (sizeup/radio/trunkrecd.py), told
+    through the system's own state file ({"on", "sources": {index: {sdr, mode, name}}, "label"}). The claims on its
+    dongles are the service's while it runs, and sizeup's own to sizeup (claims.helpers)."""
+
+    unit = True
+
+    def __init__(self, name: str, label: str, command: str, workdir: str,
+                 on_event: Callable[[str], None] = lambda m: None, state_path: str | None = None,
+                 status_path: str | None = None, poll_s: float = 0.1, wait_s: float = 20.0):
+        others = claims.helpers                        # the county's recorder's (same service): still counted
+        UnitRecorder.__init__(self, command, workdir, on_event,
+                              state_path or trunkrecd.system_state_path(name),
+                              status_path or trunkrecd.system_status_path(name), poll_s, wait_s)
+        mine = self.helper_pids
+        claims.helpers = lambda: set(others()) | set(mine())
+        self.argv = [*trunkrecd.without_config(self.argv), "--config=config.json"]
+        self.name, self.label = name, label
+        self.sources = {}
+        self.device_fn, self.device_name = _Sources(self), label
+
+    def _write_state(self, on: bool, sdr: str = "") -> int:
+        self._seq = max(self._seq + 1, time.time_ns())
+        srcs = {str(i): {"sdr": str(getattr(fn, "serial", "") or ""), "mode": job,
+                         "name": getattr(fn, "label", "") or str(getattr(fn, "serial", ""))}
+                for i, (fn, job) in sorted(self.sources.items())} if on else {}
+        w = {"on": bool(on and srcs), "sources": srcs, "label": self.label, "pid": os.getpid(), "seq": self._seq,
+             "at": time.time()}
+        p = self.state_path
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_name(f".{p.name}.{os.getpid()}")
+        tmp.write_text(json.dumps(w))
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, p)
+        return self._seq
+
+    def asked(self) -> dict:
+        w = trunkrecd.wanted_system(str(self.state_path))
+        return dict(w, sdr=trunkrecd.sources_sdr(w["sources"]))
+
+    def _apply(self, why: str) -> None:
+        if not self.sources:
+            return UnitRecorder.stop(self, why)
+        self._follow()
+        try:
+            seq = self._write_state(True)
+        except OSError as e:
+            self.state, self.detail = "down", f"cannot hand {self.label} to {trunkrecd.UNIT}: {e}"
+            self.on_event(self.detail)
+            return
+        was, self.serial = self.serial, SystemRecorder.on(self)
+        if was and set(was.split(",")) - set((self.serial or "").split(",")):
+            # a dongle was taken from it: until the service has let it go, the next program can't open it
+            end = time.monotonic() + self.wait_s
+            while time.monotonic() < end:
+                st = trunkrecd.read_status(str(self.status_path))
+                if st is None or st.get("stale") or st.get("seq") == seq:
+                    return
+                time.sleep(self.poll_s)
+            self.on_event(f"p25: {trunkrecd.UNIT} didn't let {self.label}'s dongle go within {self.wait_s:.0f} s ({why})")
+
+    def start(self) -> SystemUnitRecorder:
+        if self.sources:
+            self._apply("start")
+        return self
+
+    def stop(self, reason: str = "off") -> None:
+        self.sources = {}
+        UnitRecorder.stop(self, reason)
+
+    def shutdown(self) -> None:
+        UnitRecorder.shutdown(self)
+
+    def on(self) -> str | None:
+        return SystemRecorder.on(self) if self.serial else None
+
+    def status(self) -> dict:
+        st = UnitRecorder.status(self)
+        if st["state"] == "starting":
+            st["detail"] = self.detail = f"handing {self.label} to {trunkrecd.UNIT}"
+        return dict(st, label=self.label, system=self.name)

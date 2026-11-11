@@ -70,3 +70,11 @@ a third of the calls named only at the end). Those lines are still read (they fi
 a talker never shown live is flashed as "just transmitted"); the finished call's JSON stays the
 record of who said what, checked against the grants seen live (above). The plugin forks a tiny
 shell per unit event on the system (registrations and affiliations too); only grants print.
+
+## More systems (#409)
+
+`systems/<name>/` is another P25 system with its own trunk-recorder: `config.json` (plus a `"sizeup"` block:
+`label`, one `jobs` name per source, `site`) and `talkgroups.csv` (plus the `Tier`, `Service` and `Department`
+columns, which sizeup leaves out of the copy it hands trunk-recorder). `systems/mrrs/` is Metro-25 / MTA MRRS,
+Zone 3 Simulcast: two sources, 770.3125 and 773.08125 MHz at 2.4 MS/s, covering the seven listed frequencies. It runs
+only on the sources given a dongle in Settings > Radios. Details: `docs/cloud.md`, "More P25 systems".

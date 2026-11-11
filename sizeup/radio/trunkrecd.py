@@ -38,6 +38,13 @@ while sizeup-station restarts. sizeup writes its own claim before it hands a don
 STATE, is taken over. Anyone else's live claim (shortfinal, the ADS-B decoder) is never taken: the status says "held"
 and nothing starts until they let go. sizeup counts this process's claims as its own (claims.helpers).
 
+More systems than the county's (GitHub #409: MTA MRRS): each <recorder_dir>/systems/<name>/ (its own config.json and
+talkgroups.csv, from deploy/trunk-recorder/systems/) is a second trunk-recorder under this service, with its own state
+(p25_recorder.<name>.json: {"on", "sources": {"<source index>": {"sdr": <serial>, "mode": <its job>}}, "label", "pid",
+"seq"}), status (status.<name>.json), log and dongle claims (SystemSupervisor). It runs only the sources of its
+config.json that sizeup gave a dongle, with the control channels those cover; nothing asked, nothing runs. The county's
+trunk-recorder above never restarts for another system's sake.
+
 Supervision (as recorder.py did): an exit restarts it with backoff (2 s doubling to 30 s; back to 2 s after a minute of
 running); "Wrong rtlsdr device index" / "No supported devices" mean the dongle is gone: "absent", looked for again every
 ABSENT_S without counting a restart."""
@@ -47,6 +54,7 @@ from __future__ import annotations
 import ctypes
 import json
 import os
+import re
 import shlex
 import signal
 import subprocess
@@ -286,7 +294,7 @@ def holder(serial: str, d: Path | None = None) -> dict | None:
     return None
 
 
-def claim(serial: str, me: int, handed: int | None = None, d: Path | None = None) -> dict | None:
+def claim(serial: str, me: int, handed: int | None = None, d: Path | None = None, mode: str = MODE) -> dict | None:
     """Hold this dongle's claim as `me`. A live claim of sizeup's own by `handed` (the sizeup-station process that handed
     the dongle over) is taken over; anyone else's is left alone and returned (nothing written). None: it is ours."""
     c = holder(serial, d)
@@ -296,7 +304,7 @@ def claim(serial: str, me: int, handed: int | None = None, d: Path | None = None
     try:
         d.mkdir(parents=True, exist_ok=True)
         tmp = d / f".{serial}.{me}.tmp"
-        tmp.write_text(json.dumps({"app": APP, "pid": me, "mode": MODE, "since": time.time()}))
+        tmp.write_text(json.dumps({"app": APP, "pid": me, "mode": mode, "since": time.time()}))
         os.replace(tmp, d / f"{serial}.json")
     except OSError:
         pass                          # can't record it: still run (the dongle itself is the real lock)
@@ -344,10 +352,12 @@ class Supervisor:
         self._drain_thread: threading.Thread | None = None
         self.status: dict = {"state": "off", "detail": "", "since": None}
 
+    tag = "p25"                 # its lines in the journal
+
     def _set(self, now: float, state: str, detail: str, **kw) -> None:
         changed = state != self.status.get("state")
         if changed:
-            self.log(f"p25: {state}" + (f": {detail}" if detail else ""))
+            self.log(f"{self.tag}: {state}" + (f": {detail}" if detail else ""))
         self.status = {"state": state, "detail": detail, "since": now if changed else self.status.get("since"), **kw}
 
     def step(self, now: float | None = None) -> dict:
@@ -547,6 +557,274 @@ class Supervisor:
             pass
 
 
+# -- more systems (#409): <recorder_dir>/systems/<name>/ ------------------------------------------------------------------------
+
+SYSTEMS = "systems"
+SYSTEM_NAME = re.compile(r"[a-z][a-z0-9_-]{0,23}")
+RUNTIME_TALKGROUPS = "talkgroups.runtime.csv"
+SIZEUP_COLUMNS = ("Tier", "Service", "Department")    # talkgroups.csv columns that are sizeup's own: not handed on
+EDGE_HZ = 12_500                      # a channel this close to a source's edge isn't covered
+
+
+def system_dirs(workdir: str | Path) -> dict[str, Path]:
+    """{name: its directory} for every <workdir>/systems/<name>/config.json, by name."""
+    base = Path(workdir) / SYSTEMS
+    try:
+        names = sorted(p.name for p in base.iterdir() if SYSTEM_NAME.fullmatch(p.name) and (p / "config.json").is_file())
+    except OSError:
+        return {}
+    return {n: base / n for n in names}
+
+
+def system_state_path(name: str, state: str = STATE) -> str:
+    p = Path(state)
+    return str(p.with_name(f"{p.stem}.{name}{p.suffix}"))
+
+
+def system_status_path(name: str, status: str = STATUS) -> str:
+    p = Path(status)
+    return str(p.with_name(f"{p.stem}.{name}{p.suffix}"))
+
+
+def covers(source: dict, hz: float) -> bool:
+    """This source (center, rate) takes in a channel at hz."""
+    try:
+        return abs(float(hz) - float(source["center"])) <= float(source["rate"]) / 2 - EDGE_HZ
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
+def sources_sdr(sources: dict) -> str:
+    """{source index: {sdr}} as one string ("0=serial-a,1=serial-b"): what a system runs on, for comparing."""
+    return ",".join(f"{i}={sources[i].get('sdr', '')}" for i in sorted(sources))
+
+
+def system_runtime_argv(argv: list[str], workdir: str | Path, devs: dict[int, int | str]) -> list[str]:
+    """argv with --config pointing at config.runtime.json, written in workdir (a system's directory) from its
+    config.json: only the sources in devs ({source index: the dongle's current index}), each on its dongle; each
+    system's control channels only where one of those covers them (ValueError when none is); the unit script; the
+    talkgroups file without sizeup's own columns; no "sizeup" block (sizeup's side of the file)."""
+    base = Path(workdir)
+    conf = json.loads((base / "config.json").read_text())
+    conf.pop("sizeup", None)
+    sources = []
+    for i, s in enumerate(conf.get("sources", [])):
+        if i in devs:
+            sources.append(dict(s, device=f"rtl={devs[i]}"))
+    if not sources:
+        raise ValueError("no source of config.json has a dongle")
+    conf["sources"] = sources
+    for s in conf.get("systems", []):
+        listed = list(s.get("control_channels") or [])
+        cc = [f for f in listed if any(covers(src, f) for src in sources)]
+        if listed and not cc:
+            raise ValueError(f"[{s.get('shortName', '?')}] none of its {len(listed)} control channels is covered by "
+                             "the dongle(s) it has")
+        s["control_channels"] = cc
+        cmd = unit_script_command(base, s.get("unitScript"))
+        if cmd:
+            s["unitScript"] = cmd
+        else:
+            s.pop("unitScript", None)
+        tg = s.get("talkgroupsFile")
+        if tg and (base / tg).is_file():
+            s["talkgroupsFile"] = _runtime_talkgroups(base / tg)
+    out = base / "config.runtime.json"
+    out.write_text(json.dumps(conf, indent=2))
+    return [*without_config(argv), f"--config={out.name}"]
+
+
+def without_config(argv: list[str]) -> list[str]:
+    """argv with its --config=<file> (or --config <file>) left out."""
+    out, skip = [], False
+    for a in argv:
+        if skip:
+            skip = False
+        elif a == "--config":
+            skip = True
+        elif not a.startswith("--config="):
+            out.append(a)
+    return out
+
+
+def _runtime_talkgroups(src: Path) -> str:
+    """talkgroups.csv as trunk-recorder gets it (talkgroups.runtime.csv beside it): sizeup's own columns left out."""
+    import csv
+    import io
+    rows = list(csv.reader(io.StringIO(src.read_text())))
+    drop = {i for i, h in enumerate(rows[0]) if h.strip() in SIZEUP_COLUMNS} if rows else set()
+    buf = io.StringIO()
+    w = csv.writer(buf, lineterminator="\n")
+    for r in rows:
+        w.writerow([c for i, c in enumerate(r) if i not in drop])
+    out = src.with_name(RUNTIME_TALKGROUPS)
+    out.write_text(buf.getvalue())
+    return out.name
+
+
+def wanted_system(path: str) -> dict:
+    """{on, sources: {index: {sdr, mode, name}}, label, pid, seq, problem}: what sizeup-station asked of one system."""
+    try:
+        w = json.loads(Path(path).read_text())
+    except (OSError, ValueError):
+        w = None
+    off = {"on": False, "sources": {}, "label": "", "pid": None, "seq": None, "problem": ""}
+    if not isinstance(w, dict):
+        return off
+    pid = w.get("pid") if isinstance(w.get("pid"), int) and not isinstance(w.get("pid"), bool) else None
+    seq = w.get("seq") if isinstance(w.get("seq"), int) and not isinstance(w.get("seq"), bool) else None
+    sources, problem = {}, ""
+    raw = w.get("sources") if isinstance(w.get("sources"), dict) else {}
+    for k, v in raw.items():
+        sdr = v.get("sdr") if isinstance(v, dict) and isinstance(v.get("sdr"), str) else ""
+        if not str(k).isdigit() or not sdr or len(sdr) > 32 or not set(sdr) <= SERIAL_CHARS:
+            problem = f"not a source and its dongle serial: {str(k)[:8]!r}: {str(sdr)[:40]!r}"
+            continue
+        sources[int(k)] = {"sdr": sdr, "mode": str(v.get("mode") or "P25")[:60], "name": str(v.get("name") or sdr)[:60]}
+    if len({s["sdr"] for s in sources.values()}) != len(sources):
+        problem = "one dongle on two sources"
+    return {"on": w.get("on") is True and bool(sources or problem), "sources": sources,
+            "label": str(w.get("label") or "")[:60], "pid": pid, "seq": seq, "problem": problem}
+
+
+def _file_sig(*paths: Path) -> tuple:
+    out = []
+    for p in paths:
+        try:
+            st = p.stat()
+            out.append((p.name, st.st_mtime_ns, st.st_size))
+        except OSError:
+            out.append((p.name, 0, 0))
+    return tuple(out)
+
+
+class SystemSupervisor(Supervisor):
+    """One more system's trunk-recorder (#409): the sources of <recorder_dir>/systems/<name>/config.json that sizeup
+    gave a dongle (wanted_system), each dongle claimed under its own job. Restarted when its dongles, its config.json
+    or its talkgroups.csv change; never because of the county's. Every dongle it is asked to use must be free and
+    plugged in: one held by another app, or gone, and nothing starts (said in the status)."""
+
+    def __init__(self, name: str, config: str = CONFIG, state: str = STATE, status_path: str = STATUS, **kw):
+        super().__init__(config, system_state_path(name, state), system_status_path(name, status_path), **kw)
+        self.name = name
+        self.tag = f"p25 {name}"
+        self.claims_held: dict[str, str] = {}        # serial -> the mode it is claimed under
+
+    def _recorder(self) -> dict:
+        r = recorder(self.config)
+        if r["problem"]:
+            return r
+        d = Path(r["workdir"]) / SYSTEMS / self.name
+        return {"argv": [*without_config(r["argv"]), "--config=config.json"], "workdir": str(d),
+                "problem": "" if (d / "config.json").is_file() else f"no {SYSTEMS}/{self.name}/config.json"}
+
+    def _let_go(self, keep: set[str] = frozenset()) -> None:
+        for sd in [s for s in self.claims_held if s not in keep]:
+            release(sd, self.pid, self.claims)
+            del self.claims_held[sd]
+
+    def step(self, now: float | None = None) -> dict:
+        now = time.time() if now is None else now
+        r, w = self._recorder(), wanted_system(self.state)
+        d = Path(r["workdir"]) if r["workdir"] else Path(".")
+        sdr = sources_sdr(w["sources"])
+        key = (sdr, tuple(r["argv"]), r["workdir"], _file_sig(d / "config.json", d / "talkgroups.csv")) if w["on"] else None
+        label = w["label"] or self.name
+        if self.proc is not None and self.running != key:
+            self.stop(f"sizeup switched {label} off" if not w["on"] else f"{label}: its dongles or its config changed")
+            self.backoff, self.next_start = BACKOFF_S[0], 0.0
+        self._let_go({s["sdr"] for s in w["sources"].values()} if w["on"] else set())
+        base = {"on": w["on"], "sdr": sdr, "name": label, "system": self.name, "seq": w["seq"], "pid": self.pid,
+                "restarts": self.restarts, "workdir": r["workdir"]}
+        if not w["on"]:
+            self._set(now, "off", f"no dongle on {label} (sizeup: Settings > Radios)", **base)
+        elif w["problem"]:
+            self._set(now, "down", w["problem"], **base)
+        elif r["problem"]:
+            self._set(now, "absent", r["problem"], **base)
+        elif not installed(r["argv"]):
+            self._set(now, "absent", f"trunk-recorder not installed ({r['argv'][0]})", **base)
+        elif self.proc is None:
+            self._start_system(now, w, r, key, base)
+        else:
+            self._watch(now, base)
+        self.status["at"] = now
+        self._write()
+        return self.status
+
+    def _start_system(self, now: float, w: dict, r: dict, key: tuple, base: dict) -> None:
+        for i in sorted(w["sources"]):
+            s = w["sources"][i]
+            if self.claims_held.get(s["sdr"]) == s["mode"]:
+                continue
+            c = claim(s["sdr"], self.pid, w["pid"], self.claims, s["mode"])
+            if c is not None:
+                self._let_go()                       # all or nothing: the others stay free meanwhile
+                self._set(now, "held", f"{c.get('app', 'another app')} holds {s['name']}"
+                                       + (f" ({c.get('mode')})" if c.get("mode") else "")
+                                       + ": not started (switch it Off there to hand it over)",
+                          held_by={"app": c.get("app"), "mode": c.get("mode")}, **base)
+                return
+            self.claims_held[s["sdr"]] = s["mode"]
+        if now < self.next_start:
+            self.status.update(base)
+            return
+        try:
+            found = self.found()
+        except Exception as e:  # noqa: BLE001 - librtlsdr in a bad way: like not plugged in
+            found = None
+            self.log(f"{self.tag}: dongle lookup failed: {type(e).__name__}: {e}")
+        devs: dict[int, int | str] = {}
+        for i in sorted(w["sources"]):
+            s = w["sources"][i]
+            idx = resolve(s["sdr"], found)
+            if idx is None:
+                same = [k for k, x in (found or []) if x == s["sdr"]]
+                self.next_start = now + UNPLUGGED_S
+                if len(same) > 1:
+                    self._set(now, "ambiguous", f"SDR '{s['name']}': {duplicate_text(s['sdr'], same)}", **base)
+                else:
+                    self._set(now, "absent", "librtlsdr not found" if found is None
+                              else f"SDR '{s['name']}' not plugged in", **base)
+                return
+            devs[i] = idx
+        try:
+            argv = system_runtime_argv(r["argv"], r["workdir"], devs)
+        except (OSError, ValueError, KeyError, TypeError) as e:
+            self.next_start = now + ABSENT_S
+            self._set(now, "down", f"cannot write trunk-recorder config: {e}", **base)
+            return
+        env = dict(os.environ)
+        env["PATH"] = ":".join(["/opt/homebrew/bin", "/usr/local/bin", env.get("PATH", "") or "/usr/bin:/bin"])
+        try:
+            self.proc = self.popen(argv, cwd=r["workdir"], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                   stderr=subprocess.STDOUT, start_new_session=True, env=env)
+        except OSError as e:
+            self.restarts += 1
+            self.backoff = min(self.backoff * 2, BACKOFF_S[1])
+            self.next_start = now + self.backoff
+            self._set(now, "down", f"cannot start trunk-recorder: {e}", **dict(base, restarts=self.restarts))
+            return
+        self.running, self.started_at = key, now
+        self.lines.clear()
+        self.said = ""
+        if getattr(self.proc, "stdout", None) is not None:
+            self._drain_thread = threading.Thread(target=self._drain, args=(self.proc, r["workdir"]),
+                                                  name=f"trunk-recorder-{self.name}-output", daemon=True)
+            self._drain_thread.start()
+        on = ", ".join(f"{w['sources'][i]['name']} (device #{devs[i]})" for i in sorted(devs))
+        self.log(f"{self.tag}: trunk-recorder on {on}, pid {self.proc.pid}")
+        self._set(now, "ok", "trunk-recorder starting", tr_pid=self.proc.pid, index=devs[min(devs)], argv=argv,
+                  started=now, **base)
+
+    def shutdown(self, why: str = "the service is stopping") -> None:
+        self.stop(why)
+        self._let_go()
+        self.status.update(state="off", detail=f"the trunk-recorder service stopped ({why})", tr_pid=None,
+                           at=time.time())
+        self._write()
+
+
 def read_status(path: str | None = None, now: float | None = None) -> dict | None:
     """The service's last status (sizeup-station: the P25 row, the station health); None when there is none. One older
     than STALE_S says so: the service isn't running."""
@@ -564,6 +842,22 @@ def read_status(path: str | None = None, now: float | None = None) -> dict | Non
     return st
 
 
+def step_systems(more: dict, workdir: str, log=lambda m: None, make=None) -> None:
+    """One step of every other system under <workdir>/systems (a new directory gets its supervisor; one that went is
+    shut down). Each on its own: one failing never stops the next."""
+    names = system_dirs(workdir) if workdir else {}
+    for n in [n for n in more if n not in names]:
+        more.pop(n).shutdown("its directory is gone")
+    for n in names:
+        if n not in more:
+            more[n] = (make or SystemSupervisor)(n)
+            log(f"p25 {n}: supervised (off until sizeup-station gives it a dongle)")
+        try:
+            more[n].step()
+        except Exception as e:  # noqa: BLE001
+            log(f"p25 {n}: {type(e).__name__}: {e}")
+
+
 def main(argv: list[str]) -> int:
     cmd = argv[0] if argv else "run"
     if cmd == "print":
@@ -579,6 +873,9 @@ def main(argv: list[str]) -> int:
     if cmd == "status":
         st = read_status()
         print(json.dumps(st, indent=2) if st else f"no status yet (is {UNIT} running?)")
+        for n in system_dirs(recorder()["workdir"] or "."):
+            print(f"-- {n}")
+            print(json.dumps(read_status(system_status_path(n)), indent=2))
         return 0
     if cmd != "run":
         print("usage: trunkrecd.py run | print | status", file=sys.stderr)
@@ -591,17 +888,27 @@ def main(argv: list[str]) -> int:
     signal.signal(signal.SIGTERM, bye)
     signal.signal(signal.SIGINT, bye)
     s.log(f"p25: trunk-recorder service up; it runs what sizeup-station asks in {STATE}")
+    more: dict[str, SystemSupervisor] = {}          # the other systems (#409), as their directories are there
     try:
         while not stopping:
             try:
                 s.step()
             except Exception as e:  # noqa: BLE001 - supervision must never die
                 s.log(f"p25: {type(e).__name__}: {e}")
+            try:
+                step_systems(more, s.status.get("workdir") or recorder()["workdir"], s.log)
+            except Exception as e:  # noqa: BLE001 - another system never stops the county's
+                s.log(f"p25 systems: {type(e).__name__}: {e}")
             for _ in range(int(STEP_S * 10)):
                 if stopping:
                     break
                 time.sleep(0.1)
     finally:
+        for x in more.values():
+            try:
+                x.shutdown()
+            except Exception:  # noqa: BLE001
+                pass
         s.shutdown()
     return 0
 

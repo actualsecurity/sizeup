@@ -287,6 +287,7 @@ class StationLink:
                "radios": [r for r in app.radio_status() if r.get("label") != "Hub"],
                "sdr": app.sdr(), "rerun": dict(app.rerun, pending=len(app._rerun_ids)),
                "channels": app.channels_applied(),
+               "p25_systems": app.p25_systems_state(),       # (#409) the other P25 systems: jobs, state, activity
                "outbox": {"pending": n, "oldest": oldest, "dropped_audio": self.outbox.dropped_audio},
                "version": self.version()}
         try:
@@ -294,7 +295,7 @@ class StationLink:
         except Exception as e:  # health is a report: never in the way of the status itself
             out["health"] = {"error": f"{type(e).__name__}: {e}"[:200]}
         if talkgroups:
-            out["talkgroups"] = app.tg.state() if app.p25 else []
+            out["talkgroups"] = app.talkgroups_state() if app.p25 else []
         return out
 
     def _state(self) -> None:
@@ -309,7 +310,7 @@ class StationLink:
             body: dict = {"at": now, "talking": talking, "paging": paging}
             if self._status_now or now - last_status >= STATUS_S:
                 tgs = self.app.tg.state() if self.app.p25 else []
-                sig = [(r["tg"], r["record"], r["main"]) for r in tgs]
+                sig = [(r["tg"], r["record"], r["main"], r.get("system"), r.get("tier")) for r in tgs]
                 send_tg = sig != tg_sig or now - last_tg >= TALKGROUPS_S
                 body["status"] = self.status(talkgroups=False)
                 if send_tg:
@@ -321,7 +322,8 @@ class StationLink:
                 if "status" in body:
                     last_status, self._status_now = now, False
                     if "talkgroups" in body["status"]:
-                        last_tg, tg_sig = now, [(r["tg"], r["record"], r["main"]) for r in body["status"]["talkgroups"]]
+                        last_tg, tg_sig = now, [(r["tg"], r["record"], r["main"], r.get("system"), r.get("tier"))
+                                                for r in body["status"]["talkgroups"]]
                 backoff.ok()
             except HubError as e:
                 self._fail(e)

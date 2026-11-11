@@ -1,0 +1,69 @@
+{
+  "_about": "Police / EMS unit numbering on other P25 systems (GitHub #412). Community-sourced: every entry is editable data with a confidence, never logic. Namespaces are per system and service: a number here says nothing about a fire unit with the same number (police \"266\" is not fire 266). No radio IDs here: the roster is learned on the air and kept in the database only.",
+  "systems": {
+    "mrrs": {
+      "dispatch_radio_ids": {
+        "note": "a dispatch console may decode as source 0 or as a long fully-qualified ID: both are \"dispatch / console\"",
+        "confidence": "forum"
+      },
+      "callsigns": [
+        {
+          "said": "908",
+          "talkgroups": [
+            9211
+          ],
+          "service": "police",
+          "department": "Port Chester PD",
+          "role": "headquarters",
+          "confidence": "community",
+          "source": "RadioReference"
+        },
+        {
+          "said": "266",
+          "talkgroups": [
+            9211
+          ],
+          "service": "police",
+          "department": "Rye PD",
+          "role": "headquarters",
+          "confidence": "community",
+          "source": "RadioReference"
+        },
+        {
+          "said": "Headquarters",
+          "talkgroups": [
+            9211
+          ],
+          "service": "police",
+          "department": "Rye Brook PD",
+          "role": "headquarters",
+          "confidence": "community",
+          "source": "RadioReference"
+        },
+        {
+          "pattern": "77A[0-9]",
+          "talkgroups": [
+            9570
+          ],
+          "service": "ems",
+          "department": "Port Chester-Rye-Rye Brook EMS",
+          "role": "ambulance",
+          "confidence": "community",
+          "source": "RadioReference"
+        },
+        {
+          "said": "77 Medics",
+          "talkgroups": [
+            9570
+          ],
+          "service": "ems",
+          "department": "Port Chester-Rye-Rye Brook EMS",
+          "role": "medics",
+          "confidence": "community",
+          "source": "RadioReference"
+        }
+      ],
+      "numbering": []
+    }
+  }
+}

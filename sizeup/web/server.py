@@ -10,7 +10,7 @@ GET  /api/stream[?since=<id>]  SSE: the whole state, then each second only the s
                                clock); each event's id resumes a reconnect (Last-Event-ID); gzip when accepted
 GET  /api/audio/<id>.wav       a page or transmission clip
 POST /api/incident/<id>/close  close an incident by hand
-POST /api/talkgroup {"tg": 307, "record": bool?, "main": bool?}  per-talkgroup switches (state "talkgroups")
+POST /api/talkgroup {"tg": 307, "record": bool?, "main": bool?, "tier": str?}  per-talkgroup switches (state "talkgroups"; tier: #409)
 POST /api/talkgroup-group {"group": "County Police", "record": bool?, "main": bool?}  a whole section
 POST /api/mode {"mode": ...}  one shared dongle: hand it to a channel or trunk-recorder (state "sdr")
 POST /api/adsb-receiver {"sdr": serial | "", "confirm": true}  admins: name (or unname) the station's ADS-B dongle
@@ -672,7 +672,18 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                 try:
                     n = int(self.headers.get("Content-Length") or 0)
                     body = json.loads(self.rfile.read(min(n, 1024)) or b"{}")
-                    err = set_talkgroup(int(body["tg"]), body.get("record"), body.get("main"))
+                    if body.get("tier") is not None or body.get("system") or body.get("source"):
+                        # another P25 system's talkgroup (#409): {"source": "p25:<system>:<tg>"} or {"tg", "system"}
+                        from sizeup import sourcekeys as _sources
+                        got = _sources.parse(str(body["source"])) if body.get("source") else (
+                            str(body.get("system") or ""), int(body["tg"]))
+                        if got is None:
+                            raise ValueError("source: p25:<system>:<talkgroup>")
+                        tier = body.get("tier")
+                        err = set_talkgroup(got[1], body.get("record"), body.get("main"),
+                                            None if tier is None else str(tier), got[0])
+                    else:
+                        err = set_talkgroup(int(body["tg"]), body.get("record"), body.get("main"))
                 except (ValueError, KeyError, TypeError) as e:
                     err = f"bad request: {e}"
                 if err:
