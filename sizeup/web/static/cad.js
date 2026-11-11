@@ -1780,7 +1780,13 @@ function statusChoices(u, where) {
 // Follow a rig on the map (#358, cadmap.js): its unit-board row and its row on an incident, while it is on the map;
 // hovering (or focusing) either row rings it wider there. Only on a map already on screen: never a view switch (a new
 // call's draft, an edit form); no map showing it: the button flashes instead.
-const onMap = (name) => !!(window.CadMap && CadMap.onMap && CadMap.onMap(name));
+// a department placeholder (DPT239 ...: its unit row's placeholder flag, #400; mapview.is_placeholder) is never followed
+// nor recommended (#384); it may still be on an incident's assigned list
+function placeholderUnit(name) {
+  const u = ((cad.state && cad.state.units) || []).find((x) => x.name === name);
+  return !!(u && u.placeholder);
+}
+const onMap = (name) => !placeholderUnit(name) && !!(window.CadMap && CadMap.onMap && CadMap.onMap(name));
 const FLASH_MS = 1200;
 function followBtn(name) {
   const b = el("button", "mini quiet u-follow");
@@ -2023,6 +2029,7 @@ async function recommend(typ, sub) {
   try {
     const r = await api("POST", `/api/cad/incident/${iid}/recommend`, body);
     if (cad.sel !== iid) return;
+    r.units = (r.units || []).filter((u) => !placeholderUnit(u.name));    // never recommended (#384; the hub's too)
     cad.rec = { iid, ...r, checked: new Set(r.units.map((u) => u.id)), extra: [], forType: typ || "" };
     syncFull(inc, prev, cad.rec);
   } catch (e) {

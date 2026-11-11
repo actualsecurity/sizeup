@@ -620,7 +620,7 @@ class Cad:
     def map_slice(self, units: list[dict], incs: list[dict], pos: dict, now: float) -> dict:
         tags = {c: j["tag"] for j in self.lists.joint_response.values() for c in j["units"]}
         out = mapview.map_slice(units, incs, self.lists.role, self.firehouses, pos, now, joint=lambda c: tags.get(c, ""),
-                                clears=self.clears(now), params=self.eta, display=self.map_display)
+                                clears=self.clears(now), params=self.eta, display=self.map_display, lists=self.lists)
         if self.routes is not None:
             try:
                 out.update(self.routes.for_map(out["markers"], now, incs))     # routes, trails (#360)
@@ -641,7 +641,7 @@ class Cad:
         units = self.store.units() if units is None else units
         incs = self.store.q("SELECT id, number, status, lat, lon FROM incidents WHERE status IN ('queued', 'pending', 'active')")
         return mapview.locations(units, incs, self.lists.role, self.firehouses, self._positions(now), now,
-                                 self.clears(now), self.eta)
+                                 self.clears(now), self.eta, lists=self.lists)
 
     def _with_radio(self, incs: list[dict], limit: int = 200) -> list[dict]:
         """Each event's radio traffic (newest first), with whether its audio is still kept."""

@@ -72,15 +72,47 @@
     font: 700 var(--fs-2xs)/var(--lh-2xs) var(--mono); border: var(--bw) solid #fff; opacity: 1;
   }
   .cm-rig.rig-dot:hover > * { display: inline; }
+  .cm-rig.rig-dot:hover > .cm-ty { display: inline-block; }
+  /* #384: a firehouse's idle rigs folded into one count chip on top of its icon ("6"), the size of a rig's mark;
+     neutral (its units' statuses may differ). map-style.js's "firehouse-badge" keeps the firehouse's name clear of it */
   .cm-badge {
-    z-index: 2;   /* under every rig: the firehouse's other marks fan over the top, never under it */ min-block-size: 0; padding: 0 var(--s-1); font: 700 var(--fs-2xs)/var(--lh-2xs) var(--mono); white-space: nowrap;
-    color: var(--text); background: color-mix(in srgb, var(--panel) 90%, transparent); border: var(--bw) solid var(--c, var(--line-strong));
-    border-inline-start-width: var(--s-1); border-radius: var(--radius-s); box-shadow: 0 1px 4px rgba(0, 0, 0, 0.7); cursor: zoom-in;
+    z-index: 1;   /* under every rig and every call's pin (#384: a call's label never hidden by it) */
+    display: inline-flex; align-items: center; justify-content: center; min-inline-size: var(--s-4); block-size: var(--s-4); min-block-size: 0;
+    padding: 0 var(--s-0); font: 700 var(--fs-2xs)/1 var(--font); font-variant-numeric: tabular-nums; color: #fff;
+    background: rgba(17, 19, 21, 0.92); border: var(--bw) solid rgba(255, 255, 255, 0.85); border-radius: var(--s-2);
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.7); cursor: pointer;
   }
-  .cm-badge:hover { background: var(--panel); border-color: var(--c, var(--line-strong)); }
+  .cm-badge:hover { background: var(--panel); border-color: #fff; }
+  @media (pointer: coarse) { .cm-badge::after { content: ""; position: absolute; inset: calc(-1 * var(--s-2)); } }   /* a finger's target */
+
+  /* #384: a rig's apparatus type (mapview.icon_of): a side silhouette, monochrome (a mask, defined once here), in the
+     text colour: white on the chip's status colour; in the station list, the status colour */
+  .cm-ty { display: inline-block; flex: none; inline-size: calc(var(--s-3) * 1.5); block-size: var(--s-3); vertical-align: -1px;
+           margin-inline-end: var(--s-0); background-color: currentColor;
+           -webkit-mask: var(--ty) center / contain no-repeat; mask: var(--ty) center / contain no-repeat; }
+  .cm-far .cm-rig .cm-ty { inline-size: calc(var(--s-2) * 1.5); block-size: var(--s-2); vertical-align: 0; }
+  .cm-ty.ty-engine { --ty: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 16'%3E%3Cpath fill-rule='evenodd' d='M1 4.5h14V12H1zM2.5 7.4h11v1.3h-11z'/%3E%3Cpath fill-rule='evenodd' d='M15 3.5h4.3l3.7 4.2V12h-8zM16.4 5h2.3l2.4 2.7h-4.7z'/%3E%3Cpath fill-rule='evenodd' d='M15.6 1.9h3.4v1.6h-3.4z'/%3E%3Cpath fill-rule='evenodd' d='M3.2 13a2.3 2.3 0 1 0 4.6 0a2.3 2.3 0 1 0-4.6 0zM16.2 13a2.3 2.3 0 1 0 4.6 0a2.3 2.3 0 1 0-4.6 0z'/%3E%3C/svg%3E"); }
+  .cm-ty.ty-ladder { --ty: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 16'%3E%3Cpath fill-rule='evenodd' d='M1 7.5h14V12H1z'/%3E%3Cpath fill-rule='evenodd' d='M15 6.5h4l3.6 3.4V12H15zM16.3 7.7h2.2l2 2h-4.2z'/%3E%3Cpath fill-rule='evenodd' d='M0 2h23.5v4.2H0zM1.2 3.3h2v1.6h-2zM4.4 3.3h2v1.6h-2zM7.6 3.3h2v1.6h-2zM10.8 3.3h2v1.6h-2zM14 3.3h2v1.6h-2zM17.2 3.3h2v1.6h-2zM20.4 3.3h2v1.6h-2z'/%3E%3Cpath fill-rule='evenodd' d='M2 6.2h2.5v1.3H2z'/%3E%3Cpath fill-rule='evenodd' d='M3.2 13a2.3 2.3 0 1 0 4.6 0a2.3 2.3 0 1 0-4.6 0zM16.2 13a2.3 2.3 0 1 0 4.6 0a2.3 2.3 0 1 0-4.6 0z'/%3E%3C/svg%3E"); }
+  .cm-ty.ty-tower { --ty: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 16'%3E%3Cpath fill-rule='evenodd' d='M1 7.5h14V12H1z'/%3E%3Cpath fill-rule='evenodd' d='M15 6.5h4l3.6 3.4V12H15zM16.3 7.7h2.2l2 2h-4.2z'/%3E%3Cpath fill-rule='evenodd' d='M2.2 6.2L14.6 1.6l0.8 2.1L3 8.3z'/%3E%3Cpath fill-rule='evenodd' d='M15 0.5h8v5h-8zM16.3 1.8h5.4v1.4h-5.4z'/%3E%3Cpath fill-rule='evenodd' d='M3.2 13a2.3 2.3 0 1 0 4.6 0a2.3 2.3 0 1 0-4.6 0zM16.2 13a2.3 2.3 0 1 0 4.6 0a2.3 2.3 0 1 0-4.6 0z'/%3E%3C/svg%3E"); }
+  .cm-ty.ty-rescue { --ty: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 16'%3E%3Cpath fill-rule='evenodd' d='M1 1.5h15V12H1zM3.6 3.5h1.3v6.5H3.6zM7.7 3.5h1.3v6.5H7.7zM11.8 3.5h1.3v6.5h-1.3z'/%3E%3Cpath fill-rule='evenodd' d='M16 5.5h3.4l3.6 3.4V12h-7zM17.2 6.7h1.8l2 2h-3.8z'/%3E%3Cpath fill-rule='evenodd' d='M3.2 13a2.3 2.3 0 1 0 4.6 0a2.3 2.3 0 1 0-4.6 0zM16.2 13a2.3 2.3 0 1 0 4.6 0a2.3 2.3 0 1 0-4.6 0z'/%3E%3C/svg%3E"); }
+  .cm-ty.ty-suv { --ty: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 16'%3E%3Cpath fill-rule='evenodd' d='M1 11.8V5.2Q1 4 2.2 4H15l3.6 3.4h2.6Q23 7.4 23 9.2v2.6zM2.6 5.4h5.2v2.4H2.6zM9.2 5.4h5.2l2.3 2.4H9.2z'/%3E%3Cpath fill-rule='evenodd' d='M6 2.4h6.5V4H6z'/%3E%3Cpath fill-rule='evenodd' d='M3.2 13a2.3 2.3 0 1 0 4.6 0a2.3 2.3 0 1 0-4.6 0zM16.2 13a2.3 2.3 0 1 0 4.6 0a2.3 2.3 0 1 0-4.6 0z'/%3E%3C/svg%3E"); }
+  .cm-ty.ty-other { --ty: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 16'%3E%3Cpath fill-rule='evenodd' d='M12 1.5l6.5 6.5-6.5 6.5-6.5-6.5zM12 4.6L8.6 8l3.4 3.4L15.4 8z'/%3E%3C/svg%3E"); }
+  /* a firehouse's rigs (#384, cadmap.js openStation): one row each, its type in its status colour, active first */
+  .cm-pop[tabindex="-1"]:focus { outline: none; }   /* the box focused only to take Escape (#384); its rows ring as ever */
+  .cm-st-list { display: flex; flex-direction: column; max-block-size: 45vh; overflow-y: auto; }
+  .cm-st-row { display: flex; align-items: center; justify-content: flex-start; gap: var(--s-2); inline-size: 100%;
+    min-block-size: var(--ctl-sm); padding-inline: var(--s-1); font-weight: 400; text-align: start; color: var(--text);
+    background: none; border: 0; border-radius: var(--radius-s); }
+  .cm-st-row:hover:not(:disabled) { background: var(--hover); }
+  .cm-st-row:disabled { cursor: default; color: var(--text); }
+  .cm-st-row .cm-ty { color: var(--c, var(--dim)); margin: 0; }
+  .cm-st-row .n { min-inline-size: 4.5em; font-family: var(--mono); font-weight: 700; }
+  .cm-st-row .s { min-inline-size: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-2); }
+  .cm-st-row.oos { opacity: 0.7; }
+  .cm-st-row.oos .n { text-decoration: line-through; }
 
   /* the other calls: a dot in the type color, labelled; dimmed while another one is open */
-  .cm-pin { z-index: 1; min-block-size: 0; padding: 0; border: 0; background: none; cursor: pointer; font: 700 var(--fs-2xs)/var(--lh-2xs) var(--font); }
+  .cm-pin { z-index: 2; min-block-size: 0; padding: 0; border: 0; background: none; cursor: pointer; font: 700 var(--fs-2xs)/var(--lh-2xs) var(--font); }
   .cm-pin:hover { background: none; }
   .cm-pin .dot { display: block; inline-size: calc(var(--s-3) + var(--s-0)); block-size: calc(var(--s-3) + var(--s-0)); border-radius: 50%;
     background: var(--c); border: 2px solid #fff; box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.7); }

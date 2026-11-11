@@ -70,7 +70,7 @@ def test_a_fix_is_live_then_stale_then_ignored():
 
 def test_status_placement_is_unchanged_without_a_fix():
     """No fix: the same markers, key for key, as before #358 (no at / age / stale on them)."""
-    keys = {"unit", "id", "kind", "status", "look", "place", "group", "lon", "lat", "ring", "incident_id",
+    keys = {"unit", "id", "kind", "icon", "status", "look", "place", "group", "lon", "lat", "ring", "incident_id",
             "incident_number", "line_to", "station", "home_line",
             "status_at"}                                    # #376: when its status changed (a rig just dispatched)
     for role, inc in (("free", None), ("dispatched", INC), ("enroute", INC), ("onscene", INC), ("oos", None)):
