@@ -2305,9 +2305,9 @@ gauge_station = "8516945"        # Kings Point (the gauge)
 
 `sizeup/attachments.py`: what is attached to an incident is kept the same way whatever its kind, in a private S3
 bucket (`SIZEUP_ATTACHMENTS_BUCKET`, sizeup-aws `14-dvr-storage.sh`: Block Public Access, SSE-S3, versioning, TLS
-only, Object Lock in governance mode for 365 days, lifecycle: camera clips expire after 365 days, radio never), under
-`attachments/<incident id>/<attachment id>/`; a camera clip for a year, **radio audio until an admin deletes it** (#414
-follow-up):
+only, Object Lock in governance mode for 365 days, lifecycle: objects tagged `keep=1y` expire after 365 days), under
+`attachments/<incident id>/<attachment id>/`; a camera clip for a year, **radio audio on a confirmed link until an
+admin deletes it** (#440):
 
 - **camera**: a range of a DVR recording (at most 60 min, within what is recorded), saved by a dispatcher or admin
   (`POST /api/cad/cameras/<id>/dvr/clip {from, to, incident_id, note}`): the recorded segments concatenated as they
@@ -2318,16 +2318,22 @@ follow-up):
   `audio.wav`, `transmission.json` (transcript and the alternative one, talker, radio ID, rig, channel, talkgroup)
   and `manifest.json`. Once per incident and transmission (a deleted one is never copied again). A failed copy is
   tried again after 60 s doubling to an hour; S3's own trouble (network, 5xx, 403) never counts, a refusal counts
-  (5 at most); a round stops at its first failure. **Kept until an admin deletes it**, whatever `audio.sqlite`'s
-  retention: no `expires_at` (0), never "expired"; every object tagged `kind=radio`, which the bucket's lifecycle leaves
-  alone (camera clips are tagged `kind=camera` and expire after a year; sizeup-aws `19-incident-audio-forever.sh`,
-  the task role's `s3:PutObjectTagging`). Every transmission linked to an incident is copied, whatever the link (by
-  hand, a unit's, the radio-log backfill's, a mention), once settled and within a year of it. **Copied first**: the
-  live audio store never deletes a linked clip whose copy isn't stored yet (`Attachments.uncopied`; without the
-  attachments bucket, every linked clip), whatever its channel's retention; once copied, the live clip follows the
-  retention again (its copy is the incident's). Object Lock still stops an early delete for 365 days (an admin's
-  audited delete bypasses it, as before). Settings > System > Audio retention shows the incident audio's count, size
-  and S3 cost a month.
+  (5 at most); a round stops at its first failure. **A transmission on a confirmed link** (by hand, a unit's, the
+  radio-log backfill's, a kept mention: `SURE_LINK`) **is kept until an admin deletes it** (#440), whatever
+  `audio.sqlite`'s retention: no `expires_at` (0), never "expired", its objects tagged `keep=forever`. One on an
+  unconfirmed link (a mention or a fireground link nobody kept) keeps the year it had (`keep=1y`), and becomes
+  forever (retagged) once a person keeps the link; unlinked before it is copied, it isn't copied. (The user's words
+  were "audio that gets attached to an INC"; copying mentions forever too is one change in `_copy_radio`.) Camera
+  clips are tagged `keep=1y`; the bucket's lifecycle expires only `keep=1y` (sizeup-aws `19-incident-audio-forever.sh`,
+  the task role's `s3:PutObjectTagging`). A tagged PUT that is refused (step 19 not run yet) is sent again untagged,
+  so nothing is lost, and `Attachments.retag` tags it later; the same pass tags what was saved before #440 (so the
+  camera clips saved since 2026-11-07 still expire) and retags a copy whose link was confirmed since. **Copied
+  first**: the live audio store never deletes a linked clip that will still be copied (`Attachments.uncopied`;
+  without the attachments bucket, every linked clip), whatever its channel's retention; one that never will (its
+  incident or transmission gone, linked over a year after it ended, refused for good) is released to its retention
+  and the log says so. Once copied, the live clip follows the retention again. Object Lock still stops an early
+  delete for 365 days (an admin's audited delete bypasses it, as before). Settings > System > Audio retention shows
+  the incident audio's count, size and S3 cost a month.
 
 Every PUT has SSE, Content-MD5 and the SHA-256 checksum. The CAD store has the record (`attachments`: kind, source,
 range, sha256 of every object, who and when, note, status) and the audit (`attachment_audit`: attach, view,

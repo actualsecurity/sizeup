@@ -1308,11 +1308,17 @@ class HubApp(App):
 
     def _audio_held(self, ids: list[str]) -> set[str]:
         """Clips the retention never deletes: linked to an incident and not yet copied into its attachments (copied
-        first: the incident keeps its audio until an admin deletes it, #414 follow-up). Without the attachments
+        first: the incident keeps its audio until an admin deletes it, #440). Without the attachments
         bucket nothing is copied: every linked clip is held here."""
         att = getattr(self, "attachments", None)
         if att is not None and att.configured:
-            return att.uncopied(ids)
+            held = att.uncopied(ids)
+            if att.released and len(att.released) != getattr(self, "_released_said", 0):
+                self._released_said = len(att.released)
+                self.hub.log(f"audio: {len(att.released)} clip(s) linked to an incident will not be copied (the "
+                             "incident or the transmission gone, linked over a year on, or refused for good): their "
+                             "retention applies")
+            return held
         held: set[str] = set()
         for k in range(0, len(ids), 500):
             chunk = list(ids[k:k + 500])
