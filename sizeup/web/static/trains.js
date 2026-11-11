@@ -44,7 +44,7 @@
 //   Tracks       (#371) the line's four tracks (the hub's "tracks", Metro-North's GIS, in runs: a gap is drawn as
 //                one), numbered from zoom 17. A train lies along the track the hub puts it on ("lane": the track
 //                posted or planned for the stop it left or is going to, kept until another stop says otherwise;
-//                else its direction's outer track, or its inner one for an express skipping the next station,
+//                else its direction's outer track, or its inner one for an express skipping a station,
 //                #451). "Trk 2" in its box only near the stop that said so ("trk"); "Trk 2?" held; else "track not
 //                known". The next stop's track reads with the stop, "next Rye (trk 2)", never as the train's.
 //                From zoom 15 the basemap's own rail line (OpenStreetMap's) is hidden where they are drawn
@@ -443,7 +443,7 @@ window.TrainLayer = (() => {
     if (!text) return null;
     const title = [t.trk ? `Track ${t.trk}: ${TRK_WHO[t.trk_src] || "the MTA's"} for ${t.trk_at || "its stop"}`
                    : held ? `Track: last said for ${t.lane_at || "its last stop"}`
-                   : guess && t.lane_how === "inner" ? `Track not known; drawn on express track ${t.lane} (skips the next station)`
+                   : guess && t.lane_how === "inner" ? `Track not known; drawn on express track ${t.lane} (skips stations before its next stop)`
                    : guess ? `Track not known; drawn on outer track ${t.lane}` : "",
                    at.pole ? `Pole: CB ${at.pole} (catenary structure, Metro-North GIS)` : "",
                    typeof at.mp === "number" ? "Milepost from Grand Central, where the train is drawn" : ""].filter(Boolean).join("\n");

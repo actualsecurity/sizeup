@@ -804,7 +804,7 @@ class Model:
         "outer" | "inner") (#371). "said": within TRACK_NEAR_M of the stop that said it; "held": the last stop's word, kept up
         to TRACK_HOLD_M from that stop (beyond, an express may have crossed over: not held); "outer": nothing says, so the
         direction's outer track (3 inbound, 4 outbound), only so it lies on a drawn track: not known; "inner": nothing
-        says and it skips the next station ahead (express_here), so the direction's inner, express track (1 inbound,
+        says and it skips a station on its run to its next stop (express_here), so the direction's inner, express track (1 inbound,
         2 outbound, #451): not known either. mem: what we remember of this train (Tracker.trk_mem): its track changes only on
         better stop-track evidence (_better), so a merge flipping between TrainTime and GTFS-realtime doesn't move it.
         ("", None, "") with no numbered track here."""
@@ -818,18 +818,25 @@ class Model:
             ev = mem.get("ev")
         if ev is not None and abs(ev["ch"] - s) <= TRACK_HOLD_M and self.track_at(ev["trk"], s) is not None:
             return ev["trk"], ev, "said" if abs(ev["ch"] - s) <= TRACK_NEAR_M else "held"
-        if n is not None and self.express_here(anchors[n][1], s, d):
+        if n is not None and self.express_here(anchors[n][1], s, d, anchors[p][1] if p is not None else None):
             inner = INNER_TRACK.get(d, "")
             if self.track_at(inner, s) is not None:
                 return inner, None, "inner"
         outer = OUTER_TRACK.get(d, "")
         return (outer, None, "outer") if self.track_at(outer, s) is not None else ("", None, "")
 
-    def express_here(self, next_ch: float, s: float, d: int) -> bool:
-        """A train at s going d runs express through here (#451): its next stop (next_ch) is ahead, not at it, and
-        beyond the nearest station ahead of it, which it skips. Only for the default track: its next stop's posted
-        track says nothing of the track it is on now (it may cross over before it), so never more than this."""
-        if d not in (1, -1) or (next_ch - s) * d <= AT_STOP_M:
+    def express_here(self, next_ch: float, s: float, d: int, prev_ch: float | None = None) -> bool:
+        """A train at s going d runs express through here (#451). By its whole run from the stop it left (prev_ch) to
+        its next (next_ch): a station strictly between them, more than AT_STOP_M from both, which it skips; the same
+        all the way along the run (no sideways jump once it passes the last one it skips). No stop left: its next stop
+        is ahead, not at it, and beyond the nearest station ahead of it. Only for the default track: its next stop's
+        posted track says nothing of the track it is on now (it may cross over before it), so never more than this."""
+        if d not in (1, -1):
+            return False
+        if prev_ch is not None:
+            lo, hi = min(prev_ch, next_ch), max(prev_ch, next_ch)
+            return any(lo + AT_STOP_M < st["ch"] < hi - AT_STOP_M for st in self.stations.values())
+        if (next_ch - s) * d <= AT_STOP_M:
             return False
         ahead = [st["ch"] for st in self.stations.values() if (st["ch"] - s) * d > AT_STOP_M]
         return bool(ahead) and (next_ch - min(ahead, key=lambda c: (c - s) * d)) * d > AT_STOP_M

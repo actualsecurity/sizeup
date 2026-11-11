@@ -1916,8 +1916,8 @@ doesn't move it) and changes it only on better stop-track evidence: for the same
 (the same track from a weaker source keeps the stronger one), for another stop only one ahead of the old one in
 the direction of travel. Between stations it is held, up to 4 km from the stop that said it (beyond, an express
 may have crossed over). Nothing says: the direction's outer track (4 outbound, 3 inbound), only so the train
-lies on a drawn track; not known. An express (#451: its next stop lies beyond the nearest station ahead, which it
-skips) is drawn on the direction's inner track instead (2 outbound, 1 inbound; 3, 1, 2, 4 north to south), not known
+lies on a drawn track; not known. An express (#451: a station lies between the stop it left and its next, which it
+skips; with no stop left, its next stop lies beyond the nearest station ahead) is drawn on the direction's inner track instead (2 outbound, 1 inbound; 3, 1, 2, 4 north to south), not known
 either; its next stop's posted track is never taken for its own (it may cross over before it). No GPS guess: the tracks are 4 m apart, closer than a phone-grade fix can
 tell. A track we have no line for (Stamford's 5) is ignored. The box: *Trk 2 · near pole 249 · MP 25.3* within
 1.5 km of the stop that said it (who said it, for which stop, on hover); *Trk 2?* held ("Track: last said for

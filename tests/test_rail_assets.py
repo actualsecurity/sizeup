@@ -445,6 +445,22 @@ def test_an_express_through_the_area_is_drawn_dashed_on_the_inner_track(doc):
     assert m.express_here(-30000.0, 7000, -1) and not m.express_here(B_CH, 7000, -1)
 
 
+def test_an_express_stays_on_the_inner_track_for_its_whole_run_between_stops(doc):
+    """#452 review: the run from the stop it left to its next decides, not the station nearest ahead now: an express
+    from Rye to a stop at 7800 m skipping Port Chester stays on 2 from Rye to 1.5 km before its stop, past Port
+    Chester too (no switch to the outer track mid-run); inbound the same, past Rye. A local's run: outer throughout."""
+    st = far_static()
+    st["stations"]["C"] = {"id": "C", "name": "Cee", "code": "9CE", "lat": LAT, "lon": east(7800), "ch": 7800.0, "url": "", "tc": 300.0}
+    m = Model(st, BBOX, None, doc)
+    run = [({"stop_id": "A", "track": "", "status": "Departed"}, A_CH), ({"stop_id": "C", "track": "", "status": ""}, 7800.0)]
+    out = {m.which_track({}, run, 0, 1, x, 1)[::2] for x in range(int(A_CH), 7800 - int(T.TRACK_NEAR_M) + 1, 25)}
+    assert out == {("2", "inner")}
+    back = [({"stop_id": "B", "track": "", "status": "Departed"}, B_CH), ({"stop_id": "F", "track": "", "status": ""}, -30000.0)]
+    assert {m.which_track({}, back, 0, 1, x, -1)[::2] for x in range(int(B_CH), 0, -25)} == {("1", "inner")}
+    local = [({"stop_id": "A", "track": "", "status": "Departed"}, A_CH), ({"stop_id": "B", "track": "", "status": ""}, B_CH)]
+    assert {m.which_track({}, local, 0, 1, x, 1)[::2] for x in range(int(A_CH), int(B_CH) + 1, 25)} == {("4", "outer")}
+
+
 def test_a_local_whose_next_stop_is_the_nearest_station_keeps_the_outer_track(doc):
     m = Model(far_static(), BBOX, None, doc)
     a = [({"stop_id": "B", "track": "", "status": ""}, B_CH), ({"stop_id": "A", "track": "", "status": ""}, A_CH)]
@@ -792,7 +808,7 @@ out.said = P({ s: 3000, mp: 26.0, lane: "1", lane_how: "said", trk: "1", trk_src
     for h in (out["head"], out["planned"]):
         assert not re.search(r"(^|· )trk", h) and "Trk" not in h                # never a bare current "trk N"
     assert out["inner"]["text"] == "track not known · MP\u00a026.0"
-    assert out["inner"]["title"].startswith("Track not known; drawn on express track 1 (skips the next station)\n")
+    assert out["inner"]["title"].startswith("Track not known; drawn on express track 1 (skips stations before its next stop)\n")
     assert out["outer"]["text"] == "track not known · MP\u00a026.0" and out["outer"]["title"].startswith("Track not known; drawn on outer track 3\n")
     assert out["held"]["text"] == "Trk\u00a03? · MP\u00a026.0" and out["said"]["text"] == "Trk\u00a01 · MP\u00a026.0"
 
