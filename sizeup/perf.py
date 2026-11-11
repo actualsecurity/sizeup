@@ -45,11 +45,11 @@ HOUR_TICKS = 60              # a trend line every this many ticks
 FIRST_LINE_TICKS = 5         # ... and one after the first 5 min: what a fresh start looks like, to compare with
 KEEP_HOURS = 72
 TOP_LOG = 8                  # threads in the hourly line
-MAX_ROUTES = 150             # path families kept (more: "(other)")
+MAX_ROUTES = 400             # path families kept; one more: the one unused the longest goes into "(other)"
 PROFILE_S = 30.0
 PROFILE_MAX_S = 120.0
 PROFILE_MIN_S = 1.0
-PROFILE_HZ = 50.0
+PROFILE_HZ = 25.0            # each sample reads every thread's clock twice: at 50 Hz that was 15-20% of half a vCPU
 PROFILE_HZ_MAX = 100.0
 PROFILE_HZ_MIN = 5.0
 PROFILE_REST_S = 30.0        # after one ends: none for this long, or for as long as it ran (so never over half the time)
@@ -61,9 +61,10 @@ FOLDED_MAX = 2000            # folded stacks returned (the heaviest)
 TOP_N = 40
 
 # Thread names made at run time (name=f"..."): only what is before the made part is shown. A thread named for a push
-# topic, an incident source or a channel says none of them here. tests/test_profiler.py reads the source for every such
-# name and fails on one that is not listed.
-DYNAMIC = ("ntfy-", "stream-", "aws-stt-", "source-", "nfm-", "http-", "updating-")
+# topic, an incident source or a channel says none of them here. tests/test_profiler.py reads the source's syntax tree
+# for every thread name that is not a plain string (keyword or positional, through a spawn helper too) and fails on one
+# that is not listed.
+DYNAMIC = ("ntfy-", "stream-", "aws-stt-", "source-", "datasource-", "nfm-", "http-", "updating-")
 _UNNAMED = re.compile(r"Thread-\d+(?: \((.+)\))?")
 _COUNTER = re.compile(r"(?:[-_ ]\d+)+$")
 _UNSAFE = re.compile(r"[^A-Za-z0-9_.()<>-]")
@@ -85,14 +86,74 @@ def group(name: str) -> str:
     return _UNSAFE.sub("_", _COUNTER.sub("", name))[:32] or "thread"
 
 
-_WORD = re.compile(r"[a-z][a-z_-]{0,23}(?:\.(?:js|css|html|svg|png|ico|json|wav|ts|m3u8|zip|woff2?))?")
 _PAGES = ("/", "/cad", "/cad.html", "/monitor", "/comms", "/comms.html", "/station", "/index.html", "/healthz")
+_ROUTE_LITERAL = re.compile(r"""["'](/api/[A-Za-z0-9_/.-]*)["']""")
+_ROUTE_WORD = re.compile(r"[a-z][a-z0-9_-]*(?:\.[a-z][a-z0-9]*)?")
+_routes: tuple | None = None
+_routes_modules = 0          # how many modules were loaded when _routes was read (some are imported late)
+NOT_FOUND, REFUSED, FAILED, UNLISTED = "(not found)", "(refused)", "(error)", "/api/(unlisted)"
 
 
-def route_family(path: str) -> str:
-    """A request's path family: the path without its query, every part that is not a plain lower-case word (an id, a
-    number, a name) as ":id", static files as one. A path that is none of ours is "(other)": what someone typed into
-    the address bar is never kept."""
+def _pattern_words(pattern: str) -> frozenset[str]:
+    """The fixed words of a route's regex: what it spells out, not what it lets through."""
+    run = re.sub(r"\[[^\]]*\]|\{[^}]*\}", " ", pattern)       # character classes, {1,64}
+    run = re.sub(r"\\.", " ", run.replace("\\.", "."))         # "\." is a dot; \d and the like are not words
+    return frozenset(seg for seg in re.split(r"[/()|?:*+^$ ]+", run) if _ROUTE_WORD.fullmatch(seg))
+
+
+def routes(root: str | None = None, modules: dict | None = None) -> tuple[frozenset, tuple, tuple]:
+    """The server's own routes, read once: (paths, prefixes, patterns). The server has no one table (it is a chain of
+    ifs over several modules), so: every quoted "/api/..." in our source is a path, or a prefix when it ends in "/"
+    (what startswith() is asked); every compiled regex for an "/api/..." path that a loaded sizeup module holds (by
+    itself or in a table: WRITES, DOES) is a pattern, with the words it spells out."""
+    global _routes, _routes_modules
+    if _routes is not None and root is None and modules is None and _routes_modules == len(sys.modules):
+        return _routes
+    paths: set[str] = set()
+    prefixes: set[str] = set()
+    try:
+        for d, _, files in os.walk(root or os.path.dirname(os.path.abspath(__file__))):
+            for f in files:
+                if f.endswith(".py"):
+                    try:
+                        with open(os.path.join(d, f), encoding="utf-8") as fh:
+                            found = _ROUTE_LITERAL.findall(fh.read())
+                    except (OSError, ValueError):
+                        continue
+                    for lit in found:
+                        if lit.endswith("/"):
+                            if lit not in ("/api/", "/api/cad/"):       # (too wide to be a family)
+                                prefixes.add(lit)
+                        elif "..." not in lit:
+                            paths.add(lit)
+    except OSError:
+        pass
+    pats: dict[str, tuple] = {}
+
+    def take(v, depth: int = 0) -> None:
+        if isinstance(v, re.Pattern):
+            if isinstance(v.pattern, str) and v.pattern.startswith("/api/"):
+                pats[v.pattern] = (v, _pattern_words(v.pattern))
+        elif depth < 3 and isinstance(v, (tuple, list)):
+            for x in v:
+                take(x, depth + 1)
+
+    for name, mod in list((sys.modules if modules is None else modules).items()):
+        if name == "sizeup" or name.startswith("sizeup."):
+            for v in list(getattr(mod, "__dict__", {}).values()):
+                take(v)
+    out = (frozenset(paths), tuple(sorted(prefixes, key=len, reverse=True)),
+           tuple(sorted(pats.values(), key=lambda pw: -len(pw[0].pattern))))
+    if root is None and modules is None:
+        _routes, _routes_modules = out, len(sys.modules)
+    return out
+
+
+def route_family(path: str, table: tuple | None = None) -> str:
+    """A request's path family, from the route that matches it (routes()), never from the path alone: a known path is
+    itself; under a route's regex only the words the regex spells out and requires in that place stay, every other
+    part (an id, a number, a name, a slug, a file) is ":id"; under a known prefix it is the prefix and ":id". Static files are one family, and
+    anything that matches no route of ours is "(other)" or "/api/(unlisted)": what someone typed is never kept."""
     path = str(path or "").split("?", 1)[0].split("#", 1)[0]
     if path in _PAGES:
         return path
@@ -100,8 +161,33 @@ def route_family(path: str) -> str:
         return "/static/*"
     if not path.startswith("/api/"):
         return OTHER
-    parts = [p if _WORD.fullmatch(p) else ":id" for p in path.split("/")[1:7] if p]
-    return "/" + "/".join(parts)
+    paths, prefixes, patterns = (_routes or routes()) if table is None else table
+    if path in paths:
+        return path
+    for rx, words in patterns:
+        if rx.fullmatch(path):
+            parts = path.split("/")
+            for i, part in enumerate(parts):
+                # kept only if the regex spells this word out AND needs it here: a slug that happens to spell a route's
+                # word ("/cameras/image/image") sits where anything matches, so it goes too
+                if part and (part not in words or rx.fullmatch("/".join(parts[:i] + ["zzq9"] + parts[i + 1:]))):
+                    parts[i] = ":id"
+            return "/".join(parts)[:120]
+    if table is None and _routes_modules != len(sys.modules):      # a module imported since: its routes too, then again
+        return route_family(path, routes())
+    for pre in prefixes:
+        if path.startswith(pre):
+            return pre + ":id"
+    return UNLISTED
+
+
+def route_key(method: str, path: str, code: int) -> str:
+    """What a request is counted under: its family only when it was answered (2xx, 3xx: so the route exists and the
+    person may use it); a 404 is "(not found)", any other 4xx "(refused)", a 5xx "(error)", whatever was asked."""
+    m = method if method in ("GET", "POST", "HEAD") else "OTHER"
+    if 200 <= code < 400:
+        return f"{m} {route_family(path)}"
+    return f"{m} {NOT_FOUND if code == 404 else REFUSED if 400 <= code < 500 else FAILED}"
 
 
 # -- each thread's CPU time, from the kernel -----------------------------------------------------------------------------
@@ -208,10 +294,14 @@ class ThreadClock:
                 fd = self._fds.pop(tid, None)
                 if fd is not None:
                     self._close(fd)
-        if self.hold and len(self._fds) > len(out) + 64:    # threads that ended and were never asked for again
-            for tid in [t for t in self._fds if t not in out]:
-                self._close(self._fds.pop(tid))
         return out
+
+    def forget(self, alive: Iterable[int]) -> None:
+        """hold: close the files of threads that are gone (alive: every thread there is now). Never judged from a
+        read of only some threads: that would close, and the next read reopen, all the others' files."""
+        alive = set(alive)
+        for tid in [t for t in self._fds if t not in alive]:
+            self._close(self._fds.pop(tid))
 
     def _close(self, fd: int) -> None:
         if self._cclose is not None:
@@ -301,12 +391,23 @@ def task_vcpu(env=os.environ, cgroup: str = "/sys/fs/cgroup", fetch: Callable[[s
     except ValueError:
         pass
     try:
-        with open(os.path.join(cgroup, "cpu.max")) as f:
+        with open(os.path.join(cgroup, "cpu.max")) as f:                      # cgroup v2
             quota, period = f.read().split()[:2]
         if quota != "max":
             return round(int(quota) / int(period), 3)
     except (OSError, ValueError):
         pass
+    for d in (os.path.join(cgroup, "cpu"), os.path.join(cgroup, "cpu,cpuacct"), cgroup):      # cgroup v1
+        try:
+            with open(os.path.join(d, "cpu.cfs_quota_us")) as f:
+                quota = int(f.read().strip())
+            with open(os.path.join(d, "cpu.cfs_period_us")) as f:
+                period = int(f.read().strip())
+            if quota > 0 and period > 0:
+                return round(quota / period, 3)
+            break                                                             # (-1: no limit here)
+        except (OSError, ValueError):
+            continue
     url = env.get("ECS_CONTAINER_METADATA_URI_V4")
     if url:
         try:
@@ -417,7 +518,7 @@ class Perf:
         self._names: dict[int, str] = {}           # tid -> its group, as last seen (a thread ending: still its group)
         self._ended: dict[str, float] = {}         # group -> CPU s of threads that ended since the last tick
         self._routes: dict[str, list[float]] = {}  # "GET /family" -> [requests, CPU s, wall s] since the last tick
-        self._route_keys: set[str] = set()
+        self._route_seen: dict[str, int] = {}      # family -> the tick it was last asked in (the oldest makes room)
         self.ticks: deque[dict] = deque(maxlen=KEEP_TICKS)
         self.hours: deque[dict] = deque(maxlen=KEEP_HOURS)
         self.total: dict[str, float] = {}          # group -> CPU s since start()
@@ -515,12 +616,18 @@ class Perf:
         """One request answered: its CPU and time, to its path family (never the path itself, never its query)."""
         if self.started is None:
             return
-        key = f"{method if method in ('GET', 'POST', 'HEAD') else 'OTHER'} {'(not found)' if code == 404 else route_family(path)}"
+        key = route_key(method, path, code)
         with self._lock:
-            if key not in self._route_keys:
-                if len(self._route_keys) >= MAX_ROUTES:
-                    key = OTHER
-                self._route_keys.add(key)
+            if key not in self._route_seen and len(self._route_seen) >= MAX_ROUTES:
+                old = min(self._route_seen, key=self._route_seen.get)       # the family unused the longest: into "(other)"
+                del self._route_seen[old]
+                for table in (self._routes, self.route_total):
+                    gone = table.pop(old, None)
+                    if gone is not None:
+                        t = table.setdefault(OTHER, [0, 0.0, 0.0])
+                        for i in range(3):
+                            t[i] += gone[i]
+            self._route_seen[key] = self.n_ticks
             r = self._routes.get(key)
             if r is None:
                 r = self._routes[key] = [0, 0.0, 0.0]
@@ -533,6 +640,7 @@ class Perf:
         if self.started is None:
             raise RuntimeError("perf: not started")
         live = {t.native_id: group(t.name) for t in threading.enumerate() if t.native_id}
+        rss, fds = rss_bytes(self.proc), open_fds(self.proc)      # (files read with the GIL let go: not under the lock)
         with self._lock:
             now = self.mono()
             cpu = self.threads.read()
@@ -560,8 +668,8 @@ class Perf:
             for n in live.values():
                 counts[n] = counts.get(n, 0) + 1
             rec = {"t": self.clock(), "dt": dt, "cpu": used, "proc": max(dproc, sum(used.values())), "routes": routes,
-                   "live": counts, "rss": rss_bytes(self.proc), "threads": len(live), "os_threads": len(cpu) or None,
-                   "fds": open_fds(self.proc), "gc_s": self.gc_s - self._gc_ticked, "blocks": sys.getallocatedblocks()}
+                   "live": counts, "rss": rss, "threads": len(live), "os_threads": len(cpu) or None,
+                   "fds": fds, "gc_s": self.gc_s - self._gc_ticked, "blocks": sys.getallocatedblocks()}
             self._gc_ticked = self.gc_s
             self.ticks.append(rec)
             for name, s in used.items():
@@ -700,20 +808,25 @@ class Perf:
         started, t0 = self.clock(), time.perf_counter()
         out: dict = {"error": "the profile failed"}
         try:
-            out = self._sample(seconds, hz)
-        except Exception as e:  # noqa: BLE001 - never in the way
-            out = {"error": f"{type(e).__name__}"}
-            self.log(f"perf: profile: {type(e).__name__}: {e}")
-        ran = time.perf_counter() - t0
-        out.update(started=started, asked_s=seconds)
-        with self._plock:
-            self.last_profile = out
-            self._profiling = None
-            self._next_ok = self.mono() + max(PROFILE_REST_S, ran)
-        self._pdone.set()
+            try:
+                out = self._sample(seconds, hz)
+            except Exception as e:  # noqa: BLE001 - never in the way
+                out = {"error": f"{type(e).__name__}"}
+                self.log(f"perf: profile: {type(e).__name__}: {e}")
+        finally:                                    # whatever happened (the log itself failing too): never left "running"
+            ran = time.perf_counter() - t0
+            out.update(started=started, asked_s=seconds)
+            with self._plock:
+                self.last_profile = out
+                self._profiling = None
+                self._next_ok = self.mono() + max(PROFILE_REST_S, ran)
+            self._pdone.set()
         if "error" not in out:
-            self.log(f"perf profile: {out['seconds']:.0f}s {out['hz']:g}Hz samples={out['samples']} cpu_ms={out['cpu_ms']:.0f} "
-                     f"overhead={out['overhead']['core_pct']}% of 1 core")
+            try:
+                self.log(f"perf profile: {out['seconds']:.0f}s {out['hz']:g}Hz samples={out['samples']} cpu_ms={out['cpu_ms']:.0f} "
+                         f"overhead={out['overhead']['core_pct']}% of 1 core")
+            except Exception:  # noqa: BLE001
+                pass
 
     def _sample(self, seconds: float, hz: float) -> dict:
         """hz times a second: read every thread's CPU clock, let WINDOW_S pass, read them again and take every
@@ -754,10 +867,12 @@ class Perf:
                     if self._pstop.wait(window):
                         break
                 else:
-                    before = final
+                    before = dict(final)            # (a copy: final takes this read's values below)
                 cpu = clock.read(tids)
                 frames = sys._current_frames()
                 samples += 1
+                if samples % 64 == 0 and tids is not None:
+                    clock.forget(tids)              # (only ever against every thread there is)
                 found = []                          # (tid, group, stack, leaf): the threads that computed in the window
                 for ident, tid, name in threads:
                     c = cpu.get(tid)
@@ -814,10 +929,10 @@ class Perf:
             if d > 0 and tid in groups:
                 used[groups[tid]] = used.get(groups[tid], 0.0) + d
         scale = {g: used.get(g, s) / s for g, s in seen.items() if s > 0}
-        agg = {k: w * scale[k[0]] for k, w in agg.items()}
+        agg = {k: w * scale.get(k[0], 1.0) for k, w in agg.items()}
         by_line: dict[tuple, float] = {}
         for (g, code, ln), w in lines.items():
-            by_line[(code, ln)] = by_line.get((code, ln), 0.0) + w * scale[g]
+            by_line[(code, ln)] = by_line.get((code, ln), 0.0) + w * scale.get(g, 1.0)
         for g, s in used.items():                   # never caught computing: its CPU is real, where it went is not known
             if g not in seen and s >= 0.0005:
                 agg[(g, (UNCAUGHT,))] = s

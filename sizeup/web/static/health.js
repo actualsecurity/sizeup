@@ -387,7 +387,8 @@ const StationHealth = (() => {
       + `(${(p.gc || {}).collections || []} collections, longest ${(p.gc || {}).max_ms} ms)`;
     const btn = el("button", "", profiling ? "Profiling…" : "Profile 30 s");
     btn.disabled = profiling;
-    btn.title = "Sample every thread's stack for 30 s, weighted by the CPU each used. One at a time";
+    btn.title = "Sample every thread's stack for 30 s, 25 times a second, weighted by the CPU each used. "
+      + "Costs about a tenth of the task's CPU while it runs. One at a time";
     btn.addEventListener("click", runProfile);
     head.append(el("h2", "", "Hub CPU"), chip, el("span", "spacer"), facts, btn);
     const kids = [head];
@@ -415,7 +416,8 @@ const StationHealth = (() => {
     if (profile && !profile.error) {
       const o = profile.overhead || {};
       const sub = el("h3", "hl-sub", `Profile ${when(profile.started)} · ${Math.round(profile.seconds)} s · ${Math.round(profile.cpu_ms)} ms CPU`);
-      sub.title = `${profile.samples} samples at ${profile.hz} Hz; the profiler itself used ${o.core_pct}% of one core`;
+      sub.title = `${profile.samples} samples at ${profile.hz} Hz; the profiler itself used ${o.core_pct}% of one core`
+        + (d.vcpu ? ` (${(o.core_pct / d.vcpu).toFixed(1)}% of the task's ${d.vcpu} vCPU)` : "");
       const fold = el("a", "nav", "Folded stacks");
       fold.href = "/api/cad/perf/profile?format=folded";
       fold.target = "_blank";

@@ -132,22 +132,75 @@ def test_windows_roll_and_since_the_start_keeps_everything(quiet, monkeypatch):
     assert s["uptime_s"] == n * 60 and s["started"] == 1_790_001_000.0
 
 
-def test_requests_are_counted_by_path_family_never_by_path_or_query(quiet):
+@pytest.fixture(scope="module")
+def all_routes():
+    """Every route the hub has: the map layers' modules are imported when an app is built, as on the hub."""
+    import sizeup.app  # noqa: F401
+    import sizeup.cloud.hub  # noqa: F401
+    import sizeup.dvr  # noqa: F401
+    import sizeup.gis  # noqa: F401
+    import sizeup.roads  # noqa: F401
+    import sizeup.weather  # noqa: F401
+    return perf_mod.routes()
+
+
+def test_requests_are_counted_by_the_route_that_answered_never_by_path_or_query(quiet, all_routes):
     p = quiet().start()
-    p.request("GET", f"/api/cad/incident/2291/note?{QUERY}", 200, 0.004, 0.002)
-    p.request("GET", "/api/cad/incident/2292/note", 200, 0.006, 0.004)
+    p.request("GET", f"/api/cad/incident/2291?{QUERY}", 200, 0.004, 0.002)
+    p.request("GET", "/api/cad/incident/2292", 200, 0.006, 0.004)
     p.request("POST", "/api/cad/cameras/tw-0412/dvr/pin", 200, 0.002, 0.001)
     p.request("GET", f"/{STREET}", 404, 0.001, 0.001)
+    p.request("GET", "/api/cad/health", 403, 0.001, 0.001)                 # refused: not even which route
+    p.request("POST", "/api/cad/settings/users", 403, 0.001, 0.001)
+    p.request("GET", "/api/cad/elm/place", 401, 0.001, 0.001)
+    p.request("GET", "/api/cad/state", 500, 0.001, 0.001)
     p.request("GET", "/static/cad.js?v=9f2c", 200, 0.001, 0.0005)
+    p.request("GET", "/api/cad/state", 304, 0.001, 0.0005)
     p.tick()
     routes = {r["route"]: r for r in p.snapshot()["routes"]}
-    assert set(routes) == {"GET /api/cad/incident/:id/note", "POST /api/cad/cameras/:id/dvr/pin", "GET (not found)", "GET /static/*"}
-    note = routes["GET /api/cad/incident/:id/note"]
-    assert (note["n"], note["cpu_s"], note["cpu_ms"], note["ms"], note["h1_n"]) == (2, 0.006, 3.0, 5.0, 2)
-    for i in range(perf_mod.MAX_ROUTES + 50):                 # bounded: more families than are kept go to "(other)"
-        p.request("GET", f"/api/{'x' * (i % 20 + 1)}/{chr(97 + i % 26)}{'y' * (i // 26)}", 200, 0.001, 0.001)
+    assert set(routes) == {"GET /api/cad/incident/:id", "POST /api/cad/cameras/:id/dvr/pin", "GET (not found)", "GET (refused)",
+                           "POST (refused)", "GET (error)", "GET /static/*", "GET /api/cad/state"}
+    one = routes["GET /api/cad/incident/:id"]
+    assert (one["n"], one["cpu_s"], one["cpu_ms"], one["ms"], one["h1_n"]) == (2, 0.006, 3.0, 5.0, 2)
+    assert routes["GET (refused)"]["n"] == 2
+
+
+def test_a_flood_of_junk_paths_never_fills_the_table_or_pushes_a_real_route_out(quiet, all_routes):
+    """A signed-in viewer posting to paths that don't exist (403, 404), or asking for a thousand ids: nothing of what
+    was typed is kept, and the real routes stay their own rows."""
+    p = quiet().start()
+    p.request("GET", "/api/cad/state", 200, 0.001, 0.001)
+    for i in range(400):
+        junk = f"/api/cad/{'x' * (i % 20 + 1)}/{chr(97 + i % 26)}{'y' * (i // 26)}"
+        p.request("POST", junk, 403, 0.001, 0.001)
+        p.request("GET", junk, 404, 0.001, 0.001)
+        p.request("GET", junk, 200, 0.001, 0.001)                         # (even answered: no route of ours)
+        p.request("GET", f"/api/cad/incident/{i}", 200, 0.001, 0.001)
+    p.request("GET", "/api/cad/comms", 200, 0.001, 0.001)
     p.tick()
-    assert len(p.route_total) <= perf_mod.MAX_ROUTES + 1 and perf_mod.OTHER in p.route_total
+    assert set(p.route_total) == {"GET /api/cad/state", "POST (refused)", "GET (not found)", "GET /api/(unlisted)",
+                                  "GET /api/cad/incident/:id", "GET /api/cad/comms"}
+    assert "xx" not in json.dumps(p.snapshot())
+
+
+def test_the_table_is_bounded_and_the_family_unused_the_longest_makes_room(quiet, monkeypatch):
+    monkeypatch.setattr(perf_mod, "MAX_ROUTES", 4)
+    monkeypatch.setattr(perf_mod, "route_key", lambda m, path, code: path)     # (as many families as the test names)
+    p = quiet().start()
+    for name in ("a", "b", "c", "d"):
+        p.request("GET", name, 200, 0.001, 0.001)
+    p.tick()
+    p.request("GET", "a", 200, 0.001, 0.001)                               # a: used again; b is now the oldest
+    p.request("GET", "c", 200, 0.001, 0.001)
+    p.request("GET", "d", 200, 0.001, 0.001)
+    p.tick()
+    p.request("GET", "e", 200, 0.001, 0.001)
+    p.tick()
+    assert set(p.route_total) == {"a", "c", "d", "e", perf_mod.OTHER} and p.route_total[perf_mod.OTHER][0] == 1
+    assert sum(r[0] for r in p.route_total.values()) == 8                   # nothing lost
+    for i in range(50):
+        p.request("GET", f"n{i}", 200, 0.001, 0.001)
+    assert len(p._route_seen) <= 4 and len(p.route_total) <= 4 + 1 + 4
 
 
 @pytest.mark.parametrize("path, family", [
@@ -156,12 +209,26 @@ def test_requests_are_counted_by_path_family_never_by_path_or_query(quiet):
     ("/api/cad/attachments/0123456789abcdef/17.ts", "/api/cad/attachments/:id/:id"),
     ("/api/cad/attachments/0123456789abcdef/index.m3u8", "/api/cad/attachments/:id/index.m3u8"),
     ("/api/audio/307-1790000000-12.wav", "/api/audio/:id"),
+    ("/api/audio/afternoon.wav", "/api/audio/:id"),                        # an id that is a plain word
     ("/api/cad/geocode?q=12+Elm+Pl", "/api/cad/geocode"),
-    ("/api/cad/unit/E58", "/api/cad/unit/:id"),
+    ("/api/cad/unit/58/status", "/api/cad/unit/:id/status"),
+    ("/api/cad/cameras/elmplace/image", "/api/cad/cameras/:id/image"),       # a camera's slug
+    ("/api/cad/cameras/image/image", "/api/cad/cameras/:id/image"),          # ... or one that spells a route word
+    ("/api/cad/cameras/elmplace/stream/status", "/api/cad/cameras/:id/stream/status"),
+    ("/api/cad/cameras/elmplace/stream/chunk_0412.ts", "/api/cad/cameras/:id/stream/:id"),
+    ("/api/cad/cameras/elmplace/dvr/index.m3u8", "/api/cad/cameras/:id/dvr/index.m3u8"),
+    ("/api/cad/gis/hydrants", "/api/cad/gis/:id"),                           # a layer's key
+    ("/api/cad/datasources/elmfeed/refresh", "/api/cad/datasources/:id/refresh"),
+    ("/api/incident/elmplace/close", "/api/incident/:id/close"),
+    ("/api/station/jobs/abcdefabcdefabcd", "/api/station/jobs/:id"),       # a job id of 16 letters a-f
+    ("/api/cad/weather/radar/now/7/37/48.png", "/api/cad/weather/radar/now/:id/:id/:id"),
+    ("/api/cad/export/incidents.csv", "/api/cad/export/:id"),
+    ("/api/cad/elm/place", "/api/(unlisted)"), ("/api/elmplace", "/api/(unlisted)"),
     ("/static/cad.js", "/static/*"), ("/cad", "/cad"), ("/healthz", "/healthz"),
     ("/someone@example.org", "(other)"), ("/wp-login.php", "(other)")])
-def test_path_families(path, family):
+def test_path_families(path, family, all_routes):
     assert route_family(path) == family
+    assert "elm" not in route_family(path)
 
 
 @pytest.mark.parametrize("name, shown", [
@@ -169,22 +236,131 @@ def test_path_families(path, family):
     ("Thread-12 (process_request_thread)", "http"), ("Thread-7 (_drain)", "_drain"), ("Thread-3", "thread"),
     ("ThreadPoolExecutor-0_3", "ThreadPoolExecutor"), ("dvr-4", "dvr"),
     (f"ntfy-{TOPIC}", "ntfy"), ("aws-stt-South 2", "aws-stt"), ("stream-tw-0412", "stream"), ("source-county-a", "source"),
-    ("nfm-FG1", "nfm"), ("http-8091", "http"), ("http-stream", "http-stream"), ("odd name; here", "odd_name__here")])
+    ("nfm-FG1", "nfm"), ("http-8091", "http"), ("datasource-elmfeed", "datasource"), ("http-stream", "http-stream"), ("odd name; here", "odd_name__here")])
 def test_thread_groups_show_only_the_fixed_part_of_a_name(name, shown):
     assert group(name) == shown
 
 
+def thread_names(tree) -> tuple[list, list]:
+    """(made, unknown) for one module's syntax tree. made: the fixed start of every thread name that is put together at
+    run time (an f-string), wherever it is given: Thread(name=...), a pool's thread_name_prefix, a Thread subclass's
+    super().__init__(name=...), or an argument to a helper that passes its parameter on as the name (spawn(fn, name)).
+    unknown: (line, source) of a name that is neither a plain string nor one of those: nobody can say what it holds."""
+    import ast
+    parents = {c: n for n in ast.walk(tree) for c in ast.iter_child_nodes(n)}
+
+    def owner(node):                     # the function or lambda a node is in
+        while node in parents:
+            node = parents[node]
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                return node
+        return None
+
+    def called(call) -> str:
+        f = call.func
+        return f.attr if isinstance(f, ast.Attribute) else f.id if isinstance(f, ast.Name) else ""
+
+    def constant_loop(name: str, node) -> bool:      # for name, fn in (("hub-forward", ...), ...): every name a plain string
+        while node in parents:
+            node = parents[node]
+            if isinstance(node, ast.For) and name in {n.id for n in ast.walk(node.target) if isinstance(n, ast.Name)}:
+                return isinstance(node.iter, (ast.Tuple, ast.List)) and all(
+                    isinstance(e, (ast.Tuple, ast.List)) and all(not isinstance(x, (ast.JoinedStr, ast.BinOp, ast.Call))
+                                                                  for x in e.elts) for e in node.iter.elts)
+        return False
+
+    made, unknown, helpers = [], [], {}
+
+    def judge(value, call) -> None:
+        if isinstance(value, ast.Constant):
+            return
+        if isinstance(value, ast.JoinedStr):
+            first = value.values[0] if value.values else None
+            made.append((first.value if isinstance(first, ast.Constant) else "", value.lineno))
+            return
+        fn = owner(call)
+        if isinstance(value, ast.Name) and fn is not None and value.id in [a.arg for a in fn.args.args + fn.args.kwonlyargs]:
+            where = parents.get(fn)                      # a helper: def spawn(fn, name) / self.spawn = lambda fn, name: ...
+            while isinstance(where, (ast.BoolOp, ast.IfExp)):
+                where = parents.get(where)
+            names = [fn.name] if not isinstance(fn, ast.Lambda) else [
+                t.attr if isinstance(t, ast.Attribute) else getattr(t, "id", "")
+                for t in (where.targets if isinstance(where, ast.Assign) else [])]
+            for n in names:
+                helpers[n] = (value.id, [a.arg for a in fn.args.args if a.arg != "self"].index(value.id)
+                              if value.id in [a.arg for a in fn.args.args] else None)
+            if names:
+                return
+        if isinstance(value, ast.Name) and constant_loop(value.id, call):
+            return
+        unknown.append((value.lineno, ast.unparse(value)))
+
+    calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call)]
+    for c in calls:
+        kw = {k.arg: k.value for k in c.keywords if k.arg}
+        if called(c) == "Thread" and "name" in kw:
+            judge(kw["name"], c)
+        elif called(c) == "ThreadPoolExecutor" and "thread_name_prefix" in kw:
+            judge(kw["thread_name_prefix"], c)
+        elif called(c) == "__init__" and "name" in kw and any(
+                isinstance(b, (ast.Name, ast.Attribute)) and ast.unparse(b).endswith("Thread")
+                for cls in ast.walk(tree) if isinstance(cls, ast.ClassDef) and c in ast.walk(cls) for b in cls.bases):
+            judge(kw["name"], c)
+    for c in calls:                                      # what the helpers are handed
+        if called(c) in helpers:
+            param, at = helpers[called(c)]
+            kw = {k.arg: k.value for k in c.keywords if k.arg}
+            value = kw.get(param) or (c.args[at] if at is not None and at < len(c.args) else None)
+            if value is not None and not (isinstance(value, ast.Name) and owner(c) is not None
+                                          and value.id in [a.arg for a in owner(c).args.args]):
+                judge(value, c)
+    return made, unknown
+
+
+def test_the_guard_reads_every_way_a_thread_is_named():
+    import ast
+    made, unknown = thread_names(ast.parse("""
+import threading
+from concurrent.futures import ThreadPoolExecutor
+class Runner:
+    def __init__(self, spawn=None):
+        self.spawn = spawn or (lambda fn, name: threading.Thread(target=fn, name=name, daemon=True).start())
+    def go(self, key, topic):
+        self.spawn(lambda: None, f"feed-{key}")
+        self.spawn(lambda: None, "plain")
+        threading.Thread(target=print, name=f"ring-{topic}").start()
+        threading.Thread(target=print, name="fixed").start()
+        threading.Thread(target=print, name=topic.upper()).start()
+        ThreadPoolExecutor(2, thread_name_prefix=f"pool-{key}")
+        for name, fn in (("one", print), ("two", print)):
+            threading.Thread(target=fn, name=name).start()
+def launch(fn, label):
+    threading.Thread(target=fn, name=label).start()
+launch(print, f"job-{1 + 1}")
+launch(print, label="x" + str(2))
+class Worker(threading.Thread):
+    def __init__(self, channel):
+        super().__init__(name=f"stt-{channel}", daemon=True)
+"""))
+    assert sorted(p for p, _ in made) == ["feed-", "job-", "pool-", "ring-", "stt-"]
+    assert [src for _, src in unknown] == ["topic.upper()", "'x' + str(2)"]
+
+
 def test_every_thread_name_made_at_run_time_is_cut_to_its_fixed_part():
-    """A thread named with an f-string carries data (a topic, a source, a camera): each such prefix must be in
-    perf.DYNAMIC, so the made part never reaches the table, the profile or the log."""
-    found = set()
-    for py in (ROOT / "sizeup").rglob("*.py"):
-        for m in re.finditer(r"""name=f(["'])([^"'{]*)\{""", py.read_text()):
-            found.add((m.group(2), py.name))
-    assert found, "no thread named at run time: has the source moved?"
-    missing = [(p, f) for p, f in found if not any(p.startswith(d) for d in perf_mod.DYNAMIC)]
+    """A thread named at run time carries data (a topic, a source, a camera, a data source's key): the fixed start of
+    each must be in perf.DYNAMIC, so the made part never reaches the table, the profile or the log. Read from the
+    syntax tree: Thread(name=...), pools, Thread subclasses, and names handed to spawn helpers by position."""
+    import ast
+    made, unknown = [], []
+    for py in sorted((ROOT / "sizeup").rglob("*.py")):
+        m, u = thread_names(ast.parse(py.read_text()))
+        made += [(p, f"{py.name}:{line}") for p, line in m]
+        unknown += [(f"{py.name}:{line}", src) for line, src in u]
+    assert not unknown, f"a thread name that is not a plain string or an f-string: {unknown}"
+    assert {p for p, _ in made} >= {"ntfy-", "stream-", "aws-stt-", "source-", "datasource-", "nfm-"}, made
+    missing = [(p, at) for p, at in made if not any(p.startswith(d) for d in perf_mod.DYNAMIC)]
     assert not missing, f"add to sizeup/perf.py DYNAMIC: {missing}"
-    for p, _ in found:
+    for p, _ in made:
         assert group(p + "secret-Value 9") == next(d for d in perf_mod.DYNAMIC if p.startswith(d))[:-1]
 
 
@@ -241,12 +417,44 @@ def test_the_profilers_clock_keeps_files_open_and_lets_go_of_ended_threads(tmp_p
     assert c._fds == {}
 
 
+def test_a_read_of_a_few_threads_never_closes_the_others_files(tmp_path, monkeypatch):
+    """The profiler reads every thread, then only the few that computed. With more than ~65 threads that second read
+    used to close every other thread's file, and the next sample opened them all again."""
+    import os
+    n = 96
+    proc = proc_tree(tmp_path, {1000 + i: ("worker", 1, 1, 1_000_000_000 + i) for i in range(n)})
+    tids = [1000 + i for i in range(n)]
+    c = ThreadClock(proc, hold=True)
+    opened = []
+    real_open, c_open = os.open, c._open
+    monkeypatch.setattr(os, "open", lambda *a, **kw: opened.append(a[0]) or real_open(*a, **kw))
+    if c_open is not None:
+        c._open = lambda path, flags: opened.append(path) or c_open(path, flags)
+    for _ in range(10):                                  # ten samples: all, then two of them
+        assert len(c.read(tids)) == n
+        assert len(c.read(tids[:2])) == 2
+    assert len(opened) == n and len(c._fds) == n         # each file opened once
+    for tid in tids[:6]:                                 # six threads end
+        for f in (tmp_path / "self" / "task" / str(tid)).iterdir():
+            f.unlink()
+    c.forget(tids[6:])
+    assert len(c._fds) == n - 6 and len(c.read(tids)) == n - 6
+    c.close()
+
+
 def test_the_tasks_cpu_allowance(tmp_path):
     assert task_vcpu({"SIZEUP_PERF_VCPU": "0.5"}, str(tmp_path)) == 0.5
     (tmp_path / "cpu.max").write_text("50000 100000\n")
     assert task_vcpu({}, str(tmp_path)) == 0.5
     (tmp_path / "cpu.max").write_text("max 100000\n")
     assert task_vcpu({}, str(tmp_path)) is None
+    v1 = tmp_path / "v1" / "cpu"                                    # cgroup v1: quota and period, each its own file
+    v1.mkdir(parents=True)
+    (v1 / "cpu.cfs_quota_us").write_text("50000\n")
+    (v1 / "cpu.cfs_period_us").write_text("100000\n")
+    assert task_vcpu({}, str(tmp_path / "v1")) == 0.5
+    (v1 / "cpu.cfs_quota_us").write_text("-1\n")
+    assert task_vcpu({}, str(tmp_path / "v1")) is None
     asked = []
     meta = json.dumps({"Cluster": "c", "Limits": {"CPU": 0.5, "Memory": 2048}, "Containers": []}).encode()   # ECS's shape
     env = {"ECS_CONTAINER_METADATA_URI_V4": "http://169.254.170.2/v4/abc"}
@@ -388,6 +596,54 @@ def test_a_profile_stops_on_time_and_is_bounded(busy, quiet, monkeypatch):
     assert p.profile_wait(5) is not None and p.last_profile["seconds"] < 3
 
 
+class CoarseClock(ThreadClock):
+    """The real per-thread clock, as a kernel without schedstats gives it: in whole 10 ms ticks (kind "stat")."""
+
+    def __init__(self, proc="/proc", hold=False):
+        super().__init__(proc, hold)
+        self.real, self.kind = self.kind, "stat"
+
+    def read(self, tids=None):
+        self.kind = self.real
+        try:
+            return {tid: int(c * 100) / 100 for tid, c in super().read(tids).items()}
+        finally:
+            self.kind = "stat"
+
+
+@needs_thread_cpu
+def test_with_a_coarse_clock_the_profile_goes_by_the_cpu_since_the_last_sample(busy, quiet, monkeypatch):
+    """No 1 ms window can be seen in 10 ms ticks (/proc/<tid>/stat only): the profile still answers (it raised KeyError)."""
+    monkeypatch.setattr(perf_mod, "ThreadClock", CoarseClock)
+    logged = []
+    p = quiet(log=logged.append).start()
+    out = p.profile(1.5, hz=50)
+    assert "error" not in out, (out, logged)
+    assert out["method"] == "interval" and out["clock"] == "stat" and out["window_ms"] == 0
+    threads = {t["thread"]: t for t in out["threads"]}
+    assert out["threads"][0]["thread"] == "burner" and threads["burner"]["pct"] > 80 and threads["burner"]["caught"] >= 1
+    assert out["self"][0]["fn"].startswith("spin (tests/test_profiler.py:") and out["cpu_ms"] > 50
+    assert threads.get("sleeper", {"pct": 0})["pct"] < 5
+
+
+def test_a_profile_that_fails_is_never_left_running(quiet, monkeypatch):
+    """Whatever goes wrong, the sampling or the log line about it: not "running" for ever, the waiter let go."""
+    def boom(*a):
+        raise RuntimeError("the log is gone")
+    p = quiet(log=boom).start()
+    monkeypatch.setattr(p, "_sample", lambda seconds, hz: 1 / 0)
+    monkeypatch.setattr(threading, "excepthook", lambda args: None)        # (the thread ends with the log's error)
+    p.profile_start(1)
+    assert p._pdone.wait(5)
+    assert p.last_profile["error"] == "ZeroDivisionError" and p.snapshot()["profile"]["running"] is False
+    with pytest.raises(TooSoon):
+        p.profile_start(1)
+    p._next_ok = 0.0
+    monkeypatch.setattr(p, "_sample", lambda seconds, hz: {"seconds": 1.0})   # sampled, then the log line fails
+    p.profile_start(1)
+    assert p._pdone.wait(5) and p.snapshot()["profile"]["running"] is False and "error" not in p.last_profile
+
+
 def test_one_profile_at_a_time_and_a_rest_after_each(quiet):
     now = [50.0]
     p = quiet(mono=lambda: now[0]).start()
@@ -461,7 +717,7 @@ def test_the_hub_counts_its_threads_and_requests_and_says_nothing_of_anyone(keys
         assert code == 200
         code, again = req(h.url + "/api/cad/perf/profile", "POST", {"seconds": 1}, admin)
         assert code == 429 and again["retry_s"] > 0 and "profile again in" in again["error"]           # the rest after one
-        wait(lambda: sum(r[0] for k, r in list(h.app.perf._routes.items()) if "perf/profile" in k) == 2)   # (a request is
+        wait(lambda: "POST (refused)" in h.app.perf._routes)   # (a request is
         h.app.perf.tick()                                                # counted just after its answer is sent)
         code, table = req(h.url + "/api/cad/perf", headers=admin)
         code2, last = req(h.url + "/api/cad/perf/profile", headers=admin)
@@ -472,8 +728,8 @@ def test_the_hub_counts_its_threads_and_requests_and_says_nothing_of_anyone(keys
     assert (code, code2, code3) == (200, 200, 200) and last["folded"] == prof["folded"]
     assert folded.decode().strip() == prof["folded"].strip()
     routes = {r["route"]: r for r in table["routes"]}
-    assert routes["GET /api/cad/state"]["n"] == 5 and routes["GET /api/cad/incident/:id"]["n"] == 5
-    assert "GET (not found)" in routes and routes["POST /api/cad/perf/profile"]["n"] == 2
+    assert routes["GET /api/cad/state"]["n"] == 5 and routes["GET (refused)"]["n"] == 5        # (no such incidents: 400)
+    assert "GET (not found)" in routes and routes["POST /api/cad/perf/profile"]["n"] == 1 and routes["POST (refused)"]["n"] == 1
     import urllib.request
     with urllib.request.urlopen(urllib.request.Request(h.url + "/api/cad/stream", headers=admin), timeout=10) as r:
         r.read1(100)                                                     # a state stream open: its thread counts apart
@@ -497,7 +753,7 @@ def test_one_profile_at_a_time_over_http(access_hub, keys):  # noqa: F811
     people(h.app.cad)
     admin = as_(keys[0], COREY)
     code, out = req(h.url + "/api/cad/perf/profile", "POST", {"seconds": 20, "wait": False}, admin)
-    assert code == 202 and out == {"running": True, "seconds": 20.0, "hz": 50.0}
+    assert code == 202 and out == {"running": True, "seconds": 20.0, "hz": 25.0}        # 25 Hz unless asked
     code, out = req(h.url + "/api/cad/perf/profile", "POST", {"seconds": 1}, admin)
     assert code == 409 and out["running"] is True
     h.app.perf.profile_cancel()

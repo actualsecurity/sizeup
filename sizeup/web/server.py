@@ -49,7 +49,7 @@ GET  /api/cad/aircraft         aircraft near HPN, shortfinal's PCFD-focused pict
 GET  /api/cad/perf             the hub only: where its CPU goes (sizeup/perf.py, #425): by thread group over the last
                                minute, 5 min, 1 h and since the start, memory, threads, open files, the collector,
                                path families, the hourly trend; admins only (ADMIN_READS)
-POST /api/cad/perf/profile {"seconds": 30, "hz": 50}  admins: sample every thread's stack for seconds (1-120), weighted
+POST /api/cad/perf/profile {"seconds": 30, "hz": 25}  admins: sample every thread's stack for seconds (1-120), weighted
                                by the CPU each used; the answer is the summary and the folded stacks. One at a time
                                (409), a rest after each (429). Over PROFILE_WAIT_S (or "wait": false): 202 at once
 GET  /api/cad/perf/profile[?format=folded]  the last profile again (folded: its stacks as text, for a flame graph)
