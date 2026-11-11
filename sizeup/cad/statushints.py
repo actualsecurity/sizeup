@@ -8,12 +8,21 @@
               out of service, incident command); a phrase is skipped when it is negated ("not on location yet"), a
               question ("is Engine 64 responding?"), a condition ("advise when on location"), an order ("go to
               staging"), a time to come ("on location in 2 minutes"), or said of someone else ("PD is on location")
-    misheard  the status words speech-to-text turns into ordinary ones right after our callsign ("Engine 61 is fine",
-              "Ladder 31 around 1412", "Engine 61 on vacation") are put back first (sizeup/cad/statusrepair.py); the
-              suggestion keeps the heard words ("en route (heard “is fine”)") and the whole transcript as heard
-    number    a bare number before the phrase ("64 on scene") is the talker's unit only when its radio is that unit (E64);
-              a chief's 4-digit number one digit off ("2381 on location" from 2391's radio) is his too
-    list      units named one after another, then one status ("2391, Engine 61, Ladder 31 on location"): each of them
+    misheard  the status words speech-to-text turns into ordinary ones right after our callsign ("Engine 61 is fine"
+              for a unit dispatched on an open call, "Ladder 31 around 1412", "Engine 61 on vacation") are put back
+              first (sizeup/cad/statusrepair.py); the suggestion keeps the heard words ("en route (heard “is fine”)")
+              and the whole transcript as heard
+    addressee the radio format is "<addressee>, <who is talking> <status>": a sentence's leading "<callsign>," is the
+              one called, never one that gets the status ("23 91, responding." on Engine 61's radio: Engine 61)
+    list      units named one after another, then one status ("23 91, Engine 61, Ladder 31 on location"): each of
+              them only when the talker is one of them (an officer reporting his group) or it is the dispatcher's
+              readback; otherwise the units right before the status, else the talker. Nothing carries past . ; ? !
+    number    a bare number before the phrase ("64 on scene") is the talker's unit only when its radio is that unit
+              (E64); a chief's 4-digit number off in the last digit only, same department prefix, and no unit any
+              board knows ("2390 on location" from 2391's radio) is his too
+    near      "in the area", "in the vicinity", "on the block", "pulling up": on location (the department has no
+              arriving status), only from the talker about itself, clause-final or before a readback time; never
+              "back in the area", "in the area of", "if you need", "we can take", "available"
     who       a unit of ours (PCFD's and Rye Brook's fire units, the chiefs 239x: sizeup/cad/feed.py load_cfg) named right
               before the phrase ("Engine 64 on location", "60 Control copies, 2391 responding"), else the talker when
               its radio is one of ours (the registry's rig), else the unit that called ("Engine 64 to 60 Control, on
@@ -118,6 +127,11 @@ PHRASES: list[tuple[str, re.Pattern]] = [(i, re.compile(p, re.I)) for i, p in (
                 r"center|centre|level|structure|is|will)\b)"),
 )]
 NEAR = re.compile(r"in\s+the\s+(?:area|vicinity)|on\s+the\s+block|pulling\s+up", re.I)
+FINE_WORD = re.compile(r"\bf(?:ine|un|unny|ind)\b", re.I)
+# "in the area" said of being free nearby, or offered: never an arrival
+NEAR_NOT = re.compile(r"(?<![\w'])(?:back\s+in\s+the\s+area|if\s+you\s+need|we\s+can\s+take|can\s+take|available|"
+                      r"in\s+the\s+(?:area|vicinity)\s+of)(?![\w'])", re.I)
+NEAR_AFTER = re.compile(r"\s*(?:[.;!?,]\s*)?$|\s*(?:at\s+)?(?:(?:[01]\d|2[0-3]):?[0-5]\d|\d:[0-5]\d)(?!\d)", re.I)
 # The words that may stand between whoever is talking and the phrase ("Engine 64 is now on location").
 FILLER = (r"is|are|am|was|were|now|currently|just|also|already|be|been|being|will|shall|have|has|had|gonna|going|to|"
           r"and|still|back|arriving|arrived|placing|place|placed|putting|put|ourselves|myself|itself|going|"
@@ -156,6 +170,10 @@ class Found:
     explicit: bool = False
     lead: str = ""                   # unit | first | start | control | number
     number: str = ""                 # lead "number": the bare number said ("64 on scene"), the talker's own or nothing
+    listed: list[str] = field(default_factory=list)     # units named only, in the clauses just before ("Engine 61,")
+    addressee: list[str] = field(default_factory=list)  # the sentence's leading "<callsign>," (who is called)
+    at: int = 0                      # where the phrase starts in the text
+    near: bool = False               # "in the area" (NEAR): the talker's own arrival only
 
 
 @dataclass
@@ -195,15 +213,28 @@ def load_hint_cfg(lists, channels: tuple[str, ...], talkgroups: tuple[int, ...])
 class Phrases:
     """What a transcript says about our units' statuses: find(text) -> [Found]."""
 
-    def __init__(self, units: dict[str, str]):
+    def __init__(self, units: dict[str, str], known_numbers=()):
         self.units = [(c, re.compile(r"(?<![\w])(?:" + "|".join(unit_forms(c, sp)) + r")(?![\w])", re.I))
                       for c, sp in units.items()]
         self.codes = set(units)
         self.spoken = dict(units)
+        # every unit number any board knows (ours, Rye Brook's, mutual aid's): a heard one is never someone else's
+        self.known_numbers = set(known_numbers) | {re.sub(r"\D", "", c) for c in units if c.isdigit()}
 
-    def repair(self, text: str) -> tuple[str, list[dict]]:
+    def repair(self, text: str, talker: str = "", fine_ok=None) -> tuple[str, list[dict]]:
         """The text with misheard status words after our callsigns put back (sizeup/cad/statusrepair.py)."""
-        return repair(text, self.named, self.spoken)
+        return repair(text, self.named, self.spoken, talker, fine_ok)
+
+    def own_number(self, talker: str, heard: str) -> bool:
+        """A bare number heard before a status is the talker's own: its number, or (a chief, 4 digits) the same
+        department prefix with only the last digit off, when the heard number is no unit any board knows."""
+        own = re.sub(r"\D", "", talker)
+        if not own or not heard:
+            return False
+        if own == heard:
+            return True
+        return (len(own) == len(heard) == 4 and own[:3] == heard[:3] and own[3] != heard[3]
+                and heard not in self.known_numbers)
 
     def named(self, text: str) -> list[tuple[int, int, str]]:
         """(start, end, code) of every unit of ours the text names, in order (the longest at a place)."""
@@ -215,39 +246,58 @@ class Phrases:
         return out
 
     def caller(self, text: str) -> str:
-        """The unit of ours that called ("Engine 64 to 60 Control, ..."): the first named, unless it is the one called."""
+        """The unit of ours that called ("Engine 64 to 60 Control, ..."): the first named, unless it is the one called
+        ("to Engine 64", or the leading "Engine 64, ..." the radio format puts the addressee in)."""
         named = self.named(text)
-        return named[0][2] if named and not TO_BEFORE.search(text[:named[0][0]]) else ""
+        if not named or TO_BEFORE.search(text[:named[0][0]]):
+            return ""
+        if not text[:named[0][0]].strip(" ,") and re.match(r"\s*,", text[named[0][1]:]):
+            return ""
+        return named[0][2]
 
     def find(self, text: str) -> list[Found]:
         out: list[Found] = []
         listed: list[str] = []          # the units of ours a run of clauses has only named so far ("Engine 61, Ladder 31,")
+        addressee: list[str] = []       # the sentence's leading "<callsign>,": who is being called
+        fresh = True                    # at a sentence's start
+        near_not = bool(NEAR_NOT.search(text or ""))
         for m in CLAUSE.finditer(text or ""):
             clause = m.group(0)
             body = clause.rstrip()
+            ends = body[-1:] in (".", ";", "!", "?", "\n") or clause.endswith("\n")
+            start, fresh = fresh, ends
             if not body.strip() or body.endswith("?") or QUESTION_START.match(body):
-                listed = []
+                listed, addressee = [], []
                 continue
             named = self.named(clause)
             only = self._only_units(clause, named)
             if only is not None:
-                listed += [c for c in only if c not in listed]
+                if ends:
+                    listed, addressee = [], []           # "Ladder 31." alone: nothing carries past the full stop
+                elif start:
+                    listed, addressee = [], only         # "23 91, ...": the one called
+                else:
+                    listed += [c for c in only if c not in listed]
                 continue
-            before, listed = listed, []
+            before, called = listed, addressee
+            listed = []
+            if ends:
+                addressee = []
             hits = sorted(((x.start(), x.end(), i) for i, rx in PHRASES for x in rx.finditer(clause)), key=lambda h: (h[0], -h[1]))
             taken, last_end = [], 0
             for s, e, intent in hits:
                 if taken and s < taken[-1][1]:
                     continue                                    # inside a longer phrase already taken
                 taken.append((s, e, intent))
+                near = bool(NEAR.match(clause[s:e]))
+                if near and (near_not or not NEAR_AFTER.match(clause[e:])):
+                    continue                                    # "back in the area", "in the area if you need us"
                 f = self._one(clause, s, e, intent, named, last_end)
                 if f is not None:
+                    f.at, f.near, f.addressee = m.start() + s, near, list(called)
                     if before and last_end == 0 and (f.lead == "start" or (f.lead == "unit" and named and named[0][2] == f.units[0]
                                                                            and not clause[:named[0][0]].strip(" ,"))):
-                        # a list said before it, one status for all: "2391, Engine 61, Ladder 31 on location" (each
-                        # unit once; the speaker naming himself first is one of them)
-                        f.units = before + [u for u in f.units if u not in before]
-                        f.lead = "unit"
+                        f.listed = list(before)                 # "Engine 61, Ladder 31 on location": who gets it, _read
                     out.append(f)
                     last_end = e
         return out
@@ -275,7 +325,7 @@ class Phrases:
                 return None                                 # "Clear." alone: a room, a search, the channel...
             if re.search(r"(?<![\w'])(?:all|loud\s+and|search|primary|secondary)\s*$", clause[since:s], re.I):
                 return None
-        if NEAR.match(clause[s:e]) and lead[0] not in ("unit", "first", "number"):
+        if NEAR.match(clause[s:e]) and lead[0] not in ("unit", "first", "number", "start"):
             return None                                     # "lots of smoke in the area": a place, not a unit's status
         if intent == "staging" and lead[0] not in ("unit", "first", "number"):
             return None                                     # "Staging on King Street": where staging is, not who is in it
@@ -336,7 +386,9 @@ class StatusHints:
             except ListsError as e:
                 self.log(f"CAD: status hints off: {e}")
                 self.cfg = Cfg(False)
-            self.phrases = Phrases(self.cfg.units)
+            self.phrases = Phrases(self.cfg.units, {re.sub(r"\D", "", str(n)) for c, u in L.units.items()
+                                                    for n in (c, (u.get("spoken") if isinstance(u, dict) else "") or "")
+                                                    if re.fullmatch(r"[\d\s-]+", str(n).strip() or "x")})
             self._for = L
 
     def decorate(self, rows: list[dict]) -> list[dict]:
@@ -345,11 +397,23 @@ class StatusHints:
         self._refresh()
         if not self.cfg.enabled:
             return rows
+        dispatched: dict[str, bool] = {}
         for r in rows:
             if r.get("kind", "radio") != "radio" or not r.get("text"):
                 continue
             if r.get("channel") in self.cfg.channels or (r.get("talkgroup") is not None and r["talkgroup"] in self.cfg.talkgroups):
-                fixed, fixes = self.phrases.repair(r["text"])
+                rigs = [x.strip() for x in (r.get("rig") or "").split(",") if x.strip()]
+                talker = rigs[0] if len(rigs) == 1 and rigs[0] in self.phrases.codes else ""
+                heard_fine: set[str] = set()
+                if FINE_WORD.search(r["text"]):  # "is fine" shown as en route when it was taken so when heard, or now
+                    heard_fine = {h["unit"] for h in self.store.q("SELECT unit, phrase FROM status_hints WHERE traffic_id = ?",
+                                                                  (r.get("id"),)) if FINE_WORD.search(h["phrase"])}
+
+                def ok(code, heard_fine=heard_fine):
+                    if code not in dispatched:
+                        dispatched[code] = self.fine_ok(code)
+                    return code in heard_fine or dispatched[code]
+                fixed, fixes = self.phrases.repair(r["text"], talker, ok)
                 if fixes:
                     r["fixed_text"], r["fixes"] = fixed, fixes
         return rows
@@ -394,7 +458,7 @@ class StatusHints:
         ours_channel = t["channel"] in self.cfg.channels or (t["talkgroup"] is not None and t["talkgroup"] in self.cfg.talkgroups)
         want: dict[str, tuple[Found, str]] = {}
         if ours_channel and now - t["start"] < self.cfg.expire_s and (t["text"] or "").strip():
-            want = self._read(t)
+            want = self._read(t, self.fine_ok)
         made = []
         with self._lock:
             old = {r["unit"]: r for r in self.store.q("SELECT * FROM status_hints WHERE traffic_id = ?", (tid,))}
@@ -407,25 +471,47 @@ class StatusHints:
                     made.append(h)
         return made
 
-    def _read(self, t: dict) -> dict[str, tuple[Found, str]]:
-        """unit code -> (what was said of it, who: named | talker | caller), the last phrase for each unit."""
-        text, fixes = self.phrases.repair(t["text"])
+    def _read(self, t: dict, fine_ok=None) -> dict[str, tuple[Found, str]]:
+        """unit code -> (what was said of it, who: named | talker | caller), the last phrase for each unit.
+
+        Who gets a status (the radio format is "<addressee>, <who is talking> <status>"):
+          the dispatcher's readback ("Engine 61, Ladder 31, on location"): every unit it names, the one called too
+          a list the talker is in ("23 91, Engine 61, Ladder 31 on location" on 2391's radio): each of them
+          otherwise the units right before the status ("Engine 61 on location"), else the talker (or the caller);
+          the leading "<callsign>," is the one called, never one that gets the status
+          "in the area" (and the like): only the talker's own"""
         rigs = [r.strip() for r in (t["rig"] or "").split(",") if r.strip()]
         talker = rigs[0] if len(rigs) == 1 and rigs[0] in self.phrases.codes else ""
-        known_other = bool(t["dispatcher"]) or (bool(rigs) and not talker)
+        disp = bool(t["dispatcher"])
+        text, fixes = self.phrases.repair(t["text"], talker, fine_ok)
+        known_other = disp or (bool(rigs) and not talker)
         caller = "" if known_other or talker else self.phrases.caller(text)
         out: dict[str, tuple[Found, str]] = {}
         for f in self.phrases.find(text):
-            heard = [x["heard"] for x in fixes if x["to"].lower() == f.phrase]
+            heard = [x["heard"] for x in fixes if x.get("at") == f.at]
             if heard:                              # the status words as heard: kept with the suggestion, for audit
                 f.phrase = f"{f.phrase} (heard “{heard[0]}”)"
-            if f.units:
+            group = list(dict.fromkeys(f.listed + f.units))
+            if disp and (f.units or f.lead in ("start", "control")):
+                for u in dict.fromkeys(f.addressee + group):
+                    out[u] = (f, "named")
+                continue
+            if talker and talker in f.addressee:
+                group = list(dict.fromkeys(f.addressee + group))   # a chief naming himself first
+            if f.near:                             # an arrival nearby: only the talker telling its own
+                if talker and (talker in group or (f.lead in ("start", "first") and not group)
+                               or (f.lead == "number" and self.phrases.own_number(talker, f.number))):
+                    for u in (group if talker in group else [talker]):
+                        out[u] = (f, "talker" if u == talker else "named")
+                continue
+            if talker and talker in group:         # a list the talker is in: one status for each
+                for u in group:
+                    out[u] = (f, "talker" if u == talker else "named")
+            elif f.units:
                 for u in f.units:
                     out[u] = (f, "named")
             elif f.lead == "number":               # its number alone: only the talker's own (its radio says who)
-                own = re.sub(r"\D", "", talker)
-                if talker and (own == f.number or (len(own) == len(f.number) == 4               # a chief's number
-                                                   and sum(x != y for x, y in zip(own, f.number)) == 1)):  # one digit off
+                if talker and self.phrases.own_number(talker, f.number):
                     out[talker] = (f, "talker")
             elif f.lead in ("start", "first", "control"):
                 if talker:
@@ -433,6 +519,14 @@ class StatusHints:
                 elif caller:
                     out[caller] = (f, "caller")
         return out
+
+    def fine_ok(self, code: str) -> bool:
+        """May "<code> is fine" be its en route: dispatched now on an open call (a welfare "fine" is said on scene)."""
+        L = self._lists()
+        u = self.store.one("SELECT u.status FROM units u JOIN assignments a ON a.unit_id = u.id AND a.cleared_at IS NULL "
+                           "JOIN incidents i ON i.id = a.incident_id AND i.status IN ('pending', 'active') WHERE u.name = ?",
+                           (code,))
+        return u is not None and L.role(u["status"]) == "dispatched"
 
     def _make(self, t: dict, code: str, f: Found, who: str, old: dict | None, now: float) -> dict | None:
         status = self.status_for(f.intent)
