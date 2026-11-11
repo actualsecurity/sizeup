@@ -334,6 +334,7 @@ class SttQueue:
         for _at, ch, _p, _f in arrived:
             came[ch or "?"] = came.get(ch or "?", 0) + 1
         return {"queued": len(items), "urgent": sum(1 for e in live if e[0] == URGENT),
+                "context": sum(1 for e in items if e[0] == CONTEXT),       # another P25 system's alert clips (#409)
                 "high": sum(1 for e in live if e[0] == HIGH), "live": len(live), "low": len(low),
                 "rerun": sum(1 for e in items if e[0] == RERUN),
                 "fallback": sum(1 for e in items if e[6]),

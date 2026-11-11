@@ -141,7 +141,7 @@ class TrunkRecorder:
         self.cc = ControlChannel()              # the control channel's decode rate, from the same lines (#258)
 
     unit = False                # trunk-recorder is sizeup's child
-    preexec = None              # run in the child before trunk-recorder (SystemRecorder: a lower priority)
+    lower = False               # run trunk-recorder at a lower priority (SystemRecorder: a context system's)
 
     def _argv_for(self, dev: int | str | None = None) -> list[str]:
         """argv with --config pointing at a copy of its config (config.runtime.json) whose sources
@@ -275,8 +275,9 @@ class TrunkRecorder:
                 env = child_env()
                 env["PATH"] = ":".join(["/opt/homebrew/bin", "/usr/local/bin", env.get("PATH", "")])
                 self._proc = subprocess.Popen(argv, cwd=self.workdir, stdout=subprocess.PIPE,
-                                              stderr=subprocess.STDOUT, start_new_session=True, env=env,
-                                              preexec_fn=self.preexec)
+                                              stderr=subprocess.STDOUT, start_new_session=True, env=env)
+                if self.lower:
+                    trunkrecd.lower_priority(self._proc.pid)
             except OSError as e:
                 self.state, self.detail = "down", f"cannot start trunk-recorder: {e}"
                 self._stop.wait(backoff)
@@ -525,7 +526,7 @@ class SystemRecorder(TrunkRecorder):
     Never auto-assigned, never the county's trunk-recorder: its own process, log and capture directory, at a lower
     priority than the county's."""
 
-    preexec = staticmethod(trunkrecd._lower_priority)
+    lower = True
     # A reception test (#410, sizeup/radio/reception.py) sets this while it has the dongle: the time after which the
     # station's trunk-recorder service stops this system by itself (its state file's "until"). None: for good.
     until: float | None = None

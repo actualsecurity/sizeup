@@ -712,11 +712,14 @@ def _file_sig(*paths: Path) -> tuple:
     return tuple(out)
 
 
-def _lower_priority() -> None:
-    """A context system's trunk-recorder (#409) runs under the county's (the service is Nice=-5: this one 5)."""
+CONTEXT_NICE = 5       # a context system's trunk-recorder (#409): under the county's (the service is Nice=-5)
+
+
+def lower_priority(pid: int, setpriority=None) -> None:
+    """Nice CONTEXT_NICE for the process just started (after Popen, by its pid: no code runs between fork and exec)."""
     try:
-        os.nice(10)
-    except OSError:
+        (setpriority or os.setpriority)(os.PRIO_PROCESS, pid, CONTEXT_NICE)
+    except (OSError, AttributeError, ValueError):
         pass
 
 
@@ -729,6 +732,7 @@ class SystemSupervisor(Supervisor):
     def __init__(self, name: str, config: str = CONFIG, state: str = STATE, status_path: str = STATUS, **kw):
         super().__init__(config, system_state_path(name, state), system_status_path(name, status_path), **kw)
         self.county_state = state                    # the county's own wish: its dongle is never this system's
+        self.setpriority = None                      # os.setpriority (the tests': a recorder)
         self.name = name
         self.tag = f"p25 {name}"
         self.claims_held: dict[str, str] = {}        # serial -> the mode it is claimed under
@@ -771,6 +775,13 @@ class SystemSupervisor(Supervisor):
         label = w["label"] or self.name
         if self.proc is not None and self.running != key:
             self.stop(f"sizeup switched {label} off" if not w["on"] else f"{label}: its dongles or its config changed")
+            self.backoff, self.next_start = BACKOFF_S[0], 0.0
+        county = wanted(self.county_state)
+        if self.proc is not None and county["on"] and county["sdr"] and county["sdr"] in self.claims_held:
+            # The county's trunk-recorder was given one of this system's dongles: this one stops at once and lets
+            # every dongle go (never two programs on one dongle; fire has it). _start_system then says "held".
+            self.stop(f"{MODE} takes {county['name'] or county['sdr']}")
+            self._let_go()
             self.backoff, self.next_start = BACKOFF_S[0], 0.0
         self._let_go({s["sdr"] for s in w["sources"].values()} if w["on"] else set())
         base = {"on": w["on"], "sdr": sdr, "name": label, "system": self.name, "seq": w["seq"], "pid": self.pid,
@@ -850,8 +861,8 @@ class SystemSupervisor(Supervisor):
         env["PATH"] = ":".join(["/opt/homebrew/bin", "/usr/local/bin", env.get("PATH", "") or "/usr/bin:/bin"])
         try:
             self.proc = self.popen(argv, cwd=r["workdir"], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                   stderr=subprocess.STDOUT, start_new_session=True, env=env,
-                                   preexec_fn=_lower_priority)
+                                   stderr=subprocess.STDOUT, start_new_session=True, env=env)
+            lower_priority(self.proc.pid, self.setpriority)
         except OSError as e:
             self.restarts += 1
             self.backoff = min(self.backoff * 2, BACKOFF_S[1])

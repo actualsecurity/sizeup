@@ -1118,7 +1118,9 @@ class HubApp(App):
         except RuntimeError as e:
             return str(e)
 
-    def set_mode(self, mode: str, sdr: str | None = None) -> str | None:
+    def set_mode(self, mode: str, sdr: str | None = None, confirm: bool = False) -> str | None:
+        if confirm:                                    # (#409: a fire job's dongle to another system's job)
+            return self._switch("set_mode", mode, sdr, "person", True)
         return self._switch("set_mode", mode, sdr)
 
     def reception_post(self, body: dict, by: str = "") -> str | None:

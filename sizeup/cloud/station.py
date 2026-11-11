@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import base64
 import io
+import json
 import tempfile
 import threading
 import time
@@ -113,6 +114,15 @@ class StationLink:
         self.app, self.cfg, self.log = app, cfg, log
         self.updates = updates or Watch(log=log)
         self.outbox = outbox or Outbox(cfg.cloud_outbox or ":memory:", int(cfg.cloud_outbox_max_mb * 1024 * 1024))
+        # what the hub last said it knows (#409), kept beside the outbox: a station starting while the hub is away
+        # still queues another system's rows for it
+        self._caps_file = (Path(cfg.cloud_outbox).with_name("hub_caps.json")
+                           if cfg.cloud_outbox and cfg.cloud_outbox != ":memory:" else None)
+        try:
+            if self._caps_file is not None and self._caps_file.is_file():
+                self.hub_caps = frozenset(str(c) for c in json.loads(self._caps_file.read_text()))
+        except (OSError, ValueError, TypeError):
+            pass
         self._client = client or (lambda timeout: HubClient(cfg.cloud_hub_url, cfg.cloud_token, cfg.cloud_access_id,
                                                             cfg.cloud_access_secret, timeout))
         self._stop = threading.Event()
@@ -139,6 +149,16 @@ class StationLink:
     # -- the app's side ---------------------------------------------------------------------------
 
     hub_caps: frozenset = frozenset()       # what the hub says it knows ("caps" in its answers): "p25_systems" (#409)
+
+    def _set_caps(self, caps) -> None:
+        caps = frozenset(str(c) for c in (caps or []))
+        if caps != self.hub_caps:
+            self.hub_caps = caps
+            try:
+                if getattr(self, "_caps_file", None) is not None:
+                    self._caps_file.write_text(json.dumps(sorted(caps)))
+            except OSError:
+                pass
 
     def emit(self, kind: str, data: dict, clip: str | None = None) -> None:
         # Another P25 system's (#409): a hub from before it would file the row as the county's talkgroup of that
@@ -330,7 +350,7 @@ class StationLink:
                 self._ok()
                 self.updates.hub(r.get("build") if isinstance(r, dict) else None)
                 if isinstance(r, dict):
-                    self.hub_caps = frozenset(str(c) for c in (r.get("caps") or []))
+                    self._set_caps(r.get("caps"))
                 if "status" in body:
                     last_status, self._status_now = now, False
                     if "talkgroups" in body["status"]:
