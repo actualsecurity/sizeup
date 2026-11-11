@@ -211,7 +211,7 @@ out.chip = [L.pop.hidden, rows().map((r) => r.dataset.unit)];
 clickHouse("Brooksville Engine & Hose #5"); out.none = [L.pop.find("cm-pop-head")[0].textContent, rows().length];
 """, page_state())
     hidden, head, rows = o["house"]
-    assert hidden is False and head == f"{page_state()['hq']} 7 rigs · 4 in quarters · 2 on calls · 1 OOS"
+    assert hidden is False and head.replace("\u00a0", " ") == f"{page_state()['hq']} 7 rigs · 4 in quarters · 2 on calls · 1 OOS"
     # active first (on a call), then available, then out of service; each with its type and status, in its status colour
     assert [r[0] for r in rows] == ["E63", "L31", "2391", "E60", "E61", "TL2", "E62"]
     assert [r[1] for r in rows] == ["cm-ty ty-engine", "cm-ty ty-ladder", "cm-ty ty-suv", "cm-ty ty-engine", "cm-ty ty-engine",

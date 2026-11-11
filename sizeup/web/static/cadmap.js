@@ -153,7 +153,8 @@ window.CadMap = (() => {
     if (!rigs.length) return "No rigs";
     const n = (c) => rigs.filter((m) => rigClass(m) === c).length;
     return [`${rigs.length} rig${rigs.length === 1 ? "" : "s"}`, n("idle") && `${n("idle")} in quarters`,
-            n("act") && `${n("act")} on call${n("act") === 1 ? "" : "s"}`, n("oos") && `${n("oos")} OOS`].filter(Boolean).join(" · ");
+            n("act") && `${n("act")} on call${n("act") === 1 ? "" : "s"}`, n("oos") && `${n("oos")} OOS`]
+      .filter(Boolean).map((t) => t.replace(/ /g, "\u00a0")).join(" · ");                // a part never split across lines
   }
 
   // ---- our units followed and lit up (#358): one state for every map ----------------------------------------------
