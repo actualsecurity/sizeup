@@ -318,23 +318,23 @@ def test_setup_refuses_a_key_pair_that_doesnt_read(station_ssm, key_checks):
 
 
 def test_the_default_ssm_path_keeps_the_user_and_drops_the_password(station_ssm):
-    """What 15-station-adapter.sh then sudo sizeup-station adapter setup do: SSM has the password only; the user
+    """What the department's AWS setup then sudo sizeup-station adapter setup do: SSM has the password only; the user
     stays here, so the adapter has both and logs on."""
     repo, u, ad = station_ssm
     _current_release_with_configupdate(u)
-    assert _ssm_setup(u, ["git@github.com:example-org/feed-adapter.git", "", "SIZEUP_COUNTY_USER, SIZEUP_COUNTY_PASS",
+    assert _ssm_setup(u, ["git@github.com:example-org/feed-adapter.git", "", "FEED_USER, FEED_PASS",
                           ""], ["synthetic-user", VALUE]) == 0
     asked = []
     # Enter for repo, branch, names; y; Enter region; Enter = yes, remove the password kept here
     assert _ssm_setup(u, ["", "", "", "y", "", ""], [KEY_ID, SECRET, "", ""], asked=asked) == 0
-    assert u.cred_file("SIZEUP_COUNTY_USER").read_text() == "synthetic-user"
-    assert not u.cred_file("SIZEUP_COUNTY_PASS").exists()
+    assert u.cred_file("FEED_USER").read_text() == "synthetic-user"
+    assert not u.cred_file("FEED_PASS").exists()
     # the adapter's view: the user from here, the password from SSM (the helper, with a fake SSM)
     files = {p.name[len("sizeup-adapter."):]: p.read_text() for p in u.p.credentials.iterdir()}
-    fake = FakeSsm({ssm.PREFIX + "SIZEUP_COUNTY_PASS": (VALUE, 2)})
-    got = ssm.get(["SIZEUP_COUNTY_PASS", "SIZEUP_COUNTY_USER"], read=lambda n: files.get(n, ""), send=fake)
-    assert list(got) == ["SIZEUP_COUNTY_PASS"] and got["SIZEUP_COUNTY_PASS"].value == VALUE
-    assert files["SIZEUP_COUNTY_USER"] == "synthetic-user"                # both halves of the login are there
+    fake = FakeSsm({ssm.PREFIX + "FEED_PASS": (VALUE, 2)})
+    got = ssm.get(["FEED_PASS", "FEED_USER"], read=lambda n: files.get(n, ""), send=fake)
+    assert list(got) == ["FEED_PASS"] and got["FEED_PASS"].value == VALUE
+    assert files["FEED_USER"] == "synthetic-user"                # both halves of the login are there
 
 
 def test_check_reads_the_version_only():
