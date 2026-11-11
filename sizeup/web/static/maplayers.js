@@ -646,7 +646,7 @@ window.MapLayers = (() => {
   }
 
   // ---- times ------------------------------------------------------------------------------------------------
-  const tz = () => (window.cad && cad.scene && cad.scene.timezone) || "America/New_York";
+  const tz = () => (typeof cad !== "undefined" && cad && cad.scene && cad.scene.timezone) || "America/New_York";
   function hhmm(t) {
     try { return new Date(t * 1000).toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: tz() }); }
     catch (_) { return ""; }
@@ -1129,7 +1129,7 @@ window.MapLayers = (() => {
     }
     if (d.stopped) { el.rec.textContent = "Rec stopped"; el.rec.title = d.stopped; }
     // Keep is a dispatcher's or an admin's (the server refuses a viewer: sizeup/cad/api.py WRITES)
-    const w = window.cad && cad.who;
+    const w = typeof cad !== "undefined" && cad && cad.who;
     el.keep.hidden = !!(w && w.enforced && w.may !== "admin" && w.may !== "dispatcher");
     el.keep.setAttribute("aria-pressed", String(!!d.pinned));
     el.keep.classList.toggle("on", !!d.pinned);

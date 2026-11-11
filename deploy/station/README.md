@@ -142,7 +142,7 @@ nothing enabled or started, no prompts); `--stage SHA` and `--activate NAME` are
 | secrets `SIZEUP_STATION_TOKEN`, `SIZEUP_ACCESS_CLIENT_ID`, `SIZEUP_ACCESS_CLIENT_SECRET`, and an incident-source adapter's (root 0600) | `/etc/sizeup/station.env` |
 | what `update` fetches (repo, ref), the model, auto-update on / off | `/etc/sizeup/install.conf` |
 | state: CAD, outbox, `cloud.json`, captures, trunk-recorder's working dir | `/var/lib/sizeup` |
-| `sizeup-station.service`, `sizeup-whisper.service`, `sizeup-trunk-recorder.service` (trunk-recorder on the dongle sizeup gives Fire/EMS 15: [below](#trunk-recorder-its-own-service)), `sizeup-adsb.service` (the ADS-B decoder: idle until a dongle is named for it), `sizeup-health.timer`, `sizeup-update.path` / `.timer` / `.service`, journald cap (200 MB, kept across reboots) | `/etc/systemd/...` |
+| `sizeup-station.service`, `sizeup-whisper.service`, `sizeup-trunk-recorder.service` (trunk-recorder on the dongle sizeup gives Fire/EMS 15: [below](#trunk-recorder-its-own-service)), `sizeup-adsb.service` (the ADS-B decoder: idle until a dongle is named for it), `sizeup-ais.service` (the AIS decoder: idle until [vessels.receiver] names a dongle: [below](#ais-receiver)), `sizeup-health.timer`, `sizeup-update.path` / `.timer` / `.service`, journald cap (200 MB, kept across reboots) | `/etc/systemd/...` |
 | the auto-updater's record (state, last result, failed builds) and its one-line-per-update log | `/var/lib/sizeup-update/state.json`, `/var/log/sizeup-update.log` |
 | the `sizeup-station` command; the launchers and the updater | `/usr/local/bin`; `/usr/local/lib/sizeup` |
 
@@ -537,6 +537,66 @@ delivering samples, usually power: an LNA on the bias-tee draws from the dongle'
 hubs sag. The cause shows as `wedged` with what to check (the bias-tee only when it is on). After 3 wedges in an hour
 it waits 5 min before the next try, then 15 min, and says so. 10 min of decoding resets the count, and so does
 changing the dongle, gain or bias-tee (which also ends the wait at once).
+
+## AIS receiver
+
+Our own AIS receiver (GitHub #402; docs/vessels.md): one RTL-SDR on a marine VHF antenna, decoding AIS channels A and
+B (161.975 / 162.025 MHz) with AIS-catcher. **Off until the hardware is in.** The Vessels map layer works without it
+(aisstream.io, docs/vessels.md); with it, the hub gets what we hear ourselves too, first-hand and with no third party.
+Like the ADS-B dongle it is chosen by its exact serial and is **never** one of sizeup's radios: never auto-assigned,
+never given a channel.
+
+**Hardware:**
+
+* **An RTL-SDR**, ideally a TCXO one (RTL-SDR Blog V3 or V4): it stays on frequency, so `ppm = 0` holds. A cheap
+  dongle without a TCXO drifts a few ppm and needs `ppm` set (AIS-catcher's `-p`).
+* **A marine VHF antenna tuned near 162 MHz**, mounted as high and clear as you can: a 1/2-wave or 5/8-wave marine
+  whip (a stock boat VHF antenna is fine), or a broadband discone if one antenna must serve other bands too. AIS is
+  line of sight: height buys range.
+* **Low-loss coax**, kept short: LMR-400 for a long run, LMR-240 for a short one (RG-58 loses a lot at 162 MHz).
+* **Optional:** a 162 MHz SAW bandpass filter (it keeps paging, FM broadcast and the county P25 out of the dongle) and/or
+  an LNA. Use the dongle's bias-tee only for an LNA that is powered up the coax (AIS-catcher `-gr biastee on`; not
+  configured by sizeup today: add it by hand only if you need it).
+
+**When you plug it in:**
+
+1. **Give it a serial that is unique and not all digits:** find its index with `sudo sizeup-station doctor`, then
+   `sudo sizeup-station sdr-serial <index> ais162` ([Two dongles, one serial](#two-dongles-one-serial)), or
+   `rtl_eeprom -d <index> -s ais162` with nothing else running on it.
+2. **Install AIS-catcher** (not built by install-linux.sh, so updates stay fast): build its latest release from
+   https://github.com/jvde-github/AIS-catcher (its README: `cmake` against librtlsdr, then `make`) and put the binary
+   at `/opt/sizeup/ais-catcher/bin/AIS-catcher` (or anywhere on the sizeup user's PATH). `AIS-catcher -l` should list
+   the dongle.
+3. **Turn it on**, only once the station runs a release with this section (an older release refuses config keys it
+   doesn't know, so a switch back to it would fail): in `/etc/sizeup/config.toml`
+
+   ```toml
+   [vessels.receiver]
+   enabled = true
+   sdr = "ais162"
+   # gain = "auto"        # or dB (0 to 50)
+   # ppm = 0              # a non-TCXO dongle's correction
+   ```
+
+   then `sudo systemctl restart sizeup-ais sizeup-station`.
+4. **Check it:**
+   * `python3 /usr/local/lib/sizeup/aisd.py status`: `"state": "ok"`, with messages a second and vessels heard.
+     `held` means another app (shortfinal) has the dongle; `missing` means AIS-catcher isn't installed or the serial
+     isn't on USB; `no_signal` means nothing heard for 10 minutes (the antenna, or a quiet harbour at night).
+   * `python3 /usr/local/lib/sizeup/aisd.py print`: the command line it runs.
+   * `journalctl -u sizeup-ais`: `ais: starting: AIS-catcher on ais162 (index N)`.
+   * The CAD map's Vessels layer: a vessel's box says *Our receiver* in its foot.
+
+What runs: `python3 -I /usr/local/lib/sizeup/aisd.py run` as the sizeup user (stdlib only), which starts
+`AIS-catcher -d:<its index> -gr rtlagc on tuner auto -p 0 -o 5` (JSON lines on stdout; no web viewer, no network
+ports), keeps each vessel's latest messages in `/run/sizeup-ais/messages.json`, and restarts it with backoff when it
+exits. It holds the dongle's claim in `~/.local/state/rtl-claims` (mode `ais`) while AIS-catcher runs and never starts
+while another app holds it. sizeup-station posts the vessels to the hub every 5 s while someone looks at the layer (or
+a marine call is open), else every 30 s; nothing queues while the hub is away.
+
+**Share it once it runs.** Feeding [AISHub](https://www.aishub.net/) is what earns its free data API (another source the
+Vessels layer has a hook for), and AIS-catcher can also share with aiscatcher.org (`-X <sharing key>`). Both need
+AIS-catcher's network output, which sizeup leaves off: add it to the command line by hand and say so in the issue.
 
 ## HPN ATC: the airband dongle
 

@@ -124,7 +124,7 @@ window.AircraftLayer = (() => {
   function token(name, fallback) {
     try { return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || fallback; } catch (_) { return fallback; }
   }
-  const tz = () => (window.cad && cad.scene && cad.scene.timezone) || "America/New_York";
+  const tz = () => (typeof cad !== "undefined" && cad && cad.scene && cad.scene.timezone) || "America/New_York";
   function hms(t) {
     if (!t) return "";
     try { return new Date(t * 1000).toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false, timeZone: tz() }); } catch (_) { return ""; }
@@ -202,8 +202,8 @@ window.AircraftLayer = (() => {
   // ---- who is talking (#252): the hub's "atc" (talking, tx by hex), what plays here, a chip's aircraft ---------------
   const talk = { playing: "", pending: null };
   const lights = new MapFollow.Lights();    // a chip's aircraft (picked) and an alert card's (hovered); the frames redraw
-  const nowS = () => Date.now() / 1000 + ((window.cad && cad.skew) || 0);
-  const atcOf = (d) => (d && d.atc && !(window.cad && cad.state && cad.state.atc && cad.state.atc.map === false) ? d.atc : null);
+  const nowS = () => Date.now() / 1000 + ((typeof cad !== "undefined" && cad && cad.skew) || 0);
+  const atcOf = (d) => (d && d.atc && !(typeof cad !== "undefined" && cad && cad.state && cad.state.atc && cad.state.atc.map === false) ? d.atc : null);
   window.addEventListener("sizeup:playing", (e) => {
     const m = /\/api\/audio\/([^#?]+?)\.wav/.exec((e.detail && e.detail.url) || "");
     talk.playing = m ? decodeURIComponent(m[1]) : "";
