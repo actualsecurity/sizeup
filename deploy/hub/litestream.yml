@@ -21,7 +21,7 @@ dbs:
       bucket: ${LITESTREAM_BUCKET}
       path: ${LITESTREAM_PATH}/hub.sqlite
       region: ${LITESTREAM_REGION}
-  - path: ${SIZEUP_STATE_DIR}/audio.sqlite        # clips (docs/cloud.md "Audio retention") and dispatch audio
+  - path: ${SIZEUP_STATE_DIR}/audio.sqlite        # clips and dispatch audio; with SIZEUP_AUDIO_BUCKET their metadata only (docs/cloud.md "Audio in S3")
     replica:
       type: s3
       bucket: ${LITESTREAM_BUCKET}
