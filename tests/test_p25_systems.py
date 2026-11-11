@@ -598,7 +598,7 @@ def test_rows_from_before_get_their_source_by_the_county_system(tmp_path):
     s.db.commit()
     s.db.close()
     db = sqlite3.connect(path)                       # as it was before this release: none of the columns
-    for index in ("source_start", "service_start", "system_start", "safety"):     # the Radio page's too (#415)
+    for index in ("source_start", "service_start", "system_start", "dept_start", "safety"):     # the Radio page's too (#415)
         db.execute(f"DROP INDEX radio_traffic_{index}")
     for col in cols:
         db.execute(f'ALTER TABLE radio_traffic DROP COLUMN "{col}"') if col != "source" else None

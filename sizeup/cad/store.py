@@ -508,11 +508,12 @@ class Store:
                 self.db.execute(f"ALTER TABLE radio_traffic ADD COLUMN {col} {kind}")
         if tcols:
             self.db.execute("CREATE INDEX IF NOT EXISTS radio_traffic_source_start ON radio_traffic(source, start)")
-            # The Radio page's views (#415), an index walk each: a service's, a system's, the scene-safety rows, and the
-            # rows changed since a cursor (GET /api/cad/comms ?view= ?service= ?system= ?safety= ?changed=), 2026-11-10.
+            # The Radio page's views (#415), an index walk each: a service's, a system's, a department's, the scene-safety rows and the
+            # emergencies (GET /api/cad/comms ?view= ?service= ?system= ?dept= ?safety=, .../comms/sources), 2026-11-10.
             self.db.execute("CREATE INDEX IF NOT EXISTS radio_traffic_service_start ON radio_traffic(service, start)")
             self.db.execute("CREATE INDEX IF NOT EXISTS radio_traffic_system_start ON radio_traffic(system, start)")
-            self.db.execute("CREATE INDEX IF NOT EXISTS radio_traffic_updated ON radio_traffic(updated_at)")
+            self.db.execute("CREATE INDEX IF NOT EXISTS radio_traffic_dept_start ON radio_traffic(dept, start) WHERE dept != ''")
+            self.db.execute("CREATE INDEX IF NOT EXISTS radio_traffic_emergency ON radio_traffic(start) WHERE emergency = 1")
             self.db.execute("CREATE INDEX IF NOT EXISTS radio_traffic_safety ON radio_traffic(start) "
                             "WHERE safety != '' AND safety != 'dismissed'")
         if tcols and self.db.execute("SELECT 1 FROM radio_traffic WHERE source = '' LIMIT 1").fetchone():

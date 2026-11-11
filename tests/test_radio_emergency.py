@@ -120,6 +120,7 @@ def test_the_column_is_added_to_an_old_database_and_filled_from_its_alarms(tmp_p
                                start=t["start"], end=t["end"]))
     cad.store.db.close()
     db = sqlite3.connect(tmp_path / "cad.sqlite")           # the database as the last release left it
+    db.execute("DROP INDEX radio_traffic_emergency")       # the Radio page's (#415): made again on the next open
     for col in ("emergency", "evidence", "kept"):
         db.execute(f"ALTER TABLE radio_traffic DROP COLUMN {col}")
     db.execute("ALTER TABLE alarms DROP COLUMN clear_by")
