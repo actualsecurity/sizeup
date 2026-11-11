@@ -2200,6 +2200,13 @@ until there is a receiver to record. `tests/test_adsb_receiver.py`: the decoder 
 a tmp claims folder), the reserved dongle, the forwarding (deltas, the cap, offline drops, its cost), the hub's
 merge, details by ICAO address, the pre-alert beside the alarm, station health, the station's config update.
 
+## Vessels (AIS)
+
+Ships and boats on western Long Island Sound (#402): **docs/vessels.md** (sources, setup, the API, the limits of
+AIS). In short, the hub reads aisstream.io (key: SSM `/sizeup-hub/aisstream-key` → `SIZEUP_AISSTREAM_KEY`; none:
+off) only while the layer is open or a marine call is open, and the station's own receiver (AIS-catcher,
+`sizeup-ais.service`, off until the hardware is in) posts `POST /api/station/vessels`, never queued.
+
 ## Weather and water (NWS alerts, conditions, radar; NOAA tides)
 
 > "Public, free data: National Weather Service alerts ... as a banner on /cad and /monitor ... spoken once
