@@ -46,6 +46,13 @@ GET  /api/cad/weather[/speech?id=, /radar/frames, /radar/<frame>/<z>/<x>/<y>.png
                                NWS alerts, conditions, radar tiles, NOAA tides (sizeup/weather.py, #132)
 GET  /api/cad/aircraft         aircraft near HPN, shortfinal's PCFD-focused picture (sizeup/aircraft.py, #155): polled by
                                the page only while the layer is on; ETag (304), never in the state push
+GET  /api/cad/perf             the hub only: where its CPU goes (sizeup/perf.py, #425): by thread group over the last
+                               minute, 5 min, 1 h and since the start, memory, threads, open files, the collector,
+                               path families, the hourly trend; admins only (ADMIN_READS)
+POST /api/cad/perf/profile {"seconds": 30, "hz": 50}  admins: sample every thread's stack for seconds (1-120), weighted
+                               by the CPU each used; the answer is the summary and the folded stacks. One at a time
+                               (409), a rest after each (429). Over PROFILE_WAIT_S (or "wait": false): 202 at once
+GET  /api/cad/perf/profile[?format=folded]  the last profile again (folded: its stacks as text, for a flame graph)
 GET  /api/cad/health           the hub only: Settings > Health (sizeup/cloud/health.py, #79, #203): the station's
                                health, its alerts and 24 h of their history; admins only (sizeup/cad/api.py
                                ADMIN_READS), polled by the tab while open, never in the state push
@@ -357,7 +364,7 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                  role: str = "", roads=None, gis=None, trains=None, weather=None, station_health=None, stream_gzip: bool = True,
                  aircraft=None, roadwork=None, set_adsb: Callable[[str], str | None] | None = None,
                  airband_ab: Callable[..., str | None] | None = None,
-                 gate: Gate | None = None, health_fn: Callable[[], dict] | None = None):
+                 gate: Gate | None = None, health_fn: Callable[[], dict] | None = None, perf=None):
     """cad: a CadApi (sizeup/cad/api.py) and cad_b its own broadcaster (the console's state is
     small and separate from the monitor's, so neither page carries the other's). station: the hub's
     ingest (sizeup/cloud/hub.py Hub), which checks the station's token before reading any body.
@@ -398,12 +405,23 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
 
         who = None                       # the verified Access identity of the current request (access set)
         t0 = 0.0                         # when the request was read (perf_counter): Server-Timing and the log (#284)
+        c0 = 0.0                         # ... and this thread's CPU then (thread_time): the request's own CPU (#425)
+        code = 0                         # the status last sent
 
         def parse_request(self) -> bool:
             """Every request, whatever its method and however many on one connection: its clock starts once its
             first line is in (not while a kept-alive connection sat idle)."""
             self.t0 = time.perf_counter()
+            if perf is not None:
+                self.c0 = time.thread_time()
             return super().parse_request()
+
+        def _account(self) -> None:
+            """#425: this request's CPU and time, to its path family (sizeup/perf.py: never the query, never an id)."""
+            try:
+                perf.request(self.command, self.path, self.code, self._ms() / 1000, time.thread_time() - self.c0)
+            except Exception:  # noqa: BLE001 - never in the way of an answer
+                pass
 
         def _ms(self) -> float:
             return (time.perf_counter() - self.t0) * 1000 if self.t0 else 0.0
@@ -416,6 +434,7 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
             proxy actually fetched can be seen (ECC workstation, 2026-10-08: the page arrived without
             its CSS and scripts). Routine traffic is left out: health checks, the 2 s state polls and
             the station's own posts when they succeed."""
+            self.code = int(code) if str(code).isdigit() else 0
             if access_log is None:
                 return
             path, code = urlsplit(self.path).path, int(code) if str(code).isdigit() else 0
@@ -548,6 +567,8 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                 self._get()
             finally:
                 gate.leave()
+                if perf is not None:
+                    self._account()
 
         def do_POST(self) -> None:
             if gate.refuse(write=True):
@@ -557,6 +578,8 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                 self._post()
             finally:
                 gate.leave()
+                if perf is not None:
+                    self._account()
 
         def _get(self) -> None:
             url = urlsplit(self.path)
@@ -599,6 +622,18 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                     return self._send(*no)
                 return self._send(200, json.dumps(station_health.panel(), separators=(",", ":"), default=str).encode(),
                                   "application/json")
+            if path in ("/api/cad/perf", "/api/cad/perf/profile") and perf is not None:     # #425, admins only
+                if cad is not None and (no := cad.read_refused(path, self.who)) is not None:
+                    return self._send(*no)
+                if path == "/api/cad/perf":
+                    out = perf.snapshot()
+                else:
+                    out = perf.last_profile or {"error": "no profile yet"}
+                    if ("format", "folded") in parse_qsl(url.query):
+                        return self._send(200, (out.get("folded") or "").encode() + b"\n", "text/plain; charset=utf-8",
+                                          {"Cache-Control": "no-store"})
+                return self._send(200, json.dumps(out, separators=(",", ":")).encode(), "application/json",
+                                  {"Cache-Control": "no-store"})
             if path.startswith("/api/cad/") and cad is not None:
                 return self._send(*self._data(path, url.query, cad.get(path, url.query, self.who)))
             if path.startswith("/static/"):
@@ -657,6 +692,8 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
             if cad_refused("POST", path):
                 self.close_connection = True     # the body is left unread
                 return self._send(409, station_says(), "application/json")
+            if path == "/api/cad/perf/profile" and perf is not None:
+                return self._profile(path)
             if path.startswith("/api/cad/") and cad is not None:
                 try:
                     n = int(self.headers.get("Content-Length") or 0)
@@ -802,6 +839,36 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                                   "application/json")
             self._send(404, b"not found\n", "text/plain")
 
+        def _profile(self, path: str) -> None:
+            """POST /api/cad/perf/profile (#425): an admin's, one at a time, a rest after each (sizeup/perf.py). The
+            answer waits for it up to PROFILE_WAIT_S (a proxy in front gives up at 100 s); longer: 202, then GET."""
+            from sizeup.perf import PROFILE_HZ, PROFILE_S, Busy, TooSoon
+            raw = self._body(1024)
+            try:
+                body = json.loads(raw or b"{}") if raw is not None else None
+                if not isinstance(body, dict):
+                    raise ValueError("a JSON object, at most 1 KB")
+                seconds, hz = float(body.get("seconds", PROFILE_S)), float(body.get("hz", PROFILE_HZ))
+            except (ValueError, TypeError) as e:
+                self.close_connection = True
+                return self._send(400, json.dumps({"error": f"bad request: {e}"}).encode(), "application/json")
+            if self.who is not None and cad is not None and (refused := cad.permit(path, self.who, body, client=self._client())):
+                return self._send(*refused)
+            try:
+                p = perf.profile_start(seconds, hz)
+            except Busy as e:
+                return self._send(409, json.dumps({"error": str(e), "running": True}).encode(), "application/json")
+            except TooSoon as e:
+                return self._send(429, json.dumps({"error": str(e), "retry_s": round(e.retry_s)}).encode(), "application/json",
+                                  {"Retry-After": str(max(1, round(e.retry_s)))})
+            except ValueError as e:
+                return self._send(400, json.dumps({"error": str(e)}).encode(), "application/json")
+            self._did(path, p)
+            out = perf.profile_wait(p["seconds"] + 5) if body.get("wait", True) and p["seconds"] <= PROFILE_WAIT_S else None
+            if out is None:
+                return self._send(202, json.dumps({"running": True, **p}).encode(), "application/json")
+            self._send(200, json.dumps(out, separators=(",", ":")).encode(), "application/json", {"Cache-Control": "no-store"})
+
         def _stream(self, b: Broadcaster) -> None:
             """SSE: the whole state first (or, with an id from this boot, only what changed since: Last-Event-ID
             when EventSource reconnects, ?since= when the page already has the state from a GET), then each push's changed sections (Broadcaster), each with its id. Nothing
@@ -820,6 +887,8 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
             self.close_connection = True
             if self.command == "HEAD":
                 return
+            if perf is not None:              # #425: a stream lives for hours; its CPU is counted apart from the requests'
+                threading.current_thread().name = "http-stream"
             since = b.since(self.headers.get("Last-Event-ID")
                             or next((v for k, v in parse_qsl(urlsplit(self.path).query) if k == "since"), None))
             out = (lambda raw: z.compress(raw) + z.flush(zlib.Z_SYNC_FLUSH)) if z is not None else (lambda raw: raw)
@@ -851,6 +920,9 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
     return Handler
 
 
+PROFILE_WAIT_S = 60.0   # POST /api/cad/perf/profile answers with the profile up to this long; longer: 202, then GET
+
+
 class WebServer:
     def __init__(self, host: str, port: int, scene: dict, state_fn: Callable[[], dict],
                  clip: Callable[[str], bytes | None], close_incident: Callable[[str], bool],
@@ -861,7 +933,7 @@ class WebServer:
                  health: dict | None = None, access=None, access_log: Callable[[str], None] | None = None,
                  station_mode=None, role: str = "", roads=None, gis=None, trains=None, weather=None, station_health=None,
                  aircraft=None, roadwork=None, set_adsb=None, fence=None, health_fn: Callable[[], dict] | None = None,
-                 airband_ab=None, listener=None):
+                 airband_ab=None, listener=None, perf=None):
         """listener: a socket already bound and listening on (host, port) to serve from (sizeup/app.py run_gated: the
         hub's port answered "updating" while the app was built; the connections that came meanwhile are served)."""
         self.access = access
@@ -871,12 +943,22 @@ class WebServer:
         # The CAD's own state push (the whole console rebuilt and sent once a second): not on a station,
         # whose page has no CAD (role = "station": its /api/cad/stream is refused).
         self.cad_broadcaster = Broadcaster(cad.cad.state) if cad is not None and role != "station" else None
-        self.httpd = ThreadingHTTPServer((host, port), bind_and_activate=listener is None, RequestHandlerClass=make_handler(
+        self.perf = perf                # sizeup/perf.py Perf (the hub, #425): each request thread's CPU as it ends
+
+        class Httpd(ThreadingHTTPServer):
+            def process_request_thread(self, request, client_address) -> None:
+                try:
+                    super().process_request_thread(request, client_address)
+                finally:
+                    if perf is not None:
+                        perf.thread_exit()
+
+        self.httpd = Httpd((host, port), bind_and_activate=listener is None, RequestHandlerClass=make_handler(
             json.dumps(scene, separators=(",", ":")).encode(), self.broadcaster, clip, close_incident, set_mode,
             set_talkgroup, set_talkgroup_group, retranscribe, cad, self.cad_broadcaster, station,
             json.dumps(health or {"ok": True}, separators=(",", ":")).encode(), access, access_log, station_mode, role,
             roads, gis, trains, weather, station_health, aircraft=aircraft, roadwork=roadwork, set_adsb=set_adsb,
-            airband_ab=airband_ab, gate=self.gate, health_fn=health_fn))
+            airband_ab=airband_ab, gate=self.gate, health_fn=health_fn, perf=perf))
         if listener is not None:
             self.httpd.socket.close()                 # (the one TCPServer made, never bound)
             self.httpd.socket = listener
@@ -920,6 +1002,8 @@ class WebServer:
             self.broadcaster.stop()
             if self.cad_broadcaster:
                 self.cad_broadcaster.stop()
+            if self.perf is not None:
+                self.perf.profile_cancel()       # (a profile's answer is waiting on it)
             if not self.gate.wait_idle(wait_s):
                 print(f"sizeup: {self.gate.inflight} request(s) still in flight after {wait_s:.0f} s: stopping anyway", flush=True)
             self.httpd.shutdown()

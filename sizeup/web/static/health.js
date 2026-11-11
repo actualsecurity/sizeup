@@ -365,6 +365,116 @@ const StationHealth = (() => {
     return r;
   }
 
+// ---- the hub's own CPU (#425, sizeup/perf.py) ---------------------------------------------------------
+  // GET /api/cad/perf (admins): CPU by thread over the last minute, 1 h and since the start, as shares of the task's
+  // CPU; "Profile 30 s" (POST /api/cad/perf/profile) samples every thread's stack and lists the functions the CPU
+  // went to. Its own card and poll (the numbers change once a minute), so a profile's answer stays on screen.
+  const PERF_POLL_MS = 20000, PERF_ROWS = 12, PERF_FNS = 15;
+  let perfCard = null, perfTimer = null, perfLast = null, perfBusy = false, profile = null, profiling = false, profileSaid = "";
+
+  function renderPerf() {
+    if (!perfCard || !perfLast) return;
+    const d = perfLast, w = d.windows || {}, p = d.process || {}, v = d.vcpu, k = v ? 1 / v : 1;
+    const share = (x) => (x === null || x === undefined ? "—" : `${(x * k).toFixed(1)}%`);
+    const cell = (x) => { const td = el("td", `num${x * k >= 10 ? " hl-warn" : x ? "" : " dim"}`, share(x)); td.title = `${x}% of one core`; return td; };
+    const now = w.now || {}, mb = (n) => (n ? `${Math.round(n / 1048576)} MB` : "—");
+    const head = el("div", "card-head");
+    const chip = el("span", `chip ${now.core * k >= 90 ? "hl-bad" : now.core * k >= 60 ? "hl-warn" : "hl-ok"}`, d.ticks ? share(now.core) : "—");
+    chip.title = v ? `Last minute, of the task's ${v} vCPU (${now.core}% of one core)` : "Last minute, of one core";
+    const facts = el("span", "dim small", [`up ${longDur(d.uptime_s)}`, mb(p.rss || p.rss_peak), `${p.threads} threads`,
+      p.fds !== null && p.fds !== undefined ? `${p.fds} files` : "", `GC ${share((w.h1 || {}).gc)}`].filter(Boolean).join(" · "));
+    facts.title = `Memory: resident${p.rss ? "" : " (peak)"}. Files: open descriptors. GC: the collector's share over 1 h `
+      + `(${(p.gc || {}).collections || []} collections, longest ${(p.gc || {}).max_ms} ms)`;
+    const btn = el("button", "", profiling ? "Profiling…" : "Profile 30 s");
+    btn.disabled = profiling;
+    btn.title = "Sample every thread's stack for 30 s, weighted by the CPU each used. One at a time";
+    btn.addEventListener("click", runProfile);
+    head.append(el("h2", "", "Hub CPU"), chip, el("span", "spacer"), facts, btn);
+    const kids = [head];
+    const t = table(["Thread", "Now", "1 h", "Since start"], [], d.ticks ? "No CPU used" : "First reading in a minute");
+    const th = t.querySelectorAll("th");
+    th[0].title = "Threads by name; request threads together as http, the state streams as http-stream";
+    th[1].title = `Last minute. Share of ${v ? `the task's ${v} vCPU` : "one core"}; hover a value for its share of one core`;
+    th[2].title = "Last hour";
+    th[3].title = `Since the hub started (${when(d.started)}). Higher now than since the start: it grew with uptime`;
+    const rows = (d.threads || []).filter((r) => r.now || r.h1 || r.boot >= 0.05).slice(0, PERF_ROWS);
+    if (rows.length) {
+      const body = t.querySelector("tbody");
+      body.replaceChildren();
+      const all = el("tr");
+      all.append(el("td", "", "All"), cell(now.core), cell((w.h1 || {}).core), cell((w.boot || {}).core));
+      body.append(all);
+      for (const r of rows) {
+        const tr = el("tr");
+        tr.append(el("td", "mono", r.live > 1 ? `${r.name} ×${r.live}` : r.name), cell(r.now), cell(r.h1), cell(r.boot));
+        body.append(tr);
+      }
+    }
+    kids.push(t);
+    if (profileSaid) kids.push(el("p", "notice", profileSaid));
+    if (profile && !profile.error) {
+      const o = profile.overhead || {};
+      const sub = el("h3", "hl-sub", `Profile ${when(profile.started)} · ${Math.round(profile.seconds)} s · ${Math.round(profile.cpu_ms)} ms CPU`);
+      sub.title = `${profile.samples} samples at ${profile.hz} Hz; the profiler itself used ${o.core_pct}% of one core`;
+      const fold = el("a", "nav", "Folded stacks");
+      fold.href = "/api/cad/perf/profile?format=folded";
+      fold.target = "_blank";
+      fold.rel = "noopener";
+      fold.title = "For a flame graph (flamegraph.pl, speedscope): thread;caller;…;function microseconds";
+      const ft = table(["Function", "Self ms", "Self", "With callees"], [], "No CPU used");
+      const cum = new Map((profile.cumulative || []).map((x) => [x.fn, x.pct]));
+      const fr = (profile.self || []).slice(0, PERF_FNS);
+      if (fr.length) {
+        const body = ft.querySelector("tbody");
+        body.replaceChildren();
+        for (const x of fr) {
+          const tr = el("tr");
+          tr.append(el("td", "mono", x.fn), el("td", "num", x.ms.toFixed(0)), el("td", "num", `${x.pct}%`),
+            el("td", "num dim", cum.has(x.fn) ? `${cum.get(x.fn)}%` : "—"));
+          body.append(tr);
+        }
+      }
+      const fth = ft.querySelectorAll("th");
+      fth[1].title = "CPU in the function itself (and the C code it calls)";
+      fth[3].title = "CPU in the function and everything it calls, of the profile's CPU";
+      const by = el("p", "dim small", (profile.threads || []).slice(0, 8).map((x) => `${x.thread} ${x.pct}%`).join(" · "));
+      by.title = "The profile's CPU by thread";
+      kids.push(sub, by, ft, fold);
+    }
+    perfCard.replaceChildren(...kids);
+  }
+
+  async function runProfile() {
+    if (profiling) return;
+    profiling = true;
+    profileSaid = "";
+    renderPerf();
+    try {
+      const r = await fetch("/api/cad/perf/profile", { method: "POST", headers: { "Content-Type": "application/json" },
+                                                       body: JSON.stringify({ seconds: 30 }) });
+      const d = await r.json().catch(() => ({}));
+      if (r.ok && r.status === 200 && !d.error) profile = d;
+      else profileSaid = d.error || (d.running ? "Still running" : `HTTP ${r.status}`);
+    } catch (e) { profileSaid = String(e); }
+    profiling = false;
+    renderPerf();
+  }
+
+  async function pollPerf() {
+    clearTimeout(perfTimer);
+    perfTimer = null;
+    if (perfBusy || !isOpen()) return;
+    perfBusy = true;
+    let again = true;
+    try {
+      const r = await fetch("/api/cad/perf", { headers: { Accept: "application/json" } });
+      if (r.status === 403 || r.status === 404 || r.status === 409) { again = false; if (perfCard) perfCard.hidden = true; }
+      else if (r.ok) { perfLast = await r.json(); renderPerf(); }
+    } catch (_) { /* the next poll tries again */ }
+    perfBusy = false;
+    if (again && isOpen()) perfTimer = setTimeout(pollPerf, PERF_POLL_MS);
+  }
+
   // settings.js, every render of Settings > Health (admins): the section in place (once), then the poll.
   function mount(node) {
     if (panel !== node || !card || !node.contains(card)) {
@@ -375,12 +485,16 @@ const StationHealth = (() => {
         + "monthly limit): what is wrong now, since when and where, then the station, its programs, dongles and channels, "
         + "and 24 h of alerts with when each recovered. Each alert and its recovery are pushed to the status topic "
         + "(Push notifications). Admins only: nobody else sees these, on the console or the wall board."), links(), card);
+      perfCard = el("div", "card s-card hl-card");
+      node.append(perfCard);
     }
     if (last) render(last);
+    renderPerf();
     poll();
+    pollPerf();
   }
 
-  document.addEventListener("visibilitychange", () => { if (isOpen() && !timer) poll(); });
+  document.addEventListener("visibilitychange", () => { if (isOpen() && !timer) poll(); if (isOpen() && !perfTimer) pollPerf(); });
   return { mount, render };
 })();
 window.StationHealth = StationHealth;
