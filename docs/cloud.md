@@ -1816,19 +1816,22 @@ is drawn a little faded; over 30 s, hollow (*Predicted · N s ago*). Smoothness 
 speed of its own that closes on the prediction: the train's speed plus the gap over 6 s, within ±15 % of its speed
 (+0.5 m/s) for gaps under 30 m and a little more beyond, never faster than the consist can speed up or brake, its
 change eased (1.5 m/s³), so a new fix's error is absorbed over a few seconds with no surge. A correction no such
-change of pace can make is glided (as an aircraft eases onto a new fix, but on a cubic from the speed it was drawn
-at, so no jump and no step in speed), never faster than 25 m/s or 1.5× the train's last real speed, taking as long as
-that needs (up to 20 s), faintly ringed meanwhile; one too big for that (or over 600 m, rare) is faded out where it is
-drawn and in at the fix (0.8 s) instead. A train drawn past where a fix says it stopped (or will stop) is braked hard
-to rest (up to 4 m/s², eased in), then glides back (the user: "I'm fine with an overshoot if we keep it smooth"); a
-fix more than 400 m ahead, a GTFS-realtime report (no speed) more than 100 m ahead, or the first real fix of a train
-drawn on our estimate is glided on to. Measured with synthetic fixes at the real cadence (a fix every 3 to 12 s, 3 to
-16 s old when read, ±10 m GPS noise): a steady 45 mph train is drawn at 39-51 mph (coefficient of variation
-0.03-0.06, the same with ±1 mph of speed noise; #378's: 0-110 mph, 0.45-0.69, hollow 6-12 % of the time), never
-hollow. The trade-off: a stop with no sign before the feed goes quiet is drawn on until its fix is 20 s old, then
-eased (20/30/45/60 mph: about 150/210/280/330 m past); a brake seen in the next fix overshoots by what the train was
-drawn ahead when that fix came plus the hard stop (service 0.75 m/s²: median 64 m; emergency 1.4 m/s²: median 134 m),
-then glides back at 16-40 m/s over 2-17 s, never jumping (`Motion.rail` / `railFollow`; `tests/test_train_live.py` holds it to the measured shape). A fix no newer than the last one changes
+change of pace can make is glided: as an aircraft eases onto a new fix, but on a quintic from where and how fast the
+train is drawn to rest on the fix (no jump, no step in speed, no jolt at either end), as slow as it must be: never
+faster than the train + 25 % + 2 m/s going on, nor 25 m/s (or 1.5× the train's speed) going back, its acceleration
+at most 1.5 m/s², 3 to 20 s; faintly ringed meanwhile. One that would take longer (in practice anything over about
+100 m back, or 75 m on at 45 mph), or is over 600 m, is faded out where the train is drawn and in at the fix (0.8 s)
+instead. Any catch-up is held to the same 1.25× + 2 m/s (and the consist's vmax). A train drawn past where a fix says
+it stopped (or will stop) is braked hard to rest (up to 4 m/s², eased in), then glided back (the user: "I'm fine
+with an overshoot if we keep it smooth"); a fix more than 400 m ahead, a GTFS-realtime report (no speed) more than
+100 m ahead, or the first real fix of a train drawn on our estimate is glided (or faded) on to. An ease for want of
+news is no data: the drawn train follows it to rest without a nudge back. Measured with synthetic fixes at the real
+cadence (a fix every 3 to 12 s, 3 to 16 s old when read, ±10 m GPS noise): a steady 45 mph train is drawn at 39-51
+mph (coefficient of variation 0.03-0.06, the same with ±1 mph of speed noise; #378's: 0-110 mph, 0.45-0.69, hollow
+6-12 % of the time), never hollow, never faster than 1.12× the train. The trade-off: a stop with no sign before the
+feed goes quiet is drawn on until its fix is 20 s old, then eased (20/30/45/60 mph: about 150-340 m past), then
+faded back; a brake seen in the next fix overshoots by what the train was drawn ahead when that fix came plus the
+hard stop (see #392 for the numbers), then glides back gently or fades (`Motion.rail` / `railFollow`; `tests/test_train_live.py` holds it to the measured shape). A fix no newer than the last one changes
 nothing. The distance along the line comes from the projection, not `turf.location_mp`: the projection
 is in the same geometry the train is drawn on, while turf counts along each train's own route (see above) and
 would have to be calibrated to it. The milepost shown is turf's when the train's route starts (eastbound) or

@@ -269,7 +269,8 @@ def test_a_stop_with_no_sign_of_it_before_the_feed_goes_quiet(tmp_path):
     """#390, the trade-off, measured: a 45 mph train brakes (0.75 m/s^2) right after a moving fix and no fix comes until
     it has stopped. Nothing says it is slowing, so it is drawn on at its speed until its fix is RAIL_CRUISE_S (20 s)
     old, then eased to a stop at its service brake (it was drawn slowing on age alone before: within ~60 m, at the cost
-    of every steady train); then the stopped fix glides it back where it stopped."""
+    of every steady train); then the stopped fix glides it back where it stopped, or (further than a gentle glide
+    covers) fades it out and in there."""
     brake = 40
     frames, truth = drive(tmp_path, run=braking_v(V45, brake),
                           run_s=brake + 60, cadence="real", start_m=1000.0, quiet=(brake - 2, brake + V45 / 0.75 + 1))
@@ -278,7 +279,9 @@ def test_a_stop_with_no_sign_of_it_before_the_feed_goes_quiet(tmp_path):
     past = max(stop - s for _, s in fr)
     assert 100 <= past <= 300                                # (45 mph: ~230 m; see #392)
     smooth_back(frames, V45)
-    assert 1 <= len([g for g in glides_back(frames) if g["m"] > 10]) <= 2            # glided back (once its ease rests)
+    glided = [g for g in glides_back(frames) if g["m"] > 10]
+    faded = any(op is not None and op < 1 for *_, op in frames)
+    assert len(glided) <= 2 and (glided or faded)                                    # glided back, or (far) faded
     assert abs(fr[-1][1] - stop) <= 25 and fr[-1][1] == fr[-20][1]
 
 
@@ -335,3 +338,15 @@ def test_a_held_train_is_not_moved(tmp_path):
     frames, truth = drive(tmp_path, run=lambda dt: (0.0, 0.0), run_s=90, cadence="real", start_m=1000.0)
     ss = [s for t, s, *_ in frames if s is not None and t - frames[0][0] > 15]
     assert max(ss) - min(ss) <= 1.0
+
+
+@pytest.mark.parametrize("mph, gap_s", [(45, 20), (60, 20), (60, 35)])
+def test_never_drawn_much_faster_than_the_train(tmp_path, mph, gap_s):
+    """#390 re-review ("less surgy"): fixes stop for gap_s at a steady speed, then come again; whatever closes the gap
+    (the band, a glide, or a fade), the drawn train is never faster than 1.25 v + 2 (1 s windows; a fade's jump aside)."""
+    v = mph * 1609.344 / 3600
+    frames, truth = drive(tmp_path, run=lambda dt: (v * dt, v), run_s=90, cadence="real", start_m=1000.0,
+                          quiet=(30, 30 + gap_s))
+    fr = [(t, s) for t, s, _, _, op in frames if s is not None and (op is None or op >= 1)]
+    speeds = [(fr[i][1] - fr[i + 10][1]) / (fr[i + 10][0] - fr[i][0]) for i in range(len(fr) - 10) if fr[i + 10][0] - fr[i][0] < 1.05]
+    assert max(speeds) <= 1.25 * v + 2 + 0.3
