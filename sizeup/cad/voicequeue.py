@@ -8,7 +8,7 @@ False) and the caller fails its row at once, so a dispatch never waits for room.
     q = VoiceQueue(work, log)       work(job): render, transmit, write the row; never raises to the worker
     q.put(job)                      False: full, or stopped
     q.wait(timeout)                 True once nothing is queued or being worked on (the tests, a drain)
-    q.stop(timeout)                 no new jobs; waits; the jobs not finished (queued, or still being worked on)
+    q.stop(timeout)                 no new jobs; waits; the jobs not finished (queued: dropped; being worked on: it ends)
 """
 
 from __future__ import annotations

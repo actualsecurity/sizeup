@@ -55,7 +55,11 @@ PREVIEW_KEEP_S = 24 * 3600
 # A dispatch whose voice was never attached (#426): the row's audio_note, as "Voice unavailable — ...: text only".
 VOICE_RESTARTED = "Voice not rendered — the hub restarted first: text only"
 VOICE_BUSY = "Voice not rendered — too many dispatches waiting for theirs: text only"
-TX_WAITS = "waiting for the voice"
+VOICE_STOPPING = "Voice not rendered — the hub was stopping: text only"
+VOICE_LATE = "Voice too late: text only"
+VOICE_SLOW = "Voice too slow: text only"
+VOICE_STALE_S = 45.0     # a voice not started this long after its dispatch is not rendered (it would play stale)
+VOICE_BUDGET_S = 25.0    # one render, at most: Polly's retries plus the station's 20 s can't hold the queue longer
 MAX_UNITS = 30
 VOICE_SAMPLE = "Engine 60, respond to 1 Main Street, structure fire. Time out 14:32."   # Settings > Voice > Preview
 GEO_WINDOW = 0.25        # suggestions this close to the best one are ordered by town first
@@ -188,7 +192,10 @@ class Cad:
         self.voice = VoiceQueue(self._voice_job, log)
         self.may_write: Callable[[], bool] = lambda: True
         self.on_dispatch: Callable[[], None] | None = None
-        swept = self.store.fail_pending_voice(VOICE_RESTARTED)      # a render the last process never finished
+        self.voice_stale_s, self.voice_budget_s = VOICE_STALE_S, VOICE_BUDGET_S
+        # A voice the last process never finished: too old now, failed (text only); a younger one is rendered by
+        # resume_voice(), once the App has wired the voice (remote_voice, audio_blobs, the fence).
+        swept = self.store.fail_pending_voice(VOICE_RESTARTED, before=self.clock() - self.voice_stale_s)
         if swept:
             log(f"CAD: {swept} dispatch(es) left waiting for their voice by a restart: marked failed (text only)")
         self._state: tuple[int, dict] | None = None
@@ -1000,7 +1007,7 @@ class Cad:
             return path, f"{note} (station: {_short(why, 80)})"
         except OSError as e:
             return None, f"could not write the dispatch audio: {e}"
-        if self.audio_blobs is not None:
+        if self.audio_blobs is not None and self.may_write():      # (the voice worker's too: the writer's only)
             self.audio_blobs.put(key, path.read_bytes(), "dispatch", label)
         return path, label
 
@@ -1043,7 +1050,7 @@ class Cad:
             tmp.replace(path)
         except OSError as e:
             return None, f"could not write the dispatch audio: {e}"
-        if self.audio_blobs is not None:
+        if self.audio_blobs is not None and self.may_write():
             self.audio_blobs.put(key, wav, "dispatch", label)
         return path, label
 
@@ -1138,36 +1145,72 @@ class Cad:
         tx = self.transmitter.expect()                 # transmit off: known now; a radio: after its audio (_voice_job)
         did = self.store.log_dispatch(iid, operator=operator, text=text, unit_ids=[u["id"] for u in units],
                                       audio_path="", audio_note="", transmitted=False,
-                                      channel=channel, tx_note=tx.detail if tx else TX_WAITS, kind=kind, remarks=remarks,
-                                      tones=self._tones_text(plan), audio_state="pending")
-        if not self.voice.put((did, text, plan["groups"], channel)):
-            self.store.fail_pending_voice(VOICE_BUSY, [did])
-            self.log(f"CAD: dispatch #{did}: {VOICE_BUSY}")
+                                      channel=channel, tx_note=tx.detail if tx else "", kind=kind, remarks=remarks,
+                                      tones=self._tones_text(plan), audio_state="pending",
+                                      audio_tones=json.dumps(plan["groups"]), tx_pending=tx is None)
+        if not self.voice.put((did, text, plan["groups"], channel, time.monotonic() + self.voice_stale_s)):
+            why = VOICE_STOPPING if self.voice.stopped else VOICE_BUSY
+            self.store.fail_pending_voice(why, [did])
+            self.log(f"CAD: dispatch #{did}: {why}")
         row = self.store.dispatch_row(did)             # pending; or done already (the same words just previewed: cached)
         self._pushed()
         return dict(self._shown(text, kind, None, row["audio_note"], remarks, plan), dispatch_id=did,
                     audio=row["audio_state"], audio_url=f"/api/cad/dispatch/{did}.wav" if row["audio_path"] else None,
                     transmitted=bool(row["transmitted"]), detail=row["tx_note"], channel=channel, moved=list(moved))
 
+    def _render_in_time(self, text: str, tones) -> tuple[Path | None, str]:
+        """_render within voice_budget_s: a render that takes longer is given up (text only) so the voices behind
+        it don't wait on it; it ends by itself, its WAV cached for a replay of the same words."""
+        box: list = []
+
+        def run() -> None:
+            try:
+                box.append(self._render(text, tones=tones))
+            except Exception as e:  # noqa: BLE001 - whatever the voice did, the row says so
+                box.append((None, f"Voice failed — {type(e).__name__}: {_short(str(e))}: text only"))
+        t = threading.Thread(target=run, name="dispatch-voice-render", daemon=True)
+        t.start()
+        t.join(self.voice_budget_s)
+        return box[0] if box else (None, VOICE_SLOW)
+
     def _voice_job(self, job: tuple) -> None:
         """The voice worker's: a logged dispatch's audio, then its key-up (the transmitter needs the audio; in the
         order sent), then the row: ready with the WAV, or failed with why (the same notes as before #426:
-        "Voice unavailable — ...: text only"). A failure here never undoes the dispatch."""
-        did, text, tones, channel = job
-        try:
-            path, note = self._render(text, tones=tones)
-        except Exception as e:  # noqa: BLE001 - whatever the voice did, the row says so
-            path, note = None, f"Voice failed — {type(e).__name__}: {_short(str(e))}: text only"
+        "Voice unavailable — ...: text only"). Too long after its dispatch (voice_stale_s, the voices before it
+        were slow): not rendered, "Voice too late". Before the key-up and the write: still the writer (the
+        fence) and the row still pending. A failure here never undoes the dispatch."""
+        did, text, tones, channel, deadline = job
+        if time.monotonic() > deadline:
+            path, note = None, VOICE_LATE
+        else:
+            path, note = self._render_in_time(text, tones)
+        if not self.may_write():                       # the lease isn't ours any more: the next leader's start has the row
+            self.log(f"CAD: dispatch #{did}: voice not attached (this hub is no longer the writer)")
+            return
+        if not self.store.voice_pending(did):          # failed meanwhile (too late at a stop): nothing keyed, nothing written
+            return
         try:
             tx = self.transmitter.transmit(path, channel, text)
         except Exception as e:  # noqa: BLE001
             tx = TxResult(False, f"transmit failed: {type(e).__name__}")
-        if not self.may_write():                       # the lease isn't ours any more: the next leader's start fails the row
-            self.log(f"CAD: dispatch #{did}: voice not attached (this hub is no longer the writer)")
-            return
         if self.store.dispatch_voice(did, audio_path=str(path) if path else "", audio_note=note,
                                      transmitted=tx.transmitted, tx_note=tx.detail):
             self._pushed()
+
+    def resume_voice(self) -> int:
+        """At a start, once the voice is wired: the dispatches the last process left waiting for their voice (a
+        deploy in the seconds after a dispatch) are rendered here, each within what is left of its voice_stale_s;
+        the older ones were failed when the store opened. How many were queued."""
+        now, n = self.clock(), 0
+        for r in self.store.pending_voices():
+            left = self.voice_stale_s - (now - r["at"])
+            if left <= 0 or not self.voice.put((r["id"], r["text"], r["tones"], r["channel"], time.monotonic() + left)):
+                self.store.fail_pending_voice(VOICE_RESTARTED, [r["id"]])
+            else:
+                n += 1
+        if n:
+            self.log(f"CAD: {n} dispatch voice(s) left by a restart: rendering now")
+        return n
 
     def _pushed(self) -> None:
         if self.on_dispatch is not None:
@@ -1177,12 +1220,12 @@ class Cad:
                 self.log(f"CAD: dispatch: push: {type(e).__name__}")
 
     def stop_voice(self, wait_s: float = 6.0) -> None:
-        """A drain (the hub's handover) or a stop: the voices still rendering get wait_s; the rest are failed now
-        rather than left pending (a start sweeps any this misses)."""
+        """A drain (the hub's handover) or a stop: the voices still rendering get wait_s. What is left stays
+        pending for the next start (resume_voice renders it there if it is still young enough; else it is failed
+        there), so a dispatch in the last seconds before a deploy keeps its audio."""
         left = self.voice.stop(wait_s)
-        if left and self.may_write():
-            n = self.store.fail_pending_voice(VOICE_RESTARTED, [j[0] for j in left])
-            self.log(f"CAD: {n} dispatch voice(s) not rendered before the stop: marked failed (text only)")
+        if left:
+            self.log(f"CAD: {len(left)} dispatch voice(s) not rendered before the stop: left for the next start")
 
     def preview(self, iid: int, body: dict) -> dict:
         """The dispatch as it would go out now. Nothing is assigned or logged. An event that already had a

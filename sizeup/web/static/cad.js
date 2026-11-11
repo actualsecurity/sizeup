@@ -40,7 +40,8 @@ const cad = {
   scene: null, state: null, lastMsgAt: 0, skew: 0,
   who: null,                 // signed in through Cloudflare Access (whoami): {email, name, callsign, role, may, ...}
   sel: null,                 // selected incident id
-  voiceWait: null,           // {id}: the dispatch this page just sent, its voice still rendering (#426, syncVoice)
+  voiceWaits: new Map(),     // dispatch id -> {at, seen}: sent from this page, its voice still rendering (#426, syncVoice)
+  boxDispatch: null,         // the dispatch id the dispatch box shows (null: a preview, or hidden)
   mode: "none",              // none (Overview) | new | view | idle (Dispatch with nothing selected)
   radio: false,              // the Radio view is open (#radio)
   extra: new Map(),          // incidents opened from Records that aren't in the live state
@@ -677,7 +678,7 @@ function selectIncident(id) {
   show($("#close-form"), false);
   show($("#upgrade-form"), false);
   show($("#r-preview-box"), false);
-  cad.voiceWait = null;               // another event: the dispatch box's audio isn't waited for (its row has it)
+  cad.boxDispatch = null;             // (a voice still waited for plays all the same: syncVoice)
   $("#r-full").checked = false;
   flash($("#r-error"));
   flash($("#c-error"));
@@ -2214,32 +2215,54 @@ function voicePending(node) {
   node.title = VOICE_PENDING_TIP;
   return node;
 }
-// What the state says of the dispatch waited for: null (still rendering, or not in the state yet), else
-// {url, note}: url its audio (null: none, the note says why).
-function voiceArrived(wait, incidents) {
-  if (!wait) return null;
+const VOICE_STALE_MS = 45000;     // a voice that arrives later than this after its dispatch is never played by itself
+// What the state says of dispatch id: null (not in the live state), else {pending} or {url, note}: url its audio
+// (null: none, the note says why).
+function voiceArrived(id, incidents) {
   for (const inc of incidents || []) {
-    const d = (inc.dispatches || []).find((x) => x.id === wait.id);
+    const d = (inc.dispatches || []).find((x) => x.id === id);
     if (!d) continue;
-    if (d.audio === "pending") return null;
+    if (d.audio === "pending") return { pending: true };
     return { url: d.has_audio ? `/api/cad/dispatch/${d.id}.wav` : null, note: d.audio_note || "" };
   }
   return null;
 }
-function showAudio(url, note, pending) {
+function showAudio(url, note, pending, autoplay = true) {
   const a = $("#r-audio"), n = $("#r-audio-note");
   show(a, !!url);
-  if (url) { a.src = url; a.play().catch(() => {}); }
-  else if (!a.paused) a.pause();
+  if (url) { a.src = url; if (autoplay) a.play().catch(() => {}); }
   if (pending) voicePending(n);
   else { setText(n, note || ""); n.removeAttribute("title"); }
 }
-// Each state push: the dispatch this page sent has its voice now (or none): shown and played, once.
-function syncVoice() {
-  const got = voiceArrived(cad.voiceWait, (cad.state && cad.state.incidents) || []);
-  if (!got) return;
-  cad.voiceWait = null;
-  showAudio(got.url, got.note, false);
+// The voices of the dispatches this page sent play by themselves, once each, one after the other in the order
+// sent, whatever is selected by then: in the dispatch box's player while it shows that dispatch, else unseen.
+const voiceAudio = new Audio();
+let voiceChain = Promise.resolve();
+function voicePlay(id, url, note) {
+  voiceChain = voiceChain.then(() => new Promise((done) => {
+    const inBox = cad.boxDispatch === id && !$("#r-preview-box").hidden;
+    const a = inBox ? $("#r-audio") : voiceAudio;
+    const ends = ["ended", "error", "pause", "emptied"];
+    let timer = null;
+    const over = () => { ends.forEach((e) => a.removeEventListener(e, over)); clearTimeout(timer); done(); };
+    if (inBox) showAudio(url, note, false, false);       // its turn: the box's player takes it ("Voice…" until now)
+    else a.src = url;
+    a.play().then(() => { ends.forEach((e) => a.addEventListener(e, over)); timer = setTimeout(over, 120000); }).catch(over);
+  }));
+}
+// Each state push, for every dispatch waited for: its voice is there (played once, if still fresh), there is none
+// (the note), or its event left the live state / it never came (dropped; the box no longer says "Voice…").
+function syncVoice(now = Date.now()) {
+  const incidents = (cad.state && cad.state.incidents) || [];
+  for (const [id, w] of [...cad.voiceWaits]) {
+    const got = voiceArrived(id, incidents);
+    const fresh = now - w.at <= VOICE_STALE_MS;
+    if (got && got.pending) { w.seen = true; continue; }
+    if (!got && !w.seen && fresh) continue;              // the push with it hasn't come yet
+    cad.voiceWaits.delete(id);
+    if (got && got.url && fresh) voicePlay(id, got.url, got.note);
+    else if (cad.boxDispatch === id) showAudio(got ? got.url : null, got ? got.note : "", false, false);
+  }
 }
 function showPreview(title, text, url, note, r, pending = false) {
   show($("#r-preview-box"), true);
@@ -2253,18 +2276,19 @@ function showPreview(title, text, url, note, r, pending = false) {
 // A dispatch or upgrade just sent: in the box at once; its voice follows with the state (syncVoice).
 function showSent(title, r) {
   const pending = r.audio === "pending";
-  cad.voiceWait = pending ? { id: r.dispatch_id } : null;
+  cad.boxDispatch = r.dispatch_id;
   cad.previewSeq = (cad.previewSeq || 0) + 1;          // a preview's audio still on its way: not played over this
   showPreview(title, r.text, r.audio_url, r.audio_note, r, pending);
+  if (pending) cad.voiceWaits.set(r.dispatch_id, { at: Date.now(), seen: false });
   syncVoice();
 }
 // A preview: its text at once, then its audio (a second, slower call: the voice is rendered for it). A later
 // preview or dispatch takes the box: this one's audio is dropped.
 async function showPreviewThenAudio(title, path, body) {
   const seq = cad.previewSeq = (cad.previewSeq || 0) + 1;
-  cad.voiceWait = null;
   const r = await api("POST", path, body);
   if (cad.previewSeq !== seq) return;
+  cad.boxDispatch = null;                              // the box is the preview's now (a voice waited for still plays)
   showPreview(title(r), r.text, null, "", r, true);
   apiCall("POST", path, { ...body, audio: true }).then((a) => {
     if (cad.previewSeq === seq) showAudio(a.audio_url, a.audio_note, false);

@@ -174,7 +174,8 @@ CREATE TABLE dispatches (
   transmitted INTEGER NOT NULL DEFAULT 0,
   channel TEXT NOT NULL DEFAULT '',
   tx_note TEXT NOT NULL DEFAULT '',
-  audio_state TEXT NOT NULL DEFAULT ''  -- pending (the voice is rendering) | ready | failed; '' = before #426
+  audio_state TEXT NOT NULL DEFAULT '', -- pending (the voice is rendering) | ready | failed; '' = before #426
+  audio_tones TEXT NOT NULL DEFAULT ''  -- the tone groups its voice is rendered with (JSON): a restart renders it again
 );
 """ + """
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -446,8 +447,9 @@ class Store:
             # a unit's latest status change (Close event's and the startup repair's look-up, #232), 2026-11-04
             self.db.execute("CREATE INDEX IF NOT EXISTS unit_history_unit ON unit_history(unit_id, id)")
         dcols = {r["name"] for r in self.db.execute("PRAGMA table_info(dispatches)")}
-        if dcols and "audio_state" not in dcols:         # the voice rendered after the answer (#426): old rows keep ''
-            self.db.execute("ALTER TABLE dispatches ADD COLUMN audio_state TEXT NOT NULL DEFAULT ''")
+        for col in ("audio_state", "audio_tones"):       # the voice rendered after the answer (#426): old rows keep ''
+            if dcols and col not in dcols:
+                self.db.execute(f"ALTER TABLE dispatches ADD COLUMN {col} TEXT NOT NULL DEFAULT ''")
         ecols = {r["name"] for r in self.db.execute("PRAGMA table_info(events)")}
         if ecols and "places" not in ecols:              # a note's "@" places (#67), 2026-10-13: old notes keep ''
             self.db.execute("ALTER TABLE events ADD COLUMN places TEXT NOT NULL DEFAULT ''")
@@ -1493,17 +1495,22 @@ class Store:
 
     def log_dispatch(self, iid: int, *, operator: str, text: str, unit_ids: list[int], audio_path: str,
                      audio_note: str, transmitted: bool, channel: str, tx_note: str, kind: str = "dispatch",
-                     remarks: str = "", tones: str = "", audio_state: str = "") -> int:
+                     remarks: str = "", tones: str = "", audio_state: str = "", audio_tones: str = "",
+                     tx_pending: bool = False) -> int:
         """The dispatch row and its chronology entry, then (same time, right after it: the dispatch's,
         see _attach) "Dispatch remarks: ..." and "Tones: Port Chester + Rye Brook ..." when given.
-        audio_state "pending": logged before its voice is rendered (#426); dispatch_voice() finishes it."""
+        audio_state "pending": logged before its voice is rendered (#426); dispatch_voice() finishes it
+        (audio_tones: what it is rendered with). tx_pending (a transmitter that keys the audio): the entry says
+        "to transmit on FG1" and dispatch_voice() adds how that went."""
         now = self.clock()
         with self.tx() as db:
             cur = db.execute("INSERT INTO dispatches (incident_id, at, operator, kind, text, unit_ids, audio_path, "
-                             "audio_note, transmitted, channel, tx_note, audio_state) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                             "audio_note, transmitted, channel, tx_note, audio_state, audio_tones) "
+                             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                              (iid, now, operator, kind, text, json.dumps(unit_ids), audio_path, audio_note,
-                              int(transmitted), channel, tx_note, audio_state))
-            how = f"transmitted on {channel}" if transmitted else f"not transmitted ({tx_note})"
+                              int(transmitted), channel, tx_note, audio_state, audio_tones))
+            how = (f"to transmit on {channel}" if tx_pending else f"transmitted on {channel}" if transmitted
+                   else f"not transmitted ({tx_note})")
             self._event(db, iid, "dispatch", f"{self.DISPATCH_KINDS.get(kind, kind)}, {how}: {text}", operator, at=now)
             for k, label, v in (("remarks", "Dispatch remarks", remarks), ("tones", "Tones", tones)):
                 if v:
@@ -1517,31 +1524,47 @@ class Store:
                        tx_note: str = "") -> bool:
         """A pending dispatch's voice, rendered after the answer (#426): the row is ready (audio_path) or failed
         (audio_note says why), in one change. transmitted (a transmitter that keys the audio; None: as logged): the
-        row's, and a chronology line when it differs from what was logged. False, nothing written: the row isn't
-        pending any more (swept at a restart, failed at a drain)."""
-        if self.one("SELECT 1 AS x FROM dispatches WHERE id = ? AND audio_state = 'pending'", (did,)) is None:
+        row's, and a chronology line when it differs from what was logged (or nothing was known then: tx_note '').
+        False, nothing written: the row isn't pending any more (failed as too late, or at a restart)."""
+        if not self.voice_pending(did):
             return False                                 # (no transaction: nothing changed, nothing to push)
         with self.tx() as db:
-            row = db.execute("SELECT incident_id, operator, transmitted, channel FROM dispatches WHERE id = ? AND "
+            row = db.execute("SELECT incident_id, operator, transmitted, channel, tx_note FROM dispatches WHERE id = ? AND "
                              "audio_state = 'pending'", (did,)).fetchone()
             if row is None:
                 return False
             db.execute("UPDATE dispatches SET audio_state = ?, audio_path = ?, audio_note = ? WHERE id = ?",
                        ("ready" if audio_path else "failed", audio_path, audio_note, did))
-            if transmitted is not None and (bool(transmitted) != bool(row["transmitted"])):
+            if transmitted is not None and (bool(transmitted) != bool(row["transmitted"]) or not row["tx_note"]):
                 db.execute("UPDATE dispatches SET transmitted = ?, tx_note = ? WHERE id = ?", (int(transmitted), tx_note, did))
                 how = f"transmitted on {row['channel']}" if transmitted else f"not transmitted ({tx_note})"
                 self._event(db, row["incident_id"], "system", f"Dispatch #{did} {how}", row["operator"])
             return True
 
-    def fail_pending_voice(self, why: str, ids: list[int] | None = None) -> int:
-        """Every dispatch still waiting for its voice (ids: only these) is failed with the reason: at a start (the
-        process that was rendering is gone) and at a drain. How many."""
+    def voice_pending(self, did: int) -> bool:
+        return self.one("SELECT 1 AS x FROM dispatches WHERE id = ? AND audio_state = 'pending'", (did,)) is not None
+
+    def pending_voices(self) -> list[dict]:
+        """The dispatches still waiting for their voice, oldest first: {id, at, text, channel, tones (the groups)}."""
+        out = self.q("SELECT id, at, text, channel, audio_tones FROM dispatches WHERE audio_state = 'pending' ORDER BY id")
+        for r in out:
+            try:
+                r["tones"] = json.loads(r.pop("audio_tones") or "[]")
+            except ValueError:
+                r["tones"] = []
+        return out
+
+    def fail_pending_voice(self, why: str, ids: list[int] | None = None, before: float | None = None) -> int:
+        """Every dispatch still waiting for its voice (ids: only these; before: only those sent before then) is
+        failed with the reason: too late, refused by the queue, or left by a process that is gone. How many."""
         with self.lock:
             sql, args = "SELECT id FROM dispatches WHERE audio_state = 'pending'", []
             if ids is not None:
                 sql += f" AND id IN ({','.join('?' * len(ids))})"
                 args = list(ids)
+            if before is not None:
+                sql += " AND at < ?"
+                args.append(before)
             pending = [r["id"] for r in self.db.execute(sql, args)]
         if not pending:
             return 0
