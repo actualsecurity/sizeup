@@ -486,6 +486,10 @@ class Hub:
             if self.health_ is not None:
                 self.health_.observe(st)           # each channel's gaps, for the silence hints
             self.app.channels_check()          # the station runs other channel choices than these: send them
+            try:
+                self.app.reception_seen(st.get("reception"))     # (#410) a reception test that ended: logged, once
+            except Exception as e:  # noqa: BLE001 - a log row, never in the way of the station's report
+                self.log(f"hub: reception test not logged: {type(e).__name__}: {e}")
         if isinstance(d.get("talking"), list):
             self.live.update(d["talking"], now, d.get("paging") if isinstance(d.get("paging"), list) else None)
         return _json(200, {"ok": True, "build": self.build, "caps": ["p25_systems"]})   # (#409: what this hub knows)
@@ -1087,8 +1091,6 @@ class HubApp(App):
         st["talkgroups"] = self.hub.talkgroups
         systems = (self.hub.status or {}).get("p25_systems")
         st["p25_systems"] = systems if isinstance(systems, list) else []      # (#409) the station's other P25 systems
-        rec = (self.hub.status or {}).get("reception")                         # (#410) the station's reception tests
-        st["reception"] = rec if isinstance(rec, dict) and self.hub.connected() else None
         st["rerun"] = self.hub.rerun()
         st["cloud"] = self.hub.cad_cloud()
         return st
@@ -1119,9 +1121,40 @@ class HubApp(App):
     def set_mode(self, mode: str, sdr: str | None = None) -> str | None:
         return self._switch("set_mode", mode, sdr)
 
-    def reception_post(self, body: dict) -> str | None:
-        """Settings > Radios here: a reception test starts, stops or is annotated on the station (#410)."""
-        return self._switch("reception_post", body)
+    def reception_post(self, body: dict, by: str = "") -> str | None:
+        """Settings > Radios here: a reception test starts, stops or is annotated on the station (#410). by: who asked,
+        kept with the test so its end is in their activity (reception_seen)."""
+        return self._switch("reception_post", body, str(by or ""))
+
+    def reception_state(self) -> dict | None:
+        """The station's reception tests as it last reported them (admins only: server.py); None while it is away."""
+        rec = (self.hub.status or {}).get("reception")
+        return rec if isinstance(rec, dict) and self.hub.connected() else None
+
+    def reception_seen(self, rec) -> None:
+        """The station's report: each test that ended since the last one, and each paused job that came back late,
+        is a row in the activity of who started it, once (the hub's Stop doesn't wait for the restore; this is where
+        its outcome is recorded)."""
+        from sizeup.radio import reception
+        rows = rec.get("history") if isinstance(rec, dict) else None
+        if not isinstance(rows, list):
+            return
+        try:
+            done = set(json.loads(self.cad.store.meta_get("reception_audited") or "[]"))
+        except (ValueError, TypeError):
+            done = set()
+        new = []
+        for h in rows:
+            key = f"{h.get('id')}:{h.get('restored')}" if isinstance(h, dict) else ""
+            if not key or key in done or not h.get("ended"):
+                continue
+            new.append(key)
+            if h.get("by"):
+                self.cad.activity.record(str(h["by"]), "action", "reception test", reception.ended_text(h), "",
+                                         reception.restored_ok(h))
+        if new:
+            keep = [f"{h.get('id')}:{h.get('restored')}" for h in rows if isinstance(h, dict)]
+            self.cad.store.meta_put("reception_audited", json.dumps(keep[:80]))
 
     def reception_sample(self, sid: str) -> bytes | None:
         """A call the station's reception test captured, fetched from it as it is asked for: never stored here."""

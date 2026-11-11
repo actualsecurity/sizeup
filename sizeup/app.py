@@ -469,6 +469,7 @@ class App:
         # The reception test (#410, sizeup/radio/reception.py): one dongle lent to one side of such a system for a
         # while, measured instead of kept; the job it paused comes back after (and at a restart: start()).
         self.reception = reception.Tests(self, Path(cfg.clips_dir).parent if cfg.clips_dir else None, log)
+        self.reception.on_end = self._reception_ended
         self.modes = [c.label for c in cfg.channels] + ([P25_MODE] if self.recorder else []) + list(self._sys_jobs)
         if self.shared:
             self.modes.append(OFF_MODE)
@@ -1470,9 +1471,26 @@ class App:
         the unknown talkgroups seen on it and its encrypted activity. [] with none (the hub shows its station's)."""
         return [rt.state(self.assign) for rt in self.systems.values()]
 
-    def reception_post(self, body: dict) -> str | None:
-        """POST /api/reception (#410): start, stop or annotate a reception test. None, or why not."""
-        return self.reception.post(body)
+    def reception_post(self, body: dict, by: str = "") -> str | None:
+        """POST /api/reception (#410): start, stop or annotate a reception test (by: who asked, for the activity log
+        when it ends). None, or why not."""
+        return self.reception.post(body, str(by or ""))
+
+    def reception_state(self) -> dict | None:
+        """GET /api/reception: the reception tests' state (admins: its history and sample list are never in the
+        state everyone gets)."""
+        return self.reception.state()
+
+    def _reception_ended(self, t: dict) -> None:
+        """A reception test is over (or its paused job is back at last): in the activity of who started it. On a
+        station the hub writes it, from the station's report (sizeup/cloud/hub.py)."""
+        if self.cfg.cloud_role == "station" or not t.get("by"):
+            return
+        try:
+            self.cad.activity.record(t["by"], "action", "reception test", reception.ended_text(t), "",
+                                     reception.restored_ok(t))
+        except Exception as e:  # noqa: BLE001 - a log row, never in the way
+            log(f"reception test: activity row not written: {type(e).__name__}: {e}")
 
     def reception_sample(self, sid: str) -> bytes | None:
         """GET /api/reception/sample?id=: a call a reception test captured, while it is kept."""
@@ -2707,6 +2725,8 @@ class App:
                 return f"SDR {self.sdr_name(serial)} is in use by {held.get('app', 'another app')} ({held.get('mode', '?')})"
             if why := self._ambiguity(serial):
                 return f"SDR {self.sdr_name(serial)}: {why}"
+            if self.reception.holds(serial):
+                return f"SDR {self.sdr_name(serial)} is lent to a reception test: stop it first"
         old = self.adsb_sdr
         if serial == old:
             return None
@@ -3072,9 +3092,10 @@ class App:
                 log(f"sdr: {m} was running on SDR {self.sdr_name(sd)}, the ADS-B receiver's dongle: stopped")
                 self._stop_mode(m, f"SDR {self.sdr_name(sd)} is reserved for ADS-B", sd)
 
-    def _stop_mode(self, mode: str, why: str, serial: str) -> None:
+    def _stop_mode(self, mode: str, why: str, serial: str, release: bool = True) -> None:
         """Stop `mode`'s program if it runs on this dongle (not when it runs on another one: two dongles
-        can hold one job, a person's kept beside a replacement's) and release the dongle."""
+        can hold one job, a person's kept beside a replacement's) and release the dongle (release False: sizeup's
+        claim on it stays, for the program that takes it next: a reception test's hand-off, #410)."""
         on = self._program_on(mode) if mode != OFF_MODE else None
         if on is None or on == serial:
             if mode == P25_MODE:
@@ -3086,7 +3107,8 @@ class App:
                 r = self._receiver(mode)
                 if r is not None:
                     r.stop()
-        claims.release(serial)
+        if release:
+            claims.release(serial)
 
     def set_mode(self, mode: str, sdr: str | None = None, by: str = "person") -> str | None:
         """Give dongle `sdr` (default: the first) a channel, Fire/EMS 15 (trunk-recorder) or Off.
@@ -3101,6 +3123,10 @@ class App:
             return f"no SDR {sdr!r} plugged in" + (f"; one of {', '.join(rows)}" if rows else "")
         if mode not in self.modes:
             return f"unknown mode {mode!r}; one of {', '.join(self.modes)}"
+        # (#410) a dongle lent to a reception test: any switch of it ends the test and its paused job comes back
+        lent = self.reception.person_switch(mode, sdr)
+        if lent is not None:
+            return lent or None
         held = claims.other(sdr) if mode != OFF_MODE else None
         if held:
             return f"SDR {self.sdr_name(sdr)} is in use by {held.get('app', 'another app')} ({held.get('mode', '?')})"
@@ -3187,6 +3213,7 @@ class App:
                           "mode": self.assign.get(sd, OFF_MODE), "present": sd in plugged,
                           "ambiguous": self._ambiguity(sd, devs),   # "" or why nothing of ours opens it now
                           "set_by": self.set_by.get(sd),       # "person", "auto" or None (a default / unknown)
+                          "lent": self.reception.lent_row(sd),  # (#410) lent to a reception test: {paused, owed}
                           "held_by": ({"app": c.get("app"), "mode": c.get("mode")} if (c := claims.other(sd)) else None)}
                          for sd in rows]}
 
@@ -3241,7 +3268,6 @@ class App:
               "rerun": dict(self.rerun, pending=len(self._rerun_ids)),
               "talkgroups": self.talkgroups_state() if self.p25 else [],
               "p25_systems": self.p25_systems_state(),
-              "reception": self.reception.state(),
               "talking": self.live.state(),
               "paging": self.paging_state(),
               "prealert": self.cad.prealert_state(),
@@ -3499,6 +3525,7 @@ class App:
 
     def stop(self) -> None:
         self._stopping.set()
+        self.reception.shutdown()              # (#410) a running reception test ends here: its dongle back on its job
         self.attachments.stop()
         for r in self.receivers:
             r.stop()
@@ -3507,7 +3534,6 @@ class App:
                 self._page_done(page)
             except Exception as e:
                 log(f"page hold: {page.label} page not finalised: {type(e).__name__}: {e}")
-        self.reception.shutdown()              # a running test stays written down: the next start ends it
         if self.recorder:
             self.recorder.shutdown()           # its own service (the station) keeps running: the next sizeup adopts it
         if self.p25:
@@ -3602,7 +3628,7 @@ def make_server(app: App, fence=None, listener=None) -> WebServer:
                        trains=app.trains, weather=app.weather, station_health=getattr(app, "health", None),
                        aircraft=app.aircraft, roadwork=app.roadwork, set_adsb=app.set_adsb_receiver,
                        airband_ab=app.airband_ab if cfg.cloud_role != "hub" else None,
-                       reception=(app.reception_post, app.reception_sample),
+                       reception=(app.reception_post, app.reception_sample, app.reception_state),
                        fence=fence, health_fn=lambda: app.health_extra(fence), listener=listener)
 
     def changed() -> None:             # a new talker is pushed at once, not on the next second

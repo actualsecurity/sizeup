@@ -526,6 +526,9 @@ class SystemRecorder(TrunkRecorder):
     priority than the county's."""
 
     preexec = staticmethod(trunkrecd._lower_priority)
+    # A reception test (#410, sizeup/radio/reception.py) sets this while it has the dongle: the time after which the
+    # station's trunk-recorder service stops this system by itself (its state file's "until"). None: for good.
+    until: float | None = None
 
     def __init__(self, name: str, label: str, command: str, workdir: str,
                  on_event: Callable[[str], None] = lambda m: None):
@@ -598,6 +601,8 @@ class SystemUnitRecorder(SystemRecorder, UnitRecorder):
                 for i, (fn, job) in sorted(self.sources.items())} if on else {}
         w = {"on": bool(on and srcs), "sources": srcs, "label": self.label, "pid": os.getpid(), "seq": self._seq,
              "at": time.time()}
+        if on and srcs and self.until:
+            w["until"] = float(self.until)
         p = self.state_path
         p.parent.mkdir(parents=True, exist_ok=True)
         tmp = p.with_name(f".{p.name}.{os.getpid()}")

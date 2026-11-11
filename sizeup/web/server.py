@@ -19,6 +19,7 @@ POST /api/adsb-receiver {"sdr": serial | "", "confirm": true}  admins: name (or 
 POST /api/reception {"action": "start" | "stop" | "note", ...}  admins: a reception test (#410, sizeup/radio/reception.py:
                         one dongle lent to one side of another P25 system; state "reception"); the hub sends it to
                         the station
+GET  /api/reception            its state: the running test, the samples, the history (admins)
 GET  /api/reception/sample?id=<id>  a call a reception test captured, while it is kept (admins; minutes, then deleted)
 Every POST on the station (and all-in-one; not the hub, behind Cloudflare Access) is refused 403 when a browser says
 it came from another site (#307: Sec-Fetch-Site not same-origin / none, else an Origin not this host): it binds
@@ -613,6 +614,12 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                 return self._state(b, url.query, None)
             if path == "/api/stream":
                 return self._stream(b)
+            if path == "/api/reception" and reception is not None:
+                # the reception tests (#410): their state, history and sample list; admins only, never in /api/state
+                if cad is not None and (no := cad.read_refused(path, self.who)) is not None:
+                    return self._send(*no)
+                return self._send(200, json.dumps({"reception": reception[2]()}, separators=(",", ":"), default=str).encode(),
+                                  "application/json", {"Cache-Control": "no-store"})
             if path == "/api/reception/sample" and reception is not None:
                 # a call a reception test captured (#410): admins only, never cached, gone after its minutes
                 if cad is not None and (no := cad.read_refused(path, self.who)) is not None:
@@ -739,10 +746,12 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                 try:
                     n = int(self.headers.get("Content-Length") or 0)
                     body = json.loads(self.rfile.read(min(n, 2048)) or b"{}")
-                    err = reception[0](body)
+                    err = reception[0](body, getattr(self.who, "email", "") or "")
                 except (ValueError, KeyError, TypeError) as e:
                     err = f"bad request: {e}"
                 if err:
+                    if self.who is not None and cad is not None and getattr(self.who, "email", ""):
+                        cad.refused(path, self.who, str(err)[:160], self._client())      # a refused attempt: logged too
                     return self._send(400, json.dumps({"error": err}).encode(), "application/json")
                 self._did(path, body)
                 return self._send(200, b'{"ok":true}', "application/json")

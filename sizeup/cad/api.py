@@ -249,7 +249,8 @@ DS_READERS = ("admin", "dispatcher")      # who may see Settings > Data sources 
 ADMIN_READS = {
     "/api/cad/notify": "the push topics' names are secret",                  # Settings > System > Push notifications
     "/api/cad/health": "station health is for admins (Settings > Health)",   # #203: off the header, on an admin tab
-    "/api/reception/sample": "a reception test's audio is for the admin running it",   # #410 (server.py serves it)
+    "/api/reception": "reception tests are the admins' (Settings > Radios)",          # #410 (server.py serves both)
+    "/api/reception/sample": "a reception test's audio is for the admin running it",
 }
 
 # Who may POST what (enforced only with a verified sign-in, see above): "dispatch" = dispatchers and

@@ -41,7 +41,7 @@ and nothing starts until they let go. sizeup counts this process's claims as its
 More systems than the county's (GitHub #409: MTA MRRS): each <recorder_dir>/systems/<name>/ (its own config.json and
 talkgroups.csv, from deploy/trunk-recorder/systems/) is a second trunk-recorder under this service, with its own state
 (p25_recorder.<name>.json: {"on", "sources": {"<source index>": {"sdr": <serial>, "mode": <its job>}}, "label", "pid",
-"seq"}), status (status.<name>.json), log and dongle claims (SystemSupervisor). It runs only the sources of its
+"seq", "until": only for a reception test (#410): the time after which it is off by itself}), status (status.<name>.json), log and dongle claims (SystemSupervisor). It runs only the sources of its
 config.json that sizeup gave a dongle, with the control channels those cover; nothing asked, nothing runs. The county's
 trunk-recorder above never restarts for another system's sake.
 
@@ -664,12 +664,14 @@ def _runtime_talkgroups(src: Path) -> str:
 
 
 def wanted_system(path: str) -> dict:
-    """{on, sources: {index: {sdr, mode, name}}, label, pid, seq, problem}: what sizeup-station asked of one system."""
+    """{on, sources: {index: {sdr, mode, name}}, label, pid, seq, problem, until}: what sizeup-station asked of one
+    system. until (#410): a time after which it is off whatever else the file says: a reception test's dongle is let
+    go by this service itself when sizeup-station never comes back to end the test."""
     try:
         w = json.loads(Path(path).read_text())
     except (OSError, ValueError):
         w = None
-    off = {"on": False, "sources": {}, "label": "", "pid": None, "seq": None, "problem": ""}
+    off = {"on": False, "sources": {}, "label": "", "pid": None, "seq": None, "problem": "", "until": None}
     if not isinstance(w, dict):
         return off
     pid = w.get("pid") if isinstance(w.get("pid"), int) and not isinstance(w.get("pid"), bool) else None
@@ -684,8 +686,10 @@ def wanted_system(path: str) -> dict:
         sources[int(k)] = {"sdr": sdr, "mode": str(v.get("mode") or "P25")[:60], "name": str(v.get("name") or sdr)[:60]}
     if len({s["sdr"] for s in sources.values()}) != len(sources):
         problem = "one dongle on two sources"
+    until = w.get("until")
+    until = float(until) if isinstance(until, (int, float)) and not isinstance(until, bool) and until > 0 else None
     return {"on": w.get("on") is True and bool(sources or problem), "sources": sources,
-            "label": str(w.get("label") or "")[:60], "pid": pid, "seq": seq, "problem": problem}
+            "label": str(w.get("label") or "")[:60], "pid": pid, "seq": seq, "problem": problem, "until": until}
 
 
 _SIGS: dict[str, tuple] = {}      # path -> ((mtime, size), its content's digest)
@@ -758,6 +762,9 @@ class SystemSupervisor(Supervisor):
     def step(self, now: float | None = None) -> dict:
         now = time.time() if now is None else now
         r, w = self._recorder(), wanted_system(self.state)
+        expired = w["on"] and w["until"] is not None and now >= w["until"]
+        if expired:                                  # (#410) a reception test's deadline: stopped, its dongle let go
+            w = dict(w, on=False)
         d = Path(r["workdir"]) if r["workdir"] else Path(".")
         sdr = sources_sdr(w["sources"])
         key = (sdr, tuple(r["argv"]), r["workdir"], _file_sig(d / "config.json", d / "talkgroups.csv")) if w["on"] else None
@@ -768,7 +775,10 @@ class SystemSupervisor(Supervisor):
         self._let_go({s["sdr"] for s in w["sources"].values()} if w["on"] else set())
         base = {"on": w["on"], "sdr": sdr, "name": label, "system": self.name, "seq": w["seq"], "pid": self.pid,
                 "restarts": self.restarts, "workdir": r["workdir"]}
-        if not w["on"]:
+        if expired:
+            self._set(now, "off", f"{label}: its reception test's time is up: stopped, its dongle let go", expired=True,
+                      **base)
+        elif not w["on"]:
             self._set(now, "off", f"no dongle on {label} (sizeup: Settings > Radios)", **base)
         elif w["problem"]:
             self._set(now, "down", w["problem"], **base)

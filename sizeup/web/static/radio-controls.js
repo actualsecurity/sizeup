@@ -12,7 +12,9 @@
 // controls are locked here too (cad.js roLock). Closing the paged incident is a dispatcher's.
 // The reception test (#410, state "reception", POST /api/reception): one dongle lent to one side of another P25
 // system for a while; its numbers, a verdict, the calls it captured to listen to, and the past tests with their
-// antenna notes. On the hub it is the station's (the hub sends the POST on, and fetches a sample as it is played).
+// antenna notes. Its state is GET /api/reception, admins only (never in /api/state). On the hub it is the station's
+// (the hub sends the POST on, and fetches a sample as it is played). A dongle lent to a test is marked on its row
+// above and its job buttons are locked; a fire dongle can't be picked at all.
 //
 //   RadioControls.mount(box)   when Settings > Radios opens (settings.js)
 "use strict";
@@ -137,6 +139,11 @@ window.RadioControls = (() => {
         st.stateId = s ? r.headers.get("X-State-Id") || "" : "";
         if (s && !s.error) { st.state = s; settle(); render(); }
       }
+      if (!ro()) {                                   // the reception tests (#410): the admins' own, not in the state
+        const x = await fetch("/api/reception", { cache: "no-store" });
+        st.rx = x.ok ? (await x.json()).reception : null;
+      } else st.rx = null;
+      renderReception();
     } catch (_) { /* the next poll tries again */ }
     st.timer = setTimeout(poll, POLL_MS);
   }
@@ -149,7 +156,6 @@ window.RadioControls = (() => {
     renderStorage();
     renderTalkgroups();
     renderRerun();
-    renderReception();
   }
 
   // ---- receivers, SDR, disk -------------------------------------------------------------------------
@@ -282,6 +288,7 @@ window.RadioControls = (() => {
       setText(row.querySelector(".sdr-label"), (list.length > 1 ? `SDR ${x.name || x.serial}` : "SDR") + (x.present ? "" : " unplugged")
               + (x.ambiguous ? " · serial shared: not opened" : "")
               + (x.held_by ? `: ${x.held_by.app} ${x.held_by.mode}` : "")
+              + (x.lent ? (x.lent.owed ? ` · ${x.lent.paused} NOT restored yet` : ` · lent to reception test · ${x.lent.paused === "Off" ? "was Off" : `${x.lent.paused} paused`}`) : "")
               + (x.set_by === "auto" && x.mode !== "Off" ? ` · ${x.mode} · auto` : ""));   // given by [radio] auto_assign
       setText(row.querySelector(".sdr-err"), st.sdrError);
       const nm = (x.name && x.name !== x.serial ? `${x.name} (serial ${x.serial})` : x.serial) + (x.product ? `, ${x.product}` : "");
@@ -297,8 +304,9 @@ window.RadioControls = (() => {
         b.classList.toggle("active", m === x.mode);
         b.classList.toggle("elsewhere", !!there);
         b.title = there ? `${m} is on SDR ${there.name || there.serial}: click to move it here` : "";
-        b.disabled = !!sdr.switching || st.sdrBusy || ro();
+        b.disabled = !!sdr.switching || st.sdrBusy || ro() || !!(x.lent && !x.lent.owed);   // lent: Stop the test instead
       }
+      row.classList.toggle("lent", !!x.lent);
       const ad = row.querySelector(".adsb-use");
       if (ad) {                                       // offered only while no dongle is reserved for ADS-B
         ad.hidden = !sdr.adsb || !!sdr.adsb.serial || !x.serial || ro();
@@ -312,13 +320,13 @@ window.RadioControls = (() => {
   const RX_HELP = "Can this station hear the system with a dongle it already has?\nLend one dongle to one side of the "
     + "system's span (a 2.4 MHz dongle takes in one side at a time; Both runs them one after the other). The job that "
     + "dongle runs is paused and comes back when the test ends, is stopped or fails, and after a restart. A dongle "
-    + "another app holds is never taken. Fire dongles (the county trunk, paging, a fireground) can't be picked unless "
-    + "Fire dongles is ticked, and then only after a warning.\nControl: the control channel found, its decode rate "
+    + "another app holds is never taken. Fire dongles (the county trunk, paging, a fireground) can't be lent.\nControl: the control channel found, its decode rate "
     + "(about 40 messages/s is full strength), the share of the time it decoded (10/s or more in a 3 s window), the "
-    + "longest dropout.\nSite: what the control channel said it is, against the site as listed.\nGrants: key-ups the "
+    + "longest dropout, each of the windows there should have been.\nSite: what the control channel said it is, against the site as listed.\nGrants: key-ups the "
     + "control channel announced, on either side. Calls: voice this dongle captured (its side only). Off side: grants "
-    + "on a voice channel this dongle doesn't cover.\nVerdict: Good = decoded 90% of the time or more; None = under "
-    + "5%; Marginal = between, another site, or voice with over 5 errors/s.\nNothing of a test is transcribed or "
+    + "on a voice channel this dongle doesn't cover.\nVerdict: Good = decoded 90% of the time or more at 30 messages/s "
+    + "or more; None = under 5%; Marginal = between, another site, or voice with over 5 errors/s. The numbers are a "
+    + "first guess, not calibrated.\nNothing of a test is transcribed or "
     + "kept as radio traffic. Encrypted talkgroups are counted only. The calls it captured can be played here for a "
     + "few minutes (Sample), then they are deleted.\nSome traffic is carried over LTE and is never on the air: a "
     + "scanner misses it too.";
@@ -340,13 +348,8 @@ window.RadioControls = (() => {
     const n = st.n;
     n.rxSys = rxSelect("rx-sys", "System", "The system to test");
     n.rxJob = rxSelect("rx-job", "Side", "The side of the span the dongle listens to. Both: one after the other, each for the time picked.");
-    n.rxSdr = rxSelect("rx-sdr", "SDR", "The dongle to lend. Greyed out: held by another app, unplugged, or a fire dongle.");
+    n.rxSdr = rxSelect("rx-sdr", "SDR", "The dongle to lend. Greyed out: held by another app, unplugged, or a fire dongle (never lent).");
     n.rxTime = rxSelect("rx-time", "Time", "How long each side is measured. Until stopped ends by itself after 24 h.");
-    n.rxFire = el("input");
-    n.rxFire.type = "checkbox";
-    const fire = el("label", "rx-fire small", "");
-    fire.append(n.rxFire, " Fire dongles");
-    fire.title = "Let the county trunk, paging and fireground dongles be picked. Their job is NOT heard while the test runs.";
     n.rxKeep = el("input", "sm rx-keep");
     Object.assign(n.rxKeep, { type: "number", min: 0, max: 60, step: 1, value: 10 });
     n.rxKeep.setAttribute("aria-label", "Sample minutes");
@@ -361,15 +364,17 @@ window.RadioControls = (() => {
     n.rxGo.type = "button";
     n.rxGo.addEventListener("click", rxStart);
     n.rxForm = el("div", "row rx-form");
-    n.rxForm.append(n.rxSys, n.rxJob, n.rxSdr, n.rxTime, keep, fire, n.rxNote, n.rxGo);
-    for (const x of [n.rxSdr, n.rxFire, n.rxJob]) x.addEventListener("change", () => { rxSt.key = ""; renderReception(); });
+    n.rxForm.append(n.rxSys, n.rxJob, n.rxSdr, n.rxTime, keep, n.rxNote, n.rxGo);
+    for (const x of [n.rxSdr, n.rxJob]) x.addEventListener("change", () => { rxSt.key = ""; renderReception(); });
+    n.rxAlert = el("p", "notice err rx-alert");
+    n.rxAlert.hidden = true;
     n.rxPause = el("div", "small rx-pause");
     n.rxErr = el("div", "sdr-err");
     n.rxLive = el("div", "rx-live");
     n.rxSamples = el("div", "rx-samples");
     n.rxHist = el("div", "rx-hist");
     n.rxHist.addEventListener("change", rxNoteChange);
-    return [n.rxForm, n.rxPause, n.rxErr, n.rxLive, n.rxSamples, n.rxHist];
+    return [n.rxAlert, n.rxForm, n.rxPause, n.rxErr, n.rxLive, n.rxSamples, n.rxHist];
   }
 
   function rxOptions(sel, rows, keep) {       // rows: [value, text, disabled]
@@ -472,9 +477,12 @@ window.RadioControls = (() => {
   }
 
   function renderReception() {
-    const n = st.n, rx = st.state && st.state.reception;
+    const n = st.n, rx = st.rx;
+    if (!n.rxCard) return;
     show(n.rxCard, !!rx);
     if (!rx) return;
+    setText(n.rxAlert, rx.alert || "");
+    show(n.rxAlert, !!rx.alert);
     const a = rx.active, locked = ro();
     // the form
     show(n.rxForm, !a);
@@ -485,14 +493,11 @@ window.RadioControls = (() => {
     rxOptions(n.rxJob, [...sys.jobs.map((j) => [j.job, `${rxSide(j.job)} side · ${j.mhz}`]),
                         ...(sys.jobs.length > 1 ? [[sys.jobs.map((j) => j.job).join("|"), "Both, in turn"]] : [])]);
     rxOptions(n.rxTime, rx.durations.map((m) => [String(m), RX_TIMES[m] || `${m} min`, m === 0 && n.rxJob.value.includes("|")]));
-    rxOptions(n.rxSdr, rx.dongles.map((d) => [d.serial, `SDR ${d.name} · ${d.refuse || d.job}`, !!d.refuse || (!!d.protected && !n.rxFire.checked)]));
-    const d = rx.dongles.find((x) => x.serial === n.rxSdr.value);
-    setText(n.rxPause, !d ? "No dongle to lend" : d.job === "Off" ? "" : d.protected
-      ? `STOPS ${d.job} (${d.protected}) on SDR ${d.name} for the test: not heard meanwhile`
-      : `Pauses ${d.job} on SDR ${d.name}; restored after`);
-    n.rxPause.classList.toggle("rx-danger", !!(d && d.protected && d.job !== "Off"));
+    rxOptions(n.rxSdr, rx.dongles.map((d) => [d.serial, `SDR ${d.name} · ${d.job}${d.refuse ? ` · ${d.protected ? "fire: not lendable" : d.refuse}` : ""}`, !!d.refuse]));
+    const d = rx.dongles.find((x) => x.serial === n.rxSdr.value && !x.refuse);
+    setText(n.rxPause, !d ? "No dongle to lend" : d.job === "Off" ? "" : `Pauses ${d.job} on SDR ${d.name}; restored after`);
     n.rxGo.disabled = rxSt.busy || locked || !d;
-    for (const x of [n.rxSys, n.rxJob, n.rxSdr, n.rxTime, n.rxKeep, n.rxFire, n.rxNote]) x.disabled = locked;
+    for (const x of [n.rxSys, n.rxJob, n.rxSdr, n.rxTime, n.rxKeep, n.rxNote]) x.disabled = locked;
     setText(n.rxErr, rxSt.error);
     // the running test
     const key = JSON.stringify([a && [a.id, a.step, a.phase, a.halves.length, a.running, Math.floor((a.now - (a.phase_started || a.now)) / 2)], locked, rxSt.busy]);
@@ -503,14 +508,18 @@ window.RadioControls = (() => {
         const head = el("div", "row rx-run");
         const job = a.plan[a.phase], total = a.minutes ? a.minutes * 60 : 0;
         const went = a.phase_started ? a.now - a.phase_started : 0;
-        head.append(el("b", "", a.step === "starting" ? `Starting ${job}` : `${job}${a.plan.length > 1 ? ` (${a.phase + 1} of ${a.plan.length})` : ""}`),
+        const paused = el("span", "pill rx-paused", a.was && a.was !== "Off" ? `${a.was} PAUSED` : "");
+        paused.title = "This job is off its dongle while the test runs. It comes back when the test ends, is stopped or fails.";
+        show(paused, !!(a.was && a.was !== "Off"));
+        head.append(el("b", "", a.step === "stopping" ? `Stopping ${job}` : a.step === "starting" ? `Starting ${job}`
+                                : `${job}${a.plan.length > 1 ? ` (${a.phase + 1} of ${a.plan.length})` : ""}`),
                     el("span", "", `SDR ${a.sdr_name}`),
-                    el("span", "", a.step === "starting" ? "" : total ? `${hms(went)} of ${hms(total)}` : `${hms(went)}, until stopped`),
-                    el("span", "dim", a.was && a.was !== "Off" ? `${a.was} paused` : ""));
+                    el("span", "", a.step !== "running" ? "" : total ? `${hms(went)} of ${hms(total)}` : `${hms(went)}, until stopped`),
+                    paused);
         const stop = el("button", "sm", "Stop");
         stop.type = "button";
         stop.title = "End the test now: its numbers so far are kept, the dongle goes back to its job";
-        stop.disabled = rxSt.busy || locked;
+        stop.disabled = rxSt.busy || locked || a.step === "stopping";
         stop.addEventListener("click", () => rxPost({ action: "stop" }));
         head.append(stop);
         kids.push(head, ...a.halves.map((h) => rxSideBlock(h, false)));
@@ -561,6 +570,7 @@ window.RadioControls = (() => {
           const verdict = el("td");
           hs.forEach((x) => { const p = rxPill(x.grade); p.title = x.hint || ""; verdict.append(p, " "); });
           if (h.status !== "done") verdict.append(el("span", "dim small", h.status));
+          if (h.restored_ok === false) verdict.append(el("span", "pill err", "not restored"));
           verdict.title = [h.why, h.restored && `SDR ${h.sdr_name}: ${h.restored}`].filter(Boolean).join("\n");
           const note = el("input", "sm rx-note");
           Object.assign(note, { type: "text", maxLength: 200, value: h.note || "", disabled: locked, placeholder: "Antenna note" });
@@ -602,28 +612,26 @@ window.RadioControls = (() => {
       rxSt.busy = false;
       rxSt.key = "";
       renderReception();
+      poll();                                        // the test's new state now, not at the next poll
     }
     return ok;
   }
 
   async function rxStart() {
-    const n = st.n, rx = st.state && st.state.reception;
-    const d = rx && rx.dongles.find((x) => x.serial === n.rxSdr.value);
+    const n = st.n, rx = st.rx;
+    const d = rx && rx.dongles.find((x) => x.serial === n.rxSdr.value && !x.refuse);
     if (!d || ro()) return;
     const minutes = Number(n.rxTime.value), jobs = n.rxJob.value.split("|");
     const body = { action: "start", system: n.rxSys.value, jobs, sdr: d.serial, minutes, keep_min: Number(n.rxKeep.value) || 0, note: n.rxNote.value };
     const span = (RX_TIMES[minutes] || "").toLowerCase() + (jobs.length > 1 ? " a side" : "");
     if (d.job !== "Off") {
-      const yes = await UI.confirm(d.protected
-        ? `SDR ${d.name} runs ${d.job}: ${d.protected}. While the test runs (${span}) ${d.job} is NOT heard: calls on it are missed. `
-          + "It comes back when the test ends. Lend it anyway?"
-        : `Pause ${d.job} on SDR ${d.name} for the test (${span})? It comes back when the test ends, is stopped or fails, and after a restart.`,
-        { ok: d.protected ? `Stop ${d.job} and test` : `Pause ${d.job}`, title: "Reception test", danger: !!d.protected });
+      const yes = await UI.confirm(`Pause ${d.job} on SDR ${d.name} for the test (${span})? ${d.job} is not heard meanwhile. `
+        + "It comes back when the test ends, is stopped or fails, and after a restart.",
+        { ok: `Pause ${d.job}`, title: "Reception test", danger: false });
       if (!yes) return;
       body.pause = d.job;
-      if (d.protected) body.protected = true;
     }
-    if (await rxPost(body)) { n.rxNote.value = ""; n.rxFire.checked = false; }
+    if (await rxPost(body)) n.rxNote.value = "";
   }
 
   function rxNoteChange(e) {
