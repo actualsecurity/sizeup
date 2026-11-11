@@ -44,10 +44,13 @@
 //                one), numbered from zoom 17. A train lies along the track the hub puts it on ("lane": the track
 //                posted or planned for the stop it left or is going to, kept until another stop says otherwise;
 //                else its direction's outer track). "Trk 2" in its box only near the stop that said so ("trk").
+//                From zoom 15 the basemap's own rail line (OpenStreetMap's) is hidden where they are drawn
+//                (railMask): it ran between them.
 //   Poles · MP   (#371) a second box in the group, "Poles · mileposts" (key "railref", off by default, kept per
 //                viewer like every layer: maplayers.js): each catenary structure as Metro-North's TrainTime draws it,
 //                a thin line square across the tracks (the hub's "tick") with its number on a yellow tag at one
-//                end, from zoom 16 (POLE_ZOOM; a tag that would overlap another is left out), the mileposts (whole
+//                end (its east end: a milepost's label reads to the west of it), from zoom 16 (POLE_ZOOM; a tag
+//                that would overlap another is left out; a tag outranks a milepost's label), the mileposts (whole
 //                miles from zoom 12, tenths from 15), from GET /api/cad/trains/railref once while on. A train's
 //                box and the event's panel say "near pole 249 · MP 25.3" when the hub knows them (within 150 m of
 //                the line).
@@ -484,20 +487,77 @@ window.TrainLayer = (() => {
   }
 
   // The structures for the map (#374): each one's tick across the tracks (the hub's, square to them there) and its
-  // tag's point at the first end, anchored so the tag sits beyond the end (screen axes: east right, north up); a
-  // structure the hub has no tick for: its tag at its point.
+  // tag's point at its east end (the first, if it runs north-south), anchored so the tag sits beyond the end (screen
+  // axes: east right, north up); a structure the hub has no tick for: its tag at its point. East, because a
+  // milepost's label reads to the west of it (tr-mp-label) and Metro-North's mileposts stand by the tracks' middle,
+  // 2 in 3 within 30 m of a structure: a tag at the west end collided with the label and was left out.
   function poleFeatures(poles) {
     const out = [];
     for (const p of poles || []) {
       const t = Array.isArray(p.tick) && p.tick.length === 2 ? p.tick : null;
       if (t) out.push({ type: "Feature", geometry: { type: "LineString", coordinates: t }, properties: { kind: "pole", id: p.id } });
-      const [x, y] = t ? t[0] : [p.lon, p.lat];
-      const dx = t ? (t[0][0] - t[1][0]) * Math.cos(t[0][1] * RAD) : 1, dy = t ? t[0][1] - t[1][1] : 0;
+      const [e, o] = t ? (t[1][0] > t[0][0] ? [t[1], t[0]] : t) : [];
+      const [x, y] = t ? e : [p.lon, p.lat];
+      const dx = t ? (e[0] - o[0]) * Math.cos(e[1] * RAD) : 1, dy = t ? e[1] - o[1] : 0;
       const [anchor, off] = Math.abs(dx) >= Math.abs(dy) ? (dx >= 0 ? ["left", [0.4, 0]] : ["right", [-0.4, 0]])
         : dy >= 0 ? ["bottom", [0, -0.3]] : ["top", [0, 0.3]];
       out.push(pt(x, y, { kind: "pole-tag", id: p.id, anchor, off }));
     }
     return out;
+  }
+  // Where our numbered tracks are drawn (#374): a corridor around them, as GeoJSON polygons, for hiding the basemap's
+  // own rail line there (railMask). The tracks' points ([lon, lat, s]) are put in bins RAIL_BIN_M long by s and
+  // averaged into a centre line, broken where no track has a point for RAIL_GAP_M; each piece widened RAIL_PAD_M
+  // past the outermost track. null: no tracks.
+  const RAIL_BIN_M = 25, RAIL_GAP_M = 150, RAIL_PAD_M = 20, RAIL_MASK_ZOOM = 15, BASE_RAIL = "rail";
+  function trackCorridor(tracks) {
+    const pts = [];
+    for (const runs of Object.values(tracks || {})) for (const run of runs || []) {
+      (run || []).forEach((c, i) => {                // each step cut every half bin: a straight run has few points
+        if (!(c && c.length >= 3)) return;
+        const b = i ? run[i - 1] : null, n = b ? Math.ceil(Math.abs(c[2] - b[2]) / (RAIL_BIN_M / 2)) : 1;
+        for (let k = 1; k <= n; k++) pts.push(b ? [b[0] + (c[0] - b[0]) * k / n, b[1] + (c[1] - b[1]) * k / n, b[2] + (c[2] - b[2]) * k / n] : c);
+      });
+    }
+    if (pts.length < 2) return null;
+    pts.sort((a, b) => a[2] - b[2]);
+    const bins = new Map();
+    for (const [lon, lat, s] of pts) {
+      const k = Math.floor(s / RAIL_BIN_M), b = bins.get(k) || { lon: 0, lat: 0, s: 0, n: 0, pts: [] };
+      b.lon += lon; b.lat += lat; b.s += s; b.n += 1; b.pts.push([lon, lat]); bins.set(k, b);
+    }
+    const centre = [...bins.values()].map((b) => ({ lon: b.lon / b.n, lat: b.lat / b.n, s: b.s / b.n, pts: b.pts }));
+    const pieces = [[]];
+    for (const c of centre) {
+      const cur = pieces[pieces.length - 1];
+      if (cur.length && c.s - cur[cur.length - 1].s > RAIL_GAP_M) pieces.push([c]); else cur.push(c);
+    }
+    const polys = [];
+    for (const piece of pieces) {
+      if (piece.length < 2) continue;
+      const kx = R_EARTH * RAD * Math.cos(piece[0].lat * RAD), ky = R_EARTH * RAD;   // metres a degree, here
+      let half = 0;                             // the outermost track's distance from the centre line
+      for (const c of piece) for (const [lon, lat] of c.pts) half = Math.max(half, Math.hypot((lon - c.lon) * kx, (lat - c.lat) * ky));
+      half = Math.min(half, 60) + RAIL_PAD_M;
+      const left = [], right = [];
+      piece.forEach((c, i) => {
+        const a = piece[Math.max(0, i - 1)], b = piece[Math.min(piece.length - 1, i + 1)];
+        const dx = (b.lon - a.lon) * kx, dy = (b.lat - a.lat) * ky, L = Math.hypot(dx, dy) || 1;
+        const nx = -dy / L * half / kx, ny = dx / L * half / ky;                    // the left, going up the line
+        left.push([c.lon + nx, c.lat + ny]); right.push([c.lon - nx, c.lat - ny]);
+      });
+      const ring = [...left, ...right.reverse()];
+      ring.push(ring[0]);
+      polys.push([ring]);
+    }
+    return polys.length ? { type: "MultiPolygon", coordinates: polys } : null;
+  }
+  // the basemap's rail layer's filter with the corridor masked out from RAIL_MASK_ZOOM (a top-level step on zoom, as
+  // a filter's zoom must be); the original filter with no corridor
+  function railFilter(orig, corridor) {
+    if (!corridor) return orig;
+    const masked = ["!", ["within", { type: "Feature", geometry: corridor, properties: {} }]];
+    return ["step", ["zoom"], orig || true, RAIL_MASK_ZOOM, orig ? ["all", orig, masked] : masked];
   }
   // a tag behind a label (icon-text-fit), in one colour: rounded corners kept, the middle stretched
   const CHIP_OPTS = { pixelRatio: 2, stretchX: [[6, 18]], stretchY: [[6, 18]], content: [5, 5, 19, 19] };
@@ -541,6 +601,7 @@ window.TrainLayer = (() => {
     add() {
       const map = this.map;
       if (map.getSource(SRC_TR)) { this.added = true; return; }
+      this.railFor = undefined;                 // a new style: its rail layer unmasked (railMask)
       const glyphs = !!(map.getStyle() && map.getStyle().glyphs);
       const ids = (map.getStyle().layers || []).map((x) => x.id);
       const before = ids.find((id) => id.startsWith("ml-") || id === "cm-lines" || id === "firehouse");
@@ -625,20 +686,22 @@ window.TrainLayer = (() => {
       const isMp = ["==", ["get", "kind"], "mp"], isPole = ["==", ["get", "kind"], "pole"];
       const mpZoom = ["any", ["get", "whole"], [">=", ["zoom"], 15]];
       // each structure as TrainTime draws it: a thin light line square across the tracks, its number on a yellow tag
-      // just past one end; from POLE_ZOOM, where they don't crowd. A tag that would overlap another is left out.
+      // just past its east end (poleFeatures); from POLE_ZOOM, where they don't crowd. A tag that would overlap another is
+      // left out.
       if (!map.hasImage(POLE_CHIP)) { const img = chipImage(POLE_TAG); if (img) map.addImage(POLE_CHIP, img, CHIP_OPTS); }
       map.addLayer({ id: "tr-pole", type: "line", source: SRC_REF, filter: isPole, minzoom: POLE_ZOOM, layout: { ...vis, "line-cap": "butt" },
                      paint: { "line-color": text, "line-opacity": 0.85, "line-width": ["interpolate", ["linear"], ["zoom"], POLE_ZOOM, 1, 19, 2] } }, before);
-      map.addLayer({ id: "tr-pole-label", type: "symbol", source: SRC_REF, filter: ["==", ["get", "kind"], "pole-tag"], minzoom: POLE_ZOOM,
-                     layout: { ...vis, ...label(["get", "id"], 10, { "text-anchor": ["get", "anchor"], "text-offset": ["get", "off"],
-                                                                     "text-optional": false, "icon-image": POLE_CHIP, "icon-text-fit": "both",
-                                                                     "icon-text-fit-padding": [1, 3, 0, 3] }) },
-                     paint: { "text-color": POLE_INK } }, before);
       map.addLayer({ id: "tr-mp", type: "circle", source: SRC_REF, filter: ["all", isMp, ["get", "whole"]], minzoom: 12, layout: vis,
                      paint: { "circle-radius": 3, "circle-color": warn, "circle-stroke-color": HALO, "circle-stroke-width": 1 } }, before);
       map.addLayer({ id: "tr-mp-label", type: "symbol", source: SRC_REF, filter: ["all", isMp, mpZoom], minzoom: 12,
                      layout: { ...vis, ...label(["get", "label"], 10, { "text-anchor": "right", "text-offset": [-0.6, 0] }) },
                      paint: { "text-color": warn, "text-halo-color": HALO, "text-halo-width": 1.4 } }, before);
+      // after the milepost labels: placed first, so a tag outranks a milepost label it would overlap
+      map.addLayer({ id: "tr-pole-label", type: "symbol", source: SRC_REF, filter: ["==", ["get", "kind"], "pole-tag"], minzoom: POLE_ZOOM,
+                     layout: { ...vis, ...label(["get", "id"], 10, { "text-anchor": ["get", "anchor"], "text-offset": ["get", "off"],
+                                                                     "text-optional": false, "icon-image": POLE_CHIP, "icon-text-fit": "both",
+                                                                     "icon-text-fit-padding": [1, 3, 0, 3] }) },
+                     paint: { "text-color": POLE_INK } }, before);
       for (const id of CLICKABLE) {
         map.on("mouseenter", id, () => { map.getCanvas().style.cursor = "pointer"; });
         map.on("mouseleave", id, () => { map.getCanvas().style.cursor = ""; });
@@ -671,7 +734,19 @@ window.TrainLayer = (() => {
         this.draw(true, Date.now());
         this.tick(true);                        // the open box and the follow chip: this answer's facts
       } else if (!on && this.following) this.fol.stop();
+      this.railMask(on && d ? this.tracks : null);
       this.panelChanged();
+    }
+    // The basemap's dashed rail line (map-style.js "rail", OpenStreetMap's) ran between our numbered tracks: hidden
+    // from zoom 15 wherever they are drawn (trackCorridor), kept elsewhere and zoomed out; put back with the layer off
+    railMask(tracks) {
+      const map = this.map;
+      if (!map.getLayer || !map.getLayer(BASE_RAIL)) return;
+      tracks = tracks || null;
+      if (this.railFor === tracks) return;
+      if (this.railFor === undefined) this.railOrig = map.getFilter(BASE_RAIL) || null;   // the style's own, unmasked
+      map.setFilter(BASE_RAIL, railFilter(this.railOrig, tracks && trackCorridor(tracks)));
+      this.railFor = tracks;
     }
     syncRef() {                                 // the poles and mileposts (#371): set once a copy is here
       const r = refStore.data;
@@ -1066,5 +1141,5 @@ window.TrainLayer = (() => {
     host.append(foot);
   }
 
-  return { panel, load, maps, data: () => store.data, KEY, REF_KEY, placeRow, onTrack, poleFeatures };
+  return { panel, load, maps, data: () => store.data, KEY, REF_KEY, placeRow, onTrack, poleFeatures, trackCorridor, railFilter, TrainMap };
 })();

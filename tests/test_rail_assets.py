@@ -713,26 +713,80 @@ out.said = run("said"); out.held = run("held"); out.outer = run("outer"); out.st
 
 @pytest.mark.skipif(NODE is None, reason="node not installed")
 def test_the_page_draws_each_structure_as_a_tick_with_a_tag_beyond_its_end(tmp_path):
-    """TrainTime's look: the hub's tick as a line, the number at its first end on a yellow tag that sits beyond it
-    (east-west tick: left or right of the end; north-south: above or below); no tick: the tag at the structure."""
+    """TrainTime's look: the hub's tick as a line, the number on a yellow tag that sits beyond its east end (a
+    milepost's label reads to the west of it: at the west end the two collided and the tag was left out; north-south:
+    the first end, above or below it); no tick: the tag at the structure. The tags outrank the mileposts' labels."""
     out = page(tmp_path, """
 out.f = TrainLayer.poleFeatures([{ id: "236", lon: -73.70, lat: 41.0, tick: [[-73.70, 41.00008], [-73.70, 40.99992]] },
                                  { id: "237", lon: -73.69, lat: 41.0, tick: [[-73.69011, 41.0], [-73.68989, 41.0]] },
-                                 { id: "238", lon: -73.68, lat: 41.0 }]);
+                                 { id: "238", lon: -73.68, lat: 41.0 },
+                                 { id: "239", lon: -73.67, lat: 41.0, tick: [[-73.66989, 41.00002], [-73.67011, 40.99998]] }]);
 """, {})
     f = out["f"]
     assert [(x["geometry"]["type"], x["properties"]["kind"], x["properties"]["id"]) for x in f] == [
         ("LineString", "pole", "236"), ("Point", "pole-tag", "236"), ("LineString", "pole", "237"), ("Point", "pole-tag", "237"),
-        ("Point", "pole-tag", "238")]
+        ("Point", "pole-tag", "238"), ("LineString", "pole", "239"), ("Point", "pole-tag", "239")]
     assert f[1]["geometry"]["coordinates"] == [-73.70, 41.00008] and f[1]["properties"]["anchor"] == "bottom"   # above the north end
-    assert f[3]["geometry"]["coordinates"] == [-73.69011, 41.0] and f[3]["properties"]["anchor"] == "right"    # left of the west end
+    assert f[3]["geometry"]["coordinates"] == [-73.68989, 41.0] and f[3]["properties"]["anchor"] == "left"     # right of the east end
     assert f[4]["geometry"]["coordinates"] == [-73.68, 41.0]
+    assert f[6]["geometry"]["coordinates"] == [-73.66989, 41.00002] and f[6]["properties"]["anchor"] == "left"   # east end first
     js = (Path(__file__).resolve().parent.parent / "sizeup" / "web" / "static" / "trains.js").read_text()
     pole = js[js.index('map.addLayer({ id: "tr-pole", type: "line"'):js.index('map.addLayer({ id: "tr-mp"')]
+    pole += js[js.index('map.addLayer({ id: "tr-pole-label"'):js.index("for (const id of CLICKABLE)")]
+    assert js.index('id: "tr-mp-label"') < js.index('id: "tr-pole-label"')   # placed later in the stack: placed first, wins
     assert pole.count("minzoom: POLE_ZOOM") == 2 and "const POLE_ZOOM = 16" in js and 'POLE_TAG = "#F2D13A"' in js
     assert '"icon-image": POLE_CHIP, "icon-text-fit": "both"' in pole and '"text-optional": false' in pole
     assert "allow-overlap" not in pole and "ignore-placement" not in pole            # a tag that would overlap: left out
     assert 'type: "circle", source: SRC_REF, filter: isPole' not in js                # no dots any more
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_the_basemap_rail_line_is_hidden_where_the_numbered_tracks_are_drawn(tmp_path):
+    """The basemap's own dashed rail line (OpenStreetMap's, map-style.js "rail") ran between our numbered tracks: from
+    zoom 15 it is masked out of a corridor around them (one piece per stretch of track, split at a gap), kept below 15
+    and elsewhere, and put back as the style had it once the trains layer is off or a new style is loaded."""
+    E = 1 / T.MX
+    def run(x0, x1, off):                 # a straight track east along 41 N, as the hub sends it: [lon, lat, s], 2 points
+        return [[round(LON0 + x0 * E, 7), LAT + off * DLAT, x0], [round(LON0 + x1 * E, 7), LAT + off * DLAT, x1]]
+    tracks = {k: [run(0, 2000, o), run(2600, 4000, o)] for k, o in OFF.items()}      # a 600 m gap: two pieces
+    out = page(tmp_path, """
+const C = TrainLayer.trackCorridor(IN.tracks);
+const inside = (ring, x, y) => { let c = false; for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+  const [xi, yi] = ring[i], [xj, yj] = ring[j]; if ((yi > y) !== (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi) c = !c; } return c; };
+const at = (x, off) => [-73.70 + x / IN.mx, 41.0 + off / 110574.0];
+const where = (p) => C.coordinates.findIndex((poly) => inside(poly[0], p[0], p[1]));
+out.type = C.type; out.pieces = C.coordinates.length;
+out.on = [at(1000, 6), at(1000, -6), at(1000, 20), at(3300, 0)].map(where);
+out.off = [at(1000, 40), at(2300, 0), at(5000, 0)].map(where);
+out.none = TrainLayer.trackCorridor({});
+const orig = ["==", ["get", "class"], "rail"];
+out.f = TrainLayer.railFilter(orig, C);
+out.plain = TrainLayer.railFilter(orig, null);
+const calls = [];
+const map = { layers: { rail: true }, filter: orig, getLayer(id) { return this.layers[id]; }, getFilter() { return this.filter; },
+              setFilter(id, f) { calls.push(id); this.filter = f; } };
+const tm = { map }, mask = TrainLayer.TrainMap.prototype.railMask;
+mask.call(tm, IN.tracks); out.masked = map.filter[0] === "step"; out.n1 = calls.length;
+mask.call(tm, IN.tracks); out.n2 = calls.length;                              // the same tracks: not set again
+mask.call(tm, null); out.back = map.filter;
+const bare = { map: { getLayer: () => null, setFilter() { throw new Error("no rail layer"); } } };
+mask.call(bare, IN.tracks); out.bare = true;
+""", {"tracks": tracks, "mx": T.MX})
+    assert out["type"] == "MultiPolygon" and out["pieces"] == 2
+    assert out["on"] == [0, 0, 0, 1]                    # on each track, just past the outer ones, in the second piece
+    assert out["off"] == [-1, -1, -1]                   # 34 m past the outer track, in the gap, beyond the end
+    assert out["none"] is None
+    f = out["f"]
+    assert f[:2] == ["step", ["zoom"]] and f[2] == ["==", ["get", "class"], "rail"] and f[3] == 15
+    assert f[4][0] == "all" and f[4][1] == f[2] and f[4][2][0] == "!" and f[4][2][1][0] == "within"
+    assert out["plain"] == ["==", ["get", "class"], "rail"]
+    assert out["masked"] and out["n1"] == 1 and out["n2"] == 1 and out["back"] == ["==", ["get", "class"], "rail"] and out["bare"]
+    js = (Path(__file__).resolve().parent.parent / "sizeup" / "web" / "static" / "trains.js").read_text()
+    assert "this.railMask(on && d ? this.tracks : null);" in js            # on with the layer, off without it
+    add = js[js.index("    add() {"):js.index("    sync() {")]
+    assert "this.railFor = undefined;" in add                              # a new style: masked afresh
+    style = (Path(__file__).resolve().parent.parent / "sizeup" / "web" / "static" / "map-style.js").read_text()
+    assert 'base("rail", "line", "transportation"' in style               # the layer it masks
 
 
 MAPS = r"""
