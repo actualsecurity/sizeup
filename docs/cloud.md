@@ -1820,11 +1820,13 @@ change of pace can make is glided: as an aircraft eases onto a new fix, but on a
 train is drawn to rest on the fix (no jump, no step in speed, no jolt at either end), as slow as it must be: never
 faster than the train + 25 % + 2 m/s going on (acceleration at most 1.5 m/s², 3 to 20 s), nor 25 m/s going back
 (at most 3 m/s², up to 26 s: about 330 m, every no-evidence stop at 20-60 mph); faintly ringed meanwhile. One that
-would take longer (in practice over about 330 m back, or 75 m on at 45 mph), or is over 600 m, is faded out where the
+would take longer (in practice over about 330 m back, or over 400 m on), or is over 600 m, is faded out where the
 train is drawn and in at the fix (0.8 s) instead. Any catch-up is held to the same 1.25× + 2 m/s (and the consist's vmax). A train drawn past where a fix says
 it stopped (or will stop) is braked hard to rest (up to 4 m/s², eased in), then glided back (the user: "I'm fine
-with an overshoot if we keep it smooth"); a fix more than 400 m ahead, a GTFS-realtime report (no speed) more than
-100 m ahead, or the first real fix of a train drawn on our estimate is glided (or faded) on to. An ease for want of
+with an overshoot if we keep it smooth"); a fix more than 400 m ahead (a GTFS-realtime report too: under that, the
+band closes it, 150 m in about 35 s, 300 m in about 65 s) or the first real fix of a train drawn on our estimate is
+glided (or faded) on to. A new fix mid-glide that moves the target is taken into the glide as a smooth shift, never
+re-planned, so a glide never ends in a fade or a hitch. An ease for want of
 news is no data: the drawn train follows it to rest without a nudge back. Measured with synthetic fixes at the real
 cadence (a fix every 3 to 12 s, 3 to 16 s old when read, ±10 m GPS noise): a steady 45 mph train is drawn at 39-51
 mph (coefficient of variation 0.03-0.06, the same with ±1 mph of speed noise; #378's: 0-110 mph, 0.45-0.69, hollow

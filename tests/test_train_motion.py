@@ -205,9 +205,9 @@ out.b = drive("b", 0, 30, 1);
 def test_a_new_fix_ahead_is_caught_up_along_the_track_smoothly(tmp_path):
     """#375, #390: no lunge. A GPS fix 120 m ahead of where the train is drawn: caught up within the band (at most SHARE of
     its speed + EXTRA_SHARE beyond BIG_M), its pace changing no faster than its consist can (the M8's 0.89 m/s^2, less
-    at speed), not glided. A GTFS-realtime report (no speed) more than GLIDE_EST_M ahead, or any fix more than
-    GLIDE_AHEAD_M ahead: glided on to it, the drawn train never faster than 1.25 v + 2; too far for GLIDE_MAX_S of
-    that: faded out and in at the fix."""
+    at speed), not glided. A GTFS-realtime report (no speed) 150 or 300 m ahead: closed by the same band (#392 final
+    check: no fade, no surge). Any fix more than GLIDE_AHEAD_M ahead: glided on to it, never faster than 1.25 v + 2;
+    too far for GLIDE_MAX_S of that: faded out and in at the fix."""
     out = node(tmp_path, TRACK + GLIDE + """
 const go = (id, f, by) => {
   tk.set(id, { ...f, at: at(0) }, at(0));
@@ -219,7 +219,8 @@ const go = (id, f, by) => {
   const path = watch(id, 10.1, 29);
   return { from, path, v: path.map((p) => Motion.rail(g, p[0] - 10).v), tg: [0, 2, 4, 4.1, 19].map((x) => Motion.rail(g, x).s) };
 };
-out.gps = go("gps", IN.gps, 120); out.gpsFar = go("gpsFar", IN.gps, 600); out.est = go("est", IN.est, 300);
+out.gps = go("gps", IN.gps, 120); out.gpsFar = go("gpsFar", IN.gps, 600);
+out.est150 = go("est150", IN.est, 150); out.est300 = go("est300", IN.est, 300);
 """, {"gps": fix(v=20.0, fixAt=NOW, seg=None, hold=PC + 5000, stop=PC + 5000, until=NOW + 300),
       "est": fix(until=NOW + 300, hold=PC + 3000, stop=PC + 3000)})
     g = out["gps"]
@@ -230,9 +231,14 @@ out.gps = go("gps", IN.gps, 120); out.gpsFar = go("gpsFar", IN.gps, 600); out.es
     assert max(abs(b - a) for a, b in zip(speeds, speeds[1:])) <= 0.1 * 0.89 + 0.02   # within the M8's limits
     assert max(speeds) <= 1.25 * 20 + 2 + 0.01                                         # never over 1.25 v + 2: no surge
     assert abs(path[-1] - g["tg"][-1]) < 0.35 * 120                                    # catching up, gently
-    for name in ("est", "gpsFar"):           # 300 m (GTFS) / 600 m: a glide no faster than 1.25 v + 2 would take
-        f = out[name]                        # longer than GLIDE_MAX_S: faded out and in
-        assert min(p[3] for p in f["path"][:8]) < 0.2 and f["path"][10][3] == 1 and not f["path"][0][2]
+    f = out["gpsFar"]                        # 600 m: a glide no faster than 1.25 v + 2 would take over GLIDE_MAX_S: faded
+    assert min(p[3] for p in f["path"][:8]) < 0.2 and f["path"][10][3] == 1 and not f["path"][0][2]
+    for name in ("est150", "est300"):        # GTFS-realtime reports 150 / 300 m ahead: the band closes them, no fade,
+        e = out[name]                        # no glide, never faster than 1.25 v + 2
+        path = [e["from"]] + [p[1] for p in e["path"]]
+        assert all(p[3] == 1 and not p[2] for p in e["path"])
+        assert all((b - a) / 0.1 <= 1.25 * e["v"][i] + 2 + 0.05 for i, (a, b) in enumerate(zip(path, path[1:])))
+        assert all(b >= a for a, b in zip(path, path[1:]))
 
 
 def test_a_new_fix_behind_slows_the_train_never_back_never_stopped(tmp_path):
@@ -658,3 +664,47 @@ for (const v of IN.vs) {
     for k, path in out.items():
         assert min(b - a for a, b in zip(path, path[1:])) >= -1e-6, k                    # never back
         assert path[-1] == path[-50]                                                   # and at rest
+
+
+
+@pytest.mark.parametrize("by, move", [(60, -3), (120, -6), (200, -10), (300, -15), (250, 15)])
+def test_a_re_aim_mid_glide_never_fades_or_jumps(tmp_path, by, move):
+    """#392 final check: gliding back (here 8-17 m/s with 7-65 m left when it comes), a new fix that moves the target is
+    taken into the glide as a smooth shift: never a fade, never a jump, never a hitch, at most 4.5 m/s^2."""
+    f = fix(until=NOW + 300, hold=PC)
+    out = node(tmp_path, TRACK + GLIDE + """
+tk.set("a", { ...IN.f, at: at(0) }, at(0));
+drive("a", 0, 20);
+const drawn = tk.where("a", at(20)).s;
+const g = { ...IN.f, s: drawn - IN.by, mode: "stopped", seg: null, hold: drawn - IN.by, stop: drawn + 2000, t0: IN.f.t0 + 20, at: at(20) };
+tk.set("a", g, at(20));
+const p1 = watch("a", 20.1, 60);
+// the fix comes late in the glide: still 8 m/s or more back, 7 m or more left, but too little room to stop gently
+let k = -1;
+for (let i = 1; i < p1.length && k < 0; i++) {
+  const sp = (p1[i - 1][1] - p1[i][1]) / 0.1, left = p1[i][1] - g.s;
+  if (sp >= 8 && left >= 7 && left <= (sp * sp) / 2.5) k = i;
+}
+if (k < 0) { let best = 0; for (let i = 1; i < p1.length; i++) { const sp = (p1[i - 1][1] - p1[i][1]) / 0.1; if (sp > best) { best = sp; k = i; } } }
+out.at = p1[k][0]; out.left = p1[k][1] - g.s; out.speed = (p1[k - 1][1] - p1[k][1]) / 0.1;
+""", {"f": f, "by": by})
+    t_fix = out["at"]
+    assert out["speed"] >= 8 and out["left"] >= 7                                   # (the case the review found)
+    out2 = node(tmp_path, TRACK + GLIDE + """
+tk.set("a", { ...IN.f, at: at(0) }, at(0));
+drive("a", 0, 20);
+const drawn = tk.where("a", at(20)).s;
+const g = { ...IN.f, s: drawn - IN.by, mode: "stopped", seg: null, hold: drawn - IN.by, stop: drawn + 2000, t0: IN.f.t0 + 20, at: at(20) };
+tk.set("a", g, at(20));
+const p1 = watch("a", 20.1, IN.t);
+const t2 = IN.t + 0.05;
+tk.set("a", { ...g, s: g.s - IN.move, hold: g.s - IN.move, t0: g.t0 + 1, at: at(t2) }, at(t2));
+out.path = [...p1, ...watch("a", IN.t + 0.1, IN.t + 40)]; out.to = g.s - IN.move;
+""", {"f": f, "by": by, "move": move, "t": round(t_fix, 1)})
+    path = out2["path"]
+    assert all(p[3] == 1 for p in path)                                              # never a fade
+    ss = [p[1] for p in path]
+    v = [(b - a) / 0.1 for a, b in zip(ss, ss[1:])]
+    assert max(abs(x) for x in v) <= 26                                              # never a jump
+    assert max(abs(b - a) for a, b in zip(v, v[1:])) <= 0.1 * 4.5 + 0.35            # no hitch (the 0.05 s fix frame aside)
+    assert ss[-1] == out2["to"]

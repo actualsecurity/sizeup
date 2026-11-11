@@ -349,3 +349,14 @@ def test_never_drawn_much_faster_than_the_train(tmp_path, mph, gap_s):
     fr = [(t, s) for t, s, _, _, op in frames if s is not None and (op is None or op >= 1)]
     speeds = [(fr[i][1] - fr[i + 10][1]) / (fr[i + 10][0] - fr[i][0]) for i in range(len(fr) - 10) if fr[i + 10][0] - fr[i][0] < 1.05]
     assert max(speeds) <= 1.25 * v + 2 + 0.3
+
+
+@pytest.mark.parametrize("brake_at, b", [(a, b) for a in (31, 34, 37, 40, 44, 47, 50, 53) for b in (0.75, 1.4)])
+def test_a_stop_seen_in_a_later_fix_glides_back_never_fades(tmp_path, brake_at, b):
+    """#392 final check: braking at a service or emergency rate after a moving fix, fixes at the measured cadence: drawn
+    ahead, braked hard, glided back; a new fix that moves the target mid-glide is taken into it, never a fade or a jump
+    (7 of 48 such runs faded on a re-plan)."""
+    frames, truth = drive(tmp_path, run=braking_v(V45, brake_at, b), run_s=int(brake_at + V45 / b + 45), cadence="real",
+                          start_m=1000.0)
+    assert not any(op is not None and op < 1 for *_, op in frames)
+    smooth_back(frames, V45)
