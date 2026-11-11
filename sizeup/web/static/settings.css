@@ -167,6 +167,29 @@
   .adsb-state.bad { color: var(--warn); }
   .adsb-tail { font-family: var(--mono, monospace); overflow-wrap: anywhere; }   /* readsb's last lines (#262) */
   .adsb-use { margin-inline-start: var(--s-2); }
+  /* the reception test (#410): the form, a side's numbers, the captured calls, the past tests */
+  .rx { display: flex; flex-direction: column; gap: var(--s-2); }
+  .rx-form .rx-note { flex: 1 1 12rem; max-inline-size: 24rem; }
+  .rx-keep { inline-size: 4.5rem; }
+  .rx-keep-l { display: inline-flex; align-items: center; gap: var(--s-1); white-space: nowrap; }
+  .rx-alert, .rx-paused { margin: 0; }
+  .seg.lent .sdr-label { color: var(--warn); }      /* the dongle a reception test has: its job buttons are locked */
+  .rx-run { font-size: var(--fs-sm); }
+  .rx-left { white-space: nowrap; }
+  .rx-pause:empty, .rx-live:empty, .rx-samples:empty, .rx-hist:empty { display: none; }
+  .rx-pause { color: var(--text-2); }
+  .rx-live, .rx-samples { display: flex; flex-direction: column; gap: var(--s-2); }
+  .rx-side { border-block-start: var(--bw) solid var(--line); padding-block-start: var(--s-2); overflow-x: auto; }
+  .rx-hint { margin-block: var(--s-1); }
+  .rx-nums th { inline-size: 6rem; text-align: start; }
+  .rx-nums td { overflow-wrap: anywhere; }
+  .rx-tgs { margin-block-start: var(--s-2); }
+  .rx-tgs tr.rx-watch td:first-child { font-weight: 600; }
+  .rx-spark { flex: none; inline-size: 7.5rem; block-size: var(--lh-sm); color: var(--ok-text); }
+  .rx-spark polyline { fill: none; stroke: currentColor; stroke-width: 1.5; vector-effect: non-scaling-stroke; }
+  .rx-sample audio { block-size: var(--ctl); max-inline-size: 100%; }
+  .rx-hist { overflow-x: auto; }
+  .rx-history .rx-note { inline-size: 100%; min-inline-size: 10rem; }
   .tg-filter { inline-size: 22rem; max-inline-size: 100%; }
   .tg-error { margin-block-start: var(--s-2); }
   .tg-error:empty { display: none; }

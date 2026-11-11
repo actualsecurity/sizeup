@@ -13,6 +13,11 @@
       "nac": "051",
       "phase": 2,
       "source": "RadioReference (community-maintained)"
+    },
+    "reception": {
+      "watch": [9211, 9570],
+      "antenna": "a directional (yagi) antenna toward Harrison, the nearest subsite; no LNA near the 700 MHz cell bands",
+      "caveat": "Some traffic is carried over LTE and never on RF."
     }
   },
   "sources": [
@@ -59,6 +64,7 @@
     }
   ],
   "captureDir": "../../../../captures/p25-mrrs",
+  "controlWarnRate": -1,
   "logLevel": "info",
   "tempDir": "../../../../captures/p25-mrrs-tmp"
 }

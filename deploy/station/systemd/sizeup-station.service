@@ -39,7 +39,9 @@ Environment=PATH=/opt/sizeup/rtl-sdr/bin:/opt/sizeup/trunk-recorder/bin:/opt/siz
 ExecStart=/usr/local/lib/sizeup/start-station
 Restart=always
 RestartSec=5
-TimeoutStopSec=30
+# 45 s: a reception test's dongle goes back on its job first (it can wait on the trunk-recorder service, #410),
+# then the requests in flight drain (10 s), then the radios stop.
+TimeoutStopSec=45
 # rtl_fm is its child: stopped and restarted with it (trunk-recorder isn't: sizeup-trunk-recorder.service).
 KillMode=control-group
 LimitNOFILE=65536
