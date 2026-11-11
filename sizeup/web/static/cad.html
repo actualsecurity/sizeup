@@ -142,7 +142,31 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
         <h2 class="view-title">Radio</h2>
         <span id="rv-count" class="dim small"></span>
         <span class="spacer"></span>
+        <button id="rv-nav" class="sm" type="button" aria-pressed="false" title="Views and the channel tree in a rail">Rail</button>
         <button id="rv-live" class="live-btn" type="button">Live</button>
+      </div>
+      <!-- The rail layout (radio-nav.js, #415; /cad#radio?ui=2 or the Rail button): the views and the tree system >
+           group > channel on the left, one list on the right. Hidden until a viewer turns it on; the page as before
+           (the filters and the two sections below) is what everyone else gets. -->
+      <div id="rn" class="rn" hidden>
+        <aside id="rn-rail" class="rn-rail" aria-label="Views and channels">
+          <div class="rn-rail-head"><h2>Views</h2><span class="spacer"></span><button id="rn-fold" class="quiet sm icon" type="button" aria-expanded="true">«</button></div>
+          <div id="rn-views" class="tabs vertical" role="tablist" aria-label="Views"></div>
+          <div id="rn-tree" class="rn-tree"></div>
+        </aside>
+        <div class="rn-main">
+          <div class="rn-tools">
+            <button id="rn-open" class="sm rn-phone" type="button" title="Views and channels">Sources</button>
+            <span id="rn-crumb" class="rn-crumb trunc"></span>
+            <button id="rn-back" class="quiet sm icon" type="button" title="Back to the view" aria-label="Back to the view" hidden>✕</button>
+            <input id="rn-q" type="search" placeholder="Search words" aria-label="Search words" spellcheck="false" maxlength="60">
+            <select id="rn-event" aria-label="Incident" title="Just this call's traffic"><option value="">Any incident</option></select>
+            <select id="rn-unit" aria-label="Unit"><option value="">Any unit</option></select>
+          </div>
+          <button id="rn-ours" class="rn-ours" type="button" title="Our calls: back to them" hidden></button>
+          <ol id="rn-list" class="list log radio-log rv-list" aria-live="polite"></ol>
+          <button id="rn-older" class="sm" type="button" hidden>Older</button>
+        </div>
       </div>
       <form id="rv-filters" class="rv-filters" autocomplete="off" role="search">
         <input id="rv-q" type="search" placeholder="Search words  (/)" aria-label="Search words" spellcheck="false" maxlength="60">
@@ -626,6 +650,7 @@ Slots go in order. A kind takes the next available unit of that kind (regular ap
 <script src="/static/cadmap.js"></script>
 <script src="/static/newcall-map.js"></script>
 <script src="/static/radio-view.js"></script>
+<script src="/static/radio-nav.js"></script>
 <script src="/static/radio-controls.js"></script>
 <script src="/static/hublink.js"></script>
 <script src="/static/health.js"></script>

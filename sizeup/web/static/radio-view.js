@@ -423,12 +423,16 @@ window.RadioView = (() => {
   }
 
   function open(qs) {
+    // The rail layout (#415, radio-nav.js), when this viewer turned it on: it draws and asks, this view stays shut
+    if (window.RadioNav && RadioNav.wants(qs)) { close(true); return RadioNav.open(qs); }
+    if (window.RadioNav) RadioNav.close();
     const was = st.open;
     st.open = true;
     if (!was || qs !== query(false).toString()) { fromHash(qs); st.rev = ""; }
     poll();
   }
-  function close() {
+  function close(keepNav) {
+    if (keepNav !== true && window.RadioNav) RadioNav.close();
     st.open = false;
     clearTimeout(st.timer);
     st.timer = 0;
@@ -479,5 +483,5 @@ window.RadioView = (() => {
     else if (st.open) poll();
   });
 
-  return { open, close, render, otherGroups, get polling() { return !!st.timer || st.busy; } };
+  return { open, close, render, otherGroups, row, rowSig, get polling() { return !!st.timer || st.busy; } };
 })();
