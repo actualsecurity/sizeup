@@ -488,7 +488,7 @@ class Hub:
             self.app.channels_check()          # the station runs other channel choices than these: send them
         if isinstance(d.get("talking"), list):
             self.live.update(d["talking"], now, d.get("paging") if isinstance(d.get("paging"), list) else None)
-        return _json(200, {"ok": True, "build": self.build})
+        return _json(200, {"ok": True, "build": self.build, "caps": ["p25_systems"]})   # (#409: what this hub knows)
 
     def _aircraft(self, raw: bytes | None, headers) -> tuple[int, bytes, str]:
         """Our receiver's aircraft, forwarded by the station (#235): into the aircraft layer, nothing else."""
@@ -1008,6 +1008,9 @@ class HubApp(App):
         ok, why = self.aws_ok()
         reserve = [] if ok or self.aws is None else [k for k in self.aws.s.reserve_channels if self.aws.available(k)[0]]
         prefs = channels.for_station(self._chan_ov, self.cfg.stt_record_only)   # + the hub's record_only (#201)
+        if "p25_systems" not in (self.hub.status or {}):
+            # a station from before #409 refuses a whole map with a "p25:<system>:<tg>" key in it: left out for it
+            prefs = {k: v for k, v in prefs.items() if not k.startswith("p25:")}
         return {"prefs": prefs, "aws": {"ok": ok, "why": why, "reserve": reserve}, "tones": dict(self._tone_ov),
                 "sig": channels.sig(prefs, ok, self._tone_ov, reserve)}
 
@@ -1231,8 +1234,11 @@ class HubApp(App):
         quiet = self.offpeak(now)
         days = cfg.audio_keep_event_days
         comms = self.cad.comms            # a record, or still inside its tier's own retention (#409, sizeup/tiers.py)
-        n = self.audio.prune_clips(now - cfg.audio_keep_hours * 3600,
-                                   kept=lambda ids: comms.kept_for_events(ids) | comms.kept_for_tier(ids, cfg.tier_keep_days),
+        # Another P25 system's clips (#409) are context: a tier only keeps them past the usual hours, inside their own
+        # budget ([storage] context_audio_max_mb); over the cap they go before any clip of ours (AudioDb.prune_clips)
+        n = self.audio.prune_clips(now - cfg.audio_keep_hours * 3600, kept=comms.kept_for_events,
+                                   context=lambda ids: comms.context_clips(ids, cfg.tier_keep_days),
+                                   context_max_bytes=int(cfg.context_audio_max_mb * 1024 * 1024),
                                    kept_older_than=(now - days * 86400) if days else None, batch=cfg.audio_prune_batch,
                                    pause_s=0.05 if background else 0.0, max_rows=None if quiet else 10 * cfg.audio_prune_batch)
         over = getattr(self.audio, "over_cap", 0)

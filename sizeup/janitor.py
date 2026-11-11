@@ -6,6 +6,8 @@
     trunk-recorder temp files (p25-tmp)                                       -> 1 h
     an emergency call's trunk-recorder JSON (emergency/*.json, App._drop_recorder_files) -> EMERGENCY_KEEP_S (90 days)
     empty date folders under the P25 capture dir                              -> removed
+    another P25 system's captures (captures/p25-<name>, p25-<name>-tmp: #409)  -> the same ages, and at most
+                                                                                 SYSTEM_MAX_BYTES (clean_system)
 
 Runs at startup and every few minutes from the app. Age is file modification time. Returns
 what it found so the display can show disk use and the oldest audio kept.
@@ -35,6 +37,55 @@ def _rm(p: Path) -> bool:
         return True
     except OSError:
         return False
+
+
+SYSTEM_MAX_BYTES = 200 * 1024 * 1024   # another P25 system's capture directory at most (the oldest calls go first)
+
+
+def clean_system(capture: Path, audio_s: float, max_bytes: int = SYSTEM_MAX_BYTES, now: float | None = None) -> dict:
+    """Another P25 system's own capture directory and its temp directory beside it (<capture>-tmp), which nothing
+    else cleans (#409): calls older than audio_s (made while sizeup was down, or never ingested: an unreadable WAV, a
+    talkgroup that isn't in its file), metadata whose audio is gone, temp files older than TMP_KEEP_S, empty date
+    folders; then, over max_bytes, the oldest calls. {"deleted", "over", "bytes"}."""
+    now = time.time() if now is None else now
+    deleted = over = 0
+    if capture.is_dir():
+        for f in capture.rglob("*.wav"):
+            if _older(f, now - audio_s):
+                deleted += _rm(f)
+                deleted += _rm(f.with_suffix(".json"))
+        for f in capture.rglob("*.json"):
+            if _older(f, now - audio_s) and not f.with_suffix(".wav").exists():
+                deleted += _rm(f)
+        files = []
+        for f in capture.rglob("*"):
+            try:
+                st = f.stat()
+            except OSError:
+                continue
+            if f.is_file():
+                files.append((st.st_mtime, st.st_size, f))
+        total = sum(size for _m, size, _f in files)
+        for _m, size, f in sorted(files, key=lambda x: x[0]):
+            if total <= max_bytes:
+                break
+            if _rm(f):
+                total -= size
+                over += f.suffix == ".wav"
+                deleted += 1
+        for d in sorted((d for d in capture.rglob("*") if d.is_dir()), key=lambda d: len(d.parts), reverse=True):
+            try:
+                d.rmdir()
+            except OSError:
+                pass
+    else:
+        total = 0
+    tmp = capture.with_name(capture.name + "-tmp")
+    if tmp.is_dir():
+        for f in tmp.rglob("*"):
+            if f.is_file() and _older(f, now - TMP_KEEP_S):
+                deleted += _rm(f)
+    return {"deleted": deleted, "over": over, "bytes": total}
 
 
 def clean(captures: Path, clips: Path | None, p25: Path | None, audio_s: float, history_s: float,

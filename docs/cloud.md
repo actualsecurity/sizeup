@@ -1936,7 +1936,8 @@ directory. Adding a talkgroup is one line.
 
 **Hardware**: two more RTL-SDRs and a 700 MHz antenna. The site is simulcast, so `modulation: qpsk` (CQPSK/LSM) as on
 the county system, and Phase II (TDMA). Port Chester is a known weak spot for this site (the nearest subsite is in
-Harrison, beside the railroad): a directional (yagi) antenna toward Harrison is the likely fix, and an LNA near the
+Harrison, beside the railroad): a directional 700 MHz antenna aimed at the Harrison subsite is the fix being
+bought, and an LNA near the
 700 MHz cell bands may make it worse. Some traffic is carried over LTE and is never on RF. Try the reception first
 (#410).
 
@@ -1959,7 +1960,7 @@ A talkgroup of another system has a tier, not Record / Main / Transcribe (`sizeu
 
 | Tier | Kept | Speech-to-text | STT class |
 |---|---|---|---|
-| `alert` | audio + text | yes; may raise a pre-alert (#411) | live |
+| `alert` | audio + text | yes; may raise a pre-alert (#411) | context: under every class of ours, shed after 10 min |
 | `text` | audio + text | yes | low: shed when whisper is behind |
 | `record` | audio | no | none |
 | `off` | nothing | no | none |
@@ -1969,13 +1970,28 @@ A talkgroup of another system has a tier, not Record / Main / Transcribe (`sizeu
   `activity`. Settings > Radios > Channels changes it per talkgroup.
 - An encrypted talkgroup is only ever `activity` or `off`. Nothing of it is recorded or decoded. Its key-ups are
   counted per minute with the radio IDs (`radio_activity`), from the control channel's grants.
-- Neither tier is ever ahead of the pages, Fire/EMS 15, the firegrounds or the airband.
+- Neither tier is ever ahead of the pages, Fire/EMS 15, the firegrounds, the airband, a Main talkgroup or a
+  person's re-run. Fire traffic never queues behind police.
 - A talkgroup granted on the system that is not in the file is counted as unknown (count, last heard), shown on
   Settings > Radios, so the file can grow from real traffic.
 
 **Retention**: `[storage] tier_keep_days` (default `{ alert = 30, text = 0, record = 7 }`; 0 = the usual
 `audio_keep_hours`). A clip on a CAD event, with an alarm or an emergency is a record as before. Settings > Radios
 shows the expected storage, from the last 7 days of audio per tier.
+
+**It never costs our own audio anything**
+- Hub: a tier only keeps a clip past the usual hours. Context clips have their own budget
+  (`[storage] context_audio_max_mb`, default 100), and over the audio cap every context clip goes before any clip of
+  ours (lowest tier, then oldest, first).
+- Station outbox: context audio waits in a fifth of the outbox's audio limit and is dropped first, so a hub outage
+  never costs a fire clip.
+- Station disk: the janitor cleans each system's capture and temp directories, 200 MB at most per system.
+- CPU: its trunk-recorder runs niced below the county's.
+- Health: a context system down is shown in the panel only, never an alert or a push. Status rows carry no radio IDs.
+- A system directory that can't be used (a bad file, a talkgroup number or a name of ours used again) is left out and
+  logged. The rest starts.
+- Version skew: a hub from before this is not sent another system's rows; a station from before this is not sent
+  `p25:` channel keys.
 
 ### Source keys (#415)
 
@@ -1993,7 +2009,8 @@ Talkgroup and radio IDs are only unique inside one system, so every source has a
 - Every row of the radio log carries `source`, `system`, `group`, `service` (fire / police / ems / transit / air /
   other), `ours`, `dept`, `tier` and `safety`. Rows from before were given their source when the columns were added.
 - Until every reader of a bare `talkgroup` number is qualified (the 60 Control feed, the alarm windows, the status
-  hints, the health hints), a talkgroup number that two systems here both list is refused when the config loads.
+  hints, the health hints), a system that lists a talkgroup number already used here is left out when the config
+  loads.
 - Another system's radio IDs are never looked up in, or learned into, our radio registry. Its units never link a
   transmission to our incident by the unit, dispatcher or mention rule. A person's own link still does.
 

@@ -141,6 +141,7 @@ class TrunkRecorder:
         self.cc = ControlChannel()              # the control channel's decode rate, from the same lines (#258)
 
     unit = False                # trunk-recorder is sizeup's child
+    preexec = None              # run in the child before trunk-recorder (SystemRecorder: a lower priority)
 
     def _argv_for(self, dev: int | str | None = None) -> list[str]:
         """argv with --config pointing at a copy of its config (config.runtime.json) whose sources
@@ -274,7 +275,8 @@ class TrunkRecorder:
                 env = child_env()
                 env["PATH"] = ":".join(["/opt/homebrew/bin", "/usr/local/bin", env.get("PATH", "")])
                 self._proc = subprocess.Popen(argv, cwd=self.workdir, stdout=subprocess.PIPE,
-                                              stderr=subprocess.STDOUT, start_new_session=True, env=env)
+                                              stderr=subprocess.STDOUT, start_new_session=True, env=env,
+                                              preexec_fn=self.preexec)
             except OSError as e:
                 self.state, self.detail = "down", f"cannot start trunk-recorder: {e}"
                 self._stop.wait(backoff)
@@ -520,7 +522,10 @@ class SystemRecorder(TrunkRecorder):
         take(index)                that source's dongle goes; it restarts on the rest, or stops with none left
         source_on(index)           the serial that source runs on, None when it has none
 
-    Never auto-assigned, never the county's trunk-recorder: its own process, log and capture directory."""
+    Never auto-assigned, never the county's trunk-recorder: its own process, log and capture directory, at a lower
+    priority than the county's."""
+
+    preexec = staticmethod(trunkrecd._lower_priority)
 
     def __init__(self, name: str, label: str, command: str, workdir: str,
                  on_event: Callable[[str], None] = lambda m: None):

@@ -189,19 +189,27 @@ class AudioDb:
 
     def prune_clips(self, older_than: float, kept: Callable[[list[str]], set[str]] | None = None,
                     kept_older_than: float | None = None, batch: int = 200, pause_s: float = 0.0,
-                    max_rows: int | None = None) -> int:
+                    max_rows: int | None = None, context: Callable[[list[str]], dict[str, tuple[int, bool]]] | None = None,
+                    context_max_bytes: int | None = None) -> int:
         """The audio retention (#251, docs/cloud.md "Audio retention"). Clips (kind 'clip'; never the dispatch audio)
         older than older_than go, except the ones kept() says are a record (on a CAD event, an alarm, an emergency):
         those go only once older than kept_older_than (None: never). Then, while over the size cap, the oldest
         clips that aren't a record. In transactions of at most `batch` rows, pause_s apart, the lock let go in
         between (the station's clips and the players never wait long); at most max_rows this call (None: all).
-        The number deleted."""
+        The number deleted.
+
+        Context audio (#409: another P25 system's clips; context(ids) -> {id: (rank, extended)}: rank 0 goes first,
+        extended: its tier still keeps it past older_than) never costs our own audio anything. A tier only extends
+        a clip past older_than; context clips have their own budget (context_max_bytes: over it the lowest rank,
+        then the oldest, go); and over the cap every context clip goes before any clip of ours."""
         with self._lock:
             rows = self.db.execute("SELECT id, at FROM audio WHERE kind = 'clip' AND at < ? ORDER BY at",
                                    (older_than,)).fetchall()
         keep = kept([r[0] for r in rows]) if kept is not None and rows else set()
+        ctx = context([r[0] for r in rows]) if context is not None and rows else {}
         gone = [aid for aid, at in rows
-                if aid not in keep or (kept_older_than is not None and at < kept_older_than)]
+                if (aid not in keep and not ctx.get(aid, (0, False))[1])
+                or (aid in keep and kept_older_than is not None and at < kept_older_than)]
         if max_rows is not None:
             gone = gone[:max_rows]
         n = self._delete(gone, batch, pause_s)
@@ -210,18 +218,33 @@ class AudioDb:
         with self._lock:
             total = self.db.execute("SELECT COALESCE(SUM(LENGTH(wav)), 0) FROM audio").fetchone()[0]
             over = []
-            if total > self.max_bytes:
+            sizes = []
+            if total > self.max_bytes or (context is not None and context_max_bytes is not None):
                 sizes = self.db.execute("SELECT id, LENGTH(wav) FROM audio WHERE kind = 'clip' ORDER BY at").fetchall()
+        ctx = context([r[0] for r in sizes]) if context is not None and sizes else {}
+        if ctx:
+            # context clips: the lowest tier first, then the oldest (sizes is oldest first: a stable sort keeps that)
+            mine = sorted(((aid, size) for aid, size in sizes if aid in ctx), key=lambda x: ctx[x[0]][0])
+            used = sum(size for _aid, size in mine)
+            budget = context_max_bytes if context_max_bytes is not None else used
+            for aid, size in mine:
+                if used <= budget and total <= self.max_bytes:
+                    break
+                over.append(aid)
+                used -= size
+                total -= size
         if total > self.max_bytes:
             keep = kept([r[0] for r in sizes]) if kept is not None and sizes else set()
             for aid, size in sizes:
                 if total <= self.max_bytes:
                     break
-                if aid in keep:
+                if aid in keep or aid in ctx:
                     continue
                 over.append(aid)
                 total -= size
+        if over:
             n += self._delete(over, batch, pause_s)
+        if sizes:
             if total > self.max_bytes:
                 self.over_cap = total               # the records alone are over the cap: kept (the retention decides)
         return n

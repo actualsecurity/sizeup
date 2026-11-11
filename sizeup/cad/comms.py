@@ -73,6 +73,7 @@ from sizeup.cad.store import TZ
 
 TURN = re.compile(r"^(?P<call>.+)-t(?P<k>\d+)$")
 NOTES = "Notes"          # the /comms "channel" of event notes tagged with a unit
+ACTIVITY_RADIOS_S = 7 * 24 * 3600    # radio_activity: which radios keyed is kept this long (the counts longer)
 KEEP_UNLINKED_S = 90 * 24 * 3600     # transmissions on no event: kept 90 days (linked ones: always)
 MAX_ROWS = 500
 MAIN_LIMIT, OTHER_LIMIT = 200, 300    # the Radio view's Main and Other: each its own newest N (#241)
@@ -208,6 +209,8 @@ class Comms:
             given = str(t.get("service") or "") or ("" if p25 else "air" if mhz is not None else "fire")
             src = (skey, system, str(t.get("group") or "")[:60], given[:16],
                    int(bool(t.get("ours")) and not other), str(t.get("dept") or "")[:60], str(t.get("tier") or "")[:16])
+            disp = 0 if other else disp          # "60 Ctrl ..." is the county's dispatcher, never another system's
+            rigs = [] if other else rigs
             vals = (call_id, turn, start, float(t.get("end") or start), t.get("source") or "", t.get("talkgroup"),
                     talker, t.get("radio_id") or "", ", ".join(rigs), disp, t.get("text") or "", t.get("status") or "",
                     t.get("model") or "", tones, t.get("voice_at"), seq, note, int(bool(t.get("emergency"))),
@@ -266,6 +269,17 @@ class Comms:
         db.execute("UPDATE radio_activity SET calls = calls + ?, seconds = seconds + ?, radios = ? WHERE source = ? "
                    "AND minute = ?", (calls, seconds, both[:400], source, int(at // 60)))
 
+    def fix_air(self, labels) -> int:
+        """Rows of the airband channels logged as analog (from before a row said which it was: no frequency on them):
+        their source, system and service put right, and never "ours". The number changed."""
+        labels = [str(x) for x in labels if x]
+        if not labels:
+            return 0
+        with self.store.tx() as db:
+            return db.execute("UPDATE radio_traffic SET source = 'air:' || channel, system = 'airband', service = 'air', "
+                              f"ours = 0 WHERE talkgroup IS NULL AND system != 'airband' AND channel IN "
+                              f"({','.join('?' * len(labels))})", labels).rowcount
+
     def activity(self, source: str, minute: int, calls: int, radios=(), seconds: float = 0.0) -> None:
         """Key-ups on a source that leaves no transmission rows (an encrypted talkgroup, #409): {source, minute,
         calls, radios} as the station counted them, added to that minute."""
@@ -287,6 +301,23 @@ class Comms:
         span = max(3600.0, self.clock() - (first["a"] if first and first["a"] else since)) / 86400
         return {r["tier"]: (r["s"] or 0.0) / span for r in self.store.q(
             "SELECT tier, SUM(end - start) AS s FROM radio_traffic WHERE tier != '' AND start >= ? GROUP BY tier", (since,))}
+
+    def context_clips(self, ids: list[str], days: dict[str, float]) -> dict[str, tuple[int, bool]]:
+        """Of these clip ids, another P25 system's (#409): {id: (rank, extended)}. rank: what goes first when its audio
+        has to (record 0, text 1, alert 2); extended: its tier's retention still keeps it. A clip on a CAD event, with
+        an alarm or an emergency is a record like any other, not context: left out (kept_for_events)."""
+        rank = {"record": 0, "text": 1, "alert": 2}
+        tiered: dict[str, str] = {}
+        for k in range(0, len(ids), 500):
+            chunk = list(ids[k:k + 500])
+            tiered.update((r["id"], r["tier"]) for r in self.store.q(
+                f"SELECT id, tier FROM radio_traffic WHERE id IN ({','.join('?' * len(chunk))}) AND system NOT IN "
+                "('', 'analog', 'airband', ?) AND talkgroup IS NOT NULL", (*chunk, sources.COUNTY)))
+        if not tiered:
+            return {}
+        record = self.kept_for_events(list(tiered))
+        ext = self.kept_for_tier([i for i in tiered if i not in record], days)
+        return {i: (rank.get(t, 0), i in ext) for i, t in tiered.items() if i not in record}
 
     def kept_for_tier(self, ids: list[str], days: dict[str, float]) -> set[str]:
         """Of these clip ids, the ones a tier's own retention still keeps ([storage] tier_keep_days, sizeup/tiers.py)."""
@@ -514,6 +545,8 @@ class Comms:
         cutoff = self.clock() - KEEP_UNLINKED_S
         with self.store.tx() as db:
             db.execute("DELETE FROM radio_activity WHERE minute < ?", (int(cutoff // 60),))
+            db.execute("UPDATE radio_activity SET radios = '' WHERE radios != '' AND minute < ?",
+                       (int((self.clock() - ACTIVITY_RADIOS_S) // 60),))
             return db.execute(f"DELETE FROM radio_traffic WHERE start < ? AND id NOT IN (SELECT l.traffic_id FROM radio_links l "
                               f"WHERE {SURE_LINK})", (cutoff,)).rowcount
 

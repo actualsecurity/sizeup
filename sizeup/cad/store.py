@@ -506,17 +506,6 @@ class Store:
                           ("tier", "TEXT NOT NULL DEFAULT ''"), ("safety", "TEXT NOT NULL DEFAULT ''")):
             if tcols and col.strip('"') not in tcols:
                 self.db.execute(f"ALTER TABLE radio_traffic ADD COLUMN {col} {kind}")
-        if tcols and "source" not in tcols:
-            # the rows from before: all the county system's (the only one there was), or an analog channel's
-            # (an airband row is the one with its frequency, #260)
-            from sizeup.sourcekeys import COUNTY
-            self.db.execute("UPDATE radio_traffic SET source = 'p25:' || ? || ':' || talkgroup, system = ? "
-                            "WHERE talkgroup IS NOT NULL", (COUNTY, COUNTY))
-            self.db.execute("UPDATE radio_traffic SET source = 'air:' || channel, system = 'airband', "
-                            "service = 'air' WHERE talkgroup IS NULL AND mhz IS NOT NULL")
-            self.db.execute("UPDATE radio_traffic SET source = 'fm:' || channel, system = 'analog', "
-                            "service = 'fire', ours = 1 WHERE talkgroup IS NULL AND mhz IS NULL")
-            self.migrated.append("radio_traffic.source (every transmission's source, by its system)")
         if tcols:
             self.db.execute("CREATE INDEX IF NOT EXISTS radio_traffic_source_start ON radio_traffic(source, start)")
             # The Radio page's views (#415), an index walk each: a service's, a system's, the scene-safety rows, and the
@@ -526,6 +515,19 @@ class Store:
             self.db.execute("CREATE INDEX IF NOT EXISTS radio_traffic_updated ON radio_traffic(updated_at)")
             self.db.execute("CREATE INDEX IF NOT EXISTS radio_traffic_safety ON radio_traffic(start) "
                             "WHERE safety != '' AND safety != 'dismissed'")
+        if tcols and self.db.execute("SELECT 1 FROM radio_traffic WHERE source = '' LIMIT 1").fetchone():
+            # The rows from before (source ''): all the county system's (the only one there was), or an analog
+            # channel's (an airband row is the one with its frequency, #260; the airband rows from before that are
+            # put right by the channel's label, Comms.fix_air). Every open, only the rows still without one: a
+            # migration cut short is finished by the next start.
+            from sizeup.sourcekeys import COUNTY
+            self.db.execute("UPDATE radio_traffic SET system = ?, source = 'p25:' || ? || ':' || talkgroup "
+                            "WHERE source = '' AND talkgroup IS NOT NULL", (COUNTY, COUNTY))
+            self.db.execute("UPDATE radio_traffic SET system = 'airband', service = 'air', source = 'air:' || channel "
+                            "WHERE source = '' AND talkgroup IS NULL AND mhz IS NOT NULL")
+            self.db.execute("UPDATE radio_traffic SET system = 'analog', service = 'fire', ours = 1, "
+                            "source = 'fm:' || channel WHERE source = '' AND talkgroup IS NULL AND mhz IS NULL")
+            self.migrated.append("radio_traffic.source (every transmission's source, by its system)")
         radcols = {r["name"] for r in self.db.execute("PRAGMA table_info(radios)")}
         if radcols and "last_channel" not in radcols:        # where a radio was last heard (#163), 2026-10-14
             self.db.execute("ALTER TABLE radios ADD COLUMN last_channel TEXT NOT NULL DEFAULT ''")
