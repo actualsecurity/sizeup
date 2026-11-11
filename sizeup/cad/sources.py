@@ -58,7 +58,9 @@ sizeup/sources/runner.py (they come here as "source_event" / "source_health" thr
                another open incident, and its page matched again now takes this incident, for the same call
     stale      the station sends the ids still in each feed's snapshot ("source_seen"): an open report the feed no
                longer lists is noted once on its incident and flagged in Settings > Health
-    address    a feed's location is shown (and said) as its street part (shown_location); the addresses a feed put on
+    address    a feed's location is shown (and said) as its street part and known town, in proper case as the map's
+               labels are ("12 Example Ave, Sample Village": shown_location, proper_case; display only, matching reads
+               lower case). An incident titled before keeps its title until the feed moves it. The addresses a feed put on
                an incident are recorded (feed_addresses) so a push never carries them (alarms.push_address)
     logs       our incident ids and the source's label only: never the feed's ids, types, locations or an exception's text
     departments a feed's department entries (department_units(): {code: department}, Settings' "department_units"
@@ -263,6 +265,8 @@ def units_match(a, b) -> set[str]:
 
 TOWNS: tuple[tuple[str, ...], ...] = ()      # known town names as word tuples, longest first (set_towns)
 TOWN_OF: dict[tuple[str, ...], str] = {}       # ... and the town each one means (an alias's town)
+TOWN_NAME: dict[tuple[str, ...], str] = {}     # a listed town's own spelling, for display ("Sample Village")
+LISTED: frozenset = frozenset()                # the listed towns' keys (geo_town_order), not the aliases
 EXT = {"ext": "ext", "extension": "ext", "extn": "ext"}
 PLACE_ABBR = {"st": "saint", "mt": "mount", "ft": "fort"}   # a place's name: "@ST PAUL CHURCH" = "@SAINT PAUL CHURCH"
 
@@ -270,9 +274,11 @@ PLACE_ABBR = {"st": "saint", "mt": "mount", "ft": "fort"}   # a place's name: "@
 def set_towns(names, aliases: dict | None = None) -> None:
     """The towns a location may end with ("12 King St <town>"): the lists' geo_town_order and geo_town_aliases. Only
     these are dropped as a town (two different ones named: two places); any other trailing word stays."""
-    global TOWNS, TOWN_OF
+    global TOWNS, TOWN_OF, TOWN_NAME, LISTED
     key = lambda n: tuple(re.findall(r"[a-z0-9]+", str(n).lower()))
     TOWN_OF = {key(n): str(n).lower() for n in names if key(n)}
+    TOWN_NAME = {key(n): str(n).strip() for n in names if key(n) and str(n).strip() != str(n).strip().lower()}
+    LISTED = frozenset(key(n) for n in names if key(n))
     for a, town in (aliases or {}).items():
         if key(a):
             TOWN_OF[key(a)] = str(town).lower()
@@ -351,15 +357,124 @@ def street_part(s: str) -> str:
 
 
 def shown_location(s: str) -> str:
-    """A feed's location as the console shows it and the voice says it: its street part ('12 EXAMPLE AVE'), else its
-    named place ('@ SAMPLE SCHOOL'), else the text as given. Never the feed's whole raw string."""
+    """A feed's location as the console shows it and the voice says it, in proper case (proper_case): its street part
+    and the known town it names, as the map's labels are written ('12 EXAMPLE AVE SAMPLE_VILLAGE' -> '12 Example Ave,
+    Sample Village'), else its named place ('@ Sample School'), else the text as given. Never the feed's whole raw
+    string. Display only: matching reads the raw text (street_part, same_place: lower case throughout)."""
     s = (s or "").strip()
     part = street_part(s)
     if part:
-        return part[:200]
+        street, town = _split_town(part)
+        town = town or _town_text(s)
+        return (proper_case(street) + (f", {town}" if town else ""))[:200]
     m = re.search(r"@\s*([^():;\[\],@]+)", s)
     name = " ".join(re.split(r"\s+-\s+", m.group(1))[0].split()) if m else ""
-    return (f"@ {name}" if name else s)[:200]
+    return (f"@ {proper_case(name)}" if name else proper_case(s))[:200]
+
+
+def _town_shown(words) -> str:
+    """A known town's words as shown: the listed spelling ("Sample Village"), else the words in proper case."""
+    key = tuple(re.findall(r"[a-z0-9]+", " ".join(words).lower()))
+    return TOWN_NAME.get(key) or proper_case(" ".join(words))
+
+
+def _title_town(words) -> str:
+    """The town a title shows: as _town_shown, but none for a "Town of ..." alias that is not a listed town itself (a
+    town can hold villages of its own: the address may be in one of them, not the town's own name)."""
+    key = tuple(re.findall(r"[a-z0-9]+", " ".join(words).lower()))
+    if key[:2] == ("town", "of") and key not in LISTED:
+        return ""
+    return _town_shown(words)
+
+
+def _split_town(part: str) -> tuple[str, str]:
+    """('12 EXAMPLE AVE', 'Sample Village') for a street part ending with a known town ('12 EXAMPLE AVE sample village');
+    the town is split off only when a word that is not a number is left before it."""
+    toks = part.split()
+    for t in TOWNS:
+        n = len(t)
+        if len(toks) > n and tuple(w.lower() for w in toks[-n:]) == t \
+                and any(not re.fullmatch(r"\d+[a-z]?", w, re.I) for w in toks[:-n]):
+            return " ".join(toks[:-n]), _title_town(toks[-n:])
+    return part, ""
+
+
+def _town_text(s: str) -> str:
+    """The known town a location names after a comma, in parentheses, or as a town token before its place or after its
+    unit ('12 EXAMPLE AVE APT 3 SAMPLE_VILLAGE'), as shown; '' for none."""
+    s = s or ""
+    head = re.split(r"\s:\s|@", s)[0]
+    for part in [*re.findall(r"\(([^)]*)\)", s), *s.split(",")[1:2],
+                 *(t.replace("_", " ") for t in re.findall(r"\b[A-Za-z0-9]+(?:_[A-Za-z0-9]+)+\b", head))]:
+        words = re.findall(r"[A-Za-z0-9]+", part)
+        if words and tuple(w.lower() for w in words) in TOWN_OF:
+            return _title_town(words)
+    return ""
+
+
+# Display casing (proper_case): words kept upper case, a few lower case inside a name, route designators, "Mac" names
+# that are surely "Mac" (most "MAC..." words are not: Mack, Macy, Macon), and the endings an ordinal takes.
+CASE_UPPER = {"n", "s", "e", "w", "ne", "nw", "se", "sw", "nb", "sb", "eb", "wb", "mm", "ymca", "ywca", "usps", "po",
+              "hq", "ii", "iii", "iv"}
+CASE_LOWER = {"of", "the", "and", "at", "on", "in", "by", "for", "to"}
+ROUTE_PREFIX = {"us", "ny", "nys", "rt", "rte", "sr", "cr", "ct", "i"}
+MAC_NAMES = {"macarthur", "macdonald", "macdougal", "macdougall", "macgregor", "maclean", "macleod", "macneil"}
+_WORD = re.compile(r"[A-Za-z0-9]+(?:['\u2019_][A-Za-z0-9]+)*")
+
+
+def _cap(w: str) -> str:
+    """One plain word: 'EXAMPLE' -> 'Example', 'MCKINLEY' -> 'McKinley', '1ST' -> '1st', '12A' -> '12A'."""
+    low = w.lower()
+    if re.fullmatch(r"\d+(?:st|nd|rd|th)", low):
+        return low
+    if any(c.isdigit() for c in w):
+        return w.upper()
+    if low in CASE_UPPER or len(w) == 1:
+        return w.upper()
+    if low.startswith("mc") and len(low) > 3:
+        return "Mc" + low[2:].capitalize()
+    if low in MAC_NAMES:
+        return "Mac" + low[3:].capitalize()
+    return low.capitalize()
+
+
+def _case_word(w: str, first: bool, prev: str, nxt: str) -> str:
+    if "_" in w:                                           # SAMPLE_VILLAGE: a town token, its words
+        return _town_shown(w.split("_"))
+    if "'" in w or "\u2019" in w:                         # O'BRIEN -> O'Brien, MARY'S -> Mary's
+        q = "'" if "'" in w else "\u2019"
+        head, _, tail = w.partition(q)
+        if len(head) == 1 and head.lower() in ("o", "d"):
+            return head.upper() + q + _cap(tail)
+        return _cap(head) + q + tail.lower()
+    low = w.lower()
+    if low in ROUTE_PREFIX and re.fullmatch(r"\d+[a-z]?", nxt, re.I) and not (prev and prev.isalpha()):
+        return w.upper()                                   # US 1, NY 120A, RT 1, I 287 (not '12 SAMPLE CT 3')
+    m = re.fullmatch(r"(i|us|ny|rt|rte|sr|cr)(\d+[a-z]?)", low)
+    if m:                                                  # I287 -> I287, US1 -> US1
+        return w.upper()
+    if low in CASE_LOWER and not first:
+        return low
+    return _cap(w)
+
+
+def proper_case(s: str) -> str:
+    """A location as people write it, for display: '12 N EXAMPLE AVE APT 3B' -> '12 N Example Ave Apt 3B', 'A AVE / B
+    ST' -> 'A Ave / B St', '1ST ST' -> '1st St', 'MCKINLEY PL' -> 'McKinley Pl', "O'BRIEN LN" -> "O'Brien Ln", 'US 1',
+    'I-287', 'NY 120A' as they are, 'SAMPLE_VILLAGE' / 'sample village' -> 'Sample Village' (a listed town as the list
+    spells it). A word already in mixed case ('McKinley') is left as it is. Spaces collapsed."""
+    s = " ".join((s or "").split())
+    words = list(_WORD.finditer(s))
+    out, at = [], 0
+    for i, m in enumerate(words):
+        gap, w = s[at:m.start()], m.group(0)
+        first = (i == 0 or bool(re.search(r"[@:/&(\[;,]", gap)) or gap == " - "    # a name starts: "12 The Crossway"
+                 or (gap == " " and bool(re.fullmatch(r"\d+[a-z]?", words[i - 1].group(0), re.I))))
+        prev = words[i - 1].group(0) if i and not gap.strip() else ""
+        nxt = words[i + 1].group(0) if i + 1 < len(words) and s[m.end():words[i + 1].start()] in (" ", "-") else ""
+        out.append(gap + (_case_word(w, first, prev, nxt) if w in (w.upper(), w.lower()) else w))
+        at = m.end()
+    return "".join(out) + s[at:]
 
 
 def _place_only(s: str) -> frozenset:
@@ -966,7 +1081,7 @@ class Sources:
         typ, sub, note = self.cad.map_type(data["type"], label)
         loc = data["location"].strip()
         f = {"type": typ, "subtype": sub, "type_note": note, "address": shown_location(loc),
-             "remarks": (f"{label} event {ref}: {data['type'] or 'type not given'} at {loc or '(no location)'}"
+             "remarks": (f"{label} event {ref}: {data['type'] or 'type not given'} at {proper_case(loc) or '(no location)'}"
                          + (f"; units {', '.join(data['units'])}" if data["units"] else ""))[:4000]}
         self.cad._auto_geo(f)
         via = ""                     # never "60 Control": the console says the feed's label (the sheet has no code for it)
@@ -1455,7 +1570,7 @@ class Sources:
                     use["type"] = d["type"]
             loc = (d.get("location") or "").strip()
             if "location" in h and loc and not same_place(loc, inc["address"]):
-                use["location"] = loc
+                use["location"] = shown_location(loc)        # shown (the button's hover): proper case
             inc["feed"] = {"label": r["label"], "event_id": r["ref"], **{k: x[k] for k in EXTRA_SHOWN if k in x}, "use": use}
         return incs
 
