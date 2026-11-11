@@ -11,6 +11,7 @@ radio ID here is invented."""
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import sqlite3
 import time
@@ -458,7 +459,7 @@ def test_two_systems_calls_are_tagged_and_the_other_systems_stay_context(two):
     assert {t.id for t in app.store.loose} >= {"9211-2-call_2", "9049-3-call_3"}
     assert not [r for r in app.cad.store.q("SELECT * FROM radio_links")]
     assert not app.cad.store.q("SELECT * FROM alarms")
-    tg = {r["source"]: r for r in app.state()["talkgroups"]}
+    tg = {r["source"]: r for r in app.talkgroups_state()}
     assert (tg["p25:mrrs:9211"]["count"], tg["p25:mrrs:9211"]["tier"], tg["p25:mrrs:9211"]["tier_set"]) == (1, "alert", True)
     assert (tg["p25:mrrs:9213"]["dropped"], tg["p25:westchester:307"]["tier"], tg["p25:westchester:307"]["tier_set"]) == (
         1, "text", False)
@@ -542,7 +543,7 @@ def test_unknown_talkgroups_are_counted_and_encrypted_ones_are_activity_only(two
     assert app.cad.comms.activity_rows(0) == [{"source": "p25:mrrs:9213", "minute": 1_800_000_000 // 60, "calls": 2,
                                                "seconds": 0.0, "radios": "4100009"}]
     assert not rows(app)                                      # never a transmission row
-    assert {r["source"]: r["count"] for r in app.state()["talkgroups"]}["p25:mrrs:9213"] == 2
+    assert {r["source"]: r["count"] for r in app.talkgroups_state()}["p25:mrrs:9213"] == 2
     # the grants also name the key-ups of that system's finished calls, and only that system's
     assert [g[1] for g in rt.live.grants("mrrs", 9211, 0, 2e9)] == ["4100001"] and not app.live.grants("", 9211, 0, 2e9)
 
@@ -1074,53 +1075,204 @@ def _get(url, email=None):
         return e.code, e.read()
 
 
+SECRET_TEXT = "zebra quartz seventy seven at twelve invented avenue"     # made-up words no other row or page has
+SECRET_TALKER, SECRET_RADIO = "UNIT-ZQ9", "4100777"
+PD_ID, FIRE_ID = "9211-1790954731.970_770181250.1-call_5", "307-1790954731.970_476112500.0-call_4"     # 5.2.0's shape
+
+
 def _with_context_traffic(app):
-    """One fire transmission and one MRRS one, the MRRS one put on an incident by a person. -> (incident id, ids)."""
+    """One fire transmission and one MRRS one (distinctive words, a talker alias, a radio ID, a dotted id), the MRRS
+    one put on an incident by a person, plus an unknown and an encrypted key-up. -> (incident id, (fire id, MRRS id))."""
     rt = app.systems["mrrs"]
-    app._call(a_call(app, "1-call_1", 307, "westchester", label="Fire/EMS 15"))
-    app._call_system(rt, a_call(app, "2-call_2", PD, "mrrs", label="PD Dispatch"))
+    now = time.time()
+    app._call(Call(FIRE_ID, 307, "Fire/EMS 15", now, now + 2, ["E60"], voice(2.0, 1), "",
+                   [Turn(0.0, "E60", "4100001", "E60", at=now)], system="westchester"))
+    app._call_system(rt, Call(PD_ID, PD, "PD Dispatch", now, now + 2, [SECRET_TALKER], voice(2.0, 2), "",
+                              [Turn(0.0, SECRET_TALKER, SECRET_RADIO, SECRET_TALKER, at=now)], system="mrrs"))
     rt.recorder.on_line("SIZEUP-UNIT mrrs 4100007 call 9999")
-    rt.recorder.on_line("SIZEUP-UNIT mrrs 4100009 call 9213")
+    rt.recorder.on_line(f"SIZEUP-UNIT mrrs {SECRET_RADIO} call 9213")
     assert wait(lambda: len([r for r in rows(app).values() if r["status"] == "done"]) == 2)
+    app._retext(PD_ID, SECRET_TEXT, "done", 0.9, "m.bin")
     iid = app.cad.create({"type": "STRU", "address": "12 Invented Ave", "operator": "op"})["id"]
-    assert app.cad.comms.link("9211-2-call_2", iid, "op").get("error") is None
-    assert app.cad.comms.link("307-1-call_1", iid, "op").get("error") is None
-    return iid, ("307-1-call_1", "9211-2-call_2")
+    assert app.cad.comms.link(PD_ID, iid, "op").get("error") is None
+    assert app.cad.comms.link(FIRE_ID, iid, "op").get("error") is None
+    app.cad.radiolog.keep(PD_ID, iid, "op") if hasattr(app.cad.radiolog, "keep") else None
+    return iid, (FIRE_ID, PD_ID)
 
 
-def _leaks(body) -> bool:
-    text = json.dumps(body) if not isinstance(body, (bytes, str)) else str(body)
-    return any(x in text for x in ("9211-2-call_2", "PD Dispatch\", \"start", "p25:mrrs:9211\", \"system", "4100009", "9999"))
+def _leaks(body) -> list[str]:
+    """What of the MRRS transmission is in this response: its words, its talker, its radio ID, its id."""
+    text = body.decode("utf-8", "replace") if isinstance(body, bytes) else body if isinstance(body, str) else json.dumps(body)
+    return [x for x in (SECRET_TEXT, "zebra quartz", SECRET_TALKER, SECRET_RADIO, PD_ID, "770181250.1-call_5") if x in text]
 
 
-@pytest.mark.parametrize("role", ["all-in-one", "station", "hub without Access"])
-def test_with_no_sign_in_another_systems_traffic_is_not_served_at_all(two, monkeypatch, role):
-    app, _said, _logs = two
-    assert appmod.access_verifier(replace(app.cfg, cloud_role="station", cloud_access_team="t", cloud_access_aud="a")) is None
-    assert appmod.access_verifier(replace(app.cfg, cloud_role="hub")) is None
+def _post(url, body):
+    import urllib.error
+    import urllib.request
+    req = urllib.request.Request(url, method="POST", data=json.dumps(body).encode(), headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return r.status, r.read()
+    except urllib.error.HTTPError as e:
+        return e.code, e.read()
+
+
+def _sse(url, seconds=1.5) -> bytes:
+    """What an event stream sends in its first moments (the state, as every client gets it)."""
+    import socket
+    import urllib.parse
+    u = urllib.parse.urlsplit(url)
+    got = b""
+    with socket.create_connection((u.hostname, u.port), timeout=5) as sk:
+        sk.sendall(f"GET {u.path} HTTP/1.1\r\nHost: x\r\nAccept: text/event-stream\r\nAccept-Encoding: identity\r\n\r\n".encode())
+        sk.settimeout(0.3)
+        end = time.time() + seconds
+        while time.time() < end:
+            try:
+                chunk = sk.recv(65536)
+            except OSError:
+                continue
+            if not chunk:
+                break
+            got += chunk
+    return got
+
+
+UNSIGNED = ("/api/state", "/api/cad/state", "/api/cad/comms", "/api/cad/comms?channel=PD%20Dispatch", "/api/cad/comms?q=zebra",
+            "/api/cad/comms?unit=UNIT-ZQ9", "/api/cad/feed", "/api/cad/radios", "/api/cad/activity", "/api/cad/health",
+            "/api/cad/comms/activity", "/api/station/status", "/api/station/hello", "/healthz", "/api/scene")
+
+
+def _sweep(url, iid, app) -> None:
+    """Every route, unsigned: none of the MRRS transmission (words, talker, radio ID, id) in any answer."""
+    for path in (*UNSIGNED, f"/api/cad/incident/{iid}", f"/api/cad/incident/{iid}/export.zip",
+                 f"/api/cad/incident/{iid}/attachments"):
+        code, body = _get(url + path)
+        assert not _leaks(body), (path, code, _leaks(body))
+    for path in ("/api/stream", "/api/cad/stream"):
+        assert not _leaks(_sse(url + path)), path
+    assert _get(url + f"/api/audio/{PD_ID}.wav")[0] == 404 and _get(url + f"/api/audio/{PD_ID}.src.wav")[0] == 404
+    assert _get(url + "/api/cad/comms/activity")[0] in (403, 409)
+    assert _post(url + "/api/retranscribe", {"ids": [PD_ID]})[0] in (403, 409)
+
+
+def test_with_no_sign_in_another_systems_traffic_is_not_served_at_all(two, monkeypatch):
+    app, _said, logs = two
     iid, (fire, pd) = _with_context_traffic(app)
     server, url = _serve(app, monkeypatch, access=False)
     try:
         assert not app.access_enforced and not app.cad.comms.context_broadcast
-        server.broadcaster.poke() if hasattr(server.broadcaster, "poke") else None
         st = app.state()
-        assert [t["id"] for t in st["loose_traffic"]] == [fire] and not st["p25_systems"][0]["encrypted"]
-        assert not st["p25_systems"][0]["unknown"] and not _leaks(st)
-        for path in ("/api/state", "/api/cad/state", "/api/cad/comms", "/api/cad/comms?channel=PD%20Dispatch",
-                     "/api/cad/comms?q=words", "/api/cad/feed", *([f"/api/cad/incident/{iid}"] if iid else [])):
-            code, body = _get(url + path)
-            assert code == 200 and not _leaks(body), path
+        assert [t["id"] for t in st["loose_traffic"]] == [fire] and not _leaks(st)
+        sysrow = st["p25_systems"][0]
+        assert not sysrow["encrypted"] and not sysrow["unknown"] and sysrow["last_heard"] is None
+        tgs = {r["source"]: r for r in st["talkgroups"]}                         # names and tiers stay; activity doesn't
+        assert (tgs["p25:mrrs:9211"]["count"], tgs["p25:mrrs:9211"]["last"], tgs["p25:mrrs:9213"]["count"]) == (0, None, 0)
+        assert tgs["p25:mrrs:9211"]["tier"] == "alert" and tgs["p25:westchester:307"]["count"] == 1
+        _sweep(url, iid, app)
         code, body = _get(url + "/api/cad/comms")
         assert [r["id"] for r in body["rows"] if r.get("kind") == "radio"] == [fire]
-        if iid:
-            assert [r["id"] for r in _get(url + f"/api/cad/incident/{iid}")[1]["radio"]] == [fire]
+        inc = _get(url + f"/api/cad/incident/{iid}")[1]
+        assert [r["id"] for r in inc["radio"]] == [fire]
+        # the timeline of the incident a person put it on: when and on which channel, nothing else
+        lines = [e["text"] for e in app.cad.store.q("SELECT text FROM events WHERE incident_id = ?", (iid,))
+                 if "PD Dispatch" in e["text"]]
+        assert lines and all(re.fullmatch(r"Radio (traffic added: )?\d\d:\d\d:\d\d on PD Dispatch( kept with this event)?", x)
+                             for x in lines), lines
+        assert app.cad.comms.unlink(pd, iid, "op")["unlinked"]
+        assert not _leaks(json.dumps(app.cad.store.q("SELECT text FROM events WHERE incident_id = ?", (iid,))))
         assert _get(url + f"/api/audio/{fire}.wav")[1][:4] == b"RIFF"
-        assert _get(url + f"/api/audio/{pd}.wav")[0] == 404                    # its audio: not served, by any id
-        assert _get(url + "/api/audio/9211-never-heard.wav")[0] == 404 and app.clip_is_context("9211-zzz")
-        assert app.clip(pd)[:4] == b"RIFF"                                     # still recorded (and forwarded)
-        assert rows(app)[pd]["text"] == "words"
+        assert app.clip(pd)[:4] == b"RIFF" and rows(app)[pd]["text"] == SECRET_TEXT     # still recorded (and forwarded)
+        said = "\n".join(logs)                                                   # its words, talker and radio in no log line
+        assert "zebra" not in said and SECRET_TALKER not in said and SECRET_RADIO not in said
     finally:
         server.shutdown()
+
+
+def test_a_clip_is_context_by_its_row_even_with_dots_in_its_id_and_its_talkgroup_gone_from_the_file(two):
+    app, _said, _logs = two
+    _iid, (fire, pd) = _with_context_traffic(app)
+    assert app.clip_is_context(pd) and app.clip_is_context(pd + ".src") and not app.clip_is_context(fire)
+    assert not app.clip_is_context(fire + ".src")
+    sourcekeys.set_context_talkgroups(())                         # the talkgroup has left the file: its row still says
+    try:
+        assert app.clip_is_context(pd)
+        app.store.loose.clear()                                   # ... and with only the radio log to ask
+        assert app.clip_is_context(pd) and not app.clip_is_context(fire)
+        assert not app.clip_is_context("9211-1790000000.000_770181250.1-call_9")      # no row, not in the file: not known
+    finally:
+        sourcekeys.set_context_talkgroups(tg for tg in MRRS.talkgroups)
+    assert app.clip_is_context("9211-1790000000.000_770181250.1-call_9")              # by its talkgroup while listed
+
+
+def test_a_linked_context_clip_is_never_an_attachment(two):
+    from sizeup.attachments import Attachments
+    app, _said, _logs = two
+    iid, (fire, pd) = _with_context_traffic(app)
+    att = app.attachments
+    put = []
+
+    class S3:
+        def put(self, key, body, ctype="", **kw):
+            put.append(key)
+            return {"version": "v", "etag": "e"}
+
+        def __getattr__(self, name):
+            return lambda *a, **k: None
+    assert isinstance(att, Attachments)
+    att.s3 = S3()
+    assert att._copy_radio(pd, iid, "op") == "skipped" and not put
+    todo_sql = (ROOT / "sizeup" / "attachments.py").read_text()
+    assert 'f"WHERE t.system IN {OURS_SQL} AND t.end < ?' in todo_sql
+    app.cad.store.db.execute("UPDATE radio_traffic SET end = end - 3600, start = start - 3600")
+    att.sync_radio()
+    assert not [k for k in put if "9211" in k]
+    assert not app.cad.store.q("SELECT * FROM attachments WHERE ref = ?", (pd,))
+
+
+def test_unsigned_sweep_on_a_real_station_and_a_real_hub_without_access(tmp_path, monkeypatch):
+    """The station role's own page and a hub with no Access, both real, the station forwarding to the hub: the MRRS
+    transmission reaches the hub's log, and neither serves any of it to a reader nobody verified."""
+    from sizeup.cloud.hub import HubApp
+    from tests.test_cloud import HubRun, hub_cfg, station as make_station, station_cfg
+    monkeypatch.setattr(appmod, "log", lambda m: None)
+    monkeypatch.setattr(appmod.sdr_lookup, "devices", lambda *a, **k: [])
+    d = system_dir(tmp_path)
+    system = systems.discover(d.parent.parent, {307, 301})[0]
+    more = dict(p25_systems=(system,), p25_tg_info={307: {"name": "Fire/EMS 15", "group": "Fire/EMS", "encrypted": False}},
+                p25_talkgroups={307: "Fire/EMS 15"})
+    hub = HubRun(hub_cfg(tmp_path, **more))
+    st = make_station(replace(station_cfg(tmp_path, hub.url), p25_dir=str(tmp_path / "captures" / "p25"),
+                              p25_recorder=str(tmp_path / "no-trunk-recorder") + " --config=config.json",
+                              p25_recorder_dir=str(d.parent.parent), **more), {})
+    st.stt.client = type("W", (FakeWhisper,), {"transcribe": lambda self, audio, prompt="": ("words", 0.9)})({})
+    local = appmod.make_server(st)
+    import threading
+    threading.Thread(target=local.serve_forever, daemon=True).start()
+    local_url = f"http://127.0.0.1:{local.httpd.server_address[1]}"
+    try:
+        assert isinstance(hub.app, HubApp) and not hub.app.access_enforced and not st.access_enforced
+        assert wait(lambda: "p25_systems" in st.link.hub_caps, 10)               # the hub said what it knows
+        iid, (fire, pd) = _with_context_traffic(st)
+        # it is recorded on the station and reaches the hub's log, with its words
+        assert wait(lambda: (hub.app.cad.store.one("SELECT text FROM radio_traffic WHERE id = ?", (pd,)) or {}).get("text")
+                    == SECRET_TEXT, 15)
+        assert wait(lambda: "p25_systems" in (hub.app.hub.status or {}), 10)
+        hiid = hub.app.cad.create({"type": "STRU", "address": "12 Invented Ave", "operator": "op"})["id"]
+        assert hub.app.cad.comms.link(pd, hiid, "op").get("error") is None
+        assert hub.app.has_clip(pd)
+        _sweep(hub.url, hiid, hub.app)                                           # the hub with no Access
+        hst = hub.app.state()
+        assert all(not x["unknown"] and not x["encrypted"] for x in hst["p25_systems"]) and hst["p25_systems"]
+        assert all(r["count"] == 0 and r["last"] is None for r in hst["talkgroups"] if r.get("system") == "mrrs")
+        assert not _leaks(hst) and any(t["id"] == fire for t in hst["loose_traffic"])
+        _sweep(local_url, iid, st)                                               # the station's own page
+        assert [t["id"] for t in st.state()["loose_traffic"]] == [fire]
+    finally:
+        local.shutdown()
+        st.link.stop()
+        st.stop()
+        hub.close()
 
 
 def test_behind_access_a_signed_in_person_sees_it_and_nobody_else_gets_anything(two, monkeypatch):

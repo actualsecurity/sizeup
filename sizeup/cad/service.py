@@ -413,8 +413,8 @@ class Cad:
             except Exception as e:  # noqa: BLE001 - a notice never stops the transcript
                 self.log(f"CAD: possible incoming: {type(e).__name__}: {e}")
             try:                                          # "alert level N" for the airport (#369)
-                t = self.store.one("SELECT id, channel, talkgroup, start, text, talker, dispatcher FROM radio_traffic WHERE id = ?", (tid,))
-                if t:
+                t = self.store.one("SELECT id, channel, talkgroup, start, text, talker, dispatcher, system FROM radio_traffic WHERE id = ?", (tid,))
+                if t and not sourcekeys.is_context(t):
                     self.airport_watch.heard_radio(t)
             except Exception as e:  # noqa: BLE001 - a pre-alert never stops the transcript
                 self.log(f"CAD: airport alert level: {type(e).__name__}: {e}")
