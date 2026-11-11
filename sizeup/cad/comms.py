@@ -96,7 +96,8 @@ EM_WINDOW_S = 12 * 3600               # the sources' emergency mark: unacknowled
 # and SQLite has one writer at a time, so a reader that has seen seq N has seen everything up to N.
 # system: the row's own, written with the change (also for a row since deleted): a reader who may not see another P25
 # system's traffic is never told that one of its rows changed or went (its id says its talkgroup, time and frequency).
-# NULL (the row was gone before its link): shown to nobody but a reader who may see everything.
+# '?': a change of a link, a kept mark or an alarm (the triggers name no other table): whose it is, is read from the
+# row and from its other entries when it is asked for (Comms.page).
 #
 # The log is a convenience and the radio log is the record: a change-log failure never costs a write. A write that
 # fails is retried once with these triggers taken off (Comms._guard, the store's Db.guard); the log is then "broken"
@@ -105,7 +106,7 @@ CHANGES_TABLE = """
 CREATE TABLE IF NOT EXISTS radio_changes (
   seq INTEGER PRIMARY KEY AUTOINCREMENT,
   traffic_id TEXT NOT NULL,
-  system TEXT,                          -- the transmission's system (sizeup/sourcekeys.py); '' a note
+  system TEXT,                          -- the transmission's system (sizeup/sourcekeys.py); '' a note; '?' see above
   gone INTEGER NOT NULL DEFAULT 0       -- 1: the transmission was deleted
 );
 CREATE INDEX IF NOT EXISTS radio_changes_id ON radio_changes(traffic_id);
@@ -117,15 +118,15 @@ CREATE TRIGGER IF NOT EXISTS radio_changes_t_upd AFTER UPDATE ON radio_traffic B
 CREATE TRIGGER IF NOT EXISTS radio_changes_t_del AFTER DELETE ON radio_traffic BEGIN
   INSERT INTO radio_changes (traffic_id, system, gone) VALUES (OLD.id, OLD.system, 1); END;
 CREATE TRIGGER IF NOT EXISTS radio_changes_l_ins AFTER INSERT ON radio_links BEGIN
-  INSERT INTO radio_changes (traffic_id, system) VALUES (NEW.traffic_id, (SELECT system FROM radio_traffic WHERE id = NEW.traffic_id)); END;
+  INSERT INTO radio_changes (traffic_id, system) VALUES (NEW.traffic_id, '?'); END;
 CREATE TRIGGER IF NOT EXISTS radio_changes_l_del AFTER DELETE ON radio_links BEGIN
-  INSERT INTO radio_changes (traffic_id, system) VALUES (OLD.traffic_id, (SELECT system FROM radio_traffic WHERE id = OLD.traffic_id)); END;
+  INSERT INTO radio_changes (traffic_id, system) VALUES (OLD.traffic_id, '?'); END;
 CREATE TRIGGER IF NOT EXISTS radio_changes_k_ins AFTER INSERT ON radio_link_kept BEGIN
-  INSERT INTO radio_changes (traffic_id, system) VALUES (NEW.traffic_id, (SELECT system FROM radio_traffic WHERE id = NEW.traffic_id)); END;
+  INSERT INTO radio_changes (traffic_id, system) VALUES (NEW.traffic_id, '?'); END;
 CREATE TRIGGER IF NOT EXISTS radio_changes_k_del AFTER DELETE ON radio_link_kept BEGIN
-  INSERT INTO radio_changes (traffic_id, system) VALUES (OLD.traffic_id, (SELECT system FROM radio_traffic WHERE id = OLD.traffic_id)); END;
+  INSERT INTO radio_changes (traffic_id, system) VALUES (OLD.traffic_id, '?'); END;
 CREATE TRIGGER IF NOT EXISTS radio_changes_l_upd AFTER UPDATE ON radio_links BEGIN
-  INSERT INTO radio_changes (traffic_id, system) VALUES (NEW.traffic_id, (SELECT system FROM radio_traffic WHERE id = NEW.traffic_id)); END;
+  INSERT INTO radio_changes (traffic_id, system) VALUES (NEW.traffic_id, '?'); END;
 CREATE TRIGGER IF NOT EXISTS radio_changes_n_ins AFTER INSERT ON events WHEN NEW.kind = 'note' AND NEW.units != '' BEGIN
   INSERT INTO radio_changes (traffic_id, system) VALUES ('note-' || NEW.id, ''); END;
 CREATE TRIGGER IF NOT EXISTS radio_changes_n_upd AFTER UPDATE ON events WHEN NEW.kind = 'note' BEGIN
@@ -135,11 +136,11 @@ CREATE TRIGGER IF NOT EXISTS radio_changes_n_del AFTER DELETE ON events WHEN OLD
 """
 ALARM_CHANGES_SCHEMA = """
 CREATE TRIGGER IF NOT EXISTS radio_changes_a_ins AFTER INSERT ON alarms BEGIN
-  INSERT INTO radio_changes (traffic_id, system) VALUES (NEW.traffic_id, (SELECT system FROM radio_traffic WHERE id = NEW.traffic_id)); END;
+  INSERT INTO radio_changes (traffic_id, system) VALUES (NEW.traffic_id, '?'); END;
 CREATE TRIGGER IF NOT EXISTS radio_changes_a_upd AFTER UPDATE ON alarms BEGIN
-  INSERT INTO radio_changes (traffic_id, system) VALUES (NEW.traffic_id, (SELECT system FROM radio_traffic WHERE id = NEW.traffic_id)); END;
+  INSERT INTO radio_changes (traffic_id, system) VALUES (NEW.traffic_id, '?'); END;
 CREATE TRIGGER IF NOT EXISTS radio_changes_a_del AFTER DELETE ON alarms BEGIN
-  INSERT INTO radio_changes (traffic_id, system) VALUES (OLD.traffic_id, (SELECT system FROM radio_traffic WHERE id = OLD.traffic_id)); END;
+  INSERT INTO radio_changes (traffic_id, system) VALUES (OLD.traffic_id, '?'); END;
 """
 CHANGE_TRIGGERS = ("radio_changes_t_ins", "radio_changes_t_upd", "radio_changes_t_del", "radio_changes_l_ins", "radio_changes_l_del", "radio_changes_k_ins", "radio_changes_k_del",
                    "radio_changes_l_upd", "radio_changes_n_ins", "radio_changes_n_upd", "radio_changes_n_del", "radio_changes_a_ins", "radio_changes_a_upd", "radio_changes_a_del")
@@ -972,8 +973,12 @@ class Comms:
             # Another system's changes are not this reader's to know of: not as rows, not as `gone`, not in the count
             # (an id with any entry of another system's, or of none: a new row is first written with no system and
             # given its own right after, in the same transaction: radio_changes_id)
-            mine = "" if sees else (f" AND c.system IN {sources.OURS_SQL} AND NOT EXISTS (SELECT 1 FROM radio_changes x "
-                                    f"WHERE x.traffic_id = c.traffic_id AND (x.system IS NULL OR x.system NOT IN {sources.OURS_SQL}))")
+            # and a link's or an alarm's change ('?'): by the row it is on)
+            ours = sources.OURS_SQL[:-1] + ", '?')"
+            mine = "" if sees else (
+                f" AND c.system IN {ours} AND NOT EXISTS (SELECT 1 FROM radio_changes x WHERE x.traffic_id = c.traffic_id "
+                f"AND (x.system IS NULL OR x.system NOT IN {ours})) AND NOT EXISTS (SELECT 1 FROM radio_traffic t "
+                f"WHERE t.id = c.traffic_id AND t.system NOT IN {sources.OURS_SQL})")
             ids = [r["traffic_id"] for r in self.store.q(
                 f"SELECT DISTINCT c.traffic_id FROM radio_changes c WHERE c.seq > ? AND c.seq <= ?{mine} LIMIT ?",
                 (changed, cursor, CHANGES_MAX + 1))]
