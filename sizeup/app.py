@@ -466,6 +466,9 @@ class App:
         self._sys_jobs: dict[str, tuple[p25_systems.Runtime, int]] = {
             x.job: (rt, x.index) for rt in self.systems.values() for x in rt.system.sources}
         self._booting = False                 # start(): each system's dongles are handed over together
+        # Every reader of this server is a verified, signed-in person (the hub behind Cloudflare Access: make_app).
+        # Only then is another system's traffic in the state all clients share (sizeup/sourcekeys.py may_see_context).
+        self.access_enforced = False
         self.modes = [c.label for c in cfg.channels] + ([P25_MODE] if self.recorder else []) + list(self._sys_jobs)
         if self.shared:
             self.modes.append(OFF_MODE)
@@ -1628,7 +1631,9 @@ class App:
             if not getattr(item, "system", ""):      # another system's traffic (#409) raises none of our alarms
                 self._alarm(item)
             self._atc(item)
-            if item.status != "no_speech":
+            if item.status != "no_speech" and other:
+                log(f"{item.source}: transmission {item.id} ({item.status})")     # (#419: its words never in a log)
+            elif item.status != "no_speech":
                 log(f"{item.source}: {'[' + item.unit + '] ' if item.unit else ''}{item.text or '(' + item.status + ')'}")
             return
         if isinstance(item, Rerun):
@@ -3212,6 +3217,22 @@ class App:
         """POST /api/incident/<id>/close (the monitor's incident, not the CAD's)."""
         return self.store.close(iid)
 
+    def clip_is_context(self, cid: str) -> bool:
+        """This clip is another P25 system's (#419: served only to a signed-in person). By its row here, by the
+        radio log's, else by the talkgroup its id starts with ("9211-..."): never guessed the other way."""
+        base = cid.split(".")[0]
+        for t in list(self.store.loose) + [t for i in self.store.incidents for t in i.traffic]:
+            if t.id == base:
+                return bool(getattr(t, "system", ""))
+        try:
+            row = self.cad.store.one("SELECT system FROM radio_traffic WHERE id = ?", (base,))
+        except Exception:  # noqa: BLE001 - no log to ask: by its id
+            row = None
+        if row is not None:
+            return sources.is_context(row)
+        m = re.match(r"(\d{1,9})-", base)
+        return bool(m) and int(m.group(1)) in sources.context_talkgroups()
+
     def has_clip(self, cid: str) -> bool:
         with self._lock:
             if cid in self.clips:
@@ -3232,6 +3253,13 @@ class App:
               "paging": self.paging_state(),
               "prealert": self.cad.prealert_state(),
               "channels": self.channels_state()}
+        if not sources.may_see_context(self.access_enforced):
+            # no sign-in here (the station's own page, all-in-one, a hub without Access): another system's traffic is
+            # not served at all, nor what its control channel showed (#419)
+            st["loose_traffic"] = [t for t in st["loose_traffic"] if not sources.is_context(t)]
+            for inc in st["incidents"]:
+                inc["traffic"] = [t for t in inc["traffic"] if not sources.is_context(t)]
+            st["p25_systems"] = [dict(x, unknown=[], encrypted=[]) for x in st["p25_systems"]]
         # Tell the display which entries have a recording (so ▶ isn't a dead button).
         with self._lock:
             busy = set(self._rerun_ids)
@@ -3584,7 +3612,10 @@ def make_server(app: App, fence=None, listener=None) -> WebServer:
                        trains=app.trains, weather=app.weather, station_health=getattr(app, "health", None),
                        aircraft=app.aircraft, roadwork=app.roadwork, set_adsb=app.set_adsb_receiver,
                        airband_ab=app.airband_ab if cfg.cloud_role != "hub" else None,
-                       fence=fence, health_fn=lambda: app.health_extra(fence), listener=listener)
+                       fence=fence, health_fn=lambda: app.health_extra(fence), listener=listener,
+                       clip_context=app.clip_is_context)
+    # another system's traffic in the shared state only where every reader is verified (#419)
+    app.access_enforced = app.cad.comms.context_broadcast = server.access_enforced
 
     def changed() -> None:             # a new talker is pushed at once, not on the next second
         server.poke()

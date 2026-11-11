@@ -217,6 +217,7 @@ import re
 from datetime import datetime
 from urllib.parse import parse_qs, unquote
 
+from sizeup import sourcekeys
 from sizeup.cad import airport
 from sizeup.cad.activity import CSV_MAX_ROWS, KINDS, MAX_ROWS
 from sizeup.cad.service import Cad
@@ -638,6 +639,10 @@ class CadApi:
         return {"ok": True, "running": row["running"], "source": row}
 
     def get(self, path: str, query: str, who=None) -> tuple[int, bytes, str]:
+        with sourcekeys.request_context(who):       # another system's traffic: a signed-in person only (#419)
+            return self._get(path, query, who)
+
+    def _get(self, path: str, query: str, who=None) -> tuple[int, bytes, str]:
         if (no := self.read_refused(path, who)) is not None:
             return no
         try:
@@ -720,6 +725,10 @@ class CadApi:
         return 404, b"not found\n", "text/plain"
 
     def post(self, path: str, raw: bytes, who=None, client: tuple[str, str] = NO_CLIENT) -> tuple[int, bytes, str]:
+        with sourcekeys.request_context(who):
+            return self._post(path, raw, who, client)
+
+    def _post(self, path: str, raw: bytes, who=None, client: tuple[str, str] = NO_CLIENT) -> tuple[int, bytes, str]:
         try:
             body = json.loads(raw or b"{}")
         except ValueError as e:
