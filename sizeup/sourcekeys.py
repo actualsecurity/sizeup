@@ -33,6 +33,37 @@ SERVICE_WORDS = (("fire", ("fire", "hazmat", "airport incident")), ("police", ("
                  ("transit", ("transit", "metro-north", "railroad", "mta", " dot ", " bus")), ("air", ("airband", "atc")))
 
 
+_context_tgs: frozenset[int] = frozenset()
+
+
+def set_context_talkgroups(tgs) -> None:
+    """The talkgroup numbers of the other P25 systems here (the app, from its config): the lists a person edits
+    (the alarms' channels, the 60 Control feed, the status hints) refuse them, see context_talkgroups()."""
+    global _context_tgs
+    _context_tgs = frozenset(int(t) for t in tgs)
+
+
+def context_talkgroups() -> frozenset[int]:
+    return _context_tgs
+
+
+def is_context(row) -> bool:
+    """A row of the radio log (or a transmission as a dict) from another P25 system: context only. Every reader
+    that acts on what was said (alarms, the feed, status hints, the pre-alerts) leaves it alone."""
+    try:
+        s = row.get("system") if isinstance(row, dict) else row["system"]
+    except (KeyError, IndexError, TypeError):
+        s = ""
+    return bool(s) and s not in (COUNTY, "analog", "airband")
+
+
+def refuse_context(tgs, what: str) -> None:
+    """ValueError when a list a person configures names a talkgroup of another system."""
+    bad = sorted(int(t) for t in tgs if int(t) in _context_tgs)
+    if bad:
+        raise ValueError(f"{what}: talkgroup {bad[0]} is another P25 system's (context only): it can't be listed here")
+
+
 def p25(system: str, tg: int) -> str:
     return f"p25:{system or COUNTY}:{int(tg)}"
 

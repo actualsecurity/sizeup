@@ -1565,6 +1565,9 @@ class Sources:
         t = self.store.one("SELECT * FROM radio_traffic WHERE id = ?", (tid,))
         if not t or not (t["text"] or "").strip():
             return None
+        from sizeup import sourcekeys
+        if sourcekeys.is_context(t):                 # another P25 system's (#409): never a possible-incoming of ours
+            return None
         feed = self.cad.feed
         feed._refresh()
         if t["talkgroup"] not in feed.cfg.talkgroups and not (t["talkgroup"] is None and t["channel"] in feed.paging):

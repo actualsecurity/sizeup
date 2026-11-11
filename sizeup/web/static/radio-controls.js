@@ -382,7 +382,7 @@ window.RadioControls = (() => {
     }
   }
 
-  async function setSdrMode(mode, serial) {
+  async function setSdrMode(mode, serial, confirm) {
     if (st.sdrBusy || ro()) return;
     st.sdrBusy = true;
     st.sdrError = "";
@@ -391,8 +391,19 @@ window.RadioControls = (() => {
     const timer = setTimeout(() => ctl.abort(), 15000);      // never leave the switches disabled
     try {
       const r = await fetch("/api/mode", { method: "POST", headers: { "Content-Type": "application/json" },
-                                           body: JSON.stringify(serial ? { mode, sdr: serial } : { mode }), signal: ctl.signal });
-      if (!r.ok) st.sdrError = ((await r.json().catch(() => ({}))).error) || `switch refused (${r.status})`;
+                                           body: JSON.stringify({ mode, ...(serial ? { sdr: serial } : {}), ...(confirm ? { confirm: true } : {}) }),
+                                           signal: ctl.signal });
+      if (!r.ok) {
+        const why = ((await r.json().catch(() => ({}))).error) || `switch refused (${r.status})`;
+        // a fire job's dongle to another P25 system's job (#409): the server asks, the person says so, sent again
+        if (!confirm && why.startsWith("confirm: ")) {
+          clearTimeout(timer);
+          st.sdrBusy = false;
+          if (await UI.confirm(why.slice(9), { ok: `Give it to ${mode}`, danger: true })) return setSdrMode(mode, serial, true);
+          return renderSdr();
+        }
+        st.sdrError = why;
+      }
     } catch (e) {
       st.sdrError = e.name === "AbortError" ? "no answer from the server, try again" : "couldn't reach the server";
     } finally {
