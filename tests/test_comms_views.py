@@ -289,8 +289,6 @@ def test_every_view_walks_an_index(c):
     assert "radio_traffic_tg_start" in plan("t.talkgroup IS NULL")
     assert "radio_traffic_safety" in plan("t.safety != '' AND t.safety != 'dismissed' AND +t.talkgroup IS NULL", (),
                                           hint="INDEXED BY radio_traffic_safety")
-    assert "radio_traffic_emergency" in plan("t.emergency = 1 AND t.start >= ?", (0,), "t.start DESC",
-                                             "INDEXED BY radio_traffic_emergency")
     for p in (plan("t.service = ?", ("police",)), plan("t.source = ?", ("fm:FG1",)), plan("t.talkgroup IS NULL")):
         assert "TEMP B-TREE" not in p.replace("USE TEMP B-TREE FOR LAST TERM OF ORDER BY", "")   # start comes sorted
     by_id = " ".join(str(r[3]) for r in c.store.db.execute(
@@ -299,6 +297,10 @@ def test_every_view_walks_an_index(c):
     assert "sqlite_autoindex_radio_traffic_1" in by_id                          # ?changed=: by id, whatever the view
     assert "PRIMARY KEY" in " ".join(str(r[3]) for r in c.store.db.execute(
         "EXPLAIN QUERY PLAN SELECT DISTINCT traffic_id FROM radio_changes WHERE seq > ? AND seq <= ?", (1, 2)))
+    gated = " ".join(str(r[3]) for r in c.store.db.execute(
+        "EXPLAIN QUERY PLAN SELECT DISTINCT c.traffic_id FROM radio_changes c WHERE c.seq > ? AND c.seq <= ? AND c.system IN ('') "
+        "AND NOT EXISTS (SELECT 1 FROM radio_changes x WHERE x.traffic_id = c.traffic_id AND x.system IS NULL)", (1, 2)))
+    assert "PRIMARY KEY" in gated and "radio_changes_id" in gated               # the gate on changes: by key, then by id
     assert "radio_activity_minute" in " ".join(str(r[3]) for r in c.store.db.execute(
         "EXPLAIN QUERY PLAN SELECT source, minute, calls FROM radio_activity WHERE minute > ? AND minute <= ?", (1, 2)))
 
@@ -342,12 +344,140 @@ def test_the_source_tree_with_last_heard_live_counts_and_emergencies(c):
     assert not any(s["emergency"] for s in out["sources"])
     a = c.alarms.on_traffic(dict(tx("fg-9", t, text="mayday mayday mayday", rig="E63", radio_id="6301"), at=t))
     c.record_traffic(tx("fg-9", t, text="mayday mayday mayday", rig="E63", radio_id="6301"))
+    # a bare emergency flag with no alarm row marks nothing (it could never be cleared), nor does another system's row
     c.record_traffic(dict(tx("555-9-call_9-t0", t, "County Other", tg=555), emergency=True, group="Public Works"))
+    c.record_traffic(dict(other("pd-em", t), emergency=True))
     by = {s["key"]: s for s in c.comms_sources()["sources"]}
-    assert by["fm:FG1"]["emergency"] == "ours" and by["p25:westchester:555"]["emergency"] == "other"
+    assert by["fm:FG1"]["emergency"] == "ours"
+    assert by["p25:westchester:555"]["emergency"] == "" and by["p25:metro:9001"]["emergency"] == ""
+    # someone else's emergency button the CAD raised a notice for: marked, as not ours
+    n = c.alarms.on_traffic(dict(tx("555-9-call_9-t0", t, "County Other", tg=555, radio_id="21514"), emergency=True, at=t))
+    assert n["level"] == "notice"
+    assert {s["key"]: s for s in c.comms_sources()["sources"]}["p25:westchester:555"]["emergency"] == "other"
+    # seen but not cleared: still open, still marked; All clear: no longer
     c.alarms.acknowledge(a["id"], {"operator": "Lt. Sample"})
-    c.store.bump() if hasattr(c.store, "bump") else None
-    by = {s["key"]: s for s in c.comms_sources()["sources"]}
-    assert by["fm:FG1"]["emergency"] == ""
+    assert {s["key"]: s for s in c.comms_sources()["sources"]}["fm:FG1"]["emergency"] == "ours"
+    c.alarms.all_clear(a["id"], {"operator": "Lt. Sample"})
+    assert {s["key"]: s for s in c.comms_sources()["sources"]}["fm:FG1"]["emergency"] == ""
     code, raw, _ = CadApi(c).get("/api/cad/comms/sources", "", Identity(email="someone@example.org"))
     assert code == 200 and len(json.loads(raw)["sources"]) == len(by)
+
+
+def test_a_reader_who_may_not_see_another_system_is_told_nothing_of_its_changes(c):
+    """`gone` and `reload` too: a context row's id says its talkgroup, time and frequency."""
+    api, who = CadApi(c), Identity(email="someone@example.org")
+
+    def changed(view, cursor, w=None):
+        code, raw, _ = api.get("/api/cad/comms", f"view={view}&changed={cursor}", w)
+        assert code == 200
+        return json.loads(raw)
+    for view in ("all", "ours", "police"):
+        out = changed(view, 0)                                  # everything since the start, for nobody signed in
+        blob = json.dumps(out)
+        assert "pd-" not in blob and "tr-1" not in blob and "9001" not in blob, view
+        assert out["reload"] is False
+    assert sorted(changed("all", 0)["gone"] + ids(changed("all", 0))) == sorted(["555-1-call_2-t0", f"{MAIN}-1-call_1-t0", "fg-1", "twr-1"])
+    seen = changed("ours", 0, who)
+    assert {"pd-1", "pd-2", "tr-1"} <= set(seen["gone"])       # a signed-in reader: off this view, by id
+    cur = changed("all", 0)["cursor"]
+    # a context row's transcript, a link on it, its deletion: nothing, for any view
+    inc = _event_with(c, ["E63"], c.clockref)
+    c.comms.retext("pd-1", "changed words", "done")
+    c.comms.link("pd-2", inc["id"], "op")
+    with c.store.tx() as db:
+        db.execute("DELETE FROM radio_traffic WHERE id = 'tr-1'")
+    for view in ("all", "ours", "police"):
+        out = changed(view, cur)
+        assert out["rows"] == [] and out["gone"] == [] and out["reload"] is False, view
+    assert sorted(changed("all", cur, who)["gone"]) == ["tr-1"] and sorted(ids(changed("all", cur, who))) == ["pd-1", "pd-2"]
+    # so many context changes that a signed-in reader is told to reload: nobody else is
+    cur = changed("all", 0)["cursor"]
+    for i in range(CHANGES_MAX + 5):
+        c.record_traffic(other(f"burst-{i}", c.clockref.t + 2))
+    assert changed("all", cur, who)["reload"] is True
+    assert changed("all", cur) == {**changed("all", cur), "rows": [], "gone": [], "reload": False}
+
+
+def test_a_change_log_failure_never_costs_a_write(c, tmp_path):
+    """The change log is a convenience; the radio log is the record. Broken mid-run: the fire row, its link, a note and
+    an alarm are all stored, the page is told to ask afresh, and the next start rebuilds the log."""
+    said = []
+    c.comms.log = said.append
+    cur = q(c, view="ours")["cursor"]
+    inc = _event_with(c, ["E63"], c.clockref)
+    c.store.db.execute("DROP TABLE radio_changes")              # the log is gone under its triggers
+    t = c.clockref.t
+    assert c.record_traffic(tx("fg-after", t, rig="E63", radio_id="6301", text="engine 63 on location")) == [inc["id"]]
+    assert c.store.one("SELECT text FROM radio_traffic WHERE id = 'fg-after'")["text"] == "engine 63 on location"
+    assert c.store.one("SELECT 1 AS x FROM radio_links WHERE traffic_id = 'fg-after'")["x"] == 1     # its link too
+    assert c.comms.changes_broken and len(said) == 1 and "change log is off" in said[0]
+    c.comms.retext("fg-after", "engine 63 on location, nothing showing", "done")
+    c.note(inc["id"], {"text": "E63 reports nothing showing", "operator": "Lt. Sample", "units": ["E63"]})
+    a = c.alarms.on_traffic(dict(tx("fg-may", t + 1, text="mayday mayday mayday", rig="E63", radio_id="6301"), at=t + 1))
+    c.record_traffic(tx("fg-may", t + 1, text="mayday mayday mayday", rig="E63", radio_id="6301"))
+    c.alarms.acknowledge(a["id"], {"operator": "Lt. Sample"})
+    assert c.comms.unlink("fg-after", inc["id"], "op").get("error") is None
+    assert len(said) == 1                                       # said once, not per write
+    out = q(c, view="ours")
+    assert [r["id"] for r in out["rows"] if r["kind"] == "radio"][:2] == ["fg-may", "fg-after"] and out["cursor"] == 0
+    assert any(r["kind"] == "note" for r in out["rows"])        # the note was stored too
+    assert q(c, view="ours", changed=cur)["reload"] is True     # readers ask afresh
+    assert not c.store.q("SELECT name FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'radio_changes_%'")
+    # a write that fails for its own reason is still that failure (and the log is left alone)
+    c2 = cad(tmp_path / "two", c.clockref, airband=("Tower",))
+    with pytest.raises(Exception):
+        c2.store.db.execute("INSERT INTO radio_traffic (id) VALUES ('no-start')")
+    assert not c2.comms.changes_broken and c2.store.q("SELECT name FROM sqlite_master WHERE name = 'radio_changes_t_ins'")
+    # the next start: the log is rebuilt and changes are told again
+    path = c.store.path
+    c.store.db.close()
+    again = cad(tmp_path, c.clockref, airband=("Tower",))
+    assert again.store.path == path and not again.comms.changes_broken
+    again.comms.context_broadcast = True
+    cur = q(again, view="ours")["cursor"]
+    again.record_traffic(tx("fg-next", t + 5, rig="E63"))
+    assert ids(q(again, view="ours", changed=cur)) == ["fg-next"]
+    # a table that can't be written (an older shape): rebuilt at the start too
+    again.store.db.close()
+    import sqlite3 as sq
+    db = sq.connect(path)
+    db.executescript("DROP TABLE radio_changes; CREATE TABLE radio_changes (seq INTEGER PRIMARY KEY, traffic_id TEXT NOT NULL);")
+    db.commit()
+    db.close()
+    third = cad(tmp_path, c.clockref, airband=("Tower",))
+    third.record_traffic(tx("fg-third", t + 9, rig="E63"))
+    assert not third.comms.changes_broken and third.store.one("SELECT system FROM radio_changes WHERE traffic_id = 'fg-third'")
+
+
+def test_the_change_log_is_trimmed_as_it_grows(c, monkeypatch):
+    import sizeup.cad.comms as comms_mod
+    monkeypatch.setattr(comms_mod, "CHANGES_KEPT", 50)
+    monkeypatch.setattr(comms_mod, "CHANGES_TRIM_EVERY", 20)
+    for i in range(100):
+        c.record_traffic(tx(f"fg-{i + 10}", c.clockref.t + i))
+    n = c.store.one("SELECT COUNT(*) AS n FROM radio_changes")["n"]
+    assert 50 <= n <= 50 + 20 * 3                               # held near what is kept, without a restart
+
+
+def test_who_is_talking_is_gated_like_the_rows(c):
+    c.live = lambda: [{"system": "p25", "tg": MAIN, "channel": "Fire/EMS 15"},
+                      {"system": "p25", "tg": PD, "p25_system": "metro", "channel": "PD Dispatch", "rig": "Car 7"},
+                      {"source": "p25:metro:9002", "channel": "Rail Ops"}]
+    api, who = CadApi(c), Identity(email="someone@example.org")
+
+    def get(path, query, w=None):
+        return json.loads(api.get(path, query, w)[1])
+    for query in ("", "view=all", "view=police"):
+        assert [e["channel"] for e in get("/api/cad/comms", query)["talking"]] == ["Fire/EMS 15"], query
+        assert len(get("/api/cad/comms", query, who)["talking"]) == 3
+    rev = get("/api/cad/comms", "view=all")["rev"]
+    assert [e["channel"] for e in get("/api/cad/comms", f"view=all&rev={rev}")["talking"]] == ["Fire/EMS 15"]   # unchanged too
+    assert get("/api/cad/comms/sources", "")["live"] == [f"p25:westchester:{MAIN}"]
+    assert "p25:metro:9001" in get("/api/cad/comms/sources", "", who)["live"]
+    from sizeup import sourcekeys as sk
+    sk.set_context_talkgroups([PD])                             # a talker told only by its number, of another system's
+    try:
+        c.live = lambda: [{"system": "p25", "tg": PD, "channel": "PD Dispatch"}]
+        assert get("/api/cad/comms", "view=all")["talking"] == []
+    finally:
+        sk.set_context_talkgroups([])
