@@ -44,7 +44,7 @@ TIMEOUT_S = 8.0
 TARGET = "AmazonSSM.GetParameter"
 
 REGION_RE = re.compile(r"[a-z]{2}(?:-gov)?-[a-z]+-\d{1,2}")
-KEY_ID_RE = re.compile(r"(?:AKIA|ASIA)[A-Z0-9]{12,124}")
+KEY_ID_RE = re.compile(r"AKIA[A-Z0-9]{16}")           # a long-term IAM user key only
 SECRET_RE = re.compile(r"[A-Za-z0-9/+=]{16,128}")
 PARAM_RE = re.compile(r"[A-Z][A-Z0-9_]{0,63}")    # = autoupdate.ADAPTER_ENV: a credential's name
 

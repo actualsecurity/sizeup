@@ -137,7 +137,7 @@ SSM_KEY_ID, SSM_SECRET, SSM_REGION = "SIZEUP_SSM_KEY_ID", "SIZEUP_SSM_SECRET", "
 SSM_NAMES = (SSM_KEY_ID, SSM_SECRET, SSM_REGION)
 SSM_DEFAULT_REGION = "us-east-1"
 SSM_CHECKS = {SSM_REGION: (re.compile(r"[a-z]{2}(?:-gov)?-[a-z]+-\d{1,2}"), "a region such as us-east-1"),
-              SSM_KEY_ID: (re.compile(r"(?:AKIA|ASIA)[A-Z0-9]{12,124}"), "an access key id (AKIA...)"),
+              SSM_KEY_ID: (re.compile(r"AKIA[A-Z0-9]{16}"), "an access key id (AKIA...)"),
               SSM_SECRET: (re.compile(r"[A-Za-z0-9/+=]{16,128}"), "a secret access key (40 characters)")}
 FILES = "SIZEUP-FILES"                      # in an adapter's .dist-info: what root unpacked (all an uninstall removes)
 CRED_PREFIX = "sizeup-adapter."             # its credentials' names in the credstore and $CREDENTIALS_DIRECTORY
@@ -1312,6 +1312,21 @@ class Updater:
         except OSError:
             return None
 
+    def cred_from(self, name: str, ssm: bool):
+        """cred_has(name), or "ssm" for one not stored here while the station reads its credentials from AWS SSM
+        (SSM_PREFIX + name; whether that parameter exists is the adapter's to say, in its health)."""
+        has = self.cred_has(name)
+        return "ssm" if has is False and ssm and name not in SSM_NAMES else has
+
+    def ssm_key_tail(self) -> str:
+        """The last 4 characters of the station's SSM access key id ("" without one, or not readable here): enough to
+        tell which key is in use (sizeup-aws 17-adapter-rotate-key.sh), never the id itself."""
+        try:
+            kid = self.cred_file(SSM_KEY_ID).read_text().strip()
+        except OSError:
+            return ""
+        return kid[-4:] if len(kid) >= 16 else ""
+
     def write_creds(self, values: dict[str, str], drop: set[str] = frozenset()) -> None:
         """The adapter's credentials as root-only files, handed to the station service by systemd (its
         $CREDENTIALS_DIRECTORY), never its environment. New ones first, then the drop-in (without the dropped ones) and
@@ -1969,8 +1984,9 @@ class Updater:
             rec.setdefault("repo", repo_name(ad.get("repo")))
             if ad.get("why"):
                 rec["error"] = ad["why"]
+        ssm = bool(self.cred_has(SSM_KEY_ID) and self.cred_has(SSM_SECRET))
         adapter = dict(adapter_view(installed, rec), ref=(ad or installed or {}).get("ref", ""),
-                       env=[(k, self.cred_has(k)) for k in (ad or {}).get("env") or []],
+                       env=[(k, self.cred_from(k, ssm)) for k in (ad or {}).get("env") or []], ssm_key=self.ssm_key_tail(),
                        key=os.path.isfile(self.p.adapter_key), sources=(installed or {}).get("sources") or [],
                        key_open=self.key_open(), dropin=self.dropin_problem() if os.geteuid() == 0 else "")
         missing = [k for k, has in adapter["env"] if has is False]
@@ -2037,7 +2053,8 @@ def doctor_lines(r: dict) -> list[str]:
         if ad.get("dropin"):
             out.append(f"  FAIL  adapter: {ad['dropin']}")
         for k, has in ad.get("env") or []:
-            out.append(f"  ok    {k} is set" if has else f"  FAIL  {k} is not set: sudo sizeup-station adapter setup"
+            out.append(f"  ok    {k}: from AWS SSM ({SSM_PREFIX}{k})" if has == "ssm" else f"  ok    {k} is set" if has
+                       else f"  FAIL  {k} is not set: sudo sizeup-station adapter setup"
                        if has is False else f"  note  {k}: /etc/credstore not readable here")
     return out
 
@@ -2098,7 +2115,7 @@ def adapter_gather(u: Updater, repo: str = "", ref: str = "", env: str | None = 
     if bad:
         out("  " + "; ".join(bad))
         return None
-    values = {}
+    values, remove = {}, set()
     ssm_names = list(SSM_NAMES)
     names = [n for n in names if n not in ssm_names]
     if names:
@@ -2111,11 +2128,16 @@ def adapter_gather(u: Updater, repo: str = "", ref: str = "", env: str | None = 
             if ssm is None:
                 return None
             values.update(ssm)
-            out(f"  from SSM: {', '.join(SSM_PREFIX + n for n in names)}; a value entered below is only the "
-                "fallback (Enter skips it)")
+            out(f"  from SSM: {', '.join(SSM_PREFIX + n for n in names)}. A value kept here is only for a name SSM "
+                "has no parameter for: while SSM can't be read the adapter waits rather than try an old one.")
+            local = [n for n in names if u.cred_has(n)]
+            if local:
+                a = ask(f"Remove the values kept here for {', '.join(local)} (SSM has them)? [Y/n]: ").strip().lower()
+                if a not in ("n", "no"):
+                    remove = set(local)
             names = names + ssm_names
     for k in names:
-        if k in ssm_names:
+        if k in ssm_names or k in remove:
             continue
         has = u.cred_has(k)
         for _ in range(3):
@@ -2129,7 +2151,8 @@ def adapter_gather(u: Updater, repo: str = "", ref: str = "", env: str | None = 
                 continue
             values[k] = v
             break
-    return {"repo": repo, "ref": ref, "names": names, "values": values, "old": set(cur.get("env") or []) - set(names)}
+    return {"repo": repo, "ref": ref, "names": names, "values": values, "old": set(cur.get("env") or []) - set(names),
+            "remove": remove}
 
 
 def adapter_gather_ssm(u: Updater, ask: Callable[[str], str], secret: Callable[[str], str],
@@ -2197,9 +2220,10 @@ def adapter_setup(u: Updater, repo: str = "", ref: str = "", env: str | None = N
         out(f"  {pub}")
         out("  (add it to the repo as a read-only deploy key)")
     out("")
-    changed = bool(g["values"] or g["old"])
+    remove = set(g.get("remove") or ())          # values kept here that SSM now holds: out of the credstore
+    changed = bool(g["values"] or g["old"] or remove)
     try:
-        u.write_creds(g["values"], drop=g["old"])
+        u.write_creds(g["values"], drop=g["old"] | remove)
     except StepError as e:
         out(f"credentials: {e}")
         return 1
@@ -2315,9 +2339,10 @@ def adapter_cli(u: Updater, a) -> int:
             print(f"key:       {'yes' if ad.get('key') else 'no'} ({u.p.adapter_key})")
             env = ad.get("env") or []
             for k, has in env:
-                print(f"{k}: {'set' if has else 'not set' if has is False else '?'}")
+                print(f"{k}: {'from AWS SSM' if has == 'ssm' else 'set' if has else 'not set' if has is False else '?'}")
             if any(k == SSM_KEY_ID and has for k, has in env):
-                print(f"remote:    AWS SSM {SSM_PREFIX}<NAME> (what the adapter last read: its health)")
+                tail = ad.get("ssm_key") or "?"
+                print(f"remote:    AWS SSM {SSM_PREFIX}<NAME>, station key ...{tail} (what the adapter last read: its health)")
         return 0
     print("sizeup-station adapter setup | status | remove", file=sys.stderr)
     return 2

@@ -43,6 +43,12 @@ class FakeSsm:
                                               "LastModifiedDate": 1.7e9}}).encode()
 
 
+def test_only_a_long_term_user_key_id_is_taken():
+    for bad in ("ASIAEXAMPLEEXAMPLE00", "AKIAEXAMPLE", "AKIAexampleEXAMPLE00", "AKIAEXAMPLEEXAMPLE00X"):
+        assert ssm.problem(ssm.KEY_ID, bad) and not au.SSM_CHECKS[au.SSM_KEY_ID][0].fullmatch(bad)
+    assert not ssm.problem(ssm.KEY_ID, KEY_ID)
+
+
 def test_the_updater_and_the_helper_agree_on_the_names():
     # autoupdate.py runs as root with -I and never imports sizeup, so it has its own copy
     assert (au.SSM_PREFIX, au.SSM_NAMES, au.SSM_DEFAULT_REGION) == (ssm.PREFIX, ssm.NAMES, ssm.DEFAULT_REGION)
@@ -164,7 +170,7 @@ def test_setup_keeps_the_station_key_in_the_credstore(station):  # noqa: F811
 
     # again: SSM is the default now, Enter keeps the key; the names prompt doesn't offer SSM's own
     asked.clear()
-    answers = iter(["", "", "", "", ""])
+    answers = iter(["", "", "", "", "", "n"])                # (n: keep FEED_USER here, SSM has no user parameter)
     assert au.adapter_setup(u, ask=lambda p: (asked.append(p), next(answers))[1], secret=lambda p: "",
                             out=said.append, make_key=_key, check=False) == 0
     assert "Credential names, comma-separated [FEED_USER,FEED_PASS]: " in asked
@@ -188,3 +194,63 @@ def test_setup_gives_up_on_a_key_that_never_fits(station):  # noqa: F811
                             check=False) == 2
     assert "  SSM not set up: nothing changed" in said
     assert not u.cred_file(au.SSM_KEY_ID).exists() and "adapter" not in tomllib.loads(u.p.config.read_text())
+
+
+def _ssm_setup(u, answers, secrets, said=None, asked=None):
+    answers, secrets = iter(answers), iter(secrets)
+    said = [] if said is None else said
+    asked = [] if asked is None else asked
+    return au.adapter_setup(u, ask=lambda p: (asked.append(p), next(answers))[1], secret=lambda p: next(secrets),
+                            out=said.append, make_key=_key, check=False)
+
+
+def _with_adapter_installed(u):
+    rel = u.p.releases / u.current()[0]
+    (rel / au.ADAPTER_FILE).write_text(json.dumps({"commit": "a" * 40}))
+
+
+def test_choosing_ssm_removes_the_local_password_by_default_and_restarts(station):  # noqa: F811
+    repo, u, ad = station
+    _current_release_with_configupdate(u)
+    _with_adapter_installed(u)
+    assert _ssm_setup(u, ["git@github.com:example-org/feed-adapter.git", "", "FEED_USER, FEED_PASS", ""],
+                      ["local-user", VALUE]) == 0                         # local only, first
+    assert u.cred_file("FEED_PASS").read_text() == VALUE
+    u.systemctls.clear()
+    asked, said = [], []
+    # SSM: y, region Enter, then "remove the local values?" Enter = yes
+    assert _ssm_setup(u, ["", "", "", "y", "", ""], [KEY_ID, SECRET], said, asked) == 0
+    assert any(p.startswith("Remove the values kept here for FEED_USER, FEED_PASS") and "[Y/n]" in p for p in asked)
+    assert not u.cred_file("FEED_PASS").exists() and not u.cred_file("FEED_USER").exists()
+    assert ("try-restart", "sizeup-station.service") in u.systemctls        # the new key reaches the adapter
+    assert u.dropin_problem() == ""
+    r = u.report()["adapter"]
+    assert ("FEED_PASS", "ssm") in r["env"] and (au.SSM_KEY_ID, True) in r["env"]
+    assert r["ssm_key"] == KEY_ID[-4:] and KEY_ID not in json.dumps(r)
+    doc = "\n".join(au.doctor_lines(u.report()))
+    assert "ok    FEED_PASS: from AWS SSM (/sizeup-station/adapter/FEED_PASS)" in doc and "FAIL  FEED_PASS" not in doc
+    for v in (VALUE, KEY_ID, SECRET, "local-user"):
+        assert v not in "\n".join(said + asked)
+
+
+def test_keeping_the_local_value_is_an_explicit_no(station):  # noqa: F811
+    repo, u, ad = station
+    _current_release_with_configupdate(u)
+    assert _ssm_setup(u, ["git@github.com:example-org/feed-adapter.git", "", "FEED_PASS", ""], [VALUE]) == 0
+    assert _ssm_setup(u, ["", "", "", "y", "", "n"], [KEY_ID, SECRET, ""]) == 0
+    assert u.cred_file("FEED_PASS").read_text() == VALUE
+
+
+def test_a_new_station_key_alone_restarts_the_adapter(station):  # noqa: F811
+    repo, u, ad = station
+    _current_release_with_configupdate(u)
+    _with_adapter_installed(u)
+    assert _ssm_setup(u, ["git@github.com:example-org/feed-adapter.git", "", "FEED_PASS", "y", ""],
+                      [KEY_ID, SECRET, ""]) == 0
+    u.systemctls.clear()
+    assert _ssm_setup(u, ["", "", "", "", ""], ["", "", "", ""]) == 0         # Enter everywhere: nothing changed
+    assert ("try-restart", "sizeup-station.service") not in u.systemctls
+    new_id = "AKIAEXAMPLEEXAMPLE11"
+    assert _ssm_setup(u, ["", "", "", "", ""], [new_id, "", ""]) == 0          # only the key id: restarted
+    assert ("try-restart", "sizeup-station.service") in u.systemctls
+    assert u.report()["adapter"]["ssm_key"] == "LE11"
