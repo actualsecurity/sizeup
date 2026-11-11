@@ -128,8 +128,19 @@ def s3store(bucket: FakeBucket) -> S3AudioStore:
 
 
 def db(tmp_path, store=None, cache=True, name="audio.sqlite", **kw) -> AudioDb:
+    kw.setdefault("may_delete", kw.get("may_write") or (lambda: True))       # a lease: the hub's fence, ok
     return AudioDb(tmp_path / name, store=store, cache=DiskCache(tmp_path / "cache") if cache else None,
                    log=lambda m: None, **kw)
+
+
+class Lease:
+    """The hub's fence (sizeup/fence.py) as a test gives it: ours and fresh."""
+
+    def __init__(self, ok: bool = True):
+        self.okay = ok
+
+    def ok(self) -> bool:
+        return self.okay
 
 
 def cold(a: AudioDb) -> None:
@@ -436,24 +447,76 @@ def test_deleting_a_row_still_holding_its_bytes_deletes_an_object_uploaded_befor
     assert a.prune_clips(time.time()) == 1 and key not in bucket.objects
 
 
-def test_the_orphan_sweep_deletes_only_old_objects_no_row_names(tmp_path):
-    bucket = FakeBucket(page=3)
-    a = db(tmp_path, s3store(bucket))
+def sweep_rig(tmp_path, rows=60, page=7, **kw):
+    """A bucket and an audio.sqlite that agree: `rows` clips a few days old, all uploaded; plus dispatch audio."""
+    bucket = FakeBucket(page=page)
+    a = db(tmp_path, s3store(bucket), **kw)
     now = time.time()
-    put_stored(a, "named-clip", 2, now)
-    a.put("d" * 20, tone(), "dispatch", "Polly", at=now - 30 * DAY)
-    a.upload_pending()
-    for k in ("audio/clip/2026/01/01/orphan-1.wav", "audio/dispatch/2026/01/01/" + "e" * 20 + ".wav",
-              "audio/clip/2026/01/02/orphan-2.wav", "audio/clip/2026/01/03/young.wav"):
+    for k in range(rows):
+        put_stored(a, f"c{k:03d}", 3 + k / rows, now)
+    a.put("d" * 20, tone(0.2), "dispatch", "Polly", at=now - 30 * DAY)
+    while a.upload_pending(limit=100):
+        pass
+    for k in bucket.modified:
+        bucket.modified[k] = now - 3 * DAY
+    return a, bucket, now
+
+
+def test_the_orphan_sweep_deletes_only_old_clip_objects_no_row_names(tmp_path):
+    a, bucket, now = sweep_rig(tmp_path)
+    day = object_key("clip", now - 3 * DAY, "x").rsplit("/", 1)[0]
+    orphans = [f"{day}/orphan-{k}.wav" for k in range(3)]
+    for k in orphans + [f"{day}/young.wav", "audio/dispatch/2026/11/01/" + "e" * 20 + ".wav", "audio/clip/2020/01/01/ancient.wav"]:
         bucket.objects[k] = b"x"
         bucket.modified[k] = now - 2 * DAY
-    bucket.modified["audio/clip/2026/01/03/young.wav"] = now - 3600
-    for k in list(bucket.modified):
-        if k not in ("audio/clip/2026/01/03/young.wav",):
-            bucket.modified[k] = min(bucket.modified[k], now - 2 * DAY)
-    assert a.sweep_orphans(now=now) == 3
-    assert set(bucket.objects) == {row(a, "named-clip")[2], row(a, "d" * 20)[2], "audio/clip/2026/01/03/young.wav"}
-    assert len([c for c in bucket.calls if c[1] == "?list"]) == 2
+    bucket.modified[f"{day}/young.wav"] = now - 3600
+    before = set(bucket.objects)
+    assert a.sweep_orphans(now=now) == 3 and a.sweep_status == ""
+    # dispatch audio never; a folder older than the oldest clip the database knows: the lifecycle's; a young one: kept
+    assert before - set(bucket.objects) == set(orphans)
+    assert {c[1] for c in bucket.calls if c[0] == "GET"} == {"?list"}
+
+
+def test_the_orphan_sweep_never_empties_the_bucket(tmp_path):
+    """The wipe a wrong audio.sqlite would cause: an empty one, an old one, no lease: nothing deleted, said why."""
+    a, bucket, now = sweep_rig(tmp_path)
+    keys = set(bucket.objects)
+    # an empty audio.sqlite (a restore that didn't happen) with the same bucket
+    empty = db(tmp_path, s3store(bucket), name="empty.sqlite")
+    assert empty.sweep_orphans(now=now) == 0 and "no clips" in empty.sweep_status and set(bucket.objects) == keys
+    # an old audio.sqlite: it knows only the oldest few clips
+    old = db(tmp_path, s3store(bucket), name="old.sqlite")
+    rows = a.db.execute("SELECT id, kind, at, key FROM audio WHERE kind = 'clip' ORDER BY at LIMIT 5").fetchall()
+    old.db.executemany("INSERT INTO audio (id, kind, at, note, wav, key, stored) VALUES (?, ?, ?, '', x'', ?, 'store')", rows)
+    assert old.sweep_orphans(now=now) == 0 and "too many" in old.sweep_status and set(bucket.objects) == keys
+    # no lease (no fence: a local hub with the bucket set), whatever the database
+    for x in (db(tmp_path, s3store(bucket), name="nofence.sqlite", may_delete=lambda: False), AudioDb(
+            tmp_path / "plain.sqlite", store=s3store(bucket), log=lambda m: None)):
+        assert x.sweep_orphans(now=now, min_age_s=0) == 0 and set(bucket.objects) == keys
+    # ... and its retention deletes nothing from the store either
+    nofence = AudioDb(tmp_path / "audio.sqlite", store=s3store(bucket), log=lambda m: None)
+    assert nofence.prune_clips(now) == 0 and set(bucket.objects) == keys
+    assert [c for c in bucket.calls if c[0] == "DELETE"] == []
+
+
+def test_the_hub_sweeps_only_with_a_lease_held_a_day_and_the_migration_done(hub_s3, monkeypatch):
+    from sizeup.cloud import hub as hub_mod
+    app = hub_s3
+    now = time.time()
+    app.apply("traffic", {"id": "FG1-s", "source": "FG1", "start": now - 60, "end": now - 58, "text": "x", "status": "done"},
+              tone(0.2))
+    swept = []
+    monkeypatch.setattr(app.audio, "sweep_orphans", lambda **k: swept.append(1) or 0)
+    app._swept_at = 0.0
+    assert not app._sweep_due(now)                             # just took the lease
+    app._lead_since = time.monotonic() - hub_mod.SWEEP_LEADER_S - 1
+    assert not app._sweep_due(now)                             # a clip still to upload (the migration isn't done)
+    app.audio.upload_pending()
+    assert app._sweep_due(now)
+    app.fence = None
+    assert not app._sweep_due(now) and app._lead_since is None   # no fence: never
+    app.fence = Lease(False)
+    assert not app._sweep_due(now)
 
 
 def test_records_on_an_event_outlive_their_channel(tmp_path):
@@ -580,7 +643,9 @@ def test_the_release_before_reads_the_new_rows_without_crashing(tmp_path):
     old.close()
     b = db(tmp_path, FsAudioStore(tmp_path / "o"))             # rolled forward again: the old code's row migrates
     assert b.pending()[0] == 1 and b.upload_pending() == 1 and b.get("FG1-old-code") == tone(1.0)
-    assert b.sweep_orphans(min_age_s=0) == 1                   # the object the old release left behind
+    # the object the old release left behind (its row pruned, not its object): the sweep's, if it is dated within
+    # what the database knows (here the old row was 30 days back, before the oldest clip left: the lifecycle's)
+    assert b.sweep_orphans(min_age_s=0) == 0 and len(list((tmp_path / "o").rglob("*.wav"))) == 2
 
 
 # -- the hub: Settings, the attachments copy, playback ----------------------------------------------------------------
@@ -590,6 +655,7 @@ def hub_fs(tmp_path, monkeypatch):
     monkeypatch.setenv("SIZEUP_AUDIO_DIR", str(tmp_path / "objects"))
     monkeypatch.delenv("SIZEUP_AUDIO_BUCKET", raising=False)
     app = make_app(hub_cfg(tmp_path, gis_layers=()))
+    app.fence = Lease()
     yield app
     app.stop()
 
@@ -699,6 +765,7 @@ def hub_s3(tmp_path, monkeypatch):
     monkeypatch.setenv("SIZEUP_AUDIO_BUCKET", "sizeup-audio-test")
     monkeypatch.setattr(audiostore, "from_env", lambda log=print: s3store(bucket))
     app = make_app(hub_cfg(tmp_path, gis_layers=()))
+    app.fence = Lease()
     app.bucket = bucket
     yield app
     app.stop()
@@ -790,6 +857,7 @@ def test_transcripts_have_their_own_retention_never_shorter_than_the_audio(tmp_p
     from tests.test_radios import Clock, cad, tx
     clock = Clock()
     c = cad(tmp_path, clock)
+    c.comms.audio_default_days = 30                            # the hub's (deploy/hub/config.hub.toml)
     t0 = clock.t
 
     def put(tid, days, source="FG1", tg=None):
@@ -851,6 +919,7 @@ def test_transcript_settings_validate_audit_and_show_the_longer_of_the_two(hub_f
 def test_unused_dispatch_previews_are_kept_with_the_clips_on_the_hub(tmp_path, monkeypatch):
     monkeypatch.setenv("SIZEUP_AUDIO_DIR", str(tmp_path / "objects"))
     app = make_app(hub_cfg(tmp_path, gis_layers=(), audio_keep_hours=720))     # deploy/hub/config.hub.toml's 30 days
+    app.fence = Lease()
     request_stop = app.stop
     now = time.time()
     app.audio.put("c" * 20, tone(0.5), "dispatch", "Polly", at=now - 10 * DAY)
@@ -875,3 +944,37 @@ def test_the_audio_format_is_wav_until_another_is_written(hub_fs):
     b["overrides"]["audio_retention"] = {"_format": "flac"}
     with pytest.raises(CadError, match="audio_retention"):
         ed.post("import", {"action": "dry_run", "settings": b, "operator": "Admin"})
+
+
+def test_a_short_transcript_setting_never_outruns_the_default_audio(tmp_path, monkeypatch):
+    from sizeup.cad import comms as comms_mod
+    from tests.test_radios import Clock, _event_with, cad, tx
+    clock = Clock()
+    c = cad(tmp_path, clock)
+    inc = _event_with(c, ["E63"], clock)
+    monkeypatch.setattr(comms_mod.Comms, "PRUNE_BATCH", 3)       # several batches, each its own short transaction
+    t0 = clock.t
+    for k, days in enumerate((2, 10, 20, 29, 31, 40, 50, 60, 70, 80)):
+        c.record_traffic(tx(f"FG1-{k}", t0 - days * DAY))
+    with c.store.tx() as d:
+        d.execute("INSERT INTO settings_overrides (section, key, value, updated_at) VALUES "
+                  "('transcript_retention', 'FG1', '5', 0)")
+        d.execute("INSERT INTO radio_links (traffic_id, incident_id, why, unit) VALUES ('FG1-9', ?, 'manual', 'x')",
+                  (inc["id"],))
+    assert c.comms.prune() == 0                                # before the hub says its audio default: kept a year
+    c.comms.audio_default_days = 30                            # the hub's: FG1's audio 30 days, its text not before
+    assert c.comms.prune() == 5
+    assert {r["id"] for r in c.store.q("SELECT id FROM radio_traffic")} == {f"FG1-{k}" for k in (0, 1, 2, 3, 9)}
+
+
+def test_a_clip_whose_object_is_gone_is_not_retried_forever(tmp_path):
+    bucket = FakeBucket()
+    a = db(tmp_path, s3store(bucket), cache=False)
+    a.put("FG1-g", tone(), "clip", channel="FG1")
+    a.upload_pending()
+    cold(a)
+    bucket.objects.clear()                                     # really gone: a 404
+    assert a.get("FG1-g", strict=True) is None                 # no error: the copy saves the transcript only
+    bucket.fail = lambda m, k: m == "GET"                      # a 500: an error, tried again
+    with pytest.raises(StoreError):
+        a.get("FG1-g", strict=True)

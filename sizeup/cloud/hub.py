@@ -560,6 +560,7 @@ SOURCE_KINDS = ("source_event", "source_health", "source_seen")   # an external 
 SOURCE_RETRIES = 3          # a source_event that fails to apply (not a malformed one) is retried this often, then skipped
 AUDIO_UPLOAD_S = 5.0        # the audio uploader's round (#414): the clips the ingest couldn't store, then the migration
 AUDIO_UPLOAD_ROWS = (20, 200)   # rows a round: in the day, off-peak
+SWEEP_LEADER_S = 24 * 3600   # the audio orphan sweep: only once this task has held the lease this long (#414)
 
 
 def _where(d: dict) -> dict:
@@ -598,6 +599,7 @@ class HubApp(App):
                                  shared_device="", dispatch_tts_python=""))
         self.receivers, self.modes = [], []
         self.audio.may_write = self._may_write_audio
+        self.audio.may_delete = self._may_delete_audio
         self.hub = Hub(self, cfg, log)
         # station health (GitHub #79): the alerts, the admins' Settings > Health (#203), the push to the status topic in effect (Settings, else
         # [alerts] status_topic, else ntfy_topic: notify.Pushes; never Tapout's): App.pushes' STATUS kind (the same
@@ -630,6 +632,7 @@ class HubApp(App):
         self.cad.audio_keep_days = cfg.audio_keep_hours / 24          # Settings > System > Audio retention (#414)
         self.cad.audio_event_days = cfg.audio_keep_event_days
         self.cad.preview_blob_keep_s = cfg.audio_keep_hours * 3600     # unused dispatch previews: as long as the clips
+        self.cad.comms.audio_default_days = cfg.audio_keep_hours / 24     # transcripts never before their audio (#414)
         if getattr(self, "attachments", None) is not None:
             # the incident's copy: a clip whose bytes can't be read from the store now raises (tried again later),
             # never taken for "no audio kept" (sizeup/attachments.py _copy_radio, #414)
@@ -1234,6 +1237,17 @@ class HubApp(App):
         fence = getattr(self, "fence", None)
         return fence is None or fence.ok()
 
+    def _may_delete_audio(self) -> bool:
+        """Deletes from the audio store: only with a real lease, ours and fresh (sizeup/fence.py). No fence (a local
+        hub, compose, a hub without its supervisor): never, whatever audio.sqlite says (#414)."""
+        fence = getattr(self, "fence", None)
+        ok = fence is not None and fence.ok()
+        if ok and getattr(self, "_lead_since", None) is None:
+            self._lead_since = time.monotonic()
+        elif not ok:
+            self._lead_since = None
+        return ok
+
     def audio_keep(self):
         """The retention per channel / talkgroup (sizeup/audiostore.py Retention): Settings > System > Audio retention
         (#414), read now, over [storage] audio_keep_hours."""
@@ -1260,7 +1274,7 @@ class HubApp(App):
                                    pause_s=0.05 if background else 0.0, max_rows=None if quiet else 10 * cfg.audio_prune_batch,
                                    policy=policy, now=now, held=self._audio_held)
         try:                                      # the transcripts and metadata: their own retention, never before the audio
-            self.cad.comms.prune()
+            self.cad.comms.prune(pause_s=0.02 if background else 0.0)
         except Exception as e:  # noqa: BLE001 (the radio log's prune never stops the audio's)
             self.hub.log(f"hub: radio log prune: {type(e).__name__}: {e}")
         over = getattr(self.audio, "over_cap", 0)
@@ -1274,7 +1288,7 @@ class HubApp(App):
                 self.hub.log(f"audio: {freed} free page(s) of audio.sqlite handed back (incremental vacuum)")
             elif self.audio.compact():
                 self.hub.log("audio: audio.sqlite rewritten small once its audio was in the store (VACUUM, #414)")
-            if self.audio.store is not None and now - getattr(self, "_swept_at", 0.0) > 20 * 3600:
+            if self._sweep_due(now):
                 self._swept_at = now                  # once a night: objects no row names, a day old (#414)
                 try:
                     gone = self.audio.sweep_orphans(pause_s=0.2, now=now)
@@ -1283,6 +1297,13 @@ class HubApp(App):
                     self.hub.log(f"audio: orphan sweep: {type(e).__name__}: {str(e)[:120]}")
                 if gone:
                     self.hub.log(f"audio: {gone} object(s) in the store that no clip named, deleted")
+                if self.audio.sweep_status:
+                    self.hub.log(f"audio: orphan sweep stopped: {self.audio.sweep_status}")
+                    try:
+                        from sizeup.notify import STATUS
+                        self.pushes.notifier(STATUS).send("sizeup: audio orphan sweep stopped", self.audio.sweep_status)
+                    except Exception as e:  # noqa: BLE001 (the push is a courtesy; the log has it)
+                        self.hub.log(f"audio: could not push the sweep's notice: {type(e).__name__}")
         return n
 
     def _audio_held(self, ids: list[str]) -> set[str]:
@@ -1298,6 +1319,14 @@ class HubApp(App):
             held.update(r["traffic_id"] for r in self.cad.store.q(
                 f"SELECT traffic_id FROM radio_links WHERE traffic_id IN ({','.join('?' * len(chunk))})", chunk))
         return held
+
+    def _sweep_due(self, now: float) -> bool:
+        """The orphan sweep: once a night, only with a store, a real lease held for SWEEP_LEADER_S already (a takeover
+        that restored an old audio.sqlite has a day to be noticed first) and the migration done."""
+        if self.audio.store is None or now - getattr(self, "_swept_at", 0.0) < 20 * 3600 or not self._may_delete_audio():
+            return False
+        since = getattr(self, "_lead_since", None)
+        return since is not None and time.monotonic() - since >= SWEEP_LEADER_S and not self.audio.pending()[0]
 
     def _clip_channels(self, ids: list[str]) -> dict[str, tuple[str, int | None]]:
         """The channel and talkgroup of these clips (the migration's backfill, #414): the hub's transmissions and

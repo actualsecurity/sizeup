@@ -2483,15 +2483,22 @@ the bytes in `audio.sqlite` (`SIZEUP_AUDIO_DIR=<folder>` puts them in a local fo
   objects first — every key a row names, a `db` row's too (its bytes may have been uploaded before a crash) — in
   `DeleteObjects` calls of at most 1000 keys, then the rows whose objects S3 confirmed gone (an answer that isn't a
   `<DeleteResult>` counts as nothing deleted; a refused key keeps its row), `audio_prune_batch` rows a transaction.
-* **Orphans**: once a night (off-peak) the leader lists the bucket (ListObjectsV2) and deletes objects a day old that
-  no row names (a crash between a delete's two halves, a rollback's prune), dispatch audio's too (its prefix has no
-  lifecycle). It holds the uploader's lock for each page, so no key can become a row's between the look and the
-  delete, and it never touches a key a row names.
+  **Nothing is ever deleted from the store without a real lease** (the hub's fence, ours and fresh): a hub without
+  its supervisor (compose, a Mac with the bucket set) keeps every clip whatever its retention, and says so. A clip
+  whose object is really gone (a 404) plays as "no audio" and its incident copy is saved with the transcript only
+  (not retried forever); any other error is retried.
+* **Orphans**: once a night (off-peak) the leader lists `audio/clip/` (ListObjectsV2) and deletes clip objects a day
+  old that no row names (a crash between a delete's two halves, a rollback's prune). Never dispatch audio, never a
+  date folder older than the oldest clip `audio.sqlite` knows (the lifecycle's), never a key a row names. Only with a
+  real lease held 24 hours already and the migration done. It looks first, over the whole listing: more than 200
+  orphans, or more than 2 % of the clip objects looked at (at least 20), or no clip rows at all, and **nothing is
+  deleted**: the log and the status topic say so (an empty, old or wrong `audio.sqlite` would otherwise empty the
+  bucket). Each batch is looked at again under the uploader's lock before it goes.
 * **The bucket's lifecycle**: a **hard max of 400 days** on `audio/clip/`. Settings allows at most 365 days per
   channel, and `[storage] audio_keep_event_days` at most 400 (the config refuses more); `0` (forever) is forever in
   `audio.sqlite` only: in S3 the lifecycle still ends it at 400 days, and the hub says so at start (the incident's
   attachments are kept a year in their own bucket). Dispatch audio has none (kept with the dispatch log; its orphans
-  go by the sweep). Incomplete uploads aborted after a day. No cheaper storage class: at ~50 KB a clip,
+  stay: the sweep never touches them). Incomplete uploads aborted after a day. No cheaper storage class: at ~50 KB a clip,
   Standard-IA's 128 KB minimum and 30-day minimum would cost more than they save.
 * **The migration**: the rows from before #414 are the uploader's backlog, moved by the leader only, throttled as
   above (the ~4,400 clips of a typical 12 h: ~20 minutes in the day). Resumable at any point: the state is the rows;
@@ -2516,8 +2523,15 @@ the bytes in `audio.sqlite` (`SIZEUP_AUDIO_DIR=<folder>` puts them in a local fo
   **$1.50 a month** in all; at a year for every channel ~110-140 GB, ~$2.50-3.20/month; GETs
   (playback that misses the cache), the nightly listing and deletes: pennies / free. Today: Litestream keeps ~4.7 GB
   for `audio.sqlite` (its levels and a 270 MB snapshot, ~$0.11/month) and a cold restore or a standby has to bring
-  ~270 MB back; with S3 the file is a few MB at 12 h (the bytes pass through Litestream's WAL once, for the seconds
-  before their upload, then the pages are reused).
+  ~270 MB back; with S3 the file holds only metadata (49 MB at 30 days of every channel). **Every clip still passes
+  through `audio.sqlite` and Litestream's WAL once** (it is written there first, the spool, then uploaded and its pages
+  reused): ~300-385 MB a day shipped as before, but no longer kept in the snapshots and levels.
+* **The radio log at a year** (the transcripts' default): `cad.sqlite` grows with it, about 4× the 90 days it kept
+  before: ~2.4 million transmissions, roughly 0.8-1 GB (synthetic rows: ~310 bytes each; the real ones a little more).
+  The standby follows it continuously, so a handover only applies the last changes; a cold restore of ~1 GB from S3
+  (267 MB took 6-23 s) is about 30-90 s, well inside the 600 s limit. Its prune: one indexed query per channel /
+  talkgroup group, 500 rows a transaction: a million rows' first prune (278,000 deleted) 18 s with a CAD write
+  meanwhile at most 83 ms; a pass with nothing due, a few ms.
 
 **Deploy** (in order; the taskdef change is a separate follow-up PR, like #344):
 
