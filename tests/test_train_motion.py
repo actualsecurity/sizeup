@@ -270,9 +270,9 @@ const watch = (id, from, to) => { const r = []; for (let t = from; t <= to + 1e-
 def glide_ok(path, to, d=1, v=0.0):
     """A correction back onto `to` (path [[t, s, marked, opacity]] from the frame the fix came): braked to rest (if it
     was running: at most BRAKE_HARD, eased in), then glided back along the track (a quintic: no jolt at either end) no
-    faster than max(GLIDE_PEAK_MPS, 1.5x the train's speed), its acceleration at most GLIDE_ACC, marked meanwhile, as
-    long as that takes (to GLIDE_MAX_S); or, too far for that, faded out and in at the fix. Then at rest there and
-    unmarked. Returns (how far, peak speed back or None if faded, how long)."""
+    faster than GLIDE_PEAK_MPS, its acceleration at most GLIDE_BACK_ACC, marked meanwhile, as long as that takes (to
+    GLIDE_BACK_MAX_S); or, too far for that, faded out and in at the fix. Then at rest there and unmarked. Returns (how
+    far, peak speed back or None if faded, how long)."""
     ss = [p[1] for p in path]
     steps = [(b - a) * d for a, b in zip(ss, ss[1:])]
     far = max((s - to) * d for s in ss)
@@ -288,11 +288,11 @@ def glide_ok(path, to, d=1, v=0.0):
     assert all(x >= -1e-9 for x in steps[:rest])
     dv = [abs(b - a) / 0.1 for a, b in zip(speeds, speeds[1:])]
     assert max(dv[:rest + 1] or [0]) <= 4.0 + 1.3                                  # braking: at most BRAKE_HARD
-    assert max(dv[rest + 1:] or [0]) <= 1.5 + 0.05                                 # gliding: at most GLIDE_ACC
-    assert -min(steps) / 0.1 <= peak * 1.05 + 0.5                                   # back no faster than the cap
+    assert max(dv[rest + 1:] or [0]) <= 3.0 + 0.05                                 # gliding back: at most GLIDE_BACK_ACC
+    assert -min(steps) / 0.1 <= 25.0 + 0.3                                           # back no faster than GLIDE_PEAK_MPS
     back = [i for i, x in enumerate(steps) if x < -1e-9]
     if back:
-        assert (back[-1] - back[0] + 1) * 0.1 <= 20.3
+        assert (back[-1] - back[0] + 1) * 0.1 <= 25.3
         assert all(path[i + 1][2] for i in back[:-1])                                # marked while it glides
     assert ss[-1] == to and not path[-1][2]
     return far, (-min(steps) / 0.1 if back else 0.0), (len(back) * 0.1)
@@ -301,8 +301,8 @@ def glide_ok(path, to, d=1, v=0.0):
 def test_drawn_beyond_a_new_fixs_limit_it_is_braked_then_glided_back(tmp_path):
     """#375, #390 ("I'm fine with an overshoot if we keep it smooth, and then ... we nudge it back like we did for
     planes" ... "less surgy"): drawn running when a new fix says it stopped behind it, a little or a lot: braked hard to
-    rest (as little past the fix as smoothly can be), then glided back along the track onto it, gently (at most
-    GLIDE_ACC, 25 m/s); 400 m back (450 with its braking) is further than 20 s of that allows: faded out and in."""
+    rest (as little past the fix as smoothly can be), then glided back along the track onto it (at most 3 m/s^2,
+    25 m/s, 25 s: about 330 m); 450 m back is further than that: faded out and in."""
     f = fix(until=NOW + 300, hold=PC)
     out = node(tmp_path, TRACK + GLIDE + """
 const back = (id, by) => {
@@ -311,12 +311,12 @@ const back = (id, by) => {
   const drawn = tk.where(id, at(20)).s;
   const g = { ...IN.f, s: drawn - by, mode: "stopped", seg: null, hold: drawn - by, stop: drawn + 2000, t0: IN.f.t0 + 20, at: at(20) };
   tk.set(id, g, at(20));
-  return { to: g.s, path: [[20, drawn, false, 1], ...watch(id, 20.1, 50)] };
+  return { to: g.s, path: [[20, drawn, false, 1], ...watch(id, 20.1, 60)] };
 };
-out.r = {}; for (const by of [2, 20, 400]) out.r[by] = back("b" + by, by);
+out.r = {}; for (const by of [2, 20, 200, 450]) out.r[by] = back("b" + by, by);
 """, {"f": f})
     res = {by: glide_ok(r["path"], r["to"]) for by, r in out["r"].items()}
-    assert all(res[k][1] is not None for k in ("2", "20")) and res["400"][1] is None   # near: glided; far: faded
+    assert all(res[k][1] is not None for k in ("2", "20", "200")) and res["450"][1] is None   # glided; beyond ~330 m: faded
 
 
 def test_a_far_jump_the_other_way_or_another_train_is_drawn_at_once(tmp_path):
@@ -552,9 +552,9 @@ for (const v of IN.vs) {
   const path = drive(id, 0, 60);
   tk.set(id, { ...f, s: stop, hold: stop, v: 0, mode: "stopped", t0: IN.f.t0 + stopAt + 6, fixAt: IN.f.t0 + stopAt + 6, at: at(60) }, at(60));
   tk.where(id, at(60.1));
-  const marked = Motion.snapped(tk.items.get(id)) || Motion.fadeOf(tk.items.get(id), at(60.3)) < 1;   // glided, or faded
-  const after = drive(id, 60.2, 85);
-  out.r.push({ v, past: Math.max(...path) - stop, end: after[after.length - 1] - stop, marked,
+  const glided = Motion.snapped(tk.items.get(id)), marked = glided || Motion.fadeOf(tk.items.get(id), at(60.3)) < 1;
+  const after = drive(id, 60.2, 90);
+  out.r.push({ v, past: Math.max(...path) - stop, end: after[after.length - 1] - stop, marked, glided: glided || !(Math.max(...path) - stop > 0.5),
                ev: Math.max(...pe) - stop, evEnd: pe[pe.length - 1] - stop });
 }
 """, {"f": fix(fixAt=NOW, hold=PC + 5000, stop=PC + 5000, until=NOW + T.TT_HORIZON_S, seg=None),
@@ -563,6 +563,7 @@ for (const v of IN.vs) {
         assert r["ev"] <= 75 and abs(r["evEnd"]) <= 30          # evidence: on past it, braked smoothly (36 m/s: 61 m)
         assert abs(r["end"]) < 0.01 and r["marked"] == (r["past"] > 0.5)             # the stopped fix: glided there
     hard = {r["v"]: r["past"] for r in out["r"]}
+    assert all(r["glided"] for r in out["r"] if r["v"] <= 27)                        # no-evidence stops to 60 mph: glided
     assert 150 < hard[20] < 330                                                      # the trade-off, measured (see #392)
 
 
@@ -640,9 +641,9 @@ out.path = [...p1, ...watch("a", 30.1, 60)];
     v = [(b - a) / 0.1 for a, b in zip(ss, ss[1:])]
     k = next(i for i, p in enumerate(out["path"]) if p[0] > 30.05)
     assert out["path"][k - 1][2] and v[k - 2] < -0.5                                   # gliding back when the fix came
-    assert abs(v[k] - v[k - 2]) <= 2 * 0.1 * 1.5 + 0.1                                # its speed carried on
+    assert abs(v[k] - v[k - 2]) <= 2 * 0.1 * 3 + 0.1                                  # its speed carried on
     assert min(abs(x) for x in v[k - 3:k + 3]) > 0.1                                  # never a stop on the way
-    assert all(abs(b - a) <= 0.1 * 1.5 + 0.06 for a, b in zip(v[k - 30:k + 30], v[k - 29:k + 31]))   # no step in pace
+    assert all(abs(b - a) <= 0.1 * 3 + 0.06 for a, b in zip(v[k - 30:k + 30], v[k - 29:k + 31]))     # no step in pace
 
 
 def test_no_back_nudge_when_a_fix_goes_quiet(tmp_path):

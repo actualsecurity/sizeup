@@ -200,9 +200,9 @@ def smooth_back(frames, v=V):
     """#390 ("less surgy"): every move back is a glide, never a jump, at most GLIDE_PEAK_MPS or 1.5x the train's speed
     (it takes as long as that needs, to GLIDE_MAX_S), ringed when it is more than a few metres; a correction too big for
     that is faded out and in instead (op), the only place the drawn train moves more than a glide's pace in a frame"""
-    peak = max(25.0, 1.5 * v)
+    peak = 25.0
     for g in glides_back(frames):
-        assert g["s"] <= 20.5 and g["peak"] <= peak * 1.05 + 1.0
+        assert g["s"] <= 25.5 and g["peak"] <= peak * 1.02 + 0.5
         assert g["m"] <= 3.0 or g["ringed"]
     fr = [(t, s, op) for t, s, _, _, op in frames if s is not None]
     for a, b in zip(fr, fr[1:]):
@@ -216,7 +216,7 @@ def test_a_train_braking_to_a_stop_mid_track_is_drawn_where_it_stopped(tmp_path,
     after a fix, to a stop 360 m on, mid-track; the feed's fixes still 3-16 s old: it ends where the GPS says it stopped.
     #390: until a fix says it is braking it is drawn on at its speed, so by then it may be drawn ahead of the train (the
     user: "fine with an overshoot if we keep it smooth"): braked hard (to 4 m/s^2, eased in) as soon as the data says
-    it stops behind, then glided back no faster than 1.5x its speed (25 m/s at least), faintly ringed."""
+    it stops behind, then glided back (at most 25 m/s, 3 m/s^2), faintly ringed."""
     frames, truth = drive(tmp_path, run=braking(brake_at), run_s=brake_at + 65)
     stop = truth(frames[0][0] + 10_000)
     fr = [(t, s) for t, s, *_ in frames if s is not None]
@@ -269,19 +269,18 @@ def test_a_stop_with_no_sign_of_it_before_the_feed_goes_quiet(tmp_path):
     """#390, the trade-off, measured: a 45 mph train brakes (0.75 m/s^2) right after a moving fix and no fix comes until
     it has stopped. Nothing says it is slowing, so it is drawn on at its speed until its fix is RAIL_CRUISE_S (20 s)
     old, then eased to a stop at its service brake (it was drawn slowing on age alone before: within ~60 m, at the cost
-    of every steady train); then the stopped fix glides it back where it stopped, or (further than a gentle glide
-    covers) fades it out and in there."""
+    of every steady train); then the stopped fix glides it back where it stopped (at most 25 m/s, 3 m/s^2), not a fade."""
     brake = 40
     frames, truth = drive(tmp_path, run=braking_v(V45, brake),
-                          run_s=brake + 60, cadence="real", start_m=1000.0, quiet=(brake - 2, brake + V45 / 0.75 + 1))
+                          run_s=brake + 80, cadence="real", start_m=1000.0, quiet=(brake - 2, brake + V45 / 0.75 + 1))
     stop = truth(frames[0][0] + 10_000)
     fr = [(t, s) for t, s, *_ in frames if s is not None]
     past = max(stop - s for _, s in fr)
     assert 100 <= past <= 300                                # (45 mph: ~230 m; see #392)
     smooth_back(frames, V45)
     glided = [g for g in glides_back(frames) if g["m"] > 10]
-    faded = any(op is not None and op < 1 for *_, op in frames)
-    assert len(glided) <= 2 and (glided or faded)                                    # glided back, or (far) faded
+    assert 1 <= len(glided) <= 2 and not any(op is not None and op < 1 for *_, op in frames)   # glided back, not faded
+    assert max(g["peak"] for g in glided) <= 25.5
     assert abs(fr[-1][1] - stop) <= 25 and fr[-1][1] == fr[-20][1]
 
 

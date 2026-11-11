@@ -265,10 +265,11 @@ window.Motion = (() => {
   //                position, as an aircraft eases onto a new fix but smoother: its offset from the prediction is a
   //                quintic from where and how fast it is drawn to rest on it (no jump, no step in speed, no jolt at
   //                either end), as slow as glidePlan needs (never faster than the train + GLIDE_AHEAD_SHARE of its
-  //                speed + 2 m/s going on, or glidePeak going back; acceleration at most GLIDE_ACC); one that would
-  //                take over GLIDE_MAX_S, or is over FADE_M, is faded out and in at the fix instead. A new fix
-  //                mid-glide re-aims it from the frame before (at the speed it is drawn at). Busy and marked (snapped:
-  //                trains.js rings it faintly) meanwhile. An ease for want of news (rail's eased) is no data: up to
+  //                speed + 2 m/s going on, acceleration at most GLIDE_ACC, to GLIDE_MAX_S; going back at most
+  //                GLIDE_PEAK_MPS and GLIDE_BACK_ACC, to GLIDE_BACK_MAX_S); one that would take longer, or is over
+  //                FADE_M, is faded out and in at the fix instead. A new fix mid-glide that moves the target re-aims
+  //                it from the frame before (at the speed it is drawn at). Busy and marked (snapped: trains.js rings
+  //                it faintly) meanwhile. An ease for want of news (rail's eased) is no data: up to
   //                EASE_SLACK_M past it is left be.
   //   otherwise    on at the train's own speed (the prediction's, from the fix's own speed: never a decayed one, so a
   //                lag can't grow, #379) plus the gap over TAU_S, the correction at most SHARE of its speed (+
@@ -285,7 +286,7 @@ window.Motion = (() => {
   const JUMP_M = 2000, TAU_S = 6, RAMP_S = 1, CATCH_MAX_MPS = 30, SLOW_SHARE = 0.3, SNUG_M = 3, FRAME_MAX_S = 1;
   const SHARE = 0.15, SHARE_EST = 0.4, EXTRA_SHARE = 0.25, CORR_MIN_MPS = 0.5, BIG_M = 30, JERK_MPS3 = 1.5;
   const GLIDE_AHEAD_M = 400, GLIDE_EST_M = 100, GLIDE_MIN_S = 3, GLIDE_MAX_S = 20, GLIDE_PEAK_MPS = 25, LIM_SLACK_M = 0.5;
-  const GLIDE_ACC = 1.5, GLIDE_AHEAD_SHARE = 0.25, EASE_SLACK_M = 25;
+  const GLIDE_ACC = 1.5, GLIDE_BACK_ACC = 3, GLIDE_BACK_MAX_S = 26, GLIDE_AHEAD_SHARE = 0.25, EASE_SLACK_M = 25;
   const FADE_M = 600, FADE_MS = 800, BRAKE_HARD = 4, JERK_HARD = 12;
   // A glide's offset from the prediction, k (0..1) of the way through T: from off0, changing at m0 (metres per glide),
   // to 0 at rest on it; a quintic Hermite, so its acceleration is 0 at both ends (no jolt starting or ending)
@@ -294,19 +295,21 @@ window.Motion = (() => {
   const ddH = (k) => [-60 * k + 180 * k * k - 120 * k ** 3, -36 * k + 96 * k * k - 60 * k ** 3];
   const quintic = (off0, m0, k) => { const [a, b] = H(k); return off0 * a + m0 * b; };
   // (#390: "less surgy") a glide is as slow as it must be: the drawn train never faster than the train + GLIDE_AHEAD_SHARE
-  // of its speed + 2 m/s going on (the band's own limit), never back faster than glidePeak, its acceleration never over
-  // GLIDE_ACC; it takes as long as that needs (GLIDE_MIN_S to GLIDE_MAX_S). One that would need longer: faded out where
-  // it is drawn and in at the fix (FADE_MS), calmer than a fast glide.
-  const glidePeak = (it) => Math.max(GLIDE_PEAK_MPS, 1.5 * (it.vReal || 0));
-  function glidePlan(off0, rel, v, peak) {
-    const ahead = Math.min(peak, GLIDE_AHEAD_SHARE * v + 2);                    // most it may go faster than the train
-    for (let T = GLIDE_MIN_S; T <= GLIDE_MAX_S + 1e-9; T += 0.5) {
+  // of its speed + 2 m/s going on (the band's own limit), its acceleration at most GLIDE_ACC, over GLIDE_MIN_S to
+  // GLIDE_MAX_S; going back ("nudge it back like we did for planes": a stop the data didn't show in time) never faster
+  // than GLIDE_PEAK_MPS, at most GLIDE_BACK_ACC, over up to GLIDE_BACK_MAX_S (about 330 m: every no-evidence stop at 20
+  // to 60 mph). One that would need longer: faded out where it is drawn and in at the fix (FADE_MS).
+  function glidePlan(off0, rel, v) {
+    const back = off0 > 0;                                                      // drawn ahead: gliding back
+    const ahead = Math.min(GLIDE_PEAK_MPS, GLIDE_AHEAD_SHARE * v + 2);          // most it may go faster than the train
+    const accMax = back ? GLIDE_BACK_ACC : GLIDE_ACC, maxT = back ? GLIDE_BACK_MAX_S : GLIDE_MAX_S;
+    for (let T = GLIDE_MIN_S; T <= maxT + 1e-9; T += 0.5) {
       const m0 = rel * T;
       let ok = true;
       for (let i = 0; i <= 40 && ok; i++) {
         const k = i / 40, [a, b] = dH(k), [c, e] = ddH(k);
         const r = (off0 * a + m0 * b) / T, acc = (off0 * c + m0 * e) / (T * T);   // the offset's rate and acceleration
-        ok = r <= Math.max(ahead, rel) + 1e-9 && -(v + r) <= peak + 1e-9 && Math.abs(acc) <= GLIDE_ACC + 1e-9;
+        ok = r <= Math.max(ahead, rel) + 1e-9 && -(v + r) <= GLIDE_PEAK_MPS + 1e-9 && Math.abs(acc) <= accMax + 1e-9;
       }
       if (ok) return { m0, T };
     }
@@ -316,9 +319,9 @@ window.Motion = (() => {
   function glideFrom(it, sh, tg, now, dt = 0) {
     const v = Math.max(0, tg.v || 0), off0 = (sh.s - tg.s) * tg.d + v * dt;
     const u = typeof it.u === "number" ? it.u : 0;                        // drawn speed now, along d (signed)
-    const plan = Math.abs(off0) <= FADE_M ? glidePlan(off0, u - v, v, glidePeak(it)) : null;
+    const plan = Math.abs(off0) <= FADE_M ? glidePlan(off0, u - v, v) : null;
     if (!plan) { it.glide = null; it.fade = { at: now, s: sh.s }; it.acc = 0; return; }
-    it.glide = { off0, m0: plan.m0, at: now - dt * 1000, T: plan.T };
+    it.glide = { off0, m0: plan.m0, at: now - dt * 1000, T: plan.T, tg: tg.s };
     it.acc = 0;
   }
   function railFollow(it, tg, now) {
@@ -329,7 +332,6 @@ window.Motion = (() => {
       it.chase = 0; it.u = Math.max(0, tg.v || 0); it.acc = 0; it.glide = null; it.fade = null; return tg;
     }
     if (it.stale) { it.chase = 0; it.u = 0; it.acc = 0; it.glide = null; return { ...sh, v: 0, moving: false }; }
-    if (it.fix && typeof it.fix.v === "number" && it.fix.fixAt != null && it.fix.v > 0) it.vReal = it.fix.v;
     if (it.fade) {                                                       // faded out where it was, in at the fix
       const k = (now - it.fade.at) / FADE_MS;
       it.chase = 1; it.u = 0;
@@ -353,7 +355,9 @@ window.Motion = (() => {
       return { ...tg, s, v: u1 };
     }
     const gps = !!(it.fix && typeof it.fix.v === "number" && it.fix.fixAt != null);
-    if (it.glide ? it.fresh : (beyond                                                 // ... then glided back from rest
+    // (mid-glide, a new fix re-aims it only when it moves the target: the same stop again leaves the glide be)
+    const moved = it.glide && it.fresh && !(Math.abs((tg.s - it.glide.tg) * d - v * dt) <= 1);
+    if (it.glide ? moved : (beyond                                                    // ... then glided back from rest
         || (it.fresh && gap > GLIDE_AHEAD_M)                                            // far behind a new fix
         || (it.fresh && !gps && gap > GLIDE_EST_M)                                      // a GTFS-realtime report ahead
         || (it.fresh && sh.est && !tg.est))) {                                          // a real fix of an estimated train
@@ -362,6 +366,7 @@ window.Motion = (() => {
     }
     if (it.glide) {
       const g = it.glide, k = Math.min(1, (now - g.at) / 1000 / g.T);
+      g.tg = tg.s;
       let s = tg.s + d * quintic(g.off0, g.m0, k);
       if (k >= 1) { it.glide = null; s = tg.s; }
       const u = dt ? ((s - sh.s) * d) / dt : (typeof it.u === "number" ? it.u : v);   // (negative: gliding back)
@@ -424,6 +429,6 @@ window.Motion = (() => {
            profileS, profileT, rail, railFollow, railTracker, gpsRun, snapped, fadeOf,
            RAIL: { JUMP_M, TAU_S, RAMP_S, CATCH_MAX_MPS, SLOW_SHARE, SNUG_M, STOP_ZONE_M, RAIL_CRUISE_S, RAIL_BRAKE_A,
                    SHARE, SHARE_EST, EXTRA_SHARE, CORR_MIN_MPS, BIG_M, JERK_MPS3, GLIDE_AHEAD_M, GLIDE_EST_M, GLIDE_MIN_S, GLIDE_MAX_S,
-                   GLIDE_ACC, GLIDE_AHEAD_SHARE, EASE_SLACK_M, RAIL_JERK,
+                   GLIDE_ACC, GLIDE_BACK_ACC, GLIDE_BACK_MAX_S, GLIDE_AHEAD_SHARE, EASE_SLACK_M, RAIL_JERK,
                    GLIDE_PEAK_MPS, FADE_M, FADE_MS, BRAKE_HARD, JERK_HARD, DYN } };
 })();
