@@ -1363,6 +1363,10 @@ TENS = "_ _ twenty thirty forty fifty sixty seventy eighty ninety".split()
 MAX_PHRASE = 256
 MAX_PHRASES = 1500               # the suggested list (sizeup/stt_vocab.py) is ~650 phrases, the whole county ~1100
 MAX_BYTES = 50_000               # AWS: a custom vocabulary is at most 50 KB
+# Sent to AWS but never written back as digits by respell(): a number after a word that is common in plain speech
+# would rewrite it ("working fire two story frame" -> "Fire 2 story", "Battalion ten four" -> "Battalion 10 four",
+# "to sixty" anywhere), and a 4-digit number that is also a year ("twenty twelve" -> "2012").
+NO_RESPELL = re.compile(r"(?:fire|battalion|to) \d+|(?:19|20)\d\d", re.I)
 
 
 def _two(n: int) -> str:
@@ -1430,7 +1434,7 @@ def build_vocabulary(phrases: list[str]) -> dict:
         size += len(a.encode()) + 1
         seen.add(a.lower())
         out.append(a)
-        if re.search(r"\d", p):
+        if re.search(r"\d", p) and not NO_RESPELL.fullmatch(p):
             respell_map[a.replace("-", " ").lower()] = p
     return {"phrases": out, "skipped": skipped, "respell": respell_map}
 

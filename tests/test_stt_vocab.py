@@ -3,6 +3,8 @@ fire mutual aid plan in data/westchester_*.csv, data/cad_lists.json, data/gazett
 
 import csv
 
+import pytest
+
 from sizeup import stt_vocab as V
 from sizeup.cad.lists import load
 from sizeup.channels import vocabulary_suggestions
@@ -32,6 +34,9 @@ def test_the_plans_rigs_as_said_without_reserved_numbers_or_antiques():
         if "antique" in notes:
             assert r["unit"] not in rigs or any(x["unit"] == r["unit"] and "antique" not in x["notes"].lower()
                                                 for x in rows)
+    antiques = {r["unit"] for r in rows if "antique" in r["notes"].lower()}
+    assert len(antiques) >= 10 and {"Engine 242", "Engine 220", "Engine 6"} <= antiques   # the plan's (Ardsley ...)
+    assert not antiques & rigs                                     # no antique's number is a working rig's too
     assert {"Engine 164", "Ladder 50", "Engine 34", "Marine 34"} <= rigs
     assert "S.S.U. 15" in rigs and "SSU 15" not in rigs             # the plan's abbreviations, said letter by letter
     assert not any(r.startswith(("(", "74-")) for r in rigs)        # nothing the plan doesn't number
@@ -105,3 +110,50 @@ def test_the_table_form_has_display_as_and_sounds_like():
     assert t["Mamaroneck"][2] == V.SOUNDS_LIKE["Mamaroneck"] and t["Mamaroneck"][3] == ""
     assert t["Port-Chester"][1:] == ["", "", ""]
     assert all(len(r) == 4 for r in rows)
+
+
+@pytest.mark.parametrize("said, kept", [
+    ("working fire two story frame", "working fire two story frame"),
+    ("structure fire four floors", "structure fire four floors"),
+    ("brush fire eight acres", "brush fire eight acres"),
+    ("Battalion ten four", "Battalion ten four"),
+    ("back in twenty twelve", "back in twenty twelve"),
+    ("go to sixty and hold", "go to sixty and hold"),
+])
+def test_respell_leaves_plain_speech_alone(said, kept):
+    for battalions in (V.SUGGEST_BATTALIONS, None):
+        built = build_vocabulary(suggestions(battalions))
+        assert respell(said, built["respell"]) == kept
+        assert {"Fire-two", "Battalion-ten", "to-sixty"} <= set(built["phrases"])
+
+
+def test_respell_still_writes_callsigns_and_to_60_control():
+    built = build_vocabulary(suggestions(None))
+    assert "twenty eleven" not in built["respell"] and "2011" in suggestions(None)   # a chief car that is also a year
+    assert respell("Engine thirty four to sixty Control, Fire EMS eighteen", built["respell"]) \
+        == "Engine 34 to 60 Control, Fire EMS 18"
+
+
+def test_an_edited_settings_list_survives_the_new_suggestion(tmp_path):
+    from sizeup.app import App
+    from tests.test_cloud import base
+    app = App(base(clips_dir=str(tmp_path / "clips")))
+    s = app.cad.settings
+    assert "Fire EMS 18" in s.stt_page()["vocabulary"]["suggestions"]          # the county's, suggested
+    s.post("stt", {"action": "set", "key": "vocabulary", "value": ["Engine 60", "Rye Brook"]})
+    page = s.stt_page()["vocabulary"]
+    assert s.vocabulary() == ["Engine 60", "Rye Brook"] and page["edited"] and page["aws"] == ["Engine-sixty", "Rye-Brook"]
+    assert "Fire EMS 18" in page["suggestions"] and "Fire EMS 18" not in s.vocabulary()
+
+
+def test_settings_refuses_a_list_over_awss_size(tmp_path):
+    from sizeup.app import App
+    from sizeup.cad.settings import MAX_VOCAB, MAX_VOCAB_BYTES
+    from sizeup.cad.store import CadError
+    from tests.test_cloud import base
+    s = App(base(clips_dir=str(tmp_path / "clips"))).cad.settings
+    big = [f"Phrase {i:04d} " + "x" * 80 for i in range(MAX_VOCAB)]
+    assert sum(len(x) + 1 for x in big) > MAX_VOCAB_BYTES
+    with pytest.raises(CadError, match="50 KB"):
+        s.post("stt", {"action": "set", "key": "vocabulary", "value": big})
+    assert "vocabulary" not in s.stt_values()

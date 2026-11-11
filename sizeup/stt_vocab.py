@@ -162,7 +162,7 @@ def county_phrases(units: dict | None = None, town_aliases=(), data: Path = DATA
 def table(phrases: list[str]) -> str:
     """The phrases in AWS's table form (tab-separated Phrase, IPA, SoundsLike, DisplayAs), as built for the list
     (transcribe.build_vocabulary: the same spelling, skips and limits): DisplayAs = the phrase as written when it
-    has digits or letters said one by one ("twenty-three-oh-one" -> 2301, "S.S.U.-eight" -> SSU 8); SoundsLike
+    has digits or letters said one by one ("twenty-three-oh-one" -> 2301, "S.S.U.-fifteen" -> S.S.U. 15); SoundsLike
     for the one-word place names in SOUNDS_LIKE."""
     from sizeup.transcribe import build_vocabulary
     built = build_vocabulary(phrases)
