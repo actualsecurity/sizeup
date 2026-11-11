@@ -1641,8 +1641,10 @@ class Sources:
                     db.execute("UPDATE source_reports SET incident_id = ? WHERE source = ? AND ref = ?", (iid, PAGING, rep["ref"]))
                     self.store._event(db, p["id"], "feed", f"Page attached to {_ref(inc)}" + (" (closed there)" if closed else ""),
                                       at=self.clock())
-                    self.store._event(db, iid, "feed", f"Page card {_ref(p)} merged into this: the same call"
-                                      + (" (closed here)" if closed else f" ({'possibly the same before, the feed\'s update matches it now' if self._noted(p['id'], inc) else 'the feed\'s event matches it'})"),
+                    why = (" (closed here)" if closed else
+                           " (possibly the same before, the feed's update matches it now)" if self._noted(p["id"], inc)
+                           else " (the feed's event matches it)")
+                    self.store._event(db, iid, "feed", f"Page card {_ref(p)} merged into this: the same call{why}",
                                       at=self.clock())
                 self._page_attached(inc, rec)
                 self._moved(p["id"], iid)

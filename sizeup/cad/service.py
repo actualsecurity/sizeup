@@ -1902,7 +1902,7 @@ class Cad:
         depts = list(dict.fromkeys([*(getattr(inc, "tone_departments", None) or []), *(getattr(inc, "departments", None) or [])]))
         feed, _ = self._page_scope(iid, inc, note=False)
         texts = [x[:2000] for x in lines]
-        base = self.scope.line(iid) or scope_mod.page_line(depts, scope_mod.latest_units(inc),
+        base = self.scope.line(iid) or scope_mod.page_line(depts, scope_mod.latest_units(inc, self.scope.roster()),
                                                            getattr(inc, "tone_departments", ()), inc.incident_type)
         if base and not any(x == base or x.startswith(base + " · feed: ") for x in have):   # once per reading
             texts.append(base + (f" · feed: {feed}" if feed else ""))   # (feed: "" when that disagreement is said)

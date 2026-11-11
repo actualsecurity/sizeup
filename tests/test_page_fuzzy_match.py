@@ -6,6 +6,8 @@ nothing shared, a department entry, halves that aren't apparatus, the 5 min wind
 
 from __future__ import annotations
 
+import types
+
 import pytest
 
 from sizeup.cad import fuzzy
@@ -313,3 +315,18 @@ def test_two_calls_that_both_qualify_tie_and_never_join(tmp_path):
     rig.at(60)
     p = rig.page("p1", gas_page())["id"]
     assert p not in (a, b) and possibly(rig, p, a) and possibly(rig, p, b)
+
+
+def test_the_page_line_splits_run_together_units_as_the_station_does(tmp_path):
+    """The "Page:" line reads the page with the board's units: "Engine 6158" is Engine 61 and Engine 58 there too."""
+    from sizeup.cad import scope as scope_mod
+    rig = AutoRig(tmp_path)
+    rig.mode("pcfd")
+    a = feed(rig)
+    rig.at(6 * 60)
+    rig.page("p1", gas_page(units="Engine 6158, Engine 59/63"))
+    line = next(x for x in tones(rig, a) if x.startswith("Page:"))
+    assert "Engine 61" in line and "Engine 58" in line and "6158" not in line
+    assert "Engine 63" in line                                          # 59/63: both on the board
+    inc = types.SimpleNamespace(page_text=[gas_page()], units=[])
+    assert scope_mod.latest_units(inc, ["E61", "E58", "E59", "E63"]) == ["Engine 61", "Engine 58", "Engine 59", "Engine 63"]
