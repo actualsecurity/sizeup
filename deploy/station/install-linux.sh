@@ -815,7 +815,7 @@ whisper_argv() { timeout 5 runuser -u "$SVC_USER" -- head -c 8192 /run/sizeup-wh
 # what sizeup-adsb runs: its supervisor, its unit and the readsb build behind the link (restarted only when one changed)
 adsb_sig() { { cat "$LIB/adsbd.py" /etc/systemd/system/sizeup-adsb.service 2>/dev/null; readlink -f "$OPT/readsb" 2>/dev/null; } | sha256sum | cut -c1-16; }
 # what sizeup-ais runs (#402): its supervisor and its unit (AIS-catcher is installed by hand: README "AIS receiver")
-ais_sig() { cat "$LIB/aisd.py" /etc/systemd/system/sizeup-ais.service 2>/dev/null | sha256sum | cut -c1-16; }
+ais_sig() { { cat "$LIB/aisd.py" /etc/systemd/system/sizeup-ais.service 2>/dev/null || true; } | sha256sum | cut -c1-16; }
 # what sizeup-trunk-recorder runs (#71): its supervisor and its unit, the trunk-recorder and librtlsdr builds behind the
 # links, its config.json and talkgroups.csv (the sizeup user's directory: read as that user, bounded, never waiting
 # long). Restarted only when one of them changed: a Python-only update leaves P25 on its control channel.

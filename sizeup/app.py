@@ -97,9 +97,14 @@ ROOT = Path(__file__).resolve().parent.parent
 HOT_INCIDENTS_SQL = ("SELECT i.lat, i.lon FROM incidents i WHERE i.status IN ('active', 'pending') AND i.emergency = 1 "
                      "AND i.lat IS NOT NULL AND i.lon IS NOT NULL AND MAX(i.created_at, COALESCE((SELECT MAX(e.at) FROM events e "
                      "WHERE e.incident_id = i.id), 0)) >= ?")
-# Vessels (sizeup/vessels.py): an open marine or water call keeps aisstream.io connected (its subtypes: vessels.MARINE_SUBTYPES)
-MARINE_OPEN_SQL = ("SELECT 1 FROM incidents WHERE status IN ('queued', 'pending', 'active') "
-                   "AND UPPER(COALESCE(subtype, '')) IN ('BOAT', 'WATER', 'ACFT-WATER') LIMIT 1")
+# Vessels (sizeup/vessels.py): an open marine or water call keeps aisstream.io connected: vessels.is_marine()'s rule (a
+# boat subtype, a water rescue, an aircraft in the water, never NOTIF/WATER; or a marine unit on it, never a DPT placeholder)
+MARINE_OPEN_SQL = ("SELECT 1 FROM incidents i WHERE i.status IN ('queued', 'pending', 'open', 'active') AND ("
+                   "UPPER(COALESCE(i.subtype, '')) = 'BOAT' "
+                   "OR (UPPER(COALESCE(i.type, '')) = 'RESCUE' AND UPPER(COALESCE(i.subtype, '')) = 'WATER') "
+                   "OR (UPPER(COALESCE(i.type, '')) = 'AIRPORT' AND UPPER(COALESCE(i.subtype, '')) = 'ACFT-WATER') "
+                   "OR EXISTS (SELECT 1 FROM assignments a JOIN units u ON u.id = a.unit_id WHERE a.incident_id = i.id "
+                   "AND u.kind = 'marine' AND a.cleared_at IS NULL AND UPPER(u.name) NOT LIKE 'DPT%')) LIMIT 1")
 HUB_SWITCH_S = 0.001    # the hub's GIL switch interval (sys.setswitchinterval; Python's default 0.005), start_app() (#284)
 SPLIT_PAGE_S = 30.0      # voice this soon after a tones-only page for us = that page's voice
 # The gazetteer names a town only from this confidence up (#80: "34 Longdale Avenue" read as Port Chester at
@@ -661,6 +666,7 @@ class App:
         self.vessels = prov["vessels"]
         self.vessels.hot = lambda: bool(self.cad.store.q(MARINE_OPEN_SQL))
         self.vessels.lookup = lambda iid: self.cad.store.full(iid)
+        self.vessels.leader = self._atc_leader              # hot/cold: only the lease holder connects to aisstream.io
         # Weather and water (sizeup/weather.py, #132): NWS alerts, conditions and radar, NOAA tides; a warning
         # said by the dispatch voice when Settings > Dispatch allows it (played where the console is open).
         self.weather = prov["weather"]
@@ -2539,6 +2545,8 @@ class App:
                 return why
             if serial in (list(self.cfg.sdrs) + ([self.cfg.shared_device] if self.cfg.shared_device else [])):
                 return f"{serial} is one of the radios listed in [radio] sdrs: take it out there first"
+            if serial == getattr(self.cfg, "vessels_sdr", ""):
+                return f"{serial} is the AIS receiver's dongle ([vessels.receiver] sdr): ADS-B needs its own"
             held = claims.other(serial)
             if held and held.get("mode") != adsbd.MODE:
                 return f"SDR {self.sdr_name(serial)} is in use by {held.get('app', 'another app')} ({held.get('mode', '?')})"

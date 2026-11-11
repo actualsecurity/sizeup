@@ -41,9 +41,11 @@ def test_the_layer_is_off_by_default_and_on_by_itself_for_a_marine_call(tmp_path
 out.keys = m.keys();
 out.offByDefault = m.isOn();
 control.profile = "incident";
-control.focused = { id: 7, subtype: "STRUCTURAL", assignments: [] };
+control.focused = { id: 7, type: "RESCUE", subtype: "STRUCTURAL", assignments: [] };
 out.otherCall = m.isOn();
-control.focused = { id: 7, subtype: "WATER", assignments: [] };
+control.focused = { id: 6, type: "NOTIF", subtype: "WATER", assignments: [] };
+out.notif = m.isOn();
+control.focused = { id: 7, type: "RESCUE", subtype: "WATER", assignments: [] };
 out.marineCall = m.isOn();
 const box = m.panel();
 const cb = box.all().find((e) => e.tagName === "INPUT");
@@ -56,7 +58,8 @@ control.focused = { id: 9, subtype: "", assignments: [{ name: "DPT239", kind: "m
 out.placeholder = m.isOn();                              // a department placeholder never makes it marine
 """, {"d": {}}, pre=MAP)
     assert o["keys"] == [["vessels", False]]
-    assert o["offByDefault"] is False and o["otherCall"] is False and o["marineCall"] is True and o["forcedTag"] is True
+    assert o["offByDefault"] is False and o["otherCall"] is False and o["notif"] is False
+    assert o["marineCall"] is True and o["forcedTag"] is True
     assert o["afterUntick"] is False and o["nextCall"] is True and o["placeholder"] is False
 
 
@@ -126,7 +129,7 @@ global.fetch = async (u) => { rec.fetches++; return { ok: true, json: async () =
 (async () => {
   await VesselLayer.load(); await flush();
   const panelHost = new El("div");
-  VesselLayer.panel({ id: 7, status: "active", subtype: "BOAT", lat: 40.975, lon: -73.665, assignments: [] }, panelHost);
+  VesselLayer.panel({ id: 7, status: "active", type: "MVF", subtype: "BOAT", lat: 40.975, lon: -73.665, assignments: [] }, panelHost);
   await flush(); await flush();
   out.hidden = panelHost.hidden;
   out.rows = panelHost.find("ac-row").map((r) => r.textContent);
@@ -151,8 +154,32 @@ global.fetch = async (u) => { rec.fetches++; return { ok: true, json: async () =
 
 
 @needs_node
+def test_the_panels_old_tag_goes_by_the_near_answers_own_time(tmp_path):
+    """The layer never loaded (no /api/cad/vessels answer): a vessel in the panel is "old" only by the /near answer."""
+    near = {"id": 7, "marine": True, "configured": True, "note": "", "stale_s": 180, "named": [],
+            "nearest": [{"id": "999000001", "name": "TEST TUG ONE", "label": "Tug", "lat": 40.97, "lon": -73.66, "sog": 6.0,
+                         "cog": 90, "hdg": 90, "age": 20, "dist": 0.3},
+                        {"id": "999000002", "name": "TEST SKIFF", "label": "Pleasure", "lat": 40.98, "lon": -73.67, "sog": 0,
+                         "cog": None, "hdg": None, "age": 400, "dist": 0.6}]}
+    o = run_node(tmp_path, SCRIPTS, r"""
+IN.near.at = Date.now() / 1000;
+global.fetch = async () => ({ ok: true, json: async () => IN.near });
+(async () => {
+  const host = new El("div");
+  VesselLayer.panel({ id: 7, status: "active", type: "MVF", subtype: "BOAT", lat: 40.975, lon: -73.665, assignments: [] }, host);
+  await new Promise((r) => setTimeout(r, 0)); await new Promise((r) => setTimeout(r, 0));
+  out.rows = host.find("ac-row").map((r) => [r.textContent, r.find("ac-stale").length]);
+  console.log(JSON.stringify(out)); process.exit(0);
+})();
+""", {"near": near}, pre=MAP)
+    assert [r[1] for r in o["rows"]] == [0, 1]
+
+
+@needs_node
 @pytest.mark.parametrize("inc", [
-    {"subtype": "WATER"}, {"subtype": "boat"}, {"subtype": "ACFT-WATER"}, {"subtype": "STRUCTURAL"}, {"subtype": ""},
+    {"type": "RESCUE", "subtype": "WATER"}, {"type": "NOTIF", "subtype": "WATER"}, {"type": "MVF", "subtype": "boat"},
+    {"type": "AIRPORT", "subtype": "ACFT-WATER"}, {"type": "RESCUE", "subtype": "ACFT-WATER"}, {"subtype": "STRUCTURAL"},
+    {"subtype": ""},
     {"subtype": "", "assignments": [{"name": "M40", "kind": "marine", "cleared_at": None}]},
     {"subtype": "", "assignments": [{"name": "M40", "kind": "marine", "cleared_at": 5.0}]},
     {"subtype": "", "assignments": [{"name": "DPT266", "kind": "marine", "cleared_at": None}]},

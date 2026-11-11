@@ -943,7 +943,7 @@ def _trains(data: dict) -> dict:
                 trains_traintime=tt, trains_traintime_every_s=float(tt_every), **urls)
 
 
-def _vessels(data: dict, base: Path, sdrs: tuple[str, ...]) -> dict:
+def _vessels(data: dict, base: Path, sdrs: tuple[str, ...], adsb_sdr: str = "") -> dict:
     """[vessels] and [vessels.receiver] -> Config fields. No section: on, but with no source (no aisstream.io key, no
     receiver) it shows nothing. The key comes from env SIZEUP_AISSTREAM_KEY first (the hub: SSM); never logged."""
     vs = _take(data.get("vessels", {}), "vessels", {"enabled", "aisstream_key", "bbox", "receiver"})
@@ -973,6 +973,8 @@ def _vessels(data: dict, base: Path, sdrs: tuple[str, ...]) -> dict:
                               "digits: rtl_eeprom -d <index> -s ais162)")
         if sdr in sdrs:
             raise ConfigError(f"vessels.receiver.sdr: {sdr} is one of sizeup's radios ([radio] sdrs); give AIS its own dongle")
+        if sdr == adsb_sdr:
+            raise ConfigError(f"vessels.receiver.sdr: {sdr} is the ADS-B dongle ([aircraft.receiver] sdr); give AIS its own")
     js = str(rc.get("json", "")).strip()
     if js and not Path(js).is_absolute():
         js = str((base / js).resolve())
@@ -1272,7 +1274,8 @@ def load(path: str | Path) -> Config:
     if len(set(sdrs)) != len(sdrs):
         raise ConfigError("radio.sdrs: a serial is listed twice")
     aircraft = _aircraft(data, base, sdrs + ((str(radio["shared_device"]),) if radio.get("shared_device") else ()))
-    vessels = _vessels(data, base, sdrs + ((str(radio["shared_device"]),) if radio.get("shared_device") else ()))
+    vessels = _vessels(data, base, sdrs + ((str(radio["shared_device"]),) if radio.get("shared_device") else ()),
+                       aircraft.get("aircraft_sdr", ""))
     channels = []
     for i, c in enumerate(radio.get("channels", [])):
         _take(c, f"radio.channels[{i}]", {"label", "mhz", "kind", "device", "gain_db", "squelch_db",

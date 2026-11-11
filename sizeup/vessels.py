@@ -45,6 +45,7 @@ import re
 import threading
 import time
 import traceback
+from collections import OrderedDict
 from pathlib import Path
 from typing import Callable
 from urllib.parse import parse_qs
@@ -62,6 +63,8 @@ DROP_S = 600.0                # ... and gone after this
 LR_HOLD_S = 300.0             # a long-range (type 27) position never replaces a precise one younger than this
 STATIC_KEEP_S = 24 * 3600.0   # name / type / size kept by MMSI this long
 STATIC_MAX = 5000
+MAX_POS = 2000               # positions kept at most (the box holds a few hundred at the busiest)
+PRUNE_EVERY_S = 30.0         # old positions and statics dropped this often as messages come, whoever asks
 MAX_VESSELS = 500
 DEMAND_S = 60.0               # a viewer's ask counts as "looking" this long
 LINGER_S = 900.0              # aisstream stays connected this long after the last ask (vessels' names come slowly)
@@ -72,6 +75,7 @@ BACKOFF_S = (5.0, 300.0)
 REFUSED_S = 1800.0            # aisstream refused the key: wait this long
 IDLE_TIMEOUT_S = 600.0        # nothing from aisstream this long (a quiet box, or a dead link): reconnect
 TICK_S = 5.0                  # the connection looks at "still wanted?" this often while nothing comes
+CLOSED_FAST_S = 10.0         # a server close this soon after subscribing, nothing sent: treated as a refused key
 READ_TIMEOUT_S = 60.0         # a frame begun but not finished within this: a failure
 NEAR_KEEP_S = 10.0            # an event's near answer, cached this long
 NEAREST_N = 3
@@ -272,21 +276,32 @@ POS_KEYS = ("lat", "lon", "sog", "cog", "hdg")
 
 
 class Fleet:
-    """Every vessel heard, by MMSI: its last position report and its static data, merged. Thread-safe."""
+    """Every vessel heard, by MMSI: its last position report and its static data, merged. Thread-safe. version and
+    changed_at move only when what is known changes (a message heard again, the same, changes nothing): the API's
+    answer and its ETag stay the same in between."""
 
     def __init__(self, bbox=BBOX):
         self.bbox = tuple(bbox)
         self.pos: dict[int, dict] = {}       # mmsi -> {lat, lon, sog, cog, hdg, nav, t, type, src}
-        self.static: dict[int, dict] = {}    # mmsi -> {name, cs, stype, len, beam, dest, imo, t}
+        self.static: OrderedDict[int, dict] = OrderedDict()   # mmsi -> {name, cs, ...t}, least recently updated first
         self._lock = threading.Lock()
         self.counts: dict[int, int] = {}     # messages applied, by AIS type
         self.outside = 0                     # positions dropped outside the box
+        self.version = 0
+        self.changed_at = 0.0                # when (message or prune time) what is known last changed
+        self._pruned = 0.0
+
+    def _changed(self, t: float) -> None:
+        self.version += 1
+        self.changed_at = max(self.changed_at, t)
 
     def apply(self, m: dict | None, t: float, src: str) -> bool:
         """One normalized message, heard at t (epoch s) from src. True when it changed what is known."""
         if not m:
             return False
         mmsi, typ = m["mmsi"], m.get("type")
+        if t - self._pruned >= PRUNE_EVERY_S:
+            self.prune(t)                           # bounded however long nobody asks
         with self._lock:
             self.counts[typ] = self.counts.get(typ, 0) + 1
             changed = False
@@ -295,27 +310,41 @@ class Fleet:
                 cur = self.static.get(mmsi)
                 if cur is None:
                     if len(self.static) >= STATIC_MAX:
-                        del self.static[min(self.static, key=lambda k: self.static[k]["t"])]
+                        self.static.popitem(last=False)          # the one least recently updated: O(1)
                     cur = self.static[mmsi] = {}
-                cur.update(st, t=t)
-                changed = True
+                if any(cur.get(k) != v for k, v in st.items()):
+                    changed = True
+                cur.update(st, t=max(t, cur.get("t", t)))
+                self.static.move_to_end(mmsi)
             if m.get("lat") is not None:
                 if not in_box(m["lat"], m["lon"], self.bbox):
                     self.outside += 1
                     if mmsi in self.pos:            # it left the area
                         del self.pos[mmsi]
                         changed = True
+                    if changed:
+                        self._changed(t)
                     return changed
                 cur = self.pos.get(mmsi)
                 if cur is not None and t < cur["t"]:
+                    if changed:
+                        self._changed(t)
                     return changed                  # an older report than the one we have
                 if typ == 27 and cur is not None and cur.get("type") != 27 and t - cur["t"] < LR_HOLD_S:
+                    if changed:
+                        self._changed(t)
                     return changed                  # a coarse long-range fix never over a fresh precise one
                 nav = m.get("nav", cur.get("nav") if cur else None)
                 if typ in (18, 19):
                     nav = None                      # class B sends no status
-                self.pos[mmsi] = {**{k: m.get(k) for k in POS_KEYS}, "nav": nav, "t": t, "type": typ, "src": src}
-                changed = True
+                new = {**{k: m.get(k) for k in POS_KEYS}, "nav": nav, "t": t, "type": typ, "src": src}
+                if new != cur:
+                    if cur is None and len(self.pos) >= MAX_POS:     # never unbounded: the oldest report goes
+                        del self.pos[min(self.pos, key=lambda k: self.pos[k]["t"])]
+                    self.pos[mmsi] = new
+                    changed = True
+            if changed:
+                self._changed(t)
             return changed
 
     def put(self, rec: dict, t_pos: float, t_static: float | None, src: str) -> None:
@@ -341,17 +370,23 @@ class Fleet:
 
     def prune(self, now: float) -> None:
         with self._lock:
-            for k in [k for k, p in self.pos.items() if now - p["t"] > DROP_S]:
+            self._pruned = now
+            gone = [k for k, p in self.pos.items() if now - p["t"] > DROP_S]
+            for k in gone:
                 del self.pos[k]
-            for k in [k for k, s in self.static.items() if now - s["t"] > STATIC_KEEP_S]:
-                del self.static[k]
+            while self.static and now - next(iter(self.static.values()))["t"] > STATIC_KEEP_S:
+                self.static.popitem(last=False)
+            if gone:
+                self._changed(now)
 
-    def records(self, now: float) -> list[dict]:
-        """The vessels to draw: position within DROP_S and in the box; the newest MAX_VESSELS."""
+    def records(self, now: float, ref: float | None = None) -> list[dict]:
+        """The vessels to draw: position within DROP_S (at now) and in the box; the newest MAX_VESSELS; ages as at
+        ref (default now)."""
         self.prune(now)
+        ref = now if ref is None else ref
         with self._lock:
             items = sorted(self.pos.items(), key=lambda kv: -kv[1]["t"])[:MAX_VESSELS]
-            return [record(k, p, self.static.get(k), now) for k, p in items]
+            return [record(k, p, self.static.get(k), ref) for k, p in items]
 
 
 def _r(v, nd: int = 0):
@@ -375,7 +410,11 @@ def record(mmsi: int, p: dict, s: dict | None, now: float) -> dict:
 
 # ---- incidents: a marine call, the vessels it names, the nearest ---------------------------------------------------
 
-MARINE_SUBTYPES = {"BOAT", "WATER", "ACFT-WATER"}
+# A marine or water call by its type and subtype (data/cad_lists.json): any boat subtype (MVF/BOAT, SERVICE/BOAT ...),
+# a water rescue and an aircraft in the water. Not NOTIF/WATER (a water-department notification) or other */WATER.
+MARINE_PAIRS = {("RESCUE", "WATER"), ("AIRPORT", "ACFT-WATER")}
+MARINE_ANY_TYPE = {"BOAT"}
+OPEN_STATUSES = ("queued", "pending", "open", "active")
 STOP_NAMES = {"ENGINE", "RESCUE", "MARINE", "LADDER", "TOWER", "CHIEF", "POLICE", "WATER", "BOAT", "FIRE", "UNIT",
               "PATROL", "HARBOR", "HARBOUR", "VESSEL", "SHIP", "TUG", "FERRY", "PILOT", "UNKNOWN", "NONE", "TEST"}
 
@@ -385,12 +424,18 @@ def placeholder(unit: str) -> bool:
     return str(unit or "").upper().startswith("DPT")
 
 
+def marine_type(typ, subtype) -> bool:
+    """A boat subtype under any type, or a water rescue / an aircraft in the water (MARINE_PAIRS)."""
+    t, s = str(typ or "").upper(), str(subtype or "").upper()
+    return s in MARINE_ANY_TYPE or (t, s) in MARINE_PAIRS
+
+
 def is_marine(inc: dict | None) -> bool:
-    """A marine or water call: a boat or water subtype (MVF/BOAT, RESCUE/WATER, SERVICE/BOAT, AIRPORT/ACFT-WATER ...),
-    or a marine unit on it (a DPT placeholder never counts)."""
+    """A marine or water call: marine_type() (MVF/BOAT, SERVICE/BOAT, RESCUE/WATER, AIRPORT/ACFT-WATER; never
+    NOTIF/WATER), or a marine unit on it, not cleared (a DPT placeholder never counts)."""
     if not inc:
         return False
-    if str(inc.get("subtype") or "").upper() in MARINE_SUBTYPES:
+    if marine_type(inc.get("type"), inc.get("subtype")):
         return True
     return any(a.get("kind") == "marine" and not placeholder(a.get("name")) and not a.get("cleared_at")
                for a in inc.get("assignments") or [] if isinstance(a, dict))
@@ -401,8 +446,9 @@ def _norm(s: str) -> str:
 
 
 def call_text(inc: dict) -> str:
-    """Everything said about the call: its type note, remarks, location words and each log entry's text."""
-    parts = [inc.get(k) for k in ("type_note", "remarks", "address", "place", "geo_label", "cross_street")]
+    """What was said about the call: its type note, remarks and each log entry's text (notes, remarks, the log). Never
+    its location words: a vessel called CITY ISLAND is not named by "City Island Ave"."""
+    parts = [inc.get(k) for k in ("type_note", "remarks")]
     parts += [e.get("text") for e in inc.get("events") or [] if isinstance(e, dict)]
     return " \n ".join(str(p) for p in parts if p)
 
@@ -492,6 +538,7 @@ class AisStreamFeed:
                 self._stop.wait(2.0)
                 continue
             self.session()
+            self._stop.wait(BACKOFF_S[0] / 5)        # never a tight loop, whatever session() did
 
     def session(self) -> None:
         """One connection: subscribe, read until it fails, closes, or is no longer wanted."""
@@ -505,7 +552,8 @@ class AisStreamFeed:
                 pass
             ws.send_text(self.subscription())
             st.update(state="connected", connected_at=self.clock(), error="")
-            got, heard = 0, self.clock()
+            got, heard, ours = 0, self.clock(), False
+            subscribed = heard
             for raw in ws.messages(idle_s=TICK_S):
                 if raw is not None:
                     heard = self.clock()
@@ -515,11 +563,19 @@ class AisStreamFeed:
                         self.log(f"vessels: aisstream.io back after {st['fails']} failed tries")
                         st["fails"] = 0
                 if self._stop.is_set() or not self.wanted():
+                    ours = True
                     break
                 if self.clock() - heard > IDLE_TIMEOUT_S:   # a quiet box, or a dead link: a fresh connection
                     break
             ws.close()
-            st["state"] = "idle"
+            now = self.clock()
+            if not got and not ours and now - subscribed < CLOSED_FAST_S:
+                # closed by the server right after the subscription, nothing sent: a key or subscription it refuses
+                self._fail("closed right after subscribing (key or subscription refused?)", REFUSED_S)
+            elif not got and not ours:
+                self._fail("closed with nothing received")
+            else:
+                st.update(state="idle", rest_until=max(st["rest_until"], now + BACKOFF_S[0]))
         except PermissionError as e:
             self._fail(f"key refused ({e})", REFUSED_S)
         except (OSError, WebSocketError, ValueError) as e:
@@ -543,8 +599,7 @@ class AisStreamFeed:
 
     def public(self) -> dict:
         st = self.st
-        return {"key": self.key, **FEEDS[self.key], "state": st["state"], "n": st["n"], "at": st["at"],
-                "error": st["error"]}
+        return {"key": self.key, **FEEDS[self.key], "state": st["state"], "error": st["error"]}
 
 
 class ReceiverFile:
@@ -572,7 +627,7 @@ class ReceiverFile:
         self.st.update(state="stale" if stale else "ok", at=at, n=n, error="not updated (is sizeup-ais running?)" if stale else "")
 
     def public(self) -> dict:
-        return {"key": self.key, **FEEDS[self.key], **{k: self.st[k] for k in ("state", "n", "at", "error")}}
+        return {"key": self.key, **FEEDS[self.key], **{k: self.st[k] for k in ("state", "error")}}
 
 
 def ingest_messages(doc, fleet: Fleet, src: str) -> int:
@@ -619,7 +674,7 @@ class StationFeed:
         now = self.clock()
         at = self.st["at"]
         state = self.st["state"] if at is None or now - at <= RECEIVER_KEEP_S else "stale"
-        return {"key": self.key, **FEEDS[self.key], "state": state, "n": self.st["n"], "at": at,
+        return {"key": self.key, **FEEDS[self.key], "state": state,
                 "error": "" if state != "stale" else f"no word from the station's receiver for {now - at:.0f} s",
                 "station": True, "rx": self.rx}
 
@@ -637,6 +692,8 @@ class VesselLayer:
         self.fleet = Fleet(self.bbox)
         self.asked = 0.0
         self.hot: Callable[[], bool] = lambda: False       # an open marine call keeps aisstream connected (the app)
+        # the hub's leader only (hot/cold deploys: the standby, and a task whose lease is gone, never connect; the app)
+        self.leader: Callable[[], bool] = lambda: True
         self._hot = (0.0, False)
         self.lookup: Callable[[int], dict] | None = None   # an event by id (the app: the CAD store's full())
         self._near: dict[int, tuple[float, dict]] = {}
@@ -696,7 +753,12 @@ class VesselLayer:
         return self.clock() - self.asked <= DEMAND_S
 
     def wanted(self) -> bool:
-        """aisstream connected: someone looked within LINGER_S, or a marine call is open."""
+        """aisstream connected: on the leader only, while someone looked within LINGER_S or a marine call is open."""
+        try:
+            if not self.leader():
+                return False
+        except Exception:  # noqa: BLE001 - not known to lead: don't connect
+            return False
         now = self.clock()
         if now - self.asked <= LINGER_S:
             return True
@@ -714,18 +776,24 @@ class VesselLayer:
         out = self.receiver.ingest(d)
         return dict(out, every=5.0 if self.demanded() or self.wanted() else 30.0)
 
-    def vessels(self) -> list[dict]:
+    def vessels(self, ref: float | None = None) -> list[dict]:
         if isinstance(self.receiver, ReceiverFile):
             self.receiver.read()
-        return self.fleet.records(self.clock())
+        return self.fleet.records(self.clock(), ref)
 
     def public(self) -> dict:
+        """The answer. Its "at" is when what is known last changed, and each vessel's age is as at then: the answer
+        (and its ETag) stays the same until something changes (a 304); the page adds the time since "at" itself."""
         w, s, e, n = self.bbox
-        vs = self.vessels()
+        if isinstance(self.receiver, ReceiverFile):
+            self.receiver.read()
+        self.fleet.prune(self.clock())
+        ref = round(self.fleet.changed_at, 3)
+        vs = self.fleet.records(self.clock(), ref)
         feeds = [f.public() for f in self.feeds()]
         used = {v["src"] for v in vs}
         credit = " + ".join(f["credit"] for f in feeds if f["key"] in used) or " + ".join(f["credit"] for f in feeds)
-        return {"configured": self.configured, "note": self.why_not(), "at": self.clock(), "stale_s": STALE_S,
+        return {"configured": self.configured, "note": self.why_not(), "at": ref, "stale_s": STALE_S,
                 "drop_s": DROP_S, "bbox": [w, s, e, n], "feeds": feeds, "credit": credit,
                 "key": "set" if self.key_set else "missing", "vessels": vs}
 

@@ -313,8 +313,10 @@ def test_the_hub_keeps_the_stations_vessels_as_its_receiver_feed():
     recs = f.records(T0)
     out = hub.station_ingest({"v": 1, "at": T0, "vessels": recs, "rx": {"state": "ok", "argv": ["no"]}})
     assert out["ok"] and out["n"] == 1 and out["every"] in (5.0, 30.0)
-    (v,) = hub.public()["vessels"]
-    assert v["id"] == "999000001" and v["name"] == "TEST TUG ONE" and v["src"] == "receiver" and v["age"] == pytest.approx(30, abs=0.2)
+    d = hub.public()
+    (v,) = d["vessels"]
+    age = v["age"] + (clock.t - d["at"])                      # (ages are as at the answer's "at"; the page adds the rest)
+    assert v["id"] == "999000001" and v["name"] == "TEST TUG ONE" and v["src"] == "receiver" and age == pytest.approx(30, abs=0.2)
     feed = next(x for x in hub.public()["feeds"] if x["key"] == "receiver")
     assert feed["station"] and feed["rx"] == {"state": "ok"}
     with pytest.raises(ValueError):

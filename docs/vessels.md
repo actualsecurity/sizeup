@@ -22,11 +22,14 @@ Aircraft and Trains. Code: `sizeup/vessels.py` (the hub), `sizeup/web/static/ves
 - **Click:** follows the vessel (a drag, Recenter or ✕ lets go; one follower at a time across aircraft, trains and
   units). It also opens a live box with name, type, length, speed, course, status, destination, MMSI / callsign
   and the report's age.
-- **Marine calls:** a call with a boat or water subtype (`MVF/BOAT`, `RESCUE/WATER`, `SERVICE/BOAT`, `*/WATER`,
-  `AIRPORT/ACFT-WATER`), or with a marine unit on it, turns the layer on for that call's map. Unticking it there holds
-  for that call. A DPT placeholder unit never counts and is never located. Under the map, **Vessels nearby** lists
-  any vessel the call's text names (by name or 9-digit MMSI) first, ringed on the maps, then the 3 nearest within
-  10 nm with type, distance, speed and course. Click a row to follow that vessel.
+- **Marine calls:** a call whose type and subtype say so (any `*/BOAT`, such as `MVF/BOAT` or `SERVICE/BOAT`;
+  `RESCUE/WATER`; `AIRPORT/ACFT-WATER`), or one with a marine unit on it, turns the layer on for that call's map.
+  `NOTIF/WATER` (a water-department notification) is not a marine call. Unticking the layer there holds for that call.
+  A DPT placeholder unit never counts and is never located. The hub (`vessels.is_marine`, `app.MARINE_OPEN_SQL`) and
+  the page (`vessels.js isMarine`) use the same rule. Under the map, **Vessels nearby** lists any vessel the call
+  names first, ringed on the maps, then the 3 nearest within 10 nm with type, distance, speed and course. A vessel is
+  named by its name or 9-digit MMSI in the remarks, notes or log text, never in the location words: a vessel called
+  CITY ISLAND is not named by "City Island Ave". Click a row to follow that vessel.
 
 ## The limits of AIS
 
@@ -67,8 +70,10 @@ dongle is claimed through the shared rtl-claims (app `sizeup`, mode `ais`). It i
 
 One websocket to `wss://stream.aisstream.io/v0/stream`, subscribed to the box. It is open only while someone has
 the layer on (and 15 min after, since names come in slowly) or while a marine call is open. When it fails it backs
-off from 5 s, doubling to 5 min, and waits 30 min after a refused key. When the box is quiet it reconnects every
-10 min. It identifies as *Port Chester Fire Department - sizeup emergency situational awareness application
+off from 5 s, doubling to 5 min, and waits 30 min after a refused key. A server close right after the subscription,
+with nothing sent, counts as a refused key; any other close with nothing received counts as a failure; and every
+connection waits at least 5 s after the last one. When the box is quiet it reconnects every 10 min. Only the hub's
+lease holder connects: a standby task never does (hot/cold deploys). It identifies as *Port Chester Fire Department - sizeup emergency situational awareness application
 (github.com/actualsecurity/sizeup)*.
 
 **The key** is read from env `SIZEUP_AISSTREAM_KEY`, or `[vessels] aisstream_key` in a local, uncommitted config.
@@ -108,7 +113,7 @@ ppm = 0                            # a non-TCXO dongle's frequency correction
 
 | | |
 |---|---|
-| `GET /api/cad/vessels` | `{configured, note, at, stale_s, drop_s, bbox, feeds: [{key, label, state, n, at, error}], credit, key: set\|missing, vessels: [{id (MMSI), name, cs, imo, type, cls, label, len, beam, lat, lon, sog, cog, hdg, navc, nav, dest, age, sage, c: A\|B\|LR, src}]}`. ETag/304. Polled every 5 s only while a map has the layer on. |
+| `GET /api/cad/vessels` | `{configured, note, at, stale_s, drop_s, bbox, feeds: [{key, label, state, error}], credit, key: set\|missing, vessels: [{id (MMSI), name, cs, imo, type, cls, label, len, beam, lat, lon, sog, cog, hdg, navc, nav, dest, age, sage, c: A\|B\|LR, src}]}`. `at` is when what the hub knows last changed, and ages are as at `at`. The page adds the time since `at` by the hub's clock, so an unchanged answer keeps its ETag and comes back as a 304. Polled every 5 s only while a map has the layer on. |
 | `GET /api/cad/vessels/near?event=<id>` | `{id, marine, configured, note, named: [vessel], nearest: [vessel + dist (nm)]}` for that call. Cached 10 s. |
 | `POST /api/station/vessels` | the station's receiver (station token): `{v, at, vessels: [vessel], rx}`; the answer's `every` sets how often to post (5 s while viewed, else 30 s). |
 

@@ -254,6 +254,9 @@ def test_no_key_means_the_source_is_off(tmp_path, monkeypatch):
 
 def test_the_receivers_dongle_is_never_one_of_our_radios(tmp_path):
     p = tmp_path / "c.toml"
+    p.write_text('[aircraft.receiver]\nsdr = "adsb1090"\n[vessels.receiver]\nenabled = true\nsdr = "adsb1090"\n')
+    with pytest.raises(config_mod.ConfigError, match="the ADS-B dongle"):
+        config_mod.load(p)
     p.write_text('[radio]\nsdrs = ["ais162"]\n[vessels.receiver]\nenabled = true\nsdr = "ais162"\n')
     with pytest.raises(config_mod.ConfigError, match="one of sizeup's radios"):
         config_mod.load(p)
@@ -295,7 +298,7 @@ def test_a_session_subscribes_once_and_fills_the_fleet():
     assert made == [1] and len(ws.sent) == 1 and json.loads(ws.sent[0])["APIKey"] == KEY and ws.closed
     d = ly.public()
     assert {v["id"] for v in d["vessels"]} == {"999000001", "999000002", "999000003", "999000004"}
-    assert d["feeds"][0]["key"] == "aisstream" and d["feeds"][0]["n"] == 7 and d["credit"] == "aisstream.io"
+    assert d["feeds"][0]["key"] == "aisstream" and ly.aisstream.st["n"] == 7 and d["credit"] == "aisstream.io"
     assert not any(KEY in m for m in logs)
 
 
@@ -313,6 +316,70 @@ def test_failures_back_off_and_a_refused_key_waits_long_and_is_never_logged():
     feed2.session()
     assert feed2.st["rest_until"] - clock.t == vessels.REFUSED_S and "key refused" in feed2.st["error"]
     assert logs and not any(KEY in m for m in logs)
+
+
+def test_a_clean_close_never_reconnects_in_a_tight_loop():
+    clock, logs, made = Clock(), [], []
+
+    def connect():
+        made.append(clock.t)
+        return FakeWS([])                                  # subscribes, then the server closes at once
+    feed = AisStreamFeed(KEY, BBOX, Fleet(), lambda: True, log=logs.append, clock=clock, connect=connect)
+    feed.session()
+    assert feed.st["rest_until"] - clock.t == vessels.REFUSED_S and "right after subscribing" in feed.st["error"]
+    clock.t += 30
+    class Quiet(FakeWS):                                   # quiet for a minute, then closed, nothing ever received
+        def messages(self, idle_s=None):
+            for _ in range(2):
+                clock.t += 30
+                yield None
+    feed.connect = lambda: Quiet([])
+    feed.st["rest_until"] = 0.0
+    feed.session()
+    assert feed.st["fails"] == 2 and feed.st["error"] == "closed with nothing received" and feed.st["rest_until"] > clock.t
+    feed.connect = lambda: FakeWS([pos_report()])          # heard something, then closed: at least BACKOFF_S[0]
+    feed.st["rest_until"] = 0.0
+    feed.session()
+    assert feed.st["rest_until"] >= clock.t + vessels.BACKOFF_S[0] and feed.st["fails"] == 0 and feed.st["state"] == "idle"
+    # the thread: however often the server closes, connections are spaced out
+    clock2 = Clock()
+    n = []
+    f2 = AisStreamFeed(KEY, BBOX, Fleet(), lambda: True, clock=clock2, log=lambda m: None,
+                       connect=lambda: n.append(1) or FakeWS([pos_report()]))
+    f2.start()
+    import time as _t
+    _t.sleep(0.3)
+    f2.stop()
+    assert len(n) == 1                                     # the next connection waits BACKOFF_S[0] on the (frozen) clock
+    assert not any(KEY in m for m in logs)
+
+
+def test_only_the_leader_connects():
+    clock = Clock()
+    ly = VesselLayer(aisstream_key=KEY, clock=clock, connect=lambda: FakeWS([]))
+    ly.ask()
+    assert ly.wanted() is True
+    ly.leader = lambda: False                              # a standby, or a task whose lease is gone
+    assert ly.wanted() is False
+    ly.hot = lambda: True
+    clock.t += vessels.HOT_EVERY_S
+    assert ly.wanted() is False
+
+    def boom():
+        raise RuntimeError("lease unknown")
+    ly.leader = boom
+    assert ly.wanted() is False
+
+
+def test_the_standbys_warm_providers_never_connect(tmp_path, monkeypatch):
+    from sizeup import app as app_mod
+    monkeypatch.setenv("SIZEUP_AISSTREAM_KEY", KEY)
+    p = tmp_path / "c.toml"
+    p.write_text("[gis]\nenabled = false\n[roads]\nenabled = false\n")
+    c = config_mod.load(p)
+    prov = app_mod.make_providers(c, None)                 # what prewarm() builds on the standby: constructed, not started
+    ly = prov["vessels"]
+    assert ly.aisstream is not None and ly.aisstream._thread is None
 
 
 def test_it_connects_only_while_someone_looks_or_a_marine_call_is_open():
@@ -338,7 +405,8 @@ def test_the_handshake_names_us_honestly(monkeypatch):
     assert seen["headers"]["User-Agent"].startswith("Port Chester Fire Department - sizeup") and KEY not in json.dumps(seen)
 
 
-def test_the_api_serves_the_picture_with_an_etag():
+def test_the_api_serves_the_picture_with_an_etag_that_holds_until_something_changes():
+    from sizeup.web.server import etag_matches
     clock = Clock()
     ly = VesselLayer(aisstream_key=KEY, clock=clock, connect=lambda: FakeWS([]))
     ly.fleet.apply(from_aisstream(pos_report()), clock.t, "aisstream")
@@ -346,20 +414,72 @@ def test_the_api_serves_the_picture_with_an_etag():
     d = json.loads(body)
     assert code == 200 and ctype == "application/json" and hdrs["ETag"] and ly.demanded()
     assert d["stale_s"] == STALE_S and d["drop_s"] == DROP_S and d["bbox"] == list(BBOX) and len(d["vessels"]) == 1
+    assert d["at"] == clock.t and d["vessels"][0]["age"] == 0.0           # ages as at "at": the page adds the rest
+    clock.t += 7
+    ly.fleet.apply(from_aisstream(pos_report()), clock.t - 7, "aisstream")     # the same report heard again: no change
+    code2, body2, _, hdrs2 = ly.get("/api/cad/vessels")
+    assert body2 == body and etag_matches(hdrs["ETag"], hdrs2["ETag"])          # the server answers 304
+    ly.fleet.apply(from_aisstream(pos_report(lat=40.971)), clock.t, "aisstream")
+    _, body3, _, hdrs3 = ly.get("/api/cad/vessels")
+    assert not etag_matches(hdrs["ETag"], hdrs3["ETag"]) and json.loads(body3)["at"] == clock.t
     assert ly.handles("/api/cad/vessels/near") and not ly.handles("/api/cad/aircraft")
+
+
+def test_the_304_round_trip_through_the_server(tmp_path):
+    import urllib.request
+    from urllib.error import HTTPError
+
+    from sizeup.web.server import WebServer
+    clock = Clock()
+    ly = VesselLayer(aisstream_key=KEY, clock=clock, connect=lambda: FakeWS([]))
+    ly.fleet.apply(from_aisstream(pos_report()), clock.t, "aisstream")
+    srv = WebServer("127.0.0.1", 0, {}, lambda: {}, lambda *_: None, lambda *_: False, vessels=ly)
+    port = srv.httpd.server_address[1]
+    t = threading.Thread(target=srv.httpd.serve_forever, daemon=True)
+    t.start()
+    try:
+        url = f"http://127.0.0.1:{port}/api/cad/vessels"
+        with urllib.request.urlopen(url, timeout=5) as r:
+            etag = r.headers["ETag"]
+            assert r.status == 200 and json.loads(r.read())["vessels"]
+        clock.t += 5                                                          # time passes, nothing new heard
+        with pytest.raises(HTTPError) as e:
+            urllib.request.urlopen(urllib.request.Request(url, headers={"If-None-Match": etag}), timeout=5)
+        assert e.value.code == 304
+    finally:
+        srv.httpd.shutdown()
+        srv.httpd.server_close()
+
+
+def test_the_fleet_stays_bounded_however_long_nobody_asks():
+    from collections import OrderedDict
+    f = Fleet()
+    assert isinstance(f.static, OrderedDict)
+    for i in range(vessels.MAX_POS + 50):
+        f.apply(from_aisstream(pos_report(mmsi=990000000 + i, lat=40.9 + (i % 100) / 1000)), T0 + i / 100, "aisstream")
+    assert len(f.pos) == vessels.MAX_POS
+    f.apply(from_aisstream(pos_report(mmsi=999000001)), T0 + DROP_S + 100, "aisstream")   # prunes as messages come
+    assert len(f.pos) == 1
+    for i in range(vessels.STATIC_MAX + 10):
+        f.apply(from_aisstream(static5(mmsi=980000000 + i)), T0 + DROP_S + 100, "aisstream")
+    assert len(f.static) == vessels.STATIC_MAX and 980000000 not in f.static and 980000000 + vessels.STATIC_MAX + 9 in f.static
 
 
 # ---- incidents: marine calls, the vessels named, the nearest -----------------------------------------------------------
 
 
-def inc(subtype="WATER", text="", lat=40.975, lon=-73.665, units=()):
-    return {"id": 7, "type": "RESCUE", "subtype": subtype, "lat": lat, "lon": lon, "remarks": text, "status": "active",
+def inc(subtype="WATER", text="", lat=40.975, lon=-73.665, units=(), typ="RESCUE"):
+    return {"id": 7, "type": typ, "subtype": subtype, "lat": lat, "lon": lon, "remarks": text, "status": "active",
             "assignments": [{"name": n, "kind": k, "cleared_at": None} for n, k in units], "events": []}
 
 
 def test_a_marine_call_by_subtype_or_a_marine_unit_never_a_placeholder():
-    assert is_marine(inc("WATER")) and is_marine(inc("BOAT")) and is_marine(inc("ACFT-WATER"))
+    assert is_marine(inc("WATER")) and is_marine(inc("BOAT", typ="MVF")) and is_marine(inc("BOAT", typ="SERVICE"))
+    assert is_marine(inc("ACFT-WATER", typ="AIRPORT"))
+    assert not is_marine(inc("WATER", typ="NOTIF"))                   # a water-department notification: not marine
+    assert not is_marine(inc("ACFT-WATER", typ="RESCUE"))             # pairs, not subtypes alone
     assert not is_marine(inc("STRUCTURAL")) and not is_marine(None)
+    assert not is_marine(inc("", units=[("M40", "marine")]) | {"assignments": [{"name": "M40", "kind": "marine", "cleared_at": 5.0}]})
     assert is_marine(inc("", units=[("M40", "marine")]))
     assert not is_marine(inc("", units=[("DPT239", "marine")]))          # a department placeholder: never counts
     assert not is_marine(inc("", units=[("E60", "engine")]))
@@ -383,6 +503,16 @@ def test_the_vessels_a_call_names_by_name_or_mmsi():
     assert named("nothing named", vs) == []
 
 
+def test_names_are_matched_in_what_was_said_never_the_location():
+    from sizeup.vessels import call_text
+    vs = fleet_of((999000001, 40.97, -73.66, "CITY ISLAND", 60, 7))
+    where = inc("BOAT", typ="MVF") | {"address": "City Island Ave", "place": "City Island", "geo_label": "City Island",
+                                      "cross_street": "City Island Rd"}
+    assert named(call_text(where), vs) == []
+    said = where | {"events": [{"kind": "note", "text": "caller is aboard the City Island"}]}
+    assert named(call_text(said), vs) == ["999000001"]
+
+
 def test_the_three_nearest_by_distance():
     vs = fleet_of((999000001, 40.990, -73.660, "FAR ONE", 70, 10), (999000002, 40.976, -73.666, "NEAREST", 37, 0),
                   (999000003, 40.980, -73.670, "SECOND", 30, 4), (999000004, 40.985, -73.660, "THIRD", 60, 12),
@@ -403,6 +533,7 @@ def test_the_ais_dongle_is_never_a_radio_or_a_job(tmp_path, monkeypatch):
     try:
         assert "fire-fg" not in app.assign and app._sdr_ignored("fire-fg")
         assert app._start_mode("FG1", "fire-fg") is False                 # never given a job
+        assert "AIS receiver" in app.set_adsb_receiver("fire-fg")        # and never named for ADS-B as well
         assert isinstance(app.vessels, VesselLayer)
     finally:
         app.stop()
@@ -440,9 +571,27 @@ def test_an_open_marine_call_keeps_aisstream_connected():
     from sizeup.app import MARINE_OPEN_SQL
     from sizeup.cad.store import Store
     st = Store(":memory:")
+    st.sync_units()
     assert st.q(MARINE_OPEN_SQL) == []
-    st.create_incident(type="RESCUE", subtype="WATER", address="TEST PIER")
-    assert len(st.q(MARINE_OPEN_SQL)) == 1
+    notif = st.create_incident(type="NOTIF", subtype="WATER", address="TEST MAIN")
+    assert st.q(MARINE_OPEN_SQL) == []                                    # a water-department notification: no
+    dpt = next(u for u in st.units() if u["name"].upper().startswith("DPT"))
+    st.assign(notif, [dpt["id"]])
+    st.q("UPDATE units SET kind = 'marine' WHERE id = ?", (dpt["id"],))
+    assert st.q(MARINE_OPEN_SQL) == []                                    # a placeholder never counts
+    m40 = next(u for u in st.units() if u["kind"] == "marine" and not u["name"].upper().startswith("DPT"))
+    st.assign(notif, [m40["id"]])
+    assert len(st.q(MARINE_OPEN_SQL)) == 1                                # a marine unit on it: yes
+    st2 = Store(":memory:")
+    iid = st2.create_incident(type="RESCUE", subtype="WATER", address="TEST PIER")
+    assert len(st2.q(MARINE_OPEN_SQL)) == 1
+    st2.q("UPDATE incidents SET status = 'open' WHERE id = ?", (iid,))
+    assert len(st2.q(MARINE_OPEN_SQL)) == 1                               # "open" is open too
+    for typ, sub in (("MVF", "BOAT"), ("SERVICE", "boat"), ("AIRPORT", "ACFT-WATER")):
+        st2.q("UPDATE incidents SET type = ?, subtype = ? WHERE id = ?", (typ, sub, iid))
+        assert len(st2.q(MARINE_OPEN_SQL)) == 1, (typ, sub)
+    st2.q("UPDATE incidents SET type = 'NOTIF', subtype = 'WATER' WHERE id = ?", (iid,))
+    assert st2.q(MARINE_OPEN_SQL) == []
 
 
 # ---- the websocket client, against a local server ----------------------------------------------------------------------

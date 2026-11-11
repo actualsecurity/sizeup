@@ -2,7 +2,7 @@
 // as a group in every map's Layers box (maplayers.js MapLayers.addGroup), drawn the way the aircraft are (aircraft.js).
 //
 //   Layer        "Vessels" (key "vessels", off by default, in the viewer's or the event's set like the rest). On by
-//                itself on a marine call's own map (a boat or water subtype, or a marine unit on it; a DPT placeholder
+//                itself on a marine call's own map (*/BOAT, RESCUE/WATER, AIRPORT/ACFT-WATER, or a marine unit; a DPT placeholder
 //                never counts); unticking it there holds for that call.
 //   Marks        a hull turned to its heading (else its course), shaped and coloured by its type: ship (cargo green,
 //                tanker amber, passenger blue), tug, small craft (pleasure, fishing, other), sail; law enforcement and
@@ -76,11 +76,16 @@ window.VesselLayer = (() => {
   }
 
   // ---- marine calls (the hub decides too: sizeup/vessels.py is_marine) ---------------------------------------------
-  const MARINE_SUBTYPES = ["BOAT", "WATER", "ACFT-WATER"];
+  // a boat subtype under any type, a water rescue, an aircraft in the water; never NOTIF/WATER (sizeup/vessels.py)
+  const MARINE_PAIRS = ["RESCUE/WATER", "AIRPORT/ACFT-WATER"];
   const placeholder = (name) => /^DPT/i.test(String(name || ""));       // DPT239 ...: never located or followed
+  function marineType(type, subtype) {
+    const t = String(type || "").toUpperCase(), s = String(subtype || "").toUpperCase();
+    return s === "BOAT" || MARINE_PAIRS.includes(`${t}/${s}`);
+  }
   function isMarine(inc) {
     if (!inc) return false;
-    if (MARINE_SUBTYPES.includes(String(inc.subtype || "").toUpperCase())) return true;
+    if (marineType(inc.type, inc.subtype)) return true;
     return (inc.assignments || []).some((a) => a && a.kind === "marine" && !placeholder(a.name) && !a.cleared_at);
   }
 
@@ -115,8 +120,11 @@ window.VesselLayer = (() => {
 
   const staleS = (d) => (d && d.stale_s) || 180;
   const dropS = (d) => (d && d.drop_s) || 600;
-  // its age now: at the hub's answer, plus the time since
-  const ageNow = (v) => (v.age || 0) + Math.max(0, (Date.now() - store.at) / 1000);
+  // its age now: as at the answer's reference time (d.at: when what the hub knows last changed, so an unchanged answer
+  // is a 304), plus the time since by the hub's clock (cad.skew); an answer without one: since it was fetched
+  const nowS = () => Date.now() / 1000 + ((window.cad && cad.skew) || 0);
+  const since = (d, fetchedMs) => Math.max(0, d && typeof d.at === "number" && d.at > 0 ? nowS() - d.at : (Date.now() - (fetchedMs || Date.now())) / 1000);
+  const ageNow = (v, d = store.data, fetchedMs = store.at) => (v.age || 0) + since(d, fetchedMs);
   function alpha(age) {
     const s = staleS(store.data), drop = dropS(store.data);
     return age <= s ? 1 : Math.max(0.3, 1 - 0.7 * (age - s) / Math.max(1, drop - s));
@@ -140,7 +148,9 @@ window.VesselLayer = (() => {
     const keep = new Set();
     for (const v of d.vessels || []) {
       keep.add(v.id);
-      tracker.set(v.id, { lon: v.lon, lat: v.lat, rot: course(v) || 0, at: store.at - (v.age || 0) * 1000, sog: v.sog, cog: v.cog });
+      // when the report was true, by this browser's clock: the same for an unchanged answer (a 304), so no re-ease
+      const at = d.at > 0 ? (d.at - (v.age || 0) - ((window.cad && cad.skew) || 0)) * 1000 : store.at - (v.age || 0) * 1000;
+      tracker.set(v.id, { lon: v.lon, lat: v.lat, rot: course(v) || 0, at, sog: v.sog, cog: v.cog });
     }
     tracker.forget(keep);
   }
@@ -461,22 +471,22 @@ window.VesselLayer = (() => {
     return fetch(`${NEAR}?event=${encodeURIComponent(inc.id)}`, { credentials: "same-origin" })
       .then((r) => (r.ok ? r.json() : null)).then((d) => {
         if (st.key !== key || seq !== st.seq || !d) return;
+        d.fetchedMs = Date.now();
         st.data = d;
         setNamed((d.named || []).map((v) => v.id));
         draw(st, host);
       }).catch(() => { /* keep the last answer */ });
   }
-  function row(v, tag) {
+  function row(v, tag, d) {
     const r = h("button", "ac-row");
     r.type = "button";
     r.append(h("span", "ac-tag", tag), h("b", "", nameOf(v)),
              h("span", "dim small", [v.label, has(v.dist) ? `${v.dist.toFixed(1)} nm` : "", speed(v), has(course(v)) ? `${course(v)}°` : ""].filter(Boolean).join(" · ")));
-    if (ageNow(v) > staleS(st0())) r.append(h("span", "ac-stale small", "old"));
+    if (ageNow(v, d, d.fetchedMs) > staleS(d)) r.append(h("span", "ac-stale small", "old"));   // by the /near answer's own time
     r.title = `${brief(v)}\nClick: follow it on the map`;
     r.addEventListener("click", () => follow(v.id));
     return r;
   }
-  const st0 = () => store.data;
   function draw(st, host) {
     const d = st.data;
     host.hidden = false;
@@ -491,8 +501,8 @@ window.VesselLayer = (() => {
     if (!st.open) return;
     if (!d.configured || d.note) { host.append(h("div", "ml-note", cap(d.note) || "No AIS source")); return; }
     const list = h("div", "ac-list"), seen = new Set();
-    for (const v of d.named || []) { seen.add(v.id); list.append(row(v, "named")); }
-    for (const v of d.nearest || []) if (!seen.has(v.id)) list.append(row(v, "near"));
+    for (const v of d.named || []) { seen.add(v.id); list.append(row(v, "named", d)); }
+    for (const v of d.nearest || []) if (!seen.has(v.id)) list.append(row(v, "near", d));
     if (!list.children.length) list.append(h("div", "ml-note", "None within 10 nm"));
     host.append(list);
   }
