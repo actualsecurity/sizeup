@@ -2313,7 +2313,9 @@ admin deletes it** (#440):
   (`POST /api/cad/cameras/<id>/dvr/clip {from, to, incident_id, note}`): the recorded segments concatenated as they
   are (no re-encode) into parts of at most 8 MB, then `manifest.json` (camera, range, incident, who and when, the
   note, every segment's place in the parts, every object's sha256). Uploaded in the background (two at a time); one
-  a deploy interrupted is uploaded again by the next leader under the same id, if its range is still recorded.
+  a deploy interrupted is uploaded again by the next leader under the same id, if its range is still recorded; one
+  S3's own trouble interrupted (network, 5xx, 403) is tried again every round, 60 s doubling to an hour apart, while
+  its range is still recorded, then failed for good ("no longer recorded").
 - **radio**: every transmission linked to an incident (by hand or by the auto-linking) 5 min after it ended: its
   `audio.wav`, `transmission.json` (transcript and the alternative one, talker, radio ID, rig, channel, talkgroup)
   and `manifest.json`. Once per incident and transmission (a deleted one is never copied again). A failed copy is
@@ -2322,7 +2324,11 @@ admin deletes it** (#440):
   radio-log backfill's, a kept mention: `SURE_LINK`) **is kept until an admin deletes it** (#440), whatever
   `audio.sqlite`'s retention: no `expires_at` (0), never "expired", its objects tagged `keep=forever`. One on an
   unconfirmed link (a mention or a fireground link nobody kept) keeps the year it had (`keep=1y`), and becomes
-  forever (retagged) once a person keeps the link; unlinked before it is copied, it isn't copied. (The user's words
+  forever (retagged) once a person keeps the link; unlinked before it is copied, it isn't copied. **The limit**: the
+  retag must come within the copy's year (the lifecycle removes `keep=1y` objects 365 days after their PUT); a link
+  confirmed later is copied again, forever, from the live audio if that still has the clip (the channel's retention,
+  or a record's 365 days), else the log says its audio is gone and the row says so ("audio expired before the link
+  was confirmed"). (The user's words
   were "audio that gets attached to an INC"; copying mentions forever too is one change in `_copy_radio`.) Camera
   clips are tagged `keep=1y`; the bucket's lifecycle expires only `keep=1y` (sizeup-aws `19-incident-audio-forever.sh`,
   the task role's `s3:PutObjectTagging`). A tagged PUT that is refused (step 19 not run yet) is sent again untagged,

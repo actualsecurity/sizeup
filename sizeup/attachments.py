@@ -369,29 +369,60 @@ class Attachments:
     def retag(self, limit: int = 50) -> int:
         """Stored attachments whose objects don't carry the tag they should (saved before #440 or while tagging was
         refused, or a radio one whose link was confirmed since: forever now): tagged, each object's current version.
-        Leader only; a refusal (403: no s3:PutObjectTagging yet) stops the round, tried again the next. The number
-        retagged."""
+        Leader only; a refusal (403: no s3:PutObjectTagging yet) stops the round, tried again the next. A link
+        confirmed after its copy's year (the lifecycle removed the objects, or the row was marked expired): copied
+        again, forever, from the live audio if it still has the clip, else said in the log (its audio is gone). The
+        number retagged or copied again."""
         if self.s3 is None or not self.may_write():
             return 0
         from sizeup.cad.comms import SURE_LINK
+        sure = f"EXISTS (SELECT 1 FROM radio_links l WHERE l.traffic_id = a.ref AND l.incident_id = a.incident_id AND {SURE_LINK})"
         rows = self.store.q(
-            "SELECT a.id, a.kind, a.objects, a.expires_at, a.incident_id, EXISTS (SELECT 1 FROM radio_links l WHERE "
-            f"l.traffic_id = a.ref AND l.incident_id = a.incident_id AND {SURE_LINK}) AS sure FROM attachments a "
-            "WHERE a.status = 'stored' AND (a.tagged = 0 OR (a.kind = 'radio' AND a.expires_at > 0 AND EXISTS (SELECT 1 "
-            f"FROM radio_links l WHERE l.traffic_id = a.ref AND l.incident_id = a.incident_id AND {SURE_LINK}))) LIMIT ?",
-            (limit,))
+            f"SELECT a.id, a.kind, a.ref, a.status, a.objects, a.expires_at, a.incident_id, {sure} AS sure "
+            f"FROM attachments a WHERE (a.status = 'stored' AND a.tagged = 0) OR (a.kind = 'radio' AND a.expires_at > 0 "
+            f"AND a.status IN ('stored', 'expired') AND {sure}) LIMIT ?", (limit,))
         n = 0
         for r in rows:
             forever = r["kind"] == "radio" and bool(r["sure"])
+            gone = r["status"] == "expired"
             try:
-                for o in json.loads(r["objects"] or "[]"):
+                for o in ([] if gone else json.loads(r["objects"] or "[]")):
                     self.s3.put_tagging(o["key"], TAG_FOREVER if forever else TAG_1Y)
             except aws.AwsError as e:
-                self.log(f"attachments: retag {r['id']}: {e.code or e.status}: tried again later")
-                break
+                if not (forever and e.status == 404):
+                    self.log(f"attachments: retag {r['id']}: {e.code or e.status}: tried again later")
+                    break
+                gone = True                               # the lifecycle took it: past its year
+            if gone:
+                got = self._recopy(r)
+                if got is None:
+                    break                                 # the live audio can't be read now: the next round
+                n += got
+                continue
             self._set(r["id"], tagged=1, **({"expires_at": NEVER} if forever else {}))
             n += 1
         return n
+
+    def _recopy(self, r: dict) -> int | None:
+        """A radio copy whose link was confirmed after its year: copied again (forever) from the live audio, if it still
+        has the clip. 1: copied; 0: its audio is gone (said, the row keeps "audio expired before the link was
+        confirmed"); None: the live audio can't be read now."""
+        try:
+            wav = self.audio(r["ref"])
+        except OSError:
+            return None
+        if not wav:
+            self._set(r["id"], status="expired", expires_at=NEVER, tagged=1,
+                      error="audio expired before the link was confirmed (more than a year after its copy)")
+            self.log(f"attachments: {r['id']}: its link was confirmed after the copy's year: the audio is gone, "
+                     "the transcript record stays")
+            return 0
+        self._set(r["id"], status="failed", tries=0, attempts=0, retry_at=0)
+        got = self._copy_radio(r["ref"], r["incident_id"], "confirmed later")
+        if got == "copied":
+            self.log(f"attachments: {r['id']}: its link was confirmed after the copy's year: copied again from the live "
+                     "audio, kept until an admin deletes it")
+        return 1 if got == "copied" else None
 
     @classmethod
     def from_env(cls, store, log: Callable[[str], None] = print, may_write=None) -> Attachments:
@@ -595,8 +626,15 @@ class Attachments:
             self.log(f"attachments: {aid}: camera {cid}, {len(segs)} segments, {total / 1e6:.1f} MB in {len(objects) - 1} part(s)")
         except Exception as e:  # noqa: BLE001 - the row says why; never kills the pool
             why = f"{type(e).__name__}: {e}"[:300]
-            # S3's own trouble (network, 5xx, 403): "interrupted", so resume() uploads it again while it is recorded
-            self._set(aid, status="failed", error=("interrupted: " if _transient(e) else "") + why)
+            # S3's own trouble (network, 5xx, 403): "interrupted", so resume() uploads it again while it is recorded,
+            # 60 s doubling to an hour apart
+            if _transient(e):
+                r = self.store.one("SELECT attempts FROM attachments WHERE id = ?", (aid,))
+                k = (r["attempts"] if r else 0) + 1
+                self._set(aid, status="failed", error="interrupted: " + why, attempts=k,
+                          retry_at=self.clock() + min(RETRY_S[1], RETRY_S[0] * 2 ** (k - 1)))
+            else:
+                self._set(aid, status="failed", error=why)
             self.audit("failed", aid, inc["id"], operator, why)
         finally:
             dvr = self.dvr()
@@ -751,23 +789,30 @@ class Attachments:
 
     # -- housekeeping -----------------------------------------------------------------------------------------------
 
-    def resume(self) -> int:
+    def resume(self, due_only: bool = False) -> int:
         """The leader before this one went away mid-upload (a deploy: its queue went with it): every camera clip still
         "saving", or failed as interrupted, uploaded again under the same id, when its range is still recorded (else
-        failed: "no longer recorded"). Once, after the DVR has read its index. The number queued."""
+        failed for good: "no longer recorded"). Once, after the DVR has read its index; then every round (due_only)
+        for the ones S3's own trouble interrupted, once their retry time has come (60 s doubling to an hour), while
+        their range is still recorded (the DVR's 12 h on EFS). The number queued."""
         dvr = self.dvr()
         if self.s3 is None or not self.may_write() or dvr is None or not getattr(dvr, "scanned", lambda: True)():
             return 0
-        self._resumed = True
-        rows = self.store.q("SELECT * FROM attachments WHERE kind = 'camera' AND (status = 'saving' OR "
-                            "(status = 'failed' AND error LIKE 'interrupted%')) ORDER BY created_at")
+        if due_only:
+            rows = self.store.q("SELECT * FROM attachments WHERE kind = 'camera' AND status = 'failed' AND error LIKE "
+                                "'interrupted%' AND COALESCE(retry_at, 0) <= ? ORDER BY created_at", (self.clock(),))
+        else:
+            self._resumed = True
+            rows = self.store.q("SELECT * FROM attachments WHERE kind = 'camera' AND (status = 'saving' OR "
+                                "(status = 'failed' AND error LIKE 'interrupted%')) ORDER BY created_at")
         n = 0
         for r in rows:
             cid = dvr.alias(r["source"]) if hasattr(dvr, "alias") else r["source"]
             segs = dvr.segments(cid, r["start"], r["end"])
             whole = bool(segs) and segs[0]["t0"] <= r["start"] + 0.01 and segs[-1]["t0"] + segs[-1]["dur"] >= r["end"] - 0.01
             if not whole:
-                self._set(r["id"], status="failed", error="interrupted, and no longer recorded")
+                self._set(r["id"], status="failed", error="no longer recorded: the camera clip was interrupted (S3, "
+                          "a deploy) and its range aged out of the DVR before it could be saved")
                 self.audit("failed", r["id"], r["incident_id"], r["created_by"], "interrupted; the range is no longer recorded")
                 continue
             inc = self._incident(r["incident_id"])
@@ -821,6 +866,8 @@ class Attachments:
             try:
                 if not self._resumed:
                     self.resume()
+                else:
+                    self.resume(due_only=True)
                 self.sweep()
                 n = self.sync_radio()
                 self.retag()

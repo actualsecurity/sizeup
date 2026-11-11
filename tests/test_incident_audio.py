@@ -223,3 +223,60 @@ def test_without_the_attachments_bucket_every_linked_clip_is_held(tmp_path, monk
         assert app._audio_retention(now) == 1 and app.audio.has("FG1-l") and not app.audio.has("FG1-u")
     finally:
         app.stop()
+
+
+def test_an_interrupted_camera_save_is_retried_every_round_while_recorded(tmp_path, monkeypatch):
+    from tests.test_attachments import CAM, call, camera_setup
+    api, c, a, d, iid, clock = camera_setup(tmp_path)
+    fake = Tagged()
+    a.s3 = tagged_s3(fake)
+    a._resumed = True
+    fake.fail = lambda method, key: method == "PUT"           # S3 in trouble while it is saved
+    st = d.status(CAM)
+    call(api, f"/api/cad/cameras/{CAM}/dvr/clip", {"from": st["from"], "to": st["to"], "incident_id": iid})
+    r = a.store.one("SELECT id, status, error, retry_at FROM attachments WHERE kind = 'camera'")
+    assert r["status"] == "failed" and r["error"].startswith("interrupted") and r["retry_at"] > a.clock()
+    fake.fail = None
+    assert a.resume(due_only=True) == 0                        # not before its retry time
+    with a.store.lock:
+        a.store.db.execute("UPDATE attachments SET retry_at = 0")
+    assert a.resume(due_only=True) == 1
+    assert a.store.one("SELECT status FROM attachments WHERE id = ?", (r["id"],))["status"] == "stored"
+    # another one interrupted, and its range ages out of the DVR before S3 is back: failed for good, said why
+    fake.fail = lambda method, key: method == "PUT"
+    call(api, f"/api/cad/cameras/{CAM}/dvr/clip", {"from": st["from"], "to": st["to"], "incident_id": iid})
+    fake.fail = None
+    with a.store.lock:
+        a.store.db.execute("UPDATE attachments SET retry_at = 0")
+    monkeypatch.setattr(d, "segments", lambda *k, **kw: [])
+    assert a.resume(due_only=True) == 0
+    bad = a.store.one("SELECT status, error FROM attachments WHERE kind = 'camera' AND id != ?", (r["id"],))
+    assert bad["status"] == "failed" and bad["error"].startswith("no longer recorded")
+    assert a.resume(due_only=True) == 0                        # and never looked at again
+
+
+def test_a_link_confirmed_after_its_copys_year_is_copied_again_or_said(tmp_path):
+    c, a, inc, clock = radio_setup(tmp_path)
+    fake = Tagged()
+    a.s3 = tagged_s3(fake)
+    for tid in ("FG1-2", "FG1-9"):
+        c.record_traffic(tx(tid, clock.t))
+        link(c, tid, inc["id"], "mention")
+    clock.t += att_mod.SETTLE_S + 30
+    assert a.sync_radio() == 2
+    clock.t += att_mod.RETENTION_S + 1                        # a year on: expired, the lifecycle took the objects
+    a.sweep()
+    for k in [k for k in fake.objects if "/audio.wav" in k or k.endswith(".json")]:
+        fake.objects.pop(k)
+    a.audio = {"FG1-2": tone(0.4)}.get                         # the live audio still has FG1-2, not FG1-9
+    with c.store.tx() as d:                                   # both links confirmed now
+        for tid in ("FG1-2", "FG1-9"):
+            d.execute("INSERT INTO radio_link_kept (traffic_id, incident_id, at) VALUES (?, ?, 0)", (tid, inc["id"]))
+    logs = []
+    a.log = logs.append
+    assert a.retag() == 1
+    rows = {r["ref"]: r for r in a.store.q("SELECT ref, status, expires_at, error FROM attachments WHERE kind = 'radio'")}
+    assert (rows["FG1-2"]["status"], rows["FG1-2"]["expires_at"]) == ("stored", att_mod.NEVER)
+    assert any(k.endswith("/audio.wav") for k in fake.objects) and set(fake.tags.values()) >= {"keep=forever"}
+    assert rows["FG1-9"]["status"] == "expired" and "before the link was confirmed" in rows["FG1-9"]["error"]
+    assert any("the audio is gone" in m for m in logs) and a.retag() == 0
