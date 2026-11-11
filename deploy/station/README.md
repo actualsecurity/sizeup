@@ -368,6 +368,26 @@ own failures say only "the adapter" (no reason, repo name or commit; a release n
 GitHub Actions log of this public repo. The adapter's own words are in state.json `adapter`, `last.adapter_why`, the
 station's journal and `/var/log/sizeup-update.log`, and the hub's Settings > Health (behind Cloudflare Access).
 
+**A credential kept in AWS SSM** (changed without touching the station). A credential that changes now and then (a
+shared login's password) can live in the department's AWS account instead, as a SecureString parameter
+`/sizeup-station/adapter/<NAME>` (`<NAME>` = the credential's name) encrypted with a KMS key of its own. The station
+reads it with an IAM user of its own, `sizeup-station-adapter`, allowed `ssm:GetParameter` on `/sizeup-station/adapter/*`
+and `kms:Decrypt` on that key through SSM, nothing else; the key's policy denies Decrypt to every other principal (the
+account's root included), and the hub's roles get an explicit Deny on the prefix and the key. **The hub never holds,
+relays or can read it.** Setup answers y to "Read them from AWS SSM" and gives the region and that user's access key
+(hidden); they are credentials like the others (`SIZEUP_SSM_REGION`, `SIZEUP_SSM_KEY_ID`, `SIZEUP_SSM_SECRET` in the
+credstore, never station.env, the config or the environment). A value also entered for `<NAME>` stays the fallback.
+The fetch is `sizeup/cloud/adapterssm.py` (stdlib, SigV4 from `sizeup/aws.py`, no proxy): a value only in memory,
+never logged; an error is AWS's error type only. How often to read it and when a changed version may be tried are the
+adapter's: the station's adapter reads it at start and every 5 minutes, after a refused log-on reads it again and tries
+once more only if the version changed, keeps the last good value while SSM can't be reached, and a stop on bad
+log-ons ends by itself when the version changes. Its health says `credential vN from SSM, updated <time>` or
+`credential: local`. Changing the password, from a Mac with the department's AWS sign-in:
+`printf '%s' "$pw" | aws ssm put-parameter --name /sizeup-station/adapter/<NAME> --type SecureString --key-id
+alias/sizeup-station-adapter --overwrite --value file:///dev/stdin` with `$pw` read hidden (never an argument or an
+environment variable); the department's setup scripts do this, make the key, the user and the denies, and rotate the
+access key. IAM Roles Anywhere (an X.509 certificate on the station instead of a long-lived key) is the later option.
+
 **Reset from the hub.** An adapter may stop with "failing: login (manual reset needed)" to protect a shared account.
 An admin resets it from the hub: Settings > Health, a Reset button beside each source that is failing (with a
 confirm). That sends a `sources_reset` job over the station's authenticated jobs channel; the station calls the
