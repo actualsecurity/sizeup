@@ -410,6 +410,10 @@ def map_slice(units: list[dict], incidents: list[dict], role, firehouses: list[d
             continue
         m["tag"] = joint(u["name"])
         m["fire"] = is_fire(u)
+        # every open call it is on (#384: Store.units() gives one row a unit, its latest call, with incident_ids; a
+        # placeholder may be on several, a rig normally one): their numbers, the drawn one first
+        ids = [m["incident_id"]] + [i for i in (u.get("incident_ids") or []) if i != m["incident_id"]]
+        m["incident_numbers"] = [open_incs[i].get("number") or "" for i in ids if i in open_incs and open_incs[i].get("number")]
         markers.append(m)
     # each group's members, in board order, numbered for fanning out around the anchor
     groups: dict[str, list[dict]] = {}

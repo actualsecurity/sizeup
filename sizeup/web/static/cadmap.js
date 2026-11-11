@@ -148,6 +148,9 @@ window.CadMap = (() => {
   const drawable = (M) => ((M && M.markers) || []).filter((m) => !placeholder(m));
   const ICON_NAMES = { engine: "engine", ladder: "ladder", tower: "tower ladder", rescue: "rescue", suv: "car", other: "" };
   const CLASS_ORDER = { act: 0, idle: 1, oos: 2 };
+  // the numbers of the open calls a rig is on (#384: the hub's incident_numbers; an older hub: its one call)
+  const callsOf = (m) => (Array.isArray(m.incident_numbers) && m.incident_numbers.length ? m.incident_numbers
+    : m.incident_number ? [m.incident_number] : []);
   // a firehouse's list's head (#384): "11 rigs · 7 in quarters · 2 on calls · 2 OOS", the parts that are not 0
   function stationCounts(rigs) {
     if (!rigs.length) return "No rigs";
@@ -702,7 +705,7 @@ window.CadMap = (() => {
         .sort((a, b) => CLASS_ORDER[rigClass(a[0])] - CLASS_ORDER[rigClass(b[0])] || a[1] - b[1]).map(([m]) => m);
     }
 
-    listSig(rigs) { return JSON.stringify(rigs.map((m) => [m.unit, m.status, m.icon, m.incident_number, this.chips.has(m.unit)])); }
+    listSig(rigs) { return JSON.stringify(rigs.map((m) => [m.unit, m.status, m.icon, callsOf(m), this.chips.has(m.unit)])); }
 
     // #384: a firehouse clicked (its icon or its count chip): its rigs in the map's box, each with its type and status;
     // a click on one follows it (#358) or, where the map follows nothing, centres and rings it; hovered: ringed wider.
@@ -728,7 +731,7 @@ window.CadMap = (() => {
         b.dataset.unit = m.unit;
         b.style.setProperty("--c", st.bg || "#9AA3AD");
         b.append(h("i", `cm-ty ty-${iconOf(m)}`), h("b", "n", m.unit), h("span", "s", st.name));
-        if (m.incident_number) b.append(h("span", "dim", m.incident_number));
+        if (callsOf(m).length) b.append(h("span", "dim", callsOf(m).join(", ")));       // every call it is on
         b.title = [m.unit + (ICON_NAMES[iconOf(m)] ? ` (${ICON_NAMES[iconOf(m)]})` : ""), st.name,
                    go ? (this.onFollow ? "click: follow" : "click: show") : ""].filter(Boolean).join(", ");
         b.disabled = !go || !this.chips.has(m.unit);

@@ -477,3 +477,53 @@ out.gone = [L.hoverRow, CadMap.lights.hovered("TL2"), focused === L.pop, L.stati
 """, page_state())
     assert o["kept"] == ["E61", True, True, "full"]
     assert o["gone"] == ["", False, True, True]
+
+
+# ---- Store.units(): one row a unit, its latest open call, with incident_ids (no-dept-units, #400) -------------------------
+
+HQ_FH = {"name": "PCFD Headquarters", "ll": [-73.66692, 41.00253], "short": "HQ"}
+CALLS = [{"id": 11, "number": "26-000011", "status": "active", "lat": 41.0085, "lon": -73.66},
+         {"id": 12, "number": "26-000012", "status": "active", "lat": 41.012, "lon": -73.672}]
+
+
+def units_rows():
+    """The #400 shape, made up: one row per unit; E60 on its latest call (12) and still on 11; E61 on one; E62 idle at
+    home; DPT239 (a placeholder) on both."""
+    row = lambda n, kind, st, inc, ids: {"id": len(n) * 100 + sum(map(ord, n)), "name": n, "kind": kind, "status": st,  # noqa: E731
+                                         "board": "main", "station": HQ_FH["name"], "incident_id": inc, "incident_ids": ids}
+    return [row("E60", "engine", "RS", 12, [11, 12]), row("E61", "engine", "OL", 11, [11]),
+            row("E62", "engine", "AV", None, []), row("E63", "engine", "AV", None, []),
+            row("DPT239", "other", "OL", 12, [11, 12])]
+
+
+def slice_rows():
+    role = {"RS": "enroute", "OL": "onscene", "AV": "free"}.get
+    return mapview.map_slice(units_rows(), CALLS, role, [HQ_FH], positions={}, now=0.0)
+
+
+def test_a_units_row_with_several_calls_is_one_marker_with_every_call():
+    s = slice_rows()
+    by = {m["unit"]: m for m in s["markers"]}
+    assert sorted(by) == ["E60", "E61", "E62", "E63"]                            # one each; the placeholder none
+    assert by["E60"]["incident_id"] == 12 and by["E60"]["incident_numbers"] == ["26-000012", "26-000011"]
+    assert by["E61"]["incident_numbers"] == ["26-000011"] and by["E62"]["incident_numbers"] == []
+    assert not any(u["unit"] == "DPT239" for u in s["unset"])
+
+
+@needs_node
+def test_the_list_shows_all_of_a_rigs_calls_and_counts_each_rig_once(tmp_path):
+    s = slice_rows()
+    data = page_state()
+    data["map"] = {**data["map"], "markers": s["markers"], "incidents": s["incidents"], "unset": []}
+    o = run(tmp_path, SNAP + r"""
+zoomTo(13);
+out.chips = [...L.chips.keys()].sort();
+out.count = L.badges.has(IN.hq) ? L.badges.get(IN.hq).el.textContent : null;
+clickHouse(IN.hq);
+out.rows = rows().map((r) => [r.dataset.unit, r.children.length > 3 ? r.children[3].textContent : ""]);
+rowOf("E60").fire("click"); out.follow = rm.fol.id;
+""", data)
+    assert o["chips"] == ["E60", "E61", "E62", "E63"]
+    assert o["count"] == "2"                                                     # E62, E63 in quarters, once each
+    assert o["rows"] == [["E60", "26-000012, 26-000011"], ["E61", "26-000011"], ["E62", ""], ["E63", ""]]
+    assert o["follow"] == "E60"
