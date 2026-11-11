@@ -118,7 +118,7 @@ def test_each_rig_is_its_vehicle_with_its_code_beside_it(tmp_path):
     o = run(tmp_path, SNAP + r"""
 zoomTo(15.5);
 const ty = (u) => chip(u).el.children[0].className;
-out.full = Object.fromEntries(["E60", "L31", "TL2", "2391", "E62", "E63"].map((u) => [u, [ty(u), chip(u).el.children[1].textContent,
+out.full = Object.fromEntries(["E60", "L31", "TL2", "2391", "E62", "E63"].map((u) => [u, [ty(u), chip(u).el.children[1].children[0].textContent,
   chip(u).el.title, chip(u).el.children[0].innerHTML, chip(u).el.style["--len"], chip(u).el.style["--minl"]]]));
 zoomTo(9.5); out.dot = [kind("E63"), ty("E63")];          // a dot keeps it (shown when the dot opens under the pointer)
 """, page_state())

@@ -148,7 +148,8 @@ window.CadMap = (() => {
   // ---- the rigs as the vehicles, from overhead (#427) ----------------------------------------------------------------
   // Original simplified drawings, front (the cab) up, in decimetres: the body in the status colour (.b), glass (.g), the
   // light bar (.lt, red ends .rd), steel (.m: ladder, boom, turrets), the turntable (.k), hose (.h), roof panels (.p),
-  // recesses (.d) and seams (.ln). len, wid: the drawn outline in metres (the class's typical size: an engine 10.5 m, a
+  // recesses (.d) and seams (.ln). The aerial's full detail (.hi: rails, rungs, the boom) only on a map close in
+  // (cm-near); smaller, a thin line (.lo), so the status-tinted body is most of what shows. len, wid: the drawn outline in metres (the class's typical size: an engine 10.5 m, a
   // rear-mount ladder 13 m plus its fly over the cab, a mid-mount tower ladder 13.7 m with its platform over the back, a
   // heavy rescue 11.5 m, a Tahoe 5.3 m, a 6x6 crash truck 12.2 x 3.1 m); minl, minw: px at the least (legible at any zoom).
   const R = (c, x, y, w, ht, rx) => `<rect class="${c}" x="${x}" y="${y}" width="${w}" height="${ht}"${rx ? ` rx="${rx}"` : ""}/>`;
@@ -165,13 +166,15 @@ window.CadMap = (() => {
     ladder: { len: 15, wid: 2.5, minl: 40, minw: 12, art:            // rear turntable, the ladder bedded over the cab
       R("d", 1.5, 19, 22, 3, 1) + R("b", 0.5, 20.5, 24, 129, 2.5) + R("g", 2, 23, 21, 5, 1.5) + bar(29.5, 3, 22)
       + P("ln", "M1 46H24") + R("d", 0, 47, 2.5, 4) + R("d", 22.5, 47, 2.5, 4) + R("d", 0, 141, 2.5, 4) + R("d", 22.5, 141, 2.5, 4)
-      + R("p", 1.5, 50, 4, 78, 1) + R("p", 19.5, 50, 4, 78, 1) + C("k", 12.5, 135, 9) + C("d", 12.5, 135, 4.5)
-      + R("mf", 8.4, 0, 8.2, 132) + R("m", 6, 0, 2.4, 132, 0.6) + R("m", 16.6, 0, 2.4, 132, 0.6) + P("rg", steps(3, 129, 4, 8.4, 16.6)) },
+      + R("p", 1.5, 50, 4, 78, 1) + R("p", 19.5, 50, 4, 78, 1) + C("k hi", 12.5, 135, 9) + C("d hi", 12.5, 135, 4.5)
+      + R("mf hi", 8.4, 0, 8.2, 132) + R("m hi", 6, 0, 2.4, 132, 0.6) + R("m hi", 16.6, 0, 2.4, 132, 0.6)
+      + P("rg hi", steps(3, 129, 4, 8.4, 16.6)) + C("k lo", 12.5, 135, 5) + R("m lo", 11.2, 0, 2.6, 132, 0.6) },   // small: a thin line
     tower: { len: 14.2, wid: 2.5, minl: 38, minw: 12, art:           // turntable behind the cab, the boom back to the platform
       R("d", 1.5, 0, 22, 3, 1) + R("b", 0.5, 1.5, 24, 135.5, 2.5) + R("g", 2, 4, 21, 5, 1.5) + bar(10.5, 3, 22)
       + P("ln", "M1 30H24") + R("d", 0, 33, 2.5, 4) + R("d", 22.5, 33, 2.5, 4) + R("d", 0, 118, 2.5, 4) + R("d", 22.5, 118, 2.5, 4)
-      + R("p", 1.5, 52, 4, 64, 1) + R("p", 19.5, 52, 4, 64, 1) + C("k", 12.5, 41, 9.5) + R("m", 6.5, 36, 12, 96, 1.5)
-      + R("mi", 8.7, 50, 7.6, 80, 1) + C("d", 12.5, 41, 3) + R("bk", 1, 130, 23, 12, 1.5) + R("d", 3, 132, 19, 8, 1) },
+      + R("p", 1.5, 52, 4, 64, 1) + R("p", 19.5, 52, 4, 64, 1) + C("k hi", 12.5, 41, 9.5) + R("m hi", 6.5, 36, 12, 96, 1.5)
+      + R("mi hi", 8.7, 50, 7.6, 80, 1) + C("d hi", 12.5, 41, 3) + C("k lo", 12.5, 41, 5.5) + R("m lo", 11, 41, 3, 90, 0.8)
+      + R("bk", 4, 131, 17, 11, 1.5) + R("d", 6, 133, 13, 7, 1) },
     rescue: { len: 11.5, wid: 2.5, minl: 34, minw: 13, art:          // box body, roof compartments, light tower, generator
       R("d", 1.5, 0, 22, 3, 1) + R("b", 0.5, 1.5, 24, 112.5, 2.5) + R("g", 2, 4, 21, 5, 1.5) + bar(10.5, 3, 22)
       + P("ln", "M1 30H24") + R("d", 1.5, 32, 22, 80, 1) + [34, 53, 72, 91].map((y) => R("p", 2, y, 6.5, 17, 1) + R("p", 16.5, y, 6.5, 17, 1)).join("")
@@ -215,6 +218,8 @@ window.CadMap = (() => {
   // which way it points, degrees clockwise from north: its heading when its fix has one; else fanned out at its
   // firehouse nose out (out of the bays), around a call nose to the call; else north
   const headingOf = (m) => (typeof m.heading === "number" && Number.isFinite(m.heading) ? ((m.heading % 360) + 360) % 360 : null);
+  // a rig's status as words beside its code (#427: not by colour alone): its status code, at most 3 letters
+  const statusCue = (st, m) => String((st && st.code) || m.status || "").slice(0, 3);
   function rotOf(m, off) {
     const hd = headingOf(m);
     if (hd !== null) return hd;
@@ -505,17 +510,28 @@ window.CadMap = (() => {
         if (far !== this.far) { this.far = far; opts.host.classList.toggle("cm-far", far); this.setBand(); this.draw(); }
       });
       // #376: laid out again only if the band changed; moveend too: a drag takes the map off its automatic frame
-      const settle = () => { if (this.setBand() | this.setGrow()) this.draw(); else this.placeLabels(); };
+      const settle = () => { this.scaleNow(); if (this.setBand() | this.setGrow()) this.draw(); else this.placeLabels(); };
       map.on("zoomend", settle);
       map.on("moveend", settle);
     }
 
     // #427: px a metre on the page (--ppm on the map: each vehicle's CSS size), 0 while every one is at its least size
+    // once a frame at most while zooming (scaleNow on zoomend); cm-near on the map: the full detail (the ladder's rungs,
+    // the boom) only once an engine is drawn twice its least length, else the status-tinted body stays the most of it
     setScale() {
+      if (this.scaleRaf) return;
+      if (typeof requestAnimationFrame !== "function") { this.scaleNow(); return; }
+      this.scaleRaf = requestAnimationFrame(() => { this.scaleRaf = 0; this.scaleNow(); });
+    }
+    scaleNow() {
       const ppm = pxPerM(this.map), v = ppm >= SCALE_PPM ? Math.round(ppm * 100) / 100 : 0;
       if (v === this.ppm) return;
       this.ppm = v;
-      try { this.map.getContainer().style.setProperty("--ppm", String(v)); } catch (_) { /* */ }
+      try {
+        const c = this.map.getContainer();
+        c.style.setProperty("--ppm", String(v));
+        c.classList.toggle("cm-near", v * V.engine.len >= 2 * V.engine.minl);
+      } catch (_) { /* */ }
     }
     // how much wider the fan-outs are, once an engine is drawn longer than its least size (in quarter steps); true if
     // it changed (laid out again on zoomend, as the band)
@@ -686,7 +702,7 @@ window.CadMap = (() => {
       const lits = new Map(markers.map((m) => [m.unit, [...(lights ? [lights.isPicked(m.unit), lights.hovered(m.unit)] : [false, false]),
                                                          !!this.fol && this.fol.id === m.unit, talkState(m.unit)]]));
       if (!this.band) this.setBand();
-      if (!this.grow) { this.setGrow(); this.setScale(); }
+      if (!this.grow) { this.setGrow(); this.scaleNow(); }
       // #376: lit ones full; so is a rig just made active (FRESH_S), laid out again when the last of those runs out
       let soonest = 0;
       const sizes = declutter(markers, this.band, (m) => {
@@ -718,7 +734,10 @@ window.CadMap = (() => {
           e.type = "button";
           e.addEventListener("click", (ev) => { ev.stopPropagation(); this.chipClick(this.chips.get(m.unit).m); });
           const marker = new maplibregl.Marker({ element: e, anchor: "center" }).setLngLat(this.where(m)).addTo(this.map);
-          rec = { marker, el: e, sig: "" };
+          // #427: its label made once and kept (its words updated in place); its vehicle made again only for a new icon
+          const lbl = h("span", "lbl"), parts = { n: h("span", "n"), st: h("span", "st") };   // a tag, an age: when it has one
+          lbl.append(parts.n, parts.st);
+          rec = { marker, el: e, sig: "", lbl, parts, lblAt: "" };
           this.chips.set(m.unit, rec);
         }
         rec.m = m;
@@ -731,6 +750,7 @@ window.CadMap = (() => {
         const e = rec.el;
         const keep = [...e.classList].filter((c) => c.startsWith("maplibregl-")).join(" ");   // the marker's own
         e.className = `${keep} cm-rig rv look-${m.look} at-${m.place}` + (m.ring ? " outer" : "") + (talk ? ` ${talk}` : "")
+          + (m.look === "dispatched" || m.look === "responding" ? " enroute" : "")      // #427: not there yet, at any place
           + (cl === "act" ? " act" : "") + (sz === "dot" ? " rig-dot" : sz === "folded" ? " folded" : "")
           + (this.focus && m.incident_id && !onFocus ? " other" : "") + (onFocus ? " mine" : "")
           + (fx && fx.stale ? " stale" : "") + (lit[0] ? " hl" : "") + (lit[1] ? " hot" : "") + (lit[2] ? " followed" : "");
@@ -739,22 +759,30 @@ window.CadMap = (() => {
         e.style.opacity = fx && fx.stale && !(sz === "dot" && cl === "act") ? String(Math.round(fx.fade * 100) / 100) : "";
         // #427: the vehicle from overhead, turned to its heading (the shorter way round from where it pointed: eased by
         // CSS), its code beside it (placeLabels: the side clear of the others)
+        // Kept across redraws (a new fix, the age timer): only custom properties and words change, so a turn eases.
         const icon = iconOf(m), v = V[icon], rot = rotOf(m, off);
         const r = typeof rec.rot === "number" ? rec.rot + ((((rot - rec.rot) % 360) + 540) % 360 - 180) : rot;
+        if (r !== rec.rot) e.style.setProperty("--rot", `${r}deg`);
         rec.rot = r;
-        rec.icon = icon;
         rec.as = Math.abs(Math.sin(rot * Math.PI / 180));
         rec.ac = Math.abs(Math.cos(rot * Math.PI / 180));
-        for (const [k, x] of [["--rot", `${r}deg`], ["--as", rec.as.toFixed(3)], ["--ac", rec.ac.toFixed(3)], ["--len", v.len],
-                              ["--wid", v.wid], ["--minl", v.minl], ["--minw", v.minw]]) e.style.setProperty(k, String(x));
-        const lbl = h("span", "lbl");
-        lbl.append(h("span", "n", m.unit));
-        if (m.tag) lbl.append(h("span", "tag", m.tag));
-        if (age) lbl.append(h("span", "age", age));
-        rec.lbl = lbl;
-        rec.lblAt = "";
-        rec.chars = m.unit.length + (m.tag ? m.tag.length * 0.7 + 0.5 : 0) + (age ? age.length * 0.7 + 0.5 : 0);
-        e.replaceChildren(vehEl(icon), lbl);
+        e.style.setProperty("--as", rec.as.toFixed(3));
+        e.style.setProperty("--ac", rec.ac.toFixed(3));
+        if (rec.icon !== icon) {                                // a new class: its drawing and its sizes (rare)
+          rec.icon = icon;
+          rec.veh = vehEl(icon);
+          for (const [k, x] of [["--len", v.len], ["--wid", v.wid], ["--minl", v.minl], ["--minw", v.minw]]) e.style.setProperty(k, String(x));
+          e.replaceChildren(rec.veh, rec.lbl);
+        }
+        // its code, then its status code (not colour alone: AQ, DP, RS, OL, OS ...), then any tag and a stale fix's age
+        const P = rec.parts, cue = statusCue(st, m);
+        P.n.textContent = m.unit;
+        P.st.textContent = cue;
+        for (const [k, t] of [["tag", m.tag || ""], ["age", age]]) {
+          if (t && !P[k]) { P[k] = h("span", k); rec.lbl.append(P[k]); }
+          if (P[k]) { P[k].textContent = t; P[k].hidden = !t; }
+        }
+        rec.chars = m.unit.length + (cue.length + 0.5) * 0.75 + (m.tag ? m.tag.length * 0.7 + 0.5 : 0) + (age ? age.length * 0.7 + 0.5 : 0);
         e.title = [m.unit + (ICON_NAMES[iconOf(m)] ? ` (${ICON_NAMES[iconOf(m)]})` : ""), st.name,
                    fx ? `${fx.stale ? "last fix" : "live"} ${agoS(fx.age)} ago${m.source ? ` (${m.source})` : ""}` : "",
                    m.place === "returning" ? `returning from ${m.returning_from} (est. position)` : "",
@@ -784,7 +812,11 @@ window.CadMap = (() => {
         let p;
         try { p = this.map.project(rec.marker.getLngLat()); } catch (_) { continue; }
         const off = rec.off || [0, 0], x = p.x + off[0], y = p.y + off[1];
-        if (rec.size === "dot") { items.push({ box: [x - 6, y - 6, x + 6, y + 6] }); continue; }
+        if (rec.size === "dot") {                             // an obstacle; its code to the right when it opens
+          items.push({ box: [x - 6, y - 6, x + 6, y + 6] });
+          if (rec.lblAt !== "r") { rec.lblAt = "r"; rec.lbl.className = "lbl"; }
+          continue;
+        }
         const [L, W] = vehPx(rec.icon, ppm, far);
         const hx = (L * rec.as + W * rec.ac) / 2, hy = (L * rec.ac + W * rec.as) / 2;
         items.push({ rec, x, y, hx, hy, box: [x - hx, y - hy, x + hx, y + hy], w: rec.chars * CH + 8, pri: rec.pri });
@@ -799,7 +831,7 @@ window.CadMap = (() => {
         if (!pick && it.pri < 2) pick = "r";
         if (pick) placed.push(at[pick]);
         const want = pick || "none";
-        if (it.rec.lblAt !== want) { it.rec.lblAt = want; it.rec.lbl.className = `lbl lbl-${want}`; }
+        if (it.rec.lblAt !== want) { it.rec.lblAt = want; it.rec.lbl.className = want === "r" ? "lbl" : `lbl lbl-${want}`; }
       }
     }
 
