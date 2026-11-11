@@ -561,22 +561,25 @@ class Editor:
             return None
         r = ((self.overrides() if ov is None else ov).get(RET_SECTION) or {})
         base = float(getattr(self.cad, "audio_keep_days", 0.5))
-        default = audiostore.keep_days(r, "", None, base)
+        pol = audiostore.Retention(r, base)
+        default = pol.default
         rows: dict[str, dict] = {}
         for c in blobs.channels():
             key = audiostore.retention_key(c["channel"], c["talkgroup"])
             if not key:
                 continue
-            x = rows.setdefault(key, {"key": key, "label": c["channel"] or key, "talkgroup": c["talkgroup"], "clips": 0,
-                                      "bytes": 0})
+            x = rows.setdefault(key, {"key": key, "label": c["channel"] or key, "channel": c["channel"],
+                                      "talkgroup": c["talkgroup"], "clips": 0, "bytes": 0})
             x["clips"] += c["clips"]
             x["bytes"] += c["bytes"]
         for key in r:
             if key != audiostore.DEFAULT_KEY and key not in rows:
                 m = audiostore.TG_KEY.fullmatch(key)
-                rows[key] = {"key": key, "label": key, "talkgroup": int(m.group(1)) if m else None, "clips": 0, "bytes": 0}
+                rows[key] = {"key": key, "label": key, "channel": "" if m else key,
+                             "talkgroup": int(m.group(1)) if m else None, "clips": 0, "bytes": 0}
         for x in rows.values():
-            x["days"] = audiostore.keep_days(r, "" if x["talkgroup"] is not None else x["key"], x["talkgroup"], default)
+            # the days the prune uses for these clips (talkgroup > channel > default), whether this row is edited or not
+            x["days"] = pol.keep_days(x["channel"], x["talkgroup"])
             x["edited"] = x["key"] in r
         lo, hi = audiostore.RETENTION_DAYS
         return {"default": {"value": default, "default": base, "edited": audiostore.DEFAULT_KEY in r},
@@ -585,7 +588,11 @@ class Editor:
 
     @staticmethod
     def _ret_key(key) -> str:
-        if not isinstance(key, str) or not (key == audiostore.DEFAULT_KEY or audiostore.TG_KEY.fullmatch(key)
+        """The key as stored: tg:0123 is tg:123 (one talkgroup, one key)."""
+        m = audiostore.TG_KEY.fullmatch(key) if isinstance(key, str) else None
+        if m:
+            return audiostore.tg_key(int(m.group(1)))
+        if not isinstance(key, str) or not (key == audiostore.DEFAULT_KEY
                                             or (audiostore.CHANNEL_KEY.fullmatch(key) and not key.startswith(("_", "tg:"))
                                                 and key == key.strip())):
             raise CadError("key: _default, a channel's name or tg:<talkgroup>")
@@ -2411,7 +2418,8 @@ class Editor:
                 raise CadError(f"overrides.{MAPD_SECTION}: {e}") from None
         for k, v in (ov.get(RET_SECTION) or {}).items():      # sizeup/audiostore.py (#414)
             try:
-                self._ret_key(k)
+                if self._ret_key(k) != k:
+                    raise CadError(f"{k}: write {self._ret_key(k)}")
                 self._ret_value(k, v)
             except CadError as e:
                 raise CadError(f"overrides.{RET_SECTION}: {e}") from None

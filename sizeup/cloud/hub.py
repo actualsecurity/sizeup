@@ -629,6 +629,13 @@ class HubApp(App):
         self.cad.audio_blobs = self.audio
         self.cad.audio_keep_days = cfg.audio_keep_hours / 24          # Settings > System > Audio retention (#414)
         self.cad.audio_event_days = cfg.audio_keep_event_days
+        if getattr(self, "attachments", None) is not None:
+            # the incident's copy: a clip whose bytes can't be read from the store now raises (tried again later),
+            # never taken for "no audio kept" (sizeup/attachments.py _copy_radio, #414)
+            self.attachments.audio = lambda tid: self.audio.get(tid, strict=True) if CLIP_ID.fullmatch(tid) else None
+        if store is not None and cfg.audio_keep_event_days == 0:
+            log("audio: [storage] audio_keep_event_days = 0 (forever): in S3 the bucket's lifecycle still deletes clips "
+                f"after {audiostore.HARD_MAX_DAYS} days (their incident attachments are kept a year)")
         self.cad.cloud = self.hub.cad_cloud
         self._chan_push = {"busy": False, "at": 0.0, "error": "", "again": False}
         for d in self.mdb.load(self.store):
@@ -1226,14 +1233,11 @@ class HubApp(App):
         fence = getattr(self, "fence", None)
         return fence is None or fence.ok()
 
-    def audio_keep(self) -> tuple[Callable[[str, int | None], float], float]:
-        """(keep_for(channel, talkgroup) -> seconds, the shortest of them): Settings > System > Audio retention (#414),
-        read now, over [storage] audio_keep_hours."""
+    def audio_keep(self):
+        """The retention per channel / talkgroup (sizeup/audiostore.py Retention): Settings > System > Audio retention
+        (#414), read now, over [storage] audio_keep_hours."""
         from sizeup import audiostore
-        ov = self.cad.settings.section(audiostore.RETENTION_SECTION)
-        default = self.cfg.audio_keep_hours / 24
-        return ((lambda ch, tg: audiostore.keep_days(ov, ch, tg, default) * 86400),
-                audiostore.shortest_days(ov, default) * 86400)
+        return audiostore.Retention(self.cad.settings.section(audiostore.RETENTION_SECTION), self.cfg.audio_keep_hours / 24)
 
     def _audio_retention(self, now: float, background: bool = False) -> int:
         """The audio retention (docs/cloud.md "Audio retention", #251, #46, #414): a clip goes once older than its
@@ -1249,11 +1253,11 @@ class HubApp(App):
         cfg = self.cfg
         quiet = self.offpeak(now)
         days = cfg.audio_keep_event_days
-        keep_for, shortest = self.audio_keep()
-        n = self.audio.prune_clips(now - shortest, kept=self.cad.comms.kept_for_events,
+        policy = self.audio_keep()
+        n = self.audio.prune_clips(now - policy.shortest_days() * 86400, kept=self.cad.comms.kept_for_events,
                                    kept_older_than=(now - days * 86400) if days else None, batch=cfg.audio_prune_batch,
                                    pause_s=0.05 if background else 0.0, max_rows=None if quiet else 10 * cfg.audio_prune_batch,
-                                   keep_for=keep_for, now=now)
+                                   policy=policy, now=now)
         over = getattr(self.audio, "over_cap", 0)
         if over and over != getattr(self, "_over_said", 0):
             self._over_said = over
@@ -1265,6 +1269,11 @@ class HubApp(App):
                 self.hub.log(f"audio: {freed} free page(s) of audio.sqlite handed back (incremental vacuum)")
             elif self.audio.compact():
                 self.hub.log("audio: audio.sqlite rewritten small once its audio was in the store (VACUUM, #414)")
+            if self.audio.store is not None and now - getattr(self, "_swept_at", 0.0) > 20 * 3600:
+                self._swept_at = now                  # once a night: objects no row names, a day old (#414)
+                gone = self.audio.sweep_orphans(pause_s=0.2, now=now)
+                if gone:
+                    self.hub.log(f"audio: {gone} object(s) in the store that no clip named, deleted")
         return n
 
     def _clip_channels(self, ids: list[str]) -> dict[str, tuple[str, int | None]]:
@@ -1291,14 +1300,19 @@ class HubApp(App):
         return out
 
     def _audio_uploader(self) -> None:
-        """#414: every AUDIO_UPLOAD_S, the clips the ingest couldn't store, then the rows from before (the migration,
-        newest first, a few a round in the day, more off-peak), into the store; once, the old clips' channels. Leader
-        only (AudioDb.may_write); nothing without a store."""
+        """#414: woken by every new clip (AudioDb.wake), else every AUDIO_UPLOAD_S: the rows still holding their bytes
+        into the store, newest first (the clips just in, then the rows from before: the migration), a few a round in
+        the day, more off-peak; once, the old clips' channels. Leader only (AudioDb.may_write); nothing without a
+        store. The ingest never waits for this: a page or a transmission is in audio.sqlite before any S3 call."""
         if self.audio.store is None:
             return
         named = False
         said = 0
-        while not self._stopping.wait(AUDIO_UPLOAD_S):
+        while not self._stopping.is_set():
+            self.audio.wake.wait(AUDIO_UPLOAD_S)
+            self.audio.wake.clear()
+            if self._stopping.is_set():
+                break
             try:
                 if not self._may_write_audio():
                     continue
@@ -1308,7 +1322,7 @@ class HubApp(App):
                     if n:
                         self.hub.log(f"audio: {n} older clip(s) given their channel (the retention per channel)")
                 rows = AUDIO_UPLOAD_ROWS[1] if self.offpeak(time.time()) else AUDIO_UPLOAD_ROWS[0]
-                moved = self.audio.upload_pending(limit=rows, pause_s=0.05)
+                moved = self.audio.upload_pending(limit=rows, pause_s=0.02)
                 if moved:
                     left = self.audio.pending()[0]
                     if not left or said == 0 or time.monotonic() - said > 600:

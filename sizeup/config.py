@@ -1309,8 +1309,11 @@ def load(path: str | Path) -> Config:
     except (TypeError, ValueError):
         raise ConfigError("storage: audio_keep_event_days a number, audio_prune_batch a whole number, "
                           "audio_offpeak two hours [start, end]") from None
-    if keep_event_days < 0 or not 1 <= prune_batch <= 10000 or len(offpeak) != 2 or not all(0 <= h <= 24 for h in offpeak):
-        raise ConfigError("storage: audio_keep_event_days >= 0 (0 = forever), audio_prune_batch 1..10000, "
+    # 400: the audio bucket's lifecycle hard max (sizeup/audiostore.py HARD_MAX_DAYS, #414); 0 = forever in audio.sqlite
+    # only (in S3 the lifecycle still ends it at 400 days: the hub says so at start)
+    if not 0 <= keep_event_days <= 400 or not 1 <= prune_batch <= 10000 or len(offpeak) != 2 \
+            or not all(0 <= h <= 24 for h in offpeak):
+        raise ConfigError("storage: audio_keep_event_days 0..400 (0 = forever), audio_prune_batch 1..10000, "
                           "audio_offpeak [start, end] hours 0..24")
     mdc = _take(data.get("mdc", {}), "mdc", {"aliases"})
     units = _take(data.get("units", {}), "units", {"departments", "apparatus_file", "callsigns"})
