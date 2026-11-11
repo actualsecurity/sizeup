@@ -396,44 +396,22 @@ def event_number(year: int, n: int) -> str:
     return f"{year % 100:02d}-{n:06d}"
 
 
-WRITES = ("INSERT", "UPDATE", "DELETE", "REPLACE")
-
-
-class Db(sqlite3.Connection):
-    """The store's connection. A write that fails is offered to `guard` (set by whoever hangs triggers on the tables,
-    the Radio page's change log: sizeup/cad/comms.py): guard(db, error) -> True when it found its own triggers at
-    fault and took them off; the same statement is then run once more. A side table must never cost a fire row."""
-    guard = None
-
-    def _guarded(self, run, sql, args):
-        try:
-            return run(sql, *args)
-        except sqlite3.Error as e:
-            g = self.guard
-            if g is None or not str(sql).lstrip().upper().startswith(WRITES) or not g(self, e):
-                raise
-            return run(sql, *args)
-
-    def execute(self, sql, *args):
-        return self._guarded(super().execute, sql, args)
-
-    def executemany(self, sql, *args):
-        return self._guarded(super().executemany, sql, args)
-
-
 class Store:
     def __init__(self, path: str | Path = ":memory:", clock=time.time, lists: Lists | None = None):
         self.path, self.clock = str(path), clock
         self.lists = lists or lists_mod.load()
         if self.path != ":memory:":
             Path(self.path).parent.mkdir(parents=True, exist_ok=True)
-        self.db = sqlite3.connect(self.path, check_same_thread=False, isolation_level=None, factory=Db)
+        self.db = sqlite3.connect(self.path, check_same_thread=False, isolation_level=None)
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA foreign_keys = ON")
         if self.path != ":memory:":
             self.db.execute("PRAGMA journal_mode = WAL")
         self.lock = threading.RLock()
         self.rev = 0          # bumped on every change: the page refetches nothing, it's pushed
+        # after a transaction is committed / rolled back (tx()); touch(id, system): a row of the radio log changed in
+        # the open transaction (the Radio page's change notes: set by Comms, sizeup/cad/comms.py)
+        self.after_commit = self.after_rollback = self.touch = None
         self.migrated: list[str] = []      # what a migration did, for the log
         self.on_assigned = None            # fn(incident id, [unit names]): units just put on it (assign); never raises here
         self.on_unassigned = None          # fn(incident id): a unit just taken off it (cleared, moved); never raises here
@@ -753,11 +731,22 @@ class Store:
                 return store.db
 
             def __exit__(self, et, e, tb):
+                done = False
                 try:
                     store.db.execute("ROLLBACK" if et else "COMMIT")
-                    if not et:
+                    done = not et
+                    if done:
                         store.rev += 1
                 finally:
+                    # What rides on a transaction without being part of it (the Radio page's change notes,
+                    # sizeup/cad/comms.py): told only once the write is committed, or that it was not. Best effort:
+                    # nothing it does or fails at reaches the caller, whose data is stored (or rolled back) by now.
+                    hook = store.after_commit if done else store.after_rollback
+                    try:
+                        if hook is not None:
+                            hook()
+                    except Exception:  # noqa: BLE001
+                        pass
                     store.lock.release()
                 return False
         return _Tx()
@@ -1292,6 +1281,8 @@ class Store:
         with self.tx() as db:
             self._event(db, iid, kind, text, operator, units=",".join(units),
                         places=json.dumps(list(places), separators=(",", ":")) if places else "")
+            if units and self.touch is not None:        # a note tagged with a unit is a row of the Radio page
+                self.touch("note-new", "")
 
     def has_dispatch(self, iid: int) -> bool:
         return self.one("SELECT 1 AS x FROM dispatches WHERE incident_id = ? LIMIT 1", (iid,)) is not None
