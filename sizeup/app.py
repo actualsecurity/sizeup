@@ -64,7 +64,7 @@ from sizeup import janitor, tz
 from sizeup.cad import Cad
 from sizeup.cad.alarms import STUCK_WITHIN_S
 from sizeup.cad.api import CadApi
-from sizeup.dispatch import parse
+from sizeup.dispatch import parse, split_joined
 from sizeup.incidents import IncidentStore, Traffic
 from sizeup.radio.fm import RATE, Channel, NfmReceiver, Segment, id_burst_frames, speech_seconds, voice_floor_db
 from sizeup.radio.am import AmReceiver
@@ -484,6 +484,7 @@ class App:
             # two streets typed, "N Main St / Westchester Ave" (#213): where they meet, in [geo] search_towns
             self.cad.cross_source = lambda: IntersectionSearch(self.gaz, towns=cfg.geo_search_towns, hq=cfg.geo_hq)
             self.cad.place_source = lambda: PlaceIndex(self.gaz, crossings=self.cad.crossings())
+            self.cad.street_source = self.gaz.streets_by_town     # a page's misheard street: the one it snaps to
             # a new call's location: its place's address, its block's cross streets, what is at a map click (#204)
             from sizeup.geo.pagegeo import location_detail, what_is_here
             self.cad.detail_source = lambda m: location_detail(self.gaz, m)
@@ -1764,8 +1765,10 @@ class App:
                 self.live.fm_open(label, since)
 
     def _dispatch(self, raw: str):
-        d = parse(raw) if raw else None
+        d = parse(raw, self.cfg.unit_departments) if raw else None
         if d is not None:  # units dispatched name their department ("Engine 61" -> Port Chester FD)
+            # "Engine 6158": Engine 61 and Engine 58 run together, split when the roster has both
+            d.units = split_joined(d.units, self.cfg.unit_departments)
             named = list(d.units)   # said with the word ("Engine 61"): these name a department
             for n in d.numbers:  # "174, 175, Ladder 1": engines read without the word, if the roster has them
                 u = f"Engine {n}"

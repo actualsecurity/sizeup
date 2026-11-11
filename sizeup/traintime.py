@@ -719,6 +719,7 @@ def _with(t: dict, r: dict, now: float, stations, gtfs_at: float | None = None) 
     gtfs_ts = (gtfs_at if gtfs_at is not None else (t.get("pos") or {}).get("ts") or 0) if t.get("pos") else 0
     if usable_position(r, now) and r["loc_at"] >= gtfs_ts:          # only a position at least as new as GTFS-realtime's
         t["pos"] = {"lat": r["lat"], "lon": r["lon"], "bearing": r["heading"], "ts": r["loc_at"], "src": "traintime",
+                    "loc": r["loc_src"],                          # GPS | SIGNAL: a SIGNAL location is a fixed point (#379)
                     "speed": r["speed_mph"] * 1609.344 / 3600 if r["speed_mph"] is not None else None}
     return t
 
