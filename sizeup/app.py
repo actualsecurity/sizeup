@@ -87,7 +87,7 @@ from sizeup.cad import tonelist
 from sizeup.radio.tones import ToneEvent, TonePlan, base_name
 from sizeup.talkers import talker_prompt
 from sizeup import channels
-from sizeup.stt import HIGH, LIVE, LOW, RERUN, SHED, URGENT, Transcriber, WhisperClient, radio_voice, wav_bytes
+from sizeup.stt import CONTEXT, HIGH, LIVE, LOW, RERUN, SHED, URGENT, Transcriber, WhisperClient, radio_voice, wav_bytes
 from sizeup.talkgroups import TalkgroupPrefs
 from sizeup import sourcekeys as sources, tiers
 from sizeup.tts import TtsService
@@ -460,6 +460,8 @@ class App:
                     sysd, trunk_recorder.make_system(sysd.name, sysd.label, cfg.p25_recorder, sysd.dir, log), self.tg,
                     self._call_system, log, self.clips_dir.parent if self.clips_dir else None,
                     on_activity=self._p25_activity)
+        for why in cfg.p25_system_problems:       # a system directory that can't be used: said, the rest runs
+            log(f"p25 systems: left out: {why}")
         self._sys_jobs: dict[str, tuple[p25_systems.Runtime, int]] = {
             x.job: (rt, x.index) for rt in self.systems.values() for x in rt.system.sources}
         self._booting = False                 # start(): each system's dongles are handed over together
@@ -841,6 +843,13 @@ class App:
         audio_s, history_s = self.cfg.audio_keep_hours * 3600, self.keep_s
         self.storage = janitor.clean(self.clips_dir.parent, self.clips_dir,
                                      Path(self.cfg.p25_dir) if self.cfg.p25_dir else None, audio_s, history_s)
+        # (#409) each other system's own capture and temp directories (never on the hub: it has no recorder)
+        for sysd in (self.cfg.p25_systems if self.cfg.p25_recorder and self.cfg.p25_dir else ()):
+            got = janitor.clean_system(Path(sysd.capture_dir), audio_s)
+            self.storage["deleted"] = self.storage.get("deleted", 0) + got["deleted"]
+            if got["over"]:
+                log(f"storage: {sysd.label}'s captures were over {janitor.SYSTEM_MAX_BYTES / 1e6:.0f} MB: "
+                    f"{got['over']} oldest call(s) removed")
         now = time.time()
         with self._lock:
             for cid in [c for c, (_, t) in self.clips.items() if now - t > audio_s]:
@@ -1400,6 +1409,10 @@ class App:
         never looked up in our registry (no rig) nor learned into it; its emergency flags raise none of our alarms."""
         name, tg = rt.system.name, call.talkgroup
         tier = self.tg.tier(tg, name)
+        if call.encrypted and tier in tiers.RECORDED:
+            # the call says it was encrypted, whatever the file says of its talkgroup: nothing of it is kept
+            log(f"p25 {name}: {call.label} {call.id}: encrypted call on a talkgroup listed as clear: not kept")
+            tier = tiers.ACTIVITY
         if tier not in tiers.RECORDED:               # off, or encrypted (never recorded: nothing to keep)
             self.tg.seen(tg, dropped=True, system=name)
             self._drop_recorder_files(call, False)
@@ -1483,8 +1496,9 @@ class App:
 
     def _alarm(self, t: Traffic, text: str | None = None) -> None:
         """A transmission (new, or new text) to the alarms: the CAD of record raises them. A station forwarding
-        to a hub doesn't (the hub does, from the same transmission)."""
-        if self.forwarding():
+        to a hub doesn't (the hub does, from the same transmission). Another P25 system's (#409) raises none,
+        whichever way it comes (new, a re-run's text, the hub's copy)."""
+        if self.forwarding() or getattr(t, "system", ""):
             return
         d = {"id": t.id, "start": t.start, "end": t.end, "source": t.source, "talkgroup": t.talkgroup, "unit": t.unit,
              "rig": t.rig, "radio_id": t.radio_id, "text": t.text if text is None else text,
@@ -1829,6 +1843,12 @@ class App:
     def _backfill(self) -> None:
         """Traffic saved before radio IDs were tied to rigs: the rig from its talker text, and every
         transmission still in the history into the communications log (ones already there are left)."""
+        try:        # airband rows from before a row said so (#409's source columns): never analog, never "ours"
+            fixed = self.cad.comms.fix_air([c.label for c in self.cfg.channels if c.kind == "airband"])
+            if fixed:
+                log(f"CAD: {fixed} earlier airband transmission(s) given their source")
+        except Exception as e:  # noqa: BLE001 - the CAD must never stop the monitor
+            log(f"CAD: airband sources not fixed: {type(e).__name__}: {e}")
         rows = list(self.store.loose) + [t for i in self.store.incidents for t in i.traffic]
         n = 0
         for t in rows:
@@ -2191,8 +2211,9 @@ class App:
         if key in AIRBAND_FIRST:
             return HIGH
         if channels.is_tg(key) and (tier := self.tg.tier(*channels.tg_of(key)[::-1])) is not None:
-            # another system's talkgroup (#409): by its tier, never ahead of our own traffic
-            return LIVE if tier == tiers.ALERT else LOW
+            # another system's talkgroup (#409): by its tier, in classes under every one of ours and shed when
+            # they wait (sizeup/stt.py CONTEXT): fire traffic never queues behind police
+            return CONTEXT if tier == tiers.ALERT else LOW
         if channels.is_tg(key) and not self.tg.main(*channels.tg_of(key)[::-1]):
             return LOW
         return LIVE

@@ -45,6 +45,14 @@ ACTIVITY_SHOWN = 50
 JOB = re.compile(r"[A-Za-z0-9][A-Za-z0-9 ./_-]{0,39}")
 
 
+LONG_NUMBER = re.compile(r"(?<![\d.])\d{5,}(?![\d.]|\s*(?:MHz|Hz|/sec))")
+
+
+def no_ids(detail) -> str:
+    """trunk-recorder's own output line can name a radio (its ID): never in a status row (frequencies and rates stay)."""
+    return LONG_NUMBER.sub("#", str(detail or ""))[:200]
+
+
 class SystemError_(ValueError):
     """A system's directory can't be used (the reason; sizeup/config.py turns it into a ConfigError)."""
 
@@ -84,7 +92,11 @@ class P25System:
 
 def read_talkgroups(path: Path, system: str) -> dict[int, dict]:
     out: dict[int, dict] = {}
-    for r in csv.DictReader(path.read_text().splitlines()):
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as e:
+        raise SystemError_(f"{path}: {type(e).__name__}: {e}") from None
+    for r in csv.DictReader(text.splitlines()):
         try:
             tg = int(r["Decimal"])
         except (KeyError, TypeError, ValueError):
@@ -106,10 +118,12 @@ def load(directory: Path) -> P25System:
         conf = json.loads((directory / "config.json").read_text())
     except (OSError, ValueError) as e:
         raise SystemError_(f"{directory / 'config.json'}: {type(e).__name__}: {e}") from None
+    if not isinstance(conf, dict):
+        raise SystemError_(f"{directory / 'config.json'}: an object")
     mine = conf.get("sizeup") if isinstance(conf.get("sizeup"), dict) else {}
     srcs = conf.get("sources") if isinstance(conf.get("sources"), list) else []
     systems = conf.get("systems") if isinstance(conf.get("systems"), list) else []
-    if len(systems) != 1 or systems[0].get("shortName") != name:
+    if len(systems) != 1 or not isinstance(systems[0], dict) or systems[0].get("shortName") != name:
         raise SystemError_(f"{directory}: config.json has one system, with \"shortName\": \"{name}\" (the directory's name)")
     jobs = mine.get("jobs") if isinstance(mine.get("jobs"), list) else []
     label = str(mine.get("label") or name)
@@ -134,22 +148,43 @@ def load(directory: Path) -> P25System:
                      sources, freqs, read_talkgroups(tgf, name), dict(mine.get("site") or {}))
 
 
-def discover(base: str | Path | None, taken_tgs=(), taken_jobs=()) -> tuple[P25System, ...]:
-    """Every system under <base>/systems. A talkgroup ID or a job name already used (the county's talkgroups, the
-    channel labels, an earlier system's) is refused: SystemError_."""
+def discover(base: str | Path | None, taken_tgs=(), taken_jobs=(), problems: list[str] | None = None,
+             county_capture: str = "") -> tuple[P25System, ...]:
+    """Every system under <base>/systems that can be used. One that can't is left out, alone: a file that doesn't
+    read, a talkgroup ID or a name already used (the county's talkgroups and the lists that name them, the channel
+    labels, an earlier system's), a talkgroup named like a channel of ours, a capture directory that is the
+    county's or inside it. Why goes to `problems`; with no list given it is raised (SystemError_)."""
     if not base:
         return ()
     out = []
     tgs, jobs = set(taken_tgs), {str(j).lower() for j in taken_jobs}
     for name, d in system_dirs(base).items():
-        s = load(d)
-        both = sorted(set(s.talkgroups) & tgs)
-        if both:
-            raise SystemError_(f"{d}: talkgroup {both[0]} is already another system's (IDs are unique across the "
-                               f"systems here: {SYSTEMS}/<name>/talkgroups.csv)")
-        dup = [j for j in s.jobs if j.lower() in jobs]
-        if dup:
-            raise SystemError_(f"{d}: the job name {dup[0]!r} is already a channel's or another system's")
+        try:
+            s = load(d)
+            both = sorted(set(s.talkgroups) & tgs)
+            if both:
+                raise SystemError_(f"{d}: talkgroup {both[0]} is already another system's (IDs are unique across the "
+                                   f"systems here: {SYSTEMS}/<name>/talkgroups.csv)")
+            dup = [j for j in s.jobs if j.lower() in jobs]
+            if dup:
+                raise SystemError_(f"{d}: the job name {dup[0]!r} is already a channel's or another system's")
+            same = [i["name"] for i in s.talkgroups.values() if str(i["name"]).lower() in jobs]
+            if same:
+                raise SystemError_(f"{d}: the talkgroup name {same[0]!r} is a channel's or a job's here")
+            if county_capture:
+                mine, theirs = Path(s.capture_dir).resolve(), Path(county_capture).resolve()
+                if mine == theirs or theirs in mine.parents or mine in theirs.parents:
+                    raise SystemError_(f"{d}: captureDir {s.capture_dir} is the county's capture directory or inside it")
+        except SystemError_ as e:
+            if problems is None:
+                raise
+            problems.append(str(e))
+            continue
+        except Exception as e:  # noqa: BLE001 - whatever is wrong with its files: that system only
+            if problems is None:
+                raise SystemError_(f"{d}: {type(e).__name__}: {e}") from None
+            problems.append(f"{d}: {type(e).__name__}: {e}")
+            continue
         tgs |= set(s.talkgroups)
         jobs |= {j.lower() for j in s.jobs}
         out.append(s)
@@ -233,6 +268,7 @@ class Activity:
         with self._lock:
             enc = [dict(e) for e in list(self.encrypted)[-ACTIVITY_SHOWN:][::-1]]
         for e in enc:
+            e.pop("radio_id", None)               # which radios keyed stays in the log's activity table, not the state
             e["name"] = self.prefs.name(e["tg"], self.system.name)
             e["source"] = sources.p25(self.system.name, e["tg"])
         return {"unknown": self.prefs.unknown(self.system.name), "encrypted": enc}
@@ -279,11 +315,11 @@ class Runtime:
         if not on:
             st.update(state="off", detail="no dongle (Settings > Radios)")
         elif rs["state"] != "ok":
-            st.update(state=rs["state"], detail=rs["detail"])
+            st.update(state=rs["state"], detail=no_ids(rs["detail"]))
         else:
             part = "" if len(on) == len(self.system.sources) else f"{len(on)} of {len(self.system.sources)} dongles · "
             st["state"] = "ok"
-            st["detail"] = part + rs["detail"] + (" · " + st["detail"] if st.get("detail") else "")
+            st["detail"] = part + no_ids(rs["detail"]) + (" · " + st["detail"] if st.get("detail") else "")
         return dict(st, system=self.system.name, restarts=rs.get("restarts", 0))
 
     def state(self, assign: dict) -> dict:

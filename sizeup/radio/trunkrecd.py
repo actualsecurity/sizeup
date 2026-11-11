@@ -311,10 +311,11 @@ def claim(serial: str, me: int, handed: int | None = None, d: Path | None = None
     return None
 
 
-def release(serial: str, me: int, d: Path | None = None) -> None:
-    """Remove our own claim (never anyone else's)."""
+def release(serial: str, me: int, d: Path | None = None, mode: str | None = None) -> None:
+    """Remove our own claim (never anyone else's; mode: only one written for that job, #409: the county's
+    supervisor and another system's share this process and its pid)."""
     c = holder(serial, d)
-    if c is not None and c.get("app") == APP and _pid(c) == me:
+    if c is not None and c.get("app") == APP and _pid(c) == me and (mode is None or c.get("mode") == mode):
         try:
             ((d or claims_dir()) / f"{serial}.json").unlink()
         except OSError:
@@ -687,15 +688,32 @@ def wanted_system(path: str) -> dict:
             "label": str(w.get("label") or "")[:60], "pid": pid, "seq": seq, "problem": problem}
 
 
+_SIGS: dict[str, tuple] = {}      # path -> ((mtime, size), its content's digest)
+
+
 def _file_sig(*paths: Path) -> tuple:
+    """What these files hold (a digest, read again only when a file's time or size changed): an update that writes
+    the same config.json again restarts nothing."""
+    import hashlib
     out = []
     for p in paths:
         try:
             st = p.stat()
-            out.append((p.name, st.st_mtime_ns, st.st_size))
+            seen = _SIGS.get(str(p))
+            if seen is None or seen[0] != (st.st_mtime_ns, st.st_size):
+                seen = _SIGS[str(p)] = ((st.st_mtime_ns, st.st_size), hashlib.sha1(p.read_bytes()).hexdigest())
+            out.append((p.name, seen[1]))
         except OSError:
-            out.append((p.name, 0, 0))
+            out.append((p.name, ""))
     return tuple(out)
+
+
+def _lower_priority() -> None:
+    """A context system's trunk-recorder (#409) runs under the county's (the service is Nice=-5: this one 5)."""
+    try:
+        os.nice(10)
+    except OSError:
+        pass
 
 
 class SystemSupervisor(Supervisor):
@@ -706,6 +724,7 @@ class SystemSupervisor(Supervisor):
 
     def __init__(self, name: str, config: str = CONFIG, state: str = STATE, status_path: str = STATUS, **kw):
         super().__init__(config, system_state_path(name, state), system_status_path(name, status_path), **kw)
+        self.county_state = state                    # the county's own wish: its dongle is never this system's
         self.name = name
         self.tag = f"p25 {name}"
         self.claims_held: dict[str, str] = {}        # serial -> the mode it is claimed under
@@ -720,8 +739,21 @@ class SystemSupervisor(Supervisor):
 
     def _let_go(self, keep: set[str] = frozenset()) -> None:
         for sd in [s for s in self.claims_held if s not in keep]:
-            release(sd, self.pid, self.claims)
+            release(sd, self.pid, self.claims, self.claims_held[sd])     # only the claim written for that job
             del self.claims_held[sd]
+
+    def _taken(self, s: dict, handed: int | None) -> dict | None:
+        """Why this dongle can't be this system's now, as a claim ({app, mode}); None: free (or already ours for
+        this job). The county's trunk-recorder runs under this same process: a dongle its state names, or one
+        claimed under another job (by this pid or by sizeup-station), is someone else's, never taken over."""
+        county = wanted(self.county_state)
+        if county["on"] and county["sdr"] == s["sdr"]:
+            return {"app": APP, "mode": MODE}
+        c = holder(s["sdr"], self.claims)
+        if c is None:
+            return None
+        ours = c.get("app") == APP and _pid(c) in (self.pid, handed)
+        return None if ours and c.get("mode") == s["mode"] else c
 
     def step(self, now: float | None = None) -> dict:
         now = time.time() if now is None else now
@@ -753,16 +785,26 @@ class SystemSupervisor(Supervisor):
         return self.status
 
     def _start_system(self, now: float, w: dict, r: dict, key: tuple, base: dict) -> None:
+        # All or nothing, looked at before anything is written (no claim file made and removed every step while one
+        # dongle is held): every dongle free, then each claimed under its own job.
+        for i in sorted(w["sources"]):
+            s = w["sources"][i]
+            c = self._taken(s, w["pid"])
+            if c is not None:
+                self._let_go()
+                self._set(now, "held", f"{c.get('app', 'another app')} holds {s['name']}"
+                                       + (f" ({c.get('mode')})" if c.get("mode") else "")
+                                       + ": not started (switch it Off there to hand it over)",
+                          held_by={"app": c.get("app"), "mode": c.get("mode")}, **base)
+                return
         for i in sorted(w["sources"]):
             s = w["sources"][i]
             if self.claims_held.get(s["sdr"]) == s["mode"]:
                 continue
             c = claim(s["sdr"], self.pid, w["pid"], self.claims, s["mode"])
-            if c is not None:
-                self._let_go()                       # all or nothing: the others stay free meanwhile
-                self._set(now, "held", f"{c.get('app', 'another app')} holds {s['name']}"
-                                       + (f" ({c.get('mode')})" if c.get("mode") else "")
-                                       + ": not started (switch it Off there to hand it over)",
+            if c is not None:                        # taken between the look and the claim
+                self._let_go()
+                self._set(now, "held", f"{c.get('app', 'another app')} holds {s['name']}: not started",
                           held_by={"app": c.get("app"), "mode": c.get("mode")}, **base)
                 return
             self.claims_held[s["sdr"]] = s["mode"]
@@ -798,7 +840,8 @@ class SystemSupervisor(Supervisor):
         env["PATH"] = ":".join(["/opt/homebrew/bin", "/usr/local/bin", env.get("PATH", "") or "/usr/bin:/bin"])
         try:
             self.proc = self.popen(argv, cwd=r["workdir"], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                   stderr=subprocess.STDOUT, start_new_session=True, env=env)
+                                   stderr=subprocess.STDOUT, start_new_session=True, env=env,
+                                   preexec_fn=_lower_priority)
         except OSError as e:
             self.restarts += 1
             self.backoff = min(self.backoff * 2, BACKOFF_S[1])
@@ -889,22 +932,30 @@ def main(argv: list[str]) -> int:
     signal.signal(signal.SIGINT, bye)
     s.log(f"p25: trunk-recorder service up; it runs what sizeup-station asks in {STATE}")
     more: dict[str, SystemSupervisor] = {}          # the other systems (#409), as their directories are there
+
+    def others() -> None:
+        """In a thread of their own: stopping one of their trunk-recorders (up to STOP_S) never holds up the county's."""
+        while not stopping:
+            try:
+                step_systems(more, recorder()["workdir"], s.log)
+            except Exception as e:  # noqa: BLE001 - another system never stops the county's
+                s.log(f"p25 systems: {type(e).__name__}: {e}")
+            time.sleep(STEP_S)
+    side = threading.Thread(target=others, name="p25-systems", daemon=True)
+    side.start()
     try:
         while not stopping:
             try:
                 s.step()
             except Exception as e:  # noqa: BLE001 - supervision must never die
                 s.log(f"p25: {type(e).__name__}: {e}")
-            try:
-                step_systems(more, s.status.get("workdir") or recorder()["workdir"], s.log)
-            except Exception as e:  # noqa: BLE001 - another system never stops the county's
-                s.log(f"p25 systems: {type(e).__name__}: {e}")
             for _ in range(int(STEP_S * 10)):
                 if stopping:
                     break
                 time.sleep(0.1)
     finally:
-        for x in more.values():
+        side.join(timeout=STOP_S + 2)
+        for x in list(more.values()):
             try:
                 x.shutdown()
             except Exception:  # noqa: BLE001
