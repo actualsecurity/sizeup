@@ -84,7 +84,9 @@ sizeup/sources/runner.py (they come here as "source_event" / "source_health" thr
     logs       our incident ids and the source's label only: never the feed's ids, types, locations or an exception's text
     departments a feed's department entries (department_units(): {code: department}, Settings' "department_units"
                over the data file's; #370) are a whole department paged, never a unit: never a unit in common here,
-               never dispatched (automode.py), the incident's "Full department" label (sizeup/cad/scope.py)
+               never dispatched (automode.py), the incident's "Full department" label (sizeup/cad/scope.py). A
+               department's placeholder (cad_lists.json unit_placeholders) is never a unit in common either
+               (is_placeholder: the one test, drop_departments)
     measure    each report's first-seen time; per incident and source the earliest, and the lead over paging
     trigger    paging tones, a radio pre-alert, the phone ring: poke() tells the adapters to poll now
     alert      an airport alert level 2 / 3 declared on the fire radio makes a queued Airport incident (#369,
@@ -246,9 +248,23 @@ def set_department_codes(codes) -> None:
     DEPARTMENT_CODES = {dept_code(k) for k in codes or () if isinstance(k, str) and dept_code(k)}
 
 
+PLACEHOLDER: Callable[[str], bool] = lambda code: False   # the lists' placeholder() (set_placeholders)
+
+
+def set_placeholders(test) -> None:
+    global PLACEHOLDER
+    PLACEHOLDER = test or (lambda code: False)
+
+
+def is_placeholder(u) -> bool:
+    """A department, not a unit: a feed's department entry (department_units) or a department's placeholder code
+    (cad_lists.json unit_placeholders, Lists.placeholder). Never apparatus in common, nor "Specific units" (scope.py)."""
+    return dept_code(u) in DEPARTMENT_CODES or PLACEHOLDER(str(u or ""))
+
+
 def drop_departments(units) -> list[str]:
-    """A unit list without its department entries (#370)."""
-    return [u for u in units or () if dept_code(u) not in DEPARTMENT_CODES]
+    """A unit list without its department entries and placeholders (#370, is_placeholder)."""
+    return [u for u in units or () if not is_placeholder(u)]
 
 
 def _unit(x: str) -> str:
@@ -746,6 +762,7 @@ class Sources:
                 self.log(f"incident sources: street list: {type(e).__name__}")
         set_unit_aliases(self.feed_unit_aliases())
         set_department_codes(self.department_units())
+        set_placeholders(getattr(L, "placeholder", None))
 
     def _data_file(self, name: str, values=str) -> dict:
         """A {str: values} map from the data file, read again whenever the file changes."""

@@ -842,6 +842,13 @@
     "limit": 6,
     "phrases": ["Port Chester", "Rye Brook", "PC dispatch", "Port Chester dispatch", "PCFD", "headquarters"]
   },
+  "_unit_placeholders": [
+    "unit_placeholders: the codes (a regular expression) that are a department's placeholder on the county's",
+    "list, not a unit: 'department dispatched, no unit yet'. Assigned first; back in quarters once a unit of its",
+    "department (units.<code>.department; none: PCFD) signs on or responds on that call. Never located, routed,",
+    "followed, nor counted as apparatus in matching or Full department / Specific units."
+  ],
+  "unit_placeholders": "DPT[0-9]+",
   "_geo": [
     "Location suggestions: towns in this order first (then anything else); a town typed in the box wins.",
     "geo_town_aliases: words in the box (or a gazetteer municipality) -> the town."
