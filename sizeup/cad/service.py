@@ -213,6 +213,7 @@ class Cad:
         self.hints = StatusHints(self.store, lambda: self.lists, channels=s.tactical,
                                  talkgroups=tuple(dict.fromkeys((*s.incident_talkgroups, *s.airport_talkgroups))), log=log)
         self.comms.on_text = self._on_text
+        self.comms.fix = self.hints.decorate             # the Radio rows: misheard status words put back, heard on hover
         # Incident sources, ranked (#297, sizeup/cad/sources.py): external CAD feeds first, the paging decoder the backup;
         # which may make an incident, whose fields win, the possible-incoming notices. The app starts its ticker.
         self.sources = Sources(self, clock=clock, log=log)
@@ -588,7 +589,7 @@ class Cad:
                                 clears=self.clears(now), params=self.eta, display=self.map_display, lists=self.lists)
         if self.routes is not None:
             try:
-                out.update(self.routes.for_map(out["markers"], now))     # routes, trails (#360)
+                out.update(self.routes.for_map(out["markers"], now, incs))     # routes, trails (#360)
             except Exception as e:  # noqa: BLE001 - routing's trouble never breaks the console
                 self.log(f"CAD: routes: {type(e).__name__}: {e}")
         return out
@@ -1813,9 +1814,9 @@ class Cad:
         return self.store.update_incident(old["id"], fill, log=False)
 
     def _page_scope(self, iid: int, inc, note: bool = True) -> tuple[str, bool]:
-        """Full department or specific units, as the page says it (#370; a feed's stands): (the feed's own label when
-        it says otherwise ("units"), else ""; whether the page's reading is new there). note: that disagreement is a
-        timeline line of its own."""
+        """Full department or specific units, as the page says it (#370: the page's stands over a feed's): (the
+        feed's label when it says otherwise ("units"), else ""; whether the page's reading is new there). note: that
+        disagreement is a timeline line of its own."""
         try:
             return self.scope.on_page(iid, inc, note=note)
         except Exception as e:  # noqa: BLE001 - the page stands whatever this does
@@ -1835,9 +1836,10 @@ class Cad:
         depts = list(dict.fromkeys([*(getattr(inc, "tone_departments", None) or []), *(getattr(inc, "departments", None) or [])]))
         feed, _ = self._page_scope(iid, inc, note=False)
         texts = [x[:2000] for x in lines]
-        said = scope_mod.page_line(depts, list(inc.units or []), getattr(inc, "tone_departments", ()), inc.incident_type, feed)
-        if said:                                       # once: deduped on its text below
-            texts.append(said)
+        base = self.scope.line(iid) or scope_mod.page_line(depts, scope_mod.latest_units(inc),
+                                                           getattr(inc, "tone_departments", ()), inc.incident_type)
+        if base and not any(x == base or x.startswith(base + " · feed: ") for x in have):   # once per reading
+            texts.append(base + (f" · feed: {feed}" if feed else ""))   # (feed: "" when that disagreement is said)
         new = [x for x in dict.fromkeys(texts) if x not in have]
         if new:
             with self.store.tx() as db:

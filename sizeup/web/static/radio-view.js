@@ -219,7 +219,7 @@ window.RadioView = (() => {
     if (t.talkgroup !== null && t.talkgroup !== undefined) meta.querySelector(".chip.src").title = `TG ${t.talkgroup}`;
     return li;
   }
-  const rowSig = (t) => JSON.stringify([t.text, t.atc_text, t.atc_weak, t.atc_snaps, t.status, t.model, t.alt_text, t.alt_model, t.rig, t.has_audio,
+  const rowSig = (t) => JSON.stringify([t.text, t.fixed_text, t.atc_text, t.atc_weak, t.atc_snaps, t.status, t.model, t.alt_text, t.alt_model, t.rig, t.has_audio,
                                        (t.events || []).map((e) => [e.id, e.why]), t.rerun_at, talkSig(t.rig), cad.txRev,
                                        emSig(t), window.atcSig ? atcSig(t) : ""]);
   const fillRow = (li, t) => {

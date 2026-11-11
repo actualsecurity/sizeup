@@ -134,6 +134,7 @@ class Comms:
         self.rev = 0            # bumped on every new or changed transmission (the /comms page polls it)
         # The airband rows' ATC talker (sizeup/atc_talkers.py AtcTalkers.decorate, #252): set by the CAD; rows in place
         self.atc = None
+        self.fix = None                 # rows -> rows: the status hints' decorate (sizeup/cad/statushints.py)
         self.names_ours = None  # text -> [our unit codes] (the feed's matcher, #115): a page not ours naming them
         self.on_text = None     # traffic id -> None: a transcript arrived or changed (status suggestions, #37)
         self._revs: dict = {}   # name -> (rev, value): what _per_rev made
@@ -487,6 +488,8 @@ class Comms:
         with_alarms(self.store, shown)
         if self.atc is not None:
             self.atc(shown)
+        if self.fix is not None:
+            self.fix(shown)
         return out
 
     def events_of(self, tids: list[str]) -> dict[str, list[dict]]:
@@ -636,6 +639,8 @@ class Comms:
             with_alarms(self.store, rows)
             if self.atc is not None:
                 self.atc(rows)
+            if self.fix is not None:
+                self.fix(rows)                  # status words put back after our callsigns (statusrepair.py)
 
     def _per_rev(self, name: str, make):
         """make() once per rev (a new or changed transmission): every filter of the Radio view asks for these (#284)."""

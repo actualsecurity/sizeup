@@ -32,7 +32,11 @@ A train record (what we read; anything else is ignored, a record missing a requi
   consist {fleet, actual_len, sched_len, occupancy, cars [{number, type, loading (EMPTY | MANY_SEATS |
            FEW_SEATS | SRO | NO_DATA), passengers, locomotive, revenue}]}
   status {otp (seconds; negative = late), held, canceled}
-  alerts [{header, status, status_level, branches, railroad, is_planned}]            on some trains
+  alerts [{header, text, status, status_level, branches, railroad, is_planned}]      on some trains; header and text
+        can be HTML ("<p>The <strong>4:38pm train from ...</strong> is ...</p>"): read as plain text (alert_text), never
+        shown as HTML. No trip id or stop: an alert that names a train ("the 4:38pm train from X to Y", "Train 1234")
+        is matched to a train by its number, or a stop's scheduled time and name (named_trains, about_train); the rest
+        are the line's.
 
 Which trains: Metro-North's New Haven Line (branch_id NH) and any other train inside the map's area (a New Canaan
 or Danbury train on the main line). Matched to a GTFS-realtime train by train number and run date.
@@ -56,6 +60,8 @@ import math
 import re
 import threading
 import time
+from functools import lru_cache
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Callable
 from urllib.error import HTTPError, URLError
@@ -162,14 +168,358 @@ def _car(c) -> dict | None:
             "revenue": c.get("revenue") is not False}
 
 
+# ---- alerts: the MTA's HTML as plain text, the train an alert names, a one-line brief ----------------------------
+
+ALERT_RAW_MAX = 8000            # an alert's header / text read this far (the HTML), before it is made plain text
+PARA = " \u00b7 "               # between an alert's paragraphs
+_BLOCK = {"p", "div", "br", "li", "ul", "ol", "tr", "table", "h1", "h2", "h3", "h4", "h5", "h6", "blockquote", "hr", "section"}
+_SKIP = {"script", "style", "head", "title", "template", "noscript", "iframe", "object", "svg", "math", "select", "textarea"}
+
+
+class _Plain(HTMLParser):
+    """HTML -> its text nodes: tags, attributes and comments dropped, entities decoded, script / style bodies skipped,
+    a block element (p, br, li...) starts a new paragraph."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.paras: list[list[str]] = [[]]
+        self.skip = 0
+
+    def handle_starttag(self, tag, attrs):
+        if tag in _SKIP:
+            self.skip += 1
+        elif tag in _BLOCK:
+            self.paras.append([])
+
+    def handle_startendtag(self, tag, attrs):
+        if tag in _BLOCK:
+            self.paras.append([])
+
+    def handle_endtag(self, tag):
+        if tag in _SKIP:
+            self.skip = max(0, self.skip - 1)
+        elif tag in _BLOCK:
+            self.paras.append([])
+
+    def handle_data(self, data):
+        if not self.skip:
+            self.paras[-1].append(data)
+
+
+def alert_text(v, n: int = 600) -> str:
+    """An alert's header or text (HTML, or plain) -> plain text: no tags, entities decoded (&amp; &nbsp; &#8211;),
+    whitespace collapsed, paragraphs joined by " · "; at most n characters ("…" when cut)."""
+    if not isinstance(v, str) or not v.strip():
+        return ""
+    p = _Plain()
+    try:
+        p.feed(v[:ALERT_RAW_MAX])
+        p.close()
+    except Exception:  # noqa: BLE001 - HTMLParser is lenient; anything it can't read is dropped, never shown raw
+        return ""
+    out = PARA.join(t for t in (" ".join("".join(x).split()) for x in p.paras) if t)
+    out = "".join(c for c in out if c.isprintable())
+    return out if len(out) <= n else out[:n - 1].rstrip() + "\u2026"
+
+
+_AMPM = r"(\d{1,2})(?::(\d\d))?\s*([ap])\.?\s*m\b\.?"
+# "the 4:38pm train from X to Y" (one train: "trains" names none); a train after "behind", "following"... is a
+# reference point, not the train the sentence is about
+_TIME_TRAIN = re.compile(_AMPM + r"\s+(?:[A-Za-z]+\s+){0,2}?train\b(?!s)(?=(.{0,160}))", re.I)
+_REFERENCE = re.compile(r"\b(?:behind|following|after|ahead of|before|than|connecting (?:to|with)|connection (?:to|with))\s+(?:the\s+)?$", re.I)
+# a station's name ends at a verb ("is", "will", "may", "to operate"...); "to" + a verb is no destination
+_TO_VERB = r"(?:be|operate|depart|arrive|run|make|stop|skip|leave|terminate|originate|resume|continue|wait|board)\b"
+_VERB = (r"(?:is|are|has|have|was|were|will|would|shall|may|might|can|could|should|must|expect\w*|anticipat\w+|due|"
+         r"that|which|who|operating|operates|departing|arriving|scheduled|running|runs|now|and|but|or|with|at|in|on|by|"
+         r"because|to\s+" + _TO_VERB + r")")
+_FROM_TO = re.compile(r"^\s*(?:from|out of|departing|leaving)\s+(.+?)(?:\s+(?:to|for|bound for)\s+(?!" + _TO_VERB + r")(.+?))?"
+                      r"(?=\s+" + _VERB + r"\b|\s*[.,;:()\u00b7]|$)", re.I)
+_TO_ONLY = re.compile(r"^\s*(?:to|for|bound for)\s+(?!" + _TO_VERB + r")(.+?)(?=\s+(?:from\b|" + _VERB + r"\b)|\s*[.,;:()\u00b7]|$)", re.I)
+# "Train 1234", "train #1234", "train no. 1234": Metro-North's numbers are 1 to 4 digits. One that could be a year
+# (1900-2099) only with "#" / "no.", or followed by what a train does ("Train 2024 is cancelled") and not after a month
+# or "in" / "since" ("no train 2026 service", "the train 2026 schedule": none)
+_TRAIN_NUM = re.compile(r"\btrain\s+(#\s*|no\.\s*|number\s+)?(\d{3,4})\b(?![-–:/]|\s*(?:min|minutes|am|pm|a\.m|p\.m))", re.I)
+_SENT = re.compile(r"(?<![ap]\.m\.)(?<!\bSt\.)(?<!\bno\.)(?<=[.!?;])\s+(?=[A-Z0-9\"'(])", re.I)
+_TRAIN_DOES = re.compile(r"\s+(?:is|has|was|will|from|to|departing|operating|due|scheduled|running|departs|arrives|"
+                         r"originating|terminating)\b", re.I)
+_YEAR_BEFORE = re.compile(r"(?:\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?|\b(?:in|since|of|year|"
+                          r"fiscal|until|through|no)|\d{1,2},?)\s+train\s+$", re.I)
+SEE = "see alert"
+
+
+@lru_cache(maxsize=1024)
+def sentences(text: str) -> tuple[str, ...]:
+    """An alert's plain text in sentences (its paragraphs split at . ! ? ;), each one fact or so."""
+    out = []
+    for p in (text or "").split(PARA):
+        out += [s.strip() for s in _SENT.split(p) if s.strip()]
+    return tuple(out)
+
+
+@lru_cache(maxsize=1024)
+def named_trains(text: str) -> tuple[dict, ...]:
+    """The trains an alert's plain text names, each with its sentence (s): {s, num} ("Train 1234") and
+    {s, hm "16:38", from, to} ("the 4:38pm train from New Haven-State St to Grand Central"; from / to "" when not
+    said). Read only (cached)."""
+    out = []
+    for i, s in enumerate(sentences(text)):
+        for m in _TRAIN_NUM.finditer(s):
+            if 1900 <= int(m.group(2)) <= 2099 and not (m.group(1) or "").strip() and \
+                    (not _TRAIN_DOES.match(s, m.end()) or _YEAR_BEFORE.search(s[:m.start(2)])):
+                continue
+            out.append({"s": i, "at": m.start(), "num": m.group(2)})
+        for m in _TIME_TRAIN.finditer(s):
+            h, mi, ap = int(m.group(1)), int(m.group(2) or 0), m.group(3).lower()
+            if not (1 <= h <= 12 and 0 <= mi <= 59) or _REFERENCE.search(s[:m.start()]):
+                continue
+            h = h % 12 + (12 if ap == "p" else 0)
+            frm = to = ""
+            ft = _FROM_TO.match(m.group(4))
+            if ft:
+                frm, to = ft.group(1).strip(), (ft.group(2) or "").strip()
+            else:
+                t = _TO_ONLY.match(m.group(4))
+                to = t.group(1).strip() if t else ""
+            out.append({"s": i, "at": m.start(), "hm": f"{h:02d}:{mi:02d}", "from": frm[:60], "to": to[:60]})
+    return tuple(sorted(out, key=lambda n: (n["s"], n["at"])))      # in the order the alert says them
+
+
+def _norm(name: str) -> str:
+    n = " ".join(re.sub(r"[^a-z0-9]+", " ", (name or "").lower()).split())
+    return re.sub(r"^grand central(?: terminal)?$|^gct$", "grand central", n)
+
+
+def _same_place(said: str, ours: str, known: set[str] = frozenset()) -> bool:
+    """A station name as an alert says it and as the timetable does: equal; or, when what the alert says is no
+    station's full name (known), one the other's start ("New Haven Union Station", "New Haven")."""
+    a, b = _norm(said), _norm(ours)
+    return bool(a and b) and (a == b or (a not in known and (a.startswith(b + " ") or b.startswith(a + " "))))
+
+
+def _local(t: int | None):
+    if not t:
+        return None
+    try:
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        return datetime.fromtimestamp(t, ZoneInfo("America/New_York"))
+    except Exception:  # noqa: BLE001 - no tz database: no time match (the alert stays the line's)
+        return None
+
+
+def _local_hm(t: int | None) -> str:
+    d = _local(t)
+    return d.strftime("%H:%M") if d else ""
+
+
+_DAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
+_DAY = re.compile(r"\b(tomorrow|tonight|today|" + "|".join(_DAYS) + r")\b", re.I)
+
+
+def _on_run_date(alert: dict, rec: dict) -> bool:
+    """Not an alert for another day: planned and starting on another date than the train's run date, or saying
+    "tomorrow", or naming weekdays none of which is the run date's."""
+    run = rec.get("run_date") or ""
+    st = _local(alert.get("start"))
+    if alert.get("planned") and st and run and st.strftime("%Y-%m-%d") != run:
+        return False
+    said = {m.lower() for m in _DAY.findall(f"{alert.get('header', '')} {alert.get('text', '')}")}
+    if "tomorrow" in said:
+        return False
+    days = said & set(_DAYS)
+    if days and re.fullmatch(r"\d{4}-\d\d-\d\d", run):
+        from datetime import date
+        if _DAYS[date.fromisoformat(run).weekday()] not in days:
+            return False
+    return True
+
+
+def is_mnr(alert: dict, branches) -> bool:
+    """Metro-North's alert: its railroad says so, or it says none and lists a Metro-North branch (branches: those of
+    the Metro-North trains read). Another railroad's never, whatever its branch codes."""
+    rr = alert.get("railroad")
+    return rr == "MNR" or (not rr and bool(set(alert.get("branches") or ()) & {b for b in branches if b}))
+
+
+def about_train(alert: dict, rec: dict, names: dict[str, str] | None = None) -> tuple[int, ...]:
+    """The sentences of a Metro-North alert that name this train (none: not this train's, the line's). Named by its
+    number; or by a scheduled time: at its first stop (the trip's own), or with "from X to Y" at its stop X, Y agreeing
+    with where it ends. "From X" alone, or "to Y" alone: its first stop. No station at all: its first stop and the
+    alert on its branch. A named end or start at Grand Central must agree with its direction. Not for another day
+    (_on_run_date). With no stops or times it can't tell: none."""
+    if not alert.get("named") or not is_mnr(alert, {rec.get("branch_id")}) or not _on_run_date(alert, rec):
+        return ()
+    names = names or {}
+    known = {_norm(v) for v in names.values()}
+    stops = rec.get("stops") or []
+    first, last = (stops[0], stops[-1]) if stops else (None, None)
+    last_name = names.get(last["code"], "") if last else ""
+    hit = set()
+    for n in alert["named"]:
+        if n.get("num"):
+            if n["num"] == rec.get("train"):
+                hit.add(n["s"])
+            continue
+        if not first or not first.get("sched"):
+            continue
+        if n["to"] and not (last_name and _same_place(n["to"], last_name, known)):
+            continue
+        if (n["to"] and _norm(n["to"]) == "grand central" and rec.get("dir") != "W") or \
+                (n["from"] and _norm(n["from"]) == "grand central" and rec.get("dir") != "E"):
+            continue
+        if not n["from"] and not n["to"] and alert.get("branches") and rec.get("branch_id") not in alert["branches"]:
+            continue
+        at = [s for s in stops if s.get("sched")] if n["from"] and n["to"] else [first]
+        if any(_local_hm(s["sched"]) == n["hm"] and (not n["from"] or _same_place(n["from"], names.get(s["code"], ""), known))
+               for s in at):
+            hit.add(n["s"])
+    return tuple(sorted(hit))
+
+
+_SPAN = r"(\d{1,3}(?:\s*(?:-|–|to)\s*\d{1,3})?)"
+_LATE = re.compile(_SPAN + r"\s*(?:minutes?|mins?)\s+(?:late|delayed|behind schedule)\b", re.I)
+_DELAYS = re.compile(r"\bdelays?\s+of\s+(?:up\s+to\s+)?" + _SPAN + r"\s*(?:minutes?|mins?)", re.I)
+_CANCEL = re.compile(r"\bcancel+ed\b", re.I)
+_NOT_RUN = re.compile(r"\b(?:will not|won't|will no longer|is not|isn't)\s+(?:be\s+)?(?:operat\w*|run\w*)\b(?!\s+(?:as|on|late|\d))", re.I)
+_WAS = re.compile(r"\b(?:was|were|had been)\b", re.I)
+_HELD = re.compile(r"\bheld\b", re.I)
+_DELAYED = re.compile(r"\b(?:is|are|was|were|has been|have been|being|running|operating)\s+(?:\w+\s+)?delayed\b", re.I)
+_NEG = re.compile(r"\b(?:not|no longer|never|no)\b|n't\b", re.I)                        # in the status's own clause
+_UNDO = re.compile(r"\b(?:will now operate|now operat\w+|operate as scheduled|as scheduled|restored|resum\w+|"
+                   r"reinstated|on[- ]time|normal service)\b", re.I)                     # anywhere in the sentence
+_MODAL = re.compile(r"\b(?:may|might|could|possibl[ey]|potential\w*|if|in case)\b", re.I)   # up to the status's clause end
+_PAST = re.compile(r"\b(?:previously|earlier|had been|originally)\b", re.I)            # in the status's own clause
+_CLAUSE = re.compile(r",|;|\s+(?:and|but)\s+", re.I)
+_CAUSES = ((r"mechanical", "mechanical"), (r"signal(?:s|ing)?", "signal"), (r"switch(?:es)?", "switch"),
+           (r"police", "police"), (r"medical", "medical"), (r"trespass\w*", "trespasser"), (r"struck", "struck"),
+           (r"disabled train", "disabled train"), (r"power", "power"), (r"overhead wires?", "wires"),
+           (r"catenary", "wires"), (r"track conditions?", "track"), (r"track work", "track work"), (r"weather", "weather"),
+           (r"crews?", "crew"), (r"congestion", "congestion"), (r"fire", "fire"), (r"debris", "debris"),
+           (r"trees?", "tree"), (r"flood(?:ing|ed|s)?", "flooding"))
+_CAUSE = [(re.compile(rf"\b{p}\b", re.I), w) for p, w in _CAUSES]
+
+
+@lru_cache(maxsize=2048)
+def brief(sents: tuple[str, ...] | str, context: tuple[str, ...] = ()) -> str:
+    """What the sentences assert, in a few words: "20-25 min late (mechanical)", "delays up to 15 min", "cancelled",
+    "held" (the cause from the same sentence, by whole word). A sentence that negates it ("no longer held", "will
+    not be cancelled", "will now operate"), only supposes it ("may be cancelled") or says it of the past
+    ("previously cancelled", "was 10 minutes late") asserts nothing, nor one whose paragraph (context: its other
+    sentences) says it is undone ("... ; it is now on time"): SEE ("see alert") when that is all there is; "" when no
+    sentence says a status."""
+    later = any(_UNDO.search(c) and not _LATE.search(c) for c in context)
+    if isinstance(sents, str):
+        sents = sentences(sents)
+    unsure = False
+    span = lambda g: re.sub(r"\s*(?:-|\u2013|to)\s*", "-", g)
+    for s in sents:
+        found = [(m, w) for m, w in ((_LATE.search(s), "late"), (_DELAYS.search(s), "delays"), (_DELAYED.search(s), "delayed"),
+                                     (_CANCEL.search(s), "cancelled"), (_NOT_RUN.search(s), "not running"),
+                                     (_HELD.search(s), "held")) if m]
+        if not found:
+            continue
+        m, kind = min(found, key=lambda x: x[0].start())
+        # the status's clause: from the last , ; and / but before it to the first after it
+        cuts = list(_CLAUSE.finditer(s))
+        lo = max([0] + [c.end() for c in cuts if c.end() <= m.start()])
+        hi = min([len(s)] + [c.start() for c in cuts if c.start() >= m.end()])
+        clause = s[lo:hi]
+        neg, modal, undo = bool(_NEG.search(clause)), bool(_MODAL.search(s[:hi])), bool(_UNDO.search(s)) or later
+        now_late = undo and not (re.search(r"\bnow operat\w*", s, re.I) and not later)   # "will now operate 10 min late"
+        if kind == "late":
+            what = "" if neg or modal or now_late or _WAS.search(s[lo:m.start()]) else f"{span(m.group(1))} min late"
+        elif kind == "not running":
+            what = "" if modal or undo else "cancelled"
+        elif kind == "delays":
+            what = "" if neg else f"{'possible ' if modal else ''}delays up to {span(m.group(1))} min"
+        elif kind == "delayed":
+            what = "" if neg or modal or undo else "delayed"
+        else:
+            what = "" if neg or modal or undo or _PAST.search(clause) else kind
+        if not what:
+            unsure = True
+            continue
+        cause = next((w for p, w in _CAUSE if p.search(s)), "")
+        return f"{what} ({cause})" if cause else what
+    return SEE if unsure else ""
+
+
+def train_brief(alert: dict, hits: tuple[int, ...]) -> str:
+    """The brief of the sentences that name a train (hits) and no other: SEE when they say no status of it."""
+    named = alert.get("named") or ()
+    whole = f"{alert['header']}{PARA}{alert['text']}" if alert.get("text") else alert["header"]
+    sents = sentences(whole)
+    only = tuple(i for i in hits if i < len(sents)
+                 and len({(n.get("num"), n.get("hm"), n.get("from")) for n in named if n["s"] == i}) == 1)
+    para = _para_of(whole)
+    context = tuple(sents[j] for j in range(len(sents)) if j not in only and any(para[j] == para[i] for i in only))
+    return brief(tuple(sents[i] for i in only), context) or SEE
+
+
+@lru_cache(maxsize=1024)
+def _para_of(text: str) -> tuple[int, ...]:
+    """The paragraph of each of sentences(text)."""
+    return tuple(k for k, p in enumerate((text or "").split(PARA)) for x in _SENT.split(p) if x.strip())
+
+
+def _short_place(name: str) -> str:
+    return "GCT" if _norm(name) == "grand central" else name[:24]
+
+
+def train_label(n: dict | None) -> str:
+    """One named train, for the line's row: "4:38p New Haven-State St\u2013GCT", "Train 1234"; "" for none."""
+    if not n:
+        return ""
+    if n.get("hm"):
+        h, mi = (int(x) for x in n["hm"].split(":"))
+        t = f"{(h % 12) or 12}:{mi:02d}{'a' if h < 12 else 'p'}"
+        places = "\u2013".join(_short_place(x) for x in (n["from"], n["to"]) if x)
+        return f"{t} {places}".strip()
+    return f"Train {n['num']}"
+
+
+@lru_cache(maxsize=512)
+def _alert_words(header_raw, text_raw) -> tuple:
+    """(header, text, named, brief, about) of an alert's raw header and text: cached, as the same alerts come in
+    every poll."""
+    header = alert_text(header_raw, 300)
+    if not header:
+        return ("", "", (), "", "")
+    text = alert_text(text_raw, 1000)
+    if text == header:
+        text = ""
+    whole = f"{header}{PARA}{text}" if text else header
+    named = named_trains(whole)
+    if named:                  # about a train: the first it names, its label and what its sentence says of it
+        b = train_brief({"header": header, "text": text, "named": named}, (named[0]["s"],))
+    else:                      # the line's: what it says, else its first words
+        first = sentences(whole)[0] if sentences(whole) else header
+        b = brief(whole, sentences(whole))
+        if b.startswith(("cancelled", "held")):          # which trains? not said: the alert says (#389)
+            b = SEE
+        b = b or (first if len(first) <= 80 else first[:79].rstrip() + "\u2026")
+    return (header, text, named, b, train_label(named[0] if named else None))
+
+
 def _alert(a) -> dict | None:
-    if not isinstance(a, dict) or not _text(a.get("header")):
+    if not isinstance(a, dict):
+        return None
+    h, t = a.get("header"), a.get("text")
+    header, text, named, b, about = _alert_words(h if isinstance(h, str) else None, t if isinstance(t, str) else None)
+    if not header:
         return None
     br = a.get("branches")
-    return {"header": _text(a.get("header"), 300), "status": _text(a.get("status"), 60),
+    return {"header": header, "text": text, "brief": b, "named": named,
+            "about": about, "status": _text(a.get("status"), 60),
             "level": int(_num(a.get("status_level"), 0, 100) or 0), "railroad": _word(a.get("railroad")),
             "branches": [b for b in br if isinstance(b, str) and WORD.fullmatch(b)] if isinstance(br, list) else [],
             "planned": _bool(a.get("is_planned")), "start": _ts(a.get("start_time"))}
+
+
+def mine(a: dict, rec: dict, names: dict[str, str] | None = None) -> dict | None:
+    """An alert as this train's box says it, when it names this train: its brief from the sentences about it."""
+    hits = about_train(a, rec, names)
+    return {**{k: a[k] for k in ALERT_KEYS}, "brief": train_brief(a, hits)} if hits else None
 
 
 def record(x, keep_polyline: bool = False) -> dict | None:
@@ -286,17 +636,25 @@ def facts(rec: dict, stations: dict[str, str] | None = None) -> dict:
                      "track_change": nx["track_change"], "sched": nx["sched"], "status": nx["status"]} if nx else None,
             "prev": ({"code": pv["code"], "name": names.get(pv["code"], pv["code"]), "track": pv["track"], "posted": pv["posted"]}
                      if pv and pv["track"] else None),
-            "route": route_key(rec)}
+            "route": route_key(rec),
+            # the alerts riding on this record that name this train (#385): its box says them as "This train"
+            "alerts": [m for a in rec.get("alerts") or [] if (m := mine(a, rec, names))]}
+
+
+ALERT_KEYS = ("header", "text", "brief", "about", "status", "level", "planned", "start")
 
 
 def branch_alerts(records, branch: str = NH) -> list[dict]:
-    """Metro-North's alerts for the branch, once each (they ride along on train records)."""
+    """Metro-North's alerts for the branch, once each (they ride along on train records): those that list it, and
+    Metro-North's that list no branch (the whole railroad's). Metro-North's: is_mnr."""
     seen, out = set(), []
+    mnr = {r.get("branch_id") for r in records if r.get("railroad") == "MNR"} | {branch}
     for r in records:
         for a in r.get("alerts") or []:
-            if a["railroad"] in ("MNR", "") and branch in a["branches"] and a["header"] not in seen:
+            if is_mnr(a, mnr) and (branch in a["branches"] or (not a["branches"] and a["railroad"] == "MNR")) \
+                    and a["header"] not in seen:
                 seen.add(a["header"])
-                out.append({k: a[k] for k in ("header", "status", "level", "planned", "start")})
+                out.append({k: a[k] for k in ALERT_KEYS})
     return sorted(out, key=lambda a: -a["level"])
 
 
@@ -473,6 +831,7 @@ class TrainTime:
         self._thread: threading.Thread | None = None
         self.records: list[dict] = []
         self.alerts: list[dict] = []
+        self.branch_alerts: dict[str, list[dict]] = {}   # each branch's, for a train's box: its own branch's (#385)
         self.st = {"at": None, "error": "", "next": 0.0, "last": None, "fails": 0, "bad": 0, "n": 0, "total": 0, "dropped": 0,
                    "dropped_total": 0, "bytes": 0, "since": None}
         self.geo = {"at": None, "error": "", "next": 0.0, "fails": 0, "missing_at": None}
@@ -633,6 +992,7 @@ class TrainTime:
         with self.lock:
             self.records = keep
             self.alerts = branch_alerts(doc["records"])
+            self.branch_alerts = {b: branch_alerts(doc["records"], b) for b in sorted({r["branch_id"] for r in keep if r["branch_id"]})}
             if self.st["bad"] >= self.fallback_after:
                 self.log(f"trains: TrainTime back after {self.st['bad']} bad polls; merging again")
             self.st.update(at=now, error="", fails=0, bad=0, next=0.0, n=len(keep), total=doc["total"],
