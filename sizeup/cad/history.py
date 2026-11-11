@@ -309,12 +309,16 @@ class AddressHistory:
 
     # -- the background backfill / catch-up -------------------------------------------------------------------------
 
-    def start(self, every_s: float = 5.0) -> None:
+    def start(self, every_s: float = 5.0, delay_s: float = 20.0) -> None:
+        """The backfill and catch-up, in the background: from delay_s after start (a deploy's start, its caches and map
+        layers, comes first; open calls are keyed by the state push meanwhile), then every every_s, without a pause
+        while there is a backlog."""
         if self._thread is not None:
             return
         self._stop.clear()
 
         def run():
+            self._stop.wait(delay_s)
             while not self._stop.is_set():
                 try:
                     left = self.catch_up(BATCH)
