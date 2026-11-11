@@ -29,6 +29,11 @@ class Transmitter:
     def transmit(self, wav: Path | None, channel: str, text: str) -> TxResult:
         raise NotImplementedError
 
+    def expect(self) -> TxResult | None:
+        """What transmit() will answer whatever the audio is, known before it is rendered (a dispatch is logged
+        before its voice, #426); None: only the key-up tells (the dispatch is logged as waiting for it)."""
+        return None
+
 
 class NullTransmitter(Transmitter):
     """Transmit off: nothing is keyed. Logs what would have gone out."""
@@ -49,6 +54,9 @@ class NullTransmitter(Transmitter):
                 pass
         self.sent.append((channel, text, secs))
         self.log(f"TRANSMIT OFF: would have keyed {channel or 'no channel'} for {secs:.1f} s: {text}")
+        return self.expect()
+
+    def expect(self) -> TxResult:
         return TxResult(False, "transmit is off: logged and played locally only")
 
 
