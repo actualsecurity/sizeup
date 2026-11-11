@@ -90,7 +90,6 @@ def _slot(text: str, end: int, code: str, talker: str, fine_ok, welfare: bool, d
             return at, None, ""                           # said right already
         if kind == FINE and (welfare or fine_ok is None or not fine_ok(code) or not (dispatcher or code == talker)):
             return at, None, ""                           # only the unit's own radio, or 60 Control's readback
-            return at, None, ""
         if kind == ROUTE and not (ROUTE_OK.match(text, m.end())
                                   or (code == talker and re.match(END, text[m.end():]))):
             return at, None, ""                           # "on Route 120", "on route to King Street": a road

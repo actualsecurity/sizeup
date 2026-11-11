@@ -325,3 +325,20 @@ def test_en_route_before_an_address_is_not_a_status():
 ])
 def test_a_bare_space_between_callsigns_is_the_one_called_then_the_talker(text, rig, want):
     assert read(text, rig) == want
+
+
+@pytest.mark.parametrize("text,want", [
+    ("Copy, Engine 61, Ladder 31 responding", {"L31": "enroute"}),
+    ("60 Control, Engine 61, Ladder 31 on location.", {"L31": "onscene"}),
+    ("Engine 61, Ladder 31, en route 1412", {"E61": "enroute", "L31": "enroute"}),
+    ("Copy, Engine 61, Ladder 31 responding, 1412", {"E61": "enroute", "L31": "enroute"}),
+])
+def test_60_control_credits_a_list_before_the_unit_only_in_a_timed_readback(text, want):
+    assert read(text, "", 1) == want
+
+
+def test_an_unknown_radio_never_repairs_is_fine_or_a_clause_final_on_route():
+    """FG1 with no radio ID: not the unit's own radio, not 60 Control."""
+    assert fixed("Engine 61 is fine.", talker="", dispatcher=False) == ("Engine 61 is fine.", [])
+    assert fixed("Engine 61 on route.", talker="", dispatcher=False) == ("Engine 61 on route.", [])
+    assert read("Engine 61 is fine.") == read("Engine 61 on route.") == {}

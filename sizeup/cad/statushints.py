@@ -513,8 +513,8 @@ class StatusHints:
                         out[u] = (f, "talker" if u == talker else "named")
                 continue
             if disp:                               # 60 Control: the units it names right before the status ...
-                if f.units:
-                    for u in group:
+                if f.units:                        # a list before them only in a readback (its time after)
+                    for u in (group if f.timed else f.units):
                         out[u] = (f, "named")
                 elif f.lead in ("start", "control") and (f.addressee or group) and (f.timed or ACK.search(text)):
                     for u in dict.fromkeys(f.addressee + group):   # ... or a pure readback: "Engine 61, en route 1412"
