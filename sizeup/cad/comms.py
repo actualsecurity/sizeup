@@ -204,6 +204,7 @@ class Comms:
         self._pending: list = []         # (id, system | None, gone) touched in the open transaction
         self._retry_at = 0.0             # a broken log: when to try writing to it again
         self._said_broken = False
+        self.ours_rev = 0                # changes every reader may know of (rev_for)
         self.log = lambda m: None        # set by the CAD
         self._logged = 0                 # transmissions logged since the change log was last trimmed
         with self.store.lock:
@@ -216,8 +217,8 @@ class Comms:
         (#163). A person's own (manual) links stay."""
         try:
             with self.store.tx() as db:
-                db.execute("DELETE FROM radio_links WHERE why = 'channel'")
-                self.touch_reset()
+                if db.execute("DELETE FROM radio_links WHERE why = 'channel'").rowcount:
+                    self.touch_reset()
         except Exception:
             pass                # no comms tables yet (a fresh store migrates first)
 
@@ -786,7 +787,7 @@ class Comms:
 
     def _open_changes(self) -> None:
         """The change log at the start: made, or made again when it is an older shape. An earlier build's triggers are
-        taken off. Every cursor from before this start is told to reload (changes_floor). Failing: no log, no harm."""
+        taken off. Failing: no log, no harm."""
         db = self.store.db
         self.store.after_commit, self.store.after_rollback, self.store.touch = self.flush_changes, self._forget_changes, self.touch
         with self.store.lock:
@@ -796,11 +797,7 @@ class Comms:
                 cols = {r[1] for r in db.execute("PRAGMA table_info(radio_changes)")}
                 if cols and not {"seq", "traffic_id", "system", "gone"} <= cols:
                     db.execute("DROP TABLE radio_changes")
-                db.executescript(CHANGES_SCHEMA)
-                top = db.execute("SELECT MAX(seq) FROM radio_changes").fetchone()[0] or 0
-                # a marker, so seq moves past everything a page from before this start may hold
-                db.execute("INSERT INTO radio_changes (traffic_id, system) VALUES ('start', NULL)")
-                self.changes_floor = int(top) + 1
+                db.executescript(CHANGES_SCHEMA)            # (nothing is written here: a start leaves the database as it was)
                 self.changes_broken = False
             except Exception as e:  # noqa: BLE001 - the radio log itself is what matters
                 self._changes_off(f"could not be made ({type(e).__name__}: {e})")
@@ -853,12 +850,15 @@ class Comms:
             with self.store.lock:
                 rows = []
                 for tid, system, gone in dict.fromkeys(notes):
-                    if system is None and tid not in ("reset", "start") and not tid.startswith("note-"):
+                    if system is None and tid != "reset" and not tid.startswith("note-"):
                         r = db.execute("SELECT system FROM radio_traffic WHERE id = ?", (tid,)).fetchone()
                         system = r[0] if r is not None else None
                     elif tid.startswith("note-"):
                         system = ""
                     rows.append((tid, system, int(gone)))
+                # a change every reader may know of (not another P25 system's alone): rev_for
+                if any(tid == "reset" or (system is not None and system in sources.OURS_SYSTEMS) for tid, system, _ in rows):
+                    self.ours_rev += 1
                 if self.changes_broken and time.monotonic() < self._retry_at:
                     return
                 if db.in_transaction:                   # (never from tx(); a caller's own transaction: with it)
@@ -894,19 +894,14 @@ class Comms:
             pass
 
     def rev_for(self, sees: bool | None = None) -> str:
-        """The radio log's rev as this reader may know it. One who may see everything: the log's and the store's own
-        counters. One who may not see another P25 system's traffic: the newest change they may see (every writer notes
-        its change, with its row's system), so that system's activity never moves it; with no change log: the half
-        minute (their page asks afresh that often anyway)."""
+        """The radio log's rev as this reader may know it (GET /api/cad/comms's rev and the state's comms_rev: the page
+        asks again when it moves). One who may see everything: the log's and the store's own counters. One who may not
+        see another P25 system's traffic: a count of the changes they may know of (every writer notes its change, with
+        its row's system: flush_changes, whether or not the change log itself can be written), so that system's
+        activity never moves it."""
         if self._sees_context() if sees is None else sees:
             return f"{self.rev}.{self.store.rev}"
-        if not self.changes_broken:
-            try:
-                r = self.store.one(f"SELECT MAX(seq) AS m FROM radio_changes WHERE system IN {sources.OURS_SQL}") or {}
-                return f"o{int(r.get('m') or 0)}.{self.changes_floor}"
-            except sqlite3.Error:
-                pass
-        return f"t{int(self.clock() // 30)}"
+        return f"o{self.ours_rev}"
 
     def page(self, main_tgs, not_main=(), *, view: str = "", system: str = "", group: str = "", source=(),
              service: str = "", tier: str = "", dept: str = "", safety: bool = False, mute=(),
@@ -1020,13 +1015,12 @@ class Comms:
             # (nor an id with any entry of another system's, or of none: radio_changes_id)
             ours = sources.OURS_SQL
             mine = "" if sees else (
-                f" AND c.system IN {ours} AND NOT EXISTS (SELECT 1 FROM radio_changes x WHERE x.traffic_id = c.traffic_id "
-                f"AND (x.system IS NULL OR x.system NOT IN {ours})) AND NOT EXISTS (SELECT 1 FROM radio_traffic t "
+                f" AND (c.traffic_id = 'reset' OR c.system IN {ours}) AND NOT EXISTS (SELECT 1 FROM radio_changes x WHERE x.traffic_id = c.traffic_id "
+                f"AND x.traffic_id != 'reset' AND (x.system IS NULL OR x.system NOT IN {ours})) AND NOT EXISTS (SELECT 1 FROM radio_traffic t "
                 f"WHERE t.id = c.traffic_id AND t.system NOT IN {ours})")
             ids = [r["traffic_id"] for r in self.store.q(
                 f"SELECT DISTINCT c.traffic_id FROM radio_changes c WHERE c.seq > ? AND c.seq <= ?{mine} LIMIT ?",
                 (changed, hi, CHANGES_MAX + 1))]
-            ids = [i for i in ids if i != "start"]
             if "reset" in ids:
                 return {**out, "reload": True}
             if len(ids) > CHANGES_MAX or (notes_ok and any(i.startswith("note-") for i in ids)):
