@@ -315,7 +315,7 @@ def test_only_the_leader_uploads_or_deletes(tmp_path):
     leader["ok"] = True
     assert a.upload_pending() == 1
     leader["ok"] = False
-    assert a.prune_clips(time.time()) == 0 and bucket.objects and a.sweep_orphans(min_age_s=0) == 0
+    assert a.prune_clips(time.time()) == 0 and bucket.objects and a.sweep_orphans(min_age_s=0, known=NONE) == 0
     leader["ok"] = True
     assert a.prune_clips(time.time()) == 1 and not bucket.objects
 
@@ -447,6 +447,11 @@ def test_deleting_a_row_still_holding_its_bytes_deletes_an_object_uploaded_befor
     assert a.prune_clips(time.time()) == 1 and key not in bucket.objects
 
 
+def NONE(ids):
+    """known(): the rest of the hub knows none of these clip ids."""
+    return {}
+
+
 def sweep_rig(tmp_path, rows=60, page=7, **kw):
     """A bucket and an audio.sqlite that agree: `rows` clips a few days old, all uploaded; plus dispatch audio."""
     bucket = FakeBucket(page=page)
@@ -458,7 +463,7 @@ def sweep_rig(tmp_path, rows=60, page=7, **kw):
     while a.upload_pending(limit=100):
         pass
     for k in bucket.modified:
-        bucket.modified[k] = now - 3 * DAY
+        bucket.modified[k] = now - 4 * DAY
     return a, bucket, now
 
 
@@ -468,10 +473,10 @@ def test_the_orphan_sweep_deletes_only_old_clip_objects_no_row_names(tmp_path):
     orphans = [f"{day}/orphan-{k}.wav" for k in range(3)]
     for k in orphans + [f"{day}/young.wav", "audio/dispatch/2026/11/01/" + "e" * 20 + ".wav", "audio/clip/2020/01/01/ancient.wav"]:
         bucket.objects[k] = b"x"
-        bucket.modified[k] = now - 2 * DAY
+        bucket.modified[k] = now - 3.5 * DAY                   # before the newest clip audio.sqlite knows (3 days)
     bucket.modified[f"{day}/young.wav"] = now - 3600
     before = set(bucket.objects)
-    assert a.sweep_orphans(now=now) == 3 and a.sweep_status == ""
+    assert a.sweep_orphans(now=now, known=NONE) == 3 and a.sweep_status == ""
     # dispatch audio never; a folder older than the oldest clip the database knows: the lifecycle's; a young one: kept
     assert before - set(bucket.objects) == set(orphans)
     assert {c[1] for c in bucket.calls if c[0] == "GET"} == {"?list"}
@@ -483,16 +488,16 @@ def test_the_orphan_sweep_never_empties_the_bucket(tmp_path):
     keys = set(bucket.objects)
     # an empty audio.sqlite (a restore that didn't happen) with the same bucket
     empty = db(tmp_path, s3store(bucket), name="empty.sqlite")
-    assert empty.sweep_orphans(now=now) == 0 and "no clips" in empty.sweep_status and set(bucket.objects) == keys
+    assert empty.sweep_orphans(now=now, known=NONE) == 0 and "no clips" in empty.sweep_status and set(bucket.objects) == keys
     # an old audio.sqlite: it knows only the oldest few clips
     old = db(tmp_path, s3store(bucket), name="old.sqlite")
     rows = a.db.execute("SELECT id, kind, at, key FROM audio WHERE kind = 'clip' ORDER BY at LIMIT 5").fetchall()
     old.db.executemany("INSERT INTO audio (id, kind, at, note, wav, key, stored) VALUES (?, ?, ?, '', x'', ?, 'store')", rows)
-    assert old.sweep_orphans(now=now) == 0 and "too many" in old.sweep_status and set(bucket.objects) == keys
+    assert old.sweep_orphans(now=now, known=NONE) == 0 and set(bucket.objects) == keys    # all newer than it knows
     # no lease (no fence: a local hub with the bucket set), whatever the database
     for x in (db(tmp_path, s3store(bucket), name="nofence.sqlite", may_delete=lambda: False), AudioDb(
             tmp_path / "plain.sqlite", store=s3store(bucket), log=lambda m: None)):
-        assert x.sweep_orphans(now=now, min_age_s=0) == 0 and set(bucket.objects) == keys
+        assert x.sweep_orphans(now=now, min_age_s=0, known=NONE) == 0 and set(bucket.objects) == keys
     # ... and its retention deletes nothing from the store either
     nofence = AudioDb(tmp_path / "audio.sqlite", store=s3store(bucket), log=lambda m: None)
     assert nofence.prune_clips(now) == 0 and set(bucket.objects) == keys
@@ -645,7 +650,7 @@ def test_the_release_before_reads_the_new_rows_without_crashing(tmp_path):
     assert b.pending()[0] == 1 and b.upload_pending() == 1 and b.get("FG1-old-code") == tone(1.0)
     # the object the old release left behind (its row pruned, not its object): the sweep's, if it is dated within
     # what the database knows (here the old row was 30 days back, before the oldest clip left: the lifecycle's)
-    assert b.sweep_orphans(min_age_s=0) == 0 and len(list((tmp_path / "o").rglob("*.wav"))) == 2
+    assert b.sweep_orphans(min_age_s=0, known=NONE) == 0 and len(list((tmp_path / "o").rglob("*.wav"))) == 2
 
 
 # -- the hub: Settings, the attachments copy, playback ----------------------------------------------------------------
@@ -978,3 +983,84 @@ def test_a_clip_whose_object_is_gone_is_not_retried_forever(tmp_path):
     bucket.fail = lambda m, k: m == "GET"                      # a 500: an error, tried again
     with pytest.raises(StoreError):
         a.get("FG1-g", strict=True)
+
+
+def test_a_restore_a_little_behind_deletes_nothing_and_its_rows_are_made_again(tmp_path):
+    """audio.sqlite restored without its newest clips (the CAD's radio log has them): nothing deleted; the clips the
+    hub still knows get their rows back from their objects; the newest are never even looked at (the margin)."""
+    a, bucket, now = sweep_rig(tmp_path, rows=60)
+    keys = set(bucket.objects)
+    newest = a.db.execute("SELECT id, at, key FROM audio WHERE kind = 'clip' ORDER BY at DESC").fetchall()
+    behind = db(tmp_path, s3store(bucket), name="behind.sqlite")
+    rows = a.db.execute("SELECT id, kind, at, key FROM audio WHERE kind = 'clip' ORDER BY at LIMIT 15").fetchall()
+    behind.db.executemany("INSERT INTO audio (id, kind, at, note, wav, key, stored) VALUES (?, ?, ?, '', x'', ?, 'store')", rows)
+    lost = {aid: ("FG1", None, at) for aid, at, key in newest[:45]}          # what the radio log still knows
+    behind_newest = rows[-1][2]
+    for aid, at, key in newest[:45]:                          # uploaded a little before the newest the restore has
+        bucket.modified[key] = behind_newest - 2 * 3600
+    assert behind.sweep_orphans(now=now, known=lambda ids: {i: lost[i] for i in ids if i in lost}) == 0
+    assert set(bucket.objects) == keys and behind.sweep_restored == 45 and behind.sweep_status == ""
+    r = behind.db.execute("SELECT channel, stored, key FROM audio WHERE id = ?", (newest[0][0],)).fetchone()
+    assert r == ("FG1", "store", newest[0][2])
+    cold(behind)
+    assert behind.get(newest[0][0]) == tone(0.2)
+    # and with nothing the rest of the hub knows: the margin alone keeps the newest from being looked at
+    bucket.modified.update({key: now - 4 * DAY for _, _, key in newest[:45]})
+    other = db(tmp_path, s3store(bucket), name="other.sqlite")
+    other.db.executemany("INSERT INTO audio (id, kind, at, note, wav, key, stored) VALUES (?, ?, ?, '', x'', ?, 'store')", rows)
+    assert other.sweep_orphans(now=now, known=NONE) == 0 and set(bucket.objects) == keys
+
+
+def test_without_a_record_to_check_against_the_sweep_does_nothing(tmp_path):
+    a, bucket, now = sweep_rig(tmp_path)
+    bucket.objects["audio/clip/2026/01/01/x.wav"] = b"x"
+    assert a.sweep_orphans(now=now) == 0 and "not swept" in a.sweep_status
+
+
+def test_a_link_confirmed_during_the_prune_keeps_its_transmission(tmp_path, monkeypatch):
+    from tests.test_radios import Clock, _event_with, cad, tx
+    clock = Clock()
+    c = cad(tmp_path, clock)
+    inc = _event_with(c, ["E63"], clock)
+    c.comms.audio_default_days = 30
+    for k in range(3):
+        c.record_traffic(tx(f"FG1-{k}", clock.t - 400 * DAY))
+    real_q = c.store.q
+
+    def q(sql, args=()):
+        out = real_q(sql, args)
+        if sql.startswith("SELECT rowid AS r") and out:       # between the look and the delete: a person links one
+            with c.store.tx() as d:
+                d.execute("INSERT OR IGNORE INTO radio_links (traffic_id, incident_id, why, unit) VALUES ('FG1-1', ?, "
+                          "'manual', 'x')", (inc["id"],))
+        return out
+
+    monkeypatch.setattr(c.store, "q", q)
+    assert c.comms.prune() == 2
+    assert {r["id"] for r in real_q("SELECT id FROM radio_traffic")} == {"FG1-1"}
+
+
+def test_only_a_missing_key_is_permanent(tmp_path):
+    bucket = FakeBucket()
+    logs = []
+    a = AudioDb(tmp_path / "a.sqlite", store=s3store(bucket), log=logs.append, may_delete=lambda: True)
+    for k in range(3):
+        a.put(f"FG1-{k}", tone(0.2), "clip", channel="FG1")
+    a.upload_pending()
+    cold(a)
+    orig = a.store.s3.send
+
+    def no_bucket(method, url, headers, body, timeout):
+        if method == "GET":
+            return 404, {}, b"<Error><Code>NoSuchBucket</Code></Error>"
+        return orig(method, url, headers, body, timeout)
+
+    a.store.s3.send = no_bucket
+    with pytest.raises(StoreError):
+        a.get("FG1-0", strict=True)                           # a setup error: tried again, never "no audio for good"
+    assert any("REFUSES READS" in m for m in logs)
+    a.store.s3.send = orig
+    bucket.objects.clear()
+    assert a.get("FG1-1", strict=True) is None and a.get("FG1-2", strict=True) is None     # NoSuchKey: for good
+    said = [m for m in logs if "not in the store" in m]
+    assert len(said) == 1 and len(a._said) <= 4                # one line, not one per clip
