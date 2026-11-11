@@ -14,8 +14,9 @@ no status, so neither the suggestion nor the rig automation happens.
               vacation") needs the clause to end there or a readback time to follow ("<unit> en route, 1412": 4 digits
               or with a colon, never a house or road number); "around 5 minutes" is an ETA, never repaired
     fine      "is fine" / "was fine" is also what a welfare check sounds like, so only for a unit dispatched on an open
-              call (fine_ok(code), from the CAD) and never in a transmission about welfare (PAR, accounted for, no
-              injuries, OK, all good, everyone, Command / IC)
+              call (fine_ok(code), from the CAD), said on its own radio or in 60 Control's readback, and never in a
+              transmission about welfare or a change (PAR, accounted for, no injuries, OK, all good, everyone,
+              Command / IC; cancel, return, disregard, hold, not needed, "you can")
     route     "on route" / "and route" (a misheard "en route") never before a road ("on Route 120", "on route to
               King Street"): clause-final from the unit's own radio (talker), or before a readback time
     callsign  "Engine" misheard before one of our engine numbers ("and she's 63", "imagine 63"; Ladder as "letter"):
@@ -33,8 +34,9 @@ from __future__ import annotations
 import re
 from typing import Callable
 
-# a readback time that can't be a house or road number: 4 digits or with a colon ("1412", "14:12", "2:12"; not "120")
-CLOCK = r"(?:(?:[01]\d|2[0-3]):?[0-5]\d|\d:[0-5]\d)(?!\d)(?!\s*(?:minutes?|mins?|[A-Z][a-z]+\s+(?:Street|Avenue|Road)))"
+# a readback time that can't be a house or road number: 4 digits or with a colon ("1412", "14:12", "2:12"; not "120"),
+# and it ends the clause: "1412 North Main Street" is an address
+CLOCK = r"(?:(?:[01]\d|2[0-3]):?[0-5]\d|\d:[0-5]\d)(?!\d)(?=\s*(?:$|[.,;]))"
 # where an ordinary phrase must stop for it to be the status word: the end, a clause break, or a readback time
 STOPS = rf"(?=\s*(?:$|[.,;!?]|(?:at\s+)?{CLOCK}))"
 END = r"(?=\s*(?:$|[.,;!?]))"
@@ -59,7 +61,7 @@ MISHEARD: list[tuple[str, str, re.Pattern]] = [(to, kind, re.compile(p, re.I)) f
     ("on scene", "", r"on\s+(?:the\s+)?(?:seen|sean|scenes)\b"),
 )]
 ROUTE_OK = re.compile(rf"\s*,?\s*(?:at\s+)?{CLOCK}")             # "on route 1412": a readback time, not a road
-WELFARE = re.compile(r"(?<![\w'])(?:PAR|accounted|injur\w*|hurt|ok|okay|all\s+good|everyone|everybody|all\s+members|"
+WELFARE = re.compile(r"(?<![\w'])(?:PAR|accounted|cancel\w*|return\w*|disregard|hold\w*|not\s+needed|you\s+can|injur\w*|hurt|ok|okay|all\s+good|everyone|everybody|all\s+members|"
                      r"command|IC|welfare|condition|patient|she|he|they)(?![\w'])", re.I)
 
 # the status said (as the parser reads it): a misheard callsign is put back only before one of these
@@ -75,7 +77,7 @@ APPARATUS_MISHEARD = {
 }
 
 
-def _slot(text: str, end: int, code: str, talker: str, fine_ok, welfare: bool):
+def _slot(text: str, end: int, code: str, talker: str, fine_ok, welfare: bool, dispatcher: bool = False):
     """The heard words in the status slot after a callsign of code ending at end: (where they start, the match, the
     status as written); (at, None, "") when there is nothing to put back."""
     m0 = re.match(r"\s*,?\s*", text[end:])
@@ -86,7 +88,8 @@ def _slot(text: str, end: int, code: str, talker: str, fine_ok, welfare: bool):
             continue
         if " ".join(m.group(0).lower().split()) == to:
             return at, None, ""                           # said right already
-        if kind == FINE and (welfare or fine_ok is None or not fine_ok(code)):
+        if kind == FINE and (welfare or fine_ok is None or not fine_ok(code) or not (dispatcher or code == talker)):
+            return at, None, ""                           # only the unit's own radio, or 60 Control's readback
             return at, None, ""
         if kind == ROUTE and not (ROUTE_OK.match(text, m.end())
                                   or (code == talker and re.match(END, text[m.end():]))):
@@ -118,9 +121,11 @@ def callsigns(text: str, codes: dict[str, str]) -> tuple[str, list[dict]]:
 
 
 def repair(text: str, named: Callable[[str], list[tuple[int, int, str]]], codes: dict[str, str] | None = None,
-           talker: str = "", fine_ok: Callable[[str], bool] | None = None) -> tuple[str, list[dict]]:
+           talker: str = "", fine_ok: Callable[[str], bool] | None = None, dispatcher: bool = False
+           ) -> tuple[str, list[dict]]:
     """(the text with the status words put back after our callsigns, [{heard, to, at}] for each); nothing to put
-    back: (text, []). talker: the unit whose radio it is ("" unknown); fine_ok(code): may "is fine" be its en route."""
+    back: (text, []). talker: the unit whose radio it is ("" unknown); dispatcher: 60 Control's transmission;
+    fine_ok(code): may "is fine" be its en route (only from that unit's own radio, or 60 Control's readback)."""
     if not text:
         return text, []
     fixes: list[dict] = []
@@ -131,7 +136,7 @@ def repair(text: str, named: Callable[[str], list[tuple[int, int, str]]], codes:
     for _, end, code in named(text):
         if end < pos:
             continue
-        at, m, to = _slot(text, end, code, talker, fine_ok, welfare)
+        at, m, to = _slot(text, end, code, talker, fine_ok, welfare, dispatcher)
         if m is None:
             continue
         lead = text[pos:at]

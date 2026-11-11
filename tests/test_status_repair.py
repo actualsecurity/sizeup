@@ -21,13 +21,13 @@ P = Phrases(UNITS, {c for c in LISTS.units if re.fullmatch(r"\d+", c)})
 YES = lambda code: True          # noqa: E731 - "is fine" may be en route (dispatched on an open call)
 
 
-def fixed(text, talker="", fine_ok=YES):
-    text, fixes = P.repair(text, talker, fine_ok)
+def fixed(text, talker="", fine_ok=YES, dispatcher=True):
+    text, fixes = P.repair(text, talker, fine_ok, dispatcher)
     return text, [{k: v for k, v in x.items() if k != "at"} for x in fixes]
 
 
-def found(text, talker="", fine_ok=YES):
-    return [(f.intent, f.units) for f in P.find(P.repair(text, talker, fine_ok)[0])]
+def found(text, talker="", fine_ok=YES, dispatcher=True):
+    return [(f.intent, f.units) for f in P.find(P.repair(text, talker, fine_ok, dispatcher)[0])]
 
 
 def read(text, rig="", dispatcher=0, fine_ok=YES):
@@ -270,3 +270,58 @@ def test_a_bare_number_is_the_talkers_own_unit_only(rig):
     assert rig.status("L31") != rig.cad.hints.status_for("enroute") and rig.status("E60") != rig.cad.hints.status_for("enroute")
     rig.radio("307-17-call_17-t0", T0 + 25, "31 responding.", rig="L31", unit="L31")        # its own radio
     assert rig.status("L31") == rig.cad.hints.status_for("enroute")
+
+
+# -- re-review: 60 Control, "is fine" next to a change, addresses, a bare space ------------------------------------
+
+@pytest.mark.parametrize("text,want", [
+    ("Engine 61, be advised Ladder 31 on location.", {"L31": "onscene"}),
+    ("Engine 61, Ladder 31 on location.", {"L31": "onscene"}),
+    ("Engine 61, in the area", {}),                               # Control's "in the area": never a unit's arrival
+    ("Engine 61, on location", {}),                               # alone: may be a question with its "?" dropped
+    ("Engine 61, on location, 1412", {"E61": "onscene"}),         # a readback: its time
+    ("Copy, Engine 61, on location.", {"E61": "onscene"}),        # an acknowledgement of what it heard
+    ("Engine 61, copy, on location.", {"E61": "onscene"}),        # acknowledged
+    ("Engine 61, en route 1412", {"E61": "enroute"}),
+    ("Engine 61, Ladder 31, en route 1412", {"E61": "enroute", "L31": "enroute"}),
+])
+def test_60_controls_readback_and_the_one_it_calls(text, want):
+    assert read(text, "", 1) == want
+
+
+@pytest.mark.parametrize("text", [
+    "Engine 61 is fine, you can cancel.", "Engine 61, you can return, Ladder 31 is fine.", "Disregard, Engine 61 is fine.",
+    "Engine 61 is fine, hold in quarters.", "Engine 61 is fine, not needed.", "Engine 61 was fine, returning.",
+])
+def test_is_fine_next_to_a_cancel_or_return_stays(text):
+    assert fixed(text, talker="E61")[1] == [] and fixed(text)[1] == []
+
+
+def test_is_fine_only_from_the_units_own_radio_or_60_control():
+    assert fixed("Engine 61 is fine.", talker="E61", dispatcher=False)[0] == "Engine 61 en route."
+    assert fixed("Engine 61 is fine.", talker="", dispatcher=True)[0] == "Engine 61 en route."
+    assert fixed("Engine 61 is fine.", talker="L31", dispatcher=False)[1] == []
+    assert fixed("Engine 61 is fine.", talker="", dispatcher=False)[1] == []
+    assert read("Engine 61 is fine.", "L31") == {}
+
+
+@pytest.mark.parametrize("text", ["Engine 61 around 1412 North Main Street", "Engine 61 and route 1412 King Street",
+                                  "Engine 61 around 1412 Westchester Ave."])
+def test_a_four_digit_address_is_not_a_readback_time(text):
+    assert fixed(text) == (text, [])
+
+
+def test_en_route_before_an_address_is_not_a_status():
+    assert found("Engine 61 en route 1412 Westchester Ave") == []
+    assert found("Engine 61 en route 1412.") == [("enroute", ["E61"])]
+
+
+@pytest.mark.parametrize("text,rig,want", [
+    ("23 91 Engine 61 responding", "E61", {"E61": "enroute"}),
+    ("23 91 Engine 61 responding", "E62", {"E61": "enroute"}),
+    ("23 91 Engine 61 responding", "", {"E61": "enroute"}),
+    ("Engine 62 and Engine 64 on location", "", {"E62": "onscene", "E64": "onscene"}),
+    ("Engine 62 and Engine 64 on location", "E64", {"E62": "onscene", "E64": "onscene"}),
+])
+def test_a_bare_space_between_callsigns_is_the_one_called_then_the_talker(text, rig, want):
+    assert read(text, rig) == want
