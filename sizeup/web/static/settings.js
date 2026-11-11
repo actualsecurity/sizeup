@@ -1741,34 +1741,52 @@ function sMapDisplay(d) {
   return card;
 }
 
-// How long the hub keeps each channel's / talkgroup's clips (#414, sizeup/audiostore.py keep_days). Days; a change
-// applies to the clips already kept at the next prune (10 min). Admins; the hub only (the data is null elsewhere).
+// How long the hub keeps each channel's / talkgroup's audio, and its transcripts and metadata (#414,
+// sizeup/audiostore.py). Days; a change applies to what is already kept at the next prune. A transcript is never kept
+// shorter than its audio. The totals: what is kept now and its S3 storage a month. Admins; the hub only.
 function sAudioRetention(r) {
   const mb = (b) => (b >= 1e9 ? `${(b / 1e9).toFixed(1)} GB` : b >= 1e7 ? `${Math.round(b / 1e6)} MB` : `${(b / 1e6).toFixed(1)} MB`);
-  const card = sCard(sCardHead("Audio retention", `${r.default.value} d`,
-    sHelp(`Days each channel's clips are kept, then deleted; a change applies to clips already kept. `
-      + `Clips on an event, an alarm or an emergency: at least ${r.event_days ? `${r.event_days} d` : "forever"} `
-      + `(attached ones: a year in the incident). Talkgroup over channel over default.`)));
+  const usd = (v) => `$${v < 10 ? v.toFixed(2) : Math.round(v)}/mo`;
+  const tt = r.totals || {};
+  const card = sCard(sCardHead("Audio retention", `${r.default.value} d · transcripts ${r.default.t_value} d`,
+    sHelp(`Days each channel's audio and transcripts are kept, then deleted; a change applies to what is already kept. `
+      + `A transcript is never kept shorter than its audio. Talkgroup over channel over default. `
+      + `Clips on an event, an alarm or an emergency: at least ${r.event_days ? `${r.event_days} d` : "forever"}; `
+      + `attached ones are kept with the incident. Costs: S3 Standard storage at $${tt.usd_gb_month}/GB-month; `
+      + `uploads add about $1/mo.`)));
   card.id = "s-audio-retention";
-  const row = (key, label, v, edited, info, title) => {
+  if (tt.audio) {
+    const t = el("div", "dim small", `Audio ${tt.audio.clips} · ${tt.audio.gb} GB · ${usd(tt.audio.usd_month)} · `
+      + `Transcripts ${tt.transcripts.rows} · Incident audio ${tt.incident.clips} · ${tt.incident.gb} GB · ${usd(tt.incident.usd_month)}`);
+    t.title = "Live audio: the clips kept now (S3 and audio.sqlite). Transcripts: rows in the radio log. "
+      + "Incident audio: radio clips copied to incidents' attachments, kept until an admin deletes them.";
+    card.append(t);
+  }
+  const num = (sec, key, label, v, lo, hi, what) => {
     const n = el("input", "s-num");
-    n.type = "number"; n.min = String(r.min); n.max = String(r.max); n.step = "0.5";
+    n.type = "number"; n.min = String(lo); n.max = String(hi); n.step = "0.5";
     n.value = String(v);
-    n.setAttribute("aria-label", `${label}: days kept`);
-    n.addEventListener("change", () => sPost("audio_retention", { action: "set", key, value: Number(n.value) },
-      `${label}: ${n.value} d`));
+    n.setAttribute("aria-label", `${label}: ${what} days kept`);
+    n.addEventListener("change", () => sPost(sec, { action: "set", key, value: Number(n.value) }, `${label} ${what}: ${n.value} d`));
+    return n;
+  };
+  const row = (key, label, a, aEdited, t, tEdited, info, title) => {
     const lab = el("span", "s-eta-l", label);
     if (title) lab.title = title;
     const x = el("div", "row");
-    x.append(lab, n, el("span", "dim small", "d"), sState(edited ? "edited" : "default"), el("span", "dim small", info),
-      el("span", "spacer"));
-    if (edited) x.append(sBtn("Reset", key === "_default" ? `Default: ${r.default.default} d` : `Default: ${r.default.value} d`,
-      () => sPost("audio_retention", { action: "reset", key }, `${label}: default`)));
+    x.append(lab, num("audio_retention", key, label, a, r.min, r.max, "audio"), el("span", "dim small", "d audio"),
+      num("transcript_retention", key, label, t, r.t_min, r.t_max, "transcripts"), el("span", "dim small", "d text"),
+      sState(aEdited || tEdited ? "edited" : "default"), el("span", "dim small", info), el("span", "spacer"));
+    if (aEdited || tEdited) x.append(sBtn("Reset", "Back to the defaults", () => {
+      if (aEdited) sPost("audio_retention", { action: "reset", key }, `${label}: default`);
+      if (tEdited) sPost("transcript_retention", { action: "reset", key }, `${label}: default`);
+    }));
     return x;
   };
-  card.append(row("_default", "Default", r.default.value, r.default.edited, "", "Every channel without its own"));
+  const d = r.default;
+  card.append(row("_default", "Default", d.value, d.edited, d.t_value, d.t_edited, "", "Every channel without its own"));
   for (const c of r.rows) {
-    card.append(row(c.key, c.label, c.days, c.edited, c.clips ? `${c.clips} · ${mb(c.bytes)}` : "",
+    card.append(row(c.key, c.label, c.days, c.edited, c.t_days, c.t_edited, c.clips ? `${c.clips} · ${mb(c.bytes)}` : "",
       c.talkgroup != null ? `tg:${c.talkgroup}` : ""));
   }
   if (r.format) {                  // how new clips are kept: WAV only for now (FLAC / Opus would be chosen here)

@@ -64,6 +64,12 @@ DEFAULT_KEY = "_default"
 # "_format": how new clips are kept. Only "wav" (the station's 8 kHz 16-bit PCM, uncompressed) for now: the place a
 # lossless (FLAC) or lossy (Opus) encoding would be chosen later; nothing else is accepted until one is written.
 FORMAT_KEY = "_format"
+# The transcripts and metadata of a clip (the CAD's radio log): their own section, the same keys; never kept shorter than
+# the clip's audio (the prune uses the longer of the two).
+TRANSCRIPT_SECTION = "transcript_retention"
+TRANSCRIPT_DAYS = (1.0, 3650.0)
+TRANSCRIPT_DEFAULT_DAYS = 365.0
+COST_GB_MONTH = 0.023                 # S3 Standard, us-east-1, $ per GB-month (Settings shows what is kept and its cost)
 FORMATS = ("wav",)
 RETENTION_DAYS = (0.5, 365.0)         # min, max; the bucket's lifecycle hard max (18-audio-storage.sh) is HARD_MAX_DAYS
 HARD_MAX_DAYS = 400

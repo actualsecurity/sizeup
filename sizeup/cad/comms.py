@@ -72,11 +72,11 @@ from sizeup.cad.store import TZ
 
 TURN = re.compile(r"^(?P<call>.+)-t(?P<k>\d+)$")
 NOTES = "Notes"          # the /comms "channel" of event notes tagged with a unit
-KEEP_UNLINKED_S = 90 * 24 * 3600     # transmissions on no event: kept 90 days (linked ones: always)
-# #414: a transmission's transcript and metadata live at least as long as its audio may: the longest days in Settings >
-# System > Audio retention (settings_overrides "audio_retention") if longer than the 90 days, and a record (an emergency,
-# a keep, an alarm) as long as the audio bucket keeps any clip (its lifecycle hard max; [storage] audio_keep_event_days
-# is at most that).
+# Transmissions on no event: their transcripts and metadata kept a year by default (90 days before #414), per channel /
+# talkgroup in Settings > System > Audio retention ("transcript_retention"), never shorter than their audio
+# ("audio_retention"); linked ones: always; a record (an emergency, a keep, an alarm) as long as the audio bucket keeps
+# any clip (its lifecycle hard max; [storage] audio_keep_event_days is at most that).
+KEEP_UNLINKED_S = 365 * 24 * 3600
 KEEP_RECORD_S = 400 * 24 * 3600
 MAX_ROWS = 500
 MAIN_LIMIT, OTHER_LIMIT = 200, 300    # the Radio view's Main and Other: each its own newest N (#241)
@@ -427,29 +427,39 @@ class Comms:
                 self.rev += 1
         return bool(n)
 
-    def audio_keep_s(self) -> float:
-        """The longest audio retention set in Settings (#414, sizeup/audiostore.py), seconds; 0 when none is set."""
-        longest = 0.0
-        for r in self.store.q("SELECT value FROM settings_overrides WHERE section = 'audio_retention'"):
+    def _section(self, name: str) -> dict:
+        out = {}
+        for r in self.store.q("SELECT key, value FROM settings_overrides WHERE section = ?", (name,)):
             try:
-                v = json.loads(r["value"])
+                out[r["key"]] = json.loads(r["value"])
             except (TypeError, ValueError):
                 continue
-            if isinstance(v, (int, float)) and not isinstance(v, bool):
-                longest = max(longest, float(v) * 86400)
-        return longest
+        return out
+
+    def policies(self):
+        """(the transcripts' retention, the audio's) from Settings > System > Audio retention (#414,
+        sizeup/audiostore.py): the transcripts default KEEP_UNLINKED_S, the audio's overrides only (its default is
+        the hub's config, never longer than the transcripts' default)."""
+        from sizeup import audiostore
+        return (audiostore.Retention(self._section(audiostore.TRANSCRIPT_SECTION), KEEP_UNLINKED_S / 86400),
+                audiostore.Retention(self._section(audiostore.RETENTION_SECTION), 0.5))
 
     def prune(self) -> int:
-        """Transmissions on no event, older than 90 days or the longest audio retention (#414) if longer; a record
-        (emergency, kept, an alarm) not before KEEP_RECORD_S: never before its audio could be gone."""
+        """Transmissions on no event, once older than their transcripts' retention (Settings, per channel /
+        talkgroup, 365 days by default) and their audio's (a transcript never goes before its audio: the longer of the
+        two); a record (emergency, kept, an alarm) not before KEEP_RECORD_S either; one linked to an event, never."""
         now = self.clock()
-        cutoff = now - max(KEEP_UNLINKED_S, self.audio_keep_s())
+        tpol, apol = self.policies()
+        texpr, tparams = tpol.sql(now)
+        aexpr, aparams = apol.sql(now)
         alarms = bool(self.store.q("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'alarms'"))
         record = "emergency = 1 OR kept != ''" + (" OR id IN (SELECT traffic_id FROM alarms)" if alarms else "")
+        shortest = now - min(tpol.shortest_days(), 365.0) * 86400
         with self.store.tx() as db:
-            return db.execute(f"DELETE FROM radio_traffic WHERE start < ? AND id NOT IN (SELECT l.traffic_id FROM radio_links l "
-                              f"WHERE {SURE_LINK}) AND NOT (start >= ? AND ({record}))",
-                              (cutoff, now - KEEP_RECORD_S)).rowcount
+            return db.execute(f"DELETE FROM radio_traffic WHERE start < ? AND start < MIN(({texpr}), ({aexpr})) "
+                              f"AND id NOT IN (SELECT l.traffic_id FROM radio_links l WHERE {SURE_LINK}) "
+                              f"AND NOT (start >= ? AND ({record}))",
+                              (shortest, *tparams, *aparams, now - KEEP_RECORD_S)).rowcount
 
     def kept_for_events(self, ids: list[str]) -> set[str]:
         """Of these clip ids, the ones whose audio is a record (the hub's audio retention, #251): on a CAD event

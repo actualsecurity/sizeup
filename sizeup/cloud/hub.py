@@ -1259,6 +1259,10 @@ class HubApp(App):
                                    kept_older_than=(now - days * 86400) if days else None, batch=cfg.audio_prune_batch,
                                    pause_s=0.05 if background else 0.0, max_rows=None if quiet else 10 * cfg.audio_prune_batch,
                                    policy=policy, now=now)
+        try:                                      # the transcripts and metadata: their own retention, never before the audio
+            self.cad.comms.prune()
+        except Exception as e:  # noqa: BLE001 (the radio log's prune never stops the audio's)
+            self.hub.log(f"hub: radio log prune: {type(e).__name__}: {e}")
         over = getattr(self.audio, "over_cap", 0)
         if over and over != getattr(self, "_over_said", 0):
             self._over_said = over

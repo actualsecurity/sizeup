@@ -2404,13 +2404,20 @@ longer keeps what is still there. Clips from before #414 are given their channel
 pages and the CAD's radio log); the few that can't be named keep the default. Until `SIZEUP_AUDIO_BUCKET` is set the
 30 days are bounded by the size cap (500 MB of clips in `audio.sqlite`, about a day): the oldest non-records go first.
 
-**The data that goes with a clip lasts at least as long** (#414): its transcript, talker, radio ID, rig and channel are
-in the CAD's radio log (`cad.sqlite` `radio_traffic`, `sizeup/cad/comms.py` `prune`), kept 90 days or the longest audio
-retention set in Settings if that is longer; a record (an emergency, a keep, an alarm) is kept as long as the audio
-bucket keeps any clip (400 days), and a transmission linked to an event, with its links, always. The hub's monitor
-history (`hub.sqlite`: the live display's incidents, transmissions and pages, `[storage] keep_hours`, 24 h) is the
-display, not the record: it is not lengthened. The speech-to-text corrections (`stt_corrections`) are to follow the
-same rule.
+**Transcripts and metadata have their own retention, never shorter than the audio** (#414): a clip's transcript,
+talker, radio ID, rig and channel are in the CAD's radio log (`cad.sqlite` `radio_traffic`, `sizeup/cad/comms.py`
+`prune`, run at start and with the hub's audio retention every 10 min). The same card sets their days, a default
+(**365 days**; 90 before #414) and per channel / talkgroup (`POST /api/cad/settings/transcript_retention`, 1 to 3,650
+days, audited as System, retroactive). A row goes once older than **the longer** of its transcripts' and its audio's
+days, so a transcript can outlive its audio but never goes first. A record (an emergency, a keep, an alarm) is kept as
+long as the audio bucket keeps any clip (400 days); a transmission linked to an event, with its links, always. A row
+whose audio is gone shows **"Audio expired"** (a dash in place of the play button). The hub's monitor history
+(`hub.sqlite`: the live display, `[storage] keep_hours`, 24 h) is the display, not the record: unchanged. The
+speech-to-text corrections (`stt_corrections`) are to follow the same rule.
+
+**What it costs**: the card's first line is what is kept now: the live audio (clips, GB, its S3 Standard storage a
+month at $0.023/GB), the transcripts (rows) and the incident audio (radio clips copied to incidents' attachments:
+count, GB, a month), so it shows when it gets expensive; the uploads (~$1 a month) are in the hover.
 
 **Format**: the clips are kept as the station sends them, WAV (8 kHz mono 16-bit PCM, uncompressed). The card's
 `Format` (`_format` in the same settings section, admins) accepts only `wav` for now: it is where a lossless (FLAC) or

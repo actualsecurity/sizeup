@@ -615,7 +615,7 @@ def test_settings_validate_audit_and_apply_retroactively_on_the_hub(hub_fs):
     assert set(ed.section("audio_retention")) == {"_default", "FG1", "tg:307"}
     assert app._audio_retention(now) == 0                      # 30 days: both kept
     page = ed.page()["audio_retention"]
-    assert page["default"] == {"value": 30.0, "default": 0.5, "edited": True}
+    assert {k: page["default"][k] for k in ("value", "default", "edited")} == {"value": 30.0, "default": 0.5, "edited": True}
     assert {r["key"]: (r["clips"], r["days"], r["edited"]) for r in page["rows"]} == {"FG1": (1, 30.0, True),
                                                                                      "tg:307": (1, 30.0, True)}
     ed.post("audio_retention", {"action": "set", "key": "tg:307", "value": 2, "operator": "Admin"})
@@ -782,29 +782,70 @@ def test_the_hub_keeps_every_channels_clips_30_days_by_default():
     assert p.keep_days("FG1", None) == p.keep_days("Fire/EMS 15", 307) == p.keep_days("HPN Tower", None) == 30.0
 
 
-def test_transcripts_outlive_their_audio(tmp_path):
-    """The radio log (cad.sqlite radio_traffic: transcript, talker, radio ID, channel) is pruned at 90 days or the
-    longest audio retention if longer; a record not before the audio bucket's hard max."""
+def test_transcripts_have_their_own_retention_never_shorter_than_the_audio(tmp_path):
+    """The radio log (cad.sqlite radio_traffic: transcript, talker, radio ID, channel): a year by default, per channel
+    / talkgroup in Settings (retroactive), never pruned before its audio; a record not before the bucket's hard max;
+    a transmission linked to an event never."""
     from sizeup.cad import comms as comms_mod
     from tests.test_radios import Clock, cad, tx
     clock = Clock()
     c = cad(tmp_path, clock)
     t0 = clock.t
-    for tid, days in (("old-200", 200), ("old-100", 100), ("new-10", 10), ("rec-390", 390), ("rec-410", 410)):
-        c.record_traffic(tx(tid, t0 - days * DAY))
+
+    def put(tid, days, source="FG1", tg=None):
+        c.record_traffic(tx(tid, t0 - days * DAY, source=source, tg=tg))
+
+    def left():
+        return {r["id"] for r in c.store.q("SELECT id FROM radio_traffic")}
+
+    def setting(section, key, days):
+        with c.store.tx() as d:
+            d.execute("INSERT INTO settings_overrides (section, key, value, updated_at) VALUES (?, ?, ?, 0) "
+                      "ON CONFLICT(section, key) DO UPDATE SET value = excluded.value", (section, key, str(days)))
+
+    for tid, days in (("fg1-400", 400), ("fg1-300", 300), ("fg1-40", 40), ("rec-390", 390), ("rec-410", 410)):
+        put(tid, days)
+    put("tg-40", 40, "Fire/EMS 15", 307)
     with c.store.tx() as d:
         d.execute("UPDATE radio_traffic SET emergency = 1 WHERE id IN ('rec-390', 'rec-410')")
-    assert c.comms.prune() == 3                                # 90 days: old-200, old-100, rec-410 (past the hard max)
-    left = {r["id"] for r in c.store.q("SELECT id FROM radio_traffic")}
-    assert left == {"new-10", "rec-390"}
-    for tid, days in (("old-200", 200), ("old-100", 100)):
-        c.record_traffic(tx(tid, t0 - days * DAY))
-    with c.store.tx() as d:                                    # a channel's audio kept 365 days in Settings
-        d.execute("INSERT INTO settings_overrides (section, key, value, updated_at) VALUES ('audio_retention', 'FG1', "
-                  "'365', 0), ('audio_retention', '_format', '\"wav\"', 0)")
-    assert c.comms.audio_keep_s() == 365 * DAY
-    assert c.comms.prune() == 0 and {r["id"] for r in c.store.q("SELECT id FROM radio_traffic")} >= {"old-200", "old-100"}
+    assert comms_mod.KEEP_UNLINKED_S == 365 * DAY
+    assert c.comms.prune() == 2                                # a year: fg1-400 and rec-410 (past the hard max)
+    assert left() == {"fg1-300", "fg1-40", "rec-390", "tg-40"}
+    setting("transcript_retention", "tg:307", 30)              # an admin: 307's transcripts a month (retroactive)
+    setting("transcript_retention", "FG1", 30)
+    setting("audio_retention", "FG1", 60)                      # ... but FG1's audio is kept 60 days: its text too
+    assert c.comms.prune() == 2 and left() == {"fg1-40", "rec-390"}   # fg1-300 (past 60 d) and tg-40 (past 30 d)
+    setting("audio_retention", "FG1", 30)
+    put("fg1-35", 35)
+    assert c.comms.prune() == 2 and left() == {"rec-390"}
     assert comms_mod.KEEP_RECORD_S >= audiostore.HARD_MAX_DAYS * DAY
+
+
+def test_transcript_settings_validate_audit_and_show_the_longer_of_the_two(hub_fs):
+    app = hub_fs
+    ed = app.cad.settings
+    now = time.time()
+    app.apply("traffic", {"id": "TG-t", "source": "Fire/EMS 15", "talkgroup": 307, "start": now - 60, "end": now - 58,
+                          "text": "Engine 60 on scene", "status": "done"}, tone(1.0))
+    for bad in ({"key": "_format", "value": "wav"}, {"key": "FG1", "value": 0.5}, {"key": "FG1", "value": 4000},
+                {"key": "tg:x", "value": 3}):
+        with pytest.raises(CadError):
+            ed.post("transcript_retention", {"action": "set", "operator": "Admin", **bad})
+    page = ed.page()["audio_retention"]
+    assert page["default"]["t_value"] == 365.0 and page["t_min"] == 1.0 and page["t_max"] == 3650.0
+    ed.post("transcript_retention", {"action": "set", "key": "tg:0307", "value": 10, "operator": "Admin"})
+    ed.post("audio_retention", {"action": "set", "key": "tg:307", "value": 60, "operator": "Admin"})
+    row = next(r for r in ed.page()["audio_retention"]["rows"] if r["key"] == "tg:307")
+    assert (row["days"], row["t_days"], row["edited"], row["t_edited"]) == (60.0, 60.0, True, True)   # text >= audio
+    audit = [(r["key"], r["old"], r["new"]) for r in ed.audit_log("system") if r["key"].startswith("transcript_")]
+    assert audit == [("transcript_retention/tg:307", "default", "10 d")]
+    totals = ed.page()["audio_retention"]["totals"]
+    assert totals["audio"]["clips"] == 1 and totals["transcripts"]["rows"] >= 1 and totals["incident"] == {
+        "clips": 0, "gb": 0.0, "usd_month": 0.0} and totals["usd_gb_month"] == 0.023
+    b = ed.export()
+    b["overrides"]["transcript_retention"] = {"FG1": 0.1}
+    with pytest.raises(CadError, match="transcript_retention"):
+        ed.post("import", {"action": "dry_run", "settings": b, "operator": "Admin"})
 
 
 def test_unused_dispatch_previews_are_kept_with_the_clips_on_the_hub(tmp_path, monkeypatch):

@@ -206,7 +206,10 @@ POST /api/cad/settings/map_display        {action: set {key: detail_zoom | activ
                                           the maps (#376, sizeup/cad/mapview.py); admins
 POST /api/cad/settings/audio_retention    {action: set {key: _default | a channel's name | tg:<n>, value: days} | reset
                                           {key}}: how long the hub keeps that channel's clips, the ones already kept too
-                                          (#414, sizeup/audiostore.py); admins
+                                          (#414, sizeup/audiostore.py); _format: wav only for now; admins
+POST /api/cad/settings/transcript_retention  {action: set {key: _default | a channel's name | tg:<n>, value: days} |
+                                          reset {key}}: how long the radio log keeps that channel's transcripts and
+                                          metadata (never shorter than its audio; sizeup/cad/comms.py prune); admins
 POST /api/cad/settings/alert_mutes        {action: mute {key: a health alert kind, hours?} | unmute {key}}: shown on
                                           Settings > Health, not pushed (#340, sizeup/cloud/health.py); admins
 """
