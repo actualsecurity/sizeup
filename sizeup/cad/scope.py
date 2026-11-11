@@ -24,7 +24,7 @@ from __future__ import annotations
 import json
 import re
 
-from sizeup.cad.sources import PAGING, dept_code
+from sizeup.cad.sources import PAGING, dept_code, is_placeholder
 from sizeup.radio.tones import base_name
 
 FULL, UNITS = "full", "units"
@@ -95,7 +95,7 @@ def from_units(units, departments: dict[str, str]) -> tuple[str, list[str]] | No
     depts = list(dict.fromkeys(codes[dept_code(u)] for u in units or () if dept_code(u) in codes))
     if depts:
         return FULL, depts
-    if any(dept_code(u) for u in units or ()):
+    if any(dept_code(u) and not is_placeholder(u) for u in units or ()):    # a placeholder is never "Specific units"
         return UNITS, []
     return None
 

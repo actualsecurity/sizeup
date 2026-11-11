@@ -27,6 +27,12 @@ record (the hub, or all-in-one), on top of the incident sources (sizeup/cad/sour
       paged    a page attached to it (the paging decoder's report): "Paged 14:31:02" at the tone time (source radio);
                still queued, the page accepts it as a feed report would. The units the page names that are exactly
                on our boards are dispatched at the page's time, by the units rules below (#365)
+      placeholder a department's placeholder on our boards (cad_lists.json unit_placeholders: "department dispatched,
+               no unit yet") the feed lists is dispatched first, like a unit; it never takes the feed's statuses, and
+               the store frees it once a unit of its department signs on or responds there (store.py
+               _release_placeholders: any source). Released, a repeat listing never puts it back; the feed listing
+               it anew (dropped, then listed again) does, only with none of its department's units on the call. Not
+               when one of them has already signed on there
       units    each unit the feed newly lists that is ours is dispatched at the feed's dispatched time: matched exactly
                against the board's codes and spoken names (spaces and dashes aside), or the data file's
                "feed_unit_aliases" {feed code: board code}; codes that match none are listed on the timeline, never
@@ -68,7 +74,7 @@ from datetime import datetime
 
 import re
 
-from sizeup.cad.sources import FEED_SOURCE, PAGING
+from sizeup.cad.sources import FEED_SOURCE, PAGING, is_placeholder
 from sizeup.cad.store import OPEN, TZ, CadError
 
 MODES = {"60control": "60 Control dispatching", "pcfd": "PCFD dispatching"}
@@ -359,9 +365,21 @@ class AutoDispatch:
         for k, code in self._aliases().items():
             if code in by:
                 out[k] = by[code]
+        L = self.store.lists
         for k in self._depts():
-            out.pop(k, None)
+            if k in out and not L.placeholder(out[k]["name"]):   # a placeholder on the board is assigned (_assign)
+                out.pop(k, None)
         return out
+
+    def _dept_units_on(self, iid: int, ph: str, signed_on: bool) -> bool:
+        """A unit (not a placeholder) of placeholder ph's department on this call now; signed_on: one that has responded
+        (an en route or on location time), whose placeholder store.py has released."""
+        L = self.store.lists
+        dept = L.department_of(ph)
+        return any(not L.placeholder(r["name"]) and L.department_of(r["name"]) == dept
+                   and (not signed_on or r["enroute_at"] is not None or r["onscene_at"] is not None)
+                   for r in self.store.q("SELECT u.name, a.enroute_at, a.onscene_at FROM assignments a JOIN units u "
+                                         "ON u.id = a.unit_id WHERE a.incident_id = ? AND a.cleared_at IS NULL", (iid,)))
 
     def _held(self, iid: int, why: str, op: str) -> None:
         r = self._tracking(iid)
@@ -417,7 +435,7 @@ class AutoDispatch:
         uts, outs = new.get("unit_times") or {}, old.get("unit_times") or {}
         had = set(old.get("units") or [])
         fresh = [n for n in units if n not in had]
-        unknown = [n for n in fresh if _key(n) not in ours and _key(n) not in depts]
+        unknown = [n for n in fresh if _key(n) not in ours and _key(n) not in depts and not is_placeholder(n)]
         for name in fresh:                               # a department entry: that department paged, never a unit
             if _key(name) in depts:
                 t = (uts.get(name) or {}).get("dispatched") or times.get("dispatched")
@@ -427,16 +445,18 @@ class AutoDispatch:
         if unknown:
             with self.store.tx() as db:
                 self.store._event(db, iid, "auto", f"{label} units not on our boards (not dispatched): {', '.join(unknown)}", op)
-        for name in fresh:                               # newly listed: dispatched at the feed's time
+        L = self.store.lists
+        first = sorted(fresh, key=lambda n: not (_key(n) in ours and L.placeholder(ours[_key(n)]["name"])))
+        for name in first:                               # newly listed: dispatched at the feed's time, placeholders first
             u = ours.get(_key(name))
             if u is not None:
                 t = (uts.get(name) or {}).get("dispatched") or times.get("dispatched")
-                self._assign(iid, u, t, op, f"dispatched (county {_hm(t)})" if t else "dispatched (county)")
-        rigs = [n for n in units if _key(n) not in depts]                      # apparatus only (#370)
+                self._assign(iid, u, t, op, f"dispatched (county {_hm(t)})" if t else "dispatched (county)", again=True)
+        rigs = [n for n in units if _key(n) not in depts and not is_placeholder(n)]   # apparatus only (#370)
         single = rigs[0] if len(rigs) == 1 and _key(rigs[0]) in ours and not uts.get(rigs[0]) else None
         for name in dict.fromkeys([*uts, *([single] if single else [])]):
             u = ours.get(_key(name))
-            if u is None:
+            if u is None or L.placeholder(u["name"]):    # a placeholder never responds: its department's units do
                 continue
             if name in uts:
                 now_t, was = uts.get(name) or {}, outs.get(name) or {}
@@ -504,9 +524,10 @@ class AutoDispatch:
             return
         ours, op = self._ours(), f"{label} · auto"
         times, uts = data.get("times") or {}, data.get("unit_times") or {}
-        for name in data.get("units") or []:
+        L = self.store.lists
+        for name in sorted(data.get("units") or [], key=lambda n: not (_key(n) in ours and L.placeholder(ours[_key(n)]["name"]))):
             u = ours.get(_key(name))
-            if u is not None:
+            if u is not None:                            # placeholders first
                 t = (uts.get(name) or {}).get("dispatched") or times.get("dispatched")
                 self._assign(iid, u, t, op, f"dispatched (listed by {label}" + (f" {_hm(t)})" if t else ")"))
 
@@ -545,13 +566,19 @@ class AutoDispatch:
     def _on_here(self, iid: int, uid: int) -> dict | None:
         return self.store.one("SELECT * FROM assignments WHERE incident_id = ? AND unit_id = ? AND cleared_at IS NULL", (iid, uid))
 
-    def _assign(self, iid: int, u: dict, t: float | None, op: str, verb: str) -> bool:
+    def _assign(self, iid: int, u: dict, t: float | None, op: str, verb: str, again: bool = False) -> bool:
+        """again: the feed newly lists it now (not a repeat): a department's placeholder released here before comes
+        back only then, and only with none of its department's units on the call."""
         L = self.store.lists
         u = self.store.unit(u["id"])
         if self._manual(iid, f"unit:{u['name']}") or u["incident_id"] == iid:
             return u["incident_id"] == iid
+        ph = L.placeholder(u["name"])
+        if ph and self._dept_units_on(iid, u["name"], signed_on=True):
+            return False                                 # its department's unit already signed on: nothing to hold
         if self.store.one("SELECT 1 AS x FROM assignments WHERE incident_id = ? AND unit_id = ?", (iid, u["id"])):
-            return False                                 # was on it and cleared: never put back by automation (H1)
+            if not (ph and again and not self._dept_units_on(iid, u["name"], signed_on=False)):
+                return False                             # was on it and cleared: never put back by automation (H1)
         if L.role(u["status"]) == "oos":
             return False
         if u["incident_id"]:

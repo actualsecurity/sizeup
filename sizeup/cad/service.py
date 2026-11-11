@@ -192,6 +192,10 @@ class Cad:
         if released:
             log(f"CAD: released {len(released)} unit(s) left on a closed call's status: "
                 + ", ".join(f"{r['unit']} {r['from']} -> {r['to']} ({r['number'] or 'no number'})" for r in released))
+        self.store.quarters_status = lambda: self.eta.quarters_status    # where a released placeholder goes (AQ)
+        freed = self.store.release_placeholders()    # a department's placeholder its unit already signed on for: back
+        if freed:                                    # in quarters (the rule from now on, for calls open from before)
+            log(f"CAD: released {len(freed)} department placeholder(s) a unit of theirs signed on for")
         if runcards.seed(self.store, fill=bool(self.store.migrated)):
             log("CAD: seeded default run cards (a stand-in: edit them to PCFD policy)")
         self.radios = Registry(self.store, s.radio_seed or None)
