@@ -98,7 +98,7 @@ window.TrainLayer = (() => {
   function token(name, fallback) {
     try { return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || fallback; } catch (_) { return fallback; }
   }
-  const tz = () => (window.cad && cad.scene && cad.scene.timezone) || "America/New_York";
+  const tz = () => (typeof cad !== "undefined" && cad && cad.scene && cad.scene.timezone) || "America/New_York";
   function hm(t, secs) {
     if (!t) return "";
     try {
