@@ -109,8 +109,11 @@ def is_placeholder(unit, lists=None) -> bool:
     """A department placeholder, not apparatus (DPT239, DPT266 ...: from the county feed): never on the maps, never
     located (a placeholder set "On location" by hand too), in a firehouse's count or rig list, never followed, no icon
     (#384, the user's rule). unit: a unit dict ({name} or a marker's {unit}) or its code; lists: the CAD's Lists (else
-    data/cad_lists.json's). Lists.placeholder (data/cad_lists.json "unit_placeholders") is the one test where it exists.
+    data/cad_lists.json's). In order: the row's own "placeholder" flag (Store.units(), #400), Lists.placeholder (data/
+    cad_lists.json "unit_placeholders"), then the DPT* pattern.
     TODO: drop the DPT* fallback once Lists.placeholder is on main."""
+    if isinstance(unit, dict) and isinstance(unit.get("placeholder"), bool):
+        return unit["placeholder"]                   # Store.units()'s own flag (#400) first
     code = unit if isinstance(unit, str) else str(unit.get("name") or unit.get("unit") or "")
     lists = lists if lists is not None else _default_lists()
     if lists is not None and hasattr(lists, "placeholder"):

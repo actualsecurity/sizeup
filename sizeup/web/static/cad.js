@@ -1772,7 +1772,11 @@ function statusChoices(u, where) {
 // call's draft, an edit form); no map showing it: the button flashes instead.
 // a department placeholder (DPT239 ...: mapview.is_placeholder) is never followed nor recommended (#384); it may still
 // be on an incident's assigned list. TODO: the lists' placeholder test once no-dept-units (#400) is on main.
-const placeholderUnit = (name) => /^DPT/i.test(String(name || "").trim());
+function placeholderUnit(name) {
+  const u = ((cad.state && cad.state.units) || []).find((x) => x.name === name);
+  if (u && typeof u.placeholder === "boolean") return u.placeholder;          // the hub's own flag (#400) first
+  return /^DPT/i.test(String(name || "").trim());
+}
 const onMap = (name) => !placeholderUnit(name) && !!(window.CadMap && CadMap.onMap && CadMap.onMap(name));
 const FLASH_MS = 1200;
 function followBtn(name) {

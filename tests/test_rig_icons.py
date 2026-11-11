@@ -596,9 +596,36 @@ def test_a_placeholder_is_never_recommended():
 
 def test_the_page_never_offers_a_placeholder_to_follow_or_dispatch():
     js = (STATIC / "cad.js").read_text()
-    assert "const onMap = (name) => !placeholderUnit(name) &&" in js               # every Follow button is gated on onMap
+    assert "const onMap = (name) => !placeholderUnit(name) &&" in js and "typeof u.placeholder === \"boolean\"" in js               # every Follow button is gated on onMap
     for line in [ln for ln in js.splitlines() if "followBtn(" in ln and "function followBtn" not in ln]:
         assert "onMap(" in line, line
     assert 'r.units = (r.units || []).filter((u) => !placeholderUnit(u.name));' in js
     cm = (STATIC / "cadmap.js").read_text()
     assert "const placeholder = (m) => /^DPT/i.test(" in cm
+
+
+def test_a_row_flagged_placeholder_is_skipped_whatever_its_code():
+    """#400's final shape: one row a unit with placeholder and incident_ids. The row's flag first: a made-up "X239"
+    flagged, dispatched (DP) on two located calls, is no marker (no place "incident"), not unset, not routed, not
+    located; a real rig flagged False is drawn as ever."""
+    role = {"DP": "dispatched", "RS": "enroute", "AV": "free"}.get
+    ph = {"id": 9100, "name": "X239", "kind": "other", "response": "fire", "board": "main", "status": "DP",
+          "station": HQ_FH["name"], "incident_id": 12, "incident_ids": [11, 12], "placeholder": True}
+    e60 = {"id": 9101, "name": "E60", "kind": "engine", "board": "main", "status": "RS", "station": HQ_FH["name"],
+           "incident_id": 11, "incident_ids": [11], "placeholder": False}
+    assert mapview.is_placeholder(ph) and not mapview.is_placeholder(e60)
+    assert mapview.is_placeholder({"name": "DPT239", "placeholder": True})
+    s = mapview.map_slice([ph, e60], CALLS, role, [HQ_FH], positions={}, now=0.0)
+    assert [m["unit"] for m in s["markers"]] == ["E60"] and s["unset"] == []
+    assert mapview.locations([ph, e60], CALLS, role, [HQ_FH])["X239"] is None
+    assert mapview.place(dict(ph, status="DP"), "dispatched", None, CALLS[1], None, 0.0) is None
+    from sizeup.cad import eta, routes
+    calls = []
+    r = routes.Routes(graph=lambda: object(), params=lambda: eta.Params(), spawn=lambda fn: fn(), log=lambda m: None,
+                      clock=lambda: 1000.0)
+    r._route = lambda g, m, *a, **k: calls.append(m["unit"])
+    r.penalties = lambda g, now: ({}, ())
+    m = {"unit": "X239", "placeholder": True, "look": "dispatched", "incident_id": 12, "line_to": [-73.672, 41.012],
+         "lon": -73.6669, "lat": 41.0025}
+    r.for_map([m], 1000.0, CALLS)
+    assert calls == []
