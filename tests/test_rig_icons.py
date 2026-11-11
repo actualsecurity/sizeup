@@ -527,3 +527,78 @@ rowOf("E60").fire("click"); out.follow = rm.fol.id;
     assert o["count"] == "2"                                                     # E62, E63 in quarters, once each
     assert o["rows"] == [["E60", "26-000012, 26-000011"], ["E61", "26-000011"], ["E62", ""], ["E63", ""]]
     assert o["follow"] == "E60"
+
+
+# ---- placeholders on the map side, whatever Store.units()'s shape (the #400 review) ------------------------------------
+
+
+def per_assignment_rows():
+    """The other shape: one row per assignment (E60 and DPT239 on calls 11 and 12: two rows each)."""
+    rows = []
+    for u in units_rows():
+        ids = u["incident_ids"] or [None]
+        for i in ids:
+            rows.append({k: v for k, v in u.items() if k != "incident_ids"} | {"incident_id": i})
+    return rows
+
+
+def test_either_units_shape_gives_one_marker_a_unit_and_no_placeholder():
+    role = {"RS": "enroute", "OL": "onscene", "AV": "free"}.get
+    for rows in (units_rows(), per_assignment_rows()):
+        s = mapview.map_slice(rows, CALLS, role, [HQ_FH], positions={}, now=0.0)
+        names = [m["unit"] for m in s["markers"]]
+        assert sorted(names) == ["E60", "E61", "E62", "E63"], names              # one each
+        e60 = next(m for m in s["markers"] if m["unit"] == "E60")
+        assert e60["incident_id"] == 12 and e60["incident_numbers"] == ["26-000012", "26-000011"]
+        assert not any(u["unit"] == "DPT239" for u in s["unset"])
+    assert len(per_assignment_rows()) == 7
+
+
+def test_a_placeholder_on_a_located_call_gets_no_incident_marker_nor_an_unset_entry():
+    """DPT239 is kind other, response fire (is_fire true): on a call with a point, on location or not, with a station or
+    none, free or on a call: never a marker (place "incident" included), never in map.unset."""
+    role = {"RS": "enroute", "OL": "onscene", "AV": "free"}.get
+    base = {"id": 9001, "name": "DPT239", "kind": "other", "response": "fire", "board": "main"}
+    assert mapview.is_fire(base)
+    for st in (HQ_FH["name"], ""):
+        for status, inc in (("OL", 11), ("RS", 11), ("AV", None)):
+            u = dict(base, status=status, station=st, incident_id=inc, incident_ids=[inc] if inc else [])
+            s = mapview.map_slice([u], CALLS, role, [HQ_FH], positions={}, now=0.0)
+            assert s["markers"] == [] and s["unset"] == [], (st, status)
+            assert mapview.place(u, role(status), HQ_FH if st else None, CALLS[0] if inc else None, None, 0.0) is None
+
+
+def test_a_placeholder_is_never_routed_nor_trailed():
+    from sizeup.cad import eta, routes
+    calls = []
+    r = routes.Routes(graph=lambda: object(), params=lambda: eta.Params(), spawn=lambda fn: fn(), log=lambda m: None,
+                      clock=lambda: 1000.0)
+    r._route = lambda g, m, *a, **k: calls.append(m["unit"])                   # what would be routed
+    r.penalties = lambda g, now: ({}, ())
+    going = lambda n: {"unit": n, "look": "responding", "incident_id": 11, "line_to": [-73.66, 41.0085],  # noqa: E731
+                       "lon": -73.6669, "lat": 41.0025, "place": "position", "at": 999.0}
+    out = r.for_map([going("DPT239"), going("E60")], 1000.0, CALLS)
+    assert calls == ["E60"] and "DPT239" not in r.trails and "E60" in r.trails
+    assert all(x.get("unit") != "DPT239" for x in out["routes"])
+
+
+def test_a_placeholder_is_never_recommended():
+    c = Cad(Settings(), log=lambda m: None, clock=Clock())
+    uid = lambda n: next(u["id"] for u in c.store.units() if u["name"] == n)  # noqa: E731
+    for n in ("DPT239", "E60"):
+        c.unit_station(uid(n), {"station": c.firehouses[0]["name"], **OP})
+    inc = c.create({"type": "STRU", "address": "100 Example Ave", "lat": 41.0085, "lon": -73.6600, **OP})
+    r = c.recommend(inc["id"], {})
+    assert "E60" in [u["name"] for u in r["units"]]
+    assert "DPT239" not in [u["name"] for u in r["units"]]
+    assert uid("DPT239") not in (r.get("others") or {})
+
+
+def test_the_page_never_offers_a_placeholder_to_follow_or_dispatch():
+    js = (STATIC / "cad.js").read_text()
+    assert "const onMap = (name) => !placeholderUnit(name) &&" in js               # every Follow button is gated on onMap
+    for line in [ln for ln in js.splitlines() if "followBtn(" in ln and "function followBtn" not in ln]:
+        assert "onMap(" in line, line
+    assert 'r.units = (r.units || []).filter((u) => !placeholderUnit(u.name));' in js
+    cm = (STATIC / "cadmap.js").read_text()
+    assert "const placeholder = (m) => /^DPT/i.test(" in cm

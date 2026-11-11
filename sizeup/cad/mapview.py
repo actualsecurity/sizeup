@@ -384,6 +384,29 @@ def place(unit: dict, role: str, station: dict | None = None, incident: dict | N
                 line_to=inc_ll if going else None)
 
 
+def _one_row_each(units: list[dict], open_incs: dict) -> list[dict]:
+    """Store.units() as one row a unit, whichever shape it comes in (#384): one row per assignment (several for a unit
+    on several calls) or one row a unit with incident_ids. A unit's row: its latest open call's (the highest incident
+    id), with every call's id in incident_ids; the units in their first row's order."""
+    rows: dict[str, list[dict]] = {}
+    for u in units:
+        rows.setdefault(u["name"], []).append(u)
+    out = []
+    for rs in rows.values():
+        if len(rs) == 1:
+            out.append(rs[0])
+            continue
+        ids = []
+        for r in rs:
+            for i in [r.get("incident_id"), *(r.get("incident_ids") or [])]:
+                if i is not None and i not in ids:
+                    ids.append(i)
+        on = [r for r in rs if r.get("incident_id") in open_incs]
+        best = max(on, key=lambda r: r["incident_id"]) if on else rs[0]
+        out.append(dict(best, incident_ids=ids))
+    return out
+
+
 def map_slice(units: list[dict], incidents: list[dict], role, firehouses: list[dict],
               positions: dict | None = None, now: float = 0.0, joint=lambda code: "",
               clears: dict | None = None, params: eta.Params | None = None, display: dict | None = None,
@@ -396,7 +419,7 @@ def map_slice(units: list[dict], incidents: list[dict], role, firehouses: list[d
     by_name = {f["name"]: f for f in firehouses}
     open_incs = {i["id"]: i for i in incidents if i["status"] in ("queued", "pending", "active")}
     markers, unset = [], []
-    for u in units:
+    for u in _one_row_each(units, open_incs):
         if not (u.get("board") or u.get("incident_id")) or is_placeholder(u, lists):
             continue                                 # (a department placeholder: never drawn nor listed, #384)
         inc = open_incs.get(u.get("incident_id"))

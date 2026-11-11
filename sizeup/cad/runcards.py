@@ -327,7 +327,9 @@ def recommend(store: Store, typ: str, subtype: str = "", incident_id: int | None
     units = store.units()
     on_here = [u for u in units if incident_id is not None and u["incident_id"] == incident_id]
     inc = store.incident(incident_id) if incident_id is not None else None
-    free = [u for u in units if u["status"] in L.free and u["incident_id"] is None]
+    from sizeup.cad.mapview import is_placeholder               # (here: mapview imports nothing of this module's)
+    free = [u for u in units if u["status"] in L.free and u["incident_id"] is None
+            and not is_placeholder(u, L)]                           # a department placeholder is never offered (#384)
     est = estimates(free, where, inc, p, road)
     located = inc is not None and inc.get("lat") is not None and inc.get("lon") is not None
     nearest = p.order == "nearest" and located and where is not None
