@@ -598,7 +598,7 @@ class Cad:
                                 clears=self.clears(now), params=self.eta, display=self.map_display)
         if self.routes is not None:
             try:
-                out.update(self.routes.for_map(out["markers"], now))     # routes, trails (#360)
+                out.update(self.routes.for_map(out["markers"], now, incs))     # routes, trails (#360)
             except Exception as e:  # noqa: BLE001 - routing's trouble never breaks the console
                 self.log(f"CAD: routes: {type(e).__name__}: {e}")
         return out

@@ -568,7 +568,9 @@ def test_a_later_page_upgrades_on_evidence_and_the_latest_page_wins(rig, closed)
     assert "Page: all PCFD → units" in events(rig, iid)
 
 
-@pytest.mark.parametrize("evidence", ["tones", "words"])
+@pytest.mark.parametrize("evidence", ["tones", "full department response, respond to", "all units respond to",
+                                      "all companies, please respond to", "general alarm, respond to",
+                                      "all hands, respond to", "full assignment, respond to"])
 def test_new_tones_or_full_department_said_upgrade_at_once(rig, evidence):
     rig.mode("pcfd")
     iid = rig.page(text=UNITS_PAGE)["id"]
@@ -576,9 +578,20 @@ def test_new_tones_or_full_department_said_upgrade_at_once(rig, evidence):
     if evidence == "tones":                                            # a new dispatch: another department's tones too
         m = rig.monitor.on_page("p2", ["Port Chester FD", "Rye Brook FD"], parse(FULL_PAGE), at=rig.clock.t)
         rig.cad.from_monitor(m)
-    else:
-        rig.page(pid="p2", text=FULL_PAGE.replace("respond to", "full department response, respond to"))
+    else:                                                              # one page saying so is enough
+        rig.page(pid="p2", text=FULL_PAGE.replace("respond to", evidence))
     assert scope_of(rig, iid)[0] == "Full dept"
+
+
+@pytest.mark.parametrize("said", ["all units be advised, respond to", "all units clear, respond to",
+                                  "all units responding, be advised, respond to", "all apparatus return to quarters, respond to",
+                                  "overall unit response to", "small handset, respond to"])
+def test_all_units_without_the_order_to_respond_is_no_upgrade(rig, said):
+    rig.mode("pcfd")
+    iid = rig.page(text=UNITS_PAGE)["id"]
+    rig.at(60)
+    rig.page(pid="p2", text=FULL_PAGE.replace("respond to", said))    # one lossy reading: no evidence in its words
+    assert scope_of(rig, iid) == ("Specific units", "page", "")
 
 
 def test_the_feed_never_overrides_a_page_in_either_order(rig):
