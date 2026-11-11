@@ -1291,12 +1291,15 @@ class HubApp(App):
             if self._sweep_due(now):
                 self._swept_at = now                  # once a night: objects no row names, a day old (#414)
                 try:
-                    gone = self.audio.sweep_orphans(pause_s=0.2, now=now)
+                    gone = self.audio.sweep_orphans(pause_s=0.2, now=now, known=self._clip_known)
                 except Exception as e:  # noqa: BLE001 (S3 down: the next night)
                     gone = 0
                     self.hub.log(f"audio: orphan sweep: {type(e).__name__}: {str(e)[:120]}")
                 if gone:
                     self.hub.log(f"audio: {gone} object(s) in the store that no clip named, deleted")
+                if self.audio.sweep_restored:
+                    self.hub.log(f"audio: {self.audio.sweep_restored} clip row(s) audio.sqlite had lost made again from "
+                                 "their objects (the radio log still knew them)")
                 if self.audio.sweep_status:
                     self.hub.log(f"audio: orphan sweep stopped: {self.audio.sweep_status}")
                     try:
@@ -1313,6 +1316,26 @@ class HubApp(App):
             return False
         since = getattr(self, "_lead_since", None)
         return since is not None and time.monotonic() - since >= SWEEP_LEADER_S and not self.audio.pending()[0]
+
+    def _clip_known(self, ids: list[str]) -> dict[str, tuple[str, int | None, float]]:
+        """The clip ids the rest of the hub knows (the monitor's transmissions and pages, the CAD's radio log): {id:
+        (channel, talkgroup, when it ended)}. The orphan sweep never deletes these (#414)."""
+        want, out = set(ids), {}
+        with self.store._lock:
+            for t in list(self.store.loose) + [t for i in self.store.incidents for t in i.traffic]:
+                if t.id in want:
+                    out[t.id] = (t.source, t.talkgroup, t.end)
+        with self._lock:
+            for p in self.pages:
+                if p.id in want:
+                    out[p.id] = (p.label, None, p.end)
+        rest = [i for i in ids if i not in out]
+        for k in range(0, len(rest), 500):
+            chunk = rest[k:k + 500]
+            rows = self.cad.store.q(f"SELECT id, channel, talkgroup, end FROM radio_traffic WHERE id IN "
+                                    f"({','.join('?' * len(chunk))})", chunk)
+            out.update((r["id"], (r["channel"], r["talkgroup"], r["end"])) for r in rows)
+        return out
 
     def _clip_channels(self, ids: list[str]) -> dict[str, tuple[str, int | None]]:
         """The channel and talkgroup of these clips (the migration's backfill, #414): the hub's transmissions and

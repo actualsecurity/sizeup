@@ -2475,11 +2475,15 @@ the bytes in `audio.sqlite` (`SIZEUP_AUDIO_DIR=<folder>` puts them in a local fo
   `<DeleteResult>` counts as nothing deleted; a refused key keeps its row), `audio_prune_batch` rows a transaction.
   **Nothing is ever deleted from the store without a real lease** (the hub's fence, ours and fresh): a hub without
   its supervisor (compose, a Mac with the bucket set) keeps every clip whatever its retention, and says so. A clip
-  whose object is really gone (a 404) plays as "no audio" and its incident copy is saved with the transcript only
-  (not retried forever); any other error is retried.
+  whose object is really gone (S3's `NoSuchKey`) plays as "no audio" and its incident copy is saved with the
+  transcript only (not retried forever; one summary line in the log); any other error is retried, and a store that
+  refuses reads (`NoSuchBucket`, `AccessDenied`, another 404) is said loudly in the log as a setup error.
 * **Orphans**: once a night (off-peak) the leader lists `audio/clip/` (ListObjectsV2) and deletes clip objects a day
   old that no row names (a crash between a delete's two halves, a rollback's prune). Never dispatch audio, never a
-  date folder older than the oldest clip `audio.sqlite` knows (the lifecycle's), never a key a row names. Only with a
+  date folder older than the oldest clip `audio.sqlite` knows (the lifecycle's), never an object uploaded within an
+  hour of the newest clip it knows (a restore a little behind), never a key a row names, and never a clip whose id the
+  rest of the hub still knows (the CAD's radio log, the monitor): that one's row is **made again** from its key and
+  what is known (channel, when), so it plays and its retention applies. Only with a
   real lease held 24 hours already and the migration done. It looks first, over the whole listing: more than 200
   orphans, or more than 2 % of the clip objects looked at (at least 20), or no clip rows at all, and **nothing is
   deleted**: the log and the status topic say so (an empty, old or wrong `audio.sqlite` would otherwise empty the

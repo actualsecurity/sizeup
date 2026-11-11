@@ -490,9 +490,12 @@ class Comms:
                     (*params, cutoff, after, now - KEEP_RECORD_S, self.PRUNE_BATCH))
                 if not rows:
                     break
-                with self.store.tx() as db:
-                    db.executemany("DELETE FROM radio_traffic WHERE rowid = ?", [(r["r"],) for r in rows])
-                n += len(rows)
+                with self.store.tx() as db:            # the conditions again: a link confirmed since the look keeps it
+                    deleted = db.executemany(f"DELETE FROM radio_traffic WHERE rowid = ? AND NOT EXISTS (SELECT 1 FROM "
+                                   f"radio_links l WHERE l.traffic_id = radio_traffic.id AND {SURE_LINK}) "
+                                   f"AND NOT (start >= ? AND ({record}))",
+                                   [(r["r"], now - KEEP_RECORD_S) for r in rows]).rowcount
+                n += deleted
                 after = rows[-1]["start"]
                 if len(rows) < self.PRUNE_BATCH:
                     break

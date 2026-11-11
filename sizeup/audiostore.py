@@ -52,11 +52,12 @@ DAY = 86400.0
 class StoreError(OSError):
     """The store couldn't do it (network, S3's 5xx, a 403, a missing key). An OSError, so the attachments copy
     (sizeup/attachments.py _transient) tries again later instead of storing an attachment without its audio. missing:
-    the object isn't there (a 404): no use trying again."""
+    the object isn't there (S3's NoSuchKey): no use trying again. config: the store itself refuses (another 404, a
+    NoSuchBucket, a 403 AccessDenied): its setup, tried again and said loudly."""
 
-    def __init__(self, msg: str = "", missing: bool = False):
+    def __init__(self, msg: str = "", missing: bool = False, config: bool = False):
         super().__init__(msg)
-        self.missing = missing
+        self.missing, self.config = missing, config
 
 
 # -- the retention per channel / talkgroup (Settings > System > Audio retention; sizeup/cad/settings.py) --------------
@@ -253,7 +254,8 @@ class S3AudioStore(AudioStore):
         try:
             return self.s3.get(key)
         except aws.AwsError as e:
-            raise StoreError(str(e), missing=e.status == 404) from None
+            raise StoreError(str(e), missing=e.status == 404 and e.code == "NoSuchKey",
+                             config=e.status in (403, 404) and e.code != "NoSuchKey") from None
 
     def delete(self, keys: list[str]) -> set[str]:
         """DeleteObjects, at most DELETE_MAX keys a call (Quiet: only the failures come back). The keys gone. An answer

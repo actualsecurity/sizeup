@@ -19,6 +19,7 @@ import struct
 import threading
 import time
 from collections import OrderedDict
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
@@ -63,6 +64,7 @@ ORPHAN_AGE_S = 86400.0               # the orphan sweep: an object with no row t
 ORPHAN_MAX_N = 200                   # ... and its circuit breaker: more orphans than this in one sweep, nothing deleted
 ORPHAN_SHARE = 0.02                  # ... or more than this share of the clip objects looked at
 ORPHAN_MIN_ALLOW = 20                # ... (a small bucket: up to this many whatever the share)
+SWEEP_MARGIN_S = 3600.0              # ... and never an object uploaded within this of the newest clip audio.sqlite knows
 
 
 def _connect(path: str, incremental: bool = False) -> sqlite3.Connection:
@@ -230,6 +232,7 @@ class AudioDb:
         self._upload_after = 0.0                   # monotonic: upload_pending waits until this (backoff)
         self._upload_fails = 0
         self._said: dict[str, float] = {}
+        self._missing = 0
         self.wake = threading.Event()              # put() -> the uploader, at once
 
     def _say(self, what: str, msg: str, every_s: float = 600.0) -> None:
@@ -340,9 +343,14 @@ class AudioDb:
         try:
             b = self.store.get(key)
         except Exception as e:  # noqa: BLE001
-            if getattr(e, "missing", False):           # really gone (a 404): no audio, for good (a copy: transcript only)
-                self._say(f"missing-{aid}", f"audio: {aid}'s object is not in the store (404): no audio for it", 1e9)
+            if getattr(e, "missing", False):           # really gone (NoSuchKey): no audio, for good (a copy: transcript only)
+                self._missing += 1
+                self._say("missing", f"audio: {self._missing} clip(s) so far whose object is not in the store "
+                                     f"(NoSuchKey, the latest {aid}): no audio for them")
                 return None
+            if getattr(e, "config", False):            # the bucket gone, access denied: the store's setup, said loudly
+                self._say("config", f"audio: THE AUDIO STORE REFUSES READS ({str(e)[:160]}): check SIZEUP_AUDIO_BUCKET "
+                                    "and the task role (sizeup-aws 18-audio-storage.sh)", 300.0)
             self._say("get", f"audio: could not read {aid} from the store: {type(e).__name__}: {str(e)[:120]}", 60.0)
             if strict:
                 raise StoreError(f"audio {aid}: {type(e).__name__}: {str(e)[:120]}") from None
@@ -536,33 +544,47 @@ class AudioDb:
                     time.sleep(pause_s)
         return n
 
-    def sweep_orphans(self, min_age_s: float = ORPHAN_AGE_S, pause_s: float = 0.0, now: float | None = None) -> int:
+    def sweep_orphans(self, min_age_s: float = ORPHAN_AGE_S, pause_s: float = 0.0, now: float | None = None,
+                      known: Callable[[list[str]], dict[str, tuple[str, int | None, float]]] | None = None) -> int:
         """Clip objects in the store that no row names (a release before #414 pruned the row, a crash between a
         delete's two halves), older than min_age_s: deleted. Never dispatch audio (only audio/clip/), never a date
-        folder older than the oldest clip audio.sqlite knows (the bucket's lifecycle has those), never a key a row
-        names, and only with a real lease (may_delete). A look first, over the whole listing; then a circuit breaker:
-        more orphans than ORPHAN_MAX_N, or than ORPHAN_SHARE of what was looked at (at least ORPHAN_MIN_ALLOW), or no
-        clip rows at all, and nothing is deleted (an empty, an old or a wrong audio.sqlite would otherwise empty the
-        bucket): sweep_status says why. Then the deletes, each batch looked at again under the uploader's lock (no
-        upload can make a key a row's between the look and the delete). The number deleted."""
-        self.sweep_status = ""
+        folder older than the oldest clip audio.sqlite knows (the bucket's lifecycle has those), never an object
+        uploaded within SWEEP_MARGIN_S of the newest clip it knows (a restore a little behind), never a key a row
+        names, and only with a real lease (may_delete). An object whose clip id the rest of the hub still knows
+        (known(ids) -> {id: (channel, talkgroup, at)}: the CAD's radio log, the monitor) is not an orphan: its row is
+        made again from its key and what is known (sweep_restored), never deleted; without known() nothing is. A look
+        first, over the whole listing; then a circuit breaker: more orphans than ORPHAN_MAX_N, or than ORPHAN_SHARE of
+        what was looked at (at least ORPHAN_MIN_ALLOW), or no clip rows at all, and nothing is deleted (an empty, an
+        old or a wrong audio.sqlite would otherwise empty the bucket): sweep_status says why. Then the deletes, each
+        batch looked at again under the uploader's lock. The number deleted."""
+        self.sweep_status, self.sweep_restored = "", 0
         if self.store is None or not self.may_delete():
             return 0
+        if known is None:
+            self.sweep_status = "nothing to check the clip ids against: not swept"
+            return 0
         now = time.time() if now is None else now
-        oldest, rows = self._scan("SELECT MIN(at), COUNT(*) FROM audio WHERE kind = 'clip' AND key != ''")[0]
+        oldest, newest, rows = self._scan("SELECT MIN(at), MAX(at), COUNT(*) FROM audio WHERE kind = 'clip' AND key != ''")[0]
         if not rows:
             self.sweep_status = "no clips in audio.sqlite: not swept"
             return 0
         first = object_key("clip", oldest, "x").rsplit("/", 1)[0] + "/"     # audio/clip/<yyyy>/<mm>/<dd>/
+        before = min(now - min_age_s, newest - SWEEP_MARGIN_S)
         looked, orphans = 0, []
         for page in self.store.pages(f"{PREFIX}/clip/"):
-            old = [k for k, t in page if t < now - min_age_s and k >= first]
+            old = [k for k, t in page if t < before and k >= first]
             if not old:
                 continue
             looked += len(old)
             marks = ",".join("?" * len(old))
             named = {r[0] for r in self._scan(f"SELECT key FROM audio WHERE key IN ({marks})", old)}
-            orphans += [k for k in old if k not in named]
+            unnamed = {k: k.rsplit("/", 1)[-1].removesuffix(".wav") for k in old if k not in named}
+            still = known(list(unnamed.values())) if unnamed else {}
+            for k, aid in unnamed.items():
+                if aid in still:
+                    self._restore_row(aid, k, *still[aid])
+                else:
+                    orphans.append(k)
             if len(orphans) > ORPHAN_MAX_N:
                 break
             if pause_s:
@@ -588,6 +610,27 @@ class AudioDb:
         return n
 
     sweep_status = ""
+    sweep_restored = 0
+
+    def _restore_row(self, aid: str, key: str, channel: str, talkgroup: int | None, at: float | None) -> None:
+        """A clip the hub still knows whose row audio.sqlite lost (a restore a little behind): made again, pointing at
+        its object (sizes unknown: 0), so it plays and its retention applies, instead of the object being deleted."""
+        if not self.may_write():
+            return
+        if not at:
+            try:
+                y, m, d = (int(x) for x in key.split("/")[2:5])
+                at = datetime(y, m, d, 12, tzinfo=timezone.utc).timestamp()
+            except (ValueError, IndexError):
+                return
+        with self._lock:
+            done = self.db.execute(
+                "INSERT OR IGNORE INTO audio (id, kind, at, note, wav, channel, talkgroup, duration, bytes, key, etag, "
+                "stored) VALUES (?, 'clip', ?, '', x'', ?, ?, 0, 0, ?, '', 'store')",
+                (aid, float(at), str(channel or "")[:80], talkgroup if isinstance(talkgroup, int) else None, key)).rowcount
+        if done:
+            self.sweep_restored += 1
+            self._seen(aid)
 
     def auto_vacuum(self) -> int:
         """0 none, 1 full, 2 incremental."""
