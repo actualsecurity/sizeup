@@ -274,17 +274,18 @@ def _kinds_text(slot: dict) -> str:
 def estimates(units: list[dict], where: dict | None, inc: dict | None, params: eta.Params | None = None,
               road=None) -> dict[int, dict]:
     """unit id -> {eta_s (None: unknown), eta ("~3 min est." or ''), reason, how ("road" | "line" | "")} for the
-    given units: from where each is now (mapview.locate) to the event's map point. road({code: [lon, lat]}, to) ->
-    {code: (drive s, metres)} (sizeup/cad/routes.py Routes.to_one, #360): by road when it has a way for every one of
-    them ("~3 min est. · 1.2 mi · from ..."), plus turnout from quarters; else the straight-line model (eta.py) for
-    all of them (the nearest-first order never compares the two)."""
+    given units: from where each is now (mapview.locate) to the event's map point. road({code: [lon, lat]}, to, inc) ->
+    {code: (drive s, metres) | None} (sizeup/cad/routes.py Routes.to_one, #360): by road when every one of them is on
+    the roads ("~3 min est. · 1.2 mi · from ..."), plus turnout from quarters; one on the roads with no way (None:
+    closed in, only by a parkway, over 30 min) has no estimate and goes after the rest; else the straight-line
+    model (eta.py) for all of them (the nearest-first order never compares the two)."""
     p = params or eta.Params()
     to = [inc["lon"], inc["lat"]] if inc and inc.get("lat") is not None and inc.get("lon") is not None else None
     by_road: dict = {}
     if road is not None and to is not None:
         origins = {u["name"]: (where or {})[u["name"]]["ll"] for u in units if (where or {}).get(u["name"])}
         try:
-            by_road = road(origins, to) or {}
+            by_road = road(origins, to, inc) or {}
         except Exception:  # noqa: BLE001 - the straight line then
             by_road = {}
         if any(k not in by_road for k in origins):
@@ -296,6 +297,8 @@ def estimates(units: list[dict], where: dict | None, inc: dict | None, params: e
             out[u["id"]] = {"eta_s": None, "eta": "", "reason": "station not set", "how": ""}
         elif to is None:
             out[u["id"]] = {"eta_s": None, "eta": "", "reason": loc["label"], "how": ""}
+        elif u["name"] in by_road and by_road[u["name"]] is None:
+            out[u["id"]] = {"eta_s": None, "eta": "", "reason": f"no way by road · {loc['label']}", "how": "road"}
         elif u["name"] in by_road:
             drive, metres = by_road[u["name"]]
             s = drive + (0.0 if loc["on_road"] else p.turnout_min * 60.0)

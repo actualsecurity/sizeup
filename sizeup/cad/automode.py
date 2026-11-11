@@ -596,6 +596,7 @@ class AutoDispatch:
         if a is not None and t:
             with self.store.tx() as db:
                 db.execute("UPDATE assignments SET dispatched_at = ? WHERE id = ?", (t, a["id"]))
+                self.store.dispatch_not_after_status(db, a["id"])
         self._step(iid, "assign", "county", f"{u['name']} {verb}", t or self.clock(), unit=u, prev=u["status"],
                    status=L.status_for("dispatched"), col="dispatched_at", event_kind="status")
         return True
@@ -636,6 +637,7 @@ class AutoDispatch:
         if fresh:
             with self.store.tx() as db:
                 db.execute(f"UPDATE assignments SET {col} = ? WHERE id = ?", (t, a["id"]))
+                self.store.dispatch_not_after_status(db, a["id"])
         return self._step(iid, "status", source, f"{u['name']} {L.status_phrase(code, u['name'], u['board'])}", t, unit=u,
                           prev=u["status"], status=code, col=col if fresh else "", ref=ref, event_kind="status")
 
@@ -788,6 +790,7 @@ class AutoDispatch:
         if fresh and a is not None:
             with self.store.tx() as db:
                 db.execute(f"UPDATE assignments SET {col} = ? WHERE id = ? AND {col} IS NOT NULL", (h["heard_at"], a["id"]))
+                self.store.dispatch_not_after_status(db, a["id"])
         self._step(iid, "status", "radio", f"{u['name']} {L.status_phrase(h['status'], u['name'], u['board'])}: “{h['said']}”",
                    h["heard_at"], unit=u, prev=u["status"], status=h["status"], col=col if fresh else "", ref=h["traffic_id"],
                    event_kind="status")
