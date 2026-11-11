@@ -11,8 +11,11 @@ its queue card (inc["scope"]).
            first) and the feed only confirms it. A disagreement is one terse timeline line (kind "feed"): "Page: all
            PCFD · feed: units" (the page heard after the feed), "Feed: units · page: all PCFD" (the feed after it)
     later  a later page's reading replaces an earlier one, upgrade or downgrade ("Page: units → all PCFD"), on the
-           incident it is matched to whatever its status; a feed never changes a page's. Becoming full department
-           widens the radio log's backfill (sizeup/cad/radiolog.py: every unit since the call's dispatch)
+           incident it is matched to whatever its status; a feed never changes a page's. An upgrade (specific units
+           -> full department) needs evidence (upgrade()): a repeat that only lost the unit names (speech-to-text)
+           is not one. Becoming full department widens the radio log's backfill to the paged departments' units
+           (sizeup/cad/radiolog.py); a downgrade takes back what only widening linked. One disagreement between page
+           and feed is one line, whichever came first (_noted)
 
 Shown short ("Full dept", "Specific units"; short()), "Paged: full department (<dept>)" in its hover (label()); the
 timeline says it "all PCFD" / "units" (_said()). A page on a feed's incident (one it reached, or its card moved onto)
@@ -36,7 +39,8 @@ CREATE TABLE IF NOT EXISTS dispatch_scope (
   departments TEXT NOT NULL DEFAULT '[]',
   source TEXT NOT NULL,                 -- page | feed: who set it (a page's reading stands)
   at REAL NOT NULL,
-  page TEXT NOT NULL DEFAULT '',        -- the page's own reading [kind, departments, its line]: it stands (#370 review);
+  page TEXT NOT NULL DEFAULT '',        -- the page's own reading [kind, departments, its line, the tones heard so far]:
+                                        -- it stands (#370 review);
                                         -- a moved card's goes with it
   feed TEXT NOT NULL DEFAULT ''         -- the feed's reading [kind, departments]: shown only with no page reading
 );
@@ -127,6 +131,39 @@ def latest_units(inc) -> list[str]:
     return list(getattr(inc, "units", None) or [])
 
 
+def dept_key(name: str) -> str:
+    """A department as compared: 'Port Chester FD' / 'Port Chester · Fire' / 'Port Chester' -> 'port chester'."""
+    n = base_name(str(name or "")).partition(" · ")[0]
+    n = re.sub(r"\s+(?:fire\s+department|fire\s+dept|fire|fd)\s*$", "", n.strip(), flags=re.I)
+    return re.sub(r"\s+", " ", n).strip().lower()
+
+
+FULL_WORDS = re.compile(r"\bfull\s+(?:department|response|assignment)\b", re.I)
+
+
+def upgrade(inc, seen_tones) -> bool:
+    """Evidence that a page upgraded a call from specific units to its full department, beyond the latest reading
+    naming no units (a repeat read again by speech-to-text can lose the names; the tones and type it shares are no
+    evidence): tones of a department not heard before on this call (a new dispatch, its own tones); a different call
+    type than the page before it; "full department / response" said; or no units named in two readings in a row (one
+    lossy reading is plausible, two independent ones much less)."""
+    from sizeup.dispatch import parse
+    tones = {base_name(t) for t in getattr(inc, "tone_departments", None) or () if t}
+    if seen_tones and tones - set(seen_tones):
+        return True
+    texts = list(getattr(inc, "page_text", None) or [])
+    if not texts:
+        return False
+    if FULL_WORDS.search(texts[-1]):
+        return True
+    if len(texts) < 2:
+        return False
+    last, prev = parse(texts[-1]), parse(texts[-2])
+    if "Unknown" not in (last.incident_type, prev.incident_type) and last.incident_type != prev.incident_type:
+        return True
+    return not last.units and not prev.units
+
+
 class Scope:
     def __init__(self, cad):
         self.cad, self.store = cad, cad.store
@@ -149,7 +186,16 @@ class Scope:
         if got is None:
             return "", True                              # nothing to keep: the line says what it heard
         heard = list(dict.fromkeys([*(tones or []), *(getattr(inc, "departments", None) or [])]))
-        return self._reading(iid, *got, note=note, line=page_line(heard, list(units or []), tones, typ))
+        seen = sorted({base_name(t) for t in tones or () if t})
+        r = self.store.one("SELECT page FROM dispatch_scope WHERE incident_id = ?", (iid,))
+        before = json.loads(r["page"]) if r is not None and r["page"] else None
+        if before and before[0] == UNITS and got[0] == FULL and not upgrade(inc, before[3] if len(before) > 3 else []):
+            # no evidence of an upgrade (a repeat that lost the names): the reading stands; its tones kept as seen
+            got = (UNITS, list(before[1]))
+            units = []
+            line = before[2] if len(before) > 2 else ""
+            return self._reading(iid, *got, note=note, line=line, tones=seen)
+        return self._reading(iid, *got, note=note, line=page_line(heard, list(units or []), tones, typ), tones=seen)
 
     @staticmethod
     def _feed_of(r) -> tuple[str, list] | None:
@@ -158,15 +204,26 @@ class Scope:
             return None
         return _parse(r["feed"]) or ((r["kind"], json.loads(r["departments"])) if r["source"] == "feed" else None)
 
-    def _reading(self, iid: int, kind: str, depts: list[str], note: bool = True, line: str = "") -> tuple[str, bool]:
+    @staticmethod
+    def _noted(db, iid: int, page: str, feed: str) -> bool:
+        """This disagreement (the page's, the feed's, as the timeline says them) is on the timeline already, in either
+        order: one line per disagreement."""
+        return db.execute("SELECT 1 FROM events WHERE incident_id = ? AND text IN (?, ?) LIMIT 1",
+                          (iid, f"Feed: {feed} · page: {page}", f"Page: {page} · feed: {feed}")).fetchone() is not None
+
+    def _reading(self, iid: int, kind: str, depts: list[str], note: bool = True, line: str = "",
+                 tones=None) -> tuple[str, bool]:
         """The page's reading onto the incident: it is the label from now on (#370 review: the page wins). (the feed's
-        reading as the timeline says it when it differs, else ""; whether the page's reading changed here)."""
-        reading = json.dumps([kind, depts, line])
+        reading as the timeline says it when it differs and that is not on the timeline yet, else ""; whether the
+        page's reading changed here)."""
+        reading = json.dumps([kind, depts, line, list(tones or [])])
         now = self.store.clock()
         with self.store.tx() as db:
             r = db.execute("SELECT * FROM dispatch_scope WHERE incident_id = ?", (iid,)).fetchone()
             feed = self._feed_of(r)
             said = _said(*feed) if feed is not None and feed != (kind, depts) else ""
+            if said and self._noted(db, iid, _said(kind, depts), said):
+                said = ""                                 # said once already, whichever came first
             before = _parse(r["page"]) if r is not None else None
             if r is not None and r["page"] == reading:
                 return said, False
@@ -182,7 +239,30 @@ class Scope:
                 self.store._event(db, iid, "feed", f"Page: {_said(kind, depts)} · feed: {said}", at=now)
         if kind == FULL and (was is None or was[0] != FULL):
             self._widened(iid)
+        elif kind != FULL and was is not None and was[0] == FULL:
+            self._narrowed(iid)
         return said, True
+
+    def _narrowed(self, iid: int) -> None:
+        """Not a full department any more (a later page): what only widening linked is taken back (radiolog.py)."""
+        try:
+            self.cad.radiolog.narrow(iid)
+        except Exception as e:  # noqa: BLE001 - the label stands whatever this does
+            self.cad.log(f"CAD: dispatch scope: radio log: {type(e).__name__}")
+
+    def line(self, iid: int) -> str:
+        """The page's own line as the reading stands ("Page: all PCFD"), else ""."""
+        r = self.store.one("SELECT page FROM dispatch_scope WHERE incident_id = ?", (iid,))
+        x = json.loads(r["page"]) if r is not None and r["page"] else None
+        return x[2] if x and len(x) > 2 else ""
+
+    def paged(self, iid: int) -> list[str]:
+        """The departments paged in full on this incident (as shown), else []."""
+        r = self.store.one("SELECT * FROM dispatch_scope WHERE incident_id = ?", (iid,))
+        if r is None:
+            return []
+        kind, depts = self._shown(r)
+        return list(depts) if kind == FULL else []
 
     def _widened(self, iid: int) -> None:
         """Full department now: the radio log's backfill again, every unit from the call's dispatch (radiolog.py)."""
@@ -211,7 +291,7 @@ class Scope:
             return
         kind, depts, *rest = json.loads(r["page"])
         line = rest[0] if rest else ""
-        feed, _ = self._reading(dst, kind, list(depts), note=False, line=line)
+        feed, _ = self._reading(dst, kind, list(depts), note=False, line=line, tones=rest[1] if len(rest) > 1 else [])
         text = (line + (f" · feed: {feed}" if feed else "")) if line else ""
         if not text:
             return
@@ -245,7 +325,7 @@ class Scope:
                            (iid, kind, json.dumps(depts), now, json.dumps([kind, depts])))
             else:                                         # the page's stands
                 db.execute("UPDATE dispatch_scope SET feed = ? WHERE incident_id = ?", (json.dumps([kind, depts]), iid))
-                if page != (kind, depts):
+                if page != (kind, depts) and not self._noted(db, iid, _said(*page), _said(kind, depts)):
                     self.store._event(db, iid, "feed", f"Feed: {_said(kind, depts)} · page: {_said(*page)}", at=now)
         if page is None and kind == FULL and (r is None or r["kind"] != FULL):
             self._widened(iid)

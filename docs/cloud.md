@@ -1891,7 +1891,10 @@ the train's own (TrainTime's, or the line's).
 **Smooth tracks (#374):** a run keeps the service's own point order (turned to run up the line, its `s` held
 where it steps back). Sorted by `s`, it zig-zagged wherever the static line's kinks put nearby points' `s` out of
 order. The service's few digitising slips (hairpins doubling back 3-9 m, 1 cm steps at right angles) are dropped
-(a vertex turning more than 45°), and the page gets the tracks to 1 cm (at 1 m, tracks 4 m apart wobble).
+(a vertex turning more than 45°), and the page gets the tracks to 1 cm (at 1 m, tracks 4 m apart wobble). From
+zoom 15 the basemap's own rail line (OpenStreetMap's, drawn dashed between our tracks) is masked out of a
+corridor around them (`within`, on the style's `rail` layer while the trains layer is on); it stays elsewhere
+and zoomed out.
 
 **Poles and mileposts:** the nearest structure along the line (within 150 m), and the milepost read off the
 two either side (straight between; a milepost out of order along the line is left out). A train's box, and
@@ -1901,8 +1904,10 @@ Trains group of the Layers box (`railref`; off until a viewer turns it on, then 
 layer, and per event on an event's map), drawn from `GET /api/cad/trains/railref`. Each structure is drawn as
 Metro-North's TrainTime draws it: a thin light line square to the tracks (their bearing there, from the
 numbered tracks within 30 m), across all of them and 3 m past the outer ones (no track near: 9 m each side,
-square to the line), with its number on a yellow tag just past one end; from zoom 16, and a tag that would
-overlap another is left out. Whole mileposts from 12, tenths from 15.
+square to the line), with its number on a yellow tag just past its east end (a milepost's label reads to the
+west of its post, and the posts stand by the tracks' middle, mostly within 30 m of a structure); from zoom 16. A
+tag outranks a milepost's label; a tag that would overlap another tag is left out. Whole mileposts from 12,
+tenths from 15.
 
 A 429 or a refusal (401 / 403) rests 30 min (Data sources says *resting*); other failures back off 5 min
 doubling to 6 h; the copy we had stays.
