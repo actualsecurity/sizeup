@@ -91,7 +91,7 @@ ACTIVE_LOOK = "dispatched"
 # A rig's icon on the maps by apparatus type (#384; drawn by cadmap.js / cadmap.css): from its kind in
 # data/cad_lists.json; else by its code (ICON_BY_CODE). Anything else (marine, EMS, police,
 # agencies, code-only units): the generic mark.
-ICONS = ("engine", "ladder", "tower", "rescue", "suv", "other")
+ICONS = ("engine", "ladder", "tower", "rescue", "suv", "arff", "other")
 ICON_OF_KIND = {"engine": "engine", "ladder": "ladder", "tower": "tower", "rescue": "rescue", "chief": "suv", "utility": "suv"}
 
 
@@ -122,13 +122,13 @@ def is_placeholder(unit, lists=None) -> bool:
 
 
 # By code where the kind doesn't say (code-only or board-only units): the airport's ARFF crash trucks (AP7, AP11, AP17:
-# fire apparatus) as engines; battalion and fire coordinators' cars (BAT10-19, FC1, FC2) and CHIEF239 as cars
-ICON_BY_CODE = ((re.compile(r"^AP\d+$"), "engine"), (re.compile(r"^(BAT|FC)\d+$"), "suv"), (re.compile(r"^CHIEF"), "suv"))
+# their own overhead icon, #427); battalion and fire coordinators' cars (BAT10-19, FC1, FC2) and CHIEF239 as cars
+ICON_BY_CODE = ((re.compile(r"^AP\d+$"), "arff"), (re.compile(r"^(BAT|FC)\d+$"), "suv"), (re.compile(r"^CHIEF"), "suv"))
 
 
 def icon_of(unit: dict, lists=None) -> str:
     """A unit {name, kind?} -> its map icon: engine | ladder | tower | rescue | suv (chiefs', duty and utility cars) |
-    other; a department placeholder (is_placeholder, by the CAD's lists): "" (none: it is never drawn)."""
+    arff (the airport's crash trucks) | other; a department placeholder (is_placeholder, by the CAD's lists): "" (none: it is never drawn)."""
     if is_placeholder(unit, lists):
         return ""
     kind = unit.get("kind") or ""
