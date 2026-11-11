@@ -16,6 +16,11 @@ POST /api/mode {"mode": ...}  one shared dongle: hand it to a channel or trunk-r
 POST /api/adsb-receiver {"sdr": serial | "", "confirm": true}  admins: name (or unname) the station's ADS-B dongle
                         (#235; App.set_adsb_receiver; the hub sends it to the station): reserved for its decoder,
                         never one of the radios (state "sdr".adsb). Without "confirm": true it is refused
+POST /api/reception {"action": "start" | "stop" | "note", ...}  admins: a reception test (#410, sizeup/radio/reception.py:
+                        one dongle lent to one side of another P25 system; state "reception"); the hub sends it to
+                        the station
+GET  /api/reception            its state: the running test, the samples, the history (admins)
+GET  /api/reception/sample?id=<id>  a call a reception test captured, while it is kept (admins; minutes, then deleted)
 Every POST on the station (and all-in-one; not the hub, behind Cloudflare Access) is refused 403 when a browser says
 it came from another site (#307: Sec-Fetch-Site not same-origin / none, else an Origin not this host): it binds
 127.0.0.1, but a page open in the station PC's browser could still post. Its own page, and tools with neither header
@@ -368,7 +373,7 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                  access=None, access_log: Callable[[str], None] | None = None, station_mode=None,
                  role: str = "", roads=None, gis=None, trains=None, weather=None, station_health=None, stream_gzip: bool = True,
                  aircraft=None, roadwork=None, set_adsb: Callable[[str], str | None] | None = None, vessels=None,
-                 airband_ab: Callable[..., str | None] | None = None,
+                 airband_ab: Callable[..., str | None] | None = None, reception=None,
                  gate: Gate | None = None, health_fn: Callable[[], dict] | None = None, perf=None,
                  clip_context: Callable[[str], bool] | None = None):
     """clip_context(id): the clip is another P25 system's (#419): served only to a signed-in person
@@ -654,6 +659,19 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                 return self._state(b, url.query, None)
             if path == "/api/stream":
                 return self._stream(b)
+            if path == "/api/reception" and reception is not None:
+                # the reception tests (#410): their state, history and sample list; admins only, never in /api/state
+                if cad is not None and (no := cad.read_refused(path, self.who)) is not None:
+                    return self._send(*no)
+                return self._send(200, json.dumps({"reception": reception[2]()}, separators=(",", ":"), default=str).encode(),
+                                  "application/json", {"Cache-Control": "no-store"})
+            if path == "/api/reception/sample" and reception is not None:
+                # a call a reception test captured (#410): admins only, never cached, gone after its minutes
+                if cad is not None and (no := cad.read_refused(path, self.who)) is not None:
+                    return self._send(*no)
+                wav = reception[1](dict(parse_qsl(url.query)).get("id", ""))
+                return (self._send(200, wav, "audio/wav", {"Cache-Control": "no-store"}) if wav
+                        else self._send(404, b"no such sample\n", "text/plain"))
             if path.startswith("/api/audio/") and path.endswith(".wav"):
                 cid = path[len("/api/audio/"):-4]
                 with sourcekeys.request_context(self.who):
@@ -774,6 +792,19 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                 except (ValueError, KeyError, TypeError) as e:
                     err = f"bad request: {e}"
                 if err:
+                    return self._send(400, json.dumps({"error": err}).encode(), "application/json")
+                self._did(path, body)
+                return self._send(200, b'{"ok":true}', "application/json")
+            if path == "/api/reception" and reception is not None:
+                try:
+                    n = int(self.headers.get("Content-Length") or 0)
+                    body = json.loads(self.rfile.read(min(n, 2048)) or b"{}")
+                    err = reception[0](body, getattr(self.who, "email", "") or "")
+                except (ValueError, KeyError, TypeError) as e:
+                    err = f"bad request: {e}"
+                if err:
+                    if self.who is not None and cad is not None and getattr(self.who, "email", ""):
+                        cad.refused(path, self.who, str(err)[:160], self._client())      # a refused attempt: logged too
                     return self._send(400, json.dumps({"error": err}).encode(), "application/json")
                 self._did(path, body)
                 return self._send(200, b'{"ok":true}', "application/json")
@@ -965,7 +996,7 @@ class WebServer:
                  health: dict | None = None, access=None, access_log: Callable[[str], None] | None = None,
                  station_mode=None, role: str = "", roads=None, gis=None, trains=None, weather=None, station_health=None,
                  aircraft=None, roadwork=None, set_adsb=None, fence=None, health_fn: Callable[[], dict] | None = None,
-                 airband_ab=None, listener=None, vessels=None, perf=None,
+                 airband_ab=None, listener=None, vessels=None, perf=None, reception=None,
                  clip_context: Callable[[str], bool] | None = None):
         """listener: a socket already bound and listening on (host, port) to serve from (sizeup/app.py run_gated: the
         hub's port answered "updating" while the app was built; the connections that came meanwhile are served)."""
@@ -995,7 +1026,8 @@ class WebServer:
             json.dumps(health or {"ok": True}, separators=(",", ":")).encode(), access, access_log, station_mode, role,
             roads, gis, trains, weather, station_health, aircraft=aircraft, roadwork=roadwork, set_adsb=set_adsb,
             vessels=vessels,
-            airband_ab=airband_ab, gate=self.gate, health_fn=health_fn, perf=perf, clip_context=clip_context))
+            airband_ab=airband_ab, reception=reception, gate=self.gate, health_fn=health_fn, perf=perf,
+            clip_context=clip_context))
         if listener is not None:
             self.httpd.socket.close()                 # (the one TCPServer made, never bound)
             self.httpd.socket = listener
