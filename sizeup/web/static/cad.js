@@ -1670,14 +1670,16 @@ function callPicker(u, where, box) {
   const open = incidents().filter((i) => ["pending", "active"].includes(i.status));
   let n = 0;
   const add = (value, text) => { const o = el("option", "", text); o.value = String(value); sel.append(o); n++; };
-  const cur = open.find((i) => i.id === now.incident_id);
+  const cur = !now.placeholder && open.find((i) => i.id === now.incident_id);   // a placeholder: only calls it isn't on
   // then the incident being worked (#219: a status from the right column goes on it), then the other open calls
-  const sel0 = !cur && open.find((i) => i.id === cad.sel);
+  const sel0 = !cur && !(now.placeholder && onCall(now, cad.sel)) && open.find((i) => i.id === cad.sel);
   if (cur) add(cur.id, `${incTitle(cur)} ${typeLabel(cur.type, cur.subtype) || "No type"}, ${cur.address || ""} (current)`);
   if (sel0) add(sel0.id, `${incTitle(sel0)} ${typeLabel(sel0.type, sel0.subtype) || "No type"}, ${sel0.address || ""} (this incident)`);
-  for (const i of open) if (i !== cur && i !== sel0) add(i.id, `${incTitle(i)} ${typeLabel(i.type, i.subtype) || "No type"}, ${i.address || ""}`);
+  for (const i of open) {
+    if (i !== cur && i !== sel0 && !(now.placeholder && onCall(now, i.id))) add(i.id, `${incTitle(i)} ${typeLabel(i.type, i.subtype) || "No type"}, ${i.address || ""}`);
+  }
   const agency = !!agencySet(now);
-  if (!agency) add(0, "No call");              // another agency's unit is only ever on a call
+  if (!agency && !now.placeholder) add(0, "No call");   // another agency's unit or a placeholder: only ever on a call
   if (!n) {
     box.append(el("span", "dim small", "No open call"));
     return box;
@@ -1765,7 +1767,7 @@ function statusChoices(u, where) {
   const all = L().unit_statuses || [];
   const set = agencySet(u);
   let mine = set ? set.statuses.map((c) => all.find((s) => s.code === c)).filter(Boolean) : all;
-  if (u.placeholder) return mine.filter((s) => s.role === "free" || s.role === "dispatched");   // never a working status
+  if (u.placeholder) return mine.filter((s) => s.code === u.quarters);   // in quarters only: the county assigns it
   if (where !== "inc") return mine;
   const flow = L().status_flow || {};
   const next = u.next || (!set && (flow[u.status] || flow["*"]));
@@ -2047,8 +2049,8 @@ const awayOn = (u, iid) => !u.placeholder && u.incident_id && u.incident_id !== 
 function unitById(id) {
   return units().find((u) => u.id === id);
 }
-function canDispatch(u) {
-  return roleOf(u.status) !== "oos" && u.response !== "agency";
+function canDispatch(u) {                     // a department placeholder: the county's only, never sent by hand
+  return roleOf(u.status) !== "oos" && u.response !== "agency" && !u.placeholder;
 }
 
 const REMARKS_LONG = 200, REMARKS_MAX = 500;
@@ -2645,7 +2647,8 @@ function addStatuses() {                  // Responding, On location: the first 
 }
 function addCandidates(inc) {
   const on = new Set(openAssignments(inc).map((a) => a.name));
-  return tagOrder(inc).filter((c) => !on.has(c)).map((c) => units().find((u) => u.name === c)).filter(Boolean);
+  return tagOrder(inc).filter((c) => !on.has(c)).map((c) => units().find((u) => u.name === c))
+    .filter((u) => u && !u.placeholder);       // a department placeholder: the county's only, never added by hand
 }
 
 // "E60 E62, l31  rbpd" -> ["E60", "E62", "l31", "rbpd"]
@@ -2698,7 +2701,7 @@ function parseUnitList(text, list, here = new Set()) {
 }
 function addParse(inc) {
   const here = new Set(openAssignments(inc).map((a) => a.name));
-  return parseUnitList($("#o-unit").value, units().filter((u) => u.board || u.incident_id), here);
+  return parseUnitList($("#o-unit").value, units().filter((u) => (u.board || u.incident_id) && !u.placeholder), here);
 }
 // The preview: a chip per word, what it matched
 function renderAddPreview() {
@@ -2781,7 +2784,7 @@ function suggestAddUnit() {
     li.setAttribute("aria-selected", String(i === addUnit.idx));
     li.append(el("b", "", u.name));
     if (roleOf(u.status) === "oos") li.append(el("span", "warn small", unitStatus(u.status).name));
-    else if (u.incident_id) li.append(el("span", "warn small", `On ${u.incident_number || "another call"}`));
+    else if (awayOn(u, inc.id)) li.append(el("span", "warn small", `On ${u.incident_number || "another call"}`));
     else if (u.title || u.department) li.append(el("span", "dim small", u.title || u.department));
     li.addEventListener("mousedown", (e) => { e.preventDefault(); takeAddUnit(u.name); });
     return li;

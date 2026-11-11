@@ -774,6 +774,8 @@ class Store:
         for r in rows:
             r["incident_ids"] = [r["incident_id"]] if r["incident_id"] else []
             r["placeholder"] = self.lists.placeholder(r["name"])
+            if r["placeholder"]:                         # the one status offered for it (cad.js)
+                r["quarters"] = self.placeholder_free(r["name"], r["board"])
         if any(r["placeholder"] for r in rows if r["incident_id"]):     # one on several calls: all of them
             on: dict[int, list[int]] = {}
             for a in self.q("SELECT unit_id, incident_id FROM assignments WHERE cleared_at IS NULL ORDER BY id"):
@@ -846,6 +848,12 @@ class Store:
             out.append(r["name"])
         return out
 
+    def placeholder_free(self, name: str, board: str | None = None) -> str:
+        """The one free status a placeholder takes: in quarters (Settings > Dispatch), else its free one."""
+        L = self.lists
+        q = self.quarters_status()
+        return q if q in L.unit_statuses_for(name, board) and L.role(q) == "free" else L.free_for(name, board)
+
     def _placeholder_off(self, db, r, iid, operator: str, now: float, note: str = "") -> str:
         """A placeholder just cleared off one call (r: its units row: id, name, board, status): back to the in-quarters
         status (else its free one) once it is on no other call; still on one, it stays Dispatched. -> the status it
@@ -853,8 +861,7 @@ class Store:
         L = self.lists
         if db.execute("SELECT 1 FROM assignments WHERE unit_id = ? AND cleared_at IS NULL", (r["id"],)).fetchone():
             return ""
-        q = self.quarters_status()
-        free = q if q in L.unit_statuses_for(r["name"], r["board"]) and L.role(q) == "free" else L.free_for(r["name"], r["board"])
+        free = self.placeholder_free(r["name"], r["board"])
         if r["status"] != free and L.role(r["status"]) != "oos":
             db.execute("UPDATE units SET status = ?, status_at = ?, out_of_service = '' WHERE id = ?", (free, now, r["id"]))
             self._history(db, r["id"], r["status"], free, iid, operator, now, note)
@@ -887,19 +894,26 @@ class Store:
         return bool(dept) and any(not L.placeholder(r["name"]) and L.department_of(r["name"]) == dept for r in rows)
 
     def restore_placeholders(self, iid: int, uid: int, operator: str = "") -> list[str]:
-        """The sign-on of unit uid on this call was undone: each placeholder it released there goes back on the call
-        (Dispatched) when no unit of its department is still signed on there and nothing put it back since."""
+        """The sign-on of unit uid on this call was undone: each placeholder of its department released there (by it or
+        another of its units) goes back on the call (Dispatched) once no unit of that department is still signed on
+        there; while one is, the release waits for that unit's undo."""
         L = self.lists
         out = []
         now = self.clock()
         with self.tx() as db:
+            me = db.execute("SELECT name FROM units WHERE id = ?", (uid,)).fetchone()
+            dept = L.department_of(me["name"]) if me is not None else ""
             for r in db.execute("SELECT p.id, p.assignment_id, u.id AS uid, u.name, u.status FROM placeholder_releases p "
-                                "JOIN units u ON u.id = p.placeholder_id WHERE p.incident_id = ? AND p.by_unit_id = ? "
-                                "AND p.restored_at IS NULL ORDER BY p.id", (iid, uid)).fetchall():
+                                "JOIN units u ON u.id = p.placeholder_id WHERE p.incident_id = ? AND p.restored_at IS NULL "
+                                "ORDER BY p.id", (iid,)).fetchall():
+                if not dept or L.department_of(r["name"]) != dept:
+                    continue                             # another department's: its own units' undo
+                if self.dept_signed_on(iid, r["name"], ever=False, db=db):
+                    continue                             # still signed on: kept for that unit's undo (restored_at NULL)
                 db.execute("UPDATE placeholder_releases SET restored_at = ? WHERE id = ?", (now, r["id"]))
-                if self.dept_signed_on(iid, r["name"], ever=False, db=db) or db.execute(
-                        "SELECT 1 FROM assignments WHERE incident_id = ? AND unit_id = ? AND cleared_at IS NULL", (iid, r["uid"])).fetchone():
-                    continue
+                if db.execute("SELECT 1 FROM assignments WHERE incident_id = ? AND unit_id = ? AND cleared_at IS NULL",
+                              (iid, r["uid"])).fetchone():
+                    continue                             # back on it already
                 dp = L.status_for("dispatched")
                 db.execute("UPDATE assignments SET cleared_at = NULL WHERE id = ?", (r["assignment_id"],))
                 if r["status"] != dp:
@@ -915,9 +929,9 @@ class Store:
         L = self.lists
         u = self.unit(uid)
         role = L.role(status)
-        if role not in ("dispatched", "free"):
-            raise CadError(f"{u['name']} is a department placeholder: {L.name('unit_statuses', L.status_for('dispatched'))} "
-                           f"or in quarters only")
+        if role not in ("dispatched", "free") or (role == "free" and status != self.placeholder_free(u["name"], u["board"])):
+            raise CadError(f"{u['name']} is a department placeholder: "
+                           f"{L.name('unit_statuses', self.placeholder_free(u['name'], u['board']))} only")
         if role == "dispatched":
             if not iid:
                 raise CadError(f"{u['name']} is a department placeholder: Dispatched only on a call")

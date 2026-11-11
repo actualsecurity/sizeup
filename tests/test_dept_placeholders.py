@@ -273,7 +273,8 @@ def test_a_placeholder_is_never_said_on_the_air(rig):
     rig.cad.store.assign(iid, [rig.uid("DPTA")], "Lt. Test")
     text = rig.cad.preview(iid, {"unit_ids": [rig.uid("E61")]})["text"]
     assert "Engine 61" in text and "DPTA" not in text
-    text = rig.cad.preview(iid, {"unit_ids": [rig.uid("E61"), rig.uid("DPTB")]})["text"]
+    rig.cad.store.assign(iid, [rig.uid("DPTB")], "Lt. Test")            # Rye Brook's placeholder on it too
+    text = rig.cad.preview(iid, {"unit_ids": [rig.uid("E61")]})["text"]
     assert "DPTB" not in text and "Rye Brook" not in text                  # nor its department's lead-in or tones
 
 
@@ -372,3 +373,51 @@ def test_a_unit_with_no_department_never_releases_one(tmp_path, monkeypatch):
     st.assign(a, [rig.uid("DPTA"), rig.uid("MAX1")], "Lt. Test")
     st.set_unit_status(rig.uid("MAX1"), "RS", "Lt. Test")
     assert a in st.unit(rig.uid("DPTA"))["incident_ids"]
+
+
+# -- second review ---------------------------------------------------------------------------------------------------
+
+
+def test_a_person_only_ever_puts_it_in_quarters_and_a_refusal_marks_nothing(rig):
+    from sizeup.cad.store import CadError
+    rig.mode("pcfd")
+    a = rig.cad.create({"type": "STRU", "address": "40 Other Rd", "operator": "Lt. Test"})["id"]
+    ph = rig.uid("DPTA")
+    rig.cad.store.assign(a, [ph], "Lt. Test")
+    edits = lambda: rig.cad.store.q("SELECT * FROM manual_edits WHERE field = 'unit:DPTA'")
+    for body in ({"status": "DP", "incident_id": 0}, {"status": "DP", "incident_id": a}, {"status": "CN"},
+                 {"status": "AV", "call": a}, {"status": "RS"}):
+        with pytest.raises(CadError, match="placeholder"):
+            rig.cad.unit_status(ph, dict(body, operator="Lt. Test"))
+    assert edits() == []
+    with pytest.raises(CadError, match="placeholder"):
+        rig.cad.store.set_unit_status(ph, "CN", "Lt. Test")               # the store too: in quarters only
+    assert a in rig.cad.store.unit(ph)["incident_ids"]
+
+
+def test_never_dispatched_or_attached_by_hand(rig):
+    from sizeup.cad.store import CadError
+    rig.mode("pcfd")
+    a = rig.cad.create({"type": "STRU", "address": "40 Other Rd", "operator": "Lt. Test"})["id"]
+    for call in (lambda: rig.cad.dispatch(a, {"unit_ids": [rig.uid("DPTA")], "operator": "Lt. Test"}),
+                 lambda: rig.cad.preview(a, {"unit_ids": [rig.uid("DPTA")]}),
+                 lambda: rig.cad.attach(a, {"unit_ids": [rig.uid("DPTA")], "operator": "Lt. Test"})):
+        with pytest.raises(CadError, match="placeholder"):
+            call()
+    assert rig.cad.store.unit(rig.uid("DPTA"))["incident_ids"] == []
+    rig.mode("60control")
+    rig.created(units=("DPTA", "E60"))                                 # the county's: still assigned
+    assert rig.here("DPTA") is not None
+
+
+def test_undoing_two_sign_ons_in_turn_puts_it_back_after_the_last(rig):
+    rig.created(units=("DPTA", "E60", "L31"))
+    rig.at(30)
+    rig.change(unit_times={"E60": {"responding": T0 + 25}})
+    rig.at(40)
+    rig.change(unit_times={"E60": {"responding": T0 + 25}, "L31": {"responding": T0 + 35}})
+    assert rig.here("DPTA") is None
+    rig.cad.auto.undo(rig.iid(), rig.step("status", "E60")["id"], "Lt. Test")
+    assert rig.here("DPTA") is None                                     # L31 still signed on
+    rig.cad.auto.undo(rig.iid(), rig.step("status", "L31")["id"], "Lt. Test")
+    assert rig.here("DPTA") is not None and rig.status("DPTA") == "DP"

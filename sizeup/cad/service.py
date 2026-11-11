@@ -895,6 +895,9 @@ class Cad:
         agency = [by_id[i]["name"] for i in ids if by_id[i]["response"] == "agency"]
         if dispatching and agency:
             raise CadError(f"Agency units: attach, don't dispatch ({', '.join(agency)})")
+        ph = [by_id[i]["name"] for i in ids if by_id[i]["placeholder"]]
+        if ph:                                           # the county's, never sent or attached by hand
+            raise CadError(f"A department placeholder is assigned by the county only: {', '.join(ph)}")
         cant = [by_id[i]["name"] for i in ids if self.lists.role(by_id[i]["status"]) == "oos"
                 and not (by_id[i]["response"] == "agency" and not dispatching)]
         if cant:
@@ -1315,25 +1318,25 @@ class Cad:
         return out
 
     def _placeholder_status(self, u: dict, status: str, body: dict, op: str) -> dict:
-        """A department placeholder's status: Dispatched or in quarters only. From a call's unit row ("call"): that call
-        only. From the board: Dispatched on the call picked; in quarters off every call it is on. Each call it leaves is
-        a person's for it (automation leaves it off) and may close now (#311 N1)."""
-        call = body.get("call") if body.get("call") is not None else body.get("incident_id")
+        """A department placeholder's status from a person: in quarters only (the county assigns it; never Dispatched by
+        hand). From a call's unit row ("call"): off that call only; from the board: off every call it is on. Checked
+        first; then each call it leaves is a person's for it (automation leaves it off) and may close now (#311 N1)."""
+        q = self.store.placeholder_free(u["name"], u["board"])
+        if status != q:
+            raise CadError(f"{u['name']} is a department placeholder, assigned by the county: "
+                           f"{self.lists.name('unit_statuses', q)} only")
+        call = body.get("call")
         try:
             call = int(call) if call is not None else None
         except (TypeError, ValueError):
             raise CadError("call: a number") from None
-        ids = list(u["incident_ids"])
-        if self.lists.role(status) == "free":
-            ids = [call] if call else ids
-        elif call:
-            ids = [call]
+        if call and call not in u["incident_ids"]:
+            raise CadError(f"{u['name']} is not on this call")
+        ids = [call] if call else list(u["incident_ids"])
         for i in ids:                                    # a person's, before the write (#311 L4)
             self._by_hand(i, [u["id"]], op)
-        out = self.store.set_unit_status_on(u["id"], status, call or 0, op) if call or self.lists.role(status) != "free" \
-            else self.store.set_unit_status(u["id"], status, op)
-        if self.lists.role(status) == "free":
-            self.auto.recheck_close(out.get("cleared_from") or ids)
+        out = self.store.set_unit_status(u["id"], status, op, call=call)
+        self.auto.recheck_close(out.get("cleared_from") or ids)
         return out
 
     def unit_station(self, uid: int, body: dict) -> dict:
