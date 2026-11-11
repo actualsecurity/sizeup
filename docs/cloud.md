@@ -2327,10 +2327,10 @@ Everything the hub keeps is SQLite under `SIZEUP_STATE_DIR`, so Litestream can r
 |---|---|
 | `cad.sqlite` | the CAD: events, units, run cards, dispatch log, settings, radio registry, communications log, phone pre-alerts |
 | `hub.sqlite` | the monitor: incidents, transmissions, pages (one row each, written only when changed), and the station events applied so far |
-| `audio.sqlite` | received clips ([Audio retention](#audio-retention) below) and the dispatch audio (Polly's or the station's; kept with the dispatch log; unused previews a day) |
+| `audio.sqlite` | received clips ([Audio retention](#audio-retention) below) and the dispatch audio (Polly's or the station's; kept with the dispatch log; unused previews a day). With `SIZEUP_AUDIO_BUCKET` (#414): their metadata only, the bytes in S3 ([Audio in S3](#audio-in-s3-414)) |
 
 The hub has no `captures/`. Dispatch WAVs are also cached in `dispatch-audio/` on the task's disk; after a
-redeploy they're served from `audio.sqlite`.
+redeploy they're served from `audio.sqlite` (or its S3 bucket).
 
 **The map caches** (#229, `sizeup/cachesync.py`) are files beside them, fetched from their sources; each is
 kept gzipped in the same bucket, `s3://$LITESTREAM_BUCKET/$LITESTREAM_PATH/cache/<file>.gz`:
@@ -2360,15 +2360,26 @@ Camera snapshots and the weather's radar tiles are not kept (minutes old at most
 
 ### Audio retention
 
-`audio.sqlite` (the hub; `sizeup/cloud/hub.py` `_audio_retention`, `hubstore.py` `AudioDb.prune_clips`), every
-10 min. **The defaults** (`[storage]`, #251; the policy itself is #46's, to be settled with the department):
+`audio.sqlite` and its S3 bucket (the hub; `sizeup/cloud/hub.py` `_audio_retention`, `hubstore.py`
+`AudioDb.prune_clips`), every 10 min. **The defaults** (`[storage]`, #251; the policy itself is #46's, to be settled
+with the department):
 
 | what | kept | setting |
 |---|---|---|
-| a clip on no event | **12 hours** (unchanged) | `audio_keep_hours = 12` |
-| a clip that is a record: on a CAD event (any link: unit, dispatcher, airport, manual, page), with an alarm, or with the emergency button / an emergency window's keep | **365 days** (was 12 h like the rest) | `audio_keep_event_days = 365` (0 = forever) |
+| a clip on no event | **12 hours**, or its channel's / talkgroup's days | `audio_keep_hours = 12`; **Settings > System > Audio retention** (#414) |
+| a clip that is a record: on a CAD event (any link: unit, dispatcher, airport, manual, page), with an alarm, or with the emergency button / an emergency window's keep | **365 days**, or its channel's days if longer | `audio_keep_event_days = 365` (0 = forever; with S3, at most the bucket's 400-day hard max) |
+| a clip attached to an incident | its copy in the attachments bucket: a year ([Incident attachments](#incident-attachments-323)), whatever this says | |
 | dispatch audio (with the dispatch log) | forever (unchanged); unused previews a day | |
-| the size cap `[cloud] audio_max_mb` (500) | drops the oldest clips **that aren't records** only; records over it are kept and the log says so | |
+| the size cap `[cloud] audio_max_mb` (500) | the bytes **still in `audio.sqlite`** (all of them without S3): drops the oldest clips **that aren't records** only; records over it are kept and the log says so | |
+
+**Per channel / talkgroup** (#414, Settings > System > Audio retention, admins; `POST
+/api/cad/settings/audio_retention`, audited as System): a default and a number of days (0.5 to 365) for any channel
+(`FG1`, `South 2`, `HPN Tower`) or talkgroup (`tg:307`); a talkgroup's own beats its channel's, which beats the
+default, which beats `audio_keep_hours`. The card lists every channel and talkgroup with clips kept (count, size).
+Each clip's retention is worked out **at every prune** from its own channel and talkgroup (stored with it), so a
+change applies to the clips already kept (retroactively), at the next pass: shorter deletes the older ones,
+longer keeps what is still there. Clips from before #414 are given their channel once (from the hub's transmissions,
+pages and the CAD's radio log); the few that can't be named keep the default.
 
 Deletes go `audio_prune_batch` rows (200) per transaction with a short pause between, so the station's clips
 and the players never wait on a long write lock; outside the off-peak hours (`audio_offpeak = [2, 5]`, 2-5 am
@@ -2377,7 +2388,69 @@ file system (`PRAGMA incremental_vacuum`, 128 pages at a time) only off-peak, an
 made with `auto_vacuum = INCREMENTAL` (every new one since #251). An older file keeps `auto_vacuum` off: turning
 it on takes a whole `VACUUM` (a long lock and a full copy through Litestream), which is never done by itself;
 its free pages are reused by new clips instead, so it stops growing once the retention is in steady state.
+With S3, once every row's bytes are out, that older file is rewritten small once (below).
 Nothing here runs anywhere but in the hub, on its own schedule; the tests use their own files.
+
+### Audio in S3 (#414)
+
+`sizeup/audiostore.py`, `hubstore.py` `AudioDb`. With `SIZEUP_AUDIO_BUCKET` set, the bytes of every clip and the
+dispatch audio live in a private bucket (sizeup-aws `15-audio-storage.sh`: Block Public Access, SSE-S3, TLS only,
+versioning off), under `audio/<clip|dispatch>/<yyyy>/<mm>/<dd>/<id>.wav` (the clip's own UTC date, so a key never
+changes). `audio.sqlite` keeps one row each: kind, channel, talkgroup, at, duration, bytes, key, ETag (the MD5),
+`stored` (`db` | `store`). The format is unchanged: the WAV as the station sent it (8 kHz mono 16-bit PCM, 57.6 MB
+per hour of speech; measured 2026-11-10: ~8,600 clips and ~385 MB a day, ~3 s each). Without the variable: as before,
+the bytes in `audio.sqlite` (`SIZEUP_AUDIO_DIR=<folder>` puts them in a local folder instead, for a dev hub).
+
+* **Writes, leader only** (the fence, `sizeup/fence.py`): the object first (PUT with SSE, Content-MD5 and the SHA-256
+  checksum; an 8 s timeout on this path), then the row. A crash in between leaves an object no row points at (the
+  station resends the unacked event: the same key and bytes, idempotent; otherwise the lifecycle removes it), never
+  a row pointing at nothing. If the PUT fails (S3 down, credentials renewing) the row keeps the bytes (`stored =
+  'db'`) and the next 60 s of clips go there directly: **`audio.sqlite` is the spool** (Litestream has it, so a
+  crash or a handover loses nothing). The `audio-uploader` thread moves such rows every 5 s (20 a round in the day,
+  200 off-peak, newest first; 5 s doubling to 5 min after a failure), switching a row to its key only once the object
+  is there and only if the row still holds the same bytes.
+* **Reads**: the newest clips from memory (16 MB) — so speech-to-text, re-runs and the "both" comparison read a clip
+  the moment it arrives, before or without its upload — then a row still holding its bytes, then a disk cache of
+  recent clips (`state/audio-cache/`, 256 MB, least recently used out; lost at a deploy), then S3 (a 15 s timeout,
+  then cached). `AudioDb.get` / `has` / `note` and `HubApp.clip` / `has_clip` are unchanged, so every caller
+  (transcription, Replay, attachments, dispatch audio) works as before. **Playback goes through the hub only**
+  (`/api/audio/<id>.wav` behind Cloudflare Access): no presigned or public URLs, the bucket's name never leaves it.
+* **Deletes**: the retention deletes the objects first, in `DeleteObjects` calls of at most 1000 keys, then the rows
+  whose objects S3 confirmed gone (a refused key keeps its row, tried again next pass), `audio_prune_batch` rows a
+  transaction, paced as above. A store that can't delete leaves every row.
+* **The bucket's lifecycle**: a **hard max of 400 days** on `audio/clip/` (Settings allows at most 365 per channel,
+  so this only removes what the app failed to delete, or what an older release left after a rollback); dispatch
+  audio has none (kept with the dispatch log); incomplete uploads aborted after a day. No cheaper storage class:
+  at ~50 KB a clip, Standard-IA's 128 KB minimum and 30-day minimum would cost more than they save.
+* **The migration**: the rows from before #414 are the uploader's backlog (`stored = 'db'` with bytes), moved by the
+  leader only, throttled as above (the ~4,400 clips of a typical 12 h: ~20 minutes in the day). Resumable at any
+  point: the state is the rows; a handover mid-upload leaves at most one object PUT twice (same key, same bytes).
+  Clips already past their retention are pruned, not uploaded. Once no row holds bytes, the next off-peak pass
+  rewrites an `audio.sqlite` from before #251 (`auto_vacuum` off) with one `VACUUM` (only the live pages: a few MB of
+  metadata) and `auto_vacuum = INCREMENTAL`; a newer file hands its pages back by incremental vacuum as before.
+* **Rollback**: the columns are added with `ALTER TABLE` (defaults), so the release before #414 opens the file, its
+  inserts (five named columns) still work and it reads a row in S3 as a clip with no audio (`wav` is `x''`: a 404
+  "no such clip", never a crash). Its own new clips go into `audio.sqlite` as before; rolled forward again, they are
+  migrated like the rest. While rolled back, its retention deletes rows but not their objects: the lifecycle's hard
+  max removes those. To roll back for good, leave `SIZEUP_AUDIO_BUCKET` in the task definition until a release with
+  #414 has copied nothing new for a while, or accept that clips already in S3 don't play on the old release.
+* **Costs** (us-east-1, at the measured volume): PUTs ~260k a month, ~$1.30; storage $0.023/GB-month: 12 h of clips
+  (today's default) ~0.2 GB, ~$0.01; every channel at 30 days ~11.5 GB, ~$0.27; at a year ~140 GB, ~$3.20; GETs
+  (playback that misses the cache) and deletes: pennies / free. Today: Litestream keeps ~4.7 GB for `audio.sqlite`
+  (its levels and a 270 MB snapshot, ~$0.11/month) and a cold restore or a standby has to bring ~270 MB back; with S3
+  the file is a few MB, so its snapshots, compactions and restores shrink with it (the bytes still pass through
+  Litestream's WAL once only when a PUT failed).
+
+**Deploy** (in order; the taskdef change is a separate follow-up PR, like #344):
+
+1. Merge this. Without `SIZEUP_AUDIO_BUCKET` nothing changes: the hub keeps the audio in `audio.sqlite`, the new
+   columns are added and filled for new clips, and the per-channel retention applies.
+2. Run `bash 15-audio-storage.sh` in sizeup-aws: the bucket, its lifecycle and the task role's `audio-storage`
+   policy (S3 Get/Put/Delete on `audio/*` of that bucket only, List on that prefix).
+3. The follow-up PR: `{"name": "SIZEUP_AUDIO_BUCKET", "value": "sizeup-audio-<account>"}` in the hub container's
+   environment in `deploy/aws/taskdef.json`. Once deployed, the log says `audio: bytes in s3://...` and then
+   `audio: N clip(s) moved into the store, M still in audio.sqlite` until M is 0, and later (2-5 am)
+   `audio: audio.sqlite rewritten small once its audio was in the store (VACUUM, #414)`.
 
 ### Starting: the CAD first (#251)
 
@@ -2570,7 +2643,8 @@ namespace, a named volume for `/data`, no Litestream).
 `sizeup/cloud/`: `station.py` (StationLink: outbox, forwarder, state, jobs), `autoupdate.py` (the
 station follows the hub's build: `Watch` in the station, the root updater), `stationmode.py`
 (Settings → System → Station and the station page's hub link: on / off at runtime, state/cloud.json, the Keychain), `outbox.py`,
-`client.py` (kept-alive HTTPS), `hub.py` (Hub: ingest, health, jobs; HubApp), `health.py` (station health:
+`client.py` (kept-alive HTTPS), `hub.py` (Hub: ingest, health, jobs; HubApp; the audio retention and uploader;
+the audio's S3 store is `sizeup/audiostore.py`, tests `tests/test_audio_store.py`), `health.py` (station health:
 the model, the alerts, `/api/cad/health`, `/api/station/status`; `sizeup/notify.py` the pushes, `health.js` /
 `health.css` Settings → Health, `tools/deploy_check.py` the deploy check), `hubstore.py`
 (hub.sqlite, audio.sqlite), `access.py` (Cloudflare Access identity; the gate is in

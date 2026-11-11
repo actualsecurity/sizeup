@@ -163,7 +163,7 @@ class S3:
                           payload_sha=sha)
         try:
             status, hdrs, data = self.send(method, url, {k: v for k, v in signed.items() if k != "Host"},
-                                           body if method == "PUT" else None, TIMEOUT_S)
+                                           body if method in ("PUT", "POST") else None, TIMEOUT_S)
         except OSError as e:
             raise aws.AwsError(f"S3 {method}: {getattr(e, 'reason', e)}", "Network") from None
         if status == 403:

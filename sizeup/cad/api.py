@@ -204,6 +204,9 @@ POST /api/cad/settings/department_units  {action: set {key: a feed's department 
 POST /api/cad/settings/map_display        {action: set {key: detail_zoom | active_zoom | board_detail_zoom |
                                           board_active_zoom, value: a zoom} | reset {key}}: below it a rig is drawn small on
                                           the maps (#376, sizeup/cad/mapview.py); admins
+POST /api/cad/settings/audio_retention    {action: set {key: _default | a channel's name | tg:<n>, value: days} | reset
+                                          {key}}: how long the hub keeps that channel's clips, the ones already kept too
+                                          (#414, sizeup/audiostore.py); admins
 POST /api/cad/settings/alert_mutes        {action: mute {key: a health alert kind, hours?} | unmute {key}}: shown on
                                           Settings > Health, not pushed (#340, sizeup/cloud/health.py); admins
 """

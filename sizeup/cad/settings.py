@@ -47,6 +47,9 @@ Reset to default = drop the override (one item, or a whole section).
     map_display                    key "detail_zoom" | "active_zoom" | "board_detail_zoom" | "board_active_zoom" -> a zoom:
                                    below it an idle / active rig is drawn small on the console's maps / the wall board's
                                    (#376, sizeup/cad/mapview.py DISPLAY_DEFAULTS; Settings > System > Map display, admins)
+    audio_retention                key "_default" | a channel's label ("FG1", "HPN Tower") | "tg:<n>" -> days (0.5 to 365): how
+                                   long the hub keeps that channel's clips, the ones already kept too (#414,
+                                   sizeup/audiostore.py keep_days; Settings > System > Audio retention, admins)
     alert_mutes                    key an alert kind (sizeup/cloud/health.py MUTE_KINDS: adsb, whisper, job, trunk,
                                    silent, hub_errors ...) -> {"until": epoch | null (until unmuted)}: shown on Settings >
                                    Health, not pushed (#340; Settings > System > Push notifications, admins)
@@ -83,7 +86,7 @@ from sizeup.cad import dispatcher, eta, mapview, runcards, tonelist
 from sizeup.cad import lists as lists_mod
 from sizeup.cad.lists import CLASSES, CODE, COLOR, LIST_SECTIONS, LONG_CODE, RESPONSES, ROLES, ListsError
 from sizeup.cad.store import OPERATOR_MAX, SCHEMA_VERSION, TZ, CadError
-from sizeup import errwatch, polly
+from sizeup import audiostore, errwatch, polly
 from sizeup.cloud import health as health_mod
 from sizeup.radio.tones import pair_key
 from sizeup.tts import KOKORO_VOICES
@@ -132,6 +135,10 @@ MUTE_HOURS_MAX = 24 * 30
 # The rigs' zooms on the maps (#376, sizeup/cad/mapview.py): Settings > System > Map display, audited as System.
 MAPD_SECTION = mapview.DISPLAY_SECTION
 PAGE_SECTION[MAPD_SECTION] = "system"
+# How long each channel's / talkgroup's clips are kept on the hub (#414, sizeup/audiostore.py keep_days): Settings >
+# System > Audio retention, admins, audited as System; applies to the clips already kept at the next prune.
+RET_SECTION = audiostore.RETENTION_SECTION
+PAGE_SECTION[RET_SECTION] = "system"
 WALL_ID = re.compile(r"[A-Za-z0-9_.:-]{1,64}")      # sizeup/roads.py CAMERA_ID
 MAX_WALL_IDS = 200
 AUDIT_SECTIONS = ("lists", "run cards", "units", "dispatch", "users", "system", "radios")
@@ -543,7 +550,71 @@ class Editor:
         out["hub_errors"] = self.errors_page(ov)
         out["map_display"] = self.mapd_page(ov)
         out["alert_mutes"] = self.mutes_page(ov)
+        out["audio_retention"] = self.retention_page(ov)
         return out
+
+    def retention_page(self, ov: dict | None = None) -> dict | None:
+        """Settings > System > Audio retention (#414): the default and every channel / talkgroup with clips or its own
+        days: clips, bytes, the days in effect, edited or not. None where there is no audio database (not the hub)."""
+        blobs = getattr(self.cad, "audio_blobs", None)
+        if blobs is None or not hasattr(blobs, "channels"):
+            return None
+        r = ((self.overrides() if ov is None else ov).get(RET_SECTION) or {})
+        base = float(getattr(self.cad, "audio_keep_days", 0.5))
+        default = audiostore.keep_days(r, "", None, base)
+        rows: dict[str, dict] = {}
+        for c in blobs.channels():
+            key = audiostore.retention_key(c["channel"], c["talkgroup"])
+            if not key:
+                continue
+            x = rows.setdefault(key, {"key": key, "label": c["channel"] or key, "talkgroup": c["talkgroup"], "clips": 0,
+                                      "bytes": 0})
+            x["clips"] += c["clips"]
+            x["bytes"] += c["bytes"]
+        for key in r:
+            if key != audiostore.DEFAULT_KEY and key not in rows:
+                m = audiostore.TG_KEY.fullmatch(key)
+                rows[key] = {"key": key, "label": key, "talkgroup": int(m.group(1)) if m else None, "clips": 0, "bytes": 0}
+        for x in rows.values():
+            x["days"] = audiostore.keep_days(r, "" if x["talkgroup"] is not None else x["key"], x["talkgroup"], default)
+            x["edited"] = x["key"] in r
+        lo, hi = audiostore.RETENTION_DAYS
+        return {"default": {"value": default, "default": base, "edited": audiostore.DEFAULT_KEY in r},
+                "rows": sorted(rows.values(), key=lambda x: (-x["bytes"], x["key"])), "min": lo, "max": hi,
+                "event_days": float(getattr(self.cad, "audio_event_days", 0) or 0)}
+
+    @staticmethod
+    def _ret_key(key) -> str:
+        if not isinstance(key, str) or not (key == audiostore.DEFAULT_KEY or audiostore.TG_KEY.fullmatch(key)
+                                            or (audiostore.CHANNEL_KEY.fullmatch(key) and not key.startswith(("_", "tg:"))
+                                                and key == key.strip())):
+            raise CadError("key: _default, a channel's name or tg:<talkgroup>")
+        return key
+
+    @staticmethod
+    def _ret_value(key: str, v) -> float:
+        lo, hi = audiostore.RETENTION_DAYS
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or not lo <= v <= hi:
+            raise CadError(f"{key}: days from {lo:g} to {hi:g}")
+        return round(float(v), 2)
+
+    def _retention_op(self, action: str, body: dict, op: str) -> dict:
+        """set {key: _default | a channel's label | tg:<n>, value: days} | reset {key}: admins. Applies to the clips
+        already kept at the hub's next prune (every 10 min)."""
+        key = self._ret_key(body.get("key"))
+        r = self.overrides().get(RET_SECTION) or {}
+        cur = r.get(key)
+        if action == "reset":
+            v = REMOVE
+        elif action == "set":
+            v = self._ret_value(key, body.get("value"))
+        else:
+            raise CadError("action: set or reset")
+        if (v is REMOVE and cur is None) or v == cur:      # nothing changes: nothing written, nothing audited
+            return {"ok": True, "audio_retention": self.retention_page()}
+        shown = (lambda x: "default" if x is None or x is REMOVE else f"{x:g} d")
+        out = self._commit([(RET_SECTION, key, v)], op, [("system", f"{RET_SECTION}/{key}", shown(cur), shown(v))])
+        return {**out, "audio_retention": self.retention_page()}
 
     def mutes_page(self, ov: dict | None = None) -> dict:
         """Settings > System > Push notifications > Mute (#340): each health alert kind, muted or not, until when."""
@@ -820,7 +891,7 @@ class Editor:
               "dispatch": self._dispatch_op, "users": self._users_op, "runcards": self._cards_op,
               "import": self._import_op, "channels": self._channels_op, "stt": self._stt_op,
               "places": self._places_op, TONES_SECTION: self._tones_op, WALL_SECTION: self._wall_op, DS_SECTION: self._ds_op,
-              NOTIFY_SECTION: self._notify_op, ATC_SECTION: self._atc_op, ERR_SECTION: self._errors_op, MAPD_SECTION: self._mapd_op, MUTE_SECTION: self._mutes_op, DEPT_SECTION: self._dept_op, "alarms": lambda a, b, o: self.cad.alarms.settings_op(a, b, o)}.get(section)
+              NOTIFY_SECTION: self._notify_op, ATC_SECTION: self._atc_op, ERR_SECTION: self._errors_op, MAPD_SECTION: self._mapd_op, RET_SECTION: self._retention_op, MUTE_SECTION: self._mutes_op, DEPT_SECTION: self._dept_op, "alarms": lambda a, b, o: self.cad.alarms.settings_op(a, b, o)}.get(section)
         if fn is None:
             raise CadError(f"no settings section {section!r}")
         if section in ("users", "import"):
@@ -2338,6 +2409,12 @@ class Editor:
                 mapview.display_value(k, v)
             except ValueError as e:
                 raise CadError(f"overrides.{MAPD_SECTION}: {e}") from None
+        for k, v in (ov.get(RET_SECTION) or {}).items():      # sizeup/audiostore.py (#414)
+            try:
+                self._ret_key(k)
+                self._ret_value(k, v)
+            except CadError as e:
+                raise CadError(f"overrides.{RET_SECTION}: {e}") from None
         for k, v in list((ov.get(MUTE_SECTION) or {}).items()):     # sizeup/cloud/health.py (#340)
             if k not in health_mod.MUTE_KINDS:
                 raise CadError(f"overrides.{MUTE_SECTION}: {', '.join(health_mod.MUTE_KINDS)} only")

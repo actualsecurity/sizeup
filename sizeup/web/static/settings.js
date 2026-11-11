@@ -1629,6 +1629,7 @@ function sSystem(panel) {
     ...(sy && S.data.atc ? [sAtcTalkers(S.data.atc)] : []),
     ...(sy && S.data.hub_errors && sIsHub() ? [sHubErrors(S.data.hub_errors)] : []),
     ...(sy && S.data.map_display ? [sMapDisplay(S.data.map_display)] : []),
+    ...(sy && S.data.audio_retention && canDo("admin") ? [sAudioRetention(S.data.audio_retention)] : []),
     sCard(sCardHead("Records"), recs, counts),
     ...(S.data.camera_wall ? [sCameraWall(S.data.camera_wall)] : []),
     sCard(sCardHead("Data file"), file),
@@ -1736,6 +1737,39 @@ function sMapDisplay(d) {
     if (v.edited && canDo("admin")) row.append(sBtn("Reset", `Default: ${v.default}`,
       () => sPost("map_display", { action: "reset", key }, `${v.label}: ${v.default}`)));
     card.append(row);
+  }
+  return card;
+}
+
+// How long the hub keeps each channel's / talkgroup's clips (#414, sizeup/audiostore.py keep_days). Days; a change
+// applies to the clips already kept at the next prune (10 min). Admins; the hub only (the data is null elsewhere).
+function sAudioRetention(r) {
+  const mb = (b) => (b >= 1e9 ? `${(b / 1e9).toFixed(1)} GB` : b >= 1e7 ? `${Math.round(b / 1e6)} MB` : `${(b / 1e6).toFixed(1)} MB`);
+  const card = sCard(sCardHead("Audio retention", `${r.default.value} d`,
+    sHelp(`Days each channel's clips are kept, then deleted; a change applies to clips already kept. `
+      + `Clips on an event, an alarm or an emergency: at least ${r.event_days ? `${r.event_days} d` : "forever"} `
+      + `(attached ones: a year in the incident). Talkgroup over channel over default.`)));
+  card.id = "s-audio-retention";
+  const row = (key, label, v, edited, info, title) => {
+    const n = el("input", "s-num");
+    n.type = "number"; n.min = String(r.min); n.max = String(r.max); n.step = "0.5";
+    n.value = String(v);
+    n.setAttribute("aria-label", `${label}: days kept`);
+    n.addEventListener("change", () => sPost("audio_retention", { action: "set", key, value: Number(n.value) },
+      `${label}: ${n.value} d`));
+    const lab = el("span", "s-eta-l", label);
+    if (title) lab.title = title;
+    const x = el("div", "row");
+    x.append(lab, n, el("span", "dim small", "d"), sState(edited ? "edited" : "default"), el("span", "dim small", info),
+      el("span", "spacer"));
+    if (edited) x.append(sBtn("Reset", key === "_default" ? `Default: ${r.default.default} d` : `Default: ${r.default.value} d`,
+      () => sPost("audio_retention", { action: "reset", key }, `${label}: default`)));
+    return x;
+  };
+  card.append(row("_default", "Default", r.default.value, r.default.edited, "", "Every channel without its own"));
+  for (const c of r.rows) {
+    card.append(row(c.key, c.label, c.days, c.edited, c.clips ? `${c.clips} · ${mb(c.bytes)}` : "",
+      c.talkgroup != null ? `tg:${c.talkgroup}` : ""));
   }
   return card;
 }
