@@ -16,8 +16,8 @@
 //                 never past the hub's bounds; Motion.railFollow replaces the eased lon/lat offset with a speed
 //                 along the track that closes on the prediction (never across it, no steps; back only to where a
 //                 fix says it stopped: eased a few metres, or put there at once and marked). A GPS fix is carried on
-//                 gently (full speed for 8 s of its age, then slowing; braked to a stop when its speed is falling):
-//                 where a train stopped mid-track matters more than a smooth glide (#375).
+//                 at its speed, slowed only on evidence (braking, its next stop, a fix gone quiet), and the drawn
+//                 train's pace changes no faster than its consist can; a big correction is glided onto (#375, #390).
 //
 // Nothing fake: the prediction is only ever between a real fix and the next one, at most horizonS after its fix; a
 // fix older than the layer's stale age is drawn where it really was (eased back there), never moved on.
@@ -167,27 +167,42 @@ window.Motion = (() => {
   // Never behind its fix, never past hold_s, never past the next stop, never after `until`: there it is held.
   // A train with no run (no segment): held at its fix.
   const STOP_ZONE_M = 500;            // a stopped train's fix this close before its stop's mark: standing at it
-  // A GPS fix (MTA TrainTime) is carried on gently (#375: "if a train stops mid track we want to know where
-  // accurately"): at its full speed for RAIL_FULL_S of the fix's age, then slowing, v e^-(age - RAIL_FULL_S)/RAIL_DECAY_S
-  // (at most RAIL_DECAY_S x v further, however old); a speed falling faster than RAIL_BRAKE_A (the hub's filter, a):
-  // braked at that rate to a stop, the slower of the two.
-  const RAIL_FULL_S = 8, RAIL_DECAY_S = 5, RAIL_BRAKE_A = -0.2, RAIL_STEP_S = 0.1;
-  // [distance on, speed now] tau seconds after a GPS fix at speed v, braking at a (m/s^2, < 0) or not
-  function gpsRun(v, a, tau) {
-    const soft = (t) => (t <= RAIL_FULL_S ? v : v * Math.exp(-(t - RAIL_FULL_S) / RAIL_DECAY_S));
-    if (!(a < RAIL_BRAKE_A)) {
-      if (tau <= RAIL_FULL_S) return [v * tau, v];
-      return [v * RAIL_FULL_S + v * RAIL_DECAY_S * (1 - Math.exp(-(tau - RAIL_FULL_S) / RAIL_DECAY_S)), soft(tau)];
-    }
-    const at = (t) => Math.min(Math.max(0, v + a * t), soft(t));           // braking, never faster than the soft horizon
-    let x = 0, t = 0;
-    while (t < tau) {                                                       // (trapezoid, RAIL_STEP_S)
+  // A GPS fix (MTA TrainTime) runs on at its speed (#390: "going quick, decelerating going hollow then picking speed
+  // back up"): no slowing on its age alone. It slows only on evidence:
+  //   braking     the hub's filter says its speed is falling (a < RAIL_BRAKE_A, confirmed by the distance moved or a
+  //               second reading: trains.py speed_check): braked at that rate to a stop (an emergency brake as hard
+  //               as the feed shows it: the hub clamps a at 1.5 m/s^2);
+  //   its stop    a scheduled stop ahead: braked into it at an ordinary stop's rate (the consist's bs, ~0.8 m/s^2),
+  //               the speed never over sqrt(2 bs (distance left)), so it arrives at the stop's mark at rest;
+  //   no news     a fix older than RAIL_CRUISE_S (20 s: past the oldest a fix normally is when read, 16 s, a little
+  //               under the oldest it gets before the next read): eased to a stop at the consist's service brake (b).
+  // A train that stops mid-track with no sign of it before the feed goes quiet is drawn on at its speed until the
+  // fix is RAIL_CRUISE_S old (the trade-off for a steady train: see #390), then eased; the next fix glides it back.
+  const RAIL_BRAKE_A = -0.2, RAIL_CRUISE_S = 20, RAIL_STEP_S = 0.1, RAIL_JERK = 1.5;
+  // what a consist can do (the hub's dyn, trains.py consist): the M8's when the hub doesn't say
+  const DYN = { a0: 0.89, pw: 12.4, b: 1.34, bs: 0.8, vmax: 35.8 };
+  const dynOf = (f) => (f && f.dyn && typeof f.dyn.b === "number" ? f.dyn : DYN);
+  const accelAt = (dyn, v) => Math.min(dyn.a0, dyn.pw / Math.max(1, v));      // tapering at speed: power / mass
+  // [distance on, speed now] tau seconds after a GPS fix at speed v (m/s), its acceleration a (m/s^2, the hub's), room
+  // metres to a scheduled stop ahead (Infinity: none), dyn the consist (dynOf)
+  function gpsRun(v, a, tau, room = Infinity, dyn = DYN) {
+    const brake = a < RAIL_BRAKE_A ? a : 0;
+    if (!brake && !(room < Infinity) && tau <= RAIL_CRUISE_S) return [v * tau, v];   // the usual case: steady
+    let x = 0, t = 0, u = v;
+    const cap = (x_) => (room < Infinity ? Math.sqrt(2 * dyn.bs * Math.max(0, room - x_)) : Infinity);
+    u = Math.min(u, cap(0));
+    while (t < tau - 1e-9 && u > 0) {
       const h = Math.min(RAIL_STEP_S, tau - t);
-      x += (at(t) + at(t + h)) * h / 2;
+      let du = brake * h;
+      if (!brake && t + h > RAIL_CRUISE_S)                                 // (braking already: on so) eased in at RAIL_JERK
+        du = -Math.min(dyn.b, RAIL_JERK * (t + h - RAIL_CRUISE_S)) * Math.min(h, t + h - RAIL_CRUISE_S);
+      const u1 = Math.max(0, Math.min(u + du, cap(x + u * h)));
+      x += (u + u1) * h / 2;
+      u = u1;
       t += h;
-      if (at(t) === 0) break;                                               // stopped
     }
-    return [x, at(tau)];
+    if (room < Infinity && (x > room || (u === 0 && room - x < 2 * dyn.bs * RAIL_STEP_S))) x = room;   // (on its mark)
+    return [x, u];
   }
   function rail(fix, dt) {
     const d = fix.d >= 0 ? 1 : -1, s0 = fix.s;
@@ -200,13 +215,22 @@ window.Motion = (() => {
       // A GPS fix (v: TrainTime) says where it stopped, mid-track or not: there, nowhere else (#375).
       const gps = typeof fix.v === "number" && fix.fixAt != null;
       if (!gps && typeof fix.stop === "number" && (fix.stop - s0) * d >= 0 && (fix.stop - s0) * d <= STOP_ZONE_M) out.lim = fix.stop;
+      if (gps) out.lim = s0;
       return out;
     }
     const T = fix.t0 + dt, until = typeof fix.until === "number" ? fix.until : fix.t0;
     if (typeof fix.v === "number" && fix.v > 0 && fix.fixAt != null) {
-      // a GPS fix with its speed (MTA TrainTime, #362): on along the track from when it was taken, gently (gpsRun)
+      // a GPS fix with its speed (MTA TrainTime, #362): on along the track from when it was taken (gpsRun), braked into
+      // its next stop when that is its limit
       const tau = Math.max(0, Math.min(T, until) - fix.fixAt);
-      let [x, v] = gpsRun(fix.v, typeof fix.a === "number" ? fix.a : 0, tau);
+      const room = typeof fix.stop === "number" && lim === fix.stop ? Math.max(0, (fix.stop - s0) * d) : Infinity;
+      const a = typeof fix.a === "number" ? fix.a : 0, dyn = dynOf(fix);
+      if (a < RAIL_BRAKE_A) {                                         // braking: where it comes to rest is its limit
+        const rest = Math.min(room, (fix.v * fix.v) / (2 * -a));
+        if ((s0 + d * rest - lim) * d < 0) out.lim = lim = s0 + d * rest;
+      }
+      out.eased = !(a < RAIL_BRAKE_A) && tau > RAIL_CRUISE_S;        // slowed for want of news, not on any data
+      let [x, v] = gpsRun(fix.v, a, tau, room, dyn);
       let s = s0 + d * x;
       if ((s - lim) * d >= 0) { s = lim; v = 0; }                     // held at its limit
       out.s = s;
@@ -227,64 +251,200 @@ window.Motion = (() => {
   const railRest = (fix) => ({ ...rail(fix, 0), s: fix.s, v: 0, moving: false });
 
   // Corrections along the track (Tracker's follow), each frame from where it was drawn last (it.shown) at the speed it
-  // was drawn at (it.u), so the train never steps, stops or lunges between fixes (#375):
+  // was drawn at (it.u) and the rate that speed was changing (it.acc), so the train never steps, stops or lunges
+  // between fixes (#375), and its pace changes no faster than its consist can (#390: dynOf, the hub's dyn):
   //   jump         drawn at the new position at once: nothing drawn yet, more than JUMP_M away, the other way,
-  //                or another train number (a turn-back at Stamford); the first real fix of a train drawn on our
-  //                estimate (the estimate was a guess: no chase across it).
+  //                or another train number (a turn-back at Stamford).
   //   stale        frozen where it is: nothing moves on old data.
-  //   past lim     drawn beyond where this fix allows (its hold point, its stop, or where it stopped): back to it,
-  //                never a long slide backwards: up to BACK_EASE_M eased back along the track over about BACK_S
-  //                (at most BACK_MAX_MPS); more, put there at once, the jump marked (snapAt: trains.js rings it for
-  //                SNAP_MARK_MS) so a correction is seen as one.
-  //   otherwise    on at a speed that closes on the prediction: the train's own speed plus the gap over TAU_S (less
-  //                when drawn ahead of it, but while the train runs never under SLOW_SHARE of its speed: slowed,
-  //                not stopped; held, it comes to rest; never backwards), the drawn speed easing onto that over
-  //                RAMP_S (no step in speed either), at most CATCH_MAX_MPS faster than the train; never past lim.
-  // (Measured on the live shape, #375: fixes reach the page 3 to 16 s old every 5 s, with ±10 m of GPS noise.)
-  const JUMP_M = 2000, TAU_S = 3, RAMP_S = 1, CATCH_MAX_MPS = 30, SLOW_SHARE = 0.3, SNUG_M = 3, FRAME_MAX_S = 1;
-  const BACK_EASE_M = 30, BACK_S = 1.5, BACK_MIN_MPS = 2, BACK_MAX_MPS = 20, SNAP_MARK_MS = 2500;
+  //   glide        (#390: "fine with an overshoot if we keep it smooth ... then we nudge it back like we did for planes
+  //                ... it needs to be less surgy") a correction no bounded change of pace can make. Drawn beyond this
+  //                fix's limit (where it stopped, or will stop, or a held train) while still running: braked to rest
+  //                hard (BRAKE_HARD, eased in at JERK_HARD: on past it as little as smoothly can be), then glided back.
+  //                A new fix more than GLIDE_AHEAD_M ahead (a GTFS-realtime report too: under that, the band closes it)
+  //                or the first real fix of a train drawn on our estimate: glided on to it. A glide follows the latest fix's
+  //                position, as an aircraft eases onto a new fix but smoother: its offset from the prediction is a
+  //                quintic from where and how fast it is drawn to rest on it (no jump, no step in speed, no jolt at
+  //                either end), as slow as glidePlan needs (never faster than the train + GLIDE_AHEAD_SHARE of its
+  //                speed + 2 m/s going on, acceleration at most GLIDE_ACC, to GLIDE_MAX_S; going back at most
+  //                GLIDE_PEAK_MPS and GLIDE_BACK_ACC, to GLIDE_BACK_MAX_S); one that would take longer, or is over
+  //                FADE_M, is faded out and in at the fix instead. A new fix mid-glide that moves the target is taken
+  //                into the glide as a smooth shift (never a re-plan: never a fade or a hitch mid-glide). Busy and
+  //                marked (snapped: trains.js rings it faintly) meanwhile. An ease for want of news (rail's eased) is no data: up to
+  //                EASE_SLACK_M past it is left be.
+  //   otherwise    on at the train's own speed (the prediction's, from the fix's own speed: never a decayed one, so a
+  //                lag can't grow, #379) plus the gap over TAU_S, the correction at most SHARE of its speed (+
+  //                CORR_MIN_MPS) either way: a new fix's error is absorbed over the next few seconds, no surge. Past
+  //                BIG_M off, a little more (at most EXTRA_SHARE of its speed + 2 m/s); a train with no GPS speed
+  //                (GTFS-realtime only: its reports 1 to 1.6 km apart, its run an estimate) by SHARE_EST. Whatever
+  //                the band, never faster than (1 + GLIDE_AHEAD_SHARE) x the train's speed + 2 m/s, nor its consist's
+  //                vmax unless the train is. Never backwards; braked into lim as a train stops (sqrt(2 bs room);
+  //                harder, to BRAKE_HARD, only when the data says it stops closer). The drawn speed eases onto that
+  //                over RAMP_S (the prediction's own change of speed fed forward), its change at most the consist's
+  //                acceleration (accelAt) or brake (b), and that change itself eased (JERK_MPS3): no step in speed or
+  //                in pace.
+  // (Measured on the live shape, #375: fixes reach the page 3 to 16 s old, a new one every 3 to 12 s, ±10 m of GPS noise.)
+  const JUMP_M = 2000, TAU_S = 6, RAMP_S = 1, CATCH_MAX_MPS = 30, SLOW_SHARE = 0.3, SNUG_M = 3, FRAME_MAX_S = 1;
+  const SHARE = 0.15, SHARE_EST = 0.4, EXTRA_SHARE = 0.25, CORR_MIN_MPS = 0.5, BIG_M = 30, JERK_MPS3 = 1.5;
+  const GLIDE_AHEAD_M = 400, GLIDE_MIN_S = 3, GLIDE_MAX_S = 20, GLIDE_PEAK_MPS = 25, LIM_SLACK_M = 0.5;
+  const GLIDE_ACC = 1.5, GLIDE_BACK_ACC = 3, SHIFT_ACC = 1.5, SHIFT_MPS = 10, GLIDE_BACK_MAX_S = 26, GLIDE_AHEAD_SHARE = 0.25, EASE_SLACK_M = 25;
+  const FADE_M = 600, FADE_MS = 800, BRAKE_HARD = 4, JERK_HARD = 12;
+  // A glide's offset from the prediction, k (0..1) of the way through T: from off0, changing at m0 (metres per glide),
+  // to 0 at rest on it; a quintic Hermite, so its acceleration is 0 at both ends (no jolt starting or ending)
+  const H = (k) => [1 - 10 * k ** 3 + 15 * k ** 4 - 6 * k ** 5, k - 6 * k ** 3 + 8 * k ** 4 - 3 * k ** 5];
+  const dH = (k) => [-30 * k * k + 60 * k ** 3 - 30 * k ** 4, 1 - 18 * k * k + 32 * k ** 3 - 15 * k ** 4];
+  const ddH = (k) => [-60 * k + 180 * k * k - 120 * k ** 3, -36 * k + 96 * k * k - 60 * k ** 3];
+  const quintic = (off0, m0, k) => { const [a, b] = H(k); return off0 * a + m0 * b; };
+  // (#390: "less surgy") a glide is as slow as it must be: the drawn train never faster than the train + GLIDE_AHEAD_SHARE
+  // of its speed + 2 m/s going on (the band's own limit), its acceleration at most GLIDE_ACC, over GLIDE_MIN_S to
+  // GLIDE_MAX_S; going back ("nudge it back like we did for planes": a stop the data didn't show in time) never faster
+  // than GLIDE_PEAK_MPS, at most GLIDE_BACK_ACC, over up to GLIDE_BACK_MAX_S (about 330 m: every no-evidence stop at 20
+  // to 60 mph). One that would need longer: faded out where it is drawn and in at the fix (FADE_MS).
+  function glidePlan(off0, rel, v) {
+    const back = off0 > 0;                                                      // drawn ahead: gliding back
+    const ahead = Math.min(GLIDE_PEAK_MPS, GLIDE_AHEAD_SHARE * v + 2);          // most it may go faster than the train
+    const accMax = back ? GLIDE_BACK_ACC : GLIDE_ACC, maxT = back ? GLIDE_BACK_MAX_S : GLIDE_MAX_S;
+    for (let T = GLIDE_MIN_S; T <= maxT + 1e-9; T += 0.5) {
+      const m0 = rel * T;
+      let ok = true;
+      for (let i = 0; i <= 40 && ok; i++) {
+        const k = i / 40, [a, b] = dH(k), [c, e] = ddH(k);
+        const r = (off0 * a + m0 * b) / T, acc = (off0 * c + m0 * e) / (T * T);   // the offset's rate and acceleration
+        ok = r <= Math.max(ahead, rel) + 1e-9 && -(v + r) <= GLIDE_PEAK_MPS + 1e-9 && Math.abs(acc) <= accMax + 1e-9;
+      }
+      if (ok) return { m0, T };
+    }
+    return null;
+  }
+  // (from the frame before, dt seconds ago: where it was drawn then, against where the prediction was then)
+  function glideFrom(it, sh, tg, now, dt = 0) {
+    const v = Math.max(0, tg.v || 0), off0 = (sh.s - tg.s) * tg.d + v * dt;
+    const u = typeof it.u === "number" ? it.u : 0;                        // drawn speed now, along d (signed)
+    const plan = Math.abs(off0) <= FADE_M ? glidePlan(off0, u - v, v) : null;
+    if (!plan) { it.glide = null; it.fade = { at: now, s: sh.s }; it.acc = 0; return; }
+    it.glide = { off0, m0: plan.m0, at: now - dt * 1000, T: plan.T, tg: tg.s, shifts: [] };
+    it.acc = 0;
+  }
   function railFollow(it, tg, now) {
     const sh = it.shown, dt = it.lastAt ? Math.min(FRAME_MAX_S, Math.max(0, (now - it.lastAt) / 1000)) : 0;
     it.lastAt = now;
-    const d = tg.d;
-    if (!sh || sh.d !== d || sh.train !== tg.train || !(Math.abs(tg.s - sh.s) <= JUMP_M) || (sh.est && !tg.est)) {
-      it.chase = 0; it.u = Math.max(0, tg.v || 0); it.back = 0; return tg;
+    const d = tg.d, dyn = dynOf(it.fix);
+    if (!sh || sh.d !== d || sh.train !== tg.train || !(Math.abs(tg.s - sh.s) <= JUMP_M)) {
+      it.chase = 0; it.u = Math.max(0, tg.v || 0); it.acc = 0; it.glide = null; it.fade = null; return tg;
     }
-    if (it.stale) { it.chase = 0; it.u = 0; return { ...sh, v: 0, moving: false }; }
-    const over = (sh.s - tg.lim) * d;
-    if (over > 0.5) {                                                  // beyond this fix's limit: back to it
-      it.u = 0;
-      if (over > BACK_EASE_M && (!it.back || it.fresh)) {                            // too far to slide: put there, marked
-        it.chase = 1; it.snapAt = now;                                 // (busy while marked: the ring goes out)
-        return { ...tg, s: tg.lim, v: 0 };
+    if (it.stale) { it.chase = 0; it.u = 0; it.acc = 0; it.glide = null; return { ...sh, v: 0, moving: false }; }
+    if (it.fade) {                                                       // faded out where it was, in at the fix
+      const k = (now - it.fade.at) / FADE_MS;
+      it.chase = 1; it.u = 0;
+      if (k < 0.5) return { ...tg, s: it.fade.s, v: 0 };
+      if (k >= 1) it.fade = null;
+      it.u = Math.max(0, tg.v || 0);
+      return tg;
+    }
+    const gap = (tg.s - sh.s) * d, v = Math.max(0, tg.v || 0), room = (tg.lim - sh.s) * d;
+    let u0 = typeof it.u === "number" ? it.u : v;
+    // past where this fix allows (an ease for want of news is no data: a little past it is left alone, not glided back)
+    const beyond = -room > LIM_SLACK_M || (!tg.moving && gap < -(tg.eased ? EASE_SLACK_M : LIM_SLACK_M));
+    if (beyond && !it.glide && u0 > 0) {
+      // (#390: "fine with an overshoot if we keep it smooth"): still running on past where the data says the train never
+      // got to, so braked to rest hard (BRAKE_HARD, eased in at JERK_HARD: no jump) ...
+      let acc = typeof it.acc === "number" ? it.acc : 0;
+      acc += Math.max(-JERK_HARD * dt, Math.min(JERK_HARD * dt, -BRAKE_HARD - acc));
+      const u1 = Math.max(0, u0 + acc * dt);
+      const s = sh.s + d * (u0 + u1) / 2 * dt;
+      it.u = u1; it.acc = u1 > 0 ? acc : 0; it.chase = 1;
+      return { ...tg, s, v: u1 };
+    }
+    const gps = !!(it.fix && typeof it.fix.v === "number" && it.fix.fixAt != null);
+    // (mid-glide, a new fix re-aims it only when it moves the target: the same stop again leaves the glide be)
+    // Mid-glide, a new fix that moves the target is absorbed into the glide, never re-planned (a re-plan could find no
+    // gentle way and fade, or hitch): the glide's offset takes the target's move as a shift of its own, eased out on a
+    // smootherstep over the glide's remaining time (at least long enough for SHIFT_ACC and SHIFT_MPS: with the glide's own,
+    // at most 4.5 m/s^2, the hard stop's level).
+    if (it.glide && it.fresh) {
+      const g = it.glide, delta = (tg.s - g.tg) * d - v * dt;                       // the target's move, beyond its run
+      if (Math.abs(delta) > 0.01) {
+        const left = Math.max(0, g.T - (now - g.at) / 1000);
+        const dur = Math.max(left, GLIDE_MIN_S, Math.sqrt((5.78 * Math.abs(delta)) / SHIFT_ACC), (1.875 * Math.abs(delta)) / SHIFT_MPS);
+        g.shifts.push({ amt: -delta, at: now, dur });
       }
-      if (it.fresh || !it.back) it.back = Math.min(BACK_MAX_MPS, Math.max(BACK_MIN_MPS, over / BACK_S));
-      it.chase = 1;
-      const step = it.back * dt;
-      if (step >= over) { it.chase = 0; it.back = 0; return { ...tg, s: tg.lim, v: 0 }; }
-      return { ...tg, s: sh.s - d * step, v: 0 };
     }
-    it.back = 0;
-    const gap = (tg.s - sh.s) * d, v = Math.max(0, tg.v || 0);
-    const want = Math.max(tg.moving ? SLOW_SHARE * v : 0, Math.min(v + CATCH_MAX_MPS, v + gap / TAU_S));
-    let u = typeof it.u === "number" ? it.u : v;
-    u += (want - u) * Math.min(1, dt / RAMP_S);
-    if (u < 0.01 && want === 0) u = 0;
-    let s = sh.s + d * u * dt;
-    const room = (tg.lim - sh.s) * d;
-    if (u * dt >= room) { s = tg.lim; u = 0; }                       // never past this fix's limit
-    if (!v && Math.abs(gap) <= 0.05) { s = tg.s; u = 0; }             // settled on a held train
-    it.u = u;
-    it.chase = u > 0.01 || gap > SNUG_M || snapped(it, now) ? 1 : 0;   // busy: still moving, behind, or marked
+    if (!it.glide && (beyond                                                          // ... then glided back from rest
+        || (it.fresh && gap > GLIDE_AHEAD_M)                                            // far behind a new fix
+        || (it.fresh && sh.est && !tg.est))) {                                          // a real fix of an estimated train
+      glideFrom(it, sh, tg, now, dt);                                                 // (from the last frame: no lost step)
+      if (it.fade) { it.u = 0; it.chase = 1; return { ...tg, s: sh.s, v: 0 }; }       // (fading out where it is)
+    }
+    if (it.glide) {
+      const g = it.glide, k = Math.min(1, (now - g.at) / 1000 / g.T);
+      g.tg = tg.s;
+      let off = quintic(g.off0, g.m0, k), busy = k < 1;
+      for (const x of g.shifts) {
+        const j = Math.min(1, (now - x.at) / 1000 / x.dur);
+        off += x.amt * H(j)[0];                                                       // (1 - smootherstep)
+        busy = busy || j < 1;
+      }
+      let s = tg.s + d * off;
+      if (!busy) { it.glide = null; s = tg.s; }
+      const u = dt ? ((s - sh.s) * d) / dt : (typeof it.u === "number" ? it.u : v);   // (negative: gliding back)
+      it.u = it.glide ? u : v; it.acc = 0; it.chase = 1;
+      return { ...tg, s, v: Math.max(0, it.u) };
+    }
+    // (the band by the fix's own speed while it runs, not a prediction eased for want of news: a lag can't grow, #379)
+    const vref = Math.max(v, tg.moving && gps ? it.fix.v : 0);
+    const extra = Math.max(0, Math.abs(gap) - BIG_M) / TAU_S;
+    const band = (gps ? SHARE : SHARE_EST) * vref + CORR_MIN_MPS + (gps ? Math.min(EXTRA_SHARE * vref + 2, extra) : extra);
+    let want = v + Math.max(-band, Math.min(band, CATCH_MAX_MPS, gap / TAU_S));
+    if (tg.moving) want = Math.max(want, (Math.abs(gap) > BIG_M ? SLOW_SHARE : 1 - SHARE) * v);
+    else if (gap > 0) want = Math.max(CORR_MIN_MPS, Math.min(v + CATCH_MAX_MPS, gap / RAMP_S));   // on to a held train
+    // never faster than the train + GLIDE_AHEAD_SHARE of its speed + 2 m/s, nor its consist's vmax (unless the train
+    // itself is): over that, at most the speed it is drawn at now (it slows into a held train, never surges)
+    const cap = Math.min((1 + GLIDE_AHEAD_SHARE) * vref + 2, Math.max(dyn.vmax || Infinity, vref + CORR_MIN_MPS));
+    if (want > cap) want = Math.max(cap, Math.min(want, Math.max(0, u0)));
+    const rest = tg.moving ? room : Math.min(room, gap);                // where it comes to rest: lim, or a held train's s
+    let u = Math.max(0, u0), acc = typeof it.acc === "number" ? it.acc : 0;
+    // braked into it as a train stops (less the way it runs while its braking builds up: JERK_MPS3)
+    want = Math.max(0, Math.min(want, Math.sqrt(2 * dyn.bs * Math.max(0, rest - u * (dyn.bs / JERK_MPS3) / 2))));
+    // (the prediction's own change of speed fed forward, a fix's step in it aside: the drawn pace keeps up as it eases,
+    // rather than lagging RAMP_S behind and running on past its rest)
+    const tgAcc = dt && !it.fresh && typeof it.tv === "number" ? Math.max(-dyn.b, Math.min(dyn.a0, (v - it.tv) / dt)) : 0;
+    it.tv = v;
+    let aim = (want - u) / RAMP_S + tgAcc;
+    const need = rest > 0 ? (u * u) / (2 * rest) : 0;                    // the braking that stops it there
+    if (need >= 0.9 * dyn.bs) aim = Math.min(aim, -need);
+    // (a limit it can't stop for at its service brake: the data says the train stops there, so harder, to BRAKE_HARD)
+    const hard = need > dyn.b, jerk = hard ? JERK_HARD : JERK_MPS3;
+    aim = Math.max(hard ? -Math.min(BRAKE_HARD, need) : -dyn.b, Math.min(accelAt(dyn, u), aim));
+    acc += Math.max(-jerk * dt, Math.min(jerk * dt, aim - acc));
+    if ((want - u) * acc > 0 && Math.abs(acc) * dt > Math.abs(want - u)) acc = dt ? (want - u) / dt : 0;   // not past want
+    const u1 = Math.max(0, u + acc * dt);
+    let s = sh.s + d * (u + u1) / 2 * dt;
+    u = u1;
+    if (u === 0) acc = Math.max(0, acc);
+    const end = !tg.moving && gap >= 0 ? tg.s : tg.lim;               // onto this fix's limit (or a held train) at rest;
+    if ((s - end) * d >= 0 && u <= 0.3) {                             // faster: on past it, braked, and glided back
+      s = (sh.s - end) * d >= 0 ? sh.s : end;                          // (already a little past an ease's rest: stays)
+      u = 0; acc = 0;
+    }
+    if (!v && Math.abs(gap) <= 0.05) { s = tg.s; u = 0; acc = 0; }    // settled on a held train
+    it.u = u; it.acc = acc;
+    it.chase = u > 0.01 || gap > SNUG_M ? 1 : 0;                       // busy: still moving, or behind
     return { ...tg, s, v: u };
   }
-  // put back (railFollow's snap) within the last SNAP_MARK_MS: the page marks it
-  const snapped = (it, now) => !!(it && it.snapAt && now - it.snapAt < SNAP_MARK_MS);
+  // gliding onto a correction (railFollow's glide): the page marks it, faintly
+  const snapped = (it) => !!(it && it.glide);
+  // a correction faded rather than glided: the train's opacity now (1: none), out then in over FADE_MS
+  const fadeOf = (it, now) => {
+    if (!it || !it.fade) return 1;
+    const k = (now - it.fade.at) / FADE_MS;
+    return k >= 1 ? 1 : Math.max(0, Math.abs(1 - 2 * k));
+  };
   // the trains' tracker: no horizon of its own (rail stops at `until`), stale with the feed (staleS: the hub's)
   const railTracker = (opts) => new Tracker(rail, { horizonS: Infinity, staleS: 60, ...opts, rest: railRest, follow: railFollow });
 
   return { tracker: (predict, opts) => new Tracker(predict, opts), arc, metres, wrap180,
-           profileS, profileT, rail, railFollow, railTracker, gpsRun, snapped,
-           RAIL: { JUMP_M, TAU_S, RAMP_S, CATCH_MAX_MPS, SLOW_SHARE, SNUG_M, STOP_ZONE_M, RAIL_FULL_S, RAIL_DECAY_S, RAIL_BRAKE_A,
-                   BACK_EASE_M, BACK_S, BACK_MAX_MPS, SNAP_MARK_MS } };
+           profileS, profileT, rail, railFollow, railTracker, gpsRun, snapped, fadeOf,
+           RAIL: { JUMP_M, TAU_S, RAMP_S, CATCH_MAX_MPS, SLOW_SHARE, SNUG_M, STOP_ZONE_M, RAIL_CRUISE_S, RAIL_BRAKE_A,
+                   SHARE, SHARE_EST, EXTRA_SHARE, CORR_MIN_MPS, BIG_M, JERK_MPS3, GLIDE_AHEAD_M, GLIDE_MIN_S, GLIDE_MAX_S,
+                   GLIDE_ACC, GLIDE_BACK_ACC, SHIFT_ACC, GLIDE_BACK_MAX_S, GLIDE_AHEAD_SHARE, EASE_SLACK_M, RAIL_JERK,
+                   GLIDE_PEAK_MPS, FADE_M, FADE_MS, BRAKE_HARD, JERK_HARD, DYN } };
 })();
