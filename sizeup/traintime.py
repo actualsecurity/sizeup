@@ -335,9 +335,10 @@ def _on_run_date(alert: dict, rec: dict) -> bool:
 
 
 def is_mnr(alert: dict, branches) -> bool:
-    """Metro-North's alert: its railroad says so, or (whatever it says) it lists a Metro-North branch (branches: those
-    of the Metro-North trains read)."""
-    return alert.get("railroad") == "MNR" or bool(set(alert.get("branches") or ()) & {b for b in branches if b})
+    """Metro-North's alert: its railroad says so, or it says none and lists a Metro-North branch (branches: those of
+    the Metro-North trains read). Another railroad's never, whatever its branch codes."""
+    rr = alert.get("railroad")
+    return rr == "MNR" or (not rr and bool(set(alert.get("branches") or ()) & {b for b in branches if b}))
 
 
 def about_train(alert: dict, rec: dict, names: dict[str, str] | None = None) -> tuple[int, ...]:
@@ -379,6 +380,8 @@ _SPAN = r"(\d{1,3}(?:\s*(?:-|–|to)\s*\d{1,3})?)"
 _LATE = re.compile(_SPAN + r"\s*(?:minutes?|mins?)\s+(?:late|delayed|behind schedule)\b", re.I)
 _DELAYS = re.compile(r"\bdelays?\s+of\s+(?:up\s+to\s+)?" + _SPAN + r"\s*(?:minutes?|mins?)", re.I)
 _CANCEL = re.compile(r"\bcancel+ed\b", re.I)
+_NOT_RUN = re.compile(r"\b(?:will not|won't|will no longer|is not|isn't)\s+(?:be\s+)?(?:operat\w*|run\w*)\b(?!\s+(?:as|on|late|\d))", re.I)
+_WAS = re.compile(r"\b(?:was|were|had been)\b", re.I)
 _HELD = re.compile(r"\bheld\b", re.I)
 _DELAYED = re.compile(r"\b(?:is|are|was|were|has been|have been|being|running|operating)\s+(?:\w+\s+)?delayed\b", re.I)
 _NEG = re.compile(r"\b(?:not|no longer|never|no)\b|n't\b", re.I)                        # in the status's own clause
@@ -397,19 +400,22 @@ _CAUSE = [(re.compile(rf"\b{p}\b", re.I), w) for p, w in _CAUSES]
 
 
 @lru_cache(maxsize=2048)
-def brief(sents: tuple[str, ...] | str) -> str:
+def brief(sents: tuple[str, ...] | str, context: tuple[str, ...] = ()) -> str:
     """What the sentences assert, in a few words: "20-25 min late (mechanical)", "delays up to 15 min", "cancelled",
     "held" (the cause from the same sentence, by whole word). A sentence that negates it ("no longer held", "will
     not be cancelled", "will now operate"), only supposes it ("may be cancelled") or says it of the past
-    ("previously cancelled") asserts nothing: SEE ("see alert") when that is all there is; "" when no sentence
-    says a status."""
+    ("previously cancelled", "was 10 minutes late") asserts nothing, nor one whose paragraph (context: its other
+    sentences) says it is undone ("... ; it is now on time"): SEE ("see alert") when that is all there is; "" when no
+    sentence says a status."""
+    later = any(_UNDO.search(c) and not _LATE.search(c) for c in context)
     if isinstance(sents, str):
         sents = sentences(sents)
     unsure = False
     span = lambda g: re.sub(r"\s*(?:-|\u2013|to)\s*", "-", g)
     for s in sents:
         found = [(m, w) for m, w in ((_LATE.search(s), "late"), (_DELAYS.search(s), "delays"), (_DELAYED.search(s), "delayed"),
-                                     (_CANCEL.search(s), "cancelled"), (_HELD.search(s), "held")) if m]
+                                     (_CANCEL.search(s), "cancelled"), (_NOT_RUN.search(s), "not running"),
+                                     (_HELD.search(s), "held")) if m]
         if not found:
             continue
         m, kind = min(found, key=lambda x: x[0].start())
@@ -418,10 +424,12 @@ def brief(sents: tuple[str, ...] | str) -> str:
         lo = max([0] + [c.end() for c in cuts if c.end() <= m.start()])
         hi = min([len(s)] + [c.start() for c in cuts if c.start() >= m.end()])
         clause = s[lo:hi]
-        neg, modal, undo = bool(_NEG.search(clause)), bool(_MODAL.search(s[:hi])), bool(_UNDO.search(s))
-        now_late = undo and not re.search(r"\bnow operat\w*", s, re.I)          # "will now operate 10 minutes late": late
+        neg, modal, undo = bool(_NEG.search(clause)), bool(_MODAL.search(s[:hi])), bool(_UNDO.search(s)) or later
+        now_late = undo and not (re.search(r"\bnow operat\w*", s, re.I) and not later)   # "will now operate 10 min late"
         if kind == "late":
-            what = "" if neg or modal or now_late else f"{span(m.group(1))} min late"
+            what = "" if neg or modal or now_late or _WAS.search(s[lo:m.start()]) else f"{span(m.group(1))} min late"
+        elif kind == "not running":
+            what = "" if modal or undo else "cancelled"
         elif kind == "delays":
             what = "" if neg else f"{'possible ' if modal else ''}delays up to {span(m.group(1))} min"
         elif kind == "delayed":
@@ -439,10 +447,19 @@ def brief(sents: tuple[str, ...] | str) -> str:
 def train_brief(alert: dict, hits: tuple[int, ...]) -> str:
     """The brief of the sentences that name a train (hits) and no other: SEE when they say no status of it."""
     named = alert.get("named") or ()
-    sents = sentences(f"{alert['header']}{PARA}{alert['text']}" if alert.get("text") else alert["header"])
-    only = tuple(sents[i] for i in hits if i < len(sents)
+    whole = f"{alert['header']}{PARA}{alert['text']}" if alert.get("text") else alert["header"]
+    sents = sentences(whole)
+    only = tuple(i for i in hits if i < len(sents)
                  and len({(n.get("num"), n.get("hm"), n.get("from")) for n in named if n["s"] == i}) == 1)
-    return brief(only) or SEE
+    para = _para_of(whole)
+    context = tuple(sents[j] for j in range(len(sents)) if j not in only and any(para[j] == para[i] for i in only))
+    return brief(tuple(sents[i] for i in only), context) or SEE
+
+
+@lru_cache(maxsize=1024)
+def _para_of(text: str) -> tuple[int, ...]:
+    """The paragraph of each of sentences(text)."""
+    return tuple(k for k, p in enumerate((text or "").split(PARA)) for x in _SENT.split(p) if x.strip())
 
 
 def _short_place(name: str) -> str:
@@ -477,7 +494,10 @@ def _alert_words(header_raw, text_raw) -> tuple:
         b = train_brief({"header": header, "text": text, "named": named}, (named[0]["s"],))
     else:                      # the line's: what it says, else its first words
         first = sentences(whole)[0] if sentences(whole) else header
-        b = brief(whole) or (first if len(first) <= 80 else first[:79].rstrip() + "…")
+        b = brief(whole, sentences(whole))
+        if b.startswith(("cancelled", "held")):          # which trains? not said: the alert says (#389)
+            b = SEE
+        b = b or (first if len(first) <= 80 else first[:79].rstrip() + "\u2026")
     return (header, text, named, b, train_label(named[0] if named else None))
 
 

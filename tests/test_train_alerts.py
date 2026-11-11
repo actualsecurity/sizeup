@@ -337,3 +337,40 @@ def test_mnr_branches_and_line_wide_alerts_are_kept():
         alert("D: railroad unsaid, no branch", railroad="", branches=[])]}]
     assert [a["header"] for a in TT.branch_alerts(recs, "NH")] == ["A: listed NH, railroad unsaid", "B: whole railroad"]
     assert [a["header"] for a in TT.branch_alerts(recs, "NC")] == ["B: whole railroad"]
+
+
+@pytest.mark.parametrize("text, brief", [
+    # a delay the same paragraph undoes, or said in the past: no brief (#389 round 3)
+    ("The 11:08am train from Stamford was 10 minutes late; it is now on time.", TT.SEE),
+    ("The 11:08am train from Stamford was 10 minutes late, it is now on time.", TT.SEE),
+    ("The 11:08am train from Stamford is 10 minutes late. It is now on time.", TT.SEE),
+    ("The 11:08am train from Stamford is 10 minutes late. Service has since been restored.", TT.SEE),
+    ("The 11:08am train from Stamford was 10 minutes late.", TT.SEE),
+    ("The 11:08am train from Stamford is 10 minutes late. It will make all stops.", "10 min late"),
+    ("The 11:08am train from Stamford will now operate 10 minutes late.", "10 min late"),
+    # "will not operate": cancelled
+    ("The 11:08am train from Stamford will not operate.", "cancelled"),
+    ("The 11:08am train from Stamford won't run today due to a crew shortage.", "cancelled (crew)"),
+    ("The 11:08am train from Stamford may not operate.", TT.SEE),
+])
+def test_this_trains_brief_reads_its_paragraph(names, text, brief):
+    assert TT.mine(alert(text), rec("9901"), names)["brief"] == brief
+
+
+def test_a_delay_undone_in_another_paragraph_still_stands(names):
+    a = alert("<p>The 11:08am train from Stamford is 10 minutes late.</p><p>Other trains are now on time.</p>")
+    assert TT.mine(a, rec("9901"), names)["brief"] == "10 min late"
+
+
+@pytest.mark.parametrize("text", ["Some trains are cancelled due to a disabled train.", "Trains 9911 and 9912 are held.",
+                                  "Cancelled: express service."])
+def test_a_line_alert_that_only_says_cancelled_or_held_says_see_alert(text):
+    a = alert(text)
+    assert a["about"] == "" and a["brief"] == TT.SEE
+
+
+def test_another_railroads_alert_isnt_metro_norths_whatever_its_branch_code(names):
+    assert not TT.is_mnr(alert("x", railroad="LIRR", branches=["NH"]), {"NH"})
+    assert TT.is_mnr(alert("x", railroad="", branches=["NH"]), {"NH"})
+    assert TT.about_train(alert("Train 9901 is cancelled.", railroad="LIRR", branches=["NH"]), rec("9901"), names) == ()
+    assert TT.branch_alerts([{"railroad": "MNR", "branch_id": "NH", "alerts": [alert("x", railroad="LIRR", branches=["NH"])]}]) == []
