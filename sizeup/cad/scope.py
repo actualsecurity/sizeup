@@ -121,13 +121,15 @@ def page_line(departments, units, tone_departments, incident_type: str, feed: st
     return f"Page: {said}" + (f" · feed: {feed}" if feed else "")
 
 
-def latest_units(inc) -> list[str]:
+def latest_units(inc, known=()) -> list[str]:
     """The apparatus the latest page for this incident named (the monitor's incident keeps every page's units; the
-    latest page says who is paged now: an upgrade to the full department names none)."""
+    latest page says who is paged now: an upgrade to the full department names none). known: the configured
+    apparatus (Scope.roster()), read as the station reads the page: "Engine 59/63" two units, a run-together
+    "Engine 6158" split (sizeup/dispatch.py), so the line says what inc.units says."""
     texts = list(getattr(inc, "page_text", None) or [])
     if texts:
-        from sizeup.dispatch import parse
-        return list(parse(texts[-1]).units)
+        from sizeup.dispatch import parse, split_joined
+        return split_joined(parse(texts[-1], known or None).units, known) if known else list(parse(texts[-1]).units)
     return list(getattr(inc, "units", None) or [])
 
 
@@ -178,6 +180,13 @@ class Scope:
             if "feed" not in have:                       # a table from before the page won (#370 review)
                 self.store.db.execute("ALTER TABLE dispatch_scope ADD COLUMN feed TEXT NOT NULL DEFAULT ''")
 
+    def roster(self) -> list[str]:
+        """The units on the boards (their codes): the configured apparatus a page's units are read against."""
+        try:
+            return [u[0] for u in self.cad.lists.board_units()]
+        except (AttributeError, TypeError):
+            return []
+
     def on_page(self, iid: int | None, inc, note: bool = True) -> tuple[str, bool]:
         """A page (the monitor's incident: its tones, the apparatus it named, its type) made or reached this incident.
         (the feed's label as the timeline says it ("units") when it says otherwise than the page, else ""; whether this
@@ -186,7 +195,7 @@ class Scope:
         if not iid:
             return "", False
         tones, typ = getattr(inc, "tone_departments", ()), getattr(inc, "incident_type", "")
-        units = latest_units(inc)
+        units = latest_units(inc, self.roster())
         got = from_page(tones, units, typ)
         if got is None:
             return "", True                              # nothing to keep: the line says what it heard

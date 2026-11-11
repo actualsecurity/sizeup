@@ -760,3 +760,12 @@ class Gazetteer:
 
     def street_names(self) -> list[str]:
         return sorted({st.name for st in self.streets.values()})
+
+    def streets_by_town(self) -> dict[str, list[str]]:
+        """{town: its street names}: a street's addresses' towns and its centreline's."""
+        out: dict[str, set[str]] = collections.defaultdict(set)
+        for st in self.streets.values():
+            for muni in set(st.addrs) | set(st.xy_muni):
+                if muni:
+                    out[muni].add(st.name)
+        return {m: sorted(v) for m, v in out.items()}
