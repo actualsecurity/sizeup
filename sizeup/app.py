@@ -97,7 +97,15 @@ ROOT = Path(__file__).resolve().parent.parent
 HOT_INCIDENTS_SQL = ("SELECT i.lat, i.lon FROM incidents i WHERE i.status IN ('active', 'pending') AND i.emergency = 1 "
                      "AND i.lat IS NOT NULL AND i.lon IS NOT NULL AND MAX(i.created_at, COALESCE((SELECT MAX(e.at) FROM events e "
                      "WHERE e.incident_id = i.id), 0)) >= ?")
-HUB_SWITCH_S = 0.001     # the hub's GIL switch interval (sys.setswitchinterval; Python's default 0.005), start_app() (#284)
+# Vessels (sizeup/vessels.py): an open marine or water call keeps aisstream.io connected: vessels.is_marine()'s rule (a
+# boat subtype, a water rescue, an aircraft in the water, never NOTIF/WATER; or a marine unit on it, never a DPT placeholder)
+MARINE_OPEN_SQL = ("SELECT 1 FROM incidents i WHERE i.status IN ('queued', 'pending', 'open', 'active') AND ("
+                   "UPPER(COALESCE(i.subtype, '')) = 'BOAT' "
+                   "OR (UPPER(COALESCE(i.type, '')) = 'RESCUE' AND UPPER(COALESCE(i.subtype, '')) = 'WATER') "
+                   "OR (UPPER(COALESCE(i.type, '')) = 'AIRPORT' AND UPPER(COALESCE(i.subtype, '')) = 'ACFT-WATER') "
+                   "OR EXISTS (SELECT 1 FROM assignments a JOIN units u ON u.id = a.unit_id WHERE a.incident_id = i.id "
+                   "AND u.kind = 'marine' AND a.cleared_at IS NULL AND UPPER(u.name) NOT LIKE 'DPT%')) LIMIT 1")
+HUB_SWITCH_S = 0.001    # the hub's GIL switch interval (sys.setswitchinterval; Python's default 0.005), start_app() (#284)
 SPLIT_PAGE_S = 30.0      # voice this soon after a tones-only page for us = that page's voice
 # The gazetteer names a town only from this confidence up (#80: "34 Longdale Avenue" read as Port Chester at
 # 0.34 was a street near Fairview). The point and label stay for the map; the town is never a trigger anyway.
@@ -171,12 +179,14 @@ def make_providers(cfg: Config, gaz) -> dict:
     from sizeup.roadprojects import RoadProjects
     from sizeup.roads import Roads
     from sizeup.trains import Trains
+    from sizeup.vessels import VesselLayer
     from sizeup.weather import Weather
     roads = Roads.from_config(cfg, log=log)
     return {"roads": roads, "gis": Gis.from_config(cfg, log=log, load=False),
             "roadwork": RoadProjects.from_config(cfg, roads=roads, gaz=gaz, log=log),
             "trains": Trains.from_config(cfg, log=log),
             "aircraft": AircraftLayer.from_config(cfg, log=log, devices=lambda: sdr_lookup.devices(cfg.rtl_fm)),
+            "vessels": VesselLayer.from_config(cfg, log=log),
             "weather": Weather.from_config(cfg, log=log), "_gaz": gaz,
             "roadgraph": RoadGraph.from_config(cfg, log=log)}      # its graph read later, in the background
 
@@ -437,6 +447,8 @@ class App:
         self._adsb_file = (Path(cfg.cad_db).parent / Path(adsbd.OVERRIDE).name) if cfg.cad_db else None
         self.adsb_sdr = self._load_adsb()
         self._ignore_base = frozenset(x for x in cfg.sdr_ignore if x != cfg.aircraft_sdr)
+        # The AIS dongle ([vessels.receiver] sdr, sizeup/radio/aisd.py): reserved the same way, never a radio or a job
+        self._ignore_base |= {cfg.vessels_sdr} if getattr(cfg, "vessels_sdr", "") else frozenset()
         self._listed: list[str] = [sd for sd in (list(cfg.sdrs) or ([cfg.shared_device] if cfg.shared_device else []))
                                    if not self._sdr_ignored(sd)]
         self.shared = bool(self._listed) or cfg.sdr_auto
@@ -650,6 +662,12 @@ class App:
         # Aircraft near HPN (sizeup/aircraft.py, #155): shortfinal's PCFD-focused picture, read by the CAD of record
         # while someone looks at the Aircraft layer. It never opens a dongle: a receiver's aircraft.json is only read.
         self.aircraft = prov["aircraft"]
+        # Vessels on western Long Island Sound (sizeup/vessels.py, AIS): aisstream.io while someone looks or a marine
+        # call is open, and our own receiver when the station has one; never opens a dongle here.
+        self.vessels = prov["vessels"]
+        self.vessels.hot = lambda: bool(self.cad.store.q(MARINE_OPEN_SQL))
+        self.vessels.lookup = lambda iid: self.cad.store.full(iid)
+        self.vessels.leader = self._atc_leader              # hot/cold: only the lease holder connects to aisstream.io
         # Weather and water (sizeup/weather.py, #132): NWS alerts, conditions and radar, NOAA tides; a warning
         # said by the dispatch voice when Settings > Dispatch allows it (played where the console is open).
         self.weather = prov["weather"]
@@ -2519,7 +2537,11 @@ class App:
         except (OSError, ValueError):
             d = None
         if isinstance(d, dict) and isinstance(d.get("sdr"), str) and not adsbd.serial_problem(d["sdr"].strip()):
-            return d["sdr"].strip()
+            if d["sdr"].strip() == getattr(self.cfg, "vessels_sdr", ""):     # the AIS receiver's now: never both
+                log(f"ADS-B: Settings named {d['sdr'].strip()}, now the AIS receiver's dongle ([vessels.receiver] sdr): "
+                    "using [aircraft.receiver] sdr instead")
+            else:
+                return d["sdr"].strip()
         return self.cfg.aircraft_sdr
 
     def set_adsb_receiver(self, serial: str | None) -> str | None:
@@ -2533,6 +2555,8 @@ class App:
                 return why
             if serial in (list(self.cfg.sdrs) + ([self.cfg.shared_device] if self.cfg.shared_device else [])):
                 return f"{serial} is one of the radios listed in [radio] sdrs: take it out there first"
+            if serial == getattr(self.cfg, "vessels_sdr", ""):
+                return f"{serial} is the AIS receiver's dongle ([vessels.receiver] sdr): ADS-B needs its own"
             held = claims.other(serial)
             if held and held.get("mode") != adsbd.MODE:
                 return f"SDR {self.sdr_name(serial)} is in use by {held.get('app', 'another app')} ({held.get('mode', '?')})"
@@ -2851,6 +2875,9 @@ class App:
         if mode == OFF_MODE:
             log(f"SDR {self.sdr_name(serial)} released: nothing of ours on it (switch it back on in the web app)")
             return True
+        if getattr(self.cfg, "vessels_sdr", "") and serial == self.cfg.vessels_sdr:   # reserved for AIS (sizeup-ais)
+            log(f"SDR {self.sdr_name(serial)} is reserved for the AIS receiver: {mode} not started on it")
+            return False
         if self.adsb_sdr and serial == self.adsb_sdr:     # reserved for the ADS-B decoder (#235, #262): never a job
             log(f"SDR {self.sdr_name(serial)} is reserved for the ADS-B receiver: {mode} not started on it")
             return False
@@ -3197,6 +3224,7 @@ class App:
         self.gis.start()                          # the county GIS layers (sizeup/gis.py)
         self.trains.start()                       # Metro-North's trains (sizeup/trains.py)
         self.aircraft.start()                     # aircraft near HPN, while someone looks (sizeup/aircraft.py)
+        self.vessels.start()                      # AIS vessels, while someone looks (sizeup/vessels.py)
         self.weather.start()                      # NWS alerts, conditions, radar; NOAA tides (sizeup/weather.py)
         self.datasources.start()                  # the slow pulls' schedule, Settings > Data sources
         if self.cache_mirror is not None:
@@ -3210,6 +3238,7 @@ class App:
         self.gis.stop()
         self.trains.stop()
         self.aircraft.stop()
+        self.vessels.stop()
         self.weather.stop()
         self.datasources.stop()
         if self.cache_mirror is not None:
@@ -3380,6 +3409,7 @@ def make_server(app: App, fence=None, listener=None) -> WebServer:
                        role=cfg.cloud_role, roads=app.roads, gis=app.gis,
                        trains=app.trains, weather=app.weather, station_health=getattr(app, "health", None),
                        aircraft=app.aircraft, roadwork=app.roadwork, set_adsb=app.set_adsb_receiver,
+                       vessels=app.vessels,
                        airband_ab=app.airband_ab if cfg.cloud_role != "hub" else None,
                        fence=fence, health_fn=lambda: app.health_extra(fence), listener=listener)
 
