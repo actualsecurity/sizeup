@@ -20,6 +20,8 @@
                        updater's last result go up in the status ("version")
     aircraft thread    POST /api/station/aircraft: our ADS-B receiver's aircraft (#235, aircraftlink.py), read every
                        second, what changed, every 1-5 s as the hub asks; dropped (never queued) while it's offline
+    vessels thread     POST /api/station/vessels: our AIS receiver's vessels (#402, vessellink.py), only with
+                       [vessels.receiver] enabled; the whole list every 5-30 s as the hub asks; never queued
     jobs thread        GET /api/station/jobs?wait=25 (long poll: the station never takes inbound
                        connections): "tts" renders a dispatch with the local voice; "call" runs
                        set_mode / set_talkgroup / set_talkgroup_group / retranscribe / transcribe_now /
@@ -53,6 +55,7 @@ from sizeup.cloud.autoupdate import Watch
 from sizeup.cloud.client import Backoff, HubClient, HubError
 from sizeup.cloud.health import Metrics, station_metrics
 from sizeup.cloud.outbox import Outbox
+from sizeup.cloud.vessellink import VesselForwarder
 from sizeup.tts import VoiceCfg
 
 LIVE_REFRESH_S = 2.0     # while someone is talking the snapshot is re-sent this often (the hub drops one older than 8 s)
@@ -128,6 +131,8 @@ class StationLink:
         self._threads: list[threading.Thread] = []
         # our ADS-B receiver's aircraft, straight to the hub (#235, sizeup/cloud/aircraftlink.py): live data, never queued
         self.aircraft = AircraftForwarder(app, cfg, self._client, log)
+        # our AIS receiver's vessels (#402, sizeup/cloud/vessellink.py): only with [vessels.receiver] enabled
+        self.vessels = VesselForwarder(cfg, self._client, log)
         app.events, app.link = self.emit, self
         app.cad.cloud = self.cad_cloud
         n, _ = self.outbox.pending()
@@ -152,6 +157,7 @@ class StationLink:
             t.start()
             self._threads.append(t)
         self.aircraft.start()
+        self.vessels.start()                  # (idle unless [vessels.receiver] enabled)
         return self
 
     @property
@@ -168,6 +174,7 @@ class StationLink:
         self._wake.set()
         self._live_wake.set()
         self.aircraft.stop()
+        self.vessels.stop()
 
     # -- health -------------------------------------------------------------------------------------
 

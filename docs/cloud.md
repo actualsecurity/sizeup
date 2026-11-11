@@ -465,6 +465,19 @@ tones in front and reads it twice with the time out once, exactly as with Kokoro
   {action: "voice_preview"}`).
 * Stations and all-in-one keep Kokoro (`tts_engine = "kokoro"`); `polly` works there too with AWS
   credentials in the environment, falling back to macOS `say` like Kokoro does.
+* **After the answer (#426):** a dispatch, add-on or upgrade is logged and answered at once (a few ms; it
+  used to wait 2-3 s for Polly). Its row starts `audio: "pending"`; one worker (`sizeup/cad/voicequeue.py`,
+  at most 32 waiting) renders the voices in the order sent, hands each to the transmitter, then writes the
+  row (`ready` with the WAV, or `failed` with the same notes as above) and pushes the state. The page shows
+  the dispatch with "Voice…"; each voice it waits for plays once, in the order sent, whatever is selected by
+  then. A preview answers with the text only; the page asks for its audio in a second call (`{"audio": true}`).
+  **Never stale:** a voice not started 45 s after its dispatch is not rendered ("Voice too late: text only"), one
+  render gets 25 s at most ("Voice too slow: text only"), and the page never plays by itself a voice that comes
+  more than 45 s after its dispatch. **Handover:** the key-up and every write (the row, `audio.sqlite`) are the
+  lease holder's only (`Cad.may_write`, the fence), checked before them. At a drain the voices get 6 s; what is
+  left stays pending, and the next task renders it at its start (`Cad.resume_voice`, the tones kept in
+  `dispatches.audio_tones`) if it is still under 45 s old, else fails it ("Voice not rendered — the hub
+  restarted first: text only"). The dispatch itself is never lost: only, at worst, its audio.
 
 **Seam for transmission (M2, not built):** keying a radio stays on the station. The hub already
 stores and serves the rendered WAV for every dispatch (`dispatch-audio/` + `audio.sqlite`, `GET
@@ -2221,6 +2234,13 @@ recorded together at 15:44 EDT, and the FAA registry of
 until there is a receiver to record. `tests/test_adsb_receiver.py`: the decoder (a fake readsb, a list of dongles,
 a tmp claims folder), the reserved dongle, the forwarding (deltas, the cap, offline drops, its cost), the hub's
 merge, details by ICAO address, the pre-alert beside the alarm, station health, the station's config update.
+
+## Vessels (AIS)
+
+Ships and boats on western Long Island Sound (#402): **docs/vessels.md** (sources, setup, the API, the limits of
+AIS). In short, the hub reads aisstream.io (key: SSM `/sizeup-hub/aisstream-key` → `SIZEUP_AISSTREAM_KEY`; none:
+off) only while the layer is open or a marine call is open, and the station's own receiver (AIS-catcher,
+`sizeup-ais.service`, off until the hardware is in) posts `POST /api/station/vessels`, never queued.
 
 ## Weather and water (NWS alerts, conditions, radar; NOAA tides)
 

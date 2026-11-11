@@ -223,6 +223,11 @@ def test_the_table_is_bounded_and_the_family_unused_the_longest_makes_room(quiet
     ("/api/station/jobs/abcdefabcdefabcd", "/api/station/jobs/:id"),       # a job id of 16 letters a-f
     ("/api/cad/weather/radar/now/7/37/48.png", "/api/cad/weather/radar/now/:id/:id/:id"),
     ("/api/cad/export/incidents.csv", "/api/cad/export/:id"),
+    ("/api/cad/vessels", "/api/cad/vessels"), ("/api/cad/vessels/near", "/api/cad/vessels/near"),      # #402
+    ("/api/station/vessels", "/api/station/vessels"),
+    ("/api/cad/dispatch/8812.wav", "/api/cad/dispatch/:id"),                # a dispatch's voice (#426)
+    ("/api/cad/incident/2291/dispatch", "/api/cad/incident/:id/dispatch"),
+    ("/api/cad/incident/2291/preview", "/api/cad/incident/:id/preview"),
     ("/api/cad/elm/place", "/api/(unlisted)"), ("/api/elmplace", "/api/(unlisted)"),
     ("/static/cad.js", "/static/*"), ("/cad", "/cad"), ("/healthz", "/healthz"),
     ("/someone@example.org", "(other)"), ("/wp-login.php", "(other)")])

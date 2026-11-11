@@ -106,11 +106,16 @@ POST /api/cad/incident/<id>/keep          {traffic_id, undo?, operator?}  an aut
                                           #311) confirmed: its audio and row are kept like any on the event
 POST /api/cad/dispatch-mode               {mode: 60control | pcfd, operator?}  the header's switch (#311,
                                           sizeup/cad/automode.py); dispatchers and admins; in the Settings audit log
-POST /api/cad/incident/<id>/preview       {unit_ids, full?, remarks?} -> {text, kind, audio_url, audio_note, remarks,
+POST /api/cad/incident/<id>/preview       {unit_ids, full?, remarks?, audio?} -> {text, kind, audio_url, audio_note, remarks,
                                                                     tones, tone_warnings}
-POST /api/cad/incident/<id>/dispatch      {unit_ids, operator, channel?, full?, remarks?} -> {dispatch_id, text, ...}
+                                          the text at once (audio_url null); audio: true renders it too (seconds, #426)
+POST /api/cad/incident/<id>/dispatch      {unit_ids, operator, channel?, full?, remarks?} -> {dispatch_id, text, audio, ...}
                                           remarks: said as "Reported: ..." (at most 500 characters)
+                                          answers before the voice is rendered (#426): audio "pending", audio_url null;
+                                          the state's dispatch row (incidents[].dispatches[]: audio pending | ready |
+                                          failed, has_audio, audio_note) brings it: GET /api/cad/dispatch/<id>.wav
 POST /api/cad/incident/<id>/upgrade       {type?, subtype?, info?, remarks?, unit_ids?, full?, operator, channel?, preview?}
+                                          like dispatch; preview: true is the text only (audio: true renders it too)
 POST /api/cad/incident/<id>/attach        {unit_ids, operator?}  units on a non-emergency event, no dispatch;
                                           another agency's unit (any event): on it Dispatched (its set's first
                                           status: a keyholder Notified), then its statuses (#219)

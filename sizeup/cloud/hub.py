@@ -20,6 +20,10 @@ runs on a bare Linux box with Python + numpy.
                                   rssi, ...]], gone: [hex], rx?}, gzipped, every 1 s while someone looks at the map (or an
                                   emergency is on), else every 5 s; only what changed -> {ok, full, every}. Into the
                                   aircraft layer's "receiver" feed (sizeup/aircraft.py StationFeed), never the state push
+    POST /api/station/vessels     our AIS receiver on the station (#402, sizeup/cloud/vessellink.py): {v, at, vessels:
+                                  [vessel records], rx?}, gzipped, the whole list every 5 s while someone looks (or a
+                                  marine call is open), else every 30 s -> {ok, n, every}. Into the Vessels layer's
+                                  "receiver" feed (sizeup/vessels.py StationFeed), never the state push
     GET  /api/station/hello      {ok}: the token works (the station's Test connection; not counted as "seen")
     GET  /api/station/status     read only, for the deploy check (tools/deploy_check.py): the hub's build, the
                                  station's version and last update, the health alerts (sizeup/cloud/health.py).
@@ -96,6 +100,7 @@ MAX_EVENTS_BODY = 32 * 1024 * 1024
 MAX_STATE_BODY = 4 * 1024 * 1024
 MAX_RESULT_BODY = 16 * 1024 * 1024
 MAX_AIRCRAFT_BODY = 512 * 1024        # 300 aircraft as JSON are ~30 KB; gzipped, a few
+MAX_VESSELS_BODY = 512 * 1024         # 500 vessel records as JSON are ~150 KB; gzipped, far less
 LIVE_STALE_S = 8.0       # a "talking now" snapshot older than this is dropped (the station resends every 2 s)
 TTS_WAIT_S = 20.0        # the dispatch voice: the station renders it; longer than this = text only
 CALL_WAIT_S = 12.0       # an SDR / talkgroup switch (the monitor's switch gives up at 15 s)
@@ -439,6 +444,8 @@ class Hub:
                 return self._state(body(MAX_STATE_BODY))
             if method == "POST" and path == "/api/station/aircraft":
                 return self._aircraft(body(MAX_AIRCRAFT_BODY), headers)
+            if method == "POST" and path == "/api/station/vessels":
+                return self._vessels(body(MAX_VESSELS_BODY), headers)
             if method == "POST" and (m := JOB_PATH.fullmatch(path)):
                 raw = body(MAX_RESULT_BODY)
                 if raw is None:
@@ -508,6 +515,24 @@ class Hub:
         if layer is None:
             return _json(404, {"error": "no aircraft layer here"})
         return _json(200, layer.station_ingest(json.loads(raw or b"{}"), size))
+
+    def _vessels(self, raw: bytes | None, headers) -> tuple[int, bytes, str]:
+        """Our AIS receiver's vessels, forwarded by the station (#402): into the Vessels layer, nothing else."""
+        if raw is None:
+            return _json(413, {"error": "too large"})
+        if (headers.get("Content-Encoding") or "").strip().lower() == "gzip":
+            import zlib
+            z = zlib.decompressobj(wbits=31)
+            try:
+                raw = z.decompress(raw, MAX_VESSELS_BODY * 4)
+            except zlib.error as e:
+                return _json(400, {"error": f"bad gzip: {e}"})
+            if z.unconsumed_tail:
+                return _json(413, {"error": "too large"})
+        layer = getattr(self.app, "vessels", None)
+        if layer is None:
+            return _json(404, {"error": "no vessels layer here"})
+        return _json(200, layer.station_ingest(json.loads(raw or b"{}")))
 
     def _retry(self, seq: int) -> bool:
         """A source_event failed to apply: True while it still has tries left (left unacked, the station sends it
