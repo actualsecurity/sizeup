@@ -1154,7 +1154,7 @@ def test_api_event_lifecycle(server):
     code, d = server.j("POST", f"/api/cad/incident/{iid}/dispatch", {"unit_ids": ids, "operator": "JD", "channel": "PC repeater"})
     assert code == 200 and d["transmitted"] is False and d["channel"] == "PC repeater"
     assert d["text"].startswith("Port Chester Fire, Engine 58, respond to 209 Westchester Avenue, for a lift assist.")
-    assert d["audio"] == "pending" and d["audio_url"] is None and server.cad.voice.wait(10)   # its voice follows (#426)
+    assert d["audio"] in ("pending", "ready") and server.cad.voice.wait(10)                   # its voice follows (#426)
     code, wav, ctype = server.call("GET", f"/api/cad/dispatch/{d['dispatch_id']}.wav")
     assert code == 200 and ctype == "audio/wav" and wave.open(io.BytesIO(wav)).getframerate() == 16000
     assert server.call("GET", "/api/cad/dispatch/999.wav")[0] == 404

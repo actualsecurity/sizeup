@@ -200,7 +200,7 @@ def test_no_voice_fails_the_row_with_the_reason_and_the_dispatch_stays_logged(mo
     cad = make_cad()
     iid = call(cad)
     r = cad.dispatch(iid, {"unit_ids": [uid(cad, "E60")], "operator": "JD"})
-    assert r["audio"] == "pending" and cad.voice.wait(5)
+    assert r["audio"] in ("pending", "failed") and r["audio_url"] is None and cad.voice.wait(5)   # (it fails fast)
     d = rows(cad, iid)[0]
     assert (d["audio"], d["has_audio"]) == ("failed", False) and "say" in d["audio_note"]
     assert [a["name"] for a in cad.store.full(iid)["assignments"]] == ["E60"] and len(cad.pushes) == 2
@@ -320,13 +320,15 @@ def test_an_older_database_gets_the_column_and_its_rows_read_as_before(tmp_path,
     iid = call(cad)
     cad.dispatch(iid, {"unit_ids": [uid(cad, "E60")], "operator": "JD"})
     assert cad.voice.wait(5)
-    cad.store.db.close()
-    db = sqlite3.connect(tmp_path / "cad.sqlite")
+    old = tmp_path / "old.sqlite"                                # a copy (the live one has threads on it), made older
+    db = sqlite3.connect(old)
+    with cad.store.lock:
+        cad.store.db.backup(db)
     db.execute("INSERT INTO dispatches (incident_id, at, operator, text, audio_note) VALUES (?, 1, 'JD', 'no voice then', 'no say')", (iid,))
     db.execute("ALTER TABLE dispatches DROP COLUMN audio_state")           # as a release before #426 left it
     db.commit()
     db.close()
-    again = Cad(Settings(db=str(tmp_path / "cad.sqlite")), log=lambda m: None)
+    again = Cad(Settings(db=str(old), audio_dir=str(cad.audio_dir)), log=lambda m: None)
     got = sorted((d["text"] == "no voice then", d["audio"], d["has_audio"]) for d in rows(again, iid))
     assert got == [(False, "ready", True), (True, "", False)]
 
