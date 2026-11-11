@@ -72,7 +72,6 @@
     font: 700 var(--fs-2xs)/var(--lh-2xs) var(--mono); border: var(--bw) solid #fff; opacity: 1;
   }
   .cm-rig.rig-dot:hover > * { display: inline; }
-  .cm-rig.rig-dot:hover > .cm-ty { display: inline-block; }
   /* #384: a firehouse's idle rigs folded into one count chip on top of its icon ("6"), the size of a rig's mark;
      neutral (its units' statuses may differ). map-style.js's "firehouse-badge" keeps the firehouse's name clear of it */
   .cm-badge {
@@ -85,18 +84,67 @@
   .cm-badge:hover { background: var(--panel); border-color: #fff; }
   @media (pointer: coarse) { .cm-badge::after { content: ""; position: absolute; inset: calc(-1 * var(--s-2)); } }   /* a finger's target */
 
-  /* #384: a rig's apparatus type (mapview.icon_of): a side silhouette, monochrome (a mask, defined once here), in the
-     text colour: white on the chip's status colour; in the station list, the status colour */
-  .cm-ty { display: inline-block; flex: none; inline-size: calc(var(--s-3) * 1.5); block-size: var(--s-3); vertical-align: -1px;
-           margin-inline-end: var(--s-0); background-color: currentColor;
-           -webkit-mask: var(--ty) center / contain no-repeat; mask: var(--ty) center / contain no-repeat; }
-  .cm-far .cm-rig .cm-ty { inline-size: calc(var(--s-2) * 1.5); block-size: var(--s-2); vertical-align: 0; }
-  .cm-ty.ty-engine { --ty: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 16'%3E%3Cpath fill-rule='evenodd' d='M1 4.5h14V12H1zM2.5 7.4h11v1.3h-11z'/%3E%3Cpath fill-rule='evenodd' d='M15 3.5h4.3l3.7 4.2V12h-8zM16.4 5h2.3l2.4 2.7h-4.7z'/%3E%3Cpath fill-rule='evenodd' d='M15.6 1.9h3.4v1.6h-3.4z'/%3E%3Cpath fill-rule='evenodd' d='M3.2 13a2.3 2.3 0 1 0 4.6 0a2.3 2.3 0 1 0-4.6 0zM16.2 13a2.3 2.3 0 1 0 4.6 0a2.3 2.3 0 1 0-4.6 0z'/%3E%3C/svg%3E"); }
-  .cm-ty.ty-ladder { --ty: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 16'%3E%3Cpath fill-rule='evenodd' d='M1 7.5h14V12H1z'/%3E%3Cpath fill-rule='evenodd' d='M15 6.5h4l3.6 3.4V12H15zM16.3 7.7h2.2l2 2h-4.2z'/%3E%3Cpath fill-rule='evenodd' d='M0 2h23.5v4.2H0zM1.2 3.3h2v1.6h-2zM4.4 3.3h2v1.6h-2zM7.6 3.3h2v1.6h-2zM10.8 3.3h2v1.6h-2zM14 3.3h2v1.6h-2zM17.2 3.3h2v1.6h-2zM20.4 3.3h2v1.6h-2z'/%3E%3Cpath fill-rule='evenodd' d='M2 6.2h2.5v1.3H2z'/%3E%3Cpath fill-rule='evenodd' d='M3.2 13a2.3 2.3 0 1 0 4.6 0a2.3 2.3 0 1 0-4.6 0zM16.2 13a2.3 2.3 0 1 0 4.6 0a2.3 2.3 0 1 0-4.6 0z'/%3E%3C/svg%3E"); }
-  .cm-ty.ty-tower { --ty: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 16'%3E%3Cpath fill-rule='evenodd' d='M1 7.5h14V12H1z'/%3E%3Cpath fill-rule='evenodd' d='M15 6.5h4l3.6 3.4V12H15zM16.3 7.7h2.2l2 2h-4.2z'/%3E%3Cpath fill-rule='evenodd' d='M2.2 6.2L14.6 1.6l0.8 2.1L3 8.3z'/%3E%3Cpath fill-rule='evenodd' d='M15 0.5h8v5h-8zM16.3 1.8h5.4v1.4h-5.4z'/%3E%3Cpath fill-rule='evenodd' d='M3.2 13a2.3 2.3 0 1 0 4.6 0a2.3 2.3 0 1 0-4.6 0zM16.2 13a2.3 2.3 0 1 0 4.6 0a2.3 2.3 0 1 0-4.6 0z'/%3E%3C/svg%3E"); }
-  .cm-ty.ty-rescue { --ty: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 16'%3E%3Cpath fill-rule='evenodd' d='M1 1.5h15V12H1zM3.6 3.5h1.3v6.5H3.6zM7.7 3.5h1.3v6.5H7.7zM11.8 3.5h1.3v6.5h-1.3z'/%3E%3Cpath fill-rule='evenodd' d='M16 5.5h3.4l3.6 3.4V12h-7zM17.2 6.7h1.8l2 2h-3.8z'/%3E%3Cpath fill-rule='evenodd' d='M3.2 13a2.3 2.3 0 1 0 4.6 0a2.3 2.3 0 1 0-4.6 0zM16.2 13a2.3 2.3 0 1 0 4.6 0a2.3 2.3 0 1 0-4.6 0z'/%3E%3C/svg%3E"); }
-  .cm-ty.ty-suv { --ty: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 16'%3E%3Cpath fill-rule='evenodd' d='M1 11.8V5.2Q1 4 2.2 4H15l3.6 3.4h2.6Q23 7.4 23 9.2v2.6zM2.6 5.4h5.2v2.4H2.6zM9.2 5.4h5.2l2.3 2.4H9.2z'/%3E%3Cpath fill-rule='evenodd' d='M6 2.4h6.5V4H6z'/%3E%3Cpath fill-rule='evenodd' d='M3.2 13a2.3 2.3 0 1 0 4.6 0a2.3 2.3 0 1 0-4.6 0zM16.2 13a2.3 2.3 0 1 0 4.6 0a2.3 2.3 0 1 0-4.6 0z'/%3E%3C/svg%3E"); }
-  .cm-ty.ty-other { --ty: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 16'%3E%3Cpath fill-rule='evenodd' d='M12 1.5l6.5 6.5-6.5 6.5-6.5-6.5zM12 4.6L8.6 8l3.4 3.4L15.4 8z'/%3E%3C/svg%3E"); }
+  /* #427: a rig drawn as the vehicle from overhead (cadmap.js V), the marker itself: a circle the vehicle's length
+     across on the rig's place (its rings round it); the vehicle turned to --rot, at its least size (--minl x --minw px)
+     or, close in, its real size (--len x --wid m at the map's --ppm); its body in the status colour; its code beside it
+     on the side placeLabels picked (--hx, --hy: half the turned vehicle's box) */
+  .cm-rig.rv {
+    --L: max(calc(var(--minl) * var(--k, 1) * 1px), calc(var(--len) * var(--ppm, 0) * 1px));
+    --W: max(calc(var(--minw) * var(--k, 1) * 1px), calc(var(--wid) * var(--ppm, 0) * 1px));
+    --hx: calc((var(--L) * var(--as, 0) + var(--W) * var(--ac, 1)) / 2);
+    --hy: calc((var(--L) * var(--ac, 1) + var(--W) * var(--as, 0)) / 2);
+  }
+  .cm-far .cm-rig.rv { --k: 0.85; }   /* cadmap.js FAR_K */
+  /* the target: the vehicle's length across, at least --ctl-sm (24 px; 44 px on a coarse pointer), the drawing as it is */
+  .cm-rig.rv:not(.rig-dot), .cm-rig.rv.rig-dot:hover {
+    inline-size: max(var(--L), var(--ctl-sm)); block-size: max(var(--L), var(--ctl-sm)); padding: 0; background: none; border: 0; border-radius: 50%; box-shadow: none;
+  }
+  .cm-rig.rv:not(.rig-dot):hover { background: none; filter: brightness(1.15); }
+  .cm-rig.rv::before { content: none; }
+  .cm-rig.rv.hl { box-shadow: 0 0 12px 5px color-mix(in srgb, var(--text) 35%, transparent); }
+  .cm-rig.rv.hot { box-shadow: 0 0 18px 8px color-mix(in srgb, var(--text) 45%, transparent); }
+  .cm-rig.rv.talking { box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 35%, transparent), 0 0 14px 5px color-mix(in srgb, var(--ok) 45%, transparent); }
+  .cm-veh {
+    position: absolute; inset-block-start: 50%; inset-inline-start: 50%; inline-size: var(--W); block-size: var(--L);
+    transform: translate(-50%, -50%) rotate(var(--rot, 0deg)); transition: transform 0.6s ease; pointer-events: none;
+    filter: drop-shadow(0 0 1px rgba(0, 0, 0, 0.9));
+  }
+  .cm-veh svg, .cm-vs svg { display: block; inline-size: 100%; block-size: 100%; overflow: visible; }
+  :is(.cm-veh, .cm-vs) .b { fill: var(--c, #9AA3AD); stroke: rgba(8, 10, 12, 0.92); stroke-width: 1px; vector-effect: non-scaling-stroke; }
+  :is(.cm-veh, .cm-vs) .g { fill: #142030; }
+  :is(.cm-veh, .cm-vs) .lt { fill: #F4F6F8; }
+  :is(.cm-veh, .cm-vs) .rd { fill: #FF3B30; }
+  :is(.cm-veh, .cm-vs) .d { fill: rgba(0, 0, 0, 0.32); }
+  :is(.cm-veh, .cm-vs) .p { fill: rgba(255, 255, 255, 0.2); }
+  :is(.cm-veh, .cm-vs) .h { fill: rgba(240, 232, 212, 0.75); }
+  :is(.cm-veh, .cm-vs) :is(.m, .bk) { fill: #D5DBE2; stroke: rgba(8, 10, 12, 0.75); stroke-width: 0.5px; vector-effect: non-scaling-stroke; }
+  :is(.cm-veh, .cm-vs) .bk { fill: #F2F4F7; }
+  :is(.cm-veh, .cm-vs) .mi { fill: #AEB6C0; }
+  :is(.cm-veh, .cm-vs) .mf { fill: rgba(213, 219, 226, 0.4); }
+  :is(.cm-veh, .cm-vs) .k { fill: #59616B; stroke: rgba(8, 10, 12, 0.75); stroke-width: 0.5px; vector-effect: non-scaling-stroke; }
+  :is(.cm-veh, .cm-vs) :is(.ln, .rg) { fill: none; stroke: rgba(0, 0, 0, 0.35); stroke-width: 0.6px; vector-effect: non-scaling-stroke; }
+  :is(.cm-veh, .cm-vs) .rg { stroke: #D5DBE2; stroke-width: 0.8px; }
+  /* not there yet (dispatched, responding): a dashed light edge; out of service: grey; a stale fix: hollow */
+  .cm-rig.rv:is(.outer, .enroute) .cm-veh .b { stroke: #fff; stroke-width: 2.5px; stroke-dasharray: 4 3; }
+  /* the aerial: a thin line until the map is close in (cadmap.js cm-near), then its rails, rungs and boom */
+  :is(.cm-veh, .cm-vs) .hi, .cm-near .cm-veh .lo { display: none; }
+  .cm-near .cm-veh .hi { display: inline; }
+  .cm-rig.rv.look-oos .cm-veh .b { fill: #59616B; }
+  .cm-rig.rv.stale .cm-veh .b { fill: color-mix(in srgb, var(--bg) 80%, transparent); stroke: var(--c); stroke-width: 1.5px; }
+  .cm-rig.rv .lbl {
+    position: absolute; inset-block-start: 50%; inset-inline-start: calc(50% + var(--hx) + 2px); transform: translateY(-50%);
+    padding: 0 var(--s-0); font: 700 var(--fs-2xs)/var(--lh-2xs) var(--mono); color: #fff; white-space: nowrap; pointer-events: auto;
+    background: rgba(21, 24, 27, 0.82); border-inline-start: 2px solid var(--c, var(--dim)); border-radius: var(--radius-s);
+  }
+  .cm-rig.rv .lbl-l { inset-inline-start: auto; inset-inline-end: calc(50% + var(--hx) + 2px);
+                      border-inline-start: 0; border-inline-end: 2px solid var(--c, var(--dim)); }
+  .cm-rig.rv .lbl-b { inset-block-start: calc(50% + var(--hy) + 2px); inset-inline-start: 50%; transform: translateX(-50%); }
+  .cm-rig.rv .lbl-t { inset-block-start: auto; inset-block-end: calc(50% + var(--hy) + 2px); inset-inline-start: 50%; transform: translateX(-50%); }
+  .cm-rig.rv .lbl-none, .cm-rig.rv .lbl [hidden] { display: none; }
+  .cm-rig.rv .lbl .st { margin-inline-start: var(--s-0); font-size: calc(var(--fs-2xs) - 2px); font-weight: 400; opacity: 0.85; }
+  .cm-rig.rv.at-returning .lbl::before { content: "↩ "; font-size: calc(var(--fs-2xs) - 3px); }
+  .cm-far .cm-rig.rv .lbl { font-size: calc(var(--fs-2xs) - 2px); line-height: 1.1; }
+  .cm-rig.rv.rig-dot:hover > .lbl { display: block; }
   /* a firehouse's rigs (#384, cadmap.js openStation): one row each, its type in its status colour, active first */
   .cm-pop[tabindex="-1"]:focus { outline: none; }   /* the box focused only to take Escape (#384); its rows ring as ever */
   .cm-st-list { display: flex; flex-direction: column; max-block-size: 45vh; overflow-y: auto; }
@@ -105,7 +153,7 @@
     background: none; border: 0; border-radius: var(--radius-s); }
   .cm-st-row:hover:not(:disabled) { background: var(--hover); }
   .cm-st-row:disabled { cursor: default; color: var(--text); }
-  .cm-st-row .cm-ty { color: var(--c, var(--dim)); margin: 0; }
+  .cm-st-row .cm-vs { flex: none; inline-size: calc(var(--s-3) * 2.25); block-size: calc(var(--s-3) * 0.9); filter: drop-shadow(0 0 1px rgba(0, 0, 0, 0.6)); }   /* #427: its vehicle, front right */
   .cm-st-row .n { min-inline-size: 4.5em; font-family: var(--mono); font-weight: 700; }
   .cm-st-row .s { min-inline-size: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text-2); }
   .cm-st-row.oos { opacity: 0.7; }
