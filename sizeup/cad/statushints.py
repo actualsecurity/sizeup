@@ -552,7 +552,7 @@ class StatusHints:
 
     def _make(self, t: dict, code: str, f: Found, who: str, old: dict | None, now: float) -> dict | None:
         status = self.status_for(f.intent)
-        if not status:
+        if not status or self._lists().placeholder(code):   # a department placeholder is never heard as a unit
             return None
         if old is not None:
             if old["outcome"] != "pending" or (old["status"] == status):

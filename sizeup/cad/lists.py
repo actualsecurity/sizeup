@@ -25,6 +25,10 @@ shows). A new export can replace the file without a code change:
                                      rest_title, folded: how the board shows them) and per-unit kind /
                                      spoken name / title / spare / department. Unit codes are the
                                      department's, kept as written (242_eNG, 239_Cascd: any case)
+    unit_placeholders                a regex for the codes that are a department's placeholder, not a unit (a
+                                     county CAD's "department dispatched, no unit yet" entry; placeholder()):
+                                     assigned first, released when a unit of its department signs on
+                                     (store.py), never located, never apparatus in matching (sources.py)
     joint_response                   town -> the units of a department answering jointly with PCFD
                                      (Rye Brook): direct units, picked by kind after PCFD's own, first
                                      on an event in that town
@@ -121,11 +125,14 @@ class Lists:
     type_subtypes_partial: dict = field(default_factory=dict)  # {"given": [types], "confirm": {type: why}}
     dispatch_tones: dict = field(default_factory=dict)     # joint town -> [(hz, s), ...] | None (not known yet)
     agency_status_sets: dict = field(default_factory=dict) # {"default", "sets": {id: {statuses, labels}}, "boards"}
+    unit_placeholders: str = ""                            # regex: a department's placeholder code ('' = none)
     path: str = ""
     _names: dict[str, dict[str, str]] = field(default_factory=dict, repr=False)
     _board_of: dict[str, str] = field(default_factory=dict, repr=False)
+    _placeholder: re.Pattern | None = field(default=None, repr=False)
 
     def __post_init__(self):
+        self._placeholder = re.compile(self.unit_placeholders, re.I) if self.unit_placeholders else None
         for k in LIST_SECTIONS:
             self._names[k] = {x["code"]: x["name"] for x in getattr(self, k)}
         self._board_of = {c: b["id"] for b in self.unit_boards for c in b["units"] if c}
@@ -355,6 +362,24 @@ class Lists:
                 "spare": bool(u.get("spare")), "department": u.get("department", ""),
                 "mutual_aid": r == "mutual_aid", "response": r, "joint": self.joint_town(code),
                 "named": self.named(code)}
+
+    def placeholder(self, code: str) -> bool:
+        """A department's placeholder (unit_placeholders: "department dispatched, no unit yet"), not a unit: never
+        located, routed or followed, never apparatus in matching or scope; released when its department's unit signs on.
+        The one rule (sizeup/cad/sources.py is_placeholder adds a feed's department entries to it)."""
+        c = re.sub(r"[\s-]+", "", str(code or ""))
+        return bool(self._placeholder and c and self._placeholder.fullmatch(c))
+
+    def department_of(self, code: str) -> str:
+        """Whose unit it is: its "department", else its joint-response town, else the home department for a "fire"
+        unit that is neither (the data file's definition of PCFD's own apparatus: see the module doc); '' for a
+        mutual-aid or agency unit that names none, which never releases a placeholder (no_department lists them)."""
+        u = self.units.get(code, {})
+        return u.get("department") or self.joint_town(code) or (HOME_DEPARTMENT if self.response(code) == "fire" else "")
+
+    def no_department(self) -> list[str]:
+        """Board units with no department to match (mutual aid or another agency naming none): logged at start."""
+        return [c for c, _, _ in self.board_units() if not self.placeholder(c) and not self.department_of(c)]
 
     def named(self, code: str) -> bool:
         """Has a name (a spoken name other than the code, or a title)? Otherwise it shows as its code and
@@ -758,6 +783,14 @@ def build(d: dict, where: str, path: str | Path = "") -> Lists:
             raise ListsError(f"{where}: dispatch_tones[{town!r}]: a joint_response town -> null or [[hz, seconds], ...]")
         tones[town] = [tuple(float(v) for v in x) for x in t] if t else None
 
+    ph = d.get("unit_placeholders") or ""
+    try:
+        if not isinstance(ph, str) or len(ph) > 200:
+            raise re.error("not text")
+        re.compile(ph)
+    except re.error:
+        raise ListsError(f"{where}: unit_placeholders: a regular expression for placeholder codes") from None
+
     order = tuple(str(t) for t in d.get("geo_town_order") or [])
     aliases = {str(k).lower(): str(v) for k, v in (d.get("geo_town_aliases") or {}).items()}
     for t in order:
@@ -773,7 +806,7 @@ def build(d: dict, where: str, path: str | Path = "") -> Lists:
                  status_flow=flow,
                  lead_in_joint_only={str(t): str(v) for t, v in only.items()}, dispatch_tones=tones,
                  free_status=free_status, release_on_close=release, type_subtypes_partial=tsp, agency_status_sets=agency_sets,
-                 path=str(path))
+                 unit_placeholders=ph, path=str(path))
 
 
 def _agency_sets(v, statuses: tuple[dict, ...], board_ids: set[str], where: str) -> dict:

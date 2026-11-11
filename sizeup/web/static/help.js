@@ -3,6 +3,7 @@
 //   In a script: Help.button("...")  (the same button)
 //                Help.info("...")    (an "i" for a detail's caveats and method: #278, kept off the line itself;
 //                                     the same text as its hover title)
+//                Help.update(b, "...") (new text for a button, its open popup too)
 // Click, Enter or Space opens it under the button; the button again, a click elsewhere, Esc, a scroll
 // or a resize closes it (Esc puts the focus back on the button).
 "use strict";
@@ -26,6 +27,14 @@ window.Help = (() => {
     b.textContent = "i";
     b.title = text;
     return b;
+  }
+
+  // a button's text changed (a live box's ⓘ, #379): its title and data-help, and the open popup's words if it is this one's
+  function update(b, text) {
+    if (!b) return;
+    b.title = text;
+    if (b.dataset) b.dataset.help = text;
+    if (pop && !pop.hidden && from === b) pop.textContent = text;
   }
 
   function close(focus) {
@@ -76,5 +85,5 @@ window.Help = (() => {
   window.addEventListener("resize", () => close(false));
   document.addEventListener("scroll", () => close(false), true);
 
-  return { button, info, close };
+  return { button, info, update, close };
 })();

@@ -334,7 +334,12 @@ def apply_grants(call: Call, grants: list[tuple[float, str]], aliases: dict[str,
 # merged into the piece before it (the first piece: the one after). A short piece with a radio ID,
 # or with sound, keeps its own clip and row; when it has no voice it skips speech-to-text (shown as
 # a key-up with nothing said) instead of asking whisper about 0.2 s of silence.
+# A piece shorter than MIN_STT_S skips speech-to-text even with sound: no word fits in it. Measured on a copy of
+# the hub's data (2026-11): 6.6 % of the P25 pieces sent to speech-to-text were under 0.25 s, and what came back
+# was whisper's dead-air phrases ("You're welcome.", "It", the talker prompt echoed) or AWS's "." - never a word
+# that belonged there. Each one still cost the station's whisper a full decode (#196, #300).
 SHORT_TURN_S = 0.3
+MIN_STT_S = 0.25
 NO_VOICE_DBFS = -45.0
 RATE = 16000
 
@@ -418,7 +423,7 @@ def split_call(call: Call, rate: int = RATE) -> list[Piece]:
         if out and start < out[-1].start:
             start = out[-1].start
         clip = audio[a:b]
-        stt = not ((b - a) < short and not has_voice(clip, rate))
+        stt = (b - a) >= MIN_STT_S * rate and not ((b - a) < short and not has_voice(clip, rate))
         out.append(Piece(cid, start, start + (b - a) / rate, t.talker, clip, pairs_of(t, [t.talker]), stt, t.via, em))
     return out
 

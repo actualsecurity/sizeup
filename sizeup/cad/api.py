@@ -106,11 +106,16 @@ POST /api/cad/incident/<id>/keep          {traffic_id, undo?, operator?}  an aut
                                           #311) confirmed: its audio and row are kept like any on the event
 POST /api/cad/dispatch-mode               {mode: 60control | pcfd, operator?}  the header's switch (#311,
                                           sizeup/cad/automode.py); dispatchers and admins; in the Settings audit log
-POST /api/cad/incident/<id>/preview       {unit_ids, full?, remarks?} -> {text, kind, audio_url, audio_note, remarks,
+POST /api/cad/incident/<id>/preview       {unit_ids, full?, remarks?, audio?} -> {text, kind, audio_url, audio_note, remarks,
                                                                     tones, tone_warnings}
-POST /api/cad/incident/<id>/dispatch      {unit_ids, operator, channel?, full?, remarks?} -> {dispatch_id, text, ...}
+                                          the text at once (audio_url null); audio: true renders it too (seconds, #426)
+POST /api/cad/incident/<id>/dispatch      {unit_ids, operator, channel?, full?, remarks?} -> {dispatch_id, text, audio, ...}
                                           remarks: said as "Reported: ..." (at most 500 characters)
+                                          answers before the voice is rendered (#426): audio "pending", audio_url null;
+                                          the state's dispatch row (incidents[].dispatches[]: audio pending | ready |
+                                          failed, has_audio, audio_note) brings it: GET /api/cad/dispatch/<id>.wav
 POST /api/cad/incident/<id>/upgrade       {type?, subtype?, info?, remarks?, unit_ids?, full?, operator, channel?, preview?}
+                                          like dispatch; preview: true is the text only (audio: true renders it too)
 POST /api/cad/incident/<id>/attach        {unit_ids, operator?}  units on a non-emergency event, no dispatch;
                                           another agency's unit (any event): on it Dispatched (its set's first
                                           status: a keyholder Notified), then its statuses (#219)
@@ -192,6 +197,9 @@ GET  /api/cad/notify                      Settings > System > Push notifications
                                           last push and test; admins only (the names are secret; ADMIN_READS)
 GET  /api/cad/health                      the hub only, served by server.py: Settings > Health (sizeup/cloud/health.py);
                                           admins only (ADMIN_READS, #203: nobody else sees station health)
+GET  /api/cad/perf                        the hub only, served by server.py: where the hub's CPU goes, by thread
+                                          (sizeup/perf.py, #425), on Settings > Health; admins only (ADMIN_READS).
+                                          POST /api/cad/perf/profile {seconds}: a sampled profile (admins; WRITES)
 POST /api/cad/settings/notify             {action: set {key: alerts | status, topic ("" = the default)} | off {key} |
                                           reset {key} | server {value} | test {key}}: admins; audited without the names
 POST /api/cad/settings/datasources        {action: set, key, value: off | hourly | daily | weekly | monthly} | {action:
@@ -253,6 +261,8 @@ ADMIN_READS = {
     "/api/cad/notify": "the push topics' names are secret",                  # Settings > System > Push notifications
     "/api/cad/health": "station health is for admins (Settings > Health)",   # #203: off the header, on an admin tab
     "/api/cad/comms/activity": "radio activity (which radios keyed) is for admins",   # #409: encrypted talkgroups
+    "/api/cad/perf": "the hub's CPU and memory are for admins (Settings > Health)",          # #425 (sizeup/perf.py)
+    "/api/cad/perf/profile": "the hub's CPU profile is for admins (Settings > Health)",
 }
 
 # Who may POST what (enforced only with a verified sign-in, see above): "dispatch" = dispatchers and
@@ -277,6 +287,7 @@ WRITES = (
     (re.compile(r"/api/cad/runcards(?:/delete)?"), "admin"),
     (re.compile(r"/api/cad/radios(?:/delete)?"), "admin"),                 # the radio-ID registry
     (DATASOURCE, "admin"),                                                  # a data source's Refresh now (#186)
+    (re.compile(r"/api/cad/perf/profile"), "admin"),                        # a CPU profile of the hub (#425, server.py)
     (DVR_PIN, "dispatch"),                                                  # keep recording a camera (#277)
     (DVR_CLIP, "dispatch"),                                                 # save a camera clip on an event (#323)
     (ATTACHMENT, "admin"),                                                  # delete an event's attachment (#323)
@@ -461,6 +472,7 @@ DOES = (
                                      f"{_number(c, (o.get('attachment') or {}).get('incident_id')) or 'an event'}",
                                      _number(c, (o.get("attachment") or {}).get("incident_id")))),
     (DATASOURCE, lambda m, b, o, c: (f"Refreshed data source: {_clip((o.get('source') or {}).get('name') or unquote(m.group(1)), 60)}", "")),
+    (re.compile(r"/api/cad/perf/profile"), lambda m, b, o, c: (f"Profiled the hub's CPU ({_clip(b.get('seconds'), 6)} s)", "")),
     (re.compile(r"/api/talkgroup"), lambda m, b, o, c: (f"Talkgroup {b.get('tg')}: {_toggles(b) or 'no change'}", "")),
     (re.compile(r"/api/talkgroup-group"), lambda m, b, o, c: (f"Talkgroups {_clip(b.get('group'), 40)}: {_toggles(b) or 'no change'}", "")),
     (re.compile(r"/api/mode"), lambda m, b, o, c: (f"Radio mode: {_clip(b.get('mode'), 30)}" + (f" ({_clip(b['sdr'], 30)})" if b.get("sdr") else ""), "")),

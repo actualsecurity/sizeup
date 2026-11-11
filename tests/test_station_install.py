@@ -153,7 +153,7 @@ def test_hub_goes_text_only_when_the_station_has_no_voice(tmp_path):
         inc = c.create({"type": "STRU", "address": "209 Westchester Ave", "operator": "Lt. Ruiz"})
         assert wait(lambda: hub.app.hub.connected(), 5)
         code, p = call(hub.url + f"/api/cad/incident/{inc['id']}/preview", "POST",
-                       {"unit_ids": [uid(c, "E63")]}, token=None)
+                       {"unit_ids": [uid(c, "E63")], "audio": True}, token=None)
         assert code == 200 and p["audio_url"] is None
         assert "station has no voice" in p["audio_note"] and "text only" in p["audio_note"]
     finally:

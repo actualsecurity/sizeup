@@ -42,7 +42,8 @@ from sizeup.cad import settings as settings_mod
 from sizeup.cad import lists as lists_mod
 from sizeup.cad.dispatcher import AudioUnavailable
 from sizeup.cad.store import OPERATOR_MAX, TZ, CadError, Store
-from sizeup.cad.transmit import Transmitter, make_transmitter
+from sizeup.cad.transmit import Transmitter, TxResult, make_transmitter
+from sizeup.cad.voicequeue import VoiceQueue
 from sizeup.radio.tones import base_name
 from sizeup.tts import VoiceCfg
 from sizeup.tts import voices as tts_voices
@@ -52,6 +53,14 @@ COMMS_CACHE_S, COMMS_CACHE_N = 10.0, 32     # GET /api/cad/comms: an answer reus
 COMMS_UNSENT = ("call_id", "turn", "updated_at")   # radio_traffic columns the Radio view never reads (#284: smaller answer)
 FIRE_KINDS = ("chief", "engine", "ladder", "tower", "rescue", "utility", "marine")
 PREVIEW_KEEP_S = 24 * 3600
+# A dispatch whose voice was never attached (#426): the row's audio_note, as "Voice unavailable — ...: text only".
+VOICE_RESTARTED = "Voice not rendered — the hub restarted first: text only"
+VOICE_BUSY = "Voice not rendered — too many dispatches waiting for theirs: text only"
+VOICE_STOPPING = "Voice not rendered — the hub was stopping: text only"
+VOICE_LATE = "Voice too late: text only"
+VOICE_SLOW = "Voice too slow: text only"
+VOICE_STALE_S = 45.0     # a voice not started this long after its dispatch is not rendered (it would play stale)
+VOICE_BUDGET_S = 25.0    # one render, at most: Polly's retries plus the station's 20 s can't hold the queue longer
 MAX_UNITS = 30
 VOICE_SAMPLE = "Engine 60, respond to 1 Main Street, structure fire. Time out 14:32."   # Settings > Voice > Preview
 GEO_WINDOW = 0.25        # suggestions this close to the best one are ordered by town first
@@ -177,6 +186,19 @@ class Cad:
             self.audio_dir = None                      # made on first render
         self.transmitter: Transmitter = make_transmitter(s.transmit, log)
         self._render_lock = threading.Lock()           # one `say` at a time
+        # A dispatch answers before its voice is rendered (#426): the render, the key-up and the row's audio are a
+        # job on one worker, in order (sizeup/cad/voicequeue.py). may_write: the hub's single-writer fence
+        # (sizeup/fence.py; the App sets it); on_dispatch: a dispatch is logged, or its voice is on its row: push the
+        # state now (the web server's poke), once each.
+        self.voice = VoiceQueue(self._voice_job, log)
+        self.may_write: Callable[[], bool] = lambda: True
+        self.on_dispatch: Callable[[], None] | None = None
+        self.voice_stale_s, self.voice_budget_s = VOICE_STALE_S, VOICE_BUDGET_S
+        # A voice the last process never finished: too old now, failed (text only); a younger one is rendered by
+        # resume_voice(), once the App has wired the voice (remote_voice, audio_blobs, the fence).
+        swept = self.store.fail_pending_voice(VOICE_RESTARTED, before=self.clock() - self.voice_stale_s)
+        if swept:
+            log(f"CAD: {swept} dispatch(es) left waiting for their voice by a restart: marked failed (text only)")
         self._state: tuple[int, dict] | None = None
         self.firehouses = mapview.load_firehouses()          # the maps' stations (a unit's home station is one)
         self.eta = eta.Params()                              # the ETA estimates' settings (Settings > Dispatch)
@@ -193,6 +215,14 @@ class Cad:
         if released:
             log(f"CAD: released {len(released)} unit(s) left on a closed call's status: "
                 + ", ".join(f"{r['unit']} {r['from']} -> {r['to']} ({r['number'] or 'no number'})" for r in released))
+        self.store.quarters_status = lambda: self.eta.quarters_status    # where a released placeholder goes (AQ)
+        freed = self.store.release_placeholders()    # a department's placeholder its unit already signed on for: back
+        if freed:                                    # in quarters (the rule from now on, for calls open from before)
+            log(f"CAD: released {len(freed)} department placeholder(s) a unit of theirs signed on for")
+        nodept = self.lists.no_department()
+        if nodept:                                   # never release a placeholder: no department to match
+            log(f"CAD: {len(nodept)} board unit(s) name no department (never release a department placeholder): "
+                + ", ".join(nodept[:10]))
         if runcards.seed(self.store, fill=bool(self.store.migrated)):
             log("CAD: seeded default run cards (a stand-in: edit them to PCFD policy)")
         self.radios = Registry(self.store, s.radio_seed or None)
@@ -231,6 +261,7 @@ class Cad:
         # Full department or specific units (#370, sizeup/cad/scope.py): from the page, then the feed
         self.scope = Scope(self)
         self.sources.on_page_moved = self.scope.move
+        self.sources.on_page_swept = self._page_swept       # ... and enriches it as a page that joined does
         # FG1 radio IDs nobody has named yet (#163): "Radio 1234 (MDC) on FG1: who is this?" on the console.
         self.newids = NewIds(self)
         # The emergency button and a mayday heard on our fire channels (sizeup/cad/alarms.py, #128): the app feeds it
@@ -285,6 +316,9 @@ class Cad:
         # (once, on first use); "N Main St / Westchester Ave" in the location box. None: not here.
         self.cross_source: Callable[[], object] | None = None
         self._cross_ix = None
+        # street_source() -> {town: [street name]}: the gazetteer's streets, for a page's misheard street (Sources:
+        # snap_street, read once). None: no street list, no snapping.
+        self.street_source: Callable[[], dict] | None = None
         self._cross_lock = threading.Lock()      # its own: the PlaceIndex is built with it (under _place_lock)
         self._details: dict[tuple, dict] = {}
         self._place_lock = threading.Lock()
@@ -587,7 +621,7 @@ class Cad:
     def map_slice(self, units: list[dict], incs: list[dict], pos: dict, now: float) -> dict:
         tags = {c: j["tag"] for j in self.lists.joint_response.values() for c in j["units"]}
         out = mapview.map_slice(units, incs, self.lists.role, self.firehouses, pos, now, joint=lambda c: tags.get(c, ""),
-                                clears=self.clears(now), params=self.eta, display=self.map_display)
+                                clears=self.clears(now), params=self.eta, display=self.map_display, lists=self.lists)
         if self.routes is not None:
             try:
                 out.update(self.routes.for_map(out["markers"], now, incs))     # routes, trails (#360)
@@ -608,7 +642,7 @@ class Cad:
         units = self.store.units() if units is None else units
         incs = self.store.q("SELECT id, number, status, lat, lon FROM incidents WHERE status IN ('queued', 'pending', 'active')")
         return mapview.locations(units, incs, self.lists.role, self.firehouses, self._positions(now), now,
-                                 self.clears(now), self.eta)
+                                 self.clears(now), self.eta, lists=self.lists)
 
     def _with_radio(self, incs: list[dict], limit: int = 200) -> list[dict]:
         """Each event's radio traffic (newest first), with whether its audio is still kept."""
@@ -845,7 +879,7 @@ class Cad:
     def recommend(self, iid: int, body: dict) -> dict:
         inc = self.store.incident(iid)
         if not inc["emergency"]:
-            on = [u["name"] for u in self.store.units() if u["incident_id"] == iid]
+            on = [u["name"] for u in self.store.units() if iid in u["incident_ids"]]
             return {"card": None, "card_label": "", "units": [], "unfilled": [], "already": on,
                     "note": "Non-emergency: no run card, no dispatch. Attach units if needed."}
         typ = _text(body, "type", 24) or inc["type"]
@@ -888,6 +922,9 @@ class Cad:
         agency = [by_id[i]["name"] for i in ids if by_id[i]["response"] == "agency"]
         if dispatching and agency:
             raise CadError(f"Agency units: attach, don't dispatch ({', '.join(agency)})")
+        ph = [by_id[i]["name"] for i in ids if by_id[i]["placeholder"]]
+        if ph:                                           # the county's, never sent or attached by hand
+            raise CadError(f"A department placeholder is assigned by the county only: {', '.join(ph)}")
         cant = [by_id[i]["name"] for i in ids if self.lists.role(by_id[i]["status"]) == "oos"
                 and not (by_id[i]["response"] == "agency" and not dispatching)]
         if cant:
@@ -971,7 +1008,7 @@ class Cad:
             return path, f"{note} (station: {_short(why, 80)})"
         except OSError as e:
             return None, f"could not write the dispatch audio: {e}"
-        if self.audio_blobs is not None:
+        if self.audio_blobs is not None and self.may_write():      # (the voice worker's too: the writer's only)
             self.audio_blobs.put(key, path.read_bytes(), "dispatch", label)
         return path, label
 
@@ -1014,7 +1051,7 @@ class Cad:
             tmp.replace(path)
         except OSError as e:
             return None, f"could not write the dispatch audio: {e}"
-        if self.audio_blobs is not None:
+        if self.audio_blobs is not None and self.may_write():
             self.audio_blobs.put(key, wav, "dispatch", label)
         return path, label
 
@@ -1040,8 +1077,10 @@ class Cad:
         the event ('Port Chester and Rye Brook Fire', or 'Rye Brook Fire' if only theirs). Tones: the
         departments of the units sent (an upgrade or full response: also everyone on the event)."""
         L = self.lists
+        units = [u for u in units if not L.placeholder(u["name"])]          # a placeholder is never said, nor toned
         sending = {u["id"] for u in units}
-        on = [u for u in self.store.units() if u["incident_id"] == inc["id"] and u["id"] not in sending]
+        on = [u for u in self.store.units() if u["incident_id"] == inc["id"] and u["id"] not in sending
+              and not L.placeholder(u["name"])]
         joint, own = self._departments(units + on)
         lead = dispatcher.lead_in(self.s.department, joint, own, full, L.wording, L.lead_in_joint_only)
         t_joint, t_own = self._departments(units + on if kind == "upgrade" or full else units)
@@ -1056,13 +1095,14 @@ class Cad:
         is already on the event, by status (already_statuses), leaving out the units being sent."""
         L = self.lists
         lead, tones = self._plan(inc, units, kind, full)
+        units = [u for u in units if not L.placeholder(u["name"])]          # a department placeholder is never said
         already = []
         if kind == "add_on":
             sending = {u["id"] for u in units}
             order = [r["unit_id"] for r in self.store.q("SELECT unit_id FROM assignments WHERE incident_id = ? AND "
                                                         "cleared_at IS NULL ORDER BY id", (inc["id"],))]
             on = sorted((u for u in self.store.units() if u["incident_id"] == inc["id"] and u["id"] not in sending
-                         and u["response"] != "agency"),                  # EMS / PD are never said on the air
+                         and u["response"] != "agency" and not u["placeholder"]),   # EMS / PD, placeholders: never said
                         key=lambda u: order.index(u["id"]) if u["id"] in order else len(order))   # in the order sent
             for st in L.already_statuses:
                 names = [u["spoken"] or u["name"] for u in on if u["status"] == st]
@@ -1100,20 +1140,98 @@ class Cad:
 
     def _send(self, iid: int, text: str, units: list[dict], operator: str, channel: str, kind: str, moved=(),
               remarks: str = "", plan: dict | None = None) -> dict:
+        """Log the dispatch and answer at once (#426): the row is "pending" and its voice a job on the voice queue
+        (_voice_job: render, key up, attach, in the order sent). Nothing here waits for audio."""
         plan = plan or dispatcher.tone_plan([], dispatcher.HOME_MUNI, list(self.s.tones))
-        path, note = self._render(text, dispatcher.where(self.store.incident(iid)), plan["groups"])
-        tx = self.transmitter.transmit(path, channel, text)
+        tx = self.transmitter.expect()                 # transmit off: known now; a radio: after its audio (_voice_job)
         did = self.store.log_dispatch(iid, operator=operator, text=text, unit_ids=[u["id"] for u in units],
-                                      audio_path=str(path) if path else "", audio_note=note, transmitted=tx.transmitted,
-                                      channel=channel, tx_note=tx.detail, kind=kind, remarks=remarks,
-                                      tones=self._tones_text(plan))
-        return dict(self._shown(text, kind, path, note, remarks, plan), dispatch_id=did,
-                    audio_url=f"/api/cad/dispatch/{did}.wav" if path else None,
-                    transmitted=tx.transmitted, detail=tx.detail, channel=channel, moved=list(moved))
+                                      audio_path="", audio_note="", transmitted=False,
+                                      channel=channel, tx_note=tx.detail if tx else "", kind=kind, remarks=remarks,
+                                      tones=self._tones_text(plan), audio_state="pending",
+                                      audio_tones=json.dumps(plan["groups"]), tx_pending=tx is None)
+        if not self.voice.put((did, text, plan["groups"], channel, time.monotonic() + self.voice_stale_s)):
+            why = VOICE_STOPPING if self.voice.stopped else VOICE_BUSY
+            self.store.fail_pending_voice(why, [did])
+            self.log(f"CAD: dispatch #{did}: {why}")
+        row = self.store.dispatch_row(did)             # pending; or done already (the same words just previewed: cached)
+        self._pushed()
+        return dict(self._shown(text, kind, None, row["audio_note"], remarks, plan), dispatch_id=did,
+                    audio=row["audio_state"], audio_url=f"/api/cad/dispatch/{did}.wav" if row["audio_path"] else None,
+                    transmitted=bool(row["transmitted"]), detail=row["tx_note"], channel=channel, moved=list(moved))
+
+    def _render_in_time(self, text: str, tones) -> tuple[Path | None, str]:
+        """_render within voice_budget_s: a render that takes longer is given up (text only) so the voices behind
+        it don't wait on it; it ends by itself, its WAV cached for a replay of the same words."""
+        box: list = []
+
+        def run() -> None:
+            try:
+                box.append(self._render(text, tones=tones))
+            except Exception as e:  # noqa: BLE001 - whatever the voice did, the row says so
+                box.append((None, f"Voice failed — {type(e).__name__}: {_short(str(e))}: text only"))
+        t = threading.Thread(target=run, name="dispatch-voice-render", daemon=True)
+        t.start()
+        t.join(self.voice_budget_s)
+        return box[0] if box else (None, VOICE_SLOW)
+
+    def _voice_job(self, job: tuple) -> None:
+        """The voice worker's: a logged dispatch's audio, then its key-up (the transmitter needs the audio; in the
+        order sent), then the row: ready with the WAV, or failed with why (the same notes as before #426:
+        "Voice unavailable — ...: text only"). Too long after its dispatch (voice_stale_s, the voices before it
+        were slow): not rendered, "Voice too late". Before the key-up and the write: still the writer (the
+        fence) and the row still pending. A failure here never undoes the dispatch."""
+        did, text, tones, channel, deadline = job
+        if time.monotonic() > deadline:
+            path, note = None, VOICE_LATE
+        else:
+            path, note = self._render_in_time(text, tones)
+        if not self.may_write():                       # the lease isn't ours any more: the next leader's start has the row
+            self.log(f"CAD: dispatch #{did}: voice not attached (this hub is no longer the writer)")
+            return
+        if not self.store.voice_pending(did):          # failed meanwhile (too late at a stop): nothing keyed, nothing written
+            return
+        try:
+            tx = self.transmitter.transmit(path, channel, text)
+        except Exception as e:  # noqa: BLE001
+            tx = TxResult(False, f"transmit failed: {type(e).__name__}")
+        if self.store.dispatch_voice(did, audio_path=str(path) if path else "", audio_note=note,
+                                     transmitted=tx.transmitted, tx_note=tx.detail):
+            self._pushed()
+
+    def resume_voice(self) -> int:
+        """At a start, once the voice is wired: the dispatches the last process left waiting for their voice (a
+        deploy in the seconds after a dispatch) are rendered here, each within what is left of its voice_stale_s;
+        the older ones were failed when the store opened. How many were queued."""
+        now, n = self.clock(), 0
+        for r in self.store.pending_voices():
+            left = self.voice_stale_s - (now - r["at"])
+            if left <= 0 or not self.voice.put((r["id"], r["text"], r["tones"], r["channel"], time.monotonic() + left)):
+                self.store.fail_pending_voice(VOICE_RESTARTED, [r["id"]])
+            else:
+                n += 1
+        if n:
+            self.log(f"CAD: {n} dispatch voice(s) left by a restart: rendering now")
+        return n
+
+    def _pushed(self) -> None:
+        if self.on_dispatch is not None:
+            try:
+                self.on_dispatch()
+            except Exception as e:  # noqa: BLE001 - the page gets it on the next second's push
+                self.log(f"CAD: dispatch: push: {type(e).__name__}")
+
+    def stop_voice(self, wait_s: float = 6.0) -> None:
+        """A drain (the hub's handover) or a stop: the voices still rendering get wait_s. What is left stays
+        pending for the next start (resume_voice renders it there if it is still young enough; else it is failed
+        there), so a dispatch in the last seconds before a deploy keeps its audio."""
+        left = self.voice.stop(wait_s)
+        if left:
+            self.log(f"CAD: {len(left)} dispatch voice(s) not rendered before the stop: left for the next start")
 
     def preview(self, iid: int, body: dict) -> dict:
-        """The dispatch as it would go out now, to hear first. Nothing is assigned or logged.
-        An event that already had a dispatch gets the add-on wording."""
+        """The dispatch as it would go out now. Nothing is assigned or logged. An event that already had a
+        dispatch gets the add-on wording. The text only, at once (#426); {"audio": true}: rendered too, to hear
+        first (seconds: the page asks for it after it has shown the text)."""
         inc = self.store.incident(iid)
         if inc["status"] not in ("queued", "pending", "active"):
             raise CadError(f"event is {inc['status']}")
@@ -1123,6 +1241,8 @@ class Cad:
         remarks = self._remarks(body)
         kind = "add_on" if self.store.has_dispatch(iid) else "new"
         text, plan = self._text_for(inc, units, kind, full=bool(_bool(body, "full")), remarks=remarks)
+        if not _bool(body, "audio"):
+            return self._shown(text, kind, None, "", remarks, plan)
         path, note = self._render(text, dispatcher.where(inc), plan["groups"])
         self._prune_audio()
         return self._shown(text, kind, path, note, remarks, plan)
@@ -1147,7 +1267,7 @@ class Cad:
 
     def upgrade(self, iid: int, body: dict) -> dict:
         """Re-dispatch with new information: optional new type/subtype, a line of new information,
-        optional extra units, full department response. {"preview": true} only renders it.
+        optional extra units, full department response. {"preview": true}: its text, nothing sent or logged.
         'Port Chester Fire, upgrade on your last alarm, 169 North Main Street. Smoke in the
         structure. Now a structure fire, full department response. Time out 15:20.'"""
         inc = self.store.incident(iid)
@@ -1173,8 +1293,8 @@ class Cad:
             raise CadError("Nothing to upgrade: add a type, info, remarks or units")
         text, plan = self._text_for(inc, units, "upgrade", full=full, info=info,
                                     new_phrase=self._phrase(typ, sub) if changed else "", remarks=remarks)
-        if body.get("preview"):
-            path, note = self._render(text, dispatcher.where(inc), plan["groups"])
+        if body.get("preview"):                        # the text only; {"audio": true}: rendered too (#426)
+            path, note = self._render(text, dispatcher.where(inc), plan["groups"]) if _bool(body, "audio") else (None, "")
             return self._shown(text, "upgrade", path, note, remarks, plan)
         operator = _text(body, "operator", OPERATOR_MAX, required=True)
         channel = self._channel(body)
@@ -1225,9 +1345,12 @@ class Cad:
         if status not in ok:
             raise CadError("status: " + " or ".join(f"{c} ({L.name('unit_statuses', c)})" for c in ok))
         op = _text(body, "operator", OPERATOR_MAX, required=True)
-        here = [u["name"] for u in units if u["incident_id"] == iid]
+        here = [u["name"] for u in units if iid in u["incident_ids"]]
         if here:
             raise CadError(f"Already on this event: {', '.join(here)}")
+        ph = [u["name"] for u in units if u["placeholder"]]
+        if ph:
+            raise CadError(f"A department placeholder is never {L.name('unit_statuses', status)}: {', '.join(ph)}")
         agency = [u["name"] for u in units if u["response"] == "agency" and status not in L.unit_statuses_for(u["name"], u["board"])]
         if agency:
             raise CadError(f"Another agency's unit, not {L.name('unit_statuses', status)}: {', '.join(agency)}")
@@ -1281,7 +1404,10 @@ class Cad:
     def unit_status(self, uid: int, body: dict) -> dict:
         status = _text(body, "status", 40, required=True)
         op = _text(body, "operator", OPERATOR_MAX)
-        was = self.store.unit(uid)["incident_id"]
+        u = self.store.unit(uid)
+        if u["placeholder"]:
+            return self._placeholder_status(u, status, body, op)
+        was = u["incident_id"]
         self._by_hand(was, [uid], op)                    # a person's, before the write (#311 L4)
         if "incident_id" in body and body["incident_id"] is not None:   # the board's "which call?" answer
             try:
@@ -1296,6 +1422,28 @@ class Cad:
             self._by_hand(i, [uid], op)
         if was and out.get("incident_id") != was:
             self.auto.recheck_close([was])               # the last unit off a call that waits to close (#311 N1)
+        return out
+
+    def _placeholder_status(self, u: dict, status: str, body: dict, op: str) -> dict:
+        """A department placeholder's status from a person: in quarters only (the county assigns it; never Dispatched by
+        hand). From a call's unit row ("call"): off that call only; from the board: off every call it is on. Checked
+        first; then each call it leaves is a person's for it (automation leaves it off) and may close now (#311 N1)."""
+        q = self.store.placeholder_free(u["name"], u["board"])
+        if status != q:
+            raise CadError(f"{u['name']} is a department placeholder, assigned by the county: "
+                           f"{self.lists.name('unit_statuses', q)} only")
+        call = body.get("call")
+        try:
+            call = int(call) if call is not None else None
+        except (TypeError, ValueError):
+            raise CadError("call: a number") from None
+        if call and call not in u["incident_ids"]:
+            raise CadError(f"{u['name']} is not on this call")
+        ids = [call] if call else list(u["incident_ids"])
+        for i in ids:                                    # a person's, before the write (#311 L4)
+            self._by_hand(i, [u["id"]], op)
+        out = self.store.set_unit_status(u["id"], status, op, call=call)
+        self.auto.recheck_close(out.get("cleared_from") or ids)
         return out
 
     def unit_station(self, uid: int, body: dict) -> dict:
@@ -1719,6 +1867,11 @@ class Cad:
             address = heard or geo.get("label") or ""
         alts = [] if sure else [{k: a.get(k) for k in ("label", "lat", "lon", "town", "confidence", "why")}
                                 for a in (geo.get("alts") or []) if a.get("label") and a.get("lat") is not None][:4]
+        towns = self._page_towns(inc)
+        snap = self._snap_heard(heard, towns) if heard and not sure else None
+        if snap is not None:                           # a misheard street: the map's spelling shown, its point a reading to
+            if snap.get("alt") and not any(a["label"] == snap["alt"]["label"] for a in alts):   # pick; matched as heard
+                alts = [snap["alt"], *alts][:4]
         cross = (inc.cross_street or "").title()
         if sure and geo.get("checked") == "all" and len(geo.get("crosses") or []) >= 2:
             cross = " and ".join(geo["crosses"][:2])          # as the map names them: "Clinton St and W William St"
@@ -1740,6 +1893,8 @@ class Cad:
                          f"{geo.get('confidence', 0):.2f}: pick on the card)")
             else:
                 where = " (not found on the map)"
+            if snap is not None:
+                where += f"; the map's street: {snap['address']}"
             facts.append(f"location as heard: {heard}{where}")
         if inc.time_out:
             facts.append(f"county time out {inc.time_out}")
@@ -1767,7 +1922,8 @@ class Cad:
         if old is None:
             # The paging decoder is the backup (#297, sizeup/cad/sources.py): it attaches to the incident a feed has
             # for it, else makes its own at once (never held), noted "possibly the same as" a near one it may not join.
-            data = {"f": f, "ref": ref, "pages": list(getattr(inc, "pages", []) or []), "type_heard": inc.incident_type}
+            data = {"f": f, "ref": ref, "pages": list(getattr(inc, "pages", []) or []), "type_heard": inc.incident_type,
+                    "towns": list(towns), "lines": lines}
             at = (inc.page_starts or [inc.opened])[0]
             how, got = self.sources.page(str(inc.id), at, f["address"] or heard, list(inc.units or []), data)
             if how == "attached":
@@ -1788,7 +1944,8 @@ class Cad:
         at = (inc.page_starts or [inc.opened])[0]
         if old["source_ref"] == ref and old["status"] == "queued" and not self.sources._has_feed(old["id"]):
             # its own card, made from less than it says now (the tones half, a first reading): matched again (#365)
-            data = {"f": f, "ref": ref, "pages": list(getattr(inc, "pages", []) or []), "type_heard": inc.incident_type}
+            data = {"f": f, "ref": ref, "pages": list(getattr(inc, "pages", []) or []), "type_heard": inc.incident_type,
+                    "towns": list(towns), "lines": lines}
             how, got = self.sources.rematch_page(str(inc.id), old["id"], at, f["address"] or heard,
                                                  list(inc.units or []), data)
             if how == "attached":
@@ -1816,6 +1973,60 @@ class Cad:
             fill.update(type=typ, subtype=sub, type_note=note)
         return self.store.update_incident(old["id"], fill, log=False)
 
+    @staticmethod
+    def _page_towns(inc) -> tuple[str, ...]:
+        """The towns a page's tones name; our tones: the whole district (sizeup/geo/pagegeo.py's rule). Its implied
+        town when it names none (Sources: a misheard street)."""
+        from sizeup.geo.pagegeo import DISTRICT, home_towns
+        towns = home_towns([*(getattr(inc, "tone_departments", None) or []), *(getattr(inc, "departments", None) or [])])
+        if set(towns) & set(DISTRICT):
+            towns = (*towns, *(t for t in DISTRICT if t not in towns))
+        return tuple(towns)
+
+    def _snap_heard(self, heard: str, towns: tuple[str, ...]) -> dict | None:
+        """A page's heard location whose street the map spells otherwise ("220 Samplewerth Place"): {"address": with the
+        gazetteer's street in the page's towns ("220 Sampleworth Pl, Rye Brook"), "alt": its map point as a reading to
+        pick, when the gazetteer places it in one of those towns}; None unless exactly one known street is near it
+        (sources.snapped). Shown only: the card keeps the heard location (matching uses it), never a pin by itself
+        (#176: unconfirmed stays unconfirmed)."""
+        from sizeup.cad.sources import snapped
+        self.sources._towns()
+        fixed = snapped(heard, towns) if towns else ""
+        if not fixed:
+            return None
+        out: dict = {"address": fixed[:200]}
+        try:
+            m = next(iter(self._ranked(fixed)), None)
+        except Exception:  # noqa: BLE001 - no reading: the spelling alone
+            m = None
+        if m and m.get("lat") is not None and m.get("confidence", 0) >= 0.6 and m.get("town") in towns:
+            out["alt"] = {"label": m["label"], "lat": m["lat"], "lon": m["lon"], "town": m["town"],
+                          "confidence": m["confidence"], "why": "the street as the map spells it"}
+        return out
+
+    def _page_swept(self, card: dict, iid: int, rec: dict) -> None:
+        """A page's card a feed's event took (Sources._sweep_pages): as a page that joined it (_page_enrich): its
+        transcript lines on the timeline (kind "tones", once each), its cross streets when the incident has none and no
+        person set its location, and in 60 Control mode its units (AutoDispatch.on_page). Its scope moved already
+        (Scope.move)."""
+        lines = [str(x)[:2000] for x in rec.get("lines") or []] or [
+            x for x in (card.get("remarks") or "").splitlines() if x.startswith("60 Control page ")]
+        cur = self.store.incident(iid)
+        have = {e["text"] for e in self.store.q("SELECT text FROM events WHERE incident_id = ? AND kind = 'tones'", (iid,))}
+        new = [x for x in dict.fromkeys(lines) if x not in have]
+        if new:
+            with self.store.tx() as db:
+                for x in new:
+                    self.store._event(db, iid, "tones", x, "Paging", at=self.clock())
+        cross = (card.get("cross_street") or "").strip()
+        if (cross and not (cur["cross_street"] or "").strip() and cur["status"] in ("queued", "pending", "active")
+                and "location" not in self.sources.manual(iid)):
+            try:
+                self.store.update_incident(iid, {"cross_street": cross}, operator="Paging", log=False)
+            except CadError:
+                pass
+        self.auto.on_page(iid, list(rec.get("units") or []), rec.get("at") or self.clock())
+
     def _page_scope(self, iid: int, inc, note: bool = True) -> tuple[str, bool]:
         """Full department or specific units, as the page says it (#370: the page's stands over a feed's): (the
         feed's label when it says otherwise ("units"), else ""; whether the page's reading is new there). note: that
@@ -1839,7 +2050,7 @@ class Cad:
         depts = list(dict.fromkeys([*(getattr(inc, "tone_departments", None) or []), *(getattr(inc, "departments", None) or [])]))
         feed, _ = self._page_scope(iid, inc, note=False)
         texts = [x[:2000] for x in lines]
-        base = self.scope.line(iid) or scope_mod.page_line(depts, scope_mod.latest_units(inc),
+        base = self.scope.line(iid) or scope_mod.page_line(depts, scope_mod.latest_units(inc, self.scope.roster()),
                                                            getattr(inc, "tone_departments", ()), inc.incident_type)
         if base and not any(x == base or x.startswith(base + " · feed: ") for x in have):   # once per reading
             texts.append(base + (f" · feed: {feed}" if feed else ""))   # (feed: "" when that disagreement is said)

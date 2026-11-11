@@ -358,7 +358,7 @@ def test_hub_renders_with_polly_without_the_station_then_falls_back(tmp_path, fa
         c = hub.app.cad
         assert c.s.tts_engine == "polly" and not hub.app.hub.connected()
         inc = c.create({"type": "STRU", "address": "209 Westchester Ave", "operator": "Lt. Ruiz"})
-        body = {"unit_ids": [uid(c, "E63")]}
+        body = {"unit_ids": [uid(c, "E63")], "audio": True}     # to hear it: the text alone needs no voice (#426)
         code, p = call(hub.url + f"/api/cad/incident/{inc['id']}/preview", "POST", body, token=None)
         assert code == 200 and p["audio_note"] == "Voice: Polly Matthew" and p["audio_url"]       # no station needed
         assert len(fake_polly["requests"]) == 2 and fake_polly["bad_sig"] == 0

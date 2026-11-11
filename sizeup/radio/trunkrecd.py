@@ -864,7 +864,7 @@ class SystemSupervisor(Supervisor):
         self.said = ""
         if getattr(self.proc, "stdout", None) is not None:
             self._drain_thread = threading.Thread(target=self._drain, args=(self.proc, r["workdir"]),
-                                                  name=f"trunk-recorder-{self.name}-output", daemon=True)
+                                                  name="trunk-recorder-system-output", daemon=True)
             self._drain_thread.start()
         on = ", ".join(f"{w['sources'][i]['name']} (device #{devs[i]})" for i in sorted(devs))
         self.log(f"{self.tag}: trunk-recorder on {on}, pid {self.proc.pid}")

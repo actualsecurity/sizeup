@@ -287,12 +287,14 @@ class TrunkRecorder:
             if self.left_out:
                 self.detail += f" (left out: {'; '.join(self.left_out)})"
                 self.on_event(f"trunk-recorder: source(s) left out: {'; '.join(self.left_out)}")
-            threading.Thread(target=self._drain, args=(self._proc,), daemon=True).start()
+            drain = threading.Thread(target=self._drain, args=(self._proc,), daemon=True)
+            drain.start()
             started = time.monotonic()
             while not self._stop.is_set() and self._proc.poll() is None:
                 self._stop.wait(1.0)
             if self._stop.is_set():
                 break
+            drain.join(2.0)                 # its last words read before we judge them (an unplugged dongle, not a crash)
             tail = " ".join(list(self.last_lines)[-5:])
             if "Wrong rtlsdr device index" in tail or "No supported devices" in tail or "No matching devices" in tail:
                 # Dongle unplugged (bench, 2026-10-01): say so plainly, look again every 15 s, no log spam.
