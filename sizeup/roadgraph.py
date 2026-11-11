@@ -35,7 +35,10 @@ their ramps cost LIMITED_SLOW times as much (a last resort: never quicker than t
 (target(): its ADDRESS names a highway as a road, never a street named after one, and its point is within
 HWCALL_SNAP_M of that highway's carriageway running its signed direction (NB / SB / EB / WB: SIGNED), else the
 nearest; or, naming none, its point lands on one, more readily for an MVA) may use the motorways and the parkway it
-names. A cross street naming the highway never makes it one (a street beside or under I-95). Seconds are always driving time: the factor
+names. A cross street naming the highway never makes it one (a street beside or under I-95), nor do words for a
+place under or beside it ("I-95 overpass", "I-95 Service Rd", "under I-95"), nor a street at it with no direction
+("Example St / I-95"). A direction picks only a highway signed with it ("Thruway SB" is I-95, never I-287). A rig on
+a parkway (back from a call there) drives on along it to an exit, at LIMITED_SLOW. Seconds are always driving time: the factor
 only steers the choice. The partial edges at either end are never factored (a rig on I-95 is there).
 
 Everything shown from this is an estimate: no traffic, no signals, no turn costs.
@@ -134,7 +137,12 @@ HW_NAMES = (
 # beside or under I-95 has "I 95" as its cross street).
 _PK = r"\s+(?:PKWY|PARKWAY|PKY)\b"
 _DIRW = r"(?:[NSEW]/?B|NORTH(?:\s*BOUND)?|SOUTH(?:\s*BOUND)?|EAST(?:\s*BOUND)?|WEST(?:\s*BOUND)?|[NSEW])"
+_BOUND = r"(?:[NSEW]/?B|(?:NORTH|SOUTH|EAST|WEST)\s*BOUND)\b"
 _SUFFIX = r"(?:PLAZA|PLZ|AVE|AVENUE|RD|ROAD|ST|STREET|DR|DRIVE|LN|LANE|CT|COURT|PL|PLACE|BLVD|TER|TERRACE|CIR|CIRCLE|SQ|WAY)\b"
+# words for a street, or a place under or beside the highway, right after its name: "I-95 Service Rd", "I-95 overpass"
+_BESIDE = r"(?:SERVICE|SVC|OVERPASS|UNDERPASS|PARK\s*(?:AND|&|N)\s*RIDE|P\s*&\s*R|HOV)\b"
+_BELOW = ("UNDER", "BELOW", "BENEATH")         # ... or right before it: "under I-95"
+_STREET = re.compile(r"\b" + _SUFFIX)          # the address names a street too: "King St / I-95" (local, no direction)
 _LEAD = r"(?:^|[@&/]\s*|\b(?:AT|ON|RAMP|ENTRANCE|EXIT|TO|OF|AND)\s+)"
 _TAIL = r"(?=\s*(?:$|[@&/]|\b(?:AT|EXIT|EX|MM|MILE|RAMP|NEAR|BEFORE|AFTER|PAST|BY|BTWN|BETWEEN)\b))"
 CALL_HW = (
@@ -142,6 +150,10 @@ CALL_HW = (
     (re.compile(_LEAD + r"(95|287|684)\s*(" + _DIRW + r")" + _TAIL), None),
     (re.compile(_LEAD + r"(" + _DIRW + r")\s+(95|287|684)" + _TAIL), "first"),
     (re.compile(r"\bHUTCH(?:INSON)?(?:\s+RIVER)?" + _PK), "hutch"),
+    (re.compile(r"\bHUTCH\s+" + _BOUND), "hutch"),                    # the shorthand, with a direction: "Hutch SB"
+    (re.compile(r"\bMERRITT\s+" + _BOUND), "merritt"),
+    (re.compile(r"\bSPRAIN\s+" + _BOUND), "sprain"),
+    (re.compile(r"\bSAW\s?MILL\s+" + _BOUND), "sawmill"),
     (re.compile(r"\bMERRITT" + _PK + r"|\bCT[- ]?15\b(?!\s+" + _SUFFIX + ")"), "merritt"),
     (re.compile(r"\bSPRAIN(?:\s+BROOK)?" + _PK), "sprain"),
     (re.compile(r"\bSAW\s?MILL(?:\s+RIVER)?" + _PK), "sawmill"),
@@ -310,8 +322,12 @@ def highway_call(address: str = "", cross: str = "", typ: str = "", subtype: str
     t = " ".join((address or "").upper().replace(",", " ").replace(".", " ").replace(";", " ").split())
     keys: set[str] = set()
     way = None
+    rest = t                                                       # the address without the highways named in it
     for rx, what in CALL_HW:
         for m in rx.finditer(t):
+            if t[:m.start()].rstrip().endswith(_BELOW) or re.match(r"\s*" + _BESIDE, t[m.end():]):
+                continue                                           # a street or a place under or beside it
+            rest = rest[:m.start()] + " " * (m.end() - m.start()) + rest[m.end():]
             if what is None:                                       # I-95 [N] / 95 SB: (number, direction)
                 keys.add("i" + m.group(1))
                 way = way or _dir(m.group(2))
@@ -332,6 +348,8 @@ def highway_call(address: str = "", cross: str = "", typ: str = "", subtype: str
         else:
             d = CALL_DIR_AFTER.search(t)
             way = d.group(1)[0] if d else None
+    if way is None and _STREET.search(rest):
+        return Call((), None, vehicle)                             # "King St / I-95": the street, at the highway
     return Call(keys | {"*"}, way, vehicle)
 
 
@@ -462,19 +480,27 @@ class Graph:
                 ekind[e] = k
         self.ekind, self.kinds = ekind, kinds
 
+    def start_parkways(self, s: dict | None) -> frozenset:
+        """The parkways a rig snapped at s is on (its edge a parkway or its ramp): it may drive on to an exit."""
+        if s is None or not self.ekind[s["edge"]]:
+            return frozenset()
+        lim, ks = self.kinds[self.ekind[s["edge"]]]
+        return ks if lim == 2 else frozenset()
+
     def limited(self, e: int) -> int:
         """0: an ordinary road; 1: a motorway or its ramps; 2: a parkway or its ramps."""
         return self.kinds[self.ekind[e]][0]
 
-    def factors(self, keys: frozenset | None) -> list[float]:
+    def factors(self, keys: frozenset | None, own: frozenset = frozenset()) -> list[float]:
         """Cost factor by kind for a call: keys None (a call on no highway): motorways LIMITED_SLOW, parkways shut;
-        a highway call (its keys): motorways as they are, a parkway only when the call names it."""
+        a highway call (its keys): motorways as they are, a parkway only when the call names it. own: the parkways
+        the rig is on (start_parkways): those and their ramps at LIMITED_SLOW, its way off."""
         out = []
         for lim, ks in self.kinds:
             if lim == 0:
                 out.append(1.0)
             elif lim == 2:
-                out.append(1.0 if keys and ks & keys else math.inf)
+                out.append(1.0 if keys and ks & keys else LIMITED_SLOW if ks & own else math.inf)
             else:
                 out.append(1.0 if keys is not None else LIMITED_SLOW)
         return out
@@ -562,12 +588,15 @@ class Graph:
             return None
 
         def want(ks: frozenset) -> float | None:
+            """The bearing of the call's direction on a carriageway of these highways; None: any (no direction);
+            nan: not this one (a highway signed the other way: "Thruway SB" is never I-287)."""
             if way not in DIRS:
                 return None
-            for k in sorted(ks & named):
+            mine = sorted(ks & named)
+            for k in mine:
                 if k in SIGNED and way in SIGNED[k][0]:
                     return (SIGNED[k][1] + (0.0 if way == SIGNED[k][0][0] else 180.0)) % 360
-            return DIRS[way]
+            return math.nan if any(k in SIGNED for k in mine) else DIRS[way]
         best = {True: None, False: None}                              # by: runs the call's way
         for e in self.near_edges(x, y, max_m):
             k = self.ekind[e]
@@ -580,6 +609,8 @@ class Graph:
             if d > max_m:
                 continue
             w = want(ks)
+            if w is not None and math.isnan(w):
+                continue
             ok = w is None or abs((self.bearing(e, i) - w + 180) % 360 - 180) <= HWCALL_DIR_DEG
             if best[ok] is None or d < best[ok][0]:
                 best[ok] = (d, e, off, i, t)
@@ -792,7 +823,7 @@ class Graph:
             return None
         pen = pen or {}
         spm = self.spm(params)
-        kf, ekind = self.factors(keys), self.ekind
+        kf, ekind = self.factors(keys, self.start_parkways(sa)), self.ekind
         goals = self._goals(sb, spm, pen, wrongway_m)
         best_s, best = math.inf, None
         direct = self._direct(sa, sb, spm, pen, wrongway_m)
@@ -922,17 +953,28 @@ class Graph:
         return out
 
     def to_one(self, origins: dict, b, params, pen: dict | None = None, wrongway_m: float = 60.0,
-               max_s: float = 1800.0, call: Call | None = None) -> dict:
+               max_s: float = 1800.0, call: Call | None = None, _own: frozenset | None = None) -> dict:
         """Seconds and metres to [lon, lat] b from each origin, in one reverse Dijkstra: {key: (s, m) | None}.
         None: on the roads but no way to b within max_s of driving (closed in, or only by a parkway); a key missing:
         no road near it. origins: {key: [lon, lat]}. call: as route()'s; the seconds (and max_s) are driving time
-        (without the highway factors)."""
+        (without the highway factors). A rig on a parkway may drive on along it to an exit (factors' own): such
+        rigs are worked out apart, each parkway's in a search of its own."""
+        if _own is None:
+            groups: dict[frozenset, dict] = {}
+            for k, ll in origins.items():
+                groups.setdefault(self.start_parkways(self.snap(ll[0], ll[1])), {})[k] = ll
+            if set(groups) != {frozenset()}:
+                out: dict = {}
+                for own, part in groups.items():
+                    out.update(self.to_one(part, b, params, pen, wrongway_m, max_s, call, _own=own))
+                return out
+            _own = frozenset()
         sb, keys = self.target(b[0], b[1], call)
         if sb is None:
             return {}
         pen = pen or {}
         spm = self.spm(params)
-        kf, ekind = self.factors(keys), self.ekind
+        kf, ekind = self.factors(keys, _own), self.ekind
         goals = self._goals(sb, spm, pen, wrongway_m)
         snaps = {k: self.snap(ll[0], ll[1]) for k, ll in origins.items()}
         want: dict[int, list] = {}
