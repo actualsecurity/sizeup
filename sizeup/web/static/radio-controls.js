@@ -304,7 +304,9 @@ window.RadioControls = (() => {
         b.classList.toggle("active", m === x.mode);
         b.classList.toggle("elsewhere", !!there);
         b.title = there ? `${m} is on SDR ${there.name || there.serial}: click to move it here` : "";
-        b.disabled = !!sdr.switching || st.sdrBusy || ro() || !!(x.lent && !x.lent.owed);   // lent: Stop the test instead
+        // lent to a reception test: locked (Stop the test instead); still owed its job: only that job, "restore now"
+        b.disabled = !!sdr.switching || st.sdrBusy || ro() || !!(x.lent && !(x.lent.owed && m === x.lent.paused));
+        if (x.lent && x.lent.owed && m === x.lent.paused) b.title = `Restore ${m} now (not restored after the reception test: retried every few seconds)`;
       }
       row.classList.toggle("lent", !!x.lent);
       const ad = row.querySelector(".adsb-use");

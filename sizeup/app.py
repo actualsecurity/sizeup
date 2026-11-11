@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import uuid
 import os
 import re
 import shutil
@@ -1472,10 +1473,33 @@ class App:
         the unknown talkgroups seen on it and its encrypted activity. [] with none (the hub shows its station's)."""
         return [rt.state(self.assign) for rt in self.systems.values()]
 
-    def reception_post(self, body: dict, by: str = "") -> str | None:
-        """POST /api/reception (#410): start, stop or annotate a reception test (by: who asked, for the activity log
-        when it ends). None, or why not."""
-        return self.reception.post(body, str(by or ""))
+    def reception_post(self, body: dict, by: str = "", tid: str = "") -> str | None:
+        """POST /api/reception (#410): start, stop or annotate a reception test. None, or why not. by: who asked: kept
+        HERE, in the CAD of record, under the test's id (for the activity row when it ends), never with the test
+        itself: a station gets only the id the hub made (tid) and stores no person."""
+        start = isinstance(body, dict) and body.get("action") == "start"
+        if not reception.SAMPLE_ID.fullmatch(str(tid or "")):
+            tid = uuid.uuid4().hex[:12] if start else ""
+        err = self._reception_send(body, tid)
+        if start and not err and by:
+            self._reception_who(tid, str(by))
+        return err
+
+    def _reception_send(self, body: dict, tid: str) -> str | None:
+        return self.reception.post(body, tid)
+
+    def _reception_who(self, tid: str, by: str | None = None) -> str:
+        """Who started test `tid` (by given: remember it; the last 80 are kept, in the CAD's own store)."""
+        try:
+            m = json.loads(self.cad.store.meta_get("reception_by") or "{}")
+            m = m if isinstance(m, dict) else {}
+            if by:
+                m[tid] = by[:200]
+                self.cad.store.meta_put("reception_by", json.dumps(dict(list(m.items())[-80:])))
+            return str(m.get(tid) or "")
+        except Exception as e:  # noqa: BLE001 - a log row's name, never in the way
+            log(f"reception test: who started {tid} not kept: {type(e).__name__}")
+            return ""
 
     def reception_state(self) -> dict | None:
         """GET /api/reception: the reception tests' state (admins: its history and sample list are never in the
@@ -1485,10 +1509,11 @@ class App:
     def _reception_ended(self, t: dict) -> None:
         """A reception test is over (or its paused job is back at last): in the activity of who started it. On a
         station the hub writes it, from the station's report (sizeup/cloud/hub.py)."""
-        if self.cfg.cloud_role == "station" or not t.get("by"):
+        by = "" if self.cfg.cloud_role == "station" else self._reception_who(str(t.get("id") or ""))
+        if not by:
             return
         try:
-            self.cad.activity.record(t["by"], "action", "reception test", reception.ended_text(t), "",
+            self.cad.activity.record(by, "action", "reception test", reception.ended_text(t), "",
                                      reception.restored_ok(t))
         except Exception as e:  # noqa: BLE001 - a log row, never in the way
             log(f"reception test: activity row not written: {type(e).__name__}: {e}")
@@ -3122,6 +3147,13 @@ class App:
         A mode already running on another dongle moves here (that dongle goes Off, which auto-assign
         may fill on its next start: a person didn't choose that Off). `by` is recorded per dongle;
         a person's choice, Off included, is never changed by auto-assign."""
+        err = self._set_mode(mode, sdr, by, confirm)
+        if err is None:                 # (#410) only a switch that worked ends what a reception test still owed it
+            rows = self.sdrs
+            self.reception.switched(sdr or (rows[0] if rows else ""), mode)
+        return err
+
+    def _set_mode(self, mode: str, sdr: str | None, by: str, confirm: bool) -> str | None:
         if not self.shared:
             return "each channel has its own dongle: nothing to switch"
         rows = self.sdrs
@@ -3131,6 +3163,7 @@ class App:
         if mode not in self.modes:
             return f"unknown mode {mode!r}; one of {', '.join(self.modes)}"
         # (#410) a dongle lent to a reception test: any switch of it ends the test and its paused job comes back
+        # (said in the answer); one still owed its job: that job picked is "restore now"
         lent = self.reception.person_switch(mode, sdr)
         if lent is not None:
             return lent or None
@@ -3829,7 +3862,12 @@ def serve(cfg: Config, fence=None, phases=None, early=None) -> int:
     server = make_server(app, fence, listener)
     t.mark("server")
     if threading.current_thread() is threading.main_thread():
-        signal.signal(signal.SIGTERM, lambda *_: server.drain())
+        def term(*_a) -> None:
+            # (#410) a running reception test ends NOW, in its own thread: its dongle is back on its job while the
+            # requests in flight drain (up to 10 s), not after; App.stop() then finds nothing left to end
+            threading.Thread(target=app.reception.shutdown, name="reception-stop", daemon=True).start()
+            server.drain()
+        signal.signal(signal.SIGTERM, term)
     sm = app.station
     role = (" · hub (fed by the station, no radios)" if cfg.cloud_role == "hub"
             else f" · station, forwarding to {sm.hub_url}" if sm is not None and sm.forward else "")

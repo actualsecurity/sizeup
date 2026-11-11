@@ -32,6 +32,7 @@ from tests.test_health import access_hub, call, jwt, keys, jwks, people, req, st
 from tests.test_p25 import tr_call
 from tests.test_p25_systems import MRRS, finder, service, system_dir
 from tests.test_roles import COREY, DEE, JULIAN, VAL
+from tests.test_trunk_recorder_unit import SERVICE_PID
 
 PD, PD_SECURE, EMS = 9211, 9213, 9570
 DONGLES = [(0, "Blog V4", "v4"), (1, "RTL2838UHIDIR", "trunk"), (2, "RTL2838UHIDIR", "page"), (3, "RTL2838UHIDIR", "air"),
@@ -490,7 +491,8 @@ def test_the_dongle_is_claimed_all_the_way_through_the_hand_off(lab, monkeypatch
     assert [x for x in seen if x[1] == "air"] == [("MRRS test", "air"), ("MRRS 770", "air")]
     del seen[:]
     assert app.reception_post({"action": "stop"}) is None
-    assert [x for x in seen if x[1] == "air"] == [("HPN Tower", "air")] and (claims.DIR / "air.json").exists()
+    # (claimed for the job it gets back straight after the test's trunk-recorder stops, before the pause; never released)
+    assert [x for x in seen if x[1] == "air"] == [("HPN Tower", "air")] * 2 and (claims.DIR / "air.json").exists()
     del seen[:]
     assert start(app) is None and app.reception_post({"action": "stop"}) is None        # a spare: released only at the end
     assert [x for x in seen if x[1] == "spare"] == [("MRRS test", "spare"), ("MRRS 770", "spare"), ("release", "spare")]
@@ -503,7 +505,30 @@ def test_a_spare_dongle_goes_back_to_off(lab):
     assert app.reception_post({"action": "stop"}, "admin@example.org") is None
     assert app.assign["spare"] == "Off" and "spare" not in app.set_by and not (claims.DIR / "spare.json").exists()
     h = app.reception.history[0]
-    assert (h["status"], h["why"], h["restored"]) == ("stopped", "stopped by admin@example.org", "Off again")
+    assert (h["status"], h["why"], h["restored"]) == ("stopped", "stopped by a person", "Off again")
+
+
+def test_who_started_a_test_is_kept_by_the_cad_of_record_never_with_the_test(lab):
+    """The test itself (its marker, the history file, the log, the state a station reports) names no person: only an
+    id. The app that is the CAD of record keeps id -> person, and writes the end in that person's activity."""
+    app, clock = lab, Clock()
+    running(app, clock)
+    who = "admin@example.org"
+    assert app.reception_post({"action": "start", "job": "MRRS 770", "sdr": "air", "pause": "HPN Tower"}, who) is None
+    tid = app.reception.active["id"]
+    assert app._reception_who(tid) == who and who not in app.reception.marker.read_text()
+    assert app.reception_post({"action": "stop"}, who) is None
+    assert who not in app.reception.history_file.read_text() and who not in json.dumps(app.reception_state())
+    assert not [m for m in app.logs if who in m and not m.startswith("CAD activity: ")]   # (the CAD's own activity log)
+    acts = app.cad.store.q("SELECT email, kind, summary, ok FROM user_activity WHERE route = 'reception test'")
+    assert [(a["email"], a["kind"], a["summary"], a["ok"]) for a in acts] == [
+        (who, "action", "Reception test stopped (stopped by a person): MRRS 770 on SDR air · none · HPN Tower restored", 1)]
+    # a refused start keeps nothing; one from the station's own page (nobody signed in) has no row to write
+    assert "protected" in app.reception_post({"action": "start", "job": "MRRS 770", "sdr": "page", "pause": "South 2"}, who)
+    assert list(json.loads(app.cad.store.meta_get("reception_by"))) == [tid]
+    # a station is handed the hub's id for the test, and nothing else
+    assert app.reception_post({"action": "start", "job": "MRRS 770", "sdr": "spare"}, "", "0123456789ab") is None
+    assert app.reception.active["id"] == "0123456789ab" and app._reception_who("0123456789ab") == ""
 
 
 def test_switching_the_lent_dongle_in_settings_ends_the_test_and_restores_its_job(lab):
@@ -513,7 +538,9 @@ def test_switching_the_lent_dongle_in_settings_ends_the_test_and_restores_its_jo
     rt = running(app, clock)
     for picked in ("Off", "FG1", "MRRS 773", "HPN Tower"):
         assert start(app, "air", pause="HPN Tower") is None and app.assign["air"] == "MRRS 770"
-        assert app.set_mode(picked, "air") is None
+        # the answer says what happened instead of the switch (so no "Radio mode: X" in the activity log)
+        assert app.set_mode(picked, "air") == ("reception test stopped: SDR air was lent to it; HPN Tower comes back on it "
+                                               f"(not switched to {picked})")
         assert app.assign["air"] == "HPN Tower" and app.set_by["air"] == "person" and app.reception.active is None, picked
         assert rt.recorder.source_on(0) is None and rt.probe is None and app.assign["v4"] == "FG1"
         h = app.reception.history[0]
@@ -603,13 +630,20 @@ def test_a_restore_the_other_app_gets_in_the_way_of_is_owed_and_retried_until_do
         clock.t += reception.OWED_RETRY_S + 1
         app.reception.tick()
     assert app.assign["air"] == "Off" and app.reception.owed["tries"] == 4 and app.reception.owed_file.is_file()
+    # a click on the owed dongle while the other app holds it never cancels the debt: its own job ("restore now") is
+    # tried and refused, another job is refused by the usual checks, and it is still owed
+    err = app.set_mode("HPN Tower", "air")
+    assert err == ("SDR air: HPN Tower not restored yet (in use by shortfinal (AM 118.575)); still owed to it, retrying")
+    assert app.set_mode("FG1", "air") == "SDR air is in use by shortfinal (AM 118.575)"
+    assert app.reception.owed["was"] == "HPN Tower" and app.reception.owed_file.is_file() and app.assign["air"] == "Off"
+    assert app.assign["v4"] == "FG1" and saved_modes(app)["air"] == "HPN Tower" and app.reception.health()["push"] is True
     (claims.DIR / "air.json").unlink()                         # they let go
     clock.t += reception.OWED_RETRY_S + 1
     app.reception.tick()
     assert app.assign["air"] == "HPN Tower" and app.set_by["air"] == "person" and app.reception.owed is None
     assert json.loads((claims.DIR / "air.json").read_text())["mode"] == "HPN Tower" and not app.reception.owed_file.exists()
     h = app.reception_state()["history"][0]
-    assert h["restored"] == "HPN Tower restored (after 5 tries)" and h["restored_ok"] is True
+    assert h["restored"] == "HPN Tower restored (after 6 tries)" and h["restored_ok"] is True
     assert app.reception.health() is None and app.reception_state()["alert"] is None
     assert [(t["restored_ok"], t["restored"][:12]) for t in app.ended] == [(False, "HPN Tower NO"), (True, "HPN Tower re")]
 
@@ -624,7 +658,17 @@ def test_an_owed_job_is_dropped_when_a_person_picks_something_else_for_the_dongl
     assert app.reception.owed["was"] == "HPN Tower" and app.assign["air"] == "Off"
     assert next(d for d in app.reception.dongles() if d["serial"] == "air")["refuse"] == "HPN Tower not restored yet"
     assert start(app, "air") == "SDR air: HPN Tower not restored yet"
+    assert "still owed to it" in app.set_mode("HPN Tower", "air")      # "restore now": tried, can't be yet
+    app._start_mode = real
+    assert app.set_mode("HPN Tower", "air") is None            # ... and now it can: restored at the click
+    assert app.assign["air"] == "HPN Tower" and app.reception.owed is None
+    assert app.reception.history[0]["restored"].startswith("HPN Tower restored (after")
+    # owed again; a person's other choice that WORKS ends the debt (Off too)
+    app._start_mode = lambda mode, serial: False if mode == "HPN Tower" else real(mode, serial)
+    assert start(app, "air", pause="HPN Tower") is None and app.reception_post({"action": "stop"}) is None
+    assert app.reception.owed["was"] == "HPN Tower"
     assert app.set_mode("Off", "air") is None                  # a person's choice: theirs stands
+    assert app.reception.history[0]["restored"] == "left on Off (picked by a person)"
     assert app.reception.owed is None and not app.reception.owed_file.exists() and app.reception.health() is None
     app._start_mode = real
     clock.t += 60
@@ -898,6 +942,97 @@ def test_stop_is_immediate_during_the_sweep(lab, tmp_path):
     assert app.assign["air"] == "HPN Tower" and json.loads((claims.DIR / "air.json").read_text())["mode"] == "HPN Tower"
 
 
+def test_an_end_that_raises_is_ended_again_and_stop_always_works(lab):
+    """Whatever goes wrong while a test is being ended (here: the restore raises, once), it is ended again on the next
+    tick, with the status it was ending with; it never sits there with its dongle."""
+    app, clock = lab, Clock()
+    rt = running(app, clock)
+    assert start(app, "air", pause="HPN Tower") is None
+    real, calls = app.reception._restore, []
+
+    def once(t):
+        calls.append(1)
+        if len(calls) <= 2:                                    # (the end is tried twice on the spot)
+            raise RuntimeError("disk full")
+        return real(t)
+    app.reception._restore = once
+    assert app.reception_post({"action": "stop"}) is None      # Stop answers; it didn't get through
+    assert app.reception.active is not None and app.reception.probe is None and app.assign["air"] == "MRRS 770"
+    assert app.reception_state()["active"]["step"] == "stopping" and any("not ended yet: RuntimeError" in m for m in app.logs)
+    assert json.loads(app.reception.marker.read_text())["was"] == "HPN Tower"       # still written down
+    app.reception.tick()
+    h = app.reception.history[0]
+    assert (h["status"], h["why"], h["restored"]) == ("stopped", "stopped by a person", "HPN Tower restored")
+    assert app.reception.active is None and app.assign["air"] == "HPN Tower" and len(h["halves"]) == 1
+    # a test left "running" with nothing measuring it (a bug elsewhere): Stop still ends it, and so does a tick
+    for how in ("stop", "tick"):
+        assert start(app, "air", pause="HPN Tower") is None
+        app.reception.probe = rt.probe = None
+        if how == "stop":
+            assert app.reception_post({"action": "stop"}) is None
+        else:
+            app.reception.tick()
+        assert app.reception.active is None and app.assign["air"] == "HPN Tower", how
+    assert app.reception.history[0]["why"] == "the test lost its measurement"
+
+
+def test_a_side_whose_trunk_recorder_was_not_running_says_so():
+    clock = Clock()
+    p = reception.Probe(MRRS, "MRRS 770", "spare", clock)
+    feed(p, clock, 769.90625, [40] * 20, lock_lines())         # a minute of it, then it is down for the other fourteen
+    p.feed_line("SIZEUP-UNIT mrrs 4100001 call 9211")
+    p.ran(clock.t, True)
+    for _ in range(14 * 60):
+        clock.t += 1
+        p.ran(clock.t, False)
+    r = p.result()
+    assert r["cc"]["down_pct"] == 93 and r["verdict"]["grade"] == "good"
+    assert r["verdict"]["hint"].startswith("trunk-recorder wasn't running for 93% of the test: graded from the site and the grants")
+    q = reception.Probe(MRRS, "MRRS 770", "spare", clock)
+    q.ran(clock.t, False)
+    clock.t += 600
+    q.ran(clock.t, False)
+    v = q.result()["verdict"]
+    assert v["grade"] == "none" and v["hint"] == "trunk-recorder wasn't running for 100% of the test: nothing to judge."
+
+
+def test_the_service_keeps_its_claim_from_one_side_of_a_test_to_the_next(tmp_path):
+    """"MRRS 770" then "MRRS 773" on the one dongle: the supervisor's own claim is renamed, never released and never
+    "held" against itself; the county's dongle is still never taken, and it still yields to the county at once."""
+    _county, mrrs, pop, _logs, _d = service(tmp_path)
+    p = Path(trunkrecd.system_state_path("mrrs", str(tmp_path / "state" / "p25_recorder.json")))
+    p.parent.mkdir(parents=True, exist_ok=True)
+
+    def ask(index, mode, seq):
+        p.write_text(json.dumps({"on": True, "label": "MRRS", "pid": None, "seq": seq,
+                                 "sources": {str(index): {"sdr": "pd-b", "mode": mode, "name": "pd-b"}}}))
+    ask(0, "MRRS 770", 1)
+    assert mrrs.step(100.0)["state"] == "ok" and json.loads((claims.DIR / "pd-b.json").read_text())["mode"] == "MRRS 770"
+    seen = []
+    real = trunkrecd.release
+    trunkrecd.release = lambda *a, **k: (seen.append(a[0]), real(*a, **k))[1]
+    try:
+        ask(1, "MRRS 773", 2)
+        st = mrrs.step(101.0)
+    finally:
+        trunkrecd.release = real
+    assert st["state"] == "ok" and not seen and len(pop.started) == 2 and len(pop.running) == 1      # one restart, no gap
+    assert json.loads((claims.DIR / "pd-b.json").read_text())["mode"] == "MRRS 773" and mrrs.claims_held == {"pd-b": "MRRS 773"}
+    # someone else's claim under another job is still someone else's
+    (claims.DIR / "pd-a.json").write_text(json.dumps({"app": "sizeup", "pid": SERVICE_PID, "mode": "Fire/EMS 15", "since": 1.0}))
+    p.write_text(json.dumps({"on": True, "label": "MRRS", "pid": None, "seq": 3,
+                             "sources": {"0": {"sdr": "pd-a", "mode": "MRRS 770", "name": "pd-a"}}}))
+    st = mrrs.step(102.0)
+    assert st["state"] == "held" and json.loads((claims.DIR / "pd-a.json").read_text())["mode"] == "Fire/EMS 15"
+    # and the county naming this system's dongle stops it at once (#419), as before
+    ask(1, "MRRS 773", 4)
+    assert mrrs.step(103.0)["state"] == "ok"
+    from tests.test_p25_systems import ask_county
+    ask_county(tmp_path, "pd-b")
+    st = mrrs.step(104.0)
+    assert st["state"] == "held" and not pop.running and "pd-b" not in mrrs.claims_held
+
+
 # -- nothing of a test is kept as traffic ---------------------------------------------------------------------------------------
 
 
@@ -1051,20 +1186,20 @@ def test_the_station_reports_it_and_the_hub_may_ask_for_it(lab):
         _status_now, _live_wake = False, type("W", (), {"set": lambda self: None})()
     Link.app = app
     out = station.StationLink._call(Link(), {"fn": "reception_post", "args": [
-        {"action": "start", "job": "MRRS 770", "sdr": "spare"}, "admin@example.org"]})
+        {"action": "start", "job": "MRRS 770", "sdr": "spare"}, "", "0123456789ab"]})         # as the hub sends it
     assert out == {"ok": True, "result": None} and app.assign["spare"] == "MRRS 770"
-    assert app.reception.active["by"] == "admin@example.org"
+    assert app.reception.active["id"] == "0123456789ab" and "by" not in app.reception.active
     out = station.StationLink._call(Link(), {"fn": "reception_post", "args": [{"action": "start", "job": "MRRS 770", "sdr": "air"}]})
     assert out["result"] == "a reception test is already running: stop it first"
     # the hub's Stop never waits for the dongle: it answers at once, the outcome is in the report that follows
     app.reception.inline = False
-    out = station.StationLink._call(Link(), {"fn": "reception_post", "args": [{"action": "stop"}, "admin@example.org"]})
+    out = station.StationLink._call(Link(), {"fn": "reception_post", "args": [{"action": "stop"}, "", ""]})
     assert out == {"ok": True, "result": None} and app.reception_state()["active"]["step"] == "stopping"
     app.reception.tick()
     h = app.reception_state()["history"][0]
-    assert (h["status"], h["why"], h["by"], h["restored"]) == ("stopped", "stopped by admin@example.org",
-                                                               "admin@example.org", "Off again")
-    assert reception.ended_text(h) == "Reception test stopped: MRRS 770 on SDR spare · none · Off again"
+    assert (h["id"], h["status"], h["why"], h["restored"]) == ("0123456789ab", "stopped", "stopped by a person", "Off again")
+    assert "by" not in h and "by" not in json.loads(app.reception.history_file.read_text())[0]
+    assert reception.ended_text(h) == "Reception test stopped (stopped by a person): MRRS 770 on SDR spare · none · Off again"
     # the POST is an admin's (no rule of its own: admin), the reads an admin's, and the start is in the activity
     assert not any(rx.fullmatch("/api/reception") for rx, _need in WRITES)
     assert {"/api/reception", "/api/reception/sample"} <= set(ADMIN_READS)
@@ -1127,7 +1262,7 @@ RX_REPORT = {"systems": [{"name": "mrrs", "label": "MRRS", "jobs": [], "watch": 
              "history": [{"id": "aaaaaaaaaaaa", "system": "mrrs", "label": "MRRS", "sdr": "00000104", "sdr_name": "104",
                           "was": "HPN Tower", "plan": ["MRRS 770"], "minutes": 15, "started": 10.0, "ended": 910.0,
                           "status": "done", "why": "", "note": "whip on the roof", "verdict": {"grade": "marginal", "hint": "x"},
-                          "restored": "HPN Tower restored", "restored_ok": True, "by": COREY, "halves": []}]}
+                          "restored": "HPN Tower restored", "restored_ok": True, "halves": []}]}
 
 
 def test_on_the_hub_only_an_admin_sees_or_runs_a_reception_test(keys, access_hub):  # noqa: F811
@@ -1168,24 +1303,37 @@ def test_the_hub_logs_refused_attempts_and_how_each_test_ended(keys, access_hub)
                                                        "pause": "South 2"}, headers=admin)
     assert code == 400 and out["error"]
     assert [(a[0], a[1], a[3]) for a in activity(h)] == [(COREY, "refused", 0)] and "Refused: reception" in activity(h)[0][2]
+    # a start that goes through: the station is sent the test's id, never who asked; the hub keeps who under it
+    sent = []
+    h.app._switch = lambda fn, *a: sent.append((fn, a)) and None
+    body = {"action": "start", "job": "MRRS 770", "sdr": "00000104", "pause": "HPN Tower"}
+    assert req(h.url + "/api/reception", "POST", body, headers=admin)[0] == 200
+    (fn, (got, by, tid)), = sent
+    assert (fn, got, by) == ("reception_post", body, "") and reception.SAMPLE_ID.fullmatch(tid)
+    assert h.app._reception_who(tid) == COREY and COREY not in json.dumps(sent)
+    assert activity(h)[1] == (COREY, "action", "Reception test started: MRRS 770 on SDR 00000104, pausing HPN Tower", 1)
+    h.app._reception_who("aaaaaaaaaaaa", COREY)                # (the made-up report's tests below were his too)
+    h.app._reception_who("bbbbbbbbbbbb", COREY)
     # the station's report: a test that ended is a row of who started it, once, with what became of the dongle
     st = station_status()
     st["reception"] = RX_REPORT
     for _ in range(3):
         assert call(h.url + "/api/station/state", "POST", {"at": 1, "status": st})[0] == 200
-    assert activity(h)[1:] == [(COREY, "action", "Reception test done: MRRS 770 on SDR 104 · marginal · HPN Tower restored", 1)]
+    assert activity(h)[2:] == [(COREY, "action", "Reception test done: MRRS 770 on SDR 104 · marginal · HPN Tower restored", 1)]
     # ... a Stop from here answers before the dongle is back: its outcome arrives the same way, late or not restored
     late = json.loads(json.dumps(RX_REPORT))
     late["history"].insert(0, dict(late["history"][0], id="bbbbbbbbbbbb", status="stopped", restored_ok=False,
+                                   why="SDR 104 was switched in Settings > Radios",
                                    restored="HPN Tower NOT restored yet (in use by shortfinal (AM 118.575)): retrying"))
     st["reception"] = late
     assert call(h.url + "/api/station/state", "POST", {"at": 2, "status": st})[0] == 200
-    assert activity(h)[2] == (COREY, "action", "Reception test stopped: MRRS 770 on SDR 104 · marginal · HPN Tower NOT "
-                                               "restored yet (in use by shortfinal (AM 118.575)): retrying", 0)
+    assert activity(h)[3] == (COREY, "action", "Reception test stopped (SDR 104 was switched in Settings > Radios): MRRS 770 "
+                              "on SDR 104 · marginal · HPN Tower NOT restored yet (in use by shortfinal (AM 118.575)): "
+                              "retrying", 0)
     late["history"][0].update(restored="HPN Tower restored (after 3 tries)", restored_ok=True)
     for _ in range(2):
         assert call(h.url + "/api/station/state", "POST", {"at": 3, "status": st})[0] == 200
-    assert len(activity(h)) == 4 and activity(h)[3][2].endswith("HPN Tower restored (after 3 tries)") and activity(h)[3][3] == 1
+    assert len(activity(h)) == 5 and activity(h)[4][2].endswith("HPN Tower restored (after 3 tries)") and activity(h)[4][3] == 1
 
 
 def test_the_hub_alerts_when_a_paused_job_is_not_given_back(keys, access_hub):  # noqa: F811

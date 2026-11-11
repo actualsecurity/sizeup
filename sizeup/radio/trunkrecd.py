@@ -753,12 +753,18 @@ class SystemSupervisor(Supervisor):
     def _taken(self, s: dict, handed: int | None) -> dict | None:
         """Why this dongle can't be this system's now, as a claim ({app, mode}); None: free (or already ours for
         this job). The county's trunk-recorder runs under this same process: a dongle its state names, or one
-        claimed under another job (by this pid or by sizeup-station), is someone else's, never taken over."""
+        claimed under another job (by this pid or by sizeup-station), is someone else's, never taken over; only a
+        claim this supervisor itself wrote for this system (claims_held) is its own under any of its jobs."""
         county = wanted(self.county_state)
         if county["on"] and county["sdr"] == s["sdr"]:
             return {"app": APP, "mode": MODE}
         c = holder(s["sdr"], self.claims)
         if c is None:
+            return None
+        if s["sdr"] in self.claims_held and c.get("app") == APP and _pid(c) == self.pid \
+                and c.get("mode") == self.claims_held[s["sdr"]]:
+            # this system's own claim, written here for another of its jobs (#410: the next side of a reception
+            # test, "MRRS 770" then "MRRS 773" on the one dongle): kept and renamed, the dongle never free between
             return None
         ours = c.get("app") == APP and _pid(c) in (self.pid, handed)
         return None if ours and c.get("mode") == s["mode"] else c

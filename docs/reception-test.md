@@ -29,24 +29,28 @@ Start with 15 min on each side to find the control channel, then 1 h or more on 
 - A dongle another app holds (the shared claims, `docs/handoff-shortfinal-dongles.md`) is never taken. Switch it Off
   in that app first. sizeup's claim on the lent dongle is kept from the job it ran, through the test, to the job it
   gets back: there is no moment in which the other app could take it. (On the Linux station the trunk-recorder
-  service holds the claim while the test runs; when it lets go at the end there is about a second before the paused
-  job has it again.)
+  service holds the claim while the test runs and renames it from one side to the next; when it lets go at the end,
+  sizeup claims the dongle for the paused job at once, before it starts that job.)
 - The ADS-B receiver's dongle is never offered.
 - A dongle that runs a job is lent only when you confirm pausing that job by name. While the test runs the header
   says `<job> PAUSED`, and the dongle's row above says "lent to reception test · <job> paused" with its buttons locked.
 - **Switching the lent dongle** (Off, or anything) from Settings > Radios or the hub counts as Stop: the test ends and
-  the paused job comes back. The dongle is never left Off.
+  the paused job comes back. The dongle is never left Off. The answer says so ("reception test stopped: … comes back
+  on it"), and the activity log has the test's end, not a "Radio mode" row.
 - The paused job comes back when the test ends, is stopped or fails (trunk-recorder not running for 45 s), and when
-  **sizeup stops** (an update, a restart, a rollback: the test ends before sizeup exits, so the next release, an
-  older one too, finds the job already saved and nothing of the test left).
+  **sizeup stops** (an update, a restart, a rollback: the test ends the moment the stop is asked, before the 10 s the
+  requests in flight get, so the next release, an older one too, finds the job already saved and nothing of the test
+  left; the unit's `TimeoutStopSec` is 45 s for it).
 - After a **crash or a power cut** the next start ends the test: it stops the system's trunk-recorder, checks the
   claim is gone, and starts the dongle on its own job. While a test runs the dongle is saved under its own job, so
   any release starts it there.
 - If sizeup never comes back, the trunk-recorder service stops the test's system by itself 2 min after the side's
   end (`"until"` in the system's state file) and lets the dongle go.
 - A job that can't be given back (the other app got the dongle first) is **owed**: tried again every 5 s until it is
-  back. Meanwhile the panel and Settings > Health say so, and it is pushed. Picking another job for that dongle
-  yourself ends the retrying.
+  back. Meanwhile the panel and Settings > Health say so, and it is pushed. The dongle's row says "<job> NOT restored
+  yet" and only that job's button works ("restore now": tried at once). A click that is refused (the other app still
+  has the dongle) changes nothing: the job stays owed. From the API, another job for that dongle that really starts
+  ends the retrying.
 - If the paused job moved to another dongle meanwhile, the lent dongle goes Off instead.
 - A test is refused while the system already runs on a dongle for good, and the system can't be given another dongle
   while a test runs.
@@ -75,6 +79,9 @@ or expect to need the second dongle.
 
 **The thresholds are uncalibrated**: first guesses (90%, 5%, 30 messages/s, 5 errors/s), constants at the top of
 `sizeup/radio/reception.py`. Set them against a scanner on the first real runs.
+
+"trunk-recorder wasn't running for N% of the test": it was down or absent for a quarter of the side or more; the
+numbers are of the rest.
 
 "Decode rate not logged": trunk-recorder logged the rate for under half of the test (it logs every window only with
 `"controlWarnRate": -1`, which MRRS's `config.json` sets; a build that ignores it logs only the bad ones). Then the
@@ -111,6 +118,8 @@ side's verdict.
   edited afterwards.
 - The activity log has a row for each start (the dongle and the paused job), each refused attempt, and each end with
   what became of the dongle. A Stop from the hub answers at once; its outcome is the end row.
+- Who started a test is kept by the CAD of record (the hub) under the test's id. The station's files, log and report
+  name no person.
 
 ## First real run
 
@@ -122,6 +131,8 @@ Set-up:
 - From the **station's own page**, not the hub.
 - The other app (shortfinal) closed.
 - Not near an auto-update: check Settings > System that the station runs the hub's build first.
+- **Installing this release restarts the trunk-recorder service** (its supervisor changed), so Fire/EMS 15 loses
+  its control channel for a few seconds. Install when no call is active.
 
 Watch, in this order:
 
@@ -132,14 +143,23 @@ Watch, in this order:
 3. The `rtl_power` sweep: the Signal row shows "control +N dB over floor", and the station log has no "sweep … failed".
    It must exit by itself within 30 s (the test waits for it).
 4. The first decode-rate line within 45 s of Start. Later: the test fails ("trunk-recorder absent/down").
-5. After the end (or Stop): the paused job is running again within 30 s; `~/.local/state/rtl-claims/<serial>.json`
-   names that job; `sdr_modes.json` names it; `state/reception_test.json` is gone.
-6. Start again and restart `sizeup-station` mid-test: the history says "interrupted", the job is back, MRRS is off.
-7. No radio log row, no clip and no push from MRRS around the end of the test (the two minutes after it too).
-8. Voice SNR in the Signal row: only when trunk-recorder writes a non-zero `signal` / `noise` in the call JSON. If it
-   stays "n/a" with calls captured, that build doesn't measure it.
-9. From the hub: Stop answers at once ("Stopping …"), no error, and the end shows up in the history and the activity log.
-10. The captured-calls list is empty once the Sample minutes have passed after the last call.
+5. While it runs: the dongle's row above says "lent to reception test · <job> paused" and its buttons are locked;
+   the header says `<job> PAUSED`.
+6. While it runs, and only then: `"until"` is in `/var/lib/sizeup/state/p25_recorder.mrrs.json` (the side's end + 2
+   min). After the end the file says `"on": false` and has no `"until"`.
+7. After the end (or Stop): the paused job is running again within 30 s; `~/.local/state/rtl-claims/<serial>.json`
+   names that job; `sdr_modes.json` names it; `state/reception_test.json` is gone; `captures/p25-mrrs` is empty.
+8. Start again and restart `sizeup-station` mid-test (`systemctl restart`): the job is restored BEFORE the new
+   process is up (the old one's last log lines say "reception test …: interrupted … restored"), the history says
+   "interrupted", MRRS is off.
+9. A both-sides test: at the side change the MRRS row goes straight to "ok" on the other side and the claim file is
+   renamed to `MRRS 773`, never missing. A brief "held" there (the service refusing its own claim for one step) is a
+   bug to report.
+10. No radio log row, no clip and no push from MRRS around the end of the test (the two minutes after it too).
+11. Voice SNR in the Signal row: only when trunk-recorder writes a non-zero `signal` / `noise` in the call JSON. If it
+    stays "n/a" with calls captured, that build doesn't measure it.
+12. From the hub: Stop answers at once ("Stopping …"), no error, and the end shows up in the history and the activity log.
+13. The captured-calls list is empty once the Sample minutes have passed after the last call.
 
 ## API
 

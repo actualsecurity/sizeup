@@ -80,6 +80,7 @@ GOOD_RATE = 30.0                      # ... at this mean rate or more (messages 
 NONE_PCT = 5.0                        # under this: none
 VOICE_ERR_BAD = 5.0                   # decode errors per second of voice, over this: marginal whatever the control channel
 SHORT_S = 120.0                       # a side measured for less: said in the hint
+DOWN_PCT = 25                         # trunk-recorder not running this share of a side: said, instead of "not logged"
 QUIET_S = 3600.0                      # no grant on a watched talkgroup this long into a good side: the LTE caveat
 SWEEP_BIN_HZ = 6250
 SWEEP_TIMEOUT_S = 30.0
@@ -154,6 +155,7 @@ class Probe:
         self._sig: list[float] = []
         self._snr: list[float] = []
         self.first_decode: float | None = None
+        self.down_s, self._ran_at = 0.0, None      # how long its trunk-recorder wasn't running (ran(), each tick)
         self._lock = threading.Lock()
 
     def _tg(self, tg: int) -> dict:
@@ -253,6 +255,13 @@ class Probe:
         return {"tg": tg, "name": (self.system.talkgroups.get(tg) or {}).get("name") or f"TG {tg}",
                 "at": round(float(call.start), 1), "seconds": round(secs, 1), "errors": errs}
 
+    def ran(self, now: float, ok: bool) -> None:
+        """Each tick of the test: whether the system's trunk-recorder runs now."""
+        with self._lock:
+            if self._ran_at is not None and not ok:
+                self.down_s += max(0.0, now - self._ran_at)
+            self._ran_at = now
+
     def seconds(self) -> float:
         return max(0.0, (self.ended or self.clock()) - self.started)
 
@@ -310,6 +319,7 @@ class Probe:
                    "locked_pct": round(100.0 * self.locked / max(expected, self.windows), 1) if self.windows else 0.0,
                    "windows": self.windows, "expected": expected,
                    "logged_pct": round(min(100.0, 100.0 * self.windows / expected), 1) if expected else None,
+                   "down_pct": round(min(100.0, 100.0 * self.down_s / secs)) if secs > 0 else 0,
                    "min": self.rate_min, "max": self.rate_max, "retunes": self.retunes,
                    "dropout_s": round(self.dropout_s), "series": series, "series_step_s": step,
                    "lock_s": round(self.first_decode - self.started, 1) if self.first_decode else None,
@@ -354,10 +364,15 @@ def verdict(r: dict, system=None) -> dict:
     all_grants = sum(t["grants"] for t in r["talkgroups"]) + r["encrypted_grants"] + r["unknown_grants"]
     logged = cc["windows"] > 0 and cc["windows"] >= 0.5 * cc["expected"]
     hints: list[str] = []
+    down = cc.get("down_pct") or 0
     if not logged and (site["seen"] or all_grants):
         grade = "good" if site["match"] is True and all_grants else "marginal"
-        hints.append("Decode rate not logged" + (f" ({cc['logged_pct']:g}% of the time)" if cc["windows"] else "")
+        hints.append((f"trunk-recorder wasn't running for {down}% of the test" if down >= DOWN_PCT else
+                      "Decode rate not logged" + (f" ({cc['logged_pct']:g}% of the time)" if cc["windows"] else ""))
                      + ": graded from the site and the grants seen")
+    elif not logged and down >= DOWN_PCT:
+        grade = "none"
+        hints.append(f"trunk-recorder wasn't running for {down}% of the test: nothing to judge")
     elif not logged:
         grade = "none"
         hints.append(f"No control channel on the {side} side (no decode rate, no site, no grant): try the other side, "
@@ -403,9 +418,10 @@ def verdict(r: dict, system=None) -> dict:
 def ended_text(t: dict) -> str:
     """A finished test in one line, for the activity log: how it ended, the verdict, what became of the dongle."""
     v = t.get("verdict") or {}
-    return (f"Reception test {t.get('status') or 'ended'}: {' + '.join(map(str, t.get('plan') or []))} on SDR "
-            f"{t.get('sdr_name') or t.get('sdr')}" + (f" · {v['grade']}" if v.get("grade") else "")
-            + f" · {t.get('restored') or 'NOT restored'}")[:300]
+    return (f"Reception test {t.get('status') or 'ended'}"
+            + (f" ({t['why']})" if t.get("why") and t.get("status") != "done" else "")
+            + f": {' + '.join(map(str, t.get('plan') or []))} on SDR {t.get('sdr_name') or t.get('sdr')}"
+            + (f" · {v['grade']}" if v.get("grade") else "") + f" · {t.get('restored') or 'NOT restored'}")[:300]
 
 
 def restored_ok(t: dict) -> bool:
@@ -595,14 +611,14 @@ class Tests:
         t = self.active
         if t is None:
             return
-        doc = dict(t)
+        doc = {k: v for k, v in t.items() if k != "ending"}
         if self.probe is not None:
             doc["running"] = self.probe.result()
         self._write(self.marker, doc)
         self._saved = self.clock()
 
     def _to_history(self, t: dict) -> None:
-        t = {k: v for k, v in t.items() if k not in ("running", "cancel", "sweeps")}
+        t = {k: v for k, v in t.items() if k not in ("running", "cancel", "sweeps", "ending", "by")}
         self.history.insert(0, t)
         del self.history[HISTORY_MAX:]
         self._write(self.history_file, self.history)
@@ -680,24 +696,45 @@ class Tests:
         return None
 
     def person_switch(self, mode: str, sdr: str) -> str | None:
-        """App.set_mode: a person (or the hub) switches a dongle. None: nothing of a test's. "": it was the lent
-        dongle: the test is stopped and its paused job comes back (whatever was picked; never left Off). Text: refused."""
+        """App.set_mode, before anything is switched: a person (or the hub) picks `mode` for a dongle. None: nothing
+        of a test's, go on. Text: the answer instead (nothing else is switched):
+          - the lent dongle: the test is stopped and its paused job comes back, whatever was picked (never left Off);
+          - another dongle, a job of the system under test: refused;
+          - a dongle still owed its job, that job picked ("restore now"): tried at once; it stays owed if it can't be.
+        (Any other pick for an owed dongle goes on; the debt is dropped only once that switch has worked: switched().)"""
         t = self.active
         if t is not None:
             if sdr == t["sdr"]:
                 self.stop(f"SDR {t['sdr_name']} was switched in Settings > Radios")
-                return ""
+                back = f"{t['was']} comes back on it" if t["was"] != OFF else "it goes back to Off"
+                return f"reception test stopped: SDR {t['sdr_name']} was lent to it; {back} (not switched to {mode})"
             rt = self.app.systems.get(t["system"])
             if rt is not None and mode in rt.system.jobs:
                 return f"a reception test is running on {t['label']}: stop it first"
         o = self.owed
-        if o is not None and sdr == o["sdr"]:
-            self.owed = None                       # their choice stands (no lock here: called under the mode lock)
-            self._unlink(self.owed_file)
-            self.log(f"reception test {o.get('id')}: SDR {o.get('sdr_name')} given {mode} by a person: {o['was']} "
-                     "no longer owed to it")
-            self.app._save_modes()
+        if o is not None and sdr == o["sdr"] and mode == o["was"]:
+            with self._lock:
+                if self.owed is o:
+                    o.pop("quiet", None)
+                    self._retry_owed(self.clock(), now_please=True)
+                if self.owed is o:
+                    return (f"SDR {o.get('sdr_name') or sdr}: {o['was']} not restored yet ({o.get('err') or 'not started'}); "
+                            "still owed to it, retrying")
+            return ""
         return None
+
+    def switched(self, sdr: str, mode: str) -> None:
+        """App.set_mode, after a switch that worked: a dongle still owed a job has another one now by a person's
+        choice (Off too), so the debt is dropped. (No lock: the ADS-B path calls set_mode under the mode lock.)"""
+        o = self.owed
+        if o is None or sdr != o["sdr"] or mode == o["was"]:
+            return
+        self.owed = None
+        self._unlink(self.owed_file)
+        self.log(f"reception test {o.get('id')}: SDR {o.get('sdr_name')} given {mode} by a person: {o['was']} no longer "
+                 "owed to it")
+        self._owed_note(o, True, f"left on {mode} (picked by a person)")
+        self.app._save_modes()
 
     # -- what a page asks ---------------------------------------------------------------------------------------------
 
@@ -713,7 +750,7 @@ class Tests:
             run = {k: t.get(k) for k in ("id", "system", "label", "sdr", "sdr_name", "was", "plan", "phase", "minutes",
                                          "started", "phase_started", "phase_until", "keep_min", "note")}
             run["halves"] = list(t.get("halves") or [])
-            run["step"] = "stopping" if t.get("cancel") else t.get("step") or "running"
+            run["step"] = "stopping" if t.get("cancel") or t.get("ending") else t.get("step") or "running"
             run["now"] = round(now, 1)
             run["running"] = p.result() if p is not None and t.get("step") == "running" else None
         alert = self.health(now)
@@ -730,7 +767,7 @@ class Tests:
     @staticmethod
     def _brief(h: dict) -> dict:
         out = {k: h.get(k) for k in ("id", "system", "label", "sdr", "sdr_name", "was", "plan", "minutes", "started",
-                                     "ended", "status", "why", "note", "verdict", "restored", "restored_ok", "by")}
+                                     "ended", "status", "why", "note", "verdict", "restored", "restored_ok")}
         out["halves"] = [summary(x) for x in h.get("halves") or [] if isinstance(x, dict)]
         return out
 
@@ -753,18 +790,19 @@ class Tests:
                                 "should have ended"}
         return None
 
-    def post(self, body: dict, by: str = "") -> str | None:
-        """POST /api/reception: {"action": "start" | "stop" | "note", ...}. None, or why not. by: who asked."""
+    def post(self, body: dict, tid: str = "") -> str | None:
+        """POST /api/reception: {"action": "start" | "stop" | "note", ...}. None, or why not. tid: the id a started
+        test gets (the app's or the hub's own: who asked is kept there under it, never here)."""
         if not isinstance(body, dict):
             return "a JSON object"
         action = body.get("action")
         if action == "start":
-            err = self.start(body, by)
+            err = self.start(body, tid)
             if err:
-                self.log(f"reception test refused ({by or 'the station page'}): {err}")
+                self.log(f"reception test refused: {err}")
             return err
         if action == "stop":
-            return self.stop(f"stopped by {by}" if by else "stopped by a person")
+            return self.stop()
         if action == "note":
             return self.note(str(body.get("id") or ""), body.get("note"))
         return "action: start, stop or note"
@@ -783,7 +821,7 @@ class Tests:
                     return None
         return "no such test"
 
-    def start(self, o: dict, by: str = "") -> str | None:
+    def start(self, o: dict, tid: str = "") -> str | None:
         app = self.app
         with self._lock:
             if self.active is not None:
@@ -835,16 +873,16 @@ class Tests:
                 return (f"SDR {name} runs {was}: it is paused for the test and comes back after. Confirm with "
                         f"\"pause\": \"{was}\"")
             now = self.clock()
-            t = {"id": uuid.uuid4().hex[:12], "system": rt.system.name, "label": label, "sdr": sdr, "sdr_name": name,
+            t = {"id": tid if SAMPLE_ID.fullmatch(str(tid)) else uuid.uuid4().hex[:12], "system": rt.system.name, "label": label, "sdr": sdr, "sdr_name": name,
                  "was": was, "was_by": app.set_by.get(sdr), "plan": plan, "phase": 0, "minutes": minutes,
                  "keep_min": keep, "note": str(o.get("note") or "").strip()[:NOTE_MAX], "started": round(now, 1),
                  "phase_started": None, "phase_until": None, "halves": [], "status": "running", "step": "starting",
-                 "step_at": now, "taken": False, "by": str(by or "")[:120]}
+                 "step_at": now, "taken": False}
             self.active = t
             self._save_active()                    # the job to give back is on disk before anything is switched
             self.log(f"reception test {t['id']}: {label} {' then '.join(plan)} on SDR {name}, "
                      + (f"{minutes} min a side" if minutes else "until stopped")
-                     + (f"; {was} paused" if was != OFF else "") + (f"; asked by {by}" if by else ""))
+                     + (f"; {was} paused" if was != OFF else ""))
         self._spawn(self._begin)
         return None
 
@@ -862,10 +900,14 @@ class Tests:
             except Exception:  # noqa: BLE001 - already gone
                 pass
         if self.inline:
-            with self._lock:
-                if self.active is t and t.get("step") == "running":
-                    self._finish("stopped", t["cancel"])
+            self._guarded(self._stop_now)
         return None
+
+    def _stop_now(self) -> None:
+        with self._lock:
+            t = self.active
+            if t is not None and t.get("cancel") and t.get("step") != "starting":
+                self._finish("stopped", t["cancel"])
 
     # -- running it -----------------------------------------------------------------------------------------------------
 
@@ -883,7 +925,7 @@ class Tests:
                 with self._lock:
                     if self.active is not None:
                         self._finish("failed", f"{type(e).__name__}: {e}")
-            except Exception as e2:  # noqa: BLE001 - nor does its thread ever die: the next tick tries again
+            except Exception as e2:  # noqa: BLE001 - nor does its thread ever die; tick() ends it again ("ending")
                 self.log(f"reception test: not ended yet: {type(e2).__name__}: {e2}")
 
     def _begin(self) -> None:
@@ -1012,7 +1054,9 @@ class Tests:
                     claims.release(sdr)
                     app.assign[sdr] = OFF
                     return None
-                if cur != OFF:
+                # claimed for the new job at once, before the pause that lets the dongle settle: on the Linux
+                # station the trunk-recorder service has just let its own claim go
+                if cur != OFF and claims.claim(sdr, new):
                     time.sleep(appmod.SWITCH_PAUSE_S)
                 if not app._start_mode(new, sdr):
                     c = claims.other(sdr) or {}
@@ -1042,6 +1086,8 @@ class Tests:
         t = self.active
         if t is None:
             return
+        t.setdefault("ending", [status, why])      # if anything below raises, tick() comes back here until it is done
+        status, why = t["ending"]
         self._end_side()
         ok, text = self._restore(t)
         now = self.clock()
@@ -1073,6 +1119,9 @@ class Tests:
     def _restore(self, t: dict) -> tuple[bool, str]:
         """The dongle back on the job it had: (done, what was done in words). Not done: owed, tried again by tick()."""
         app, sdr, was = self.app, t["sdr"], t["was"]
+        rt = app.systems.get(t["system"])
+        if rt is not None:
+            rt.recorder.until = None               # (before its trunk-recorder is asked anything else)
         if not t.get("taken"):
             return True, (f"{was} never left it" if was != OFF else "never taken")
         with app._mode_lock:
@@ -1092,11 +1141,11 @@ class Tests:
             return False, f"{was} NOT restored yet ({err}): retrying"
         return True, (f"{was} now on another dongle: Off" if elsewhere else f"{was} restored" if was != OFF else "Off again")
 
-    def _retry_owed(self, now: float) -> None:
+    def _retry_owed(self, now: float, now_please: bool = False) -> None:
         """A paused job that couldn't be given back: tried again until it is back (or a person gave the dongle
-        something else, or the job runs on another dongle)."""
+        something else, or the job runs on another dongle). now_please: a person asked ("restore now")."""
         o = self.owed
-        if o is None or now - float(o.get("tried") or 0) < OWED_RETRY_S:
+        if o is None or (not now_please and now - float(o.get("tried") or 0) < OWED_RETRY_S):
             return
         o["tried"] = now
         app, sdr, was = self.app, o["sdr"], o["was"]
@@ -1203,17 +1252,22 @@ class Tests:
             t = self.active
             if t is None:
                 return
-            if t.get("step") != "running" or self.probe is None:
-                if t.get("step") == "starting" and now - float(t.get("step_at") or now) > START_STUCK_S:
+            if t.get("ending"):                    # an end that didn't get through (it raised): again, until it does
+                return self._finish(*t["ending"])
+            if t.get("step") == "starting":
+                if now - float(t.get("step_at") or now) > START_STUCK_S:
                     self._finish("failed", "the start never finished")
                 return
-            if t.get("cancel"):
+            if t.get("cancel"):                    # Stop always works, whatever state the test is in
                 return self._finish("stopped", t["cancel"])
+            if self.probe is None:
+                return self._finish("failed", "the test lost its measurement")
             app = self.app
             rt = app.systems[t["system"]]
             if app.assign.get(t["sdr"]) != t["plan"][t["phase"]]:
                 return self._finish("failed", f"SDR {t['sdr_name']} lost the test's job")
             state = rt.recorder.status().get("state")
+            self.probe.ran(now, state == "ok")
             if state == "ok":
                 self._down_since = None
             else:

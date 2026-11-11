@@ -1123,10 +1123,10 @@ class HubApp(App):
             return self._switch("set_mode", mode, sdr, "person", True)
         return self._switch("set_mode", mode, sdr)
 
-    def reception_post(self, body: dict, by: str = "") -> str | None:
-        """Settings > Radios here: a reception test starts, stops or is annotated on the station (#410). by: who asked,
-        kept with the test so its end is in their activity (reception_seen)."""
-        return self._switch("reception_post", body, str(by or ""))
+    def _reception_send(self, body: dict, tid: str) -> str | None:
+        """Settings > Radios here: a reception test starts, stops or is annotated on the station (#410). The station
+        is sent the test's id only: who asked stays here (App.reception_post), for the row when it ends."""
+        return self._switch("reception_post", body, "", tid)
 
     def reception_state(self) -> dict | None:
         """The station's reception tests as it last reported them (admins only: server.py); None while it is away."""
@@ -1151,8 +1151,9 @@ class HubApp(App):
             if not key or key in done or not h.get("ended"):
                 continue
             new.append(key)
-            if h.get("by"):
-                self.cad.activity.record(str(h["by"]), "action", "reception test", reception.ended_text(h), "",
+            by = self._reception_who(str(h.get("id") or ""))
+            if by:
+                self.cad.activity.record(by, "action", "reception test", reception.ended_text(h), "",
                                          reception.restored_ok(h))
         if new:
             keep = [f"{h.get('id')}:{h.get('restored')}" for h in rows if isinstance(h, dict)]
