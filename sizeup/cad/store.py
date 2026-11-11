@@ -396,13 +396,38 @@ def event_number(year: int, n: int) -> str:
     return f"{year % 100:02d}-{n:06d}"
 
 
+WRITES = ("INSERT", "UPDATE", "DELETE", "REPLACE")
+
+
+class Db(sqlite3.Connection):
+    """The store's connection. A write that fails is offered to `guard` (set by whoever hangs triggers on the tables,
+    the Radio page's change log: sizeup/cad/comms.py): guard(db, error) -> True when it found its own triggers at
+    fault and took them off; the same statement is then run once more. A side table must never cost a fire row."""
+    guard = None
+
+    def _guarded(self, run, sql, args):
+        try:
+            return run(sql, *args)
+        except sqlite3.Error as e:
+            g = self.guard
+            if g is None or not str(sql).lstrip().upper().startswith(WRITES) or not g(self, e):
+                raise
+            return run(sql, *args)
+
+    def execute(self, sql, *args):
+        return self._guarded(super().execute, sql, args)
+
+    def executemany(self, sql, *args):
+        return self._guarded(super().executemany, sql, args)
+
+
 class Store:
     def __init__(self, path: str | Path = ":memory:", clock=time.time, lists: Lists | None = None):
         self.path, self.clock = str(path), clock
         self.lists = lists or lists_mod.load()
         if self.path != ":memory:":
             Path(self.path).parent.mkdir(parents=True, exist_ok=True)
-        self.db = sqlite3.connect(self.path, check_same_thread=False, isolation_level=None)
+        self.db = sqlite3.connect(self.path, check_same_thread=False, isolation_level=None, factory=Db)
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA foreign_keys = ON")
         if self.path != ":memory:":
@@ -508,12 +533,11 @@ class Store:
                 self.db.execute(f"ALTER TABLE radio_traffic ADD COLUMN {col} {kind}")
         if tcols:
             self.db.execute("CREATE INDEX IF NOT EXISTS radio_traffic_source_start ON radio_traffic(source, start)")
-            # The Radio page's views (#415), an index walk each: a service's, a system's, a department's, the scene-safety rows and the
-            # emergencies (GET /api/cad/comms ?view= ?service= ?system= ?dept= ?safety=, .../comms/sources), 2026-11-10.
+            # The Radio page's views (#415), an index walk each: a service's, a system's, a department's and the scene-safety
+            # rows (GET /api/cad/comms ?view= ?service= ?system= ?dept= ?safety=), 2026-11-10.
             self.db.execute("CREATE INDEX IF NOT EXISTS radio_traffic_service_start ON radio_traffic(service, start)")
             self.db.execute("CREATE INDEX IF NOT EXISTS radio_traffic_system_start ON radio_traffic(system, start)")
             self.db.execute("CREATE INDEX IF NOT EXISTS radio_traffic_dept_start ON radio_traffic(dept, start) WHERE dept != ''")
-            self.db.execute("CREATE INDEX IF NOT EXISTS radio_traffic_emergency ON radio_traffic(start) WHERE emergency = 1")
             self.db.execute("CREATE INDEX IF NOT EXISTS radio_traffic_safety ON radio_traffic(start) "
                             "WHERE safety != '' AND safety != 'dismissed'")
         if tcols and self.db.execute("SELECT 1 FROM radio_traffic WHERE source = '' LIMIT 1").fetchone():

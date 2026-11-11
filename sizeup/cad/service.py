@@ -203,6 +203,7 @@ class Cad:
             log(f"CAD: seeded {n} radio IDs ({len(self.radios.plan['conflicts'])} conflicts left unmapped)")
         self.comms = Comms(self.store, s.tactical, s.incident_talkgroups, clock=clock, paging=s.paging,
                            airport_tgs=s.airport_talkgroups)
+        self.comms.log = self.log
         self.comms.prune()
         self._comms_cache: dict = {}       # GET /api/cad/comms answers by (filters, revs), COMMS_CACHE_S (#284)
         self._sources_cache: dict = {}     # GET /api/cad/comms/sources: {may see context: (rev, the tree)}
@@ -1409,7 +1410,7 @@ class Cad:
             except ValueError:
                 raise CadError(f"{k}: unix seconds") from None
         rev = one("rev")
-        talking = self.live()
+        talking = self._talking()
         now_rev = f"{self.comms.rev}.{self.store.rev}"
         if rev and rev == now_rev:
             return {"unchanged": True, "rev": rev, "talking": talking}
@@ -1450,6 +1451,18 @@ class Cad:
                           for r in self.store.q("SELECT DISTINCT i.id, i.number, i.type, i.address FROM radio_links l "
                                                 "JOIN incidents i ON i.id = l.incident_id ORDER BY i.id DESC LIMIT 100")]}
         return {**self._comms_keep(key, now_rev, out), "talking": talking}
+
+    def _talking(self) -> list[dict]:
+        """Who is talking now, as a reader of the radio log is told: never a talker on another P25 system for a reader
+        who may not see its traffic (#419's gate). (Only the county's and the analog channels' feed this today.)"""
+        live = self.live()
+        if self.comms._sees_context():
+            return live
+        theirs = sourcekeys.context_talkgroups()
+        return [e for e in live if not (
+            sourcekeys.is_context({"system": e.get("p25_system") or ""})
+            or (sourcekeys.parse(str(e.get("source") or "")) or (sourcekeys.COUNTY, 0))[0] != sourcekeys.COUNTY
+            or (e.get("tg") is not None and not e.get("p25_system") and int(e["tg"]) in theirs))]
 
     def _comms_keep(self, key, now_rev: str, out: dict) -> dict:
         kept = {k: v for k, v in self._comms_cache.items() if k[0] == now_rev}     # an older rev's: never asked again
@@ -1538,7 +1551,7 @@ class Cad:
         minute = int(now // 60)
         rev = f"{self.comms.rev}.{self.store.rev}.{minute}.{int(bool(context))}"
         live = set()
-        for e in self.live():
+        for e in self._talking():
             if e.get("ended"):
                 continue
             if e.get("source"):
