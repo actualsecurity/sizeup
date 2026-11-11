@@ -1099,10 +1099,22 @@ def _with_context_traffic(app):
     return iid, (FIRE_ID, PD_ID)
 
 
+# Needles that can't turn up by chance: each has letters in it, or (the radio ID) is only taken as a whole number
+# with no digit or point beside it, so a clock value such as 1794100777.25 is never a hit.
+LEAK_WORDS = (SECRET_TEXT, "zebra quartz", SECRET_TALKER, PD_ID, "770181250.1-call_5")
+LEAK_RADIO = re.compile(rf"(?<![\d.]){SECRET_RADIO}(?![\d.])")
+
+
 def _leaks(body) -> list[str]:
     """What of the MRRS transmission is in this response: its words, its talker, its radio ID, its id."""
     text = body.decode("utf-8", "replace") if isinstance(body, bytes) else body if isinstance(body, str) else json.dumps(body)
-    return [x for x in (SECRET_TEXT, "zebra quartz", SECRET_TALKER, SECRET_RADIO, PD_ID, "770181250.1-call_5") if x in text]
+    return [x for x in LEAK_WORDS if x in text] + ([SECRET_RADIO] if LEAK_RADIO.search(text) else [])
+
+
+def test_the_leak_check_takes_no_clock_value_for_a_radio_id():
+    assert _leaks({"time": 1794100777.25, "at": 17941007770, "x": 0.4100777}) == []
+    assert _leaks({"radio_id": SECRET_RADIO}) == [SECRET_RADIO] and _leaks(f"src {SECRET_RADIO}, tg") == [SECRET_RADIO]
+    assert _leaks(b"... zebra quartz ...") == ["zebra quartz"]
 
 
 def _post(url, body):
@@ -1260,11 +1272,20 @@ def test_unsigned_sweep_on_a_real_station_and_a_real_hub_without_access(tmp_path
         hiid = hub.app.cad.create({"type": "STRU", "address": "12 Invented Ave", "operator": "op"})["id"]
         assert hub.app.cad.comms.link(pd, hiid, "op").get("error") is None
         assert hub.app.has_clip(pd)
+        # the station has told the hub what it would have to hide: an unknown talkgroup, an encrypted key-up, a count
+        def told() -> bool:
+            sysrows = (hub.app.hub.status or {}).get("p25_systems") or []
+            tg = {r.get("source"): r for r in hub.app.hub.talkgroups}
+            return bool(sysrows and sysrows[0].get("unknown") and sysrows[0].get("encrypted")
+                        and tg.get("p25:mrrs:9211", {}).get("count") and tg.get("p25:mrrs:9213", {}).get("count"))
+        assert wait(told, 45)
         _sweep(hub.url, hiid, hub.app)                                           # the hub with no Access
-        hst = hub.app.state()
-        assert all(not x["unknown"] and not x["encrypted"] for x in hst["p25_systems"]) and hst["p25_systems"]
-        assert all(r["count"] == 0 and r["last"] is None for r in hst["talkgroups"] if r.get("system") == "mrrs")
-        assert not _leaks(hst) and any(t["id"] == fire for t in hst["loose_traffic"])
+        for hst in (hub.app.state(), _get(hub.url + "/api/state")[1]):           # built now, and as served
+            assert hst["p25_systems"] and all(x["unknown"] == [] and x["encrypted"] == [] for x in hst["p25_systems"])
+            ctx = [r for r in hst["talkgroups"] if r.get("system") == "mrrs"]
+            assert ctx and all(r["count"] == 0 and r["last"] is None and r["dropped"] == 0 for r in ctx)
+            assert next(r for r in ctx if r["tg"] == 9211)["tier"] == "alert"     # its name and tier stay
+            assert not _leaks(hst) and any(t["id"] == fire for t in hst["loose_traffic"])
         _sweep(local_url, iid, st)                                               # the station's own page
         assert [t["id"] for t in st.state()["loose_traffic"]] == [fire]
     finally:
