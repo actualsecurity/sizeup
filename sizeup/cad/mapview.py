@@ -65,6 +65,7 @@ taken into account too, if within reasonable time before them ending up back in 
 
 from __future__ import annotations
 
+import functools
 import json
 from pathlib import Path
 
@@ -93,10 +94,27 @@ ICONS = ("engine", "ladder", "tower", "rescue", "suv", "other")
 ICON_OF_KIND = {"engine": "engine", "ladder": "ladder", "tower": "tower", "rescue": "rescue", "chief": "suv", "utility": "suv"}
 
 
-def is_placeholder(unit: dict) -> bool:
-    """A department placeholder, not apparatus (DPT239, DPT266 ...: from the county feed): never on the maps, in a
-    firehouse's count or rig list, never followed, no icon (#384, the user's rule)."""
-    return str(unit.get("name") or unit.get("unit") or "").strip().upper().startswith("DPT")
+@functools.lru_cache(maxsize=1)
+def _default_lists():
+    """data/cad_lists.json, read once (is_placeholder without the CAD's own lists); None if it can't be read."""
+    try:
+        from sizeup.cad.lists import load
+        return load()
+    except Exception:  # noqa: BLE001 - the pattern below then
+        return None
+
+
+def is_placeholder(unit, lists=None) -> bool:
+    """A department placeholder, not apparatus (DPT239, DPT266 ...: from the county feed): never on the maps, never
+    located (a placeholder set "On location" by hand too), in a firehouse's count or rig list, never followed, no icon
+    (#384, the user's rule). unit: a unit dict ({name} or a marker's {unit}) or its code; lists: the CAD's Lists (else
+    data/cad_lists.json's). Lists.placeholder (data/cad_lists.json "unit_placeholders") is the one test where it exists.
+    TODO: drop the DPT* fallback once Lists.placeholder is on main."""
+    code = unit if isinstance(unit, str) else str(unit.get("name") or unit.get("unit") or "")
+    lists = lists if lists is not None else _default_lists()
+    if lists is not None and hasattr(lists, "placeholder"):
+        return bool(lists.placeholder(code))
+    return code.strip().upper().startswith("DPT")
 
 
 def icon_of(unit: dict) -> str:
@@ -247,8 +265,8 @@ def _ll(x: dict | None) -> list[float] | None:
 
 def locate(unit: dict, role: str, station: dict | None = None, incident: dict | None = None,
            position: dict | None = None, now: float = 0.0, clear: dict | None = None,
-           params: eta.Params | None = None) -> dict | None:
-    """Where one rig is now, estimated (the module doc's table).
+           params: eta.Params | None = None, lists=None) -> dict | None:
+    """Where one rig is now, estimated (the module doc's table); a department placeholder (is_placeholder): None.
 
     unit:     {name, status?, assigned_at? (when it was put on its open call)}
     role, station, incident, position, now: as for place()
@@ -258,6 +276,8 @@ def locate(unit: dict, role: str, station: dict | None = None, incident: dict | 
     Returns None (unknown) or {where: position|incident|returning|near|station, ll: [lon, lat],
     on_road (no turnout from here), label ("from Washington Park", "returning from 26-000004"),
     station (its name or ''), home ([lon, lat] or None), and for a return: call_ll, number, until}."""
+    if is_placeholder(unit, lists):
+        return None                                  # a department placeholder: nowhere, whatever its status (#384)
     p = params or eta.Params()
     home = list(station["ll"]) if station else None
     base = {"station": station["name"] if station else "", "home": home}
@@ -306,8 +326,8 @@ def _returning(unit: dict, role: str, incident: dict | None, clear: dict | None,
 
 def place(unit: dict, role: str, station: dict | None = None, incident: dict | None = None,
           position: dict | None = None, now: float = 0.0, fire: bool | None = None,
-          clear: dict | None = None, params: eta.Params | None = None) -> dict | None:
-    """Where one unit goes on the map and how it looks.
+          clear: dict | None = None, params: eta.Params | None = None, lists=None) -> dict | None:
+    """Where one unit goes on the map and how it looks (a department placeholder: never, is_placeholder).
 
     unit:     {name, id?, kind?, status?, assigned_at?}
     role:     its status's role: free | oos | dispatched | enroute | onscene | '' (committed)
@@ -321,7 +341,7 @@ def place(unit: dict, role: str, station: dict | None = None, incident: dict | N
     place: station|incident|position|returning, group, lon, lat, ring: 0 (inner) | 1 (outer, not there yet), incident_id, incident_number,
     line_to: [lon, lat] | None, station, home_line (the line is to its station: thin)}; a "position"
     one also has its fix's at, age (s), stale, and heading / speed / source when the fix has them."""
-    if is_placeholder(unit):
+    if is_placeholder(unit, lists):
         return None                                  # a department placeholder (DPT239): not apparatus, never drawn
     fire = is_fire(unit) if fire is None else fire
     look = look_of(role)
@@ -334,7 +354,7 @@ def place(unit: dict, role: str, station: dict | None = None, incident: dict | N
             "incident_number": (incident or {}).get("number") or "",
             "line_to": None, "station": station["name"] if station else "", "home_line": False}
     going = incident is not None and role != "onscene" and inc_ll is not None   # a line to where it's going
-    loc = locate(unit, role, station, incident, position, now, clear, params)
+    loc = locate(unit, role, station, incident, position, now, clear, params, lists)
     if loc and loc["where"] == "position":
         fix = fresh_position(position, now)
         extra = {k: fix[k] for k in ("heading", "speed", "source") if k in fix}
@@ -357,7 +377,8 @@ def place(unit: dict, role: str, station: dict | None = None, incident: dict | N
 
 def map_slice(units: list[dict], incidents: list[dict], role, firehouses: list[dict],
               positions: dict | None = None, now: float = 0.0, joint=lambda code: "",
-              clears: dict | None = None, params: eta.Params | None = None, display: dict | None = None) -> dict:
+              clears: dict | None = None, params: eta.Params | None = None, display: dict | None = None,
+              lists=None) -> dict:
     """state["map"]: {stations, markers, unset, incidents, avl, display}. units: Store.units(); incidents: the
     state's; role(status) -> role; joint(code) -> 'RB' tag for a joint-response unit; clears: unit id ->
     its latest cleared call (Store.recent_clears); params: the ETA settings; display: the map display zooms
@@ -367,11 +388,12 @@ def map_slice(units: list[dict], incidents: list[dict], role, firehouses: list[d
     open_incs = {i["id"]: i for i in incidents if i["status"] in ("queued", "pending", "active")}
     markers, unset = [], []
     for u in units:
-        if not (u.get("board") or u.get("incident_id")) or is_placeholder(u):
+        if not (u.get("board") or u.get("incident_id")) or is_placeholder(u, lists):
             continue                                 # (a department placeholder: never drawn nor listed, #384)
         inc = open_incs.get(u.get("incident_id"))
         st = by_name.get(u.get("station") or "")
-        m = place(u, role(u["status"]), st, inc, positions.get(u["name"]), now, clear=clears.get(u["id"]), params=params)
+        m = place(u, role(u["status"]), st, inc, positions.get(u["name"]), now, clear=clears.get(u["id"]), params=params,
+                  lists=lists)
         if m is None:
             if is_fire(u) and st is None:
                 unset.append({"id": u["id"], "unit": u["name"], "station": u.get("station") or "",
@@ -399,13 +421,14 @@ def map_slice(units: list[dict], incidents: list[dict], role, firehouses: list[d
 
 
 def locations(units: list[dict], incidents: list[dict], role, firehouses: list[dict], positions: dict | None = None,
-              now: float = 0.0, clears: dict | None = None, params: eta.Params | None = None) -> dict[str, dict | None]:
-    """unit code -> locate() for every unit (the recommendation's "where is it now")."""
+              now: float = 0.0, clears: dict | None = None, params: eta.Params | None = None,
+              lists=None) -> dict[str, dict | None]:
+    """unit code -> locate() for every unit (the recommendation's "where is it now"); a placeholder: None."""
     positions, clears = positions or {}, clears or {}
     by_name = {f["name"]: f for f in firehouses}
     open_incs = {i["id"]: i for i in incidents if i["status"] in ("queued", "pending", "active")}
     return {u["name"]: locate(u, role(u["status"]), by_name.get(u.get("station") or ""), open_incs.get(u.get("incident_id")),
-                              positions.get(u["name"]), now, clears.get(u["id"]), params) for u in units}
+                              positions.get(u["name"]), now, clears.get(u["id"]), params, lists) for u in units}
 
 
 def _snippet(text: str, n: int = SNIPPET) -> str:

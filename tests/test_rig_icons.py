@@ -376,3 +376,46 @@ zoomTo(15.5); out.full = L.chips.has("DPT239");
     assert o["count"] == "4"                                                    # 2391, E60, E61, TL2 only
     assert not any(u.startswith("DPT") for u in o["rows"]) and len(o["rows"]) == 7
     assert o["follow"] == [False, False, False]
+
+
+def test_a_placeholder_set_on_location_by_hand_is_still_nowhere():
+    """A person sets DPT239 On location at a call (and gives it a home): it is still not drawn, not located (the
+    recommendation's "where"), not in a count nor in the unset list; a fix fed for it is ignored too."""
+    c = Cad(Settings(), log=lambda m: None, clock=Clock())
+    uid = lambda n: next(u["id"] for u in c.store.units() if u["name"] == n)  # noqa: E731
+    hq = c.firehouses[0]["name"]
+    for n in ("DPT239", "E60", "E61"):
+        c.unit_station(uid(n), {"station": hq, **OP})
+    inc = c.create({"type": "ALARM", "address": "100 Example Ave", "lat": 41.0085, "lon": -73.6600, **OP})
+    c.attach(inc["id"], {"unit_ids": [uid("DPT239")], "status": "RS", **OP})
+    c.unit_status(uid("DPT239"), {"status": "OL", **OP})                        # by hand
+    c._feed_position({"unit": "DPT239", "lat": 41.0101, "lon": -73.6702, "at": Clock()() - 5, "source": "test"})
+    m = c.state()["map"]
+    assert not any(x["unit"] == "DPT239" for x in m["markers"] + m["unset"])
+    assert not any(x["unit"] == "DPT239" for x in m.get("routes") or [])
+    where = c.locations()
+    assert where["DPT239"] is None and where["E60"] is not None
+    on = next(u for u in c.store.units() if u["name"] == "DPT239")
+    assert on["status"] == "OL"                                                  # it is on the call, only not on the map
+    assert mapview.locate(on, "onscene", {"name": hq, "ll": [-73.66692, 41.00253]},
+                          {"id": inc["id"], "lat": 41.0085, "lon": -73.66}, None, 0.0) is None
+    # the idle ones at HQ: E60 and E61 only (DPT239 counts nowhere)
+    idle = [x["unit"] for x in m["markers"] if x["station"] == hq and x["look"] == "available"]
+    assert sorted(idle) == ["E60", "E61"]
+
+
+def test_is_placeholder_uses_lists_placeholder_where_it_exists():
+    """One test: Lists.placeholder (the no-dept-units change) when the lists have it, else the DPT* pattern."""
+    class WithIt:
+        def placeholder(self, code):
+            return code in ("DPT239", "X9")
+
+    class Without:
+        pass
+
+    assert mapview.is_placeholder("X9", WithIt()) and mapview.is_placeholder({"name": "DPT239"}, WithIt())
+    assert not mapview.is_placeholder("DPT266", WithIt())                         # the lists decide, not the pattern
+    assert mapview.is_placeholder("DPT266", Without()) and not mapview.is_placeholder("X9", Without())
+    assert mapview.is_placeholder({"unit": "DPT239"}) and not mapview.is_placeholder({"name": "E60"})
+    assert mapview.place({"name": "X9", "kind": "engine"}, "free", {"name": "HQ", "ll": [-73.67, 41.0]}, lists=WithIt()) is None
+    assert mapview.locate({"name": "X9"}, "free", {"name": "HQ", "ll": [-73.67, 41.0]}, lists=WithIt()) is None
