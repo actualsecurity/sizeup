@@ -4,7 +4,9 @@ Each directory <recorder_dir>/systems/<name>/ (the repo's deploy/trunk-recorder/
 
     config.json      trunk-recorder's own config for it (sources, control channels, captureDir), plus a "sizeup"
                      block trunk-recorder never sees: {"label": the system as shown ("MRRS"), "name": its full name,
-                     "jobs": one dongle job per source, in order (["MRRS 770", "MRRS 773"]), "site": facts as listed}
+                     "jobs": one dongle job per source, in order (["MRRS 770", "MRRS 773"]), "site": facts as listed,
+                     "reception": the reception test's (#410, sizeup/radio/reception.py): {"watch": the talkgroups it
+                     is about, "antenna": what to try when it is weak, "caveat": what a test can't show}}
     talkgroups.csv   trunk-recorder's talkgroups, plus a "Tier" column (sizeup/tiers.py); "Tag" is the UI group
 
 Adding a talkgroup is one line in that file; adding a system is one directory. Nothing here is logic about a system.
@@ -68,6 +70,7 @@ class P25System:
     frequencies: tuple[float, ...]                    # the listed (control channel candidate) frequencies, Hz
     talkgroups: dict[int, dict] = field(default_factory=dict)   # tg -> {name, group, encrypted, tier, system, description}
     site: dict = field(default_factory=dict)
+    reception: dict = field(default_factory=dict)     # the reception test's (#410): {watch, antenna, caveat}
 
     @property
     def jobs(self) -> tuple[str, ...]:
@@ -131,7 +134,8 @@ def load(directory: Path) -> P25System:
     cap = Path(str(conf.get("captureDir") or f"captures/p25-{name}"))
     cap = cap if cap.is_absolute() else (directory / cap)
     return P25System(name, label, str(mine.get("name") or label), os.path.abspath(directory), os.path.abspath(cap),
-                     sources, freqs, read_talkgroups(tgf, name), dict(mine.get("site") or {}))
+                     sources, freqs, read_talkgroups(tgf, name), dict(mine.get("site") or {}),
+                     dict(mine.get("reception") or {}) if isinstance(mine.get("reception"), dict) else {})
 
 
 def discover(base: str | Path | None, taken_tgs=(), taken_jobs=()) -> tuple[P25System, ...]:
@@ -257,9 +261,13 @@ class Runtime:
         self.ingest.record_all = False                    # a talkgroup that isn't in its file is never taken
         self.ingest.grants = self.live.grants
         self.ingest.alias_of = lambda src: self.live.aliases.get(src, "")
+        self.probe = None                     # sizeup/radio/reception.py Probe while a reception test runs (#410)
         recorder.on_line = self._line
 
     def _line(self, line: str) -> None:
+        probe = self.probe
+        if probe is not None:                 # a reception test (#410): counted there, nothing kept as activity
+            return probe.feed_line(line)
         self.live.feed_line(line)
         self.activity.feed_line(line)
 

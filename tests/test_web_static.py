@@ -125,7 +125,9 @@ def test_every_admin_only_get_the_scripts_make_is_in_the_read_map():
                                   ("/api/cad/health", '"/api/cad/health"', "health.js")):
         assert literal in js(script), f"{script} doesn't read {path}"
         assert path in ADMIN_READS, path
-    assert set(ADMIN_READS) == {"/api/cad/notify", "/api/cad/health"}
+    # ... and a reception test's captured audio (#410: served by server.py, played in Settings > Radios)
+    assert "/api/reception/sample?id=" in js("radio-controls.js")
+    assert set(ADMIN_READS) == {"/api/cad/notify", "/api/cad/health", "/api/reception/sample"}
     assert "/api/cad/health" not in scripts.replace(js("health.js"), "")      # only the tab reads it
 
 

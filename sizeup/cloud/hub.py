@@ -1084,6 +1084,8 @@ class HubApp(App):
         st["talkgroups"] = self.hub.talkgroups
         systems = (self.hub.status or {}).get("p25_systems")
         st["p25_systems"] = systems if isinstance(systems, list) else []      # (#409) the station's other P25 systems
+        rec = (self.hub.status or {}).get("reception")                         # (#410) the station's reception tests
+        st["reception"] = rec if isinstance(rec, dict) and self.hub.connected() else None
         st["rerun"] = self.hub.rerun()
         st["cloud"] = self.hub.cad_cloud()
         return st
@@ -1113,6 +1115,18 @@ class HubApp(App):
 
     def set_mode(self, mode: str, sdr: str | None = None) -> str | None:
         return self._switch("set_mode", mode, sdr)
+
+    def reception_post(self, body: dict) -> str | None:
+        """Settings > Radios here: a reception test starts, stops or is annotated on the station (#410)."""
+        return self._switch("reception_post", body)
+
+    def reception_sample(self, sid: str) -> bytes | None:
+        """A call the station's reception test captured, fetched from it as it is asked for: never stored here."""
+        try:
+            wav = base64.b64decode(self.hub.remote("reception_sample_b64", str(sid)) or "", validate=True)
+        except (StationOffline, RuntimeError, binascii.Error, ValueError, TypeError):
+            return None
+        return wav if wav[:4] == b"RIFF" else None
 
     def set_adsb_receiver(self, serial: str | None) -> str | None:
         """Settings > Radios here: the station's ADS-B dongle is named (or unnamed) on the station (#235)."""

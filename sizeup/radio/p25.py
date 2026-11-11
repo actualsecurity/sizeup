@@ -85,6 +85,9 @@ class Call:
     ids: dict[str, tuple[str, str]] = field(default_factory=dict)  # talker -> (radio ID, alias tag) as sent
     system: str = ""           # trunk-recorder's shortName ("westchester")
     emergency: bool = False    # the call JSON's "emergency": granted as an emergency call (the button, #128)
+    signal: float | None = None   # the call JSON's "signal" / "noise" (dB; 5.x), None when it has none (0 / 0)
+    noise: float | None = None
+    freq: float | None = None     # its voice channel, Hz
 
     def __post_init__(self) -> None:
         self.turns = [t if isinstance(t, Turn) else Turn(float(t[0]), str(t[1])) for t in self.turns]
@@ -92,6 +95,14 @@ class Call:
 
 WAV_HEADER = 44            # bytes; a WAV this size or smaller has no audio yet
 SETTLE_GIVE_UP_S = 60.0
+
+
+def _levels(d: dict) -> tuple[float | None, float | None]:
+    """(signal, noise) of a call JSON in dB, (None, None) when trunk-recorder measured none (both 0, or absent)."""
+    sig, noise = _num(d.get("signal")), _num(d.get("noise"))
+    if sig is None or noise is None or (sig == 0 and noise == 0):
+        return None, None
+    return float(sig), float(noise)
 
 
 def _mtime(p: Path) -> float:
@@ -165,7 +176,7 @@ def parse_call(meta_path: Path, labels: dict[int, str], aliases: dict[str, str] 
             units.append(t.talker)
     wav = meta_path.with_suffix(".wav")
     return Call(meta_path.stem, int(tg), labels.get(tg) or f"TG {tg}", start, stop, units, None, str(wav), turns,
-                ids, str(d.get("short_name") or ""), _flag(d.get("emergency")))
+                ids, str(d.get("short_name") or ""), _flag(d.get("emergency")), *_levels(d), _num(d.get("freq")))
 
 
 def _turns(d: dict, aliases: dict[str, str]) -> list[Turn]:

@@ -80,6 +80,7 @@ from sizeup.radio.livepage import HOLD_S, LivePaging
 from sizeup.radio import sdr as sdr_lookup
 from sizeup.radio import adsbd
 from sizeup.radio import recorder as trunk_recorder
+from sizeup.radio import reception
 from sizeup.radio import systems as p25_systems
 from sizeup.radio.page import Page, PageHold, assemble, decode_tones, page_from_dict, recording_note
 from sizeup.radio.tap import LiveTap
@@ -463,6 +464,9 @@ class App:
         self._sys_jobs: dict[str, tuple[p25_systems.Runtime, int]] = {
             x.job: (rt, x.index) for rt in self.systems.values() for x in rt.system.sources}
         self._booting = False                 # start(): each system's dongles are handed over together
+        # The reception test (#410, sizeup/radio/reception.py): one dongle lent to one side of such a system for a
+        # while, measured instead of kept; the job it paused comes back after (and at a restart: start()).
+        self.reception = reception.Tests(self, Path(cfg.clips_dir).parent if cfg.clips_dir else None, log)
         self.modes = [c.label for c in cfg.channels] + ([P25_MODE] if self.recorder else []) + list(self._sys_jobs)
         if self.shared:
             self.modes.append(OFF_MODE)
@@ -1395,6 +1399,8 @@ class App:
         (sizeup/tiers.py). Context only: never Main, never on our incident; its radio IDs are another system's, so
         never looked up in our registry (no rig) nor learned into it; its emergency flags raise none of our alarms."""
         name, tg = rt.system.name, call.talkgroup
+        if self.reception.on_call(rt, call):         # a reception test (#410): counted there, nothing of it kept
+            return self._drop_recorder_files(call, False)
         tier = self.tg.tier(tg, name)
         if tier not in tiers.RECORDED:               # off, or encrypted (never recorded: nothing to keep)
             self.tg.seen(tg, dropped=True, system=name)
@@ -1450,6 +1456,17 @@ class App:
         """state()["p25_systems"] (#409): each other system with its jobs and dongles, what runs, its control channel,
         the unknown talkgroups seen on it and its encrypted activity. [] with none (the hub shows its station's)."""
         return [rt.state(self.assign) for rt in self.systems.values()]
+
+    def reception_post(self, body: dict) -> str | None:
+        """POST /api/reception (#410): start, stop or annotate a reception test. None, or why not."""
+        return self.reception.post(body)
+
+    def reception_sample(self, sid: str) -> bytes | None:
+        """GET /api/reception/sample?id=: a call a reception test captured, while it is kept."""
+        return self.reception.sample(sid)
+
+    def reception_sample_b64(self, sid: str) -> str:
+        return self.reception.sample_b64(sid)
 
     def set_talkgroup_tier(self, tg: int, tier: str, system: str = "") -> str | None:
         err = self.tg.set_tier(int(tg), str(tier), system)
@@ -2732,7 +2749,14 @@ class App:
         if self._mode_file:
             try:
                 by = {sd: b for sd, b in self.set_by.items() if sd in self.assign}
-                self._mode_file.write_text(json.dumps({**self.assign, "_set_by": by}))
+                modes = dict(self.assign)
+                lent = self.reception.lent()        # (#410) a dongle lent to a reception test is saved on its own job
+                if lent is not None:
+                    modes[lent[0]] = lent[1]
+                    by.pop(lent[0], None)
+                    if lent[2]:
+                        by[lent[0]] = lent[2]
+                self._mode_file.write_text(json.dumps({**modes, "_set_by": by}))
             except OSError:
                 pass
 
@@ -3196,6 +3220,7 @@ class App:
               "rerun": dict(self.rerun, pending=len(self._rerun_ids)),
               "talkgroups": self.talkgroups_state() if self.p25 else [],
               "p25_systems": self.p25_systems_state(),
+              "reception": self.reception.state(),
               "talking": self.live.state(),
               "paging": self.paging_state(),
               "prealert": self.cad.prealert_state(),
@@ -3242,6 +3267,7 @@ class App:
         threading.Thread(target=self.cad.place_index, name="places", daemon=True).start()   # built before the first "@"
         threading.Thread(target=self._watch_fm, name="talking", daemon=True).start()
         if self.shared:
+            self.reception.recover()          # (#410) a test that never ended: its dongle starts on its own job
             self._booting = True
             try:
                 for sd, m in list(self.assign.items()):  # each dongle runs what was picked for it
@@ -3272,6 +3298,8 @@ class App:
             self.p25.start()
         for rt in self.systems.values():
             rt.ingest.start()
+        if self.systems:
+            self.reception.start_thread()
         if self.vocab is not None and self.vocab.state()["state"] == "PENDING":
             self.vocab.poll()
         if getattr(self, "atc_vocab", None) is not None and self.atc_vocab.state()["state"] == "PENDING":
@@ -3458,6 +3486,7 @@ class App:
                 self._page_done(page)
             except Exception as e:
                 log(f"page hold: {page.label} page not finalised: {type(e).__name__}: {e}")
+        self.reception.shutdown()              # a running test stays written down: the next start ends it
         if self.recorder:
             self.recorder.shutdown()           # its own service (the station) keeps running: the next sizeup adopts it
         if self.p25:
@@ -3552,6 +3581,7 @@ def make_server(app: App, fence=None, listener=None) -> WebServer:
                        trains=app.trains, weather=app.weather, station_health=getattr(app, "health", None),
                        aircraft=app.aircraft, roadwork=app.roadwork, set_adsb=app.set_adsb_receiver,
                        airband_ab=app.airband_ab if cfg.cloud_role != "hub" else None,
+                       reception=(app.reception_post, app.reception_sample),
                        fence=fence, health_fn=lambda: app.health_extra(fence), listener=listener)
 
     def changed() -> None:             # a new talker is pushed at once, not on the next second

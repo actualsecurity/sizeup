@@ -249,6 +249,7 @@ DS_READERS = ("admin", "dispatcher")      # who may see Settings > Data sources 
 ADMIN_READS = {
     "/api/cad/notify": "the push topics' names are secret",                  # Settings > System > Push notifications
     "/api/cad/health": "station health is for admins (Settings > Health)",   # #203: off the header, on an admin tab
+    "/api/reception/sample": "a reception test's audio is for the admin running it",   # #410 (server.py serves it)
 }
 
 # Who may POST what (enforced only with a verified sign-in, see above): "dispatch" = dispatchers and
@@ -460,6 +461,10 @@ DOES = (
     (re.compile(r"/api/talkgroup"), lambda m, b, o, c: (f"Talkgroup {b.get('tg')}: {_toggles(b) or 'no change'}", "")),
     (re.compile(r"/api/talkgroup-group"), lambda m, b, o, c: (f"Talkgroups {_clip(b.get('group'), 40)}: {_toggles(b) or 'no change'}", "")),
     (re.compile(r"/api/mode"), lambda m, b, o, c: (f"Radio mode: {_clip(b.get('mode'), 30)}" + (f" ({_clip(b['sdr'], 30)})" if b.get("sdr") else ""), "")),
+    (re.compile(r"/api/reception"), lambda m, b, o, c: (
+        (f"Reception test started: {_clip(', '.join(map(str, b.get('jobs') or [b.get('job')])), 40)} on SDR {_clip(b.get('sdr'), 30)}"
+         + (f", pausing {_clip(b.get('pause'), 30)}" if b.get("pause") else "")) if b.get("action") == "start"
+        else "Reception test stopped" if b.get("action") == "stop" else "Reception test: antenna note", "")),
     (re.compile(r"/api/adsb-receiver"), lambda m, b, o, c: ((f"Named SDR {_clip(b.get('sdr'), 30)} the ADS-B receiver"
                                                             if b.get("sdr") else "Unnamed the ADS-B receiver's SDR"), "")),
     (re.compile(r"/api/retranscribe"), lambda m, b, o, c: ("Retranscribe: every recording" if b.get("all")
