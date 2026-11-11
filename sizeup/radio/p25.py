@@ -85,6 +85,7 @@ class Call:
     ids: dict[str, tuple[str, str]] = field(default_factory=dict)  # talker -> (radio ID, alias tag) as sent
     system: str = ""           # trunk-recorder's shortName ("westchester")
     emergency: bool = False    # the call JSON's "emergency": granted as an emergency call (the button, #128)
+    encrypted: bool = False    # the call JSON's "encrypted" (#409: another system's such call is never kept)
     signal: float | None = None   # the call JSON's "signal" / "noise" (dB; 5.x), None when it has none (0 / 0)
     noise: float | None = None
     freq: float | None = None     # its voice channel, Hz
@@ -176,7 +177,8 @@ def parse_call(meta_path: Path, labels: dict[int, str], aliases: dict[str, str] 
             units.append(t.talker)
     wav = meta_path.with_suffix(".wav")
     return Call(meta_path.stem, int(tg), labels.get(tg) or f"TG {tg}", start, stop, units, None, str(wav), turns,
-                ids, str(d.get("short_name") or ""), _flag(d.get("emergency")), *_levels(d), _num(d.get("freq")))
+                ids, str(d.get("short_name") or ""), _flag(d.get("emergency")), _flag(d.get("encrypted")), *_levels(d),
+                _num(d.get("freq")))
 
 
 def _turns(d: dict, aliases: dict[str, str]) -> list[Turn]:

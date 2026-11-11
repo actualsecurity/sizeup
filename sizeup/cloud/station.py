@@ -138,9 +138,16 @@ class StationLink:
 
     # -- the app's side ---------------------------------------------------------------------------
 
+    hub_caps: frozenset = frozenset()       # what the hub says it knows ("caps" in its answers): "p25_systems" (#409)
+
     def emit(self, kind: str, data: dict, clip: str | None = None) -> None:
+        # Another P25 system's (#409): a hub from before it would file the row as the county's talkgroup of that
+        # number, so it is not sent there (the station's own page still has it); its audio waits in its own budget.
+        context = kind == "activity" or (kind in ("traffic", "alarm") and bool(data.get("system")))
+        if context and "p25_systems" not in self.hub_caps:
+            return
         audio = clip_8k(self.app.clip(clip)) if clip else None
-        self.outbox.add(kind, data, audio)
+        self.outbox.add(kind, data, audio, context=context)
         self._wake.set()
 
     def live_changed(self) -> None:
@@ -322,6 +329,8 @@ class StationLink:
                 r = client.request("POST", "/api/station/state", body, timeout=10.0)
                 self._ok()
                 self.updates.hub(r.get("build") if isinstance(r, dict) else None)
+                if isinstance(r, dict):
+                    self.hub_caps = frozenset(str(c) for c in (r.get("caps") or []))
                 if "status" in body:
                     last_status, self._status_now = now, False
                     if "talkgroups" in body["status"]:

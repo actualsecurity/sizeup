@@ -23,7 +23,7 @@ import pytest
 import sizeup.app as appmod
 import sizeup.radio.claims as claims
 from sizeup import channels, sourcekeys, tiers
-from sizeup.config import ChannelCfg, ConfigError, load
+from sizeup.config import ChannelCfg, load
 from sizeup.radio import systems, trunkrecd
 from sizeup.radio.p25 import Call, Turn
 from sizeup.radio.recorder import SystemRecorder, SystemUnitRecorder, TrunkRecorder
@@ -98,15 +98,16 @@ def test_a_talkgroup_number_or_job_name_used_twice_is_refused(tmp_path):
         systems.discover(tmp_path)
 
 
-def test_config_load_refuses_a_system_that_reuses_a_county_talkgroup(tmp_path):
+def test_config_load_leaves_out_a_system_that_reuses_a_county_talkgroup(tmp_path):
     shutil.copytree(TR, tmp_path / "tr", ignore=shutil.ignore_patterns("*.wav", "westchester"))
     f = tmp_path / "tr" / "systems" / "mrrs" / "talkgroups.csv"
     f.write_text(f.read_text() + '307,133,Clash,T,"x",Police,MRRS,3,record,police,\n')
     conf = tmp_path / "c.toml"
     conf.write_text(f'[p25]\ncapture_dir = ""\nrecorder_dir = "{tmp_path / "tr"}"\n'
                     f'talkgroups_file = "{tmp_path / "tr" / "talkgroups.csv"}"\n')
-    with pytest.raises(ConfigError, match="talkgroup 307 is already another system's"):
-        load(conf)
+    c = load(conf)                                   # the app still starts: fire is never held up by another system
+    assert c.p25_systems == () and 307 in c.p25_talkgroups
+    assert "talkgroup 307 is already another system's" in c.p25_system_problems[0]
 
 
 # -- source keys (#415) ---------------------------------------------------------------------------------------------------
@@ -471,7 +472,7 @@ def test_stt_class_follows_the_tier_and_never_passes_fire_traffic(two):
     from sizeup.incidents import Traffic
     item = Traffic("i", "x", 0, 1, "", talkgroup=PD)
     assert app._stt_priority(item, "tg:307") == URGENT
-    assert app._stt_priority(item, "p25:mrrs:9211") == LIVE and app._stt_priority(item, "p25:mrrs:9212") == LOW
+    assert LIVE < app._stt_priority(item, "p25:mrrs:9211") < LOW and app._stt_priority(item, "p25:mrrs:9212") == LOW
     assert app.channel_pref("p25:mrrs:9211")["transcribe"] and not app.channel_pref("p25:mrrs:9049")["transcribe"]
     assert app.channel_pref("p25:mrrs:9211")["engine"] == "local" and t.system == "mrrs"
     assert app.set_talkgroup(PD, None, None, "record", "mrrs") is None
@@ -534,7 +535,7 @@ def test_unknown_talkgroups_are_counted_and_encrypted_ones_are_activity_only(two
     st = rt.state(app.assign)
     assert [(u["tg"], u["source"], u["count"]) for u in st["unknown"]] == [(9999, "p25:mrrs:9999", 2)]
     assert sum("unknown talkgroup seen: 9999" in m for m in logs) == 1
-    assert [(e["tg"], e["radio_id"], e["name"]) for e in st["encrypted"]] == [(9213, "", "PD Secure"), (9213, "4100009", "PD Secure")]
+    assert [(e["tg"], e["name"]) for e in st["encrypted"]] == [(9213, "PD Secure")] * 2 and "4100009" not in json.dumps(st)
     assert not app.cad.comms.activity_rows(0)                 # the minute isn't over
     now[0] += 61
     rt.activity.flush()
@@ -626,4 +627,303 @@ def test_the_installer_and_the_hub_image_carry_the_systems():
     assert "!deploy/trunk-recorder/systems" in (ROOT / ".dockerignore").read_text()
     units = json.loads((ROOT / "data" / "pd_units.json").read_text())
     assert "mrrs" in units["systems"] and "radio_id" not in json.dumps(units["systems"]["mrrs"]["callsigns"])
+    # the only radio IDs in the repo: the two headquarters seeds the wiki publishes
+    assert [(x["radio_id"], x["said"], x["confidence"]) for x in units["systems"]["mrrs"]["radio_ids"]] == [
+        ("4242098", "908", "low"), ("4242396", "266", "low")]
     assert np.isfinite(1.0)
+
+
+# -- the review of #419: context audio, disk and speech-to-text never cost the fire side anything ------------------------------
+
+
+def test_a_bad_system_directory_is_left_out_and_the_rest_starts(tmp_path):
+    shutil.copytree(TR, tmp_path / "tr", ignore=shutil.ignore_patterns("*.wav", "westchester"))
+    make_system(tmp_path / "tr", "bytes", jobs=("Bytes 1",))
+    (tmp_path / "tr" / "systems" / "bytes" / "talkgroups.csv").write_bytes(b"Decimal,Alpha Tag\n1,\xff\xfe\n")
+    make_system(tmp_path / "tr", "named", tgs="4000,fa0,FG1,T,d,Police,X,1,record\n", jobs=("Named 1",))
+    make_system(tmp_path / "tr", "nested", tgs="4001,fa1,Y,T,d,Police,X,1,record\n", jobs=("Nested 1",),
+                captureDir=str(tmp_path / "cap" / "p25" / "inside"))
+    conf = tmp_path / "c.toml"
+    conf.write_text(f'[[radio.channels]]\nlabel = "FG1"\nmhz = 453.0375\nkind = "traffic"\n'
+                    f'[p25]\ncapture_dir = "{tmp_path / "cap" / "p25"}"\nrecorder_dir = "{tmp_path / "tr"}"\n'
+                    f'talkgroups_file = "{tmp_path / "tr" / "talkgroups.csv"}"\n')
+    c = load(conf)
+    assert [s.name for s in c.p25_systems] == ["mrrs"] and 307 in c.p25_talkgroups       # fire as ever
+    why = " | ".join(c.p25_system_problems)
+    assert "bytes" in why and "Unicode" in why and "talkgroup name 'FG1'" in why and "inside it" in why
+    # the lists that name our own talkgroups are taken too: the airport incident's number on another system
+    assert systems.discover(tmp_path / "tr", {333}, problems=[]) and len(c.p25_system_problems) == 3
+    f = tmp_path / "tr" / "systems" / "mrrs" / "talkgroups.csv"
+    f.write_text(f.read_text() + '333,14d,Clash,T,"x",Police,MRRS,3,record,police,\n')
+    c = load(conf)
+    assert not c.p25_systems and any("talkgroup 333 is already" in x for x in c.p25_system_problems)
+
+
+def test_over_the_cap_context_clips_go_first_and_a_fire_clip_is_kept(tmp_path):
+    from sizeup.cloud.hubstore import AudioDb
+    clock = Clock()
+    c = cad(tmp_path, clock)
+    days = {"alert": 30.0, "text": 0.0, "record": 7.0}
+    wav = b"RIFF" + b"\0" * 996
+    audio = AudioDb(":memory:", 4000)                                    # room for four clips
+    for k, (tier, age_h) in enumerate([("record", 40), ("record", 30), ("alert", 20), ("alert", 10), ("record", 2)]):
+        tid = f"9211-c{k}"
+        c.record_traffic(dict(tx(tid, clock.t - age_h * 3600, "PD Dispatch", "", "", 9211), system="mrrs",
+                              source_key="p25:mrrs:9211", tier=tier))
+        audio.put(tid, wav, at=clock.t - age_h * 3600)
+    c.record_traffic(dict(tx("307-fire", clock.t - 60, "Fire/EMS 15", "E60", "E60", 307), system="westchester", ours=True))
+    audio.put("307-fire", wav, at=clock.t - 60)                          # the newest clip, and over the cap now
+    ctx = lambda ids: c.comms.context_clips(ids, days)                  # noqa: E731
+    assert set(ctx(["9211-c0", "9211-c2", "307-fire"])) == {"9211-c0", "9211-c2"}
+    # as #419 first had it (tier-kept clips exempt from the cap) the fire clip was the one deleted
+    audio.prune_clips(clock.t - 12 * 3600, kept=c.comms.kept_for_events, context=ctx, context_max_bytes=10_000)
+    assert audio.has("307-fire")
+    assert [audio.has(f"9211-c{k}") for k in range(5)] == [False, False, True, True, True]   # oldest record tier first
+    # context audio has its own budget, whatever room the cap has
+    audio.max_bytes = 100_000
+    audio.prune_clips(clock.t - 12 * 3600, kept=c.comms.kept_for_events, context=ctx, context_max_bytes=2000)
+    assert [audio.has(f"9211-c{k}") for k in range(5)] == [False, False, True, True, False] and audio.has("307-fire")
+    # a tier only extends past the usual hours: the text tier's old clip goes, the alert tier's stays
+    c.record_traffic(dict(tx("9212-old", clock.t - 20 * 3600, "PD Tac", "", "", 9212), system="mrrs",
+                          source_key="p25:mrrs:9212", tier="text"))
+    audio.put("9212-old", wav, at=clock.t - 20 * 3600)
+    audio.prune_clips(clock.t - 12 * 3600, kept=c.comms.kept_for_events, context=ctx, context_max_bytes=10_000)
+    assert not audio.has("9212-old") and audio.has("9211-c2")
+    # ... and with only fire clips over the cap, the oldest fire clip goes as before
+    for k in range(6):
+        audio.put(f"307-f{k}", wav, at=clock.t - 50 + k)
+    audio.max_bytes = 3000
+    audio.prune_clips(clock.t - 12 * 3600, kept=c.comms.kept_for_events, context=ctx, context_max_bytes=10_000)
+    assert not any(audio.has(f"9211-c{k}") for k in range(5)) and audio.has("307-f5") and not audio.has("307-fire")
+
+
+def test_the_janitor_cleans_every_systems_captures_within_a_budget(tmp_path):
+    import os
+    from sizeup import janitor
+    cap, tmp = tmp_path / "captures" / "p25-mrrs", tmp_path / "captures" / "p25-mrrs-tmp"
+    day = cap / "mrrs" / "2026" / "11" / "9"
+    day.mkdir(parents=True)
+    tmp.mkdir()
+    now = 1_800_000_000.0
+
+    def put(p, age_s, size=1000):
+        p.write_bytes(b"x" * size)
+        os.utime(p, (now - age_s, now - age_s))
+
+    put(day / "9211-old.wav", 20 * 3600), put(day / "9211-old.json", 20 * 3600, 50)      # made while sizeup was down
+    put(day / "9999-orphan.json", 20 * 3600, 50)                                         # its audio never came
+    put(tmp / "stale.wav", 2 * 3600), put(tmp / "live.wav", 60)
+    empty = cap / "mrrs" / "2026" / "11" / "8"
+    empty.mkdir()
+    fresh = cap / "mrrs" / "2026" / "11" / "10"
+    fresh.mkdir()
+    for k in range(5):
+        put(fresh / f"9211-{k}.wav", 600 - k * 60), put(fresh / f"9211-{k}.json", 600 - k * 60, 50)
+    got = janitor.clean_system(cap, 12 * 3600, max_bytes=3200, now=now)
+    assert not day.exists() and not empty.exists() and not (tmp / "stale.wav").exists() and (tmp / "live.wav").exists()
+    left = sorted(p.name for p in fresh.glob("*.wav"))
+    assert left == ["9211-2.wav", "9211-3.wav", "9211-4.wav"] and got["over"] == 2 and got["bytes"] <= 3200
+    assert janitor.clean_system(tmp_path / "none", 3600) == {"deleted": 0, "over": 0, "bytes": 0}
+
+
+def test_the_app_cleans_its_systems_capture_directories(two):
+    import os
+    app, _said, _logs = two
+    d = Path(app.systems["mrrs"].system.capture_dir) / "mrrs" / "2026" / "11" / "1"
+    d.mkdir(parents=True)
+    (d / "9211-x.wav").write_bytes(b"x" * 100)
+    old = time.time() - 30 * 3600
+    os.utime(d / "9211-x.wav", (old, old))
+    app._clean()
+    assert not d.exists()
+
+
+def test_context_speech_to_text_is_under_every_class_of_ours_and_is_shed(two):
+    from sizeup import stt
+    from sizeup.incidents import Traffic
+    from sizeup.radio.page import Page
+    app, _said, _logs = two
+    appmod.AIRBAND_FIRST.add("HPN Tower")
+    try:
+        t = Traffic("i", "x", 0, 1, "")
+        ours = [app._stt_priority(Page.__new__(Page), "South 2"),          # a page
+                app._stt_priority(t, "tg:307"), app._stt_priority(t, "FG1"), app._stt_priority(t, "FG2"),
+                app._stt_priority(t, "HPN Tower"), app._stt_priority(t, "South 2"),      # voice on the paging channel
+                stt.RERUN]                                                                # a person's re-run
+        app.tg.set(301, main=True)
+        ours.append(app._stt_priority(t, "tg:301"))                                       # a Main talkgroup
+    finally:
+        appmod.AIRBAND_FIRST.discard("HPN Tower")
+    alert, text = app._stt_priority(t, "p25:mrrs:9211"), app._stt_priority(t, "p25:mrrs:9212")
+    assert alert == stt.CONTEXT and text == stt.LOW and all(p < alert <= text for p in ours)
+    assert stt.SHED_AFTER[stt.CONTEXT] <= 600 and stt.CONTEXT not in stt.LIVE_CLASSES     # shed; never "behind" by it
+    # in the queue itself: a fire clip that comes later is still taken first, and a waiting context clip is shed
+    clock, dropped = {"t": 100.0}, []
+    q = stt.SttQueue(lambda item, why: dropped.append((item, why)), clock=lambda: clock["t"])
+    q.put((stt.CONTEXT, None, "pd", None, "p25:mrrs:9211"))
+    q.put((stt.LOW, None, "county-context", None, "tg:383"))
+    q.put((stt.LIVE, None, "fire", None, "tg:301"))
+    q.put((stt.URGENT, None, "page", None, "South 2"))
+    assert [q.get_nowait()[2] for _ in range(4)] == ["page", "fire", "pd", "county-context"]
+    q.put((stt.CONTEXT, None, "pd-late", None, "p25:mrrs:9211"))
+    clock["t"] += stt.CONTEXT_MAX_WAIT_S + 1
+    q.put((stt.LIVE, None, "fire-2", None, "tg:301"))
+    assert q.get_nowait()[2] == "fire-2" and dropped and dropped[0][0] == "pd-late" and dropped[0][1].startswith(stt.SHED)
+
+
+def test_another_systems_supervisor_never_takes_or_deletes_the_countys_claim(tmp_path):
+    county, mrrs, pop, _logs, _d = service(tmp_path)
+    ask_county(tmp_path)
+    assert county.step(100.0)["state"] == "ok"
+    mine = json.loads((claims.DIR / "v4.json").read_text())
+    assert (mine["mode"], mine["pid"]) == ("Fire/EMS 15", SERVICE_PID)
+    # a stale state file of MRRS's names the county's dongle (the same service pid holds its claim)
+    ask_system(tmp_path, {0: "v4"})
+    st = mrrs.step(101.0)
+    assert st["state"] == "held" and "Fire/EMS 15" in st["detail"] and len(pop.started) == 1
+    assert json.loads((claims.DIR / "v4.json").read_text()) == mine
+    ask_system(tmp_path, {}, on=False, seq=2)                    # MRRS switched off: the county's claim stays
+    assert mrrs.step(102.0)["state"] == "off"
+    assert json.loads((claims.DIR / "v4.json").read_text()) == mine and county.step(102.0)["state"] == "ok"
+    mrrs.shutdown()
+    assert json.loads((claims.DIR / "v4.json").read_text()) == mine
+    # a dongle claimed under another job by this same pid (the county's, before its state says so): not taken either
+    (tmp_path / "state" / "p25_recorder.json").unlink()
+    ask_system(tmp_path, {0: "v4", 1: "pd-b"}, seq=3)
+    assert mrrs.step(103.0)["state"] == "held" and not (claims.DIR / "pd-b.json").exists()
+    assert json.loads((claims.DIR / "v4.json").read_text()) == mine
+    # and no claim file is written and removed while it waits
+    before = sorted(p.name for p in claims.DIR.iterdir())
+    for k in range(5):
+        mrrs.step(104.0 + k)
+    assert sorted(p.name for p in claims.DIR.iterdir()) == before
+
+
+def test_the_same_files_written_again_restart_nothing_and_it_runs_at_a_lower_priority(tmp_path):
+    _county, mrrs, pop, _logs, d = service(tmp_path)
+    ask_system(tmp_path, {0: "pd-a"})
+    assert mrrs.step(100.0)["state"] == "ok"
+    assert pop.started[0].kw["preexec_fn"] is trunkrecd._lower_priority
+    (d / "config.json").write_text((d / "config.json").read_text())           # an update installs the same file again
+    (d / "talkgroups.csv").write_text((d / "talkgroups.csv").read_text())
+    assert mrrs.step(101.0)["state"] == "ok" and len(pop.started) == 1
+    (d / "talkgroups.csv").write_text((d / "talkgroups.csv").read_text() + "9999,270f,New,T,x,Police,MRRS,3,record,police,\n")
+    mrrs.step(102.0)
+    assert mrrs.step(103.0)["state"] == "ok" and len(pop.started) == 2        # a real change: its own restart
+
+
+def test_transcript_content_on_another_system_raises_nothing_of_ours(two):
+    app, _said, _logs = two
+    rt = app.systems["mrrs"]
+    app.cad.incident({"type": "STRUCTURE FIRE", "address": "12 Invented Ave"}, "op") if hasattr(app.cad, "incident") else None
+    app._call_system(rt, a_call(app, "7-call_7", PD, "mrrs", label="PD Dispatch"))
+    assert wait(lambda: rows(app).get("9211-7-call_7", {}).get("status") == "done")
+    for text in ("Mayday mayday mayday, Engine 61 trapped on the second floor", "Engine 61 on location",
+                 "60 Control to Engine 61 respond to 12 Invented Ave for a structure fire", "emergency button activated"):
+        assert app._retext("9211-7-call_7", text, "done", 0.9, "m.bin") in (True, False)
+    assert rows(app)["9211-7-call_7"]["text"] == "emergency button activated"
+    assert not app.cad.store.q("SELECT * FROM alarms") and not app.cad.store.q("SELECT * FROM radio_links")
+    assert not app.cad.store.q("SELECT * FROM status_hints") and not app.cad.store.q("SELECT * FROM incoming")
+    assert rows(app)["9211-7-call_7"]["dispatcher"] == 0
+    # an encrypted call on a talkgroup the file lists as clear: nothing kept
+    enc = a_call(app, "8-call_8", PD, "mrrs", label="PD Dispatch")
+    enc.encrypted = True
+    app._call_system(rt, enc)
+    assert "9211-8-call_8" not in rows(app) and not app.has_clip("9211-8-call_8")
+    # encrypted activity as the browser gets it: when and which talkgroup, never which radio
+    rt.recorder.on_line("SIZEUP-UNIT mrrs 4100009 call 9213")
+    assert app.state()["p25_systems"][0]["encrypted"][0].keys() == {"at", "tg", "name", "source"}
+
+
+def test_the_hub_never_gives_another_systems_radio_a_rig_or_a_dispatcher(tmp_path):
+    from sizeup.cloud.hub import HubApp
+    from tests.test_cloud import hub_cfg
+    hub = HubApp(hub_cfg(tmp_path))
+    hub.radios.save({"system": "p25", "radio_id": "4100001", "unit": "E61"})
+    now = time.time()
+    base = {"start": now, "end": now + 2, "text": "", "raw": "Engine 61 on location", "status": "done", "unit": "60 Ctrl OP 6",
+            "radio_id": "4100001", "pairs": [["4100001", "60 Ctrl OP 6"]], "model": "m.bin"}
+    t = hub._traffic_of({**base, "id": "307-h1", "source": "Fire/EMS 15", "talkgroup": 307})
+    assert t.rig == "E61"
+    for d in ({**base, "pairs": None}, base):
+        t = hub._traffic_of({**d, "id": "9211-h2", "source": "PD Dispatch", "talkgroup": 9211, "system": "mrrs",
+                             "source_key": "p25:mrrs:9211", "tier": "alert", "group": "Police", "service": "police"})
+        assert t.rig == "" and t.system == "mrrs"
+    hub.apply("traffic", {**base, "id": "9211-h2", "source": "PD Dispatch", "talkgroup": 9211, "system": "mrrs",
+                          "source_key": "p25:mrrs:9211", "tier": "alert", "group": "Police", "service": "police",
+                          "attach": True}, None)
+    row = hub.cad.store.one("SELECT * FROM radio_traffic WHERE id = '9211-h2'")
+    assert (row["rig"], row["dispatcher"], row["ours"], row["system"], row["source"]) == ("", 0, 0, "mrrs", "p25:mrrs:9211")
+    assert not hub.cad.store.q("SELECT * FROM alarms") and all(x.id != "9211-h2" for i in hub.store.incidents for x in i.traffic)
+    hub.apply("activity", {"source": "p25:mrrs:9213", "minute": int(now // 60), "calls": 3, "radios": ["4100009"]}, None)
+    assert hub.cad.comms.activity_rows(0, "p25:mrrs:9213")[0]["calls"] == 3
+    # radio IDs in the activity table: a week at most
+    hub.cad.comms.activity("p25:mrrs:9213", int(now // 60) - 8 * 1440, 1, ["4100009"])
+    hub.cad.comms.prune()
+    old = [r for r in hub.cad.comms.activity_rows(0, "p25:mrrs:9213") if r["minute"] < int(now // 60) - 1440]
+    assert old and all(r["radios"] == "" for r in old)
+    # version skew: a station from before this never gets a "p25:" channel key; this hub says what it knows
+    hub._chan_ov = {"p25:mrrs:9211": {"engine": "aws"}, "tg:307": {"engine": "local"}}
+    assert set(hub.channel_desired()["prefs"]) == {"tg:307"}
+    hub.hub.status = {"p25_systems": []}
+    assert "p25:mrrs:9211" in hub.channel_desired()["prefs"]
+    assert json.loads(hub.hub._state(json.dumps({"at": now}).encode())[1])["caps"] == ["p25_systems"]
+
+
+def test_the_station_keeps_context_out_of_an_older_hub_and_out_of_the_fire_audio_budget(tmp_path):
+    from sizeup.cloud.outbox import Outbox
+    from sizeup.cloud.station import StationLink
+    box = Outbox(tmp_path / "o.sqlite", max_audio_bytes=10_000)
+    for k in range(4):
+        box.add("traffic", {"id": f"307-{k}"}, b"f" * 2000)
+    for k in range(4):
+        box.add("traffic", {"id": f"9211-{k}", "system": "mrrs"}, b"p" * 2000, context=True)
+    got = {e["data"]["id"]: e["audio"] is not None for e in box.batch()}
+    assert all(got[f"307-{k}"] for k in range(4))                              # a hub outage: no fire clip lost
+    assert [got[f"9211-{k}"] for k in range(4)] == [False, False, False, True] and box.context_bytes == 2000
+    sent = []
+
+    class Box:
+        def add(self, kind, data, audio, context=False):
+            sent.append((kind, data.get("id"), context))
+
+    link = StationLink.__new__(StationLink)
+    link.outbox, link._wake = Box(), type("W", (), {"set": lambda self: None})()
+    link.app = type("A", (), {"clip": lambda self, c: None})()
+    link.emit("traffic", {"id": "9211-a", "system": "mrrs"})
+    link.emit("activity", {"source": "p25:mrrs:9213"})
+    link.emit("traffic", {"id": "307-a"})
+    assert sent == [("traffic", "307-a", False)]                               # the hub hasn't said it knows systems
+    link.hub_caps = frozenset({"p25_systems"})
+    link.emit("traffic", {"id": "9211-b", "system": "mrrs"})
+    assert sent[-1] == ("traffic", "9211-b", True)
+
+
+def test_a_context_system_down_is_never_an_alert_and_details_carry_no_radio_ids(two):
+    from sizeup.cloud.health import Metrics, no_ids, station_metrics
+    app, _said, _logs = two
+    app.start()
+    assert app.set_mode("MRRS 770", "pd-b") is None
+    rt = app.systems["mrrs"]
+    rt.recorder.status = lambda: {"state": "down", "restarts": 4, "detail": "trunk-recorder exited (1): [mrrs] 12C TG: 9211 "
+                                  "Freq: 770.181250 MHz Unit ID set via Control Channel, ext: 4100001"}
+    jobs = station_metrics(app, Metrics(app.clips_dir))["jobs"]
+    assert jobs["MRRS 770"]["context"] is True and "4100001" not in jobs["MRRS 770"]["detail"]
+    assert "770.181250 MHz" in jobs["MRRS 770"]["detail"] and "4100001" not in rt.status(app.assign.values())["detail"]
+    assert no_ids("Control Channel Message Decode Rate: 38/sec, count: 115") == "Control Channel Message Decode Rate: 38/sec, count: 115"
+    src = (ROOT / "sizeup" / "cloud" / "health.py").read_text()
+    assert 'if d.get("context"):\n                continue' in src
+
+
+def test_old_airband_rows_and_a_cut_short_migration_are_put_right(tmp_path):
+    clock = Clock()
+    c = cad(tmp_path, clock)
+    c.record_traffic(tx("HPN-1", clock.t, "HPN Tower", "", "", None))
+    c.store.db.execute("UPDATE radio_traffic SET source = 'fm:HPN Tower', system = 'analog', service = 'fire', ours = 1")
+    assert c.comms.fix_air(["HPN Tower"]) == 1 and c.comms.fix_air(["HPN Tower"]) == 0
+    r = c.store.one("SELECT * FROM radio_traffic")
+    assert (r["source"], r["system"], r["service"], r["ours"]) == ("air:HPN Tower", "airband", "air", 0)
+    c.store.db.execute("UPDATE radio_traffic SET source = ''")            # as a migration cut short left it
+    c.store.db.commit()
+    from sizeup.cad.store import Store
+    assert Store(str(tmp_path / "cad.sqlite")).one("SELECT source FROM radio_traffic")["source"] == "fm:HPN Tower"
