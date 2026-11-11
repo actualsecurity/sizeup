@@ -287,3 +287,37 @@ def test_an_earlier_builds_triggers_are_taken_off_at_the_start(tmp_path):
     before = dump(again.store.db)
     again.store.db.close()
     assert dump(cad(tmp_path, c.clockref, airband=("Tower",)).store.db) == before       # a start writes nothing
+
+
+def test_another_process_holding_the_write_lock_never_holds_a_writer_for_the_change_log(tmp_path):
+    """A real second connection takes the database's write lock just as each write has committed (so only the change
+    log's own statement meets it): the log gives up at once, the writer is not kept waiting, its data is stored."""
+    import time as clock_
+    c = make(tmp_path)
+    assert c.store.db.execute("PRAGMA busy_timeout").fetchone()[0] >= 1000        # the connection's own: seconds
+    holder = sqlite3.connect(c.store.path, isolation_level=None, timeout=0)
+    flush, held = c.store.after_commit, []
+
+    def locked_flush():
+        holder.execute("BEGIN IMMEDIATE")                       # the lock is the other process's now
+        held.append(1)
+        try:
+            flush()
+        finally:
+            holder.execute("ROLLBACK")
+    c.store.after_commit = locked_flush
+    slowest = 0.0
+    for name, do, _noted, stored in writers(c):
+        c.comms._retry_at = 0.0                                 # every writer meets the lock (not only once a minute)
+        t0 = clock_.perf_counter()
+        do()                                                    # raises nothing
+        slowest = max(slowest, clock_.perf_counter() - t0)
+        assert stored(), f"{name} did not store its data"
+    assert len(held) >= 20 and slowest < 1.0, f"a writer waited {slowest:.2f} s for the change log"
+    assert c.comms.changes_broken and len(c.said) == 1
+    assert c.store.db.execute("PRAGMA busy_timeout").fetchone()[0] >= 1000        # put back: the writes' own patience
+    c.store.after_commit = flush                                # the lock gone: written again, the gap a reload
+    c.comms._retry_at = 0.0
+    c.comms.retext("fg-1", "written again", "done")
+    assert not c.comms.changes_broken and since(c, 0)[-1] == "fg-1"
+    holder.close()

@@ -65,6 +65,7 @@ import json
 import re
 import sqlite3
 import time
+from contextlib import contextmanager
 from datetime import datetime
 
 from sizeup import sourcekeys as sources
@@ -121,6 +122,7 @@ CREATE INDEX IF NOT EXISTS radio_changes_system ON radio_changes(system, seq);
 OLD_CHANGE_TRIGGERS = tuple(f"radio_changes_{t}_{w}" for t, ws in (("t", "ins upd del"), ("l", "ins upd del"), ("k", "ins del"),
                                                                     ("n", "ins upd del"), ("a", "ins upd del")) for w in ws.split())
 CHANGES_RETRY_S = 60.0                # a broken change log is tried again after this long
+CHANGES_BUSY_MS = 200                 # the change log waits this long for the database's write lock, no more
 CHANGES_TRIM_EVERY = 500              # the change log is trimmed to CHANGES_KEPT every this many transmissions logged
 ID_NOTES = ("none", "undecoded", "weak")    # why an FG1 key-up has no radio ID (radio_traffic.id_note, #163)
 RELINK_MAX = 2000                           # a radio just named: at most this many of its unnamed transmissions
@@ -864,17 +866,20 @@ class Comms:
                 if db.in_transaction:                   # (never from tx(); a caller's own transaction: with it)
                     db.executemany("INSERT INTO radio_changes (traffic_id, system, gone) VALUES (?, ?, ?)", rows)
                 else:
-                    db.execute("BEGIN")
-                    try:
-                        db.executemany("INSERT INTO radio_changes (traffic_id, system, gone) VALUES (?, ?, ?)", rows)
-                        top = db.execute("SELECT MAX(seq) FROM radio_changes").fetchone()[0] or 0
-                        db.execute("COMMIT")
-                    except BaseException:
+                    # Another process holding the write lock: give up at once (CHANGES_BUSY_MS, not the connection's
+                    # 5 s): the writer's thread, and the store's lock it holds, are never kept waiting for the log
+                    with self._quick(db):
+                        db.execute("BEGIN IMMEDIATE")
                         try:
-                            db.execute("ROLLBACK")
-                        except Exception:  # noqa: BLE001
-                            pass
-                        raise
+                            db.executemany("INSERT INTO radio_changes (traffic_id, system, gone) VALUES (?, ?, ?)", rows)
+                            top = db.execute("SELECT MAX(seq) FROM radio_changes").fetchone()[0] or 0
+                            db.execute("COMMIT")
+                        except BaseException:
+                            try:
+                                db.execute("ROLLBACK")
+                            except Exception:  # noqa: BLE001
+                                pass
+                            raise
                     if self.changes_broken or any(r[0] == "reset" for r in rows):
                         # written again after a gap, or a reset: what was missed can't be told: older cursors reload
                         self.changes_floor = int(top)
@@ -882,14 +887,26 @@ class Comms:
         except Exception as e:  # noqa: BLE001 - never the writer's problem
             self._changes_off(f"an entry could not be written ({type(e).__name__}: {e})")
 
+    @staticmethod
+    @contextmanager
+    def _quick(db):
+        """The connection's busy timeout held to CHANGES_BUSY_MS for the change log's own statements, then put back."""
+        was = db.execute("PRAGMA busy_timeout").fetchone()[0]
+        db.execute(f"PRAGMA busy_timeout = {CHANGES_BUSY_MS}")
+        try:
+            yield
+        finally:
+            db.execute(f"PRAGMA busy_timeout = {int(was)}")
+
     def _trim_changes(self) -> None:
         """The change log held to its newest CHANGES_KEPT (a range on its key): at the start and every
         CHANGES_TRIM_EVERY transmissions. Its own statement, after the write; a failure is only a longer log."""
         try:
             with self.store.lock:
                 if not self.store.db.in_transaction:
-                    self.store.db.execute("DELETE FROM radio_changes WHERE seq <= (SELECT MAX(seq) FROM radio_changes) - ?",
-                                          (CHANGES_KEPT,))
+                    with self._quick(self.store.db):
+                        self.store.db.execute("DELETE FROM radio_changes WHERE seq <= (SELECT MAX(seq) FROM radio_changes) - ?",
+                                              (CHANGES_KEPT,))
         except Exception:  # noqa: BLE001
             pass
 
