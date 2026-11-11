@@ -322,9 +322,9 @@ window.RadioNav = (() => {
       return b;
     }));
     const tree = [];
-    if (m.pinned.length) tree.push(el("h3", "rn-sys", "Pinned"), ...m.pinned.map(sourceRow));
+    if (m.pinned.length) tree.push(el("div", "rn-sys h2", "Pinned"), ...m.pinned.map(sourceRow));
     for (const sys of m.systems) {
-      tree.push(el("h3", "rn-sys", sys.label));
+      tree.push(el("div", "rn-sys h2", sys.label));
       for (const g of sys.groups) {
         if (sys.groups.length === 1 && g.name.toLowerCase() === String(sys.label).toLowerCase()) {   // "Analog > Analog": once
           tree.push(...g.sources.map(sourceRow));

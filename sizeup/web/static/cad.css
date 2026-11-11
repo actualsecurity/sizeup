@@ -705,8 +705,7 @@
   .rn-rail { grid-template-columns: minmax(0, 1fr); }
   .rn-rail .tab { gap: var(--s-2); min-inline-size: 0; }
   .rn-rail .tab .lbl { overflow: hidden; text-overflow: ellipsis; }
-  .rn-sys { margin-block-start: var(--s-2); padding-inline: var(--s-1); font-size: var(--fs-2xs); line-height: var(--lh-2xs);
-            letter-spacing: 0.08em; text-transform: uppercase; color: var(--dim); }
+  .rn-sys { margin-block-start: var(--s-2); padding-inline: var(--s-1); }      /* an overline: .h2 (style.css) */
   .rn-grp { display: flex; align-items: center; gap: var(--s-2); min-block-size: var(--ctl); padding-inline: var(--s-1);
             font-size: var(--fs-sm); line-height: var(--lh-sm); font-weight: 600; color: var(--text-2); min-inline-size: 0; }
   .rn-ch { display: flex; align-items: center; gap: var(--s-0); padding-inline-start: var(--s-4); min-inline-size: 0; }
