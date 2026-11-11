@@ -469,8 +469,9 @@ class Comms:
             db.execute("DELETE FROM radio_link_exclusions WHERE traffic_id = ? AND incident_id = ?", (tid, iid))
             db.execute("INSERT INTO radio_links (traffic_id, incident_id, why, unit) VALUES (?, ?, 'manual', ?)",
                        (tid, iid, operator))
-            said = (t["text"] or "").strip()
-            self.store._event(db, iid, "radio", f"Radio traffic added: {_when(t)} {_who(t)} on {t['channel']}"
+            # (another P25 system's row, #419: when and which channel only; the timeline is read without a sign-in)
+            said = "" if sources.is_context(t) else (t["text"] or "").strip()
+            self.store._event(db, iid, "radio", f"Radio traffic added: {_row_line(t)}"
                               + (f": \u201c{said[:160]}{'…' if len(said) > 160 else ''}\u201d" if said else ""), operator)
             self.rev += 1
         return {"linked": True, "why": "manual"}
@@ -493,7 +494,7 @@ class Comms:
                 db.execute("INSERT OR REPLACE INTO radio_link_exclusions (traffic_id, incident_id, at, operator, why, unit) "
                            "VALUES (?, ?, ?, ?, ?, ?)", (tid, iid, self.clock(), operator, old["why"], old["unit"]))
             name = re.sub(r"\s*<[^<>\s]+@[^<>\s]+>$", "", operator).strip()
-            self.store._event(db, iid, "radio", f"Radio {_when(t)} {_who(t)} on {t['channel']} removed from this event"
+            self.store._event(db, iid, "radio", f"Radio {_row_line(t)} removed from this event"
                               + (f" (auto: {why_text(old['why'], old['unit'])})" if auto else "")
                               + (f" by {name}" if name else ""), operator)
             self.rev += 1
@@ -914,6 +915,12 @@ def _when(t) -> str:
 
 def _who(t) -> str:
     return t["rig"] or t["talker"] or t["radio_id"] or "radio"
+
+
+def _row_line(t) -> str:
+    """A transmission as an event's timeline names it: "14:02:11 E63 on FG1". Another P25 system's (#419): when and
+    on which channel only, never who (its talker, its radio ID) nor what was said."""
+    return f"{_when(t)} on {t['channel']}" if sources.is_context(t) else f"{_when(t)} {_who(t)} on {t['channel']}"
 
 
 def _like(w: str) -> str:

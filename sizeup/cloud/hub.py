@@ -1089,7 +1089,7 @@ class HubApp(App):
         st["p25_systems"] = systems if isinstance(systems, list) else []      # (#409) the station's other P25 systems
         st["rerun"] = self.hub.rerun()
         st["cloud"] = self.hub.cad_cloud()
-        return st
+        return self._hide_context(st)       # (#419: the station's lists too, where nobody is signed in)
 
     def _sources_poll_now(self, reason: str) -> None:
         """A radio or phone pre-alert on the hub: the station's adapters poll now (a job; never waits, never raises)."""

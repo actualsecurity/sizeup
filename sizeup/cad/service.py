@@ -23,6 +23,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
+from sizeup import sourcekeys
 from sizeup import polly
 from sizeup.cad import airport, dispatcher, eta, export, mapview, runcards
 from sizeup.cad.activity import Activity
@@ -404,8 +405,8 @@ class Cad:
             except Exception as e:  # noqa: BLE001 - a notice never stops the transcript
                 self.log(f"CAD: possible incoming: {type(e).__name__}: {e}")
             try:                                          # "alert level N" for the airport (#369)
-                t = self.store.one("SELECT id, channel, talkgroup, start, text, talker, dispatcher FROM radio_traffic WHERE id = ?", (tid,))
-                if t:
+                t = self.store.one("SELECT id, channel, talkgroup, start, text, talker, dispatcher, system FROM radio_traffic WHERE id = ?", (tid,))
+                if t and not sourcekeys.is_context(t):
                     self.airport_watch.heard_radio(t)
             except Exception as e:  # noqa: BLE001 - a pre-alert never stops the transcript
                 self.log(f"CAD: airport alert level: {type(e).__name__}: {e}")
