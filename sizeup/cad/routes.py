@@ -7,10 +7,15 @@ Routes sits between the maps (sizeup/cad/mapview.py's markers: where each rig is
 the road graph (sizeup/roadgraph.py). It reads only the map state and Cad.positions' fixes as the markers carry
 them; nothing here knows how the page draws or glides a rig.
 
-    for_map(markers, now)     state["map"]["routes"]: one route per rig going to a call (dispatched / responding,
+    for_map(markers, now, incidents)
+                              state["map"]["routes"]: one route per rig going to a call (dispatched / responding,
                               its call with a map point): {unit, incident_id, coords, m, s, along_m, remain_m,
                               remain_s, eta_s, from: "fix" | "status", at, why}; and the trails
-    to_one(origins, to)       the recommendation's road estimates (sizeup/cad/runcards.py estimates)
+    to_one(origins, to, inc)  the recommendation's road estimates (sizeup/cad/runcards.py estimates)
+
+Highways (roadgraph's module doc): each call's address, cross streets and type say whether it is on a highway
+(roadgraph.highway_call); a call on none keeps the rigs on local streets, a highway call lets them use it, the right
+way. A call whose words change is routed again ("new").
 
 Cached per (unit, incident). A route is worked out again only when:
 
@@ -40,6 +45,7 @@ import time
 from collections import deque
 from typing import Callable
 
+from sizeup import roadgraph
 from sizeup.cad import eta
 
 MOVED_M = 30.0
@@ -74,6 +80,7 @@ class Routes:
         self._pen_lock = threading.Lock()
         self._lock = threading.Lock()
         self.stats = {"routed": 0, "last_ms": None, "why": {}}
+        self._calls: dict[tuple, roadgraph.Call] = {}   # a call's words -> roadgraph.Call (the last state build's)
 
     # -- inputs -----------------------------------------------------------------------------------------------
 
@@ -120,8 +127,23 @@ class Routes:
 
     # -- the maps ---------------------------------------------------------------------------------------------
 
-    def for_map(self, markers: list[dict], now: float | None = None) -> dict:
-        """{"routes": [...], "trails": {unit: [[lon, lat], ...]}} for state["map"] (the module doc)."""
+    def call_of(self, inc: dict | None) -> roadgraph.Call:
+        """What an incident's words say about being on a highway (roadgraph.highway_call), remembered by its words."""
+        if not inc:
+            return roadgraph.LOCAL
+        words = (inc.get("address") or "", inc.get("cross_street") or "", inc.get("type") or "",
+                 inc.get("subtype") or "")
+        got = self._calls.get(words)
+        if got is None:
+            got = roadgraph.highway_call(*words)
+            if len(self._calls) > 256:
+                self._calls.clear()
+            self._calls[words] = got
+        return got
+
+    def for_map(self, markers: list[dict], now: float | None = None, incidents: list[dict] | None = None) -> dict:
+        """{"routes": [...], "trails": {unit: [[lon, lat], ...]}} for state["map"] (the module doc). incidents: the
+        state's (their words: a highway call or not)."""
         now = self.clock() if now is None else now
         with self._lock:
             self._trail(markers, now)
@@ -136,20 +158,23 @@ class Routes:
             p = self.params()
             pen, pen_sig = self.penalties(g, now)
             sig = (id(g), pen_sig, p.highway_mph, p.arterial_mph, p.local_mph, p.emergency_factor, p.wrongway_m)
+            incs = {i.get("id"): i for i in incidents or ()}
             seen, out, n = set(), [], 0
             t0 = time.monotonic()
             for m in going:
                 key = (m["unit"], m["incident_id"])
                 seen.add(key)
+                call = self.call_of(incs.get(m["incident_id"]))
+                msig = sig + (call,)
                 ent = self.cache.get(key)
-                why = self._why(ent, m, sig, p)
+                why = self._why(ent, m, msig, p)
                 bad = self.failed.get(key)
-                if why and bad and bad[0] == m["line_to"] and bad[1] == sig and now - bad[3] < RETRY_S \
+                if why and bad and bad[0] == m["line_to"] and bad[1] == msig and now - bad[3] < RETRY_S \
                         and _m([m["lon"], m["lat"]], bad[2]) <= MOVED_M:
                     why = ""                                        # no way last time: not again every second
                 if why and (n == 0 or time.monotonic() - t0 < BUDGET_S):
                     n += 1
-                    ent = self._route(g, m, sig, pen, p, why, now) or (None if why == "new" else ent)
+                    ent = self._route(g, m, msig, pen, p, why, now, call) or (None if why == "new" else ent)
                 if ent is None or ent["to"] != m["line_to"]:      # (a call moved, not routed yet: none)
                     continue
                 out.append(self._public(ent, m, now, p))
@@ -187,13 +212,14 @@ class Routes:
         ent.update(fix_at=at, away=n, along=along, remain=remain if away else min(remain, ent["remain"]))
         return ""
 
-    def _route(self, g, m: dict, sig: tuple, pen: dict, p: eta.Params, why: str, now: float) -> dict | None:
+    def _route(self, g, m: dict, sig: tuple, pen: dict, p: eta.Params, why: str, now: float,
+               call: roadgraph.Call | None = None) -> dict | None:
         here = [m["lon"], m["lat"]]
         fix = m.get("place") == "position"
         hd = m.get("heading") if fix and isinstance(m.get("speed"), (int, float)) and m["speed"] >= AWAY_MIN_MPS else None
         t0 = time.monotonic()
         try:
-            r = g.route(here, m["line_to"], p, pen, heading=hd, wrongway_m=p.wrongway_m)
+            r = g.route(here, m["line_to"], p, pen, heading=hd, wrongway_m=p.wrongway_m, call=call)
         except Exception as e:  # noqa: BLE001 - one route's trouble: the straight line, as before
             self.log(f"routes: {m['unit']}: {type(e).__name__}: {e}")
             r = None
@@ -247,15 +273,16 @@ class Routes:
 
     # -- the recommendation -----------------------------------------------------------------------------------
 
-    def to_one(self, origins: dict, to) -> dict:
-        """{key: (drive seconds, metres)} by road from each [lon, lat] origin to `to`; {} with no graph."""
+    def to_one(self, origins: dict, to, inc: dict | None = None) -> dict:
+        """{key: (drive seconds, metres) | None (no way)} by road from each [lon, lat] origin to `to` (inc: the call,
+        its words: a highway call or not); {} with no graph."""
         g = self.graph()
         if g is None or not origins or to is None:
             return {}
         p = self.params()
         try:
             pen, _ = self.penalties(g, self.clock())
-            return g.to_one(origins, to, p, pen, wrongway_m=p.wrongway_m)
+            return g.to_one(origins, to, p, pen, wrongway_m=p.wrongway_m, call=self.call_of(inc))
         except Exception as e:  # noqa: BLE001 - the straight-line estimate then
             self.log(f"routes: estimates by road: {type(e).__name__}: {e}")
             return {}

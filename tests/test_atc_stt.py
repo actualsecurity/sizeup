@@ -320,7 +320,7 @@ def test_the_map_draws_the_tower_mark():
     assert 'const IDS = ["ac-trail", "ac-ring", "ac-mark", "ac-label", "ac-twr", "ac-twr-label", ' in js   # on with the layer
     assert "localStorage" not in js
     cad_js = (STATIC / "cad.js").read_text()
-    assert "t.atc_text || t.text" in cad_js and '"atc-weak"' in cad_js and "As transcribed: " in cad_js
+    assert "t.atc_text || t.fixed_text || t.text" in cad_js and '"atc-weak"' in cad_js and "As transcribed: " in cad_js
 
 
 def test_the_eval_tool_runs_offline():

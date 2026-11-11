@@ -90,7 +90,7 @@ window.CadFeed = (() => {
     if (window.Radio) Radio.fillPaging(st.paging, s.paging, null);
     const rows = f.rows || [];
     const sig = JSON.stringify([st.collapsed, st.deps.rev(),
-      rows.map((t) => [t.id, t.text, t.status, t.rig, t.pc, t.has_audio, t.alt_text, t.rerun_at, t.page, t.tones,
+      rows.map((t) => [t.id, t.text, t.fixed_text, t.status, t.rig, t.pc, t.has_audio, t.alt_text, t.rerun_at, t.page, t.tones,
                        t.names_ours, t.tone_seq, t.prealert && t.prealert.status,
                        (t.events || []).map((e) => [e.id, e.why]), emSig(t)])]);
     if (sig !== st.sig) {

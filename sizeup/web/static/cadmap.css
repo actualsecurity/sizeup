@@ -268,6 +268,7 @@
   .tr-car.l4 > span { block-size: 100%; background: var(--err); }
   .tr-car.loco { background: var(--line-strong); }
   .tr-alert { color: var(--warn); }
+  .tr-more { cursor: help; text-decoration: underline dotted; }
   .tr-deps { display: flex; flex-direction: column; gap: var(--s-0); font-variant-numeric: tabular-nums; }
   /* the Aircraft group (aircraft.js, #155): HPN's movements, one row each (a click opens the aircraft), emergencies first */
   .ac-list { display: flex; flex-direction: column; }
