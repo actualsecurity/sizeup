@@ -2361,6 +2361,42 @@ could delete attachments with the same permission. The app's audit (`attachment_
 CAD store) and S3's own records (CloudTrail data events, if turned on) are what show such a delete. Only the lease holder writes. Without the bucket:
 "Incident attachments not configured", nothing copied, the lists read empty.
 
+## Where the hub's CPU goes (#425)
+
+`sizeup/perf.py`, the hub only. Three parts, none of them an AWS change:
+
+- **By thread, always on.** Once a minute each thread's CPU time is read from the kernel
+  (`/proc/self/task/<tid>/schedstat`, else `.../stat`) and added to its *group*: the thread's name with whatever was
+  made at run time cut off (`ntfy-<topic>` is `ntfy`, `stream-<camera>` is `stream`). Request threads are `http`
+  (each reports its own CPU as it ends), the state streams `http-stream`. An hour of minutes is kept, and the sums
+  since the start. With it: memory, threads, open files, the garbage collector's count and time, and how many things
+  the main in-memory lists hold (`HubApp._perf_sizes`). Each answered request's CPU goes to its route: the family is
+  made from the route that matched (the server's own paths and regexes), so only the words a route spells out stay and
+  every id, slug and file name is `:id`; a request that was refused or found nothing is only `(refused)` /
+  `(not found)` / `(error)`, whatever was asked. At most 400 families; the one unused the longest makes room.
+- **A profile on demand.** `POST /api/cad/perf/profile {"seconds": 30}` (1 to 120 s, `"hz"` 5 to 100, default 25):
+  a thread reads every thread's stack, but counts a stack only for a thread whose CPU clock moved in the 1 ms
+  before *and* the 1 ms after it was taken, so the ~50 threads asleep in a wait count nothing. Each group's total is
+  then set to the CPU it really used meanwhile. The answer: CPU by thread (`caught`: how many times it was seen
+  computing: few means its split by function is rough), by function (`self`, `cumulative`), by line, and `folded`
+  (`thread;caller;...;function microseconds`, for flamegraph.pl or speedscope). One at a time (409), a rest of 30 s
+  after each (429), at most 4000 stacks of 48 frames. Over 60 s the answer is 202 at once and
+  `GET /api/cad/perf/profile` has the result (`?format=folded`: the stacks as text). **It is not free**: every sample
+  reads every thread's clock twice, about 3.7% of one core at 50 Hz on a laptop, so expect around a tenth of the task's
+  0.5 vCPU while it runs at the default 25 Hz (twice that at 50). Its real cost is in each answer (`overhead`) and in
+  the log (`perf profile: ... overhead=1.9% of 1 core`).
+- **A line an hour** in the log (CloudWatch), and one 5 minutes after the start to compare with:
+  `perf 1h: cpu=41.2% of 0.5 vCPU top[broadcast=12.3 http-stream=8.1 ...] gc=0.8% rss_mb=412 threads=53 fds=88 up_h=5.0`
+  The top 8 thread groups, as shares of the task's CPU (ECS says how much that is; else of one core).
+
+Admins only (`ADMIN_READS`, `WRITES`), on Settings > Health ("Hub CPU": threads now / 1 h / since start, "Profile
+30 s"). Nothing in any of it but thread groups, function names, file:line and path families.
+
+**Reading it.** A thread whose "Now" is above its "Since start" has grown with uptime; the hourly lines show the
+same per thread, hour on hour (`GET /api/cad/perf` → `hours` keeps 72 of them, with the sizes at each). In a
+profile, time inside one C call is its Python caller's: `Store.q` is SQLite, `compress` zlib, `Perf._gc` the garbage
+collector. `(short bursts, not caught)` is a thread that used CPU but was never seen computing.
+
 ## The hub's storage
 
 Everything the hub keeps is SQLite under `SIZEUP_STATE_DIR`, so Litestream can replicate it:

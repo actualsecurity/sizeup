@@ -3414,7 +3414,8 @@ def make_server(app: App, fence=None, listener=None) -> WebServer:
                        aircraft=app.aircraft, roadwork=app.roadwork, set_adsb=app.set_adsb_receiver,
                        vessels=app.vessels,
                        airband_ab=app.airband_ab if cfg.cloud_role != "hub" else None,
-                       fence=fence, health_fn=lambda: app.health_extra(fence), listener=listener)
+                       fence=fence, health_fn=lambda: app.health_extra(fence), listener=listener,
+                       perf=getattr(app, "perf", None))
 
     def changed() -> None:             # a new talker is pushed at once, not on the next second
         server.poke()

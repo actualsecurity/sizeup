@@ -643,7 +643,31 @@ class HubApp(App):
         for p in list(self.pages):                     # pages from before #64: rows in Radio too
             self._page_to_cad(p, replace=False)
         self._clean_hub()
+        # where the hub's CPU goes (#425, sizeup/perf.py): by thread, always on; a profile on demand; a log line an hour
+        from sizeup.perf import Perf
+        self.perf = Perf(log=log)
+        self._perf_sizes()
         app_mod._mark("hub")
+
+    def _perf_sizes(self) -> None:
+        """How many things the main in-memory lists and caches hold (#425: a len() each, read once a minute), so
+        what grows with uptime shows next to the CPU. A name that is gone is simply not listed."""
+        def size(obj, attr: str):
+            return lambda: len(v) if (v := getattr(obj, attr, None)) is not None else None
+
+        dvr = getattr(self.roads, "dvr", None)
+        for name, obj, attr in (
+                ("pages", self, "pages"), ("monitor_incidents", self.store, "incidents"), ("monitor_traffic", self.store, "loose"),
+                ("hubdb_written", self.mdb, "_written"), ("station_jobs", getattr(self.hub, "jobs", None), "_jobs"),
+                ("aws_waiting", self, "_aws_since"), ("camera_images", self.roads, "_images"),
+                ("camera_segments", self.roads, "_segments"), ("camera_streams", self.roads, "_streams"),
+                ("camera_health", self.roads, "_health"), ("dvr_cameras", dvr, "_cams"), ("gis_layers", self.gis, "_bytes"),
+                ("radar_tiles", self.weather, "_tiles"), ("trains", self.trains, "_gtfs_pos"),
+                ("aircraft", self.aircraft, "phases")):
+            if obj is not None:
+                self.perf.gauge(name, size(obj, attr))
+        self.perf.gauge("dvr_segments", lambda: sum(len(c.get("segs") or ()) for c in list(getattr(dvr, "_cams", {}).values()))
+                        if dvr is not None else None)
 
     # -- the station's events ----------------------------------------------------------------------
 
@@ -1266,6 +1290,7 @@ class HubApp(App):
         threading.Thread(target=self.health.run, args=(self._stopping,), name="station-health", daemon=True).start()
         threading.Thread(target=self.error_watch.run, args=(self._stopping,), name="hub-errors", daemon=True).start()
         threading.Thread(target=self._aws_watch, name="aws-sweep", daemon=True).start()
+        self.perf.start()
         self._started = True                      # the phone pre-alert: the hub's own subscription
         self.prealert_sync()
         self.start_sources()                      # held reports and promotion (#297); the adapters are the station's
@@ -1282,6 +1307,7 @@ class HubApp(App):
         from sizeup.timing import Phases
         t = Phases("stop")                             # the drain's share of a deploy (#264): where it goes
         self._stopping.set()
+        self.perf.stop()
         if self.prealert is not None:
             self.prealert.stop()
         self.cad.sources.stop()
