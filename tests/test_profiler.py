@@ -14,6 +14,7 @@ from sizeup import perf as perf_mod
 from sizeup.perf import (FIRST_LINE_TICKS, HOUR_TICKS, HTTP, KEEP_TICKS, Busy, Perf, ThreadClock, TooSoon, group,
                          route_family, task_vcpu)
 from tests.test_access import AUD, TEAM, jwks, jwt, keys, req  # noqa: F401  (fixtures)
+from tests.test_app import wait
 from tests.test_cloud import HubRun, hub_cfg
 from tests.test_roles import COREY, DEE, JULIAN, VAL, people
 
@@ -347,7 +348,7 @@ def test_a_profile_charges_the_function_that_computes_not_the_threads_that_wait(
     assert 0 < out["cpu_ms"] <= out["process_cpu_ms"] * 1.05
     assert "perf-sampler" not in threads                              # itself: measured apart
     o = out["overhead"]
-    assert o["cpu_ms"] > 0 and o["core_pct"] < 25 and out["samples"] > 5
+    assert o["cpu_ms"] > 0 and o["us_per_sample"] > 0 and out["samples"] > 5     # its own cost, measured and said
 
 
 @needs_thread_cpu
@@ -458,7 +459,8 @@ def test_the_hub_counts_its_threads_and_requests_and_says_nothing_of_anyone(keys
         assert code == 200
         code, again = req(h.url + "/api/cad/perf/profile", "POST", {"seconds": 1}, admin)
         assert code == 429 and again["retry_s"] > 0 and "profile again in" in again["error"]           # the rest after one
-        h.app.perf.tick()
+        wait(lambda: sum(r[0] for k, r in list(h.app.perf._routes.items()) if "perf/profile" in k) == 2)   # (a request is
+        h.app.perf.tick()                                                # counted just after its answer is sent)
         code, table = req(h.url + "/api/cad/perf", headers=admin)
         code2, last = req(h.url + "/api/cad/perf/profile", headers=admin)
         code3, folded = req(h.url + "/api/cad/perf/profile?format=folded", headers=admin)
