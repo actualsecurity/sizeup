@@ -2297,7 +2297,10 @@ class App:
                 ranked = sorted(self.gaz.streets.values(),
                                 key=lambda st: -sum(len(v) for m, v in st.addrs.items() if m in ours))
                 streets = [st.name for st in ranked if any(m in ours for m in st.addrs)]
-            self._vocab_suggest = channels.vocabulary_suggestions(self.cad.lists.units, streets)
+            from sizeup import stt_vocab                         # 60 Control and the Fire/EMS channels: the county's
+            county = stt_vocab.county_phrases(self.cad.lists.units, self.cad.lists.geo_town_aliases,
+                                              battalions=stt_vocab.SUGGEST_BATTALIONS)
+            self._vocab_suggest = channels.vocabulary_suggestions(self.cad.lists.units, streets, county=county)
         return list(self._vocab_suggest)
 
     def vocabulary_push(self, phrases: list[str]) -> dict:

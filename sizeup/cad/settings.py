@@ -148,7 +148,7 @@ WORDING = (("new", "First dispatch"), ("add_on", "Added to the assignment"), ("u
            ("change_type_full", "Upgrade: new type, full response"), ("change_full", "Upgrade: full response"),
            ("respond", "Upgrade: more units"))
 MAX_TONES, MAX_GROUPS, MAX_CHANNELS = 8, 4, 8
-MAX_VOCAB, MAX_PHRASE_CHARS = 500, 100
+MAX_VOCAB, MAX_PHRASE_CHARS = 1500, 100
 MAX_PLACE_NAMES = 300
 TONES_SECTION, MAX_NAMED_TONES, TONE_HZ = "tones", 400, tonelist.TONE_HZ     # the decoder's band (radio/tones.py)
 
