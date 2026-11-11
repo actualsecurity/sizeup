@@ -307,6 +307,15 @@ class Metrics:
                 "mem_total": mem_total, "temp_c": self.temp_c(), "disk_path": str(self.disk_path)[:200], **disk}
 
 
+LONG_NUMBER = re.compile(r"(?<![\d.])\d{5,}(?![\d.]|\s*(?:MHz|Hz|/sec))")
+
+
+def no_ids(detail) -> str:
+    """A recorder's detail for the health report: trunk-recorder's own output lines can name a radio (its ID), so
+    any long whole number in it is left out (frequencies and rates stay)."""
+    return LONG_NUMBER.sub("#", str(detail or ""))[:200]
+
+
 def station_metrics(app, metrics: Metrics) -> dict:
     """status["health"] in the station's state post: the machine, and each radio program as it really runs
     (the rows say "off" for a job no dongle has; here every job with whether it is expected to run)."""
@@ -328,13 +337,15 @@ def station_metrics(app, metrics: Metrics) -> dict:
         except Exception:  # noqa: BLE001
             continue
         for job in rt.system.jobs:
+            # context: a context system's job is never an alert (the hub shows it in the panel only)
             jobs[job] = {"state": rs.get("state") if job in assigned else "off", "restarts": rs.get("restarts", 0),
-                         "detail": str(rs.get("detail") or "")[:200], "expected": (not shared) or job in assigned}
+                         "detail": no_ids(rs.get("detail")), "expected": (not shared) or job in assigned,
+                         "context": True}
     rec = getattr(app, "recorder", None)
     if rec is not None and getattr(app, "p25", None) is not None:
         rs = rec.status()
         out["recorder"] = {"state": rs.get("state"), "restarts": rs.get("restarts", 0),
-                           "detail": str(rs.get("detail") or "")[:200],
+                           "detail": no_ids(rs.get("detail")),
                            "expected": (not shared) or P25_JOB in assigned}
         cc = getattr(rec, "cc", None)
         if cc is not None:
@@ -581,6 +592,7 @@ class StationHealth:
             dongles.append({"serial": str(d.get("serial") or ""), "name": str(d.get("name") or d.get("serial") or ""),
                             "present": bool(d.get("present")), "job": job, "set_by": d.get("set_by"),
                             "held_by": d.get("held_by"), "ambiguous": str(d.get("ambiguous") or "")[:300],
+                            "context": bool(js.get("context")),      # another P25 system's job (#409): never an alert
                             "running": bool(d.get("present")) and job != "Off" and js.get("state") == "ok",
                             "state": js.get("state") if job != "Off" else "off", "restarts": js.get("restarts", 0),
                             "detail": str(js.get("detail") or "")[:200]})
@@ -779,6 +791,8 @@ class StationHealth:
                                          "text": (x["text"] or f"{len(x['indexes'])} dongles share serial {x['serial']}") + "." + on,
                                          "since": now}
         for d in m["dongles"]:
+            if d.get("context"):
+                continue                                 # a context system down is shown in the panel, never pushed
             if not d["present"]:
                 held(f"sdr:{d['serial']}", 0, {"severity": "critical", "title": f"SDR {d['name']} gone",
                                                "text": f"dongle {d['name']} ({d['serial']}) unplugged or not found"

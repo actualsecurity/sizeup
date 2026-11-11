@@ -1,5 +1,5 @@
 {
-  "_about": "Police / EMS unit numbering on other P25 systems (GitHub #412). Community-sourced: every entry is editable data with a confidence, never logic. Namespaces are per system and service: a number here says nothing about a fire unit with the same number (police \"266\" is not fire 266). No radio IDs here: the roster is learned on the air and kept in the database only.",
+  "_about": "Police / EMS unit numbering on other P25 systems (GitHub #412). Community-sourced: every entry is editable data with a confidence, never logic. Namespaces are per system and service: a number here says nothing about a fire unit with the same number (police \"266\" is not fire 266). The only radio IDs here are the two headquarters seeds published on the RadioReference wiki; the roster itself is learned on the air and kept in the database only.",
   "systems": {
     "mrrs": {
       "dispatch_radio_ids": {
@@ -63,7 +63,27 @@
           "source": "RadioReference"
         }
       ],
-      "numbering": []
+      "numbering": [],
+      "radio_ids": [
+        {
+          "radio_id": "4242098",
+          "said": "908",
+          "service": "police",
+          "department": "Port Chester PD",
+          "role": "headquarters",
+          "confidence": "low",
+          "source": "RadioReference wiki"
+        },
+        {
+          "radio_id": "4242396",
+          "said": "266",
+          "service": "police",
+          "department": "Rye PD",
+          "role": "headquarters",
+          "confidence": "low",
+          "source": "RadioReference wiki"
+        }
+      ]
     }
   }
 }

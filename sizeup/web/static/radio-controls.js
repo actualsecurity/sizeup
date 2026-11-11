@@ -592,6 +592,10 @@ window.RadioControls = (() => {
     }
     renderTalkgroups();
   }
+  function systemLabel(name) {
+    const sys = ((st.state && st.state.p25_systems) || []).find((x) => x.name === name);
+    return sys ? sys.label : String(name || "").toUpperCase();
+  }
   function tierSelect() {
     const sel = el("select", "tg-tier sm");
     for (const [v, label] of TIERS) sel.append(new Option(label, v));
@@ -737,8 +741,9 @@ window.RadioControls = (() => {
     show(n.tgErr, !!st.error);
     const by = new Map();
     for (const r of shown) {
-      if (!by.has(r.group || "")) by.set(r.group || "", []);
-      by.get(r.group || "").push(r);
+      const gk = (r.tier_set ? `${r.system}\u0001` : "") + (r.group || "");     // (#409) never blended into a county group
+      if (!by.has(gk)) by.set(gk, []);
+      by.get(gk).push(r);
     }
     const rank = (g) => { const i = GROUP_ORDER.indexOf(g); return i < 0 ? GROUP_ORDER.length - 1 : i; };
     const groups = [...by.entries()].sort((a, b) => rank(a[0]) - rank(b[0]) || a[0].localeCompare(b[0]))
@@ -768,7 +773,8 @@ window.RadioControls = (() => {
           setText(gcount, `${x.list.length} channel${x.list.length === 1 ? "" : "s"}, squelch + MDC IDs`);
           show(gsw, false);
         } else {
-          show(gsw, true);
+          const other = x.list.length > 0 && !!x.list[0].tier_set;      // another P25 system's: tiers, row by row
+          show(gsw, !other);
           const dec = x.list.filter((r) => !r.encrypted), on = dec.filter((r) => r.record).length;
           const all = dec.length > 0 && on === dec.length, mixed = on > 0 && !all;
           gsw.dataset.group = x.g;
@@ -776,7 +782,7 @@ window.RadioControls = (() => {
           gsw.classList.toggle("mixed", mixed);
           gsw.disabled = !dec.length || lock;
           gsw.title = !dec.length ? "All encrypted" : all ? `Recording all ${dec.length}: tap to stop` : `Record all ${dec.length} (encrypted stay off)`;
-          setText(gchip, groupName(x.g));
+          setText(gchip, other ? `${systemLabel(x.list[0].system)} \u00b7 ${groupName(x.list[0].group)}` : groupName(x.g));
           gchip.style.setProperty("--c", groupColor(x.g));
           const m = x.list.filter((r) => r.main).length, hd = x.list.filter((r) => r.count).length;
           setText(gcount, `${x.list.length} TG${x.list.length === 1 ? "" : "s"}` + (m ? `, ${m} main` : "") + (hd ? `, ${hd} heard` : ""));
