@@ -356,7 +356,7 @@ window.TrainLayer = (() => {
     const part = (a, b, kind) => ({ type: "Feature", geometry: { type: "LineString", coordinates: piece(tr, Math.min(a, b), Math.max(a, b)) },
                                     properties: { id: t.id, estimated: !!t.estimated, stale: !!t.stale, dim: !!t.dim, unsure, kind } });
     const cars = [part(s, s + back * len, "body"), part(s, s + back * M_PER_CAR, "cab")];
-    if (t.stale) cars.pop();                  // faded: no cab over the body (two layers at partial opacity: a brighter cab)
+    if (t.stale || t.dim) cars.pop();         // faded: no cab over the body (two layers at partial opacity: a brighter cab)
     for (let k = 1; k < n; k++) cars.push(part(s + back * (k * M_PER_CAR - GAP_M / 2), s + back * (k * M_PER_CAR + GAP_M / 2), "gap"));
     return { cars, mid: toLonLat(tr, along(tr, s + (back * len) / 2)[1]) };
   }

@@ -686,7 +686,7 @@ out.carried = P({ s: 3000, mp: 27.3, pos_src: "traintime" }, { s: 3000 + 1609.34
 @pytest.mark.skipif(NODE is None, reason="node not installed")
 def test_a_train_on_a_held_or_default_track_is_dashed_not_faded(tmp_path, model):
     """#374 re-review: an unsure track (held, or the outer default) is a dashed stripe down the body at full opacity;
-    faded stays for a stale feed alone, and a stale train has no cab over its body (a brighter cab at partial
+    faded stays for a stale feed (and, a little, a GPS fix over 20 s old: #390), and a faded train has no cab over its body (a brighter cab at partial
     opacity)."""
     tracks = {k: [[[round(a, 7), round(b, 7), round(c, 1)] for a, b, c in lane.coords] for lane in lanes]
               for k, lanes in model.track_lanes.items()}
@@ -698,7 +698,8 @@ out.said = run("said"); out.held = run("held"); out.outer = run("outer"); out.st
     assert not any(u for _, u in out["said"]) and all(u for _, u in out["held"]) and all(u for _, u in out["outer"])
     assert [k for k, _ in out["said"]][:2] == ["body", "cab"] and "cab" not in [k for k, _ in out["stale"]]
     js = (Path(__file__).resolve().parent.parent / "sizeup" / "web" / "static" / "trains.js").read_text()
-    assert 'const fade = ["case", ["get", "stale"], STALE_OPACITY, 1];' in js and "UNSURE_OPACITY" not in js
+    assert ('const fade = ["case", ["get", "stale"], STALE_OPACITY, ["get", "dim"], DIM_OPACITY, 1];' in js   # (#390: a little
+            and "UNSURE_OPACITY" not in js)                                                              # faded at 20 s)
     unsure = js[js.index('id: "tr-unsure"'):js.index('id: "tr-gap"')]
     assert '["==", ["get", "unsure"], true]' in unsure and '"line-dasharray"' in unsure    # (the icon's features have none)
     assert js.index('id: "tr-cab", type') < js.index('id: "tr-unsure"') < js.index('id: "tr-gap"') and '"tr-unsure", "tr-gap"]' in js
