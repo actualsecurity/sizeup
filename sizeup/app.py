@@ -2152,7 +2152,8 @@ class App:
             self._alarm(t, text)                       # the words came later (Amazon Transcribe, a re-run)
             self._atc(t, text)
         if changed:
-            log(f"{why} {cid}: {text or '(no speech)'}")
+            # (another P25 system's words are never in a log, #419)
+            log(f"{why} {cid}: " + ("(text changed)" if self.clip_is_context(cid) else text or "(no speech)"))
         self._emit("retext", {"id": cid, "text": text, "status": status, "confidence": confidence, "model": model,
                               **({"alt": alt} if alt is not None else {})})
         return changed
@@ -2394,7 +2395,8 @@ class App:
         if getattr(item, "status", "") in ("error", "skipped") and job.alt is None and not job.rerun:
             log(f"aws transcribe: {job.kind} {job.id}: a late answer, and the fallback had none: it is the text")
             return self._aws_done(job, text, conf)
-        log(f"aws transcribe: {job.kind} {job.id}: a late answer, kept as the alternative: {text}")
+        log(f"aws transcribe: {job.kind} {job.id}: a late answer, kept as the alternative"
+            + ("" if self.clip_is_context(job.id) else f": {text}"))
         self._set_alt(job.id, text, f"{channels_model()} (late)")
 
     def _aws_changed(self) -> None:
@@ -3221,13 +3223,33 @@ class App:
         """POST /api/incident/<id>/close (the monitor's incident, not the CAD's)."""
         return self.store.close(iid)
 
+    def _hide_context(self, st: dict) -> dict:
+        """The state as served where nobody is signed in (the station's own page, all-in-one, a hub without Access;
+        sizeup/sourcekeys.py may_see_context, #419): none of another system's traffic, nothing its control channel
+        showed, and no activity on its talkgroups (count, last heard, dropped: their names and tiers stay). In place;
+        the hub calls it again after it puts the station's lists in."""
+        if sources.may_see_context(self.access_enforced):
+            return st
+        st["loose_traffic"] = [t for t in st.get("loose_traffic") or [] if not sources.is_context(t)]
+        for inc in st.get("incidents") or []:
+            inc["traffic"] = [t for t in inc.get("traffic") or [] if not sources.is_context(t)]
+        st["p25_systems"] = [dict(x, unknown=[], encrypted=[], last_heard=None, cc=None)
+                             for x in st.get("p25_systems") or [] if isinstance(x, dict)]
+        st["talkgroups"] = [dict(r, count=0, last=None, dropped=0) if isinstance(r, dict) and sources.is_context(r) else r
+                            for r in st.get("talkgroups") or []]
+        st["radios"] = [dict(r, last_heard=None, detail="") if isinstance(r, dict) and r.get("system") else r
+                        for r in st.get("radios") or []]
+        return st
+
     def clip_is_context(self, cid: str) -> bool:
         """This clip is another P25 system's (#419: served only to a signed-in person). By its row here, by the
-        radio log's, else by the talkgroup its id starts with ("9211-..."): never guessed the other way."""
-        base = cid.split(".")[0]
+        radio log's, else by the talkgroup its id starts with ("9211-..."). A row that says so is context even when its
+        talkgroup has since left the file. (An id has dots of its own, "9211-1790954731.970_770181250.1-call_5": only
+        the source copy's ".src" is taken off.)"""
+        base = cid[:-4] if cid.endswith(".src") else cid
         for t in list(self.store.loose) + [t for i in self.store.incidents for t in i.traffic]:
             if t.id == base:
-                return bool(getattr(t, "system", ""))
+                return sources.is_context(t.__dict__)
         try:
             row = self.cad.store.one("SELECT system FROM radio_traffic WHERE id = ?", (base,))
         except Exception:  # noqa: BLE001 - no log to ask: by its id
@@ -3257,13 +3279,7 @@ class App:
               "paging": self.paging_state(),
               "prealert": self.cad.prealert_state(),
               "channels": self.channels_state()}
-        if not sources.may_see_context(self.access_enforced):
-            # no sign-in here (the station's own page, all-in-one, a hub without Access): another system's traffic is
-            # not served at all, nor what its control channel showed (#419)
-            st["loose_traffic"] = [t for t in st["loose_traffic"] if not sources.is_context(t)]
-            for inc in st["incidents"]:
-                inc["traffic"] = [t for t in inc["traffic"] if not sources.is_context(t)]
-            st["p25_systems"] = [dict(x, unknown=[], encrypted=[]) for x in st["p25_systems"]]
+        self._hide_context(st)
         # Tell the display which entries have a recording (so ▶ isn't a dead button).
         with self._lock:
             busy = set(self._rerun_ids)

@@ -671,7 +671,7 @@ class RadioLog:
     def keep(self, tid: str, iid: int, operator: str = "", undo: bool = False) -> dict:
         """A person confirms an automatic mention / fireground link (its audio and row then kept like the event's), or
         takes that back (undo): a line in the event's timeline either way."""
-        from sizeup.cad.comms import _when, _who
+        from sizeup.cad.comms import _row_line
         with self.store.tx() as db:
             t = db.execute("SELECT * FROM radio_traffic WHERE id = ?", (tid,)).fetchone()
             if t is None or not db.execute("SELECT 1 FROM radio_links WHERE traffic_id = ? AND incident_id = ?",
@@ -683,7 +683,7 @@ class RadioLog:
                 n = db.execute("INSERT OR IGNORE INTO radio_link_kept (traffic_id, incident_id, at, operator) VALUES (?, ?, ?, ?)",
                                (tid, iid, self.cad.clock(), operator)).rowcount
             if n:
-                self.store._event(db, iid, "radio", f"Radio {_when(t)} {_who(t)} on {t['channel']} "
+                self.store._event(db, iid, "radio", f"Radio {_row_line(t)} "
                                   + ("no longer kept" if undo else "kept with this event"), operator)
         self.cad.comms.rev += 1
         return {"kept": not undo}

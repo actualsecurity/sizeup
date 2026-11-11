@@ -755,6 +755,11 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                     n = int(self.headers.get("Content-Length") or 0)
                     body = json.loads(self.rfile.read(min(n, 65536)) or b"{}")
                     ids = None if body.get("all") else [str(i) for i in body["ids"]][:2000]
+                    with sourcekeys.request_context(self.who):
+                        hidden = (ids is not None and clip_context is not None and not sourcekeys.may_see_context()
+                                  and any(clip_context(i) for i in ids))
+                    if hidden:                   # another P25 system's transmission (#419): a signed-in person only
+                        return self._send(403, b'{"error":"sign in to re-run that transmission"}', "application/json")
                     queued = retranscribe(ids)
                 except (ValueError, KeyError, TypeError, AttributeError) as e:
                     return self._send(400, json.dumps({"error": f"bad request: {e}"}).encode(), "application/json")

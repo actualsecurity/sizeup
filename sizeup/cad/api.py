@@ -687,6 +687,10 @@ class CadApi:
             if path == "/api/cad/comms/sources":
                 return _json(200, self.cad.comms_sources(parse_qs(query)))
             if path == "/api/cad/comms/activity":      # per-minute activity per source (#409); ?source=&hours= (24)
+                # which radios keyed an encrypted talkgroup: a verified, signed-in admin only (read_refused checks the
+                # admin when someone is signed in; with nobody verified, never: sourcekeys.may_see_context)
+                if not sourcekeys.may_see_context():
+                    return _json(403, {"error": "radio activity needs a sign-in (Cloudflare Access)"})
                 q = parse_qs(query)
                 try:
                     hours = min(24.0 * 90, max(0.1, float((q.get("hours") or ["24"])[0])))
