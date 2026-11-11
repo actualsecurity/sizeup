@@ -436,30 +436,69 @@ class Comms:
                 continue
         return out
 
+    # The audio's default days (the hub's [storage] audio_keep_hours / 24, set by sizeup/cloud/hub.py) and the floor of
+    # a record's. None until the hub says: then the audio counts as kept as long as Settings allows (365 days), so
+    # a prune never takes a transcript before its audio (the prune at start runs before the hub has said).
+    audio_default_days: float | None = None
+    PRUNE_BATCH = 500
+
     def policies(self):
         """(the transcripts' retention, the audio's) from Settings > System > Audio retention (#414,
-        sizeup/audiostore.py): the transcripts default KEEP_UNLINKED_S, the audio's overrides only (its default is
-        the hub's config, never longer than the transcripts' default)."""
+        sizeup/audiostore.py): the transcripts default KEEP_UNLINKED_S, the audio the hub's default."""
         from sizeup import audiostore
+        a_default = self.audio_default_days if self.audio_default_days is not None else audiostore.RETENTION_DAYS[1]
         return (audiostore.Retention(self._section(audiostore.TRANSCRIPT_SECTION), KEEP_UNLINKED_S / 86400),
-                audiostore.Retention(self._section(audiostore.RETENTION_SECTION), 0.5))
+                audiostore.Retention(self._section(audiostore.RETENTION_SECTION), a_default))
 
-    def prune(self) -> int:
-        """Transmissions on no event, once older than their transcripts' retention (Settings, per channel /
-        talkgroup, 365 days by default) and their audio's (a transcript never goes before its audio: the longer of the
-        two); a record (emergency, kept, an alarm) not before KEEP_RECORD_S either; one linked to an event, never."""
+    def _groups(self, tpol, apol) -> list[tuple[str, tuple, float]]:
+        """(an SQL condition, its parameters, the days kept) covering every row once: per talkgroup with days of its
+        own (in either policy) by channel with days of its own, per such channel, the rest: each kept the longer of its
+        transcripts' and its audio's days, by the same precedence as the prunes (talkgroup > channel > default)."""
+        tgs = sorted(set(tpol.tg) | set(apol.tg))
+        chs = sorted(set(tpol.ch) | set(apol.ch))
+        days = lambda ch, tg: max(tpol.keep_days(ch, tg), apol.keep_days(ch, tg))   # noqa: E731
+        no_ch = f"channel NOT IN ({','.join('?' * len(chs))})" if chs else "1"
+        no_tg = f"(talkgroup IS NULL OR talkgroup NOT IN ({','.join('?' * len(tgs))}))" if tgs else "1"
+        out = []
+        for tg in tgs:
+            for ch in chs:
+                out.append(("talkgroup = ? AND channel = ?", (tg, ch), days(ch, tg)))
+            out.append((f"talkgroup = ? AND {no_ch}", (tg, *chs), days("", tg)))
+        for ch in chs:
+            out.append((f"channel = ? AND {no_tg}", (ch, *tgs), days(ch, None)))
+        out.append((f"{no_tg} AND {no_ch}", (*tgs, *chs), days("", None)))
+        return out
+
+    def prune(self, pause_s: float = 0.0) -> int:
+        """Transmissions on no event, once older than the longer of their transcripts' retention (Settings, per channel /
+        talkgroup, 365 days by default) and their audio's: a transcript never goes before its audio. A record
+        (emergency, kept, an alarm) not before KEEP_RECORD_S either; one linked to an event, never. One indexed query
+        per channel / talkgroup group ((talkgroup, start), (channel, start), (start)), deleted PRUNE_BATCH rows a
+        transaction (the CAD's write lock held only that long), pause_s apart. The number deleted."""
         now = self.clock()
         tpol, apol = self.policies()
-        texpr, tparams = tpol.sql(now)
-        aexpr, aparams = apol.sql(now)
         alarms = bool(self.store.q("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'alarms'"))
         record = "emergency = 1 OR kept != ''" + (" OR id IN (SELECT traffic_id FROM alarms)" if alarms else "")
-        shortest = now - min(tpol.shortest_days(), 365.0) * 86400
-        with self.store.tx() as db:
-            return db.execute(f"DELETE FROM radio_traffic WHERE start < ? AND start < MIN(({texpr}), ({aexpr})) "
-                              f"AND id NOT IN (SELECT l.traffic_id FROM radio_links l WHERE {SURE_LINK}) "
-                              f"AND NOT (start >= ? AND ({record}))",
-                              (shortest, *tparams, *aparams, now - KEEP_RECORD_S)).rowcount
+        n = 0
+        for cond, params, days in self._groups(tpol, apol):
+            cutoff, after = now - days * 86400, float("-inf")
+            while True:
+                rows = self.store.q(
+                    f"SELECT rowid AS r, start FROM radio_traffic WHERE {cond} AND start < ? AND start >= ? "
+                    f"AND id NOT IN (SELECT l.traffic_id FROM radio_links l WHERE {SURE_LINK}) "
+                    f"AND NOT (start >= ? AND ({record})) ORDER BY start LIMIT ?",
+                    (*params, cutoff, after, now - KEEP_RECORD_S, self.PRUNE_BATCH))
+                if not rows:
+                    break
+                with self.store.tx() as db:
+                    db.executemany("DELETE FROM radio_traffic WHERE rowid = ?", [(r["r"],) for r in rows])
+                n += len(rows)
+                after = rows[-1]["start"]
+                if len(rows) < self.PRUNE_BATCH:
+                    break
+                if pause_s:
+                    time.sleep(pause_s)
+        return n
 
     def kept_for_events(self, ids: list[str]) -> set[str]:
         """Of these clip ids, the ones whose audio is a record (the hub's audio retention, #251): on a CAD event
