@@ -376,9 +376,14 @@ and `kms:Decrypt` on that key through SSM, nothing else; the key's policy denies
 account's root included), and the hub's roles get an explicit Deny on the prefix and the key. **The hub never holds,
 relays or can read it.** Setup answers y to "Read them from AWS SSM" and gives the region and that user's access key
 (hidden); they are credentials like the others (`SIZEUP_SSM_REGION`, `SIZEUP_SSM_KEY_ID`, `SIZEUP_SSM_SECRET` in the
-credstore, never station.env, the config or the environment). Setup then offers to remove the values kept here for
-those names (default yes); `adapter status` / `doctor` show such a name as "from AWS SSM", and `status` shows the last
-4 characters of the station key in use (to compare with `aws iam list-access-keys`). Any change to the SSM settings
+credstore, never station.env, the config or the environment). A new key pair must read the password's parameter (one
+signed GetParameter by the release's `adapterssm.py` with `-I -S`, the pair on its stdin, the version only) or nothing
+is saved, and setup says AWS's error code (UnrecognizedClientException: a wrong key id; InvalidSignatureException: a
+wrong secret or the clock off). Setup then offers to remove the copy kept here of each password (`*_PASS`, default
+yes); a user name stays here unless SSM has a parameter for it. An adapter writes `ssm.json` in its state directory
+(`/var/lib/sizeup/sources/<source>/`) after each SSM fetch, `{"names": [...], "at": <epoch>}`, the names SSM gave,
+never a value: `adapter status` / `doctor` say "from AWS SSM" only for those, and `status` shows the last 4
+characters of the station key in use (to compare with `aws iam list-access-keys`). Any change to the SSM settings
 restarts the station service, so the adapter uses them at once.
 The fetch is `sizeup/cloud/adapterssm.py` (stdlib, SigV4 from `sizeup/aws.py`, no proxy): a value only in memory,
 never logged; an error is AWS's error type only. How often to read it and when a changed version may be tried are the

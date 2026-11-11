@@ -17,6 +17,10 @@ department's setup scripts). This module only fetches; how often, what to cache 
 tried belong to the adapter (it keeps values in memory only).
 
     configured(read)            whether the station has an SSM key at all (never a value)
+    check(key_id, secret, region, name)
+                                one signed GetParameter with a key pair setup was given: the parameter's version, or
+                                SsmError with AWS's error code; setup refuses a pair that fails (run as
+                                `python -I -S -c ...` by autoupdate.py, the pair on stdin: see _main)
     get(names, read, send)      {name: Param(value, version, modified)} for each NAME that has a parameter (a missing
                                 one is left out: the adapter falls back to its local value); SsmError when SSM can't
                                 be asked or says no. Never raises with a value, a key or AWS's message in it.
@@ -167,3 +171,29 @@ def get(names: Iterable[str], read: Reader = credential, send: Sender | None = N
             raise SsmError("bad value")
         out[name] = Param(name, value, version, modified)
     return out
+
+
+def check(key_id: str, secret: str, region: str, name: str, send: Sender | None = None, endpoint: str = "") -> int:
+    """Whether this key pair reads PREFIX + name: its version (never the value, which is dropped at once). SsmError
+    with AWS's code (AccessDeniedException, UnrecognizedClientException, InvalidSignatureException: a wrong secret or
+    a skewed clock, ParameterNotFound, network) when it can't."""
+    vals = {KEY_ID: key_id, SECRET: secret, REGION: region}
+    got = get([name], read=lambda n: vals.get(n, ""), send=send, endpoint=endpoint)
+    if name not in got:
+        raise SsmError("ParameterNotFound")
+    return got.pop(name).version
+
+
+def _main() -> int:
+    """stdin: {"key_id", "secret", "region", "name"} (a pair never goes in argv or the environment); stdout: "ok <version>"
+    or "error <code>"."""
+    import sys
+    try:
+        d = json.loads(sys.stdin.read())
+        print(f"ok {check(d['key_id'], d['secret'], d['region'], d['name'], endpoint=d.get('endpoint', ''))}")
+        return 0
+    except SsmError as e:
+        print(f"error {e.code}")
+    except Exception as e:  # noqa: BLE001 - never its text
+        print(f"error {type(e).__name__}")
+    return 1

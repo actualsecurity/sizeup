@@ -136,6 +136,8 @@ SSM_PREFIX = "/sizeup-station/adapter/"
 SSM_KEY_ID, SSM_SECRET, SSM_REGION = "SIZEUP_SSM_KEY_ID", "SIZEUP_SSM_SECRET", "SIZEUP_SSM_REGION"
 SSM_NAMES = (SSM_KEY_ID, SSM_SECRET, SSM_REGION)
 SSM_DEFAULT_REGION = "us-east-1"
+SSM_PROVIDED = "ssm.json"     # in an adapter's state dir: {"names": [...], "at": t}, the names SSM gave at its last fetch
+SSM_REMOVABLE = re.compile(r".*_PASS(?:WORD)?")   # a password: setup offers to drop the copy kept here once SSM has it
 SSM_CHECKS = {SSM_REGION: (re.compile(r"[a-z]{2}(?:-gov)?-[a-z]+-\d{1,2}"), "a region such as us-east-1"),
               SSM_KEY_ID: (re.compile(r"AKIA[A-Z0-9]{16}"), "an access key id (AKIA...)"),
               SSM_SECRET: (re.compile(r"[A-Za-z0-9/+=]{16,128}"), "a secret access key (40 characters)")}
@@ -549,6 +551,7 @@ class Paths:
     env: Path = Path("/etc/sizeup/station.env")
     marks: Path = Path("/etc/sizeup/config-updates")
     credentials: Path = Path("/etc/credstore")                       # the adapter's: sizeup-adapter.<NAME>, root 0600
+    sources_state: Path = Path("/var/lib/sizeup/sources")            # each adapter's state dir (its ssm.json)
     dropin: Path = Path("/etc/systemd/system/sizeup-station.service.d/adapter-credentials.conf")
 
     @property
@@ -1312,11 +1315,48 @@ class Updater:
         except OSError:
             return None
 
-    def cred_from(self, name: str, ssm: bool):
-        """cred_has(name), or "ssm" for one not stored here while the station reads its credentials from AWS SSM
-        (SSM_PREFIX + name; whether that parameter exists is the adapter's to say, in its health)."""
-        has = self.cred_has(name)
-        return "ssm" if has is False and ssm and name not in SSM_NAMES else has
+    def cred_from(self, name: str, ssm: bool, provided: set[str] = frozenset()):
+        """cred_has(name), or "ssm" for one SSM actually gave the adapter at its last fetch (ssm_provided()) while the
+        station reads its credentials from AWS SSM."""
+        if ssm and name in provided and name not in SSM_NAMES:
+            return "ssm"
+        return self.cred_has(name)
+
+    def ssm_provided(self) -> set[str]:
+        """The credential names SSM gave the adapter at its last fetch: each adapter's SSM_PROVIDED (names only)."""
+        out: set[str] = set()
+        try:
+            files = list(self.p.sources_state.glob(f"*/{SSM_PROVIDED}"))
+        except OSError:
+            return out
+        for f in files:
+            try:
+                names = json.loads(f.read_text()).get("names") or []
+            except (OSError, ValueError, AttributeError):
+                continue
+            out.update(n for n in names if isinstance(n, str) and ADAPTER_ENV.fullmatch(n))
+        return out
+
+    def ssm_check(self, key_id: str, secret: str, region: str, name: str) -> str:
+        """One signed GetParameter of SSM_PREFIX + name with this pair, by the running release's
+        sizeup/cloud/adapterssm.py (sizeup's own code, stdlib, -I -S: no venv), the pair on its stdin: "" when it
+        reads, "not checked: ..." when it can't be run here, else AWS's error code. Never a value."""
+        rel = Path(os.path.realpath(self.p.current))
+        if not (rel / "sizeup" / "cloud" / "adapterssm.py").is_file():
+            return "not checked: this release has no adapterssm.py"
+        code = (f"import sys; sys.path.insert(0, {str(rel)!r}); "
+                "from sizeup.cloud.adapterssm import _main; sys.exit(_main())")
+        try:
+            r = subprocess.run([sys.executable, "-I", "-S", "-c", code], cwd="/", capture_output=True, text=True,
+                               timeout=30, input=json.dumps({"key_id": key_id, "secret": secret, "region": region,
+                                                             "name": name}))
+        except (OSError, subprocess.SubprocessError) as e:
+            return f"not checked: {type(e).__name__}"
+        out = (r.stdout.strip().splitlines() or [""])[-1]
+        if r.returncode == 0 and out.startswith("ok "):
+            return ""
+        return out[len("error "):] if out.startswith("error ") and re.fullmatch(r"error [A-Za-z0-9 ]{1,64}", out) \
+            else "no answer"
 
     def ssm_key_tail(self) -> str:
         """The last 4 characters of the station's SSM access key id ("" without one, or not readable here): enough to
@@ -1985,8 +2025,10 @@ class Updater:
             if ad.get("why"):
                 rec["error"] = ad["why"]
         ssm = bool(self.cred_has(SSM_KEY_ID) and self.cred_has(SSM_SECRET))
+        provided = self.ssm_provided() if ssm else set()
         adapter = dict(adapter_view(installed, rec), ref=(ad or installed or {}).get("ref", ""),
-                       env=[(k, self.cred_from(k, ssm)) for k in (ad or {}).get("env") or []], ssm_key=self.ssm_key_tail(),
+                       env=[(k, self.cred_from(k, ssm, provided)) for k in (ad or {}).get("env") or []],
+                       ssm_key=self.ssm_key_tail(),
                        key=os.path.isfile(self.p.adapter_key), sources=(installed or {}).get("sources") or [],
                        key_open=self.key_open(), dropin=self.dropin_problem() if os.geteuid() == 0 else "")
         missing = [k for k, has in adapter["env"] if has is False]
@@ -2124,15 +2166,16 @@ def adapter_gather(u: Updater, repo: str = "", ref: str = "", env: str | None = 
         had = all(u.cred_has(n) for n in (SSM_KEY_ID, SSM_SECRET))
         a = ask(f"Read them from AWS SSM ({SSM_PREFIX}NAME)? [{'Y/n' if had else 'y/N'}]: ").strip().lower()
         if a in ("y", "yes") or (had and a not in ("n", "no")):
-            ssm = adapter_gather_ssm(u, ask, secret, out)
+            ssm = adapter_gather_ssm(u, ask, secret, out, names)
             if ssm is None:
                 return None
             values.update(ssm)
-            out(f"  from SSM: {', '.join(SSM_PREFIX + n for n in names)}. A value kept here is only for a name SSM "
-                "has no parameter for: while SSM can't be read the adapter waits rather than try an old one.")
-            local = [n for n in names if u.cred_has(n)]
+            out(f"  from SSM: {', '.join(SSM_PREFIX + n for n in names)} where it has one; a name it has no parameter "
+                "for (e.g. the user) is read here. While SSM can't be read the adapter waits rather than try an old "
+                "password.")
+            local = [n for n in names if SSM_REMOVABLE.fullmatch(n) and u.cred_has(n)]     # passwords only
             if local:
-                a = ask(f"Remove the values kept here for {', '.join(local)} (SSM has them)? [Y/n]: ").strip().lower()
+                a = ask(f"Remove the copy kept here of {', '.join(local)} (SSM has it)? [Y/n]: ").strip().lower()
                 if a not in ("n", "no"):
                     remove = set(local)
             names = names + ssm_names
@@ -2156,9 +2199,11 @@ def adapter_gather(u: Updater, repo: str = "", ref: str = "", env: str | None = 
 
 
 def adapter_gather_ssm(u: Updater, ask: Callable[[str], str], secret: Callable[[str], str],
-                       out: Callable[[str], None]) -> dict | None:
+                       out: Callable[[str], None], names: list[str] = ()) -> dict | None:
     """setup's SSM answers: the region and the station's access key (the sizeup-station-adapter IAM user's), each
-    checked, the key hidden; Enter keeps what's stored. {NAME: value} of those given; None (said why) if not."""
+    checked, the key hidden; Enter keeps what's stored. A new pair (or region) must read one of the adapter's
+    parameters (u.ssm_check: one signed GetParameter, the version only) or nothing is saved. {NAME: value} of those
+    given; None (said why) if not."""
     got = {}
     for k, prompt, hidden in ((SSM_REGION, "AWS region", False),
                               (SSM_KEY_ID, "Station access key id", True),
@@ -2181,6 +2226,25 @@ def adapter_gather_ssm(u: Updater, ask: Callable[[str], str], secret: Callable[[
         else:
             out("  SSM not set up: nothing changed")
             return None
+    if got:
+        def now(k: str) -> str:
+            if k in got:
+                return got[k]
+            try:
+                return u.cred_file(k).read_text().strip()
+            except OSError:
+                return ""
+        name = next((n for n in names if SSM_REMOVABLE.fullmatch(n)), names[0] if names else "")
+        why = u.ssm_check(now(SSM_KEY_ID), now(SSM_SECRET), now(SSM_REGION) or SSM_DEFAULT_REGION, name) if name \
+            else "not checked: no credential names"
+        if why.startswith("not checked"):
+            out(f"  SSM key {why}")
+        elif why:
+            out(f"  SSM key refused reading {SSM_PREFIX}{name}: {why}. Nothing changed (a wrong key id: "
+                "UnrecognizedClientException; a wrong secret or the clock off: InvalidSignatureException).")
+            return None
+        else:
+            out(f"  SSM key ok: it reads {SSM_PREFIX}{name}")
     return got
 
 

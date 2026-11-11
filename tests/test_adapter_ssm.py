@@ -4,8 +4,12 @@ a fake SSM (no network), synthetic keys and values only. Never a value in an err
 from __future__ import annotations
 
 import json
+import os
 import stat
+import subprocess
+import sys
 import tomllib
+from pathlib import Path
 
 import pytest
 
@@ -16,6 +20,23 @@ from tests.test_station_adapter import PUB, _current_release_with_configupdate, 
 KEY_ID = "AKIAEXAMPLEEXAMPLE00"                          # synthetic
 SECRET = "exampleSECRETexampleSECRETexample/+EXMPL"     # synthetic, 40 characters
 VALUE = "Zq9-synthetic-pass!word"                       # synthetic: must never appear in any text
+
+
+ROOT = Path(__file__).resolve().parent.parent
+
+
+@pytest.fixture(autouse=True)
+def key_checks(monkeypatch):
+    """setup's one signed GetParameter of a new key pair: answered here (no network). .answer: "" = it reads."""
+    calls = []
+
+    def check(self, key_id, secret, region, name):
+        calls.append((key_id, secret, region, name))
+        return check.answer
+    check.answer = ""
+    check.calls = calls
+    monkeypatch.setattr(au.Updater, "ssm_check", check)
+    return check
 
 
 def reader(**over):
@@ -170,7 +191,7 @@ def test_setup_keeps_the_station_key_in_the_credstore(station):  # noqa: F811
 
     # again: SSM is the default now, Enter keeps the key; the names prompt doesn't offer SSM's own
     asked.clear()
-    answers = iter(["", "", "", "", "", "n"])                # (n: keep FEED_USER here, SSM has no user parameter)
+    answers = iter(["", "", "", "", ""])                     # (FEED_USER isn't offered for removal: not a password)
     assert au.adapter_setup(u, ask=lambda p: (asked.append(p), next(answers))[1], secret=lambda p: "",
                             out=said.append, make_key=_key, check=False) == 0
     assert "Credential names, comma-separated [FEED_USER,FEED_PASS]: " in asked
@@ -209,8 +230,8 @@ def _with_adapter_installed(u):
     (rel / au.ADAPTER_FILE).write_text(json.dumps({"commit": "a" * 40}))
 
 
-def test_choosing_ssm_removes_the_local_password_by_default_and_restarts(station):  # noqa: F811
-    repo, u, ad = station
+def test_choosing_ssm_removes_the_local_password_by_default_and_restarts(station_ssm):
+    repo, u, ad = station_ssm
     _current_release_with_configupdate(u)
     _with_adapter_installed(u)
     assert _ssm_setup(u, ["git@github.com:example-org/feed-adapter.git", "", "FEED_USER, FEED_PASS", ""],
@@ -219,13 +240,20 @@ def test_choosing_ssm_removes_the_local_password_by_default_and_restarts(station
     u.systemctls.clear()
     asked, said = [], []
     # SSM: y, region Enter, then "remove the local values?" Enter = yes
-    assert _ssm_setup(u, ["", "", "", "y", "", ""], [KEY_ID, SECRET], said, asked) == 0
-    assert any(p.startswith("Remove the values kept here for FEED_USER, FEED_PASS") and "[Y/n]" in p for p in asked)
-    assert not u.cred_file("FEED_PASS").exists() and not u.cred_file("FEED_USER").exists()
+    assert _ssm_setup(u, ["", "", "", "y", "", ""], [KEY_ID, SECRET, ""], said, asked) == 0
+    assert any(p.startswith("Remove the copy kept here of FEED_PASS (SSM has it)") and "[Y/n]" in p for p in asked)
+    assert not any("FEED_USER" in p for p in asked if p.startswith("Remove"))
+    assert not u.cred_file("FEED_PASS").exists()
+    assert u.cred_file("FEED_USER").read_text() == "local-user"          # the user stays: SSM has only the password
     assert ("try-restart", "sizeup-station.service") in u.systemctls        # the new key reaches the adapter
     assert u.dropin_problem() == ""
+    # "from AWS SSM" only for what the adapter last got from SSM (its ssm.json: names only)
     r = u.report()["adapter"]
-    assert ("FEED_PASS", "ssm") in r["env"] and (au.SSM_KEY_ID, True) in r["env"]
+    assert ("FEED_PASS", False) in r["env"] and ("FEED_USER", True) in r["env"]
+    (u.p.sources_state / "cadfeed").mkdir(parents=True)
+    (u.p.sources_state / "cadfeed" / "ssm.json").write_text(json.dumps({"names": ["FEED_PASS"], "at": 1.7e9}))
+    r = u.report()["adapter"]
+    assert ("FEED_PASS", "ssm") in r["env"] and ("FEED_USER", True) in r["env"] and (au.SSM_KEY_ID, True) in r["env"]
     assert r["ssm_key"] == KEY_ID[-4:] and KEY_ID not in json.dumps(r)
     doc = "\n".join(au.doctor_lines(u.report()))
     assert "ok    FEED_PASS: from AWS SSM (/sizeup-station/adapter/FEED_PASS)" in doc and "FAIL  FEED_PASS" not in doc
@@ -254,3 +282,91 @@ def test_a_new_station_key_alone_restarts_the_adapter(station):  # noqa: F811
     assert _ssm_setup(u, ["", "", "", "", ""], [new_id, "", ""]) == 0          # only the key id: restarted
     assert ("try-restart", "sizeup-station.service") in u.systemctls
     assert u.report()["adapter"]["ssm_key"] == "LE11"
+
+
+@pytest.fixture
+def station_ssm(station, tmp_path):  # noqa: F811
+    repo, u, ad = station
+    u.p.sources_state = tmp_path / "var-lib-sizeup" / "sources"
+    return station
+
+
+def test_setup_refuses_a_key_pair_that_doesnt_read(station_ssm, key_checks):
+    repo, u, ad = station_ssm
+    _current_release_with_configupdate(u)
+    key_checks.answer = "InvalidSignatureException"
+    said = []
+    assert _ssm_setup(u, ["git@github.com:example-org/feed-adapter.git", "", "FEED_USER, FEED_PASS", "y", ""],
+                      [KEY_ID, SECRET], said) == 2
+    assert key_checks.calls == [(KEY_ID, SECRET, "us-east-1", "FEED_PASS")]      # the password's parameter
+    text = "\n".join(said)
+    assert "InvalidSignatureException" in text and "Nothing changed" in text
+    assert KEY_ID not in text and SECRET not in text
+    assert not u.cred_file(au.SSM_KEY_ID).exists() and "adapter" not in tomllib.loads(u.p.config.read_text())
+    # it reads: saved; then Enter everywhere: no new pair, no check
+    key_checks.answer = ""
+    assert _ssm_setup(u, ["git@github.com:example-org/feed-adapter.git", "", "FEED_USER, FEED_PASS", "y", ""],
+                      [KEY_ID, SECRET, "local-user", ""], said) == 0
+    assert "  SSM key ok: it reads /sizeup-station/adapter/FEED_PASS" in said
+    n = len(key_checks.calls)
+    assert _ssm_setup(u, ["", "", "", "", ""], ["", "", "", ""]) == 0
+    assert len(key_checks.calls) == n
+    # a new secret alone is checked with the stored id
+    key_checks.answer = "AccessDeniedException"
+    assert _ssm_setup(u, ["", "", "", "", ""], ["", "exampleSECRETexampleSECRETexample/+OTHER"]) == 2
+    assert key_checks.calls[-1][0] == KEY_ID and u.cred_file(au.SSM_SECRET).read_text() == SECRET
+
+
+def test_the_default_ssm_path_keeps_the_user_and_drops_the_password(station_ssm):
+    """What 15-station-adapter.sh then sudo sizeup-station adapter setup do: SSM has the password only; the user
+    stays here, so the adapter has both and logs on."""
+    repo, u, ad = station_ssm
+    _current_release_with_configupdate(u)
+    assert _ssm_setup(u, ["git@github.com:example-org/feed-adapter.git", "", "SIZEUP_COUNTY_USER, SIZEUP_COUNTY_PASS",
+                          ""], ["synthetic-user", VALUE]) == 0
+    asked = []
+    # Enter for repo, branch, names; y; Enter region; Enter = yes, remove the password kept here
+    assert _ssm_setup(u, ["", "", "", "y", "", ""], [KEY_ID, SECRET, "", ""], asked=asked) == 0
+    assert u.cred_file("SIZEUP_COUNTY_USER").read_text() == "synthetic-user"
+    assert not u.cred_file("SIZEUP_COUNTY_PASS").exists()
+    # the adapter's view: the user from here, the password from SSM (the helper, with a fake SSM)
+    files = {p.name[len("sizeup-adapter."):]: p.read_text() for p in u.p.credentials.iterdir()}
+    fake = FakeSsm({ssm.PREFIX + "SIZEUP_COUNTY_PASS": (VALUE, 2)})
+    got = ssm.get(["SIZEUP_COUNTY_PASS", "SIZEUP_COUNTY_USER"], read=lambda n: files.get(n, ""), send=fake)
+    assert list(got) == ["SIZEUP_COUNTY_PASS"] and got["SIZEUP_COUNTY_PASS"].value == VALUE
+    assert files["SIZEUP_COUNTY_USER"] == "synthetic-user"                # both halves of the login are there
+
+
+def test_check_reads_the_version_only():
+    fake = FakeSsm({ssm.PREFIX + "FEED_PASS": (VALUE, 4)})
+    assert ssm.check(KEY_ID, SECRET, "us-east-1", "FEED_PASS", send=fake) == 4
+    with pytest.raises(ssm.SsmError, match="ParameterNotFound"):
+        ssm.check(KEY_ID, SECRET, "us-east-1", "FEED_USER", send=fake)
+
+
+def test_the_check_runs_as_the_updater_runs_it(tmp_path):
+    """autoupdate.py's way: the system interpreter, -I -S, the pair on stdin, one line out; never the pair."""
+    code = (f"import sys; sys.path.insert(0, {str(ROOT)!r}); "
+            "from sizeup.cloud.adapterssm import _main; sys.exit(_main())")
+    r = subprocess.run([sys.executable, "-I", "-S", "-c", code], cwd="/", capture_output=True, text=True, timeout=60,
+                       input=json.dumps({"key_id": KEY_ID, "secret": SECRET, "region": "us-east-1", "name": "FEED_PASS",
+                                         "endpoint": "http://127.0.0.1:9"}))
+    assert (r.returncode, r.stdout.strip()) == (1, "error network")
+    assert SECRET not in r.stdout + r.stderr and KEY_ID not in r.stdout + r.stderr
+
+
+def test_the_updater_runs_the_check_from_the_release(station_ssm, monkeypatch):
+    repo, u, ad = station_ssm
+    monkeypatch.undo()                                  # the real Updater.ssm_check (key_checks patched it)
+    monkeypatch.setenv(au.ALLOW_LOCAL, "1")
+    rel = Path(os.path.realpath(u.p.current))
+    assert u.ssm_check(KEY_ID, SECRET, "us-east-1", "FEED_PASS").startswith("not checked")
+    (rel / "sizeup").mkdir(exist_ok=True)
+    (rel / "sizeup" / "cloud").mkdir(exist_ok=True)
+    for f in ("__init__.py", "aws.py", "procenv.py", "cloud/__init__.py", "cloud/adapterssm.py"):
+        (rel / "sizeup" / f).write_text((ROOT / "sizeup" / f).read_text())
+    # no network in tests: a region that resolves nowhere would still try DNS, so point the helper at a closed port
+    src = (rel / "sizeup" / "cloud" / "adapterssm.py").read_text()
+    (rel / "sizeup" / "cloud" / "adapterssm.py").write_text(
+        src.replace('endpoint=d.get(\'endpoint\', \'\')', 'endpoint="http://127.0.0.1:9"'))
+    assert u.ssm_check(KEY_ID, SECRET, "us-east-1", "FEED_PASS") == "network"
