@@ -76,6 +76,14 @@ NOTES = "Notes"          # the /comms "channel" of event notes tagged with a uni
 KEEP_UNLINKED_S = 90 * 24 * 3600     # transmissions on no event: kept 90 days (linked ones: always)
 MAX_ROWS = 500
 MAIN_LIMIT, OTHER_LIMIT = 200, 300    # the Radio view's Main and Other: each its own newest N (#241)
+# The Radio page's views (#415): a named filter each. ours: our fire channels (today's Main); a service's: every source
+# of that service; all: everything not muted. One page of PAGE rows (at most PAGE_MAX), older ones by a keyset.
+VIEWS = ("ours", "police", "ems", "transit", "air", "all")
+SERVICE_VIEWS = ("police", "ems", "transit", "air")
+PAGE, PAGE_MAX = 100, 200
+SOURCES_MAX, MUTE_MAX = 24, 100       # ?source= and ?mute= keys taken per request
+COUNT_MINUTES = 60                    # GET /api/cad/comms/sources: calls per minute over the last hour
+SAFETY_WHERE = "t.safety != '' AND t.safety != 'dismissed'"     # as the partial index radio_traffic_safety is declared
 ID_NOTES = ("none", "undecoded", "weak")    # why an FG1 key-up has no radio ID (radio_traffic.id_note, #163)
 RELINK_MAX = 2000                           # a radio just named: at most this many of its unnamed transmissions
 EVIDENCE_MAX = 64 * 1024                    # an emergency's raw call record (radio_traffic.evidence), at most
@@ -122,6 +130,7 @@ CREATE TABLE IF NOT EXISTS radio_activity (
   radios TEXT NOT NULL DEFAULT '',      -- radio IDs heard that minute, comma-separated (encrypted sources)
   PRIMARY KEY (source, minute)
 );
+CREATE INDEX IF NOT EXISTS radio_activity_minute ON radio_activity(minute);
 """
 # A link that keeps its transmission: any but an unconfirmed mention / fireground one
 SURE_LINK = ("(l.why NOT IN ('mention', 'fireground') OR EXISTS (SELECT 1 FROM radio_link_kept k "
@@ -195,7 +204,9 @@ class Comms:
             skey = str(t.get("source_key") or "") or sources.of_row(t.get("source") or "", t.get("talkgroup"), system,
                                                                     air=mhz is not None)
             system = system or (sources.COUNTY if p25 else "airband" if mhz is not None else "analog")
-            src = (skey, system, str(t.get("group") or "")[:60], str(t.get("service") or "")[:16],
+            # no service given (a caller from before #415): an airband row is air, an analog channel is ours: fire
+            given = str(t.get("service") or "") or ("" if p25 else "air" if mhz is not None else "fire")
+            src = (skey, system, str(t.get("group") or "")[:60], given[:16],
                    int(bool(t.get("ours")) and not other), str(t.get("dept") or "")[:60], str(t.get("tier") or "")[:16])
             vals = (call_id, turn, start, float(t.get("end") or start), t.get("source") or "", t.get("talkgroup"),
                     talker, t.get("radio_id") or "", ", ".join(rigs), disp, t.get("text") or "", t.get("status") or "",
@@ -653,6 +664,176 @@ class Comms:
         self._decorate(main + other)
         main = sorted(main + notes, key=lambda r: -r["start"])[:main_limit]
         return main, other
+
+    # ---- the Radio page's views (#415): one page of one filter, older pages by a keyset, changes by a cursor --------
+
+    def _ours_branches(self, main_tgs, not_main) -> list[tuple[str, list]]:
+        """"Our calls" as index walks (as split()'s Main, #241): the analog channels but the airband, and each talkgroup
+        marked Main, the county system's only (a talkgroup number alone is never read: #409)."""
+        fm = "t.talkgroup IS NULL" + (f" AND t.channel NOT IN ({','.join('?' * len(not_main))})" if not_main else "")
+        return [(fm, list(not_main))] + [("t.talkgroup = ? AND t.system IN ('', ?)", [int(tg), sources.COUNTY])
+                                         for tg in main_tgs]
+
+    def page(self, main_tgs, not_main=(), *, view: str = "", system: str = "", group: str = "", source=(),
+             service: str = "", tier: str = "", dept: str = "", safety: bool = False, mute=(),
+             before: tuple[float, str] | None = None, changed: float | None = None, at: float | None = None,
+             limit: int = PAGE, unit: str = "", channel: str = "", event: str = "", pcfd: list[str] | None = None,
+             since: float | None = None, until: float | None = None, kind: str = "", text: str = "",
+             emergency: bool = False) -> dict:
+        """One page of the radio log for the Radio page (#415), newest first: {rows, older, newer, next, cursor, reload}.
+
+        view: ours | police | ems | transit | air | all ("" = all). system / group / service / tier / dept: the row's
+        own (sizeup/sourcekeys.py). source: only these sources (keys). safety: only scene-safety rows. mute: sources left
+        out (not with source=). The older filters (unit, channel, event, pcfd, since, until, kind, text, emergency) as
+        in query().
+
+        before (start, id): the rows older than that one (the keyset: `next` of the page before). changed: only the rows
+        new or changed since that cursor (their transcript arrived, a re-run), whatever their age; reload: more than a
+        page of them, ask afresh. at: a page around that time (half newer, half older). cursor: what to send as
+        `changed` next. older / newer: there are more that way.
+
+        Every view walks an index: ours one walk per channel kind and Main talkgroup (radio_traffic_tg_start), a service
+        radio_traffic_service_start, a source radio_traffic_source_start, a system radio_traffic_system_start, changes
+        radio_traffic_updated. Notes tagged with a unit ride with ours and all, as in Main."""
+        limit = max(1, min(int(limit), PAGE_MAX))
+        words = [w.lower() for w in text.split()][:8]
+        main_tgs, not_main = sorted({int(t) for t in main_tgs}), tuple(dict.fromkeys(not_main))
+        srcs = list(dict.fromkeys(str(x) for x in source if x))[:SOURCES_MAX]
+        muted = [] if srcs else list(dict.fromkeys(str(x) for x in mute if x))[:MUTE_MAX]
+        top = self.store.one("SELECT MAX(updated_at) AS m FROM radio_traffic")
+        cursor = max(float((top or {}).get("m") or 0.0), float(changed or 0.0))
+        narrowed = bool(srcs or system or group or service or tier or dept or safety or view in SERVICE_VIEWS)
+        out = {"rows": [], "older": False, "newer": False, "next": "", "cursor": cursor, "reload": False}
+
+        cond, args = [], []
+        for col, val in (("t.system", system), ('t."group"', group), ("t.tier", tier), ("t.dept", dept),
+                         ("t.service", view if view in SERVICE_VIEWS else ""), ("t.service", service)):
+            if val:
+                cond.append(f"{col} = ?")
+                args.append(val)
+        if safety:
+            cond.append(SAFETY_WHERE)
+        if muted:
+            cond.append(f"+t.source NOT IN ({','.join('?' * len(muted))})")
+            args += muted
+        ours = self._ours_branches(main_tgs, not_main)
+        ours_sql = "(" + " OR ".join(f"({c})" for c, _ in ours) + ")"
+        ours_args = [a for _, extra in ours for a in extra]
+        if srcs:
+            branches = [("t.source = ?", [k]) for k in srcs]
+            if view == "ours":
+                cond.append(ours_sql)
+                args += ours_args
+        elif view == "ours":
+            branches = ours
+        else:
+            branches = [("1", [])]
+
+        w = self._radio_where(unit, channel, event, pcfd, since, until, words, emergency) \
+            if kind in ("", "radio") and channel != NOTES else None
+        notes_ok = kind in ("", "notes") and channel in ("", NOTES) and not emergency and not narrowed
+        radio: list[dict] = []
+        if w is not None:
+            where, wargs = w[0] + cond, w[1] + args
+            if changed is not None:
+                # one walk of radio_traffic_updated from the cursor: the branches as one condition
+                any_branch = "(" + " OR ".join(f"({c})" for c, _ in branches) + ")"
+                radio = self.store.q(
+                    "SELECT t.*, 'radio' AS kind FROM radio_traffic t INDEXED BY radio_traffic_updated WHERE "
+                    + " AND ".join(f"({x})" for x in where + [any_branch, "t.updated_at > ?"])
+                    + " ORDER BY t.updated_at LIMIT ?",
+                    (*wargs, *[a for _, extra in branches for a in extra], float(changed), PAGE_MAX + 1))
+                out["reload"] = len(radio) > PAGE_MAX
+                radio = radio[:PAGE_MAX]
+            elif at is not None:
+                half = max(1, limit // 2)
+                new = self._walk(branches, where + ["t.start >= ?"], wargs + [float(at)], half + 1, asc=True)
+                old = self._walk(branches, where + ["t.start < ?"], wargs + [float(at)], limit - half + 1)
+                out["newer"], out["older"] = len(new) > half, len(old) > limit - half
+                radio = new[:half] + old[:limit - half]
+            else:
+                if before is not None:
+                    where = where + ["(t.start < ? OR (t.start = ? AND t.id < ?))"]
+                    wargs = wargs + [float(before[0]), float(before[0]), str(before[1])]
+                radio = self._walk(branches, where, wargs, limit + 1)
+                out["older"] = len(radio) > limit
+                radio = radio[:limit]
+        notes: list[dict] = []
+        if notes_ok:
+            lo, hi = since, until
+            if changed is not None:
+                lo = max(lo or 0.0, float(changed) + 1e-6)
+            elif at is not None and radio:
+                lo, hi = max(lo or 0.0, min(r["start"] for r in radio)), min(hi or 1e18, max(r["start"] for r in radio))
+            elif before is not None:
+                hi = min(hi or 1e18, float(before[0]) - 1e-6)
+            notes = self._notes(unit, event, pcfd, lo, hi, limit + 1, words)
+            if changed is None and at is None:
+                out["older"] = out["older"] or len(notes) > limit
+                notes = notes[:limit]
+        self._decorate(radio)
+        mains = set(main_tgs)
+        for r in radio:
+            r["main"] = (r["channel"] not in not_main if r["talkgroup"] is None
+                         else r["talkgroup"] in mains and r["system"] in ("", sources.COUNTY))
+        for r in notes:
+            r["main"] = True
+        rows = sorted(sorted(radio + notes, key=lambda r: r["id"], reverse=True), key=lambda r: -r["start"])
+        if changed is None and at is None and len(rows) > limit:
+            rows, out["older"] = rows[:limit], True
+        out["rows"] = rows
+        if rows:
+            last = rows[-1]
+            out["next"] = f"{last['start']!r},{last['id']}"
+            out["cursor"] = max(cursor, max((r.get("updated_at") or 0.0) for r in rows))
+        return out
+
+    def _walk(self, branches, where, args, limit: int, asc: bool = False) -> list[dict]:
+        """The newest (asc: the oldest) `limit` rows over these branches (one index walk each), in that order."""
+        way = "ASC" if asc else "DESC"
+        got: list[dict] = []
+        for c, extra in branches:
+            got += self.store.q("SELECT t.*, 'radio' AS kind FROM radio_traffic t WHERE "
+                                + " AND ".join(f"({x})" for x in where + [c])
+                                + f" ORDER BY t.start {way}, t.id {way} LIMIT ?", (*args, *extra, limit))
+        if len(branches) > 1:
+            seen: dict[str, dict] = {}
+            for r in got:
+                seen.setdefault(r["id"], r)
+            got = sorted(seen.values(), key=lambda r: (r["start"], r["id"]), reverse=not asc)[:limit]
+        return got
+
+    def sources_seen(self) -> list[dict]:
+        """Every source in the log or the activity table: [{source, channel, system, group, service, tier, talkgroup,
+        last}] (last: its newest transmission or active minute, unix). A skip along radio_traffic_source_start and the
+        activity table's key: one look-up per source, not a scan. Once per rev."""
+        return self._per_rev("sources_seen", self._sources_seen)
+
+    def _sources_seen(self) -> list[dict]:
+        skip = ("WITH RECURSIVE g(k) AS (SELECT MIN(source) FROM {t} WHERE source > '' UNION ALL "
+                "SELECT (SELECT MIN(source) FROM {t} WHERE source > g.k) FROM g WHERE g.k IS NOT NULL) "
+                "SELECT k FROM g WHERE k IS NOT NULL")
+        keys = dict.fromkeys(r["k"] for t in ("radio_traffic", "radio_activity") for r in self.store.q(skip.format(t=t)))
+        out = []
+        for k in keys:
+            row = self.store.one('SELECT channel, system, "group" AS grp, service, tier, talkgroup, start FROM radio_traffic '
+                                 "WHERE source = ? ORDER BY start DESC LIMIT 1", (k,)) or {}
+            act = self.store.one("SELECT MAX(minute) AS m FROM radio_activity WHERE source = ?", (k,)) or {}
+            last = max(float(row.get("start") or 0.0), float(act.get("m") or 0) * 60.0)
+            out.append({"source": k, "channel": row.get("channel") or "", "system": row.get("system") or "",
+                        "group": row.get("grp") or "", "service": row.get("service") or "", "tier": row.get("tier") or "",
+                        "talkgroup": row.get("talkgroup"), "last": last or None})
+        return out
+
+    def minute_counts(self, now: float, minutes: int = COUNT_MINUTES) -> dict[str, list[int]]:
+        """{source: calls per minute, oldest first, the last one the minute of `now`} over the last `minutes`, from
+        the activity table (radio_activity_minute): the sources' unread counts and the time bar (#415)."""
+        end = int(now // 60)
+        out: dict[str, list[int]] = {}
+        for r in self.store.q("SELECT source, minute, calls FROM radio_activity WHERE minute > ? AND minute <= ?",
+                              (end - minutes, end)):
+            out.setdefault(r["source"], [0] * minutes)[r["minute"] - (end - minutes) - 1] += int(r["calls"])
+        return out
 
     def _radio(self, unit, channel, event, pcfd, since, until, limit, words=(), emergency=False) -> list[dict]:
         w = self._radio_where(unit, channel, event, pcfd, since, until, words, emergency)

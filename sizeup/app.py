@@ -543,6 +543,10 @@ class App:
         # Radio view's rows too.
         self.cad.comms.names_ours = self.cad.feed.names_ours
         self.cad.main_tg = self.tg.main
+        # the Radio page's source tree (#415, Cad.comms_sources): the talkgroups as Settings > Radios lists them, and each
+        # system's label (the county's is its name: it has none of its own)
+        self.cad.source_rows = self.talkgroups_state
+        self.cad.source_systems = lambda: {self.tg.county: "County", **{x.name: x.label for x in self.cfg.p25_systems}}
         # Per-channel record / transcribe / engine (Settings > Radios, sizeup/channels.py) and Amazon
         # Transcribe where this process may call it ([stt] aws: the hub; sizeup/transcribe.py).
         self.cad.radio_ctx = self

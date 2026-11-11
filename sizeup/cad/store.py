@@ -519,6 +519,13 @@ class Store:
             self.migrated.append("radio_traffic.source (every transmission's source, by its system)")
         if tcols:
             self.db.execute("CREATE INDEX IF NOT EXISTS radio_traffic_source_start ON radio_traffic(source, start)")
+            # The Radio page's views (#415), an index walk each: a service's, a system's, the scene-safety rows, and the
+            # rows changed since a cursor (GET /api/cad/comms ?view= ?service= ?system= ?safety= ?changed=), 2026-11-10.
+            self.db.execute("CREATE INDEX IF NOT EXISTS radio_traffic_service_start ON radio_traffic(service, start)")
+            self.db.execute("CREATE INDEX IF NOT EXISTS radio_traffic_system_start ON radio_traffic(system, start)")
+            self.db.execute("CREATE INDEX IF NOT EXISTS radio_traffic_updated ON radio_traffic(updated_at)")
+            self.db.execute("CREATE INDEX IF NOT EXISTS radio_traffic_safety ON radio_traffic(start) "
+                            "WHERE safety != '' AND safety != 'dismissed'")
         radcols = {r["name"] for r in self.db.execute("PRAGMA table_info(radios)")}
         if radcols and "last_channel" not in radcols:        # where a radio was last heard (#163), 2026-10-14
             self.db.execute("ALTER TABLE radios ADD COLUMN last_channel TEXT NOT NULL DEFAULT ''")

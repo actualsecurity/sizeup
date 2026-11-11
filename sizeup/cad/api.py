@@ -135,6 +135,12 @@ GET  /api/cad/comms?unit=&channel=&event=&pcfd=1&emergency=1&since=&until=&main_
                                           every transmission (newest first) with its rig, radio ID, events, the
                                           emergency button and its alarm (emergency=1: only those, #128); Main
                                           and Other each their own newest main_limit (200) / limit (300), #241
+                                          The Radio page's views (#415): any of ?view=ours|police|ems|transit|air|all
+                                          ?system= ?group= ?source= ?service= ?tier= ?dept= ?safety=1 ?mute= ?before=
+                                          ?changed= ?at= gives one page {rows, older, newer, next, cursor, reload}
+                                          (Cad.comms_query). A police row's words and audio: only to someone signed in
+GET  /api/cad/comms/sources               the Radio page's tree: {sources: [{key, system, group, name, service, tier,
+                                          ours, last, live, counts: calls per minute, the last hour}]} (Cad.comms_sources)
 GET  /api/cad/feed?limit=&tg=307,333      the pinned 60 Control feed: newest transmissions on the incident
                                           talkgroup(s), pc = why it is talking to us (sizeup/cad/feed.py)
 POST /api/cad/incident/<id>/link          {traffic_id, operator}  put a transmission on the event (why manual)
@@ -669,7 +675,9 @@ class CadApi:
             if path == "/api/cad/radios":
                 return _json(200, self.cad.radio_registry())
             if path == "/api/cad/comms":
-                return _json(200, self.cad.comms_query(parse_qs(query)))
+                return _json(200, self.cad.comms_query(parse_qs(query), signed=who is not None and bool(who.email)))
+            if path == "/api/cad/comms/sources":
+                return _json(200, self.cad.comms_sources())
             if path == "/api/cad/feed":
                 return _json(200, self.cad.feed_query(parse_qs(query)))
             if path == "/api/cad/rigs":
