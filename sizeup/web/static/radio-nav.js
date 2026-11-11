@@ -168,6 +168,7 @@ window.RadioNav = (() => {
     if (!shown()) return;
     if (want === "page" || st.shown !== query()) return page();
     if (want === "delta") return delta();
+    if (want === "older") return older();
     return null;
   }
 
@@ -221,7 +222,8 @@ window.RadioNav = (() => {
     await settle();
   }
   async function older() {
-    if (st.busy || !st.older) return;
+    if (!st.older) return;
+    if (st.busy) { st.want = st.want || "older"; return; }    // a click while a request is out: done right after it
     st.busy = true;
     const asked = query();
     try {
@@ -409,7 +411,9 @@ window.RadioNav = (() => {
     show($("#rn-back"), !!st.f.source);
     // the phone's Sources button: what the other views hold (the rail is behind it)
     const away = m.views.filter((v) => !here(v) && v.id !== "all");
-    const n = away.reduce((a, v) => a + v.n, 0), em = away.some((v) => v.em === "ours") ? "ours" : away.some((v) => v.em) ? "other" : "";
+    // (an emergency on any channel not on screen, also one that is in no view but All)
+    const off = m.rows.filter((x) => x.em && !(st.f.source ? x.key === st.f.source : inView(x, st.f.view)));
+    const n = away.reduce((a, v) => a + v.n, 0), em = off.some((x) => x.em === "ours") ? "ours" : off.length ? "other" : "";
     $("#rn-open").replaceChildren(el("span", "", "Sources"), ...(em ? [emChip(em)] : []),
                                   ...(n ? [count(n, away.some((v) => v.id === "ours" && v.n))] : []));
     renderFlags(m);
@@ -600,6 +604,8 @@ window.RadioNav = (() => {
     });
   }
 
-  return { wants, open, close, prefs, inView, unread, mutesFor, model, merged, get on() { return st.open; },
-           test: { st, page, delta, older, sources, ours, set, onPush, query, fromHash, hashOf, render } };
+  const out = { wants, open, close, prefs, inView, unread, mutesFor, model, merged, get on() { return st.open; } };
+  // its insides, for tests/test_radio_nav.py only (the harness sets this before the script runs): never on the page
+  if (window.RADIO_NAV_TEST === true) out.test = { st, page, delta, older, sources, ours, set, onPush, query, fromHash, hashOf, render };
+  return out;
 })();

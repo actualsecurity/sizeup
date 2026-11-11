@@ -91,7 +91,9 @@ async function drain(n = 50) { for (let i = 0; i < n; i++) { await tick(); const
 const comms = () => calls.filter((c) => c.startsWith("/api/cad/comms?"));
 const last = (k) => new URLSearchParams(comms().filter((c) => !c.includes("limit=15")).slice(-1)[0].split("?")[1]).get(k);   // not the Our calls line's own
 
+global.RADIO_NAV_TEST = process.argv[4] !== "plain";
 eval(fs.readFileSync(process.argv[2], "utf8"));
+if (process.argv[4] === "plain") { console.log(JSON.stringify({ test: "test" in window.RadioNav, keys: Object.keys(window.RadioNav) })); process.exit(0); }
 const N = window.RadioNav, T = N.test, st = T.st;
 const out = {};
 const ids = () => st.rows.map((t) => t.id);
@@ -149,6 +151,13 @@ const ids = () => st.rows.map((t) => t.id);
   T.set({ view: "police", source: "" });                      // ... a view is picked
   await drain();
   out.pickedDuringOlder = { rows: ids(), busy: st.busy };
+  // ---- Older clicked while a change request is out: done right after, not dropped ----
+  T.set({ view: "ours", source: "" }); await drain();
+  cad.state.comms_rev = "5"; cad.hooks.forEach((h) => h());   // a delta goes out ...
+  T.older();                                                  // ... Older is clicked
+  await drain();
+  out.olderDuringDelta = { n: st.rows.length, asked: comms().some((c) => c.includes("before=") && comms().indexOf(c) > comms().findIndex((d) => d.includes("changed=11") || d.includes("changed=12"))) };
+  T.set({ view: "police", source: "" }); await drain();
 
   // ---- Live: only Our calls, whatever is on screen ----
   out.liveInPolice = { last: offered.slice(-1)[0].slice(0, 2), anyPolice: offered.some((x) => x.some((id) => id.startsWith("p"))) };
@@ -192,6 +201,11 @@ const ids = () => st.rows.map((t) => t.id);
 
   st.p.seen["fm:FG1"] = NOW - 20 * 60; st.railSig = ""; T.render();     // in Police, with new traffic on Our calls
   out.sourcesButton2 = $("#rn-open").children.map((c) => [c.className, c.textContent]);
+  SRC = SRC.map((s) => ({ ...s, emergency: "" })).concat([{ key: "p25:westchester:555", system: "westchester", system_label: "County", group: "Public Works", name: "County Other", service: "other", tier: "", ours: false, last: NOW - 5, counts: [], emergency: "ours", stuck: "" }]);
+  cad.state.alarms.windows = []; st.srcRev = ""; st.srcAt = 0;
+  T.sources(true); await drain();
+  out.allOnlyEm = { views: $("#rn-views").children.filter((b) => b.children.some((c) => c.className.includes("emergency"))).map((b) => b.dataset.view),
+                    button: $("#rn-open").children.map((c) => c.className) };
   // ---- a page going out now: over the list here too ----
   cad.state.paging = { channel: "South 2" }; cad.hooks.forEach((h) => h());
   out.paging = paged.slice(-1)[0].slice(0, 2);
@@ -262,7 +276,7 @@ def test_mute_never_hides_our_calls_or_an_emergency(out):
     assert out["flags"]["text"] == [["chip emergency em-other em-stuck", "Emergency flag stuck on CAR 9 (1234): PD Secure"],
                                     ["chip kept", "Recording until t4242 (emergency)"]]
     assert dict(out["viewsEm"])["police"] is True and dict(out["viewsEm"])["all"] is True and dict(out["viewsEm"])["ours"] is False
-    assert any("emergency" in c for c, _ in out["sourcesButton"])
+    assert not any("emergency" in c for c, _ in out["sourcesButton"])     # in All it is on screen: Sources marks what isn't
 
 
 def test_the_page_keeps_what_older_loaded_and_patches_what_changed(out):
@@ -282,6 +296,8 @@ def test_a_view_picked_while_a_request_is_out_is_not_dropped(out):
     a, b = out["pickedDuringDelta"], out["pickedDuringOlder"]
     assert a["view"] == "police" and a["rows"] == ["p4", "p3", "p2", "p1", "p0"]
     assert b["rows"] == ["p4", "p3", "p2", "p1", "p0"] and b["busy"] is False   # Older's answer for Our calls is not mixed in
+    c = out["olderDuringDelta"]
+    assert c["asked"] and c["n"] > 100                                          # Older clicked meanwhile: asked right after
 
 
 def test_our_calls_stay_on_top_and_live_plays_only_them(out):
@@ -310,6 +326,8 @@ def test_the_phone_sheet_the_keys_and_the_page_going_out(out):
     assert out["arrow"][0] == 1 and out["arrow"][1].count(0) == 1               # the arrows move between the views: one tab stop
     assert out["paging"] == [True, {"channel": "South 2"}]                      # the page going out now, over this list too
     assert ["badge rn-n", "2"] in out["sourcesButton2"]                         # the other views' new traffic on Sources
+    # an emergency on a channel that is in no view but All: on All, and on the phone's Sources button all the same
+    assert out["allOnlyEm"]["views"] == ["all"] and "chip emergency" in out["allOnlyEm"]["button"]
 
 
 def test_the_page_as_before_is_untouched_until_the_rail_is_on():
@@ -326,3 +344,10 @@ def test_the_page_as_before_is_untouched_until_the_rail_is_on():
     assert 'window.RadioNav && RadioNav.on ? $("#rn-q") : $("#rv-q")' in (STATIC / "cad.js").read_text()   # "/": the box on screen
     nav = (STATIC / "radio-nav.js").read_text()
     assert "/api/cad/comms?view=ours&limit=15" in nav and "redacted" not in nav
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_the_page_never_carries_the_scripts_insides(tmp_path):
+    out = run(tmp_path, scenario="plain")
+    assert out["test"] is False and "test" not in out["keys"]
+    assert "RADIO_NAV_TEST" not in "".join((STATIC / f).read_text() for f in ("cad.html", "cad.js", "radio-view.js"))
