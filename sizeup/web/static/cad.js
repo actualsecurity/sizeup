@@ -40,6 +40,7 @@ const cad = {
   scene: null, state: null, lastMsgAt: 0, skew: 0,
   who: null,                 // signed in through Cloudflare Access (whoami): {email, name, callsign, role, may, ...}
   sel: null,                 // selected incident id
+  voiceWait: null,           // {id}: the dispatch this page just sent, its voice still rendering (#426, syncVoice)
   mode: "none",              // none (Overview) | new | view | idle (Dispatch with nothing selected)
   radio: false,              // the Radio view is open (#radio)
   extra: new Map(),          // incidents opened from Records that aren't in the live state
@@ -676,6 +677,7 @@ function selectIncident(id) {
   show($("#close-form"), false);
   show($("#upgrade-form"), false);
   show($("#r-preview-box"), false);
+  cad.voiceWait = null;               // another event: the dispatch box's audio isn't waited for (its row has it)
   $("#r-full").checked = false;
   flash($("#r-error"));
   flash($("#c-error"));
@@ -1898,7 +1900,7 @@ function renderEvents(inc) {
   show($("#d-events"), open);
   syncList($("#d-events"), events.slice().reverse(), {
     key: (e) => String(e.id),
-    sig: (e) => `${e.id}|${e.units || ""}|${window.DispatchMode ? DispatchMode.sig(inc, e.id) : ""}`,
+    sig: (e) => `${e.id}|${e.units || ""}|${window.DispatchMode ? DispatchMode.sig(inc, e.id) : ""}|${playForEvent(inc, e) || ""}`,
     make: () => el("li", "ev"),
     fill: (li, e) => {
       const meta = el("div", "meta");
@@ -1958,7 +1960,7 @@ function renderComments(inc) {
   list._last = last;
   syncList(list, items, {
     key: (e) => String(e.id),
-    sig: (e) => `${e.id}|${e.units || ""}|${e.kind === "remarks" ? `${e.text}|${e.operator}` : ""}`,
+    sig: (e) => `${e.id}|${e.units || ""}|${e.kind === "remarks" ? `${e.text}|${e.operator}` : ""}|${playForEvent(inc, e) || ""}`,
     make: (e) => el("li", `cm${e.kind === "remarks" ? " cm-remarks" : e.kind === "note" ? "" : " cm-sys"}`),
     fill: (li, e) => {
       const meta = el("div", "meta");
@@ -1981,7 +1983,7 @@ function renderDispatches(inc) {
   show($("#d-dispatches-card"), !!inc.emergency || (inc.dispatches || []).length > 0);
   syncList($("#d-dispatches"), (inc.dispatches || []).slice().reverse(), {
     key: (d) => String(d.id),
-    sig: (d) => String(d.id),
+    sig: (d) => `${d.id}|${d.audio || ""}|${d.has_audio}|${d.audio_note || ""}|${d.transmitted}`,   // its voice comes after it (#426)
     make: () => el("li", "dp"),
     fill: (li, d) => {
       const meta = el("div", "meta");
@@ -2002,7 +2004,8 @@ function renderDispatches(inc) {
       li.replaceChildren(meta, row);
       if (d.remarks) li.append(el("div", "small", `Remarks: ${d.remarks}`));
       if (d.tones) li.append(el("div", d.tones.includes("not set") ? "warn small" : "dim small", `Tones: ${d.tones}`));
-      if (d.audio_note) li.append(el("div", "dim small", d.audio_note));
+      if (d.audio === "pending") li.append(voicePending(el("div", "dim small")));
+      else if (d.audio_note) li.append(el("div", "dim small", d.audio_note));
     },
     empty: "None",
   });
@@ -2202,17 +2205,70 @@ function addJoint() {                 // "Add Rye Brook (E14, L30, 2662)": tick 
   renderDispatchBox(inc);
 }
 
-function showPreview(title, text, url, note, r) {
+// A dispatch answers before its voice is rendered (#426): the box shows it at once with "Voice…", and the state
+// brings the audio (the dispatch's row: audio pending -> ready | failed). Played once, by the page that sent it.
+const VOICE_PENDING = "Voice…";
+const VOICE_PENDING_TIP = "The voice is being rendered. It plays here when it is ready; the dispatch is already logged.";
+function voicePending(node) {
+  setText(node, VOICE_PENDING);
+  node.title = VOICE_PENDING_TIP;
+  return node;
+}
+// What the state says of the dispatch waited for: null (still rendering, or not in the state yet), else
+// {url, note}: url its audio (null: none, the note says why).
+function voiceArrived(wait, incidents) {
+  if (!wait) return null;
+  for (const inc of incidents || []) {
+    const d = (inc.dispatches || []).find((x) => x.id === wait.id);
+    if (!d) continue;
+    if (d.audio === "pending") return null;
+    return { url: d.has_audio ? `/api/cad/dispatch/${d.id}.wav` : null, note: d.audio_note || "" };
+  }
+  return null;
+}
+function showAudio(url, note, pending) {
+  const a = $("#r-audio"), n = $("#r-audio-note");
+  show(a, !!url);
+  if (url) { a.src = url; a.play().catch(() => {}); }
+  else if (!a.paused) a.pause();
+  if (pending) voicePending(n);
+  else { setText(n, note || ""); n.removeAttribute("title"); }
+}
+// Each state push: the dispatch this page sent has its voice now (or none): shown and played, once.
+function syncVoice() {
+  const got = voiceArrived(cad.voiceWait, (cad.state && cad.state.incidents) || []);
+  if (!got) return;
+  cad.voiceWait = null;
+  showAudio(got.url, got.note, false);
+}
+function showPreview(title, text, url, note, r, pending = false) {
   show($("#r-preview-box"), true);
   setText($("#r-preview-title"), title);
   setText($("#r-preview-text"), text);
   const warns = (r && r.tone_warnings) || [];
   $("#r-preview-tones").className = warns.length ? "warn small" : "dim small";
   setText($("#r-preview-tones"), r && r.tones ? `Tones: ${r.tones}${warns.length ? `. ${warns.join("; ")}` : ""}` : "");
-  const a = $("#r-audio");
-  show(a, !!url);
-  if (url) { a.src = url; a.play().catch(() => {}); }
-  setText($("#r-audio-note"), note || "");
+  showAudio(url, note, pending);
+}
+// A dispatch or upgrade just sent: in the box at once; its voice follows with the state (syncVoice).
+function showSent(title, r) {
+  const pending = r.audio === "pending";
+  cad.voiceWait = pending ? { id: r.dispatch_id } : null;
+  cad.previewSeq = (cad.previewSeq || 0) + 1;          // a preview's audio still on its way: not played over this
+  showPreview(title, r.text, r.audio_url, r.audio_note, r, pending);
+  syncVoice();
+}
+// A preview: its text at once, then its audio (a second, slower call: the voice is rendered for it). A later
+// preview or dispatch takes the box: this one's audio is dropped.
+async function showPreviewThenAudio(title, path, body) {
+  const seq = cad.previewSeq = (cad.previewSeq || 0) + 1;
+  cad.voiceWait = null;
+  const r = await api("POST", path, body);
+  if (cad.previewSeq !== seq) return;
+  showPreview(title(r), r.text, null, "", r, true);
+  apiCall("POST", path, { ...body, audio: true }).then((a) => {
+    if (cad.previewSeq === seq) showAudio(a.audio_url, a.audio_note, false);
+  }).catch((e) => { if (cad.previewSeq === seq) showAudio(null, e.message, false); });
 }
 
 async function busy(button, label, fn) {
@@ -2234,9 +2290,8 @@ async function preview() {
   if (!ids.length) return flash($("#r-error"), "Tick a unit");
   await busy($("#r-preview"), "Rendering", async () => {
     try {
-      const r = await api("POST", `/api/cad/incident/${inc.id}/preview`,
-        { unit_ids: ids, full: $("#r-full").checked, remarks: $("#r-remarks").value });
-      showPreview(`Preview${r.kind === "add_on" ? " add-on" : ""}: not logged`, r.text, r.audio_url, r.audio_note, r);
+      await showPreviewThenAudio((r) => `Preview${r.kind === "add_on" ? " add-on" : ""}: not logged`,
+        `/api/cad/incident/${inc.id}/preview`, { unit_ids: ids, full: $("#r-full").checked, remarks: $("#r-remarks").value });
     } catch (e) {
       flash($("#r-error"), e.message);
     }
@@ -2262,8 +2317,8 @@ async function dispatch() {
       const r = await api("POST", `/api/cad/incident/${inc.id}/dispatch`,
         { unit_ids: ids, operator: op, channel: $("#r-channel").value, full: $("#r-full").checked, remarks: $("#r-remarks").value });
       const how = r.transmitted ? `transmitted on ${r.channel}` : "logged, not transmitted";
-      showPreview(`${r.kind === "add-on" ? "Add-on" : "Dispatch"} #${r.dispatch_id}: ${how}`
-        + (r.moved.length ? `. Moved ${r.moved.join(", ")}` : ""), r.text, r.audio_url, r.audio_note, r);
+      showSent(`${r.kind === "add-on" ? "Add-on" : "Dispatch"} #${r.dispatch_id}: ${how}`
+        + (r.moved.length ? `. Moved ${r.moved.join(", ")}` : ""), r);
       $("#r-full").checked = false;
       setTimeout(() => recommend(), 300);
     } catch (e) {
@@ -2291,11 +2346,11 @@ async function upgrade(e, previewOnly) {
   const b = previewOnly ? $("#u-preview") : $("#u-send");
   await busy(b, previewOnly ? "Rendering" : "Sending", async () => {
     try {
-      const r = await api("POST", `/api/cad/incident/${inc.id}/upgrade`, body);
-      if (previewOnly) showPreview("Preview upgrade: not logged", r.text, r.audio_url, r.audio_note, r);
+      if (previewOnly) await showPreviewThenAudio(() => "Preview upgrade: not logged", `/api/cad/incident/${inc.id}/upgrade`, body);
       else {
+        const r = await api("POST", `/api/cad/incident/${inc.id}/upgrade`, body);
         const how = r.transmitted ? `transmitted on ${r.channel}` : "logged, not transmitted";
-        showPreview(`Upgrade #${r.dispatch_id}: ${how}`, r.text, r.audio_url, r.audio_note, r);
+        showSent(`Upgrade #${r.dispatch_id}: ${how}`, r);
         $("#upgrade-form").reset();
         show($("#upgrade-form"), false);
         setTimeout(() => recommend(), 300);
@@ -3562,6 +3617,7 @@ function render() {
   renderRunCards();
   renderRecords();
   renderOperators();
+  syncVoice();
   for (const fn of cad.hooks) fn();
   roLockAll();
 }

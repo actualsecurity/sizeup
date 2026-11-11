@@ -173,7 +173,8 @@ CREATE TABLE dispatches (
   audio_note TEXT NOT NULL DEFAULT '',  -- why there's no audio (no `say` on this machine, ...)
   transmitted INTEGER NOT NULL DEFAULT 0,
   channel TEXT NOT NULL DEFAULT '',
-  tx_note TEXT NOT NULL DEFAULT ''
+  tx_note TEXT NOT NULL DEFAULT '',
+  audio_state TEXT NOT NULL DEFAULT ''  -- pending (the voice is rendering) | ready | failed; '' = before #426
 );
 """ + """
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -444,6 +445,9 @@ class Store:
         if self.db.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'unit_history'").fetchone():
             # a unit's latest status change (Close event's and the startup repair's look-up, #232), 2026-11-04
             self.db.execute("CREATE INDEX IF NOT EXISTS unit_history_unit ON unit_history(unit_id, id)")
+        dcols = {r["name"] for r in self.db.execute("PRAGMA table_info(dispatches)")}
+        if dcols and "audio_state" not in dcols:         # the voice rendered after the answer (#426): old rows keep ''
+            self.db.execute("ALTER TABLE dispatches ADD COLUMN audio_state TEXT NOT NULL DEFAULT ''")
         ecols = {r["name"] for r in self.db.execute("PRAGMA table_info(events)")}
         if ecols and "places" not in ecols:              # a note's "@" places (#67), 2026-10-13: old notes keep ''
             self.db.execute("ALTER TABLE events ADD COLUMN places TEXT NOT NULL DEFAULT ''")
@@ -1489,15 +1493,16 @@ class Store:
 
     def log_dispatch(self, iid: int, *, operator: str, text: str, unit_ids: list[int], audio_path: str,
                      audio_note: str, transmitted: bool, channel: str, tx_note: str, kind: str = "dispatch",
-                     remarks: str = "", tones: str = "") -> int:
+                     remarks: str = "", tones: str = "", audio_state: str = "") -> int:
         """The dispatch row and its chronology entry, then (same time, right after it: the dispatch's,
-        see _attach) "Dispatch remarks: ..." and "Tones: Port Chester + Rye Brook ..." when given."""
+        see _attach) "Dispatch remarks: ..." and "Tones: Port Chester + Rye Brook ..." when given.
+        audio_state "pending": logged before its voice is rendered (#426); dispatch_voice() finishes it."""
         now = self.clock()
         with self.tx() as db:
             cur = db.execute("INSERT INTO dispatches (incident_id, at, operator, kind, text, unit_ids, audio_path, "
-                             "audio_note, transmitted, channel, tx_note) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                             "audio_note, transmitted, channel, tx_note, audio_state) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                              (iid, now, operator, kind, text, json.dumps(unit_ids), audio_path, audio_note,
-                              int(transmitted), channel, tx_note))
+                              int(transmitted), channel, tx_note, audio_state))
             how = f"transmitted on {channel}" if transmitted else f"not transmitted ({tx_note})"
             self._event(db, iid, "dispatch", f"{self.DISPATCH_KINDS.get(kind, kind)}, {how}: {text}", operator, at=now)
             for k, label, v in (("remarks", "Dispatch remarks", remarks), ("tones", "Tones", tones)):
@@ -1507,6 +1512,43 @@ class Store:
 
     def dispatch_row(self, did: int) -> dict | None:
         return self.one("SELECT * FROM dispatches WHERE id = ?", (did,))
+
+    def dispatch_voice(self, did: int, *, audio_path: str, audio_note: str, transmitted: bool | None = None,
+                       tx_note: str = "") -> bool:
+        """A pending dispatch's voice, rendered after the answer (#426): the row is ready (audio_path) or failed
+        (audio_note says why), in one change. transmitted (a transmitter that keys the audio; None: as logged): the
+        row's, and a chronology line when it differs from what was logged. False, nothing written: the row isn't
+        pending any more (swept at a restart, failed at a drain)."""
+        if self.one("SELECT 1 AS x FROM dispatches WHERE id = ? AND audio_state = 'pending'", (did,)) is None:
+            return False                                 # (no transaction: nothing changed, nothing to push)
+        with self.tx() as db:
+            row = db.execute("SELECT incident_id, operator, transmitted, channel FROM dispatches WHERE id = ? AND "
+                             "audio_state = 'pending'", (did,)).fetchone()
+            if row is None:
+                return False
+            db.execute("UPDATE dispatches SET audio_state = ?, audio_path = ?, audio_note = ? WHERE id = ?",
+                       ("ready" if audio_path else "failed", audio_path, audio_note, did))
+            if transmitted is not None and (bool(transmitted) != bool(row["transmitted"])):
+                db.execute("UPDATE dispatches SET transmitted = ?, tx_note = ? WHERE id = ?", (int(transmitted), tx_note, did))
+                how = f"transmitted on {row['channel']}" if transmitted else f"not transmitted ({tx_note})"
+                self._event(db, row["incident_id"], "system", f"Dispatch #{did} {how}", row["operator"])
+            return True
+
+    def fail_pending_voice(self, why: str, ids: list[int] | None = None) -> int:
+        """Every dispatch still waiting for its voice (ids: only these) is failed with the reason: at a start (the
+        process that was rendering is gone) and at a drain. How many."""
+        with self.lock:
+            sql, args = "SELECT id FROM dispatches WHERE audio_state = 'pending'", []
+            if ids is not None:
+                sql += f" AND id IN ({','.join('?' * len(ids))})"
+                args = list(ids)
+            pending = [r["id"] for r in self.db.execute(sql, args)]
+        if not pending:
+            return 0
+        with self.tx() as db:
+            cur = db.execute(f"UPDATE dispatches SET audio_state = 'failed', audio_path = '', audio_note = ? WHERE "
+                             f"audio_state = 'pending' AND id IN ({','.join('?' * len(pending))})", [why] + pending)
+            return cur.rowcount
 
     def _attach(self, rows: list[dict], max_events: int = 300) -> list[dict]:
         """Each event with its assignments, chronology and dispatch log."""
@@ -1518,7 +1560,7 @@ class Store:
                          f"WHERE a.incident_id IN ({marks}) ORDER BY a.id", ids)
         events = self.q(f"SELECT * FROM events WHERE incident_id IN ({marks}) ORDER BY at, id", ids)
         disp = self.q(f"SELECT id, incident_id, at, operator, kind, text, unit_ids, audio_path != '' AS has_audio, audio_note, "
-                      f"transmitted, channel, tx_note FROM dispatches WHERE incident_id IN ({marks}) ORDER BY at, id", ids)
+                      f"transmitted, channel, tx_note, audio_state AS audio FROM dispatches WHERE incident_id IN ({marks}) ORDER BY at, id", ids)
         by = {r["id"]: dict(r, emergency=bool(r["emergency"]), assignments=[], events=[], dispatches=[],
                             map_layers=json.loads(r["map_layers"]) if r.get("map_layers") else None,   # (#111)
                             geo_alts=_alts(r.get("geo_alts"))) for r in rows}                          # (#176)
@@ -1540,6 +1582,7 @@ class Store:
             by[e["incident_id"]]["events"].append(e)
         for d in disp:
             d["transmitted"], d["has_audio"] = bool(d["transmitted"]), bool(d["has_audio"])
+            d["audio"] = d["audio"] or ("ready" if d["has_audio"] else "")     # pending | ready | failed | '' (none)
             d["unit_ids"] = json.loads(d["unit_ids"])
             d["remarks"] = d["tones"] = ""
             by[d["incident_id"]]["dispatches"].append(d)

@@ -560,6 +560,8 @@ class App:
             from sizeup.fence import Fence
             fence = Fence.from_env(log=log)      # the hub's single-writer lock (sizeup/handoff.py): uploads only while ours
             self.fence = fence
+            if fence is not None:                 # a dispatch's voice, attached after the answer (#426): the writer's only
+                self.cad.may_write = fence.ok
             self.cache_mirror = CacheMirror.from_env(Path(cfg.cad_db).parent, log=log, fence=fence.ok if fence else None)
         self._layers_lock = threading.Lock()
         self._layers_on = False                   # start_layers() asked for, stop_layers() not since
@@ -3282,6 +3284,7 @@ class App:
 
     def stop(self) -> None:
         self._stopping.set()
+        self.cad.stop_voice()                # dispatch voices still rendering: finished, or failed (#426), not left pending
         self.attachments.stop()
         for r in self.receivers:
             r.stop()
@@ -3390,6 +3393,7 @@ def make_server(app: App, fence=None, listener=None) -> WebServer:
     if app.prealert is not None:
         app.prealert.on_change = server.poke             # so is the phone ringing
     app.cad.alarms.on_change = server.poke               # and an emergency alarm (#128)
+    app.cad.on_dispatch = server.poke                    # and a dispatch, then its voice once rendered (#426)
     app.cad.airport_alerts.on_change = server.poke       # and an airport pre-alert (#233)
     app.trains.on_change = server.poke                   # and Metro-North's trains, each TrainTime read (#362)
     return server

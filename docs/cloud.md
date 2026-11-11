@@ -465,6 +465,15 @@ tones in front and reads it twice with the time out once, exactly as with Kokoro
   {action: "voice_preview"}`).
 * Stations and all-in-one keep Kokoro (`tts_engine = "kokoro"`); `polly` works there too with AWS
   credentials in the environment, falling back to macOS `say` like Kokoro does.
+* **After the answer (#426):** a dispatch, add-on or upgrade is logged and answered at once (a few ms; it
+  used to wait 2-3 s for Polly). Its row starts `audio: "pending"`; one worker (`sizeup/cad/voicequeue.py`,
+  at most 32 waiting) renders the voices in the order sent, hands each to the transmitter, then writes the
+  row (`ready` with the WAV, or `failed` with the same notes as above) and pushes the state. The page shows
+  the dispatch with "Voice…" and plays the audio once when the state brings it. A preview answers with the
+  text only; the page asks for its audio in a second call (`{"audio": true}`). **Handover:** the write is the
+  lease holder's only (`Cad.may_write`, the fence); at a drain the voices get 6 s, then what is left is
+  failed ("Voice not rendered — the hub restarted first: text only"); a start fails any row a dead process
+  left pending. The dispatch itself is never lost: only its audio.
 
 **Seam for transmission (M2, not built):** keying a radio stays on the station. The hub already
 stores and serves the rendered WAV for every dispatch (`dispatch-audio/` + `audio.sqlite`, `GET
