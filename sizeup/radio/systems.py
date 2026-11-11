@@ -45,12 +45,20 @@ ACTIVITY_SHOWN = 50
 JOB = re.compile(r"[A-Za-z0-9][A-Za-z0-9 ./_-]{0,39}")
 
 
-LONG_NUMBER = re.compile(r"(?<![\d.])\d{5,}(?![\d.]|\s*(?:MHz|Hz|/sec))")
+LONG_NUMBER = re.compile(r"(?<![\d.])\d{5,}(?!\d|\.\d)")
+NOT_AN_ID = re.compile(r"(?:rate|freq\w*|center|centre|hz|count|pid)\W*$", re.I)
 
 
 def no_ids(detail) -> str:
-    """trunk-recorder's own output line can name a radio (its ID): never in a status row (frequencies and rates stay)."""
-    return LONG_NUMBER.sub("#", str(detail or ""))[:200]
+    """trunk-recorder's own output line can name a radio (its ID): never in a status row (a frequency or a rate stays)."""
+    text = str(detail or "")
+
+    def one(m) -> str:
+        after = text[m.end():m.end() + 8].lstrip().lower()
+        if after.startswith(("mhz", "hz", "khz", "/sec", "sps")) or NOT_AN_ID.search(text[:m.start()][-16:]):
+            return m.group(0)                       # a frequency or a rate, by what is written around it
+        return "#"
+    return LONG_NUMBER.sub(one, text)[:200]
 
 
 class SystemError_(ValueError):

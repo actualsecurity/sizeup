@@ -460,6 +460,7 @@ class App:
                     sysd, trunk_recorder.make_system(sysd.name, sysd.label, cfg.p25_recorder, sysd.dir, log), self.tg,
                     self._call_system, log, self.clips_dir.parent if self.clips_dir else None,
                     on_activity=self._p25_activity)
+        sources.set_context_talkgroups(tg for x in cfg.p25_systems for tg in x.talkgroups)
         for why in cfg.p25_system_problems:       # a system directory that can't be used: said, the rest runs
             log(f"p25 systems: left out: {why}")
         self._sys_jobs: dict[str, tuple[p25_systems.Runtime, int]] = {
@@ -3068,7 +3069,13 @@ class App:
                     r.stop()
         claims.release(serial)
 
-    def set_mode(self, mode: str, sdr: str | None = None, by: str = "person") -> str | None:
+    CONFIRM = "confirm: "       # what a refusal that only needs the person's confirm starts with (the UI asks, then resends)
+
+    def fire_job(self, mode: str) -> bool:
+        """A job of ours a dongle shouldn't lose by one click: the county's trunk-recorder, paging, a fireground."""
+        return mode == P25_MODE or any(c.label == mode and c.kind in ("paging", "traffic") for c in self.cfg.channels)
+
+    def set_mode(self, mode: str, sdr: str | None = None, by: str = "person", confirm: bool = False) -> str | None:
         """Give dongle `sdr` (default: the first) a channel, Fire/EMS 15 (trunk-recorder) or Off.
         A mode already running on another dongle moves here (that dongle goes Off, which auto-assign
         may fill on its next start: a person didn't choose that Off). `by` is recorded per dongle;
@@ -3081,6 +3088,10 @@ class App:
             return f"no SDR {sdr!r} plugged in" + (f"; one of {', '.join(rows)}" if rows else "")
         if mode not in self.modes:
             return f"unknown mode {mode!r}; one of {', '.join(self.modes)}"
+        was = self.assign.get(sdr, OFF_MODE)
+        if mode in self._sys_jobs and self.fire_job(was) and not confirm:
+            # (#409) another system's job never takes a dongle off the fire side without the person saying so
+            return f"{self.CONFIRM}SDR {self.sdr_name(sdr)} runs {was}. Giving it to {mode} stops {was} on it."
         held = claims.other(sdr) if mode != OFF_MODE else None
         if held:
             return f"SDR {self.sdr_name(sdr)} is in use by {held.get('app', 'another app')} ({held.get('mode', '?')})"

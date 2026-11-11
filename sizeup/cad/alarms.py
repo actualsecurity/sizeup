@@ -549,6 +549,15 @@ class Alarms:
         dflt = self.defaults()[key]
         if action == "set":
             v = clean(key, body.get("value"))
+            if key == "channels":                    # our fire channels: never another P25 system's talkgroup (#409)
+                from sizeup import sourcekeys
+                try:
+                    sourcekeys.refuse_context([int(c[3:]) for c in v if isinstance(c, str) and c.startswith("tg:")
+                                               and c[3:].isdigit()], "channels")
+                except ValueError as e:
+                    raise CadError(str(e)) from None
+                if any(isinstance(c, str) and c.startswith("p25:") for c in v):
+                    raise CadError("channels: another P25 system's talkgroup is context only: it can't be listed here")
             new = REMOVE if v == dflt else v
         elif action == "reset":
             v, new = dflt, REMOVE
@@ -568,6 +577,9 @@ class Alarms:
     @staticmethod
     def channel_key(t: dict) -> str:
         tg = t.get("talkgroup")
+        from sizeup import sourcekeys
+        if tg is not None and sourcekeys.is_context(t):       # another P25 system's talkgroup: never "tg:<n>" (#409)
+            return sourcekeys.p25(str(t.get("system")), int(tg))
         return f"tg:{int(tg)}" if tg is not None and str(tg).lstrip("-").isdigit() else str(t.get("source") or "")
 
     def _named(self, text: str) -> list[str]:
@@ -637,6 +649,9 @@ class Alarms:
             return None
         now = self.clock()
         cfg = self.config()
+        from sizeup import sourcekeys
+        if sourcekeys.is_context(t):                 # another P25 system's transmission raises none of our alarms
+            return None
         fire = self.channel_key(t) in cfg["channels"]
         emergency = bool(t.get("emergency"))
         text = str(t.get("text") or "")

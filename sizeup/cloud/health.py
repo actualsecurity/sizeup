@@ -307,13 +307,22 @@ class Metrics:
                 "mem_total": mem_total, "temp_c": self.temp_c(), "disk_path": str(self.disk_path)[:200], **disk}
 
 
-LONG_NUMBER = re.compile(r"(?<![\d.])\d{5,}(?![\d.]|\s*(?:MHz|Hz|/sec))")
+LONG_NUMBER = re.compile(r"(?<![\d.])\d{5,}(?!\d|\.\d)")
+NOT_AN_ID = re.compile(r"(?:rate|freq\w*|center|centre|hz|count|pid)\W*$", re.I)
 
 
 def no_ids(detail) -> str:
     """A recorder's detail for the health report: trunk-recorder's own output lines can name a radio (its ID), so
-    any long whole number in it is left out (frequencies and rates stay)."""
-    return LONG_NUMBER.sub("#", str(detail or ""))[:200]
+    any long whole number in it is left out, whatever follows it (a full stop, a comma, a bracket); a frequency or a
+    sample rate ("476075000 Hz", "rate: 2400000") stays."""
+    text = str(detail or "")
+
+    def one(m) -> str:
+        after = text[m.end():m.end() + 8].lstrip().lower()
+        if after.startswith(("mhz", "hz", "khz", "/sec", "sps")) or NOT_AN_ID.search(text[:m.start()][-16:]):
+            return m.group(0)                       # a frequency or a rate, by what is written around it
+        return "#"
+    return LONG_NUMBER.sub(one, text)[:200]
 
 
 def station_metrics(app, metrics: Metrics) -> dict:

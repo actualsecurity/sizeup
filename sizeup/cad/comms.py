@@ -289,7 +289,7 @@ class Comms:
             self._count(db, source, minute * 60.0, seconds, int(calls), radios)
 
     def activity_rows(self, since: float, source: str = "", limit: int = 2000) -> list[dict]:
-        """[{source, minute, calls, seconds, radios}] since then, newest first (GET /api/cad/comms/activity)."""
+        """[{source, minute, calls, seconds, radios}] since then, newest first (GET /api/cad/comms/activity, admins)."""
         return self.store.q("SELECT source, minute, calls, seconds, radios FROM radio_activity WHERE minute >= ? "
                             + ("AND source = ? " if source else "") + "ORDER BY minute DESC LIMIT ?",
                             (int(since // 60), *([source] if source else []), int(limit)))

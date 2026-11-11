@@ -131,6 +131,8 @@ POST /api/cad/radio-id                    {system: mdc | fleetsync, radio_id, un
                                           new FG1 radio is (#163, the state's radio_ids; sizeup/cad/newids.py): unit
                                           names it (its transmissions go on that unit's events), label just says who,
                                           ignore stops asking; dispatchers and admins, only for an ID nobody has set
+GET  /api/cad/comms/activity?source=&hours=   per-minute activity per source (#409: an encrypted talkgroup's key-ups
+                                          and which radios keyed, a week at most); admins only (ADMIN_READS)
 GET  /api/cad/comms?unit=&channel=&event=&pcfd=1&emergency=1&since=&until=&main_limit=&limit=&rev=
                                           every transmission (newest first) with its rig, radio ID, events, the
                                           emergency button and its alarm (emergency=1: only those, #128); Main
@@ -255,6 +257,7 @@ DS_READERS = ("admin", "dispatcher")      # who may see Settings > Data sources 
 ADMIN_READS = {
     "/api/cad/notify": "the push topics' names are secret",                  # Settings > System > Push notifications
     "/api/cad/health": "station health is for admins (Settings > Health)",   # #203: off the header, on an admin tab
+    "/api/cad/comms/activity": "radio activity (which radios keyed) is for admins",   # #409: encrypted talkgroups
 }
 
 # Who may POST what (enforced only with a verified sign-in, see above): "dispatch" = dispatchers and
@@ -678,6 +681,14 @@ class CadApi:
                 return _json(200, self.cad.comms_query(parse_qs(query), signed=who is not None and bool(who.email)))
             if path == "/api/cad/comms/sources":
                 return _json(200, self.cad.comms_sources())
+            if path == "/api/cad/comms/activity":      # per-minute activity per source (#409); ?source=&hours= (24)
+                q = parse_qs(query)
+                try:
+                    hours = min(24.0 * 90, max(0.1, float((q.get("hours") or ["24"])[0])))
+                except ValueError:
+                    hours = 24.0
+                return _json(200, {"rows": self.cad.comms.activity_rows(self.cad.clock() - hours * 3600,
+                                                                        (q.get("source") or [""])[0][:80])})
             if path == "/api/cad/feed":
                 return _json(200, self.cad.feed_query(parse_qs(query)))
             if path == "/api/cad/rigs":

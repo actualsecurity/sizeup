@@ -705,7 +705,10 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                 try:
                     n = int(self.headers.get("Content-Length") or 0)
                     body = json.loads(self.rfile.read(min(n, 1024)) or b"{}")
-                    err = set_mode(str(body["mode"]), str(body["sdr"]) if body.get("sdr") else None)
+                    sdr_arg = str(body["sdr"]) if body.get("sdr") else None
+                    # "confirm": a fire job's dongle given to another P25 system's job, said twice (#409)
+                    err = (set_mode(str(body["mode"]), sdr_arg, confirm=True) if body.get("confirm") is True
+                           else set_mode(str(body["mode"]), sdr_arg))
                 except (ValueError, KeyError, TypeError) as e:
                     err = f"bad request: {e}"
                 if err:
