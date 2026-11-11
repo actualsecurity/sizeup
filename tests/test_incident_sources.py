@@ -179,7 +179,7 @@ def test_the_feed_creates_and_the_page_attaches_without_a_duplicate(tmp_path):
     rig.poll()
     [inc] = rig.incidents()
     assert (inc["source"], inc["status"], inc["type"], inc["subtype"], inc["address"]) == (
-        "CAD feed", "queued", "ALARM", "COMM", "12 EXAMPLE AVE")
+        "CAD feed", "queued", "ALARM", "COMM", "12 Example Ave")
     assert rig.cad.sources.acting()["source"] == "county"
     rig.at(75)                                             # the page, 75 s later
     got = rig.page()
@@ -188,7 +188,7 @@ def test_the_feed_creates_and_the_page_attaches_without_a_duplicate(tmp_path):
     rig.at(80)
     assert rig.page()["id"] == inc["id"] and len(rig.incidents()) == 1     # the page's repeat: still one
     after = rig.cad.store.incident(inc["id"])
-    assert after["address"] == "12 EXAMPLE AVE" and "60 Control page" not in after["remarks"]   # the feed's fields rule
+    assert after["address"] == "12 Example Ave" and "60 Control page" not in after["remarks"]   # the feed's fields rule
     panel = rig.cad.sources.panel()
     [row] = panel["incidents"]
     assert [(s["source"], s["lead_s"]) for s in row["seen"]] == [("county", 75.0), (PAGING, None)]
@@ -383,18 +383,18 @@ def test_a_person_s_type_location_and_pin_are_kept_and_use_the_feeds_is_one_clic
     a = rig.cad.store.incident(inc["id"])
     assert (a["address"], a["type"], a["lat"]) == ("400 Sample St", "STRU", 41.0)
     lines = rig.feed_lines(inc["id"])
-    assert "County feed: location 14 EXAMPLE AVE (kept the location set by hand)" in lines
+    assert "County feed: location 14 Example Ave (kept the location set by hand)" in lines
     assert "County feed: type ALARM/RESD (kept the type set by hand)" in lines
     [shown] = [i for i in rig.cad.state()["incidents"] if i["id"] == inc["id"]]
-    assert shown["feed"]["use"] == {"type": "ALARM/RESD", "location": "14 EXAMPLE AVE"}
+    assert shown["feed"]["use"] == {"type": "ALARM/RESD", "location": "14 Example Ave"}
     rig.cad.feed_use(inc["id"], {"field": "location", "operator": "Lt. Test"})
     a = rig.cad.store.incident(inc["id"])
-    assert (a["address"], a["lat"]) == ("14 EXAMPLE AVE", 41.0)            # the pin a person set stays
+    assert (a["address"], a["lat"]) == ("14 Example Ave", 41.0)            # the pin a person set stays
     assert "location" not in rig.cad.sources.manual(inc["id"]) and "Used County feed's location" in rig.feed_lines(inc["id"])
     rig.at(60)
     rig.feed.change("A1", location="16 EXAMPLE AVE")       # no hand on the location now: the feed's applies
     rig.poll()
-    assert rig.cad.store.incident(inc["id"])["address"] == "16 EXAMPLE AVE"
+    assert rig.cad.store.incident(inc["id"])["address"] == "16 Example Ave"
 
 
 def test_every_feed_change_and_comment_is_on_the_timeline(tmp_path):
@@ -1212,8 +1212,8 @@ def test_a_feed_location_is_shown_and_said_as_its_street_part(tmp_path):
     rig.feed.put("B1", type="EMS", location="@SAMPLE PARK - SAMPLE VILLAGE", units=("E62",), times={"dispatched": T0})
     rig.poll()
     a, b = rig.incidents()
-    assert (a["address"], b["address"]) == ("12 EXAMPLE AVE", "@ SAMPLE PARK")
-    assert src.shown_location("") == "" and src.shown_location("12-14 EXAMPLE AVE 3RD FL") == "12 EXAMPLE AVE"
+    assert (a["address"], b["address"]) == ("12 Example Ave", "@ Sample Park")
+    assert src.shown_location("") == "" and src.shown_location("12-14 EXAMPLE AVE 3RD FL") == "12 Example Ave"
 
 
 def test_triggers_are_gentle_floor_cap_and_never_soon_after_a_poll(tmp_path):
@@ -1762,3 +1762,134 @@ def test_an_open_late_earlier_call_10_min_before_stays_separate(tmp_path):
     rig.feed.put("E1", type="ALARM/COMM", location="12 EXAMPLE AVE", units=("E60", "L31"), times={"dispatched": T0})
     rig.poll()
     assert _ref_of(rig, "E1") not in (None, page["id"])
+
+
+# -- a feed's location in proper case: display only, matching unchanged ------------------------------------------------
+
+
+@pytest.mark.parametrize("raw,shown", [
+    ("12 EXAMPLE AVE", "12 Example Ave"),
+    ("12 N EXAMPLE AVE APT 3B", "12 N Example Ave Apt 3B"),
+    ("12 EXAMPLE AVE W", "12 Example Ave W"),
+    ("1ST ST", "1st St"), ("22ND PL", "22nd Pl"), ("3RD AVE", "3rd Ave"), ("4TH TER", "4th Ter"),
+    ("12 SAMPLE RD / EXAMPLE BLVD", "12 Sample Rd / Example Blvd"),
+    ("SAMPLE DR & EXAMPLE CT", "Sample Dr & Example Ct"),
+    ("A AVE / B ST", "A Ave / B St"),
+    ("9 SAMPLE LN", "9 Sample Ln"), ("9 SAMPLE PKWY", "9 Sample Pkwy"), ("9 SAMPLE HWY", "9 Sample Hwy"),
+    ("5 MCEXAMPLE PL", "5 McExample Pl"), ("5 MACARTHUR LN", "5 MacArthur Ln"),
+    ("5 MACK RD", "5 Mack Rd"), ("5 MACY ST", "5 Macy St"), ("5 MACON ST", "5 Macon St"),
+    ("5 O'SAMPLE LN", "5 O'Sample Ln"), ("5 ST SAMPLE'S PL", "5 St Sample's Pl"),
+    ("US 1", "US 1"), ("100 US 1", "100 US 1"), ("I-287", "I-287"), ("I287 EB MM 10.0", "I287 EB MM 10.0"),
+    ("NY 120A", "NY 120A"), ("RT 1 / SAMPLE AVE", "RT 1 / Sample Ave"), ("12 SAMPLE CT 3", "12 Sample Ct 3"),
+    ("12 EXAMPLE AVE # 2", "12 Example Ave # 2"), ("12 EXAMPLE AVE STE 4", "12 Example Ave Ste 4"),
+    ("12 EXAMPLE AVE 3RD FL", "12 Example Ave 3rd Fl"), ("12A EXAMPLE AVE", "12A Example Ave"),
+    ("@SAMPLE SCHOOL OF THE ARTS", "@Sample School of the Arts"),
+    ("12 EXAMPLE AVE : @SAMPLE PARK - SAMPLE VILLAGE", "12 Example Ave : @Sample Park - Sample Village"),
+    ("12 example ave", "12 Example Ave"), ("12 McExample Ave", "12 McExample Ave"),
+    ("12 EXAMPLE AVE SAMPLE_TOWN", "12 Example Ave Sample Town"), ("12 EXAMPLE AVE TOWN_OF_SAMPLE", "12 Example Ave Town of Sample"),
+    ("12 THE CROSSWAY", "12 The Crossway"), ("1 ON THE GREEN", "1 On the Green"), ("12A THE SAMPLE", "12A The Sample"),
+    ("SAMPLE AVE / THE CROSSWAY", "Sample Ave / The Crossway"), ("SAMPLE AVE & THE MALL", "Sample Ave & The Mall"),
+    ("@THE SAMPLE CLUB", "@The Sample Club"), ("12 SAMPLE OF THE ARTS", "12 Sample of the Arts"),
+    ("", ""),
+])
+def test_proper_case(raw, shown):
+    assert src.proper_case(raw) == shown
+
+
+def test_a_feed_location_is_shown_with_its_known_town_as_the_map_labels_are():
+    t1, t2, _ = towns()
+    snake = t1.upper().replace(" ", "_")
+    for raw in (f"12 EXAMPLE AVE {snake}", f"12 EXAMPLE AVE {t1.lower()}", f"12 EXAMPLE AVE {t1.upper()}",
+                f"12 EXAMPLE AVE, {t1.upper()}", f"12 EXAMPLE AVE ({t1.upper()})", f"12 EXAMPLE AVE APT 3 {snake}",
+                f"12 EXAMPLE AVE {snake} : @SAMPLE PLACE"):
+        assert src.shown_location(raw) == f"12 Example Ave, {t1}", raw
+    assert src.shown_location("12 EXAMPLE AVE SAMPLE_TOWN") == "12 Example Ave"        # an unknown town token: dropped
+    assert src.shown_location(f"12 {t2.upper()}") == f"12 {t2}"                          # nothing left but a number
+    assert src.shown_location("@SAMPLE PARK - SAMPLE VILLAGE") == "@ Sample Park"
+
+
+@pytest.mark.parametrize("raw", [
+    "12 EXAMPLE AVE", "12 N EXAMPLE AVE APT 3", "12 EXAMPLE AVE W", "12 EXAMPLE AVE EXT", "1ST ST", "12 1ST ST",
+    "5 MCEXAMPLE PL", "5 O'SAMPLE LN", "SAMPLE DR & EXAMPLE CT", "A AVE / B ST", "@SAMPLE SCHOOL", "100 US 1",
+    "12 EXAMPLE AVE : @SAMPLE PLACE", "12-14 EXAMPLE AVE 3RD FL", "12 EXAMPLE AVE SAMPLE_TOWN", "12A EXAMPLE AVE",
+])
+def test_proper_case_never_changes_what_matches(raw):
+    """Matching reads lower case (street_part, place_key, same_place): the shown text is the same place as the raw one,
+    with the same key, and two different places stay different."""
+    t1, t2, _ = towns()
+    for r in (raw, f"{raw} {t1.upper().replace(' ', '_')}"):
+        shown = src.shown_location(r)
+        assert same_place(r, shown) and same_place(shown, r), (r, shown)
+        assert src.place_key(r) == src.place_key(shown) == src.place_key(src.proper_case(r)), (r, shown)
+        assert same_place(src.street_part(r) or r, shown)                  # the old title (raw case) and the new one
+        assert src.place_key(r.lower()) == src.place_key(r)
+        assert src.street_of(r) == src.street_of(shown) and src.halved(r) == src.halved(r.lower())
+    assert not same_place(src.shown_location("14 EXAMPLE AVE"), "12 EXAMPLE AVE")
+    for r in ("17 EXAMPLE LN", f"17 EXAMPLE LN {t1.upper().replace(' ', '_')}"):          # a page's doubled number
+        assert src.same_place_halved("1717 Example Lane", src.shown_location(r), heard_b=False)
+        assert src.same_place_halved("1717 EXAMPLE LANE", src.shown_location(r), heard_b=False)
+    snake2 = t2.upper().replace(" ", "_")
+    assert not same_place(src.shown_location(f"12 EXAMPLE AVE {t1.upper().replace(' ', '_')}"), f"12 EXAMPLE AVE {snake2}")
+
+
+def test_a_feed_incident_is_titled_in_proper_case_and_matches_as_before(tmp_path):
+    t1, _, _ = towns()
+    snake = t1.upper().replace(" ", "_")
+    rig = Rig(tmp_path)
+    rig.cad.sources._towns()
+    rig.feed.put("A1", type="ALARM/COMM", location=f"12 EXAMPLE AVE {snake}", units=("E60",), times={"dispatched": T0})
+    rig.poll()
+    [inc] = rig.incidents()
+    assert inc["address"] == f"12 Example Ave, {t1}"
+    assert f"at 12 Example Ave {t1}" in inc["remarks"] and snake not in inc["remarks"]
+    # the same location again (another field changes): no location line, the title stays
+    rig.feed.put("A1", type="ALARM/COMM", location=f"12 EXAMPLE AVE {snake}", units=("E60", "L31"),
+                 times={"dispatched": T0})
+    rig.poll()
+    assert rig.incidents()[0]["address"] == f"12 Example Ave, {t1}"
+    assert not any("location" in x for x in rig.feed_lines(inc["id"]))
+    # the page for it still attaches (the same place, whatever the case)
+    rig.page()
+    assert len(rig.incidents()) == 1
+
+
+def test_an_old_title_in_raw_case_stays_until_the_feed_moves_it(tmp_path):
+    """Incidents titled before proper case keep their title; a new location from the feed is shown in proper case."""
+    rig = Rig(tmp_path)
+    rig.feed.put("A1", type="ALARM/COMM", location="12 EXAMPLE AVE", units=("E60",), times={"dispatched": T0})
+    rig.poll()
+    [inc] = rig.incidents()
+    with rig.cad.store.tx() as db:                                  # as the hub titled it before
+        db.execute("UPDATE incidents SET address = '12 EXAMPLE AVE' WHERE id = ?", (inc["id"],))
+    rig.feed.put("A1", type="ALARM/COMM", location="12 EXAMPLE AVE", units=("E60", "L31"), times={"dispatched": T0})
+    rig.poll()
+    assert rig.incidents()[0]["address"] == "12 EXAMPLE AVE"
+    rig.feed.put("A1", type="ALARM/COMM", location="14 EXAMPLE AVE", units=("E60", "L31"), times={"dispatched": T0})
+    rig.poll()
+    assert rig.incidents()[0]["address"] == "14 Example Ave"
+
+
+@pytest.fixture
+def synthetic_towns():
+    """Made-up towns: two listed (one of them a "Town of ..."), a "Town of ..." alias and a hamlet alias."""
+    saved = (src.TOWNS, src.TOWN_OF, src.TOWN_NAME, src.LISTED)
+    src.set_towns(["Sampleton", "Exampleville", "Town of Otherton"],
+                  {"town of sampleton": "Sampleton", "hamletburg": "Exampleville"})
+    yield
+    src.TOWNS, src.TOWN_OF, src.TOWN_NAME, src.LISTED = saved
+
+
+def test_a_town_of_alias_is_never_a_title_s_town(synthetic_towns):
+    """A town can hold villages of its own: "TOWN_OF_SAMPLETON" (an alias) may be one of them, so the title names none;
+    a listed town is shown, a "Town of ..." one too, and the remark keeps the county's words."""
+    shown = src.shown_location
+    assert shown("12 EXAMPLE AVE TOWN_OF_SAMPLETON") == "12 Example Ave"
+    assert shown("12 EXAMPLE AVE TOWN OF SAMPLETON") == "12 Example Ave"
+    assert shown("12 EXAMPLE AVE, TOWN OF SAMPLETON") == "12 Example Ave"
+    assert shown("12 EXAMPLE AVE SAMPLETON") == "12 Example Ave, Sampleton"
+    assert shown("12 EXAMPLE AVE TOWN_OF_OTHERTON") == "12 Example Ave, Town of Otherton"
+    assert shown("12 EXAMPLE AVE HAMLETBURG") == "12 Example Ave, Hamletburg"
+    assert src.proper_case("12 EXAMPLE AVE TOWN_OF_SAMPLETON") == "12 Example Ave Town of Sampleton"
+    # matching still reads the alias as its town
+    assert same_place("12 EXAMPLE AVE TOWN_OF_SAMPLETON", shown("12 EXAMPLE AVE SAMPLETON"))
+    assert not same_place("12 EXAMPLE AVE TOWN_OF_SAMPLETON", "12 EXAMPLE AVE EXAMPLEVILLE")

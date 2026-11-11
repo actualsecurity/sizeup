@@ -68,7 +68,7 @@ def test_the_feed_first_then_the_street_only_page_attaches_and_enriches_it(tmp_p
     got = rig.page("p1", PAGE_ST)
     assert got["id"] == a and len(open_incidents(rig)) == 1                     # no second card
     inc = rig.cad.store.incident(a)
-    assert inc["address"] == "9 EXAMPLE TER"                                     # the feed's location stands
+    assert inc["address"] == "9 Example Ter"                                     # the feed's location stands
     assert (inc["type"], inc["subtype"]) == ("ALARM", "RESD")                    # the feed's type stands
     assert inc["cross_street"] == "Sample Avenue And Specimen Street"              # the page's, the incident had none
     assert any(x.startswith("Page ") and "attached" in x for x in rig.feed_lines(a))
@@ -96,7 +96,7 @@ def test_the_page_first_then_the_feeds_numbered_event_attaches_to_its_incident(t
     rig.at(45)
     a = feed_event(rig, dt=10)
     assert a == p and len(open_incidents(rig)) == 1
-    assert rig.cad.store.incident(p)["address"] == "9 EXAMPLE TER"              # the feed's numbered address now
+    assert rig.cad.store.incident(p)["address"] == "9 Example Ter"              # the feed's numbered address now
 
 
 def test_two_calls_on_one_street_never_join_and_every_one_is_noted(tmp_path):
@@ -439,7 +439,7 @@ def test_a_doubled_number_page_joins_the_feed_incident(tmp_path):
     a = feed_event(rig, location="17 EXAMPLE LN", units=("E60",), typ="ALARM/RESD")
     rig.at(30)
     assert rig.page("p1", DOUBLED)["id"] == a and len(open_incidents(rig)) == 1
-    assert rig.cad.store.incident(a)["address"] == "17 EXAMPLE LN"
+    assert rig.cad.store.incident(a)["address"] == "17 Example Ln"
 
 
 def test_a_doubled_number_page_first_then_the_feed_joins_it(tmp_path):
