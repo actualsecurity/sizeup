@@ -339,11 +339,12 @@ class Attachments:
                     store.db.execute(stmt)
             cols = {r["name"] for r in store.db.execute("PRAGMA table_info(attachments)")}
             for col, decl in (("versions", "TEXT NOT NULL DEFAULT '[]'"), ("attempts", "INTEGER NOT NULL DEFAULT 0"),
-                              ("retry_at", "REAL"), ("tagged", "INTEGER NOT NULL DEFAULT 0")):
+                              ("retry_at", "REAL"), ("tagged", "INTEGER NOT NULL DEFAULT 0"), ("saving_since", "REAL")):
                 if col not in cols:                       # a table from before these (this branch's own test runs)
                     store.db.execute(f"ALTER TABLE attachments ADD COLUMN {col} {decl}")
         self._untagged: set[str] = set()
         self._said_untagged = False
+        self._uploading: set[str] = set()             # camera clips being uploaded by this process: sweep / resume skip them
         self._migrate_forever()
 
     def _sure(self, tid: str, iid: int) -> bool:
@@ -380,11 +381,12 @@ class Attachments:
         rows = self.store.q(
             f"SELECT a.id, a.kind, a.ref, a.status, a.objects, a.expires_at, a.incident_id, {sure} AS sure "
             f"FROM attachments a WHERE (a.status = 'stored' AND a.tagged = 0) OR (a.kind = 'radio' AND a.expires_at > 0 "
-            f"AND a.status IN ('stored', 'expired') AND {sure}) LIMIT ?", (limit,))
+            f"AND {sure} AND (a.status IN ('stored', 'expired') OR (a.status = 'failed' AND a.tries < ? "
+            f"AND COALESCE(a.retry_at, 0) <= ?))) LIMIT ?", (TRIES, self.clock(), limit))
         n = 0
         for r in rows:
             forever = r["kind"] == "radio" and bool(r["sure"])
-            gone = r["status"] == "expired"
+            gone = r["status"] in ("expired", "failed")       # failed: a re-copy that failed, tried again (backoff)
             try:
                 for o in ([] if gone else json.loads(r["objects"] or "[]")):
                     self.s3.put_tagging(o["key"], TAG_FOREVER if forever else TAG_1Y)
@@ -396,7 +398,7 @@ class Attachments:
             if gone:
                 got = self._recopy(r)
                 if got is None:
-                    break                                 # the live audio can't be read now: the next round
+                    continue                              # the live audio can't be read now / the copy failed: later
                 n += got
                 continue
             self._set(r["id"], tagged=1, **({"expires_at": NEVER} if forever else {}))
@@ -410,6 +412,9 @@ class Attachments:
         try:
             wav = self.audio(r["ref"])
         except OSError:
+            k = int(self.store.one("SELECT attempts FROM attachments WHERE id = ?", (r["id"],))["attempts"] or 0) + 1
+            if r["status"] == "failed":                   # its backoff: 60 s doubling to an hour
+                self._set(r["id"], attempts=k, retry_at=self.clock() + min(RETRY_S[1], RETRY_S[0] * 2 ** (k - 1)))
             return None
         if not wav:
             self._set(r["id"], status="expired", expires_at=NEVER, tagged=1,
@@ -417,7 +422,8 @@ class Attachments:
             self.log(f"attachments: {r['id']}: its link was confirmed after the copy's year: the audio is gone, "
                      "the transcript record stays")
             return 0
-        self._set(r["id"], status="failed", tries=0, attempts=0, retry_at=0)
+        if r["status"] != "failed":                       # the first try; a failed one keeps its count and backoff
+            self._set(r["id"], status="failed", tries=0, attempts=0, retry_at=0)
         got = self._copy_radio(r["ref"], r["incident_id"], "confirmed later")
         if got == "copied":
             self.log(f"attachments: {r['id']}: its link was confirmed after the copy's year: copied again from the live "
@@ -583,6 +589,9 @@ class Attachments:
     def _upload_camera(self, aid: str, inc: dict, cid: str, cam: dict, segs: list[dict], note: str, operator: str,
                        now: float) -> None:
         s3 = self.s3
+        with self._mu:
+            self._uploading.add(aid)
+        self._set(aid, saving_since=self.clock())
         try:
             objects, index, part, pn, total = [], [], bytearray(), 0, 0
 
@@ -637,6 +646,8 @@ class Attachments:
                 self._set(aid, status="failed", error=why)
             self.audit("failed", aid, inc["id"], operator, why)
         finally:
+            with self._mu:
+                self._uploading.discard(aid)
             dvr = self.dvr()
             if dvr is not None:
                 dvr.hold(cid, False)
@@ -806,7 +817,11 @@ class Attachments:
             rows = self.store.q("SELECT * FROM attachments WHERE kind = 'camera' AND (status = 'saving' OR "
                                 "(status = 'failed' AND error LIKE 'interrupted%')) ORDER BY created_at")
         n = 0
+        with self._mu:
+            busy = set(self._uploading)
         for r in rows:
+            if r["id"] in busy:
+                continue                                  # still uploading here: never a second upload of it
             cid = dvr.alias(r["source"]) if hasattr(dvr, "alias") else r["source"]
             segs = dvr.segments(cid, r["start"], r["end"])
             whole = bool(segs) and segs[0]["t0"] <= r["start"] + 0.01 and segs[-1]["t0"] + segs[-1]["dur"] >= r["end"] - 0.01
@@ -816,7 +831,10 @@ class Attachments:
                 self.audit("failed", r["id"], r["incident_id"], r["created_by"], "interrupted; the range is no longer recorded")
                 continue
             inc = self._incident(r["incident_id"])
-            self._set(r["id"], status="saving", error="")
+            now = self.clock()
+            self._set(r["id"], status="saving", error="", saving_since=now, retry_at=now + SAVING_STALE_S)
+            with self._mu:
+                self._uploading.add(r["id"])              # from now: the pool's upload discards it when it ends
             dvr.hold(cid, True)
             self._pool.submit(self._upload_camera, r["id"], inc, cid, self.camera(cid) or {}, segs, r["note"],
                               r["created_by"], r["created_at"])
@@ -830,9 +848,14 @@ class Attachments:
         removes the objects). A radio one on a confirmed link never expires (NEVER, #440): an incident keeps its audio
         until an admin deletes it."""
         now = self.clock()
+        with self._mu:
+            busy = set(self._uploading)
+        stale = [r["id"] for r in self.store.q("SELECT id FROM attachments WHERE status = 'saving' AND "
+                                              "COALESCE(saving_since, created_at) < ?", (now - SAVING_STALE_S,))
+                 if r["id"] not in busy]                  # an upload still running here is never taken for a lost one
         with self.store.lock:
-            self.store.db.execute("UPDATE attachments SET status = 'failed', error = 'interrupted (a deploy?)', "
-                                  "tries = tries + 1 WHERE status = 'saving' AND created_at < ?", (now - SAVING_STALE_S,))
+            self.store.db.executemany("UPDATE attachments SET status = 'failed', error = 'interrupted (a deploy?)', "
+                                      "tries = tries + 1 WHERE id = ? AND status = 'saving'", [(i,) for i in stale])
             self.store.db.execute("UPDATE attachments SET status = 'expired' WHERE status = 'stored' "
                                   "AND expires_at > 0 AND expires_at < ?", (now,))
 

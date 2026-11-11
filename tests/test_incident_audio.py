@@ -280,3 +280,90 @@ def test_a_link_confirmed_after_its_copys_year_is_copied_again_or_said(tmp_path)
     assert any(k.endswith("/audio.wav") for k in fake.objects) and set(fake.tags.values()) >= {"keep=forever"}
     assert rows["FG1-9"]["status"] == "expired" and "before the link was confirmed" in rows["FG1-9"]["error"]
     assert any("the audio is gone" in m for m in logs) and a.retag() == 0
+
+
+def test_a_long_upload_is_never_submitted_twice_or_flipped(tmp_path):
+    """resume() hands an interrupted camera clip to the pool; while that upload runs (longer than SAVING_STALE_S),
+    neither sweep() nor the next rounds' resume() take it for lost or upload it again."""
+    import threading
+    from tests.test_attachments import CAM, call, camera_setup
+    api, c, a, d, iid, clock = camera_setup(tmp_path)
+    fake = Tagged()
+    a.s3 = tagged_s3(fake)
+    a._resumed = True
+    fake.fail = lambda method, key: method == "PUT"
+    st = d.status(CAM)
+    call(api, f"/api/cad/cameras/{CAM}/dvr/clip", {"from": st["from"], "to": st["to"], "incident_id": iid})
+    aid = a.store.one("SELECT id FROM attachments WHERE kind = 'camera'")["id"]
+    fake.fail = None
+    gate, started, submitted = threading.Event(), threading.Event(), []
+    real_upload = a._upload_camera
+
+    class Slow:                                               # the pool: the upload runs on, held until the gate opens
+        def submit(self, fn, *args):
+            submitted.append(args[0])
+
+            def run():
+                started.set()
+                gate.wait(10)
+                fn(*args)
+            threading.Thread(target=run, daemon=True).start()
+
+        def shutdown(self, **kw):
+            pass
+
+    a._pool = Slow()
+    a._upload_camera = lambda *args: (a._uploading.add(args[0]), real_upload(*args))
+    with a.store.lock:
+        a.store.db.execute("UPDATE attachments SET retry_at = 0")
+    assert a.resume(due_only=True) == 1 and started.wait(5)
+    t0 = clock.t
+    for k in range(5):                                         # rounds go by, the upload far past SAVING_STALE_S
+        clock.t = t0 + (k + 1) * att_mod.SAVING_STALE_S
+        a.sweep()
+        assert a.resume(due_only=True) == 0 and a.resume() == 0
+        assert a.store.one("SELECT status FROM attachments WHERE id = ?", (aid,))["status"] == "saving"
+    gate.set()
+    for _ in range(200):
+        if a.store.one("SELECT status FROM attachments WHERE id = ?", (aid,))["status"] == "stored":
+            break
+        time.sleep(0.02)
+    assert submitted == [aid] and a.store.one("SELECT status FROM attachments WHERE id = ?", (aid,))["status"] == "stored"
+    assert aid not in a._uploading
+
+
+def test_a_failed_late_recopy_is_tried_again_then_said_when_the_audio_is_gone(tmp_path):
+    c, a, inc, clock = radio_setup(tmp_path)
+    fake = Tagged()
+    a.s3 = tagged_s3(fake)
+    c.record_traffic(tx("FG1-2", clock.t))
+    link(c, "FG1-2", inc["id"], "mention")
+    clock.t += att_mod.SETTLE_S + 30
+    a.sync_radio()
+    clock.t += att_mod.RETENTION_S + 1
+    a.sweep()
+    fake.objects.clear()
+    with c.store.tx() as d:
+        d.execute("INSERT INTO radio_link_kept (traffic_id, incident_id, at) VALUES ('FG1-2', ?, 0)", (inc["id"],))
+    a.audio = {"FG1-2": tone(0.3)}.get
+    fake.fail = lambda method, key: method == "PUT"           # the re-copy fails (S3 in trouble)
+    assert a.retag() == 0
+    r = a.store.one("SELECT status, expires_at, retry_at FROM attachments WHERE ref = 'FG1-2'")
+    assert r["status"] == "failed" and r["expires_at"] > 0 and r["retry_at"] > clock.t
+    fake.fail = None
+    assert a.retag() == 0                                      # its backoff
+    with a.store.lock:
+        a.store.db.execute("UPDATE attachments SET retry_at = 0")
+    assert a.retag() == 1
+    assert a.store.one("SELECT status, expires_at FROM attachments WHERE ref = 'FG1-2'")["expires_at"] == att_mod.NEVER
+    # the same, but the live audio is gone by the time it is tried again: expired, with the reason
+    c.record_traffic(tx("FG1-3", clock.t - att_mod.RETENTION_S - 400))
+    link(c, "FG1-3", inc["id"])
+    with a.store.lock:
+        a.store.db.execute("INSERT INTO attachments (id, incident_id, kind, source, ref, start, end, status, tries, "
+                           "created_at, expires_at, retry_at) VALUES ('00000000000000ff', ?, 'radio', 'FG1', 'FG1-3', 0, 1, "
+                           "'failed', 0, 0, 5, 0)", (inc["id"],))
+    a.audio = lambda tid: None
+    a.retag()
+    r = a.store.one("SELECT status, error FROM attachments WHERE id = '00000000000000ff'")
+    assert r["status"] == "expired" and "before the link was confirmed" in r["error"]
