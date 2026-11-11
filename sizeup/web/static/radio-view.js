@@ -468,7 +468,7 @@ window.RadioView = (() => {
   });
   $("#radio-view").addEventListener("click", (e) => {
     const b = e.target.closest("[data-event]");
-    if (!b) return;
+    if (!b || (window.RadioNav && RadioNav.on)) return;    // the rail layout handles its own list (radio-nav.js)
     pickOption(f("event"), b.dataset.event);
     changed();
   });

@@ -156,14 +156,17 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
         </aside>
         <div class="rn-main">
           <div class="rn-tools">
-            <button id="rn-open" class="sm rn-phone" type="button" title="Views and channels">Sources</button>
+            <button id="rn-open" class="sm rn-phone" type="button" title="Views and channels" aria-haspopup="dialog">Sources</button>
             <span id="rn-crumb" class="rn-crumb trunc"></span>
             <button id="rn-back" class="quiet sm icon" type="button" title="Back to the view" aria-label="Back to the view" hidden>✕</button>
             <input id="rn-q" type="search" placeholder="Search words" aria-label="Search words" spellcheck="false" maxlength="60">
             <select id="rn-event" aria-label="Incident" title="Just this call's traffic"><option value="">Any incident</option></select>
             <select id="rn-unit" aria-label="Unit"><option value="">Any unit</option></select>
+            <span id="rn-chips" class="chips"></span>
           </div>
+          <div id="rn-flags" class="chips rn-flags" aria-live="polite" hidden></div>
           <button id="rn-ours" class="rn-ours" type="button" title="Our calls: back to them" hidden></button>
+          <div id="rn-paging" class="paging-live" hidden aria-live="polite"></div>
           <ol id="rn-list" class="list log radio-log rv-list" aria-live="polite"></ol>
           <button id="rn-older" class="sm" type="button" hidden>Older</button>
         </div>

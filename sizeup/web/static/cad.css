@@ -741,6 +741,9 @@
   .rn-tools select { flex: 0 1 auto; max-inline-size: 14rem; }
   .rn-crumb { font-size: var(--fs-sm); line-height: var(--lh-sm); font-weight: 600; color: var(--text-2); max-inline-size: 100%; }
   .rn-phone { display: none; }
+  .rn-phone { gap: var(--s-1); }
+  .rn-flags { align-items: center; }
+  .rn-chip { --c: var(--text-2); }
   /* Our calls, one line on top of any other view */
   .rn-ours { justify-content: flex-start; gap: var(--s-2); inline-size: 100%; min-inline-size: 0; font-weight: 400;
              border-inline-start: var(--bw-mark) solid var(--accent-text); position: sticky; inset-block-start: 0; z-index: var(--z-sticky); }

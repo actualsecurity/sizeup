@@ -1,39 +1,50 @@
 // The Radio page with many sources (GitHub #415, layout B): a rail on the left with the views (Our calls, Police, EMS,
 // Transit, Air, All) and the tree system > group > channel, one list on the right.
 //
-//   /cad#radio?ui=2            turns it on for this browser (ui=1: the page as before, radio-view.js); the Sources
+//   /cad#radio?ui=2            turns it on for this browser (ui=1: the page as before, radio-view.js); the Rail
 //                              button on the Radio page does the same. Remembered (localStorage "sizeup.cad.radio.nav").
-//   &view=police &source=<key> &event= &unit= &q= &channel=    what is shown; an old link (#radio?event=26-000012,
-//                              ?channel=Fire/EMS 15) opens filtered here too, in All
+//   &event= &unit= &q= &channel= &emergency=1 &type= &pcfd=1 &since= &until=    the filters, kept in the address; an old
+//                              link (#radio?event=26-000012, ?channel=Fire/EMS 15) opens filtered here too, in All
+//   &view=police &source=<key>  read from a link, never written back: a reload or the Radio tab opens Our calls
 //
 // Our calls is the view the page opens on, every time. Live (RadioLive) plays only Our calls, whatever is on screen;
-// any other view keeps the newest of Our calls in one line on top (a click: back to Our calls).
+// any other view keeps the newest of Our calls in one line on top (a click: back to Our calls). A page going out now
+// (South 2) shows over the list as on the page before.
 // A view is a filter on the hub (GET /api/cad/comms?view=...): one page of 100, older ones by "Older" (?before=),
-// and on each state push whose comms_rev moved only the rows new or changed since (?changed=), patched by id; the
-// whole page again every SAFETY_MS and when a link changes (sizeup:tx-changed). The rail is GET
-// /api/cad/comms/sources: each source with when it was last heard, whether it is live and its calls per minute over
-// the last hour; the unread counts are worked out here from those and when this viewer last had the source on screen
-// (no per-viewer state on the hub).
+// and on each state push whose comms_rev moved only what changed since (?changed=: rows patched by id, `gone` taken
+// off, `reload` asks afresh); the first page again every SAFETY_MS and when a link changes (sizeup:tx-changed), the
+// older pages already loaded kept under it. One request at a time: what is asked meanwhile (a view picked, a change
+// pushed) is done right after, never dropped.
+// The rail is GET /api/cad/comms/sources (?rev=: unchanged while nothing was logged): each source with when it was
+// last heard, its calls in the minutes of the last hour that had any, and an emergency nobody has acknowledged; the
+// unread counts are worked out here from those and when this viewer last had the source on screen (the hub's clock:
+// no per-viewer state on the hub).
 //
 // Per viewer, remembered: the rail folded (a strip of view marks with their counts), pinned channels (a Pinned group
-// on top of the tree, in every view) and muted ones (not in All, no count; one of Our calls can't be muted). On a
-// phone the rail is a sheet behind Sources.
+// on top of the tree, in every view) and muted ones (not in All, no count). One of Our calls is never muted (a mute
+// from before it became Main is dropped), and a mute never hides an emergency: the hub leaves neither out. An
+// emergency on any channel shows over the list in every view (folded rail and phone too), with "Recording until"
+// while its window is open (#128), and marks its channel, its view and the phone's Sources button.
+// On a phone the rail is a sheet behind Sources (Escape closes it).
 // A service is told by a letter in a shape (F P E T A), never by colour alone. The tier is a short code (PA TX REC OFF
-// ENC), its meaning in the hover. A police row's words come only to someone signed in (the hub leaves them out).
+// ENC), its meaning in the hover. Another system's traffic comes only to a viewer who may see it (the hub decides).
 //
-// Uses cad.js (el, $, show, setText, syncList, api, fmtTime, cad) and radio-view.js (RadioView.row / rowSig, RadioLive):
-// loaded after both. The pure part (prefs, inView, unread, model) is tested in node (tests/test_radio_nav.py).
+// Uses cad.js (el, $, show, setText, syncList, api, fmtTime, cad), radio.js (Radio.fillPaging) and radio-view.js
+// (RadioView.row / rowSig, RadioLive): loaded after them. Tested in node (tests/test_radio_nav.py).
 "use strict";
 
 window.RadioNav = (() => {
   const KEY = "sizeup.cad.radio.nav";
-  const SAFETY_MS = 30000, SOURCES_MS = 5000, RECENT_S = 300, PAGE = 100, MAX_KEYS = 100;
+  const SAFETY_MS = 30000, SOURCES_MS = 5000, RECENT_S = 300, PAGE = 100, MAX_KEYS = 100, SEEN_MAX = 1000;
   const VIEWS = [["ours", "Our calls", "F", "fire"], ["police", "Police", "P", "police"], ["ems", "EMS", "E", "ems"],
                  ["transit", "Transit", "T", "transit"], ["air", "Air", "A", "air"], ["all", "All", "∗", ""]];
   const MARK = { fire: "F", police: "P", ems: "E", transit: "T", air: "A" };
   const SERVICE = { fire: "Fire", police: "Police", ems: "EMS", transit: "Transit", air: "Air", other: "Other" };
   const TIER = { alert: ["PA", "Transcribe + pre-alert"], text: ["TX", "Record + transcribe"], record: ["REC", "Record only"],
                  off: ["OFF", "Ignored"], activity: ["ENC", "Encrypted: activity only"] };
+  const KEPT = ["event", "unit", "q", "channel", "emergency", "type", "pcfd", "since", "until"];   // in the address
+  const EXTRA = ["channel", "emergency", "type", "pcfd", "since", "until"];   // an old link's: a chip each, gone with the view
+  const BLANK = () => ({ view: "ours", source: "", event: "", unit: "", q: "", channel: "", emergency: "", type: "", pcfd: "", since: "", until: "" });
 
   // ---- pure: what the rail shows -----------------------------------------------------------------------
 
@@ -42,35 +53,41 @@ window.RadioNav = (() => {
     try { v = JSON.parse(raw || "null"); } catch (_) { /* as new */ }
     v = v && typeof v === "object" ? v : {};
     const keys = (x) => (Array.isArray(x) ? x.map(String).slice(-MAX_KEYS) : []);
-    const seen = {};
-    for (const [k, t] of Object.entries(v.seen && typeof v.seen === "object" ? v.seen : {}).slice(-3 * MAX_KEYS)) if (t > 0) seen[k] = +t;
+    // when each source was last on screen: the newest SEEN_MAX (a source dropped here would read as never seen)
+    const seen = Object.fromEntries(Object.entries(v.seen && typeof v.seen === "object" ? v.seen : {}).filter(([, t]) => t > 0)
+      .sort((a, b) => b[1] - a[1]).slice(0, SEEN_MAX).map(([k, t]) => [k, +t]));
     return { on: !!v.on, rail: v.rail !== false, pins: keys(v.pins), mutes: keys(v.mutes), seen };
   }
   // ours: our fire channels; a service's view: its sources that aren't ours; all: every source
   const inView = (s, view) => (view === "all" ? true : view === "ours" ? !!s.ours : !s.ours && s.service === view);
-  // Calls on a source in the minutes after this viewer last had it on screen (counts: per minute, the last one the
-  // minute of `now`). Never seen: nothing is new (a first visit doesn't start with an hour of counts).
+  // Calls on a source in the minutes after this viewer last had it on screen. counts: [[minutes ago, calls]] as of
+  // `now` (the hub's clock). Never seen: nothing is new (a first visit doesn't start with an hour of counts).
   function unread(s, seen, now) {
-    const c = s.counts || [];
-    if (!seen || !c.length) return 0;
+    if (!seen) return 0;
     const end = Math.floor(now / 60), from = Math.floor(seen / 60);
     let n = 0;
-    for (let i = 0; i < c.length; i++) if (end - (c.length - 1 - i) > from) n += c[i];
+    for (const [ago, calls] of s.counts || []) if (end - ago > from) n += calls;
     return n;
   }
-  function model(sources, p, now, live = new Set(), flagged = new Set()) {
-    const pins = new Set(p.pins), mutes = new Set(p.mutes);
+  // The mutes that count: never one of Our calls (a channel muted, then made Main: its mute is dropped)
+  const mutesFor = (mutes, sources) => { const ours = new Set(sources.filter((s) => s.ours).map((s) => s.key)); return mutes.filter((k) => !ours.has(k)); };
+  const emText = (s) => (s.em === "ours" ? "EMERGENCY" : s.stuck ? `Emergency flag stuck on ${s.stuck}` : "Emergency (not ours)");
+  // live: source keys transmitting now; windows: {source key: until} of the open emergency windows
+  function model(sources, p, now, live = new Set(), windows = {}) {
+    const pins = new Set(p.pins), mutes = new Set(mutesFor(p.mutes, sources));
     const rows = sources.map((s) => {
-      const mute = mutes.has(s.key) && !s.ours;
+      const mute = mutes.has(s.key);
       const t = TIER[s.tier] || null;
+      const until = windows[s.key] || null;
       return { ...s, mute, pin: pins.has(s.key), n: mute ? 0 : unread(s, p.seen[s.key], now),
-               live: !!s.live || live.has(s.key), recent: !!s.last && now - s.last < RECENT_S, em: flagged.has(s.key),
-               code: t ? t[0] : "", tip: t ? t[1] : "" };
+               live: !!s.live || live.has(s.key), recent: !!s.last && now - s.last < RECENT_S,
+               em: s.emergency || (until ? "other" : ""), until, code: t ? t[0] : "", tip: t ? t[1] : "" };
     });
     const views = VIEWS.filter(([v]) => v === "ours" || v === "all" || rows.some((s) => inView(s, v))).map(([id, name, mark, service]) => {
-      const mine = rows.filter((s) => inView(s, id) && !s.mute);
-      return { id, name, mark, service, n: id === "all" ? 0 : mine.reduce((a, s) => a + s.n, 0), live: mine.some((s) => s.live),
-               em: mine.some((s) => s.em) };
+      const mine = rows.filter((s) => inView(s, id));
+      const em = mine.filter((s) => s.em);            // an emergency shows on its views, muted or not
+      return { id, name, mark, service, n: id === "all" ? 0 : mine.reduce((a, s) => a + s.n, 0), live: mine.some((s) => s.live && !s.mute),
+               em: em.some((s) => s.em === "ours") ? "ours" : em.length ? "other" : "" };
     });
     const systems = [];
     for (const s of rows) {
@@ -82,20 +99,29 @@ window.RadioNav = (() => {
       g.sources.push(s);
       g.n += s.n;
     }
-    return { views, systems, pinned: rows.filter((s) => s.pin), rows };
+    return { views, systems, pinned: rows.filter((s) => s.pin), rows, flagged: rows.filter((s) => s.em || s.until) };
   }
+  // The first page asked again while older pages are on screen: the fresh page, then what was loaded under it
+  function merged(fresh, have) {
+    if (!fresh.length) return [];
+    const last = fresh[fresh.length - 1], ids = new Set(fresh.map((t) => t.id));
+    const older = (t) => t.start < last.start || (t.start === last.start && t.id < last.id);
+    return fresh.concat(have.filter((t) => !ids.has(t.id) && older(t)));
+  }
+  const byNewest = (a, b) => (b.start - a.start) || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0);
 
   // ---- state -------------------------------------------------------------------------------------------
 
-  const st = { open: false, p: prefs(null), src: [], srcAt: 0, rows: [], cursor: 0, next: "", older: false, rev: "", busy: false,
-               again: false, timer: 0, error: "", f: { view: "ours", source: "", event: "", unit: "", q: "", channel: "" },
-               ours: [], railSig: "", sheet: false, qTimer: 0, facets: "", shown: "" };
+  const st = { open: false, p: prefs(null), src: [], srcRev: "", srcLive: [], srcAt: 0, clock: null, rows: [], cursor: 0, next: "",
+               older: false, deep: false, rev: "", busy: false, want: "", timer: 0, error: "", f: BLANK(), ours: [], railSig: "",
+               flagSig: "", sheet: false, qTimer: 0, facets: "", shown: null, hash: null, offered: [] };
   const dom = typeof document !== "undefined" && typeof $ === "function";
   const load = () => { try { st.p = prefs(localStorage.getItem(KEY)); } catch (_) { st.p = prefs(null); } };
   const save = () => { try { localStorage.setItem(KEY, JSON.stringify(st.p)); } catch (_) { /* not remembered */ } };
   load();
-  const now = () => Date.now() / 1000;
-  const narrowed = () => !!(st.f.source || st.f.event || st.f.unit || st.f.q || st.f.channel);
+  // the hub's clock, carried on from the last tree (the counts and "seen" are both in it)
+  const now = () => (st.clock ? st.clock.hub + (Date.now() - st.clock.at) / 1000 : Date.now() / 1000);
+  const narrowed = () => !!(st.f.source || KEPT.some((k) => st.f[k]));
 
   // on / off: ?ui=2 / ?ui=1 in the address, else what this browser chose
   function wants(qs) {
@@ -105,102 +131,129 @@ window.RadioNav = (() => {
   function query(extra = {}) {
     const q = new URLSearchParams(), f = st.f;
     q.set("view", f.source ? "all" : f.view);
-    for (const k of ["source", "event", "unit", "q", "channel"]) if (f[k]) q.set(k, f[k]);
-    if (f.view === "all" && !f.source && st.p.mutes.length) q.set("mute", st.p.mutes.join(","));
+    if (f.source) q.set("source", f.source);
+    for (const k of KEPT) if (f[k]) q.set(k, f[k]);
+    const mutes = mutesFor(st.p.mutes, st.src);
+    if (f.view === "all" && !f.source && mutes.length) q.set("mute", mutes.join(","));
     q.set("limit", String(PAGE));
     for (const [k, v] of Object.entries(extra)) q.set(k, String(v));
     return q.toString();
   }
+  function hashOf() {                                 // the filters only: never the view or the source
+    const q = new URLSearchParams();
+    for (const k of KEPT) if (st.f[k]) q.set(k, st.f[k]);
+    return q.toString();
+  }
   function toHash() {
-    const q = new URLSearchParams(), f = st.f;
-    if (f.view !== "ours") q.set("view", f.view);
-    for (const k of ["source", "event", "unit", "q", "channel"]) if (f[k]) q.set(k, f[k]);
-    const s = q.toString();
-    history.replaceState(null, "", "#radio" + (s ? `?${s}` : ""));
+    st.hash = hashOf();
+    history.replaceState(null, "", "#radio" + (st.hash ? `?${st.hash}` : ""));
   }
   function fromHash(qs) {
-    const q = new URLSearchParams(qs || "");
-    const f = { view: "ours", source: "", event: "", unit: "", q: "", channel: "" };
-    for (const k of ["source", "event", "unit", "q", "channel"]) f[k] = q.get(k) || "";
+    const q = new URLSearchParams(qs || ""), f = BLANK();
+    for (const k of ["source", ...KEPT]) f[k] = q.get(k) || "";
     const v = q.get("view") || "";
     // an old link (an incident's "All", the feed's More): its filter, over every source
-    f.view = VIEWS.some(([id]) => id === v) ? v : f.event || f.unit || f.channel || f.q ? "all" : "ours";
+    f.view = VIEWS.some(([id]) => id === v) ? v : KEPT.some((k) => f[k]) ? "all" : "ours";
     st.f = f;
   }
 
-  // ---- the hub -----------------------------------------------------------------------------------------
+  // ---- the hub: one request at a time, what is asked meanwhile done right after ------------------------------
 
   const shown = () => st.open && location.hash.startsWith("#radio") && document.visibilityState !== "hidden";
   const pushed = () => (typeof cad !== "undefined" && cad.state && cad.state.comms_rev) || "";
+  function settle() {                                 // a request is back: what was asked while it was out
+    st.busy = false;
+    const want = st.want;
+    st.want = "";
+    if (!shown()) return;
+    if (want === "page" || st.shown !== query()) return page();
+    if (want === "delta") return delta();
+    return null;
+  }
 
   async function page() {                             // the first page of what is asked
     clearTimeout(st.timer);
     st.timer = 0;
     if (!shown()) return;
-    if (st.busy) { st.again = true; return; }
+    if (st.busy) { st.want = "page"; return; }
     st.busy = true;
-    st.again = false;
     const asked = query();
     try {
       const d = await api("GET", `/api/cad/comms?${asked}`);
       st.error = "";
-      if (asked !== query()) st.again = true;         // the filters moved on meanwhile
-      else {
-        Object.assign(st, { rows: d.rows || [], cursor: d.cursor || 0, next: d.next || "", older: !!d.older, rev: d.rev || "", shown: asked });
+      if (asked === query()) {
+        const same = st.shown === asked && st.deep;   // older pages on screen: kept under the fresh first page
+        st.rows = same ? merged(d.rows || [], st.rows) : d.rows || [];
+        if (!same) Object.assign(st, { next: d.next || "", older: !!d.older, deep: false });
+        Object.assign(st, { cursor: d.cursor || 0, rev: d.rev || "", shown: asked });
         fillFacets(d);
         seenNow();
       }
     } catch (e) { st.error = e.message; }
-    st.busy = false;
     render();
-    if (st.again) return page();
     if (shown()) st.timer = setTimeout(page, SAFETY_MS);
+    await settle();
     sources();
     ours();
   }
-  async function delta() {                            // only what is new or changed since the page on screen
-    if (!shown() || st.busy || st.shown !== query()) return;
+  async function delta() {                            // only what changed since the page on screen
+    if (!shown()) return;
+    if (st.busy) { st.want = st.want || "delta"; return; }
+    if (st.shown !== query()) { page(); return; }
     st.busy = true;
     const asked = st.shown;
     try {
       const d = await api("GET", `/api/cad/comms?${query({ changed: st.cursor })}`);
-      st.busy = false;
-      if (asked !== query()) return;
-      st.rev = pushed();
-      if (d.reload) return page();
-      if ((d.rows || []).length) {
-        const by = new Map(st.rows.map((t) => [t.id, t]));
-        for (const t of d.rows) by.set(t.id, t);
-        st.rows = [...by.values()].sort((a, b) => (b.start - a.start) || (a.id < b.id ? 1 : -1));
-        st.cursor = d.cursor || st.cursor;
-        seenNow();
-        render();
+      if (asked === query()) {
+        st.rev = pushed() || st.rev;
+        if (d.reload) st.want = "page";
+        else {
+          const by = new Map(st.rows.map((t) => [t.id, t]));
+          for (const id of d.gone || []) by.delete(id);
+          for (const t of d.rows || []) by.set(t.id, t);
+          st.rows = [...by.values()].sort(byNewest);
+          st.cursor = d.cursor || st.cursor;
+          if ((d.rows || []).length) seenNow();
+          render();
+        }
       }
-    } catch (_) { st.busy = false; }
+    } catch (_) { /* the next push, or the safety page */ }
+    await settle();
   }
   async function older() {
     if (st.busy || !st.older) return;
     st.busy = true;
+    const asked = query();
     try {
       const d = await api("GET", `/api/cad/comms?${query({ before: st.next })}`);
-      const have = new Set(st.rows.map((t) => t.id));
-      st.rows = st.rows.concat((d.rows || []).filter((t) => !have.has(t.id)));
-      st.next = d.next || st.next;
-      st.older = !!d.older;
+      if (asked === query() && asked === st.shown) {
+        const have = new Set(st.rows.map((t) => t.id));
+        st.rows = st.rows.concat((d.rows || []).filter((t) => !have.has(t.id)));
+        st.next = d.next || st.next;
+        st.older = !!d.older;
+        st.deep = true;
+      }
     } catch (e) { st.error = e.message; }
-    st.busy = false;
     render();
+    await settle();
   }
   async function sources(force) {
     if (!shown() || (!force && Date.now() - st.srcAt < SOURCES_MS)) return;
     st.srcAt = Date.now();
     try {
-      const d = await api("GET", "/api/cad/comms/sources");
-      st.src = d.sources || [];
-      let fresh = false;                              // a source first met: nothing of it is unread
-      for (const s of st.src) if (!st.p.seen[s.key]) { st.p.seen[s.key] = now(); fresh = true; }
-      if (fresh) save();
-      seenNow();
+      const d = await api("GET", "/api/cad/comms/sources" + (st.srcRev ? `?rev=${encodeURIComponent(st.srcRev)}` : ""));
+      st.srcLive = d.live || [];
+      if (!d.unchanged) {
+        st.src = d.sources || [];
+        st.srcRev = d.rev || "";
+        st.clock = { hub: d.now || Date.now() / 1000, at: Date.now() };
+        let changed = false;                          // a source first met: nothing of it is unread
+        for (const s of st.src) if (!st.p.seen[s.key]) { st.p.seen[s.key] = now(); changed = true; }
+        const mutes = mutesFor(st.p.mutes, st.src);   // muted, then made one of Our calls: not muted any more
+        if (mutes.length !== st.p.mutes.length) { st.p.mutes = mutes; changed = true; }
+        if (changed) save();
+        seenNow();
+      }
       renderRail();
     } catch (_) { /* the rail as it was */ }
   }
@@ -212,7 +265,8 @@ window.RadioNav = (() => {
       try { rows = (await api("GET", "/api/cad/comms?view=ours&limit=15")).rows || []; } catch (_) { return; }
     }
     st.ours = rows.filter((t) => t.kind !== "note" && t.main).slice(0, 15);
-    RadioLive.offer(st.ours.map((t) => ({ id: t.id, start: t.start, has: t.has_audio, keyup: t.status === "no_speech" })));
+    st.offered = st.ours.map((t) => ({ id: t.id, start: t.start, has: t.has_audio, keyup: t.status === "no_speech" }));
+    RadioLive.offer(st.offered);
     renderStrip();
   }
   // What is on screen has been seen: its sources' counts start again from now
@@ -224,11 +278,12 @@ window.RadioNav = (() => {
   }
   function onPush() {
     if (!st.open) return;
-    renderRail();                                     // who is talking now: each push
+    renderRail();                                     // who is talking now, an emergency window: each push
+    renderPaging();
     const rev = pushed();
-    if (!rev || rev === st.rev || st.busy) return;
-    if (st.shown !== query()) return void page();
-    delta().then(() => { sources(); ours(); });
+    if (!rev || rev === st.rev) return;
+    if (st.busy) { st.want = st.want || "delta"; return; }
+    Promise.resolve(delta()).then(() => { sources(); ours(); });
   }
 
   // ---- drawing -----------------------------------------------------------------------------------------
@@ -248,14 +303,20 @@ window.RadioNav = (() => {
     c.title = `${n} new`;
     return c;
   }
-  function emChip() {
-    const c = el("span", "chip emergency", "EM");
-    c.title = "Emergency: everything on this talkgroup is kept until it is cleared";
+  function emChip(em, text, title) {
+    const c = el("span", "chip emergency" + (em === "ours" ? "" : " em-other"), text || "EM");
+    c.title = title || (em === "ours" ? "Emergency" : "Emergency (not ours)");
     return c;
   }
-  // talking now (the state push) and open emergency windows, as source keys
+  function keptChip(until) {
+    const u = el("span", "chip kept", `Recording until ${fmtTime(until)} (emergency)`);
+    u.title = "The emergency window: everything on this talkgroup is kept until then, even with Record off "
+      + "(the alarm's All clear ends it)";
+    return u;
+  }
+  // talking now (the state push, and the tree's own list) and the open emergency windows, by source key
   function liveKeys() {
-    const out = new Set();
+    const out = new Set(st.srcLive);
     for (const e of (cad.state && cad.state.talking) || []) {
       if (e.ended) continue;
       if (e.source) out.add(String(e.source));
@@ -264,9 +325,12 @@ window.RadioNav = (() => {
     }
     return out;
   }
-  function flaggedKeys() {
-    const wins = (cad.state && cad.state.alarms && cad.state.alarms.windows) || [];
-    return new Set(wins.map((w) => w.source || `p25:${w.system || "westchester"}:${w.talkgroup}`));
+  function windowKeys() {
+    const out = {};
+    for (const w of (cad.state && cad.state.alarms && cad.state.alarms.windows) || []) {
+      if (w.until) out[w.source || `p25:${w.system || "westchester"}:${w.talkgroup}`] = w.until;
+    }
+    return out;
   }
   function sourceRow(s) {
     const row = el("div", "rn-ch" + (st.f.source === s.key ? " on" : "") + (s.mute ? " mute" : ""));
@@ -276,7 +340,7 @@ window.RadioNav = (() => {
     b.title = [`${s.system_label || s.system} › ${s.group || "Other"}`, s.tip, s.department].filter(Boolean).join(" · ");
     b.append(dot(s), el("span", "trunc", s.name));
     if (s.code) b.append(el("span", "rn-tier", s.code));
-    if (s.em) b.append(emChip());
+    if (s.em) b.append(emChip(s.em, "EM", emText(s)));
     b.append(el("span", "spacer"));
     if (s.n) b.append(count(s.n, s.ours));
     const pin = el("button", "rn-act quiet sm icon", "★");
@@ -290,7 +354,7 @@ window.RadioNav = (() => {
       const mute = el("button", "rn-act quiet sm icon", s.mute ? "✕" : "♪");
       mute.type = "button";
       mute.dataset.mute = s.key;
-      mute.title = s.mute ? "Muted: not in All, no count" : "Mute";
+      mute.title = s.mute ? "Muted: not in All, no count (an emergency still shows)" : "Mute";
       mute.setAttribute("aria-pressed", String(s.mute));
       mute.setAttribute("aria-label", `Mute ${s.name}`);
       row.append(mute);
@@ -299,25 +363,27 @@ window.RadioNav = (() => {
   }
   function renderRail() {
     if (!dom || !st.open) return;
-    const m = model(st.src, st.p, now(), liveKeys(), flaggedKeys());
-    const sig = JSON.stringify([st.f.view, st.f.source, st.p.rail, st.sheet, m.views, m.rows.map((s) => [s.key, s.name, s.n, s.live, s.recent, s.pin, s.mute, s.em, s.code])]);
+    const m = model(st.src, st.p, now(), liveKeys(), windowKeys());
+    const here = (v) => v.id === st.f.view && !st.f.source;
+    const sig = JSON.stringify([st.f.view, st.f.source, st.p.rail, st.sheet, m.views, m.rows.map((s) => [s.key, s.name, s.n, s.live, s.recent, s.pin, s.mute, s.em, s.stuck, s.until, s.code])]);
     if (sig === st.railSig) return;
     st.railSig = sig;
     $("#rn").classList.toggle("mini", !st.p.rail);
     $("#rn-rail").classList.toggle("sheet", st.sheet);
-    setText($("#rn-fold"), st.p.rail ? "«" : "»");
-    $("#rn-fold").title = st.p.rail ? "Fold" : "Views and channels";
-    $("#rn-fold").setAttribute("aria-expanded", String(st.p.rail));
+    setText($("#rn-fold"), st.sheet ? "✕" : st.p.rail ? "«" : "»");
+    $("#rn-fold").title = st.sheet ? "Close" : st.p.rail ? "Fold" : "Views and channels";
+    $("#rn-fold").setAttribute("aria-expanded", String(st.sheet || st.p.rail));
     $("#rn-views").replaceChildren(...m.views.map((v) => {
       const b = el("button", "tab");
       b.type = "button";
       b.dataset.view = v.id;
       b.title = v.name;
+      b.tabIndex = here(v) || (st.f.source && v.id === st.f.view) ? 0 : -1;      // one stop; the arrows move between them
       b.setAttribute("role", "tab");
-      b.setAttribute("aria-selected", String(v.id === st.f.view && !st.f.source));
+      b.setAttribute("aria-selected", String(here(v)));
       b.append(mark(v.service, v.mark), el("span", "lbl", v.name), el("span", "spacer"));
-      if (v.em) b.append(emChip());
-      if (v.n && !(v.id === st.f.view && !st.f.source)) b.append(count(v.n, v.id === "ours"));
+      if (v.em) b.append(emChip(v.em));
+      if (v.n && !here(v)) b.append(count(v.n, v.id === "ours"));
       if (v.live) b.append(dot({ live: true }));
       return b;
     }));
@@ -341,6 +407,32 @@ window.RadioNav = (() => {
     setText($("#rn-crumb"), s ? `${s.system_label || s.system} › ${s.group || "Other"} › ${s.name}` : st.f.source
       || (VIEWS.find(([id]) => id === st.f.view) || VIEWS[0])[1]);
     show($("#rn-back"), !!st.f.source);
+    // the phone's Sources button: what the other views hold (the rail is behind it)
+    const away = m.views.filter((v) => !here(v) && v.id !== "all");
+    const n = away.reduce((a, v) => a + v.n, 0), em = away.some((v) => v.em === "ours") ? "ours" : away.some((v) => v.em) ? "other" : "";
+    $("#rn-open").replaceChildren(el("span", "", "Sources"), ...(em ? [emChip(em)] : []),
+                                  ...(n ? [count(n, away.some((v) => v.id === "ours" && v.n))] : []));
+    renderFlags(m);
+  }
+  // An emergency on any channel, over the list in every view: what it is, where, and its window (#128)
+  function renderFlags(m) {
+    const sig = JSON.stringify(m.flagged.map((s) => [s.key, s.name, s.em, s.stuck, s.until]));
+    if (sig === st.flagSig) return;
+    st.flagSig = sig;
+    const box = $("#rn-flags");
+    show(box, m.flagged.length > 0);
+    box.replaceChildren(...m.flagged.flatMap((s) => {
+      const out = [];
+      if (s.em) {
+        const b = el("button", "chip emergency" + (s.em === "ours" ? "" : " em-other") + (s.stuck ? " em-stuck" : ""), `${emText(s)}: ${s.name}`);
+        b.type = "button";
+        b.dataset.source = s.key;
+        b.title = "Show this channel";
+        out.push(b);
+      }
+      if (s.until) out.push(keptChip(s.until));
+      return out;
+    }));
   }
   function renderStrip() {
     if (!dom) return;
@@ -352,6 +444,22 @@ window.RadioNav = (() => {
     const n = st.src.filter((s) => s.ours).reduce((a, s) => a + unread(s, st.p.seen[s.key], now()), 0);
     box.replaceChildren(mark("fire"), el("b", "", "Our calls"), ...(n ? [count(n, true)] : []),
                         el("span", "t", fmtTime(t.start)), el("span", "trunc", `${who}: ${t.text || "—"}`));
+  }
+  // A page going out now (South 2), over the list until its finished row is in it
+  function renderPaging() {
+    if (!dom || !st.open || !window.Radio) return;
+    Radio.fillPaging($("#rn-paging"), cad.state && cad.state.paging, new Set(st.rows.map((t) => t.id)));
+  }
+  const CHIP = { channel: (v) => v, emergency: () => "Emergency", type: (v) => (v === "notes" ? "Notes" : "Transmissions"), pcfd: () => "PCFD only",
+                 since: (v) => `From ${fmtTime(+v)}`, until: (v) => `To ${fmtTime(+v)}` };
+  function renderChips() {
+    $("#rn-chips").replaceChildren(...EXTRA.filter((k) => st.f[k]).map((k) => {
+      const b = el("button", "chip rn-chip", `${CHIP[k](st.f[k])} ✕`);
+      b.type = "button";
+      b.dataset.clear = k;
+      b.title = "Clear";
+      return b;
+    }));
   }
   function fillFacets(d) {
     if (!d.rigs) return;
@@ -369,10 +477,6 @@ window.RadioNav = (() => {
   }
   function fillRow(li, t) {
     const n = RadioView.row(t);
-    if (t.redacted) {                                 // a police row, nobody signed in: the hub sent no words
-      const txt = n.querySelector(".txt");
-      if (txt) { txt.textContent = "Sign in to read"; txt.className = "txt muted"; }
-    }
     li.className = n.className;
     li.replaceChildren(...n.childNodes);
   }
@@ -380,30 +484,38 @@ window.RadioNav = (() => {
     if (!dom || !st.open) return;
     renderRail();
     renderStrip();
-    $("#rn-q").value = document.activeElement === $("#rn-q") ? $("#rn-q").value : st.f.q;
+    renderPaging();
+    renderChips();
+    if (document.activeElement !== $("#rn-q")) $("#rn-q").value = st.f.q;
     setText($("#rv-count"), st.error ? `Load failed: ${st.error}` : `${st.rows.filter((t) => t.kind !== "note").length} TX${st.older ? "+" : ""}`);
-    syncList($("#rn-list"), st.rows, { key: (t) => t.id, sig: (t) => RadioView.rowSig(t) + (t.redacted ? "r" : ""), make: () => el("li"),
-                                       fill: fillRow, empty: narrowed() ? "None match" : "None" });
+    syncList($("#rn-list"), st.rows, { key: (t) => t.id, sig: RadioView.rowSig, make: () => el("li"), fill: fillRow,
+                                       empty: narrowed() ? "None match" : "None" });
     show($("#rn-older"), st.older);
   }
 
   // ---- in and out --------------------------------------------------------------------------------------
 
   function set(patch) {
+    if ("view" in patch && patch.view !== st.f.view) for (const k of EXTRA) st.f[k] = "";   // an old link's filters: gone with the view
     Object.assign(st.f, patch);
     st.sheet = false;
     st.railSig = "";
     toHash();
     $("#rn-event").value = st.f.event;
     $("#rn-unit").value = st.f.unit;
+    render();
     page();
   }
   function open(qs) {
-    const ui = new URLSearchParams(qs || "").get("ui");
+    const q = new URLSearchParams(qs || ""), ui = q.get("ui");
     if (ui && st.p.on !== (ui === "2")) { st.p.on = ui === "2"; save(); }
+    const was = st.open;
     st.open = true;
-    st.railSig = "";
-    fromHash(qs);
+    st.railSig = st.flagSig = "";
+    if (!was || (qs || "") !== st.hash) {             // not our own address coming back: a link, the Radio tab, a reload
+      fromHash(qs);
+      toHash();                                       // the view and the source are never kept in the address
+    }
     $("#radio-view").classList.add("nav-on");
     $("#rv-nav").setAttribute("aria-pressed", "true");
     show($("#rn"), true);
@@ -413,6 +525,7 @@ window.RadioNav = (() => {
   function close() {
     if (!dom) return;
     st.open = false;
+    st.sheet = false;
     clearTimeout(st.timer);
     st.timer = 0;
     $("#radio-view").classList.remove("nav-on");
@@ -425,6 +538,22 @@ window.RadioNav = (() => {
     save();
     st.railSig = "";
   }
+  function sheet(on) {
+    st.sheet = on;
+    renderRail();
+    if (on) { const t = $("#rn-views").querySelector('[tabindex="0"]'); if (t && t.focus) t.focus(); }
+    else if ($("#rn-open").focus) $("#rn-open").focus();
+  }
+  function onKeys(e) {                                // the views are a tablist: the arrows, Home and End move between them
+    const tabs = [...$("#rn-views").children];
+    const i = tabs.indexOf(e.target.closest ? e.target.closest(".tab") : null);
+    const to = { ArrowDown: i + 1, ArrowRight: i + 1, ArrowUp: i - 1, ArrowLeft: i - 1, Home: 0, End: tabs.length - 1 }[e.key];
+    if (i < 0 || to === undefined) return;
+    e.preventDefault();
+    const n = tabs[(to + tabs.length) % tabs.length];
+    for (const t of tabs) t.tabIndex = t === n ? 0 : -1;
+    n.focus();
+  }
 
   if (dom) {
     $("#rv-nav").addEventListener("click", () => {    // on / off: the page as before stays one click away
@@ -434,13 +563,15 @@ window.RadioNav = (() => {
       window.dispatchEvent(new HashChangeEvent("hashchange"));
     });
     $("#rn-fold").addEventListener("click", () => {
-      if (st.sheet) st.sheet = false; else { st.p.rail = !st.p.rail; save(); }
-      renderRail();
+      if (st.sheet) return sheet(false);
+      st.p.rail = !st.p.rail;
+      save();
+      return renderRail();
     });
-    $("#rn-open").addEventListener("click", () => { st.sheet = !st.sheet; renderRail(); });
+    $("#rn-open").addEventListener("click", () => sheet(!st.sheet));
     $("#rn-back").addEventListener("click", () => set({ source: "" }));
     $("#rn-older").addEventListener("click", older);
-    $("#rn-ours").addEventListener("click", () => set({ view: "ours", source: "", event: "", unit: "", q: "", channel: "" }));
+    $("#rn-ours").addEventListener("click", () => set({ ...BLANK() }));
     $("#rn-rail").addEventListener("click", (e) => {
       const b = e.target.closest("button");
       if (!b) return;
@@ -449,13 +580,17 @@ window.RadioNav = (() => {
       if (b.dataset.pin) { toggle(st.p.pins, b.dataset.pin); return renderRail(); }
       if (b.dataset.mute) { toggle(st.p.mutes, b.dataset.mute); renderRail(); if (st.f.view === "all") page(); }
     });
+    $("#rn-views").addEventListener("keydown", onKeys);
+    $("#rn-flags").addEventListener("click", (e) => { const b = e.target.closest("[data-source]"); if (b) set({ source: b.dataset.source }); });
+    $("#rn-chips").addEventListener("click", (e) => { const b = e.target.closest("[data-clear]"); if (b) set({ [b.dataset.clear]: "" }); });
     $("#rn-event").addEventListener("change", () => set({ event: $("#rn-event").value, view: $("#rn-event").value && st.f.view === "ours" ? "all" : st.f.view }));
     $("#rn-unit").addEventListener("change", () => set({ unit: $("#rn-unit").value }));
     $("#rn-q").addEventListener("input", () => { clearTimeout(st.qTimer); st.qTimer = setTimeout(() => set({ q: $("#rn-q").value.trim() }), 350); });
-    $("#rn-list").addEventListener("click", (e) => {  // an incident chip on a row: just that call's traffic
+    $("#rn-list").addEventListener("click", (e) => {  // an incident chip on a row: just that call's traffic (once: radio-view.js stands down)
       const b = e.target.closest("[data-event]");
       if (b) set({ event: b.dataset.event, view: st.f.view === "ours" ? "all" : st.f.view });
     });
+    document.addEventListener("keydown", (e) => { if (e.key === "Escape" && st.open && st.sheet) { e.stopPropagation(); sheet(false); } }, true);
     cad.hooks.push(onPush);
     let drawn = -1;
     cad.hooks.push(() => { if (st.open && drawn !== cad.txRev) { drawn = cad.txRev; render(); } });
@@ -465,5 +600,6 @@ window.RadioNav = (() => {
     });
   }
 
-  return { wants, open, close, prefs, inView, unread, model, get on() { return st.open; } };
+  return { wants, open, close, prefs, inView, unread, mutesFor, model, merged, get on() { return st.open; },
+           test: { st, page, delta, older, sources, ours, set, onPush, query, fromHash, hashOf, render } };
 })();
