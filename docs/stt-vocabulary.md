@@ -23,7 +23,9 @@ Nothing is pushed automatically. **Settings > Radios > Vocabulary** shows the su
 edited; an edited list stays as it is (reset it to get the new suggestion). **Push** sends it as `sizeup-pcfd`.
 
 The push uses AWS's list form: digits are spelled out the way they are said ("twenty-three-oh-one") and
-`respell()` writes them back ("2301") in the text. `stt_vocab.table()` writes the same list in AWS's table form
+`respell()` writes them back ("2301") in the text. "Fire N", "Battalion N", "to 60" and 4-digit numbers that are
+also years are sent but never written back (`transcribe.NO_RESPELL`), so "working fire two story" stays as said.
+Settings refuses a list over 50 KB. `stt_vocab.table()` writes the same list in AWS's table form
 (Phrase, IPA, SoundsLike, DisplayAs: DisplayAs does the respelling on AWS's side, SoundsLike covers names like
 Mamaroneck and Greenwich). A table vocabulary has to be a file in S3, and in the measurement it gave the same
 words as the list, so it isn't pushed.
