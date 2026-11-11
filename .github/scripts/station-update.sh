@@ -173,7 +173,7 @@ gita commit -q -m one
 git clone -q --bare "$AD" "$ADB"
 A1=$(gita rev-parse HEAD)
 wait_for 600 idle
-printf 'ci-user\n' | sizeup-station adapter setup --repo "$ADB" --ref main --env CI_FEED_USER --no-check
+printf 'n\nci-user\n' | sizeup-station adapter setup --repo "$ADB" --ref main --env CI_FEED_USER --no-check   # (n: not from AWS SSM)
 test "$(stat -c '%U %a' /etc/sizeup/adapter-deploy-key)" = "root 600"
 CRED=/etc/credstore/sizeup-adapter.CI_FEED_USER
 test "$(stat -c '%U %a' "$CRED")" = "root 600"                            # systemd's credstore, never the environment

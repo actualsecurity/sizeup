@@ -2164,7 +2164,10 @@ def adapter_gather(u: Updater, repo: str = "", ref: str = "", env: str | None = 
         # the credentials may live in AWS SSM, /sizeup-station/adapter/<NAME>, read with a station-only key kept here
         # (sizeup/cloud/adapterssm.py); a value set here too stays the fallback while SSM can't be reached
         had = all(u.cred_has(n) for n in (SSM_KEY_ID, SSM_SECRET))
-        a = ask(f"Read them from AWS SSM ({SSM_PREFIX}NAME)? [{'Y/n' if had else 'y/N'}]: ").strip().lower()
+        try:                                     # (no answer at all, e.g. answers piped in by a script: as before)
+            a = ask(f"Read them from AWS SSM ({SSM_PREFIX}NAME)? [{'Y/n' if had else 'y/N'}]: ").strip().lower()
+        except EOFError:
+            a = ""
         if a in ("y", "yes") or (had and a not in ("n", "no")):
             ssm = adapter_gather_ssm(u, ask, secret, out, names)
             if ssm is None:
@@ -2175,7 +2178,10 @@ def adapter_gather(u: Updater, repo: str = "", ref: str = "", env: str | None = 
                 "password.")
             local = [n for n in names if SSM_REMOVABLE.fullmatch(n) and u.cred_has(n)]     # passwords only
             if local:
-                a = ask(f"Remove the copy kept here of {', '.join(local)} (SSM has it)? [Y/n]: ").strip().lower()
+                try:
+                    a = ask(f"Remove the copy kept here of {', '.join(local)} (SSM has it)? [Y/n]: ").strip().lower()
+                except EOFError:
+                    a = "n"                      # (no answer: nothing removed)
                 if a not in ("n", "no"):
                     remove = set(local)
             names = names + ssm_names

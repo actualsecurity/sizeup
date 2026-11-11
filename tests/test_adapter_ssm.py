@@ -370,3 +370,23 @@ def test_the_updater_runs_the_check_from_the_release(station_ssm, monkeypatch):
     (rel / "sizeup" / "cloud" / "adapterssm.py").write_text(
         src.replace('endpoint=d.get(\'endpoint\', \'\')', 'endpoint="http://127.0.0.1:9"'))
     assert u.ssm_check(KEY_ID, SECRET, "us-east-1", "FEED_PASS") == "network"
+
+
+def test_no_answer_to_the_ssm_question_is_local_as_before(station):  # noqa: F811
+    """Answers piped in by a script that predates the question (CI's station-update.sh did): EOF there is N."""
+    repo, u, ad = station
+    _current_release_with_configupdate(u)
+
+    def eof(prompt):
+        raise EOFError
+    secrets = iter(["ci-user"])
+    assert au.adapter_setup(u, repo="git@github.com:example-org/feed-adapter.git", ref="main", env="FEED_USER",
+                            ask=eof, secret=lambda p: next(secrets), out=lambda s: None, make_key=_key,
+                            check=False) == 0
+    assert u.cred_file("FEED_USER").read_text() == "ci-user" and not u.cred_file(au.SSM_KEY_ID).exists()
+
+
+def test_ci_answers_the_ssm_question():
+    script = (ROOT / ".github" / "scripts" / "station-update.sh").read_text()
+    line = next(ln for ln in script.splitlines() if "sizeup-station adapter setup" in ln and "printf" in ln)
+    assert line.startswith("printf 'n\\nci-user\\n'")          # n: not from AWS SSM, then the credential
