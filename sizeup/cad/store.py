@@ -26,7 +26,11 @@
                           was last seen and from where (last_seen / last_ip / last_ua)
       user_activity       each signed-in person's history on the hub: sign-ins, writes, refusals, kept
                           90 days (sizeup/cad/activity.py)
-      prealerts           phone pre-alerts from Tapout's ntfy feed and how each ended (sizeup/prealert.py,
+      addr_queue, here_rev, fts_incidents, fts_events, fts_radio(_queue)
+                          address history and search (#403, sizeup/cad/history.py): incidents' address / building keys
+                          (addr_key, bldg_key, addr_street, addr_how, addr_label), the FTS5 index; made on open there
+      premise_notes, premise_acks   notes on a building, shown on every call there (#403, sizeup/cad/premise.py)
+      prealerts          phone pre-alerts from Tapout's ntfy feed and how each ended (sizeup/prealert.py,
                           made there; its events: kind 'prealert', in the event log, not the unit log)
 
 The lists (types, subtypes, dispositions, unit statuses and what each one means) come from

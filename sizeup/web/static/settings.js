@@ -1480,7 +1480,7 @@ function sUsers(panel) {
 // sizeup/cad/activity.py): each sign-in (once per login), what they did, what they were refused,
 // and when each was last seen. GET /api/cad/activity: an admin anyone's (or everyone's), anyone
 // else only their own. Only behind Cloudflare Access (cad.who): all-in-one records none.
-const S_ACT_KINDS = [["", "All"], ["signin", "Sign-ins"], ["action", "Actions"], ["refused", "Refused"]];
+const S_ACT_KINDS = [["", "All"], ["signin", "Sign-ins"], ["action", "Actions"], ["refused", "Refused"], ["search", "Searches"]];
 const S_ACT_LIMIT = 300;
 
 function sActAll() { return !!(cad.who && cad.who.may === "admin"); }
@@ -1554,7 +1554,7 @@ function sActivityRender() {
     t.title = `${fmtTime(r.at, true)}`;
     li.append(t);
     if (!email) li.append(Object.assign(el("span", "s-act-who", r.name && r.name !== r.email ? r.name : r.email), { title: r.email }));
-    li.append(el("span", `chip s-kind ${r.kind}`, { signin: "sign-in", action: "action", refused: "refused" }[r.kind] || r.kind));
+    li.append(el("span", `chip s-kind ${r.kind}`, { signin: "sign-in", action: "action", refused: "refused", search: "search" }[r.kind] || r.kind));
     li.append(Object.assign(el("span", "s-act-sum", r.summary), { title: r.route }));
     li.append(Object.assign(el("span", "s-act-ip dim", r.ip || "—"), { title: r.ua || "" }));
     ol.append(li);

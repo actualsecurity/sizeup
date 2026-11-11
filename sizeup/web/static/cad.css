@@ -692,6 +692,60 @@
   .rv-sec .sum { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-inline-size: 0; }
   .radio-view .feed-acts { flex-wrap: wrap; justify-content: flex-end; }
 
+  /* ---- Search (search-view.js, /cad#search, #403): the filters, the calls and their map, address notes ------- */
+  body[data-view="search"] .overview { display: none; }      /* the middle column is Search's (cadmap.js shows the Overview) */
+  .search-view { display: flex; flex-direction: column; gap: var(--gutter); min-inline-size: 0; }
+  .sv-filters :is(#sv-where, #sv-text) { flex: 1 1 12rem; }
+  .sv-body { display: flex; flex-direction: column; gap: var(--gutter); min-inline-size: 0; }
+  .sv-results { display: flex; flex-direction: column; gap: var(--s-2); min-inline-size: 0; }
+  .sv-table td.t { white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .sv-table td.loc { overflow-wrap: anywhere; }
+  .sv-table tr.ev { cursor: pointer; }
+  .sv-table tr.retired { color: var(--dim); }
+  .sv-hit b { color: var(--text); }
+  .sv-pager { justify-content: center; gap: var(--s-3); }
+  .sv-mapbox { position: relative; block-size: calc(var(--map-h) * 0.75); border-radius: var(--radius);
+               border: var(--bw) solid var(--line); overflow: hidden; }
+  .sv-map { position: absolute; inset: 0; }
+  .sv-table td.num { white-space: nowrap; }
+  .sv-notes { display: flex; flex-direction: column; gap: var(--s-2); }
+  .sv-notes td.pn-text { overflow-wrap: anywhere; font-weight: 600; }
+
+  /* ---- the incident card's address notes and History here (addr-history.js, #403) ------------------------- */
+  .premise { display: flex; flex-direction: column; gap: var(--s-1); margin-block: var(--s-2); }
+  .pn {
+    display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-1) var(--s-2); padding: var(--s-1) var(--s-2);
+    border: var(--bw) solid var(--warn); border-inline-start-width: var(--s-1); border-radius: var(--radius-s);
+    background: color-mix(in srgb, var(--warn) 10%, var(--card));
+  }
+  .pn.p1 { border-color: var(--err); background: color-mix(in srgb, var(--err) 12%, var(--card)); }
+  .pn.p3, .pn.seen { border-color: var(--line-strong); background: var(--raised); }
+  .pn-text { flex: 1 1 14rem; min-inline-size: 0; font-weight: 600; overflow-wrap: anywhere; }
+  .pn.seen .pn-text { font-weight: 400; color: var(--text-2); }
+  .pn-cat { --c: var(--warn); }
+  .pn-cat.hazard { --c: var(--err); }
+  .pn-cat.medical { --c: var(--info); }
+  .pn-cat.access { --c: var(--ok); }
+  .pn-cat.animals, .pn-cat.hoarding, .pn-cat.other { --c: var(--text-2); }
+  .pn-due { --c: var(--warn); color: var(--warn); }
+  .pn-acked, .pn-meta { white-space: nowrap; }
+  .here-counts { color: var(--text-2); }
+  .pn-form { display: flex; flex-direction: column; gap: var(--s-2); padding: var(--s-2) var(--s-3); margin-block: var(--s-2); }
+  .pn-form-head { display: flex; align-items: baseline; gap: var(--s-2); }
+  .pn-fields { flex-wrap: wrap; gap: var(--s-2); }
+  .pn-form textarea { resize: vertical; min-block-size: var(--ctl-lg); }
+  .here { margin-block-start: var(--s-2); }
+  .here-head { display: flex; align-items: center; gap: var(--s-2); min-inline-size: 0; }
+  .here-head .sec-toggle { flex: 1 1 auto; }
+  .here-head .sec-toggle[aria-expanded="true"] .caret { transform: rotate(90deg); }
+  .here-head .sec-toggle.warn .sum { color: var(--warn); }
+  .here-head .sum { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-inline-size: 0; }
+  .here-body { display: flex; flex-direction: column; gap: var(--s-1); padding-block-start: var(--s-1); }
+  .here-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--s-0); }
+  .here-list li { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--s-0) var(--s-2); }
+  .here-call { min-block-size: var(--ctl-sm); padding-inline: var(--s-1); font-variant-numeric: tabular-nums; }
+  .here-false.warn { color: var(--warn); }
+
   /* ---- the talk alerts popover (radio.js) ----------------------------------------------------------- */
   .alerts-panel {
     position: fixed; inset-block-start: calc(var(--hdr-h) + var(--s-1)); inset-inline-end: var(--s-4);

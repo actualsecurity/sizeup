@@ -3213,6 +3213,7 @@ class App:
         """The incident sources (#297): the CAD's ticker (held reports, promotion) and this machine's adapters."""
         self.cad.sources.start()
         self.cad.radiolog.start()                 # open calls' units matched again (#370: what a restart left)
+        self.cad.addrs.start()                    # address keys and the search index, backfilled and kept up (#403)
         if self.cfg.cloud_role == "hub":         # station only: the hub gets their events through the outbox
             return
         from sizeup.sources.runner import SourceRunner, context_for, load_adapters, require_station
@@ -3308,6 +3309,7 @@ class App:
             self.sources_runner.stop()
         self.cad.sources.stop()
         self.cad.radiolog.stop()
+        self.cad.addrs.stop()
         self.stop_layers()
 
     def _weather_voice(self, text: str) -> tuple[str | None, str]:
