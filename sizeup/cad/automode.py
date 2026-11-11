@@ -571,9 +571,11 @@ class AutoDispatch:
         back only then, and only with none of its department's units on the call."""
         L = self.store.lists
         u = self.store.unit(u["id"])
+        ph = L.placeholder(u["name"])
+        if ph:                                           # not a rig: may be on several calls at once (only this one counts)
+            u = dict(u, incident_id=iid if self._on_here(iid, u["id"]) else None)
         if self._manual(iid, f"unit:{u['name']}") or u["incident_id"] == iid:
             return u["incident_id"] == iid
-        ph = L.placeholder(u["name"])
         if ph and self._dept_units_on(iid, u["name"], signed_on=True):
             return False                                 # its department's unit already signed on: nothing to hold
         if self.store.one("SELECT 1 AS x FROM assignments WHERE incident_id = ? AND unit_id = ?", (iid, u["id"])):
@@ -653,6 +655,10 @@ class AutoDispatch:
         for r in self.store.q("SELECT u.id, u.name FROM assignments a JOIN units u ON u.id = a.unit_id "
                               "WHERE a.incident_id = ? AND a.cleared_at IS NULL ORDER BY a.id", (iid,)):
             on_list = any(ours.get(k, {}).get("id") == r["id"] for k in keys)
+            if on_list and self.store.lists.placeholder(r["name"]):   # this call's only: its other calls keep it
+                if not self._manual(iid, f"unit:{r['name']}"):
+                    self.store.placeholder_off_call(iid, r["id"], op, f"{label} in service")
+                continue
             if on_list and not self._manual(iid, f"unit:{r['name']}"):
                 sid = self._unit_step(iid, self.store.unit(r["id"]), "free", t, op, "county", "in_service")
                 if sid:
@@ -810,7 +816,10 @@ class AutoDispatch:
             else:
                 u = self.store.unit(s["unit_id"])
                 a = self._on_here(iid, u["id"])
-                if s["kind"] == "assign":
+                if s["kind"] == "assign" and L.placeholder(u["name"]):
+                    if not self.store.placeholder_off_call(iid, u["id"], operator, "automatic dispatch undone"):
+                        raise CadError(f"{u['name']} is no longer on this event")
+                elif s["kind"] == "assign":
                     if a is None:
                         raise CadError(f"{u['name']} is no longer on this event")
                     if u["status"] != s["status"]:

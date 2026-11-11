@@ -764,8 +764,17 @@ class Store:
 
     def units(self) -> list[dict]:
         rows = self.q("SELECT u.*, a.incident_id, i.number AS incident_number, a.assigned_at FROM units u "
-                      "LEFT JOIN assignments a ON a.unit_id = u.id AND a.cleared_at IS NULL "
+                      "LEFT JOIN assignments a ON a.id = (SELECT MAX(id) FROM assignments b WHERE b.unit_id = u.id "
+                      "AND b.cleared_at IS NULL) "     # one row per unit: a placeholder on several calls shows its latest
                       "LEFT JOIN incidents i ON i.id = a.incident_id ORDER BY u.sort, u.id")
+        for r in rows:
+            r["incident_ids"] = []
+        if any(self.lists.placeholder(r["name"]) for r in rows if r["incident_id"]):
+            on: dict[int, list[int]] = {}
+            for a in self.q("SELECT unit_id, incident_id FROM assignments WHERE cleared_at IS NULL ORDER BY id"):
+                on.setdefault(a["unit_id"], []).append(a["incident_id"])
+            for r in rows:
+                r["incident_ids"] = on.get(r["id"], [])
         for r in rows:
             r["spare"], r["mutual_aid"] = bool(r["spare"]), bool(r["mutual_aid"])
             r["response"] = self.lists.response(r["name"])       # fire | mutual_aid | agency
@@ -822,15 +831,43 @@ class Store:
                             "WHERE a.incident_id = ? AND a.cleared_at IS NULL AND u.id != ? ORDER BY a.id", (iid, uid)).fetchall():
             if not L.placeholder(r["name"]) or L.department_of(r["name"]) != dept:
                 continue
-            q = self.quarters_status()
-            free = q if q in L.unit_statuses_for(r["name"], r["board"]) and L.role(q) == "free" else L.free_for(r["name"], r["board"])
             db.execute("UPDATE assignments SET cleared_at = ? WHERE id = ?", (now, r["aid"]))
-            db.execute("UPDATE units SET status = ?, status_at = ?, out_of_service = '' WHERE id = ?", (free, now, r["id"]))
-            self._history(db, r["id"], r["status"], free, iid, operator, now, f"{me['name']} signed on")
-            self._event(db, iid, "status", f"{r['name']} {L.status_phrase(free, r['name'], r['board'])}: "
-                        f"{me['name']} {L.status_phrase(status, me['name'])}", operator, r["id"], now)
+            free = self._placeholder_off(db, r, iid, operator, now, f"{me['name']} signed on")
+            said = L.status_phrase(free, r["name"], r["board"]) if free else "off this call"
+            self._event(db, iid, "status", f"{r['name']} {said}: {me['name']} {L.status_phrase(status, me['name'])}",
+                        operator, r["id"], now)
             out.append(r["name"])
         return out
+
+    def _placeholder_off(self, db, r, iid, operator: str, now: float, note: str = "") -> str:
+        """A placeholder just cleared off one call (r: its units row: id, name, board, status): back to the in-quarters
+        status (else its free one) once it is on no other call; still on one, it stays Dispatched. -> the status it
+        went to, '' when it stays."""
+        L = self.lists
+        if db.execute("SELECT 1 FROM assignments WHERE unit_id = ? AND cleared_at IS NULL", (r["id"],)).fetchone():
+            return ""
+        q = self.quarters_status()
+        free = q if q in L.unit_statuses_for(r["name"], r["board"]) and L.role(q) == "free" else L.free_for(r["name"], r["board"])
+        if r["status"] != free and L.role(r["status"]) != "oos":
+            db.execute("UPDATE units SET status = ?, status_at = ?, out_of_service = '' WHERE id = ?", (free, now, r["id"]))
+            self._history(db, r["id"], r["status"], free, iid, operator, now, note)
+        return free
+
+    def placeholder_off_call(self, iid: int, uid: int, operator: str = "", why: str = "") -> bool:
+        """A placeholder taken off this one call (the call's in service, an undone dispatch): its other calls keep it.
+        -> whether it was on the call."""
+        now = self.clock()
+        with self.tx() as db:
+            r = db.execute("SELECT a.id AS aid, u.id, u.name, u.board, u.status FROM assignments a JOIN units u ON u.id = a.unit_id "
+                           "WHERE a.incident_id = ? AND a.unit_id = ? AND a.cleared_at IS NULL", (iid, uid)).fetchone()
+            if r is None:
+                return False
+            db.execute("UPDATE assignments SET cleared_at = ? WHERE id = ?", (now, r["aid"]))
+            free = self._placeholder_off(db, r, iid, operator, now, why)
+            said = self.lists.status_phrase(free, r["name"], r["board"]) if free else "off this call"
+            self._event(db, iid, "status", f"{r['name']} {said}" + (f" ({why})" if why else ""), operator, uid, now)
+        self._unassigned(iid)
+        return True
 
     def release_placeholders(self) -> list[str]:
         """Once at start: a placeholder still on an open call that a unit of its department already signed on or
@@ -878,6 +915,14 @@ class Store:
                                "WHERE id = ?", (now, a["id"]))
                 elif role in ("free", "oos"):
                     db.execute("UPDATE assignments SET cleared_at = ? WHERE id = ?", (now, a["id"]))
+            also = []                                    # a placeholder on several calls: a free status clears it off all
+            if a is not None and role in ("free", "oos") and L.placeholder(u["name"]):
+                also = [r["incident_id"] for r in db.execute("SELECT id, incident_id FROM assignments WHERE unit_id = ? "
+                                                             "AND cleared_at IS NULL", (uid,)).fetchall()]
+                db.execute("UPDATE assignments SET cleared_at = ? WHERE unit_id = ? AND cleared_at IS NULL", (now, uid))
+                for other in also:
+                    self._event(db, other, "status", f"{u['name']} {L.status_phrase(status, u['name'], u['board'])}",
+                                operator, uid, now)
             text = f"{u['name']} {'cleared' if u['response'] == 'agency' and role == 'free' else L.status_phrase(status, u['name'], u['board'])}" \
                 + (f" ({note})" if note and role == "oos" else "")
             iid = a["incident_id"] if a is not None else None
@@ -889,6 +934,8 @@ class Store:
             freed = self._release_placeholders(db, iid, uid, status, operator, now)
         if a is not None and (role in ("free", "oos") or freed):
             self._unassigned(a["incident_id"])
+        for other in also:
+            self._unassigned(other)
         out = self.unit(uid)
         if relieved:
             out["command_from"] = relieved
@@ -1164,6 +1211,9 @@ class Store:
         for a in on:
             db.execute("UPDATE assignments SET cleared_at = ? WHERE id = ?", (now, a["id"]))
         for r in [dict(a, id=a["unit_id"]) for a in on] + [dict(u) for u in left]:
+            if L.placeholder(r["name"]):                 # back in quarters once on no other call
+                self._placeholder_off(db, r, iid, operator, now)
+                continue
             free = L.free_for(r["name"], r["board"])
             if L.role(r["status"]) != "oos" and r["status"] != free:
                 db.execute("UPDATE units SET status = ?, status_at = ? WHERE id = ?", (free, now, r["id"]))
@@ -1295,6 +1345,9 @@ class Store:
                 u = db.execute("SELECT * FROM units WHERE id = ?", (uid,)).fetchone()
                 a = db.execute("SELECT a.*, i.number FROM assignments a JOIN incidents i ON i.id = a.incident_id "
                                "WHERE a.unit_id = ? AND a.cleared_at IS NULL", (uid,)).fetchone()
+                if a is not None and self.lists.placeholder(u["name"]):      # not a rig: on several calls at once
+                    a = db.execute("SELECT a.*, i.number FROM assignments a JOIN incidents i ON i.id = a.incident_id "
+                                   "WHERE a.unit_id = ? AND a.incident_id = ? AND a.cleared_at IS NULL", (uid, iid)).fetchone()
                 if a is not None and a["incident_id"] == iid:
                     continue
                 if a is not None:

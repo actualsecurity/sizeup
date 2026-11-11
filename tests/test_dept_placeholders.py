@@ -191,3 +191,62 @@ def test_never_a_unit_in_common_nor_specific_units_nor_heard(rig):
     rig.poll()
     assert rig.cad.full(a)["scope"]["short"] == "Specific units"
     assert "DPTA" not in {b[0] for b in rig.cad.radiolog.board().values()}
+
+
+# -- on several calls at once (not a rig) -------------------------------------------------------------------------------
+
+
+def test_one_placeholder_on_two_calls_released_per_call(rig):
+    rig.feed.put("A1", type="ALARM/COMM", location=ADDR, units=("DPTA",), times={"dispatched": T0})
+    rig.poll()
+    rig.at(30)
+    rig.feed.put("B1", type="ALARM/COMM", location="400 Sample St", units=("DPTA", "E61"), times={"dispatched": T0 + 30})
+    rig.poll()
+    a, b = rig.iid("A1"), rig.iid("B1")
+    assert rig.here("DPTA", "A1") is not None and rig.here("DPTA", "B1") is not None    # on both, never moved
+    assert not any("not moved" in e for e in events(rig, a) + events(rig, b))
+    board = [u for u in rig.cad.store.units() if u["name"] == "DPTA"]
+    assert len(board) == 1 and board[0]["status"] == "DP" and sorted(board[0]["incident_ids"]) == sorted([a, b])
+    rig.at(60)
+    rig.feed.change("B1", unit_times={"E61": {"responding": T0 + 55}})                   # B's engine signs on
+    rig.poll()
+    assert rig.here("DPTA", "B1") is None and rig.here("DPTA", "A1") is not None        # released on B only
+    assert rig.status("DPTA") == "DP"                                                   # still on A
+    assert any(e == "DPTA off this call: E61 responding" for e in events(rig, b))
+    rig.at(90)
+    rig.cad.dispatch(a, {"unit_ids": [rig.uid("E60")], "operator": "Lt. Test"})
+    rig.cad.store.set_unit_status(rig.uid("E60"), "RS", "Lt. Test")
+    assert rig.here("DPTA", "A1") is None and rig.status("DPTA") == "AQ"               # off every call: in quarters
+    assert [u for u in rig.cad.store.units() if u["name"] == "DPTA"][0]["incident_id"] is None
+
+
+def test_a_close_or_undo_on_one_call_leaves_it_on_the_other(rig):
+    rig.mode("pcfd")
+    st = rig.cad.store
+    a = rig.cad.create({"type": "STRU", "address": "40 Other Rd", "operator": "Lt. Test"})["id"]
+    b = rig.cad.create({"type": "STRU", "address": "50 Other Rd", "operator": "Lt. Test"})["id"]
+    st.assign(a, [rig.uid("DPTA")], "Lt. Test")
+    st.assign(b, [rig.uid("DPTA")], "Lt. Test")
+    st.close(a, st.lists.disposition_codes[0], "Lt. Test")
+    assert rig.status("DPTA") == "DP" and st.unit(rig.uid("DPTA"))["incident_id"] == b
+    assert st.placeholder_off_call(b, rig.uid("DPTA"), "Lt. Test") and rig.status("DPTA") == "AQ"
+    st.assign(a := rig.cad.create({"type": "STRU", "address": "60 Other Rd", "operator": "Lt. Test"})["id"],
+              [rig.uid("DPTA")], "Lt. Test")
+    st.assign(b := rig.cad.create({"type": "STRU", "address": "70 Other Rd", "operator": "Lt. Test"})["id"],
+              [rig.uid("DPTA")], "Lt. Test")
+    st.set_unit_status(rig.uid("DPTA"), "AQ", "Lt. Test")                               # the board: off all of them
+    assert not st.q("SELECT 1 FROM assignments WHERE unit_id = ? AND cleared_at IS NULL", (rig.uid("DPTA"),))
+
+
+def test_the_feeds_in_service_frees_it_on_that_call_only(rig):
+    rig.feed.put("A1", type="ALARM/COMM", location=ADDR, units=("DPTA",), times={"dispatched": T0})
+    rig.feed.put("B1", type="ALARM/COMM", location="400 Sample St", units=("DPTA",), times={"dispatched": T0})
+    rig.poll()
+    rig.at(600)
+    rig.feed.change("A1", times={"in_service": T0 + 590}, closed=True)
+    rig.poll()
+    assert rig.inc("A1")["status"] == "closed"
+    assert rig.here("DPTA", "B1") is not None and rig.status("DPTA") == "DP"
+    s = rig.step("assign", "DPTA", "B1")
+    rig.cad.auto.undo(rig.iid("B1"), s["id"], "Lt. Test")                                # undone there: in quarters
+    assert rig.here("DPTA", "B1") is None and rig.status("DPTA") == "AQ"
