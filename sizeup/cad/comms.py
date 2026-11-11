@@ -144,6 +144,9 @@ class Comms:
         self.tactical, self.incident_tgs, self.paging = set(tactical), set(incident_tgs), set(paging)
         self.airport_tgs = set(airport_tgs)      # the Airport Incident talkgroup(s): an open Airport event's (#87)
         self.rev = 0            # bumped on every new or changed transmission (the /comms page polls it)
+        # Another P25 system's rows (#409) are only ever read out for a signed-in person (sourcekeys.may_see_context):
+        # True here only when the server verifies every reader (the hub behind Access), for the state all share
+        self.context_broadcast = False
         # The airband rows' ATC talker (sizeup/atc_talkers.py AtcTalkers.decorate, #252): set by the CAD; rows in place
         self.atc = None
         self.fix = None                 # rows -> rows: the status hints' decorate (sizeup/cad/statushints.py)
@@ -587,7 +590,8 @@ class Comms:
         rows = self.store.q(f"SELECT t.*, l.incident_id, l.why, l.unit AS link_unit, EXISTS (SELECT 1 FROM radio_link_kept k "
                             f"WHERE k.traffic_id = l.traffic_id AND k.incident_id = l.incident_id) AS link_kept FROM radio_links l "
                             f"JOIN radio_traffic t ON t.id = l.traffic_id WHERE l.incident_id IN ({','.join('?' * len(ids))}) "
-                            f"ORDER BY t.start DESC", ids)
+                            + ("" if self._sees_context() else f"AND t.system IN {sources.OURS_SQL} ")
+                            + "ORDER BY t.start DESC", ids)
         for r in rows:
             lst = out[r.pop("incident_id")]
             if len(lst) < limit:
@@ -674,13 +678,15 @@ class Comms:
         if w is not None:
             where, args = w
             fm = "t.talkgroup IS NULL" + (f" AND t.channel NOT IN ({','.join('?' * len(not_main))})" if not_main else "")
-            for cond, extra in [(fm, list(not_main))] + [("t.talkgroup = ?", [tg]) for tg in main_tgs]:
+            county = f"+t.system IN ('', '{sources.COUNTY}')"      # (as view=ours will: never another system's number)
+            for cond, extra in [(fm, list(not_main))] + [(f"t.talkgroup = ? AND {county}", [tg]) for tg in main_tgs]:
                 main += self._fetch(where + [cond], args + extra, main_limit)
             # +t.talkgroup: no index on it, so the newest-first walk stays on the start (or channel) index; never NULL
             # inside the NOT (NULL IN (...) is NULL, and NOT NULL would drop an airband row from both sections)
             mine = "+t.talkgroup IS NULL" + (f" AND +t.channel NOT IN ({','.join('?' * len(not_main))})" if not_main else "")
             if main_tgs:
-                mine = f"({mine}) OR (+t.talkgroup IS NOT NULL AND +t.talkgroup IN ({','.join('?' * len(main_tgs))}))"
+                mine = (f"({mine}) OR (+t.talkgroup IS NOT NULL AND +t.talkgroup IN ({','.join('?' * len(main_tgs))}) "
+                        f"AND {county})")
             other = self._fetch(where + [f"NOT ({mine})"], args + list(not_main) + main_tgs, limit)
         main = sorted(main, key=lambda r: -r["start"])[:main_limit]
         self._decorate(main + other)
@@ -735,7 +741,12 @@ class Comms:
             where.append("(" + " OR ".join([RIG_LIKE.format(col="t.rig")] * len(pats)) + ")")
             args += pats
 
+    def _sees_context(self) -> bool:
+        return sources.may_see_context(self.context_broadcast)
+
     def _fetch(self, where, args, limit) -> list[dict]:
+        if not self._sees_context():
+            where = list(where) + [f"+t.system IN {sources.OURS_SQL}"]     # (+: the walk stays on its index)
         return self.store.q("SELECT t.*, 'radio' AS kind FROM radio_traffic t"
                             + (" WHERE " + " AND ".join(f"({w})" for w in where) if where else "")
                             + " ORDER BY t.start DESC LIMIT ?", (*args, limit))

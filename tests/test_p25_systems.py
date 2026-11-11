@@ -569,7 +569,9 @@ def test_another_systems_units_never_link_traffic_to_our_incidents(tmp_path):
     assert c.comms.relink("p25", "6001", "E60") == []                         # naming a county radio: not its rows
     assert c.store.one("SELECT rig FROM radio_traffic WHERE id = ?", ("9211-9-call_5-t0",))["rig"] == ""
     assert c.comms.link("9211-9-call_5-t0", a["id"], "op").get("error") is None   # a person still can
-    got = c.comms_query({})["rows"]
+    assert all(r["id"] != "9211-9-call_5-t0" for r in c.comms_query({})["rows"])      # nobody signed in: not read out
+    with sourcekeys.request_context(object()):
+        got = c.comms_query({})["rows"]
     pd = next(r for r in got if r["id"] == "9211-9-call_5-t0")
     assert {"source", "system", "group", "service", "ours", "dept", "tier", "safety"} <= set(pd)
 
@@ -832,6 +834,8 @@ def test_transcript_content_on_another_system_raises_nothing_of_ours(two):
     assert "9211-8-call_8" not in rows(app) and not app.has_clip("9211-8-call_8")
     # encrypted activity as the browser gets it: when and which talkgroup, never which radio
     rt.recorder.on_line("SIZEUP-UNIT mrrs 4100009 call 9213")
+    assert app.state()["p25_systems"][0]["encrypted"] == []                   # nobody signed in here: not even that
+    app.access_enforced = True
     assert app.state()["p25_systems"][0]["encrypted"][0].keys() == {"at", "tg", "name", "source"}
 
 
@@ -1035,3 +1039,156 @@ def test_no_ids_hub_caps_and_queue_stats(tmp_path):
     assert q.stats()["context"] == 1 and q.stats()["live"] == 1
     api = (ROOT / "sizeup" / "cad" / "api.py").read_text()
     assert '"/api/cad/comms/activity": "radio activity' in api and 'if path == "/api/cad/comms/activity":' in api
+
+
+# -- another system's traffic is only ever shown to a signed-in person (#419) ---------------------------------------------------
+
+
+def _serve(app, monkeypatch, access: bool):
+    """The app's own web server on an ephemeral port. access: every request verified (a hub behind Cloudflare Access;
+    here a stand-in that takes the email from a header), else none (the station's page, all-in-one, a hub without it)."""
+    import threading
+    from sizeup.cloud.access import Identity
+
+    class Access:
+        def identify(self, headers):
+            email = headers.get("X-Test-Email")
+            return Identity(email=email) if email else None
+
+    monkeypatch.setattr(appmod, "access_verifier", lambda cfg: Access() if access else None)
+    server = appmod.make_server(app)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server, f"http://127.0.0.1:{server.httpd.server_address[1]}"
+
+
+def _get(url, email=None):
+    import urllib.error
+    import urllib.request
+    req = urllib.request.Request(url, headers={"X-Test-Email": email} if email else {})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            raw = r.read()
+            return r.status, json.loads(raw) if "json" in r.headers.get("Content-Type", "") else raw
+    except urllib.error.HTTPError as e:
+        return e.code, e.read()
+
+
+def _with_context_traffic(app):
+    """One fire transmission and one MRRS one, the MRRS one put on an incident by a person. -> (incident id, ids)."""
+    rt = app.systems["mrrs"]
+    app._call(a_call(app, "1-call_1", 307, "westchester", label="Fire/EMS 15"))
+    app._call_system(rt, a_call(app, "2-call_2", PD, "mrrs", label="PD Dispatch"))
+    rt.recorder.on_line("SIZEUP-UNIT mrrs 4100007 call 9999")
+    rt.recorder.on_line("SIZEUP-UNIT mrrs 4100009 call 9213")
+    assert wait(lambda: len([r for r in rows(app).values() if r["status"] == "done"]) == 2)
+    iid = app.cad.create({"type": "STRU", "address": "12 Invented Ave", "operator": "op"})["id"]
+    assert app.cad.comms.link("9211-2-call_2", iid, "op").get("error") is None
+    assert app.cad.comms.link("307-1-call_1", iid, "op").get("error") is None
+    return iid, ("307-1-call_1", "9211-2-call_2")
+
+
+def _leaks(body) -> bool:
+    text = json.dumps(body) if not isinstance(body, (bytes, str)) else str(body)
+    return any(x in text for x in ("9211-2-call_2", "PD Dispatch\", \"start", "p25:mrrs:9211\", \"system", "4100009", "9999"))
+
+
+@pytest.mark.parametrize("role", ["all-in-one", "station", "hub without Access"])
+def test_with_no_sign_in_another_systems_traffic_is_not_served_at_all(two, monkeypatch, role):
+    app, _said, _logs = two
+    assert appmod.access_verifier(replace(app.cfg, cloud_role="station", cloud_access_team="t", cloud_access_aud="a")) is None
+    assert appmod.access_verifier(replace(app.cfg, cloud_role="hub")) is None
+    iid, (fire, pd) = _with_context_traffic(app)
+    server, url = _serve(app, monkeypatch, access=False)
+    try:
+        assert not app.access_enforced and not app.cad.comms.context_broadcast
+        server.broadcaster.poke() if hasattr(server.broadcaster, "poke") else None
+        st = app.state()
+        assert [t["id"] for t in st["loose_traffic"]] == [fire] and not st["p25_systems"][0]["encrypted"]
+        assert not st["p25_systems"][0]["unknown"] and not _leaks(st)
+        for path in ("/api/state", "/api/cad/state", "/api/cad/comms", "/api/cad/comms?channel=PD%20Dispatch",
+                     "/api/cad/comms?q=words", "/api/cad/feed", *([f"/api/cad/incident/{iid}"] if iid else [])):
+            code, body = _get(url + path)
+            assert code == 200 and not _leaks(body), path
+        code, body = _get(url + "/api/cad/comms")
+        assert [r["id"] for r in body["rows"] if r.get("kind") == "radio"] == [fire]
+        if iid:
+            assert [r["id"] for r in _get(url + f"/api/cad/incident/{iid}")[1]["radio"]] == [fire]
+        assert _get(url + f"/api/audio/{fire}.wav")[1][:4] == b"RIFF"
+        assert _get(url + f"/api/audio/{pd}.wav")[0] == 404                    # its audio: not served, by any id
+        assert _get(url + "/api/audio/9211-never-heard.wav")[0] == 404 and app.clip_is_context("9211-zzz")
+        assert app.clip(pd)[:4] == b"RIFF"                                     # still recorded (and forwarded)
+        assert rows(app)[pd]["text"] == "words"
+    finally:
+        server.shutdown()
+
+
+def test_behind_access_a_signed_in_person_sees_it_and_nobody_else_gets_anything(two, monkeypatch):
+    app, _said, _logs = two
+    iid, (fire, pd) = _with_context_traffic(app)
+    server, url = _serve(app, monkeypatch, access=True)
+    me = "dispatcher@example.org"
+    try:
+        assert app.access_enforced and app.cad.comms.context_broadcast
+        for path in ("/api/state", "/api/cad/comms", f"/api/audio/{pd}.wav", "/api/cad/state"):
+            assert _get(url + path)[0] == 401, path                            # not signed in: nothing at all
+        st = _get(url + "/api/state", me)[1]
+        assert {t["id"] for t in st["loose_traffic"]} == {fire, pd}
+        got = _get(url + "/api/cad/comms", me)[1]["rows"]
+        assert {r["id"] for r in got if r.get("kind") == "radio"} == {fire, pd}
+        assert next(r for r in got if r["id"] == pd)["system"] == "mrrs"
+        assert _get(url + f"/api/audio/{pd}.wav", me)[1][:4] == b"RIFF"
+        if iid:
+            assert {r["id"] for r in _get(url + f"/api/cad/incident/{iid}", me)[1]["radio"]} == {fire, pd}
+    finally:
+        server.shutdown()
+
+
+def test_the_predicate_is_one_and_defaults_to_no():
+    assert sourcekeys.may_see_context() is False and sourcekeys.may_see_context(True) is True
+    with sourcekeys.request_context(None):
+        assert sourcekeys.may_see_context(True) is False           # a request with no verified person: never
+    with sourcekeys.request_context(object()):
+        assert sourcekeys.may_see_context(False) is True
+    assert sourcekeys.may_see_context() is False
+
+
+def test_the_hubs_shared_state_carries_context_only_behind_access(tmp_path):
+    from sizeup.cloud.hub import HubApp
+    from tests.test_cloud import hub_cfg
+    hub = HubApp(hub_cfg(tmp_path))
+    now = time.time()
+    hub.apply("traffic", {"id": "9211-h9", "source": "PD Dispatch", "talkgroup": 9211, "system": "mrrs", "start": now,
+                          "end": now + 2, "text": "", "raw": "made-up words", "status": "done", "unit": "", "radio_id": "",
+                          "source_key": "p25:mrrs:9211", "tier": "alert", "group": "Police", "service": "police"}, b"RIFF....")
+    assert not hub.access_enforced and all(t["id"] != "9211-h9" for t in hub.state()["loose_traffic"])
+    assert hub.clip_is_context("9211-h9") and not hub.clip_is_context("307-h1")
+    assert all(r["id"] != "9211-h9" for r in hub.cad.comms_query({})["rows"])
+    hub.access_enforced = hub.cad.comms.context_broadcast = True                # (make_server: Access verifies everyone)
+    assert any(t["id"] == "9211-h9" for t in hub.state()["loose_traffic"])
+    assert any(r["id"] == "9211-h9" for r in hub.cad.comms_query({})["rows"])
+
+
+def test_service_of_every_tag_in_the_shipped_talkgroup_files_and_main_is_the_countys(tmp_path):
+    import csv
+    want = {"County Police": "police", "DOT": "transit", "Fire/EMS": "fire", "Hospital": "ems", "Interop/Events": "other",
+            "OEM": "other", "Operations": "other"}
+    county = list(csv.DictReader((TR / "talkgroups.csv").read_text().splitlines()))
+    assert {r["Tag"] for r in county} == set(want)
+    assert all(sourcekeys.service(r["Tag"]) == want[r["Tag"]] for r in county)
+    mrrs = list(csv.DictReader((TR / "systems" / "mrrs" / "talkgroups.csv").read_text().splitlines()))
+    assert all(r["Service"] in sourcekeys.SERVICES for r in mrrs)               # every row says its own
+    assert all(MRRS.talkgroups[int(r["Decimal"])]["service"] == r["Service"] for r in mrrs)
+    by_tag = {"Police": "police", "EMS": "ems", "Metro-North": "transit", "MTA Police": "police", "Interop": "other"}
+    assert {r["Tag"] for r in mrrs} == set(by_tag) and all(sourcekeys.service(t) == s for t, s in by_tag.items())
+    # whole words only, and the listed service wins
+    assert [sourcekeys.service(g) for g in ("Law Dispatch", "MTAPD Dispatch", "Fire Police", "Dispatch", "Batch")] == [
+        "police", "police", "police", "other", "other"]
+    assert sourcekeys.service("Law Dispatch", "transit") == "transit"
+    # Main is the county's talkgroup of that number only, whatever a row of another system carries
+    clock = Clock()
+    c = cad(tmp_path, clock)
+    c.record_traffic(tx("307-m1", clock.t, "Fire/EMS 15", "", "", 307))
+    c.record_traffic(dict(tx("307-m2", clock.t, "Other 307", "", "", 307), system="mrrs", source_key="p25:mrrs:307"))
+    c.comms.context_broadcast = True
+    main, other = c.comms.split([307])
+    assert [r["id"] for r in main] == ["307-m1"] and [r["id"] for r in other] == ["307-m2"]

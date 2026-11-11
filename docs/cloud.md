@@ -1993,6 +1993,17 @@ shows the expected storage, from the last 7 days of audio per tier.
 - Version skew: a hub from before this is not sent another system's rows; a station from before this is not sent
   `p25:` channel keys.
 
+### Who sees it
+
+Another system's transcripts and audio are served only to a verified, signed-in person: the hub behind Cloudflare
+Access. One predicate decides (`sourcekeys.may_see_context`), by the row's system, not its service word.
+
+- The station's own page, an all-in-one install and a hub without Access serve none of it: no rows, text, ids or
+  audio in `/api/state`, `/api/stream`, `/api/cad/state`, `/api/cad/comms`, `/api/cad/feed`,
+  `/api/cad/incident/<id>` (a row a person linked is left out) or `/api/audio/<id>.wav` (404).
+- The station still records it and forwards it to the hub.
+- Its words are never written to a log.
+
 ### Source keys (#415)
 
 Talkgroup and radio IDs are only unique inside one system, so every source has a qualified key

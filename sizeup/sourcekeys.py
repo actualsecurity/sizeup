@@ -22,15 +22,47 @@ Each row of the radio log carries its source (sizeup/cad/comms.py: `source`, `sy
 from __future__ import annotations
 
 import re
+from contextlib import contextmanager
+from contextvars import ContextVar
 
 COUNTY = "westchester"       # the first P25 system (trunk-recorder's shortName): what "tg:<n>" means
 SERVICES = ("fire", "police", "ems", "transit", "air", "other")
 SYSTEM = re.compile(r"[a-z][a-z0-9_-]{0,23}")
 P25_KEY = re.compile(r"p25:(?P<system>[a-z][a-z0-9_-]{0,23}):(?P<tg>\d{1,9})")
 TG_KEY = re.compile(r"tg:(?P<tg>\d{1,9})")
-SERVICE_WORDS = (("fire", ("fire", "hazmat", "airport incident")), ("police", ("police", " pd ", "sheriff", "wcpd")),
-                 ("ems", ("ems", "hospital", "medic", "ambulance")),
-                 ("transit", ("transit", "metro-north", "railroad", "mta", " dot ", " bus")), ("air", ("airband", "atc")))
+# service by the group's words, whole words only ("Law Dispatch" is police: no "atc" inside "dispatch"); the first
+# rule that matches wins (police before fire: "Fire Police"; fire before EMS: "Fire/EMS"). A talkgroups file's own
+# "Service" column always wins over this (the other systems' files have one).
+SERVICE_WORDS = (("police", {"police", "pd", "law", "sheriff", "wcpd", "mtapd", "nysp", "le"}),
+                 ("fire", {"fire", "hazmat"}),
+                 ("ems", {"ems", "hospital", "medic", "medics", "ambulance"}),
+                 ("transit", {"transit", "railroad", "rail", "mta", "dot", "bus", "metro-north", "mnr"}),
+                 ("air", {"airband", "atc", "aviation"}))
+OURS_SYSTEMS = ("", COUNTY, "analog", "airband")      # the systems whose rows are not "context"
+OURS_SQL = "(" + ", ".join(f"'{x}'" for x in OURS_SYSTEMS) + ")"
+
+# -- who may be shown another system's traffic (#419: police / context transcripts and audio only behind a sign-in) --
+#
+# One predicate, may_see_context(). A request sets it for its own thread (request_context(who): a verified,
+# signed-in person; `who` is only ever set by the server when Cloudflare Access verified them). Outside a request
+# (a state built for the stream every client shares) it is what the builder passes: True only when every listener
+# of that stream was verified, i.e. the server enforces Access. Everywhere else (the station's own page, all-in-one,
+# a hub with no Access) another system's traffic is not served at all: no rows, no text, no ids, no audio.
+_sees: ContextVar = ContextVar("sizeup_sees_context", default=None)
+
+
+def may_see_context(broadcast_ok: bool = False) -> bool:
+    v = _sees.get()
+    return bool(broadcast_ok) if v is None else bool(v)
+
+
+@contextmanager
+def request_context(who):
+    token = _sees.set(who is not None)
+    try:
+        yield
+    finally:
+        _sees.reset(token)
 
 
 _context_tgs: frozenset[int] = frozenset()
@@ -54,7 +86,7 @@ def is_context(row) -> bool:
         s = row.get("system") if isinstance(row, dict) else row["system"]
     except (KeyError, IndexError, TypeError):
         s = ""
-    return bool(s) and s not in (COUNTY, "analog", "airband")
+    return bool(s) and s not in OURS_SYSTEMS
 
 
 def refuse_context(tgs, what: str) -> None:
@@ -117,8 +149,9 @@ def service(group: str = "", listed: str = "", kind: str = "") -> str:
         return "air"
     if kind in ("paging", "traffic", "fireground"):
         return "fire"
-    g = f" {str(group or '').lower()} "
-    for name, words in SERVICE_WORDS:
-        if any(w in g for w in words):
+    low = str(group or "").lower()
+    words = set(re.findall(r"[a-z0-9]+", low)) | set(re.findall(r"[a-z0-9]+(?:-[a-z0-9]+)+", low))
+    for name, any_of in SERVICE_WORDS:
+        if words & any_of:
             return name
     return "other"

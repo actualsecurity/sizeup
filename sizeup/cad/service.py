@@ -1390,7 +1390,9 @@ class Cad:
         # made a moment ago, for COMMS_CACHE_S (#284). Only "talking" is live.
         pcfd = [u["name"] for u in self.radios.units if is_pcfd(u)]
         main_tgs = [tg for tg in self.comms.talkgroups() if self.main_tg(tg)]
-        key = (now_rev, tuple(pcfd), tuple(main_tgs), tuple(sorted((k, tuple(v)) for k, v in q.items() if k != "rev")))
+        # (+ whether this reader may be shown another P25 system's rows, #419: an answer is never another reader's)
+        key = (now_rev, tuple(pcfd), tuple(main_tgs), tuple(sorted((k, tuple(v)) for k, v in q.items() if k != "rev")),
+               self.comms._sees_context())
         hit = self._comms_cache.get(key)
         if hit is not None and time.monotonic() - hit[0] < COMMS_CACHE_S:
             return {**hit[1], "talking": talking}
