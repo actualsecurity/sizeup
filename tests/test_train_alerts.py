@@ -69,14 +69,22 @@ def test_a_record_alert_is_plain_text_with_a_brief_and_the_train_it_names():
     assert a["text"] == "The 4:38pm train & more."
     assert a["brief"] == "20-25 min late (mechanical)"
     assert a["about"] == "4:38p Example Town–GCT"
-    assert a["named"][0] == {"s": 0, "hm": "16:38", "from": "Example Town", "to": "Grand Central"}
+    assert a["named"][0] == {"s": 0, "at": 4, "hm": "16:38", "from": "Example Town", "to": "Grand Central"}
     assert TT._alert({"header": "<p> </p>"}) is None                      # nothing left once the tags are gone
 
 
 @pytest.mark.parametrize("text, brief", [
     ("The 9:05am train is operating 10 - 15 minutes late due to signal problems.", "10-15 min late (signal)"),
     ("Delays of up to 20 minutes due to police activity.", "delays up to 20 min (police)"),
-    ("Expect delays of up to 20 minutes due to police activity.", "possible delays up to 20 min (police)"),
+    ("Expect delays of up to 20 minutes due to police activity.", "delays up to 20 min (police)"),   # assertive
+    ("Delays of up to 20 minutes may occur.", "possible delays up to 20 min"),
+    # recall (#389 re-review): the status's own clause; "will now operate N minutes late"; "was cancelled"; "is delayed"
+    ("The 7:12pm train is 20 minutes late and will not stop at Example.", "20 min late"),
+    ("The 7:12pm train will now operate 10 minutes late.", "10 min late"),
+    ("The 7:12pm train was cancelled due to a disabled train.", "cancelled (disabled train)"),
+    ("Train 9902 is delayed due to police activity.", "delayed (police)"),
+    ("Train 9902 is not delayed.", TT.SEE),
+    ("The 7:12pm train was 10 minutes late, it is now on time.", TT.SEE),
     ("The 7:12pm train has been cancelled.", "cancelled"),
     ("Train 9902 is being held at Example due to a medical emergency.", "held (medical)"),
     # negation, modality and the past assert nothing (#389 review)
@@ -154,10 +162,12 @@ def test_no_station_named_needs_the_trains_branch(names):
 
 
 def test_an_alert_with_no_railroad_or_planned_for_another_day_isnt_this_trains(names):
-    assert TT.about_train(alert("Train 9901 is cancelled.", railroad=""), rec("9901"), names) == ()
+    assert TT.about_train(alert("Train 9901 is cancelled.", railroad="", branches=[]), rec("9901"), names) == ()
+    assert TT.about_train(alert("Train 9901 is cancelled.", railroad="", branches=["NH"]), rec("9901"), names) == (0,)
+    assert TT.about_train(alert("Train 9901 is cancelled.", railroad="LIRR", branches=["BY"]), rec("9901"), names) == ()
     assert TT.about_train(alert("Train 9901 is cancelled.", is_planned=True, start_time=1791990507 + 86400), rec("9901"), names) == ()
     assert TT.about_train(alert("Train 9901 is cancelled.", is_planned=True, start_time=1791990507), rec("9901"), names) == (0,)
-    assert TT.branch_alerts([{"alerts": [alert("x", railroad="")]}]) == []
+    assert TT.branch_alerts([{"alerts": [alert("x", railroad="", branches=[])]}]) == []
 
 
 def test_the_first_stop_is_the_trips_own(names):
@@ -277,3 +287,53 @@ def test_the_box_says_this_train_and_the_line_in_one_line_each_with_the_rest_on_
     assert len(a2) == 1 and a2[0]["text"].startswith("Line: delays · 4:38p ") and a2[0]["text"].endswith(" · +2")
     assert not any(r["text"].startswith("This train") for r in o[ids["9902"]])
     assert all("<" not in r["text"] and "<" not in r["title"] for r in a1 + a2)
+
+
+def test_the_line_rows_label_and_brief_are_the_same_trains():
+    a = alert("Train 9912 is cancelled. The 5:00pm train from Example Town is 15 minutes late.")
+    assert (a["about"], a["brief"]) == ("Train 9912", "cancelled")
+    a = alert("The 5:00pm train from Example Town is 15 minutes late. Train 9912 is cancelled.")
+    assert (a["about"], a["brief"]) == ("5:00p Example Town", "15 min late")
+    a = alert("The 5:00pm train from Example Town and Train 9912 are 15 minutes late.")      # two in one sentence
+    assert (a["about"], a["brief"]) == ("5:00p Example Town", TT.SEE)
+
+
+@pytest.mark.parametrize("text, label", [
+    ("The 4:38pm train from Example Town may be cancelled.", "4:38p Example Town"),
+    ("The 4:38pm train from Example Town should arrive 10 minutes late.", "4:38p Example Town"),
+    ("The 4:38pm train from Example Town expected to operate late.", "4:38p Example Town"),
+    ("We anticipate the 4:38pm train from Example Town to Grand Central to operate 15 minutes late.", "4:38p Example Town\u2013GCT"),
+    ("The 4:38pm train from Example Town to operate express.", "4:38p Example Town"),
+    ("The 4:38pm train to depart Example Town is late.", "4:38p"),
+    ("The 4:38pm train to Grand Central will be held.", "4:38p GCT"),
+])
+def test_a_label_is_just_the_time_and_stations(text, label):
+    assert alert(text)["about"] == label
+
+
+def test_an_anticipated_delay_matches_and_briefs(names):
+    a = alert("We anticipate the 11:08am train from Stamford to Grand Central to operate 15 minutes late.")
+    assert TT.mine(a, rec("9901"), names)["brief"] == "15 min late"
+
+
+@pytest.mark.parametrize("text, nums", [
+    ("Train 2024 is cancelled.", ["2024"]),
+    ("Train 1999 from Example Town is 10 minutes late.", ["1999"]),
+    ("There is no train 2024 service.", []),
+    ("The train 2026 schedule changes.", []),
+    ("Starting in train 2026 is new.", []),
+    ("Since March 3, train 2025 is cancelled.", []),
+    ("On October train 2026 will run.", []),
+])
+def test_a_year_like_train_number_counts_when_a_train_is_meant(text, nums):
+    assert [n["num"] for n in TT.named_trains(text)] == nums
+
+
+def test_mnr_branches_and_line_wide_alerts_are_kept():
+    recs = [{"railroad": "MNR", "branch_id": "NH", "alerts": [
+        alert("A: listed NH, railroad unsaid", railroad="", branches=["NH"]),
+        alert("B: whole railroad", branches=[]),
+        alert("C: another railroad's", railroad="LIRR", branches=["BY"]),
+        alert("D: railroad unsaid, no branch", railroad="", branches=[])]}]
+    assert [a["header"] for a in TT.branch_alerts(recs, "NH")] == ["A: listed NH, railroad unsaid", "B: whole railroad"]
+    assert [a["header"] for a in TT.branch_alerts(recs, "NC")] == ["B: whole railroad"]
