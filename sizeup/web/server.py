@@ -103,6 +103,8 @@ from pathlib import Path
 from typing import Callable
 from urllib.parse import parse_qsl, urlsplit
 
+from sizeup import sourcekeys
+
 STATIC_DIR = Path(__file__).parent / "static"
 MAX_CAD_BODY = 65536
 # role = "station": the only CAD routes served, (method, path): what Settings > Radios (radio-controls.js) uses
@@ -357,8 +359,10 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                  role: str = "", roads=None, gis=None, trains=None, weather=None, station_health=None, stream_gzip: bool = True,
                  aircraft=None, roadwork=None, set_adsb: Callable[[str], str | None] | None = None,
                  airband_ab: Callable[..., str | None] | None = None,
-                 gate: Gate | None = None, health_fn: Callable[[], dict] | None = None):
-    """cad: a CadApi (sizeup/cad/api.py) and cad_b its own broadcaster (the console's state is
+                 gate: Gate | None = None, health_fn: Callable[[], dict] | None = None,
+                 clip_context: Callable[[str], bool] | None = None):
+    """clip_context(id): the clip is another P25 system's (#419): served only to a signed-in person
+    (sizeup/sourcekeys.py may_see_context), a 404 to anyone else. cad: a CadApi (sizeup/cad/api.py) and cad_b its own broadcaster (the console's state is
     small and separate from the monitor's, so neither page carries the other's). station: the hub's
     ingest (sizeup/cloud/hub.py Hub), which checks the station's token before reading any body.
     access: an AccessVerifier (sizeup/cloud/access.py): who signed in, required on the hub.
@@ -610,7 +614,10 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
             if path == "/api/stream":
                 return self._stream(b)
             if path.startswith("/api/audio/") and path.endswith(".wav"):
-                wav = clip(path[len("/api/audio/"):-4])
+                cid = path[len("/api/audio/"):-4]
+                with sourcekeys.request_context(self.who):
+                    hidden = clip_context is not None and not sourcekeys.may_see_context() and clip_context(cid)
+                wav = None if hidden else clip(cid)     # another system's audio: a signed-in person only (#419)
                 return self._send(200, wav, "audio/wav") if wav else self._send(404, b"no such clip\n", "text/plain")
             if path == "/healthz":
                 if health_fn is not None:
@@ -875,10 +882,13 @@ class WebServer:
                  health: dict | None = None, access=None, access_log: Callable[[str], None] | None = None,
                  station_mode=None, role: str = "", roads=None, gis=None, trains=None, weather=None, station_health=None,
                  aircraft=None, roadwork=None, set_adsb=None, fence=None, health_fn: Callable[[], dict] | None = None,
-                 airband_ab=None, listener=None):
+                 airband_ab=None, listener=None, clip_context: Callable[[str], bool] | None = None):
         """listener: a socket already bound and listening on (host, port) to serve from (sizeup/app.py run_gated: the
         hub's port answered "updating" while the app was built; the connections that came meanwhile are served)."""
         self.access = access
+        # every page and API call is a verified, signed-in person's (Cloudflare Access): only then does the state all
+        # clients share carry another P25 system's traffic (#419, sizeup/sourcekeys.py may_see_context)
+        self.access_enforced = access is not None
         self.gate = Gate(fence)
         self.station = station
         self.broadcaster = Broadcaster(state_fn)
@@ -890,7 +900,7 @@ class WebServer:
             set_talkgroup, set_talkgroup_group, retranscribe, cad, self.cad_broadcaster, station,
             json.dumps(health or {"ok": True}, separators=(",", ":")).encode(), access, access_log, station_mode, role,
             roads, gis, trains, weather, station_health, aircraft=aircraft, roadwork=roadwork, set_adsb=set_adsb,
-            airband_ab=airband_ab, gate=self.gate, health_fn=health_fn))
+            airband_ab=airband_ab, gate=self.gate, health_fn=health_fn, clip_context=clip_context))
         if listener is not None:
             self.httpd.socket.close()                 # (the one TCPServer made, never bound)
             self.httpd.socket = listener

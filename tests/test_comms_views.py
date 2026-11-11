@@ -10,6 +10,7 @@ import json
 
 import pytest
 
+from sizeup import sourcekeys
 from sizeup.cad.api import CadApi
 from sizeup.cad.comms import CHANGES_MAX, PAGE, PAGE_MAX
 from sizeup.cad.service import CadError
@@ -35,6 +36,7 @@ def c(tmp_path):
     clock = Clock()
     c = cad(tmp_path, clock, airband=("Tower",))
     c.clockref = clock
+    c.comms.context_broadcast = True          # as on the hub behind Access: every reader is a signed-in person (#419)
     t = clock.t
     c.record_traffic(tx("fg-1", t - 50, rig="E63", radio_id="6301"))
     c.record_traffic(dict(tx(f"{MAIN}-1-call_1-t0", t - 40, "Fire/EMS 15", "E60", "E60", MAIN), ours=True, service="fire",
@@ -209,7 +211,8 @@ def test_changed_gives_everything_that_changed_since_the_cursor(c):
 
 
 def test_another_systems_rows_do_not_exist_for_a_viewer_who_may_not_see_them(c):
-    """#419's gate decides who may (CadApi.sees_context); here: what the answers hold when it says no."""
+    """#419's one gate decides who may (sourcekeys.may_see_context: a request from a signed-in person); here: what
+    the views and the tree hold when it says no."""
     c.has_clip = lambda cid: True
     api = CadApi(c)
     who = Identity(email="someone@example.org")
@@ -231,6 +234,17 @@ def test_another_systems_rows_do_not_exist_for_a_viewer_who_may_not_see_them(c):
     assert not [s for s in tree["sources"] if s["system"] == "metro"] and "metro" not in json.dumps(tree)
     assert [s["key"] for s in get("/api/cad/comms/sources", "", who)["sources"] if s["system"] == "metro"]
     assert ids(get("/api/cad/comms", "view=ours")) == ids(get("/api/cad/comms", "view=ours", who))   # fire: as ever
+    # a context row a person put on an incident: on the incident's list for a signed-in reader only, and never in
+    # an event filter's answer for anyone else (the audio by id and the shared state: #419's own tests)
+    inc = _event_with(c, ["E63"], c.clockref)
+    assert c.comms.link("pd-2", inc["id"], "op").get("error") is None
+    number = c.store.incident(inc["id"])["number"]
+    assert ids(get("/api/cad/comms", f"view=all&event={number}", who)) == ["pd-2"]
+    assert get("/api/cad/comms", f"view=all&event={number}")["rows"] == [] and get("/api/cad/comms", f"event={number}")["rows"] == []
+    with sourcekeys.request_context(None):
+        assert c.comms.for_incidents([inc["id"]])[inc["id"]] == []
+    with sourcekeys.request_context(who):
+        assert [r["id"] for r in c.comms.for_incidents([inc["id"]])[inc["id"]]] == ["pd-2"]
 
 
 def test_mute_never_hides_our_calls_or_an_emergency(c):

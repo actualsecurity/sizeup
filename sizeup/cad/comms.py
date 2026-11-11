@@ -89,8 +89,6 @@ BRANCH_MAX = 64                       # a group or tier resolved to its sources:
 CHANGES_MAX = 400                     # ?changed=: more transmissions changed than this since the cursor: reload
 CHANGES_KEPT = 50000                  # radio_changes rows kept (prune): a cursor older than those is told to reload
 EM_WINDOW_S = 12 * 3600               # the sources' emergency mark: unacknowledged ones this recent
-# The viewer may not see another system's traffic (context, #419's gate): only these systems' rows exist for them
-FIRE_SYSTEMS_SQL = "+t.system IN ('', ?, 'analog', 'airband')"
 # Every change to what a row of the Radio page shows, in order (#415 ?changed=): the transmission itself (new, its
 # transcript, a re-run, the alternative text, pruned), its links to incidents, a link kept, its alarm (raised, seen,
 # cleared), and a note tagged with a unit ('note-<id>'). Written by triggers, so no writer can forget; seq only grows
@@ -200,6 +198,9 @@ class Comms:
         self.tactical, self.incident_tgs, self.paging = set(tactical), set(incident_tgs), set(paging)
         self.airport_tgs = set(airport_tgs)      # the Airport Incident talkgroup(s): an open Airport event's (#87)
         self.rev = 0            # bumped on every new or changed transmission (the /comms page polls it)
+        # Another P25 system's rows (#409) are only ever read out for a signed-in person (sourcekeys.may_see_context):
+        # True here only when the server verifies every reader (the hub behind Access), for the state all share
+        self.context_broadcast = False
         # The airband rows' ATC talker (sizeup/atc_talkers.py AtcTalkers.decorate, #252): set by the CAD; rows in place
         self.atc = None
         self.fix = None                 # rows -> rows: the status hints' decorate (sizeup/cad/statushints.py)
@@ -648,7 +649,8 @@ class Comms:
         rows = self.store.q(f"SELECT t.*, l.incident_id, l.why, l.unit AS link_unit, EXISTS (SELECT 1 FROM radio_link_kept k "
                             f"WHERE k.traffic_id = l.traffic_id AND k.incident_id = l.incident_id) AS link_kept FROM radio_links l "
                             f"JOIN radio_traffic t ON t.id = l.traffic_id WHERE l.incident_id IN ({','.join('?' * len(ids))}) "
-                            f"ORDER BY t.start DESC", ids)
+                            + ("" if self._sees_context() else f"AND t.system IN {sources.OURS_SQL} ")
+                            + "ORDER BY t.start DESC", ids)
         for r in rows:
             lst = out[r.pop("incident_id")]
             if len(lst) < limit:
@@ -716,7 +718,7 @@ class Comms:
 
     def split(self, main_tgs, not_main=(), unit: str = "", channel: str = "", event: str = "", pcfd: list[str] | None = None,
               since: float | None = None, until: float | None = None, main_limit: int = MAIN_LIMIT, limit: int = OTHER_LIMIT,
-              kind: str = "", text: str = "", emergency: bool = False, context: bool = True) -> tuple[list[dict], list[dict]]:
+              kind: str = "", text: str = "", emergency: bool = False) -> tuple[list[dict], list[dict]]:
         """The Radio view's two sections, each its own newest N with the same filters (#241: on a busy evening the
         other talkgroups filled the shared newest 300 and Main showed None): (main, other), newest first.
         Main: the FM channels (no talkgroup) but not_main (the airband, #233), the talkgroups in main_tgs and the
@@ -730,18 +732,20 @@ class Comms:
         notes = (self._notes(unit, event, pcfd, since, until, main_limit, words)
                  if kind in ("", "notes") and channel in ("", NOTES) and not emergency else [])
         main, other = [], []
-        w = self._radio_where(unit, channel, event, pcfd, since, until, words, emergency, context) \
+        w = self._radio_where(unit, channel, event, pcfd, since, until, words, emergency) \
             if kind in ("", "radio") and channel != NOTES else None
         if w is not None:
             where, args = w
             fm = "t.talkgroup IS NULL" + (f" AND t.channel NOT IN ({','.join('?' * len(not_main))})" if not_main else "")
-            for cond, extra in [(fm, list(not_main))] + [("t.talkgroup = ?", [tg]) for tg in main_tgs]:
+            county = f"+t.system IN ('', '{sources.COUNTY}')"      # (as view=ours will: never another system's number)
+            for cond, extra in [(fm, list(not_main))] + [(f"t.talkgroup = ? AND {county}", [tg]) for tg in main_tgs]:
                 main += self._fetch(where + [cond], args + extra, main_limit)
             # +t.talkgroup: no index on it, so the newest-first walk stays on the start (or channel) index; never NULL
             # inside the NOT (NULL IN (...) is NULL, and NOT NULL would drop an airband row from both sections)
             mine = "+t.talkgroup IS NULL" + (f" AND +t.channel NOT IN ({','.join('?' * len(not_main))})" if not_main else "")
             if main_tgs:
-                mine = f"({mine}) OR (+t.talkgroup IS NOT NULL AND +t.talkgroup IN ({','.join('?' * len(main_tgs))}))"
+                mine = (f"({mine}) OR (+t.talkgroup IS NOT NULL AND +t.talkgroup IN ({','.join('?' * len(main_tgs))}) "
+                        f"AND {county})")
             other = self._fetch(where + [f"NOT ({mine})"], args + list(not_main) + main_tgs, limit)
         main = sorted(main, key=lambda r: -r["start"])[:main_limit]
         self._decorate(main + other)
@@ -769,7 +773,7 @@ class Comms:
              before: tuple[float, str] | None = None, changed: int | None = None, at: float | None = None,
              limit: int = PAGE, unit: str = "", channel: str = "", event: str = "", pcfd: list[str] | None = None,
              since: float | None = None, until: float | None = None, kind: str = "", text: str = "",
-             emergency: bool = False, context: bool = True) -> dict:
+             emergency: bool = False, context: bool | None = None) -> dict:
         """One page of the radio log for the Radio page (#415), newest first: {rows, older, newer, next, cursor, reload,
         gone}.
 
@@ -777,8 +781,8 @@ class Comms:
         own (sizeup/sourcekeys.py). source: only these sources (keys). safety: only scene-safety rows. mute: sources left
         out (not with source=): never one of Our calls, and never a row with the emergency button or an alarm. The
         older filters (unit, channel, event, pcfd, since, until, kind, text, emergency) as in query().
-        context False: the viewer may not see another system's traffic: those rows don't exist for this answer (left
-        out in the SQL itself, before any search of the words).
+        context: whether the reader may see another system's traffic (None: #419's gate, _sees_context). False:
+        those rows don't exist for this answer (left out in the SQL itself, before any search of the words).
 
         before (start, id): the rows older than that one (the keyset: `next` of the page before). at: a page around that
         time (half newer, half older). older / newer: there are more that way.
@@ -803,9 +807,8 @@ class Comms:
         out = {"rows": [], "older": False, "newer": False, "next": "", "cursor": cursor, "reload": False, "gone": []}
 
         cond, args = [], []
-        if not context:
-            cond.append(FIRE_SYSTEMS_SQL)
-            args.append(sources.COUNTY)
+        if not (self._sees_context() if context is None else context):
+            cond.append(f"+t.system IN {sources.OURS_SQL}")
         for col, val in (("t.system", system), ("t.service", view if view in SERVICE_VIEWS else ""), ("t.service", service)):
             if val:
                 cond.append(f"{col} = ?")
@@ -1009,13 +1012,9 @@ class Comms:
         self._decorate(rows)
         return rows
 
-    def _radio_where(self, unit, channel, event, pcfd, since, until, words=(), emergency=False, context=True):
-        """The Radio view's filters as SQL (where, args); None: nothing can match (PCFD only, no PCFD units).
-        context False: another system's rows are left out, first (before the words are searched)."""
+    def _radio_where(self, unit, channel, event, pcfd, since, until, words=(), emergency=False):
+        """The Radio view's filters as SQL (where, args); None: nothing can match (PCFD only, no PCFD units)."""
         where, args = [], []
-        if not context:
-            where.append(FIRE_SYSTEMS_SQL)
-            args.append(sources.COUNTY)
         if emergency:
             where.append(EMERGENCY_WHERE if has_alarms(self.store) else "t.emergency = 1")
         for w in words:
@@ -1053,7 +1052,12 @@ class Comms:
             where.append("(" + " OR ".join([RIG_LIKE.format(col="t.rig")] * len(pats)) + ")")
             args += pats
 
+    def _sees_context(self) -> bool:
+        return sources.may_see_context(self.context_broadcast)
+
     def _fetch(self, where, args, limit) -> list[dict]:
+        if not self._sees_context():
+            where = list(where) + [f"+t.system IN {sources.OURS_SQL}"]     # (+: the walk stays on its index)
         return self.store.q("SELECT t.*, 'radio' AS kind FROM radio_traffic t"
                             + (" WHERE " + " AND ".join(f"({w})" for w in where) if where else "")
                             + " ORDER BY t.start DESC LIMIT ?", (*args, limit))

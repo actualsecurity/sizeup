@@ -1367,7 +1367,7 @@ class Cad:
             self.log(f"CAD: {t.get('source')} {t.get('rig') or t.get('unit') or 'transmission'} -> {', '.join(nums)}")
         return iids
 
-    def comms_query(self, q: dict, context: bool = True) -> dict:
+    def comms_query(self, q: dict) -> dict:
         """GET /api/cad/comms: {rows, rev, channels, rigs, pcfd, talking, counts, limits}. ?rev=N: {unchanged: true}
         when nothing was logged since N (the CAD's Radio view polls). ?q=: words in the transcript or
         note. Each row says whether it is "main" (FG1 and the like, a talkgroup marked Main, a note):
@@ -1389,9 +1389,9 @@ class Cad:
                                 or cleared); gone: ids deleted or no longer matching; reload: ask afresh
           ?at=<unix>      a page around that time
           ?limit=         rows a page (PAGE; at most PAGE_MAX)
-        context: the viewer may see another P25 system's traffic (#419's gate, decided by the caller). False: those
-        rows are not in any answer here (not their id, time, talker or radio ID), nor their channels and units in the
-        choices; they are left out before the words are searched.
+        Another P25 system's traffic (context) is in an answer only when the reader may see it (#419's one gate,
+        sourcekeys.may_see_context: a signed-in person). Otherwise those rows are not here at all (not their id, time,
+        talker or radio ID), nor their channels and units in the choices; they are left out before the words are searched.
         Without any of the views' parameters the answer is as it always was, but for each row's `service`, now filled
         on the airband ("air") and the analog channels ("fire")."""
         def one(k: str) -> str:
@@ -1417,7 +1417,9 @@ class Cad:
         # made a moment ago, for COMMS_CACHE_S (#284). Only "talking" is live.
         pcfd = [u["name"] for u in self.radios.units if is_pcfd(u)]
         main_tgs = [tg for tg in self.comms.talkgroups() if self.main_tg(tg)]
-        key = (now_rev, bool(context), tuple(pcfd), tuple(main_tgs),
+        # (+ whether this reader may be shown another P25 system's rows, #419: an answer is never another reader's)
+        context = self.comms._sees_context()
+        key = (now_rev, context, tuple(pcfd), tuple(main_tgs),
                tuple(sorted((k, tuple(v)) for k, v in q.items() if k != "rev")))
         hit = self._comms_cache.get(key)
         if hit is not None and time.monotonic() - hit[0] < COMMS_CACHE_S:
@@ -1435,7 +1437,7 @@ class Cad:
                                        pcfd=pcfd if one("pcfd") in ("1", "true", "on") else None,
                                        since=when("since"), until=when("until"), main_limit=main_limit, limit=limit,
                                        kind={"radio": "radio", "notes": "notes"}.get(one("type"), ""), text=one("q"),
-                                       emergency=one("emergency") in ("1", "true", "on"), context=context)
+                                       emergency=one("emergency") in ("1", "true", "on"))
         for r in main:
             r["main"] = True
         for r in other:
@@ -1518,7 +1520,7 @@ class Cad:
                                                    "JOIN incidents i ON i.id = l.incident_id ORDER BY i.id DESC LIMIT 100")]
         return out
 
-    def comms_sources(self, q: dict | None = None, context: bool = True) -> dict:
+    def comms_sources(self, q: dict | None = None) -> dict:
         """GET /api/cad/comms/sources?rev=: the Radio page's tree (#415), {rev, now, minutes, live: [keys], sources:
         [{key, system, system_label, group, name, service, tier, ours, encrypted, department, talkgroup, last, counts,
         emergency, stuck}]}. ?rev= a tree's rev: {unchanged: true, rev, live} while nothing was logged and the minute is
@@ -1529,7 +1531,9 @@ class Cad:
         now. counts: [[minutes ago, calls], ...] over the last hour, only the minutes with calls (the viewer's unread
         counts and the time bar come from these: no per-viewer state here). emergency: "ours" | "other": an emergency
         on it nobody has acknowledged (Comms.emergencies). In the tree's order: system, group, name. Nothing of what
-        was said. context False: the viewer may not see another system's traffic: none of its sources are listed."""
+        was said. A reader who may not see another system's traffic (sourcekeys.may_see_context) gets none of its
+        sources."""
+        context = self.comms._sees_context()
         now = self.clock()
         minute = int(now // 60)
         rev = f"{self.comms.rev}.{self.store.rev}.{minute}.{int(bool(context))}"

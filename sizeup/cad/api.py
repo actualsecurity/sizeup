@@ -223,6 +223,7 @@ import re
 from datetime import datetime
 from urllib.parse import parse_qs, unquote
 
+from sizeup import sourcekeys
 from sizeup.cad import airport
 from sizeup.cad.activity import CSV_MAX_ROWS, KINDS, MAX_ROWS
 from sizeup.cad.service import Cad
@@ -643,13 +644,11 @@ class CadApi:
         self.cad.settings.note(str(body.get("operator") or ""), "system", f"datasources/{key}", f"last fetched {was}", src.action)
         return {"ok": True, "running": row["running"], "source": row}
 
-    @staticmethod
-    def sees_context(who) -> bool:
-        """Whether this viewer may see another P25 system's traffic (police, transit: context). TODO(#419): its central
-        gate (may_see_context) decides this for every route; until it is merged in here: someone signed in."""
-        return who is not None and bool(getattr(who, "email", ""))
-
     def get(self, path: str, query: str, who=None) -> tuple[int, bytes, str]:
+        with sourcekeys.request_context(who):       # another system's traffic: a signed-in person only (#419)
+            return self._get(path, query, who)
+
+    def _get(self, path: str, query: str, who=None) -> tuple[int, bytes, str]:
         if (no := self.read_refused(path, who)) is not None:
             return no
         try:
@@ -684,9 +683,9 @@ class CadApi:
             if path == "/api/cad/radios":
                 return _json(200, self.cad.radio_registry())
             if path == "/api/cad/comms":
-                return _json(200, self.cad.comms_query(parse_qs(query), context=self.sees_context(who)))
+                return _json(200, self.cad.comms_query(parse_qs(query)))
             if path == "/api/cad/comms/sources":
-                return _json(200, self.cad.comms_sources(parse_qs(query), context=self.sees_context(who)))
+                return _json(200, self.cad.comms_sources(parse_qs(query)))
             if path == "/api/cad/comms/activity":      # per-minute activity per source (#409); ?source=&hours= (24)
                 q = parse_qs(query)
                 try:
@@ -734,6 +733,10 @@ class CadApi:
         return 404, b"not found\n", "text/plain"
 
     def post(self, path: str, raw: bytes, who=None, client: tuple[str, str] = NO_CLIENT) -> tuple[int, bytes, str]:
+        with sourcekeys.request_context(who):
+            return self._post(path, raw, who, client)
+
+    def _post(self, path: str, raw: bytes, who=None, client: tuple[str, str] = NO_CLIENT) -> tuple[int, bytes, str]:
         try:
             body = json.loads(raw or b"{}")
         except ValueError as e:
