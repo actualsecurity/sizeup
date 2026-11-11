@@ -122,7 +122,9 @@ window.VesselLayer = (() => {
   const dropS = (d) => (d && d.drop_s) || 600;
   // its age now: as at the answer's reference time (d.at: when what the hub knows last changed, so an unchanged answer
   // is a 304), plus the time since by the hub's clock (cad.skew); an answer without one: since it was fetched
-  const nowS = () => Date.now() / 1000 + ((window.cad && cad.skew) || 0);
+  // (cad.js's `const cad` is a global binding, not window.cad: cadmap.js reads it the same way)
+  const skew = () => (typeof cad !== "undefined" && cad && cad.skew) || 0;
+  const nowS = () => Date.now() / 1000 + skew();
   const since = (d, fetchedMs) => Math.max(0, d && typeof d.at === "number" && d.at > 0 ? nowS() - d.at : (Date.now() - (fetchedMs || Date.now())) / 1000);
   const ageNow = (v, d = store.data, fetchedMs = store.at) => (v.age || 0) + since(d, fetchedMs);
   function alpha(age) {
@@ -149,7 +151,7 @@ window.VesselLayer = (() => {
     for (const v of d.vessels || []) {
       keep.add(v.id);
       // when the report was true, by this browser's clock: the same for an unchanged answer (a 304), so no re-ease
-      const at = d.at > 0 ? (d.at - (v.age || 0) - ((window.cad && cad.skew) || 0)) * 1000 : store.at - (v.age || 0) * 1000;
+      const at = d.at > 0 ? (d.at - (v.age || 0) - skew()) * 1000 : store.at - (v.age || 0) * 1000;
       tracker.set(v.id, { lon: v.lon, lat: v.lat, rot: course(v) || 0, at, sog: v.sog, cog: v.cog });
     }
     tracker.forget(keep);

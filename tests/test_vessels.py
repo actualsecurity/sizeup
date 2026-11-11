@@ -318,6 +318,30 @@ def test_failures_back_off_and_a_refused_key_waits_long_and_is_never_logged():
     assert logs and not any(KEY in m for m in logs)
 
 
+def test_early_closes_back_off_then_wait_long_only_after_three_in_a_row():
+    clock, hot = Clock(), [False]
+    script = []                                            # what each connection does: [] closes at once, [msg] hears one
+    feed = AisStreamFeed(KEY, BBOX, Fleet(), lambda: True, log=lambda m: None, clock=clock,
+                         connect=lambda: FakeWS(script.pop(0)), hot=lambda: hot[0])
+
+    def run(msgs):
+        script.append(msgs)
+        feed.session()
+        wait = feed.st["rest_until"] - clock.t
+        clock.t += wait
+        return wait
+    assert [run([]) for _ in range(2)] == [5.0, 10.0]      # the first two early closes: the usual backoff
+    assert run([]) == vessels.REFUSED_S                    # three in a row: as a refused key
+    assert run([pos_report()]) == vessels.BACKOFF_S[0] and feed.st["early"] == 0   # anything heard: reset
+    assert [run([]) for _ in range(2)] == [5.0, 10.0]
+    hot[0] = True                                          # a marine call is open: never more than 5 min
+    assert run([]) == vessels.BACKOFF_S[1]
+    # the layer passes its own marine-call check down
+    ly = VesselLayer(aisstream_key=KEY, clock=clock, connect=lambda: FakeWS([]))
+    ly.hot = lambda: True
+    assert ly.aisstream._hot() is True
+
+
 def test_a_clean_close_never_reconnects_in_a_tight_loop():
     clock, logs, made = Clock(), [], []
 
@@ -326,7 +350,7 @@ def test_a_clean_close_never_reconnects_in_a_tight_loop():
         return FakeWS([])                                  # subscribes, then the server closes at once
     feed = AisStreamFeed(KEY, BBOX, Fleet(), lambda: True, log=logs.append, clock=clock, connect=connect)
     feed.session()
-    assert feed.st["rest_until"] - clock.t == vessels.REFUSED_S and "right after subscribing" in feed.st["error"]
+    assert feed.st["rest_until"] - clock.t == vessels.BACKOFF_S[0] and "right after subscribing" in feed.st["error"]
     clock.t += 30
     class Quiet(FakeWS):                                   # quiet for a minute, then closed, nothing ever received
         def messages(self, idle_s=None):
@@ -537,6 +561,13 @@ def test_the_ais_dongle_is_never_a_radio_or_a_job(tmp_path, monkeypatch):
         assert isinstance(app.vessels, VesselLayer)
     finally:
         app.stop()
+    # Settings named that dongle for ADS-B before it became the AIS one: the config's ADS-B dongle is used instead
+    (tmp_path / "state" / "adsb_receiver.json").write_text(json.dumps({"sdr": "fire-fg", "by": "settings"}))
+    again = appmod.App(c)
+    try:
+        assert again.adsb_sdr == "adsb1090" and again._sdr_ignored("fire-fg")
+    finally:
+        again.stop()
 
 
 def test_the_near_endpoint_for_a_marine_call_and_not_for_another(tmp_path):

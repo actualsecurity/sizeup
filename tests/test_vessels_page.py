@@ -102,6 +102,29 @@ def test_a_clicked_vessel_is_followed_with_its_live_box_until_a_drag(tmp_path):
 
 
 @needs_node
+@pytest.mark.parametrize("skewed", [True, False])
+def test_ages_go_by_the_hubs_clock_not_a_skewed_browser_clock(tmp_path, skewed):
+    """This browser's clock 10 min fast; cad.js's `const cad` (a global binding, not window.cad) knows the skew."""
+    d = answer()
+    o = run_node(tmp_path, SCRIPTS, LOADED + r"""
+(async () => {
+  await VesselLayer.load(); await flush();
+  m.draw(true);
+  out.marks = pts("vs-vessels").map((p) => [p.icon, p.opacity]);
+  console.log(JSON.stringify(out)); process.exit(0);
+})();
+""", {"d": d, "layerOn": True}, pre=r"""
+const realNow = Date.now;
+IN.d.at = realNow() / 1000;                                  // the hub's answer, just now by the hub's clock
+Date.now = () => realNow() + 600e3;                          // this browser: 10 min fast
+""" + ("const cad = { skew: -600 };\n" if skewed else "") + MAP)
+    if skewed:
+        assert all(not icon.endswith("-old") and op == 1 for icon, op in o["marks"])   # fresh: by the hub's clock
+    else:
+        assert all(icon.endswith("-old") and op < 1 for icon, op in o["marks"])         # (no skew known: the clock's)
+
+
+@needs_node
 def test_dead_reckoning_is_gentle_and_only_for_a_moving_vessel(tmp_path):
     o = run_node(tmp_path, SCRIPTS, r"""
 const fix = { lon: -73.66, lat: 40.97, sog: 10, cog: 90, rot: 90 };

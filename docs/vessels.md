@@ -71,8 +71,9 @@ dongle is claimed through the shared rtl-claims (app `sizeup`, mode `ais`). It i
 One websocket to `wss://stream.aisstream.io/v0/stream`, subscribed to the box. It is open only while someone has
 the layer on (and 15 min after, since names come in slowly) or while a marine call is open. When it fails it backs
 off from 5 s, doubling to 5 min, and waits 30 min after a refused key. A server close right after the subscription,
-with nothing sent, counts as a refused key; any other close with nothing received counts as a failure; and every
-connection waits at least 5 s after the last one. When the box is quiet it reconnects every 10 min. Only the hub's
+with nothing sent, backs off as usual the first two times in a row and waits as for a refused key from the third
+(at most 5 min while a marine call is open; anything heard resets the count). Any other close with nothing received
+counts as a failure, and every connection waits at least 5 s after the last one. When the box is quiet it reconnects every 10 min. Only the hub's
 lease holder connects: a standby task never does (hot/cold deploys). It identifies as *Port Chester Fire Department - sizeup emergency situational awareness application
 (github.com/actualsecurity/sizeup)*.
 

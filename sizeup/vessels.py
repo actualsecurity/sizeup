@@ -75,7 +75,8 @@ BACKOFF_S = (5.0, 300.0)
 REFUSED_S = 1800.0            # aisstream refused the key: wait this long
 IDLE_TIMEOUT_S = 600.0        # nothing from aisstream this long (a quiet box, or a dead link): reconnect
 TICK_S = 5.0                  # the connection looks at "still wanted?" this often while nothing comes
-CLOSED_FAST_S = 10.0         # a server close this soon after subscribing, nothing sent: treated as a refused key
+CLOSED_FAST_S = 10.0         # a server close this soon after subscribing, nothing sent: an "early close"
+EARLY_REFUSED = 3             # ... this many in a row (nothing heard in between): treated as a refused key (REFUSED_S)
 READ_TIMEOUT_S = 60.0         # a frame begun but not finished within this: a failure
 NEAR_KEEP_S = 10.0            # an event's near answer, cached this long
 NEAREST_N = 3
@@ -484,12 +485,15 @@ class AisStreamFeed:
     key = "aisstream"
 
     def __init__(self, api_key: str, bbox, fleet: Fleet, wanted: Callable[[], bool], log: Callable[[str], None] = print,
-                 clock: Callable[[], float] = time.time, url: str = AISSTREAM_URL, connect=None):
+                 clock: Callable[[], float] = time.time, url: str = AISSTREAM_URL, connect=None,
+                 hot: Callable[[], bool] | None = None):
         self._key = api_key
         self.bbox, self.fleet, self.wanted, self.log, self.clock = tuple(bbox), fleet, wanted, log, clock
+        self.hot = hot or (lambda: False)        # a marine call open: an early close never waits longer than BACKOFF_S[1]
         self.url = url
         self.connect = connect or (lambda: WebSocket.connect(self.url, {"User-Agent": UA}, timeout=30.0))
-        self.st = {"state": "idle", "at": None, "n": 0, "error": "", "connected_at": None, "fails": 0, "rest_until": 0.0}
+        self.st = {"state": "idle", "at": None, "n": 0, "error": "", "connected_at": None, "fails": 0, "rest_until": 0.0,
+                   "early": 0}
         self.ws = None
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -559,9 +563,11 @@ class AisStreamFeed:
                     heard = self.clock()
                     self.handle(raw)
                     got += 1
-                    if got == 1 and st["fails"]:
-                        self.log(f"vessels: aisstream.io back after {st['fails']} failed tries")
-                        st["fails"] = 0
+                    if got == 1:
+                        st["early"] = 0
+                        if st["fails"]:
+                            self.log(f"vessels: aisstream.io back after {st['fails']} failed tries")
+                            st["fails"] = 0
                 if self._stop.is_set() or not self.wanted():
                     ours = True
                     break
@@ -570,8 +576,16 @@ class AisStreamFeed:
             ws.close()
             now = self.clock()
             if not got and not ours and now - subscribed < CLOSED_FAST_S:
-                # closed by the server right after the subscription, nothing sent: a key or subscription it refuses
-                self._fail("closed right after subscribing (key or subscription refused?)", REFUSED_S)
+                # closed by the server right after the subscription, nothing sent: the usual backoff, and after
+                # EARLY_REFUSED in a row a key or subscription it refuses (the long wait; 5 min at most on a marine call)
+                st["early"] += 1
+                wait = None
+                if st["early"] >= EARLY_REFUSED:
+                    wait = REFUSED_S
+                    if self._hot():
+                        wait = BACKOFF_S[1]
+                self._fail(f"closed right after subscribing ({st['early']} in a row)"
+                           + (" (key or subscription refused?)" if st["early"] >= EARLY_REFUSED else ""), wait)
             elif not got and not ours:
                 self._fail("closed with nothing received")
             else:
@@ -587,6 +601,12 @@ class AisStreamFeed:
             ws, self.ws = self.ws, None
             if ws is not None:
                 ws.close()
+
+    def _hot(self) -> bool:
+        try:
+            return bool(self.hot())
+        except Exception:  # noqa: BLE001
+            return False
 
     def _fail(self, why: str, wait: float | None = None) -> None:
         st = self.st
@@ -697,7 +717,8 @@ class VesselLayer:
         self._hot = (0.0, False)
         self.lookup: Callable[[int], dict] | None = None   # an event by id (the app: the CAD store's full())
         self._near: dict[int, tuple[float, dict]] = {}
-        self.aisstream = (AisStreamFeed(aisstream_key, self.bbox, self.fleet, self.wanted, log, clock, connect=connect)
+        self.aisstream = (AisStreamFeed(aisstream_key, self.bbox, self.fleet, self.wanted, log, clock, connect=connect,
+                                        hot=lambda: self.hot())
                           if self.enabled and aisstream_key else None)
         self.receiver = None
         if self.enabled and station_feed:
