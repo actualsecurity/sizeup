@@ -936,19 +936,44 @@ def limited_in(g, r):
     return {g.limited(e) for e, _ in r["way"]} - {0}
 
 
-def test_a_highway_call_is_read_from_the_calls_words():
+def test_a_highway_call_is_read_from_the_calls_address():
     hc = rg.highway_call
     assert hc("100 Example Ave", "Example Pl", typ="ALS") == rg.LOCAL
     assert hc("I-95 NB", "Exit 21") == rg.Call({"i95", "*"}, "N")
-    assert hc("Hutch SB @ Exit 25").keys == {"hutch", "*"} and hc("Hutch SB @ Exit 25").dir == "S"
+    assert hc("Hutchinson River Pkwy SB @ Exit 25") == rg.Call({"hutch", "*"}, "S")
+    assert hc("Hutch Pkwy", "Exit 25 SB") == rg.Call({"hutch", "*"}, "S")              # the direction from the cross street
     assert hc("Cross Westchester Expwy EB").keys == {"i287", "*"} and hc("I287 EB").dir == "E"
-    assert hc("Merritt Pkwy westbound").keys == {"merritt", "*"} and hc("Merritt Pkwy westbound").dir == "W"
-    assert hc("Thruway", typ="MVA").keys == {"i95", "i287", "i87", "*"} and hc("Thruway", typ="MVA").vehicle
-    assert hc("684 SB").keys == {"i684", "*"}
-    assert hc("Exit 9 ramp").keys == {"*"} and hc("MM 12.4").keys == {"*"}
-    assert hc("95 North Main St") == rg.LOCAL and hc("287 Example Ave") == rg.LOCAL     # a house number, not a road
-    assert hc("100 Example Ave", "Example Pl NB").dir is None                          # a direction on no highway
+    assert hc("Merritt Pkwy westbound") == rg.Call({"merritt", "*"}, "W")
+    assert hc("Thruway", typ="MVA") == rg.Call({"i95", "i287", "i87", "*"}, None, True)
+    assert hc("684 SB") == rg.Call({"i684", "*"}, "S")
+    for words, want in (("95 SOUTH", ("i95", "S")), ("287 EAST", ("i287", "E")), ("95S", ("i95", "S")),
+                        ("ENTRANCE RAMP 95N", ("i95", "N")), ("I-95 N", ("i95", "N")), ("I95 NORTH", ("i95", "N")),
+                        ("NB 95 at exit 21", ("i95", "N")), ("287 WB @ MM 4.2", ("i287", "W")),
+                        ("Saw Mill River Pkwy N", ("sawmill", "N")), ("Sprain Brook Parkway", ("sprain", None))):
+        c = hc(words)
+        assert (c.keys - {"*"}, c.dir) == ({want[0]}, want[1]), words
+
+
+def test_a_cross_street_or_a_street_named_after_a_highway_is_not_a_highway_call():
+    hc = rg.highway_call
+    # a street beside or under the highway: its cross street names it (common in county CAD)
+    assert hc("100 Example Ave", "I 95") == rg.LOCAL
+    assert hc("100 Example Ave", "I-287 RAMP") == rg.LOCAL
+    assert hc("100 Example Ave", "Hutchinson River Pkwy NB") == rg.LOCAL
+    # streets named after one, unit and suite numbers, house numbers
+    for words in ("12 Hutchinson Ave", "200 Saw Mill River Rd", "10 Sprain Rd", "3 Taconic Rd", "4 Merritt St",
+                  "1 Thruway Plaza", "100 Example Ave Unit MM2", "100 Example Ave Suite 95 NB", "95 North Main St",
+                  "287 Example Ave", "95 N Example St", "Exit 9 Example Rd", "MM 12.4", "Hutch", "Example Pkwy NB"):
+        assert hc(words).keys == frozenset(), words
+    assert hc("100 Example Ave", "Example Pl NB").dir is None                             # a direction on no highway
     assert rg.hw_keys("New England Thruway; I 95") == {"i95"} and rg.hw_keys("Hutchinson River Parkway; HR") == {"hutch"}
+
+
+def test_a_vehicle_call_is_an_mva_a_vehicle_fire_or_an_entrapment():
+    hc = rg.highway_call
+    assert hc("100 Example Ave", typ="MVA").vehicle and hc("100 Example Ave", typ="MVF").vehicle
+    assert hc("100 Example Ave", typ="Entrapment").vehicle and hc("100 Example Ave", typ="RESCUE", subtype="VEHICLE").vehicle
+    assert not hc("100 Example Ave", typ="ALS").vehicle
 
 
 def test_the_graph_marks_motorways_parkways_and_their_ramps():
@@ -968,9 +993,9 @@ def test_the_graph_marks_motorways_parkways_and_their_ramps():
 def test_a_local_call_keeps_off_the_motorway_even_when_it_is_shorter():
     g = freeway()
     to = [LON0 + 20 * DX, LAT0 + 0.5 * DY]                              # on Long Road, beside the off-ramp
-    free = g.route(at(0, 0), to, P, call=rg.highway_call("I-95 EB"))   # (as if it were a highway call)
+    free = g.route(at(0, 0), at(18, -1), P, call=rg.highway_call("I-95 EB"))     # (to I-95, a highway call: 1.6 km)
     r = g.route(at(0, 0), to, P)
-    assert free["m"] < 2000 and limited_in(g, free) == {1}
+    assert free["m"] < 1700 and limited_in(g, free) == {1}
     assert limited_in(g, r) == set() and r["m"] > 2200 and not r["highway"]
     assert {g.name(e) for e, _ in r["way"]} <= {"Long Road"}
     # the estimate agrees: by Long Road, and its seconds are driving time at street speeds
@@ -993,6 +1018,9 @@ def test_a_motorway_is_a_last_resort_with_its_seconds_as_driven():
     driven = sum(g.elen[e] * spm[g.ecls[e]] for e, _ in r["way"]) + g.elen[0] * spm[rg.CLASSES.index("residential")]
     assert r["s"] == pytest.approx(driven, rel=0.05)                     # not LIMITED_SLOW times it
     assert g.to_one({"E60": at(-2, 0)}, at(22, 0), P)["E60"][0] == pytest.approx(r["s"], rel=1e-6)
+    # the estimate's cut-off is driving time, not the steering cost (6x): a unit this far is still estimated
+    assert g.to_one({"E60": at(-2, 0)}, at(22, 0), P, max_s=r["s"] * 1.2)["E60"][0] == pytest.approx(r["s"], rel=1e-6)
+    assert g.to_one({"E60": at(-2, 0)}, at(22, 0), P, max_s=r["s"] * 0.8) == {"E60": None}
 
 
 def test_a_highway_call_uses_the_highway_by_the_on_ramp_for_its_direction():
@@ -1021,7 +1049,7 @@ def test_parkways_are_shut_to_rigs_unless_the_call_is_on_that_parkway():
     r = g.route(at(0, 0), to, P)
     assert limited_in(g, r) == set()
     assert limited_in(g, g.route(at(0, 0), to, P, call=rg.highway_call("I-95 EB"))) == set()    # another highway's call
-    on = g.route(at(-2, 0), at(10, -1.15), P, call=rg.highway_call("Hutch EB"))
+    on = g.route(at(-2, 0), at(10, -1.15), P, call=rg.highway_call("Hutchinson River Pkwy EB"))
     assert on["highway"] and limited_in(g, on) == {2} and on["m"] < 1200
     # a parkway as the only way: no route at all for a local call
     w = Ways()
@@ -1031,8 +1059,62 @@ def test_parkways_are_shut_to_rigs_unless_the_call_is_on_that_parkway():
     w.add([at(19, -1), at(20, 0)], hw="motorway_link")
     w.add([at(20, 0), at(22, 0)], name="Far Street")
     only = w.graph()
-    assert only.route(at(-2, 0), at(22, 0), P) is None and only.to_one({"E60": at(-2, 0)}, at(22, 0), P) == {}
+    assert only.route(at(-2, 0), at(22, 0), P) is None
+    assert only.to_one({"E60": at(-2, 0)}, at(22, 0), P) == {"E60": None}     # on the roads, no way: no estimate
     assert only.route(at(-2, 0), at(10, -1), P, call=rg.highway_call("Merritt Pkwy EB")) is not None
+
+
+def beside():
+    """freeway() and Example Street, a dead end 26 m beside the eastbound carriageway (j=-0.7, i=10..20), reached
+    from Long Road at (20, 0)."""
+    w = Ways()
+    w.add([at(0, 0), at(0, 4), at(20, 4), at(20, 0)], name="Long Road")
+    w.add([at(-2, 0), at(0, 0)], name="Short Street")
+    w.add([at(20, 0), at(20, -0.7), at(10, -0.7)], name="Example Street")
+    tags = {"name": "New England Thruway", "ref": "I 95"}
+    w.add([at(i, -1) for i in range(1, 20)], hw="motorway", **tags)
+    w.add([at(i, -1.3) for i in range(19, 0, -1)], hw="motorway", **tags)
+    w.add([at(0, 0), at(1, -1)], hw="motorway_link")
+    w.add([at(19, -1), at(19.5, -0.7)], hw="motorway_link")                         # off, onto Example Street
+    w.add([at(20, 0), at(19, -1.3)], hw="motorway_link")
+    w.add([at(1, -1.3), at(0, 0)], hw="motorway_link")
+    return w.graph()
+
+
+def test_a_call_beside_the_highway_naming_it_as_a_cross_street_stays_local():
+    g = beside()
+    to = [LON0 + 12 * DX, LAT0 - 0.72 * DY]                              # on Example Street, 24 m from I-95 EB
+    for cross in ("I 95", "I-287 RAMP", ""):
+        call = rg.highway_call("100 Example St", cross, typ="ALS")
+        r = g.route(at(0, 0), to, P, call=call)
+        assert not r["highway"] and limited_in(g, r) == set() and g.name(r["way"][-1][0]) == "Example Street", cross
+    # the address says I-95 EB and the point is on it: the highway, by the on-ramp at (0, 0)
+    on = g.route(at(0, 0), to, P, call=rg.highway_call("I-95 EB", "Exit 21"))
+    assert on["highway"] and limited_in(g, on) == {1} and on["m"] < 1200
+
+
+def test_a_highway_named_but_not_under_the_call_point_is_a_local_call():
+    g = beside()
+    off = [LON0 + 12 * DX, LAT0 - 0.4 * DY]                              # 26 m from Example St, 53 m from EB, 79 m from WB
+    for words in ("I-95 WB", "Hutchinson River Pkwy NB"):               # only the other carriageway near; another road
+        sb, keys = g.target(*off, rg.highway_call(words))
+        r = g.route(at(0, 0), off, P, call=rg.highway_call(words))
+        assert keys is None and g.name(sb["edge"]) == "Example Street" and limited_in(g, r) == set(), words
+    far = at(20, 0.5)                                                    # on Long Road, 156 m from I-95
+    assert g.target(*far, rg.highway_call("I-95 EB")) == (g.snap(*far), None)
+    # I-95 is signed north / south but runs north-east here (roadgraph.SIGNED): "NB" is the eastbound carriageway
+    mid = (LON0 + 12 * DX, LAT0 - 1.15 * DY)
+    nb, sb = g.snap_highway(*mid, frozenset({"i95"}), "N"), g.snap_highway(*mid, frozenset({"i95"}), "S")
+    assert 80 < g.bearing(nb["edge"], nb["seg"]) < 100 and 260 < g.bearing(sb["edge"], sb["seg"]) < 280
+    # a carriageway more than HWCALL_DIR_DEG off the call's direction (I-684, signed N/S, drawn east-west): neither
+    w = Ways()
+    w.add([at(i, 0) for i in range(0, 6)], hw="motorway", name="I 684")
+    w.add([at(i, -0.3) for i in range(5, -1, -1)], hw="motorway", name="I 684")
+    w.add([at(0, 0), at(0, 2), at(5, 2), at(5, 0)], name="Example Road")
+    ns = w.graph()
+    assert ns.snap_highway(LON0 + 2.5 * DX, LAT0 - 0.15 * DY, frozenset({"i684"}), "N") is None
+    assert ns.target(LON0 + 2.5 * DX, LAT0 - 0.15 * DY, rg.highway_call("684 NB"))[1] is None        # a local call
+    assert g.snap_highway(LON0 + 12 * DX, LAT0 - 1.0 * DY, frozenset({"*"}), None) is None    # no highway named
 
 
 def test_the_live_routes_read_each_calls_words_and_route_again_when_they_change():
@@ -1043,7 +1125,21 @@ def test_the_live_routes_read_each_calls_words_and_route_again_when_they_change(
     inc = {"id": 7, "address": "100 Example Ave", "cross_street": "", "type": "ALS"}
     local = r.for_map([m], NOW, [inc])["routes"][0]
     assert local["m"] > 2300                                             # round by Long Road
-    hw = r.for_map([dict(m, at=NOW + 1)], NOW + 1, [dict(inc, address="I-95 EB", cross_street="Exit 21")])["routes"][0]
-    assert hw["why"] == "new" and hw["m"] < local["m"] - 400                          # by I-95 eastbound
-    est = r.to_one({"E60": at(-2, 0)}, to, dict(inc, address="I-95 EB"))["E60"]
+    named = r.for_map([dict(m, at=NOW + 1)], NOW + 1, [dict(inc, address="I-95 EB")])["routes"][0]
+    assert named["why"] == "new" and named["m"] == local["m"]           # its point is not on I-95: still the streets
+    on = at(10, -1.15)
+    hw = r.for_map([dict(m, at=NOW + 2, line_to=on)], NOW + 2, [dict(inc, address="I-95 EB", cross_street="Exit 21")])
+    hw = hw["routes"][0]
+    assert hw["why"] == "new" and hw["m"] < 1200                                       # by I-95 eastbound
+    est = r.to_one({"E60": at(-2, 0)}, on, dict(inc, address="I-95 EB"))["E60"]
     assert est[1] == pytest.approx(hw["m"], rel=0.05)
+
+
+def test_a_unit_with_no_way_by_road_has_no_estimate_and_the_rest_keep_theirs():
+    units = [{"id": 1, "name": "E60"}, {"id": 2, "name": "E61"}]
+    where = {"E60": {"ll": at(0, 0), "on_road": True, "label": "live position"},
+             "E61": {"ll": at(1, 1), "on_road": True, "label": "live position"}}
+    inc = {"lat": at(3, 3)[1], "lon": at(3, 3)[0], "address": "100 Example Ave"}
+    est = runcards.estimates(units, where, inc, P, lambda origins, to, i: {"E60": None, "E61": (60.0, 800.0)})
+    assert est[1] == {"eta_s": None, "eta": "", "reason": "no way by road · live position", "how": "road"}
+    assert est[2]["how"] == "road" and est[2]["eta_s"] == 60

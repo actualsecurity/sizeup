@@ -32,9 +32,10 @@ Highways (user, 2026-11-10: "unless it's a highway call it's unlikely a rig woul
 normal call"): a call that is not on a highway keeps the rig on local streets. Motorways (I-95, I-287, I-684) and
 their ramps cost LIMITED_SLOW times as much (a last resort: never quicker than the streets beside them); parkways
 (the Hutch, the Merritt, the Bronx River ...: no commercial vehicles) and their ramps are shut. A highway call
-(highway_call(): its address or cross streets name a highway, the Thruway, an exit or a mile marker; or its point
-lands on one, more readily for an MVA) is put on that highway's carriageway in its direction (NB / SB / EB / WB,
-else the nearest), and may use the motorways, and the parkway it names. Seconds are always driving time: the factor
+(target(): its ADDRESS names a highway as a road, never a street named after one, and its point is within
+HWCALL_SNAP_M of that highway's carriageway running its signed direction (NB / SB / EB / WB: SIGNED), else the
+nearest; or, naming none, its point lands on one, more readily for an MVA) may use the motorways and the parkway it
+names. A cross street naming the highway never makes it one (a street beside or under I-95). Seconds are always driving time: the factor
 only steers the choice. The partial edges at either end are never factored (a rig on I-95 is there).
 
 Everything shown from this is an estimate: no traffic, no signals, no turn costs.
@@ -100,11 +101,19 @@ SLOW = {"lanes": 1.5, "alternating": 1.6, "detour": 1.3}   # a partial closure: 
 # Parkway / Pkwy) and its ramps. A trunk not named a parkway (Kensico Circle, NY 9A) is an ordinary road.
 LIMITED_SLOW = 6.0                    # a motorway or its ramps on a call that is not on one: this much costlier
 PARKWAY_RE = re.compile(r"\b(parkway|pkwy)\b", re.I)
-HWCALL_SNAP_M = 500.0                 # a call naming a highway: snapped onto it when it is this near
+HWCALL_SNAP_M = 75.0                  # a call naming a highway: put on it only when its point is this near
+HWCALL_DIR_DEG = 60.0                 # ... on the carriageway whose bearing is this near its signed direction (SIGNED)
+# Each highway's signed directions and the bearing of the first here (the length-weighted axis of its mainline in the
+# response ring, OSM 2026-11-09): "I-95 NB" runs north-east through Port Chester (52°), "I-287 EB" south-east (121°).
+# A compass bearing would be wrong: I-95 runs 46° off north at worst here, I-287 86° off east. 95% of the mainline
+# is within 41° (I-95), 49° (I-287) and 56° (the Hutch) of these. A direction the highway isn't signed with: the compass.
+SIGNED = {"i95": ("NS", 52.0), "i287": ("EW", 121.0), "i684": ("NS", 9.0), "i87": ("NS", 0.0),
+          "hutch": ("NS", 45.0), "merritt": ("NS", 55.0), "sprain": ("NS", 24.0), "sawmill": ("NS", 0.0),
+          "bronxriver": ("NS", 21.0), "taconic": ("NS", 329.0), "crosscounty": ("EW", 90.0)}
 MVA_MOTORWAY_SNAP_M = 15.0            # an MVA / vehicle fire: a motorway need only be this much nearer (MOTORWAY_SNAP_M)
 DIRS = {"N": 0.0, "E": 90.0, "S": 180.0, "W": 270.0}
 LINKS = {7, 8}                        # motorway_link, trunk_link
-# a highway's name, ref or a call's words for it -> its key ("I 95" / "I-95" / "New England Thruway" -> i95)
+# an OSM highway's name or ref -> its key ("I 95" / "I-95" / "New England Thruway" -> i95)
 HW_NAMES = (
     (re.compile(r"\bI[- ]?95\b|\bINTERSTATE[- ]?95\b|\bNEW ENGLAND (THRUWAY|THWY|EXPRESSWAY|EXPWY)\b"), "i95"),
     (re.compile(r"\bI[- ]?287\b|\bINTERSTATE[- ]?287\b|\bCROSS[- ]?WESTCHESTER\b|\bCWE\b"), "i287"),
@@ -118,14 +127,37 @@ HW_NAMES = (
     (re.compile(r"\bTACONIC\b"), "taconic"),
     (re.compile(r"\bCROSS COUNTY\b"), "crosscounty"),
 )
-# a call's words only: "Thruway" alone (the NYS Thruway here: I-95, I-287, I-87); "95 NB" without the I
-CALL_NAMES = (
-    (re.compile(r"\bTHRUWAY\b|\bTHWY\b"), ("i95", "i287", "i87")),
-    (re.compile(r"(?<![\d-])\b(95|287|684)\s*(?:[NSEW]/?B|(?:NORTH|SOUTH|EAST|WEST)\s*BOUND)\b"), None),
+# A call's ADDRESS naming a highway, as a road (never a street named after one: "12 Hutchinson Ave", "10 Sprain Rd",
+# "1 Thruway Plaza"): a parkway / expressway by its name AND its road word, an interstate by I- / Interstate and its
+# number, or a bare number with a direction at the start of the address or after a ramp word ("95 SB", "NB 95 at Exit
+# 21", "Entrance ramp 95N"). The cross streets and the place's address never make a call a highway call (a street
+# beside or under I-95 has "I 95" as its cross street).
+_PK = r"\s+(?:PKWY|PARKWAY|PKY)\b"
+_DIRW = r"(?:[NSEW]/?B|NORTH(?:\s*BOUND)?|SOUTH(?:\s*BOUND)?|EAST(?:\s*BOUND)?|WEST(?:\s*BOUND)?|[NSEW])"
+_SUFFIX = r"(?:PLAZA|PLZ|AVE|AVENUE|RD|ROAD|ST|STREET|DR|DRIVE|LN|LANE|CT|COURT|PL|PLACE|BLVD|TER|TERRACE|CIR|CIRCLE|SQ|WAY)\b"
+_LEAD = r"(?:^|[@&/]\s*|\b(?:AT|ON|RAMP|ENTRANCE|EXIT|TO|OF|AND)\s+)"
+_TAIL = r"(?=\s*(?:$|[@&/]|\b(?:AT|EXIT|EX|MM|MILE|RAMP|NEAR|BEFORE|AFTER|PAST|BY|BTWN|BETWEEN)\b))"
+CALL_HW = (
+    (re.compile(r"\b(?:I|INTERSTATE)[- ]?(95|287|684|87)(?:\s*(" + _DIRW + r"))?\b(?!\s+" + _SUFFIX + ")"), None),
+    (re.compile(_LEAD + r"(95|287|684)\s*(" + _DIRW + r")" + _TAIL), None),
+    (re.compile(_LEAD + r"(" + _DIRW + r")\s+(95|287|684)" + _TAIL), "first"),
+    (re.compile(r"\bHUTCH(?:INSON)?(?:\s+RIVER)?" + _PK), "hutch"),
+    (re.compile(r"\bMERRITT" + _PK + r"|\bCT[- ]?15\b(?!\s+" + _SUFFIX + ")"), "merritt"),
+    (re.compile(r"\bSPRAIN(?:\s+BROOK)?" + _PK), "sprain"),
+    (re.compile(r"\bSAW\s?MILL(?:\s+RIVER)?" + _PK), "sawmill"),
+    (re.compile(r"\bBRONX\s+RIVER" + _PK), "bronxriver"),
+    (re.compile(r"\bTACONIC(?:\s+STATE)?" + _PK), "taconic"),
+    (re.compile(r"\bCROSS\s+COUNTY" + _PK), "crosscounty"),
+    (re.compile(r"\bCROSS[- ]?WESTCHESTER\s+(?:EXPWY|EXPRESSWAY|EXPY|EXP|XWAY)\b|\bCWE\b"), "i287"),
+    (re.compile(r"\bNEW\s+ENGLAND\s+(?:THRUWAY|THWY)\b"), "i95"),
+    (re.compile(r"(?<!\d\s)\b(?:THRUWAY|THWY)\b(?!\s+" + _SUFFIX + ")"), ("i95", "i287", "i87")),   # the NYS Thruway
 )
-CALL_ANY = re.compile(r"\bEXIT\s*\d|\bMM\s*\d|\bMILE\s*MARKER|\bMILEPOST\b")   # on a highway, which one not said
+# the direction: NB / S/B / westbound anywhere in the address or cross streets; NORTH / S after the highway's road word
 CALL_DIR = re.compile(r"\b([NSEW])/?B\b|\b(NORTH|SOUTH|EAST|WEST)\s*BOUND\b")
+CALL_DIR_AFTER = re.compile(r"(?:PKWY|PARKWAY|PKY|EXPWY|EXPRESSWAY|EXPY|THRUWAY|THWY)\s+(NORTH|SOUTH|EAST|WEST|[NSEW])\b")
+# the call's type: a vehicle on the road (the page's "Entrapment" is an MVA, runcards.type_from_page)
 VEHICLE_TYPES = ("MVA", "MVF")
+VEHICLE_SUBTYPES = ("EXTRI", "VEHICLE")
 # Measured 2026-11-09 (12 km ring, bbox -73.819 40.888 -73.517 41.144, an M-series Mac): Overpass answered 28 MB in
 # 56 s; built into 41,623 nodes and 52,744 edges in 0.5 s, a 5.6 MB file (1.7 MB gzipped in S3); read into a Graph in
 # 0.4 s, ~20 MB held (45 MB peak while reading). A route (a firehouse to a point within ~6 km): median 2 ms, p95 6 ms,
@@ -266,20 +298,41 @@ class Call(tuple):
 LOCAL = Call()
 
 
-def highway_call(*texts: str, typ: str = "") -> Call:
-    """A call's location words (address, cross streets) and its type -> Call. "I-95 NB @ Exit 21" ->
-    ({i95, *}, "N"); "Hutch SB" -> ({hutch, *}, "S"); "Exit 9" -> ({*}); "100 Example Ave" -> LOCAL."""
-    t = " ".join(x for x in texts if x).upper()
-    keys = set(hw_keys(t))
-    for rx, ks in CALL_NAMES:
-        m = rx.search(t)
-        if m:
-            keys.update(ks if ks else ("i" + m.group(1),))
-    if keys or CALL_ANY.search(t):
-        keys.add("*")
-    d = CALL_DIR.search(t) if keys else None
-    way = (d.group(1) or d.group(2)[0]) if d else None
-    return Call(keys, way, (typ or "").upper() in VEHICLE_TYPES)
+def _dir(word: str | None) -> str | None:
+    return word.replace("/", "")[0] if word else None
+
+
+def highway_call(address: str = "", cross: str = "", typ: str = "", subtype: str = "") -> Call:
+    """A call's address (and cross streets, for its direction only) and its type -> Call. "I-95 NB @ Exit 21" ->
+    ({i95, *}, "N"); "Hutchinson River Pkwy SB" -> ({hutch, *}, "S"); "NB 95 at Exit 21" -> ({i95, *}, "N");
+    "100 Example Ave" with "I 95" as its cross street -> LOCAL (a street beside the highway); "12 Hutchinson Ave" ->
+    LOCAL."""
+    t = " ".join((address or "").upper().replace(",", " ").replace(".", " ").replace(";", " ").split())
+    keys: set[str] = set()
+    way = None
+    for rx, what in CALL_HW:
+        for m in rx.finditer(t):
+            if what is None:                                       # I-95 [N] / 95 SB: (number, direction)
+                keys.add("i" + m.group(1))
+                way = way or _dir(m.group(2))
+            elif what == "first":                                  # NB 95: (direction, number)
+                keys.add("i" + m.group(2))
+                way = way or _dir(m.group(1))
+            else:
+                keys.update((what,) if isinstance(what, str) else what)
+    vehicle = (typ or "").upper() in VEHICLE_TYPES or "ENTRAP" in (typ or "").upper() \
+        or (subtype or "").upper() in VEHICLE_SUBTYPES
+    if not keys:
+        return Call((), None, vehicle)
+    if way is None:
+        both = t + " " + " ".join((cross or "").upper().split())
+        d = CALL_DIR.search(both)
+        if d:
+            way = d.group(1) or d.group(2)[0]
+        else:
+            d = CALL_DIR_AFTER.search(t)
+            way = d.group(1)[0] if d else None
+    return Call(keys | {"*"}, way, vehicle)
 
 
 def street_key(name: str) -> str:
@@ -481,15 +534,18 @@ class Graph:
     def target(self, lon: float, lat: float, call: Call | None = None) -> tuple[dict | None, frozenset | None]:
         """Where a call is on the roads, and the highways a route to it may use (None: none, factors()).
 
-        A call naming a highway (call.keys) is put on that highway's carriageway within HWCALL_SNAP_M, the one
-        running its way (call.dir, within 90°) when it says, else the nearest; it may use the highways (any motorway,
-        and the parkways it names). A call naming none is snapped as usual (an MVA or vehicle fire with a smaller
-        lead for the motorway, MVA_MOTORWAY_SNAP_M), and is a highway call only when it lands on one."""
+        A call whose address names a highway (call.keys) is put on that highway's carriageway when its point is
+        within HWCALL_SNAP_M of it, the one running its way (call.dir, within HWCALL_DIR_DEG) when it says, else the
+        nearest; it may use the highways (any motorway, and the parkways it names). Its words alone never are enough:
+        a point not on the named highway (or only beside the other carriageway) is a local call, whatever it is
+        snapped to. A call naming no highway is snapped as usual (an MVA or vehicle fire with a smaller lead for the motorway,
+        MVA_MOTORWAY_SNAP_M), and is a highway call only when it lands on one."""
         call = call or LOCAL
         if call.keys:
             s = self.snap_highway(lon, lat, call.keys, call.dir)
-            s = s or self.snap(lon, lat)
-            return s, call.keys | (self.kinds[self.ekind[s["edge"]]][1] if s else frozenset())
+            if s is not None:
+                return s, call.keys | self.kinds[self.ekind[s["edge"]]][1]
+            return self.snap(lon, lat), None                         # not on it (or not its way): a local call
         s = self.snap(lon, lat, motorway_m=MVA_MOTORWAY_SNAP_M if call.vehicle else MOTORWAY_SNAP_M)
         if s is not None and self.ekind[s["edge"]]:
             return s, frozenset({"*"}) | self.kinds[self.ekind[s["edge"]]][1]
@@ -497,26 +553,37 @@ class Graph:
 
     def snap_highway(self, lon: float, lat: float, keys: frozenset, way: str | None,
                      max_m: float = HWCALL_SNAP_M) -> dict | None:
-        """The nearest point on a highway mainline the keys name (only "*": any limited mainline but a parkway),
-        on the carriageway running `way` (N/E/S/W, within 90°) when there is one; None: none within max_m."""
+        """The nearest point on a mainline of a highway the keys name, on the carriageway running `way` (N/E/S/W,
+        within HWCALL_DIR_DEG of SIGNED) when it is given; None: none within max_m (or only the other carriageway: never
+        the wrong way silently), or no highway named."""
         x, y = self.to_xy(lon, lat)
         named = keys - {"*"}
-        want = DIRS.get(way) if way else None
+        if not named:
+            return None
+
+        def want(ks: frozenset) -> float | None:
+            if way not in DIRS:
+                return None
+            for k in sorted(ks & named):
+                if k in SIGNED and way in SIGNED[k][0]:
+                    return (SIGNED[k][1] + (0.0 if way == SIGNED[k][0][0] else 180.0)) % 360
+            return DIRS[way]
         best = {True: None, False: None}                              # by: runs the call's way
         for e in self.near_edges(x, y, max_m):
             k = self.ekind[e]
             if not k or self.ecls[e] not in MAINLINE or not self.main[self.ea[e]]:
                 continue
             lim, ks = self.kinds[k]
-            if (named and not ks & named) or (not named and lim == 2):
+            if not ks & named:
                 continue
             d, off, i, t = self._onto(self.xy(e), x, y)
             if d > max_m:
                 continue
-            ok = want is None or abs((self.bearing(e, i) - want + 180) % 360 - 180) < 90
+            w = want(ks)
+            ok = w is None or abs((self.bearing(e, i) - w + 180) % 360 - 180) <= HWCALL_DIR_DEG
             if best[ok] is None or d < best[ok][0]:
                 best[ok] = (d, e, off, i, t)
-        got = best[True] or best[False]
+        got = best[True]
         if got is None:
             return None
         d, e, off, i, t = got
@@ -856,9 +923,10 @@ class Graph:
 
     def to_one(self, origins: dict, b, params, pen: dict | None = None, wrongway_m: float = 60.0,
                max_s: float = 1800.0, call: Call | None = None) -> dict:
-        """Seconds and metres to [lon, lat] b from each origin, in one reverse Dijkstra: {key: (s, m)} for the
-        origins with a way (a key missing: no road near it, or none within max_s). origins: {key: [lon, lat]}.
-        call: as route()'s; the seconds are driving time (without the highway factors)."""
+        """Seconds and metres to [lon, lat] b from each origin, in one reverse Dijkstra: {key: (s, m) | None}.
+        None: on the roads but no way to b within max_s of driving (closed in, or only by a parkway); a key missing:
+        no road near it. origins: {key: [lon, lat]}. call: as route()'s; the seconds (and max_s) are driving time
+        (without the highway factors)."""
         sb, keys = self.target(b[0], b[1], call)
         if sb is None:
             return {}
@@ -891,9 +959,11 @@ class Graph:
             g, n = heapq.heappop(heap)
             if g > dist[n]:
                 continue
-            if g > max_s:
-                break
+            if g > max_s * LIMITED_SLOW:
+                break                                         # (driving time is at least cost / LIMITED_SLOW)
             left.discard(n)
+            if real[n] > max_s:
+                continue
             for code in adj[n]:
                 e = code >> 1
                 if code & 1:
@@ -914,12 +984,15 @@ class Graph:
                     heapq.heappush(heap, (g2, o))
         best_of = {k: v[0] for k, v in out.items()}           # the cost each one's estimate was chosen by
         for n, rows in want.items():
-            if n not in dist or dist[n] > max_s:
+            if n not in dist or real[n] > max_s:
                 continue
             for k, sec, m in rows:
                 if k not in out or sec + dist[n] < best_of.get(k, math.inf):
                     best_of[k] = sec + dist[n]
                     out[k] = (sec + real[n], m + metres[n])
+        for k, s in snaps.items():
+            if s is not None and k not in out:
+                out[k] = None                                 # on the roads, no way: this one has no road estimate
         return out
 
 

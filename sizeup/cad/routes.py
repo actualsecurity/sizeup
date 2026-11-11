@@ -131,11 +131,11 @@ class Routes:
         """What an incident's words say about being on a highway (roadgraph.highway_call), remembered by its words."""
         if not inc:
             return roadgraph.LOCAL
-        words = (inc.get("address") or "", inc.get("cross_street") or "", inc.get("place_address") or "",
-                 inc.get("type") or "")
+        words = (inc.get("address") or "", inc.get("cross_street") or "", inc.get("type") or "",
+                 inc.get("subtype") or "")
         got = self._calls.get(words)
         if got is None:
-            got = roadgraph.highway_call(*words[:3], typ=words[3])
+            got = roadgraph.highway_call(*words)
             if len(self._calls) > 256:
                 self._calls.clear()
             self._calls[words] = got
@@ -274,8 +274,8 @@ class Routes:
     # -- the recommendation -----------------------------------------------------------------------------------
 
     def to_one(self, origins: dict, to, inc: dict | None = None) -> dict:
-        """{key: (drive seconds, metres)} by road from each [lon, lat] origin to `to` (inc: the call, its words: a
-        highway call or not); {} with no graph."""
+        """{key: (drive seconds, metres) | None (no way)} by road from each [lon, lat] origin to `to` (inc: the call,
+        its words: a highway call or not); {} with no graph."""
         g = self.graph()
         if g is None or not origins or to is None:
             return {}

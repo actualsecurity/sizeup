@@ -128,8 +128,9 @@ are referenced from there. M1 is built.
     and kept in S3 like the GIS layers); routing is A* in-process (`sizeup/cad/routes.py`). One-ways are honoured
     except a short wrong-way final stretch; closures in effect now are avoided. Rigs keep to local streets unless the
     call is on a highway: motorways (I-95, I-287, I-684) are a last resort, parkways (no commercial vehicles) are
-    shut. A call whose address or cross streets name a highway, an exit or a mile marker (or whose point is on one) is
-    routed onto that highway's carriageway in its direction (NB / SB / EB / WB, else the nearest). Re-routed when a
+    shut. A call whose address names a highway and whose point is on it (or, naming none, whose point is on one) is
+    routed onto that highway's carriageway in its signed direction (NB / SB / EB / WB, else the nearest); a cross
+    street naming the highway never does it. Re-routed when a
     fix is more than 50 m off the path, or after 3 fixes heading away. The recommendation's estimates use the route's time where there
     is one, else the straight-line model. The numbers are in Settings > Dispatch. No traffic, signals or turn costs.
 
