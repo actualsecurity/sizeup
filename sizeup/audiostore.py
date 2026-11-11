@@ -61,6 +61,10 @@ class StoreError(OSError):
 # kept (retroactive).
 RETENTION_SECTION = "audio_retention"
 DEFAULT_KEY = "_default"
+# "_format": how new clips are kept. Only "wav" (the station's 8 kHz 16-bit PCM, uncompressed) for now: the place a
+# lossless (FLAC) or lossy (Opus) encoding would be chosen later; nothing else is accepted until one is written.
+FORMAT_KEY = "_format"
+FORMATS = ("wav",)
 RETENTION_DAYS = (0.5, 365.0)         # min, max; the bucket's lifecycle hard max (18-audio-storage.sh) is HARD_MAX_DAYS
 HARD_MAX_DAYS = 400
 TG_KEY = re.compile(r"tg:(\d{1,9})")

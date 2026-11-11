@@ -2388,10 +2388,10 @@ with the department):
 
 | what | kept | setting |
 |---|---|---|
-| a clip on no event | **12 hours**, or its channel's / talkgroup's days | `audio_keep_hours = 12`; **Settings > System > Audio retention** (#414) |
+| a clip on no event | **30 days** on the hub (12 h before #414), or its channel's / talkgroup's days | `audio_keep_hours = 720` (`deploy/hub/config.hub.toml`); **Settings > System > Audio retention** (#414) |
 | a clip that is a record: on a CAD event (any link: unit, dispatcher, airport, manual, page), with an alarm, or with the emergency button / an emergency window's keep | **365 days**, or its channel's days if longer | `audio_keep_event_days = 365` (0..400; 0 = forever, in S3 the bucket's 400-day hard max) |
 | a clip attached to an incident | its copy in the attachments bucket: a year ([Incident attachments](#incident-attachments-323)), whatever this says | |
-| dispatch audio (with the dispatch log) | forever (unchanged); unused previews a day | |
+| dispatch audio (with the dispatch log) | forever (unchanged); unused previews as long as the clips (30 days; the task's disk copy a day) | |
 | the size cap `[cloud] audio_max_mb` (500) | the bytes **still in `audio.sqlite`** (all of them without S3): drops the oldest clips **that aren't records** only; records over it are kept and the log says so | |
 
 **Per channel / talkgroup** (#414, Settings > System > Audio retention, admins; `POST
@@ -2401,7 +2401,25 @@ default, which beats `audio_keep_hours`. The card lists every channel and talkgr
 Each clip's retention is worked out **at every prune** from its own channel and talkgroup (stored with it), so a
 change applies to the clips already kept (retroactively), at the next pass: shorter deletes the older ones,
 longer keeps what is still there. Clips from before #414 are given their channel once (from the hub's transmissions,
-pages and the CAD's radio log); the few that can't be named keep the default.
+pages and the CAD's radio log); the few that can't be named keep the default. Until `SIZEUP_AUDIO_BUCKET` is set the
+30 days are bounded by the size cap (500 MB of clips in `audio.sqlite`, about a day): the oldest non-records go first.
+
+**The data that goes with a clip lasts at least as long** (#414): its transcript, talker, radio ID, rig and channel are
+in the CAD's radio log (`cad.sqlite` `radio_traffic`, `sizeup/cad/comms.py` `prune`), kept 90 days or the longest audio
+retention set in Settings if that is longer; a record (an emergency, a keep, an alarm) is kept as long as the audio
+bucket keeps any clip (400 days), and a transmission linked to an event, with its links, always. The hub's monitor
+history (`hub.sqlite`: the live display's incidents, transmissions and pages, `[storage] keep_hours`, 24 h) is the
+display, not the record: it is not lengthened. The speech-to-text corrections (`stt_corrections`) are to follow the
+same rule.
+
+**Format**: the clips are kept as the station sends them, WAV (8 kHz mono 16-bit PCM, uncompressed). The card's
+`Format` (`_format` in the same settings section, admins) accepts only `wav` for now: it is where a lossless (FLAC) or
+lossy (Opus) encoding would be chosen once one is written.
+
+**Keeping longer**: the Settings maximum (365 days) and the bucket's lifecycle hard max (400 days on clips) stay
+consistent. Retention beyond about a year will go through the daily-bundle archive (#428) into S3 Glacier Instant
+Retrieval or Deep Archive, not per-clip lifecycle transitions (at ~50 KB a clip, per-object transition and storage
+minimums cost more than they save).
 
 Deletes go `audio_prune_batch` rows (200) per transaction with a short pause between, so the station's clips
 and the players never wait on a long write lock; outside the off-peak hours (`audio_offpeak = [2, 5]`, 2-5 am
@@ -2464,19 +2482,21 @@ the bytes in `audio.sqlite` (`SIZEUP_AUDIO_DIR=<folder>` puts them in a local fo
   retention are pruned, not uploaded. Once no row holds bytes, an `audio.sqlite` from before #251 (`auto_vacuum`
   off) is rewritten once, off-peak, when that is worth it (at least 32 MB free and at least as much free as live),
   with `auto_vacuum = INCREMENTAL`; from then on its free pages go back by incremental vacuum.
-* **Size at scale** (measured on a synthetic million clips, 30 days of every channel): ~190 MB of metadata (~190 bytes
-  a clip), opened in 0.5 s with no per-row memory (`has()` keeps only the ids it saw lately: 5 µs for any other);
-  a prune pass with nothing due 5.4 s, one that deletes 85,000 clips (a channel cut from 31 to 10 days) 9.5 s, both on
-  their own connection: a `put()` + `has()` meanwhile 0.4 ms (max 5 ms). The Settings card's counts (~1.6 s at that
-  size) are kept 5 min. At 12 h (today's default) the file is a few MB.
+* **Size at scale** (synthetic, metadata only): **30 days of every channel (260,000 clips)**: 49 MB, opened in 0.14 s
+  with no per-row memory (`has()` keeps only the ids it saw lately: 5 µs for any other); a full prune scan 0.7 s, one
+  that deletes 22,000 clips (a channel cut to 10 days) 1.7 s, the Settings counts 0.5 s; peak RSS of the benchmark
+  68 MB. **A million clips**: ~190 MB, a full scan 5.4 s, deleting 85,000 9.5 s, the counts 1.6 s (kept 5 min). Both on
+  their own connection: a `put()` + `has()` meanwhile 0.4 ms (max 5 ms). With the 30-day default and no shorter
+  override the scan only reads the clips older than 30 days.
 * **Rollback**: the columns are added with `ALTER TABLE` (defaults), so the release before #414 opens the file, its
   inserts (five named columns) still work and it reads a row in S3 as a clip with no audio (`wav` is `x''`: a 404
   "no such clip", never a crash). Its own new clips go into `audio.sqlite` as before; rolled forward again, they are
   migrated like the rest. While rolled back, its retention deletes rows but not their objects: the orphan sweep (once
   rolled forward) and the lifecycle's hard max remove those. To roll back for good, accept that clips already in S3
   don't play on the old release.
-* **Costs** (us-east-1, at the measured volume): PUTs ~260k a month, ~$1.30; storage $0.023/GB-month: 12 h of clips
-  (today's default) ~0.2 GB, ~$0.01; every channel at 30 days ~11.5 GB, ~$0.27; at a year ~140 GB, ~$3.20; GETs
+* **Costs** (us-east-1; measured over 7 days to 2026-11-10: ~6,700 clips and ~300 MB a day, busier evenings ~385 MB):
+  at the **30-day default** ~9-11.5 GB stored, **~$0.21-0.27/month**, plus PUTs ~200-260k a month, **~$1.00-1.30**: about
+  **$1.50 a month** in all; at a year for every channel ~110-140 GB, ~$2.50-3.20/month; GETs
   (playback that misses the cache), the nightly listing and deletes: pennies / free. Today: Litestream keeps ~4.7 GB
   for `audio.sqlite` (its levels and a 270 MB snapshot, ~$0.11/month) and a cold restore or a standby has to bring
   ~270 MB back; with S3 the file is a few MB at 12 h (the bytes pass through Litestream's WAL once, for the seconds

@@ -629,6 +629,7 @@ class HubApp(App):
         self.cad.audio_blobs = self.audio
         self.cad.audio_keep_days = cfg.audio_keep_hours / 24          # Settings > System > Audio retention (#414)
         self.cad.audio_event_days = cfg.audio_keep_event_days
+        self.cad.preview_blob_keep_s = cfg.audio_keep_hours * 3600     # unused dispatch previews: as long as the clips
         if getattr(self, "attachments", None) is not None:
             # the incident's copy: a clip whose bytes can't be read from the store now raises (tried again later),
             # never taken for "no audio kept" (sizeup/attachments.py _copy_radio, #414)
@@ -1271,7 +1272,11 @@ class HubApp(App):
                 self.hub.log("audio: audio.sqlite rewritten small once its audio was in the store (VACUUM, #414)")
             if self.audio.store is not None and now - getattr(self, "_swept_at", 0.0) > 20 * 3600:
                 self._swept_at = now                  # once a night: objects no row names, a day old (#414)
-                gone = self.audio.sweep_orphans(pause_s=0.2, now=now)
+                try:
+                    gone = self.audio.sweep_orphans(pause_s=0.2, now=now)
+                except Exception as e:  # noqa: BLE001 (S3 down: the next night)
+                    gone = 0
+                    self.hub.log(f"audio: orphan sweep: {type(e).__name__}: {str(e)[:120]}")
                 if gone:
                     self.hub.log(f"audio: {gone} object(s) in the store that no clip named, deleted")
         return n

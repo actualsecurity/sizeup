@@ -98,7 +98,7 @@ aws_idle_s = 120
 
 [storage]
 keep_hours = 24                    # pages, monitor incidents, transcripts (the CAD keeps its own records)
-audio_keep_hours = 12              # received clips on no CAD event (docs/cloud.md "Audio retention", #251, #46)
+audio_keep_hours = 720             # received clips on no CAD event: 30 days (#414; Settings > System > Audio retention overrides it per channel / talkgroup; docs/cloud.md "Audio retention")
 audio_keep_event_days = 365        # clips on a CAD event, with an alarm or an emergency: a year (0 = forever)
 audio_prune_batch = 200            # rows per delete transaction (no long write lock)
 audio_offpeak = [2, 5]             # 2-5 am New York time: the backlog and the incremental vacuum

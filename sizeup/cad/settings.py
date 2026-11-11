@@ -573,7 +573,7 @@ class Editor:
             x["clips"] += c["clips"]
             x["bytes"] += c["bytes"]
         for key in r:
-            if key != audiostore.DEFAULT_KEY and key not in rows:
+            if key not in (audiostore.DEFAULT_KEY, audiostore.FORMAT_KEY) and key not in rows:
                 m = audiostore.TG_KEY.fullmatch(key)
                 rows[key] = {"key": key, "label": key, "channel": "" if m else key,
                              "talkgroup": int(m.group(1)) if m else None, "clips": 0, "bytes": 0}
@@ -584,7 +584,9 @@ class Editor:
         lo, hi = audiostore.RETENTION_DAYS
         return {"default": {"value": default, "default": base, "edited": audiostore.DEFAULT_KEY in r},
                 "rows": sorted(rows.values(), key=lambda x: (-x["bytes"], x["key"])), "min": lo, "max": hi,
-                "event_days": float(getattr(self.cad, "audio_event_days", 0) or 0)}
+                "event_days": float(getattr(self.cad, "audio_event_days", 0) or 0),
+                "format": {"value": r.get(audiostore.FORMAT_KEY, audiostore.FORMATS[0]), "choices": list(audiostore.FORMATS),
+                           "edited": audiostore.FORMAT_KEY in r}}
 
     @staticmethod
     def _ret_key(key) -> str:
@@ -592,14 +594,18 @@ class Editor:
         m = audiostore.TG_KEY.fullmatch(key) if isinstance(key, str) else None
         if m:
             return audiostore.tg_key(int(m.group(1)))
-        if not isinstance(key, str) or not (key == audiostore.DEFAULT_KEY
+        if not isinstance(key, str) or not (key in (audiostore.DEFAULT_KEY, audiostore.FORMAT_KEY)
                                             or (audiostore.CHANNEL_KEY.fullmatch(key) and not key.startswith(("_", "tg:"))
                                                 and key == key.strip())):
-            raise CadError("key: _default, a channel's name or tg:<talkgroup>")
+            raise CadError("key: _default, _format, a channel's name or tg:<talkgroup>")
         return key
 
     @staticmethod
-    def _ret_value(key: str, v) -> float:
+    def _ret_value(key: str, v) -> float | str:
+        if key == audiostore.FORMAT_KEY:       # how new clips are stored: only "wav" for now (FLAC / Opus would go here)
+            if v not in audiostore.FORMATS:
+                raise CadError(f"{key}: {', '.join(audiostore.FORMATS)}")
+            return v
         lo, hi = audiostore.RETENTION_DAYS
         if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or not lo <= v <= hi:
             raise CadError(f"{key}: days from {lo:g} to {hi:g}")
@@ -619,7 +625,7 @@ class Editor:
             raise CadError("action: set or reset")
         if (v is REMOVE and cur is None) or v == cur:      # nothing changes: nothing written, nothing audited
             return {"ok": True, "audio_retention": self.retention_page()}
-        shown = (lambda x: "default" if x is None or x is REMOVE else f"{x:g} d")
+        shown = (lambda x: "default" if x is None or x is REMOVE else str(x) if isinstance(x, str) else f"{x:g} d")
         out = self._commit([(RET_SECTION, key, v)], op, [("system", f"{RET_SECTION}/{key}", shown(cur), shown(v))])
         return {**out, "audio_retention": self.retention_page()}
 

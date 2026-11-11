@@ -1771,6 +1771,15 @@ function sAudioRetention(r) {
     card.append(row(c.key, c.label, c.days, c.edited, c.clips ? `${c.clips} · ${mb(c.bytes)}` : "",
       c.talkgroup != null ? `tg:${c.talkgroup}` : ""));
   }
+  if (r.format) {                  // how new clips are kept: WAV only for now (FLAC / Opus would be chosen here)
+    const f = r.format;
+    const sel = sSelect(f.choices.map((v) => [v, v === "wav" ? "WAV (uncompressed)" : v]), f.value,
+      (v) => sPost("audio_retention", { action: "set", key: "_format", value: v }, `Audio format: ${v}`), "Audio format");
+    sel.disabled = f.choices.length < 2;
+    const x = el("div", "row");
+    x.append(el("span", "s-eta-l", "Format"), sel, el("span", "spacer"));
+    card.append(x);
+  }
   return card;
 }
 

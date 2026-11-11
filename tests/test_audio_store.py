@@ -769,3 +769,68 @@ def test_playback_streams_through_the_hub_behind_access_never_a_public_url(tmp_p
         assert b"sizeup-audio-test" not in body and not hasattr(audiostore.S3AudioStore, "presign")
     finally:
         h.close()
+
+
+# -- 30 days by default; the related data lasts as long as the audio (#414) -------------------------------------------
+
+def test_the_hub_keeps_every_channels_clips_30_days_by_default():
+    from sizeup.config import load
+    from tests.test_cloud import ROOT
+    cfg = load(ROOT / "deploy" / "hub" / "config.hub.toml")
+    assert cfg.audio_keep_hours == 720 and cfg.audio_keep_event_days >= 30
+    p = Retention({}, cfg.audio_keep_hours / 24)
+    assert p.keep_days("FG1", None) == p.keep_days("Fire/EMS 15", 307) == p.keep_days("HPN Tower", None) == 30.0
+
+
+def test_transcripts_outlive_their_audio(tmp_path):
+    """The radio log (cad.sqlite radio_traffic: transcript, talker, radio ID, channel) is pruned at 90 days or the
+    longest audio retention if longer; a record not before the audio bucket's hard max."""
+    from sizeup.cad import comms as comms_mod
+    from tests.test_radios import Clock, cad, tx
+    clock = Clock()
+    c = cad(tmp_path, clock)
+    t0 = clock.t
+    for tid, days in (("old-200", 200), ("old-100", 100), ("new-10", 10), ("rec-390", 390), ("rec-410", 410)):
+        c.record_traffic(tx(tid, t0 - days * DAY))
+    with c.store.tx() as d:
+        d.execute("UPDATE radio_traffic SET emergency = 1 WHERE id IN ('rec-390', 'rec-410')")
+    assert c.comms.prune() == 3                                # 90 days: old-200, old-100, rec-410 (past the hard max)
+    left = {r["id"] for r in c.store.q("SELECT id FROM radio_traffic")}
+    assert left == {"new-10", "rec-390"}
+    for tid, days in (("old-200", 200), ("old-100", 100)):
+        c.record_traffic(tx(tid, t0 - days * DAY))
+    with c.store.tx() as d:                                    # a channel's audio kept 365 days in Settings
+        d.execute("INSERT INTO settings_overrides (section, key, value, updated_at) VALUES ('audio_retention', 'FG1', "
+                  "'365', 0), ('audio_retention', '_format', '\"wav\"', 0)")
+    assert c.comms.audio_keep_s() == 365 * DAY
+    assert c.comms.prune() == 0 and {r["id"] for r in c.store.q("SELECT id FROM radio_traffic")} >= {"old-200", "old-100"}
+    assert comms_mod.KEEP_RECORD_S >= audiostore.HARD_MAX_DAYS * DAY
+
+
+def test_unused_dispatch_previews_are_kept_with_the_clips_on_the_hub(tmp_path, monkeypatch):
+    monkeypatch.setenv("SIZEUP_AUDIO_DIR", str(tmp_path / "objects"))
+    app = make_app(hub_cfg(tmp_path, gis_layers=(), audio_keep_hours=720))     # deploy/hub/config.hub.toml's 30 days
+    request_stop = app.stop
+    now = time.time()
+    app.audio.put("c" * 20, tone(0.5), "dispatch", "Polly", at=now - 10 * DAY)
+    app.audio.put("e" * 20, tone(0.5), "dispatch", "Polly", at=now - 40 * DAY)
+    app.cad.audio_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        app.cad._prune_audio()
+        assert app.audio.has("c" * 20) and not app.audio.has("e" * 20)
+    finally:
+        request_stop()
+
+
+def test_the_audio_format_is_wav_until_another_is_written(hub_fs):
+    ed = hub_fs.cad.settings
+    assert ed.page()["audio_retention"]["format"] == {"value": "wav", "choices": ["wav"], "edited": False}
+    for bad in ("flac", "opus", "WAV", 1):
+        with pytest.raises(CadError, match="_format"):
+            ed.post("audio_retention", {"action": "set", "key": "_format", "value": bad, "operator": "Admin"})
+    ed.post("audio_retention", {"action": "set", "key": "_format", "value": "wav", "operator": "Admin"})
+    assert ed.page()["audio_retention"]["format"]["edited"] and Retention(ed.section("audio_retention"), 30).ch == {}
+    b = ed.export()
+    b["overrides"]["audio_retention"] = {"_format": "flac"}
+    with pytest.raises(CadError, match="audio_retention"):
+        ed.post("import", {"action": "dry_run", "settings": b, "operator": "Admin"})

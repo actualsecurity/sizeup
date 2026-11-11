@@ -73,6 +73,11 @@ from sizeup.cad.store import TZ
 TURN = re.compile(r"^(?P<call>.+)-t(?P<k>\d+)$")
 NOTES = "Notes"          # the /comms "channel" of event notes tagged with a unit
 KEEP_UNLINKED_S = 90 * 24 * 3600     # transmissions on no event: kept 90 days (linked ones: always)
+# #414: a transmission's transcript and metadata live at least as long as its audio may: the longest days in Settings >
+# System > Audio retention (settings_overrides "audio_retention") if longer than the 90 days, and a record (an emergency,
+# a keep, an alarm) as long as the audio bucket keeps any clip (its lifecycle hard max; [storage] audio_keep_event_days
+# is at most that).
+KEEP_RECORD_S = 400 * 24 * 3600
 MAX_ROWS = 500
 MAIN_LIMIT, OTHER_LIMIT = 200, 300    # the Radio view's Main and Other: each its own newest N (#241)
 ID_NOTES = ("none", "undecoded", "weak")    # why an FG1 key-up has no radio ID (radio_traffic.id_note, #163)
@@ -422,11 +427,29 @@ class Comms:
                 self.rev += 1
         return bool(n)
 
+    def audio_keep_s(self) -> float:
+        """The longest audio retention set in Settings (#414, sizeup/audiostore.py), seconds; 0 when none is set."""
+        longest = 0.0
+        for r in self.store.q("SELECT value FROM settings_overrides WHERE section = 'audio_retention'"):
+            try:
+                v = json.loads(r["value"])
+            except (TypeError, ValueError):
+                continue
+            if isinstance(v, (int, float)) and not isinstance(v, bool):
+                longest = max(longest, float(v) * 86400)
+        return longest
+
     def prune(self) -> int:
-        cutoff = self.clock() - KEEP_UNLINKED_S
+        """Transmissions on no event, older than 90 days or the longest audio retention (#414) if longer; a record
+        (emergency, kept, an alarm) not before KEEP_RECORD_S: never before its audio could be gone."""
+        now = self.clock()
+        cutoff = now - max(KEEP_UNLINKED_S, self.audio_keep_s())
+        alarms = bool(self.store.q("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'alarms'"))
+        record = "emergency = 1 OR kept != ''" + (" OR id IN (SELECT traffic_id FROM alarms)" if alarms else "")
         with self.store.tx() as db:
             return db.execute(f"DELETE FROM radio_traffic WHERE start < ? AND id NOT IN (SELECT l.traffic_id FROM radio_links l "
-                              f"WHERE {SURE_LINK})", (cutoff,)).rowcount
+                              f"WHERE {SURE_LINK}) AND NOT (start >= ? AND ({record}))",
+                              (cutoff, now - KEEP_RECORD_S)).rowcount
 
     def kept_for_events(self, ids: list[str]) -> set[str]:
         """Of these clip ids, the ones whose audio is a record (the hub's audio retention, #251): on a CAD event
