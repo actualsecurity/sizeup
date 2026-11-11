@@ -405,6 +405,83 @@ def test_a_held_track_is_marked_held_and_dropped_beyond_4_km(model):
     assert how(model, {}, 4000) == ("4", "outer") and how(model, {}, 4000, d=-1) == ("3", "outer")
 
 
+# ---- an express's default track (#451) -----------------------------------------------------------------------------
+# On the New Haven Line here the tracks lie 3, 1, 2, 4 north to south: inbound stops on 3 (outer), so 1 beside it is
+# its inner (express) track; outbound stops on 4, so 2. Synthetic: Rye (A, 2000 m) and Port Chester (B, 6000 m), and a
+# far stop (F) down the line toward Grand Central, off our tracks' ends (its own track never near).
+
+
+def far_static() -> dict:
+    st = static()
+    st["stations"]["F"] = {"id": "F", "name": "Far St", "code": "9FA", "lat": LAT, "lon": east(-30000), "ch": -30000.0,
+                           "url": "", "tc": -2000.0}
+    st["stops"]["F"] = "Far St"
+    return st
+
+
+def test_inner_and_outer_tracks_are_beside_each_other_by_direction():
+    order = sorted(OFF, key=lambda k: -OFF[k])                             # north to south
+    assert order == ["3", "1", "2", "4"]
+    for d in (1, -1):
+        o, i = T.OUTER_TRACK[d], T.INNER_TRACK[d]
+        assert abs(order.index(o) - order.index(i)) == 1 and i not in T.OUTER_TRACK.values()
+
+
+def test_an_express_through_the_area_is_drawn_dashed_on_the_inner_track(doc):
+    """Inbound at 7000 m, its next stop far down the line: it skips Port Chester and Rye, so the inner (express)
+    track 1, not certain; outbound the same past both: 2. Nothing said its track, so no "trk"."""
+    m = Model(far_static(), BBOX, None, doc)
+    far = [({"stop_id": "F", "track": "", "status": ""}, -30000.0)]
+    assert m.which_track({}, far, None, 0, 7000, -1) == ("1", None, "inner")
+    assert m.which_track({}, far, None, 0, 4000, -1) == ("1", None, "inner")      # between them, Rye still skipped
+    # its next stop's posted track (TrainTime's, 30 km on) is no word for where it is now: still the default
+    assert m.which_track({"tt": {"next": stop("9FA", "4")}}, far, None, 0, 4000, -1) == ("1", None, "inner")
+    out = [({"stop_id": "F", "track": "", "status": "Departed"}, -30000.0), ({"stop_id": "X", "track": "", "status": ""}, 99000.0)]
+    m.stations["X"] = {"id": "X", "name": "Far East", "code": "", "lat": LAT, "lon": east(99000), "ch": 99000.0, "url": ""}
+    try:
+        assert m.which_track({}, out, 0, 1, 1000, 1) == ("2", None, "inner")
+    finally:
+        del m.stations["X"]
+    assert m.express_here(-30000.0, 7000, -1) and not m.express_here(B_CH, 7000, -1)
+
+
+def test_an_express_stays_on_the_inner_track_for_its_whole_run_between_stops(doc):
+    """#452 review: the run from the stop it left to its next decides, not the station nearest ahead now: an express
+    from Rye to a stop at 7800 m skipping Port Chester stays on 2 from Rye to 1.5 km before its stop, past Port
+    Chester too (no switch to the outer track mid-run); inbound the same, past Rye. A local's run: outer throughout."""
+    st = far_static()
+    st["stations"]["C"] = {"id": "C", "name": "Cee", "code": "9CE", "lat": LAT, "lon": east(7800), "ch": 7800.0, "url": "", "tc": 300.0}
+    m = Model(st, BBOX, None, doc)
+    run = [({"stop_id": "A", "track": "", "status": "Departed"}, A_CH), ({"stop_id": "C", "track": "", "status": ""}, 7800.0)]
+    out = {m.which_track({}, run, 0, 1, x, 1)[::2] for x in range(int(A_CH), 7800 - int(T.TRACK_NEAR_M) + 1, 25)}
+    assert out == {("2", "inner")}
+    back = [({"stop_id": "B", "track": "", "status": "Departed"}, B_CH), ({"stop_id": "F", "track": "", "status": ""}, -30000.0)]
+    assert {m.which_track({}, back, 0, 1, x, -1)[::2] for x in range(int(B_CH), 0, -25)} == {("1", "inner")}
+    local = [({"stop_id": "A", "track": "", "status": "Departed"}, A_CH), ({"stop_id": "B", "track": "", "status": ""}, B_CH)]
+    assert {m.which_track({}, local, 0, 1, x, 1)[::2] for x in range(int(A_CH), int(B_CH) + 1, 25)} == {("4", "outer")}
+
+
+def test_a_local_whose_next_stop_is_the_nearest_station_keeps_the_outer_track(doc):
+    m = Model(far_static(), BBOX, None, doc)
+    a = [({"stop_id": "B", "track": "", "status": ""}, B_CH), ({"stop_id": "A", "track": "", "status": ""}, A_CH)]
+    assert m.which_track({}, a, None, 0, 7800, -1) == ("3", None, "outer")       # next: Port Chester, the nearest
+    assert m.which_track({}, a, 0, 1, 4000, -1) == ("3", None, "outer")          # left it, next Rye: the nearest
+    assert m.which_track({}, a, 0, 1, A_CH + 50, -1) == ("3", None, "outer")     # at Rye
+    stopped = [({"stop_id": "A", "track": "", "status": ""}, A_CH), ({"stop_id": "F", "track": "", "status": ""}, -30000.0)]
+    assert m.which_track({}, stopped, None, 0, A_CH + 20, -1) == ("3", None, "outer")   # standing at its stop, Rye
+    assert m.which_track({}, a, None, None, 1000, -1) == ("3", None, "outer")    # beyond its last stop
+
+
+def test_a_said_or_held_track_still_wins_over_the_express_default(doc):
+    m = Model(far_static(), BBOX, None, doc)
+    far = [({"stop_id": "F", "track": "", "status": ""}, -30000.0)]
+    t = {"tt": {"prev": stop("2PC", "2")}}                                    # Port Chester said 2 as it passed
+    mem = {}
+    assert m.which_track(t, far, None, 0, B_CH - 500, -1, mem)[::2] == ("2", "said")
+    assert m.which_track({}, far, None, 0, B_CH - 2500, -1, mem)[::2] == ("2", "held")
+    assert m.which_track({}, far, None, 0, B_CH - 2500, -1)[::2] == ("1", "inner")   # (nothing remembered: the default)
+
+
 def test_a_train_is_drawn_on_its_numbered_track_with_its_pole_and_milepost(model):
     feed = {"timestamp": NOW, "trains": {"1234": {
         "id": "1234", "train": "1234", "trip_id": "x", "route_id": "", "start_date": "", "delay": None, "vstatus": "IN_TRANSIT_TO",
@@ -678,7 +755,8 @@ out.carried = P({ s: 3000, mp: 27.3, pos_src: "traintime" }, { s: 3000 + 1609.34
     assert out["empty"]["text"] == out["none"]["text"] == "Trk 2 · near pole 230 · MP 21.2"   # the hub's own
     assert out["ttOnly"] == {"k": "place", "text": "MP 27.3", "title": "Milepost from Grand Central, where the train is drawn"}
     assert out["held"]["text"].startswith("Trk 2? · ") and out["held"]["title"].startswith("Track: last said for Rye\n")
-    assert "Trk" not in out["outer"]["text"] and out["outer"]["title"].startswith("Track not known; drawn on outer track\n")
+    assert out["outer"]["text"].startswith("track not known · ") and "Trk" not in out["outer"]["text"]
+    assert out["outer"]["title"].startswith("Track not known; drawn on outer track 4\n")
     assert out["nothing"] is None
     assert out["carried"]["text"] == "MP\u00a028.3"                         # no GIS milepost: the hub's, carried to the drawn s
 
@@ -705,8 +783,34 @@ out.said = run("said"); out.held = run("held"); out.outer = run("outer"); out.st
     assert js.index('id: "tr-cab", type') < js.index('id: "tr-unsure"') < js.index('id: "tr-gap"') and '"tr-unsure", "tr-gap"]' in js
     assert '"Hollow: estimated · faded: stale feed · dashed: track not certain "' in js
     # the GTFS-only box: the next stop's track said as the next stop's, never as the drawn one
-    assert "`Next ${t.next_stop}${t.next_time ? ` ${hm(t.next_time)}` : \"\"}${t.track ? ` trk\\u00a0${t.track}` : \"\"}`" in js
+    assert "`Next ${t.next_stop}${t.next_time ? ` ${hm(t.next_time)}` : \"\"}${t.track ? ` (trk\\u00a0${t.track})` : \"\"}`" in js
     assert "`Trk ${t.track}`" not in js
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_the_next_stops_track_reads_with_the_stop_and_the_place_row_says_the_current_tracks_basis(tmp_path):
+    """#451: "next Far St (trk 1)": the next stop's track, never a bare "trk 1" read as the train's; the place row
+    says what the drawn track rests on: "Trk 1" said here, "Trk 3?" held, "track not known" (the default, outer or
+    the express's inner, on hover)."""
+    out = page(tmp_path, """
+const H = TrainLayer.headline, P = TrainLayer.placeRow, rr = { poles: [], mps: [] };
+const nx = { name: "Far St", track: "1", posted: true };
+out.head = H({ d: -1, delay_s: 60, tt: { branch: "DN", cars: 7, fleet: "DIESEL", next: nx } });
+out.planned = H({ d: -1, tt: { next: { ...nx, posted: false } } });
+out.none = H({ d: -1, tt: { next: { name: "Far St" } } });
+out.inner = P({ s: 3000, mp: 26.0, lane: "1", lane_how: "inner" }, { s: 3000 }, rr);
+out.outer = P({ s: 3000, mp: 26.0, lane: "3", lane_how: "outer" }, { s: 3000 }, rr);
+out.held = P({ s: 3000, mp: 26.0, lane: "3", lane_how: "held", lane_at: "Rye" }, { s: 3000 }, rr);
+out.said = P({ s: 3000, mp: 26.0, lane: "1", lane_how: "said", trk: "1", trk_src: "posted", trk_at: "Rye" }, { s: 3000 }, rr);
+""", {})
+    assert out["head"].endswith(" · next Far St (trk\u00a01)") and out["head"].startswith("DN west · 7 cars (diesel) · ")
+    assert out["planned"].endswith("next Far St (trk\u00a01 planned)") and out["none"].endswith("next Far St")
+    for h in (out["head"], out["planned"]):
+        assert not re.search(r"(^|· )trk", h) and "Trk" not in h                # never a bare current "trk N"
+    assert out["inner"]["text"] == "track not known · MP\u00a026.0"
+    assert out["inner"]["title"].startswith("Track not known; drawn on express track 1 (skips stations before its next stop)\n")
+    assert out["outer"]["text"] == "track not known · MP\u00a026.0" and out["outer"]["title"].startswith("Track not known; drawn on outer track 3\n")
+    assert out["held"]["text"] == "Trk\u00a03? · MP\u00a026.0" and out["said"]["text"] == "Trk\u00a01 · MP\u00a026.0"
 
 
 # ---- the poles' look and their layer (#374) -------------------------------------------------------------------------
