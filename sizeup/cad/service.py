@@ -283,6 +283,9 @@ class Cad:
         # (once, on first use); "N Main St / Westchester Ave" in the location box. None: not here.
         self.cross_source: Callable[[], object] | None = None
         self._cross_ix = None
+        # street_source() -> {town: [street name]}: the gazetteer's streets, for a page's misheard street (Sources:
+        # snap_street, read once). None: no street list, no snapping.
+        self.street_source: Callable[[], dict] | None = None
         self._cross_lock = threading.Lock()      # its own: the PlaceIndex is built with it (under _place_lock)
         self._details: dict[tuple, dict] = {}
         self._place_lock = threading.Lock()
@@ -1715,6 +1718,11 @@ class Cad:
             address = heard or geo.get("label") or ""
         alts = [] if sure else [{k: a.get(k) for k in ("label", "lat", "lon", "town", "confidence", "why")}
                                 for a in (geo.get("alts") or []) if a.get("label") and a.get("lat") is not None][:4]
+        snap = self._snap_heard(heard, inc) if heard and not sure else None
+        if snap is not None:                           # a misheard street: the map's spelling, its point a reading to pick
+            address = snap["address"]
+            if snap.get("alt") and not any(a["label"] == snap["alt"]["label"] for a in alts):
+                alts = [snap["alt"], *alts][:4]
         cross = (inc.cross_street or "").title()
         if sure and geo.get("checked") == "all" and len(geo.get("crosses") or []) >= 2:
             cross = " and ".join(geo["crosses"][:2])          # as the map names them: "Clinton St and W William St"
@@ -1736,6 +1744,8 @@ class Cad:
                          f"{geo.get('confidence', 0):.2f}: pick on the card)")
             else:
                 where = " (not found on the map)"
+            if snap is not None:
+                where += f"; the map's street: {snap['address']}"
             facts.append(f"location as heard: {heard}{where}")
         if inc.time_out:
             facts.append(f"county time out {inc.time_out}")
@@ -1811,6 +1821,30 @@ class Cad:
         if not old["type"] and typ:                    # the repeat said what it is
             fill.update(type=typ, subtype=sub, type_note=note)
         return self.store.update_incident(old["id"], fill, log=False)
+
+    def _snap_heard(self, heard: str, inc) -> dict | None:
+        """A page's heard location whose street the map spells otherwise ("220 Samplewerth Place"): {"address": with the
+        gazetteer's street in the page's towns ("220 Sampleworth Pl"), "alt": its map point as a reading to pick, when
+        the gazetteer places it in one of those towns}; None unless exactly one known street is near it
+        (sources.snapped). Never a pin by itself (#176: unconfirmed stays unconfirmed)."""
+        from sizeup.cad.sources import snapped
+        from sizeup.geo.pagegeo import DISTRICT, home_towns
+        self.sources._towns()
+        towns = home_towns([*(getattr(inc, "tone_departments", None) or []), *(getattr(inc, "departments", None) or [])])
+        if set(towns) & set(DISTRICT):                 # our tones: the whole district (pagegeo's rule)
+            towns = (*towns, *(t for t in DISTRICT if t not in towns))
+        fixed = snapped(heard, tuple(towns)) if towns else ""
+        if not fixed:
+            return None
+        out: dict = {"address": fixed[:200]}
+        try:
+            m = next(iter(self._ranked(f"{fixed}, {towns[0]}" if len(towns) == 1 else fixed)), None)
+        except Exception:  # noqa: BLE001 - no reading: the spelling alone
+            m = None
+        if m and m.get("lat") is not None and m.get("confidence", 0) >= 0.6 and m.get("town") in towns:
+            out["alt"] = {"label": m["label"], "lat": m["lat"], "lon": m["lon"], "town": m["town"],
+                          "confidence": m["confidence"], "why": "the street as the map spells it"}
+        return out
 
     def _page_scope(self, iid: int, inc, note: bool = True) -> tuple[str, bool]:
         """Full department or specific units, as the page says it (#370: the page's stands over a feed's): (the

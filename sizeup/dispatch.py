@@ -153,10 +153,45 @@ def _road(s: str, type_phrase: str = "") -> str:
     return " ".join(rest) if len(rest) >= 2 else ""
 
 
+# "Engine 59/63", "Engines 59 / 63 / 65": one unit word for each number (read before "/" is normalised away).
+UNIT_SLASH = re.compile(r"\b(tower ladder|engine|ladder|tower|rescue|squad|truck|ambulance|medic|tanker)s?\s+"
+                        r"(\d{1,4}(?:\s*/\s*\d{1,4})+)\b", re.I)
+
+
+def _unit_slash(text: str) -> str:
+    return UNIT_SLASH.sub(lambda m: ", ".join(f"{m.group(1)} {n}" for n in re.split(r"\s*/\s*", m.group(2))), text)
+
+
+def split_joined(units, known) -> list[str]:
+    """Run-together apparatus numbers ("Engine 6158": Engine 61 and Engine 58 read as one) split in two, only when the
+    whole is not a known unit and exactly one split gives two known units of the same kind (two digits a side at
+    least). known: the configured apparatus, as written anywhere ("E61", "Engine 61"): compared as norm(). Order kept,
+    no repeats."""
+    def norm(u: str) -> str:
+        parts = re.findall(r"[A-Za-z]+|\d+", u or "")
+        return "".join(p[0].upper() if len(p) > 2 else p.upper() for p in parts if p.isalpha()) + \
+            "".join(p for p in parts if p.isdigit())
+    have = {norm(k) for k in known or () if isinstance(k, str)}
+    out: list[str] = []
+    for u in units or ():
+        m = re.fullmatch(r"\s*(.*?\D)\s*(\d{4,8})\s*", str(u))
+        parts = [u]
+        if m and norm(u) not in have:
+            word, n = m.group(1).strip(), m.group(2)
+            splits = [(n[:i], n[i:]) for i in range(2, len(n) - 1) if n[i] != "0"
+                      and norm(f"{word} {n[:i]}") in have and norm(f"{word} {n[i:]}") in have]
+            if len(splits) == 1:
+                parts = [f"{word} {x}" for x in splits[0]]
+        for x in parts:
+            if x not in out:
+                out.append(x)
+    return out
+
+
 def parse(text: str) -> Dispatch:
     d = Dispatch(text)
     # "16-10-191-22": 60 Control's run number, not engines (the normalising below turns "-" into spaces).
-    t = _spoken_digits(_norm(re.sub(r"\b\d{1,3}(?:\s*-\s*\d{1,3}){3,}(?=\s*[,.])", " , ", text)))
+    t = _spoken_digits(_norm(_unit_slash(re.sub(r"\b\d{1,3}(?:\s*-\s*\d{1,3}){3,}(?=\s*[,.])", " , ", text))))
     t = re.sub(r"\b(\d+)(?:\s+\1\b)+", r"\1", t)          # "42 42 stratton road": a repeat, not two numbers
     for name, phrases in DEPARTMENTS.items():
         if any(p in t for p in phrases):
