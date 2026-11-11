@@ -1258,7 +1258,7 @@ class HubApp(App):
         n = self.audio.prune_clips(now - policy.shortest_days() * 86400, kept=self.cad.comms.kept_for_events,
                                    kept_older_than=(now - days * 86400) if days else None, batch=cfg.audio_prune_batch,
                                    pause_s=0.05 if background else 0.0, max_rows=None if quiet else 10 * cfg.audio_prune_batch,
-                                   policy=policy, now=now)
+                                   policy=policy, now=now, held=self._audio_held)
         try:                                      # the transcripts and metadata: their own retention, never before the audio
             self.cad.comms.prune()
         except Exception as e:  # noqa: BLE001 (the radio log's prune never stops the audio's)
@@ -1284,6 +1284,20 @@ class HubApp(App):
                 if gone:
                     self.hub.log(f"audio: {gone} object(s) in the store that no clip named, deleted")
         return n
+
+    def _audio_held(self, ids: list[str]) -> set[str]:
+        """Clips the retention never deletes: linked to an incident and not yet copied into its attachments (copied
+        first: the incident keeps its audio until an admin deletes it, #414 follow-up). Without the attachments
+        bucket nothing is copied: every linked clip is held here."""
+        att = getattr(self, "attachments", None)
+        if att is not None and att.configured:
+            return att.uncopied(ids)
+        held: set[str] = set()
+        for k in range(0, len(ids), 500):
+            chunk = list(ids[k:k + 500])
+            held.update(r["traffic_id"] for r in self.cad.store.q(
+                f"SELECT traffic_id FROM radio_links WHERE traffic_id IN ({','.join('?' * len(chunk))})", chunk))
+        return held
 
     def _clip_channels(self, ids: list[str]) -> dict[str, tuple[str, int | None]]:
         """The channel and talkgroup of these clips (the migration's backfill, #414): the hub's transmissions and

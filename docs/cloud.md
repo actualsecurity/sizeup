@@ -2305,8 +2305,9 @@ gauge_station = "8516945"        # Kings Point (the gauge)
 
 `sizeup/attachments.py`: what is attached to an incident is kept the same way whatever its kind, in a private S3
 bucket (`SIZEUP_ATTACHMENTS_BUCKET`, sizeup-aws `14-dvr-storage.sh`: Block Public Access, SSE-S3, versioning, TLS
-only, Object Lock in governance mode for 365 days, lifecycle: expire after 365 days), under
-`attachments/<incident id>/<attachment id>/`, for a year:
+only, Object Lock in governance mode for 365 days, lifecycle: camera clips expire after 365 days, radio never), under
+`attachments/<incident id>/<attachment id>/`; a camera clip for a year, **radio audio until an admin deletes it** (#414
+follow-up):
 
 - **camera**: a range of a DVR recording (at most 60 min, within what is recorded), saved by a dispatcher or admin
   (`POST /api/cad/cameras/<id>/dvr/clip {from, to, incident_id, note}`): the recorded segments concatenated as they
@@ -2317,7 +2318,16 @@ only, Object Lock in governance mode for 365 days, lifecycle: expire after 365 d
   `audio.wav`, `transmission.json` (transcript and the alternative one, talker, radio ID, rig, channel, talkgroup)
   and `manifest.json`. Once per incident and transmission (a deleted one is never copied again). A failed copy is
   tried again after 60 s doubling to an hour; S3's own trouble (network, 5xx, 403) never counts, a refusal counts
-  (5 at most); a round stops at its first failure. Kept a year whatever `audio.sqlite`'s retention.
+  (5 at most); a round stops at its first failure. **Kept until an admin deletes it**, whatever `audio.sqlite`'s
+  retention: no `expires_at` (0), never "expired"; every object tagged `kind=radio`, which the bucket's lifecycle leaves
+  alone (camera clips are tagged `kind=camera` and expire after a year; sizeup-aws `19-incident-audio-forever.sh`,
+  the task role's `s3:PutObjectTagging`). Every transmission linked to an incident is copied, whatever the link (by
+  hand, a unit's, the radio-log backfill's, a mention), once settled and within a year of it. **Copied first**: the
+  live audio store never deletes a linked clip whose copy isn't stored yet (`Attachments.uncopied`; without the
+  attachments bucket, every linked clip), whatever its channel's retention; once copied, the live clip follows the
+  retention again (its copy is the incident's). Object Lock still stops an early delete for 365 days (an admin's
+  audited delete bypasses it, as before). Settings > System > Audio retention shows the incident audio's count, size
+  and S3 cost a month.
 
 Every PUT has SSE, Content-MD5 and the SHA-256 checksum. The CAD store has the record (`attachments`: kind, source,
 range, sha256 of every object, who and when, note, status) and the audit (`attachment_audit`: attach, view,
@@ -2390,7 +2400,7 @@ with the department):
 |---|---|---|
 | a clip on no event | **30 days** on the hub (12 h before #414), or its channel's / talkgroup's days | `audio_keep_hours = 720` (`deploy/hub/config.hub.toml`); **Settings > System > Audio retention** (#414) |
 | a clip that is a record: on a CAD event (any link: unit, dispatcher, airport, manual, page), with an alarm, or with the emergency button / an emergency window's keep | **365 days**, or its channel's days if longer | `audio_keep_event_days = 365` (0..400; 0 = forever, in S3 the bucket's 400-day hard max) |
-| a clip attached to an incident | its copy in the attachments bucket: a year ([Incident attachments](#incident-attachments-323)), whatever this says | |
+| a clip linked to an incident | its copy in the attachments bucket: **until an admin deletes it** ([Incident attachments](#incident-attachments-323)); the live clip is held until that copy is stored | |
 | dispatch audio (with the dispatch log) | forever (unchanged); unused previews as long as the clips (30 days; the task's disk copy a day) | |
 | the size cap `[cloud] audio_max_mb` (500) | the bytes **still in `audio.sqlite`** (all of them without S3): drops the oldest clips **that aren't records** only; records over it are kept and the log says so | |
 

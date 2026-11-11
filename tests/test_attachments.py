@@ -414,10 +414,15 @@ def test_expired_and_interrupted_rows_are_swept(tmp_path):
         c.store.db.execute("INSERT INTO attachments (id, incident_id, kind, source, start, end, status, created_at, expires_at) "
                            "VALUES ('00000000000000aa', ?, 'camera', 'x', 0, 1, 'saving', ?, ?)",
                            (inc["id"], clock.t - att_mod.SAVING_STALE_S - 1, clock.t + 1))
+        c.store.db.execute("INSERT INTO attachments (id, incident_id, kind, source, start, end, status, created_at, expires_at) "
+                           "VALUES ('00000000000000bb', ?, 'camera', 'x', 0, 1, 'stored', ?, ?)",
+                           (inc["id"], clock.t, clock.t + att_mod.RETENTION_S))
     clock.t += att_mod.RETENTION_S + 1
     a.sweep()
     st = {r["id"]: r["status"] for r in a.list(inc["id"], deleted=True)}
-    assert st["00000000000000aa"] == "failed" and sorted(st.values()) == ["expired", "failed"]
+    # a camera clip expires after a year; the radio copy never (an incident keeps its audio until an admin deletes it)
+    assert st["00000000000000aa"] == "failed" and st["00000000000000bb"] == "expired"
+    assert sorted(st.values()) == ["expired", "failed", "stored"]
 
 
 def test_the_server_streams_a_download_and_closes_it(tmp_path):

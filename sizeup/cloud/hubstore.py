@@ -421,7 +421,8 @@ class AudioDb:
 
     def prune_clips(self, older_than: float, kept: Callable[[list[str]], set[str]] | None = None,
                     kept_older_than: float | None = None, batch: int = 200, pause_s: float = 0.0,
-                    max_rows: int | None = None, policy=None, now: float | None = None) -> int:
+                    max_rows: int | None = None, policy=None, now: float | None = None,
+                    held: Callable[[list[str]], set[str]] | None = None) -> int:
         """The audio retention (#251, #414, docs/cloud.md "Audio retention"). Clips (kind 'clip'; never the dispatch
         audio) go once older than their own retention: the policy's (sizeup/audiostore.py Retention: the channel's or
         talkgroup's days in Settings, worked out in SQL at every prune, so a change applies to the clips already
@@ -431,7 +432,8 @@ class AudioDb:
         oldest of those that aren't a record. The scan reads SCAN_PAGE rows at a time on the read connection (no
         lock held between pages); store objects go first (DeleteObjects, 1000 a call), then the rows whose objects
         are gone, in transactions of at most `batch` rows, pause_s apart; at most max_rows this call (None: all).
-        The number deleted."""
+        held(ids): the ones never deleted whatever their age (a clip linked to an incident whose copy in the incident's
+        attachments isn't stored yet: copied first). The number deleted."""
         now = time.time() if now is None else now
         expr, params = policy.sql(now) if policy is not None else ("?", [older_than])
         n, cur_at, cur_rowid = 0, float("-inf"), -1
@@ -447,8 +449,11 @@ class AudioDb:
                              (older_than, cur_at, cur_at, cur_rowid, last[0], last[0], last[1], *params))
             cur_at, cur_rowid = last
             if due:
-                keep = kept([a for a, _ in due]) if kept is not None else set()
-                gone = [aid for aid, at in due if aid not in keep or (kept_older_than is not None and at < kept_older_than)]
+                ids = [a for a, _ in due]
+                keep = kept(ids) if kept is not None else set()
+                hold = held(ids) if held is not None else set()
+                gone = [aid for aid, at in due if aid not in hold
+                        and (aid not in keep or (kept_older_than is not None and at < kept_older_than))]
                 if max_rows is not None:
                     gone = gone[:max(0, max_rows - n)]
                 n += self._delete(gone, batch, pause_s)
@@ -461,6 +466,8 @@ class AudioDb:
             sizes = self._scan("SELECT id, LENGTH(wav) FROM audio WHERE stored = 'db' AND kind = 'clip' "
                                "AND LENGTH(wav) > 0 ORDER BY at")
             keep = kept([r[0] for r in sizes]) if kept is not None and sizes else set()
+            if held is not None and sizes:
+                keep |= held([r[0] for r in sizes])
             over = []
             for aid, size in sizes:
                 if total <= self.max_bytes:
