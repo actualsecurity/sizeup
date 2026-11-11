@@ -39,6 +39,7 @@ window.AddrHistory = (() => {
     if (inc.id !== st.iid) {
       st.iid = inc.id;
       st.here = null;
+      st.allNotes = false;
       closeForm($("#d-premise-form"));
     }
     const sig = JSON.stringify([inc.id, inc.bldg_key || "", inc.addr_key || "", inc.lat, inc.lon, inc.status, inc.disposition]);
@@ -70,18 +71,31 @@ window.AddrHistory = (() => {
   }
 
   // ---- premise notes on the card ------------------------------------------------------------------------------------
+  // An open call's notes come in the push (what everyone may see, live); History here's add any of a category kept to
+  // some roles (premise.VISIBLE_TO). The push's own copy of a note wins (its acknowledgement is the newer).
   function notesOf(inc) {
-    if (Array.isArray(inc.premise)) return inc.premise;
-    return (st.here && st.here.notes) || [];
+    const here = (st.here && st.here.notes) || [];
+    if (!Array.isArray(inc.premise)) return here;
+    const ids = new Set(inc.premise.map((n) => n.id));
+    return inc.premise.concat(here.filter((n) => n.restricted && !ids.has(n.id)));
   }
+  const FOLD_AT = 3;                          // more notes than this: the first ones, then "N more"
   function renderNotes(inc) {
     const box = $("#d-premise");
     const notes = notesOf(inc);
-    const sig = JSON.stringify([inc.id, notes, st.readonly]);
+    const sig = JSON.stringify([inc.id, notes, st.readonly, st.allNotes]);
     show(box, notes.length > 0);
     if (sig === st.notesSig) return;
     st.notesSig = sig;
-    box.replaceChildren(...notes.map((n) => noteRow(n, inc)));
+    const shown = st.allNotes || notes.length <= FOLD_AT + 1 ? notes : notes.slice(0, FOLD_AT);
+    const rows = shown.map((n) => noteRow(n, inc));
+    if (notes.length > shown.length || (st.allNotes && notes.length > FOLD_AT + 1)) {
+      const b = el("button", "sm quiet", st.allNotes ? "Fewer" : `${notes.length - shown.length} more note${notes.length - shown.length > 1 ? "s" : ""}`);
+      b.type = "button";
+      b.addEventListener("click", () => { st.allNotes = !st.allNotes; renderNotes(inc); });
+      rows.push(b);
+    }
+    box.replaceChildren(...rows);
   }
   function noteRow(n, inc) {
     const row = el("div", `pn p${n.priority}` + (n.ack ? " seen" : ""));
@@ -143,6 +157,7 @@ window.AddrHistory = (() => {
     else if (h) {
       sum = h.total ? `· ${h.year.n} in 12 mo` + (h.total > h.year.n ? ` · ${h.total} all` : "") : "· none";
       if (h.false_alarms.n) sum += ` · ${h.false_alarms.n} false alarm${h.false_alarms.n > 1 ? "s" : ""}`;
+      sum += { geo: " · by map point, 20 m", text: " · as typed" }[h.key.addr_how] || "";    // a weak match says so
     }
     setText($("#d-here-sum"), sum);
     tog.classList.toggle("warn", !!(h && h.false_alarms && h.false_alarms.n >= 2));

@@ -622,20 +622,33 @@ class CadApi:
 
     def _search(self, q: dict, who, csv: bool = False) -> tuple:
         """GET /api/cad/search(.csv): the Search page (#403). Anyone signed in may search what they may already open; the
-        CSV is admins' (ADMIN_READS). The first page of each search and every CSV is in the person's activity (kind
-        "search": the filters and the count)."""
+        CSV is admins' (ADMIN_READS). The first page of each search with a filter, and every CSV, is in the person's
+        activity (kind "search": the filters and the count); the server log says only that they searched and the count
+        (the filters can hold an address or a name)."""
         from sizeup.cad.history import csv_rows
         h = self.cad.addrs
         f = h.parse_query(q)
         out = h.search(f, csv=csv)
-        if who is not None and who.email and (csv or f["page"] == 0):
+        if who is not None and who.email and (csv or (f["page"] == 0 and h.filtered(f))):
+            n = out["total"]
             self.cad.activity.record(who.email, "search", f"GET /api/cad/search{'.csv' if csv else ''}",
-                                     ("CSV: " if csv else "") + h.summary(f, out["total"]))
+                                     ("CSV: " if csv else "") + h.summary(f, n),
+                                     logged=f"{'CSV: ' if csv else ''}Searched: {n} result{'s' if n != 1 else ''}")
         if csv:
             name = f"search-{datetime.now(TZ).strftime('%Y%m%d-%H%M')}.csv"
             return 200, csv_rows(out["rows"], self.cad.lists), "text/csv; charset=utf-8", {
                 "Content-Disposition": f'attachment; filename="{name}"', "Cache-Control": "no-store"}
         return _json(200, out)
+
+    def _may(self, who) -> str:
+        """The viewer's standing for what they may read (premise notes' categories, #403): "admin" | "dispatcher" |
+        "viewer"; without a verified person (all-in-one) nothing is checked: "admin"."""
+        if who is None or not who.email:
+            return "admin"
+        try:
+            return self.cad.settings.standing(who.email)["may"]
+        except CadError:
+            return "viewer"
 
     def read_refused(self, path: str, who) -> tuple[int, bytes, str] | None:
         """A GET in ADMIN_READS from someone signed in who isn't an admin: the 403; else None (nothing is checked
@@ -729,9 +742,9 @@ class CadApi:
             if path in ("/api/cad/search", "/api/cad/search.csv"):
                 return self._search(parse_qs(query), who, csv=path.endswith(".csv"))
             if path == "/api/cad/premise":
-                return _json(200, self.cad.premise.listing(parse_qs(query)))
+                return _json(200, self.cad.premise.listing(parse_qs(query), self._may(who)))
             if m := HERE.fullmatch(path):
-                return _json(200, self.cad.addrs.here(int(m.group(1))))
+                return _json(200, self.cad.addrs.here(int(m.group(1)), self._may(who)))
             if m := SUGGEST.fullmatch(path):
                 return _json(200, {"units": self.cad.suggest_units(int(m.group(1)), (parse_qs(query).get("q") or [""])[0][:20])})
             if m := INCIDENT.fullmatch(path):

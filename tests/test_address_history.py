@@ -21,8 +21,16 @@ from tests.test_roles import COREY, JULIAN, VAL, call, people
 ALIASES = lists.load().geo_town_aliases
 # An invented gazetteer: street -> (as written, town, lat of number 0, lon), each number 10 m further north
 STREETS = {"example ave": ("Example Ave", "Port Chester", 41.0, -73.66),
+           "w example ave": ("W Example Ave", "Port Chester", 41.03, -73.66),        # a direction's own street
+           "e example ave": ("E Example Ave", "Port Chester", 41.04, -73.66),
+           "n example ave": ("N Example Ave", "Port Chester", 41.09, -73.66),
+           "s example ave": ("S Example Ave", "Port Chester", 41.10, -73.66),
            "sample st": ("Sample St", "Port Chester", 41.01, -73.67),
-           "specimen rd": ("Specimen Rd", "Rye Brook", 41.02, -73.68)}
+           "specimen rd": ("Specimen Rd", "Rye Brook", 41.02, -73.68),
+           "front st": ("Front St", "Port Chester", 41.05, -73.66),                  # streets named with unit words
+           "upper ridge rd": ("Upper Ridge Rd", "Port Chester", 41.06, -73.66),
+           "rear lot rd": ("Rear Lot Rd", "Port Chester", 41.07, -73.66),
+           "at rd": ("At Rd", "Port Chester", 41.08, -73.66)}
 DAY = 86400
 
 
@@ -58,8 +66,18 @@ def key(text, geocode=fake_geocode, **inc):
     ("100 Example Ave #2B", "100|example ave|port chester|2b", "100|example ave|port chester", "gazetteer"),
     ("100 Example Ave Unit 2B", "100|example ave|port chester|2b", "100|example ave|port chester", "gazetteer"),
     ("100 EXAMPLE AVE 3RD FL", "100|example ave|port chester|fl 3", "100|example ave|port chester", "gazetteer"),
-    ("100-104 EXAMPLE AVE", "100|example ave|port chester", "100|example ave|port chester", "gazetteer"),       # a range
-    ("100A Example Ave", "100|example ave|port chester", "100|example ave|port chester", "gazetteer"),          # 100A: the lot
+    ("100-104 EXAMPLE AVE", "100-104|example ave|port chester", "100-104|example ave|port chester", "gazetteer"),  # range
+    ("100A Example Ave", "100a|example ave|port chester", "100a|example ave|port chester", "gazetteer"),        # its own
+    ("100 1/2 Example Ave", "100 1/2|example ave|port chester", "100 1/2|example ave|port chester", "gazetteer"),
+    ("100 Example Ave Rear", "100|example ave|port chester|rear", "100|example ave|port chester", "gazetteer"),
+    ("100 Example Ave Bldg 3 Apt 2B", "100|example ave|port chester|bldg 3|2b", "100|example ave|port chester|bldg 3",
+     "gazetteer"),                                                         # a complex: BLDG is a building
+    ("12 W EXAMPLE AVE", "12|w example ave|port chester", "12|w example ave|port chester", "gazetteer"),       # direction
+    ("12W EXAMPLE AVE", "12|w example ave|port chester", "12|w example ave|port chester", "gazetteer"),
+    ("7 Front St", "7|front st|port chester", "7|front st|port chester", "gazetteer"),                          # street
+    ("7 Upper Ridge Rd", "7|upper ridge rd|port chester", "7|upper ridge rd|port chester", "gazetteer"),       # names,
+    ("7 Rear Lot Rd", "7|rear lot rd|port chester", "7|rear lot rd|port chester", "gazetteer"),                # not units
+    ("7 At Rd", "7|at rd|port chester", "7|at rd|port chester", "gazetteer"),
     ("100 Exampel Ave", "100|example ave|port chester", "100|example ave|port chester", "gazetteer"),          # misspelt
     ("@SAMPLE SCHOOL (100 EXAMPLE AVE)", "100|example ave|port chester", "100|example ave|port chester", "gazetteer"),
     ("100 Example Ave @ Sample Market", "100|example ave|port chester", "100|example ave|port chester", "gazetteer"),
@@ -93,9 +111,25 @@ def test_a_reading_far_from_the_pin_is_not_trusted():
     assert key("100 Example Ave", lat=41.05, lon=-73.66).how == "geo"        # ~4 km away: the pin wins
 
 
+@pytest.mark.parametrize("a, b", [("12 N Example Ave", "12 S Example Ave"), ("12 E Example Ave", "12 W Example Ave"),
+                                  ("12 N EXAMPLE AVE", "12 EXAMPLE AVE"), ("12W EXAMPLE AVE", "12 EXAMPLE AVE"),
+                                  ("12 Example Ave", "112 Example Ave")])
+def test_direction_pairs_are_never_one_building(a, b):
+    for geo in (fake_geocode, None):
+        assert key(a, geocode=geo).bldg_key != key(b, geocode=geo).bldg_key, (a, b, geo)
+
+
+def test_the_text_names_the_town_with_no_pin():
+    assert key("7 Specimen Rd, Port Chester").how == "text"     # the reading is in Rye Brook: not this address
+    assert key("7 Specimen Rd, Rye Brook").how == "gazetteer"
+
+
 def test_parse_and_street_text():
     p = addrkey.parse("12-14 EXAMPLE AVE REAR, RYE_BROOK", ALIASES)
-    assert (p.number, p.street, p.unit, p.town) == ("12", "EXAMPLE AVE", "rear", "Rye Brook")
+    assert (p.number, p.street, p.unit, p.town, p.ends()) == ("12-14", "EXAMPLE AVE", "rear", "Rye Brook", ("12", "14"))
+    p = addrkey.parse("12 EXAMPLE AVE BLDG 3 APT 2B PORT_CHESTER", ALIASES)
+    assert (p.number, p.street, p.bldg, p.unit, p.town) == ("12", "EXAMPLE AVE", "bldg 3", "2b", "Port Chester")
+    assert addrkey.parse("12 Lot Rd", ALIASES).street == "Lot Rd" and addrkey.parse("12 Example Rd Lot 7", ALIASES).unit == "lot 7"
     assert addrkey.street_text("575 Example Rd @ Sample Market") == "575 Example Rd"
     assert addrkey.street_text("@ Sample School") == ""
     assert addrkey.parse("Example Ave", ALIASES) is None
@@ -394,7 +428,7 @@ def test_notes_surface_on_open_incidents_ranked_with_acks(hist):
     b = mk({"where": "100 EXAMPLE AVE APT 4", "text": "Hoarding in basement", "category": "hoarding"})["note"]
     clock.t += 1
     h = mk({"where": "100 Example Ave", "text": "Propane tanks in yard", "category": "hazard", "priority": 1})["note"]
-    mk({"where": "102 Example Ave", "text": "Dog", "category": "animals"})                    # next door
+    mk({"where": "106 Example Ave", "text": "Dog", "category": "animals"})                    # 60 m down the street
     clock.t += 1
     stru = c.store.create_incident(type="STRU", subtype="RESD", address="100 Example Ave")
     ems = c.store.create_incident(type="BLS", address="100 Example Ave Apt 2")
@@ -457,3 +491,164 @@ def test_note_validation(hist):
     iid = c.store.create_incident(type="SERVICE", address="")
     with pytest.raises(CadError, match="location"):
         c.premise.create({"incident_id": iid, "text": "x"})
+
+
+# -- review fixes (#421) -------------------------------------------------------------------------------------------------
+
+def test_ranges_and_lettered_numbers_in_history(hist):
+    c, clock = hist, hist.clock_
+    base = 41.01
+
+    def pt(n, dlat=0.0, dlon=0.0):                                       # where Sample St's numbers are
+        return {"lat": base + n * 0.00009 + dlat, "lon": -73.67 + dlon}
+    rng = call_at(c, clock, 9, "10-12 Sample St", **pt(10))
+    ten = call_at(c, clock, 8, "10 Sample St", **pt(10))
+    twelve = call_at(c, clock, 7, "12 Sample St", **pt(12))
+    eleven = call_at(c, clock, 6, "11 Sample St", **pt(11))
+    near_a = call_at(c, clock, 5, "12A Sample St", **pt(12, 0.00005))        # ~5 m from 12's pin
+    far_b = call_at(c, clock, 4, "12B Sample St", **pt(12, 0.0002))          # ~22 m
+    half = call_at(c, clock, 3, "12 1/2 Sample St", **pt(12, 0.0002, 0.005))
+    now = c.store.create_incident(type="ALARM", subtype="COMM", address="12 Sample St", **pt(12))
+    ids = {r["id"] for r in c.addrs.here(now)["recent"]} | {x["id"] for x in c.addrs.here(now)["false_alarms"]["calls"]}
+    inc = c.store.incident(now)
+    ids = {r["id"] for r in c.addrs.building(inc["bldg_key"], inc["lat"], inc["lon"], inc["addr_street"])}
+    assert {rng, twelve, near_a} <= ids and not {ten, eleven, far_b, half} & ids
+    r = c.store.incident(rng)
+    ids = {x["id"] for x in c.addrs.building(r["bldg_key"], r["lat"], r["lon"], r["addr_street"])}
+    assert {ten, twelve} <= ids and eleven not in ids                    # a range: each of its numbers
+
+
+def test_the_address_box_matches_keys_not_substrings(calls):
+    c, ids = calls
+    for n in (112, 1100):                                              # "100 Example Ave" is in "1100 Example Ave"
+        call_at(c, c.clock_, 2, f"{n} Example Ave")
+    assert {r["id"] for r in search(c, where="100 Example Ave")["rows"]} == {ids["alarm"], ids["ems"]}
+    assert search(c, where="12 Example Ave")["rows"] == []               # not 112
+    sql, args = c.addrs._where_sql("100 Example Ave")
+    plan = " ".join(r["detail"] for r in c.store.q(f"EXPLAIN QUERY PLAN SELECT id FROM incidents WHERE {sql}", args))
+    assert "SCAN incidents" not in plan                                  # on the keys' indexes
+    call_at(c, c.clock_, 1, "100-102 Example Ave")
+    assert search(c, where="102 Example Ave")["total"] == 1             # a range: either number finds it
+    place = call_at(c, c.clock_, 1, "@ Zqxv School")
+    assert [r["id"] for r in search(c, where="zqxv school")["rows"]] == [place]   # no key: the words, whole
+    assert search(c, where="Zqxv Scho")["total"] == 0
+
+
+def test_free_text_counts_every_hit_newest_first_and_snippets_only_the_page(hist):
+    c, clock = hist, hist.clock_
+    made = [call_at(c, clock, 60 - i, f"{100 + i} Example Ave", remarks=f"smoke detector {i}") for i in range(60)]
+    out = search(c, text="smoke", size=10)
+    assert out["total"] == 60 and [r["id"] for r in out["rows"]] == made[::-1][:10]
+    assert all("[smoke]" in r["hit"] for r in out["rows"])
+    seen = []
+    c.store.db.set_trace_callback(seen.append)
+    search(c, text="smoke", size=10, page=1)                            # the hits reused; snippets for 10 rows
+    c.store.db.set_trace_callback(None)
+    assert sum("snippet(" in s for s in seen) <= 10
+    assert not any("MATCH" in s and "snippet(" not in s for s in seen)  # the match itself: from the cache
+
+
+def test_search_reads_off_the_store_lock(tmp_path):
+    import threading
+    c = make_cad(tmp_path, geocoder=fake_geocode)
+    c.store.create_incident(type="ALARM", subtype="COMM", address="100 Example Ave", remarks="smoke")
+    wait_idle(c.addrs)
+    out = []
+    with c.store.lock:                                                   # the console mid-write
+        t = threading.Thread(target=lambda: out.append(search(c, text="smoke")))
+        t.start()
+        t.join(5)
+    assert out and out[0]["total"] == 1
+
+
+def test_key_open_reads_nothing_with_an_empty_queue(hist):
+    c = hist
+    c.store.create_incident(type="ALARM", subtype="COMM", address="100 Example Ave")
+    c.state()
+    seen = []
+    c.store.db.set_trace_callback(seen.append)
+    assert c.addrs.key_open() == 0
+    c.store.db.set_trace_callback(None)
+    assert seen and all("addr_queue" in s and "incidents" not in s for s in seen)
+
+
+def test_the_point_cache_follows_nearby_changes(hist):
+    c, clock = hist, hist.clock_
+    lat, lon = 41.0 + 100 * 0.00009, -73.66
+    keyed = call_at(c, clock, 3, "100 Example Ave", disposition="", lat=lat, lon=lon)
+    geo = c.store.create_incident(type="ALARM", subtype="COMM", address="Zqxv Blvd", lat=lat + 0.00005, lon=lon)
+    assert c.addrs.here(geo)["recent"][0]["disposition"] == ""
+    c.store.close(keyed, "FALSE")                                        # a keyed call nearby changes
+    assert c.addrs.here(geo)["recent"][0]["disposition"] == "FALSE"
+
+
+def test_search_audit_keeps_filters_out_of_the_server_log(api):
+    logged = []
+    api.cad.activity.log = logged.append
+    get(api, "/api/cad/search", "", VAL)                                # the tab opened: no filter, no row
+    assert api.cad.activity.rows(kind="search") == []
+    get(api, "/api/cad/search", "where=100+Example+Ave&text=toast", VAL)
+    assert len(api.cad.activity.rows(kind="search")) == 1
+    line = next(m for m in logged if "Searched" in m)
+    assert "Example" not in line and "toast" not in line and "Searched: 1 result" in line
+
+
+def test_a_typed_note_address_must_be_sure(hist):
+    c = hist
+    from sizeup.cad.store import CadError
+    with pytest.raises(CadError, match="map knows"):
+        c.premise.create({"where": "100 Zqxv Blvd", "text": "Dog"})
+    lat, lon = 41.005, -73.661
+    n = c.premise.create({"where": "100 Zqxv Blvd", "lat": lat, "lon": lon, "text": "Dog", "category": "animals"})["note"]
+    geo = c.store.create_incident(type="ALARM", subtype="COMM", address="Zqxv Blvd / Sample St", lat=lat + 0.0001, lon=lon)
+    assert [x["id"] for x in next(i for i in c.state()["incidents"] if i["id"] == geo)["premise"]] == [n["id"]]
+    k = c.premise.create({"where": "100 Example Ave", "text": "Knox box", "category": "access"})["note"]
+    pin = c.store.create_incident(type="BLS", address="Zqxv Blvd", lat=41.0 + 100 * 0.00009 + 0.00005, lon=-73.66)
+    assert k["id"] in [x["id"] for x in next(i for i in c.state()["incidents"] if i["id"] == pin)["premise"]]
+
+
+def test_category_visibility_is_configurable(api, monkeypatch):
+    from sizeup.cad import premise
+    c, iid = api.cad, api.calls["ems"]
+    c.premise.create({"incident_id": iid, "text": "On home oxygen", "category": "medical"})
+    c.premise.create({"incident_id": iid, "text": "Knox box", "category": "access"})
+    c.store.reopen(iid)
+    monkeypatch.setattr(premise, "VISIBLE_TO", {"medical": "dispatcher"})
+    pushed = next(i for i in c.state()["incidents"] if i["id"] == iid)["premise"]
+    assert [n["category"] for n in pushed] == ["access"]                 # the push is everyone's
+    assert [n["category"] for n in get(api, f"/api/cad/incident/{iid}/here", "", VAL)[1]["notes"]] == ["access"]
+    here = get(api, f"/api/cad/incident/{iid}/here", "", JULIAN)[1]["notes"]
+    assert sorted(n["category"] for n in here) == ["access", "medical"]
+    assert [n["category"] for n in get(api, "/api/cad/premise", "", VAL)[1]["notes"]] == ["access"]
+
+
+def test_migration_messages_are_logged(tmp_path):
+    from sizeup.cad.service import Cad, Settings
+    logged = []
+    c = make_cad(tmp_path, geocoder=fake_geocode)
+    c.store.db.close()
+    db = sqlite3.connect(tmp_path / "cad.sqlite")
+    db.execute("DROP TRIGGER here_rev_inc2")
+    db.execute("DROP TRIGGER here_rev_asg2")
+    db.execute("DROP INDEX incidents_bldg")
+    db.execute("DROP INDEX incidents_street")
+    for col in ADDR_COLUMNS:
+        db.execute(f"ALTER TABLE incidents DROP COLUMN {col}")
+    db.commit()
+    db.close()
+    Cad(Settings(db=str(tmp_path / "cad.sqlite")), geocoder=fake_geocode, log=logged.append)
+    assert any("address keys" in m for m in logged)
+
+
+def test_a_broken_gazetteer_never_breaks_the_push():
+    def boom(q):
+        raise RuntimeError("gazetteer down")
+    c = make_cad(geocoder=boom)
+    iid = c.store.create_incident(type="ALARM", subtype="COMM", address="100 Example Ave")
+    assert next(i for i in c.state()["incidents"] if i["id"] == iid)["addr_how"] == "text"
+
+
+def test_csv_cells_never_run_as_formulas():
+    from sizeup.cad.export import _csv
+    out = _csv(["a", "b", "c"], [["=1+1", "-73.66", "@SUM(A1)"]]).decode("utf-8-sig").splitlines()[1]
+    assert out == "'=1+1,-73.66,'@SUM(A1)"

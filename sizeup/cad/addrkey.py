@@ -3,8 +3,10 @@ page and premise notes.
 
     addr_key    "123|example ave|port chester|2b": house number, the street as the gazetteer spells it (as a
                 street_key: lower case, suffixes abbreviated), town, and the apartment / unit / floor when given
-    bldg_key    "123|example ave|port chester": the building, apt / unit / floor stripped, a house number's letter
-                too (12A and 12B are one lot); '' when only a map point is known
+    bldg_key    "123|example ave|port chester": the building, apt / unit / floor / rear stripped; a complex's
+                building kept ("...|bldg 3"); 12A, 12 1/2 and 12 are three buildings (History here joins 12A and 12
+                only when their pins are within SAME_LOT_M), a range "10-12" is its own key and also the same building
+                as 10 and as 12; '' when only a map point is known
     street_key  "example ave|port chester": a street search
     how         gazetteer   the gazetteer read the address with confidence (a misspelt or misheard street is snapped to
                             its street only then: SNAP_CONFIDENCE, and within SNAP_M of the incident's own pin)
@@ -16,7 +18,8 @@ page and premise notes.
 
 The variants the department's feeds and pages send: ALL CAPS ("123 EXAMPLE AVE"), towns as UPPER_SNAKE tokens
 ("PORT_CHESTER"), the town after a comma or at the end, "Avenue" / "Ave." / "AVE", apartments ("APT 2B", "#2B",
-"UNIT 3", "3RD FL"), a range ("12-14 Example Ave": 12), a named place ("@ Sample School", "575 Example Rd @ Sample
+"UNIT 3", "3RD FL", "REAR" after the suffix: never Front St, Upper Ridge Rd), a street's direction ("12 W EXAMPLE AVE"
+is 12, West Example Ave), a range ("12-14 Example Ave"), a named place ("@ Sample School", "575 Example Rd @ Sample
 Market", "@SAMPLE SCHOOL (12 EXAMPLE AVE)").
 
 Pure functions: the gazetteer is passed in as geocode(text) -> [{kind, street, house_number, municipality,
@@ -31,23 +34,26 @@ from dataclasses import dataclass
 from typing import Callable
 
 from sizeup.cad.sources import proper_case
-from sizeup.geo.normalize import street_key
+from sizeup.geo.normalize import STREET_TYPES, TYPE_ABBRS, street_key
 
 SNAP_CONFIDENCE = 0.7      # the gazetteer's reading of an address is trusted from here (a misspelt street at ~0.74)
 SNAP_M = 150.0             # ... and only within this of a pin the incident already has
 GROUP_M = 20.0             # a call keyed by its point: the calls this close are the same building
+SAME_LOT_M = 10.0          # 12A and 12 (one street): the same building only when their pins are this close
 
-# An apartment / unit / floor, anywhere after the street: "APT 2B", "APT. 2B", "#2B", "UNIT 3", "STE 100", "FL 2",
-# "3RD FL", "2ND FLOOR", "BSMT", "REAR"
-UNIT = re.compile(
-    r"(?:\b(?:apt|apartment|unit|ste|suite|rm|room|bldg|building|fl|flr|floor|lot)\b\.?\s*(?:no\.?\s*|#\s*)?([a-z0-9-]{1,8})\b"
-    r"|#\s*([a-z0-9-]{1,8})\b"
-    r"|\b(\d{1,2}(?:st|nd|rd|th))\s+(?:fl|flr|floor)\b"
-    r"|\b(bsmt|basement|rear|front|upper|lower)\b)", re.I)
-UNIT_WORD = {"apt": "apt", "apartment": "apt", "unit": "unit", "ste": "ste", "suite": "ste", "rm": "rm", "room": "rm",
+# Unit words: one with an identifier after it ("APT 3", "UNIT 2B", "FL 2", "BLDG 3", "#2B", "3RD FL") anywhere after the
+# first street word; a bare one ("REAR", "BSMT", "UPPER") only after the street's suffix, so Front St, Upper Ridge Rd,
+# Lower Example Ln, Rear Example Rd and Lot Rd stay street names. BLDG names a building of a complex (in the building
+# key); the rest name a part of one (apartment, floor, rear: the address key only).
+UNIT_WORD = {"apt": "apt", "apartment": "apt", "unit": "apt", "ste": "apt", "suite": "apt", "rm": "apt", "room": "apt",
              "bldg": "bldg", "building": "bldg", "fl": "fl", "flr": "fl", "floor": "fl", "lot": "lot"}
-NUMBER = re.compile(r"^\s*(\d{1,6})\s?([a-z])?(?:\s*-\s*\d{1,6}[a-z]?)?\b\s*", re.I)
-CROSSING = re.compile(r"\s(?:/|&|and|at)\s|^\s*@|\bx\b", re.I)     # two streets, or a place only: not one address
+BARE_UNIT = {"bsmt": "bsmt", "basement": "bsmt", "rear": "rear", "front": "front", "upper": "upper", "lower": "lower"}
+UNIT_ID = re.compile(r"^#?(?:[a-z]?\d[a-z0-9-]{0,7}|[a-z])$", re.I)          # 3, 2B, B2, 12-A, B
+ORDINAL_FL = re.compile(r"^(\d{1,2})(?:st|nd|rd|th)$", re.I)                   # 3RD (FL)
+# The house number: 12, 12A (a letter right after it, never "12 W": that is the street's direction), 12 1/2, 10-12
+NUMBER = re.compile(r"^\s*(\d{1,6})(?:([a-z])(?=\s)|\s+(1/2|½)(?=\s)|\s*-\s*(\d{1,6})[a-z]?(?=\s))?\s+", re.I)
+# two streets, or a place only: not one address ("12 At Rd" is a street: "at" right before a suffix)
+CROSSING = re.compile(r"\s(?:/|&|and)\s|\sat\s(?!(?:rd|st|ave|ln|dr|ct|pl|way|ter|blvd)\b)|^\s*@|\bx\b", re.I)
 
 
 @dataclass(frozen=True)
@@ -65,15 +71,27 @@ class Key:
 
 @dataclass(frozen=True)
 class Parsed:
-    number: str            # "123", "12A"
-    street: str            # as written, minus the number, unit and town ("EXAMPLE AVE")
-    unit: str              # "apt 2b", "fl 3", "rear", ''
+    number: str            # as shown: "123", "12A", "12 1/2", "10-12"
+    street: str            # as written, minus the number, units and town ("EXAMPLE AVE")
+    unit: str              # the part of a building: "2b", "fl 3", "rear", "2b rear", ''
     town: str              # a known town named in the text ("Port Chester"), ''
+    bldg: str = ""         # a complex's building: "bldg 3", ''
+    raw_street: str = ""   # the street with any unit words left in (the gazetteer may know "Rear Example Rd")
 
     @property
     def lot(self) -> str:
-        """The house number without its letter: 12A -> 12 (one lot)."""
-        return re.sub(r"\D", "", self.number)
+        """The house number in the keys: "12", "12a" (its own building), "12 1/2", "10-12" (a range)."""
+        return self.number.lower().replace("½", "1/2")
+
+    @property
+    def first(self) -> str:
+        """The first house number's digits: 12A -> 12, 10-12 -> 10 (what the gazetteer is asked for)."""
+        return re.match(r"\d+", self.number).group(0)
+
+    def ends(self) -> tuple[str, ...]:
+        """A range's two numbers ("10-12" -> ("10", "12")): each is also the same building; () for one number."""
+        m = re.fullmatch(r"(\d+)-(\d+)", self.lot)
+        return (m.group(1), m.group(2)) if m else ()
 
 
 def _towns(aliases: dict[str, str]) -> list[tuple[str, str]]:
@@ -107,45 +125,93 @@ def parse(text: str, aliases: dict[str, str]) -> Parsed | None:
         t = " ".join(re.findall(r"[a-z0-9]+", part.lower()))
         if t in aliases and not town:
             town = aliases[t]
-    s = head
-    unit = ""
-    m = UNIT.search(s)
-    if m:
-        word = m.group(0).split()[0].lower().rstrip(".")
-        if m.group(1):                                # APT 2B, UNIT 2B, #2B: one apartment ("2b"); a floor, a building
-            w = UNIT_WORD.get(word, word)
-            unit = m.group(1).lower() if w in ("apt", "unit", "ste", "rm") else f"{w} {m.group(1).lower()}"
-        elif m.group(2):
-            unit = m.group(2).lower()
-        elif m.group(3):
-            unit = "fl " + re.sub(r"\D", "", m.group(3))
-        else:
-            unit = m.group(4).lower().replace("basement", "bsmt")
-        s = s[:m.start()]
-    num = NUMBER.match(s)
+    num = NUMBER.match(head + " ")
     if not num:
         return None
-    number = num.group(1) + (num.group(2) or "").upper()
-    rest = s[num.end():].strip(" ,.-")
-    low = " " + " ".join(re.findall(r"[a-z0-9]+", rest.lower())) + " "
-    for alias, name in _towns(aliases):           # "123 EXAMPLE AVE PORT CHESTER": the town at the end
-        if low.endswith(f" {alias} ") and len(low.split()) > len(alias.split()):
+    words = (head + " ")[num.end():].replace(",", " ").split()
+    if num.group(2) and num.group(2).lower() in "nsew":      # "12W EXAMPLE AVE": the street's direction, not 12W
+        number = num.group(1)
+        words = [num.group(2)] + words
+    elif num.group(2):
+        number = num.group(1) + num.group(2).upper()
+    elif num.group(3):
+        number = f"{num.group(1)} 1/2"
+    elif num.group(4):
+        number = f"{num.group(1)}-{num.group(4)}" if num.group(4) != num.group(1) else num.group(1)
+    else:
+        number = num.group(1)
+    low = [re.sub(r"[^a-z0-9#-]", "", w.lower()) for w in words]
+    for alias, name in _towns(aliases):           # "123 EXAMPLE AVE PORT CHESTER" / "... APT 3 PORT_CHESTER": the town
+        n = len(alias.split())                    # at the end
+        if len(low) > n and " ".join(low[-n:]) == alias:
             town = town or name
-            words = rest.split()
-            rest = " ".join(words[:len(words) - len(alias.split())])
+            words, low = words[:-n], low[:-n]
             break
-    rest = rest.strip(" ,.-")
-    if not re.search(r"[a-z]", rest, re.I):
+    street_end, bldg, parts = _units(low)
+    raw = " ".join(words).strip(" ,.-")
+    street = " ".join(words[:street_end]).strip(" ,.-")
+    if not re.search(r"[a-z]", street, re.I):
         return None
-    return Parsed(number, rest, unit, town)
+    return Parsed(number, street, " ".join(parts), town, bldg, raw)
+
+
+def _suffix_at(low: list[str]) -> int:
+    """Where the street's suffix is (the last word that is one: "st", "avenue"), -1 for none."""
+    at = -1
+    for i, w in enumerate(low):
+        if STREET_TYPES.get(w, w) in TYPE_ABBRS:
+            at = i
+    return at
+
+
+def _units(low: list[str]) -> tuple[int, str, list[str]]:
+    """(where the street ends, the building "bldg 3" or '', the parts of the building ["2b", "fl 3", "rear"]) from a
+    location's words after its house number, lower case."""
+    suffix = _suffix_at(low)
+    i, start, bldg, parts = 1, None, "", []
+    while i < len(low):
+        w = low[i].rstrip(".")
+        nxt = low[i + 1].lstrip("#") if i + 1 < len(low) else ""
+        took = 0
+        if w in UNIT_WORD and nxt and UNIT_ID.match(nxt):            # APT 3, UNIT 2B, BLDG 3, FL 2, LOT 7
+            kind = UNIT_WORD[w]
+            if kind == "bldg":
+                bldg = f"bldg {nxt}"
+            else:
+                parts.append(nxt if kind == "apt" else f"{kind} {nxt}")
+            took = 2
+        elif w.startswith("#") and UNIT_ID.match(w):                 # #2B
+            parts.append(w.lstrip("#"))
+            took = 1
+        elif ORDINAL_FL.match(w) and nxt in ("fl", "flr", "floor"):  # 3RD FL
+            parts.append("fl " + ORDINAL_FL.match(w).group(1))
+            took = 2
+        elif w in BARE_UNIT and 0 <= suffix < i:                     # after the suffix: REAR, BSMT, UPPER
+            parts.append(BARE_UNIT[w])
+            took = 1
+        if took:
+            start = i if start is None else start
+            i += took
+        elif start is not None:                   # a word after a unit that is not one: keep it out of the street too
+            i += 1
+        else:
+            i += 1
+    return (len(low) if start is None else start), bldg, parts
 
 
 def _key(p: Parsed, street: str, town: str, how: str) -> Key:
     sk = street_key(street)
     t = (town or "").lower()
-    bldg = f"{p.lot}|{sk}|{t}"
-    label = f"{p.number} {proper_case(sk if how == 'text' else street)}" + (f", {town}" if town else "")
+    bldg = f"{p.lot}|{sk}|{t}" + (f"|{p.bldg}" if p.bldg else "")       # a complex's building is a building
+    label = (f"{p.number} {proper_case(sk if how == 'text' else street)}" + (f" {p.bldg.title()}" if p.bldg else "")
+             + (f", {town}" if town else ""))
     return Key(bldg + (f"|{p.unit}" if p.unit else ""), bldg, f"{sk}|{t}", how, label)
+
+
+def bldg_parts(bldg_key: str) -> tuple[str, str, str, str]:
+    """'12|example ave|port chester|bldg 3' -> ('12', 'example ave', 'port chester', 'bldg 3')."""
+    p = (bldg_key.split("|") + ["", "", "", ""])[:4]
+    return p[0], p[1], p[2], p[3]
 
 
 def meters(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -161,22 +227,31 @@ def bbox(lat: float, lon: float, m: float = GROUP_M) -> tuple[float, float, floa
 
 
 def snap(p: Parsed, geocode: Callable[[str], list[dict] | None], town_of: Callable[[str], str],
-         point: tuple[float, float] | None = None) -> Key | None:
+         point: tuple[float, float] | None = None, town_hint: str = "") -> Key | None:
     """The gazetteer's reading of a parsed address, when it is sure: an address (not a street or a place), the same
-    house number, SNAP_CONFIDENCE, and near the incident's own pin if it has one."""
-    q = f"{p.number} {p.street}" + (f", {p.town}" if p.town else "")
-    try:
-        ms = geocode(q) or []
-    except Exception:  # noqa: BLE001 - a key is never worth an error
-        return None
-    for m in ms:
-        if m.get("kind") != "address" or float(m.get("confidence") or 0) < SNAP_CONFIDENCE or not m.get("street"):
-            continue
-        if re.sub(r"\D", "", str(m.get("house_number") or "")) != p.lot:
-            continue
-        if point is not None and m.get("lat") is not None and meters(point[0], point[1], m["lat"], m["lon"]) > SNAP_M:
-            continue
-        return _key(p, m["street"], town_of(m.get("municipality") or "") or p.town, "gazetteer")
+    house number, SNAP_CONFIDENCE, near the incident's own pin if it has one, and, with no pin, in the town the text
+    names (or the hint) if it names one. The street as written first, then with any unit words left in ("Rear Example
+    Rd" may be the street's own name)."""
+    want = p.town or town_hint
+    tries = [p] + ([Parsed(p.number, p.raw_street, "", p.town, "", p.raw_street)] if p.raw_street and p.raw_street != p.street else [])
+    for t in tries:
+        q = f"{t.first} {t.street}" + (f", {want}" if want else "")
+        try:
+            ms = geocode(q) or []
+        except Exception:  # noqa: BLE001 - a key is never worth an error
+            return None
+        for m in ms:
+            if m.get("kind") != "address" or float(m.get("confidence") or 0) < SNAP_CONFIDENCE or not m.get("street"):
+                continue
+            hn = re.match(r"\d+", str(m.get("house_number") or ""))
+            if not hn or hn.group(0) != t.first:
+                continue
+            if point is not None and m.get("lat") is not None and meters(point[0], point[1], m["lat"], m["lon"]) > SNAP_M:
+                continue
+            town = town_of(m.get("municipality") or "") or t.town
+            if point is None and want and town and town != want:
+                continue                          # the text says another town: not this one's reading
+            return _key(t, m["street"], town, "gazetteer")
     return None
 
 
@@ -194,7 +269,7 @@ def key_incident(inc: dict, aliases: dict[str, str], town_of: Callable[[str], st
             parsed.append(p)
     if geocode is not None:
         for p in parsed:
-            k = snap(p, geocode, town_of, point)
+            k = snap(p, geocode, town_of, point, town_hint)
             if k is not None:
                 return k
     elif parsed:

@@ -53,7 +53,9 @@ class Activity:
     # -- writing ------------------------------------------------------------------------------------------
 
     def record(self, email: str, kind: str, route: str = "", summary: str = "", number: str | None = None,
-               ok: bool = True, ip: str = "", ua: str = "", session: str = "") -> None:
+               ok: bool = True, ip: str = "", ua: str = "", session: str = "", logged: str | None = None) -> None:
+        """logged: what the server log (CloudWatch) says instead of the summary (a search's filters can hold an address
+        or a name: they stay in this table only)."""
         if not email or kind not in KINDS:
             return
         now = self.clock()
@@ -63,7 +65,7 @@ class Activity:
                 "INSERT INTO user_activity (at, email, kind, route, summary, incident_number, ok, ip, ua, session) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (now, email, kind, route, summary, number or None, int(ok), ip, ua, session[:64]))
-        self.log(f"CAD activity: {email}: {summary}{f' [{number}]' if number else ''} ({route}) ip={ip or '-'}"
+        self.log(f"CAD activity: {email}: {summary if logged is None else logged}{f' [{number}]' if number else ''} ({route}) ip={ip or '-'}"
                  + (f" ua={ua[:60]}" if kind == "signin" else ""))
         self._maybe_prune(now)
 
