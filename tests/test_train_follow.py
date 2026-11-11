@@ -275,8 +275,11 @@ let fc = null;
   out.titles = info.find("ml-lines")[0].children.map((c) => c.title || "");
   T += 12000;                                                    // 12 s on, no newer fix: older, still a normal age (#390)
   m.draw(false, T); m.live.refresh(); m.tick();
-  out.mid = mine().estimated; out.rowsMid = rows();
-  T += 20000;                                                    // 32 s on: well over 30 s old
+  out.mid = mine().estimated; out.rowsMid = rows(); out.midDim = mine().dim;
+  T += 8000;                                                     // 20 s on: over 20 s old, under 30 (#390)
+  m.draw(false, T);
+  out.dim = [mine().dim, mine().estimated];
+  T += 12000;                                                    // 32 s on: well over 30 s old
   m.draw(false, T); m.live.refresh(); m.tick();
   out.old = mine().estimated;
   out.rowsOld = rows(); out.chipOld = host.find("ac-follow-t")[0].textContent;
@@ -284,6 +287,7 @@ let fc = null;
 })();
 """, {"answers": [{**x["body"], "got": x["got"]} for x in a], "got": a[0]["got"], "id": t0["id"]})
     assert o["fresh"] is False and o["mid"] is False and o["old"] is True                    # filled, then hollow
+    assert o["midDim"] is False and o["dim"] == [True, False]                                # a little faded from 20 s
     import re
     assert any(re.fullmatch(r"\d+ mph \(GPS \d+( · moved \d+)?\)", x) for x in o["titles"])   # its speed's basis (#390)
     pos = lambda rs: next(r for r in rs if r.endswith(" s ago"))

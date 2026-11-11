@@ -207,8 +207,8 @@ CLUSTER_M = 25.0                 # fixes this close along the line: the same poi
 POINT_KNOWN_N = 2                # a point seen this many times (by new fixes, not re-reads) is known
 POINT_AHEAD_M = 3000.0           # a known point further ahead than this: none (fall back)
 HOLD_FALLBACK_M = 1500.0
-HOLD_FALLBACK_TT_M = 2500.0      # a GPS fix (TrainTime): carried on at its speed for up to RAIL_CRUISE_S (motion.js), then
-                                 # eased to a stop: at 80 mph about 1.9 km, so the fallback never stops it short
+HOLD_FALLBACK_TT_M = 2500.0      # a GPS fix (TrainTime): carried on at its speed for up to RAIL_CRUISE_S (20 s, motion.js),
+                                 # then eased to a stop: at 80 mph about 1.2 km, so the fallback never stops it short
 POINTS_SAVE_S = 300.0
 PREDICT_S = 120.0                # the page carries a train on at most this long past its fix
 STALE_S = 60.0                   # a feed this old: the page freezes the trains where they were
@@ -1239,9 +1239,9 @@ STOP_JITTER_M = 150.0            # a train already stopped: a fix less than this
 A_MIN, A_MAX = -1.5, 1.0         # the filter's acceleration (m/s^2), clamped: past a service brake is noise
 A_BRAKE = -0.2                   # falling faster than this (m/s^2): braking (the page brakes it too: motion.js RAIL_BRAKE_A)
 TT_HORIZON_S = 75.0              # a GPS fix is carried on at most this long past its time (predict_until). The page runs it
-                                 # on at its speed (no slowing on age alone) for RAIL_CRUISE_S (30 s: TrainTime's fixes are
-                                 # 3 to 16 s old when read, measured #375, read every 5 s), then eases it to a stop; the
-                                 # hub's own limits come first (POS_MAX_AGE_S 40 s: GTFS-realtime's position; STALE_S)
+                                 # on at its speed (no slowing on age alone) for RAIL_CRUISE_S (20 s: TrainTime's fixes are
+                                 # 3 to 16 s old when read, measured #375, read every 5 s), then eases it to a stop at its
+                                 # service brake; the hub's own limits come first (POS_MAX_AGE_S 40 s, STALE_S)
 # The feed's speed, checked against the distance moved (speed_check): two GPS fixes' s, along the real track geometry,
 # over their own times. TrainTime's GPS speed agrees with that to 0.1 % on 2,900 measured pairs (traintime.py), so a
 # reading that disagrees with both the distance moved and the last reading is a bad reading, not a change of speed.
@@ -1249,20 +1249,25 @@ A_PHYS = 1.5                     # m/s^2: no train's speed changes faster (an M7
 MOVED_NOISE_M = 14.0             # two GPS fixes' along-track error (about 10 m each, #375), in the distance moved
 MOVED_MIN_S = 2.0                # fixes closer in time than this: no speed from the distance moved
 SPEED_TOL = 1.5                  # m/s: two readings this close agree (and a speed jump this much over A_PHYS dt is allowed)
+A_CONFIRM = -0.447               # m/s^2 (1 mph/s): one falling reading is braked on only this steep (and the distance moved
+                                 # agreeing); gentler, two in a row. (±1 mph of reading noise falls past A_BRAKE about 6 % of
+                                 # the time over 5 s; past this, almost never)
 
 
 # What a consist can do (#390): the drawn train never speeds up or slows down faster than its consist can (motion.js
 # railFollow). Per fleet (TrainTime's consist "fleet"): a0, the starting acceleration (m/s^2), tapering at speed as
 # power / mass (pw, W/kg = m^2/s^3: a(v) = min(a0, pw / v)); b, its full service brake (the drawn train's limit);
-# bs, an ordinary stop's braking (the page brakes a prediction into a scheduled stop at this); vmax, its service speed.
+# bs, an ordinary stop's braking (the page brakes a prediction into a scheduled stop at this); vmax, its service speed
+# (the drawn train's catch-up never runs it faster, unless the train itself is).
 #   M8 (Kawasaki EMU, New Haven Line): 2.0 mph/s starting acceleration, 0.89 m/s^2 (Univ. of New Haven field trial of
 #        the M8 against its rated 2.0 mph/s); eight 200 kW (270 hp) motors a married pair of ~64 t cars: 12.4 W/kg;
 #        80 mph in Metro-North service (en.wikipedia.org/wiki/M8_(railcar)). No published brake rate: the M7's below.
 #   M7 / M7A (Bombardier EMU): 2 mph/s acceleration; 3.0 mph/s service, 3.2 mph/s emergency braking; 80 mph in
 #        service (en.wikipedia.org/wiki/M7_(railcar)); its power per kg taken as the M8's (no published figure).
 #   Diesel push-pull (GE P32AC-DM + coaches): 275.8 kN starting tractive effort, 2.39 MW, 124.5 t
-#        (en.wikipedia.org/wiki/GE_Genesis); coaches (Shoreliners) about 50 t each (an assumption: no published
-#        weight); 1.0 m/s^2 braking assumed for a loco-hauled train. A longer train is heavier: slower to accelerate.
+#        (en.wikipedia.org/wiki/GE_Genesis), published; coaches (Shoreliners) about 50 t each and 1.0 m/s^2 braking
+#        for a loco-hauled train, assumed (no published figures). A longer train is heavier: slower to accelerate.
+# (Published figures as cited; the M8's brake and power per kg for the M7 are assumed from its sister fleet.)
 # An EMU's every car is motored, so its length doesn't change what it can do; a diesel's does (one locomotive).
 # An ordinary stop is braked at about 0.8 m/s^2 (the run profile's DECEL is 0.75). Unknown fleet: the M8 (the line's
 # usual train), which is the quickest here, so the limits never hold the drawn train back from the real one.
@@ -1294,8 +1299,8 @@ def speed_check(last: dict | None, s: float, d: int, t: float, vf: float | None,
       - the speed changed faster than any train can (A_PHYS) and nothing moved confirms it: held too, until a second
         reading agrees (#379: one bad reading is no stop).
       - the reading steady but the distance moved disagrees: the position is off ("position"); the speed stands.
-    A fall in speed is braked on (brake) only when the distance moved agrees with it, or the reading before was
-    falling too, or two readings agree."""
+    A fall in speed is braked on (brake) only when it is steep (A_CONFIRM, 1 mph/s) and the distance moved agrees with
+    it, or the reading before was falling too, or a held reading is agreed with."""
     out = {"vf": vf, "moved": None, "bad": "", "brake": False, "fell": False}
     if last is None or last.get("s_raw") is None or not (t > last.get("fix_at", t)):
         return out
@@ -1303,6 +1308,8 @@ def speed_check(last: dict | None, s: float, d: int, t: float, vf: float | None,
     if gps and last.get("gps") and dt >= MOVED_MIN_S:
         out["moved"] = max(0.0, (s - last["s_raw"]) * d / dt)
     vl = last.get("vf")
+    if last.get("repeat") and isinstance(last.get("vf_raw"), (int, float)):
+        vl = last["vf_raw"]                              # the last was the same GPS position again (held at 0): its reading
     if vf is None or not isinstance(vl, (int, float)):
         return out
     moved, tol = out["moved"], (max(SPEED_TOL, 2 * MOVED_NOISE_M / dt + 0.1 * max(vf, vl)) if dt else SPEED_TOL)
@@ -1316,9 +1323,9 @@ def speed_check(last: dict | None, s: float, d: int, t: float, vf: float | None,
         out.update(vf=vl, bad="speed")                                  # faster than any train: wait for a second one
     elif moved is not None and not agrees and abs(vf - vl) <= SPEED_TOL:
         out["bad"] = "position"
-    falling = vf < vl - SPEED_TOL / 3
-    out["fell"] = falling
-    out["brake"] = not out["bad"] and falling and (agrees or second or bool(last.get("fell")))
+    rate = (vf - vl) / dt if dt else 0.0
+    out["fell"] = not out["bad"] and rate < A_BRAKE
+    out["brake"] = out["fell"] and ((agrees and rate <= A_CONFIRM) or second or bool(last.get("fell")))
     if out["bad"] == "speed":
         out["held"] = vf
     return out
@@ -1448,7 +1455,7 @@ class Tracker:
                 if last is not None and last["raw"] == raw and gps and last.get("gps", True):
                     # the same GPS position again, newer: it hasn't moved, whatever its speed says (#375). (A SIGNAL
                     # location is a fixed point: the same one again says nothing, #379.)
-                    vf, chk = 0.0, {"moved": 0.0, "brake": True}
+                    vf, chk = 0.0, {"moved": 0.0, "brake": True, "repeat": True}
                 else:
                     chk = speed_check(last, s, d, fix_at, p.get("speed"), gps)
                     vf = chk["vf"]
@@ -1459,7 +1466,7 @@ class Tracker:
                                "bearing": p.get("bearing"), "fix_at": fix_at, "first_read": first and src == "gtfs", "src": src,
                                "v": v, "a": a, "vf": vf, "s_raw": s_raw, "gps": gps, "vf_raw": p.get("speed"),
                                "moved": chk.get("moved"), "bad": chk.get("bad", ""), "fell": chk.get("fell", False),
-                               "vf_held": chk.get("held")}
+                               "vf_held": chk.get("held"), "repeat": bool(chk.get("repeat"))}
             if not first and src == "gtfs":              # one we saw appear: a point of the MTA's (GPS fixes are anywhere)
                 self.points.learn(raw[0], raw[1], s, d, at)
         for tid in [k for k in self.fixes if k not in seen]:

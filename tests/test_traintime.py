@@ -815,6 +815,54 @@ def test_a_speed_reading_is_checked_against_the_distance_moved():
     assert r7["bad"] == "speed" and r7["vf"] == 20.0
 
 
+def test_speed_noise_is_not_braking():
+    """#390 (review): ±1 mph of reading noise often falls past A_BRAKE over a few seconds. One falling reading is braked
+    on only when it is steep (1 mph/s) and the distance moved agrees; a gentler fall needs a second falling reading."""
+    from sizeup.trains import speed_check
+    last = {"s_raw": 1000.0, "fix_at": NOW, "vf": 20.0, "gps": True, "a": 0.0}
+    r = speed_check(last, 1000.0 + 5 * 19.4, 1, NOW + 5, 18.8, True)                 # -1.2 m/s in 5 s: noise-sized
+    assert r["fell"] and not r["brake"]
+    r2 = speed_check({**last, "s_raw": 1097.0, "fix_at": NOW + 5, "vf": 18.8, "fell": True}, 1097.0 + 5 * 18.2, 1, NOW + 10,
+                     17.6, True)
+    assert r2["brake"]                                                               # two in a row: slowing
+    import random
+    rnd, false = random.Random(5), 0
+    for _ in range(2000):                                                            # a steady 20 m/s, read with ±1 mph
+        a, b = 20 + rnd.gauss(0, 0.447), 20 + rnd.gauss(0, 0.447)
+        x = speed_check({**last, "vf": a}, 1100.0 + rnd.gauss(0, 14), 1, NOW + 5, b, True)
+        false += x["brake"]
+    assert false == 0
+
+
+def test_a_repeated_gps_position_then_moving_is_moving_at_once(tmp_path):
+    """#390 (review): the same GPS position again holds the train at 0; the next fix that moved on at its speed is
+    taken as moving at once, not held a fix longer as a speed "jump" from 0."""
+    from sizeup.trains import speed_check
+    rep = {"s_raw": 1000.0, "fix_at": NOW, "vf": 0.0, "vf_raw": 20.0, "repeat": True, "gps": True, "a": 0.0}
+    r = speed_check(rep, 1100.0, 1, NOW + 5, 20.0, True)
+    assert r["bad"] == "" and r["vf"] == 20.0
+    tr, clock, fetch = provider(tmp_path)
+    tr.tick()
+    looking(tr, clock)
+    doc = json.loads(LOC)
+    x = next(r for r in doc if r.get("train_num") == "9901")
+    x["location"].update(timestamp=int(clock.t) - 4, speed=45.0)
+    fetch.loc = json.dumps(doc).encode()
+    tr.refresh_rt()
+    tr.tt.tick()
+    for step in (0, 1):
+        clock.t += 5
+        if step:                                                                     # then on, 100 m west
+            x["location"].update(latitude=round(x["location"]["latitude"] - 0.0006, 6),
+                                 longitude=round(x["location"]["longitude"] - 0.0009, 6))
+        x["location"].update(timestamp=int(clock.t) - 4)
+        fetch.loc = json.dumps(doc).encode()
+        view(tr, clock)
+        tr.tt.tick()
+        t = {x_["train"]: x_ for x_ in tr.public()["trains"]}["9901"]
+        assert t["mode"] == ("stopped" if step == 0 else "reported")
+
+
 def test_one_bad_speed_reading_is_no_stop_on_the_hub(tmp_path, model):
     """#379: a train at 20 m/s with one reading of 0 is neither stopped nor braked (the page draws it on); the next
     reading at 20 carries on."""

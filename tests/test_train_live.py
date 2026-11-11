@@ -183,19 +183,46 @@ def back_steps(frames):
     return [(b[0], b[1] - a[1], b[2]) for a, b in zip(fr, fr[1:]) if b[1] - a[1] > 3.0]
 
 
+def glides_back(frames):
+    """Each run of frames moving back (east) more than 0.05 m a frame: {s (how long), m (how far), peak (m/s), ringed}"""
+    fr = [(t, s, snap) for t, s, _, snap in frames if s is not None]
+    runs, cur = [], None
+    for a, b in zip(fr, fr[1:]):
+        back = b[1] - a[1]
+        if back > 0.05:
+            cur = cur or {"t0": a[0], "m": 0.0, "peak": 0.0, "ringed": True}
+            cur.update(t1=b[0], m=cur["m"] + back, peak=max(cur["peak"], back / (b[0] - a[0])), ringed=cur.get("last", True),
+                       last=cur["ringed"] and b[2])   # (the glide's last frame is already off it)
+        elif cur:
+            runs.append(cur)
+            cur = None
+    if cur:
+        runs.append(cur)
+    return [{"s": r["t1"] - r["t0"], "m": r["m"], "peak": r["peak"], "ringed": r["ringed"]} for r in runs]
+
+
+def smooth_back(frames, max_s=6.0):
+    """#390: every move back is a glide (no jump: no frame back more than its glide's own pace), ringed when it is more
+    than a few metres, done within GLIDE_MAX_S (a little more when a new fix re-aims it on the way)"""
+    for g in glides_back(frames):
+        T = max(2.0, min(4.0, g["m"] / 30.0))
+        assert g["s"] <= max_s and (g["m"] < 1.0 or g["peak"] <= 1.5 * g["m"] / T * 1.1 + 2.0)
+        assert g["m"] <= 3.0 or g["ringed"]
+
+
 @pytest.mark.parametrize("brake_at", [15, 21, 27, 33])
 def test_a_train_braking_to_a_stop_mid_track_is_drawn_where_it_stopped(tmp_path, brake_at):
     """#375: "if a train stops mid track we want to know where accurately". At 52 mph, a service brake (0.75 m/s^2) right
-    after a fix, to a stop 360 m on, mid-track; the feed's fixes still 3-16 s old: drawn at most 60 m past where it
-    stopped, and it ends where the GPS says it stopped. #390: until a fix says it is braking it is drawn on at its speed,
-    so by then it may be drawn ahead of the train: put back once, at once and ringed (no slide), when that fix comes."""
+    after a fix, to a stop 360 m on, mid-track; the feed's fixes still 3-16 s old: it ends where the GPS says it stopped. #390: until a fix says it is braking it is drawn on at its speed,
+    so by then it may be drawn ahead of the train; then braked smoothly at its service brake (the user: "fine with an
+    overshoot if we keep it smooth") and glided back (2 to 4 s, faintly ringed)."""
     frames, truth = drive(tmp_path, run=braking(brake_at), run_s=brake_at + 65)
     stop = truth(frames[0][0] + 10_000)
     fr = [(t, s) for t, s, *_ in frames if s is not None]
     past = max(stop - s for _, s in fr)                     # westbound: past the stop is a lower s
-    back = back_steps(frames)
-    assert past <= 60
-    assert len(back) <= 1 and all(ring and m <= 80 for _, m, ring in back)   # at most one put-back, ringed
+    assert past <= 250                                      # (#390: on past it, braked smoothly; measured 70-210 m)
+    smooth_back(frames)                                     # glided back, never put back at once (#390)
+    assert len([g for g in glides_back(frames) if g["m"] > 10]) <= 1
     assert abs(fr[-1][1] - stop) <= 25                      # at rest where it stopped (GPS noise ±10 m)
     assert fr[-1][1] == fr[-20][1]                          # and still
 
@@ -239,18 +266,18 @@ def test_one_bad_speed_reading_is_no_stop(tmp_path):
 
 def test_a_stop_with_no_sign_of_it_before_the_feed_goes_quiet(tmp_path):
     """#390, the trade-off, measured: a 45 mph train brakes (0.75 m/s^2) right after a moving fix and no fix comes until
-    it has stopped. Nothing says it is slowing, so it is drawn on at its speed (it was drawn slowing on age alone
-    before: within ~60 m, at the cost of every steady train), never hollow while the fix is under 30 s old; then the
-    stopped fix puts it back, at once and ringed, where it stopped."""
+    it has stopped. Nothing says it is slowing, so it is drawn on at its speed until its fix is RAIL_CRUISE_S (20 s)
+    old, then eased to a stop at its service brake (it was drawn slowing on age alone before: within ~60 m, at the cost
+    of every steady train); then the stopped fix glides it back where it stopped."""
     brake = 40
     frames, truth = drive(tmp_path, run=braking_v(V45, brake),
                           run_s=brake + 60, cadence="real", start_m=1000.0, quiet=(brake - 2, brake + V45 / 0.75 + 1))
     stop = truth(frames[0][0] + 10_000)
     fr = [(t, s) for t, s, *_ in frames if s is not None]
     past = max(stop - s for _, s in fr)
-    assert 150 <= past <= 450                                # (45 mph: ~340 m; see the PR)
-    back = back_steps(frames)
-    assert len(back) == 1 and back[0][2]                     # put back once, ringed
+    assert 100 <= past <= 300                                # (45 mph: ~230 m; see #392)
+    smooth_back(frames)
+    assert 1 <= len([g for g in glides_back(frames) if g["m"] > 10]) <= 2            # glided back (once its ease rests)
     assert abs(fr[-1][1] - stop) <= 25 and fr[-1][1] == fr[-20][1]
 
 
@@ -264,18 +291,19 @@ def braking_v(v, at_s, b=0.75):
 
 
 def test_a_feed_gone_quiet_eases_the_train_to_a_stop_and_it_is_drawn_hollow_after_30_s(tmp_path):
-    """#390: no fix for 50 s at 45 mph: on at its speed while the last fix is a normal age, hollow past 30 s and eased to
-    a stop from there (not run on for ever); when fixes come again it is put on at once (ringed) or caught up, never
-    slid back."""
+    """#390: no fix for 50 s at 45 mph: on at its speed while the last fix is a normal age, eased to a stop from 20 s
+    (a little faded), hollow past 30 s; when fixes come again it glides on to them, never jumps."""
     frames, truth = drive(tmp_path, run=lambda dt: (V45 * dt, V45), run_s=125, cadence="real", start_m=1000.0, quiet=(40, 90))
     t0 = frames[0][0] - 1
     hollow = [t - t0 for t, s, old, _ in frames if old]
-    assert hollow and min(hollow) > 40 + 25                  # (its last fix was taken before 40 s)
+    assert hollow and min(hollow) > 40 + 25                  # (its last fix was taken before 40 s; hollow past 30 s)
     v = speeds_1s(frames, t0 + 20, t0 + 124)
-    assert min(v[:250]) >= 0.85 * V45 - 0.5                  # 20-45 s: steady
+    assert min(v[:200]) >= 0.85 * V45 - 0.5                  # 20-40 s: steady
+    fr = [(t, s, snap) for t, s, _, snap in frames if s is not None]
+    assert max(abs(b[1] - a[1]) for a, b in zip(fr, fr[1:]) if not (a[2] or b[2])) <= 3.0   # no jump outside a glide
     stillest = min(v[300:700])
     assert stillest < 0.5                                    # eased to a stop while nothing came
-    assert all(ring for _, _, ring in back_steps(frames))
+    smooth_back(frames)
     at = lambda T_: min(((t, s) for t, s, *_ in frames if s is not None), key=lambda x: abs(x[0] - T_))
     assert abs(at(t0 + 110)[1] - truth(at(t0 + 110)[0])) <= 30            # and back with the train (before it brakes for Rye)
 

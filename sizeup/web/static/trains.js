@@ -33,8 +33,9 @@
 //   Follow       a click on a train also follows it (mapfollow.js, as aircraft and rigs): centred and kept centred as
 //                it glides, a "Following 9901 · NH west · 67 mph · 3 s ago" chip with ✕; its box stays live while
 //                open (each new fix, the milepost where it is drawn, the fix's age once a second) (#375). A GPS fix over
-//                OLD_FIX_S old: drawn hollow and said "Predicted · N s ago"; a train put back to where a fix says it
-//                stopped (motion.js railFollow): ringed for a moment.
+//                DIM_FIX_S (20 s) old: a little faded (its prediction easing to a stop); over OLD_FIX_S (30 s): drawn
+//                hollow and said "Predicted · N s ago"; a train gliding back to where a fix says it stopped (motion.js
+//                railFollow): faintly ringed while it glides.
 //   Panel        TrainLayer.panel(inc, host) (cadmap.js, under the event's map): for an event within 150 m of
 //                the tracks or a station, the next trains each way in the next 15 minutes at the nearest
 //                station (or the event's point on the tracks): minutes away, stops or passes, delay, track;
@@ -64,8 +65,11 @@ window.TrainLayer = (() => {
   const POLL_MS = 5000, PANEL_MS = 30000;
   const ANIMATE_MS = 100;                    // ~10 redraws a second while a train moves (motion.js)
   const PREDICTED_M = 5;                     // drawn this far ahead of the MTA's report: "predicted"
-  const OLD_FIX_S = 30;                      // a GPS fix older than this: drawn hollow, "Predicted · N s ago" (#375): twice
-                                             // the oldest a fix normally is when read (16 s), so a steady train never is (#390)
+  const DIM_FIX_S = 20;                      // a GPS fix older than this: drawn a little faded, its prediction easing to a
+                                             // stop (motion.js RAIL_CRUISE_S); past the oldest a fix normally is when read
+                                             // (16 s), so a steady train never is (#390)
+  const OLD_FIX_S = 30;                      // ... older than this: drawn hollow, "Predicted · N s ago" (#375, #390)
+  const DIM_OPACITY = 0.7;
   const STALE_OPACITY = 0.45;                // a train frozen on an old feed: faded
   const BACKOFF_MS = [10000, 60000];         // a failed poll: 10 s doubling to a minute
   const SRC_LINE = "tr-line", SRC_ST = "tr-stations", SRC_TR = "tr-trains", SRC_CARS = "tr-cars", SRC_ROUTE = "tr-route";
@@ -350,7 +354,7 @@ window.TrainLayer = (() => {
     const { tr, s, back } = f, n = carsOf(t), len = n * M_PER_CAR;
     const unsure = !!f.own && t.lane_how !== "said";          // on a numbered track nothing near says (held, or the outer default, #371)
     const part = (a, b, kind) => ({ type: "Feature", geometry: { type: "LineString", coordinates: piece(tr, Math.min(a, b), Math.max(a, b)) },
-                                    properties: { id: t.id, estimated: !!t.estimated, stale: !!t.stale, unsure, kind } });
+                                    properties: { id: t.id, estimated: !!t.estimated, stale: !!t.stale, dim: !!t.dim, unsure, kind } });
     const cars = [part(s, s + back * len, "body"), part(s, s + back * M_PER_CAR, "cab")];
     if (t.stale) cars.pop();                  // faded: no cab over the body (two layers at partial opacity: a brighter cab)
     for (let k = 1; k < n; k++) cars.push(part(s + back * (k * M_PER_CAR - GAP_M / 2), s + back * (k * M_PER_CAR + GAP_M / 2), "gap"));
@@ -480,7 +484,8 @@ window.TrainLayer = (() => {
     return `${window.MapFollow ? MapFollow.ago(s * 1000) : `${Math.max(0, Math.round(s))} s`} ago`;
   }
   // a GPS fix (TrainTime) gone old: the train is drawn on a prediction, not where it was seen (#375)
-  const oldFix = (t, d, now) => t.pos_src === "traintime" && !t.estimated && typeof t.fix_at === "number" && fixAgeS(t, d, now) > OLD_FIX_S;
+  const fixOlder = (t, d, now, lim) => t.pos_src === "traintime" && !t.estimated && typeof t.fix_at === "number" && fixAgeS(t, d, now) > lim;
+  const oldFix = (t, d, now) => fixOlder(t, d, now, OLD_FIX_S);
   // the follow chip: "Following 9901 · NH west · 67 mph · 3 s ago"; its fix over OLD_FIX_S old: "Following 9901 · NH west ·
   // Predicted · 34 s ago"
   const followText = (t, d) => [`Following ${t.train}`, [t.tt && t.tt.branch, dirWord(t)].filter(Boolean).join(" "),
@@ -592,7 +597,8 @@ window.TrainLayer = (() => {
       // estimate; the front car's nose rounded (the cab); the cars' ends as thin gaps across it from GAP_ZOOM. Every
       // outline under every body, so the cab's outline never shows on the car behind it.
       const dark = token("--bg", HALO);
-      const fade = ["case", ["get", "stale"], STALE_OPACITY, 1];        // frozen on an old feed: faded
+      const fade = ["case", ["get", "stale"], STALE_OPACITY, ["get", "dim"], DIM_OPACITY, 1];   // frozen on an old feed: faded;
+                                                                       // a GPS fix over DIM_FIX_S old: a little (#390)
       const carW = ["interpolate", ["linear"], ["zoom"], 10, 4, 15, 6, 17, 9, 19, 28];
       const caseW = ["interpolate", ["linear"], ["zoom"], 10, 7, 15, 9, 17, 12, 19, 32];
       const part = (kind) => ["==", ["get", "kind"], kind];
@@ -613,11 +619,11 @@ window.TrainLayer = (() => {
                                                    "line-opacity": fade } }, before);
       map.addLayer({ id: "tr-gap", type: "line", source: SRC_CARS, filter: part("gap"), minzoom: GAP_ZOOM, layout: lay("butt"),
                      paint: { "line-color": ["case", ["get", "estimated"], warn, HALO], "line-width": carW, "line-opacity": fade } }, before);
-      // a train just put back to where a fix says it stopped (motion.js railFollow, #375): ringed for a moment, so the
-      // correction is seen as one rather than as the train moving
+      // a train gliding onto a correction (motion.js railFollow's glide, #375, #390: back to where a fix says it stopped,
+      // or on to a fix far ahead): a faint ring while it glides, so the correction reads as one, not as the train moving
       map.addLayer({ id: "tr-snap", type: "circle", source: SRC_TR, filter: ["==", ["get", "snap"], true], layout: vis,
                      paint: { "circle-radius": ["interpolate", ["linear"], ["zoom"], 10, 8, 15, 16, 17, 26], "circle-color": "rgba(0,0,0,0)",
-                              "circle-stroke-color": warn, "circle-stroke-width": 2, "circle-stroke-opacity": 0.9 } }, before);
+                              "circle-stroke-color": warn, "circle-stroke-width": 1.5, "circle-stroke-opacity": 0.45 } }, before);
       // a train off the line: an icon lying flat along its heading, to scale once zoomed in (ICON_SIZE)
       map.addLayer({ id: "tr-train", type: "symbol", source: SRC_TR, filter: ["!", ["get", "onTrack"]],
                      layout: { ...vis, "icon-image": ["get", "icon"], "icon-rotate": ["get", "bearing"],
@@ -711,10 +717,11 @@ window.TrainLayer = (() => {
         const p = pos.get(t.id), stale = motion && pos.has(t.id) ? motion.stale(t.id) : own;
         const s = p ? Math.round(p.s * 10) / 10 : t.s;
         const aged = oldFix(t, d, now), snap = !!motion && Motion.snapped && Motion.snapped(motion.items.get(t.id), now);
+        const dim = !aged && fixOlder(t, d, now, DIM_FIX_S);
         // ahead of the MTA's report while on its way (a stopped train held at its station's mark isn't a prediction)
-        drawn.set(t.id, { s, stale, old: aged, snap,
+        drawn.set(t.id, { s, stale, old: aged, dim, snap,
                           ahead: !t.estimated && t.mode !== "stopped" && typeof t.s === "number" && (s - t.s) * t.d > PREDICTED_M });
-        key.push(`${t.id}:${s}:${stale ? 1 : 0}${aged ? 1 : 0}${snap ? 1 : 0}`);
+        key.push(`${t.id}:${s}:${stale ? 1 : 0}${aged ? 1 : 0}${dim ? 1 : 0}${snap ? 1 : 0}`);
       }
       const sig = key.join("|");
       this.drawn = drawn;
@@ -723,7 +730,7 @@ window.TrainLayer = (() => {
       const cars = [];
       this.at = new Map();
       this.map.getSource(SRC_TR).setData(fc((d.trains || []).map((x) => {
-        const w = drawn.get(x.id), t = { ...x, s: w.s, ds: typeof x.s === "number" ? w.s - x.s : 0, stale: w.stale,
+        const w = drawn.get(x.id), t = { ...x, s: w.s, ds: typeof x.s === "number" ? w.s - x.s : 0, stale: w.stale, dim: w.dim,
                                           estimated: !!x.estimated || w.old };          // an old fix: hollow, as an estimate
         const on = onTrack(t, this.line, this.lanes, this.tracks);
         if (on) cars.push(...on.cars);
@@ -732,7 +739,7 @@ window.TrainLayer = (() => {
         const [lon, lat] = on ? on.mid : [t.lon, t.lat];
         this.at.set(x.id, [lon, lat]);
         return pt(lon, lat, { id: t.id, train: t.train, towards: towards(t), bearing: t.bearing || 0, estimated: !!t.estimated,
-                              stale: w.stale, snap: w.snap, onTrack: !!on, icon: on ? "" : ensureIcon(this.map, t), anchor, off_lo, off_hi });
+                              stale: w.stale, dim: !!w.dim, snap: w.snap, onTrack: !!on, icon: on ? "" : ensureIcon(this.map, t), anchor, off_lo, off_hi });
       })));
       this.map.getSource(SRC_CARS).setData(fc(cars));
       if (this.following && this.at.has(this.following)) this.fol.pan(this.at.get(this.following));   // kept centred
@@ -982,7 +989,8 @@ window.TrainLayer = (() => {
       // the legend on screen (hollow: estimated, faded: stale, dashed: track not certain); the method behind an "i"
       const legend = h("div", "ml-note", "Hollow: estimated · faded: stale feed · dashed: track not certain ");
       const how = "Between reports a train runs on along its track, never past its next reporting point or stop; "
-        + "faded: the feed is out of date and it is held where it was. "
+        + "faded: the feed is out of date and it is held where it was; a little faded: no GPS position for 20 s, easing to a "
+        + "stop (hollow past 30 s). "
         + (this.tracks ? "Dashed: no stop near says its track (last said for an earlier stop, or not known: drawn on the outer track). " : "")
         + ((d.trains || []).some((t) => t.cars) ? "Cars as the MTA gives them." : `Drawn as ${LOOK_CARS} cars (the MTA doesn't say).`)
         + ` ${d.disclaimer || ""}.`;
