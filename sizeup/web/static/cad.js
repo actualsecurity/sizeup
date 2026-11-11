@@ -507,6 +507,9 @@ function callLive(o) {
 }
 const txNow = (name) => { const t = window.Radio && Radio.talkingFor(name); return !!t && !t.ended; };
 
+// The scope chip's hover (#370): "Paged: full department (Port Chester FD)", then where it came from ("From page",
+// " · feed: units" when the county feed disagreed: the page stands)
+const scopeTip = (sc) => `${sc.paged}\nFrom ${sc.source === "feed" ? "feed" : "page"}${sc.feed ? ` · feed: ${sc.feed}` : ""}`;
 function queueItem() {
   const li = el("li", "qi item");
   li.tabIndex = 0;
@@ -537,7 +540,7 @@ function fillQueueItem(li, inc) {
   if (inc.joint_call) type.append(el("span", "chip joint", inc.joint_call));
   if (inc.scope) {                    // full department or specific units (#370)
     const sc = el("span", "chip scope", inc.scope.short);
-    sc.title = `${inc.scope.paged}\nFrom ${inc.scope.source === "feed" ? "the county feed" : "the page"}`;
+    sc.title = scopeTip(inc.scope);
     type.append(sc);
   }
   const addr = el("div", "qa" + (inc.address ? "" : " dim"), inc.address || "No location");
@@ -621,7 +624,7 @@ function renderQueue() {
   const byAge = (a, b) => a.created_at - b.created_at;        // oldest first
   const sig = (i) => JSON.stringify([i.status, i.number, i.type, i.subtype, i.address, i.id === cad.sel, i.emergency,
     i.until_at, i.disposition, i.type_note, unconfirmed(i), i.joint_call, openAssignments(i).map((a) => [a.name, a.status, txNow(a.name)]),
-    i.closed_at, cad.listSig.length, canDo("dispatch"), airportLine(i), i.scope && [i.scope.short, i.scope.label, i.scope.source], queueExtra(i)]);
+    i.closed_at, cad.listSig.length, canDo("dispatch"), airportLine(i), i.scope && [i.scope.short, i.scope.label, i.scope.source, i.scope.feed], queueExtra(i)]);
   const opts = { key: (i) => String(i.id), sig, make: queueItem, fill: fillQueueItem };
   syncList($("#q-queued"), all.filter((i) => i.status === "queued").sort(byAge), { ...opts, empty: "None" });
   syncList($("#q-pending"), all.filter((i) => i.status === "pending" && i.emergency).sort(byAge),
@@ -708,7 +711,7 @@ function renderDetail() {
   show(scope, !!inc.scope);
   if (inc.scope) {                    // full department or specific units (#370, sizeup/cad/scope.py)
     stBadge(scope, inc.scope.short, "#9AA3AD");
-    scope.title = `${inc.scope.paged}\nFrom ${inc.scope.source === "feed" ? "the county feed" : "the page"}`;
+    scope.title = scopeTip(inc.scope);
   }
   setText($("#d-source"), inc.source === "manual" ? "Manual" : inc.feed && inc.source === "CAD feed" ? inc.feed.label : inc.source);
   show($("#d-accept"), inc.status === "queued");

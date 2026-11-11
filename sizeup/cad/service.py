@@ -1813,9 +1813,9 @@ class Cad:
         return self.store.update_incident(old["id"], fill, log=False)
 
     def _page_scope(self, iid: int, inc, note: bool = True) -> tuple[str, bool]:
-        """Full department or specific units, as the page says it (#370; a feed's stands): (the feed's own label when
-        it says otherwise ("units"), else ""; whether the page's reading is new there). note: that disagreement is a
-        timeline line of its own."""
+        """Full department or specific units, as the page says it (#370: the page's stands over a feed's): (the
+        feed's label when it says otherwise ("units"), else ""; whether the page's reading is new there). note: that
+        disagreement is a timeline line of its own."""
         try:
             return self.scope.on_page(iid, inc, note=note)
         except Exception as e:  # noqa: BLE001 - the page stands whatever this does
@@ -1835,9 +1835,10 @@ class Cad:
         depts = list(dict.fromkeys([*(getattr(inc, "tone_departments", None) or []), *(getattr(inc, "departments", None) or [])]))
         feed, _ = self._page_scope(iid, inc, note=False)
         texts = [x[:2000] for x in lines]
-        said = scope_mod.page_line(depts, list(inc.units or []), getattr(inc, "tone_departments", ()), inc.incident_type, feed)
-        if said:                                       # once: deduped on its text below
-            texts.append(said)
+        base = self.scope.line(iid) or scope_mod.page_line(depts, scope_mod.latest_units(inc),
+                                                           getattr(inc, "tone_departments", ()), inc.incident_type)
+        if base and not any(x == base or x.startswith(base + " · feed: ") for x in have):   # once per reading
+            texts.append(base + (f" · feed: {feed}" if feed else ""))   # (feed: "" when that disagreement is said)
         new = [x for x in dict.fromkeys(texts) if x not in have]
         if new:
             with self.store.tx() as db:
