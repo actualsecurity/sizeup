@@ -107,23 +107,41 @@ def test_not_assigned_when_its_department_already_signed_on(rig):
     assert rig.here("DPTA") is None and rig.on("DPTA") is None
 
 
-def test_back_only_when_the_department_is_dispatched_again_with_none_of_its_units_on(rig):
-    rig.created(units=("DPTA",))
-    iid = rig.iid()
+def test_back_when_listed_again_while_none_of_its_department_signed_on(rig):
+    rig.created(units=("DPTA", "E60", "L31"))                          # E60 and L31 dispatched, not responding
+    assert rig.status("DPTA") == "DP" and rig.status("E60") == "DP"
     rig.at(30)
-    rig.cad.dispatch(iid, {"unit_ids": [rig.uid("E60")], "operator": "Lt. Test"})   # dispatched, not signed on
+    rig.change(units=("E60", "L31"))                                   # the county drops it for one poll: off the call
+    assert rig.here("DPTA") is None
     rig.at(60)
-    rig.change(units=())                                              # the county drops it: off the call
+    rig.change(units=("DPTA", "E60", "L31"))                           # listed again: no unit of its department signed on
+    assert rig.here("DPTA") is not None and rig.status("DPTA") == "DP"
+
+
+def test_not_back_when_listed_again_after_its_unit_responded(rig):
+    rig.created(units=("DPTA", "E60", "L31"))
+    rig.at(30)
+    rig.change(units=("E60", "L31"))                                   # dropped
     assert rig.here("DPTA") is None
+    rig.at(45)
+    rig.change(units=("E60", "L31"), unit_times={"E60": {"responding": T0 + 40}})
+    assert rig.status("E60") == "RS"
+    rig.at(60)
+    rig.change(units=("DPTA", "E60", "L31"), unit_times={"E60": {"responding": T0 + 40}})   # listed again
+    assert rig.here("DPTA") is None
+
+
+def test_not_back_when_listed_again_after_a_person_freed_it(rig):
+    rig.created(units=("DPTA", "E60", "L31"))
+    iid, ph = rig.iid(), rig.uid("DPTA")
+    rig.at(30)
+    rig.cad.unit_status(ph, {"status": "AQ", "call": iid, "operator": "Lt. Test"})   # a person frees it
+    assert rig.here("DPTA") is None
+    rig.at(60)
+    rig.change(units=("E60", "L31"))                                   # the county drops it ...
     rig.at(90)
-    rig.change(units=("DPTA",))                                       # ... and lists it again: E60 is still on
+    rig.change(units=("DPTA", "E60", "L31"))                           # ... and lists it again
     assert rig.here("DPTA") is None
-    rig.cad.store.set_unit_status(rig.uid("E60"), "AQ", "Lt. Test")    # E60 clears before it went
-    rig.at(120)
-    rig.change(units=())
-    rig.at(150)
-    rig.change(units=("DPTA",))                                       # dispatched again, none of PCFD's on it
-    assert rig.here("DPTA") is not None
 
 
 def test_never_back_once_its_department_signed_on_there_even_cleared_since(rig):
