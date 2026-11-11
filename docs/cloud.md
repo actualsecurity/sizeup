@@ -465,6 +465,19 @@ tones in front and reads it twice with the time out once, exactly as with Kokoro
   {action: "voice_preview"}`).
 * Stations and all-in-one keep Kokoro (`tts_engine = "kokoro"`); `polly` works there too with AWS
   credentials in the environment, falling back to macOS `say` like Kokoro does.
+* **After the answer (#426):** a dispatch, add-on or upgrade is logged and answered at once (a few ms; it
+  used to wait 2-3 s for Polly). Its row starts `audio: "pending"`; one worker (`sizeup/cad/voicequeue.py`,
+  at most 32 waiting) renders the voices in the order sent, hands each to the transmitter, then writes the
+  row (`ready` with the WAV, or `failed` with the same notes as above) and pushes the state. The page shows
+  the dispatch with "Voice…"; each voice it waits for plays once, in the order sent, whatever is selected by
+  then. A preview answers with the text only; the page asks for its audio in a second call (`{"audio": true}`).
+  **Never stale:** a voice not started 45 s after its dispatch is not rendered ("Voice too late: text only"), one
+  render gets 25 s at most ("Voice too slow: text only"), and the page never plays by itself a voice that comes
+  more than 45 s after its dispatch. **Handover:** the key-up and every write (the row, `audio.sqlite`) are the
+  lease holder's only (`Cad.may_write`, the fence), checked before them. At a drain the voices get 6 s; what is
+  left stays pending, and the next task renders it at its start (`Cad.resume_voice`, the tones kept in
+  `dispatches.audio_tones`) if it is still under 45 s old, else fails it ("Voice not rendered — the hub
+  restarted first: text only"). The dispatch itself is never lost: only, at worst, its audio.
 
 **Seam for transmission (M2, not built):** keying a radio stays on the station. The hub already
 stores and serves the rendered WAV for every dispatch (`dispatch-audio/` + `audio.sqlite`, `GET
@@ -1623,7 +1636,8 @@ rigs): centred at street zoom and kept centred as it glides, a chip at the foot 
 Recenter or ✕ lets go, a zoom keeps it. The box stays live while open: each new fix's speed, lateness, next stop and
 track, the place line (the milepost where the train is drawn now: with #374's poles, the pole and GIS milepost at the
 drawn position, else TrainTime's milepost carried along with it), the fix's age, the subtitle and the ⓘ, once a
-second. A GPS fix over 15 s old: the train is drawn hollow and the box and chip say *Predicted · N s ago*.
+second. A GPS fix over 20 s old: the train is drawn a little faded; over 30 s old: hollow, and the box and chip say
+*Predicted · N s ago*.
 
 **Trains approaching.** Under an open event's map, for an event within **150 m of the tracks or a
 station** (measured against the line's GTFS shape and the stations): the next trains each way in the next
@@ -1800,20 +1814,41 @@ drawn on its own direction's track at that distance, so never off it) and filter
 (`trains.along_filter`: an alpha-beta filter on distance against the fix's own time, the feed's speed blended
 in): never backwards (a miss behind holds the train), a smooth speed. Under about 1 mph it is stopped and stays
 put through GPS jitter; the first stopped fix after it moved is taken as where it stopped (forward only), and the
-same position again with a newer time counts as stopped whatever speed it says. The filter also sends its
-acceleration (`a`, from the feed's own speeds). Where a train stops mid-track matters more than a smooth glide
-(#375: "if a train stops mid track we want to know where accurately"), so the page carries a fix on gently: at its
-full speed for 8 s of the fix's age, then slowing as v·e^-(age-8)/5 (at most 13·v on, however old; never past the
-next stop; nothing after 30 s, `TT_HORIZON_S`); a speed falling faster than 0.2 m/s² is braked at that rate to a
-stop (s0 + v·t + ½·a·t²). Fixes are 3 to 16 s old when read and read every 5 s (median about 6 s), so most of
-the time a train runs at its full speed. A train that brakes at a service rate (0.75 m/s²) right after its last
-moving fix, with no fix until it has stopped, is drawn at most about 63 m past where it stopped (at about 22 mph;
-at 52 mph not past it at all); the old 30 s at full speed drew it up to 337 m past. With the feed's real cadence
-(a fix every 3 s, 3 to 16 s late) it is drawn under 10 m past. The drawn train keeps a speed of its own that
-closes on the prediction (the train's speed plus the gap over 3 s, eased in over 1 s), so a new fix changes its
-pace, not its position; it goes back only to where a fix says it stopped: up to 30 m eased back (at most 20 m/s),
-more put there at once and ringed for a moment, never a long slide backwards (motion.js `Motion.rail` /
-`railFollow`; `tests/test_train_live.py` holds it to the measured shape). A fix no newer than the last one changes
+same GPS position again with a newer time counts as stopped whatever speed it says (a SIGNAL location, a fixed point,
+does not: #379). Each speed reading is checked against the distance moved along the track between two GPS fixes over
+their own times (`trains.speed_check`): a reading that disagrees with that and with the last reading, or changes
+faster than any train can (1.5 m/s²), is set aside until a second reading agrees (#379: one bad reading is no stop);
+a fall in speed is braked on only when it is steep (1 mph/s) and the distance moved agrees, or two readings fall in a
+row (±1 mph of reading noise is not braking). The filter also sends its acceleration (`a`), the speed's basis
+(`v_basis`: the box's hover says *45 mph (GPS 44 · moved 45)*) and what the consist can do (`dyn`, `trains.consist`:
+per fleet, M8 / M7 / diesel push-pull, from published figures or, where none are published, assumed, with sources
+in the code; an EMU's limits don't depend on its length, a diesel's do). The page runs a fix on at its speed, with
+no slowing on age alone (#390: slowing from 8 s of age made a steady 45 mph train go quick, slow, hollow and quick
+again), and slows only on evidence: a confirmed fall in speed (braked at that rate to a stop, which becomes its
+limit), its next scheduled stop (braked into it at an ordinary stop's 0.8 m/s²), or no news (a fix over 20 s old,
+past the oldest a fix normally is when read, eased to a stop at the consist's service brake). A fix over 20 s old
+is drawn a little faded; over 30 s, hollow (*Predicted · N s ago*). Smoothness comes first. The drawn train keeps a
+speed of its own that closes on the prediction: the train's speed plus the gap over 6 s, within ±15 % of its speed
+(+0.5 m/s) for gaps under 30 m and a little more beyond, never faster than the consist can speed up or brake, its
+change eased (1.5 m/s³), so a new fix's error is absorbed over a few seconds with no surge. A correction no such
+change of pace can make is glided: as an aircraft eases onto a new fix, but on a quintic from where and how fast the
+train is drawn to rest on the fix (no jump, no step in speed, no jolt at either end), as slow as it must be: never
+faster than the train + 25 % + 2 m/s going on (acceleration at most 1.5 m/s², 3 to 20 s), nor 25 m/s going back
+(at most 3 m/s², up to 26 s: about 330 m, every no-evidence stop at 20-60 mph); faintly ringed meanwhile. One that
+would take longer (in practice over about 330 m back, or over 400 m on), or is over 600 m, is faded out where the
+train is drawn and in at the fix (0.8 s) instead. Any catch-up is held to the same 1.25× + 2 m/s (and the consist's vmax). A train drawn past where a fix says
+it stopped (or will stop) is braked hard to rest (up to 4 m/s², eased in), then glided back (the user: "I'm fine
+with an overshoot if we keep it smooth"); a fix more than 400 m ahead (a GTFS-realtime report too: under that, the
+band closes it, 150 m in about 35 s, 300 m in about 65 s) or the first real fix of a train drawn on our estimate is
+glided (or faded) on to. A new fix mid-glide that moves the target is taken into the glide as a smooth shift, never
+re-planned, so a glide never ends in a fade or a hitch. An ease for want of
+news is no data: the drawn train follows it to rest without a nudge back. Measured with synthetic fixes at the real
+cadence (a fix every 3 to 12 s, 3 to 16 s old when read, ±10 m GPS noise): a steady 45 mph train is drawn at 39-51
+mph (coefficient of variation 0.03-0.06, the same with ±1 mph of speed noise; #378's: 0-110 mph, 0.45-0.69, hollow
+6-12 % of the time), never hollow, never faster than 1.12× the train. The trade-off: a stop with no sign before the
+feed goes quiet is drawn on until its fix is 20 s old, then eased (20/30/45/60 mph: about 150-330 m past), then
+glided back; a brake seen in the next fix overshoots by what the train was drawn ahead when that fix came plus the
+hard stop (see #392 for the numbers), then glides back gently or fades (`Motion.rail` / `railFollow`; `tests/test_train_live.py` holds it to the measured shape). A fix no newer than the last one changes
 nothing. The distance along the line comes from the projection, not `turf.location_mp`: the projection
 is in the same geometry the train is drawn on, while turf counts along each train's own route (see above) and
 would have to be calibrated to it. The milepost shown is turf's when the train's route starts (eastbound) or
@@ -1881,10 +1916,13 @@ doesn't move it) and changes it only on better stop-track evidence: for the same
 (the same track from a weaker source keeps the stronger one), for another stop only one ahead of the old one in
 the direction of travel. Between stations it is held, up to 4 km from the stop that said it (beyond, an express
 may have crossed over). Nothing says: the direction's outer track (4 outbound, 3 inbound), only so the train
-lies on a drawn track; not known. No GPS guess: the tracks are 4 m apart, closer than a phone-grade fix can
+lies on a drawn track; not known. An express (#451: a station lies between the stop it left and its next, which it
+skips; with no stop left, its next stop lies beyond the nearest station ahead) is drawn on the direction's inner track instead (2 outbound, 1 inbound; 3, 1, 2, 4 north to south), not known
+either; its next stop's posted track is never taken for its own (it may cross over before it). No GPS guess: the tracks are 4 m apart, closer than a phone-grade fix can
 tell. A track we have no line for (Stamford's 5) is ignored. The box: *Trk 2 · near pole 249 · MP 25.3* within
 1.5 km of the stop that said it (who said it, for which stop, on hover); *Trk 2?* held ("Track: last said for
-<stop>"); no number on the outer default ("Track not known; drawn on outer track"). A held or default train is
+<stop>"); *track not known* on the default ("Track not known; drawn on outer track 3", or "express track 1"
+for an express). The next stop's track reads with the stop, *next Rye (trk 2)*, never as the train's (#451). A held or default train is
 drawn with a dashed stripe down its body (faded is for a stale feed only). No GIS milepost where it is drawn:
 the train's own (TrainTime's, or the line's).
 
@@ -2200,6 +2238,13 @@ until there is a receiver to record. `tests/test_adsb_receiver.py`: the decoder 
 a tmp claims folder), the reserved dongle, the forwarding (deltas, the cap, offline drops, its cost), the hub's
 merge, details by ICAO address, the pre-alert beside the alarm, station health, the station's config update.
 
+## Vessels (AIS)
+
+Ships and boats on western Long Island Sound (#402): **docs/vessels.md** (sources, setup, the API, the limits of
+AIS). In short, the hub reads aisstream.io (key: SSM `/sizeup-hub/aisstream-key` → `SIZEUP_AISSTREAM_KEY`; none:
+off) only while the layer is open or a marine call is open, and the station's own receiver (AIS-catcher,
+`sizeup-ais.service`, off until the hardware is in) posts `POST /api/station/vessels`, never queued.
+
 ## Weather and water (NWS alerts, conditions, radar; NOAA tides)
 
 > "Public, free data: National Weather Service alerts ... as a banner on /cad and /monitor ... spoken once
@@ -2318,6 +2363,42 @@ then protects against mistakes and against anyone without the task role, but not
 could delete attachments with the same permission. The app's audit (`attachment_audit`, in the Litestream-replicated
 CAD store) and S3's own records (CloudTrail data events, if turned on) are what show such a delete. Only the lease holder writes. Without the bucket:
 "Incident attachments not configured", nothing copied, the lists read empty.
+
+## Where the hub's CPU goes (#425)
+
+`sizeup/perf.py`, the hub only. Three parts, none of them an AWS change:
+
+- **By thread, always on.** Once a minute each thread's CPU time is read from the kernel
+  (`/proc/self/task/<tid>/schedstat`, else `.../stat`) and added to its *group*: the thread's name with whatever was
+  made at run time cut off (`ntfy-<topic>` is `ntfy`, `stream-<camera>` is `stream`). Request threads are `http`
+  (each reports its own CPU as it ends), the state streams `http-stream`. An hour of minutes is kept, and the sums
+  since the start. With it: memory, threads, open files, the garbage collector's count and time, and how many things
+  the main in-memory lists hold (`HubApp._perf_sizes`). Each answered request's CPU goes to its route: the family is
+  made from the route that matched (the server's own paths and regexes), so only the words a route spells out stay and
+  every id, slug and file name is `:id`; a request that was refused or found nothing is only `(refused)` /
+  `(not found)` / `(error)`, whatever was asked. At most 400 families; the one unused the longest makes room.
+- **A profile on demand.** `POST /api/cad/perf/profile {"seconds": 30}` (1 to 120 s, `"hz"` 5 to 100, default 25):
+  a thread reads every thread's stack, but counts a stack only for a thread whose CPU clock moved in the 1 ms
+  before *and* the 1 ms after it was taken, so the ~50 threads asleep in a wait count nothing. Each group's total is
+  then set to the CPU it really used meanwhile. The answer: CPU by thread (`caught`: how many times it was seen
+  computing: few means its split by function is rough), by function (`self`, `cumulative`), by line, and `folded`
+  (`thread;caller;...;function microseconds`, for flamegraph.pl or speedscope). One at a time (409), a rest of 30 s
+  after each (429), at most 4000 stacks of 48 frames. Over 60 s the answer is 202 at once and
+  `GET /api/cad/perf/profile` has the result (`?format=folded`: the stacks as text). **It is not free**: every sample
+  reads every thread's clock twice, about 3.7% of one core at 50 Hz on a laptop, so expect around a tenth of the task's
+  0.5 vCPU while it runs at the default 25 Hz (twice that at 50). Its real cost is in each answer (`overhead`) and in
+  the log (`perf profile: ... overhead=1.9% of 1 core`).
+- **A line an hour** in the log (CloudWatch), and one 5 minutes after the start to compare with:
+  `perf 1h: cpu=41.2% of 0.5 vCPU top[broadcast=12.3 http-stream=8.1 ...] gc=0.8% rss_mb=412 threads=53 fds=88 up_h=5.0`
+  The top 8 thread groups, as shares of the task's CPU (ECS says how much that is; else of one core).
+
+Admins only (`ADMIN_READS`, `WRITES`), on Settings > Health ("Hub CPU": threads now / 1 h / since start, "Profile
+30 s"). Nothing in any of it but thread groups, function names, file:line and path families.
+
+**Reading it.** A thread whose "Now" is above its "Since start" has grown with uptime; the hourly lines show the
+same per thread, hour on hour (`GET /api/cad/perf` → `hours` keeps 72 of them, with the sizes at each). In a
+profile, time inside one C call is its Python caller's: `Store.q` is SQLite, `compress` zlib, `Perf._gc` the garbage
+collector. `(short bursts, not caught)` is a thread that used CPU but was never seen computing.
 
 ## The hub's storage
 

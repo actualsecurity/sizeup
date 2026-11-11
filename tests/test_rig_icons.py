@@ -359,7 +359,10 @@ def test_department_placeholders_are_never_drawn_listed_or_given_an_icon():
     for n in ("DPT239", "DPT266", "E60", "E61"):
         c.unit_station(uid(n), {"station": hq, **OP})
     inc = c.create({"type": "ALARM", "address": "100 Example Ave", "lat": 41.0085, "lon": -73.6600, **OP})
-    c.attach(inc["id"], {"unit_ids": [uid("DPT239"), uid("L31")], "status": "OL", **OP})
+    c.store.assign(inc["id"], [uid("DPT239")], "Lt. Example")                  # as the county assigns it (#400)
+    with c.store.tx() as db:                                                   # forced on location (the store refuses)
+        db.execute("UPDATE units SET status = 'OL' WHERE id = ?", (uid("DPT239"),))
+    c.attach(inc["id"], {"unit_ids": [uid("L31")], "status": "OL", **OP})
     m = c.state()["map"]
     names = [x["unit"] for x in m["markers"]] + [x["unit"] for x in m["unset"]]
     assert "L31" in names and "E60" in names
@@ -374,14 +377,16 @@ def test_department_placeholders_are_never_drawn_listed_or_given_an_icon():
 
 @needs_node
 def test_a_placeholder_that_reaches_the_page_is_ignored(tmp_path):
-    """An older hub's (or a feed's) DPT marker at HQ and at the call: no chip, not in the count, not in the list, not
-    followable."""
+    """A placeholder's marker that reaches the page (the hub never sends one) at HQ and at the call, known by its unit
+    row's flag or its own: no chip, not in the count, not in the list, not followable."""
     data = page_state()
     e60 = next(m for m in data["map"]["markers"] if m["unit"] == "E60")
     l31 = next(m for m in data["map"]["markers"] if m["unit"] == "L31")
     data["map"]["markers"] += [dict(e60, unit="DPT239", id=9001, kind="other", icon="other"),
                                dict(l31, unit="DPT266", id=9002, kind="other", icon="other", station=e60["station"])]
     o = run(tmp_path, SNAP + r"""
+cad.state.units = [{ name: "DPT239", placeholder: true }, { name: "E60", placeholder: false }];   // their unit rows' flag
+setMap({ ...IN.map, markers: IN.map.markers.map((m) => (m.unit === "DPT266" ? { ...m, placeholder: true } : m)) });
 zoomTo(13);
 out.chips = [L.chips.has("DPT239"), L.chips.has("DPT266")];
 out.count = L.badges.get(IN.hq).el.textContent;
@@ -404,8 +409,9 @@ def test_a_placeholder_set_on_location_by_hand_is_still_nowhere():
     for n in ("DPT239", "E60", "E61"):
         c.unit_station(uid(n), {"station": hq, **OP})
     inc = c.create({"type": "ALARM", "address": "100 Example Ave", "lat": 41.0085, "lon": -73.6600, **OP})
-    c.attach(inc["id"], {"unit_ids": [uid("DPT239")], "status": "RS", **OP})
-    c.unit_status(uid("DPT239"), {"status": "OL", **OP})                        # by hand
+    c.store.assign(inc["id"], [uid("DPT239")], "Lt. Example")                  # as the county assigns it (#400)
+    with c.store.tx() as db:                                                   # forced on location (the store refuses
+        db.execute("UPDATE units SET status = 'OL' WHERE id = ?", (uid("DPT239"),))   # it now, #400: as a stale row)
     c._feed_position({"unit": "DPT239", "lat": 41.0101, "lon": -73.6702, "at": Clock()() - 5, "source": "test"})
     m = c.state()["map"]
     assert not any(x["unit"] == "DPT239" for x in m["markers"] + m["unset"])
@@ -421,21 +427,21 @@ def test_a_placeholder_set_on_location_by_hand_is_still_nowhere():
     assert sorted(idle) == ["E60", "E61"]
 
 
-def test_is_placeholder_uses_lists_placeholder_where_it_exists():
-    """One test: Lists.placeholder (the no-dept-units change) when the lists have it, else the DPT* pattern."""
-    class WithIt:
-        def placeholder(self, code):
-            return code in ("DPT239", "X9")
-
-    class Without:
-        pass
-
-    assert mapview.is_placeholder("X9", WithIt()) and mapview.is_placeholder({"name": "DPT239"}, WithIt())
-    assert not mapview.is_placeholder("DPT266", WithIt())                         # the lists decide, not the pattern
-    assert mapview.is_placeholder("DPT266", Without()) and not mapview.is_placeholder("X9", Without())
-    assert mapview.is_placeholder({"unit": "DPT239"}) and not mapview.is_placeholder({"name": "E60"})
-    assert mapview.place({"name": "X9", "kind": "engine"}, "free", {"name": "HQ", "ll": [-73.67, 41.0]}, lists=WithIt()) is None
-    assert mapview.locate({"name": "X9"}, "free", {"name": "HQ", "ll": [-73.67, 41.0]}, lists=WithIt()) is None
+def test_is_placeholder_is_the_rows_flag_then_lists_placeholder():
+    """The one rule (#400): a unit row's own placeholder flag, else the CAD's Lists.placeholder (cad_lists.json
+    unit_placeholders); no pattern of its own."""
+    from sizeup.cad.lists import load
+    L = load()
+    for code in ("DPT239", "DPT266", "dpt7700", "CHIEF239", "239EOC", "E60"):
+        assert mapview.is_placeholder(code, L) is L.placeholder(code) is mapview.is_placeholder({"name": code}), code
+        assert mapview.is_placeholder({"unit": code}) is L.placeholder(code), code
+    assert mapview.is_placeholder({"name": "E60", "placeholder": True})                # the row's flag first
+    assert not mapview.is_placeholder({"name": "DPT239", "placeholder": False})
+    assert mapview.place({"name": "DPT239", "kind": "other"}, "free", {"name": "HQ", "ll": [-73.67, 41.0]}, lists=L) is None
+    assert mapview.locate({"name": "DPT239"}, "free", {"name": "HQ", "ll": [-73.67, 41.0]}, lists=L) is None
+    src = (ROOT / "sizeup" / "cad" / "mapview.py").read_text()
+    body = src[src.index("def is_placeholder("):src.index("# By code where the kind")]
+    assert "DPT" not in body.split('"""')[2] and "startswith" not in body                 # no fallback pattern left
 
 
 def test_call_pins_over_the_count_chips_and_rigs_over_both():
@@ -605,12 +611,13 @@ def test_a_placeholder_is_never_recommended():
 
 def test_the_page_never_offers_a_placeholder_to_follow_or_dispatch():
     js = (STATIC / "cad.js").read_text()
-    assert "const onMap = (name) => !placeholderUnit(name) &&" in js and "typeof u.placeholder === \"boolean\"" in js               # every Follow button is gated on onMap
+    assert "const onMap = (name) => !placeholderUnit(name) &&" in js and "return !!(u && u.placeholder);" in js               # every Follow button is gated on onMap
     for line in [ln for ln in js.splitlines() if "followBtn(" in ln and "function followBtn" not in ln]:
         assert "onMap(" in line, line
     assert 'r.units = (r.units || []).filter((u) => !placeholderUnit(u.name));' in js
     cm = (STATIC / "cadmap.js").read_text()
-    assert "const placeholder = (m) => /^DPT/i.test(" in cm
+    assert "u.placeholder" in cm and "DPT" not in "".join(ln for ln in cm.splitlines() if not ln.strip().startswith("//"))
+    assert "DPT" not in "".join(ln for ln in js.splitlines() if not ln.strip().startswith("//"))
 
 
 def test_a_row_flagged_placeholder_is_skipped_whatever_its_code():

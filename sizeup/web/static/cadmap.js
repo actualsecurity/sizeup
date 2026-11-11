@@ -228,10 +228,15 @@ window.CadMap = (() => {
     const a = Math.atan2(x, -y) * 180 / Math.PI;          // the offset's bearing on screen (y down)
     return Math.round((((m.place === "station" ? a : a + 180) % 360) + 360) % 360);
   }
-  // a department placeholder (DPT239 ...: mapview.is_placeholder), not apparatus: the hub never sends one; if one comes,
-  // it is never drawn, counted, listed or followed
-  const placeholder = (m) => /^DPT/i.test(String((m && m.unit) || "").trim());
-  const drawable = (M) => ((M && M.markers) || []).filter((m) => !placeholder(m));
+  // a department placeholder (DPT239 ...: its unit row's placeholder flag, #400; mapview.is_placeholder), not apparatus:
+  // the hub never sends one; if one comes (flagged on its marker or its unit row), it is never drawn, counted, listed or
+  // followed
+  function drawable(M) {
+    const ms = (M && M.markers) || [];
+    const units = typeof cad !== "undefined" && cad && cad.state && cad.state.units;
+    const ph = new Set((units || []).filter((u) => u.placeholder).map((u) => u.name));
+    return ph.size || ms.some((m) => m.placeholder) ? ms.filter((m) => !m.placeholder && !ph.has(m.unit)) : ms;
+  }
   const ICON_NAMES = { engine: "engine", ladder: "ladder", tower: "tower ladder", rescue: "rescue", suv: "car", arff: "crash truck",
                        other: "" };
   const CLASS_ORDER = { act: 0, idle: 1, oos: 2 };
@@ -1379,6 +1384,7 @@ window.CadMap = (() => {
   function detail(inc) {
     const box = $("#d-map"), nomap = $("#d-nomap");
     if (window.TrainLayer) TrainLayer.panel(inc, $("#d-trains"));      // "Trains approaching" near the tracks (#131)
+    if (window.VesselLayer) VesselLayer.panel(inc, $("#d-vessels"));   // a marine call's "Vessels nearby" (vessels.js)
     if (!mapsOk()) {
       show(box, false);
       show(nomap, true);

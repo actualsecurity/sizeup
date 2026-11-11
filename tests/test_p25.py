@@ -100,7 +100,7 @@ def test_turns_follow_srclist_positions(tmp_path):
 # "time" whole seconds; src -1 when no radio ID was decoded.
 
 from sizeup.radio.live import LiveTalk                                       # noqa: E402
-from sizeup.radio.p25 import Call, Turn, apply_grants, parse_call, split_call  # noqa: E402
+from sizeup.radio.p25 import Call, Turn, apply_grants, has_voice, parse_call, split_call  # noqa: E402
 
 T0 = 1_790_954_731.97        # the first key-up, to the ms (start_time_ms)
 
@@ -255,21 +255,42 @@ def test_short_key_ups_kept_silent_unknown_fragment_merged():
     rate = 16000
     sound = lambda s: (0.3 * np.sin(np.arange(int(s * rate)) / 3)).astype(np.float32)   # noqa: E731
     quiet = lambda s: np.zeros(int(s * rate), np.float32)                              # noqa: E731
-    audio = np.concatenate([sound(2.0), quiet(0.2), quiet(0.2), sound(0.2), sound(2.0)])
+    audio = np.concatenate([sound(2.0), quiet(0.2), quiet(0.2), sound(0.28), sound(2.0)])
     c = Call("307-s", 307, "Fire/EMS 15", 100.0, 105.0, ["77A4", "2391"], audio, "", [
         Turn(0.0, "77A4", "41228", "77A4"),
         Turn(2.0, "", ""),                          # 0.2 s, no ID, no sound: a fragment -> into 77A4's
         Turn(2.2, "2391", "2391001", "2391"),       # 0.2 s, an ID, no sound: a key-up, not transcribed
-        Turn(2.4, "", ""),                          # 0.2 s, no ID, sound: kept and transcribed
-        Turn(2.6, "77A4", "41228", "77A4")])
+        Turn(2.4, "", ""),                          # 0.28 s, no ID, sound: kept and transcribed
+        Turn(2.68, "77A4", "41228", "77A4")])
     pieces = split_call(c)
     assert [(p.talker, round(len(p.audio) / rate, 2), p.stt) for p in pieces] == [
-        ("77A4", 2.2, True), ("2391", 0.2, False), ("", 0.2, True), ("77A4", 2.0, True)]
+        ("77A4", 2.2, True), ("2391", 0.2, False), ("", 0.28, True), ("77A4", 2.0, True)]
     assert [p.id for p in pieces] == [f"307-s-t{k}" for k in range(4)]
     # a leading fragment goes to the key-up after it
     c = Call("307-u", 307, "Fire/EMS 15", 100.0, 102.0, ["77A4"], np.concatenate([quiet(0.1), sound(2.0)]), "",
              [Turn(0.0, "", ""), Turn(0.1, "77A4", "41228", "77A4")])
     assert [(p.id, p.talker, len(p.audio)) for p in split_call(c)] == [("307-u", "77A4", int(2.1 * rate))]
+
+
+def test_key_up_too_short_for_a_word_skips_stt_even_with_sound():
+    # A 0.1 s burst (a vocoder click, a talk-permit chirp) between two key-ups: its own row, never sent to
+    # speech-to-text (whisper says "You're welcome." or the talker prompt to it; AWS says "."). Synthetic audio.
+    rate = 16000
+    t = lambda s: np.arange(int(s * rate)) / rate                                       # noqa: E731
+    voice = lambda s: (0.3 * np.sin(2 * np.pi * 220 * t(s)) * (1 + np.sin(2 * np.pi * 4 * t(s)))).astype(np.float32)   # noqa: E731
+    click = lambda s: (0.8 * np.sin(2 * np.pi * 1000 * t(s))).astype(np.float32)        # noqa: E731
+    audio = np.concatenate([voice(2.0), click(0.1), click(0.24), voice(0.26), voice(1.5)])
+    c = Call("307-c", 307, "Fire/EMS 15", 100.0, 105.0, ["77A4", "2391"], audio, "", [
+        Turn(0.0, "77A4", "41228", "77A4"),
+        Turn(2.0, "2391", "2391001", "2391"),        # 0.1 s, loud: kept, not transcribed
+        Turn(2.1, "", ""),                           # 0.24 s, loud, no ID: kept, not transcribed
+        Turn(2.34, "77A4", "41228", "77A4"),         # 0.26 s with sound: transcribed
+        Turn(2.6, "2391", "2391001", "2391")])
+    pieces = split_call(c)
+    assert [(p.talker, round(len(p.audio) / rate, 2), p.stt) for p in pieces] == [
+        ("77A4", 2.0, True), ("2391", 0.1, False), ("", 0.24, False), ("77A4", 0.26, True), ("2391", 1.5, True)]
+    assert all(has_voice(p.audio) for p in pieces)       # every one has sound: length alone decides
+    assert sum(len(p.audio) for p in pieces) == len(audio)
 
 
 def test_live_keeps_grants_for_the_call_turns():

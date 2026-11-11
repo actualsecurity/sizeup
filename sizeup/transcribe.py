@@ -59,7 +59,9 @@ UpdateVocabulary, polled with GetVocabulary until READY) and used by new streams
 (list form): letters, apostrophes and periods only, the words of a phrase joined with hyphens
 ("Port-Chester"), at most 256 characters; no digits, so numbers are spelled out the way they are said
 on the air ("Engine 60" -> "Engine-sixty", "23 98" -> "twenty-three-ninety-eight"). Transcribe then
-writes those words, so respell() turns "Engine sixty" back into "Engine 60" in the text.
+writes those words, so respell() turns "Engine sixty" back into "Engine 60" in the text. The list Settings
+suggests: channels.vocabulary_suggestions + the county's callsigns and places (sizeup/stt_vocab.py,
+docs/stt-vocabulary.md). At most MAX_PHRASES phrases and AWS's 50 KB (MAX_BYTES).
 """
 
 from __future__ import annotations
@@ -1359,7 +1361,12 @@ ONES = ("zero one two three four five six seven eight nine ten eleven twelve thi
         "seventeen eighteen nineteen").split()
 TENS = "_ _ twenty thirty forty fifty sixty seventy eighty ninety".split()
 MAX_PHRASE = 256
-MAX_PHRASES = 500
+MAX_PHRASES = 1500               # the suggested list (sizeup/stt_vocab.py) is ~650 phrases, the whole county ~1100
+MAX_BYTES = 50_000               # AWS: a custom vocabulary is at most 50 KB
+# Sent to AWS but never written back as digits by respell(): a number after a word that is common in plain speech
+# would rewrite it ("working fire two story frame" -> "Fire 2 story", "Battalion ten four" -> "Battalion 10 four",
+# "to sixty" anywhere), and a 4-digit number that is also a year ("twenty twelve" -> "2012").
+NO_RESPELL = re.compile(r"(?:fire|battalion|to) \d+|(?:19|20)\d\d", re.I)
 
 
 def _two(n: int) -> str:
@@ -1407,7 +1414,7 @@ def to_aws(phrase: str) -> tuple[str | None, str]:
 
 def build_vocabulary(phrases: list[str]) -> dict:
     """{phrases: [as sent to AWS], skipped: [{phrase, why}], respell: {"engine sixty": "Engine 60"}}."""
-    out, skipped, seen, respell_map = [], [], set(), {}
+    out, skipped, seen, respell_map, size = [], [], set(), {}, 0
     for p in phrases:
         p = " ".join(str(p).split())
         if not p:
@@ -1421,9 +1428,13 @@ def build_vocabulary(phrases: list[str]) -> dict:
         if len(out) >= MAX_PHRASES:
             skipped.append({"phrase": p, "why": f"over {MAX_PHRASES} phrases"})
             continue
+        if size + len(a.encode()) + 1 > MAX_BYTES:
+            skipped.append({"phrase": p, "why": f"over AWS's {MAX_BYTES // 1000} KB"})
+            continue
+        size += len(a.encode()) + 1
         seen.add(a.lower())
         out.append(a)
-        if re.search(r"\d", p):
+        if re.search(r"\d", p) and not NO_RESPELL.fullmatch(p):
             respell_map[a.replace("-", " ").lower()] = p
     return {"phrases": out, "skipped": skipped, "respell": respell_map}
 

@@ -190,7 +190,7 @@ for (const z of [9, 10.5, 12, 13.5, 15, 17, 19]) {
   }
 }
 // a placeholder on a live fix with a heading: never drawn
-setMap({ ...cad.state.map, markers: [...cad.state.map.markers, { ...chip("E63").m, unit: "DPT239", icon: "", heading: 90 }] });
+setMap({ ...cad.state.map, markers: [...cad.state.map.markers, { ...chip("E63").m, unit: "DPT239", icon: "", heading: 90, placeholder: true }] });
 out.dpt = L.chips.has("DPT239");
 """, with_now(page_state()))
     for z, auto, rigs in o["z"]:

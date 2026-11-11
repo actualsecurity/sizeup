@@ -102,7 +102,7 @@ def fix(**kw):
     """A reported train 1.2 km out of the stop before, 2.3 km run, its fix 10 s after leaving."""
     seg = run(PC - 2300, PC, NOW - 60, NOW + 120)
     s, _ = T.profile_s(NOW - 30, seg)
-    f = {"s": round(s, 1), "d": 1, "train": "1350", "mode": "reported", "t0": NOW, "at": 0, "fixAt": NOW - 30,
+    f = {"s": round(s, 1), "d": 1, "train": "9950", "mode": "reported", "t0": NOW, "at": 0, "fixAt": NOW - 30,
          "hold": PC - 900, "stop": PC, "until": NOW - 30 + T.PREDICT_S, "seg": seg, "lag": 0.0}
     return f | kw
 
@@ -149,7 +149,7 @@ out.noSeg = sweep(IN.noSeg, 10).map((p) => [p.s, p.moving]);
 def test_an_estimated_train_glides_on_the_hubs_run_with_the_same_bounds(tmp_path):
     seg = run(PC - 2300, PC, NOW - 60, NOW + 120)
     s, _ = T.profile_s(NOW, seg)
-    f = {"s": round(s, 1), "d": 1, "train": "1350", "mode": "estimated", "t0": NOW, "at": 0, "fixAt": None, "hold": PC,
+    f = {"s": round(s, 1), "d": 1, "train": "9950", "mode": "estimated", "t0": NOW, "at": 0, "fixAt": None, "hold": PC,
          "stop": PC, "until": NOW + T.PREDICT_S, "seg": seg, "lag": None}
     out = node(tmp_path, SWEEP + "out.r = sweep(IN).map((p) => p.s);", f)["r"]
     assert out[20] == pytest.approx(T.profile_s(NOW + 10, seg)[0], abs=1e-6)         # the hub's own estimate, in time
@@ -165,11 +165,11 @@ def test_a_stopped_train_is_held_at_the_station_until_the_hub_says_it_left(tmp_p
 out.stopped = sweep(IN.stopped).map((p) => [p.s, p.moving]);
 const tk = Motion.railTracker();
 const at = (s) => IN.t0ms + s * 1000;
-tk.set("1350", { ...IN.stopped, at: at(0) }, at(0));
-out.held = []; for (let k = 0; k <= 50; k++) out.held.push(tk.where("1350", at(k * 0.2)).s);
+tk.set("9950", { ...IN.stopped, at: at(0) }, at(0));
+out.held = []; for (let k = 0; k <= 50; k++) out.held.push(tk.where("9950", at(k * 0.2)).s);
 out.busyStopped = tk.busy();
-tk.set("1350", { ...IN.left, t0: IN.stopped.t0 + 10, at: at(10) }, at(10));      // the next answer: it left
-out.moved = []; for (let k = 50; k <= 100; k++) out.moved.push(tk.where("1350", at(k * 0.2)).s);
+tk.set("9950", { ...IN.left, t0: IN.stopped.t0 + 10, at: at(10) }, at(10));      // the next answer: it left
+out.moved = []; for (let k = 50; k <= 100; k++) out.moved.push(tk.where("9950", at(k * 0.2)).s);
 out.busyLeft = tk.busy();
 """, {"stopped": stopped, "left": left, "t0ms": 1_000_000})
     assert {tuple(x) for x in out["stopped"]} == {(PC - 60, False)}               # the timetable alone moves nothing
@@ -203,28 +203,42 @@ out.b = drive("b", 0, 30, 1);
 
 
 def test_a_new_fix_ahead_is_caught_up_along_the_track_smoothly(tmp_path):
-    """#375: no lunge. The drawn train speeds up gently (its pace eased in over RAMP_S, at most CATCH_MAX_MPS over the
-    train's own) and settles on the new fix, never past it."""
-    f = fix(until=NOW + 300, hold=PC)
-    out = node(tmp_path, TRACK + """
-tk.set("a", { ...IN.f, at: at(0) }, at(0));
-drive("a", 0, 1);
-const g = { ...IN.f, s: IN.f.s + 600, t0: IN.f.t0 + 1, fixAt: IN.f.t0 + 1, at: at(1), lag: IN.lag };
-const before = tk.where("a", at(1));
-tk.set("a", g, at(1));
-out.from = before.s;
-out.path = drive("a", 1.1, 60);
-out.target = Motion.rail(g, 0).s;
-out.busy = tk.busy();
-""", {"f": f, "lag": None})
-    # (lag None: no prediction from the new fix; it waits at its fix, 600 m on)
-    path, target = [out["from"]] + out["path"], out["target"]
+    """#375, #390: no lunge. A GPS fix 120 m ahead of where the train is drawn: caught up within the band (at most SHARE of
+    its speed + EXTRA_SHARE beyond BIG_M), its pace changing no faster than its consist can (the M8's 0.89 m/s^2, less
+    at speed), not glided. A GTFS-realtime report (no speed) 150 or 300 m ahead: closed by the same band (#392 final
+    check: no fade, no surge). Any fix more than GLIDE_AHEAD_M ahead: glided on to it, never faster than 1.25 v + 2;
+    too far for GLIDE_MAX_S of that: faded out and in at the fix."""
+    out = node(tmp_path, TRACK + GLIDE + """
+const go = (id, f, by) => {
+  tk.set(id, { ...f, at: at(0) }, at(0));
+  drive(id, 0, 10);
+  const from = tk.where(id, at(10)).s;
+  const g = { ...f, s: (f.seg ? from : Motion.rail(f, 10).s) + by, t0: f.t0 + 10, fixAt: f.seg ? f.t0 + 10 : f.fixAt + 10, at: at(10) };
+  if (f.seg) g.lag = g.fixAt - Motion.profileT(g.s, g.seg);
+  tk.set(id, g, at(10));
+  const path = watch(id, 10.1, 29);
+  return { from, path, v: path.map((p) => Motion.rail(g, p[0] - 10).v), tg: [0, 2, 4, 4.1, 19].map((x) => Motion.rail(g, x).s) };
+};
+out.gps = go("gps", IN.gps, 120); out.gpsFar = go("gpsFar", IN.gps, 600);
+out.est150 = go("est150", IN.est, 150); out.est300 = go("est300", IN.est, 300);
+""", {"gps": fix(v=20.0, fixAt=NOW, seg=None, hold=PC + 5000, stop=PC + 5000, until=NOW + 300),
+      "est": fix(until=NOW + 300, hold=PC + 3000, stop=PC + 3000)})
+    g = out["gps"]
+    path = [g["from"]] + [p[1] for p in g["path"]]
     steps = [b - a for a, b in zip(path, path[1:])]
-    assert min(steps) >= 0 and max(path) <= target                                   # always forward, never past it
-    assert steps[0] < 5                                                              # not a jump
-    assert max(abs(b - a) for a, b in zip(steps, steps[1:])) <= 0.6                 # its pace eased: <= 6 m/s a frame
-    assert max(steps) <= (30 + 20) * 0.1                                             # at most CATCH_MAX_MPS over its speed
-    assert path[-1] == target and out["busy"] is False                               # settled on it, at rest
+    assert min(steps) >= 0 and not any(p[2] for p in g["path"])                      # forward, no glide
+    speeds = [x / 0.1 for x in steps]
+    assert max(abs(b - a) for a, b in zip(speeds, speeds[1:])) <= 0.1 * 0.89 + 0.02   # within the M8's limits
+    assert max(speeds) <= 1.25 * 20 + 2 + 0.01                                         # never over 1.25 v + 2: no surge
+    assert abs(path[-1] - g["tg"][-1]) < 0.35 * 120                                    # catching up, gently
+    f = out["gpsFar"]                        # 600 m: a glide no faster than 1.25 v + 2 would take over GLIDE_MAX_S: faded
+    assert min(p[3] for p in f["path"][:8]) < 0.2 and f["path"][10][3] == 1 and not f["path"][0][2]
+    for name in ("est150", "est300"):        # GTFS-realtime reports 150 / 300 m ahead: the band closes them, no fade,
+        e = out[name]                        # no glide, never faster than 1.25 v + 2
+        path = [e["from"]] + [p[1] for p in e["path"]]
+        assert all(p[3] == 1 and not p[2] for p in e["path"])
+        assert all((b - a) / 0.1 <= 1.25 * e["v"][i] + 2 + 0.05 for i, (a, b) in enumerate(zip(path, path[1:])))
+        assert all(b >= a for a, b in zip(path, path[1:]))
 
 
 def test_a_new_fix_behind_slows_the_train_never_back_never_stopped(tmp_path):
@@ -247,35 +261,68 @@ out.target = []; for (let t = 10.1; t <= 40 + 1e-9; t += 0.1) out.target.push(Mo
     assert min(steps) >= 0                                                           # never slid back
     moving = [i for i, q in enumerate(target) if q["moving"] and q["v"] > 1]
     assert all(steps[i] > 0 for i in moving)                                         # never stood still while it runs
-    meet = next(i for i, (p, q) in enumerate(zip(path, target)) if abs(p - q["s"]) < 2)
-    assert meet * 0.1 < 20 and all(abs(p - q["s"]) < 3 for p, q in zip(path[meet:], target[meet:]))   # then on with it
+    gaps = [p - q["s"] for p, q in zip(path, target)]
+    assert all(b <= a + 0.05 for a, b in zip(gaps, gaps[1:]))                       # closing all the time
+    meet = next(i for i, g in enumerate(gaps) if abs(g) < 5)                         # (150 m: well past BIG_M, quickly;
+    assert meet * 0.1 < 30 and all(abs(g) < 5 for g in gaps[meet:])                 # the last few metres within SHARE)
 
 
-def test_drawn_beyond_a_new_fixs_limit_it_is_eased_back_a_little_or_put_there_and_marked(tmp_path):
-    """#375: no long slide backwards. A few metres past where a new fix allows (where it stopped): eased back along the
-    track (at most BACK_MAX_MPS, over about BACK_S); more than BACK_EASE_M: put there at once, and marked (snapped) for
-    SNAP_MARK_MS so the correction is seen as one."""
+GLIDE = """
+const watch = (id, from, to) => { const r = []; for (let t = from; t <= to + 1e-9; t += 0.1) { const s = tk.where(id, at(t)).s;
+  r.push([t, s, Motion.snapped(tk.items.get(id)), Motion.fadeOf(tk.items.get(id), at(t))]); } return r; };
+"""
+
+
+def glide_ok(path, to, d=1, v=0.0):
+    """A correction back onto `to` (path [[t, s, marked, opacity]] from the frame the fix came): braked to rest (if it
+    was running: at most BRAKE_HARD, eased in), then glided back along the track (a quintic: no jolt at either end) no
+    faster than GLIDE_PEAK_MPS, its acceleration at most GLIDE_BACK_ACC, marked meanwhile, as long as that takes (to
+    GLIDE_BACK_MAX_S); or, too far for that, faded out and in at the fix. Then at rest there and unmarked. Returns (how
+    far, peak speed back or None if faded, how long)."""
+    ss = [p[1] for p in path]
+    steps = [(b - a) * d for a, b in zip(ss, ss[1:])]
+    far = max((s - to) * d for s in ss)
+    peak = max(25.0, 1.5 * v)
+    faded = [i for i, p in enumerate(path) if p[3] < 1]
+    if faded:                                                                        # too far to glide: faded
+        assert len(faded) * 0.1 <= 0.9
+        assert all(abs(x) <= 2.5 for i, x in enumerate(steps) if i + 1 not in faded and i not in faded)
+        assert ss[-1] == to
+        return far, None, None
+    speeds = [x / 0.1 for x in steps]
+    rest = next(i for i, x in enumerate(steps) if x <= 0)
+    assert all(x >= -1e-9 for x in steps[:rest])
+    dv = [abs(b - a) / 0.1 for a, b in zip(speeds, speeds[1:])]
+    assert max(dv[:rest + 1] or [0]) <= 4.0 + 1.3                                  # braking: at most BRAKE_HARD
+    assert max(dv[rest + 1:] or [0]) <= 3.0 + 0.05                                 # gliding back: at most GLIDE_BACK_ACC
+    assert -min(steps) / 0.1 <= 25.0 + 0.3                                           # back no faster than GLIDE_PEAK_MPS
+    back = [i for i, x in enumerate(steps) if x < -1e-9]
+    if back:
+        assert (back[-1] - back[0] + 1) * 0.1 <= 25.3
+        assert all(path[i + 1][2] for i in back[:-1])                                # marked while it glides
+    assert ss[-1] == to and not path[-1][2]
+    return far, (-min(steps) / 0.1 if back else 0.0), (len(back) * 0.1)
+
+
+def test_drawn_beyond_a_new_fixs_limit_it_is_braked_then_glided_back(tmp_path):
+    """#375, #390 ("I'm fine with an overshoot if we keep it smooth, and then ... we nudge it back like we did for
+    planes" ... "less surgy"): drawn running when a new fix says it stopped behind it, a little or a lot: braked hard to
+    rest (as little past the fix as smoothly can be), then glided back along the track onto it (at most 3 m/s^2,
+    25 m/s, 25 s: about 330 m); 450 m back is further than that: faded out and in."""
     f = fix(until=NOW + 300, hold=PC)
-    out = node(tmp_path, TRACK + """
+    out = node(tmp_path, TRACK + GLIDE + """
 const back = (id, by) => {
   tk.set(id, { ...IN.f, at: at(0) }, at(0));
   drive(id, 0, 20);
   const drawn = tk.where(id, at(20)).s;
   const g = { ...IN.f, s: drawn - by, mode: "stopped", seg: null, hold: drawn - by, stop: drawn + 2000, t0: IN.f.t0 + 20, at: at(20) };
   tk.set(id, g, at(20));
-  const path = drive(id, 20.1, 24);
-  return { drawn, to: g.s, path, marked: Motion.snapped(tk.items.get(id), at(21)),
-           later: Motion.snapped(tk.items.get(id), at(20.1 + Motion.RAIL.SNAP_MARK_MS / 1000 + 0.1)) };
+  return { to: g.s, path: [[20, drawn, false, 1], ...watch(id, 20.1, 60)] };
 };
-out.near = back("near", 20); out.far = back("far", 400);
+out.r = {}; for (const by of [2, 20, 200, 450]) out.r[by] = back("b" + by, by);
 """, {"f": f})
-    n, fa = out["near"], out["far"]
-    steps = [a - b for a, b in zip([n["drawn"]] + n["path"], n["path"])]
-    assert min(steps) >= 0 and n["path"][-1] == n["to"]                             # back, along the track, to its fix
-    assert max(steps) <= 20 * 0.1 + 1e-6 and n["drawn"] - n["path"][0] < 5   # gently: no jump
-    assert not n["marked"]
-    assert fa["path"][0] == fa["to"] and set(fa["path"]) == {fa["to"]}              # 400 m: put there at once ...
-    assert fa["marked"] and not fa["later"]                                         # ... and marked for a moment
+    res = {by: glide_ok(r["path"], r["to"]) for by, r in out["r"].items()}
+    assert all(res[k][1] is not None for k in ("2", "20", "200")) and res["450"][1] is None   # glided; beyond ~330 m: faded
 
 
 def test_a_far_jump_the_other_way_or_another_train_is_drawn_at_once(tmp_path):
@@ -283,20 +330,20 @@ def test_a_far_jump_the_other_way_or_another_train_is_drawn_at_once(tmp_path):
     out = node(tmp_path, TRACK + """
 const go = (id, g) => { tk.set(id, { ...IN.f, at: at(0) }, at(0)); drive(id, 0, 2); tk.set(id, { ...IN.f, ...g, at: at(2) }, at(2)); return tk.where(id, at(2.1)).s; };
 out.far = go("far", { s: IN.f.s + 2500, hold: IN.f.s + 3000, stop: IN.f.s + 3000, seg: null });
-out.near = go("near", { s: IN.f.s + 1500, hold: IN.f.s + 1600, stop: IN.f.s + 3000, seg: null });
+out.near = go("near", { s: IN.f.s + 800, hold: IN.f.s + 1600, stop: IN.f.s + 3000, seg: null });
 out.back = go("back", { s: IN.f.s + 300, d: -1, hold: IN.f.s + 300, seg: null, stop: null });
-out.other = go("other", { s: IN.f.s + 300, train: "1351", hold: IN.f.s + 300, seg: null, stop: null });
+out.other = go("other", { s: IN.f.s + 300, train: "9951", hold: IN.f.s + 300, seg: null, stop: null });
 """, {"f": f})
     s = f["s"]
     assert out["far"] == s + 2500 and out["back"] == s + 300 and out["other"] == s + 300
-    assert out["near"] < s + 1500 - 100                                                   # under 2 km: caught up, not jumped
+    assert out["near"] < s + 800 - 100                  # (drawn ~470 m on) under SNAP_AHEAD_M ahead: caught up, not jumped
 
 
 def test_the_aircraft_tracker_is_unchanged_without_the_hooks():
     mo = (STATIC / "motion.js").read_text()
     assert "if (this.follow) {" in mo and "this.rest ? this.rest(it.fix)" in mo and "p.moving !== false" in mo
     assert "railTracker = (opts) => new Tracker(rail, { horizonS: Infinity, staleS: 60, ...opts, rest: railRest, follow: railFollow })" in mo
-    assert "JUMP_M = 2000, TAU_S = 3, RAMP_S = 1" in mo
+    assert "JUMP_M = 2000, TAU_S = 6, RAMP_S = 1" in mo
 
 
 # ---- the layer's frames (trains.js in node, a fake map) --------------------------------------------------------------
@@ -397,74 +444,156 @@ def test_the_layer_draws_one_setdata_a_source_a_frame_and_none_when_nothing_move
             assert w["ahead"] == (not t["estimated"] and t["mode"] != "stopped" and (w["s"] - t["s"]) * t["d"] > 5)
 
 
-def test_a_gps_fix_runs_on_at_its_own_speed_then_slows(tmp_path):
-    """MTA TrainTime (#362, #375): a GPS fix with its speed (v, m/s) is carried on at that speed for RAIL_FULL_S of its age,
-    then slowing (v e^-(age - 8)/5): at most 13 v on, however old; never past hold_s or the next stop, never after
-    predict_until; no speed: held at its fix."""
-    f = fix(v=20.0, fixAt=NOW - 4, hold=PC - 300, until=NOW + 200, seg=None)
-    out = node(tmp_path, SWEEP + "out.r = sweep(IN.f, 200, 0.5); out.still = sweep(IN.still, 4); out.far = sweep(IN.far, 120, 0.5);",
-               {"f": f, "still": fix(v=0.0, seg=None), "far": fix(v=20.0, fixAt=NOW, hold=PC + 5000, stop=PC + 5000, until=NOW + 60, seg=None)})
-    ss = [p["s"] for p in out["r"]]
-    assert ss[0] == pytest.approx(f["s"] + 20.0 * 4, abs=1e-6)                       # 4 s since the fix at 20 m/s
-    assert ss[8] == pytest.approx(f["s"] + 20.0 * 8, abs=1e-6)                       # 8 s: still its full speed
-    assert ss[18] == pytest.approx(f["s"] + 20.0 * 8 + 20.0 * 5 * (1 - math.exp(-1)), abs=1e-6)   # 13 s: slowing
-    assert out["r"][18]["v"] == pytest.approx(20.0 * math.exp(-1))
-    assert all(b >= a for a, b in zip(ss, ss[1:])) and max(ss) <= f["hold"]          # never past hold_s
-    assert out["r"][0]["moving"] and out["r"][0]["v"] == 20.0
-    far = [p["s"] - out["far"][0]["s"] for p in out["far"]]
-    assert max(far) < 20.0 * 13 and far[-1] > 20.0 * 12.9                             # at most 13 v on, however old
+def test_a_gps_fix_runs_on_at_its_own_speed_and_slows_only_on_evidence(tmp_path):
+    """MTA TrainTime (#362, #390): a GPS fix with its speed (v, m/s) runs on at that speed, however old (no slowing on
+    age alone: #375's soft horizon made a steady train go quick, slow, hollow and quick again), until RAIL_CRUISE_S
+    (20 s); a fix older than that eases to a stop at the consist's service brake (b); never past hold_s or the next stop, never
+    after predict_until; no speed: held at its fix."""
+    f = fix(v=20.0, fixAt=NOW - 4, hold=PC + 3000, stop=PC + 3000, until=NOW + 200, seg=None)
+    out = node(tmp_path, SWEEP + "out.r = sweep(IN.f, 200, 0.5); out.still = sweep(IN.still, 4); out.held = sweep(IN.held, 200, 0.5);",
+               {"f": f, "still": fix(v=0.0, seg=None), "held": fix(v=20.0, fixAt=NOW, hold=fix()["s"] + 300, until=NOW + 200, seg=None)})
+    r, ss = out["r"], [p["s"] for p in out["r"]]
+    cruise = 20 - 4                                                                  # RAIL_CRUISE_S of its age
+    for k in range(0, 2 * cruise + 1):
+        assert ss[k] == pytest.approx(f["s"] + 20.0 * (4 + k * 0.5), abs=1e-6) and r[k]["v"] == 20.0   # steady: 16 s
+    b = 1.34                                                                         # the M8's service brake
+    k = 2 * cruise + 6                                                               # 3 s into the ease (eased in at
+    ramp = b / 1.5                                                                   # RAIL_JERK, 1.5 m/s^3)
+    assert r[k]["v"] == pytest.approx(20.0 - b * ramp / 2 - b * (3 - ramp), abs=0.1)
+    rest = f["s"] + 20.0 * 20 + 20.0 ** 2 / (2 * b) + 20.0 * ramp / 2
+    assert ss[-1] == pytest.approx(rest, abs=3.0) and not r[-1]["moving"] and r[-1]["v"] == 0   # at rest ~165 m on
+    assert all(b >= a for a, b in zip(ss, ss[1:]))
+    held = [p["s"] for p in out["held"]]
+    assert max(held) == fix()["s"] + 300 and not out["held"][-1]["moving"]            # never past hold_s
     assert all(p["s"] == out["still"][0]["s"] and not p["moving"] for p in out["still"])
 
 
-def test_no_hard_stall_at_a_steady_speed(tmp_path):
-    """#375: slowing is not stopping. Up to predict_until (30 s) the prediction still moves (a new fix comes every 3 to
-    12 s: the drawn train never stands still between them)."""
+def test_no_slowing_at_a_steady_speed_while_fixes_come_at_their_normal_ages(tmp_path):
+    """#390: TrainTime's fixes are 3 to 16 s old when read (median ~6), a new one every 3 to 12 s. A steady train's
+    prediction keeps its full speed to RAIL_CRUISE_S (20 s)."""
     f = fix(v=23.0, fixAt=NOW, hold=PC + 5000, stop=PC + 5000, until=NOW + T.TT_HORIZON_S, seg=None)
-    out = node(tmp_path, SWEEP + "out.r = sweep(IN, 59, 0.5);", f)["r"]
-    running = [p for k, p in enumerate(out) if k * 0.5 < T.TT_HORIZON_S]
-    assert all(p["moving"] and p["v"] > 0 for p in running)
-    assert all(b["s"] > a["s"] for a, b in zip(running, running[1:]))
-    assert next(p for k, p in enumerate(out) if k * 0.5 >= 21)["v"] > 0.05 * 23.0      # 21 s old (16 s + a poll): still on
+    out = node(tmp_path, SWEEP + "out.r = sweep(IN, 60, 0.5); out.cruise = Motion.RAIL.RAIL_CRUISE_S;", f)
+    assert out["cruise"] >= 16
+    assert all(p["v"] == 23.0 and p["moving"] for p in out["r"][:2 * out["cruise"] + 1])
 
 
 def test_a_braking_train_is_predicted_to_stop_where_it_will(tmp_path):
-    """#375: the hub's filter says its speed is falling (a < -0.2 m/s^2): predicted s0 + v t + a t^2 / 2, stopping
-    where v reaches 0 (v^2 / 2|a| on), not carried on at its speed."""
+    """#375: the hub's filter says its speed is falling (a < -0.2 m/s^2, confirmed: trains.speed_check): predicted
+    s0 + v t + a t^2 / 2, stopping where v reaches 0 (v^2 / 2|a| on), and that is its limit (lim) now: an emergency
+    brake as hard as the feed shows it (the hub clamps a at 1.5 m/s^2), not carried on at its speed."""
     v, a = 12.0, -0.75
     f = fix(v=v, a=a, fixAt=NOW, hold=PC + 5000, stop=PC + 5000, until=NOW + T.TT_HORIZON_S, seg=None)
-    out = node(tmp_path, SWEEP + "out.r = sweep(IN, 60, 0.5); out.gentle = sweep({ ...IN, a: -0.1 }, 60, 0.5);", f)
+    out = node(tmp_path, SWEEP + """out.r = sweep(IN, 60, 0.5); out.gentle = sweep({ ...IN, a: -0.1 }, 60, 0.5);
+out.hard = sweep({ ...IN, a: -3 }, 60, 0.5);""", f)
     ss = [p["s"] - f["s"] for p in out["r"]]
     stop = v * v / (2 * -a)                                                          # 96 m on
     assert ss[8] == pytest.approx(v * 4 + 0.5 * a * 16, abs=0.1)                      # 4 s on: braking
     assert max(ss) == pytest.approx(stop, abs=1.0) and ss[-1] == pytest.approx(stop, abs=1.0)
+    assert out["r"][0]["lim"] == pytest.approx(f["s"] + stop, abs=1e-6)
     k = next(i for i, x in enumerate(ss) if abs(x - stop) < 1.0)
     assert k * 0.5 <= v / -a + 1 and not out["r"][-1]["moving"] and out["r"][-1]["v"] == 0
-    assert out["gentle"][24]["s"] - f["s"] > stop                                    # under 0.2 m/s^2: not braking, on
+    assert out["gentle"][24]["s"] - f["s"] == pytest.approx(v * 12)                  # under 0.2 m/s^2: not braking, on
+    assert out["hard"][-1]["s"] - f["s"] == pytest.approx(v * v / (2 * 3), abs=1.0)  # as hard as the feed shows it
 
 
-def test_drift_past_a_mid_track_stop_is_small(tmp_path):
-    """#375 ("if a train stops mid track we want to know where accurately"): a train that brakes at a service rate
-    (0.75 m/s^2) the moment after its last moving fix, and no further fix until it has stopped: drawn (the predictor
-    and railFollow together) at most ~60 m past where it stopped, at any speed; the old 30 s horizon drew it up to
-    337 m past. The stopped fix then puts it back (eased, or put there and marked)."""
+def test_a_train_is_braked_into_its_next_stop_as_a_train_stops(tmp_path):
+    """#390: a scheduled stop ahead is braked into at an ordinary stop's rate (bs, 0.8 m/s^2): the speed never over
+    sqrt(2 bs (distance left)), at rest on the stop's mark; not run at full speed into it and stopped dead."""
+    v = 12.0                                                                         # (all within RAIL_CRUISE_S of its fix)
+    f = fix(v=v, fixAt=NOW, hold=PC, stop=PC, s=PC - 150, until=NOW + T.TT_HORIZON_S, seg=None)
+    out = node(tmp_path, SWEEP + "out.r = sweep(IN, 280, 0.25);", f)["r"]
+    for p in out:
+        assert p["v"] <= math.sqrt(2 * 0.8 * max(0.0, PC - p["s"])) + 0.05
+    assert out[-1]["s"] == PC and out[-1]["v"] == 0 and not out[-1]["moving"]
+    dv = [(a["v"] - b["v"]) / 0.25 for a, b in zip(out, out[1:])]
+    assert max(dv) <= 0.8 + 0.05                                                     # braked at bs, no harder
+    k = next(i for i, p in enumerate(out) if p["v"] < v)
+    assert out[k]["s"] == pytest.approx(PC - v * v / 1.6, abs=v * 0.25 + 1)          # braking starts 90 m out
+
+
+def test_a_consists_limits_bound_the_drawn_pace(tmp_path):
+    """#390: the drawn train's speed never changes faster than its consist can (the hub's dyn): speeding up at most
+    min(a0, pw / v), slowing at most b, whatever the corrections ask; a diesel (heavier, slower) slower than an M8."""
+    from sizeup.trains import consist
+    m8, diesel = consist("M8", 8), consist("MNR_DIESEL", 7)
+    out = node(tmp_path, TRACK + """
+const run = (id, dyn) => {
+  const f = { ...IN.f, dyn, v: 5, at: at(0) };
+  tk.set(id, f, at(0));
+  drive(id, 0, 1);
+  tk.set(id, { ...f, s: f.s + 400, v: 30, t0: f.t0 + 1, fixAt: f.fixAt + 1, at: at(1) }, at(1));   // far ahead and fast
+  const r = []; for (let t = 1.1; t <= 40; t += 0.1) { tk.where(id, at(t)); r.push(tk.items.get(id).u); }
+  return r;
+};
+out.m8 = run("m8", IN.m8); out.diesel = run("d", IN.diesel);
+""", {"f": fix(v=5.0, fixAt=NOW, hold=PC + 5000, stop=PC + 5000, until=NOW + 200, seg=None), "m8": m8, "diesel": diesel})
+    for name, dyn in (("m8", m8), ("diesel", diesel)):
+        u = out[name]
+        for a, b in zip(u, u[1:]):
+            assert (b - a) / 0.1 <= min(dyn["a0"], dyn["pw"] / max(1.0, a)) + 1e-6
+            assert (a - b) / 0.1 <= dyn["b"] + 1e-6
+    assert out["diesel"][100] < out["m8"][100]                                        # 10 s on: the diesel slower
+
+
+def test_drift_past_a_mid_track_stop(tmp_path):
+    """#375 ("if a train stops mid track we want to know where accurately") against #390 (a steady train is drawn
+    steadily). A service brake (0.75 m/s^2) right after a moving fix:
+      - with evidence (the next fix says its speed is falling, as TrainTime's 3 to 12 s fixes do): predicted to stop where
+        it will, drawn close to it;
+      - with none (no fix at all until it has stopped: the hard case): drawn on at its speed until the fix is 20 s old,
+        then eased at its service brake; the stopped fix glides it back. The trade-off for no slowing on age alone."""
     out = node(tmp_path, TRACK + """
 out.r = [];
 for (const v of IN.vs) {
   const id = "v" + v, f = { ...IN.f, v, fixAt: IN.f.t0, at: at(0) };
   tk.set(id, f, at(0));
-  const path = drive(id, 0, 60);
   const stopAt = v / 0.75, stop = IN.f.s + v * v / 1.5;
+  // evidence: a fix 4 s into the brake, read 4 s later
+  const e = { ...f, id: "e" + v };
+  tk.set(e.id, e, at(0));
+  drive(e.id, 0, 8);
+  const t4 = 4, s4 = IN.f.s + v * t4 - 0.75 * 8;
+  tk.set(e.id, { ...f, s: s4, v: v - 3, a: -0.75, t0: IN.f.t0 + t4, fixAt: IN.f.t0 + t4, at: at(8) }, at(8));
+  const pe = drive(e.id, 8.1, 80);
+  const path = drive(id, 0, 60);
   tk.set(id, { ...f, s: stop, hold: stop, v: 0, mode: "stopped", t0: IN.f.t0 + stopAt + 6, fixAt: IN.f.t0 + stopAt + 6, at: at(60) }, at(60));
-  const after = drive(id, 60.1, 66);
-  out.r.push({ v, past: Math.max(...path) - stop, end: after[after.length - 1] - stop });
+  tk.where(id, at(60.1));
+  const glided = Motion.snapped(tk.items.get(id)), marked = glided || Motion.fadeOf(tk.items.get(id), at(60.3)) < 1;
+  const after = drive(id, 60.2, 90);
+  out.r.push({ v, past: Math.max(...path) - stop, end: after[after.length - 1] - stop, marked, glided: glided || !(Math.max(...path) - stop > 0.5),
+               ev: Math.max(...pe) - stop, evEnd: pe[pe.length - 1] - stop });
 }
 """, {"f": fix(fixAt=NOW, hold=PC + 5000, stop=PC + 5000, until=NOW + T.TT_HORIZON_S, seg=None),
-      "vs": [2, 4, 6, 8, 9.75, 12, 16, 20, 23.25, 30, 36]})
-    worst = max(r["past"] for r in out["r"])
-    assert worst <= 64                                                               # 63.4 m at ~22 mph; 0 at 52 mph
-    assert next(r for r in out["r"] if r["v"] == 23.25)["past"] <= 0
-    assert all(abs(r["end"]) < 0.01 for r in out["r"] if r["past"] > 0)            # then exactly where it stopped
-    assert all(r["end"] <= 0.01 for r in out["r"])                                   # (short of it: on to it, never past)
+      "vs": [4, 8, 12, 16, 20, 23.25, 30, 36]})
+    for r in out["r"]:
+        assert r["ev"] <= 75 and abs(r["evEnd"]) <= 30          # evidence: on past it, braked smoothly (36 m/s: 61 m)
+        assert abs(r["end"]) < 0.01 and r["marked"] == (r["past"] > 0.5)             # the stopped fix: glided there
+    hard = {r["v"]: r["past"] for r in out["r"]}
+    assert all(r["glided"] for r in out["r"] if r["v"] <= 27)                        # no-evidence stops to 60 mph: glided
+    assert 150 < hard[20] < 330                                                      # the trade-off, measured (see #392)
+
+
+def test_the_lag_cannot_grow_when_every_fix_is_old(tmp_path):
+    """#379: fixes 28 s old when they come, every 5 s, at 36 m/s (80 mph). They are past RAIL_CRUISE_S, so each is eased
+    for want of news, but the drawn train's catch-up runs off the fix's own speed: the lag stays bounded (it can't run
+    faster than its consist's vmax to close it, #390: no surge; #378's drew it further behind with every fix until the
+    2 km jump: 1.6 km here)."""
+    out = node(tmp_path, TRACK + """
+const lag = [];
+for (let k = 0; k <= 30; k++) {
+  const t = 28 + 5 * k, f = { ...IN.f, s: IN.f.s + 36 * (t - 28), v: 36, fixAt: IN.f.t0 + t - 28, t0: IN.f.t0 + t - 28,
+                               until: IN.f.t0 + t - 28 + IN.horizon, at: at(t - 28) };
+  tk.set("a", f, at(t));
+  for (const p of drive("a", t, t + 4.9)) lag.push(p);
+}
+out.lag = lag;
+""", {"f": fix(fixAt=NOW, hold=PC + 50_000, stop=PC + 50_000, seg=None), "horizon": T.TT_HORIZON_S})
+    s0 = fix()["s"]
+    n = len(out["lag"]) // 31
+    truth = [s0 + 36 * (28 + 5 * k + 0.1 * j) for k in range(31) for j in range(n)]
+    lags = [t - p for t, p in zip(truth, out["lag"])]
+    peak = max(lags)
+    assert peak < 500 and lags[-1] <= peak + 1                                       # bounded, not growing
 
 
 def test_noisy_gps_fixes_glide_forward_along_the_track_and_a_stop_stays_put(tmp_path):
@@ -492,8 +621,90 @@ out.path = path;
 """, {"fixes": fixes})
     path = out["path"]
     steps = [b - a for a, b in zip(path, path[1:])]
-    assert min(steps) >= 0                                                               # never a step back
-    assert max(steps) < 8.0                                                              # no jumps (20 m/s is 2 m a frame)
+    # (its speed reads 0 at once, at 20 m/s, with no fall before: braked on past where it stopped, then glided back)
+    assert min(steps) >= -8.0 and max(steps) < 8.0                                       # no jumps (20 m/s is 2 m a frame)
+    assert min(steps[:450]) >= 0                                                         # never back while it runs
     moving = path[50:450]
     assert (moving[-1] - moving[0]) / 40.0 == pytest.approx(20.0, rel=0.25)              # about the feed's speed
     assert len(set(path[-40:])) == 1                                                     # stopped: put
+
+
+def test_a_glide_keeps_its_speed_when_a_new_fix_re_aims_it(tmp_path):
+    """#390 re-review: a new fix mid-glide re-aims the glide from where it is drawn at the speed it is drawn at: no frame
+    where it stops (Tracker.set draws it at the same moment, dt 0), no step in pace."""
+    f = fix(until=NOW + 300, hold=PC)
+    out = node(tmp_path, TRACK + GLIDE + """
+tk.set("a", { ...IN.f, at: at(0) }, at(0));
+drive("a", 0, 20);
+const drawn = tk.where("a", at(20)).s;
+const g = { ...IN.f, s: drawn - 30, mode: "stopped", seg: null, hold: drawn - 30, stop: drawn + 2000, t0: IN.f.t0 + 20, at: at(20) };
+tk.set("a", g, at(20));
+const p1 = watch("a", 20.1, 30);
+tk.set("a", { ...g, s: g.s - 5, hold: g.s - 5, t0: g.t0 + 10, at: at(30.05) }, at(30.05));   // re-aimed 5 m further back
+out.path = [...p1, ...watch("a", 30.1, 60)];
+""", {"f": f})
+    ss = [p[1] for p in out["path"]]
+    v = [(b - a) / 0.1 for a, b in zip(ss, ss[1:])]
+    k = next(i for i, p in enumerate(out["path"]) if p[0] > 30.05)
+    assert out["path"][k - 1][2] and v[k - 2] < -0.5                                   # gliding back when the fix came
+    assert abs(v[k] - v[k - 2]) <= 2 * 0.1 * 3 + 0.1                                  # its speed carried on
+    assert min(abs(x) for x in v[k - 3:k + 3]) > 0.1                                  # never a stop on the way
+    assert all(abs(b - a) <= 0.1 * 3 + 0.06 for a, b in zip(v[k - 30:k + 30], v[k - 29:k + 31]))     # no step in pace
+
+
+def test_no_back_nudge_when_a_fix_goes_quiet(tmp_path):
+    """#390 re-review: no fix for a minute: eased to a stop (the ease eased in at RAIL_JERK, as the drawn train's own
+    pace), drawn onto its rest without overshooting it and gliding back."""
+    out = node(tmp_path, TRACK + """
+for (const v of IN.vs) {
+  tk.set("q" + v, { ...IN.f, v, fixAt: IN.f.t0, at: at(0) }, at(0));
+  out["q" + v] = drive("q" + v, 0, 70);
+}
+""", {"f": fix(fixAt=NOW, hold=PC + 5000, stop=PC + 5000, until=NOW + T.TT_HORIZON_S, seg=None), "vs": [10, 20, 30, 36]})
+    for k, path in out.items():
+        assert min(b - a for a, b in zip(path, path[1:])) >= -1e-6, k                    # never back
+        assert path[-1] == path[-50]                                                   # and at rest
+
+
+
+@pytest.mark.parametrize("by, move", [(60, -3), (120, -6), (200, -10), (300, -15), (250, 15)])
+def test_a_re_aim_mid_glide_never_fades_or_jumps(tmp_path, by, move):
+    """#392 final check: gliding back (here 8-17 m/s with 7-65 m left when it comes), a new fix that moves the target is
+    taken into the glide as a smooth shift: never a fade, never a jump, never a hitch, at most 4.5 m/s^2."""
+    f = fix(until=NOW + 300, hold=PC)
+    out = node(tmp_path, TRACK + GLIDE + """
+tk.set("a", { ...IN.f, at: at(0) }, at(0));
+drive("a", 0, 20);
+const drawn = tk.where("a", at(20)).s;
+const g = { ...IN.f, s: drawn - IN.by, mode: "stopped", seg: null, hold: drawn - IN.by, stop: drawn + 2000, t0: IN.f.t0 + 20, at: at(20) };
+tk.set("a", g, at(20));
+const p1 = watch("a", 20.1, 60);
+// the fix comes late in the glide: still 8 m/s or more back, 7 m or more left, but too little room to stop gently
+let k = -1;
+for (let i = 1; i < p1.length && k < 0; i++) {
+  const sp = (p1[i - 1][1] - p1[i][1]) / 0.1, left = p1[i][1] - g.s;
+  if (sp >= 8 && left >= 7 && left <= (sp * sp) / 2.5) k = i;
+}
+if (k < 0) { let best = 0; for (let i = 1; i < p1.length; i++) { const sp = (p1[i - 1][1] - p1[i][1]) / 0.1; if (sp > best) { best = sp; k = i; } } }
+out.at = p1[k][0]; out.left = p1[k][1] - g.s; out.speed = (p1[k - 1][1] - p1[k][1]) / 0.1;
+""", {"f": f, "by": by})
+    t_fix = out["at"]
+    assert out["speed"] >= 8 and out["left"] >= 7                                   # (the case the review found)
+    out2 = node(tmp_path, TRACK + GLIDE + """
+tk.set("a", { ...IN.f, at: at(0) }, at(0));
+drive("a", 0, 20);
+const drawn = tk.where("a", at(20)).s;
+const g = { ...IN.f, s: drawn - IN.by, mode: "stopped", seg: null, hold: drawn - IN.by, stop: drawn + 2000, t0: IN.f.t0 + 20, at: at(20) };
+tk.set("a", g, at(20));
+const p1 = watch("a", 20.1, IN.t);
+const t2 = IN.t + 0.05;
+tk.set("a", { ...g, s: g.s - IN.move, hold: g.s - IN.move, t0: g.t0 + 1, at: at(t2) }, at(t2));
+out.path = [...p1, ...watch("a", IN.t + 0.1, IN.t + 40)]; out.to = g.s - IN.move;
+""", {"f": f, "by": by, "move": move, "t": round(t_fix, 1)})
+    path = out2["path"]
+    assert all(p[3] == 1 for p in path)                                              # never a fade
+    ss = [p[1] for p in path]
+    v = [(b - a) / 0.1 for a, b in zip(ss, ss[1:])]
+    assert max(abs(x) for x in v) <= 26                                              # never a jump
+    assert max(abs(b - a) for a, b in zip(v, v[1:])) <= 0.1 * 4.5 + 0.35            # no hitch (the 0.05 s fix frame aside)
+    assert ss[-1] == out2["to"]

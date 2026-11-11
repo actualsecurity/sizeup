@@ -241,6 +241,9 @@ global.requestAnimationFrame = (f) => { frames.push(f); return frames.length; };
 """
 
 LOAD = r"""
+// A fake clock (#404): only the frames move it, 25 ms a frame, so a busy machine can't stretch a second of frames.
+const T0 = Date.now(), P0 = performance.now(); let dt = 0;
+Date.now = () => T0 + dt; performance.now = () => P0 + dt;
 for (const f of ["motion.js", "glide.js", "mapfollow.js", "cadmap.js"]) eval(fs.readFileSync(IN.static + "/" + f, "utf8"));
 const host = new El("div");
 const rm = new CadMap.RigMap(host, { scene: { home: { center: [-73.68, 41.02], zoom: 13 }, firehouses: [] }, pins: true, unset: false,
@@ -252,7 +255,7 @@ const chip = (u) => L.chips.get(u);
 const cls = (u) => chip(u).el.className.split(/\s+/).filter((c) => !c.startsWith("maplibregl-"));
 const follow = () => host.find("cm-follow")[0];
 const followText = () => follow().find("ac-follow-t")[0].textContent;
-const spin = (ms) => { const t = Date.now(); while (Date.now() - t < ms) {} };
+const spin = (ms) => { dt += ms; };
 const lng = (u) => chip(u).marker.getLngLat().lng;
 const run = (n, ms) => { for (let i = 0; i < n; i++) { spin(ms); const fs_ = frames.splice(0); for (const f of fs_) f(performance.now()); } };
 const withFix = (u, patch) => ({ ...cad.state.map, markers: cad.state.map.markers.map((m) => (m.unit === u ? { ...m, ...patch } : m)) });

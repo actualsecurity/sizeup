@@ -510,7 +510,7 @@ window.GisLayers = (() => {
     if (/^\d{13}$/.test(s)) return day(Number(s) / 1000);
     return s.replace(/\s+/g, " ");
   }
-  const tz = () => (window.cad && cad.scene && cad.scene.timezone) || "America/New_York";
+  const tz = () => (typeof cad !== "undefined" && cad && cad.scene && cad.scene.timezone) || "America/New_York";
   function day(t) {
     try { return new Date(t * 1000).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric", timeZone: tz() }); }
     catch (_) { return ""; }
