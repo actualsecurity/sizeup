@@ -31,19 +31,25 @@ sizeup/sources/runner.py (they come here as "source_event" / "source_health" thr
                terms as "street only" (within SAME_CALL_S, types not different, units not disjoint), never while an
                incident at the number as written is open (then noted). A feed's typed number is never halved
     misheard   a page against a feed's incident (either order) whose street speech-to-text misspelled ("220 Samplewerth
-               Place" for "20 SAMPLEWORTH PL": heard_place, sizeup/cad/fuzzy.py): the street alike (name_sim >=
-               STREET_SIM: case, spaces and doubled letters folded, sound-alikes), directions and suffix agreeing, and,
-               with the gazetteer's street list (set_streets), not a closer known street of its own (snap_street: one
-               clear best, else "ambiguous"). The type never matters. It joins only when the house number is the same,
-               misread (a digit inserted or dropped) or halved, no two different known towns are named, at least
-               FUZZY_UNITS apparatus are shared (department entries never; run-together numbers split when both halves
-               are on the board: split_units), the page came at most SAME_CALL_S before and PAGE_LAG_S after the
-               feed's dispatch, and no other open incident fits as well (two: a person picks). Less (one unit shared,
-               another number, too late, ambiguous) is "possibly the same"; another number with nothing shared,
-               nothing. A page's own card (Cad.from_monitor) takes the gazetteer's spelling when one street is clearly
-               meant, its point offered as a reading to pick, never a pin. A feed event made or changed (units,
-               location) sweeps a page card left queued for it, as "closed" does
-    same call  a match must also be the same call (SAME_CALL_S; PAGE_LAG_S after with FUZZY_UNITS shared): a page joins a feed's incident only when the feed's
+               Place" for "20 SAMPLEWORTH PL": heard_place, sizeup/cad/fuzzy.py): the heard name not the typed one but
+               alike (name_sim >= STREET_SIM: case, spaces and doubled letters folded, sound-alikes), the suffix agreeing,
+               no known street of that exact name in the page's towns (its tones': the whole district for ours) or
+               the feed's. The type never matters. It joins only when the heard street snaps to the feed's
+               (snap_street over the gazetteer's streets, set_streets: one clear best; never with no street list), the
+               directions are the same on both sides, the house number is the same, misread (a digit inserted or
+               dropped: only ever for a misheard street; an exactly right street with another number is another
+               place, the strict rules decide) or halved, the page's town (named, else its tones' towns) and the feed's
+               don't differ, at least FUZZY_UNITS apparatus are shared (department entries never; run-together numbers
+               split when both halves are on the board: split_units), the page came at most SAME_CALL_S before and
+               PAGE_LAG_S after the feed's dispatch (that window is this rule's only: match_all marks the match
+               "_misheard"), and no other open incident qualifies too (two: a person picks). Less (one unit shared,
+               another number, too late, not snapped, a direction missing) is "possibly the same"; another number with
+               nothing shared, nothing. A page's own card keeps the heard location (matching uses it); the gazetteer's
+               spelling is shown (remarks) and its point offered as a reading to pick, never a pin. A feed event made or
+               changed (units, location) sweeps a page card left queued for it, as "closed" does, only when this match
+               meets the join bar (never a note's evidence), with one line on the incident; the CAD enriches it as for
+               a page that joined (on_page_swept)
+    same call  a match must also be the same call (SAME_CALL_S; PAGE_LAG_S after for a "misheard" one): a page joins a feed's incident only when the feed's
                dispatch is within 5 min of it (the same type is not enough), and never one the feed has in service. A
                feed event never joins an incident made after it ended, nor one made more than SAME_CALL_S after its
                dispatch (an earlier call, open or not); one first seen closed only when dispatched at most
@@ -111,7 +117,7 @@ ALERT_SOURCE = "60 Control radio"     # incidents.source of an airport alert lev
 MATCH_WINDOW_S = 20 * 60.0
 ALERT_WINDOW_S = MATCH_WINDOW_S        # an airport alert (#369) and a report that is an alert already: this far apart
 SAME_CALL_S = 5 * 60.0                 # a report's dispatch this close to an incident's creation: the same call
-PAGE_LAG_S = 8 * 60.0                  # a page this long after the feed's dispatch, FUZZY_UNITS apparatus shared: one call
+PAGE_LAG_S = 8 * 60.0                  # a "misheard" page this long after the feed's dispatch: still the same call
 FUZZY_UNITS = 2                        # apparatus a page and a feed's incident share for a misheard street to join
 SAME_CALL_BEFORE_S = 60.0              # ... and an event first seen closed or old: dispatched at most this before it
 REPORT_STALE_S = 180.0
@@ -513,29 +519,39 @@ def snapped(location: str, town: str | tuple = "") -> str:
     return f"{k[1]} {written}".strip() + there
 
 
-def heard_place(heard: str, typed: str) -> str:
-    """A page's heard address against a typed one (a feed's), when not the same place as written: "num" for a street
-    speech-to-text misheard (fuzzy.name_sim) with the same house number, one misread (fuzzy.misread: a digit
-    inserted or dropped; a doubled number, halved) or none on one side; "other" for that street and another number;
-    "ambiguous" when the heard street is as near another known street; "" for anything else (another street, another
-    town, a known street the page names that the feed's isn't, an intersection or a named place)."""
+def heard_place(heard: str, typed: str, towns=()) -> str:
+    """A page's heard address against a typed one (a feed's) whose street speech-to-text misheard: the heard name is
+    not the typed one but alike (fuzzy.name_sim), suffix agreeing. towns: where the page may be (its tones' towns, the
+    feed's town): the heard street is snapped over their known streets (snap_street).
+      "num"    may join: the heard street snaps to the feed's street ("snap", never "unknown"), the directions are the
+               same on both sides (none missing), and the house number is the same, misread (fuzzy.misread: a digit
+               inserted or dropped), halved, or missing on one side
+      "other"  that misheard street, another house number
+      "weak"   alike, but not sure it is that street (no street list, two near it, a direction missing): a note at most
+      ""       not a misheard street: the same name as typed (an exactly right street with another number is another
+               place: the strict rules decide), another street, another town, a known street the page names exactly that
+               isn't the feed's, an intersection or a named place"""
     kh, kt = place_key(heard), place_key(typed)
     if not kh or not kt or kh[0] != "addr" or kt[0] != "addr" or not _towns_agree(heard, typed):
         return ""
-    if not _fits(kh[2:], kt[2:]) or name_sim(" ".join(sorted(kh[4])), " ".join(sorted(kt[4]))) < STREET_SIM:
+    hn, tn = " ".join(sorted(kh[4])), " ".join(sorted(kt[4]))
+    if hn == tn or not _fits(kh[2:], kt[2:]) or name_sim(hn, tn) < STREET_SIM:
         return ""
-    town = _town(heard) or _town(typed)
-    how, st = snap_street(heard, town)
+    where = tuple(dict.fromkeys(t for t in (_town(heard), *towns, _town(typed)) if t))
+    if any(n == hn and not _same_street(st, kt[2:]) for t in where for n, st, _ in STREETS.get(str(t).lower(), ())):
+        return ""                                          # the page names another known street, as it is spelled
+    how, st = snap_street(heard, where)
     if how == "snap":
-        how_t, st_t = snap_street(typed, town)
-        if how_t == "snap" and st_t != st:
-            return ""                                      # two known streets: the page names the other one
-    if how == "ambiguous":
-        return "ambiguous"
+        how_t, st_t = snap_street(typed, where)
+        if (st_t if how_t == "snap" else None) != st and not _same_street(st, kt[2:]):
+            return ""                                      # the heard street is another known one
     nh, nt = kh[1], kt[1]
     half = halved(heard)
     nh2 = place_key(half)[1] if half else ""
-    return "num" if (nh == nt or not nh or not nt or misread(nh, nt) or (nh2 and nh2 == nt)) else "other"
+    if not (nh == nt or not nh or not nt or misread(nh, nt) or (nh2 and nh2 == nt)):
+        return "other"
+    sure = how == "snap" and kh[2] == kt[2] and kh[5] == kt[5]
+    return "num" if sure else "weak"
 
 
 def _towns_agree(a: str, b: str) -> bool:
@@ -582,6 +598,9 @@ class Sources:
         # on_page_moved(card id, incident id): a page's card moved onto another incident (rematch_page, _sweep_pages;
         # #370: its full department / specific units reading goes with it); None: nobody listens
         self.on_page_moved: Callable[[int, int], None] | None = None
+        # on_page_swept(card, incident id, page record): a page's card a feed's event took (_sweep_pages): the CAD
+        # enriches the incident as for a page that joined it (transcript, cross streets, 60 Control mode's units)
+        self.on_page_swept: Callable[[dict, int, dict], None] | None = None
         self._stop = threading.Event()
         with self.store.lock:
             self.store.db.executescript(SCHEMA)
@@ -745,9 +764,11 @@ class Sources:
         return best, (nears[0] if nears else None)
 
     def match_all(self, source: str, at: float, location: str, units, typ: str = "",
-                  exclude: int | None = None) -> tuple[dict | None, list[dict]]:
+                  exclude: int | None = None, towns=()) -> tuple[dict | None, list[dict]]:
         """(the open incident this report may attach to, else every one it is possibly the same as, nearest first): see
-        the module's "match" and "street only". Whether it may attach there is also the caller's (see "attach")."""
+        the module's "match", "street only" and "misheard". Whether it may attach there is also the caller's (see
+        "attach"). One found by "misheard" comes back marked "_misheard": True (its own time window: PAGE_LAG_S).
+        towns: a page's tones' towns ("misheard")."""
         self._towns()
         units = split_units(drop_departments(units))         # a department entry says nothing about which call (#370)
         taken = {r["incident_id"] for r in self.store.q(
@@ -793,7 +814,7 @@ class Sources:
                     score = -1                               # other units: maybe another call there, noted
                 else:
                     score = 5 + len(common)
-            elif here and theirs and not same and (fz := self._heard(source, location, inc, theirs, heard, at)):
+            elif here and theirs and not same and (fz := self._heard(source, location, inc, theirs, heard, at, towns)):
                 if fz[0] == "num" and fz[1] and len(common) >= FUZZY_UNITS:
                     fuzzy.append(((abs(inc["created_at"] - at), -len(common)), inc))
                     continue                                 # joins when it is the only one (below)
@@ -829,7 +850,7 @@ class Sources:
             nears.append((bkey, best))                       # two calls at the place, neither near in time: a person picks
             best = None
         if best is None and len(fuzzy) == 1:                 # one misheard street, apparatus shared: the call
-            best = fuzzy[0][1]
+            best = dict(fuzzy[0][1], _misheard=True)
         elif fuzzy:                                          # two equally good (or a better match): a person picks
             nears += fuzzy
         if best is not None:
@@ -843,25 +864,31 @@ class Sources:
                 out.append(inc)
         return None, out
 
-    def _heard(self, source: str, location: str, inc: dict, theirs: list[str], heard: bool,
-               at: float) -> tuple[str, bool] | None:
+    def _heard(self, source: str, location: str, inc: dict, theirs: list[str], heard: bool, at: float,
+               towns=()) -> tuple[str, bool] | None:
         """A page and a feed's incident at a street speech-to-text misheard (heard_place): (the best reading, "num" >
-        "ambiguous" > "other"; whether the page came within -SAME_CALL_S..PAGE_LAG_S of the feed's incident). None when
-        it isn't a page against a feed's (either way round), or no reading fits."""
+        "weak" > "other"; whether the page came within -SAME_CALL_S..PAGE_LAG_S of the feed's incident). None when it
+        isn't a page against a feed's (either way round), the page's town (named, else its tones' towns) and the
+        feed's differ, or no reading fits. towns: the page's tones' towns (page(); a page card's from its report)."""
         if source == PAGING and self._has_feed(inc["id"]):
             raw = [json.loads(r["data"] or "{}").get("location") or "" for r in self.store.q(
                 "SELECT data FROM source_reports WHERE incident_id = ? AND source != ? AND merged_into = ''", (inc["id"], PAGING))]
             pages, typed, lag = [location], [*theirs, *raw], at - inc["created_at"]
         elif source != PAGING and heard:
-            pages, typed, lag = theirs, [location], inc["created_at"] - at
+            reps = [json.loads(r["data"] or "{}") for r in self.store.q(
+                "SELECT data FROM source_reports WHERE incident_id = ? AND source = ?", (inc["id"], PAGING))]
+            pages = [*theirs, *(d.get("location") or "" for d in reps)]
+            towns = [t for d in reps for t in d.get("towns") or ()]
+            typed, lag = [location], inc["created_at"] - at
         else:
             return None
-        tp = {t for t in map(_town, pages) if t}
+        tp = {t for t in map(_town, pages) if t} or {str(t).lower() for t in towns}
         tt = {t for t in map(_town, typed) if t}
         if tp and tt and not tp & tt:
             return None                                      # two towns: never the same call by a misheard street
-        got = {heard_place(h, t) for h in pages for t in typed if place_key(t) is not None} - {""}
-        best = next((g for g in ("num", "ambiguous", "other") if g in got), None)
+        got = {heard_place(h, t, tuple(towns)) for h in pages for t in typed
+               if place_key(h) is not None and place_key(t) is not None} - {""}
+        best = next((g for g in ("num", "weak", "other") if g in got), None)
         return (best, -SAME_CALL_S <= lag <= PAGE_LAG_S) if best else None
 
     @staticmethod
@@ -1024,8 +1051,7 @@ class Sources:
                 # (open), so a page that beat the feed gets the feed's report, not a duplicate
                 typ, sub = self.cad.map_type(data["type"], label)[:2] if data["type"] else ("", "")
                 inc, similar = self.match_all(ev.source, at, data["location"], data["units"], typ)
-                lag = (PAGE_LAG_S if inc is not None and inc["source"] == PAGE_SOURCE and len(units_match(
-                    split_units(data["units"]), split_units(self._units_of(inc["id"])))) >= FUZZY_UNITS else SAME_CALL_S)
+                lag = PAGE_LAG_S if inc is not None and inc.get("_misheard") else SAME_CALL_S
                 if inc is not None and not self._same_call(inc, data, now, lag):
                     inc, similar = None, [inc]               # another call there (one that ended before, an old one)
                 if inc is None:                              # the airport alert 60 Control declared on the radio (#369)
@@ -1332,8 +1358,8 @@ class Sources:
             if rep and rep["incident_id"]:
                 return "attached", rep["incident_id"]
             typ = str((data.get("f") or {}).get("type") or "")
-            inc, similar = self.match_all(PAGING, at, location, units, typ)
-            if inc is not None and self._has_feed(inc["id"]) and not self._page_same_call(inc, at, typ, units):
+            inc, similar = self.match_all(PAGING, at, location, units, typ, towns=data.get("towns") or ())
+            if inc is not None and self._has_feed(inc["id"]) and not self._page_same_call(inc, at, typ):
                 inc, similar = None, [inc]                   # another call there: the page's own incident, noted
             if not (inc is not None and self._has_feed(inc["id"])):
                 al = self.alert_incident(PAGING, at, typ, location,      # the alert level declared on the radio (#369)
@@ -1388,19 +1414,18 @@ class Sources:
             (ALERT_SOURCE, airport.TYPE, *OPEN, at - MATCH_WINDOW_S, at + after, source, at))
         return next((r for r in rows if not self.other_aircraft(r, aircraft)), None)
 
-    def _page_same_call(self, inc: dict, at: float, typ: str, units=()) -> bool:
+    def _page_same_call(self, inc: dict, at: float, typ: str) -> bool:
         """A page joins a feed's incident only for the same call: the feed's dispatch within SAME_CALL_S of the page (the
-        same type is not enough: a second alarm there later is another call); a page sharing FUZZY_UNITS apparatus
-        with it up to PAGE_LAG_S after that dispatch (60 Control pages a while after the county dispatched); never one
-        the feed has in service."""
+        same type is not enough: a second alarm there later is another call); one match_all found by "misheard" (a
+        misheard street, FUZZY_UNITS apparatus shared) up to PAGE_LAG_S after that dispatch (60 Control pages a while
+        after the county dispatched); never one the feed has in service."""
         r = self._best_feed(inc["id"])
         d = json.loads(r["data"] or "{}") if r else {}
         ended = (d.get("times") or {}).get("in_service")
         if d.get("closed") or (ended is not None and ended < at):
             return False
         disp = self._disp(d) or (r["first_seen"] if r else None)
-        shared = units_match(split_units(units), split_units(self._units_of(inc["id"])))
-        after = PAGE_LAG_S if len(shared) >= FUZZY_UNITS else SAME_CALL_S
+        after = PAGE_LAG_S if inc.get("_misheard") else SAME_CALL_S
         return disp is not None and -SAME_CALL_S <= at - disp <= after
 
     def created_by_page(self, ref: str, iid: int, similar: dict | list | None = None) -> None:
@@ -1424,8 +1449,8 @@ class Sources:
             if rep is None or rep["incident_id"] != iid or own["status"] != "queued" or self._has_feed(iid):
                 return "own", None
             typ = str((data.get("f") or {}).get("type") or "")
-            inc, similar = self.match_all(PAGING, at, location, units, typ, exclude=iid)
-            if inc is not None and self._has_feed(inc["id"]) and not self._page_same_call(inc, at, typ, units):
+            inc, similar = self.match_all(PAGING, at, location, units, typ, exclude=iid, towns=data.get("towns") or ())
+            if inc is not None and self._has_feed(inc["id"]) and not self._page_same_call(inc, at, typ):
                 inc, similar = None, [inc]
             if not (inc is not None and self._has_feed(inc["id"])):
                 al = self.alert_incident(PAGING, at, typ, location,      # the alert level declared on the radio (#369)
@@ -1454,7 +1479,9 @@ class Sources:
         """A feed is closing the event on this incident (still open here): the page cards left queued for that call
         (#365: they never joined). Only a page's own card, untouched by anyone (_touched_page), with no "possibly the
         same" note on another open incident, whose page matched again now (match_all, its own card left out) takes
-        THIS incident as the one to attach to, for the same call (_page_same_call)."""
+        THIS incident as the one to attach to, for the same call (_page_same_call). Also when the feed made or changed
+        the event: a card noted "possibly the same" as it then is taken only now that this match meets the join bar
+        (match_all's best: never a note's evidence)."""
         inc = self.store.incident(iid)
         out = []
         with self._lock:
@@ -1471,9 +1498,8 @@ class Sources:
                 d = json.loads(rep["data"] or "{}")
                 typ = str((d.get("f") or {}).get("type") or p["type"] or "")
                 best, _ = self.match_all(PAGING, rep["first_seen"], d.get("location") or p["address"],
-                                         d.get("units") or [], typ, exclude=p["id"])
-                if best is not None and best["id"] == iid and self._page_same_call(best, rep["first_seen"], typ,
-                                                                                   d.get("units") or []):
+                                         d.get("units") or [], typ, exclude=p["id"], towns=d.get("towns") or ())
+                if best is not None and best["id"] == iid and self._page_same_call(best, rep["first_seen"], typ):
                     out.append(p)
                 elif inc["source"] == ALERT_SOURCE:          # the airport alert level's incident (#369): as page() joins it
                     al = self.alert_incident(PAGING, rep["first_seen"], typ, d.get("location") or p["address"],
@@ -1495,12 +1521,21 @@ class Sources:
                 rep = self.store.one("SELECT * FROM source_reports WHERE source = ? AND incident_id = ?", (PAGING, p["id"]))
                 if p["status"] != "queued" or rep is None or self._touched_page(p["id"], p["source_ref"]):
                     continue
+                rec = dict(json.loads(rep["data"] or "{}"), at=rep["first_seen"])
                 with self.store.tx() as db:
                     db.execute("UPDATE source_reports SET incident_id = ? WHERE source = ? AND ref = ?", (iid, PAGING, rep["ref"]))
                     self.store._event(db, p["id"], "feed", f"Page attached to {_ref(inc)}" + (" (closed there)" if closed else ""),
                                       at=self.clock())
-                self._page_attached(inc, dict(json.loads(rep["data"] or "{}"), at=rep["first_seen"]))
+                    self.store._event(db, iid, "feed", f"Page card {_ref(p)} merged into this: the same call"
+                                      + (" (closed here)" if closed else f" ({'possibly the same before, the feed\'s update matches it now' if self._noted(p['id'], inc) else 'the feed\'s event matches it'})"),
+                                      at=self.clock())
+                self._page_attached(inc, rec)
                 self._moved(p["id"], iid)
+                if self.on_page_swept is not None:
+                    try:
+                        self.on_page_swept(p, iid, rec)
+                    except Exception as e:  # noqa: BLE001 - the move stands whatever a listener does
+                        self.log(f"incident sources: page swept: {type(e).__name__}")
                 self.store.dismiss(p["id"], operator=PAGING_LABEL, reason=f"the same call as {_ref(inc)}" + (", closed" if closed else ""))
                 self.log(f"incident sources: page event {p['id']} attached to {'closed ' if closed else ''}event {iid}, dismissed")
                 n += 1

@@ -1765,7 +1765,7 @@ class App:
                 self.live.fm_open(label, since)
 
     def _dispatch(self, raw: str):
-        d = parse(raw) if raw else None
+        d = parse(raw, self.cfg.unit_departments) if raw else None
         if d is not None:  # units dispatched name their department ("Engine 61" -> Port Chester FD)
             # "Engine 6158": Engine 61 and Engine 58 run together, split when the roster has both
             d.units = split_joined(d.units, self.cfg.unit_departments)
