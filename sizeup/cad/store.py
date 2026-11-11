@@ -57,6 +57,9 @@ OPEN = ("queued", "pending", "active")
 SOURCES = ("manual", "60 Control page", "CAD feed", "60 Control radio")    # CAD feed: an external incident source (#297);
 # 60 Control radio: an airport alert level declared on the fire radio (#369, sizeup/airport_watch.py)
 ON_TIMES = {"dispatched": "dispatched_at", "enroute": "enroute_at", "onscene": "onscene_at"}
+PLACEHOLDER_SCHEMA = """CREATE TABLE IF NOT EXISTS placeholder_releases (
+    id INTEGER PRIMARY KEY, incident_id INTEGER NOT NULL, placeholder_id INTEGER NOT NULL, assignment_id INTEGER NOT NULL,
+    by_unit_id INTEGER NOT NULL, at REAL NOT NULL, restored_at REAL)"""
 
 SCHEMA = """
 CREATE TABLE units (
@@ -437,6 +440,7 @@ class Store:
         for stmt in (ACTIVITY_SCHEMA + EXCLUSION_SCHEMA).split(";"):   # per-person activity, removed links (2026-10-08)
             if stmt.strip():
                 self.db.execute(stmt)
+        self.db.execute(PLACEHOLDER_SCHEMA)               # which unit's sign-on released a placeholder (undo puts it back)
         if self.db.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'unit_history'").fetchone():
             # a unit's latest status change (Close event's and the startup repair's look-up, #232), 2026-11-04
             self.db.execute("CREATE INDEX IF NOT EXISTS unit_history_unit ON unit_history(unit_id, id)")
@@ -768,8 +772,9 @@ class Store:
                       "AND b.cleared_at IS NULL) "     # one row per unit: a placeholder on several calls shows its latest
                       "LEFT JOIN incidents i ON i.id = a.incident_id ORDER BY u.sort, u.id")
         for r in rows:
-            r["incident_ids"] = []
-        if any(self.lists.placeholder(r["name"]) for r in rows if r["incident_id"]):
+            r["incident_ids"] = [r["incident_id"]] if r["incident_id"] else []
+            r["placeholder"] = self.lists.placeholder(r["name"])
+        if any(r["placeholder"] for r in rows if r["incident_id"]):     # one on several calls: all of them
             on: dict[int, list[int]] = {}
             for a in self.q("SELECT unit_id, incident_id FROM assignments WHERE cleared_at IS NULL ORDER BY id"):
                 on.setdefault(a["unit_id"], []).append(a["incident_id"])
@@ -832,6 +837,8 @@ class Store:
             if not L.placeholder(r["name"]) or L.department_of(r["name"]) != dept:
                 continue
             db.execute("UPDATE assignments SET cleared_at = ? WHERE id = ?", (now, r["aid"]))
+            db.execute("INSERT INTO placeholder_releases (incident_id, placeholder_id, assignment_id, by_unit_id, at) "
+                       "VALUES (?, ?, ?, ?, ?)", (iid, r["id"], r["aid"], uid, now))
             free = self._placeholder_off(db, r, iid, operator, now, f"{me['name']} signed on")
             said = L.status_phrase(free, r["name"], r["board"]) if free else "off this call"
             self._event(db, iid, "status", f"{r['name']} {said}: {me['name']} {L.status_phrase(status, me['name'])}",
@@ -869,6 +876,72 @@ class Store:
         self._unassigned(iid)
         return True
 
+    def dept_signed_on(self, iid: int, ph: str, ever: bool = True, db=None) -> bool:
+        """A unit (not a placeholder) of placeholder ph's department that signed on or responded on this call (an en route
+        or on location time; ever: cleared since too, else on it now)."""
+        L = self.lists
+        dept = L.department_of(ph)
+        rows = (db or self.db).execute("SELECT u.name FROM assignments a JOIN units u ON u.id = a.unit_id WHERE a.incident_id = ? "
+                                       "AND (a.enroute_at IS NOT NULL OR a.onscene_at IS NOT NULL)"
+                                       + ("" if ever else " AND a.cleared_at IS NULL"), (iid,)).fetchall()
+        return bool(dept) and any(not L.placeholder(r["name"]) and L.department_of(r["name"]) == dept for r in rows)
+
+    def restore_placeholders(self, iid: int, uid: int, operator: str = "") -> list[str]:
+        """The sign-on of unit uid on this call was undone: each placeholder it released there goes back on the call
+        (Dispatched) when no unit of its department is still signed on there and nothing put it back since."""
+        L = self.lists
+        out = []
+        now = self.clock()
+        with self.tx() as db:
+            for r in db.execute("SELECT p.id, p.assignment_id, u.id AS uid, u.name, u.status FROM placeholder_releases p "
+                                "JOIN units u ON u.id = p.placeholder_id WHERE p.incident_id = ? AND p.by_unit_id = ? "
+                                "AND p.restored_at IS NULL ORDER BY p.id", (iid, uid)).fetchall():
+                db.execute("UPDATE placeholder_releases SET restored_at = ? WHERE id = ?", (now, r["id"]))
+                if self.dept_signed_on(iid, r["name"], ever=False, db=db) or db.execute(
+                        "SELECT 1 FROM assignments WHERE incident_id = ? AND unit_id = ? AND cleared_at IS NULL", (iid, r["uid"])).fetchone():
+                    continue
+                dp = L.status_for("dispatched")
+                db.execute("UPDATE assignments SET cleared_at = NULL WHERE id = ?", (r["assignment_id"],))
+                if r["status"] != dp:
+                    db.execute("UPDATE units SET status = ?, status_at = ? WHERE id = ?", (dp, now, r["uid"]))
+                    self._history(db, r["uid"], r["status"], dp, iid, operator, now, "sign-on undone")
+                self._event(db, iid, "status", f"{r['name']} back on this call (sign-on undone)", operator, r["uid"], now)
+                out.append(r["name"])
+        return out
+
+    def _placeholder_status(self, uid: int, status: str, iid: int | None, operator: str) -> dict:
+        """A placeholder's status from the board or a call's unit row: only Dispatched (put on that call, its other calls
+        kept) or a free one (off that call; from the board, iid None: off every call)."""
+        L = self.lists
+        u = self.unit(uid)
+        role = L.role(status)
+        if role not in ("dispatched", "free"):
+            raise CadError(f"{u['name']} is a department placeholder: {L.name('unit_statuses', L.status_for('dispatched'))} "
+                           f"or in quarters only")
+        if role == "dispatched":
+            if not iid:
+                raise CadError(f"{u['name']} is a department placeholder: Dispatched only on a call")
+            self.assign(iid, [uid], operator)
+            return self.unit(uid)
+        if iid:
+            if not self.placeholder_off_call(iid, uid, operator):
+                raise CadError(f"{u['name']} is not on this call")
+            return dict(self.unit(uid), cleared_from=[iid])
+        now = self.clock()
+        with self.tx() as db:
+            calls = [r["incident_id"] for r in db.execute("SELECT incident_id FROM assignments WHERE unit_id = ? "
+                                                          "AND cleared_at IS NULL ORDER BY id", (uid,)).fetchall()]
+            db.execute("UPDATE assignments SET cleared_at = ? WHERE unit_id = ? AND cleared_at IS NULL", (now, uid))
+            db.execute("UPDATE units SET status = ?, status_at = ?, out_of_service = '' WHERE id = ?", (status, now, uid))
+            for c in calls:
+                self._event(db, c, "status", f"{u['name']} {L.status_phrase(status, u['name'], u['board'])}", operator, uid, now)
+            self._history(db, uid, u["status"], status, calls[-1] if calls else None, operator, now)
+            if not calls:
+                self._event(db, None, "status", f"{u['name']} {L.status_phrase(status, u['name'], u['board'])}", operator, uid, now)
+        for c in calls:
+            self._unassigned(c)
+        return dict(self.unit(uid), cleared_from=calls)
+
     def release_placeholders(self) -> list[str]:
         """Once at start: a placeholder still on an open call that a unit of its department already signed on or
         responded to (an assignment with an en route or on location time) goes back to free, as if released then.
@@ -891,7 +964,8 @@ class Store:
                 out += [f"{n} (#{r['incident_id']})" for n in got]
         return out
 
-    def set_unit_status(self, uid: int, status: str, operator: str = "", note: str = "", why: str = "") -> dict:
+    def set_unit_status(self, uid: int, status: str, operator: str = "", note: str = "", why: str = "",
+                        call: int | None = None) -> dict:
         """The status dropdown. A free or out-of-service status clears the unit off its event;
         dispatched, en route and on scene stamp the assignment's times. why: where the status came from, after the
         chronology line ("Status from radio (heard ...)": a suggestion accepted, sizeup/cad/statushints.py)."""
@@ -900,6 +974,8 @@ class Store:
             raise CadError(f"unknown status {status!r}; one of {', '.join(L.status_ids)}")
         role = L.role(status)
         u = self.unit(uid)
+        if u["placeholder"]:                             # not a rig: Dispatched or in quarters, per call
+            return self._placeholder_status(uid, status, call, operator)
         if u["response"] == "agency" and status not in L.unit_statuses_for(u["name"], u["board"]):
             ok = [L.label(s, u["name"], u["board"]) for s in L.unit_statuses_for(u["name"], u["board"])]
             raise CadError(f"{u['name']} is another agency's unit: {', '.join(ok[:-1])} or {ok[-1]}" if len(ok) > 1
@@ -915,14 +991,6 @@ class Store:
                                "WHERE id = ?", (now, a["id"]))
                 elif role in ("free", "oos"):
                     db.execute("UPDATE assignments SET cleared_at = ? WHERE id = ?", (now, a["id"]))
-            also = []                                    # a placeholder on several calls: a free status clears it off all
-            if a is not None and role in ("free", "oos") and L.placeholder(u["name"]):
-                also = [r["incident_id"] for r in db.execute("SELECT id, incident_id FROM assignments WHERE unit_id = ? "
-                                                             "AND cleared_at IS NULL", (uid,)).fetchall()]
-                db.execute("UPDATE assignments SET cleared_at = ? WHERE unit_id = ? AND cleared_at IS NULL", (now, uid))
-                for other in also:
-                    self._event(db, other, "status", f"{u['name']} {L.status_phrase(status, u['name'], u['board'])}",
-                                operator, uid, now)
             text = f"{u['name']} {'cleared' if u['response'] == 'agency' and role == 'free' else L.status_phrase(status, u['name'], u['board'])}" \
                 + (f" ({note})" if note and role == "oos" else "")
             iid = a["incident_id"] if a is not None else None
@@ -934,8 +1002,6 @@ class Store:
             freed = self._release_placeholders(db, iid, uid, status, operator, now)
         if a is not None and (role in ("free", "oos") or freed):
             self._unassigned(a["incident_id"])
-        for other in also:
-            self._unassigned(other)
         out = self.unit(uid)
         if relieved:
             out["command_from"] = relieved
@@ -946,8 +1012,10 @@ class Store:
         """The board's working statuses ask which call (user, 2026-10-07: "it should prompt us ... to
         select the call they are now responding to and remove them from the old call if they were
         on one"). incident_id > 0: put the unit on that call first (moved off any other, noted on both
-        chronologies); 0: on no call (cleared off the one it was on). Then the status."""
+        chronologies); 0: on no call (cleared off the one it was on). Then the status. A placeholder: that call only."""
         L = self.lists
+        if self.lists.placeholder(self.unit(uid)["name"]):
+            return self._placeholder_status(uid, status, incident_id or None, operator)
         if L.role(status) in ("free", "oos"):
             return self.set_unit_status(uid, status, operator, note, why)
         u = self.unit(uid)
@@ -991,7 +1059,11 @@ class Store:
         clear an alarm that is still opened, we need a way to send them back en route and then on
         scene"). Its assignment on that call is reopened; the first times it recorded are kept."""
         L = self.lists
-        if status not in self.return_statuses():
+        ph = L.placeholder(self.unit(uid)["name"])       # a placeholder goes back Dispatched, its other calls kept
+        if ph and L.role(status) != "dispatched":
+            raise CadError(f"{self.unit(uid)['name']} is a department placeholder: back on a call as "
+                           f"{L.name('unit_statuses', L.status_for('dispatched'))} only")
+        if not ph and status not in self.return_statuses():
             raise CadError("a unit goes back to a call as " + " or ".join(L.name("unit_statuses", s)
                                                                            for s in self.return_statuses()))
         u = self.unit(uid)
@@ -1005,7 +1077,8 @@ class Store:
             if inc["status"] in ("closed", "dismissed"):
                 raise CadError("Incident closed")
             busy = db.execute("SELECT a.incident_id, i.number FROM assignments a JOIN incidents i ON i.id = a.incident_id "
-                              "WHERE a.unit_id = ? AND a.cleared_at IS NULL", (uid,)).fetchone()
+                              "WHERE a.unit_id = ? AND a.cleared_at IS NULL" + (" AND a.incident_id = ?" if ph else ""),
+                              (uid, iid) if ph else (uid,)).fetchone()
             if busy is not None:
                 raise CadError(f"{u['name']} on {busy['number'] or busy['incident_id']}: clear it there")
             if L.role(u["status"]) == "oos":
@@ -1014,7 +1087,7 @@ class Store:
                            "ORDER BY cleared_at DESC, id DESC LIMIT 1", (iid, uid)).fetchone()
             if a is None:
                 raise CadError(f"{u['name']} was not on this incident")
-            col = ON_TIMES[L.role(status)]
+            col = ON_TIMES[L.role(status)]          # (Dispatched: dispatched_at, kept)
             db.execute(f"UPDATE assignments SET cleared_at = NULL, {col} = COALESCE({col}, ?) WHERE id = ?", (now, a["id"]))
             db.execute("UPDATE units SET status = ?, status_at = ?, out_of_service = '' WHERE id = ?", (status, now, uid))
             self._event(db, iid, "status", f"{u['name']} returned ({L.status_phrase(status, u['name'], u['board'])})", operator, uid, now)
@@ -1357,6 +1430,8 @@ class Store:
                     left.append(a["incident_id"])
                 cur = db.execute("INSERT INTO assignments (incident_id, unit_id, dispatched_at, assigned_at) VALUES (?, ?, ?, ?)",
                                  (iid, uid, None if attach or status else now, now))
+                if status and self.lists.placeholder(u["name"]):
+                    raise CadError(f"{u['name']} is a department placeholder: never {self.lists.name('unit_statuses', status)}")
                 if status:
                     col = ON_TIMES[self.lists.role(status)]
                     db.execute(f"UPDATE assignments SET {col} = ? WHERE id = ?", (now, cur.lastrowid))

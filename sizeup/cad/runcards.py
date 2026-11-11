@@ -321,7 +321,7 @@ def recommend(store: Store, typ: str, subtype: str = "", incident_id: int | None
     L = store.lists
     p = params or eta.Params()
     c = resolve(store, typ, subtype)
-    units = store.units()
+    units = [u for u in store.units() if not u.get("placeholder")]    # a department placeholder: never on a card
     on_here = [u for u in units if incident_id is not None and u["incident_id"] == incident_id]
     inc = store.incident(incident_id) if incident_id is not None else None
     free = [u for u in units if u["status"] in L.free and u["incident_id"] is None]

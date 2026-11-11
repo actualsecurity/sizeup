@@ -371,15 +371,13 @@ class AutoDispatch:
                 out.pop(k, None)
         return out
 
-    def _dept_units_on(self, iid: int, ph: str, signed_on: bool) -> bool:
-        """A unit (not a placeholder) of placeholder ph's department on this call now; signed_on: one that has responded
-        (an en route or on location time), whose placeholder store.py has released."""
+    def _dept_units_on(self, iid: int, ph: str) -> bool:
+        """A unit (not a placeholder) of placeholder ph's department on this call now, whatever its status."""
         L = self.store.lists
         dept = L.department_of(ph)
         return any(not L.placeholder(r["name"]) and L.department_of(r["name"]) == dept
-                   and (not signed_on or r["enroute_at"] is not None or r["onscene_at"] is not None)
-                   for r in self.store.q("SELECT u.name, a.enroute_at, a.onscene_at FROM assignments a JOIN units u "
-                                         "ON u.id = a.unit_id WHERE a.incident_id = ? AND a.cleared_at IS NULL", (iid,)))
+                   for r in self.store.q("SELECT u.name FROM assignments a JOIN units u ON u.id = a.unit_id "
+                                         "WHERE a.incident_id = ? AND a.cleared_at IS NULL", (iid,)))
 
     def _held(self, iid: int, why: str, op: str) -> None:
         r = self._tracking(iid)
@@ -446,6 +444,10 @@ class AutoDispatch:
             with self.store.tx() as db:
                 self.store._event(db, iid, "auto", f"{label} units not on our boards (not dispatched): {', '.join(unknown)}", op)
         L = self.store.lists
+        for name in [n for n in (old.get("units") or []) if n not in units]:   # a placeholder the feed no longer lists
+            u = ours.get(_key(name))
+            if u is not None and L.placeholder(u["name"]) and not self._manual(iid, f"unit:{u['name']}"):
+                self.store.placeholder_off_call(iid, u["id"], op, f"{label} no longer lists it")
         first = sorted(fresh, key=lambda n: not (_key(n) in ours and L.placeholder(ours[_key(n)]["name"])))
         for name in first:                               # newly listed: dispatched at the feed's time, placeholders first
             u = ours.get(_key(name))
@@ -576,10 +578,10 @@ class AutoDispatch:
             u = dict(u, incident_id=iid if self._on_here(iid, u["id"]) else None)
         if self._manual(iid, f"unit:{u['name']}") or u["incident_id"] == iid:
             return u["incident_id"] == iid
-        if ph and self._dept_units_on(iid, u["name"], signed_on=True):
-            return False                                 # its department's unit already signed on: nothing to hold
+        if ph and self.store.dept_signed_on(iid, u["name"]):
+            return False                                 # its department's unit signed on here (ever): nothing to hold
         if self.store.one("SELECT 1 AS x FROM assignments WHERE incident_id = ? AND unit_id = ?", (iid, u["id"])):
-            if not (ph and again and not self._dept_units_on(iid, u["name"], signed_on=False)):
+            if not (ph and again and not self._dept_units_on(iid, u["name"])):
                 return False                             # was on it and cleared: never put back by automation (H1)
         if L.role(u["status"]) == "oos":
             return False
@@ -650,14 +652,19 @@ class AutoDispatch:
         if self.store.one("SELECT 1 AS x FROM auto_steps WHERE incident_id = ? AND kind = 'close'", (iid,)):
             return                                       # closed by automation before (and reopened since): a person's
         ours = self._ours()
+        L = self.store.lists
         keys = {_key(n) for n in listed or []}
         released = []
         for r in self.store.q("SELECT u.id, u.name FROM assignments a JOIN units u ON u.id = a.unit_id "
                               "WHERE a.incident_id = ? AND a.cleared_at IS NULL ORDER BY a.id", (iid,)):
             on_list = any(ours.get(k, {}).get("id") == r["id"] for k in keys)
-            if on_list and self.store.lists.placeholder(r["name"]):   # this call's only: its other calls keep it
+            if self.store.lists.placeholder(r["name"]):  # listed or not: off this call (its other calls keep it)
                 if not self._manual(iid, f"unit:{r['name']}"):
-                    self.store.placeholder_off_call(iid, r["id"], op, f"{label} in service")
+                    u = self.store.unit(r["id"])
+                    if self.store.placeholder_off_call(iid, r["id"], op, f"{label} in service"):
+                        released.append(self._step(iid, "status", "county", f"{r['name']} off this call", t, unit=u,
+                                                   prev=L.status_for("dispatched"), status=self.store.unit(r["id"])["status"],
+                                                   ref="in_service"))
                 continue
             if on_list and not self._manual(iid, f"unit:{r['name']}"):
                 sid = self._unit_step(iid, self.store.unit(r["id"]), "free", t, op, "county", "in_service")
@@ -832,6 +839,11 @@ class AutoDispatch:
                         self.store._history(db, u["id"], u["status"], back, iid, operator, now, "automatic dispatch undone")
                         self.store._event(db, iid, "status", f"{u['name']} off this call (automatic dispatch undone)",
                                           operator, u["id"], now)
+                elif L.placeholder(u["name"]):           # a placeholder taken off by the feed: back on, Dispatched
+                    if inc["status"] in ("closed", "dismissed"):
+                        raise CadError("the call is closed: undo the close first")
+                    if a is None:
+                        self.store.return_to_incident(iid, u["id"], L.status_for("dispatched"), operator)
                 elif L.role(s["status"]) == "free":      # cleared by the feed / the radio: back on it as it was
                     if inc["status"] in ("closed", "dismissed"):
                         raise CadError("the call is closed: undo the close first")
@@ -850,6 +862,8 @@ class AutoDispatch:
                     if s["col"]:
                         with self.store.tx() as db:
                             db.execute(f"UPDATE assignments SET {s['col']} = NULL WHERE id = ?", (a["id"],))
+                    if L.role(s["status"]) in ("enroute", "onscene"):     # its sign-on undone: a placeholder it freed
+                        self.store.restore_placeholders(iid, u["id"], operator)
                 self.mark_units(iid, [u["name"]], operator)
                 self.cad.radiolog.units_soon(iid)        # taken off: its unkept mentions there go too (#370)
             now = self.clock()
@@ -875,6 +889,16 @@ class AutoDispatch:
             if r is None:
                 continue
             u = self.store.unit(r["unit_id"])
+            if L.placeholder(u["name"]):                 # a placeholder: back on this call, Dispatched (other calls kept)
+                if not self._on_here(iid, u["id"]):
+                    try:
+                        self.store.return_to_incident(iid, u["id"], L.status_for("dispatched"), operator)
+                    except CadError:
+                        continue
+                with self.store.tx() as db:
+                    db.execute("UPDATE auto_steps SET undone_at = ?, undone_by = ? WHERE id = ?", (now, operator, sid))
+                self.mark_units(iid, [u["name"]], operator)
+                continue
             a = self.store.one("SELECT id FROM assignments WHERE incident_id = ? AND unit_id = ? AND cleared_at IS NOT NULL "
                                "ORDER BY cleared_at DESC, id DESC LIMIT 1", (iid, u["id"]))
             if a is None or u["incident_id"] is not None or L.role(u["status"]) != "free" or r["prev"] not in L.status_ids:

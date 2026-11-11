@@ -371,10 +371,15 @@ class Lists:
         return bool(self._placeholder and c and self._placeholder.fullmatch(c))
 
     def department_of(self, code: str) -> str:
-        """Whose unit it is: its "department", else its joint-response town, else the home department for a fire unit;
-        '' for another agency's that names none (never released against: store.py _release_placeholders)."""
+        """Whose unit it is: its "department", else its joint-response town, else the home department for a "fire"
+        unit that is neither (the data file's definition of PCFD's own apparatus: see the module doc); '' for a
+        mutual-aid or agency unit that names none, which never releases a placeholder (no_department lists them)."""
         u = self.units.get(code, {})
         return u.get("department") or self.joint_town(code) or (HOME_DEPARTMENT if self.response(code) == "fire" else "")
+
+    def no_department(self) -> list[str]:
+        """Board units with no department to match (mutual aid or another agency naming none): logged at start."""
+        return [c for c, _, _ in self.board_units() if not self.placeholder(c) and not self.department_of(c)]
 
     def named(self, code: str) -> bool:
         """Has a name (a spoken name other than the code, or a title)? Otherwise it shows as its code and

@@ -196,6 +196,10 @@ class Cad:
         freed = self.store.release_placeholders()    # a department's placeholder its unit already signed on for: back
         if freed:                                    # in quarters (the rule from now on, for calls open from before)
             log(f"CAD: released {len(freed)} department placeholder(s) a unit of theirs signed on for")
+        nodept = self.lists.no_department()
+        if nodept:                                   # never release a placeholder: no department to match
+            log(f"CAD: {len(nodept)} board unit(s) name no department (never release a department placeholder): "
+                + ", ".join(nodept[:10]))
         if runcards.seed(self.store, fill=bool(self.store.migrated)):
             log("CAD: seeded default run cards (a stand-in: edit them to PCFD policy)")
         self.radios = Registry(self.store, s.radio_seed or None)
@@ -847,7 +851,7 @@ class Cad:
     def recommend(self, iid: int, body: dict) -> dict:
         inc = self.store.incident(iid)
         if not inc["emergency"]:
-            on = [u["name"] for u in self.store.units() if u["incident_id"] == iid]
+            on = [u["name"] for u in self.store.units() if iid in u["incident_ids"]]
             return {"card": None, "card_label": "", "units": [], "unfilled": [], "already": on,
                     "note": "Non-emergency: no run card, no dispatch. Attach units if needed."}
         typ = _text(body, "type", 24) or inc["type"]
@@ -1042,8 +1046,10 @@ class Cad:
         the event ('Port Chester and Rye Brook Fire', or 'Rye Brook Fire' if only theirs). Tones: the
         departments of the units sent (an upgrade or full response: also everyone on the event)."""
         L = self.lists
+        units = [u for u in units if not L.placeholder(u["name"])]          # a placeholder is never said, nor toned
         sending = {u["id"] for u in units}
-        on = [u for u in self.store.units() if u["incident_id"] == inc["id"] and u["id"] not in sending]
+        on = [u for u in self.store.units() if u["incident_id"] == inc["id"] and u["id"] not in sending
+              and not L.placeholder(u["name"])]
         joint, own = self._departments(units + on)
         lead = dispatcher.lead_in(self.s.department, joint, own, full, L.wording, L.lead_in_joint_only)
         t_joint, t_own = self._departments(units + on if kind == "upgrade" or full else units)
@@ -1058,13 +1064,14 @@ class Cad:
         is already on the event, by status (already_statuses), leaving out the units being sent."""
         L = self.lists
         lead, tones = self._plan(inc, units, kind, full)
+        units = [u for u in units if not L.placeholder(u["name"])]          # a department placeholder is never said
         already = []
         if kind == "add_on":
             sending = {u["id"] for u in units}
             order = [r["unit_id"] for r in self.store.q("SELECT unit_id FROM assignments WHERE incident_id = ? AND "
                                                         "cleared_at IS NULL ORDER BY id", (inc["id"],))]
             on = sorted((u for u in self.store.units() if u["incident_id"] == inc["id"] and u["id"] not in sending
-                         and u["response"] != "agency"),                  # EMS / PD are never said on the air
+                         and u["response"] != "agency" and not u["placeholder"]),   # EMS / PD, placeholders: never said
                         key=lambda u: order.index(u["id"]) if u["id"] in order else len(order))   # in the order sent
             for st in L.already_statuses:
                 names = [u["spoken"] or u["name"] for u in on if u["status"] == st]
@@ -1227,9 +1234,12 @@ class Cad:
         if status not in ok:
             raise CadError("status: " + " or ".join(f"{c} ({L.name('unit_statuses', c)})" for c in ok))
         op = _text(body, "operator", OPERATOR_MAX, required=True)
-        here = [u["name"] for u in units if u["incident_id"] == iid]
+        here = [u["name"] for u in units if iid in u["incident_ids"]]
         if here:
             raise CadError(f"Already on this event: {', '.join(here)}")
+        ph = [u["name"] for u in units if u["placeholder"]]
+        if ph:
+            raise CadError(f"A department placeholder is never {L.name('unit_statuses', status)}: {', '.join(ph)}")
         agency = [u["name"] for u in units if u["response"] == "agency" and status not in L.unit_statuses_for(u["name"], u["board"])]
         if agency:
             raise CadError(f"Another agency's unit, not {L.name('unit_statuses', status)}: {', '.join(agency)}")
@@ -1283,7 +1293,10 @@ class Cad:
     def unit_status(self, uid: int, body: dict) -> dict:
         status = _text(body, "status", 40, required=True)
         op = _text(body, "operator", OPERATOR_MAX)
-        was = self.store.unit(uid)["incident_id"]
+        u = self.store.unit(uid)
+        if u["placeholder"]:
+            return self._placeholder_status(u, status, body, op)
+        was = u["incident_id"]
         self._by_hand(was, [uid], op)                    # a person's, before the write (#311 L4)
         if "incident_id" in body and body["incident_id"] is not None:   # the board's "which call?" answer
             try:
@@ -1298,6 +1311,28 @@ class Cad:
             self._by_hand(i, [uid], op)
         if was and out.get("incident_id") != was:
             self.auto.recheck_close([was])               # the last unit off a call that waits to close (#311 N1)
+        return out
+
+    def _placeholder_status(self, u: dict, status: str, body: dict, op: str) -> dict:
+        """A department placeholder's status: Dispatched or in quarters only. From a call's unit row ("call"): that call
+        only. From the board: Dispatched on the call picked; in quarters off every call it is on. Each call it leaves is
+        a person's for it (automation leaves it off) and may close now (#311 N1)."""
+        call = body.get("call") if body.get("call") is not None else body.get("incident_id")
+        try:
+            call = int(call) if call is not None else None
+        except (TypeError, ValueError):
+            raise CadError("call: a number") from None
+        ids = list(u["incident_ids"])
+        if self.lists.role(status) == "free":
+            ids = [call] if call else ids
+        elif call:
+            ids = [call]
+        for i in ids:                                    # a person's, before the write (#311 L4)
+            self._by_hand(i, [u["id"]], op)
+        out = self.store.set_unit_status_on(u["id"], status, call or 0, op) if call or self.lists.role(status) != "free" \
+            else self.store.set_unit_status(u["id"], status, op)
+        if self.lists.role(status) == "free":
+            self.auto.recheck_close(out.get("cleared_from") or ids)
         return out
 
     def unit_station(self, uid: int, body: dict) -> dict:

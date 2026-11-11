@@ -111,20 +111,31 @@ def test_back_only_when_the_department_is_dispatched_again_with_none_of_its_unit
     rig.created(units=("DPTA",))
     iid = rig.iid()
     rig.at(30)
-    rig.cad.dispatch(iid, {"unit_ids": [rig.uid("E60")], "operator": "Lt. Test"})
-    rig.cad.store.set_unit_status(rig.uid("E60"), "RS", "Lt. Test")    # a person: E60 responding
-    assert rig.here("DPTA") is None
+    rig.cad.dispatch(iid, {"unit_ids": [rig.uid("E60")], "operator": "Lt. Test"})   # dispatched, not signed on
     rig.at(60)
-    rig.change(units=())                                              # the county drops it ...
+    rig.change(units=())                                              # the county drops it: off the call
+    assert rig.here("DPTA") is None
     rig.at(90)
     rig.change(units=("DPTA",))                                       # ... and lists it again: E60 is still on
     assert rig.here("DPTA") is None
-    rig.cad.store.set_unit_status(rig.uid("E60"), "AQ", "Lt. Test")    # E60 clears
+    rig.cad.store.set_unit_status(rig.uid("E60"), "AQ", "Lt. Test")    # E60 clears before it went
     rig.at(120)
     rig.change(units=())
     rig.at(150)
     rig.change(units=("DPTA",))                                       # dispatched again, none of PCFD's on it
     assert rig.here("DPTA") is not None
+
+
+def test_never_back_once_its_department_signed_on_there_even_cleared_since(rig):
+    rig.created(units=("DPTA", "E60"))
+    rig.at(30)
+    rig.change(unit_times={"E60": {"responding": T0 + 25}})
+    rig.cad.store.set_unit_status(rig.uid("E60"), "AQ", "Lt. Test")    # signed on, then cleared
+    rig.at(60)
+    rig.change(units=("E60",))
+    rig.at(90)
+    rig.change(units=("E60", "DPTA"))                                  # listed again
+    assert rig.here("DPTA") is None
 
 
 def test_every_source_releases_it(rig):
@@ -250,3 +261,114 @@ def test_the_feeds_in_service_frees_it_on_that_call_only(rig):
     s = rig.step("assign", "DPTA", "B1")
     rig.cad.auto.undo(rig.iid("B1"), s["id"], "Lt. Test")                                # undone there: in quarters
     assert rig.here("DPTA", "B1") is None and rig.status("DPTA") == "AQ"
+
+
+# -- review fixes ------------------------------------------------------------------------------------------------------
+
+
+def test_a_placeholder_is_never_said_on_the_air(rig):
+    rig.mode("pcfd")
+    iid = rig.cad.create({"type": "STRU", "address": "40 Other Rd", "operator": "Lt. Test"})["id"]
+    rig.cad.dispatch(iid, {"unit_ids": [rig.uid("E60")], "operator": "Lt. Test"})
+    rig.cad.store.assign(iid, [rig.uid("DPTA")], "Lt. Test")
+    text = rig.cad.preview(iid, {"unit_ids": [rig.uid("E61")]})["text"]
+    assert "Engine 61" in text and "DPTA" not in text
+    text = rig.cad.preview(iid, {"unit_ids": [rig.uid("E61"), rig.uid("DPTB")]})["text"]
+    assert "DPTB" not in text and "Rye Brook" not in text                  # nor its department's lead-in or tones
+
+
+def test_a_calls_unit_row_frees_it_there_only_and_the_board_from_every_call(rig):
+    rig.mode("pcfd")
+    a = rig.cad.create({"type": "STRU", "address": "40 Other Rd", "operator": "Lt. Test"})["id"]
+    b = rig.cad.create({"type": "STRU", "address": "50 Other Rd", "operator": "Lt. Test"})["id"]
+    c = rig.cad.create({"type": "STRU", "address": "60 Other Rd", "operator": "Lt. Test"})["id"]
+    ph = rig.uid("DPTA")
+    for i in (a, b, c):
+        rig.cad.store.assign(i, [ph], "Lt. Test")
+    out = rig.cad.unit_status(ph, {"status": "AQ", "call": a, "operator": "Lt. Test"})
+    assert out["status"] == "DP" and sorted(out["incident_ids"]) == sorted([b, c])
+    marked = lambda: {r["incident_id"] for r in rig.cad.store.q("SELECT incident_id FROM manual_edits WHERE field = 'unit:DPTA'")}
+    assert marked() == {a}
+    out = rig.cad.unit_status(ph, {"status": "AQ", "operator": "Lt. Test"})              # the board: every call
+    assert out["status"] == "AQ" and out["incident_ids"] == [] and sorted(out["cleared_from"]) == sorted([b, c])
+    assert marked() == {a, b, c}
+
+
+def test_dropped_from_the_listing_it_never_holds_up_the_close(rig):
+    rig.created(units=("DPTA", "E60"))
+    rig.at(30)
+    rig.change(units=("E60",))
+    assert rig.here("DPTA") is None
+    rig.at(600)
+    rig.change(times={"in_service": T0 + 590}, closed=True)
+    assert rig.inc()["status"] == "closed"
+
+
+def test_an_unlisted_placeholder_still_on_the_call_is_freed_at_the_close(rig):
+    rig.created(units=("E60",))
+    rig.cad.store.assign(rig.iid(), [rig.uid("DPTA")], "Paging · auto")   # put on by something but the feed's listing
+    rig.at(600)
+    rig.change(times={"in_service": T0 + 590}, closed=True)
+    assert rig.inc()["status"] == "closed" and rig.status("DPTA") == "AQ"
+
+
+def test_only_dispatched_or_in_quarters(rig):
+    from sizeup.cad.store import CadError
+    rig.mode("pcfd")
+    st = rig.cad.store
+    a = rig.cad.create({"type": "STRU", "address": "40 Other Rd", "operator": "Lt. Test"})["id"]
+    b = rig.cad.create({"type": "STRU", "address": "50 Other Rd", "operator": "Lt. Test"})["id"]
+    ph = rig.uid("DPTA")
+    st.assign(a, [ph], "Lt. Test")
+    for code in ("RS", "OL", "OS"):
+        with pytest.raises(CadError, match="placeholder"):
+            st.set_unit_status(ph, code, "Lt. Test")
+    with pytest.raises(CadError, match="placeholder"):
+        st.set_unit_status_on(ph, "RS", a, "Lt. Test")
+    with pytest.raises(CadError, match="placeholder"):
+        st.assign(b, [ph], "Lt. Test", status="RS")
+    with pytest.raises(CadError, match="placeholder"):
+        rig.cad.attach(b, {"unit_ids": [ph], "status": "RS", "operator": "Lt. Test"})
+    st.set_unit_status_on(ph, "DP", b, "Lt. Test")                       # on b too, a kept
+    assert sorted(st.unit(ph)["incident_ids"]) == sorted([a, b])
+    st.set_unit_status(ph, "AQ", "Lt. Test", call=b)
+    st.return_to_incident(b, ph, "DP", "Lt. Test")                       # back on b while on a
+    assert sorted(st.unit(ph)["incident_ids"]) == sorted([a, b])
+    with pytest.raises(CadError, match="placeholder"):
+        st.return_to_incident(b, ph, "RS", "Lt. Test")
+
+
+def test_undoing_the_sign_on_puts_it_back(rig):
+    rig.created(units=("DPTA", "E60"))
+    rig.at(30)
+    rig.change(unit_times={"E60": {"responding": T0 + 25}})
+    assert rig.here("DPTA") is None
+    rig.cad.auto.undo(rig.iid(), rig.step("status", "E60")["id"], "Lt. Test")
+    assert rig.here("DPTA") is not None and rig.status("DPTA") == "DP"
+
+
+def test_undoing_the_automatic_close_puts_it_back(rig):
+    rig.created(units=("DPTA", "E60", "L31"))
+    rig.at(600)
+    rig.change(times={"in_service": T0 + 590}, closed=True)
+    assert rig.inc()["status"] == "closed" and rig.status("DPTA") == "AQ"
+    rig.cad.auto.undo(rig.iid(), rig.step("close")["id"], "Lt. Test")
+    assert rig.here("DPTA") is not None and rig.status("DPTA") == "DP"
+
+
+def test_a_unit_with_no_department_never_releases_one(tmp_path, monkeypatch):
+    path = lists_file(tmp_path)
+    d = json.loads(open(path).read())
+    d["units"]["MAX1"] = {"kind": "engine", "mutual_aid": True}
+    d["unit_boards"][0]["units"].append("MAX1")
+    open(path, "w").write(json.dumps(d))
+    L = lists_mod.load(path)
+    assert L.department_of("MAX1") == "" and "MAX1" in L.no_department() and "DPTA" not in L.no_department()
+    monkeypatch.setattr(tis, "make_cad", lambda tmp, clock=None: make_cad(tmp, clock=clock, lists=path))
+    rig = AutoRig(tmp_path)
+    rig.mode("pcfd")
+    st = rig.cad.store
+    a = rig.cad.create({"type": "STRU", "address": "40 Other Rd", "operator": "Lt. Test"})["id"]
+    st.assign(a, [rig.uid("DPTA"), rig.uid("MAX1")], "Lt. Test")
+    st.set_unit_status(rig.uid("MAX1"), "RS", "Lt. Test")
+    assert a in st.unit(rig.uid("DPTA"))["incident_ids"]

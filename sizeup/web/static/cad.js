@@ -1743,7 +1743,11 @@ function statusButtons(u, where) {
       e.stopPropagation();
       if (s.role === "oos") { cad.ask = { uid: u.id, status: s.code, where, text: "" }; render(); }
       else if (where === "board" && s.role !== "free") { cad.pick = { uid: u.id, status: s.code }; render(); }
-      else setUnitStatus(u.id, s.code);
+      else if (where === "board" && who.placeholder && (who.incident_ids || []).length) {
+        const n = who.incident_ids.length;
+        UI.confirm(`${who.name}: ${statusLabel(who, s.code)} clears it from ${n} call${n === 1 ? "" : "s"}.`, { ok: statusLabel(who, s.code) })
+          .then((ok) => { if (ok) setUnitStatus(u.id, s.code); });
+      } else setUnitStatus(u.id, s.code, "", where === "inc" ? u.iid : undefined);
     });
     box.append(b);
   }
@@ -1756,7 +1760,8 @@ function statusButtons(u, where) {
 function statusChoices(u, where) {
   const all = L().unit_statuses || [];
   const set = agencySet(u);
-  const mine = set ? set.statuses.map((c) => all.find((s) => s.code === c)).filter(Boolean) : all;
+  let mine = set ? set.statuses.map((c) => all.find((s) => s.code === c)).filter(Boolean) : all;
+  if (u.placeholder) return mine.filter((s) => s.role === "free" || s.role === "dispatched");   // never a working status
   if (where !== "inc") return mine;
   const flow = L().status_flow || {};
   const next = u.next || (!set && (flow[u.status] || flow["*"]));
@@ -1830,7 +1835,7 @@ function renderOnUnits(inc) {
       if (!a.cleared_at && onMap(a.name)) head.append(followBtn(a.name));
       if (!a.cleared_at && isOpen(inc)) {
         head.append(statusButtons({ id: a.unit_id, status: a.status, next: a.next, cmd: cmd !== a.name && cmd,
-          status_set: a.status_set || "" }, "inc"));
+          status_set: a.status_set || "", iid: inc.id }, "inc"));
       }
       else if (a.cleared_at && isOpen(inc) && (a.return || []).length) head.append(returnButtons(inc, a));
       li.replaceChildren(head);
@@ -2031,6 +2036,10 @@ function syncFull(inc, prev, rec) {
 function units() {
   return (cad.state && cad.state.units) || [];
 }
+// A department placeholder (the county's "department dispatched, no unit yet") is not a rig: it may be on several calls
+// at once (incident_ids), is never moved, and is only Dispatched or in quarters.
+const onCall = (u, iid) => (u.incident_ids && u.incident_ids.length ? u.incident_ids.includes(iid) : u.incident_id === iid);
+const awayOn = (u, iid) => !u.placeholder && u.incident_id && u.incident_id !== iid;
 function unitById(id) {
   return units().find((u) => u.id === id);
 }
@@ -2104,7 +2113,7 @@ function renderDispatchBox(inc) {
     if (u.reason) lab.append(etaHint(u));
     lab.append(el("span", "spacer"), statusChip(now.status));
     if (now.spare) lab.append(el("span", "chip spare", "spare"));
-    if (now.incident_id && now.incident_id !== inc.id) lab.append(el("span", "warn small", `On ${now.incident_number}: moves`));
+    if (awayOn(now, inc.id)) lab.append(el("span", "warn small", `On ${now.incident_number}: moves`));
     li.append(lab);
     return li;
   });
@@ -2116,7 +2125,7 @@ function renderDispatchBox(inc) {
   list.replaceChildren(...items);
   // Add any other unit (not out of service or unmanned, not already listed or on this incident).
   const listed = new Set(rows.map((u) => u.id));
-  const others = units().filter((u) => !listed.has(u.id) && canDispatch(u) && u.incident_id !== inc.id && (u.board || u.incident_id));
+  const others = units().filter((u) => !listed.has(u.id) && canDispatch(u) && !onCall(u, inc.id) && (u.board || u.incident_id));
   const hints = (rec && rec.others) || {};
   fillSelect($("#r-add"), others.map((u) => [String(u.id),
     `${u.name} ${u.status}${u.incident_number ? ` on ${u.incident_number}` : ""}`
@@ -2551,7 +2560,7 @@ function renderAttach(inc) {
   $("#a-hint").dataset.help = inc.emergency ? "EMS, PD, utilities, keyholders: attached as Dispatched (a keyholder or the Knox box: Notified), "
     + "then their statuses like our units, here and in the right column. Never toned out or said on the air."
     : "Non-emergency: no run card, no dispatch.";
-  const others = units().filter((u) => u.incident_id !== inc.id && (u.board || u.incident_id)
+  const others = units().filter((u) => !onCall(u, inc.id) && (u.board || u.incident_id)
     && (!inc.emergency || u.response === "agency"));
   const sig = JSON.stringify([inc.emergency, others.map((u) => [u.id, u.status, u.incident_number])]);
   const sel = $("#a-unit");
@@ -2693,7 +2702,7 @@ function renderAddPreview() {
   const got = inc ? addParse(inc) : [];
   show(box, got.length > 0);
   box.replaceChildren(...got.map((g) => {
-    const u = g.unit, away = u && !g.why && u.incident_id && u.incident_id !== inc.id;
+    const u = g.unit, away = u && !g.why && awayOn(u, inc.id);
     const oos = u && !g.why && roleOf(u.status) === "oos" && u.response !== "agency";
     const c = el("span", "chip add-chip" + (g.why === "unknown" ? " nomatch" : g.why === "typing" ? " typing"
       : g.why ? " skip" : away || oos ? " moving" : ""), u ? u.name : g.text);
@@ -2830,7 +2839,7 @@ async function submitAddUnit(status) {
   }
   const op = needOperator(err);
   if (!op) return;
-  const away = take.filter((u) => u.incident_id && u.incident_id !== inc.id);
+  const away = take.filter((u) => awayOn(u, inc.id));
   if (away.length && !await UI.confirm(away.length === 1
     ? `${away[0].name} is on ${away[0].incident_number || "another call"}. Move it here?`
     : `${away.map((u) => `${u.name} is on ${u.incident_number || "another call"}`).join(", ")}. Move them here?`,
@@ -2852,9 +2861,9 @@ async function submitAddUnit(status) {
   }
 }
 
-async function setUnitStatus(uid, status, note = "") {
+async function setUnitStatus(uid, status, note = "", call) {   // call: the incident row's (a placeholder: that call only)
   try {
-    await api("POST", `/api/cad/unit/${uid}/status`, { status, operator: operator(), note });
+    await api("POST", `/api/cad/unit/${uid}/status`, { status, operator: operator(), note, ...(call ? { call } : {}) });
   } catch (e) {
     UI.toast(e.message, "err");
   }
