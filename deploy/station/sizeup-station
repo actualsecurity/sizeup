@@ -16,7 +16,9 @@
 #   sizeup-station adapter setup|status|remove|reset [source]
 #                                the station's private incident-source adapter (#301): setup makes its deploy key
 #                                (prints only the public half), asks for its repo, ref and credentials (hidden, into
-#                                station.env), and the updater installs it into the next release; never on the hub.
+#                                the credstore), or for AWS SSM: the region and the station's access key (the values
+#                                then live in /sizeup-station/adapter/NAME), and the updater installs it into the next
+#                                release; never on the hub.
 #                                reset: a source that stopped itself (a login it won't retry) calls its reset()
 #   sizeup-station doctor        check everything, say what's wrong and what to do
 #   sizeup-station sdr-serial <index|serial> <new-serial> [--dry-run] [--yes]

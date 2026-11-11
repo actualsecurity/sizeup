@@ -588,7 +588,11 @@ def test_the_hub_serves_trains_and_never_fetches_the_realtime_feed_unasked(tmp_p
         assert [s["name"] for s in d["stations"]] == AREA
         n = h.get(f"/api/cad/trains/near?lat={PC[0]}&lon={PC[1]}")
         assert n["near"] and n["ref"]["name"] == "Port Chester"
-        assert (tmp_path / "hub" / "trains" / "static.json").is_file()
+        cache = tmp_path / "hub" / "trains" / "static.json"     # saved just after the model is up (#407): wait for it
+        deadline = time.time() + 10
+        while not cache.is_file() and time.time() < deadline:
+            time.sleep(0.05)
+        assert cache.is_file()
     finally:
         h.close()
         mta.close()

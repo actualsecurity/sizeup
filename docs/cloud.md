@@ -465,6 +465,19 @@ tones in front and reads it twice with the time out once, exactly as with Kokoro
   {action: "voice_preview"}`).
 * Stations and all-in-one keep Kokoro (`tts_engine = "kokoro"`); `polly` works there too with AWS
   credentials in the environment, falling back to macOS `say` like Kokoro does.
+* **After the answer (#426):** a dispatch, add-on or upgrade is logged and answered at once (a few ms; it
+  used to wait 2-3 s for Polly). Its row starts `audio: "pending"`; one worker (`sizeup/cad/voicequeue.py`,
+  at most 32 waiting) renders the voices in the order sent, hands each to the transmitter, then writes the
+  row (`ready` with the WAV, or `failed` with the same notes as above) and pushes the state. The page shows
+  the dispatch with "Voice…"; each voice it waits for plays once, in the order sent, whatever is selected by
+  then. A preview answers with the text only; the page asks for its audio in a second call (`{"audio": true}`).
+  **Never stale:** a voice not started 45 s after its dispatch is not rendered ("Voice too late: text only"), one
+  render gets 25 s at most ("Voice too slow: text only"), and the page never plays by itself a voice that comes
+  more than 45 s after its dispatch. **Handover:** the key-up and every write (the row, `audio.sqlite`) are the
+  lease holder's only (`Cad.may_write`, the fence), checked before them. At a drain the voices get 6 s; what is
+  left stays pending, and the next task renders it at its start (`Cad.resume_voice`, the tones kept in
+  `dispatches.audio_tones`) if it is still under 45 s old, else fails it ("Voice not rendered — the hub
+  restarted first: text only"). The dispatch itself is never lost: only, at worst, its audio.
 
 **Seam for transmission (M2, not built):** keying a radio stays on the station. The hub already
 stores and serves the rendered WAV for every dispatch (`dispatch-audio/` + `audio.sqlite`, `GET
@@ -1903,10 +1916,13 @@ doesn't move it) and changes it only on better stop-track evidence: for the same
 (the same track from a weaker source keeps the stronger one), for another stop only one ahead of the old one in
 the direction of travel. Between stations it is held, up to 4 km from the stop that said it (beyond, an express
 may have crossed over). Nothing says: the direction's outer track (4 outbound, 3 inbound), only so the train
-lies on a drawn track; not known. No GPS guess: the tracks are 4 m apart, closer than a phone-grade fix can
+lies on a drawn track; not known. An express (#451: a station lies between the stop it left and its next, which it
+skips; with no stop left, its next stop lies beyond the nearest station ahead) is drawn on the direction's inner track instead (2 outbound, 1 inbound; 3, 1, 2, 4 north to south), not known
+either; its next stop's posted track is never taken for its own (it may cross over before it). No GPS guess: the tracks are 4 m apart, closer than a phone-grade fix can
 tell. A track we have no line for (Stamford's 5) is ignored. The box: *Trk 2 · near pole 249 · MP 25.3* within
 1.5 km of the stop that said it (who said it, for which stop, on hover); *Trk 2?* held ("Track: last said for
-<stop>"); no number on the outer default ("Track not known; drawn on outer track"). A held or default train is
+<stop>"); *track not known* on the default ("Track not known; drawn on outer track 3", or "express track 1"
+for an express). The next stop's track reads with the stop, *next Rye (trk 2)*, never as the train's (#451). A held or default train is
 drawn with a dashed stripe down its body (faded is for a stale feed only). No GIS milepost where it is drawn:
 the train's own (TrainTime's, or the line's).
 
@@ -2222,6 +2238,13 @@ until there is a receiver to record. `tests/test_adsb_receiver.py`: the decoder 
 a tmp claims folder), the reserved dongle, the forwarding (deltas, the cap, offline drops, its cost), the hub's
 merge, details by ICAO address, the pre-alert beside the alarm, station health, the station's config update.
 
+## Vessels (AIS)
+
+Ships and boats on western Long Island Sound (#402): **docs/vessels.md** (sources, setup, the API, the limits of
+AIS). In short, the hub reads aisstream.io (key: SSM `/sizeup-hub/aisstream-key` → `SIZEUP_AISSTREAM_KEY`; none:
+off) only while the layer is open or a marine call is open, and the station's own receiver (AIS-catcher,
+`sizeup-ais.service`, off until the hardware is in) posts `POST /api/station/vessels`, never queued.
+
 ## Weather and water (NWS alerts, conditions, radar; NOAA tides)
 
 > "Public, free data: National Weather Service alerts ... as a banner on /cad and /monitor ... spoken once
@@ -2362,6 +2385,42 @@ then protects against mistakes and against anyone without the task role, but not
 could delete attachments with the same permission. The app's audit (`attachment_audit`, in the Litestream-replicated
 CAD store) and S3's own records (CloudTrail data events, if turned on) are what show such a delete. Only the lease holder writes. Without the bucket:
 "Incident attachments not configured", nothing copied, the lists read empty.
+
+## Where the hub's CPU goes (#425)
+
+`sizeup/perf.py`, the hub only. Three parts, none of them an AWS change:
+
+- **By thread, always on.** Once a minute each thread's CPU time is read from the kernel
+  (`/proc/self/task/<tid>/schedstat`, else `.../stat`) and added to its *group*: the thread's name with whatever was
+  made at run time cut off (`ntfy-<topic>` is `ntfy`, `stream-<camera>` is `stream`). Request threads are `http`
+  (each reports its own CPU as it ends), the state streams `http-stream`. An hour of minutes is kept, and the sums
+  since the start. With it: memory, threads, open files, the garbage collector's count and time, and how many things
+  the main in-memory lists hold (`HubApp._perf_sizes`). Each answered request's CPU goes to its route: the family is
+  made from the route that matched (the server's own paths and regexes), so only the words a route spells out stay and
+  every id, slug and file name is `:id`; a request that was refused or found nothing is only `(refused)` /
+  `(not found)` / `(error)`, whatever was asked. At most 400 families; the one unused the longest makes room.
+- **A profile on demand.** `POST /api/cad/perf/profile {"seconds": 30}` (1 to 120 s, `"hz"` 5 to 100, default 25):
+  a thread reads every thread's stack, but counts a stack only for a thread whose CPU clock moved in the 1 ms
+  before *and* the 1 ms after it was taken, so the ~50 threads asleep in a wait count nothing. Each group's total is
+  then set to the CPU it really used meanwhile. The answer: CPU by thread (`caught`: how many times it was seen
+  computing: few means its split by function is rough), by function (`self`, `cumulative`), by line, and `folded`
+  (`thread;caller;...;function microseconds`, for flamegraph.pl or speedscope). One at a time (409), a rest of 30 s
+  after each (429), at most 4000 stacks of 48 frames. Over 60 s the answer is 202 at once and
+  `GET /api/cad/perf/profile` has the result (`?format=folded`: the stacks as text). **It is not free**: every sample
+  reads every thread's clock twice, about 3.7% of one core at 50 Hz on a laptop, so expect around a tenth of the task's
+  0.5 vCPU while it runs at the default 25 Hz (twice that at 50). Its real cost is in each answer (`overhead`) and in
+  the log (`perf profile: ... overhead=1.9% of 1 core`).
+- **A line an hour** in the log (CloudWatch), and one 5 minutes after the start to compare with:
+  `perf 1h: cpu=41.2% of 0.5 vCPU top[broadcast=12.3 http-stream=8.1 ...] gc=0.8% rss_mb=412 threads=53 fds=88 up_h=5.0`
+  The top 8 thread groups, as shares of the task's CPU (ECS says how much that is; else of one core).
+
+Admins only (`ADMIN_READS`, `WRITES`), on Settings > Health ("Hub CPU": threads now / 1 h / since start, "Profile
+30 s"). Nothing in any of it but thread groups, function names, file:line and path families.
+
+**Reading it.** A thread whose "Now" is above its "Since start" has grown with uptime; the hourly lines show the
+same per thread, hour on hour (`GET /api/cad/perf` → `hours` keeps 72 of them, with the sizes at each). In a
+profile, time inside one C call is its Python caller's: `Store.q` is SQLite, `compress` zlib, `Perf._gc` the garbage
+collector. `(short bursts, not caught)` is a thread that used CPU but was never seen computing.
 
 ## The hub's storage
 

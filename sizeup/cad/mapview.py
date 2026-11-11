@@ -65,7 +65,9 @@ taken into account too, if within reasonable time before them ending up back in 
 
 from __future__ import annotations
 
+import functools
 import json
+import re
 from pathlib import Path
 
 from sizeup.cad import eta
@@ -86,6 +88,55 @@ LOOK = {"free": "available", "oos": "oos", "dispatched": "dispatched", "enroute"
 # Every other role is committed to a call (role '' in data/cad_lists.json: acknowledged, staging, out at, call back,
 # dispatched by other agency; or one not known here): drawn as dispatched, an active rig (#376: chips longest).
 ACTIVE_LOOK = "dispatched"
+# A rig's icon on the maps by apparatus type (#384; drawn by cadmap.js / cadmap.css): from its kind in
+# data/cad_lists.json; else by its code (ICON_BY_CODE). Anything else (marine, EMS, police,
+# agencies, code-only units): the generic mark.
+ICONS = ("engine", "ladder", "tower", "rescue", "suv", "arff", "other")
+ICON_OF_KIND = {"engine": "engine", "ladder": "ladder", "tower": "tower", "rescue": "rescue", "chief": "suv", "utility": "suv"}
+
+
+@functools.lru_cache(maxsize=1)
+def _default_lists():
+    """data/cad_lists.json, read once (is_placeholder without the CAD's own lists); None if it can't be read."""
+    try:
+        from sizeup.cad.lists import load
+        return load()
+    except Exception:  # noqa: BLE001 - the pattern below then
+        return None
+
+
+def is_placeholder(unit, lists=None) -> bool:
+    """A department placeholder, not apparatus (DPT239, DPT266 ...: from the county feed): never on the maps, never
+    located (a placeholder set "On location" by hand too), in a firehouse's count or rig list, never followed, no icon
+    (#384, the user's rule). unit: a unit dict ({name} or a marker's {unit}) or its code; lists: the CAD's Lists (else
+    data/cad_lists.json's). The row's own "placeholder" flag (Store.units(), #400), else Lists.placeholder (data/
+    cad_lists.json "unit_placeholders")."""
+    if isinstance(unit, dict) and isinstance(unit.get("placeholder"), bool):
+        return unit["placeholder"]                   # Store.units()'s own flag (#400) first
+    code = unit if isinstance(unit, str) else str(unit.get("name") or unit.get("unit") or "")
+    lists = lists if lists is not None else _default_lists()
+    return bool(lists is not None and lists.placeholder(code))
+
+
+# By code where the kind doesn't say (code-only or board-only units): the airport's ARFF crash trucks (AP7, AP11, AP17:
+# their own overhead icon, #427); battalion and fire coordinators' cars (BAT10-19, FC1, FC2) and CHIEF239 as cars
+ICON_BY_CODE = ((re.compile(r"^AP\d+$"), "arff"), (re.compile(r"^(BAT|FC)\d+$"), "suv"), (re.compile(r"^CHIEF"), "suv"))
+
+
+def icon_of(unit: dict, lists=None) -> str:
+    """A unit {name, kind?} -> its map icon: engine | ladder | tower | rescue | suv (chiefs', duty and utility cars) |
+    arff (the airport's crash trucks) | other; a department placeholder (is_placeholder, by the CAD's lists): "" (none: it is never drawn)."""
+    if is_placeholder(unit, lists):
+        return ""
+    kind = unit.get("kind") or ""
+    if kind in ICON_OF_KIND:
+        return ICON_OF_KIND[kind]
+    if kind in ("", "other", "agency"):
+        code = str(unit.get("name") or "").strip().upper()
+        for pat, icon in ICON_BY_CODE:
+            if pat.match(code):
+                return icon
+    return "other"
 
 
 def look_of(role: str | None) -> str:
@@ -93,9 +144,10 @@ def look_of(role: str | None) -> str:
     return LOOK.get(role or "", ACTIVE_LOOK)
 SNIPPET = 160
 # Rigs decluttered by zoom (#376; drawn by cadmap.js): below detail_zoom an idle rig is a dot (two or more idle at one
-# firehouse: one badge, "HQ · 6"), below active_zoom an active one (on a call) a strong dot. Settings > System > Map
-# display; the wall board (/monitor, read from across the room, always showing the whole area) has its own pair. A map
-# on its automatic frame (the area or the call, not moved by hand) keeps every active rig a full chip whatever its zoom.
+# firehouse: one count chip on its icon, "6": #384), below active_zoom an active one (on a call) a strong dot. Settings >
+# System > Map display; the wall board (/monitor, read from across the room, always showing the whole area) has its own
+# pair. A map on its automatic frame (the area or the call, not moved by hand) keeps every active rig a full chip whatever
+# its zoom.
 DISPLAY_SECTION = "map_display"
 DISPLAY_DEFAULTS = {"detail_zoom": 15.0, "active_zoom": 10.0, "board_detail_zoom": 16.0, "board_active_zoom": 10.0}
 DISPLAY_LABELS = {"detail_zoom": "Idle rigs: chips from zoom", "active_zoom": "Active rigs: chips from zoom",
@@ -120,7 +172,7 @@ def load_firehouses(path: str | Path | None = None) -> list[dict]:
     except (OSError, ValueError, KeyError, TypeError):
         return []
     return [{"name": str(f["name"]), "address": str(f.get("address") or ""), "ll": [float(f["ll"][0]), float(f["ll"][1])],
-             **({"short": str(f["short"])[:12]} if f.get("short") else {})}      # the map's badge (#376): "HQ · 6"
+             **({"short": str(f["short"])[:12]} if f.get("short") else {})}      # a short name (#376)
             for f in fh if isinstance(f, dict) and f.get("name") and isinstance(f.get("ll"), list) and len(f["ll"]) == 2]
 
 
@@ -222,8 +274,8 @@ def _ll(x: dict | None) -> list[float] | None:
 
 def locate(unit: dict, role: str, station: dict | None = None, incident: dict | None = None,
            position: dict | None = None, now: float = 0.0, clear: dict | None = None,
-           params: eta.Params | None = None) -> dict | None:
-    """Where one rig is now, estimated (the module doc's table).
+           params: eta.Params | None = None, lists=None) -> dict | None:
+    """Where one rig is now, estimated (the module doc's table); a department placeholder (is_placeholder): None.
 
     unit:     {name, status?, assigned_at? (when it was put on its open call)}
     role, station, incident, position, now: as for place()
@@ -233,6 +285,8 @@ def locate(unit: dict, role: str, station: dict | None = None, incident: dict | 
     Returns None (unknown) or {where: position|incident|returning|near|station, ll: [lon, lat],
     on_road (no turnout from here), label ("from Washington Park", "returning from 26-000004"),
     station (its name or ''), home ([lon, lat] or None), and for a return: call_ll, number, until}."""
+    if is_placeholder(unit, lists):
+        return None                                  # a department placeholder: nowhere, whatever its status (#384)
     p = params or eta.Params()
     home = list(station["ll"]) if station else None
     base = {"station": station["name"] if station else "", "home": home}
@@ -281,8 +335,8 @@ def _returning(unit: dict, role: str, incident: dict | None, clear: dict | None,
 
 def place(unit: dict, role: str, station: dict | None = None, incident: dict | None = None,
           position: dict | None = None, now: float = 0.0, fire: bool | None = None,
-          clear: dict | None = None, params: eta.Params | None = None) -> dict | None:
-    """Where one unit goes on the map and how it looks.
+          clear: dict | None = None, params: eta.Params | None = None, lists=None) -> dict | None:
+    """Where one unit goes on the map and how it looks (a department placeholder: never, is_placeholder).
 
     unit:     {name, id?, kind?, status?, assigned_at?}
     role:     its status's role: free | oos | dispatched | enroute | onscene | '' (committed)
@@ -292,22 +346,24 @@ def place(unit: dict, role: str, station: dict | None = None, incident: dict | N
     fire:     drawn by default (is_fire); None = from the unit
     clear:    its latest cleared call (locate()): a recent one draws it on its way home
 
-    Returns None (not drawn) or {unit, id, kind, status, status_at, look, place: station|incident|position|returning,
-    group, lon, lat, ring: 0 (inner) | 1 (outer, not there yet), incident_id, incident_number,
+    Returns None (not drawn) or {unit, id, kind, icon (icon_of: #384), status, status_at, look,
+    place: station|incident|position|returning, group, lon, lat, ring: 0 (inner) | 1 (outer, not there yet), incident_id, incident_number,
     line_to: [lon, lat] | None, station, home_line (the line is to its station: thin)}; a "position"
     one also has its fix's at, age (s), stale, and heading / speed / source when the fix has them."""
+    if is_placeholder(unit, lists):
+        return None                                  # a department placeholder (DPT239): not apparatus, never drawn
     fire = is_fire(unit) if fire is None else fire
     look = look_of(role)
     inc_ll = _ll(incident)
     if incident is None and not fire:
         return None                                  # EMS / police / agencies: only while on an event
-    spec = {"unit": unit["name"], "id": unit.get("id"), "kind": unit.get("kind", ""), "status": unit.get("status", ""),
-            "status_at": unit.get("status_at"), "look": look, "place": "", "group": "", "lon": None, "lat": None, "ring": 0,
+    spec = {"unit": unit["name"], "id": unit.get("id"), "kind": unit.get("kind", ""), "icon": icon_of(unit, lists),
+            "status": unit.get("status", ""), "status_at": unit.get("status_at"), "look": look, "place": "", "group": "", "lon": None, "lat": None, "ring": 0,
             "incident_id": incident["id"] if incident else None,
             "incident_number": (incident or {}).get("number") or "",
             "line_to": None, "station": station["name"] if station else "", "home_line": False}
     going = incident is not None and role != "onscene" and inc_ll is not None   # a line to where it's going
-    loc = locate(unit, role, station, incident, position, now, clear, params)
+    loc = locate(unit, role, station, incident, position, now, clear, params, lists)
     if loc and loc["where"] == "position":
         fix = fresh_position(position, now)
         extra = {k: fix[k] for k in ("heading", "speed", "source") if k in fix}
@@ -328,9 +384,33 @@ def place(unit: dict, role: str, station: dict | None = None, incident: dict | N
                 line_to=inc_ll if going else None)
 
 
+def _one_row_each(units: list[dict], open_incs: dict) -> list[dict]:
+    """Store.units() as one row a unit, whichever shape it comes in (#384): one row per assignment (several for a unit
+    on several calls) or one row a unit with incident_ids. A unit's row: its latest open call's (the highest incident
+    id), with every call's id in incident_ids; the units in their first row's order."""
+    rows: dict[str, list[dict]] = {}
+    for u in units:
+        rows.setdefault(u["name"], []).append(u)
+    out = []
+    for rs in rows.values():
+        if len(rs) == 1:
+            out.append(rs[0])
+            continue
+        ids = []
+        for r in rs:
+            for i in [r.get("incident_id"), *(r.get("incident_ids") or [])]:
+                if i is not None and i not in ids:
+                    ids.append(i)
+        on = [r for r in rs if r.get("incident_id") in open_incs]
+        best = max(on, key=lambda r: r["incident_id"]) if on else rs[0]
+        out.append(dict(best, incident_ids=ids))
+    return out
+
+
 def map_slice(units: list[dict], incidents: list[dict], role, firehouses: list[dict],
               positions: dict | None = None, now: float = 0.0, joint=lambda code: "",
-              clears: dict | None = None, params: eta.Params | None = None, display: dict | None = None) -> dict:
+              clears: dict | None = None, params: eta.Params | None = None, display: dict | None = None,
+              lists=None) -> dict:
     """state["map"]: {stations, markers, unset, incidents, avl, display}. units: Store.units(); incidents: the
     state's; role(status) -> role; joint(code) -> 'RB' tag for a joint-response unit; clears: unit id ->
     its latest cleared call (Store.recent_clears); params: the ETA settings; display: the map display zooms
@@ -339,12 +419,13 @@ def map_slice(units: list[dict], incidents: list[dict], role, firehouses: list[d
     by_name = {f["name"]: f for f in firehouses}
     open_incs = {i["id"]: i for i in incidents if i["status"] in ("queued", "pending", "active")}
     markers, unset = [], []
-    for u in units:
-        if not (u.get("board") or u.get("incident_id")):
-            continue
+    for u in _one_row_each(units, open_incs):
+        if not (u.get("board") or u.get("incident_id")) or is_placeholder(u, lists):
+            continue                                 # (a department placeholder: never drawn nor listed, #384)
         inc = open_incs.get(u.get("incident_id"))
         st = by_name.get(u.get("station") or "")
-        m = place(u, role(u["status"]), st, inc, positions.get(u["name"]), now, clear=clears.get(u["id"]), params=params)
+        m = place(u, role(u["status"]), st, inc, positions.get(u["name"]), now, clear=clears.get(u["id"]), params=params,
+                  lists=lists)
         if m is None:
             if is_fire(u) and st is None:
                 unset.append({"id": u["id"], "unit": u["name"], "station": u.get("station") or "",
@@ -352,6 +433,10 @@ def map_slice(units: list[dict], incidents: list[dict], role, firehouses: list[d
             continue
         m["tag"] = joint(u["name"])
         m["fire"] = is_fire(u)
+        # every open call it is on (#384: Store.units() gives one row a unit, its latest call, with incident_ids; a
+        # placeholder may be on several, a rig normally one): their numbers, the drawn one first
+        ids = [m["incident_id"]] + [i for i in (u.get("incident_ids") or []) if i != m["incident_id"]]
+        m["incident_numbers"] = [open_incs[i].get("number") or "" for i in ids if i in open_incs and open_incs[i].get("number")]
         markers.append(m)
     # each group's members, in board order, numbered for fanning out around the anchor
     groups: dict[str, list[dict]] = {}
@@ -372,13 +457,14 @@ def map_slice(units: list[dict], incidents: list[dict], role, firehouses: list[d
 
 
 def locations(units: list[dict], incidents: list[dict], role, firehouses: list[dict], positions: dict | None = None,
-              now: float = 0.0, clears: dict | None = None, params: eta.Params | None = None) -> dict[str, dict | None]:
-    """unit code -> locate() for every unit (the recommendation's "where is it now")."""
+              now: float = 0.0, clears: dict | None = None, params: eta.Params | None = None,
+              lists=None) -> dict[str, dict | None]:
+    """unit code -> locate() for every unit (the recommendation's "where is it now"); a placeholder: None."""
     positions, clears = positions or {}, clears or {}
     by_name = {f["name"]: f for f in firehouses}
     open_incs = {i["id"]: i for i in incidents if i["status"] in ("queued", "pending", "active")}
     return {u["name"]: locate(u, role(u["status"]), by_name.get(u.get("station") or ""), open_incs.get(u.get("incident_id")),
-                              positions.get(u["name"]), now, clears.get(u["id"]), params) for u in units}
+                              positions.get(u["name"]), now, clears.get(u["id"]), params, lists) for u in units}
 
 
 def _snippet(text: str, n: int = SNIPPET) -> str:

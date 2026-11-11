@@ -231,7 +231,9 @@ class Connector:
 
     def _beat(self):
         while self.beating:
-            (self.shared / "hub-alive").write_text(f"{self.beat_value or int(time.time())}\n")
+            tmp = self.shared / "hub-alive.tmp"            # atomic, as handoff._write: cat never reads it half-written
+            tmp.write_text(f"{self.beat_value or int(time.time())}\n")
+            os.replace(tmp, self.shared / "hub-alive")
             time.sleep(0.2)
 
     def lead(self):

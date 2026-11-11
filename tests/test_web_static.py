@@ -125,7 +125,9 @@ def test_every_admin_only_get_the_scripts_make_is_in_the_read_map():
                                   ("/api/cad/health", '"/api/cad/health"', "health.js")):
         assert literal in js(script), f"{script} doesn't read {path}"
         assert path in ADMIN_READS, path
-    assert set(ADMIN_READS) == {"/api/cad/notify", "/api/cad/health"}
+    assert set(ADMIN_READS) == {"/api/cad/notify", "/api/cad/health", "/api/cad/perf", "/api/cad/perf/profile"}   # (perf: #425)
+    assert '"/api/cad/perf"' in js("health.js") and '"/api/cad/perf/profile' in js("health.js")
+    assert "/api/cad/perf" not in scripts.replace(js("health.js"), "")        # only the tab reads it
     assert "/api/cad/health" not in scripts.replace(js("health.js"), "")      # only the tab reads it
 
 

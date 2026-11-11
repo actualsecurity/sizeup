@@ -146,9 +146,10 @@ STATUS_SAID_BY = {"E61": "en route", "E62": "on location", "L31": "responding", 
                   "2394": "en route", "TL2": "in service", "E64": "in the area"}
 
 
-def vocabulary_suggestions(units: dict, streets: list[str], top_streets: int = 60) -> list[str]:
+def vocabulary_suggestions(units: dict, streets: list[str], top_streets: int = 60, county=()) -> list[str]:
     """The seed phrase list: every unit's spoken name (Engine 60, Ladder 31, Tower Ladder 2, 23 98 ...),
-    PCFD words, and the busiest street names of Port Chester / Rye Brook as said ("North Main Street")."""
+    PCFD words, and the busiest street names of Port Chester / Rye Brook as said ("North Main Street"); then
+    county: the county-wide phrases (sizeup/stt_vocab.py county_phrases: callsigns, departments, channels)."""
     from sizeup.transcribe import street_spoken
     out: list[str] = ["60 Control", "Port Chester", "Rye Brook", "Fire EMS 15", "Port Chester Fire", "Rye Brook Fire",
                       "Westchester", "Fireground", "Fireground 1", "Fireground 2", "Battalion 15", "Airport Incident",
@@ -174,4 +175,4 @@ def vocabulary_suggestions(units: dict, streets: list[str], top_streets: int = 6
         s = street_spoken(name)
         if s not in out:
             out.append(s)
-    return out
+    return list(dict.fromkeys([*out, *county]))

@@ -90,7 +90,8 @@ def test_a_failed_rerun_ends_too(tmp_path):
         n, row = rerun(app, tid)
         assert n == 1 and row["rerun_result"] == "same"                   # the same text: still an answer
         app.stt.client = BrokenWhisper()
-        n, row = rerun(app, tid, timeout=25)                               # (three tries, 15 s)
+        app.stt.RETRY_S = (0.05, 0.05, 0.05)                              # three tries, not 15 s of backoff (#401)
+        n, row = rerun(app, tid, timeout=25)
         assert row["rerun_result"] == "failed: speech-to-text error" and row["text"] == "whisper heard this"
         assert app.retranscribe(["no-such-id"]) == 0                     # nothing to re-run: said at once (queued 0)
     finally:
