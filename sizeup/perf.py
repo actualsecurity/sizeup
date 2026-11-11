@@ -119,10 +119,11 @@ class ThreadClock:
     """{native thread id: CPU seconds} for this process's threads. kind: where it reads ("schedstat": ns on the CPU;
     "stat": utime+stime in clock ticks, 10 ms; "mach": macOS; "none": nowhere, and read() is {}). Only ever a file of
     our own process or our own task's thread list: a thread that ended meanwhile is just not in the answer (never a
-    call on a thread id that may be gone). hold: keep each thread's file open between reads (the profiler reads them
-    HZ times a second) and read them without letting go of the GIL (libc's pread through ctypes.PyDLL: os.pread gives
-    the GIL up at every call, and while another thread computes each of the ~50 would wait a switch interval to get it
-    back, so the busier the hub the fewer the samples); close() when done."""
+    call on a thread id that may be gone). The files are read without letting go of the GIL (libc's open, pread and
+    close through ctypes.PyDLL): Python's own give the GIL up at every call, and while another thread computes each of
+    the ~50 threads' reads would wait a switch interval to get it back, so the busier the hub the longer a pass (and
+    the further apart in time its first and last thread are read). hold: keep each thread's file open between reads
+    (the profiler reads them HZ times a second); close() when done."""
 
     def __init__(self, proc: str = "/proc", hold: bool = False):
         self.dir = os.path.join(proc, "self", "task")
@@ -133,14 +134,20 @@ class ThreadClock:
         self._pread = None
         self._buf = ctypes.create_string_buffer(512)
         self.kind = self._detect()
-        if hold and self.kind in ("schedstat", "stat"):
+        self._open = self._cclose = None
+        if self.kind in ("schedstat", "stat"):
             try:
-                fn = ctypes.PyDLL(None, use_errno=True).pread
-                fn.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_longlong]
-                fn.restype = ctypes.c_ssize_t
-                self._pread = fn
-            except (OSError, AttributeError):      # no libc to ask: os.pread (correct, slower under load)
-                pass
+                c = ctypes.PyDLL(None, use_errno=True)
+                c.pread.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_longlong]
+                c.pread.restype = ctypes.c_ssize_t
+                if sys.platform.startswith("linux"):       # (open is variadic: called this way only where that is sound)
+                    c.open.argtypes = [ctypes.c_char_p, ctypes.c_int]
+                    c.open.restype = ctypes.c_int
+                    c.close.argtypes = [ctypes.c_int]
+                    self._open, self._cclose = c.open, c.close
+                self._pread = c.pread
+            except (OSError, AttributeError):      # no libc to ask: Python's own (correct, slower under load)
+                self._pread = self._open = self._cclose = None
 
     def _detect(self) -> str:
         try:
@@ -174,10 +181,18 @@ class ThreadClock:
         out: dict[int, float] = {}
         for tid in tids:
             try:
-                if self.hold:
-                    fd = self._fds.get(tid)
-                    if fd is None:
-                        fd = self._fds[tid] = os.open(os.path.join(self.dir, str(tid), self.kind), os.O_RDONLY)
+                fd = self._fds.get(tid) if self.hold else None
+                if fd is None:
+                    path = f"{self.dir}/{tid}/{self.kind}"
+                    if self._open is not None:
+                        fd = self._open(path.encode(), os.O_RDONLY | getattr(os, "O_CLOEXEC", 0))
+                        if fd < 0:
+                            raise OSError("gone")
+                    else:
+                        fd = os.open(path, os.O_RDONLY)
+                    if self.hold:
+                        self._fds[tid] = fd
+                try:
                     if self._pread is not None:
                         n = self._pread(fd, self._buf, 512, 0)
                         if n <= 0:
@@ -185,9 +200,9 @@ class ThreadClock:
                         raw = self._buf.raw[:n]
                     else:
                         raw = os.pread(fd, 512, 0)
-                else:
-                    with open(os.path.join(self.dir, str(tid), self.kind), "rb") as f:
-                        raw = f.read(512)
+                finally:
+                    if not self.hold:
+                        self._close(fd)
                 out[tid] = self._parse(raw)
             except (OSError, ValueError, IndexError):     # the thread ended: no such file, or ESRCH on an open one
                 fd = self._fds.pop(tid, None)
@@ -198,8 +213,10 @@ class ThreadClock:
                 self._close(self._fds.pop(tid))
         return out
 
-    @staticmethod
-    def _close(fd: int) -> None:
+    def _close(self, fd: int) -> None:
+        if self._cclose is not None:
+            self._cclose(fd)
+            return
         try:
             os.close(fd)
         except OSError:
