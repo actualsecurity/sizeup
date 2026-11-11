@@ -1817,16 +1817,18 @@ speed of its own that closes on the prediction: the train's speed plus the gap o
 (+0.5 m/s) for gaps under 30 m and a little more beyond, never faster than the consist can speed up or brake, its
 change eased (1.5 m/s³), so a new fix's error is absorbed over a few seconds with no surge. A correction no such
 change of pace can make is glided (as an aircraft eases onto a new fix, but on a cubic from the speed it was drawn
-at, so no jump and no step in speed), over 2 to 4 s, faintly ringed meanwhile: a train drawn past where a fix says
-it stopped (or will stop) runs on, braked smoothly at its service brake, then glides back (the user: "I'm fine with
-an overshoot if we keep it smooth"); a fix more than 400 m ahead, a GTFS-realtime report (no speed) more than 100 m
-ahead, or the first real fix of a train drawn on our estimate is glided on to. Measured with synthetic fixes at the
-real cadence (a fix every 3 to 12 s, 3 to 16 s old when read, ±10 m GPS noise): a steady 45 mph train is drawn at
-39-51 mph (coefficient of variation 0.03-0.06, the same with ±1 mph of speed noise; #378's: 0-110 mph, 0.45-0.69,
-hollow 6-12 % of the time), never hollow. The trade-off: a stop with no sign before the feed goes quiet is drawn on
-until its fix is 20 s old, then eased (20/30/45/60 mph: about 165/220/290/330 m past), and a service brake seen in
-the next fix still overshoots by the drawn train's own braking (56-320 m in the runs), then glides back, never
-jumping (`Motion.rail` / `railFollow`; `tests/test_train_live.py` holds it to the measured shape). A fix no newer than the last one changes
+at, so no jump and no step in speed), never faster than 25 m/s or 1.5× the train's last real speed, taking as long as
+that needs (up to 20 s), faintly ringed meanwhile; one too big for that (or over 600 m, rare) is faded out where it is
+drawn and in at the fix (0.8 s) instead. A train drawn past where a fix says it stopped (or will stop) is braked hard
+to rest (up to 4 m/s², eased in), then glides back (the user: "I'm fine with an overshoot if we keep it smooth"); a
+fix more than 400 m ahead, a GTFS-realtime report (no speed) more than 100 m ahead, or the first real fix of a train
+drawn on our estimate is glided on to. Measured with synthetic fixes at the real cadence (a fix every 3 to 12 s, 3 to
+16 s old when read, ±10 m GPS noise): a steady 45 mph train is drawn at 39-51 mph (coefficient of variation
+0.03-0.06, the same with ±1 mph of speed noise; #378's: 0-110 mph, 0.45-0.69, hollow 6-12 % of the time), never
+hollow. The trade-off: a stop with no sign before the feed goes quiet is drawn on until its fix is 20 s old, then
+eased (20/30/45/60 mph: about 150/210/280/330 m past); a brake seen in the next fix overshoots by what the train was
+drawn ahead when that fix came plus the hard stop (service 0.75 m/s²: median 64 m; emergency 1.4 m/s²: median 134 m),
+then glides back at 16-40 m/s over 2-17 s, never jumping (`Motion.rail` / `railFollow`; `tests/test_train_live.py` holds it to the measured shape). A fix no newer than the last one changes
 nothing. The distance along the line comes from the projection, not `turf.location_mp`: the projection
 is in the same geometry the train is drawn on, while turf counts along each train's own route (see above) and
 would have to be calibrated to it. The milepost shown is turf's when the train's route starts (eastbound) or

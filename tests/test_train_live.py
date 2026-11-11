@@ -70,7 +70,7 @@ const flush = () => new Promise((r) => setImmediate(r));
     for (const t of timers.filter((x) => x.live && x.at <= now)) { if (t.every) t.at += t.every; else t.live = false; t.fn(); }
     await flush(); await flush();
     const w = m.drawn && m.drawn.get(IN.id);
-    out.frames.push([now / 1000, w ? w.s : null, w ? !!w.old : null, w ? !!w.snap : null]);
+    out.frames.push([now / 1000, w ? w.s : null, w ? !!w.old : null, w ? !!w.snap : null, w ? w.op : null]);
   }
   console.log(JSON.stringify(out));
 })();
@@ -177,19 +177,14 @@ def test_a_train_on_traintime_glides_at_its_speed_with_no_steps_stalls_or_backwa
                                                             # s old: past 8 s of age it is drawn slowing, so a little behind)
 
 
-def back_steps(frames):
-    """[(t, metres back (east) in one frame, ringed)] for every step back over 3 m"""
-    fr = [(t, s, snap) for t, s, _, snap in frames if s is not None]
-    return [(b[0], b[1] - a[1], b[2]) for a, b in zip(fr, fr[1:]) if b[1] - a[1] > 3.0]
-
-
 def glides_back(frames):
-    """Each run of frames moving back (east) more than 0.05 m a frame: {s (how long), m (how far), peak (m/s), ringed}"""
-    fr = [(t, s, snap) for t, s, _, snap in frames if s is not None]
+    """Each run of frames moving back (east) more than 0.05 m a frame, faded frames left out: {s (how long), m (how
+    far), peak (m/s), ringed}"""
+    fr = [(t, s, snap) for t, s, _, snap, op in frames if s is not None and (op is None or op >= 1)]
     runs, cur = [], None
     for a, b in zip(fr, fr[1:]):
         back = b[1] - a[1]
-        if back > 0.05:
+        if back > 0.05 and b[0] - a[0] < 0.15:
             cur = cur or {"t0": a[0], "m": 0.0, "peak": 0.0, "ringed": True}
             cur.update(t1=b[0], m=cur["m"] + back, peak=max(cur["peak"], back / (b[0] - a[0])), ringed=cur.get("last", True),
                        last=cur["ringed"] and b[2])   # (the glide's last frame is already off it)
@@ -201,28 +196,34 @@ def glides_back(frames):
     return [{"s": r["t1"] - r["t0"], "m": r["m"], "peak": r["peak"], "ringed": r["ringed"]} for r in runs]
 
 
-def smooth_back(frames, max_s=6.0):
-    """#390: every move back is a glide (no jump: no frame back more than its glide's own pace), ringed when it is more
-    than a few metres, done within GLIDE_MAX_S (a little more when a new fix re-aims it on the way)"""
+def smooth_back(frames, v=V):
+    """#390 ("less surgy"): every move back is a glide, never a jump, at most GLIDE_PEAK_MPS or 1.5x the train's speed
+    (it takes as long as that needs, to GLIDE_MAX_S), ringed when it is more than a few metres; a correction too big for
+    that is faded out and in instead (op), the only place the drawn train moves more than a glide's pace in a frame"""
+    peak = max(25.0, 1.5 * v)
     for g in glides_back(frames):
-        T = max(2.0, min(4.0, g["m"] / 30.0))
-        assert g["s"] <= max_s and (g["m"] < 1.0 or g["peak"] <= 1.5 * g["m"] / T * 1.1 + 2.0)
+        assert g["s"] <= 20.5 and g["peak"] <= peak * 1.05 + 1.0
         assert g["m"] <= 3.0 or g["ringed"]
+    fr = [(t, s, op) for t, s, _, _, op in frames if s is not None]
+    for a, b in zip(fr, fr[1:]):
+        if not ((a[2] is not None and a[2] < 1) or (b[2] is not None and b[2] < 1)):
+            assert abs(b[1] - a[1]) <= max(peak, 2 * v) * 0.1 * 1.05 + 1.0          # no jump outside a fade
 
 
 @pytest.mark.parametrize("brake_at", [15, 21, 27, 33])
 def test_a_train_braking_to_a_stop_mid_track_is_drawn_where_it_stopped(tmp_path, brake_at):
     """#375: "if a train stops mid track we want to know where accurately". At 52 mph, a service brake (0.75 m/s^2) right
-    after a fix, to a stop 360 m on, mid-track; the feed's fixes still 3-16 s old: it ends where the GPS says it stopped. #390: until a fix says it is braking it is drawn on at its speed,
-    so by then it may be drawn ahead of the train; then braked smoothly at its service brake (the user: "fine with an
-    overshoot if we keep it smooth") and glided back (2 to 4 s, faintly ringed)."""
+    after a fix, to a stop 360 m on, mid-track; the feed's fixes still 3-16 s old: it ends where the GPS says it stopped.
+    #390: until a fix says it is braking it is drawn on at its speed, so by then it may be drawn ahead of the train (the
+    user: "fine with an overshoot if we keep it smooth"): braked hard (to 4 m/s^2, eased in) as soon as the data says
+    it stops behind, then glided back no faster than 1.5x its speed (25 m/s at least), faintly ringed."""
     frames, truth = drive(tmp_path, run=braking(brake_at), run_s=brake_at + 65)
     stop = truth(frames[0][0] + 10_000)
     fr = [(t, s) for t, s, *_ in frames if s is not None]
     past = max(stop - s for _, s in fr)                     # westbound: past the stop is a lower s
-    assert past <= 250                                      # (#390: on past it, braked smoothly; measured 70-210 m)
+    assert past <= 250                                      # (#390: on past it, braked hard but smoothly)
     smooth_back(frames)                                     # glided back, never put back at once (#390)
-    assert len([g for g in glides_back(frames) if g["m"] > 10]) <= 1
+    assert len([g for g in glides_back(frames) if g["m"] > 10]) <= 2
     assert abs(fr[-1][1] - stop) <= 25                      # at rest where it stopped (GPS noise ±10 m)
     assert fr[-1][1] == fr[-20][1]                          # and still
 
@@ -249,9 +250,9 @@ def test_a_steady_train_is_drawn_steadily_at_the_measured_cadence(tmp_path):
     cov = (sum((x - mean) ** 2 for x in v) / len(v)) ** 0.5 / mean
     assert cov <= 0.07
     assert min(v) >= 0.85 * V45 - 0.5 and max(v) <= 1.15 * V45 + 0.5
-    assert not any(old for t, s, old, _ in frames if t > t0 + 5)                     # never hollow
+    assert not any(old for t, s, old, *_ in frames if t > t0 + 5)                     # never hollow
     assert max(abs(s - truth(t)) for t, s, *_ in frames if s is not None and t > t0 + 20) <= 30
-    assert not back_steps(frames)
+    assert not [g for g in glides_back(frames) if g["m"] > 3]
 
 
 def test_one_bad_speed_reading_is_no_stop(tmp_path):
@@ -260,7 +261,7 @@ def test_one_bad_speed_reading_is_no_stop(tmp_path):
     frames, truth = drive(tmp_path, run=lambda dt: (V45 * dt, V45), run_s=90, cadence="real", start_m=1000.0, bad={6})
     t0 = frames[0][0] - 1
     v = speeds_1s(frames, t0 + 20, t0 + 89)
-    assert min(v) >= 0.8 * V45 and not back_steps(frames)
+    assert min(v) >= 0.8 * V45 and not [g for g in glides_back(frames) if g["m"] > 3]
     assert max(abs(s - truth(t)) for t, s, *_ in frames if s is not None and t > t0 + 20) <= 30
 
 
@@ -276,7 +277,7 @@ def test_a_stop_with_no_sign_of_it_before_the_feed_goes_quiet(tmp_path):
     fr = [(t, s) for t, s, *_ in frames if s is not None]
     past = max(stop - s for _, s in fr)
     assert 100 <= past <= 300                                # (45 mph: ~230 m; see #392)
-    smooth_back(frames)
+    smooth_back(frames, V45)
     assert 1 <= len([g for g in glides_back(frames) if g["m"] > 10]) <= 2            # glided back (once its ease rests)
     assert abs(fr[-1][1] - stop) <= 25 and fr[-1][1] == fr[-20][1]
 
@@ -295,15 +296,13 @@ def test_a_feed_gone_quiet_eases_the_train_to_a_stop_and_it_is_drawn_hollow_afte
     (a little faded), hollow past 30 s; when fixes come again it glides on to them, never jumps."""
     frames, truth = drive(tmp_path, run=lambda dt: (V45 * dt, V45), run_s=125, cadence="real", start_m=1000.0, quiet=(40, 90))
     t0 = frames[0][0] - 1
-    hollow = [t - t0 for t, s, old, _ in frames if old]
+    hollow = [t - t0 for t, s, old, *_ in frames if old]
     assert hollow and min(hollow) > 40 + 25                  # (its last fix was taken before 40 s; hollow past 30 s)
     v = speeds_1s(frames, t0 + 20, t0 + 124)
     assert min(v[:200]) >= 0.85 * V45 - 0.5                  # 20-40 s: steady
-    fr = [(t, s, snap) for t, s, _, snap in frames if s is not None]
-    assert max(abs(b[1] - a[1]) for a, b in zip(fr, fr[1:]) if not (a[2] or b[2])) <= 3.0   # no jump outside a glide
+    smooth_back(frames, V45)                                 # no jump outside a fade
     stillest = min(v[300:700])
     assert stillest < 0.5                                    # eased to a stop while nothing came
-    smooth_back(frames)
     at = lambda T_: min(((t, s) for t, s, *_ in frames if s is not None), key=lambda x: abs(x[0] - T_))
     assert abs(at(t0 + 110)[1] - truth(at(t0 + 110)[0])) <= 30            # and back with the train (before it brakes for Rye)
 
@@ -327,7 +326,7 @@ def test_a_train_stopping_at_its_station_is_braked_into_it(tmp_path):
     stop = truth(t0 + 10_000)
     fr = [(t, s) for t, s, *_ in frames if s is not None]
     assert max(abs(s - truth(t)) for t, s in fr if t > t0 + 20) <= 30
-    assert max(stop - s for _, s in fr) <= 25 and not back_steps(frames)
+    assert max(stop - s for _, s in fr) <= 25 and not [g for g in glides_back(frames) if g["m"] > 3]
     assert abs(fr[-1][1] - stop) <= 25 and fr[-1][1] == fr[-20][1]
 
 

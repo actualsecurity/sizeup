@@ -206,17 +206,18 @@ def test_a_new_fix_ahead_is_caught_up_along_the_track_smoothly(tmp_path):
     """#375, #390: no lunge. A GPS fix 120 m ahead of where the train is drawn: caught up within the band (at most SHARE of
     its speed + EXTRA_SHARE beyond BIG_M), its pace changing no faster than its consist can (the M8's 0.89 m/s^2, less
     at speed), not glided. A GTFS-realtime report (no speed) more than GLIDE_EST_M ahead, or any fix more than
-    GLIDE_AHEAD_M ahead: glided on to it in 2 to 4 s, marked meanwhile, no jump."""
+    GLIDE_AHEAD_M ahead: glided on to it no faster than 25 m/s over it (or 1.5x its speed), marked meanwhile; too far
+    for 20 s of that: faded out and in at the fix."""
     out = node(tmp_path, TRACK + GLIDE + """
 const go = (id, f, by) => {
   tk.set(id, { ...f, at: at(0) }, at(0));
   drive(id, 0, 10);
-  const g = { ...f, s: Motion.rail(f, 10).s + by, t0: f.t0 + 10, fixAt: f.fixAt + 10, at: at(10) };
-  if (f.seg) g.lag = g.fixAt - Motion.profileT(g.s, g.seg);
   const from = tk.where(id, at(10)).s;
+  const g = { ...f, s: (f.seg ? from : Motion.rail(f, 10).s) + by, t0: f.t0 + 10, fixAt: f.seg ? f.t0 + 10 : f.fixAt + 10, at: at(10) };
+  if (f.seg) g.lag = g.fixAt - Motion.profileT(g.s, g.seg);
   tk.set(id, g, at(10));
-  return { from, path: watch(id, 10.1, 29), target: (t) => Motion.rail(g, t - 10).s,
-           tg: [0, 2, 4, 4.1, 19].map((x) => Motion.rail(g, x).s) };
+  const path = watch(id, 10.1, 29);
+  return { from, path, v: path.map((p) => Motion.rail(g, p[0] - 10).v), tg: [0, 2, 4, 4.1, 19].map((x) => Motion.rail(g, x).s) };
 };
 out.gps = go("gps", IN.gps, 120); out.gpsFar = go("gpsFar", IN.gps, 600); out.est = go("est", IN.est, 300);
 """, {"gps": fix(v=20.0, fixAt=NOW, seg=None, hold=PC + 5000, stop=PC + 5000, until=NOW + 300),
@@ -229,11 +230,13 @@ out.gps = go("gps", IN.gps, 120); out.gpsFar = go("gpsFar", IN.gps, 600); out.es
     assert max(abs(b - a) for a, b in zip(speeds, speeds[1:])) <= 0.1 * 0.89 + 0.02   # within the M8's limits
     assert max(speeds) <= 20 + 0.15 * 20 + 0.5 + 0.25 * 20 + 2 + 0.01                 # the band, no surge
     assert abs(path[-1] - g["tg"][-1]) < 0.35 * 120                                    # catching up, gently
-    for name in ("gpsFar", "est"):
-        r = out[name]
-        path = [r["from"]] + [p[1] for p in r["path"]]
-        assert r["path"][0][2] and all(b >= a for a, b in zip(path, path[1:]))        # glided, marked, forward
-        assert abs(path[41] - r["tg"][3]) < 1 and not r["path"][45][2]                # on it within 4 s
+    r = out["est"]                                                                   # 300 m: glided, at most 25 m/s
+    path = [r["from"]] + [p[1] for p in r["path"]]
+    assert r["path"][0][2] and all(b >= a for a, b in zip(path, path[1:]))          # marked, forward
+    rel = [(b - a) / 0.1 - r["v"][i] for i, (a, b) in enumerate(zip(path, path[1:]))]
+    assert max(rel) <= 25 * 1.05 + 0.5 and not r["path"][-1][2]                     # (and done)
+    f = out["gpsFar"]                                                                # 600 m: too far, faded out and in
+    assert min(p[3] for p in f["path"][:8]) < 0.2 and f["path"][10][3] == 1 and not f["path"][0][2]
 
 
 def test_a_new_fix_behind_slows_the_train_never_back_never_stopped(tmp_path):
@@ -263,28 +266,35 @@ out.target = []; for (let t = 10.1; t <= 40 + 1e-9; t += 0.1) out.target.push(Mo
 
 
 GLIDE = """
-const glide = (off) => Math.max(Motion.RAIL.GLIDE_MIN_S, Math.min(Motion.RAIL.GLIDE_MAX_S, off / Motion.RAIL.GLIDE_MPS));
 const watch = (id, from, to) => { const r = []; for (let t = from; t <= to + 1e-9; t += 0.1) { const s = tk.where(id, at(t)).s;
-  r.push([t, s, Motion.snapped(tk.items.get(id))]); } return r; };
+  r.push([t, s, Motion.snapped(tk.items.get(id)), Motion.fadeOf(tk.items.get(id), at(t))]); } return r; };
 """
 
 
-def glide_ok(path, to, d=1):
-    """A glide back onto `to` (path [[t, s, marked]] from the frame the fix came): braked smoothly to rest (if it was
-    running), then back along the track on a cubic over GLIDE_MIN_S..GLIDE_MAX_S: no jump, no step in pace, at most 1.5x
-    the glide's average speed, marked while it glides, then at rest there and unmarked."""
+def glide_ok(path, to, d=1, v=0.0):
+    """A correction back onto `to` (path [[t, s, marked, opacity]] from the frame the fix came): braked to rest (if it
+    was running: at most BRAKE_HARD, eased in), then glided back along the track no faster than max(GLIDE_PEAK_MPS, 1.5x
+    the train's speed) on a cubic (no jump, no step in pace), marked meanwhile, as long as that takes; or, too far for
+    that, faded out and in at the fix. Then at rest there and unmarked. Returns (how far, peak speed back, how long)."""
     ss = [p[1] for p in path]
     steps = [(b - a) * d for a, b in zip(ss, ss[1:])]
     far = max((s - to) * d for s in ss)
-    T = max(2.0, min(4.0, far / 30.0))
+    peak = max(25.0, 1.5 * v)
+    faded = [i for i, p in enumerate(path) if p[3] < 1]
+    if faded:                                                                        # too far to glide: faded
+        assert far > min(600, peak * 20 / 1.5) - 60 and len(faded) * 0.1 <= 0.9
+        assert all(abs(x) <= 2.5 for i, x in enumerate(steps) if i + 1 not in faded and i not in faded)
+        assert ss[-1] == to
+        return far, None, None
+    T = max(2.0, 1.5 * far / peak)
     speeds = [x / 0.1 for x in steps]
-    assert max(abs(b - a) for a, b in zip(speeds, speeds[1:])) <= 0.1 * 6 * far / T ** 2 * 1.2 + 0.5   # no step in pace
-    assert -min(steps) / 0.1 <= 1.5 * far / T * 1.05 + 0.5                         # back no faster than its glide
-    rest = next(i for i, x in enumerate(steps) if x <= 0)                           # (braked to rest first)
+    assert max(abs(b - a) for a, b in zip(speeds, speeds[1:])) <= 0.1 * max(6 * far / T ** 2, 4.0) * 1.2 + 0.5
+    assert -min(steps) / 0.1 <= peak * 1.05 + 0.5                                   # back no faster than the cap
+    rest = next(i for i, x in enumerate(steps) if x <= 0)
     assert all(x >= -1e-9 for x in steps[:rest])
     back = [i for i, x in enumerate(steps) if x < -1e-9]
     if back:
-        assert (back[-1] - back[0] + 1) * 0.1 <= 4.0 + 0.15                          # 2 to 4 s
+        assert (back[-1] - back[0] + 1) * 0.1 <= min(20.0, T) + 0.3
         assert all(path[i + 1][2] for i in back[:-1])                                # marked while it glides
     assert ss[-1] == to and not path[-1][2]
     return far, (-min(steps) / 0.1 if back else 0.0), (len(back) * 0.1)
@@ -292,8 +302,9 @@ def glide_ok(path, to, d=1):
 
 def test_drawn_beyond_a_new_fixs_limit_it_is_braked_then_glided_back(tmp_path):
     """#375, #390 ("I'm fine with an overshoot if we keep it smooth, and then ... we nudge it back like we did for
-    planes"): drawn running when a new fix says it stopped behind it, a little or a lot: braked at its service brake to
-    rest (on past the fix, smoothly), then glided back along the track onto it."""
+    planes" ... "less surgy"): drawn running when a new fix says it stopped behind it, a little or a lot: braked hard to
+    rest (as little past the fix as smoothly can be), then glided back along the track onto it, no faster than 25 m/s
+    here; 400 m back (450 with its braking) is further than 20 s of that allows: faded out and in at the fix."""
     f = fix(until=NOW + 300, hold=PC)
     out = node(tmp_path, TRACK + GLIDE + """
 const back = (id, by) => {
@@ -302,12 +313,12 @@ const back = (id, by) => {
   const drawn = tk.where(id, at(20)).s;
   const g = { ...IN.f, s: drawn - by, mode: "stopped", seg: null, hold: drawn - by, stop: drawn + 2000, t0: IN.f.t0 + 20, at: at(20) };
   tk.set(id, g, at(20));
-  return { to: g.s, path: [[20, drawn, false], ...watch(id, 20.1, 50)] };
+  return { to: g.s, path: [[20, drawn, false, 1], ...watch(id, 20.1, 50)] };
 };
 out.r = {}; for (const by of [2, 20, 120, 400]) out.r[by] = back("b" + by, by);
 """, {"f": f})
-    for r in out["r"].values():
-        glide_ok(r["path"], r["to"])
+    res = {by: glide_ok(r["path"], r["to"]) for by, r in out["r"].items()}
+    assert res["400"][1] is None and all(res[k][1] is not None for k in ("2", "20", "120"))   # the far one faded
 
 
 def test_a_far_jump_the_other_way_or_another_train_is_drawn_at_once(tmp_path):
@@ -538,12 +549,12 @@ for (const v of IN.vs) {
   drive(e.id, 0, 8);
   const t4 = 4, s4 = IN.f.s + v * t4 - 0.75 * 8;
   tk.set(e.id, { ...f, s: s4, v: v - 3, a: -0.75, t0: IN.f.t0 + t4, fixAt: IN.f.t0 + t4, at: at(8) }, at(8));
-  const pe = drive(e.id, 8.1, 60);
+  const pe = drive(e.id, 8.1, 80);
   const path = drive(id, 0, 60);
   tk.set(id, { ...f, s: stop, hold: stop, v: 0, mode: "stopped", t0: IN.f.t0 + stopAt + 6, fixAt: IN.f.t0 + stopAt + 6, at: at(60) }, at(60));
   tk.where(id, at(60.1));
   const marked = Motion.snapped(tk.items.get(id));
-  const after = drive(id, 60.2, 66);
+  const after = drive(id, 60.2, 85);
   out.r.push({ v, past: Math.max(...path) - stop, end: after[after.length - 1] - stop, marked,
                ev: Math.max(...pe) - stop, evEnd: pe[pe.length - 1] - stop });
 }

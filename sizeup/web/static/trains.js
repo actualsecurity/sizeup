@@ -354,7 +354,7 @@ window.TrainLayer = (() => {
     const { tr, s, back } = f, n = carsOf(t), len = n * M_PER_CAR;
     const unsure = !!f.own && t.lane_how !== "said";          // on a numbered track nothing near says (held, or the outer default, #371)
     const part = (a, b, kind) => ({ type: "Feature", geometry: { type: "LineString", coordinates: piece(tr, Math.min(a, b), Math.max(a, b)) },
-                                    properties: { id: t.id, estimated: !!t.estimated, stale: !!t.stale, dim: !!t.dim, unsure, kind } });
+                                    properties: { id: t.id, estimated: !!t.estimated, stale: !!t.stale, dim: !!t.dim, op: t.op == null ? 1 : t.op, unsure, kind } });
     const cars = [part(s, s + back * len, "body"), part(s, s + back * M_PER_CAR, "cab")];
     if (t.stale || t.dim) cars.pop();         // faded: no cab over the body (two layers at partial opacity: a brighter cab)
     for (let k = 1; k < n; k++) cars.push(part(s + back * (k * M_PER_CAR - GAP_M / 2), s + back * (k * M_PER_CAR + GAP_M / 2), "gap"));
@@ -597,8 +597,9 @@ window.TrainLayer = (() => {
       // estimate; the front car's nose rounded (the cab); the cars' ends as thin gaps across it from GAP_ZOOM. Every
       // outline under every body, so the cab's outline never shows on the car behind it.
       const dark = token("--bg", HALO);
-      const fade = ["case", ["get", "stale"], STALE_OPACITY, ["get", "dim"], DIM_OPACITY, 1];   // frozen on an old feed: faded;
-                                                                       // a GPS fix over DIM_FIX_S old: a little (#390)
+      const fade = ["*", ["case", ["get", "stale"], STALE_OPACITY, ["get", "dim"], DIM_OPACITY, 1],   // frozen on an old feed:
+                    ["coalesce", ["get", "op"], 1]];   // faded; a GPS fix over DIM_FIX_S old: a little; op: a correction
+                                                       // too big to glide, faded out and in at the fix (motion.js, #390)
       const carW = ["interpolate", ["linear"], ["zoom"], 10, 4, 15, 6, 17, 9, 19, 28];
       const caseW = ["interpolate", ["linear"], ["zoom"], 10, 7, 15, 9, 17, 12, 19, 32];
       const part = (kind) => ["==", ["get", "kind"], kind];
@@ -718,10 +719,11 @@ window.TrainLayer = (() => {
         const s = p ? Math.round(p.s * 10) / 10 : t.s;
         const aged = oldFix(t, d, now), snap = !!motion && Motion.snapped && Motion.snapped(motion.items.get(t.id), now);
         const dim = !aged && fixOlder(t, d, now, DIM_FIX_S);
+        const op = motion && Motion.fadeOf ? Math.round(Motion.fadeOf(motion.items.get(t.id), now) * 10) / 10 : 1;   // (#390)
         // ahead of the MTA's report while on its way (a stopped train held at its station's mark isn't a prediction)
-        drawn.set(t.id, { s, stale, old: aged, dim, snap,
+        drawn.set(t.id, { s, stale, old: aged, dim, snap, op,
                           ahead: !t.estimated && t.mode !== "stopped" && typeof t.s === "number" && (s - t.s) * t.d > PREDICTED_M });
-        key.push(`${t.id}:${s}:${stale ? 1 : 0}${aged ? 1 : 0}${dim ? 1 : 0}${snap ? 1 : 0}`);
+        key.push(`${t.id}:${s}:${stale ? 1 : 0}${aged ? 1 : 0}${dim ? 1 : 0}${snap ? 1 : 0}:${op}`);
       }
       const sig = key.join("|");
       this.drawn = drawn;
@@ -730,7 +732,7 @@ window.TrainLayer = (() => {
       const cars = [];
       this.at = new Map();
       this.map.getSource(SRC_TR).setData(fc((d.trains || []).map((x) => {
-        const w = drawn.get(x.id), t = { ...x, s: w.s, ds: typeof x.s === "number" ? w.s - x.s : 0, stale: w.stale, dim: w.dim,
+        const w = drawn.get(x.id), t = { ...x, s: w.s, ds: typeof x.s === "number" ? w.s - x.s : 0, stale: w.stale, dim: w.dim, op: w.op,
                                           estimated: !!x.estimated || w.old };          // an old fix: hollow, as an estimate
         const on = onTrack(t, this.line, this.lanes, this.tracks);
         if (on) cars.push(...on.cars);
@@ -739,7 +741,7 @@ window.TrainLayer = (() => {
         const [lon, lat] = on ? on.mid : [t.lon, t.lat];
         this.at.set(x.id, [lon, lat]);
         return pt(lon, lat, { id: t.id, train: t.train, towards: towards(t), bearing: t.bearing || 0, estimated: !!t.estimated,
-                              stale: w.stale, dim: !!w.dim, snap: w.snap, onTrack: !!on, icon: on ? "" : ensureIcon(this.map, t), anchor, off_lo, off_hi });
+                              stale: w.stale, dim: !!w.dim, op: w.op, snap: w.snap, onTrack: !!on, icon: on ? "" : ensureIcon(this.map, t), anchor, off_lo, off_hi });
       })));
       this.map.getSource(SRC_CARS).setData(fc(cars));
       if (this.following && this.at.has(this.following)) this.fol.pan(this.at.get(this.following));   // kept centred

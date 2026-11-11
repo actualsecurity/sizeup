@@ -698,7 +698,7 @@ out.said = run("said"); out.held = run("held"); out.outer = run("outer"); out.st
     assert not any(u for _, u in out["said"]) and all(u for _, u in out["held"]) and all(u for _, u in out["outer"])
     assert [k for k, _ in out["said"]][:2] == ["body", "cab"] and "cab" not in [k for k, _ in out["stale"]]
     js = (Path(__file__).resolve().parent.parent / "sizeup" / "web" / "static" / "trains.js").read_text()
-    assert ('const fade = ["case", ["get", "stale"], STALE_OPACITY, ["get", "dim"], DIM_OPACITY, 1];' in js   # (#390: a little
+    assert ('const fade = ["*", ["case", ["get", "stale"], STALE_OPACITY, ["get", "dim"], DIM_OPACITY, 1],' in js   # (#390: a little
             and "UNSURE_OPACITY" not in js)                                                              # faded at 20 s)
     unsure = js[js.index('id: "tr-unsure"'):js.index('id: "tr-gap"')]
     assert '["==", ["get", "unsure"], true]' in unsure and '"line-dasharray"' in unsure    # (the icon's features have none)
