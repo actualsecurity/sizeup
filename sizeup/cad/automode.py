@@ -31,8 +31,8 @@ record (the hub, or all-in-one), on top of the incident sources (sizeup/cad/sour
                no unit yet") the feed lists is dispatched first, like a unit; it never takes the feed's statuses, and
                the store frees it once a unit of its department signs on or responds there (store.py
                _release_placeholders: any source). Released, a repeat listing never puts it back; the feed listing
-               it anew (dropped, then listed again) does, only with none of its department's units on the call. Not
-               when one of them has already signed on there
+               it anew (dropped, then listed again) does, only while none of its department's units has signed on
+               there (ever; units merely dispatched don't count), and never after a person freed it
       units    each unit the feed newly lists that is ours is dispatched at the feed's dispatched time: matched exactly
                against the board's codes and spoken names (spaces and dashes aside), or the data file's
                "feed_unit_aliases" {feed code: board code}; codes that match none are listed on the timeline, never
@@ -371,14 +371,6 @@ class AutoDispatch:
                 out.pop(k, None)
         return out
 
-    def _dept_units_on(self, iid: int, ph: str) -> bool:
-        """A unit (not a placeholder) of placeholder ph's department on this call now, whatever its status."""
-        L = self.store.lists
-        dept = L.department_of(ph)
-        return any(not L.placeholder(r["name"]) and L.department_of(r["name"]) == dept
-                   for r in self.store.q("SELECT u.name FROM assignments a JOIN units u ON u.id = a.unit_id "
-                                         "WHERE a.incident_id = ? AND a.cleared_at IS NULL", (iid,)))
-
     def _held(self, iid: int, why: str, op: str) -> None:
         r = self._tracking(iid)
         if r is not None and r["held"] == why:
@@ -570,7 +562,8 @@ class AutoDispatch:
 
     def _assign(self, iid: int, u: dict, t: float | None, op: str, verb: str, again: bool = False) -> bool:
         """again: the feed newly lists it now (not a repeat): a department's placeholder released here before comes
-        back only then, and only with none of its department's units on the call."""
+        back only then, and only while none of its department's units has signed on there (an en route or on location
+        time, ever): units merely dispatched don't keep it off. Never after a person freed it (manual_edits)."""
         L = self.store.lists
         u = self.store.unit(u["id"])
         ph = L.placeholder(u["name"])
@@ -581,7 +574,7 @@ class AutoDispatch:
         if ph and self.store.dept_signed_on(iid, u["name"]):
             return False                                 # its department's unit signed on here (ever): nothing to hold
         if self.store.one("SELECT 1 AS x FROM assignments WHERE incident_id = ? AND unit_id = ?", (iid, u["id"])):
-            if not (ph and again and not self._dept_units_on(iid, u["name"])):
+            if not (ph and again):                       # a placeholder re-listed (dept_signed_on checked above)
                 return False                             # was on it and cleared: never put back by automation (H1)
         if L.role(u["status"]) == "oos":
             return False

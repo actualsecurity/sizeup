@@ -255,7 +255,8 @@ def test_an_idle_stream_closes_and_a_new_one_opens_on_demand():
         t.submit("FG1", "a", tone8k(400, 0.6))
         assert wait(lambda: "a" in res.done)
         assert wait(lambda: fake.conns[0].ended and fake.conns[0].closed_at)       # ended cleanly (empty AudioEvent)
-        assert t.spent()["streams_open"] == 0 and Usage(kv.get, kv.__setitem__).month()["streams"] == 1
+        # the worker lets go of it and bills it just after the server sees it close: wait for that too
+        assert wait(lambda: t.spent()["streams_open"] == 0 and Usage(kv.get, kv.__setitem__).month()["streams"] == 1)
         t.submit("FG1", "b", tone8k(600, 0.6))
         assert wait(lambda: "b" in res.done) and res.done["b"][0] == "Ladder 31 responding."
         assert len(fake.conns) == 2

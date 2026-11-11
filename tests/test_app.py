@@ -400,10 +400,11 @@ def test_call_is_split_into_one_row_per_talker(tmp_path):
                 [(0.0, "60 Ctrl OP 8"), (5.84, "45M6"), (11.76, "60 Ctrl OP 8"), (12.9, "45M6")])
     turns = split_turns(call)
     # The 0.1 s 45M6 key-up at the end is a real key-up (named, with sound): its own row (issue #62),
-    # no longer folded into the dispatcher's last turn.
+    # no longer folded into the dispatcher's last turn. Too short for a word (p25.MIN_STT_S): not transcribed.
     assert [(t.id, t.talker) for t in turns] == [
         ("307-x-t0", "60 Ctrl OP 8"), ("307-x-t1", "45M6"), ("307-x-t2", "60 Ctrl OP 8"), ("307-x-t3", "45M6")]
-    assert turns[1].start == now + 5.84 and turns[3].audio[-1] == audio[-1] and turns[3].stt
+    assert turns[1].start == now + 5.84 and turns[3].audio[-1] == audio[-1] and not turns[3].stt
+    assert all(t.stt for t in turns[:3])
     assert sum(len(t.audio) for t in turns) == len(audio)                 # nothing lost, nothing doubled
     one = Call("307-y", 307, "Fire/EMS 15", now, now + 2, ["77A4"], audio[:2 * RATE], "", [(0.0, "77A4")])
     assert [t.id for t in split_turns(one)] == ["307-y"]                    # one talker: the call's own id

@@ -352,7 +352,7 @@ def test_setup_makes_the_key_asks_hidden_and_records_the_repo(station):
         key.with_name(key.name + ".pub").write_text(PUB + "\n")
 
     asked, hidden, said = [], [], []
-    answers = iter(["git@github.com:example-org/feed-adapter.git", "", "FEED_USER, FEED_PASS"])
+    answers = iter(["git@github.com:example-org/feed-adapter.git", "", "FEED_USER, FEED_PASS", ""])   # ("": not from SSM)
     secrets = iter(['us"er$1', "p\\ass word`x"])
     rc = au.adapter_setup(u, ask=lambda p: (asked.append(p), next(answers))[1],
                           secret=lambda p: (hidden.append(p), next(secrets))[1], out=said.append, make_key=make_key,
@@ -388,7 +388,7 @@ def test_setup_makes_the_key_asks_hidden_and_records_the_repo(station):
     assert r["env"] == [("FEED_USER", True), ("FEED_PASS", True)] and r["state"] == "failing"   # set up, not in yet
     # again: Enter keeps each credential, a name dropped takes its value out
     said.clear()
-    answers = iter(["", "v2", "FEED_USER"])
+    answers = iter(["", "v2", "FEED_USER", ""])
     assert au.adapter_setup(u, ask=lambda p: next(answers), secret=lambda p: "", out=said.append,
                             make_key=make_key, check=False) == 0
     assert len(made) == 1                                                     # the same key

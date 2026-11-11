@@ -148,7 +148,8 @@ WORDING = (("new", "First dispatch"), ("add_on", "Added to the assignment"), ("u
            ("change_type_full", "Upgrade: new type, full response"), ("change_full", "Upgrade: full response"),
            ("respond", "Upgrade: more units"))
 MAX_TONES, MAX_GROUPS, MAX_CHANNELS = 8, 4, 8
-MAX_VOCAB, MAX_PHRASE_CHARS = 500, 100
+MAX_VOCAB, MAX_PHRASE_CHARS = 1500, 100
+MAX_VOCAB_BYTES = 50_000          # AWS's limit; also keeps the Settings request under its 64 KB
 MAX_PLACE_NAMES = 300
 TONES_SECTION, MAX_NAMED_TONES, TONE_HZ = "tones", 400, tonelist.TONE_HZ     # the decoder's band (radio/tones.py)
 
@@ -1834,6 +1835,8 @@ class Editor:
             x = " ".join(x.split())
             if x and x.lower() not in {y.lower() for y in out}:
                 out.append(x)
+        if sum(len(x.encode()) + 1 for x in out) > MAX_VOCAB_BYTES:
+            raise CadError(f"vocabulary: at most {MAX_VOCAB_BYTES // 1000} KB in all (AWS's limit)")
         return out
 
     @staticmethod

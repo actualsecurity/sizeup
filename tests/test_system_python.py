@@ -22,7 +22,7 @@ ROOT = Path(__file__).resolve().parents[1]
 STATION = ROOT / "deploy" / "station"
 INSTALLER = STATION / "install-linux.sh"
 MIN = (3, 11)
-SYSTEM_PY = ("sizeup/radio/adsbd.py", "sizeup/radio/trunkrecd.py", "sizeup/cloud/autoupdate.py", "sizeup/cloud/configupdate.py",
+SYSTEM_PY = ("sizeup/radio/adsbd.py", "sizeup/radio/aisd.py", "sizeup/radio/trunkrecd.py", "sizeup/cloud/autoupdate.py", "sizeup/cloud/configupdate.py",
              "tools/stt_diag.py")
 
 # stdlib names that are newer than MIN (ast.parse's feature_version catches new syntax, not new library names)
