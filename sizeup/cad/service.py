@@ -213,6 +213,7 @@ class Cad:
         self.hints = StatusHints(self.store, lambda: self.lists, channels=s.tactical,
                                  talkgroups=tuple(dict.fromkeys((*s.incident_talkgroups, *s.airport_talkgroups))), log=log)
         self.comms.on_text = self._on_text
+        self.comms.fix = self.hints.decorate             # the Radio rows: misheard status words put back, heard on hover
         # Incident sources, ranked (#297, sizeup/cad/sources.py): external CAD feeds first, the paging decoder the backup;
         # which may make an incident, whose fields win, the possible-incoming notices. The app starts its ticker.
         self.sources = Sources(self, clock=clock, log=log)
@@ -588,7 +589,7 @@ class Cad:
                                 clears=self.clears(now), params=self.eta, display=self.map_display)
         if self.routes is not None:
             try:
-                out.update(self.routes.for_map(out["markers"], now))     # routes, trails (#360)
+                out.update(self.routes.for_map(out["markers"], now, incs))     # routes, trails (#360)
             except Exception as e:  # noqa: BLE001 - routing's trouble never breaks the console
                 self.log(f"CAD: routes: {type(e).__name__}: {e}")
         return out

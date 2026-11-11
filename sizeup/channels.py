@@ -138,6 +138,14 @@ def check_map(prefs) -> dict:
     return out
 
 
+# the unit status words (sizeup/cad/statushints.py PHRASES), as said on the air
+STATUS_WORDS = ("en route", "responding", "on location", "on scene", "arrived", "in service", "back in service",
+                "available", "returning", "in quarters", "out of service", "staging", "in the area")
+# a few of them in radio phrasing, with a unit of each kind: the phrase as a whole is what AWS hears ("Engine 61 en route")
+STATUS_SAID_BY = {"E61": "en route", "E62": "on location", "L31": "responding", "R41": "en route", "2391": "on location",
+                  "2394": "en route", "TL2": "in service", "E64": "in the area"}
+
+
 def vocabulary_suggestions(units: dict, streets: list[str], top_streets: int = 60) -> list[str]:
     """The seed phrase list: every unit's spoken name (Engine 60, Ladder 31, Tower Ladder 2, 23 98 ...),
     PCFD words, and the busiest street names of Port Chester / Rye Brook as said ("North Main Street")."""
@@ -150,11 +158,18 @@ def vocabulary_suggestions(units: dict, streets: list[str], top_streets: int = 6
                       "flaps", "flap issues", "landing gear", "runway one six", "runway three four", "mile final",
                       "landed without incident",
                       # #365: Fire/EMS 15 heard "carbon dioxide"; C.O. is AWS's spelling of an acronym said letter by letter
-                      "carbon monoxide", "carbon monoxide detector activation", "C.O. detector", "C.O. alarm"]
+                      "carbon monoxide", "carbon monoxide detector activation", "C.O. detector", "C.O. alarm",
+                      # a unit's status as it says it (2026-11-10: clear "en route" came back "is fine", "around";
+                      # "on location" as "on vacation"): the words alone here, in radio phrasing below
+                      *STATUS_WORDS]
     for code, u in units.items():
         s = (u or {}).get("spoken") if isinstance(u, dict) else None
         if s and s not in out:
             out.append(str(s))
+    for code, said in STATUS_SAID_BY.items():          # "Engine 61 en route", "23 91 on location" (a board's own units)
+        s = (units.get(code) or {}).get("spoken") if isinstance(units.get(code), dict) else None
+        if s and f"{s} {said}" not in out:
+            out.append(f"{s} {said}")
     for name in streets[:top_streets]:
         s = street_spoken(name)
         if s not in out:

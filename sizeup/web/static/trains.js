@@ -480,6 +480,27 @@ window.TrainLayer = (() => {
     if (d && d.catenary) n.title = d.catenary;
     return n;
   }
+  // an alert's full words for a tooltip: its status, header and text (plain text from the hub, #385)
+  const alertFull = (a) => [`${a.status ? `${a.status}: ` : ""}${a.header || ""}`, a.text || ""].filter(Boolean).join("\n");
+  // "Line: delays · 4:38p X–GCT 20-25 min late · +1": the first alert in a few words (its full text on hover), the
+  // count of the rest (their full text on hover)
+  function alertRow(k, label, list, isLine) {
+    const a = list[0], st = (a.status || "").toLowerCase().replace(/^some\s+/, "");
+    const said = isLine && a.about ? (a.brief || "").replace(/ \([^)]*\)$/, "") : a.brief;     // another train's: no cause
+    const what = [isLine && st && st !== "good service" ? st : "", [isLine ? a.about : "", said || "see alert"].filter(Boolean).join(" ")]
+      .filter(Boolean).join(" \u00b7 ");
+    const text = `${label}: ${what}`, rest = list.slice(1);
+    return { k, cls: "tr-alert", text, title: alertFull(a), el: () => {
+      const n = h("div", "tr-alert");
+      n.append(h("span", "", text));
+      if (rest.length) {
+        const more = h("span", "tr-more", `+${rest.length}`);
+        more.title = rest.map(alertFull).join("\n\n");
+        n.append(" \u00b7 ", more);
+      }
+      return n;
+    } };
+  }
   function rowEl(r) {                         // a box line: an element (its words, tooltip, class)
     const n = r.el ? r.el() : h("div", r.cls || "", r.text);
     if (r.title) n.title = r.title;
@@ -909,15 +930,18 @@ window.TrainLayer = (() => {
       if (place) rows.push(place);
       rows.push({ k: "pos", text: [pos.word, w.old ? "" : mph(t), fixAge(t, d)].filter(Boolean).join(" \u00b7 ") });   // old: "Predicted · 17 s ago"
       if ((tt.car_loads || []).length) rows.push({ k: "bars", sig: JSON.stringify([tt.car_loads, tt.occupancy, tt.pax]), el: () => carBars(tt) });
-      const al = d.alerts || [];
-      if (al.length) {
-        rows.push({ k: "alert", cls: "tr-alert", text: `${al[0].status ? `${al[0].status}: ` : ""}${al[0].header}${al.length > 1 ? ` (+${al.length - 1})` : ""}`,
-                    title: al.map((x) => `${x.status ? `${x.status}: ` : ""}${x.header}`).join("\n") });
-      }
+      // Metro-North's alerts (#385): the hub's plain text (never HTML). Those that name this train as "This train"; the
+      // rest as the line's, labelled with the train they name; one line each, the full text and the others on hover
+      const mine = tt.alerts || [], heads = new Set(mine.map((x) => x.header));
+      const own = d.branch_alerts && tt.branch && d.branch_alerts[tt.branch];      // its own branch's, else the New Haven Line's
+      const line = (own || d.alerts || []).filter((x) => !heads.has(x.header));
+      if (mine.length) rows.push(alertRow("alert-this", "This train", mine, false));
+      if (line.length) rows.push(alertRow("alert-line", "Line", line, true));
       rows.push(cat);
       const foot = [gps ? `MTA TrainTime (${(tt.loc_src || "").toLowerCase() || "?"})` : "MTA", hm(gps ? tt.loc_at : d.at, true)].filter(Boolean).join(" \u00b7 ");
       const tip = [pos.why, gps ? "Position, speed and cars: MTA TrainTime" : "Position: MTA GTFS-realtime; cars: MTA TrainTime",
-                   "TrainTime is an undocumented MTA API; GTFS-realtime is used when it fails", d.catenary, credit].filter(Boolean).join("\n");
+                   "TrainTime is an undocumented MTA API; GTFS-realtime is used when it fails",
+                   ...mine.map((a) => `This train. ${alertFull(a)}`), ...line.map((a) => `Line. ${alertFull(a)}`), d.catenary, credit].filter(Boolean).join("\n");
       return { sub, rows, foot, tip };
     }
     // follow a train (mapfollow.js): centred, zoomed in to its cars, kept centred as it glides; the chip at the foot

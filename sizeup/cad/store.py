@@ -804,6 +804,14 @@ class Store:
         was = [h["name"] for h in held]
         return f"Command: {name}" + (f" (from {', '.join(was)})" if was else ""), was
 
+    @staticmethod
+    def dispatch_not_after_status(db, aid: int) -> None:
+        """An assignment's dispatch time never after its own earliest status time on the call: a unit can't respond
+        before it is dispatched (a unit put on a call by its own "responding" heard on the radio was dispatched when
+        added, ~seconds after the transmission it was added for)."""
+        db.execute("UPDATE assignments SET dispatched_at = MIN(dispatched_at, COALESCE(enroute_at, dispatched_at), "
+                   "COALESCE(onscene_at, dispatched_at)) WHERE id = ? AND dispatched_at IS NOT NULL", (aid,))
+
     def set_unit_status(self, uid: int, status: str, operator: str = "", note: str = "", why: str = "") -> dict:
         """The status dropdown. A free or out-of-service status clears the unit off its event;
         dispatched, en route and on scene stamp the assignment's times. why: where the status came from, after the
