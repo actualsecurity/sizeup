@@ -1362,7 +1362,7 @@ class App:
                     self._alarm_now(t)      # before speech-to-text: the alarm doesn't wait for the words
                 if pc.stt:
                     self._stt(t, pc.audio, eng, key)
-                else:                   # a sub-0.3 s key-up with no voice: kept, not transcribed
+                else:                   # under 0.25 s, or under 0.3 s with no voice (p25.MIN_STT_S): kept, not transcribed
                     t.raw, t.confidence, t.status, t.model = "", None, "no_speech", ""  # type: ignore[attr-defined]
                     t.stt = ""  # type: ignore[attr-defined]
                     self._transcribed(t)
