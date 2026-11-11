@@ -215,7 +215,10 @@ window.MapFollow = (() => {
       const sub = v.sub || "", sEl = sub !== this.subText && info.querySelector ? info.querySelector(".ml-subtitle") : null;
       if (sEl) { sEl.textContent = sub; this.subText = sub; }
       const tip = v.tip || "", b = tip !== this.tipText && f && f.querySelector ? f.querySelector(".help") : null;
-      if (b) { b.title = tip; if (b.dataset) b.dataset.help = tip; this.tipText = tip; }
+      if (b) {                                                        // (an open popup's words with it, #379)
+        if (window.Help && Help.update) Help.update(b, tip); else { b.title = tip; if (b.dataset) b.dataset.help = tip; }
+        this.tipText = tip;
+      }
     }
     stop() {
       if (!this.timer) return;

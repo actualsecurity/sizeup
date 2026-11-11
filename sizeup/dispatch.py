@@ -153,10 +153,65 @@ def _road(s: str, type_phrase: str = "") -> str:
     return " ".join(rest) if len(rest) >= 2 else ""
 
 
-def parse(text: str) -> Dispatch:
+# "Engine 59/63", "Engines 59 / 63 / 65": one unit word for each number (read before "/" is normalised away).
+UNIT_WORDS = ("tower ladder", "engine", "ladder", "tower", "rescue", "squad", "truck", "ambulance", "medic", "tanker")
+UNIT_SLASH = re.compile(rf"\b({'|'.join(UNIT_WORDS)})s?\s+(\d{{1,4}}(?:\s*/\s*\d{{1,4}})+)\b", re.I)
+STREET_WORDS = {"street", "st", "avenue", "ave", "av", "road", "rd", "place", "pl", "lane", "ln", "drive", "dr", "court",
+                "ct", "boulevard", "blvd", "terrace", "ter", "parkway", "pkwy", "highway", "hwy", "way", "circle", "cir",
+                "plaza", "turnpike", "tpke", "route", "rt"}
+
+
+def _unit_norm(u: str) -> str:
+    """'Engine 61' / 'E-61' -> 'E61' (as sizeup/cad/sources.py norm_unit)."""
+    parts = re.findall(r"[A-Za-z]+|\d+", u or "")
+    return "".join(p[0].upper() if len(p) > 2 else p.upper() for p in parts if p.isalpha()) + \
+        "".join(p for p in parts if p.isdigit())
+
+
+def _unit_slash(text: str, known=None) -> str:
+    """"Engine 59/63" -> "Engine 59, Engine 63", only when every number after the first is a configured unit of that
+    kind (known: the roster, as written anywhere) and no street word follows ("Engine 61 / 25 Example Street": a unit,
+    then the house number). No roster: left as it is."""
+    have = {_unit_norm(k) for k in known or () if isinstance(k, str)}
+
+    def one(m: re.Match) -> str:
+        word, nums = m.group(1), re.split(r"\s*/\s*", m.group(2))
+        after = re.findall(r"[a-z]+", re.split(r"[,.;:]", text[m.end():m.end() + 60])[0].lower())[:3]
+        if not have or any(w in STREET_WORDS for w in after) or \
+                not all(_unit_norm(f"{word} {n}") in have for n in nums[1:]):
+            return m.group(0)
+        return ", ".join(f"{word} {n}" for n in nums)
+    return UNIT_SLASH.sub(one, text)
+
+
+def split_joined(units, known) -> list[str]:
+    """Run-together apparatus numbers ("Engine 6158": Engine 61 and Engine 58 read as one) split in two, only when the
+    whole is not a known unit, the word is an apparatus word (UNIT_WORDS, or E / L / TL / R: never "EMS 6158") and
+    exactly one split gives two known units of the same kind (two digits a side at least). known: the configured apparatus, as written anywhere ("E61", "Engine 61"): compared as norm(). Order kept,
+    no repeats."""
+    norm = _unit_norm
+    have = {norm(k) for k in known or () if isinstance(k, str)}
+    out: list[str] = []
+    for u in units or ():
+        m = re.fullmatch(r"\s*(.*?\D)\s*(\d{4,8})\s*", str(u))
+        parts = [u]
+        if m and norm(u) not in have and m.group(1).strip().lower() in (*UNIT_WORDS, "e", "l", "tl", "r"):
+            word, n = m.group(1).strip(), m.group(2)
+            splits = [(n[:i], n[i:]) for i in range(2, len(n) - 1) if n[i] != "0"
+                      and norm(f"{word} {n[:i]}") in have and norm(f"{word} {n[i:]}") in have]
+            if len(splits) == 1:
+                parts = [f"{word} {x}" if len(word) > 2 else f"{word}{x}" for x in splits[0]]
+        for x in parts:
+            if x not in out:
+                out.append(x)
+    return out
+
+
+def parse(text: str, known=None) -> Dispatch:
+    """known: the configured apparatus (the station's roster), for "Engine 59/63" (_unit_slash)."""
     d = Dispatch(text)
     # "16-10-191-22": 60 Control's run number, not engines (the normalising below turns "-" into spaces).
-    t = _spoken_digits(_norm(re.sub(r"\b\d{1,3}(?:\s*-\s*\d{1,3}){3,}(?=\s*[,.])", " , ", text)))
+    t = _spoken_digits(_norm(_unit_slash(re.sub(r"\b\d{1,3}(?:\s*-\s*\d{1,3}){3,}(?=\s*[,.])", " , ", text), known)))
     t = re.sub(r"\b(\d+)(?:\s+\1\b)+", r"\1", t)          # "42 42 stratton road": a repeat, not two numbers
     for name, phrases in DEPARTMENTS.items():
         if any(p in t for p in phrases):

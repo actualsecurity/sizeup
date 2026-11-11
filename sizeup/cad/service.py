@@ -194,6 +194,14 @@ class Cad:
         if released:
             log(f"CAD: released {len(released)} unit(s) left on a closed call's status: "
                 + ", ".join(f"{r['unit']} {r['from']} -> {r['to']} ({r['number'] or 'no number'})" for r in released))
+        self.store.quarters_status = lambda: self.eta.quarters_status    # where a released placeholder goes (AQ)
+        freed = self.store.release_placeholders()    # a department's placeholder its unit already signed on for: back
+        if freed:                                    # in quarters (the rule from now on, for calls open from before)
+            log(f"CAD: released {len(freed)} department placeholder(s) a unit of theirs signed on for")
+        nodept = self.lists.no_department()
+        if nodept:                                   # never release a placeholder: no department to match
+            log(f"CAD: {len(nodept)} board unit(s) name no department (never release a department placeholder): "
+                + ", ".join(nodept[:10]))
         if runcards.seed(self.store, fill=bool(self.store.migrated)):
             log("CAD: seeded default run cards (a stand-in: edit them to PCFD policy)")
         self.radios = Registry(self.store, s.radio_seed or None)
@@ -232,6 +240,7 @@ class Cad:
         # Full department or specific units (#370, sizeup/cad/scope.py): from the page, then the feed
         self.scope = Scope(self)
         self.sources.on_page_moved = self.scope.move
+        self.sources.on_page_swept = self._page_swept       # ... and enriches it as a page that joined does
         # FG1 radio IDs nobody has named yet (#163): "Radio 1234 (MDC) on FG1: who is this?" on the console.
         self.newids = NewIds(self)
         # The emergency button and a mayday heard on our fire channels (sizeup/cad/alarms.py, #128): the app feeds it
@@ -286,6 +295,9 @@ class Cad:
         # (once, on first use); "N Main St / Westchester Ave" in the location box. None: not here.
         self.cross_source: Callable[[], object] | None = None
         self._cross_ix = None
+        # street_source() -> {town: [street name]}: the gazetteer's streets, for a page's misheard street (Sources:
+        # snap_street, read once). None: no street list, no snapping.
+        self.street_source: Callable[[], dict] | None = None
         self._cross_lock = threading.Lock()      # its own: the PlaceIndex is built with it (under _place_lock)
         self._details: dict[tuple, dict] = {}
         self._place_lock = threading.Lock()
@@ -853,7 +865,7 @@ class Cad:
     def recommend(self, iid: int, body: dict) -> dict:
         inc = self.store.incident(iid)
         if not inc["emergency"]:
-            on = [u["name"] for u in self.store.units() if u["incident_id"] == iid]
+            on = [u["name"] for u in self.store.units() if iid in u["incident_ids"]]
             return {"card": None, "card_label": "", "units": [], "unfilled": [], "already": on,
                     "note": "Non-emergency: no run card, no dispatch. Attach units if needed."}
         typ = _text(body, "type", 24) or inc["type"]
@@ -896,6 +908,9 @@ class Cad:
         agency = [by_id[i]["name"] for i in ids if by_id[i]["response"] == "agency"]
         if dispatching and agency:
             raise CadError(f"Agency units: attach, don't dispatch ({', '.join(agency)})")
+        ph = [by_id[i]["name"] for i in ids if by_id[i]["placeholder"]]
+        if ph:                                           # the county's, never sent or attached by hand
+            raise CadError(f"A department placeholder is assigned by the county only: {', '.join(ph)}")
         cant = [by_id[i]["name"] for i in ids if self.lists.role(by_id[i]["status"]) == "oos"
                 and not (by_id[i]["response"] == "agency" and not dispatching)]
         if cant:
@@ -1048,8 +1063,10 @@ class Cad:
         the event ('Port Chester and Rye Brook Fire', or 'Rye Brook Fire' if only theirs). Tones: the
         departments of the units sent (an upgrade or full response: also everyone on the event)."""
         L = self.lists
+        units = [u for u in units if not L.placeholder(u["name"])]          # a placeholder is never said, nor toned
         sending = {u["id"] for u in units}
-        on = [u for u in self.store.units() if u["incident_id"] == inc["id"] and u["id"] not in sending]
+        on = [u for u in self.store.units() if u["incident_id"] == inc["id"] and u["id"] not in sending
+              and not L.placeholder(u["name"])]
         joint, own = self._departments(units + on)
         lead = dispatcher.lead_in(self.s.department, joint, own, full, L.wording, L.lead_in_joint_only)
         t_joint, t_own = self._departments(units + on if kind == "upgrade" or full else units)
@@ -1064,13 +1081,14 @@ class Cad:
         is already on the event, by status (already_statuses), leaving out the units being sent."""
         L = self.lists
         lead, tones = self._plan(inc, units, kind, full)
+        units = [u for u in units if not L.placeholder(u["name"])]          # a department placeholder is never said
         already = []
         if kind == "add_on":
             sending = {u["id"] for u in units}
             order = [r["unit_id"] for r in self.store.q("SELECT unit_id FROM assignments WHERE incident_id = ? AND "
                                                         "cleared_at IS NULL ORDER BY id", (inc["id"],))]
             on = sorted((u for u in self.store.units() if u["incident_id"] == inc["id"] and u["id"] not in sending
-                         and u["response"] != "agency"),                  # EMS / PD are never said on the air
+                         and u["response"] != "agency" and not u["placeholder"]),   # EMS / PD, placeholders: never said
                         key=lambda u: order.index(u["id"]) if u["id"] in order else len(order))   # in the order sent
             for st in L.already_statuses:
                 names = [u["spoken"] or u["name"] for u in on if u["status"] == st]
@@ -1233,9 +1251,12 @@ class Cad:
         if status not in ok:
             raise CadError("status: " + " or ".join(f"{c} ({L.name('unit_statuses', c)})" for c in ok))
         op = _text(body, "operator", OPERATOR_MAX, required=True)
-        here = [u["name"] for u in units if u["incident_id"] == iid]
+        here = [u["name"] for u in units if iid in u["incident_ids"]]
         if here:
             raise CadError(f"Already on this event: {', '.join(here)}")
+        ph = [u["name"] for u in units if u["placeholder"]]
+        if ph:
+            raise CadError(f"A department placeholder is never {L.name('unit_statuses', status)}: {', '.join(ph)}")
         agency = [u["name"] for u in units if u["response"] == "agency" and status not in L.unit_statuses_for(u["name"], u["board"])]
         if agency:
             raise CadError(f"Another agency's unit, not {L.name('unit_statuses', status)}: {', '.join(agency)}")
@@ -1289,7 +1310,10 @@ class Cad:
     def unit_status(self, uid: int, body: dict) -> dict:
         status = _text(body, "status", 40, required=True)
         op = _text(body, "operator", OPERATOR_MAX)
-        was = self.store.unit(uid)["incident_id"]
+        u = self.store.unit(uid)
+        if u["placeholder"]:
+            return self._placeholder_status(u, status, body, op)
+        was = u["incident_id"]
         self._by_hand(was, [uid], op)                    # a person's, before the write (#311 L4)
         if "incident_id" in body and body["incident_id"] is not None:   # the board's "which call?" answer
             try:
@@ -1304,6 +1328,28 @@ class Cad:
             self._by_hand(i, [uid], op)
         if was and out.get("incident_id") != was:
             self.auto.recheck_close([was])               # the last unit off a call that waits to close (#311 N1)
+        return out
+
+    def _placeholder_status(self, u: dict, status: str, body: dict, op: str) -> dict:
+        """A department placeholder's status from a person: in quarters only (the county assigns it; never Dispatched by
+        hand). From a call's unit row ("call"): off that call only; from the board: off every call it is on. Checked
+        first; then each call it leaves is a person's for it (automation leaves it off) and may close now (#311 N1)."""
+        q = self.store.placeholder_free(u["name"], u["board"])
+        if status != q:
+            raise CadError(f"{u['name']} is a department placeholder, assigned by the county: "
+                           f"{self.lists.name('unit_statuses', q)} only")
+        call = body.get("call")
+        try:
+            call = int(call) if call is not None else None
+        except (TypeError, ValueError):
+            raise CadError("call: a number") from None
+        if call and call not in u["incident_ids"]:
+            raise CadError(f"{u['name']} is not on this call")
+        ids = [call] if call else list(u["incident_ids"])
+        for i in ids:                                    # a person's, before the write (#311 L4)
+            self._by_hand(i, [u["id"]], op)
+        out = self.store.set_unit_status(u["id"], status, op, call=call)
+        self.auto.recheck_close(out.get("cleared_from") or ids)
         return out
 
     def unit_station(self, uid: int, body: dict) -> dict:
@@ -1725,6 +1771,11 @@ class Cad:
             address = heard or geo.get("label") or ""
         alts = [] if sure else [{k: a.get(k) for k in ("label", "lat", "lon", "town", "confidence", "why")}
                                 for a in (geo.get("alts") or []) if a.get("label") and a.get("lat") is not None][:4]
+        towns = self._page_towns(inc)
+        snap = self._snap_heard(heard, towns) if heard and not sure else None
+        if snap is not None:                           # a misheard street: the map's spelling shown, its point a reading to
+            if snap.get("alt") and not any(a["label"] == snap["alt"]["label"] for a in alts):   # pick; matched as heard
+                alts = [snap["alt"], *alts][:4]
         cross = (inc.cross_street or "").title()
         if sure and geo.get("checked") == "all" and len(geo.get("crosses") or []) >= 2:
             cross = " and ".join(geo["crosses"][:2])          # as the map names them: "Clinton St and W William St"
@@ -1746,6 +1797,8 @@ class Cad:
                          f"{geo.get('confidence', 0):.2f}: pick on the card)")
             else:
                 where = " (not found on the map)"
+            if snap is not None:
+                where += f"; the map's street: {snap['address']}"
             facts.append(f"location as heard: {heard}{where}")
         if inc.time_out:
             facts.append(f"county time out {inc.time_out}")
@@ -1773,7 +1826,8 @@ class Cad:
         if old is None:
             # The paging decoder is the backup (#297, sizeup/cad/sources.py): it attaches to the incident a feed has
             # for it, else makes its own at once (never held), noted "possibly the same as" a near one it may not join.
-            data = {"f": f, "ref": ref, "pages": list(getattr(inc, "pages", []) or []), "type_heard": inc.incident_type}
+            data = {"f": f, "ref": ref, "pages": list(getattr(inc, "pages", []) or []), "type_heard": inc.incident_type,
+                    "towns": list(towns), "lines": lines}
             at = (inc.page_starts or [inc.opened])[0]
             how, got = self.sources.page(str(inc.id), at, f["address"] or heard, list(inc.units or []), data)
             if how == "attached":
@@ -1794,7 +1848,8 @@ class Cad:
         at = (inc.page_starts or [inc.opened])[0]
         if old["source_ref"] == ref and old["status"] == "queued" and not self.sources._has_feed(old["id"]):
             # its own card, made from less than it says now (the tones half, a first reading): matched again (#365)
-            data = {"f": f, "ref": ref, "pages": list(getattr(inc, "pages", []) or []), "type_heard": inc.incident_type}
+            data = {"f": f, "ref": ref, "pages": list(getattr(inc, "pages", []) or []), "type_heard": inc.incident_type,
+                    "towns": list(towns), "lines": lines}
             how, got = self.sources.rematch_page(str(inc.id), old["id"], at, f["address"] or heard,
                                                  list(inc.units or []), data)
             if how == "attached":
@@ -1822,6 +1877,60 @@ class Cad:
             fill.update(type=typ, subtype=sub, type_note=note)
         return self.store.update_incident(old["id"], fill, log=False)
 
+    @staticmethod
+    def _page_towns(inc) -> tuple[str, ...]:
+        """The towns a page's tones name; our tones: the whole district (sizeup/geo/pagegeo.py's rule). Its implied
+        town when it names none (Sources: a misheard street)."""
+        from sizeup.geo.pagegeo import DISTRICT, home_towns
+        towns = home_towns([*(getattr(inc, "tone_departments", None) or []), *(getattr(inc, "departments", None) or [])])
+        if set(towns) & set(DISTRICT):
+            towns = (*towns, *(t for t in DISTRICT if t not in towns))
+        return tuple(towns)
+
+    def _snap_heard(self, heard: str, towns: tuple[str, ...]) -> dict | None:
+        """A page's heard location whose street the map spells otherwise ("220 Samplewerth Place"): {"address": with the
+        gazetteer's street in the page's towns ("220 Sampleworth Pl, Rye Brook"), "alt": its map point as a reading to
+        pick, when the gazetteer places it in one of those towns}; None unless exactly one known street is near it
+        (sources.snapped). Shown only: the card keeps the heard location (matching uses it), never a pin by itself
+        (#176: unconfirmed stays unconfirmed)."""
+        from sizeup.cad.sources import snapped
+        self.sources._towns()
+        fixed = snapped(heard, towns) if towns else ""
+        if not fixed:
+            return None
+        out: dict = {"address": fixed[:200]}
+        try:
+            m = next(iter(self._ranked(fixed)), None)
+        except Exception:  # noqa: BLE001 - no reading: the spelling alone
+            m = None
+        if m and m.get("lat") is not None and m.get("confidence", 0) >= 0.6 and m.get("town") in towns:
+            out["alt"] = {"label": m["label"], "lat": m["lat"], "lon": m["lon"], "town": m["town"],
+                          "confidence": m["confidence"], "why": "the street as the map spells it"}
+        return out
+
+    def _page_swept(self, card: dict, iid: int, rec: dict) -> None:
+        """A page's card a feed's event took (Sources._sweep_pages): as a page that joined it (_page_enrich): its
+        transcript lines on the timeline (kind "tones", once each), its cross streets when the incident has none and no
+        person set its location, and in 60 Control mode its units (AutoDispatch.on_page). Its scope moved already
+        (Scope.move)."""
+        lines = [str(x)[:2000] for x in rec.get("lines") or []] or [
+            x for x in (card.get("remarks") or "").splitlines() if x.startswith("60 Control page ")]
+        cur = self.store.incident(iid)
+        have = {e["text"] for e in self.store.q("SELECT text FROM events WHERE incident_id = ? AND kind = 'tones'", (iid,))}
+        new = [x for x in dict.fromkeys(lines) if x not in have]
+        if new:
+            with self.store.tx() as db:
+                for x in new:
+                    self.store._event(db, iid, "tones", x, "Paging", at=self.clock())
+        cross = (card.get("cross_street") or "").strip()
+        if (cross and not (cur["cross_street"] or "").strip() and cur["status"] in ("queued", "pending", "active")
+                and "location" not in self.sources.manual(iid)):
+            try:
+                self.store.update_incident(iid, {"cross_street": cross}, operator="Paging", log=False)
+            except CadError:
+                pass
+        self.auto.on_page(iid, list(rec.get("units") or []), rec.get("at") or self.clock())
+
     def _page_scope(self, iid: int, inc, note: bool = True) -> tuple[str, bool]:
         """Full department or specific units, as the page says it (#370: the page's stands over a feed's): (the
         feed's label when it says otherwise ("units"), else ""; whether the page's reading is new there). note: that
@@ -1845,7 +1954,7 @@ class Cad:
         depts = list(dict.fromkeys([*(getattr(inc, "tone_departments", None) or []), *(getattr(inc, "departments", None) or [])]))
         feed, _ = self._page_scope(iid, inc, note=False)
         texts = [x[:2000] for x in lines]
-        base = self.scope.line(iid) or scope_mod.page_line(depts, scope_mod.latest_units(inc),
+        base = self.scope.line(iid) or scope_mod.page_line(depts, scope_mod.latest_units(inc, self.scope.roster()),
                                                            getattr(inc, "tone_departments", ()), inc.incident_type)
         if base and not any(x == base or x.startswith(base + " · feed: ") for x in have):   # once per reading
             texts.append(base + (f" · feed: {feed}" if feed else ""))   # (feed: "" when that disagreement is said)
