@@ -131,6 +131,8 @@ POST /api/cad/radio-id                    {system: mdc | fleetsync, radio_id, un
                                           new FG1 radio is (#163, the state's radio_ids; sizeup/cad/newids.py): unit
                                           names it (its transmissions go on that unit's events), label just says who,
                                           ignore stops asking; dispatchers and admins, only for an ID nobody has set
+GET  /api/cad/comms/activity?source=&hours=   per-minute activity per source (#409: an encrypted talkgroup's key-ups
+                                          and which radios keyed, a week at most); admins only (ADMIN_READS)
 GET  /api/cad/comms?unit=&channel=&event=&pcfd=1&emergency=1&since=&until=&main_limit=&limit=&rev=
                                           every transmission (newest first) with its rig, radio ID, events, the
                                           emergency button and its alarm (emergency=1: only those, #128); Main
@@ -138,9 +140,9 @@ GET  /api/cad/comms?unit=&channel=&event=&pcfd=1&emergency=1&since=&until=&main_
                                           The Radio page's views (#415): any of ?view=ours|police|ems|transit|air|all
                                           ?system= ?group= ?source= ?service= ?tier= ?dept= ?safety=1 ?mute= ?before=
                                           ?changed= ?at= gives one page {rows, older, newer, next, cursor, reload}
-                                          (Cad.comms_query). A police row's words and audio: only to someone signed in
-GET  /api/cad/comms/sources               the Radio page's tree: {sources: [{key, system, group, name, service, tier,
-                                          ours, last, live, counts: calls per minute, the last hour}]} (Cad.comms_sources)
+                                          (Cad.comms_query). Another system's rows: only to a viewer who may see them
+GET  /api/cad/comms/sources?rev=          the Radio page's tree: {live, sources: [{key, system, group, name, service,
+                                          tier, ours, last, counts: [[minutes ago, calls]], emergency}]} (Cad.comms_sources)
 GET  /api/cad/feed?limit=&tg=307,333      the pinned 60 Control feed: newest transmissions on the incident
                                           talkgroup(s), pc = why it is talking to us (sizeup/cad/feed.py)
 POST /api/cad/incident/<id>/link          {traffic_id, operator}  put a transmission on the event (why manual)
@@ -255,6 +257,7 @@ DS_READERS = ("admin", "dispatcher")      # who may see Settings > Data sources 
 ADMIN_READS = {
     "/api/cad/notify": "the push topics' names are secret",                  # Settings > System > Push notifications
     "/api/cad/health": "station health is for admins (Settings > Health)",   # #203: off the header, on an admin tab
+    "/api/cad/comms/activity": "radio activity (which radios keyed) is for admins",   # #409: encrypted talkgroups
 }
 
 # Who may POST what (enforced only with a verified sign-in, see above): "dispatch" = dispatchers and
@@ -640,6 +643,12 @@ class CadApi:
         self.cad.settings.note(str(body.get("operator") or ""), "system", f"datasources/{key}", f"last fetched {was}", src.action)
         return {"ok": True, "running": row["running"], "source": row}
 
+    @staticmethod
+    def sees_context(who) -> bool:
+        """Whether this viewer may see another P25 system's traffic (police, transit: context). TODO(#419): its central
+        gate (may_see_context) decides this for every route; until it is merged in here: someone signed in."""
+        return who is not None and bool(getattr(who, "email", ""))
+
     def get(self, path: str, query: str, who=None) -> tuple[int, bytes, str]:
         if (no := self.read_refused(path, who)) is not None:
             return no
@@ -675,9 +684,17 @@ class CadApi:
             if path == "/api/cad/radios":
                 return _json(200, self.cad.radio_registry())
             if path == "/api/cad/comms":
-                return _json(200, self.cad.comms_query(parse_qs(query), signed=who is not None and bool(who.email)))
+                return _json(200, self.cad.comms_query(parse_qs(query), context=self.sees_context(who)))
             if path == "/api/cad/comms/sources":
-                return _json(200, self.cad.comms_sources())
+                return _json(200, self.cad.comms_sources(parse_qs(query), context=self.sees_context(who)))
+            if path == "/api/cad/comms/activity":      # per-minute activity per source (#409); ?source=&hours= (24)
+                q = parse_qs(query)
+                try:
+                    hours = min(24.0 * 90, max(0.1, float((q.get("hours") or ["24"])[0])))
+                except ValueError:
+                    hours = 24.0
+                return _json(200, {"rows": self.cad.comms.activity_rows(self.cad.clock() - hours * 3600,
+                                                                        (q.get("source") or [""])[0][:80])})
             if path == "/api/cad/feed":
                 return _json(200, self.cad.feed_query(parse_qs(query)))
             if path == "/api/cad/rigs":

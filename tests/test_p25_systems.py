@@ -598,7 +598,7 @@ def test_rows_from_before_get_their_source_by_the_county_system(tmp_path):
     s.db.commit()
     s.db.close()
     db = sqlite3.connect(path)                       # as it was before this release: none of the columns
-    for index in ("source_start", "service_start", "system_start", "safety"):     # the Radio page's too (#415)
+    for index in ("source_start", "service_start", "system_start", "dept_start", "safety"):     # the Radio page's too (#415)
         db.execute(f"DROP INDEX radio_traffic_{index}")
     for col in cols:
         db.execute(f'ALTER TABLE radio_traffic DROP COLUMN "{col}"') if col != "source" else None
@@ -804,7 +804,7 @@ def test_the_same_files_written_again_restart_nothing_and_it_runs_at_a_lower_pri
     _county, mrrs, pop, _logs, d = service(tmp_path)
     ask_system(tmp_path, {0: "pd-a"})
     assert mrrs.step(100.0)["state"] == "ok"
-    assert pop.started[0].kw["preexec_fn"] is trunkrecd._lower_priority
+    assert "preexec_fn" not in pop.started[0].kw            # (never code between fork and exec: threads)
     (d / "config.json").write_text((d / "config.json").read_text())           # an update installs the same file again
     (d / "talkgroups.csv").write_text((d / "talkgroups.csv").read_text())
     assert mrrs.step(101.0)["state"] == "ok" and len(pop.started) == 1
@@ -928,3 +928,111 @@ def test_old_airband_rows_and_a_cut_short_migration_are_put_right(tmp_path):
     c.store.db.commit()
     from sizeup.cad.store import Store
     assert Store(str(tmp_path / "cad.sqlite")).one("SELECT source FROM radio_traffic")["source"] == "fm:HPN Tower"
+
+
+# -- the second review of #419 -----------------------------------------------------------------------------------------------
+
+
+def test_a_running_system_yields_at_once_when_the_county_is_given_its_dongle(tmp_path):
+    county, mrrs, pop, logs, _d = service(tmp_path)
+    nice = []
+    mrrs.setpriority = lambda which, pid, n: nice.append((pid, n))
+    ask_system(tmp_path, {0: "pd-a", 1: "pd-b"})
+    assert mrrs.step(100.0)["state"] == "ok" and len(pop.running) == 1
+    pd = pop.started[0]
+    assert nice == [(pd.pid, 5)]                                    # niced by its pid, after it started
+    ask_county(tmp_path, sdr="pd-a")                                # Settings: Fire/EMS 15 now on one of MRRS's dongles
+    st = mrrs.step(101.0)                                           # MRRS's state still names it: it stops anyway
+    assert pd.code is not None and st["state"] == "held" and "Fire/EMS 15" in st["detail"]
+    assert not (claims.DIR / "pd-a.json").exists() and not (claims.DIR / "pd-b.json").exists()
+    assert county.step(101.5)["state"] == "ok" and len(pop.running) == 1 and pop.running[0] is not pd
+    assert json.loads((claims.DIR / "pd-a.json").read_text())["mode"] == "Fire/EMS 15"
+    assert mrrs.step(102.0)["state"] == "held" and len(pop.running) == 1          # never two programs on one dongle
+    ask_system(tmp_path, {1: "pd-b"}, seq=2)                        # sizeup catches up: MRRS on what is left
+    assert mrrs.step(103.0)["state"] == "ok" and len(pop.running) == 2
+
+
+def test_a_fire_jobs_dongle_goes_to_another_system_only_with_a_confirm(two):
+    app, _said, _logs = two
+    app.start()
+    assert app.assign["v4"] == "FG1" and app.assign["pd-a"] == "Fire/EMS 15"
+    for sd, job in (("v4", "FG1"), ("pd-a", "Fire/EMS 15")):
+        why = app.set_mode("MRRS 770", sd)
+        assert why.startswith("confirm: ") and job in why and app.assign[sd] == job      # nothing moved
+    assert app.fire_job("FG1") and app.fire_job("Fire/EMS 15") and not app.fire_job("MRRS 770") and not app.fire_job("Off")
+    assert app.set_mode("MRRS 770", "pd-b") is None                 # a free dongle: one click, as any job
+    assert app.set_mode("MRRS 773", "v4", confirm=True) is None and app.assign["v4"] == "MRRS 773"
+    assert app.set_mode("FG1", "v4") is None                        # back to a fire job: no confirm asked
+    src = (ROOT / "sizeup" / "web" / "server.py").read_text()
+    assert 'set_mode(str(body["mode"]), sdr_arg, confirm=True) if body.get("confirm") is True' in src
+
+
+def test_lists_a_person_edits_refuse_a_context_talkgroup_and_the_readers_leave_context_rows(two, tmp_path):
+    from sizeup.cad import feed, statushints
+    from sizeup.cad.lists import ListsError
+    from sizeup.cad.store import CadError
+    app, _said, _logs = two
+    assert PD in sourcekeys.context_talkgroups() and 307 not in sourcekeys.context_talkgroups()
+    f = tmp_path / "lists.json"
+    lists = type("L", (), {"path": str(f)})()
+    f.write_text(json.dumps({"status_hints": {"talkgroups": [307, PD]}}))
+    with pytest.raises(ListsError, match="9211 is another P25 system's"):
+        statushints.load_hint_cfg(lists, ("FG1",), (307, 333))
+    f.write_text(json.dumps({"comms_feed": {"talkgroups": [301, EMS]}}))
+    with pytest.raises(ListsError, match="9570 is another P25 system's"):
+        feed.load_cfg(lists)
+    for bad in (["FG1", "tg:9211"], ["p25:mrrs:9211"]):
+        with pytest.raises(CadError):
+            app.cad.alarms.settings_op("set", {"key": "channels", "value": bad}, "op")
+    # readers, given a context row that carries one of OUR numbers and names (the worst case a guard has to hold in)
+    now = time.time()
+    row = dict(tx("307-ctx", now, "Fire/EMS 15", "", "60 Ctrl OP 6", 307, text="Mayday mayday, Engine 61 on location"),
+               system="mrrs", source_key="p25:mrrs:307", tier="alert")
+    app.cad.record_traffic(row)
+    t = app.cad.store.one("SELECT * FROM radio_traffic WHERE id = '307-ctx'")
+    assert sourcekeys.is_context(t) and not sourcekeys.is_context({"system": "westchester"}) and not sourcekeys.is_context({})
+    assert app.cad.alarms.on_traffic(dict(row, emergency=False)) is None
+    assert app.cad.alarms.channel_key(row) == "p25:mrrs:307"
+    assert app.cad.sources.consider_radio("307-ctx") is None
+    assert all(r["id"] != "307-ctx" for r in app.cad.feed.rows())
+    hints = getattr(app.cad, "hints", None) or getattr(app.cad, "statushints", None)
+    assert hints.consider("307-ctx") == [] and not app.cad.store.q("SELECT * FROM status_hints")
+    assert not app.cad.store.q("SELECT * FROM alarms") and not app.cad.store.q("SELECT * FROM incoming")
+
+
+def test_county_groups_still_show_beside_another_systems(two):
+    app, _said, _logs = two
+    tgs = app.state()["talkgroups"]
+    county = [r for r in tgs if not r["tier_set"]]
+    other = [r for r in tgs if r["tier_set"]]
+    assert {r["group"] for r in county} == {"Fire/EMS"} and {r["system"] for r in county} == {"westchester"}
+    assert {r["tg"] for r in county} == {307, 301} and len(other) == len(MRRS.talkgroups)
+    assert all(r["system"] == "mrrs" and r["tier"] in tiers.TIERS for r in other)
+    # Settings > Radios groups by the group name alone for the county's (as before: its sections, order and colours)
+    # and by system + group for another system's, so neither swallows the other
+    js = (ROOT / "sizeup" / "web" / "static" / "radio-controls.js").read_text()
+    assert 'const gk = (r.tier_set ? `${r.system}\\u0001` : "") + (r.group || "");' in js
+    assert "key: (x) => `g:${x.g}`" in js and "show(gsw, !other);" in js
+
+
+def test_no_ids_hub_caps_and_queue_stats(tmp_path):
+    from sizeup import stt
+    from sizeup.cloud.health import no_ids
+    from sizeup.cloud.station import StationLink
+    assert no_ids("Unit ID set via Control Channel, ext: 4100001.") == "Unit ID set via Control Channel, ext: #."
+    assert no_ids("src 4100001, tg 9211 (4100002)") == "src #, tg 9211 (#)"
+    assert no_ids("center 770312500 rate: 2400000 · 476075000 Hz · 770.181250 MHz · 38/sec") == \
+        "center 770312500 rate: 2400000 · 476075000 Hz · 770.181250 MHz · 38/sec"
+    assert systems.no_ids("exited (1): radio 4100001!") == "exited (1): radio #!"
+    link = StationLink.__new__(StationLink)
+    link._caps_file = tmp_path / "hub_caps.json"
+    link._set_caps(["p25_systems"])
+    assert json.loads(link._caps_file.read_text()) == ["p25_systems"] and link.hub_caps == {"p25_systems"}
+    src = (ROOT / "sizeup" / "cloud" / "station.py").read_text()
+    assert 'with_name("hub_caps.json")' in src and "self.hub_caps = frozenset(str(c) for c in json.loads(self._caps_file.read_text()))" in src
+    q = stt.SttQueue(lambda item, why: None)
+    q.put((stt.CONTEXT, None, "pd", None, "p25:mrrs:9211"))
+    q.put((stt.LIVE, None, "fire", None, "tg:301"))
+    assert q.stats()["context"] == 1 and q.stats()["live"] == 1
+    api = (ROOT / "sizeup" / "cad" / "api.py").read_text()
+    assert '"/api/cad/comms/activity": "radio activity' in api and 'if path == "/api/cad/comms/activity":' in api
