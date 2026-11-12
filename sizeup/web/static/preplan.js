@@ -35,7 +35,7 @@ window.Preplan = (() => {
   const PREF_KEY = "sizeup.preplanLayer";
   const LAYER_ZOOM = 16;
   const SRC = "pp-points", EDIT_SRC = "pp-edit";
-  const BELOW = ["cm-lines", "cm-trail", "cm-routes", "cm-route-lines", "firehouse"];
+  const BELOW = ["cm-lines", "cm-trail", "cm-routes", "firehouse"];   // cadmap.js: rigs' lines, routes, trails
   const PAD = 0.3, MOVE_MS = 250;
 
   // ---- pure helpers (tests/test_preplan.py runs these in node) ------------------------------------------------------
@@ -416,7 +416,7 @@ window.Preplan = (() => {
       if (e.marker) e.marker.getElement().replaceChildren(iconImg(k, "pp-mark-i"));
     };
     for (const [k, name] of Object.entries(KINDS)) {
-      const b = el("button", "pp-kind");
+      const b = el("button", "sm pp-kind");
       b.type = "button";
       b.dataset.kind = k;
       b.setAttribute("role", "radio");

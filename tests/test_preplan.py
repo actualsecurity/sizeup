@@ -441,7 +441,10 @@ def test_the_script_wires_the_layer_the_list_and_the_editor():
     # the layer: its own source and layers, under the route lines, rigs and pins (DOM marks above every map layer)
     assert 'addSource(SRC, ' in src and '"pp-icons"' in src and '"pp-labels"' in src
     assert "this.map.addLayer(spec, beforeId(ids()))" in src
-    assert 'const BELOW = ["cm-lines", "cm-trail", "cm-routes", "cm-route-lines", "firehouse"];' in src
+    assert 'const BELOW = ["cm-lines", "cm-trail", "cm-routes", "firehouse"];' in src
+    cm = (STATIC / "cadmap.js").read_text()
+    for lid in ("cm-lines", "cm-trail", "cm-routes"):                      # the ids are cadmap.js's own
+        assert f'id: "{lid}", type: "line"' in cm, lid
     # off by default, per viewer, in a try; a viewport by bbox at zoom 16+, again only when the map leaves it
     assert re.search(r"try \{ return localStorage\.getItem\(PREF_KEY\) === \"1\"; \} catch", src)
     assert "/api/cad/preplan?bbox=" in src and "this.map.getZoom() >= LAYER_ZOOM" in src

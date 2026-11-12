@@ -228,7 +228,7 @@
   .d-tides .wx-tides-body, .b-marine .wx-tides-body { min-inline-size: 0; }
   @container hdr (width < 1100px) { .wx-now { display: none; } }
   .ap-line { color: var(--info); overflow-wrap: anywhere; }
-  .ap-fields { display: grid; grid-template-columns: repeat(auto-fill, minmax(9rem, 1fr)); gap: var(--s-2) var(--s-3); margin: 0;
+  .ap-fields { display: grid; grid-template-columns: repeat(auto-fill, minmax(8.5rem, 1fr)); gap: var(--s-2) var(--s-3); margin: 0;
     padding: var(--s-2) var(--s-3); border: var(--bw) solid var(--line); border-radius: var(--radius); min-inline-size: 0; }
   .ap-fields[hidden] { display: none; }
   .ap-fields > legend { display: flex; align-items: center; gap: var(--s-1); padding-inline: var(--s-1); font-size: var(--fs-sm); line-height: var(--lh-sm); color: var(--text-2); }
@@ -960,7 +960,7 @@
   .pp-form { display: flex; flex-direction: column; gap: var(--s-2); padding: var(--s-2) var(--s-3); margin-block: var(--s-2); }
   .pp-form-head { display: flex; align-items: baseline; gap: var(--s-2); }
   .pp-form textarea { resize: vertical; min-block-size: var(--ctl-lg); }
-  .pp-kinds { display: grid; grid-template-columns: repeat(auto-fill, minmax(9rem, 1fr)); gap: var(--s-1); }
+  .pp-kinds { display: grid; grid-template-columns: repeat(auto-fill, minmax(8.5rem, 1fr)); gap: var(--s-1); }
   .pp-kind { justify-content: flex-start; gap: var(--s-2); font-weight: 400; }
   .pp-kind[aria-checked="true"] { border-color: var(--accent); background: var(--raised); font-weight: 700; }
   .pp-fields { flex-wrap: wrap; gap: var(--s-2); }
