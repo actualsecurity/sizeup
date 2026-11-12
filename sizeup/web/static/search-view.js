@@ -47,7 +47,7 @@ window.SearchView = (() => {
     const p = new URLSearchParams(qs || "");
     st.q = Object.fromEntries(KEYS.map((k) => [k, p.get(k) || ""]));
     st.page = Math.max(0, Number(p.get("page")) || 0);
-    st.tab = p.get("tab") === "notes" ? "notes" : st.tab;
+    st.tab = ["notes", "preplan"].includes(p.get("tab")) ? p.get("tab") : st.tab;
     fillLists();
     for (const k of KEYS) {
       const n = $(INPUT[k]);
@@ -56,7 +56,7 @@ window.SearchView = (() => {
     }
     tab(st.tab);
   }
-  function close() { st.seq++; }
+  function close() { st.seq++; if (window.Preplan) Preplan.closeSearch(); }
 
   function submit(page = 0) {
     const q = Object.fromEntries(KEYS.map((k) => [k, $(INPUT[k]).value.trim()]));
@@ -70,11 +70,13 @@ window.SearchView = (() => {
     for (const b of document.querySelectorAll("#sv-tabs button")) b.setAttribute("aria-pressed", String(b.dataset.tab === name));
     show($("#sv-calls"), name === "calls");
     show($("#sv-notes"), name === "notes");
+    show($("#sv-preplan"), name === "preplan");
     for (const id of ["#sv-text", "#sv-type", "#sv-unit", "#sv-disp", "#sv-from-l", "#sv-to-l", "#sv-csv"]) {
-      if (name === "notes") show($(id), false);         // the notes: by address only
+      if (name !== "calls") show($(id), false);         // the notes, the pre-plan points: by address only
       else if (id !== "#sv-csv") show($(id), true);
     }
-    if (name === "calls") run(); else runNotes();
+    if (name !== "preplan" && window.Preplan) Preplan.closeSearch();
+    if (name === "calls") run(); else if (name === "notes") runNotes(); else if (window.Preplan) Preplan.search(st.q.where);   // #456
   }
 
   // ---- calls ----------------------------------------------------------------------------------------------------
@@ -217,7 +219,7 @@ window.SearchView = (() => {
   }
 
   // ---- wiring ------------------------------------------------------------------------------------------------------
-  $("#sv-filters").addEventListener("submit", (e) => { e.preventDefault(); if (st.tab === "notes") { st.q.where = $("#sv-where").value.trim(); runNotes(); } else submit(0); });
+  $("#sv-filters").addEventListener("submit", (e) => { e.preventDefault(); if (st.tab !== "calls") { st.q.where = $("#sv-where").value.trim(); tab(st.tab); } else submit(0); });
   $("#sv-clear").addEventListener("click", () => { for (const k of KEYS) $(INPUT[k]).value = ""; submit(0); });
   $("#sv-prev").addEventListener("click", () => submit(Math.max(0, st.page - 1)));
   $("#sv-next").addEventListener("click", () => submit(st.page + 1));
