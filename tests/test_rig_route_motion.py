@@ -701,3 +701,20 @@ def test_one_bad_trip_never_breaks_the_others():
     del r.trips["E63"]["coords"]                                             # (however it got that way)
     out = r.for_map([free("CE", NOW + 45), free("CE", NOW + 45, unit="E63")], NOW + 50)["routes"]
     assert [x["unit"] for x in out] == ["E61"] and "E63" not in r.trips
+
+
+def test_a_kept_move_with_no_anchor_is_left_out_and_never_stops_the_map():
+    doc, g = _kept_record()
+    doc["moves"]["E63|7"]["anchor"] = None
+    r, log = _from(doc, g)
+    out = r.for_map([free("CE", NOW + 45), going(unit="E63")], NOW + 50)["routes"]
+    assert ("E63", 7) in r.cache and r.cache[("E63", 7)]["anchor"] is not None        # routed afresh, not restored
+    assert {x["unit"] for x in out} == {"E61", "E63"} and any("E63|7" in x for x in log)
+    # however a bad route got into memory: that rig's route is dropped this build, the others' stay
+    r.cache[("E63", 7)]["anchor"] = None                                      # (_why falls back to its origin)
+    r.cache[("E63", 7)]["m"] = None
+    n = len(log)
+    out = r.for_map([free("CE", NOW + 45), going(unit="E63")], NOW + 51)["routes"]
+    assert [x["unit"] for x in out] == ["E61"] and "route dropped" in " ".join(log[n:])
+    out = r.for_map([free("CE", NOW + 45), going(unit="E63"), going(unit="E64", incident_id=8)], NOW + 52)["routes"]
+    assert {x["unit"] for x in out} == {"E61", "E63", "E64"}

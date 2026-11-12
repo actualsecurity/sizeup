@@ -231,33 +231,37 @@ class Routes:
         for m in going:
             key = (m["unit"], m["incident_id"])
             seen.add(key)
-            ent = prev = self.cache.get(key)
-            if prev is None:                       # moved to another call while moving by estimate: on from there
-                prev = next((e for k, e in self.cache.items() if k[0] == m["unit"] and e.get("move")), None)
-            if g is not None:
-                call = self.call_of(incs.get(m["incident_id"]))
-                msig = sig + (call,)
-                why = self._why(ent, m, msig, p)
-                bad = self.failed.get(key)
-                if why and bad and bad[0] == m["line_to"] and bad[1] == msig and now - bad[3] < RETRY_S \
-                        and _m([m["lon"], m["lat"]], bad[2]) <= MOVED_M:
-                    why = ""                                        # no way last time: not again every second
-                if why and (n == 0 or time.monotonic() - t0 < BUDGET_S):
-                    n += 1
-                    new = self._route(g, m, msig, pens, p, why, now, call, self._start(prev, m, now))
-                    if new is not None:
-                        ent = new
-                    elif why == "new" and not (ent and ent.get("by") == "line" and ent["to"] == m["line_to"]):
-                        ent = None
-            if ent is not None and ent.get("by") == "line" and m.get("place") not in PLACED:
-                ent = None                                  # a live fix: no estimate, the straight line as before
+            try:
+                ent = prev = self.cache.get(key)
+                if prev is None:                       # moved to another call while moving by estimate: on from there
+                    prev = next((e for k, e in self.cache.items() if k[0] == m["unit"] and e.get("move")), None)
+                if g is not None:
+                    call = self.call_of(incs.get(m["incident_id"]))
+                    msig = sig + (call,)
+                    why = self._why(ent, m, msig, p)
+                    bad = self.failed.get(key)
+                    if why and bad and bad[0] == m["line_to"] and bad[1] == msig and now - bad[3] < RETRY_S \
+                            and _m([m["lon"], m["lat"]], bad[2]) <= MOVED_M:
+                        why = ""                                        # no way last time: not again every second
+                    if why and (n == 0 or time.monotonic() - t0 < BUDGET_S):
+                        n += 1
+                        new = self._route(g, m, msig, pens, p, why, now, call, self._start(prev, m, now))
+                        if new is not None:
+                            ent = new
+                        elif why == "new" and not (ent and ent.get("by") == "line" and ent["to"] == m["line_to"]):
+                            ent = None
+                if ent is not None and ent.get("by") == "line" and m.get("place") not in PLACED:
+                    ent = None                                  # a live fix: no estimate, the straight line as before
+                    self.cache.pop(key, None)
+                if (ent is None or ent["to"] != m["line_to"]) and self._moving(m):
+                    ent = self._line(m, prev, now, p)                   # no road near (no graph): the straight line
+                if ent is None or ent["to"] != m["line_to"]:      # (a call moved, not routed yet: none)
+                    continue
+                self._move(ent, m, now)
+                out.append(self._public(ent, m, now, p))
+            except (KeyError, TypeError, ValueError, IndexError, ZeroDivisionError) as e:   # one bad route: that one
+                self.log(f"routes: {m['unit']}: route dropped ({type(e).__name__}: {e})")   # (routed afresh next build)
                 self.cache.pop(key, None)
-            if (ent is None or ent["to"] != m["line_to"]) and self._moving(m):
-                ent = self._line(m, prev, now, p)                   # no road near (no graph): the straight line
-            if ent is None or ent["to"] != m["line_to"]:      # (a call moved, not routed yet: none)
-                continue
-            self._move(ent, m, now)
-            out.append(self._public(ent, m, now, p))
         for k in [k for k in self.cache if k not in seen]:
             del self.cache[k]
         for k in [k for k in self.failed if k not in seen]:
@@ -454,7 +458,7 @@ class Routes:
             return "new"
         here = [m["lon"], m["lat"]]
         if m.get("place") != "position":
-            return "moved" if _m(here, ent.get("anchor", ent["origin"])) > MOVED_M or ent["from"] == "fix" else ""
+            return "moved" if _m(here, ent.get("anchor") or ent["origin"]) > MOVED_M or ent["from"] == "fix" else ""
         at = m.get("at")
         if at == ent.get("fix_at"):
             return ""
@@ -678,7 +682,7 @@ def _ok_trip(t) -> bool:
 def _ok_ent(e) -> bool:
     """A kept route with its move (Routes.cache's entry)."""
     return (isinstance(e, dict) and _pt(e.get("to")) and _pt(e.get("origin")) and _path_ok(e) and _num(e.get("at"))
-            and _ok_move(e.get("move")) and (e.get("anchor") is None or _pt(e["anchor"]))
+            and _ok_move(e.get("move")) and _pt(e.get("anchor"))
             and all(isinstance(e.get(k), str) for k in ("from", "why", "by")))
 
 
