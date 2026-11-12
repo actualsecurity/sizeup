@@ -105,7 +105,13 @@ window.AddrHistory = (() => {
     const m = el("span", "pn-meta dim small", meta);
     m.title = `Added ${day(n.created_at)}` + (n.updated_by ? `, last changed by ${who(n.updated_by)}` : "")
       + (n.review_at ? `; review by ${day(n.review_at)}` : "") + (n.expires_at ? `; expires ${day(n.expires_at)}` : "");
-    row.append(cat, text, m);
+    row.append(cat);
+    if (n.nearby) {                           // shown by its point, not this building: whose it is, visibly
+      const w = el("span", "chip pn-near", `Nearby · ${n.label || "?"}`);
+      w.title = "A note on another address within 20 m (this call or that note has no exact address)";
+      row.append(w);
+    }
+    row.append(text, m);
     if (n.review_due) row.append(el("span", "chip pn-due", "Review due"));
     if (n.ack) {
       const a = el("span", "pn-acked dim small", `✓ ${n.ack.by || "Seen"} ${fmtTime(n.ack.at)}`);

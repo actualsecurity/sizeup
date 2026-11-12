@@ -728,6 +728,7 @@
   .pn-cat.access { --c: var(--ok); }
   .pn-cat.animals, .pn-cat.hoarding, .pn-cat.other { --c: var(--text-2); }
   .pn-due { --c: var(--warn); color: var(--warn); }
+  .pn-near { --c: var(--info); color: var(--info); overflow-wrap: anywhere; }
   .pn-acked, .pn-meta { white-space: nowrap; }
   .here-counts { color: var(--text-2); }
   .pn-form { display: flex; flex-direction: column; gap: var(--s-2); padding: var(--s-2) var(--s-3); margin-block: var(--s-2); }

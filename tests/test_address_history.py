@@ -652,3 +652,129 @@ def test_csv_cells_never_run_as_formulas():
     from sizeup.cad.export import _csv
     out = _csv(["a", "b", "c"], [["=1+1", "-73.66", "@SUM(A1)"]]).decode("utf-8-sig").splitlines()[1]
     assert out == "'=1+1,-73.66,'@SUM(A1)"
+
+
+# -- re-review fixes (#421) ----------------------------------------------------------------------------------------------
+
+def notes_on(c, iid):
+    return next(i for i in c.state()["incidents"] if i["id"] == iid)["premise"]
+
+
+def test_notes_never_spill_onto_a_neighbouring_building(hist):
+    c = hist
+    n = c.premise.create({"where": "100 Example Ave", "text": "On home oxygen", "category": "medical"})["note"]
+    here = c.store.create_incident(type="BLS", address="100 Example Ave Apt 3")
+    for num in (101, 102):                                             # 10 m and 20 m away, each its own address
+        assert notes_on(c, c.store.create_incident(type="BLS", address=f"{num} Example Ave")) == []
+    (same,) = notes_on(c, here)
+    assert same["id"] == n["id"] and same["nearby"] is False
+    pin = c.store.create_incident(type="BLS", address="Zqxv Blvd / Sample St", lat=41.0 + 100 * 0.00009 + 0.0001, lon=-73.66)
+    (near,) = notes_on(c, pin)                                         # a call known only by its point: shown, nearby
+    assert near["nearby"] is True and near["label"] == "100 Example Ave, Port Chester"
+
+
+def test_a_request_catch_up_is_bounded_and_keys_outside_the_lock(hist):
+    import threading
+    c = hist
+    free = []
+
+    def geocode(q):                                                    # the gazetteer: is the store free meanwhile?
+        t = threading.Thread(target=lambda: free.append(c.store.lock.acquire(timeout=0.5) and (c.store.lock.release() or True)))
+        t.start()
+        t.join()
+        return fake_geocode(q)
+    c.geocoder = geocode
+    sizes = []
+    orig = c.addrs._index_radio
+    c.addrs._index_radio = lambda limit=300: (sizes.append(limit), orig(limit))[1]
+    for i in range(40):
+        c.record_traffic({"id": f"t{i}", "start": 1.0 + i, "end": 2.0 + i, "channel": "FG1", "text": f"engine {i}"})
+    c.store.create_incident(type="ALARM", subtype="COMM", address="100 Example Ave")
+    c.addrs._bounded_catch_up(transcripts=True)
+    assert sizes and max(sizes) <= 25 and sum(sizes) <= 25 + 25
+    assert free and all(free)
+
+
+def test_note_visibility_is_an_audited_admin_setting(api):
+    c, iid = api.cad, api.calls["ems"]
+    med = c.premise.create({"incident_id": iid, "text": "On home oxygen", "category": "medical"})["note"]
+    code, out = call(api, "/api/cad/settings/premise_visibility", {"action": "set", "key": "medical", "value": "admin"}, JULIAN)
+    assert code == 403                                                 # admins only
+    code, out = call(api, "/api/cad/settings/premise_visibility", {"action": "set", "key": "medical", "value": "admin"}, COREY)
+    assert code == 200 and out["premise_visibility"]["medical"]["value"] == "admin"
+    assert call(api, "/api/cad/settings/premise_visibility", {"action": "set", "key": "medical", "value": "x"}, COREY)[0] == 400
+    (a,) = c.store.q("SELECT * FROM settings_audit WHERE key = 'premise_visibility/medical'")
+    assert (a["section"], a["old"], a["new"]) == ("system", "everyone", "admin")
+    assert '"premise_visibility": {"medical": "admin"}' in json.dumps(c.settings_export())      # in the settings file
+    # a dispatcher may no longer see, edit or acknowledge it, and gets no text back
+    code, out = call(api, f"/api/cad/premise/{med['id']}", {"text": "changed"}, JULIAN)
+    assert code == 400 and "no note" in out["error"]
+    code, out = call(api, f"/api/cad/premise/{med['id']}/ack", {"incident_id": iid}, JULIAN)
+    assert code == 400 and "no note" in out["error"]
+    code, out = call(api, f"/api/cad/premise/{med['id']}", {"priority": 1}, COREY)
+    assert code == 200 and out["note"]["text"] == "On home oxygen"
+    last = c.store.q("SELECT * FROM settings_audit WHERE section = 'premise' ORDER BY id DESC LIMIT 1")[0]
+    assert last["key"] == str(med["id"]) and "oxygen" not in (last["old"] + last["new"]) and "Example" not in last["key"]
+    assert json.loads(last["new"]) == {"category": "medical", "changed": ["priority"]}
+    code, out = call(api, "/api/cad/settings/premise_visibility", {"action": "reset", "key": "medical"}, COREY)
+    assert out["premise_visibility"]["medical"]["value"] == "everyone"
+    assert [n["id"] for n in get(api, f"/api/cad/incident/{iid}/here", "", VAL)[1]["notes"]] == [med["id"]]
+
+
+def test_snippets_bind_the_page_rowids(calls):
+    c, ids = calls
+    seen = []
+    c.store.db.set_trace_callback(seen.append)
+    out = search(c, text="oxygen")
+    c.store.db.set_trace_callback(None)
+    assert out["rows"][0]["hit"].count("[oxygen]") == 1
+    assert not any("MATCH" in s and "IN (SELECT" in s for s in seen)
+
+
+def test_the_backfill_rests_at_least_twice_its_cpu():
+    from sizeup.cad.history import PACE_S, pace
+    assert pace(0.01) == PACE_S and pace(1.0) == 2.0
+
+
+def test_cold_history_reads_only_its_house_number(hist):
+    c, clock = hist, hist.clock_
+    for n in range(1, 40):
+        call_at(c, clock, 3, f"{n} Sample St")
+    now = c.store.create_incident(type="ALARM", subtype="COMM", address="12 Sample St")
+    c.addrs.key_one(now)
+    inc = c.store.incident(now)
+    seen = []
+    c.store.db.set_trace_callback(seen.append)
+    c.addrs._same_building(inc["bldg_key"], inc["addr_street"], None)
+    c.store.db.set_trace_callback(None)
+    (sql,) = [s for s in seen if "bldg_key GLOB" in s]
+    plan = " ".join(r["detail"] for r in c.store.q("EXPLAIN QUERY PLAN " + sql))
+    assert "SCAN incidents" not in plan
+
+
+def test_single_letter_streets_and_letter_numbers():
+    def strict(q):                                                     # an exact gazetteer: no fuzzy street
+        s = q.split(",")[0].lower()
+        m = re.match(r"(\d+)\s+(.*)$", s)
+        if not m or addrkey.street_key(m.group(2)) not in STREETS | {"x st": ("X St", "Port Chester", 41.2, -73.6)}:
+            return []
+        name, town, lat, lon = (STREETS | {"x st": ("X St", "Port Chester", 41.2, -73.6)})[addrkey.street_key(m.group(2))]
+        return [{"kind": "address", "street": name, "house_number": m.group(1), "municipality": town, "confidence": 1.0,
+                 "lat": lat, "lon": lon}]
+    assert key("1 X ST", geocode=strict).bldg_key == "1|x st|port chester"
+    assert key("Example Ave x Sample St", geocode=strict).how == ""            # "x" between two streets: a crossing
+    assert key("12 B Example Ave", geocode=strict).bldg_key == "12b|example ave|port chester"   # no "B Example Ave"
+    assert key("12 W Example Ave", geocode=strict).bldg_key == "12|w example ave|port chester"
+
+
+def test_a_failing_gazetteer_still_saves_a_mapped_note():
+    calls_ = []
+
+    def flaky(q):
+        calls_.append(q)
+        if len(calls_) > 1:
+            raise RuntimeError("down")
+        return fake_geocode(q)
+    c = make_cad(geocoder=flaky)
+    n = c.premise.create({"where": "100 Example Ave", "text": "Knox box", "category": "access"})["note"]
+    assert n["label"] == "100 Example Ave, Port Chester"

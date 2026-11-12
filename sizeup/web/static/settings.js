@@ -1629,6 +1629,7 @@ function sSystem(panel) {
     ...(sy && S.data.atc ? [sAtcTalkers(S.data.atc)] : []),
     ...(sy && S.data.hub_errors && sIsHub() ? [sHubErrors(S.data.hub_errors)] : []),
     ...(sy && S.data.map_display ? [sMapDisplay(S.data.map_display)] : []),
+    ...(sy && S.data.premise_visibility ? [sPremiseVisibility(S.data.premise_visibility)] : []),
     ...(sy && S.data.audio_retention && canDo("admin") ? [sAudioRetention(S.data.audio_retention)] : []),
     sCard(sCardHead("Records"), recs, counts),
     ...(S.data.camera_wall ? [sCameraWall(S.data.camera_wall)] : []),
@@ -1716,6 +1717,28 @@ function sHubErrors(e) {
 
 // The rigs on the maps by zoom (#376, cadmap.js declutter; sizeup/cad/mapview.py DISPLAY_DEFAULTS): below each zoom a
 // rig is a dot (idle at a firehouse: one badge). The console's maps and the wall board's. Admins.
+// Who sees each category of address notes (#403, sizeup/cad/premise.py; Settings key premise_visibility). Admins.
+function sPremiseVisibility(d) {
+  const card = sCard(sCardHead("Address notes", "",
+    sHelp("Who sees each category of address notes on the incident card and the Search page. Dispatchers: dispatchers "
+      + "and admins; Admins: admins only. A restricted category is never in the screen's live push.")));
+  card.id = "s-premise-vis";
+  const names = { everyone: "Everyone", dispatcher: "Dispatchers", admin: "Admins" };
+  for (const [key, v] of Object.entries(d)) {
+    const s = el("select");
+    for (const c of v.choices) s.append(new Option(names[c] || c, c));
+    s.value = v.value;
+    s.disabled = !canDo("admin");
+    s.setAttribute("aria-label", `${v.label}: who sees it`);
+    s.addEventListener("change", () => sPost("premise_visibility", { action: "set", key, value: s.value },
+      `${v.label}: ${names[s.value]}`));
+    const row = el("div", "row");
+    row.append(el("span", "s-eta-l", v.label), s, sState(v.edited ? "edited" : "default"), el("span", "spacer"));
+    card.append(row);
+  }
+  return card;
+}
+
 function sMapDisplay(d) {
   const card = sCard(sCardHead("Map display", "",
     sHelp("Below these zooms an idle rig is a dot (two or more at a firehouse: one badge, \u201cHQ \u00b7 6\u201d) and a rig on a "

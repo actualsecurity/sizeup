@@ -53,7 +53,7 @@ ORDINAL_FL = re.compile(r"^(\d{1,2})(?:st|nd|rd|th)$", re.I)                   #
 # The house number: 12, 12A (a letter right after it, never "12 W": that is the street's direction), 12 1/2, 10-12
 NUMBER = re.compile(r"^\s*(\d{1,6})(?:([a-z])(?=\s)|\s+(1/2|½)(?=\s)|\s*-\s*(\d{1,6})[a-z]?(?=\s))?\s+", re.I)
 # two streets, or a place only: not one address ("12 At Rd" is a street: "at" right before a suffix)
-CROSSING = re.compile(r"\s(?:/|&|and)\s|\sat\s(?!(?:rd|st|ave|ln|dr|ct|pl|way|ter|blvd)\b)|^\s*@|\bx\b", re.I)
+CROSSING = re.compile(r"\s(?:/|&|and)\s|\s(?:at|x)\s(?!(?:rd|st|ave|ln|dr|ct|pl|way|ter|blvd)\b)|^\s*@", re.I)
 
 
 @dataclass(frozen=True)
@@ -270,6 +270,8 @@ def key_incident(inc: dict, aliases: dict[str, str], town_of: Callable[[str], st
     if geocode is not None:
         for p in parsed:
             k = snap(p, geocode, town_of, point, town_hint)
+            if k is None and (q := _letter_number(p)) is not None:
+                k = snap(q, geocode, town_of, point, town_hint)   # "12 B Example Ave": no B Example Ave here, so 12B
             if k is not None:
                 return k
     elif parsed:
@@ -281,6 +283,16 @@ def key_incident(inc: dict, aliases: dict[str, str], town_of: Callable[[str], st
         p = parsed[0]
         return _key(p, p.street, p.town or town_hint, "text")
     return Key()
+
+
+def _letter_number(p: Parsed) -> Parsed | None:
+    """'12 B Example Ave' read the other way: house 12B on Example Ave (tried only when the gazetteer has no "B Example
+    Ave"); None when the street doesn't start with a lone letter (N / S / E / W are always the direction)."""
+    words = p.street.split()
+    if len(words) < 2 or not re.fullmatch(r"[a-z]", words[0], re.I) or words[0].lower() in "nsew" or not re.fullmatch(r"\d+", p.number):
+        return None
+    rest = " ".join(words[1:])
+    return Parsed(p.number + words[0].upper(), rest, p.unit, p.town, p.bldg, rest)
 
 
 def key_text(text: str, aliases: dict[str, str], town_of: Callable[[str], str] = lambda m: m,

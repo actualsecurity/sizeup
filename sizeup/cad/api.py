@@ -453,7 +453,7 @@ def _premise(m, b, o, c):
     act = str(b.get("action") or "")
     if act in ("expire", "restore"):
         return f"{'Expired' if act == 'expire' else 'Restored'} address note {nid}", ""
-    return f"Edited address note {nid}: {', '.join(k for k in b if k not in ('operator', 'action')) or 'nothing'}", ""
+    return f"Edited address note {nid}: {', '.join(k for k in b if k not in ('operator', 'action', '_may')) or 'nothing'}", ""
 
 
 def _prealert_at(o) -> str:
@@ -804,12 +804,15 @@ class CadApi:
             return _json(400, {"error": "the body must be a JSON object"})
         c = self.cad
         signed = who is not None and bool(who.email)
+        body.pop("_may", None)                     # never the page's: what the person may read (premise notes, #403)
         try:
             if signed:                             # signed in: that's the operator, not what the page typed
                 st = c.settings.standing(who.email)
                 if refused := self.permit(path, who, body, st, client):
                     return refused
                 body["operator"] = st["operator"]
+                if PREMISE.fullmatch(path):
+                    body["_may"] = st["may"]
             out = self._write(path, body, signed)
         except LastAdmin as e:
             if signed:

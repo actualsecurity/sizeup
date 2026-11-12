@@ -63,7 +63,8 @@ TOKENIZE = "unicode61 remove_diacritics 2"
 CELL_PER_DEG = 2000
 CELL = "'c:' || CAST({r}.lat * " + str(CELL_PER_DEG) + " AS INTEGER) || ',' || CAST({r}.lon * " + str(CELL_PER_DEG) + " AS INTEGER)"
 HITS_TTL_S = 30.0          # a search's free-text hits, reused this long (paging through them)
-PACE_S = 0.5               # the background backfill: at least this between batches
+PACE_S = 0.5               # the background backfill: at least this between batches,
+CPU_REST = 2.0             # ... and twice the batch's own CPU time (<= ~33% of a core)
 LOCK_WAIT_S = 0.25         # a GET's own catch-up waits at most this for the store
 
 SCHEMA = f"""
@@ -292,7 +293,7 @@ class AddressHistory:
             n += len(ids)
         m = 0
         while transcripts and self.fts and m < max_rows:
-            k = self._index_radio()
+            k = self._index_radio(min(BATCH, max_rows - m))
             if not k:
                 break
             m += k
@@ -303,12 +304,13 @@ class AddressHistory:
                                    ("(SELECT COUNT(*) FROM fts_radio_queue)" if self.fts else "0") + " AS transcripts")[0]
         return {"keys": r["keys"], "transcripts": r["transcripts"]}
 
-    def _index_radio(self) -> int:
+    def _index_radio(self, limit: int = BATCH) -> int:
+        """Index up to limit queued transcripts: read, repair (outside the lock), then one short write."""
         rows = self.store.q("SELECT t.rowid AS rid, t.id, t.text, t.alt_text, t.channel, t.talkgroup, t.rig, t.dispatcher "
                             "FROM fts_radio_queue q JOIN radio_traffic t ON t.rowid = q.rid ORDER BY q.rid DESC LIMIT ?",
-                            (BATCH,))
+                            (limit,))
         gone = [r["rid"] for r in self.store.q("SELECT q.rid FROM fts_radio_queue q LEFT JOIN radio_traffic t "
-                                               "ON t.rowid = q.rid WHERE t.rowid IS NULL LIMIT ?", (BATCH,))]
+                                               "ON t.rowid = q.rid WHERE t.rowid IS NULL LIMIT ?", (limit,))]
         if not rows and not gone:
             return 0
         fix = getattr(getattr(self.cad, "hints", None), "decorate", None)
@@ -350,13 +352,15 @@ class AddressHistory:
         def run():
             self._stop.wait(delay_s)
             while not self._stop.is_set():
+                t0 = time.thread_time()
                 try:
                     left = self.catch_up(BATCH)
                     busy = left["keys"] or left["transcripts"]
                 except Exception as e:  # noqa: BLE001
                     self.log(f"CAD history: {type(e).__name__}: {e}")
                     busy = False
-                self._stop.wait(PACE_S if busy else every_s)
+                spent = time.thread_time() - t0       # this thread's own CPU for the batch
+                self._stop.wait(pace(spent) if busy else every_s)
         self._thread = threading.Thread(target=run, name="cad-history", daemon=True)
         self._thread.start()
 
@@ -367,16 +371,17 @@ class AddressHistory:
             t.join(timeout=5)
 
     def _bounded_catch_up(self, transcripts: bool = False) -> None:
-        """A request's own share of the catch-up: a few rows (CATCH_UP), only when the store is free within LOCK_WAIT_S (a
-        request never waits long for the console's writes; else what is keyed already), never an error."""
+        """A request's own share of the catch-up: a few rows (CATCH_UP of each), only when the store is free within
+        LOCK_WAIT_S (a request never waits long for the console's writes; else what is keyed already), never an error.
+        The lock is only looked at here, not held: the gazetteer and the status repair run outside it (catch_up takes it
+        for each short read and write)."""
         if not self.store.lock.acquire(timeout=LOCK_WAIT_S):
             return
+        self.store.lock.release()
         try:
             self.catch_up(CATCH_UP, transcripts=transcripts)
         except Exception as e:  # noqa: BLE001 - the answer from what is keyed already
             self.log(f"CAD history: catch-up: {type(e).__name__}: {e}")
-        finally:
-            self.store.lock.release()
 
     # -- reads off the store's lock (Search) ------------------------------------------------------------------------
 
@@ -415,15 +420,24 @@ class AddressHistory:
 
     def _same_building(self, bldg_key: str, addr_street: str, point) -> list[int]:
         """The other keys that are this building: a range and each of its numbers ("10-12" and 10, 12), and 12A and 12
-        when their pins are within SAME_LOT_M of this one's. From the street's own calls (indexed)."""
+        when their pins are within SAME_LOT_M of this one's. Only the keys with this house number, by prefix on the
+        building index (a range ending with it: on the street index), never the whole street."""
         if not addr_street:
             return []
         num, street, town, b = addrkey.bldg_parts(bldg_key)
         mine = re.fullmatch(r"(\d+)-(\d+)", num)
         lot = re.fullmatch(r"(\d+)([a-z]?)", num)
+        if not (mine or lot):
+            return []
+        rest = _glob(f"|{street}|{town}") + "*"
+        ors, args = [], []
+        for d in (mine.groups() if mine else (lot.group(1),)):
+            ors += ["bldg_key GLOB ?", "bldg_key GLOB ?", "bldg_key GLOB ?",
+                    "(addr_street = ? AND bldg_key GLOB ?)"]
+            args += [d + rest, d + "[a-z]" + rest, d + "-[0-9]*" + rest, addr_street, "[0-9]*-" + d + rest]
         out = []
-        for r in self.store.q("SELECT id, bldg_key, lat, lon FROM incidents WHERE addr_street = ? AND bldg_key != ? "
-                              "AND number IS NOT NULL", (addr_street, bldg_key)):
+        for r in self.store.q(f"SELECT id, bldg_key, lat, lon FROM incidents WHERE ({' OR '.join(ors)}) AND bldg_key != ? "
+                              f"AND number IS NOT NULL", (*args, bldg_key)):
             n2, s2, t2, b2 = addrkey.bldg_parts(r["bldg_key"])
             if (s2, t2, b2) != (street, town, b):
                 continue
@@ -671,28 +685,41 @@ class AddressHistory:
         return out
 
     def _snippets(self, text: str, ids: list[int]) -> dict[int, str]:
-        """Where the words are, for the page's rows only: the remarks, else a comment, else a transcript."""
+        """Where the words are, for the page's rows only: the remarks, else a comment, else a transcript. The rowids of
+        the page's remarks, comments and transcripts are read first (indexed), then each FTS table is matched once with
+        them bound (rowid IN (?, ...)): never a subquery the match would run again for every row."""
         q = fts_query(text)
         out: dict[int, str] = {}
         if not q or not ids:
             return out
-        for iid in ids:
-            for sql, args in (
-                    ("SELECT snippet(fts_incidents, 0, '[', ']', '…', 10) AS s FROM fts_incidents WHERE fts_incidents MATCH ? "
-                     "AND rowid = ?", (q, iid)) if self.fts else
-                    ("SELECT substr(remarks, 1, 120) AS s FROM incidents WHERE id = ? AND lower(remarks) LIKE ?",
-                     (iid, "%" + text.lower() + "%")),
-                    ("SELECT snippet(fts_events, 0, '[', ']', '…', 10) AS s FROM fts_events WHERE fts_events MATCH ? "
-                     "AND rowid IN (SELECT id FROM events WHERE incident_id = ?) LIMIT 1", (q, iid)) if self.fts else ("", ()),
-                    ("SELECT snippet(fts_radio, 0, '[', ']', '…', 10) AS s FROM fts_radio WHERE fts_radio MATCH ? AND rowid IN "
-                     "(SELECT t.rowid FROM radio_links l JOIN radio_traffic t ON t.id = l.traffic_id WHERE l.incident_id = ?) "
-                     "LIMIT 1", (q, iid)) if self.fts else ("", ())):
-                if not sql:
-                    continue
-                r = self._rq(sql, args)
-                if r and r[0]["s"]:
-                    out[iid] = r[0]["s"]
-                    break
+        if not self.fts:
+            like = "%" + text.lower().replace("%", "") + "%"
+            for r in self._rq(f"SELECT id, substr(remarks, 1, 120) AS s FROM incidents WHERE id IN ({','.join('?' * len(ids))}) "
+                              f"AND lower(remarks) LIKE ?", (*ids, like)):
+                out[r["id"]] = r["s"]
+            return out
+        snip = "snippet({t}, 0, '[', ']', '…', 10)"
+
+        def matched(table: str, owner: dict[int, int]) -> None:
+            rids = list(owner)
+            for i in range(0, len(rids), 500):
+                part = rids[i:i + 500]
+                for r in self._rq(f"SELECT rowid AS rid, {snip.format(t=table)} AS s FROM {table} WHERE {table} MATCH ? "
+                                  f"AND rowid IN ({','.join('?' * len(part))})", (q, *part)):
+                    out.setdefault(owner[r["rid"]], r["s"])
+        matched("fts_incidents", {i: i for i in ids})
+        left = [i for i in ids if i not in out]
+        if left:
+            m = ",".join("?" * len(left))
+            matched("fts_events", {r["id"]: r["incident_id"] for r in self._rq(
+                f"SELECT id, incident_id FROM events WHERE incident_id IN ({m}) AND kind IN "
+                f"({','.join('?' * len(COMMENT_KINDS))})", (*left, *COMMENT_KINDS))})
+        left = [i for i in ids if i not in out]
+        if left:
+            m = ",".join("?" * len(left))
+            matched("fts_radio", {r["rid"]: r["incident_id"] for r in self._rq(
+                f"SELECT t.rowid AS rid, l.incident_id FROM radio_links l JOIN radio_traffic t ON t.id = l.traffic_id "
+                f"WHERE l.incident_id IN ({m})", left)})
         return out
 
     def search(self, f: dict, csv: bool = False) -> dict:
@@ -757,6 +784,12 @@ class AddressHistory:
             if f.get(k) is not None:
                 parts.append(f"{k}={_when(f[k])}")
         return f"Searched {', '.join(parts) or 'everything'}: {total} result{'s' if total != 1 else ''}"
+
+
+def pace(cpu_s: float) -> float:
+    """The backfill's rest after a batch that took cpu_s of CPU: at least CPU_REST x that, and PACE_S, so it stays under
+    about a third of a core on the hub, whatever the backlog."""
+    return max(PACE_S, CPU_REST * cpu_s)
 
 
 def _glob(s: str) -> str:

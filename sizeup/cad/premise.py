@@ -39,8 +39,9 @@ RELEVANCE = {
     "RESCUE": ("access", "hazard", "medical", "animals", "hoarding", "other"),
 }
 # Who may see a category's notes: category -> the least standing (Settings.standing's "may": viewer < dispatcher <
-# admin). Not listed: everyone signed in. A restricted category never rides the state push (it goes to everyone); the
-# card gets it from History here (GET, checked per person). E.g. {"medical": "dispatcher", "hoarding": "dispatcher"}.
+# admin). Not listed: everyone signed in. Set in Settings > System > Address notes (sizeup/cad/settings.py
+# premise_visibility, admins, audited; Cad.premise_visible), this is the default before any edit. A restricted category
+# never rides the state push (it goes to everyone); the card gets it from History here (GET, checked per person).
 VISIBLE_TO: dict[str, str] = {}
 STANDING = {"viewer": 0, "dispatcher": 1, "admin": 2}
 TEXT_MAX = 500
@@ -86,9 +87,10 @@ def rank(notes: list[dict], call_type: str = "") -> list[dict]:
     return sorted(notes, key=lambda n: (n["priority"], pos.get(n["category"], len(pos)), -n["updated_at"], -n["id"]))
 
 
-def may_see(category: str, may: str) -> bool:
-    """Whether someone of this standing ("admin" | "dispatcher" | "viewer") may see a category's notes (VISIBLE_TO)."""
-    need = VISIBLE_TO.get(category)
+def may_see(category: str, may: str, visible: dict | None = None) -> bool:
+    """Whether someone of this standing ("admin" | "dispatcher" | "viewer") may see a category's notes (visible: the
+    setting, else VISIBLE_TO)."""
+    need = (VISIBLE_TO if visible is None else visible).get(category)
     return need is None or STANDING.get(may, 0) >= STANDING.get(need, 0)
 
 
@@ -111,9 +113,18 @@ class Premise:
 
     # -- reading ----------------------------------------------------------------------------------------------------
 
+    def visible(self) -> dict:
+        """Who may see each category now (the setting; VISIBLE_TO until it is edited)."""
+        v = getattr(self.cad, "premise_visible", None)
+        return VISIBLE_TO if v is None else v
+
+    def can_see(self, n: dict, may: str) -> bool:
+        return may_see(n["category"], may, self.visible())
+
     def _at(self, bldg_key: str, lat, lon) -> list[dict]:
-        """The active notes at a building (cached until the next write): its key's, and every note whose point is within
-        GROUP_M of the call's."""
+        """The active notes at a building (cached until the next write): its key's; and, when the call or the note has
+        no building key (known only by its point, or a place), the notes whose point is within GROUP_M of the call's.
+        Two keyed buildings never share notes, however close."""
         if not bldg_key and lat is None:
             return []
         ck = (bldg_key, round(lat, 5) if lat is not None else None, round(lon, 5) if lon is not None else None)
@@ -128,7 +139,8 @@ class Premise:
             seen = {r["id"] for r in rows}
             rows += [r for r in self.store.q("SELECT * FROM premise_notes WHERE active = 1 AND lat IS NOT NULL AND lat BETWEEN ? AND ? "
                                              "AND lon BETWEEN ? AND ?", (a, b, c, d))
-                     if r["id"] not in seen and addrkey.meters(lat, lon, r["lat"], r["lon"]) <= addrkey.GROUP_M]
+                     if r["id"] not in seen and (not bldg_key or not r["bldg_key"])
+                     and addrkey.meters(lat, lon, r["lat"], r["lon"]) <= addrkey.GROUP_M]
         with self._lock:
             if len(self._cache) > 512:
                 self._cache.clear()
@@ -141,7 +153,7 @@ class Premise:
         out["active"] = bool(n["active"]) and not (n["expires_at"] is not None and n["expires_at"] <= now)
         out["review_due"] = n["review_at"] is not None and n["review_at"] <= now
         out["author_name"] = who(n["author"])
-        out["restricted"] = n["category"] in VISIBLE_TO      # not in the state push: the card asks for it (History here)
+        out["restricted"] = n["category"] in self.visible()    # not in the state push: the card asks (History here)
         return out
 
     def for_incident(self, inc: dict, may: str = "admin") -> list[dict]:
@@ -149,7 +161,7 @@ class Premise:
         ranked, each with its acknowledgement on this incident (ack: {at, by} | None; an edit after it: None again)."""
         now = self.cad.clock()
         notes = [n for n in self._at(inc.get("bldg_key") or "", inc.get("lat"), inc.get("lon"))
-                 if (n["expires_at"] is None or n["expires_at"] > now) and may_see(n["category"], may)]
+                 if (n["expires_at"] is None or n["expires_at"] > now) and self.can_see(n, may)]
         if not notes:
             return []
         acks = {a["note_id"]: a for a in self.store.q("SELECT note_id, at, operator FROM premise_acks WHERE incident_id = ?",
@@ -159,6 +171,8 @@ class Premise:
             s = self.shown(n, now)
             a = acks.get(n["id"])
             s["ack"] = {"at": a["at"], "by": who(a["operator"])} if a and a["at"] >= n["updated_at"] else None
+            # shown by its point, not its building: the card says whose it is ("nearby" and the note's own address)
+            s["nearby"] = not (inc.get("bldg_key") and n["bldg_key"] == inc.get("bldg_key"))
             out.append(s)
         return out
 
@@ -188,7 +202,7 @@ class Premise:
         rows = self.store.q("SELECT * FROM premise_notes" + (f" WHERE {' AND '.join(conds)}" if conds else "")
                             + " ORDER BY updated_at DESC, id DESC LIMIT 500", args)
         now = self.cad.clock()
-        return {"notes": [self.shown(r, now) for r in rows if may_see(r["category"], may)], "categories": CATEGORIES,
+        return {"notes": [self.shown(r, now) for r in rows if self.can_see(r, may)], "categories": CATEGORIES,
                 "priorities": {str(k): v for k, v in PRIORITIES.items()}}
 
     # -- writing ----------------------------------------------------------------------------------------------------
@@ -237,6 +251,16 @@ class Premise:
         return f
 
     def _audit(self, db, op: str, n: dict, old: dict | None, new: dict | None) -> None:
+        """The Settings audit log (anyone who may read Settings): a note of a restricted category (or one moved in or out
+        of one) is only its id, its category and the names of what changed: never its text or address."""
+        vis = self.visible()
+        cats = {n["category"], *((old or {}).get("category", ()),), *((new or {}).get("category", ()),)}
+        if any(c in vis for c in cats if isinstance(c, str)):
+            shape = lambda d, cat: None if d is None else {"category": cat, "changed": sorted(d)}   # noqa: E731
+            Editor._audit(db, self.cad.clock(), op, SECTION, str(n["id"]),
+                          shape(old, (old or {}).get("category", n["category"])),
+                          shape(new, (new or {}).get("category", n["category"])))
+            return
         Editor._audit(db, self.cad.clock(), op, SECTION, f"{n['id']} {n['label']}"[:200], old, new)
 
     def _bump(self) -> None:
@@ -294,17 +318,22 @@ class Premise:
             raise CadError("Not an address the map knows: check the spelling, or add the note from a call there")
         if point is None and self.cad.geocoder is not None:      # the building's point: notes match within GROUP_M too
             p = addrkey.parse(text, L.geo_town_aliases)
-            m = next((m for m in (self.cad.geocoder(f"{p.first} {p.street}" + (f", {p.town}" if p.town else "")) or [])
-                      if m.get("kind") == "address" and float(m.get("confidence") or 0) >= addrkey.SNAP_CONFIDENCE), None) if p else None
+            try:
+                ms = self.cad.geocoder(f"{p.first} {p.street}" + (f", {p.town}" if p.town else "")) or [] if p else []
+            except Exception:  # noqa: BLE001 - the note keeps its key, without a point
+                ms = []
+            m = next((m for m in ms if m.get("kind") == "address" and float(m.get("confidence") or 0) >= addrkey.SNAP_CONFIDENCE), None)
             if m:
                 point = (m["lat"], m["lon"])
         return {"bldg_key": k.bldg_key, "addr_key": k.addr_key, "lat": point[0] if point else None,
                 "lon": point[1] if point else None, "label": (k.label or text)[:200], "incident_id": None}
 
     def edit(self, nid: int, body: dict) -> dict:
-        """POST /api/cad/premise/<id> {text?, category?, priority?, review_at?, expires_at?, action?: expire | restore}."""
+        """POST /api/cad/premise/<id> {text?, category?, priority?, review_at?, expires_at?, action?: expire | restore}.
+        A note of a category the person may not see is, for them, no note (body["_may"]: their standing, the API's)."""
+        may = str(body.get("_may") or "admin")
         n = self.store.one("SELECT * FROM premise_notes WHERE id = ?", (nid,))
-        if n is None:
+        if n is None or not self.can_see(n, may):
             raise CadError(f"no note {nid}")
         op = str(body.get("operator") or "")[:320]
         f = self._fields(body, partial=True)
@@ -325,12 +354,14 @@ class Premise:
             self._audit(db, op, n, {k: n[k] for k in changes}, changes)
             n = dict(db.execute("SELECT * FROM premise_notes WHERE id = ?", (nid,)).fetchone())
         self._bump()
+        if not self.can_see(n, may):                   # moved into a category they may not see: not its text back
+            return {"ok": True, "note": {"id": nid, "category": n["category"], "restricted": True}}
         return {"ok": True, "note": self.shown(n, now)}
 
     def ack(self, nid: int, body: dict) -> dict:
-        """POST /api/cad/premise/<id>/ack {incident_id, operator}: seen on this call."""
+        """POST /api/cad/premise/<id>/ack {incident_id, operator}: seen on this call (only a note the person may see)."""
         n = self.store.one("SELECT * FROM premise_notes WHERE id = ?", (nid,))
-        if n is None:
+        if n is None or not self.can_see(n, str(body.get("_may") or "admin")):
             raise CadError(f"no note {nid}")
         try:
             iid = int(body.get("incident_id"))
