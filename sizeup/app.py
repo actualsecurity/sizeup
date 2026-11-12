@@ -649,9 +649,11 @@ class App:
             from sizeup.roadgraph import RoadGraph
             self.roadgraph = RoadGraph.from_config(cfg, log=log)
         if self.roadgraph.configured:
-            from sizeup.cad.routes import Routes
+            from sizeup.cad.routes import SAVE_KEY, Routes
+            store = self.cad.store                    # the trips home and the moves kept across a restart (#453)
             self.cad.routes = Routes(self.roadgraph.ready, lambda: self.cad.eta, self._route_closures,
-                                     lambda: self.cad.firehouses, log=log)
+                                     lambda: self.cad.firehouses, log=log,
+                                     persist=(lambda: store.meta_get(SAVE_KEY), lambda v: store.meta_put(SAVE_KEY, v)))
         # Metro-North's trains (sizeup/trains.py, #131): the MTA's feeds, read by the CAD of record while
         # someone looks at the Trains layer or an event near the tracks.
         self.trains = prov["trains"]
