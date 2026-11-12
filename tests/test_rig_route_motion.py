@@ -636,3 +636,68 @@ def test_the_recommendation_agrees_with_the_map_on_the_way_home_and_once_home():
     est = runcards.estimates([{"id": uid(n), "name": n} for n in ("E60", "E61")], c.locations(), c.store.full(nxt), c.eta,
                              c.routes.to_one)
     assert est[uid("E61")]["eta_s"] == est[uid("E60")]["eta_s"]
+
+
+def _kept_record():
+    """A good kept record (a trip home and a move), made the way the hub makes it."""
+    kept = {}
+    g = grid()
+    mk = lambda: Routes(lambda: g, lambda: P, lambda: [], lambda: [HQ], log=lambda m: None, spawn=lambda fn: fn(),  # noqa: E731
+                        persist=(lambda: kept.get("v"), lambda v: kept.__setitem__("v", v)))
+    r = mk()
+    one(r, going(), NOW + 40)
+    one(r, free("CE", NOW + 45), NOW + 46, "back")                           # E61's trip home
+    r.for_map([free("CE", NOW + 45), going(unit="E63")], NOW + 47)          # and E63's move to the call
+    import json
+    return json.loads(kept["v"]), g
+
+
+def _from(doc, g):
+    import json
+    log = []
+    r = Routes(lambda: g, lambda: P, lambda: [], lambda: [HQ], log=log.append, spawn=lambda fn: fn(),
+               persist=(lambda: json.dumps(doc), lambda v: None))
+    return r, log
+
+
+@pytest.mark.parametrize("bad", [
+    {"trips": {"E61": {"key": ["clear", 1]}}},                                         # a trip with nothing but its key
+    {"moves": {"E63|7": {"move": {"t0": NOW}}}},                                       # a move with only t0
+    {"trips": {"E61": "x"}, "moves": {"E63|7": None, "nope": {}}},                     # wrong types
+    {"trips": [], "moves": "x"},
+    ["not", "an", "object"],
+    "just a string",
+])
+def test_a_kept_record_missing_fields_or_of_the_wrong_types_is_left_out(bad):
+    doc, g = _kept_record()
+    r, log = _from(bad, g)
+    a = r.for_map([going(status_at=NOW + 100)], NOW + 110)                   # routes as if never kept: no KeyError
+    assert r.trips == {} and a["routes"][0]["move"]["t0"] == NOW + 100
+    assert r.for_map([free("CE", NOW + 120)], NOW + 121)["routes"]         # trips still work afterwards
+    assert log                                                               # said what it left out
+
+
+def test_a_partly_bad_record_keeps_the_good_entries_and_drops_the_bad():
+    doc, g = _kept_record()
+    good_trip, good_move = doc["trips"]["E61"], doc["moves"]["E63|7"]
+    doc["trips"]["E62"] = dict(good_trip, move={"t0": NOW})                  # a move with only t0
+    doc["trips"]["E64"] = dict(good_trip, coords=[[1, "a"], [2, 3]])         # a bad point
+    doc["trips"]["E65"] = dict(good_trip, home="HQ")
+    doc["moves"]["E66|7"] = dict(good_move, cum=[0])                         # cum not along coords
+    doc["moves"]["E67|x"] = good_move                                        # not a call's id
+    doc["moves"]["E68|7"] = dict(good_move, move={k: v for k, v in good_move["move"].items() if k != "done_at"})
+    r, log = _from(doc, g)
+    r._load()
+    assert set(r.trips) == {"E61"} and set(r.cache) == {("E63", 7)} and len(log) == 6
+    back = r.for_map([free("CE", NOW + 45)], NOW + 60)["routes"]
+    assert back and back[0]["move"] == good_trip["move"]
+
+
+def test_one_bad_trip_never_breaks_the_others():
+    r = routes_on(grid())
+    r.for_map([going(), going(unit="E63", incident_id=8)], NOW + 40)
+    r.for_map([free("CE", NOW + 45), free("CE", NOW + 45, unit="E63")], NOW + 46)
+    assert set(r.trips) == {"E61", "E63"}
+    del r.trips["E63"]["coords"]                                             # (however it got that way)
+    out = r.for_map([free("CE", NOW + 45), free("CE", NOW + 45, unit="E63")], NOW + 50)["routes"]
+    assert [x["unit"] for x in out] == ["E61"] and "E63" not in r.trips

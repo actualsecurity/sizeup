@@ -432,7 +432,7 @@ window.CadMap = (() => {
   // A rig moved by the estimate (no live fix, not at a call), on its way to a call or home: {r, g, d, ll, brg, moving}
   // or null. moving: not yet held short of the call, not stopped, not home: it wants frames.
   // overdue: held short of the call OVERDUE_S past its estimated arrival, still not on location (faded, "overdue")
-  const OVERDUE_S = 120;               // routes.py OVERDUE_S
+  const OVERDUE_S = 120;
   function motionOf(m, M) {
     if (m.place === "position" || m.place === "incident") return null;
     const r = m.home_line ? (m.place === "returning" ? backOf(M, m) : null) : m.line_to ? routeOf(M, m) : null;

@@ -65,7 +65,8 @@ it to the road. Nothing here runs per frame: a move is made once, and only a sta
     a live fix      always wins: no move, any trip forgotten
 
 The markers of rigs on a trip home are rewritten here (place "returning" at the estimate, or "station" once there);
-mapview.locate's straight-line estimate stays the recommendation's.
+The recommendation agrees with the map: Cad.locations lays trip_at() (a rig's place on its trip home, or home) over
+mapview.locate's straight-line return (service.py _with_trips).
 """
 
 from __future__ import annotations
@@ -101,7 +102,6 @@ HOLD_MAX_M = 150.0            # ... at most this short of the call
 LAST_FIX_S = TRAIL_S          # a last live fix this recent (the maps no longer draw it) starts its next trip
 OUT_S = 6 * 3600.0            # older, away from its station: where it is is unknown (not moved)
 PLACED = ("station", "returning", "enroute")   # placed by status (no live fix, not at a call); "enroute": started here
-OVERDUE_S = 120.0             # held short of the call this long past its estimated arrival: overdue (the page fades it)
 SAVE_KEY = "routes.motion"    # the trips and the moves, kept in the CAD's meta (a restart or a handover goes on with them)
 
 
@@ -324,64 +324,72 @@ class Routes:
         """Each rig's trip home (the module doc): started, moved on, ended; its marker rewritten. The trips' routes."""
         out, units = [], set()
         for m in markers:
-            u = m["unit"]
-            units.add(u)
-            place = m.get("place")
-            if place == "position":                    # a live fix: always wins
-                self.fixes[u] = ([m["lon"], m["lat"]], m["at"] if _num(m.get("at")) else now)
-                self.trips.pop(u, None)
-                continue
-            if place not in PLACED:                    # at a call (on location)
-                self.trips.pop(u, None)
-                continue
-            home = self._home(m.get("station") or "")
-            trip = self.trips.get(u)
-            if m.get("look") == "available":
-                rel = self._released(m, now, trip)
-                if rel is not None:
-                    trip = self._trip(g, rel, home, now, p, pen) if home is not None else None
-                    if trip is None:
-                        self.trips.pop(u, None)
-                    else:
-                        self.trips[u] = trip
-                if trip is None:
-                    continue
-                q, at = p.quarters_status, m.get("status_at")
-                if q and m.get("status") == q and _num(at) and at > trip["move"]["t0"] + QUARTERS_GRACE_S:
-                    self.trips.pop(u, None)            # reported back in quarters
-                    self.fixes.pop(u, None)
-                    continue
-                if now >= trip["move"]["done_at"]:     # there: in quarters, idle
-                    self.fixes.pop(u, None)
-                    if place == "station":
-                        self.trips.pop(u, None)
-                    else:
-                        _at_home(m, trip["home"])
-                    continue
-                out.append(self._apply(m, trip, now))
-            elif m.get("look") not in GOING:           # out of service (any status neither free nor on a call)
-                self.trips.pop(u, None)
-                continue
-            elif trip is not None:                     # on a call while on its way home: from where it was then
-                if "froze" not in trip:
-                    t = m.get("status_at")
-                    t = t if _num(t) and trip["move"]["t0"] <= t <= now else now
-                    trip["froze"] = (_est(trip, t)[0], t)
-                ll, t = trip["froze"]
-                m.update(place="enroute", group=f"unit:{u}", lon=ll[0], lat=ll[1], ring=0, start_at=t, est=True)
-            else:
-                f = self.fixes.get(u)
-                if f is None or home is None or eta.haversine_km(f[0], home) <= AT_HOME_KM:
-                    continue
-                if now - f[1] <= LAST_FIX_S:           # from its last live fix
-                    m.update(place="enroute", group=f"unit:{u}", lon=f[0][0], lat=f[0][1], ring=0, start_at=f[1], est=True)
-                elif now - f[1] <= OUT_S:
-                    m["start_unknown"] = True          # out, where unknown: not moved
+            units.add(m["unit"])
+            try:
+                self._trip_one(m, now, g, p, pen, out)
+            except (KeyError, TypeError, ValueError, IndexError, ZeroDivisionError) as e:   # one bad trip: that one forgotten
+                self.log(f"routes: {m['unit']}: trip dropped ({type(e).__name__}: {e})")
+                self.trips.pop(m["unit"], None)
         for u in [u for u in self.trips if u not in units]:
             del self.trips[u]
         for u in [u for u, f in self.fixes.items() if now - f[1] > OUT_S]:
             del self.fixes[u]
         return out
+
+    def _trip_one(self, m: dict, now: float, g, p: eta.Params, pen, out: list) -> None:
+        """One rig's trip home this build (_trips)."""
+        u = m["unit"]
+        place = m.get("place")
+        if place == "position":                    # a live fix: always wins
+            self.fixes[u] = ([m["lon"], m["lat"]], m["at"] if _num(m.get("at")) else now)
+            self.trips.pop(u, None)
+            return
+        if place not in PLACED:                    # at a call (on location)
+            self.trips.pop(u, None)
+            return
+        home = self._home(m.get("station") or "")
+        trip = self.trips.get(u)
+        if m.get("look") == "available":
+            rel = self._released(m, now, trip)
+            if rel is not None:
+                trip = self._trip(g, rel, home, now, p, pen) if home is not None else None
+                if trip is None:
+                    self.trips.pop(u, None)
+                else:
+                    self.trips[u] = trip
+            if trip is None:
+                return
+            q, at = p.quarters_status, m.get("status_at")
+            if q and m.get("status") == q and _num(at) and at > trip["move"]["t0"] + QUARTERS_GRACE_S:
+                self.trips.pop(u, None)            # reported back in quarters
+                self.fixes.pop(u, None)
+                return
+            if now >= trip["move"]["done_at"]:     # there: in quarters, idle
+                self.fixes.pop(u, None)
+                if place == "station":
+                    self.trips.pop(u, None)
+                else:
+                    _at_home(m, trip["home"])
+                return
+            out.append(self._apply(m, trip, now))
+        elif m.get("look") not in GOING:           # out of service (any status neither free nor on a call)
+            self.trips.pop(u, None)
+            return
+        elif trip is not None:                     # on a call while on its way home: from where it was then
+            if "froze" not in trip:
+                t = m.get("status_at")
+                t = t if _num(t) and trip["move"]["t0"] <= t <= now else now
+                trip["froze"] = (_est(trip, t)[0], t)
+            ll, t = trip["froze"]
+            m.update(place="enroute", group=f"unit:{u}", lon=ll[0], lat=ll[1], ring=0, start_at=t, est=True)
+        else:
+            f = self.fixes.get(u)
+            if f is None or home is None or eta.haversine_km(f[0], home) <= AT_HOME_KM:
+                return
+            if now - f[1] <= LAST_FIX_S:           # from its last live fix
+                m.update(place="enroute", group=f"unit:{u}", lon=f[0][0], lat=f[0][1], ring=0, start_at=f[1], est=True)
+            elif now - f[1] <= OUT_S:
+                m["start_unknown"] = True          # out, where unknown: not moved
 
     def _released(self, m: dict, now: float, trip: dict | None) -> tuple | None:
         """A release newer than its trip: (key, from [lon, lat], when, the call's number) or None. Cleared from a call
@@ -548,22 +556,41 @@ class Routes:
     # -- kept across a restart (#453) ---------------------------------------------------------------------------
 
     def _load(self) -> None:
+        """The kept trips and moves, each checked (_ok_trip, _ok_ent): a bad one left out; a record that can't be read
+        at all: started afresh (nothing half read)."""
         self._loaded = True
+        trips, cache, raw = {}, {}, None
         try:
             raw = self.persist[0]() if self.persist else None
             doc = json.loads(raw) if raw else {}
-            for u, t in (doc.get("trips") or {}).items():
-                t["key"] = tuple(t["key"])
-                if t.get("froze"):
-                    t["froze"] = (t["froze"][0], t["froze"][1])
-                self.trips[u] = t
-            for k, ent in (doc.get("moves") or {}).items():
-                unit, iid = k.rsplit("|", 1)
-                self.cache[(unit, int(iid))] = dict(ent, sig=None, restored=True, fix_at=None, away=0, along=0.0,
-                                                    remain=ent["m"])
-            self._saved = raw or ""
-        except Exception as e:  # noqa: BLE001 - a bad record: started afresh
+            if not isinstance(doc, dict):
+                raise ValueError("not an object")
+            for k in ("trips", "moves"):
+                if doc.get(k) and not isinstance(doc[k], dict):
+                    self.log(f"routes: kept {k} left out (not an object)")
+            got = doc.get("trips") or {}
+            for u, t in (got.items() if isinstance(got, dict) else ()):
+                if isinstance(u, str) and _ok_trip(t):
+                    t["key"] = tuple(t["key"])
+                    if t.get("froze") is not None:
+                        t["froze"] = (list(t["froze"][0]), float(t["froze"][1]))
+                    trips[u] = t
+                else:
+                    self.log(f"routes: a kept trip left out ({str(u)[:20]})")
+            got = doc.get("moves") or {}
+            for k, ent in (got.items() if isinstance(got, dict) else ()):
+                unit, _, iid = str(k).rpartition("|")
+                if unit and iid.lstrip("-").isdigit() and _ok_ent(ent):
+                    cache[(unit, int(iid))] = dict(ent, sig=None, restored=True, fix_at=None, away=0, along=0.0,
+                                                   remain=ent["m"])
+                else:
+                    self.log(f"routes: a kept move left out ({str(k)[:30]})")
+        except Exception as e:  # noqa: BLE001 - a bad record: started afresh, nothing of it kept
             self.log(f"routes: kept trips not read ({type(e).__name__}: {e})")
+            return
+        self.trips.update(trips)
+        self.cache.update(cache)
+        self._saved = raw or ""
 
     def _save(self) -> None:
         if not self.persist:
@@ -620,6 +647,39 @@ def _m(a, b) -> float:
 
 def _num(v) -> bool:
     return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+
+
+def _pt(v) -> bool:
+    return isinstance(v, list) and len(v) == 2 and all(_num(x) for x in v)
+
+
+def _path_ok(d: dict) -> bool:
+    c, cum = d.get("coords"), d.get("cum")
+    return (isinstance(c, list) and len(c) >= 2 and all(_pt(x) for x in c) and isinstance(cum, list)
+            and len(cum) == len(c) and all(_num(x) for x in cum) and _num(d.get("m")) and _num(d.get("s")))
+
+
+def _ok_move(mv) -> bool:
+    """A kept move: its numbers (stop and short_m when there)."""
+    return (isinstance(mv, dict) and all(_num(mv.get(k)) for k in ("t0", "mps", "hold_m", "done_at"))
+            and all(k not in mv or _num(mv[k]) for k in ("ease_s", "stop", "short_m")))
+
+
+def _ok_trip(t) -> bool:
+    """A kept trip home: its key, home, path and move (and where it froze, when it did)."""
+    if not (isinstance(t, dict) and isinstance(t.get("key"), list) and t["key"] and _pt(t.get("home"))
+            and _path_ok(t) and _ok_move(t.get("move")) and _num(t.get("at")) and isinstance(t.get("number"), str)
+            and isinstance(t.get("by"), str)):
+        return False
+    fz = t.get("froze")
+    return fz is None or (isinstance(fz, list) and len(fz) == 2 and _pt(fz[0]) and _num(fz[1]))
+
+
+def _ok_ent(e) -> bool:
+    """A kept route with its move (Routes.cache's entry)."""
+    return (isinstance(e, dict) and _pt(e.get("to")) and _pt(e.get("origin")) and _path_ok(e) and _num(e.get("at"))
+            and _ok_move(e.get("move")) and (e.get("anchor") is None or _pt(e["anchor"]))
+            and all(isinstance(e.get(k), str) for k in ("from", "why", "by")))
 
 
 def _cum(coords: list) -> list[float]:
