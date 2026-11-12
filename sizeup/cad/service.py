@@ -1374,7 +1374,9 @@ class Cad:
         keep = {Path(r["audio_path"]).name for r in self.store.q("SELECT audio_path FROM dispatches WHERE audio_path != ''")}
         cutoff = time.time() - PREVIEW_KEEP_S
         if self.audio_blobs is not None:
-            self.audio_blobs.prune_dispatch({Path(k).stem for k in keep}, cutoff)
+            # the hub's copy of a preview: kept as long as the radio audio by default (#414: 30 days), the disk's a day
+            keep_s = max(PREVIEW_KEEP_S, float(getattr(self, "preview_blob_keep_s", 0) or 0))
+            self.audio_blobs.prune_dispatch({Path(k).stem for k in keep}, time.time() - keep_s)
         for f in self.audio_dir.glob("*.wav"):
             try:
                 if f.name not in keep and f.stat().st_mtime < cutoff:

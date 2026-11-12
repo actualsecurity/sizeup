@@ -858,7 +858,7 @@ function renderSourcePages(inc) {
     const b = Icon.play(el("button", "play"));
     b.type = "button";
     b.disabled = t.has_audio === false;
-    b.title = t.has_audio === false ? "Recording expired (12 h)" : `Play the page (${fmtTime(t.start, true)})${t.voice_at > 0 ? ", tones skipped" : ""}`;
+    b.title = t.has_audio === false ? "Audio expired" : `Play the page (${fmtTime(t.start, true)})${t.voice_at > 0 ? ", tones skipped" : ""}`;
     playBtn(b, clipUrl(t, false));
     r.append(b, el("span", "dim", `Page ${fmtTime(t.start)}`), ...Radio.pageTags(t.tones));
     if (!BOARD) r.append(UI.menu.button(`Actions: page ${fmtTime(t.start, true)}`, () => pageMenuItems(t), { key: `inc-page:${t.id}` }));
@@ -1094,8 +1094,8 @@ function radioRow(t, ctx = {}) {
   const li = el("li", "rt");
   const meta = el("div", "meta");
   if (t.id) meta.dataset.tx = t.id;      // which transmission (status-hints.js: "Suggests E64 on location" under it)
-  const b = Icon.play(el("button", "play"));
-  b.title = t.has_audio === false ? "Recording expired (12 h)" : t.voice_at > 0 ? "Play (tones skipped)" : "Play";
+  const b = Icon.play(el("button", "play"), t.has_audio === false ? "none" : "play");     // expired: a dash, no play (#414)
+  b.title = t.has_audio === false ? "Audio expired" : t.voice_at > 0 ? "Play (tones skipped)" : "Play";
   b.disabled = t.has_audio === false;
   playBtn(b, clipUrl(t, false));
   meta.append(b, el("span", "t", fmtTime(t.start, true)));
@@ -1465,7 +1465,7 @@ function txMenuItems(t) {
   if (canDo("admin")) {
     const waiting = rerunWaiting(t);
     items.push({ label: waiting ? "Re-transcribing…" : "Re-transcribe", disabled: t.has_audio === false || waiting,
-                 hint: t.has_audio === false ? "recording expired" : "", run: () => rerunTx(t) });
+                 hint: t.has_audio === false ? "audio expired" : "", run: () => rerunTx(t) });
   }
   items.push({ label: "Copy text", disabled: !t.text, run: () => copyText(t) });
   return items;
