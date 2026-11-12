@@ -230,6 +230,9 @@ class Routes:
                             ent = new
                         elif why == "new" and not (ent and ent.get("by") == "line" and ent["to"] == m["line_to"]):
                             ent = None
+                if ent is not None and ent.get("by") == "line" and m.get("place") not in PLACED:
+                    ent = None                                  # a live fix: no estimate, the straight line as before
+                    self.cache.pop(key, None)
                 if (ent is None or ent["to"] != m["line_to"]) and self._moving(m):
                     ent = self._line(m, prev, now, p)                   # no road near (no graph): the straight line
                 if ent is None or ent["to"] != m["line_to"]:      # (a call moved, not routed yet: none)
@@ -369,7 +372,7 @@ class Routes:
             cands.append((("cancel", k[1], ent["at"]), _est(ent, t)[0], t, ent.get("number") or ""))
         if not cands:
             return None
-        c = max(cands, key=lambda c: c[2])
+        c = cands[0] if cands[0][0][0] == "clear" else max(cands, key=lambda c: c[2])   # on location there: the clear
         if trip is not None and (c[0] == trip["key"] or c[2] <= trip["move"]["t0"]):
             return None
         return c
