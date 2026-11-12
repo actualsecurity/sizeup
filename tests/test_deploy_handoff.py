@@ -431,6 +431,9 @@ def test_the_task_definition_mounts_the_dvr_on_efs_and_names_the_attachments_buc
     acct = td["taskRoleArn"].split(":")[4]
     assert env["SIZEUP_ATTACHMENTS_BUCKET"] == f"sizeup-clips-{acct}"     # 14-dvr-storage.sh's CLIPS
     assert "SIZEUP_ATTACHMENTS_BUCKET" not in {e["name"] for e in cf["environment"]}
+    assert env["SIZEUP_AUDIO_BUCKET"] == f"sizeup-audio-{acct}"          # 18-audio-storage.sh's bucket (#414)
+    assert "SIZEUP_AUDIO_BUCKET" not in {e["name"] for e in cf["environment"]}
+    assert "SIZEUP_AUDIO_BUCKET" not in {s["name"] for s in hub["secrets"]}   # a plain value, not a secret
 
 
 def test_the_hub_sees_the_efs_mount_as_the_dvrs_shared_folder(monkeypatch, tmp_path):
@@ -466,6 +469,20 @@ def test_the_hub_turns_attachments_on_from_the_task_definitions_bucket(monkeypat
     assert a.configured and a.s3.bucket == env["SIZEUP_ATTACHMENTS_BUCKET"] and a.prefix == "attachments"
     monkeypatch.delenv("SIZEUP_ATTACHMENTS_BUCKET")                  # the rollback: no bucket, nothing copied
     assert not Attachments.from_env(make_cad(tmp_path / "b").store, log=lambda m: None).configured
+
+
+def test_the_hub_keeps_audio_in_the_task_definitions_bucket(monkeypatch):
+    from sizeup import audiostore
+    hub = next(c for c in _taskdef()["containerDefinitions"] if c["name"] == "hub")
+    env = {e["name"]: e["value"] for e in hub["environment"]}
+    monkeypatch.setenv("SIZEUP_AUDIO_BUCKET", env["SIZEUP_AUDIO_BUCKET"])
+    monkeypatch.setenv("AWS_REGION", env["AWS_REGION"])
+    monkeypatch.delenv("SIZEUP_AUDIO_DIR", raising=False)
+    store = audiostore.from_env(log=lambda m: None)
+    assert isinstance(store, audiostore.S3AudioStore) and store.bucket == env["SIZEUP_AUDIO_BUCKET"]
+    assert store.s3.base == f"https://{env['SIZEUP_AUDIO_BUCKET']}.s3.us-east-1.amazonaws.com"
+    monkeypatch.delenv("SIZEUP_AUDIO_BUCKET")                        # the rollback: the bytes stay in audio.sqlite
+    assert audiostore.from_env(log=lambda m: None) is None
 
 
 def test_the_task_definition_names_real_efs_ids_not_placeholders():

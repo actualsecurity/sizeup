@@ -14,7 +14,8 @@
 // its audio here. Nothing is keyed on a radio.
 //
 // Views (the header's tabs): Dispatch (the selected incident), Overview (every open call, cadmap.js),
-// Radio (/cad#radio?..., radio-view.js: every transmission, which replaced the Comms page) and Settings.
+// Radio (/cad#radio?..., radio-view.js: every transmission, which replaced the Comms page), Search (/cad#search?...,
+// search-view.js: past calls and address notes, #403) and Settings.
 // /monitor is this same page as a read-only wall board (BOARD, board.js): the Overview only, larger type,
 // nothing to press but Sound and Full screen, so it never disagrees with the console.
 //
@@ -44,6 +45,7 @@ const cad = {
   boxDispatch: null,         // the dispatch id the dispatch box shows (null: a preview, or hidden)
   mode: "none",              // none (Overview) | new | view | idle (Dispatch with nothing selected)
   radio: false,              // the Radio view is open (#radio)
+  search: false,             // the Search view is open (#search, search-view.js, #403)
   extra: new Map(),          // incidents opened from Records that aren't in the live state
   rec: null,                 // {iid, units, unfilled, already, card, note, checked:Set, extra:[], error}
   map: null, marker: null, mapSig: "",
@@ -433,9 +435,16 @@ function renderClock() {              // the same clock on the console and the b
 
 function leaveView() {               // an incident or the form opens: out of Radio and Settings
   if (location.hash) history.pushState(null, "", location.pathname);
-  if (cad.radio || !$("#settings").hidden || !$("#styleguide").hidden) window.dispatchEvent(new HashChangeEvent("hashchange"));
+  if (cad.radio || cad.search || !$("#settings").hidden || !$("#styleguide").hidden) window.dispatchEvent(new HashChangeEvent("hashchange"));
 }
-function route() {                    // #radio?filters: the Radio view; anything else: the console's own
+function route() {                    // #radio?filters: the Radio view; #search?filters: Search; anything else: the console's own
+  const search = !BOARD && location.hash.startsWith("#search");
+  if (search !== cad.search || search) {
+    cad.search = search;
+    show($("#search-view"), search);
+    if (window.SearchView) { if (search) SearchView.open(location.hash.slice("#search".length).replace(/^\?/, "")); else SearchView.close(); }
+    if (cad.state && !location.hash.startsWith("#radio")) render();
+  }
   const radio = !BOARD && location.hash.startsWith("#radio");
   const q = radio ? location.hash.slice("#radio".length).replace(/^\?/, "") : "";
   if (radio !== cad.radio || radio) {
@@ -448,13 +457,13 @@ function route() {                    // #radio?filters: the Radio view; anythin
 }
 function viewTab() {                 // the view on screen: overview | dispatch (the Incident tab) | radio | settings
   const settings = !$("#settings").hidden || !$("#styleguide").hidden;
-  return settings ? "settings" : cad.radio ? "radio" : cad.mode === "none" ? "overview" : "dispatch";
+  return settings ? "settings" : cad.radio ? "radio" : cad.search ? "search" : cad.mode === "none" ? "overview" : "dispatch";
 }
 function renderTabs() {
   const tab = viewTab();
   // body[data-view]: Dispatch drops the 60 Control feed and shows the rigs big (#205); the board has no tabs
   if (!BOARD && document.body.dataset.view !== tab) document.body.dataset.view = tab;
-  for (const [id, k] of [["#overview-open", "overview"], ["#dispatch-open", "dispatch"], ["#radio-open", "radio"], ["#settings-open", "settings"]]) {
+  for (const [id, k] of [["#overview-open", "overview"], ["#dispatch-open", "dispatch"], ["#radio-open", "radio"], ["#search-open", "search"], ["#settings-open", "settings"]]) {
     const b = $(id);
     b.classList.toggle("on", tab === k);
     if (tab === k) b.setAttribute("aria-current", "page"); else b.removeAttribute("aria-current");
@@ -689,7 +698,7 @@ function selectIncident(id) {
 
 function renderDetail() {
   renderTabs();
-  if (cad.radio) {                    // the Radio view has the middle column (radio-view.js)
+  if (cad.radio || cad.search) {      // the Radio view (radio-view.js) or Search (search-view.js) has the middle column
     for (const id of ["#new-form", "#d-empty", "#d-body"]) show($(id), false);
     return;
   }
@@ -757,6 +766,7 @@ function renderDetail() {
   if (open) since(elapsed, inc.created_at);
   else { since(elapsed, null); setText(elapsed, fmtDur((inc.closed_at || 0) - inc.created_at)); }
   if (window.Incoming) Incoming.facts($("#d-feed"), inc, { api, operator, readonly: BOARD || !canDo("dispatch") });
+  if (window.AddrHistory) AddrHistory.card(inc, { readonly: BOARD || !canDo("dispatch") });   // notes, History here (#403)
   const viaFeed = inc.source === "CAD feed" && inc.feed;              // received from the feed itself (#297)
   show($("#d-via-w"), !!inc.received_via || !!viaFeed);
   setText($("#d-via"), viaFeed ? inc.feed.label : inc.received_via ? nameOf("received_via", inc.received_via) : "");
@@ -848,7 +858,7 @@ function renderSourcePages(inc) {
     const b = Icon.play(el("button", "play"));
     b.type = "button";
     b.disabled = t.has_audio === false;
-    b.title = t.has_audio === false ? "Recording expired (12 h)" : `Play the page (${fmtTime(t.start, true)})${t.voice_at > 0 ? ", tones skipped" : ""}`;
+    b.title = t.has_audio === false ? "Audio expired" : `Play the page (${fmtTime(t.start, true)})${t.voice_at > 0 ? ", tones skipped" : ""}`;
     playBtn(b, clipUrl(t, false));
     r.append(b, el("span", "dim", `Page ${fmtTime(t.start)}`), ...Radio.pageTags(t.tones));
     if (!BOARD) r.append(UI.menu.button(`Actions: page ${fmtTime(t.start, true)}`, () => pageMenuItems(t), { key: `inc-page:${t.id}` }));
@@ -1084,8 +1094,8 @@ function radioRow(t, ctx = {}) {
   const li = el("li", "rt");
   const meta = el("div", "meta");
   if (t.id) meta.dataset.tx = t.id;      // which transmission (status-hints.js: "Suggests E64 on location" under it)
-  const b = Icon.play(el("button", "play"));
-  b.title = t.has_audio === false ? "Recording expired (12 h)" : t.voice_at > 0 ? "Play (tones skipped)" : "Play";
+  const b = Icon.play(el("button", "play"), t.has_audio === false ? "none" : "play");     // expired: a dash, no play (#414)
+  b.title = t.has_audio === false ? "Audio expired" : t.voice_at > 0 ? "Play (tones skipped)" : "Play";
   b.disabled = t.has_audio === false;
   playBtn(b, clipUrl(t, false));
   meta.append(b, el("span", "t", fmtTime(t.start, true)));
@@ -1455,7 +1465,7 @@ function txMenuItems(t) {
   if (canDo("admin")) {
     const waiting = rerunWaiting(t);
     items.push({ label: waiting ? "Re-transcribing…" : "Re-transcribe", disabled: t.has_audio === false || waiting,
-                 hint: t.has_audio === false ? "recording expired" : "", run: () => rerunTx(t) });
+                 hint: t.has_audio === false ? "audio expired" : "", run: () => rerunTx(t) });
   }
   items.push({ label: "Copy text", disabled: !t.text, run: () => copyText(t) });
   return items;

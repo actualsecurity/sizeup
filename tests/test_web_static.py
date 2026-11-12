@@ -119,17 +119,20 @@ def test_every_post_the_scripts_make_is_in_the_permission_map():
 
 def test_every_admin_only_get_the_scripts_make_is_in_the_read_map():
     """The admin-only GETs (sizeup/cad/api.py ADMIN_READS, checked by CadApi.get and server.py's /api/cad/health): the push
-    topics (Settings > System) and station health (Settings > Health, #203). A dispatcher or viewer gets a 403."""
+    topics (Settings > System), station health (Settings > Health, #203) and the Search page's CSV (#403). A dispatcher or
+    viewer gets a 403."""
     scripts = "".join(js(n) for n in JS_FILES)
     for path, literal, script in (("/api/cad/notify", '"/api/cad/notify"', "settings.js"),
-                                  ("/api/cad/health", '"/api/cad/health"', "health.js")):
+                                  ("/api/cad/health", '"/api/cad/health"', "health.js"),
+                                  ("/api/cad/search.csv", "`/api/cad/search.csv?", "search-view.js")):
         assert literal in js(script), f"{script} doesn't read {path}"
         assert path in ADMIN_READS, path
     # ... and a reception test's captured audio (#410: served by server.py, played in Settings > Radios)
     assert "/api/reception/sample?id=" in js("radio-controls.js") and '"/api/reception"' in js("radio-controls.js")
-    # (perf: #425; + #409: which radios keyed an encrypted talkgroup, which no script reads yet)
+    # (perf: #425; #403: the Search CSV; + #409: which radios keyed an encrypted talkgroup, which no script reads yet)
     assert set(ADMIN_READS) == {"/api/cad/notify", "/api/cad/health", "/api/cad/perf", "/api/cad/perf/profile",
-                                "/api/cad/comms/activity", "/api/reception", "/api/reception/sample"}
+                                "/api/cad/search.csv", "/api/cad/comms/activity", "/api/reception",
+                                "/api/reception/sample"}
     assert '"/api/cad/perf"' in js("health.js") and '"/api/cad/perf/profile' in js("health.js")
     assert "/api/cad/perf" not in scripts.replace(js("health.js"), "")        # only the tab reads it
     assert "/api/cad/health" not in scripts.replace(js("health.js"), "")      # only the tab reads it

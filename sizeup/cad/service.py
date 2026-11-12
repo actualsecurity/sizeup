@@ -30,6 +30,8 @@ from sizeup.cad.activity import Activity
 from sizeup.cad.alarms import Alarms
 from sizeup.cad.automode import AutoDispatch
 from sizeup.cad.comms import MAIN_LIMIT, MAX_ROWS, OTHER_LIMIT, Comms
+from sizeup.cad.history import AddressHistory
+from sizeup.cad.premise import Premise
 from sizeup.cad.feed import Feed
 from sizeup.cad.newids import NewIds
 from sizeup.cad.statushints import StatusHints
@@ -343,6 +345,11 @@ class Cad:
         # GET /api/cad/tones (#80): the pairs named from the console and the names to pick from; the app sets it.
         self.tone_names: Callable[[], dict] = lambda: {"named": self.settings.tone_rows(), "names": list(s.monitor_departments),
                                                         "ours": list(s.monitor_departments)}
+        # Address history and search (#403, sizeup/cad/history.py): each incident's address and building keys, History
+        # here, the Search page and its FTS index; the app starts its background backfill (addrs.start()). Premise
+        # notes (sizeup/cad/premise.py): what crews should know about a building, on every call there.
+        self.addrs = AddressHistory(self, clock=clock, log=log)
+        self.premise = Premise(self)
 
     @classmethod
     def from_config(cls, cfg, geocoder=None, log=print) -> Cad:
@@ -365,7 +372,9 @@ class Cad:
         rev = self.store.rev
         if self._state is None or self._state[0] != rev:
             cards = runcards.cards(self.store)
+            self.addrs.key_open()                         # a new or moved address keyed first: its notes show (#403)
             incs = self._with_radio(self.store.incidents())
+            self.premise.decorate(incs)
             try:
                 self.sources.decorate(incs)               # a feed's jurisdiction and run numbers on the incident (#297)
             except Exception as e:  # noqa: BLE001
@@ -641,8 +650,30 @@ class Cad:
         now = self.clock() if now is None else now
         units = self.store.units() if units is None else units
         incs = self.store.q("SELECT id, number, status, lat, lon FROM incidents WHERE status IN ('queued', 'pending', 'active')")
-        return mapview.locations(units, incs, self.lists.role, self.firehouses, self._positions(now), now,
-                                 self.clears(now), self.eta, lists=self.lists)
+        out = mapview.locations(units, incs, self.lists.role, self.firehouses, self._positions(now), now,
+                                self.clears(now), self.eta, lists=self.lists)
+        return self._with_trips(out, now) if self.routes is not None else out
+
+    def _with_trips(self, where: dict, now: float) -> dict:
+        """The maps' trips home by road (routes.py, #453) over mapview's straight-line return: the recommendation puts
+        a rig where the map draws it (on the road: no turnout), and in quarters once the map has it home."""
+        for code, loc in where.items():
+            if not loc or loc["where"] not in ("returning", "near", "station"):
+                continue
+            try:
+                t = self.routes.trip_at(code, now)
+            except Exception as e:  # noqa: BLE001 - mapview's estimate then
+                self.log(f"CAD: trips home: {type(e).__name__}: {e}")
+                return where
+            if t is None:
+                continue
+            if t["home"]:
+                where[code] = dict(loc, where="station", ll=loc.get("home") or t["ll"], on_road=False,
+                                   label=f"from {loc['station']}" if loc.get("station") else loc["label"])
+            else:
+                where[code] = dict(loc, where="returning", ll=t["ll"], on_road=True,
+                                   label=f"returning from {t['number'] or 'a call'}")
+        return where
 
     def _with_radio(self, incs: list[dict], limit: int = 200) -> list[dict]:
         """Each event's radio traffic (newest first), with whether its audio is still kept."""
@@ -1366,7 +1397,9 @@ class Cad:
         keep = {Path(r["audio_path"]).name for r in self.store.q("SELECT audio_path FROM dispatches WHERE audio_path != ''")}
         cutoff = time.time() - PREVIEW_KEEP_S
         if self.audio_blobs is not None:
-            self.audio_blobs.prune_dispatch({Path(k).stem for k in keep}, cutoff)
+            # the hub's copy of a preview: kept as long as the radio audio by default (#414: 30 days), the disk's a day
+            keep_s = max(PREVIEW_KEEP_S, float(getattr(self, "preview_blob_keep_s", 0) or 0))
+            self.audio_blobs.prune_dispatch({Path(k).stem for k in keep}, time.time() - keep_s)
         for f in self.audio_dir.glob("*.wav"):
             try:
                 if f.name not in keep and f.stat().st_mtime < cutoff:
@@ -1630,8 +1663,9 @@ class Cad:
     def settings_export(self) -> dict:
         return self.settings.export()
 
-    def settings_audit_log(self, q: dict) -> dict:
-        return {"audit": self.settings.audit_log((q.get("section") or [""])[0][:40])}
+    def settings_audit_log(self, q: dict, may: str = "admin") -> dict:
+        """may: the reader's standing; a premise note's rows of a category they may not see (now) without its text (#403)."""
+        return {"audit": self.premise.redact_audit(self.settings.audit_log((q.get("section") or [""])[0][:40]), may)}
 
     # -- location suggestions -----------------------------------------------------------------------
 

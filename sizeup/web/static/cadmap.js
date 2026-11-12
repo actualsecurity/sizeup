@@ -38,6 +38,14 @@
 // near): the straight line, as before. Redrawn with the call line, on the frames that move a mark: nothing here keeps
 // the frame loop running.
 //
+// Estimated motion (#453): a rig with no live fix moves along its route by the hub's `move` (routes.py: the route's
+// average speed from its en-route time, from rest; held just short of the call until on location; released, home along
+// its route): drawn at alongAt(move, now), turned to the road, translucent with "~" before its status (the tooltip says
+// it is an estimate). Its route ahead of it replaces the straight line (the passed part gone; the way home thin and grey,
+// only while it is drawn full). On location, released or home it glides to its new place (SETTLE_MS). A live fix always
+// wins at once. tick() moves it and turns it (position and --rot only) at most every EST_MS, while it is moving and the
+// tab is shown; held, or home, it asks for no frames.
+//
 // Decluttered by zoom (#376; the zooms: state.map.display, Settings > System > Map display, mapview.py DISPLAY_DEFAULTS):
 //
 //   idle (available, in quarters, returning)   below detail_zoom a dot; two or more idle at one firehouse: one count
@@ -61,9 +69,12 @@
 // board); Zoom to: the firehouse at detail_zoom, its rigs drawn one by one.
 //
 // Rigs by apparatus type (#384; the hub's marker "icon", mapview.icon_of): engine, ladder, tower (aerial platform),
-// rescue, suv (chiefs', duty and utility cars), other. One monochrome silhouette each (cadmap.css .cm-ty, a CSS mask
-// defined once), in the chip's text colour on its status colour; in the station list, in the status colour. Not in the
-// dots (8-12 px: too small to read); a dot under the pointer opens to its chip, icon and all.
+// rescue, suv (chiefs', duty and utility cars), arff (the airport's crash trucks), other. #427: each drawn as the
+// vehicle from overhead (V: original simplified drawings), the marker itself: on the rig's place, turned to its
+// heading (rotOf: a live fix's; else nose out of its firehouse, nose to its call, or north), its body in its status
+// colour, its code in a small label beside it (placeLabels). Its least size keeps it legible; close in it is drawn to
+// its real length (--ppm on the map, set on zoom: the CSS sizes it; tick() never does). Not in the dots (8-12 px: too
+// small to read); a dot under the pointer opens to its vehicle and code.
 //
 // Highway layers (cameras, incidents, signs, mileposts, exits) and their Layers button: maplayers.js,
 // attached to every RigMap; the event's "Cameras nearby" row from detail().
@@ -73,7 +84,7 @@
 "use strict";
 
 window.CadMap = (() => {
-  const STATION_R = 34, INC_R = 30, RING_GAP = 24, CHIP_W = 62;   // px: the fan-out around an anchor (#384: icon + code)
+  const STATION_R = 38, INC_R = 36, RING_GAP = 32, CHIP_W = 62;   // px: the fan-out around an anchor (#427: a vehicle + its code)
   const DOT_R = 16, DOT_W = 14;        // px: the fan-out of dots only (#376)
   const BADGE_AT = [0, -13];           // px: a firehouse's count chip on top of its icon (#384; map-style.js reserves it)
   const FAR_ZOOM = 13.6;               // below this: smaller chips, tighter rings
@@ -139,9 +150,92 @@ window.CadMap = (() => {
   // s left of an active rig's FRESH_S since its status changed (0: not fresh); the hub's status_at, on the hub's clock
   const freshLeft = (m) => (rigClass(m) === "act" && typeof m.status_at === "number"
     ? Math.max(0, FRESH_S - Math.max(0, nowS() - m.status_at)) : 0);
-  // a rig's icon by apparatus type (#384): the hub's (mapview.icon_of), else the generic mark
-  const ICONS = new Set(["engine", "ladder", "tower", "rescue", "suv", "other"]);
+  // a rig's icon by apparatus type (#384; the hub's mapview.icon_of), else the generic one
+  const ICONS = new Set(["engine", "ladder", "tower", "rescue", "suv", "arff", "other"]);
   const iconOf = (m) => (m && ICONS.has(m.icon) ? m.icon : "other");
+  // ---- the rigs as the vehicles, from overhead (#427) ----------------------------------------------------------------
+  // Original simplified drawings, front (the cab) up, in decimetres: the body in the status colour (.b), glass (.g), the
+  // light bar (.lt, red ends .rd), steel (.m: ladder, boom, turrets), the turntable (.k), hose (.h), roof panels (.p),
+  // recesses (.d) and seams (.ln). The aerial's full detail (.hi: rails, rungs, the boom) only on a map close in
+  // (cm-near); smaller, a thin line (.lo), so the status-tinted body is most of what shows. len, wid: the drawn outline in metres (the class's typical size: an engine 10.5 m, a
+  // rear-mount ladder 13 m plus its fly over the cab, a mid-mount tower ladder 13.7 m with its platform over the back, a
+  // heavy rescue 11.5 m, a Tahoe 5.3 m, a 6x6 crash truck 12.2 x 3.1 m); minl, minw: px at the least (legible at any zoom).
+  const R = (c, x, y, w, ht, rx) => `<rect class="${c}" x="${x}" y="${y}" width="${w}" height="${ht}"${rx ? ` rx="${rx}"` : ""}/>`;
+  const C = (c, cx, cy, r) => `<circle class="${c}" cx="${cx}" cy="${cy}" r="${r}"/>`;
+  const P = (c, d) => `<path class="${c}" d="${d}"/>`;
+  const bar = (y, x0, x1) => R("lt", x0, y, x1 - x0, 2.2, 0.8) + R("rd", x0, y, 3.5, 2.2, 0.8) + R("rd", x1 - 3.5, y, 3.5, 2.2, 0.8);
+  const steps = (y0, y1, dy, x0, x1) => { let d = ""; for (let y = y0; y <= y1; y += dy) d += `M${x0} ${y}H${x1}`; return d; };
+  const V = {
+    engine: { len: 10.5, wid: 2.5, minl: 32, minw: 12, art:          // cab, crosslays behind it, ground ladders, hose bed
+      R("d", 1.5, 0, 22, 3, 1) + R("b", 0.5, 1.5, 24, 102, 2.5) + R("g", 2, 4, 21, 5, 1.5) + bar(10.5, 3, 22) + P("ln", "M1 28H24")
+      + R("h", 2, 30.5, 21, 2) + R("h", 2, 33.5, 21, 2) + R("h", 2, 36.5, 21, 2) + R("p", 2, 41, 13.5, 18, 1)
+      + R("m", 17.5, 41, 5, 56, 1) + P("ln", steps(45, 93, 4, 17.5, 22.5)) + R("d", 2.5, 62, 13.5, 38, 1)
+      + R("h", 3.5, 63, 3.4, 36) + R("h", 7.6, 63, 3.4, 36) + R("h", 11.7, 63, 3.4, 36) + R("d", 1, 101, 23, 3, 1) },
+    ladder: { len: 15, wid: 2.5, minl: 40, minw: 12, art:            // rear turntable, the ladder bedded over the cab
+      R("d", 1.5, 19, 22, 3, 1) + R("b", 0.5, 20.5, 24, 129, 2.5) + R("g", 2, 23, 21, 5, 1.5) + bar(29.5, 3, 22)
+      + P("ln", "M1 46H24") + R("d", 0, 47, 2.5, 4) + R("d", 22.5, 47, 2.5, 4) + R("d", 0, 141, 2.5, 4) + R("d", 22.5, 141, 2.5, 4)
+      + R("p", 1.5, 50, 4, 78, 1) + R("p", 19.5, 50, 4, 78, 1) + C("k hi", 12.5, 135, 9) + C("d hi", 12.5, 135, 4.5)
+      + R("mf hi", 8.4, 0, 8.2, 132) + R("m hi", 6, 0, 2.4, 132, 0.6) + R("m hi", 16.6, 0, 2.4, 132, 0.6)
+      + P("rg hi", steps(3, 129, 4, 8.4, 16.6)) + C("k lo", 12.5, 135, 5) + R("m lo", 11.2, 0, 2.6, 132, 0.6) },   // small: a thin line
+    tower: { len: 14.2, wid: 2.5, minl: 38, minw: 12, art:           // turntable behind the cab, the boom back to the platform
+      R("d", 1.5, 0, 22, 3, 1) + R("b", 0.5, 1.5, 24, 135.5, 2.5) + R("g", 2, 4, 21, 5, 1.5) + bar(10.5, 3, 22)
+      + P("ln", "M1 30H24") + R("d", 0, 33, 2.5, 4) + R("d", 22.5, 33, 2.5, 4) + R("d", 0, 118, 2.5, 4) + R("d", 22.5, 118, 2.5, 4)
+      + R("p", 1.5, 52, 4, 64, 1) + R("p", 19.5, 52, 4, 64, 1) + C("k hi", 12.5, 41, 9.5) + R("m hi", 6.5, 36, 12, 96, 1.5)
+      + R("mi hi", 8.7, 50, 7.6, 80, 1) + C("d hi", 12.5, 41, 3) + C("k lo", 12.5, 41, 5.5) + R("m lo", 11, 41, 3, 90, 0.8)
+      + R("bk", 4, 131, 17, 11, 1.5) + R("d", 6, 133, 13, 7, 1) },
+    rescue: { len: 11.5, wid: 2.5, minl: 34, minw: 13, art:          // box body, roof compartments, light tower, generator
+      R("d", 1.5, 0, 22, 3, 1) + R("b", 0.5, 1.5, 24, 112.5, 2.5) + R("g", 2, 4, 21, 5, 1.5) + bar(10.5, 3, 22)
+      + P("ln", "M1 30H24") + R("d", 1.5, 32, 22, 80, 1) + [34, 53, 72, 91].map((y) => R("p", 2, y, 6.5, 17, 1) + R("p", 16.5, y, 6.5, 17, 1)).join("")
+      + C("lt", 12.5, 40, 2.6) + R("k", 10, 56, 5, 10, 1) + C("k", 12.5, 100, 2.2) + R("d", 1, 111, 23, 3, 1) },
+    suv: { len: 5.3, wid: 2.05, minl: 20, minw: 10, art:              // hood, windshield, roof light bar, rear glass
+      R("d", -0.8, 16, 1.6, 2.4, 0.5) + R("d", 19.7, 16, 1.6, 2.4, 0.5) + R("b", 0.5, 0.5, 19.5, 52, 4.5)
+      + P("ln", "M3 13.5Q10.25 11.8 17.5 13.5") + P("g", "M2.5 15Q10.25 13 18 15L17 20.5Q10.25 19.5 3.5 20.5Z")
+      + R("p", 3.5, 21.5, 13.5, 23, 1.5) + R("lt", 3, 23, 14.5, 2.6, 1) + R("rd", 3, 23, 4, 2.6, 1) + R("rd", 13.5, 23, 4, 2.6, 1)
+      + R("g", 3.5, 46, 13.5, 4, 1.2) },
+    arff: { len: 12.2, wid: 3.1, minl: 36, minw: 15, art:            // bumper and roof turrets, wraparound glass, tanks, engine aft
+      R("m", 14.4, 0, 2.2, 4.5, 0.6) + R("b", 0.5, 3, 30, 118.5, 5) + C("m", 15.5, 5, 2.6)
+      + P("g", "M3 9Q15.5 5.5 28 9L27 16Q15.5 14 4 16Z") + bar(17.5, 5, 26) + C("m", 15.5, 28, 4.2) + R("m", 14.6, 19.5, 1.8, 8.5, 0.6)
+      + P("ln", "M1 36H30") + R("p", 3, 39, 11, 58, 2) + R("p", 17, 39, 11, 58, 2) + R("d", 4, 102, 23, 16, 1.5)
+      + P("ln", steps(105, 115, 3.3, 6, 25)) },
+    other: { len: 5.5, wid: 2.0, minl: 20, minw: 10, art:             // a plain vehicle, its front glass
+      R("b", 0.5, 0.5, 19, 54, 5) + R("g", 2.5, 9, 15, 4.5, 1.5) + R("g", 3, 46, 14, 3, 1) },
+  };
+  // its drawing: front up (on the map, turned to its heading), or front to the right (the station list's rows)
+  const vehSvg = (icon, side) => {
+    const v = V[icon] || V.other, w = v.wid * 10, l = v.len * 10;
+    return `<svg viewBox="0 0 ${side ? `${l} ${w}` : `${w} ${l}`}" preserveAspectRatio="none" aria-hidden="true">`
+      + (side ? `<g transform="translate(${l} 0) rotate(90)">${v.art}</g>` : v.art) + "</svg>";
+  };
+  function vehEl(icon, side) {
+    const e = h("i", `${side ? "cm-vs" : "cm-veh"} v-${icon}`);
+    e.innerHTML = vehSvg(icon, side);                     // our own drawing (V), never data
+    return e;
+  }
+  // px a metre on this map now (the maps never tilt or turn)
+  function pxPerM(map) {
+    try { return (512 * 2 ** map.getZoom()) / (40075016.686 * Math.cos(map.getCenter().lat * Math.PI / 180)); } catch (_) { return 0; }
+  }
+  // below this a metre is too few px for any vehicle to reach its least size: no scale on the page (one less restyle)
+  const SCALE_PPM = Math.min(...Object.values(V).map((v) => v.minl / v.len)) * 0.9;
+  // its size in px at ppm (a far map's least size smaller: FAR_K)
+  const FAR_K = 0.85;
+  const vehPx = (icon, ppm, far) => {
+    const v = V[icon] || V.other, k = far ? FAR_K : 1;
+    return [Math.max(v.minl * k, v.len * ppm), Math.max(v.minw * k, v.wid * ppm)];
+  };
+  // which way it points, degrees clockwise from north: its heading when its fix has one; else fanned out at its
+  // firehouse nose out (out of the bays), around a call nose to the call; else north
+  const headingOf = (m) => (typeof m.heading === "number" && Number.isFinite(m.heading) ? ((m.heading % 360) + 360) % 360 : null);
+  // a rig's status as words beside its code (#427: not by colour alone): its status code, at most 3 letters
+  const statusCue = (st, m) => String((st && st.code) || m.status || "").slice(0, 3);
+  function rotOf(m, off) {
+    const hd = headingOf(m);
+    if (hd !== null) return hd;
+    const [x, y] = off || [0, 0];
+    if (!x && !y) return 0;
+    const a = Math.atan2(x, -y) * 180 / Math.PI;          // the offset's bearing on screen (y down)
+    return Math.round((((m.place === "station" ? a : a + 180) % 360) + 360) % 360);
+  }
   // a department placeholder (DPT239 ...: its unit row's placeholder flag, #400; mapview.is_placeholder), not apparatus:
   // the hub never sends one; if one comes (flagged on its marker or its unit row), it is never drawn, counted, listed or
   // followed
@@ -151,7 +245,8 @@ window.CadMap = (() => {
     const ph = new Set((units || []).filter((u) => u.placeholder).map((u) => u.name));
     return ph.size || ms.some((m) => m.placeholder) ? ms.filter((m) => !m.placeholder && !ph.has(m.unit)) : ms;
   }
-  const ICON_NAMES = { engine: "engine", ladder: "ladder", tower: "tower ladder", rescue: "rescue", suv: "car", other: "" };
+  const ICON_NAMES = { engine: "engine", ladder: "ladder", tower: "tower ladder", rescue: "rescue", suv: "car", arff: "crash truck",
+                       other: "" };
   const CLASS_ORDER = { act: 0, idle: 1, oos: 2 };
   // the numbers of the open calls a rig is on (#384: the hub's incident_numbers; an older hub: its one call)
   const callsOf = (m) => (Array.isArray(m.incident_numbers) && m.incident_numbers.length ? m.incident_numbers
@@ -237,11 +332,13 @@ window.CadMap = (() => {
   // Frames only while something moves on a map on screen: a rig drawn on or catching up (glide.busy: parked and stale
   // ones settle and stop), a rig followed, or the frames owed after a new state; each map redrawn once its fastest rig
   // has moved STEP_PX there. The ages tick on a one-second timer while any live fix is drawn.
-  let raf = 0, ageTimer = 0;
+  // #453: only rigs moved by the estimate (ticked a few times a second): the loop sleeps between ticks (a timer), no
+  // frames in between
+  let raf = 0, ageTimer = 0, sleepT = 0;
   const visible = () => typeof document === "undefined" || document.visibilityState !== "hidden";
   const wanted = () => visible() && [...rigLayers].some((l) => l.moving());
   function animate() {
-    if (!raf && typeof requestAnimationFrame === "function" && wanted()) raf = requestAnimationFrame(frame);
+    if (!raf && !sleepT && typeof requestAnimationFrame === "function" && wanted()) raf = requestAnimationFrame(frame);
     if (fixesShown() && !ageTimer) ageTimer = setInterval(ageTick, AGE_MS);
     else if (!fixesShown() && ageTimer) { clearInterval(ageTimer); ageTimer = 0; }
   }
@@ -254,11 +351,17 @@ window.CadMap = (() => {
   function frame(ts) {
     raf = 0;
     if (!wanted()) return;
+    let smooth = fresh > 0, wait = Infinity;
     for (const l of rigLayers) {
-      if (l.moving() && ts - (l.tickedAt || 0) >= l.frameMs() - 2) { l.tickedAt = ts; l.tick(); }
+      if (!l.moving()) continue;
+      const ms = l.frameMs();
+      if (ts - (l.tickedAt || 0) >= ms - 2) { l.tickedAt = ts; l.tick(); }
+      if (l.smooth()) smooth = true;
+      else wait = Math.min(wait, (l.tickedAt || 0) + ms - ts);
     }
     if (fresh > 0) fresh -= 1;
-    raf = requestAnimationFrame(frame);
+    if (smooth || !(wait < Infinity) || typeof setTimeout !== "function") raf = requestAnimationFrame(frame);
+    else sleepT = setTimeout(() => { sleepT = 0; if (!raf) raf = requestAnimationFrame(frame); }, Math.max(0, wait - 8));
   }
   if (typeof document !== "undefined" && document.addEventListener) {
     document.addEventListener("visibilitychange", animate);
@@ -292,7 +395,72 @@ window.CadMap = (() => {
   // drawn on (fixWhere, on the frames), else where the hub put it
   const markAt = (m) => (m.place === "position" ? (drawn.get(m.unit) || [m.lon, m.lat]) : [m.lon, m.lat]);
   // ---- the probable path (#360) ----------------------------------------------------------------------------------
-  const routeOf = (M, m) => ((M && M.routes) || []).find((r) => r.unit === m.unit && r.incident_id === m.incident_id) || null;
+  const routeOf = (M, m) => ((M && M.routes) || []).find((r) => r.kind !== "back" && r.unit === m.unit && r.incident_id === m.incident_id) || null;
+  // ---- estimated motion along the route (#453) ----------------------------------------------------------------------
+  const EST_MS = 125;                  // an estimated rig moved and turned at most ~8 Hz
+  const SETTLE_MS = 1200;              // a rig taking a new place (on location, released, home) glides there this long
+  const backOf = (M, m) => ((M && M.routes) || []).find((r) => r.kind === "back" && r.unit === m.unit) || null;
+  const geos = new WeakMap();          // a route (one state's object) -> its points and metres along (once)
+  function geoOf(r) {
+    let g = geos.get(r);
+    if (g) return g;
+    const c = r.coords, cum = [0];
+    for (let i = 1; i < c.length; i++) cum.push(cum[i - 1] + km(c[i - 1], c[i]) * 1000);
+    g = { c, cum };
+    geos.set(r, g);
+    return g;
+  }
+  // routes.py along_at: metres along at t (hub epoch s): from rest over ease_s up to mps, never past hold_m, held at stop
+  function alongAt(mv, t) {
+    if (typeof mv.stop === "number") t = Math.min(t, mv.stop);
+    const dt = t - mv.t0, v = mv.mps || 0, e = mv.ease_s || 0;
+    if (!(dt > 0)) return 0;
+    const d = e > 0 ? v * (dt - e * (1 - Math.exp(-dt / e))) : v * dt;
+    return Math.min(mv.hold_m, Math.max(0, d));
+  }
+  // {ll, brg (degrees, the road's way there), i (its segment)} d metres along
+  function pointAt(g, d) {
+    const { c, cum } = g;
+    let i = 0;
+    while (i < c.length - 2 && cum[i + 1] <= d) i++;
+    while (i < c.length - 2 && cum[i + 1] - cum[i] <= 0) i++;
+    const a = c[i], b = c[i + 1], seg = cum[i + 1] - cum[i], k = seg > 0 ? Math.max(0, Math.min(1, (d - cum[i]) / seg)) : 0;
+    const kx = Math.cos((a[1] * Math.PI) / 180);
+    const brg = seg > 0 ? ((Math.atan2((b[0] - a[0]) * kx, b[1] - a[1]) * 180) / Math.PI + 360) % 360 : null;
+    return { ll: [a[0] + (b[0] - a[0]) * k, a[1] + (b[1] - a[1]) * k], brg, i };
+  }
+  // A rig moved by the estimate (no live fix, not at a call), on its way to a call or home: {r, g, d, ll, brg, moving}
+  // or null. moving: not yet held short of the call, not stopped, not home: it wants frames.
+  // overdue: held short of the call OVERDUE_S past its estimated arrival, still not on location (faded, "overdue")
+  const OVERDUE_S = 120;
+  function motionOf(m, M) {
+    if (m.place === "position" || m.place === "incident") return null;
+    const r = m.home_line ? (m.place === "returning" ? backOf(M, m) : null) : m.line_to ? routeOf(M, m) : null;
+    if (!r || !r.move || !Array.isArray(r.coords) || r.coords.length < 2) return null;
+    const g = geoOf(r), t = nowS(), d = alongAt(r.move, t), p = pointAt(g, d), held = typeof r.move.stop === "number";
+    return { r, g, d, ll: p.ll, brg: p.brg, i: p.i, moving: !held && d < r.move.hold_m && t < r.move.done_at,
+             overdue: r.kind !== "back" && !held && t > r.move.done_at + OVERDUE_S };
+  }
+  // the hub's markers as drawn: a rig moved by the estimate is its own group at its estimate (place "route" on its way to a
+  // call from its firehouse), marked est; one the hub placed by an estimate (est: started away from its firehouse) stays
+  // marked est while it waits there
+  function withEst(ms, M) {
+    return ms.map((m) => {
+      if (motionOf(m, M)) return { ...m, est: true, place: m.place === "station" ? "route" : m.place, group: `unit:${m.unit}`, ring: 0 };
+      if (m.est) return m.place === "position" || m.place === "incident" ? { ...m, est: false } : m;
+      return m;
+    });
+  }
+  // the route ahead of an estimated rig: from its estimate on
+  // its route ahead from a point at most ROUTE_STEP_M behind it (under the vehicle): the line is made again only when it
+  // has gone that far or passed a bend, not on every tick
+  const ROUTE_STEP_M = 20;
+  function restOf(e) {
+    const p = pointAt(e.g, Math.floor(e.d / ROUTE_STEP_M) * ROUTE_STEP_M);
+    return [p.ll, ...e.g.c.slice(p.i + 1)];
+  }
+  let routeIds = 0;
+  const routeId = (g) => g.id || (g.id = ++routeIds);
   // the route's points from the mark on: [mark, ...the rest]. The nearest segment to the mark, looked for near where the
   // hub last had the rig along it (along_m: from a little behind to ALONG_AHEAD_M ahead, as the mark is drawn on
   // between fixes), a tie going to the EARLIER segment: a route that doubles back on a street keeps its first leg.
@@ -408,7 +576,8 @@ window.CadMap = (() => {
           map.addLayer({
             id: "cm-routes", type: "line", source: "cm-routes", filter: ["!=", ["get", "trail"], true],
             layout: { "line-cap": "round", "line-join": "round" },
-            paint: { "line-color": ["get", "color"], "line-width": 3, "line-opacity": 0.9, "line-dasharray": [1.4, 1.2] },
+            paint: { "line-color": ["get", "color"], "line-width": ["case", ["to-boolean", ["get", "home"]], 1.6, 2.5],
+                     "line-opacity": ["case", ["to-boolean", ["get", "home"]], 0.7, 0.85], "line-dasharray": [1.4, 1.2] },
           }, map.getLayer("firehouse") ? "firehouse" : undefined);
         }
         this.ready = true;
@@ -423,13 +592,41 @@ window.CadMap = (() => {
       if (map.isStyleLoaded() || map.loaded()) tryInit();
       else { map.once("load", tryInit); map.once("idle", tryInit); }
       map.on("zoom", () => {
+        this.setScale();                                // #427: the vehicles to scale close in (one style property)
         const far = map.getZoom() < FAR_ZOOM;
         if (far !== this.far) { this.far = far; opts.host.classList.toggle("cm-far", far); this.setBand(); this.draw(); }
       });
       // #376: laid out again only if the band changed; moveend too: a drag takes the map off its automatic frame
-      const settle = () => { if (this.setBand()) this.draw(); };
+      const settle = () => { this.scaleNow(); if (this.setBand() | this.setGrow()) this.draw(); else this.placeLabels(); };
       map.on("zoomend", settle);
       map.on("moveend", settle);
+    }
+
+    // #427: px a metre on the page (--ppm on the map: each vehicle's CSS size), 0 while every one is at its least size
+    // once a frame at most while zooming (scaleNow on zoomend); cm-near on the map: the full detail (the ladder's rungs,
+    // the boom) only once an engine is drawn twice its least length, else the status-tinted body stays the most of it
+    setScale() {
+      if (this.scaleRaf) return;
+      if (typeof requestAnimationFrame !== "function") { this.scaleNow(); return; }
+      this.scaleRaf = requestAnimationFrame(() => { this.scaleRaf = 0; this.scaleNow(); });
+    }
+    scaleNow() {
+      const ppm = pxPerM(this.map), v = ppm >= SCALE_PPM ? Math.round(ppm * 100) / 100 : 0;
+      if (v === this.ppm) return;
+      this.ppm = v;
+      try {
+        const c = this.map.getContainer();
+        c.style.setProperty("--ppm", String(v));
+        c.classList.toggle("cm-near", v * V.engine.len >= 2 * V.engine.minl);
+      } catch (_) { /* */ }
+    }
+    // how much wider the fan-outs are, once an engine is drawn longer than its least size (in quarter steps); true if
+    // it changed (laid out again on zoomend, as the band)
+    setGrow() {
+      const g = Math.max(1, Math.round(pxPerM(this.map) * V.engine.len / V.engine.minl * 4) / 4);
+      if (g === this.grow) return false;
+      this.grow = g;
+      return true;
     }
 
     // the zoom band for the rigs' sizes (#376), from the map's zoom now and this map's zooms; true if it changed
@@ -456,8 +653,9 @@ window.CadMap = (() => {
       if (!this.ready || !this.data || !this.data.map) return;
       const M = this.data.map, lists = this.data.lists;
       if (this.opts.pins) this.drawPins(M.incidents || [], lists);
-      this.drawChips(drawable(M), lists);
-      this.drawLines(drawable(M), lists);
+      const ms = withEst(drawable(M), M);                // #453: the rigs moved by the estimate
+      this.drawChips(ms, lists);
+      this.drawLines(ms, lists);
       if (this.unsetBox) this.drawUnset(M.unset || []);
       this.followTick(true);
       animate();
@@ -465,30 +663,89 @@ window.CadMap = (() => {
 
     // where a rig's chip goes now: a live fix drawn on by the follower (fixWhere), else where the hub put it
     where(m) {
-      return m.place === "position" && typeof m.at === "number" ? fixWhere(m, this.data && this.data.map) : [m.lon, m.lat];
+      if (m.place === "position" && typeof m.at === "number") return fixWhere(m, this.data && this.data.map);
+      const e = m.est ? motionOf(m, this.data && this.data.map) : null;     // #453: the estimate now
+      return e ? e.ll : [m.lon, m.lat];
+    }
+    // #453: a rig not on a live fix put where it is drawn now: its estimate (turned to the road), gliding to a new place
+    // (SETTLE_MS: from where it was drawn, and its fan-out offset with it); position, offset and --rot only
+    put(rec) {
+      const m = rec.m, M = this.data && this.data.map, now = Date.now();
+      const e = m.est ? motionOf(m, M) : null;
+      let ll = e ? e.ll : [m.lon, m.lat], off = rec.off || [0, 0];
+      const s = rec.settle;
+      if (s) {
+        const k = Math.min(1, (now - s.t0) / SETTLE_MS), q = k * k * (3 - 2 * k);
+        ll = [s.ll[0] + (ll[0] - s.ll[0]) * q, s.ll[1] + (ll[1] - s.ll[1]) * q];
+        off = [Math.round(s.off[0] + (off[0] - s.off[0]) * q), Math.round(s.off[1] + (off[1] - s.off[1]) * q)];
+        if (k >= 1) rec.settle = null;
+      }
+      rec.marker.setLngLat(ll);
+      if (off[0] !== (rec.offAt || [0, 0])[0] || off[1] !== (rec.offAt || [0, 0])[1]) { rec.marker.setOffset(off); rec.offAt = off; }
+      if (e && e.brg !== null) this.turn(rec, e.brg);
+      return e;
+    }
+    // the vehicle turned to rot (degrees), the shorter way round from where it pointed (eased by CSS); only on a change
+    turn(rec, rot) {
+      const r = typeof rec.rot === "number" ? rec.rot + ((((rot - rec.rot) % 360) + 540) % 360 - 180) : rot;
+      if (typeof rec.rot === "number" && Math.abs(r - rec.rot) < 1) return;
+      rec.el.style.setProperty("--rot", `${r}deg`);
+      rec.rot = r;
+      rec.as = Math.abs(Math.sin(rot * Math.PI / 180));
+      rec.ac = Math.abs(Math.cos(rot * Math.PI / 180));
+      rec.el.style.setProperty("--as", rec.as.toFixed(3));
+      rec.el.style.setProperty("--ac", rec.ac.toFixed(3));
     }
     shown() { try { return !!this.map.getContainer().offsetParent; } catch (_) { return false; } }
     // anything to animate here: a live fix moving or catching up (not a parked or a stale one: they settle), a rig
     // followed, or the frames owed after a new state
     moving() {
-      return !!(this.ready && this.shown() && ((this.fol && this.fol.id) || (this.hasFix && (fresh > 0 || (glide && glide.busy())))));
+      return !!(this.ready && this.shown() && ((this.fol && this.fol.id) || this.estBusy
+                                               || (this.hasFix && (fresh > 0 || (glide && glide.busy())))));
     }
+    fixMoving() { return !!(this.hasFix && (fresh > 0 || (glide && glide.busy()))); }
+    // frames every frame (a live fix, a follow, a glide to a new place); else only the estimate's ticks (#453)
+    smooth() { return !!(this.fixMoving() || (this.fol && this.fol.id) || this.settling); }
     // how often to tick this map: each time the fastest rig has moved STEP_PX on it at its zoom (aircraft.js frameMs)
+    // #453: rigs moved only by the estimate: at most every EST_MS (FRAME_MS while one glides to a new place)
     frameMs() {
+      const fix = this.fixMoving(), v = Math.max(fix ? fastest : 0, this.estBusy ? this.estV || 0 : 0);
+      let ms;
       try {
         const metresPerPx = 40075016.686 * Math.cos(this.map.getCenter().lat * Math.PI / 180) / (512 * 2 ** this.map.getZoom());
-        const pxPerS = fastest / metresPerPx;
-        return Math.max(FRAME_MS, Math.min(MAX_FRAME_MS, pxPerS > 0 ? 1000 * STEP_PX / pxPerS : MAX_FRAME_MS));
-      } catch (_) { return FRAME_MS; }
+        const pxPerS = v / metresPerPx;
+        ms = Math.max(FRAME_MS, Math.min(MAX_FRAME_MS, pxPerS > 0 ? 1000 * STEP_PX / pxPerS : MAX_FRAME_MS));
+      } catch (_) { ms = FRAME_MS; }
+      return fix || this.settling ? ms : Math.max(EST_MS, ms);
+    }
+    // #453: whether any rig here moves by the estimate or glides to a new place now (frames wanted), and the fastest
+    estScan() {
+      let busy = false, settling = false, v = 0;
+      for (const rec of this.chips.values()) {
+        if (rec.settle) settling = true;
+        if (rec.m.est && rec.moving) { busy = true; v = Math.max(v, rec.mps || 0); }
+      }
+      this.estBusy = busy || settling;
+      this.settling = settling;
+      this.estV = v;
     }
     // a frame: the live fixes moved on, their lines to the call with them, the follow kept centred
     tick() {
       let moved = false;
-      for (const rec of this.chips.values()) if (rec.m.place === "position") { rec.marker.setLngLat(this.where(rec.m)); moved = true; }
+      for (const rec of this.chips.values()) {
+        if (rec.m.place === "position") { rec.marker.setLngLat(this.where(rec.m)); moved = true; }
+        else if (rec.m.est || rec.settle) {                 // #453: the estimate on, a glide to a new place
+          if (!rec.moving && !rec.settle) continue;
+          const e = this.put(rec);
+          rec.moving = !!(e && e.moving);
+          moved = true;
+        }
+      }
+      this.estScan();
       // the call lines and routes with them, at most LINE_MS apart (setData re-tiles the source; the age timer's
       // redraw puts them on the settled marks)
       if (moved && this.data && this.data.map && Date.now() - (this.linesAt || 0) >= LINE_MS) {
-        this.drawLines(drawable(this.data.map), this.data.lists);
+        this.drawLines(withEst(drawable(this.data.map), this.data.map), this.data.lists);
       }
       this.followTick(false);
     }
@@ -503,8 +760,10 @@ window.CadMap = (() => {
       if (!force && f.chipShown()) return;
       const m = rec.m, st = statusOf(this.data && this.data.lists, m.status), fx = fixAge(m, this.data && this.data.map);
       const r = routeOf(this.data && this.data.map, m);      // by road (#360): "~3 min · 1.2 mi"
-      const text = [`Following ${m.unit}`, st.name, r ? r.text : "", fx ? `${agoS(fx.age)} ago` : ""].filter(Boolean).join(" · ");
-      f.chip(text, r ? `${rec.el.title}, ${r.text} by road (est.)` : rec.el.title, { stale: !!(fx && fx.stale) });
+      const text = [`Following ${m.unit}`, st.name, m.est ? "est." : "", r ? r.text : "", fx ? `${agoS(fx.age)} ago` : ""]
+        .filter(Boolean).join(" · ");                       // #453: an estimate says so in words
+      f.chip(text, r ? `${rec.el.title}, ${r.text} ${r.by === "line" ? "straight line" : "by road"} (est.)` : rec.el.title,
+             { stale: !!(fx && fx.stale) });
     }
 
     drawPins(incidents, lists) {
@@ -545,7 +804,7 @@ window.CadMap = (() => {
     // #376: sizes (declutter()): a folded rig takes no place; a dot is DOT_W wide. #384: a firehouse with a count chip:
     // an arc under it (the chip is on top of the icon).
     offsets(markers, sizes) {
-      const k = this.far ? 0.72 : 1;
+      const k = (this.far ? 0.72 : 1) * (this.grow || 1);   // #427: wider apart as the vehicles grow to scale
       const size = (m) => (sizes ? sizes.size.get(m.unit) : "full");
       const wOf = (m) => (size(m) === "dot" ? DOT_W : CHIP_W * k);
       const groups = new Map();
@@ -560,7 +819,7 @@ window.CadMap = (() => {
         rings.forEach((list, ring) => {
           if (!list.length) return;
           const m0 = list[0];
-          if (m0.place === "position" || m0.place === "returning") { list.forEach((m) => out.set(m.unit, [0, 0])); return; }
+          if (["position", "returning", "route", "enroute"].includes(m0.place)) { list.forEach((m) => out.set(m.unit, [0, 0])); return; }
           const n = list.length, deg = Math.PI / 180;
           const dots = list.every((m) => size(m) === "dot"), gap = dots ? DOT_W : RING_GAP * k;
           const sum = list.reduce((a, m) => a + wOf(m), 0), w = Math.max(...list.map(wOf));
@@ -592,6 +851,7 @@ window.CadMap = (() => {
       const lits = new Map(markers.map((m) => [m.unit, [...(lights ? [lights.isPicked(m.unit), lights.hovered(m.unit)] : [false, false]),
                                                          !!this.fol && this.fol.id === m.unit, talkState(m.unit)]]));
       if (!this.band) this.setBand();
+      if (!this.grow) { this.setGrow(); this.scaleNow(); }
       // #376: lit ones full; so is a rig just made active (FRESH_S), laid out again when the last of those runs out
       let soonest = 0;
       const sizes = declutter(markers, this.band, (m) => {
@@ -613,48 +873,126 @@ window.CadMap = (() => {
         const off = offs.get(m.unit) || [0, 0];
         const onFocus = !!this.focus && m.incident_id === this.focus.id;
         const fx = fixAge(m, M);                               // a live fix: its age, stale (hollow, faded, aged)
+        const mo = m.est ? motionOf(m, M) : null, late = !!(mo && mo.overdue);   // #453
         if (fx) this.hasFix = true;
         const age = fx && fx.stale ? agoS(fx.age) : "";
-        const sig = JSON.stringify([m.lon, m.lat, off, m.look, m.ring, m.place, st.bg, talk, m.tag, m.station, m.incident_number,
-          m.returning_from, onFocus, !!this.focus, this.far, age, fx && Math.round(fx.fade * 20), lit, m.source, sz, cl, m.icon]);
+        const sig = JSON.stringify([m.est ? 0 : m.lon, m.est ? 0 : m.lat, off, m.look, m.ring, m.place, st.bg, talk, m.tag, m.station,
+          m.incident_number, m.returning_from, onFocus, !!this.focus, this.far, age, fx && Math.round(fx.fade * 20), lit, m.source, sz,
+          cl, m.icon, m.heading, !!m.est, late]);
         let rec = this.chips.get(m.unit);
         if (!rec) {
           const e = h("button", "cm-rig");
           e.type = "button";
           e.addEventListener("click", (ev) => { ev.stopPropagation(); this.chipClick(this.chips.get(m.unit).m); });
           const marker = new maplibregl.Marker({ element: e, anchor: "center" }).setLngLat(this.where(m)).addTo(this.map);
-          rec = { marker, el: e, sig: "" };
+          // #427: its label made once and kept (its words updated in place); its vehicle made again only for a new icon
+          const lbl = h("span", "lbl"), parts = { n: h("span", "n"), st: h("span", "st") };   // a tag, an age: when it has one
+          lbl.append(parts.n, parts.st);
+          rec = { marker, el: e, sig: "", lbl, parts, lblAt: "" };
           this.chips.set(m.unit, rec);
         }
+        // #453: a new place (not a live fix's: that is at once) glides there from where it was drawn
+        const pk = `${m.place}|${m.group}`;
+        if (rec.pk && rec.pk !== pk && m.place !== "position" && !rec.pk.startsWith("position|")) {
+          const ll = rec.marker.getLngLat();
+          if (ll) rec.settle = { ll: [ll.lng, ll.lat], off: rec.offAt || rec.off || [0, 0], t0: Date.now() };
+        } else if (m.place === "position") rec.settle = null;
+        rec.pk = pk;
         rec.m = m;
+        rec.size = sz;
+        rec.off = off;
+        rec.pri = lit.some(Boolean) || talk ? 0 : cl === "act" ? 1 : cl === "idle" ? 2 : 3;   // its code placed in this order
         if (fx) rec.marker.setLngLat(this.where(m));            // drawn on between fixes (glide.js), every draw
+        else {                                                  // #453: its estimate (or its place), every draw
+          const est = this.put(rec);
+          rec.moving = !!(est && est.moving);
+          rec.mps = est ? est.r.move.mps : 0;
+        }
         if (rec.sig === sig) continue;
         rec.sig = sig;
         const e = rec.el;
         const keep = [...e.classList].filter((c) => c.startsWith("maplibregl-")).join(" ");   // the marker's own
-        e.className = `${keep} cm-rig look-${m.look} at-${m.place}` + (m.ring ? " outer" : "") + (talk ? ` ${talk}` : "")
+        e.className = `${keep} cm-rig rv look-${m.look} at-${m.place}` + (m.ring ? " outer" : "") + (talk ? ` ${talk}` : "")
+          + (m.look === "dispatched" || m.look === "responding" ? " enroute" : "")      // #427: not there yet, at any place
           + (cl === "act" ? " act" : "") + (sz === "dot" ? " rig-dot" : sz === "folded" ? " folded" : "")
           + (this.focus && m.incident_id && !onFocus ? " other" : "") + (onFocus ? " mine" : "")
-          + (fx && fx.stale ? " stale" : "") + (lit[0] ? " hl" : "") + (lit[1] ? " hot" : "") + (lit[2] ? " followed" : "");
+          + (fx && fx.stale ? " stale" : "") + (lit[0] ? " hl" : "") + (lit[1] ? " hot" : "") + (lit[2] ? " followed" : "")
+          + (m.est ? " est" : "") + (late ? " overdue" : "");                        // #453: an estimate, not a fix
         e.style.setProperty("--c", st.bg || "#9AA3AD");
         // a stale fix fades; not an active rig's dot (#376: it stays plain to see)
         e.style.opacity = fx && fx.stale && !(sz === "dot" && cl === "act") ? String(Math.round(fx.fade * 100) / 100) : "";
-        e.replaceChildren(h("i", `cm-ty ty-${iconOf(m)}`), h("span", "n", m.unit));     // #384: its type, then its code
-        if (m.tag) e.append(h("span", "tag", m.tag));
-        if (age) e.append(h("span", "age", age));
+        // #427: the vehicle from overhead, turned to its heading (the shorter way round from where it pointed: eased by
+        // CSS), its code beside it (placeLabels: the side clear of the others)
+        // Kept across redraws (a new fix, the age timer): only custom properties and words change, so a turn eases.
+        const icon = iconOf(m), v = V[icon];
+        if (!m.est || typeof rec.rot !== "number") this.turn(rec, rotOf(m, off));   // (an estimate: to the road, put())
+        if (rec.icon !== icon) {                                // a new class: its drawing and its sizes (rare)
+          rec.icon = icon;
+          rec.veh = vehEl(icon);
+          for (const [k, x] of [["--len", v.len], ["--wid", v.wid], ["--minl", v.minl], ["--minw", v.minw]]) e.style.setProperty(k, String(x));
+          e.replaceChildren(rec.veh, rec.lbl);
+        }
+        // its code, then its status code (not colour alone: AQ, DP, RS, OL, OS ...), then any tag and a stale fix's age
+        const P = rec.parts, cue = (m.est ? "~" : "") + statusCue(st, m) + (late ? " overdue" : "");   // #453: "~": an estimate
+        P.n.textContent = m.unit;
+        P.st.textContent = cue;
+        for (const [k, t] of [["tag", m.tag || ""], ["age", age]]) {
+          if (t && !P[k]) { P[k] = h("span", k); rec.lbl.append(P[k]); }
+          if (P[k]) { P[k].textContent = t; P[k].hidden = !t; }
+        }
+        rec.chars = m.unit.length + (cue.length + 0.5) * 0.75 + (m.tag ? m.tag.length * 0.7 + 0.5 : 0) + (age ? age.length * 0.7 + 0.5 : 0);
         e.title = [m.unit + (ICON_NAMES[iconOf(m)] ? ` (${ICON_NAMES[iconOf(m)]})` : ""), st.name,
                    fx ? `${fx.stale ? "last fix" : "live"} ${agoS(fx.age)} ago${m.source ? ` (${m.source})` : ""}` : "",
-                   m.place === "returning" ? `returning from ${m.returning_from} (est. position)` : "",
+                   m.place === "returning" ? (m.returning_from ? `returning from ${m.returning_from}` : "returning") + (m.est ? "" : " (est. position)") : "",
+                   m.est ? "Estimated from the route and status times, not a real position" : "",
+                   late ? "overdue: past its estimated arrival, not on location yet" : "",
                    m.station ? `home ${m.station}` : (m.fire ? "no home station" : ""),
                    m.incident_number ? `on ${m.incident_number}` : "",
                    talk === "talking" ? "TX now" : talk ? "TX ended" : ""].filter(Boolean).join(", ");
         e.setAttribute("aria-label", e.title);
-        rec.marker.setLngLat(this.where(m)).setOffset(off);
+        if (m.place === "position") { rec.marker.setLngLat(this.where(m)).setOffset(off); rec.offAt = off; }
       }
       for (const [name, rec] of this.chips) if (!seen.has(name)) { rec.marker.remove(); this.chips.delete(name); }
+      this.estScan();
+      this.placeLabels();
       this.drawBadges(sizes.badges, M, lists);
       if (this.stationOpen && !this.pop.hidden) {          // #384: the open list kept to the state (a status, a call)
         if (this.listSig(this.stationRigs(this.stationOpen)) !== this.stationSig) this.openStation(this.stationOpen, true);
+      }
+    }
+
+    // #427: each drawn vehicle's code on the first side (right, left, below, above) clear of every vehicle and the codes
+    // placed before it: lit and active rigs first; an idle or out-of-service rig's code with nowhere to go left out (on
+    // its tooltip), never a lit or active one's (on the right). On each draw and once a move or zoom ends, never per frame.
+    placeLabels() {
+      if (!this.chips.size) return;
+      const ppm = this.ppm || 0, far = this.far, CH = far ? 5.6 : 6.6, LH = far ? 12 : 15, GAP = 2;
+      const items = [];
+      for (const rec of this.chips.values()) {
+        if (rec.size === "folded" || !rec.icon) continue;
+        let p;
+        try { p = this.map.project(rec.marker.getLngLat()); } catch (_) { continue; }
+        const off = rec.off || [0, 0], x = p.x + off[0], y = p.y + off[1];
+        if (rec.size === "dot") {                             // an obstacle; its code to the right when it opens
+          items.push({ box: [x - 6, y - 6, x + 6, y + 6] });
+          if (rec.lblAt !== "r") { rec.lblAt = "r"; rec.lbl.className = "lbl"; }
+          continue;
+        }
+        const [L, W] = vehPx(rec.icon, ppm, far);
+        const hx = (L * rec.as + W * rec.ac) / 2, hy = (L * rec.ac + W * rec.as) / 2;
+        items.push({ rec, x, y, hx, hy, box: [x - hx, y - hy, x + hx, y + hy], w: rec.chars * CH + 8, pri: rec.pri });
+      }
+      const meets = (a, b) => a[0] < b[2] && b[0] < a[2] && a[1] < b[3] && b[1] < a[3];
+      const placed = [];
+      for (const it of items.filter((i) => i.rec).sort((a, b) => a.pri - b.pri)) {
+        const { x, y, hx, hy, w } = it;
+        const at = { r: [x + hx + GAP, y - LH / 2, x + hx + GAP + w, y + LH / 2], l: [x - hx - GAP - w, y - LH / 2, x - hx - GAP, y + LH / 2],
+                     b: [x - w / 2, y + hy + GAP, x + w / 2, y + hy + GAP + LH], t: [x - w / 2, y - hy - GAP - LH, x + w / 2, y - hy - GAP] };
+        let pick = Object.keys(at).find((k) => !items.some((o) => o !== it && meets(o.box, at[k])) && !placed.some((b) => meets(b, at[k])));
+        if (!pick && it.pri < 2) pick = "r";
+        if (pick) placed.push(at[pick]);
+        const want = pick || "none";
+        if (it.rec.lblAt !== want) { it.rec.lblAt = want; it.rec.lbl.className = want === "r" ? "lbl" : `lbl lbl-${want}`; }
       }
     }
 
@@ -705,12 +1043,12 @@ window.CadMap = (() => {
 
     // #384: a firehouse's rigs (home station), active first, then idle, then out of service, each in the hub's order
     stationRigs(name) {
-      const ms = drawable(this.data && this.data.map);
+      const M = this.data && this.data.map, ms = withEst(drawable(M), M);     // #453: an estimate marked in the list too
       return ms.map((m, i) => [m, i]).filter(([m]) => m.station === name)
         .sort((a, b) => CLASS_ORDER[rigClass(a[0])] - CLASS_ORDER[rigClass(b[0])] || a[1] - b[1]).map(([m]) => m);
     }
 
-    listSig(rigs) { return JSON.stringify(rigs.map((m) => [m.unit, m.status, m.icon, callsOf(m), this.chips.has(m.unit)])); }
+    listSig(rigs) { return JSON.stringify(rigs.map((m) => [m.unit, m.status, m.icon, callsOf(m), this.chips.has(m.unit), !!m.est])); }
 
     // #384: a firehouse clicked (its icon or its count chip): its rigs in the map's box, each with its type and status;
     // a click on one follows it (#358) or, where the map follows nothing, centres and rings it; hovered: ringed wider.
@@ -735,7 +1073,8 @@ window.CadMap = (() => {
         b.type = "button";
         b.dataset.unit = m.unit;
         b.style.setProperty("--c", st.bg || "#9AA3AD");
-        b.append(h("i", `cm-ty ty-${iconOf(m)}`), h("b", "n", m.unit), h("span", "s", st.name));
+        b.append(vehEl(iconOf(m), true), h("b", "n", m.unit), h("span", "s", st.name));   // #427: its vehicle, front right
+        if (m.est) b.append(h("span", "dim est", "est."));                              // #453: not a real position
         if (callsOf(m).length) b.append(h("span", "dim", callsOf(m).join(", ")));       // every call it is on
         b.title = [m.unit + (ICON_NAMES[iconOf(m)] ? ` (${ICON_NAMES[iconOf(m)]})` : ""), st.name,
                    go ? (this.onFollow ? "click: follow" : "click: show") : ""].filter(Boolean).join(", ");
@@ -787,7 +1126,7 @@ window.CadMap = (() => {
       const M = this.data && this.data.map;
       this.drawRoutes(markers, lists, M);
       for (const m of markers) {
-        if (!m.line_to || (!m.home_line && routeOf(M, m))) continue;      // its route drawn instead (#360)
+        if (!m.line_to || (!m.home_line && routeOf(M, m)) || (m.est && m.home_line && backOf(M, m))) continue;   // its route drawn instead (#360, #453)
         const from = markAt(m);                                             // a live fix: from its mark
         const k = JSON.stringify([from, m.line_to]);
         const color = m.home_line ? HOME_LINE : statusOf(lists, m.status).bg || LINE;
@@ -806,24 +1145,43 @@ window.CadMap = (() => {
     drawRoutes(markers, lists, M) {
       const src = this.map.getSource("cm-routes");
       if (!src) return;
-      const feats = [];
+      const feats = [], keys = [];
       const trails = (M && M.trails) || {};
       for (const m of markers) {
         const color = statusOf(lists, m.status).bg || LINE;
-        const r = m.line_to && !m.home_line ? routeOf(M, m) : null;
-        const here = markAt(m);
-        const path = r ? routeFrom(r.coords, here, r.along_m) : null;
-        if (path && path.length >= 2) feats.push({ type: "Feature", properties: { color, unit: m.unit },
-                                                   geometry: { type: "LineString", coordinates: path } });
+        const e = m.est ? motionOf(m, M) : null;              // #453: the route ahead of the estimate (the passed part gone)
+        const r = !e && m.line_to && !m.home_line ? routeOf(M, m) : null;
+        const here = e ? e.ll : markAt(m);
+        const rec = this.chips.get(m.unit);
+        // the way home: thin and grey, only while its rig is drawn full (#376: a dot's or a folded one's not)
+        const home = !!(e && m.home_line), hide = home && rec && rec.size !== "full";
+        // an estimate's line: made again only when its rig has gone ROUTE_STEP_M or its route changed (#453)
+        if (e && !hide) {
+          const k = `${m.unit}|${routeId(e.g)}|${Math.floor(e.d / ROUTE_STEP_M)}|${color}|${home}`;
+          keys.push(k);
+          const c = rec && rec.lineKey === k ? rec.lineFeat : null;
+          const f = c || { type: "Feature", properties: { color: home ? HOME_LINE : color, unit: m.unit, home },
+                           geometry: { type: "LineString", coordinates: restOf(e) } };
+          if (rec) { rec.lineKey = k; rec.lineFeat = f; }
+          if (f.geometry.coordinates.length >= 2) feats.push(f);
+        }
+        const path = !e && r ? routeFrom(r.coords, here, r.along_m) : null;
+        if (path && path.length >= 2) {
+          const f = { type: "Feature", properties: { color, unit: m.unit, home: false }, geometry: { type: "LineString", coordinates: path } };
+          keys.push(JSON.stringify(f));
+          feats.push(f);
+        }
         const t = this.fol && this.fol.id === m.unit ? trails[m.unit] : null;
-        if (Array.isArray(t) && t.length >= 2) feats.push({ type: "Feature", properties: { color, trail: true, unit: m.unit },
-                                                            geometry: { type: "LineString", coordinates: [...t, here] } });
+        if (Array.isArray(t) && t.length >= 2) {
+          const f = { type: "Feature", properties: { color, trail: true, unit: m.unit }, geometry: { type: "LineString", coordinates: [...t, here] } };
+          keys.push(JSON.stringify(f));
+          feats.push(f);
+        }
       }
-      const fc = { type: "FeatureCollection", features: feats };
-      const sig = JSON.stringify(fc);
+      const sig = keys.join("\n");
       if (sig === this.routeSig) return;
       this.routeSig = sig;
-      src.setData(fc);
+      src.setData({ type: "FeatureCollection", features: feats });
     }
 
     drawUnset(unset) {
@@ -1414,5 +1772,5 @@ window.CadMap = (() => {
 
   const detailMap = () => views.detail;   // the working event's map, for its resize handles (incident-map.js, #210)
   return { RigLayer, RigMap, detail, detailMap, place, overview, goOverview, openBig, closeBig, areaBounds, areaCalls, AREA_KM,
-           followUnit, focusUnit, hoverUnits, onMap, lights, routeFrom, declutter, zoomsOf, rigClass, iconOf };
+           followUnit, focusUnit, hoverUnits, onMap, lights, routeFrom, declutter, zoomsOf, rigClass, iconOf, vehicles: V, vehSvg };
 })();

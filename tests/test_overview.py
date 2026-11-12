@@ -40,11 +40,13 @@ def text(name):
 def test_the_tabs_are_overview_incident_radio_settings():
     html = text("cad.html")
     nav = re.search(r'<nav class="tabs console-only"[^>]*>(.*?)</nav>', html, re.S).group(1)
-    assert re.findall(r'id="([\w-]+)" class="tab', nav) == ["overview-open", "dispatch-open", "radio-open", "settings-open"]
-    assert re.findall(r'<span class="lbl">([^<]+)</span>', nav) == ["Overview", "Incident", "Radio", "Settings"]
+    assert re.findall(r'id="([\w-]+)" class="tab', nav) == ["overview-open", "dispatch-open", "radio-open", "search-open",
+                                                            "settings-open"]          # Search: #403
+    assert re.findall(r'<span class="lbl">([^<]+)</span>', nav) == ["Overview", "Incident", "Radio", "Search", "Settings"]
     assert ">Dispatch<" not in nav
     cad = text("cad.js")
-    assert '[["#overview-open", "overview"], ["#dispatch-open", "dispatch"], ["#radio-open", "radio"], ["#settings-open", "settings"]]' in cad
+    assert ('[["#overview-open", "overview"], ["#dispatch-open", "dispatch"], ["#radio-open", "radio"], ["#search-open", "search"], '
+            '["#settings-open", "settings"]]') in cad
     # the keyboard: G I, and G D as before; the "?" sheet lists the tabs in their order
     assert 'gi: () => $("#dispatch-open").click(),' in cad and 'gd: () => $("#dispatch-open").click(),' in cad
     ui = text("ui.js")

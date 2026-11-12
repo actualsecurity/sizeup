@@ -32,7 +32,7 @@ def test_each_apparatus_class_has_its_icon_and_everything_else_the_generic_one()
     want = {"E60": "engine", "E14": "engine", "L31": "ladder", "L30": "ladder", "TL2": "tower", "R40": "rescue",
             "2391": "suv", "2398": "suv", "2661": "suv", "U65": "suv", "U42": "suv", "CHIEF239": "suv",
             "M40": "other", "DPT239": "", "239EOC": "other", "77A1": "other", "PCPD": "other", "239_Eng": "other",
-            "AP7": "engine", "AP11": "engine", "AP17": "engine"}                   # the airport's ARFF crash trucks
+            "AP7": "arff", "AP11": "arff", "AP17": "arff"}                         # the airport's ARFF crash trucks (#427)
     for code, icon in want.items():
         assert mapview.icon_of({"name": code, **units[code]}) == icon, code
     # board-only codes (no units entry: kind "agency"): battalion and fire coordinators' cars; fire marshals generic
@@ -49,7 +49,7 @@ def test_each_apparatus_class_has_its_icon_and_everything_else_the_generic_one()
         assert icon in mapview.ICONS, code
         by_code = "other"
         if u.get("kind") in ("", "other", None):                                  # CHIEF239: a chief's car; AP7: ARFF
-            by_code = "suv" if code.upper().startswith("CHIEF") else "engine" if re.match(r"^AP\d+$", code) else "other"
+            by_code = "suv" if code.upper().startswith("CHIEF") else "arff" if re.match(r"^AP\d+$", code) else "other"
         assert icon == by_kind.get(u.get("kind"), by_code), code
     # an older or odd unit: no kind, a new kind, a code-only chief's car with no kind
     assert mapview.icon_of({"name": "X1"}) == mapview.icon_of({"name": "X1", "kind": "hovercraft"}) == "other"
@@ -66,15 +66,18 @@ def test_every_marker_carries_its_icon():
     assert ms == {"E60": "engine", "L31": "ladder", "TL2": "tower", "R40": "rescue", "2391": "suv", "U65": "suv", "M40": "other"}
 
 
-def test_each_icon_is_defined_once_as_a_mask_and_they_differ():
-    css = (STATIC / "cadmap.css").read_text()
-    masks = {n: re.findall(r'\.cm-ty\.ty-%s \{ --ty: url\("(data:image/svg\+xml,[^"]+)"\); \}' % n, css) for n in mapview.ICONS}
-    assert all(len(v) == 1 for v in masks.values()), {k: len(v) for k, v in masks.items()}
-    assert len({v[0] for v in masks.values()}) == len(mapview.ICONS)          # six different silhouettes
-    assert "mask: var(--ty)" in css and "background-color: currentColor" in css     # monochrome, in the text colour
+def test_each_icon_is_one_overhead_drawing_and_they_differ():
+    """#427: one original drawing per class (cadmap.js V), front up, the body in the status colour; the JS set is the
+    hub's; no side-profile masks left."""
     js = (STATIC / "cadmap.js").read_text()
     m = re.search(r'const ICONS = new Set\((\[[^\]]*\])\)', js)
     assert set(json.loads(m.group(1))) == set(mapview.ICONS)
+    block = js[js.index("  const V = {"):js.index("  // its drawing: front up")]
+    assert sorted(re.findall(r"^    (\w+): \{ len:", block, re.M)) == sorted(mapview.ICONS)
+    css = (STATIC / "cadmap.css").read_text()
+    assert "cm-ty" not in css and "mask:" not in css                          # the side silhouettes are gone
+    assert ".cm-vs) .b { fill: var(--c, #9AA3AD)" in css                      # the body: the status colour
+    assert "rotate(var(--rot, 0deg))" in css                                  # turned to its heading
 
 
 # ---- the page, in node --------------------------------------------------------------------------------------------------
@@ -111,22 +114,27 @@ const rowOf = (u) => rows().find((r) => r.dataset.unit === u);
 
 
 @needs_node
-def test_the_chips_carry_their_type_icon(tmp_path):
+def test_each_rig_is_its_vehicle_with_its_code_beside_it(tmp_path):
     o = run(tmp_path, SNAP + r"""
 zoomTo(15.5);
 const ty = (u) => chip(u).el.children[0].className;
-out.full = Object.fromEntries(["E60", "L31", "TL2", "2391", "E62", "E63"].map((u) => [u, [ty(u), chip(u).el.children[1].textContent, chip(u).el.title]]));
+out.full = Object.fromEntries(["E60", "L31", "TL2", "2391", "E62", "E63"].map((u) => [u, [ty(u), chip(u).el.children[1].children[0].textContent,
+  chip(u).el.title, chip(u).el.children[0].innerHTML, chip(u).el.style["--len"], chip(u).el.style["--minl"]]]));
 zoomTo(9.5); out.dot = [kind("E63"), ty("E63")];          // a dot keeps it (shown when the dot opens under the pointer)
 """, page_state())
     f = o["full"]
-    assert {u: v[0] for u, v in f.items()} == {"E60": "cm-ty ty-engine", "L31": "cm-ty ty-ladder", "TL2": "cm-ty ty-tower",
-                                               "2391": "cm-ty ty-suv", "E62": "cm-ty ty-engine", "E63": "cm-ty ty-engine"}
+    assert {u: v[0] for u, v in f.items()} == {"E60": "cm-veh v-engine", "L31": "cm-veh v-ladder", "TL2": "cm-veh v-tower",
+                                               "2391": "cm-veh v-suv", "E62": "cm-veh v-engine", "E63": "cm-veh v-engine"}
     assert f["TL2"][1] == "TL2" and f["TL2"][2].startswith("TL2 (tower ladder), Available")
     assert f["2391"][2].startswith("2391 (car), ")
-    assert o["dot"] == ["dot", "cm-ty ty-engine"]
+    for u, v in f.items():                                    # an SVG, front up, the body (.b) to tint
+        assert v[3].startswith("<svg viewBox=") and 'class="b"' in v[3], u
+    assert f["E60"][3] == f["E62"][3] != f["L31"][3]          # one drawing per class
+    assert f["E60"][4] == "10.5" and f["2391"][4] == "5.3" and float(f["L31"][4]) > float(f["E60"][4])   # real lengths, m
+    assert o["dot"] == ["dot", "cm-veh v-engine"]
     css = (STATIC / "cadmap.css").read_text()
     assert ".cm-rig.rig-dot > *, .cm-rig.rig-dot::before { display: none; }" in css           # a plain dot ...
-    assert ".cm-rig.rig-dot:hover > .cm-ty { display: inline-block; }" in css               # ... opening to icon + code
+    assert ".cm-rig.rv:not(.rig-dot), .cm-rig.rv.rig-dot:hover {" in css                      # ... opening to its vehicle
 
 
 @needs_node
@@ -214,8 +222,8 @@ clickHouse("Brooksville Engine & Hose #5"); out.none = [L.pop.find("cm-pop-head"
     assert hidden is False and head.replace("\u00a0", " ") == f"{page_state()['hq']} 7 rigs · 4 in quarters · 2 on calls · 1 OOS"
     # active first (on a call), then available, then out of service; each with its type and status, in its status colour
     assert [r[0] for r in rows] == ["E63", "L31", "2391", "E60", "E61", "TL2", "E62"]
-    assert [r[1] for r in rows] == ["cm-ty ty-engine", "cm-ty ty-ladder", "cm-ty ty-suv", "cm-ty ty-engine", "cm-ty ty-engine",
-                                    "cm-ty ty-tower", "cm-ty ty-engine"]
+    assert [r[1] for r in rows] == ["cm-vs v-engine", "cm-vs v-ladder", "cm-vs v-suv", "cm-vs v-engine", "cm-vs v-engine",
+                                    "cm-vs v-tower", "cm-vs v-engine"]           # #427: its vehicle from overhead, front right
     assert [r[2] for r in rows] == ["Responding", "On location", "Available", "Available", "Available", "Available", "Out of service"]
     assert all(r[3] for r in rows) and not any(r[4] for r in rows)
     assert o["closed"] is True
@@ -334,7 +342,8 @@ def test_the_page_wires_it():
     js = (STATIC / "cadmap.js").read_text()
     assert 'this.map.on("click", "firehouse"' in js and "badgeSpaceIcon()" in js
     tick = js[js.index("    tick() {"):js.index("    followTick(force) {")]
-    assert "openStation" not in tick and "syncFirehouses" not in tick and "cm-ty" not in tick     # nothing per frame
+    assert "openStation" not in tick and "syncFirehouses" not in tick and "vehEl" not in tick     # nothing per frame
+    assert "placeLabels" not in tick and "--ppm" not in tick and "setProperty" not in tick
     assert "BADGE_AT = [0, -13]" in js
     style = (STATIC / "map-style.js").read_text()
     assert '"icon-offset": [0, -13]' in style                     # the same place as the chip

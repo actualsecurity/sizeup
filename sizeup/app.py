@@ -683,9 +683,11 @@ class App:
             from sizeup.roadgraph import RoadGraph
             self.roadgraph = RoadGraph.from_config(cfg, log=log)
         if self.roadgraph.configured:
-            from sizeup.cad.routes import Routes
+            from sizeup.cad.routes import SAVE_KEY, Routes
+            store = self.cad.store                    # the trips home and the moves kept across a restart (#453)
             self.cad.routes = Routes(self.roadgraph.ready, lambda: self.cad.eta, self._route_closures,
-                                     lambda: self.cad.firehouses, log=log)
+                                     lambda: self.cad.firehouses, log=log,
+                                     persist=(lambda: store.meta_get(SAVE_KEY), lambda v: store.meta_put(SAVE_KEY, v)))
         # Metro-North's trains (sizeup/trains.py, #131): the MTA's feeds, read by the CAD of record while
         # someone looks at the Trains layer or an event near the tracks.
         self.trains = prov["trains"]
@@ -3584,6 +3586,7 @@ class App:
         """The incident sources (#297): the CAD's ticker (held reports, promotion) and this machine's adapters."""
         self.cad.sources.start()
         self.cad.radiolog.start()                 # open calls' units matched again (#370: what a restart left)
+        self.cad.addrs.start()                    # address keys and the search index, backfilled and kept up (#403)
         if self.cfg.cloud_role == "hub":         # station only: the hub gets their events through the outbox
             return
         from sizeup.sources.runner import SourceRunner, context_for, load_adapters, require_station
@@ -3687,6 +3690,7 @@ class App:
             self.sources_runner.stop()
         self.cad.sources.stop()
         self.cad.radiolog.stop()
+        self.cad.addrs.stop()
         self.stop_layers()
 
     def _weather_voice(self, text: str) -> tuple[str | None, str]:
