@@ -502,6 +502,10 @@ class AudioDb:
                 for aid, size, stored, in_db in mine:
                     if used <= budget and total <= self.max_bytes:
                         break
+                    # inside the budget, only a clip still in audio.sqlite helps the cap (the cap counts those bytes
+                    # alone): one already in the store stays
+                    if used <= budget and not (stored == 'db' and in_db):
+                        continue
                     over.append(aid)
                     used -= size or 0
                     if stored == 'db':

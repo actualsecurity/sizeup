@@ -592,6 +592,11 @@ AUDIO_UPLOAD_ROWS = (20, 200)   # rows a round: in the day, off-peak
 SWEEP_LEADER_S = 24 * 3600   # the audio orphan sweep: only once this task has held the lease this long (#414)
 
 
+def _our_tg(t) -> int | None:
+    """A transmission's talkgroup for its clip's row, None for another P25 system's (#409): see _where."""
+    return None if sourcekeys.is_context(t.__dict__) else t.talkgroup
+
+
 def _where(d: dict) -> dict:
     """A transmission's channel and talkgroup, for its clip's retention (#414). Another P25 system's (#409): its
     channel only, never a "tg:<n>" of ours (the same number there is another talkgroup)."""
@@ -1442,7 +1447,7 @@ class HubApp(App):
         with self.store._lock:
             for t in list(self.store.loose) + [t for i in self.store.incidents for t in i.traffic]:
                 if t.id in want:
-                    out[t.id] = (t.source, t.talkgroup, t.end)
+                    out[t.id] = (t.source, _our_tg(t), t.end)
         with self._lock:
             for p in self.pages:
                 if p.id in want:
@@ -1450,8 +1455,9 @@ class HubApp(App):
         rest = [i for i in ids if i not in out]
         for k in range(0, len(rest), 500):
             chunk = rest[k:k + 500]
-            rows = self.cad.store.q(f"SELECT id, channel, talkgroup, end FROM radio_traffic WHERE id IN "
-                                    f"({','.join('?' * len(chunk))})", chunk)
+            rows = self.cad.store.q(f"SELECT id, channel, CASE WHEN system IN {sourcekeys.OURS_SQL} THEN talkgroup END "
+                                    f"AS talkgroup, end FROM radio_traffic WHERE id IN ({','.join('?' * len(chunk))})",
+                                    chunk)
             out.update((r["id"], (r["channel"], r["talkgroup"], r["end"])) for r in rows)
         return out
 
@@ -1462,7 +1468,7 @@ class HubApp(App):
         with self.store._lock:
             for t in list(self.store.loose) + [t for i in self.store.incidents for t in i.traffic]:
                 if t.id in want:
-                    out[t.id] = (t.source, t.talkgroup)
+                    out[t.id] = (t.source, _our_tg(t))
         with self._lock:
             for p in self.pages:
                 if p.id in want:

@@ -34,11 +34,13 @@ from tests.test_app import FakeWhisper, cfg as app_cfg, voice, wait
 from tests.test_p25 import T0, tr_call
 from tests.test_radios import Clock, _event_with, cad, tx
 from tests.test_trunk_recorder_unit import OTHER_PID, SERVICE_PID, FakePopen
+from tests.test_audio_store import hub_fs  # noqa: F401 (fixture)
 
 ROOT = Path(__file__).resolve().parent.parent
 TR = ROOT / "deploy" / "trunk-recorder"
 MRRS = systems.load(TR / "systems" / "mrrs")
 PD, PD_TAC, PD_SECURE, EMS = 9211, 9212, 9213, 9570
+DAY_S = 86400
 
 
 # -- the system as shipped ------------------------------------------------------------------------------------------------
@@ -1372,3 +1374,240 @@ def test_service_of_every_tag_in_the_shipped_talkgroup_files_and_main_is_the_cou
     c.comms.context_broadcast = True
     main, other = c.comms.split([307])
     assert [r["id"] for r in main] == ["307-m1"] and [r["id"] for r in other] == ["307-m2"]
+
+
+# -- the merge with #414 (audio in S3, retention per channel / talkgroup) and #403 (search): context stays context ----
+
+WAV1K = b"RIFF" + b"\0" * 996                     # 1000 bytes
+
+
+def _ctx_traffic(c, tid, at, tier="alert", channel="PD Dispatch", tg=PD):
+    c.record_traffic(dict(tx(tid, at, channel, "", "", tg), system="mrrs", source_key=f"p25:mrrs:{tg}", tier=tier))
+
+
+def _s3_audio(tmp_path):
+    from tests.test_audio_store import FakeBucket, db as audio_db, s3store
+    bucket = FakeBucket()
+    return audio_db(tmp_path, s3store(bucket)), bucket
+
+
+def test_over_the_db_cap_context_clips_already_in_s3_stay_and_our_oldest_db_clip_goes(tmp_path):
+    from sizeup.audiostore import Retention
+    clock = Clock()
+    c = cad(tmp_path, clock)
+    audio, bucket = _s3_audio(tmp_path)
+    ctx_ids = [f"9211-s{k}" for k in range(3)]
+    for k, tid in enumerate(ctx_ids):
+        _ctx_traffic(c, tid, clock.t - 3600 * (k + 1))
+        audio.put(tid, WAV1K, at=clock.t - 3600 * (k + 1), channel="PD Dispatch")
+    assert audio.upload_pending(limit=50) == 3 and audio.bytes() == 0      # in the store: no audio.sqlite bytes
+    for k in range(5):                                                      # ours, not uploaded yet: over the cap
+        audio.put(f"307-f{k}", WAV1K, at=clock.t - 60 + k, channel="Fire/EMS 15", talkgroup=307)
+    audio.max_bytes = 4500
+    ctx = lambda ids: c.comms.context_clips(ids, {"alert": 30.0, "text": 0.0, "record": 7.0})   # noqa: E731
+    audio.prune_clips(clock.t - 30 * DAY_S, kept=c.comms.kept_for_events, context=ctx, context_max_bytes=10_000_000,
+                      policy=Retention({}, 30), now=clock.t)
+    assert all(audio.has(t) for t in ctx_ids)                              # inside their budget: freeing nothing, kept
+    assert not audio.has("307-f0") and all(audio.has(f"307-f{k}") for k in range(1, 5))
+
+
+def test_the_context_budget_counts_clips_in_s3_lowest_tier_then_oldest_first(tmp_path):
+    from sizeup.audiostore import Retention
+    clock = Clock()
+    c = cad(tmp_path, clock)
+    audio, bucket = _s3_audio(tmp_path)
+    ids = [f"9211-b{k}" for k in range(4)]                                  # newest first
+    for k, tid in enumerate(ids):
+        _ctx_traffic(c, tid, clock.t - 3600 * (k + 1))
+        audio.put(tid, WAV1K, at=clock.t - 3600 * (k + 1), channel="PD Dispatch")
+    audio.upload_pending(limit=50)
+    days = {"alert": 30.0, "text": 0.0, "record": 7.0}
+    ctx = lambda ids_: c.comms.context_clips(ids_, days)                    # noqa: E731
+    audio.prune_clips(clock.t - 30 * DAY_S, kept=c.comms.kept_for_events, context=ctx, context_max_bytes=2000,
+                      policy=Retention({}, 30), now=clock.t)
+    assert [audio.has(t) for t in ids] == [True, True, False, False]
+    # the tier's rank first (record, then text, then alert), the oldest first within one
+    for tid, tier, age_h in (("9212-alert", "alert", 9), ("9212-text", "text", 6), ("9212-rec", "record", 3)):
+        _ctx_traffic(c, tid, clock.t - age_h * 3600, tier=tier, channel="PD Tac", tg=PD_TAC)
+        audio.put(tid, WAV1K, at=clock.t - age_h * 3600, channel="PD Tac")
+    audio.upload_pending(limit=50)
+    audio.prune_clips(clock.t - 30 * DAY_S, kept=c.comms.kept_for_events, context=ctx, context_max_bytes=3000,
+                      policy=Retention({}, 30), now=clock.t)
+    assert {t for t in ids + ["9212-alert", "9212-text", "9212-rec"] if audio.has(t)} == {"9211-b0", "9211-b1", "9212-alert"}
+
+
+def test_the_settings_retention_with_context_tiers_and_records(tmp_path):
+    from sizeup.audiostore import Retention
+    from sizeup.cloud.hub import _where
+    from sizeup.cloud.hubstore import AudioDb
+    clock = Clock()
+    c = cad(tmp_path, clock)
+    audio = AudioDb(":memory:")
+    old = clock.t - 5 * DAY_S
+    _ctx_traffic(c, "9211-alert", old)                                     # past its channel's day, inside its tier's 30
+    _ctx_traffic(c, "9212-text", old, tier="text", channel="PD Tac", tg=PD_TAC)
+    for tid, src, tg in (("9211-alert", "PD Dispatch", PD), ("9212-text", "PD Tac", PD_TAC)):
+        audio.put(tid, WAV1K, at=old, **_where({"source": src, "talkgroup": tg, "system": "mrrs"}))
+    for tid, ch, tg, age in (("307-old", "Fire/EMS 15", 307, 5), ("FG1-old", "FG1", None, 5), ("FG1-new", "FG1", None, 2),
+                             ("Other-old", "Other", None, 5), ("FG1-rec", "FG1", None, 5)):
+        audio.put(tid, WAV1K, at=clock.t - age * DAY_S, channel=ch, talkgroup=tg)
+    p = Retention({"PD Dispatch": 1, "PD Tac": 1, "tg:307": 10, "FG1": 3, "_default": 4}, 30)
+    ctx = lambda ids: c.comms.context_clips(ids, {"alert": 30.0, "text": 0.0, "record": 7.0})   # noqa: E731
+    kept = lambda ids: {"FG1-rec"} & set(ids)                              # noqa: E731 (a record: on an event)
+    run = lambda ko: audio.prune_clips(clock.t - p.shortest_days() * DAY_S, kept=kept, context=ctx,   # noqa: E731
+                                       context_max_bytes=10_000, kept_older_than=ko, policy=p, now=clock.t)
+    run(None)
+    left = {t for t in ("9211-alert", "9212-text", "307-old", "FG1-old", "FG1-new", "Other-old", "FG1-rec") if audio.has(t)}
+    assert left == {"9211-alert", "307-old", "FG1-new", "FG1-rec"}
+    run(clock.t - 4 * DAY_S)                                               # a record older than the event days goes too
+    assert not audio.has("FG1-rec") and audio.has("9211-alert") and audio.has("307-old")
+
+
+def test_over_the_cap_context_clips_go_first_and_a_fire_clip_is_kept_with_the_settings_policy(tmp_path):
+    """test_over_the_cap_context_clips_go_first_and_a_fire_clip_is_kept on the hub's path since #414 (policy=, now=)."""
+    from sizeup.audiostore import Retention
+    from sizeup.cloud.hubstore import AudioDb
+    clock = Clock()
+    c = cad(tmp_path, clock)
+    days = {"alert": 30.0, "text": 0.0, "record": 7.0}
+    audio = AudioDb(":memory:", 4000)
+    pol = Retention({}, 0.5)
+    prune = lambda mb: audio.prune_clips(clock.t - pol.shortest_days() * DAY_S, kept=c.comms.kept_for_events,  # noqa: E731
+                                         context=ctx, context_max_bytes=mb, policy=pol, now=clock.t)
+    for k, (tier, age_h) in enumerate([("record", 40), ("record", 30), ("alert", 20), ("alert", 10), ("record", 2)]):
+        _ctx_traffic(c, f"9211-c{k}", clock.t - age_h * 3600, tier=tier)
+        audio.put(f"9211-c{k}", WAV1K, at=clock.t - age_h * 3600, channel="PD Dispatch")
+    c.record_traffic(dict(tx("307-fire", clock.t - 60, "Fire/EMS 15", "E60", "E60", 307), system="westchester", ours=True))
+    audio.put("307-fire", WAV1K, at=clock.t - 60, channel="Fire/EMS 15", talkgroup=307)
+    ctx = lambda ids: c.comms.context_clips(ids, days)                     # noqa: E731
+    prune(10_000)
+    assert audio.has("307-fire")
+    assert [audio.has(f"9211-c{k}") for k in range(5)] == [False, False, True, True, True]
+    audio.max_bytes = 100_000
+    prune(2000)
+    assert [audio.has(f"9211-c{k}") for k in range(5)] == [False, False, True, True, False] and audio.has("307-fire")
+    _ctx_traffic(c, "9212-old", clock.t - 20 * 3600, tier="text", channel="PD Tac", tg=PD_TAC)
+    audio.put("9212-old", WAV1K, at=clock.t - 20 * 3600, channel="PD Tac")
+    prune(10_000)
+    assert not audio.has("9212-old") and audio.has("9211-c2")
+    for k in range(6):
+        audio.put(f"307-f{k}", WAV1K, at=clock.t - 50 + k, channel="Fire/EMS 15", talkgroup=307)
+    audio.max_bytes = 3000
+    prune(10_000)
+    assert not any(audio.has(f"9211-c{k}") for k in range(5)) and audio.has("307-f5") and not audio.has("307-fire")
+
+
+def test_a_context_clip_has_no_talkgroup_of_ours_and_our_tg_retention_leaves_it(tmp_path):
+    from sizeup.audiostore import Retention
+    from sizeup.cloud.hub import _where
+    from sizeup.cloud.hubstore import AudioDb
+    assert _where({"source": "PD Dispatch", "talkgroup": PD, "system": "mrrs"}) == {"channel": "PD Dispatch", "talkgroup": None}
+    assert _where({"source": "County", "talkgroup": PD, "system": "westchester"}) == {"channel": "County", "talkgroup": PD}
+    clock = Clock()
+    audio = AudioDb(":memory:")
+    audio.put("9211-x", WAV1K, at=clock.t - 2 * DAY_S, **_where({"source": "PD Dispatch", "talkgroup": PD, "system": "mrrs"}))
+    audio.put("9211-ours", WAV1K, at=clock.t - 2 * DAY_S, channel="County", talkgroup=PD)
+    p = Retention({f"tg:{PD}": 0.5, "_default": 30}, 30)
+    audio.prune_clips(clock.t - p.shortest_days() * DAY_S, policy=p, now=clock.t)
+    assert audio.has("9211-x") and not audio.has("9211-ours")
+
+
+def test_the_hub_stores_a_context_clip_without_its_talkgroup(hub_fs):
+    app = hub_fs
+    ed = app.cad.settings
+    now = time.time()
+    app.apply("traffic", {"id": "9211-h", "source": "PD Dispatch", "talkgroup": PD, "system": "mrrs",
+                          "source_key": f"p25:mrrs:{PD}", "start": now - 3 * DAY_S, "end": now - 3 * DAY_S + 2,
+                          "text": "words", "status": "done"}, WAV1K)
+    app.apply("traffic", {"id": "9211-o", "source": "County", "talkgroup": PD, "start": now - 3 * DAY_S,
+                          "end": now - 3 * DAY_S + 2, "text": "words", "status": "done"}, WAV1K)
+    assert app.audio.db.execute("SELECT channel, talkgroup FROM audio WHERE id = '9211-h'").fetchone() == ("PD Dispatch", None)
+    assert app.audio.db.execute("SELECT talkgroup FROM audio WHERE id = '9211-o'").fetchone() == (PD,)
+    for key, value in (("_default", 30), (f"tg:{PD}", 1)):
+        ed.post("audio_retention", {"action": "set", "key": key, "value": value, "operator": "Admin"})
+    app._audio_retention(now)
+    assert app.audio.has("9211-h") and not app.audio.has("9211-o")
+
+
+def _hub_like(c, loose=()):
+    import threading
+    from types import SimpleNamespace
+    return SimpleNamespace(store=SimpleNamespace(_lock=threading.Lock(), loose=list(loose), incidents=[]),
+                           _lock=threading.Lock(), pages=[], cad=c)
+
+
+def test_the_backfill_and_the_sweep_never_give_a_context_clip_a_talkgroup(tmp_path):
+    from types import SimpleNamespace
+    from sizeup.cloud.hub import HubApp
+    from sizeup.incidents import Traffic
+    from tests.test_audio_store import FakeBucket, db as audio_db, s3store
+    # in memory (the monitor's transmissions)
+    t = Traffic.from_dict({"id": "9211-m", "source": "PD Dispatch", "start": 1.0, "end": 2.0, "text": "x",
+                           "talkgroup": PD, "system": "mrrs"})
+    ours = Traffic.from_dict({"id": "307-m", "source": "Fire/EMS 15", "start": 1.0, "end": 2.0, "text": "x", "talkgroup": 307})
+    fake = _hub_like(SimpleNamespace(store=SimpleNamespace(q=lambda *a: [])), [t, ours])
+    assert HubApp._clip_channels(fake, ["9211-m", "307-m"]) == {"9211-m": ("PD Dispatch", None), "307-m": ("Fire/EMS 15", 307)}
+    assert HubApp._clip_known(fake, ["9211-m"])["9211-m"][1] is None
+    # the radio log
+    now = time.time()
+    clock = Clock(now)
+    c = cad(tmp_path, clock)
+    _ctx_traffic(c, "9211-r", now - 3.5 * DAY_S)
+    fake = _hub_like(c)
+    assert HubApp._clip_channels(fake, ["9211-r"])["9211-r"] == ("PD Dispatch", None)
+    assert HubApp._clip_known(fake, ["9211-r"])["9211-r"][:2] == ("PD Dispatch", None)
+    # ... and the sweep makes a lost row again from it with no talkgroup
+    bucket = FakeBucket()
+    a = audio_db(tmp_path, s3store(bucket))
+    for k in range(5):
+        a.put(f"c{k}", WAV1K, at=now - (3 + k / 10) * DAY_S, channel="FG1")
+    a.put("9211-r", WAV1K, at=now - 3.5 * DAY_S, channel="PD Dispatch")
+    while a.upload_pending(limit=100):
+        pass
+    for k in bucket.modified:
+        bucket.modified[k] = now - 4 * DAY_S
+    a.db.execute("DELETE FROM audio WHERE id = '9211-r'")                  # a restore a little behind
+    a.sweep_orphans(now=now, known=lambda ids: HubApp._clip_known(fake, ids))
+    assert a.sweep_restored == 1
+    assert a.db.execute("SELECT channel, talkgroup FROM audio WHERE id = '9211-r'").fetchone() == ("PD Dispatch", None)
+
+
+def test_the_retention_settings_list_a_context_channel_only_to_a_signed_in_person(tmp_path):
+    from sizeup.cad.api import CadApi
+    from sizeup.cloud.access import Identity
+    from sizeup.cloud.hub import _where
+    from sizeup.cloud.hubstore import AudioDb
+    clock = Clock()
+    c = cad(tmp_path, clock)
+    _ctx_traffic(c, "9211-x", clock.t - 60)
+    c.record_traffic(tx("FG1-x", clock.t - 60))
+    a = AudioDb(":memory:")
+    a.put("9211-x", WAV1K, at=clock.t - 60, **_where({"source": "PD Dispatch", "talkgroup": PD, "system": "mrrs"}))
+    a.put("FG1-x", WAV1K, at=clock.t - 60, channel="FG1")
+    c.audio_blobs = a
+    api = CadApi(c)
+    chans = lambda who: {r["channel"] for r in json.loads(api.get("/api/cad/settings", "", who)[1])["audio_retention"]["rows"]}   # noqa: E731
+    assert chans(None) == {"FG1"}                                           # no sign-in: no context channel, no count
+    assert chans(Identity(email="admin@example.org")) == {"FG1", "PD Dispatch"}
+
+
+def test_the_radio_log_prune_keeps_a_context_row_off_our_talkgroups_days(tmp_path):
+    clock = Clock()
+    c = cad(tmp_path, clock)
+    t = clock.t - 10 * DAY_S
+    _ctx_traffic(c, "9211-ctx", t)
+    c.record_traffic(dict(tx("9211-ours", t, "County 9211", "", "", PD), system="westchester"))
+    _ctx_traffic(c, "9212-ctx", t, channel="PD Tac", tg=PD_TAC)
+    for sec in ("transcript_retention", "audio_retention"):
+        for key in (f"tg:{PD}", "PD Tac"):
+            c.store.db.execute("INSERT INTO settings_overrides (section, key, value, updated_at) VALUES (?, ?, '1', 0)",
+                               (sec, key))
+    c.comms.audio_default_days = 30
+    m = int(clock.t // 60)
+    for src, age in (("p25:mrrs:9300", 100), ("p25:mrrs:9301", 80), ("p25:mrrs:9302", 8), ("p25:mrrs:9303", 2)):
+        c.comms.activity(src, m - age * 1440, 3, ["4100001"])
+    c.comms.prune()
+    # ours on tg 9211 goes at its day; the other system's 9211 by its channel (the default); PD Tac's channel day: gone
+    assert {r["id"] for r in c.store.q("SELECT id FROM radio_traffic")} == {"9211-ctx"}
+    act = {r["source"]: r["radios"] for r in c.store.q("SELECT source, radios FROM radio_activity WHERE source LIKE 'p25:mrrs:93%'")}
+    assert act == {"p25:mrrs:9301": "", "p25:mrrs:9302": "", "p25:mrrs:9303": "4100001"}     # 90 days; radios 7
