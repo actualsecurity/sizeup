@@ -640,8 +640,30 @@ class Cad:
         now = self.clock() if now is None else now
         units = self.store.units() if units is None else units
         incs = self.store.q("SELECT id, number, status, lat, lon FROM incidents WHERE status IN ('queued', 'pending', 'active')")
-        return mapview.locations(units, incs, self.lists.role, self.firehouses, self._positions(now), now,
-                                 self.clears(now), self.eta, lists=self.lists)
+        out = mapview.locations(units, incs, self.lists.role, self.firehouses, self._positions(now), now,
+                                self.clears(now), self.eta, lists=self.lists)
+        return self._with_trips(out, now) if self.routes is not None else out
+
+    def _with_trips(self, where: dict, now: float) -> dict:
+        """The maps' trips home by road (routes.py, #453) over mapview's straight-line return: the recommendation puts
+        a rig where the map draws it (on the road: no turnout), and in quarters once the map has it home."""
+        for code, loc in where.items():
+            if not loc or loc["where"] not in ("returning", "near", "station"):
+                continue
+            try:
+                t = self.routes.trip_at(code, now)
+            except Exception as e:  # noqa: BLE001 - mapview's estimate then
+                self.log(f"CAD: trips home: {type(e).__name__}: {e}")
+                return where
+            if t is None:
+                continue
+            if t["home"]:
+                where[code] = dict(loc, where="station", ll=loc.get("home") or t["ll"], on_road=False,
+                                   label=f"from {loc['station']}" if loc.get("station") else loc["label"])
+            else:
+                where[code] = dict(loc, where="returning", ll=t["ll"], on_road=True,
+                                   label=f"returning from {t['number'] or 'a call'}")
+        return where
 
     def _with_radio(self, incs: list[dict], limit: int = 200) -> list[dict]:
         """Each event's radio traffic (newest first), with whether its audio is still kept."""

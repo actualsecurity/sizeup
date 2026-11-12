@@ -57,7 +57,11 @@ it to the road. Nothing here runs per frame: a move is made once, and only a sta
     already out     dispatched while on a trip home: from where the trip had it when it took the call (frozen); else
                     from its last live fix if it is no older than LAST_FIX_S and away from its station; a fix older
                     than that (up to OUT_S) away from its station: where it is is unknown, not moved
-                    (start_unknown: at its station, dashed, as before)
+                    (start_unknown: at its station, dashed, as before). A rig started away from its station is
+                    placed "enroute" (est: True), held where it is until it responds
+    out of service  (or any status not on a call nor free): its trip is ended, nothing frozen
+    a restart       the trips and the moves are kept in the CAD's meta (persist: SAVE_KEY) and read back on the
+                    first build, so a restart or a hot/cold handover goes on from the same estimate
     a live fix      always wins: no move, any trip forgotten
 
 The markers of rigs on a trip home are rewritten here (place "returning" at the estimate, or "station" once there);
@@ -67,6 +71,7 @@ mapview.locate's straight-line estimate stays the recommendation's.
 from __future__ import annotations
 
 import bisect
+import json
 import math
 import threading
 import time
@@ -95,15 +100,19 @@ HOLD_FRAC = 0.95              # ... waits this far along its way to a call until
 HOLD_MAX_M = 150.0            # ... at most this short of the call
 LAST_FIX_S = TRAIL_S          # a last live fix this recent (the maps no longer draw it) starts its next trip
 OUT_S = 6 * 3600.0            # older, away from its station: where it is is unknown (not moved)
-PLACED = ("station", "returning")   # placed by status (no live fix, not at a call)
+PLACED = ("station", "returning", "enroute")   # placed by status (no live fix, not at a call); "enroute": started here
+OVERDUE_S = 120.0             # held short of the call this long past its estimated arrival: overdue (the page fades it)
+SAVE_KEY = "routes.motion"    # the trips and the moves, kept in the CAD's meta (a restart or a handover goes on with them)
 
 
 class Routes:
     def __init__(self, graph: Callable[[], object | None], params: Callable[[], eta.Params],
                  closures: Callable[[], list[dict]] = lambda: [], firehouses: Callable[[], list[dict]] = lambda: [],
                  clock: Callable[[], float] = time.time, log: Callable[[str], None] = print,
-                 spawn: Callable[[Callable[[], None]], None] | None = None):
-        """spawn(fn): runs the closures' penalties off the state build (a thread; tests: at once)."""
+                 spawn: Callable[[Callable[[], None]], None] | None = None,
+                 persist: tuple[Callable[[], str | None], Callable[[str], None]] | None = None):
+        """spawn(fn): runs the closures' penalties off the state build (a thread; tests: at once). persist: (load,
+        save) of the trips and moves as JSON (the CAD's meta: Store.meta_get / meta_put), #453."""
         self.graph, self.params, self.closures, self.firehouses = graph, params, closures, firehouses
         self.spawn = spawn or (lambda fn: threading.Thread(target=fn, name="route-closures", daemon=True).start())
         self.clock, self.log = clock, log
@@ -117,6 +126,9 @@ class Routes:
         self.stats = {"routed": 0, "last_ms": None, "why": {}}
         self.trips: dict[str, dict] = {}        # unit -> its trip home (#453)
         self.fixes: dict[str, tuple] = {}       # unit -> ([lon, lat], at): its last live fix (a trip's start)
+        self.persist = persist
+        self._loaded = persist is None
+        self._saved = ""
         self._calls: dict[tuple, roadgraph.Call] = {}   # a call's words -> roadgraph.Call (the last state build's)
 
     # -- inputs -----------------------------------------------------------------------------------------------
@@ -185,65 +197,72 @@ class Routes:
         from sizeup.cad.mapview import is_placeholder
         markers = [m for m in markers if not is_placeholder(m)]     # a department placeholder: never routed (#384)
         with self._lock:
-            self._trail(markers, now)
-            trails = {u: [[p[0], p[1]] for p in t] for u, t in self.trails.items() if len(t) >= 2}
-            g = self.graph()
-            p = self.params()
-            got: list = []
+            if not self._loaded:
+                self._load()
+            out = self._for_map(markers, now, incidents)
+            self._save()
+            return out
 
-            def pen():                         # the closures in effect: looked at only when something is routed
-                if not got:
-                    got.append(self.penalties(g, now) if g is not None else ({}, 0))
-                return got[0]
-            backs = self._trips(markers, now, g, p, pen)
-            going = [m for m in markers if m.get("look") in GOING and m.get("incident_id") and m.get("line_to")
-                     and m.get("lon") is not None]
-            if not going:
-                self.cache.clear()
-                self.failed.clear()
-                return {"routes": backs, "trails": trails}
-            sig = None
+    def _for_map(self, markers: list[dict], now: float, incidents: list[dict] | None) -> dict:
+        self._trail(markers, now)
+        trails = {u: [[p[0], p[1]] for p in t] for u, t in self.trails.items() if len(t) >= 2}
+        g = self.graph()
+        p = self.params()
+        got: list = []
+
+        def pen():                         # the closures in effect: looked at only when something is routed
+            if not got:
+                got.append(self.penalties(g, now) if g is not None else ({}, 0))
+            return got[0]
+        backs = self._trips(markers, now, g, p, pen)
+        going = [m for m in markers if m.get("look") in GOING and m.get("incident_id") and m.get("line_to")
+                 and m.get("lon") is not None]
+        if not going:
+            self.cache.clear()
+            self.failed.clear()
+            return {"routes": backs, "trails": trails}
+        sig = None
+        if g is not None:
+            pens, pen_sig = pen()
+            sig = (id(g), pen_sig, p.highway_mph, p.arterial_mph, p.local_mph, p.emergency_factor, p.wrongway_m)
+        incs = {i.get("id"): i for i in incidents or ()}
+        seen, out, n = set(), [], 0
+        t0 = time.monotonic()
+        for m in going:
+            key = (m["unit"], m["incident_id"])
+            seen.add(key)
+            ent = prev = self.cache.get(key)
+            if prev is None:                       # moved to another call while moving by estimate: on from there
+                prev = next((e for k, e in self.cache.items() if k[0] == m["unit"] and e.get("move")), None)
             if g is not None:
-                pens, pen_sig = pen()
-                sig = (id(g), pen_sig, p.highway_mph, p.arterial_mph, p.local_mph, p.emergency_factor, p.wrongway_m)
-            incs = {i.get("id"): i for i in incidents or ()}
-            seen, out, n = set(), [], 0
-            t0 = time.monotonic()
-            for m in going:
-                key = (m["unit"], m["incident_id"])
-                seen.add(key)
-                ent = prev = self.cache.get(key)
-                if prev is None:                       # moved to another call while moving by estimate: on from there
-                    prev = next((e for k, e in self.cache.items() if k[0] == m["unit"] and e.get("move")), None)
-                if g is not None:
-                    call = self.call_of(incs.get(m["incident_id"]))
-                    msig = sig + (call,)
-                    why = self._why(ent, m, msig, p)
-                    bad = self.failed.get(key)
-                    if why and bad and bad[0] == m["line_to"] and bad[1] == msig and now - bad[3] < RETRY_S \
-                            and _m([m["lon"], m["lat"]], bad[2]) <= MOVED_M:
-                        why = ""                                        # no way last time: not again every second
-                    if why and (n == 0 or time.monotonic() - t0 < BUDGET_S):
-                        n += 1
-                        new = self._route(g, m, msig, pens, p, why, now, call, self._start(prev, m, now))
-                        if new is not None:
-                            ent = new
-                        elif why == "new" and not (ent and ent.get("by") == "line" and ent["to"] == m["line_to"]):
-                            ent = None
-                if ent is not None and ent.get("by") == "line" and m.get("place") not in PLACED:
-                    ent = None                                  # a live fix: no estimate, the straight line as before
-                    self.cache.pop(key, None)
-                if (ent is None or ent["to"] != m["line_to"]) and self._moving(m):
-                    ent = self._line(m, prev, now, p)                   # no road near (no graph): the straight line
-                if ent is None or ent["to"] != m["line_to"]:      # (a call moved, not routed yet: none)
-                    continue
-                self._move(ent, m, now)
-                out.append(self._public(ent, m, now, p))
-            for k in [k for k in self.cache if k not in seen]:
-                del self.cache[k]
-            for k in [k for k in self.failed if k not in seen]:
-                del self.failed[k]
-            return {"routes": out + backs, "trails": trails}
+                call = self.call_of(incs.get(m["incident_id"]))
+                msig = sig + (call,)
+                why = self._why(ent, m, msig, p)
+                bad = self.failed.get(key)
+                if why and bad and bad[0] == m["line_to"] and bad[1] == msig and now - bad[3] < RETRY_S \
+                        and _m([m["lon"], m["lat"]], bad[2]) <= MOVED_M:
+                    why = ""                                        # no way last time: not again every second
+                if why and (n == 0 or time.monotonic() - t0 < BUDGET_S):
+                    n += 1
+                    new = self._route(g, m, msig, pens, p, why, now, call, self._start(prev, m, now))
+                    if new is not None:
+                        ent = new
+                    elif why == "new" and not (ent and ent.get("by") == "line" and ent["to"] == m["line_to"]):
+                        ent = None
+            if ent is not None and ent.get("by") == "line" and m.get("place") not in PLACED:
+                ent = None                                  # a live fix: no estimate, the straight line as before
+                self.cache.pop(key, None)
+            if (ent is None or ent["to"] != m["line_to"]) and self._moving(m):
+                ent = self._line(m, prev, now, p)                   # no road near (no graph): the straight line
+            if ent is None or ent["to"] != m["line_to"]:      # (a call moved, not routed yet: none)
+                continue
+            self._move(ent, m, now)
+            out.append(self._public(ent, m, now, p))
+        for k in [k for k in self.cache if k not in seen]:
+            del self.cache[k]
+        for k in [k for k in self.failed if k not in seen]:
+            del self.failed[k]
+        return {"routes": out + backs, "trails": trails}
 
     # -- estimated motion (#453) ------------------------------------------------------------------------------
 
@@ -258,7 +277,7 @@ class Routes:
         mv = ent.get("move") if ent else None
         if mv is None or m.get("place") not in PLACED or now <= mv["t0"]:
             return None
-        return _est(ent, now)[0], True
+        return _est(ent, now)[0], True, mv.get("short_m")     # (held as far short of the call as before)
 
     def _line(self, m: dict, prev: dict | None, now: float, p: eta.Params) -> dict:
         """The straight line to the call (no road near, or no graph), from the marker or the estimate now."""
@@ -271,7 +290,7 @@ class Routes:
         ent = {"to": to, "origin": a, "anchor": here, "coords": [a, to], "cum": [0.0, d], "m": d,
                "s": eta.drive_s(a, to, p), "sig": None, "from": "status", "at": now, "why": "line", "fix_at": None,
                "away": 0, "along": 0.0, "remain": d, "by": "line", "number": m.get("incident_number") or ""}
-        ent["move"] = make_move(now, d, ent["s"], ease=False) if st else None
+        ent["move"] = make_move(now, d, ent["s"], ease=False, short=st[2]) if st else None
         self.cache[(m["unit"], m["incident_id"])] = ent
         return ent
 
@@ -282,6 +301,9 @@ class Routes:
             ent["move"] = None
             return
         mv = ent.get("move")
+        if mv is None and m.get("place") == "enroute" and _num(m.get("start_at")):
+            ent["move"] = mv = make_move(m["start_at"], ent["m"], ent["s"])     # away from its station: held there
+            mv["stop"] = mv["t0"]
         if m.get("look") == "responding":
             if mv is None:
                 t = m.get("status_at")
@@ -290,7 +312,9 @@ class Routes:
                     t = max(t, m["start_at"])          # from where it was then (a trip home, its last fix)
                 ent["move"] = make_move(t, ent["m"], ent["s"])
             elif "stop" in mv:
-                paused = max(0.0, now - mv.pop("stop"))
+                stop, t = mv.pop("stop"), m.get("status_at")
+                t = t if _num(t) and stop <= t <= now else now     # on again from its en-route time
+                paused = max(0.0, t - stop)
                 mv["t0"] += paused
                 mv["done_at"] += paused
         elif mv is not None and "stop" not in mv:
@@ -335,19 +359,22 @@ class Routes:
                         _at_home(m, trip["home"])
                     continue
                 out.append(self._apply(m, trip, now))
+            elif m.get("look") not in GOING:           # out of service (any status neither free nor on a call)
+                self.trips.pop(u, None)
+                continue
             elif trip is not None:                     # on a call while on its way home: from where it was then
                 if "froze" not in trip:
                     t = m.get("status_at")
                     t = t if _num(t) and trip["move"]["t0"] <= t <= now else now
                     trip["froze"] = (_est(trip, t)[0], t)
                 ll, t = trip["froze"]
-                m.update(place="returning", group=f"unit:{u}", lon=ll[0], lat=ll[1], ring=0, start_at=t)
+                m.update(place="enroute", group=f"unit:{u}", lon=ll[0], lat=ll[1], ring=0, start_at=t, est=True)
             else:
                 f = self.fixes.get(u)
                 if f is None or home is None or eta.haversine_km(f[0], home) <= AT_HOME_KM:
                     continue
                 if now - f[1] <= LAST_FIX_S:           # from its last live fix
-                    m.update(place="returning", group=f"unit:{u}", lon=f[0][0], lat=f[0][1], ring=0, start_at=f[1])
+                    m.update(place="enroute", group=f"unit:{u}", lon=f[0][0], lat=f[0][1], ring=0, start_at=f[1], est=True)
                 elif now - f[1] <= OUT_S:
                     m["start_unknown"] = True          # out, where unknown: not moved
         for u in [u for u in self.trips if u not in units]:
@@ -403,7 +430,7 @@ class Routes:
         along = along_at(trip["move"], now)
         ll = point_at(trip["coords"], trip["cum"], along)[0]
         m.update(place="returning", group=f"unit:{m['unit']}", lon=ll[0], lat=ll[1], ring=0, line_to=list(trip["home"]),
-                 home_line=True, returning_from=trip["number"] or m.get("returning_from") or "")
+                 home_line=True, returning_from=trip["number"] or m.get("returning_from") or "", est=True)
         remain = max(0.0, trip["m"] - along)
         remain_s = trip["s"] * remain / trip["m"] if trip["m"] > 0 else 0.0
         return {"unit": m["unit"], "incident_id": None, "kind": "back", "coords": trip["coords"], "m": round(trip["m"]),
@@ -413,6 +440,8 @@ class Routes:
 
     def _why(self, ent: dict | None, m: dict, sig: tuple, p: eta.Params) -> str:
         """Why the route must be worked out again now ('' = keep it); a new fix moves the rig along it here."""
+        if ent is not None and ent.pop("restored", False) and ent["to"] == m["line_to"]:
+            ent["sig"] = sig                             # read back after a restart: kept (the same estimate)
         if ent is None or ent["to"] != m["line_to"] or ent["sig"] != sig:
             return "new"
         here = [m["lon"], m["lat"]]
@@ -465,7 +494,7 @@ class Routes:
         ent = {"to": list(m["line_to"]), "origin": a, "anchor": here, "coords": coords, "cum": cum, "m": cum[-1],
                "s": r["s"], "sig": sig, "from": "fix" if fix else "status", "at": now, "why": why, "fix_at": m.get("at"),
                "away": 0, "along": 0.0, "remain": cum[-1], "by": "road", "number": m.get("incident_number") or "",
-               "move": make_move(now, cum[-1], r["s"], ease=False) if start and not fix else None}
+               "move": make_move(now, cum[-1], r["s"], ease=False, short=start[2]) if start and not fix else None}
         self.cache[(m["unit"], m["incident_id"])] = ent
         return ent
 
@@ -500,6 +529,56 @@ class Routes:
                 t.popleft()
             if not t or u not in live:
                 del self.trails[u]
+
+    def trip_at(self, unit: str, now: float | None = None) -> dict | None:
+        """Where the maps have a rig on its way home (Cad.locations: the recommendation agrees with the map, #453):
+        {"ll", "number", "home": False} on its way, {"home": True} there, None (no trip: mapview's)."""
+        now = self.clock() if now is None else now
+        with self._lock:
+            if not self._loaded:
+                self._load()
+            t = self.trips.get(unit)
+            if t is None or "froze" in t:
+                return None
+            if t.get("done") or now >= t["move"]["done_at"]:
+                return {"home": True, "ll": list(t["home"])}
+            return {"home": False, "ll": point_at(t["coords"], t["cum"], along_at(t["move"], now))[0],
+                    "number": t["number"]}
+
+    # -- kept across a restart (#453) ---------------------------------------------------------------------------
+
+    def _load(self) -> None:
+        self._loaded = True
+        try:
+            raw = self.persist[0]() if self.persist else None
+            doc = json.loads(raw) if raw else {}
+            for u, t in (doc.get("trips") or {}).items():
+                t["key"] = tuple(t["key"])
+                if t.get("froze"):
+                    t["froze"] = (t["froze"][0], t["froze"][1])
+                self.trips[u] = t
+            for k, ent in (doc.get("moves") or {}).items():
+                unit, iid = k.rsplit("|", 1)
+                self.cache[(unit, int(iid))] = dict(ent, sig=None, restored=True, fix_at=None, away=0, along=0.0,
+                                                    remain=ent["m"])
+            self._saved = raw or ""
+        except Exception as e:  # noqa: BLE001 - a bad record: started afresh
+            self.log(f"routes: kept trips not read ({type(e).__name__}: {e})")
+
+    def _save(self) -> None:
+        if not self.persist:
+            return
+        keep = ("to", "origin", "anchor", "coords", "cum", "m", "s", "from", "at", "why", "by", "number", "move")
+        doc = {"trips": {u: dict(t, key=list(t["key"])) for u, t in self.trips.items()},
+               "moves": {f"{k[0]}|{k[1]}": {x: e.get(x) for x in keep} for k, e in self.cache.items() if e.get("move")}}
+        raw = json.dumps(doc, separators=(",", ":"))
+        if raw == self._saved:
+            return
+        try:
+            self.persist[1](raw)
+            self._saved = raw
+        except Exception as e:  # noqa: BLE001 - not kept this time: tried again next build
+            self.log(f"routes: trips not kept ({type(e).__name__}: {e})")
 
     # -- the recommendation -----------------------------------------------------------------------------------
 
@@ -550,15 +629,23 @@ def _cum(coords: list) -> list[float]:
     return cum
 
 
-def make_move(t0: float, metres: float, secs: float, ease: bool = True, hold: bool = True) -> dict:
+def make_move(t0: float, metres: float, secs: float, ease: bool = True, hold: bool = True,
+              short: float | None = None) -> dict:
     """A move along a route (#453; cadmap.js alongAt is the same): from t0 at the route's average speed (metres /
     secs), from rest (ease: EASE_S) or rolling; hold: to a call, held HOLD_FRAC of the way (at most HOLD_MAX_M short)
-    until on location; else (home) all the way. done_at: when it is there (held, or home)."""
+    until on location; else (home) all the way. done_at: when it is there (held, or home). short: routed again from
+    where it was, held as far short of the call as the first route said (no creep)."""
     v = metres / secs if secs > 0 and metres > 0 else 0.0
-    hold_m = metres - min(metres * (1 - HOLD_FRAC), HOLD_MAX_M) if hold else metres
+    if not hold:
+        hold_m = metres
+    elif short is not None:
+        hold_m = metres - short
+    else:
+        hold_m = metres - min(metres * (1 - HOLD_FRAC), HOLD_MAX_M)
+    hold_m = max(0.0, hold_m)
     e = EASE_S if ease else 0.0
-    return {"t0": round(float(t0), 3), "mps": round(v, 3), "hold_m": round(max(0.0, hold_m), 1), "ease_s": e,
-            "done_at": round(float(t0) + (hold_m / v + e if v > 0 else 0.0), 3)}
+    return {"t0": round(float(t0), 3), "mps": round(v, 3), "hold_m": round(hold_m, 1), "ease_s": e,
+            "done_at": round(float(t0) + (hold_m / v + e if v > 0 else 0.0), 3), "short_m": round(metres - hold_m, 1)}
 
 
 def along_at(mv: dict, t: float) -> float:
@@ -596,7 +683,7 @@ def _at_home(m: dict, home: list) -> None:
     """Its trip home done: in quarters, idle (#377: folded with the firehouse's others)."""
     m.update(place="station", group=f"station:{m['station']}", lon=home[0], lat=home[1], ring=0, line_to=None,
              home_line=False)
-    for k in ("returning_from", "return_ll", "cleared_at"):
+    for k in ("returning_from", "return_ll", "cleared_at", "est"):
         m.pop(k, None)
 
 

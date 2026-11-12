@@ -132,9 +132,14 @@
   .cm-rig.rv.look-oos .cm-veh .b { fill: #59616B; }
   .cm-rig.rv.stale .cm-veh .b { fill: color-mix(in srgb, var(--bg) 80%, transparent); stroke: var(--c); stroke-width: 1.5px; }
   /* #453: moved by the estimate along its route (no live fix): translucent, its status edge kept ("~" before its status) */
-  .cm-rig.rv.est .cm-veh { opacity: 0.85; }
-  .cm-rig.rv.est .cm-veh .b { fill: color-mix(in srgb, var(--c) 42%, transparent); }
-  .cm-rig.rv.est:not(.enroute) .cm-veh .b { stroke: var(--c); stroke-width: 1.5px; }
+  /* a ghost: a faint body and a dotted outline in its status colour (not the dashes of en route, at any size), its
+     code in italics with a dotted edge; overdue (held past its estimated arrival): fainter still */
+  .cm-rig.rv.est .cm-veh { opacity: 0.9; }
+  .cm-rig.rv.est .cm-veh .b { fill: color-mix(in srgb, var(--c) 28%, transparent); stroke: var(--c); stroke-width: 2px;
+                              stroke-dasharray: 0.5 3; stroke-linecap: round; }
+  .cm-rig.rv.est .cm-veh :is(.g, .lt, .rd, .h, .p, .m, .k, .mi, .mf, .bk, .d) { opacity: 0.45; }
+  .cm-rig.rv.est .lbl { font-style: italic; border-inline-start-style: dotted; border-inline-end-style: dotted; }
+  .cm-rig.rv.est.overdue .cm-veh { opacity: 0.5; }
   .cm-rig.rv .lbl {
     position: absolute; inset-block-start: 50%; inset-inline-start: calc(50% + var(--hx) + 2px); transform: translateY(-50%);
     padding: 0 var(--s-0); font: 700 var(--fs-2xs)/var(--lh-2xs) var(--mono); color: #fff; white-space: nowrap; pointer-events: auto;

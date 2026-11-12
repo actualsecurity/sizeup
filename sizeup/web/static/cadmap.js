@@ -332,11 +332,13 @@ window.CadMap = (() => {
   // Frames only while something moves on a map on screen: a rig drawn on or catching up (glide.busy: parked and stale
   // ones settle and stop), a rig followed, or the frames owed after a new state; each map redrawn once its fastest rig
   // has moved STEP_PX there. The ages tick on a one-second timer while any live fix is drawn.
-  let raf = 0, ageTimer = 0;
+  // #453: only rigs moved by the estimate (ticked a few times a second): the loop sleeps between ticks (a timer), no
+  // frames in between
+  let raf = 0, ageTimer = 0, sleepT = 0;
   const visible = () => typeof document === "undefined" || document.visibilityState !== "hidden";
   const wanted = () => visible() && [...rigLayers].some((l) => l.moving());
   function animate() {
-    if (!raf && typeof requestAnimationFrame === "function" && wanted()) raf = requestAnimationFrame(frame);
+    if (!raf && !sleepT && typeof requestAnimationFrame === "function" && wanted()) raf = requestAnimationFrame(frame);
     if (fixesShown() && !ageTimer) ageTimer = setInterval(ageTick, AGE_MS);
     else if (!fixesShown() && ageTimer) { clearInterval(ageTimer); ageTimer = 0; }
   }
@@ -349,11 +351,17 @@ window.CadMap = (() => {
   function frame(ts) {
     raf = 0;
     if (!wanted()) return;
+    let smooth = fresh > 0, wait = Infinity;
     for (const l of rigLayers) {
-      if (l.moving() && ts - (l.tickedAt || 0) >= l.frameMs() - 2) { l.tickedAt = ts; l.tick(); }
+      if (!l.moving()) continue;
+      const ms = l.frameMs();
+      if (ts - (l.tickedAt || 0) >= ms - 2) { l.tickedAt = ts; l.tick(); }
+      if (l.smooth()) smooth = true;
+      else wait = Math.min(wait, (l.tickedAt || 0) + ms - ts);
     }
     if (fresh > 0) fresh -= 1;
-    raf = requestAnimationFrame(frame);
+    if (smooth || !(wait < Infinity) || typeof setTimeout !== "function") raf = requestAnimationFrame(frame);
+    else sleepT = setTimeout(() => { sleepT = 0; if (!raf) raf = requestAnimationFrame(frame); }, Math.max(0, wait - 8));
   }
   if (typeof document !== "undefined" && document.addEventListener) {
     document.addEventListener("visibilitychange", animate);
@@ -423,21 +431,36 @@ window.CadMap = (() => {
   }
   // A rig moved by the estimate (no live fix, not at a call), on its way to a call or home: {r, g, d, ll, brg, moving}
   // or null. moving: not yet held short of the call, not stopped, not home: it wants frames.
+  // overdue: held short of the call OVERDUE_S past its estimated arrival, still not on location (faded, "overdue")
+  const OVERDUE_S = 120;               // routes.py OVERDUE_S
   function motionOf(m, M) {
     if (m.place === "position" || m.place === "incident") return null;
     const r = m.home_line ? (m.place === "returning" ? backOf(M, m) : null) : m.line_to ? routeOf(M, m) : null;
     if (!r || !r.move || !Array.isArray(r.coords) || r.coords.length < 2) return null;
-    const g = geoOf(r), t = nowS(), d = alongAt(r.move, t), p = pointAt(g, d);
-    return { r, g, d, ll: p.ll, brg: p.brg, i: p.i, moving: typeof r.move.stop !== "number" && d < r.move.hold_m && t < r.move.done_at };
+    const g = geoOf(r), t = nowS(), d = alongAt(r.move, t), p = pointAt(g, d), held = typeof r.move.stop === "number";
+    return { r, g, d, ll: p.ll, brg: p.brg, i: p.i, moving: !held && d < r.move.hold_m && t < r.move.done_at,
+             overdue: r.kind !== "back" && !held && t > r.move.done_at + OVERDUE_S };
   }
   // the hub's markers as drawn: a rig moved by the estimate is its own group at its estimate (place "route" on its way to a
-  // call from its firehouse), marked est
+  // call from its firehouse), marked est; one the hub placed by an estimate (est: started away from its firehouse) stays
+  // marked est while it waits there
   function withEst(ms, M) {
-    return ms.map((m) => (motionOf(m, M) ? { ...m, est: true, place: m.place === "station" ? "route" : m.place,
-                                                group: `unit:${m.unit}`, ring: 0 } : m));
+    return ms.map((m) => {
+      if (motionOf(m, M)) return { ...m, est: true, place: m.place === "station" ? "route" : m.place, group: `unit:${m.unit}`, ring: 0 };
+      if (m.est) return m.place === "position" || m.place === "incident" ? { ...m, est: false } : m;
+      return m;
+    });
   }
   // the route ahead of an estimated rig: from its estimate on
-  const restOf = (e) => [e.ll, ...e.g.c.slice(e.i + 1)];
+  // its route ahead from a point at most ROUTE_STEP_M behind it (under the vehicle): the line is made again only when it
+  // has gone that far or passed a bend, not on every tick
+  const ROUTE_STEP_M = 20;
+  function restOf(e) {
+    const p = pointAt(e.g, Math.floor(e.d / ROUTE_STEP_M) * ROUTE_STEP_M);
+    return [p.ll, ...e.g.c.slice(p.i + 1)];
+  }
+  let routeIds = 0;
+  const routeId = (g) => g.id || (g.id = ++routeIds);
   // the route's points from the mark on: [mark, ...the rest]. The nearest segment to the mark, looked for near where the
   // hub last had the rig along it (along_m: from a little behind to ALONG_AHEAD_M ahead, as the mark is drawn on
   // between fixes), a tie going to the EARLIER segment: a route that doubles back on a street keeps its first leg.
@@ -681,6 +704,8 @@ window.CadMap = (() => {
                                                || (this.hasFix && (fresh > 0 || (glide && glide.busy())))));
     }
     fixMoving() { return !!(this.hasFix && (fresh > 0 || (glide && glide.busy()))); }
+    // frames every frame (a live fix, a follow, a glide to a new place); else only the estimate's ticks (#453)
+    smooth() { return !!(this.fixMoving() || (this.fol && this.fol.id) || this.settling); }
     // how often to tick this map: each time the fastest rig has moved STEP_PX on it at its zoom (aircraft.js frameMs)
     // #453: rigs moved only by the estimate: at most every EST_MS (FRAME_MS while one glides to a new place)
     frameMs() {
@@ -735,7 +760,8 @@ window.CadMap = (() => {
       if (!force && f.chipShown()) return;
       const m = rec.m, st = statusOf(this.data && this.data.lists, m.status), fx = fixAge(m, this.data && this.data.map);
       const r = routeOf(this.data && this.data.map, m);      // by road (#360): "~3 min · 1.2 mi"
-      const text = [`Following ${m.unit}`, st.name, r ? r.text : "", fx ? `${agoS(fx.age)} ago` : ""].filter(Boolean).join(" · ");
+      const text = [`Following ${m.unit}`, st.name, m.est ? "est." : "", r ? r.text : "", fx ? `${agoS(fx.age)} ago` : ""]
+        .filter(Boolean).join(" · ");                       // #453: an estimate says so in words
       f.chip(text, r ? `${rec.el.title}, ${r.text} ${r.by === "line" ? "straight line" : "by road"} (est.)` : rec.el.title,
              { stale: !!(fx && fx.stale) });
     }
@@ -793,7 +819,7 @@ window.CadMap = (() => {
         rings.forEach((list, ring) => {
           if (!list.length) return;
           const m0 = list[0];
-          if (m0.place === "position" || m0.place === "returning" || m0.place === "route") { list.forEach((m) => out.set(m.unit, [0, 0])); return; }
+          if (["position", "returning", "route", "enroute"].includes(m0.place)) { list.forEach((m) => out.set(m.unit, [0, 0])); return; }
           const n = list.length, deg = Math.PI / 180;
           const dots = list.every((m) => size(m) === "dot"), gap = dots ? DOT_W : RING_GAP * k;
           const sum = list.reduce((a, m) => a + wOf(m), 0), w = Math.max(...list.map(wOf));
@@ -847,11 +873,12 @@ window.CadMap = (() => {
         const off = offs.get(m.unit) || [0, 0];
         const onFocus = !!this.focus && m.incident_id === this.focus.id;
         const fx = fixAge(m, M);                               // a live fix: its age, stale (hollow, faded, aged)
+        const mo = m.est ? motionOf(m, M) : null, late = !!(mo && mo.overdue);   // #453
         if (fx) this.hasFix = true;
         const age = fx && fx.stale ? agoS(fx.age) : "";
         const sig = JSON.stringify([m.est ? 0 : m.lon, m.est ? 0 : m.lat, off, m.look, m.ring, m.place, st.bg, talk, m.tag, m.station,
           m.incident_number, m.returning_from, onFocus, !!this.focus, this.far, age, fx && Math.round(fx.fade * 20), lit, m.source, sz,
-          cl, m.icon, m.heading, !!m.est]);
+          cl, m.icon, m.heading, !!m.est, late]);
         let rec = this.chips.get(m.unit);
         if (!rec) {
           const e = h("button", "cm-rig");
@@ -890,7 +917,7 @@ window.CadMap = (() => {
           + (cl === "act" ? " act" : "") + (sz === "dot" ? " rig-dot" : sz === "folded" ? " folded" : "")
           + (this.focus && m.incident_id && !onFocus ? " other" : "") + (onFocus ? " mine" : "")
           + (fx && fx.stale ? " stale" : "") + (lit[0] ? " hl" : "") + (lit[1] ? " hot" : "") + (lit[2] ? " followed" : "")
-          + (m.est ? " est" : "");                                                    // #453: an estimate, not a fix
+          + (m.est ? " est" : "") + (late ? " overdue" : "");                        // #453: an estimate, not a fix
         e.style.setProperty("--c", st.bg || "#9AA3AD");
         // a stale fix fades; not an active rig's dot (#376: it stays plain to see)
         e.style.opacity = fx && fx.stale && !(sz === "dot" && cl === "act") ? String(Math.round(fx.fade * 100) / 100) : "";
@@ -906,7 +933,7 @@ window.CadMap = (() => {
           e.replaceChildren(rec.veh, rec.lbl);
         }
         // its code, then its status code (not colour alone: AQ, DP, RS, OL, OS ...), then any tag and a stale fix's age
-        const P = rec.parts, cue = (m.est ? "~" : "") + statusCue(st, m);    // #453: "~": an estimate
+        const P = rec.parts, cue = (m.est ? "~" : "") + statusCue(st, m) + (late ? " overdue" : "");   // #453: "~": an estimate
         P.n.textContent = m.unit;
         P.st.textContent = cue;
         for (const [k, t] of [["tag", m.tag || ""], ["age", age]]) {
@@ -916,8 +943,9 @@ window.CadMap = (() => {
         rec.chars = m.unit.length + (cue.length + 0.5) * 0.75 + (m.tag ? m.tag.length * 0.7 + 0.5 : 0) + (age ? age.length * 0.7 + 0.5 : 0);
         e.title = [m.unit + (ICON_NAMES[iconOf(m)] ? ` (${ICON_NAMES[iconOf(m)]})` : ""), st.name,
                    fx ? `${fx.stale ? "last fix" : "live"} ${agoS(fx.age)} ago${m.source ? ` (${m.source})` : ""}` : "",
-                   m.place === "returning" ? `returning from ${m.returning_from}${m.est ? "" : " (est. position)"}` : "",
+                   m.place === "returning" ? (m.returning_from ? `returning from ${m.returning_from}` : "returning") + (m.est ? "" : " (est. position)") : "",
                    m.est ? "Estimated from the route and status times, not a real position" : "",
+                   late ? "overdue: past its estimated arrival, not on location yet" : "",
                    m.station ? `home ${m.station}` : (m.fire ? "no home station" : ""),
                    m.incident_number ? `on ${m.incident_number}` : "",
                    talk === "talking" ? "TX now" : talk ? "TX ended" : ""].filter(Boolean).join(", ");
@@ -1015,12 +1043,12 @@ window.CadMap = (() => {
 
     // #384: a firehouse's rigs (home station), active first, then idle, then out of service, each in the hub's order
     stationRigs(name) {
-      const ms = drawable(this.data && this.data.map);
+      const M = this.data && this.data.map, ms = withEst(drawable(M), M);     // #453: an estimate marked in the list too
       return ms.map((m, i) => [m, i]).filter(([m]) => m.station === name)
         .sort((a, b) => CLASS_ORDER[rigClass(a[0])] - CLASS_ORDER[rigClass(b[0])] || a[1] - b[1]).map(([m]) => m);
     }
 
-    listSig(rigs) { return JSON.stringify(rigs.map((m) => [m.unit, m.status, m.icon, callsOf(m), this.chips.has(m.unit)])); }
+    listSig(rigs) { return JSON.stringify(rigs.map((m) => [m.unit, m.status, m.icon, callsOf(m), this.chips.has(m.unit), !!m.est])); }
 
     // #384: a firehouse clicked (its icon or its count chip): its rigs in the map's box, each with its type and status;
     // a click on one follows it (#358) or, where the map follows nothing, centres and rings it; hovered: ringed wider.
@@ -1046,6 +1074,7 @@ window.CadMap = (() => {
         b.dataset.unit = m.unit;
         b.style.setProperty("--c", st.bg || "#9AA3AD");
         b.append(vehEl(iconOf(m), true), h("b", "n", m.unit), h("span", "s", st.name));   // #427: its vehicle, front right
+        if (m.est) b.append(h("span", "dim est", "est."));                              // #453: not a real position
         if (callsOf(m).length) b.append(h("span", "dim", callsOf(m).join(", ")));       // every call it is on
         b.title = [m.unit + (ICON_NAMES[iconOf(m)] ? ` (${ICON_NAMES[iconOf(m)]})` : ""), st.name,
                    go ? (this.onFollow ? "click: follow" : "click: show") : ""].filter(Boolean).join(", ");
@@ -1097,7 +1126,7 @@ window.CadMap = (() => {
       const M = this.data && this.data.map;
       this.drawRoutes(markers, lists, M);
       for (const m of markers) {
-        if (!m.line_to || (!m.home_line && routeOf(M, m)) || (m.est && m.home_line)) continue;   // its route drawn instead (#360, #453)
+        if (!m.line_to || (!m.home_line && routeOf(M, m)) || (m.est && m.home_line && backOf(M, m))) continue;   // its route drawn instead (#360, #453)
         const from = markAt(m);                                             // a live fix: from its mark
         const k = JSON.stringify([from, m.line_to]);
         const color = m.home_line ? HOME_LINE : statusOf(lists, m.status).bg || LINE;
@@ -1116,7 +1145,7 @@ window.CadMap = (() => {
     drawRoutes(markers, lists, M) {
       const src = this.map.getSource("cm-routes");
       if (!src) return;
-      const feats = [];
+      const feats = [], keys = [];
       const trails = (M && M.trails) || {};
       for (const m of markers) {
         const color = statusOf(lists, m.status).bg || LINE;
@@ -1126,18 +1155,33 @@ window.CadMap = (() => {
         const rec = this.chips.get(m.unit);
         // the way home: thin and grey, only while its rig is drawn full (#376: a dot's or a folded one's not)
         const home = !!(e && m.home_line), hide = home && rec && rec.size !== "full";
-        const path = e ? (hide ? null : restOf(e)) : r ? routeFrom(r.coords, here, r.along_m) : null;
-        if (path && path.length >= 2) feats.push({ type: "Feature", properties: { color: home ? HOME_LINE : color, unit: m.unit, home },
-                                                   geometry: { type: "LineString", coordinates: path } });
+        // an estimate's line: made again only when its rig has gone ROUTE_STEP_M or its route changed (#453)
+        if (e && !hide) {
+          const k = `${m.unit}|${routeId(e.g)}|${Math.floor(e.d / ROUTE_STEP_M)}|${color}|${home}`;
+          keys.push(k);
+          const c = rec && rec.lineKey === k ? rec.lineFeat : null;
+          const f = c || { type: "Feature", properties: { color: home ? HOME_LINE : color, unit: m.unit, home },
+                           geometry: { type: "LineString", coordinates: restOf(e) } };
+          if (rec) { rec.lineKey = k; rec.lineFeat = f; }
+          if (f.geometry.coordinates.length >= 2) feats.push(f);
+        }
+        const path = !e && r ? routeFrom(r.coords, here, r.along_m) : null;
+        if (path && path.length >= 2) {
+          const f = { type: "Feature", properties: { color, unit: m.unit, home: false }, geometry: { type: "LineString", coordinates: path } };
+          keys.push(JSON.stringify(f));
+          feats.push(f);
+        }
         const t = this.fol && this.fol.id === m.unit ? trails[m.unit] : null;
-        if (Array.isArray(t) && t.length >= 2) feats.push({ type: "Feature", properties: { color, trail: true, unit: m.unit },
-                                                            geometry: { type: "LineString", coordinates: [...t, here] } });
+        if (Array.isArray(t) && t.length >= 2) {
+          const f = { type: "Feature", properties: { color, trail: true, unit: m.unit }, geometry: { type: "LineString", coordinates: [...t, here] } };
+          keys.push(JSON.stringify(f));
+          feats.push(f);
+        }
       }
-      const fc = { type: "FeatureCollection", features: feats };
-      const sig = JSON.stringify(fc);
+      const sig = keys.join("\n");
       if (sig === this.routeSig) return;
       this.routeSig = sig;
-      src.setData(fc);
+      src.setData({ type: "FeatureCollection", features: feats });
     }
 
     drawUnset(unset) {
