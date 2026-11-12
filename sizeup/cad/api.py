@@ -732,7 +732,7 @@ class CadApi:
             if path == "/api/cad/settings/export":
                 return _json(200, self.cad.settings_export())
             if path == "/api/cad/settings/audit":
-                return _json(200, self.cad.settings_audit_log(parse_qs(query)))
+                return _json(200, self.cad.settings_audit_log(parse_qs(query), self._may(who)))
             if path == "/api/cad/stt":
                 return _json(200, self.cad.settings.stt_page())
             if path == "/api/cad/tones":

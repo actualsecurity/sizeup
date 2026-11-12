@@ -721,6 +721,26 @@ def test_note_visibility_is_an_audited_admin_setting(api):
     assert [n["id"] for n in get(api, f"/api/cad/incident/{iid}/here", "", VAL)[1]["notes"]] == [med["id"]]
 
 
+def test_the_settings_audit_hides_older_rows_of_a_newly_restricted_category(api):
+    c, iid = api.cad, api.calls["ems"]
+    med = c.premise.create({"incident_id": iid, "text": "On home oxygen", "category": "medical"})["note"]
+    call(api, f"/api/cad/premise/{med['id']}", {"text": "On home oxygen, 2nd floor"}, JULIAN)    # written in the clear
+    assert call(api, "/api/cad/settings/premise_visibility", {"action": "set", "key": "medical", "value": "admin"},
+                COREY)[0] == 200
+
+    def rows(email):
+        code, out = get(api, "/api/cad/settings/audit", "section=premise", email)
+        assert code == 200
+        return [r for r in out["audit"] if r["section"] == "premise"]
+    for who_ in (JULIAN, VAL):
+        seen = rows(who_)
+        assert len(seen) == 2 and not any("oxygen" in (r["old"] or "") + (r["new"] or "") + r["key"] for r in seen)
+        assert {r["key"] for r in seen} == {str(med["id"])}
+        assert json.loads(seen[0]["new"]) == {"category": "medical", "changed": ["text"]}
+    assert any("oxygen" in (r["new"] or "") for r in rows(COREY))       # an admin still reads it all
+    assert any("oxygen" in (r["new"] or "") for r in c.store.q("SELECT new FROM settings_audit WHERE section = 'premise'"))
+
+
 def test_snippets_bind_the_page_rowids(calls):
     c, ids = calls
     seen = []

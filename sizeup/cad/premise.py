@@ -15,6 +15,7 @@ activity line.
 
 from __future__ import annotations
 
+import json
 import re
 import threading
 from datetime import datetime
@@ -249,6 +250,34 @@ class Premise:
             if not partial or k in body:
                 f[k] = self._when(body.get(k), k)
         return f
+
+    def redact_audit(self, rows: list[dict], may: str) -> list[dict]:
+        """The Settings audit log as this reader may see it: a premise note's rows (any written before its category was
+        restricted too) reduced to its id, its category now and the names of what changed, when the reader may not see
+        that category under the current setting. At read time: the rows themselves stay as written."""
+        ids = {int(m.group(1)) for r in rows if r.get("section") == SECTION and (m := re.match(r"(\d+)", r.get("key") or ""))}
+        if not ids:
+            return rows
+        cats = {r["id"]: r["category"] for r in self.store.q(
+            f"SELECT id, category FROM premise_notes WHERE id IN ({','.join('?' * len(ids))})", list(ids))}
+
+        def names(v):
+            try:
+                d = json.loads(v) if v else None
+            except ValueError:
+                return None
+            return sorted(d) if isinstance(d, dict) else None
+        out = []
+        for r in rows:
+            m = re.match(r"(\d+)", r.get("key") or "") if r.get("section") == SECTION else None
+            cat = cats.get(int(m.group(1))) if m else None
+            if m and (cat is None or not may_see(cat, may, self.visible())):
+                def shape(v, cat=cat):
+                    n = names(v)
+                    return "" if n is None else json.dumps({"category": cat, "changed": n}, separators=(",", ":"))
+                r = dict(r, key=m.group(1), old=shape(r.get("old")), new=shape(r.get("new")))
+            out.append(r)
+        return out
 
     def _audit(self, db, op: str, n: dict, old: dict | None, new: dict | None) -> None:
         """The Settings audit log (anyone who may read Settings): a note of a restricted category (or one moved in or out

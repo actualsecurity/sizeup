@@ -1638,8 +1638,9 @@ class Cad:
     def settings_export(self) -> dict:
         return self.settings.export()
 
-    def settings_audit_log(self, q: dict) -> dict:
-        return {"audit": self.settings.audit_log((q.get("section") or [""])[0][:40])}
+    def settings_audit_log(self, q: dict, may: str = "admin") -> dict:
+        """may: the reader's standing; a premise note's rows of a category they may not see (now) without its text (#403)."""
+        return {"audit": self.premise.redact_audit(self.settings.audit_log((q.get("section") or [""])[0][:40]), may)}
 
     # -- location suggestions -----------------------------------------------------------------------
 
