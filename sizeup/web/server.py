@@ -19,8 +19,11 @@ POST /api/adsb-receiver {"sdr": serial | "", "confirm": true}  admins: name (or 
 POST /api/reception {"action": "start" | "stop" | "note", ...}  admins: a reception test (#410, sizeup/radio/reception.py:
                         one dongle lent to one side of another P25 system; state "reception"); the hub sends it to
                         the station
-GET  /api/reception            its state: the running test, the samples, the history (admins)
-GET  /api/reception/sample?id=<id>  a call a reception test captured, while it is kept (admins; minutes, then deleted)
+GET  /api/reception            its state: the running test and the history (admins); the list of captured calls only
+                               to a verified, signed-in person (the hub), else just how many are kept (#419)
+GET  /api/reception/sample?id=<id>  a call a reception test captured, while it is kept (minutes, then deleted): a
+                               signed-in admin only, i.e. from the hub, which fetches it from the station; 403 on the
+                               station's own page, all-in-one and a hub without Access
 Every POST on the station (and all-in-one; not the hub, behind Cloudflare Access) is refused 403 when a browser says
 it came from another site (#307: Sec-Fetch-Site not same-origin / none, else an Origin not this host): it binds
 127.0.0.1, but a page open in the station PC's browser could still post. Its own page, and tools with neither header
@@ -663,12 +666,25 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                 # the reception tests (#410): their state, history and sample list; admins only, never in /api/state
                 if cad is not None and (no := cad.read_refused(path, self.who)) is not None:
                     return self._send(*no)
-                return self._send(200, json.dumps({"reception": reception[2]()}, separators=(",", ":"), default=str).encode(),
+                rx = reception[2]()
+                with sourcekeys.request_context(self.who):
+                    seen = sourcekeys.may_see_context()
+                if isinstance(rx, dict) and not seen:
+                    # The numbers of a test (decode rate, signal, counts, history) carry no content and show where
+                    # the test is run. The captured calls are another system's audio (#419): their list (talkgroup,
+                    # time, id) only to a signed-in person, i.e. from the hub; here only how many are kept.
+                    rx = dict(rx, samples=[], samples_kept=len(rx.get("samples") or []), samples_at="hub")
+                return self._send(200, json.dumps({"reception": rx}, separators=(",", ":"), default=str).encode(),
                                   "application/json", {"Cache-Control": "no-store"})
             if path == "/api/reception/sample" and reception is not None:
                 # a call a reception test captured (#410): admins only, never cached, gone after its minutes
                 if cad is not None and (no := cad.read_refused(path, self.who)) is not None:
                     return self._send(*no)
+                with sourcekeys.request_context(self.who):
+                    seen = sourcekeys.may_see_context()
+                if not seen:        # another system's audio: a verified, signed-in person only (#419): from the hub
+                    return self._send(403, b'{"error":"listen to a captured call from the hub (signed in)"}',
+                                      "application/json", {"Cache-Control": "no-store"})
                 wav = reception[1](dict(parse_qsl(url.query)).get("id", ""))
                 return (self._send(200, wav, "audio/wav", {"Cache-Control": "no-store"}) if wav
                         else self._send(404, b"no such sample\n", "text/plain"))

@@ -1151,7 +1151,8 @@ def _sse(url, seconds=1.5) -> bytes:
 
 UNSIGNED = ("/api/state", "/api/cad/state", "/api/cad/comms", "/api/cad/comms?channel=PD%20Dispatch", "/api/cad/comms?q=zebra",
             "/api/cad/comms?unit=UNIT-ZQ9", "/api/cad/feed", "/api/cad/radios", "/api/cad/activity", "/api/cad/health",
-            "/api/cad/comms/activity", "/api/station/status", "/api/station/hello", "/healthz", "/api/scene")
+            "/api/cad/comms/activity", "/api/station/status", "/api/station/hello", "/healthz", "/api/scene",
+            "/api/reception")
 
 
 def _sweep(url, iid, app) -> None:
@@ -1164,6 +1165,12 @@ def _sweep(url, iid, app) -> None:
         assert not _leaks(_sse(url + path)), path
     assert _get(url + f"/api/audio/{PD_ID}.wav")[0] == 404 and _get(url + f"/api/audio/{PD_ID}.src.wav")[0] == 404
     assert _get(url + "/api/cad/comms/activity")[0] in (403, 409)
+    # a reception test's captured calls (#410) are the same audio: no list and no call, whatever the id
+    code, rx = _get(url + "/api/reception")
+    assert code != 200 or not isinstance(rx, dict) or rx.get("reception") is None or (
+        rx["reception"]["samples"] == [] and rx["reception"]["samples_at"] == "hub")
+    for sid in ("0123456789ab", PD_ID):
+        assert _get(url + f"/api/reception/sample?id={sid}")[0] in (403, 404, 409)
     assert _post(url + "/api/retranscribe", {"ids": [PD_ID]})[0] in (403, 409)
 
 

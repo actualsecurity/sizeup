@@ -112,7 +112,12 @@ side's verdict.
 - Captured calls stay on the station as a rolling sample (first 60 s of each, at most 40) for the minutes set, then
   they are deleted. Never a talkgroup switched Off, never an encrypted call. All samples are deleted when sizeup
   stops and when it starts. On the hub they are fetched from the station when played and never stored.
-- The state (the running test, the samples, the history) is `GET /api/reception`, admins only. It is not in the
+- A captured call is another system's audio, so it is **listened to from the hub**: Settings > Radios there, a
+  signed-in admin. The hub asks the station for the call when it is played and stores nothing. The station's own
+  page (and an all-in-one install, or a hub without Access) shows only how many calls are kept, "sample: listen from
+  the hub": no list, no audio (`GET /api/reception/sample` answers 403 there).
+- The state (the running test, the history; the list of captured calls only for a signed-in person) is
+  `GET /api/reception`, admins only. It is not in the
   state everyone gets; only "lent to reception test" on the dongle's row is.
 - The history (last 30 tests, with the antenna notes) is `state/reception_history.json` on the station. Notes can be
   edited afterwards.
@@ -165,4 +170,4 @@ Watch, in this order:
 
 `POST /api/reception` (admins): `{"action": "start", "system", "jobs": [..], "sdr", "minutes": 15|60|240|0,
 "keep_min", "note", "pause": "<the job on the dongle now>"}`, `{"action": "stop"}`, `{"action": "note", "id", "note"}`.
-State: `GET /api/reception`. A sample: `GET /api/reception/sample?id=`.
+State: `GET /api/reception`. A sample: `GET /api/reception/sample?id=` (from the hub, signed in).

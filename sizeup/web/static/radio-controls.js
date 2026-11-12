@@ -530,7 +530,8 @@ window.RadioControls = (() => {
       n.rxLive.replaceChildren(...kids);
     }
     // the calls it captured, while they are kept
-    const skey = rx.samples.map((s) => s.id).join("|");
+    // (#419) where nobody is signed in (the station's own page): only how many, and where to listen
+    const skey = rx.samples_at === "hub" ? `hub:${rx.samples_kept || 0}` : rx.samples.map((s) => s.id).join("|");
     if (skey !== rxSt.sampleKey) {
       rxSt.sampleKey = skey;
       const rows = rx.samples.map((s) => {
@@ -542,7 +543,9 @@ window.RadioControls = (() => {
                    el("span", "dim", `${hms(s.seconds)} · ${s.errors} err`), au, el("span", "dim small rx-left"));
         return row;
       });
-      n.rxSamples.replaceChildren(...(rows.length ? [el("div", "dim small", "Captured calls (deleted after their minutes)"), ...rows] : []));
+      n.rxSamples.replaceChildren(...(rx.samples_at === "hub"
+        ? (rx.samples_kept ? [el("div", "dim small", `${rx.samples_kept} captured call${rx.samples_kept === 1 ? "" : "s"} \u00b7 sample: listen from the hub`)] : [])
+        : rows.length ? [el("div", "dim small", "Captured calls (deleted after their minutes)"), ...rows] : []));
     }
     for (const s of rx.samples) {
       const row = [...n.rxSamples.children].find((r) => r.dataset.id === s.id);

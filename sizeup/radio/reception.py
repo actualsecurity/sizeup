@@ -19,8 +19,12 @@ system's own trunk-recorder runs on it as it would for good, and its output is m
     Tests        the test itself: which dongle may be lent, the job it pauses and gets back, the history.
 
 Nothing of a test is kept as traffic: no transcription, no radio log row, no activity row, no radio ID. The calls it
-captured are counted and their audio kept as a rolling sample for the tester to listen to (Settings > Radios, behind
-the sign-in): `keep_min` minutes (default 10, 0 = none), then deleted; all of it is deleted when sizeup starts.
+captured are counted and their audio kept as a rolling sample for the tester to listen to: `keep_min` minutes
+(default 10, 0 = none), then deleted; all of it is deleted when sizeup starts. The sample is another system's audio,
+so it is listened to from the hub only (Settings > Radios there, a signed-in admin: the hub asks the station for the
+call through its job queue, App.reception_sample_b64, and stores nothing). The station's own page, an all-in-one
+install and a hub without Access serve neither the audio nor the list of captured calls (sizeup/web/server.py,
+sourcekeys.may_see_context, #419): only how many are kept.
 
 The dongle: never one another app holds (sizeup/radio/claims.py), never the ADS-B receiver's, never a fire job's (the
 county trunk, paging, a fireground: not lendable at all in this version), and one that runs any other job only when

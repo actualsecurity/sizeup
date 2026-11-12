@@ -1240,17 +1240,25 @@ def test_the_web_server_starts_stops_and_serves_a_sample(lab):
         app._call_system(rt, a_call(PD, at=clock.t))
         headers, raw = get("/api/reception")
         st = json.loads(raw)["reception"]
-        assert headers["Cache-Control"] == "no-store" and st["active"]["was"] == "HPN Tower" and len(st["samples"]) == 1
+        assert headers["Cache-Control"] == "no-store" and st["active"]["was"] == "HPN Tower"
+        # nobody is signed in on the station's own page: the test's numbers show, the captured calls don't (#419):
+        # no list (talkgroup, time, id), only how many are kept and where to listen
+        assert (st["samples"], st["samples_kept"], st["samples_at"]) == ([], 1, "hub")
+        sid = app.reception_state()["samples"][0]["id"]
+        assert sid not in raw.decode() and "radio_id" not in raw.decode()
         server.poke()
         time.sleep(0.3)
         state = json.loads(get("/api/state")[1])
         assert "reception" not in state and "samples" not in json.dumps(state)
         assert next(x for x in state["sdr"]["sdrs"] if x["serial"] == "air")["lent"]["paused"] == "HPN Tower"
-        headers, wav = get(f"/api/reception/sample?id={st['samples'][0]['id']}")
-        assert headers["Content-Type"] == "audio/wav" and headers["Cache-Control"] == "no-store" and wav[:4] == b"RIFF"
-        with pytest.raises(urllib.error.HTTPError) as e:
-            get("/api/reception/sample?id=000000000000")
-        assert e.value.code == 404
+        for q in (sid, "000000000000"):                           # its audio: refused here, whatever the id
+            with pytest.raises(urllib.error.HTTPError) as e:
+                get(f"/api/reception/sample?id={q}")
+            assert e.value.code == 403 and e.value.headers["Cache-Control"] == "no-store"
+        # ... while the hub can still be handed it (the station's job queue: App.reception_sample_b64, never HTTP here)
+        import base64
+        assert base64.b64decode(app.reception_sample_b64(sid))[:4] == b"RIFF" and app.reception_sample(sid)[:4] == b"RIFF"
+        assert "reception_sample_b64" in __import__("sizeup.cloud.station", fromlist=["CALLS"]).CALLS
         assert post({"action": "stop"}) == (200, {"ok": True}) and app.assign["air"] == "HPN Tower"
     finally:
         server.httpd.shutdown()
@@ -1287,7 +1295,14 @@ def test_on_the_hub_only_an_admin_sees_or_runs_a_reception_test(keys, access_hub
     assert req(h.url + "/api/reception")[0] == 401             # nobody: not even that
     code, out = req(h.url + "/api/reception", headers=as_(COREY))
     assert code == 200 and out["reception"]["history"][0]["note"] == "whip on the roof"
-    assert len(out["reception"]["samples"]) == 1
+    assert len(out["reception"]["samples"]) == 1 and "samples_at" not in out["reception"]     # signed in: the list
+    # ... and the call itself: the hub asks the station for it (its job queue), for a signed-in admin only
+    import base64
+    asked = []
+    h.app.hub.remote = lambda fn, *a, **k: asked.append((fn, a)) or base64.b64encode(b"RIFF-made-up").decode()
+    code, wav = req(h.url + "/api/reception/sample?id=0123456789ab", headers=as_(COREY))
+    assert code == 200 and wav[:4] == b"RIFF" and asked == [("reception_sample_b64", ("0123456789ab",))]
+    assert req(h.url + "/api/reception/sample?id=0123456789ab")[0] == 401 and len(asked) == 1     # nobody: never asked
 
 
 def activity(h) -> list[tuple]:
