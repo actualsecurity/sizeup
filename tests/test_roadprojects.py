@@ -571,7 +571,7 @@ def test_the_hub_starts_the_reader_and_a_look_reads_the_sources(tmp_path):
     threading.Thread(target=feed.serve_forever, daemon=True).start()
     h = HubRun(hub_cfg(tmp_path, roadwork_wzdx_url=f"http://127.0.0.1:{feed.server_address[1]}/wzdx"))
     try:
-        assert h.app.roadwork.running                                   # started by the hub, as by App
+        assert wait_for(lambda: h.app.roadwork.running)                 # started by the hub (its layers thread), as by App
         assert hits == []                                               # nobody looked yet: nothing read
         d = h.get("/api/cad/roadprojects")
         assert d["reader"] == "" and not {s["name"]: s for s in d["sources"]}["wzdx_other"].get("reader")

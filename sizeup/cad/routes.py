@@ -145,6 +145,8 @@ class Routes:
         """{"routes": [...], "trails": {unit: [[lon, lat], ...]}} for state["map"] (the module doc). incidents: the
         state's (their words: a highway call or not)."""
         now = self.clock() if now is None else now
+        from sizeup.cad.mapview import is_placeholder
+        markers = [m for m in markers if not is_placeholder(m)]     # a department placeholder: never routed (#384)
         with self._lock:
             self._trail(markers, now)
             trails = {u: [[p[0], p[1]] for p in t] for u, t in self.trails.items() if len(t) >= 2}

@@ -160,7 +160,9 @@ def test_station_traffic_shows_on_the_hub_with_its_audio_and_on_the_cad_event(tm
     try:
         inc, r = event_with(hub.app.cad, ["E63"])
         # No station yet: the dispatch goes out as text, and says why (never a hung request).
-        assert r["audio_url"] is None and r["audio_note"].startswith("Voice unavailable") and "station" in r["audio_note"]
+        assert r["audio_url"] is None and hub.app.cad.voice.wait(10)          # the voice: after the answer (#426)
+        row = hub.app.cad.store.full(inc["id"])["dispatches"][0]
+        assert row["audio"] == "failed" and row["audio_note"].startswith("Voice unavailable") and "station" in row["audio_note"]
         st = station(station_cfg(tmp_path, hub.url), {3: "Engine 63 on location nothing showing"})
         from sizeup.radio.mdc1200 import encode as mdc_encode
         tid = fm_segment(st, bursts=[mdc_encode(0x01, 0x00, 0x6301).astype(np.float32)])     # E63's post-ID (#163)
@@ -445,7 +447,7 @@ def test_hub_dispatch_voice_comes_from_the_station_and_falls_back_to_text_withou
         c = hub.app.cad
         inc = c.create({"type": "STRU", "address": "209 Westchester Ave", "operator": "Lt. Ruiz"})
         assert wait(lambda: hub.app.hub.connected(), 5)
-        body = {"unit_ids": [uid(c, "E63")]}
+        body = {"unit_ids": [uid(c, "E63")], "audio": True}     # to hear it: the text alone needs no voice (#426)
         code, p = call(hub.url + f"/api/cad/incident/{inc['id']}/preview", "POST", body, token=None)
         assert code == 200 and p["audio_url"] and p["audio_note"] == "Voice: Kokoro af_heart"
         assert [j["type"] for j in fake.jobs] == ["tts"]

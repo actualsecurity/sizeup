@@ -329,6 +329,21 @@ class Config:
     aircraft_sdr: str = ""
     aircraft_gain: str = "auto"
     aircraft_bias_tee: bool = False
+    # [vessels] (sizeup/vessels.py, docs/vessels.md): AIS ships and boats on western Long Island Sound, read by the hub
+    # (or all-in-one). aisstream.io only with a key: [vessels] aisstream_key or env SIZEUP_AISSTREAM_KEY (the hub: SSM
+    # /sizeup-hub/aisstream-key); none: that source is off. bbox: the area (west, south, east, north), by default Throgs
+    # Neck to Stamford across to Long Island's north shore; anything outside it is dropped.
+    vessels_enabled: bool = True
+    vessels_aisstream_key: str = ""
+    vessels_bbox: tuple[float, float, float, float] = (-73.83, 40.78, -73.50, 41.07)
+    # [vessels.receiver]: our own AIS receiver (AIS-catcher on one RTL-SDR at the station, sizeup-ais.service,
+    # sizeup/radio/aisd.py); off until the dongle and a marine VHF antenna are in. sdr: that dongle's exact USB serial,
+    # kept out of sizeup's own radios; json: the decoder's messages file ("" = sizeup/radio/aisd.py MESSAGES).
+    vessels_receiver: bool = False
+    vessels_sdr: str = ""
+    vessels_gain: str = "auto"
+    vessels_ppm: int = 0
+    vessels_receiver_json: str = ""
 
 
 def read_tones_file(path: str | Path) -> list[ToneCode]:
@@ -400,6 +415,8 @@ def hub_url_problem(url: str) -> str:
 #   SIZEUP_STATUS_TOKEN               [cloud] status_token: the deploy check's read-only bearer
 #   (no [gis] secrets: the county's open data needs no key)
 #   SIZEUP_MTA_KEY                    [trains] key: only should the MTA require one again (none needed, 2026-10-14)
+#   SIZEUP_AISSTREAM_KEY              [vessels] aisstream_key: aisstream.io's API key (the hub: SSM
+#                                     /sizeup-hub/aisstream-key); none: that source is off
 def _env(name: str, default):
     v = os.environ.get(name, "").strip()
     return v if v else default
@@ -926,6 +943,45 @@ def _trains(data: dict) -> dict:
                 trains_traintime=tt, trains_traintime_every_s=float(tt_every), **urls)
 
 
+def _vessels(data: dict, base: Path, sdrs: tuple[str, ...], adsb_sdr: str = "") -> dict:
+    """[vessels] and [vessels.receiver] -> Config fields. No section: on, but with no source (no aisstream.io key, no
+    receiver) it shows nothing. The key comes from env SIZEUP_AISSTREAM_KEY first (the hub: SSM); never logged."""
+    vs = _take(data.get("vessels", {}), "vessels", {"enabled", "aisstream_key", "bbox", "receiver"})
+    if not isinstance(vs.get("receiver", {}), dict):
+        raise ConfigError("vessels.receiver: a table ([vessels.receiver])")
+    rc = _take(vs.get("receiver", {}), "vessels.receiver", {"enabled", "sdr", "gain", "ppm", "json"})
+    enabled, receiver = vs.get("enabled", True), rc.get("enabled", False)
+    if not isinstance(enabled, bool) or not isinstance(receiver, bool):
+        raise ConfigError("vessels.enabled / vessels.receiver.enabled: true or false")
+    key = _env("SIZEUP_AISSTREAM_KEY", str(vs.get("aisstream_key", ""))).strip()
+    if key and not re.fullmatch(r"[!-~]{16,256}", key):
+        raise ConfigError("vessels.aisstream_key / SIZEUP_AISSTREAM_KEY: aisstream.io's API key (16 or more characters, "
+                          "no spaces)")
+    bbox = _bbox(vs.get("bbox", [-73.83, 40.78, -73.50, 41.07]), "vessels.bbox", 2.0)
+    from sizeup.radio.adsbd import gain_problem
+    gain = rc.get("gain", "auto")
+    if isinstance(gain, bool) or (why := gain_problem(gain)):
+        raise ConfigError(f"vessels.receiver.gain: {why if not isinstance(gain, bool) else 'auto or a number of dB'}")
+    gain = "auto" if str(gain).strip().lower() == "auto" else f"{float(gain):g}"
+    ppm = rc.get("ppm", 0)
+    if isinstance(ppm, bool) or not isinstance(ppm, int) or not -150 <= ppm <= 150:
+        raise ConfigError("vessels.receiver.ppm: the dongle's frequency correction, a whole number -150 to 150 (0 for a TCXO)")
+    sdr = str(rc.get("sdr", "")).strip()
+    if sdr:
+        if not re.fullmatch(r"[\w.-]{1,32}", sdr) or sdr.isdigit():
+            raise ConfigError("vessels.receiver.sdr: the AIS dongle's exact USB serial (letters, digits, . _ -; not all "
+                              "digits: rtl_eeprom -d <index> -s ais162)")
+        if sdr in sdrs:
+            raise ConfigError(f"vessels.receiver.sdr: {sdr} is one of sizeup's radios ([radio] sdrs); give AIS its own dongle")
+        if sdr == adsb_sdr:
+            raise ConfigError(f"vessels.receiver.sdr: {sdr} is the ADS-B dongle ([aircraft.receiver] sdr); give AIS its own")
+    js = str(rc.get("json", "")).strip()
+    if js and not Path(js).is_absolute():
+        js = str((base / js).resolve())
+    return dict(vessels_enabled=enabled, vessels_aisstream_key=key, vessels_bbox=bbox, vessels_receiver=receiver,
+                vessels_sdr=sdr, vessels_gain=gain, vessels_ppm=ppm, vessels_receiver_json=js)
+
+
 def _bbox(v, what: str, max_deg: float = 3.0) -> tuple[float, float, float, float]:
     try:
         w, s, e, n = (float(x) for x in v)
@@ -1186,7 +1242,7 @@ def load(path: str | Path) -> Config:
         raise ConfigError(f"{path}: {e}") from e
     _take(data, "config", {"station", "web", "radio", "tones", "stt", "p25", "mdc", "units", "storage", "map",
                            "cad", "dispatch", "cloud", "prealert", "roads", "roadwork", "gis", "trains", "weather", "alerts",
-                           "aircraft", "geo", "atc", "adapter", "routing"})
+                           "aircraft", "geo", "atc", "adapter", "routing", "vessels"})
     adapter_env = _adapter(data)
     st = _take(data.get("station", {}), "station", {"id", "name", "auto_update", "lat", "lon"})
     if not isinstance(st.get("auto_update", True), bool):
@@ -1218,6 +1274,8 @@ def load(path: str | Path) -> Config:
     if len(set(sdrs)) != len(sdrs):
         raise ConfigError("radio.sdrs: a serial is listed twice")
     aircraft = _aircraft(data, base, sdrs + ((str(radio["shared_device"]),) if radio.get("shared_device") else ()))
+    vessels = _vessels(data, base, sdrs + ((str(radio["shared_device"]),) if radio.get("shared_device") else ()),
+                       aircraft.get("aircraft_sdr", ""))
     channels = []
     for i, c in enumerate(radio.get("channels", [])):
         _take(c, f"radio.channels[{i}]", {"label", "mhz", "kind", "device", "gain_db", "squelch_db",
@@ -1428,5 +1486,5 @@ def load(path: str | Path) -> Config:
         cloud_state="" if cloud.get("cloud_role") == "hub" else rel_state("state/cloud.json"),
         **_geo(data),
         **_atc(data, base),
-        **pa, **_alerts(data, pa), **_roads(data), **_roadwork(data), **_gis(data), **_routing(data), **_trains(data), **_weather(data), **aircraft,
+        **pa, **_alerts(data, pa), **_roads(data), **_roadwork(data), **_gis(data), **_routing(data), **_trains(data), **_weather(data), **aircraft, **vessels,
     )

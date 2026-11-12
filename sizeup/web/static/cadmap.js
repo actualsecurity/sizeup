@@ -40,8 +40,9 @@
 //
 // Decluttered by zoom (#376; the zooms: state.map.display, Settings > System > Map display, mapview.py DISPLAY_DEFAULTS):
 //
-//   idle (available, in quarters, returning)   below detail_zoom a dot; two or more idle at one firehouse: one badge
-//                                              under it, "HQ · 6" (its tooltip lists them; a click zooms to detail_zoom),
+//   idle (available, in quarters, returning)   below detail_zoom a dot; two or more idle at one firehouse: one count
+//                                              chip on top of its icon, "6" (#384: its tooltip lists them; the
+//                                              style's "firehouse-badge" mark keeps the firehouse's name clear of it),
 //                                              the firehouse's other marks over the top
 //   active (on a call: dispatched, responding, on location, staging ...)   full chips down to active_zoom (never
 //                                              above detail_zoom nor ACTIVE_MAX), drawn over the rest; below it a
@@ -55,6 +56,18 @@
 // never on the frames: tick() moves marks, it never re-sizes or re-fans them. Markers are kept and re-used: a rig in a
 // badge keeps its marker, hidden (folded), so a Follow or a pick still finds it.
 //
+// A firehouse clicked (#384: its icon, its name or its count chip): its rigs in the map's box, active first, each with
+// its type icon and status; a click on one follows it (#358), or rings it where the map follows nothing (the wall
+// board); Zoom to: the firehouse at detail_zoom, its rigs drawn one by one.
+//
+// Rigs by apparatus type (#384; the hub's marker "icon", mapview.icon_of): engine, ladder, tower (aerial platform),
+// rescue, suv (chiefs', duty and utility cars), arff (the airport's crash trucks), other. #427: each drawn as the
+// vehicle from overhead (V: original simplified drawings), the marker itself: on the rig's place, turned to its
+// heading (rotOf: a live fix's; else nose out of its firehouse, nose to its call, or north), its body in its status
+// colour, its code in a small label beside it (placeLabels). Its least size keeps it legible; close in it is drawn to
+// its real length (--ppm on the map, set on zoom: the CSS sizes it; tick() never does). Not in the dots (8-12 px: too
+// small to read); a dot under the pointer opens to its vehicle and code.
+//
 // Highway layers (cameras, incidents, signs, mileposts, exits) and their Layers button: maplayers.js,
 // attached to every RigMap; the event's "Cameras nearby" row from detail().
 //
@@ -63,9 +76,9 @@
 "use strict";
 
 window.CadMap = (() => {
-  const STATION_R = 34, INC_R = 30, RING_GAP = 24, CHIP_W = 48;   // px: the fan-out around an anchor
+  const STATION_R = 38, INC_R = 36, RING_GAP = 32, CHIP_W = 62;   // px: the fan-out around an anchor (#427: a vehicle + its code)
   const DOT_R = 16, DOT_W = 14;        // px: the fan-out of dots only (#376)
-  const BADGE_DY = 22;                 // px: a firehouse's badge under its icon (#376); the rest fan out from the top
+  const BADGE_AT = [0, -13];           // px: a firehouse's count chip on top of its icon (#384; map-style.js reserves it)
   const FAR_ZOOM = 13.6;               // below this: smaller chips, tighter rings
   const FOCUS_MAX_ZOOM = 16.3;
   const LINE = "#E0A030", HOME_LINE = "#AEB6C0";      // to a call | a returning rig's way home (thin)
@@ -129,8 +142,115 @@ window.CadMap = (() => {
   // s left of an active rig's FRESH_S since its status changed (0: not fresh); the hub's status_at, on the hub's clock
   const freshLeft = (m) => (rigClass(m) === "act" && typeof m.status_at === "number"
     ? Math.max(0, FRESH_S - Math.max(0, nowS() - m.status_at)) : 0);
-  // a firehouse's short name for its badge: data/firehouses.json "short", else its first word
-  const shortOf = (M, name) => (((M && M.stations) || []).find((s) => s.name === name) || {}).short || String(name).split(/\s+/)[0];
+  // a rig's icon by apparatus type (#384; the hub's mapview.icon_of), else the generic one
+  const ICONS = new Set(["engine", "ladder", "tower", "rescue", "suv", "arff", "other"]);
+  const iconOf = (m) => (m && ICONS.has(m.icon) ? m.icon : "other");
+  // ---- the rigs as the vehicles, from overhead (#427) ----------------------------------------------------------------
+  // Original simplified drawings, front (the cab) up, in decimetres: the body in the status colour (.b), glass (.g), the
+  // light bar (.lt, red ends .rd), steel (.m: ladder, boom, turrets), the turntable (.k), hose (.h), roof panels (.p),
+  // recesses (.d) and seams (.ln). The aerial's full detail (.hi: rails, rungs, the boom) only on a map close in
+  // (cm-near); smaller, a thin line (.lo), so the status-tinted body is most of what shows. len, wid: the drawn outline in metres (the class's typical size: an engine 10.5 m, a
+  // rear-mount ladder 13 m plus its fly over the cab, a mid-mount tower ladder 13.7 m with its platform over the back, a
+  // heavy rescue 11.5 m, a Tahoe 5.3 m, a 6x6 crash truck 12.2 x 3.1 m); minl, minw: px at the least (legible at any zoom).
+  const R = (c, x, y, w, ht, rx) => `<rect class="${c}" x="${x}" y="${y}" width="${w}" height="${ht}"${rx ? ` rx="${rx}"` : ""}/>`;
+  const C = (c, cx, cy, r) => `<circle class="${c}" cx="${cx}" cy="${cy}" r="${r}"/>`;
+  const P = (c, d) => `<path class="${c}" d="${d}"/>`;
+  const bar = (y, x0, x1) => R("lt", x0, y, x1 - x0, 2.2, 0.8) + R("rd", x0, y, 3.5, 2.2, 0.8) + R("rd", x1 - 3.5, y, 3.5, 2.2, 0.8);
+  const steps = (y0, y1, dy, x0, x1) => { let d = ""; for (let y = y0; y <= y1; y += dy) d += `M${x0} ${y}H${x1}`; return d; };
+  const V = {
+    engine: { len: 10.5, wid: 2.5, minl: 32, minw: 12, art:          // cab, crosslays behind it, ground ladders, hose bed
+      R("d", 1.5, 0, 22, 3, 1) + R("b", 0.5, 1.5, 24, 102, 2.5) + R("g", 2, 4, 21, 5, 1.5) + bar(10.5, 3, 22) + P("ln", "M1 28H24")
+      + R("h", 2, 30.5, 21, 2) + R("h", 2, 33.5, 21, 2) + R("h", 2, 36.5, 21, 2) + R("p", 2, 41, 13.5, 18, 1)
+      + R("m", 17.5, 41, 5, 56, 1) + P("ln", steps(45, 93, 4, 17.5, 22.5)) + R("d", 2.5, 62, 13.5, 38, 1)
+      + R("h", 3.5, 63, 3.4, 36) + R("h", 7.6, 63, 3.4, 36) + R("h", 11.7, 63, 3.4, 36) + R("d", 1, 101, 23, 3, 1) },
+    ladder: { len: 15, wid: 2.5, minl: 40, minw: 12, art:            // rear turntable, the ladder bedded over the cab
+      R("d", 1.5, 19, 22, 3, 1) + R("b", 0.5, 20.5, 24, 129, 2.5) + R("g", 2, 23, 21, 5, 1.5) + bar(29.5, 3, 22)
+      + P("ln", "M1 46H24") + R("d", 0, 47, 2.5, 4) + R("d", 22.5, 47, 2.5, 4) + R("d", 0, 141, 2.5, 4) + R("d", 22.5, 141, 2.5, 4)
+      + R("p", 1.5, 50, 4, 78, 1) + R("p", 19.5, 50, 4, 78, 1) + C("k hi", 12.5, 135, 9) + C("d hi", 12.5, 135, 4.5)
+      + R("mf hi", 8.4, 0, 8.2, 132) + R("m hi", 6, 0, 2.4, 132, 0.6) + R("m hi", 16.6, 0, 2.4, 132, 0.6)
+      + P("rg hi", steps(3, 129, 4, 8.4, 16.6)) + C("k lo", 12.5, 135, 5) + R("m lo", 11.2, 0, 2.6, 132, 0.6) },   // small: a thin line
+    tower: { len: 14.2, wid: 2.5, minl: 38, minw: 12, art:           // turntable behind the cab, the boom back to the platform
+      R("d", 1.5, 0, 22, 3, 1) + R("b", 0.5, 1.5, 24, 135.5, 2.5) + R("g", 2, 4, 21, 5, 1.5) + bar(10.5, 3, 22)
+      + P("ln", "M1 30H24") + R("d", 0, 33, 2.5, 4) + R("d", 22.5, 33, 2.5, 4) + R("d", 0, 118, 2.5, 4) + R("d", 22.5, 118, 2.5, 4)
+      + R("p", 1.5, 52, 4, 64, 1) + R("p", 19.5, 52, 4, 64, 1) + C("k hi", 12.5, 41, 9.5) + R("m hi", 6.5, 36, 12, 96, 1.5)
+      + R("mi hi", 8.7, 50, 7.6, 80, 1) + C("d hi", 12.5, 41, 3) + C("k lo", 12.5, 41, 5.5) + R("m lo", 11, 41, 3, 90, 0.8)
+      + R("bk", 4, 131, 17, 11, 1.5) + R("d", 6, 133, 13, 7, 1) },
+    rescue: { len: 11.5, wid: 2.5, minl: 34, minw: 13, art:          // box body, roof compartments, light tower, generator
+      R("d", 1.5, 0, 22, 3, 1) + R("b", 0.5, 1.5, 24, 112.5, 2.5) + R("g", 2, 4, 21, 5, 1.5) + bar(10.5, 3, 22)
+      + P("ln", "M1 30H24") + R("d", 1.5, 32, 22, 80, 1) + [34, 53, 72, 91].map((y) => R("p", 2, y, 6.5, 17, 1) + R("p", 16.5, y, 6.5, 17, 1)).join("")
+      + C("lt", 12.5, 40, 2.6) + R("k", 10, 56, 5, 10, 1) + C("k", 12.5, 100, 2.2) + R("d", 1, 111, 23, 3, 1) },
+    suv: { len: 5.3, wid: 2.05, minl: 20, minw: 10, art:              // hood, windshield, roof light bar, rear glass
+      R("d", -0.8, 16, 1.6, 2.4, 0.5) + R("d", 19.7, 16, 1.6, 2.4, 0.5) + R("b", 0.5, 0.5, 19.5, 52, 4.5)
+      + P("ln", "M3 13.5Q10.25 11.8 17.5 13.5") + P("g", "M2.5 15Q10.25 13 18 15L17 20.5Q10.25 19.5 3.5 20.5Z")
+      + R("p", 3.5, 21.5, 13.5, 23, 1.5) + R("lt", 3, 23, 14.5, 2.6, 1) + R("rd", 3, 23, 4, 2.6, 1) + R("rd", 13.5, 23, 4, 2.6, 1)
+      + R("g", 3.5, 46, 13.5, 4, 1.2) },
+    arff: { len: 12.2, wid: 3.1, minl: 36, minw: 15, art:            // bumper and roof turrets, wraparound glass, tanks, engine aft
+      R("m", 14.4, 0, 2.2, 4.5, 0.6) + R("b", 0.5, 3, 30, 118.5, 5) + C("m", 15.5, 5, 2.6)
+      + P("g", "M3 9Q15.5 5.5 28 9L27 16Q15.5 14 4 16Z") + bar(17.5, 5, 26) + C("m", 15.5, 28, 4.2) + R("m", 14.6, 19.5, 1.8, 8.5, 0.6)
+      + P("ln", "M1 36H30") + R("p", 3, 39, 11, 58, 2) + R("p", 17, 39, 11, 58, 2) + R("d", 4, 102, 23, 16, 1.5)
+      + P("ln", steps(105, 115, 3.3, 6, 25)) },
+    other: { len: 5.5, wid: 2.0, minl: 20, minw: 10, art:             // a plain vehicle, its front glass
+      R("b", 0.5, 0.5, 19, 54, 5) + R("g", 2.5, 9, 15, 4.5, 1.5) + R("g", 3, 46, 14, 3, 1) },
+  };
+  // its drawing: front up (on the map, turned to its heading), or front to the right (the station list's rows)
+  const vehSvg = (icon, side) => {
+    const v = V[icon] || V.other, w = v.wid * 10, l = v.len * 10;
+    return `<svg viewBox="0 0 ${side ? `${l} ${w}` : `${w} ${l}`}" preserveAspectRatio="none" aria-hidden="true">`
+      + (side ? `<g transform="translate(${l} 0) rotate(90)">${v.art}</g>` : v.art) + "</svg>";
+  };
+  function vehEl(icon, side) {
+    const e = h("i", `${side ? "cm-vs" : "cm-veh"} v-${icon}`);
+    e.innerHTML = vehSvg(icon, side);                     // our own drawing (V), never data
+    return e;
+  }
+  // px a metre on this map now (the maps never tilt or turn)
+  function pxPerM(map) {
+    try { return (512 * 2 ** map.getZoom()) / (40075016.686 * Math.cos(map.getCenter().lat * Math.PI / 180)); } catch (_) { return 0; }
+  }
+  // below this a metre is too few px for any vehicle to reach its least size: no scale on the page (one less restyle)
+  const SCALE_PPM = Math.min(...Object.values(V).map((v) => v.minl / v.len)) * 0.9;
+  // its size in px at ppm (a far map's least size smaller: FAR_K)
+  const FAR_K = 0.85;
+  const vehPx = (icon, ppm, far) => {
+    const v = V[icon] || V.other, k = far ? FAR_K : 1;
+    return [Math.max(v.minl * k, v.len * ppm), Math.max(v.minw * k, v.wid * ppm)];
+  };
+  // which way it points, degrees clockwise from north: its heading when its fix has one; else fanned out at its
+  // firehouse nose out (out of the bays), around a call nose to the call; else north
+  const headingOf = (m) => (typeof m.heading === "number" && Number.isFinite(m.heading) ? ((m.heading % 360) + 360) % 360 : null);
+  // a rig's status as words beside its code (#427: not by colour alone): its status code, at most 3 letters
+  const statusCue = (st, m) => String((st && st.code) || m.status || "").slice(0, 3);
+  function rotOf(m, off) {
+    const hd = headingOf(m);
+    if (hd !== null) return hd;
+    const [x, y] = off || [0, 0];
+    if (!x && !y) return 0;
+    const a = Math.atan2(x, -y) * 180 / Math.PI;          // the offset's bearing on screen (y down)
+    return Math.round((((m.place === "station" ? a : a + 180) % 360) + 360) % 360);
+  }
+  // a department placeholder (DPT239 ...: its unit row's placeholder flag, #400; mapview.is_placeholder), not apparatus:
+  // the hub never sends one; if one comes (flagged on its marker or its unit row), it is never drawn, counted, listed or
+  // followed
+  function drawable(M) {
+    const ms = (M && M.markers) || [];
+    const units = typeof cad !== "undefined" && cad && cad.state && cad.state.units;
+    const ph = new Set((units || []).filter((u) => u.placeholder).map((u) => u.name));
+    return ph.size || ms.some((m) => m.placeholder) ? ms.filter((m) => !m.placeholder && !ph.has(m.unit)) : ms;
+  }
+  const ICON_NAMES = { engine: "engine", ladder: "ladder", tower: "tower ladder", rescue: "rescue", suv: "car", arff: "crash truck",
+                       other: "" };
+  const CLASS_ORDER = { act: 0, idle: 1, oos: 2 };
+  // the numbers of the open calls a rig is on (#384: the hub's incident_numbers; an older hub: its one call)
+  const callsOf = (m) => (Array.isArray(m.incident_numbers) && m.incident_numbers.length ? m.incident_numbers
+    : m.incident_number ? [m.incident_number] : []);
+  // a firehouse's list's head (#384): "11 rigs · 7 in quarters · 2 on calls · 2 OOS", the parts that are not 0
+  function stationCounts(rigs) {
+    if (!rigs.length) return "No rigs";
+    const n = (c) => rigs.filter((m) => rigClass(m) === c).length;
+    return [`${rigs.length} rig${rigs.length === 1 ? "" : "s"}`, n("idle") && `${n("idle")} in quarters`,
+            n("act") && `${n("act")} on call${n("act") === 1 ? "" : "s"}`, n("oos") && `${n("oos")} OOS`]
+      .filter(Boolean).map((t) => t.replace(/ /g, "\u00a0")).join(" · ");                // a part never split across lines
+  }
 
   // ---- our units followed and lit up (#358): one state for every map ----------------------------------------------
   const UNIT_ZOOM = 15;                // a rig followed or picked: centred at least this close
@@ -236,7 +356,7 @@ window.CadMap = (() => {
     });
   }
   const onMap = (name) => !!(typeof cad !== "undefined" && cad && cad.state && cad.state.map
-                             && (cad.state.map.markers || []).some((m) => m.unit === name));
+                             && drawable(cad.state.map).some((m) => m.unit === name));
   // the map to show a rig on: the large one if open, else the first on screen that follows (never the new call's or
   // the wall board's)
   function shownRigMap() {
@@ -390,13 +510,41 @@ window.CadMap = (() => {
       if (map.isStyleLoaded() || map.loaded()) tryInit();
       else { map.once("load", tryInit); map.once("idle", tryInit); }
       map.on("zoom", () => {
+        this.setScale();                                // #427: the vehicles to scale close in (one style property)
         const far = map.getZoom() < FAR_ZOOM;
         if (far !== this.far) { this.far = far; opts.host.classList.toggle("cm-far", far); this.setBand(); this.draw(); }
       });
       // #376: laid out again only if the band changed; moveend too: a drag takes the map off its automatic frame
-      const settle = () => { if (this.setBand()) this.draw(); };
+      const settle = () => { this.scaleNow(); if (this.setBand() | this.setGrow()) this.draw(); else this.placeLabels(); };
       map.on("zoomend", settle);
       map.on("moveend", settle);
+    }
+
+    // #427: px a metre on the page (--ppm on the map: each vehicle's CSS size), 0 while every one is at its least size
+    // once a frame at most while zooming (scaleNow on zoomend); cm-near on the map: the full detail (the ladder's rungs,
+    // the boom) only once an engine is drawn twice its least length, else the status-tinted body stays the most of it
+    setScale() {
+      if (this.scaleRaf) return;
+      if (typeof requestAnimationFrame !== "function") { this.scaleNow(); return; }
+      this.scaleRaf = requestAnimationFrame(() => { this.scaleRaf = 0; this.scaleNow(); });
+    }
+    scaleNow() {
+      const ppm = pxPerM(this.map), v = ppm >= SCALE_PPM ? Math.round(ppm * 100) / 100 : 0;
+      if (v === this.ppm) return;
+      this.ppm = v;
+      try {
+        const c = this.map.getContainer();
+        c.style.setProperty("--ppm", String(v));
+        c.classList.toggle("cm-near", v * V.engine.len >= 2 * V.engine.minl);
+      } catch (_) { /* */ }
+    }
+    // how much wider the fan-outs are, once an engine is drawn longer than its least size (in quarter steps); true if
+    // it changed (laid out again on zoomend, as the band)
+    setGrow() {
+      const g = Math.max(1, Math.round(pxPerM(this.map) * V.engine.len / V.engine.minl * 4) / 4);
+      if (g === this.grow) return false;
+      this.grow = g;
+      return true;
     }
 
     // the zoom band for the rigs' sizes (#376), from the map's zoom now and this map's zooms; true if it changed
@@ -423,8 +571,8 @@ window.CadMap = (() => {
       if (!this.ready || !this.data || !this.data.map) return;
       const M = this.data.map, lists = this.data.lists;
       if (this.opts.pins) this.drawPins(M.incidents || [], lists);
-      this.drawChips(M.markers || [], lists);
-      this.drawLines(M.markers || [], lists);
+      this.drawChips(drawable(M), lists);
+      this.drawLines(drawable(M), lists);
       if (this.unsetBox) this.drawUnset(M.unset || []);
       this.followTick(true);
       animate();
@@ -455,7 +603,7 @@ window.CadMap = (() => {
       // the call lines and routes with them, at most LINE_MS apart (setData re-tiles the source; the age timer's
       // redraw puts them on the settled marks)
       if (moved && this.data && this.data.map && Date.now() - (this.linesAt || 0) >= LINE_MS) {
-        this.drawLines(this.data.map.markers || [], this.data.lists);
+        this.drawLines(drawable(this.data.map), this.data.lists);
       }
       this.followTick(false);
     }
@@ -509,9 +657,10 @@ window.CadMap = (() => {
     // Each anchor's chips on rings around it: on location (ring 0) close in, not-there-yet (ring 1) outside.
     // At a firehouse a full ring from the bottom (its name is drawn to the right); at a call an arc over
     // the top and sides, leaving the bottom for the call's label.
-    // #376: sizes (declutter()): a folded rig takes no place; a dot is DOT_W wide; around a badge, the chips' radius.
+    // #376: sizes (declutter()): a folded rig takes no place; a dot is DOT_W wide. #384: a firehouse with a count chip:
+    // an arc under it (the chip is on top of the icon).
     offsets(markers, sizes) {
-      const k = this.far ? 0.72 : 1;
+      const k = (this.far ? 0.72 : 1) * (this.grow || 1);   // #427: wider apart as the vehicles grow to scale
       const size = (m) => (sizes ? sizes.size.get(m.unit) : "full");
       const wOf = (m) => (size(m) === "dot" ? DOT_W : CHIP_W * k);
       const groups = new Map();
@@ -539,13 +688,13 @@ window.CadMap = (() => {
             });
             return;
           }
-          // a call's: an arc centred on the top, 270° at most; a firehouse with a badge under it: 180° (#376: the lower
-          // arc left to the badge, nothing under it)
-          const step = n > 1 ? Math.min((badge ? 180 : 270) / (n - 1), 62) * deg : 0;
+          // a call's: an arc centred on the top, 270° at most; a firehouse with a count chip on top of its icon
+          // (#384): 140° centred on the bottom, clear of the chip and of the name's places either side
+          const step = n > 1 ? Math.min((badge ? 140 : 270) / (n - 1), 62) * deg : 0;
           const need = step ? w / (2 * Math.sin(step / 2)) : 0;                // neighbours a chip apart
-          r = Math.max(ring ? r + gap : badge ? STATION_R * k : dots ? DOT_R : INC_R * k, need);
+          r = Math.max(ring ? r + gap : badge ? (dots ? DOT_R : STATION_R * k) : dots ? DOT_R : INC_R * k, need);
           list.forEach((m, i) => {
-            const a = -Math.PI / 2 + (i - (n - 1) / 2) * step;
+            const a = (badge ? Math.PI / 2 : -Math.PI / 2) + (i - (n - 1) / 2) * step;
             out.set(m.unit, [Math.round(r * Math.cos(a)), Math.round(r * Math.sin(a) * 0.82)]);
           });
         });
@@ -558,6 +707,7 @@ window.CadMap = (() => {
       const lits = new Map(markers.map((m) => [m.unit, [...(lights ? [lights.isPicked(m.unit), lights.hovered(m.unit)] : [false, false]),
                                                          !!this.fol && this.fol.id === m.unit, talkState(m.unit)]]));
       if (!this.band) this.setBand();
+      if (!this.grow) { this.setGrow(); this.scaleNow(); }
       // #376: lit ones full; so is a rig just made active (FRESH_S), laid out again when the last of those runs out
       let soonest = 0;
       const sizes = declutter(markers, this.band, (m) => {
@@ -582,33 +732,63 @@ window.CadMap = (() => {
         if (fx) this.hasFix = true;
         const age = fx && fx.stale ? agoS(fx.age) : "";
         const sig = JSON.stringify([m.lon, m.lat, off, m.look, m.ring, m.place, st.bg, talk, m.tag, m.station, m.incident_number,
-          m.returning_from, onFocus, !!this.focus, this.far, age, fx && Math.round(fx.fade * 20), lit, m.source, sz, cl]);
+          m.returning_from, onFocus, !!this.focus, this.far, age, fx && Math.round(fx.fade * 20), lit, m.source, sz, cl, m.icon, m.heading]);
         let rec = this.chips.get(m.unit);
         if (!rec) {
           const e = h("button", "cm-rig");
           e.type = "button";
           e.addEventListener("click", (ev) => { ev.stopPropagation(); this.chipClick(this.chips.get(m.unit).m); });
           const marker = new maplibregl.Marker({ element: e, anchor: "center" }).setLngLat(this.where(m)).addTo(this.map);
-          rec = { marker, el: e, sig: "" };
+          // #427: its label made once and kept (its words updated in place); its vehicle made again only for a new icon
+          const lbl = h("span", "lbl"), parts = { n: h("span", "n"), st: h("span", "st") };   // a tag, an age: when it has one
+          lbl.append(parts.n, parts.st);
+          rec = { marker, el: e, sig: "", lbl, parts, lblAt: "" };
           this.chips.set(m.unit, rec);
         }
         rec.m = m;
+        rec.size = sz;
+        rec.off = off;
+        rec.pri = lit.some(Boolean) || talk ? 0 : cl === "act" ? 1 : cl === "idle" ? 2 : 3;   // its code placed in this order
         if (fx) rec.marker.setLngLat(this.where(m));            // drawn on between fixes (glide.js), every draw
         if (rec.sig === sig) continue;
         rec.sig = sig;
         const e = rec.el;
         const keep = [...e.classList].filter((c) => c.startsWith("maplibregl-")).join(" ");   // the marker's own
-        e.className = `${keep} cm-rig look-${m.look} at-${m.place}` + (m.ring ? " outer" : "") + (talk ? ` ${talk}` : "")
+        e.className = `${keep} cm-rig rv look-${m.look} at-${m.place}` + (m.ring ? " outer" : "") + (talk ? ` ${talk}` : "")
+          + (m.look === "dispatched" || m.look === "responding" ? " enroute" : "")      // #427: not there yet, at any place
           + (cl === "act" ? " act" : "") + (sz === "dot" ? " rig-dot" : sz === "folded" ? " folded" : "")
           + (this.focus && m.incident_id && !onFocus ? " other" : "") + (onFocus ? " mine" : "")
           + (fx && fx.stale ? " stale" : "") + (lit[0] ? " hl" : "") + (lit[1] ? " hot" : "") + (lit[2] ? " followed" : "");
         e.style.setProperty("--c", st.bg || "#9AA3AD");
         // a stale fix fades; not an active rig's dot (#376: it stays plain to see)
         e.style.opacity = fx && fx.stale && !(sz === "dot" && cl === "act") ? String(Math.round(fx.fade * 100) / 100) : "";
-        e.replaceChildren(h("span", "n", m.unit));
-        if (m.tag) e.append(h("span", "tag", m.tag));
-        if (age) e.append(h("span", "age", age));
-        e.title = [m.unit, st.name,
+        // #427: the vehicle from overhead, turned to its heading (the shorter way round from where it pointed: eased by
+        // CSS), its code beside it (placeLabels: the side clear of the others)
+        // Kept across redraws (a new fix, the age timer): only custom properties and words change, so a turn eases.
+        const icon = iconOf(m), v = V[icon], rot = rotOf(m, off);
+        const r = typeof rec.rot === "number" ? rec.rot + ((((rot - rec.rot) % 360) + 540) % 360 - 180) : rot;
+        if (r !== rec.rot) e.style.setProperty("--rot", `${r}deg`);
+        rec.rot = r;
+        rec.as = Math.abs(Math.sin(rot * Math.PI / 180));
+        rec.ac = Math.abs(Math.cos(rot * Math.PI / 180));
+        e.style.setProperty("--as", rec.as.toFixed(3));
+        e.style.setProperty("--ac", rec.ac.toFixed(3));
+        if (rec.icon !== icon) {                                // a new class: its drawing and its sizes (rare)
+          rec.icon = icon;
+          rec.veh = vehEl(icon);
+          for (const [k, x] of [["--len", v.len], ["--wid", v.wid], ["--minl", v.minl], ["--minw", v.minw]]) e.style.setProperty(k, String(x));
+          e.replaceChildren(rec.veh, rec.lbl);
+        }
+        // its code, then its status code (not colour alone: AQ, DP, RS, OL, OS ...), then any tag and a stale fix's age
+        const P = rec.parts, cue = statusCue(st, m);
+        P.n.textContent = m.unit;
+        P.st.textContent = cue;
+        for (const [k, t] of [["tag", m.tag || ""], ["age", age]]) {
+          if (t && !P[k]) { P[k] = h("span", k); rec.lbl.append(P[k]); }
+          if (P[k]) { P[k].textContent = t; P[k].hidden = !t; }
+        }
+        rec.chars = m.unit.length + (cue.length + 0.5) * 0.75 + (m.tag ? m.tag.length * 0.7 + 0.5 : 0) + (age ? age.length * 0.7 + 0.5 : 0);
+        e.title = [m.unit + (ICON_NAMES[iconOf(m)] ? ` (${ICON_NAMES[iconOf(m)]})` : ""), st.name,
                    fx ? `${fx.stale ? "last fix" : "live"} ${agoS(fx.age)} ago${m.source ? ` (${m.source})` : ""}` : "",
                    m.place === "returning" ? `returning from ${m.returning_from} (est. position)` : "",
                    m.station ? `home ${m.station}` : (m.fire ? "no home station" : ""),
@@ -618,39 +798,169 @@ window.CadMap = (() => {
         rec.marker.setLngLat(this.where(m)).setOffset(off);
       }
       for (const [name, rec] of this.chips) if (!seen.has(name)) { rec.marker.remove(); this.chips.delete(name); }
+      this.placeLabels();
       this.drawBadges(sizes.badges, M, lists);
+      if (this.stationOpen && !this.pop.hidden) {          // #384: the open list kept to the state (a status, a call)
+        if (this.listSig(this.stationRigs(this.stationOpen)) !== this.stationSig) this.openStation(this.stationOpen, true);
+      }
     }
 
-    // #376: a firehouse's idle rigs below detail_zoom as one badge, "HQ · 6", under the firehouse; its tooltip lists them,
-    // a click zooms there to detail_zoom (their chips)
+    // #427: each drawn vehicle's code on the first side (right, left, below, above) clear of every vehicle and the codes
+    // placed before it: lit and active rigs first; an idle or out-of-service rig's code with nowhere to go left out (on
+    // its tooltip), never a lit or active one's (on the right). On each draw and once a move or zoom ends, never per frame.
+    placeLabels() {
+      if (!this.chips.size) return;
+      const ppm = this.ppm || 0, far = this.far, CH = far ? 5.6 : 6.6, LH = far ? 12 : 15, GAP = 2;
+      const items = [];
+      for (const rec of this.chips.values()) {
+        if (rec.size === "folded" || !rec.icon) continue;
+        let p;
+        try { p = this.map.project(rec.marker.getLngLat()); } catch (_) { continue; }
+        const off = rec.off || [0, 0], x = p.x + off[0], y = p.y + off[1];
+        if (rec.size === "dot") {                             // an obstacle; its code to the right when it opens
+          items.push({ box: [x - 6, y - 6, x + 6, y + 6] });
+          if (rec.lblAt !== "r") { rec.lblAt = "r"; rec.lbl.className = "lbl"; }
+          continue;
+        }
+        const [L, W] = vehPx(rec.icon, ppm, far);
+        const hx = (L * rec.as + W * rec.ac) / 2, hy = (L * rec.ac + W * rec.as) / 2;
+        items.push({ rec, x, y, hx, hy, box: [x - hx, y - hy, x + hx, y + hy], w: rec.chars * CH + 8, pri: rec.pri });
+      }
+      const meets = (a, b) => a[0] < b[2] && b[0] < a[2] && a[1] < b[3] && b[1] < a[3];
+      const placed = [];
+      for (const it of items.filter((i) => i.rec).sort((a, b) => a.pri - b.pri)) {
+        const { x, y, hx, hy, w } = it;
+        const at = { r: [x + hx + GAP, y - LH / 2, x + hx + GAP + w, y + LH / 2], l: [x - hx - GAP - w, y - LH / 2, x - hx - GAP, y + LH / 2],
+                     b: [x - w / 2, y + hy + GAP, x + w / 2, y + hy + GAP + LH], t: [x - w / 2, y - hy - GAP - LH, x + w / 2, y - hy - GAP] };
+        let pick = Object.keys(at).find((k) => !items.some((o) => o !== it && meets(o.box, at[k])) && !placed.some((b) => meets(b, at[k])));
+        if (!pick && it.pri < 2) pick = "r";
+        if (pick) placed.push(at[pick]);
+        const want = pick || "none";
+        if (it.rec.lblAt !== want) { it.rec.lblAt = want; it.rec.lbl.className = want === "r" ? "lbl" : `lbl lbl-${want}`; }
+      }
+    }
+
+    // #376: a firehouse's idle rigs below detail_zoom as one count chip (#384: on top of its icon, "6", the size of
+    // a rig's mark); its tooltip lists them, a click lists the firehouse's rigs (openStation)
     drawBadges(badges, M, lists) {
       for (const [name, list] of badges) {
-        const short = shortOf(M, name), units = list.map((m) => m.unit);
-        const sig = JSON.stringify([short, units, list[0].lon, list[0].lat]);
+        const units = list.map((m) => m.unit);
+        const sig = JSON.stringify([units, list[0].lon, list[0].lat]);
         let rec = this.badges.get(name);
         if (!rec) {
           const e = h("button", "cm-badge");
           e.type = "button";
-          e.addEventListener("click", (ev) => {
-            ev.stopPropagation();
-            const r = this.badges.get(name);
-            if (!r) return;
-            const ll = r.marker.getLngLat(), z = zoomsOf(this.data && this.data.map, this.opts.board).detail;
-            try { this.map.easeTo({ center: [ll.lng, ll.lat], zoom: Math.max(this.map.getZoom(), z), duration: 500 }); } catch (_) { /* */ }
-          });
+          e.addEventListener("click", (ev) => { ev.stopPropagation(); this.openStation(name); });
           rec = { marker: new maplibregl.Marker({ element: e, anchor: "center" }).setLngLat([list[0].lon, list[0].lat])
-                    .setOffset([0, BADGE_DY]).addTo(this.map), el: e, sig: "" };
+                    .setOffset(BADGE_AT).addTo(this.map), el: e, sig: "" };
           this.badges.set(name, rec);
         }
         if (rec.sig === sig) continue;
         rec.sig = sig;
         const e = rec.el;
-        e.replaceChildren(`${short} · ${units.length}`);                   // neutral: its units' statuses may differ
-        e.title = `${name}: ${units.join(", ")}`;
-        e.setAttribute("aria-label", e.title);
+        e.replaceChildren(String(units.length));                         // neutral: its units' statuses may differ
+        e.title = `${name}\n${units.length} in quarters: ${units.join(", ")}`;
+        e.setAttribute("aria-label", `${name}, ${units.length} in quarters`);
         rec.marker.setLngLat([list[0].lon, list[0].lat]);
       }
       for (const [name, rec] of this.badges) if (!badges.has(name)) { rec.marker.remove(); this.badges.delete(name); }
+      this.syncFirehouses(new Set(badges.keys()));
+    }
+
+    // The firehouses' source, each with its badge flag (#384): the style's "firehouse-badge" mark (map-style.js) holds
+    // the count chip's corner in MapLibre's label placement, so a firehouse's name is placed clear of it (or left out).
+    // Set again only when the firehouses with a chip change.
+    syncFirehouses(badged) {
+      const fhs = (this.opts.scene && this.opts.scene.firehouses) || [];
+      const sig = JSON.stringify([fhs.map((f) => f.name), [...badged].sort()]);
+      if (sig === this.fhSig) return;
+      let src = null;
+      try { src = this.map.getSource("firehouses"); } catch (_) { /* style not up yet */ }
+      if (!src) return;
+      this.fhSig = sig;
+      src.setData({
+        type: "FeatureCollection",
+        features: fhs.map((f) => ({ type: "Feature", properties: { name: f.name, address: f.address, badge: badged.has(f.name) ? 1 : 0 },
+                                    geometry: { type: "Point", coordinates: f.ll } })),
+      });
+    }
+
+    // #384: a firehouse's rigs (home station), active first, then idle, then out of service, each in the hub's order
+    stationRigs(name) {
+      const ms = drawable(this.data && this.data.map);
+      return ms.map((m, i) => [m, i]).filter(([m]) => m.station === name)
+        .sort((a, b) => CLASS_ORDER[rigClass(a[0])] - CLASS_ORDER[rigClass(b[0])] || a[1] - b[1]).map(([m]) => m);
+    }
+
+    listSig(rigs) { return JSON.stringify(rigs.map((m) => [m.unit, m.status, m.icon, callsOf(m), this.chips.has(m.unit)])); }
+
+    // #384: a firehouse clicked (its icon or its count chip): its rigs in the map's box, each with its type and status;
+    // a click on one follows it (#358) or, where the map follows nothing, centres and rings it; hovered: ringed wider.
+    // Zoom to: the firehouse at detail_zoom (its rigs drawn one by one).
+    // refresh: the list open, laid out again on a new state that changes its rows (the focus left where it is)
+    openStation(name, refresh) {
+      if (!this.data || !this.data.map) return;
+      const lists = this.data.lists, rigs = this.stationRigs(name);
+      // a refresh: the row focused (by its unit) focused again; the row hovered: its ring kept, or cleared if it went
+      const act = typeof document !== "undefined" ? document.activeElement : null;
+      const focusUnit_ = refresh && act && this.pop.contains(act) && act.dataset ? act.dataset.unit || "" : "";
+      if (!refresh) this.hoverRow = "";
+      else if (this.hoverRow && !rigs.some((m) => m.unit === this.hoverRow)) { this.hoverRow = ""; hoverUnits([]); }
+      this.stationSig = this.listSig(rigs);
+      const go = this.onFollow || this.onFocus;
+      const head = h("div", "cm-pop-head");
+      head.append(h("b", "", name), " ", h("span", "dim small", stationCounts(rigs)));
+      const list = h("div", "cm-st-list");
+      for (const m of rigs) {
+        const st = statusOf(lists, m.status);
+        const b = h("button", "cm-st-row" + (rigClass(m) === "oos" ? " oos" : ""));
+        b.type = "button";
+        b.dataset.unit = m.unit;
+        b.style.setProperty("--c", st.bg || "#9AA3AD");
+        b.append(vehEl(iconOf(m), true), h("b", "n", m.unit), h("span", "s", st.name));   // #427: its vehicle, front right
+        if (callsOf(m).length) b.append(h("span", "dim", callsOf(m).join(", ")));       // every call it is on
+        b.title = [m.unit + (ICON_NAMES[iconOf(m)] ? ` (${ICON_NAMES[iconOf(m)]})` : ""), st.name,
+                   go ? (this.onFollow ? "click: follow" : "click: show") : ""].filter(Boolean).join(", ");
+        b.disabled = !go || !this.chips.has(m.unit);
+        b.addEventListener("click", (e) => { e.stopPropagation(); this.closePicker(); go(m.unit); });
+        b.addEventListener("mouseenter", () => { this.hoverRow = m.unit; hoverUnits([m.unit]); });
+        b.addEventListener("mouseleave", () => { this.hoverRow = ""; hoverUnits([]); });
+        list.append(b);
+      }
+      const row = h("div", "row");
+      const z = h("button", "mini", "Zoom to");
+      z.type = "button";
+      z.title = `${name}: its rigs one by one`;
+      z.addEventListener("click", (e) => { e.stopPropagation(); this.closePicker(); this.zoomStation(name); });
+      const x = h("button", "mini quiet", "Close");
+      x.type = "button";
+      x.addEventListener("click", (e) => { e.stopPropagation(); this.closePicker(); });
+      row.append(z, x);
+      this.pop.replaceChildren(head, list, row);
+      this.pop.hidden = false;
+      this.stationOpen = name;
+      if (refresh) {
+        const again = focusUnit_ && [...list.children].find((r) => r.dataset.unit === focusUnit_);
+        if (again && !again.disabled) again.focus({ preventScroll: true });
+        else if (focusUnit_) this.pop.focus({ preventScroll: true });           // its row went: Escape still works
+        return;
+      }
+      this.pop.tabIndex = -1;
+      this.pop.focus({ preventScroll: true });          // Escape closes it (the pop's keydown); Tab: its rows
+    }
+
+    // #384: the firehouse centred at detail_zoom at least: its rigs at home drawn one by one (those out on calls are
+    // where they are, drawn as ever). A move by hand as far as the frame goes (stays until Recenter); a follow let go.
+    zoomStation(name) {
+      const M = (this.data && this.data.map) || {};
+      const fh = (M.stations || []).find((s) => s.name === name) || ((this.opts.scene && this.opts.scene.firehouses) || []).find((s) => s.name === name);
+      const ll = fh ? fh.ll : null;
+      if (!ll) return false;
+      if (window.MapFollow) MapFollow.takeMap(this.map);
+      if (this.onMoved) this.onMoved();
+      const z = zoomsOf(M, this.opts.board).detail;
+      try { this.map.easeTo({ center: ll, zoom: Math.max(this.map.getZoom(), z), duration: 500 }); } catch (_) { /* */ }
+      return true;
     }
 
     drawLines(markers, lists) {
@@ -753,6 +1063,7 @@ window.CadMap = (() => {
     }
 
     openInfo(m) {
+      this.stationOpen = null;                         // the box is this rig's now (#384)
       const st = statusOf(this.data && this.data.lists, m.status);
       const head = h("div", "cm-pop-head");
       head.append(h("b", "", m.unit));
@@ -769,6 +1080,7 @@ window.CadMap = (() => {
     }
 
     openPicker(id, name, current, m) {
+      this.stationOpen = null;                         // the box is the picker's now (#384)
       const stations = (this.data && this.data.map && this.data.map.stations) || [];
       const pop = this.pop;
       const sel = h("select");
@@ -820,6 +1132,9 @@ window.CadMap = (() => {
     }
 
     closePicker() {
+      if (this.stationOpen) hoverUnits([]);
+      this.stationOpen = null;
+      this.hoverRow = "";
       this.pop.hidden = true;
       this.pop.replaceChildren();
     }
@@ -887,12 +1202,27 @@ window.CadMap = (() => {
       this.map.addControl(new maplibregl.NavigationControl({ showCompass: false }), "top-right");
       this.map.on("load", () => {
         this.map.addImage("firehouse", firehouseIcon(), { pixelRatio: 2 });
-        this.map.getSource("firehouses").setData({
-          type: "FeatureCollection",
-          features: (sc.firehouses || []).map((f) => ({ type: "Feature", properties: { name: f.name, address: f.address },
-            geometry: { type: "Point", coordinates: f.ll } })),
-        });
+        if (typeof badgeSpaceIcon === "function") this.map.addImage("firehouse-badge", badgeSpaceIcon());   // #384
+        this.layer.fhSig = null;
+        this.layer.syncFirehouses(new Set(this.layer.badges.keys()));
       });
+      // #384: a click on the map (not a pan or a zoom: MapLibre's click), off a firehouse, closes a firehouse's list
+      this.map.on("click", (e) => {
+        if (!this.layer.stationOpen) return;
+        let hit = e && e.features ? e.features.length : 0;
+        if (!hit && e && e.point) {
+          try { hit = this.map.queryRenderedFeatures(e.point, { layers: ["firehouse"] }).length; } catch (_) { /* */ }
+        }
+        if (!hit) this.layer.closePicker();
+      });
+      // #384: a firehouse (its icon or its name) clicked: its rigs
+      this.map.on("click", "firehouse", (e) => {
+        const f = e && e.features && e.features[0];
+        if (f && f.properties && f.properties.name) this.layer.openStation(f.properties.name);
+      });
+      const cursor = (c) => () => { try { this.map.getCanvas().style.cursor = c; } catch (_) { /* */ } };
+      this.map.on("mouseenter", "firehouse", cursor("pointer"));
+      this.map.on("mouseleave", "firehouse", cursor(""));
       this.map.on("movestart", (e) => { if (e.originalEvent) this.userMoved = true; });
       this.map.on("sizeup:follow", () => { this.userMoved = true; });   // following an aircraft: no refit until Recenter
       this.layer = new RigLayer(this.map, { ...opts, host });
@@ -904,6 +1234,8 @@ window.CadMap = (() => {
         : null;
       this.layer.fol = this.fol;
       if (this.fol) this.layer.onFollow = (name) => this.followUnit(name);
+      if (!opts.manual) this.layer.onFocus = (name) => this.focusUnit(name);     // #384: the station list, no follower
+      this.layer.onMoved = () => { this.userMoved = true; };                      // #384: Zoom to, as a move by hand
       rigMaps.add(this);
       // Cameras, incidents, roadwork, signs, mileposts, exits and their Layers button (maplayers.js, #73)
       this.roads = window.MapLayers ? MapLayers.attach(this.map, host, ctrls, { layers: opts.layers }) : null;   // its set: "overview" | "incident" (#111)
@@ -936,7 +1268,10 @@ window.CadMap = (() => {
       }
       const key = JSON.stringify(this.focus ? this.layer.focusKey() : this.framePoints());
       if (!this.focus) {                              // no call open: the calls changed, so all of them again, as
-        if (this.callsKey !== undefined && key !== this.callsKey) this.userMoved = false;   // Recenter does (#218)
+        if (this.callsKey !== undefined && key !== this.callsKey) {
+          this.userMoved = false;                     // Recenter does (#218)
+          if (this.layer.stationOpen) this.layer.closePicker();   // #384: a firehouse's list never left over the calls
+        }
         this.callsKey = key;                          // (a view switch or a resize leaves a map the viewer moved)
       } else this.callsKey = undefined;
       if (key !== this.fitKey && this.canvas.clientWidth) {
@@ -1049,6 +1384,7 @@ window.CadMap = (() => {
   function detail(inc) {
     const box = $("#d-map"), nomap = $("#d-nomap");
     if (window.TrainLayer) TrainLayer.panel(inc, $("#d-trains"));      // "Trains approaching" near the tracks (#131)
+    if (window.VesselLayer) VesselLayer.panel(inc, $("#d-vessels"));   // a marine call's "Vessels nearby" (vessels.js)
     if (!mapsOk()) {
       show(box, false);
       show(nomap, true);
@@ -1260,5 +1596,5 @@ window.CadMap = (() => {
 
   const detailMap = () => views.detail;   // the working event's map, for its resize handles (incident-map.js, #210)
   return { RigLayer, RigMap, detail, detailMap, place, overview, goOverview, openBig, closeBig, areaBounds, areaCalls, AREA_KM,
-           followUnit, focusUnit, hoverUnits, onMap, lights, routeFrom, declutter, zoomsOf, rigClass };
+           followUnit, focusUnit, hoverUnits, onMap, lights, routeFrom, declutter, zoomsOf, rigClass, iconOf, vehicles: V, vehSvg };
 })();

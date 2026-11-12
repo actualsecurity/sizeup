@@ -1,0 +1,43 @@
+# The station's AIS decoder (GitHub #402, deploy/station/README.md "AIS receiver"): AIS-catcher on the ONE dongle
+# named for AIS ([vessels.receiver] enabled / sdr in /etc/sizeup/config.toml), supervised by
+# /usr/local/lib/sizeup/aisd.py (sizeup/radio/aisd.py). Off, or with no dongle named, it runs nothing and touches no
+# dongle. Its own service: an update restarts it only when aisd.py or this unit changed (install-linux.sh). The
+# messages go to /run/sizeup-ais/messages.json (tmpfs), which sizeup-station forwards to the hub.
+# Installed by install-linux.sh; edit there, not here.
+[Unit]
+Description=sizeup station: AIS decoder (AIS-catcher on the dongle named for AIS)
+Documentation=file:///opt/sizeup/current/deploy/station/README.md
+After=systemd-udevd.service sizeup-usbfs.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=sizeup
+Group=sizeup
+SupplementaryGroups=plugdev
+WorkingDirectory=/opt/sizeup
+# HOME: the shared dongle claims (~/.local/state/rtl-claims) are the sizeup user's, as sizeup-station's
+Environment=HOME=/var/lib/sizeup
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=LD_LIBRARY_PATH=/opt/sizeup/rtl-sdr/lib
+RuntimeDirectory=sizeup-ais
+RuntimeDirectoryMode=0755
+ExecStart=/usr/bin/python3 -I /usr/local/lib/sizeup/aisd.py run
+Restart=always
+RestartSec=5
+TimeoutStopSec=15
+# AIS-catcher is its child: stopped with it
+KillMode=control-group
+# Below the radios and whisper: vessels move slowly, a few lost messages cost nothing
+Nice=10
+CPUWeight=30
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectHome=yes
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=sizeup-ais
+
+[Install]
+WantedBy=multi-user.target

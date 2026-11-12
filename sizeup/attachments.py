@@ -60,7 +60,12 @@ from typing import Callable, Iterator
 
 from sizeup import aws
 
-RETENTION_S = 365 * 86400
+RETENTION_S = 365 * 86400        # a camera clip, a radio one on an unconfirmed link (a mention); a radio one on a
+NEVER = 0.0                      # confirmed link: until an admin deletes it (expires_at NEVER)
+# The objects' tag, read by the bucket's lifecycle (sizeup-aws 19-incident-audio-forever.sh): keep=1y expires after a
+# year, keep=forever (and an untagged object) never. Tagging needs s3:PutObjectTagging; without it a PUT is sent again
+# untagged (nothing is lost) and the row stays tagged = 0, for retag() once the permission is there.
+TAG_1Y, TAG_FOREVER = "1y", "forever"
 MAX_CLIP_S = 3600.0               # a camera clip, at most
 EDGE_S = 1.0                      # a range may start / end this far past what is recorded
 PART_BYTES = 8 * 1024 * 1024      # a camera clip's parts, at most (a bigger single segment is a part of its own)
@@ -171,16 +176,28 @@ class S3:
             aws.forget_credentials()
         return status, {k.lower(): v for k, v in (hdrs or {}).items()}, data or b""
 
-    def put(self, key: str, body: bytes, ctype: str = "application/octet-stream") -> str:
+    def put(self, key: str, body: bytes, ctype: str = "application/octet-stream", keep: str = "") -> str:
+        """keep: the object's tag (x-amz-tagging keep=1y | forever, TAG_1Y / TAG_FOREVER): the bucket's lifecycle
+        expires keep=1y after a year, never the rest (sizeup-aws 19-incident-audio-forever.sh; s3:PutObjectTagging)."""
         digest = hashlib.sha256(body).digest()
         status, h, data = self._call("PUT", key, {
             "Content-Type": ctype, "Content-Length": str(len(body)),
             "Content-MD5": base64.b64encode(hashlib.md5(body).digest()).decode(),
             "x-amz-checksum-sha256": base64.b64encode(digest).decode(),
-            "x-amz-server-side-encryption": "AES256"}, body)
+            "x-amz-server-side-encryption": "AES256",
+            **({"x-amz-tagging": f"keep={keep}"} if keep else {})}, body)
         if status != 200:
             raise aws.AwsError(f"S3 PUT {key}: {status} {_code(data)}", _code(data) or f"HTTP {status}", status)
         return h.get("x-amz-version-id", "")
+
+    def put_tagging(self, key: str, keep: str) -> None:
+        """An object already stored: its tag (PutObjectTagging, the current version)."""
+        body = (f"<Tagging><TagSet><Tag><Key>keep</Key><Value>{keep}</Value></Tag></TagSet></Tagging>").encode()
+        status, _, data = self._call("PUT", key, {
+            "Content-Type": "application/xml", "Content-Length": str(len(body)),
+            "Content-MD5": base64.b64encode(hashlib.md5(body).digest()).decode()}, body, query="tagging=")
+        if status != 200:
+            raise aws.AwsError(f"S3 PUT tagging {key}: {status} {_code(data)}", _code(data) or f"HTTP {status}", status)
 
     def get(self, key: str, first: int | None = None, last: int | None = None) -> bytes:
         hdrs = {"Range": f"bytes={first}-{last}"} if first is not None else {}
@@ -322,16 +339,103 @@ class Attachments:
                     store.db.execute(stmt)
             cols = {r["name"] for r in store.db.execute("PRAGMA table_info(attachments)")}
             for col, decl in (("versions", "TEXT NOT NULL DEFAULT '[]'"), ("attempts", "INTEGER NOT NULL DEFAULT 0"),
-                              ("retry_at", "REAL")):
+                              ("retry_at", "REAL"), ("tagged", "INTEGER NOT NULL DEFAULT 0"), ("saving_since", "REAL")):
                 if col not in cols:                       # a table from before these (this branch's own test runs)
                     store.db.execute(f"ALTER TABLE attachments ADD COLUMN {col} {decl}")
+        self._untagged: set[str] = set()
+        self._said_untagged = False
+        self._uploading: set[str] = set()             # camera clips being uploaded by this process: sweep / resume skip them
+        self._migrate_forever()
+
+    def _sure(self, tid: str, iid: int) -> bool:
+        """The transmission is on the incident by a confirmed link (sizeup/cad/comms.py SURE_LINK: not an unconfirmed
+        mention / fireground one): its copy is kept until an admin deletes it."""
+        from sizeup.cad.comms import SURE_LINK
+        return bool(self.store.q(f"SELECT 1 FROM radio_links l WHERE l.traffic_id = ? AND l.incident_id = ? AND {SURE_LINK}",
+                                 (tid, iid)))
+
+    def _migrate_forever(self) -> None:
+        """The radio rows from before #440 on a confirmed link: kept until an admin deletes them (back to stored if
+        the sweep had marked them expired: their objects outlive that by the lifecycle's change), retagged (retag)."""
+        from sizeup.cad.comms import SURE_LINK
+        try:
+            with self.store.lock:
+                self.store.db.execute(
+                    "UPDATE attachments SET expires_at = 0, tagged = 0, status = CASE status WHEN 'expired' THEN 'stored' "
+                    "ELSE status END WHERE kind = 'radio' AND expires_at != 0 AND EXISTS (SELECT 1 FROM radio_links l "
+                    f"WHERE l.traffic_id = attachments.ref AND l.incident_id = attachments.incident_id AND {SURE_LINK})")
+        except Exception:  # noqa: BLE001 (a CAD without the radio log: nothing to migrate)
+            pass
+
+    def retag(self, limit: int = 50) -> int:
+        """Stored attachments whose objects don't carry the tag they should (saved before #440 or while tagging was
+        refused, or a radio one whose link was confirmed since: forever now): tagged, each object's current version.
+        Leader only; a refusal (403: no s3:PutObjectTagging yet) stops the round, tried again the next. A link
+        confirmed after its copy's year (the lifecycle removed the objects, or the row was marked expired): copied
+        again, forever, from the live audio if it still has the clip, else said in the log (its audio is gone). The
+        number retagged or copied again."""
+        if self.s3 is None or not self.may_write():
+            return 0
+        from sizeup.cad.comms import SURE_LINK
+        sure = f"EXISTS (SELECT 1 FROM radio_links l WHERE l.traffic_id = a.ref AND l.incident_id = a.incident_id AND {SURE_LINK})"
+        rows = self.store.q(
+            f"SELECT a.id, a.kind, a.ref, a.status, a.objects, a.expires_at, a.incident_id, {sure} AS sure "
+            f"FROM attachments a WHERE (a.status = 'stored' AND a.tagged = 0) OR (a.kind = 'radio' AND a.expires_at > 0 "
+            f"AND {sure} AND (a.status IN ('stored', 'expired') OR (a.status = 'failed' AND a.tries < ? "
+            f"AND COALESCE(a.retry_at, 0) <= ?))) LIMIT ?", (TRIES, self.clock(), limit))
+        n = 0
+        for r in rows:
+            forever = r["kind"] == "radio" and bool(r["sure"])
+            gone = r["status"] in ("expired", "failed")       # failed: a re-copy that failed, tried again (backoff)
+            try:
+                for o in ([] if gone else json.loads(r["objects"] or "[]")):
+                    self.s3.put_tagging(o["key"], TAG_FOREVER if forever else TAG_1Y)
+            except aws.AwsError as e:
+                if not (forever and e.status == 404):
+                    self.log(f"attachments: retag {r['id']}: {e.code or e.status}: tried again later")
+                    break
+                gone = True                               # the lifecycle took it: past its year
+            if gone:
+                got = self._recopy(r)
+                if got is None:
+                    continue                              # the live audio can't be read now / the copy failed: later
+                n += got
+                continue
+            self._set(r["id"], tagged=1, **({"expires_at": NEVER} if forever else {}))
+            n += 1
+        return n
+
+    def _recopy(self, r: dict) -> int | None:
+        """A radio copy whose link was confirmed after its year: copied again (forever) from the live audio, if it still
+        has the clip. 1: copied; 0: its audio is gone (said, the row keeps "audio expired before the link was
+        confirmed"); None: the live audio can't be read now."""
+        try:
+            wav = self.audio(r["ref"])
+        except OSError:
+            k = int(self.store.one("SELECT attempts FROM attachments WHERE id = ?", (r["id"],))["attempts"] or 0) + 1
+            if r["status"] == "failed":                   # its backoff: 60 s doubling to an hour
+                self._set(r["id"], attempts=k, retry_at=self.clock() + min(RETRY_S[1], RETRY_S[0] * 2 ** (k - 1)))
+            return None
+        if not wav:
+            self._set(r["id"], status="expired", expires_at=NEVER, tagged=1,
+                      error="audio expired before the link was confirmed (more than a year after its copy)")
+            self.log(f"attachments: {r['id']}: its link was confirmed after the copy's year: the audio is gone, "
+                     "the transcript record stays")
+            return 0
+        if r["status"] != "failed":                       # the first try; a failed one keeps its count and backoff
+            self._set(r["id"], status="failed", tries=0, attempts=0, retry_at=0)
+        got = self._copy_radio(r["ref"], r["incident_id"], "confirmed later")
+        if got == "copied":
+            self.log(f"attachments: {r['id']}: its link was confirmed after the copy's year: copied again from the live "
+                     "audio, kept until an admin deletes it")
+        return 1 if got == "copied" else None
 
     @classmethod
     def from_env(cls, store, log: Callable[[str], None] = print, may_write=None) -> Attachments:
         bucket = os.environ.get("SIZEUP_ATTACHMENTS_BUCKET", "").strip()
         s3 = S3(bucket) if bucket else None
         att = cls(store, s3, log=log, prefix=os.environ.get("SIZEUP_ATTACHMENTS_PREFIX", "attachments"), may_write=may_write)
-        log(f"attachments: s3://{bucket}/{att.prefix}/, kept {RETENTION_S // 86400} days" if s3 is not None
+        log(f"attachments: s3://{bucket}/{att.prefix}/, camera clips {RETENTION_S // 86400} days, radio until deleted" if s3 is not None
             else f"attachments: {NOT_CONFIGURED}: nothing is copied")
         return att
 
@@ -485,6 +589,9 @@ class Attachments:
     def _upload_camera(self, aid: str, inc: dict, cid: str, cam: dict, segs: list[dict], note: str, operator: str,
                        now: float) -> None:
         s3 = self.s3
+        with self._mu:
+            self._uploading.add(aid)
+        self._set(aid, saving_since=self.clock())
         try:
             objects, index, part, pn, total = [], [], bytearray(), 0, 0
 
@@ -496,7 +603,7 @@ class Attachments:
                 key = self.key(inc["id"], aid, name)
                 if not self.may_write():
                     raise AttachError("lost the lease mid-upload")
-                self._wrote(aid, key, s3.put(key, bytes(part), "video/MP2T"))
+                self._wrote(aid, key, self._put(aid, key, bytes(part), "video/MP2T", TAG_1Y))
                 objects.append({"name": name, "key": key, "bytes": len(part), "sha256": sha256(part)})
                 part, pn = bytearray(), pn + 1
 
@@ -522,22 +629,48 @@ class Attachments:
                         "segments": [{"part": p, "offset": o, "bytes": n, "start": iso(t), "duration": d, "seq": s["key"],
                                       "discontinuity": bool(x)} for (p, o, n, t, d, x), s in zip(index, segs)],
                         "objects": [{k: o[k] for k in ("name", "bytes", "sha256")} for o in objects]}
-            objects.append(self._put_manifest(inc["id"], aid, manifest))
-            self._set(aid, status="stored", bytes=total, objects=json.dumps(objects), segments=json.dumps(index), error="")
+            objects.append(self._put_manifest(inc["id"], aid, manifest, TAG_1Y))
+            self._set(aid, status="stored", bytes=total, objects=json.dumps(objects), segments=json.dumps(index), error="",
+                      tagged=0 if aid in self._untagged else 1)
             self.log(f"attachments: {aid}: camera {cid}, {len(segs)} segments, {total / 1e6:.1f} MB in {len(objects) - 1} part(s)")
         except Exception as e:  # noqa: BLE001 - the row says why; never kills the pool
             why = f"{type(e).__name__}: {e}"[:300]
-            self._set(aid, status="failed", error=why)
+            # S3's own trouble (network, 5xx, 403): "interrupted", so resume() uploads it again while it is recorded,
+            # 60 s doubling to an hour apart
+            if _transient(e):
+                r = self.store.one("SELECT attempts FROM attachments WHERE id = ?", (aid,))
+                k = (r["attempts"] if r else 0) + 1
+                self._set(aid, status="failed", error="interrupted: " + why, attempts=k,
+                          retry_at=self.clock() + min(RETRY_S[1], RETRY_S[0] * 2 ** (k - 1)))
+            else:
+                self._set(aid, status="failed", error=why)
             self.audit("failed", aid, inc["id"], operator, why)
         finally:
+            with self._mu:
+                self._uploading.discard(aid)
             dvr = self.dvr()
             if dvr is not None:
                 dvr.hold(cid, False)
 
-    def _put_manifest(self, iid: int, aid: str, manifest: dict) -> dict:
+    def _put(self, aid: str, key: str, body: bytes, ctype: str, keep: str) -> str:
+        """A PUT with its keep tag; refused (403: s3:PutObjectTagging not granted yet) it is sent again untagged, so an
+        ordering mistake (the release before sizeup-aws step 19) loses nothing: the row is retagged later (retag)."""
+        try:
+            return self._need().put(key, body, ctype, keep)
+        except aws.AwsError as e:
+            if e.status != 403 or not keep:
+                raise
+            self._untagged.add(aid)
+            if not self._said_untagged:
+                self._said_untagged = True
+                self.log("attachments: tagging refused (403: s3:PutObjectTagging, sizeup-aws step 19?): saved untagged, "
+                         "tagged later")
+            return self._need().put(key, body, ctype)
+
+    def _put_manifest(self, iid: int, aid: str, manifest: dict, keep: str = "") -> dict:
         body = (json.dumps(manifest, indent=1, sort_keys=True) + "\n").encode()
         key = self.key(iid, aid, "manifest.json")
-        self._wrote(aid, key, self.s3.put(key, body, "application/json"))
+        self._wrote(aid, key, self._put(aid, key, body, "application/json", keep))
         return {"name": "manifest.json", "key": key, "bytes": len(body), "sha256": sha256(body)}
 
     # -- radio --------------------------------------------------------------------------------------------------------
@@ -566,6 +699,35 @@ class Attachments:
             n += got == "copied"
         return n
 
+    def uncopied(self, ids: list[str]) -> set[str]:
+        """Of these transmissions, the ones linked to an incident that sync_radio will still copy (the incident and
+        the transmission exist, it ended within RETENTION_S, no copy stored or deleted for that incident, no copy
+        refused for good): the live audio store must not let them go yet (#440). The rest (an incident deleted, a
+        link a year after the transmission, TRIES refusals, the transmission pruned) are not held: released lists
+        them, and the live clip follows its retention."""
+        now = self.clock()
+        held: set[str] = set()
+        linked: set[str] = set()
+        done: set[str] = set()
+        for k in range(0, len(ids), 500):
+            chunk = list(ids[k:k + 500])
+            marks = ",".join("?" * len(chunk))
+            held.update(r["tid"] for r in self.store.q(
+                "SELECT l.traffic_id AS tid FROM radio_links l JOIN radio_traffic t ON t.id = l.traffic_id "
+                "JOIN incidents i ON i.id = l.incident_id LEFT JOIN attachments a ON a.kind = 'radio' "
+                "AND a.incident_id = l.incident_id AND a.ref = l.traffic_id "
+                f"WHERE l.traffic_id IN ({marks}) AND t.end > ? AND (a.id IS NULL OR (a.status IN ('saving', 'failed') "
+                "AND a.tries < ?))", (*chunk, now - RETENTION_S, TRIES)))
+            linked.update(r["tid"] for r in self.store.q(
+                f"SELECT traffic_id AS tid FROM radio_links WHERE traffic_id IN ({marks})", chunk))
+            done.update(r["ref"] for r in self.store.q(
+                f"SELECT ref FROM attachments WHERE kind = 'radio' AND status IN ('stored', 'deleted', 'expired') "
+                f"AND ref IN ({marks})", chunk))
+        self.released = linked - held - done
+        return held
+
+    released: set[str] = set()
+
     def copy_radio(self, tid: str, iid: int, by: str = "") -> bool:
         """One transmission into the store for one event (idempotent: an existing row is left alone unless its copy
         failed). True when it was copied now."""
@@ -585,16 +747,18 @@ class Attachments:
                                         "AND ref = ?", (inc["id"], tid)).fetchone()
             if old is not None and not (old["status"] == "failed" and old["tries"] < TRIES):
                 return "skipped"
+            sure = self._sure(tid, inc["id"])
             if old is None:
                 aid = self._new_id()
                 self.store.db.execute(
                     "INSERT INTO attachments (id, incident_id, kind, source, source_name, talkgroup, ref, start, end, status, "
                     "created_at, created_by, expires_at) VALUES (?, ?, 'radio', ?, ?, ?, ?, ?, ?, 'saving', ?, ?, ?)",
                     (aid, inc["id"], t["channel"], t["talker"] or t["rig"] or t["radio_id"] or "", t["talkgroup"], tid,
-                     t["start"], t["end"], now, by, now + RETENTION_S))
+                     t["start"], t["end"], now, by, NEVER if sure else now + RETENTION_S))
             else:
                 aid = old["id"]
                 self.store.db.execute("UPDATE attachments SET status = 'saving' WHERE id = ?", (aid,))
+        keep = TAG_FOREVER if sure else TAG_1Y
         try:
             meta = {k: t.get(k) for k in ("id", "call_id", "turn", "start", "end", "channel", "talkgroup", "talker",
                                            "radio_id", "rig", "dispatcher", "text", "status", "model", "alt_text",
@@ -604,21 +768,22 @@ class Attachments:
             wav = self.audio(tid)
             if wav:
                 key = self.key(inc["id"], aid, "audio.wav")
-                self._wrote(aid, key, s3.put(key, wav, "audio/wav"))
+                self._wrote(aid, key, self._put(aid, key, wav, "audio/wav", keep))
                 objects.append({"name": "audio.wav", "key": key, "bytes": len(wav), "sha256": sha256(wav)})
             body = (json.dumps(meta, indent=1, sort_keys=True, default=str) + "\n").encode()
             key = self.key(inc["id"], aid, "transmission.json")
-            self._wrote(aid, key, s3.put(key, body, "application/json"))
+            self._wrote(aid, key, self._put(aid, key, body, "application/json", keep))
             objects.append({"name": "transmission.json", "key": key, "bytes": len(body), "sha256": sha256(body)})
             manifest = {"v": 1, "id": aid, "kind": "radio", "incident": {"id": inc["id"], "number": inc.get("number") or ""},
                         "source": {"transmission": tid, "channel": t["channel"], "talkgroup": t["talkgroup"],
                                    "talker": t["talker"], "radio_id": t["radio_id"], "rig": t["rig"]},
                         "from": iso(t["start"]), "to": iso(t["end"]), "created_by": by, "created_at": iso(now),
-                        "note": "", "expires_at": iso(now + RETENTION_S), "audio": bool(wav),
+                        "note": "", "expires_at": None if sure else iso(now + RETENTION_S), "audio": bool(wav),
                         "objects": [{k: o[k] for k in ("name", "bytes", "sha256")} for o in objects]}
-            objects.append(self._put_manifest(inc["id"], aid, manifest))
+            objects.append(self._put_manifest(inc["id"], aid, manifest, keep))
             self._set(aid, status="stored", bytes=sum(o["bytes"] for o in objects[:-1]), objects=json.dumps(objects),
-                      error="" if wav else "no audio kept for it: the transcript only")
+                      error="" if wav else "no audio kept for it: the transcript only",
+                      tagged=0 if aid in self._untagged else 1, expires_at=NEVER if sure else now + RETENTION_S)
         except Exception as e:  # noqa: BLE001
             why = f"{type(e).__name__}: {e}"[:300]
             with self.store.lock:
@@ -635,27 +800,41 @@ class Attachments:
 
     # -- housekeeping -----------------------------------------------------------------------------------------------
 
-    def resume(self) -> int:
+    def resume(self, due_only: bool = False) -> int:
         """The leader before this one went away mid-upload (a deploy: its queue went with it): every camera clip still
         "saving", or failed as interrupted, uploaded again under the same id, when its range is still recorded (else
-        failed: "no longer recorded"). Once, after the DVR has read its index. The number queued."""
+        failed for good: "no longer recorded"). Once, after the DVR has read its index; then every round (due_only)
+        for the ones S3's own trouble interrupted, once their retry time has come (60 s doubling to an hour), while
+        their range is still recorded (the DVR's 12 h on EFS). The number queued."""
         dvr = self.dvr()
         if self.s3 is None or not self.may_write() or dvr is None or not getattr(dvr, "scanned", lambda: True)():
             return 0
-        self._resumed = True
-        rows = self.store.q("SELECT * FROM attachments WHERE kind = 'camera' AND (status = 'saving' OR "
-                            "(status = 'failed' AND error LIKE 'interrupted%')) ORDER BY created_at")
+        if due_only:
+            rows = self.store.q("SELECT * FROM attachments WHERE kind = 'camera' AND status = 'failed' AND error LIKE "
+                                "'interrupted%' AND COALESCE(retry_at, 0) <= ? ORDER BY created_at", (self.clock(),))
+        else:
+            self._resumed = True
+            rows = self.store.q("SELECT * FROM attachments WHERE kind = 'camera' AND (status = 'saving' OR "
+                                "(status = 'failed' AND error LIKE 'interrupted%')) ORDER BY created_at")
         n = 0
+        with self._mu:
+            busy = set(self._uploading)
         for r in rows:
+            if r["id"] in busy:
+                continue                                  # still uploading here: never a second upload of it
             cid = dvr.alias(r["source"]) if hasattr(dvr, "alias") else r["source"]
             segs = dvr.segments(cid, r["start"], r["end"])
             whole = bool(segs) and segs[0]["t0"] <= r["start"] + 0.01 and segs[-1]["t0"] + segs[-1]["dur"] >= r["end"] - 0.01
             if not whole:
-                self._set(r["id"], status="failed", error="interrupted, and no longer recorded")
+                self._set(r["id"], status="failed", error="no longer recorded: the camera clip was interrupted (S3, "
+                          "a deploy) and its range aged out of the DVR before it could be saved")
                 self.audit("failed", r["id"], r["incident_id"], r["created_by"], "interrupted; the range is no longer recorded")
                 continue
             inc = self._incident(r["incident_id"])
-            self._set(r["id"], status="saving", error="")
+            now = self.clock()
+            self._set(r["id"], status="saving", error="", saving_since=now, retry_at=now + SAVING_STALE_S)
+            with self._mu:
+                self._uploading.add(r["id"])              # from now: the pool's upload discards it when it ends
             dvr.hold(cid, True)
             self._pool.submit(self._upload_camera, r["id"], inc, cid, self.camera(cid) or {}, segs, r["note"],
                               r["created_by"], r["created_at"])
@@ -665,12 +844,20 @@ class Attachments:
 
     def sweep(self) -> None:
         """A "saving" row left by a task that went away: failed (a radio one is tried again; a camera one, by resume() on
-        the next leader); past a year: expired (S3's lifecycle removes the objects)."""
+        the next leader); a camera clip or a radio one on an unconfirmed link past a year: expired (S3's lifecycle
+        removes the objects). A radio one on a confirmed link never expires (NEVER, #440): an incident keeps its audio
+        until an admin deletes it."""
         now = self.clock()
+        with self._mu:
+            busy = set(self._uploading)
+        stale = [r["id"] for r in self.store.q("SELECT id FROM attachments WHERE status = 'saving' AND "
+                                              "COALESCE(saving_since, created_at) < ?", (now - SAVING_STALE_S,))
+                 if r["id"] not in busy]                  # an upload still running here is never taken for a lost one
         with self.store.lock:
-            self.store.db.execute("UPDATE attachments SET status = 'failed', error = 'interrupted (a deploy?)', "
-                                  "tries = tries + 1 WHERE status = 'saving' AND created_at < ?", (now - SAVING_STALE_S,))
-            self.store.db.execute("UPDATE attachments SET status = 'expired' WHERE status = 'stored' AND expires_at < ?", (now,))
+            self.store.db.executemany("UPDATE attachments SET status = 'failed', error = 'interrupted (a deploy?)', "
+                                      "tries = tries + 1 WHERE id = ? AND status = 'saving'", [(i,) for i in stale])
+            self.store.db.execute("UPDATE attachments SET status = 'expired' WHERE status = 'stored' "
+                                  "AND expires_at > 0 AND expires_at < ?", (now,))
 
     def start(self) -> Attachments:
         if self.s3 is not None and (self._thread is None or not self._thread.is_alive()):
@@ -702,8 +889,11 @@ class Attachments:
             try:
                 if not self._resumed:
                     self.resume()
+                else:
+                    self.resume(due_only=True)
                 self.sweep()
                 n = self.sync_radio()
+                self.retag()
                 if n:
                     self.log(f"attachments: {n} linked transmissions copied")
             except Exception as e:  # pragma: no cover - the next round tries again
