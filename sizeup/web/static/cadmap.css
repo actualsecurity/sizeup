@@ -131,6 +131,10 @@
   .cm-near .cm-veh .hi { display: inline; }
   .cm-rig.rv.look-oos .cm-veh .b { fill: #59616B; }
   .cm-rig.rv.stale .cm-veh .b { fill: color-mix(in srgb, var(--bg) 80%, transparent); stroke: var(--c); stroke-width: 1.5px; }
+  /* #453: moved by the estimate along its route (no live fix): translucent, its status edge kept ("~" before its status) */
+  .cm-rig.rv.est .cm-veh { opacity: 0.85; }
+  .cm-rig.rv.est .cm-veh .b { fill: color-mix(in srgb, var(--c) 42%, transparent); }
+  .cm-rig.rv.est:not(.enroute) .cm-veh .b { stroke: var(--c); stroke-width: 1.5px; }
   .cm-rig.rv .lbl {
     position: absolute; inset-block-start: 50%; inset-inline-start: calc(50% + var(--hx) + 2px); transform: translateY(-50%);
     padding: 0 var(--s-0); font: 700 var(--fs-2xs)/var(--lh-2xs) var(--mono); color: #fff; white-space: nowrap; pointer-events: auto;

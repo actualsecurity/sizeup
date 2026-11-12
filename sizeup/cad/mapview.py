@@ -57,7 +57,9 @@ taken into account too, if within reasonable time before them ending up back in 
                                      then at its station. No station: "near" the call for the margin,
                                      then unknown. Only a call it was on location at counts (one cancelled
                                      en route: where it was is unknown, so its station, as before).
-                                     Set to the "in quarters" status (Settings > Dispatch): at its station.
+                                     Set to the "in quarters" status (Settings > Dispatch): at its station
+                                     (not when it is set with the release itself, within QUARTERS_GRACE_S of
+                                     clearing: #453). The maps move it home along its route (routes.py).
     dispatched / responding          where it was when it took the call: its station, or its returning
                                      position at that moment (frozen: it is committed either way)
     otherwise                        its home station; no station: unknown (None)
@@ -84,6 +86,8 @@ MAX_SPEED_MS = 100.0            # m/s; faster is no fire apparatus (360 km/h): i
 EPOCH_MIN, EPOCH_MAX = 1e9, 1e10   # plausible epoch seconds (2001-2286): milliseconds (1.7e12) are refused
 RECENT_S = 6 * 3600.0           # cleared calls looked at for a return trip (the longest window allowed)
 AT_HOME_KM = 0.15               # an AVL fix this close to its station: in quarters (turnout counts)
+QUARTERS_GRACE_S = 20.0         # the in-quarters status set this soon after clearing is the release itself (#453), not
+                                # "back in quarters": the rig is still on its way home
 LOOK = {"free": "available", "oos": "oos", "dispatched": "dispatched", "enroute": "responding", "onscene": "onscene"}
 # Every other role is committed to a call (role '' in data/cad_lists.json: acknowledged, staging, out at, call back,
 # dispatched by other agency; or one not known here): drawn as dispatched, an active rig (#376: chips longest).
@@ -314,7 +318,8 @@ def _returning(unit: dict, role: str, incident: dict | None, clear: dict | None,
     if call is None or role in ("oos", "onscene"):
         return None
     if incident is None:
-        if role != "free" or (p.quarters_status and unit.get("status") == p.quarters_status):
+        if role != "free" or (p.quarters_status and unit.get("status") == p.quarters_status
+                              and not _released_with(unit, clear)):
             return None                         # reported back in quarters
         t = now
     else:
@@ -326,11 +331,19 @@ def _returning(unit: dict, role: str, incident: dict | None, clear: dict | None,
     if since < 0 or since >= window:
         return None
     num = clear.get("number") or "a call"
-    out = {"on_road": True, "call_ll": call, "number": num, "until": clear["cleared_at"] + window}
+    out = {"on_road": True, "call_ll": call, "number": num, "until": clear["cleared_at"] + window,
+           "cleared_at": clear["cleared_at"]}
     if home is None:
         return dict(out, where="near", ll=call, label=f"near {num} (station not set)")
     return dict(out, where="returning", ll=eta.along(call, home, since / window) if window else home,
                 label=f"returning from {num}")
+
+
+def _released_with(unit: dict, clear: dict) -> bool:
+    """The in-quarters status set with the release (within QUARTERS_GRACE_S of clearing the call: the county's release
+    sets it at once), not reported later: still on the way home (#453)."""
+    at = unit.get("status_at")
+    return _num(at) and abs(at - clear["cleared_at"]) <= QUARTERS_GRACE_S
 
 
 def place(unit: dict, role: str, station: dict | None = None, incident: dict | None = None,
@@ -348,7 +361,9 @@ def place(unit: dict, role: str, station: dict | None = None, incident: dict | N
 
     Returns None (not drawn) or {unit, id, kind, icon (icon_of: #384), status, status_at, look,
     place: station|incident|position|returning, group, lon, lat, ring: 0 (inner) | 1 (outer, not there yet), incident_id, incident_number,
-    line_to: [lon, lat] | None, station, home_line (the line is to its station: thin)}; a "position"
+    line_to: [lon, lat] | None, station, home_line (the line is to its station: thin)}; a "returning" one on its way home
+    also has returning_from (the call's number), return_ll (the call's point) and cleared_at (routes.py: its way home
+    by road, #453); a "position"
     one also has its fix's at, age (s), stale, and heading / speed / source when the fix has them."""
     if is_placeholder(unit, lists):
         return None                                  # a department placeholder (DPT239): not apparatus, never drawn
@@ -379,7 +394,7 @@ def place(unit: dict, role: str, station: dict | None = None, incident: dict | N
     if loc and loc["where"] == "returning":
         return dict(spec, place="returning", group=f"unit:{unit['name']}", lon=loc["ll"][0], lat=loc["ll"][1],
                     line_to=inc_ll if going else list(station["ll"]), home_line=not going,
-                    returning_from=loc["number"])
+                    returning_from=loc["number"], return_ll=loc["call_ll"], cleared_at=loc["cleared_at"])
     return dict(spec, place="station", group=f"station:{station['name']}", lon=station["ll"][0], lat=station["ll"][1],
                 line_to=inc_ll if going else None)
 
