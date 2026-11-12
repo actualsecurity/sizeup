@@ -29,6 +29,8 @@ from sizeup.cad.activity import Activity
 from sizeup.cad.alarms import Alarms
 from sizeup.cad.automode import AutoDispatch
 from sizeup.cad.comms import MAIN_LIMIT, MAX_ROWS, OTHER_LIMIT, Comms
+from sizeup.cad.history import AddressHistory
+from sizeup.cad.premise import Premise
 from sizeup.cad.feed import Feed
 from sizeup.cad.newids import NewIds
 from sizeup.cad.statushints import StatusHints
@@ -342,6 +344,11 @@ class Cad:
         # GET /api/cad/tones (#80): the pairs named from the console and the names to pick from; the app sets it.
         self.tone_names: Callable[[], dict] = lambda: {"named": self.settings.tone_rows(), "names": list(s.monitor_departments),
                                                         "ours": list(s.monitor_departments)}
+        # Address history and search (#403, sizeup/cad/history.py): each incident's address and building keys, History
+        # here, the Search page and its FTS index; the app starts its background backfill (addrs.start()). Premise
+        # notes (sizeup/cad/premise.py): what crews should know about a building, on every call there.
+        self.addrs = AddressHistory(self, clock=clock, log=log)
+        self.premise = Premise(self)
 
     @classmethod
     def from_config(cls, cfg, geocoder=None, log=print) -> Cad:
@@ -364,7 +371,9 @@ class Cad:
         rev = self.store.rev
         if self._state is None or self._state[0] != rev:
             cards = runcards.cards(self.store)
+            self.addrs.key_open()                         # a new or moved address keyed first: its notes show (#403)
             incs = self._with_radio(self.store.incidents())
+            self.premise.decorate(incs)
             try:
                 self.sources.decorate(incs)               # a feed's jurisdiction and run numbers on the incident (#297)
             except Exception as e:  # noqa: BLE001
@@ -1629,8 +1638,9 @@ class Cad:
     def settings_export(self) -> dict:
         return self.settings.export()
 
-    def settings_audit_log(self, q: dict) -> dict:
-        return {"audit": self.settings.audit_log((q.get("section") or [""])[0][:40])}
+    def settings_audit_log(self, q: dict, may: str = "admin") -> dict:
+        """may: the reader's standing; a premise note's rows of a category they may not see (now) without its text (#403)."""
+        return {"audit": self.premise.redact_audit(self.settings.audit_log((q.get("section") or [""])[0][:40]), may)}
 
     # -- location suggestions -----------------------------------------------------------------------
 

@@ -25,6 +25,7 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
     <!-- the Incident view (#216: it was "Dispatch"; the id and the view's key, "dispatch", are unchanged) -->
     <button id="dispatch-open" class="tab" type="button" title="The open incident"><svg class="ico" aria-hidden="true"><use href="/static/icons.svg#i-dispatch"/></svg><span class="lbl">Incident</span></button>
     <a id="radio-open" class="tab" href="#radio" title="All transmissions"><svg class="ico" aria-hidden="true"><use href="/static/icons.svg#i-radio"/></svg><span class="lbl">Radio</span></a>
+    <a id="search-open" class="tab" href="#search" title="Past calls: address, type, unit, words; address notes"><svg class="ico" aria-hidden="true"><use href="/static/icons.svg#i-search"/></svg><span class="lbl">Search</span></a>
     <a id="settings-open" class="tab" href="#settings" title="Settings"><svg class="ico" aria-hidden="true"><use href="/static/icons.svg#i-settings"/></svg><span class="lbl">Settings</span></a>
   </nav>
   <span id="conn" class="pill warn">Connecting</span>
@@ -171,6 +172,49 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
       </section>
     </div>
 
+    <!-- Search (search-view.js, /cad#search?where=&type=&unit=&disposition=&text=&from=&to=&page=, #403): past calls by
+         address, street or place, type, unit, disposition, dates and words in the remarks, comments and transcripts;
+         a table and the map; Address notes (premise notes) to list, add, edit and expire -->
+    <div id="search-view" class="search-view" hidden>
+      <div class="view-head">
+        <h2 class="view-title">Search</h2>
+        <span id="sv-count" class="dim small" aria-live="polite"></span>
+        <span class="spacer"></span>
+        <span id="sv-tabs" class="seg" role="group" aria-label="Show">
+          <button type="button" data-tab="calls" aria-pressed="true" title="Past calls">Calls</button>
+          <button type="button" data-tab="notes" aria-pressed="false" title="Premise notes: shown on every call at the building">Address notes</button>
+        </span>
+        <a id="sv-csv" class="nav sm" href="#" download hidden title="These results as a spreadsheet (admins; in your activity)">CSV</a>
+      </div>
+      <form id="sv-filters" class="rv-filters sv-filters" autocomplete="off" role="search">
+        <input id="sv-where" type="search" placeholder="Address, street or place" aria-label="Address, street or place" spellcheck="false" maxlength="120">
+        <input id="sv-text" type="search" placeholder="Words: remarks, comments, radio" aria-label="Words in the remarks, comments and transcripts" spellcheck="false" maxlength="200"
+               title='Each word matches its start (eng: engine); "quotes" for a phrase'>
+        <select id="sv-type" aria-label="Type"><option value="">Any type</option></select>
+        <select id="sv-unit" aria-label="Unit"><option value="">Any unit</option></select>
+        <select id="sv-disp" aria-label="Disposition"><option value="">Any disposition</option></select>
+        <label id="sv-from-l" class="inline"><span class="dim">From</span> <input id="sv-from" type="date"></label>
+        <label id="sv-to-l" class="inline"><span class="dim">To</span> <input id="sv-to" type="date"></label>
+        <button id="sv-go" type="submit" class="primary">Search</button>
+        <button id="sv-clear" type="button">Clear</button>
+      </form>
+      <div id="sv-calls" class="sv-body">
+        <div id="sv-mapbox" class="sv-mapbox"><div id="sv-map" class="sv-map"></div><div id="sv-nomap" class="nomap dim" hidden>No map points</div></div>
+        <div class="sv-results">
+          <div class="tscroll"><table class="evtable db sv-table"><thead><tr><th>Received</th><th>Number</th><th>Type</th><th>Location</th><th>Disposition</th><th>Units</th></tr></thead>
+            <tbody id="sv-rows"></tbody></table></div>
+          <div class="sv-pager row"><button id="sv-prev" type="button" class="sm">Newer</button><span id="sv-page" class="dim small"></span><button id="sv-next" type="button" class="sm">Older</button></div>
+        </div>
+      </div>
+      <div id="sv-notes" class="sv-notes" hidden>
+        <div class="row"><label class="inline check"><input id="sv-notes-all" type="checkbox"> <span>Expired too</span></label>
+          <span class="spacer"></span><button id="sv-note-add" type="button" class="sm"><svg class="ico" aria-hidden="true"><use href="/static/icons.svg#i-plus"/></svg>Address note</button></div>
+        <div id="sv-note-form" hidden></div>
+        <div class="tscroll"><table class="evtable db sv-table"><thead><tr><th>Address</th><th>Note</th><th>Priority</th><th>Review by</th><th>By</th><th><span class="sr-only">Actions</span></th></tr></thead>
+          <tbody id="sv-note-rows"></tbody></table></div>
+      </div>
+    </div>
+
     <!-- A new call (#204), in the order the dispatcher takes it: Location > Caller name > Caller address > Caller # >
          Event type > Event subtype > Comments. Tab / Shift+Tab go through exactly those (nothing else in between takes
          focus: tabindex -1); the rest come after Comments. On the right, a big map (newcall-map.js) plots the location
@@ -258,6 +302,11 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
           </div>
         </div>
 
+        <!-- premise notes at this building (#403, addr-history.js): ranked, each to acknowledge; open calls get them in the
+             state push, so they show as soon as the address is set or changed -->
+        <div id="d-premise" class="premise" hidden aria-label="Address notes" aria-live="polite"></div>
+        <div id="d-premise-form" hidden></div>
+
         <form id="close-form" class="closebox" hidden autocomplete="off">
           <label class="inline">Disposition <select id="c-disp"></select></label>
           <span class="dim small">Clears all units</span>
@@ -284,6 +333,17 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
             <div id="d-caller" class="d-caller"></div>
             <!-- the external CAD feed's event (#297, incoming.js): its id, jurisdiction and run numbers -->
             <div id="d-feed" class="d-caller" hidden></div>
+            <!-- History here (#403, addr-history.js): the last calls at the same building, 12 months by type, repeat
+                 false alarms; folded or open as last left (per browser) -->
+            <section id="d-here" class="here" hidden aria-label="History here">
+              <div class="here-head">
+                <button id="d-here-toggle" class="sec-toggle" type="button" aria-expanded="false" aria-controls="d-here-body">
+                  <span class="caret" aria-hidden="true">▸</span><span class="h2">History here</span><span id="d-here-sum" class="dim sum"></span>
+                </button>
+                <button id="d-here-note" type="button" class="sm quiet" title="A note on this address, shown on every call here">+ Note</button>
+              </div>
+              <div id="d-here-body" class="here-body" hidden></div>
+            </section>
             <!-- an Airport event (#105): what the tower passed, one compact row; the subtype's FAA definition behind "?" -->
             <div id="d-airport" class="d-airport" hidden aria-label="Airport: what the tower passed"></div>
             <div id="d-roads" class="d-roads" hidden aria-label="Road closures and projects nearby"></div>
@@ -315,6 +375,7 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
                   <ol id="note-sugg" class="sugg note-sugg" role="listbox" hidden></ol>
                 </div>
                 <button id="note-add" type="submit">Add</button>
+                <button id="note-premise" type="button" class="sm quiet" title="Save what is typed as a note on this address: shown on every call here">Save as address note</button>
                 <div id="note-tags" class="note-tags" hidden></div>
               </form>
             </section>
@@ -628,6 +689,8 @@ Slots go in order. A kind takes the next available unit of that kind (regular ap
 <script src="/static/cadmap.js"></script>
 <script src="/static/newcall-map.js"></script>
 <script src="/static/radio-view.js"></script>
+<script src="/static/addr-history.js"></script>
+<script src="/static/search-view.js"></script>
 <script src="/static/radio-controls.js"></script>
 <script src="/static/hublink.js"></script>
 <script src="/static/health.js"></script>

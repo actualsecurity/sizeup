@@ -38,6 +38,19 @@ GET  /api/cad/airport                     the Airport map layer (#87): data/khpn
                                           field is) and "sources"; {} when the file isn't there
 GET  /api/cad/incident/<id>               one event with its units, chronology and dispatches
 GET  /api/cad/history                     the Incident database: every numbered event, newest first
+GET  /api/cad/incident/<id>/here          History here (#403, sizeup/cad/history.py): {key, total, recent (the last 5 at
+                                          the building), year {n, by_type}, false_alarms {n, calls}, notes (premise)}
+GET  /api/cad/search?where=&from=&to=&type=&unit=&disposition=&text=&page=&size=
+                                          the Search page (#403): numbered events newest first, {rows, total, page, size,
+                                          pending}; from / to: a date or unix seconds; text: words (a prefix each) or a
+                                          "phrase" in the remarks, comments and transcripts. Anyone signed in; page 0 is
+                                          in the person's activity (kind "search": who, the filters, the count)
+GET  /api/cad/search.csv?...              the same as a spreadsheet (at most 20000): admins only (ADMIN_READS); audited
+GET  /api/cad/premise?where=&all=1        premise notes (#403, sizeup/cad/premise.py): {notes, categories, priorities}
+POST /api/cad/premise                     {incident_id | where, text, category?, priority? (1-3), review_at?, expires_at?}
+POST /api/cad/premise/<id>                {text?, category?, priority?, review_at?, expires_at?, action?: expire | restore}
+POST /api/cad/premise/<id>/ack            {incident_id}: seen on that call. All three: dispatchers and admins, in the
+                                          Settings audit log (section "premise")
 GET  /api/cad/admin                       record counts and the next event number
 GET  /api/cad/whoami                      {email, name, callsign, source: "access" | "none", role, enforced}: who
                                           signed in; with Access also {active, may, bootstrap, admins: [names]}
@@ -240,6 +253,8 @@ JSON = "application/json"
 MAX_BODY = 65536
 INCIDENT = re.compile(r"/api/cad/incident/(\d{1,9})(?:/(accept|dismiss|close|reopen|note|recommend|preview|dispatch|upgrade|attach|link|unlink|keep|return|feed-use|auto-undo))?")
 SUGGEST = re.compile(r"/api/cad/incident/(\d{1,9})/units")
+HERE = re.compile(r"/api/cad/incident/(\d{1,9})/here")                          # History here (#403)
+PREMISE = re.compile(r"/api/cad/premise(?:/(\d{1,9})(?:/(ack))?)?")              # premise notes (#403)
 EXPORT = re.compile(r"/api/cad/export/([a-z-]{1,20}\.csv)")
 UNIT = re.compile(r"/api/cad/unit/(\d{1,9})/status")
 UNIT_STATION = re.compile(r"/api/cad/unit/(\d{1,9})/station")
@@ -265,6 +280,7 @@ ADMIN_READS = {
     "/api/cad/health": "station health is for admins (Settings > Health)",   # #203: off the header, on an admin tab
     "/api/cad/perf": "the hub's CPU and memory are for admins (Settings > Health)",          # #425 (sizeup/perf.py)
     "/api/cad/perf/profile": "the hub's CPU profile is for admins (Settings > Health)",
+    "/api/cad/search.csv": "the search export is for admins",                # #403: many calls at once, off the hub
 }
 
 # Who may POST what (enforced only with a verified sign-in, see above): "dispatch" = dispatchers and
@@ -281,6 +297,7 @@ WRITES = (
     (ALARM_ACK, "dispatch"),                                                # an emergency alarm seen (#128)
     (ALARM_CLEAR, "dispatch"),                                              # ... and resolved: its window closed
     (re.compile(r"/api/cad/radio-id"), "dispatch"),                          # who a new FG1 radio is (#163)
+    (PREMISE, "dispatch"),                                                  # premise notes: add, edit, expire, seen (#403)
     (re.compile(r"/api/incident/[^/]{1,80}/close"), "dispatch"),            # the monitor's incident list (server.py)
     (UNIT_STATION, "admin"),                                                # a unit's home station: Settings > Units
     (re.compile(r"/api/cad/settings/(?:channels|stt)"), "admin"),           # Settings > Radios: record / transcribe /
@@ -424,6 +441,21 @@ def _stt(m, b, o, c):
     return f"Changed the AWS monthly limit: {b.get('value') if act == 'set' else 'default'}", ""
 
 
+def _premise(m, b, o, c):
+    """A premise note (#403): its number and category, never its text or address (the Settings audit log has those)."""
+    note = o.get("note") or {}
+    nid = m.group(1) or note.get("id") or ""
+    if m.group(2) == "ack":
+        return f"Acknowledged address note {nid} on {o.get('number') or 'an event'}", o.get("number") or ""
+    if m.group(1) is None:
+        n = _number(c, b.get("incident_id")) if b.get("incident_id") not in (None, "") else ""
+        return f"Added address note {nid} ({note.get('category', '')})" + (f" from {n}" if n else ""), n
+    act = str(b.get("action") or "")
+    if act in ("expire", "restore"):
+        return f"{'Expired' if act == 'expire' else 'Restored'} address note {nid}", ""
+    return f"Edited address note {nid}: {', '.join(k for k in b if k not in ('operator', 'action', '_may')) or 'nothing'}", ""
+
+
 def _prealert_at(o) -> str:
     from sizeup.prealert import _hms
     return _hms(o.get("at")) or "?"
@@ -456,6 +488,7 @@ DOES = (
         + ("ignored" if b.get("ignore") is True else f"named {_clip(b.get('unit') or b.get('label'), 40)}")
         + (f" (its transmissions on {', '.join(o.get('linked') or [])})" if o.get("linked") else ""),
         (o.get("linked") or [""])[0])),
+    (PREMISE, _premise),
     (UNIT_STATION, lambda m, b, o, c: (f"Changed settings: {o.get('name', '')} station {_clip(b.get('station'), 40) or 'unset'}", "")),
     (re.compile(r"/api/cad/settings/channels"), _channels),
     (re.compile(r"/api/cad/settings/stt"), _stt),
@@ -605,6 +638,36 @@ class CadApi:
             return _json(200, {"rev": out["rev"], "same": True})
         return _json(200, out)
 
+    def _search(self, q: dict, who, csv: bool = False) -> tuple:
+        """GET /api/cad/search(.csv): the Search page (#403). Anyone signed in may search what they may already open; the
+        CSV is admins' (ADMIN_READS). The first page of each search with a filter, and every CSV, is in the person's
+        activity (kind "search": the filters and the count); the server log says only that they searched and the count
+        (the filters can hold an address or a name)."""
+        from sizeup.cad.history import csv_rows
+        h = self.cad.addrs
+        f = h.parse_query(q)
+        out = h.search(f, csv=csv)
+        if who is not None and who.email and (csv or (f["page"] == 0 and h.filtered(f))):
+            n = out["total"]
+            self.cad.activity.record(who.email, "search", f"GET /api/cad/search{'.csv' if csv else ''}",
+                                     ("CSV: " if csv else "") + h.summary(f, n),
+                                     logged=f"{'CSV: ' if csv else ''}Searched: {n} result{'s' if n != 1 else ''}")
+        if csv:
+            name = f"search-{datetime.now(TZ).strftime('%Y%m%d-%H%M')}.csv"
+            return 200, csv_rows(out["rows"], self.cad.lists), "text/csv; charset=utf-8", {
+                "Content-Disposition": f'attachment; filename="{name}"', "Cache-Control": "no-store"}
+        return _json(200, out)
+
+    def _may(self, who) -> str:
+        """The viewer's standing for what they may read (premise notes' categories, #403): "admin" | "dispatcher" |
+        "viewer"; without a verified person (all-in-one) nothing is checked: "admin"."""
+        if who is None or not who.email:
+            return "admin"
+        try:
+            return self.cad.settings.standing(who.email)["may"]
+        except CadError:
+            return "viewer"
+
     def read_refused(self, path: str, who) -> tuple[int, bytes, str] | None:
         """A GET in ADMIN_READS from someone signed in who isn't an admin: the 403; else None (nothing is checked
         without a verified person, as with the POSTs)."""
@@ -669,7 +732,7 @@ class CadApi:
             if path == "/api/cad/settings/export":
                 return _json(200, self.cad.settings_export())
             if path == "/api/cad/settings/audit":
-                return _json(200, self.cad.settings_audit_log(parse_qs(query)))
+                return _json(200, self.cad.settings_audit_log(parse_qs(query), self._may(who)))
             if path == "/api/cad/stt":
                 return _json(200, self.cad.settings.stt_page())
             if path == "/api/cad/tones":
@@ -694,6 +757,12 @@ class CadApi:
                 return _json(200, self.cad.rigs())
             if path == "/api/cad/alarms":
                 return _json(200, self.cad.alarms_page())
+            if path in ("/api/cad/search", "/api/cad/search.csv"):
+                return self._search(parse_qs(query), who, csv=path.endswith(".csv"))
+            if path == "/api/cad/premise":
+                return _json(200, self.cad.premise.listing(parse_qs(query), self._may(who)))
+            if m := HERE.fullmatch(path):
+                return _json(200, self.cad.addrs.here(int(m.group(1)), self._may(who)))
             if m := SUGGEST.fullmatch(path):
                 return _json(200, {"units": self.cad.suggest_units(int(m.group(1)), (parse_qs(query).get("q") or [""])[0][:20])})
             if m := INCIDENT.fullmatch(path):
@@ -735,12 +804,15 @@ class CadApi:
             return _json(400, {"error": "the body must be a JSON object"})
         c = self.cad
         signed = who is not None and bool(who.email)
+        body.pop("_may", None)                     # never the page's: what the person may read (premise notes, #403)
         try:
             if signed:                             # signed in: that's the operator, not what the page typed
                 st = c.settings.standing(who.email)
                 if refused := self.permit(path, who, body, st, client):
                     return refused
                 body["operator"] = st["operator"]
+                if PREMISE.fullmatch(path):
+                    body["_may"] = st["may"]
             out = self._write(path, body, signed)
         except LastAdmin as e:
             if signed:
@@ -797,6 +869,10 @@ class CadApi:
             return c.delete_radio(body)
         if path == "/api/cad/radio-id":
             return c.name_radio(body)
+        if m := PREMISE.fullmatch(path):
+            if m.group(1) is None:
+                return c.premise.create(body)
+            return (c.premise.ack if m.group(2) else c.premise.edit)(int(m.group(1)), body)
         if m := DATASOURCE.fullmatch(path):
             return self._ds_refresh(unquote(m.group(1)), body)
         if m := DVR_PIN.fullmatch(path):

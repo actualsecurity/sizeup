@@ -10,6 +10,7 @@ database (user_activity, so Litestream backs it up with everything else):
     action    every write that went through (sizeup/cad/api.py CadApi.post, and the server's own
               POSTs that permit() covers), as a sentence: "Dispatched 26-000014: E60, L31"
     refused   every 403 from role enforcement (and the last-admin guard's 409)
+    search    a Search page query (its first page) or its CSV, with the filters and the count (#403)
 
 and per person when they were last seen and from where (operators.last_seen / last_ip / last_ua),
 written at most once a minute each. Every row is also one line in the server log (CloudWatch).
@@ -24,7 +25,7 @@ from typing import Callable
 
 from sizeup.cad.export import _csv, ts
 
-KINDS = ("signin", "action", "refused")
+KINDS = ("signin", "action", "refused", "search")   # search: a Search page query or its CSV (#403)
 KEEP_S = 90 * 86400            # rows older than this are dropped
 PRUNE_EVERY_S = 86400
 SEEN_EVERY_S = 60              # operators.last_seen: at most this often per person (no write per request)
@@ -52,7 +53,9 @@ class Activity:
     # -- writing ------------------------------------------------------------------------------------------
 
     def record(self, email: str, kind: str, route: str = "", summary: str = "", number: str | None = None,
-               ok: bool = True, ip: str = "", ua: str = "", session: str = "") -> None:
+               ok: bool = True, ip: str = "", ua: str = "", session: str = "", logged: str | None = None) -> None:
+        """logged: what the server log (CloudWatch) says instead of the summary (a search's filters can hold an address
+        or a name: they stay in this table only)."""
         if not email or kind not in KINDS:
             return
         now = self.clock()
@@ -62,7 +65,7 @@ class Activity:
                 "INSERT INTO user_activity (at, email, kind, route, summary, incident_number, ok, ip, ua, session) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (now, email, kind, route, summary, number or None, int(ok), ip, ua, session[:64]))
-        self.log(f"CAD activity: {email}: {summary}{f' [{number}]' if number else ''} ({route}) ip={ip or '-'}"
+        self.log(f"CAD activity: {email}: {summary if logged is None else logged}{f' [{number}]' if number else ''} ({route}) ip={ip or '-'}"
                  + (f" ua={ua[:60]}" if kind == "signin" else ""))
         self._maybe_prune(now)
 
