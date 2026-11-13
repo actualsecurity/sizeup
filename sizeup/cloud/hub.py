@@ -353,7 +353,7 @@ class Hub:
 
     def cad_cloud(self) -> dict:
         """The CAD state's cloud (everyone's state push): the station's connection, for the header pill. No health
-        alerts here (#203): those are on the admins' Settings > Health, from GET /api/cad/health."""
+        alerts here (#203): those are on the admins' Settings > Station > Health, from GET /api/cad/health."""
         h = self.health()
         return {"role": "hub", "state": h["state"], "word": h["word"], "detail": h["detail"],
                 "health_url": "/cad#settings/station/health"}
@@ -378,7 +378,7 @@ class Hub:
         return res
 
     def reset_source(self, source: str, by: str = "") -> dict:
-        """POST /api/sources/reset (an admin, Settings > Health): the station's incident source's reset() (#301), as a
+        """POST /api/sources/reset (an admin, Settings > Station > Health): the station's incident source's reset() (#301), as a
         sources_reset job over the station's authenticated jobs channel. Logged with who asked (their Access
         identity; never a credential). ValueError for a bad source, StationOffline / RuntimeError from the station."""
         from sizeup.cloud.adapters import SOURCE_ID
@@ -656,13 +656,13 @@ class HubApp(App):
         self.audio.may_write = self._may_write_audio
         self.audio.may_delete = self._may_delete_audio
         self.hub = Hub(self, cfg, log)
-        # station health (GitHub #79): the alerts, the admins' Settings > Health (#203), the push to the status topic in effect (Settings, else
+        # station health (GitHub #79): the alerts, the admins' Settings > Station > Health (#203), the push to the status topic in effect (Settings, else
         # [alerts] status_topic, else ntfy_topic: notify.Pushes; never Tapout's): App.pushes' STATUS kind (the same
         # Notifier as the emergency alarms when both kinds share a topic: one queue in order)
         from sizeup.notify import STATUS
         notifier = self.pushes.notifier(STATUS)
         self.health = self.hub.health_ = StationHealth(self.hub, cfg, self.mdb, notifier, log)
-        # The incident sources (#297): paging is a tier only while the station is connected; Settings > Health shows them.
+        # The incident sources (#297): paging is a tier only while the station is connected; Settings > Station > Health shows them.
         self.cad.sources.paging_ok = self.hub.connected
         self.cad.sources.trigger = self._sources_poll_now      # a pre-alert here: the station's adapters poll now
         self.health.sources = self.cad.sources.panel
@@ -678,7 +678,7 @@ class HubApp(App):
         self.health.mutes = lambda: self.cad.settings.section(MUTE_SECTION)
         self.health.errors = self.error_watch
         if not notifier.enabled:
-            log("health: no push for station alerts (no status or alerts topic in effect): Settings > Health and log only")
+            log("health: no push for station alerts (no status or alerts topic in effect): Settings > Station > Health and log only")
         self.live = self.hub.live                      # main() sets on_change to push the display
         self.cad.live = self.live.state
         # the Radio page's source tree (#415): the station's talkgroups and systems, as its state says them
@@ -1081,7 +1081,7 @@ class HubApp(App):
             if now - seen >= PENDING_FLAG_S:
                 self._pending_seen.pop(p.id, None)
                 self._aws_give_up(p, "page", f"no text from the station's speech-to-text in {PENDING_FLAG_S / 60:.0f} min "
-                                             "(it may be behind: Settings > Health); it comes up if it arrives",
+                                             "(it may be behind: Settings > Station > Health); it comes up if it arrives",
                                   model="speech-to-text")
                 n += 1
         return n
