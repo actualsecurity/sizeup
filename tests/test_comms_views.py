@@ -7,6 +7,7 @@ No radios, no network. Every transmission, unit, talkgroup number and address he
 from __future__ import annotations
 
 import json
+import re
 
 import pytest
 
@@ -37,6 +38,7 @@ def c(tmp_path):
     c = cad(tmp_path, clock, airband=("Tower",))
     c.clockref = clock
     c.comms.context_broadcast = True          # as on the hub behind Access: every reader is a signed-in person (#419)
+    c.radiolog.inline = True                  # (the units backfill on the test's thread: no write lands mid-test)
     t = clock.t
     c.record_traffic(tx("fg-1", t - 50, rig="E63", radio_id="4242098"))
     c.record_traffic(dict(tx(f"{MAIN}-1-call_1-t0", t - 40, "Fire/EMS 15", "E60", "E60", MAIN), ours=True, service="fire",
@@ -299,9 +301,9 @@ def test_every_view_walks_an_index(c):
     assert "PRIMARY KEY" in " ".join(str(r[3]) for r in c.store.db.execute(
         "EXPLAIN QUERY PLAN SELECT DISTINCT traffic_id FROM radio_changes WHERE seq > ? AND seq <= ?", (1, 2)))
     gated = " ".join(str(r[3]) for r in c.store.db.execute(
-        "EXPLAIN QUERY PLAN SELECT DISTINCT c.traffic_id FROM radio_changes c WHERE c.seq > ? AND c.seq <= ? AND c.system IN ('') "
-        "AND NOT EXISTS (SELECT 1 FROM radio_changes x WHERE x.traffic_id = c.traffic_id AND x.system IS NULL)", (1, 2)))
-    assert "radio_changes_system" in gated and "radio_changes_id" in gated      # the gate on changes: by system and seq, then by id
+        "EXPLAIN QUERY PLAN SELECT DISTINCT c.traffic_id FROM radio_changes c WHERE c.oseq > ? AND c.oseq <= ? "
+        "AND NOT EXISTS (SELECT 1 FROM radio_changes x WHERE x.traffic_id = c.traffic_id AND x.oseq IS NULL)", (1, 2)))
+    assert "radio_changes_oseq" in gated and "radio_changes_id" in gated        # the gate on changes: by oseq, then by id
     assert "radio_activity_minute" in " ".join(str(r[3]) for r in c.store.db.execute(
         "EXPLAIN QUERY PLAN SELECT source, minute, calls FROM radio_activity WHERE minute > ? AND minute <= ?", (1, 2)))
 
@@ -519,3 +521,116 @@ def test_main_s_batched_prune_notes_each_row_gone_and_a_big_clear_out_as_one_res
     assert c.comms.prune() >= 6
     assert q(c, view="ours", changed=cur)["reload"] is True
     assert c.store.one("SELECT COUNT(*) AS n FROM radio_changes WHERE traffic_id = 'reset'")["n"] >= 1
+
+
+def test_no_answer_to_any_cursor_of_a_reader_not_signed_in_moves_with_another_systems_traffic(c):
+    """#441 review blocker: the change cursor was an oracle (changed=cursor+k said reload exactly past the newest entry
+    of ANY system, so it counted another system's transmissions and, polled, timed them). Now such a reader's cursor,
+    its bounds and the trim are all in oseq: every answer, for every k, is the same before and after."""
+    api = CadApi(c)
+
+    def get(query):
+        code, raw, _ = api.get("/api/cad/comms", query, None)
+        assert code == 200
+        return json.loads(raw)
+
+    def answers():
+        first = get("view=ours")
+        cur = first["cursor"]
+        return [first["cursor"], first["rev"], get("view=all")["cursor"]] + [
+            get(f"view={v}&changed={cur + k}") for v in ("ours", "all", "police") for k in range(-3, 40)]
+    before = answers()
+    t = c.clockref.t
+    for i in range(25):                                         # another system: rows, a transcript, key-ups, a prune
+        c.record_traffic(other(f"pd-n{i}", t + 100 + i, text="made-up words"))
+    c.comms.retext("pd-n0", "other made-up words", "done")
+    c.comms.activity("p25:metro:9003", int(t // 60), 6, ["4100031"])
+    assert answers() == before
+    c.record_traffic(tx("fg-z", t + 200, rig="E63"))            # one of ours: the cursor moves by one entry, no more
+    after = get("view=ours")
+    assert after["cursor"] == before[0] + 1 and after["rev"] != before[1]
+    assert ids(get(f"view=ours&changed={before[0]}")) == ["fg-z"]
+
+
+def test_an_incident_edit_moves_the_rev_of_a_reader_not_signed_in(c):
+    """Rows carry their incidents' number, type, address and status: an edit moves every reader's rev (the station
+    board asks again), and the row comes back with the new address."""
+    inc = _event_with(c, ["E63"], c.clockref)
+    c.record_traffic(tx("fg-a", c.clockref.t + 1, rig="E63", radio_id="4242098"))
+    api = CadApi(c)
+    get = lambda q: json.loads(api.get("/api/cad/comms", q, None)[1])     # noqa: E731
+    pushed = lambda: c.state()["comms_rev"]                               # noqa: E731
+    c.comms.context_broadcast = False                                     # the station's own page
+    first = get("type=radio")
+    assert pushed() == first["rev"]
+    c.update(inc["id"], {"address": "1 Invented Way", "operator": "Lt. Sample"})
+    again = get(f"type=radio&rev={first['rev']}")
+    assert "unchanged" not in again and again["rev"] != first["rev"] and pushed() == again["rev"]
+    row = next(r for r in again["rows"] if r["id"] == "fg-a")
+    assert [e["address"] for e in row["events"]] == ["1 Invented Way"]
+
+
+def test_a_reader_not_signed_in_walks_none_of_another_systems_rows(c):
+    """A view, service, group or tier with no source of ours answers without walking the rows it can't have (how
+    long it took would tell how many there are): no query reads radio_traffic's rows."""
+    api = CadApi(c)
+    c.comms.sources_seen()                                      # (the per-rev source list: warm, as any page has it)
+    seen = []
+    c.store.db.set_trace_callback(seen.append)
+    try:
+        for query in ("view=police", "service=police", "view=transit", "group=Police", "group=Transit", "tier=text",
+                      "tier=record", "system=metro", f"source=p25:metro:{PD}", "service=police&tier=text"):
+            del seen[:]
+            code, raw, _ = api.get("/api/cad/comms", query, None)
+            assert code == 200 and json.loads(raw)["rows"] == [], query
+            walks = [s for s in seen if re.search(r"FROM (json_each\(\?\) j CROSS JOIN )?radio_traffic t\b", s)]
+            assert walks == [], (query, walks)
+    finally:
+        c.store.db.set_trace_callback(None)
+    # signed in: the same asks do read them
+    assert ids(json.loads(api.get("/api/cad/comms", "group=Police", Identity(email="someone@example.org"))[1])) == ["pd-2", "pd-1"]
+
+
+def test_a_cursor_from_before_a_start_is_told_to_reload(c, tmp_path):
+    """The log's seq outlives a restart, so a page held across one would be answered from it, missing what ran at the
+    start (the migrations' rewrites, the alarms' retention) and any entry the run before couldn't write: the floor is
+    the log's newest entry at the start (read only: a start writes nothing)."""
+    cur = q(c, view="ours")["cursor"]
+    with sourcekeys.request_context(None):
+        anon = q(c, view="ours")["cursor"]
+    c.record_traffic(tx("fg-late", c.clockref.t + 1, rig="E63"))        # logged before the stop
+    c.store.db.close()
+    again = cad(tmp_path, c.clockref, airband=("Tower",))
+    again.comms.context_broadcast = True
+    assert q(again, view="ours", changed=cur)["reload"] is True
+    with sourcekeys.request_context(None):
+        assert q(again, view="ours", changed=anon)["reload"] is True
+        fresh_anon = q(again, view="ours")["cursor"]
+    fresh = q(again, view="ours")["cursor"]
+    again.record_traffic(tx("fg-after", c.clockref.t + 5, rig="E63"))
+    out = q(again, view="ours", changed=fresh)
+    assert out["reload"] is False and ids(out) == ["fg-after"]
+    with sourcekeys.request_context(None):
+        out = q(again, view="ours", changed=fresh_anon)
+        assert out["reload"] is False and ids(out) == ["fg-after"]
+
+
+def test_fire_channels_of_ours_are_never_muted(c):
+    """Fire channels can't be muted: Our calls, and any fire source of ours (a county fire talkgroup not marked Main),
+    in All too; the tree says which can't (mutable false)."""
+    t = c.clockref.t
+    c.record_traffic(dict(tx("7001-1-call_7-t0", t - 2, "Fire Ops 9", tg=7001), service="fire", group="Fire"))
+    out = q(c, view="all", mute="p25:westchester:7001,p25:westchester:555,fm:FG1")
+    assert "7001-1-call_7-t0" in ids(out) and "fg-1" in ids(out) and "555-1-call_2-t0" not in ids(out)
+    by = {s["key"]: s for s in c.comms_sources()["sources"]}
+    assert by["p25:westchester:7001"]["mutable"] is False and by["fm:FG1"]["mutable"] is False
+    assert by["p25:westchester:555"]["mutable"] is True and by[f"p25:metro:{PD}"]["mutable"] is True
+
+
+def test_the_state_push_tells_who_is_talking_through_the_same_gate(c):
+    c.live = lambda: [{"system": "p25", "tg": MAIN, "channel": "Fire/EMS 15"},
+                      {"system": "p25", "tg": PD, "p25_system": "metro", "channel": "PD Dispatch", "rig": "Car 7"}]
+    c.comms.context_broadcast = False                          # the station's own page, an all-in-one
+    assert [e["channel"] for e in c.state()["talking"]] == ["Fire/EMS 15"]
+    with sourcekeys.request_context(Identity(email="someone@example.org")):
+        assert len(c.state()["talking"]) == 2

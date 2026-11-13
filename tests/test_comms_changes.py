@@ -52,6 +52,7 @@ def make(tmp_path):
     c = cad(tmp_path, clock, airband=("Tower",))
     c.clockref = clock
     c.comms.context_broadcast = True
+    c.radiolog.inline = True                  # (the units backfill on the test's thread: no write lands mid-test)
     c.said = []
     c.comms.log = c.said.append
     t = clock.t
@@ -131,7 +132,7 @@ WRITERS = {"record", "retext", "set_alt", "rerun_done", "link", "unlink", "link_
 READERS = {"activity", "activity_rows", "audio_per_day", "context_clips", "emergencies", "events_of", "facets", "for_incidents",
            "id_stats", "kept_for_events", "kept_for_tier", "minute_counts", "page", "policies", "query", "source_names",
            "rev_for", "sources_seen", "split", "talkgroups"}
-NOTES = {"touch", "touch_reset", "note_change", "flush_changes"}               # the change notes themselves
+NOTES = {"touch", "touch_reset", "note_change", "flush_changes", "quiet"}               # the change notes themselves
 
 
 def test_every_function_that_writes_the_radio_log_notes_the_change():
@@ -220,7 +221,7 @@ def test_a_broken_change_log_never_costs_a_write_and_nothing_runs_twice(tmp_path
         # the log back (here: made again), and its minute over: written again, and what was missed is a reload
         c.store.db.execute("DROP TRIGGER IF EXISTS no_changes")
         c.store.db.executescript("CREATE TABLE IF NOT EXISTS radio_changes (seq INTEGER PRIMARY KEY AUTOINCREMENT, traffic_id TEXT "
-                                 "NOT NULL, system TEXT, gone INTEGER NOT NULL DEFAULT 0);")
+                                 "NOT NULL, system TEXT, gone INTEGER NOT NULL DEFAULT 0, oseq INTEGER);")
         c.comms._retry_at = 0.0
         c.comms.retext("fg-1", "written again", "done")
         assert not c.comms.changes_broken and since(c, 0)[-1] == "fg-1"

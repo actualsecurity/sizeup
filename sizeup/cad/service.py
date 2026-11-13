@@ -429,7 +429,7 @@ class Cad:
         # comms_rev: what GET /api/cad/comms calls its rev; the Radio view and the board ask again only when it moves (#137)
         return dict(st, units=units, map=self.map_slice(units, st["incidents"], pos, now), time=now, rev=rev,
                     comms_rev=self.comms.rev_for(),
-                    talking=self.live(), paging=self.paging(), cloud=self.cloud(), prealert=self.prealert_state(now),
+                    talking=self._talking(), paging=self.paging(), cloud=self.cloud(), prealert=self.prealert_state(now),
                     airport_alerts=self.airport_alerts_state(now),
                     status_hints=self.status_hints(), alarms=self.alarms_state(now), radio_ids=self.radio_ids(now),
                     sources=self.sources_state(now), trains_rev=self._trains_rev())
@@ -1731,15 +1731,15 @@ class Cad:
 
     def comms_sources(self, q: dict | None = None) -> dict:
         """GET /api/cad/comms/sources?rev=: the Radio page's tree (#415), {rev, now, minutes, live: [keys], sources:
-        [{key, system, system_label, group, name, service, tier, ours, encrypted, department, talkgroup, last, counts,
-        emergency, stuck}]}. ?rev= a tree's rev: {unchanged: true, rev, live} while nothing was logged and the minute is
+        [{key, system, system_label, group, name, service, tier, ours, mutable, encrypted, department, talkgroup, last,
+        counts, emergency, stuck}]}. ?rev= a tree's rev: {unchanged: true, rev, live} while nothing was logged and the minute is
         the same (the page asks every few seconds).
 
         A source: every one in the log or the activity table, and every known talkgroup that is ours, was heard, or is
         another system's with a tier that isn't off. last: when it was last heard (unix). live: the sources transmitting
         now. counts: [[minutes ago, calls], ...] over the last hour, only the minutes with calls (the viewer's unread
         counts and the time bar come from these: no per-viewer state here). emergency: "ours" | "other": an emergency
-        on it nobody has acknowledged (Comms.emergencies). In the tree's order: system, group, name. Nothing of what
+        on it not yet cleared (Comms.emergencies). In the tree's order: system, group, name. Nothing of what
         was said. A reader who may not see another system's traffic (sourcekeys.may_see_context) gets none of its
         sources."""
         context = self.comms._sees_context()
@@ -1784,10 +1784,12 @@ class Cad:
                     continue                             # a talkgroup only listed: never heard, not ours, not chosen
                 group = str(i.get("group") or s.get("group") or ("Airband" if kind == "airband" else "Analog" if not got else ""))
                 em = ems.get(key) or {}
+                svc = str(i.get("service") or s.get("service") or sourcekeys.service(group, kind=kind))
                 out.append({"key": key, "system": system, "system_label": labels.get(system, system), "group": group,
-                            "name": name,
-                            "service": str(i.get("service") or s.get("service") or sourcekeys.service(group, kind=kind)),
+                            "name": name, "service": svc,
                             "tier": tier, "ours": ours, "encrypted": bool(i.get("encrypted")),
+                            # fire channels can't be muted: Our calls, and any fire source of ours (in All too)
+                            "mutable": not (ours or (svc == "fire" and system in sourcekeys.OURS_SYSTEMS)),
                             "department": str(i.get("department") or ""), "talkgroup": got[1] if got else None,
                             "last": last, "counts": counts.get(key) or [], "emergency": em.get("emergency", ""),
                             "stuck": em.get("stuck", "")})
