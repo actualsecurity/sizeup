@@ -288,3 +288,24 @@ def test_60_controls_list_of_our_engines_is_still_named(tmp_path, text, units):
 ])
 def test_a_chief_at_a_street_is_named_only_when_he_takes_command(tmp_path, text, units):
     assert app_with_list(tmp_path).cad.feed.names_ours(text) == units
+
+
+@pytest.mark.parametrize("text, units", [
+    ("2391 Ladder 31 park in front", ["2391", "L31"]), ("2391 Engine 62 run a line", ["2391", "E62"]),
+    ("2391 Rescue 40 point of entry", ["2391", "R40"]), ("2391 copy Engine 60 green light", ["2391", "E60"]),
+    ("2391 Engine 64 walk the perimeter", ["2391", "E64"]), ("23 91 Ladder 31 close", ["2391", "L31"]),
+    ("2391 Example Park", []), ("2391 Example Point", []), ("2391 Example Run", []),
+])
+def test_a_chief_before_a_unit_order_is_never_a_house_number(tmp_path, text, units):
+    assert app_with_list(tmp_path).cad.feed.names_ours(text) == units
+
+
+@pytest.mark.parametrize("text", ["responding to 6462", "to 6462.", "at 6462", "respond to 6462", "1414", "6060",
+                                  "64, 64"])
+def test_an_address_after_to_or_one_unit_twice_is_not_a_list(tmp_path, text):
+    assert app_with_list(tmp_path).cad.feed.names_ours(text, True) == []
+
+
+def test_a_split_number_then_a_unit_names_all_three(tmp_path):
+    f = app_with_list(tmp_path).cad.feed.names_ours
+    assert f("6462, Ladder 31", True) == ["E64", "E62", "L31"] and f("6462 to Rescue 40", True) == ["E64", "E62", "R40"]
