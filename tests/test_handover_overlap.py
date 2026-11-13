@@ -381,10 +381,10 @@ def test_the_gated_app_warms_waits_opens_the_databases_then_listens_at_once(tmp_
     building, go = threading.Event(), threading.Event()
     real_make = app_mod.make_app
 
-    def slow_make(cfg):
+    def slow_make(cfg, fence=None):
         building.set()
         assert go.wait(10)
-        return real_make(cfg)
+        return real_make(cfg, fence)
     monkeypatch.setattr(app_mod, "make_app", slow_make)
     cfg, gate, th, result, servers, made = _gated(tmp_path, monkeypatch)
     state = Path(cfg.cad_db).parent
