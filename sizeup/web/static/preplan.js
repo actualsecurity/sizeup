@@ -37,6 +37,7 @@ window.Preplan = (() => {
   const SRC = "pp-points", EDIT_SRC = "pp-edit";
   const BELOW = ["cm-lines", "cm-trail", "cm-routes", "firehouse"];   // cadmap.js: rigs' lines, routes, trails
   const PAD = 0.3, MOVE_MS = 250;
+  const BOX_MAX = 0.049;                                 // deg a side (the hub: 0.05)
 
   // ---- pure helpers (tests/test_preplan.py runs these in node) ------------------------------------------------------
   // "Knox box · Front door left · Fl 2" (a level that is a number is a floor; "B1", "Roof" as they are)
@@ -56,9 +57,15 @@ window.Preplan = (() => {
     }
     return { type: "FeatureCollection", features: out };
   }
+  // the viewport padded, never more than the hub serves a side (BOX_MAX: preplan.py BBOX_MAX_DEG, a little under):
+  // a very wide screen asks for its middle (the hub would refuse the whole)
   function padBox(b) {
     const dx = (b[2] - b[0]) * PAD, dy = (b[3] - b[1]) * PAD;
-    return [b[0] - dx, b[1] - dy, b[2] + dx, b[3] + dy].map((x) => Math.round(x * 1e5) / 1e5);
+    const out = [b[0] - dx, b[1] - dy, b[2] + dx, b[3] + dy];
+    for (const [lo, hi] of [[0, 2], [1, 3]]) {
+      if (out[hi] - out[lo] > BOX_MAX) { const c = (out[lo] + out[hi]) / 2; out[lo] = c - BOX_MAX / 2; out[hi] = c + BOX_MAX / 2; }
+    }
+    return out.map((x) => Math.round(x * 1e5) / 1e5);
   }
   const inside = (view, box) => !!box && view[0] >= box[0] && view[1] >= box[1] && view[2] <= box[2] && view[3] <= box[3];
 
@@ -128,7 +135,7 @@ window.Preplan = (() => {
       g.beginPath(); g.arc(18, 18, 3, 0, 2 * Math.PI); g.fill();
     },
   };
-  const art = {};                                        // kind -> its canvas (made once)
+  const art = {}, urls = {};                             // kind -> its canvas, its data URL (made once)
   function drawn(kind) {
     if (art[kind]) return art[kind];
     const c = document.createElement("canvas");
@@ -144,7 +151,7 @@ window.Preplan = (() => {
   function iconImg(kind, cls = "pp-ico") {               // the same mark in the page (the list, the kind picker)
     const i = el("img", cls);
     i.alt = "";
-    i.src = drawn(kind).toDataURL();
+    i.src = urls[kind] || (urls[kind] = drawn(kind).toDataURL());
     i.width = i.height = 18;
     return i;
   }
@@ -161,13 +168,16 @@ window.Preplan = (() => {
   }
   const pstate = () => (window.cad && cad.state && cad.state.preplan) || { gen: 0, restricted: [] };
   const mayMore = () => { const w = window.cad && cad.who; return !w || !w.enforced || w.may !== "viewer"; };
+  const STANDING = { viewer: 0, dispatcher: 1, admin: 2 };
+  const standing = () => { const w = window.cad && cad.who; return !w || !w.enforced ? 2 : STANDING[w.may] || 0; };
+  const mayKind = (k) => { const need = (pstate().levels || {})[k]; return !need || standing() >= (STANDING[need] || 0); };
   // the push's copy, or this person's own (a restricted kind, a closed call): asked once per call, place and generation
   function pointsOf(inc) {
     if (!inc) return [];
     const restricted = pstate().restricted || [];
     const need = !Array.isArray(inc.preplan) || (restricted.length && mayMore());
     if (!need) return inc.preplan;
-    const key = JSON.stringify([inc.id, pstate().gen, inc.bldg_key || "", inc.lat, inc.lon]);
+    const key = JSON.stringify([inc.id, pstate().gen, inc.bldg_key || "", inc.lat, inc.lon, inc.status, pstate().levels || {}]);
     if (st.fetched && st.fetched.key === key) return st.fetched.points;
     if (st.fetching !== key) {
       st.fetching = key;
@@ -237,7 +247,10 @@ window.Preplan = (() => {
       }
     }
     sync() {
-      if (!this.ready()) { this.map.once("idle", () => this.sync()); return; }
+      if (!this.ready()) {
+        if (!this.waiting) { this.waiting = true; this.map.once("idle", () => { this.waiting = false; this.sync(); }); }
+        return;
+      }
       try { this.ensure(); } catch (e) { console.error("pre-plan layer", e); return; }
       const fc = features(this.own(), st.layerOn ? this.boxPts : []);
       const sig = JSON.stringify(fc.features.map((f) => [f.properties, f.geometry.coordinates]));
@@ -292,7 +305,7 @@ window.Preplan = (() => {
       if (p.level) lines.push(levelOf(p.level));
       lines.push([p.addr_label || "No building", LINK[p.link] || ""].filter(Boolean).join(" · "));
       if (p.review_due) lines.push(el("span", "chip warn", "Review due"));
-      if (window.canDo && canDo("dispatch") && !st.readonly && this.isCall()) {
+      if (window.canDo && canDo("dispatch") && !st.readonly && this.map.getContainer().closest("#d-map")) {
         const b = el("button", "sm", "Edit");
         b.type = "button";
         b.addEventListener("click", () => { this.control.closeInfo(); edit({ point: p, map: this, host: $("#d-preplan-form"), done: redraw }); });
@@ -399,7 +412,7 @@ window.Preplan = (() => {
   function edit(opts) {
     cancelEdit();
     const p = opts.point || null, pm = opts.map, map = pm.map, host = opts.host;
-    const e = { map: pm, host, kind: p ? p.kind : "knox_box", at: p ? [p.lon, p.lat] : null, link: "auto", marker: null, seq: 0 };
+    const e = { map: pm, host, kind: p ? p.kind : (Object.keys(KINDS).find(mayKind) || "other"), at: p ? [p.lon, p.lat] : null, link: "auto", marker: null, seq: 0 };
     st.edit = e;
     const f = el("form", "pp-form card");
     f.autocomplete = "off";
@@ -416,6 +429,7 @@ window.Preplan = (() => {
       if (e.marker) e.marker.getElement().replaceChildren(iconImg(k, "pp-mark-i"));
     };
     for (const [k, name] of Object.entries(KINDS)) {
+      if (!mayKind(k) && !(p && p.kind === k)) continue;
       const b = el("button", "sm pp-kind");
       b.type = "button";
       b.dataset.kind = k;

@@ -696,13 +696,14 @@ class CadApi:
     def _preplan(self, path: str, query: str, who) -> tuple:
         """GET /api/cad/preplan(?bbox= | incident= | where= | all), /preplan/where (the editor's: dispatchers and admins)
         and /preplan.csv (admins, ADMIN_READS: in the person's activity, kind "search"). The layer's answer has an ETag
-        of the write generation, the reader's standing and the query (304 when unchanged: server.py _send)."""
+        of the write generation, the reader's standing and the query (304 when unchanged: server.py _send); a call's
+        points have none (they follow the call's address, pin and status)."""
         may, q = self._may(who), parse_qs(query)
         pp = self.cad.preplan
         if path == "/api/cad/preplan/where":
             if may == "viewer":
                 return _json(403, {"error": "placing a pre-plan point is for dispatchers and admins"})
-            return _json(200, pp.preview(q))
+            return _json(200, pp.preview(q, may))
         if path == "/api/cad/preplan.csv":
             data, n = pp.csv()
             if who is not None and who.email:
@@ -715,7 +716,8 @@ class CadApi:
             out = pp.get(q, may)
         except PermissionError as e:
             return _json(403, {"error": f"Admins only: {e}"})
-        return 200, json.dumps(out, separators=(",", ":")).encode(), JSON, {"ETag": etag, "Cache-Control": "private, no-cache"}
+        h = {"ETag": etag, "Cache-Control": "private, no-cache"} if etag else {"Cache-Control": "no-store"}   # a call's: never a 304
+        return 200, json.dumps(out, separators=(",", ":")).encode(), JSON, h
 
     def _may(self, who) -> str:
         """The viewer's standing for what they may read (premise notes' categories, #403): "admin" | "dispatcher" |

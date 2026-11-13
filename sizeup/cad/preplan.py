@@ -39,7 +39,9 @@ import json
 import math
 import re
 import threading
+import time
 from datetime import datetime
+from urllib.parse import parse_qs
 
 from sizeup.cad import addrkey
 from sizeup.cad.premise import STANDING, may_see, who
@@ -134,18 +136,24 @@ def edge_m(g: dict, lat: float, lon: float) -> float:
     return best
 
 
-def _inner(g: dict, lat: float, lon: float) -> tuple[float, float]:
-    """A point to look the parcel up with: the placed one when inside, else the outer ring's vertex mean when that is
-    inside, else the placed one."""
-    from sizeup.gis import contains
-    if contains(g, lat, lon):
-        return lat, lon
-    r = (_rings(g) or [[]])[0][:-1]
-    if r:
-        cy, cx = sum(p[1] for p in r) / len(r), sum(p[0] for p in r) / len(r)
-        if contains(g, cy, cx):
-            return cy, cx
-    return lat, lon
+SAMPLES = 9                          # a footprint's parcel: a 9 x 9 grid over it, the parcel most of its inside points are in
+
+
+def samples(g: dict, n: int = SAMPLES) -> list[tuple[float, float]]:
+    """Points inside the footprint, on an n x n grid over its box (cell centres): what it covers, whatever the shape (an L,
+    a U), the same wherever a point on it was tapped. A footprint too thin for the grid: its vertices' mean."""
+    from sizeup.gis import contains, geometry_bbox
+    b = geometry_bbox(g)
+    if b is None:
+        return []
+    w, s_, e, n_ = b
+    out = [(s_ + (n_ - s_) * (j + 0.5) / n, w + (e - w) * (i + 0.5) / n) for j in range(n) for i in range(n)]
+    out = [(y, x) for y, x in out if contains(g, y, x)]
+    if not out:
+        r = (_rings(g) or [[]])[0][:-1]
+        if r:
+            out = [(sum(p[1] for p in r) / len(r), sum(p[0] for p in r) / len(r))]
+    return out
 
 
 def footprint(gis, lat: float, lon: float, near_m: float = NEAR_M) -> dict | None:
@@ -183,7 +191,9 @@ class Preplan:
 
     def __init__(self, cad):
         self.cad, self.store = cad, cad.store
-        self.gen = 0                       # bumped on every write: the caches, the layer's ETag
+        # bumped on every write: the caches, the layer's ETag, the pages' copies. Starts at this process's start in ms, so a
+        # new task (a deploy) never repeats an earlier one's generation (that would take more than a write a ms)
+        self.gen = int(time.time() * 1000)
         self._cache: dict = {}
         self._lock = threading.Lock()
         with self.store.lock:
@@ -267,7 +277,7 @@ class Preplan:
 
     def state(self) -> dict:
         """The state's "preplan": the write generation and the kinds kept to some roles (the page asks for those)."""
-        return {"gen": self.gen, "restricted": self.restricted()}
+        return {"gen": self.gen, "restricted": self.restricted(), "levels": self.visible()}
 
     def in_box(self, box: tuple[float, float, float, float], may: str) -> list[dict]:
         w, s, e, n = box
@@ -277,7 +287,12 @@ class Preplan:
         return [self.shown(r, now) for r in self.order(rows)
                 if w <= r["lon"] <= e and s <= r["lat"] <= n and self.can_see(r, may)]
 
-    def etag(self, query: str, may: str) -> str:
+    def etag(self, query: str, may: str) -> str | None:
+        """The layer's (bbox) and a building's (where) answer: the generation, the reader's standing, the setting and the
+        query. None for anything else: a call's points follow the call (its address, pin, status), so never a 304."""
+        q = parse_qs(query or "")
+        if not (q.get("bbox") or q.get("where")) or q.get("incident"):
+            return None
         vis = json.dumps(self.visible(), sort_keys=True)
         h = hashlib.sha1(f"{query}|{may}|{vis}".encode()).hexdigest()[:12]
         return f'W/"pp-{self.gen}-{h}"'
@@ -334,17 +349,32 @@ class Preplan:
 
     # -- the building a point belongs to ----------------------------------------------------------------------------------
 
-    def _parcel_key(self, fp: dict, lat: float, lon: float) -> addrkey.Key | None:
-        """The footprint's parcel's address, keyed as calls are (only when the gazetteer is sure of it)."""
+    def _parcel_key(self, fp: dict) -> addrkey.Key | None:
+        """The footprint's parcel's address, keyed as calls are (only when the gazetteer is sure of it). The parcel is the
+        one most of the footprint is on (samples(): one answer per footprint, wherever it was tapped; a tie: the first
+        address in order), never the one under the tap."""
+        from sizeup.gis import contains, geometry_bbox
         gis = getattr(self.cad, "gis", None)
         if gis is None or PARCELS not in getattr(gis, "layers", {}):
             return None
-        y, x = _inner(fp["geometry"], lat, lon)
-        p = gis.feature_at(PARCELS, y, x) or {}
-        addr = str(p.get("PARCEL_ADDR") or "").strip()
+        g = fp["geometry"]
+        b = geometry_bbox(g)
+        if b is None:
+            return None
+        lots = gis.features_in(PARCELS, b)
+        votes: dict[tuple, int] = {}
+        for y, x in samples(g):
+            for f in lots:
+                if contains(f.get("geometry") or {}, y, x):
+                    pr = f.get("properties") or {}
+                    t = (str(pr.get("PARCEL_ADDR") or "").strip(), str(pr.get("MUNI_NAME") or "").strip())
+                    votes[t] = votes.get(t, 0) + 1
+                    break
+        if not votes:
+            return None
+        (addr, muni), _ = min(votes.items(), key=lambda kv: (-kv[1], kv[0]))
         if not addr:
             return None
-        muni = str(p.get("MUNI_NAME") or "").strip()
         k = self.cad.premise._key_text(f"{addr}, {muni}" if muni else addr)
         sure = k.how == "gazetteer" or (self.cad.geocoder is None and k.how == "text")
         return k if sure and k.bldg_key else None
@@ -356,7 +386,7 @@ class Preplan:
         give, for the editor's picker."""
         gis = getattr(self.cad, "gis", None)
         fp = footprint(gis, lat, lon)
-        k = self._parcel_key(fp, lat, lon) if fp else None
+        k = self._parcel_key(fp) if fp else None
         ctx = ctx or {}
         ck = ctx.get("bldg_key") or ""
         same = False
@@ -367,15 +397,21 @@ class Preplan:
                 cf = footprint(gis, ctx["lat"], ctx["lon"])
                 same = cf is not None and cf["ref"] == fp["ref"]
         fp_how = fp["how"] if fp else "call"
+        own = k is not None and (not same or not ck)          # the footprint's key: another building's, or the call has none
         choices = {}
-        if k is not None and not same:
+        if own:
             choices["building"] = {"bldg_key": k.bldg_key, "addr_key": k.addr_key, "addr_label": k.label, "link": fp_how}
         if ctx and (ck or ctx.get("lat") is not None):
             choices["call"] = {"bldg_key": ck, "addr_key": ctx.get("addr_key") or None, "addr_label": ctx.get("label") or "",
                                "link": fp_how if same else "call"}
         choices["point"] = {"bldg_key": "", "addr_key": None, "addr_label": "", "link": "point"}
         if link == "auto":
-            pick = choices.get("building") if (fp and k is not None and not same) else choices.get("call") or choices["point"]
+            if own:
+                pick = choices["building"]
+            elif fp and not same and "call" in choices:       # another building's footprint with no address: not the call's
+                pick = choices["point"]
+            else:
+                pick = choices.get("call") or choices["point"]
         elif link in choices:
             pick = choices[link]
         else:
@@ -385,16 +421,18 @@ class Preplan:
                 "choices": {c: v["addr_label"] or ("Map point only" if c == "point" else "") for c, v in choices.items()},
                 "footprints": gis is not None and LAYER in getattr(gis, "layers", {}) and bool(gis.status.get(LAYER, {}).get("at"))}
 
-    def _ctx(self, body: dict) -> dict | None:
-        """The building a new point is placed for: a call's (incident_id), or a typed address's (where)."""
+    def _ctx(self, body: dict, write: bool = True) -> dict | None:
+        """The building a new point is placed for: a call's (incident_id), or a typed address's (where). write=False (a
+        GET: the editor's preview): the call's keys as they are, never keyed here."""
         iid = body.get("incident_id")
         if iid not in (None, ""):
             try:
                 inc = self.store.incident(int(iid))
             except (TypeError, ValueError):
                 raise CadError("incident_id: a number") from None
-            self.cad.addrs.key_one(inc["id"])
-            inc = self.store.incident(inc["id"])
+            if write:
+                self.cad.addrs.key_one(inc["id"])
+                inc = self.store.incident(inc["id"])
             return {"bldg_key": inc["bldg_key"], "addr_key": inc["addr_key"] or None, "lat": inc["lat"], "lon": inc["lon"],
                     "label": (inc["addr_label"] or inc["address"] or inc["geo_label"] or "")[:200]}
         if str(body.get("where") or "").strip():
@@ -403,20 +441,21 @@ class Preplan:
                     "label": w["label"]}
         return None
 
-    def preview(self, q: dict) -> dict:
+    def preview(self, q: dict, may: str = "admin") -> dict:
         """GET /api/cad/preplan/where?lat=&lon=&incident_id= | where= | point=<id>&link=: where a point placed there
-        would belong (dispatchers and admins: the editor)."""
+        would belong (dispatchers and admins: the editor). A point the person may not see, or a deleted one, is no point;
+        nothing is written."""
         def one(k: str) -> str:
             return ((q.get(k) or [""])[0] or "").strip()[:200]
         lat, lon = self._point({"lat": one("lat"), "lon": one("lon")})
         pid = one("point")
         if pid:
             p = self.store.one("SELECT * FROM preplan_points WHERE id = ?", (int(pid) if pid.isdigit() else -1,))
-            if p is None:
+            if p is None or not p["active"] or not self.can_see(p, may):
                 raise CadError(f"no point {pid}")
             ctx = self._own(p)
         else:
-            ctx = self._ctx({"incident_id": one("incident_id") or None, "where": one("where")})
+            ctx = self._ctx({"incident_id": one("incident_id") or None, "where": one("where")}, write=False)
         return self.associate(lat, lon, ctx, one("link") or "auto")
 
     @staticmethod
@@ -504,11 +543,24 @@ class Preplan:
             except ValueError:
                 return None
             return sorted(d) if isinstance(d, dict) else None
+        def row_kinds(r) -> list[str]:
+            found = []
+            for v in (r.get("old"), r.get("new")):
+                try:
+                    d = json.loads(v) if v else None
+                except ValueError:
+                    d = None
+                if isinstance(d, dict) and isinstance(d.get("kind"), str):
+                    found.append(d["kind"])
+            return found
         vis = self.visible()
         out = []
         for r in rows:
             m = re.match(r"(\d+)", r.get("key") or "") if r.get("section") == SECTION else None
             kind = kinds.get(int(m.group(1))) if m else None
+            hidden = [k for k in row_kinds(r) if not may_see(k, may, vis)] if m else []
+            if hidden and kind is not None and may_see(kind, may, vis):
+                kind = hidden[0]                  # a row from when it was a kind they may not see: that kind's rule
             if m and (kind is None or not may_see(kind, may, vis)):
                 def shape(v, kind=kind):
                     n = names(v)
@@ -525,6 +577,9 @@ class Preplan:
         """POST /api/cad/preplan {kind, lat, lon, label?, note?, level?, priority?, review_by?, incident_id | where?,
         link?: auto | building | call | point}."""
         f = self._fields(body, partial=False)
+        may = str(body.get("_may") or "admin")
+        if not may_see(f["kind"], may, self.visible()):
+            raise CadError(f"kind: one of {', '.join(k for k in KINDS if may_see(k, may, self.visible()))}")
         lat, lon = self._point(body)
         a = self.associate(lat, lon, self._ctx(body), str(body.get("link") or "auto"))
         op = str(body.get("operator") or "")[:320]

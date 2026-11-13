@@ -38,15 +38,20 @@ def square(lat, lon, half_lat=0.00003, half_lon=0.00004):
                                                 [lon - half_lon, lat - half_lat]]]}
 
 
-def fake_gis(numbers=(100, 102), parcels=True):
+def lot(n, geometry):
+    return {"type": "Feature", "id": 9000 + n, "properties": {"PARCEL_ADDR": f"{n} EXAMPLE AVE", "MUNI_NAME": "Port Chester"},
+            "geometry": geometry}
+
+
+def fake_gis(numbers=(100, 102), parcels=True, more_buildings=(), more_lots=()):
     """A real Gis with the buildings and parcels layers, holding a footprint (about 7 m x 7 m) and a parcel (the whole
-    10 m lot) per house number on Example Ave."""
+    10 m lot) per house number on Example Ave (parcels: True, False, or the numbers that have one); more_*: as given."""
     g = Gis(layers=tuple(l for l in DEFAULT_LAYERS if l.key in ("buildings", "parcels")), load=False)
     g.cache_loaded = True
     blds = [{"type": "Feature", "id": 7000 + n, "properties": {"ACTUAL_HEIGHT": 30}, "geometry": square(lat_of(n), LON)}
-            for n in numbers]
-    lots = [{"type": "Feature", "id": 9000 + n, "properties": {"PARCEL_ADDR": f"{n} EXAMPLE AVE", "MUNI_NAME": "Port Chester"},
-             "geometry": square(lat_of(n), LON, DLAT / 2 - 0.000001, 0.0002)} for n in numbers] if parcels else []
+            for n in numbers] + list(more_buildings)
+    with_lot = numbers if parcels is True else (parcels or ())
+    lots = [lot(n, square(lat_of(n), LON, DLAT / 2 - 0.000001, 0.0002)) for n in with_lot] + list(more_lots)
     for key, feats in (("buildings", blds), ("parcels", lots)):
         g.data[key] = feats
         g._boxes[key] = [geometry_bbox(f["geometry"]) for f in feats]
@@ -459,3 +464,146 @@ def test_the_script_wires_the_layer_the_list_and_the_editor():
         assert f"  {k}: " in src, k                                          # a drawing for every kind
     for line in src.splitlines():                                          # never a point in the console
         assert not re.search(r"console\.\w+\([^)]*\b(lat|lon|note|label)\b", line), line
+
+
+# -- the review of #458 (each a regression test) -----------------------------------------------------------------------
+
+def test_a_calls_points_have_no_etag_and_follow_a_rekeyed_call(api):
+    c = api.cad
+    c.preplan.create({"kind": "knox_box", "lat": lat_of(100), "lon": LON, "label": "A"})
+    c.preplan.create({"kind": "fdc", "lat": lat_of(102), "lon": LON, "label": "B"})
+    c.state()                                                              # the call keyed (to 100)
+    code, out, h = get(api, "/api/cad/preplan", f"incident={api.iid}", JULIAN)
+    assert [p["label"] for p in out["points"]] == ["A"]
+    assert "ETag" not in h and h["Cache-Control"] == "no-store"            # never a 304 for a call
+    c.update(api.iid, {"address": "102 Example Ave", "lat": lat_of(102), "lon": LON})
+    c.state()                                                              # keyed again
+    assert [p["label"] for p in get(api, "/api/cad/preplan", f"incident={api.iid}", JULIAN)[1]["points"]] == ["B"]
+    assert "ETag" in get(api, "/api/cad/preplan", "where=100+Example+Ave", JULIAN)[2]
+
+
+def test_the_preview_of_a_point_they_may_not_see_or_a_deleted_one_is_no_point(api, monkeypatch):
+    c = api.cad
+    knox = c.preplan.create({"kind": "knox_box", "lat": lat_of(100), "lon": LON})["point"]
+    gone = c.preplan.create({"kind": "fdc", "lat": lat_of(100), "lon": LON})["point"]
+    c.preplan.edit(gone["id"], {"action": "delete"})
+    monkeypatch.setattr(pp, "VISIBLE_TO", {"knox_box": "admin"})
+    q = f"lat={lat_of(102)}&lon={LON}&point="
+    for pid in (knox["id"], gone["id"], 999):
+        code, out, _ = get(api, "/api/cad/preplan/where", q + str(pid), JULIAN)
+        assert (code, out) == (400, {"error": f"no point {pid}"}), pid       # the same answer as a point that never was
+    assert get(api, "/api/cad/preplan/where", q + str(knox["id"]), COREY)[0] == 200
+
+
+def test_a_neighbours_footprint_with_no_address_is_never_the_calls(cad):
+    cad.gis = fake_gis(parcels=(100,))                                     # 102's parcel has no address here
+    iid = at(cad, 100)
+    a = cad.preplan.associate(lat_of(102), LON, cad.preplan._ctx({"incident_id": iid}))
+    assert (a["bldg_key"], a["link"], a["building_ref"]) == ("", "point", "buildings/7102")
+    assert set(a["choices"]) == {"call", "point"}                          # the call's building: one pick away
+    assert cad.preplan.associate(lat_of(102), LON, cad.preplan._ctx({"incident_id": iid}), "call")["bldg_key"] == \
+        "100|example ave|port chester"
+
+
+def test_a_footprints_parcel_is_the_one_most_of_it_is_on_wherever_it_is_tapped(cad):
+    y0, x0 = 41.05, -73.64
+    fp = {"type": "Feature", "id": 7200, "properties": {}, "geometry": {"type": "Polygon", "coordinates": [[
+        [x0, y0], [x0 + 0.0001, y0], [x0 + 0.0001, y0 + 0.0001], [x0, y0 + 0.0001], [x0, y0]]]}}
+    south = lot(200, {"type": "Polygon", "coordinates": [[[x0 - 0.001, y0 - 0.001], [x0 + 0.001, y0 - 0.001],
+                                                          [x0 + 0.001, y0 + 0.00007], [x0 - 0.001, y0 + 0.00007], [x0 - 0.001, y0 - 0.001]]]})
+    north = lot(202, {"type": "Polygon", "coordinates": [[[x0 - 0.001, y0 + 0.00007], [x0 + 0.001, y0 + 0.00007],
+                                                          [x0 + 0.001, y0 + 0.001], [x0 - 0.001, y0 + 0.001], [x0 - 0.001, y0 + 0.00007]]]})
+    # an L whose vertices' mean is outside it, on its own lot
+    u, ly, lx = 0.00002, 41.06, -73.63
+    L = {"type": "Feature", "id": 7300, "properties": {}, "geometry": {"type": "Polygon", "coordinates": [[
+        [lx, ly], [lx + 10 * u, ly], [lx + 10 * u, ly + u], [lx + u, ly + u], [lx + u, ly + 10 * u], [lx, ly + 10 * u], [lx, ly]]]}}
+    l_lot = lot(300, {"type": "Polygon", "coordinates": [[[lx, ly], [lx + 10 * u, ly], [lx + 10 * u, ly + 10 * u], [lx, ly + 10 * u], [lx, ly]]]})
+    cad.gis = fake_gis(more_buildings=(fp, L), more_lots=(south, north, l_lot))
+    for y in (y0 + 0.00001, y0 + 0.00009):                                # its south end, its north end (the other lot)
+        assert cad.preplan.associate(y, x0 + 0.00005, None)["bldg_key"] == "200|example ave|port chester"
+    a = cad.preplan.associate(ly + 9.5 * u, lx - 0.00005, None)            # 4 m off the end of an arm, outside the lot
+    assert (a["bldg_key"], a["link"], a["building_ref"]) == ("300|example ave|port chester", "nearest", "buildings/7300")
+
+
+def test_a_call_with_no_key_takes_its_footprints_sure_key(cad):
+    iid = cad.store.create_incident(type="STRU", address="Example Ave / Sample St", lat=lat_of(100), lon=LON)
+    ctx = cad.preplan._ctx({"incident_id": iid})
+    assert ctx["bldg_key"] == ""
+    p = cad.preplan.create({"incident_id": iid, "kind": "fdc", "lat": lat_of(100) + 0.00001, "lon": LON})["point"]
+    assert (p["bldg_key"], p["link"]) == ("100|example ave|port chester", "inside")
+
+
+def test_the_generation_never_repeats_across_a_restart(tmp_path):
+    import time
+    a = make_cad(tmp_path, geocoder=fake_geocode)
+    for _ in range(3):
+        a.preplan.create({"kind": "fdc", "lat": lat_of(100), "lon": LON})
+    before = a.preplan.gen
+    box = f"bbox={LON - 0.001},41.0,{LON + 0.001},41.01"
+    tag = a.preplan.etag(box, "viewer")
+    a.store.db.close()
+    time.sleep(0.01)
+    b = make_cad(tmp_path, geocoder=fake_geocode)
+    assert b.preplan.gen > before                                          # a new task: never an old tag again
+    assert b.preplan.etag(box, "viewer") != tag
+
+
+def test_older_audit_rows_of_a_since_restricted_kind_are_redacted(api, monkeypatch):
+    c = api.cad
+    p = c.preplan.create({"kind": "knox_box", "lat": lat_of(100), "lon": LON, "note": "Box behind sign"})["point"]
+    c.preplan.edit(p["id"], {"kind": "fdc", "note": "Side A"})            # now an FDC: the first row still says Knox box
+    monkeypatch.setattr(pp, "VISIBLE_TO", {"knox_box": "admin"})
+    rows = [r for r in get(api, "/api/cad/settings/audit", "section=preplan", JULIAN)[1]["audit"] if r["section"] == "preplan"]
+    assert len(rows) == 2 and not any("sign" in (r["old"] or "") + (r["new"] or "") for r in rows)
+    assert {json.loads(r["new"])["kind"] for r in rows} == {"knox_box"}
+    assert any("sign" in (r["new"] or "") for r in get(api, "/api/cad/settings/audit", "section=preplan", COREY)[1]["audit"])
+
+
+def test_a_kind_they_may_not_see_cannot_be_created(api, monkeypatch):
+    monkeypatch.setattr(pp, "VISIBLE_TO", {"knox_box": "admin"})
+    body = {"incident_id": api.iid, "kind": "knox_box", "lat": lat_of(100), "lon": LON}
+    code, out = call(api, "/api/cad/preplan", body, JULIAN)
+    assert code == 400 and "knox_box" not in out["error"] and "fdc" in out["error"]
+    assert call(api, "/api/cad/preplan", body, COREY)[0] == 200
+    api.cad._state = None
+    assert api.cad.state()["preplan"]["levels"] == {"knox_box": "admin"}   # the page leaves it out of the picker
+    src = (STATIC / "preplan.js").read_text()
+    assert "if (!mayKind(k) && !(p && p.kind === k)) continue;" in src
+    assert 'kind: p ? p.kind : (Object.keys(KINDS).find(mayKind) || "other")' in src
+
+
+def test_the_editors_preview_writes_nothing(api):
+    c = api.cad
+    iid = c.store.create_incident(type="STRU", address="102 Example Ave", lat=lat_of(102), lon=LON)
+    assert c.store.one("SELECT id FROM addr_queue WHERE id = ?", (iid,))   # not keyed yet
+    rev = c.store.rev
+    code, out, _ = get(api, "/api/cad/preplan/where", f"lat={lat_of(102)}&lon={LON}&incident_id={iid}", JULIAN)
+    assert code == 200 and out["bldg_key"] == "102|example ave|port chester"
+    assert c.store.rev == rev and c.store.one("SELECT id FROM addr_queue WHERE id = ?", (iid,))
+
+
+def test_edit_only_from_the_calls_own_map_and_one_idle_wait():
+    src = (STATIC / "preplan.js").read_text()
+    assert '!st.readonly && this.map.getContainer().closest("#d-map")' in src         # never under the large map's overlay
+    assert 'if (!this.waiting) { this.waiting = true; this.map.once("idle"' in src
+    assert "urls[kind] || (urls[kind] = drawn(kind).toDataURL())" in src
+    assert "inc.status, pstate().levels || {}]" in src
+
+
+PAD_HARNESS = r"""
+global.window = global;
+require(process.argv[2]);
+console.log(JSON.stringify(window.Preplan.padBox([-73.70, 41.0, -73.64, 41.01])));   // a 0.06-degree-wide screen at zoom 16
+"""
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_very_wide_screen_asks_for_no_more_than_the_hub_serves(tmp_path):
+    h = tmp_path / "h.js"
+    h.write_text(PAD_HARNESS)
+    w, s, e, n = json.loads(subprocess.run([NODE, str(h), str(STATIC / "preplan.js")], capture_output=True, text=True,
+                                           check=True, timeout=30).stdout)
+    assert e - w <= pp.BBOX_MAX_DEG and n - s <= pp.BBOX_MAX_DEG
+    assert abs((w + e) / 2 - -73.67) < 1e-4                                  # its middle
+    from sizeup.gis import parse_bbox
+    parse_bbox(f"{w},{s},{e},{n}", pp.BBOX_MAX_DEG)                          # the hub takes it
