@@ -764,8 +764,8 @@ class Cad:
 
     @staticmethod
     def _place(f: dict, old: dict | None = None) -> None:
-        """A named place's location (#204): the address is shown "<street address> @ <place>" ("575 Boston Post Rd @
-        Whole Foods Market"; "@ Whole Foods Market" when the data has no street address), and the place and its street
+        """A named place's location (#204): the address is shown "<street address> @ <place>" ("40 Example Rd @
+        Sample Market"; "@ Sample Market" when the data has no street address), and the place and its street
         address are kept on their own (place, place_address). place given: the address made from it (place_address,
         else what the address says before the "@", else the address typed). An edit of the address alone keeps the place
         while the address still ends with "@ <place>" (the street address typed in front of it); else the place goes."""
@@ -2020,11 +2020,12 @@ class Cad:
 
     def _page_address(self, raw: str, geo: dict, towns: tuple[str, ...]) -> str:
         """A page's location as the incident stores it (sources.normal_location): the town it names, else the map's
-        reading's when it is sure of one, else the one town among the page's tones' towns whose streets have it. Never
-        a guess beyond that: an unconfirmed location (#176) gets no town it doesn't name (lists.event_town reads it)."""
-        from sizeup.cad.sources import normal_location
+        reading's when it is sure of one. An unconfirmed location (#176) gets no town it doesn't name: never a street
+        list's guess (and lists.event_town reads only the heard words, address_raw)."""
+        from sizeup.cad.sources import checked_location, normal_location
         self.sources._towns()
-        return normal_location(raw, geo_label=str(geo.get("label") or ""), within=towns)
+        return checked_location(raw, normal_location(raw, geo_label=str(geo.get("label") or ""), within=towns,
+                                                     guess=bool(geo.get("label"))))
 
     @staticmethod
     def _page_towns(inc) -> tuple[str, ...]:

@@ -36,7 +36,7 @@ def gaz(tmp_path_factory):
     db.execute("INSERT INTO meta VALUES ('sources', '[]')")
     db.executemany("INSERT INTO streets VALUES (?,?,?)", d["streets"])
     db.executemany("INSERT INTO intersections VALUES (?,?,?,?,?)", d["intersections"])
-    db.execute("INSERT INTO landmarks VALUES (1, 'Whole Foods Market', 'shop=supermarket', '575 Boston Post Road', "
+    db.execute("INSERT INTO landmarks VALUES (1, 'Whole Foods Market', 'shop=supermarket', '40 Example Road', "
                "'Port Chester', 40.99242, -73.675505, 'osm', 'whole foods market|whole foods')")
     db.commit()
     db.close()
@@ -79,7 +79,7 @@ def test_the_directional_typed_first():
 
 @pytest.mark.parametrize("text", [
     "", "135 S Regent St", "King St", "King St &", "& King St", "@ Whole Foods Market",
-    "575 Boston Post Rd @ Whole Foods Market",                     # a named place's address (#204)
+    "40 Example Rd @ Whole Foods Market",                     # a named place's address (#204)
     "135 S Regent St / W William St",                              # an address with its cross street
     "5 @ Lyon Pa",                                                 # a house number typed in front of a place
     "King St / Westchester Ave / Willett Ave",                     # three streets: not one corner

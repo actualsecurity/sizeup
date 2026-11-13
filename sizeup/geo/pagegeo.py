@@ -947,9 +947,9 @@ _HOUSE = re.compile(r"^\s*(\d+[A-Za-z]?)\s+(.+?)\s*$")
 
 
 def place_address(gaz: Gazetteer, raw: str, muni: str, lat: float, lon: float) -> dict | None:
-    """A named place's street address as the places data gives it ("575 Boston Post Road"), checked against the
+    """A named place's street address as the places data gives it ("40 Example Road"), checked against the
     address points: the same number on a street of that name in its town, within 400 m of the place ->
-    {address: "575 Boston Post Rd" (the gazetteer's spelling), street, lat, lon} (the address point); else None."""
+    {address: "40 Example Rd" (the gazetteer's spelling), street, lat, lon} (the address point); else None."""
     m = _HOUSE.match(raw or "")
     if not m:
         return None

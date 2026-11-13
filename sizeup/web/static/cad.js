@@ -2976,7 +2976,7 @@ async function setUnitStatus(uid, status, note = "", call) {   // call: the inci
 // ---- location box with gazetteer suggestions -------------------------------------------------
 // #204: the keys of a picker: ↑ / ↓ move the highlight, Tab takes the highlighted suggestion and goes on to the next
 // field, Esc closes the list and stays, Enter does what it always did (the form's submit). A named place is shown with
-// its street address ("Whole Foods Market · 575 Boston Post Rd") and taken as "<street address> @ <place>" ("@ <place>"
+// its street address ("Sample Market · 40 Example Rd") and taken as "<street address> @ <place>" ("@ <place>"
 // when the data has no address: type it in front of the @); its cross streets fill the form's Cross streets (unless
 // edited by hand). opts: {cross: the cross street input, map: the new call's map (newcall-map.js) follows}.
 
@@ -3021,7 +3021,7 @@ function addressBox(input, geoNote, list, opts = {}) {
       li.setAttribute("role", "option");
       li.setAttribute("aria-selected", String(i === box.idx));
       const meet = m.kind === "intersection" && m.name && m.exact != null;   // two streets typed (#213): where they meet
-      if (m.place) {                    // "Whole Foods Market · 575 Boston Post Rd" (the address from the data, or none)
+      if (m.place) {                    // "Sample Market · 40 Example Rd" (the address from the data, or none)
         li.append(el("b", "", m.place));
         li.append(el("span", m.street_address ? "sg-addr" : "sg-addr dim", m.street_address ? `· ${m.street_address}` : "· no street address"));
       } else li.append(el("b", "", meet ? m.name : m.label));         // "N Main St & Westchester Ave" · its town

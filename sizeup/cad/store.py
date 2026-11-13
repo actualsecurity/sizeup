@@ -95,9 +95,9 @@ CREATE TABLE incidents (
   received_via TEXT NOT NULL DEFAULT '',   -- PHONE | WALK-IN | RADIO | 60 CONTROL | ... (cad_lists.json)
   until_at REAL,                        -- a closure / hydrant out of service: until when (optional)
   priority INTEGER,
-  address TEXT NOT NULL DEFAULT '',     -- LOCATION, as shown: "575 Boston Post Rd @ Whole Foods Market" for a named place (#204)
-  place TEXT NOT NULL DEFAULT '',       -- the named place picked ("Whole Foods Market"), '' for a plain address
-  place_address TEXT NOT NULL DEFAULT '',   -- that place's street address ("575 Boston Post Rd"), '' when the data has none
+  address TEXT NOT NULL DEFAULT '',     -- LOCATION, as shown: "40 Example Rd @ Sample Market" for a named place (#204)
+  place TEXT NOT NULL DEFAULT '',       -- the named place picked ("Sample Market"), '' for a plain address
+  place_address TEXT NOT NULL DEFAULT '',   -- that place's street address ("40 Example Rd"), '' when the data has none
   cross_street TEXT NOT NULL DEFAULT '',
   lat REAL, lon REAL, geo_label TEXT NOT NULL DEFAULT '',
   geo_alts TEXT NOT NULL DEFAULT '',    -- a page's location not confirmed (#176): JSON [{label, lat, lon, town, confidence, why}] to pick from

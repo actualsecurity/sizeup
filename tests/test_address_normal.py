@@ -155,7 +155,7 @@ def test_a_feed_moving_the_incident_writes_both_and_notes_the_normal_form(tmp_pa
 def test_a_page_incident_keeps_the_heard_words_for_matching(tmp_path):
     rig = Rig(tmp_path)
     inc = rig.page()
-    assert inc["address"] == "12 Example Ave, Rye Brook" and inc["address_raw"] == "12 Example Avenue"
+    assert inc["address"] == "12 Example Ave" and inc["address_raw"] == "12 Example Avenue"   # unconfirmed: no town guessed
     rig.feed.put("A1", type="ALARM/COMM", location="12 EXAMPLE AVE", units=("E60", "L31"), times={"dispatched": T0})
     rig.poll()
     assert len(rig.incidents()) == 1                                # the feed joins it, as before
@@ -229,7 +229,7 @@ def test_the_backfill_normalises_old_rows_once_and_keeps_what_matching_read(tmp_
     got = {r["id"]: r for r in rig.incidents()}
     assert got[a]["address"] == f"40 Example Ave, {t3}"
     assert got[b]["address"] == "Exampleton Rd & Sample Ave, Othertown"          # closed too
-    assert got[c]["address"] == "12 Sample Ln, Rye Brook"                         # dismissed too
+    assert got[c]["address"] == "12 Sample Ln"                                    # dismissed too (unplaced: no guess)
     for i in (a, b, c):
         assert got[i]["address_raw"] == before[i]                                 # matching reads what it read
         assert match_address(got[i]) == before[i]
@@ -309,3 +309,136 @@ def test_the_same_call_under_a_second_event_id_is_never_silent(tmp_path, monkeyp
     rig.poll()
     a, b = [i["id"] for i in rig.incidents()]
     assert possibly(rig, b, a)
+
+
+# -- review of #475 ---------------------------------------------------------------------------------------------------
+
+
+def joint_rig(tmp_path):
+    """A rig whose lists make Rye Brook a joint-response town (their units first on the run card)."""
+    rig = Rig(tmp_path)
+    assert "Rye Brook" in rig.cad.lists.joint_response
+    return rig
+
+
+def test_a_jurisdiction_only_town_is_shown_but_never_makes_a_joint_call(tmp_path):
+    """The dispatch group's jurisdiction fills the shown town; it never says where the call is (as on main)."""
+    rig = joint_rig(tmp_path)
+    rig.feed.put("A1", type="ALARM/COMM", location="12 OTHER ST", units=("E60",), times={"dispatched": T0},
+                 extra={"jurisdiction": "Rye Brook"})
+    rig.poll()
+    [inc] = rig.cad.state()["incidents"]
+    assert inc["address"] == "12 Other St, Rye Brook"
+    assert inc["town"] == "" and inc["joint_call"] == ""
+
+
+def test_a_named_town_still_makes_the_joint_call(tmp_path):
+    rig = joint_rig(tmp_path)
+    rig.feed.put("A1", type="ALARM/COMM", location="12 OTHER ST RYE_BROOK", units=("E60",), times={"dispatched": T0})
+    rig.poll()
+    [inc] = rig.cad.state()["incidents"]
+    assert inc["joint_call"] == "Rye Brook"
+
+
+def test_an_unconfirmed_page_gets_no_street_list_town_and_no_joint_call(tmp_path):
+    rig = joint_rig(tmp_path)
+    page = ("Port Chester Fire Department, Engine 60, respond to an activated fire alarm. 12 Sample Lane. Time out 1432.")
+    p = rig.page("p1", page)
+    assert p["address"] == "12 Sample Ln" and p["address_raw"] == "12 Sample Lane"   # Sample Ln: a Rye Brook street
+    [inc] = rig.cad.state()["incidents"]
+    assert inc["town"] == "" and inc["joint_call"] == ""
+
+
+@pytest.mark.parametrize("raw,want", [
+    ("12 EXAMPLE AVE REAR", "12 Example Ave Rear, Rye Brook"),     # the town: its street list
+    ("12 EXAMPLE AVE REAR OTHERTOWN", "12 Example Ave Rear Othertown, Rye Brook"),
+    ("12 EXAMPLE AVE BASEMENT", "12 Example Ave Basement, Rye Brook"),
+    ("SAMPLE PKWY NB", "Sample Pkwy NB"),
+    ("12 SAMPLE RD OTHERTOWN CT", "12 Sample Rd, Othertown"),       # the state code dropped, the town kept
+    ("12 OTHER RD CT", "12 Other Rd Ct"),
+    ("12 ST SAMPLES", "12 St Samples"),                             # a saint's street: no town
+])
+def test_words_after_the_suffix_are_a_town_only_when_one_plain_word(raw, want):
+    assert normal_location(raw, typed=True) == want
+
+
+def test_a_unit_word_after_the_street_stays_a_unit_for_the_address_history():
+    from sizeup.cad import addrkey
+    p = addrkey.parse(normal_location("12 EXAMPLE AVE REAR", typed=True), {})
+    assert p.unit == "rear" and p.number == "12"
+
+
+def test_a_town_hint_is_never_stripped_down_to_a_nameless_street():
+    assert normal_location("12 OTHERTOWN", town="Othertown", typed=True) == "12 Othertown, Othertown"
+    assert normal_location("12 SAMPLE AVE OTHERTOWN", town="Othertown", typed=True) == "12 Sample Ave, Othertown"
+
+
+def test_a_reading_that_is_not_the_same_place_is_never_stored(tmp_path, monkeypatch):
+    """The ingest guard: a normal form that isn't same_place as the feed's text falls back to shown_location."""
+    monkeypatch.setattr(src, "normal_location", lambda *a, **k: "99 Elsewhere Rd")
+    rig = Rig(tmp_path)
+    rig.feed.put("A1", type="ALARM/COMM", location="12 EXAMPLE AVE", units=("E60",), times={"dispatched": T0})
+    rig.poll()
+    assert rig.incidents()[0]["address"] == shown_location("12 EXAMPLE AVE") == "12 Example Ave"
+
+
+def test_the_backfill_runs_on_the_sources_thread_and_never_blocks_start(tmp_path, monkeypatch):
+    import threading
+    rig = Rig(tmp_path)
+    ran = threading.Event()
+    where: list[str] = []
+    monkeypatch.setattr(rig.cad.sources, "backfill_addresses",
+                        lambda pause=0.0: (where.append(threading.current_thread().name), ran.wait(5), 0)[-1])
+    rig.cad.sources.start()                                        # returns at once, the backfill still waiting
+    ran.set()
+    rig.cad.sources.stop()
+    for _ in range(100):
+        if where:
+            break
+        threading.Event().wait(0.01)
+    assert where == ["incident-sources"]
+
+
+def test_the_backfill_does_open_incidents_first_and_writes_only_changes(tmp_path):
+    rig = Rig(tmp_path)
+    closed = old_row(rig, "12 EXAMPLE AVE", ref="E1", feed_text="12 EXAMPLE AVE", status="closed")
+    opened = old_row(rig, "14 EXAMPLE AVE", ref="E2", feed_text="14 EXAMPLE AVE")
+    same = old_row(rig, "16 Example Ave, Rye Brook", ref="E3", feed_text="16 EXAMPLE AVE RYE_BROOK")
+    order: list[int] = []
+    one = rig.cad.sources._backfill_one
+    rig.cad.sources._backfill_one = lambda inc: (order.append(inc["id"]), one(inc))[1]
+    rig.cad.store.db.execute("DELETE FROM addr_queue")
+    assert rig.cad.sources.backfill_addresses() == 2
+    assert order[-1] == closed and set(order) == {opened, closed, same}      # the open ones first
+    queued = {r[0] for r in rig.cad.store.db.execute("SELECT id FROM addr_queue")}
+    assert same not in queued and {opened, closed} <= queued        # unchanged: no address-history churn
+    assert rig.cad.store.incident(same)["address_raw"] == "16 Example Ave, Rye Brook"   # done all the same
+
+
+def test_one_bad_row_never_stops_the_backfill_nor_comes_back(tmp_path):
+    logs: list[str] = []
+    rig = Rig(tmp_path)
+    rig.cad.sources.log = logs.append
+    bad = old_row(rig, "12 EXAMPLE AVE", ref="E1", feed_text="12 EXAMPLE AVE")
+    good = old_row(rig, "14 EXAMPLE AVE", ref="E2", feed_text="14 EXAMPLE AVE")
+    one = rig.cad.sources._backfill_one
+
+    def flaky(inc):
+        if inc["id"] == bad:
+            raise ValueError("a row the code can't read")
+        return one(inc)
+    rig.cad.sources._backfill_one = flaky
+    assert rig.cad.sources.backfill_addresses() == 1
+    assert rig.cad.store.incident(good)["address"] == "14 Example Ave, Rye Brook"
+    b = rig.cad.store.incident(bad)
+    assert (b["address"], b["address_raw"]) == ("12 EXAMPLE AVE", "12 EXAMPLE AVE")   # marked: never retried
+    assert logs == ["incident sources: 1 stored addresses normalised, 1 left as they were (failed)"]
+    assert rig.cad.sources.backfill_addresses() == 0
+
+
+def test_a_feed_made_incident_keeps_its_push_guard_even_without_the_old_record(tmp_path):
+    rig = Rig(tmp_path)
+    iid = old_row(rig, "12 EXAMPLE AVE", ref="E1")                 # a feed's incident, its feed_addresses row missing
+    rig.cad.sources.backfill_addresses()
+    inc = rig.cad.store.incident(iid)
+    assert inc["address"] != "12 EXAMPLE AVE" and rig.cad.sources.feed_address(iid, inc["address"])
