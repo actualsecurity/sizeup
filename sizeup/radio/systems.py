@@ -172,6 +172,9 @@ def discover(base: str | Path | None, taken_tgs=(), taken_jobs=(), problems: lis
     tgs, jobs = set(taken_tgs), {str(j).lower() for j in taken_jobs}
     for name, d in system_dirs(base).items():
         try:
+            if name.lower() in sources.RESERVED_SYSTEMS:    # its rows would read as ours (sourcekeys.is_context)
+                raise SystemError_(f"{d}: the system name {name!r} is reserved (ours: "
+                                   f"{', '.join(sources.RESERVED_SYSTEMS)})")
             s = load(d)
             both = sorted(set(s.talkgroups) & tgs)
             if both:

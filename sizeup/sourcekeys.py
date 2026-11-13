@@ -39,6 +39,7 @@ SERVICE_WORDS = (("police", {"police", "pd", "law", "sheriff", "wcpd", "mtapd", 
                  ("transit", {"transit", "railroad", "rail", "mta", "dot", "bus", "metro-north", "mnr"}),
                  ("air", {"airband", "atc", "aviation"}))
 OURS_SYSTEMS = ("", COUNTY, "analog", "airband")      # the systems whose rows are not "context"
+RESERVED_SYSTEMS = tuple(x for x in OURS_SYSTEMS if x)  # never another P25 system's name (systems.discover refuses it)
 OURS_SQL = "(" + ", ".join(f"'{x}'" for x in OURS_SYSTEMS) + ")"
 
 # -- who may be shown another system's traffic (#419: police / context transcripts and audio only behind a sign-in) --
@@ -87,6 +88,18 @@ def is_context(row) -> bool:
     except (KeyError, IndexError, TypeError):
         s = ""
     return bool(s) and s not in OURS_SYSTEMS
+
+
+def other_p25(row) -> bool:
+    """A transmission (a row or a dict) on another P25 system's talkgroup: a talkgroup, and a system that is neither
+    unset nor the county's. What Comms.record() and Comms.retext() route to on_context_text, never to on_text. With
+    RESERVED_SYSTEMS refused as a system's name it agrees with is_context() on every P25 row."""
+    try:
+        tg = row.get("talkgroup") if isinstance(row, dict) else row["talkgroup"]
+        s = row.get("system") if isinstance(row, dict) else row["system"]
+    except (KeyError, IndexError, TypeError):
+        return False
+    return tg is not None and str(s or "") not in ("", COUNTY)
 
 
 def refuse_context(tgs, what: str) -> None:

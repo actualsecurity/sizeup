@@ -8,6 +8,10 @@ import threading
 
 import pytest
 
+from sizeup import sourcekeys
+from sizeup.radio import systems
+
+from tests.test_p25_systems import make_system
 from tests.test_radios import Clock, cad, tx
 
 PD = 9001
@@ -124,8 +128,9 @@ def test_a_raising_hook_never_breaks_record_or_retext(c):
 
 
 def test_context_rows_never_reach_a_fire_consumer(c):
-    """Every consumer on_text feeds, and the alarms, spied on: record and retext several context rows (on a
-    talkgroup number we use as well, with words the consumers would act on) and none of them sees a context id."""
+    """Every consumer on_text feeds (Cad._on_text) spied on: record and retext several context rows (on a talkgroup
+    number we use as well, with words the consumers would act on) and none of them sees a context id. (The alarms
+    are fed by the app, not by on_text: sizeup/app.py _alarm, which drops another system's rows itself.)"""
     seen: list[tuple[str, object]] = []
 
     def wrap(obj, name, key=lambda a: a[0]):
@@ -143,7 +148,6 @@ def test_context_rows_never_reach_a_fire_consumer(c):
     wrap(c.sources, "consider_radio")
     wrap(c.airport_watch, "heard_radio", lambda a: a[0]["id"])
     wrap(c.auto, "on_hints", lambda a: [h.get("traffic_id") for h in a[0] or []])
-    wrap(c.alarms, "on_traffic", lambda a: a[0]["id"])
     got = []
     c.comms.on_context_text = got.append
     t = c.clockref.t
@@ -157,3 +161,64 @@ def test_context_rows_never_reach_a_fire_consumer(c):
     assert got == ids + ids
     assert all("metro-" not in str(k) for _, k in seen), seen
     assert ("consider", "307-3-call_1-t0") in seen
+
+
+def test_the_consumers_own_guards_still_hold_for_a_context_row(c):
+    """on_text never brings them a context row now; their is_context guards stay as a second line, called directly."""
+    t = c.clockref.t
+    words = "mayday mayday engine sixty three on scene blorpville alert level two"
+    c.record_traffic(ctx("metro-g", t - 5, words, tg=307))
+    row = c.store.one("SELECT * FROM radio_traffic WHERE id = ?", ("metro-g",))
+    assert c.hints.consider("metro-g") == []
+    assert c.sources.consider_radio("metro-g") is None
+    assert c.radiolog.matches(row) == {}
+    assert c.radiolog.consider("metro-g") == []
+    assert c.store.q("SELECT * FROM status_hints WHERE traffic_id = ?", ("metro-g",)) == []
+    assert c.store.q("SELECT * FROM radio_links WHERE traffic_id = ?", ("metro-g",)) == []
+
+
+@pytest.mark.parametrize("row", [
+    dict(tx("fg1-1", 0, "FG1", radio_id="4100031")),                                   # analog FM
+    dict(tx("twr-1", 0, "Tower"), mhz=119.7),                                          # airband
+    dict(tx("fm-metro-1", 0, "Metro FM", radio_id="4100032"), system="metro"),         # a system, no talkgroup
+])
+def test_retext_of_a_row_with_no_talkgroup_goes_to_on_text_only(c, row):
+    c.record_traffic({**row, "start": c.clockref.t - 5, "end": c.clockref.t - 3})
+    calls = spy(c)
+    assert c.comms.retext(row["id"], "snorkel wimble", "done", "m")
+    assert [tid for tid, _ in calls["text"]] == [row["id"]] and calls["context"] == []
+
+
+@pytest.mark.parametrize("system", ["metro", "analog", "airband", sourcekeys.COUNTY, ""])
+def test_record_and_retext_route_a_p25_row_the_same_way(c, system):
+    """One rule (sourcekeys.other_p25) for both: whatever the system is called, record and retext agree."""
+    calls = spy(c)
+    row = dict(ctx("p25-x", c.clockref.t - 5, "quibble zent"), system=system,
+               source_key=f"p25:{system}:{PD}" if system else "")
+    c.record_traffic(row)
+    c.comms.retext("p25-x", "quibble zent again", "done", "m")
+    other = system not in ("", sourcekeys.COUNTY)
+    hook = "context" if other else "text"
+    assert [tid for tid, _ in calls[hook]] == ["p25-x", "p25-x"]
+    assert calls["text" if other else "context"] == []
+    assert sourcekeys.other_p25(row) is other
+
+
+def test_other_p25_agrees_with_is_context_for_every_name_a_system_may_have():
+    for name in ("metro", "mrrs", "east", sourcekeys.COUNTY, ""):
+        r = {"talkgroup": PD, "system": name}
+        assert sourcekeys.other_p25(r) == sourcekeys.is_context(r)
+    assert not sourcekeys.other_p25({"talkgroup": None, "system": "metro"})
+    assert not sourcekeys.other_p25({})
+    assert set(sourcekeys.RESERVED_SYSTEMS) == {sourcekeys.COUNTY, "analog", "airband"}
+
+
+@pytest.mark.parametrize("name", ["analog", "airband", sourcekeys.COUNTY])
+def test_a_system_named_like_one_of_ours_is_refused(tmp_path, name):
+    make_system(tmp_path, name, tgs="9101,238d,Metro Ops,T,d,Police,X,1,text\n", jobs=("Zz 1",))
+    make_system(tmp_path, "metro", tgs="9102,238e,Metro PD,T,d,Police,X,1,text\n", jobs=("Zz 2",))
+    problems: list[str] = []
+    assert [s.name for s in systems.discover(tmp_path, problems=problems)] == ["metro"]
+    assert len(problems) == 1 and f"system name {name!r} is reserved" in problems[0]
+    with pytest.raises(systems.SystemError_, match="is reserved"):
+        systems.discover(tmp_path)

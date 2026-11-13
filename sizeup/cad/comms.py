@@ -214,6 +214,8 @@ class Comms:
         self.on_text = None     # traffic id -> None: a transcript arrived or changed (status suggestions, #37)
         # traffic id -> None: a transcript arrived or changed on another P25 system's row (context only; the intel
         # pre-alerts); never called for our rows. Called after the transaction has committed, never under store.lock.
+        # May fire again for the same tid (replace re-records, the startup backfill of old rows): a consumer dedupes
+        # by tid + text, ignores a stale `start`, and queues rather than blocks (it runs on the writer's thread).
         self.on_context_text = None
         self._revs: dict = {}   # name -> (rev, value): what _per_rev made
         self.changes_broken = False      # an entry couldn't be written: every ?changed= answers reload (flush_changes)
@@ -249,7 +251,8 @@ class Comms:
         """One transmission: {id, start, end, source, talkgroup, unit (talker as heard), rig, radio_id,
         text, status, model, emergency?, evidence?}. Returns the event ids it is linked to. replace=False: skip
         one already logged (the startup backfill). An emergency once logged stays (a later write without the
-        flag never clears it), and so does its evidence."""
+        flag never clears it), and so does its evidence. Must not be called with store.lock held: the hooks
+        (on_text, on_context_text) run on the caller's thread after commit."""
         tid = str(t["id"])
         p25 = t.get("talkgroup") is not None
         call_id, turn = split_call(tid, p25)
@@ -272,7 +275,7 @@ class Comms:
             mhz = round(float(mhz), 4) if isinstance(mhz, (int, float)) and not isinstance(mhz, bool) and mhz > 0 else None
             # its source, by its system (#409 / #415: sizeup/sourcekeys.py); another P25 system's is context only
             system = str(t.get("system") or "")
-            other = bool(system) and p25 and system != sources.COUNTY
+            other = sources.other_p25({"talkgroup": t.get("talkgroup"), "system": system})
             skey = str(t.get("source_key") or "") or sources.of_row(t.get("source") or "", t.get("talkgroup"), system,
                                                                     air=mhz is not None)
             system = system or (sources.COUNTY if p25 else "airband" if mhz is not None else "analog")
@@ -609,7 +612,8 @@ class Comms:
     def retext(self, tid: str, text: str, status: str, model: str = "", alt: dict | None = None) -> bool:
         """New text for a transmission. alt {text, model}: the other engine's transcript, kept to compare
         ("both": Amazon Transcribe's is the text, whisper's the alternative). Another P25 system's row goes to
-        on_context_text only, never to on_text (as in record())."""
+        on_context_text only, never to on_text (as in record()). Must not be called with store.lock held: the hooks
+        run on the caller's thread after commit."""
         with self.store.tx() as db:
             self.touch(tid)
             if alt is not None:
@@ -621,7 +625,7 @@ class Comms:
             if n:
                 self.rev += 1
         if n:
-            if row is not None and row["talkgroup"] is not None and sources.is_context(row):
+            if row is not None and sources.other_p25(row):
                 self._heard_context(tid)
             else:
                 self._heard(tid)
