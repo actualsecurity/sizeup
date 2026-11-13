@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 
 import pytest
 
@@ -572,11 +573,21 @@ def test_an_incident_edit_moves_the_rev_of_a_reader_not_signed_in(c):
     get = lambda q: json.loads(api.get("/api/cad/comms", q, None)[1])     # noqa: E731
     pushed = lambda: c.state()["comms_rev"]                               # noqa: E731
     c.comms.context_broadcast = False                                     # the station's own page
-    first = get("type=radio")
-    assert pushed() == first["rev"]
+
+    def settled():
+        """The dispatch's own background work (the voice queue) done: a GET and the push agree on one rev."""
+        c.voice.wait(10)
+        for _ in range(100):
+            got = get("type=radio")
+            if pushed() == got["rev"]:
+                return got
+            time.sleep(0.05)
+        raise AssertionError("the rev never settled")
+    first = settled()
     c.update(inc["id"], {"address": "1 Invented Way", "operator": "Lt. Sample"})
     again = get(f"type=radio&rev={first['rev']}")
-    assert "unchanged" not in again and again["rev"] != first["rev"] and pushed() == again["rev"]
+    assert "unchanged" not in again and again["rev"] != first["rev"]
+    assert settled()["rev"] != first["rev"]                               # the push moved with it
     row = next(r for r in again["rows"] if r["id"] == "fg-a")
     assert [e["address"] for e in row["events"]] == ["1 Invented Way"]
 

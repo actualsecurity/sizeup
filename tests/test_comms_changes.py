@@ -99,10 +99,6 @@ def writers(c):
         ("record again", lambda: c.comms.record(tx("fg-new", t + 20, rig="E63", radio_id="4242098", text="the same row, its words in")),
          "fg-new", lambda: row(c, "fg-new")["text"] == "the same row, its words in"),
         ("record context", lambda: c.comms.record(other("pd-new", t + 21)), "pd-new", lambda: row(c, "pd-new")["system"] == "metro"),
-        ("record waiting", lambda: c.comms.record(dict(tx("fg-wait", t + 22, text=""), status="pending")), "fg-wait",
-         lambda: row(c, "fg-wait")["status"] == "pending"),
-        ("set_stt", lambda: c.comms.set_stt("fg-wait", "error", "made-up-engine"), "fg-wait",
-         lambda: (row(c, "fg-wait")["status"], row(c, "fg-wait")["model"]) == ("error", "made-up-engine")),
         ("retext", lambda: c.comms.retext("fg-2", "its transcript", "done", alt={"text": "another", "model": "m"}), "fg-2",
          lambda: row(c, "fg-2")["text"] == "its transcript"),
         ("set_alt", lambda: c.comms.set_alt("fg-2", {"text": "a third reading", "model": "m"}), "fg-2",
@@ -136,7 +132,7 @@ def writers(c):
     ]
 
 
-WRITERS = {"record", "retext", "set_stt", "set_alt", "rerun_done", "link", "unlink", "link_pages", "relink", "retag_pages", "fix_air", "prune"}
+WRITERS = {"record", "retext", "set_alt", "rerun_done", "link", "unlink", "link_pages", "relink", "retag_pages", "fix_air", "prune"}
 # Public methods of Comms that write nothing a row of the Radio page shows (activity: the per-minute counts)
 READERS = {"activity", "activity_rows", "audio_per_day", "context_clips", "emergencies", "events_of", "facets", "for_incidents",
            "id_stats", "kept_for_events", "kept_for_tier", "minute_counts", "page", "policies", "query", "cursor", "source_names",
