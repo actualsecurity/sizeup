@@ -2773,8 +2773,8 @@ stateDiagram-v2
     STARTING --> STANDBY: lock held by another
     STANDBY --> TAKEOVER: lock released, or expired + 5 s
     STANDBY --> [*]: SIGTERM (lock untouched)
-    TAKEOVER --> ACTIVE: followers caught up, promoted, gate "init" (init-state), litestream replicate, gate "run" (the port answers: leader file), app healthy, connector up, "serving"
-    TAKEOVER --> RELEASED: can't (bad copy, no backup, replica moved) - released, exit 1
+    TAKEOVER --> ACTIVE: followers caught up and stopped cleanly, promoted, litestream replicate (confirmed in S3), gate "init" (init-state), confirmed in S3 again, gate "run" (the port answers: leader file), app healthy, connector up, "serving"
+    TAKEOVER --> RELEASED: can't (bad copy, no backup, replica moved, file written before Litestream, Litestream disagrees) - released, exit 1
     ACTIVE --> DRAINING: SIGTERM (ECS - the new task is healthy)
     ACTIVE --> RELEASED: the app exited - drained, exit 1
     DRAINING --> RELEASED: app exited, litestream sync -wait for each file, Litestream stopped, lock released with positions
@@ -2797,9 +2797,12 @@ stateDiagram-v2
   is held, so nothing can move it. The followers need only the last few changes: **seconds, not a restore**. A follower that doesn't get
   there in 30 s falls back to a full restore. Refused, never promoted: a replica behind the release; no backup at
   all although a leader ran before (an empty start would be replicated over the real data); a replica that moves
-  while this task holds the lock (another writer: e.g. a hub from before the lock). Then the warm app is told
-  "init" through its gate file (it checks the lease file first, like its fence, and opens / migrates the
-  databases), `litestream replicate` starts, the gate says "run": the app's port answers at once ("update in
+  while this task holds the lock (another writer: e.g. a hub from before the lock); a follower that needed a
+  SIGKILL to stop, a `-wal` / `-shm` beside a staged copy, a failed quick_check (a normal read-only open). Then
+  `litestream replicate` starts and each promoted file is confirmed in S3 at a position past the one promoted
+  ([Replicate before migrate](#replicate-before-migrate)); only then is the warm app told "init" through its gate
+  file (it checks the lease file first, like its fence, and opens / migrates the databases); every file is confirmed
+  in S3 again (the migrations included), and the gate says "run": the app's port answers at once ("update in
   progress", 503 + Retry-After), so the `leader` file goes in then and the new connector registers while the app
   is built; the real server takes the same socket over (nothing refused in between). "serving" goes in the lock
   once the app's /healthz is 200 and the connector is up.
@@ -2823,7 +2826,7 @@ uploads nothing. The release happens only after the app and Litestream have exit
 
 **Where the time goes** (#264): one log line each, `handoff: drain timing: app … · sync … · litestream … · release
 … (…; N s since SIGTERM)` on the old task, `handoff: takeover timing: plan … · catch-up … · verify … · promote … ·
-init-state … · litestream … · listen … · app … · connector …` on the new one, and in the app `warm-up timing:`
+litestream … · init-state … · replicated … · listen … · app … · connector …` on the new one, and in the app `warm-up timing:`
 (standby), `startup timing:` (gate to serving, App.__init__'s parts: cad, providers, speech-to-text, hub, …) and
 `stop timing:`.
 
@@ -2862,10 +2865,143 @@ gap users see is the handoff only.
 code works either way (with 0/100 the old task releases, and the new one, started after it stopped, takes the
 lock at once). Set 0/100 **before** deploying any code without the lock.
 
+### Replicate before migrate
+
+**What happened (2026-11).** A deploy carried a schema migration of the radio log: 8 `ALTER TABLE … ADD COLUMN`,
+a new index and 3 full-table `UPDATE`s of the transmissions, in autocommit. The takeover ran it the way every
+takeover then ran `--init-state`: on the promoted copy of the replica, **before** `litestream replicate` started.
+SQLite's WAL autocheckpoints moved the migration's pages into the main file, so Litestream never saw them as
+changes in a WAL: it started with no state of its own (`detected database behind replica db_txid=0`) and had to
+snapshot a file that already differed from the replica's last position. The replica ended up with pre- and
+post-migration pages mixed (an interior b-tree page out of order: a few dozen garbage rows in the radio log). That
+task served on; every later takeover restored the replica, failed quick_check and gave up, so the hub crash-looped
+(Cloudflare 1033) until the replica was repaired by hand. (The exact path inside Litestream was not reproduced
+with a local file replica on 0.5.17 or 0.5.18; 0.5.18 fixes two bugs in exactly this area, litestream#1547 — a
+snapshot taken from a stale WAL position dropped the frames before it — and #1579 — the read lock that keeps
+checkpoints from running under Litestream could be dropped after a `litestream sync` request. The image now pins
+0.5.18.)
+
+**The rule: nothing writes a database before Litestream replicates it.** `sizeup/handoff.py` `_start_writer`:
+
+1. The promoted files must be **untouched** since they were verified: no `-wal` / `-shm` / `-journal` beside them,
+   the same size, mtime and 100-byte header (`fingerprint`). Else `REFUSED: cad.sqlite was written before
+   Litestream replicates it`.
+2. `litestream replicate` starts. For each promoted file `litestream sync` (the control socket, no `-wait`) must
+   answer a position **past** the one promoted: Litestream's own first snapshot of the untouched file, read under
+   its read lock (from here every write goes through the WAL it reads). Else `REFUSED: Litestream's position of …
+   doesn't follow the position promoted`. The upload goes on in the background (a release waits for all of it,
+   `sync -wait`): waiting for it here would add the whole snapshot's upload to every takeover.
+3. Litestream's stderr is watched: one `detected database behind replica` per promoted file is expected (no
+   local state, `db_txid=0`, the replica exactly at the position promoted). Any other (a local position that isn't
+   0, a replica somewhere else) is fatal: `REFUSED: Litestream found … behind its replica`.
+4. Only then does the app migrate (`init`), every page of it through the WAL Litestream reads. Then every file is
+   confirmed again (new files of a very first start included: Litestream's first sync of a file with no replica is
+   a full snapshot from WAL offset 0) before the gate says `run`. Each file has its own budget (`REPLICATING_S`,
+   120 s). All three are needed before `init`: `--init-state` opens hub and audio too (`journal_mode = WAL` on a
+   follower's copy writes its header).
+
+**What it costs.** Litestream snapshotted the promoted files at every takeover before too, only after `run`, beside
+the app's start; now that snapshot comes before `init`. Measured with a local file replica (an M-series Mac, NVMe),
+cad 900 MB + audio 275 MB + hub: **~9 s** until Litestream has all three synced locally, ~9.5 s with the upload.
+The snapshot is the whole file (2.2 GB of LTX for two of them: barely compressed). On Fargate (0.5 vCPU, its
+ephemeral disk, S3 at tens of MB/s) expect **~15–30 s** before `init` (an estimate: not measured there), within the
+old connector's overlap (it stays until the new leader serves, at most until 3 s before ECS's SIGKILL at 120 s;
+the drain takes ~20 s and a takeover ~50 s).
+
+A refusal in 2 or 3 SIGKILLs Litestream (no last sync of a file it disagrees with) and releases the lock unclean;
+the task exits 1 and nothing is served from it. A retake (the old task taking its lock back) confirms its own
+Litestream at its release before its app starts.
+
+**When a new image's takeover fails.** Its Litestream has already put a snapshot in the replica (position + 1)
+before `init`, so the replica has "moved on" from the old leader's release. What happens then:
+
+* **It failed before its app wrote anything** (never told `init`, or its migration raised before writing: every
+  file still at Litestream's first position after the last sync): its release says `"pristine_from": <the
+  positions it promoted>`, and the replica holds nothing but a snapshot of the old leader's own files. The old
+  leader takes the lock back from its own files (each checkpointed, `PRAGMA wal_checkpoint(TRUNCATE)`, and its
+  Litestream state dropped: a fresh snapshot of them on top) and serves until shortly before ECS's SIGKILL, as any
+  retake: **at most ~30–50 s more service** (stopTimeout 120 s, less the drain and the failed takeover).
+* **Otherwise** (its migration wrote: autocommit, part of it applied; or it failed later): the old leader doesn't
+  take it back (its files are behind the replica) and exits as before. ECS starts the new image again, which fails
+  again, until the **circuit breaker rolls the deploy back**; the rolled-back image's task then takes over from the
+  replica normally. The hub is down (Cloudflare 1033) for that time. That image opens the newer build's
+  half-applied migration (extra columns, indexes, tables: `tests/test_startup_writes.py`); it can't open a newer
+  `user_version` (the store refuses a schema newer than its own), so **a migration must not bump `user_version`**
+  unless its rollback is planned.
+
+**The operator's override.** `SIZEUP_HANDOFF_SKIP_REPLICATION_CHECKS=1` in the hub container's environment skips
+the checks above (untouched files, Litestream's positions, "database behind replica", the followers' clean stop),
+said as a `WARNING` at every takeover and in the supervisor's `/healthz` (`"replication_checks": "skipped"`). The
+order itself (Litestream before `init`) stays. Runbook: a takeover refused by one of these checks → **roll the
+task definition back first** (the old image takes over as before); set the override only if a check is
+demonstrably a false positive, and remove it in the next deploy.
+
+The override is also on the app's Health panel while it is set (`replication_checks`, a warning).
+
+**Each takeover's confirmations** have their own budget per file (`REPLICATING_S`, 120 s) and one overall cap
+(`REPLICATION_TOTAL_S`, 150 s, both rounds): a hung Litestream fails the takeover within a few minutes, not
+indefinitely.
+
+**The first rollout of this** (and any deploy after a takeover): the new leader's first snapshot of every file (the
+whole file: ~1.2 GB) goes to S3 in the background after it serves. **Let it finish before any further deploy**:
+wait ~5 minutes after `active: serving`, or until `litestream restore -dry-run` (read-only) shows the replica past
+the takeover's `its first positions …` line for each file. A drain that logs
+`<db> not confirmed in S3` means its release was **unclean** (no positions): the next takeover still restores what
+the replica has, but nothing vouches that the last changes reached it.
+
+**Litestream's version.** The supervisor says `WARNING: Litestream 0.5.17 is older than 0.5.18 …` at start if the
+image carries an older one, and the Health panel shows it (`litestream`, a warning).
+
+**The staged copy** is checked before it is promoted: its follower must have stopped cleanly (exit 0 on SIGTERM;
+a SIGKILL may have cut an LTX file half-written into it), no `-wal` / `-shm` / `-journal` beside it (a follower
+writes the main file only), and `PRAGMA quick_check` through a normal read-only open (it used to be `immutable=1`,
+which reads the main file alone).
+
+**Writing a migration.** It runs at the takeover, after Litestream has the file: safe for the replica, but it costs
+the takeover its time (`INIT_S` 300 s) and S3 the rewritten pages (`REPLICATING_S`). Keep it one-time (nothing left
+for the next start: `tests/test_startup_writes.py` fails when a start on an up-to-date database writes more than a
+few pages), and keep big backfills out of the start (in the background, in batches, after "run"). Never run
+`--init-state` on a hub's replicated file by hand. Tests: `tests/test_handoff.py` (the order, every refusal, a
+failed migration taken back from, the override),
+`tests/test_litestream_takeover.py` (a takeover with the real Litestream and a #419-sized migration: the replica
+restores to exactly the live files; skipped without `litestream` on PATH), `tests/test_deploy_handoff.py`.
+
+### Reseeding a replica
+
+When a replica no longer restores to a good file (every takeover refuses it), and only then: an operator's
+procedure, never run by the hub or any workflow. `tools/reseed_replica.py` writes **one new full snapshot** of a
+verified file on top of the replica (Litestream's own "database behind replica" path, on a copy with nothing else
+writing): a restore of the latest is then exactly that file. Nothing is deleted or overwritten; the old history
+stays (`litestream restore -txid <old position>` gives the state before), and the bucket is versioned.
+
+1. Stop the hub: `aws ecs update-service --cluster sizeup-hub --service sizeup-hub --desired-count 0`, and wait
+   for its task to stop (the lock says `released`, or expires 35 s after its last renew).
+2. Get a good file: `litestream restore -o /tmp/cad.sqlite -txid <a position from before the damage>` (or the
+   latest, repaired), with the same config the hub uses. Check it: `PRAGMA integrity_check` = ok, the row counts
+   you expect. No `-wal` beside it (checkpoint it into the file on a copy first).
+3. With the hub's `LITESTREAM_BUCKET` / `LITESTREAM_PATH` / `LITESTREAM_REGION` and credentials in the environment
+   (`eval "$(aws configure export-credentials --format env)"`), Litestream 0.5.18 or later on PATH:
+   `python tools/reseed_replica.py --db cad --file /tmp/cad.sqlite`. Read-only: it checks the file again, reads the
+   lock and the replica's position, and prints exactly what it would write: the lock taken (generation + 1), the
+   Litestream config, the new snapshot's key (`<path>/cad.sqlite/ltx/0/<N+1>-<N+1>.ltx`), the lock released with
+   that position.
+4. If that is right: the same with `--apply` (it asks you to type the database's name). It holds the lock while it
+   works, waits for `litestream sync -wait`, restores the replica into its scratch dir and compares it with the
+   file (integrity_check, the content), then releases the lock with the new position. Any failure: the lock is
+   released unclean and it says so; the old history is untouched either way.
+5. Start the hub again (`--desired-count 1`). Its takeover restores the reseeded replica and quick-checks it.
+
+There is no "undo" of a reseed as such: restore the state wanted (`-txid <old position>`), verify it, and reseed
+again from that file (a second new snapshot on top). The old history isn't kept for ever either: Litestream's
+retention (the hub's, from its next start) prunes old LTX files (L0 files once compacted, snapshots past a day);
+then only the bucket's noncurrent versions (30 days, its lifecycle rule) still hold them.
+
+`tests/test_reseed_replica.py` rehearses it against a local file replica (`--file-replica DIR`).
+
 ## Packaging and the Fargate task
 
 `Dockerfile`: `python:3.14-slim`, linux/arm64 (amd64 builds too), non-root user `sizeup` (uid
-10001), `pip install .`, `data/` included, Litestream 0.5.17 pinned and sha256-checked, health check
+10001), `pip install .`, `data/` included, Litestream 0.5.18 pinned and sha256-checked, health check
 on `/healthz` (a Python one-liner: slim has no curl). `/healthz` answers 200 with
 `{ok, version, build, role, station, public_url}` while the process serves (it doesn't depend on the
 station). Build with `--build-arg SIZEUP_BUILD=$(git rev-parse HEAD)`: the full sha (the deploy

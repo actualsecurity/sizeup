@@ -3971,7 +3971,8 @@ def main(argv: list[str] | None = None) -> int:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--config", default="config.toml")
     ap.add_argument("--init-state", action="store_true",
-                    help="create / migrate the databases and exit (the hub container runs this before Litestream)")
+                    help="create / migrate the databases and exit (never on a replicated file Litestream isn't "
+                         "replicating: docs/cloud.md \"Replicate before migrate\")")
     args = ap.parse_args(argv)
     try:
         cfg = load(args.config)
@@ -4030,8 +4031,10 @@ def run_gated(cfg: Config, gate: Path) -> int:
     write until the supervisor says so through the gate file (and the lease file says the lock is ours):
 
         (standby)  prewarm(): imports, the gazetteer, the map providers and their caches, the ATC rules; then wait
-        "init"     the takeover: the databases promoted. --init-state's work, here (no new Python to start); the
-                   answer ("ok" / "error: ...") in <gate>.answer; then wait while the supervisor starts Litestream
+        "init"     the takeover: the databases promoted and Litestream already replicating each (the supervisor
+                   confirmed it: docs/cloud.md "Replicate before migrate"). --init-state's work, here (no new Python
+                   to start): the migrations; the answer ("ok" / "error: ...") in <gate>.answer; then wait while the
+                   supervisor confirms they are in S3
         "run"      the port listens at once ("updating": the supervisor starts the connector beside it), the app is
                    built and takes the socket over: the CAD serves
 
@@ -4061,7 +4064,7 @@ def run_gated(cfg: Config, gate: Path) -> int:
         log(f"sizeup: databases ready ({cfg.cad_db or 'in memory'})")
         t.mark("init-state")
         _wait_gate(gate, ("run",))
-        t.mark("litestream")                      # (the supervisor starts it meanwhile)
+        t.mark("replicated")                      # (the supervisor confirms the migrations are in S3 meanwhile)
     early = None
     try:
         from sizeup.web.updating import serve_updating
