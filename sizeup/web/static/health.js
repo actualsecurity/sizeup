@@ -308,15 +308,16 @@ const StationHealth = (() => {
     for (const x of failing) {
       const name = x.label || x.source;
       const btn = el("button", "", `Reset ${name}`);
-      btn.title = x.reason || "failing";
+      btn.title = (x.reason || "failing") + (/refused versions 24 h/.test(x.reason || "")
+        ? ". A reset from the hub keeps the refused versions and never resends a refused password; it lifts other "
+          + "stops, or tries a new version once. 3 refused in 24 h: only a reset at the station clears them" : "");
       btn.addEventListener("click", async () => {
         // versions the county refused in 24 h (the adapter's Health): a Reset from here keeps them, and is one more
         // log-on on the shared account: said, and confirmed explicitly (the server asks for it too)
         const m = /refused versions 24 h: (\d+)/.exec(x.reason || "");
         const refused = m ? Number(m[1]) : 0;
-        const ask = refused ? `Reset ${name} on the station?\n${refused} password version(s) refused in 24 h. `
-          + "A reset from here keeps them (3 in 24 h: only a reset at the station clears them) and may be one more "
-          + `log-on on the shared county account.\n${x.reason}` : `Reset ${name} on the station?\n${x.reason || "failing"}`;
+        const ask = refused ? `Reset ${name}?\n${refused} refused in 24 h: a refused password isn't resent. Save a new one first.`
+          : `Reset ${name} on the station?\n${x.reason || "failing"}`;
         if (!confirm(ask)) return;
         btn.disabled = true;
         let msg;
