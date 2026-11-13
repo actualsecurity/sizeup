@@ -24,13 +24,13 @@ const S = {
   stab: "", stationShown: false,                     // Settings > Station: the tab (#settings/station/<tab>)
 };
 // The sections, by what they are about: the CAD's lists and run cards, people, the radios, the station (its health, its
-// hub link) and the hub's data sources, then System (records, backup, audit, the hub's own switches).
-// Station (sStationTab): Health is the admins' on the hub (#203: the server refuses their data to anyone
+// logs, its hub link) and the hub's data sources, then System (records, backup, audit, the hub's own switches).
+// Station (sStationTab): Health and Logs are the admins' on the hub (#203: the server refuses their data to anyone
 // else), Hub link this machine's forwarding (not on the hub). #settings/health and #settings/system/health still land
 // on Station > Health (old links in pushes and bookmarks).
 const S_SECTIONS = [["lists", "Lists"], ["runcards", "Run cards"], ["units", "Units"], ["dispatch", "Dispatch"],
   ["users", "Users"], ["radios", "Radios"], ["station", "Station"], ["data", "Data sources"], ["system", "System"]];
-const S_STATION_TABS = [["health", "Health"], ["link", "Hub link"]];
+const S_STATION_TABS = [["health", "Health"], ["logs", "Logs"], ["link", "Hub link"]];
 // Settings > Radios, one tab per part (#115; the Lists page's tabs): which RadioControls card, the Tones page and the
 // Radio IDs editor each go under (data-rtab on each).
 const S_RADIO_TABS = [["receivers", "Receivers"], ["channels", "Channels"], ["squelch", "Squelch"], ["tones", "Tones"],
@@ -1833,8 +1833,8 @@ function sAudioRetention(r) {
   return card;
 }
 
-// ---- station: its health and alerts (health.js, #79), its hub link (hublink.js) ---------------------------------------
-// Health: admins only (#203), on the hub. Hub link: this machine's forwarding, not on the hub. One tab bar (the
+// ---- station: its health and alerts (health.js, #79), its logs (logs.js), its hub link (hublink.js) --------------------
+// Health and Logs: admins only (#203), on the hub. Hub link: this machine's forwarding, not on the hub. One tab bar (the
 // Radios page's); each tab's part shown, the rest hidden (health.js polls only while its part is on screen).
 
 const sIsHub = () => !!(cad.state && cad.state.cloud && cad.state.cloud.role === "hub");
@@ -1883,6 +1883,7 @@ function sStationPanel(panel) {
     return;
   }
   if (S.stab === "health") sHealth($("#s-station-health"));
+  if (S.stab === "logs" && window.StationLogsView) StationLogsView.mount($("#s-station-logs"));
   if (S.stab === "link") sStation();
 }
 function sHealth(panel) {

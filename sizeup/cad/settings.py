@@ -60,6 +60,8 @@ Reset to default = drop the override (one item, or a whole section).
     datasources                    key a data source ("gis:hydrants", "aircraft:registry") -> off | hourly | daily | weekly |
                                    monthly: how often the registry refreshes it (#186, Settings > Data sources;
                                    sizeup/datasources.py); not set: the source's default
+    station_logs                   key "on" | "level" | "include" | "exclude" | "retention_days": the station's logs into
+                                   CloudWatch (sizeup/cloud/cwlogs.py; Settings > Station > Logs, admins)
     department_units               key a feed's department entry code -> the department it pages ("Port Chester FD"), or
                                    {"name", "accepts": true}: a whole department, never a unit (#370,
                                    sizeup/cad/sources.py; admins, no panel); never a board unit's code
@@ -91,6 +93,7 @@ from sizeup.cad import lists as lists_mod
 from sizeup.cad.lists import CLASSES, CODE, COLOR, LIST_SECTIONS, LONG_CODE, RESPONSES, ROLES, ListsError
 from sizeup.cad.store import OPERATOR_MAX, SCHEMA_VERSION, TZ, CadError
 from sizeup import audiostore, errwatch, polly, sourcekeys
+from sizeup.cloud import cwlogs
 from sizeup.cloud import health as health_mod
 from sizeup.radio.tones import pair_key
 from sizeup.tts import KOKORO_VOICES
@@ -145,6 +148,9 @@ PAGE_SECTION[MAPD_SECTION] = "system"
 PREMISE_SECTION = "premise_visibility"
 PAGE_SECTION[PREMISE_SECTION] = "system"
 PREMISE_LEVELS = ("everyone", "dispatcher", "admin")
+# The station's logs into CloudWatch (sizeup/cloud/cwlogs.py): Settings > Station > Logs, admins, audited as System.
+LOGS_SECTION = cwlogs.SECTION
+PAGE_SECTION[LOGS_SECTION] = "system"
 
 
 def _visibility_keys() -> dict[str, str]:
@@ -575,7 +581,40 @@ class Editor:
         out["premise_visibility"] = self.premise_page(ov)
         out["alert_mutes"] = self.mutes_page(ov)
         out["audio_retention"] = self.retention_page(ov)
+        out["station_logs"] = self.logs_page(ov)
         return out
+
+    def logs_page(self, ov: dict | None = None) -> dict:
+        """Settings > Station > Logs: each setting, its default and whether it is edited."""
+        e = ((self.overrides() if ov is None else ov).get(LOGS_SECTION) or {})
+        c = cwlogs.config(e)
+        return {k: {"label": cwlogs.LABELS[k], "value": c[k], "default": d, "edited": k in e}
+                for k, d in cwlogs.DEFAULTS.items()} | {"levels": list(cwlogs.logscrub.LEVELS),
+                                                         "retention_choices": list(cwlogs.RETENTION_DAYS)}
+
+    def _logs_op(self, action: str, body: dict, op: str) -> dict:
+        """set {key, value} | reset {key}: admins."""
+        key = body.get("key")
+        if key not in cwlogs.DEFAULTS:
+            raise CadError(f"key: one of {', '.join(cwlogs.DEFAULTS)}")
+        d = cwlogs.DEFAULTS[key]
+        cur = cwlogs.config(self.section(LOGS_SECTION))[key]
+        if action == "reset":
+            v = d
+        elif action == "set":
+            try:
+                v = cwlogs.check_value(key, body.get("value"))
+            except ValueError as e:
+                raise CadError(str(e)) from None
+        else:
+            raise CadError("action: set or reset")
+        shown = (lambda x: ("on" if x else "off") if key in ("on", "adapter") else ", ".join(x) or "none" if isinstance(x, list) else str(x))
+        out = self._commit([(LOGS_SECTION, key, REMOVE if v == d and type(v) is type(d) else v)], op,
+                           [("system", f"{LOGS_SECTION}/{key}", shown(cur), shown(v))])
+        sl = getattr(self.cad, "station_logs", None)
+        if key == "retention_days" and sl is not None:
+            sl.checked = 0.0                 # applied at the next look (the Logs view's status, or the next batch)
+        return {**out, "station_logs": self.logs_page()}
 
     def _context_channel(self, channel: str) -> bool:
         """This channel's newest transmission is another P25 system's (#409; one indexed row: (channel, start))."""
@@ -785,7 +824,7 @@ class Editor:
             v = self._errors_value(key, body.get("value"))
         else:
             raise CadError("action: set or reset")
-        shown = (lambda x: ("on" if x else "off") if key == "on" else str(x))
+        shown = (lambda x: ("on" if x else "off") if key in ("on", "adapter") else str(x))
         out = self._commit([(ERR_SECTION, key, REMOVE if v == d and type(v) is type(d) else v)], op,
                            [("system", f"{ERR_SECTION}/{key}", shown(cur), shown(v))])
         return {**out, "hub_errors": self.errors_page()}
@@ -999,7 +1038,7 @@ class Editor:
               channels_mod.SQUELCH_SECTION: self._squelch_op,
               "places": self._places_op, TONES_SECTION: self._tones_op, WALL_SECTION: self._wall_op, DS_SECTION: self._ds_op,
               NOTIFY_SECTION: self._notify_op, ATC_SECTION: self._atc_op, ERR_SECTION: self._errors_op, MAPD_SECTION: self._mapd_op, PREMISE_SECTION: self._premise_op, RET_SECTION: self._retention_op,
-              TRS_SECTION: lambda a, b, o: self._retention_op(a, b, o, TRS_SECTION), MUTE_SECTION: self._mutes_op, DEPT_SECTION: self._dept_op, "alarms": lambda a, b, o: self.cad.alarms.settings_op(a, b, o)}.get(section)
+              TRS_SECTION: lambda a, b, o: self._retention_op(a, b, o, TRS_SECTION), MUTE_SECTION: self._mutes_op, LOGS_SECTION: self._logs_op, DEPT_SECTION: self._dept_op, "alarms": lambda a, b, o: self.cad.alarms.settings_op(a, b, o)}.get(section)
         if fn is None:
             raise CadError(f"no settings section {section!r}")
         if section in ("users", "import"):
