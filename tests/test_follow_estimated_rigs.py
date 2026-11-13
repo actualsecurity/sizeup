@@ -1,6 +1,6 @@
 """A rig drawn by an estimate is followed by a click, as a live rig or a plane is (GitHub #473).
 
-The user, on a returning ghost ("↩ L30 ~AV"): click to follow it, the same as for live rigs and planes, even without
+The user, on a returning ghost on the map (an engine on its way home, "~AV"): click to follow it, the same as for live rigs and planes, even without
 live location. A click on any rig on a map that follows now follows it (and opens its box: its call and, for an admin,
 its home station one click away); the camera is kept on the estimate through the frame loop; a trip home followed ends
 at quarters with a word; a live fix taking over glides onto the fix; placeholders are never followed.
@@ -53,7 +53,8 @@ for (const [k, M] of [["enroute", IN.map], ["held", IN.held], ["late", IN.late],
 }
 """, data)
     for k, (fol, est, text, st, hidden) in o["r"].items():
-        assert fol == "E61" and est and " · est." in text and hidden is False, (k, text)
+        assert fol == "E61" and est and " · est." in text, (k, text)
+        assert hidden is (k == "home"), k                       # a box only with its call in it (on its way home: none)
     assert o["r"]["enroute"][2].startswith("Following E61 · Responding · est.") and o["r"]["enroute"][3] == "~RS"
     assert o["r"]["held"][3] == "~DP" and o["r"]["late"][3] == "~RS overdue"
     assert o["r"]["home"][2].startswith("Following E61 · Returning · est.")
@@ -136,10 +137,94 @@ out.r = [L.chips.has("DPT239"), CadMap.followUnit("DPT239"), rm.followUnit("DPT2
 def test_every_rig_is_a_full_size_target():
     css = (STATIC / "cadmap.css").read_text()
     assert "inline-size: max(var(--L), var(--ctl-sm)); block-size: max(var(--L), var(--ctl-sm))" in css   # a vehicle
-    dot = css[css.index(".cm-rig.rig-dot::after"):]
+    assert ".cm-rig.rig-dot::after" not in css                                      # fanned dots: no bigger target
+    dot = css[css.index(".cm-rig.rig-dot.solo::after"):]
     dot = dot[:dot.index("}")]
     assert "inline-size: var(--ctl-sm)" in dot and "block-size: var(--ctl-sm)" in dot             # a dot: 24 / 44 px
     est = css[css.index(".cm-rig.rv.est"):css.index(".cm-rig.rv.est.overdue")]
     assert "pointer-events" not in est and "size" not in est.replace("font-style", "")          # an estimate: the same
     style = (STATIC / "style.css").read_text()
     assert "--ctl-sm: calc(24px" in style and "--ctl-sm: 44px" in style
+
+
+@needs_node
+def test_a_follow_let_go_carries_nothing_into_the_next_one(tmp_path):
+    """Follow a rig on its way home, let go (a drag), it gets home, click it: followed, no "in quarters" ending."""
+    c, clock, uid, data = page_state()
+    data["map"] = released(c, clock, uid)
+    back = next(r for r in data["map"]["routes"] if r["unit"] == "E61")
+    clock.t = back["move"]["done_at"] + 1
+    data["home"] = c.state()["map"]
+    o = run(tmp_path, FOLLOW + r"""
+click("E61"); go(5, 16);
+rm.map.emit("dragstart", { originalEvent: { touches: [{}] } }); out.dragged = rm.fol.id;
+setMap(IN.home); go(5, 16);
+click("E61"); go(5, 16);
+const toast = host.find("cm-toast")[0];
+out.after = [rm.fol.id, toast ? toast.hidden : true];
+// the same through the chip's ✕ and Recenter
+rm.fol.stop(); setMap(IN.map); click("E61"); follow().find("mini")[0].fire("click"); setMap(IN.home); click("E61"); go(3, 16);
+out.x = rm.fol.id;
+rm.fol.stop(); setMap(IN.map); click("E61"); rm.map.emit("sizeup:recenter"); setMap(IN.home); click("E61"); go(3, 16);
+out.recenter = rm.fol.id;
+""", data)
+    assert o["dragged"] == "" and o["after"] == ["E61", True] and o["x"] == "E61" and o["recenter"] == "E61"
+
+
+@needs_node
+def test_dots_round_a_firehouse_or_a_call_never_cover_its_taps(tmp_path):
+    """Below the detail zoom an idle rig at a firehouse, and below the active zoom the rigs at a call, are dots fanned
+    round the firehouse's icon or the call's pin: their targets stay their own size, clear of the icon or pin; only a
+    dot on its own (on the road) gets the full target."""
+    c, clock, uid, data = page_state()
+    c.unit_status(uid("E60"), {"status": "OS", **OP})                            # one idle rig left at HQ (no count chip)
+    c.unit_status(uid("E62"), {"status": "OS", **OP})
+    data["map"] = released(c, clock, uid)                                        # E61 on its way home: a dot on its own
+    o = run(tmp_path, FOLLOW + r"""
+zoomTo(9.5);
+out.dots = [...L.chips.values()].filter((r) => r.size === "dot").map((r) => [r.m.unit, r.m.place, r.off,
+  r.el.className.includes("solo"), r.el.className.includes(" act") ? 6 : r.el.className.includes("look-oos") ? 3 : 4]);
+""", data)
+    css = (STATIC / "cadmap.css").read_text()
+    fanned = [d for d in o["dots"] if d[1] in ("station", "incident")]
+    assert fanned and all(not d[3] for d in fanned)
+    for unit, place, off, solo, r in fanned:                                     # r: the dot's own radius (its target)
+        assert (off[0] ** 2 + off[1] ** 2) ** 0.5 - r >= 4, unit                   # a tap at the icon's or pin's centre: theirs
+    assert any(d[3] for d in o["dots"] if d[1] in ("route", "returning"))
+    assert ".cm-rig.rig-dot.solo::after" in css and ".cm-rig.rig-dot::after" not in css
+
+
+@needs_node
+def test_a_followed_rig_standing_still_lets_the_loop_sleep(tmp_path):
+    *_, data = page_state()
+    rt = next(r for r in data["map"]["routes"] if r["unit"] == "E61")
+    data["held"] = dict(data["map"], routes=[dict(r, move=dict(r["move"], stop=r["move"]["t0"])) if r is rt else r
+                                             for r in data["map"]["routes"]])
+    o = run(tmp_path, FOLLOW + r"""
+click("E61"); go(10, 16);
+out.moving = [L.smooth(), L.frameMs()];
+setMap(IN.held); go(100, 16);                  // let the glide and the pans finish
+frameRuns = 0; go(63, 16);
+out.held = [L.moving(), L.smooth(), L.frameMs(), frameRuns];
+""", data)
+    assert o["moving"][0] is True and o["moving"][1] == 50                       # moving: every frame (FRAME_MS)
+    moving, smooth, ms, frames = o["held"]
+    assert moving is True and smooth is False and ms == 250 and frames <= 8      # still: looked at every PAN_MS
+
+
+@needs_node
+def test_the_box_says_what_the_chip_says_and_the_zoom_is_kept_on_screen(tmp_path):
+    c, clock, uid, data = page_state()
+    data["map"] = released(c, clock, uid)
+    data["admin"] = True
+    o = run(tmp_path, FOLLOW + r"""
+rm.map.zoom = 14; click("E61");
+const pop = host.find("cm-pop")[0];
+out.box = [pop.hidden, pop.textContent, followText()];
+out.zoom14 = rec.eases[rec.eases.length - 1].zoom;
+rm.fol.stop(); rm.map.zoom = 12; click("E61"); out.zoom12 = rec.eases[rec.eases.length - 1].zoom;
+""", data)
+    hidden, text, chip = o["box"]
+    assert hidden is False and "Home station" in text and "Returning · est." in text and "Available" not in text
+    assert chip.startswith("Following E61 · Returning · est.")
+    assert o["zoom14"] == 14 and o["zoom12"] == 15                              # kept on screen; zoomed in from far out

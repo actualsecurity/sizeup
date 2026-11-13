@@ -262,10 +262,15 @@ window.CadMap = (() => {
 
   // ---- our units followed and lit up (#358): one state for every map ----------------------------------------------
   const UNIT_ZOOM = 15;                // a rig followed or picked: centred at least this close
+  const FOLLOW_MIN_ZOOM = 13;          // #473: a rig followed from a click: zoomed in (to UNIT_ZOOM) only from below this
+  // the words for a rig's status on its chip and in its box: an estimate on its way home "Returning", else its status
+  const SOLO = new Set(["position", "returning", "route", "enroute"]);   // places a rig is drawn on its own (not fanned)
+  const statusWords = (m, st) => (m.est && m.home_line ? "Returning" : st.name);
   const KT_MS = 1852 / 3600;           // m/s in a knot (glide.js reads kt; the ingest shape's speed is m/s)
   const STALE_S = 60, MAX_AGE_S = 300, HORIZON_S = 8;   // an older hub: mapview.py's POSITION_STALE_S / _MAX_AGE_S / _HORIZON_S
   const MIN_MS = 2;                    // slower than this a rig is stopped: drawn at its fix, never drawn on
   const HOLD_M = 30;                   // a stopped rig's fix this close to where it is drawn: held there (never eased back)
+  const PAN_MS = (window.MapFollow && MapFollow.PAN_MS) || 250;   // a followed rig standing still: looked at this often
   const LINE_MS = 250;                 // the lines from moving marks (to the call, the routes) re-set at most ~4 Hz
   const FRAME_MS = 50, MAX_FRAME_MS = 250, STEP_PX = 0.75;   // as aircraft.js: redrawn as often as the fastest moves STEP_PX
   const AGE_MS = 1000;                 // the chips' ages and the follow chip's words: once a second (a timer, not frames)
@@ -398,8 +403,8 @@ window.CadMap = (() => {
   const routeOf = (M, m) => ((M && M.routes) || []).find((r) => r.kind !== "back" && r.unit === m.unit && r.incident_id === m.incident_id) || null;
   // ---- estimated motion along the route (#453) ----------------------------------------------------------------------
   const EST_MS = 125;                  // an estimated rig moved and turned at most ~8 Hz
-  const SETTLE_MS = 1200;
-  const TOAST_MS = 3000;              // a rig taking a new place (on location, released, home) glides there this long
+  const SETTLE_MS = 1200;              // a rig taking a new place (on location, released, home) glides there this long
+  const TOAST_MS = 3000;               // a follow ended at quarters: its word shown this long
   const backOf = (M, m) => ((M && M.routes) || []).find((r) => r.kind === "back" && r.unit === m.unit) || null;
   const geos = new WeakMap();          // a route (one state's object) -> its points and metres along (once)
   function geoOf(r) {
@@ -706,7 +711,13 @@ window.CadMap = (() => {
     }
     fixMoving() { return !!(this.hasFix && (fresh > 0 || (glide && glide.busy()))); }
     // frames every frame (a live fix, a follow, a glide to a new place); else only the estimate's ticks (#453)
-    smooth() { return !!(this.fixMoving() || (this.fol && this.fol.id) || this.settling); }
+    smooth() { return !!(this.fixMoving() || this.settling || this.folBusy()); }
+    // #473: the rig followed is moving (an estimate on its way, a glide, a live fix drawn on): the camera wants every
+    // frame; a followed rig standing still is looked at again only every PAN_MS (the loop sleeps between)
+    folBusy() {
+      const rec = this.fol && this.fol.id ? this.chips.get(this.fol.id) : null;
+      return !!(rec && (rec.settle || (rec.m.est && rec.moving) || (rec.m.place === "position" && this.fixMoving())));
+    }
     // how often to tick this map: each time the fastest rig has moved STEP_PX on it at its zoom (aircraft.js frameMs)
     // #453: rigs moved only by the estimate: at most every EST_MS (FRAME_MS while one glides to a new place)
     frameMs() {
@@ -717,7 +728,7 @@ window.CadMap = (() => {
         const pxPerS = v / metresPerPx;
         ms = Math.max(FRAME_MS, Math.min(MAX_FRAME_MS, pxPerS > 0 ? 1000 * STEP_PX / pxPerS : MAX_FRAME_MS));
       } catch (_) { ms = FRAME_MS; }
-      if (this.fol && this.fol.id) return FRAME_MS;   // followed (an estimate too): the camera kept on it smoothly
+      if (this.fol && this.fol.id) return this.folBusy() ? FRAME_MS : PAN_MS;   // followed: smooth while it moves
       return fix || this.settling ? ms : Math.max(EST_MS, ms);
     }
     // #453: whether any rig here moves by the estimate or glides to a new place now (frames wanted), and the fastest
@@ -776,7 +787,7 @@ window.CadMap = (() => {
       if (!force && f.chipShown()) return;
       const st = statusOf(this.data && this.data.lists, m.status), fx = fixAge(m, this.data && this.data.map);
       const r = routeOf(this.data && this.data.map, m);      // by road (#360): "~3 min · 1.2 mi"
-      const what = m.est && m.home_line ? "Returning" : st.name;
+      const what = statusWords(m, st);
       const text = [`Following ${m.unit}`, what, m.est ? "est." : "", r ? r.text : "", fx ? `${agoS(fx.age)} ago` : ""]
         .filter(Boolean).join(" · ");                       // #453: an estimate says so in words
       f.chip(text, r ? `${rec.el.title}, ${r.text} ${r.by === "line" ? "straight line" : "by road"} (est.)` : rec.el.title,
@@ -947,6 +958,7 @@ window.CadMap = (() => {
           + (m.look === "dispatched" || m.look === "responding" ? " enroute" : "")      // #427: not there yet, at any place
           + (cl === "act" ? " act" : "") + (sz === "dot" ? " rig-dot" : sz === "folded" ? " folded" : "")
           + (this.focus && m.incident_id && !onFocus ? " other" : "") + (onFocus ? " mine" : "")
+          + (SOLO.has(m.place) ? " solo" : "")                                       // #473: not fanned: a full target
           + (fx && fx.stale ? " stale" : "") + (lit[0] ? " hl" : "") + (lit[1] ? " hot" : "") + (lit[2] ? " followed" : "")
           + (m.est ? " est" : "") + (late ? " overdue" : "");                        // #453: an estimate, not a fix
         e.style.setProperty("--c", st.bg || "#9AA3AD");
@@ -1257,8 +1269,8 @@ window.CadMap = (() => {
     // admin) its home station one click away. A map that follows nothing (the wall board, the new call's): as before.
     chipClick(m) {
       if (this.onFollow) {
-        if (!(this.fol && this.fol.id === m.unit)) this.onFollow(m.unit);
-        return this.openInfo(m);
+        if (!(this.fol && this.fol.id === m.unit)) this.onFollow(m.unit, true);
+        return this.openInfo(m, true);
       }
       if (this.editable() && m.fire && m.id != null) return this.openPicker(m.id, m.unit, m.station, m);
       if (m.incident_id && this.opts.onPick) return this.opts.onPick(m.incident_id);
@@ -1271,12 +1283,14 @@ window.CadMap = (() => {
       return f;
     }
 
-    openInfo(m) {
+    // its box; actions: only when it has something besides Close (its call, its home station: the follow chip says
+    // the rest), else none
+    openInfo(m, actions) {
       this.stationOpen = null;                         // the box is this rig's now (#384)
       const st = statusOf(this.data && this.data.lists, m.status);
       const head = h("div", "cm-pop-head");
       head.append(h("b", "", m.unit));
-      const line = h("div", "dim small", [st.name, m.est ? "est." : "", m.incident_number ? `on ${m.incident_number}` : ""]
+      const line = h("div", "dim small", [statusWords(m, st), m.est ? "est." : "", m.incident_number ? `on ${m.incident_number}` : ""]
         .filter(Boolean).join(" · "));
       const row = h("div", "row");
       const btn = (text, fn) => {
@@ -1291,6 +1305,7 @@ window.CadMap = (() => {
         btn(`Open ${m.incident_number || "call"}`, () => { this.closePicker(); this.opts.onPick(m.incident_id); });
       }
       if (this.editable() && m.fire && m.id != null) btn("Home station", () => this.openPicker(m.id, m.unit, m.station, m));
+      if (actions && !row.children.length) { this.closePicker(); return; }
       const x = btn("Close", () => this.closePicker());
       x.className = "mini quiet";
       this.pop.replaceChildren(head, line, row);
@@ -1449,10 +1464,10 @@ window.CadMap = (() => {
       // following a rig (#358, mapfollow.js): not on the new call's map (its owner moves it), nor the wall board's
       this.fol = !opts.manual && opts.follow !== false && window.MapFollow
         ? new MapFollow.Follower(this.map, host, { cls: "ac-follow cm-follow", textCls: "ac-follow-t", icon: "locate",
-                                                   onStop: () => this.layer.draw() })
+                                                   onStop: () => { this.layer.folTrip = null; this.layer.draw(); } })
         : null;
       this.layer.fol = this.fol;
-      if (this.fol) this.layer.onFollow = (name) => this.followUnit(name);
+      if (this.fol) this.layer.onFollow = (name, near) => this.followUnit(name, near);
       if (!opts.manual) this.layer.onFocus = (name) => this.focusUnit(name);     // #384: the station list, no follower
       this.layer.onMoved = () => { this.userMoved = true; };                      // #384: Zoom to, as a move by hand
       rigMaps.add(this);
@@ -1503,11 +1518,16 @@ window.CadMap = (() => {
     }
 
     // a rig followed (centred, zoomed in, kept centred; ringed for a while) or only picked (centred, ringed)
-    followUnit(name) {
+    // near: from a click on the rig itself (#473: it is on screen): centred, zoomed in only from below FOLLOW_MIN_ZOOM;
+    // else (a row's Follow, a firehouse's list) centred at UNIT_ZOOM at least, as before
+    followUnit(name, near) {
       const rec = this.fol && this.layer.chips.get(name);
       if (!rec) return false;
       const ll = rec.marker.getLngLat();
-      this.fol.start(name, { lon: ll.lng, lat: ll.lat }, UNIT_ZOOM);
+      let z = UNIT_ZOOM;
+      try { if (near && this.map.getZoom() >= FOLLOW_MIN_ZOOM) z = this.map.getZoom(); } catch (_) { /* */ }
+      this.layer.folTrip = null;                      // a new follow: nothing carried over from the last one
+      this.fol.start(name, { lon: ll.lng, lat: ll.lat }, z);   // #473: centred; zoomed in only from far out
       if (lights) lights.pick(name);
       this.layer.draw();
       return true;

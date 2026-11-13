@@ -324,8 +324,8 @@ rm.followUnit("E60"); setMap({ ...IN.map, markers: IN.map.markers.filter((m) => 
     assert o["e61"][0] == "E61" and o["e61"][1] is None and o["e61"][2] is False      # followed, not switched away
     assert any(t.startswith("Open ") for t in num) and "Close" in num and "Follow" not in num
     assert o["opened"][0] is not None and o["opened"][1] is True                         # its call: one click away
-    assert o["box"] == [False, "E60", "Close"]                                           # the box (Escape works)
-    assert o["following"] == "E60" and o["ease"]["zoom"] >= 15
+    assert o["box"][:2] == [True, "E60"]                         # #473: no box with only Close in it; the chip says it
+    assert o["following"] == "E60" and o["ease"]["zoom"] == 13   # on screen at z13: centred, not zoomed in
     assert o["text"] == "Following E60 · Available" and o["title"].endswith("A drag or Recenter stops following")
     assert "followed" in o["cls"] and "hl" in o["cls"] and "sizeup:follow" in o["fired"] and {"around": "center"} in o["zoomOpts"]
     assert o["pinch"] == "E60" and o["drag"] == ["", True, False]

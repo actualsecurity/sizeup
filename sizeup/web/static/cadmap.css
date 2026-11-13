@@ -62,8 +62,9 @@
   .cm-rig.rig-dot { padding: 0; inline-size: var(--s-2); block-size: var(--s-2); border-radius: 50%; font-size: 0; line-height: 0;
                     border-color: rgba(17, 19, 21, 0.85); box-shadow: 0 0 2px rgba(0, 0, 0, 0.7); }
   .cm-rig.rig-dot > *, .cm-rig.rig-dot::before { display: none; }
-  /* a dot is a rig's target too (#473): at least --ctl-sm across (24 px; 44 px on a coarse pointer), the dot as it is */
-  .cm-rig.rig-dot::after { content: ""; position: absolute; inset-block-start: 50%; inset-inline-start: 50%;
+  /* a dot on its own (on the road: a live fix, an estimate, on its way home; not fanned round a firehouse or a call,
+     whose icons and pins keep their taps) is a full target (#473): --ctl-sm across (24 px; 44 px on a coarse pointer) */
+  .cm-rig.rig-dot.solo::after { content: ""; position: absolute; inset-block-start: 50%; inset-inline-start: 50%;
     inline-size: var(--ctl-sm); block-size: var(--ctl-sm); transform: translate(-50%, -50%); border-radius: 50%; }
   .cm-rig.rig-dot.act { inline-size: var(--s-3); block-size: var(--s-3); border: 2px solid #fff; box-shadow: 0 0 0 1px rgba(17, 19, 21, 0.85), 0 1px 4px rgba(0, 0, 0, 0.7); }
   .cm-rig.rig-dot.act.outer { border: 2px dashed var(--c); }
