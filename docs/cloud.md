@@ -672,7 +672,10 @@ in the CAD database, `meta` `aws_usage:YYYY-MM` with each channel's share; a new
 budget**, `aws_context_budget_usd` (default $15, Settings > Radios > Vocabulary "PD $"), counted apart
 (`meta` `aws_usage_context:YYYY-MM`): police never spends the fire limit or its reserve, and the fire limit running out
 never stops police. Past its own limit the hub tells the station (`aws.deny`), which runs whisper on it (never
-silence), and Settings > Health shows a hint. Each source's profile (`data/stt/profiles.json`) gives whisper a short
+silence), and Settings > Health shows a hint. On whisper for that reason its clips queue in their own class
+(`CONTEXT_FALLBACK`: above the other context clips, still below every fire class and re-runs) and wait 30 min, not 10,
+before they are shed; a shed while its budget is used up is a warning hint. Size the budget from real volumes with
+`tools/stt_cost.py` on a local restore. Each source's profile (`data/stt/profiles.json`) gives whisper a short
 police prompt (phrasing, the headquarters' callsigns from `data/pd_units.json`, the towns and their busiest streets;
 never a talker's name) and AWS its own vocabulary **`sizeup-pd`** (`stt_vocab.police_phrases()`: the headquarters'
 callsigns, 10-codes, police phrasing, the towns, every street of Port Chester, Rye and Rye Brook as said, their public

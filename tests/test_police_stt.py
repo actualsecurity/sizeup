@@ -60,7 +60,14 @@ def gazetteer(tmp_path):
         INSERT INTO lines VALUES (4, 'Rye', '[]');
         INSERT INTO landmarks VALUES (1, 'Example Park', 'park', '', 'Rye', 0, 0, 'x', 'Example Green'),
                                      (2, 'Law Office of Pat Doe', 'office=lawyer', '', 'Rye', 0, 0, 'x', ''),
-                                     (3, 'Sample School', 'school', '', 'Elsewhere', 0, 0, 'x', '');
+                                     (3, 'Sample School', 'school', '', 'Elsewhere', 0, 0, 'x', ''),
+                                     (4, 'Example Memorial', 'historic=memorial', '', 'Rye', 0, 0, 'x', ''),
+                                     (5, 'Example Old Building', 'historic=building', '', 'Rye', 0, 0, 'x', ''),
+                                     (6, 'Example Plain Historic', 'historic', '', 'Rye', 0, 0, 'x', ''),
+                                     (7, 'Doe Homestead', 'park', '', 'Rye', 0, 0, 'x', ''),
+                                     (8, 'Example House', 'tourism=museum', '', 'Rye', 0, 0, 'x', ''),
+                                     (9, 'Example Chapel', 'worship', '', 'Rye', 0, 0, 'x', ''),
+                                     (10, 'Example Congregation', 'amenity=place_of_worship', '', 'Rye', 0, 0, 'x', '');
     """)
     c.commit()
     c.close()
@@ -160,6 +167,10 @@ def test_police_phrases_come_from_the_gazetteer_with_public_landmarks_only(tmp_p
     assert "Faraway Road" not in pd                                       # another town
     assert {"Example Park", "Example Green"} <= set(pd) and not [p for p in pd if "Doe" in p or "Office" in p]
     assert "Sample School" not in pd
+    # historic: explicit subtypes only; never a place named for a person's home; no places of worship
+    assert "Example Memorial" in pd
+    assert not {"Example Old Building", "Example Plain Historic", "Doe Homestead", "Example House", "Example Chapel",
+                "Example Congregation"} & set(pd)
     # priority: callsigns and 10-codes before streets, streets before landmarks (a long list loses landmarks first)
     assert pd.index("266") < pd.index("10-4") < pd.index("Rye Brook") < pd.index("Example Avenue") < pd.index("Example Park")
 
@@ -352,3 +363,117 @@ def test_stt_cost_reads_aggregates_only(tmp_path, capsys):
     pd = next(r for r in d["rows"] if r["source"] == PD)
     assert pd["min_day"] == pytest.approx(60, abs=1) and pd["aws_usd_month"] == pytest.approx(18, abs=0.5)
     assert pd["mb_day"] == pytest.approx(57.6, abs=1)
+
+
+# -- review fixes ---------------------------------------------------------------------------------------------------
+
+
+def test_police_on_whisper_after_its_budget_waits_longer_and_fire_still_wins():
+    from sizeup.stt import CONTEXT_FALLBACK, CONTEXT_FALLBACK_MAX_WAIT_S, LIVE, RERUN, URGENT
+    assert RERUN < CONTEXT_FALLBACK < CONTEXT and CONTEXT_FALLBACK_MAX_WAIT_S > CONTEXT_MAX_WAIT_S
+    now = [1000.0]
+    q = SttQueue(clock=lambda: now[0])
+    q.put((CONTEXT_FALLBACK, None, "pd-aws-off", None, PD))
+    q.put((CONTEXT, None, "pd-ctx", None, "p25:mrrs:9570"))
+    q.put((RERUN, None, "rerun", None, "FG1"))
+    q.put((LIVE, None, "live", None, "tg:301"))
+    q.put((URGENT, None, "fire", None, "tg:307"))
+    now[0] += CONTEXT_MAX_WAIT_S + 1                     # past 600 s: the plain context clip is shed, police kept
+    got = [q.get(timeout=0)[2] for _ in range(4)]
+    assert got == ["fire", "live", "rerun", "pd-aws-off"]
+    assert q.stats()["shed_context"] == 1
+    q.put((CONTEXT_FALLBACK, None, "pd-2", None, PD))
+    now[0] += CONTEXT_FALLBACK_MAX_WAIT_S + 1
+    q.put((URGENT, None, "fire-2", None, "tg:307"))
+    assert q.get(timeout=0)[2] == "fire-2" and q.stats()["shed_context"] == 2
+
+
+def test_the_station_queues_police_as_fallback_only_while_aws_cant_take_it():
+    from sizeup.incidents import Traffic
+    from sizeup.stt import CONTEXT_FALLBACK
+    ok = {PD: (True, "")}
+    app = SimpleNamespace(tg=SimpleNamespace(tier=lambda tg, system=None: "alert", main=lambda *a: False),
+                          channel_pref=lambda k: {"engine": "aws"}, aws_ok=lambda k: ok[k])
+    app._aws_fallback = App._aws_fallback.__get__(app)
+    prio = App._stt_priority.__get__(app)
+    item = Traffic("i", "PD Dispatch", 0, 1, "", talkgroup=9211)
+    assert prio(item, PD) == CONTEXT                       # on AWS: whisper only as "both" / a rare fallback
+    ok[PD] = (False, "the monthly AWS limit for context talkgroups (police) is reached")
+    assert prio(item, PD) == CONTEXT_FALLBACK
+    app.channel_pref = lambda k: {"engine": "local"}
+    assert prio(item, PD) == CONTEXT                       # set to Local by a person: as before
+
+
+def test_shed_police_clips_while_its_budget_is_used_up_are_a_warning():
+    h = context_hints({"shed_context_h": 2}, {"budget": {"context": {"ok": False, "usd": 15.0, "limit_usd": 15,
+                                                                      "month": "2026-11"}}})
+    assert h[0]["level"] == "warn" and "budget used up" in h[0]["text"] and "missed" in h[0]["text"]
+    assert context_hints({"shed_context_h": 2}, {"budget": {"context": {"ok": True}}})[0]["level"] == "info"
+
+
+def test_restart_recovery_and_resend_use_each_items_own_pool():
+    from sizeup.cloud.hub import HubApp
+    t, _ = svc(limit=25.0, ctx_limit=15.0)
+    t.usage.add(40 / PRICE_PER_MIN * 60, 0, "tg:307")      # ours used up (and its reserve); police has its own
+    sent, failed = [], []
+    t.submit = lambda key, job, pcm: sent.append(key)
+    item = SimpleNamespace(id="pd-1", end=time.time(), status="pending", stt="aws", voice_offset_s=0.0)
+    fire = SimpleNamespace(id="fg-1", end=time.time(), status="pending", stt="aws", voice_offset_s=0.0)
+    import io
+    import wave
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(8000)
+        w.writeframes(b"\0\0" * 8000)
+    hub = SimpleNamespace(aws=t, _aws_since={}, _aws_asked={}, audio=SimpleNamespace(get=lambda i: buf.getvalue()),
+                          _aws_pending=lambda: [(item, PD, "traffic"), (fire, "FG1", "traffic")],
+                          _stt_state=lambda *a: None, _aws_failed=lambda job, why: failed.append(job.id),
+                          hub=SimpleNamespace(log=lambda m: None))
+    assert HubApp._aws_recover.__get__(hub)() == 2
+    assert sent == [PD] and failed == ["fg-1"]              # police to AWS on its own budget, fire to whisper
+    # the context pool coming back (a raised PD budget) resends, not only ours
+    t2, _ = svc(limit=25.0, ctx_limit=15.0)
+    t2.usage.add(16 / PRICE_PER_MIN * 60, 0, PD)
+    resent = []
+    hub2 = SimpleNamespace(aws=t2, _aws_resend=lambda: resent.append(1))
+    check = HubApp._aws_check_resend.__get__(hub2)
+    assert check() is False and hub2._aws_pools_ok == {"": True, POOL: False}
+    t2.context_limit_usd = lambda: 30.0
+    assert check() is True and resent == [1]
+    assert check() is False
+
+
+def test_the_hubs_word_on_aws_keeps_every_channel_and_an_old_station_never_loops():
+    keys = [f"Air {i}" for i in range(12)] + ["tg:307", "South 2", PD]
+    got = channels.hub_aws({"ok": False, "why": "x", "reserve": keys, "deny": [PD], "deny_why": "y"})
+    assert got["reserve"] == keys and got["deny"] == [PD]       # 15 kept (was 8: a 9th lost the police reserve)
+    assert channels.hub_aws({"ok": True}) == {"ok": True, "why": "", "reserve": []}
+    from sizeup.cloud.hub import HubApp
+    t, _ = svc(limit=25.0, ctx_limit=15.0)
+    t.usage.add(16 / PRICE_PER_MIN * 60, 0, PD)
+    for deny_ok, want in ((True, [PD]), (False, None)):
+        hub = SimpleNamespace(aws=t, _chan_ov={}, _tone_ov={}, cfg=SimpleNamespace(stt_record_only=()),
+                              hub=SimpleNamespace(status={"p25_systems": [], "channels": {"deny_ok": deny_ok}}),
+                              aws_ok=lambda: (True, ""), _squelch_ok=lambda: False)
+        hub.aws_split = App.aws_split.__get__(SimpleNamespace(aws=t, context_aws_keys=lambda: [PD]))
+        hub._deny_ok = HubApp._deny_ok.__get__(hub)
+        d = HubApp.channel_desired.__get__(hub)()
+        assert d["aws"].get("deny") == want
+        # an older station echoes a signature without deny: the same as the hub's when it isn't sent
+        if not deny_ok:
+            assert d["sig"] == channels.sig({}, True, {}, [], None)
+
+
+def test_ordinals_and_route_are_said_for_the_fire_and_police_vocabularies():
+    from sizeup.transcribe import spoken, spoken_ordinal, street_spoken, to_aws
+    assert [spoken_ordinal(n) for n in ("1", "2", "3", "4", "5", "8", "9", "11", "12", "20", "21", "100")] == [
+        "first", "second", "third", "fourth", "fifth", "eighth", "ninth", "eleventh", "twelfth", "twentieth",
+        "twenty first", "one hundredth"]
+    assert spoken("3rd Street") == "third Street" and spoken("W 2nd St") == "W second St"
+    assert street_spoken("Old Rte 22") == "Old Route 22" and street_spoken("Rt 1") == "Route 1"
+    assert to_aws(street_spoken("N 1st Ave"))[0] == "North-first-Avenue"
+    built = build_vocabulary(["3rd Street", "Route 120A", "Engine 60"])
+    assert built["respell"]["third street"] == "3rd Street" and built["respell"]["engine sixty"] == "Engine 60"
+    assert respell("units to third street", built["respell"]) == "units to 3rd Street"

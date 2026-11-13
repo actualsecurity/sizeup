@@ -91,7 +91,8 @@ from sizeup.cad import tonelist
 from sizeup.radio.tones import ToneEvent, TonePlan, base_name
 from sizeup.talkers import talker_prompt
 from sizeup import channels
-from sizeup.stt import CONTEXT, HIGH, LIVE, LOW, RERUN, SHED, URGENT, Transcriber, WhisperClient, radio_voice, wav_bytes
+from sizeup.stt import (CONTEXT, CONTEXT_FALLBACK, HIGH, LIVE, LOW, RERUN, SHED, URGENT, Transcriber, WhisperClient,
+                        radio_voice, wav_bytes)
 from sizeup.talkgroups import TalkgroupPrefs
 from sizeup import sourcekeys as sources, tiers
 from sizeup.tts import TtsService
@@ -2358,11 +2359,18 @@ class App:
             return HIGH
         if channels.is_tg(key) and (tier := self.tg.tier(*channels.tg_of(key)[::-1])) is not None:
             # another system's talkgroup (#409): by its tier, in classes under every one of ours and shed when
-            # they wait (sizeup/stt.py CONTEXT): fire traffic never queues behind police
-            return CONTEXT if tier == tiers.ALERT else LOW
+            # they wait (sizeup/stt.py CONTEXT): fire traffic never queues behind police. One set to AWS that AWS can't
+            # take now (its own budget used up, radio-intel PR 3): whisper is its only text, CONTEXT_FALLBACK
+            if tier != tiers.ALERT:
+                return LOW
+            return CONTEXT_FALLBACK if self._aws_fallback(key) else CONTEXT
         if channels.is_tg(key) and not self.tg.main(*channels.tg_of(key)[::-1]):
             return LOW
         return LIVE
+
+    def _aws_fallback(self, key: str) -> bool:
+        """A channel set to AWS (or both) that AWS can't take now: whisper is all it gets."""
+        return self.channel_pref(key).get("engine") in ("aws", "both") and not self.aws_ok(key)[0]
 
     def _stt_dropped(self, item, why: str) -> None:
         """The whisper queue dropped or skipped it (sizeup/stt.py SttQueue, #195): it says so ("Transcription
@@ -2736,10 +2744,7 @@ class App:
             self._apply_named_tones()
             changed = True
         if isinstance(aws, dict):
-            new = {"ok": bool(aws.get("ok")), "why": str(aws.get("why") or "")[:300],
-                   "reserve": [str(k)[:40] for k in (aws.get("reserve") or [])][:8]}
-            if aws.get("deny"):      # context channels past their own AWS budget: whisper here (radio-intel PR 3)
-                new.update(deny=[str(k)[:40] for k in aws["deny"]][:8], deny_why=str(aws.get("deny_why") or "")[:300])
+            new = channels.hub_aws(aws)
             if new != self._hub_aws:
                 self._hub_aws = new
                 self.cad.store.meta_put("hub_aws", json.dumps(new))
@@ -2753,6 +2758,7 @@ class App:
         """What this station runs (its state push: the hub compares sig)."""
         return {"prefs": self._chan_ov, "aws": dict(self._hub_aws), "tones": len(self._tone_ov),
                 "squelch": self._sq_ov, "squelch_ok": True,       # (takes the squelch: a hub sends it)
+                "deny_ok": True,                                  # (takes aws.deny: radio-intel PR 3)
                 "sig": channels.sig(self._chan_ov, self._hub_aws["ok"], self._tone_ov, self._hub_aws.get("reserve"),
                                     self._sq_ov, self._hub_aws.get("deny"))}
 

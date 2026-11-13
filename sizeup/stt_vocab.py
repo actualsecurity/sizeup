@@ -198,13 +198,16 @@ POLICE_PHRASING = ("respond to", "en route", "on scene", "in the area", "be advi
                    "negative", "affirmative", "disregard", "copy", "stand by", "in custody", "transport")
 POLICE_PLACES = ("Village of Port Chester", "City of Rye", "Village of Rye Brook", "Town of Rye", "Harrison",
                  "Greenwich", "Byram", "Mamaroneck", "Purchase", "Westchester County")
-# Gazetteer landmark categories that are public places (the rest, e.g. offices and small shops, may carry a person's name).
-# Never a firehouse: its name ("... Engine & Hose ...") is the fire namespace's.
-PUBLIC_LANDMARKS = re.compile(r"^(?:school|park|worship|police|library|post_office|cemetery|historic|municipal"
-                              r"|amenity=(?:school|library|townhall|courthouse|community_centre|place_of_worship"
+# Gazetteer landmark categories that are public places (the rest, e.g. offices, small shops, a historic house or a small
+# congregation, may carry a person's name). Never a firehouse: its name ("... Engine & Hose ...") is the fire namespace's.
+PUBLIC_LANDMARKS = re.compile(r"^(?:school|park|police|library|post_office|cemetery|municipal"
+                              r"|amenity=(?:school|library|townhall|courthouse|community_centre"
                               r"|theatre|cinema|grave_yard|public_building)|leisure=(?:park|golf_course|marina|stadium"
                               r"|nature_reserve)|shop=(?:mall|shopping_center|supermarket|department_store)"
-                              r"|tourism=(?:attraction|hotel|museum)|historic(?:=.*)?)$")
+                              r"|tourism=(?:attraction|hotel|museum)"
+                              r"|historic=(?:memorial|monument|district|battlefield|fort|ruins|milestone))$")
+# A place named for a person's home ("<name> House", "... Homestead"): left out whatever its category.
+PERSON_PLACE = re.compile(r"\b(?:house|homestead|residence|mansion|estate)\b", re.I)
 FIRE_WORDS = re.compile(r"\b(?:fire|engine|ladder|hose|hook|rescue|firehouse)\b", re.I)
 LANDMARK_WORDS = 6               # a landmark name longer than this many words isn't said on the air as written
 
@@ -300,7 +303,8 @@ def town_landmarks(towns, gazetteer: Path | None = None) -> list[str]:
         c.close()
     out = []
     for name, aliases, cat in rows:
-        if not PUBLIC_LANDMARKS.match(str(cat or "")) or FIRE_WORDS.search(f"{name} {aliases}"):
+        if (not PUBLIC_LANDMARKS.match(str(cat or "")) or FIRE_WORDS.search(f"{name} {aliases}")
+                or PERSON_PLACE.search(f"{name} {aliases}")):
             continue
         for n in [name, *str(aliases or "").split("|")]:
             n = _clean_name(n)

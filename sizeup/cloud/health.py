@@ -192,12 +192,16 @@ def context_hints(sq: dict | None, tr: dict | None) -> list[dict]:
     station's whisper shed in the last hour (lost recall, not quiet), and the police AWS budget used up (whisper)."""
     out = []
     n = (sq or {}).get("shed_context_h")
-    if isinstance(n, int) and n > 0:
-        out.append({"channel": "PD", "text": f"{n} context clip{'s' if n != 1 else ''} shed in the last hour "
-                                             "(whisper busy): not transcribed, pre-alerts may be missed"})
     ctx = ((tr or {}).get("budget") or {}).get("context") or {}
+    denied = bool(ctx) and ctx.get("ok") is False
+    if isinstance(n, int) and n > 0:
+        # on whisper only because its AWS budget is used up: its pre-alerts are being lost, a warning, not a note
+        out.append({"channel": "PD", "level": "warn" if denied else "info",
+                    "text": f"{n} context clip{'s' if n != 1 else ''} shed in the last hour (whisper busy"
+                            + (", PD AWS budget used up" if denied else "") + "): not transcribed, pre-alerts "
+                            + ("missed" if denied else "may be missed")})
     if ctx and ctx.get("ok") is False:
-        out.append({"channel": "PD", "text": f"AWS budget used: ${ctx.get('usd', 0):.2f} / ${ctx.get('limit_usd', 0):g} in "
+        out.append({"channel": "PD", "level": "info", "text": f"AWS budget used: ${ctx.get('usd', 0):.2f} / ${ctx.get('limit_usd', 0):g} in "
                                              f"{ctx.get('month', '')} · on the station's whisper (Settings > Radios)"})
     return out
 

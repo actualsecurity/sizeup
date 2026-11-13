@@ -21,8 +21,9 @@ nothing extra either: it saves the handshake on every transmission.
         ended past it or `quiet_s` has gone by since its last audio was sent. A result still open after
         `settle_s` more gets up to `flush_s` of silence (billed) to finish, then the stream is ended
         (which makes Transcribe finalize everything).
-        Idle: every stream is billed at least 15 s, so a burst of traffic should share one; the stream
-        is ended `idle_s` (default 120) after the last transmission and opened again on demand.
+        Idle: a stream is billed for the audio sent, per second (#423: no per-stream minimum any more), so sharing
+        one costs nothing and saves a handshake per transmission; the stream is ended `idle_s` (default 120) after
+        the last transmission and opened again on demand.
         Transcribe ends a stream that gets no audio for 15 s, so while it waits it gets KEEPALIVE_AUDIO_S
         (0.1 s) of silence every KEEPALIVE_S (10 s): billed as audio, about 1 % of the idle time
         (AWS bills the audio streamed, not the time connected; set idle_s to ~10 if that ever changes).
@@ -1464,9 +1465,28 @@ def spoken_number(d: str) -> str:
     return " ".join(ONES[int(c)] for c in d)
 
 
+ORDINAL_WORDS = {"one": "first", "two": "second", "three": "third", "five": "fifth", "eight": "eighth", "nine": "ninth",
+                 "twelve": "twelfth"}
+ORDINAL = re.compile(r"(?<![A-Za-z0-9])(\d+)(?:st|nd|rd|th)(?![A-Za-z0-9])", re.I)
+
+
+def spoken_ordinal(d: str) -> str:
+    """'3' -> third, '21' -> twenty first, '100' -> one hundredth (as a street is said: 3rd Street, 125th Street)."""
+    words = spoken_number(d).split()
+    last = words[-1]
+    if last in ORDINAL_WORDS:
+        last = ORDINAL_WORDS[last]
+    elif last.endswith("y"):
+        last = last[:-1] + "ieth"
+    else:
+        last += "th"
+    return " ".join(words[:-1] + [last])
+
+
 def spoken(phrase: str) -> str:
-    """A phrase in words: digits spelled out, '/' and '&' said."""
+    """A phrase in words: ordinals said (3rd -> third), digits spelled out, '/' and '&' said."""
     p = phrase.replace("&", " and ").replace("/", " ").replace("_", " ")
+    p = ORDINAL.sub(lambda m: f" {spoken_ordinal(m.group(1))} ", p)
     p = re.sub(r"(?<=[A-Za-z])(?=\d)|(?<=\d)(?=[A-Za-z])", " ", p)
     p = re.sub(r"\d+", lambda m: f" {spoken_number(m.group())} ", p)
     return " ".join(p.split())
@@ -1522,7 +1542,8 @@ def respell(text: str, mapping: dict[str, str]) -> str:
 
 STREET_WORDS = {"St": "Street", "Ave": "Avenue", "Rd": "Road", "Dr": "Drive", "Ln": "Lane", "Pl": "Place", "Ct": "Court",
                 "Ter": "Terrace", "Blvd": "Boulevard", "Cres": "Crescent", "Pkwy": "Parkway", "Hwy": "Highway",
-                "Cir": "Circle", "Tpke": "Turnpike", "Sq": "Square", "Mt": "Mount", "Ext": "Extension"}
+                "Cir": "Circle", "Tpke": "Turnpike", "Sq": "Square", "Mt": "Mount", "Ext": "Extension",
+                "Rte": "Route", "Rt": "Route"}
 STREET_DIRS = {"N": "North", "S": "South", "E": "East", "W": "West"}
 
 

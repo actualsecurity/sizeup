@@ -127,6 +127,19 @@ def effective(p: dict, aws_ok: bool) -> str:
     return eng if eng == "local" or aws_ok else "local"
 
 
+AWS_KEYS_MAX = 16          # channels in the hub's reserve / deny lists (the airband, the pages, Fire/EMS 15, police)
+
+
+def hub_aws(aws: dict) -> dict:
+    """The hub's word on AWS as the station keeps it (set_channel_prefs): ok, why, reserve (channels that keep AWS past
+    our limit) and, when there is one, deny (context channels past their own budget, radio-intel PR 3)."""
+    out = {"ok": bool(aws.get("ok")), "why": str(aws.get("why") or "")[:300],
+           "reserve": [str(k)[:40] for k in (aws.get("reserve") or [])][:AWS_KEYS_MAX]}
+    if aws.get("deny"):
+        out.update(deny=[str(k)[:40] for k in aws["deny"]][:AWS_KEYS_MAX], deny_why=str(aws.get("deny_why") or "")[:300])
+    return out
+
+
 def sig(overrides: dict, aws_ok: bool, tones: dict | None = None, reserve=None, squelch: dict | None = None,
         deny=None) -> str:
     """The same choices + the same AWS availability (+ the same named tone pairs, #80; + the channels that keep
