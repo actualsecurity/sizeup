@@ -3956,7 +3956,7 @@ def init_state(cfg: Config) -> list[str]:
     made: list[str] = []
     if not cfg.cad_db:
         return made
-    Cad.from_config(cfg, log=log).store.db.close()     # the schema, its migrations, the seeded lists
+    Cad.from_config(cfg, log=log).shutdown()           # the schema, its migrations, the seeded lists
     made.append(cfg.cad_db)
     if cfg.cloud_role == "hub":
         from sizeup.cloud.hubstore import AudioDb, MonitorDb

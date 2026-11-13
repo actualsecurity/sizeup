@@ -83,7 +83,7 @@ def test_the_migration_is_idempotent_and_an_older_release_still_opens_the_databa
     c = make_cad(tmp_path, geocoder=fake_geocode)
     iid = at(c, 100)
     c.preplan.create({"incident_id": iid, "kind": "fdc", "lat": lat_of(100) - 0.00005, "lon": LON, "label": "Side A"})
-    c.store.db.close()
+    c.shutdown()
     c = make_cad(tmp_path, geocoder=fake_geocode)                   # opened again: nothing made twice, nothing lost
     assert [p["label"] for p in c.preplan.for_incident(c.store.incident(iid))] == ["Side A"]
     idx = {r["name"] for r in c.store.q("SELECT name FROM sqlite_master WHERE type = 'index'")}
@@ -94,7 +94,7 @@ def test_the_migration_is_idempotent_and_an_older_release_still_opens_the_databa
     plan = " ".join(r["detail"] for r in c.store.q("EXPLAIN QUERY PLAN SELECT * FROM preplan_points WHERE active = 1 "
                                                     "AND cell IN (?, ?)", ("1:2", "1:3")))
     assert "preplan_cell" in plan                                   # nor does a viewport
-    c.store.db.close()
+    c.shutdown()
 
     # the release before this one: no Preplan at all; the extra table is none of its business
     from sizeup.cad import service
@@ -116,7 +116,7 @@ def test_the_migration_is_idempotent_and_an_older_release_still_opens_the_databa
     j = old.store.create_incident(type="ALARM", subtype="COMM", address="102 Example Ave")
     assert any(i["id"] == j for i in old.state()["incidents"])
     assert old.store.q("PRAGMA integrity_check")[0]["integrity_check"] == "ok"
-    old.store.db.close()
+    old.shutdown()
     db = sqlite3.connect(tmp_path / "cad.sqlite")
     assert db.execute("SELECT COUNT(*) FROM preplan_points").fetchone()[0] == 1
     db.close()
@@ -541,7 +541,7 @@ def test_the_generation_never_repeats_across_a_restart(tmp_path):
     before = a.preplan.gen
     box = f"bbox={LON - 0.001},41.0,{LON + 0.001},41.01"
     tag = a.preplan.etag(box, "viewer")
-    a.store.db.close()
+    a.shutdown()
     time.sleep(0.01)
     b = make_cad(tmp_path, geocoder=fake_geocode)
     assert b.preplan.gen > before                                          # a new task: never an old tag again

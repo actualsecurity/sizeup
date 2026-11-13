@@ -289,14 +289,14 @@ def test_an_earlier_builds_triggers_are_taken_off_at_the_start(tmp_path):
     c.store.db.executescript(
         "CREATE TRIGGER radio_changes_t_ins AFTER INSERT ON radio_traffic BEGIN INSERT INTO no_such_table VALUES (1); END;"
         "CREATE TRIGGER radio_changes_a_upd AFTER UPDATE ON alarms BEGIN INSERT INTO no_such_table VALUES (1); END;")
-    c.store.db.close()
+    c.shutdown()
     again = cad(tmp_path, c.clockref, airband=("Tower",))
     assert not change_triggers(again.store)
     assert again.record_traffic(tx("fg-after", c.clockref.t + 60, rig="E63")) == [c.inc["id"]]
     assert not again.comms.changes_broken
     dump = lambda db: "\n".join(db.iterdump())             # noqa: E731
     before = dump(again.store.db)
-    again.store.db.close()
+    again.shutdown()
     assert dump(cad(tmp_path, c.clockref, airband=("Tower",)).store.db) == before       # a start writes nothing
 
 
