@@ -87,46 +87,55 @@ def callsigns(system: str, service: str) -> list[str]:
     return out
 
 
-# Words after which the next number is never a house number: a plate, a radio ID, a unit, a date of birth (#492 review:
-# "...New York ABC 1234 heading down <street>" read as "1234 <street>", "ID 1452 <street>" as "1452 <street>").
-NUMBER_CUES = {"plate", "plates", "tag", "tags", "registration", "reg", "radio", "id", "ids", "unit", "units", "car", "cars",
-               "badge", "dob", "birth", "born", "york", "ny", "connecticut", "ct", "jersey", "nj", "pennsylvania", "pa",
-               "sector", "post", "rmp", "number", "plated"}
-# ... of which a unit's number may be followed by an address ("K9 unit 120 Example Ave": 120 is the house number), an ID's
-# or a plate's never ("ID 1452 Example Ave": fail closed)
-UNIT_WORDS = {"unit", "units", "car", "cars", "sector", "post", "rmp", "number"}
-ID_WORDS = {"id", "ids", "radio", "badge", "dob", "birth", "born"}          # numbers only: never an address after them
-FILLER = {"is", "number", "reads", "of", "was", "say", "says"}
-NOT_PLATE = {"at", "on", "to", "the", "in", "and", "by", "for", "a", "an", "from", "near", "is", "of", "was"}
-SPACED_PLATE = re.compile(r"\b[A-Z]{2,4}[\s-]\d{3,4}\b")                  # ABC 1234, ABC-1234 (as written, upper case)
+# Words after which the next number is never a house number (#492 review: "...New York ABC 1234 heading down <street>"
+# read as "1234 <street>", "ID 1452 <street>" as "1452 <street>"). Two kinds:
+#   plate words: a plate's letters may come first ("york abc 1234", "plate is abc 1234"); a number alone followed by a
+#                street is the address after all ("plate is 120 Example Ave")
+#   digit words: the number right after ("car 3", "radio 1452", "ID 1452"); a unit's number followed by a street is an
+#                address ("K9 unit 120 Example Ave"), an ID's never. Never "units" (plural: "all units go to 120 ...") or
+#                "house number"
+PLATE_CUES = {"plate", "plates", "tag", "tags", "registration", "reg", "plated", "york", "ny", "connecticut", "ct",
+              "jersey", "nj", "pennsylvania", "pa"}
+UNIT_DIGIT_CUES = {"unit", "car", "sector", "post", "rmp"}
+ID_DIGIT_CUES = {"radio", "id", "badge", "dob", "birth", "born"}
+NUMBER_CUES = PLATE_CUES | UNIT_DIGIT_CUES | ID_DIGIT_CUES
+FILLER = {"is", "reads", "of", "was", "number"}
+NOT_PLATE = {"at", "on", "to", "the", "in", "and", "by", "for", "a", "an", "from", "near", "is", "of", "was", "go", "all"}
+SUFFIX = (r"(?:st|street|ave|avenue|av|rd|road|pl|place|ln|lane|dr|drive|blvd|boulevard|ct|court|pkwy|parkway|ter|terrace|"
+          r"way|hwy|highway|tpke|turnpike|cir|circle)")
 STREET_NEXT = re.compile(rf"^\s*(?:[A-Za-z]+\.?\s+){{0,3}}?{SUFFIX}\b", re.I)
+# ABC 1234, ABC-1234 as written (upper case); never a route label ("NY 120", "US 1", "RT 120", "CR 104")
+SPACED_PLATE = re.compile(r"\b(?!(?:NY|US|SR|CR|RT|RTE|CT|NJ|PA|I|ROUTE|HWY|EXIT|MM)[\s-])[A-Z]{2,4}[\s-]\d{3,4}\b")
 TOKEN = re.compile(r"\S+")
 
 
 def cued_numbers(text: str) -> list[str]:
-    """The tokens a NUMBER_CUES word makes not-an-address: up to two short letter groups that lead into a number (a
-    plate's letters), then the token(s) with digits right after ("york abc 1234" -> abc, 1234; "id 1452" -> 1452).
-    "unit 3 at 100 Example Ave" takes only the 3."""
+    """The tokens a cue word makes not-an-address, in order ("york abc 1234" -> abc, 1234; "id 1452" -> 1452;
+    "unit 3 at 100 Example Ave" -> 3)."""
     toks = [m.group(0).strip(".,;:!?()\"'").lower() for m in TOKEN.finditer(text or "")]
     out: list[str] = []
     i = 0
     while i < len(toks):
-        if toks[i] not in NUMBER_CUES:
+        cue = toks[i]
+        if cue not in NUMBER_CUES or (cue == "number" and i and toks[i - 1] == "house"):
             i += 1
             continue
         j = i + 1
-        while j < len(toks) and toks[j] in FILLER:
-            j += 1
-        letters = []
-        while (j < len(toks) and len(letters) < 2 and re.fullmatch(r"[a-z]{1,4}", toks[j]) and toks[j] not in NUMBER_CUES
-               and toks[j] not in NOT_PLATE):
-            letters.append(toks[j])
+        letters: list[str] = []
+        if cue in PLATE_CUES:
+            while j < len(toks) and toks[j] in FILLER:
+                j += 1
+            while (j < len(toks) and len(letters) < 2 and re.fullmatch(r"[a-z]{1,4}", toks[j])
+                   and toks[j] not in NUMBER_CUES and toks[j] not in NOT_PLATE):
+                letters.append(toks[j])
+                j += 1
+        elif j < len(toks) and toks[j] == "number":
             j += 1
         digits = []
-        while j < len(toks) and len(digits) < 2 and re.search(r"\d", toks[j]):
+        while j < len(toks) and len(digits) < (2 if cue in PLATE_CUES else 1) and re.search(r"\d", toks[j]):
             digits.append(toks[j])
             j += 1
-        if digits and toks[i] not in ID_WORDS and not letters and STREET_NEXT.match(" ".join(toks[j:j + 4])):
+        if digits and cue not in ID_DIGIT_CUES and not letters and STREET_NEXT.match(" ".join(toks[j:j + 4])):
             i = j                             # "K9 unit 120 Example Ave", "plate is 120 Example Ave": the address
         elif digits:
             out += letters + digits
@@ -158,7 +167,7 @@ def strip(text: str, system: str = "", service: str = "") -> str:
     t = SPACED_PLATE.sub(" ", t)
     t = _drop_cued(t)
     t = TEN_CODE.sub(" ", t)
-    t = UNIT_NUM.sub(lambda m: m.group(0) if STREET_NEXT.match(t[m.end():]) else " ", t)
+    t = UNIT_NUM.sub(lambda m: m.group(0) if STREET_NEXT.match(m.string[m.end():]) else " ", t)
     t = TIME.sub(" ", t)
     t = MIXED.sub(" ", t)
     for said in callsigns(system, service):
