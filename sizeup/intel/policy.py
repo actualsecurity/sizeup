@@ -126,9 +126,11 @@ class Policy:
                 return Decision(ev.mode, False, "merged", prio)        # a move counts toward max_repush too
             repush = True
         elif change == "reopened":
-            if ev.pushed_at is not None and (now - ev.pushed_at < self.cfg["repush_min"] * 60
-                                             or ev.push_count > self.cfg["max_repush"]):
-                return Decision(ev.mode, False, "merged", prio)        # re-opens obey repush_min and max_repush
+            # only a safety call a nameless disregard marked "possibly cancelled" is ever re-opened (engine.py): new
+            # evidence of it pushes at once, whatever repush_min says, once per such episode; it still counts toward
+            # max_repush, so a disregard / shots back-and-forth pushes at most max_repush more times
+            if ev.pushed_at is not None and ev.push_count > self.cfg["max_repush"]:
+                return Decision(ev.mode, False, "merged", prio)
             repush = ev.pushed_at is not None
         elif change == "updated" or ev.pushed_at is not None:
             if ev.pushed_at is None:

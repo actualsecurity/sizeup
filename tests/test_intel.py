@@ -957,7 +957,7 @@ def test_t3_a_nameless_disregard_never_ends_shots_and_the_repeat_pushes():
     assert x.id == a.id and x.status == "open" and x.note == "possibly cancelled"
     clock.t = 1020 + 4 * 60
     [y] = e.feed(row("t3", "shots fired, 100 Example Ave, multiple callers", clock.t))
-    assert y.id == a.id and y.note == "re-opened" and len(pushed(sink)) == 1   # re-opened; within repush_min (10)
+    assert y.id == a.id and y.note == "re-opened" and len(pushed(sink)) == 2   # pushed at once, whatever repush_min
     # (a re-open past repush_min pushes again: test_u2)
 
 
@@ -1008,7 +1008,7 @@ def test_u2_shots_and_disregard_alternating_never_flood():
         clock.t = 1000 + k * 60
         text = "shots fired at 100 Example Ave" if k % 2 == 0 else "disregard my last"
         e.feed(row(f"t{k}", text, clock.t))
-    assert len(pushed(sink)) == 2 and len(e.events.all()) == 1     # the first, and one re-open past repush_min (10)
+    assert len(pushed(sink)) == 1 + e.policy.cfg["max_repush"] and len(e.events.all()) == 1   # bounded by max_repush
 
 
 def test_u3_moves_count_toward_max_repush():
@@ -1019,3 +1019,12 @@ def test_u3_moves_count_toward_max_repush():
         clock.t = 1000 + k * 330
         e.feed(row(f"t{k}", f"car 3 in pursuit, {places[k % 2]}", clock.t, talker="DISP"))
     assert len(pushed(sink)) == 1 + e.policy.cfg["max_repush"] and len(e.events.all()) == 1   # 1 + 2 moves, then no more
+
+
+
+def test_u4_a_non_safety_call_never_reopens_on_a_nameless_disregard():
+    clock = Clock(1000)
+    e, sink = engine(clock=clock)
+    [a] = e.feed(row("t1", "vehicle pursuit, failed to stop", 1000))
+    e.feed(row("t2", "disregard my last", 1020))                    # not a safety call: ended
+    assert e.events.get(a.id).status == "ended"
