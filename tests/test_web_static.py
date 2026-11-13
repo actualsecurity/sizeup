@@ -163,6 +163,9 @@ def test_no_health_banner_on_the_console_or_the_board_and_health_is_an_admins_ta
     assert body.index('canDo("admin")') < body.index("StationHealth.mount(panel)")
     # the old places (a push's link, a bookmark) land on the tab
     assert 'sec === "health" || (sec === "system" && m[2] === "health")' in s and '"#settings/station/health"' in s
+    # a cold open of #settings/station/health on the hub routes before the first state: no tab chosen, no hash rewritten
+    pick = re.search(r"^function sStationPick\(\) \{(.*?)^\}", s, re.S | re.M).group(1)
+    assert pick.index("if (!cad.state) return false;") < pick.index("history.replaceState")
     assert "StationHealth.mount" not in re.search(r"^function sSystem\(panel\) \{(.*?)^\}", s, re.S | re.M).group(1)
     # the links to the related Data sources row and Push notifications
     for href in ("#settings/system/pushes", "#settings/data/transcribe"):

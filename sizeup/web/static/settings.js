@@ -21,7 +21,7 @@ const S = {
   toneQ: "", toneShow: "", toneType: "", toneEdit: null, unnamedEdit: null,      // Radios > Tones (#115, #122)
   toneOpen: new Set(), entEdit: null, entMerge: null, toneMove: null, toneAdd: null,
   dsFocus: "", pushScrolled: "",                     // #settings/data/<key>: that row; #settings/system/pushes: that card
-  stab: "",                                          // Settings > Station: the tab (#settings/station/<tab>)
+  stab: "", stationShown: false,                     // Settings > Station: the tab (#settings/station/<tab>)
 };
 // The sections, by what they are about: the CAD's lists and run cards, people, the radios, the station (its health, its
 // logs, its hub link) and the hub's data sources, then System (records, backup, audit, the hub's own switches).
@@ -189,10 +189,8 @@ function sRoute() {
     history.replaceState(null, "", "#settings/station/health");
   }
   if (sec === "station") {
-    const tabs = sStationTabs();
-    if (tabs.some(([k]) => k === m[2])) S.stab = m[2];
-    if (!tabs.some(([k]) => k === S.stab)) S.stab = tabs.length ? tabs[0][0] : "";
-    if (S.stab && location.hash !== `#settings/station/${S.stab}`) history.replaceState(null, "", `#settings/station/${S.stab}`);
+    if (S_STATION_TABS.some(([k]) => k === m[2])) S.stab = m[2];
+    sStationPick();          // (before the first state: the tab asked for is kept, the hash untouched)
   }
   S.dsFocus = sec === "data" ? m[2] || "" : "";
   if (location.hash !== "#settings/system/pushes") S.pushScrolled = "";
@@ -589,6 +587,7 @@ function sUnnamed(d) {
 
 function sHook() {                 // every render (cad.js): keep up with edits made elsewhere
   sStationTab();
+  if (S.section === "station" && cad.state && !S.stationShown && S.data) sRender(true);   // the first state: its tab
   if (!S.section) return;
   if (S.section === "runcards") sRunTools();
   if (cad.state && S.data && cad.state.rev !== S.data.rev && !S.loading) sLoad();
@@ -1701,7 +1700,7 @@ function sHubErrors(e) {
       + `${e.window_min} min, or all errors exceed ${e.total.value}. Names the module and type, never the message. `
       + `At most hourly per error; 'back to normal' after ${e.quiet_min} quiet min.`)));
   card.id = "s-hub-errors";
-  const [lab, cb] = sCheck(e.on.label, e.on.value, "Off: still counted on Settings > Health, nothing pushed");
+  const [lab, cb] = sCheck(e.on.label, e.on.value, "Off: still counted on Settings > Station > Health, nothing pushed");
   cb.disabled = !canDo("admin");
   cb.addEventListener("change", () => sPost("hub_errors", { action: "set", key: "on", value: cb.checked },
     `${e.on.label}: ${cb.checked ? "on" : "off"}`));
@@ -1842,14 +1841,30 @@ function sStationTabs() {
   const hubAdmin = canDo("admin") && sIsHub();
   return S_STATION_TABS.filter(([k]) => (k === "link" ? !sIsHub() : hubAdmin));
 }
+// The tab in effect, once the state says whether this is the hub (a cold open of #settings/station/health on the hub
+// runs before cad.state: nothing is chosen or rewritten until then).
+function sStationPick() {
+  if (!cad.state) return false;
+  const tabs = sStationTabs();
+  if (!tabs.some(([k]) => k === S.stab)) S.stab = tabs.length ? tabs[0][0] : "";
+  if (S.section === "station" && S.stab && location.hash !== `#settings/station/${S.stab}`) {
+    history.replaceState(null, "", `#settings/station/${S.stab}`);
+  }
+  return true;
+}
 function sStationTab() {           // the nav item: shown while it has a tab (an admin on the hub; anyone off it)
   const a = document.querySelector('#s-sections a[data-s="station"]');
   if (a) show(a.parentNode, sStationTabs().length > 0);
 }
 function sStationPanel(panel) {
-  const tabs = sStationTabs();
-  if (!tabs.some(([k]) => k === S.stab)) S.stab = tabs.length ? tabs[0][0] : "";
   const bar = $("#s-station-tabs");
+  if (!sStationPick()) {                 // the state isn't in yet: sHook renders again when it is
+    show(bar, false);
+    for (const n of panel.querySelectorAll("[data-stab]")) show(n, false);
+    return;
+  }
+  S.stationShown = true;
+  const tabs = sStationTabs();
   bar.replaceChildren(...tabs.map(([k, t]) => {
     const b = sBtn(t, "", () => {
       S.stab = k;
@@ -1932,7 +1947,7 @@ async function sPushes(card) {
   kids.push(sRow);
   if (S.data.alert_mutes) kids.push(...sMutes(S.data.alert_mutes));
   card.hidden = false;
-  if (location.hash === "#settings/system/pushes" && S.pushScrolled !== location.hash) {     // from Settings > Health
+  if (location.hash === "#settings/system/pushes" && S.pushScrolled !== location.hash) {     // from Settings > Station > Health
     S.pushScrolled = location.hash;
     requestAnimationFrame(() => card.scrollIntoView({ block: "start" }));
   }
@@ -1943,12 +1958,12 @@ async function sPushes(card) {
     + `them. Never Tapout's topics (${d.forbidden.join(", ")}): refused. ${d.min_len} to ${d.max_len} letters, digits, - and _; `
     + "ntfy topics are public by name, so make them long and random. Only admins see the names.")), ...kids);
 }
-// Health alerts muted (#340, health.py MUTE_KINDS): still on Settings > Health, not pushed (nor their recovery).
+// Health alerts muted (#340, health.py MUTE_KINDS): still on Settings > Station > Health, not pushed (nor their recovery).
 const S_MUTE_FOR = [["", "Until unmuted"], ["1", "1 h"], ["24", "24 h"], ["168", "7 days"]];
 function sMutes(m) {
   const head = el("div", "row");
   head.append(el("b", "s-eta-l", "Mute alerts"), el("span", "dim small", `${m.kinds.filter((k) => k.muted).length} muted`));
-  if (window.Help && Help.info) head.append(Help.info("A muted alert still shows on Settings > Health, not pushed. One pushed before the mute still gets its recovery."));
+  if (window.Help && Help.info) head.append(Help.info("A muted alert still shows on Settings > Station > Health, not pushed. One pushed before the mute still gets its recovery."));
   const rows = m.kinds.map((k) => {
     const [lab, cb] = sCheck(k.label, k.muted, k.muted ? "Unmute: pushed again" : "Mute: Health only, no push");
     const sel = sSelect(k.timed_only ? S_MUTE_FOR.slice(1) : S_MUTE_FOR, "24", null, `${k.label}: mute for`);
