@@ -32,6 +32,7 @@ from sizeup.cad.comms import (COUNT_MINUTES, MAIN_LIMIT, MAX_ROWS, MUTE_MAX, OTH
                               VIEWS, Comms)
 from sizeup.cad.history import AddressHistory
 from sizeup.cad.premise import Premise
+from sizeup.cad.sttfix import SttCorrections
 from sizeup.cad.preplan import Preplan
 from sizeup.cad.feed import Feed
 from sizeup.cad.newids import NewIds
@@ -363,6 +364,8 @@ class Cad:
         # Pre-plan points (#456, sizeup/cad/preplan.py): where a building's Knox box, FDC, shutoffs ... are, on the map of
         # every call there. gis: the county layers (the app sets it: the building footprints a point is linked to).
         self.preplan = Preplan(self)
+        # Hand-corrected transcripts (sizeup/cad/sttfix.py): the private reference set for speech-to-text evaluation (#428)
+        self.stt_fix = SttCorrections(self)
         self.gis = None
 
     @classmethod

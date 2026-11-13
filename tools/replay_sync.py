@@ -60,7 +60,9 @@ OWNER = "504804195561"         # the account both buckets must belong to (head-b
 AIRBAND = re.compile(r"^(HPNTower|HPNGround|NYApproach)-\d+$")
 CLIP_KEYS = {"id", "channel", "at", "bytes", "file"}
 # what each kind may hold, by name ending; the content of each is sniffed (sniff())
-ALLOWED = {"adsb": (".jsonl.gz", ".json"), "camera": (".xml", ".json", ".m3u8", ".ts"), "audio": (".wav", ".json")}
+ALLOWED = {"adsb": (".jsonl.gz", ".json"), "camera": (".xml", ".json", ".m3u8", ".ts"), "audio": (".wav", ".json"),
+           "mrrs-intel": (".jsonl.gz", ".json")}
+LOCAL_ONLY = ("mrrs-intel",)  # kinds never pushed: they hold transcripts (tools/intel_replay.py --capture)
 SAFE_PART = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.:-]{0,127}$")
 
 
@@ -270,6 +272,9 @@ def push(args) -> int:
     owned(url)
     rc = 0
     for name, _doc in sets(root):                  # set by set: only <kind>/<set>/ is ever sent
+        if name.split("/")[0] in LOCAL_ONLY:
+            print(f"kept local: {name} (never pushed)")
+            continue
         rc = aws("s3", "sync", str(root / name) + "/", f"{url}/{name}/", "--only-show-errors", "--sse", "AES256",
                  "--no-follow-symlinks", "--exclude", ".*", "--exclude", "*/.*",
                  *(["--dryrun"] if args.dryrun else [])) or rc

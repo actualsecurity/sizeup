@@ -1632,6 +1632,7 @@ function sSystem(panel) {
     ...(sy && S.data.map_display ? [sMapDisplay(S.data.map_display)] : []),
     ...(sy && S.data.premise_visibility ? [sPremiseVisibility(S.data.premise_visibility)] : []),
     ...(sy && S.data.audio_retention && canDo("admin") ? [sAudioRetention(S.data.audio_retention)] : []),
+    ...(sy && canDo("admin") && window.SttFix ? [SttFix.card()] : []),        // transcript corrections (stt-fix.js)
     sCard(sCardHead("Records"), recs, counts),
     ...(S.data.camera_wall ? [sCameraWall(S.data.camera_wall)] : []),
     sCard(sCardHead("Data file"), file),

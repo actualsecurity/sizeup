@@ -1468,6 +1468,7 @@ function txMenuItems(t) {
     const waiting = rerunWaiting(t);
     items.push({ label: waiting ? "Re-transcribing…" : "Re-transcribe", disabled: t.has_audio === false || waiting,
                  hint: t.has_audio === false ? "audio expired" : "", run: () => rerunTx(t) });
+    if (window.SttFix) items.push({ label: "Correct transcript", run: () => SttFix.open(t) });   // stt-fix.js
   }
   items.push({ label: "Copy text", disabled: !t.text, run: () => copyText(t) });
   return items;
