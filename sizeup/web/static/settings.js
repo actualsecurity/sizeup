@@ -279,7 +279,8 @@ const S_EM_LABELS = { fire: "Fire", ems: "EMS", police: "Police", transit: "Tran
 function sEmergencies(e) {
   const card = sCard(sCardHead("Emergencies", "", sHelp("Someone else's emergency button on these services stands out on the "
     + "Radio page (a banner over the list, the row marked). On any other service (a bus, DOT): a muted EM chip, its "
-    + "detail in the hover. Ours (our fire channels, our rigs, scene safety) always stand out. What is recorded, kept, "
+    + "detail in the hover. Ours (our fire channels, our rigs, scene safety) and a channel with no known service always "
+    + "stand out. What is recorded, kept, "
     + "alarmed and pushed doesn't change.")));
   card.id = "s-radio-emergencies";
   const row = el("div", "row");

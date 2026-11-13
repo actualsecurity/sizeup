@@ -77,7 +77,7 @@ window.RadioNav = (() => {
   const emText = (s) => (s.em === "ours" ? "EMERGENCY" : s.stuck ? `Emergency flag stuck on ${s.stuck}` : "Emergency (not ours)");
   // The services whose emergencies stand out when they aren't ours (Settings > Radios > Emergencies; cad.js emLoud):
   // anyone else's (a bus, DOT) is quiet: a muted EM on its channel only, never over the list, its view or Sources.
-  const EM_LOUD = ["fire", "ems"];
+  const EM_LOUD = ["fire", "ems", "other"];
   const loudServices = () => {
     const v = typeof cad !== "undefined" && cad.state && cad.state.radio_emergencies;
     return v && Array.isArray(v.prominent) ? v.prominent : EM_LOUD;
@@ -93,8 +93,9 @@ window.RadioNav = (() => {
       const em = s.emergency || "";
       return { ...s, mute, pin: pins.has(s.key), n: mute ? 0 : unread(s, p.seen[s.key], now),
                live: !!s.live || live.has(s.key), recent: !!s.last && now - s.last < RECENT_S,
-               // quiet: someone else's emergency (or its window alone) on a service that doesn't stand out
-               em, quiet: !!(em || until) && em !== "ours" && !s.ours && !loud.includes(s.service || "other"),
+               // quiet: someone else's emergency (or its window alone) on a service that is known and doesn't
+               // stand out; a source with no service is never quiet
+               em, quiet: !!(em || until) && em !== "ours" && !s.ours && !!s.service && !loud.includes(s.service),
                until, code: t ? t[0] : "", tip: t ? t[1] : "" };
     });
     const views = VIEWS.filter(([v]) => v === "ours" || v === "all" || rows.some((s) => inView(s, v))).map(([id, name, mark, service]) => {

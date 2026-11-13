@@ -1043,13 +1043,18 @@ document.addEventListener("click", (e) => {
 // row): ours (the alarm, alarm_level "alarm") a red EMERGENCY chip (MAYDAY ... for words alone) and a red row;
 // someone else's (a notice) amber "Emergency (not ours)" and an amber edge; then who acknowledged it and when, and
 // the all clear. A flag with no alarm of its own (the same radio again, its alarm still open): amber, "Emergency button".
-// Someone else's emergency on a service Settings > Radios > Emergencies doesn't list (fire and EMS by default: a bus,
-// DOT, transit, another town's police) is quiet: a muted "EM" chip, its detail in the hover, no row mark.
-const EM_LOUD = ["fire", "ems"];
+// Someone else's emergency on a service Settings > Radios > Emergencies doesn't list (fire, EMS and other by default:
+// so a bus, DOT, transit, another town's police) is quiet: a muted "EM" chip, its detail in the hover, no row mark.
+// Quiet ONLY when the service is known and not listed. Loud whenever unsure: no service on the row, ours (an alarm,
+// our channel, one of our rigs keyed it, its talkgroup's window is ours), scene safety.
+const EM_LOUD = ["fire", "ems", "other"];
 function emLoud(t) {
-  if (t.alarm_level === "alarm" || t.ours || (t.safety && t.safety !== "dismissed")) return true;   // ours, scene safety
-  const set = typeof cad !== "undefined" && cad.state && cad.state.radio_emergencies;
-  return (set && Array.isArray(set.prominent) ? set.prominent : EM_LOUD).includes(t.service || "other");
+  if (t.alarm_level === "alarm" || t.ours || t.em_ours || (t.safety && t.safety !== "dismissed") || !t.service) return true;
+  const st = (typeof cad !== "undefined" && cad.state) || {};
+  if (t.talkgroup !== null && t.talkgroup !== undefined && (!t.system || t.system === "westchester")
+      && ((st.alarms && st.alarms.windows) || []).some((w) => w.ours && w.talkgroup === t.talkgroup)) return true;
+  const set = st.radio_emergencies;
+  return (set && Array.isArray(set.prominent) ? set.prominent : EM_LOUD).includes(t.service);
 }
 function emergencyChip(t) {
   if (!t.emergency && !t.alarm_id) return null;

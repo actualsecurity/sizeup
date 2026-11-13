@@ -417,11 +417,21 @@ out.kept = pick(keptChip({ kept: "emergency", service: "fire" }));
 const full = (n) => (n ? { cls: n.cls, text: n.text, title: n.title } : null);
 out.bus = full(emergencyChip({ emergency: 1, alarm_id: 7, alarm_level: "notice", talkgroup: 4100, service: "transit",
                                ack_by: "Dana <d@x>", ack_at: 1 }));
-out.busStuck = pick(emergencyChip({ emergency: 1, alarm_id: 7, alarm_level: "notice", service: "other", alarm_stuck: "VAN7 (4107)" }));
+out.busStuck = pick(emergencyChip({ emergency: 1, alarm_id: 7, alarm_level: "notice", service: "transit", alarm_stuck: "VAN7 (4107)" }));
 out.busDrill = pick(emergencyChip({ emergency: 1, alarm_id: 7, alarm_level: "notice", service: "transit", drill: true }));
 out.busKept = full(keptChip({ kept: "emergency", service: "transit" }));
 out.oursOnTransit = pick(emergencyChip({ emergency: 1, alarm_id: 8, alarm_level: "alarm", service: "transit" }));
-out.ourChannel = pick(emergencyChip({ emergency: 1, alarm_id: null, alarm_level: "", service: "other", ours: 1 }));
+out.ourChannel = pick(emergencyChip({ emergency: 1, alarm_id: null, alarm_level: "", service: "transit", ours: 1 }));
+// unsure is loud: no service on the row; "other" (Trunk Ops, Interop, OEM) by default; one of our rigs on someone
+// else's talkgroup (a repeat press: no alarm row of its own); a row on a talkgroup whose window is ours
+out.other = pick(emergencyChip({ emergency: 1, alarm_id: 9, alarm_level: "notice", service: "other" }));
+out.ourRig = pick(emergencyChip({ emergency: 1, alarm_id: null, alarm_level: "", service: "transit", em_ours: true }));
+cad.state.alarms = { windows: [{ talkgroup: 4100, ours: true, until: 9 }, { talkgroup: 4300, ours: false, until: 9 }] };
+out.oursWindow = pick(emergencyChip({ emergency: 1, alarm_id: null, alarm_level: "", service: "transit", talkgroup: 4100 }));
+out.oursWindowKept = pick(keptChip({ kept: "emergency", service: "transit", talkgroup: 4100, system: "westchester" }));
+out.othersWindow = pick(emergencyChip({ emergency: 1, alarm_id: null, alarm_level: "", service: "transit", talkgroup: 4300 }));
+out.otherSystemsTg = pick(emergencyChip({ emergency: 1, alarm_id: null, alarm_level: "", service: "transit", talkgroup: 4100, system: "metro" }));
+cad.state.alarms = null;
 out.safety = pick(emergencyChip({ emergency: 1, alarm_id: 9, alarm_level: "notice", service: "police", safety: "officer" }));
 out.dismissed = pick(emergencyChip({ emergency: 1, alarm_id: 9, alarm_level: "notice", service: "police", safety: "dismissed" }));
 out.noService = pick(emergencyChip({ emergency: 1, alarm_id: 9, alarm_level: "notice" }));
@@ -431,6 +441,7 @@ out.busKeptLoud = pick(keptChip({ kept: "emergency", service: "transit" }));
 cad.state.radio_emergencies = { prominent: [] };
 out.fireQuiet = pick(emergencyChip({ emergency: 1, alarm_id: 7, alarm_level: "notice", service: "fire" }));
 out.oursStill = pick(emergencyChip({ emergency: 1, alarm_id: 8, alarm_level: "alarm", service: "fire" }));
+out.noServiceStill = pick(emergencyChip({ emergency: 1, alarm_id: 9, alarm_level: "notice" }));
 out.notKept = pick(keptChip({ kept: "" }));
 console.log(JSON.stringify(out));
 """
@@ -480,13 +491,18 @@ def test_the_row_chip_and_the_folded_group_in_the_pages_own_code(tmp_path):
     assert out["busStuck"] == {"cls": "chip em-quiet", "text": "EM"} and out["busDrill"]["text"] == "DRILL · EM"
     assert (out["busKept"]["cls"], out["busKept"]["text"]) == ("em-dot", "•")
     assert out["busKept"]["title"].startswith("Kept: emergency window. ")
-    assert out["noService"]["cls"] == "chip em-quiet" and out["dismissed"]["cls"] == "chip em-quiet"
+    assert out["dismissed"]["cls"] == "chip em-quiet"
+    for k in ("noService", "other", "ourRig", "oursWindow"):                      # unsure, or ours: loud
+        assert out[k]["cls"] == "chip emergency em-other", k
+    assert out["oursWindowKept"]["text"] == "kept: emergency window"
+    assert out["othersWindow"]["cls"] == "chip em-quiet" and out["otherSystemsTg"]["cls"] == "chip em-quiet"
     assert out["oursOnTransit"] == {"cls": "chip emergency", "text": "EMERGENCY"}
     assert out["ourChannel"]["cls"] == "chip emergency em-other" and out["safety"]["cls"] == "chip emergency em-other"
     # the setting: transit made prominent stands out as before; none prominent quiets even fire, never ours
     assert out["busLoud"] == {"cls": "chip emergency em-other", "text": "Emergency (not ours)"}
     assert out["busKeptLoud"]["text"] == "kept: emergency window"
     assert out["fireQuiet"]["cls"] == "chip em-quiet" and out["oursStill"]["cls"] == "chip emergency"
+    assert out["noServiceStill"]["cls"] == "chip emergency em-other"             # blank: loud whatever the setting
     h = tmp_path / "groups.js"
     h.write_text(GROUPS_HARNESS)
     groups = json.loads(subprocess.run([NODE, str(h), str(STATIC / "radio-view.js")], capture_output=True, text=True,
@@ -505,9 +521,9 @@ def test_the_prominent_services_are_a_radios_setting(tmp_path):
     exported and imported again. Presentation only: someone else's button still raises its notice, never a push."""
     cad = make_cad(tmp_path)
     page = cad.settings.page()["radio_emergencies"]
-    assert page == {"prominent": ["fire", "ems"], "default": ["fire", "ems"], "edited": False,
+    assert page == {"prominent": ["fire", "ems", "other"], "default": ["fire", "ems", "other"], "edited": False,
                     "choices": ["fire", "police", "ems", "transit", "air", "other"]}
-    assert cad.state()["radio_emergencies"] == {"prominent": ["fire", "ems"]}
+    assert cad.state()["radio_emergencies"] == {"prominent": ["fire", "ems", "other"]}
     assert needs("/api/cad/settings/radio_emergencies") == "admin"
     out = cad.settings_post("radio_emergencies", {"action": "set", "key": "prominent", "value": ["transit", "fire"],
                                                   "operator": "Lt. Test"})
@@ -516,7 +532,7 @@ def test_the_prominent_services_are_a_radios_setting(tmp_path):
     def audit():
         return [r for r in cad.settings.audit_log("radios") if r["key"] == "radio_emergencies/prominent"]
     (a,) = audit()
-    assert (a["operator"], a["old"], a["new"]) == ("Lt. Test", "fire, ems", "fire, transit")
+    assert (a["operator"], a["old"], a["new"]) == ("Lt. Test", "fire, ems, other", "fire, transit")
     # the same again: nothing written, nothing audited
     cad.settings_post("radio_emergencies", {"action": "set", "key": "prominent", "value": ["fire", "transit"], "operator": "Lt. Test"})
     assert len(audit()) == 1
@@ -535,8 +551,8 @@ def test_the_prominent_services_are_a_radios_setting(tmp_path):
     assert cad.state()["radio_emergencies"] == {"prominent": []}
     cad.settings_post("radio_emergencies", {"action": "reset", "key": "prominent", "operator": "Lt. Test"})
     assert cad.settings.page()["radio_emergencies"]["edited"] is False
-    assert cad.state()["radio_emergencies"] == {"prominent": ["fire", "ems"]}
-    assert [r["new"] for r in audit()][:2] == ["fire, ems", "none"]
+    assert cad.state()["radio_emergencies"] == {"prominent": ["fire", "ems", "other"]}
+    assert [r["new"] for r in audit()][:2] == ["fire, ems, other", "none"]
 
 
 def test_someone_elses_button_is_still_a_notice_and_never_pushed(tmp_path):
@@ -554,7 +570,7 @@ def test_someone_elses_button_is_still_a_notice_and_never_pushed(tmp_path):
 
 
 QUIET_GROUPS = r"""
-global.emLoud = (t) => t.alarm_level === "alarm" || !!t.ours || ["fire", "ems"].includes(t.service || "other");
+global.emLoud = (t) => t.alarm_level === "alarm" || !!t.ours || !t.service || ["fire", "ems", "other"].includes(t.service);
 const rows2 = [
   { id: "q1", talkgroup: 4100, channel: "Metro Transit 1", start: 260, text: "", status: "no_speech", service: "transit",
     emergency: 1, alarm_id: 7, alarm_level: "notice" },
@@ -701,3 +717,89 @@ def test_a_quiet_emergency_is_acknowledged_and_cleared_from_its_rows_menu(tmp_pa
     for k in ("cleared", "fire", "plain", "viewer"):
         assert "All clear" not in out[k] and "Acknowledge emergency" not in out[k], k
     assert "/api/cad/alarm/${t.alarm_id}/${what}" in (STATIC / "cad.js").read_text()
+
+
+# -- unsure is loud; quiet only for a service that is known and not prominent -------------------------------------------
+
+
+def test_the_countys_bus_talkgroups_are_transit_and_the_shared_ones_other():
+    """The county file's tags as the classifier reads them (deploy/trunk-recorder/talkgroups.csv): DOT (the buses'
+    dispatch, supervisors, maintenance) is transit, so it goes quiet; Operations, Interop/Events and OEM (where a
+    mutual-aid firefighter or an unmapped portable of ours could be) are "other": prominent by default."""
+    import csv
+
+    from sizeup import sourcekeys
+    path = Path(__file__).resolve().parent.parent / "deploy" / "trunk-recorder" / "talkgroups.csv"
+    tags = {r["Tag"] for r in csv.DictReader(path.open())}
+    got = {t: sourcekeys.service(t) for t in tags}
+    assert got["DOT"] == "transit" and got["Fire/EMS"] == "fire" and got["County Police"] == "police"
+    assert got["Hospital"] == "ems"
+    assert {got[t] for t in ("Operations", "Interop/Events", "OEM")} == {"other"}
+    for words in ("Bee-Line", "Bus Dispatch", "County Transit", "Paratransit", "Metro Buses"):
+        assert sourcekeys.service(words) == "transit", words
+
+
+def test_an_unknown_or_other_service_is_never_quiet_by_default(tmp_path):
+    cad = make_cad(tmp_path)
+    blank = _button(cad, "5100-1-call_1", "Ops 1", 5100, "", "P901", "5901")
+    other = _button(cad, "5200-1-call_1", "Interop 1", 5200, "other", "P902", "5902")
+    bus = _button(cad, "4100-1-call_1", "Metro Transit 1", 4100, "transit", "VAN7", "4107")
+    quiet = {a["id"]: a["quiet"] for a in cad.alarms.state()["notices"]}
+    assert quiet == {blank["id"]: False, other["id"]: False, bus["id"]: True}
+    assert {w["talkgroup"]: w["quiet"] for w in cad.alarms.state()["windows"]}[5200] is False
+    # a row with no service at all, whatever the setting: never quiet
+    assert cad.store.one("SELECT service FROM radio_traffic WHERE id = '5100-1-call_1'")["service"] == ""
+    cad.settings_post("radio_emergencies", {"action": "set", "key": "prominent", "value": [], "operator": "Lt. Test"})
+    quiet = {a["id"]: a["quiet"] for a in cad.alarms.state()["notices"]}
+    assert quiet == {blank["id"]: False, other["id"]: True, bus["id"]: True}
+    assert cad.alarms._quiet("no-such-row") is False                            # not in the log: shown as before
+
+
+def test_a_window_on_a_full_alarm_is_never_quiet(tmp_path):
+    """"Other agency's button: the full alarm": the bus's button is an alarm, so its window is not quiet (All clear
+    stays on the screens) though its service is transit."""
+    cad = make_cad(tmp_path)
+    cad.settings_post("alarms", {"action": "set", "key": "other", "value": "alarm", "operator": "Lt. Test"})
+    a = _button(cad, "4100-1-call_1", "Metro Transit 1", 4100, "transit", "VAN7", "4107")
+    assert a["level"] == "alarm"
+    s = cad.alarms.state()
+    (w,) = s["windows"]
+    assert (w["alarm_id"], w["ours"], w["quiet"]) == (a["id"], False, False) and [x["id"] for x in s["open"]] == [a["id"]]
+    cad.alarm_ack(a["id"], {"operator": "Lt. Test"})                            # seen: the window's own line, All clear on it
+    (w,) = cad.alarms.state()["windows"]
+    assert w["quiet"] is False
+    cad.alarm_clear(a["id"], {"operator": "Lt. Test"})
+    assert cad.alarms.state()["windows"] == []
+
+
+def test_our_rig_on_another_agencys_talkgroup_is_loud_repeat_presses_too(tmp_path):
+    """One of our rigs presses the button on a transit talkgroup, twice: the alarm, its window ours; the second press
+    has no alarm row of its own, and its row still says one of ours keyed it (em_ours: cad.js emLoud)."""
+    cad = make_cad(tmp_path)
+    kw = dict(source="Metro Transit 1", talkgroup=4100, unit="E64 P1", radio_id="6401", rig="E64", service="transit")
+    t1 = row(cad, id="4100-1-call_1", emergency=True, **kw)
+    a = cad.alarms.on_traffic(dict(tx(t1["id"], emergency=True, **{k: v for k, v in kw.items() if k != "service"}),
+                                   start=t1["start"], end=t1["end"]))
+    t2 = row(cad, id="4100-2-call_2", emergency=True, at=t1["start"] + 20, **kw)
+    again = cad.alarms.on_traffic(dict(tx(t2["id"], emergency=True, **{k: v for k, v in kw.items() if k != "service"}),
+                                       start=t2["start"], end=t2["end"]))
+    assert a["level"] == "alarm" and again["id"] == a["id"]
+    bus = row(cad, id="4100-3-call_3", unit="VAN7", radio_id="4107", source="Metro Transit 1", talkgroup=4100,
+              service="transit", emergency=True, at=t1["start"] + 25)
+    got = rows_of(cad)
+    assert (got[t2["id"]]["alarm_id"], got[t2["id"]]["em_ours"], got[t1["id"]]["em_ours"]) == (None, True, True)
+    assert got[bus["id"]]["em_ours"] is False
+    (w,) = cad.alarms.state()["windows"]
+    assert w["ours"] is True and w["quiet"] is False
+
+
+def test_a_windows_talkgroup_is_looked_up_on_the_county_system_only(tmp_path):
+    """A window with no alarm (notices off): quiet by the newest row on its talkgroup of the county system; another
+    system's row with the same talkgroup number says nothing about it."""
+    cad = make_cad(tmp_path)
+    cad.settings_post("alarms", {"action": "set", "key": "other", "value": "off", "operator": "Lt. Test"})
+    assert _button(cad, "4100-1-call_1", "Metro Transit 1", 4100, "transit", "VAN7", "4107") is None
+    (w,) = cad.alarms.state()["windows"]
+    assert w["alarm_id"] is None and w["quiet"] is True
+    cad.store.db.execute("UPDATE radio_traffic SET system = 'metro'")
+    assert cad.alarms.state()["windows"][0]["quiet"] is False                   # nothing of the county's on it: shown

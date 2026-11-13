@@ -509,6 +509,7 @@ class Alarms:
         self.notifier = None                      # sizeup/notify.py Notifier, or None: no pushes
         self.public_url = ""                      # the CAD's address, for the push's link
         self.windows = Windows(clock=self.clock, log=log)
+        self.store.rig_ours = self._ours          # comms.with_alarms: a row keyed by one of our rigs (its em_ours)
         with self.store.lock:
             for stmt in SCHEMA.split(";"):
                 if stmt.strip():
@@ -1044,7 +1045,7 @@ class Alarms:
             a["quiet"] = self._quiet(a["traffic_id"])
         windows = self.windows.state(now)
         for w in windows:
-            w["quiet"] = not w.get("ours") and self._quiet(alarm_id=w.get("alarm_id"), tg=w.get("talkgroup"))
+            w["quiet"] = not w.get("ours") and self._quiet(alarm_id=w.get("alarm_id"), tg=w.get("talkgroup"))   # (ours: never)
         return {"drill": bool(self.config()["drill"]),   # no clock here: the state has it, and the push sends what changed (#137)
                 "open": self._rows("a.ack_at IS NULL AND a.level = 'alarm'", (), 20),
                 "notices": notices,
@@ -1054,25 +1055,31 @@ class Alarms:
     def _quiet(self, traffic_id: str = "", alarm_id=None, tg=None) -> bool:
         """Someone else's emergency on a service Settings > Radios > Emergencies doesn't list (fire and EMS by default:
         a bus, DOT): the screens show no strip and no toast for it, only the muted EM on its row in Radio (cad.js
-        emLoud, the same rule). By its transmission's row (traffic_id, an alarm's, or the talkgroup's newest): not
-        quiet when the row is ours or a scene-safety one, or isn't in the log. Presentation only."""
+        emLoud, the same rule). By its transmission's row (traffic_id, an alarm's, or the newest on the talkgroup of the
+        county system: a window is the county's). Quiet ONLY when that row's service is known and isn't listed. Never
+        when unsure: the row isn't in the log, its service is blank, it is ours, one of our rigs keyed it, it is a
+        scene-safety row, or its alarm is a full alarm ("Other agency's button: the full alarm"). Presentation only."""
         try:
-            if not traffic_id and alarm_id is not None:
-                a = self.store.one("SELECT traffic_id FROM alarms WHERE id = ?", (alarm_id,))
-                traffic_id = (a or {}).get("traffic_id") or ""
+            if alarm_id is not None:
+                a = self.store.one("SELECT traffic_id, level, rig FROM alarms WHERE id = ?", (alarm_id,))
+                if a is not None and (a["level"] == "alarm" or self._ours(a["rig"])):
+                    return False
+                traffic_id = traffic_id or (a or {}).get("traffic_id") or ""
+            cols = "service, ours, safety, rig"
             if traffic_id:
-                r = self.store.one("SELECT service, ours, safety FROM radio_traffic WHERE id = ?", (traffic_id,))
+                r = self.store.one(f"SELECT {cols} FROM radio_traffic WHERE id = ?", (traffic_id,))
             elif tg is not None:
-                r = self.store.one("SELECT service, ours, safety FROM radio_traffic WHERE talkgroup = ? "
-                                   "ORDER BY start DESC LIMIT 1", (tg,))
+                from sizeup import sourcekeys
+                r = self.store.one(f"SELECT {cols} FROM radio_traffic WHERE talkgroup = ? AND system IN ('', ?) "
+                                   "ORDER BY start DESC LIMIT 1", (tg, sourcekeys.COUNTY))
             else:
                 r = None
         except Exception:  # noqa: BLE001 - no log table here: shown as before
             return False
-        if r is None or r["ours"] or (r["safety"] and r["safety"] != "dismissed"):
+        if r is None or not r["service"] or r["ours"] or (r["safety"] and r["safety"] != "dismissed") or self._ours(r["rig"]):
             return False
         loud = getattr(self.cad, "em_prominent", None)
-        return (r["service"] or "other") not in (("fire", "ems") if loud is None else loud)
+        return r["service"] not in (("fire", "ems", "other") if loud is None else loud)
 
     def history(self, limit: int = 200) -> list[dict]:
         rows = self._rows("1 = 1", (), 100000)

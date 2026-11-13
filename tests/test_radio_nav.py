@@ -59,7 +59,7 @@ const offered = [];
 global.RadioLive = { offer(x) { offered.push(x.map((t) => t.id)); } };
 global.RadioView = { rowSig: (t) => JSON.stringify([t.text]), row: (t) => { const li = new El("li", "rt"); li.append(new El("div", "txt", t.text)); return li; } };
 // police made prominent here (Settings > Radios > Emergencies), so someone else's police emergency stands out; the
-// default (fire, EMS) is the quiet scenario's
+// default (fire, EMS, other) is the quiet scenario's
 global.cad = { state: { comms_rev: "1", talking: [], alarms: { windows: [] }, paging: null,
                         radio_emergencies: { prominent: ["fire", "ems", "police"] } }, hooks: [], txRev: 0 };
 
@@ -124,11 +124,13 @@ const ids = () => st.rows.map((t) => t.id);
                      return { views: h.views.map((v) => v.id), systems: h.systems.map((x) => x.label), rows: h.rows.map((x) => x.key),
                               pinned: h.pinned.map((x) => x.key), flagged: h.flagged.map((x) => x.key) }; })(),
     seenKept: [Object.keys(N.prefs(JSON.stringify({ seen: many })).seen).length, "k1499" in N.prefs(JSON.stringify({ seen: many })).seen, "k0" in N.prefs(JSON.stringify({ seen: many })).seen],
-    // the default (fire, EMS): someone else's transit / police emergency is quiet; ours never is
+    // the default (fire, EMS, other): someone else's transit / police emergency is quiet; ours never is
     quiet: (() => { const q = N.model(SRC.map((s) => (s.key === "p25:metro:9100" ? { ...s, emergency: "other" }
                                                       : s.key === "p25:metro:9001" ? { ...s, emergency: "ours" }
-                                                      : s.key === "p25:metro:9003" ? { ...s, emergency: "other" } : s)),
-                                      N.prefs(null), NOW, new Set(), { "fm:FG1": 777, "air:Tower": 888 }, ["fire", "ems"]);
+                                                      : s.key === "p25:metro:9003" ? { ...s, emergency: "other" } : s))
+                                        .concat([{ ...SRC[3], key: "p25:metro:9200", name: "Ops 1", service: "", emergency: "other" },
+                                                 { ...SRC[3], key: "p25:metro:9201", name: "Interop 1", service: "other", emergency: "other" }]),
+                                      N.prefs(null), NOW, new Set(), { "fm:FG1": 777, "air:Tower": 888 }, ["fire", "ems", "other"]);
                     return { rows: Object.fromEntries(q.rows.map((s) => [s.key, [s.em, s.quiet]])), flagged: q.flagged.map((s) => s.key),
                              views: Object.fromEntries(q.views.map((v) => [v.id, v.em])) }; })(),
     merged: N.merged([{ id: "c", start: 3 }, { id: "b", start: 2 }], [{ id: "b", start: 2 }, { id: "a", start: 1 }, { id: "z", start: 9 }]).map((t) => t.id),
@@ -228,8 +230,8 @@ const ids = () => st.rows.map((t) => t.id);
   T.sources(true); await drain();
   out.allOnlyEm = { views: $("#rn-views").children.filter((b) => b.children.some((c) => c.className.includes("emergency"))).map((b) => b.dataset.view),
                     button: $("#rn-open").children.map((c) => c.className) };
-  // ---- the default (fire, EMS): a transit emergency, not ours, is a muted EM on its channel and nothing else ----
-  cad.state.radio_emergencies = { prominent: ["fire", "ems"] };
+  // ---- the default (fire, EMS, other): a transit emergency, not ours, is a muted EM on its channel and nothing else ----
+  cad.state.radio_emergencies = { prominent: ["fire", "ems", "other"] };
   SRC = SRC.map((s) => ({ ...s, emergency: s.key === "p25:metro:9100" ? "other" : "" }));
   st.srcRev = ""; st.srcAt = 0;
   T.set({ view: "all", source: "" }); T.sources(true); await drain();
@@ -406,7 +408,9 @@ def test_someone_elses_emergency_off_the_prominent_services_is_quiet(out):
     assert q["rows"]["p25:metro:9100"] == ["other", True] and q["rows"]["p25:metro:9003"] == ["other", True]
     assert q["rows"]["p25:metro:9001"] == ["ours", False] and q["rows"]["fm:FG1"] == ["", False]   # ours; our window
     assert q["rows"]["air:Tower"] == ["", True]                     # a window alone on a quiet service: quiet too
-    assert q["flagged"] == ["fm:FG1", "p25:metro:9001"]
+    # unsure is loud: a source with no service (whatever the setting), and "other" by default
+    assert q["rows"]["p25:metro:9200"] == ["other", False] and q["rows"]["p25:metro:9201"] == ["other", False]
+    assert q["flagged"] == ["fm:FG1", "p25:metro:9001", "p25:metro:9200", "p25:metro:9201"]
     assert q["views"]["transit"] == "" and q["views"]["police"] == "ours"
     d = out["quietDom"]
     assert d["flags"] == [True, 0] and d["views"] == [] and d["button"] == [""]

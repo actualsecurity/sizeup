@@ -150,9 +150,12 @@ PREMISE_SECTION = "premise_visibility"
 PAGE_SECTION[PREMISE_SECTION] = "system"
 # Which services' emergencies the Radio page shows prominently when they aren't ours (Settings > Radios > Emergencies):
 # a banner, a highlighted row, the full "Emergency (not ours)" chip. Any other service's: a muted "EM" chip only.
-# Ours (our fire channels, our rigs, scene safety) always stand out. Presentation only: what is recorded, kept,
-# alarmed and pushed doesn't change. Admins, audited as Radios. key "prominent" -> [services] (sourcekeys.SERVICES).
-EM_SECTION, EM_DEFAULT = "radio_emergencies", ("fire", "ems")
+# Ours (our fire channels, our rigs, scene safety) always stand out, and so does a source whose service isn't known
+# (blank): quiet is only for a service that is known and not listed. "other" (Trunk Ops, Interop, Special Events, OEM:
+# where a mutual-aid firefighter or an unmapped portable of ours could be) is prominent by default.
+# Presentation only: what is recorded, kept, alarmed and pushed doesn't change. Admins, audited as Radios.
+# key "prominent" -> [services] (sourcekeys.SERVICES).
+EM_SECTION, EM_DEFAULT = "radio_emergencies", ("fire", "ems", "other")
 PAGE_SECTION[EM_SECTION] = "radios"
 PREMISE_LEVELS = ("everyone", "dispatcher", "admin")
 # The station's logs into CloudWatch (sizeup/cloud/cwlogs.py): Settings > Station > Logs, admins, audited as System.
@@ -168,7 +171,7 @@ def em_value(v) -> list[str]:
 
 
 def em_prominent(e) -> list[str]:
-    """The stored section's services, or the default (fire, EMS) when unset or unreadable."""
+    """The stored section's services, or the default (fire, EMS, other) when unset or unreadable."""
     try:
         return em_value((e or {})["prominent"])
     except (KeyError, TypeError, CadError):
