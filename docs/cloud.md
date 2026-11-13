@@ -317,14 +317,15 @@ crew's phones and `pcfd-status` is Tapout's own health feed. The config refuses 
 exact name: a topic of ours with "status" in it is fine. No topic: no push (banner and log only); that is
 the default.
 
-Two kinds, two topics (`sizeup/notify.py` `route()`):
+Three kinds (`sizeup/notify.py` `route()`):
 
 | Kind | Setting (hub: SSM) | What |
 |---|---|---|
 | alerts | `[alerts] ntfy_topic` / `SIZEUP_ALERT_TOPIC` (`/sizeup-hub/alert-topic`) | Emergency buttons (P25, MDC, FleetSync), the fireground mayday, aircraft emergency squawks; their acknowledgements, all clears and "Ended" notices |
 | status | `[alerts] status_topic` / `SIZEUP_STATUS_TOPIC` (`/sizeup-hub/status-topic`) | Station health (silent, behind, update failed, dongle gone, job / whisper / trunk-recorder down, stuck channel, outbox, disk, whisper queue), "Amazon Transcribe failing", its monthly budget at 80 % / 100 %, the hub's own error spikes (#285), and every recovery notice |
+| intel | `[alerts] intel_topic` / `SIZEUP_INTEL_TOPIC` (no SSM parameter yet; set it in Settings) | Radio pre-alerts (`sizeup/intel`): what police / fire chatter reported and where. No topic of its own: they go where the alerts go |
 
-Only one of the two set: both kinds go to it. The app logs at startup where each kind goes
+Only one of alerts / status set: both kinds go to it; intel follows the alerts unless it has its own. The app logs at startup where each kind goes
 ("notify: alerts → topic set (SSM), status → topic set (SSM)"), never the names.
 
 **Settings > System > Push notifications** (admins only) changes either topic, and the ntfy server, without a

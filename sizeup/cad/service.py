@@ -316,6 +316,15 @@ class Cad:
         self.airport_watch = AirportWatch(self.airport_alerts, s.airband,
                                           fire_talkgroups=(301, *s.incident_talkgroups, *s.airport_talkgroups),
                                           log=log, clock=clock)
+        # Radio pre-alerts (sizeup/intel, #411): police / fire chatter rules -> events, pushed on the INTEL kind. Fed by
+        # _on_text (our channels) and Comms.on_context_text (other systems' rows, PR 0); the app starts its thread on the
+        # CAD of record and sets its leader check, locator and notifier. Never writes incidents, links, incoming or alarms.
+        from sizeup.intel.admin import IntelAdmin
+        from sizeup.intel.engine import IntelEngine
+        self.intel = IntelEngine(settings=lambda: {k: self.settings.section(k) for k in ("intel", "intel_packs", "intel_rules")},
+                                 store=self.store, clock=clock, log=log, tz=TZ)
+        self.intel_admin = IntelAdmin(self, self.intel)
+        self.comms.on_context_text = self.intel.consider      # called by comms.py once PR 0 adds the hook
         # The place search (sizeup/geo/places.py, #67): the app sets place_source, a function that builds the
         # PlaceIndex over its gazetteer (once, on first use); None: no gazetteer, no place suggestions.
         self.place_source: Callable[[], object] | None = None
@@ -433,7 +442,7 @@ class Cad:
         return dict(st, units=units, map=self.map_slice(units, st["incidents"], pos, now), time=now, rev=rev,
                     comms_rev=self.comms.rev_for(),
                     talking=self.live(), paging=self.paging(), cloud=self.cloud(), prealert=self.prealert_state(now),
-                    airport_alerts=self.airport_alerts_state(now),
+                    airport_alerts=self.airport_alerts_state(now), intel=self.intel_state(now),
                     status_hints=self.status_hints(), alarms=self.alarms_state(now), radio_ids=self.radio_ids(now),
                     sources=self.sources_state(now), trains_rev=self._trains_rev())
 
@@ -455,6 +464,7 @@ class Cad:
     def _on_text(self, tid: str) -> None:
         """A transcript arrived or changed: the per-incident radio log (#311), status suggestions (#37), taken at once
         for a tracked incident in 60 Control mode (#311), the radio pre-alerts (#297) and an airport alert level (#369)."""
+        self.intel.consider(tid)                          # radio pre-alerts (sizeup/intel): queued, never waits
         try:
             self.radiolog.consider(tid)
         except Exception as e:  # noqa: BLE001 - the log never stops the transcript
@@ -605,6 +615,14 @@ class Cad:
             self.airport_alerts.match(inc)          # an aircraft emergency's pre-alert joins an Airport event (#235)
         except Exception as e:  # noqa: BLE001
             self.log(f"CAD: airport pre-alert match: {type(e).__name__}: {e}")
+
+    def intel_state(self, now: float | None = None) -> dict | None:
+        """Radio pre-alerts for the console's card (sizeup/intel): signed-in viewers only; never breaks the console."""
+        try:
+            return self.intel_admin.state(now)
+        except Exception as e:  # noqa: BLE001
+            self.log(f"CAD: intel: {type(e).__name__}")
+            return None
 
     def airport_alerts_state(self, now: float | None = None) -> dict | None:
         """The airport pre-alerts (#233; a fault never breaks the console)."""

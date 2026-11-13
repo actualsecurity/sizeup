@@ -1615,6 +1615,9 @@ function sSystem(panel) {
   const pushes = sCard(null);                  // the ntfy topics by kind (sPushes): admins only, the names are secret
   pushes.id = "s-pushes";
   pushes.hidden = true;
+  const intel = sCard(null);                   // radio pre-alerts (intel.js IntelSettings, sizeup/intel): self-contained
+  intel.id = "s-intel";
+  intel.hidden = true;
   // the department, with its patch (static/brand)
   const patch = el("img", "s-patch");
   patch.src = "/static/brand/pcfd-patch.svg";
@@ -1626,7 +1629,7 @@ function sSystem(panel) {
   const about = sCard(patch, dept);
   about.classList.add("s-dept");
   panel.replaceChildren(...sHead("System"),
-    about, station, alarms, pushes,
+    about, station, alarms, pushes, intel,
     ...(sy && S.data.atc ? [sAtcTalkers(S.data.atc)] : []),
     ...(sy && S.data.hub_errors && sIsHub() ? [sHubErrors(S.data.hub_errors)] : []),
     ...(sy && S.data.map_display ? [sMapDisplay(S.data.map_display)] : []),
@@ -1652,6 +1655,7 @@ function sSystem(panel) {
   sStation();
   if (window.Alarm) Alarm.mountSettings($("#s-alarms"));
   sPushes(pushes);
+  if (window.IntelSettings) IntelSettings.mount(intel);
 }
 
 // Who is talking on HPN Tower (#252, sizeup/atc_talkers.py): the callsign heard on each airband row, matched to ADS-B,
@@ -1902,7 +1906,8 @@ async function sPushes(card) {
   card.replaceChildren(sCardHead("Push notifications", "", sHelp("Pushes go to our own ntfy topics, by kind. Status & health: "
     + "station health (silent, behind, a dongle or program down, the disk, the whisper queue), Amazon Transcribe failing and its "
     + "monthly limit, and their recoveries. Alerts: the emergency buttons, a mayday, an aircraft emergency, their acknowledgements "
-    + "and all clears. Only one topic set: everything goes to it. A name set here wins over SSM and the config file; empty uses "
+    + "and all clears. Pre-alerts (intel): radio pre-alerts (police / fire chatter); not set: the alerts topic. "
+    + "Only one of alerts / status set: everything goes to it. A name set here wins over SSM and the config file; empty uses "
     + `them. Never Tapout's topics (${d.forbidden.join(", ")}): refused. ${d.min_len} to ${d.max_len} letters, digits, - and _; `
     + "ntfy topics are public by name, so make them long and random. Only admins see the names.")), ...kids);
 }
