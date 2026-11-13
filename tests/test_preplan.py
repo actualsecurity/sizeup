@@ -607,3 +607,27 @@ def test_a_very_wide_screen_asks_for_no_more_than_the_hub_serves(tmp_path):
     assert abs((w + e) / 2 - -73.67) < 1e-4                                  # its middle
     from sizeup.gis import parse_bbox
     parse_bbox(f"{w},{s},{e},{n}", pp.BBOX_MAX_DEG)                          # the hub takes it
+
+
+def test_the_previews_footprint_choice_saves_on_a_call_keyed_meanwhile(api):
+    c = api.cad
+    c.gis = fake_gis(numbers=(100, 102, 104))
+    iid = c.store.create_incident(type="STRU", address="104 Example Ave", lat=lat_of(104), lon=LON)
+    q = f"lat={lat_of(104)}&lon={LON}&incident_id={iid}"
+    out = get(api, "/api/cad/preplan/where", q, JULIAN)[1]               # the call not keyed yet: its footprint, a choice
+    assert out["choices"]["building"] == "104 Example Ave, Port Chester"
+    code, out = call(api, "/api/cad/preplan", {"incident_id": iid, "kind": "fdc", "lat": lat_of(104), "lon": LON,
+                                               "link": "building"}, JULIAN)  # keyed on save: the same building
+    assert code == 200 and out["point"]["bldg_key"] == "104|example ave|port chester"
+
+
+@pytest.mark.parametrize("pin", [None, (lat_of(100) + 0.001, LON)])         # no pin; a pin 110 m from any footprint
+def test_a_call_with_no_footprint_of_its_own_keeps_its_unaddressed_building(cad, pin):
+    cad.gis = fake_gis(parcels=False)                                      # no parcel can be keyed
+    kw = {"lat": pin[0], "lon": pin[1]} if pin else {}
+    iid = cad.store.create_incident(type="STRU", address="100 Example Ave", **kw)
+    cad.state()
+    assert cad.store.incident(iid)["bldg_key"] == "100|example ave|port chester"
+    p = cad.preplan.create({"incident_id": iid, "kind": "knox_box", "lat": lat_of(100), "lon": LON})["point"]
+    assert (p["bldg_key"], p["link"], p["building_ref"]) == ("100|example ave|port chester", "call", "buildings/7100")
+    assert [x["id"] for x in pushed(cad, iid)] == [p["id"]]                # it shows on that call

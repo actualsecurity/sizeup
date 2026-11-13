@@ -389,13 +389,14 @@ class Preplan:
         k = self._parcel_key(fp) if fp else None
         ctx = ctx or {}
         ck = ctx.get("bldg_key") or ""
-        same = False
+        same = elsewhere = False          # in the call's own footprint | in another one the call's pin is known to be in
         if fp and ctx and (ck or ctx.get("lat") is not None):
             if k is not None and ck and k.bldg_key == ck:
                 same = True
             elif ctx.get("lat") is not None:
                 cf = footprint(gis, ctx["lat"], ctx["lon"])
                 same = cf is not None and cf["ref"] == fp["ref"]
+                elsewhere = cf is not None and not same       # no footprint of its own (no pin, or none near it): unknown
         fp_how = fp["how"] if fp else "call"
         own = k is not None and (not same or not ck)          # the footprint's key: another building's, or the call has none
         choices = {}
@@ -408,12 +409,14 @@ class Preplan:
         if link == "auto":
             if own:
                 pick = choices["building"]
-            elif fp and not same and "call" in choices:       # another building's footprint with no address: not the call's
+            elif elsewhere and "call" in choices:             # another building's footprint with no address: not the call's
                 pick = choices["point"]
             else:
                 pick = choices.get("call") or choices["point"]
         elif link in choices:
             pick = choices[link]
+        elif link == "building" and same and k is not None and "call" in choices:
+            pick = choices["call"]          # the footprint's key is the call's (the preview saw the call before it was keyed)
         else:
             raise CadError("link: " + " | ".join(("auto", *choices)))
         return {**pick, "building_ref": fp["ref"] if fp else None,
