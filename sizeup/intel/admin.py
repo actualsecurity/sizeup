@@ -185,17 +185,21 @@ class IntelAdmin:
             key, v = str(body.get("key")), body.get("value")
             if key not in infer_mod.DEFAULTS:
                 raise CadError(f"key: {' | '.join(infer_mod.DEFAULTS)}")
-            if key == "infer":
+            if key in ("infer", "infer_agree_push"):
                 if not isinstance(v, bool):
-                    raise CadError("infer: true or false")
+                    raise CadError(f"{key}: true or false")
             elif key == "infer_provider":
                 if v not in infer_mod.PROVIDERS:
                     raise CadError(f"infer_provider: {' | '.join(infer_mod.PROVIDERS)}")
-            elif key == "infer_mode":
-                v = _mode(v, "infer_mode")
+            elif key in ("infer_mode", "infer_alone_mode"):
+                v = _mode(v, key)
             elif key in ("infer_model", "infer_region"):
                 if not isinstance(v, str) or not re.fullmatch(r"[A-Za-z0-9._:/-]{2,120}", v):
                     raise CadError(f"{key}: letters, digits and . _ : / - (a Bedrock model id or region)")
+                cur = {**infer_mod.DEFAULTS, **ov["intel"]}
+                if key == "infer_model" and infer_mod.price({**cur, "infer_model": v}) is None:
+                    raise CadError(f"infer_model: no known price for {v}: set infer_usd_in and infer_usd_out first "
+                                   f"(known: {', '.join(sorted(infer_mod.PRICES))})")
             else:
                 lo, hi = infer_mod.LIMITS[key]
                 v = _f(v, lo, hi, key)

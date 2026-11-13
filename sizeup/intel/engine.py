@@ -532,59 +532,91 @@ class IntelEngine:
         return ev
 
     def _inference(self, pack, row, key, tid, win, at, cats, mine, event_of, hits) -> list[Event]:
-        """Ask the model about what the rules left uncertain (infer.py); its category is one more hit, its place only
-        what the gazetteer finds for it. A sample is asked and recorded, never acted on."""
+        """Ask the model about what the rules left uncertain (infer.py). Never waits for it: the answer comes back in
+        _infer_done (on the infer thread live, inline in replay). A sample is asked and recorded, never acted on."""
         from sizeup.intel import infer as infer_mod
         c = self.infer.cfg()
-        why, ev_for = "", None
+        why, ev_for, unsure = "", None, ""
         for cat, (what, _contrib, _m) in cats.items():
             cd = pack.category(cat)
             thr = cd.get("threshold") if cd.get("threshold") is not None else pack.threshold
             if float(c["infer_low"]) <= what < thr and mine & {cat, rules_mod.WILD}:
-                why = "uncertain"
+                why, unsure = "uncertain", cat
                 break
         if not why:
-            ev_for = next((e for e in event_of.values() if e.precision == "none" or not e.confirmed), None)
-            why = "place" if ev_for is not None else ""
+            now = self.clock()
+            ev_for = next((e for e in event_of.values() if (e.precision == "none" or not e.confirmed)
+                           and now - self.infer.asked.get(e.id or 0, -1e18) >= infer_mod.PLACE_REASK_S), None)
+            if ev_for is not None:
+                why = "place"
+                self.infer.asked[ev_for.id or 0] = now
         if not why and int(c["infer_sample_pct"]) and int(hashlib.sha256(tid.encode()).hexdigest(), 16) % 100 < int(c["infer_sample_pct"]):
             why = "sample"
         if not why:
             return []
-        req = infer_mod.Request(self._window_text(win), {k: v["label"] for k, v in pack.categories.items()},
-                                pack.towns_for(key), key)
-        res = self.infer.ask(req, tid=tid, pack=pack.name, why=why, event_id=ev_for.id if ev_for else None)
-        if res is None or res.refused or why == "sample":
+        text = self._window_text(win)
+        req = infer_mod.Request(text, {k: v["label"] for k, v in pack.categories.items()}, pack.towns_for(key), key)
+        job = {"pack": pack.name, "key": key, "tid": tid, "row": dict(row), "at": at, "why": why, "unsure": unsure,
+               "event_id": ev_for.id if ev_for else None, "text": text}
+        self.infer.submit(req, job, self._infer_done)
+        return []
+
+    def _infer_done(self, job: dict, res) -> list[Event]:
+        """The model's answer (#504 review): its category backs the rules (a push only when they agree, else
+        infer_alone_mode); its place only if its words are in the transcript and the gazetteer finds it, UNCONFIRMED,
+        never over a place the rules confirmed."""
+        from sizeup.intel import infer as infer_mod
+        if res is None or res.refused or job["why"] == "sample" or not self.leader():
             return []
         out: list[Event] = []
-        cat = res.category
-        if why == "uncertain" and cat in pack.categories and res.confidence > 0:
-            rule = rules_mod.Rule(f"infer.{self.infer.cfg()['infer_provider']}", 1, cat,
-                                  round(min(1.0, res.confidence * float(c["infer_weight"])), 4), [], [],
-                                  str(c["infer_mode"]), True, {})
-            hits.append((rule, rule.w))                   # the row's own hits (its window entry holds the same list)
-            mine.add(cat)
-            got = self._scores(pack, win).get(cat)
-            cd = pack.category(cat)
-            thr = cd.get("threshold") if cd.get("threshold") is not None else pack.threshold
-            if got and got[0] >= thr:
-                mode = lowest(pack.mode, cd.get("mode", "push"), got[2])
-                if mode != "off":
-                    ev = self._raise(pack, row, key, cat, cd, got[0], got[1], mode, win, at, tid)
-                    if ev is not None:
-                        event_of[cat] = ev
-                        out.append(ev)
-        target = event_of.get(cat) or ev_for
-        if res.location and self.locate is not None and target is not None:
+        with self._lock:
+            pack = self.pack(job["pack"])
+            if pack is None:
+                return []
+            c = self.infer.cfg()
+            key, tid, at, row = job["key"], job["tid"], job["at"], job["row"]
+            win = self.windows.get((pack.name, key))
+            cat = res.category
+            target = self.events.get(job["event_id"]) if job["event_id"] else None
+            if (job["why"] == "uncertain" and cat in pack.categories and res.confidence > 0 and win is not None
+                    and tid in win.entries):
+                agree = cat == job["unsure"] and bool(c["infer_agree_push"])
+                rule = rules_mod.Rule(f"infer.{c['infer_provider']}", 1, cat,
+                                      round(min(1.0, res.confidence * float(c["infer_weight"])), 4), [], [],
+                                      str(c["infer_mode"]) if agree else lowest(str(c["infer_mode"]), str(c["infer_alone_mode"])),
+                                      True, {})
+                entry = win.entries[tid]
+                entry.hits = [*entry.hits, (rule, rule.w)]        # a new list: the row's own report has its hits already
+                self.sink.hit(Hit(tid, rule.id, rule.v, rule.w, cat, pack.name, at, None))
+                got = self._scores(pack, win).get(cat)
+                cd = pack.category(cat)
+                thr = cd.get("threshold") if cd.get("threshold") is not None else pack.threshold
+                if got and got[0] >= thr:
+                    mode = lowest(pack.mode, cd.get("mode", "push"), got[2])
+                    if not agree:
+                        mode = lowest(mode, str(c["infer_alone_mode"]))        # the model alone: never a push
+                    if mode != "off":
+                        ev = self._raise(pack, row, key, cat, cd, got[0], got[1], mode, win, at, tid)
+                        if ev is not None:
+                            out.append(ev)
+                            target = ev
+            if target is None or target.status != "open" or target.confirmed or not res.location or self.locate is None:
+                return out
+            if not infer_mod.said(res.location, job["text"]):
+                return out                    # words the transcript never said: never a place
             try:
                 place = self.locate(res.location, self._scope(pack, row, key))      # the gazetteer decides
             except Exception:  # noqa: BLE001
                 place = None
-            if place is not None:
-                place.basis = "; ".join(x for x in (place.basis, "place from inference") if x)
-                up = self._set_place(pack, target, place, key, tid, at)
-                if up is not None:
-                    self.infer.mark_used(res.record_id, place.label)
-                    out.append(up)
+            if place is None or push_mod.scrub_label(place.label, self._who(pack, target)):
+                return out
+            place.confirmed = False                # the model's reading: never confirmed
+            place.radius_m = max(place.radius_m, 150.0)
+            place.basis = "; ".join(x for x in (place.basis, "place from inference") if x)
+            up = self._set_place(pack, target, place, key, tid, at)
+            if up is not None:
+                self.infer.mark_used(res.record_id, place.label)
+                out.append(up)
         return out
 
     def _end_window(self, pack, key: str, at: float, tid: str) -> list[Event]:
