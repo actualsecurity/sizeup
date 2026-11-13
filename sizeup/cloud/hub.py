@@ -712,6 +712,9 @@ class HubApp(App):
                 ("aircraft", self.aircraft, "phases")):
             if obj is not None:
                 self.perf.gauge(name, size(obj, attr))
+        # context clips the station's whisper shed (#300, radio-intel PR 3): lost recall that would otherwise look quiet
+        self.perf.gauge("stt_shed_context", lambda: ((self.hub.status or {}).get("health") or {}).get("stt_queue", {})
+                        .get("shed_context") if isinstance(getattr(self.hub, "status", None), dict) else None)
         self.perf.gauge("dvr_segments", lambda: sum(len(c.get("segs") or ()) for c in list(getattr(dvr, "_cams", {}).values()))
                         if dvr is not None else None)
 
@@ -1113,6 +1116,9 @@ class HubApp(App):
     def channel_desired(self) -> dict:
         ok, why = self.aws_ok()
         reserve = [] if ok or self.aws is None else [k for k in self.aws.s.reserve_channels if self.aws.available(k)[0]]
+        # another P25 system's police (radio-intel PR 3): its own budget, apart from ours either way
+        more, deny, deny_why = self.aws_split(ok)
+        reserve += more
         prefs = channels.for_station(self._chan_ov, self.cfg.stt_record_only)   # + the hub's record_only (#201)
         if "p25_systems" not in (self.hub.status or {}):
             # a station from before #409 refuses a whole map with a "p25:<system>:<tg>" key in it: left out for it
@@ -1122,8 +1128,9 @@ class HubApp(App):
         if self._squelch_ok():          # what of it fits the station's channels, as it reported them (the station agrees)
             kinds = {r.get("label"): r.get("channel_kind") for r in self.hub.radio_rows() if r.get("channel_kind")}
             sq = channels.fit_squelch(self._sq_ov, kinds, self.squelch_defaults)[0]
-        return {"prefs": prefs, "aws": {"ok": ok, "why": why, "reserve": reserve}, "tones": dict(self._tone_ov),
-                "squelch": sq, "sig": channels.sig(prefs, ok, self._tone_ov, reserve, sq)}
+        aws = {"ok": ok, "why": why, "reserve": reserve, **({"deny": deny, "deny_why": deny_why} if deny else {})}
+        return {"prefs": prefs, "aws": aws, "tones": dict(self._tone_ov),
+                "squelch": sq, "sig": channels.sig(prefs, ok, self._tone_ov, reserve, sq, deny)}
 
     def squelch_defaults(self, key: str) -> dict:
         """The station's receiver defaults, as it reported them (its config's, not the hub's)."""

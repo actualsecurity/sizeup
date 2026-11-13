@@ -187,6 +187,21 @@ def status_token(station_token: str, configured: str = "") -> str:
     return hmac.new(station_token.encode(), STATUS_KEY, hashlib.sha256).hexdigest()
 
 
+def context_hints(sq: dict | None, tr: dict | None) -> list[dict]:
+    """Settings > Health hints for another P25 system's police (radio-intel PR 3), never alerts: context clips the
+    station's whisper shed in the last hour (lost recall, not quiet), and the police AWS budget used up (whisper)."""
+    out = []
+    n = (sq or {}).get("shed_context_h")
+    if isinstance(n, int) and n > 0:
+        out.append({"channel": "PD", "text": f"{n} context clip{'s' if n != 1 else ''} shed in the last hour "
+                                             "(whisper busy): not transcribed, pre-alerts may be missed"})
+    ctx = ((tr or {}).get("budget") or {}).get("context") or {}
+    if ctx and ctx.get("ok") is False:
+        out.append({"channel": "PD", "text": f"AWS budget used: ${ctx.get('usd', 0):.2f} / ${ctx.get('limit_usd', 0):g} in "
+                                             f"{ctx.get('month', '')} · on the station's whisper (Settings > Radios)"})
+    return out
+
+
 def _hhmm(t: float | None) -> str:
     return tz.hhmm(t)          # the console's time zone, not the container's UTC (#200)
 
@@ -676,6 +691,7 @@ class StationHealth:
         out["stt_queue"] = {k: sq.get(k) for k in ("queued", "urgent", "high", "live", "low", "rerun", "fallback", "stale",
                                                    "oldest_s", "oldest_low_s", "top", "in_h", "in_low_h", "in_fallback_h",
                                                    "in_top", "service_s", "out_h", "dropped", "skipped", "shed",
+                                                   "shed_context", "shed_context_h",
                                                    "last_drop", "last_error", "max", "working")} if sq else None
         started = hl.get("started")
         out["system"] = {k: hl.get(k) for k in ("host", "cpu_pct", "load1", "cpus", "mem_pct", "mem_total", "temp_c",
@@ -696,6 +712,7 @@ class StationHealth:
             ad["hub"] = sf.stats() if sf is not None else None
         out["adsb"] = ad
         out["transcribe"] = self._transcribe()
+        out["hints"] += context_hints(out["stt_queue"], out["transcribe"])
         return out
 
     def _usual(self, label: str, heard: float, snow: float, gaps_min: int) -> float | None:

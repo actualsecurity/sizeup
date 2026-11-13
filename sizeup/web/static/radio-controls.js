@@ -37,10 +37,11 @@ window.RadioControls = (() => {
     + "Record only: audio kept, no speech-to-text.\nOff: dropped.\nActivity only: encrypted, never decoded; "
     + "only when it was active and which radios.";
   const ENGINE_HELP = "Local: whisper.cpp large-v3 on the station (whisper-server, port 8179).\n"
-    + "AWS: Amazon Transcribe streaming, called from the hub (its task role): $0.024 a minute, at least 15 s a stream; "
+    + "AWS: Amazon Transcribe streaming, called from the hub (its task role): $0.01 a minute, billed per second; "
     + "the station skips whisper and sends the clip.\nBoth: whisper on the station and AWS on the hub; AWS's text is "
     + "shown, whisper's kept to compare (Radio view: \u21c4).\nWithout AWS (not set up, no credentials, the monthly "
-    + "limit reached) AWS channels use Local until it's back.";
+    + "limit reached) AWS channels use Local until it's back.\nPolice (another P25 system): its own monthly AWS limit, "
+    + "never the fire one; reached: Local.";
   const ro = () => typeof canDo === "function" && !canDo("admin");
   const groupName = (g) => g || "Unknown";
   const groupColor = (g) => GROUP_COLORS[g || ""] || GROUP_COLORS[""];
@@ -862,7 +863,8 @@ window.RadioControls = (() => {
                 ...((c.prefs || {})[key] || {}) };
     const q = st.cpending.get(key);
     if (q) Object.assign(p, q.vals, { cpending: true });
-    const aws = c.aws_ok || (c.aws_reserve || []).includes(key);     // past the limit: the reserve channels keep AWS
+    // past the limit: the reserve channels keep AWS; police past its own limit: Local (radio-intel PR 3)
+    const aws = (c.aws_ok || (c.aws_reserve || []).includes(key)) && !(c.aws_deny || []).includes(key);
     p.effective = !p.transcribe ? "off" : p.engine === "local" || aws ? p.engine : "local";
     return p;
   }
@@ -1057,9 +1059,13 @@ window.RadioControls = (() => {
     let cost = "";
     if (a.enabled) {
       cost = `AWS this month: ${Math.round(a.minutes || 0)} min ≈ $${(a.usd || 0).toFixed(2)} of $${a.limit_usd} limit`;
+      const pd = a.context;
+      if (pd && (pd.minutes || pd.limit_usd)) cost += ` · PD ${Math.round(pd.minutes || 0)} min ≈ $${(pd.usd || 0).toFixed(2)} of $${pd.limit_usd}`;
       if (!a.ok && a.why) cost += ` · ${a.why}`;
+      const per = (ch) => Object.entries(ch || {}).map(([k, v]) => `${k} ${Math.round(v.minutes)} min $${v.usd.toFixed(2)}`).join(", ");
       n.cost.title = `${a.streams || 0} streams, ${Math.round((a.audio_s || 0) / 60)} min of audio sent in ${a.month}; `
-        + `billed at least 15 s a stream at $${a.price_per_min}/min. Open now: ${a.streams_open || 0}.`
+        + `billed per second at $${a.price_per_min}/min. Open now: ${a.streams_open || 0}.`
+        + (per(a.channels) ? `\nBy channel: ${per(a.channels)}` : "") + (pd && per(pd.channels) ? `\nPD: ${per(pd.channels)}` : "")
         + (a.last_error ? `\nLast AWS error: ${a.last_error}` : "");
     } else if (a.where === "hub") {
       cost = "AWS runs on the hub: its cost and limit are shown there";
@@ -1245,10 +1251,16 @@ window.RadioControls = (() => {
     Object.assign(n.limit, { type: "number", min: 0, max: 10000, step: 1 });
     n.limit.setAttribute("aria-label", "Monthly AWS limit in dollars");
     n.limitSave = btn("Save limit", saveLimit, "When this month's AWS cost reaches it, AWS channels use the local model until next month");
+    n.pdLimit = el("input", "vocab-limit");
+    Object.assign(n.pdLimit, { type: "number", min: 0, max: 10000, step: 1 });
+    n.pdLimit.setAttribute("aria-label", "Monthly police AWS limit in dollars");
+    n.pdLimitSave = btn("Save", () => saveLimit("aws_context_budget_usd"),
+      "Police talkgroups (another P25 system) only, never the fire limit or its reserve; reached: the local model until next month");
     const row = el("div", "row");
     row.append(n.vocabSave, n.vocabSuggest, n.vocabPush, n.vocabState);
     const lim = el("div", "row");
-    lim.append(el("span", "small", "Monthly AWS limit $"), n.limit, n.limitSave);
+    lim.append(el("span", "small", "Monthly AWS limit $"), n.limit, n.limitSave,
+      el("span", "small", "PD $"), n.pdLimit, n.pdLimitSave);
     return [n.vocab, row, n.vocabMsg, n.vocabSkip, lim];
   }
 
@@ -1270,13 +1282,16 @@ window.RadioControls = (() => {
     const v = d.vocabulary, lock = ro();
     if (fresh && !st.vocabDirty) n.vocab.value = v.phrases.join("\n");
     if (fresh && document.activeElement !== n.limit) n.limit.value = d.limit.value;
+    if (fresh && d.context_limit && document.activeElement !== n.pdLimit) n.pdLimit.value = d.context_limit.value;
     const s = v.state || {};
     const when = s.updated ? ` (sent ${fmtTime(s.updated)})` : "";
     const word = { READY: "Ready", PENDING: "Being built by AWS…", FAILED: "Failed", error: "Error", none: "Not on AWS yet" }[s.state] || s.state;
     setText(n.vocabState, `${s.name || "sizeup-pcfd"}: ${word}${when}` + (s.state === "READY" && s.sig && s.sig !== v.sig ? " · the saved list changed: Push again" : "")
       + (s.reason ? ` · ${s.reason}` : "")
       // HPN ATC's own vocabulary (#233, data/atc/vocabulary.json): pushed with this one, used on the airband channels
-      + (s.atc ? ` · ${s.atc.name}: ${{ READY: "Ready", PENDING: "Being built by AWS…", FAILED: "Failed", error: "Error", none: "Not on AWS yet" }[s.atc.state] || s.atc.state}` : ""));
+      + (s.atc ? ` · ${s.atc.name}: ${{ READY: "Ready", PENDING: "Being built by AWS…", FAILED: "Failed", error: "Error", none: "Not on AWS yet" }[s.atc.state] || s.atc.state}` : "")
+      // the police sources' own (radio-intel PR 3, built from the gazetteer and data/pd_units.json): pushed with this one
+      + (s.pd ? ` · ${s.pd.name}: ${{ READY: "Ready", PENDING: "Being built by AWS…", FAILED: "Failed", error: "Error", none: "Not on AWS yet" }[s.pd.state] || s.pd.state}` : ""));
     n.vocabState.className = `small vocab-state ${s.state === "READY" ? "ok" : s.state === "FAILED" || s.state === "error" ? "bad" : ""}`;
     setText(n.vocabMsg, st.vocabMsg || `${v.phrases.length} phrases${v.edited ? "" : " (the suggestions)"}`
       + (v.skipped.length ? `, ${v.skipped.length} can't go to AWS` : "") + (st.vocabDirty ? " · not saved" : ""));
@@ -1287,7 +1302,7 @@ window.RadioControls = (() => {
     n.vocabSuggest.disabled = lock || st.vocabBusy;
     n.vocabPush.disabled = lock || st.vocabBusy || !enabled || st.vocabDirty;
     n.vocabPush.title = !enabled ? "Amazon Transcribe runs on the hub: push from there" : st.vocabDirty ? "Save the list first" : "Send the saved list to Amazon Transcribe";
-    n.vocab.disabled = n.limit.disabled = n.limitSave.disabled = lock;
+    n.vocab.disabled = n.limit.disabled = n.limitSave.disabled = n.pdLimit.disabled = n.pdLimitSave.disabled = lock;
   }
 
   async function saveVocab() {
@@ -1322,11 +1337,12 @@ window.RadioControls = (() => {
     loadStt();
   }
 
-  async function saveLimit() {
+  async function saveLimit(key) {
     if (ro()) return;
-    const v = Number(st.n.limit.value);
+    const pd = key === "aws_context_budget_usd";
+    const v = Number((pd ? st.n.pdLimit : st.n.limit).value);
     try {
-      await api("POST", "/api/cad/settings/stt", { action: "set", key: "aws_monthly_limit_usd", value: v,
+      await api("POST", "/api/cad/settings/stt", { action: "set", key: pd ? key : "aws_monthly_limit_usd", value: v,
                                                    operator: typeof operator === "function" ? operator() : "" });
       st.vocabMsg = "";
     } catch (e) {

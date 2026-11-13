@@ -664,12 +664,28 @@ applied at once, AWS only if that machine has `[stt] aws` and credentials.
 **An AWS channel uses whisper whenever AWS can't take audio**: the hub without `[stt] aws`, no
 credentials, or **the monthly limit** (`aws_monthly_limit_usd`, default $25, editable under Vocabulary)
 reached: the station is told (`aws.ok = false`) and runs whisper; the row says "AWS off: local (why)".
-The cost line: *AWS this month: 214 min ≈ $5.14 of $25 limit* (billed seconds per month in the CAD
-database, `meta` `aws_usage:YYYY-MM`; a new month starts at zero).
+The cost line: *AWS this month: 214 min ≈ $2.14 of $25 limit · PD 90 min ≈ $0.90 of $15* (billed seconds per month
+in the CAD database, `meta` `aws_usage:YYYY-MM` with each channel's share; a new month starts at zero).
+
+**Police on another P25 system** (radio-intel PR 3): PD dispatch on MTA MRRS (`p25:mrrs:9211`) defaults to AWS
+(`[stt] aws_channels`; Settings > Radios switches it to Local or Both like any channel). It has **its own monthly
+budget**, `aws_context_budget_usd` (default $15, Settings > Radios > Vocabulary "PD $"), counted apart
+(`meta` `aws_usage_context:YYYY-MM`): police never spends the fire limit or its reserve, and the fire limit running out
+never stops police. Past its own limit the hub tells the station (`aws.deny`), which runs whisper on it (never
+silence), and Settings > Health shows a hint. Each source's profile (`data/stt/profiles.json`) gives whisper a short
+police prompt (phrasing, the headquarters' callsigns from `data/pd_units.json`, the towns and their busiest streets;
+never a talker's name) and AWS its own vocabulary **`sizeup-pd`** (`stt_vocab.police_phrases()`: the headquarters'
+callsigns, 10-codes, police phrasing, the towns, every street of Port Chester, Rye and Rye Brook as said, their public
+landmarks; from the gazetteer at runtime), pushed with the PCFD one (Push to AWS; the task role's `sizeup-*`
+vocabulary permission covers it). The fire vocabulary and its respelling are never used on a police source, nor
+sizeup-pd's on ours: a police "266" never becomes a fire callsign. Context clips the station's whisper sheds
+(`stt_shed_context`, #300) are counted and shown as a Health hint, so lost recall never looks like quiet.
+`tools/stt_cost.py` gives minutes a day and the AWS and S3 cost per source (aggregates only).
 
 **How the hub streams** (`sizeup/transcribe.py`, stdlib: RFC 6455 WebSocket, AWS event-stream framing
-with CRC32, SigV4 query signing in `sizeup/aws.py`): Transcribe bills $0.024 a minute with **15 s
-minimum per stream**, so there is **one long-lived stream per channel** (`wss://transcribestreaming.
+with CRC32, SigV4 query signing in `sizeup/aws.py`): Transcribe streaming bills **$0.01 a minute in us-east-1,
+per second with no minimum** (#423; it was $0.024 with a 15 s minimum per stream when this was built), and there is
+**one long-lived stream per channel** (`wss://transcribestreaming.
 <region>.amazonaws.com:8443/stream-transcription-websocket`, en-US, PCM, 8 kHz = the clips the hub
 gets, `vocabulary-name` once the vocabulary is ready). Transmissions are fed back to back (100 ms
 chunks at 2× real time, `aws_pace`) with 0.3 s of silence between them; each one's place in the
@@ -2019,8 +2035,10 @@ shows the expected storage, from the last 7 days of audio per tier.
 
 **It never costs our own audio anything**
 - Hub: a tier only keeps a clip past the usual hours. Context clips have their own budget
-  (`[storage] context_audio_max_mb`, default 100), and over the audio cap every context clip goes before any clip of
-  ours (lowest tier, then oldest, first).
+  (`[storage] context_audio_max_mb`, default 8000), and over the audio cap every context clip goes before any clip of
+  ours (lowest tier, then oldest, first). The budget counts their bytes wherever kept, S3 included, so it is a
+  runaway bound sized for `tier_keep_days`: 30 days of PD alert audio at 1-4 h a day is 1.7-7 GB (about $0.04-0.16
+  a month in S3 Standard). It was 100 MB (about 1.7 h of audio) until radio-intel PR 3.
 - Station outbox: context audio waits in a fifth of the outbox's audio limit and is dropped first, so a hub outage
   never costs a fire clip.
 - Station disk: the janitor cleans each system's capture and temp directories, 200 MB at most per system.

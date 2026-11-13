@@ -243,7 +243,8 @@ def test_one_stream_feeds_several_transmissions_and_maps_results_back():
         t.stop()
         fake.close()
     m = Usage(kv.get, kv.__setitem__).month()
-    assert m["streams"] == 2 and m["billed_s"] == 30.0          # 15 s minimum each
+    # billed per second with no minimum (#423): the audio sent, each channel's share apart
+    assert m["streams"] == 2 and m["billed_s"] == pytest.approx(m["audio_s"]) and set(m["channels"]) == {"tg:307", "FG1"}
     assert m["audio_s"] == pytest.approx(sum(c.audio_s for c in fake.conns), abs=0.01)
 
 
@@ -328,7 +329,7 @@ def test_the_monthly_budget_stops_new_audio():
     fake = FakeTranscribe()
     res, kv = Results(), {}
     usage = Usage(kv.get, kv.__setitem__)
-    usage.add(25 / 0.024 * 60 - 10, 0)                # $25 less 10 s worth spent this month
+    usage.add(25 / tr.PRICE_PER_MIN * 60 - 10, 0)     # $25 less 10 s worth spent this month
     t = AwsTranscriber(Settings(endpoint=fake.url, pace=50), usage, res.ok, res.fail, log=lambda m: None,
                        limit_usd=lambda: 25.0)
     try:

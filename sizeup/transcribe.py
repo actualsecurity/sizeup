@@ -3,9 +3,10 @@ Transcribe] ... test aws transcribe on the important channels like South 2 pagin
 fireground for now"). Stdlib only (+numpy): a minimal RFC 6455 WebSocket client, AWS event-stream
 framing and SigV4 query signing (sizeup/aws.py).
 
-Billing ($0.024 a minute, at least 15 s per stream) is why it works the way it does: one long-lived
-stream per channel, transmissions fed back to back, never one stream per transmission (a 3.7 s
-transmission alone would be billed 15 s).
+Billing (#423: AWS's us-east-1 standard streaming price, $0.01 a minute, billed per second with no minimum; it was
+$0.024 a minute with 15 s per stream when this was written, which is why it works the way it does): one long-lived
+stream per channel, transmissions fed back to back. With no per-stream minimum now, the long-lived stream costs
+nothing extra either: it saves the handshake on every transmission.
 
     AwsTranscriber.submit(channel, item, pcm)    pcm: int16, 8 kHz mono (the clips the hub keeps)
         one ChannelWorker thread per channel (South 2, FG1, tg:307 ...), one stream each:
@@ -50,9 +51,12 @@ push), and every BREAKER_RETRY_S AWS is tried again (half-open: the next clips g
 it, a failure opens it for another BREAKER_RETRY_S. health(): the last success, the recent failures with
 AWS's reason, the breaker (station health, Settings > Data sources).
 
-Budget (Usage): billed seconds per calendar month (max(15 s, audio sent) per stream) in the CAD
-database; when the month's cost reaches the limit no new audio is sent: available() says why and the
-callers use the local model until the next month.
+Budget (Usage): billed seconds (the audio sent) per calendar month in the CAD database, per pool and per channel;
+when the month's cost reaches the limit no new audio is sent: available() says why and the callers use the local
+model until the next month. Two pools that never share a dollar: ours (the fire channels, the airband: limit_usd,
+with the reserve for the pages and Fire/EMS 15) and context (another P25 system's talkgroups, e.g. PD dispatch on
+MRRS, "p25:<system>:<tg>": context_limit_usd, no reserve). A context channel never counts against our limit or its
+reserve, and past its own limit it goes to the station's whisper, not silence.
 
 Custom vocabulary (Vocabulary): a phrase list pushed as `sizeup-pcfd` (CreateVocabulary /
 UpdateVocabulary, polled with GetVocabulary until READY) and used by new streams once READY. AWS rules
@@ -91,12 +95,16 @@ from sizeup import tz
 RATE = 8000
 MODEL = "aws-transcribe"
 SERVICE = "transcribe"
-PRICE_PER_MIN = 0.024
-MIN_BILLED_S = 15.0
+PRICE_PER_MIN = 0.01             # us-east-1 standard streaming, $/min (#423; was 0.024, ~2.4x high)
+MIN_BILLED_S = 0.0               # billed per second, no minimum per stream (#423; was 15 s)
+PROBE_S = 15.0                   # available(): a transmission's worth of headroom left under the limit
+CONTEXT = "context"              # the usage pool of another P25 system's talkgroups (police): its own budget
+CONTEXT_LIMIT_USD = 15.0         # ... its monthly limit until Settings > Radios sets one
 MAX_STREAM_S = 4 * 3600 - 120     # end a stream between transmissions before Transcribe's 4 h limit
 KEEPALIVE_S = 10.0               # Transcribe ends a stream that gets no audio for 15 s: this often ...
 KEEPALIVE_AUDIO_S = 0.1          # ... this much silence while it waits for the next transmission
 VOCABULARY = "sizeup-pcfd"
+PD_VOCABULARY = "sizeup-pd"      # the police sources' own (stt_vocab.police_phrases, data/stt/profiles.json)
 RETRIES = 1                      # a transmission caught in a failed stream is tried this many more times
 DEADLINE_MIN_S = 60.0            # a job's overall deadline from when it was submitted: at least this ...
 DEADLINE_FACTOR = 3.0            # ... or this many times its clip's length; then "AWS timed out" and the fallback
@@ -575,8 +583,19 @@ class Session:
 
 # -- usage and the monthly budget -------------------------------------------------------------------------
 
+def is_context(channel: str | None) -> bool:
+    """Another P25 system's talkgroup ("p25:mrrs:9211", sizeup/sourcekeys.py channel_key): the context pool. Ours are
+    "tg:<n>" (the county system) and the FM / airband channels' labels."""
+    return str(channel or "").startswith("p25:")
+
+
+def pool_of(channel: str | None) -> str:
+    return CONTEXT if is_context(channel) else ""
+
+
 class Usage:
-    """Billed seconds per calendar month (local time), kept through get/put (the CAD's meta table)."""
+    """Billed seconds per calendar month (local time), kept through get/put (the CAD's meta table): one record per
+    pool (ours: "aws_usage:<month>", context: "aws_usage_context:<month>"), each with its channels' share."""
 
     def __init__(self, get: Callable[[str], str | None], put: Callable[[str, str], None],
                  now: Callable[[], float] = time.time):
@@ -588,22 +607,35 @@ class Usage:
         budget starts again at local midnight on the 1st."""
         return datetime.fromtimestamp(self.now(), BUDGET_TZ).strftime("%Y-%m")
 
-    def month(self) -> dict:
-        key = self.month_key()
+    @staticmethod
+    def _key(month: str, pool: str = "") -> str:
+        return f"aws_usage_{pool}:{month}" if pool else f"aws_usage:{month}"
+
+    def month(self, pool: str = "", month: str | None = None) -> dict:
+        key = month or self.month_key()
         try:
-            d = json.loads(self._get(f"aws_usage:{key}") or "{}")
+            d = json.loads(self._get(self._key(key, pool)) or "{}")
         except ValueError:
             d = {}
+        chans = d.get("channels") if isinstance(d.get("channels"), dict) else {}
         return {"month": key, "billed_s": float(d.get("billed_s") or 0), "audio_s": float(d.get("audio_s") or 0),
-                "streams": int(d.get("streams") or 0)}
+                "streams": int(d.get("streams") or 0),
+                "channels": {str(k): float(v or 0) for k, v in chans.items() if isinstance(v, (int, float))}}
 
-    def add(self, billed_s: float, audio_s: float) -> None:
+    def add(self, billed_s: float, audio_s: float, channel: str | None = None) -> None:
+        """A stream's billed seconds, to its channel's pool (pool_of) and its channel's share of it."""
+        pool = pool_of(channel)
         with self._lock:
-            m = self.month()
+            m = self.month(pool)
             m["billed_s"] += billed_s
             m["audio_s"] += audio_s
             m["streams"] += 1
-            self._put(f"aws_usage:{m['month']}", json.dumps({k: m[k] for k in ("billed_s", "audio_s", "streams")}))
+            if channel:
+                m["channels"][channel] = round(m["channels"].get(channel, 0.0) + billed_s, 1)
+            out = {k: m[k] for k in ("billed_s", "audio_s", "streams")}
+            if m["channels"]:
+                out["channels"] = m["channels"]
+            self._put(self._key(m["month"], pool), json.dumps(out))
 
 
 @dataclass
@@ -660,15 +692,20 @@ class AwsTranscriber:
     def __init__(self, s: Settings, usage: Usage, on_done: Callable[[object, str, float | None], None],
                  on_fail: Callable[[object, str], None], log: Callable[[str], None] = print,
                  limit_usd: Callable[[], float] = lambda: 25.0, connect: Callable[..., WebSocket] = WebSocket.connect,
+                 context_limit_usd: Callable[[], float] = lambda: CONTEXT_LIMIT_USD,
                  creds: Callable[[], aws.Credentials] = aws.credentials, respell: Callable[[str], str] = lambda t: t,
                  on_late: Callable[[object, str, float | None], None] = lambda item, text, conf: None,
                  on_change: Callable[[], None] = lambda: None, clock: Callable[[], float] = time.time):
         self.s, self.usage, self.on_done, self.on_fail, self.log = s, usage, on_done, on_fail, log
         self.limit_usd, self.connect, self.creds, self.respell = limit_usd, connect, creds, respell
         self.on_late, self.on_change, self.clock = on_late, on_change, clock
+        self.context_limit_usd = context_limit_usd
         self.region = aws.region(s.region)
         self.vocabulary = ""                       # set once the custom vocabulary is READY
         self.channel_vocabulary: dict[str, str] = {}   # channel -> its own vocabulary once READY (HPN ATC: sizeup-atc)
+        # channel -> its own respelling (PD dispatch: sizeup-pd's "two sixty six" -> "266"). A context channel
+        # (is_context) never gets ours (sizeup-pcfd's) nor our vocabulary: police words never become fire callsigns
+        self.channel_respell: dict[str, Callable[[str], str]] = {}
         self.pace = max(0.5, float(s.pace))
         self._workers: dict[str, ChannelWorker] = {}
         self._lock = threading.RLock()
@@ -692,26 +729,47 @@ class AwsTranscriber:
     def url(self, channel: str | None = None) -> str:
         base = (self.s.endpoint or f"wss://transcribestreaming.{self.region}.amazonaws.com:8443").rstrip("/")
         q = {"language-code": self.s.language, "media-encoding": "pcm", "sample-rate": str(RATE)}
-        vocab = self.channel_vocabulary.get(channel or "") or self.vocabulary
+        vocab = self.channel_vocabulary.get(channel or "") or ("" if is_context(channel) else self.vocabulary)
         if vocab:
             q["vocabulary-name"] = vocab
         return aws.presign(f"{base}/stream-transcription-websocket?{urllib.parse.urlencode(q)}", self.creds(),
                            self.region, SERVICE, expires=300)
 
-    def spent(self) -> dict:
-        """This month: billed seconds (closed streams + the open ones so far), minutes, dollars, the limit."""
-        m = self.usage.month()
-        live = sum(max(MIN_BILLED_S, w.session.sent_s) for w in list(self._workers.values()) if w.session is not None)
-        billed = m["billed_s"] + live
+    def _usd(self, seconds: float) -> float:
+        return seconds / 60 * self.s.price_per_min
+
+    def spent(self, pool: str = "") -> dict:
+        """This month in a pool (ours "", or CONTEXT): billed seconds (closed streams + the open ones so far), minutes,
+        dollars, the pool's limit, and each channel's share {channel: {minutes, usd}}."""
+        m = self.usage.month(pool)
+        live: dict[str, float] = {}
+        for c, w in list(self._workers.items()):
+            if w.session is not None and pool_of(c) == pool:
+                live[c] = max(MIN_BILLED_S, w.session.sent_s)
+        billed = m["billed_s"] + sum(live.values())
+        chans = dict(m["channels"])
+        for c, sec in live.items():
+            chans[c] = chans.get(c, 0.0) + sec
+        limit = float(self.context_limit_usd() if pool == CONTEXT else self.limit_usd())
         return {**m, "billed_s": round(billed, 1), "minutes": round(billed / 60, 1),
-                "usd": round(billed / 60 * self.s.price_per_min, 2), "limit_usd": float(self.limit_usd()),
-                "streams_open": sum(1 for w in list(self._workers.values()) if w.session is not None)}
+                "usd": round(self._usd(billed), 2), "limit_usd": limit,
+                "channels": {c: {"minutes": round(sec / 60, 1), "usd": round(self._usd(sec), 2)}
+                             for c, sec in sorted(chans.items(), key=lambda kv: -kv[1])},
+                "streams_open": len(live)}
 
     def budget_ok(self, extra_s: float = 0.0, channel: str | None = None) -> tuple[bool, str]:
-        """Within this month's limit; a reserve channel (pages, Fire/EMS 15) up to the limit and its reserve."""
+        """Within this month's limit; a reserve channel (pages, Fire/EMS 15) up to the limit and its reserve. A context
+        channel (another P25 system's talkgroup) within the context pool's own limit only: never ours, no reserve."""
+        if is_context(channel):
+            sp = self.spent(CONTEXT)
+            limit = sp["limit_usd"]
+            if self._usd(sp["billed_s"] + extra_s) < limit:
+                return True, ""
+            return False, (f"the monthly AWS limit for context talkgroups (police) is reached "
+                           f"(${sp['usd']:.2f} of ${limit:g} in {sp['month']}): the station's whisper")
         sp = self.spent()
         limit = sp["limit_usd"]
-        cost = (sp["billed_s"] + extra_s) / 60 * self.s.price_per_min
+        cost = self._usd(sp["billed_s"] + extra_s)
         if cost < limit:
             return True, ""
         cap = limit * (1 + max(0.0, self.s.reserve_fraction))
@@ -729,7 +787,7 @@ class AwsTranscriber:
 
     def reserve_left(self) -> list[str]:
         """The channels that may still use AWS past the monthly limit (none once the reserve is used too)."""
-        return [c for c in self.s.reserve_channels if self.budget_ok(MIN_BILLED_S, c)[0]]
+        return [c for c in self.s.reserve_channels if self.budget_ok(PROBE_S, c)[0]]
 
     def budget(self) -> dict:
         """This month's cost against the limit (station health: the 80 % and 100 % alerts)."""
@@ -741,7 +799,15 @@ class AwsTranscriber:
         return {"month": sp["month"], "usd": sp["usd"], "limit_usd": limit, "pct": pct, "cap_usd": round(cap, 2),
                 "reserve": left, "reserve_text": (f"{self.reserve_words()} keep AWS up to ${cap:g} (the reserve)" if left
                                                   else f"the reserve for {self.reserve_words()} is used up too")
-                if pct >= 100 else ""}
+                if pct >= 100 else "", "context": self.context_budget()}
+
+    def context_budget(self) -> dict:
+        """The context pool's month (police on another P25 system): its cost, limit, percent and channels."""
+        sp = self.spent(CONTEXT)
+        limit = sp["limit_usd"]
+        pct = round(100.0 * sp["usd"] / limit, 1) if limit > 0 else 100.0
+        return {"month": sp["month"], "usd": sp["usd"], "limit_usd": limit, "pct": pct, "minutes": sp["minutes"],
+                "channels": sp["channels"], "ok": self.budget_ok(PROBE_S, "p25:")[0]}
 
     def breaker_ok(self) -> tuple[bool, str]:
         """(False, why) while the breaker is open. Past its retry time it half-opens: the next clips go to AWS."""
@@ -772,7 +838,7 @@ class AwsTranscriber:
             self.creds()
         except aws.AwsError as e:
             return False, str(e)
-        return self.budget_ok(MIN_BILLED_S, channel)
+        return self.budget_ok(PROBE_S, channel)
 
     def retry_now(self) -> bool:
         """Settings > Data sources, Try AWS now: an open breaker half-opens (the next clips go to AWS)."""
@@ -939,9 +1005,16 @@ class AwsTranscriber:
             self._open.discard(job)
             return True
 
+    def _respell_for(self, channel: str) -> Callable[[str], str]:
+        """The channel's own respelling, else ours; a context channel without its own: none (never ours)."""
+        fn = self.channel_respell.get(channel)
+        if fn is not None:
+            return fn
+        return (lambda t: t) if is_context(channel) else self.respell
+
     def _done(self, job: Job, text: str, conf: float | None) -> None:
         try:
-            text = self.respell(text)
+            text = self._respell_for(job.channel)(text)
         except Exception as e:
             self.log(f"aws transcribe: respell: {type(e).__name__}: {e}")
         if self._resolve(job, "done"):
@@ -1021,11 +1094,11 @@ class AwsTranscriber:
         except Exception as e:
             self.log(f"aws transcribe: on_change: {type(e).__name__}: {e}")
 
-    def _bill(self, sent_s: float) -> None:
+    def _bill(self, sent_s: float, channel: str | None = None) -> None:
         if sent_s <= 0:
             return
         try:
-            self.usage.add(max(MIN_BILLED_S, sent_s), sent_s)
+            self.usage.add(max(MIN_BILLED_S, sent_s), sent_s, channel)
         except Exception as e:  # the cost line's trouble (SQLite) must never kill a channel's thread (#195)
             self.log(f"aws transcribe: could not count {sent_s:.0f} s of audio: {type(e).__name__}: {e}")
 
@@ -1119,7 +1192,7 @@ class ChannelWorker(threading.Thread):
                 try:
                     s.close()
                 finally:
-                    self.o._bill(s.sent_s)
+                    self.o._bill(s.sent_s, self.channel)
             return
         try:
             if self.session is not None:
@@ -1283,7 +1356,7 @@ class ChannelWorker(threading.Thread):
         self.session = None
         self.fed = []
         s.close()
-        self.o._bill(s.sent_s)
+        self.o._bill(s.sent_s, self.channel)
         self.errors = 0
 
     @staticmethod
@@ -1314,7 +1387,7 @@ class ChannelWorker(threading.Thread):
         self.pending, self.fed, self.session = [], [], None
         if s is not None:
             s.close()
-            self.o._bill(s.sent_s)
+            self.o._bill(s.sent_s, self.channel)
         kind, msg = err
         self.o.log(f"aws transcribe {self.channel}: {kind}: {msg}")
         if kind == "BadRequestException" and re.search(r"real.?time|too fast|rate", msg, re.I) and self.o.pace > 1.0:

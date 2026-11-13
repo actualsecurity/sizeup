@@ -404,6 +404,8 @@ class Rerun:
     raw: str = ""
     confidence: float | None = None
     as_alt: bool = False      # "both" re-run: this text is the alternative to compare, not the text
+    source_key: str = ""      # its channel key ("p25:mrrs:9211"): another P25 system's profile (data/stt/profiles.json)
+    service: str = ""
 
 class App:
     def __init__(self, cfg: Config):
@@ -595,7 +597,8 @@ class App:
         self._hub_aws = self._load_hub_aws()
         self._aws_wait: dict[str, tuple[np.ndarray, str]] = {}
         self._vocab_suggest: list[str] | None = None
-        self.aws = self.vocab = self.atc_vocab = None
+        self.aws = self.vocab = self.atc_vocab = self.pd_vocab = None
+        self.pd_sources: list[str] = []
         _mark("radio")
         if cfg.stt_aws:
             self._aws_setup()
@@ -980,11 +983,38 @@ class App:
         talkers on this call as they're said on the air."""
         if self._kind.get(getattr(item, "source", "")) == "airband":
             return self._atc_prompt(getattr(item, "source", ""))
+        prof = self._stt_profile(item)
+        if prof is not None:          # another P25 system's police (radio-intel PR 3): its own words, never a talker's name
+            return self._profile_prompt(prof)
         parts = [self.cfg.stt_prompt]
         if self.cfg.stt_talker_prompt != "off":
             parts.append(talker_prompt(getattr(item, "unit", "") or "", getattr(item, "start", None),
                                        with_time=self.cfg.stt_talker_prompt == "ids+time"))
         return " ".join(p for p in parts if p)
+
+    @staticmethod
+    def _stt_profile(item) -> dict | None:
+        """The speech-to-text profile (data/stt/profiles.json) of another P25 system's source, None for any of ours."""
+        key = str(getattr(item, "source_key", "") or "")
+        got = sources.parse(key) if key else None
+        if got is None or got[0] == sources.COUNTY:
+            return None
+        from sizeup import stt_vocab
+        return stt_vocab.profile(sources.p25(*got), str(getattr(item, "service", "") or ""))
+
+    def _profile_prompt(self, prof: dict) -> str:
+        """whisper's prompt for a profile (stt_vocab.police_prompt: phrasing, the headquarters, the towns' streets),
+        worked out once per profile."""
+        cache = self.__dict__.setdefault("_profile_prompts", {})
+        name = str(prof.get("name") or "")
+        if name not in cache:
+            from sizeup import stt_vocab
+            try:
+                cache[name] = stt_vocab.police_prompt(prof)
+            except Exception as e:  # noqa: BLE001 - a missing gazetteer: the profile's own words only
+                log(f"speech-to-text: profile {name}: {type(e).__name__}: {e}")
+                cache[name] = str(prof.get("prompt") or "")
+        return cache[name]
 
     def _atc_prompt(self, channel: str = "") -> str:
         """whisper's prompt on an airband channel (#233): HPN's words, then the callsigns of the aircraft nearest the field
@@ -2099,7 +2129,8 @@ class App:
     def _rerun_split(self, ids: list[str]) -> tuple[int, list[str], list[str]]:
         """The ids whose channel is on AWS go to it now: (how many, the ones for the local model, the ones
         whose local text is the alternative ("both"))."""
-        ok, why = self.aws.available() if self.aws is not None else (False, "Amazon Transcribe isn't set up here")
+        from sizeup.transcribe import is_context
+        ok0, why0 = self.aws.available() if self.aws is not None else (False, "Amazon Transcribe isn't set up here")
         n, local, alt = 0, [], []
         for cid in dict.fromkeys(ids):
             item, key = self._find(cid)
@@ -2107,6 +2138,7 @@ class App:
             if eng not in ("aws", "both"):
                 local.append(cid)
                 continue
+            ok, why = self.aws.available(key) if self.aws is not None and is_context(key) else (ok0, why0)
             pcm = self._rerun_pcm(item) if ok else None
             if pcm is None:
                 self._rerun_note[cid] = f"AWS unavailable ({why if not ok else 'no recording for it here'})"
@@ -2150,7 +2182,8 @@ class App:
                 got = self._rerun_audio(t.id, getattr(t, "fm", self._kind.get(t.source) != "airband"))
                 if got:
                     low = speech_seconds(got[0]) < MIN_SPEECH_S  # same mic-click rule as the live pass
-                    jobs.append((t.start, Rerun(t.id, "traffic", got[1], low, t.unit, t.start, as_alt=as_alt), got[0]))
+                    jobs.append((t.start, Rerun(t.id, "traffic", got[1], low, t.unit, t.start, as_alt=as_alt,
+                                                source_key=keys[t.id], service=getattr(t, "service", "") or ""), got[0]))
                     seen.add(t.id)
         jobs.sort(key=lambda j: -j[0])  # newest first: what's on screen updates first
         with self._lock:
@@ -2281,6 +2314,8 @@ class App:
         Fire/EMS 15 keep it within the reserve)? Forwarding to a hub: what the hub last said (it runs it);
         else this process's own (the hub; all-in-one with [stt] aws and credentials)."""
         if self.forwarding():
+            if key is not None and key in (self._hub_aws.get("deny") or ()):    # the police budget used up (PR 3)
+                return False, str(self._hub_aws.get("deny_why") or self._hub_aws.get("why") or "")
             ok = bool(self._hub_aws.get("ok")) or (key is not None and key in (self._hub_aws.get("reserve") or ()))
             return ok, "" if ok else str(self._hub_aws.get("why") or "")
         if self.aws is None:
@@ -2352,7 +2387,7 @@ class App:
 
     def _aws_setup(self) -> None:
         from sizeup import aws as aws_mod
-        from sizeup.transcribe import AwsTranscriber, Settings as AwsSettings, Usage, Vocabulary, respell
+        from sizeup.transcribe import PD_VOCABULARY, AwsTranscriber, Settings as AwsSettings, Usage, Vocabulary, respell
         cfg, store = self.cfg, self.cad.store
         reg = aws_mod.region(cfg.stt_aws_region)
         self.aws_usage = Usage(store.meta_get, store.meta_put)
@@ -2372,12 +2407,25 @@ class App:
                                               reserve_channels=tuple(dict.fromkeys((*RESERVE_CHANNELS, *airband)))),
                                   self.aws_usage, self._aws_done, self._aws_failed, log=log,
                                   limit_usd=self.cad.settings.aws_limit,
+                                  context_limit_usd=self.cad.settings.aws_context_limit,
                                   respell=lambda t: respell(t, self.vocab.state()["respell"]),
                                   on_late=self._aws_late, on_change=self._aws_changed)
         if self.vocab.ready():
             self.aws.vocabulary = cfg.stt_aws_vocabulary
         if self.atc_vocab is not None and self.atc_vocab.ready():
             self._atc_vocab_ready(self.atc_vocab.name)
+        # Police on another P25 system (radio-intel PR 3): their own vocabulary (sizeup-pd, stt_vocab.police_phrases) and
+        # respelling on their sources only, pushed with the PCFD one; never the fire vocabulary on them, nor theirs on ours
+        from sizeup import stt_vocab
+        self.pd_sources = stt_vocab.vocabulary_sources(PD_VOCABULARY)
+        self.pd_vocab = None
+        if self.pd_sources:
+            self.pd_vocab = Vocabulary(reg, store.meta_get, store.meta_put, PD_VOCABULARY, cfg.stt_aws_api_endpoint,
+                                       log=log, on_ready=self._pd_vocab_ready, key="aws_vocabulary_pd")
+            for k in self.pd_sources:
+                self.aws.channel_respell[k] = lambda t: respell(t, self.pd_vocab.state()["respell"])
+            if self.pd_vocab.ready():
+                self._pd_vocab_ready(self.pd_vocab.name)
         log(f"speech-to-text: Amazon Transcribe streaming ({reg}) for the channels set to AWS in Settings > Radios")
 
     def _atc_view(self, view, now) -> None:
@@ -2419,6 +2467,30 @@ class App:
                 self.aws.channel_vocabulary[c.label] = name
                 log(f"aws transcribe: custom vocabulary {name} in use on {c.label} from its next stream")
 
+    def _pd_vocab_pending(self) -> None:
+        """sizeup-pd is being updated: the police sources' new streams go without it until it is READY again."""
+        if self.aws is None:
+            return
+        for k in getattr(self, "pd_sources", ()):
+            self.aws.channel_vocabulary.pop(k, None)
+
+    def _pd_vocab_ready(self, name: str) -> None:
+        """sizeup-pd is READY: the police sources' next streams use it (and only theirs)."""
+        if self.aws is None:
+            return
+        for k in getattr(self, "pd_sources", ()):
+            if self.aws.channel_vocabulary.get(k) != name:
+                self.aws.channel_vocabulary[k] = name
+                log(f"aws transcribe: custom vocabulary {name} in use on {k} from its next stream")
+
+    def police_vocabulary(self) -> list[str]:
+        """sizeup-pd's phrases (stt_vocab.police_phrases over the police profile's towns), worked out once."""
+        if getattr(self, "_pd_phrases", None) is None:
+            from sizeup import stt_vocab
+            prof = (stt_vocab.profiles()["profiles"].get("police") or {})
+            self._pd_phrases = stt_vocab.police_phrases(tuple(prof.get("towns") or ("Port Chester", "Rye", "Rye Brook")))
+        return list(self._pd_phrases)
+
     def _vocab_ready(self, name: str) -> None:
         if self.aws is not None and self.aws.vocabulary != name:
             self.aws.vocabulary = name
@@ -2443,7 +2515,8 @@ class App:
 
     def _aws_alt(self, item, pcm: np.ndarray, key: str) -> None:
         """"both": the local text is in; Amazon Transcribe's becomes the text, the local one the alternative."""
-        if self.aws is None or not self.aws.available()[0]:
+        from sizeup.transcribe import is_context
+        if self.aws is None or not self.aws.available(key if is_context(key) else None)[0]:
             return
         alt = {"text": getattr(item, "text", "") if isinstance(item, Traffic) else getattr(item, "raw", ""),
                "model": getattr(item, "model", "") or ""}
@@ -2542,6 +2615,29 @@ class App:
     def aws_limit_default(self) -> float:
         return float(self.cfg.stt_aws_limit_usd)
 
+    def aws_context_limit_default(self) -> float:
+        return float(self.cfg.stt_aws_context_limit_usd)
+
+    def context_aws_keys(self) -> list[str]:
+        """Another P25 system's talkgroups set to AWS or both (their own budget, transcribe.CONTEXT): the ones the
+        station must hear about separately when only one of the two budgets is used up."""
+        from sizeup.transcribe import is_context
+        keys = {*self._chan_ov, *self.cfg.stt_aws_channels}
+        return sorted(k for k in keys if is_context(k) and self.channel_pref(k).get("engine") in ("aws", "both"))
+
+    def aws_split(self, ok: bool) -> tuple[list[str], list[str], str]:
+        """(context keys that keep AWS while ours can't, context keys that can't while ours can, why): the police
+        budget and ours are apart (radio-intel PR 3), so one running out never moves the other's channels."""
+        ctx = self.context_aws_keys() if self.aws is not None else []
+        if not ctx:
+            return [], [], ""
+        cok, cwhy = self.aws.available(ctx[0])        # one pool, one breaker: the same answer for every context key
+        if ok and not cok:
+            return [], ctx, cwhy
+        if not ok and cok:
+            return ctx, [], ""
+        return [], [], ""
+
     def _channel_overrides(self) -> dict:
         """The channel choices (renamed_overrides), the old names' moved and dropped in the store too (#307)."""
         stored = self.cad.settings.channel_overrides()
@@ -2583,6 +2679,9 @@ class App:
             r = getattr(self, "atc_refresh", None)             # ... with the operators seen near HPN lately (#257)
             self._atc_vocab_pending()
             st = dict(st, atc=self.atc_vocab.push(r.phrases() if r is not None else atc.vocabulary()["phrases"]))
+        if getattr(self, "pd_vocab", None) is not None:        # the police sources' own (radio-intel PR 3)
+            self._pd_vocab_pending()
+            st = dict(st, pd=self.pd_vocab.push(self.police_vocabulary()))
         return st
 
     def vocabulary_state(self) -> dict:
@@ -2594,6 +2693,10 @@ class App:
             a = self.atc_vocab.state()
             a.pop("respell", None)
             st["atc"] = a
+        if getattr(self, "pd_vocab", None) is not None:
+            a = self.pd_vocab.state()
+            a.pop("respell", None)
+            st["pd"] = a
         return st
 
     def aws_status(self) -> dict:
@@ -2602,7 +2705,7 @@ class App:
         if self.aws is None:
             return {"enabled": False, "where": "hub" if self.forwarding() else "none", "ok": ok, "why": why}
         return {"enabled": True, "where": "here", "ok": ok, "why": why, **self.aws.spent(),
-                "price_per_min": self.aws.s.price_per_min, **self.aws.status()}
+                "price_per_min": self.aws.s.price_per_min, "context": self.aws.context_budget(), **self.aws.status()}
 
     # -- the hub's choices on the station (the set_channel_prefs job) ------------------------------------------
 
@@ -2612,7 +2715,9 @@ class App:
         except ValueError:
             d = {}
         return {"ok": bool(d.get("ok")), "why": str(d.get("why") or "the hub hasn't said whether it can use AWS yet"),
-                "reserve": [str(k) for k in (d.get("reserve") or [])]}
+                "reserve": [str(k) for k in (d.get("reserve") or [])],
+                **({"deny": [str(k) for k in d["deny"]], "deny_why": str(d.get("deny_why") or "")}
+                   if d.get("deny") else {})}
 
     def set_channel_prefs(self, prefs: dict, aws: dict | None = None, tones: dict | None = None,
                           squelch: dict | None = None) -> dict:
@@ -2633,6 +2738,8 @@ class App:
         if isinstance(aws, dict):
             new = {"ok": bool(aws.get("ok")), "why": str(aws.get("why") or "")[:300],
                    "reserve": [str(k)[:40] for k in (aws.get("reserve") or [])][:8]}
+            if aws.get("deny"):      # context channels past their own AWS budget: whisper here (radio-intel PR 3)
+                new.update(deny=[str(k)[:40] for k in aws["deny"]][:8], deny_why=str(aws.get("deny_why") or "")[:300])
             if new != self._hub_aws:
                 self._hub_aws = new
                 self.cad.store.meta_put("hub_aws", json.dumps(new))
@@ -2647,7 +2754,7 @@ class App:
         return {"prefs": self._chan_ov, "aws": dict(self._hub_aws), "tones": len(self._tone_ov),
                 "squelch": self._sq_ov, "squelch_ok": True,       # (takes the squelch: a hub sends it)
                 "sig": channels.sig(self._chan_ov, self._hub_aws["ok"], self._tone_ov, self._hub_aws.get("reserve"),
-                                    self._sq_ov)}
+                                    self._sq_ov, self._hub_aws.get("deny"))}
 
     # -- an FM channel's squelch (Settings > Radios > Squelch; sizeup/radio/fm.py) ---------------------------
 
@@ -2738,9 +2845,15 @@ class App:
         """Settings > Radios > Channels: the choices, what AWS can do, where they stand, the cost."""
         ok, why = self.aws_ok()
         reserve = ([k for k in channels_reserve(self) if self.aws_ok(k)[0]] if not ok else [])
+        if self.forwarding():
+            deny = list(self._hub_aws.get("deny") or [])
+            reserve += [k for k in self._hub_aws.get("reserve") or [] if k not in reserve] if not ok else []
+        else:
+            more, deny, _why = self.aws_split(ok)
+            reserve += more
         return {"prefs": self._chan_ov, "aws_channels": list(self.cfg.stt_aws_channels),
                 "record_only": list(self.cfg.stt_record_only), "aws_ok": ok, "aws_why": why,
-                "aws_reserve": reserve,
+                "aws_reserve": reserve, "aws_deny": deny,
                 "fm": [{"key": c.label, "kind": c.kind, "mhz": c.mhz,
                         **({"schedule": plan_text(c)} if getattr(c, "schedule", ()) or getattr(c, "also", ()) else {})}
                        for c in self.cfg.channels],
@@ -3607,6 +3720,8 @@ class App:
             self.vocab.poll()
         if getattr(self, "atc_vocab", None) is not None and self.atc_vocab.state()["state"] == "PENDING":
             self.atc_vocab.poll()
+        if getattr(self, "pd_vocab", None) is not None and self.pd_vocab.state()["state"] == "PENDING":
+            self.pd_vocab.poll()
         if self.station is not None:
             self.station.start()
         elif self.link is not None:

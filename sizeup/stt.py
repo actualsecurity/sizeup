@@ -207,6 +207,8 @@ class SttQueue:
         self._cv = threading.Condition()
         self._seq = itertools.count()
         self.dropped = self.skipped = self.shed = 0
+        self.shed_context = 0                     # of those shed, another P25 system's alert clips (police dispatch)
+        self._shed_ctx_at: deque = deque()        # ... when, over RATE_WINDOW_S x 2 (the last hour)
         self.last_drop: dict | None = None
         self._in: deque = deque()                 # (at, channel, priority, fallback) of each clip put, RATE_WINDOW_S
 
@@ -273,6 +275,10 @@ class SttQueue:
         old = [e for e in self._items if e[0] in LIVE_CLASSES and now - e[5] >= MAX_WAIT_S and e not in shed]
         for e in old + shed:
             self._items.remove(e)
+        for e in shed:
+            if e[0] == CONTEXT:                   # lost recall on the police pre-alerts: counted, never just quiet
+                self.shed_context += 1
+                self._shed_ctx_at.append(now)
         skips.extend((e[2], f"waited {int((now - e[5]) // 60)} min for speech-to-text: skipped, "
                                     "too far behind (Re-transcribe it if it matters)") for e in old)
         sheds.extend((e[2], f"{SHED}: speech-to-text {int((now - e[5]) // 60)} min behind, "
@@ -306,6 +312,13 @@ class SttQueue:
 
     def get_nowait(self) -> tuple:
         return self.get(timeout=0)
+
+    def _shed_context_h(self, now: float) -> int:
+        """Context alert clips shed in the last hour."""
+        with self._cv:
+            while self._shed_ctx_at and now - self._shed_ctx_at[0] > 3600.0:
+                self._shed_ctx_at.popleft()
+            return len(self._shed_ctx_at)
 
     def behind(self) -> bool:
         """The oldest live clip (any class but re-runs) has waited BEHIND_S."""
@@ -347,6 +360,7 @@ class SttQueue:
                 "in_fallback_h": round(sum(1 for x in arrived if x[3]) * per_h),
                 "in_top": [(ch, round(n * per_h)) for ch, n in sorted(came.items(), key=lambda kv: -kv[1])[:3]],
                 "dropped": self.dropped, "skipped": self.skipped, "shed": self.shed, "last_drop": self.last_drop,
+                "shed_context": self.shed_context, "shed_context_h": self._shed_context_h(now),
                 "max": self.maxsize, "stale_s": STALE_S, "max_wait_s": MAX_WAIT_S, "low_max_wait_s": LOW_MAX_WAIT_S,
                 "high_max_wait_s": HIGH_MAX_WAIT_S}
 

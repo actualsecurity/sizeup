@@ -477,7 +477,9 @@ def test_stt_class_follows_the_tier_and_never_passes_fire_traffic(two):
     assert app._stt_priority(item, "tg:307") == URGENT
     assert LIVE < app._stt_priority(item, "p25:mrrs:9211") < LOW and app._stt_priority(item, "p25:mrrs:9212") == LOW
     assert app.channel_pref("p25:mrrs:9211")["transcribe"] and not app.channel_pref("p25:mrrs:9049")["transcribe"]
-    assert app.channel_pref("p25:mrrs:9211")["engine"] == "local" and t.system == "mrrs"
+    # PD dispatch defaults to AWS (radio-intel PR 3), on the local model where AWS isn't set up
+    assert app.channel_pref("p25:mrrs:9211")["engine"] == "aws" and t.system == "mrrs"
+    assert app.stt_engine("p25:mrrs:9211") == "local" and app.channel_pref("p25:mrrs:9049")["engine"] == "local"
     assert app.set_talkgroup(PD, None, None, "record", "mrrs") is None
     assert not app.channel_pref("p25:mrrs:9211")["transcribe"]
     assert "no talkgroup 307 on mrrs" in app.set_talkgroup(307, None, None, "alert", "mrrs")

@@ -36,7 +36,9 @@ section ("squelch", key the channel's label, value only what differs from the re
 sent to the station with the channel choices (set_channel_prefs' squelch, in the same signature), applied live.
 
 An "aws" or "both" channel uses the local model whenever AWS can't take audio (no AWS here or on the
-hub, no credentials, the monthly limit reached): effective().
+hub, no credentials, the monthly limit reached): effective(). Another P25 system's talkgroup ("p25:mrrs:9211", police
+dispatch: AWS by default, radio-intel PR 3) has its own monthly budget: the hub's word on AWS lists it under "reserve"
+when only ours is used up, and under "deny" when only its own is (the station's whisper takes it).
 """
 
 from __future__ import annotations
@@ -125,10 +127,12 @@ def effective(p: dict, aws_ok: bool) -> str:
     return eng if eng == "local" or aws_ok else "local"
 
 
-def sig(overrides: dict, aws_ok: bool, tones: dict | None = None, reserve=None, squelch: dict | None = None) -> str:
+def sig(overrides: dict, aws_ok: bool, tones: dict | None = None, reserve=None, squelch: dict | None = None,
+        deny=None) -> str:
     """The same choices + the same AWS availability (+ the same named tone pairs, #80; + the channels that keep
-    AWS past the monthly limit, #195; + the squelch settings) -> the same short signature (hub and station). None
-    of those: the signature from before them."""
+    AWS past the monthly limit, #195; + the squelch settings; + the context channels past their own AWS budget while
+    ours isn't, radio-intel PR 3) -> the same short signature (hub and station). None of those: the signature from
+    before them."""
     d = {"prefs": {k: {f: v for f, v in sorted(o.items())} for k, o in sorted(overrides.items())}, "aws": bool(aws_ok)}
     if squelch:
         d["squelch"] = {k: {f: v for f, v in sorted(o.items())} for k, o in sorted(squelch.items())}
@@ -136,6 +140,8 @@ def sig(overrides: dict, aws_ok: bool, tones: dict | None = None, reserve=None, 
         d["tones"] = {k: tones[k] for k in sorted(tones)}
     if reserve and not aws_ok:
         d["reserve"] = sorted(str(k) for k in reserve)
+    if deny:
+        d["deny"] = sorted(str(k) for k in deny)
     raw = json.dumps(d, sort_keys=True, separators=(",", ":"))
     return hashlib.sha1(raw.encode()).hexdigest()[:12]
 

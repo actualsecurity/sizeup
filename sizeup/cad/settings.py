@@ -25,7 +25,8 @@ Reset to default = drop the override (one item, or a whole section).
     channels                       key "FG1" | "South 2" | "tg:307" -> {record?, transcribe?, engine?}: which channel is
                                    kept, transcribed, and by what (sizeup/channels.py; Settings > Radios)
     stt                            key "vocabulary" -> [phrases] (Amazon Transcribe's custom vocabulary),
-                                   "aws_monthly_limit_usd" -> the monthly AWS limit (sizeup/transcribe.py)
+                                   "aws_monthly_limit_usd" -> the monthly AWS limit (sizeup/transcribe.py),
+                                   "aws_context_budget_usd" -> another P25 system's (police) own monthly AWS limit
     tones                          the tone book (#80, #115, #122; sizeup/cad/tonelist.py): key "A/B" -> a pair named
                                    here {a_hz, b_hz, places, service, role?, confirmed?, page?} (#84/#115: {name, ...});
                                    "A/B@<name in the list>" -> an edit to a row of data/westchester_tones.csv {list,
@@ -177,6 +178,7 @@ WORDING = (("new", "First dispatch"), ("add_on", "Added to the assignment"), ("u
            ("respond", "Upgrade: more units"))
 MAX_TONES, MAX_GROUPS, MAX_CHANNELS = 8, 4, 8
 MAX_VOCAB, MAX_PHRASE_CHARS = 1500, 100
+STT_KEYS = ("vocabulary", "aws_monthly_limit_usd", "aws_context_budget_usd")   # the "stt" section's keys
 MAX_VOCAB_BYTES = 50_000          # AWS's limit; also keeps the Settings request under its 64 KB
 MAX_PLACE_NAMES = 300
 TONES_SECTION, MAX_NAMED_TONES, TONE_HZ = "tones", 400, tonelist.TONE_HZ     # the decoder's band (radio/tones.py)
@@ -2118,13 +2120,14 @@ class Editor:
         return out
 
     @staticmethod
-    def _limit(v) -> float:
+    def _limit(v, key: str = "aws_monthly_limit_usd") -> float:
         if isinstance(v, bool) or not isinstance(v, (int, float)) or not 0 <= v <= 10000:
-            raise CadError("aws_monthly_limit_usd: 0 to 10000 (dollars)")
+            raise CadError(f"{key}: 0 to 10000 (dollars)")
         return round(float(v), 2)
 
     def _stt_op(self, action: str, body: dict, op: str) -> dict:
-        """set {key: vocabulary | aws_monthly_limit_usd, value} | reset {key} | push (the vocabulary to AWS)."""
+        """set {key: vocabulary | aws_monthly_limit_usd | aws_context_budget_usd, value} | reset {key} | push (the
+        vocabularies to AWS)."""
         ctx = self.cad.radio_ctx
         cur = self.stt_values()
         if action == "push":
@@ -2138,8 +2141,8 @@ class Editor:
             return {"ok": st.get("state") != "error", "vocabulary": st, **({"error": st["reason"]}
                                                                            if st.get("state") == "error" else {})}
         key = _text(body.get("key"), "key", 40)
-        if key not in ("vocabulary", "aws_monthly_limit_usd"):
-            raise CadError("key: vocabulary or aws_monthly_limit_usd")
+        if key not in STT_KEYS:
+            raise CadError("key: vocabulary, aws_monthly_limit_usd or aws_context_budget_usd")
         if action == "set":
             if key == "vocabulary":
                 v = self._vocab_list(body.get("value"))
@@ -2147,8 +2150,8 @@ class Editor:
                 new = REMOVE if v == dflt else v
                 shown = (f"{len(cur[key])} phrases" if key in cur else "default"), f"{len(v)} phrases"
             else:
-                v = self._limit(body.get("value"))
-                dflt = ctx.aws_limit_default() if ctx is not None else 25.0
+                v = self._limit(body.get("value"), key)
+                dflt = self._limit_default(key)
                 new = REMOVE if v == dflt else v
                 shown = cur.get(key, dflt), v
             out = self._commit([("stt", key, new)], op, [("radios", f"stt/{key}", *shown)])
@@ -2171,7 +2174,20 @@ class Editor:
         v = self.stt_values().get("aws_monthly_limit_usd")
         if isinstance(v, (int, float)) and not isinstance(v, bool):
             return float(v)
+        return self._limit_default("aws_monthly_limit_usd")
+
+    def aws_context_limit(self) -> float:
+        """Another P25 system's (police) own monthly AWS limit: never ours, nor our reserve (radio-intel PR 3)."""
+        v = self.stt_values().get("aws_context_budget_usd")
+        if isinstance(v, (int, float)) and not isinstance(v, bool):
+            return float(v)
+        return self._limit_default("aws_context_budget_usd")
+
+    def _limit_default(self, key: str) -> float:
         ctx = self.cad.radio_ctx
+        if key == "aws_context_budget_usd":
+            fn = getattr(ctx, "aws_context_limit_default", None)
+            return float(fn()) if fn is not None else 15.0
         return ctx.aws_limit_default() if ctx is not None else 25.0
 
     def stt_page(self) -> dict:
@@ -2188,6 +2204,8 @@ class Editor:
                                "state": ctx.vocabulary_state() if ctx is not None else {"state": "none"}},
                 "limit": {"value": self.aws_limit(), "default": ctx.aws_limit_default() if ctx is not None else 25.0,
                           "edited": "aws_monthly_limit_usd" in cur},
+                "context_limit": {"value": self.aws_context_limit(), "default": self._limit_default("aws_context_budget_usd"),
+                                  "edited": "aws_context_budget_usd" in cur},
                 "aws": ctx.aws_status() if ctx is not None else {"enabled": False}}
 
     # -- the camera wall's area (#125): the margin around our fire districts, cameras always / never on it ---------
@@ -2650,12 +2668,13 @@ class Editor:
             except CadError as e:
                 raise CadError(f"overrides.{DEPT_SECTION}.{e}") from None
         st = ov.get("stt") or {}
-        if set(st) - {"vocabulary", "aws_monthly_limit_usd"}:
-            raise CadError("overrides.stt: vocabulary and aws_monthly_limit_usd only")
+        if set(st) - set(STT_KEYS):
+            raise CadError("overrides.stt: vocabulary, aws_monthly_limit_usd and aws_context_budget_usd only")
         if "vocabulary" in st:
             self._vocab_list(st["vocabulary"])
-        if "aws_monthly_limit_usd" in st:
-            self._limit(st["aws_monthly_limit_usd"])
+        for k in ("aws_monthly_limit_usd", "aws_context_budget_usd"):
+            if k in st:
+                self._limit(st[k], k)
         L = self.build(ov)
         for k in eta.KEYS:
             if k in d:
