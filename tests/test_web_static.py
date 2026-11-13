@@ -152,14 +152,17 @@ def test_no_health_banner_on_the_console_or_the_board_and_health_is_an_admins_ta
     health = js("health.js")
     assert "cad.hooks" not in health and "renderBanner" not in health and "alert-banners" not in health
     assert not re.search(r"cloud\)?\.alerts|cloud && c\.alerts", "".join(js(n) for n in JS_FILES))   # nothing reads it
-    # the tab: a section of its own, its nav item an admin's on the hub, its content refused to anyone else
+    # the tab: Settings > Station > Health, an admin's on the hub, its content refused to anyone else
     s = js("settings.js")
-    assert '["health", "Health"]' in s and '<section id="s-health" class="s-panel" data-s="health" hidden>' in html
-    tab = re.search(r"^function sHealthTab\(\) \{(.*?)^\}", s, re.S | re.M).group(1)
-    assert 'canDo("admin")' in tab and "sIsHub()" in tab
+    assert '["station", "Station"]' in s and '["health", "Health"]' in s
+    assert '<section id="s-station" class="s-panel" data-s="station" hidden>' in html
+    assert '<div id="s-station-health" class="s-station-part" data-stab="health" hidden></div>' in html
+    tabs = re.search(r"^function sStationTabs\(\) \{(.*?)^\}", s, re.S | re.M).group(1)
+    assert 'canDo("admin")' in tabs and "sIsHub()" in tabs
     body = re.search(r"^function sHealth\(panel\) \{(.*?)^\}", s, re.S | re.M).group(1)
     assert body.index('canDo("admin")') < body.index("StationHealth.mount(panel)")
-    assert 'm[2] === "health"' in s and '"#settings/health"' in s        # the pushes' old link lands on the tab
+    # the old places (a push's link, a bookmark) land on the tab
+    assert 'sec === "health" || (sec === "system" && m[2] === "health")' in s and '"#settings/station/health"' in s
     assert "StationHealth.mount" not in re.search(r"^function sSystem\(panel\) \{(.*?)^\}", s, re.S | re.M).group(1)
     # the links to the related Data sources row and Push notifications
     for href in ("#settings/system/pushes", "#settings/data/transcribe"):

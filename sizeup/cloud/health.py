@@ -1190,7 +1190,7 @@ class StationHealth:
         if n is None or not n.enabled:
             return
         # (the old address, kept so the pushes are as they were: settings.js opens Settings > Health from it, #203)
-        click = f"{self.public_url}/cad#settings/system/health" if self.public_url else ""
+        click = f"{self.public_url}/cad#settings/station/health" if self.public_url else ""
         who = a.get("who") or None
         if recovered:
             flap = f", back {a['flap_n']}× before it settled" if a.get("flap_n") else ""

@@ -395,7 +395,7 @@ def test_status_token_is_read_only_and_the_panel_needs_no_station_token(tmp_path
         # no banner's data in the state (#203): the cloud is the connection only, the Station row links Settings > Health
         assert hub.get("/api/cad/state")["cloud"].keys() == {"role", "state", "word", "detail", "health_url"}
         row = hub.get("/api/state")["radios"][0]
-        assert row["label"] == "Station" and row["link"] == "#settings/health"
+        assert row["label"] == "Station" and row["link"] == "#settings/station/health"
     finally:
         hub.close()
 

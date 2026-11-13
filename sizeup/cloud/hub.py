@@ -322,7 +322,7 @@ class Hub:
         return {"label": "Station", "mhz": None, "state": h["state"], "word": h["word"],
                 "detail": h["detail"] + " · Station health: Settings > Health (admins)",
                 "open": False, "quieting_db": None, "restarts": 0, "last_heard": self.last_seen,
-                "link": "#settings/health"}
+                "link": "#settings/station/health"}
 
     def radio_rows(self) -> list[dict]:
         """The Station row, then the station's own rows as it reported them, or, offline, marked
@@ -351,7 +351,7 @@ class Hub:
         alerts here (#203): those are on the admins' Settings > Health, from GET /api/cad/health."""
         h = self.health()
         return {"role": "hub", "state": h["state"], "word": h["word"], "detail": h["detail"],
-                "health_url": "/cad#settings/health"}
+                "health_url": "/cad#settings/station/health"}
 
     # -- jobs ------------------------------------------------------------------------------------------
 
@@ -652,7 +652,7 @@ class HubApp(App):
         from sizeup import errwatch
         pub = (cfg.cloud_public_url or "").rstrip("/")
         self.error_watch = errwatch.ErrorWatch(notifier, settings=lambda: self.cad.settings.section(errwatch.SECTION), log=log,
-                                               click=f"{pub}/cad#settings/system/health" if pub else "", db=self.mdb,
+                                               click=f"{pub}/cad#settings/station/health" if pub else "", db=self.mdb,
                                                muted=lambda: self.health.muted("hub_errors"))
         # an alert kind muted in Settings > System > Push notifications (#340): shown on Health, not pushed
         from sizeup.cloud.health import MUTE_SECTION

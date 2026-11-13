@@ -295,7 +295,7 @@
     .s-msg { inset-block-start: var(--hdr-h); }
   }
   /* Data sources (#186, datasources.js): a table a group; each row its times, status, size, schedule, Refresh now */
-  #s-data, #s-health { max-inline-size: none; }     /* (Health: health.css, its wide tables) */
+  #s-data, #s-station { max-inline-size: none; }    /* (Station > Health, Logs: health.css, their wide tables) */
   .ds-body { display: flex; flex-direction: column; gap: var(--gutter); }
   .ds-sum { gap: var(--s-2); }
   .ds-table td { vertical-align: top; }
