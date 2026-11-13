@@ -740,6 +740,9 @@ class HubApp(App):
                 ("aircraft", self.aircraft, "phases")):
             if obj is not None:
                 self.perf.gauge(name, size(obj, attr))
+        # context clips the station's whisper shed (#300, radio-intel PR 3): lost recall that would otherwise look quiet
+        self.perf.gauge("stt_shed_context", lambda: ((self.hub.status or {}).get("health") or {}).get("stt_queue", {})
+                        .get("shed_context") if isinstance(getattr(self.hub, "status", None), dict) else None)
         self.perf.gauge("dvr_segments", lambda: sum(len(c.get("segs") or ()) for c in list(getattr(dvr, "_cams", {}).values()))
                         if dvr is not None else None)
 
@@ -997,9 +1000,10 @@ class HubApp(App):
         rest (and all of it when AWS can't: the breaker, the limit, not set up) to the station's whisper."""
         from sizeup.transcribe import wav_pcm
         now = time.time()
-        ok, why = self.aws.available() if self.aws is not None else (False, "Amazon Transcribe isn't set up on the hub")
         again = whisper = 0
         for item, key, kind in self._aws_pending():
+            # each item's own pool (a police source's budget is its own, radio-intel PR 3)
+            ok, why = self.aws.available(key) if self.aws is not None else (False, "Amazon Transcribe isn't set up on the hub")
             page = item if kind == "page" else None
             wav = self.audio.get(item.id)
             pcm = wav_pcm(wav, getattr(item, "voice_offset_s", 0.0) if page is not None else 0.0) if wav else None
@@ -1102,6 +1106,7 @@ class HubApp(App):
                 if it.end > now - RESEND_S and (it.status == "pending" or (it.status in ("error", "skipped") and not getattr(it, "text", "")
                                                                            and not getattr(it, "raw", "")))
                 and self.channel_pref(key)["engine"] == "aws"
+                and self.aws.available(key)[0]
                 and (it.id not in self._aws_since or it.id in self._aws_asked)]     # (not one AWS is doing now)
         todo.sort(key=lambda x: -x[0].end)
         n = 0
@@ -1121,14 +1126,25 @@ class HubApp(App):
                          f"{RESEND_S / 3600:.0f} h sent to it")
         return n
 
+    def _aws_check_resend(self) -> bool:
+        """Either pool (ours, or the context pool's own budget: radio-intel PR 3) able to take audio again since the
+        last sweep: what waited goes to AWS (_aws_resend sends each item only within its own pool). True if it did."""
+        from sizeup.transcribe import CONTEXT
+        if self.aws is None:
+            return False
+        now = {"": self.aws.available()[0], CONTEXT: self.aws.available("p25:")[0]}
+        was = getattr(self, "_aws_pools_ok", {})
+        back = any(ok and was.get(pool) is False for pool, ok in now.items())
+        self._aws_pools_ok, self._aws_was_ok = now, now[""]
+        if back:
+            self._aws_resend()
+        return back
+
     def _aws_watch(self) -> None:
         while not self._stopping.wait(SWEEP_S):
             try:
                 self._aws_sweep()
-                ok = self.aws is not None and self.aws.available()[0]
-                if ok and self._aws_was_ok is False:
-                    self._aws_resend()
-                self._aws_was_ok = ok
+                self._aws_check_resend()
             except Exception as e:  # the sweep must never die
                 self.hub.log(f"hub: Amazon Transcribe sweep: {type(e).__name__}: {e}")
 
@@ -1141,6 +1157,13 @@ class HubApp(App):
     def channel_desired(self) -> dict:
         ok, why = self.aws_ok()
         reserve = [] if ok or self.aws is None else [k for k in self.aws.s.reserve_channels if self.aws.available(k)[0]]
+        # another P25 system's police (radio-intel PR 3): its own budget, apart from ours either way
+        more, deny, deny_why = self.aws_split(ok)
+        reserve += more
+        if not self._deny_ok():
+            # a station from before deny would never echo it in its signature (a push every 10 s): it isn't sent; that
+            # station runs its police channel on our pool's word until it updates
+            deny = []
         prefs = channels.for_station(self._chan_ov, self.cfg.stt_record_only)   # + the hub's record_only (#201)
         if "p25_systems" not in (self.hub.status or {}):
             # a station from before #409 refuses a whole map with a "p25:<system>:<tg>" key in it: left out for it
@@ -1150,8 +1173,9 @@ class HubApp(App):
         if self._squelch_ok():          # what of it fits the station's channels, as it reported them (the station agrees)
             kinds = {r.get("label"): r.get("channel_kind") for r in self.hub.radio_rows() if r.get("channel_kind")}
             sq = channels.fit_squelch(self._sq_ov, kinds, self.squelch_defaults)[0]
-        return {"prefs": prefs, "aws": {"ok": ok, "why": why, "reserve": reserve}, "tones": dict(self._tone_ov),
-                "squelch": sq, "sig": channels.sig(prefs, ok, self._tone_ov, reserve, sq)}
+        aws = {"ok": ok, "why": why, "reserve": reserve, **({"deny": deny, "deny_why": deny_why} if deny else {})}
+        return {"prefs": prefs, "aws": aws, "tones": dict(self._tone_ov),
+                "squelch": sq, "sig": channels.sig(prefs, ok, self._tone_ov, reserve, sq, deny)}
 
     def squelch_defaults(self, key: str) -> dict:
         """The station's receiver defaults, as it reported them (its config's, not the hub's)."""
@@ -1160,6 +1184,9 @@ class HubApp(App):
         row = next((r for r in rows if r.get("label") == key), None) or {}
         d = row.get("squelch_default")
         return {f: d.get(f) for f in channels.SQUELCH} if isinstance(d, dict) else super().squelch_defaults(key)
+
+    def _deny_ok(self) -> bool:
+        return bool(((self.hub.status or {}).get("channels") or {}).get("deny_ok"))
 
     def _squelch_ok(self) -> bool:
         return bool(((self.hub.status or {}).get("channels") or {}).get("squelch_ok"))
