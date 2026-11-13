@@ -798,3 +798,30 @@ def test_a_failing_gazetteer_still_saves_a_mapped_note():
     c = make_cad(geocoder=flaky)
     n = c.premise.create({"where": "100 Example Ave", "text": "Knox box", "category": "access"})["note"]
     assert n["label"] == "100 Example Ave, Port Chester"
+
+
+def test_another_p25_systems_transcript_is_never_searchable(calls):
+    """#419 x #403: a context transcript (another P25 system's, linked to a call by hand) is never in the search index:
+    no hit, no snippet, through a re-transcription, a second engine's text and a full reindex. Ours stays searchable."""
+    c, ids = calls
+    t = c.clock() - 9 * DAY
+    row = {"id": "9211-p1", "start": t, "end": t + 3, "channel": "PD Dispatch", "talkgroup": 9211, "system": "mrrs",
+           "source_key": "p25:mrrs:9211", "text": "suspect zebra fled northbound"}
+    c.record_traffic(row)
+    c.store.db.execute("INSERT INTO radio_links (traffic_id, incident_id, why) VALUES ('9211-p1', ?, 'manual')", (ids["fire"],))
+    # (the same row as ours would be found: the link and the index work)
+    c.store.db.execute("UPDATE radio_traffic SET system = 'westchester', text = text || '.' WHERE id = '9211-p1'")
+    assert search(c, text="zebra")["total"] == 1
+    c.store.db.execute("UPDATE radio_traffic SET system = 'mrrs', text = text || '.' WHERE id = '9211-p1'")
+    c.addrs._hits.clear()
+    assert search(c, text="zebra")["total"] == 0
+    c.record_traffic(dict(row, text="suspect giraffe fled"))                         # re-transcribed
+    assert search(c, text="giraffe")["total"] == 0 and search(c, text="zebra")["total"] == 0
+    c.store.db.execute("UPDATE radio_traffic SET alt_text = 'okapi' WHERE id = '9211-p1'")   # a second engine's text
+    assert search(c, text="okapi")["total"] == 0
+    c.store.meta_put("search_fts", "0")                                               # a full reindex
+    c.addrs.ensure()
+    assert search(c, text="giraffe")["total"] == 0
+    assert c.store.db.execute("SELECT COUNT(*) FROM fts_radio WHERE fts_radio MATCH 'giraffe OR okapi OR zebra'").fetchone()[0] == 0
+    got = search(c, text='"heavy smoke"')                                             # ours, on the same call
+    assert got["total"] == 1 and all("giraffe" not in (r.get("hit") or "") for r in got["rows"])

@@ -90,7 +90,7 @@ from sizeup.cad import dispatcher, eta, mapview, runcards, tonelist
 from sizeup.cad import lists as lists_mod
 from sizeup.cad.lists import CLASSES, CODE, COLOR, LIST_SECTIONS, LONG_CODE, RESPONSES, ROLES, ListsError
 from sizeup.cad.store import OPERATOR_MAX, SCHEMA_VERSION, TZ, CadError
-from sizeup import audiostore, errwatch, polly
+from sizeup import audiostore, errwatch, polly, sourcekeys
 from sizeup.cloud import health as health_mod
 from sizeup.radio.tones import pair_key
 from sizeup.tts import KOKORO_VOICES
@@ -576,6 +576,16 @@ class Editor:
         out["audio_retention"] = self.retention_page(ov)
         return out
 
+    def _context_channel(self, channel: str) -> bool:
+        """This channel's newest transmission is another P25 system's (#409; one indexed row: (channel, start))."""
+        if not channel:
+            return False
+        try:
+            r = self.store.q("SELECT system FROM radio_traffic WHERE channel = ? ORDER BY start DESC LIMIT 1", (channel,))
+        except Exception:  # noqa: BLE001 (no radio log, or one without the system column)
+            return False
+        return bool(r) and sourcekeys.is_context(r[0])
+
     def retention_page(self, ov: dict | None = None) -> dict | None:
         """Settings > System > Audio retention (#414): the defaults and every channel / talkgroup with clips or days of
         its own: clips, bytes, the audio's days and the transcripts' days in effect (talkgroup > channel > default;
@@ -592,12 +602,13 @@ class Editor:
         tpol = audiostore.Retention(tr, audiostore.TRANSCRIPT_DEFAULT_DAYS)
         rows: dict[str, dict] = {}
         live_n = live_b = 0
+        hide = None if sourcekeys.may_see_context() else self._context_channel
         for c in blobs.channels():
             live_n += c["clips"]
             live_b += c["bytes"]
             key = audiostore.retention_key(c["channel"], c["talkgroup"])
-            if not key:
-                continue
+            if not key or (hide is not None and hide(c["channel"])):
+                continue                    # another P25 system's channel: its clips only to a signed-in person (#419)
             x = rows.setdefault(key, {"key": key, "label": c["channel"] or key, "channel": c["channel"],
                                       "talkgroup": c["talkgroup"], "clips": 0, "bytes": 0})
             x["clips"] += c["clips"]
@@ -1710,7 +1721,9 @@ class Editor:
             for key, v in vals.items():
                 if channels_mod.is_tg(key) and "record" in v:
                     rec = v.pop("record")
-                    err = ctx.set_talkgroup(int(key[3:]), rec) if ctx is not None else "no talkgroups here"
+                    tsys, tgn = channels_mod.tg_of(key)       # (#409) another system's: with its system
+                    err = "no talkgroups here" if ctx is None else (
+                        ctx.set_talkgroup(tgn, rec, None, None, tsys) if tsys else ctx.set_talkgroup(tgn, rec))
                     if err:
                         raise CadError(err)
                 if not v:

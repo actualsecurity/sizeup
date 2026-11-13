@@ -81,10 +81,10 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Callable
 
-from sizeup import channels
+from sizeup import channels, sourcekeys
 from sizeup import tz
 from sizeup import app as app_mod
-from sizeup.app import AIRBAND_FIRST, CLIP_ID, RENAMED, STT_FIRST, App, AwsJob, channels_model
+from sizeup.app import AIRBAND_FIRST, CLIP_ID, RENAMED, STT_FIRST, App, AwsJob, channels_model, traffic_key
 from sizeup.cad.dispatcher import AudioUnavailable
 from sizeup.cad.radios import fm_system
 from sizeup.cloud.autoupdate import describe
@@ -493,9 +493,13 @@ class Hub:
             if self.health_ is not None:
                 self.health_.observe(st)           # each channel's gaps, for the silence hints
             self.app.channels_check()          # the station runs other channel choices than these: send them
+            try:
+                self.app.reception_seen(st.get("reception"))     # (#410) a reception test that ended: logged, once
+            except Exception as e:  # noqa: BLE001 - a log row, never in the way of the station's report
+                self.log(f"hub: reception test not logged: {type(e).__name__}: {e}")
         if isinstance(d.get("talking"), list):
             self.live.update(d["talking"], now, d.get("paging") if isinstance(d.get("paging"), list) else None)
-        return _json(200, {"ok": True, "build": self.build})
+        return _json(200, {"ok": True, "build": self.build, "caps": ["p25_systems"]})   # (#409: what this hub knows)
 
     def _aircraft(self, raw: bytes | None, headers) -> tuple[int, bytes, str]:
         """Our receiver's aircraft, forwarded by the station (#235): into the aircraft layer, nothing else."""
@@ -588,9 +592,15 @@ AUDIO_UPLOAD_ROWS = (20, 200)   # rows a round: in the day, off-peak
 SWEEP_LEADER_S = 24 * 3600   # the audio orphan sweep: only once this task has held the lease this long (#414)
 
 
+def _our_tg(t) -> int | None:
+    """A transmission's talkgroup for its clip's row, None for another P25 system's (#409): see _where."""
+    return None if sourcekeys.is_context(t.__dict__) else t.talkgroup
+
+
 def _where(d: dict) -> dict:
-    """A transmission's channel and talkgroup, for its clip's retention (#414)."""
-    tg = d.get("talkgroup")
+    """A transmission's channel and talkgroup, for its clip's retention (#414). Another P25 system's (#409): its
+    channel only, never a "tg:<n>" of ours (the same number there is another talkgroup)."""
+    tg = None if sourcekeys.is_context(d) else d.get("talkgroup")
     return {"channel": str(d.get("source") or ""), "talkgroup": tg if isinstance(tg, int) and not isinstance(tg, bool) else None}
 
 
@@ -740,6 +750,9 @@ class HubApp(App):
             if d.get("system") in ("mdc", "p25", "fleetsync"):
                 self.radios.heard(d["system"], str(d.get("radio_id") or ""), str(d.get("alias") or ""), d.get("at"),
                                   str(d.get("channel") or ""))
+        elif kind == "activity":                      # key-ups on an encrypted talkgroup (#409): counted, never rows
+            self.cad.comms.activity(str(d.get("source") or ""), int(d.get("minute") or 0), int(d.get("calls") or 0),
+                                    [str(x)[:12] for x in (d.get("radios") or [])][:40])
         else:
             self.hub.log(f"hub: ignoring event type {kind!r} (a newer station?)")
 
@@ -784,7 +797,9 @@ class HubApp(App):
         t = Traffic.from_dict({k: v for k, v in d.items() if EXTRA.fullmatch(str(k))})
         ids = [x.strip() for x in (t.radio_id or "").split(",") if x.strip()]
         pairs = d.get("pairs")
-        if t.talkgroup is None:
+        if getattr(t, "system", ""):                   # another P25 system's radio IDs (#409): never our registry's
+            t.rig = ""
+        elif t.talkgroup is None:
             t.rig = self.radios.rig_mdc(ids)
         elif isinstance(pairs, list):
             t.rig = self.radios.rig_p25([(str(p[0]), str(p[1])) for p in pairs if isinstance(p, list) and len(p) == 2])
@@ -812,7 +827,7 @@ class HubApp(App):
             self.audio.put(tid, audio, "clip", at=float(d.get("end") or time.time()), **_where(d))
         # with the station's extras (raw, confidence, model, attach, pairs, ...): plain names only
         t = self._traffic_of(d)
-        key = channels.tg_key(t.talkgroup) if t.talkgroup is not None else t.source
+        key = traffic_key(t)
         if d.get("transcript_pending") == "aws":            # the station skipped whisper: Amazon Transcribe here
             return self._aws_from_clip(t, audio, key)
         self._transcribed(t)
@@ -925,7 +940,7 @@ class HubApp(App):
             out = [(p, p.label, "page") for p in self.pages if p.status == "pending" and getattr(p, "stt", "") == "aws"]
         for t in list(self.store.loose) + [t for i in self.store.incidents for t in i.traffic]:
             if t.status == "pending" and getattr(t, "stt", "") == "aws":
-                out.append((t, channels.tg_key(t.talkgroup) if t.talkgroup is not None else t.source, "traffic"))
+                out.append((t, traffic_key(t), "traffic"))
         return out
 
     def _aws_recover(self) -> int:
@@ -1031,7 +1046,7 @@ class HubApp(App):
         now = time.time() if now is None else now
         with self._lock:
             pages = [(p, p.label, "page") for p in self.pages]
-        items = pages + [(t, channels.tg_key(t.talkgroup) if t.talkgroup is not None else t.source, "traffic")
+        items = pages + [(t, traffic_key(t), "traffic")
                          for t in list(self.store.loose) + [t for i in self.store.incidents for t in i.traffic]]
         todo = [(it, key, kind) for it, key, kind in items
                 if it.end > now - RESEND_S and (it.status == "pending" or (it.status in ("error", "skipped") and not getattr(it, "text", "")
@@ -1077,6 +1092,9 @@ class HubApp(App):
         ok, why = self.aws_ok()
         reserve = [] if ok or self.aws is None else [k for k in self.aws.s.reserve_channels if self.aws.available(k)[0]]
         prefs = channels.for_station(self._chan_ov, self.cfg.stt_record_only)   # + the hub's record_only (#201)
+        if "p25_systems" not in (self.hub.status or {}):
+            # a station from before #409 refuses a whole map with a "p25:<system>:<tg>" key in it: left out for it
+            prefs = {k: v for k, v in prefs.items() if not k.startswith("p25:")}
         return {"prefs": prefs, "aws": {"ok": ok, "why": why, "reserve": reserve}, "tones": dict(self._tone_ov),
                 "sig": channels.sig(prefs, ok, self._tone_ov, reserve)}
 
@@ -1156,9 +1174,11 @@ class HubApp(App):
     def state(self) -> dict:
         st = super().state()
         st["talkgroups"] = self.hub.talkgroups
+        systems = (self.hub.status or {}).get("p25_systems")
+        st["p25_systems"] = systems if isinstance(systems, list) else []      # (#409) the station's other P25 systems
         st["rerun"] = self.hub.rerun()
         st["cloud"] = self.hub.cad_cloud()
-        return st
+        return self._hide_context(st)       # (#419: the station's lists too, where nobody is signed in)
 
     def _sources_poll_now(self, reason: str) -> None:
         """A radio or phone pre-alert on the hub: the station's adapters poll now (a job; never waits, never raises)."""
@@ -1183,14 +1203,63 @@ class HubApp(App):
         except RuntimeError as e:
             return str(e)
 
-    def set_mode(self, mode: str, sdr: str | None = None) -> str | None:
+    def set_mode(self, mode: str, sdr: str | None = None, confirm: bool = False) -> str | None:
+        if confirm:                                    # (#409: a fire job's dongle to another system's job)
+            return self._switch("set_mode", mode, sdr, "person", True)
         return self._switch("set_mode", mode, sdr)
+
+    def _reception_send(self, body: dict, tid: str) -> str | None:
+        """Settings > Radios here: a reception test starts, stops or is annotated on the station (#410). The station
+        is sent the test's id only: who asked stays here (App.reception_post), for the row when it ends."""
+        return self._switch("reception_post", body, "", tid)
+
+    def reception_state(self) -> dict | None:
+        """The station's reception tests as it last reported them (admins only: server.py); None while it is away."""
+        rec = (self.hub.status or {}).get("reception")
+        return rec if isinstance(rec, dict) and self.hub.connected() else None
+
+    def reception_seen(self, rec) -> None:
+        """The station's report: each test that ended since the last one, and each paused job that came back late,
+        is a row in the activity of who started it, once (the hub's Stop doesn't wait for the restore; this is where
+        its outcome is recorded)."""
+        from sizeup.radio import reception
+        rows = rec.get("history") if isinstance(rec, dict) else None
+        if not isinstance(rows, list):
+            return
+        try:
+            done = set(json.loads(self.cad.store.meta_get("reception_audited") or "[]"))
+        except (ValueError, TypeError):
+            done = set()
+        new = []
+        for h in rows:
+            key = f"{h.get('id')}:{h.get('restored')}" if isinstance(h, dict) else ""
+            if not key or key in done or not h.get("ended"):
+                continue
+            new.append(key)
+            by = self._reception_who(str(h.get("id") or ""))
+            if by:
+                self.cad.activity.record(by, "action", "reception test", reception.ended_text(h), "",
+                                         reception.restored_ok(h))
+        if new:
+            keep = [f"{h.get('id')}:{h.get('restored')}" for h in rows if isinstance(h, dict)]
+            self.cad.store.meta_put("reception_audited", json.dumps(keep[:80]))
+
+    def reception_sample(self, sid: str) -> bytes | None:
+        """A call the station's reception test captured, fetched from it as it is asked for: never stored here."""
+        try:
+            wav = base64.b64decode(self.hub.remote("reception_sample_b64", str(sid)) or "", validate=True)
+        except (StationOffline, RuntimeError, binascii.Error, ValueError, TypeError):
+            return None
+        return wav if wav[:4] == b"RIFF" else None
 
     def set_adsb_receiver(self, serial: str | None) -> str | None:
         """Settings > Radios here: the station's ADS-B dongle is named (or unnamed) on the station (#235)."""
         return self._switch("set_adsb_receiver", serial or "")
 
-    def set_talkgroup(self, tg: int, record: bool | None = None, main: bool | None = None) -> str | None:
+    def set_talkgroup(self, tg: int, record: bool | None = None, main: bool | None = None,
+                      tier: str | None = None, system: str = "") -> str | None:
+        if tier is not None or system:                 # (#409: a station from before this refuses the extra arguments)
+            return self._switch("set_talkgroup", int(tg), record, main, tier, str(system or ""))
         return self._switch("set_talkgroup", int(tg), record, main)
 
     def _all_clear_sent(self, a: dict) -> None:
@@ -1318,7 +1387,12 @@ class HubApp(App):
         quiet = self.offpeak(now)
         days = cfg.audio_keep_event_days
         policy = self.audio_keep()
-        n = self.audio.prune_clips(now - policy.shortest_days() * 86400, kept=self.cad.comms.kept_for_events,
+        comms = self.cad.comms            # a record, or still inside its tier's own retention (#409, sizeup/tiers.py)
+        # Another P25 system's clips (#409) are context: a tier only keeps them past their usual retention, inside their
+        # own budget ([storage] context_audio_max_mb); over the cap they go before any clip of ours (AudioDb.prune_clips)
+        n = self.audio.prune_clips(now - policy.shortest_days() * 86400, kept=comms.kept_for_events,
+                                   context=lambda ids: comms.context_clips(ids, cfg.tier_keep_days),
+                                   context_max_bytes=int(cfg.context_audio_max_mb * 1024 * 1024),
                                    kept_older_than=(now - days * 86400) if days else None, batch=cfg.audio_prune_batch,
                                    pause_s=0.05 if background else 0.0, max_rows=None if quiet else 10 * cfg.audio_prune_batch,
                                    policy=policy, now=now)
@@ -1373,7 +1447,7 @@ class HubApp(App):
         with self.store._lock:
             for t in list(self.store.loose) + [t for i in self.store.incidents for t in i.traffic]:
                 if t.id in want:
-                    out[t.id] = (t.source, t.talkgroup, t.end)
+                    out[t.id] = (t.source, _our_tg(t), t.end)
         with self._lock:
             for p in self.pages:
                 if p.id in want:
@@ -1381,8 +1455,9 @@ class HubApp(App):
         rest = [i for i in ids if i not in out]
         for k in range(0, len(rest), 500):
             chunk = rest[k:k + 500]
-            rows = self.cad.store.q(f"SELECT id, channel, talkgroup, end FROM radio_traffic WHERE id IN "
-                                    f"({','.join('?' * len(chunk))})", chunk)
+            rows = self.cad.store.q(f"SELECT id, channel, CASE WHEN system IN {sourcekeys.OURS_SQL} THEN talkgroup END "
+                                    f"AS talkgroup, end FROM radio_traffic WHERE id IN ({','.join('?' * len(chunk))})",
+                                    chunk)
             out.update((r["id"], (r["channel"], r["talkgroup"], r["end"])) for r in rows)
         return out
 
@@ -1393,7 +1468,7 @@ class HubApp(App):
         with self.store._lock:
             for t in list(self.store.loose) + [t for i in self.store.incidents for t in i.traffic]:
                 if t.id in want:
-                    out[t.id] = (t.source, t.talkgroup)
+                    out[t.id] = (t.source, _our_tg(t))
         with self._lock:
             for p in self.pages:
                 if p.id in want:
@@ -1402,8 +1477,9 @@ class HubApp(App):
         for k in range(0, len(rest), 500):
             chunk = rest[k:k + 500]
             try:
-                rows = self.cad.store.q(f"SELECT id, channel, talkgroup FROM radio_traffic WHERE id IN "
-                                        f"({','.join('?' * len(chunk))})", chunk)
+                rows = self.cad.store.q(f"SELECT id, channel, CASE WHEN system IN {sourcekeys.OURS_SQL} THEN talkgroup "
+                                        f"END AS talkgroup FROM radio_traffic WHERE id IN ({','.join('?' * len(chunk))})",
+                                        chunk)
             except Exception:  # noqa: BLE001 (a CAD without the radio log)
                 break
             out.update((r["id"], (r["channel"], r["talkgroup"])) for r in rows if r["channel"])

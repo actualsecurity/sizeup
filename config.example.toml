@@ -183,6 +183,8 @@ audio_keep_hours = 12              # every WAV under captures/ (clips, skipped c
 # kept this many days instead (0 = forever); deleted in transactions of audio_prune_batch rows; free pages handed
 # back only in the off-peak hours [start, end), New York time.
 # audio_keep_event_days = 365
+# tier_keep_days = { alert = 30, text = 0, record = 7 }   # another P25 system's talkgroups, by tier (#409); 0 = audio_keep_hours
+# context_audio_max_mb = 100       # hub: another P25 system's clips at most (their own budget, inside the audio cap)
 # audio_prune_batch = 200
 # audio_offpeak = [2, 5]
 

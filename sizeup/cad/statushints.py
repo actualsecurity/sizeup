@@ -58,6 +58,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
+from sizeup import sourcekeys
 from sizeup.cad.feed import load_cfg, unit_forms
 from sizeup.cad.lists import ListsError
 from sizeup.cad.statusrepair import repair
@@ -208,6 +209,10 @@ def load_hint_cfg(lists, channels: tuple[str, ...], talkgroups: tuple[int, ...])
     tgs = h.get("talkgroups", list(talkgroups))
     if not isinstance(tgs, list) or not all(isinstance(t, int) and not isinstance(t, bool) and 1 <= t <= 65535 for t in tgs):
         raise ListsError(f"{where}: status_hints.talkgroups: a list of P25 talkgroup numbers, e.g. [307, 333]")
+    try:
+        sourcekeys.refuse_context(tgs, f"{where}: status_hints.talkgroups")
+    except ValueError as e:
+        raise ListsError(str(e)) from None
     exp = h.get("expire_s", EXPIRE_S)
     if isinstance(exp, bool) or not isinstance(exp, (int, float)) or not 30 <= exp <= 3600:
         raise ListsError(f"{where}: status_hints.expire_s: seconds, 30 to 3600")
@@ -466,6 +471,7 @@ class StatusHints:
             return []
         now = self.store.clock()
         ours_channel = t["channel"] in self.cfg.channels or (t["talkgroup"] is not None and t["talkgroup"] in self.cfg.talkgroups)
+        ours_channel = ours_channel and not sourcekeys.is_context(t)      # never another P25 system's (#409)
         want: dict[str, tuple[Found, str]] = {}
         if ours_channel and now - t["start"] < self.cfg.expire_s and (t["text"] or "").strip():
             want = self._read(t, self.fine_ok)

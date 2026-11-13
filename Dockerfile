@@ -57,6 +57,8 @@ RUN pip install --no-cache-dir . && rm -rf build
 COPY data ./data
 COPY deploy/hub ./deploy/hub
 COPY deploy/trunk-recorder/talkgroups.csv ./deploy/trunk-recorder/talkgroups.csv
+# the other P25 systems' talkgroups (#409: names, groups and tiers for the rows the station sends)
+COPY deploy/trunk-recorder/systems ./deploy/trunk-recorder/systems
 
 # sizeup finds data/ next to its package (data/gazetteer.sqlite, cad_lists.json, ...), so it runs from
 # /app (PYTHONPATH) rather than the site-packages copy; `pip install .` brings numpy.

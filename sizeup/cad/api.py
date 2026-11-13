@@ -163,6 +163,8 @@ POST /api/cad/radio-id                    {system: mdc | fleetsync, radio_id, un
                                           new FG1 radio is (#163, the state's radio_ids; sizeup/cad/newids.py): unit
                                           names it (its transmissions go on that unit's events), label just says who,
                                           ignore stops asking; dispatchers and admins, only for an ID nobody has set
+GET  /api/cad/comms/activity?source=&hours=   per-minute activity per source (#409: an encrypted talkgroup's key-ups
+                                          and which radios keyed, a week at most); admins only (ADMIN_READS)
 GET  /api/cad/comms?unit=&channel=&event=&pcfd=1&emergency=1&since=&until=&main_limit=&limit=&rev=
                                           every transmission (newest first) with its rig, radio ID, events, the
                                           emergency button and its alarm (emergency=1: only those, #128); Main
@@ -256,6 +258,7 @@ import re
 from datetime import datetime
 from urllib.parse import parse_qs, unquote
 
+from sizeup import sourcekeys
 from sizeup.cad import airport
 from sizeup.cad.activity import CSV_MAX_ROWS, KINDS, MAX_ROWS
 from sizeup.cad.service import Cad
@@ -293,6 +296,9 @@ DS_READERS = ("admin", "dispatcher")      # who may see Settings > Data sources 
 ADMIN_READS = {
     "/api/cad/notify": "the push topics' names are secret",                  # Settings > System > Push notifications
     "/api/cad/health": "station health is for admins (Settings > Health)",   # #203: off the header, on an admin tab
+    "/api/reception": "reception tests are the admins' (Settings > Radios)",          # #410 (server.py serves both)
+    "/api/reception/sample": "a reception test's audio is for the admin running it",
+    "/api/cad/comms/activity": "radio activity (which radios keyed) is for admins",   # #409: encrypted talkgroups
     "/api/cad/perf": "the hub's CPU and memory are for admins (Settings > Health)",          # #425 (sizeup/perf.py)
     "/api/cad/perf/profile": "the hub's CPU profile is for admins (Settings > Health)",
     "/api/cad/search.csv": "the search export is for admins",                # #403: many calls at once, off the hub
@@ -548,6 +554,10 @@ DOES = (
     (re.compile(r"/api/talkgroup"), lambda m, b, o, c: (f"Talkgroup {b.get('tg')}: {_toggles(b) or 'no change'}", "")),
     (re.compile(r"/api/talkgroup-group"), lambda m, b, o, c: (f"Talkgroups {_clip(b.get('group'), 40)}: {_toggles(b) or 'no change'}", "")),
     (re.compile(r"/api/mode"), lambda m, b, o, c: (f"Radio mode: {_clip(b.get('mode'), 30)}" + (f" ({_clip(b['sdr'], 30)})" if b.get("sdr") else ""), "")),
+    (re.compile(r"/api/reception"), lambda m, b, o, c: (
+        (f"Reception test started: {_clip(', '.join(map(str, b.get('jobs') or [b.get('job')])), 40)} on SDR {_clip(b.get('sdr'), 30)}"
+         + (f", pausing {_clip(b.get('pause'), 30)}" if b.get("pause") else "")) if b.get("action") == "start"
+        else "Reception test stopped" if b.get("action") == "stop" else "Reception test: antenna note", "")),
     (re.compile(r"/api/adsb-receiver"), lambda m, b, o, c: ((f"Named SDR {_clip(b.get('sdr'), 30)} the ADS-B receiver"
                                                             if b.get("sdr") else "Unnamed the ADS-B receiver's SDR"), "")),
     (re.compile(r"/api/retranscribe"), lambda m, b, o, c: ("Retranscribe: every recording" if b.get("all")
@@ -786,6 +796,10 @@ class CadApi:
         return {"ok": True, "running": row["running"], "source": row}
 
     def get(self, path: str, query: str, who=None) -> tuple[int, bytes, str]:
+        with sourcekeys.request_context(who):       # another system's traffic: a signed-in person only (#419)
+            return self._get(path, query, who)
+
+    def _get(self, path: str, query: str, who=None) -> tuple[int, bytes, str]:
         if (no := self.read_refused(path, who)) is not None:
             return no
         try:
@@ -823,6 +837,18 @@ class CadApi:
                 return _json(200, self.cad.radio_registry())
             if path == "/api/cad/comms":
                 return _json(200, self.cad.comms_query(parse_qs(query)))
+            if path == "/api/cad/comms/activity":      # per-minute activity per source (#409); ?source=&hours= (24)
+                # which radios keyed an encrypted talkgroup: a verified, signed-in admin only (read_refused checks the
+                # admin when someone is signed in; with nobody verified, never: sourcekeys.may_see_context)
+                if not sourcekeys.may_see_context():
+                    return _json(403, {"error": "radio activity needs a sign-in (Cloudflare Access)"})
+                q = parse_qs(query)
+                try:
+                    hours = min(24.0 * 90, max(0.1, float((q.get("hours") or ["24"])[0])))
+                except ValueError:
+                    hours = 24.0
+                return _json(200, {"rows": self.cad.comms.activity_rows(self.cad.clock() - hours * 3600,
+                                                                        (q.get("source") or [""])[0][:80])})
             if path == "/api/cad/feed":
                 return _json(200, self.cad.feed_query(parse_qs(query)))
             if path == "/api/cad/rigs":
@@ -870,6 +896,10 @@ class CadApi:
         return 404, b"not found\n", "text/plain"
 
     def post(self, path: str, raw: bytes, who=None, client: tuple[str, str] = NO_CLIENT) -> tuple[int, bytes, str]:
+        with sourcekeys.request_context(who):
+            return self._post(path, raw, who, client)
+
+    def _post(self, path: str, raw: bytes, who=None, client: tuple[str, str] = NO_CLIENT) -> tuple[int, bytes, str]:
         try:
             body = json.loads(raw or b"{}")
         except ValueError as e:

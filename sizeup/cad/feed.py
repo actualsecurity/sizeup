@@ -32,6 +32,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from sizeup.sourcekeys import COUNTY
 from sizeup.cad.comms import _tones, events_of, with_alarms
 from sizeup.cad.lists import Lists, ListsError
 from sizeup.cad.radios import PCFD_KINDS
@@ -109,6 +110,11 @@ def load_cfg(lists: Lists) -> FeedCfg:
     if (not isinstance(tgs, list) or not tgs
             or not all(isinstance(t, int) and not isinstance(t, bool) and 1 <= t <= 65535 for t in tgs)):
         raise ListsError(f"{where}: comms_feed.talkgroups: a list of P25 talkgroup numbers, e.g. [307, 333]")
+    from sizeup import sourcekeys
+    try:
+        sourcekeys.refuse_context(tgs, f"{where}: comms_feed.talkgroups")
+    except ValueError as e:
+        raise ListsError(str(e)) from None
     limit = f.get("limit", DEFAULT_LIMIT)
     if not isinstance(limit, int) or isinstance(limit, bool) or not 1 <= limit <= MAX_LIMIT:
         raise ListsError(f"{where}: comms_feed.limit: a number from 1 to {MAX_LIMIT}")
@@ -209,7 +215,9 @@ class Feed:
         tgs = tuple(talkgroups or self.cfg.talkgroups)
         n = max(1, min(int(limit or self.cfg.limit), MAX_LIMIT))
         pg = self.paging
-        rows = self.store.q(f"SELECT * FROM radio_traffic WHERE talkgroup IN ({','.join('?' * len(tgs))}) "
+        # (another P25 system's rows never: a talkgroup number alone doesn't say whose it is, #409)
+        rows = self.store.q(f"SELECT * FROM radio_traffic WHERE (talkgroup IN ({','.join('?' * len(tgs))}) "
+                            f"AND system IN ('', '{COUNTY}')) "
                             + (f"OR (talkgroup IS NULL AND channel IN ({','.join('?' * len(pg))})) " if pg else "")
                             + "ORDER BY start DESC, turn DESC LIMIT ?", (*tgs, *pg, n))
         if not rows:

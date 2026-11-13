@@ -23,6 +23,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
+from sizeup import sourcekeys
 from sizeup import polly
 from sizeup.cad import airport, dispatcher, eta, export, mapview, runcards
 from sizeup.cad.activity import Activity
@@ -456,8 +457,8 @@ class Cad:
             except Exception as e:  # noqa: BLE001 - a notice never stops the transcript
                 self.log(f"CAD: possible incoming: {type(e).__name__}: {e}")
             try:                                          # "alert level N" for the airport (#369)
-                t = self.store.one("SELECT id, channel, talkgroup, start, text, talker, dispatcher FROM radio_traffic WHERE id = ?", (tid,))
-                if t:
+                t = self.store.one("SELECT id, channel, talkgroup, start, text, talker, dispatcher, system FROM radio_traffic WHERE id = ?", (tid,))
+                if t and not sourcekeys.is_context(t):
                     self.airport_watch.heard_radio(t)
             except Exception as e:  # noqa: BLE001 - a pre-alert never stops the transcript
                 self.log(f"CAD: airport alert level: {type(e).__name__}: {e}")
@@ -1580,7 +1581,9 @@ class Cad:
         # made a moment ago, for COMMS_CACHE_S (#284). Only "talking" is live.
         pcfd = [u["name"] for u in self.radios.units if is_pcfd(u)]
         main_tgs = [tg for tg in self.comms.talkgroups() if self.main_tg(tg)]
-        key = (now_rev, tuple(pcfd), tuple(main_tgs), tuple(sorted((k, tuple(v)) for k, v in q.items() if k != "rev")))
+        # (+ whether this reader may be shown another P25 system's rows, #419: an answer is never another reader's)
+        key = (now_rev, tuple(pcfd), tuple(main_tgs), tuple(sorted((k, tuple(v)) for k, v in q.items() if k != "rev")),
+               self.comms._sees_context())
         hit = self._comms_cache.get(key)
         if hit is not None and time.monotonic() - hit[0] < COMMS_CACHE_S:
             return {**hit[1], "talking": talking}
