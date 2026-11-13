@@ -186,10 +186,16 @@ const ids = () => st.rows.map((t) => t.id);
   st.p.mutes = ["fm:FG1", "air:Tower", "p25:metro:9003"]; st.p.seen = Object.fromEntries(SRC.map((s) => [s.key, NOW - 20 * 60]));
   T.set({ view: "all", source: "" }); await drain();
   out.muteSent = last("mute");
-  SRC = flagged; st.srcRev = ""; st.srcAt = 0;
-  cad.state.alarms.windows = [{ talkgroup: 9003, system: "metro", until: 4242 }];
+  // a county fire talkgroup with an emergency window open and no alarm row (Windows.state's own shape)
+  SRC = flagged.concat([{ key: "p25:westchester:4100015", system: "westchester", system_label: "County", group: "Fire", name: "Fire Ops 9",
+                          service: "fire", tier: "", ours: false, mutable: false, last: NOW - 5, counts: [], emergency: "", stuck: "" }]);
+  st.srcRev = ""; st.srcAt = 0;
+  st.p.mutes = st.p.mutes.concat(["p25:westchester:4100015"]);
+  cad.state.alarms.windows = [{ talkgroup: 4100015, channel: "Fire Ops 9", since: 4000, until: 4242, radios: [], alarm_id: null, ours: false, kept: 0 }];
   T.sources(true); await drain();
   out.mutesKept = st.p.mutes.slice();
+  { const r = N.model(st.src, st.p, NOW, new Set(), { "p25:westchester:4100015": 4242 }).rows.find((x) => x.key === "p25:westchester:4100015");
+    out.windowEm = r.em; out.windowMute = r.mute; }
   out.flags = { hidden: $("#rn-flags").hidden, text: $("#rn-flags").children.map((c) => [c.className, c.textContent]) };
   out.viewsEm = $("#rn-views").children.map((b) => [b.dataset.view, b.children.some((c) => c.className.includes("emergency"))]);
   out.sourcesButton = $("#rn-open").children.map((c) => [c.className, c.textContent]);
@@ -281,14 +287,16 @@ def test_mute_never_hides_our_calls_or_an_emergency(out):
     assert rows["fm:FG1"][3] is False and out["mutesFor"] == ["air:Tower", "p25:metro:9003"]     # one of Our calls: never muted
     assert rows["p25:metro:9003"][3] is True and rows["p25:metro:9003"][5] == "other"          # muted, and its emergency known
     assert views["police"]["em"] == "other" and views["all"]["em"] == "other"                  # ... shows on its views
-    assert rows["fm:FG1"][5:] == ["other", 777] and views["ours"]["em"] == "other"             # an open window marks it too
-    assert out["flaggedKeys"] == ["fm:FG1", "p25:metro:9003"]
+    assert rows["fm:FG1"][5:] == ["", 777] and views["ours"]["em"] == ""                       # a window alone: no mark
+    assert out["flaggedKeys"] == ["fm:FG1", "p25:metro:9003"]                                  # (its Recording until chip)
     # in the page: the hub is never asked to mute one of Our calls, and the mute of one is dropped
     assert out["muteSent"] == "air:Tower,p25:metro:9003" and out["mutesKept"] == ["air:Tower", "p25:metro:9003"]
     # the emergency over the list in every view, with its window; on the views; on the phone's Sources button
     assert out["flags"]["hidden"] is False
+    # the window (no alarm row): its Recording until chip, never an emergency mark; a fire channel of ours: never muted
     assert out["flags"]["text"] == [["chip emergency em-other em-stuck", "Emergency flag stuck on CAR 9 (4100012): PD Secure"],
                                     ["chip kept", "Recording until t4242 (emergency)"]]
+    assert out["windowEm"] == "" and out["windowMute"] is False and "p25:westchester:4100015" not in out["mutesKept"]
     assert dict(out["viewsEm"])["police"] is True and dict(out["viewsEm"])["all"] is True and dict(out["viewsEm"])["ours"] is False
     assert not any("emergency" in c for c, _ in out["sourcesButton"])     # in All it is on screen: Sources marks what isn't
 
