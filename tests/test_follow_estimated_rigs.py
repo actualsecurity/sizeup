@@ -77,7 +77,7 @@ out.heldMoving = L.moving(); frames.splice(0); go(3, 16); out.heldFrames = frame
 rm.fol.stop(); go(3, 16); out.after = L.moving();
 """, data)
     assert o["followed"] >= 2.5 * o["alone"] and o["followed"] >= 15                 # smooth while followed (~20 Hz)
-    assert metres(o["track"][0], o["track"][1]) < 1                                  # the camera on the estimate
+    assert metres(o["track"][0], o["track"][1]) < 5                                  # the camera on the estimate (mapfollow pans every PAN_MS)
     assert o["heldMoving"] is True and o["after"] is False
 
 
