@@ -381,7 +381,7 @@ def test_the_real_locator_on_the_gazetteer_keeps_266_off_the_address():
     if not DEFAULT_DB.exists():
         pytest.skip("no gazetteer")
     loc = place_mod.Locator(Gazetteer())
-    p = loc("266 car 3 respond to 222 Westchester Ave for smoke", {"system": "mrrs", "service": "police",
+    p = loc("266 car 3 respond to 40 Example Ave for smoke", {"system": "mrrs", "service": "police",
                                                                     "towns": ["Port Chester", "Rye", "Rye Brook"]})
     assert p is None or not p.label.startswith("266 ")
     assert loc("copy that, 10-4", {"system": "mrrs", "service": "police"}) is None       # no cue: no gazetteer work
