@@ -3,11 +3,12 @@
 // ADMIN_READS) has the station's health, the alerts now and 24 h of their history; polled every POLL_MS while the tab is
 // on screen, and not at all otherwise. Self-contained: settings.js mounts it on the section (sHealth).
 const StationHealth = (() => {
-  // shed clips caught up (Settings > Radios > Speech-to-text, Catch up): "4 waiting · 12 caught up (24 h)"
+  // shed clips caught up (Settings > Radios > Speech-to-text, Catch up): "4 waiting · 12 caught up (24 h) · 1 gave up · paused: an event is open"
   function catchupLine(cu, sq) {
     if (!cu || cu.on === null || cu.on === undefined) return "";
     if (!cu.on) return "Off";
-    return `${cu.waiting ?? 0} waiting · ${cu.caught_24h ?? 0} caught up (24 h)` + (sq && sq.catchup ? ` · ${sq.catchup} queued` : "");
+    return `${cu.waiting ?? 0} waiting · ${cu.caught_24h ?? 0} caught up (24 h)` + (cu.gave_up ? ` · ${cu.gave_up} gave up` : "")
+      + (sq && sq.catchup ? ` · ${sq.catchup} queued` : "") + (cu.why && cu.why.startsWith("paused") ? ` · ${cu.why}` : "");
   }
   const POLL_MS = 5000;
   let panel = null, card = null, timer = null, last = null, busy = false;

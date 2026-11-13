@@ -712,18 +712,38 @@ After a hub redeploy what was still waiting for AWS goes to it again (or to the 
 
 **Catch-up** (`sizeup/sttcatchup.py`). A context clip that whisper shed while it was busy ("Skipped:
 busy") is run again later. The hub does this (all-in-one: the app itself), on its own thread, a few
-clips at a time. The alert tier goes first, then the newest. Clips older than the max age (6 h by
-default) stay skipped. It uses the re-run path, so the text, model, history and change log behave like
-any re-run; the result reads `changed; catch-up`. A police channel set to AWS goes to AWS while its own
-budget has room, never our budget or its reserve. Everything else goes to the station's whisper (its
-`catch_up` call), and only once the station reports no fire, airband, live or alert clip waiting and at
-most 5 clips in its queue. On the station a catch-up clip sits under every other class
-(`stt.CATCHUP`), gets one greedy pass, and starts only after 20 s with no clip of ours coming in. A
-fire clip never waits behind a queued catch-up clip; at most it waits for the one greedy pass already
-running. A clip that doesn't come back transcribed is tried again after 15 min, at most twice. Nothing
-is read or written for 5 min after the start. Settings → Radios → Speech-to-text: on/off and the max
-age. Settings → Health → Speech-to-text queue: the backlog waiting and the clips caught up in the last
-24 h (also the perf gauges `stt_catchup_waiting` and `stt_caught_up_24h`).
+clips at a time. Nothing is read or written for 5 min after the start.
+
+- **Which clips.** The alert tier first, then the newest. Clips older than the max age (6 h by default)
+  stay skipped. Rows that can't go now (given up, not transcribed, too long) are sorted out before the
+  limit, so the clips behind them get their turn.
+- **Fire first.** Nothing is caught up, on whisper or on AWS, while an emergency event is pending or
+  active (or a page was queued in the last 30 min), an alarm is unacknowledged, an emergency window is
+  open, a carrier is open or someone is talking. After that, whisper is used only once the station
+  reports no fire, airband, live or alert clip waiting and at most 5 clips in its queue.
+- **On the station** a catch-up clip sits under every other class (`stt.CATCHUP`). It starts only after
+  90 s with no clip of ours heard (a clip that went to AWS counts, and so does the start of the
+  process). It gets one greedy pass, one try, a 20 s timeout and no backoff, and clips over 30 s are
+  refused. A fire clip never waits behind a queued catch-up clip; at most it waits for the one pass
+  already running.
+- **Engine and budget.** A police channel set to AWS goes to AWS on its own budget, up to 80 % of its
+  month, never our budget or its reserve. Everything else goes to the station's whisper (`catch_up`).
+  A catch-up clip failing on AWS never counts toward the breaker.
+- **Quiet.** It uses the re-run path, so the text, model, history and change log behave like any
+  re-run and the result reads `changed; catch-up`. But the words may be hours old, so nothing that
+  alerts hears them: no alarm, ATC or airport pre-alert, status hint, possible incoming or dispatch step
+  (`App._retext(quiet=True)`, `Comms.retext(notify=False)`, `catchup` on the station's `retext` event).
+  The ATC watch also ignores any transcript of a transmission that ended more than 15 min ago.
+- **Tries.** A failed try is written on the row (`failed: why; catch-up try N`), so the count survives
+  a restart and a handover. It is tried again after 15 min, at most twice. A station call that itself
+  failed counts for nothing; a station that refuses the call (an older build) isn't asked again for
+  10 min.
+- **People and updates.** Re-transcribe on a clip the catch-up holds promotes it to a normal re-run.
+  Catch-up work never counts as "busy" for a station update, and the station takes none while an update
+  is waiting.
+- Settings → Radios → Speech-to-text: on/off and the max age. Settings → Health → Speech-to-text
+  queue: waiting, caught up in the last 24 h, given up, and why it is paused (also the perf gauges
+  `stt_catchup_waiting` and `stt_caught_up_24h`).
 
 **Vocabulary** (Settings → Radios → Vocabulary; `sizeup-pcfd`): the phrases AWS should expect —
 seeded from the boards' spoken unit names (Engine 60, Ladder 31, Tower Ladder 2, Rescue 40, 23 98 …),

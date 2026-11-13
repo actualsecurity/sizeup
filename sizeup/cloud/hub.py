@@ -120,6 +120,7 @@ RESEND_MAX = 200         # ... at most this many, the newest first
 RECOVER_S = 3600.0       # after a restart: what waited for AWS less than this goes to AWS again, older to whisper
 RECOVER_WAIT_S = 120.0   # ... to whisper: waiting this long for the station to reconnect first
 CATCHUP_STATUS_S = 30.0  # shed clips caught up: the station's whisper judged idle only on a report this fresh
+CATCHUP_REFUSED_S = 600.0  # ... and a station that refuses the call (an older build) isn't asked again for this long
 JOB_PATH = re.compile(r"/api/station/jobs/([0-9a-f]{16})")
 EXTRA = re.compile(r"[a-z][a-z0-9_]{0,30}")      # a transmission's field names, as the station sends them
 
@@ -632,6 +633,7 @@ class HubApp(App):
     switches through jobs, and the state lives in SQLite (hubstore.py)."""
 
     def __init__(self, cfg, log: Callable[[str], None] = print):
+        self._catchup_refused_until = 0.0              # the station refused catch_up (an older build): not asked before
         self._aws_since: dict[str, float] = {}         # id -> when Amazon Transcribe got it (the sweep's clock)
         self._aws_asked: dict[str, float] = {}         # id -> when the station's whisper was asked instead
         self._aws_late_wait: set[str] = set()          # timed out, not a priority channel: AWS's late answer is the text
@@ -780,7 +782,8 @@ class HubApp(App):
                 return
             alt = d.get("alt") if isinstance(d.get("alt"), dict) else None
             self._retext(pid, str(d.get("text") or ""), str(d.get("status") or "done"),
-                         d.get("confidence"), str(d.get("model") or ""), alt=alt)
+                         d.get("confidence"), str(d.get("model") or ""), alt=alt,
+                         quiet=bool(d.get("catchup")))      # (a shed clip caught up: old words, nothing alerts)
         elif kind == "rerun":                         # a re-run on the station is over (changed, same or failed)
             self._rerun_finish(self._id(d), str(d.get("result") or "")[:200], str(d.get("model") or "")[:80])
         elif kind == "alt_text":                      # "both" re-run: the station's whisper text, to compare
@@ -934,10 +937,10 @@ class HubApp(App):
         """Amazon Transcribe couldn't: the station's whisper does it (retranscribe, the text comes back as
         a retext event); a station that can't: "transcription failed", said on the transmission. Timed out on a
         channel that isn't a priority one: AWS's late answer is awaited instead (_whisper_fallback)."""
-        if job.catchup:                            # a shed clip caught up: still skipped; the catch-up tries whisper later
-            self._rerun_note.pop(job.id, None)
+        if job.catchup:                            # a shed clip caught up: still skipped, a failed try on its row
             self.hub.log(f"aws transcribe: catch-up {job.id}: {why}: left skipped")
-            return
+            self._rerun_finish(job.id, f"failed: AWS: {why[:80]}")
+            return self.sync()
         late = (job.alt is None and not job.rerun and not job.recovered and why.startswith("AWS timed out")
                 and not self._whisper_fallback(job))
         self.hub.log(f"aws transcribe: {job.kind} {job.id}: {why}" + (
@@ -1459,14 +1462,26 @@ class HubApp(App):
             return False, "whisper not ready"
         return whisper_idle(hl.get("stt_queue"))
 
-    def _catchup_whisper(self, specs: list[dict]) -> list[str]:
-        """The station's whisper (its catch_up call): the ids it queued. An older station without it: none."""
+    def _catchup_whisper(self, specs: list[dict]) -> dict | None:
+        """The station's whisper (its catch_up call): {queued, refused, hold}. None: the call itself failed (offline,
+        a network error, an older station that refuses it): no clip was tried, so none is counted as tried. A station
+        that doesn't know the call isn't asked again for CATCHUP_REFUSED_S."""
+        now = time.time()
+        if now < self._catchup_refused_until:
+            return None
         try:
             got = self.hub.remote("catch_up", specs, timeout=CALL_WAIT_S)
         except (StationOffline, RuntimeError, TypeError, ValueError) as e:
-            self.hub.log(f"speech-to-text catch-up: not sent to the station: {str(e)[:160]}")
-            return []
-        return [str(x) for x in got] if isinstance(got, list) else []
+            if "not allowed" in str(e):
+                self._catchup_refused_until = now + CATCHUP_REFUSED_S
+            self.hub.log(f"speech-to-text catch-up: not sent to the station: {str(e)[:160]}"
+                         + (f" (asked again in {CATCHUP_REFUSED_S / 60:.0f} min)" if "not allowed" in str(e) else ""))
+            return None
+        if not isinstance(got, dict):
+            return None
+        refused = got.get("refused") if isinstance(got.get("refused"), dict) else {}
+        return {"queued": [str(x) for x in got.get("queued") or [] if isinstance(x, str)],
+                "refused": {str(k): str(v)[:160] for k, v in refused.items()}, "hold": str(got.get("hold") or "")[:160]}
 
     def _catchup_pcm(self, cid: str, key: str, source: str):
         from sizeup.transcribe import wav_pcm

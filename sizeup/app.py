@@ -91,7 +91,7 @@ from sizeup.cad import tonelist
 from sizeup.radio.tones import ToneEvent, TonePlan, base_name
 from sizeup.talkers import talker_prompt
 from sizeup import channels
-from sizeup.stt import (CATCHUP, CATCHUP_NOTE, CONTEXT, CONTEXT_FALLBACK, HIGH, LIVE, LOW, RERUN, SHED, URGENT,
+from sizeup.stt import (CATCHUP, CATCHUP_MAX_CLIP_S, CATCHUP_NOTE, CONTEXT, CONTEXT_FALLBACK, HIGH, LIVE, LOW, RERUN, SHED, URGENT,
                         Transcriber, WhisperClient, radio_voice, wav_bytes)
 from sizeup.talkgroups import TalkgroupPrefs
 from sizeup import sourcekeys as sources, tiers
@@ -149,6 +149,8 @@ STT_FIRST = ("tg:307", "FG1", "FG2")
 AIRBAND_FIRST: set[str] = set()   # ... and the airband channels (HPN ATC, #233: the pre-alerts), filled by App
 ATC_CEILING_FT = 10000   # the station's own ADS-B: aircraft above this aren't talking to HPN Tower (the ATC prompt, #257)
 CATCHUP_BATCH_MAX = 10     # catch_up(): at most this many shed clips a call (sizeup/sttcatchup.py)
+CATCHUP_QUEUED_S = 1800.0  # a page queued (nobody took it yet) this recently is an open event: the catch-up waits
+CATCHUP_AWS_PCT = 80.0     # the catch-up stops using the police AWS budget at this much of its month
 MIN_SPEECH_S = 0.15      # less sound than this above the dead-air floor (and no tones) = a mic click
 LIVE_WATCH_S = 0.2       # FG1 talking watcher: how often the squelch is looked at (the MDC ID: radio/tap.py)
 ID_EDGE_S = 1.0          # an FG1 key-up with no ID: a burst is looked for this close to either end of the carrier (#163)
@@ -391,7 +393,7 @@ class AwsJob:
     page: object = None
     rerun: bool = False       # a person asked for it again (re-transcribe): the text is replaced, the result said
     recovered: bool = False   # left waiting by a restart (the hub): its fallback waits for the station to reconnect
-    catchup: bool = False     # a shed clip caught up (sizeup/sttcatchup.py): failed, it stays skipped (tried again later)
+    catchup: bool = False     # a shed clip caught up (sizeup/sttcatchup.py): quiet (no alerts), a failed try on its row
 
 
 @dataclass
@@ -409,7 +411,7 @@ class Rerun:
     as_alt: bool = False      # "both" re-run: this text is the alternative to compare, not the text
     source_key: str = ""      # its channel key ("p25:mrrs:9211"): another P25 system's profile (data/stt/profiles.json)
     service: str = ""
-    catchup: bool = False     # a shed clip caught up (sizeup/sttcatchup.py): not in a person's re-run progress
+    catchup: bool = False     # a shed clip caught up (sizeup/sttcatchup.py): quiet, not in a person's re-run progress
 
 class App:
     def __init__(self, cfg: Config):
@@ -432,6 +434,7 @@ class App:
         self.storage: dict | None = None
         self._rerun_ids: set[str] = set()
         self.rerun = {"total": 0, "done": 0, "changed": 0, "failed": 0}
+        self._catchup_ids: set[str] = set()       # the re-runs in _rerun_ids that are the catch-up's (no person's)
         self._rerun_note: dict[str, str] = {}     # id -> why a re-run didn't go the channel's way ("AWS unavailable ...")
         self.clips: OrderedDict[str, tuple[np.ndarray, float]] = OrderedDict()   # id -> (pcm, saved at)
         self.clips_dir = Path(cfg.clips_dir) if cfg.clips_dir else None
@@ -2164,13 +2167,20 @@ class App:
         live priority (pages, Fire/EMS 15 and the firegrounds first), not behind live traffic like a re-run."""
         return self._rerun_local(list(ids or []), live=True)
 
-    def catch_up(self, specs: list) -> list[str]:
+    def catch_up(self, specs: list) -> dict:
         """Shed clips caught up on the local model (sizeup/sttcatchup.py; the hub's call to its station): each
         {id, key, source, unit, start, service} queued as a re-run in the CATCHUP class, under every other clip and
         started only once no clip of ours has come in for a while (sizeup/stt.py). The transmission's own fields when
-        it is still in memory, else the spec's (a station restarted since). The ids queued (one with no recording
-        here is left out: it stays skipped)."""
-        out: list[str] = []
+        it is still in memory, else the spec's (a station restarted since).
+        -> {queued: [ids], refused: {id: why} (no recording here, too long: they stay skipped), hold: why none was
+        taken now ("" = taken)}."""
+        out: dict = {"queued": [], "refused": {}, "hold": ""}
+        hold = self._update_waiting()
+        if hold:                                           # an update never waits on the catch-up: it yields
+            for item in self.stt.withdraw_catchup():
+                self._catchup_forget(getattr(item, "id", ""))
+            out["hold"] = hold
+            return out
         for d in list(specs or [])[:CATCHUP_BATCH_MAX]:
             if not isinstance(d, dict):
                 continue
@@ -2178,7 +2188,8 @@ class App:
             if not CLIP_ID.fullmatch(cid) or ".." in cid:
                 continue
             with self._lock:
-                if cid in self._rerun_ids:
+                if cid in self._rerun_ids:                 # here already (the last batch's, or a person's re-run)
+                    out["queued"].append(cid)
                     continue
             t, key = self._find(cid)
             if t is not None and not isinstance(t, Traffic):
@@ -2190,6 +2201,10 @@ class App:
                 fm = not channels.is_tg(key) and self._kind.get(source) != "airband"
             got = self._rerun_audio(cid, bool(fm))
             if not got:
+                out["refused"][cid] = "no recording on the station"
+                continue
+            if len(got[0]) / RATE > CATCHUP_MAX_CLIP_S:
+                out["refused"][cid] = f"longer than {CATCHUP_MAX_CLIP_S:g} s"
                 continue
             start = t.start if t is not None else d.get("start")
             job = Rerun(cid, "traffic", got[1], speech_seconds(got[0]) < MIN_SPEECH_S,
@@ -2199,14 +2214,31 @@ class App:
                         catchup=True)
             with self._lock:
                 if cid in self._rerun_ids:
+                    out["queued"].append(cid)
                     continue
                 self._rerun_ids.add(cid)
+                self._catchup_ids.add(cid)
             self._rerun_note[cid] = CATCHUP_NOTE
-            if self.stt.submit(job, got[0], priority=CATCHUP):
-                out.append(cid)
-        if out:
-            log(f"speech-to-text catch-up: {len(out)} shed clip(s) queued")
+            self.stt.submit(job, got[0], priority=CATCHUP)     # (dropped at once: _stt_dropped says so on its row)
+            out["queued"].append(cid)
+        if out["queued"]:
+            log(f"speech-to-text catch-up: {len(out['queued'])} shed clip(s) queued")
         return out
+
+    def _catchup_forget(self, cid: str) -> None:
+        """A catch-up re-run taken back before it ran (an update is waiting): as if never asked, no try counted."""
+        with self._lock:
+            self._rerun_ids.discard(cid)
+            self._catchup_ids.discard(cid)
+        self._rerun_note.pop(cid, None)
+
+    def _update_waiting(self) -> str:
+        """The station's auto-update waiting for a quiet moment (or switching now): why the catch-up holds, else ""."""
+        try:
+            upd = self.station.updates.status().get("update") or {} if self.station is not None else {}
+        except Exception:  # noqa: BLE001 - a status that can't be read is no reason to hold
+            return ""
+        return "a station update is waiting" if upd.get("state") in ("waiting", "updating") else ""
 
     # -- shed clips caught up (sizeup/sttcatchup.py): the CAD of record drives it, the station's whisper runs it ------
 
@@ -2215,25 +2247,50 @@ class App:
         comms = self.cad.comms
         oldest = sttcatchup.MAX_AGE_RANGE_H[1] * 3600.0
         return sttcatchup.CatchUp(settings=self.cad.settings.stt_catchup, may_run=self._catchup_may_run,
-                                  rows=comms.shed_clips, count=comms.shed_count,
+                                  pause=self._catchup_pause, scan=comms.shed_clips,
                                   caught=lambda since: comms.caught_up(since, since - oldest),
                                   route=self._catchup_route, whisper_ready=self._catchup_whisper_ready,
                                   aws_idle=self._catchup_aws_idle, to_whisper=self._catchup_whisper,
-                                  to_aws=self._catchup_aws, log=log)
+                                  to_aws=self._catchup_aws, give_up=self._catchup_give_up, log=log)
 
     def _catchup_may_run(self) -> bool:
         """All-in-one only: a station forwarding to a hub is caught up by the hub (its catch_up call)."""
         return not self.forwarding()
 
+    def _catchup_pause(self) -> str:
+        """Why nothing is caught up now ("" = go): fire work comes first, whichever engine would run the catch-up.
+        An event of ours open (an emergency one: pending or active, or a page just queued), an alarm not yet
+        acknowledged or an emergency window open, a carrier open or someone talking on the station."""
+        now = time.time()
+        store = self.cad.store
+        if store.one("SELECT 1 AS x FROM incidents WHERE emergency = 1 AND (status IN ('pending', 'active') "
+                     "OR (status = 'queued' AND created_at >= ?)) LIMIT 1", (now - CATCHUP_QUEUED_S,)):
+            return "an event is open"
+        if store.one("SELECT 1 AS x FROM alarms WHERE ack_at IS NULL AND level = 'alarm' LIMIT 1"):
+            return "an alarm is open"
+        if self.cad.alarms.windows.state(now):
+            return "an emergency window is open"
+        try:
+            rows = self.radio_status()
+        except Exception:  # noqa: BLE001 - a status that can't be read: not known to be quiet
+            return "the radios' status isn't known"
+        opened = [str(r.get("label")) for r in rows if r.get("open")]
+        if opened:
+            return "carrier open on " + ", ".join(opened)
+        if self.live.state():
+            return "someone is talking"
+        return ""
+
     def _catchup_route(self, key: str) -> str:
         """aws | whisper | "" (not transcribed now): AWS only on another system's talkgroup (police) set to AWS while
-        its own budget has room, never our pool nor its reserve; otherwise the local model."""
+        its own budget has room and is under CATCHUP_AWS_PCT of its month (the rest is for what is heard live),
+        never our pool nor its reserve; otherwise the local model."""
         from sizeup.transcribe import is_context
         p = self.channel_pref(key)
         if not p.get("transcribe", True):
             return ""
         if (p.get("engine") in ("aws", "both") and is_context(key) and self.aws is not None
-                and self.aws.available(key)[0]):
+                and self.aws.available(key)[0] and self.aws.context_budget()["pct"] < CATCHUP_AWS_PCT):
             return "aws"
         return "whisper"
 
@@ -2246,7 +2303,8 @@ class App:
     def _catchup_aws_idle(self, key: str) -> bool:
         return self.aws is not None and self.aws.open_jobs(key) == 0
 
-    def _catchup_whisper(self, specs: list[dict]) -> list[str]:
+    def _catchup_whisper(self, specs: list[dict]) -> dict | None:
+        """{queued, refused, hold} (catch_up), None when the call itself failed (the hub: its station)."""
         return self.catch_up(specs)
 
     def _catchup_pcm(self, cid: str, key: str, source: str):
@@ -2255,17 +2313,26 @@ class App:
         got = self._rerun_audio(cid, not channels.is_tg(key) and self._kind.get(source) != "airband")
         return pcm8k(radio_voice(got[0], deemph=got[1], nr=False), RATE) if got else None
 
-    def _catchup_aws(self, row: dict) -> bool:
-        """One shed clip to Amazon Transcribe (a context channel, its own budget): the re-run path (AwsJob rerun)."""
+    def _catchup_aws(self, row: dict) -> tuple[bool, str]:
+        """One shed clip to Amazon Transcribe (a context channel, its own budget): the re-run path (AwsJob rerun).
+        (sent, why it never can be: no recording)."""
         cid, key = str(row.get("id") or ""), str(row.get("key") or "")
         if self.aws is None or not CLIP_ID.fullmatch(cid) or not self.aws.available(key)[0]:
-            return False
+            return False, ""
         pcm = self._catchup_pcm(cid, key, str(row.get("source") or ""))
         if pcm is None:
-            return False
+            return False, "no recording"
         self._rerun_note[cid] = CATCHUP_NOTE
         self.aws.submit(key, AwsJob("traffic", cid, key, rerun=True, catchup=True), pcm)
-        return True
+        return True, ""
+
+    def _catchup_give_up(self, cid: str, why: str) -> None:
+        """A shed clip that can never be caught up (no recording, too long): said on its row, counted as given up."""
+        from sizeup.sttcatchup import MAX_TRIES
+        try:
+            self.cad.comms.rerun_done(cid, f"failed: {why[:160]}; {CATCHUP_NOTE} try {MAX_TRIES}")
+        except Exception as e:  # the CAD must never stop the monitor
+            log(f"CAD: could not note a catch-up: {type(e).__name__}: {e}")
 
     def _rerun_local(self, ids: list[str] | None = None, as_alt: bool = False, live: bool = False) -> int:
         """The local model again on recordings still on disk (ids=None: all of them). Queued behind live
@@ -2274,6 +2341,19 @@ class App:
         want = set(ids) if ids is not None else None
         jobs: list[tuple[float, Rerun, np.ndarray]] = []
         seen: set[str] = set()
+        promoted = 0
+        if want is not None and not as_alt and not live:
+            # one the catch-up holds, asked for by a person: now a re-run of theirs (RERUN: ahead of the context clips)
+            with self._lock:
+                mine = [c for c in want if c in self._catchup_ids]
+            for cid in mine:
+                item = self.stt.promote(lambda it, c=cid: isinstance(it, Rerun) and it.id == c)
+                with self._lock:
+                    self._catchup_ids.discard(cid)
+                if item is not None:
+                    item.catchup = False
+                    self._rerun_note.pop(cid, None)
+                promoted += 1                       # (running right now: its result is the one the person waits for)
         with self._lock:
             pages = [p for p in self.pages if p.status != "no_voice"]
             busy = set(self._rerun_ids)
@@ -2296,9 +2376,9 @@ class App:
                     seen.add(t.id)
         jobs.sort(key=lambda j: -j[0])  # newest first: what's on screen updates first
         with self._lock:
-            if not self._rerun_ids:  # a new batch: restart the progress count
+            if not self._rerun_ids - self._catchup_ids:  # a new batch: restart the progress count
                 self.rerun = {"total": 0, "done": 0, "changed": 0, "failed": 0}
-            n = 0
+            n = promoted
             for _start, job, audio in jobs:
                 key = keys.get(job.id, "")
                 prio = RERUN if not live else self._stt_priority(job, key)
@@ -2318,9 +2398,13 @@ class App:
             if job.status != "error":
                 self._set_alt(job.id, text, model)
         elif job.status != "error":
-            changed = self._retext(job.id, text, job.status, job.confidence, model)
+            # (a shed clip caught up hours later: its words are old, nothing that alerts hears them)
+            changed = self._retext(job.id, text, job.status, job.confidence, model, quiet=job.catchup)
+            # (a restarted station no longer has the transmission to compare: a skipped clip with words now has changed)
+            changed = changed or (job.catchup and bool(text))
         with self._lock:
             self._rerun_ids.discard(job.id)
+            self._catchup_ids.discard(job.id)
             if not job.catchup:               # (a catch-up is no person's re-run: not in its progress)
                 self.rerun["done"] += 1
                 self.rerun["changed"] += changed
@@ -2334,9 +2418,20 @@ class App:
         didn't run the channel's way). On the transmission (rerun_at, rerun_result) and the page, and to
         the hub (a "rerun" event): the Re-transcribe menu item shows it."""
         note = self._rerun_note.pop(cid, "")
-        if note and note != CATCHUP_NOTE and not result.startswith("failed"):
-            note += ": the local model ran"
-        result = (result + (f"; {note}" if note else ""))[:300]
+        tail = f"; {CATCHUP_NOTE}"
+        if note == CATCHUP_NOTE or result.endswith(tail):
+            # a shed clip caught up: "changed; catch-up", and a failed try numbered on the CAD of record (the count is
+            # the row's own: it outlives a restart and a handover)
+            result = result.removesuffix(tail)[:240] + tail
+            if result.startswith("failed") and not self.forwarding():
+                try:
+                    result += f" try {self.cad.comms.catchup_tries(cid) + 1}"
+                except Exception:  # noqa: BLE001 - the count never stops the result
+                    result += " try 1"
+        else:
+            if note and not result.startswith("failed"):
+                note += ": the local model ran"
+            result = (result + (f"; {note}" if note else ""))[:300]
         with self._lock:
             page = next((p for p in self.pages if p.id == cid), None)
         if page is not None:
@@ -2364,10 +2459,13 @@ class App:
         self._emit("alt_text", {"id": cid, **alt})
 
     def _retext(self, cid: str, text: str, status: str, confidence: float | None, model: str,
-                alt: dict | None = None, why: str = "re-run") -> bool:
+                alt: dict | None = None, why: str = "re-run", quiet: bool = False) -> bool:
         """New text for a page or transmission already on screen (a re-run here, or one the station
         sent the hub, or Amazon Transcribe's), the old text kept in its history. True = the text changed.
-        alt {text, model}: the other engine's transcript, kept to compare ("both")."""
+        alt {text, model}: the other engine's transcript, kept to compare ("both"). quiet: a shed clip caught up
+        (sizeup/sttcatchup.py): its words may be hours old, so the text, history and change log are written as ever
+        but nothing that alerts hears it: no alarm, no ATC or airport pre-alert, no status hint, possible incoming or
+        dispatch step (Comms.retext notify=False), here and on the hub ("catchup" on the retext event)."""
         changed = False
         with self._lock:
             page = next((p for p in self.pages if p.id == cid), None)
@@ -2390,19 +2488,19 @@ class App:
         changed = changed or (old is not None and old != text)
         self.store.retext(cid, text, status, confidence, model, alt=alt)
         try:
-            self.cad.comms.retext(cid, text, status, model, alt)
+            self.cad.comms.retext(cid, text, status, model, alt, notify=not quiet)
         except Exception as e:  # the CAD must never stop the monitor
             log(f"CAD: could not update the communications log: {type(e).__name__}: {e}")
         t = next((x for x in list(self.store.loose) + [x for i in self.store.incidents for x in i.traffic]
                   if x.id == cid), None)
-        if t is not None and text:
+        if t is not None and text and not quiet:
             self._alarm(t, text)                       # the words came later (Amazon Transcribe, a re-run)
             self._atc(t, text)
         if changed:
             # (another P25 system's words are never in a log, #419)
             log(f"{why} {cid}: " + ("(text changed)" if self.clip_is_context(cid) else text or "(no speech)"))
         self._emit("retext", {"id": cid, "text": text, "status": status, "confidence": confidence, "model": model,
-                              **({"alt": alt} if alt is not None else {})})
+                              **({"alt": alt} if alt is not None else {}), **({"catchup": True} if quiet else {})})
         return changed
 
 
@@ -2439,6 +2537,8 @@ class App:
     def _stt(self, item, audio: np.ndarray, eng: str, key: str) -> None:
         """One transmission or page to speech-to-text the way its channel says (audio: whisper's 16 kHz input)."""
         item.stt = eng if eng in ("aws", "both") else ""
+        if self._stt_priority(item, key) in (URGENT, HIGH, LIVE):
+            self.stt.ours_heard()              # ours, whichever engine takes it (AWS too): the catch-up's quiet spell
         if eng == "off":                       # kept, not transcribed
             item.raw, item.confidence, item.status = "", None, "off"
             item.model = ""
@@ -2485,16 +2585,12 @@ class App:
         """The whisper queue dropped or skipped it (sizeup/stt.py SttQueue, #195): it says so ("Transcription
         failed", the reason in its model line), never left "Transcribing"; Re-transcribe can still run it."""
         log(f"speech-to-text: {getattr(item, 'id', '?')} not transcribed: {why}")
-        if isinstance(item, Rerun) and item.catchup:    # still skipped, as it was: the catch-up tries it again later
-            with self._lock:
-                self._rerun_ids.discard(item.id)
-            self._rerun_note.pop(item.id, None)
-            return
         if isinstance(item, Rerun):
             with self._lock:
                 had = item.id in self._rerun_ids
                 self._rerun_ids.discard(item.id)
-                if had:
+                self._catchup_ids.discard(item.id)
+                if had and not item.catchup:    # (the catch-up's: still skipped, a failed try on its row, tried again)
                     self.rerun["done"] += 1
                     self.rerun["failed"] += 1
             if not item.as_alt:
@@ -2648,7 +2744,8 @@ class App:
     def _aws_done(self, job: AwsJob, text: str, conf: float | None) -> None:
         status = "done" if text else "no_speech"
         if job.rerun:
-            changed = self._retext(job.id, text, status, conf, channels_model(), why="AWS Transcribe re-run")
+            changed = self._retext(job.id, text, status, conf, channels_model(), why="AWS Transcribe re-run",
+                                   quiet=job.catchup)
             return self._rerun_finish(job.id, "changed" if changed else "same", channels_model())
         if job.kind == "page" and job.alt is None:
             page = job.page
@@ -2659,10 +2756,9 @@ class App:
 
     def _aws_failed(self, job: AwsJob, why: str) -> None:
         """Never dropped: the local model takes it ("both": the local text simply stays)."""
-        if job.catchup:                       # still skipped, as it was: the catch-up tries it again later (whisper)
-            self._rerun_note.pop(job.id, None)
+        if job.catchup:                       # still skipped: a failed try on its row, the catch-up tries it again later
             log(f"aws transcribe: catch-up {job.id}: {why}: left skipped")
-            return
+            return self._rerun_finish(job.id, f"failed: AWS: {why[:80]}")
         log(f"aws transcribe: {job.kind} {job.id}: {why}" + ("" if job.alt is not None else ": using the local model"))
         if job.rerun:
             self._rerun_note[job.id] = f"AWS failed ({why[:80]})"

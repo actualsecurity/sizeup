@@ -594,9 +594,13 @@ class Comms:
             self.rev += 1
         return {"unlinked": True, "why": old["why"], "excluded": auto}
 
-    def retext(self, tid: str, text: str, status: str, model: str = "", alt: dict | None = None) -> bool:
+    def retext(self, tid: str, text: str, status: str, model: str = "", alt: dict | None = None,
+               notify: bool = True) -> bool:
         """New text for a transmission. alt {text, model}: the other engine's transcript, kept to compare
-        ("both": Amazon Transcribe's is the text, whisper's the alternative)."""
+        ("both": Amazon Transcribe's is the text, whisper's the alternative). notify=False: a shed clip caught up
+        hours later (sizeup/sttcatchup.py): stored and in the change log like any text, but on_text isn't told, so
+        nothing that acts on what was just said (status hints, possible incoming, the airport, a dispatch mode's
+        step) acts on old words."""
         with self.store.tx() as db:
             self.touch(tid)
             if alt is not None:
@@ -606,7 +610,7 @@ class Comms:
                            (text, status, model, self.clock(), tid)).rowcount
             if n:
                 self.rev += 1
-        if n:
+        if n and notify:
             self._heard(tid)
         return bool(n)
 
@@ -625,28 +629,51 @@ class Comms:
         return bool(n)
 
     # -- shed clips caught up (sizeup/sttcatchup.py): read only; the re-run path writes ---------------------------
+    # A try that failed is on the row (rerun_result "failed: why; catch-up try N", App._rerun_finish), so the count
+    # outlives a restart and a hub handover.
 
     SHED_WHERE = "start >= ? AND status = 'skipped' AND model LIKE ?"
+    TRY = re.compile(r"; catch-up try (\d+)$")
 
-    def shed_clips(self, since: float, limit: int = 60) -> list[dict]:
+    @classmethod
+    def catchup_tries_of(cls, result: str) -> int:
+        m = cls.TRY.search(result or "")
+        return int(m.group(1)) if m else 0
+
+    def catchup_tries(self, tid: str) -> int:
+        """How many catch-up tries of this row failed so far."""
+        r = self.store.one("SELECT rerun_result FROM radio_traffic WHERE id = ?", (str(tid),))
+        return self.catchup_tries_of((r or {}).get("rerun_result") or "")
+
+    @staticmethod
+    def _shed_row(r) -> dict:
+        tg = r["talkgroup"]
+        key = r["channel"] if tg is None else sources.channel_key(r["system"] or "", int(tg))
+        return {"id": r["id"], "key": key, "source": r["channel"], "unit": r["talker"] or "",
+                "start": r["start"], "seconds": max(0.0, float(r["end"] or r["start"]) - float(r["start"])),
+                "service": r["service"] or "", "tier": r["tier"] or "",
+                "tries": Comms.catchup_tries_of(r["rerun_result"] or ""), "tried_at": r["rerun_at"] or 0.0}
+
+    def shed_clips(self, since: float, limit: int = 60, sort=None) -> tuple[list[dict], dict[str, int]]:
         """Rows still skipped because speech-to-text was busy (stt.SHED), heard since `since`: the alert tier first,
-        then the newest. Each {id, key (its speech-to-text channel key), source, unit, start, service, tier}."""
+        then the newest. Each {id, key (its speech-to-text channel key), source, unit, start, seconds, service, tier,
+        tries, tried_at}. sort(row) -> a word for it ("" = eligible): every row is sorted before the limit, so one
+        that can't be sent now (given up, not transcribed, too long) never keeps one further back from its turn.
+        -> (the first `limit` eligible rows, how many rows got each word: {"": eligible, "gave up": ...})."""
         from sizeup.stt import SHED
-        rows = self.store.q(
-            f'SELECT id, start, channel, talkgroup, talker, system, service, tier FROM radio_traffic WHERE {self.SHED_WHERE} '
-            "ORDER BY (tier = 'alert') DESC, start DESC LIMIT ?", (float(since), f"%{SHED}%", int(limit)))
-        out = []
-        for r in rows:
-            tg = r["talkgroup"]
-            key = r["channel"] if tg is None else sources.channel_key(r["system"] or "", int(tg))
-            out.append({"id": r["id"], "key": key, "source": r["channel"], "unit": r["talker"] or "",
-                        "start": r["start"], "service": r["service"] or "", "tier": r["tier"] or ""})
-        return out
-
-    def shed_count(self, since: float) -> int:
-        from sizeup.stt import SHED
-        r = self.store.one(f"SELECT COUNT(*) AS n FROM radio_traffic WHERE {self.SHED_WHERE}", (float(since), f"%{SHED}%"))
-        return int((r or {}).get("n") or 0)
+        out, counts = [], {}
+        with self.store.lock:
+            cur = self.store.db.execute(
+                "SELECT id, start, end, channel, talkgroup, talker, system, service, tier, rerun_result, rerun_at "
+                f"FROM radio_traffic WHERE {self.SHED_WHERE} ORDER BY (tier = 'alert') DESC, start DESC",
+                (float(since), f"%{SHED}%"))
+            rows = [self._shed_row(r) for r in cur]
+        for row in rows:
+            word = sort(row) if sort is not None else ""
+            counts[word] = counts.get(word, 0) + 1
+            if not word and len(out) < int(limit):
+                out.append(row)
+        return out, counts
 
     def caught_up(self, since: float, heard_since: float) -> int:
         """Shed rows caught up (a re-run whose result says so, not failed) since `since`, heard since heard_since."""

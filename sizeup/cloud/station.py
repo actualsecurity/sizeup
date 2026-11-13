@@ -332,7 +332,7 @@ class StationLink:
         n, oldest = self.outbox.pending()
         out = {"id": self.cfg.station_id, "name": self.cfg.station_name,
                "radios": [r for r in app.radio_status() if r.get("label") != "Hub"],
-               "sdr": app.sdr(), "rerun": dict(app.rerun, pending=len(app._rerun_ids)),
+               "sdr": app.sdr(), "rerun": dict(app.rerun, pending=len(app._rerun_ids - app._catchup_ids)),
                "channels": app.channels_applied(),
                "p25_systems": app.p25_systems_state(),       # (#409) the other P25 systems: jobs, state, activity
                "reception": app.reception.state(),           # (#410) the reception test: its numbers, the history
