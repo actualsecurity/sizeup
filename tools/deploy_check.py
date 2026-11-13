@@ -14,6 +14,15 @@ Success: the hub answers with this build and the station reports it (or an equiv
 the station recorded as "no runtime change"); the station's update log line is printed. Failure (exit 1): the
 station's update failed or was rolled back, auto-update is paused there, the token is refused, or the time ran
 out. Exit 2: bad arguments or no token (the workflow skips the step with a warning before that).
+
+    python3 tools/deploy_check.py replicas [--taskdef deploy/aws/taskdef.json] [--dbs cad,hub,audio] [--quick]
+
+After the deploy serves (2026-11-13: a corrupt cad.sqlite replica sat unnoticed until the next takeover failed): each
+replica's latest is restored from S3 (`litestream restore`, the runner's litestream: the Dockerfile's version) into a
+temp dir and checked read-only with PRAGMA integrity_check (--quick: quick_check). The bucket and prefix are the task
+definition's LITESTREAM_BUCKET / LITESTREAM_PATH; the region AWS_REGION; credentials the deploy role's (env), which may
+read the backups (sizeup-aws step 28). Exit 1 with "<db>.sqlite: ..." for a file that is bad, has no backup or can't be
+restored; nothing of the files' contents is printed (the log is public), only SQLite's check lines.
 """
 
 from __future__ import annotations
@@ -21,10 +30,15 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
+import sqlite3
+import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
+from pathlib import Path
 from typing import Callable
 
 OK, WAIT, FAIL = "ok", "wait", "fail"
@@ -105,7 +119,126 @@ def wait_for(get: Callable[[], tuple[dict | None, str, int]], build: str, timeou
         sleep(min(every, max(0.0, timeout - (clock() - t0))))
 
 
+# -- the replicas, restored and checked after the deploy ---------------------------------------------------------------
+
+DBS = ("cad", "hub", "audio")
+
+
+def taskdef_backup(path: str) -> tuple[str, str]:
+    """(bucket, prefix) from the task definition's hub container (LITESTREAM_BUCKET / LITESTREAM_PATH)."""
+    d = json.loads(Path(path).read_text())
+    env = {}
+    for c in d.get("containerDefinitions") or []:
+        if c.get("name") == "hub":
+            env = {e.get("name"): e.get("value") for e in c.get("environment") or []}
+    bucket = str(env.get("LITESTREAM_BUCKET") or "").strip()
+    if not bucket:
+        raise ValueError(f"{path}: no LITESTREAM_BUCKET in the hub container")
+    return bucket, (str(env.get("LITESTREAM_PATH") or "").strip() or "sizeup-hub").strip("/")
+
+
+def litestream_config(bucket: str, prefix: str, region: str, dbs, work: Path) -> Path:
+    """A litestream.yml for restoring only (deploy/hub/litestream.yml's replicas; the "path"s are never opened)."""
+    lines = ["dbs:"]
+    for db in dbs:
+        lines += [f"  - path: {work / 'live' / (db + '.sqlite')}", "    replica:", "      type: s3",
+                  f"      bucket: {bucket}", f"      path: {prefix}/{db}.sqlite"] + ([f"      region: {region}"] if region else [])
+    cfg = work / "litestream.yml"
+    cfg.write_text("\n".join(lines) + "\n")
+    return cfg
+
+
+def litestream_restore(cfg: Path, db: str, work: Path, timeout: float = 900.0) -> Path:
+    """The latest of db restored into work: its path. RuntimeError: no backup, or it couldn't."""
+    out = work / "restored" / f"{db}.sqlite"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        r = subprocess.run(["litestream", "restore", "-config", str(cfg), "-o", str(out), str(work / "live" / f"{db}.sqlite")],
+                           capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"the restore took over {timeout:.0f} s") from None
+    except FileNotFoundError:
+        raise RuntimeError("no litestream on this runner") from None
+    if r.returncode != 0:
+        err = (r.stderr or r.stdout).strip()
+        if "no matching backup files" in err or "no snapshots available" in err:
+            raise RuntimeError("no backup in S3")
+        raise RuntimeError(f"litestream restore failed: {err[-300:]}")
+    if not out.exists():
+        raise RuntimeError("litestream restore wrote nothing")
+    return out
+
+
+def integrity(path: Path, full: bool = True) -> tuple[bool, str]:
+    """(ok, SQLite's answer): integrity_check (or quick_check), read-only, never the rows themselves."""
+    try:
+        con = sqlite3.connect(Path(path).resolve().as_uri() + "?mode=ro", uri=True)
+        try:
+            rows = con.execute(f"PRAGMA {'integrity_check' if full else 'quick_check'}(20)").fetchall()
+        finally:
+            con.close()
+    except sqlite3.DatabaseError as e:
+        return False, f"{type(e).__name__}: {e}"
+    text = "; ".join(str(r[0]) for r in rows)
+    return text == "ok", text
+
+
+def check_replicas(dbs, restore: Callable[[str], Path], check: Callable[[Path], tuple[bool, str]],
+                   out: Callable[[str], None] = print) -> list[tuple[str, bool, str]]:
+    """Each replica restored and checked: [(db, ok, what to say)]. A restore that fails is a failure too."""
+    res = []
+    for db in dbs:
+        t0 = time.monotonic()
+        try:
+            path = restore(db)
+            ok, text = check(path)
+            size = path.stat().st_size if path.exists() else 0
+            msg = f"{db}.sqlite: {'ok' if ok else 'CORRUPT: ' + text[:500]} ({size / 1e6:.0f} MB, {time.monotonic() - t0:.0f} s)"
+        except Exception as e:  # noqa: BLE001 - said, and a failure
+            ok, msg = False, f"{db}.sqlite: can't be restored: {e}"
+        out(msg)
+        res.append((db, ok, msg))
+    return res
+
+
+def replicas_main(argv: list[str]) -> int:
+    ap = argparse.ArgumentParser(prog="deploy_check.py replicas", description="restore each replica and integrity_check it")
+    ap.add_argument("--taskdef", default="deploy/aws/taskdef.json")
+    ap.add_argument("--dbs", default=",".join(DBS))
+    ap.add_argument("--region", default=os.environ.get("AWS_REGION", ""))
+    ap.add_argument("--quick", action="store_true", help="quick_check instead of integrity_check")
+    a = ap.parse_args(argv)
+    dbs = [x.strip() for x in a.dbs.split(",") if x.strip()]
+    if not dbs or any(x not in DBS for x in dbs):
+        print(f"replica check: --dbs from {', '.join(DBS)}", file=sys.stderr)
+        return 2
+    try:
+        bucket, prefix = taskdef_backup(a.taskdef)
+    except (OSError, ValueError) as e:
+        print(f"replica check: {e}", file=sys.stderr)
+        return 2
+    gh = os.environ.get("GITHUB_ACTIONS") == "true"
+    work = Path(tempfile.mkdtemp(prefix="replica-check-"))
+    try:
+        cfg = litestream_config(bucket, prefix, a.region, dbs, work)
+        print(f"replica check: restoring {', '.join(dbs)} from the backups ({prefix}/) and checking them")
+        res = check_replicas(dbs, lambda db: litestream_restore(cfg, db, work), lambda p: integrity(p, not a.quick))
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+    bad = [m for _, ok, m in res if not ok]
+    if not bad:
+        print(f"::notice title=Replicas verified::{'; '.join(m for _, _, m in res)}" if gh else "replicas verified")
+        return 0
+    for m in bad:
+        print(f"::error title=Replica bad::{m} · a takeover or cold start from it would fail; fix it before the next "
+              "deploy (docs/cloud.md \"Replica checks\")" if gh else f"replica BAD: {m}")
+    return 1
+
+
 def main(argv: list[str] | None = None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    if argv[:1] == ["replicas"]:
+        return replicas_main(argv[1:])
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--url", default=os.environ.get("SIZEUP_HUB_URL", ""))
     ap.add_argument("--build", required=True, help="the git sha just deployed")

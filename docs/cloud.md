@@ -2862,6 +2862,45 @@ gap users see is the handoff only.
 code works either way (with 0/100 the old task releases, and the new one, started after it stopped, takes the
 lock at once). Set 0/100 **before** deploying any code without the lock.
 
+## Replica checks
+
+On 2026-11-13 a corrupt `cad.sqlite` replica sat unnoticed for ~110 min, until the next deploy's takeover failed its
+quick_check. Then every new task crash-looped for ~35 min (Cloudflare 1033) until someone opened a browser. Four
+layers now catch both cases (`sizeup/replicawatch.py`, run by the supervisor):
+
+| what | when | how it says so |
+|---|---|---|
+| **Standby check** | while a standby follows the replica: at once when all three files are restored, then every `SIZEUP_REPLICA_CHECK_MIN` (10) | It takes a consistent copy of each followed file: the copy counts only if the `-txid` sidecar, size and mtime don't change while it is made, so the follow never pauses. It runs `quick_check` on the copy, read-only (not immutable), in a child process at nice 19, and `integrity_check` every `SIZEUP_REPLICA_FULL_EVERY` (6) rounds. |
+| **Leader check** | the leader (normally no standby runs): 2 min after it serves, then every `SIZEUP_REPLICA_LEADER_CHECK_MIN` (15) | It runs `litestream restore` of cad and hub, and of audio every 4th round, into `/data/.replica-check` at nice 19. Then the same check runs and the copy is deleted. A file that a standby verified within the interval is skipped. |
+| **Task failure** | a takeover fails, the app exits, the task is fenced, a release is unclean, the supervisor crashes | Before the task exits, the event goes into S3 and is pushed synchronously (5 s timeout). Three or more failures in 10 min send a second push, "Hub crash-looping". The next task that serves pushes "Hub serving again". |
+| **Deploy check** | after each deploy (`deploy.yml`) | `tools/deploy_check.py replicas` restores all three files in the runner with the pinned Litestream and runs `integrity_check`. A bad file, or one that can't be restored, fails the job and names the file. |
+
+* **Pushes** go to the STATUS topic in effect from the env (SSM `/sizeup-hub/status-topic`, else the alerts topic),
+  else the config file. A Settings override is in the CAD database, which the supervisor never opens. Tapout's and
+  `[prealert]`'s topics are refused. These pushes are sent: "Replica corrupt: cad.sqlite" (priority 5), "Replica not
+  verifiable" (a file that couldn't be restored or checked 2 rounds running), "Replica OK again", the failure's title
+  ("Hub takeover failed", ...) and "Hub crash-looping". Each kind is pushed **at most once per
+  `SIZEUP_REPLICA_PUSH_MIN` (30)**. That limit is kept in S3, so a crash loop of fresh tasks can't repeat a push, and
+  only one of two tasks failing at the same moment pushes (a conditional write). If S3 is unreadable, the push is sent
+  anyway.
+* **The shared record** is `s3://<bucket>/sizeup-hub/replica-watch.json`: the last check per file, the files failing,
+  the last 30 task events and the push times. It uses conditional writes, like `leader.json`, under the task role's
+  existing `backups` policy. The leader copies it to `$SIZEUP_RUN_DIR/replica-watch.json` every minute for the app.
+* **Settings > Health** shows the **Replicas** row: each file's result, when it was verified and by whom (standby or
+  leader, quick or full), plus the task failures of the last 24 h. A bad file also shows as the critical alert
+  "Replica corrupt: <db>.sqlite". The panel only shows that alert: the supervisor has already pushed it.
+* **CloudWatch** is the backstop for a task that dies without pushing (`sizeup-aws/28-replica-watch.sh`). It adds
+  metric filters on `/ecs/sizeup-hub` and alarms through the existing SNS → `sizeup-hub-alarm-ntfy` Lambda path from
+  step 13:
+  * "takeover failed" at least once in a minute;
+  * a "replica check FAILED" line;
+  * more than 3 task starts (`handoff: this task is`) in 10 min.
+
+  The same script lets the deploy role read the backups bucket.
+* **Cost**: the leader's restore is in-region S3 (no transfer cost, a few dozen GETs a check). Its CPU runs at nice 19:
+  each check logs how long its restore and check took, so the intervals can be tuned. The deploy check downloads the
+  three files to GitHub's runner once per deploy, which is S3 egress at about $0.09/GB (cad.sqlite is hundreds of MB).
+
 ## Packaging and the Fargate task
 
 `Dockerfile`: `python:3.14-slim`, linux/arm64 (amd64 builds too), non-root user `sizeup` (uid
