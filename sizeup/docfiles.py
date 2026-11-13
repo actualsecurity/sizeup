@@ -18,8 +18,11 @@ photos without their metadata; a PDF page rendered to a picture for the floor-pl
     plan_image(data)     in the same child: a plan picture the right way up (EXIF orientation), at most MAX_PX a side.
     The child: -I, an environment of its own (child_env(): no secrets), niced, RLIMIT_CPU and RLIMIT_AS, one at a time,
     a timeout; a malformed file can crash or stall it, not the hub. no_dump(): the hub's memory and environ not readable
-    by it (the app and the hot/cold supervisor, sizeup/handoff.py, both call it). Accepted residual risk: the Litestream
-    process runs as the same user and stays readable to it (its environ has the same AWS role, nothing more).
+    by it (the app and the hot/cold supervisor, sizeup/handoff.py, both call it). Accepted residual risk: the
+    container's init process (initProcessEnabled) and Litestream run as the same user and stay dumpable, so a compromised
+    child could read their /proc/<pid>/environ: every SSM secret the task gets, and the container-credentials URI (the
+    task role's credentials). The child itself starts with none of them; a renderer under its own user or in its own
+    task is a follow-up (#505).
     recheck_pdf(): the hub looks at the child's copy again before it is stored.
     Not removed: EXIF inside a PDF's own JPEG (DCTDecode) images; an image's or form's /Metadata (XMP) is.
 
@@ -484,17 +487,44 @@ CLEAN_NEVER = {b"JS", b"JavaScript", b"OpenAction", b"AA", b"Launch", b"URI", b"
 CLEAN_MAX_BYTES = 64 * 1024 * 1024
 
 
+STREAM_AT = re.compile(rb"(?<=[>\s])stream\r?\n")
+OBJ_AT = re.compile(rb"\d+\s+\d+\s+obj\b")
+LENGTH = re.compile(rb"/Length\s+(\d+)(\s+\d+\s+R)?")
+END_AT = re.compile(rb"\r?\n?endstream\b")
+
+
 def recheck_pdf(pdf: bytes, original: int) -> None:
-    """The sanitised copy, looked at again here in the hub: none of CLEAN_NEVER as a name anywhere in its bytes (pypdf
+    """The sanitised copy, looked at again here in the hub: none of CLEAN_NEVER as a whole name in its objects (pypdf
     writes every object uncompressed and in no object stream, so nothing can hide), and no bigger than 64 MB or than
-    twice the original and a megabyte. Refused otherwise. (A name inside a compressed page content stream is a drawing
-    operand, not an object: nothing there runs.)"""
+    twice the original and a megabyte. A stream's own bytes (page drawing, an image's pixels) are skipped by its /Length
+    (written direct by pypdf): text that says "Stair A/AA" or pixels that happen to spell a name are not objects, and
+    nothing in them runs. A stream whose length can't be followed to its endstream: refused. Refused otherwise too."""
+    bad = Refused("the PDF couldn't be cleaned: print it to a new PDF")
     if len(pdf) > min(CLEAN_MAX_BYTES, 2 * original + (1 << 20)):
-        raise Refused("the PDF couldn't be cleaned: print it to a new PDF")
-    for m in NAME.finditer(pdf):
-        name = HEX.sub(lambda h: bytes((int(h.group(1), 16),)), m.group(1)) if b"#" in m.group(1) else m.group(1)
-        if name in CLEAN_NEVER:
-            raise Refused("the PDF couldn't be cleaned: print it to a new PDF")
+        raise bad
+
+    def names(part: bytes) -> None:
+        for m in NAME.finditer(part):
+            name = HEX.sub(lambda h: bytes((int(h.group(1), 16),)), m.group(1)) if b"#" in m.group(1) else m.group(1)
+            if name in CLEAN_NEVER:
+                raise bad
+    i = 0
+    while (m := STREAM_AT.search(pdf, i)) is not None:
+        names(pdf[i:m.start()])                       # the objects before it, its own dictionary included
+        heads = list(OBJ_AT.finditer(pdf, i, m.start()))
+        if not heads:
+            raise bad
+        lm = None
+        for lm in LENGTH.finditer(pdf, heads[-1].start(), m.start()):
+            pass                                      # its dictionary's /Length (the last one before the stream)
+        if lm is None or lm.group(2):                 # none, or an indirect one: can't be followed
+            raise bad
+        end = m.end() + int(lm.group(1))
+        tail = END_AT.match(pdf, end)
+        if end > len(pdf) or tail is None:
+            raise bad
+        i = tail.end()
+    names(pdf[i:])
 
 
 def plan_image(data: bytes, max_px: int = MAX_PX) -> dict | None:

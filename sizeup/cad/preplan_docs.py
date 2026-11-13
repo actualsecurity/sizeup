@@ -60,20 +60,55 @@ UPLOADS = threading.BoundedSemaphore(2)     # read at once (each up to 25 MB): s
 UPLOAD_WAIT_S = 5.0
 UPLOAD_READ_S, UPLOAD_DEADLINE_S = 30.0, 300.0   # server.py: each read of an upload's body, and all of it
 # Downloads: a plan's picture (at most 4096 x 4096) is read whole while it holds a READS slot (only for the store's read),
-# then sent from memory; a document is streamed from the store while it holds a STREAMS slot (the whole transfer, at
-# most DOWNLOAD_DEADLINE_S). Each waits DOWNLOAD_WAIT_S for its slot, then 503 (the page tries the plan again).
+# then sent from memory, its bytes counted against PLAN_BUDGET until it is sent; a document is streamed from the store
+# while it holds a STREAMS slot (the whole transfer). Either is dropped when the client takes nothing for
+# DOWNLOAD_WRITE_S, or after download_s(its size). Each waits DOWNLOAD_WAIT_S, then 503 (the page tries the plan again).
 READS = threading.BoundedSemaphore(4)
 STREAMS = threading.BoundedSemaphore(12)
 DOWNLOADS = STREAMS                         # (the name the tests and the docs use for the documents' slots)
 DOWNLOAD_WAIT_S = 2.0
-DOWNLOAD_WRITE_S = 30.0                     # server.py: a client that takes no bytes this long is dropped
-DOWNLOAD_DEADLINE_S = 120.0                 # server.py: a whole document, at most this
+DOWNLOAD_WRITE_S = 30.0                     # server.py: a client that takes no bytes this long (idle) is dropped
+DOWNLOAD_MIN_S, DOWNLOAD_MIN_RATE = 600.0, 100_000   # a whole download: at least 10 min, or its size at 100 KB/s
 PLAN_MAX_BYTES = 64 * 1024 * 1024           # a plan's picture read whole: never more than this
+PLAN_BUDGET_BYTES = 96 * 1024 * 1024        # plans' bytes held in memory at once (until each is sent), at most
+
+
+def download_s(n: int) -> float:
+    """How long a whole download of n bytes may take: a rig's iPad on weak LTE still gets the file."""
+    return max(DOWNLOAD_MIN_S, n / DOWNLOAD_MIN_RATE)
+
+
+class ByteBudget:
+    """Bytes held at once, at most total: take(n, wait) -> False when they don't free up in time; give(n) back."""
+
+    def __init__(self, total: int):
+        self.total, self.used = total, 0
+        self._cv = threading.Condition()
+
+    def take(self, n: int, wait: float) -> bool:
+        end = time.monotonic() + wait
+        with self._cv:
+            while self.used + n > self.total:
+                left = end - time.monotonic()
+                if left <= 0 or n > self.total:
+                    return False
+                self._cv.wait(left)
+            self.used += n
+            return True
+
+    def give(self, n: int) -> None:
+        with self._cv:
+            self.used = max(0, self.used - n)
+            self._cv.notify_all()
+
+
+PLAN_BUDGET = ByteBudget(PLAN_BUDGET_BYTES)
 SWEEP_MARGIN_S = 6 * 3600.0                 # the sweep: a deleted or never finished document, this old
 SWEEP_FIRST_S, SWEEP_EVERY_S = 72 * 3600.0, 6 * 3600.0   # never in a process's (a takeover's) first 72 h
 SWEEP_MAX_N = 50                            # documents purged a pass, at most
 SWEEP_MIN_ALLOW = 0                         # objects no row names: never deleted
 PENDING, DELETED, ACTIVE = -1, 0, 1         # preplan_docs.active
+ADDED_COLUMNS = (("purged", "REAL"),)       # since the table was first made (05f9f30): ALTER TABLE ... ADD COLUMN
 VIEW_S = 600.0                              # the same person opening the same document: in their activity once a while
 AUDITED = ("kind", "title", "floor", "mime", "bytes", "sha256", "pages", "page", "bldg_key", "building_ref", "link",
            "corners", "admin_only", "active")
@@ -196,6 +231,11 @@ class PreplanDocs:
         with self.db.lock:
             if self.db.db.execute("SELECT 1 FROM sqlite_master WHERE name = 'incidents'").fetchone():
                 self.db.db.executescript(SCHEMA)
+                # columns added after the table was first made (a database an earlier build created): additive, once
+                have = {r[1] for r in self.db.db.execute("PRAGMA table_info(preplan_docs)").fetchall()}
+                for col, decl in ADDED_COLUMNS:
+                    if col not in have:
+                        self.db.db.execute(f"ALTER TABLE preplan_docs ADD COLUMN {col} {decl}")
 
     # -- reading ----------------------------------------------------------------------------------------------------------
 
@@ -319,28 +359,39 @@ class PreplanDocs:
                 self.cad.log(f"CAD site doc {did}: {e}")
                 raise CadError("Not available now: try again") from None
             raise
-        if part == "plan":                       # read whole, the slot let go, sent from memory
-            try:
-                if opened.length > PLAN_MAX_BYTES:
+        if part == "plan":                       # read whole (the read slot let go after it), then sent from memory
+            n = opened.length
+            if n > PLAN_MAX_BYTES or not PLAN_BUDGET.take(n, DOWNLOAD_WAIT_S):  # its bytes held until it is sent
+                try:
+                    opened.close()
+                finally:
+                    slots.release()
+                if n > PLAN_MAX_BYTES:
                     raise CadError(f"no plan for document {did}")
+                raise Busy("Busy: try again in a moment")
+            try:
                 body = b"".join(opened.pieces())
-            except (DocStoreError, OSError) as e:
-                self.cad.log(f"CAD site doc {did}: plan: {type(e).__name__}")
-                raise CadError("Not available now: try again") from None
+            except BaseException as e:
+                PLAN_BUDGET.give(n)
+                if isinstance(e, (DocStoreError, OSError)):
+                    self.cad.log(f"CAD site doc {did}: plan: {type(e).__name__}")
+                    raise CadError("Not available now: try again") from None
+                raise
             finally:
                 try:
                     opened.close()
                 finally:
                     slots.release()
-            return {"body": body, "ctype": ctype, "disposition": disposition}
-
-        def done() -> None:
-            try:
-                opened.close()
-            finally:
-                slots.release()
-        stream = Stream(opened.length, opened.pieces, done)
-        stream.deadline = time.monotonic() + DOWNLOAD_DEADLINE_S      # server.py stops sending after it
+            stream = Stream(len(body), lambda: (body[i:i + 65536] for i in range(0, len(body), 65536)),
+                            lambda: PLAN_BUDGET.give(n))
+        else:
+            def done() -> None:
+                try:
+                    opened.close()
+                finally:
+                    slots.release()
+            stream = Stream(opened.length, opened.pieces, done)
+        stream.deadline = time.monotonic() + download_s(stream.length)          # server.py stops sending after it
         return {"stream": stream, "ctype": ctype, "disposition": disposition}
 
     def _seen(self, email: str, did: int, part: str) -> None:
@@ -525,8 +576,13 @@ class PreplanDocs:
         return {"ok": True, "doc": self.shown(d)}
 
     def _purged(self, did: int) -> None:
-        with self.db.tx() as db:
-            db.execute("UPDATE preplan_docs SET purged = ? WHERE id = ?", (self.cad.clock(), did))
+        """Its objects are confirmed gone. Never in the way of what it follows (a delete already done): a failure here
+        leaves the row for the sweep, whose deletes are idempotent."""
+        try:
+            with self.db.tx() as db:
+                db.execute("UPDATE preplan_docs SET purged = ? WHERE id = ?", (self.cad.clock(), did))
+        except Exception as e:  # noqa: BLE001
+            self.cad.log(f"CAD site doc {did}: purged not recorded ({type(e).__name__}): the sweep will")
 
     def _keys(self, d: dict) -> list[str]:
         """Every object a document can have (deleting one that isn't there is fine)."""

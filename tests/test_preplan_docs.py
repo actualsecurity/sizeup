@@ -9,6 +9,7 @@ import http.client
 import io
 import json
 import re
+import sqlite3
 import struct
 import subprocess
 import threading
@@ -471,17 +472,18 @@ def test_downloads_at_once_are_bounded_and_plans_hold_a_slot_only_while_read(api
     assert code == 503 and h["Retry-After"] and "Busy" in json.loads(raw)["error"]
     for _ in range(3):                                                   # the plan: read whole, its slot back at once
         code, body, ctype, _ = api.get(f"/api/cad/preplan/docs/{did}/plan", "", who(VAL))
-        assert code == 200 and isinstance(body, bytes) and body.startswith(b"\x89PNG") and ppd.READS._value == 1
+        assert code == 200 and ppd.READS._value == 1
+        assert body.read_all().startswith(b"\x89PNG") and ppd.PLAN_BUDGET.used == 0
     held.pop().close()                                                   # one done (or dropped)
     code, stream, _, _ = api.get(f"/api/cad/preplan/docs/{did}/file", "", who(VAL))
     assert code == 200
     import time as _time
-    assert abs(stream.deadline - (_time.monotonic() + ppd.DOWNLOAD_DEADLINE_S)) < 5     # a whole download: 120 s at most
+    assert abs(stream.deadline - (_time.monotonic() + ppd.download_s(stream.length))) < 5
     stream.close()
     for x in held:
         x.close()
     assert ppd.STREAMS._value == 2
-    assert ppd.DOWNLOAD_WRITE_S <= 60 and ppd.DOWNLOAD_DEADLINE_S <= 120
+    assert ppd.DOWNLOAD_WRITE_S <= 60
 
 
 def test_a_client_gone_before_its_headers_gives_its_slot_back(api, monkeypatch):
@@ -1159,3 +1161,119 @@ def test_local_files_are_never_readable_by_others(tmp_path):
     k = st.key("0123456789abcdef", "original.png")
     st.put(k, b"x", "image/png")
     assert os.stat(tmp_path / k).st_mode & 0o777 == 0o600
+
+
+# -- the final check of #464 (each a regression test) --------------------------------------------------------------------
+
+def test_a_table_made_by_an_earlier_build_gets_its_new_columns(tmp_path):
+    """The table as 05f9f30 made it (no purged): opened again, the column is added, and upload, delete and sweep work."""
+    old = ppd.SCHEMA.replace("  purged REAL,                          -- a deleted or abandoned one: when its objects were "
+                             "confirmed gone\n", "")
+    assert "purged" not in old
+    c = make_cad(tmp_path, geocoder=fake_geocode)
+    with c.store.lock:
+        c.store.db.execute("DROP TABLE preplan_docs")
+        c.store.db.executescript(old)
+    assert "purged" not in {r["name"] for r in c.store.q("PRAGMA table_info(preplan_docs)")}
+    c.store.db.close()
+    c = make_cad(tmp_path, geocoder=fake_geocode)                             # a new release opens it
+    make_cad(tmp_path, geocoder=fake_geocode).store.db.close()                # and again: nothing added twice
+    assert "purged" in {r["name"] for r in c.store.q("PRAGMA table_info(preplan_docs)")}
+    c.gis = fake_gis()
+    c.log = lambda m: None
+    c.preplan_docs.store = docstore.FsDocStore(tmp_path / "docs")
+    iid = at(c, 100)
+    d = c.preplan_docs.upload({"kind": "photo", "title": "Rear", "incident_id": iid, "_may": "dispatcher"}, png())["doc"]
+    out = c.preplan_docs.edit(d["id"], {"action": "delete", "_may": "dispatcher"})
+    assert out["doc"]["active"] is False
+    assert c.store.q("SELECT purged FROM preplan_docs WHERE id = ?", (d["id"],))[0]["purged"] is not None
+    assert not list((tmp_path / "docs").rglob("original.*"))
+    assert c.preplan_docs.sweep() == 0
+
+
+def test_a_delete_that_cant_record_purged_still_answers(api, monkeypatch):
+    c = api.cad
+    did = upload(api, png(), kind="photo", title="Rear", floor="")[1]["doc"]["id"]
+    real = c.store.tx
+
+    def tx():
+        raise sqlite3.OperationalError("database is locked")
+    monkeypatch.setattr(c.preplan_docs, "_purged", lambda d, real=c.preplan_docs._purged: (
+        monkeypatch.setattr(c.store, "tx", tx), real(d), monkeypatch.setattr(c.store, "tx", real)))
+    code, out = call(api, f"/api/cad/preplan/docs/{did}", {"action": "delete"}, JULIAN)
+    assert code == 200 and out["doc"]["active"] is False                        # done, whatever the purged mark did
+    monkeypatch.undo()
+    assert c.store.q("SELECT active, purged FROM preplan_docs WHERE id = ?", (did,))[0]["active"] == ppd.DELETED
+    assert c.preplan_docs.sweep() == 1                                          # the sweep records it
+
+
+def text_pdf(label: bytes) -> bytes:
+    content = b"BT /F1 24 Tf 40 40 Td (" + label + b") Tj ET"
+    objs = [b"<< /Type /Catalog /Pages 2 0 R >>", b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 120] /Resources << /Font << /F1 5 0 R >> >> "
+            b"/Contents 4 0 R >>",
+            b"<< /Length " + str(len(content)).encode() + b" >>\nstream\n" + content + b"\nendstream",
+            b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"]
+    return _assemble(objs)
+
+
+def _assemble(objs):
+    out, offs = b"%PDF-1.4\n", []
+    for n, o in enumerate(objs, 1):
+        offs.append(len(out))
+        out += f"{n} 0 obj\n".encode() + o + b"\nendobj\n"
+    xref = len(out)
+    out += f"xref\n0 {len(objs) + 1}\n0000000000 65535 f \n".encode() + b"".join(f"{o:010d} 00000 n \n".encode() for o in offs)
+    return out + f"trailer\n<< /Size {len(objs) + 1} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n".encode()
+
+
+@pytest.mark.skipif(not HAVE_PDFIUM, reason="pypdf / pypdfium2 not installed")
+def test_names_in_page_text_or_pixels_are_not_objects(api):
+    """#464 final check 2: a label "Stair A/AA" drawn on the page, or pixels that happen to spell /JS, aren't refused."""
+    code, out = upload(api, text_pdf(b"Stair A/AA /URI /JS"), kind="preplan", title="Stairs", floor="")
+    assert code == 200, out
+    import random
+    w, h = 1024, 2048                                                          # 2 MB of grey noise, uncompressed
+    px = bytearray(random.Random(7).randbytes(w * h))
+    px[1000:1004] = b"/JS "
+    px[50000:50012] = b"/OpenAction "
+    content = b"q 300 0 0 600 0 0 cm /Im1 Do Q"
+    objs = [b"<< /Type /Catalog /Pages 2 0 R >>", b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 600] /Resources << /XObject << /Im1 5 0 R >> >> "
+            b"/Contents 4 0 R >>",
+            b"<< /Length " + str(len(content)).encode() + b" >>\nstream\n" + content + b"\nendstream",
+            b"<< /Type /XObject /Subtype /Image /Width " + str(w).encode() + b" /Height " + str(h).encode()
+            + b" /ColorSpace /DeviceGray /BitsPerComponent 8 /Length " + str(len(px)).encode() + b" >>\nstream\n"
+            + bytes(px) + b"\nendstream"]
+    code, out = upload(api, _assemble(objs), kind="inspection", title="Photo sheet", floor="")
+    assert code == 200, out
+    # a real /AA in a dictionary, before or after a stream, is still refused; a length that doesn't lead to endstream too
+    clean = text_pdf(b"Lobby")
+    docfiles.recheck_pdf(clean, len(clean))
+    length = re.search(rb"<< /Length \d+ >>", clean).group(0)
+    for bad in (clean.replace(b"/Type /Font", b"/Type /Font /AA << >>"),
+                clean.replace(b"/Type /Catalog", b"/Type /Catalog /OpenAction 3 0 R"),
+                clean.replace(length, b"<< /Length 5 >>"),
+                clean.replace(length, b"<< /Length 9 0 R >>")):
+        assert bad != clean
+        with pytest.raises(docfiles.Refused):
+            docfiles.recheck_pdf(bad, len(bad))
+
+
+def test_plans_in_flight_are_bounded_in_bytes_and_deadlines_scale_with_size(api, monkeypatch):
+    monkeypatch.setattr(ppd, "DOWNLOAD_WAIT_S", 0.05)
+    did = upload(api, png())[1]["doc"]["id"]
+    code, first, _, _ = api.get(f"/api/cad/preplan/docs/{did}/plan", "", who(VAL))
+    n = first.length
+    first.close()
+    monkeypatch.setattr(ppd, "PLAN_BUDGET", ppd.ByteBudget(int(n * 1.5)))     # room for one plan's bytes
+    code, held, _, _ = api.get(f"/api/cad/preplan/docs/{did}/plan", "", who(VAL))
+    assert code == 200 and ppd.PLAN_BUDGET.used == n                           # held until it is sent
+    code, raw, _, h = api.get(f"/api/cad/preplan/docs/{did}/plan", "", who(VAL))
+    assert code == 503 and h["Retry-After"]
+    assert held.read_all().startswith(b"\x89PNG") and ppd.PLAN_BUDGET.used == 0     # sent: its bytes given back
+    assert api.get(f"/api/cad/preplan/docs/{did}/plan", "", who(VAL))[1].read_all().startswith(b"\x89PNG")
+    assert ppd.READS._value == 4
+    # no fixed short cut-off: idle 30 s (server.py), and the whole at least 10 min or the size at 100 KB/s
+    assert ppd.download_s(1000) == 600 and ppd.download_s(200_000_000) == 2000
+    assert ppd.DOWNLOAD_WRITE_S == 30
