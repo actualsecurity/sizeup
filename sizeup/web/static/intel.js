@@ -146,6 +146,7 @@ window.IntelSettings = (() => {
       el("span", "dim small", "/day"), num(s.per_day, 1, 10000, 1, (v) => post({ action: "set", key: "per_day", value: v }), "Pushes a day"),
       el("span", "dim small", "/cat/h"), num(s.per_category_hour, 1, 1000, 1, (v) => post({ action: "set", key: "per_category_hour", value: v }), "Pushes an hour, one category"),
       el("span", "dim small", "repush min"), num(s.repush_min, 0, 1440, 1, (v) => post({ action: "set", key: "repush_min", value: v }), "Minutes between pushes of one event"),
+      el("span", "dim small", "max age min"), num(s.max_age_min, 1, 1440, 1, (v) => post({ action: "set", key: "max_age_min", value: v }), "A transmission older than this is never a pre-alert (a restart replays nothing)"),
       el("span", "spacer"),
       el("span", "dim small", `24 h: ${c24.events || 0} events · ${c24.pushed || 0} pushed · ${c24.suppressed || 0} held`));
     for (const x of caps.querySelectorAll("input")) x.disabled = !admin;

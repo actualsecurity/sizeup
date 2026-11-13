@@ -180,16 +180,17 @@ def test_the_push_carries_a_listen_action_and_a_plain_link(tmp_path):
     from tests.test_notify import FakeNtfy
     ntfy = FakeNtfy()
     try:
-        r = Radio()
-        r.add("t1", 1000, 1.0, 500)
-        b = FakeBucket()
-        p = notify.Pushes(ntfy.url, "pcfd-xmpl-alerts", "", log=lambda m: None)
         from tests.test_cad import make_cad
         cad = make_cad(tmp_path)
+        now = cad.clock()
+        r = Radio()
+        r.add("t1", now, 1.0, 500)
+        b = FakeBucket()
+        p = notify.Pushes(ntfy.url, "pcfd-xmpl-alerts", "", log=lambda m: None)
         e = cad.intel
         e.notifier, e.locate = p.notifier(notify.INTEL), example_locate
-        e.listen = listen(r, b, Clock(1001))
-        cad.comms.record({"id": "t1", "start": 1000, "end": 1001, "source": "MRRS PD", "talkgroup": 9211, "system": "mrrs",
+        e.listen = listen(r, b, Clock(now + 1))
+        cad.comms.record({"id": "t1", "start": now, "end": now + 1, "source": "MRRS PD", "talkgroup": 9211, "system": "mrrs",
                           "source_key": "p25:mrrs:9211", "service": "police", "tier": "alert", "unit": "",
                           "text": "shots fired at Sample St and Test Rd", "status": "done", "model": "whisper"})
         e.consider("t1")
