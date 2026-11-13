@@ -42,6 +42,7 @@ CREATE TABLE IF NOT EXISTS intel_events (
   traffic_ids TEXT NOT NULL DEFAULT '[]',
   mode TEXT NOT NULL DEFAULT 'log', priority INTEGER NOT NULL DEFAULT 3,
   pushed_at REAL, push_count INTEGER NOT NULL DEFAULT 0, suppressed TEXT NOT NULL DEFAULT '',
+  note TEXT NOT NULL DEFAULT '',
   near_incident INTEGER, incident_id INTEGER,
   updated_at REAL NOT NULL,
   dismissed_by TEXT NOT NULL DEFAULT ''

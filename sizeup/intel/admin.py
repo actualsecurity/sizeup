@@ -134,7 +134,7 @@ class IntelAdmin:
                 "place": e["label_full"], "town": e["town"], "alts": e["alts"], "basis": e["basis"], "mode": e["mode"],
                 "priority": e["priority"], "pushed_at": e["pushed_at"], "suppressed": e["suppressed"],
                 "traffic_ids": e["traffic_ids"][-12:], "rules": e["rules"], "accept": bool(p.accept) if p else False,
-                "dismissed_by": e.get("dismissed_by", "")}
+                "dismissed_by": e.get("dismissed_by", ""), "note": e.get("note", "")}
 
     def state(self, now: float | None = None) -> dict | None:
         """The console's card: open events at map or push, newest first; None for a viewer who may not see them."""
