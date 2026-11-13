@@ -755,6 +755,7 @@ class App:
         # CAD of record holding the lease only; located over the gazetteer (read only). Its thread starts in start().
         intel = self.cad.intel
         intel.notifier, intel.public_url, intel.leader = self.pushes.notifier(notify.INTEL), cfg.cloud_public_url, self._atc_leader
+        intel.active = lambda: not self.forwarding()      # a station forwarding to the hub queues nothing (no thread)
         if self.gaz is not None:
             from sizeup.intel.place import Locator
             intel.locate = Locator(self.gaz)

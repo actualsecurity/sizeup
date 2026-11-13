@@ -58,6 +58,9 @@ from sizeup.intel.policy import Policy, level
 
 TICK_S = 15.0
 PRUNE_S = 3600.0
+PRUNE_FIRST_S = 3 * 3600.0             # the first prune this long after start (never in the startup's busy minutes)
+STOP_WORDS = {"from", "with", "that", "this", "the", "and", "into", "front", "near", "area", "call", "calls", "caller",
+              "report", "reported", "respond", "units", "unit", "male", "female", "person", "subject", "someone"}
 QUEUE_MAX = 5000
 SEEN_MAX = 20000                       # traffic ids remembered with their text (the same text again: skipped)
 ROW_SQL = ("SELECT id, start, end, source, system, service, dept, tier, talkgroup, channel, talker, rig, radio_id, text, "
@@ -133,6 +136,7 @@ class IntelEngine:
         self.policy = Policy(tz=tz)
         self.public_url = ""
         self.leader = lambda: True            # live: the CAD of record holding the lease (the app sets it)
+        self.active = lambda: True            # live: False on a station forwarding to a hub (no thread runs there)
         self.notifier = None                  # live: notify.Pushes' INTEL KindNotifier (the app sets it)
         self.infer = None                     # infer.Inference: the model behind the rules (off unless set and on)
         self.windows: dict[tuple[str, str], Window] = {}
@@ -149,7 +153,8 @@ class IntelEngine:
         self.errors = 0
         self.last_error = ""
         self._ticked = 0.0
-        self._pruned = 0.0
+        self._pruned = self.clock() + PRUNE_FIRST_S - PRUNE_S      # the first prune hours after start (#492 review)
+        self._catwords: dict[tuple[str, str], set] = {}
         self.reload()
         if sink is None:
             sink = LiveSink(self) if store is not None else RecordingSink()
@@ -172,6 +177,7 @@ class IntelEngine:
                     self.log(f"intel: Settings' rule changes not applied ({e}): the pack files alone")
                     self.packs = rules_mod.load_packs(None, {})
             self._hash = rules_mod.ruleset_hash(self.packs)
+            self._catwords = {}
 
     def ruleset_hash(self) -> str:
         return self._hash
@@ -190,7 +196,7 @@ class IntelEngine:
         queued, never waits. It runs on the caller's thread (transcription, the station-apply thread, the AWS
         callback): no rules, gazetteer, model or push here, and nothing written; the "intel" thread does all of that
         (through store.tx(), never under the caller's store.lock). Without a thread (replay): feed() rows directly."""
-        if not self.threaded or not self.enabled:
+        if not self.threaded or not self.enabled or not self.active():
             return
         try:
             self._q.put_nowait(str(tid))
@@ -349,7 +355,8 @@ class IntelEngine:
                 changed.append(ev)
         if not hits and not suppressed:       # a read-back with no rule words: may still place an open event
             for ev in self._open_for(pack, None, key, at):
-                if ev.category not in event_of and not ev.confirmed and self.locate is not None:
+                if (ev.category not in event_of and not ev.confirmed and self.locate is not None
+                        and self._same_job(pack, ev, win.entries[tid], ws)):
                     up = self._relocate(pack, ev, row, key, win, tid, at)
                     if up is not None:
                         changed.append(up)
@@ -396,10 +403,46 @@ class IntelEngine:
             out[cat] = (round(what, 4), [(t, r, w) for w, t, r in pos + cues + damp], top_mode)
         return out
 
-    def _open_for(self, pack, cat: str | None, key: str, at: float) -> list[Event]:
+    def _open_for(self, pack, cat: str | None, key: str, at: float, span: float | None = None) -> list[Event]:
+        span = pack.window_s if span is None else span
         return [e for e in self.events.open_events()
                 if e.pack == pack.name and e.source_key == key and (cat is None or e.category == cat)
-                and e.last_at >= at - pack.window_s]
+                and e.last_at >= at - span and (not e.until or e.until >= at)]
+
+    def _merge_span(self, pack) -> float:
+        """How far back an open event of the same pack, category and source takes a new mention (#492 review, H3)."""
+        return max(pack.window_s, float(self.policy.cfg.get("merge_min", 20)) * 60)
+
+    def category_words(self, pack, cat: str) -> set:
+        """The telling words of a category's rules ("smoke", "flames", "shots" ...)."""
+        k = (pack.name, cat)
+        if k not in self._catwords:
+            out = set()
+            for r in pack.rules:
+                if r.category != cat:
+                    continue
+                for ph in r.any:
+                    for item in ph.items or ():
+                        if item == rules_mod.GAP:
+                            continue
+                        for alt in item:
+                            out |= {w for w in alt if len(w) >= 4 and w not in STOP_WORDS}
+            self._catwords[k] = out
+        return self._catwords[k]
+
+    def _same_job(self, pack, ev: Event, entry, ws: list[str]) -> bool:
+        """A transmission with no rule words is about this event only when the same talker / unit said it, or it says
+        the event's own category words; "car 5 copy, en route to X and Y" is another job (#492 review, M2)."""
+        mine = {w.strip().lower() for w in entry.who if w.strip()}
+        if mine and mine & {w.strip().lower() for w in self._who(pack, ev) if w.strip()}:
+            return True
+        return bool(self.category_words(pack, ev.category) & set(ws))
+
+    def _texts(self, pack, key: str, tids) -> list[str]:
+        win = self.windows.get((pack.name, key))
+        if win is None:
+            return []
+        return [win.entries[t].text for t in tids if t in win.entries and win.entries[t].text]
 
     def _window_text(self, win: Window) -> str:
         return " . ".join(e.text for _t, e in win.ordered() if e.text and not e.suppressed)
@@ -408,27 +451,39 @@ class IntelEngine:
         return {"source_key": key, "system": str(row.get("system") or ""), "service": str(row.get("service") or ""),
                 "towns": pack.towns_for(key), "pack": pack.name}
 
-    def _where(self, pack, row: dict, key: str, win: Window):
-        if self.locate is None:
+    def _where(self, pack, row: dict, key: str, texts: list[str], who=()):
+        """The place in these transmissions' words (only the event's own: never another job's in the same window);
+        a label the scrub refuses (a plate or an ID read as an address) is no place at all (fail closed)."""
+        if self.locate is None or not texts:
             return None
         try:
-            return self.locate(self._window_text(win), self._scope(pack, row, key))
+            place = self.locate(" . ".join(texts), self._scope(pack, row, key))
         except Exception as e:  # noqa: BLE001 - no place is still a pre-alert
             self.log(f"intel: locate: {type(e).__name__}")
             return None
+        if place is not None and push_mod.scrub_label(place.label, who):
+            self.log("intel: a place withheld by the scrub")
+            return None
+        return place
 
     def _raise(self, pack, row, key, cat, cd, what, contrib, mode, win, at, tid) -> Event | None:
         now = self.clock()
-        cur = self._open_for(pack, cat, key, at)
+        cur = self._open_for(pack, cat, key, at, self._merge_span(pack))
         ev = cur[0] if cur else None
+        tids = list(dict.fromkeys([*(t for t, _r, _w in contrib), tid]))      # the row that made it look again too
         place = None
         if ev is None or not ev.confirmed:
-            place = self._where(pack, row, key, win)
-        if ev is None and place is not None and place.key:
-            subject = f"{pack.name}:{cat}:{place.key}"
+            own = list(dict.fromkeys([*(ev.traffic_ids if ev else []), *tids]))
+            place = self._where(pack, row, key, self._texts(pack, key, own),
+                                [w for t in own if t in win.entries for w in win.entries[t].who])
+        subject = f"{pack.name}:{cat}:{place.key}" if place is not None and place.key else ""
+        if ev is None and subject:
             ev = next((e for e in self.events.open_events() if e.subject == subject), None)
+        if ev is None:
+            mute = float(self.policy.cfg.get("mute_min", 15)) * 60
+            if mute and self.events.recent_closed(pack.name, cat, key, subject, now - mute):
+                return None                   # ended or dismissed a moment ago: not raised again (#492 review, H2)
         before = copy.deepcopy(ev) if ev is not None else None
-        tids = list(dict.fromkeys([*(t for t, _r, _w in contrib), tid]))      # the row that made it look again too
         rules = sorted({(r.id, r.v, round(float(w), 4)) for _t, r, w in contrib})
         if ev is None:
             ev = Event(domain=pack.domain, pack=pack.name, category=cat, source_key=key,
@@ -457,7 +512,9 @@ class IntelEngine:
         return ev
 
     def _relocate(self, pack, ev: Event, row, key, win, tid, at) -> Event | None:
-        return self._set_place(pack, ev, self._where(pack, row, key, win), key, tid, at)
+        own = list(dict.fromkeys([*ev.traffic_ids, tid]))
+        place = self._where(pack, row, key, self._texts(pack, key, own), self._who(pack, ev) + list(win.entries[tid].who))
+        return self._set_place(pack, ev, place, key, tid, at)
 
     def _set_place(self, pack, ev: Event, place, key, tid, at) -> Event | None:
         if place is None or not (ev.precision == "none" or place.confirmed or place.where_score > ev.where_score):
@@ -532,37 +589,51 @@ class IntelEngine:
 
     def _end_window(self, pack, key: str, at: float, tid: str) -> list[Event]:
         out = []
-        for ev in self._open_for(pack, None, key, at):
+        for ev in self._open_for(pack, None, key, at, self._merge_span(pack)):
             ev.status, ev.updated_at = "ended", self.clock()
             ev.traffic_ids = list(dict.fromkeys([*ev.traffic_ids, tid]))
             self.events.save(ev)
             self.sink.event(ev, "ended")
             out.append(ev)
+        self._consume(pack.name, key)
         return out
+
+    def _consume(self, pack_name: str, key: str) -> None:
+        """What the window held is spent: a routine cue after "disregard" never adds it up again (#492 review, H2)."""
+        win = self.windows.get((pack_name, key))
+        if win is not None:
+            win.entries = {t: e for t, e in win.entries.items() if e.suppressed}
+
+    def dismissed(self, ev: Event) -> None:
+        """A person dismissed it (sizeup/intel/admin.py): its window is spent, and mute_min keeps it from coming back."""
+        with self._lock:
+            self._consume(ev.pack, ev.source_key)
 
     def _after(self, pack, ev: Event, change: str, now: float, before: Event | None) -> None:
         self.sink.event(ev, change)
         d = self.policy.decide(ev, change, now, before)
         if d.would_push:
             cat = pack.category(ev.category)
-            msg = push_mod.compose(ev, pack.label, cat, self.public_url, self.tz)
+            doubtful = push_mod.doubtful_number(ev.label_full, self._texts(pack, ev.source_key, ev.traffic_ids))
+            msg = push_mod.compose(ev, pack.label, cat, self.public_url, self.tz, doubtful=doubtful)
             why = push_mod.scrub(msg, self._who(pack, ev))
             if why:
                 self.log(f"intel: push of event {ev.id} withheld by the scrub ({why})")
                 d = Decision(d.mode, False, "scrub", d.priority)
             else:
                 d = Decision(d.mode, True, "", d.priority, d.repush, msg)
-        if d.would_push:
+        sent = self.sink.push(ev, d)
+        if d.would_push and sent is not False:    # counted only once the sink took it (#492 review, L1)
             ev.pushed_at, ev.push_count, ev.suppressed = now, ev.push_count + 1, ""
             self.policy.sent_now(ev, now)
             if ev.id in self.policy.held:
                 self.policy.held.remove(ev.id)
+            self.save_policy()
+        elif d.would_push:
+            ev.suppressed = "unsent"
         elif d.suppressed and not ev.pushed_at:
             ev.suppressed = d.suppressed
         self.events.save(ev)
-        self.sink.push(ev, d)
-        if d.would_push:
-            self.save_policy()
 
     def _who(self, pack, ev: Event) -> list[str]:
         out = []
@@ -589,7 +660,7 @@ class IntelEngine:
             for k in [k for k, w in self.windows.items()
                       if not w.entries or max(e.at for e in w.entries.values()) < now - 2 * self._span(k[0])]:
                 del self.windows[k]
-            held = self.policy.digest_due(now)
+            held = self.policy.digest_due(now) if self.enabled else []     # obeys enabled, push, quiet (M3)
             if held and hasattr(self.sink, "digest"):
                 evs = [e for e in (self.events.get(i) for i in held) if e is not None]
                 if evs:
@@ -629,13 +700,18 @@ class LiveSink:
         if mode_rank(ev.mode) >= mode_rank("log"):
             self.engine.log(f"intel: {change} event {ev.id} ({ev.pack} {ev.category}, {ev.level}, {ev.precision})")
 
-    def push(self, ev: Event, d: Decision) -> None:
+    def push(self, ev: Event, d: Decision) -> bool:
+        """True: queued for ntfy; False: not sent (no topic, the queue full, not the leader)."""
         n = self.engine.notifier
-        if not d.would_push or d.message is None or n is None or not self.engine.leader():
-            return
+        if not d.would_push or d.message is None:
+            return False
+        if n is None or not self.engine.leader():
+            return False
         m = d.message
         if not n.send(m["title"], m["body"], m["priority"], m["tags"], m["click"]):
             self.engine.log(f"intel: event {ev.id}: no pre-alert topic in effect (or the queue is full): not pushed")
+            return False
+        return True
 
     def digest(self, evs: list[Event]) -> None:
         n = self.engine.notifier
