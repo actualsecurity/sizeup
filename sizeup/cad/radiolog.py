@@ -258,7 +258,9 @@ class RadioLog:
     def _unit_rx(self, code: str, spoken: str) -> re.Pattern:
         k = (code, spoken)
         if k not in self._rx:
-            self._rx[k] = re.compile(r"(?<![\w])(?:" + "|".join(unit_forms(code, spoken)) + r")(?![\w])", re.I)
+            r = self.store.one("SELECT kind FROM units WHERE name = ?", (code,)) if code.isdigit() else None
+            kind = str((r or {}).get("kind") or "")          # a chief's number guarded (feed.unit_forms), an EMS unit's not
+            self._rx[k] = re.compile(r"(?<![\w])(?:" + "|".join(unit_forms(code, spoken, kind)) + r")(?![\w])", re.I)
         return self._rx[k]
 
     def context(self, lo: float, hi: float) -> dict:

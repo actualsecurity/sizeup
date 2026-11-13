@@ -664,6 +664,12 @@ Slots go in order. A kind takes the next available unit of that kind (regular ap
       <div class="s-head view-head"><h2 class="view-title">Radios</h2></div>
       <div id="s-radio-tabs" class="s-tabs tabs" aria-label="Radios"></div>
       <div id="settings-radio-controls" class="radio-controls"></div>
+      <div class="radio-controls" data-rtab="squelch" hidden>
+        <section class="card">
+          <div class="card-head"><h2>Squelch</h2><button type="button" class="help" aria-label="Help" aria-expanded="false" data-help="Each FM channel's noise squelch, applied live on the station. Open: quieting (dB under the idle hiss) that opens it. Close: it stays open above this. Min: carrier shorter than this is not kept and never shows as TX. Short/min: opens that closed with nothing kept (last 5 min); many means it is chattering on noise: raise Open. Empty: the default. Traffic channels only: paging (South 2) is read-only. PL est.: the CTCSS tone estimated per key-up (none, or unsure when too short, speech or hum).">?</button></div>
+          <div id="settings-squelch"></div>
+        </section>
+      </div>
       <div id="settings-tones" class="radio-controls" data-rtab="tones" hidden></div>
       <div class="radio-controls" data-rtab="ids" hidden>
         <div class="s-note notice">Radios editor unavailable</div>
@@ -738,6 +744,7 @@ Slots go in order. A kind takes the next available unit of that kind (regular ap
 <script src="/static/search-view.js"></script>
 <script src="/static/preplan.js"></script>
 <script src="/static/radio-controls.js"></script>
+<script src="/static/squelch-panel.js"></script>
 <script src="/static/hublink.js"></script>
 <script src="/static/health.js"></script>
 <script src="/static/datasources.js"></script>

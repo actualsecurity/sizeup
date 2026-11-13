@@ -18,6 +18,7 @@ Graph: the cache file read into flat arrays (no per-edge objects), a 200 m grid 
 
     snap(lon, lat)        the nearest edge point (motorways need to be clearly nearer: a house beside I-95 is on its street)
     target(lon, lat, call) where a call is on the roads, and the highways a route to it may use (Highways, below)
+    snap_gate(lon, lat, street) where a firehouse's bay doors join the roads: its street, else a public one (no lot)
     route(a, b, ...)      A* from a point to a point: [lon, lat] coords, metres, seconds (pure Python)
     to_one(origins, b)    one reverse Dijkstra from b: seconds and metres from many points (the recommendation)
     penalties(items, now) the edges near road closures in effect now: blocked (a full or ramp closure) or slowed
@@ -87,6 +88,8 @@ GROUP = {"motorway": ("highway", 1.0), "trunk": ("highway", 0.9), "primary": ("a
          "primary_link": ("arterial", 0.75), "secondary_link": ("arterial", 0.75), "tertiary_link": ("arterial", 0.75),
          "living_street": ("local", 0.5), "service": ("local", 0.5)}
 SERVICE_SKIP = ("parking_aisle", "drive-through", "driveway")
+SERVICE = CLASSES.index("service")
+GATE_SNAP_M = 75.0                    # a firehouse's gate (snap_gate): its street, or else a public street, this near
 MPS_PER_MPH = 0.44704
 WRONGWAY_MPH = 10.0                   # the wrong-way final stretch: slowly
 UTURN_S = 20.0                        # starting against the rig's heading
@@ -650,6 +653,46 @@ class Graph:
         return {"edge": e, "off": min(off, self.elen[e]), "d": d, "len": self.elen[e],
                 "lon": x1 + (x2 - x1) * t, "lat": y1 + (y2 - y1) * t, "seg": i}
 
+    def snap_gate(self, lon: float, lat: float, street: str = "", max_m: float = GATE_SNAP_M) -> dict | None:
+        """Where a rig leaving (or coming back into) a firehouse joins the roads: the nearest point on `street` (its
+        name or ref, roadprojects.street_key) within max_m; else the nearest public street within max_m (never a
+        service road, such as a lot's aisle or a side drive, nor a motorway); else snap(). Only roads on self.main.
+        The snap's "by": "street" | "public" | "nearest"."""
+        x, y = self.to_xy(lon, lat)
+        want = street_key(street) if street else ""
+        best: dict[str, tuple | None] = {"street": None, "public": None}
+        for e in self.near_edges(x, y, max_m):
+            if not self.main[self.ea[e]] or self.ecls[e] == SERVICE or self.ecls[e] in HIGHWAY:
+                continue
+            d, off, i, t = self._onto(self.xy(e), x, y)
+            if d > max_m:
+                continue
+            for by in ("street", "public"):
+                if by == "street" and not (want and want in self.street_keys(e)):
+                    continue
+                if best[by] is None or d < best[by][0]:
+                    best[by] = (d, e, off, i, t)
+        got, by = (best["street"], "street") if best["street"] is not None else (best["public"], "public")
+        if got is None:
+            s = self.snap(lon, lat)
+            return dict(s, by="nearest") if s is not None else None
+        d, e, off, i, t = got
+        pts = self.ll(e)
+        (x1, y1), (x2, y2) = pts[i], pts[i + 1]
+        return {"edge": e, "off": min(off, self.elen[e]), "d": d, "len": self.elen[e],
+                "lon": x1 + (x2 - x1) * t, "lat": y1 + (y2 - y1) * t, "seg": i, "by": by}
+
+    def _from(self, ll, gate: str | None) -> dict | None:
+        """A start (or an end) on the roads: a firehouse's gate (gate: the street it joins, '' for none named;
+        snap_gate) or else the nearest road (None: snap)."""
+        return self.snap(ll[0], ll[1]) if gate is None else self.snap_gate(ll[0], ll[1], gate)
+
+    @staticmethod
+    def _lead(ll, s: dict, spm: list) -> tuple[float, float]:
+        """(seconds, metres) from a gate's own point (the apron) onto its road point, at a service road's speed."""
+        m = _metres([list(ll), [s["lon"], s["lat"]]])
+        return m * spm[SERVICE], m
+
     def bearing(self, e: int, seg: int) -> float:
         """Degrees true of the edge's segment, a -> b."""
         pts = self.ll(e)
@@ -812,15 +855,40 @@ class Graph:
         return None
 
     def route(self, a, b, params, pen: dict | None = None, heading: float | None = None,
-              wrongway_m: float = 60.0, call: Call | None = None) -> dict | None:
+              wrongway_m: float = 60.0, call: Call | None = None, a_gate: str | None = None,
+              b_gate: str | None = None) -> dict | None:
         """The fastest way from [lon, lat] a to [lon, lat] b: {coords: [[lon, lat], ...] (a's road point to b's),
         m (metres), s (seconds: driving, without the highway factors), pops, way, highway (the call is on one)};
         None: no road near either, or no way (closed in). call: what the call says about highways (target(),
-        factors()): a call on none keeps the rig off them."""
-        sa = self.snap(a[0], a[1])
-        sb, keys = self.target(b[0], b[1], call)
+        factors()): a call on none keeps the rig off them. a_gate / b_gate: a is (b is) a firehouse's gate, its
+        apron, joining the street named (snap_gate; '' none named): the coords start (end) at the apron itself, and
+        m and s count the stretch onto the street."""
+        sa = self._from(a, a_gate)
+        if b_gate is None:
+            sb, keys = self.target(b[0], b[1], call)
+        else:
+            sb, keys = self.snap_gate(b[0], b[1], b_gate), None
         if sa is None or sb is None:
             return None
+        r = self._route(sa, sb, keys, params, pen, heading, wrongway_m)
+        if r is None:
+            return r
+        spm = self.spm(params)
+        for ll, s, gate, end in ((a, sa, a_gate, 0), (b, sb, b_gate, -1)):
+            if gate is None:
+                continue
+            sec, m = self._lead(ll, s, spm)
+            if m < 0.5:
+                continue
+            pt = [round(ll[0], 6), round(ll[1], 6)]
+            r["coords"] = [pt, *r["coords"]] if end == 0 else [*r["coords"], pt]
+            r["s"] += sec
+            r["m"] = _metres(r["coords"])
+        return r
+
+    def _route(self, sa: dict, sb: dict, keys, params, pen: dict | None, heading: float | None,
+               wrongway_m: float) -> dict | None:
+        """route() between two road points (snap / target / snap_gate)."""
         pen = pen or {}
         spm = self.spm(params)
         kf, ekind = self.factors(keys, self.start_parkways(sa)), self.ekind
@@ -953,20 +1021,23 @@ class Graph:
         return out
 
     def to_one(self, origins: dict, b, params, pen: dict | None = None, wrongway_m: float = 60.0,
-               max_s: float = 1800.0, call: Call | None = None, _own: frozenset | None = None) -> dict:
+               max_s: float = 1800.0, call: Call | None = None, _own: frozenset | None = None,
+               gates: dict | None = None) -> dict:
         """Seconds and metres to [lon, lat] b from each origin, in one reverse Dijkstra: {key: (s, m) | None}.
         None: on the roads but no way to b within max_s of driving (closed in, or only by a parkway); a key missing:
         no road near it. origins: {key: [lon, lat]}. call: as route()'s; the seconds (and max_s) are driving time
         (without the highway factors). A rig on a parkway may drive on along it to an exit (factors' own): such
-        rigs are worked out apart, each parkway's in a search of its own."""
+        rigs are worked out apart, each parkway's in a search of its own. gates: {key: street} for the origins
+        that are a firehouse's gate (route()'s a_gate: the same seconds and metres as a route from there)."""
+        gates = gates or {}
         if _own is None:
             groups: dict[frozenset, dict] = {}
             for k, ll in origins.items():
-                groups.setdefault(self.start_parkways(self.snap(ll[0], ll[1])), {})[k] = ll
+                groups.setdefault(self.start_parkways(self._from(ll, gates.get(k))), {})[k] = ll
             if set(groups) != {frozenset()}:
                 out: dict = {}
                 for own, part in groups.items():
-                    out.update(self.to_one(part, b, params, pen, wrongway_m, max_s, call, _own=own))
+                    out.update(self.to_one(part, b, params, pen, wrongway_m, max_s, call, _own=own, gates=gates))
                 return out
             _own = frozenset()
         sb, keys = self.target(b[0], b[1], call)
@@ -976,17 +1047,20 @@ class Graph:
         spm = self.spm(params)
         kf, ekind = self.factors(keys, _own), self.ekind
         goals = self._goals(sb, spm, pen, wrongway_m)
-        snaps = {k: self.snap(ll[0], ll[1]) for k, ll in origins.items()}
+        snaps = {k: self._from(ll, gates.get(k)) for k, ll in origins.items()}
         want: dict[int, list] = {}
         out: dict = {}
         for k, s in snaps.items():
             if s is None:
                 continue
+            ls, lm = self._lead(origins[k], s, spm) if k in gates else (0.0, 0.0)
+            if lm < 0.5:
+                ls = lm = 0.0                                 # (route() adds no stretch this short either)
             d = self._direct(s, sb, spm, pen, wrongway_m)
             if d:
-                out[k] = (d[0], d[1])
+                out[k] = (d[0] + ls, d[1] + lm)
             for n, sec, m, _ in self._starts(s, spm, pen, None):
-                want.setdefault(n, []).append((k, sec, m))
+                want.setdefault(n, []).append((k, sec + ls, m + lm))
         dist: dict[int, float] = {}
         metres: dict[int, float] = {}
         real: dict[int, float] = {}                           # driving seconds (dist: with the highway factors)

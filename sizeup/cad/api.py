@@ -99,6 +99,10 @@ GET  /api/cad/tones                       {named: [pairs named here], choices: [
                                           list), services, names, ours: the ours entities' names}
 GET  /api/cad/stt                         Settings > Radios > Vocabulary: {vocabulary: {phrases, edited, suggestions,
                                           aws (as sent), skipped, sig, state}, limit, aws (where it runs, this month's cost)}
+GET  /api/cad/squelch                     Settings > Radios > Squelch: {channels: [{key, set, default, running, hiss_db,
+                                          quieting_db, floor_db, short_per_min}], sync, chatter_per_min, ranges}
+POST /api/cad/settings/squelch            {action: set {key, open_db?, close_db?, min_open_s?: null = default} | reset {key}}:
+                                          an FM channel's squelch, applied live on the station (sizeup/channels.py): admins
 GET  /api/cad/export/<name>.csv           incidents | calls | unit-history | event-log, the sheet's columns
 GET  /api/cad/dispatch/<id>.wav           a logged dispatch's audio
 GET  /api/cad/audio/<key>.wav             a preview's audio
@@ -458,6 +462,14 @@ def _channels(m, b, o, c):
     return f"Channel {_clip(b.get('key'), 30)}: {what or 'no change'}", ""
 
 
+def _squelch(m, b, o, c):
+    key = _clip(b.get("key"), 30)
+    if str(b.get("action") or "") == "reset":
+        return f"Squelch {key}: back to the default", ""
+    what = ", ".join(f"{k} {'default' if b[k] is None else b[k]}" for k in ("open_db", "close_db", "min_open_s") if k in b)
+    return f"Squelch {key}: {what or 'unchanged'}", ""
+
+
 def _stt(m, b, o, c):
     act, key = str(b.get("action") or ""), str(b.get("key") or "")
     if act == "push":
@@ -539,6 +551,7 @@ DOES = (
     (UNIT_STATION, lambda m, b, o, c: (f"Changed settings: {o.get('name', '')} station {_clip(b.get('station'), 40) or 'unset'}", "")),
     (re.compile(r"/api/cad/settings/channels"), _channels),
     (re.compile(r"/api/cad/settings/stt"), _stt),
+    (re.compile(r"/api/cad/settings/squelch"), _squelch),
     (SETTINGS, _settings),
     (re.compile(r"/api/cad/runcards"), lambda m, b, o, c: (f"Changed settings: run card {_clip(b.get('type'), 50)} saved", "")),
     (re.compile(r"/api/cad/runcards/delete"), lambda m, b, o, c: (f"Changed settings: run card {_clip(b.get('type'), 50)} deleted", "")),
@@ -816,6 +829,8 @@ class CadApi:
                 return _json(200, self.cad.settings_audit_log(parse_qs(query), self._may(who)))
             if path == "/api/cad/stt":
                 return _json(200, self.cad.settings.stt_page())
+            if path == "/api/cad/squelch":
+                return _json(200, self.cad.settings.squelch_page())
             if path == "/api/cad/tones":
                 return _json(200, self.cad.tone_names())
             if path == "/api/cad/state":

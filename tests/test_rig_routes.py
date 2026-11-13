@@ -323,16 +323,16 @@ def test_estimates_by_road_with_turnout_else_the_straight_line():
     where = {"E60": {"ll": at(0, 0), "on_road": False, "label": "from HQ"},
              "E61": {"ll": at(1, 1), "on_road": True, "label": "live position"}}
     inc = {"lat": at(3, 3)[1], "lon": at(3, 3)[0]}
-    road = lambda origins, to, inc: {"E60": (120.0, 1609.0), "E61": (60.0, 800.0)}
+    road = lambda origins, to, inc, **kw: {"E60": (120.0, 1609.0), "E61": (60.0, 800.0)}
     est = runcards.estimates(units, where, inc, P, road)
     assert est[1] == {"eta_s": 240, "eta": "~4 min est.", "how": "road", "reason": "~4 min est. · 1.0 mi · from HQ"}
     assert est[2]["how"] == "road" and est[2]["eta_s"] == 60                  # on the road: no turnout
     # one without a way by road: the straight line for ALL of them, never a mix
-    mixed = runcards.estimates(units, where, inc, P, lambda origins, to, inc: {"E60": (120.0, 1609.0)})
+    mixed = runcards.estimates(units, where, inc, P, lambda origins, to, inc, **kw: {"E60": (120.0, 1609.0)})
     straight = eta.eta_s(at(1, 1), at(3, 3), P, from_quarters=False)
     assert {e["how"] for e in mixed.values()} == {"line"} and mixed[2]["eta_s"] == round(straight)
     assert runcards.estimates(units, where, inc, P)[1]["how"] == "line"     # no graph: the model, as before
-    broken = runcards.estimates(units, where, inc, P, lambda o, t, i: 1 / 0)
+    broken = runcards.estimates(units, where, inc, P, lambda o, t, i, **kw: 1 / 0)
     assert broken[1]["how"] == "line"
 
 
@@ -1143,7 +1143,7 @@ def test_a_unit_with_no_way_by_road_has_no_estimate_and_the_rest_keep_theirs():
     where = {"E60": {"ll": at(0, 0), "on_road": True, "label": "live position"},
              "E61": {"ll": at(1, 1), "on_road": True, "label": "live position"}}
     inc = {"lat": at(3, 3)[1], "lon": at(3, 3)[0], "address": "100 Example Ave"}
-    est = runcards.estimates(units, where, inc, P, lambda origins, to, i: {"E60": None, "E61": (60.0, 800.0)})
+    est = runcards.estimates(units, where, inc, P, lambda origins, to, i, **kw: {"E60": None, "E61": (60.0, 800.0)})
     assert est[1] == {"eta_s": None, "eta": "", "reason": "no way by road · live position", "how": "road"}
     assert est[2]["how"] == "road" and est[2]["eta_s"] == 60
 

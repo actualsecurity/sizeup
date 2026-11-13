@@ -58,6 +58,7 @@ class _Chan:
     last: list = field(default_factory=list)    # [(since, ids, at, alarm, burst)] finished carriers, for ids()
     alarm: str = ""                             # the emergency alarm raised for this carrier (its key)
     burst: bool = False                         # no ID decoded in the key-up window, but a burst was there
+    shown: bool = False                         # LiveTalk told (the squelch keyed: not a noise opening)
 
 
 class TapSquelch:
@@ -106,7 +107,8 @@ class LiveTap:
     def frame(self, channel, frame: np.ndarray, squelch) -> None:
         """One frame, after squelch.feed(frame) (TapSquelch). Never raises."""
         try:
-            self._frame(channel.label, frame, bool(squelch.open), float(getattr(squelch, "_start", 0.0)))
+            self._frame(channel.label, frame, bool(squelch.open), float(getattr(squelch, "_start", 0.0)),
+                        bool(getattr(squelch, "keyed", squelch.open)))
         except Exception as e:  # the tap must never stop the receiver
             self._errors += 1
             if self.log is not None and self._errors in (1, 10, 100):
@@ -129,18 +131,15 @@ class LiveTap:
             if self.log is not None and self._errors in (1, 10, 100):
                 self.log(f"live tap error ({self._errors}): {type(e).__name__}: {e}")
 
-    def _frame(self, label: str, frame: np.ndarray, is_open: bool, since: float) -> None:
+    def _frame(self, label: str, frame: np.ndarray, is_open: bool, since: float, keyed: bool = True) -> None:
         kind = self.kind(label)
         with self._lock:
             c = self._ch.setdefault(label, _Chan())
             if is_open and (not c.open or abs(since - c.since) > 0.01):
                 self._ended(c)
-                c.open, c.since, c.n, c.ids, c.done, c.alarm, c.burst = True, since, 0, [], False, "", False
+                c.open, c.since, c.n, c.ids, c.done, c.alarm, c.burst, c.shown = True, since, 0, [], False, "", False, False
                 c.buf = list(c.pre)
                 c.pre.clear()
-                opened = True
-            else:
-                opened = False
             if not is_open:
                 was = c.open
                 if was:
@@ -159,8 +158,13 @@ class LiveTap:
             return
         if kind != "traffic" or self.live is None:
             return
-        if opened:
-            self.live.fm_open(label, since)     # at the frame the squelch opened, not the next 0.2 s poll
+        if keyed and not c.shown:
+            # Shown once the carrier has held min_open_s (NoiseSquelch.keyed), from when it opened: a noise opening
+            # (one frame over open_db, then the hang) is never "TX". The MDC decode and the emergency alarm don't wait.
+            c.shown = True
+            self.live.fm_open(label, since)
+            if c.ids:
+                self.live.fm_ids(label, list(dict.fromkeys(h for h, _e in c.ids)))
         self._mdc_step(label, c, frame)
 
     def _mdc_step(self, label: str, c: _Chan, frame: np.ndarray) -> None:
@@ -179,7 +183,8 @@ class LiveTap:
             c.ids, c.done, c.buf = list(found), True, []
             if any(e for _h, e in found) and not c.alarm and self.on_emergency is not None:
                 c.alarm = self.on_emergency(label, c.since, list(found)) or "raised"
-            self.live.fm_ids(label, list(dict.fromkeys(h for h, _e in found)))
+            if c.shown:
+                self.live.fm_ids(label, list(dict.fromkeys(h for h, _e in found)))
 
     def _ended(self, c: _Chan) -> None:
         if c.open and not c.done and not c.ids and len(c.buf) >= MDC_MIN_FRAMES and self.mdc is not None:
