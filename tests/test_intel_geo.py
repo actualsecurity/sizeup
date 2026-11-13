@@ -142,3 +142,12 @@ def test_ids_plates_and_callsigns_alone_still_go(text, gone):
 
 def test_a_relative_or_landmark_cue_is_worth_the_gazetteer():
     assert P.has_cue("units to the area of the park") and P.has_cue("in front of the school")
+
+
+def test_an_address_far_from_the_corner_said_is_not_confirmed_by_it(gaz):
+    # "100 Example Ave at Test Rd": the 100 block is at Sample St, ~840 m from Test Rd (#502 re-check)
+    p = P.Locator(gaz)("shots fired 100 Example Ave at Test Rd", SCOPE)
+    assert not (p.precision == "address" and p.confirmed and "at Example Ave & Test Rd" in p.basis)
+    assert "m from" in p.basis
+    near = P.Locator(gaz)("shots fired 196 Example Ave at Test Rd", SCOPE)             # the far end: at the corner
+    assert near.precision == "address" and near.confirmed

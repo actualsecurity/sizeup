@@ -56,7 +56,8 @@ CROSS_CUE = re.compile(r"\b(?:corner of|intersection of|at the corner|block of)\
 KIND_PRECISION = {"address": "address", "intersection": "intersection", "landmark": "landmark", "street": "street"}
 RADIUS = {"address": 25.0, "intersection": 40.0, "landmark": 75.0, "street": 300.0, "block": 120.0, "town": 0.0, "none": 0.0}
 RANK = {"address": 0, "intersection": 1, "block": 2, "landmark": 3, "street": 4, "town": 5, "none": 6}
-DOMAIN_PARAMS = {"police": {"confirm": 0.8, "rival": 0.1, "rival_m": 200, "sound_min": 0.7}}
+DOMAIN_PARAMS = {"police": {"confirm": 0.8, "rival": 0.1, "rival_m": 200, "sound_min": 0.7, "corner_m": 200}}
+CORNER_M = 200.0               # "N <street> at <cross>": the address confirms only this close to where they meet
 READBACK_BONUS, RIVAL_PENALTY = 0.08, 0.15
 SUFFIX = (r"(?:st|street|ave|avenue|av|rd|road|pl|place|ln|lane|dr|drive|blvd|boulevard|ct|court|pkwy|parkway|ter|terrace|"
           r"way|hwy|highway|tpke|turnpike|cir|circle)")
@@ -256,13 +257,24 @@ class Locator:
         addr = next((p for p in cands if p.precision == "address"), None)
         if addr is not None:
             street = re.sub(r"^\d+[A-Za-z]?\s+", "", addr.label.split(",")[0]).strip().lower()
+            corner_m = float(params.get("corner_m", CORNER_M))
             for p in cands:
-                if p.precision == "intersection" and p.confirmed and street and street in p.label.lower():
+                if p.precision != "intersection" or not p.confirmed or not street or street not in p.label.lower():
+                    continue
+                d = _dist_m(addr, p)
+                corner = p.label.split(",")[0]
+                if d <= corner_m:             # the address is at that corner: the cross street confirms it
                     addr.confirmed = True
                     addr.radius_m = RADIUS["address"]
-                    addr.basis = "; ".join(x for x in (addr.basis, "at " + p.label.split(",")[0]) if x)
+                    addr.basis = "; ".join(x for x in (addr.basis, f"at {corner}") if x)
                     cands = [addr]
-                    break
+                elif not addr.confirmed:      # the number is far from the corner said: misheard, the corner it is
+                    p.basis = "; ".join(x for x in (p.basis, f"{addr.label.split(',')[0]} is {int(d)} m from {corner}: "
+                                                             "the number taken as misheard") if x)
+                    cands = [p]
+                else:
+                    addr.basis = "; ".join(x for x in (addr.basis, f"{int(d)} m from {corner}") if x)
+                break
         best = min(cands, key=lambda p: (not p.confirmed, RANK.get(p.precision, 9), -p.where_score))
         rel = RELATIVE.search(clean)
         if rel:
@@ -335,3 +347,10 @@ class Locator:
                 return Place("landmark", r["lat"], r["lon"], 300.0, r["label"], r.get("sub") or "", False,
                              round(float(r.get("quality", 0.6)), 3), [], "highway " + r["kind"])
         return None
+
+
+def _dist_m(a, b) -> float:
+    import math
+    if None in (a.lat, a.lon, b.lat, b.lon):
+        return float("inf")
+    return math.hypot((a.lat - b.lat) * 110_574.0, (a.lon - b.lon) * 111_320.0 * math.cos(math.radians(a.lat)))
