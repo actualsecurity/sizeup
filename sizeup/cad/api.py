@@ -57,10 +57,6 @@ GET  /api/cad/preplan?bbox=w,s,e,n | incident=<id> | where=<address> | (all=1)
                                           of those, every point: admins. ETag (304); restricted kinds per person
 GET  /api/cad/preplan/where?lat=&lon=&incident_id= | where= | point=&link=
                                           the editor's: the building a point there belongs to (dispatchers and admins)
-GET  /api/cad/logs?source=station|hub|all&unit=&level=&q=&start=&end=&limit=
-                                          Logs Insights over the station's logs and the hub's (sizeup/cloud/cwlogs.py),
-                                          newest first, bounded (7 days, 500 rows); /status: set up or not, today's
-                                          volume, the station's shipper. The hub's only; a signed-in admin only
 GET  /api/cad/preplan.csv                 every active point: admins only (ADMIN_READS); in the person's activity
 POST /api/cad/preplan                     {kind, lat, lon, label?, note?, level?, priority?, review_by?, incident_id |
                                           where?, link?: auto | building | call | point}
@@ -231,6 +227,10 @@ POST /api/cad/datasources/<key>/refresh   {operator?}  Refresh now: runs in the 
                                           ({ok, source: the row, running}); 429 {error} when refused (refreshing already,
                                           too soon after the last, or the source is resting); admins; in the person's
                                           activity and the Settings audit log
+GET  /api/cad/logs?source=station|hub|all&unit=&level=&q=&start=&end=&limit=
+                                          Logs Insights over the station's logs and the hub's (sizeup/cloud/cwlogs.py),
+                                          newest first, bounded (7 days, 500 rows); /status: set up or not, today's
+                                          volume, the station's shipper. The hub's only; a signed-in admin only
 GET  /api/cad/notify                      Settings > System > Push notifications (sizeup/notify.py Pushes): each kind's
                                           topic in effect and where it came from (Settings / SSM / config / off), the
                                           last push and test; admins only (the names are secret; ADMIN_READS)
