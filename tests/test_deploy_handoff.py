@@ -443,6 +443,16 @@ def test_litestreams_stderr_is_passed_on_and_watched(tmp_path, capfd):
     assert "one\ntwo\n" in capfd.readouterr().err
 
 
+def test_ci_installs_the_same_litestream_as_the_hub_image():
+    docker = (ROOT / "Dockerfile").read_text()
+    ci = (ROOT / ".github/workflows/test.yml").read_text()
+    ver = re.search(r"ARG LITESTREAM_VERSION=(\S+)", docker).group(1)
+    amd = re.search(r"ARG LITESTREAM_SHA256_AMD64=(\S+)", docker).group(1)
+    assert f'LITESTREAM_VERSION: "{ver}"' in ci and f"LITESTREAM_SHA256_AMD64: {amd}" in ci
+    from sizeup.handoff import MIN_LITESTREAM
+    assert tuple(int(x) for x in ver.split(".")) >= MIN_LITESTREAM
+
+
 def test_litestream_config_has_the_control_socket_and_logs_on_stderr():
     text = (ROOT / "deploy/hub/litestream.yml").read_text()
     assert "socket:\n  enabled: true\n  path: ${LITESTREAM_SOCKET}" in text and "stderr: true" in text
