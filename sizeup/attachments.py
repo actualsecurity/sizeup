@@ -149,10 +149,11 @@ class S3:
     boto3). send(method, url, headers, body, timeout) -> (status, headers, body): tests give a fake."""
 
     def __init__(self, bucket: str, region: str = "", endpoint: str = "", send: Callable | None = None,
-                 creds: Callable[[], aws.Credentials] = aws.credentials):
+                 creds: Callable[[], aws.Credentials] = aws.credentials, forget: Callable[[bytes], bool] | None = None):
         self.bucket, self.region = bucket, aws.region(region)
         self.base = (endpoint or f"https://{bucket}.s3.{self.region}.amazonaws.com").rstrip("/")
         self.send, self.creds = send or _send, creds
+        self.forget = forget or (lambda data: True)     # a 403's body -> fetch the credentials again (sizeup/audiostore.py)
 
     def url(self, key: str) -> str:
         return f"{self.base}/{urllib.parse.quote(key)}"
@@ -164,10 +165,10 @@ class S3:
                           payload_sha=sha)
         try:
             status, hdrs, data = self.send(method, url, {k: v for k, v in signed.items() if k != "Host"},
-                                           body if method == "PUT" else None, TIMEOUT_S)
+                                           body if method in ("PUT", "POST") else None, TIMEOUT_S)
         except OSError as e:
             raise aws.AwsError(f"S3 {method}: {getattr(e, 'reason', e)}", "Network") from None
-        if status == 403:
+        if status == 403 and self.forget(data or b""):
             aws.forget_credentials()
         return status, {k.lower(): v for k, v in (hdrs or {}).items()}, data or b""
 

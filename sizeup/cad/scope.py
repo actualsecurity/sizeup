@@ -27,7 +27,7 @@ from __future__ import annotations
 import json
 import re
 
-from sizeup.cad.sources import PAGING, dept_code
+from sizeup.cad.sources import PAGING, dept_code, is_placeholder
 from sizeup.radio.tones import base_name
 
 FULL, UNITS = "full", "units"
@@ -99,7 +99,7 @@ def from_units(units, departments: dict[str, str]) -> tuple[str, list[str]] | No
     depts = list(dict.fromkeys(codes[dept_code(u)] for u in units or () if dept_code(u) in codes))
     if depts:
         return FULL, depts
-    if any(dept_code(u) for u in units or ()):
+    if any(dept_code(u) and not is_placeholder(u) for u in units or ()):    # a placeholder is never "Specific units"
         return UNITS, []
     return None
 
@@ -121,13 +121,15 @@ def page_line(departments, units, tone_departments, incident_type: str, feed: st
     return f"Page: {said}" + (f" · feed: {feed}" if feed else "")
 
 
-def latest_units(inc) -> list[str]:
+def latest_units(inc, known=()) -> list[str]:
     """The apparatus the latest page for this incident named (the monitor's incident keeps every page's units; the
-    latest page says who is paged now: an upgrade to the full department names none)."""
+    latest page says who is paged now: an upgrade to the full department names none). known: the configured
+    apparatus (Scope.roster()), read as the station reads the page: "Engine 59/63" two units, a run-together
+    "Engine 6158" split (sizeup/dispatch.py), so the line says what inc.units says."""
     texts = list(getattr(inc, "page_text", None) or [])
     if texts:
-        from sizeup.dispatch import parse
-        return list(parse(texts[-1]).units)
+        from sizeup.dispatch import parse, split_joined
+        return split_joined(parse(texts[-1], known or None).units, known) if known else list(parse(texts[-1]).units)
     return list(getattr(inc, "units", None) or [])
 
 
@@ -138,14 +140,19 @@ def dept_key(name: str) -> str:
     return re.sub(r"\s+", " ", n).strip().lower()
 
 
-FULL_WORDS = re.compile(r"\bfull\s+(?:department|response|assignment)\b", re.I)
+# A full-department dispatch said in words. "all units / companies / apparatus" only as the order to respond ("all units
+# respond", "all units, please respond"): on its own it is also how advisories and clears start ("all units be advised",
+# "all units clear", "all units responding, be advised" to whoever was sent), so it upgrades only with "respond" right after.
+FULL_WORDS = re.compile(r"\bfull\s+(?:department|response|assignment)\b|\bgeneral\s+alarm\b|\ball[\s-]+hands\b"
+                        r"|\ball\s+(?:units|companies|apparatus)\s*,?\s*(?:please\s+)?respond\b", re.I)
 
 
 def upgrade(inc, seen_tones) -> bool:
     """Evidence that a page upgraded a call from specific units to its full department, beyond the latest reading
     naming no units (a repeat read again by speech-to-text can lose the names; the tones and type it shares are no
     evidence): tones of a department not heard before on this call (a new dispatch, its own tones); a different call
-    type than the page before it; "full department / response" said; or no units named in two readings in a row (one
+    type than the page before it; a full dispatch said (FULL_WORDS: "full department / response / assignment", "all
+    units respond", "general alarm", "all hands"); or no units named in two readings in a row (one
     lossy reading is plausible, two independent ones much less)."""
     from sizeup.dispatch import parse
     tones = {base_name(t) for t in getattr(inc, "tone_departments", None) or () if t}
@@ -173,6 +180,13 @@ class Scope:
             if "feed" not in have:                       # a table from before the page won (#370 review)
                 self.store.db.execute("ALTER TABLE dispatch_scope ADD COLUMN feed TEXT NOT NULL DEFAULT ''")
 
+    def roster(self) -> list[str]:
+        """The units on the boards (their codes): the configured apparatus a page's units are read against."""
+        try:
+            return [u[0] for u in self.cad.lists.board_units()]
+        except (AttributeError, TypeError):
+            return []
+
     def on_page(self, iid: int | None, inc, note: bool = True) -> tuple[str, bool]:
         """A page (the monitor's incident: its tones, the apparatus it named, its type) made or reached this incident.
         (the feed's label as the timeline says it ("units") when it says otherwise than the page, else ""; whether this
@@ -181,7 +195,7 @@ class Scope:
         if not iid:
             return "", False
         tones, typ = getattr(inc, "tone_departments", ()), getattr(inc, "incident_type", "")
-        units = latest_units(inc)
+        units = latest_units(inc, self.roster())
         got = from_page(tones, units, typ)
         if got is None:
             return "", True                              # nothing to keep: the line says what it heard

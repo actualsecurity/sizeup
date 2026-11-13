@@ -12,6 +12,7 @@ import base64
 import hashlib
 import io
 import json
+import time
 import zipfile
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
@@ -447,6 +448,9 @@ def test_the_server_streams_a_download_and_closes_it(tmp_path):
         want = b"".join(Path(s["path"]).read_bytes() for s in d.segments(CAM, st["from"], st["to"]))
         assert r.status == 200 and body == want and int(r.getheader("Content-Length")) == len(want)
         assert r.getheader("Content-Type") == "video/MP2T" and r.getheader("Content-Disposition").startswith("attachment;")
+        end = time.monotonic() + 2           # the server closes it in a finally after the last write: soon, not at once
+        while not closed and time.monotonic() < end:
+            time.sleep(0.01)
         assert closed == [aid]
     finally:
         srv.httpd.shutdown()

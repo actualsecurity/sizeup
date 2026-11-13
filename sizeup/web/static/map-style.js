@@ -184,8 +184,21 @@ function buildMapStyle(scene) {
     },
     paint: glyphs ? { "text-color": PALETTE.firehouseLabel, "text-halo-color": PALETTE.halo, "text-halo-width": 1.8 } : {},
   });
+  // #384: a firehouse's count chip (cadmap.js, a DOM mark on top of the icon) kept clear of the names: an invisible
+  // mark in the same place that the label placement avoids (above the firehouse layer, so placed first)
+  layers.push({
+    id: "firehouse-badge", type: "symbol", source: "firehouses", filter: ["==", ["get", "badge"], 1],
+    layout: { "icon-image": "firehouse-badge", "icon-offset": [0, -13], "icon-allow-overlap": true, "icon-ignore-placement": false },
+    paint: { "icon-opacity": 0 },
+  });
 
   return { version: 8, name: "pcfd", glyphs, sources, layers };
+}
+
+// The space a firehouse's count chip takes (#384): a clear 16 px square (the chip's size), only for the label placement.
+function badgeSpaceIcon() {
+  const s = 16;
+  return { width: s, height: s, data: new Uint8Array(s * s * 4) };
 }
 
 // Firehouse icon: a white Maltese cross on a dark disc ringed in the department's red (drawn once, 2x for crisp TVs).

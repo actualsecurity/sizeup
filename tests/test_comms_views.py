@@ -12,7 +12,7 @@ import pytest
 
 from sizeup import sourcekeys
 from sizeup.cad.api import CadApi
-from sizeup.cad.comms import CHANGES_MAX, PAGE, PAGE_MAX
+from sizeup.cad.comms import CHANGES_MAX, KEEP_UNLINKED_S, PAGE, PAGE_MAX
 from sizeup.cad.service import CadError
 from sizeup.cloud.access import Identity
 from tests.test_radios import Clock, _event_with, cad, tx
@@ -38,7 +38,7 @@ def c(tmp_path):
     c.clockref = clock
     c.comms.context_broadcast = True          # as on the hub behind Access: every reader is a signed-in person (#419)
     t = clock.t
-    c.record_traffic(tx("fg-1", t - 50, rig="E63", radio_id="6301"))
+    c.record_traffic(tx("fg-1", t - 50, rig="E63", radio_id="4242098"))
     c.record_traffic(dict(tx(f"{MAIN}-1-call_1-t0", t - 40, "Fire/EMS 15", "E60", "E60", MAIN), ours=True, service="fire",
                           group="Fire"))
     c.record_traffic(dict(tx("555-1-call_2-t0", t - 35, "County Other", tg=555), group="Public Works"))
@@ -184,8 +184,8 @@ def test_changed_gives_everything_that_changed_since_the_cursor(c):
     assert ids(q(c, view="police", changed=unlinked["cursor"])) == ["pd-2"]
     # an alarm raised and acknowledged on a row
     cur = q(c, view="ours")["cursor"]
-    a = c.alarms.on_traffic(dict(tx("fg-9", c.clockref.t, text="mayday mayday mayday", rig="E63", radio_id="6301"), at=c.clockref.t))
-    c.record_traffic(tx("fg-9", c.clockref.t, text="mayday mayday mayday", rig="E63", radio_id="6301"))
+    a = c.alarms.on_traffic(dict(tx("fg-9", c.clockref.t, text="mayday mayday mayday", rig="E63", radio_id="4242098"), at=c.clockref.t))
+    c.record_traffic(tx("fg-9", c.clockref.t, text="mayday mayday mayday", rig="E63", radio_id="4242098"))
     raised = q(c, view="ours", changed=cur)
     assert "fg-9" in ids(raised) and next(r for r in raised["rows"] if r["id"] == "fg-9")["alarm_id"]
     c.alarms.acknowledge(a["id"], {"operator": "Lt. Sample"})
@@ -193,10 +193,10 @@ def test_changed_gives_everything_that_changed_since_the_cursor(c):
     assert ids(seen) == ["fg-9"] and seen["rows"][0]["ack_at"]
     # a row deleted (pruned): a tombstone
     cur = q(c, view="police")["cursor"]
-    c.clockref.t += 91 * 24 * 3600                          # past the retention: pruned (not pd-2: it was on an event)
+    c.clockref.t += KEEP_UNLINKED_S + 86400                  # past the retention: pruned (not pd-2: it was on an event)
     assert c.comms.prune() > 0
     assert "pd-3" in q(c, view="police", changed=cur)["gone"]
-    c.clockref.t -= 91 * 24 * 3600
+    c.clockref.t -= KEEP_UNLINKED_S + 86400
     # a note: ask afresh (ours and all carry notes; a police view doesn't)
     cur = q(c, view="ours")["cursor"]
     c.note(inc["id"], {"text": "E63 reports a made-up condition", "operator": "Lt. Sample", "units": ["E63"]})
@@ -317,7 +317,7 @@ def test_the_source_tree_with_last_heard_live_counts_and_emergencies(c):
          "tier": "activity", "encrypted": True},
         {"source": "p25:metro:9004", "system": "metro", "name": "Off TG", "group": "Police", "tier": "off"},
         {"source": "p25:westchester:777", "system": "westchester", "name": "Never heard", "group": "Other"}]
-    c.comms.activity("p25:metro:9003", int(t // 60) - 2, 3, ["1234"])          # encrypted: key-ups only
+    c.comms.activity("p25:metro:9003", int(t // 60) - 2, 3, ["4100012"])          # encrypted: key-ups only
     c.live = lambda: [{"system": "p25", "tg": MAIN, "channel": "Fire/EMS 15"}, {"channel": "FG1", "ended": True}]
     out = c.comms_sources()
     by = {s["key"]: s for s in out["sources"]}
@@ -343,8 +343,8 @@ def test_the_source_tree_with_last_heard_live_counts_and_emergencies(c):
     assert again == {"unchanged": True, "rev": out["rev"], "live": out["live"]}
     # an emergency nobody has acknowledged marks its source; acknowledged: no longer
     assert not any(s["emergency"] for s in out["sources"])
-    a = c.alarms.on_traffic(dict(tx("fg-9", t, text="mayday mayday mayday", rig="E63", radio_id="6301"), at=t))
-    c.record_traffic(tx("fg-9", t, text="mayday mayday mayday", rig="E63", radio_id="6301"))
+    a = c.alarms.on_traffic(dict(tx("fg-9", t, text="mayday mayday mayday", rig="E63", radio_id="4242098"), at=t))
+    c.record_traffic(tx("fg-9", t, text="mayday mayday mayday", rig="E63", radio_id="4242098"))
     # a bare emergency flag with no alarm row marks nothing (it could never be cleared), nor does another system's row
     c.record_traffic(dict(tx("555-9-call_9-t0", t, "County Other", tg=555), emergency=True, group="Public Works"))
     c.record_traffic(dict(other("pd-em", t), emergency=True))
@@ -352,7 +352,7 @@ def test_the_source_tree_with_last_heard_live_counts_and_emergencies(c):
     assert by["fm:FG1"]["emergency"] == "ours"
     assert by["p25:westchester:555"]["emergency"] == "" and by["p25:metro:9001"]["emergency"] == ""
     # someone else's emergency button the CAD raised a notice for: marked, as not ours
-    n = c.alarms.on_traffic(dict(tx("555-9-call_9-t0", t, "County Other", tg=555, radio_id="21514"), emergency=True, at=t))
+    n = c.alarms.on_traffic(dict(tx("555-9-call_9-t0", t, "County Other", tg=555, radio_id="4242396"), emergency=True, at=t))
     assert n["level"] == "notice"
     assert {s["key"]: s for s in c.comms_sources()["sources"]}["p25:westchester:555"]["emergency"] == "other"
     # seen but not cleared: still open, still marked; All clear: no longer
@@ -433,3 +433,89 @@ def test_who_is_talking_is_gated_like_the_rows(c):
         assert get("/api/cad/comms", "view=all")["talking"] == []
     finally:
         sk.set_context_talkgroups([])
+
+
+def test_every_filter_and_the_tree_tell_a_reader_who_is_not_signed_in_nothing_of_another_system(c):
+    """The merge of main (#419's gate) with the views (#415): each of the views' filters, the paging (before, at,
+    changed), the event choices and the source tree go through sourcekeys.may_see_context. Nobody signed in (the station's
+    own page, an all-in-one, a hub without Access): no context row, name or count, whatever is asked. A signed-in
+    person on a hub behind Access: all of it. Invented data only: the radio ID is a made-up one."""
+    t = c.clockref.t
+    c.record_traffic(dict(other("pd-9", t - 3, dept="South PD", text="made-up words about a kite"), radio_id="4100042"))
+    inc = _event_with(c, ["E63"], c.clockref)
+    assert c.comms.link("pd-9", inc["id"], "op").get("error") is None             # a context row put on an incident
+    c.source_systems = lambda: {"westchester": "County", "metro": "Metro"}
+    c.source_rows = lambda: [
+        {"source": f"p25:metro:{PD}", "system": "metro", "name": "PD Dispatch", "group": "Police", "service": "police",
+         "tier": "text", "department": "South PD"},
+        {"source": f"p25:metro:{TRANSIT}", "system": "metro", "name": "Rail Ops", "group": "Transit", "service": "transit",
+         "tier": "record"}]
+    api, who = CadApi(c), Identity(email="someone@example.org")
+    needles = ("metro", "Metro", "PD Dispatch", "Rail Ops", "South PD", "North PD", "kite", "parade", "Car 7", "4100042",
+               str(PD), str(TRANSIT), "pd-", "tr-1")
+
+    def get(path, query, w=None):
+        code, raw, _ = api.get(path, query, w)
+        assert code == 200, (path, query, raw)
+        return json.loads(raw)
+
+    signed = get("/api/cad/comms", "view=police&limit=1", who)                   # a page's next and cursor, at a context row
+    assert ids(signed) == ["pd-9"] and signed["older"]
+    asks = ["system=metro", "group=Police", "group=Transit", "service=police", "service=transit", "view=police",
+            "view=transit", "view=all", "tier=text", "tier=record", "dept=South+PD", "dept=North+PD",
+            f"source=p25:metro:{PD}", f"source=p25:metro:{PD},p25:metro:{TRANSIT}", "view=all&safety=1",
+            f"view=all&mute=p25:metro:{TRANSIT}", "view=police&q=kite", "service=police&tier=text&dept=South+PD",
+            f"view=police&before={signed['next']}", f"view=all&before={signed['next']}", f"view=police&at={int(t)}",
+            f"view=all&at={int(t - 20)}&limit=3", f"view=police&changed={c.comms.changes_floor}",
+            f"view=all&changed={c.comms.changes_floor}", f"view=all&event={c.store.incident(inc['id'])['number']}"]
+    for query in asks:
+        blob = json.dumps(get("/api/cad/comms", query))
+        assert not [n for n in needles if n in blob], (query, [n for n in needles if n in blob])
+    # the event choices: the incident's only transmission is another system's
+    assert inc["id"] not in [e["id"] for e in get("/api/cad/comms", "view=all")["events"]]
+    assert inc["id"] not in [e["id"] for e in get("/api/cad/comms", "")["events"]]
+    tree = get("/api/cad/comms/sources", "")
+    blob = json.dumps(tree)
+    assert not [n for n in needles if n in blob] and "Police" not in blob and "Transit" not in blob
+    assert not [s for s in tree["sources"] if s["system"] != "westchester" and s["system"] not in ("analog", "airband")]
+    # ... and the same outside any request when the app was not told it may (the station's page: no broadcast)
+    c.comms.context_broadcast = False
+    assert not [n for n in needles if n in json.dumps(c.comms_sources())]
+    assert not [n for n in needles if n in json.dumps(q(c, service="police"))]
+    c.comms.context_broadcast = True
+    # signed in on a hub behind Access: every filter answers with the other system's rows, names and counts
+    assert ids(get("/api/cad/comms", "system=metro", who)) == ["pd-9", "tr-1", "pd-2", "pd-1"]
+    assert ids(get("/api/cad/comms", "group=Transit", who)) == ["tr-1"]
+    assert ids(get("/api/cad/comms", "service=police", who)) == ["pd-9", "pd-2", "pd-1"]
+    assert ids(get("/api/cad/comms", "tier=record", who)) == ["tr-1"]
+    assert ids(get("/api/cad/comms", "dept=South+PD", who)) == ["pd-9", "pd-2"]
+    assert ids(get("/api/cad/comms", f"view=police&before={signed['next']}", who)) == ["pd-2", "pd-1"]
+    assert "pd-9" in ids(get("/api/cad/comms", f"view=police&changed={c.comms.changes_floor}", who))
+    assert inc["id"] in [e["id"] for e in get("/api/cad/comms", "view=all", who)["events"]]
+    by = {s["key"]: s for s in get("/api/cad/comms/sources", "", who)["sources"]}
+    pd = by[f"p25:metro:{PD}"]
+    assert (pd["name"], pd["group"], pd["department"], pd["system_label"]) == ("PD Dispatch", "Police", "South PD", "Metro")
+    assert sum(n for _, n in pd["counts"]) == 3 and by[f"p25:metro:{TRANSIT}"]["name"] == "Rail Ops"
+
+
+def test_main_s_batched_prune_notes_each_row_gone_and_a_big_clear_out_as_one_reset(c, monkeypatch):
+    """main's prune (#414: per retention group, PRUNE_BATCH rows a transaction) with the views' change log: each deleted
+    row noted gone (after its batch committed), past CHANGES_MAX one reset instead; a record or a linked row stays."""
+    import sizeup.cad.comms as comms_mod
+    t = c.clockref.t
+    for i in range(6):
+        c.record_traffic(tx(f"old-{i}", t + i, text="made-up words"))
+    monkeypatch.setattr(c.comms, "PRUNE_BATCH", 2)
+    cur = q(c, view="ours")["cursor"]
+    c.clockref.t += KEEP_UNLINKED_S + 86400
+    assert c.comms.prune() == 6 + 7                     # (and the fixture's seven, on no event)
+    gone = q(c, view="ours", changed=cur)["gone"]
+    assert {f"old-{i}" for i in range(6)} <= set(gone) and not c.comms.changes_broken
+    for i in range(6):
+        c.record_traffic(tx(f"older-{i}", c.clockref.t + i, text="made-up words"))
+    monkeypatch.setattr(comms_mod, "CHANGES_MAX", 3)
+    cur = q(c, view="ours")["cursor"]
+    c.clockref.t += KEEP_UNLINKED_S + 86400
+    assert c.comms.prune() >= 6
+    assert q(c, view="ours", changed=cur)["reload"] is True
+    assert c.store.one("SELECT COUNT(*) AS n FROM radio_changes WHERE traffic_id = 'reset'")["n"] >= 1

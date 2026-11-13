@@ -86,6 +86,9 @@ class Call:
     system: str = ""           # trunk-recorder's shortName ("westchester")
     emergency: bool = False    # the call JSON's "emergency": granted as an emergency call (the button, #128)
     encrypted: bool = False    # the call JSON's "encrypted" (#409: another system's such call is never kept)
+    signal: float | None = None   # the call JSON's "signal" / "noise" (dB; 5.x), None when it has none (0 / 0)
+    noise: float | None = None
+    freq: float | None = None     # its voice channel, Hz
 
     def __post_init__(self) -> None:
         self.turns = [t if isinstance(t, Turn) else Turn(float(t[0]), str(t[1])) for t in self.turns]
@@ -93,6 +96,14 @@ class Call:
 
 WAV_HEADER = 44            # bytes; a WAV this size or smaller has no audio yet
 SETTLE_GIVE_UP_S = 60.0
+
+
+def _levels(d: dict) -> tuple[float | None, float | None]:
+    """(signal, noise) of a call JSON in dB, (None, None) when trunk-recorder measured none (both 0, or absent)."""
+    sig, noise = _num(d.get("signal")), _num(d.get("noise"))
+    if sig is None or noise is None or (sig == 0 and noise == 0):
+        return None, None
+    return float(sig), float(noise)
 
 
 def _mtime(p: Path) -> float:
@@ -166,7 +177,8 @@ def parse_call(meta_path: Path, labels: dict[int, str], aliases: dict[str, str] 
             units.append(t.talker)
     wav = meta_path.with_suffix(".wav")
     return Call(meta_path.stem, int(tg), labels.get(tg) or f"TG {tg}", start, stop, units, None, str(wav), turns,
-                ids, str(d.get("short_name") or ""), _flag(d.get("emergency")), _flag(d.get("encrypted")))
+                ids, str(d.get("short_name") or ""), _flag(d.get("emergency")), _flag(d.get("encrypted")), *_levels(d),
+                _num(d.get("freq")))
 
 
 def _turns(d: dict, aliases: dict[str, str]) -> list[Turn]:
@@ -334,7 +346,12 @@ def apply_grants(call: Call, grants: list[tuple[float, str]], aliases: dict[str,
 # merged into the piece before it (the first piece: the one after). A short piece with a radio ID,
 # or with sound, keeps its own clip and row; when it has no voice it skips speech-to-text (shown as
 # a key-up with nothing said) instead of asking whisper about 0.2 s of silence.
+# A piece shorter than MIN_STT_S skips speech-to-text even with sound: no word fits in it. Measured on a copy of
+# the hub's data (2026-11): 6.6 % of the P25 pieces sent to speech-to-text were under 0.25 s, and what came back
+# was whisper's dead-air phrases ("You're welcome.", "It", the talker prompt echoed) or AWS's "." - never a word
+# that belonged there. Each one still cost the station's whisper a full decode (#196, #300).
 SHORT_TURN_S = 0.3
+MIN_STT_S = 0.25
 NO_VOICE_DBFS = -45.0
 RATE = 16000
 
@@ -418,7 +435,7 @@ def split_call(call: Call, rate: int = RATE) -> list[Piece]:
         if out and start < out[-1].start:
             start = out[-1].start
         clip = audio[a:b]
-        stt = not ((b - a) < short and not has_voice(clip, rate))
+        stt = (b - a) >= MIN_STT_S * rate and not ((b - a) < short and not has_voice(clip, rate))
         out.append(Piece(cid, start, start + (b - a) / rate, t.talker, clip, pairs_of(t, [t.talker]), stt, t.via, em))
     return out
 

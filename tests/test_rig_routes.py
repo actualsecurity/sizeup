@@ -298,17 +298,20 @@ def test_a_few_hundred_routes_are_quick():
         w.add([at(i, j) for i in range(40)], name=f"Row {j}", **({"oneway": "yes"} if j % 3 == 1 else {}))
     for i in range(40):
         w.add([at(i, j) for j in range(40)], name=f"Col {i}", hw="tertiary" if i % 10 == 0 else "residential")
-    t0 = time.monotonic()
+    # CPU time (process_time), not the wall clock: a loaded CI runner stretched a 0.014 s build to 2.31 s of wall time
+    t0 = time.process_time()
     g = w.graph()
-    built = time.monotonic() - t0
+    built = time.process_time() - t0
     pts = [[LON0 + ((k * 7) % 40) * DX + 0.0003, LAT0 + ((k * 11) % 40) * DY] for k in range(300)]
-    t0 = time.monotonic()
+    t0 = time.process_time()
     got = [g.route(pts[k], pts[(k + 150) % 300], P) for k in range(300)]
-    took = time.monotonic() - t0
-    assert all(got) and built < 1.0
-    # 0.3 s here (~1 ms a route, every node settled at worst); a bound with room for a slow CI runner, still well
-    # under one state build's routing budget per route
-    assert took < 2.0, f"300 routes on a {g.n}-node grid took {took:.2f} s"
+    took = time.process_time() - t0
+    times = f"build {built:.3f} s CPU, 300 routes {took:.3f} s CPU on a {g.n}-node grid"
+    assert all(got), times
+    # ~0.01 s and ~0.3 s here; bounds with headroom for a slow runner, still well under one state build's routing
+    # budget per route
+    assert built < 2.0, times
+    assert took < 4.0, times
     assert max(r["pops"] for r in got) <= g.max_pops
 
 

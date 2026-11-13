@@ -20,10 +20,12 @@
                        updater's last result go up in the status ("version")
     aircraft thread    POST /api/station/aircraft: our ADS-B receiver's aircraft (#235, aircraftlink.py), read every
                        second, what changed, every 1-5 s as the hub asks; dropped (never queued) while it's offline
+    vessels thread     POST /api/station/vessels: our AIS receiver's vessels (#402, vessellink.py), only with
+                       [vessels.receiver] enabled; the whole list every 5-30 s as the hub asks; never queued
     jobs thread        GET /api/station/jobs?wait=25 (long poll: the station never takes inbound
                        connections): "tts" renders a dispatch with the local voice; "call" runs
                        set_mode / set_talkgroup / set_talkgroup_group / retranscribe / transcribe_now /
-                       set_channel_prefs
+                       reception_post / reception_sample_b64 (a reception test, #410) / set_channel_prefs
                        (Settings > Radios > Channels, as the hub has them) / emergency_all_clear (an
                        alarm's All clear: the emergency window here, App._call's keep decision) here
 
@@ -54,6 +56,7 @@ from sizeup.cloud.autoupdate import Watch
 from sizeup.cloud.client import Backoff, HubClient, HubError
 from sizeup.cloud.health import Metrics, station_metrics
 from sizeup.cloud.outbox import Outbox
+from sizeup.cloud.vessellink import VesselForwarder
 from sizeup.tts import VoiceCfg
 
 LIVE_REFRESH_S = 2.0     # while someone is talking the snapshot is re-sent this often (the hub drops one older than 8 s)
@@ -65,7 +68,9 @@ CALLS = ("set_mode", "set_talkgroup", "set_talkgroup_group", "retranscribe", "se
          "emergency_all_clear",       # an alarm's All clear on the hub: the emergency window here closes (#128)
          "transcribe_now",            # the hub's fallback when Amazon Transcribe can't: whisper at live priority (#195)
          "set_adsb_receiver",         # Settings > Radios on the hub: the dongle reserved for ADS-B (#235)
-         "sources_poll_now")          # a pre-alert on the hub: the CAD feed adapters here poll now (#297)
+         "sources_poll_now",          # a pre-alert on the hub: the CAD feed adapters here poll now (#297)
+         "reception_post",            # Settings > Radios on the hub: a reception test here (#410)
+         "reception_sample_b64")      # ... and a call it captured, to listen to (never stored on the hub)
 
 
 def clip_8k(wav: bytes | None) -> bytes | None:
@@ -138,6 +143,8 @@ class StationLink:
         self._threads: list[threading.Thread] = []
         # our ADS-B receiver's aircraft, straight to the hub (#235, sizeup/cloud/aircraftlink.py): live data, never queued
         self.aircraft = AircraftForwarder(app, cfg, self._client, log)
+        # our AIS receiver's vessels (#402, sizeup/cloud/vessellink.py): only with [vessels.receiver] enabled
+        self.vessels = VesselForwarder(cfg, self._client, log)
         app.events, app.link = self.emit, self
         app.cad.cloud = self.cad_cloud
         n, _ = self.outbox.pending()
@@ -179,6 +186,7 @@ class StationLink:
             t.start()
             self._threads.append(t)
         self.aircraft.start()
+        self.vessels.start()                  # (idle unless [vessels.receiver] enabled)
         return self
 
     @property
@@ -195,6 +203,7 @@ class StationLink:
         self._wake.set()
         self._live_wake.set()
         self.aircraft.stop()
+        self.vessels.stop()
 
     # -- health -------------------------------------------------------------------------------------
 
@@ -315,6 +324,7 @@ class StationLink:
                "sdr": app.sdr(), "rerun": dict(app.rerun, pending=len(app._rerun_ids)),
                "channels": app.channels_applied(),
                "p25_systems": app.p25_systems_state(),       # (#409) the other P25 systems: jobs, state, activity
+               "reception": app.reception.state(),           # (#410) the reception test: its numbers, the history
                "outbox": {"pending": n, "oldest": oldest, "dropped_audio": self.outbox.dropped_audio},
                "version": self.version()}
         try:

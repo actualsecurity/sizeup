@@ -76,7 +76,13 @@ from sizeup.cad.store import TZ
 TURN = re.compile(r"^(?P<call>.+)-t(?P<k>\d+)$")
 NOTES = "Notes"          # the /comms "channel" of event notes tagged with a unit
 ACTIVITY_RADIOS_S = 7 * 24 * 3600    # radio_activity: which radios keyed is kept this long (the counts longer)
-KEEP_UNLINKED_S = 90 * 24 * 3600     # transmissions on no event: kept 90 days (linked ones: always)
+ACTIVITY_KEEP_S = 90 * 24 * 3600     # radio_activity: its per-minute counts kept this long
+# Transmissions on no event: their transcripts and metadata kept a year by default (90 days before #414), per channel /
+# talkgroup in Settings > System > Audio retention ("transcript_retention"), never shorter than their audio
+# ("audio_retention"); linked ones: always; a record (an emergency, a keep, an alarm) as long as the audio bucket keeps
+# any clip (its lifecycle hard max; [storage] audio_keep_event_days is at most that).
+KEEP_UNLINKED_S = 365 * 24 * 3600
+KEEP_RECORD_S = 400 * 24 * 3600
 MAX_ROWS = 500
 MAIN_LIMIT, OTHER_LIMIT = 200, 300    # the Radio view's Main and Other: each its own newest N (#241)
 # The Radio page's views (#415): a named filter each. ours: our fire channels (today's Main); a service's: every source
@@ -607,20 +613,96 @@ class Comms:
                 self.rev += 1
         return bool(n)
 
-    def prune(self) -> int:
-        cutoff = self.clock() - KEEP_UNLINKED_S
-        with self.store.tx() as db:
-            db.execute("DELETE FROM radio_activity WHERE minute < ?", (int(cutoff // 60),))
+    def _section(self, name: str) -> dict:
+        out = {}
+        for r in self.store.q("SELECT key, value FROM settings_overrides WHERE section = ?", (name,)):
+            try:
+                out[r["key"]] = json.loads(r["value"])
+            except (TypeError, ValueError):
+                continue
+        return out
+
+    # The audio's default days (the hub's [storage] audio_keep_hours / 24, set by sizeup/cloud/hub.py) and the floor of
+    # a record's. None until the hub says: then the audio counts as kept as long as Settings allows (365 days), so
+    # a prune never takes a transcript before its audio (the prune at start runs before the hub has said).
+    audio_default_days: float | None = None
+    PRUNE_BATCH = 500
+
+    def policies(self):
+        """(the transcripts' retention, the audio's) from Settings > System > Audio retention (#414,
+        sizeup/audiostore.py): the transcripts default KEEP_UNLINKED_S, the audio the hub's default."""
+        from sizeup import audiostore
+        a_default = self.audio_default_days if self.audio_default_days is not None else audiostore.RETENTION_DAYS[1]
+        return (audiostore.Retention(self._section(audiostore.TRANSCRIPT_SECTION), KEEP_UNLINKED_S / 86400),
+                audiostore.Retention(self._section(audiostore.RETENTION_SECTION), a_default))
+
+    def _groups(self, tpol, apol) -> list[tuple[str, tuple, float]]:
+        """(an SQL condition, its parameters, the days kept) covering every row once: per talkgroup with days of its
+        own (in either policy) by channel with days of its own, per such channel, the rest: each kept the longer of its
+        transcripts' and its audio's days, by the same precedence as the prunes (talkgroup > channel > default)."""
+        tgs = sorted(set(tpol.tg) | set(apol.tg))
+        chs = sorted(set(tpol.ch) | set(apol.ch))
+        days = lambda ch, tg: max(tpol.keep_days(ch, tg), apol.keep_days(ch, tg))   # noqa: E731
+        no_ch = f"channel NOT IN ({','.join('?' * len(chs))})" if chs else "1"
+        # "tg:<n>" is ours: another P25 system's row (#409, the same number is another talkgroup there) goes by its channel
+        ours = f"system IN {sources.OURS_SQL}"
+        no_tg = (f"(talkgroup IS NULL OR NOT {ours} OR talkgroup NOT IN ({','.join('?' * len(tgs))}))"
+                 if tgs else "1")
+        out = []
+        for tg in tgs:
+            for ch in chs:
+                out.append((f"talkgroup = ? AND {ours} AND channel = ?", (tg, ch), days(ch, tg)))
+            out.append((f"talkgroup = ? AND {ours} AND {no_ch}", (tg, *chs), days("", tg)))
+        for ch in chs:
+            out.append((f"channel = ? AND {no_tg}", (ch, *tgs), days(ch, None)))
+        out.append((f"{no_tg} AND {no_ch}", (*tgs, *chs), days("", None)))
+        return out
+
+    def prune(self, pause_s: float = 0.0) -> int:
+        """Transmissions on no event, once older than the longer of their transcripts' retention (Settings, per channel /
+        talkgroup, 365 days by default) and their audio's: a transcript never goes before its audio. A record
+        (emergency, kept, an alarm) not before KEEP_RECORD_S either; one linked to an event, never. One indexed query
+        per channel / talkgroup group ((talkgroup, start), (channel, start), (start)), deleted PRUNE_BATCH rows a
+        transaction (the CAD's write lock held only that long), pause_s apart. The number deleted."""
+        now = self.clock()
+        with self.store.tx() as db:                    # radio_activity (encrypted talkgroups' counts): its own ages
+            db.execute("DELETE FROM radio_activity WHERE minute < ?", (int((now - ACTIVITY_KEEP_S) // 60),))
             db.execute("UPDATE radio_activity SET radios = '' WHERE radios != '' AND minute < ?",
-                       (int((self.clock() - ACTIVITY_RADIOS_S) // 60),))
-            going = f"start < ? AND id NOT IN (SELECT l.traffic_id FROM radio_links l WHERE {SURE_LINK})"
-            gone = db.execute(f"SELECT id, system FROM radio_traffic WHERE {going} LIMIT ?", (cutoff, CHANGES_MAX + 1)).fetchall()
-            if len(gone) > CHANGES_MAX:
-                self.touch_reset()                      # a big clear-out: the pages ask afresh
-            else:
-                for r in gone:
-                    self.touch(r["id"], r["system"], gone=True)
-            n = db.execute(f"DELETE FROM radio_traffic WHERE {going}", (cutoff,)).rowcount
+                       (int((now - ACTIVITY_RADIOS_S) // 60),))
+        tpol, apol = self.policies()
+        alarms = bool(self.store.q("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'alarms'"))
+        record = "emergency = 1 OR kept != ''" + (" OR id IN (SELECT traffic_id FROM alarms)" if alarms else "")
+        n = 0
+        noted = 0                                      # rows noted to the change log one by one; past CHANGES_MAX: a reset
+        for cond, params, days in self._groups(tpol, apol):
+            cutoff, after = now - days * 86400, float("-inf")
+            while True:
+                rows = self.store.q(
+                    f"SELECT rowid AS r, id, system, start FROM radio_traffic WHERE {cond} AND start < ? AND start >= ? "
+                    f"AND id NOT IN (SELECT l.traffic_id FROM radio_links l WHERE {SURE_LINK}) "
+                    f"AND NOT (start >= ? AND ({record})) ORDER BY start LIMIT ?",
+                    (*params, cutoff, after, now - KEEP_RECORD_S, self.PRUNE_BATCH))
+                if not rows:
+                    break
+                with self.store.tx() as db:            # the conditions again: a link confirmed since the look keeps it
+                    for r in rows:
+                        gone = db.execute(f"DELETE FROM radio_traffic WHERE rowid = ? AND NOT EXISTS (SELECT 1 FROM "
+                                          f"radio_links l WHERE l.traffic_id = radio_traffic.id AND {SURE_LINK}) "
+                                          f"AND NOT (start >= ? AND ({record}))",
+                                          (r["r"], now - KEEP_RECORD_S)).rowcount
+                        if not gone:
+                            continue
+                        n += 1
+                        noted += 1
+                        if noted <= CHANGES_MAX:       # (the change log: written after the commit, store.after_commit)
+                            self.touch(r["id"], r["system"], gone=True)
+                        elif noted == CHANGES_MAX + 1:
+                            self.touch_reset()         # a big clear-out: the pages ask afresh
+                after = rows[-1]["start"]
+                if len(rows) < self.PRUNE_BATCH:
+                    break
+                if pause_s:
+                    time.sleep(pause_s)
         self._trim_changes()
         return n
 

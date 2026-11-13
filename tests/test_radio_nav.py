@@ -102,7 +102,7 @@ const ids = () => st.rows.map((t) => t.id);
   // ---- pure ----
   const seenAll = Object.fromEntries(SRC.map((s) => [s.key, NOW - 20 * 60]));
   const p = { ...N.prefs(null), seen: seenAll, pins: ["p25:metro:9001"], mutes: ["air:Tower", "fm:FG1", "p25:metro:9003"] };
-  const flagged = SRC.map((s) => (s.key === "p25:metro:9003" ? { ...s, emergency: "other", stuck: "CAR 9 (1234)" } : s));
+  const flagged = SRC.map((s) => (s.key === "p25:metro:9003" ? { ...s, emergency: "other", stuck: "CAR 9 (4100012)" } : s));
   const m = N.model(flagged, p, NOW, new Set(["p25:metro:9003"]), { "fm:FG1": 777 });
   const county = N.model(SRC.slice(0, 1), { ...N.prefs(null), seen: seenAll }, NOW);
   const many = Object.fromEntries(Array.from({ length: 1500 }, (_, i) => [`k${i}`, i + 1]));
@@ -114,6 +114,12 @@ const ids = () => st.rows.map((t) => t.id);
     flaggedKeys: m.flagged.map((s) => s.key), mutesFor: N.mutesFor(p.mutes, SRC),
     unseen: N.unread(SRC[1], undefined, NOW), old: N.unread(SRC[0], NOW - 50 * 60, NOW), later: N.unread(SRC[0], NOW - 30 * 60, NOW),
     countyViews: county.views.map((v) => v.id),
+    // nobody signed in: the hub's tree holds none of another system's sources; this browser's pins, mutes and looks at
+    // them, a live key or an emergency window for one (the state push) bring none of it back
+    hidden: (() => { const h = N.model(SRC.slice(0, 1), { ...N.prefs(null), pins: ["p25:metro:9001"], mutes: ["p25:metro:9003"],
+                                                          seen: seenAll }, NOW, new Set(["p25:metro:9001"]), { "p25:metro:9100": 4242 });
+                     return { views: h.views.map((v) => v.id), systems: h.systems.map((x) => x.label), rows: h.rows.map((x) => x.key),
+                              pinned: h.pinned.map((x) => x.key), flagged: h.flagged.map((x) => x.key) }; })(),
     seenKept: [Object.keys(N.prefs(JSON.stringify({ seen: many })).seen).length, "k1499" in N.prefs(JSON.stringify({ seen: many })).seen, "k0" in N.prefs(JSON.stringify({ seen: many })).seen],
     merged: N.merged([{ id: "c", start: 3 }, { id: "b", start: 2 }], [{ id: "b", start: 2 }, { id: "a", start: 1 }, { id: "z", start: 9 }]).map((t) => t.id),
   });
@@ -262,6 +268,14 @@ def test_views_tree_and_unread_counts(out):
     assert out["merged"] == ["c", "b", "a"]                         # the fresh page, then only what is older than it
 
 
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_the_rail_shows_no_other_system_the_hub_did_not_send(tmp_path):
+    """#419's gate on the rail: the tree is only what GET /api/cad/comms/sources sent (nothing of another P25 system
+    to a reader who is not signed in); what this browser remembers of such a source never puts it, or its view, back."""
+    hidden = run(tmp_path, scenario="pure")["hidden"]
+    assert hidden == {"views": ["ours", "all"], "systems": ["Analog"], "rows": ["fm:FG1"], "pinned": [], "flagged": []}
+
+
 def test_mute_never_hides_our_calls_or_an_emergency(out):
     rows, views = out["rows"], {v["id"]: v for v in out["views"]}
     assert rows["fm:FG1"][3] is False and out["mutesFor"] == ["air:Tower", "p25:metro:9003"]     # one of Our calls: never muted
@@ -273,7 +287,7 @@ def test_mute_never_hides_our_calls_or_an_emergency(out):
     assert out["muteSent"] == "air:Tower,p25:metro:9003" and out["mutesKept"] == ["air:Tower", "p25:metro:9003"]
     # the emergency over the list in every view, with its window; on the views; on the phone's Sources button
     assert out["flags"]["hidden"] is False
-    assert out["flags"]["text"] == [["chip emergency em-other em-stuck", "Emergency flag stuck on CAR 9 (1234): PD Secure"],
+    assert out["flags"]["text"] == [["chip emergency em-other em-stuck", "Emergency flag stuck on CAR 9 (4100012): PD Secure"],
                                     ["chip kept", "Recording until t4242 (emergency)"]]
     assert dict(out["viewsEm"])["police"] is True and dict(out["viewsEm"])["all"] is True and dict(out["viewsEm"])["ours"] is False
     assert not any("emergency" in c for c, _ in out["sourcesButton"])     # in All it is on screen: Sources marks what isn't

@@ -1480,7 +1480,7 @@ function sUsers(panel) {
 // sizeup/cad/activity.py): each sign-in (once per login), what they did, what they were refused,
 // and when each was last seen. GET /api/cad/activity: an admin anyone's (or everyone's), anyone
 // else only their own. Only behind Cloudflare Access (cad.who): all-in-one records none.
-const S_ACT_KINDS = [["", "All"], ["signin", "Sign-ins"], ["action", "Actions"], ["refused", "Refused"]];
+const S_ACT_KINDS = [["", "All"], ["signin", "Sign-ins"], ["action", "Actions"], ["refused", "Refused"], ["search", "Searches"]];
 const S_ACT_LIMIT = 300;
 
 function sActAll() { return !!(cad.who && cad.who.may === "admin"); }
@@ -1554,7 +1554,7 @@ function sActivityRender() {
     t.title = `${fmtTime(r.at, true)}`;
     li.append(t);
     if (!email) li.append(Object.assign(el("span", "s-act-who", r.name && r.name !== r.email ? r.name : r.email), { title: r.email }));
-    li.append(el("span", `chip s-kind ${r.kind}`, { signin: "sign-in", action: "action", refused: "refused" }[r.kind] || r.kind));
+    li.append(el("span", `chip s-kind ${r.kind}`, { signin: "sign-in", action: "action", refused: "refused", search: "search" }[r.kind] || r.kind));
     li.append(Object.assign(el("span", "s-act-sum", r.summary), { title: r.route }));
     li.append(Object.assign(el("span", "s-act-ip dim", r.ip || "—"), { title: r.ua || "" }));
     ol.append(li);
@@ -1629,6 +1629,8 @@ function sSystem(panel) {
     ...(sy && S.data.atc ? [sAtcTalkers(S.data.atc)] : []),
     ...(sy && S.data.hub_errors && sIsHub() ? [sHubErrors(S.data.hub_errors)] : []),
     ...(sy && S.data.map_display ? [sMapDisplay(S.data.map_display)] : []),
+    ...(sy && S.data.premise_visibility ? [sPremiseVisibility(S.data.premise_visibility)] : []),
+    ...(sy && S.data.audio_retention && canDo("admin") ? [sAudioRetention(S.data.audio_retention)] : []),
     sCard(sCardHead("Records"), recs, counts),
     ...(S.data.camera_wall ? [sCameraWall(S.data.camera_wall)] : []),
     sCard(sCardHead("Data file"), file),
@@ -1715,6 +1717,28 @@ function sHubErrors(e) {
 
 // The rigs on the maps by zoom (#376, cadmap.js declutter; sizeup/cad/mapview.py DISPLAY_DEFAULTS): below each zoom a
 // rig is a dot (idle at a firehouse: one badge). The console's maps and the wall board's. Admins.
+// Who sees each category of address notes (#403, sizeup/cad/premise.py; Settings key premise_visibility). Admins.
+function sPremiseVisibility(d) {
+  const card = sCard(sCardHead("Address notes", "",
+    sHelp("Who sees each category of address notes on the incident card and the Search page. Dispatchers: dispatchers "
+      + "and admins; Admins: admins only. A restricted category is never in the screen's live push.")));
+  card.id = "s-premise-vis";
+  const names = { everyone: "Everyone", dispatcher: "Dispatchers", admin: "Admins" };
+  for (const [key, v] of Object.entries(d)) {
+    const s = el("select");
+    for (const c of v.choices) s.append(new Option(names[c] || c, c));
+    s.value = v.value;
+    s.disabled = !canDo("admin");
+    s.setAttribute("aria-label", `${v.label}: who sees it`);
+    s.addEventListener("change", () => sPost("premise_visibility", { action: "set", key, value: s.value },
+      `${v.label}: ${names[s.value]}`));
+    const row = el("div", "row");
+    row.append(el("span", "s-eta-l", v.label), s, sState(v.edited ? "edited" : "default"), el("span", "spacer"));
+    card.append(row);
+  }
+  return card;
+}
+
 function sMapDisplay(d) {
   const card = sCard(sCardHead("Map display", "",
     sHelp("Below these zooms an idle rig is a dot (two or more at a firehouse: one badge, \u201cHQ \u00b7 6\u201d) and a rig on a "
@@ -1736,6 +1760,66 @@ function sMapDisplay(d) {
     if (v.edited && canDo("admin")) row.append(sBtn("Reset", `Default: ${v.default}`,
       () => sPost("map_display", { action: "reset", key }, `${v.label}: ${v.default}`)));
     card.append(row);
+  }
+  return card;
+}
+
+// How long the hub keeps each channel's / talkgroup's audio, and its transcripts and metadata (#414,
+// sizeup/audiostore.py). Days; a change applies to what is already kept at the next prune. A transcript is never kept
+// shorter than its audio. The totals: what is kept now and its S3 storage a month. Admins; the hub only.
+function sAudioRetention(r) {
+  const mb = (b) => (b >= 1e9 ? `${(b / 1e9).toFixed(1)} GB` : b >= 1e7 ? `${Math.round(b / 1e6)} MB` : `${(b / 1e6).toFixed(1)} MB`);
+  const usd = (v) => `$${v < 10 ? v.toFixed(2) : Math.round(v)}/mo`;
+  const tt = r.totals || {};
+  const card = sCard(sCardHead("Audio retention", `${r.default.value} d · transcripts ${r.default.t_value} d`,
+    sHelp(`Days each channel's audio and transcripts are kept, then deleted; a change applies to what is already kept. `
+      + `A transcript is never kept shorter than its audio. Talkgroup over channel over default. `
+      + `Clips on an event, an alarm or an emergency: at least ${r.event_days ? `${r.event_days} d` : "forever"}; `
+      + `attached ones are kept with the incident. Costs: S3 Standard storage at $${tt.usd_gb_month}/GB-month; `
+      + `uploads add about $1/mo.`)));
+  card.id = "s-audio-retention";
+  if (tt.audio) {
+    const t = el("div", "dim small", `Audio ${tt.audio.clips} · ${tt.audio.gb} GB · ${usd(tt.audio.usd_month)} · `
+      + `Transcripts ${tt.transcripts.rows} · Incident audio ${tt.incident.clips} · ${tt.incident.gb} GB · ${usd(tt.incident.usd_month)}`);
+    t.title = "Live audio: the clips kept now (S3 and audio.sqlite). Transcripts: rows in the radio log. "
+      + "Incident audio: radio clips copied to incidents' attachments, kept until an admin deletes them.";
+    card.append(t);
+  }
+  const num = (sec, key, label, v, lo, hi, what) => {
+    const n = el("input", "s-num");
+    n.type = "number"; n.min = String(lo); n.max = String(hi); n.step = "0.5";
+    n.value = String(v);
+    n.setAttribute("aria-label", `${label}: ${what} days kept`);
+    n.addEventListener("change", () => sPost(sec, { action: "set", key, value: Number(n.value) }, `${label} ${what}: ${n.value} d`));
+    return n;
+  };
+  const row = (key, label, a, aEdited, t, tEdited, info, title) => {
+    const lab = el("span", "s-eta-l", label);
+    if (title) lab.title = title;
+    const x = el("div", "row");
+    x.append(lab, num("audio_retention", key, label, a, r.min, r.max, "audio"), el("span", "dim small", "d audio"),
+      num("transcript_retention", key, label, t, r.t_min, r.t_max, "transcripts"), el("span", "dim small", "d text"),
+      sState(aEdited || tEdited ? "edited" : "default"), el("span", "dim small", info), el("span", "spacer"));
+    if (aEdited || tEdited) x.append(sBtn("Reset", "Back to the defaults", () => {
+      if (aEdited) sPost("audio_retention", { action: "reset", key }, `${label}: default`);
+      if (tEdited) sPost("transcript_retention", { action: "reset", key }, `${label}: default`);
+    }));
+    return x;
+  };
+  const d = r.default;
+  card.append(row("_default", "Default", d.value, d.edited, d.t_value, d.t_edited, "", "Every channel without its own"));
+  for (const c of r.rows) {
+    card.append(row(c.key, c.label, c.days, c.edited, c.t_days, c.t_edited, c.clips ? `${c.clips} · ${mb(c.bytes)}` : "",
+      c.talkgroup != null ? `tg:${c.talkgroup}` : ""));
+  }
+  if (r.format) {                  // how new clips are kept: WAV only for now (FLAC / Opus would be chosen here)
+    const f = r.format;
+    const sel = sSelect(f.choices.map((v) => [v, v === "wav" ? "WAV (uncompressed)" : v]), f.value,
+      (v) => sPost("audio_retention", { action: "set", key: "_format", value: v }, `Audio format: ${v}`), "Audio format");
+    sel.disabled = f.choices.length < 2;
+    const x = el("div", "row");
+    x.append(el("span", "s-eta-l", "Format"), sel, el("span", "spacer"));
+    card.append(x);
   }
   return card;
 }

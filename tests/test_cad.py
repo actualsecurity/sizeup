@@ -834,6 +834,7 @@ def test_joint_tones_follow_ours_in_the_audio(tmp_path, monkeypatch):
     iid = cad.create({"type": "STRU", "address": "122 South Regent St"})["id"]
     d = cad.dispatch(iid, {"unit_ids": [uid(cad, "E63"), uid(cad, "L30")], "operator": "JD"})
     assert d["tones"] == "Port Chester + Rye Brook" and d["tone_warnings"] == []
+    assert cad.voice.wait(10)                                    # the voice comes after the answer (#426)
     with wave.open(io.BytesIO(cad.dispatch_audio(d["dispatch_id"]))) as w:
         x = np.frombuffer(w.readframes(w.getnframes()), "<i2").astype(np.float32) / 32768
 
@@ -871,8 +872,9 @@ def test_no_tts_means_text_only_dispatch(monkeypatch):
     cad = make_cad()
     iid = cad.create({"type": "ALARM", "subtype": "CO-RESD", "address": "1 King St"})["id"]
     r = cad.dispatch(iid, {"unit_ids": [uid(cad, "E60")], "operator": "JD"})
-    assert r["audio_url"] is None and "say" in r["audio_note"] and r["transmitted"] is False
-    assert cad.store.full(iid)["dispatches"][0]["audio_note"] == r["audio_note"]
+    assert r["audio_url"] is None and r["transmitted"] is False and cad.voice.wait(10)   # the voice: after the answer (#426)
+    row = cad.store.full(iid)["dispatches"][0]
+    assert (row["audio"], row["has_audio"]) == ("failed", False) and "say" in row["audio_note"]
 
 
 # -- the bridge from the monitor ------------------------------------------------------------------------
@@ -1141,6 +1143,8 @@ def test_api_event_lifecycle(server):
     assert code == 200 and names(rec["units"]) == ["E58"] and rec["card"] == "SERVICE"
     ids = [u["id"] for u in rec["units"]]
     code, pv = server.j("POST", f"/api/cad/incident/{iid}/preview", {"unit_ids": ids})
+    assert code == 200 and pv["audio_url"] is None and pv["kind"] == "new"                    # the text only (#426)
+    code, pv = server.j("POST", f"/api/cad/incident/{iid}/preview", {"unit_ids": ids, "audio": True})
     assert code == 200 and pv["audio_url"].startswith("/api/cad/audio/") and pv["kind"] == "new"
     assert server.call("GET", pv["audio_url"])[1][:4] == b"RIFF"
     assert server.cad.store.full(iid)["assignments"] == []                                   # preview assigns nothing
@@ -1150,7 +1154,8 @@ def test_api_event_lifecycle(server):
     code, d = server.j("POST", f"/api/cad/incident/{iid}/dispatch", {"unit_ids": ids, "operator": "JD", "channel": "PC repeater"})
     assert code == 200 and d["transmitted"] is False and d["channel"] == "PC repeater"
     assert d["text"].startswith("Port Chester Fire, Engine 58, respond to 209 Westchester Avenue, for a lift assist.")
-    code, wav, ctype = server.call("GET", d["audio_url"])
+    assert d["audio"] in ("pending", "ready") and server.cad.voice.wait(10)                   # its voice follows (#426)
+    code, wav, ctype = server.call("GET", f"/api/cad/dispatch/{d['dispatch_id']}.wav")
     assert code == 200 and ctype == "audio/wav" and wave.open(io.BytesIO(wav)).getframerate() == 16000
     assert server.call("GET", "/api/cad/dispatch/999.wav")[0] == 404
     assert server.j("POST", f"/api/cad/unit/{ids[0]}/status", {"status": "napping"})[0] == 400
@@ -1214,7 +1219,7 @@ def test_only_the_null_transmitter_exists_in_m1(tmp_path):
     iid = cad.create({"type": "ALARM", "subtype": "CO-RESD"})["id"]
     cad.s.tones = ()
     r = cad.dispatch(iid, {"unit_ids": [uid(cad, "E60")], "operator": "JD"})
-    assert r["transmitted"] is False and cad.transmitter.sent[-1][1] == r["text"]
+    assert r["transmitted"] is False and cad.voice.wait(10) and cad.transmitter.sent[-1][1] == r["text"]
 
 
 def test_config_cad_sections(tmp_path):
@@ -1235,7 +1240,7 @@ def test_cad_page_buttons_have_handlers():
     js = (ROOT / "sizeup" / "web" / "static" / "cad.js").read_text()
     js_all = js + "".join((ROOT / "sizeup" / "web" / "static" / f).read_text()
                           for f in ("settings.js", "cadmap.js", "radio-view.js", "radio-nav.js", "radio-controls.js", "board.js",
-                                    "camwall.js"))
+                                    "camwall.js", "addr-history.js", "search-view.js", "preplan.js"))
     for bid, rest in re.findall(r'<button id="([\w-]+)"([^>]*)>', html):
         assert (f'$("#{bid}").addEventListener' in js_all or f'RadioLive.button($("#{bid}")' in js_all
                 or 'type="submit"' in rest), f"#{bid} has no handler"

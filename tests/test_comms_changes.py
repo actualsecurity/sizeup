@@ -23,7 +23,7 @@ from pathlib import Path
 import pytest
 
 from sizeup.cad.api import CadApi
-from sizeup.cad.comms import Comms
+from sizeup.cad.comms import KEEP_UNLINKED_S, Comms
 from sizeup.cloud.access import Identity
 from tests.test_radios import Clock, _event_with, cad, tx
 
@@ -40,6 +40,13 @@ def other(tid, start, tg=9001, text="words"):
                 group="Police", service="police", tier="text")
 
 
+def change_triggers(store):
+    """The triggers that are the change log's: by name (an earlier build's) or by what they write. CAD search's own
+    index queues (sizeup/cad/history.py: fts_*, addr_queue_*, here_rev_*) are triggers of their own and not counted."""
+    return [r["name"] for r in store.q("SELECT name, sql FROM sqlite_master WHERE type = 'trigger'")
+            if r["name"].startswith("radio_changes") or "radio_changes" in (r["sql"] or "")]
+
+
 def make(tmp_path):
     clock = Clock()
     c = cad(tmp_path, clock, airband=("Tower",))
@@ -49,14 +56,14 @@ def make(tmp_path):
     c.comms.log = c.said.append
     t = clock.t
     c.inc = _event_with(c, ["E63"], clock)
-    c.record_traffic(tx("fg-1", t + 1, rig="E63", radio_id="6301", text="engine 63 on location"))
+    c.record_traffic(tx("fg-1", t + 1, rig="E63", radio_id="4242098", text="engine 63 on location"))
     c.record_traffic(tx("fg-2", t + 2, text="a made-up key-up"))
     c.record_traffic(dict(tx("pg-1", t + 3, "South 2", text="a made-up page"), tones=[{"a_hz": 1000.0, "b_hz": 2000.0, "names": [], "ours": False}]))
     c.record_traffic(dict(tx("tw-1", t + 4, "Tower", text="made-up tower words")))          # an airband row logged as analog
-    c.record_traffic(tx("fg-x", t + 5, radio_id="0999", text="an unnamed radio"))
+    c.record_traffic(tx("fg-x", t + 5, radio_id="4100099", text="an unnamed radio"))
     c.record_traffic(other("pd-1", t + 6))
-    c.alarm = c.alarms.on_traffic(dict(tx("fg-m", t + 7, text="mayday mayday mayday", rig="E63", radio_id="6301"), at=t + 7))
-    c.record_traffic(tx("fg-m", t + 7, text="mayday mayday mayday", rig="E63", radio_id="6301"))
+    c.alarm = c.alarms.on_traffic(dict(tx("fg-m", t + 7, text="mayday mayday mayday", rig="E63", radio_id="4242098"), at=t + 7))
+    c.record_traffic(tx("fg-m", t + 7, text="mayday mayday mayday", rig="E63", radio_id="4242098"))
     return c
 
 
@@ -81,9 +88,9 @@ def writers(c):
     t, iid = c.clockref.t, c.inc["id"]
     links = lambda tid: {r["incident_id"] for r in c.store.q("SELECT incident_id FROM radio_links WHERE traffic_id = ?", (tid,))}  # noqa: E731
     return [
-        ("record", lambda: c.comms.record(tx("fg-new", t + 20, rig="E63", radio_id="6301", text="a new fire row")), "fg-new",
+        ("record", lambda: c.comms.record(tx("fg-new", t + 20, rig="E63", radio_id="4242098", text="a new fire row")), "fg-new",
          lambda: row(c, "fg-new")["text"] == "a new fire row" and iid in links("fg-new")),
-        ("record again", lambda: c.comms.record(tx("fg-new", t + 20, rig="E63", radio_id="6301", text="the same row, its words in")),
+        ("record again", lambda: c.comms.record(tx("fg-new", t + 20, rig="E63", radio_id="4242098", text="the same row, its words in")),
          "fg-new", lambda: row(c, "fg-new")["text"] == "the same row, its words in"),
         ("record context", lambda: c.comms.record(other("pd-new", t + 21)), "pd-new", lambda: row(c, "pd-new")["system"] == "metro"),
         ("retext", lambda: c.comms.retext("fg-2", "its transcript", "done", alt={"text": "another", "model": "m"}), "fg-2",
@@ -95,11 +102,11 @@ def writers(c):
         ("keep", lambda: c.comms.link("pd-1", iid, "Lt. Sample") and None, "pd-1", lambda: iid in links("pd-1")),
         ("unlink", lambda: c.comms.unlink("fg-2", iid, "Lt. Sample"), "fg-2", lambda: iid not in links("fg-2")),
         ("link_pages", lambda: c.comms.link_pages(iid, ["pg-1"]), "pg-1", lambda: iid in links("pg-1")),
-        ("relink", lambda: c.comms.relink("mdc", "0999", "E63"), "fg-x", lambda: row(c, "fg-x")["rig"] == "E63"),
+        ("relink", lambda: c.comms.relink("mdc", "4100099", "E63"), "fg-x", lambda: row(c, "fg-x")["rig"] == "E63"),
         ("retag_pages", lambda: c.comms.retag_pages(lambda a, b: ["Sample FD"], lambda names: True), "pg-1",
          lambda: "Sample FD" in row(c, "pg-1")["tones"]),
         ("fix_air", lambda: c.comms.fix_air(["Tower"]), "reset", lambda: row(c, "tw-1")["system"] == "airband"),
-        ("alarm raised", lambda: c.alarms.on_traffic(dict(tx("fg-new", t + 20, text="mayday mayday", rig="E63", radio_id="6301"), at=t + 20)),
+        ("alarm raised", lambda: c.alarms.on_traffic(dict(tx("fg-new", t + 20, text="mayday mayday", rig="E63", radio_id="4242098"), at=t + 20)),
          "fg-new", lambda: c.store.one("SELECT 1 AS x FROM alarms WHERE traffic_id = 'fg-new'") is not None),
         ("alarm acknowledged", lambda: c.alarms.acknowledge(c.alarm["id"], {"operator": "Lt. Sample"}), "fg-m",
          lambda: c.store.one("SELECT ack_at FROM alarms WHERE id = ?", (c.alarm["id"],))["ack_at"]),
@@ -114,7 +121,7 @@ def writers(c):
         ("a unit's mention links removed", lambda: c.radiolog.unit_removed(iid, "E63"), "reset", lambda: True),
         ("note", lambda: c.note(iid, {"text": "E63 reports a made-up condition", "operator": "Lt. Sample", "units": ["E63"]}), "note-new",
          lambda: c.store.one("SELECT 1 AS x FROM events WHERE kind = 'note' AND text LIKE 'E63 reports%'") is not None),
-        ("prune", lambda: (setattr(c.clockref, "t", c.clockref.t + 91 * 24 * 3600), c.comms.prune())[1], "fg-2",
+        ("prune", lambda: (setattr(c.clockref, "t", c.clockref.t + KEEP_UNLINKED_S + 86400), c.comms.prune())[1], "fg-2",
          lambda: row(c, "fg-2") is None and row(c, "fg-new") is not None),         # fg-new is on the event: kept
     ]
 
@@ -122,7 +129,7 @@ def writers(c):
 WRITERS = {"record", "retext", "set_alt", "rerun_done", "link", "unlink", "link_pages", "relink", "retag_pages", "fix_air", "prune"}
 # Public methods of Comms that write nothing a row of the Radio page shows (activity: the per-minute counts)
 READERS = {"activity", "activity_rows", "audio_per_day", "context_clips", "emergencies", "events_of", "facets", "for_incidents",
-           "id_stats", "kept_for_events", "kept_for_tier", "minute_counts", "page", "query", "source_names",
+           "id_stats", "kept_for_events", "kept_for_tier", "minute_counts", "page", "policies", "query", "source_names",
            "rev_for", "sources_seen", "split", "talkgroups"}
 NOTES = {"touch", "touch_reset", "note_change", "flush_changes"}               # the change notes themselves
 
@@ -168,7 +175,7 @@ def test_every_writer_leaves_a_change_entry(tmp_path):
     assert systems == {"fg-new": "analog", "pd-new": "metro", "fg-2": "analog"}
     assert c.store.db.execute("SELECT gone FROM radio_changes WHERE traffic_id = 'fg-2' ORDER BY seq DESC LIMIT 1").fetchone()[0] == 1
     assert not c.said and not c.comms.changes_broken
-    assert not c.store.q("SELECT name FROM sqlite_master WHERE type = 'trigger'")       # nothing hangs on the tables
+    assert not change_triggers(c.store)                 # nothing of the change log hangs on the tables
 
 
 def trace(c):
@@ -263,7 +270,7 @@ def test_another_systems_activity_moves_neither_the_cursor_nor_the_rev_of_a_read
     for i in range(5):                                          # another system: rows, a transcript, encrypted key-ups
         c.record_traffic(other(f"pd-busy-{i}", t + 40 + i))
     c.comms.retext("pd-busy-0", "made-up words", "done")
-    c.comms.activity("p25:metro:9003", int(t // 60), 4, ["1234"])
+    c.comms.activity("p25:metro:9003", int(t // 60), 4, ["4100012"])
     assert seen(None) == anon                                   # nothing to see, nothing to time
     assert seen(who) != signed and seen(who)[0] > signed[0]
     assert get("/api/cad/comms", f"view=all&rev={anon[1]}")["unchanged"] is True
@@ -280,7 +287,7 @@ def test_an_earlier_builds_triggers_are_taken_off_at_the_start(tmp_path):
         "CREATE TRIGGER radio_changes_a_upd AFTER UPDATE ON alarms BEGIN INSERT INTO no_such_table VALUES (1); END;")
     c.store.db.close()
     again = cad(tmp_path, c.clockref, airband=("Tower",))
-    assert not again.store.q("SELECT name FROM sqlite_master WHERE type = 'trigger'")
+    assert not change_triggers(again.store)
     assert again.record_traffic(tx("fg-after", c.clockref.t + 60, rig="E63")) == [c.inc["id"]]
     assert not again.comms.changes_broken
     dump = lambda db: "\n".join(db.iterdump())             # noqa: E731

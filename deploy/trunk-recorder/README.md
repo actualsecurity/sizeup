@@ -78,3 +78,8 @@ shell per unit event on the system (registrations and affiliations too); only gr
 columns, which sizeup leaves out of the copy it hands trunk-recorder). `systems/mrrs/` is Metro-25 / MTA MRRS,
 Zone 3 Simulcast: two sources, 770.3125 and 773.08125 MHz at 2.4 MS/s, covering the seven listed frequencies. It runs
 only on the sources given a dongle in Settings > Radios. Details: `docs/cloud.md`, "More P25 systems".
+
+Before giving MRRS dongles for good, try it with one you have: Settings > Radios > **Reception test**
+(`docs/reception-test.md`, #410). Its `config.json` sets `"controlWarnRate": -1`, so trunk-recorder logs the control
+channel's decode rate every 3 s (the test and the status read it), and `"sizeup"."reception"` names the talkgroups a
+test is about and the antenna advice its verdict gives.

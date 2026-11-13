@@ -9,6 +9,7 @@
 #   SIZEUP_MTA_KEY         only should the MTA require a key again (SSM /sizeup-hub/mta-key; [trains]: none needed today)
 #   SIZEUP_ALERT_TOPIC     the alarms' pushes (emergency, mayday, aircraft): our own ntfy topic (SSM /sizeup-hub/alert-topic)
 #   SIZEUP_STATUS_TOPIC    station health / Amazon Transcribe pushes: our own ntfy topic (SSM /sizeup-hub/status-topic)
+#   SIZEUP_AISSTREAM_KEY   the Vessels layer's aisstream.io key (SSM /sizeup-hub/aisstream-key; docs/vessels.md); none: off
 # Run it on a Mac or Linux box without radios:
 #   SIZEUP_STATE_DIR=$(mktemp -d) SIZEUP_STATION_TOKEN=... python -m sizeup --config deploy/hub/config.hub.toml
 
@@ -16,7 +17,7 @@
 role = "hub"
 public_url = ""                    # e.g. "https://sizeup.example.org" (or SIZEUP_PUBLIC_URL); shown in /healthz
 offline_after_s = 15               # no word from the station this long = "Station offline" on screen
-audio_max_mb = 500                 # received clips kept in audio.sqlite (oldest dropped first)
+audio_max_mb = 500                 # received clips' bytes still in audio.sqlite (oldest dropped first; with S3: only those waiting to upload)
 # Cloudflare Access identity (sizeup/cloud/access.py, docs/cloud.md "Who is signed in"): with both set,
 # every page and API but /healthz and /api/station/ needs a verified Access token, and the email
 # someone signed in with is the operator (named in Settings > Users). Either empty: off (free-text
@@ -98,7 +99,7 @@ aws_idle_s = 120
 
 [storage]
 keep_hours = 24                    # pages, monitor incidents, transcripts (the CAD keeps its own records)
-audio_keep_hours = 12              # received clips on no CAD event (docs/cloud.md "Audio retention", #251, #46)
+audio_keep_hours = 720             # received clips on no CAD event: 30 days (#414; Settings > System > Audio retention overrides it per channel / talkgroup; docs/cloud.md "Audio retention")
 audio_keep_event_days = 365        # clips on a CAD event, with an alarm or an emergency: a year (0 = forever)
 audio_prune_batch = 200            # rows per delete transaction (no long write lock)
 audio_offpeak = [2, 5]             # 2-5 am New York time: the backlog and the incremental vacuum

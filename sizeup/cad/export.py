@@ -50,11 +50,23 @@ def municipality(geo_label: str) -> str:
     return parts[-1] if len(parts) > 1 else ""
 
 
+def _cell(v):
+    """A text cell a spreadsheet would run as a formula (=, +, -, @, a tab or CR first) starts with ' instead (#403); a
+    number, and text that is one ("-73.66"), as they are."""
+    if isinstance(v, str) and v[:1] in ("=", "+", "-", "@", "\t", "\r"):
+        try:
+            float(v)
+            return v
+        except ValueError:
+            return "'" + v
+    return v
+
+
 def _csv(columns: list[str], rows: list[list]) -> bytes:
     buf = io.StringIO()
     w = csv.writer(buf, lineterminator="\r\n")
     w.writerow(columns)
-    w.writerows(rows)
+    w.writerows([_cell(v) for v in r] for r in rows)
     return buf.getvalue().encode("utf-8-sig")       # BOM: Excel opens it as UTF-8
 
 

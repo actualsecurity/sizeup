@@ -228,7 +228,7 @@
   .d-tides .wx-tides-body, .b-marine .wx-tides-body { min-inline-size: 0; }
   @container hdr (width < 1100px) { .wx-now { display: none; } }
   .ap-line { color: var(--info); overflow-wrap: anywhere; }
-  .ap-fields { display: grid; grid-template-columns: repeat(auto-fill, minmax(9rem, 1fr)); gap: var(--s-2) var(--s-3); margin: 0;
+  .ap-fields { display: grid; grid-template-columns: repeat(auto-fill, minmax(8.5rem, 1fr)); gap: var(--s-2) var(--s-3); margin: 0;
     padding: var(--s-2) var(--s-3); border: var(--bw) solid var(--line); border-radius: var(--radius); min-inline-size: 0; }
   .ap-fields[hidden] { display: none; }
   .ap-fields > legend { display: flex; align-items: center; gap: var(--s-1); padding-inline: var(--s-1); font-size: var(--fs-sm); line-height: var(--lh-sm); color: var(--text-2); }
@@ -761,6 +761,65 @@
     .rn-tools select { flex: 1 1 8rem; max-inline-size: none; }
   }
 
+  /* ---- Search (search-view.js, /cad#search, #403): the filters, the calls and their map, address notes ------- */
+  body[data-view="search"] .overview { display: none; }      /* the middle column is Search's (cadmap.js shows the Overview) */
+  .search-view { display: flex; flex-direction: column; gap: var(--gutter); min-inline-size: 0; }
+  .sv-filters :is(#sv-where, #sv-text) { flex: 1 1 12rem; }
+  .sv-body { display: flex; flex-direction: column; gap: var(--gutter); min-inline-size: 0; }
+  .sv-results { display: flex; flex-direction: column; gap: var(--s-2); min-inline-size: 0; }
+  .sv-table td.t { white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .sv-table td.loc { overflow-wrap: anywhere; }
+  .sv-table tr.ev { cursor: pointer; }
+  .sv-table tr.retired { color: var(--dim); }
+  .sv-hit b { color: var(--text); }
+  .sv-pager { justify-content: center; gap: var(--s-3); }
+  /* its height: the layout's, or what the viewer dragged its bottom edge to (--sv-map-h, search-view.js; the incident
+     map's handle, .dmap-h); the map clips itself so the handle can reach out into the gap */
+  .sv-mapbox { position: relative; block-size: var(--sv-map-h, calc(var(--map-h) * 0.75)); border-radius: var(--radius);
+               border: var(--bw) solid var(--line); }
+  .sv-mapbox > :is(.sv-map, .nomap) { border-radius: calc(var(--radius) - var(--bw)); overflow: hidden; }
+  body.row-dragging .sv-mapbox > :not(.dmap-handle) { pointer-events: none; }
+  .sv-map { position: absolute; inset: 0; }
+  .sv-table td.num { white-space: nowrap; }
+  .sv-notes { display: flex; flex-direction: column; gap: var(--s-2); }
+  .sv-notes td.pn-text { overflow-wrap: anywhere; font-weight: 600; }
+
+  /* ---- the incident card's address notes and History here (addr-history.js, #403) ------------------------- */
+  .premise { display: flex; flex-direction: column; gap: var(--s-1); margin-block: var(--s-2); }
+  .pn {
+    display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-1) var(--s-2); padding: var(--s-1) var(--s-2);
+    border: var(--bw) solid var(--warn); border-inline-start-width: var(--s-1); border-radius: var(--radius-s);
+    background: color-mix(in srgb, var(--warn) 10%, var(--card));
+  }
+  .pn.p1 { border-color: var(--err); background: color-mix(in srgb, var(--err) 12%, var(--card)); }
+  .pn.p3, .pn.seen { border-color: var(--line-strong); background: var(--raised); }
+  .pn-text { flex: 1 1 14rem; min-inline-size: 0; font-weight: 600; overflow-wrap: anywhere; }
+  .pn.seen .pn-text { font-weight: 400; color: var(--text-2); }
+  .pn-cat { --c: var(--warn); }
+  .pn-cat.hazard { --c: var(--err); }
+  .pn-cat.medical { --c: var(--info); }
+  .pn-cat.access { --c: var(--ok); }
+  .pn-cat.animals, .pn-cat.hoarding, .pn-cat.other { --c: var(--text-2); }
+  .pn-due { --c: var(--warn); color: var(--warn); }
+  .pn-near { --c: var(--info); color: var(--info); overflow-wrap: anywhere; }
+  .pn-acked, .pn-meta { white-space: nowrap; }
+  .here-counts { color: var(--text-2); }
+  .pn-form { display: flex; flex-direction: column; gap: var(--s-2); padding: var(--s-2) var(--s-3); margin-block: var(--s-2); }
+  .pn-form-head { display: flex; align-items: baseline; gap: var(--s-2); }
+  .pn-fields { flex-wrap: wrap; gap: var(--s-2); }
+  .pn-form textarea { resize: vertical; min-block-size: var(--ctl-lg); }
+  .here { margin-block-start: var(--s-2); }
+  .here-head { display: flex; align-items: center; gap: var(--s-2); min-inline-size: 0; }
+  .here-head .sec-toggle { flex: 1 1 auto; }
+  .here-head .sec-toggle[aria-expanded="true"] .caret { transform: rotate(90deg); }
+  .here-head .sec-toggle.warn .sum { color: var(--warn); }
+  .here-head .sum { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-inline-size: 0; }
+  .here-body { display: flex; flex-direction: column; gap: var(--s-1); padding-block-start: var(--s-1); }
+  .here-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--s-0); }
+  .here-list li { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--s-0) var(--s-2); }
+  .here-call { min-block-size: var(--ctl-sm); padding-inline: var(--s-1); font-variant-numeric: tabular-nums; }
+  .here-false.warn { color: var(--warn); }
+
   /* ---- the talk alerts popover (radio.js) ----------------------------------------------------------- */
   .alerts-panel {
     position: fixed; inset-block-start: calc(var(--hdr-h) + var(--s-1)); inset-inline-end: var(--s-4);
@@ -957,4 +1016,31 @@
   .auto-src.undone { color: var(--dim); text-decoration: line-through; }
   .auto-undo { color: var(--dim); }
   .auto-close { display: flex; align-items: center; gap: var(--s-2); }
+
+  /* Pre-plan points (#456, preplan.js): the list under the call's map, the editor, the Search page's tab */
+  .pp-box, .pp-formhost { grid-column: 2; min-inline-size: 0; }
+  @container (width < 44rem) { .pp-box, .pp-formhost { grid-column: auto; } }
+  .pp-box { display: flex; flex-direction: column; gap: var(--s-1); }
+  .pp-head { display: flex; align-items: center; gap: var(--s-2); }
+  .pp-title { font-weight: 700; }
+  .pp-list { display: flex; flex-direction: column; gap: var(--s-0); margin: 0; padding: 0; list-style: none; }
+  .pp-row { display: flex; align-items: center; gap: var(--s-2); min-inline-size: 0; }
+  .pp-row.near .pp-go { color: var(--text-2); }
+  .pp-go { display: inline-flex; align-items: center; gap: var(--s-2); flex: 1 1 auto; min-inline-size: 0; justify-content: flex-start;
+           text-align: start; background: none; border-color: transparent; font-weight: 600; overflow-wrap: anywhere; }
+  .pp-ico { inline-size: var(--s-5); block-size: var(--s-5); flex: none; }
+  .pp-near { --c: var(--info); color: var(--info); }
+  .pp-form { display: flex; flex-direction: column; gap: var(--s-2); padding: var(--s-2) var(--s-3); margin-block: var(--s-2); }
+  .pp-form-head { display: flex; align-items: baseline; gap: var(--s-2); }
+  .pp-form textarea { resize: vertical; min-block-size: var(--ctl-lg); }
+  .pp-kinds { display: grid; grid-template-columns: repeat(auto-fill, minmax(8.5rem, 1fr)); gap: var(--s-1); }
+  .pp-kind { justify-content: flex-start; gap: var(--s-2); font-weight: 400; }
+  .pp-kind[aria-checked="true"] { border-color: var(--accent); background: var(--raised); font-weight: 700; }
+  .pp-fields { flex-wrap: wrap; gap: var(--s-2); }
+  .pp-level { inline-size: 6rem; }
+  .pp-bldg { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-1); overflow-wrap: anywhere; }
+  .pp-link { max-inline-size: 100%; }
+  .pp-mark { cursor: grab; filter: drop-shadow(0 0 2px rgba(0, 0, 0, 0.8)); }
+  .pp-mark-i { inline-size: var(--s-7); block-size: var(--s-7); display: block; }
+  .pp-toggle img { inline-size: var(--s-4); block-size: var(--s-4); }
 }

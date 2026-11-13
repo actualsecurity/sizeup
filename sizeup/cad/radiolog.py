@@ -33,7 +33,8 @@ it, else when it was put on; never more than UNITS_MAX_BACK_S back. For that inc
 transmission is on an incident once, a unit mention on one incident only, and on at most MAX_PER_TX incidents by
 words. A unit taken off before it went (undone, cleared or removed before responding, or no longer listed by the
 feed) loses its unkept mention links there (unit_removed). A dismissed incident still owns its units (a mention of
-one is ambiguous) but is never linked. A feed's department entries (Sources.department_units) are never a unit.
+one is ambiguous) but is never linked. A feed's department entries (Sources.department_units) and a department's
+placeholders (Lists.placeholder) are never a unit.
 
 Retention: a mention or fireground link doesn't keep its audio or its row past the normal unlinked retention until a
 person keeps it ("Keep" on the radio card: radio_link_kept, sizeup/cad/comms.py AUTO_UNSURE).
@@ -246,6 +247,8 @@ class RadioLog:
         if self._board is None or now - self._board[0] > BOARD_TTL_S:
             out: dict[str, tuple[str, str]] = {}
             for u in self.store.q("SELECT name, spoken FROM units WHERE board != ''"):
+                if self.store.lists.placeholder(u["name"]):  # a department's placeholder: never heard as a unit
+                    continue
                 for k in (_key(u["name"]), _key(u["spoken"])):
                     if k:
                         out.setdefault(k, (u["name"], u["spoken"]))
@@ -325,7 +328,7 @@ class RadioLog:
                 b = ctx["board"].get(_key(u))
                 if b and b[0] not in off:                # a person took it off (an undone dispatch): not theirs
                     out.add(b[0])
-        return out
+        return {u for u in out if not self.store.lists.placeholder(u)}
 
     def matches(self, t: dict, ctx: dict | None = None) -> dict[int, tuple[str, str]]:
         """incident id -> (why, unit) for this transmission (see the module's rules)."""
@@ -477,7 +480,7 @@ class RadioLog:
                 b = ctx["board"].get(_key(u))
                 if b and _key(u) not in ctx["depts"]:
                     listed.add(b[0])
-        return out | (listed - off)
+        return {u for u in out | (listed - off) if not self.store.lists.placeholder(u)}
 
     def _starts(self, iid: int, units, hi: float, widen: bool = True) -> dict[str, float]:
         """Each unit's window start: its own dispatch (the feed's unit_times dispatched for it; else the call's when

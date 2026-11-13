@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import uuid
 import os
 import re
 import shutil
@@ -64,7 +65,7 @@ from sizeup import janitor, tz
 from sizeup.cad import Cad
 from sizeup.cad.alarms import STUCK_WITHIN_S
 from sizeup.cad.api import CadApi
-from sizeup.dispatch import parse
+from sizeup.dispatch import parse, split_joined
 from sizeup.incidents import IncidentStore, Traffic
 from sizeup.radio.fm import RATE, Channel, NfmReceiver, Segment, id_burst_frames, speech_seconds, voice_floor_db
 from sizeup.radio.am import AmReceiver
@@ -80,6 +81,7 @@ from sizeup.radio.livepage import HOLD_S, LivePaging
 from sizeup.radio import sdr as sdr_lookup
 from sizeup.radio import adsbd
 from sizeup.radio import recorder as trunk_recorder
+from sizeup.radio import reception
 from sizeup.radio import systems as p25_systems
 from sizeup.radio.page import Page, PageHold, assemble, decode_tones, page_from_dict, recording_note
 from sizeup.radio.tap import LiveTap
@@ -99,7 +101,15 @@ ROOT = Path(__file__).resolve().parent.parent
 HOT_INCIDENTS_SQL = ("SELECT i.lat, i.lon FROM incidents i WHERE i.status IN ('active', 'pending') AND i.emergency = 1 "
                      "AND i.lat IS NOT NULL AND i.lon IS NOT NULL AND MAX(i.created_at, COALESCE((SELECT MAX(e.at) FROM events e "
                      "WHERE e.incident_id = i.id), 0)) >= ?")
-HUB_SWITCH_S = 0.001     # the hub's GIL switch interval (sys.setswitchinterval; Python's default 0.005), start_app() (#284)
+# Vessels (sizeup/vessels.py): an open marine or water call keeps aisstream.io connected: vessels.is_marine()'s rule (a
+# boat subtype, a water rescue, an aircraft in the water, never NOTIF/WATER; or a marine unit on it, never a DPT placeholder)
+MARINE_OPEN_SQL = ("SELECT 1 FROM incidents i WHERE i.status IN ('queued', 'pending', 'open', 'active') AND ("
+                   "UPPER(COALESCE(i.subtype, '')) = 'BOAT' "
+                   "OR (UPPER(COALESCE(i.type, '')) = 'RESCUE' AND UPPER(COALESCE(i.subtype, '')) = 'WATER') "
+                   "OR (UPPER(COALESCE(i.type, '')) = 'AIRPORT' AND UPPER(COALESCE(i.subtype, '')) = 'ACFT-WATER') "
+                   "OR EXISTS (SELECT 1 FROM assignments a JOIN units u ON u.id = a.unit_id WHERE a.incident_id = i.id "
+                   "AND u.kind = 'marine' AND a.cleared_at IS NULL AND UPPER(u.name) NOT LIKE 'DPT%')) LIMIT 1")
+HUB_SWITCH_S = 0.001    # the hub's GIL switch interval (sys.setswitchinterval; Python's default 0.005), start_app() (#284)
 SPLIT_PAGE_S = 30.0      # voice this soon after a tones-only page for us = that page's voice
 # The gazetteer names a town only from this confidence up (#80: "34 Longdale Avenue" read as Port Chester at
 # 0.34 was a street near Fairview). The point and label stay for the map; the town is never a trigger anyway.
@@ -181,12 +191,14 @@ def make_providers(cfg: Config, gaz) -> dict:
     from sizeup.roadprojects import RoadProjects
     from sizeup.roads import Roads
     from sizeup.trains import Trains
+    from sizeup.vessels import VesselLayer
     from sizeup.weather import Weather
     roads = Roads.from_config(cfg, log=log)
     return {"roads": roads, "gis": Gis.from_config(cfg, log=log, load=False),
             "roadwork": RoadProjects.from_config(cfg, roads=roads, gaz=gaz, log=log),
             "trains": Trains.from_config(cfg, log=log),
             "aircraft": AircraftLayer.from_config(cfg, log=log, devices=lambda: sdr_lookup.devices(cfg.rtl_fm)),
+            "vessels": VesselLayer.from_config(cfg, log=log),
             "weather": Weather.from_config(cfg, log=log), "_gaz": gaz,
             "roadgraph": RoadGraph.from_config(cfg, log=log)}      # its graph read later, in the background
 
@@ -448,6 +460,8 @@ class App:
         self._adsb_file = (Path(cfg.cad_db).parent / Path(adsbd.OVERRIDE).name) if cfg.cad_db else None
         self.adsb_sdr = self._load_adsb()
         self._ignore_base = frozenset(x for x in cfg.sdr_ignore if x != cfg.aircraft_sdr)
+        # The AIS dongle ([vessels.receiver] sdr, sizeup/radio/aisd.py): reserved the same way, never a radio or a job
+        self._ignore_base |= {cfg.vessels_sdr} if getattr(cfg, "vessels_sdr", "") else frozenset()
         self._listed: list[str] = [sd for sd in (list(cfg.sdrs) or ([cfg.shared_device] if cfg.shared_device else []))
                                    if not self._sdr_ignored(sd)]
         self.shared = bool(self._listed) or cfg.sdr_auto
@@ -466,6 +480,10 @@ class App:
         self._sys_jobs: dict[str, tuple[p25_systems.Runtime, int]] = {
             x.job: (rt, x.index) for rt in self.systems.values() for x in rt.system.sources}
         self._booting = False                 # start(): each system's dongles are handed over together
+        # The reception test (#410, sizeup/radio/reception.py): one dongle lent to one side of such a system for a
+        # while, measured instead of kept; the job it paused comes back after (and at a restart: start()).
+        self.reception = reception.Tests(self, Path(cfg.clips_dir).parent if cfg.clips_dir else None, log)
+        self.reception.on_end = self._reception_ended
         # Every reader of this server is a verified, signed-in person (the hub behind Cloudflare Access: make_app).
         # Only then is another system's traffic in the state all clients share (sizeup/sourcekeys.py may_see_context).
         self.access_enforced = False
@@ -513,6 +531,7 @@ class App:
             # two streets typed, "N Main St / Westchester Ave" (#213): where they meet, in [geo] search_towns
             self.cad.cross_source = lambda: IntersectionSearch(self.gaz, towns=cfg.geo_search_towns, hq=cfg.geo_hq)
             self.cad.place_source = lambda: PlaceIndex(self.gaz, crossings=self.cad.crossings())
+            self.cad.street_source = self.gaz.streets_by_town     # a page's misheard street: the one it snaps to
             # a new call's location: its place's address, its block's cross streets, what is at a map click (#204)
             from sizeup.geo.pagegeo import location_detail, what_is_here
             self.cad.detail_source = lambda m: location_detail(self.gaz, m)
@@ -592,6 +611,8 @@ class App:
             from sizeup.fence import Fence
             fence = Fence.from_env(log=log)      # the hub's single-writer lock (sizeup/handoff.py): uploads only while ours
             self.fence = fence
+            if fence is not None:                 # a dispatch's voice, attached after the answer (#426): the writer's only
+                self.cad.may_write = fence.ok
             self.cache_mirror = CacheMirror.from_env(Path(cfg.cad_db).parent, log=log, fence=fence.ok if fence else None)
         self._layers_lock = threading.Lock()
         self._layers_on = False                   # start_layers() asked for, stop_layers() not since
@@ -612,6 +633,7 @@ class App:
         # ("camera_wall": margin, include, exclude), our departments for the municipal fallback; Settings >
         # System shows every camera with where it falls (cad.camera_area).
         self.roads.gis = self.gis
+        self.cad.gis = self.gis                    # pre-plan points: the building footprint a point is in (#456)
         self.roads.ours = tuple(cfg.cad_monitor_departments)
         self.roads.wall_settings = lambda: self.cad.settings.overrides().get("camera_wall") or {}
         self.cad.camera_area = self.roads.settings_rows
@@ -666,9 +688,11 @@ class App:
             from sizeup.roadgraph import RoadGraph
             self.roadgraph = RoadGraph.from_config(cfg, log=log)
         if self.roadgraph.configured:
-            from sizeup.cad.routes import Routes
+            from sizeup.cad.routes import SAVE_KEY, Routes
+            store = self.cad.store                    # the trips home and the moves kept across a restart (#453)
             self.cad.routes = Routes(self.roadgraph.ready, lambda: self.cad.eta, self._route_closures,
-                                     lambda: self.cad.firehouses, log=log)
+                                     lambda: self.cad.firehouses, log=log,
+                                     persist=(lambda: store.meta_get(SAVE_KEY), lambda v: store.meta_put(SAVE_KEY, v)))
         # Metro-North's trains (sizeup/trains.py, #131): the MTA's feeds, read by the CAD of record while
         # someone looks at the Trains layer or an event near the tracks.
         self.trains = prov["trains"]
@@ -682,6 +706,12 @@ class App:
         # Aircraft near HPN (sizeup/aircraft.py, #155): shortfinal's PCFD-focused picture, read by the CAD of record
         # while someone looks at the Aircraft layer. It never opens a dongle: a receiver's aircraft.json is only read.
         self.aircraft = prov["aircraft"]
+        # Vessels on western Long Island Sound (sizeup/vessels.py, AIS): aisstream.io while someone looks or a marine
+        # call is open, and our own receiver when the station has one; never opens a dongle here.
+        self.vessels = prov["vessels"]
+        self.vessels.hot = lambda: bool(self.cad.store.q(MARINE_OPEN_SQL))
+        self.vessels.lookup = lambda iid: self.cad.store.full(iid)
+        self.vessels.leader = self._atc_leader              # hot/cold: only the lease holder connects to aisstream.io
         # Weather and water (sizeup/weather.py, #132): NWS alerts, conditions and radar, NOAA tides; a warning
         # said by the dispatch voice when Settings > Dispatch allows it (played where the console is open).
         self.weather = prov["weather"]
@@ -1401,7 +1431,7 @@ class App:
                     self._alarm_now(t)      # before speech-to-text: the alarm doesn't wait for the words
                 if pc.stt:
                     self._stt(t, pc.audio, eng, key)
-                else:                   # a sub-0.3 s key-up with no voice: kept, not transcribed
+                else:                   # under 0.25 s, or under 0.3 s with no voice (p25.MIN_STT_S): kept, not transcribed
                     t.raw, t.confidence, t.status, t.model = "", None, "no_speech", ""  # type: ignore[attr-defined]
                     t.stt = ""  # type: ignore[attr-defined]
                     self._transcribed(t)
@@ -1412,6 +1442,8 @@ class App:
         (sizeup/tiers.py). Context only: never Main, never on our incident; its radio IDs are another system's, so
         never looked up in our registry (no rig) nor learned into it; its emergency flags raise none of our alarms."""
         name, tg = rt.system.name, call.talkgroup
+        if self.reception.on_call(rt, call):         # a reception test (#410): counted there, nothing of it kept
+            return self._drop_recorder_files(call, False)
         tier = self.tg.tier(tg, name)
         if call.encrypted and tier in tiers.RECORDED:
             # the call says it was encrypted, whatever the file says of its talkgroup: nothing of it is kept
@@ -1471,6 +1503,58 @@ class App:
         """state()["p25_systems"] (#409): each other system with its jobs and dongles, what runs, its control channel,
         the unknown talkgroups seen on it and its encrypted activity. [] with none (the hub shows its station's)."""
         return [rt.state(self.assign) for rt in self.systems.values()]
+
+    def reception_post(self, body: dict, by: str = "", tid: str = "") -> str | None:
+        """POST /api/reception (#410): start, stop or annotate a reception test. None, or why not. by: who asked: kept
+        HERE, in the CAD of record, under the test's id (for the activity row when it ends), never with the test
+        itself: a station gets only the id the hub made (tid) and stores no person."""
+        start = isinstance(body, dict) and body.get("action") == "start"
+        if not reception.SAMPLE_ID.fullmatch(str(tid or "")):
+            tid = uuid.uuid4().hex[:12] if start else ""
+        err = self._reception_send(body, tid)
+        if start and not err and by:
+            self._reception_who(tid, str(by))
+        return err
+
+    def _reception_send(self, body: dict, tid: str) -> str | None:
+        return self.reception.post(body, tid)
+
+    def _reception_who(self, tid: str, by: str | None = None) -> str:
+        """Who started test `tid` (by given: remember it; the last 80 are kept, in the CAD's own store)."""
+        try:
+            m = json.loads(self.cad.store.meta_get("reception_by") or "{}")
+            m = m if isinstance(m, dict) else {}
+            if by:
+                m[tid] = by[:200]
+                self.cad.store.meta_put("reception_by", json.dumps(dict(list(m.items())[-80:])))
+            return str(m.get(tid) or "")
+        except Exception as e:  # noqa: BLE001 - a log row's name, never in the way
+            log(f"reception test: who started {tid} not kept: {type(e).__name__}")
+            return ""
+
+    def reception_state(self) -> dict | None:
+        """GET /api/reception: the reception tests' state (admins: its history and sample list are never in the
+        state everyone gets)."""
+        return self.reception.state()
+
+    def _reception_ended(self, t: dict) -> None:
+        """A reception test is over (or its paused job is back at last): in the activity of who started it. On a
+        station the hub writes it, from the station's report (sizeup/cloud/hub.py)."""
+        by = "" if self.cfg.cloud_role == "station" else self._reception_who(str(t.get("id") or ""))
+        if not by:
+            return
+        try:
+            self.cad.activity.record(by, "action", "reception test", reception.ended_text(t), "",
+                                     reception.restored_ok(t))
+        except Exception as e:  # noqa: BLE001 - a log row, never in the way
+            log(f"reception test: activity row not written: {type(e).__name__}: {e}")
+
+    def reception_sample(self, sid: str) -> bytes | None:
+        """GET /api/reception/sample?id=: a call a reception test captured, while it is kept."""
+        return self.reception.sample(sid)
+
+    def reception_sample_b64(self, sid: str) -> str:
+        return self.reception.sample_b64(sid)
 
     def set_talkgroup_tier(self, tg: int, tier: str, system: str = "") -> str | None:
         err = self.tg.set_tier(int(tg), str(tier), system)
@@ -1910,8 +1994,10 @@ class App:
                 self.live.fm_open(label, since)
 
     def _dispatch(self, raw: str):
-        d = parse(raw) if raw else None
+        d = parse(raw, self.cfg.unit_departments) if raw else None
         if d is not None:  # units dispatched name their department ("Engine 61" -> Port Chester FD)
+            # "Engine 6158": Engine 61 and Engine 58 run together, split when the roster has both
+            d.units = split_joined(d.units, self.cfg.unit_departments)
             named = list(d.units)   # said with the word ("Engine 61"): these name a department
             for n in d.numbers:  # "174, 175, Ladder 1": engines read without the word, if the roster has them
                 u = f"Engine {n}"
@@ -2450,7 +2536,10 @@ class App:
                 ranked = sorted(self.gaz.streets.values(),
                                 key=lambda st: -sum(len(v) for m, v in st.addrs.items() if m in ours))
                 streets = [st.name for st in ranked if any(m in ours for m in st.addrs)]
-            self._vocab_suggest = channels.vocabulary_suggestions(self.cad.lists.units, streets)
+            from sizeup import stt_vocab                         # 60 Control and the Fire/EMS channels: the county's
+            county = stt_vocab.county_phrases(self.cad.lists.units, self.cad.lists.geo_town_aliases,
+                                              battalions=stt_vocab.SUGGEST_BATTALIONS)
+            self._vocab_suggest = channels.vocabulary_suggestions(self.cad.lists.units, streets, county=county)
         return list(self._vocab_suggest)
 
     def vocabulary_push(self, phrases: list[str]) -> dict:
@@ -2683,7 +2772,11 @@ class App:
         except (OSError, ValueError):
             d = None
         if isinstance(d, dict) and isinstance(d.get("sdr"), str) and not adsbd.serial_problem(d["sdr"].strip()):
-            return d["sdr"].strip()
+            if d["sdr"].strip() == getattr(self.cfg, "vessels_sdr", ""):     # the AIS receiver's now: never both
+                log(f"ADS-B: Settings named {d['sdr'].strip()}, now the AIS receiver's dongle ([vessels.receiver] sdr): "
+                    "using [aircraft.receiver] sdr instead")
+            else:
+                return d["sdr"].strip()
         return self.cfg.aircraft_sdr
 
     def set_adsb_receiver(self, serial: str | None) -> str | None:
@@ -2697,11 +2790,15 @@ class App:
                 return why
             if serial in (list(self.cfg.sdrs) + ([self.cfg.shared_device] if self.cfg.shared_device else [])):
                 return f"{serial} is one of the radios listed in [radio] sdrs: take it out there first"
+            if serial == getattr(self.cfg, "vessels_sdr", ""):
+                return f"{serial} is the AIS receiver's dongle ([vessels.receiver] sdr): ADS-B needs its own"
             held = claims.other(serial)
             if held and held.get("mode") != adsbd.MODE:
                 return f"SDR {self.sdr_name(serial)} is in use by {held.get('app', 'another app')} ({held.get('mode', '?')})"
             if why := self._ambiguity(serial):
                 return f"SDR {self.sdr_name(serial)}: {why}"
+            if self.reception.holds(serial):
+                return f"SDR {self.sdr_name(serial)} is lent to a reception test: stop it first"
         old = self.adsb_sdr
         if serial == old:
             return None
@@ -2765,7 +2862,14 @@ class App:
         if self._mode_file:
             try:
                 by = {sd: b for sd, b in self.set_by.items() if sd in self.assign}
-                self._mode_file.write_text(json.dumps({**self.assign, "_set_by": by}))
+                modes = dict(self.assign)
+                lent = self.reception.lent()        # (#410) a dongle lent to a reception test is saved on its own job
+                if lent is not None:
+                    modes[lent[0]] = lent[1]
+                    by.pop(lent[0], None)
+                    if lent[2]:
+                        by[lent[0]] = lent[2]
+                self._mode_file.write_text(json.dumps({**modes, "_set_by": by}))
             except OSError:
                 pass
 
@@ -3019,6 +3123,9 @@ class App:
         if mode == OFF_MODE:
             log(f"SDR {self.sdr_name(serial)} released: nothing of ours on it (switch it back on in the web app)")
             return True
+        if getattr(self.cfg, "vessels_sdr", "") and serial == self.cfg.vessels_sdr:   # reserved for AIS (sizeup-ais)
+            log(f"SDR {self.sdr_name(serial)} is reserved for the AIS receiver: {mode} not started on it")
+            return False
         if self.adsb_sdr and serial == self.adsb_sdr:     # reserved for the ADS-B decoder (#235, #262): never a job
             log(f"SDR {self.sdr_name(serial)} is reserved for the ADS-B receiver: {mode} not started on it")
             return False
@@ -3060,9 +3167,10 @@ class App:
                 log(f"sdr: {m} was running on SDR {self.sdr_name(sd)}, the ADS-B receiver's dongle: stopped")
                 self._stop_mode(m, f"SDR {self.sdr_name(sd)} is reserved for ADS-B", sd)
 
-    def _stop_mode(self, mode: str, why: str, serial: str) -> None:
+    def _stop_mode(self, mode: str, why: str, serial: str, release: bool = True) -> None:
         """Stop `mode`'s program if it runs on this dongle (not when it runs on another one: two dongles
-        can hold one job, a person's kept beside a replacement's) and release the dongle."""
+        can hold one job, a person's kept beside a replacement's) and release the dongle (release False: sizeup's
+        claim on it stays, for the program that takes it next: a reception test's hand-off, #410)."""
         on = self._program_on(mode) if mode != OFF_MODE else None
         if on is None or on == serial:
             if mode == P25_MODE:
@@ -3074,7 +3182,8 @@ class App:
                 r = self._receiver(mode)
                 if r is not None:
                     r.stop()
-        claims.release(serial)
+        if release:
+            claims.release(serial)
 
     CONFIRM = "confirm: "       # what a refusal that only needs the person's confirm starts with (the UI asks, then resends)
 
@@ -3087,6 +3196,13 @@ class App:
         A mode already running on another dongle moves here (that dongle goes Off, which auto-assign
         may fill on its next start: a person didn't choose that Off). `by` is recorded per dongle;
         a person's choice, Off included, is never changed by auto-assign."""
+        err = self._set_mode(mode, sdr, by, confirm)
+        if err is None:                 # (#410) only a switch that worked ends what a reception test still owed it
+            rows = self.sdrs
+            self.reception.switched(sdr or (rows[0] if rows else ""), mode)
+        return err
+
+    def _set_mode(self, mode: str, sdr: str | None, by: str, confirm: bool) -> str | None:
         if not self.shared:
             return "each channel has its own dongle: nothing to switch"
         rows = self.sdrs
@@ -3095,6 +3211,11 @@ class App:
             return f"no SDR {sdr!r} plugged in" + (f"; one of {', '.join(rows)}" if rows else "")
         if mode not in self.modes:
             return f"unknown mode {mode!r}; one of {', '.join(self.modes)}"
+        # (#410) a dongle lent to a reception test: any switch of it ends the test and its paused job comes back
+        # (said in the answer); one still owed its job: that job picked is "restore now"
+        lent = self.reception.person_switch(mode, sdr)
+        if lent is not None:
+            return lent or None
         was = self.assign.get(sdr, OFF_MODE)
         if mode in self._sys_jobs and self.fire_job(was) and not confirm:
             # (#409) another system's job never takes a dongle off the fire side without the person saying so
@@ -3185,6 +3306,7 @@ class App:
                           "mode": self.assign.get(sd, OFF_MODE), "present": sd in plugged,
                           "ambiguous": self._ambiguity(sd, devs),   # "" or why nothing of ours opens it now
                           "set_by": self.set_by.get(sd),       # "person", "auto" or None (a default / unknown)
+                          "lent": self.reception.lent_row(sd),  # (#410) lent to a reception test: {paused, owed}
                           "held_by": ({"app": c.get("app"), "mode": c.get("mode")} if (c := claims.other(sd)) else None)}
                          for sd in rows]}
 
@@ -3322,6 +3444,7 @@ class App:
         threading.Thread(target=self.cad.place_index, name="places", daemon=True).start()   # built before the first "@"
         threading.Thread(target=self._watch_fm, name="talking", daemon=True).start()
         if self.shared:
+            self.reception.recover()          # (#410) a test that never ended: its dongle starts on its own job
             self._booting = True
             try:
                 for sd, m in list(self.assign.items()):  # each dongle runs what was picked for it
@@ -3352,6 +3475,8 @@ class App:
             self.p25.start()
         for rt in self.systems.values():
             rt.ingest.start()
+        if self.systems:
+            self.reception.start_thread()
         if self.vocab is not None and self.vocab.state()["state"] == "PENDING":
             self.vocab.poll()
         if getattr(self, "atc_vocab", None) is not None and self.atc_vocab.state()["state"] == "PENDING":
@@ -3442,6 +3567,7 @@ class App:
         self.gis.start()                          # the county GIS layers (sizeup/gis.py)
         self.trains.start()                       # Metro-North's trains (sizeup/trains.py)
         self.aircraft.start()                     # aircraft near HPN, while someone looks (sizeup/aircraft.py)
+        self.vessels.start()                      # AIS vessels, while someone looks (sizeup/vessels.py)
         self.weather.start()                      # NWS alerts, conditions, radar; NOAA tides (sizeup/weather.py)
         self.datasources.start()                  # the slow pulls' schedule, Settings > Data sources
         if self.cache_mirror is not None:
@@ -3455,6 +3581,7 @@ class App:
         self.gis.stop()
         self.trains.stop()
         self.aircraft.stop()
+        self.vessels.stop()
         self.weather.stop()
         self.datasources.stop()
         if self.cache_mirror is not None:
@@ -3464,6 +3591,7 @@ class App:
         """The incident sources (#297): the CAD's ticker (held reports, promotion) and this machine's adapters."""
         self.cad.sources.start()
         self.cad.radiolog.start()                 # open calls' units matched again (#370: what a restart left)
+        self.cad.addrs.start()                    # address keys and the search index, backfilled and kept up (#403)
         if self.cfg.cloud_role == "hub":         # station only: the hub gets their events through the outbox
             return
         from sizeup.sources.runner import SourceRunner, context_for, load_adapters, require_station
@@ -3530,6 +3658,8 @@ class App:
 
     def stop(self) -> None:
         self._stopping.set()
+        self.cad.stop_voice()                # dispatch voices still rendering get a moment (#426); the rest: the next start's
+        self.reception.shutdown()              # (#410) a running reception test ends here: its dongle back on its job
         self.attachments.stop()
         for r in self.receivers:
             r.stop()
@@ -3565,6 +3695,7 @@ class App:
             self.sources_runner.stop()
         self.cad.sources.stop()
         self.cad.radiolog.stop()
+        self.cad.addrs.stop()
         self.stop_layers()
 
     def _weather_voice(self, text: str) -> tuple[str | None, str]:
@@ -3631,9 +3762,11 @@ def make_server(app: App, fence=None, listener=None) -> WebServer:
                        role=cfg.cloud_role, roads=app.roads, gis=app.gis,
                        trains=app.trains, weather=app.weather, station_health=getattr(app, "health", None),
                        aircraft=app.aircraft, roadwork=app.roadwork, set_adsb=app.set_adsb_receiver,
+                       vessels=app.vessels,
                        airband_ab=app.airband_ab if cfg.cloud_role != "hub" else None,
+                       reception=(app.reception_post, app.reception_sample, app.reception_state),
                        fence=fence, health_fn=lambda: app.health_extra(fence), listener=listener,
-                       clip_context=app.clip_is_context)
+                       perf=getattr(app, "perf", None), clip_context=app.clip_is_context)
     # another system's traffic in the shared state only where every reader is verified (#419)
     app.access_enforced = app.cad.comms.context_broadcast = server.access_enforced
 
@@ -3647,6 +3780,8 @@ def make_server(app: App, fence=None, listener=None) -> WebServer:
     if app.prealert is not None:
         app.prealert.on_change = server.poke             # so is the phone ringing
     app.cad.alarms.on_change = server.poke               # and an emergency alarm (#128)
+    app.cad.on_dispatch = server.poke                    # and a dispatch, then its voice once rendered (#426)
+    app.cad.resume_voice()                               # ... and the voices a restart cut short, now that all is wired
     app.cad.airport_alerts.on_change = server.poke       # and an airport pre-alert (#233)
     app.trains.on_change = server.poke                   # and Metro-North's trains, each TrainTime read (#362)
     return server
@@ -3824,7 +3959,12 @@ def serve(cfg: Config, fence=None, phases=None, early=None) -> int:
     server = make_server(app, fence, listener)
     t.mark("server")
     if threading.current_thread() is threading.main_thread():
-        signal.signal(signal.SIGTERM, lambda *_: server.drain())
+        def term(*_a) -> None:
+            # (#410) a running reception test ends NOW, in its own thread: its dongle is back on its job while the
+            # requests in flight drain (up to 10 s), not after; App.stop() then finds nothing left to end
+            threading.Thread(target=app.reception.shutdown, name="reception-stop", daemon=True).start()
+            server.drain()
+        signal.signal(signal.SIGTERM, term)
     sm = app.station
     role = (" · hub (fed by the station, no radios)" if cfg.cloud_role == "hub"
             else f" · station, forwarding to {sm.hub_url}" if sm is not None and sm.forward else "")

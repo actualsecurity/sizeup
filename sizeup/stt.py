@@ -356,6 +356,8 @@ class Transcriber:
     order and handed to on_done. whisper-server restarting -> retry with backoff. on_drop(item, why):
     an item the queue dropped or skipped (SttQueue), never transcribed."""
 
+    RETRY_S = (2, 5, 8)                           # the backoff after each failed try (three tries)
+
     def __init__(self, client: WhisperClient, on_done: Callable[[object], None],
                  prompt: Callable[[object], str] = lambda item: "",
                  on_drop: Callable[[object, str], None] = lambda item, why: None):
@@ -424,7 +426,7 @@ class Transcriber:
                     break
                 except Exception as e:
                     self.last_error = f"{type(e).__name__}: {e}"[:160]
-                    time.sleep(2 + 3 * attempt)
+                    time.sleep(self.RETRY_S[attempt])
             else:
                 item.status = "error"
                 self.on_done(item)

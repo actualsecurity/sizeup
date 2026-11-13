@@ -14,7 +14,8 @@
 // its audio here. Nothing is keyed on a radio.
 //
 // Views (the header's tabs): Dispatch (the selected incident), Overview (every open call, cadmap.js),
-// Radio (/cad#radio?..., radio-view.js: every transmission, which replaced the Comms page) and Settings.
+// Radio (/cad#radio?..., radio-view.js: every transmission, which replaced the Comms page), Search (/cad#search?...,
+// search-view.js: past calls and address notes, #403) and Settings.
 // /monitor is this same page as a read-only wall board (BOARD, board.js): the Overview only, larger type,
 // nothing to press but Sound and Full screen, so it never disagrees with the console.
 //
@@ -40,8 +41,11 @@ const cad = {
   scene: null, state: null, lastMsgAt: 0, skew: 0,
   who: null,                 // signed in through Cloudflare Access (whoami): {email, name, callsign, role, may, ...}
   sel: null,                 // selected incident id
+  voiceWaits: new Map(),     // dispatch id -> {at, seen}: sent from this page, its voice still rendering (#426, syncVoice)
+  boxDispatch: null,         // the dispatch id the dispatch box shows (null: a preview, or hidden)
   mode: "none",              // none (Overview) | new | view | idle (Dispatch with nothing selected)
   radio: false,              // the Radio view is open (#radio)
+  search: false,             // the Search view is open (#search, search-view.js, #403)
   extra: new Map(),          // incidents opened from Records that aren't in the live state
   rec: null,                 // {iid, units, unfilled, already, card, note, checked:Set, extra:[], error}
   map: null, marker: null, mapSig: "",
@@ -431,9 +435,16 @@ function renderClock() {              // the same clock on the console and the b
 
 function leaveView() {               // an incident or the form opens: out of Radio and Settings
   if (location.hash) history.pushState(null, "", location.pathname);
-  if (cad.radio || !$("#settings").hidden || !$("#styleguide").hidden) window.dispatchEvent(new HashChangeEvent("hashchange"));
+  if (cad.radio || cad.search || !$("#settings").hidden || !$("#styleguide").hidden) window.dispatchEvent(new HashChangeEvent("hashchange"));
 }
-function route() {                    // #radio?filters: the Radio view; anything else: the console's own
+function route() {                    // #radio?filters: the Radio view; #search?filters: Search; anything else: the console's own
+  const search = !BOARD && location.hash.startsWith("#search");
+  if (search !== cad.search || search) {
+    cad.search = search;
+    show($("#search-view"), search);
+    if (window.SearchView) { if (search) SearchView.open(location.hash.slice("#search".length).replace(/^\?/, "")); else SearchView.close(); }
+    if (cad.state && !location.hash.startsWith("#radio")) render();
+  }
   const radio = !BOARD && location.hash.startsWith("#radio");
   const q = radio ? location.hash.slice("#radio".length).replace(/^\?/, "") : "";
   if (radio !== cad.radio || radio) {
@@ -446,13 +457,13 @@ function route() {                    // #radio?filters: the Radio view; anythin
 }
 function viewTab() {                 // the view on screen: overview | dispatch (the Incident tab) | radio | settings
   const settings = !$("#settings").hidden || !$("#styleguide").hidden;
-  return settings ? "settings" : cad.radio ? "radio" : cad.mode === "none" ? "overview" : "dispatch";
+  return settings ? "settings" : cad.radio ? "radio" : cad.search ? "search" : cad.mode === "none" ? "overview" : "dispatch";
 }
 function renderTabs() {
   const tab = viewTab();
   // body[data-view]: Dispatch drops the 60 Control feed and shows the rigs big (#205); the board has no tabs
   if (!BOARD && document.body.dataset.view !== tab) document.body.dataset.view = tab;
-  for (const [id, k] of [["#overview-open", "overview"], ["#dispatch-open", "dispatch"], ["#radio-open", "radio"], ["#settings-open", "settings"]]) {
+  for (const [id, k] of [["#overview-open", "overview"], ["#dispatch-open", "dispatch"], ["#radio-open", "radio"], ["#search-open", "search"], ["#settings-open", "settings"]]) {
     const b = $(id);
     b.classList.toggle("on", tab === k);
     if (tab === k) b.setAttribute("aria-current", "page"); else b.removeAttribute("aria-current");
@@ -676,6 +687,7 @@ function selectIncident(id) {
   show($("#close-form"), false);
   show($("#upgrade-form"), false);
   show($("#r-preview-box"), false);
+  cad.boxDispatch = null;             // (a voice still waited for plays all the same: syncVoice)
   $("#r-full").checked = false;
   flash($("#r-error"));
   flash($("#c-error"));
@@ -686,7 +698,7 @@ function selectIncident(id) {
 
 function renderDetail() {
   renderTabs();
-  if (cad.radio) {                    // the Radio view has the middle column (radio-view.js)
+  if (cad.radio || cad.search) {      // the Radio view (radio-view.js) or Search (search-view.js) has the middle column
     for (const id of ["#new-form", "#d-empty", "#d-body"]) show($(id), false);
     return;
   }
@@ -754,6 +766,7 @@ function renderDetail() {
   if (open) since(elapsed, inc.created_at);
   else { since(elapsed, null); setText(elapsed, fmtDur((inc.closed_at || 0) - inc.created_at)); }
   if (window.Incoming) Incoming.facts($("#d-feed"), inc, { api, operator, readonly: BOARD || !canDo("dispatch") });
+  if (window.AddrHistory) AddrHistory.card(inc, { readonly: BOARD || !canDo("dispatch") });   // notes, History here (#403)
   const viaFeed = inc.source === "CAD feed" && inc.feed;              // received from the feed itself (#297)
   show($("#d-via-w"), !!inc.received_via || !!viaFeed);
   setText($("#d-via"), viaFeed ? inc.feed.label : inc.received_via ? nameOf("received_via", inc.received_via) : "");
@@ -767,6 +780,7 @@ function renderDetail() {
   renderSourcePages(inc);
   renderComments(inc);
   renderMap(inc);
+  if (window.Preplan) Preplan.card(inc, { readonly: BOARD || !canDo("dispatch") });   // its building's points (#456)
   renderOnUnits(inc);
   renderAddUnit(inc);
   show($("#d-attach"), open && inc.status !== "queued");
@@ -845,7 +859,7 @@ function renderSourcePages(inc) {
     const b = Icon.play(el("button", "play"));
     b.type = "button";
     b.disabled = t.has_audio === false;
-    b.title = t.has_audio === false ? "Recording expired (12 h)" : `Play the page (${fmtTime(t.start, true)})${t.voice_at > 0 ? ", tones skipped" : ""}`;
+    b.title = t.has_audio === false ? "Audio expired" : `Play the page (${fmtTime(t.start, true)})${t.voice_at > 0 ? ", tones skipped" : ""}`;
     playBtn(b, clipUrl(t, false));
     r.append(b, el("span", "dim", `Page ${fmtTime(t.start)}`), ...Radio.pageTags(t.tones));
     if (!BOARD) r.append(UI.menu.button(`Actions: page ${fmtTime(t.start, true)}`, () => pageMenuItems(t), { key: `inc-page:${t.id}` }));
@@ -1081,8 +1095,8 @@ function radioRow(t, ctx = {}) {
   const li = el("li", "rt");
   const meta = el("div", "meta");
   if (t.id) meta.dataset.tx = t.id;      // which transmission (status-hints.js: "Suggests E64 on location" under it)
-  const b = Icon.play(el("button", "play"));
-  b.title = t.has_audio === false ? "Recording expired (12 h)" : t.voice_at > 0 ? "Play (tones skipped)" : "Play";
+  const b = Icon.play(el("button", "play"), t.has_audio === false ? "none" : "play");     // expired: a dash, no play (#414)
+  b.title = t.has_audio === false ? "Audio expired" : t.voice_at > 0 ? "Play (tones skipped)" : "Play";
   b.disabled = t.has_audio === false;
   playBtn(b, clipUrl(t, false));
   meta.append(b, el("span", "t", fmtTime(t.start, true)));
@@ -1452,7 +1466,7 @@ function txMenuItems(t) {
   if (canDo("admin")) {
     const waiting = rerunWaiting(t);
     items.push({ label: waiting ? "Re-transcribing…" : "Re-transcribe", disabled: t.has_audio === false || waiting,
-                 hint: t.has_audio === false ? "recording expired" : "", run: () => rerunTx(t) });
+                 hint: t.has_audio === false ? "audio expired" : "", run: () => rerunTx(t) });
   }
   items.push({ label: "Copy text", disabled: !t.text, run: () => copyText(t) });
   return items;
@@ -1670,14 +1684,16 @@ function callPicker(u, where, box) {
   const open = incidents().filter((i) => ["pending", "active"].includes(i.status));
   let n = 0;
   const add = (value, text) => { const o = el("option", "", text); o.value = String(value); sel.append(o); n++; };
-  const cur = open.find((i) => i.id === now.incident_id);
+  const cur = !now.placeholder && open.find((i) => i.id === now.incident_id);   // a placeholder: only calls it isn't on
   // then the incident being worked (#219: a status from the right column goes on it), then the other open calls
-  const sel0 = !cur && open.find((i) => i.id === cad.sel);
+  const sel0 = !cur && !(now.placeholder && onCall(now, cad.sel)) && open.find((i) => i.id === cad.sel);
   if (cur) add(cur.id, `${incTitle(cur)} ${typeLabel(cur.type, cur.subtype) || "No type"}, ${cur.address || ""} (current)`);
   if (sel0) add(sel0.id, `${incTitle(sel0)} ${typeLabel(sel0.type, sel0.subtype) || "No type"}, ${sel0.address || ""} (this incident)`);
-  for (const i of open) if (i !== cur && i !== sel0) add(i.id, `${incTitle(i)} ${typeLabel(i.type, i.subtype) || "No type"}, ${i.address || ""}`);
+  for (const i of open) {
+    if (i !== cur && i !== sel0 && !(now.placeholder && onCall(now, i.id))) add(i.id, `${incTitle(i)} ${typeLabel(i.type, i.subtype) || "No type"}, ${i.address || ""}`);
+  }
   const agency = !!agencySet(now);
-  if (!agency) add(0, "No call");              // another agency's unit is only ever on a call
+  if (!agency && !now.placeholder) add(0, "No call");   // another agency's unit or a placeholder: only ever on a call
   if (!n) {
     box.append(el("span", "dim small", "No open call"));
     return box;
@@ -1747,7 +1763,11 @@ function statusButtons(u, where) {
       e.stopPropagation();
       if (s.role === "oos") { cad.ask = { uid: u.id, status: s.code, where, text: "" }; render(); }
       else if (where === "board" && s.role !== "free") { cad.pick = { uid: u.id, status: s.code }; render(); }
-      else setUnitStatus(u.id, s.code);
+      else if (where === "board" && who.placeholder && (who.incident_ids || []).length) {
+        const n = who.incident_ids.length;
+        UI.confirm(`${who.name}: ${statusLabel(who, s.code)} clears it from ${n} call${n === 1 ? "" : "s"}.`, { ok: statusLabel(who, s.code) })
+          .then((ok) => { if (ok) setUnitStatus(u.id, s.code); });
+      } else setUnitStatus(u.id, s.code, "", where === "inc" ? u.iid : undefined);
     });
     box.append(b);
   }
@@ -1760,7 +1780,8 @@ function statusButtons(u, where) {
 function statusChoices(u, where) {
   const all = L().unit_statuses || [];
   const set = agencySet(u);
-  const mine = set ? set.statuses.map((c) => all.find((s) => s.code === c)).filter(Boolean) : all;
+  let mine = set ? set.statuses.map((c) => all.find((s) => s.code === c)).filter(Boolean) : all;
+  if (u.placeholder) return mine.filter((s) => s.code === u.quarters);   // in quarters only: the county assigns it
   if (where !== "inc") return mine;
   const flow = L().status_flow || {};
   const next = u.next || (!set && (flow[u.status] || flow["*"]));
@@ -1770,7 +1791,13 @@ function statusChoices(u, where) {
 // Follow a rig on the map (#358, cadmap.js): its unit-board row and its row on an incident, while it is on the map;
 // hovering (or focusing) either row rings it wider there. Only on a map already on screen: never a view switch (a new
 // call's draft, an edit form); no map showing it: the button flashes instead.
-const onMap = (name) => !!(window.CadMap && CadMap.onMap && CadMap.onMap(name));
+// a department placeholder (DPT239 ...: its unit row's placeholder flag, #400; mapview.is_placeholder) is never followed
+// nor recommended (#384); it may still be on an incident's assigned list
+function placeholderUnit(name) {
+  const u = ((cad.state && cad.state.units) || []).find((x) => x.name === name);
+  return !!(u && u.placeholder);
+}
+const onMap = (name) => !placeholderUnit(name) && !!(window.CadMap && CadMap.onMap && CadMap.onMap(name));
 const FLASH_MS = 1200;
 function followBtn(name) {
   const b = el("button", "mini quiet u-follow");
@@ -1834,7 +1861,7 @@ function renderOnUnits(inc) {
       if (!a.cleared_at && onMap(a.name)) head.append(followBtn(a.name));
       if (!a.cleared_at && isOpen(inc)) {
         head.append(statusButtons({ id: a.unit_id, status: a.status, next: a.next, cmd: cmd !== a.name && cmd,
-          status_set: a.status_set || "" }, "inc"));
+          status_set: a.status_set || "", iid: inc.id }, "inc"));
       }
       else if (a.cleared_at && isOpen(inc) && (a.return || []).length) head.append(returnButtons(inc, a));
       li.replaceChildren(head);
@@ -1891,7 +1918,7 @@ function renderEvents(inc) {
   show($("#d-events"), open);
   syncList($("#d-events"), events.slice().reverse(), {
     key: (e) => String(e.id),
-    sig: (e) => `${e.id}|${e.units || ""}|${window.DispatchMode ? DispatchMode.sig(inc, e.id) : ""}`,
+    sig: (e) => `${e.id}|${e.units || ""}|${window.DispatchMode ? DispatchMode.sig(inc, e.id) : ""}|${playForEvent(inc, e) || ""}`,
     make: () => el("li", "ev"),
     fill: (li, e) => {
       const meta = el("div", "meta");
@@ -1951,7 +1978,7 @@ function renderComments(inc) {
   list._last = last;
   syncList(list, items, {
     key: (e) => String(e.id),
-    sig: (e) => `${e.id}|${e.units || ""}|${e.kind === "remarks" ? `${e.text}|${e.operator}` : ""}`,
+    sig: (e) => `${e.id}|${e.units || ""}|${e.kind === "remarks" ? `${e.text}|${e.operator}` : ""}|${playForEvent(inc, e) || ""}`,
     make: (e) => el("li", `cm${e.kind === "remarks" ? " cm-remarks" : e.kind === "note" ? "" : " cm-sys"}`),
     fill: (li, e) => {
       const meta = el("div", "meta");
@@ -1974,7 +2001,7 @@ function renderDispatches(inc) {
   show($("#d-dispatches-card"), !!inc.emergency || (inc.dispatches || []).length > 0);
   syncList($("#d-dispatches"), (inc.dispatches || []).slice().reverse(), {
     key: (d) => String(d.id),
-    sig: (d) => String(d.id),
+    sig: (d) => `${d.id}|${d.audio || ""}|${d.has_audio}|${d.audio_note || ""}|${d.transmitted}`,   // its voice comes after it (#426)
     make: () => el("li", "dp"),
     fill: (li, d) => {
       const meta = el("div", "meta");
@@ -1995,7 +2022,8 @@ function renderDispatches(inc) {
       li.replaceChildren(meta, row);
       if (d.remarks) li.append(el("div", "small", `Remarks: ${d.remarks}`));
       if (d.tones) li.append(el("div", d.tones.includes("not set") ? "warn small" : "dim small", `Tones: ${d.tones}`));
-      if (d.audio_note) li.append(el("div", "dim small", d.audio_note));
+      if (d.audio === "pending") li.append(voicePending(el("div", "dim small")));
+      else if (d.audio_note) li.append(el("div", "dim small", d.audio_note));
     },
     empty: "None",
   });
@@ -2012,6 +2040,7 @@ async function recommend(typ, sub) {
   try {
     const r = await api("POST", `/api/cad/incident/${iid}/recommend`, body);
     if (cad.sel !== iid) return;
+    r.units = (r.units || []).filter((u) => !placeholderUnit(u.name));    // never recommended (#384; the hub's too)
     cad.rec = { iid, ...r, checked: new Set(r.units.map((u) => u.id)), extra: [], forType: typ || "" };
     syncFull(inc, prev, cad.rec);
   } catch (e) {
@@ -2035,11 +2064,15 @@ function syncFull(inc, prev, rec) {
 function units() {
   return (cad.state && cad.state.units) || [];
 }
+// A department placeholder (the county's "department dispatched, no unit yet") is not a rig: it may be on several calls
+// at once (incident_ids), is never moved, and is only Dispatched or in quarters.
+const onCall = (u, iid) => (u.incident_ids && u.incident_ids.length ? u.incident_ids.includes(iid) : u.incident_id === iid);
+const awayOn = (u, iid) => !u.placeholder && u.incident_id && u.incident_id !== iid;
 function unitById(id) {
   return units().find((u) => u.id === id);
 }
-function canDispatch(u) {
-  return roleOf(u.status) !== "oos" && u.response !== "agency";
+function canDispatch(u) {                     // a department placeholder: the county's only, never sent by hand
+  return roleOf(u.status) !== "oos" && u.response !== "agency" && !u.placeholder;
 }
 
 const REMARKS_LONG = 200, REMARKS_MAX = 500;
@@ -2108,7 +2141,7 @@ function renderDispatchBox(inc) {
     if (u.reason) lab.append(etaHint(u));
     lab.append(el("span", "spacer"), statusChip(now.status));
     if (now.spare) lab.append(el("span", "chip spare", "spare"));
-    if (now.incident_id && now.incident_id !== inc.id) lab.append(el("span", "warn small", `On ${now.incident_number}: moves`));
+    if (awayOn(now, inc.id)) lab.append(el("span", "warn small", `On ${now.incident_number}: moves`));
     li.append(lab);
     return li;
   });
@@ -2120,7 +2153,7 @@ function renderDispatchBox(inc) {
   list.replaceChildren(...items);
   // Add any other unit (not out of service or unmanned, not already listed or on this incident).
   const listed = new Set(rows.map((u) => u.id));
-  const others = units().filter((u) => !listed.has(u.id) && canDispatch(u) && u.incident_id !== inc.id && (u.board || u.incident_id));
+  const others = units().filter((u) => !listed.has(u.id) && canDispatch(u) && !onCall(u, inc.id) && (u.board || u.incident_id));
   const hints = (rec && rec.others) || {};
   fillSelect($("#r-add"), others.map((u) => [String(u.id),
     `${u.name} ${u.status}${u.incident_number ? ` on ${u.incident_number}` : ""}`
@@ -2191,17 +2224,93 @@ function addJoint() {                 // "Add Rye Brook (E14, L30, 2662)": tick 
   renderDispatchBox(inc);
 }
 
-function showPreview(title, text, url, note, r) {
+// A dispatch answers before its voice is rendered (#426): the box shows it at once with "Voice…", and the state
+// brings the audio (the dispatch's row: audio pending -> ready | failed). Played once, by the page that sent it.
+const VOICE_PENDING = "Voice…";
+const VOICE_PENDING_TIP = "The voice is being rendered. It plays here when it is ready; the dispatch is already logged.";
+function voicePending(node) {
+  setText(node, VOICE_PENDING);
+  node.title = VOICE_PENDING_TIP;
+  return node;
+}
+const VOICE_STALE_MS = 45000;     // a voice that arrives later than this after its dispatch is never played by itself
+// What the state says of dispatch id: null (not in the live state), else {pending} or {url, note}: url its audio
+// (null: none, the note says why).
+function voiceArrived(id, incidents) {
+  for (const inc of incidents || []) {
+    const d = (inc.dispatches || []).find((x) => x.id === id);
+    if (!d) continue;
+    if (d.audio === "pending") return { pending: true };
+    return { url: d.has_audio ? `/api/cad/dispatch/${d.id}.wav` : null, note: d.audio_note || "" };
+  }
+  return null;
+}
+function showAudio(url, note, pending, autoplay = true) {
+  const a = $("#r-audio"), n = $("#r-audio-note");
+  show(a, !!url);
+  if (url) { a.src = url; if (autoplay) a.play().catch(() => {}); }
+  if (pending) voicePending(n);
+  else { setText(n, note || ""); n.removeAttribute("title"); }
+}
+// The voices of the dispatches this page sent play by themselves, once each, one after the other in the order
+// sent, whatever is selected by then: in the dispatch box's player while it shows that dispatch, else unseen.
+const voiceAudio = new Audio();
+let voiceChain = Promise.resolve();
+function voicePlay(id, url, note) {
+  voiceChain = voiceChain.then(() => new Promise((done) => {
+    const inBox = cad.boxDispatch === id && !$("#r-preview-box").hidden;
+    const a = inBox ? $("#r-audio") : voiceAudio;
+    const ends = ["ended", "error", "pause", "emptied"];
+    let timer = null;
+    const over = () => { ends.forEach((e) => a.removeEventListener(e, over)); clearTimeout(timer); done(); };
+    if (inBox) showAudio(url, note, false, false);       // its turn: the box's player takes it ("Voice…" until now)
+    else a.src = url;
+    a.play().then(() => { ends.forEach((e) => a.addEventListener(e, over)); timer = setTimeout(over, 120000); }).catch(over);
+  }));
+}
+// Each state push, for every dispatch waited for: its voice is there (played once, if still fresh), there is none
+// (the note), or its event left the live state / it never came (dropped; the box no longer says "Voice…").
+function syncVoice(now = Date.now()) {
+  const incidents = (cad.state && cad.state.incidents) || [];
+  for (const [id, w] of [...cad.voiceWaits]) {
+    const got = voiceArrived(id, incidents);
+    const fresh = now - w.at <= VOICE_STALE_MS;
+    if (got && got.pending) { w.seen = true; continue; }
+    if (!got && !w.seen && fresh) continue;              // the push with it hasn't come yet
+    cad.voiceWaits.delete(id);
+    if (got && got.url && fresh) voicePlay(id, got.url, got.note);
+    else if (cad.boxDispatch === id) showAudio(got ? got.url : null, got ? got.note : "", false, false);
+  }
+}
+function showPreview(title, text, url, note, r, pending = false) {
   show($("#r-preview-box"), true);
   setText($("#r-preview-title"), title);
   setText($("#r-preview-text"), text);
   const warns = (r && r.tone_warnings) || [];
   $("#r-preview-tones").className = warns.length ? "warn small" : "dim small";
   setText($("#r-preview-tones"), r && r.tones ? `Tones: ${r.tones}${warns.length ? `. ${warns.join("; ")}` : ""}` : "");
-  const a = $("#r-audio");
-  show(a, !!url);
-  if (url) { a.src = url; a.play().catch(() => {}); }
-  setText($("#r-audio-note"), note || "");
+  showAudio(url, note, pending);
+}
+// A dispatch or upgrade just sent: in the box at once; its voice follows with the state (syncVoice).
+function showSent(title, r) {
+  const pending = r.audio === "pending";
+  cad.boxDispatch = r.dispatch_id;
+  cad.previewSeq = (cad.previewSeq || 0) + 1;          // a preview's audio still on its way: not played over this
+  showPreview(title, r.text, r.audio_url, r.audio_note, r, pending);
+  if (pending) cad.voiceWaits.set(r.dispatch_id, { at: Date.now(), seen: false });
+  syncVoice();
+}
+// A preview: its text at once, then its audio (a second, slower call: the voice is rendered for it). A later
+// preview or dispatch takes the box: this one's audio is dropped.
+async function showPreviewThenAudio(title, path, body) {
+  const seq = cad.previewSeq = (cad.previewSeq || 0) + 1;
+  const r = await api("POST", path, body);
+  if (cad.previewSeq !== seq) return;
+  cad.boxDispatch = null;                              // the box is the preview's now (a voice waited for still plays)
+  showPreview(title(r), r.text, null, "", r, true);
+  apiCall("POST", path, { ...body, audio: true }).then((a) => {
+    if (cad.previewSeq === seq) showAudio(a.audio_url, a.audio_note, false);
+  }).catch((e) => { if (cad.previewSeq === seq) showAudio(null, e.message, false); });
 }
 
 async function busy(button, label, fn) {
@@ -2223,9 +2332,8 @@ async function preview() {
   if (!ids.length) return flash($("#r-error"), "Tick a unit");
   await busy($("#r-preview"), "Rendering", async () => {
     try {
-      const r = await api("POST", `/api/cad/incident/${inc.id}/preview`,
-        { unit_ids: ids, full: $("#r-full").checked, remarks: $("#r-remarks").value });
-      showPreview(`Preview${r.kind === "add_on" ? " add-on" : ""}: not logged`, r.text, r.audio_url, r.audio_note, r);
+      await showPreviewThenAudio((r) => `Preview${r.kind === "add_on" ? " add-on" : ""}: not logged`,
+        `/api/cad/incident/${inc.id}/preview`, { unit_ids: ids, full: $("#r-full").checked, remarks: $("#r-remarks").value });
     } catch (e) {
       flash($("#r-error"), e.message);
     }
@@ -2251,8 +2359,8 @@ async function dispatch() {
       const r = await api("POST", `/api/cad/incident/${inc.id}/dispatch`,
         { unit_ids: ids, operator: op, channel: $("#r-channel").value, full: $("#r-full").checked, remarks: $("#r-remarks").value });
       const how = r.transmitted ? `transmitted on ${r.channel}` : "logged, not transmitted";
-      showPreview(`${r.kind === "add-on" ? "Add-on" : "Dispatch"} #${r.dispatch_id}: ${how}`
-        + (r.moved.length ? `. Moved ${r.moved.join(", ")}` : ""), r.text, r.audio_url, r.audio_note, r);
+      showSent(`${r.kind === "add-on" ? "Add-on" : "Dispatch"} #${r.dispatch_id}: ${how}`
+        + (r.moved.length ? `. Moved ${r.moved.join(", ")}` : ""), r);
       $("#r-full").checked = false;
       setTimeout(() => recommend(), 300);
     } catch (e) {
@@ -2280,11 +2388,11 @@ async function upgrade(e, previewOnly) {
   const b = previewOnly ? $("#u-preview") : $("#u-send");
   await busy(b, previewOnly ? "Rendering" : "Sending", async () => {
     try {
-      const r = await api("POST", `/api/cad/incident/${inc.id}/upgrade`, body);
-      if (previewOnly) showPreview("Preview upgrade: not logged", r.text, r.audio_url, r.audio_note, r);
+      if (previewOnly) await showPreviewThenAudio(() => "Preview upgrade: not logged", `/api/cad/incident/${inc.id}/upgrade`, body);
       else {
+        const r = await api("POST", `/api/cad/incident/${inc.id}/upgrade`, body);
         const how = r.transmitted ? `transmitted on ${r.channel}` : "logged, not transmitted";
-        showPreview(`Upgrade #${r.dispatch_id}: ${how}`, r.text, r.audio_url, r.audio_note, r);
+        showSent(`Upgrade #${r.dispatch_id}: ${how}`, r);
         $("#upgrade-form").reset();
         show($("#upgrade-form"), false);
         setTimeout(() => recommend(), 300);
@@ -2555,7 +2663,7 @@ function renderAttach(inc) {
   $("#a-hint").dataset.help = inc.emergency ? "EMS, PD, utilities, keyholders: attached as Dispatched (a keyholder or the Knox box: Notified), "
     + "then their statuses like our units, here and in the right column. Never toned out or said on the air."
     : "Non-emergency: no run card, no dispatch.";
-  const others = units().filter((u) => u.incident_id !== inc.id && (u.board || u.incident_id)
+  const others = units().filter((u) => !onCall(u, inc.id) && (u.board || u.incident_id)
     && (!inc.emergency || u.response === "agency"));
   const sig = JSON.stringify([inc.emergency, others.map((u) => [u.id, u.status, u.incident_number])]);
   const sel = $("#a-unit");
@@ -2636,7 +2744,8 @@ function addStatuses() {                  // Responding, On location: the first 
 }
 function addCandidates(inc) {
   const on = new Set(openAssignments(inc).map((a) => a.name));
-  return tagOrder(inc).filter((c) => !on.has(c)).map((c) => units().find((u) => u.name === c)).filter(Boolean);
+  return tagOrder(inc).filter((c) => !on.has(c)).map((c) => units().find((u) => u.name === c))
+    .filter((u) => u && !u.placeholder);       // a department placeholder: the county's only, never added by hand
 }
 
 // "E60 E62, l31  rbpd" -> ["E60", "E62", "l31", "rbpd"]
@@ -2689,7 +2798,7 @@ function parseUnitList(text, list, here = new Set()) {
 }
 function addParse(inc) {
   const here = new Set(openAssignments(inc).map((a) => a.name));
-  return parseUnitList($("#o-unit").value, units().filter((u) => u.board || u.incident_id), here);
+  return parseUnitList($("#o-unit").value, units().filter((u) => (u.board || u.incident_id) && !u.placeholder), here);
 }
 // The preview: a chip per word, what it matched
 function renderAddPreview() {
@@ -2697,7 +2806,7 @@ function renderAddPreview() {
   const got = inc ? addParse(inc) : [];
   show(box, got.length > 0);
   box.replaceChildren(...got.map((g) => {
-    const u = g.unit, away = u && !g.why && u.incident_id && u.incident_id !== inc.id;
+    const u = g.unit, away = u && !g.why && awayOn(u, inc.id);
     const oos = u && !g.why && roleOf(u.status) === "oos" && u.response !== "agency";
     const c = el("span", "chip add-chip" + (g.why === "unknown" ? " nomatch" : g.why === "typing" ? " typing"
       : g.why ? " skip" : away || oos ? " moving" : ""), u ? u.name : g.text);
@@ -2772,7 +2881,7 @@ function suggestAddUnit() {
     li.setAttribute("aria-selected", String(i === addUnit.idx));
     li.append(el("b", "", u.name));
     if (roleOf(u.status) === "oos") li.append(el("span", "warn small", unitStatus(u.status).name));
-    else if (u.incident_id) li.append(el("span", "warn small", `On ${u.incident_number || "another call"}`));
+    else if (awayOn(u, inc.id)) li.append(el("span", "warn small", `On ${u.incident_number || "another call"}`));
     else if (u.title || u.department) li.append(el("span", "dim small", u.title || u.department));
     li.addEventListener("mousedown", (e) => { e.preventDefault(); takeAddUnit(u.name); });
     return li;
@@ -2834,7 +2943,7 @@ async function submitAddUnit(status) {
   }
   const op = needOperator(err);
   if (!op) return;
-  const away = take.filter((u) => u.incident_id && u.incident_id !== inc.id);
+  const away = take.filter((u) => awayOn(u, inc.id));
   if (away.length && !await UI.confirm(away.length === 1
     ? `${away[0].name} is on ${away[0].incident_number || "another call"}. Move it here?`
     : `${away.map((u) => `${u.name} is on ${u.incident_number || "another call"}`).join(", ")}. Move them here?`,
@@ -2856,9 +2965,9 @@ async function submitAddUnit(status) {
   }
 }
 
-async function setUnitStatus(uid, status, note = "") {
+async function setUnitStatus(uid, status, note = "", call) {   // call: the incident row's (a placeholder: that call only)
   try {
-    await api("POST", `/api/cad/unit/${uid}/status`, { status, operator: operator(), note });
+    await api("POST", `/api/cad/unit/${uid}/status`, { status, operator: operator(), note, ...(call ? { call } : {}) });
   } catch (e) {
     UI.toast(e.message, "err");
   }
@@ -3550,6 +3659,7 @@ function render() {
   renderRunCards();
   renderRecords();
   renderOperators();
+  syncVoice();
   for (const fn of cad.hooks) fn();
   roLockAll();
 }

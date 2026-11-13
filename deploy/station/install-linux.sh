@@ -783,7 +783,7 @@ preflight() {
   # an error says what failed. (Not "adsbd.py help | grep -q usage": its usage exits 2, and under
   # pipefail that fails the pipeline even when grep matches. That refused 919cfc2.)
   local f
-  for f in sizeup/radio/adsbd.py sizeup/radio/trunkrecd.py sizeup/cloud/autoupdate.py sizeup/cloud/configupdate.py tools/stt_diag.py; do
+  for f in sizeup/radio/adsbd.py sizeup/radio/aisd.py sizeup/radio/trunkrecd.py sizeup/cloud/autoupdate.py sizeup/cloud/configupdate.py tools/stt_diag.py; do
     [ -f "$rel/$f" ] || continue
     if out=$(python3 -I -B -c 'import importlib.util as u, sys
 s = u.spec_from_file_location("preflight_check", sys.argv[1]); m = u.module_from_spec(s)
@@ -814,6 +814,8 @@ swap_link() {     # swap_link TARGET LINK: a rename over the old link, never a m
 whisper_argv() { timeout 5 runuser -u "$SVC_USER" -- head -c 8192 /run/sizeup-whisper/argv 2>/dev/null || true; }
 # what sizeup-adsb runs: its supervisor, its unit and the readsb build behind the link (restarted only when one changed)
 adsb_sig() { { cat "$LIB/adsbd.py" /etc/systemd/system/sizeup-adsb.service 2>/dev/null; readlink -f "$OPT/readsb" 2>/dev/null; } | sha256sum | cut -c1-16; }
+# what sizeup-ais runs (#402): its supervisor and its unit (AIS-catcher is installed by hand: README "AIS receiver")
+ais_sig() { { cat "$LIB/aisd.py" /etc/systemd/system/sizeup-ais.service 2>/dev/null || true; } | sha256sum | cut -c1-16; }
 # what sizeup-trunk-recorder runs (#71): its supervisor and its unit, the trunk-recorder and librtlsdr builds behind the
 # links, its config.json and talkgroups.csv (the sizeup user's directory: read as that user, bounded, never waiting
 # long). Restarted only when one of them changed: a Python-only update leaves P25 on its control channel.
@@ -837,10 +839,11 @@ trunk_recorder_service() {
 }
 
 activate() {
-  local name=$1 rel="$RELEASES/$1" sys pair t want have t0 t1 adsb_was tr_was leaving
+  local name=$1 rel="$RELEASES/$1" sys pair t want have t0 t1 adsb_was ais_was tr_was leaving
   [ -f "$rel/.complete" ] || die "no staged release $name in $RELEASES"
   step "switch to release $name"
   adsb_was=$(adsb_sig)
+  ais_was=$(ais_sig)
   tr_was=$(tr_sig)
   # The system files: the release's own, or (a release from before #58) this installer's.
   sys="$rel/deploy/station"
@@ -853,10 +856,13 @@ activate() {
   install -D -m 0644 "$sys/../../sizeup/cloud/autoupdate.py" "$LIB/autoupdate.py"
   # the ADS-B decoder's supervisor (#235; a release from before it has none: the one installed stays)
   [ ! -f "$sys/../../sizeup/radio/adsbd.py" ] || install -D -m 0644 "$sys/../../sizeup/radio/adsbd.py" "$LIB/adsbd.py"
+  # the AIS decoder's supervisor (#402; a release from before it has none)
+  [ ! -f "$sys/../../sizeup/radio/aisd.py" ] || install -D -m 0644 "$sys/../../sizeup/radio/aisd.py" "$LIB/aisd.py"
   # trunk-recorder's supervisor (#71; a release from before it runs trunk-recorder inside sizeup-station)
   [ ! -f "$sys/../../sizeup/radio/trunkrecd.py" ] || install -D -m 0644 "$sys/../../sizeup/radio/trunkrecd.py" "$LIB/trunkrecd.py"
   for t in sizeup-usbfs.service sizeup-station.service sizeup-whisper.service sizeup-health.service sizeup-health.timer \
-           sizeup-update.service sizeup-update.path sizeup-update.timer sizeup-adsb.service sizeup-trunk-recorder.service; do
+           sizeup-update.service sizeup-update.path sizeup-update.timer sizeup-ais.service \
+           sizeup-adsb.service sizeup-trunk-recorder.service; do
     [ -f "$sys/systemd/$t" ] || continue                       # (sizeup-adsb: from before #235; sizeup-trunk-recorder: #71;
                                                                # sizeup-usbfs: #269)
     install -m 0644 "$sys/systemd/$t" "/etc/systemd/system/$t"
@@ -950,6 +956,7 @@ PY
   systemctl enable --quiet sizeup-station.service sizeup-whisper.service sizeup-health.timer \
     sizeup-update.path sizeup-update.timer
   [ ! -f /etc/systemd/system/sizeup-adsb.service ] || systemctl enable --quiet sizeup-adsb.service
+  [ ! -f /etc/systemd/system/sizeup-ais.service ] || systemctl enable --quiet sizeup-ais.service
   # no usbfs buffer limit (#269), at every boot and now, before the dongles' services (re)start; never fails the switch
   if [ -f /etc/systemd/system/sizeup-usbfs.service ]; then
     systemctl enable --quiet sizeup-usbfs.service || warn "sizeup-usbfs: couldn't enable it"
@@ -977,6 +984,15 @@ PY
     else
       systemctl restart sizeup-adsb.service
       say "sizeup-adsb: (re)started (readsb runs only on the dongle named for ADS-B)"
+    fi
+  fi
+  # the AIS decoder (#402): idle unless [vessels.receiver] names a dongle; left running unless it changed
+  if [ -f /etc/systemd/system/sizeup-ais.service ]; then
+    if systemctl is-active --quiet sizeup-ais.service && [ "$ais_was" = "$(ais_sig)" ]; then
+      say "sizeup-ais: unchanged, left running"
+    else
+      systemctl restart sizeup-ais.service
+      say "sizeup-ais: (re)started (AIS-catcher runs only on the dongle named for AIS)"
     fi
   fi
   systemctl restart sizeup-health.timer
@@ -1167,7 +1183,7 @@ fi
 activate "$NAME"
 if command -v systemd-analyze >/dev/null; then
   systemd-analyze verify /etc/systemd/system/sizeup-station.service /etc/systemd/system/sizeup-whisper.service \
-    /etc/systemd/system/sizeup-adsb.service /etc/systemd/system/sizeup-trunk-recorder.service \
+    /etc/systemd/system/sizeup-adsb.service /etc/systemd/system/sizeup-ais.service /etc/systemd/system/sizeup-trunk-recorder.service \
     /etc/systemd/system/sizeup-usbfs.service /etc/systemd/system/sizeup-health.timer /etc/systemd/system/sizeup-update.path \
     /etc/systemd/system/sizeup-update.timer || warn "systemd-analyze verify complained (above)"
 fi

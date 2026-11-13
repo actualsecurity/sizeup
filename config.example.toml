@@ -492,3 +492,18 @@ heartbeat_stale_min = 90             # no heartbeat (or restart) this long: "Tap
 # enabled = false
 # json_1090 = ""                             # e.g. "/run/readsb/aircraft.json" or "http://127.0.0.1/tar1090/data/aircraft.json"
 # json_978 = ""                              # e.g. "/run/skyaware978/aircraft.json"
+
+# [vessels]: AIS ships and boats on western Long Island Sound (sizeup/vessels.py, docs/vessels.md, #402), read by the
+# hub (or all-in-one). aisstream.io only with a key (env SIZEUP_AISSTREAM_KEY; the hub: SSM /sizeup-hub/aisstream-key;
+# never in a committed file); no key: that source is off. Anything outside bbox is dropped.
+# [vessels]
+# enabled = true
+# bbox = [-73.83, 40.78, -73.50, 41.07]     # west, south, east, north: Throgs Neck to Stamford, CT shore to LI's north shore
+#
+# Our own AIS receiver: AIS-catcher on one RTL-SDR at the station (sizeup-ais.service; deploy/station/README.md
+# "AIS receiver"), by its exact USB serial; never one of sizeup's radios. Off until the dongle and antenna are in.
+# [vessels.receiver]
+# enabled = false
+# sdr = ""                                   # e.g. "ais162"
+# gain = "auto"                              # or dB
+# ppm = 0                                    # a non-TCXO dongle's correction
