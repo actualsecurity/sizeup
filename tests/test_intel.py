@@ -232,11 +232,15 @@ def test_the_same_place_from_another_source_merges():
     assert a.id == b.id and b.traffic_ids == ["t1", "t2"]
 
 
-def test_disregard_ends_the_open_event():
+def test_disregard_ends_the_open_event_but_a_nameless_one_only_flags_a_safety_call():
     e, sink = engine()
-    [a] = e.feed(row("t1", "shots fired near Sample St and Test Rd", 1000))
+    [a] = e.feed(row("t1", "vehicle pursuit, failed to stop", 1000))
     out = e.feed(row("t2", "disregard, units disregard", 1020))
     assert [x.status for x in out] == ["ended"] and sink.events[-1][1] == "ended"
+    e, sink = engine()
+    [a] = e.feed(row("t1", "shots fired near Sample St and Test Rd", 1000))
+    [x] = e.feed(row("t2", "disregard, units disregard", 1020))
+    assert x.status == "open" and x.note == "possibly cancelled"          # shots are never ended by a nameless one
 
 
 def test_events_expire_at_their_ttl():
@@ -713,14 +717,14 @@ def test_h1_a_number_said_after_an_id_word_is_never_pushed_as_the_address():
 def test_h2_disregard_then_a_routine_cue_never_pushes_again():
     clock = Clock(1000)
     e, sink = engine(clock=clock)
-    e.feed(row("t1", "shots fired at Sample St and Test Rd", 1000))
-    e.feed(row("t2", "disregard, units disregard", 1010))
-    for k, text in enumerate(("respond to Sample St", "report of shots fired at Sample St and Test Rd")):
-        clock.t = 1020 + k * 60
-        e.feed(row(f"t{3 + k}", text, clock.t))
+    e.feed(row("t1", "pursuit, failed to stop on Sample St", 1000))
+    e.feed(row("t2", "disregard, units disregard", 1010))          # not a safety call: ended
+    clock.t = 1020
+    assert e.feed(row("t3", "respond to Sample St", 1020)) == []    # a routine cue: nothing
     assert sum(d.would_push for _e, d in sink.pushes) == 1
-    clock.t = 1010 + 16 * 60                                     # past mute_min (15): a new mention is a new event
-    assert e.feed(row("t9", "shots fired at Sample St and Test Rd", clock.t))
+    clock.t = 1080                                                  # the call itself again: new evidence, pushed
+    assert e.feed(row("t4", "vehicle pursuit, failed to stop on Sample St", 1080))
+    assert sum(d.would_push for _e, d in sink.pushes) == 2
 
 
 def test_h2_a_dismissed_event_doesnt_come_straight_back(live):
@@ -733,7 +737,8 @@ def test_h2_a_dismissed_event_doesnt_come_straight_back(live):
     cad.comms.record(ctx_row("c2-t0", "units respond, shots fired at Sample St and Test Rd", cad.clock() + 5))
     cad.intel.consider("c2-t0")
     cad.intel.drain()
-    assert len(n.sent) == 1 and [x.mode for x in cad.intel.events.open_events()] == ["log"]   # recorded, never shown
+    [back] = cad.intel.events.open_events()                       # a new report of it: new evidence, it comes back
+    assert back.id == ev.id and back.note == "re-opened" and len(n.sent) == 2
 
 
 def test_h4_intel_writes_never_bump_the_cad_rev(live):
@@ -838,11 +843,11 @@ def test_r2_the_mute_is_by_place_never_by_source():
     e.feed(row("t1", "shots fired at 100 Example Ave", 1000))
     e.feed(row("t2", "disregard, units disregard, shots fired call cancelled", 1010))
     clock.t = 1100
-    [same] = e.feed(row("t3", "shots fired at 100 Example Ave", 1100))      # the same place a moment later: logged
-    assert same.mode == "log"
+    [same] = e.feed(row("t3", "shots fired at 100 Example Ave", 1100))      # the same place again: re-opened, pushed
+    assert same.status == "open" and same.note == "re-opened"
     clock.t = 1110
-    [other] = e.feed(row("t4", "shots fired at Sample St and Test Rd", 1110))   # another place: a real pre-alert
-    assert other.mode == "push" and len(pushed(sink)) == 2
+    [other] = e.feed(row("t4", "shots fired at Sample St and Test Rd", 1110))   # another place: a new pre-alert
+    assert other.id != same.id and other.mode == "push" and len(pushed(sink)) == 3
 
 
 def test_r3_the_dispatchers_next_job_never_places_this_one():
@@ -893,14 +898,100 @@ def test_end_to_end_a_dispatchers_evening():
         (1200, "", "car 3 on scene, smoke showing from the roof"),
         (1260, "", "car 5 to dispatch, I'm at Sample St and Test Rd"),
         (1300, "DISP", "car 7 clear of the parking complaint"),
+        (1320, "DISP", "car 8 in pursuit, at Sample St and Test Rd"),
+        (1380, "", "car 8, now at 100 Example Ave"),
+        (1400, "DISP", "another caller reporting shots fired at Sample St and Test Rd"),
+        (1420, "DISP", "disregard my last"),
     ]
     for k, (t, talker, text) in enumerate(script):
         clock.t = t
         e.feed(row(f"s{k}", text, t, talker=talker))
     by = {x.category: x for x in e.events.all()}
-    assert set(by) == {"fire_report", "weapons", "alarm"}
+    assert set(by) == {"fire_report", "weapons", "alarm", "pursuit"} and len(e.events.all()) == 4
     assert by["fire_report"].status == "open" and by["fire_report"].label_full.startswith("100 Example Ave")
     assert by["weapons"].status == "open" and by["weapons"].label_full.startswith("Sample St")
     assert by["alarm"].status == "ended"
     assert set(by["fire_report"].traffic_ids) == {"s0", "s6"} and "s7" not in by["fire_report"].traffic_ids
-    assert pushed(sink) == [("fire_report", "100 Example Ave"), ("weapons", "Sample St & Test Rd"), ("alarm", "location not heard")]
+    assert by["pursuit"].label_full.startswith("100 Example Ave") and by["pursuit"].status == "ended"   # moved, then
+    assert by["weapons"].status == "open" and by["weapons"].note == "possibly cancelled"             # nameless: flagged
+    assert "s11" in by["weapons"].traffic_ids                      # "another caller": the same incident
+    assert pushed(sink) == [("fire_report", "100 Example Ave"), ("weapons", "Sample St & Test Rd"),
+                            ("alarm", "location not heard"), ("pursuit", "Sample St & Test Rd")]
+
+
+# -- the #492 third check: duplicates, moving incidents, nameless disregards ------------------------------------------
+
+def test_t1_another_caller_is_more_of_the_same_incident():
+    clock = Clock(1000)
+    e, sink = engine(clock=clock)
+    [a] = e.feed(row("t1", "shots fired at 100 Example Ave", 1000))
+    clock.t = 1200
+    [b] = e.feed(row("t2", "another caller reporting shots fired at 100 Example Ave", 1200))
+    assert b.id == a.id and len(pushed(sink)) == 1
+    clock.t = 1300
+    [c] = e.feed(row("t3", "new call, shots fired, no location yet", 1300))        # "new call", no place: new
+    assert c.id != a.id
+
+
+def test_t2_a_pursuit_moves_instead_of_splitting():
+    clock = Clock(1000)
+    e, sink = engine(clock=clock)
+    [a] = e.feed(row("t1", "car 3 in pursuit, at 100 Example Ave", 1000, talker="DISP"))
+    clock.t = 1060
+    [m] = e.feed(row("t2", "car 3, now at Sample St and Test Rd", 1060, talker=""))
+    assert m.id == a.id and m.label_full.startswith("Sample St") and m.note == "moved"
+    assert len(pushed(sink)) == 1                                       # moved within move_min (5): not pushed again
+    clock.t = 1000 + 6 * 60
+    [n] = e.feed(row("t3", "car 3 continuing, still in pursuit at 100 Example Ave", clock.t, talker=""))
+    assert n.id == a.id and n.label_full.startswith("100 Example Ave")
+    assert [x[1] for x in pushed(sink)] == ["100 Example Ave", "100 Example Ave"]   # one "moved" push after 5 min
+    assert len(e.events.all()) == 1
+
+
+def test_t3_a_nameless_disregard_never_ends_shots_and_the_repeat_pushes():
+    clock = Clock(1000)
+    e, sink = engine(clock=clock)
+    [a] = e.feed(row("t1", "shots fired at 100 Example Ave", 1000))
+    clock.t = 1020
+    [x] = e.feed(row("t2", "disregard my last", 1020))
+    assert x.id == a.id and x.status == "open" and x.note == "possibly cancelled"
+    clock.t = 1020 + 4 * 60
+    [y] = e.feed(row("t3", "shots fired, 100 Example Ave, multiple callers", clock.t))
+    assert y.id == a.id and y.note == "re-opened" and len(pushed(sink)) == 2
+
+
+def test_t4_a_unit_alias_is_no_dispatcher_and_a_busy_unit_ties_by_words_only():
+    clock = Clock(1000)
+    e, sink = engine(clock=clock)
+    [a] = e.feed(row("t1", "car 3 respond, shots fired", 1000, talker="DISP"))
+    [b] = e.feed(row("t2", "car 3 also respond, smoke coming from the garage", 1010, talker="DISP"))
+    clock.t = 1060
+    assert e.feed(row("t3", "car 3, I'm at Sample St and Test Rd", 1060, talker="RYE PD CAR 3")) == []
+    assert e.events.get(a.id).precision == "none" and e.events.get(b.id).precision == "none"
+    [up] = e.feed(row("t4", "car 3, the smoke is at Sample St and Test Rd", 1070, talker="RYE PD CAR 3"))
+    assert up.id == b.id and e.events.get(a.id).precision == "none"
+    e2, _s = engine()
+    e2.feed(row("x1", "shots fired", 1000, talker="RYE PD CAR 3"))
+    assert not e2.windows[("police", KEY)].entries["x1"].dispatcher
+
+
+def test_t5_the_locator_runs_only_when_it_can_matter():
+    calls = []
+
+    def counting(text, scope):
+        calls.append(text)
+        return example_locate(text, scope)
+    e, sink = engine(locate=counting)
+    e.feed(row("t1", "car 7 clear, back in service at 100 Example Ave", 1000))    # no rule, nothing open: never
+    assert calls == []
+    e.feed(row("t2", "shots fired at Sample St and Test Rd", 1010))
+    assert calls
+
+
+def test_t2_a_suspect_last_seen_moves_the_one_open_weapons_call():
+    clock = Clock(1000)
+    e, sink = engine(clock=clock)
+    [a] = e.feed(row("t1", "male with a gun at 100 Example Ave", 1000, talker="DISP"))
+    clock.t = 1090
+    [m] = e.feed(row("t2", "suspect last seen at Sample St and Test Rd", 1090, talker="DISP"))
+    assert m.id == a.id and m.label_full.startswith("Sample St") and m.note == "moved" and len(e.events.all()) == 1
