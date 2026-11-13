@@ -1283,12 +1283,18 @@ class Cad:
         if self._shut:
             return
         self._shut = True
-        self.sources.stop(wait_s)
-        self.radiolog.stop(wait_s)
-        self.addrs.stop()
-        self.voice.stop(0.0)                 # a voice still rendering: its job ends by itself; nothing new starts
-        self.voice.join(wait_s)
-        self.store.shutdown()
+        steps = (("incident sources", lambda: self.sources.stop(wait_s)),
+                 ("radio log", lambda: self.radiolog.stop(wait_s, closing=True)),
+                 ("address history", self.addrs.stop),
+                 ("dispatch voice", lambda: (self.voice.stop(0.0), self.voice.join(wait_s))))   # a render ends by itself
+        try:
+            for name, stop in steps:         # one that fails never skips the rest, nor the close
+                try:
+                    stop()
+                except Exception as e:  # noqa: BLE001
+                    self.log(f"CAD: shutdown: {name}: {type(e).__name__}: {e}")
+        finally:
+            self.store.shutdown()
 
     def preview(self, iid: int, body: dict) -> dict:
         """The dispatch as it would go out now. Nothing is assigned or logged. An event that already had a

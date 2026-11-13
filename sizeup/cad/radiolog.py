@@ -216,6 +216,7 @@ class RadioLog:
         self._q: queue.Queue | None = None
         self._qlock = threading.Lock()
         self._stopped = False
+        self._closing = False                            # Cad.shutdown: the store is about to close, no new work at all
         self._threads: list[threading.Thread] = []      # the units worker and backfills running: stop(wait_s) joins them
         with self.store.lock:
             self.store.db.executescript(SCHEMA)
@@ -449,14 +450,18 @@ class RadioLog:
                 self.cad.log(f"CAD: radio log backfill: {type(e).__name__}")
         if self.inline:
             run()
-        elif not self._stopped:                          # stopped: the store may be closing under it
-            self._spawn(run, "radiolog-backfill")
-
-    def _spawn(self, target, name: str) -> None:
-        t = threading.Thread(target=target, name=name, daemon=True)
+            return
         with self._qlock:
-            self._threads = [x for x in self._threads if x.is_alive()]
-            self._threads.append(t)
+            # A plain stop (the App's) still lets a first report's backfill run, as before: only a shutdown (the store
+            # closing under it) refuses it.
+            if not self._closing:
+                self._spawn_locked(run, "radiolog-backfill")
+
+    def _spawn_locked(self, target, name: str) -> None:
+        """A worker started and kept for stop() to join (under _qlock: stop() never sees one not started yet)."""
+        t = threading.Thread(target=target, name=name, daemon=True)
+        self._threads = [x for x in self._threads if x.is_alive()]
+        self._threads.append(t)
         t.start()
 
     # -- units added later (#370) ---------------------------------------------------------------------------------------
@@ -651,12 +656,12 @@ class RadioLog:
             self._units_run(iid)
             return
         with self._qlock:
-            start = self._q is None
-            if start:
+            if self._stopped:                            # stopped meanwhile
+                return
+            if self._q is None:
                 self._q = queue.Queue()
-        if start:
-            self._spawn(self._units_worker, "radiolog-units")
-        self._q.put(iid)
+                self._spawn_locked(self._units_worker, "radiolog-units")
+            self._q.put(iid)
 
     def start(self) -> RadioLog:
         """At start: every open incident's units matched again (a unit put on while the app was down, or work queued
@@ -665,12 +670,13 @@ class RadioLog:
             self.units_soon(r["id"])
         return self
 
-    def stop(self, wait_s: float = 0.0) -> list[threading.Thread]:
+    def stop(self, wait_s: float = 0.0, closing: bool = False) -> list[threading.Thread]:
         """The worker ends after what it is doing (what was queued is picked up again at the next start). wait_s: the
-        units worker and the backfills still running are joined for up to that long in all (before the store is
-        closed under them, Cad.shutdown). The threads still running after it."""
-        self._stopped = True
+        units worker and the backfills still running are joined for up to that long in all. closing (Cad.shutdown, the
+        store is closed next): no new backfill either. The threads still running after it."""
         with self._qlock:
+            self._stopped = True
+            self._closing = self._closing or closing
             if self._q is not None:
                 self._q.put(None)
             threads = list(self._threads)

@@ -169,3 +169,70 @@ def test_shutdown_with_work_queued_never_crashes(tmp_path):
         queue_units_work(c)
         c.shutdown()
         assert not any(t.is_alive() for t in c.radiolog._threads)
+
+
+# -- review follow-ups -------------------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("which", ["after_commit", "after_rollback"])
+def test_a_hook_raising_a_base_exception_never_keeps_the_lock(which):
+    s = Store()
+
+    def boom():
+        raise KeyboardInterrupt
+    setattr(s, which, boom)
+    with pytest.raises(KeyboardInterrupt):
+        with s.tx() as db:
+            db.execute("INSERT INTO meta (key, value) VALUES ('k', 'v')")
+            if which == "after_rollback":
+                raise ValueError
+    assert lock_free(s) and not s.db.in_transaction
+
+
+def test_the_callers_error_is_raised_when_its_rollback_fails_too():
+    """The transaction already ended under the caller (SQLite rolls back by itself on some FULL / IOERR): the ROLLBACK
+    is skipped, and the caller's own error is the one raised, not "no transaction is active"."""
+    s = Store()
+    fired = hooks(s)
+    with pytest.raises(ValueError, match="the caller's"):
+        with s.tx() as db:
+            db.execute("INSERT INTO meta (key, value) VALUES ('k', 'v')")
+            db.execute("ROLLBACK")
+            raise ValueError("the caller's")
+    assert fired == ["rollback"] and lock_free(s) and not s.db.in_transaction and s.meta_get("k") is None
+
+
+def test_a_plain_stop_still_backfills_a_first_report_a_shutdown_does_not(tmp_path):
+    c = make_cad(tmp_path)
+    iid = c.store.create_incident(type="ALARM", subtype="COMM", address="100 Example Ave")
+    c.radiolog.stop()                                      # the App's stop: a first report's backfill still runs
+    c.radiolog.backfill_soon(iid)
+    assert any(t.name == "radiolog-backfill" for t in c.radiolog._threads)
+    c.radiolog.units_soon(iid)                             # ... the units worker does not (picked up at the next start)
+    assert not any(t.name == "radiolog-units" for t in c.radiolog._threads)
+    c.shutdown()
+    n = len(c.radiolog._threads)
+    c.radiolog.backfill_soon(iid)                          # shutting down: nothing new
+    assert len(c.radiolog._threads) == n and not any(t.is_alive() for t in c.radiolog._threads)
+
+
+def test_shutdown_closes_the_store_when_a_stop_fails(tmp_path):
+    logged: list[str] = []
+    c = make_cad(tmp_path)
+    c.log = logged.append
+
+    def broken():
+        raise RuntimeError("stuck")
+    c.addrs.stop = broken
+    c.shutdown()
+    assert any("address history: RuntimeError" in m for m in logged)
+    assert c.voice.stopped                                 # the steps after it still ran
+    with pytest.raises(sqlite3.ProgrammingError):
+        c.store.q("SELECT 1")
+
+
+def test_address_history_stop_from_its_own_thread(tmp_path):
+    c = make_cad(tmp_path)
+    c.addrs._thread = threading.current_thread()          # as if its own worker stopped it: no join on itself
+    c.addrs.stop()
+    c.shutdown()

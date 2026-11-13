@@ -758,7 +758,13 @@ class Store:
                 done = False
                 try:
                     if et:
-                        store.db.execute("ROLLBACK")
+                        # The caller's error is the one raised: a ROLLBACK that fails too (FULL, IOERR: SQLite may
+                        # have rolled back by itself already) never replaces it.
+                        if store.db.in_transaction:
+                            try:
+                                store.db.execute("ROLLBACK")
+                            except Exception:  # noqa: BLE001
+                                pass
                     else:
                         try:
                             store.db.execute("COMMIT")
@@ -784,7 +790,8 @@ class Store:
                             hook()
                     except Exception:  # noqa: BLE001
                         pass
-                    store.lock.release()
+                    finally:                         # even a KeyboardInterrupt in a hook never keeps the lock
+                        store.lock.release()
                 return False
         return _Tx()
 
