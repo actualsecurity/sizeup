@@ -36,8 +36,8 @@ def gaz(tmp_path_factory):
     db.execute("INSERT INTO meta VALUES ('sources', '[]')")
     db.executemany("INSERT INTO streets VALUES (?,?,?)", d["streets"])
     db.executemany("INSERT INTO intersections VALUES (?,?,?,?,?)", d["intersections"])
-    db.execute("INSERT INTO landmarks VALUES (1, 'Whole Foods Market', 'shop=supermarket', '40 Example Road', "
-               "'Port Chester', 40.99242, -73.675505, 'osm', 'whole foods market|whole foods')")
+    db.execute("INSERT INTO landmarks VALUES (1, 'Sample Market', 'shop=supermarket', '40 Example Road', "
+               "'Port Chester', 40.99242, -73.675505, 'osm', 'sample market|sample mkt')")
     db.commit()
     db.close()
     return Gazetteer(path)
@@ -78,8 +78,8 @@ def test_the_directional_typed_first():
 
 
 @pytest.mark.parametrize("text", [
-    "", "135 S Regent St", "King St", "King St &", "& King St", "@ Whole Foods Market",
-    "40 Example Rd @ Whole Foods Market",                     # a named place's address (#204)
+    "", "135 S Regent St", "King St", "King St &", "& King St", "@ Sample Market",
+    "40 Example Rd @ Sample Market",                     # a named place's address (#204)
     "135 S Regent St / W William St",                              # an address with its cross street
     "5 @ Lyon Pa",                                                 # a house number typed in front of a place
     "King St / Westchester Ave / Willett Ave",                     # three streets: not one corner
@@ -90,7 +90,7 @@ def test_not_two_streets(text):
 
 
 def test_an_at_sign_before_a_named_place_is_the_place():
-    assert parse("King St @ Whole Foods Market", is_place=lambda t: t.lower() == "whole foods market") is None
+    assert parse("King St @ Sample Market", is_place=lambda t: t.lower() == "sample market") is None
     assert parse("King St @ Westchester Ave", is_place=lambda t: False).sep == "@"
 
 
@@ -285,7 +285,7 @@ def test_the_location_box(tmp_path, gaz):
     # not two streets, or nowhere they meet: the box's usual suggestions
     assert "error" not in cad.geocode("King St &") and "more" not in cad.geocode("King St")
     assert "more" not in cad.geocode("king st / nowhere ln")
-    assert "more" not in cad.geocode("King St @ Whole Foods Market")        # the place, not a street
+    assert "more" not in cad.geocode("King St @ Sample Market")        # the place, not a street
 
 
 def test_the_place_search_built_with_the_intersection_search_does_not_wait_on_itself(tmp_path, gaz):
@@ -334,8 +334,8 @@ def test_a_note_s_at_search(gaz):
     hits = ix.search("n main / west")
     assert [(h["kind"], h["label"], h["sub"]) for h in hits] == [("intersection", "N Main St & Westchester Ave", "Port Chester")]
     assert [h["label"] for h in ix.search("king / ma", limit=2)] == ["King St & N Main St", "King St & S Main St"]
-    assert ix.names_place("Whole Foods Market") and not ix.names_place("Westchester Ave")
-    assert any(h["kind"] == "place" for h in ix.search("whole foods"))          # everything else as before
+    assert ix.names_place("Sample Market") and not ix.names_place("Example Ave")
+    assert any(h["kind"] == "place" for h in ix.search("sample mkt"))          # everything else as before
 
 
 # --------------------------------------------------------------------------- config and the page

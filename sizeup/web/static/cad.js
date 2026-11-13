@@ -2984,7 +2984,7 @@ function locationText(m) {             // what the location field says for a sug
   if (m && m.place) return m.street_address ? `${m.street_address} @ ${m.place}` : `@ ${m.place}`;
   return (m && m.label) || "";
 }
-function placeKept(box, value) {       // the picked place still named at the end of the field ("... @ Whole Foods Market")?
+function placeKept(box, value) {       // the picked place still named at the end of the field ("... @ Sample Market")?
   const p = box.picked && box.picked.place;
   return !!p && value.trim().toLowerCase().endsWith(`@ ${p}`.toLowerCase());
 }

@@ -323,7 +323,7 @@ class PlaceIndex:
         return rows
 
     def names_place(self, text: str, extra: list[dict] = ()) -> bool:
-        """text is a named place's whole name or alias ("Whole Foods Market"), or one of the department's own."""
+        """text is a named place's whole name or alias ("Sample Market"), or one of the department's own."""
         q = tuple(norm_tokens(text))
         if not q:
             return False

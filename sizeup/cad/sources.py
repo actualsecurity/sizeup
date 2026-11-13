@@ -462,15 +462,38 @@ NOT_TOWN = {"ext", "extn", "extension", "north", "south", "east", "west", "rear"
 STATE_CODES = {"ny", "ct", "nj", "pa", "ma", "usa"}
 
 
+EXTRA_TOWNS: frozenset = frozenset()          # more towns a location may name (set_known_towns: the joint-response towns)
+
+
+def set_known_towns(names) -> None:
+    global EXTRA_TOWNS
+    EXTRA_TOWNS = frozenset(k for k in (tuple(re.findall(r"[a-z0-9]+", str(n).lower())) for n in names or ()) if k)
+
+
+def known_town(text: str) -> bool:
+    """A town this CAD knows: a listed town or alias (set_towns), a town of the street lists (set_streets: the
+    gazetteer's, neighbours included), a joint-response town (set_known_towns), or "Town of X" for one of those. Words
+    typed after a street, or a feed's town, are a town only then ("12 SAMPLE AVE CLUBHOUSE" never is)."""
+    key = tuple(re.findall(r"[a-z0-9]+", str(text or "").lower().replace("_", " ")))
+    if len(key) >= 2 and key[-1] in TOWN_KIND:          # SAMPLE_V, SAMPLE_T: the county's village / town of Sample
+        key = (*TOWN_KIND[key[-1]], *key[:-1])
+    if not key or any(w in NOT_TOWN for w in key[-1:]):
+        return False
+    streets = {tuple(re.findall(r"[a-z0-9]+", t)) for t in STREETS}
+    known = lambda k: k in TOWN_OF or k in streets or k in EXTRA_TOWNS
+    return known(key) or (key[:2] == ("town", "of") and len(key) > 2 and known(key[2:]))
+
+
 def _tail_town(tail: list[str]) -> tuple[str, list[str]]:
-    """(the town a typed location's words after its suffix name, the words that stay on the street): one word that is
-    not a descriptor ("OTHERTOWN"; "OTHERTOWN CT": the state code dropped); ('', tail) for anything else ("REAR",
-    "REAR OTHERTOWN", "NB")."""
+    """(the town a typed location's words after its suffix name, the words that stay on the street): a known town
+    (known_town; "OTHERTOWN CT": the state code dropped); ('', tail) for anything else ("REAR", "MAIN", "REAR
+    OTHERTOWN", "NB", a town this CAD doesn't know)."""
     words = list(tail)
     while len(words) > 1 and words[-1].lower() in STATE_CODES:
         words.pop()
-    if len(words) == 1 and words[0].isalpha() and len(words[0]) >= 3 and words[0].lower() not in NOT_TOWN | STATE_CODES:
-        return town_label(words[0]), []
+    if words and all(w.isalpha() for w in words) and known_town(" ".join(words)) \
+            and not any(w.lower() in NOT_TOWN | STATE_CODES for w in words):
+        return town_label(" ".join(words)), []
     return "", list(tail)
 
 
@@ -608,7 +631,7 @@ def normal_location(s: str, *, town: str = "", geo_label: str = "", within=(), f
                                               *re.findall(r"\b[A-Za-z0-9]+(?:_[A-Za-z0-9]+)+\b", head),
                                               *re.findall(r"\b[A-Z0-9]+(?:_[A-Z0-9]+)+\s*$", s)]   # "... : @PLACE TOWN_V"
                       if _town_token(x)), "")
-    if not found and str(town or "").strip():
+    if not found and str(town or "").strip() and known_town(town):     # a feed's town hint: only a town we know
         hint = [w.lower() for w in re.split(r"[_\s]+", str(town).strip()) if w]
         toks = part.split()
         rest = " ".join(toks[:-len(hint)]) if len(toks) > len(hint) else ""
@@ -994,6 +1017,7 @@ class Sources:
                 self.log(f"incident sources: street list: {type(e).__name__}")
         set_unit_aliases(self.feed_unit_aliases())
         set_department_codes(self.department_units())
+        set_known_towns(getattr(L, "joint_response", None) or ())
         set_placeholders(getattr(L, "placeholder", None))
 
     def _data_file(self, name: str, values=str) -> dict:
@@ -2006,7 +2030,8 @@ class Sources:
                 failed += 1
                 try:
                     with self.store.tx() as db:
-                        db.execute("UPDATE incidents SET address_raw = ? WHERE id = ? AND address_raw = ''", (old, inc["id"]))
+                        db.execute("UPDATE incidents SET address_raw = ? WHERE id = ? AND address = ? AND "
+                                       "address_raw = ''", (old, inc["id"], old))
                 except Exception:  # noqa: BLE001
                     pass
         if n or failed:
@@ -2035,7 +2060,8 @@ class Sources:
                 cur = db.execute("UPDATE incidents SET address = ?, address_raw = ? WHERE id = ? AND address = ? AND "
                                  "address_raw = ''", (new, old, inc["id"], old))
             else:                                            # as it was: marked done, the address left alone
-                cur = db.execute("UPDATE incidents SET address_raw = ? WHERE id = ? AND address_raw = ''", (old, inc["id"]))
+                cur = db.execute("UPDATE incidents SET address_raw = ? WHERE id = ? AND address = ? AND "
+                                       "address_raw = ''", (old, inc["id"], old))
             if fed and cur.rowcount:
                 db.execute("INSERT OR IGNORE INTO feed_addresses (incident_id, address) VALUES (?, ?)", (inc["id"], new))
         return bool(cur.rowcount) and new != old

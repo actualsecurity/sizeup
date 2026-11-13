@@ -14,7 +14,8 @@ from tests.test_incident_sources import T0, Rig, towns
 from tests.test_street_only import open_incidents, possibly
 
 STREETS = {"rye brook": ["Example Ave", "Sample Ln", "DeSample Rd", "N Example St"],
-           "port chester": ["Exampleton Rd", "Sample Ave", "Specimen St", "North St"]}
+           "port chester": ["Exampleton Rd", "Sample Ave", "Specimen St", "North St"],
+           "othertown": ["Distant Way"]}                  # a neighbouring town of the street lists (out of area)
 
 
 @pytest.fixture(autouse=True)
@@ -442,3 +443,61 @@ def test_a_feed_made_incident_keeps_its_push_guard_even_without_the_old_record(t
     rig.cad.sources.backfill_addresses()
     inc = rig.cad.store.incident(iid)
     assert inc["address"] != "12 EXAMPLE AVE" and rig.cad.sources.feed_address(iid, inc["address"])
+
+
+# -- a town only when it is one we know ------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("raw,want", [
+    ("12 SAMPLE AVE MAIN", "12 Sample Ave Main, Port Chester"),
+    ("12 SAMPLE AVE CLUBHOUSE", "12 Sample Ave Clubhouse, Port Chester"),
+    ("12 SAMPLE AVE TRLR", "12 Sample Ave Trlr, Port Chester"),
+    ("12 SAMPLE AVE SOUTHSIDE", "12 Sample Ave Southside, Port Chester"),
+    ("12 OTHER AVE UNKNOWNVILLE", "12 Other Ave Unknownville"),          # not a town this CAD knows: stays
+    ("12 OTHER AVE OTHERTOWN", "12 Other Ave, Othertown"),              # a town of the street lists: its town
+    ("12 OTHER AVE OTHERTOWN CT", "12 Other Ave, Othertown"),
+])
+def test_a_trailing_word_is_a_town_only_when_known(raw, want):
+    assert normal_location(raw, typed=True) == want
+
+
+def test_a_feeds_town_hint_is_filtered_by_the_same_list():
+    """Whatever an adapter release sends as its town, only a known one is shown."""
+    assert normal_location("12 OTHER ST BASEMENT", town="Basement", typed=True) == "12 Other St Basement"
+    assert normal_location("12 OTHER ST", town="Unknownville", typed=True, fallback="Rye Brook") == "12 Other St, Rye Brook"
+    assert normal_location("12 OTHER ST OTHERTOWN", town="Othertown", typed=True) == "12 Other St, Othertown"
+    assert normal_location("12 OTHER ST", town="OTHERTOWN_T", typed=True) == "12 Other St, Town of Othertown"
+
+
+def test_known_towns():
+    try:
+        assert src.known_town("Rye Brook") and src.known_town("RYE_BROOK") and src.known_town("othertown")
+        assert src.known_town("Town of Othertown") and src.known_town("OTHERTOWN_V")
+        assert not src.known_town("Unknownville") and not src.known_town("Basement") and not src.known_town("")
+        assert not src.known_town("Jointville")
+        src.set_known_towns(["Jointville"])                             # a joint-response town
+        assert src.known_town("JOINTVILLE") and normal_location("12 OTHER AVE JOINTVILLE", typed=True) == \
+            "12 Other Ave, Jointville"
+    finally:
+        src.set_known_towns(())
+
+
+def test_a_persons_edit_during_the_backfill_is_never_overwritten(tmp_path):
+    """The row read, then a person edits its address before the backfill writes: their address stands, address_raw
+    stays empty (theirs), on the unchanged path and the failure path alike."""
+    rig = Rig(tmp_path)
+    same = old_row(rig, "16 Example Ave, Rye Brook", ref="E1", feed_text="16 EXAMPLE AVE RYE_BROOK")   # unchanged path
+    bad = old_row(rig, "12 EXAMPLE AVE", ref="E2", feed_text="12 EXAMPLE AVE")                         # failure path
+    one = rig.cad.sources._backfill_one
+
+    def edited_meanwhile(inc):
+        with rig.cad.store.tx() as db:
+            db.execute("UPDATE incidents SET address = '20 Example Ave' WHERE id = ?", (inc["id"],))
+        if inc["id"] == bad:
+            raise ValueError("fails after the edit")
+        return one(inc)
+    rig.cad.sources._backfill_one = edited_meanwhile
+    rig.cad.sources.backfill_addresses()
+    for iid in (same, bad):
+        got = rig.cad.store.incident(iid)
+        assert (got["address"], got["address_raw"]) == ("20 Example Ave", "")
