@@ -122,7 +122,7 @@ window.RadioControls = (() => {
              + "so numbers go spelled out (Engine 60 \u2192 Engine-sixty) and come back as written. Saved here, sent to "
              + "AWS with Push (the hub's vocabulary sizeup-pcfd), used by new streams once it is Ready.", ...vocabCard())),
         tab("stt", card("Speech-to-text", "Runs every recording still on disk through speech-to-text again (newest first, behind live "
-             + "traffic), with the local model.\n" + ENGINE_HELP, rerunRow)));
+             + "traffic), with the local model.\n" + ENGINE_HELP, rerunRow, n.catchupRow)));
     }
     loadStt();
     poll();
@@ -1261,6 +1261,22 @@ window.RadioControls = (() => {
     const lim = el("div", "row");
     lim.append(el("span", "small", "Monthly AWS limit $"), n.limit, n.limitSave,
       el("span", "small", "PD $"), n.pdLimit, n.pdLimitSave);
+    // shed clips ("Skipped: busy") re-run once whisper or their AWS channel is idle (sizeup/sttcatchup.py)
+    n.catchup = el("input");
+    n.catchup.type = "checkbox";
+    n.catchup.setAttribute("aria-label", "Catch up skipped clips");
+    n.catchup.title = "Clips skipped while speech-to-text was busy are transcribed once it is idle: fire traffic first, "
+      + "never the fire AWS budget";
+    n.catchup.addEventListener("change", () => saveCatchup("catchup", n.catchup.checked));
+    n.catchupAge = el("input", "vocab-limit");
+    Object.assign(n.catchupAge, { type: "number", min: 0.5, max: 48, step: 0.5 });
+    n.catchupAge.setAttribute("aria-label", "Catch-up max age in hours");
+    n.catchupAgeSave = btn("Save", () => saveCatchup("catchup_max_age_h", Number(n.catchupAge.value)),
+      "Older skipped clips stay skipped");
+    const cuLabel = el("label", "small");
+    cuLabel.append(n.catchup, el("span", "", " Catch up skipped clips"));
+    n.catchupRow = el("div", "row");          // (in the Speech-to-text card)
+    n.catchupRow.append(cuLabel, el("span", "small", "max age"), n.catchupAge, el("span", "small", "h"), n.catchupAgeSave);
     return [n.vocab, row, n.vocabMsg, n.vocabSkip, lim];
   }
 
@@ -1283,6 +1299,10 @@ window.RadioControls = (() => {
     if (fresh && !st.vocabDirty) n.vocab.value = v.phrases.join("\n");
     if (fresh && document.activeElement !== n.limit) n.limit.value = d.limit.value;
     if (fresh && d.context_limit && document.activeElement !== n.pdLimit) n.pdLimit.value = d.context_limit.value;
+    if (fresh && d.catchup) {
+      n.catchup.checked = !!d.catchup.on;
+      if (document.activeElement !== n.catchupAge) n.catchupAge.value = d.catchup.max_age_h;
+    }
     const s = v.state || {};
     const when = s.updated ? ` (sent ${fmtTime(s.updated)})` : "";
     const word = { READY: "Ready", PENDING: "Being built by AWS…", FAILED: "Failed", error: "Error", none: "Not on AWS yet" }[s.state] || s.state;
@@ -1303,6 +1323,7 @@ window.RadioControls = (() => {
     n.vocabPush.disabled = lock || st.vocabBusy || !enabled || st.vocabDirty;
     n.vocabPush.title = !enabled ? "Amazon Transcribe runs on the hub: push from there" : st.vocabDirty ? "Save the list first" : "Send the saved list to Amazon Transcribe";
     n.vocab.disabled = n.limit.disabled = n.limitSave.disabled = n.pdLimit.disabled = n.pdLimitSave.disabled = lock;
+    n.catchup.disabled = n.catchupAge.disabled = n.catchupAgeSave.disabled = lock || !d.catchup;
   }
 
   async function saveVocab() {
@@ -1334,6 +1355,17 @@ window.RadioControls = (() => {
       st.vocabMsg = `Not sent: ${e.message}`;
     }
     st.vocabBusy = false;
+    loadStt();
+  }
+
+  async function saveCatchup(key, value) {
+    if (ro()) return;
+    try {
+      await api("POST", "/api/cad/settings/stt", { action: "set", key, value,
+                                                   operator: typeof operator === "function" ? operator() : "" });
+    } catch (e) {
+      UI.toast(`Catch-up not saved: ${e.message}`, "err");
+    }
     loadStt();
   }
 

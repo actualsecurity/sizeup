@@ -864,6 +864,11 @@ class AwsTranscriber:
             w.put(job)
         self._watch()
 
+    def open_jobs(self, channel: str | None = None) -> int:
+        """Jobs submitted with no outcome yet (from that channel): the catch-up waits for none (sizeup/sttcatchup.py)."""
+        with self._lock:
+            return sum(1 for j in self._open if channel is None or j.channel == channel)
+
     def give_up(self, match: Callable[[object], bool], why: str) -> bool:
         """Fail every open job whose item matches as timed out (on_fail: its fallback). The hub's sweep, for an
         item still "Transcribing" past its deadline. True if there was one."""

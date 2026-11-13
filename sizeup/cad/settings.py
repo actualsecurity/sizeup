@@ -178,7 +178,8 @@ WORDING = (("new", "First dispatch"), ("add_on", "Added to the assignment"), ("u
            ("respond", "Upgrade: more units"))
 MAX_TONES, MAX_GROUPS, MAX_CHANNELS = 8, 4, 8
 MAX_VOCAB, MAX_PHRASE_CHARS = 1500, 100
-STT_KEYS = ("vocabulary", "aws_monthly_limit_usd", "aws_context_budget_usd")   # the "stt" section's keys
+STT_KEYS = ("vocabulary", "aws_monthly_limit_usd", "aws_context_budget_usd",   # the "stt" section's keys
+            "catchup", "catchup_max_age_h")    # shed clips caught up (sizeup/sttcatchup.py): on/off, how far back
 MAX_VOCAB_BYTES = 50_000          # AWS's limit; also keeps the Settings request under its 64 KB
 MAX_PLACE_NAMES = 300
 TONES_SECTION, MAX_NAMED_TONES, TONE_HZ = "tones", 400, tonelist.TONE_HZ     # the decoder's band (radio/tones.py)
@@ -2125,9 +2126,32 @@ class Editor:
             raise CadError(f"{key}: 0 to 10000 (dollars)")
         return round(float(v), 2)
 
+    @staticmethod
+    def _catchup_value(key: str, v):
+        """catchup: true | false; catchup_max_age_h: hours (sizeup/sttcatchup.py MAX_AGE_RANGE_H)."""
+        from sizeup.sttcatchup import MAX_AGE_RANGE_H
+        if key == "catchup":
+            if not isinstance(v, bool):
+                raise CadError("catchup: true or false")
+            return v
+        lo, hi = MAX_AGE_RANGE_H
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not lo <= v <= hi:
+            raise CadError(f"catchup_max_age_h: {lo:g} to {hi:g} (hours)")
+        return round(float(v), 1)
+
+    def stt_catchup(self) -> tuple[bool, float]:
+        """(on, max age in hours): shed clips caught up (sizeup/sttcatchup.py), on and 6 h unless set here."""
+        from sizeup.sttcatchup import DEFAULT_MAX_AGE_H
+        cur = self.stt_values()
+        on, age = cur.get("catchup", True), cur.get("catchup_max_age_h", DEFAULT_MAX_AGE_H)
+        try:
+            return self._catchup_value("catchup", on), self._catchup_value("catchup_max_age_h", age)
+        except CadError:
+            return True, DEFAULT_MAX_AGE_H
+
     def _stt_op(self, action: str, body: dict, op: str) -> dict:
-        """set {key: vocabulary | aws_monthly_limit_usd | aws_context_budget_usd, value} | reset {key} | push (the
-        vocabularies to AWS)."""
+        """set {key: vocabulary | aws_monthly_limit_usd | aws_context_budget_usd | catchup | catchup_max_age_h, value} |
+        reset {key} | push (the vocabularies to AWS)."""
         ctx = self.cad.radio_ctx
         cur = self.stt_values()
         if action == "push":
@@ -2142,13 +2166,19 @@ class Editor:
                                                                            if st.get("state") == "error" else {})}
         key = _text(body.get("key"), "key", 40)
         if key not in STT_KEYS:
-            raise CadError("key: vocabulary, aws_monthly_limit_usd or aws_context_budget_usd")
+            raise CadError("key: vocabulary, aws_monthly_limit_usd, aws_context_budget_usd, catchup or catchup_max_age_h")
         if action == "set":
             if key == "vocabulary":
                 v = self._vocab_list(body.get("value"))
                 dflt = ctx.vocabulary_suggestions() if ctx is not None else []
                 new = REMOVE if v == dflt else v
                 shown = (f"{len(cur[key])} phrases" if key in cur else "default"), f"{len(v)} phrases"
+            elif key in ("catchup", "catchup_max_age_h"):
+                from sizeup.sttcatchup import DEFAULT_MAX_AGE_H
+                v = self._catchup_value(key, body.get("value"))
+                dflt = True if key == "catchup" else DEFAULT_MAX_AGE_H
+                new = REMOVE if v == dflt else v
+                shown = cur.get(key, dflt), v
             else:
                 v = self._limit(body.get("value"), key)
                 dflt = self._limit_default(key)
@@ -2206,6 +2236,8 @@ class Editor:
                           "edited": "aws_monthly_limit_usd" in cur},
                 "context_limit": {"value": self.aws_context_limit(), "default": self._limit_default("aws_context_budget_usd"),
                                   "edited": "aws_context_budget_usd" in cur},
+                "catchup": dict(zip(("on", "max_age_h"), self.stt_catchup()),
+                                edited="catchup" in cur or "catchup_max_age_h" in cur),
                 "aws": ctx.aws_status() if ctx is not None else {"enabled": False}}
 
     # -- the camera wall's area (#125): the margin around our fire districts, cameras always / never on it ---------
@@ -2669,12 +2701,16 @@ class Editor:
                 raise CadError(f"overrides.{DEPT_SECTION}.{e}") from None
         st = ov.get("stt") or {}
         if set(st) - set(STT_KEYS):
-            raise CadError("overrides.stt: vocabulary, aws_monthly_limit_usd and aws_context_budget_usd only")
+            raise CadError("overrides.stt: vocabulary, aws_monthly_limit_usd, aws_context_budget_usd, catchup and "
+                           "catchup_max_age_h only")
         if "vocabulary" in st:
             self._vocab_list(st["vocabulary"])
         for k in ("aws_monthly_limit_usd", "aws_context_budget_usd"):
             if k in st:
                 self._limit(st[k], k)
+        for k in ("catchup", "catchup_max_age_h"):
+            if k in st:
+                self._catchup_value(k, st[k])
         L = self.build(ov)
         for k in eta.KEYS:
             if k in d:

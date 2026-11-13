@@ -605,6 +605,37 @@ class Comms:
                 self.rev += 1
         return bool(n)
 
+    # -- shed clips caught up (sizeup/sttcatchup.py): read only; the re-run path writes ---------------------------
+
+    SHED_WHERE = "start >= ? AND status = 'skipped' AND model LIKE ?"
+
+    def shed_clips(self, since: float, limit: int = 60) -> list[dict]:
+        """Rows still skipped because speech-to-text was busy (stt.SHED), heard since `since`: the alert tier first,
+        then the newest. Each {id, key (its speech-to-text channel key), source, unit, start, service, tier}."""
+        from sizeup.stt import SHED
+        rows = self.store.q(
+            f'SELECT id, start, channel, talkgroup, talker, system, service, tier FROM radio_traffic WHERE {self.SHED_WHERE} '
+            "ORDER BY (tier = 'alert') DESC, start DESC LIMIT ?", (float(since), f"%{SHED}%", int(limit)))
+        out = []
+        for r in rows:
+            tg = r["talkgroup"]
+            key = r["channel"] if tg is None else sources.channel_key(r["system"] or "", int(tg))
+            out.append({"id": r["id"], "key": key, "source": r["channel"], "unit": r["talker"] or "",
+                        "start": r["start"], "service": r["service"] or "", "tier": r["tier"] or ""})
+        return out
+
+    def shed_count(self, since: float) -> int:
+        from sizeup.stt import SHED
+        r = self.store.one(f"SELECT COUNT(*) AS n FROM radio_traffic WHERE {self.SHED_WHERE}", (float(since), f"%{SHED}%"))
+        return int((r or {}).get("n") or 0)
+
+    def caught_up(self, since: float, heard_since: float) -> int:
+        """Shed rows caught up (a re-run whose result says so, not failed) since `since`, heard since heard_since."""
+        from sizeup.stt import CATCHUP_NOTE
+        r = self.store.one("SELECT COUNT(*) AS n FROM radio_traffic WHERE start >= ? AND rerun_at >= ? AND rerun_result LIKE ? "
+                           "AND rerun_result NOT LIKE 'failed%'", (float(heard_since), float(since), f"%; {CATCHUP_NOTE}"))
+        return int((r or {}).get("n") or 0)
+
     def set_alt(self, tid: str, alt: dict) -> bool:
         """The other engine's text ("both"), the transcript left as it is."""
         with self.store.tx() as db:

@@ -695,8 +695,9 @@ class StationHealth:
         out["stt_queue"] = {k: sq.get(k) for k in ("queued", "urgent", "high", "live", "low", "rerun", "fallback", "stale",
                                                    "oldest_s", "oldest_low_s", "top", "in_h", "in_low_h", "in_fallback_h",
                                                    "in_top", "service_s", "out_h", "dropped", "skipped", "shed",
-                                                   "shed_context", "shed_context_h",
+                                                   "shed_context", "shed_context_h", "catchup",
                                                    "last_drop", "last_error", "max", "working")} if sq else None
+        out["stt_catchup"] = self._catchup()
         started = hl.get("started")
         out["system"] = {k: hl.get(k) for k in ("host", "cpu_pct", "load1", "cpus", "mem_pct", "mem_total", "temp_c",
                                                  "disk_pct", "disk_free", "disk_total", "disk_path")}
@@ -755,6 +756,16 @@ class StationHealth:
                                                "retunes": cc.get("retunes"),
                                                "last_retune": cc["last_retune"] + skew
                                                if isinstance(cc.get("last_retune"), (int, float)) else None}}
+
+    def _catchup(self) -> dict | None:
+        """Shed clips caught up (sizeup/sttcatchup.py): on, the backlog waiting, caught up in the last 24 h."""
+        cu = getattr(getattr(self.hub, "app", None), "catchup", None)
+        if cu is None:
+            return None
+        try:
+            return cu.stats()
+        except Exception as e:  # never in the way of the rest
+            return {"error": f"{type(e).__name__}: {e}"}
 
     def _transcribe(self) -> dict | None:
         """Amazon Transcribe's health on the hub (HubApp.aws_health()), None when it isn't set up here."""

@@ -3,6 +3,12 @@
 // ADMIN_READS) has the station's health, the alerts now and 24 h of their history; polled every POLL_MS while the tab is
 // on screen, and not at all otherwise. Self-contained: settings.js mounts it on the section (sHealth).
 const StationHealth = (() => {
+  // shed clips caught up (Settings > Radios > Speech-to-text, Catch up): "4 waiting · 12 caught up (24 h)"
+  function catchupLine(cu, sq) {
+    if (!cu || cu.on === null || cu.on === undefined) return "";
+    if (!cu.on) return "Off";
+    return `${cu.waiting ?? 0} waiting · ${cu.caught_24h ?? 0} caught up (24 h)` + (sq && sq.catchup ? ` · ${sq.catchup} queued` : "");
+  }
   const POLL_MS = 5000;
   let panel = null, card = null, timer = null, last = null, busy = false;
 
@@ -207,6 +213,8 @@ const StationHealth = (() => {
           + (sq.in_fallback_h ? ` · ${sq.in_fallback_h}/h AWS fallback` : "") : "", sq.service_s && sq.in_h > 3600 / sq.service_s ? "hl-warn" : ""],
         ["Dropped / skipped / shed", `${sq.dropped || 0} / ${sq.skipped || 0} / ${sq.shed || 0}` + (sq.last_drop ? ` · last: ${sq.last_drop.why}` : ""),
           sq.dropped || sq.skipped ? "hl-warn" : ""],
+        // shed clips re-run once whisper is idle (sizeup/sttcatchup.py): the backlog, and caught up in the last 24 h
+        ["Catch-up", catchupLine(h.stt_catchup, sq)],
       ]));
     }
     const tr = h.transcribe;
