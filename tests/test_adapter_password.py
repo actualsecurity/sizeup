@@ -171,26 +171,105 @@ def test_what_a_password_may_be():
     assert not leaks(*(problem(x + SECRET) for x in ("", "\n", "x" * 5000, "\ud800")))
 
 
-def test_the_names_come_from_the_environment_and_must_be_the_adapters():
-    assert AdapterPassword.from_env({}).why_not == "Not configured"
-    assert AdapterPassword.from_env({adapterpass.ENV_PARAM: NAME, adapterpass.ENV_KEY: KEY}).configured
-    assert AdapterPassword.from_env({adapterpass.ENV_PARAM: "/sizeup-hub/station-token", adapterpass.ENV_KEY: KEY}).why_not \
-        .startswith("Not configured (the parameter")              # never anything but the adapter's prefix
-    assert AdapterPassword(NAME, "not a key").why_not.startswith("Not configured (not a KMS")
+def test_the_names_must_be_the_adapters():
+    assert AdapterPassword(lookup=False).why_not == "Not configured"
+    assert AdapterPassword(NAME, KEY).configured
+    assert AdapterPassword("/sizeup-hub/station-token", KEY).why_not.startswith("Not configured (the parameter")   # never
+    assert AdapterPassword(NAME, "not a key").why_not.startswith("Not configured (not a KMS")    # anything but the adapter's
     for k in ("alias/some-key", f"arn:aws:kms:us-east-1:000000000000:key/{KEY}", "mrk-" + "a" * 32):
         assert AdapterPassword(NAME, k).configured, k
     src = (ROOT / "sizeup" / "cloud" / "adapterpass.py").read_text() + (ROOT / "sizeup" / "app.py").read_text()
     assert "SIZEUP_" + "COUNTY" not in src                           # (the real name is the department's, never here)
 
 
-def test_the_task_definition_names_them_from_ssm_by_name_only():
-    td = json.loads((ROOT / "deploy" / "aws" / "taskdef.json").read_text())
-    hub = next(c for c in td["containerDefinitions"] if c["name"] == "hub")
-    secrets = {s["name"]: s["valueFrom"] for s in hub["secrets"]}
-    assert secrets[adapterpass.ENV_PARAM] == "/sizeup-hub/adapter-password-param"
-    assert secrets[adapterpass.ENV_KEY] == "/sizeup-hub/adapter-password-key"
-    cf = next(c for c in td["containerDefinitions"] if c["name"] == "cloudflared")
-    assert adapterpass.ENV_PARAM not in json.dumps(cf)
+def test_the_task_definition_knows_nothing_of_it():
+    """Optional: a deploy never depends on it (a task whose secret is missing doesn't start)."""
+    text = (ROOT / "deploy" / "aws" / "taskdef.json").read_text()
+    assert "adapter-password" not in text and "ADAPTER_PASSWORD" not in text
+
+
+class LookupSsm(FakeSsm):
+    """FakeSsm plus the hub's two name parameters (GetParameter, never with decryption)."""
+
+    def __init__(self, names: dict | None = None, error: str = ""):
+        super().__init__()
+        self.names, self.error = names, error
+
+    def __call__(self, url, headers, body, timeout):
+        if headers["X-Amz-Target"] == "AmazonSSM.GetParameter":
+            doc = json.loads(bytes(body))
+            self.calls.append({"target": "AmazonSSM.GetParameter", "doc": doc, "headers": dict(headers), "url": url})
+            assert set(doc) == {"Name"}                                 # never WithDecryption
+            if self.error:
+                return 400, json.dumps({"__type": self.error, "message": "no"}).encode()
+            if not self.names or doc["Name"] not in self.names:
+                return 400, json.dumps({"__type": "ParameterNotFound"}).encode()
+            return 200, json.dumps({"Parameter": {"Name": doc["Name"], "Type": "String", "Value": self.names[doc["Name"]],
+                                                  "Version": 1}}).encode()
+        return super().__call__(url, headers, body, timeout)
+
+
+def lookup_ap(ssm, clock, logs=None):
+    return AdapterPassword(region="us-east-1", send=ssm, clock=clock, log=(logs if logs is not None else []).append,
+                           creds=lambda: aws.Credentials("AKIDEXAMPLE", "x"))
+
+
+def test_the_names_are_looked_up_lazily_cached_and_retried():
+    clock, ssm = Clock(), LookupSsm({adapterpass.LOOKUP_PARAM: NAME, adapterpass.LOOKUP_KEY: KEY})
+    logs = []
+    ap = lookup_ap(ssm, clock, logs)
+    assert ssm.calls == []                                              # nothing at the start
+    assert ap.configured and ap.name == NAME and ap.key == KEY
+    assert [c["doc"]["Name"] for c in ssm.calls] == [adapterpass.LOOKUP_PARAM, adapterpass.LOOKUP_KEY]
+    assert logs == ["adapter password: configured from SSM"]           # (never the names)
+    ap.configured
+    assert len(ssm.calls) == 2                                          # cached
+    clock.t += adapterpass.RESOLVED_S + 1
+    ssm.error = "InternalServerError"                                   # a hiccup: the names that worked stay
+    assert ap.configured and len(ssm.calls) == 3
+    clock.t += adapterpass.RESOLVED_S + 1
+    ssm.error = "AccessDeniedException"                                 # taken away (step 20 undone): not configured
+    assert not ap.configured and ap.status(make_cad().store)["detail"] == "AccessDeniedException"
+
+
+def test_without_the_parameters_the_hub_runs_the_card_says_not_configured_and_nothing_is_written(tmp_path, capfd):
+    """No parameters (step 20 never ran): the hub starts as ever, the card says so, a save is refused, no AWS write."""
+    from tests.test_cloud import HubRun, hub_cfg
+    hub = HubRun(hub_cfg(tmp_path))                     # the real hub, as make_server builds it (no AWS credentials)
+    try:
+        from sizeup.app import adapter_password
+        made = adapter_password(hub.app.cfg)
+        assert isinstance(made, AdapterPassword) and not made._fixed
+        assert hub.get("/healthz")["ok"] is True
+        code, st, _ = get(hub)                          # (no Access here: nobody to check, as all-in-one)
+        assert code == 403                              # never without a verified person
+    finally:
+        hub.close()
+    clock, ssm = Clock(), LookupSsm(None)               # SSM says ParameterNotFound
+    cad = make_cad(tmp_path)
+    people(cad)
+    ap = lookup_ap(ssm, clock)
+    srv = WebServer("127.0.0.1", 0, {}, lambda: {}, lambda c: None, lambda i: False, cad=CadApi(cad), access=Access(),
+                    role="hub", adapter_password=ap)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    h = type("Hub", (), {"url": f"http://127.0.0.1:{srv.httpd.server_address[1]}"})()
+    try:
+        code, st, _ = get(h)
+        assert code == 200 and st["configured"] is False and st["why_not"] == "Not configured" and st["detail"] == "absent"
+        code, out, _ = post(h, {"password": SECRET, "again": SECRET})
+        assert code == 404 and out["error"] == "Not configured"
+        assert {c["target"] for c in ssm.calls} == {"AmazonSSM.GetParameter"}   # looked up once, nothing written
+        n = len(ssm.calls)
+        post(h, {"password": SECRET, "again": SECRET})
+        assert len(ssm.calls) == n                      # asked again only after RETRY_S
+        clock.t += adapterpass.RETRY_S + 1
+        ssm.names = {adapterpass.LOOKUP_PARAM: NAME, adapterpass.LOOKUP_KEY: KEY}   # step 20 ran: it comes on by itself
+        code, st, _ = get(h)
+        assert st["configured"] and st["version"] == 4
+    finally:
+        srv.shutdown()
+    io = capfd.readouterr()
+    assert not leaks(io.out, io.err)
 
 
 # -- the endpoint ----------------------------------------------------------------------------------------------------
@@ -227,7 +306,9 @@ def test_the_status_never_reads_the_value(hub):
     get(hub)
     assert len(hub.ssm.calls) == 1                                                        # cached a minute
     src = (ROOT / "sizeup" / "cloud" / "adapterpass.py").read_text()
-    assert "GetParameter\"" not in src and "WithDecryption" not in src and "GetParameterHistory" not in src
+    assert "WithDecryption" not in src and "GetParameterHistory" not in src and "GetParameters" not in src
+    # its only GetParameter: the hub's two name parameters (plain Strings), never the password's
+    assert src.count('"AmazonSSM.GetParameter"') == 1 and 'for n in (LOOKUP_PARAM, LOOKUP_KEY):' in src
 
 
 def test_admins_only_and_refused_before_the_body_is_read(hub):
@@ -346,7 +427,7 @@ def test_aws_credentials_missing_or_ssm_unconfigured(hub, tmp_path):
     hub.ap.creds = none
     code, out, _ = post(hub, {"password": SECRET, "again": SECRET})
     assert code == 502 and out["error"] == "No AWS credentials"
-    hub.ap.name = ""
+    hub.ap._name = ""
     code, st, _ = get(hub)
     assert not st["configured"] and st["why_not"] == "Not configured"
     assert post(hub, {"password": SECRET, "again": SECRET})[0] == 404

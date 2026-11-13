@@ -60,7 +60,8 @@ const AdapterPasswordCard = (() => {
       + "within about 5 min. Fallback: the sizeup-aws password script";
     if (window.Help && Help.info) head.append(Help.info(info, "About"));
     const rows = [];
-    if (!d.configured) rows.push(["Version", d.why_not || "Not configured", "dim"]);
+    if (!d.configured) rows.push(["Version", d.why_not || "Not configured", "dim",
+      `Optional: set up by the department's AWS script (SSM ${d.detail || "lookup"}); retried every few minutes`]);
     else if (d.version) rows.push(["Version", `v${d.version} · ${when(d.modified)}`
       + (d.saved_here ? ` · ${d.saved_by || "?"}` : " · not from the hub")]);
     else rows.push(["Version", d.error || "—", d.error ? "hl-bad" : ""]);
@@ -71,9 +72,11 @@ const AdapterPasswordCard = (() => {
     if (!(d.sources || []).length) rows.push(["Station", "No adapter report", "dim"]);
     if (d.configured && d.wait_s > 0) rows.push(["Next save", `in ${mins(d.wait_s)}`, "hl-warn"]);
     const dl = el("dl", "admin");
-    for (const [k, v, cls] of rows) {
+    for (const [k, v, cls, tip] of rows) {
       const w = el("div");
-      w.append(el("dt", "", k), el("dd", cls || "", v));
+      const dd = el("dd", cls || "", v);
+      if (tip) dd.title = tip;
+      w.append(el("dt", "", k), dd);
       dl.append(w);
     }
     const kids = [head, dl];

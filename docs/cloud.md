@@ -861,9 +861,11 @@ Incidents come in from ranked sources. The interface is in `sizeup/sources/__ini
   as it does any new version (about 5 min). The hub can't read it back: its roles keep an explicit Deny on
   `GetParameter*`, history, delete and label for `/sizeup-station/*` and on `kms:Decrypt` for the key; it may only
   `PutParameter` that one parameter, `kms:Encrypt` through SSM for it, and `ssm:DescribeParameters` (metadata: the
-  version and when). The parameter's name and key come from the task definition (`SIZEUP_ADAPTER_PASSWORD_PARAM`,
-  `SIZEUP_ADAPTER_PASSWORD_KEY`, from `/sizeup-hub/...` by name), never the repo; without them the card says "Not
-  configured". Each save is one log-on attempt on the shared county account, so: at most one save per 5 min (after
+  version and when). It is optional and the task definition doesn't know about it: at first use the hub reads the
+  parameter's name and the key from two plain String parameters of its own, `/sizeup-hub/adapter-password-param` and
+  `/sizeup-hub/adapter-password-key` (names only, `ssm:GetParameter` on exactly those two), cached 10 min; absent or
+  unreadable, the card says "Not configured", a save is refused, and it is asked again at most every 3 min. The real
+  names never appear in the repo. Each save is one log-on attempt on the shared county account, so: at most one save per 5 min (after
   the last save here or the last change in SSM), and while a source is stopped on refused log-ons ("login ...") only
   with an explicit confirm. Each save is in the settings audit (who, when, the version) and the person's activity;
   a save AWS didn't answer is audited as "no answer" and counts. The value is never logged, audited, answered or put

@@ -3408,12 +3408,12 @@ def start_app(cfg: Config) -> App:
 
 
 def adapter_password(cfg: Config):
-    """The hub's write-only station adapter password (sizeup/cloud/adapterpass.py): its SSM name and key from the
-    environment (the task definition); None off the hub."""
+    """The hub's write-only station adapter password (sizeup/cloud/adapterpass.py), an optional feature: its SSM name
+    and key are looked up in SSM at first use (nothing is asked here); None off the hub."""
     if cfg.cloud_role != "hub":
         return None
     from sizeup.cloud.adapterpass import AdapterPassword
-    return AdapterPassword.from_env(log=log)
+    return AdapterPassword(log=log)
 
 
 def make_server(app: App, fence=None, listener=None) -> WebServer:

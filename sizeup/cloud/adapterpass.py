@@ -7,8 +7,12 @@ instead of running the department's CLI script. The hub only ever WRITES it (ssm
 delete, label and kms:Decrypt on that prefix and key (the department's setup scripts), so the hub can never read it
 back, and it never logs into the county app itself.
 
-    configured                   the parameter's name and the key come from the environment (the task definition,
-                                 from SSM by name): ENV_PARAM, ENV_KEY. Never written in the repo.
+    configured                   an OPTIONAL feature, nothing at the hub's start: the parameter's name and the key
+                                 are read, at first use, from two plain String parameters of the hub's own (names
+                                 only, never a password), LOOKUP_PARAM and LOOKUP_KEY, with the task role
+                                 (ssm:GetParameter on exactly those two: the department's setup script makes them and
+                                 grants it). Cached (RESOLVED_S); a failed or missing lookup is "Not configured" and is
+                                 asked again at most every RETRY_S. Neither the task definition nor the repo names them.
     status(store)                what Settings > Health shows: the version and when it was saved (DescribeParameters,
                                  cached), who saved it (this hub's own audit, if it was saved here), when the next
                                  save may go, and the station's adapter state (the source_health rows)
@@ -30,7 +34,6 @@ can't wipe a str; nothing keeps a reference past the request.
 from __future__ import annotations
 
 import json
-import os
 import re
 import threading
 import time
@@ -41,8 +44,11 @@ from typing import Callable
 from sizeup import aws
 from sizeup.cloud.adapterssm import PREFIX, _code
 
-ENV_PARAM = "SIZEUP_ADAPTER_PASSWORD_PARAM"     # the SecureString's full name (under PREFIX)
-ENV_KEY = "SIZEUP_ADAPTER_PASSWORD_KEY"         # the adapter's KMS key: its id, ARN or alias
+LOOKUP_PARAM = "/sizeup-hub/adapter-password-param"   # String: the SecureString's full name (under PREFIX)
+LOOKUP_KEY = "/sizeup-hub/adapter-password-key"       # String: the adapter's KMS key (its id, ARN or alias)
+RESOLVED_S = 600.0                              # a lookup that worked is asked again after this long
+RETRY_S = 180.0                                 # one that failed (absent, no permission, no AWS): at most this often
+HICCUPS = ("network", "error", "BadAnswer", "InternalServerError", "ThrottlingException")   # names kept through these
 MIN_GAP_S = 300.0                               # saves at least this far apart (here or by the CLI): one try each
 DESCRIBE_S = 60.0                               # the version is asked of SSM at most this often (page polls)
 TIMEOUT_S = 10.0
@@ -153,8 +159,13 @@ def station_sources(store) -> list[dict]:
 class AdapterPassword:
     def __init__(self, name: str = "", key: str = "", region: str = "", endpoint: str = "", send: Sender | None = None,
                  clock: Callable[[], float] = time.time, log: Callable[[str], None] = print,
-                 creds: Callable[[], aws.Credentials] | None = None):
-        self.name, self.key = (name or "").strip(), (key or "").strip()
+                 creds: Callable[[], aws.Credentials] | None = None, lookup: bool = True):
+        """name, key: given (tests), else looked up in SSM at first use (lookup); nothing is asked here."""
+        self._fixed = bool(name or key) or not lookup
+        self._name, self._key = (name or "").strip(), (key or "").strip()
+        self._looked_at = -1e18
+        self._lookup_why = ""                # why the last lookup failed (an AWS code, "absent"): Health's hover
+        self._lookup_lock = threading.Lock()
         self.region = aws.region(region)
         self.endpoint = endpoint
         self.send = send or _send
@@ -165,10 +176,50 @@ class AdapterPassword:
         self._meta: dict | None = None       # the last DescribeParameters answer: {version, modified} | {error}
         self._meta_at = -1e18
 
-    @classmethod
-    def from_env(cls, env=None, **kw) -> "AdapterPassword":
-        env = os.environ if env is None else env
-        return cls(env.get(ENV_PARAM, ""), env.get(ENV_KEY, ""), **kw)
+    # -- the names: looked up, lazily -------------------------------------------------------------------------------
+
+    def _lookup(self) -> None:
+        """The two names from SSM (plain Strings, GetParameter without decryption), cached; never raises."""
+        if self._fixed:
+            return
+        with self._lookup_lock:
+            now = self.clock()
+            age = now - self._looked_at
+            if age < (RESOLVED_S if self._name and self._key else RETRY_S):
+                return
+            self._looked_at = now
+            got: dict[str, str] = {}
+            why = ""
+            for n in (LOOKUP_PARAM, LOOKUP_KEY):
+                try:
+                    p = self._call("AmazonSSM.GetParameter", json.dumps({"Name": n}, separators=(",", ":")).encode())
+                    v = (p.get("Parameter") or {}).get("Value")
+                    got[n] = v.strip() if isinstance(v, str) else ""
+                except SaveRefused as e:
+                    why = "absent" if e.code == "ParameterNotFound" else (e.code or "error")
+                    break
+                except Exception:  # noqa: BLE001 - optional: never in the way of the hub
+                    why = "error"
+                    break
+            if why or not got.get(LOOKUP_PARAM) or not got.get(LOOKUP_KEY):
+                if self._name and self._key and (why in HICCUPS or why.startswith("HTTP 5")):
+                    return                    # a hiccup: keep the names that worked (asked again later)
+                self._name = self._key = ""
+                self._lookup_why = why or "absent"
+                return
+            if (got[LOOKUP_PARAM], got[LOOKUP_KEY]) != (self._name, self._key):
+                self.log("adapter password: configured from SSM" if not self._name else "adapter password: names changed in SSM")
+            self._name, self._key, self._lookup_why = got[LOOKUP_PARAM], got[LOOKUP_KEY], ""
+
+    @property
+    def name(self) -> str:
+        self._lookup()
+        return self._name
+
+    @property
+    def key(self) -> str:
+        self._lookup()
+        return self._key
 
     @property
     def why_not(self) -> str:
@@ -265,7 +316,7 @@ class AdapterPassword:
         version = meta.get("version")
         mine = next((s for s in saves if s["result"] == f"v{version}"), None) if version else None
         sources = station_sources(store)
-        return {"configured": self.configured, "why_not": self.why_not, "version": version,
+        return {"configured": self.configured, "why_not": self.why_not, "detail": self._lookup_why, "version": version,
                 "modified": meta.get("modified"), "error": meta.get("error", ""),
                 "saved_by": mine["by"] if mine else "", "saved_here": mine is not None,
                 "wait_s": round(self.wait_s(store, meta)) if self.configured else 0, "gap_s": MIN_GAP_S,
