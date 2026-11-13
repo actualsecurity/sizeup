@@ -37,6 +37,23 @@ jobs:
         with:
           role-to-assume: ${{ vars.AWS_DEPLOY_ROLE }}
           aws-region: ${{ vars.AWS_REGION }}
+      # Every SSM parameter the task definition names must exist before anything is built or ECS touched: a task whose
+      # secret is missing never starts, and the service would roll to it. Names only (ssm:DescribeParameters: metadata,
+      # never a value; sizeup-aws/23-deploy-ssm-describe.sh grants it).
+      - name: Every secret the task definition names is in SSM
+        run: |
+          names=$(python3 tools/taskdef_params.py deploy/aws/taskdef.json)
+          found=$(aws ssm describe-parameters \
+            --parameter-filters "Key=Name,Option=Equals,Values=$(paste -sd, - <<<"$names")" \
+            --query 'Parameters[].Name' --output text | tr '\t' '\n')
+          missing=$(comm -23 <(sort -u <<<"$names") <(sort -u <<<"$found"))
+          if [ -n "$missing" ]; then
+            for n in $missing; do
+              echo "::error title=Missing SSM parameter::$n is named in deploy/aws/taskdef.json but not in SSM: create it (sizeup-aws) before deploying; nothing was deployed"
+            done
+            exit 1
+          fi
+          echo "All $(wc -l <<<"$names" | tr -d ' ') SSM parameters the task definition names exist."
       - id: ecr
         uses: aws-actions/amazon-ecr-login@v2
       - uses: docker/setup-qemu-action@v3
