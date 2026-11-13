@@ -213,14 +213,13 @@ def png_size(data: bytes) -> tuple[int, int]:
 
 # -- PDF ------------------------------------------------------------------------------------------------------------------
 
-# names in a PDF that run something, open something else or carry another file: a quick first look at the raw bytes
+# names in a PDF that refuse it outright (an attachment, an XFA form, encryption): a quick first look at the raw bytes
 # (names inside compressed object streams aren't visible here: the child process's walk of the parsed objects is the
-# check that counts)
-PDF_ACTIVE = {b"JavaScript", b"JS", b"Launch", b"EmbeddedFile", b"EmbeddedFiles", b"RichMedia", b"XFA", b"SubmitForm",
-              b"ImportData", b"GoToR", b"GoToE", b"Sound", b"Movie", b"Encrypt", b"AA", b"URI", b"Rendition"}
+# check that counts). Links, actions, scripts and form fields aren't refused: the stored copy is saved without them.
+PDF_ACTIVE = {b"EmbeddedFile", b"EmbeddedFiles", b"XFA", b"Encrypt"}
 NAME = re.compile(rb"/([^\s/<>\[\]()%{}]{1,127})")
 HEX = re.compile(rb"#([0-9A-Fa-f]{2})")
-REFUSED_PDF = "a PDF with scripts, actions, links, attachments, forms or encryption is refused: print it to a new PDF"
+REFUSED_PDF = "a PDF with attachments, an XFA form or encryption is refused: print it to a new PDF"
 
 
 def check_pdf(data: bytes) -> None:
@@ -237,11 +236,14 @@ def check_pdf(data: bytes) -> None:
 # The child process (-I, an environment of its own: child_env()). argv [mode: pdf | image, page (1-based; 0: check only),
 # max px]; stdin the file; stdout a JSON line {pages, w, h, pdf: its length, png: its length, refused?, nopage?,
 # rlimit?: why a limit couldn't be set} then the sanitised PDF and the PNG.
-#   pdf     pypdf parses it (object streams inflated) and every object reachable from the trailer is looked at: an
-#           action of a refused kind (/S JavaScript, Launch, URI, SubmitForm, ImportData, GoToR, GoToE, Rendition,
-#           Sound, Movie, Named), /AA, /JS, an /OpenAction that is an action, /EmbeddedFiles, an embedded file, /XFA,
-#           encryption: refused. Then it is saved again with its pages only (no catalog actions, names, forms, outline,
-#           /Info or XMP): what is stored. PDFium renders the page from that copy (its own script count checked too).
+#   pdf     pypdf parses it (object streams inflated) and every object reachable from the trailer is looked at:
+#           encryption, an XFA form, an embedded file (/EmbeddedFiles, /EF, an /EmbeddedFile stream): refused. Then it
+#           is saved again with its pages only, so no catalog /OpenAction, /AA, /Names (JavaScript, attachments),
+#           /AcroForm, outline, /Info or XMP; on each page /AA, /Metadata and /PieceInfo go; links, media, screen and
+#           attachment annotations go; every other annotation keeps its appearance without /A, /AA or its field
+#           (/Parent: form fields aren't interactive any more). That copy is walked again: anything left that is an
+#           action (/A, /AA, /OpenAction, /JS, /Next, an action's /S): refused (never happens with a whole PDF). That
+#           copy is what is stored; PDFium renders the page from it (its own script count checked too).
 #   image   Pillow turns a plan picture the right way up (its EXIF orientation), scales it to max px a side, as a PNG.
 # Limits first: niced, RLIMIT_CPU, RLIMIT_AS (RLIMIT_AS_MB), the pixels to render capped before rendering.
 RLIMIT_AS_MB = 700
@@ -294,15 +296,15 @@ if mode == "image":
     out(png=b.getvalue())
 
 from pypdf import PdfReader, PdfWriter
-from pypdf.generic import ArrayObject, DictionaryObject, IndirectObject
-BAD_S = {"/JavaScript", "/Launch", "/URI", "/SubmitForm", "/ImportData", "/GoToR", "/GoToE", "/Rendition", "/Sound",
-         "/Movie", "/Named", "/ResetForm", "/Hide", "/SetOCGState", "/Trans", "/GoTo3DView", "/RichMediaExecute"}
-BAD_KEYS = {"/AA", "/JS", "/EmbeddedFiles", "/XFA", "/EmbeddedFile", "/RichMediaContent"}
-try:
-    reader = PdfReader(io.BytesIO(data), strict=False)
-    if reader.is_encrypted:
-        refuse("encrypted")
-    stack, seen, n = [reader.trailer], set(), 0
+from pypdf.generic import ArrayObject, DictionaryObject, IndirectObject, NameObject
+ACTION_S = {"/JavaScript", "/Launch", "/URI", "/SubmitForm", "/ImportData", "/GoToR", "/GoToE", "/Rendition", "/Sound",
+            "/Movie", "/Named", "/ResetForm", "/Hide", "/SetOCGState", "/Trans", "/GoTo3DView", "/RichMediaExecute",
+            "/GoTo", "/Thread"}
+ACTION_KEYS = {"/A", "/AA", "/OpenAction", "/JS", "/Next"}
+DROP_ANNOTS = {"/Link", "/Screen", "/Movie", "/Sound", "/RichMedia", "/FileAttachment", "/3D"}
+
+def walk(root, look):
+    stack, seen, n = [root], set(), 0
     while stack:
         o = stack.pop()
         if isinstance(o, IndirectObject):
@@ -315,29 +317,50 @@ try:
         if n > 200000:
             refuse("too many objects")
         if isinstance(o, DictionaryObject):
-            keys = set(o.keys())
-            if keys & BAD_KEYS:
-                refuse("active")
-            if o.get("/S") in BAD_S or o.get("/Type") == "/EmbeddedFile":
-                refuse("action")
-            if "/OpenAction" in keys:
-                oa = o["/OpenAction"]
-                oa = oa.get_object() if isinstance(oa, IndirectObject) else oa
-                if isinstance(oa, DictionaryObject):
-                    refuse("open action")
+            look(o)
             stack.extend(o.values())
         elif isinstance(o, ArrayObject):
             stack.extend(o)
+
+def attached(o):
+    keys = set(o.keys())
+    if keys & {"/EmbeddedFiles", "/EF", "/XFA", "/RichMediaContent"} or o.get("/Type") == "/EmbeddedFile":
+        refuse("attachment")
+
+def active(o):
+    if set(o.keys()) & ACTION_KEYS or o.get("/S") in ACTION_S and ("/Type" not in o or o.get("/Type") == "/Action"):
+        refuse("an action left")
+
+try:
+    reader = PdfReader(io.BytesIO(data), strict=False)
+    if reader.is_encrypted:
+        refuse("encrypted")
+    walk(reader.trailer, attached)
     writer = PdfWriter()
     for p in reader.pages:
-        for key in ("/Metadata", "/PieceInfo"):
+        for key in ("/Metadata", "/PieceInfo", "/AA"):
             if key in p:
                 del p[key]
+        if "/Annots" in p:
+            kept = ArrayObject()
+            for a in p["/Annots"].get_object() or []:
+                ad = a.get_object()
+                if not isinstance(ad, DictionaryObject) or ad.get("/Subtype") in DROP_ANNOTS:
+                    continue
+                for key in ("/A", "/AA", "/Parent", "/Popup"):
+                    if key in ad:
+                        del ad[key]
+                kept.append(a)
+            if kept:
+                p[NameObject("/Annots")] = kept
+            else:
+                del p["/Annots"]
         writer.add_page(p)
     writer.metadata = None
     b = io.BytesIO()
     writer.write(b)
     clean = b.getvalue()
+    walk(PdfReader(io.BytesIO(clean), strict=False).trailer, active)     # what is stored: no action at all
 except SystemExit:
     raise
 except Exception as e:
@@ -424,6 +447,8 @@ def _child(mode: str, data: bytes, page: int, max_px: int) -> tuple[dict, bytes,
         info = None
     if not isinstance(info, dict) or info.get("error"):
         raise Refused("the file couldn't be read")
+    if info.get("refused") == "an action left":
+        raise Refused("the PDF couldn't be cleaned: print it to a new PDF")
     if info.get("refused"):
         raise Refused(REFUSED_PDF if mode == "pdf" else "the picture couldn't be read")
     n = int(info.get("pdf") or 0)

@@ -68,14 +68,16 @@ def jpeg_with_gps(orientation=6):
     return buf.getvalue() + b"<html><script>alert(1)</script></html>"
 
 
-def pdf(pages=1, extra=b""):
-    """A small PDF written here: each page a framed rectangle (a "floor plan"); extra: more names in its catalog."""
+def pdf(pages=1, extra=b"", page_extra=b""):
+    """A small PDF written here: each page a framed rectangle (a "floor plan"); extra: more names in its catalog;
+    page_extra: in each page's dictionary."""
     objs = [b"<< /Type /Catalog /Pages 2 0 R " + extra + b">>"]
     kids = " ".join(f"{3 + 2 * i} 0 R" for i in range(pages)).encode()
     objs.append(b"<< /Type /Pages /Kids [" + kids + b"] /Count " + str(pages).encode() + b" >>")
     for i in range(pages):
         stream = f"0.2 g 50 50 500 {300 + 50 * i} re S 0.8 g 60 60 480 {280 + 50 * i} re f".encode()
-        objs.append(f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 600 {400 + 50 * i}] /Contents {4 + 2 * i} 0 R >>".encode())
+        objs.append(f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 600 {400 + 50 * i}] /Contents {4 + 2 * i} 0 R ".encode()
+                    + page_extra + b">>")
         objs.append(b"<< /Length " + str(len(stream)).encode() + b" >>\nstream\n" + stream + b"\nendstream")
     out, offs = b"%PDF-1.4\n", []
     for n, o in enumerate(objs, 1):
@@ -194,14 +196,63 @@ def test_png_text_and_exif_chunks_are_dropped():
     assert clean == png()
 
 
-def test_pdfs_that_can_run_something_are_refused(api):
-    for name in (b"/OpenAction << /S /JavaScript /JS (app.alert(1)) >>", b"/Names << /EmbeddedFiles 9 0 R >>",
-                 b"/OpenAction << /S /URI /URI (https://example.com/) >>", b"/AA << /O 9 0 R >>",
-                 b"/OpenAction << /S /Launch /F (x.exe) >>", b"/AcroForm << /XFA 9 0 R >>", b"/OpenAction << /S /J#61vaScript >>"):
+ACTIVE_NAMES = (b"/URI", b"/JS", b"/JavaScript", b"/Launch", b"/AA", b"/OpenAction", b"/SubmitForm", b"/A ", b"/A<")
+
+
+def inflated(data: bytes) -> bytes:
+    """The PDF with every stream inflated (FlateDecode) beside it: what a name could hide in."""
+    out = [data]
+    for m in re.finditer(rb"stream\r?\n(.*?)\r?\nendstream", data, re.S):
+        try:
+            out.append(zlib.decompress(m.group(1)))
+        except zlib.error:
+            pass
+    return b"\n".join(out)
+
+
+def stored_pdf(api, did):
+    ref = api.cad.store.q("SELECT ref FROM preplan_docs WHERE id = ?", (did,))[0]["ref"]
+    return (Path(api.cad.preplan_docs.store.root) / "preplan-docs" / ref / "original.pdf").read_bytes()
+
+
+def test_attachments_xfa_and_encryption_are_refused(api):
+    for name in (b"/Names << /EmbeddedFiles 9 0 R >>", b"/AcroForm << /XFA 9 0 R >>", b"/Encrypt 9 0 R"):
         code, out = upload(api, pdf(extra=name), kind="inspection", title="Annual")
         assert code == 400 and "PDF" in out["error"], name
     code, out = upload(api, pdf(), kind="inspection", title="Annual", floor="")
     assert code == 200, out
+
+
+@pytest.mark.skipif(not HAVE_PDFIUM, reason="pypdf / pypdfium2 not installed")
+def test_links_actions_and_scripts_are_stripped_from_the_stored_copy(api):
+    """Vendor and county exports have links, a GoTo /OpenAction, page actions, form fields: they upload, and what is
+    stored has no action at all (in its streams either)."""
+    annots = (b"/Annots [<< /Type /Annot /Subtype /Link /Rect [10 10 90 30] /A << /S /URI /URI (https://example.com/) >> >> "
+              b"<< /Type /Annot /Subtype /Square /Rect [100 100 200 200] /C [1 0 0] "
+              b"/AA << /E << /S /Launch /F (x.exe) >> >> /A << /S /JavaScript /JS (app.alert(1)) >> >> "
+              b"<< /Type /Annot /Subtype /Widget /FT /Tx /T (Owner) /V (Example) /Rect [300 300 400 320] "
+              b"/AA << /K << /S /JavaScript /JS (event.rc = true) >> >> >>] "
+              b"/AA << /O << /S /JavaScript /JS (app.alert(2)) >> >> ")
+    catalog = (b"/OpenAction << /S /GoTo /D [3 0 R /Fit] >> /AA << /WC << /S /JavaScript /JS (x) >> >> "
+               b"/Names << /JavaScript << /Names [(a) << /S /JavaScript /JS (app.alert(3)) >>] >> >> "
+               b"/AcroForm << /Fields [] /NeedAppearances true >> ")
+    for extra, page_extra in ((catalog, annots), (b"/OpenAction << /S /J#61vaScript /JS (x) >>", b""),
+                              (b"/OpenAction << /S /Launch /F (x.exe) >>", b""), (b"", b"/AA << /O 9 0 R >> ")):
+        raw = pdf(extra=extra, page_extra=page_extra)
+        code, out = upload(api, raw, kind="preplan", title="Vendor export", floor="")
+        assert code == 200, (out, extra, page_extra)
+        clean = inflated(stored_pdf(api, out["doc"]["id"]))
+        for name in ACTIVE_NAMES:
+            assert name not in clean, (name, extra, page_extra)
+    from pypdf import PdfReader
+    reader = PdfReader(io.BytesIO(stored_pdf(api, get(api, "/api/cad/preplan/docs", f"incident={api.iid}",
+                                                         VAL)[1]["docs"][0]["id"])))
+    assert len(reader.pages) == 1
+    code, out = upload(api, pdf(extra=catalog, page_extra=annots), title="Plan with links", floor="1")   # a plan too
+    assert code == 200 and out["doc"]["plan"] is True
+    page = PdfReader(io.BytesIO(stored_pdf(api, out["doc"]["id"]))).pages[0]
+    kinds = [a.get_object()["/Subtype"] for a in page["/Annots"]]
+    assert kinds == ["/Square", "/Widget"]                                  # the link gone, the markup and field kept
 
 
 @pytest.mark.skipif(not HAVE_PDFIUM, reason="pypdfium2 not installed")
@@ -638,18 +689,20 @@ def objstm_pdf(action: bytes):
 
 
 @pytest.mark.skipif(not HAVE_PDFIUM, reason="pypdf / pypdfium2 not installed")
-def test_actions_hidden_in_a_compressed_object_stream_are_refused(api):
+def test_actions_hidden_in_a_compressed_object_stream_never_reach_the_stored_copy(api):
     for action in (b"<< /S /JavaScript /JS (app.alert(1)) >>", b"<< /S /URI /URI (https://example.com/) >>",
-                   b"<< /S /Launch /F (x) >>", b"<< /S /Named /N /Print >>"):
+                   b"<< /S /Launch /F (x) >>", b"<< /S /Named /N /Print >>", b"<< /D [3 0 R /Fit] /S /GoTo >>",
+                   b"[3 0 R /Fit]"):
         data = objstm_pdf(action)
-        docfiles.check_pdf(data)                                   # the raw bytes show nothing ...
-        with pytest.raises(docfiles.Refused):                      # ... the parsed objects do
-            docfiles.render(data, 0)
+        docfiles.check_pdf(data)                                   # the raw bytes show nothing
+        assert b"JavaScript" not in data and b"/URI" not in data
         code, out = upload(api, data, kind="inspection", title="Annual", floor="")
-        assert code == 400 and "PDF" in out["error"], action
-    assert docfiles.render(objstm_pdf(b"[3 0 R /Fit]"), 0)["pages"] == 1               # opening at a page: fine
-    with pytest.raises(docfiles.Refused):
-        docfiles.render(objstm_pdf(b"<< /D [3 0 R /Fit] /S /GoTo >>"), 0)                # any action as /OpenAction: no
+        assert code == 200, (out, action)
+        clean = inflated(stored_pdf(api, out["doc"]["id"]))
+        for name in ACTIVE_NAMES:
+            assert name not in clean, (name, action)
+    with pytest.raises(docfiles.Refused):                          # an attachment inside one: refused all the same
+        docfiles.render(objstm_pdf(b"<< /Type /Filespec /F (x) /EF << /F 3 0 R >> >>"), 0)
 
 
 @pytest.mark.skipif(not HAVE_PDFIUM, reason="pypdf / pypdfium2 not installed")
