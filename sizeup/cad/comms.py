@@ -126,11 +126,14 @@ CREATE TABLE IF NOT EXISTS radio_changes (
   oseq INTEGER                          -- every reader's own sequence; NULL: not every reader's to know of
 );
 CREATE INDEX IF NOT EXISTS radio_changes_id ON radio_changes(traffic_id);
-CREATE INDEX IF NOT EXISTS radio_changes_oseq ON radio_changes(oseq);
+CREATE INDEX IF NOT EXISTS radio_changes_oseq ON radio_changes(oseq) WHERE oseq IS NOT NULL;
 """
+# the newest seq and oseq (each by its own key: oseq's index is partial, only the entries that have one)
+TOPS = ("SELECT (SELECT MAX(seq) FROM radio_changes), "
+        "(SELECT MAX(oseq) FROM radio_changes WHERE oseq IS NOT NULL)")
 CURSOR = re.compile(r"(?P<kind>[so])(?P<n>\d{1,15})-(?P<run>[0-9a-f]{8})")
 INSERT_CHANGE = ("INSERT INTO radio_changes (traffic_id, system, gone, oseq) VALUES (?, ?, ?, "
-                 "CASE WHEN ? THEN (SELECT IFNULL(MAX(oseq), 0) + 1 FROM radio_changes) END)")
+                 "CASE WHEN ? THEN (SELECT IFNULL(MAX(oseq), 0) + 1 FROM radio_changes WHERE oseq IS NOT NULL) END)")
 # The triggers an earlier build of this branch hung on the tables: taken off at every start
 OLD_CHANGE_TRIGGERS = tuple(f"radio_changes_{t}_{w}" for t, ws in (("t", "ins upd del"), ("l", "ins upd del"), ("k", "ins del"),
                                                                     ("n", "ins upd del"), ("a", "ins upd del")) for w in ws.split())
@@ -918,12 +921,13 @@ class Comms:
                     db.execute("DROP TABLE radio_changes")
                 elif cols and "oseq" not in cols:
                     # the shape before oseq: the column added (its entries: NULL, nobody's but a reader's who may see
-                    # everything), seq kept as it was so it only ever grows. Once; a start after writes nothing.
+                    # everything), seq kept as it was so it only ever grows. Once; a start after writes nothing. Its
+                    # index is partial (only entries with an oseq): adding it to a full log writes next to nothing.
                     db.execute("ALTER TABLE radio_changes ADD COLUMN oseq INTEGER")
                 db.executescript(CHANGES_SCHEMA)            # (nothing is written here: a start leaves the database as it was)
                 # A cursor from before this start: told to reload (what ran at the start, and any entry an earlier run
                 # couldn't write, are not in the log): it names another run (cursor()). Read only.
-                top = db.execute("SELECT MAX(seq), MAX(oseq) FROM radio_changes").fetchone()
+                top = db.execute(TOPS).fetchone()
                 self.changes_floor, self.changes_floor_o = int(top[0] or 0), int(top[1] or 0)
                 self.changes_broken = False
             except Exception as e:  # noqa: BLE001 - the radio log itself is what matters
@@ -1031,7 +1035,7 @@ class Comms:
                         db.execute("BEGIN IMMEDIATE")
                         try:
                             db.executemany(INSERT_CHANGE, rows)
-                            top, top_o = db.execute("SELECT MAX(seq), MAX(oseq) FROM radio_changes").fetchone()
+                            top, top_o = db.execute(TOPS).fetchone()
                             db.execute("COMMIT")
                         except BaseException:
                             try:
@@ -1077,7 +1081,7 @@ class Comms:
                 if not db.in_transaction:
                     with self._quick(db):
                         cut = None if kind is False else db.execute(
-                            "SELECT seq, oseq FROM radio_changes WHERE oseq <= (SELECT MAX(oseq) FROM radio_changes) - ? "
+                            "SELECT seq, oseq FROM radio_changes WHERE oseq <= (SELECT MAX(oseq) FROM radio_changes WHERE oseq IS NOT NULL) - ? "
                             "ORDER BY oseq DESC LIMIT 1", (CHANGES_KEPT,)).fetchone()
                         if cut is not None:
                             db.execute("DELETE FROM radio_changes WHERE oseq <= ?", (cut[1],))
@@ -1142,7 +1146,8 @@ class Comms:
         floor = max(self.changes_floor, self._trimmed) if sees else max(self.changes_floor_o, self._trimmed_o)
         try:
             hi = 0 if self.changes_broken else int(
-                (self.store.one(f"SELECT MAX({'seq' if sees else 'oseq'}) AS hi FROM radio_changes") or {}).get("hi") or 0)
+                (self.store.one("SELECT MAX(seq) AS hi FROM radio_changes" if sees else
+                                "SELECT MAX(oseq) AS hi FROM radio_changes WHERE oseq IS NOT NULL") or {}).get("hi") or 0)
         except sqlite3.Error:
             hi = 0
         cursor = hi

@@ -311,6 +311,17 @@ def test_every_view_walks_an_index(c):
         "EXPLAIN QUERY PLAN SELECT DISTINCT c.traffic_id FROM radio_changes c WHERE c.oseq > ? AND c.oseq <= ? "
         "AND NOT EXISTS (SELECT 1 FROM radio_changes x WHERE x.traffic_id = c.traffic_id AND x.oseq IS NULL)", (1, 2)))
     assert "radio_changes_oseq" in gated and "radio_changes_id" in gated        # the gate on changes: by oseq, then by id
+    # oseq's index is partial (an older log's entries, all NULL, aren't in it: the upgrade writes next to nothing), so
+    # every newest-oseq read says oseq IS NOT NULL to use it
+    import sizeup.cad.comms as comms_mod
+    assert "WHERE oseq IS NOT NULL" in c.store.one("SELECT sql FROM sqlite_master WHERE name = 'radio_changes_oseq'")["sql"]
+    assert "(SELECT IFNULL(MAX(oseq), 0) + 1 FROM radio_changes WHERE oseq IS NOT NULL)" in comms_mod.INSERT_CHANGE
+    for sql, args in ((comms_mod.TOPS, ()), ("SELECT MAX(oseq) AS hi FROM radio_changes WHERE oseq IS NOT NULL", ()),
+                      ("SELECT IFNULL(MAX(oseq), 0) + 1 FROM radio_changes WHERE oseq IS NOT NULL", ()),
+                      ("SELECT seq, oseq FROM radio_changes WHERE oseq <= (SELECT MAX(oseq) FROM radio_changes WHERE oseq IS "
+                       "NOT NULL) - ? ORDER BY oseq DESC LIMIT 1", (5,))):
+        plan = " ".join(str(r[3]) for r in c.store.db.execute("EXPLAIN QUERY PLAN " + sql, args))
+        assert "radio_changes_oseq" in plan and "SCAN radio_changes" not in plan, (sql, plan)
     assert "radio_activity_minute" in " ".join(str(r[3]) for r in c.store.db.execute(
         "EXPLAIN QUERY PLAN SELECT source, minute, calls FROM radio_activity WHERE minute > ? AND minute <= ?", (1, 2)))
 
