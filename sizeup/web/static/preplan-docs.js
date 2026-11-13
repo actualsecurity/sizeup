@@ -170,7 +170,8 @@ window.PreplanDocs = (() => {
   const editor = () => window.canDo && canDo("dispatch");
   const day = (t) => (window.AddrHistory ? AddrHistory.day(t) : "");
   const fileUrl = (d, dl) => `/api/cad/preplan/docs/${d.id}/file` + (dl ? "?dl=1" : "");
-  const planUrl = (d) => `/api/cad/preplan/docs/${d.id}/plan`;
+  // versioned by its page and size: another page or picture is another URL, so the map loads it again (updateImage)
+  const planUrl = (d) => `/api/cad/preplan/docs/${d.id}/plan?v=${d.page || 0}-${d.plan_w}x${d.plan_h}`;
 
   // a context: the call's ({inc}) or the Search page's building ({where})
   const ctxKey = (ctx) => (ctx.inc ? `i${ctx.inc.id}` : `w${ctx.where}`);

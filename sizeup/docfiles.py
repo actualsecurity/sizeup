@@ -8,14 +8,19 @@ photos without their metadata; a PDF page rendered to a picture for the floor-pl
                          phone photo stands the right way up. Its colour profile (ICC) and the JFIF / Adobe markers stay.
     clean_png(data)      the PNG's image chunks only (IHDR PLTE IDAT IEND and the colour ones): no text, no eXIf, no
                          time, nothing after IEND; every chunk's CRC checked.
-    check_pdf(data)      a PDF with no script or anything that runs or opens something else (JavaScript, Launch,
-                         embedded files, XFA, rich media, form submission, remote go-tos), not encrypted; its names'
-                         #xx escapes undone before they are compared. render() asks PDFium too (document scripts).
-    render(data, page)   the page as a PNG, at most MAX_PX a side, from PDFium (pypdfium2) in a child process (-I, CPU
-                         and memory limits, a timeout): a malformed PDF can crash or stall that process, not the hub.
-                         None when pypdfium2 isn't installed here (the hub image has it: Dockerfile, pyproject "docs").
+    check_pdf(data)      a first look at the raw bytes (names that run or open something, #xx escapes undone); it can't see
+                         inside compressed object streams: render() is the check that counts.
+    render(data, page)   in a child process: pypdf walks every object (object streams inflated) and refuses any action
+                         that runs, opens or submits something, /AA, /JS, an action as /OpenAction, embedded files, XFA,
+                         encryption; then saves the pages again without metadata (the copy that is stored); PDFium draws
+                         the page as a PNG, at most MAX_PX a side. None when pypdf / pypdfium2 aren't installed (the hub
+                         image has them: Dockerfile, pyproject "docs"): a PDF is then refused.
+    plan_image(data)     in the same child: a plan picture the right way up (EXIF orientation), at most MAX_PX a side.
+    The child: -I, an environment of its own (child_env(): no secrets), niced, RLIMIT_CPU and RLIMIT_AS, one at a time,
+    a timeout; a malformed file can crash or stall it, not the hub. no_dump(): the hub's memory and environ not readable
+    by it.
 
-Pure standard library here; the child process needs pypdfium2 and numpy.
+Pure standard library here; the child process needs pypdf, pypdfium2 and Pillow.
 """
 
 from __future__ import annotations
@@ -25,12 +30,13 @@ import re
 import struct
 import subprocess
 import sys
+import threading
 import zlib
 
 MIMES = {"image/png": "png", "image/jpeg": "jpg", "application/pdf": "pdf"}
 MAX_SIDE = 20000                 # an image's width or height, at most
 MAX_PIXELS = 100_000_000         # and its pixels (a browser decoding a bomb)
-MAX_PX = 4096                    # a rendered PDF page's longer side (every iPad's WebGL takes 4096)
+MAX_PX = 4096                    # a plan's longer side, rendered or scaled (every iPad's WebGL takes 4096)
 RENDER_S = 45.0                  # the child process, at most
 
 
@@ -129,7 +135,7 @@ def clean_jpeg(data: bytes) -> tuple[bytes, int, int]:
                 orient = _orientation(seg)
             continue                                    # EXIF and XMP: gone
         if 0xE0 <= m <= 0xEF:
-            keep = (m == 0xE0 and seg[:5] in (b"JFIF\0", b"JFXX\0")) or (m == 0xE2 and seg.startswith(b"ICC_PROFILE\0")) \
+            keep = (m == 0xE0 and seg[:5] == b"JFIF\0") or (m == 0xE2 and seg.startswith(b"ICC_PROFILE\0")) \
                 or (m == 0xEE and seg.startswith(b"Adobe"))
             if not keep:
                 continue                                # IPTC, maker notes, MPF, FlashPix ...
@@ -207,11 +213,14 @@ def png_size(data: bytes) -> tuple[int, int]:
 
 # -- PDF ------------------------------------------------------------------------------------------------------------------
 
-# names in a PDF that run something, open something else or carry another file
+# names in a PDF that run something, open something else or carry another file: a quick first look at the raw bytes
+# (names inside compressed object streams aren't visible here: the child process's walk of the parsed objects is the
+# check that counts)
 PDF_ACTIVE = {b"JavaScript", b"JS", b"Launch", b"EmbeddedFile", b"EmbeddedFiles", b"RichMedia", b"XFA", b"SubmitForm",
-              b"ImportData", b"GoToR", b"GoToE", b"Sound", b"Movie", b"Encrypt"}
+              b"ImportData", b"GoToR", b"GoToE", b"Sound", b"Movie", b"Encrypt", b"AA", b"URI", b"Rendition"}
 NAME = re.compile(rb"/([^\s/<>\[\]()%{}]{1,127})")
 HEX = re.compile(rb"#([0-9A-Fa-f]{2})")
+REFUSED_PDF = "a PDF with scripts, actions, links, attachments, forms or encryption is refused: print it to a new PDF"
 
 
 def check_pdf(data: bytes) -> None:
@@ -222,28 +231,125 @@ def check_pdf(data: bytes) -> None:
     for m in NAME.finditer(data):
         name = HEX.sub(lambda h: bytes((int(h.group(1), 16),)), m.group(1)) if b"#" in m.group(1) else m.group(1)
         if name in PDF_ACTIVE:
-            raise Refused("a PDF with scripts, attachments, links out or encryption is refused: print it to a new PDF")
+            raise Refused(REFUSED_PDF)
 
 
-# The child process: stdin the PDF, argv [page (1-based, 0: check only), max px]; stdout a JSON line {pages, js, form,
-# w, h} then the PNG. Limits first, so nothing it reads can take the hub's memory or CPU.
+# The child process (-I, an environment of its own: child_env()). argv [mode: pdf | image, page (1-based; 0: check only),
+# max px]; stdin the file; stdout a JSON line {pages, w, h, pdf: its length, png: its length, refused?, nopage?,
+# rlimit?: why a limit couldn't be set} then the sanitised PDF and the PNG.
+#   pdf     pypdf parses it (object streams inflated) and every object reachable from the trailer is looked at: an
+#           action of a refused kind (/S JavaScript, Launch, URI, SubmitForm, ImportData, GoToR, GoToE, Rendition,
+#           Sound, Movie, Named), /AA, /JS, an /OpenAction that is an action, /EmbeddedFiles, an embedded file, /XFA,
+#           encryption: refused. Then it is saved again with its pages only (no catalog actions, names, forms, outline,
+#           /Info or XMP): what is stored. PDFium renders the page from that copy (its own script count checked too).
+#   image   Pillow turns a plan picture the right way up (its EXIF orientation), scales it to max px a side, as a PNG.
+# Limits first: niced, RLIMIT_CPU, RLIMIT_AS (RLIMIT_AS_MB), the pixels to render capped before rendering.
+RLIMIT_AS_MB = 700
+RENDER_PIXELS = MAX_PX * MAX_PX
 RENDER_SRC = r"""
-import json, struct, sys, zlib
+import io, json, os, struct, sys, zlib
+info = {}
+try:
+    os.nice(19)
+except OSError as e:
+    info["nice"] = type(e).__name__
 try:
     import resource
     resource.setrlimit(resource.RLIMIT_CPU, (40, 40))
-    try:
-        resource.setrlimit(resource.RLIMIT_AS, (1536 << 20, 1536 << 20))
-    except (ValueError, OSError):
-        pass
-except ImportError:
-    pass
-import numpy as np
+    as_bytes = int(sys.argv[4]) << 20
+    resource.setrlimit(resource.RLIMIT_AS, (as_bytes, as_bytes))
+except (ImportError, ValueError, OSError) as e:
+    info["rlimit"] = type(e).__name__
+mode, page, max_px = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+data = sys.stdin.buffer.read()
+
+def out(pdf=b"", png=b""):
+    info.update(pdf=len(pdf), png=len(png))
+    sys.stdout.buffer.write(json.dumps(info).encode() + b"\n" + pdf + png)
+    sys.exit(0)
+
+def refuse(why):
+    info["refused"] = why
+    out()
+
+def png_of(raw, w, h, n, stride):
+    ctype = {1: 0, 3: 2, 4: 6}[n]
+    rows = b"".join(b"\0" + raw[y * stride:y * stride + w * n] for y in range(h))
+    def chunk(t, b):
+        return struct.pack(">I", len(b)) + t + b + struct.pack(">I", zlib.crc32(t + b))
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, ctype, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(rows, 6)) + chunk(b"IEND", b""))
+
+if mode == "image":
+    import warnings
+    from PIL import Image, ImageOps
+    warnings.simplefilter("error", Image.DecompressionBombWarning)
+    Image.MAX_IMAGE_PIXELS = 100_000_000
+    im = ImageOps.exif_transpose(Image.open(io.BytesIO(data)))
+    im = im.convert("RGBA" if "A" in im.getbands() or "transparency" in im.info else "RGB")
+    im.thumbnail((max_px, max_px), Image.LANCZOS)
+    b = io.BytesIO()
+    im.save(b, "PNG", compress_level=6)
+    info.update(w=im.width, h=im.height)
+    out(png=b.getvalue())
+
+from pypdf import PdfReader, PdfWriter
+from pypdf.generic import ArrayObject, DictionaryObject, IndirectObject
+BAD_S = {"/JavaScript", "/Launch", "/URI", "/SubmitForm", "/ImportData", "/GoToR", "/GoToE", "/Rendition", "/Sound",
+         "/Movie", "/Named", "/ResetForm", "/Hide", "/SetOCGState", "/Trans", "/GoTo3DView", "/RichMediaExecute"}
+BAD_KEYS = {"/AA", "/JS", "/EmbeddedFiles", "/XFA", "/EmbeddedFile", "/RichMediaContent"}
+try:
+    reader = PdfReader(io.BytesIO(data), strict=False)
+    if reader.is_encrypted:
+        refuse("encrypted")
+    stack, seen, n = [reader.trailer], set(), 0
+    while stack:
+        o = stack.pop()
+        if isinstance(o, IndirectObject):
+            k = (o.idnum, o.generation)
+            if k in seen:
+                continue
+            seen.add(k)
+            o = o.get_object()
+        n += 1
+        if n > 200000:
+            refuse("too many objects")
+        if isinstance(o, DictionaryObject):
+            keys = set(o.keys())
+            if keys & BAD_KEYS:
+                refuse("active")
+            if o.get("/S") in BAD_S or o.get("/Type") == "/EmbeddedFile":
+                refuse("action")
+            if "/OpenAction" in keys:
+                oa = o["/OpenAction"]
+                oa = oa.get_object() if isinstance(oa, IndirectObject) else oa
+                if isinstance(oa, DictionaryObject):
+                    refuse("open action")
+            stack.extend(o.values())
+        elif isinstance(o, ArrayObject):
+            stack.extend(o)
+    writer = PdfWriter()
+    for p in reader.pages:
+        for key in ("/Metadata", "/PieceInfo"):
+            if key in p:
+                del p[key]
+        writer.add_page(p)
+    writer.metadata = None
+    b = io.BytesIO()
+    writer.write(b)
+    clean = b.getvalue()
+except SystemExit:
+    raise
+except Exception as e:
+    info["error"] = type(e).__name__
+    out()
+
 import pypdfium2 as pdfium
 import pypdfium2.raw as raw
-page, max_px = int(sys.argv[1]), int(sys.argv[2])
-doc = pdfium.PdfDocument(sys.stdin.buffer.read())
-info = {"pages": len(doc), "js": int(raw.FPDFDoc_GetJavaScriptActionCount(doc.raw)), "form": int(raw.FPDF_GetFormType(doc.raw))}
+doc = pdfium.PdfDocument(clean)
+info.update(pages=len(doc), js=int(raw.FPDFDoc_GetJavaScriptActionCount(doc.raw)), form=int(raw.FPDF_GetFormType(doc.raw)))
+if info["js"] or info["form"] in (2, 3):
+    refuse("script")
 png = b""
 if page > len(doc):
     info["nopage"] = 1
@@ -251,50 +357,100 @@ elif page >= 1:
     p = doc[page - 1]
     w, h = p.get_size()
     scale = min(max_px / max(w, h, 1.0), 4.0)
-    a = p.render(scale=scale, rev_byteorder=True).to_numpy()
-    if a.ndim == 2:
-        a = np.stack([a] * 3, axis=-1)
-    a = np.ascontiguousarray(a[:, :, :3])
-    hh, ww = a.shape[:2]
-    rows = np.concatenate([np.zeros((hh, 1), np.uint8), a.reshape(hh, ww * 3)], axis=1)
-    def chunk(t, b):
-        return struct.pack(">I", len(b)) + t + b + struct.pack(">I", zlib.crc32(t + b))
-    png = (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", ww, hh, 8, 2, 0, 0, 0))
-           + chunk(b"IDAT", zlib.compress(rows.tobytes(), 6)) + chunk(b"IEND", b""))
-    info.update(w=ww, h=hh)
-sys.stdout.buffer.write(json.dumps(info).encode() + b"\n" + png)
+    if w * scale * h * scale > int(sys.argv[5]) * 1.01:
+        refuse("too large")
+    bm = p.render(scale=scale, rev_byteorder=True)
+    png = png_of(bytes(bm.buffer), bm.width, bm.height, bm.n_channels, bm.stride)
+    info.update(w=bm.width, h=bm.height)
+out(clean, png)
 """
+
+# One render at a time: the hub task has 2 GB and half a vCPU, and its dispatch comes first.
+_RENDER = threading.BoundedSemaphore(1)
+RENDER_WAIT_S = 20.0
+
+
+def child_env() -> dict[str, str]:
+    """The child's whole environment: none of the hub's (its SSM secrets, AWS credentials, tokens)."""
+    return {"PATH": "/usr/bin:/bin", "LC_ALL": "C.UTF-8"}
+
+
+def no_dump() -> bool:
+    """The hub process made non-dumpable (Linux: prctl PR_SET_DUMPABLE 0): a child running as the same user can't read
+    its /proc/<pid>/environ or memory, or ptrace it. True when set; elsewhere a no-op (False)."""
+    if not sys.platform.startswith("linux"):
+        return False
+    try:
+        import ctypes
+        libc = ctypes.CDLL(None, use_errno=True)
+        return libc.prctl(4, 0, 0, 0, 0) == 0          # PR_SET_DUMPABLE
+    except (OSError, AttributeError):
+        return False
 
 
 def can_render() -> bool:
+    """PDFs can be checked and drawn here (pypdf and pypdfium2: the hub image's "docs" extra)."""
     try:
+        import pypdf  # noqa: F401
         import pypdfium2  # noqa: F401
     except ImportError:
         return False
     return True
 
 
-def render(data: bytes, page: int = 1, max_px: int = MAX_PX) -> dict | None:
-    """{pages, w, h, png} for page (1-based; 0: only check and count the pages); None without pypdfium2. Refused for a
-    PDF PDFium can't open, with document scripts or XFA, or without that page."""
-    if not can_render():
-        return None
+def can_plan_images() -> bool:
     try:
-        r = subprocess.run([sys.executable, "-I", "-c", RENDER_SRC, str(int(page)), str(int(max_px))], input=data,
-                           capture_output=True, timeout=RENDER_S, check=False)
+        import PIL  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+def _child(mode: str, data: bytes, page: int, max_px: int) -> tuple[dict, bytes, bytes]:
+    if not _RENDER.acquire(timeout=RENDER_WAIT_S):
+        raise Refused("Busy reading another file: try again in a moment")
+    try:
+        r = subprocess.run([sys.executable, "-I", "-c", RENDER_SRC, mode, str(int(page)), str(int(max_px)),
+                            str(RLIMIT_AS_MB), str(RENDER_PIXELS)], input=data, capture_output=True, timeout=RENDER_S,
+                           check=False, env=child_env())
     except subprocess.TimeoutExpired:
-        raise Refused("the PDF took too long to read") from None
-    head, _, png = r.stdout.partition(b"\n")
+        raise Refused("the file took too long to read") from None
+    finally:
+        _RENDER.release()
+    head, _, rest = r.stdout.partition(b"\n")
     try:
         info = json.loads(head) if r.returncode == 0 and head else None
     except ValueError:
         info = None
-    if not isinstance(info, dict):
-        raise Refused("the PDF couldn't be read")
+    if not isinstance(info, dict) or info.get("error"):
+        raise Refused("the file couldn't be read")
+    if info.get("refused"):
+        raise Refused(REFUSED_PDF if mode == "pdf" else "the picture couldn't be read")
+    n = int(info.get("pdf") or 0)
+    return info, rest[:n], rest[n:n + int(info.get("png") or 0)]
+
+
+def render(data: bytes, page: int = 1, max_px: int = MAX_PX) -> dict | None:
+    """{pages, w, h, pdf: the sanitised copy to store, png: the page (page >= 1), limits: why a limit wasn't set ("")}
+    for page (1-based; 0: only check, clean and count); None without pypdf and pypdfium2. Refused for a PDF that can't
+    be read, has anything active (see RENDER_SRC), or hasn't that page."""
+    if not can_render():
+        return None
+    info, pdf, png = _child("pdf", data, page, max_px)
     if info.get("nopage"):
         raise Refused(f"page: 1 to {info.get('pages')}")
-    if info.get("js") or info.get("form") in (2, 3):            # FORMTYPE_XFA_FULL / _FOREGROUND
-        raise Refused("a PDF with scripts or XFA forms is refused: print it to a new PDF")
-    if page >= 1 and not png.startswith(b"\x89PNG"):
+    if not pdf.startswith(b"%PDF-") or (page >= 1 and not png.startswith(b"\x89PNG")):
         raise Refused("the PDF couldn't be read")
-    return {"pages": int(info["pages"]), "w": info.get("w"), "h": info.get("h"), "png": png}
+    return {"pages": int(info["pages"]), "w": info.get("w"), "h": info.get("h"), "pdf": pdf, "png": png,
+            "limits": info.get("rlimit") or ""}
+
+
+def plan_image(data: bytes, max_px: int = MAX_PX) -> dict | None:
+    """A plan picture (PNG / JPEG) the right way up and at most max_px a side, as a PNG: {w, h, png}; None without
+    Pillow."""
+    if not can_plan_images():
+        return None
+    info, _, png = _child("image", data, 0, max_px)
+    if not png.startswith(b"\x89PNG"):
+        raise Refused("the picture couldn't be read")
+    return {"w": info["w"], "h": info["h"], "png": png, "limits": info.get("rlimit") or ""}

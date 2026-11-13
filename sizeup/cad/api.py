@@ -784,9 +784,9 @@ class CadApi:
 
     def _doc_reader(self, who) -> str | None:
         """A site document reader's standing: "admin" | "dispatcher" | "viewer"; None: deactivated (no documents). Without
-        a verified person (all-in-one): "admin", as everywhere."""
+        a verified person (all-in-one, a dev box): "viewer" (never an admin-only document)."""
         if who is None or not who.email:
-            return "admin"
+            return "viewer"
         try:
             st = self.cad.settings.standing(who.email)
         except CadError:
@@ -807,6 +807,8 @@ class CadApi:
                     return refused
                 body["operator"] = st["operator"]
                 body["_may"] = st["may"]
+            else:
+                body["_may"] = "dispatcher"        # all-in-one (roles not enforced): an editor, never an admin
             out = c.preplan_docs.upload(body, raw)
         except CadError as e:
             return _json(400, {"error": str(e)})
@@ -972,6 +974,8 @@ class CadApi:
                 body["operator"] = st["operator"]
                 if PREMISE.fullmatch(path) or PREPLAN.fullmatch(path) or DOCS.fullmatch(path):
                     body["_may"] = st["may"]
+            elif DOCS.fullmatch(path):
+                body["_may"] = "dispatcher"            # all-in-one: an editor of site documents, never an admin (#459)
             out = self._write(path, body, signed)
         except LastAdmin as e:
             if signed:

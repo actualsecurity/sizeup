@@ -488,8 +488,16 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
             if not 0 < n <= MAX_DOC_BODY:
                 self.close_connection = True
                 return self._send(413, b'{"error":"a file of at most 25 MB"}', "application/json")
-            return self._send(*cad.upload(path, self.headers.get("X-Sizeup-Doc") or "", self.rfile.read(n), self.who,
-                                          self._client()))
+            from sizeup.cad.preplan_docs import UPLOAD_WAIT_S, UPLOADS
+            if not UPLOADS.acquire(timeout=UPLOAD_WAIT_S):  # a slot before the body is read (memory: 2 at most)
+                self.close_connection = True     # the body is left unread
+                return self._send(503, b'{"error":"Busy with other uploads: try again in a moment"}', "application/json",
+                                  {"Retry-After": "5"})
+            try:
+                return self._send(*cad.upload(path, self.headers.get("X-Sizeup-Doc") or "", self.rfile.read(n), self.who,
+                                              self._client()))
+            finally:
+                UPLOADS.release()
 
         def _client(self) -> tuple[str, str]:
             """(ip, browser) for the activity log: the visitor's address as Cloudflare saw it."""

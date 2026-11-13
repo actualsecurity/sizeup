@@ -20,8 +20,9 @@ that expire in minutes, never public.
                  off the hub). link() is None: the hub serves the bytes itself (nosniff, Content-Disposition, a
                  sandboxing CSP), behind the same sign-in.
 
-from_env(): the bucket (SIZEUP_PREPLAN_DOCS_BUCKET, prefix SIZEUP_PREPLAN_DOCS_PREFIX), else a folder, else None (a hub
-with no bucket: uploads say "not configured"; a task's disk doesn't outlive a deploy).
+from_env(): the bucket (SIZEUP_PREPLAN_DOCS_BUCKET, prefix SIZEUP_PREPLAN_DOCS_PREFIX; SIZEUP_PREPLAN_DOCS_LINKS=0: no
+presigned links, the hub reads the bytes and serves them itself), else a folder, else None (a hub with no bucket:
+uploads say "not configured"; a task's disk doesn't outlive a deploy). pages(): the sweep's listing (preplan_docs.py).
 """
 
 from __future__ import annotations
@@ -80,11 +81,18 @@ class FsDocStore(DocStore):
 
     def put(self, key: str, body: bytes, ctype: str) -> None:
         p = self._path(key)
-        p.parent.mkdir(parents=True, exist_ok=True)
+        p.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         tmp = p.with_suffix(p.suffix + ".part")
-        tmp.write_bytes(body)
-        os.chmod(tmp, 0o600)
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)     # never readable by others, not even briefly
+        with os.fdopen(fd, "wb") as f:
+            f.write(body)
         tmp.replace(p)
+
+    def pages(self, prefix: str):
+        """[(key, last modified)] under prefix, a page at a time (the sweep)."""
+        base = self.root / prefix
+        if base.is_dir():
+            yield [(str(f.relative_to(self.root)), f.stat().st_mtime) for f in sorted(base.rglob("*")) if f.is_file()]
 
     def get(self, key: str) -> bytes:
         try:
@@ -103,11 +111,20 @@ class FsDocStore(DocStore):
 
 class S3DocStore(DocStore):
     def __init__(self, bucket: str, prefix: str = PREFIX, region: str = "", endpoint: str = "", send: Callable | None = None,
-                 creds: Callable[[], aws.Credentials] = aws.credentials):
+                 creds: Callable[[], aws.Credentials] = aws.credentials, links: bool = True):
         from sizeup.attachments import S3
         self.s3 = S3(bucket, region, endpoint, send=send, creds=creds)
         self.bucket, self.prefix, self.creds = bucket, prefix, creds
-        self.name = f"s3://{bucket}/{prefix}/"
+        self.links = links             # False: no presigned links, the hub reads the bytes and serves them itself
+        self.name = f"s3://{bucket}/{prefix}/" + ("" if links else " (served by the hub)")
+
+    def pages(self, prefix: str):
+        """ListObjectsV2 under prefix (s3:ListBucket on the bucket), a page at a time: [(key, last modified)]."""
+        from sizeup.audiostore import S3AudioStore, StoreError
+        try:
+            yield from S3AudioStore.pages(self, prefix)          # (it uses only self.s3)
+        except StoreError as e:
+            raise DocStoreError(f"S3 list: {e}") from None
 
     def put(self, key: str, body: bytes, ctype: str) -> None:
         try:
@@ -130,6 +147,8 @@ class S3DocStore(DocStore):
             raise DocStoreError(f"S3 DELETE: {status}")
 
     def link(self, key: str, ctype: str, disposition: str, expires: int = LINK_S) -> str | None:
+        if not self.links:
+            return None
         q = urllib.parse.urlencode([("response-cache-control", "private, no-store"),
                                     ("response-content-disposition", disposition), ("response-content-type", ctype)],
                                    quote_via=urllib.parse.quote)
@@ -149,7 +168,8 @@ def from_env(log: Callable[[str], None] = print, default_dir: str | Path | None 
         log("pre-plan documents: SIZEUP_PREPLAN_DOCS_PREFIX must be lowercase letters, digits and dashes: not configured")
         return None
     if bucket:
-        st: DocStore = S3DocStore(bucket, prefix)
+        # SIZEUP_PREPLAN_DOCS_LINKS=0: no presigned links, every byte through the hub behind the sign-in
+        st: DocStore = S3DocStore(bucket, prefix, links=os.environ.get("SIZEUP_PREPLAN_DOCS_LINKS", "1").strip() != "0")
     elif os.environ.get("SIZEUP_PREPLAN_DOCS_DIR", "").strip():
         st = FsDocStore(os.environ["SIZEUP_PREPLAN_DOCS_DIR"].strip(), prefix)
     elif default_dir is not None:

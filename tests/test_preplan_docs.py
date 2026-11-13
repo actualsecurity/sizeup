@@ -181,7 +181,7 @@ def test_exif_and_gps_are_stripped_from_photos_and_the_orientation_kept(api):
     assert dict(ex) == {0x0112: 6}                                    # only the orientation
     assert not ex.get_ifd(0x8825)                                     # no GPS
     assert im.size == (64, 48) and im.getpixel((30, 24))[0] < 80      # the picture itself unchanged
-    assert d["bytes"] == len(data) and (d["plan_w"], d["plan_h"]) == (48, 64)   # as it stands (rotated)
+    assert d["bytes"] == len(data) and d["plan"] is False
     clean, w, h = docfiles.clean_jpeg(jpeg_with_gps(orientation=1))
     assert 0x0112 not in Image.open(io.BytesIO(clean)).getexif() and (w, h) == (64, 48)
 
@@ -196,6 +196,7 @@ def test_png_text_and_exif_chunks_are_dropped():
 
 def test_pdfs_that_can_run_something_are_refused(api):
     for name in (b"/OpenAction << /S /JavaScript /JS (app.alert(1)) >>", b"/Names << /EmbeddedFiles 9 0 R >>",
+                 b"/OpenAction << /S /URI /URI (https://example.com/) >>", b"/AA << /O 9 0 R >>",
                  b"/OpenAction << /S /Launch /F (x.exe) >>", b"/AcroForm << /XFA 9 0 R >>", b"/OpenAction << /S /J#61vaScript >>"):
         code, out = upload(api, pdf(extra=name), kind="inspection", title="Annual")
         assert code == 400 and "PDF" in out["error"], name
@@ -215,6 +216,7 @@ def test_a_pdf_plan_is_rendered_from_the_chosen_page(api):
     assert docfiles.png_size(plan) == (d["plan_w"], d["plan_h"])
     code, out = call(api, f"/api/cad/preplan/docs/{d['id']}", {"page": 3}, JULIAN)          # another page
     assert code == 200 and out["doc"]["page"] == 3 and out["changed"] == ["page"]
+    assert out["doc"]["corners"] is None
     assert abs(out["doc"]["plan_w"] / out["doc"]["plan_h"] - 600 / 500) < 0.01
     assert call(api, f"/api/cad/preplan/docs/{d['id']}", {"page": 9}, JULIAN)[0] == 400
     assert upload(api, pdf(pages=1), page=4)[0] == 400
@@ -304,15 +306,20 @@ def test_admin_only_documents_are_hidden_from_everyone_else(api):
         assert code == 400 and out["error"] == f"no document {did}", body              # as if there were none
     assert len(get(api, "/api/cad/preplan/docs", f"incident={api.iid}", COREY)[1]["docs"]) == 2
     rows = [r for r in get(api, "/api/cad/settings/audit", f"section={ppd.SECTION}", JULIAN)[1]["audit"]]
-    mine = [r for r in rows if r["key"].split()[0] == str(did)]
-    assert mine and not any("Alarm" in (r["old"] or "") + (r["new"] or "") + r["key"] for r in rows)
-    assert json.loads(mine[0]["new"])["admin_only"] is True
+    assert rows and not [r for r in rows if r["key"].split()[0] == str(did)]          # not there at all
+    assert not any("Alarm" in (r["old"] or "") + (r["new"] or "") + r["key"] for r in rows)
+    mine = [r for r in get(api, "/api/cad/settings/audit", f"section={ppd.SECTION}", COREY)[1]["audit"]
+            if r["key"].split()[0] == str(did)]
+    assert json.loads(mine[0]["new"]) == {"admin_only": True, "changed": sorted(ppd.AUDITED)}      # redacted once
     # a document made admin-only later: its earlier rows too
     lobby = next(d for d in get(api, "/api/cad/preplan/docs", f"incident={api.iid}", COREY)[1]["docs"] if d["title"] == "Lobby")
     assert call(api, f"/api/cad/preplan/docs/{lobby['id']}", {"admin_only": True}, JULIAN)[0] == 400
     assert call(api, f"/api/cad/preplan/docs/{lobby['id']}", {"admin_only": True}, COREY)[0] == 200
     rows = get(api, "/api/cad/settings/audit", f"section={ppd.SECTION}", JULIAN)[1]["audit"]
     assert not any("Lobby" in (r["old"] or "") + (r["new"] or "") + r["key"] for r in rows)
+    assert not [r for r in rows if r["key"].split()[0] == str(lobby["id"])]
+    assert not any('"changed":["admin_only","changed"]' in (r["new"] or "") for r in
+                   get(api, "/api/cad/settings/audit", f"section={ppd.SECTION}", COREY)[1]["audit"])
     assert any("Lobby" in (r["new"] or "") for r in get(api, "/api/cad/settings/audit", f"section={ppd.SECTION}", COREY)[1]["audit"])
     assert c.preplan_docs.for_incident(c.store.incident(api.iid), "viewer") == []
 
@@ -350,7 +357,8 @@ def test_s3_links_are_presigned_and_expire_in_two_minutes(api):
     code, out = upload(api, png(), email=JULIAN)
     assert code == 200
     did = out["doc"]["id"]
-    (key, (body, ctype)), = fake.objects.items()
+    (key, (body, ctype)), = [(k, v) for k, v in fake.objects.items() if "/original." in k]
+    assert any(k.endswith("/plan.png") for k in fake.objects)
     assert re.fullmatch(r"preplan-docs/[0-9a-f]{16}/original\.png", key) and ctype == "image/png"
     put = next(h for m, k, h in fake.calls if m == "PUT")
     assert put["x-amz-server-side-encryption"] == "AES256"
@@ -477,7 +485,7 @@ def test_no_titles_filenames_notes_or_coordinates_in_the_logs(api):
     c.log = log.append
     code, out = upload(api, png(), title="Knox box behind blue door", floor="Mezzanine")
     did = out["doc"]["id"]
-    corners = box_corners(41.0123456, -73.6543219)
+    corners = box_corners(0.5123456, 0.5432198)
     call(api, f"/api/cad/preplan/docs/{did}", {"title": "Alarm panel code room"}, JULIAN)
     call(api, f"/api/cad/preplan/docs/{did}", {"corners": [[x, y] for x, y in box_corners(lat_of(100), LON)]}, JULIAN)
     call(api, f"/api/cad/preplan/docs/{did}", {"corners": corners}, JULIAN)          # refused: too far
@@ -489,8 +497,8 @@ def test_no_titles_filenames_notes_or_coordinates_in_the_logs(api):
     get(api, f"/api/cad/preplan/docs/{did}/file", "", VAL)
     text = "\n".join(map(str, log))
     assert log and f"site doc {did}" in text
-    for s in ("blue door", "Knox", "Mezzanine", "Alarm panel", "evil-plan", "Secret riser", ".svg", "41.0", "73.6", "41.012",
-              str(round(lat_of(100), 4))):
+    for s in ("blue door", "Knox", "Mezzanine", "Alarm panel", "evil-plan", "Secret riser", ".svg", "0.512", "0.543",
+              str(round(lat_of(100), 4)), str(LON)):
         assert s not in text, s
 
 
@@ -518,7 +526,8 @@ def test_the_script_draws_the_plan_under_the_points_and_uploads_with_its_header(
     assert '"raster-opacity"' in src and "setCoordinates(" in src
     # the upload: the file as the body, its details in X-Sizeup-Doc; opened through the hub's link
     assert '"X-Sizeup-Doc": encodeURIComponent(JSON.stringify(' in src
-    assert "`/api/cad/preplan/docs/${d.id}/file`" in src and "`/api/cad/preplan/docs/${d.id}/plan`" in src
+    assert "`/api/cad/preplan/docs/${d.id}/file`" in src
+    assert "`/api/cad/preplan/docs/${d.id}/plan?v=${d.page || 0}-${d.plan_w}x${d.plan_h}`" in src   # a new page: a new URL
     assert 'accept = "application/pdf,image/png,image/jpeg,.pdf,.png,.jpg,.jpeg"' in src
     for line in src.splitlines():                                         # never a title or a corner in the console
         assert not re.search(r"console\.\w+\([^)]*\b(title|corners|lat|lon|name)\b", line), line
@@ -531,8 +540,8 @@ require(process.argv[2]);
 const D = window.PreplanDocs;
 const out = {};
 out.kinds = Object.keys(D.KINDS);
-// a footprint 40 m east-west, 10 m north-south, rotated 30 degrees (counter-clockwise), at 41 N
-const lat0 = 41.0, lon0 = -73.66, kx = 111320 * Math.cos(lat0 * Math.PI / 180), ky = 110574;
+// a footprint 40 m east-west, 10 m north-south, rotated 30 degrees (counter-clockwise), at 0.5 N 0.5 E (nowhere real)
+const lat0 = 0.5, lon0 = 0.5, kx = 111320 * Math.cos(lat0 * Math.PI / 180), ky = 110574;
 const rot = (x, y, a) => [x * Math.cos(a) - y * Math.sin(a), x * Math.sin(a) + y * Math.cos(a)];
 const a = 30 * Math.PI / 180;
 const ring = [[-20, -5], [20, -5], [20, 5], [-20, 5], [-20, -5]].map(([x, y]) => { const [u, v] = rot(x, y, a); return [lon0 + u / kx, lat0 + v / ky]; });
@@ -570,10 +579,10 @@ def test_the_overlay_math_in_node(tmp_path):
     o = out["obb"]
     assert abs(o["w"] - 40) < 0.5 and abs(o["h"] - 10) < 0.5               # the oriented box: 40 x 10 m
     assert abs(math.degrees(o["angle"]) % 180 - 30) < 1
-    kx, ky = 111320 * math.cos(math.radians(41.0)), 110574
+    kx, ky = 111320 * math.cos(math.radians(0.5)), 110574
 
     def m(c):
-        return [((x + 73.66) * kx, (y - 41.0) * ky) for x, y in c]
+        return [((x - 0.5) * kx, (y - 0.5) * ky) for x, y in c]
     tl, tr, br, bl = m(out["snapWide"])
     assert abs(math.hypot(tr[0] - tl[0], tr[1] - tl[1]) - 40) < 0.5        # the image's width along the long side
     assert abs(math.hypot(bl[0] - tl[0], bl[1] - tl[1]) - 10) < 0.5
@@ -598,3 +607,295 @@ def test_the_overlay_math_in_node(tmp_path):
     assert out["before"] == "pp-edit-fp" and out["beforeNoPP"] == "cm-trail"
     py = sorted(["2", "Roof", "1", "B1", "", "Mezz", "B2", "G"], key=ppd.floor_key)
     assert py == out["floors"]                                              # the hub's order and the page's agree
+
+
+# -- the security review of #464 (each a regression test) ----------------------------------------------------------------
+
+def objstm_pdf(action: bytes):
+    """A PDF 1.5 whose catalog and its /OpenAction live in a compressed object stream (FlateDecode), found through a
+    cross-reference stream: nothing active is visible in the raw bytes."""
+    inner = [(1, b"<< /Type /Catalog /Pages 2 0 R /OpenAction 4 0 R >>"), (4, action)]
+    head, body = b"", b""
+    for n, o in inner:
+        head += f"{n} {len(body)} ".encode()
+        body += o + b" "
+    raw = head + body
+    packed = zlib.compress(raw)
+    objs = {2: b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            3: b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] >>",
+            5: b"<< /Type /ObjStm /N 2 /First " + str(len(head)).encode() + b" /Filter /FlateDecode /Length "
+               + str(len(packed)).encode() + b" >>\nstream\n" + packed + b"\nendstream"}
+    out, offs = b"%PDF-1.5\n%\xe2\xe3\xcf\xd3\n", {}
+    for n in (2, 3, 5):
+        offs[n] = len(out)
+        out += f"{n} 0 obj\n".encode() + objs[n] + b"\nendobj\n"
+    offs[6] = len(out)
+    rows = [(0, 0, 65535), (2, 5, 0), (1, offs[2], 0), (1, offs[3], 0), (2, 5, 1), (1, offs[5], 0), (1, offs[6], 0)]
+    xs = b"".join(struct.pack(">BIH", *r) for r in rows)
+    out += (b"6 0 obj\n<< /Type /XRef /Size 7 /W [1 4 2] /Root 1 0 R /Length " + str(len(xs)).encode()
+            + b" >>\nstream\n" + xs + b"\nendstream\nendobj\n")
+    return out + f"startxref\n{offs[6]}\n%%EOF\n".encode()
+
+
+@pytest.mark.skipif(not HAVE_PDFIUM, reason="pypdf / pypdfium2 not installed")
+def test_actions_hidden_in_a_compressed_object_stream_are_refused(api):
+    for action in (b"<< /S /JavaScript /JS (app.alert(1)) >>", b"<< /S /URI /URI (https://example.com/) >>",
+                   b"<< /S /Launch /F (x) >>", b"<< /S /Named /N /Print >>"):
+        data = objstm_pdf(action)
+        docfiles.check_pdf(data)                                   # the raw bytes show nothing ...
+        with pytest.raises(docfiles.Refused):                      # ... the parsed objects do
+            docfiles.render(data, 0)
+        code, out = upload(api, data, kind="inspection", title="Annual", floor="")
+        assert code == 400 and "PDF" in out["error"], action
+    assert docfiles.render(objstm_pdf(b"[3 0 R /Fit]"), 0)["pages"] == 1               # opening at a page: fine
+    with pytest.raises(docfiles.Refused):
+        docfiles.render(objstm_pdf(b"<< /D [3 0 R /Fit] /S /GoTo >>"), 0)                # any action as /OpenAction: no
+
+
+@pytest.mark.skipif(not HAVE_PDFIUM, reason="pypdf / pypdfium2 not installed")
+def test_the_stored_pdf_is_saved_again_without_its_metadata(api):
+    from pypdf import PdfWriter
+    w = PdfWriter()
+    w.add_blank_page(300, 200)
+    w.add_metadata({"/Author": "Example Author", "/Title": "Example inner title"})
+    b = io.BytesIO()
+    w.write(b)
+    raw = b.getvalue()
+    assert b"Example Author" in raw
+    code, out = upload(api, raw, kind="inspection", title="Annual", floor="")
+    assert code == 200, out
+    stored = next(Path(api.cad.preplan_docs.store.root).rglob("original.pdf")).read_bytes()
+    assert stored.startswith(b"%PDF-") and b"Example Author" not in stored and b"Example inner title" not in stored
+    assert api.cad.store.q("SELECT sha256 FROM preplan_docs")[0]["sha256"] == hashlib.sha256(stored).hexdigest()
+
+
+def test_without_a_pdf_reader_pdfs_are_refused(api, monkeypatch):
+    monkeypatch.setattr(docfiles, "can_render", lambda: False)
+    code, out = upload(api, pdf(), kind="inspection", title="Annual", floor="")
+    assert code == 400 and "PDF" in out["error"]
+
+
+@pytest.mark.skipif(not HAVE_PDFIUM, reason="pypdf / pypdfium2 not installed")
+def test_the_child_gets_none_of_the_hubs_environment(monkeypatch):
+    monkeypatch.setenv("SIZEUP_STATION_TOKEN", "example-token")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "example-secret")
+    monkeypatch.setenv("AWS_CONTAINER_CREDENTIALS_RELATIVE_URI", "/v2/example")
+    seen = []
+    real = subprocess.run
+
+    def run(*a, **kw):
+        seen.append(kw.get("env"))
+        return real(*a, **kw)
+    monkeypatch.setattr(docfiles.subprocess, "run", run)
+    assert docfiles.render(pdf(), 1)["png"].startswith(b"\x89PNG")
+    env, = seen
+    assert env is not None and not [k for k in env if k.startswith(("SIZEUP_", "AWS_"))]
+    assert set(env) <= {"PATH", "LC_ALL"}
+    # and in the child itself
+    out = real([docfiles.sys.executable, "-I", "-c", "import os, json; print(json.dumps(sorted(os.environ)))"],
+               env=docfiles.child_env(), capture_output=True, text=True, check=True)
+    assert not [k for k in json.loads(out.stdout) if k.startswith(("SIZEUP_", "AWS_"))]
+
+
+def test_the_hub_process_is_made_non_dumpable():
+    code = ("import sys; from sizeup.docfiles import no_dump; r = no_dump(); "
+            "d = None\nif sys.platform.startswith('linux'):\n import ctypes; d = ctypes.CDLL(None).prctl(3, 0, 0, 0, 0)\n"
+            "print(r, d)")
+    out = subprocess.run([docfiles.sys.executable, "-c", code], capture_output=True, text=True, check=True,
+                         cwd=str(Path(__file__).resolve().parent.parent)).stdout.split()
+    if docfiles.sys.platform.startswith("linux"):
+        assert out == ["True", "0"]                                 # PR_GET_DUMPABLE: 0
+    else:
+        assert out == ["False", "None"]                             # a no-op elsewhere
+
+
+def big_image_pdf(side=6000):
+    """A page drawing one large grey image (6000 x 6000 px, FlateDecode: small on disk, 36 MB decoded)."""
+    img = zlib.compress(bytes(side * side), 9)
+    content = b"q 600 0 0 600 0 0 cm /Im1 Do Q"
+    objs = [b"<< /Type /Catalog /Pages 2 0 R >>", b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 600 600] /Resources << /XObject << /Im1 5 0 R >> >> "
+            b"/Contents 4 0 R >>",
+            b"<< /Length " + str(len(content)).encode() + b" >>\nstream\n" + content + b"\nendstream",
+            b"<< /Type /XObject /Subtype /Image /Width " + str(side).encode() + b" /Height " + str(side).encode()
+            + b" /ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /FlateDecode /Length " + str(len(img)).encode()
+            + b" >>\nstream\n" + img + b"\nendstream"]
+    out, offs = b"%PDF-1.4\n", []
+    for n, o in enumerate(objs, 1):
+        offs.append(len(out))
+        out += f"{n} 0 obj\n".encode() + o + b"\nendobj\n"
+    xref = len(out)
+    out += f"xref\n0 {len(objs) + 1}\n0000000000 65535 f \n".encode() + b"".join(f"{o:010d} 00000 n \n".encode() for o in offs)
+    return out + f"trailer\n<< /Size {len(objs) + 1} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n".encode()
+
+
+@pytest.mark.skipif(not HAVE_PDFIUM, reason="pypdf / pypdfium2 not installed")
+def test_a_large_image_pdf_renders_within_the_limits_or_is_refused(monkeypatch):
+    data = big_image_pdf()
+    try:
+        r = docfiles.render(data, 1)
+    except docfiles.Refused:
+        r = None
+    if r is not None:
+        assert max(r["w"], r["h"]) <= docfiles.MAX_PX and r["w"] * r["h"] <= docfiles.RENDER_PIXELS
+    assert docfiles.RLIMIT_AS_MB <= 800
+    monkeypatch.setattr(docfiles, "RENDER_PIXELS", 1000)               # the pixels capped before rendering
+    with pytest.raises(docfiles.Refused):
+        docfiles.render(pdf(), 1)
+
+
+@pytest.mark.skipif(not HAVE_PDFIUM, reason="pypdf / pypdfium2 not installed")
+def test_one_render_at_a_time(monkeypatch):
+    monkeypatch.setattr(docfiles, "RENDER_WAIT_S", 0.05)
+    assert docfiles._RENDER.acquire(timeout=1)
+    try:
+        with pytest.raises(docfiles.Refused, match="Busy"):
+            docfiles.render(pdf(), 1)
+    finally:
+        docfiles._RENDER.release()
+    assert docfiles.render(pdf(), 1)
+
+
+@pytest.mark.skipif(not HAVE_PDFIUM, reason="pypdf / pypdfium2 not installed")
+def test_another_page_clears_the_alignment_and_says_so(api):
+    c = api.cad
+    did = upload(api, pdf(pages=2), page=1)[1]["doc"]["id"]
+    assert call(api, f"/api/cad/preplan/docs/{did}", {"corners": box_corners(lat_of(100), LON)}, JULIAN)[0] == 200
+    code, out = call(api, f"/api/cad/preplan/docs/{did}", {"page": 2}, JULIAN)
+    assert code == 200 and out["doc"]["corners"] is None and out["changed"] == ["corners", "page"]
+    last = c.store.q("SELECT * FROM settings_audit WHERE section = ? ORDER BY id DESC LIMIT 1", (ppd.SECTION,))[0]
+    assert json.loads(last["new"])["corners"] is None and json.loads(last["old"])["corners"]
+    assert f"Aligned site doc {did} and edited: page" in [r["summary"] for r in c.activity.rows(kind="action")][:1]
+    # a kind that isn't a plan: no picture, no corners
+    out = call(api, f"/api/cad/preplan/docs/{did}", {"kind": "inspection"}, JULIAN)[1]
+    assert out["doc"]["plan"] is False and out["doc"]["corners"] is None
+    assert not list(Path(c.preplan_docs.store.root).rglob("plan.png"))
+
+
+def test_without_a_verified_person_the_reader_is_a_viewer(api):
+    c = api.cad
+    did = upload(api, png(), email=COREY, admin_only=True, title="Panel")[1]["doc"]["id"]
+    assert get(api, "/api/cad/preplan/docs", f"incident={api.iid}", None)[1]["docs"] == []          # all-in-one: a viewer
+    assert get(api, f"/api/cad/preplan/docs/{did}/file", "", None)[0] == 404
+    with pytest.raises(ppd.CadError):
+        c.preplan_docs.edit(did, {"title": "x"})                                                    # no _may: a viewer
+    with pytest.raises(ppd.CadError):
+        c.preplan_docs.upload({"kind": "photo", "title": "x", "incident_id": api.iid, "admin_only": True}, png())
+    assert c.preplan_docs.edit(did, {"title": "y", "_may": "admin"})["ok"]                         # admin: explicit
+
+
+def test_the_upload_slot_is_taken_before_the_body_is_read(api, monkeypatch):
+    from sizeup.web.server import WebServer
+    monkeypatch.setattr(ppd, "UPLOAD_WAIT_S", 0.1)
+    srv = WebServer("127.0.0.1", 0, {}, dict, lambda cid: None, lambda i: False, cad=api)
+    threading.Thread(target=srv.httpd.serve_forever, daemon=True).start()
+    held = [ppd.UPLOADS.acquire(timeout=1) for _ in range(2)]
+    try:
+        assert all(held)
+        conn = http.client.HTTPConnection("127.0.0.1", srv.httpd.server_address[1], timeout=10)
+        conn.putrequest("POST", "/api/cad/preplan/docs")
+        meta = quote(json.dumps({"kind": "photo", "title": "x", "incident_id": api.iid}))
+        for k, v in {"X-Sizeup-Doc": meta, "Content-Length": str(20 * 1024 * 1024)}.items():
+            conn.putheader(k, v)
+        conn.endheaders()                                                    # 20 MB announced, never sent
+        r = conn.getresponse()
+        assert r.status == 503 and r.getheader("Retry-After")
+    finally:
+        for _ in held:
+            ppd.UPLOADS.release()
+        srv.httpd.shutdown()
+    assert upload(api, png())[0] == 200
+
+
+def test_a_delete_marks_the_row_first_and_the_sweep_takes_what_was_left(api, monkeypatch):
+    import time as _time
+    c = api.cad
+    st = c.preplan_docs.store
+    did = upload(api, png(), kind="photo", title="Rear", floor="")[1]["doc"]["id"]
+    real = st.delete
+
+    def broken(key):
+        raise docstore.DocStoreError("S3 DELETE: 503")
+    monkeypatch.setattr(st, "delete", broken)
+    code, out = call(api, f"/api/cad/preplan/docs/{did}", {"action": "delete"}, JULIAN)
+    assert code == 200 and out["doc"]["active"] is False                       # deleted for everyone at once
+    assert get(api, f"/api/cad/preplan/docs/{did}/file", "", COREY)[0] == 404
+    left = list(Path(st.root).rglob("original.*"))
+    assert len(left) == 1                                                      # the bytes: still there
+    monkeypatch.setattr(st, "delete", real)
+    assert c.preplan_docs.sweep(now=_time.time()) == 0                         # not yet: inside the margin
+    assert c.preplan_docs.sweep(now=_time.time() + ppd.SWEEP_MARGIN_S + 60) == 1
+    assert not list(Path(st.root).rglob("original.*"))
+    assert "site doc" in "\n".join(map(str, c.logged)) and "Rear" not in "\n".join(map(str, c.logged))
+
+
+def test_the_sweep_keeps_what_documents_name_and_stops_when_too_much_would_go(api, tmp_path):
+    import time as _time
+    c = api.cad
+    st = c.preplan_docs.store
+    keep = upload(api, png(), kind="photo", title="Rear", floor="")[1]["doc"]
+    later = _time.time() + ppd.SWEEP_MARGIN_S + 60
+    outside = Path(st.root) / "other" / "0123456789abcdef" / "original.png"
+    outside.parent.mkdir(parents=True)
+    outside.write_bytes(b"x")
+    stray = Path(st.root) / "preplan-docs" / "0123456789abcdef" / "original.png"
+    stray.parent.mkdir(parents=True)
+    stray.write_bytes(b"x")
+    odd = Path(st.root) / "preplan-docs" / "notes.txt"
+    odd.write_bytes(b"x")
+    c.preplan_docs.may_write = lambda: False
+    assert c.preplan_docs.sweep(now=later) == 0 and stray.exists()            # only the leader
+    c.preplan_docs.may_write = lambda: True
+    assert c.preplan_docs.sweep(now=later) == 1
+    assert not stray.exists() and outside.exists() and odd.exists()           # its own shape, under its prefix only
+    assert len(list(Path(st.root).rglob("original.png"))) == 2                # the document's own: kept (and outside)
+    for i in range(ppd.SWEEP_MAX_N + 5):
+        f = Path(st.root) / "preplan-docs" / f"{i:016x}" / "original.pdf"
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_bytes(b"x")
+    assert c.preplan_docs.sweep(now=later) == 0                               # the circuit breaker
+    assert "too many, nothing deleted" in c.preplan_docs.sweep_status
+    assert len(list((Path(st.root) / "preplan-docs").rglob("original.pdf"))) == ppd.SWEEP_MAX_N + 5
+    assert keep["id"]
+
+
+def test_plan_pictures_are_upright_and_at_most_4096_a_side(api):
+    from PIL import Image
+    c = api.cad
+    d = upload(api, png(4200, 30), title="Long", floor="1")[1]["doc"]
+    assert (d["plan_w"], d["plan_h"]) == (4096, 29) or (d["plan_w"], d["plan_h"]) == (4096, 30)
+    code, out = upload(api, jpeg_with_gps(orientation=6), title="Phone photo of a plan", floor="2")
+    assert code == 200, out
+    assert (out["doc"]["plan_w"], out["doc"]["plan_h"]) == (48, 64)          # turned upright
+    ref = c.store.q("SELECT ref FROM preplan_docs WHERE id = ?", (out["doc"]["id"],))[0]["ref"]
+    plan = (Path(c.preplan_docs.store.root) / "preplan-docs" / ref / "plan.png").read_bytes()
+    im = Image.open(io.BytesIO(plan))
+    assert im.size == (48, 64) and not im.getexif() and not im.info.get("exif")
+    assert ppd.PLAN_MAX_SIDE == docfiles.MAX_PX == 4096
+
+
+def test_jfxx_thumbnails_and_other_app_segments_are_dropped():
+    raw = jpeg_with_gps(orientation=1)
+    jfxx = b"\xff\xe0" + struct.pack(">H", 2 + 5 + 4) + b"JFXX\0" + b"\x10\x01\x01\x00"
+    app2 = b"\xff\xe2" + struct.pack(">H", 2 + 8) + b"MPF\0\0\0\0\0"
+    data = raw[:2] + jfxx + app2 + raw[2:]
+    clean, w, h = docfiles.clean_jpeg(data)
+    assert b"JFXX" not in clean and b"MPF\0" not in clean and (w, h) == (64, 48)
+
+
+def test_local_files_are_never_readable_by_others(tmp_path):
+    import os
+    st = docstore.FsDocStore(tmp_path)
+    k = st.key("0123456789abcdef", "original.png")
+    st.put(k, b"x", "image/png")
+    assert os.stat(tmp_path / k).st_mode & 0o777 == 0o600
+
+
+def test_the_s3_store_can_serve_through_the_hub_instead_of_links(api):
+    st, fake = s3_store()
+    st.links = False
+    api.cad.preplan_docs.store = st
+    did = upload(api, png())[1]["doc"]["id"]
+    code, raw, h = get(api, f"/api/cad/preplan/docs/{did}/file", "", VAL)
+    assert code == 200 and raw.startswith(b"\x89PNG") and h["X-Content-Type-Options"] == "nosniff"
+    assert "Location" not in h

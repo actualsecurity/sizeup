@@ -643,6 +643,11 @@ class App:
         from sizeup import docstore
         self.cad.preplan_docs.store = docstore.from_env(
             log=log, default_dir=None if cfg.cloud_role == "hub" or not cfg.cad_db else Path(cfg.cad_db).parent / "preplan-docs")
+        if self.fence is not None:
+            self.cad.preplan_docs.may_write = self.fence.ok      # only the leader sweeps the store
+        if cfg.cloud_role == "hub":
+            from sizeup.docfiles import no_dump
+            no_dump()               # a PDF renderer (same user) can't read this process's environ or memory (#459)
         # Road projects & closures (sizeup/roadprojects.py, #185): the Thruway's and 511NY's roadwork through roads,
         # the villages' road notices (placed by the gazetteer, or listed), any WZDx feed configured; read while someone looks.
         self.roadwork = prov["roadwork"]
@@ -3122,6 +3127,7 @@ class App:
         self.stt.start()
         threading.Thread(target=self._janitor, name="janitor", daemon=True).start()
         self.attachments.start()                  # linked transmissions copied to the attachments bucket (#323)
+        self.cad.preplan_docs.start()             # site documents: objects no document names, swept (#459)
         threading.Thread(target=self.cad.place_index, name="places", daemon=True).start()   # built before the first "@"
         threading.Thread(target=self._watch_fm, name="talking", daemon=True).start()
         if self.shared:
@@ -3327,6 +3333,7 @@ class App:
         self._stopping.set()
         self.cad.stop_voice()                # dispatch voices still rendering get a moment (#426); the rest: the next start's
         self.attachments.stop()
+        self.cad.preplan_docs.stop()
         for r in self.receivers:
             r.stop()
         for page in self.pagehold.flush():   # pages still in their continuation window: as they are
