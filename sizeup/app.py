@@ -492,6 +492,7 @@ class App:
         self.modes = [c.label for c in cfg.channels] + ([P25_MODE] if self.recorder else []) + list(self._sys_jobs)
         if self.shared:
             self.modes.append(OFF_MODE)
+        self.reception.setup_probes()         # (#436) the county's P25 sites, probe-only: never a mode here
         first = cfg.start_mode if cfg.start_mode in self.modes else (self.modes[0] if self.modes else OFF_MODE)
         self.assign: dict[str, str] = {sd: (first if k == 0 else OFF_MODE) for k, sd in enumerate(self._listed)}
         # Who set each dongle's mode: "person" (the web app, here or the hub's) or "auto" (_auto_assign).
@@ -3601,7 +3602,7 @@ class App:
             self.p25.start()
         for rt in self.systems.values():
             rt.ingest.start()
-        if self.systems:
+        if self.systems or self.reception.probes:
             self.reception.start_thread()
         if self.vocab is not None and self.vocab.state()["state"] == "PENDING":
             self.vocab.poll()

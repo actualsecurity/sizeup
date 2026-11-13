@@ -10,13 +10,15 @@
 // polled every 2 s while this section is open) and /api/cad/stt (the vocabulary);
 // every switch is a POST the server allows admins only (sizeup/cad/api.py WRITES): for anyone else the
 // controls are locked here too (cad.js roLock). Closing the paged incident is a dispatcher's.
-// The reception test (#410, state "reception", POST /api/reception): one dongle lent to one side of another P25
-// system for a while; its numbers, a verdict, the calls it captured to listen to, and the past tests with their
-// antenna notes. Its state is GET /api/reception, admins only (never in /api/state). On the hub it is the station's
+// The reception test (#410, #436, POST /api/reception): one dongle lent to a P25 system (the county's site, or a side
+// of another system) for a while; its numbers, a verdict, the calls it captured to listen to, and the past tests with
+// their antenna notes. Settings > Radios > Receivers only: never another tab, never the station's own page. Its state
+// is GET /api/reception, admins only (never in /api/state), fetched only while that card is shown. On the hub it is the station's
 // (the hub sends the POST on, and fetches a sample as it is played). A dongle lent to a test is marked on its row
 // above and its job buttons are locked; a fire dongle can't be picked at all.
 //
-//   RadioControls.mount(box)   when Settings > Radios opens (settings.js)
+//   RadioControls.mount(box, { reception, tab })   when Settings > Radios opens (settings.js: the reception test
+//                                                   card, Receivers only); the station's page mounts it without
 "use strict";
 
 window.RadioControls = (() => {
@@ -61,7 +63,8 @@ window.RadioControls = (() => {
     return c;
   }
 
-  function mount(box) {
+  function mount(box, opts = {}) {
+    st.tab = opts.tab || "";
     if (st.box !== box) {
       st.box = box;
       const n = st.n;
@@ -94,9 +97,12 @@ window.RadioControls = (() => {
       n.rerunMsg = el("span", "dim small");
       const tools = el("div", "row");
       tools.append(n.filter, n.tgSum);
-      n.rx = el("div", "rx");                        // the reception test (#410)
-      n.rx.append(...rxBuild());
-      n.rxCard = tab("receivers", card("Reception test", RX_HELP, n.rx));
+      if (opts.reception) {                          // the reception test (#410): Settings > Radios > Receivers only
+        n.rx = el("div", "rx");
+        n.rx.append(...rxBuild());
+        n.rxCard = tab("receivers", card("Reception test", RX_HELP, n.rx));
+        n.rxCard.hidden = true;
+      } else n.rxCard = null;
       n.inc = el("div", "row");
       n.close = el("button", "ro-ok", "Close");        // a dispatcher's (ro-ok: not locked with the admin switches)
       n.close.type = "button";
@@ -110,7 +116,7 @@ window.RadioControls = (() => {
              + "no auto-assign ever do. Admins name it with Use for ADS-B on its row, or release it.\nTwo dongles with one serial "
              + "(a factory 00000001) can't be told apart: neither is opened by it until one is renamed; the box above the "
              + "dongles says how.", n.radios, n.dups, n.sdr, n.adsb, n.storage)),
-        n.rxCard,
+        ...(n.rxCard ? [n.rxCard] : []),
         tab("receivers", card("Paged incident", "The incident the station opened from the last page: Main traffic attaches to it until it "
              + "goes quiet. Close it when the call is over.", n.inc)),
         tab("channels", card("Channels", "Record: keeps its transmissions (off for FG1, FG2 or South 2: the receiver keeps running, squelch, "
@@ -139,7 +145,7 @@ window.RadioControls = (() => {
         st.stateId = s ? r.headers.get("X-State-Id") || "" : "";
         if (s && !s.error) { st.state = s; settle(); render(); }
       }
-      if (!ro()) {                                   // the reception tests (#410): the admins' own, not in the state
+      if (st.n.rxCard && st.tab === "receivers" && !ro()) {   // the reception tests (#410): admins', Receivers only
         const x = await fetch("/api/reception", { cache: "no-store" });
         st.rx = x.ok ? (await x.json()).reception : null;
       } else st.rx = null;
@@ -260,21 +266,23 @@ window.RadioControls = (() => {
     if (box.dataset.key !== key) {
       box.replaceChildren();
       for (const x of list) {
-        const row = el("span", "seg");
+        // the label in its own column, the job buttons (and Use for ADS-B) wrapping beside it: no row runs off the card
+        const row = el("div", "seg sdr-row");
         row.dataset.sdr = x.serial;
-        row.append(el("span", "dim sdr-label", ""));
+        const btns = el("div", "sdr-btns");
         for (const m of modes) {
           const b = el("button", "", m);
           b.type = "button";
           b.dataset.mode = m;
           b.addEventListener("click", () => setSdrMode(m, x.serial));
-          row.append(b);
+          btns.append(b);
         }
         const ad = el("button", "adsb-use", "Use for ADS-B");
         ad.type = "button";
         ad.title = "Reserve this dongle for the ADS-B receiver (its filter and LNA): its decoder only, never a channel";
         ad.addEventListener("click", () => setAdsb(x.serial, x.name || x.serial));
-        row.append(ad, el("span", "sdr-err"));
+        btns.append(ad);
+        row.append(el("span", "dim sdr-label", ""), btns, el("span", "sdr-err"));
         box.append(row);
       }
       box.dataset.key = key;
@@ -317,27 +325,161 @@ window.RadioControls = (() => {
     }
   }
 
-  // ---- the reception test (#410) ------------------------------------------------------------------------------------
+  // ---- the reception test (#410, #436) ------------------------------------------------------------------------------
+  // Settings > Radios > Receivers only (settings.js mounts with { reception: true, tab }); never on the station's page.
+  // Every trunked P25 system is a target: the county's sites (probe-only, sizeup/radio/probes.py), then the systems
+  // config's, each side and "both". On screen: data only; what each number means is in the "?" and the hovers.
 
-  const RX_HELP = "Can this station hear the system with a dongle it already has?\nLend one dongle to one side of the "
-    + "system's span (a 2.4 MHz dongle takes in one side at a time; Both runs them one after the other). The job that "
-    + "dongle runs is paused and comes back when the test ends, is stopped or fails, and after a restart. A dongle "
-    + "another app holds is never taken. Fire dongles (the county trunk, paging, a fireground) can't be lent.\nControl: the control channel found, its decode rate "
-    + "(about 40 messages/s is full strength), the share of the time it decoded (10/s or more in a 3 s window), the "
-    + "longest dropout, each of the windows there should have been.\nSite: what the control channel said it is, against the site as listed.\nGrants: key-ups the "
-    + "control channel announced, on either side. Calls: voice this dongle captured (its side only). Off side: grants "
-    + "on a voice channel this dongle doesn't cover.\nVerdict: Good = decoded 90% of the time or more at 30 messages/s "
-    + "or more; None = under 5%; Marginal = between, another site, or voice with over 5 errors/s. The numbers are a "
-    + "first guess, not calibrated.\nNothing of a test is transcribed or "
-    + "kept as radio traffic. Encrypted talkgroups are counted only. The calls it captured can be played here for a "
-    + "few minutes (Sample), then they are deleted.\nSome traffic is carried over LTE and is never on the air: a "
-    + "scanner misses it too.";
+  const RX_HELP = "Can this station hear a P25 system with a dongle it already has?\nTarget: the county's site (its "
+    + "own probe, never the county's trunk-recorder or dongle) or another system's side (a 2.4 MHz dongle takes in one "
+    + "side at a time; both: one after the other). FM and airband channels are not tested here.\nThe lent dongle's job "
+    + "is paused and comes back when the test ends, is stopped or fails, and after a restart. A dongle another app "
+    + "holds is never taken; fire dongles can't be lent.\nControl: the control channel, its decode rate (about 40/s is "
+    + "full strength), the share of 3 s windows at 10/s or more, the longest dropout.\nTG hits/h: grants per hour on "
+    + "the system's alert talkgroups (the county's: our fire alert talkgroups), either side.\nVerdict: Good = decoded "
+    + "90% of the time or more at 30/s or more; None = a finished side under 5%; Marginal = between, another site, or "
+    + "voice over 5 errors/s. Uncalibrated.\nStopped, failed or restored after a restart: grey, no verdict for a side "
+    + "that measured nothing.\nNothing is transcribed or kept as traffic; encrypted talkgroups are counted only. "
+    + "Captured calls play from the hub for the Sample minutes, then are deleted.\nSome traffic is carried over LTE, "
+    + "never on the air.";
   const RX_TIMES = { 15: "15 min", 60: "1 h", 240: "4 h", 0: "Until stopped" };
-  const RX_GRADE = { good: ["Good", "ok"], marginal: ["Marginal", ""], none: ["None", "err"] };
-  const rxSt = { busy: false, error: "", key: "", histKey: "", sampleKey: "" };
+  const RX_GRADE = { good: ["Good", "ok"], marginal: ["Marginal", "warn"], none: ["None", "err"] };
+  const RX_ENDED = { stopped: "stopped", failed: "failed", interrupted: "interrupted" };
+  const RX_WHY = { stopped: "Stopped", failed: "Failed", interrupted: "Restored after a crash or restart" };
+  const rxSt = { busy: false, error: "", key: "", histKey: "", sampleKey: "", editing: "", drawnEditing: "" };
   const hms = (s) => { const n = Math.max(0, Math.floor(s || 0)); return n < 3600 ? mmss(n) : `${Math.floor(n / 3600)}:${String(Math.floor(n / 60) % 60).padStart(2, "0")}:${String(n % 60).padStart(2, "0")}`; };
-  const rxSide = (job) => String(job || "").split(" ").pop();
-  const num = (v, unit = "") => (v == null ? "–" : `${v}${unit}`);
+  const num = (v, unit = "") => (v == null ? "—" : `${v}${unit}`);
+  const plural = (n, w) => `${n} ${w}${n === 1 ? "" : "s"}`;
+
+  // "3m", "45s", "1h05": how long a test ran, for its chip
+  function rxDur(s) {
+    const n = Math.max(0, Math.round(s || 0));
+    if (n < 60) return `${n}s`;
+    if (n < 3600) return `${Math.floor(n / 60)}m`;
+    return `${Math.floor(n / 3600)}h${String(Math.floor(n / 60) % 60).padStart(2, "0")}`;
+  }
+
+  // The side a job is, as the target list names it: "770" of "MRRS 770"; "" for a system of one side
+  function rxSideOf(sys, job) {
+    return sys && sys.jobs.length > 1 ? String(job || "").split(" ").pop() : "";
+  }
+
+  // The target select's rows: [value "system|job,job", text, disabled, title]: each side of each system by its first
+  // control channel (the others, and the dongle's centre, in the hover), then "both" for a system of two sides
+  function rxTargets(systems) {
+    const out = [];
+    for (const s of systems || []) {
+      for (const j of s.jobs) {
+        const cc = j.cc && j.cc.length ? j.cc : [j.mhz];
+        out.push([`${s.name}|${j.job}`, `${s.label}${rxSideOf(s, j.job) ? ` ${rxSideOf(s, j.job)}` : ""} · ${cc[0]}`, false,
+                  `Control channels ${cc.join(", ")} MHz (dongle centred on ${j.mhz})`]);
+      }
+      if (s.jobs.length > 1) {
+        out.push([`${s.name}|${s.jobs.map((j) => j.job).join(",")}`, `${s.label} both sides`, false,
+                  s.jobs.map((j) => `${j.job}: ${(j.cc && j.cc.length ? j.cc : [j.mhz]).join(", ")}`).join("\n")]);
+      }
+    }
+    return out;
+  }
+
+  function rxPill(grade, title) {
+    const [word, cls] = RX_GRADE[grade] || ["—", "off"];
+    const p = el("span", `pill ${cls}`, word);
+    if (title) p.title = title;
+    return p;
+  }
+
+  // How a past test ended, as one chip: a verdict pill per side when it ran its course; a grey chip otherwise ("stopped
+  // at 3m"), with no verdict colour, whatever it measured (the reason, and what it did measure, in the hover)
+  function rxResult(h) {
+    const hs = h.halves || [];
+    const box = el("span", "rx-result");
+    if (h.status === "done") {
+      for (const x of hs) box.append(rxPill(x.grade, x.hint || ""));
+      if (!hs.length) box.append(rxPill(null));
+    } else {
+      const went = h.ended && h.started ? h.ended - h.started : hs.reduce((a, x) => a + (x.seconds || 0), 0);
+      const chip = el("span", "pill rx-ended", `${RX_ENDED[h.status] || h.status || "ended"} at ${rxDur(went)}`);
+      chip.title = [`${RX_WHY[h.status] || "Ended"}${h.why ? `: ${h.why}` : ""}`, ...hs.filter((x) => x.grade).map((x) => `${x.job}: ${x.grade}${x.hint ? `. ${x.hint}` : ""}`)]
+        .filter(Boolean).join("\n");
+      box.append(chip);
+    }
+    if (h.restored_ok === false) box.append(el("span", "pill err", "not restored"));
+    box.title = [h.restored && `SDR ${h.sdr_name}: ${h.restored}`].filter(Boolean).join("\n");
+    return box;
+  }
+
+  // The antenna note of a past test: its text with a pencil; the pencil edits it in place (Enter or leaving the field
+  // saves through {"action": "note"}, Escape puts it back)
+  function rxNote(h, locked) {
+    const td = el("td", "rx-note-cell");
+    td.dataset.id = h.id;
+    if (rxSt.editing === h.id && !locked) {
+      const i = el("input", "sm rx-note-edit");
+      Object.assign(i, { type: "text", maxLength: 200, value: h.note || "", autocomplete: "off" });
+      i.setAttribute("aria-label", "Antenna note");
+      let done = false;
+      const save = (keep) => {
+        if (done) return;
+        done = true;
+        if (document.activeElement === i) i.blur();    // (the history isn't redrawn under a focused field)
+        rxSt.editing = "";
+        rxSt.histKey = "";
+        const v = i.value.trim();
+        if (keep && v !== (h.note || "")) { h.note = v; rxPost({ action: "note", id: h.id, note: v }); } else renderReception();
+      };
+      i.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") { e.preventDefault(); save(true); } else if (e.key === "Escape") { e.preventDefault(); save(false); }
+      });
+      i.addEventListener("blur", () => save(true));
+      td.append(i);
+      return td;
+    }
+    const box = el("div", "rx-note-box");
+    box.append(el("span", h.note ? "rx-note-text" : "rx-note-text dim", h.note || "—"));
+    const pen = el("button", "mini quiet rx-note-pen", "✎");
+    pen.type = "button";
+    pen.title = "Edit the antenna note";
+    pen.setAttribute("aria-label", "Edit the antenna note");
+    pen.disabled = locked;
+    pen.addEventListener("click", () => {
+      rxSt.editing = h.id;
+      rxSt.histKey = "";
+      renderReception();                             // (redrawn whatever has the focus; the field is focused there)
+    });
+    box.append(pen);
+    td.append(box);
+    return td;
+  }
+
+  function rxDecoded(hs) {                    // "61% / 0%"; "—" for a side with no decode rate; the mean rate in the hover
+    const td = el("td", "num", hs.map((x) => (x.decoded_pct == null ? "—" : `${x.decoded_pct}%`)).join(" / ") || "—");
+    td.title = hs.filter((x) => x.rate != null).map((x) => `${x.job}: ${x.rate}/s`).join("\n");
+    return td;
+  }
+
+  function rxHistRow(h, systems, locked) {
+    const sys = (systems || []).find((s) => s.name === h.system);
+    const hs = h.halves || [];
+    const join = (f) => hs.map(f).join(" / ") || "—";
+    const tr = el("tr", h.status === "done" ? "" : "rx-unfinished");
+    tr.dataset.id = h.id;
+    const side = hs.length ? hs.map((x) => rxSideOf(sys || { jobs: [1, 2] }, x.job)).filter(Boolean).join("+")
+      : (h.plan || []).map((j) => rxSideOf(sys || { jobs: [1, 2] }, j)).filter(Boolean).join("+");
+    const hits = el("td", "num", join((x) => num(x.alert ? x.alert.per_h : null)));
+    const tgs = (hs.find((x) => x.alert) || {}).alert;
+    if (tgs && tgs.tgs.length) hits.title = `Grants per hour on ${tgs.tgs.map((t) => `${t.tg} ${t.name}`).join(", ")}`;
+    tr.append(el("td", "t", fmtTime(h.started)),
+              el("td", "", `${h.label || h.system}${side ? ` ${side}` : ""}`),
+              el("td", "", h.sdr_name + (h.was && h.was !== "Off" ? ` (${h.was})` : "")),
+              el("td", "num", join((x) => hms(x.seconds))));
+    const res = el("td");
+    res.append(rxResult(h));
+    tr.append(res, el("td", "num", join((x) => num(x.cc_mhz))),
+              rxDecoded(hs),
+              hits, rxNote(h, locked));
+    return tr;
+  }
 
   function rxSelect(cls, label, title) {
     const s = el("select", `sm ${cls}`);
@@ -348,16 +490,15 @@ window.RadioControls = (() => {
 
   function rxBuild() {
     const n = st.n;
-    n.rxSys = rxSelect("rx-sys", "System", "The system to test");
-    n.rxJob = rxSelect("rx-job", "Side", "The side of the span the dongle listens to. Both: one after the other, each for the time picked.");
+    n.rxTarget = rxSelect("rx-target", "Target", "The P25 system (or side of its span) to test");
     n.rxSdr = rxSelect("rx-sdr", "SDR", "The dongle to lend. Greyed out: held by another app, unplugged, or a fire dongle (never lent).");
     n.rxTime = rxSelect("rx-time", "Time", "How long each side is measured. Until stopped ends by itself after 24 h.");
     n.rxKeep = el("input", "sm rx-keep");
     Object.assign(n.rxKeep, { type: "number", min: 0, max: 60, step: 1, value: 10 });
     n.rxKeep.setAttribute("aria-label", "Sample minutes");
+    n.rxKeep.title = "Minutes each captured call can be played from the hub, then deleted. 0: none kept.";
     const keep = el("label", "rx-keep-l small", "Sample ");
     keep.append(n.rxKeep, " min");
-    keep.title = "How long each captured call can be played here before it is deleted. 0: no audio is kept.";
     n.rxNote = el("input", "sm rx-note");
     Object.assign(n.rxNote, { type: "text", maxLength: 200, placeholder: "Antenna note", autocomplete: "off" });
     n.rxNote.setAttribute("aria-label", "Antenna note");
@@ -366,8 +507,8 @@ window.RadioControls = (() => {
     n.rxGo.type = "button";
     n.rxGo.addEventListener("click", rxStart);
     n.rxForm = el("div", "row rx-form");
-    n.rxForm.append(n.rxSys, n.rxJob, n.rxSdr, n.rxTime, keep, n.rxNote, n.rxGo);
-    for (const x of [n.rxSdr, n.rxJob]) x.addEventListener("change", () => { rxSt.key = ""; renderReception(); });
+    n.rxForm.append(n.rxTarget, n.rxSdr, n.rxTime, keep, n.rxNote, n.rxGo);
+    for (const x of [n.rxSdr, n.rxTarget]) x.addEventListener("change", () => { rxSt.key = ""; renderReception(); });
     n.rxAlert = el("p", "notice err rx-alert");
     n.rxAlert.hidden = true;
     n.rxPause = el("div", "small rx-pause");
@@ -375,7 +516,6 @@ window.RadioControls = (() => {
     n.rxLive = el("div", "rx-live");
     n.rxSamples = el("div", "rx-samples");
     n.rxHist = el("div", "rx-hist");
-    n.rxHist.addEventListener("change", rxNoteChange);
     return [n.rxAlert, n.rxForm, n.rxPause, n.rxErr, n.rxLive, n.rxSamples, n.rxHist];
   }
 
@@ -383,15 +523,10 @@ window.RadioControls = (() => {
     const key = JSON.stringify(rows);
     if (sel.dataset.key === key) return;
     const was = keep != null ? keep : sel.value;
-    sel.replaceChildren(...rows.map(([v, t, off]) => { const o = new Option(t, v); o.disabled = !!off; return o; }));
+    sel.replaceChildren(...rows.map(([v, t, off, tip]) => { const o = new Option(t, v); o.disabled = !!off; if (tip) o.title = tip; return o; }));
     sel.dataset.key = key;
     if (rows.some(([v, , off]) => String(v) === was && !off)) sel.value = was;
     else { const first = rows.find((r) => !r[2]); sel.value = first ? first[0] : ""; }
-  }
-
-  function rxPill(grade) {
-    const [word, cls] = RX_GRADE[grade] || ["–", "off"];
-    return el("span", `pill ${cls}`, word);
   }
 
   function rxSpark(series, stepS) {           // the decode rate over the side: 0 to 45 messages/s
@@ -421,17 +556,19 @@ window.RadioControls = (() => {
     tb.append(tr);
   }
 
+  const RX_TG_ROWS = 8;                       // the busiest talkgroups shown under the alert ones; the rest counted
+
   function rxSideBlock(h, running) {          // one side's numbers: a finished one, or the running one so far
     const box = el("div", "rx-side");
     const cc = h.cc, v = h.verdict || {}, site = h.site || {}, sig = h.signal || {};
     const head = el("div", "row");
-    head.append(rxPill(v.grade), el("b", "", `${h.job} · ${h.mhz} MHz`), el("span", "dim small", `${hms(h.seconds)}${running ? " so far" : ""}`));
+    head.append(running && !cc.windows ? el("span", "pill rx-ended", "measuring") : rxPill(v.grade, v.hint || ""),
+                el("b", "", `${h.job} · ${h.mhz} MHz`), el("span", "dim small", `${hms(h.seconds)}${running ? " so far" : ""}`));
     box.append(head);
-    if (v.hint) box.append(el("p", "small rx-hint", v.hint));
     const t = el("table", "table rx-nums"), tb = el("tbody");
-    const ctl = [cc.found ? `${cc.mhz} MHz · ${num(cc.rate, "/s")} · decoded ${cc.decoded_pct}%`
-      : cc.windows ? `not found · ${num(cc.rate, "/s")} · decoded ${cc.decoded_pct}%` : "no decode rate logged",
-      cc.windows ? ` · dropout ${hms(cc.dropout_s)} · ${cc.retunes} retune${cc.retunes === 1 ? "" : "s"}` : ""].join("");
+    const ctl = !cc.windows ? "no decode rate yet"
+      : [cc.found ? `${cc.mhz} MHz` : "not found", num(cc.rate, "/s"), `${cc.decoded_pct}%`,
+         `dropout ${hms(cc.dropout_s)}`, plural(cc.retunes, "retune")].join(" · ");
     const cells = [ctl];
     if (cc.series && cc.series.length) cells.push(rxSpark(cc.series, cc.series_step_s));
     rxRow(tb, "Control", "The control channel found, its mean decode rate (about 40 messages/s is full strength), the share of "
@@ -441,21 +578,30 @@ window.RadioControls = (() => {
     rxRow(tb, "Site", "What the control channel said it is, against the site as listed", Object.keys(seen).length
       ? ["sysid", "wacn", "nac", "rfss", "site"].filter((k) => seen[k] != null).map((k) => `${k.toUpperCase()} ${seen[k]}`).join(" · ")
         + (site.match === true ? " · as listed" : site.match === false ? ` · NOT as listed (${site.differs.join(", ")})` : "")
-      : "not decoded");
+      : "—");
     const sw = sig.sweep;
     rxRow(tb, "Signal", "Control: the control channel's level over the noise floor, swept before the test (rtl_power). Voice: the "
       + "signal-to-noise ratio trunk-recorder measured on the calls it captured.\n"
       + (sw ? sw.channels.map((c) => `${c.mhz}: ${c.over_db >= 0 ? "+" : ""}${c.over_db} dB`).join("\n") : "No sweep (rtl_power not found)."),
-      [sig.cc_over_db != null ? `control +${sig.cc_over_db} dB over floor` : sw ? `strongest listed +${Math.max(...sw.channels.map((c) => c.over_db))} dB over floor` : "",
-       sig.voice_snr_db != null ? `voice SNR ${sig.voice_snr_db} dB` : ""].filter(Boolean).join(" · ") || "n/a");
+      [sig.cc_over_db != null ? `control +${sig.cc_over_db} dB` : sw ? `best +${Math.max(...sw.channels.map((c) => c.over_db))} dB` : "",
+       sig.voice_snr_db != null ? `voice SNR ${sig.voice_snr_db} dB` : ""].filter(Boolean).join(" · ") || "—");
+    const al = h.alert;
+    if (al && al.tgs.length) {
+      rxRow(tb, "TG hits/h", `Grants per hour on ${al.tgs.map((x) => `${x.tg} ${x.name}`).join(", ")}, either side`,
+        `${num(al.per_h)} · ${plural(al.grants, "grant")}`);
+    }
     const vo = h.voice;
     rxRow(tb, "Voice", "Calls this dongle captured (its side only): how many, per hour, their audio, decode errors per second of audio",
-      vo.calls ? `${vo.calls} call${vo.calls === 1 ? "" : "s"} · ${num(vo.calls_per_h, "/h")} · ${hms(vo.audio_s)} · ${num(vo.err_per_s, " err/s")}` : "none captured");
+      vo.calls ? `${plural(vo.calls, "call")} · ${num(vo.calls_per_h, "/h")} · ${hms(vo.audio_s)} · ${num(vo.err_per_s, " err/s")}` : "—");
     rxRow(tb, "Encrypted", "Grants on encrypted talkgroups: counted, never decoded, no radio ID kept. Unknown: talkgroups not in the system's file.",
-      `${h.encrypted_grants} grant${h.encrypted_grants === 1 ? "" : "s"} · unknown ${h.unknown_grants}`);
+      `${h.encrypted_grants} · unknown ${h.unknown_grants}`);
     t.append(tb);
     box.append(t);
-    if (h.talkgroups.length) {
+    const alert = new Set(((al && al.tgs) || []).map((x) => x.tg));
+    const rows = h.talkgroups.filter((r) => r.watch || alert.has(r.tg) || r.grants || r.calls)
+      .sort((a, b) => (alert.has(b.tg) || b.watch) - (alert.has(a.tg) || a.watch) || b.grants - a.grants);
+    const shown = rows.filter((r, i) => r.watch || alert.has(r.tg) || i < RX_TG_ROWS);
+    if (shown.length) {
       const g = el("table", "table rx-tgs"), gh = el("tr"), gb = el("tbody");
       for (const [c, tip] of [["Talkgroup", ""], ["Grants", "Key-ups the control channel announced, on either side of the span"],
                               ["Off side", "Grants on a voice channel this dongle doesn't cover"], ["Calls", "Voice calls captured on this side"],
@@ -464,10 +610,17 @@ window.RadioControls = (() => {
         th.title = tip;
         gh.append(th);
       }
-      for (const r of h.talkgroups) {
-        const tr = el("tr", r.watch ? "rx-watch" : "");
+      for (const r of shown) {
+        const tr = el("tr", r.watch || alert.has(r.tg) ? "rx-watch" : "");
         tr.append(el("td", "", `${r.tg} ${r.name}`), el("td", "num", String(r.grants)), el("td", "num", String(r.uncovered)),
                   el("td", "num", String(r.calls)), el("td", "num", num(r.calls_per_h)), el("td", "num", hms(r.audio_s)), el("td", "num", num(r.err_per_s)));
+        gb.append(tr);
+      }
+      if (rows.length > shown.length) {
+        const tr = el("tr", "dim");
+        const td = el("td", "", `+${rows.length - shown.length} more`);
+        td.colSpan = 7;
+        tr.append(td);
         gb.append(tr);
       }
       const thead = el("thead");
@@ -481,28 +634,28 @@ window.RadioControls = (() => {
   function renderReception() {
     const n = st.n, rx = st.rx;
     if (!n.rxCard) return;
-    show(n.rxCard, !!rx);
-    if (!rx) return;
+    // only under Receivers (the other tabs share this box: settings.js hides the card by its data-rtab, and so does this)
+    const on = !!rx && st.tab === "receivers";
+    show(n.rxCard, on);
+    if (!on) return;
     setText(n.rxAlert, rx.alert || "");
     show(n.rxAlert, !!rx.alert);
     const a = rx.active, locked = ro();
     // the form
     show(n.rxForm, !a);
     show(n.rxPause, !a);
-    rxOptions(n.rxSys, rx.systems.map((x) => [x.name, x.label]));
-    show(n.rxSys, rx.systems.length > 1);
-    const sys = rx.systems.find((x) => x.name === n.rxSys.value) || rx.systems[0];
-    rxOptions(n.rxJob, [...sys.jobs.map((j) => [j.job, `${rxSide(j.job)} side · ${j.mhz}`]),
-                        ...(sys.jobs.length > 1 ? [[sys.jobs.map((j) => j.job).join("|"), "Both, in turn"]] : [])]);
-    rxOptions(n.rxTime, rx.durations.map((m) => [String(m), RX_TIMES[m] || `${m} min`, m === 0 && n.rxJob.value.includes("|")]));
-    rxOptions(n.rxSdr, rx.dongles.map((d) => [d.serial, `SDR ${d.name} · ${d.job}${d.refuse ? ` · ${d.protected ? "fire: not lendable" : d.refuse}` : ""}`, !!d.refuse]));
+    rxOptions(n.rxTarget, rxTargets(rx.systems));
+    const [sysName, jobs = ""] = n.rxTarget.value.split("|");
+    const both = jobs.includes(",");
+    rxOptions(n.rxTime, rx.durations.map((m) => [String(m), RX_TIMES[m] || `${m} min`, m === 0 && both]));
+    rxOptions(n.rxSdr, rx.dongles.map((d) => [d.serial, `SDR ${d.name} · ${d.job}${d.refuse ? ` · ${d.protected ? "fire" : d.refuse}` : ""}`, !!d.refuse]));
     const d = rx.dongles.find((x) => x.serial === n.rxSdr.value && !x.refuse);
-    setText(n.rxPause, !d ? "No dongle to lend" : d.job === "Off" ? "" : `Pauses ${d.job} on SDR ${d.name}; restored after`);
-    n.rxGo.disabled = rxSt.busy || locked || !d;
-    for (const x of [n.rxSys, n.rxJob, n.rxSdr, n.rxTime, n.rxKeep, n.rxNote]) x.disabled = locked;
+    setText(n.rxPause, !d ? "No dongle to lend" : d.job === "Off" ? "" : `Pauses ${d.job}`);
+    n.rxGo.disabled = rxSt.busy || locked || !d || !sysName;
+    for (const x of [n.rxTarget, n.rxSdr, n.rxTime, n.rxKeep, n.rxNote]) x.disabled = locked;
     setText(n.rxErr, rxSt.error);
     // the running test
-    const key = JSON.stringify([a && [a.id, a.step, a.phase, a.halves.length, a.running, Math.floor((a.now - (a.phase_started || a.now)) / 2)], locked, rxSt.busy]);
+    const key = JSON.stringify([a && [a.id, a.step, a.phase, a.halves.length, a.running, a.note, Math.floor((a.now - (a.phase_started || a.now)) / 2)], locked, rxSt.busy]);
     if (key !== rxSt.key) {
       rxSt.key = key;
       const kids = [];
@@ -510,14 +663,15 @@ window.RadioControls = (() => {
         const head = el("div", "row rx-run");
         const job = a.plan[a.phase], total = a.minutes ? a.minutes * 60 : 0;
         const went = a.phase_started ? a.now - a.phase_started : 0;
-        const paused = el("span", "pill rx-paused", a.was && a.was !== "Off" ? `${a.was} PAUSED` : "");
-        paused.title = "This job is off its dongle while the test runs. It comes back when the test ends, is stopped or fails.";
+        const paused = el("span", "pill warn rx-paused", a.was && a.was !== "Off" ? `${a.was} paused` : "");
+        paused.title = "Off its dongle while the test runs; back when it ends, is stopped or fails";
         show(paused, !!(a.was && a.was !== "Off"));
-        head.append(el("b", "", a.step === "stopping" ? `Stopping ${job}` : a.step === "starting" ? `Starting ${job}`
-                                : `${job}${a.plan.length > 1 ? ` (${a.phase + 1} of ${a.plan.length})` : ""}`),
+        head.append(el("b", "", `${a.step === "stopping" ? "Stopping " : a.step === "starting" ? "Starting " : ""}${job}`
+                                + (a.plan.length > 1 ? ` (${a.phase + 1}/${a.plan.length})` : "")),
                     el("span", "", `SDR ${a.sdr_name}`),
-                    el("span", "", a.step !== "running" ? "" : total ? `${hms(went)} of ${hms(total)}` : `${hms(went)}, until stopped`),
+                    el("span", "num", a.step !== "running" ? "" : total ? `${hms(went)} / ${hms(total)}` : hms(went)),
                     paused);
+        if (a.note) head.append(el("span", "dim", a.note));
         const stop = el("button", "sm", "Stop");
         stop.type = "button";
         stop.title = "End the test now: its numbers so far are kept, the dongle goes back to its job";
@@ -544,55 +698,46 @@ window.RadioControls = (() => {
         return row;
       });
       n.rxSamples.replaceChildren(...(rx.samples_at === "hub"
-        ? (rx.samples_kept ? [el("div", "dim small", `${rx.samples_kept} captured call${rx.samples_kept === 1 ? "" : "s"} \u00b7 sample: listen from the hub`)] : [])
-        : rows.length ? [el("div", "dim small", "Captured calls (deleted after their minutes)"), ...rows] : []));
+        ? (rx.samples_kept ? [el("div", "dim small", `${plural(rx.samples_kept, "captured call")} · listen from the hub`)] : [])
+        : rows));
     }
     for (const s of rx.samples) {
       const row = [...n.rxSamples.children].find((r) => r.dataset.id === s.id);
-      if (row) setText(row.querySelector(".rx-left"), `deleted in ${hms(s.keep_s - s.age_s)}`);
+      if (row) {
+        const left = row.querySelector(".rx-left");
+        setText(left, hms(s.keep_s - s.age_s));
+        left.title = "Deleted in";
+      }
     }
     // the past tests
-    const hkey = JSON.stringify([rx.history, locked]);
-    if (hkey !== rxSt.histKey && !n.rxHist.contains(document.activeElement)) {
+    // Redrawn when it changed, but never under the note being typed (a focused .rx-note-edit); an edit started or
+    // ended always redraws, whatever has the focus (a clicked pencil is focused), and the new field gets the focus
+    const hkey = JSON.stringify([rx.history, locked, rxSt.editing]);
+    const typing = document.activeElement && n.rxHist.contains(document.activeElement)
+      && document.activeElement.classList.contains("rx-note-edit");
+    if (hkey !== rxSt.histKey && (!typing || rxSt.editing !== rxSt.drawnEditing)) {
       rxSt.histKey = hkey;
+      rxSt.drawnEditing = rxSt.editing;
       if (!rx.history.length) n.rxHist.replaceChildren();
       else {
-        const watch = sys.watch[0];
         const t = el("table", "table rx-history"), hr = el("tr"), tb = el("tbody"), thead = el("thead");
-        for (const [c, tip] of [["When", ""], ["Side", ""], ["SDR", "The dongle lent, and the job it paused"], ["Time", "Measured, per side"],
-                                ["Verdict", "Per side. Hover for the hint."], ["Control", "The control channel found, MHz"],
+        for (const [c, tip] of [["When", ""], ["Target", "The system, and the side of its span"],
+                                ["SDR", "The dongle lent, and the job it paused"], ["Time", "Measured, per side"],
+                                ["Verdict", "Per side; hover for the hint. Grey: stopped, failed or restored after a crash (hover for why)"],
+                                ["Control", "The control channel found, MHz"],
                                 ["Decoded", "Share of the time the control channel decoded, and its mean rate"],
-                                [watch ? `${watch} /h` : "Calls /h", "Voice calls captured per hour" + (watch ? ` on talkgroup ${watch}` : "")],
+                                ["TG hits/h", "Grants per hour on the system's alert talkgroups (hover a cell for which)"],
                                 ["Antenna note", "Which antenna, where, pointing where"]]) {
           const th = el("th", "", c);
           th.title = tip;
           hr.append(th);
         }
-        for (const h of rx.history) {
-          const tr = el("tr");
-          const hs = h.halves || [];
-          const join = (f) => hs.map(f).join(" / ") || "–";
-          const verdict = el("td");
-          hs.forEach((x) => { const p = rxPill(x.grade); p.title = x.hint || ""; verdict.append(p, " "); });
-          if (h.status !== "done") verdict.append(el("span", "dim small", h.status));
-          if (h.restored_ok === false) verdict.append(el("span", "pill err", "not restored"));
-          verdict.title = [h.why, h.restored && `SDR ${h.sdr_name}: ${h.restored}`].filter(Boolean).join("\n");
-          const note = el("input", "sm rx-note");
-          Object.assign(note, { type: "text", maxLength: 200, value: h.note || "", disabled: locked, placeholder: "Antenna note" });
-          note.setAttribute("aria-label", "Antenna note");
-          note.dataset.id = h.id;
-          const nt = el("td");
-          nt.append(note);
-          const per = (x) => { const w = (x.watch || []).find((y) => y.tg === watch); return w ? num(w.calls_per_h) + (w.grants && !w.calls ? ` (${w.grants} grants)` : "") : num(x.calls); };
-          tr.append(el("td", "t", fmtTime(h.started)),
-                    el("td", "", join((x) => rxSide(x.job))), el("td", "", h.sdr_name + (h.was && h.was !== "Off" ? ` (${h.was})` : "")),
-                    el("td", "num", join((x) => hms(x.seconds))), verdict, el("td", "num", join((x) => num(x.cc_mhz))),
-                    el("td", "num", join((x) => `${num(x.decoded_pct, "%")} ${num(x.rate, "/s")}`)), el("td", "num", join(per)), nt);
-          tb.append(tr);
-        }
+        for (const h of rx.history) tb.append(rxHistRow(h, rx.systems, locked));
         thead.append(hr);
         t.append(thead, tb);
         n.rxHist.replaceChildren(t);
+        const i = rxSt.editing ? n.rxHist.querySelector(".rx-note-edit") : null;
+        if (i && document.activeElement !== i) { i.focus(); i.select(); }
       }
     }
   }
@@ -616,6 +761,7 @@ window.RadioControls = (() => {
       clearTimeout(timer);
       rxSt.busy = false;
       rxSt.key = "";
+      rxSt.histKey = "";
       renderReception();
       poll();                                        // the test's new state now, not at the next poll
     }
@@ -625,9 +771,10 @@ window.RadioControls = (() => {
   async function rxStart() {
     const n = st.n, rx = st.rx;
     const d = rx && rx.dongles.find((x) => x.serial === n.rxSdr.value && !x.refuse);
-    if (!d || ro()) return;
-    const minutes = Number(n.rxTime.value), jobs = n.rxJob.value.split("|");
-    const body = { action: "start", system: n.rxSys.value, jobs, sdr: d.serial, minutes, keep_min: Number(n.rxKeep.value) || 0, note: n.rxNote.value };
+    const [system, jobsText = ""] = n.rxTarget.value.split("|");
+    if (!d || !system || ro()) return;
+    const minutes = Number(n.rxTime.value), jobs = jobsText.split(",").filter(Boolean);
+    const body = { action: "start", system, jobs, sdr: d.serial, minutes, keep_min: Number(n.rxKeep.value) || 0, note: n.rxNote.value };
     const span = (RX_TIMES[minutes] || "").toLowerCase() + (jobs.length > 1 ? " a side" : "");
     if (d.job !== "Off") {
       const yes = await UI.confirm(`Pause ${d.job} on SDR ${d.name} for the test (${span})? ${d.job} is not heard meanwhile. `
@@ -637,11 +784,6 @@ window.RadioControls = (() => {
       body.pause = d.job;
     }
     if (await rxPost(body)) n.rxNote.value = "";
-  }
-
-  function rxNoteChange(e) {
-    const i = e.target.closest("input.rx-note");
-    if (i && i.dataset.id) rxPost({ action: "note", id: i.dataset.id, note: i.value });
   }
 
   // ---- the ADS-B receiver (#235): reserved by serial, its decoder's state ------------------------------------------
@@ -1336,5 +1478,5 @@ window.RadioControls = (() => {
     poll();
   }
 
-  return { mount };
+  return { mount, _rx: { rxDur, rxTargets, rxResult, rxHistRow, renderReception, st, rxSt } };   // _rx: the tests
 })();
