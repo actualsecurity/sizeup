@@ -51,7 +51,7 @@ def test_pages_load_only_scripts_that_exist_and_nothing_points_at_the_old_pages(
     html = (STATIC / "cad.html").read_text()
     assert 'id="settings-radios"' in html and 'id="settings-radio-controls"' in html
     assert 'RadiosPanel.mount($("#settings-radios")' in js("settings.js")
-    assert 'const rc = $("#settings-radio-controls");' in js("settings.js") and "RadioControls.mount(rc)" in js("settings.js")
+    assert 'const rc = $("#settings-radio-controls");' in js("settings.js") and "RadioControls.mount(rc, { reception: true, tab: S.rtab })" in js("settings.js")
     # one header: the console's tabs and the board's links on the same bar
     for tab in ("dispatch-open", "overview-open", "radio-open", "settings-open"):
         assert f'id="{tab}" class="tab' in html

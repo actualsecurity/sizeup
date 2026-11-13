@@ -250,7 +250,8 @@ function sRadioTab() {
   }));
   const rc = $("#settings-radio-controls");
   show(rc, S_RC_TABS.has(S.rtab));
-  if (S_RC_TABS.has(S.rtab) && window.RadioControls) RadioControls.mount(rc);    // receivers, talkgroups, vocabulary
+  // receivers, talkgroups, vocabulary; the reception test card under Receivers only (#436)
+  if (S_RC_TABS.has(S.rtab) && window.RadioControls) RadioControls.mount(rc, { reception: true, tab: S.rtab });
   for (const n of panel.querySelectorAll("[data-rtab]")) show(n, n.dataset.rtab === S.rtab);
 }
 

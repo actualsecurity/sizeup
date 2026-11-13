@@ -522,7 +522,7 @@ def test_who_started_a_test_is_kept_by_the_cad_of_record_never_with_the_test(lab
     assert not [m for m in app.logs if who in m and not m.startswith("CAD activity: ")]   # (the CAD's own activity log)
     acts = app.cad.store.q("SELECT email, kind, summary, ok FROM user_activity WHERE route = 'reception test'")
     assert [(a["email"], a["kind"], a["summary"], a["ok"]) for a in acts] == [
-        (who, "action", "Reception test stopped (stopped by a person): MRRS 770 on SDR air · none · HPN Tower restored", 1)]
+        (who, "action", "Reception test stopped (stopped by a person): MRRS 770 on SDR air · HPN Tower restored", 1)]
     # a refused start keeps nothing; one from the station's own page (nobody signed in) has no row to write
     assert "protected" in app.reception_post({"action": "start", "job": "MRRS 770", "sdr": "page", "pause": "South 2"}, who)
     assert list(json.loads(app.cad.store.meta_get("reception_by"))) == [tid]
@@ -573,7 +573,9 @@ def test_the_paused_job_comes_back_when_the_test_fails(lab):
     h = app.reception.history[0]
     assert (h["status"], h["restored"]) == ("failed", "HPN Tower restored") and "trunk-recorder absent" in h["why"]
     assert app.assign["air"] == "HPN Tower" and app.reception.active is None and rt.probe is None
-    assert h["verdict"]["grade"] == "none"
+    # it never measured anything: no verdict (#436: "None" is a finished side that heard nothing), never "0% decoded"
+    assert h["verdict"] is None and h["halves"][0]["verdict"] is None
+    assert reception.Tests._brief(h)["halves"][0]["decoded_pct"] is None
     # the dongle can't take the test's job at all: its own job is started on it again
     rt.recorder.status = lambda: {"state": "ok", "detail": "", "restarts": 0}
     real = app._start_mode
@@ -1166,9 +1168,15 @@ def test_the_state_says_what_can_be_tested_and_on_which_dongle(lab):
     running(app)
     assert "reception" not in app.state()                      # never in the state everyone gets
     st = app.reception_state()
-    assert st["systems"] == [{"name": "mrrs", "label": "MRRS", "watch": [PD, EMS],
-                              "jobs": [{"job": "MRRS 770", "mhz": 770.3125}, {"job": "MRRS 773", "mhz": 773.08125}],
-                              "caveat": "Some traffic is carried over LTE and never on RF."}]
+    # (#436) the county's P25 site first (probe-only, from its trunk-recorder config), then the systems config's
+    assert st["systems"] == [
+        {"name": "probe-westchester", "label": "County", "kind": "county", "watch": [307, 333],
+         "jobs": [{"job": "County probe", "mhz": 477.19375}],
+         "alert": [{"tg": 307, "name": "Fire/EMS 15"}, {"tg": 333, "name": "Airport Incident"}], "caveat": ""},
+        {"name": "mrrs", "label": "MRRS", "kind": "system", "watch": [PD, EMS],
+         "jobs": [{"job": "MRRS 770", "mhz": 770.3125}, {"job": "MRRS 773", "mhz": 773.08125}],
+         "alert": [{"tg": PD, "name": "PD Dispatch"}, {"tg": EMS, "name": "PC-Rye EMS"}],
+         "caveat": "Some traffic is carried over LTE and never on RF."}]
     assert st["durations"] == [15, 60, 240, 0] and st["keep_min"] == 10.0 and st["active"] is None and st["history"] == []
     assert st["alert"] is None
     assert [(d["serial"], d["job"], d["refuse"]) for d in st["dongles"]] == [
@@ -1200,7 +1208,7 @@ def test_the_station_reports_it_and_the_hub_may_ask_for_it(lab):
     h = app.reception_state()["history"][0]
     assert (h["id"], h["status"], h["why"], h["restored"]) == ("0123456789ab", "stopped", "stopped by a person", "Off again")
     assert "by" not in h and "by" not in json.loads(app.reception.history_file.read_text())[0]
-    assert reception.ended_text(h) == "Reception test stopped (stopped by a person): MRRS 770 on SDR spare · none · Off again"
+    assert reception.ended_text(h) == "Reception test stopped (stopped by a person): MRRS 770 on SDR spare · Off again"
     # the POST is an admin's (no rule of its own: admin), the reads an admin's, and the start is in the activity
     assert not any(rx.fullmatch("/api/reception") for rx, _need in WRITES)
     assert {"/api/reception", "/api/reception/sample"} <= set(ADMIN_READS)
