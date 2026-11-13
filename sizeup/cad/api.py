@@ -255,6 +255,18 @@ POST /api/cad/settings/audio_retention    {action: set {key: _default | a channe
 POST /api/cad/settings/transcript_retention  {action: set {key: _default | a channel's name | tg:<n>, value: days} |
                                           reset {key}}: how long the radio log keeps that channel's transcripts and
                                           metadata (never shorter than its audio; sizeup/cad/comms.py prune); admins
+GET  /api/cad/intel                       Settings > System > Intel (sizeup/intel/admin.py): the packs, categories and rules
+                                          with their modes, weights and 7-day hits, the policy (kill switch, caps)
+GET  /api/cad/intel/events?since=&bbox=w,s,e,n&mode=map,push&status=open|all&limit=
+                                          radio pre-alert events (the map layer's): {events: [{id, pack, category, label,
+                                          what, level, where, precision, confirmed, lat, lon, radius_m, place, town, alts,
+                                          mode, status, first_at, last_at, until, traffic_ids ...}], now}. Both: anyone
+                                          signed in (sourcekeys.may_see_context), 403 otherwise
+POST /api/cad/intel/<id>/dismiss          {verdict?}  a pre-alert that is nothing (dispatchers and admins)
+POST /api/cad/intel/<id>/feedback         {verdict: useful | noise | wrong_place | wrong_type | late | missed, category?}
+                                          anyone signed in
+POST /api/cad/settings/intel              {action: set | pack | category | rule | local | reset, ...}: Settings > System >
+                                          Intel; admins; audited
 POST /api/cad/settings/alert_mutes        {action: mute {key: a health alert kind, hours?} | unmute {key}}: shown on
                                           Settings > Health, not pushed (#340, sizeup/cloud/health.py); admins
 """
@@ -290,6 +302,7 @@ SETTINGS = re.compile(r"/api/cad/settings/([a-z_]{1,30})")
 PREALERT = re.compile(r"/api/cad/prealert/(\d{1,9})/dismiss")
 AIRPORT_ALERT = re.compile(r"/api/cad/airport-alert/(\d{1,9})/(accept|dismiss)")
 HINT = re.compile(r"/api/cad/hint/(\d{1,9})/(accept|dismiss)")
+INTEL_EVENT = re.compile(r"/api/cad/intel/(\d{1,9})/(dismiss|feedback)")        # radio pre-alerts (sizeup/intel)
 ALARM_ACK = re.compile(r"/api/cad/alarm/(\d{1,9})/ack")
 ALARM_CLEAR = re.compile(r"/api/cad/alarm/(\d{1,9})/clear")
 DISPATCH_MODE = re.compile(r"/api/cad/dispatch-mode")
@@ -311,6 +324,7 @@ ADMIN_READS = {
     "/api/cad/perf/profile": "the hub's CPU profile is for admins (Settings > Health)",
     "/api/cad/search.csv": "the search export is for admins",                # #403: many calls at once, off the hub
     "/api/cad/preplan.csv": "the pre-plan export is for admins",              # #456: every Knox box at once
+    "/api/cad/intel": "the radio pre-alert rules are for admins (Settings > System > Intel)",   # #411: rule phrases
 }
 
 # Who may POST what (enforced only with a verified sign-in, see above): "dispatch" = dispatchers and
@@ -324,6 +338,8 @@ WRITES = (
     (PREALERT, "dispatch"),                                                 # a phone pre-alert that is nothing
     (AIRPORT_ALERT, "dispatch"),                                            # an airport pre-alert: an event, or nothing
     (HINT, "dispatch"),                                                     # a status suggested from the radio (#37)
+    (re.compile(r"/api/cad/intel/\d{1,9}/dismiss"), "dispatch"),             # a radio pre-alert that is nothing
+    (re.compile(r"/api/cad/intel/\d{1,9}/feedback"), "read"),                # ... a vote on it: anyone signed in
     (ALARM_ACK, "dispatch"),                                                # an emergency alarm seen (#128)
     (ALARM_CLEAR, "dispatch"),                                              # ... and resolved: its window closed
     (re.compile(r"/api/cad/radio-id"), "dispatch"),                          # who a new FG1 radio is (#163)
@@ -771,6 +787,15 @@ class CadApi:
             pass
         return _json(403, {"error": f"Admins only: {why}"})
 
+    def _admin(self, who) -> bool:
+        """A verified admin (with nobody verified: no, the shadow and log pre-alerts stay hidden)."""
+        if who is None or not who.email:
+            return False
+        try:
+            return self.cad.settings.standing(who.email)["may"] == "admin"
+        except CadError:
+            return False
+
     def _notify(self, who) -> tuple[int, bytes, str]:
         """GET /api/cad/notify: Settings > System > Push notifications, admins only (ADMIN_READS: a topic's name is its
         only secret)."""
@@ -861,6 +886,11 @@ class CadApi:
                     hours = 24.0
                 return _json(200, {"rows": self.cad.comms.activity_rows(self.cad.clock() - hours * 3600,
                                                                         (q.get("source") or [""])[0][:80])})
+            if path in ("/api/cad/intel", "/api/cad/intel/events"):    # radio pre-alerts: a signed-in person only
+                if not sourcekeys.may_see_context(self.cad.comms.context_broadcast):
+                    return _json(403, {"error": "radio pre-alerts need a sign-in (Cloudflare Access)"})
+                ia = self.cad.intel_admin
+                return _json(200, ia.page() if path == "/api/cad/intel" else ia.events(parse_qs(query), self._admin(who)))
             if path == "/api/cad/feed":
                 return _json(200, self.cad.feed_query(parse_qs(query)))
             if path == "/api/cad/rigs":
@@ -969,6 +999,11 @@ class CadApi:
             return c.airport_alert(int(m.group(1)), m.group(2), body)
         if m := HINT.fullmatch(path):
             return c.hint(int(m.group(1)), m.group(2), body)
+        if m := INTEL_EVENT.fullmatch(path):
+            if not sourcekeys.may_see_context(c.comms.context_broadcast):
+                raise CadError("radio pre-alerts need a sign-in (Cloudflare Access)")
+            ia = c.intel_admin
+            return (ia.dismiss if m.group(2) == "dismiss" else ia.feedback)(int(m.group(1)), body)
         if m := ALARM_ACK.fullmatch(path):
             return c.alarm_ack(int(m.group(1)), body)
         if m := ALARM_CLEAR.fullmatch(path):
