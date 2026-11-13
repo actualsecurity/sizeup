@@ -239,6 +239,31 @@ def _module_rng_per_test(request):
     mod.rng = rng
 
 
+@pytest.fixture(autouse=True)
+def _cads_shut_down(monkeypatch):
+    """Every Cad a test makes (its own, an app's, a hub's and a station's) is shut down when the test ends
+    (Cad.shutdown(), #497): its workers joined and its database closed. Left as they were, each kept its threads
+    (the radio log's, the dispatch voice's, the address history's) and its database's descriptors for the rest of the
+    run: a process that ran the whole suite ended with about 1000 threads and 2000 descriptors (#457), and another
+    test's CPU and descriptor numbers were at their mercy. A Cad made by a module's fixture is made before this one
+    and is not touched. The workers get a moment, not seconds: a dispatch voice still being rendered (the real `say`
+    on a Mac) ends by itself, finds the Cad shut and writes nothing."""
+    from sizeup.cad.service import Cad
+    made, init = [], Cad.__init__
+
+    def tracked(self, *a, **kw):
+        made.append(self)
+        init(self, *a, **kw)
+    monkeypatch.setattr(Cad, "__init__", tracked)
+    yield
+    for cad in reversed(made):
+        try:
+            if hasattr(cad, "store"):            # (one whose __init__ raised has nothing to shut down)
+                cad.shutdown(wait_s=0.05)
+        except Exception:  # noqa: BLE001 - a teardown: the test's own result stands
+            pass
+
+
 @pytest.fixture(params=[3, 6, 12, 22, 23], ids=lambda h: f"wall-{h:02d}h")
 def any_hour(request, monkeypatch):
     """The real clock moved to hh:30 America/New_York (still ticking), as if the suite ran then. #346: an airband test

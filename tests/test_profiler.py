@@ -48,6 +48,16 @@ def busy():
         t.join(5)
 
 
+def share(out: dict, name: str = "burner") -> float:
+    """What thread `name` used of the CPU this test's own threads used in the profile (the burner, the ones asleep,
+    the test's thread), 0..1. Never of the whole process's: threads earlier tests left behind in it compute too (an
+    xdist worker runs many files; a whole run in one process ends with about 1000 threads), and they took the burner's
+    "over 90% of the process" down to 88%."""
+    ms = {t["thread"]: t["ms"] for t in out["threads"]}
+    mine = sum(ms.get(n, 0.0) for n in ("burner", "sleeper", "waiter", "MainThread"))
+    return ms.get(name, 0.0) / mine if mine else 0.0
+
+
 KERNEL = ThreadClock()             # (one for the tests' own readings: it holds no file open between reads)
 
 
@@ -578,11 +588,13 @@ def test_a_profile_charges_the_function_that_computes_not_the_threads_that_wait(
     out = p.profile(1.0, hz=100)
     used = cpu_of(busy.burner) - before                    # (from before the profile to after it: at least its share)
     threads = {t["thread"]: t for t in out["threads"]}
-    assert out["threads"][0]["thread"] == "burner" and threads["burner"]["pct"] > 90
+    mine = threads["burner"]["ms"]
+    assert out["threads"][0]["thread"] == "burner" and share(out) > 0.90
     assert threads.get("waiter", {"pct": 0})["pct"] < 2 and threads.get("sleeper", {"pct": 0})["pct"] < 2    # 31 threads asleep
-    assert out["self"][0]["fn"].startswith("spin (tests/test_profiler.py:") and out["self"][0]["pct"] > 85
-    cum = {x["fn"].split(" ")[0]: x["pct"] for x in out["cumulative"]}
-    assert cum["burner"] > 90 and cum["spin"] > 90 and cum["Thread.run"] > 90
+    # of the burner's own CPU (was: 85% and 90% of the process's, with the burner over 90% of it)
+    assert out["self"][0]["fn"].startswith("spin (tests/test_profiler.py:") and out["self"][0]["ms"] > 0.94 * mine
+    cum = {x["fn"].split(" ")[0]: x["ms"] for x in out["cumulative"]}
+    assert cum["burner"] > 0.99 * mine and cum["spin"] > 0.99 * mine and cum["Thread.run"] > 0.99 * mine
     assert out["lines"][0]["at"].startswith("tests/test_profiler.py:") and out["lines"][0]["at"].endswith(" spin")
     heavy = out["folded"].splitlines()[0]
     assert re.fullmatch(r"burner;Thread\._bootstrap \(python3\.\d+/threading\.py:\d+\);.*;burner \(tests/test_profiler\.py:\d+\);"
@@ -661,7 +673,7 @@ def test_with_a_coarse_clock_the_profile_goes_by_the_cpu_since_the_last_sample(b
     assert "error" not in out, (out, logged)
     assert out["method"] == "interval" and out["clock"] == "stat" and out["window_ms"] == 0
     threads = {t["thread"]: t for t in out["threads"]}
-    assert out["threads"][0]["thread"] == "burner" and threads["burner"]["pct"] > 80 and threads["burner"]["caught"] >= 1
+    assert out["threads"][0]["thread"] == "burner" and share(out) > 0.80 and threads["burner"]["caught"] >= 1
     assert out["self"][0]["fn"].startswith("spin (tests/test_profiler.py:") and out["cpu_ms"] > 50
     assert threads.get("sleeper", {"pct": 0})["pct"] < 5
 
