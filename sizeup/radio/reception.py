@@ -866,7 +866,8 @@ class Tests:
                 "durations": list(DURATIONS), "keep_min": KEEP_MIN_DEFAULT,
                 "dongles": self.dongles(), "active": run, "alert": alert["text"] if alert else None,
                 "samples": [dict(s, age_s=round(now - s["kept"])) for s in list(self.samples)],
-                "history": [self._brief(h) for h in list(self.history)]}
+                # (a test just ended is in the history a moment before `active` is cleared, #503: never shown twice)
+                "history": [self._brief(h) for h in list(self.history) if t is None or h.get("id") != t.get("id")]}
 
     @staticmethod
     def _brief(h: dict) -> dict:
@@ -1212,13 +1213,13 @@ class Tests:
                  verdict=overall(unjudged(t["halves"], status)))
         rt = self._rt(t["system"])
         self._ended[t["system"]] = now
-        self.active = None
+        self._to_history(t)                        # before `active` goes: state() reads without the lock, and must never
+        self.active = None                         # find no test running and no row for it either (#503)
         self.app._save_modes()
         if rt is not None:
             rt.probe = None
             rt.recorder.until = None
             self._wipe_capture(rt)
-        self._to_history(t)
         self._unlink(self.marker)
         v = t["verdict"]
         self.log(f"reception test {t['id']}: {status}" + (f" ({why})" if why else "")
