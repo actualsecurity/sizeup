@@ -407,7 +407,9 @@ def test_aws_failing_with_the_station_gone_says_transcription_failed(tmp_path):
                        "status": "remote", "transcript_pending": "aws", "stt": "aws", "model": "aws-transcribe"},
               "audio": __import__("base64").b64encode(wav_bytes((voice(3.0)[::2] * 32767).astype(np.int16), 8000)).decode()}
         assert call(hub.url + "/api/station/events", "POST", {"epoch": "e1", "events": [ev]})[0] == 200
-        assert wait(lambda: any(r["id"] == "FG1-123" and r["status"] == "error" for r in hub.get("/api/cad/comms")["rows"]), 20)
+        # (the hub's call to the station gives up after CALL_WAIT_S, 12 s: this takes 13 s on an idle machine, and the
+        # 20 s once waited ran out on a busy one)
+        assert wait(lambda: any(r["id"] == "FG1-123" and r["status"] == "error" for r in hub.get("/api/cad/comms")["rows"]), 90)
         row = next(r for r in hub.get("/api/cad/comms")["rows"] if r["id"] == "FG1-123")
         assert "failed" in row["model"]
     finally:

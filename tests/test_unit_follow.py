@@ -242,6 +242,8 @@ global.requestAnimationFrame = (f) => { frames.push(f); return frames.length; };
 
 LOAD = r"""
 // A fake clock (#404): only the frames move it, 25 ms a frame, so a busy machine can't stretch a second of frames.
+// It starts at the moment the test built its state (IN.now, Python's clock), never at the moment node got going: a
+// test whose rig is 10 s from arriving found it arrived when a loaded machine took that long to start node.
 // performance.now() starts at an hour, as on a page long open, never at node's own age: the loop's first tick is due
 // when a frame's time is FRAME_MS..MAX_FRAME_MS past 0, so a node that took over ~0.2 s to start (a loaded machine)
 // ticked on the first frame and one that started fast never did, and the two went different ways from there.
@@ -249,7 +251,7 @@ LOAD = r"""
 // and after the last rig settles (#453), and a real timer never fires in a script that never yields, so a loop put
 // to sleep stayed asleep and asked for no frame again. The handle is shaped like node's (_idleTimeout, _onTimeout:
 // the tests read them). setInterval stays node's: the once-a-second ages are not driven here.
-const T0 = Date.now(), P0 = 3600e3; let dt = 0;
+const T0 = typeof IN.now === "number" ? Math.round(IN.now * 1000) : Date.now(), P0 = 3600e3; let dt = 0;
 Date.now = () => T0 + dt; performance.now = () => P0 + dt;
 const sleeping = new Set();
 global.setTimeout = (f, ms) => { const t = { _onTimeout: f, _idleTimeout: ms || 0, at: dt + (ms || 0) }; sleeping.add(t); return t; };
@@ -300,10 +302,11 @@ def run(tmp_path, body, data):
 
 def with_now(data, age=None):
     """The fixes' times moved to this run's clock (the page ages them by its own); `age`: E61's fix this old now."""
-    shift = time.time() - NOW
+    now = data["now"] = time.time()                 # the page's clock starts here too (LOAD), however late node starts
+    shift = now - NOW
     for m in data["map"]["markers"]:
         if "at" in m:
-            m["at"] = time.time() - age if age is not None else m["at"] + shift
+            m["at"] = now - age if age is not None else m["at"] + shift
     return data
 
 

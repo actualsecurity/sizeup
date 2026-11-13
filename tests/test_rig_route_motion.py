@@ -331,7 +331,8 @@ def page_state():
     c.unit_status(uid("E61"), {"status": "RS", **OP})
     clock.t += 20
     st = c.state()
-    return c, clock, uid, {"map": st["map"], "lists": st["lists"], "static": str(STATIC), "hq": hq,
+    # now: the page's clock starts at this state's time (tests/test_unit_follow.py LOAD), not when node gets going
+    return c, clock, uid, {"map": st["map"], "lists": st["lists"], "static": str(STATIC), "hq": hq, "now": clock.t,
                            "inc": {"id": inc["id"], "lon": -73.6650, "lat": 41.0020}}
 
 
@@ -427,7 +428,7 @@ def test_the_page_brings_it_home_along_the_route_then_folds_it(tmp_path):
     back = next(r for r in data["map"]["routes"] if r["unit"] == "E61")
     clock.t = back["move"]["done_at"] + 1
     home = c.state()["map"]
-    clock.t = time.time()
+    clock.t = data["now"]
     data["home"] = home
     o = run(tmp_path, PRE + r"""
 zoomTo(16);
@@ -453,7 +454,7 @@ def test_a_live_fix_replaces_the_estimate_and_a_placeholder_is_never_drawn(tmp_p
     """The estimate's style goes at once; the mark glides from the estimate onto the fix (#473: no jump)."""
     *_, data = page_state()
     e61 = next(m for m in data["map"]["markers"] if m["unit"] == "E61")
-    fixed = dict(e61, place="position", lon=-73.6672, lat=41.0030, at=time.time() - 1, heading=90.0, speed=0.0)
+    fixed = dict(e61, place="position", lon=-73.6672, lat=41.0030, at=data["now"] - 1, heading=90.0, speed=0.0)
     ph = dict(e61, unit="DPT239", placeholder=True, icon="")
     data["fixed"] = dict(data["map"], markers=[fixed if m is e61 else m for m in data["map"]["markers"]] + [ph])
     data["map"]["markers"].append(ph)
@@ -478,7 +479,7 @@ def test_the_straight_line_fallback_moves_it_too_and_hidden_tabs_ask_for_no_fram
     rt = next(r for r in data["map"]["routes"] if r["unit"] == "E61")
     a, b = rt["coords"][0], rt["coords"][-1]
     d = metres(a, b)
-    line = dict(rt, by="line", coords=[a, b], move=make_move(time.time() - 3, d, d / rt["move"]["mps"]))
+    line = dict(rt, by="line", coords=[a, b], move=make_move(data["now"] - 3, d, d / rt["move"]["mps"]))
     data["map"]["routes"] = [line if r is rt else r for r in data["map"]["routes"]]
     o = run(tmp_path, PRE + r"""
 out.cls = cls("E61"); out.a = ll("E61"); go(30, 16); out.b = ll("E61"); out.moving = L.moving();
