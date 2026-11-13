@@ -18,6 +18,11 @@ continuation only opens another window if it had something of its own, and never
 continuations span 2 minutes. A channel still open without a break after STUCK_S is reported ("stuck":
 NfmReceiver.status, logged once).
 
+Noise openings: one frame at open_db opens the squelch and the hang holds it 0.4 s, but under min_open_s of carrier
+(first frame at open_db to the last at close_db) nothing is kept. Such an open is not "keyed" (NoiseSquelch.keyed: what
+the live "talking" indicator waits for, radio/tap.py) and is counted (short_per_min: the squelch chattering on noise).
+open_db, close_db and min_open_s are per channel, set live (NfmReceiver.set_squelch; Settings > Radios > Squelch).
+
 One rtl_fm per channel; if it dies, stalls or the dongle is unplugged, the loop restarts it
 with backoff, forever (same pattern as shortfinal's receivers).
 """
@@ -43,7 +48,10 @@ FRAME = RATE // 20             # 50 ms
 HISTORY_FRAMES = 20 * 60       # hiss reference: last minute
 LEARN_FRAMES = 40              # 2 s before the squelch may open
 HANG_FRAMES = 8                # carrier may flicker for 0.4 s inside one transmission
-MIN_FRAMES = 6                 # under 0.3 s of carrier: not worth keeping
+MIN_FRAMES = 6                 # under 0.3 s of carrier: not worth keeping (min_open_s: per channel)
+OPEN_DB, CLOSE_DB = 10.0, 6.0  # quieting to open / to stay open (per channel: Settings > Radios > Squelch)
+MIN_OPEN_S = MIN_FRAMES * FRAME / RATE   # 0.3 s
+SHORT_WINDOW_S = 300.0         # short opens (closed with nothing kept) counted over the last 5 min, per minute
 DATA_SHARE = 0.75              # a frame with this much of its voice-band energy at 1000-2100 Hz ...
 DATA_OVER_DB = 15.0            # ... and this far over the dead air is an MDC-1200 data burst
 EDGE_SEARCH = 20               # look for a burst within 1 s of either end of the carrier (PCFD's APX
@@ -227,10 +235,19 @@ class NoiseSquelch:
     the loudest things in every clip, 14-25 dB over the voice, and the only content of a mic
     click. The bursts are kept on the segment (unit ID decoding)."""
 
-    def __init__(self, open_db: float = 10.0, close_db: float = 6.0,
+    def __init__(self, open_db: float = OPEN_DB, close_db: float = CLOSE_DB,
                  clock: Callable[[], float] = time.time, drop_db: float | None = None,
-                 hang_s: float | None = None, continue_s: float = 0.0):
+                 hang_s: float | None = None, continue_s: float = 0.0, min_open_s: float | None = None,
+                 shorts: deque | None = None):
         self.open_db, self.close_db, self.clock, self.drop_db = open_db, close_db, clock, drop_db
+        self.min_frames = min_frames(min_open_s)
+        # set_params(): (open_db, close_db, min_frames) as one tuple, taken by feed() at a frame's start (_applied:
+        # the one it took), so a frame never sees a mixed set
+        self._pending: tuple[float, float, int] | None = None
+        self._applied: tuple[float, float, int] | None = None
+        # wall-clock times of opens that closed with nothing kept (the receiver's, across rtl_fm restarts)
+        self.shorts: deque[float] = shorts if shorts is not None else deque(maxlen=2000)
+        self._keyed = False
         # hang_s: the hang once a transmission has had tones or speech in it (None: HANG_FRAMES, as
         # before). continue_s: how long after such a transmission closes it may come back at close_db.
         self._hang_live = HANG_FRAMES if hang_s is None else max(1, round(hang_s * RATE / FRAME))
@@ -273,6 +290,32 @@ class NoiseSquelch:
         self.relearned = 0                  # times the hiss reference was relearned from a steady hold (#116)
 
     @property
+    def keyed(self) -> bool:
+        """Open with carrier for at least min_open_s (its first frame at open_db to a frame at close_db that far on):
+        a transmission, not a noise opening. What the live "talking" indicator shows (radio/tap.py)."""
+        if not self.open:
+            return False
+        if not self._keyed:
+            # (feed() sets it; this sees frames a reopen added in one go. Short: unkeyed, it closes within the hang)
+            self._keyed = any(v >= self.close_db for v in self._qs[self.min_frames - 1:])
+        return self._keyed
+
+    def set_params(self, open_db: float, close_db: float, min_open_s: float | None) -> None:
+        """New thresholds from another thread (Settings): one reference swap, taken at the next frame."""
+        self._pending = (float(open_db), float(close_db), min_frames(min_open_s))
+
+    @property
+    def params(self) -> tuple[float, float, int]:
+        """(open_db, close_db, min_frames) as set: the pending set if the next frame hasn't taken it yet."""
+        p = self._pending
+        return p if p is not None and p is not self._applied else (self.open_db, self.close_db, self.min_frames)
+
+    def short_per_min(self, now: float | None = None) -> float:
+        """Opens that closed with nothing kept (under min_open_s), per minute over the last SHORT_WINDOW_S."""
+        now = self.clock() if now is None else now
+        return sum(1 for t in self.shorts if now - t <= SHORT_WINDOW_S) * 60.0 / SHORT_WINDOW_S
+
+    @property
     def holding(self) -> bool:
         """Closed, but still watching for the last transmission to come back (continuation window)."""
         return not self.open and self._cont_left > 0
@@ -302,6 +345,10 @@ class NoiseSquelch:
         return float(10 * np.log10(self.hiss / self._lvl))
 
     def feed(self, frame: np.ndarray) -> Segment | None:
+        p = self._pending
+        if p is not None and p is not self._applied:
+            self._applied = p
+            self.open_db, self.close_db, self.min_frames = p
         spec = np.abs(np.fft.rfft(frame * self._win)) ** 2
         lvl = self._lvl = float(spec[self._hf].mean()) + 1e-12
         self._n += 1
@@ -334,6 +381,8 @@ class NoiseSquelch:
             return None
         self._frames.append(frame)
         self._qs.append(q)
+        if not self._keyed and q >= self.close_db and len(self._qs) >= self.min_frames:
+            self._keyed = True
         if q >= self.close_db and self._quiet_run > HANG_FRAMES:
             k = len(self._frames) - 1                       # back inside the long hang (closed before #61)
             self._breaks.append((k - self._quiet_run, k))
@@ -393,6 +442,7 @@ class NoiseSquelch:
             self.open_since = start
         self.open, self._start, self._chain_start = True, start, start
         self._frames, self._qs, self._quiet_run = [frame], [q], 0
+        self._keyed = False
         self._level, self._drop_run, self._rise_run = None, 0, 0
         self._up_db = self.open_db if up_db is None else up_db
         self._content, self._live, self._breaks, self.continuing = 0, False, [], False
@@ -421,6 +471,8 @@ class NoiseSquelch:
         for g0, g1 in breaks:   # carrier gone (hiss) inside the hang: silence, as a radio's squelch would
             frames[g0:g1] = [np.zeros_like(f) for f in frames[g0:g1]]
         seg = self._segment(frames, qs, start, self._up_db, breaks)
+        if seg is None and reason == "quiet":
+            self.shorts.append(self.clock())        # a noise opening (or a blip): nothing kept
         # A window only after a page (or a continuation with tones / speech of its own) went quiet, and
         # only while the page and its continuations span under 2 minutes: they can't chain on noise at
         # the close threshold (#116). After a max-length split the next part has to reach open_db.
@@ -463,7 +515,7 @@ class NoiseSquelch:
         floor = self.floor
         if n == 0 or not (any(data_frames(self._frames[:n]))
                           or speech_seconds(np.concatenate(self._frames[:n])) >= BACKGROUND_SPEECH_S
-                          or sum(v >= floor + self.drop_db for v in qs) >= MIN_FRAMES):
+                          or sum(v >= floor + self.drop_db for v in qs) >= self.min_frames):
             self._frames, self._qs, self.open = [], [], False      # the background all along
             self._closed_n = self._n
             return None
@@ -547,7 +599,7 @@ class NoiseSquelch:
                 b -= 1
             bursts.append(np.concatenate(body[max(lo, b - 1):min(hi, k + 1) + 1]))
             hi = b - 2
-        if hi - lo + 1 < MIN_FRAMES:
+        if hi - lo + 1 < self.min_frames:
             if not bursts:
                 return None
             # A key-up that is only an ID burst (+ dead carrier): still a transmission (who keyed),
@@ -565,6 +617,93 @@ class NoiseSquelch:
         seg.hiss_db = float(10 * np.log10(self.hiss)) if self.hiss > 0 else None
         seg.floor_db = self.floor
         return seg
+
+
+# The standard CTCSS (PL) tones, Hz. FG1 runs PL 100.0 (docs/PLAN.md): a carrier without it may be another user or interference.
+CTCSS_HZ = (67.0, 69.3, 71.9, 74.4, 77.0, 79.7, 82.5, 85.4, 88.5, 91.5, 94.8, 97.4, 100.0, 103.5, 107.2, 110.9,
+            114.8, 118.8, 123.0, 127.3, 131.8, 136.5, 141.3, 146.2, 151.4, 156.7, 159.8, 162.2, 165.5, 167.9, 171.3,
+            173.8, 177.3, 179.9, 183.5, 186.2, 189.9, 192.8, 196.6, 199.5, 203.5, 206.5, 210.7, 218.1, 225.7, 229.1,
+            233.6, 241.8, 250.3, 254.1)
+CTCSS_OVER_DB = 12.0           # a tone's line this far over the 60-260 Hz band's median: something is there
+CTCSS_MARGIN_DB = 6.0          # ... and this far over the next tone (not its own line) and mains hum: which tone
+CTCSS_TOL_HZ = 0.6             # a radio's tone this close to its nominal
+CTCSS_MAX_S = 4.0              # looked for in the first 4 s
+CTCSS_RUN_S = 0.4              # dead air between words: runs at least this long, each its own spectrum
+HUM_HZ = (60.0, 120.0, 180.0, 240.0)
+
+
+def _power(x: np.ndarray, n: int) -> np.ndarray:
+    w = np.hanning(len(x))
+    return np.abs(np.fft.rfft((x - x.mean()) * w, n)) ** 2 / float(np.sum(w ** 2))
+
+
+def ctcss_estimate(audio: np.ndarray, rate: int = RATE) -> tuple[str, float | None]:
+    """An estimate of the CTCSS (PL) tone on a transmission's audio (as demodulated: the sub-audible tone is still
+    in it): ("tone", Hz), ("none", None): no line stands out, or ("unsure", Hz or None).
+
+    Only dead air is trusted: the runs of it at least CTCSS_RUN_S long (each phase-continuous, never spliced),
+    their power spectra added. "tone" needs the line CTCSS_OVER_DB over the band, CTCSS_MARGIN_DB over the next
+    tone (97.4 / 100.0 are 2.6 Hz apart) and over mains hum, not beside a hum line, and the same tone the strongest
+    in at least two separate pieces of dead air (a voice harmonic wanders; a PL doesn't). With too little dead air
+    the whole clip is looked at, and says at most "unsure": speech's harmonics sit in the same 60-260 Hz. A
+    diagnostic (Settings > Radios > Squelch), never a gate."""
+    a = np.asarray(audio, dtype=np.float64)[:int(CTCSS_MAX_S * rate)]
+    if len(a) < rate // 2 or not np.any(a):
+        return "unsure", None
+    runs: list[np.ndarray] = []
+    if rate == RATE:
+        fr = [a[i:i + FRAME] for i in range(0, len(a) - FRAME + 1, FRAME)]
+        sp = speech_frames(fr)
+        k = 0
+        while k < len(fr):
+            if sp[k]:
+                k += 1
+                continue
+            e = k
+            while e < len(fr) and not sp[e]:
+                e += 1
+            if (e - k) * FRAME >= CTCSS_RUN_S * rate:
+                runs.append(a[k * FRAME:e * FRAME])
+            k = e
+    run_len = int(CTCSS_RUN_S * rate)
+    pieces = [r[i * (len(r) // m):(i + 1) * (len(r) // m)] for r in runs for m in [max(1, len(r) // run_len)]
+              for i in range(m)]
+    whole = len(pieces) < 2
+    if whole:
+        runs = [a]
+    n = 1 << int(np.ceil(np.log2(max(4 * rate, 4 * max(len(r) for r in runs)))))
+    f = np.fft.rfftfreq(n, 1 / rate)
+    band = (f >= 60) & (f <= 260)
+    near = {t: (f >= t - CTCSS_TOL_HZ) & (f <= t + CTCSS_TOL_HZ) for t in (*CTCSS_HZ, *HUM_HZ)}
+
+    def pick(spec: np.ndarray) -> tuple[float, dict, float]:
+        p = {t: float(spec[near[t]].max()) for t in CTCSS_HZ}
+        return max(p, key=p.get), p, float(np.median(spec[band])) + 1e-18
+
+    spec = sum(_power(r, n) for r in runs)
+    best, p, floor = pick(spec)
+    if 10 * np.log10(p[best] / floor) < CTCSS_OVER_DB:
+        return "none", None
+    margin = 10 ** (CTCSS_MARGIN_DB / 10)
+    other = max(v for t, v in p.items() if abs(t - best) > 2 * CTCSS_TOL_HZ)
+    hum = max(float(spec[near[h]].max()) for h in HUM_HZ)
+    if (whole or other * margin > p[best] or hum * margin > p[best]
+            or any(abs(best - h) <= 2 * CTCSS_TOL_HZ for h in HUM_HZ)):
+        return "unsure", best
+    if sum(1 for x in pieces if pick(_power(x, n))[0] == best) < 2:
+        return "unsure", best
+    return "tone", best
+
+
+def pl_text(est: tuple[str, float | None]) -> str:
+    """'PL est. 100', 'PL est. none', 'PL est. unsure': for a log line."""
+    v, hz = est
+    return f"PL est. {hz:g}" if v == "tone" else f"PL est. {v}"
+
+
+def min_frames(min_open_s: float | None) -> int:
+    """min_open_s in whole frames (None: MIN_FRAMES)."""
+    return MIN_FRAMES if min_open_s is None else max(1, round(float(min_open_s) * RATE / FRAME))
 
 
 def _mmss(s: float) -> str:
@@ -593,11 +732,14 @@ class NfmReceiver:
     def __init__(self, rtl_fm: str, device: str, gain_db: float | None, channel: Channel,
                  on_segment: Callable[[Channel, Segment], None],
                  on_event: Callable[[str], None] = lambda m: None,
-                 open_db: float = 10.0, drop_db: float | None = None,
-                 hang_s: float | None = None, continue_s: float = 0.0):
+                 open_db: float = OPEN_DB, drop_db: float | None = None,
+                 hang_s: float | None = None, continue_s: float = 0.0,
+                 close_db: float = CLOSE_DB, min_open_s: float | None = None):
         self.rtl_fm, self.device, self.gain_db, self.channel = rtl_fm, device, gain_db, channel
         self.on_segment, self.on_event = on_segment, on_event
         self.open_db, self.drop_db, self.hang_s, self.continue_s = open_db, drop_db, hang_s, continue_s
+        self.close_db, self.min_open_s = close_db, min_open_s
+        self.shorts: deque[float] = deque(maxlen=2000)     # short opens, kept across rtl_fm restarts
         self.squelch = self.new_squelch()
         self.state, self.detail, self.restarts = "starting", "", 0
         self.last_heard: float | None = None   # end of the last transmission
@@ -610,8 +752,17 @@ class NfmReceiver:
     def new_squelch(self) -> NoiseSquelch:
         # Fresh on every rtl_fm start. (It used to be made here without drop_db, so FG1 ran with none
         # of the weaker-carrier rules live: 16:32 on 2026-10-08 was held open 51 s by the background.)
-        return NoiseSquelch(open_db=self.open_db, drop_db=self.drop_db, hang_s=self.hang_s,
-                            continue_s=self.continue_s)
+        return NoiseSquelch(open_db=self.open_db, close_db=self.close_db, drop_db=self.drop_db, hang_s=self.hang_s,
+                            continue_s=self.continue_s, min_open_s=self.min_open_s, shorts=self.shorts)
+
+    def set_squelch(self, open_db: float, close_db: float, min_open_s: float | None) -> bool:
+        """Settings > Radios > Squelch, live: the running squelch and every new one (rtl_fm restarts). True if changed."""
+        new = (float(open_db), float(close_db), min_open_s if min_open_s is None else float(min_open_s))
+        if new == (self.open_db, self.close_db, self.min_open_s):
+            return False
+        self.open_db, self.close_db, self.min_open_s = new
+        self.squelch.set_params(*new)       # the running one, at its next frame (new ones: from the fields above)
+        return True
 
     def argv(self, dev: str | None = None) -> list[str]:
         cmd = [self.rtl_fm, "-M", "fm", "-f", f"{self.channel.mhz:.4f}M", "-s", str(RATE), "-E", "dc"]
@@ -650,9 +801,13 @@ class NfmReceiver:
                # in quieting dB down from the idle hiss (hiss_db: that reference, relative dB)
                "open_s": round(open_s, 1) if open_s is not None else None,
                "stuck": bool(open_s is not None and open_s >= STUCK_S and self.state == "ok"),
-               "open_db": sq.open_db, "close_db": sq.close_db,
+               "open_db": sq.params[0] if hasattr(sq, "params") else sq.open_db,
+               "close_db": sq.params[1] if hasattr(sq, "params") else sq.close_db,
                "hiss_db": round(hiss, 1) if hiss is not None else None,
                "floor_db": round(sq.floor, 1) if sq.floor is not None else None}
+        if hasattr(sq, "min_frames"):           # the noise squelch (Settings > Radios > Squelch): not airband's
+            out["min_open_s"] = round(sq.params[2] * FRAME / RATE, 2)
+            out["short_per_min"] = round(sq.short_per_min(self.clock()), 1)
         if sq.holding and self.state == "ok":
             # Between a page's carrier dropping and the continuation window ending: not "RX" (nothing
             # is on the air), but not idle either; RX comes back if the page does (GitHub #61).

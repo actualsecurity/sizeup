@@ -172,15 +172,15 @@ def test_a_page_naming_our_units_with_tones_not_ours_is_flagged_with_the_ring_be
 def test_units_named_as_said(tmp_path):
     app = app_with_list(tmp_path)
     f = app.cad.feed.names_ours
-    assert f(TEXT_0704) == ["E64", "E62", "R40"]
+    assert f(TEXT_0704) == ["R40"] and f(TEXT_0704, True) == ["E64", "E62", "R40"]   # bare: unknown tones only
     assert f("Engine 64, Ladder 30, 23 91 respond") == ["E64", "L30", "2391"]
-    assert f("64, 62 to 1 Main Street") == ["E64", "E62"]
+    assert f("64, 62 to 1 Main Street") == [] and f("64, 62 to 1 Main Street", True) == ["E64", "E62"]
     for none in ("64 King Street, structure fire", "Sixty Control, 60 Control to all units", "time out 1432",
                  "Fairview 34 Longdale Avenue", "Engine 25, 42 Stratton Road"):
         assert f(none) == [], none
 
 
-def test_a_bare_number_is_an_engine_or_a_chief_never_a_ladder(tmp_path):
+def test_a_bare_number_is_never_a_unit(tmp_path):
     # 2026-10-14 11:38 South 2, Fairview tones: STT garbled "Ladder 12, 1230 Manhattan Avenue" and the repeat
     # "...Ladder 12 122. 30, that's 30 Manhattan Avenue": the bare "30" was read as Rye Brook's L30.
     app = app_with_list(tmp_path)
@@ -191,6 +191,121 @@ def test_a_bare_number_is_an_engine_or_a_chief_never_a_ladder(tmp_path):
     assert f(fairview) == []
     assert f("30, 31 to the alarm") == []                  # no engine 30/31: bare numbers never become ladders
     assert f("Ladder 30 and Engine 60") == ["L30", "E60"]  # said as a unit, it counts
-    assert f("64, 62, Rescue 40") == ["E64", "E62", "R40"]
-    assert f("62. 64 to 100 King Street") == ["E62", "E64"]
+    assert f("64, 62, Rescue 40") == ["R40"]
+    assert f("62. 64 to 100 King Street") == []
     assert f("we have 64, that's on Westchester Ave") == []
+
+
+def test_a_bare_number_next_to_another_departments_unit_names_none_of_ours(tmp_path):
+    # 60 Control on another department's page: a bare number, a run number and a mutual-aid EMS unit. Rye Brook's
+    # Engine 14 is never "14" alone, nor E64 "64": an apparatus word or the code as written ("E14") is.
+    app = app_with_list(tmp_path)
+    f = app.cad.feed.names_ours
+    for none in ("17 4410 with XPD EMS 31, that's 31 Example Drive", "14, 4410 with XPD EMS 31, that's 31 Example Drive",
+                 "14 to 4410 with XPD EMS 31", "14. 4410, XPD EMS 31", "64, 4410 with XPD EMS 31", "14 44 10 with XPD EMS 31",
+                 "60, 61 to the alarm", "Box 14", "I'm 60 seconds out", "e14 and r40"):
+        assert f(none) == [], none
+    assert f("Engine 14 with XPD EMS 31 to 31 Example Drive") == ["E14"]
+    assert f("E14, E-60 and Rescue 40") == ["E14", "E60", "R40"]
+
+
+def test_a_chiefs_number_is_never_a_house_number_or_another_agencys(tmp_path):
+    app = app_with_list(tmp_path)
+    f = app.cad.feed.names_ours
+    assert f("2391 responding") == ["2391"] and f("23 91, Engine 61 on location") == ["2391", "E61"]
+    for none in ("2391 Example Drive", "2662 North Example Road", "number 2391", "#2391", "XPD EMS 2391", "PD 26 62"):
+        assert f(none) == [], none
+
+
+def test_a_page_with_other_tones_and_a_bare_number_is_not_flagged(tmp_path):
+    app = app_with_list(tmp_path)
+    t0 = time.time() - 3600
+    page_row(app, "pbare", t0, [(700.0, 900.0)], "14, 4410 with XPD EMS 31, that's 31 Example Drive")
+    page_row(app, "pnamed", t0 + 60, [(700.0, 900.0)], "Engine 14, 4410 with XPD EMS 31, 31 Example Drive")
+    rows = {r["id"]: r for r in app.cad.feed.rows(limit=10)}
+    assert rows["pbare"]["page"] != "ours" and rows["pbare"]["names_ours"] == []
+    assert rows["pnamed"]["page"] != "ours" and rows["pnamed"]["names_ours"] == ["E14"]
+
+
+def test_a_list_of_bare_numbers_counts_only_on_unknown_tones_all_ours_and_two_or_more(tmp_path):
+    app = app_with_list(tmp_path)
+    f = app.cad.feed.names_ours
+    assert f("64, 62 to 1 Example Street", True) == ["E64", "E62"]
+    assert f("6462 to Rescue 40", True) == ["E64", "E62", "R40"]
+    assert f("64 and 14 to the alarm", True) == ["E64", "E14"]
+    for none in ("64 to 1 Example Street", "64, 17 to the alarm", "14, 4410 with XPD EMS 31", "14 44 10 with XPD EMS 31",
+                 "64 62 Example Street", "number 64, 62", "box 64, 62"):
+        assert f(none, True) == [], none
+    assert f("60 Control, 64, 62 respond", True) == ["E64", "E62"]
+    t0 = time.time() - 3600
+    page_row(app, "punk", t0, [(700.0, 900.0)], "64, 62 to 1 Example Street")        # tones nobody's: unknown
+    page_row(app, "poth", t0 + 60, [(581.4, 796.7)], "64, 62 to 1 Example Street")   # another department's tones
+    page_row(app, "pnone", t0 + 120, [], "64, 62 to 1 Example Street")               # no tones decoded
+    rows = {r["id"]: r for r in app.cad.feed.rows(limit=10)}
+    assert rows["punk"]["page"] == "unknown" and rows["punk"]["names_ours"] == ["E64", "E62"]
+    assert rows["poth"]["page"] == "other" and rows["poth"]["names_ours"] == []
+    assert rows["pnone"]["page"] == "none" and rows["pnone"]["names_ours"] == ["E64", "E62"]
+
+
+def test_a_chief_naming_his_command_at_a_street_is_still_named(tmp_path):
+    f = app_with_list(tmp_path).cad.feed.names_ours
+    assert f("2391 Example Street command") == ["2391"]
+    assert f("2391 North Example Avenue Command establishing") == ["2391"]
+    assert f("2391 Example Road, on location") == ["2391"]
+    assert f("unit 2391 responding") == ["2391"]
+    assert f("2391 Example Drive") == []                                         # a house number read out
+    assert f("piano 2391 responding") == ["2391"] and f("problems 2391 responding") == ["2391"]   # word-bound: not "no"/"ems"
+    for none in ("EMS-2391", "PD-23 91", "no. 2391", "No 2391"):
+        assert f(none) == [], none
+
+
+# -- bare-number lists: no false flags (#472 re-check) --------------------------------------------------------------
+
+@pytest.mark.parametrize("text", [
+    "time out 1458", "1459 hours", "incident 6061", "event 6162", "run 6061", "6014, Example Street",
+    "6462, Example Street", "6460 Example Way", "1460 Example Way", "6462 main street", "6062 Boston Post",
+    "60, 62 minutes", "we'll be 60, 62 seconds", "rooms 58, 59", "call back 914 555 6462",
+    "14, 4410 with XPD EMS 31", "6460 Example Walk", "6462 Example Row", "6462 Example Path", "6462 Example Park",
+    "6462 Example Point", "6462 Example Terrace", "6462 Example Plaza",
+])
+def test_a_bare_number_that_is_not_60_controls_list_names_no_unit(tmp_path, text):
+    assert app_with_list(tmp_path).cad.feed.names_ours(text, True) == []
+
+
+@pytest.mark.parametrize("text, units", [
+    ("64, 62 to 1 Main Street", ["E64", "E62"]), ("6462 to Rescue 40", ["E64", "E62", "R40"]),
+    ("64 and 62", ["E64", "E62"]), ("64 & 62", ["E64", "E62"]), ("58 59 60 61", ["E58", "E59", "E60", "E61"]),
+    (TEXT_0704, ["E64", "E62", "R40"]),
+])
+def test_60_controls_list_of_our_engines_is_still_named(tmp_path, text, units):
+    assert app_with_list(tmp_path).cad.feed.names_ours(text, True) == units
+
+
+@pytest.mark.parametrize("text, units", [
+    ("2391 Example Street is command", ["2391"]), ("2391 Example Street to command", ["2391"]),
+    ("2391 en route", ["2391"]), ("2391 Ladder 31 en route", ["2391", "L31"]), ("2391 Example Way", []),
+    ("2391 main street", []),
+])
+def test_a_chief_at_a_street_is_named_only_when_he_takes_command(tmp_path, text, units):
+    assert app_with_list(tmp_path).cad.feed.names_ours(text) == units
+
+
+@pytest.mark.parametrize("text, units", [
+    ("2391 Ladder 31 park in front", ["2391", "L31"]), ("2391 Engine 62 run a line", ["2391", "E62"]),
+    ("2391 Rescue 40 point of entry", ["2391", "R40"]), ("2391 copy Engine 60 green light", ["2391", "E60"]),
+    ("2391 Engine 64 walk the perimeter", ["2391", "E64"]), ("23 91 Ladder 31 close", ["2391", "L31"]),
+    ("2391 Example Park", []), ("2391 Example Point", []), ("2391 Example Run", []),
+])
+def test_a_chief_before_a_unit_order_is_never_a_house_number(tmp_path, text, units):
+    assert app_with_list(tmp_path).cad.feed.names_ours(text) == units
+
+
+@pytest.mark.parametrize("text", ["responding to 6462", "to 6462.", "at 6462", "respond to 6462", "1414", "6060",
+                                  "64, 64"])
+def test_an_address_after_to_or_one_unit_twice_is_not_a_list(tmp_path, text):
+    assert app_with_list(tmp_path).cad.feed.names_ours(text, True) == []
+
+
+def test_a_split_number_then_a_unit_names_all_three(tmp_path):
+    f = app_with_list(tmp_path).cad.feed.names_ours
+    assert f("6462, Ladder 31", True) == ["E64", "E62", "L31"] and f("6462 to Rescue 40", True) == ["E64", "E62", "R40"]

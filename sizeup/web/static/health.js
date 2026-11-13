@@ -108,7 +108,7 @@ const StationHealth = (() => {
     if (d.alerts.length) kids[kids.length - 1].append(...alertRows(d.alerts, n, th));
     if ((h.hints || []).length) {
       const box = el("div", "hl-hints");
-      for (const x of h.hints) box.append(el("p", "notice info", `${x.channel}: ${x.text}`));
+      for (const x of h.hints) box.append(el("p", x.level === "warn" ? "notice" : "notice info", `${x.channel}: ${x.text}`));
       kids.push(el("h3", "hl-sub", "Hints"), box);
     }
     const so = d.sources;

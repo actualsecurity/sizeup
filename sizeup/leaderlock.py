@@ -7,6 +7,9 @@ replicate, runs the Cloudflare connector).
          "generation": <fencing counter, +1 on every take>, "expires_at": <unix s>, "renewed_at": <unix s>,
          "phase": "starting" | "serving" | "draining" | "released", "nonce": <random, this write's>,
          "positions": {"cad": <txid>, "hub": ..., "audio": ...} | null   (the replica's, on a clean release),
+         "pristine_from": {"cad": <txid>, ...}   (optional: a taker that failed before its app wrote anything,
+                                                  so the replica holds only its Litestream's snapshot of the
+                                                  files it promoted from these positions: sizeup/handoff.py),
          "clean": bool, "build": <git sha>}
 
     take    PUT If-None-Match: *          (no lock object yet: the very first start)
@@ -289,13 +292,15 @@ class LeaderLock:
         who = short((doc or {}).get("holder", "")) if doc else "nobody"
         raise LockLost(f"the lock was written by someone else (now: {who}, generation {(doc or {}).get('generation')})")
 
-    def release(self, positions: dict | None, clean: bool) -> str:
-        """Hand it back with the replica's final positions: the released record's ETag (retake() needs it).
-        LockLost: it wasn't ours any more. LockError: unknown (then it simply expires)."""
+    def release(self, positions: dict | None, clean: bool, extra: dict | None = None) -> str:
+        """Hand it back with the replica's final positions: the released record's ETag (retake() needs it). extra:
+        more fields for the record (sizeup/handoff.py: "pristine_from"). LockLost: it wasn't ours any more.
+        LockError: unknown (then it simply expires)."""
         with self._lock:
             if self.generation <= 0:
                 raise LockLost("not held")
-            new, nonce = self._doc("released", "released", self.wall(), {"positions": positions, "clean": bool(clean)})
+            new, nonce = self._doc("released", "released", self.wall(),
+                                   {**(extra or {}), "positions": positions, "clean": bool(clean)})
             self._remember(nonce)
             tag = self.obj.put(new, if_match=self.etag)
             if tag is None:

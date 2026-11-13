@@ -94,13 +94,16 @@ class HubClient:
         self._conn = None
 
     def request(self, method: str, path: str, body: dict | None = None, timeout: float | None = None,
-                gzip_body: bool = False) -> dict:
+                gzip_body: bool = False, raw_gzip: bytes | None = None) -> dict:
         """JSON in, JSON out. HubError on anything but a 2xx JSON answer (the connection is then dropped). gzip_body:
-        the body gzipped (the aircraft posts, #235: an endpoint that takes it)."""
+        the body gzipped (the aircraft posts, #235: an endpoint that takes it). raw_gzip: a JSON body already gzipped
+        (the station's spooled log batches, sizeup/cloud/logship.py), sent as it is."""
         data = (json.dumps(body, separators=(",", ":"), default=lambda o: o.item() if hasattr(o, "item") else str(o)).encode()
-                if body is not None else None)
+                if body is not None else raw_gzip)
         headers = dict(self.headers, **({"Content-Type": "application/json"} if data is not None else {}))
-        if gzip_body and data is not None:
+        if raw_gzip is not None and body is None:
+            headers["Content-Encoding"] = "gzip"
+        elif gzip_body and data is not None:
             import gzip
             data = gzip.compress(data, 6)
             headers["Content-Encoding"] = "gzip"

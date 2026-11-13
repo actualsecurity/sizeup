@@ -153,7 +153,7 @@ def test_old_notes_and_plain_notes_are_unchanged(cad, tmp_path):
         ALTER TABLE events_old RENAME TO events;
         CREATE INDEX events_incident ON events(incident_id);""")
     assert "places" not in {r["name"] for r in s.db.execute("PRAGMA table_info(events)")}
-    s.db.close()
+    s.shutdown()
     s = Store(str(path))
     assert "places" in {r["name"] for r in s.db.execute("PRAGMA table_info(events)")}
     old = [e for e in s.full(iid)["events"] if e["kind"] == "note"][0]

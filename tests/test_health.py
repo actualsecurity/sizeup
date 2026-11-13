@@ -132,6 +132,29 @@ def test_silent_starts_after_three_minutes_pushes_once_and_clears_with_a_recover
     assert r.n.msgs[-1]["title"] == "Station silent 3 min · PCFD station · last heard " + tz.hhmm(T0 + t + 300)
 
 
+def test_an_old_litestream_on_the_hub_is_a_warning_on_the_panel(monkeypatch):
+    monkeypatch.setenv("SIZEUP_LITESTREAM_WARNING", "Litestream 0.5.17 is older than 0.5.18: made-up detail")
+    r = Rig()
+    r.at(0, status=station_status())
+    (a,) = [a for a in r.h.alerts() if a["key"] == "litestream"]
+    assert a["severity"] == "warning" and "0.5.17" in a["text"]
+    assert "litestream" in [x["key"] for x in r.h.panel()["alerts"]]
+    monkeypatch.delenv("SIZEUP_LITESTREAM_WARNING")
+    r.at(10, status=station_status())
+    assert "litestream" not in r.keys()
+
+
+def test_the_takeover_override_is_a_warning_on_the_panel(monkeypatch):
+    monkeypatch.setenv("SIZEUP_HANDOFF_SKIP_REPLICATION_CHECKS", "1")
+    r = Rig()
+    r.at(0, status=station_status())
+    (a,) = [a for a in r.h.alerts() if a["key"] == "replication_checks"]
+    assert a["severity"] == "warning" and "SIZEUP_HANDOFF_SKIP_REPLICATION_CHECKS=1" in a["text"]
+    monkeypatch.delenv("SIZEUP_HANDOFF_SKIP_REPLICATION_CHECKS")
+    r.at(10, status=station_status())
+    assert "replication_checks" not in r.keys()
+
+
 def test_while_silent_nothing_else_starts_or_clears():
     r = Rig()
     r.at(0, status=station_status(radios=[radio("FG1", open=True, open_s=200.0, stuck=True)]))
@@ -306,6 +329,20 @@ def test_a_channel_quiet_far_longer_than_usual_is_a_hint_not_an_alert():
     assert r.keys() == [] and r.n.msgs == []
 
 
+
+def test_a_chattering_squelch_is_a_hint_not_an_alert():
+    """An FM channel opening on noise (short opens a minute, sizeup/radio/fm.py): a hint, with the number."""
+    r = Rig()
+    r.at(0, status=station_status(radios=[radio("FG1", short_per_min=0.4), radio("South 2", short_per_min=None)]))
+    assert [c["hint"] for c in r.h.model()["channels"]] == ["", ""]
+    r.at(10, status=station_status(radios=[radio("FG1", short_per_min=4.2, channel_kind="traffic"),
+                                            radio("South 2", short_per_min=3.0, channel_kind="paging")]))
+    m = r.h.model()
+    assert "squelch chattering: 4.2 short opens/min" in m["channels"][0]["hint"] and m["channels"][0]["short_per_min"] == 4.2
+    assert "raise Open" in m["channels"][0]["hint"]
+    assert "raise Open" not in m["channels"][1]["hint"] and "check antenna" in m["channels"][1]["hint"]   # paging: read-only
+    assert m["hints"][0]["channel"] == "FG1" and r.keys() == [] and r.n.msgs == []
+
 def test_the_model_has_what_the_panel_shows():
     r = Rig()
     st = station_status(radios=[radio("FG1", last_heard=T0 - 30, quieting_db=12.5, restarts=1)])
@@ -381,7 +418,7 @@ def test_status_token_is_read_only_and_the_panel_needs_no_station_token(tmp_path
         # no banner's data in the state (#203): the cloud is the connection only, the Station row links Settings > Health
         assert hub.get("/api/cad/state")["cloud"].keys() == {"role", "state", "word", "detail", "health_url"}
         row = hub.get("/api/state")["radios"][0]
-        assert row["label"] == "Station" and row["link"] == "#settings/health"
+        assert row["label"] == "Station" and row["link"] == "#settings/station/health"
     finally:
         hub.close()
 

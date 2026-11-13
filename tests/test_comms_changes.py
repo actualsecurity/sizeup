@@ -30,7 +30,7 @@ from tests.test_radios import Clock, _event_with, cad, tx
 ROOT = Path(__file__).resolve().parent.parent
 WRITE = re.compile(r"(INSERT( OR [A-Z]+)? INTO|UPDATE|DELETE FROM) (radio_traffic|radio_links|radio_link_kept|alarms)\b")
 # Writes that need no note: what runs when the database is opened, before any page holds a cursor (every cursor from
-# before a start is told to reload: Comms.changes_floor)
+# before a start is told to reload: it names another run, Comms.cursor)
 AT_OPEN = {("store.py", "_operator_identity"),      # the schema migrations (the def above them in the file)
            ("alarms.py", "__init__")}               # alarms past their retention, dropped at the start
 
@@ -45,6 +45,11 @@ def change_triggers(store):
     index queues (sizeup/cad/history.py: fts_*, addr_queue_*, here_rev_*) are triggers of their own and not counted."""
     return [r["name"] for r in store.q("SELECT name, sql FROM sqlite_master WHERE type = 'trigger'")
             if r["name"].startswith("radio_changes") or "radio_changes" in (r["sql"] or "")]
+
+
+def entry(cursor: str) -> int:
+    """The log entry a page's cursor ("s12-<run>" / "o7-<run>") stands at."""
+    return int(cursor[1:].split("-")[0])
 
 
 def make(tmp_path):
@@ -94,6 +99,10 @@ def writers(c):
         ("record again", lambda: c.comms.record(tx("fg-new", t + 20, rig="E63", radio_id="4242098", text="the same row, its words in")),
          "fg-new", lambda: row(c, "fg-new")["text"] == "the same row, its words in"),
         ("record context", lambda: c.comms.record(other("pd-new", t + 21)), "pd-new", lambda: row(c, "pd-new")["system"] == "metro"),
+        ("record waiting", lambda: c.comms.record(dict(tx("fg-w", t + 22, text=""), status="pending", model="aws-transcribe")), "fg-w",
+         lambda: row(c, "fg-w")["status"] == "pending"),
+        ("set_stt", lambda: c.comms.set_stt("fg-w", "pending", "whisper (AWS failed: made up)"), "fg-w",
+         lambda: row(c, "fg-w")["model"] == "whisper (AWS failed: made up)"),
         ("retext", lambda: c.comms.retext("fg-2", "its transcript", "done", alt={"text": "another", "model": "m"}), "fg-2",
          lambda: row(c, "fg-2")["text"] == "its transcript"),
         ("set_alt", lambda: c.comms.set_alt("fg-2", {"text": "a third reading", "model": "m"}), "fg-2",
@@ -127,10 +136,10 @@ def writers(c):
     ]
 
 
-WRITERS = {"record", "retext", "set_alt", "rerun_done", "link", "unlink", "link_pages", "relink", "retag_pages", "fix_air", "prune"}
+WRITERS = {"record", "retext", "set_alt", "set_stt", "rerun_done", "link", "unlink", "link_pages", "relink", "retag_pages", "fix_air", "prune"}
 # Public methods of Comms that write nothing a row of the Radio page shows (activity: the per-minute counts)
 READERS = {"activity", "activity_rows", "audio_per_day", "context_clips", "emergencies", "events_of", "facets", "for_incidents",
-           "id_stats", "kept_for_events", "kept_for_tier", "minute_counts", "page", "policies", "query", "source_names",
+           "id_stats", "kept_for_events", "kept_for_tier", "minute_counts", "page", "policies", "query", "cursor", "source_names",
            "rev_for", "sources_seen", "split", "talkgroups"}
 NOTES = {"touch", "touch_reset", "note_change", "flush_changes", "quiet"}               # the change notes themselves
 
@@ -254,7 +263,7 @@ def test_a_rolled_back_write_leaves_no_entry_and_a_stray_entry_is_harmless(tmp_p
     signed = json.loads(api.get("/api/cad/comms", f"view=all&changed={cur}", who)[1])
     assert signed["rows"] == [] and signed["gone"] == ["no-such-row"] and signed["reload"] is False
     anon_cur = json.loads(api.get("/api/cad/comms", "view=all", None)[1])["cursor"]
-    anon = json.loads(api.get("/api/cad/comms", f"view=all&changed={min(cur, anon_cur)}", None)[1])
+    anon = json.loads(api.get("/api/cad/comms", f"view=all&changed={anon_cur}", None)[1])
     assert anon["rows"] == [] and anon["gone"] == []
 
 
@@ -273,11 +282,11 @@ def test_another_systems_activity_moves_neither_the_cursor_nor_the_rev_of_a_read
     c.comms.retext("pd-busy-0", "made-up words", "done")
     c.comms.activity("p25:metro:9003", int(t // 60), 4, ["4100012"])
     assert seen(None) == anon                                   # nothing to see, nothing to time
-    assert seen(who) != signed and seen(who)[0] > signed[0]
+    assert seen(who) != signed and entry(seen(who)[0]) > entry(signed[0])
     assert get("/api/cad/comms", f"view=all&rev={anon[1]}")["unchanged"] is True
     c.record_traffic(tx("fg-fire", t + 50, rig="E63"))           # a fire row: everyone's
     after = seen(None)
-    assert after[0] > anon[0] and after[1] != anon[1] and after[3] != anon[3]
+    assert entry(after[0]) > entry(anon[0]) and after[1] != anon[1] and after[3] != anon[3]
     assert [r["id"] for r in get("/api/cad/comms", f"view=all&changed={anon[0]}")["rows"]] == ["fg-fire"]
 
 
@@ -286,14 +295,14 @@ def test_an_earlier_builds_triggers_are_taken_off_at_the_start(tmp_path):
     c.store.db.executescript(
         "CREATE TRIGGER radio_changes_t_ins AFTER INSERT ON radio_traffic BEGIN INSERT INTO no_such_table VALUES (1); END;"
         "CREATE TRIGGER radio_changes_a_upd AFTER UPDATE ON alarms BEGIN INSERT INTO no_such_table VALUES (1); END;")
-    c.store.db.close()
+    c.shutdown()
     again = cad(tmp_path, c.clockref, airband=("Tower",))
     assert not change_triggers(again.store)
     assert again.record_traffic(tx("fg-after", c.clockref.t + 60, rig="E63")) == [c.inc["id"]]
     assert not again.comms.changes_broken
     dump = lambda db: "\n".join(db.iterdump())             # noqa: E731
     before = dump(again.store.db)
-    again.store.db.close()
+    again.shutdown()
     assert dump(cad(tmp_path, c.clockref, airband=("Tower",)).store.db) == before       # a start writes nothing
 
 

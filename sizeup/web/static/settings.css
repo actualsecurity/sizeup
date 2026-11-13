@@ -156,7 +156,17 @@
 
   /* Settings > Radios: receivers, the SDR switch, talkgroups (radio-controls.js) */
   .radios { display: flex; flex-wrap: wrap; gap: var(--s-1); }
-  .sdrs { display: flex; flex-direction: column; gap: var(--s-1); margin-block-start: var(--s-2); }
+  .sdrs { display: flex; flex-direction: column; gap: var(--s-2); margin-block-start: var(--s-2); }
+  /* one dongle: its label in a column of its own, its job buttons wrapping beside it (never past the card, #436) */
+  .sdrs .sdr-row { display: grid; grid-template-columns: minmax(5rem, 10rem) minmax(0, 1fr); column-gap: var(--s-2);
+                   row-gap: var(--s-1); align-items: center; }
+  .sdr-row > .sdr-label { margin: 0; overflow-wrap: anywhere; }
+  .sdr-btns { display: flex; flex-wrap: wrap; align-items: center; row-gap: var(--s-1); min-inline-size: 0; }
+  .sdr-btns button { white-space: nowrap; }
+  .sdr-btns button[data-mode]:has(+ .adsb-use) { border-start-end-radius: var(--radius); border-end-end-radius: var(--radius); }
+  .sdr-btns .adsb-use { margin-inline-start: var(--s-2); border-radius: var(--radius); }
+  .sdr-row > .sdr-err { grid-column: 2; margin: 0; }
+  @media (max-width: 40rem) { .sdrs .sdr-row { grid-template-columns: minmax(0, 1fr); } .sdr-row > .sdr-err { grid-column: 1; } }
   .sdr-err { color: var(--warn); font-size: var(--fs-xs); margin-inline-start: var(--s-2); }
   .sdr-err:empty { display: none; }
   /* the ADS-B receiver (reserved, #235): its dongle and its decoder; "Use for ADS-B" on a dongle's row */
@@ -166,7 +176,6 @@
   .adsb-state.ok { color: var(--ok-text); }
   .adsb-state.bad { color: var(--warn); }
   .adsb-tail { font-family: var(--mono, monospace); overflow-wrap: anywhere; }   /* readsb's last lines (#262) */
-  .adsb-use { margin-inline-start: var(--s-2); }
   /* the reception test (#410): the form, a side's numbers, the captured calls, the past tests */
   .rx { display: flex; flex-direction: column; gap: var(--s-2); }
   .rx-form .rx-note { flex: 1 1 12rem; max-inline-size: 24rem; }
@@ -180,7 +189,6 @@
   .rx-pause { color: var(--text-2); }
   .rx-live, .rx-samples { display: flex; flex-direction: column; gap: var(--s-2); }
   .rx-side { border-block-start: var(--bw) solid var(--line); padding-block-start: var(--s-2); overflow-x: auto; }
-  .rx-hint { margin-block: var(--s-1); }
   .rx-nums th { inline-size: 6rem; text-align: start; }
   .rx-nums td { overflow-wrap: anywhere; }
   .rx-tgs { margin-block-start: var(--s-2); }
@@ -189,7 +197,16 @@
   .rx-spark polyline { fill: none; stroke: currentColor; stroke-width: 1.5; vector-effect: non-scaling-stroke; }
   .rx-sample audio { block-size: var(--ctl); max-inline-size: 100%; }
   .rx-hist { overflow-x: auto; }
-  .rx-history .rx-note { inline-size: 100%; min-inline-size: 10rem; }
+  .rx-result { display: inline-flex; flex-wrap: wrap; gap: var(--s-1); }
+  /* stopped, failed, interrupted (#436): grey, no verdict colour; a finished side that heard nothing is the red None */
+  .pill.rx-ended { color: var(--dim); border-color: var(--line-strong); white-space: nowrap; }
+  .rx-history tr.rx-unfinished td:not(:has(.rx-note-edit)) { color: var(--text-2); }
+  .rx-note-cell { min-inline-size: 8rem; }
+  .rx-note-box { display: flex; align-items: center; gap: var(--s-1); }
+  .rx-note-text { flex: 1 1 auto; min-inline-size: 0; overflow-wrap: anywhere; }
+  .rx-note-pen { flex: none; padding-inline: var(--s-1); }
+  .rx-history td:is(:nth-child(1), :nth-child(4)) { white-space: nowrap; }
+  .rx-note-edit { inline-size: 100%; min-inline-size: 10rem; }
   .tg-filter { inline-size: 22rem; max-inline-size: 100%; }
   .tg-error { margin-block-start: var(--s-2); }
   .tg-error:empty { display: none; }
@@ -295,7 +312,7 @@
     .s-msg { inset-block-start: var(--hdr-h); }
   }
   /* Data sources (#186, datasources.js): a table a group; each row its times, status, size, schedule, Refresh now */
-  #s-data, #s-health { max-inline-size: none; }     /* (Health: health.css, its wide tables) */
+  #s-data, #s-station { max-inline-size: none; }    /* (Station > Health, Logs: health.css, their wide tables) */
   .ds-body { display: flex; flex-direction: column; gap: var(--gutter); }
   .ds-sum { gap: var(--s-2); }
   .ds-table td { vertical-align: top; }
@@ -343,4 +360,8 @@
     .s-prow .s-t-name { padding-inline-start: 0; }
     .s-unnamed .s-t-act:not(.s-t-naming) { flex: 0 0 auto; margin-inline-start: auto; }
   }
+
+  /* Settings > Radios > Squelch (squelch-panel.js) */
+  .sq-table .sq-in { inline-size: 5.5em; }
+  .sq-table td.warn { color: var(--warn); font-weight: 600; }
 }

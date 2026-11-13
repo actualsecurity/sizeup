@@ -54,6 +54,7 @@ import threading
 import time
 import wave
 from collections import OrderedDict, deque
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -67,7 +68,8 @@ from sizeup.cad.alarms import STUCK_WITHIN_S
 from sizeup.cad.api import CadApi
 from sizeup.dispatch import parse, split_joined
 from sizeup.incidents import IncidentStore, Traffic
-from sizeup.radio.fm import RATE, Channel, NfmReceiver, Segment, id_burst_frames, speech_seconds, voice_floor_db
+from sizeup.radio.fm import (CLOSE_DB, MIN_OPEN_S, RATE, Channel, NfmReceiver, Segment, ctcss_estimate, id_burst_frames,
+                              pl_text, speech_seconds, voice_floor_db)
 from sizeup.radio.am import AmReceiver
 from sizeup.radio.am import Extra as AmExtra
 from sizeup.radio.am import Schedule as AmSchedule
@@ -89,7 +91,8 @@ from sizeup.cad import tonelist
 from sizeup.radio.tones import ToneEvent, TonePlan, base_name
 from sizeup.talkers import talker_prompt
 from sizeup import channels
-from sizeup.stt import CONTEXT, HIGH, LIVE, LOW, RERUN, SHED, URGENT, Transcriber, WhisperClient, radio_voice, wav_bytes
+from sizeup.stt import (CONTEXT, CONTEXT_FALLBACK, HIGH, LIVE, LOW, RERUN, SHED, URGENT, Transcriber, WhisperClient,
+                        radio_voice, wav_bytes)
 from sizeup.talkgroups import TalkgroupPrefs
 from sizeup import sourcekeys as sources, tiers
 from sizeup.tts import TtsService
@@ -402,6 +405,8 @@ class Rerun:
     raw: str = ""
     confidence: float | None = None
     as_alt: bool = False      # "both" re-run: this text is the alternative to compare, not the text
+    source_key: str = ""      # its channel key ("p25:mrrs:9211"): another P25 system's profile (data/stt/profiles.json)
+    service: str = ""
 
 class App:
     def __init__(self, cfg: Config):
@@ -490,6 +495,7 @@ class App:
         self.modes = [c.label for c in cfg.channels] + ([P25_MODE] if self.recorder else []) + list(self._sys_jobs)
         if self.shared:
             self.modes.append(OFF_MODE)
+        self.reception.setup_probes()         # (#436) the county's P25 sites, probe-only: never a mode here
         first = cfg.start_mode if cfg.start_mode in self.modes else (self.modes[0] if self.modes else OFF_MODE)
         self.assign: dict[str, str] = {sd: (first if k == 0 else OFF_MODE) for k, sd in enumerate(self._listed)}
         # Who set each dongle's mode: "person" (the web app, here or the hub's) or "auto" (_auto_assign).
@@ -576,6 +582,13 @@ class App:
         # Transcribe where this process may call it ([stt] aws: the hub; sizeup/transcribe.py).
         self.cad.radio_ctx = self
         self._chan_ov: dict = self._channel_overrides()
+        self._sq_ov: dict = channels.norm_squelch(self.cad.settings.squelch_overrides())   # each FM channel's squelch
+        # each traffic channel's recent key-ups (end, s, quieting dB, CTCSS Hz, ID, speech): Settings > Radios > Squelch
+        self._keyups: dict[str, deque] = {}
+        self._keyup_pl: dict[str, tuple] = {}    # a kept key-up's PL estimate, for its "no speech" log line
+        # the PL estimate's own thread: never on the close (the live entry's end, the ID flash, the clip)
+        self._keyup_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="keyup-pl")
+        self._apply_squelch()
         # Tone pairs named from the console (Settings "tones", #80): merged into the plan, with the names
         # that count as ours; the hub sends them to the station with the channel choices.
         self._tone_ov: dict = {}
@@ -586,7 +599,8 @@ class App:
         self._hub_aws = self._load_hub_aws()
         self._aws_wait: dict[str, tuple[np.ndarray, str]] = {}
         self._vocab_suggest: list[str] | None = None
-        self.aws = self.vocab = self.atc_vocab = None
+        self.aws = self.vocab = self.atc_vocab = self.pd_vocab = None
+        self.pd_sources: list[str] = []
         _mark("radio")
         if cfg.stt_aws:
             self._aws_setup()
@@ -971,11 +985,38 @@ class App:
         talkers on this call as they're said on the air."""
         if self._kind.get(getattr(item, "source", "")) == "airband":
             return self._atc_prompt(getattr(item, "source", ""))
+        prof = self._stt_profile(item)
+        if prof is not None:          # another P25 system's police (radio-intel PR 3): its own words, never a talker's name
+            return self._profile_prompt(prof)
         parts = [self.cfg.stt_prompt]
         if self.cfg.stt_talker_prompt != "off":
             parts.append(talker_prompt(getattr(item, "unit", "") or "", getattr(item, "start", None),
                                        with_time=self.cfg.stt_talker_prompt == "ids+time"))
         return " ".join(p for p in parts if p)
+
+    @staticmethod
+    def _stt_profile(item) -> dict | None:
+        """The speech-to-text profile (data/stt/profiles.json) of another P25 system's source, None for any of ours."""
+        key = str(getattr(item, "source_key", "") or "")
+        got = sources.parse(key) if key else None
+        if got is None or got[0] == sources.COUNTY:
+            return None
+        from sizeup import stt_vocab
+        return stt_vocab.profile(sources.p25(*got), str(getattr(item, "service", "") or ""))
+
+    def _profile_prompt(self, prof: dict) -> str:
+        """whisper's prompt for a profile (stt_vocab.police_prompt: phrasing, the headquarters, the towns' streets),
+        worked out once per profile."""
+        cache = self.__dict__.setdefault("_profile_prompts", {})
+        name = str(prof.get("name") or "")
+        if name not in cache:
+            from sizeup import stt_vocab
+            try:
+                cache[name] = stt_vocab.police_prompt(prof)
+            except Exception as e:  # noqa: BLE001 - a missing gazetteer: the profile's own words only
+                log(f"speech-to-text: profile {name}: {type(e).__name__}: {e}")
+                cache[name] = str(prof.get("prompt") or "")
+        return cache[name]
 
     def _atc_prompt(self, channel: str = "") -> str:
         """whisper's prompt on an airband channel (#233): HPN's words, then the callsigns of the aircraft nearest the field
@@ -1187,6 +1228,11 @@ class App:
         for h in ids:
             self._heard(fm_system(h), h, at=seg.end, channel=ch.label)
         self.live.fm_segment(ch.label, ids, seg.start, seg.end)
+        tid = f"{ch.label.replace(' ', '')}-{int(seg.start * 1000)}" if record else ""
+        try:
+            self._keyup_pool.submit(self._keyup, ch.label, seg, bool(ids), not low_energy, tid)   # after the close
+        except RuntimeError:            # shut down (a flush at exit): no estimate, nothing else changes
+            pass
         emergency = any(e for _h, e in found)        # the radio's emergency button (MDC / FleetSync, #128)
         live_key = self.tap.alarm_key(ch.label, seg.start, seg.end) if emergency else ""
         if not record:              # squelch, MDC IDs and "talking now" stay live; nothing is kept
@@ -1707,7 +1753,10 @@ class App:
                 # A key-up with nothing said (mic click): still shown, as who keyed and when, with
                 # its clip; just no transcript.
                 item.text = ""
-                log(f"{item.source}: key-up ({item.end - item.start:.1f} s, no speech)"
+                with self._lock:
+                    pl = self._keyup_pl.pop(item.id, None)
+                log(f"{item.source}: key-up ({item.end - item.start:.1f} s, no speech"
+                    + (f", {pl_text(pl)}" if pl else "") + ")"
                     + (f" · unit {item.unit}" if item.unit else ""))
             if hasattr(item, "raw_audio"):
                 del item.raw_audio
@@ -1981,7 +2030,8 @@ class App:
             if self._kind.get(label) != "traffic":
                 continue
             sq = r.squelch
-            on = sq.open and (not self.shared or label in self.assign.values())
+            # keyed: the carrier held min_open_s (radio/fm.py): a noise opening is never "talking"
+            on = sq.open and bool(getattr(sq, "keyed", True)) and (not self.shared or label in self.assign.values())
             st = self._fm_live.get(label)
             if not on:
                 if st is not None:
@@ -2081,7 +2131,8 @@ class App:
     def _rerun_split(self, ids: list[str]) -> tuple[int, list[str], list[str]]:
         """The ids whose channel is on AWS go to it now: (how many, the ones for the local model, the ones
         whose local text is the alternative ("both"))."""
-        ok, why = self.aws.available() if self.aws is not None else (False, "Amazon Transcribe isn't set up here")
+        from sizeup.transcribe import is_context
+        ok0, why0 = self.aws.available() if self.aws is not None else (False, "Amazon Transcribe isn't set up here")
         n, local, alt = 0, [], []
         for cid in dict.fromkeys(ids):
             item, key = self._find(cid)
@@ -2089,6 +2140,7 @@ class App:
             if eng not in ("aws", "both"):
                 local.append(cid)
                 continue
+            ok, why = self.aws.available(key) if self.aws is not None and is_context(key) else (ok0, why0)
             pcm = self._rerun_pcm(item) if ok else None
             if pcm is None:
                 self._rerun_note[cid] = f"AWS unavailable ({why if not ok else 'no recording for it here'})"
@@ -2132,7 +2184,8 @@ class App:
                 got = self._rerun_audio(t.id, getattr(t, "fm", self._kind.get(t.source) != "airband"))
                 if got:
                     low = speech_seconds(got[0]) < MIN_SPEECH_S  # same mic-click rule as the live pass
-                    jobs.append((t.start, Rerun(t.id, "traffic", got[1], low, t.unit, t.start, as_alt=as_alt), got[0]))
+                    jobs.append((t.start, Rerun(t.id, "traffic", got[1], low, t.unit, t.start, as_alt=as_alt,
+                                                source_key=keys[t.id], service=getattr(t, "service", "") or ""), got[0]))
                     seen.add(t.id)
         jobs.sort(key=lambda j: -j[0])  # newest first: what's on screen updates first
         with self._lock:
@@ -2263,6 +2316,8 @@ class App:
         Fire/EMS 15 keep it within the reserve)? Forwarding to a hub: what the hub last said (it runs it);
         else this process's own (the hub; all-in-one with [stt] aws and credentials)."""
         if self.forwarding():
+            if key is not None and key in (self._hub_aws.get("deny") or ()):    # the police budget used up (PR 3)
+                return False, str(self._hub_aws.get("deny_why") or self._hub_aws.get("why") or "")
             ok = bool(self._hub_aws.get("ok")) or (key is not None and key in (self._hub_aws.get("reserve") or ()))
             return ok, "" if ok else str(self._hub_aws.get("why") or "")
         if self.aws is None:
@@ -2305,11 +2360,18 @@ class App:
             return HIGH
         if channels.is_tg(key) and (tier := self.tg.tier(*channels.tg_of(key)[::-1])) is not None:
             # another system's talkgroup (#409): by its tier, in classes under every one of ours and shed when
-            # they wait (sizeup/stt.py CONTEXT): fire traffic never queues behind police
-            return CONTEXT if tier == tiers.ALERT else LOW
+            # they wait (sizeup/stt.py CONTEXT): fire traffic never queues behind police. One set to AWS that AWS can't
+            # take now (its own budget used up, radio-intel PR 3): whisper is its only text, CONTEXT_FALLBACK
+            if tier != tiers.ALERT:
+                return LOW
+            return CONTEXT_FALLBACK if self._aws_fallback(key) else CONTEXT
         if channels.is_tg(key) and not self.tg.main(*channels.tg_of(key)[::-1]):
             return LOW
         return LIVE
+
+    def _aws_fallback(self, key: str) -> bool:
+        """A channel set to AWS (or both) that AWS can't take now: whisper is all it gets."""
+        return self.channel_pref(key).get("engine") in ("aws", "both") and not self.aws_ok(key)[0]
 
     def _stt_dropped(self, item, why: str) -> None:
         """The whisper queue dropped or skipped it (sizeup/stt.py SttQueue, #195): it says so ("Transcription
@@ -2334,7 +2396,7 @@ class App:
 
     def _aws_setup(self) -> None:
         from sizeup import aws as aws_mod
-        from sizeup.transcribe import AwsTranscriber, Settings as AwsSettings, Usage, Vocabulary, respell
+        from sizeup.transcribe import PD_VOCABULARY, AwsTranscriber, Settings as AwsSettings, Usage, Vocabulary, respell
         cfg, store = self.cfg, self.cad.store
         reg = aws_mod.region(cfg.stt_aws_region)
         self.aws_usage = Usage(store.meta_get, store.meta_put)
@@ -2354,12 +2416,25 @@ class App:
                                               reserve_channels=tuple(dict.fromkeys((*RESERVE_CHANNELS, *airband)))),
                                   self.aws_usage, self._aws_done, self._aws_failed, log=log,
                                   limit_usd=self.cad.settings.aws_limit,
+                                  context_limit_usd=self.cad.settings.aws_context_limit,
                                   respell=lambda t: respell(t, self.vocab.state()["respell"]),
                                   on_late=self._aws_late, on_change=self._aws_changed)
         if self.vocab.ready():
             self.aws.vocabulary = cfg.stt_aws_vocabulary
         if self.atc_vocab is not None and self.atc_vocab.ready():
             self._atc_vocab_ready(self.atc_vocab.name)
+        # Police on another P25 system (radio-intel PR 3): their own vocabulary (sizeup-pd, stt_vocab.police_phrases) and
+        # respelling on their sources only, pushed with the PCFD one; never the fire vocabulary on them, nor theirs on ours
+        from sizeup import stt_vocab
+        self.pd_sources = stt_vocab.vocabulary_sources(PD_VOCABULARY)
+        self.pd_vocab = None
+        if self.pd_sources:
+            self.pd_vocab = Vocabulary(reg, store.meta_get, store.meta_put, PD_VOCABULARY, cfg.stt_aws_api_endpoint,
+                                       log=log, on_ready=self._pd_vocab_ready, key="aws_vocabulary_pd")
+            for k in self.pd_sources:
+                self.aws.channel_respell[k] = lambda t: respell(t, self.pd_vocab.state()["respell"])
+            if self.pd_vocab.ready():
+                self._pd_vocab_ready(self.pd_vocab.name)
         log(f"speech-to-text: Amazon Transcribe streaming ({reg}) for the channels set to AWS in Settings > Radios")
 
     def _atc_view(self, view, now) -> None:
@@ -2401,6 +2476,30 @@ class App:
                 self.aws.channel_vocabulary[c.label] = name
                 log(f"aws transcribe: custom vocabulary {name} in use on {c.label} from its next stream")
 
+    def _pd_vocab_pending(self) -> None:
+        """sizeup-pd is being updated: the police sources' new streams go without it until it is READY again."""
+        if self.aws is None:
+            return
+        for k in getattr(self, "pd_sources", ()):
+            self.aws.channel_vocabulary.pop(k, None)
+
+    def _pd_vocab_ready(self, name: str) -> None:
+        """sizeup-pd is READY: the police sources' next streams use it (and only theirs)."""
+        if self.aws is None:
+            return
+        for k in getattr(self, "pd_sources", ()):
+            if self.aws.channel_vocabulary.get(k) != name:
+                self.aws.channel_vocabulary[k] = name
+                log(f"aws transcribe: custom vocabulary {name} in use on {k} from its next stream")
+
+    def police_vocabulary(self) -> list[str]:
+        """sizeup-pd's phrases (stt_vocab.police_phrases over the police profile's towns), worked out once."""
+        if getattr(self, "_pd_phrases", None) is None:
+            from sizeup import stt_vocab
+            prof = (stt_vocab.profiles()["profiles"].get("police") or {})
+            self._pd_phrases = stt_vocab.police_phrases(tuple(prof.get("towns") or ("Port Chester", "Rye", "Rye Brook")))
+        return list(self._pd_phrases)
+
     def _vocab_ready(self, name: str) -> None:
         if self.aws is not None and self.aws.vocabulary != name:
             self.aws.vocabulary = name
@@ -2425,7 +2524,8 @@ class App:
 
     def _aws_alt(self, item, pcm: np.ndarray, key: str) -> None:
         """"both": the local text is in; Amazon Transcribe's becomes the text, the local one the alternative."""
-        if self.aws is None or not self.aws.available()[0]:
+        from sizeup.transcribe import is_context
+        if self.aws is None or not self.aws.available(key if is_context(key) else None)[0]:
             return
         alt = {"text": getattr(item, "text", "") if isinstance(item, Traffic) else getattr(item, "raw", ""),
                "model": getattr(item, "model", "") or ""}
@@ -2459,13 +2559,25 @@ class App:
             page = job.page
             if page.audio is not None:
                 page.status, page.model, page.stt = "pending", "", ""
+                self._stt_row(page.id, "pending", f"{WHISPER_FALLBACK} (AWS failed: {why[:80]})")
                 self.stt.submit(page, page.voice, URGENT, job.channel)
                 return
-            page.status = "error"
+            page.status, page.model = "error", f"{channels_model()} (failed: {why[:80]})"  # type: ignore[attr-defined]
+            self._stt_row(page.id, "error", page.model)
             self._save_page(page)
             return
+        # (said first: a fast whisper finishing before this line would otherwise be put back to "Transcribing")
+        self._stt_row(job.id, "pending", f"{WHISPER_FALLBACK} (AWS failed: {why[:80]})")
         if not self._rerun_local([job.id]):
             self._retext(job.id, "", "error", None, f"{channels_model()} (failed: {why[:80]})", why="AWS Transcribe")
+
+    def _stt_row(self, cid: str, status: str, model: str) -> None:
+        """The log's row says where its speech-to-text stands now (Comms.set_stt): which engine has it, or that it
+        failed, while its text is still to come (the text, when it comes, says which engine wrote it)."""
+        try:
+            self.cad.comms.set_stt(cid, status, model[:200])
+        except Exception as e:  # the CAD must never stop the monitor
+            log(f"CAD: could not update the communications log: {type(e).__name__}: {e}")
 
     def _aws_late(self, job: AwsJob, text: str, conf: float | None) -> None:
         """AWS answered after the job's deadline (#195): its fallback ran already, so the late text never takes
@@ -2512,6 +2624,29 @@ class App:
     def aws_limit_default(self) -> float:
         return float(self.cfg.stt_aws_limit_usd)
 
+    def aws_context_limit_default(self) -> float:
+        return float(self.cfg.stt_aws_context_limit_usd)
+
+    def context_aws_keys(self) -> list[str]:
+        """Another P25 system's talkgroups set to AWS or both (their own budget, transcribe.CONTEXT): the ones the
+        station must hear about separately when only one of the two budgets is used up."""
+        from sizeup.transcribe import is_context
+        keys = {*self._chan_ov, *self.cfg.stt_aws_channels}
+        return sorted(k for k in keys if is_context(k) and self.channel_pref(k).get("engine") in ("aws", "both"))
+
+    def aws_split(self, ok: bool) -> tuple[list[str], list[str], str]:
+        """(context keys that keep AWS while ours can't, context keys that can't while ours can, why): the police
+        budget and ours are apart (radio-intel PR 3), so one running out never moves the other's channels."""
+        ctx = self.context_aws_keys() if self.aws is not None else []
+        if not ctx:
+            return [], [], ""
+        cok, cwhy = self.aws.available(ctx[0])        # one pool, one breaker: the same answer for every context key
+        if ok and not cok:
+            return [], ctx, cwhy
+        if not ok and cok:
+            return ctx, [], ""
+        return [], [], ""
+
     def _channel_overrides(self) -> dict:
         """The channel choices (renamed_overrides), the old names' moved and dropped in the store too (#307)."""
         stored = self.cad.settings.channel_overrides()
@@ -2526,6 +2661,8 @@ class App:
 
     def channels_changed(self) -> None:
         self._chan_ov = self._channel_overrides()
+        self._sq_ov = channels.norm_squelch(self.cad.settings.squelch_overrides())
+        self._apply_squelch()
         log("speech-to-text channels: " + (", ".join(f"{k} {v}" for k, v in sorted(self._chan_ov.items())) or "the defaults"))
 
     def vocabulary_suggestions(self) -> list[str]:
@@ -2551,6 +2688,9 @@ class App:
             r = getattr(self, "atc_refresh", None)             # ... with the operators seen near HPN lately (#257)
             self._atc_vocab_pending()
             st = dict(st, atc=self.atc_vocab.push(r.phrases() if r is not None else atc.vocabulary()["phrases"]))
+        if getattr(self, "pd_vocab", None) is not None:        # the police sources' own (radio-intel PR 3)
+            self._pd_vocab_pending()
+            st = dict(st, pd=self.pd_vocab.push(self.police_vocabulary()))
         return st
 
     def vocabulary_state(self) -> dict:
@@ -2562,6 +2702,10 @@ class App:
             a = self.atc_vocab.state()
             a.pop("respell", None)
             st["atc"] = a
+        if getattr(self, "pd_vocab", None) is not None:
+            a = self.pd_vocab.state()
+            a.pop("respell", None)
+            st["pd"] = a
         return st
 
     def aws_status(self) -> dict:
@@ -2570,7 +2714,7 @@ class App:
         if self.aws is None:
             return {"enabled": False, "where": "hub" if self.forwarding() else "none", "ok": ok, "why": why}
         return {"enabled": True, "where": "here", "ok": ok, "why": why, **self.aws.spent(),
-                "price_per_min": self.aws.s.price_per_min, **self.aws.status()}
+                "price_per_min": self.aws.s.price_per_min, "context": self.aws.context_budget(), **self.aws.status()}
 
     # -- the hub's choices on the station (the set_channel_prefs job) ------------------------------------------
 
@@ -2580,21 +2724,28 @@ class App:
         except ValueError:
             d = {}
         return {"ok": bool(d.get("ok")), "why": str(d.get("why") or "the hub hasn't said whether it can use AWS yet"),
-                "reserve": [str(k) for k in (d.get("reserve") or [])]}
+                "reserve": [str(k) for k in (d.get("reserve") or [])],
+                **({"deny": [str(k) for k in d["deny"]], "deny_why": str(d.get("deny_why") or "")}
+                   if d.get("deny") else {})}
 
-    def set_channel_prefs(self, prefs: dict, aws: dict | None = None, tones: dict | None = None) -> dict:
-        """From the hub (CAD of record): its whole channel map, whether it can take AWS audio now, and the
-        tone pairs named there (#80; a hub from before sends none: this station's stay). Applied here and
-        kept (this station's own Settings overrides, audited as "hub")."""
+    def set_channel_prefs(self, prefs: dict, aws: dict | None = None, tones: dict | None = None,
+                          squelch: dict | None = None) -> dict:
+        """From the hub (CAD of record): its whole channel map, whether it can take AWS audio now, the
+        tone pairs named there (#80; a hub from before sends none: this station's stay) and the FM channels'
+        squelch (none from a hub before it: this station's stay). Applied here and kept (this station's own
+        Settings overrides, audited as "hub"); the squelch at once, on the running receivers."""
         clean = channels.check_map(prefs)
+        sq = self._check_squelch(squelch) if squelch is not None else None
+        if sq is not None and self.cad.settings.replace_squelch(sq, "hub"):
+            self._sq_ov = channels.norm_squelch(self.cad.settings.squelch_overrides())
+            self._apply_squelch()
         changed = self.cad.settings.replace_channels(clean, "hub")
         self._chan_ov = self._channel_overrides()
         if isinstance(tones, dict) and self.cad.settings.replace_tones(tones, "hub"):
             self._apply_named_tones()
             changed = True
         if isinstance(aws, dict):
-            new = {"ok": bool(aws.get("ok")), "why": str(aws.get("why") or "")[:300],
-                   "reserve": [str(k)[:40] for k in (aws.get("reserve") or [])][:8]}
+            new = channels.hub_aws(aws)
             if new != self._hub_aws:
                 self._hub_aws = new
                 self.cad.store.meta_put("hub_aws", json.dumps(new))
@@ -2607,7 +2758,90 @@ class App:
     def channels_applied(self) -> dict:
         """What this station runs (its state push: the hub compares sig)."""
         return {"prefs": self._chan_ov, "aws": dict(self._hub_aws), "tones": len(self._tone_ov),
-                "sig": channels.sig(self._chan_ov, self._hub_aws["ok"], self._tone_ov, self._hub_aws.get("reserve"))}
+                "squelch": self._sq_ov, "squelch_ok": True,       # (takes the squelch: a hub sends it)
+                "deny_ok": True,                                  # (takes aws.deny: radio-intel PR 3)
+                "sig": channels.sig(self._chan_ov, self._hub_aws["ok"], self._tone_ov, self._hub_aws.get("reserve"),
+                                    self._sq_ov, self._hub_aws.get("deny"))}
+
+    # -- an FM channel's squelch (Settings > Radios > Squelch; sizeup/radio/fm.py) ---------------------------
+
+    def squelch_defaults(self, key: str) -> dict:
+        """The receiver's own: open at the config's squelch_db, close CLOSE_DB, MIN_OPEN_S (the hub: the station's)."""
+        c = next((c for c in self.cfg.channels if c.label == key and c.kind != "airband"), None)
+        return {"open_db": float(c.squelch_db) if c is not None else 10.0, "close_db": CLOSE_DB, "min_open_s": MIN_OPEN_S}
+
+    def _check_squelch(self, m) -> dict:
+        """The hub's squelch map against this station's channels (channels.fit_squelch): traffic channels only (a
+        paging channel's squelch is never set: a high Open would mute a page), close under open with this station's
+        own defaults. What doesn't fit is left out and logged, never refused: the rest of the push still applies."""
+        kept, why = channels.fit_squelch(m, self._kind, self.squelch_defaults)
+        if why:
+            log("squelch from the hub: left out " + "; ".join(why))
+        return kept
+
+    def _apply_squelch(self) -> None:
+        """Each FM receiver's squelch as set (else its default), on the running squelch: no restart."""
+        for r in getattr(self, "receivers", []):
+            label = r.channel.label
+            if self._kind.get(label) != "traffic" or isinstance(r, AmReceiver):
+                continue                    # paging (South 2): always the receiver's own; airband: its own squelch
+            s = {**self.squelch_defaults(label), **(self._sq_ov.get(label) or {})}
+            if r.set_squelch(s["open_db"], s["close_db"], s["min_open_s"]) and label in self._sq_ov:
+                log(f"{label}: squelch opens at {s['open_db']:g} dB, closes under {s['close_db']:g} dB, "
+                    f"keeps {s['min_open_s']:g} s or more")
+
+    def _keyup(self, label: str, seg: Segment, has_id: bool, speech: bool, tid: str = "") -> tuple:
+        """A traffic channel's transmission, for telling real key-ups from interference: its length, quieting,
+        estimated CTCSS tone (radio/fm.py ctcss_estimate), ID, speech. On its own thread (_keyup_pool)."""
+        try:
+            est = ctcss_estimate(seg.audio)
+        except Exception:  # noqa: BLE001 - a diagnostic, never in the way of the transmission
+            est = ("unsure", None)
+        with self._lock:
+            self._keyups.setdefault(label, deque(maxlen=300)).append(
+                (seg.end, round(seg.end - seg.start, 1), round(float(seg.quieting_db), 1), est[0], est[1], has_id, speech))
+            if tid:
+                if len(self._keyup_pl) > 500:
+                    self._keyup_pl.clear()
+                self._keyup_pl[tid] = est
+        return est
+
+    def keyups(self, label: str, now: float | None = None, window_s: float = 3600.0) -> dict:
+        """The last hour's key-ups on a channel: how many, without speech, by estimated CTCSS tone ("none": no line,
+        "unsure"), the lengths and quieting of the ones without speech, and the last few
+        ([end, s, quieting, verdict, Hz, ID, speech])."""
+        now = time.time() if now is None else now
+        with self._lock:
+            rows = [k for k in self._keyups.get(label, ()) if now - k[0] <= window_s]
+        tones: dict[str, int] = {}
+        for k in rows:
+            key = f"{k[4]:g}" if k[3] == "tone" else k[3]
+            tones[key] = tones.get(key, 0) + 1
+        bare = [k for k in rows if not k[6] and not k[5]]
+        return {"n": len(rows), "no_speech": len(bare), "tones": tones,
+                "bare_s": sorted(k[1] for k in bare)[:50], "bare_q": sorted(k[2] for k in bare)[:50],
+                "recent": [list(k) for k in rows[-8:]]}
+
+    def squelch_state(self) -> dict:
+        """GET /api/cad/squelch: each FM channel's squelch as set, as running, its noise floor and short opens."""
+        rows = []
+        for r in self.radio_status():
+            if not isinstance(r, dict) or "min_open_s" not in r:
+                continue
+            key = r.get("label")
+            kind = r.get("channel_kind") or ""
+            rows.append({"key": key, "mhz": r.get("mhz"), "state": r.get("state"), "open": bool(r.get("open")),
+                         "kind": kind, "editable": kind == "traffic",
+                         "set": dict(self._sq_ov.get(key) or {}),
+                         "default": r.get("squelch_default") or self.squelch_defaults(key),
+                         "running": {f: r.get(f) for f in channels.SQUELCH},
+                         "hiss_db": r.get("hiss_db"), "quieting_db": r.get("quieting_db"), "floor_db": r.get("floor_db"),
+                         "short_per_min": r.get("short_per_min"), "keyups": r.get("keyups")})
+        ed = {r["key"] for r in rows if r["editable"]}
+        orphans = [{"key": k, "set": v} for k, v in sorted(self._sq_ov.items()) if k not in ed]   # renamed, gone, paging
+        return {"channels": rows, "orphans": orphans, "sync": self.channels_sync(),
+                "chatter_per_min": channels.CHATTER_PER_MIN,
+                "ranges": {f: list(v) for f, v in channels.SQUELCH.items()}}
 
     def channels_sync(self) -> dict:
         if self.forwarding():
@@ -2618,9 +2852,15 @@ class App:
         """Settings > Radios > Channels: the choices, what AWS can do, where they stand, the cost."""
         ok, why = self.aws_ok()
         reserve = ([k for k in channels_reserve(self) if self.aws_ok(k)[0]] if not ok else [])
+        if self.forwarding():
+            deny = list(self._hub_aws.get("deny") or [])
+            reserve += [k for k in self._hub_aws.get("reserve") or [] if k not in reserve] if not ok else []
+        else:
+            more, deny, _why = self.aws_split(ok)
+            reserve += more
         return {"prefs": self._chan_ov, "aws_channels": list(self.cfg.stt_aws_channels),
                 "record_only": list(self.cfg.stt_record_only), "aws_ok": ok, "aws_why": why,
-                "aws_reserve": reserve,
+                "aws_reserve": reserve, "aws_deny": deny,
                 "fm": [{"key": c.label, "kind": c.kind, "mhz": c.mhz,
                         **({"schedule": plan_text(c)} if getattr(c, "schedule", ()) or getattr(c, "also", ()) else {})}
                        for c in self.cfg.channels],
@@ -3083,6 +3323,7 @@ class App:
         r = make_receiver(self.cfg, c, self._dongle(serial), self._segment, self._heard_elsewhere)
         self.tap.attach(r)
         self.receivers[self.receivers.index(old)] = r
+        self._apply_squelch()
         return r
 
     def _running(self, r) -> bool:
@@ -3314,6 +3555,11 @@ class App:
         out = []
         for r in self.receivers:
             st = r.status()
+            if "min_open_s" in st:                   # the noise squelch: its defaults, for Settings on the hub
+                st["squelch_default"] = self.squelch_defaults(r.channel.label)
+                st["channel_kind"] = self._kind.get(r.channel.label, "")    # only traffic squelch is editable
+                if self._kind.get(r.channel.label) == "traffic":
+                    st["keyups"] = self.keyups(r.channel.label)
             if self.shared and r.channel.label not in self.assign.values():
                 st.update(state="off", detail=self._off_detail(), open=False, quieting_db=None, open_s=None, stuck=False)
             out.append(st)
@@ -3475,12 +3721,14 @@ class App:
             self.p25.start()
         for rt in self.systems.values():
             rt.ingest.start()
-        if self.systems:
+        if self.systems or self.reception.probes:
             self.reception.start_thread()
         if self.vocab is not None and self.vocab.state()["state"] == "PENDING":
             self.vocab.poll()
         if getattr(self, "atc_vocab", None) is not None and self.atc_vocab.state()["state"] == "PENDING":
             self.atc_vocab.poll()
+        if getattr(self, "pd_vocab", None) is not None and self.pd_vocab.state()["state"] == "PENDING":
+            self.pd_vocab.poll()
         if self.station is not None:
             self.station.start()
         elif self.link is not None:
@@ -3714,6 +3962,12 @@ def channels_reserve(app) -> tuple:
     return RESERVE_CHANNELS
 
 
+# The model a row shows while whisper does a clip AWS couldn't (the station's on the hub): "Transcribing (whisper)" in
+# the log, never "(AWS)"; whisper's own model name replaces it with the text (cad.js sttSaid).
+WHISPER_FALLBACK = "whisper"
+WHISPER_FALLBACK_STATION = "whisper on the station"
+
+
 def channels_model() -> str:
     from sizeup.transcribe import MODEL
     return MODEL
@@ -3823,7 +4077,7 @@ def init_state(cfg: Config) -> list[str]:
     made: list[str] = []
     if not cfg.cad_db:
         return made
-    Cad.from_config(cfg, log=log).store.db.close()     # the schema, its migrations, the seeded lists
+    Cad.from_config(cfg, log=log).shutdown()           # the schema, its migrations, the seeded lists
     made.append(cfg.cad_db)
     if cfg.cloud_role == "hub":
         from sizeup.cloud.hubstore import AudioDb, MonitorDb
@@ -3839,7 +4093,8 @@ def main(argv: list[str] | None = None) -> int:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--config", default="config.toml")
     ap.add_argument("--init-state", action="store_true",
-                    help="create / migrate the databases and exit (the hub container runs this before Litestream)")
+                    help="create / migrate the databases and exit (never on a replicated file Litestream isn't "
+                         "replicating: docs/cloud.md \"Replicate before migrate\")")
     args = ap.parse_args(argv)
     try:
         cfg = load(args.config)
@@ -3898,8 +4153,10 @@ def run_gated(cfg: Config, gate: Path) -> int:
     write until the supervisor says so through the gate file (and the lease file says the lock is ours):
 
         (standby)  prewarm(): imports, the gazetteer, the map providers and their caches, the ATC rules; then wait
-        "init"     the takeover: the databases promoted. --init-state's work, here (no new Python to start); the
-                   answer ("ok" / "error: ...") in <gate>.answer; then wait while the supervisor starts Litestream
+        "init"     the takeover: the databases promoted and Litestream already replicating each (the supervisor
+                   confirmed it: docs/cloud.md "Replicate before migrate"). --init-state's work, here (no new Python
+                   to start): the migrations; the answer ("ok" / "error: ...") in <gate>.answer; then wait while the
+                   supervisor confirms they are in S3
         "run"      the port listens at once ("updating": the supervisor starts the connector beside it), the app is
                    built and takes the socket over: the CAD serves
 
@@ -3929,7 +4186,7 @@ def run_gated(cfg: Config, gate: Path) -> int:
         log(f"sizeup: databases ready ({cfg.cad_db or 'in memory'})")
         t.mark("init-state")
         _wait_gate(gate, ("run",))
-        t.mark("litestream")                      # (the supervisor starts it meanwhile)
+        t.mark("replicated")                      # (the supervisor confirms the migrations are in S3 meanwhile)
     early = None
     try:
         from sizeup.web.updating import serve_updating

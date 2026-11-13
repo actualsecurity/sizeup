@@ -1179,6 +1179,7 @@ function radioRow(t, ctx = {}) {
     const fixes = (t.atc_snaps || []).map((x) => `“${x.from}” → ${x.to} (on ADS-B)`);
     txt.title = `As transcribed: ${t.text}` + (fixes.length ? `\nCallsign matched to ADS-B: ${fixes.join(", ")}` : "");
   }
+  if (!txt.title && t.model && t.status !== "off") txt.title = (shown ? "Transcribed by " : "Speech-to-text: ") + t.model;
   if (t.atc_weak) {                      // a marginal AM carrier (#257): transcribed, but the words may be wrong
     const w = el("span", "atc-weak", "weak signal");
     w.title = `Carrier ${t.carrier_db} dB over the noise floor: transcribed, but the words may be wrong`;
@@ -1227,7 +1228,7 @@ function oursNamed(t) {
 }
 function oursNamedText(t) {
   const why = t.page === "none" ? "no tones decoded" : t.page === "unknown" ? "its tones are unknown" : "its tones aren't ours";
-  return `Names PCFD units (${t.names_ours.join(", ")}); ${why}`;
+  return `Names PCFD/RB units (${t.names_ours.join(", ")}); ${why}`;
 }
 function oursNamedNote(t) {
   if (!oursNamed(t)) return null;
@@ -1576,7 +1577,12 @@ function repaintTx() {                   // the rows' busy state changed: draw t
   txChanged();
 }
 // What a transmission without text says (its status): sizeup/app.py, sizeup/channels.py.
+// Pending: which engine has it (the row's model, sizeup/app.py _stt_row): AWS, or whisper after AWS failed.
 function sttSaid(t) {
+  const m = t.model || "";
+  if (t.status === "pending" && m.startsWith("whisper")) return m.startsWith("whisper on the station")
+    ? "Transcribing on the station (whisper)" : "Transcribing (whisper)";
+  if (t.status === "pending" && m.startsWith("aws-transcribe")) return "Transcribing (AWS)";
   return { no_speech: "Key-up, no speech", no_voice: "Tones only, no message", pending: "Transcribing", remote: "Transcribing on the hub (AWS)", off: "Not transcribed",
            skipped: "Skipped: busy", error: "Transcription failed" }[t.status] || "—";
 }

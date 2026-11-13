@@ -25,7 +25,8 @@ Reset to default = drop the override (one item, or a whole section).
     channels                       key "FG1" | "South 2" | "tg:307" -> {record?, transcribe?, engine?}: which channel is
                                    kept, transcribed, and by what (sizeup/channels.py; Settings > Radios)
     stt                            key "vocabulary" -> [phrases] (Amazon Transcribe's custom vocabulary),
-                                   "aws_monthly_limit_usd" -> the monthly AWS limit (sizeup/transcribe.py)
+                                   "aws_monthly_limit_usd" -> the monthly AWS limit (sizeup/transcribe.py),
+                                   "aws_context_budget_usd" -> another P25 system's (police) own monthly AWS limit
     tones                          the tone book (#80, #115, #122; sizeup/cad/tonelist.py): key "A/B" -> a pair named
                                    here {a_hz, b_hz, places, service, role?, confirmed?, page?} (#84/#115: {name, ...});
                                    "A/B@<name in the list>" -> an edit to a row of data/westchester_tones.csv {list,
@@ -60,6 +61,8 @@ Reset to default = drop the override (one item, or a whole section).
     datasources                    key a data source ("gis:hydrants", "aircraft:registry") -> off | hourly | daily | weekly |
                                    monthly: how often the registry refreshes it (#186, Settings > Data sources;
                                    sizeup/datasources.py); not set: the source's default
+    station_logs                   key "on" | "level" | "include" | "exclude" | "retention_days": the station's logs into
+                                   CloudWatch (sizeup/cloud/cwlogs.py; Settings > Station > Logs, admins)
     department_units               key a feed's department entry code -> the department it pages ("Port Chester FD"), or
                                    {"name", "accepts": true}: a whole department, never a unit (#370,
                                    sizeup/cad/sources.py; admins, no panel); never a board unit's code
@@ -91,6 +94,7 @@ from sizeup.cad import lists as lists_mod
 from sizeup.cad.lists import CLASSES, CODE, COLOR, LIST_SECTIONS, LONG_CODE, RESPONSES, ROLES, ListsError
 from sizeup.cad.store import OPERATOR_MAX, SCHEMA_VERSION, TZ, CadError
 from sizeup import audiostore, errwatch, polly, sourcekeys
+from sizeup.cloud import cwlogs
 from sizeup.cloud import health as health_mod
 from sizeup.radio.tones import pair_key
 from sizeup.tts import KOKORO_VOICES
@@ -104,7 +108,8 @@ EMAIL = re.compile(r"[^@\s<>]{1,64}@[^@\s<>]{1,190}\.[^@\s<>]{1,63}")
 PAGE_SECTION = {**{s: "lists" for s in LIST_SECTIONS}, "event_class": "lists", "geo_town_order": "lists", "status_flow": "lists",
                 "type_subtypes": "lists",
                 "units": "units", "dispatch_wording": "dispatch", "dispatch_tones": "dispatch", "dispatch": "dispatch",
-                "channels": "radios", "stt": "radios", "places": "lists", "tones": "radios", "alarms": "system"}
+                "channels": "radios", "stt": "radios", "places": "lists", "tones": "radios", "alarms": "system",
+                channels_mod.SQUELCH_SECTION: "radios"}
 # The camera wall's area (#125, sizeup/roads.py Roads.area): Settings > System.
 WALL_SECTION, WALL_KEYS, WALL_MARGIN = "camera_wall", ("margin_m", "include", "exclude"), (0, 5000, 1000)
 PAGE_SECTION[WALL_SECTION] = "system"
@@ -144,6 +149,9 @@ PAGE_SECTION[MAPD_SECTION] = "system"
 PREMISE_SECTION = "premise_visibility"
 PAGE_SECTION[PREMISE_SECTION] = "system"
 PREMISE_LEVELS = ("everyone", "dispatcher", "admin")
+# The station's logs into CloudWatch (sizeup/cloud/cwlogs.py): Settings > Station > Logs, admins, audited as System.
+LOGS_SECTION = cwlogs.SECTION
+PAGE_SECTION[LOGS_SECTION] = "system"
 
 
 def _visibility_keys() -> dict[str, str]:
@@ -176,6 +184,7 @@ WORDING = (("new", "First dispatch"), ("add_on", "Added to the assignment"), ("u
            ("respond", "Upgrade: more units"))
 MAX_TONES, MAX_GROUPS, MAX_CHANNELS = 8, 4, 8
 MAX_VOCAB, MAX_PHRASE_CHARS = 1500, 100
+STT_KEYS = ("vocabulary", "aws_monthly_limit_usd", "aws_context_budget_usd")   # the "stt" section's keys
 MAX_VOCAB_BYTES = 50_000          # AWS's limit; also keeps the Settings request under its 64 KB
 MAX_PLACE_NAMES = 300
 TONES_SECTION, MAX_NAMED_TONES, TONE_HZ = "tones", 400, tonelist.TONE_HZ     # the decoder's band (radio/tones.py)
@@ -574,7 +583,40 @@ class Editor:
         out["premise_visibility"] = self.premise_page(ov)
         out["alert_mutes"] = self.mutes_page(ov)
         out["audio_retention"] = self.retention_page(ov)
+        out["station_logs"] = self.logs_page(ov)
         return out
+
+    def logs_page(self, ov: dict | None = None) -> dict:
+        """Settings > Station > Logs: each setting, its default and whether it is edited."""
+        e = ((self.overrides() if ov is None else ov).get(LOGS_SECTION) or {})
+        c = cwlogs.config(e)
+        return {k: {"label": cwlogs.LABELS[k], "value": c[k], "default": d, "edited": k in e}
+                for k, d in cwlogs.DEFAULTS.items()} | {"levels": list(cwlogs.logscrub.LEVELS),
+                                                         "retention_choices": list(cwlogs.RETENTION_DAYS)}
+
+    def _logs_op(self, action: str, body: dict, op: str) -> dict:
+        """set {key, value} | reset {key}: admins."""
+        key = body.get("key")
+        if key not in cwlogs.DEFAULTS:
+            raise CadError(f"key: one of {', '.join(cwlogs.DEFAULTS)}")
+        d = cwlogs.DEFAULTS[key]
+        cur = cwlogs.config(self.section(LOGS_SECTION))[key]
+        if action == "reset":
+            v = d
+        elif action == "set":
+            try:
+                v = cwlogs.check_value(key, body.get("value"))
+            except ValueError as e:
+                raise CadError(str(e)) from None
+        else:
+            raise CadError("action: set or reset")
+        shown = (lambda x: ("on" if x else "off") if key in ("on", "adapter") else ", ".join(x) or "none" if isinstance(x, list) else str(x))
+        out = self._commit([(LOGS_SECTION, key, REMOVE if v == d and type(v) is type(d) else v)], op,
+                           [("system", f"{LOGS_SECTION}/{key}", shown(cur), shown(v))])
+        sl = getattr(self.cad, "station_logs", None)
+        if key == "retention_days" and sl is not None:
+            sl.checked = 0.0                 # applied at the next look (the Logs view's status, or the next batch)
+        return {**out, "station_logs": self.logs_page()}
 
     def _context_channel(self, channel: str) -> bool:
         """This channel's newest transmission is another P25 system's (#409; one indexed row: (channel, start))."""
@@ -784,7 +826,7 @@ class Editor:
             v = self._errors_value(key, body.get("value"))
         else:
             raise CadError("action: set or reset")
-        shown = (lambda x: ("on" if x else "off") if key == "on" else str(x))
+        shown = (lambda x: ("on" if x else "off") if key in ("on", "adapter") else str(x))
         out = self._commit([(ERR_SECTION, key, REMOVE if v == d and type(v) is type(d) else v)], op,
                            [("system", f"{ERR_SECTION}/{key}", shown(cur), shown(v))])
         return {**out, "hub_errors": self.errors_page()}
@@ -995,9 +1037,10 @@ class Editor:
         fn = {"event_class": self._class_op, "status_flow": self._flow_op, "type_subtypes": self._map_op, "geo_town_order": self._towns_op, "units": self._units_op,
               "dispatch": self._dispatch_op, "users": self._users_op, "runcards": self._cards_op,
               "import": self._import_op, "channels": self._channels_op, "stt": self._stt_op,
+              channels_mod.SQUELCH_SECTION: self._squelch_op,
               "places": self._places_op, TONES_SECTION: self._tones_op, WALL_SECTION: self._wall_op, DS_SECTION: self._ds_op,
               NOTIFY_SECTION: self._notify_op, ATC_SECTION: self._atc_op, ERR_SECTION: self._errors_op, MAPD_SECTION: self._mapd_op, PREMISE_SECTION: self._premise_op, RET_SECTION: self._retention_op,
-              TRS_SECTION: lambda a, b, o: self._retention_op(a, b, o, TRS_SECTION), MUTE_SECTION: self._mutes_op, DEPT_SECTION: self._dept_op, "alarms": lambda a, b, o: self.cad.alarms.settings_op(a, b, o)}.get(section)
+              TRS_SECTION: lambda a, b, o: self._retention_op(a, b, o, TRS_SECTION), MUTE_SECTION: self._mutes_op, LOGS_SECTION: self._logs_op, DEPT_SECTION: self._dept_op, "alarms": lambda a, b, o: self.cad.alarms.settings_op(a, b, o)}.get(section)
         if fn is None:
             raise CadError(f"no settings section {section!r}")
         if section in ("users", "import"):
@@ -1750,6 +1793,104 @@ class Editor:
             ctx.channels_changed()
         return out
 
+    # -- an FM channel's squelch (Settings > Radios > Squelch; sizeup/channels.py, sizeup/radio/fm.py) --------------
+
+    def squelch_overrides(self) -> dict:
+        return dict(self.overrides().get(channels_mod.SQUELCH_SECTION) or {})
+
+    def _squelch_op(self, action: str, body: dict, op: str) -> dict:
+        """set {key, open_db?, close_db?, min_open_s?} (null: back to the receiver's default) | reset {key}. Audited."""
+        ctx = self.cad.radio_ctx
+        locked = ctx.channels_locked() if ctx is not None else ""
+        if locked:
+            raise CadError(locked)
+        ov = self.squelch_overrides()
+        key = body.get("key")
+        dflt = ctx.squelch_defaults(key) if ctx is not None and isinstance(key, str) else {}
+        if action == "set":
+            self._squelch_editable(key)
+            try:
+                vals = channels_mod.clean_squelch(key, {f: body.get(f) for f in channels_mod.SQUELCH})
+            except ValueError as e:
+                raise CadError(str(e)) from None
+            cur = dict(ov.get(key) or {})
+            for f in channels_mod.SQUELCH:
+                if f in body and body[f] is None:
+                    cur.pop(f, None)
+            new = {k: v for k, v in {**cur, **vals}.items() if v != dflt.get(k)}
+            eff = {**dflt, **new}
+            if eff.get("open_db") is not None and eff.get("close_db") is not None and eff["close_db"] >= eff["open_db"]:
+                raise CadError(f"close {eff['close_db']:g} dB: under open ({eff['open_db']:g} dB)")
+            if new == (ov.get(key) or {}):
+                return {"ok": True}
+            before = {**dflt, **(ov.get(key) or {})}
+            out = self._commit([(channels_mod.SQUELCH_SECTION, key, new or REMOVE)], op,
+                               [("radios", f"squelch/{key}", before, eff)])
+        elif action == "reset":
+            key = _text(key, "key", 40)
+            if key not in ov:
+                return {"ok": True}
+            out = self._commit([(channels_mod.SQUELCH_SECTION, key, REMOVE)], op,
+                               [("radios", f"squelch/{key}", {**dflt, **ov[key]}, "default")])
+        else:
+            raise CadError("action: set or reset")
+        if ctx is not None:
+            ctx.channels_changed()
+        return out
+
+    def _squelch_editable(self, key) -> None:
+        """Only a traffic channel's squelch is set here, one the station has reported (with its own defaults). A paging
+        channel's (South 2: the tone-outs, 60 Control) is read-only: an Open over the pages' quieting mutes them."""
+        ctx = self.cad.radio_ctx
+        rows = {c["key"]: c for c in ctx.squelch_state()["channels"]} if ctx is not None else {}
+        row = rows.get(key) if isinstance(key, str) else None
+        if row is None:
+            ed = [k for k, c in rows.items() if c.get("editable")]
+            raise CadError(f"key: one of {', '.join(ed)}" if ed else "no traffic channel's squelch reported yet")
+        if not row.get("editable"):
+            raise CadError(f"{key}: {row.get('kind') or 'not a traffic'} channel: its squelch is read-only")
+
+    def _import_squelch(self, sq: dict) -> tuple[dict, list[str]]:
+        """An imported squelch section: invalid entries and a channel the station reports as paging (read-only)
+        skipped; one no station has reported (a fresh hub, a channel gone) kept, left out of the push until a traffic
+        channel by that name is there (channels.fit_squelch). -> (kept, notes)."""
+        ctx = self.cad.radio_ctx
+        rows = {c["key"]: c for c in ctx.squelch_state()["channels"]} if ctx is not None else {}
+        kept, notes = {}, []
+        for k, v in sq.items():
+            try:
+                c = channels_mod.clean_squelch(k, v)
+            except ValueError as e:
+                notes.append(f"squelch {k}: skipped ({e})")
+                continue
+            if not c:
+                continue
+            row = rows.get(k)
+            if row is not None and not row.get("editable"):
+                notes.append(f"squelch {k}: skipped ({row.get('kind') or 'not a traffic'} channel: read-only)")
+                continue
+            if row is None:
+                notes.append(f"squelch {k}: kept, not applied until a traffic channel {k} is reported")
+            kept[k] = c
+        return kept, notes
+
+    def replace_squelch(self, m: dict, operator: str) -> bool:
+        """The whole squelch map as the hub sent it. True when anything changed."""
+        cur = self.squelch_overrides()
+        sec = channels_mod.SQUELCH_SECTION
+        changes = [(sec, k, REMOVE) for k in cur if k not in m]
+        changes += [(sec, k, v) for k, v in m.items() if cur.get(k) != v]
+        if not changes:
+            return False
+        self._commit(changes, operator, [("radios", f"squelch/{k}", cur.get(k), None if v is REMOVE else v)
+                                         for _s, k, v in changes])
+        return True
+
+    def squelch_page(self) -> dict:
+        """GET /api/cad/squelch: each FM channel's squelch as set and as running, the noise floor, the short opens."""
+        ctx = self.cad.radio_ctx
+        return ctx.squelch_state() if ctx is not None else {"channels": [], "sync": {"state": "local", "detail": ""}}
+
     def replace_channels(self, prefs: dict, operator: str) -> bool:
         """The whole channel map as the hub sent it (the station applying the CAD of record's choices).
         True when anything changed."""
@@ -2018,13 +2159,14 @@ class Editor:
         return out
 
     @staticmethod
-    def _limit(v) -> float:
+    def _limit(v, key: str = "aws_monthly_limit_usd") -> float:
         if isinstance(v, bool) or not isinstance(v, (int, float)) or not 0 <= v <= 10000:
-            raise CadError("aws_monthly_limit_usd: 0 to 10000 (dollars)")
+            raise CadError(f"{key}: 0 to 10000 (dollars)")
         return round(float(v), 2)
 
     def _stt_op(self, action: str, body: dict, op: str) -> dict:
-        """set {key: vocabulary | aws_monthly_limit_usd, value} | reset {key} | push (the vocabulary to AWS)."""
+        """set {key: vocabulary | aws_monthly_limit_usd | aws_context_budget_usd, value} | reset {key} | push (the
+        vocabularies to AWS)."""
         ctx = self.cad.radio_ctx
         cur = self.stt_values()
         if action == "push":
@@ -2038,8 +2180,8 @@ class Editor:
             return {"ok": st.get("state") != "error", "vocabulary": st, **({"error": st["reason"]}
                                                                            if st.get("state") == "error" else {})}
         key = _text(body.get("key"), "key", 40)
-        if key not in ("vocabulary", "aws_monthly_limit_usd"):
-            raise CadError("key: vocabulary or aws_monthly_limit_usd")
+        if key not in STT_KEYS:
+            raise CadError("key: vocabulary, aws_monthly_limit_usd or aws_context_budget_usd")
         if action == "set":
             if key == "vocabulary":
                 v = self._vocab_list(body.get("value"))
@@ -2047,8 +2189,8 @@ class Editor:
                 new = REMOVE if v == dflt else v
                 shown = (f"{len(cur[key])} phrases" if key in cur else "default"), f"{len(v)} phrases"
             else:
-                v = self._limit(body.get("value"))
-                dflt = ctx.aws_limit_default() if ctx is not None else 25.0
+                v = self._limit(body.get("value"), key)
+                dflt = self._limit_default(key)
                 new = REMOVE if v == dflt else v
                 shown = cur.get(key, dflt), v
             out = self._commit([("stt", key, new)], op, [("radios", f"stt/{key}", *shown)])
@@ -2071,7 +2213,20 @@ class Editor:
         v = self.stt_values().get("aws_monthly_limit_usd")
         if isinstance(v, (int, float)) and not isinstance(v, bool):
             return float(v)
+        return self._limit_default("aws_monthly_limit_usd")
+
+    def aws_context_limit(self) -> float:
+        """Another P25 system's (police) own monthly AWS limit: never ours, nor our reserve (radio-intel PR 3)."""
+        v = self.stt_values().get("aws_context_budget_usd")
+        if isinstance(v, (int, float)) and not isinstance(v, bool):
+            return float(v)
+        return self._limit_default("aws_context_budget_usd")
+
+    def _limit_default(self, key: str) -> float:
         ctx = self.cad.radio_ctx
+        if key == "aws_context_budget_usd":
+            fn = getattr(ctx, "aws_context_limit_default", None)
+            return float(fn()) if fn is not None else 15.0
         return ctx.aws_limit_default() if ctx is not None else 25.0
 
     def stt_page(self) -> dict:
@@ -2088,6 +2243,8 @@ class Editor:
                                "state": ctx.vocabulary_state() if ctx is not None else {"state": "none"}},
                 "limit": {"value": self.aws_limit(), "default": ctx.aws_limit_default() if ctx is not None else 25.0,
                           "edited": "aws_monthly_limit_usd" in cur},
+                "context_limit": {"value": self.aws_context_limit(), "default": self._limit_default("aws_context_budget_usd"),
+                                  "edited": "aws_context_budget_usd" in cur},
                 "aws": ctx.aws_status() if ctx is not None else {"enabled": False}}
 
     # -- the camera wall's area (#125): the margin around our fire districts, cameras always / never on it ---------
@@ -2495,6 +2652,9 @@ class Editor:
                 channels_mod.clean(k, v)
             except ValueError as e:
                 raise CadError(f"overrides.channels.{k}: {e}") from None
+        if channels_mod.SQUELCH_SECTION in ov:
+            # never the whole backup refused over a squelch entry: what can't apply is skipped, said in the notes
+            ov[channels_mod.SQUELCH_SECTION], self._import_notes = self._import_squelch(ov[channels_mod.SQUELCH_SECTION])
         for k, v in (ov.get(TONES_SECTION) or {}).items():
             key, val = self._clean_tone(v, f"overrides.tones.{k}")
             if key != k:
@@ -2547,12 +2707,13 @@ class Editor:
             except CadError as e:
                 raise CadError(f"overrides.{DEPT_SECTION}.{e}") from None
         st = ov.get("stt") or {}
-        if set(st) - {"vocabulary", "aws_monthly_limit_usd"}:
-            raise CadError("overrides.stt: vocabulary and aws_monthly_limit_usd only")
+        if set(st) - set(STT_KEYS):
+            raise CadError("overrides.stt: vocabulary, aws_monthly_limit_usd and aws_context_budget_usd only")
         if "vocabulary" in st:
             self._vocab_list(st["vocabulary"])
-        if "aws_monthly_limit_usd" in st:
-            self._limit(st["aws_monthly_limit_usd"])
+        for k in ("aws_monthly_limit_usd", "aws_context_budget_usd"):
+            if k in st:
+                self._limit(st[k], k)
         L = self.build(ov)
         for k in eta.KEYS:
             if k in d:
@@ -2634,7 +2795,9 @@ class Editor:
     def _import_op(self, action: str, body: dict, op: str, guard: bool = False) -> dict:
         if action not in ("dry_run", "apply"):
             raise CadError("action: dry_run or apply")
+        self._import_notes = []
         ov, cards, ops, L = self._check_import(body.get("settings"))
+        notes = list(self._import_notes)
         if guard and ops is not None:         # the operators as apply (below) would leave them
             after = {o["name"]: dict(o) for o in self.operators()}
             for o in ops:
@@ -2677,7 +2840,7 @@ class Editor:
                     changes.append({"section": "users", "store": "operators", "key": o["name"],
                                     "change": "added" if h is None else "changed", "old": old, "new": new})
         if action == "dry_run":
-            return {"ok": True, "dry_run": True, "changes": changes,
+            return {"ok": True, "dry_run": True, "changes": changes, "notes": notes,
                     "note": "Nothing changed yet. Operators not in the file are kept; run cards and edits are replaced."}
         now = self.store.clock()
         with self.store.tx() as db:
@@ -2714,8 +2877,9 @@ class Editor:
         self._use(L, ov)
         self.store.sync_units()
         self.store.rev += 1
-        if self.cad.radio_ctx is not None and any(c["store"] in (channels_mod.SECTION, "stt") for c in changes):
+        if self.cad.radio_ctx is not None and any(c["store"] in (channels_mod.SECTION, "stt", channels_mod.SQUELCH_SECTION)
+                                                  for c in changes):
             self.cad.radio_ctx.channels_changed()
         if self.cad.radio_ctx is not None and any(c["store"] == TONES_SECTION for c in changes):
             self.cad.radio_ctx.tones_changed()
-        return {"ok": True, "dry_run": False, "changes": changes}
+        return {"ok": True, "dry_run": False, "changes": changes, "notes": notes}

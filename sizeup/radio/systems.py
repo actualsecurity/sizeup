@@ -86,7 +86,8 @@ class P25System:
     frequencies: tuple[float, ...]                    # the listed (control channel candidate) frequencies, Hz
     talkgroups: dict[int, dict] = field(default_factory=dict)   # tg -> {name, group, encrypted, tier, system, description}
     site: dict = field(default_factory=dict)
-    reception: dict = field(default_factory=dict)     # the reception test's (#410): {watch, antenna, caveat}
+    reception: dict = field(default_factory=dict)     # the reception test's (#410): {watch, antenna, caveat, alert}
+    probe_only: bool = False                          # a probe-only system (#436, sizeup/radio/probes.py): never a job
 
     @property
     def jobs(self) -> tuple[str, ...]:
@@ -171,6 +172,8 @@ def discover(base: str | Path | None, taken_tgs=(), taken_jobs=(), problems: lis
     out = []
     tgs, jobs = set(taken_tgs), {str(j).lower() for j in taken_jobs}
     for name, d in system_dirs(base).items():
+        if (d / "probe.json").is_file():          # (#436) a reception test's probe of the county: never a system here
+            continue
         try:
             if name.lower() in sources.RESERVED_SYSTEMS:    # its rows would read as ours (sourcekeys.is_context)
                 raise SystemError_(f"{d}: the system name {name!r} is reserved (ours: "

@@ -1,8 +1,10 @@
-"""The reception test (GitHub #410): can this station hear another P25 system with a dongle it already has?
+"""The reception test (GitHub #410, #436): can this station hear a P25 system with a dongle it already has?
 
 A person lends ONE dongle to one side of a system's span (a job of sizeup/radio/systems.py: "MRRS 770" / "MRRS 773";
-one 2.4 MHz dongle takes in one side at a time) for 15 min, 1 h, 4 h or until stopped, from Settings > Radios. The
-system's own trunk-recorder runs on it as it would for good, and its output is measured instead of kept:
+one 2.4 MHz dongle takes in one side at a time; or the county's own site, a probe-only system of
+sizeup/radio/probes.py: "County probe") for 15 min, 1 h, 4 h or until stopped, from the hub's Settings > Radios >
+Receivers. The system's own trunk-recorder runs on it as it would for good (the county's: the probe's, never the
+county's own), and its output is measured instead of kept:
 
     Probe        one side's numbers, from trunk-recorder's lines and its finished calls:
                    the control channel: which frequency, the decode rate (messages / s, logged every 3 s with
@@ -56,6 +58,7 @@ import numpy as np
 from sizeup.radio import claims
 from sizeup.radio.live import ANSI
 from sizeup.radio.recorder import CC_LOW, CC_RATE
+from sizeup.radio.systems import Runtime
 
 OFF = "Off"
 DURATIONS = (15, 60, 240, 0)          # minutes a side; 0: until stopped
@@ -89,6 +92,9 @@ QUIET_S = 3600.0                      # no grant on a watched talkgroup this lon
 SWEEP_BIN_HZ = 6250
 SWEEP_TIMEOUT_S = 30.0
 SAMPLE_ID = re.compile(r"[0-9a-f]{12}")
+PROBE_CLEAN_S = 60.0                  # (#436) a probe's capture directory is capped this often ...
+PROBE_KEEP_S = 600.0                  # ... its calls older than this removed (a test takes them within seconds) ...
+PROBE_MAX_BYTES = 200 * 1024 * 1024   # ... and the oldest over this (janitor.SYSTEM_MAX_BYTES)
 
 CC_AT = re.compile(r"(?:Started with|Retuning to) Control Channel:\s*(?P<mhz>[\d.]+)\s*MHz", re.I)
 CC_FREQ = re.compile(r"freq:\s*(?P<mhz>[\d.]+)\s*MHz\s+Control Channel Message Decode Rate", re.I)
@@ -136,8 +142,11 @@ def site_check(seen: dict, listed: dict) -> dict:
 class Probe:
     """One side of a reception test. feed_line(each line trunk-recorder says), call(each finished call), result()."""
 
-    def __init__(self, system, job: str, sdr: str = "", clock: Callable[[], float] = time.time, sweep: dict | None = None):
+    def __init__(self, system, job: str, sdr: str = "", clock: Callable[[], float] = time.time, sweep: dict | None = None,
+                 alert=None):
         self.system, self.job, self.sdr, self.clock = system, job, sdr, clock
+        # the talkgroups "TG hits/h" counts the grants of (#436): the system's alert tier, the county's fire ones
+        self.alert = sorted({int(t) for t in (alert_tgs(system) if alert is None else alert)})
         src = next((s for s in system.sources if s.job == job), None)
         self.center = src.center if src else 0.0
         self.covered = system.covered([src.index]) if src else []
@@ -310,6 +319,7 @@ class Probe:
         if sweep and found:
             cc_over = next((x["over_db"] for x in sweep["channels"] if abs(x["mhz"] - best[0]) < 0.001), None)
         mean = lambda xs: round(sum(xs) / len(xs), 1) if xs else None   # noqa: E731
+        hits = sum((self.tgs.get(tg) or {}).get("grants", 0) for tg in self.alert)
         out = {
             "job": self.job, "sdr": self.sdr, "mhz": round(self.center / 1e6, 5),
             "covers": [round(f / 1e6, 5) for f in self.covered],
@@ -334,12 +344,31 @@ class Probe:
             "signal": {"sweep": sweep, "cc_over_db": cc_over, "voice_db": mean(self._sig), "voice_snr_db": mean(self._snr)},
             "talkgroups": tgs,
             "encrypted_grants": self.encrypted, "unknown_grants": self.unknown,
+            "alert": {"tgs": [{"tg": tg, "name": (self.system.talkgroups.get(tg) or {}).get("name") or f"TG {tg}"}
+                              for tg in self.alert],
+                      "grants": hits, "per_h": round(hits / hours, 1) if hours > 0 and self.alert else None},
             "voice": {"calls": self.calls, "audio_s": round(self.audio_s, 1),
                       "calls_per_h": round(self.calls / hours, 1) if hours > 0 else None,
                       "err_per_s": round(self.errors / self.audio_s, 2) if self.audio_s > 0 else None},
         }
         out["verdict"] = verdict(out, self.system)
         return out
+
+
+def alert_tgs(system, tier=None) -> list[int]:
+    """The talkgroups a test's "TG hits/h" is of (#436): the system's own list ("reception"."alert": the county's fire
+    alert talkgroups), else its talkgroups of the alert tier (tier(tg): as set now; default: as in its file).
+    Never an encrypted one (its grants are only counted)."""
+    listed = (getattr(system, "reception", None) or {}).get("alert")
+    if listed:
+        return sorted(int(t) for t in listed if str(t).isdigit() or isinstance(t, int))
+    from sizeup import tiers
+    out = []
+    for tg, i in (getattr(system, "talkgroups", None) or {}).items():
+        t = tier(tg) if tier is not None else i.get("tier")
+        if t == tiers.ALERT and not i.get("encrypted"):
+            out.append(int(tg))
+    return sorted(out)
 
 
 def _side(job: str) -> str:
@@ -436,19 +465,39 @@ def summary(h: dict) -> dict:
     """One side of a past test as the history shows it (the file keeps all of it)."""
     cc, v = h.get("cc") or {}, h.get("verdict") or {}
     return {"job": h.get("job"), "seconds": h.get("seconds"), "grade": v.get("grade"), "hint": v.get("hint"),
-            "cc_mhz": cc.get("mhz"), "rate": cc.get("rate"), "decoded_pct": cc.get("decoded_pct"),
+            "cc_mhz": cc.get("mhz"), "rate": cc.get("rate"),
+            "decoded_pct": cc.get("decoded_pct") if cc.get("windows") else None,
             "dropout_s": cc.get("dropout_s"), "retunes": cc.get("retunes"), "site": (h.get("site") or {}).get("match"),
             "cc_over_db": (h.get("signal") or {}).get("cc_over_db"), "voice_snr_db": (h.get("signal") or {}).get("voice_snr_db"),
             "watch": [{k: t.get(k) for k in ("tg", "name", "grants", "calls", "calls_per_h", "err_per_s")}
                       for t in h.get("talkgroups") or [] if t.get("watch")],
             "calls": (h.get("voice") or {}).get("calls"), "err_per_s": (h.get("voice") or {}).get("err_per_s"),
-            "encrypted_grants": h.get("encrypted_grants")}
+            "encrypted_grants": h.get("encrypted_grants"), "windows": cc.get("windows"),
+            "alert": h.get("alert") if isinstance(h.get("alert"), dict) else None}
+
+
+def measured(h: dict) -> bool:
+    """A side that measured anything: a decode rate logged, a site or a grant seen. One that didn't, of a test that
+    was stopped, failed or interrupted, has no verdict (#436): "None" is a finished side that heard nothing."""
+    cc = h.get("cc") or {}
+    grants = sum(int(t.get("grants") or 0) for t in h.get("talkgroups") or [])
+    return bool(cc.get("windows") or (h.get("site") or {}).get("seen") or grants or h.get("encrypted_grants")
+                or h.get("unknown_grants"))
+
+
+def unjudged(halves: list[dict], status: str) -> list[dict]:
+    """A test that didn't run its course: the sides that measured nothing lose their verdict."""
+    if status != "done":
+        for h in halves:
+            if isinstance(h, dict) and not measured(h):
+                h["verdict"] = None
+    return halves
 
 
 def overall(halves: list[dict]) -> dict | None:
     """A test's verdict: its best side's (a system is heard if either side's control channel is)."""
     order = {"good": 2, "marginal": 1, "none": 0}
-    done = [h for h in halves if h.get("verdict")]
+    done = [h for h in halves if isinstance(h, dict) and h.get("verdict")]
     if not done:
         return None
     best = max(done, key=lambda h: (order.get(h["verdict"]["grade"], 0), h["cc"]["decoded_pct"]))
@@ -521,6 +570,16 @@ def sweep(binary: str, index: int | str, listed_hz, center: float, rate: float, 
 # -- the test ---------------------------------------------------------------------------------------------------------------
 
 
+class ProbeRuntime(Runtime):
+    """A probe-only system as the reception test runs it (#436, sizeup/radio/probes.py: the county's): its own
+    trunk-recorder and capture directory, never a dongle job, never traffic. Its lines are a test's or nothing."""
+
+    def _line(self, line: str) -> None:
+        probe = self.probe
+        if probe is not None:
+            probe.feed_line(line)
+
+
 def _wav_8k(audio, max_s: float = SAMPLE_MAX_S) -> bytes:
     """A call's audio (float32, 16 kHz) as an 8 kHz WAV, its first max_s."""
     x = np.asarray(audio, dtype=np.float32)[:int(max_s * 16000):2]
@@ -556,6 +615,8 @@ class Tests:
         self.samples_dir = self.dir / "reception_samples" if self.dir else None
         self.active: dict | None = None
         self.probe: Probe | None = None
+        self.probes: dict[str, ProbeRuntime] = {}  # (#436) the county's sites, probe-only: setup_probes()
+        self._probes_cleaned = 0.0
         self.samples: list[dict] = []
         self.history: list[dict] = self._load_history()
         self.owed: dict | None = self._load_owed()
@@ -632,6 +693,40 @@ class Tests:
             self.on_end(t)
         except Exception as e:  # noqa: BLE001 - a log row, never in the way
             self.log(f"reception test: end not recorded: {type(e).__name__}: {e}")
+
+    # -- what can be tested ---------------------------------------------------------------------------------------------
+
+    def setup_probes(self) -> None:
+        """(#436) The county's P25 system as a test can target it: a probe-only system per site, made from the county
+        trunk-recorder's config (read only; sizeup/radio/probes.py), each with a trunk-recorder of its own that runs
+        only on a lent dongle. The county's trunk-recorder, its state file and its dongles are never touched."""
+        app = self.app
+        cfg = getattr(app, "cfg", None)
+        if (cfg is None or not getattr(app, "recorder", None) or not getattr(cfg, "p25_recorder", "")
+                or not getattr(cfg, "p25_recorder_dir", "")):
+            return
+        from sizeup.radio import probes
+        from sizeup.radio import recorder as trunk_recorder
+        for sysd in probes.county(cfg.p25_recorder_dir, getattr(cfg, "p25_incident_talkgroups", ()),
+                                  list(getattr(app, "modes", ())) + list(getattr(app, "_sys_jobs", {})), self.log):
+            rec = trunk_recorder.make_system(sysd.name, sysd.label, cfg.p25_recorder, sysd.dir, self.log)
+            self.probes[sysd.name] = ProbeRuntime(sysd, rec, app.tg, lambda rt, call: self.on_call(rt, call), self.log)
+        probes.stale(cfg.p25_recorder_dir, list(self.probes), self.log)   # a site gone: its probe (marked) with it
+
+    def targets(self) -> list:
+        """Every system a test can be run on: the county's sites (probe-only), then the other systems."""
+        return list(self.probes.values()) + list((getattr(self.app, "systems", None) or {}).values())
+
+    def _rt(self, name):
+        return (getattr(self.app, "systems", None) or {}).get(name) or self.probes.get(name)
+
+    def _alert(self, rt) -> list[int]:
+        tg = getattr(self.app, "tg", None)
+        try:
+            return alert_tgs(rt.system, (lambda t: tg.tier(t, rt.system.name))
+                             if tg is not None and not rt.system.probe_only else None)
+        except Exception:  # noqa: BLE001 - a column, never in the way
+            return alert_tgs(rt.system)
 
     # -- which dongle ---------------------------------------------------------------------------------------------------
 
@@ -712,7 +807,7 @@ class Tests:
                 self.stop(f"SDR {t['sdr_name']} was switched in Settings > Radios")
                 back = f"{t['was']} comes back on it" if t["was"] != OFF else "it goes back to Off"
                 return f"reception test stopped: SDR {t['sdr_name']} was lent to it; {back} (not switched to {mode})"
-            rt = self.app.systems.get(t["system"])
+            rt = self._rt(t["system"])
             if rt is not None and mode in rt.system.jobs:
                 return f"a reception test is running on {t['label']}: stop it first"
         o = self.owed
@@ -746,7 +841,7 @@ class Tests:
         """GET /api/reception (admins): the systems a test can be run on, the dongles, the running test and its
         numbers so far, the sample list, the history, an alert. None when this app has no system to test."""
         app = self.app
-        if not getattr(app, "systems", None):
+        if not self.targets():
             return None
         t, p, now = self.active, self.probe, self.clock()      # (no lock: a slow switch never holds the page up)
         run = None
@@ -759,10 +854,15 @@ class Tests:
             run["running"] = p.result() if p is not None and t.get("step") == "running" else None
         alert = self.health(now)
         return {"systems": [{"name": rt.system.name, "label": rt.system.label,
-                             "jobs": [{"job": s.job, "mhz": round(s.center / 1e6, 5)} for s in rt.system.sources],
+                             "kind": "county" if rt.system.probe_only else "system",
+                             "jobs": [{"job": s.job, "mhz": round(s.center / 1e6, 5),
+                                       "cc": [round(f / 1e6, 5) for f in rt.system.covered([s.index])]}
+                                      for s in rt.system.sources],
                              "watch": list(rt.system.reception.get("watch") or []),
+                             "alert": [{"tg": tg, "name": (rt.system.talkgroups.get(tg) or {}).get("name") or f"TG {tg}"}
+                                       for tg in self._alert(rt)],
                              "caveat": str(rt.system.reception.get("caveat") or "")}
-                            for rt in app.systems.values()],
+                            for rt in self.targets()],
                 "durations": list(DURATIONS), "keep_min": KEEP_MIN_DEFAULT,
                 "dongles": self.dongles(), "active": run, "alert": alert["text"] if alert else None,
                 "samples": [dict(s, age_s=round(now - s["kept"])) for s in list(self.samples)],
@@ -832,13 +932,15 @@ class Tests:
                 return "a reception test is already running: stop it first"
             if not getattr(app, "shared", False):
                 return "each channel has its own dongle here: nothing to lend"
-            rt = app.systems.get(str(o.get("system") or "")) or (
-                next(iter(app.systems.values())) if len(app.systems) == 1 and not o.get("system") else None)
-            if rt is None:
-                return f"no such system; one of {', '.join(app.systems) or 'none'}"
-            label = rt.system.label
             jobs = o.get("jobs") if isinstance(o.get("jobs"), list) else [o.get("job")]
             plan = [j for j in jobs if isinstance(j, str)]
+            every = self.targets()
+            rt = self._rt(str(o.get("system") or "")) if o.get("system") else (
+                next((x for x in every if plan and set(plan) <= set(x.system.jobs)), None)
+                or (every[0] if len(every) == 1 else None))
+            if rt is None:
+                return f"no such system; one of {', '.join(x.system.name for x in every) or 'none'}"
+            label = rt.system.label
             if not plan or len(set(plan)) != len(plan) or any(j not in rt.system.jobs for j in plan):
                 return f"jobs: one or more of {', '.join(rt.system.jobs)}, each once"
             try:
@@ -941,7 +1043,7 @@ class Tests:
                 return
             if t.get("cancel"):
                 return self._finish("stopped", t["cancel"])
-            rt = app.systems[t["system"]]
+            rt = self._rt(t["system"])
             first = not t.get("taken")
             if first:
                 err = self._take(t)
@@ -958,7 +1060,8 @@ class Tests:
             job, now = t["plan"][t["phase"]], self.clock()
             until = now + (t["minutes"] * 60 if t["minutes"] else UNTIL_STOPPED_MAX_S)
             rt.recorder.until = until + UNTIL_GRACE_S            # the trunk-recorder service's own deadline for it
-            self.probe = rt.probe = Probe(rt.system, job, t["sdr"], self.clock, (t.get("sweeps") or {}).get(job))
+            self.probe = rt.probe = Probe(rt.system, job, t["sdr"], self.clock, (t.get("sweeps") or {}).get(job),
+                                          alert=self._alert(rt))
             err = self._give(t, rt, job)
             if err:
                 return self._finish("failed", err)
@@ -1032,6 +1135,11 @@ class Tests:
                     if not getattr(rt.recorder, "unit", False):
                         claims.claim(sdr, job)
                     rt.recorder.give(rt.job_source(job), app._dongle(sdr), job)
+                elif rt.system.probe_only:          # (#436) never a dongle job of the app: its trunk-recorder, here
+                    if not claims.claim(sdr, job):
+                        c = claims.other(sdr) or {}
+                        return f"SDR {t['sdr_name']} was just taken by {c.get('app') or 'another app'}"
+                    rt.recorder.give(rt.job_source(job), app._dongle(sdr), job)
                 elif not app._start_mode(job, sdr):
                     c = claims.other(sdr) or {}
                     claims.release(sdr)
@@ -1052,7 +1160,10 @@ class Tests:
             app.switching = True
             try:
                 cur = app.assign.get(sdr, OFF)
-                if cur != OFF:
+                probe = next((rt for rt in self.probes.values() if cur in rt.system.jobs), None)
+                if probe is not None:              # (#436) a probe's trunk-recorder: off, the claim kept
+                    probe.recorder.take(probe.job_source(cur), why)
+                elif cur != OFF:
                     app._stop_mode(cur, why, sdr, release=False)
                 if new == OFF:
                     claims.release(sdr)
@@ -1079,7 +1190,7 @@ class Tests:
             return
         p.ended = self.clock()
         t["halves"].append(p.result())
-        rt = self.app.systems.get(t["system"])
+        rt = self._rt(t["system"])
         if rt is not None and rt.probe is p:
             rt.probe = None
         self.probe = None
@@ -1093,11 +1204,13 @@ class Tests:
         t.setdefault("ending", [status, why])      # if anything below raises, tick() comes back here until it is done
         status, why = t["ending"]
         self._end_side()
+        self._probe_off(t, "the reception test ended", keep=True)
         ok, text = self._restore(t)
+        self._probe_off(t, "the reception test ended")
         now = self.clock()
         t.update(restored=text, restored_ok=ok, status=status, why=why, ended=round(now, 1), step="ended",
-                 verdict=overall(t["halves"]))
-        rt = self.app.systems.get(t["system"])
+                 verdict=overall(unjudged(t["halves"], status)))
+        rt = self._rt(t["system"])
         self._ended[t["system"]] = now
         self.active = None
         self.app._save_modes()
@@ -1112,6 +1225,21 @@ class Tests:
                  + (f": {v['grade']}: {v['hint']}" if v else "") + f"; SDR {t['sdr_name']}: {text}")
         self._ended_hook(self.history[0])
 
+    def _probe_off(self, t: dict, why: str, keep: bool = False) -> None:
+        """(#436) A probe's trunk-recorder never outlives its test: every source it still has is taken (keep: but the
+        one on the test's dongle while the dongle still runs it: the restore switches that one over, claim kept)."""
+        rt = self.probes.get(t.get("system"))
+        if rt is None:
+            return
+        cur = self.app.assign.get(t["sdr"], OFF)
+        for k, (_fn, job) in list(rt.recorder.sources.items()):
+            if keep and job == cur:
+                continue
+            try:
+                rt.recorder.take(k, why)
+            except Exception as e:  # noqa: BLE001 - said; the next end tries again
+                self.log(f"reception test: {rt.system.label} probe not stopped: {type(e).__name__}: {e}")
+
     def _set_by(self, sdr: str, target: str, was: str, was_by) -> None:
         """Who set the dongle's job, as before the test. Off instead of the job it had (that job runs elsewhere now):
         nobody's choice, so never "person"."""
@@ -1123,7 +1251,7 @@ class Tests:
     def _restore(self, t: dict) -> tuple[bool, str]:
         """The dongle back on the job it had: (done, what was done in words). Not done: owed, tried again by tick()."""
         app, sdr, was = self.app, t["sdr"], t["was"]
-        rt = app.systems.get(t["system"])
+        rt = self._rt(t["system"])
         if rt is not None:
             rt.recorder.until = None               # (before its trunk-recorder is asked anything else)
         if not t.get("taken"):
@@ -1211,7 +1339,7 @@ class Tests:
             sdr, was = t["sdr"], str(t.get("was") or OFF)
             was = was if was in app.modes else OFF
             name = t.get("sdr_name") or sdr
-            rt = app.systems.get(str(t.get("system")))
+            rt = self._rt(str(t.get("system")))
             if rt is not None:
                 rt.probe, rt.recorder.until = None, None
                 for _ in range(RECOVER_TRIES):     # off, and the dongle let go, before anything else opens it
@@ -1240,7 +1368,8 @@ class Tests:
             if isinstance(t.get("running"), dict):
                 t.setdefault("halves", []).append(t["running"])
             t.update(status="interrupted", why="sizeup stopped without ending the test (a crash, a kill, the power)",
-                     step="ended", ended=round(self.clock(), 1), verdict=overall(t.get("halves") or []))
+                     step="ended", ended=round(self.clock(), 1),
+                     verdict=overall(unjudged([h for h in t.get("halves") or [] if isinstance(h, dict)], "interrupted")))
             self._to_history(t)
             self.log(f"reception test {t.get('id')}: interrupted by a restart; SDR {name}: {t['restored']}")
             self._ended_hook(self.history[0])
@@ -1252,6 +1381,7 @@ class Tests:
         with self._lock:
             now = self.clock()
             self._prune(now)
+            self._clean_probes(now)
             self._retry_owed(now)
             t = self.active
             if t is None:
@@ -1267,7 +1397,7 @@ class Tests:
             if self.probe is None:
                 return self._finish("failed", "the test lost its measurement")
             app = self.app
-            rt = app.systems[t["system"]]
+            rt = self._rt(t["system"])
             if app.assign.get(t["sdr"]) != t["plan"][t["phase"]]:
                 return self._finish("failed", f"SDR {t['sdr_name']} lost the test's job")
             state = rt.recorder.status().get("state")
@@ -1290,6 +1420,11 @@ class Tests:
                 self._save_active()
 
     def start_thread(self) -> None:
+        for rt in self.probes.values():            # (#436) the probes' calls: only ever a test's
+            try:
+                rt.ingest.start()
+            except Exception as e:  # noqa: BLE001
+                self.log(f"reception: {rt.system.label} probe's calls not watched: {type(e).__name__}: {e}")
         if self._thread is None:
             self._thread = threading.Thread(target=self._run, name="reception-tests", daemon=True)
             self._thread.start()
@@ -1324,6 +1459,11 @@ class Tests:
                     self._finish("interrupted", "sizeup stopped during the test (an update or a restart)")
         except Exception as e:  # noqa: BLE001 - the marker stays: recover() at the next start
             self.log(f"reception test: not ended at the stop: {type(e).__name__}: {e}")
+        for rt in self.probes.values():
+            try:
+                rt.ingest.stop()
+            except Exception:  # noqa: BLE001
+                pass
         self._wipe_samples()
 
     # -- the calls it captured ------------------------------------------------------------------------------------------
@@ -1343,7 +1483,13 @@ class Tests:
             audio = getattr(call, "audio", None)
             # a sample only of what would be kept anyway: never a talkgroup switched Off, never an encrypted call
             from sizeup import tiers
-            kept = app.tg.tier(int(call.talkgroup), name) in tiers.RECORDED and not getattr(call, "encrypted", False)
+            tg = int(call.talkgroup)
+            if rt.system.probe_only:               # (#436) the county's: as its Record switch says, a known talkgroup
+                info = rt.system.talkgroups.get(tg) or {}
+                kept = bool(info) and not info.get("encrypted") and app.tg.record(tg)
+            else:
+                kept = app.tg.tier(tg, name) in tiers.RECORDED
+            kept = kept and not getattr(call, "encrypted", False)
             if (kept and t is not None and t.get("keep_min") and audio is not None and len(audio)
                     and self.samples_dir is not None):
                 sid = uuid.uuid4().hex[:12]
@@ -1361,19 +1507,37 @@ class Tests:
         deleted, unless the system has a dongle of its own now."""
         if not force and any(m in rt.system.jobs for m in self.app.assign.values()):
             return
-        d = Path(rt.system.capture_dir)
-        try:
-            kids = list(d.iterdir()) if d.is_dir() else []
-        except OSError:
-            kids = []
-        for k in kids:
+        cap = Path(rt.system.capture_dir)
+        for d in (cap, cap.with_name(cap.name + "-tmp")):     # and its temp directory (trunk-recorder's tempDir)
             try:
-                if k.is_dir() and not k.is_symlink():
-                    shutil.rmtree(k, ignore_errors=True)
-                else:
-                    k.unlink()
+                kids = list(d.iterdir()) if d.is_dir() else []
             except OSError:
-                pass
+                kids = []
+            for k in kids:
+                try:
+                    if k.is_dir() and not k.is_symlink():
+                        shutil.rmtree(k, ignore_errors=True)
+                    else:
+                        k.unlink()
+                except OSError:
+                    pass
+
+    def _clean_probes(self, now: float) -> None:
+        """(#436) A probe's captures and temp files, capped while a test runs (an "until stopped" county test never
+        fills the disk): janitor.clean_system every PROBE_CLEAN_S, calls older than PROBE_KEEP_S (a test's are taken
+        within seconds) and at most PROBE_MAX_BYTES. The app's janitor cleans only the systems of the config."""
+        if not self.probes or now - self._probes_cleaned < PROBE_CLEAN_S:
+            return
+        self._probes_cleaned = now
+        from sizeup import janitor
+        for rt in self.probes.values():
+            try:
+                got = janitor.clean_system(Path(rt.system.capture_dir), PROBE_KEEP_S, PROBE_MAX_BYTES, now=now)
+                if got.get("over"):
+                    self.log(f"reception: {rt.system.label} probe's captures over {PROBE_MAX_BYTES / 1e6:.0f} MB: "
+                             f"{got['over']} oldest call(s) removed")
+            except Exception as e:  # noqa: BLE001 - a cleanup, never in the way
+                self.log(f"reception: {rt.system.label} probe's captures not cleaned: {type(e).__name__}: {e}")
 
     def _prune(self, now: float) -> None:
         keep = [s for s in self.samples if now - s["kept"] < s["keep_s"]][:SAMPLES_MAX]

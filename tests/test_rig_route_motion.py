@@ -449,7 +449,8 @@ out.badge = L.badges.has(IN.hq.name);
 
 
 @needs_node
-def test_a_live_fix_replaces_the_estimate_at_once_and_a_placeholder_is_never_drawn(tmp_path):
+def test_a_live_fix_replaces_the_estimate_and_a_placeholder_is_never_drawn(tmp_path):
+    """The estimate's style goes at once; the mark glides from the estimate onto the fix (#473: no jump)."""
     *_, data = page_state()
     e61 = next(m for m in data["map"]["markers"] if m["unit"] == "E61")
     fixed = dict(e61, place="position", lon=-73.6672, lat=41.0030, at=time.time() - 1, heading=90.0, speed=0.0)
@@ -459,11 +460,16 @@ def test_a_live_fix_replaces_the_estimate_at_once_and_a_placeholder_is_never_dra
     data["map"]["routes"].append(dict(next(r for r in data["map"]["routes"] if r["unit"] == "E61"), unit="DPT239"))
     o = run(tmp_path, PRE + r"""
 out.ph = L.chips.has("DPT239");
+out.was = ll("E61");
 setMap(IN.fixed);
-out.at = ll("E61"); out.cls = cls("E61"); out.st = chip("E61").parts.st.textContent; out.ph2 = L.chips.has("DPT239");
+out.cls = cls("E61"); out.st = chip("E61").parts.st.textContent; out.ph2 = L.chips.has("DPT239");
+go(1, 16); out.just = ll("E61");
+go(100, 16); out.at = ll("E61");
 """, data)
     assert o["ph"] is False and o["ph2"] is False
-    assert o["at"] == pytest.approx([-73.6672, 41.0030]) and "est" not in o["cls"] and o["st"] == "RS"
+    assert "est" not in o["cls"] and o["st"] == "RS"                             # the estimate's style: gone at once
+    assert metres(o["just"], o["was"]) < 15                                      # no jump
+    assert o["at"] == pytest.approx([-73.6672, 41.0030])                         # then on the fix
 
 
 @needs_node

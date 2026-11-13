@@ -216,6 +216,8 @@ class RadioLog:
         self._q: queue.Queue | None = None
         self._qlock = threading.Lock()
         self._stopped = False
+        self._closing = False                            # Cad.shutdown: the store is about to close, no new work at all
+        self._threads: list[threading.Thread] = []      # the units worker and backfills running: stop(wait_s) joins them
         with self.store.lock:
             self.store.db.executescript(SCHEMA)
             for table, col in (("radiolog_units", "again INTEGER NOT NULL DEFAULT 0"),
@@ -258,7 +260,9 @@ class RadioLog:
     def _unit_rx(self, code: str, spoken: str) -> re.Pattern:
         k = (code, spoken)
         if k not in self._rx:
-            self._rx[k] = re.compile(r"(?<![\w])(?:" + "|".join(unit_forms(code, spoken)) + r")(?![\w])", re.I)
+            r = self.store.one("SELECT kind FROM units WHERE name = ?", (code,)) if code.isdigit() else None
+            kind = str((r or {}).get("kind") or "")          # a chief's number guarded (feed.unit_forms), an EMS unit's not
+            self._rx[k] = re.compile(r"(?<![\w])(?:" + "|".join(unit_forms(code, spoken, kind)) + r")(?![\w])", re.I)
         return self._rx[k]
 
     def context(self, lo: float, hi: float) -> dict:
@@ -446,8 +450,19 @@ class RadioLog:
                 self.cad.log(f"CAD: radio log backfill: {type(e).__name__}")
         if self.inline:
             run()
-        else:
-            threading.Thread(target=run, name="radiolog-backfill", daemon=True).start()
+            return
+        with self._qlock:
+            # A plain stop (the App's) still lets a first report's backfill run, as before: only a shutdown (the store
+            # closing under it) refuses it.
+            if not self._closing:
+                self._spawn_locked(run, "radiolog-backfill")
+
+    def _spawn_locked(self, target, name: str) -> None:
+        """A worker started and kept for stop() to join (under _qlock: stop() never sees one not started yet)."""
+        t = threading.Thread(target=target, name=name, daemon=True)
+        self._threads = [x for x in self._threads if x.is_alive()]
+        self._threads.append(t)
+        t.start()
 
     # -- units added later (#370) ---------------------------------------------------------------------------------------
 
@@ -641,10 +656,12 @@ class RadioLog:
             self._units_run(iid)
             return
         with self._qlock:
+            if self._stopped:                            # stopped meanwhile
+                return
             if self._q is None:
                 self._q = queue.Queue()
-                threading.Thread(target=self._units_worker, name="radiolog-units", daemon=True).start()
-        self._q.put(iid)
+                self._spawn_locked(self._units_worker, "radiolog-units")
+            self._q.put(iid)
 
     def start(self) -> RadioLog:
         """At start: every open incident's units matched again (a unit put on while the app was down, or work queued
@@ -653,12 +670,21 @@ class RadioLog:
             self.units_soon(r["id"])
         return self
 
-    def stop(self) -> None:
-        """The worker ends after what it is doing (what was queued is picked up again at the next start)."""
-        self._stopped = True
+    def stop(self, wait_s: float = 0.0, closing: bool = False) -> list[threading.Thread]:
+        """The worker ends after what it is doing (what was queued is picked up again at the next start). wait_s: the
+        units worker and the backfills still running are joined for up to that long in all. closing (Cad.shutdown, the
+        store is closed next): no new backfill either. The threads still running after it."""
         with self._qlock:
+            self._stopped = True
+            self._closing = self._closing or closing
             if self._q is not None:
                 self._q.put(None)
+            threads = list(self._threads)
+        deadline = time.monotonic() + wait_s
+        for t in threads:
+            if t is not threading.current_thread():
+                t.join(max(0.0, deadline - time.monotonic()))
+        return [t for t in threads if t.is_alive()]
 
     def _units_worker(self) -> None:
         while True:

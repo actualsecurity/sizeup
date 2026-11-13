@@ -1,6 +1,6 @@
 // The hub link card (sizeup/cloud/stationmode.py): Forward to hub on / off, the hub URL, Test connection,
 // the link's status, its last contact and what waits in the outbox, and where each secret came from (never
-// a value). One card for the CAD's Settings > System > Station (settings.js) and the station page's
+// a value). One card for the CAD's Settings > Station > Hub link (settings.js) and the station page's
 // Settings (station.js). Not on the hub: GET /api/station-mode answers 409 there and the card stays hidden.
 //
 //   HubLink.mount(card, deps)   card: an empty .card; deps: {title, operator() -> name, askOperator(), msg(text, ok),

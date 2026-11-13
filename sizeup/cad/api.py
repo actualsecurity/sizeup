@@ -99,6 +99,10 @@ GET  /api/cad/tones                       {named: [pairs named here], choices: [
                                           list), services, names, ours: the ours entities' names}
 GET  /api/cad/stt                         Settings > Radios > Vocabulary: {vocabulary: {phrases, edited, suggestions,
                                           aws (as sent), skipped, sig, state}, limit, aws (where it runs, this month's cost)}
+GET  /api/cad/squelch                     Settings > Radios > Squelch: {channels: [{key, set, default, running, hiss_db,
+                                          quieting_db, floor_db, short_per_min}], sync, chatter_per_min, ranges}
+POST /api/cad/settings/squelch            {action: set {key, open_db?, close_db?, min_open_s?: null = default} | reset {key}}:
+                                          an FM channel's squelch, applied live on the station (sizeup/channels.py): admins
 GET  /api/cad/export/<name>.csv           incidents | calls | unit-history | event-log, the sheet's columns
 GET  /api/cad/dispatch/<id>.wav           a logged dispatch's audio
 GET  /api/cad/audio/<key>.wav             a preview's audio
@@ -223,6 +227,10 @@ POST /api/cad/datasources/<key>/refresh   {operator?}  Refresh now: runs in the 
                                           ({ok, source: the row, running}); 429 {error} when refused (refreshing already,
                                           too soon after the last, or the source is resting); admins; in the person's
                                           activity and the Settings audit log
+GET  /api/cad/logs?source=station|hub|all&unit=&level=&q=&start=&end=&limit=
+                                          Logs Insights over the station's logs and the hub's (sizeup/cloud/cwlogs.py),
+                                          newest first, bounded (7 days, 500 rows); /status: set up or not, today's
+                                          volume, the station's shipper. The hub's only; a signed-in admin only
 GET  /api/cad/notify                      Settings > System > Push notifications (sizeup/notify.py Pushes): each kind's
                                           topic in effect and where it came from (Settings / SSM / config / off), the
                                           last push and test; admins only (the names are secret; ADMIN_READS)
@@ -458,6 +466,14 @@ def _channels(m, b, o, c):
     return f"Channel {_clip(b.get('key'), 30)}: {what or 'no change'}", ""
 
 
+def _squelch(m, b, o, c):
+    key = _clip(b.get("key"), 30)
+    if str(b.get("action") or "") == "reset":
+        return f"Squelch {key}: back to the default", ""
+    what = ", ".join(f"{k} {'default' if b[k] is None else b[k]}" for k in ("open_db", "close_db", "min_open_s") if k in b)
+    return f"Squelch {key}: {what or 'unchanged'}", ""
+
+
 def _stt(m, b, o, c):
     act, key = str(b.get("action") or ""), str(b.get("key") or "")
     if act == "push":
@@ -539,6 +555,7 @@ DOES = (
     (UNIT_STATION, lambda m, b, o, c: (f"Changed settings: {o.get('name', '')} station {_clip(b.get('station'), 40) or 'unset'}", "")),
     (re.compile(r"/api/cad/settings/channels"), _channels),
     (re.compile(r"/api/cad/settings/stt"), _stt),
+    (re.compile(r"/api/cad/settings/squelch"), _squelch),
     (SETTINGS, _settings),
     (re.compile(r"/api/cad/runcards"), lambda m, b, o, c: (f"Changed settings: run card {_clip(b.get('type'), 50)} saved", "")),
     (re.compile(r"/api/cad/runcards/delete"), lambda m, b, o, c: (f"Changed settings: run card {_clip(b.get('type'), 50)} deleted", "")),
@@ -792,6 +809,27 @@ class CadApi:
         self.cad.settings.note(str(body.get("operator") or ""), "system", f"datasources/{key}", f"last fetched {was}", src.action)
         return {"ok": True, "running": row["running"], "source": row}
 
+    def _logs(self, path: str, query: str, who) -> tuple[int, bytes, str]:
+        """GET /api/cad/logs (Logs Insights, bounded) and /api/cad/logs/status: the hub's only, and only for an admin
+        with a verified sign-in (stricter than ADMIN_READS, so not in it: never without one)."""
+        sl = getattr(self.cad, "station_logs", None)
+        if sl is None:
+            return _json(404, {"error": "logs are on the hub"})
+        if who is None or not getattr(who, "email", ""):
+            return _json(403, {"error": "Admins only: sign in"})
+        try:
+            if self.cad.settings.standing(who.email)["may"] != "admin":
+                return _json(403, {"error": "Admins only: the logs (Settings > Station > Logs)"})
+        except CadError:
+            return _json(403, {"error": "Admins only: the logs (Settings > Station > Logs)"})
+        from sizeup.cloud.cwlogs import LogsError
+        if path.endswith("/status"):
+            return _json(200, sl.status())
+        try:
+            return _json(200, sl.query(parse_qs(query)))
+        except LogsError as e:
+            return _json(e.status, {"error": str(e)})
+
     def get(self, path: str, query: str, who=None) -> tuple[int, bytes, str]:
         with sourcekeys.request_context(who):       # another system's traffic: a signed-in person only (#419)
             return self._get(path, query, who)
@@ -800,6 +838,8 @@ class CadApi:
         if (no := self.read_refused(path, who)) is not None:
             return no
         try:
+            if path in ("/api/cad/logs", "/api/cad/logs/status"):
+                return self._logs(path, query, who)
             if path == "/api/cad/datasources":
                 return self._datasources(parse_qs(query), who)
             if path == "/api/cad/notify":
@@ -816,6 +856,8 @@ class CadApi:
                 return _json(200, self.cad.settings_audit_log(parse_qs(query), self._may(who)))
             if path == "/api/cad/stt":
                 return _json(200, self.cad.settings.stt_page())
+            if path == "/api/cad/squelch":
+                return _json(200, self.cad.settings.squelch_page())
             if path == "/api/cad/tones":
                 return _json(200, self.cad.tone_names())
             if path == "/api/cad/state":

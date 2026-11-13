@@ -14,7 +14,7 @@ import pytest
 
 from sizeup import datasources as ds
 from sizeup.stt import LIVE, RERUN, STALE_S, URGENT, SttQueue
-from sizeup.transcribe import (AwsTranscriber, ChannelWorker, Settings, Usage, WebSocket, WsError, _handshake_error,
+from sizeup.transcribe import (PRICE_PER_MIN, AwsTranscriber, ChannelWorker, Settings, Usage, WebSocket, WsError, _handshake_error,
                                classify, deadline_for)
 from tests.fake_transcribe import FakeTranscribe, tone8k
 from tests.test_channels import AWS_TEXT, aws_cfg
@@ -292,7 +292,7 @@ def test_past_the_limit_pages_and_fire_ems_15_keep_aws_within_the_reserve():
     fake = FakeTranscribe()
     res, kv = Results(), {}
     usage = Usage(kv.get, kv.__setitem__)
-    usage.add(25 / 0.024 * 60 + 60, 0)                       # just over $25
+    usage.add(25 / PRICE_PER_MIN * 60 + 60, 0)               # just over $25
     t = quick(fake, res, kv=kv)
     t.usage = usage
     try:
@@ -300,7 +300,7 @@ def test_past_the_limit_pages_and_fire_ems_15_keep_aws_within_the_reserve():
         assert t.available("tg:307")[0] and t.available("South 2")[0] and not t.available("FG1")[0]
         b = t.budget()
         assert b["pct"] >= 100 and b["reserve"] == ["South 2", "tg:307"] and "reserve" in b["reserve_text"]
-        usage.add(5 / 0.024 * 60, 0)                         # past $30: the reserve is used up too
+        usage.add(5 / PRICE_PER_MIN * 60, 0)                 # past $30: the reserve is used up too
         assert not t.available("tg:307")[0] and "reserve" in t.available("tg:307")[1] and t.budget()["reserve"] == []
     finally:
         t.stop()
@@ -575,6 +575,143 @@ def test_when_aws_can_take_audio_again_what_failed_meanwhile_goes_to_it(tmp_path
                                                                  "value": 40}, token=None)[0] == 200
         assert hub.app._aws_resend() == 1                                                  # (the sweep does it)
         assert wait(lambda: (_row(hub, "FG1-5") or {}).get("text") == AWS_TEXT + ".", 20)
+    finally:
+        hub.close()
+        fake.close()
+
+
+def _page_event(pid, seq=1):
+    """A voice page the station sent for Amazon Transcribe on the hub (status "remote", stt "aws"): synthetic."""
+    from sizeup.cad.dispatcher import wav_bytes
+    now = time.time()
+    return {"seq": seq, "at": now, "type": "page",
+            "data": {"id": pid, "label": "South 2", "mhz": 470.2, "start": now - 6, "end": now, "kind": "voice",
+                     "status": "remote", "departments": [], "quieting_db": 25.0, "tones": [], "raw": "",
+                     "confidence": None, "voice_offset_s": 0.0, "tone_seq": [], "stt": "aws", "model": "aws-transcribe"},
+            "audio": base64.b64encode(wav_bytes((voice(6.0)[::2] * 32767).astype(np.int16), 8000)).decode()}
+
+
+def test_a_page_aws_failed_on_never_says_transcribing_on_the_hub_aws_in_the_log(tmp_path):
+    # The radio log's row for a page AWS couldn't do: "remote" (Transcribing on the hub (AWS)) until then; the
+    # station's whisper asked (model "whisper on the station ..."); the station offline: "error", never "remote" for good
+    fake = FakeTranscribe(refuse=403)
+    hub = HubRun(hub_cfg(tmp_path, **aws_cfg(fake)))
+    seen = []
+    set_stt = hub.app.cad.comms.set_stt
+    hub.app.cad.comms.set_stt = lambda tid, status, model: seen.append((status, model)) or set_stt(tid, status, model)
+    try:
+        assert call(hub.url + "/api/station/events", "POST", {"epoch": "e1", "events": [_page_event("South_2-100")]})[0] == 200
+        assert wait(lambda: seen, 10)
+        assert seen[0][0] == "pending" and seen[0][1].startswith("whisper on the station (AWS failed")
+        assert wait(lambda: (_row(hub, "South_2-100") or {}).get("status") == "error", 40)
+        r = _row(hub, "South_2-100")
+        assert r["model"].startswith("aws-transcribe failed") and "station" in r["model"]
+    finally:
+        hub.close()
+        fake.close()
+
+
+def test_a_page_flagged_by_the_sweep_says_failed_in_the_log(tmp_path):
+    fake = FakeTranscribe()
+    hub = HubRun(hub_cfg(tmp_path, **aws_cfg(fake)))
+    try:
+        hub.app.aws.submit = lambda *a, **k: None                  # the job is lost
+        assert call(hub.url + "/api/station/events", "POST", {"epoch": "e1", "events": [_page_event("South_2-101")]})[0] == 200
+        assert wait(lambda: (_row(hub, "South_2-101") or {}).get("status") == "remote", 5)   # AWS on the hub has it
+        assert wait(lambda: any(p.id == "South_2-101" and p.status == "pending" for p in hub.app.pages), 5)
+        hub.app._aws_asked["South_2-101"] = time.time() - 1000      # the station's whisper asked, never answered
+        assert hub.app._aws_sweep() == 1
+        r = _row(hub, "South_2-101")
+        assert r["status"] == "error" and "failed" in r["model"]
+    finally:
+        hub.close()
+        fake.close()
+
+
+# -- a text that comes first is never put back to "Transcribing" or "failed" (#472 review) ----------------------------
+
+def test_set_stt_only_changes_a_row_still_waiting(tmp_path):
+    from tests.test_cad import make_cad
+    cad = make_cad(tmp_path)
+    now = time.time()
+    for tid, text, status in (("FG1-w", "", "pending"), ("FG1-r", "", "remote"), ("FG1-d", "a text came", "done"),
+                              ("FG1-n", "", "no_speech")):
+        cad.record_traffic({"id": tid, "start": now - 3, "end": now, "source": "FG1", "talkgroup": None, "unit": "",
+                            "rig": "", "radio_id": "", "text": text, "status": status, "model": "aws-transcribe"})
+    for tid in ("FG1-w", "FG1-r", "FG1-d", "FG1-n"):
+        cad.comms.set_stt(tid, "pending", "whisper (AWS failed: x)")
+    got = {r["id"]: (r["status"], r["model"]) for r in cad.store.q("SELECT id, status, model FROM radio_traffic")}
+    assert got["FG1-w"] == got["FG1-r"] == ("pending", "whisper (AWS failed: x)")
+    assert got["FG1-d"] == ("done", "aws-transcribe") and got["FG1-n"] == ("no_speech", "aws-transcribe")
+
+
+def test_a_whisper_that_finishes_at_once_is_not_put_back_to_transcribing(tmp_path):
+    from sizeup.app import App
+    from tests.test_channels import CountingWhisper, comms_row
+    from tests.test_cloud import base
+    fake = FakeTranscribe(refuse=403)
+    app = App(base(clips_dir=str(tmp_path / "clips"), **aws_cfg(fake)))
+    app.stt.client = CountingWhisper({})
+    app.stt.start()
+
+    def instant(ids, *a, **k):                       # the local model done before _aws_failed's next line
+        app._retext(ids[0], "whisper heard this", "done", None, "m.bin")
+        return 1
+    app._rerun_local = instant
+    try:
+        tid = fm_segment(app)
+        assert wait(lambda: (comms_row(app, tid) or {}).get("text") == "whisper heard this", 10)
+        time.sleep(0.3)
+        r = comms_row(app, tid)
+        assert (r["status"], r["model"], r["text"]) == ("done", "m.bin", "whisper heard this")
+    finally:
+        app.stop()
+        fake.close()
+
+
+def test_the_hubs_fallback_never_fails_a_row_whose_text_came_meanwhile(tmp_path):
+    from sizeup.cloud.hub import StationOffline
+    fake = FakeTranscribe(refuse=403)
+    hub = HubRun(hub_cfg(tmp_path, **aws_cfg(fake)))
+
+    def remote(fn, ids, *a, **k):                    # the text arrives, then the station "can't" (a race)
+        hub.app._retext(ids[0], "whisper got there", "done", None, "m.bin")
+        raise StationOffline("the station went away")
+    hub.app.hub.remote = remote
+    try:
+        assert call(hub.url + "/api/station/events", "POST", {"epoch": "e1", "events": [_pending_event("FG1-7")]})[0] == 200
+        assert wait(lambda: (_row(hub, "FG1-7") or {}).get("text") == "whisper got there", 15)
+        time.sleep(0.5)
+        r = _row(hub, "FG1-7")
+        assert (r["status"], r["model"], r["text"]) == ("done", "m.bin", "whisper got there")
+    finally:
+        hub.close()
+        fake.close()
+
+
+def test_after_a_restart_the_row_says_where_the_job_went(tmp_path):
+    fake = FakeTranscribe()
+    hub = HubRun(hub_cfg(tmp_path, **aws_cfg(fake)))
+    try:
+        sent = []
+        hub.app.aws.submit = lambda *a, **k: sent.append(a)          # held: the label is what is looked at
+        assert call(hub.url + "/api/station/events", "POST", {"epoch": "e1", "events": [_page_event("South_2-102")]})[0] == 200
+        assert wait(lambda: any(p.id == "South_2-102" and p.status == "pending" for p in hub.app.pages), 5)
+        hub.app.cad.comms.set_stt("South_2-102", "pending", "whisper on the station (AWS failed: x)")   # before the restart
+        hub.app._aws_since.clear()
+        assert hub.app._aws_recover() == 1 and sent                      # AWS can take it: back to AWS
+        r = _row(hub, "South_2-102")
+        assert (r["status"], r["model"]) == ("pending", "aws-transcribe")
+        page = next(p for p in hub.app.pages if p.id == "South_2-102")
+        assert (page.status, page.model) == ("pending", "aws-transcribe")
+        # without AWS: the station's whisper, said so on the row and the page
+        hub.app._aws_since.clear()
+        aws, hub.app.aws = hub.app.aws, None
+        hub.app.hub.remote = lambda *a, **k: 1                         # the station takes it
+        assert hub.app._aws_recover() == 1
+        assert wait(lambda: (_row(hub, "South_2-102") or {}).get("model", "").startswith("whisper on the station"), 5)
+        assert page.model.startswith("whisper on the station") and page.status == "pending"
+        hub.app.aws = aws
     finally:
         hub.close()
         fake.close()

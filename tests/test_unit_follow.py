@@ -301,15 +301,18 @@ M_PER_DEG_LON = 111_195 * 0.7547      # metres in a degree of longitude at 41° 
 
 
 @needs_node
-def test_a_plain_click_does_what_it_did_and_follow_comes_from_a_button(tmp_path):
+def test_a_click_follows_the_rig_and_its_box_keeps_its_call_one_click_away(tmp_path):
+    """#473 (the user: click to follow a rig, as a plane): a click follows it, whatever drew it, and opens its box: its
+    call one click away (what a click did before #473), Close; how a follow ends is unchanged."""
     o = run(tmp_path, r"""
-chip("E61").el.fire("click");                                // on a call, not an admin: its call opened, as before
-out.e61 = [out.picked, rm.fol.id, rec.eases.length];
-chip("E60").el.fire("click");                                // on no call: its box, with Follow (a click did nothing before)
+chip("E61").el.fire("click");                                // on a call: followed, its box with its call in it
 const pop = host.find("cm-pop")[0];
-out.box = [pop.hidden, rm.fol.id, rec.eases.length, focused && focused.textContent];
-pop.byText("Follow").fire("click");
-out.following = rm.fol.id; out.ease = rec.eases[0]; out.text = followText(); out.title = follow().title; out.cls = cls("E60");
+out.e61 = [rm.fol.id, out.picked, pop.hidden, pop.find("mini").map((b) => b.textContent), focused && focused.textContent];
+pop.find("mini").find((b) => b.textContent.startsWith("Open ")).fire("click");
+out.opened = [out.picked, pop.hidden];
+chip("E60").el.fire("click");                                // on no call: followed, its box
+out.box = [pop.hidden, rm.fol.id, focused && focused.textContent];
+out.following = rm.fol.id; out.ease = rec.eases[rec.eases.length - 1]; out.text = followText(); out.title = follow().title; out.cls = cls("E60");
 out.fired = [...rec.fired]; out.zoomOpts = [...rec.zoomOpts];
 rm.map.emit("dragstart", { originalEvent: { touches: [{}, {}] } }); out.pinch = rm.fol.id;
 rm.map.emit("dragstart", { originalEvent: { touches: [{}] } }); out.drag = [rm.fol.id, follow().hidden, cls("E60").includes("followed")];
@@ -317,9 +320,12 @@ rm.followUnit("E60"); rm.map.emit("sizeup:recenter"); out.recenter = rm.fol.id;
 rm.followUnit("E60"); follow().find("mini")[0].fire("click"); out.x = [rm.fol.id, follow().hidden];
 rm.followUnit("E60"); setMap({ ...IN.map, markers: IN.map.markers.filter((m) => m.unit !== "E60") }); out.gone = [rm.fol.id, follow().hidden];
 """, with_now(page_state()))
-    assert o["e61"] == [o["e61"][0], "", 0] and o["e61"][0] is not None       # onPick, no follow, no zoom
-    assert o["box"] == [False, "", 0, "Follow"]                                  # the box: Follow focused (Escape works)
-    assert o["following"] == "E60" and o["ease"]["zoom"] >= 15
+    num = o["e61"][3]
+    assert o["e61"][0] == "E61" and o["e61"][1] is None and o["e61"][2] is False      # followed, not switched away
+    assert any(t.startswith("Open ") for t in num) and "Close" in num and "Follow" not in num
+    assert o["opened"][0] is not None and o["opened"][1] is True                         # its call: one click away
+    assert o["box"][:2] == [True, "E60"]                         # #473: no box with only Close in it; the chip says it
+    assert o["following"] == "E60" and o["ease"]["zoom"] == 13   # on screen at z13: centred, not zoomed in
     assert o["text"] == "Following E60 · Available" and o["title"].endswith("A drag or Recenter stops following")
     assert "followed" in o["cls"] and "hl" in o["cls"] and "sizeup:follow" in o["fired"] and {"around": "center"} in o["zoomOpts"]
     assert o["pinch"] == "E60" and o["drag"] == ["", True, False]
@@ -327,16 +333,16 @@ rm.followUnit("E60"); setMap({ ...IN.map, markers: IN.map.markers.filter((m) => 
 
 
 @needs_node
-def test_an_admins_click_opens_the_picker_only_with_follow_in_it(tmp_path):
+def test_an_admins_click_follows_and_the_home_station_is_one_click_away(tmp_path):
     o = run(tmp_path, r"""
 chip("E60").el.fire("click");
 const pop = host.find("cm-pop")[0];
-out.picker = [pop.hidden, pop.textContent.includes("home station"), rm.fol.id, rec.eases.length];
-pop.byText("Follow").fire("click");
-out.after = [rm.fol.id, pop.hidden];
+out.box = [pop.hidden, rm.fol.id, pop.find("mini").map((b) => b.textContent)];
+pop.byText("Home station").fire("click");
+out.picker = [pop.hidden, pop.textContent.includes("home station"), rm.fol.id, !!pop.byText("Follow")];
 """, with_now(page_state(admin=True)))
-    assert o["picker"] == [False, True, "", 0]                                   # no follow, no zoom from the click
-    assert o["after"] == ["E60", True]
+    assert o["box"][0] is False and o["box"][1] == "E60" and "Home station" in o["box"][2]
+    assert o["picker"] == [False, True, "E60", False]                            # (already followed: no Follow in it)
 
 
 @needs_node

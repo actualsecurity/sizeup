@@ -93,7 +93,8 @@ class Config:
     # More P25 systems (#409: <recorder_dir or the talkgroups file's folder>/systems/<name>/, sizeup/radio/systems.py)
     p25_systems: tuple = ()
     tier_keep_days: dict = field(default_factory=lambda: {"alert": 30.0, "text": 0.0, "record": 7.0})
-    context_audio_max_mb: float = 100.0      # hub: another system's clips kept at most (their own budget, inside the cap)
+    context_audio_max_mb: float = 8000.0     # hub: another system's clips kept at most, wherever kept (S3 included):
+    #                                          a runaway bound over tier_keep_days, sized for 30 days of PD alert audio
     p25_system_problems: tuple = ()          # a system directory that couldn't be used: said, that system left out
     mdc_aliases: dict[str, str] = field(default_factory=dict)   # MDC-1200 unit ID ("0611") -> name
     unit_departments: dict[str, str] = field(default_factory=dict)  # "Engine 60" -> "Port Chester FD"
@@ -109,7 +110,8 @@ class Config:
     stt_aws_idle_s: float = 120.0     # a channel's stream ends this long after its last transmission
     stt_aws_pace: float = 2.0         # audio sent this many times faster than real time
     stt_aws_limit_usd: float = 25.0   # the monthly limit until Settings > Radios sets one
-    stt_aws_channels: tuple[str, ...] = ("South 2", "FG1", "FG2", "tg:307")   # engine "aws" by default
+    stt_aws_context_limit_usd: float = 15.0   # another P25 system's talkgroups (police): their own monthly AWS limit
+    stt_aws_channels: tuple[str, ...] = ("South 2", "FG1", "FG2", "tg:307", "p25:mrrs:9211")   # engine "aws" by default
     stt_aws_vocabulary: str = "sizeup-pcfd"
     stt_record_only: tuple[str, ...] = ()     # recorded, not transcribed by default ([stt] record_only, #201)
     shared_device: str = ""      # one dongle for everything (bench): switch channel / P25 in the web app
@@ -1200,11 +1202,14 @@ def _stt_aws(stt: dict) -> dict:
     try:
         idle, pace = float(stt.get("aws_idle_s", 120)), float(stt.get("aws_pace", 2.0))
         limit = float(stt.get("aws_monthly_limit_usd", 25))
+        ctx_limit = float(stt.get("aws_context_budget_usd", 15))
     except (TypeError, ValueError):
-        raise ConfigError("stt.aws_idle_s, aws_pace, aws_monthly_limit_usd: numbers") from None
-    if not 1 <= idle <= 3600 or not 0.5 <= pace <= 10 or not 0 <= limit <= 10000:
-        raise ConfigError("stt.aws_idle_s: 1 to 3600; aws_pace: 0.5 to 10; aws_monthly_limit_usd: 0 to 10000")
-    chans = stt.get("aws_channels", ["South 2", "FG1", "FG2", 307])
+        raise ConfigError("stt.aws_idle_s, aws_pace, aws_monthly_limit_usd, aws_context_budget_usd: numbers") from None
+    if not 1 <= idle <= 3600 or not 0.5 <= pace <= 10 or not 0 <= limit <= 10000 or not 0 <= ctx_limit <= 10000:
+        raise ConfigError("stt.aws_idle_s: 1 to 3600; aws_pace: 0.5 to 10; aws_monthly_limit_usd, aws_context_budget_usd: "
+                          "0 to 10000")
+    # PD dispatch on MTA MRRS (radio-intel PR 3): AWS by default, on its own budget (aws_context_budget_usd)
+    chans = stt.get("aws_channels", ["South 2", "FG1", "FG2", 307, "p25:mrrs:9211"])
     if not isinstance(chans, list):
         raise ConfigError('stt.aws_channels: a list of channel labels and talkgroups, e.g. ["South 2", "FG1", 307]')
     names = tuple(f"tg:{c}" if isinstance(c, int) else str(c) for c in chans)
@@ -1219,6 +1224,7 @@ def _stt_aws(stt: dict) -> dict:
                 stt_aws_endpoint=str(stt.get("aws_endpoint", "")).rstrip("/"),
                 stt_aws_api_endpoint=str(stt.get("aws_api_endpoint", "")).rstrip("/"),
                 stt_aws_idle_s=idle, stt_aws_pace=pace, stt_aws_limit_usd=limit, stt_aws_channels=names,
+                stt_aws_context_limit_usd=ctx_limit,
                 stt_aws_vocabulary=vocab, stt_record_only=record_only)
 
 
@@ -1339,7 +1345,7 @@ def load(path: str | Path) -> Config:
     stt = _take(data.get("stt", {}), "stt", {"server_binary", "model", "port", "threads", "prompt", "talker_prompt", "beam_size",
                                              "aws", "aws_region", "aws_endpoint", "aws_api_endpoint", "aws_idle_s", "aws_pace",
                                              "aws_monthly_limit_usd", "aws_channels", "aws_vocabulary",
-                                             "record_only"})
+                                             "aws_context_budget_usd", "record_only"})
     talker_mode = str(stt.get("talker_prompt", "off"))
     if talker_mode not in ("off", "ids", "ids+time"):
         raise ConfigError('stt.talker_prompt: "off", "ids" or "ids+time"')
@@ -1389,7 +1395,7 @@ def load(path: str | Path) -> Config:
     except ValueError as e:
         raise ConfigError(f"storage.tier_keep_days: {e}") from None
     try:
-        context_mb = float(storage.get("context_audio_max_mb", 100))
+        context_mb = float(storage.get("context_audio_max_mb", 8000))
     except (TypeError, ValueError):
         context_mb = -1.0
     if not 0 <= context_mb <= 100000:

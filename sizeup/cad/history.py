@@ -371,7 +371,7 @@ class AddressHistory:
     def stop(self) -> None:
         self._stop.set()
         t, self._thread = self._thread, None
-        if t is not None:
+        if t is not None and t is not threading.current_thread():
             t.join(timeout=5)
 
     def _bounded_catch_up(self, transcripts: bool = False) -> None:
