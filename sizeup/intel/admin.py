@@ -24,6 +24,7 @@ verified sign-in gate, the same as context traffic), on the API and in the conso
 from __future__ import annotations
 
 import copy
+import re
 
 from sizeup import sourcekeys
 from sizeup.cad.store import CadError
@@ -83,6 +84,7 @@ class IntelAdmin:
         return {"settings": eng.policy.cfg, "defaults": policy_mod.DEFAULTS, "edited": sorted(ov["intel"]),
                 "packs": packs, "modes": list(MODES), "ruleset_hash": eng.ruleset_hash(), "counts_24h": counts,
                 "verdicts": list(VERDICTS), "queue": {"dropped": eng.dropped, "errors": eng.errors},
+                "infer": eng.infer.status() if eng.infer is not None else {"on": False, "ready": False, "why": "not here"},
                 "may_edit": True}
 
     def events(self, q: dict) -> dict:
@@ -168,7 +170,28 @@ class IntelAdmin:
         ov = self._ov()
         trial = copy.deepcopy(ov)
         audit_key, old, new = "", None, None
-        if action == "set":
+        if action == "set" and str(body.get("key") or "").startswith("infer"):
+            from sizeup.intel import infer as infer_mod
+            key, v = str(body.get("key")), body.get("value")
+            if key not in infer_mod.DEFAULTS:
+                raise CadError(f"key: {' | '.join(infer_mod.DEFAULTS)}")
+            if key == "infer":
+                if not isinstance(v, bool):
+                    raise CadError("infer: true or false")
+            elif key == "infer_provider":
+                if v not in infer_mod.PROVIDERS:
+                    raise CadError(f"infer_provider: {' | '.join(infer_mod.PROVIDERS)}")
+            elif key == "infer_mode":
+                v = _mode(v, "infer_mode")
+            elif key in ("infer_model", "infer_region"):
+                if not isinstance(v, str) or not re.fullmatch(r"[A-Za-z0-9._:/-]{2,120}", v):
+                    raise CadError(f"{key}: letters, digits and . _ : / - (a Bedrock model id or region)")
+            else:
+                lo, hi = infer_mod.LIMITS[key]
+                v = _f(v, lo, hi, key)
+            changes = [("intel", key, REMOVE if v == infer_mod.DEFAULTS[key] else v)]
+            audit_key, old, new = f"intel/{key}", ov["intel"].get(key, infer_mod.DEFAULTS[key]), v
+        elif action == "set":
             key = body.get("key")
             if key not in policy_mod.DEFAULTS:
                 raise CadError(f"key: {' | '.join(policy_mod.DEFAULTS)}")

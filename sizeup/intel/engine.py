@@ -44,6 +44,7 @@ Intel never writes incidents, radio_links, incoming or alarms.
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import queue
 import threading
@@ -133,6 +134,7 @@ class IntelEngine:
         self.public_url = ""
         self.leader = lambda: True            # live: the CAD of record holding the lease (the app sets it)
         self.notifier = None                  # live: notify.Pushes' INTEL KindNotifier (the app sets it)
+        self.infer = None                     # infer.Inference: the model behind the rules (off unless set and on)
         self.windows: dict[tuple[str, str], Window] = {}
         self.packs: list = []
         self.cfg: dict = {}
@@ -252,6 +254,8 @@ class IntelEngine:
             if now - self._pruned >= PRUNE_S and hasattr(self.events, "prune"):
                 self._pruned = now
                 self.events.prune(now)
+                if self.infer is not None:
+                    self.infer.prune(now)
 
     def _restore(self) -> None:
         if self.store is None:
@@ -349,6 +353,11 @@ class IntelEngine:
                     up = self._relocate(pack, ev, row, key, win, tid, at)
                     if up is not None:
                         changed.append(up)
+        if self.infer is not None and hits and not suppressed:
+            try:
+                changed += self._inference(pack, row, key, tid, win, at, cats, mine, event_of, hits)
+            except Exception as e:  # noqa: BLE001 - the model never stops the rules
+                self.log(f"intel: inference: {type(e).__name__}")
         keep = {r.id for r, _w in hits}
         if known and hasattr(self.sink, "clear"):
             self.sink.clear(tid, keep)
@@ -448,7 +457,9 @@ class IntelEngine:
         return ev
 
     def _relocate(self, pack, ev: Event, row, key, win, tid, at) -> Event | None:
-        place = self._where(pack, row, key, win)
+        return self._set_place(pack, ev, self._where(pack, row, key, win), key, tid, at)
+
+    def _set_place(self, pack, ev: Event, place, key, tid, at) -> Event | None:
         if place is None or not (ev.precision == "none" or place.confirmed or place.where_score > ev.where_score):
             return None
         before = copy.deepcopy(ev)
@@ -462,6 +473,62 @@ class IntelEngine:
         self.events.save(ev)
         self._after(pack, ev, "updated", ev.updated_at, before)
         return ev
+
+    def _inference(self, pack, row, key, tid, win, at, cats, mine, event_of, hits) -> list[Event]:
+        """Ask the model about what the rules left uncertain (infer.py); its category is one more hit, its place only
+        what the gazetteer finds for it. A sample is asked and recorded, never acted on."""
+        from sizeup.intel import infer as infer_mod
+        c = self.infer.cfg()
+        why, ev_for = "", None
+        for cat, (what, _contrib, _m) in cats.items():
+            cd = pack.category(cat)
+            thr = cd.get("threshold") if cd.get("threshold") is not None else pack.threshold
+            if float(c["infer_low"]) <= what < thr and mine & {cat, rules_mod.WILD}:
+                why = "uncertain"
+                break
+        if not why:
+            ev_for = next((e for e in event_of.values() if e.precision == "none" or not e.confirmed), None)
+            why = "place" if ev_for is not None else ""
+        if not why and int(c["infer_sample_pct"]) and int(hashlib.sha256(tid.encode()).hexdigest(), 16) % 100 < int(c["infer_sample_pct"]):
+            why = "sample"
+        if not why:
+            return []
+        req = infer_mod.Request(self._window_text(win), {k: v["label"] for k, v in pack.categories.items()},
+                                pack.towns_for(key), key)
+        res = self.infer.ask(req, tid=tid, pack=pack.name, why=why, event_id=ev_for.id if ev_for else None)
+        if res is None or res.refused or why == "sample":
+            return []
+        out: list[Event] = []
+        cat = res.category
+        if why == "uncertain" and cat in pack.categories and res.confidence > 0:
+            rule = rules_mod.Rule(f"infer.{self.infer.cfg()['infer_provider']}", 1, cat,
+                                  round(min(1.0, res.confidence * float(c["infer_weight"])), 4), [], [],
+                                  str(c["infer_mode"]), True, {})
+            hits.append((rule, rule.w))                   # the row's own hits (its window entry holds the same list)
+            mine.add(cat)
+            got = self._scores(pack, win).get(cat)
+            cd = pack.category(cat)
+            thr = cd.get("threshold") if cd.get("threshold") is not None else pack.threshold
+            if got and got[0] >= thr:
+                mode = lowest(pack.mode, cd.get("mode", "push"), got[2])
+                if mode != "off":
+                    ev = self._raise(pack, row, key, cat, cd, got[0], got[1], mode, win, at, tid)
+                    if ev is not None:
+                        event_of[cat] = ev
+                        out.append(ev)
+        target = event_of.get(cat) or ev_for
+        if res.location and self.locate is not None and target is not None:
+            try:
+                place = self.locate(res.location, self._scope(pack, row, key))      # the gazetteer decides
+            except Exception:  # noqa: BLE001
+                place = None
+            if place is not None:
+                place.basis = "; ".join(x for x in (place.basis, "place from inference") if x)
+                up = self._set_place(pack, target, place, key, tid, at)
+                if up is not None:
+                    self.infer.mark_used(res.record_id, place.label)
+                    out.append(up)
+        return out
 
     def _end_window(self, pack, key: str, at: float, tid: str) -> list[Event]:
         out = []
