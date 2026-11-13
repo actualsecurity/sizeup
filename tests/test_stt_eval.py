@@ -23,13 +23,15 @@ WHISPER = "ggml-large-v3-turbo.bin"
 def test_words_and_wer():
     assert stt_eval.tokens("Respond to 456 Example Avenue") == stt_eval.tokens("respond to four five six example ave")
     assert stt_eval.wer("engine 60 en route", "Engine 60 en route") == (0, 5)
-    assert stt_eval.wer("engine sixty route", "engine 60 en route")[0] == 3      # "60" is two digit tokens
+    assert stt_eval.wer("engine sixty route", "engine 60 en route")[0] == 1      # "sixty" is 60: only "en" missing
+    assert stt_eval.wer("", "engine 60 en route") == (5, 5)                     # nothing heard: all deletions
 
 
 def test_address_scores():
     assert stt_eval.score_address("respond to 456 example avenue", "456", ["example", "ave"]) == (True, True, True)
     assert stt_eval.score_address("respond to 420 example avenue", "456", ["example", "ave"]) == (False, True, True)
-    assert stt_eval.score_address("respond to 4 5 6 sample avenue", "456", ["example", "ave"]) == (True, False, False)
+    assert stt_eval.score_address("respond to 4 5 6 sample avenue", "456", ["example", "ave"]) == (False, False, False)
+    assert stt_eval.score_address("respond to 4 5 6 example avenue", "456", ["example", "ave"]) == (True, True, True)
     assert stt_eval.score_address("respond to 1456 example ave", "456", ["example", "ave"]) == (False, True, False)
 
 
@@ -114,3 +116,60 @@ def test_the_db_is_opened_read_only(restored):
     with pytest.raises(sqlite3.OperationalError):
         con.execute("DELETE FROM stt_corrections")
     con.close()
+
+
+@pytest.mark.parametrize("said, written", [
+    ("four fifty six example avenue", ["456", "example", "ave"]),
+    ("one hundred", ["100"]),
+    ("sixty three", ["63"]),
+    ("four hundred fifty six", ["456"]),
+    ("one two three", ["123"]),
+    ("route one oh one", ["route", "101"]),
+    ("oh no", ["oh", "no"]),                                   # "oh" alone is a word
+    ("first ave", ["1st", "ave"]),
+    ("twenty first street", ["21st", "st"]),
+    ("twelve thirty four", ["1234"]),
+    ("4 5 6 sample st", ["456", "sample", "st"]),
+])
+def test_number_words(said, written):
+    assert stt_eval.words(said) == written
+
+
+def test_only_the_number_before_the_street_is_the_house_number():
+    street = ["example", "ave"]
+    # a unit's number elsewhere in the clip is never the house number
+    assert stt_eval.score_address("engine 12 respond to 34 example ave", "12", street) == (False, True, None)
+    assert stt_eval.score_address("engine 34 respond to 12 example ave", "12", street)[0] is True
+    # a callsign's digits run into the house number after a unit word: its last digits are the house number
+    assert stt_eval.score_address("rescue one four five six example avenue", "456", street) == (True, True, True)
+    assert stt_eval.score_address("rescue one four five six example avenue", "1456", street)[0] is True
+    assert stt_eval.score_address("respond to 1456 example ave", "456", street) == (False, True, False)
+    # under 100 there is no block: not counted
+    assert stt_eval.score_address("respond to 34 example ave", "36", street) == (False, True, None)
+    assert stt_eval.split_address("100 Route 1") == ("100", ["route", "1"])
+    assert stt_eval.split_address("100 Example Avenue") == ("100", ["example", "ave"])
+
+
+def test_no_phrases_no_prompt_rates():
+    refs = [{"start": 1.0, "ref": "Engine 60 en route", "tags": [], "domain": "fire", "hyps": {"aws": "engine 60 en route"}}]
+    r = stt_eval.evaluate(refs, phrases=[])["all"]["aws"]
+    assert r["prompt_insertion"] is None and r["insertions_per_100w"] is None
+    r = stt_eval.evaluate(refs, phrases=["willow lane"])["all"]["aws"]
+    assert r["prompt_insertion"] == 0
+
+
+def test_an_engine_that_heard_nothing_scores_as_deletions(tmp_path):
+    cad = make_cad(tmp_path)
+    tx(cad, "c1", "", model="aws-transcribe", alt_text="engine 60 en route", alt_model=WHISPER)
+    cad.stt_fix.save("c1", {"corrected": "Engine 60 en route", "reference": True})
+    cad.store.db.close()
+    res = stt_eval.evaluate(stt_eval.from_db(tmp_path / "cad.sqlite", False, "", None, None))
+    assert res["all"]["aws"]["wer"] == 1.0 and res["all"]["whisper"]["wer"] == 0
+    assert res["paired"]["aws"]["clips"] == 1
+
+
+def test_json_never_inside_the_repo(restored):
+    db, _ = restored
+    with pytest.raises(SystemExit):
+        stt_eval.main(["--db", str(db), "--json", str(stt_eval.ROOT / "x.stt-eval.json")])
+    assert not (stt_eval.ROOT / "x.stt-eval.json").exists()

@@ -85,7 +85,8 @@ def test_the_audit_never_holds_the_words(cad):
     for w in ("ladder", "example", "location"):
         assert w not in blob
     first = json.loads(rows[-1]["new"])
-    assert first["words"] == 7 and first["tags"] == {"callsign": 1} and first["hash"] == sttfix.text_hash(said)
+    assert first["words"] == 7 and first["tags"] == {"callsign": 1} and "hash" not in first   # no hash of the words
+    assert first["original_hash"] == sttfix.text_hash("ladder 31 on location 12 example court")
     assert rows[0]["new"] in (None, "", "null")          # the delete
     assert cad.stt_fix.get("c1")["correction"] is None
 
@@ -105,14 +106,14 @@ def test_another_systems_row_only_behind_a_sign_in(cad):
     """A police talkgroup's transmission (another P25 system: context, #419) is never served without a verified
     person; with one it is, like the Radio page."""
     from sizeup.cad.store import CadError
-    tx(cad, "p1", "car 266 respond to 100 example avenue", channel="PD Dispatch", talkgroup=9211, system="mrrs",
+    tx(cad, "p1", "car 12 respond to 100 example avenue", channel="PD Dispatch", talkgroup=9211, system="mrrs",
        service="police", talker="")
     with pytest.raises(CadError):
         cad.stt_fix.get("p1")
     with pytest.raises(CadError):
-        cad.stt_fix.save("p1", {"corrected": "Car 266 respond to 100 Example Ave"})
+        cad.stt_fix.save("p1", {"corrected": "Car 12 respond to 100 Example Ave"})
     with sourcekeys.request_context(Identity(email=COREY)):
-        cad.stt_fix.save("p1", {"corrected": "Car 266 respond to 100 Example Ave", "reference": True})
+        cad.stt_fix.save("p1", {"corrected": "Car 12 respond to 100 Example Ave", "reference": True})
         assert cad.stt_fix.get("p1")["correction"]["domain"] == "police"
         assert cad.stt_fix.counts()["n"] == 1
     assert cad.stt_fix.counts()["n"] == 0             # not counted (nor exported) without a sign-in
@@ -174,3 +175,33 @@ def test_the_editor_builds_no_markup_from_text():
     assert "/api/cad/stt/correction/" in js and '"/api/cad/stt/corrections"' in js
     cad_js = (Path(__file__).resolve().parent.parent / "sizeup" / "web" / "static" / "cad.js").read_text()
     assert "SttFix.open(t)" in cad_js
+
+
+def test_an_unnamed_admin_is_never_recorded_by_email(cad):
+    """An admin without a name yet signs in as their bare email: the correction keeps no name rather than the email,
+    in the row, the dialog's answer and the export."""
+    tx(cad, "c1", "engine 60 en route")
+    out = cad.stt_fix.save("c1", {"corrected": "Engine 60 en route", "operator": "new.admin@example.org"})
+    assert out["correction"]["by"] == ""
+    assert cad.store.one('SELECT "by" FROM stt_corrections')["by"] == ""
+    cad.stt_fix.save("c1", {"corrected": "Engine 60 en route", "operator": "Pat <pat@example.org>"})
+    assert cad.stt_fix.get("c1")["correction"]["by"] == "Pat"
+    with cad.store.tx() as db:                     # a row written before this rule: still never shown or exported
+        db.execute('UPDATE stt_corrections SET "by" = ? WHERE traffic_id = ?', ("old.admin@example.org", "c1"))
+    assert cad.stt_fix.get("c1")["correction"]["by"] == ""
+    assert cad.stt_fix.export_rows({})[0]["correction"]["by"] == ""
+    assert sttfix.name_only("Sam Sample") == "Sam Sample" and sttfix.name_only("x@example.org") == ""
+
+
+def test_an_engine_that_heard_nothing_is_exported_as_empty(cad):
+    tx(cad, "c1", "", model="aws-transcribe", alt_text="engine 60 en route", alt_model="ggml-large-v3-turbo.bin")
+    cad.stt_fix.save("c1", {"corrected": "Engine 60 en route"})
+    assert cad.stt_fix.export_rows({})[0]["asr"] == {"aws-transcribe": "", "ggml-large-v3-turbo.bin": "engine 60 en route"}
+
+
+@pytest.mark.parametrize("service, system, domain", [
+    ("fire", "westchester", "fire"), ("police", "mrrs", "police"), ("ems", "westchester", "ems"), ("air", "airband", "atc"),
+    ("transit", "mrrs", "other"), ("", "westchester", "other"), ("", "analog", "other"), ("other", "mrrs", "other"),
+])
+def test_domain_of_a_rows_service(service, system, domain):
+    assert sttfix.domain_of({"service": service, "system": system}) == domain

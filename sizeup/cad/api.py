@@ -361,8 +361,8 @@ WRITES = (
     (re.compile(r"/api/cad/runcards(?:/delete)?"), "admin"),
     (re.compile(r"/api/cad/radios(?:/delete)?"), "admin"),                 # the radio-ID registry
     (DATASOURCE, "admin"),                                                  # a data source's Refresh now (#186)
-    (re.compile(r"/api/cad/perf/profile"), "admin"),
-    (STT_CORRECTION, "admin"),                                              # a hand-corrected transcript (sttfix.py)                        # a CPU profile of the hub (#425, server.py)
+    (re.compile(r"/api/cad/perf/profile"), "admin"),                        # a CPU profile of the hub (#425, server.py)
+    (STT_CORRECTION, "admin"),                                              # a hand-corrected transcript (sttfix.py)
     (DVR_PIN, "dispatch"),                                                  # keep recording a camera (#277)
     (DVR_CLIP, "dispatch"),                                                 # save a camera clip on an event (#323)
     (ATTACHMENT, "admin"),                                                  # delete an event's attachment (#323)

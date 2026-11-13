@@ -18,7 +18,8 @@ table alone). Its retention is the transcript's: the row goes with its transmiss
 log's prune, sizeup/cad/comms.py). Written only through the CAD API's POSTs (admins), which the web server refuses
 while the hub's single-writer fence is not held (sizeup/fence.py, sizeup/web/server.py Gate): leader-only and fenced
 like every other admin edit. Every save and delete is in the Settings audit log (section "stt_corrections"), with
-the hash, word count and tag count only: never the words (the audit log is read more widely than transcripts are).
+the word and tag counts and the original text's hash only: never the words, nor a hash of them (the audit log is read
+more widely than transcripts are). `by` is the person's name only, never a sign-in email.
 
 Another system's transmission (police: sourcekeys.is_context) is read and corrected only behind a verified sign-in
 (sourcekeys.may_see_context), like the Radio page.
@@ -77,8 +78,19 @@ def words(text: str) -> int:
 
 
 def domain_of(row: dict) -> str:
+    """The row's service as a domain: air -> atc; fire, police, ems as they are; anything else (transit, '', unknown):
+    other (the admin picks)."""
     s = row.get("service") or ""
-    return "atc" if s == "air" else s if s in DOMAINS else "fire" if not sourcekeys.is_context(row) else "other"
+    return "atc" if s == "air" else s if s in ("fire", "police", "ems") else "other"
+
+
+EMAIL = re.compile(r"[^\s@<>]+@[^\s@<>]+")
+
+
+def name_only(operator: str) -> str:
+    """A person's name for the record: 'Name <email>' -> 'Name'; a bare email (an admin not named yet) -> ''."""
+    n = who(operator or "")
+    return "" if EMAIL.search(n) else n
 
 
 def clean_tags(tags, corrected: str) -> list[dict]:
@@ -146,7 +158,8 @@ class SttCorrections:
         if c is None:
             return None
         return {"corrected": c["corrected"], "domain": c["domain"], "tags": json.loads(c["tags"] or "[]"),
-                "by": c["by"], "at": c["at"], "reference": bool(c["reference"]), "original_hash": c["original_hash"]}
+                "by": name_only(c["by"]), "at": c["at"], "reference": bool(c["reference"]),
+                "original_hash": c["original_hash"]}
 
     def get(self, tid: str) -> dict:
         """GET /api/cad/stt/correction/<id>: the transmission's transcripts and its correction (null: none yet)."""
@@ -172,7 +185,7 @@ class SttCorrections:
 
     def save(self, tid: str, body: dict) -> dict:
         """POST /api/cad/stt/correction/<id> {corrected, domain?, tags?, reference?} | {delete: true}."""
-        op = str(body.get("operator") or "")[:200]
+        op = name_only(str(body.get("operator") or "")[:200])    # the name only: never a sign-in email
         r = self._traffic(tid)
         if body.get("delete") is True:
             return self.delete(tid, op)
@@ -218,8 +231,8 @@ class SttCorrections:
         kinds: dict[str, int] = {}
         for t in tags:
             kinds[t["kind"]] = kinds.get(t["kind"], 0) + 1
-        return {"hash": text_hash(c["corrected"]), "words": words(c["corrected"]), "domain": c["domain"],
-                "tags": kinds, "reference": bool(c["reference"]), "original_hash": c["original_hash"]}
+        return {"words": words(c["corrected"]), "domain": c["domain"], "tags": kinds, "reference": bool(c["reference"]),
+                "original_hash": c["original_hash"]}
 
     # -- the JSONL export (#428's contract; admins, ADMIN_READS) -------------------------------------------------------
 
@@ -263,13 +276,13 @@ def record(r: dict) -> dict:
     """One clip as #428's JSONL line. r: radio_traffic's columns (+ fixed_text when the status words were put back) and
     the correction's (corrected, reference, by, at; corrected None: no correction)."""
     asr = {}
-    if r.get("text"):
-        asr[r.get("model") or "unknown"] = r["text"]
-    if r.get("alt_text"):
-        asr[r.get("alt_model") or "alt"] = r["alt_text"]
+    if r.get("text") or r.get("model"):          # an engine that ran and heard nothing: "" (all deletions)
+        asr[r.get("model") or "unknown"] = r.get("text") or ""
+    if r.get("alt_text") or r.get("alt_model"):
+        asr[r.get("alt_model") or "alt"] = r.get("alt_text") or ""
     corr = None
     if r.get("corrected") is not None:
-        corr = {"text": r["corrected"], "checked": bool(r.get("reference")), "by": who(r.get("by") or ""), "at": r.get("at")}
+        corr = {"text": r["corrected"], "checked": bool(r.get("reference")), "by": name_only(r.get("by") or ""), "at": r.get("at")}
     return {"clip_id": r["id"], "channel": r.get("channel") or "", "talkgroup": r.get("talkgroup"),
             "talker": r.get("talker") or "", "start": r.get("start"), "end": r.get("end"), "asr": asr,
             "fixed_text": r.get("fixed_text") or r.get("text") or "", "correction": corr}

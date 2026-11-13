@@ -1,18 +1,19 @@
 """Replay / backtest (radio intel plan, PR 7): the intel pipeline over stored radio log rows, in memory. Nothing is
 pushed and nothing is written: not incidents, radio_links, incoming, alarms, nor the intel tables themselves. The rows
-come from a connection opened read-only (open_ro), the pipeline gets an in-memory event store and a recording sink.
+and the Settings snapshot come from a connection opened read-only (open_ro); the engine gets an in-memory event store
+(events.MemoryEvents), no CAD store (no meta writes) and the recording sink below (no ntfy).
 
-It drives the intel core's own pipeline (sizeup/intel/engine.py, PR 1), never a copy of it. The interface it needs
-(proposed to the core's owner; Pipeline below is the stub this module is written against until it lands):
+It drives the intel core's own engine (sizeup/intel/engine.py), never a copy of it:
 
-    IntelEngine(packs=..., settings=..., events=MemoryEvents(), sink=Recorder(), clock=..., thread=False)
-    engine.feed(row)        one radio_traffic row (a dict), synchronously; the clock is the row's end
-    engine.tick(now)        windows close and events end by the given time
+    IntelEngine(packs=, settings=, events=MemoryEvents(), sink=Recorder, locate=, clock=, thread=False, store=None)
+    engine.feed(row)        one radio_traffic row, synchronously; the clock is the row's START (the policy reads it)
+    engine.tick(now)        events expire, a due digest is sent to the sink
     engine.ruleset_hash()
-    sink.hit(hit) / sink.event(event, change) / sink.push(event, decision)   what happened, never done
+    sink.hit / event / push(Event, Decision) and the optional clear(tid, keep) / digest(events): recorded, never done.
+    Decision.message (the composed push) is dropped on arrival: it may hold police text, and replay keeps aggregates only.
 
 Used by tools/intel_replay.py (a restored cad.sqlite, aggregates only), the private `mrrs-intel` replay tests
-(tests/test_intel_replay.py) and, later, Settings > Intel's dry run on save (PR 6).
+(tests/test_intel_replay.py) and Settings > Intel's dry run on save (PR 6).
 
 Metrics (metrics()):
     rules / categories   hits, events, would-push, labelled, what-right (tp + near + time_only), precision
@@ -20,7 +21,7 @@ Metrics (metrics()):
                          or within the window (sizeup/intel/labels.py), and the lead time (median, p90; > 0: earlier)
     place                address-resolved rate (address or intersection), error median / p90 in metres, false-place
                          rate (> 300 m off, of the labelled same-call events with a point)
-    pushes_per_day       would-push decisions over the span's days
+    pushes_per_day       would-push decisions over the span's days (digests counted apart)
     latency              the pipeline's own time per row (ms, p50 / p90 / max) and the raise delay (s: an event's
                          first raise after its earliest transmission started)
     shed                 rows in the span that speech-to-text shed (status skipped: "skipped: busy ..."): lost recall
@@ -28,6 +29,7 @@ Metrics (metrics()):
 
 from __future__ import annotations
 
+import json
 import math
 import sqlite3
 import time
@@ -39,28 +41,24 @@ from typing import Callable, Iterable, Protocol
 from sizeup.intel import labels as lab
 
 ROW_COLUMNS = ("id", "start", "end", "source", "system", "service", "dept", "tier", "talkgroup", "channel", "talker",
-               "rig", "dispatcher", "text", "alt_text", "model", "alt_model", "status")
-TICK_EVERY_S = 30.0
+               "rig", "radio_id", "dispatcher", "text", "alt_text", "model", "alt_model", "status")
+SETTINGS_SECTIONS = ("intel", "intel_packs", "intel_rules")       # the engine's (sizeup/intel/engine.py SECTIONS)
+TICK_EVERY_S = 15.0                # the live thread's TICK_S
 FLUSH_S = 6 * 3600.0               # after the last row: time moved on this far, every window closed, every event ended
 WHAT_RIGHT = ("tp", "near", "time_only")
+LABELLED = WHAT_RIGHT + ("false_place", "none")    # precision's denominator (never unlabelled, ambiguous, no_time)
 SHED = "skipped: busy"             # sizeup/stt.py SHED: what a shed clip's model line says
 
 
-class Sink(Protocol):
-    def hit(self, hit) -> None: ...
-    def event(self, event, change: str) -> None: ...
-    def push(self, event, decision) -> None: ...
-
-
 class Pipeline(Protocol):
-    """The intel core's engine as replay drives it (see the module doc)."""
-    def feed(self, row: dict) -> None: ...
-    def tick(self, now: float) -> None: ...
+    """The intel core's engine as replay drives it (see the module doc); tests pass a stand-in with the same shape."""
+    def feed(self, row: dict): ...
+    def tick(self, now: float): ...
     def ruleset_hash(self) -> str: ...
 
 
 def _d(x) -> dict:
-    """An event / hit / decision as a dict, whatever the core makes it (a dataclass, an object, a dict)."""
+    """An event / hit / decision as a dict, whatever it is (the core's dataclasses, a dict)."""
     if isinstance(x, dict):
         return dict(x)
     if is_dataclass(x) and not isinstance(x, type):
@@ -69,16 +67,23 @@ def _d(x) -> dict:
 
 
 class Recorder:
-    """The replay's sink: keeps what the pipeline did, in memory."""
+    """The replay's sink: keeps what the engine did, in memory. Never a push's message (has_message only)."""
 
     def __init__(self, clock: Callable[[], float]):
         self.clock = clock
         self.hits: list[dict] = []
         self.events: dict[str, dict] = {}         # id -> the latest snapshot (+ raised_at: the clock at its first raise)
         self.decisions: dict[str, list[dict]] = defaultdict(list)
+        self.digests = 0                           # digests due (events held over a rate cap)
+        self.digested = 0                          # ... the events in them
 
     def hit(self, hit) -> None:
         self.hits.append(_d(hit))
+
+    def clear(self, tid: str, keep) -> None:
+        """A re-transcription: the rules that no longer hit tid are forgotten (the live intel_hits does the same)."""
+        keep = set(keep or ())
+        self.hits = [h for h in self.hits if not (str(h.get("traffic_id")) == str(tid) and h.get("rule_id") not in keep)]
 
     def event(self, event, change: str) -> None:
         e = _d(event)
@@ -89,7 +94,13 @@ class Recorder:
         self.events[eid] = e
 
     def push(self, event, decision) -> None:
-        self.decisions[str(_d(event).get("id"))].append(_d(decision))
+        d = _d(decision)
+        d["has_message"] = bool(d.pop("message", None))     # the composed push: never kept, never printed
+        self.decisions[str(_d(event).get("id"))].append(d)
+
+    def digest(self, events) -> None:
+        self.digests += 1
+        self.digested += len(list(events))
 
     def would_push(self, eid: str) -> bool:
         return any(d.get("would_push") for d in self.decisions.get(eid, ()))
@@ -98,17 +109,33 @@ class Recorder:
 PipelineFactory = Callable[[Recorder, "Path | None", Callable[[], float]], Pipeline]
 
 
-def core_pipeline(sink: Recorder, rules: Path | None, clock: Callable[[], float]) -> Pipeline:
-    """The intel core's engine, offline (the interface above). ImportError until the core (PR 1) is on this branch."""
-    from sizeup.intel import engine, events, rules as rules_mod    # noqa: PLC0415 (the core: PR 1)
-    packs = rules_mod.load_packs([rules]) if rules else None
-    return engine.IntelEngine(packs=packs, events=events.MemoryEvents(), sink=sink, clock=clock, thread=False)
+def core_pipeline(sink: Recorder, rules: Path | None, clock: Callable[[], float], settings: dict | None = None,
+                  locate=None) -> Pipeline:
+    """The intel core's engine, offline: in-memory events, no store, no thread. rules: a pack file in place of
+    data/intel/*.json; settings: the Settings snapshot (read_settings), its overrides on either."""
+    from sizeup.intel import events, rules as rules_mod
+    from sizeup.intel.engine import IntelEngine
+    snap = settings or {}
+    packs = rules_mod.load_packs([rules], snap) if rules else None
+    return IntelEngine(packs=packs, settings=snap, events=events.MemoryEvents(), sink=sink, locate=locate, clock=clock,
+                       thread=False, store=None, log=lambda m: None)
+
+
+def gazetteer_locator():
+    """place.Locator over the shipped gazetteer (data/gazetteer.sqlite, read only), as the live engine has it; None
+    when the gazetteer can't load (events then have no place)."""
+    try:
+        from sizeup.geo.gazetteer import Gazetteer
+        from sizeup.intel.place import Locator
+        return Locator(Gazetteer())
+    except Exception:  # noqa: BLE001
+        return None
 
 
 # -- the rows ------------------------------------------------------------------------------------------------------------
 
 def open_ro(path: str | Path) -> sqlite3.Connection:
-    """A restored cad.sqlite, read-only: SQLite refuses every write on this connection."""
+    """A restored cad.sqlite, read-only: SQLite refuses every write on this connection (mode=ro, query_only)."""
     p = Path(path)
     if not p.is_file():
         raise FileNotFoundError(str(p))
@@ -116,6 +143,20 @@ def open_ro(path: str | Path) -> sqlite3.Connection:
     con.row_factory = sqlite3.Row
     con.execute("PRAGMA query_only = ON")
     return con
+
+
+def read_settings(db: sqlite3.Connection) -> dict:
+    """The copy's intel Settings ({section: {key: value}}), as the live engine reads them (Settings.section)."""
+    if not db.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'settings_overrides'").fetchone():
+        return {}
+    out: dict = {s: {} for s in SETTINGS_SECTIONS}
+    for sec, key, value in db.execute("SELECT section, key, value FROM settings_overrides WHERE section IN "
+                                      f"({','.join('?' * len(SETTINGS_SECTIONS))})", SETTINGS_SECTIONS):
+        try:
+            out[sec][key] = json.loads(value)
+        except ValueError:
+            continue
+    return out
 
 
 def load_rows(db: sqlite3.Connection, since: float | None = None, until: float | None = None,
@@ -144,17 +185,20 @@ class Run:
         self.rows, self.rec, self.feed_s, self.ruleset = rows, rec, feed_s, ruleset
 
 
-def replay(rows: list[dict], factory: PipelineFactory | None = None, rules: Path | None = None) -> Run:
-    """Every row through the pipeline in time order, the clock at each row's end, ticked every TICK_EVERY_S of row
-    time, then flushed FLUSH_S on. factory: the intel core's engine (core_pipeline) unless given."""
-    factory = factory or core_pipeline
-    now = [rows[0]["end"] if rows else time.time()]
+def replay(rows: list[dict], factory: PipelineFactory | None = None, rules: Path | None = None,
+           settings: dict | None = None, locate=None) -> Run:
+    """Every row through the engine in time order, the clock at each row's START (the policy decides by clock()),
+    ticked every TICK_EVERY_S of row time, then flushed FLUSH_S on. factory: the intel core's engine unless given."""
+    if factory is None:
+        def factory(sink, r, clock):
+            return core_pipeline(sink, r, clock, settings, locate)
+    now = [float(rows[0]["start"]) if rows else time.time()]
     rec = Recorder(lambda: now[0])
     p = factory(rec, rules, lambda: now[0])
     feed_s: list[float] = []
     last_tick = now[0]
     for r in rows:
-        now[0] = max(now[0], float(r.get("end") or r.get("start") or now[0]))
+        now[0] = max(now[0], float(r.get("start") or now[0]))
         if now[0] - last_tick >= TICK_EVERY_S:
             p.tick(now[0])
             last_tick = now[0]
@@ -210,7 +254,7 @@ def metrics(run: Run, incidents: list[dict] | None = None, categories: dict | No
         for rid in rule_ids:
             per_rule[rid]["events"] += 1
             per_rule[rid]["pushes"] += pushed
-        if label and label != "unlabelled":
+        if label in LABELLED:
             c["labelled"] += 1
             c["right"] += label in WHAT_RIGHT
             c["tp"] += label == "tp"
@@ -260,7 +304,7 @@ def metrics(run: Run, incidents: list[dict] | None = None, categories: dict | No
             "latency": {"feed_ms_p50": _round(_pct(ms, 0.5)), "feed_ms_p90": _round(_pct(ms, 0.9)),
                         "feed_ms_max": _round(max(ms) if ms else None),
                         "raise_s_median": _pct(delays, 0.5), "raise_s_p90": _pct(delays, 0.9)},
-            "shed": shed}
+            "digests": rec.digests, "shed": shed}
 
 
 def _round(x):
