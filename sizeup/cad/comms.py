@@ -63,7 +63,9 @@ from __future__ import annotations
 
 import json
 import re
+import sqlite3
 import time
+from contextlib import contextmanager
 from datetime import datetime
 
 from sizeup import sourcekeys as sources
@@ -83,6 +85,51 @@ KEEP_UNLINKED_S = 365 * 24 * 3600
 KEEP_RECORD_S = 400 * 24 * 3600
 MAX_ROWS = 500
 MAIN_LIMIT, OTHER_LIMIT = 200, 300    # the Radio view's Main and Other: each its own newest N (#241)
+# The Radio page's views (#415): a named filter each. ours: our fire channels (today's Main); a service's: every source
+# of that service; all: everything not muted. One page of PAGE rows (at most PAGE_MAX), older ones by a keyset.
+VIEWS = ("ours", "police", "ems", "transit", "air", "all")
+SERVICE_VIEWS = ("police", "ems", "transit", "air")
+PAGE, PAGE_MAX = 100, 200
+SOURCES_MAX, MUTE_MAX = 24, 100       # ?source= and ?mute= keys taken per request
+COUNT_MINUTES = 60                    # GET /api/cad/comms/sources: calls per minute over the last hour
+SAFETY_WHERE = "t.safety != '' AND t.safety != 'dismissed'"     # as the partial index radio_traffic_safety is declared
+BRANCH_MAX = 64                       # a group or tier resolved to its sources: at most this many index walks
+CHANGES_MAX = 400                     # ?changed=: more transmissions changed than this since the cursor: reload
+CHANGES_KEPT = 50000                  # radio_changes rows kept (prune): a cursor older than those is told to reload
+EM_WINDOW_S = 12 * 3600               # the sources' emergency mark: unacknowledged ones this recent
+# Every change to what a row of the Radio page shows, in order (#415 ?changed=): the transmission itself (new, its
+# transcript, a re-run, the alternative text, pruned), its links to incidents, a link kept, its alarm (raised, seen,
+# cleared), and a note tagged with a unit ('note-...').
+#
+# The radio log is the record and this log is a convenience, so NOTHING on the write path depends on it: no trigger,
+# no retry. A write site says which row it changed (Comms.touch, inside its transaction); the entries are written
+# only after that transaction has committed, as their own statement in their own try (Comms.flush_changes, called by
+# the store's tx()). Rolled back: the notes are dropped with it. A failure to write an entry is caught, logged once,
+# and marks the log broken (every ?changed= answers reload) until an entry can be written again; it is never raised
+# and never repeats a write. A write site that forgets to touch costs a late update on the page (its 30 s page is
+# the backstop), never a row: tests/test_comms_changes.py walks every writer and fails for one that doesn't.
+#
+# seq only grows and SQLite has one writer at a time, so a reader that has seen seq N has seen everything up to N.
+# system: the row's own, read when the entry is written (given by the writer for a row it deleted). A reader who may
+# not see another P25 system's traffic is never told that one of its rows changed or went (its id says its
+# talkgroup, time and frequency), and their cursor doesn't move with it. NULL: not known: nobody's but a reader's
+# who may see everything.
+CHANGES_SCHEMA = """
+CREATE TABLE IF NOT EXISTS radio_changes (
+  seq INTEGER PRIMARY KEY AUTOINCREMENT,
+  traffic_id TEXT NOT NULL,
+  system TEXT,                          -- the transmission's system (sizeup/sourcekeys.py); '' a note
+  gone INTEGER NOT NULL DEFAULT 0       -- 1: the transmission was deleted
+);
+CREATE INDEX IF NOT EXISTS radio_changes_id ON radio_changes(traffic_id);
+CREATE INDEX IF NOT EXISTS radio_changes_system ON radio_changes(system, seq);
+"""
+# The triggers an earlier build of this branch hung on the tables: taken off at every start
+OLD_CHANGE_TRIGGERS = tuple(f"radio_changes_{t}_{w}" for t, ws in (("t", "ins upd del"), ("l", "ins upd del"), ("k", "ins del"),
+                                                                    ("n", "ins upd del"), ("a", "ins upd del")) for w in ws.split())
+CHANGES_RETRY_S = 60.0                # a broken change log is tried again after this long
+CHANGES_BUSY_MS = 200                 # the change log waits this long for the database's write lock, no more
+CHANGES_TRIM_EVERY = 500              # the change log is trimmed to CHANGES_KEPT every this many transmissions logged
 ID_NOTES = ("none", "undecoded", "weak")    # why an FG1 key-up has no radio ID (radio_traffic.id_note, #163)
 RELINK_MAX = 2000                           # a radio just named: at most this many of its unnamed transmissions
 EVIDENCE_MAX = 64 * 1024                    # an emergency's raw call record (radio_traffic.evidence), at most
@@ -129,6 +176,7 @@ CREATE TABLE IF NOT EXISTS radio_activity (
   radios TEXT NOT NULL DEFAULT '',      -- radio IDs heard that minute, comma-separated (encrypted sources)
   PRIMARY KEY (source, minute)
 );
+CREATE INDEX IF NOT EXISTS radio_activity_minute ON radio_activity(minute);
 """
 # A link that keeps its transmission: any but an unconfirmed mention / fireground one
 SURE_LINK = ("(l.why NOT IN ('mention', 'fireground') OR EXISTS (SELECT 1 FROM radio_link_kept k "
@@ -159,8 +207,17 @@ class Comms:
         self.names_ours = None  # text -> [our unit codes] (the feed's matcher, #115): a page not ours naming them
         self.on_text = None     # traffic id -> None: a transcript arrived or changed (status suggestions, #37)
         self._revs: dict = {}   # name -> (rev, value): what _per_rev made
+        self.changes_broken = False      # an entry couldn't be written: every ?changed= answers reload (flush_changes)
+        self.changes_floor = 0           # cursors below this are told to reload (the log has a gap before it)
+        self._pending: list = []         # (id, system | None, gone) touched in the open transaction
+        self._retry_at = 0.0             # a broken log: when to try writing to it again
+        self._said_broken = False
+        self.ours_rev = 0                # changes every reader may know of (rev_for)
+        self.log = lambda m: None        # set by the CAD
+        self._logged = 0                 # transmissions logged since the change log was last trimmed
         with self.store.lock:
             self.store.db.executescript(KEPT_SCHEMA)
+        self._open_changes()
         self._drop_channel_links()
 
     def _drop_channel_links(self) -> None:
@@ -168,7 +225,8 @@ class Comms:
         (#163). A person's own (manual) links stay."""
         try:
             with self.store.tx() as db:
-                db.execute("DELETE FROM radio_links WHERE why = 'channel'")
+                if db.execute("DELETE FROM radio_links WHERE why = 'channel'").rowcount:
+                    self.touch_reset()
         except Exception:
             pass                # no comms tables yet (a fresh store migrates first)
 
@@ -205,7 +263,9 @@ class Comms:
             skey = str(t.get("source_key") or "") or sources.of_row(t.get("source") or "", t.get("talkgroup"), system,
                                                                     air=mhz is not None)
             system = system or (sources.COUNTY if p25 else "airband" if mhz is not None else "analog")
-            src = (skey, system, str(t.get("group") or "")[:60], str(t.get("service") or "")[:16],
+            # no service given (a caller from before #415): an airband row is air, an analog channel is ours: fire
+            given = str(t.get("service") or "") or ("" if p25 else "air" if mhz is not None else "fire")
+            src = (skey, system, str(t.get("group") or "")[:60], given[:16],
                    int(bool(t.get("ours")) and not other), str(t.get("dept") or "")[:60], str(t.get("tier") or "")[:16])
             disp = 0 if other else disp          # "60 Ctrl ..." is the county's dispatcher, never another system's
             rigs = [] if other else rigs
@@ -229,6 +289,7 @@ class Comms:
                 db.execute('UPDATE radio_traffic SET source = ?, system = ?, "group" = ?, service = ?, ours = ?, dept = ?, '
                            "tier = ? WHERE id = ?", (*src, tid))
                 self._count(db, skey, start, max(0.0, float(t.get("end") or start) - start))
+            self.touch(tid)
             if other:
                 # Another system's units never put traffic on our incidents by a rule (#415): no unit, airport or
                 # dispatcher link. Only a person's own link does (link()).
@@ -251,6 +312,10 @@ class Comms:
                 self._dispatcher_links(db, tid, call_id, turn, bool(disp), links)
             self.rev += 1
             out = sorted(r[0] for r in db.execute("SELECT incident_id FROM radio_links WHERE traffic_id = ?", (tid,)))
+        self._logged += 1
+        if self._logged >= CHANGES_TRIM_EVERY:
+            self._logged = 0
+            self._trim_changes()
         self._heard(tid)
         return out
 
@@ -274,6 +339,7 @@ class Comms:
         if not labels:
             return 0
         with self.store.tx() as db:
+            self.touch_reset()
             return db.execute("UPDATE radio_traffic SET source = 'air:' || channel, system = 'airband', service = 'air', "
                               f"ours = 0 WHERE talkgroup IS NULL AND system != 'airband' AND channel IN "
                               f"({','.join('?' * len(labels))})", labels).rowcount
@@ -386,13 +452,13 @@ class Comms:
                     if why == "unit":
                         self._auto(db, s["id"], iid, "dispatcher", unit)
 
-    @staticmethod
-    def _auto(db, tid: str, iid: int, why: str, unit: str) -> None:
+    def _auto(self, db, tid: str, iid: int, why: str, unit: str) -> None:
         """An auto link, unless a person took this transmission off that event (radio_link_exclusions)."""
         db.execute("INSERT OR IGNORE INTO radio_links (traffic_id, incident_id, why, unit) SELECT ?, ?, ?, ? "
                    "WHERE NOT EXISTS (SELECT 1 FROM radio_link_exclusions WHERE traffic_id = ? AND incident_id = ?)",
                    (tid, iid, why, unit, tid, iid))
 
+        self.touch(tid)
     def relink(self, system: str, radio_id: str, unit: str) -> list[int]:
         """A radio ID just named (the new-ID prompt, sizeup/cad/newids.py, or Settings > Radios): each of its
         transmissions logged with no rig (newest RELINK_MAX) gets that rig, and goes on the events the unit was on
@@ -414,6 +480,7 @@ class Comms:
             for r in rows:
                 db.execute("UPDATE radio_traffic SET rig = ?, id_note = '', updated_at = ? WHERE id = ?",
                            (unit, self.clock(), r["id"]))
+                self.touch(r["id"])
                 mine: dict[int, tuple[str, str]] = {}
                 for e in db.execute(self.ON_EVENT_BY_UNIT, (unit, r["start"], r["start"])).fetchall():
                     mine[e["incident_id"]] = ("unit", unit)
@@ -457,6 +524,7 @@ class Comms:
                 n += db.execute("INSERT OR IGNORE INTO radio_links (traffic_id, incident_id, why, unit) SELECT ?, ?, 'page', '' "
                                 "WHERE NOT EXISTS (SELECT 1 FROM radio_link_exclusions WHERE traffic_id = ? AND incident_id = ?)",
                                 (pid, iid, pid, iid)).rowcount
+                self.touch(pid)
             if n:
                 self.rev += 1
         return n
@@ -472,6 +540,7 @@ class Comms:
             old = db.execute("SELECT why FROM radio_links WHERE traffic_id = ? AND incident_id = ?", (tid, iid)).fetchone()
             if old is not None:
                 return {"linked": False, "why": old["why"]}
+            self.touch(tid)
             db.execute("DELETE FROM radio_link_exclusions WHERE traffic_id = ? AND incident_id = ?", (tid, iid))
             db.execute("INSERT INTO radio_links (traffic_id, incident_id, why, unit) VALUES (?, ?, 'manual', ?)",
                        (tid, iid, operator))
@@ -493,6 +562,7 @@ class Comms:
             old = db.execute("SELECT why, unit FROM radio_links WHERE traffic_id = ? AND incident_id = ?", (tid, iid)).fetchone()
             if old is None:
                 return {"unlinked": False, "why": ""}
+            self.touch(tid)
             db.execute("DELETE FROM radio_links WHERE traffic_id = ? AND incident_id = ?", (tid, iid))
             db.execute("DELETE FROM radio_link_kept WHERE traffic_id = ? AND incident_id = ?", (tid, iid))
             auto = old["why"] != "manual"
@@ -510,6 +580,7 @@ class Comms:
         """New text for a transmission. alt {text, model}: the other engine's transcript, kept to compare
         ("both": Amazon Transcribe's is the text, whisper's the alternative)."""
         with self.store.tx() as db:
+            self.touch(tid)
             if alt is not None:
                 db.execute("UPDATE radio_traffic SET alt_text = ?, alt_model = ? WHERE id = ?",
                            (str(alt.get("text") or ""), str(alt.get("model") or ""), tid))
@@ -521,9 +592,23 @@ class Comms:
             self._heard(tid)
         return bool(n)
 
+    def set_stt(self, tid: str, status: str, model: str) -> bool:
+        """Where a transmission's speech-to-text stands, its text left as it is: the status ("pending", "error") and
+        the engine doing it or that failed (model), so the log never says "Transcribing on the hub (AWS)" for a clip
+        whisper took over from AWS, or one that failed. Only a row still waiting (pending or remote, no text): a text
+        that came first (a fast whisper, a late AWS answer) is never put back to waiting or failed."""
+        with self.store.tx() as db:
+            n = db.execute("UPDATE radio_traffic SET status = ?, model = ?, updated_at = ? WHERE id = ? "
+                           "AND status IN ('pending', 'remote') AND text = ''",
+                           (status, model, self.clock(), tid)).rowcount
+            if n:
+                self.rev += 1
+        return bool(n)
+
     def set_alt(self, tid: str, alt: dict) -> bool:
         """The other engine's text ("both"), the transcript left as it is."""
         with self.store.tx() as db:
+            self.touch(tid)
             n = db.execute("UPDATE radio_traffic SET alt_text = ?, alt_model = ?, updated_at = ? WHERE id = ?",
                            (str(alt.get("text") or ""), str(alt.get("model") or ""), self.clock(), tid)).rowcount
             if n:
@@ -534,6 +619,7 @@ class Comms:
         """A re-run (re-transcribe) is over: when, and what came of it (changed | same | failed: why),
         even when the text is the same, so the page that asked sees it end."""
         with self.store.tx() as db:
+            self.touch(tid)
             n = db.execute("UPDATE radio_traffic SET rerun_at = ?, rerun_result = ?, updated_at = ? WHERE id = ?",
                            (self.clock(), result, self.clock(), tid)).rowcount
             if n:
@@ -600,27 +686,37 @@ class Comms:
         alarms = bool(self.store.q("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'alarms'"))
         record = "emergency = 1 OR kept != ''" + (" OR id IN (SELECT traffic_id FROM alarms)" if alarms else "")
         n = 0
+        noted = 0                                      # rows noted to the change log one by one; past CHANGES_MAX: a reset
         for cond, params, days in self._groups(tpol, apol):
             cutoff, after = now - days * 86400, float("-inf")
             while True:
                 rows = self.store.q(
-                    f"SELECT rowid AS r, start FROM radio_traffic WHERE {cond} AND start < ? AND start >= ? "
+                    f"SELECT rowid AS r, id, system, start FROM radio_traffic WHERE {cond} AND start < ? AND start >= ? "
                     f"AND id NOT IN (SELECT l.traffic_id FROM radio_links l WHERE {SURE_LINK}) "
                     f"AND NOT (start >= ? AND ({record})) ORDER BY start LIMIT ?",
                     (*params, cutoff, after, now - KEEP_RECORD_S, self.PRUNE_BATCH))
                 if not rows:
                     break
                 with self.store.tx() as db:            # the conditions again: a link confirmed since the look keeps it
-                    deleted = db.executemany(f"DELETE FROM radio_traffic WHERE rowid = ? AND NOT EXISTS (SELECT 1 FROM "
-                                   f"radio_links l WHERE l.traffic_id = radio_traffic.id AND {SURE_LINK}) "
-                                   f"AND NOT (start >= ? AND ({record}))",
-                                   [(r["r"], now - KEEP_RECORD_S) for r in rows]).rowcount
-                n += deleted
+                    for r in rows:
+                        gone = db.execute(f"DELETE FROM radio_traffic WHERE rowid = ? AND NOT EXISTS (SELECT 1 FROM "
+                                          f"radio_links l WHERE l.traffic_id = radio_traffic.id AND {SURE_LINK}) "
+                                          f"AND NOT (start >= ? AND ({record}))",
+                                          (r["r"], now - KEEP_RECORD_S)).rowcount
+                        if not gone:
+                            continue
+                        n += 1
+                        noted += 1
+                        if noted <= CHANGES_MAX:       # (the change log: written after the commit, store.after_commit)
+                            self.touch(r["id"], r["system"], gone=True)
+                        elif noted == CHANGES_MAX + 1:
+                            self.touch_reset()         # a big clear-out: the pages ask afresh
                 after = rows[-1]["start"]
                 if len(rows) < self.PRUNE_BATCH:
                     break
                 if pause_s:
                     time.sleep(pause_s)
+        self._trim_changes()
         return n
 
     def kept_for_events(self, ids: list[str]) -> set[str]:
@@ -655,6 +751,7 @@ class Comms:
                     new.append(dict(t, names=names, ours=bool(is_ours(names))))
                 if new != tones:
                     db.execute("UPDATE radio_traffic SET tones = ?, updated_at = ? WHERE id = ?", (json.dumps(new), self.clock(), r["id"]))
+                    self.touch(r["id"])
                     n += 1
         if n:
             self.rev += 1
@@ -773,6 +870,399 @@ class Comms:
         self._decorate(main + other)
         main = sorted(main + notes, key=lambda r: -r["start"])[:main_limit]
         return main, other
+
+    # ---- the Radio page's views (#415): one page of one filter, older pages by a keyset, changes by a cursor --------
+
+    def _ours_branches(self, main_tgs, not_main) -> list[tuple[str, list]]:
+        """"Our calls" as index walks (as split()'s Main, #241): the analog channels but the airband, and each talkgroup
+        marked Main, the county system's only (a talkgroup number alone is never read: #409)."""
+        fm = "t.talkgroup IS NULL" + (f" AND t.channel NOT IN ({','.join('?' * len(not_main))})" if not_main else "")
+        return [(fm, list(not_main))] + [("t.talkgroup = ? AND t.system IN ('', ?)", [int(tg), sources.COUNTY])
+                                         for tg in main_tgs]
+
+    # ---- the change log (radio_changes): told after the write, never part of it ----------------------------------
+
+    def _open_changes(self) -> None:
+        """The change log at the start: made, or made again when it is an older shape. An earlier build's triggers are
+        taken off. Failing: no log, no harm."""
+        db = self.store.db
+        self.store.after_commit, self.store.after_rollback, self.store.touch = self.flush_changes, self._forget_changes, self.touch
+        with self.store.lock:
+            try:
+                for name in OLD_CHANGE_TRIGGERS:
+                    db.execute(f"DROP TRIGGER IF EXISTS {name}")
+                cols = {r[1] for r in db.execute("PRAGMA table_info(radio_changes)")}
+                if cols and not {"seq", "traffic_id", "system", "gone"} <= cols:
+                    db.execute("DROP TABLE radio_changes")
+                db.executescript(CHANGES_SCHEMA)            # (nothing is written here: a start leaves the database as it was)
+                self.changes_broken = False
+            except Exception as e:  # noqa: BLE001 - the radio log itself is what matters
+                self._changes_off(f"could not be made ({type(e).__name__}: {e})")
+
+    def _changes_off(self, why: str) -> None:
+        self.changes_broken = True
+        self._retry_at = time.monotonic() + CHANGES_RETRY_S
+        if not self._said_broken:
+            self._said_broken = True
+            try:
+                self.log(f"CAD: the Radio page's change log is off ({why}); pages ask afresh instead. Nothing of the radio "
+                         "log is lost")
+            except Exception:  # noqa: BLE001
+                pass
+
+    def touch(self, tid, system: str | None = None, gone: bool = False) -> None:
+        """A row of the Radio page changed in the transaction now open: remembered, and written to the change log once
+        that transaction has committed (flush_changes; dropped if it is rolled back). system: only for a row this
+        writer deleted (it can't be read afterwards). Never raises."""
+        try:
+            self._pending.append((str(tid), system, bool(gone)))
+        except Exception:  # noqa: BLE001
+            pass
+
+    def touch_reset(self) -> None:
+        """Many rows changed at once, or which ones isn't known: every page asks afresh (one entry, and the floor)."""
+        self.touch("reset", None)
+
+    def note_change(self, tid, system: str | None = None, gone: bool = False) -> None:
+        """touch() for a writer outside the store's tx(): written now, unless a transaction is open (then with it)."""
+        self.touch(tid, system, gone)
+        try:
+            if not self.store.db.in_transaction:
+                self.flush_changes()
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _forget_changes(self) -> None:
+        self._pending = []
+
+    def flush_changes(self) -> None:
+        """The change notes of the transaction just committed, written to the log: its own statements, after the fact.
+        Any failure is caught here: the log is marked broken (readers reload) and tried again in CHANGES_RETRY_S.
+        Nothing is raised and no write is repeated: what the notes are about is already stored."""
+        notes, self._pending = self._pending, []
+        if not notes:
+            return
+        try:
+            db = self.store.db
+            with self.store.lock:
+                rows = []
+                for tid, system, gone in dict.fromkeys(notes):
+                    if system is None and tid != "reset" and not tid.startswith("note-"):
+                        r = db.execute("SELECT system FROM radio_traffic WHERE id = ?", (tid,)).fetchone()
+                        system = r[0] if r is not None else None
+                    elif tid.startswith("note-"):
+                        system = ""
+                    rows.append((tid, system, int(gone)))
+                # a change every reader may know of (not another P25 system's alone): rev_for
+                if any(tid == "reset" or (system is not None and system in sources.OURS_SYSTEMS) for tid, system, _ in rows):
+                    self.ours_rev += 1
+                if self.changes_broken and time.monotonic() < self._retry_at:
+                    return
+                if db.in_transaction:                   # (never from tx(); a caller's own transaction: with it)
+                    db.executemany("INSERT INTO radio_changes (traffic_id, system, gone) VALUES (?, ?, ?)", rows)
+                else:
+                    # Another process holding the write lock: give up at once (CHANGES_BUSY_MS, not the connection's
+                    # 5 s): the writer's thread, and the store's lock it holds, are never kept waiting for the log
+                    with self._quick(db):
+                        db.execute("BEGIN IMMEDIATE")
+                        try:
+                            db.executemany("INSERT INTO radio_changes (traffic_id, system, gone) VALUES (?, ?, ?)", rows)
+                            top = db.execute("SELECT MAX(seq) FROM radio_changes").fetchone()[0] or 0
+                            db.execute("COMMIT")
+                        except BaseException:
+                            try:
+                                db.execute("ROLLBACK")
+                            except Exception:  # noqa: BLE001
+                                pass
+                            raise
+                    if self.changes_broken or any(r[0] == "reset" for r in rows):
+                        # written again after a gap, or a reset: what was missed can't be told: older cursors reload
+                        self.changes_floor = int(top)
+                        self.changes_broken = self._said_broken = False
+        except Exception as e:  # noqa: BLE001 - never the writer's problem
+            self._changes_off(f"an entry could not be written ({type(e).__name__}: {e})")
+
+    @staticmethod
+    @contextmanager
+    def _quick(db):
+        """The connection's busy timeout held to CHANGES_BUSY_MS for the change log's own statements, then put back."""
+        was = db.execute("PRAGMA busy_timeout").fetchone()[0]
+        db.execute(f"PRAGMA busy_timeout = {CHANGES_BUSY_MS}")
+        try:
+            yield
+        finally:
+            db.execute(f"PRAGMA busy_timeout = {int(was)}")
+
+    def _trim_changes(self) -> None:
+        """The change log held to its newest CHANGES_KEPT (a range on its key): at the start and every
+        CHANGES_TRIM_EVERY transmissions. Its own statement, after the write; a failure is only a longer log."""
+        try:
+            with self.store.lock:
+                if not self.store.db.in_transaction:
+                    with self._quick(self.store.db):
+                        self.store.db.execute("DELETE FROM radio_changes WHERE seq <= (SELECT MAX(seq) FROM radio_changes) - ?",
+                                              (CHANGES_KEPT,))
+        except Exception:  # noqa: BLE001
+            pass
+
+    def rev_for(self, sees: bool | None = None) -> str:
+        """The radio log's rev as this reader may know it (GET /api/cad/comms's rev and the state's comms_rev: the page
+        asks again when it moves). One who may see everything: the log's and the store's own counters. One who may not
+        see another P25 system's traffic: a count of the changes they may know of (every writer notes its change, with
+        its row's system: flush_changes, whether or not the change log itself can be written), so that system's
+        activity never moves it."""
+        if self._sees_context() if sees is None else sees:
+            return f"{self.rev}.{self.store.rev}"
+        return f"o{self.ours_rev}"
+
+    def page(self, main_tgs, not_main=(), *, view: str = "", system: str = "", group: str = "", source=(),
+             service: str = "", tier: str = "", dept: str = "", safety: bool = False, mute=(),
+             before: tuple[float, str] | None = None, changed: int | None = None, at: float | None = None,
+             limit: int = PAGE, unit: str = "", channel: str = "", event: str = "", pcfd: list[str] | None = None,
+             since: float | None = None, until: float | None = None, kind: str = "", text: str = "",
+             emergency: bool = False, context: bool | None = None) -> dict:
+        """One page of the radio log for the Radio page (#415), newest first: {rows, older, newer, next, cursor, reload,
+        gone}.
+
+        view: ours | police | ems | transit | air | all ("" = all). system / group / service / tier / dept: the row's
+        own (sizeup/sourcekeys.py). source: only these sources (keys). safety: only scene-safety rows. mute: sources left
+        out (not with source=): never one of Our calls, and never a row with the emergency button or an alarm. The
+        older filters (unit, channel, event, pcfd, since, until, kind, text, emergency) as in query().
+        context: whether the reader may see another system's traffic (None: #419's gate, _sees_context). False:
+        those rows don't exist for this answer (left out in the SQL itself, before any search of the words).
+
+        before (start, id): the rows older than that one (the keyset: `next` of the page before). at: a page around that
+        time (half newer, half older). older / newer: there are more that way.
+        changed: only what changed since that cursor (a page's `cursor`): rows new or whose transcript, alternative
+        text, links, kept mark or alarm changed (radio_changes: every writer, by triggers), whatever their age; gone:
+        the ids that were deleted or no longer match; reload: too many changed, a note changed, or the cursor is older
+        than what is kept: ask afresh.
+
+        Every view walks an index: ours one walk per channel kind and Main talkgroup (radio_traffic_tg_start), a service
+        radio_traffic_service_start, a source radio_traffic_source_start (a group or a tier: its sources, resolved
+        first), a system radio_traffic_system_start, a department radio_traffic_dept_start, safety its partial index;
+        changes are looked up by id. Notes tagged with a unit ride with ours and all, as in Main."""
+        limit = max(1, min(int(limit), PAGE_MAX))
+        words = [w.lower() for w in text.split()][:8]
+        main_tgs, not_main = sorted({int(t) for t in main_tgs}), tuple(dict.fromkeys(not_main))
+        srcs = list(dict.fromkeys(str(x) for x in source if x))[:SOURCES_MAX]
+        muted = [] if srcs else list(dict.fromkeys(str(x) for x in mute if x))[:MUTE_MAX]
+        sees = self._sees_context() if context is None else bool(context)
+        try:
+            ends = {} if self.changes_broken else self.store.one("SELECT MIN(seq) AS lo, MAX(seq) AS hi FROM radio_changes") or {}
+            hi = int(ends.get("hi") or 0)
+            # the cursor a reader is given: over the entries they may see (another system's activity never moves it)
+            cursor = hi if sees or not hi else int((self.store.one(
+                f"SELECT MAX(seq) AS m FROM radio_changes WHERE system IN {sources.OURS_SQL}") or {}).get("m") or 0)
+            cursor = max(cursor, min(hi, self.changes_floor))
+        except sqlite3.Error:
+            ends, hi, cursor = {}, 0, 0
+        narrowed = bool(srcs or system or group or service or tier or dept or safety or view in SERVICE_VIEWS)
+        out = {"rows": [], "older": False, "newer": False, "next": "", "cursor": cursor, "reload": False, "gone": []}
+
+        cond, args = [], []
+        if not sees:
+            cond.append(f"+t.system IN {sources.OURS_SQL}")
+        for col, val in (("t.system", system), ("t.service", view if view in SERVICE_VIEWS else ""), ("t.service", service)):
+            if val:
+                cond.append(f"{col} = ?")
+                args.append(val)
+        if dept:
+            cond.append("t.dept != '' AND t.dept = ?")           # as radio_traffic_dept_start is declared
+            args.append(dept)
+        ours = self._ours_branches(main_tgs, not_main)
+        ours_sql = "(" + " OR ".join(f"({c})" for c, _ in ours) + ")"
+        ours_args = [a for _, extra in ours for a in extra]
+        if group or tier:
+            # A group and a tier are a source's own: its sources first (one row each, per rev), then one index walk per
+            # source. None: nothing can match, and nothing is read.
+            mine = [r["source"] for r in self.sources_seen()
+                    if (not group or r["group"] == group) and (not tier or r["tier"] == tier)
+                    and (not srcs or r["source"] in srcs)]
+            if not mine:
+                return out
+            if len(mine) <= BRANCH_MAX:
+                srcs = mine
+            for col, val in (('t."group"', group), ("t.tier", tier)):
+                if val:
+                    cond.append(f"+{col} = ?")
+                    args.append(val)
+        if muted:
+            # a muted source's rows are left out, but never one of Our calls and never an emergency (#128)
+            keep = ["+t.emergency = 1", ours_sql] + (["t.id IN (SELECT traffic_id FROM alarms)"] if has_alarms(self.store) else [])
+            cond.append(f"(+t.source NOT IN ({','.join('?' * len(muted))}) OR " + " OR ".join(keep) + ")")
+            args += muted + ours_args
+        hint = ""
+        if safety:
+            # few rows: from the safety index, the view and the sources as plain conditions on them
+            hint = " INDEXED BY radio_traffic_safety"
+            cond.append(SAFETY_WHERE)
+            if srcs:
+                cond.append(f"+t.source IN ({','.join('?' * len(srcs))})")
+                args += srcs
+            if view == "ours":
+                cond.append(ours_sql.replace("t.talkgroup", "+t.talkgroup"))
+                args += ours_args
+            branches = [("1", [])]
+        elif srcs:
+            branches = [("t.source = ?", [k]) for k in srcs]
+            if view == "ours":
+                cond.append(ours_sql)
+                args += ours_args
+        elif view == "ours":
+            branches = ours
+        else:
+            branches = [("1", [])]
+
+        w = self._radio_where(unit, channel, event, pcfd, since, until, words, emergency) \
+            if kind in ("", "radio") and channel != NOTES else None
+        notes_ok = kind in ("", "notes") and channel in ("", NOTES) and not emergency and not narrowed
+        radio: list[dict] = []
+        if changed is not None:
+            changed = int(changed)
+            lo = int(ends.get("lo") or 0)
+            if self.changes_broken or changed > hi or changed < self.changes_floor or (lo and changed < lo - 1):
+                return {**out, "reload": True}                   # no log now, a gap, another database's cursor, or older than is kept
+            # Another system's changes are not this reader's to know of: not as rows, not as `gone`, not in the count
+            # (nor an id with any entry of another system's, or of none: radio_changes_id)
+            ours = sources.OURS_SQL
+            mine = "" if sees else (
+                f" AND (c.traffic_id = 'reset' OR c.system IN {ours}) AND NOT EXISTS (SELECT 1 FROM radio_changes x WHERE x.traffic_id = c.traffic_id "
+                f"AND x.traffic_id != 'reset' AND (x.system IS NULL OR x.system NOT IN {ours})) AND NOT EXISTS (SELECT 1 FROM radio_traffic t "
+                f"WHERE t.id = c.traffic_id AND t.system NOT IN {ours})")
+            ids = [r["traffic_id"] for r in self.store.q(
+                f"SELECT DISTINCT c.traffic_id FROM radio_changes c WHERE c.seq > ? AND c.seq <= ?{mine} LIMIT ?",
+                (changed, hi, CHANGES_MAX + 1))]
+            if "reset" in ids:
+                return {**out, "reload": True}
+            if len(ids) > CHANGES_MAX or (notes_ok and any(i.startswith("note-") for i in ids)):
+                return {**out, "reload": True}
+            ids = [i for i in ids if not i.startswith("note-")]
+            if ids and w is not None:
+                any_branch = "(" + " OR ".join(f"({c})" for c, _ in branches) + ")"
+                radio = self.store.q(
+                    # CROSS JOIN: the ids first, each row by its key, whatever index the view's own conditions offer
+                    "SELECT t.*, 'radio' AS kind FROM json_each(?) j CROSS JOIN radio_traffic t ON t.id = j.value WHERE "
+                    + " AND ".join(f"({x})" for x in w[0] + cond + [any_branch]),
+                    (json.dumps(ids), *w[1], *args, *[a for _, extra in branches for a in extra]))
+            have = {r["id"] for r in radio}
+            out["gone"] = [i for i in ids if i not in have]      # deleted, or no longer what was asked: off the page
+        elif w is not None:
+            where, wargs = w[0] + cond, w[1] + args
+            if at is not None:
+                half = max(1, limit // 2)
+                new = self._walk(branches, where + ["t.start >= ?"], wargs + [float(at)], half + 1, asc=True, hint=hint)
+                old = self._walk(branches, where + ["t.start < ?"], wargs + [float(at)], limit - half + 1, hint=hint)
+                out["newer"], out["older"] = len(new) > half, len(old) > limit - half
+                radio = new[:half] + old[:limit - half]
+            else:
+                if before is not None:
+                    where = where + ["(t.start < ? OR (t.start = ? AND t.id < ?))"]
+                    wargs = wargs + [float(before[0]), float(before[0]), str(before[1])]
+                radio = self._walk(branches, where, wargs, limit + 1, hint=hint)
+                out["older"] = len(radio) > limit
+                radio = radio[:limit]
+        notes: list[dict] = []
+        if notes_ok and changed is None:
+            lo, hi = since, until
+            if at is not None and radio:
+                lo, hi = max(lo or 0.0, min(r["start"] for r in radio)), min(hi or 1e18, max(r["start"] for r in radio))
+            elif before is not None:
+                hi = min(hi or 1e18, float(before[0]) - 1e-6)
+            notes = self._notes(unit, event, pcfd, lo, hi, limit + 1, words)
+            if at is None:
+                out["older"] = out["older"] or len(notes) > limit
+                notes = notes[:limit]
+        self._decorate(radio)
+        mains = set(main_tgs)
+        for r in radio:
+            r["main"] = (r["channel"] not in not_main if r["talkgroup"] is None
+                         else r["talkgroup"] in mains and r["system"] in ("", sources.COUNTY))
+        for r in notes:
+            r["main"] = True
+        rows = sorted(sorted(radio + notes, key=lambda r: r["id"], reverse=True), key=lambda r: -r["start"])
+        if changed is None and at is None and len(rows) > limit:
+            rows, out["older"] = rows[:limit], True
+        out["rows"] = rows
+        if rows:
+            last = rows[-1]
+            out["next"] = f"{last['start']!r},{last['id']}"
+        return out
+
+    def _walk(self, branches, where, args, limit: int, asc: bool = False, hint: str = "") -> list[dict]:
+        """The newest (asc: the oldest) `limit` rows over these branches (one index walk each), in that order."""
+        way = "ASC" if asc else "DESC"
+        got: list[dict] = []
+        for c, extra in branches:
+            got += self.store.q(f"SELECT t.*, 'radio' AS kind FROM radio_traffic t{hint} WHERE "
+                                + " AND ".join(f"({x})" for x in where + [c])
+                                + f" ORDER BY t.start {way}, t.id {way} LIMIT ?", (*args, *extra, limit))
+        if len(branches) > 1:
+            seen: dict[str, dict] = {}
+            for r in got:
+                seen.setdefault(r["id"], r)
+            got = sorted(seen.values(), key=lambda r: (r["start"], r["id"]), reverse=not asc)[:limit]
+        return got
+
+    def sources_seen(self) -> list[dict]:
+        """Every source in the log or the activity table: [{source, channel, system, group, service, tier, talkgroup,
+        last}] (last: its newest transmission or active minute, unix). A skip along radio_traffic_source_start and the
+        activity table's key: one look-up per source, not a scan. Once per rev."""
+        return self._per_rev("sources_seen", self._sources_seen)
+
+    def _sources_seen(self) -> list[dict]:
+        skip = ("WITH RECURSIVE g(k) AS (SELECT MIN(source) FROM {t} WHERE source > '' UNION ALL "
+                "SELECT (SELECT MIN(source) FROM {t} WHERE source > g.k) FROM g WHERE g.k IS NOT NULL) "
+                "SELECT k FROM g WHERE k IS NOT NULL")
+        keys = dict.fromkeys(r["k"] for t in ("radio_traffic", "radio_activity") for r in self.store.q(skip.format(t=t)))
+        out = []
+        for k in keys:
+            row = self.store.one('SELECT channel, system, "group" AS grp, service, tier, talkgroup, start FROM radio_traffic '
+                                 "WHERE source = ? ORDER BY start DESC LIMIT 1", (k,)) or {}
+            act = self.store.one("SELECT MAX(minute) AS m FROM radio_activity WHERE source = ?", (k,)) or {}
+            last = max(float(row.get("start") or 0.0), float(act.get("m") or 0) * 60.0)
+            out.append({"source": k, "channel": row.get("channel") or "", "system": row.get("system") or "",
+                        "group": row.get("grp") or "", "service": row.get("service") or "", "tier": row.get("tier") or "",
+                        "talkgroup": row.get("talkgroup"), "last": last or None})
+        return out
+
+    def minute_counts(self, now: float, minutes: int = COUNT_MINUTES) -> dict[str, list[list[int]]]:
+        """{source: [[minutes ago, calls], ...]} over the last `minutes` (0: the minute of `now`), only the minutes with
+        calls, newest first: from the activity table (radio_activity_minute). The sources' unread counts and the time
+        bar (#415)."""
+        end = int(now // 60)
+        out: dict[str, list[list[int]]] = {}
+        for r in self.store.q("SELECT source, minute, calls FROM radio_activity WHERE minute > ? AND minute <= ? "
+                              "ORDER BY minute DESC", (end - minutes, end)):
+            out.setdefault(r["source"], []).append([end - r["minute"], int(r["calls"])])
+        return out
+
+    def emergencies(self, now: float, window: float = EM_WINDOW_S) -> dict[str, dict]:
+        """{source: {emergency: "ours" | "other", stuck}} for the sources with an alarm of ours still open: an alarm
+        or a notice the CAD raised on a transmission in the last `window` (sizeup/cad/alarms.py) that nobody has
+        cleared. ours: an alarm (alarm_level alarm); other: a notice (someone else's emergency button, #128; stuck: the
+        radio its flag is stuck on, #190). Seen (acknowledged) but not cleared: still open, still marked.
+        Only what has an alarm row, so every mark can be cleared (All clear); a bare emergency flag with no alarm, and
+        any row of another P25 system (context: it never raises an alarm), marks nothing."""
+        if not has_alarms(self.store):
+            return {}
+        rows = self.store.q("SELECT t.* FROM radio_traffic t WHERE t.id IN (SELECT traffic_id FROM alarms "
+                            "WHERE at >= ? ORDER BY at DESC LIMIT 200)", (now - window,))
+        with_alarms(self.store, rows)
+        out: dict[str, dict] = {}
+        for r in rows:
+            if not r["alarm_id"] or r["clear_at"] or sources.is_context(r):
+                continue
+            e = out.setdefault(r["source"], {"emergency": "other", "stuck": ""})
+            if r["alarm_level"] == "alarm":
+                e["emergency"] = "ours"
+            e["stuck"] = e["stuck"] or r["alarm_stuck"] or ""
+        return out
+
+    def source_names(self, context: bool = True) -> list[str]:
+        """The channels in the log, newest heard first; context False: not another system's."""
+        rows = [r for r in self.sources_seen() if context or not sources.is_context(r)]
+        return [r["channel"] for r in sorted(rows, key=lambda r: -(r["last"] or 0)) if r["channel"]]
 
     def _radio(self, unit, channel, event, pcfd, since, until, limit, words=(), emergency=False) -> list[dict]:
         w = self._radio_where(unit, channel, event, pcfd, since, until, words, emergency)
@@ -984,7 +1474,8 @@ def _tones(r: dict, paging=(), names_ours=None) -> dict:
         except (TypeError, ValueError):
             r[k] = []
     r["page"] = page_kind(r["tones"], r.get("channel") or "", paging)
-    r["names_ours"] = (names_ours(r.get("text") or "") if names_ours and r["page"] in ("other", "unknown", "none")
+    bare = r["page"] in ("unknown", "none")       # a list of bare numbers counts only then (feed.Matcher.units_named)
+    r["names_ours"] = (names_ours(r.get("text") or "", bare) if names_ours and r["page"] in ("other", "unknown", "none")
                        else [])
     return r
 

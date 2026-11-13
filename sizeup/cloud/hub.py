@@ -84,7 +84,8 @@ from typing import Callable
 from sizeup import channels, sourcekeys
 from sizeup import tz
 from sizeup import app as app_mod
-from sizeup.app import AIRBAND_FIRST, CLIP_ID, RENAMED, STT_FIRST, App, AwsJob, channels_model, traffic_key
+from sizeup.app import (AIRBAND_FIRST, CLIP_ID, RENAMED, STT_FIRST, WHISPER_FALLBACK_STATION, App, AwsJob, channels_model,
+                        traffic_key)
 from sizeup.cad.dispatcher import AudioUnavailable
 from sizeup.cad.radios import fm_system
 from sizeup.cloud.autoupdate import describe
@@ -661,6 +662,11 @@ class HubApp(App):
             log("health: no push for station alerts (no status or alerts topic in effect): Settings > Health and log only")
         self.live = self.hub.live                      # main() sets on_change to push the display
         self.cad.live = self.live.state
+        # the Radio page's source tree (#415): the station's talkgroups and systems, as its state says them
+        self.cad.source_rows = lambda: self.hub.talkgroups or []
+        self.cad.source_systems = lambda: {self.tg.county: "County", **{
+            str(x.get("name")): str(x.get("label") or x.get("name")) for x in ((self.hub.status or {}).get("p25_systems") or [])
+            if isinstance(x, dict) and x.get("name")}}
         self.paging_state = self.live.paging_state     # the station's page going out now
         self.cad.remote_voice = self.hub.render_voice
         self.cad.audio_blobs = self.audio
@@ -907,6 +913,8 @@ class HubApp(App):
         if job.alt is not None:                    # "both": the station's text stays
             return
         self._aws_asked[job.id] = time.time()      # (the sweep: no text from the station either -> failed)
+        self._stt_state(job.page if job.kind == "page" and job.page is not None else self._find(job.id)[0], job.id,
+                        "pending", f"{WHISPER_FALLBACK_STATION} (AWS failed: {why[:80]})")
 
         def ask() -> None:
             err = ""
@@ -925,14 +933,26 @@ class HubApp(App):
                 n, err = 0, str(e)
             if n:
                 return
+            item = job.page if job.kind == "page" and job.page is not None else self._find(job.id)[0]
+            if item is not None and (getattr(item, "raw", "") or getattr(item, "text", "")
+                                     or getattr(item, "status", "") not in ("pending", "remote")):
+                return                             # its text came meanwhile (a late AWS answer, the station's whisper)
             note = f"{channels_model()} failed ({why[:80]}); station: {err or 'no recording to re-run'}"
             if job.kind == "page" and job.page is not None:
                 job.page.status, job.page.model = "error", note
+                self._stt_row(job.id, "error", note)
                 self.sync()
             else:
                 self._retext(job.id, "", "error", None, note, why="transcription failed:")
                 self.sync()
         threading.Thread(target=ask, name="aws-fallback", daemon=True).start()
+
+    def _stt_state(self, item, cid: str, status: str, model: str) -> None:
+        """The page or transmission (in memory) and its log row (App._stt_row) say the same: which engine has it now,
+        so a later write of the item to the log (_page_to_cad, _to_cad) never puts back "(AWS)"."""
+        if item is not None and not (getattr(item, "raw", "") or getattr(item, "text", "")):
+            item.status, item.model = status, model
+        self._stt_row(cid, status, model)
 
     def _aws_pending(self) -> list[tuple[object, str, str]]:
         """Every page and transmission still waiting for Amazon Transcribe: (item, its channel key, kind)."""
@@ -957,6 +977,7 @@ class HubApp(App):
             pcm = wav_pcm(wav, getattr(item, "voice_offset_s", 0.0) if page is not None else 0.0) if wav else None
             if ok and pcm is not None and item.end > now - RECOVER_S:
                 self._aws_since[item.id] = now
+                self._stt_state(item, item.id, "pending", channels_model())    # the log says AWS again
                 self.aws.submit(key, AwsJob(kind, item.id, key, page=page), pcm)
                 again += 1
                 continue
@@ -1014,6 +1035,7 @@ class HubApp(App):
         item.flagged = True
         if kind == "page":
             item.status, item.model = "error", note
+            self._stt_row(item.id, "error", note)
         else:
             self._retext(item.id, "", "error", None, note, why="transcription failed:")
         self.sync()
@@ -1095,8 +1117,24 @@ class HubApp(App):
         if "p25_systems" not in (self.hub.status or {}):
             # a station from before #409 refuses a whole map with a "p25:<system>:<tg>" key in it: left out for it
             prefs = {k: v for k, v in prefs.items() if not k.startswith("p25:")}
+        # each FM channel's squelch: only to a station that takes it (one before it refuses a 4th argument)
+        sq = None
+        if self._squelch_ok():          # what of it fits the station's channels, as it reported them (the station agrees)
+            kinds = {r.get("label"): r.get("channel_kind") for r in self.hub.radio_rows() if r.get("channel_kind")}
+            sq = channels.fit_squelch(self._sq_ov, kinds, self.squelch_defaults)[0]
         return {"prefs": prefs, "aws": {"ok": ok, "why": why, "reserve": reserve}, "tones": dict(self._tone_ov),
-                "sig": channels.sig(prefs, ok, self._tone_ov, reserve)}
+                "squelch": sq, "sig": channels.sig(prefs, ok, self._tone_ov, reserve, sq)}
+
+    def squelch_defaults(self, key: str) -> dict:
+        """The station's receiver defaults, as it reported them (its config's, not the hub's)."""
+        hub = getattr(self, "hub", None)          # (None while App's __init__ runs)
+        rows = hub.radio_rows() if hub is not None else []
+        row = next((r for r in rows if r.get("label") == key), None) or {}
+        d = row.get("squelch_default")
+        return {f: d.get(f) for f in channels.SQUELCH} if isinstance(d, dict) else super().squelch_defaults(key)
+
+    def _squelch_ok(self) -> bool:
+        return bool(((self.hub.status or {}).get("channels") or {}).get("squelch_ok"))
 
     def channels_check_tones(self) -> None:
         """A pair named here: the station gets it with the next channel push (the signature changed)."""
@@ -1120,7 +1158,8 @@ class HubApp(App):
 
         def push() -> None:
             try:
-                res = self.hub.remote("set_channel_prefs", want["prefs"], want["aws"], want["tones"])
+                res = self.hub.remote("set_channel_prefs", want["prefs"], want["aws"], want["tones"],
+                                      *([want["squelch"]] if want["squelch"] is not None else []))
                 if isinstance(res, dict) and self.hub.status is not None:
                     self.hub.status["channels"] = res
                 self._chan_push["error"] = ""
@@ -1140,6 +1179,8 @@ class HubApp(App):
         got = (self.hub.status or {}).get("channels") or {}
         if not self.hub.status:
             return {"state": "offline", "detail": "No station has reported yet: these apply when it connects"}
+        if got.get("sig") == want["sig"] and self._sq_ov and not self._squelch_ok():
+            return {"state": "pending", "detail": "The station runs an older sizeup: update it to apply the squelch"}
         if got.get("sig") == want["sig"]:
             return {"state": "applied", "detail": "Applied on the station"}
         if not self.hub.connected():

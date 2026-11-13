@@ -50,7 +50,7 @@ import threading
 import time
 
 from sizeup import sourcekeys as sources
-from sizeup.cad.comms import AUTO_UNSURE, Comms
+from sizeup.cad.comms import AUTO_UNSURE
 from sizeup.cad.feed import unit_forms
 from sizeup.cad.sources import ABBR, INTERSECTION, NOISE, PAGING, SUFFIXES, _street, place_key, same_place, street_part
 
@@ -258,7 +258,9 @@ class RadioLog:
     def _unit_rx(self, code: str, spoken: str) -> re.Pattern:
         k = (code, spoken)
         if k not in self._rx:
-            self._rx[k] = re.compile(r"(?<![\w])(?:" + "|".join(unit_forms(code, spoken)) + r")(?![\w])", re.I)
+            r = self.store.one("SELECT kind FROM units WHERE name = ?", (code,)) if code.isdigit() else None
+            kind = str((r or {}).get("kind") or "")          # a chief's number guarded (feed.unit_forms), an EMS unit's not
+            self._rx[k] = re.compile(r"(?<![\w])(?:" + "|".join(unit_forms(code, spoken, kind)) + r")(?![\w])", re.I)
         return self._rx[k]
 
     def context(self, lo: float, hi: float) -> dict:
@@ -401,7 +403,7 @@ class RadioLog:
                 return []                                # more than that: it isn't about one call
             for iid, (why, unit) in new.items():
                 before = db.total_changes
-                Comms._auto(db, tid, iid, why, unit)
+                self.cad.comms._auto(db, tid, iid, why, unit)
                 if db.total_changes != before:
                     got.append(iid)
                     if backfill:
@@ -540,6 +542,7 @@ class RadioLog:
         """Not a full department any more (a later page): the links only widening made that no person kept are taken
         off, and each unit's window is its own again. How many links went."""
         with self.store.tx() as db:
+            self.cad.comms.touch_reset()          # which rows: not listed here: the Radio pages ask afresh
             n = db.execute("DELETE FROM radio_links WHERE incident_id = ? AND why = 'mention' AND traffic_id IN "
                            "(SELECT traffic_id FROM radiolog_backfill WHERE incident_id = ? AND widened = 1) AND NOT EXISTS "
                            "(SELECT 1 FROM radio_link_kept k WHERE k.traffic_id = radio_links.traffic_id "
@@ -560,6 +563,7 @@ class RadioLog:
         """A unit taken off the incident before it went: its mention links there that no person kept are removed (the
         backfill's and the live ones), and it is matched afresh if it comes back. How many links went."""
         with self.store.tx() as db:
+            self.cad.comms.touch_reset()          # which rows: not listed here: the Radio pages ask afresh
             n = db.execute("DELETE FROM radio_links WHERE incident_id = ? AND why = 'mention' AND unit = ? AND NOT EXISTS "
                            "(SELECT 1 FROM radio_link_kept k WHERE k.traffic_id = radio_links.traffic_id "
                            "AND k.incident_id = radio_links.incident_id)", (iid, unit)).rowcount
@@ -680,6 +684,7 @@ class RadioLog:
             if t is None or not db.execute("SELECT 1 FROM radio_links WHERE traffic_id = ? AND incident_id = ?",
                                            (tid, iid)).fetchone():
                 return {"kept": False, "error": "not on this event"}
+            self.cad.comms.touch(tid)
             if undo:
                 n = db.execute("DELETE FROM radio_link_kept WHERE traffic_id = ? AND incident_id = ?", (tid, iid)).rowcount
             else:

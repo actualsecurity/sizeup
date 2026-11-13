@@ -23,13 +23,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
-from sizeup import sourcekeys
-from sizeup import polly
+from sizeup import polly, sourcekeys, tiers
 from sizeup.cad import airport, dispatcher, eta, export, mapview, runcards
 from sizeup.cad.activity import Activity
 from sizeup.cad.alarms import Alarms
 from sizeup.cad.automode import AutoDispatch
-from sizeup.cad.comms import MAIN_LIMIT, MAX_ROWS, OTHER_LIMIT, Comms
+from sizeup.cad.comms import (COUNT_MINUTES, MAIN_LIMIT, MAX_ROWS, MUTE_MAX, OTHER_LIMIT, PAGE, PAGE_MAX, SOURCES_MAX,
+                              VIEWS, Comms)
 from sizeup.cad.history import AddressHistory
 from sizeup.cad.premise import Premise
 from sizeup.cad.preplan import Preplan
@@ -53,6 +53,8 @@ from sizeup.tts import voices as tts_voices
 
 AUDIO_NAME = re.compile(r"[0-9a-f]{20}")
 COMMS_CACHE_S, COMMS_CACHE_N = 10.0, 32     # GET /api/cad/comms: an answer reused this long, at most this many kept (#284)
+# GET /api/cad/comms: any of these asks for a page of a view (#415, Cad._comms_page), none: Main and Other as before
+COMMS_PAGE_PARAMS = ("view", "system", "group", "source", "service", "tier", "dept", "safety", "mute", "before", "changed", "at")
 COMMS_UNSENT = ("call_id", "turn", "updated_at")   # radio_traffic columns the Radio view never reads (#284: smaller answer)
 FIRE_KINDS = ("chief", "engine", "ladder", "tower", "rescue", "utility", "marine")
 PREVIEW_KEEP_S = 24 * 3600
@@ -234,8 +236,10 @@ class Cad:
             log(f"CAD: seeded {n} radio IDs ({len(self.radios.plan['conflicts'])} conflicts left unmapped)")
         self.comms = Comms(self.store, s.tactical, s.incident_talkgroups, clock=clock, paging=s.paging,
                            airport_tgs=s.airport_talkgroups)
+        self.comms.log = self.log
         self.comms.prune()
         self._comms_cache: dict = {}       # GET /api/cad/comms answers by (filters, revs), COMMS_CACHE_S (#284)
+        self._sources_cache: dict = {}     # GET /api/cad/comms/sources: {may see context: (rev, the tree)}
         # Who is talking on HPN Tower (#252, sizeup/atc_talkers.py): the callsign heard, matched to ADS-B, on each airband
         # row ("atc"), speech-derived (never a radio ID). The app hands it the transcripts and the Aircraft layer's pictures.
         from sizeup.atc_talkers import AtcTalkers
@@ -277,6 +281,11 @@ class Cad:
         self.has_clip: Callable[[str], bool] = lambda cid: False
         # Is this talkgroup "Main" (the station's switch, Settings > Radios)? The app sets it; alone: the incident talkgroups.
         self.main_tg: Callable[[int], bool] = lambda tg: tg in s.incident_talkgroups
+        # The Radio page's source tree (#415, comms_sources): every known talkgroup as the monitor's state lists it
+        # ([{source, system, name, group, service, tier, ours, encrypted, department, last}], App.talkgroups_state; the
+        # hub: the station's), and each P25 system's label ({name: label}). Without them: what the log itself says.
+        self.source_rows: Callable[[], list[dict]] = lambda: []
+        self.source_systems: Callable[[], dict[str, str]] = lambda: {}
         # The maps (sizeup/cad/mapview.py): live unit positions {code: {lat, lon, at, heading?, speed?, source?}}
         # from a future AVL feed (IamResponding, Red Alert, an iPad app; #358). The single input: no provider sets
         # it yet (the source isn't chosen); _feed_position() feeds fixes in the ingest shape for tests and dev.
@@ -419,7 +428,7 @@ class Cad:
         units = [dict(u, position=pos[u["name"]]) if u["name"] in pos else u for u in st["units"]] if pos else st["units"]
         # comms_rev: what GET /api/cad/comms calls its rev; the Radio view and the board ask again only when it moves (#137)
         return dict(st, units=units, map=self.map_slice(units, st["incidents"], pos, now), time=now, rev=rev,
-                    comms_rev=f"{self.comms.rev}.{rev}",
+                    comms_rev=self.comms.rev_for(),
                     talking=self.live(), paging=self.paging(), cloud=self.cloud(), prealert=self.prealert_state(now),
                     airport_alerts=self.airport_alerts_state(now),
                     status_hints=self.status_hints(), alarms=self.alarms_state(now), radio_ids=self.radio_ids(now),
@@ -1555,7 +1564,25 @@ class Cad:
         other talkgroups filled a shared newest 300 and Main showed None): ?main_limit= (MAIN_LIMIT) for Main,
         ?limit= (OTHER_LIMIT) for the rest, the same filters on both; rows: both, newest first; counts and
         limits: {main, other}. ?emergency=1: only transmissions with the emergency button or an alarm
-        (comms.with_alarms puts the alarm on every row)."""
+        (comms.with_alarms puts the alarm on every row).
+
+        The Radio page's views (#415), when any of these is asked (the answer is then one page: {rows, rev, older,
+        newer, next, cursor, reload, view}; rows still say "main"):
+          ?view=ours|police|ems|transit|air|all   ours: our fire channels (Main); a service's sources; all
+          ?system= ?group= ?service= ?tier= ?dept=  the row's own
+          ?source=<key>   only these sources (repeat it, or commas between keys: p25:<system>:<tg>, fm:<label>, air:<label>)
+          ?safety=1       only scene-safety rows (suggested or confirmed)
+          ?mute=<key>,..  sources left out (the viewer's muted ones)
+          ?before=<start>,<id>  the page older than that row (a page's `next`)
+          ?changed=<cursor>     only what changed since a page's `cursor` (new rows, a transcript, links, an alarm seen
+                                or cleared); gone: ids deleted or no longer matching; reload: ask afresh
+          ?at=<unix>      a page around that time
+          ?limit=         rows a page (PAGE; at most PAGE_MAX)
+        Another P25 system's traffic (context) is in an answer only when the reader may see it (#419's one gate,
+        sourcekeys.may_see_context: a signed-in person). Otherwise those rows are not here at all (not their id, time,
+        talker or radio ID), nor their channels and units in the choices; they are left out before the words are searched.
+        Without any of the views' parameters the answer is as it always was, but for each row's `service`, now filled
+        on the airband ("air") and the analog channels ("fire")."""
         def one(k: str) -> str:
             v = (q.get(k) or [""])[0].strip()
             if len(v) > 60:
@@ -1571,8 +1598,9 @@ class Cad:
             except ValueError:
                 raise CadError(f"{k}: unix seconds") from None
         rev = one("rev")
-        talking = self.live()
-        now_rev = f"{self.comms.rev}.{self.store.rev}"
+        talking = self._talking()
+        # (as this reader may know it: not moved by another P25 system's traffic for one who may not see it, #419)
+        now_rev = self.comms.rev_for()
         if rev and rev == now_rev:
             return {"unchanged": True, "rev": rev, "talking": talking}
         # The same filters at the same revs (every screen asks when comms_rev moves; a filter tried again): the answer
@@ -1580,11 +1608,17 @@ class Cad:
         pcfd = [u["name"] for u in self.radios.units if is_pcfd(u)]
         main_tgs = [tg for tg in self.comms.talkgroups() if self.main_tg(tg)]
         # (+ whether this reader may be shown another P25 system's rows, #419: an answer is never another reader's)
-        key = (now_rev, tuple(pcfd), tuple(main_tgs), tuple(sorted((k, tuple(v)) for k, v in q.items() if k != "rev")),
-               self.comms._sees_context())
+        context = self.comms._sees_context()
+        # (kept by the log's and the store's own counters, not the reader's rev: a setting changed is a new answer)
+        mark = (self.comms.rev, self.store.rev)
+        key = (mark, context, tuple(pcfd), tuple(main_tgs),
+               tuple(sorted((k, tuple(v)) for k, v in q.items() if k != "rev")))
         hit = self._comms_cache.get(key)
         if hit is not None and time.monotonic() - hit[0] < COMMS_CACHE_S:
             return {**hit[1], "talking": talking}
+        if any((q.get(k) or [""])[0].strip() for k in COMMS_PAGE_PARAMS):
+            out = self._comms_page(q, one, when, pcfd, main_tgs, now_rev, context)
+            return {**self._comms_keep(key, mark, out), "talking": talking}
         try:
             limit = max(1, min(int(one("limit") or OTHER_LIMIT), MAX_ROWS))
             main_limit = max(1, min(int(one("main_limit") or MAIN_LIMIT), MAX_ROWS))
@@ -1601,21 +1635,171 @@ class Cad:
         for r in other:
             r["main"] = False
         rows = sorted(main + other, key=lambda r: -r["start"])
-        for r in rows:
-            r["has_audio"] = r["kind"] == "radio" and self.has_clip(r["id"])
-            for k in COMMS_UNSENT:
-                r.pop(k, None)
-        out = {"rows": rows, "rev": now_rev, "pcfd": pcfd, **self.comms.facets(),
+        self._comms_rows(rows)
+        out = {"rows": rows, "rev": now_rev, "pcfd": pcfd, **self._comms_facets(context),
                "counts": {"main": len(main), "other": len(other)}, "limits": {"main": main_limit, "other": limit},
-               "events": [{"id": r["id"], "number": r["number"], "type": r["type"], "address": r["address"]}
-                          for r in self.store.q("SELECT DISTINCT i.id, i.number, i.type, i.address FROM radio_links l "
-                                                "JOIN incidents i ON i.id = l.incident_id ORDER BY i.id DESC LIMIT 100")]}
-        kept = {k: v for k, v in self._comms_cache.items() if k[0] == now_rev}     # an older rev's: never asked again
+               "events": self._comms_events(context)}
+        return {**self._comms_keep(key, mark, out), "talking": talking}
+
+    def _talking(self) -> list[dict]:
+        """Who is talking now, as a reader of the radio log is told: never a talker on another P25 system for a reader
+        who may not see its traffic (#419's gate). (Only the county's and the analog channels' feed this today.)"""
+        live = self.live()
+        if self.comms._sees_context():
+            return live
+        theirs = sourcekeys.context_talkgroups()
+        return [e for e in live if not (
+            sourcekeys.is_context({"system": e.get("p25_system") or ""})
+            or (sourcekeys.parse(str(e.get("source") or "")) or (sourcekeys.COUNTY, 0))[0] != sourcekeys.COUNTY
+            or (e.get("tg") is not None and not e.get("p25_system") and int(e["tg"]) in theirs))]
+
+    def _comms_keep(self, key, mark, out: dict) -> dict:
+        kept = {k: v for k, v in self._comms_cache.items() if k[0] == mark}     # an older rev's: never asked again
         if len(kept) >= COMMS_CACHE_N:
             kept = {}
         kept[key] = (time.monotonic(), out)
         self._comms_cache = kept
-        return {**out, "talking": talking}
+        return out
+
+    def _comms_rows(self, rows: list[dict]) -> None:
+        """Each row as it is sent: whether its audio is here, without the columns nobody reads."""
+        for r in rows:
+            r["has_audio"] = r["kind"] == "radio" and self.has_clip(r["id"])
+            for k in COMMS_UNSENT:
+                r.pop(k, None)
+
+    def _comms_facets(self, context: bool) -> dict:
+        """The Radio view's choices: {channels, rigs}. A viewer who may not see another system's traffic gets none of its
+        channels, and only units of our own registry."""
+        f = self.comms.facets()
+        if context:
+            return f
+        ours = {u["name"] for u in self.radios.units}
+        return {"channels": self.comms.source_names(False) + [f["channels"][-1]], "rigs": [r for r in f["rigs"] if r in ours]}
+
+    def _comms_events(self, context: bool) -> list[dict]:
+        """The Radio view's event choices: the incidents with a transmission on them. A reader who may not see another
+        P25 system's traffic (#419's gate) is not told of an incident whose only links are that system's rows."""
+        ours = "" if context else f"JOIN radio_traffic t ON t.id = l.traffic_id AND t.system IN {sourcekeys.OURS_SQL} "
+        return [{"id": r["id"], "number": r["number"], "type": r["type"], "address": r["address"]}
+                for r in self.store.q("SELECT DISTINCT i.id, i.number, i.type, i.address FROM incidents i WHERE i.id IN "
+                                      f"(SELECT l.incident_id FROM radio_links l {ours}) "
+                                      "ORDER BY i.id DESC LIMIT 100")]
+
+    def _comms_page(self, q: dict, one, when, pcfd, main_tgs, now_rev: str, context: bool) -> dict:
+        """comms_query's answer for the Radio page's views (#415): one page (Comms.page)."""
+        def keys(k: str, most: int) -> list[str]:
+            out = [x.strip() for v in q.get(k) or [] for x in v.split(",") if x.strip()]
+            if len(out) > most or any(len(x) > 80 for x in out):
+                raise CadError(f"{k}: at most {most} source keys")
+            return out
+        view = one("view").lower()
+        if view and view not in VIEWS:
+            raise CadError(f"view: one of {', '.join(VIEWS)}")
+        service = one("service").lower()
+        if service and service not in sourcekeys.SERVICES:
+            raise CadError(f"service: one of {', '.join(sourcekeys.SERVICES)}")
+        before = None
+        token = (q.get("before") or [""])[0].strip()       # a page's `next`: "<start>,<id>", a P25 clip id is long
+        if len(token) > 240:
+            raise CadError("before: a page's next")
+        if token:
+            start, _, tid = token.partition(",")
+            try:
+                before = (float(start), tid)
+            except ValueError:
+                raise CadError("before: <start>,<id> (a page's next)") from None
+        try:
+            limit = max(1, min(int(one("limit") or PAGE), PAGE_MAX))
+        except ValueError:
+            raise CadError("limit: a number") from None
+        changed, at = when("changed"), when("at")
+        got = self.comms.page(
+            main_tgs, self.s.airband, view=view, system=one("system"), group=one("group"), source=keys("source", SOURCES_MAX),
+            service=service, tier=one("tier").lower(), dept=one("dept"), safety=one("safety") in ("1", "true", "on"),
+            mute=keys("mute", MUTE_MAX), before=before, changed=None if changed is None else int(changed), at=at, limit=limit,
+            unit=one("unit"), channel=one("channel"), event=one("event"),
+            pcfd=pcfd if one("pcfd") in ("1", "true", "on") else None, since=when("since"), until=when("until"),
+            kind={"radio": "radio", "notes": "notes"}.get(one("type"), ""), text=one("q"),
+            emergency=one("emergency") in ("1", "true", "on"), context=context)
+        self._comms_rows(got["rows"])
+        out = {**got, "rev": now_rev, "view": view or "all", "pcfd": pcfd}
+        if changed is None and before is None:           # a first page: the choices for the filters too
+            out.update(self._comms_facets(context))
+            out["events"] = self._comms_events(context)
+        return out
+
+    def comms_sources(self, q: dict | None = None) -> dict:
+        """GET /api/cad/comms/sources?rev=: the Radio page's tree (#415), {rev, now, minutes, live: [keys], sources:
+        [{key, system, system_label, group, name, service, tier, ours, encrypted, department, talkgroup, last, counts,
+        emergency, stuck}]}. ?rev= a tree's rev: {unchanged: true, rev, live} while nothing was logged and the minute is
+        the same (the page asks every few seconds).
+
+        A source: every one in the log or the activity table, and every known talkgroup that is ours, was heard, or is
+        another system's with a tier that isn't off. last: when it was last heard (unix). live: the sources transmitting
+        now. counts: [[minutes ago, calls], ...] over the last hour, only the minutes with calls (the viewer's unread
+        counts and the time bar come from these: no per-viewer state here). emergency: "ours" | "other": an emergency
+        on it nobody has acknowledged (Comms.emergencies). In the tree's order: system, group, name. Nothing of what
+        was said. A reader who may not see another system's traffic (sourcekeys.may_see_context) gets none of its
+        sources."""
+        context = self.comms._sees_context()
+        now = self.clock()
+        minute = int(now // 60)
+        rev = f"{self.comms.rev_for(context)}.{minute}.{int(bool(context))}"
+        live = set()
+        for e in self._talking():
+            if e.get("ended"):
+                continue
+            if e.get("source"):
+                live.add(str(e["source"]))
+            elif e.get("tg") is not None:
+                live.add(sourcekeys.p25(str(e.get("p25_system") or sourcekeys.COUNTY), int(e["tg"])))
+            elif e.get("channel"):
+                live.update((f"fm:{e['channel']}", f"air:{e['channel']}"))
+        mark = (self.comms.rev, self.store.rev, minute)
+        hit = self._sources_cache.get(bool(context))
+        if hit is None or hit[0] != mark:
+            county = sourcekeys.COUNTY
+            labels = {"analog": "Analog", "airband": "Airband", **{str(k): str(v) for k, v in self.source_systems().items()}}
+            info = {str(r.get("source")): r for r in self.source_rows() if r.get("source")}
+            seen = {r["source"]: r for r in self.comms.sources_seen()}
+            counts = self.comms.minute_counts(now)
+            ems = self.comms.emergencies(now)
+            out = []
+            for key in dict.fromkeys([*seen, *info]):
+                i, s = info.get(key, {}), seen.get(key, {})
+                got = sourcekeys.parse(key)
+                kind = "airband" if key.startswith("air:") else "" if got else "traffic"
+                system = str(i.get("system") or s.get("system") or (got[0] if got else "airband" if kind == "airband" else "analog"))
+                if not context and sourcekeys.is_context({"system": system}):
+                    continue
+                name = str(i.get("name") or s.get("channel") or key.split(":", 1)[-1])
+                if got:
+                    ours = system == county and bool(self.main_tg(got[1]))
+                else:
+                    ours = kind != "airband" and name not in self.s.airband
+                tier = str(i.get("tier") or s.get("tier") or "")
+                last = max(float(s.get("last") or 0.0), float(i.get("last") or 0.0)) or None
+                if key not in seen and not ours and not last and (system == county or tier in ("", tiers.IGNORE)):
+                    continue                             # a talkgroup only listed: never heard, not ours, not chosen
+                group = str(i.get("group") or s.get("group") or ("Airband" if kind == "airband" else "Analog" if not got else ""))
+                em = ems.get(key) or {}
+                out.append({"key": key, "system": system, "system_label": labels.get(system, system), "group": group,
+                            "name": name,
+                            "service": str(i.get("service") or s.get("service") or sourcekeys.service(group, kind=kind)),
+                            "tier": tier, "ours": ours, "encrypted": bool(i.get("encrypted")),
+                            "department": str(i.get("department") or ""), "talkgroup": got[1] if got else None,
+                            "last": last, "counts": counts.get(key) or [], "emergency": em.get("emergency", ""),
+                            "stuck": em.get("stuck", "")})
+            order = {"analog": 1, "airband": 3}
+            out.sort(key=lambda r: (0 if r["system"] == county else order.get(r["system"], 2), r["system"],
+                                    not r["ours"], r["group"], r["name"]))
+            hit = self._sources_cache[bool(context)] = (mark, out)
+        shown = {r["key"] for r in hit[1]}
+        live_keys = sorted(live & shown)
+        if q and (q.get("rev") or [""])[0] == rev:
+            return {"unchanged": True, "rev": rev, "live": live_keys}
+        return {"rev": rev, "now": now, "minutes": COUNT_MINUTES, "live": live_keys, "sources": hit[1]}
 
     def feed_query(self, q: dict) -> dict:
         """GET /api/cad/feed?limit=&tg=307,333: the 60 Control feed (default: the data file's talkgroups)."""

@@ -692,6 +692,75 @@
   .rv-sec .sum { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-inline-size: 0; }
   .radio-view .feed-acts { flex-wrap: wrap; justify-content: flex-end; }
 
+  /* ---- Radio, the rail layout (radio-nav.js, #415): views and the tree system > group > channel on the left, one
+     list on the right. .nav-on: this viewer turned it on, and the page as before is put away. The rail folds to a
+     strip of view marks (.mini); under 640 px it is a sheet over the list (.sheet), behind Sources. ---- */
+  .radio-view.nav-on > :is(.rv-filters, .rv-sec) { display: none; }
+  .rn { display: grid; grid-template-columns: var(--rail-w) minmax(0, 1fr); gap: var(--gutter); align-items: start; min-inline-size: 0; }
+  .rn.mini { grid-template-columns: calc(var(--ctl) + 2 * var(--s-2)) minmax(0, 1fr); }
+  .rn-rail { display: grid; gap: var(--s-1); padding: var(--s-2); background: var(--panel); border: var(--bw) solid var(--line);
+             border-radius: var(--radius); min-inline-size: 0; position: sticky; inset-block-start: 0;
+             max-block-size: calc(100vh - 2 * var(--hdr-h)); overflow-y: auto; }
+  .rn-rail-head { display: flex; align-items: center; gap: var(--s-2); padding-inline-start: var(--s-1); }
+  .rn-rail { grid-template-columns: minmax(0, 1fr); }
+  .rn-rail .tab { gap: var(--s-2); min-inline-size: 0; }
+  .rn-rail .tab .lbl { overflow: hidden; text-overflow: ellipsis; }
+  .rn-sys { margin-block-start: var(--s-2); padding-inline: var(--s-1); }      /* an overline: .h2 (style.css) */
+  .rn-grp { display: flex; align-items: center; gap: var(--s-2); min-block-size: var(--ctl); padding-inline: var(--s-1);
+            font-size: var(--fs-sm); line-height: var(--lh-sm); font-weight: 600; color: var(--text-2); min-inline-size: 0; }
+  .rn-ch { display: flex; align-items: center; gap: var(--s-0); padding-inline-start: var(--s-4); min-inline-size: 0; }
+  .rn-name { flex: 1 1 auto; justify-content: flex-start; gap: var(--s-2); padding-inline: var(--s-1); min-inline-size: 0; color: var(--text); }
+  .rn-ch.on > .rn-name { background: var(--raised); box-shadow: inset var(--bw-mark) 0 0 var(--accent); font-weight: 600; }
+  .rn-ch.mute > .rn-name > .trunc { text-decoration: line-through; color: var(--dim); }
+  .rn-act { color: var(--dim); }
+  .rn-ch:hover .rn-act { color: var(--text-2); }
+  .rn-act[aria-pressed="true"] { color: var(--warn); border-color: transparent; background: transparent; }
+  .rn-tier { font-family: var(--mono); font-size: var(--fs-2xs); line-height: var(--lh-2xs); font-weight: 700; color: var(--dim); letter-spacing: 0.04em; }
+  .rn-n { border-radius: var(--s-2); min-inline-size: var(--tag-h); }
+  .rn-n.chip { --c: var(--text-2); }
+  /* live: filled and ringed; heard in the last 5 minutes: filled; quiet: an outline (shape, not just colour) */
+  .rn-dot { inline-size: var(--s-2); block-size: var(--s-2); flex: none; border-radius: 50%; border: var(--bw) solid var(--line-hover); }
+  .rn-dot.recent { background: var(--dim); border-color: var(--dim); }
+  .rn-dot.live { background: var(--ok); border-color: var(--ok); box-shadow: 0 0 0 var(--bw-mark) color-mix(in srgb, var(--ok) 30%, transparent); }
+  /* a service: a letter in a shape (F filled, P outlined, E round, T dashed, A dotted): colour is the third cue */
+  .rn-svc { display: inline-flex; align-items: center; justify-content: center; inline-size: var(--tag-h); block-size: var(--tag-h);
+            flex: none; font-size: var(--fs-2xs); line-height: var(--lh-2xs); font-weight: 800; color: var(--c);
+            border: var(--bw) solid var(--c); border-radius: var(--radius-s); --c: var(--dim); }
+  .rn-fire { --c: var(--accent-text); background: var(--accent-text); color: var(--on-fill); }
+  .rn-police { --c: var(--info); }
+  .rn-ems { --c: var(--ok-text); border-radius: 50%; }
+  .rn-transit { --c: var(--text-2); border-style: dashed; }
+  .rn-air { --c: var(--text-2); border-style: dotted; }
+  .rn.mini .rn-rail { padding-inline: var(--s-1); }
+  .rn.mini .rn-rail :is(h2, .rn-tree, .tab .lbl, .tab .spacer) { display: none; }
+  .rn.mini .rn-rail .tab { flex-direction: column; gap: var(--s-0); padding: var(--s-1) 0; justify-content: center; }
+  .rn.mini .rn-rail-head { justify-content: center; padding: 0; }
+  .rn-main { display: grid; gap: var(--s-2); min-inline-size: 0; }
+  .rn-tools { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-2); min-inline-size: 0; }
+  .rn-tools #rn-q { flex: 1 1 12rem; }
+  .rn-tools select { flex: 0 1 auto; max-inline-size: 14rem; }
+  .rn-crumb { font-size: var(--fs-sm); line-height: var(--lh-sm); font-weight: 600; color: var(--text-2); max-inline-size: 100%; }
+  .rn-phone { display: none; }
+  .rn-phone { gap: var(--s-1); }
+  .rn-flags { align-items: center; }
+  .rn-chip { --c: var(--text-2); }
+  /* Our calls, one line on top of any other view */
+  .rn-ours { justify-content: flex-start; gap: var(--s-2); inline-size: 100%; min-inline-size: 0; font-weight: 400;
+             border-inline-start: var(--bw-mark) solid var(--accent-text); position: sticky; inset-block-start: 0; z-index: var(--z-sticky); }
+  .rn-ours .t { font-weight: 600; }
+  .rn-ours .trunc { flex: 1 1 auto; min-inline-size: 0; text-align: start; }
+  #rn-older { justify-self: center; }
+  @media (max-width: 640px) {
+    .rn, .rn.mini { grid-template-columns: minmax(0, 1fr); }
+    .rn-rail { display: none; }
+    .rn-rail.sheet { display: grid; position: fixed; inset: var(--hdr-h) 0 0 0; z-index: var(--z-overlay); max-block-size: none;
+                     border-radius: 0; align-content: start; }
+    .rn.mini .rn-rail.sheet :is(h2, .rn-tree, .tab .lbl, .tab .spacer) { display: revert; }
+    .rn.mini .rn-rail.sheet .tab { flex-direction: row; padding-inline: var(--s-3); justify-content: flex-start; }
+    .rn-phone { display: inline-flex; }
+    .rn-tools select { flex: 1 1 8rem; max-inline-size: none; }
+  }
+
   /* ---- Search (search-view.js, /cad#search, #403): the filters, the calls and their map, address notes ------- */
   body[data-view="search"] .overview { display: none; }      /* the middle column is Search's (cadmap.js shows the Overview) */
   .search-view { display: flex; flex-direction: column; gap: var(--gutter); min-inline-size: 0; }
@@ -704,8 +773,12 @@
   .sv-table tr.retired { color: var(--dim); }
   .sv-hit b { color: var(--text); }
   .sv-pager { justify-content: center; gap: var(--s-3); }
-  .sv-mapbox { position: relative; block-size: calc(var(--map-h) * 0.75); border-radius: var(--radius);
-               border: var(--bw) solid var(--line); overflow: hidden; }
+  /* its height: the layout's, or what the viewer dragged its bottom edge to (--sv-map-h, search-view.js; the incident
+     map's handle, .dmap-h); the map clips itself so the handle can reach out into the gap */
+  .sv-mapbox { position: relative; block-size: var(--sv-map-h, calc(var(--map-h) * 0.75)); border-radius: var(--radius);
+               border: var(--bw) solid var(--line); }
+  .sv-mapbox > :is(.sv-map, .nomap) { border-radius: calc(var(--radius) - var(--bw)); overflow: hidden; }
+  body.row-dragging .sv-mapbox > :not(.dmap-handle) { pointer-events: none; }
   .sv-map { position: absolute; inset: 0; }
   .sv-table td.num { white-space: nowrap; }
   .sv-notes { display: flex; flex-direction: column; gap: var(--s-2); }
