@@ -93,7 +93,7 @@ def test_the_standby_warms_the_app_and_the_takeover_uses_that_one(world, tmp_pat
     assert b.env.calls.count("app start") == 1                       # the warm one, not a second start
     assert not any("no warm app" in e for e in b.sup.events)
     c = b.env.calls
-    assert c.index("init_state") < c.index("replicate") < c.index("app")
+    assert c.index("replicate") < c.index("init_state") < c.index("app")
     assert world.violations == []
     assert a.wait() == 0
     finish(b)
@@ -309,7 +309,8 @@ def test_the_takeover_and_the_drain_log_where_the_time_went(world, tmp_path, cap
     out = capsys.readouterr().out
     take = [ln for ln in out.splitlines() if "takeover timing:" in ln]
     assert take, out[-2000:]
-    for phase in ("plan", "catch-up", "verify", "promote", "init-state", "litestream", "listen", "app", "connector"):
+    for phase in ("plan", "catch-up", "verify", "promote", "litestream", "init-state", "replicated", "listen", "app",
+                  "connector"):
         assert f" {phase} " in take[-1], take[-1]
     drain = next(ln for ln in out.splitlines() if "drain timing:" in ln)
     for phase in ("app", "sync", "litestream", "release"):
@@ -398,7 +399,7 @@ def test_the_gated_app_warms_waits_opens_the_databases_then_listens_at_once(tmp_
         gate.write_text("init\n")
         assert soon(lambda: _answer(gate) == "ok", 30)
         assert all((state / f"{db}.sqlite").exists() for db in DBS)        # --init-state's work, in this process
-        assert not building.is_set()                                        # waits for "run" (Litestream first)
+        assert not building.is_set()                                        # waits for "run" (the migrations in S3 first)
         gate.write_text("run\n")
         assert building.wait(10)
         code, hdr, body = get(url + "/cad", accept="text/html")             # listening already, "updating"
@@ -412,7 +413,7 @@ def test_the_gated_app_warms_waits_opens_the_databases_then_listens_at_once(tmp_
         out = capsys.readouterr().out
         assert "warm-up timing: imports" in out and "gazetteer" in out
         line = next(ln for ln in out.splitlines() if "startup timing:" in ln)
-        for phase in ("init-state", "litestream", "listen", "cad", "start", "server"):
+        for phase in ("init-state", "replicated", "listen", "cad", "start", "server"):
             assert f" {phase} " in line, line
     finally:
         go.set()

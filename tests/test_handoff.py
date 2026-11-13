@@ -247,6 +247,8 @@ class World:
         self.connector_down: set[str] = set()       # whose cloudflared never connects
         self.app_fails: set[str] = set()
         self.rogue = False                  # something else moves the replica (a writer from before the lock)
+        self.ls_first: dict[str, int] = {}  # Litestream's first position past the replica's (+1: its own snapshot)
+        self.follower_hangs: set[str] = set()   # whose followers need a SIGKILL to stop
         self.pids = 1000
 
     def event(self, task: str, what: str) -> None:
@@ -290,6 +292,8 @@ class FakeProc:
                 self.world.down(self.task, self.kind)
 
     def stop(self, timeout, sig=None):
+        if self.kind.startswith("follower") and self.task in self.world.follower_hangs:
+            self._end(-9)                     # didn't stop on SIGTERM: SIGKILLed (maybe half way through a file)
         self._end(0)
         return self.code
 
@@ -330,6 +334,11 @@ class FakeApp(FakeProc):
             self.world.up(self.task, "app")
             if said == "init":
                 self.env.calls.append("init_state")
+                # the ordering rule: nothing migrates a file Litestream hasn't confirmed (a file with a replica)
+                unseen = sorted(db for db in DBS if self.world.replica[db] is not None and db not in self.env.confirmed)
+                if unseen or self.task not in self.world.alive["litestream"]:
+                    self.world.violations.append(f"{self.task} migrated {unseen or 'everything'} before Litestream "
+                                                 "replicated it")
                 for db in DBS:
                     self.env.db_path(db).touch()
                 self._say("ok")
@@ -350,6 +359,7 @@ class FakeEnv(Env):
         self.calls: list[str] = []
         self.app: FakeProc | None = None
         self.written: dict[str, int] = {}
+        self.confirmed: set[str] = set()      # the files this task's Litestream has confirmed in S3
 
     def plan(self, db):
         self.calls.append(f"plan {db}")
@@ -380,7 +390,25 @@ class FakeEnv(Env):
 
     def replicate(self):
         self.calls.append("replicate")
+        self.confirmed = set()
+        self.snapshotted: set[str] = set()
         return FakeProc(self.world, self.task, "litestream")
+
+    def position(self, db, timeout):
+        """`litestream sync -wait` while the app may run: Litestream's first sync of a promoted file is its own
+        snapshot, one past the replica (ls_first overrides it); a file with no replica yet once the app made it; a
+        Litestream started again by the same task (a retake) has its own state: no snapshot."""
+        self.calls.append(f"position {db}")
+        assert self.task in self.world.alive["litestream"]
+        if self.world.replica[db] is None:
+            if not self.db_path(db).exists():
+                raise RuntimeError(f"litestream sync {db}: database not found")
+            self.world.replica[db] = 0
+        if db not in self.snapshotted and self.calls.count("replicate") == 1:   # (again: its own local state, kept)
+            self.snapshotted.add(db)
+            self.world.replica[db] = self.world.ls_first.pop(db, self.world.replica[db] + 1)
+        self.confirmed.add(db)
+        return self.world.replica[db], self.world.replica[db]
 
     def sync(self, db, timeout):
         self.calls.append(f"sync {db}")
@@ -419,7 +447,7 @@ class FakeEnv(Env):
 FAST = dict(POLL_S=0.05, CATCHUP_S=2.0, RESTORE_S=4.0, APP_READY_S=1.5, CONNECTOR_READY_S=0.2, APP_STOP_S=1.0,
             SYNC_S=2.0, LITESTREAM_STOP_S=1.0, OVERLAP_S=3.0, RETAKE_S=0.8, STOP_TIMEOUT_S=6.0, REDRAIN_S=1.5,
             RENEW_S=0.15, RETAKE_MIN_LEFT_S=1.0, CREATED_WAIT_S=0.1, KILL_MARGIN_S=0.3, INIT_S=2.0, APP_LISTEN_S=1.0,
-            WARM_APP_RETRY_S=0.3)
+            WARM_APP_RETRY_S=0.3, REPLICATING_S=1.0)
 LEASE = dict(ttl=1.0, safety=0.4, grace=0.3)        # holder: 0.6 s after a renew; taker: 1.3 s
 
 
@@ -485,7 +513,7 @@ def test_a_cold_start_with_no_lock_takes_generation_1_and_serves(world, tmp_path
     until(lambda: a.sup.role == "active", what="A active")
     assert a.lock.generation == 1 and world.s3.doc()["phase"] == "serving"
     assert a.leader_file.read_text().strip() == "1"
-    assert a.env.calls.index("init_state") < a.env.calls.index("replicate") < a.env.calls.index("app")
+    assert a.env.calls.index("replicate") < a.env.calls.index("init_state") < a.env.calls.index("app")
     for db in DBS:
         assert a.env.db_path(db).exists() and not a.sup.staged(db).exists()      # promoted
     lease = json.loads(a.sup.lease_file.read_text())
@@ -526,15 +554,15 @@ def test_the_handoff_old_drains_syncs_releases_new_catches_up_and_serves(world, 
     assert a.wait() == 0
     until(lambda: b.sup.role == "active", what="B active")
     rel = next(p for p in world.s3.puts if p["state"] == "released" and p["who"] == "A")
-    assert rel["clean"] and {db: int(v, 16) for db, v in rel["positions"].items()} == {db: 105 for db in DBS}
+    assert rel["clean"] and {db: int(v, 16) for db, v in rel["positions"].items()} == {db: 106 for db in DBS}    # 100, its snapshot, 5 writes
     assert b.lock.generation == a.lock.generation + 0 or b.lock.generation == 2
     assert world.s3.doc()["holder"] == "B" and world.s3.doc()["generation"] == 2 and world.s3.doc()["phase"] == "serving"
-    # the order: A's app gone, A's Litestream gone (after its sync), the release, then B writes
+    # the order: A's app gone, A's Litestream gone (after its sync), the release, then B's Litestream, then B writes
     t = world.when
-    assert t("A", "app down") < t("A", "litestream down") < t("B", "app up") < t("B", "litestream up")
-    assert b.env.calls.index("init_state") < b.env.calls.index("replicate") < b.env.calls.index("app")
+    assert t("A", "app down") < t("A", "litestream down") < t("B", "litestream up") < t("B", "app up")
+    assert b.env.calls.index("replicate") < b.env.calls.index("init_state") < b.env.calls.index("app")
     assert [c for c in a.env.calls if c.startswith("sync")] == [f"sync {db}" for db in DBS]
-    assert b.sup.positions == {db: f"{105:016x}" for db in DBS}         # caught up to the release, by the followers
+    assert b.sup.positions == {db: f"{106:016x}" for db in DBS}         # caught up to the release, by the followers
     assert not any(c.startswith("restore") for c in b.env.calls)        # incremental: no full restore
     assert any("the new leader B serves" in e for e in a.sup.events)
     assert not a.leader_file.exists() and b.leader_file.exists()
@@ -613,7 +641,7 @@ def test_a_new_task_that_wrote_then_failed_is_never_resumed_over_the_next_task_r
     assert "A" not in world.alive["app"]
     c = Task(world, "C", tmp_path).start()                    # ECS's next task (or the rollback) takes over
     until(lambda: c.sup.role == "active", what="C active")
-    assert c.sup.positions == {db: f"{110:016x}" for db in DBS}   # with B's writes
+    assert c.sup.positions == {db: f"{112:016x}" for db in DBS}   # with B's snapshot and writes
     assert world.violations == []
     finish(c)
 
@@ -672,6 +700,132 @@ def test_a_follower_that_falls_behind_falls_back_to_a_full_restore(world, tmp_pa
     assert [c for c in b.env.calls if c.startswith("restore")] == [f"restore {db}" for db in DBS]
     assert world.violations == []
     finish(b)
+
+
+# -- replicate before migrate (docs/cloud.md): nothing writes a file before Litestream has it ----------------------
+
+def _wrote_before_litestream(task: Task, how: str) -> None:
+    """Something writes a promoted file between the promote and `litestream replicate` (as the app's migrations did
+    until 2026-11): a -wal beside it, or the main file itself changed (an autocheckpoint)."""
+    orig = task.sup._check_untouched
+
+    def first_write():
+        dest = task.env.db_path("cad")
+        if how == "wal":
+            Path(f"{dest}-wal").write_bytes(b"\x37\x7f\x06\x82" + bytes(28))
+        else:
+            with open(dest, "ab") as f:
+                f.write(bytes(4096))                         # pages straight into the main file
+        orig()
+    task.sup._check_untouched = first_write
+
+
+def test_litestream_confirms_every_promoted_file_before_the_app_migrates_anything(world, tmp_path):
+    a = Task(world, "A", tmp_path).start()
+    until(lambda: a.sup.role == "active", what="A active")
+    c = a.env.calls
+    first = [c.index(f"position {db}") for db in DBS]
+    assert c.index("replicate") < min(first) and max(first) < c.index("init_state") < c.index("app")
+    after = [i for i, x in enumerate(c) if x.startswith("position") and i > c.index("init_state")]
+    assert len(after) == len(DBS) and max(after) < c.index("app")           # the migrations in S3 before "run"
+    assert any("Litestream replicates cad, hub, audio" in e for e in a.sup.events)
+    assert {db: world.replica[db] for db in DBS} == {db: 101 for db in DBS}  # Litestream's own snapshot: 100 + 1
+    assert world.violations == []
+    finish(a)
+
+
+@pytest.mark.parametrize("how", ["wal", "main file"])
+def test_a_file_written_before_litestream_replicates_it_is_refused(world, tmp_path, how):
+    a = Task(world, "A", tmp_path)
+    _wrote_before_litestream(a, how)
+    a.start()
+    assert a.wait() == 1
+    assert "replicate" not in a.env.calls and "init_state" not in a.env.calls and "app" not in a.env.calls
+    assert any("REFUSED: cad.sqlite was written before Litestream replicates it" in e for e in a.sup.events)
+    rel = world.s3.doc()
+    assert rel["state"] == "released" and rel["clean"] is False and rel["positions"] is None
+    assert world.replica["cad"] == 100                                       # the replica untouched
+
+
+def test_a_litestream_that_doesnt_follow_the_replica_is_never_served_from(world, tmp_path):
+    world.ls_first["hub"] = 100                  # its first position isn't past the replica's: not its own snapshot
+    a = Task(world, "A", tmp_path).start()
+    assert a.wait() == 1
+    assert "init_state" not in a.env.calls and "app" not in a.env.calls
+    assert any("REFUSED: Litestream's position of hub (100" in e for e in a.sup.events)
+    assert "A" not in world.alive["litestream"]                             # SIGKILLed: no last sync
+    assert world.s3.doc()["clean"] is False and world.violations == []
+
+
+@pytest.mark.parametrize("ev, fatal", [
+    ({"db": "cad", "db_txid": 0, "replica_txid": 100}, False),             # expected: no local state, the replica as promoted
+    ({"db": "cad", "db_txid": 0, "replica_txid": 104}, True),              # the replica isn't where it was promoted from
+    ({"db": "hub", "db_txid": 90, "replica_txid": 100}, True),             # a local position behind the replica
+])
+def test_detected_database_behind_replica_is_fatal_unless_it_is_the_expected_first_one(world, tmp_path, ev, fatal):
+    a = Task(world, "A", tmp_path)
+    orig = a.env.replicate
+
+    def replicate():
+        p = orig()
+        a.env.behind_events.append(dict(ev))
+        return p
+    a.env.replicate = replicate
+    a.start()
+    if fatal:
+        assert a.wait() == 1 and "app" not in a.env.calls and "init_state" not in a.env.calls
+        assert any("REFUSED: Litestream found" in e and "behind its replica" in e for e in a.sup.events)
+    else:
+        until(lambda: a.sup.role == "active", what="A active")
+        finish(a)
+    assert world.violations == []
+
+
+def test_a_follower_that_needed_a_sigkill_is_never_promoted(world, tmp_path):
+    world.follower_hangs.add("A")
+    a = Task(world, "A", tmp_path).start()
+    assert a.wait() == 1
+    assert "replicate" not in a.env.calls and not any(a.env.db_path(db).exists() for db in DBS)
+    assert any("REFUSED: the follower of" in e and "SIGKILLed" in e for e in a.sup.events)
+
+
+def test_a_staged_copy_with_a_wal_beside_it_is_never_promoted(world, tmp_path):
+    a = Task(world, "A", tmp_path)
+    orig = a.env.follower
+
+    def follower(db, out):
+        p = orig(db, out)
+        if db == "hub":
+            Path(f"{out}-wal").write_bytes(b"x")
+        return p
+    a.env.follower = follower
+    a.start()
+    assert a.wait() == 1
+    assert any("REFUSED: hub.sqlite-wal beside the staged hub.sqlite" in e for e in a.sup.events)
+    assert "replicate" not in a.env.calls
+
+
+def test_a_first_start_confirms_the_new_files_in_s3_before_it_serves(world, tmp_path):
+    world.replica = {db: None for db in DBS}
+    a = Task(world, "A", tmp_path).start()
+    until(lambda: a.sup.role == "active")
+    c = a.env.calls
+    assert c.index("replicate") < c.index("init_state") < min(c.index(f"position {db}") for db in DBS) < c.index("app")
+    assert {db: world.replica[db] for db in DBS} == {db: 1 for db in DBS}
+    finish(a)
+
+
+def test_a_retake_confirms_litestream_at_its_own_release_before_the_app(world, tmp_path):
+    a = Task(world, "A", tmp_path).start()
+    until(lambda: a.sup.role == "active")
+    a.sup.on_term()
+    until(lambda: any("taken back" in e for e in a.sup.events), what="retake")
+    until(lambda: "A" in world.alive["app"])
+    c = a.env.calls
+    second = [i for i, x in enumerate(c) if x == "replicate"][1]
+    assert second < min(i for i, x in enumerate(c) if x.startswith("position") and i > second) \
+        < [i for i, x in enumerate(c) if x == "app start"][-1]
+    assert a.wait(10) == 0 and world.violations == []
 
 
 # -- the app's fence ------------------------------------------------------------------------------------------------
