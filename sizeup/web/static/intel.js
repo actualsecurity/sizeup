@@ -45,6 +45,7 @@ window.IntelCard = (() => {
     const loc = el("div", "aa-loc" + (e.confirmed ? "" : " approx"), where(e));
     if (!e.confirmed && e.place) loc.title = ["Unconfirmed", e.basis, ...(e.alts || []).map((a) => `or ${a.label}`)].filter(Boolean).join("\n");
     li.append(loc);
+    if (e.note) li.append(el("div", "aa-loc approx", e.note));          // "possibly cancelled", "moved", "re-opened"
     const src = el("div", "aa-src", `${deps.time(e.first_at)} · ${(e.traffic_ids || []).length} tx`);
     for (const id of (e.traffic_ids || []).slice(-4)) {
       const b = el("button", "mini play", st.playing === id ? "■" : "▶");
