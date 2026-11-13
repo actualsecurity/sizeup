@@ -26,6 +26,7 @@ from sizeup.app import make_app
 from sizeup.audiostore import DiskCache, FsAudioStore, Retention, S3AudioStore, StoreError, object_key
 from sizeup.cad.store import CadError
 from sizeup.cloud.hubstore import AUDIO_SCHEMA, AudioDb, wav_seconds
+from sizeup.fence import FencedWrite
 from tests.test_access import AUD, TEAM, jwks, jwt, keys, req  # noqa: F401 (fixtures)
 from tests.test_attachments import FakeS3
 from tests.test_cloud import HubRun, call, hub_cfg
@@ -312,7 +313,10 @@ def test_only_the_leader_uploads_or_deletes(tmp_path):
     a = db(tmp_path, s3store(bucket), may_write=lambda: leader["ok"])
     a.put("FG1-5", tone(), "clip", at=time.time() - 10 * DAY, channel="FG1")      # spooled while the leader
     leader["ok"] = False
-    a.put("FG1-6", tone(), "clip", channel="FG1")          # not the leader: not written at all (#501)
+    # not the leader (#501): refused out loud, never a quiet drop. The caller (the hub's ingest, Hub._events) acks
+    # nothing then: the clip stays in the station's outbox and is sent again, to the leader (tests/test_fenced_reads.py)
+    with pytest.raises(FencedWrite):
+        a.put("FG1-6", tone(), "clip", channel="FG1")
     assert a.db.execute("SELECT COUNT(*) FROM audio WHERE id = 'FG1-6'").fetchone()[0] == 0
     assert a.upload_pending() == 0 and a.prune_clips(time.time()) == 0 and a.has("FG1-5") and bucket.calls == []
     leader["ok"] = True

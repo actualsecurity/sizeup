@@ -2422,6 +2422,11 @@ class Editor:
     def recorded(name: str, email: str) -> str:
         return email if not name or name.lower() == email else f"{name} <{email}>"
 
+    def _unlinked(self, email: str) -> dict | None:
+        """An operator entered by hand with this email as its name and no email yet: the leader's person() links it
+        (sets its email); a fenced task (#501) reads it as it would be, its role and active as they are."""
+        return self.store.one("SELECT name, callsign, role, active FROM operators WHERE name = ? AND email = ''", (email,))
+
     def person(self, email: str) -> dict:
         """{email, name, callsign, operator} for a verified email. An email not on the list is added
         (named by its email, a dispatcher) so an admin can give it a name in Settings > Users."""
@@ -2430,9 +2435,10 @@ class Editor:
             raise CadError("not an email address")
         r = self.store.one("SELECT name, callsign FROM operators WHERE email = ?", (email,))
         if r is None and not self.store.may_write():
-            # a fenced hub task (not the leader, sizeup/fence.py, #501): signed in all the same, as a dispatcher named
-            # by their email, nothing written; the leader adds them on their next request there
-            r = {"name": email, "callsign": ""}
+            # a fenced hub task (not the leader, sizeup/fence.py, #501): signed in all the same, nothing written: the
+            # row the leader would give them (one entered by hand under this email as its name), else a dispatcher
+            # named by their email; the leader adds them on their next request there
+            r = self._unlinked(email) or {"name": email, "callsign": ""}
         elif r is None:
             with self.store.tx() as db:
                 row = db.execute("SELECT id, name, callsign, email FROM operators WHERE email = ? OR name = ?",
@@ -2465,7 +2471,9 @@ class Editor:
         """person() plus {role, active, may, bootstrap, admins}: may = what they may do now (admin |
         dispatcher | viewer), bootstrap = no admin yet (anyone signed in may do anything)."""
         p = self.person(email)
-        r = self.store.one("SELECT role, active FROM operators WHERE email = ?", (p["email"],)) or {"role": "dispatcher", "active": 1}
+        r = (self.store.one("SELECT role, active FROM operators WHERE email = ?", (p["email"],))
+             or (None if self.store.may_write() else self._unlinked(p["email"]))      # fenced: as the leader would
+             or {"role": "dispatcher", "active": 1})
         admins = self.admins()
         active = bool(r["active"])
         may = "admin" if not admins else r["role"] if active and r["role"] in OPERATOR_ROLES else "viewer"

@@ -84,6 +84,7 @@ from typing import Callable
 from sizeup import channels, sourcekeys
 from sizeup import tz
 from sizeup import app as app_mod
+from sizeup import fence as fence_mod
 from sizeup.app import (AIRBAND_FIRST, CLIP_ID, RENAMED, STT_FIRST, WHISPER_FALLBACK_STATION, App, AwsJob, channels_model,
                         traffic_key)
 from sizeup.cad.dispatcher import AudioUnavailable
@@ -435,6 +436,10 @@ class Hub:
             return refused
         if method == "GET" and path == "/api/station/hello":
             return _json(200, {"ok": True})    # the station's Test connection: the token works (not "seen")
+        if not self.app._may_write_audio():
+            # not the leader (#501): nothing the station sends is taken here, and no job is handed out whose result
+            # couldn't be kept: 503 + Retry-After (sizeup/web/server.py); its outbox sends it again, to the leader
+            fence_mod.refuse(f"{method} {path}")
         self._seen()
         try:
             if method == "GET" and path == "/api/station/jobs":
@@ -565,11 +570,14 @@ class Hub:
                 if seq <= self.seq:
                     continue                   # delivered before (the station retried): already applied
                 kind = str(ev.get("type"))
+                refused = fence_mod.refused()
                 try:
                     audio = base64.b64decode(ev["audio"]) if ev.get("audio") else None
                     self.app.apply(kind, ev.get("data") or {}, audio)
                     n += 1
                 except Exception as e:  # one bad event must not block the ones behind it
+                    if isinstance(e, fence_mod.FencedWrite) or fence_mod.refused() != refused:
+                        raise fence_mod.FencedWrite(f"not the leader: {kind} #{seq} not acked") from e
                     self.errors += 1
                     # an incident source's event: its text may quote the county's data, so the type only (#297)
                     said = "" if kind in SOURCE_KINDS else f": {e}"
@@ -577,6 +585,11 @@ class Hub:
                     self.log(f"hub: could not apply {kind} #{seq}: {type(e).__name__}")
                     if kind == "source_event" and not isinstance(e, SourceError) and self._retry(seq):
                         break                  # not acked: the station sends it again (a malformed one is skipped)
+                if fence_mod.refused() != refused or not self.app._may_write_audio():
+                    # a write of this event was refused (the lease went, #501), even if something on the way caught
+                    # it, or the lease is gone now: neither it nor anything after it is acked (seq stays), the
+                    # station sends them again, to the leader
+                    raise fence_mod.FencedWrite(f"not the leader: {kind} #{seq} not acked")
                 self.seq = seq
             self.app.mdb.put("station_epoch", self.epoch)
             self.app.mdb.put("station_seq", str(self.seq))
@@ -609,7 +622,7 @@ class HubApp(App):
     """App with no radios: the station's events go through the same code (apply), the station's
     switches through jobs, and the state lives in SQLite (hubstore.py)."""
 
-    def __init__(self, cfg, log: Callable[[str], None] = print):
+    def __init__(self, cfg, log: Callable[[str], None] = print, fence=None):
         self._aws_since: dict[str, float] = {}         # id -> when Amazon Transcribe got it (the sweep's clock)
         self._aws_asked: dict[str, float] = {}         # id -> when the station's whisper was asked instead
         self._aws_late_wait: set[str] = set()          # timed out, not a priority channel: AWS's late answer is the text
@@ -632,11 +645,13 @@ class HubApp(App):
         # Nothing that could open an SDR or start a program: no dongles, no trunk-recorder or its
         # capture dir, no voice server, and no captures/ (its JSON files and WAVs live in SQLite here).
         super().__init__(replace(cfg, clips_dir="", p25_dir="", p25_recorder="", sdrs=(), sdr_auto=False,
-                                 shared_device="", dispatch_tts_python=""))
+                                 shared_device="", dispatch_tts_python=""), fence=fence)
         self.receivers, self.modes = [], []
         self.audio.may_write = self._may_write_audio
         self.mdb.may_write = self._may_write_audio       # hub.sqlite too: a fenced task writes neither (#501)
         self.mdb.db.log = self.audio.db.log = log
+        if self.fence is not None:
+            self.mdb.db.on_refuse = self.audio.db.on_refuse = self.fence.check    # refused: the process stops (#501)
         self.audio.may_delete = self._may_delete_audio
         self.hub = Hub(self, cfg, log)
         # station health (GitHub #79): the alerts, the admins' Settings > Health (#203), the push to the status topic in effect (Settings, else

@@ -60,6 +60,7 @@ from typing import Callable, Iterator
 
 from sizeup.sourcekeys import OURS_SQL, is_context
 from sizeup import aws
+from sizeup.fence import bookkeeping
 
 RETENTION_S = 365 * 86400
 MAX_CLIP_S = 3600.0               # a camera clip, at most
@@ -366,7 +367,8 @@ class Attachments:
                 if now - self._seen.get((who, row["id"]), -1e18) < VIEW_AUDIT_S:
                     return
                 self._seen[(who, row["id"])] = now
-        self.audit(action, row["id"], row["incident_id"], who)
+        with bookkeeping():          # a GET's side effect: skipped on a fenced hub task, the view still served (#501)
+            self.audit(action, row["id"], row["incident_id"], who)
 
     def audit_rows(self, iid: int | None = None, aid: str = "", limit: int = 500) -> list[dict]:
         where, args = [], []

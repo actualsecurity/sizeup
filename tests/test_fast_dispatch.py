@@ -36,6 +36,7 @@ from sizeup.cad.api import CadApi
 from sizeup.cad.service import Cad, Settings
 from sizeup.cad.voicequeue import VoiceQueue
 from sizeup.cad.dispatcher import AudioUnavailable
+from sizeup.fence import FencedWrite
 
 STATIC = Path(__file__).resolve().parent.parent / "sizeup" / "web" / "static"
 NODE = shutil.which("node") or shutil.which("node", path="/opt/homebrew/bin:/usr/local/bin")
@@ -430,6 +431,11 @@ def test_the_audio_blobs_are_the_writers_only(tmp_path):
     cad.may_write = lambda: False                                # ... fenced before its voice is back (#501: the
     back.set()                                                   # fenced process writes nothing at all)
     assert cad.voice.wait(5) and Blobs.puts == [] and rows(cad, iid)[0]["audio"] == "pending"
+    # (the next leader's start renders it while young: resume_voice). A dispatch on the fenced task itself: refused out
+    # loud (the web server's 503: the console sends it again), never logged as sent
+    with pytest.raises(FencedWrite):
+        cad.dispatch(iid, {"unit_ids": [uid(cad, "E61")], "operator": "JD"})
+    assert len(rows(cad, iid)) == 1
     cad.may_write = lambda: True
     cad.dispatch(iid, {"unit_ids": [uid(cad, "E61")], "operator": "JD"})
     assert cad.voice.wait(5) and Blobs.puts == [("dispatch", "Voice: Kokoro am_michael")]

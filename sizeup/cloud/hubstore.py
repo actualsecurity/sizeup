@@ -165,6 +165,7 @@ class MonitorDb:
         for p in page_docs:
             rows[("pages", p["id"])] = (_dump(p), p.get("start") or 0.0)
         n = 0
+        written: dict[tuple[str, str], str | None] = {}    # into _written only once COMMIT has landed (#501)
         with self._lock:
             self.db.execute("BEGIN")
             try:
@@ -182,16 +183,22 @@ class MonitorDb:
                     else:
                         self.db.execute("INSERT INTO pages (id, start, doc) VALUES (?, ?, ?) ON CONFLICT(id) DO "
                                         "UPDATE SET start = excluded.start, doc = excluded.doc", (key, v[1], v[0]))
-                    self._written[(table, key)] = v[0]
+                    written[(table, key)] = v[0]
                     n += 1
                 for (table, key) in [k for k in self._written if k not in rows]:
                     self.db.execute(f"DELETE FROM {table} WHERE id = ?", (key,))
-                    del self._written[(table, key)]
+                    written[(table, key)] = None
                     n += 1
                 self.db.execute("COMMIT")
             except Exception:
-                self.db.execute("ROLLBACK")
+                if self.db.in_transaction:
+                    self.db.execute("ROLLBACK")
                 raise
+            for k, doc in written.items():
+                if doc is None:
+                    self._written.pop(k, None)
+                else:
+                    self._written[k] = doc
         return n
 
 

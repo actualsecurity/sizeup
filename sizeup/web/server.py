@@ -121,6 +121,7 @@ from pathlib import Path
 from typing import Callable
 from urllib.parse import parse_qsl, urlsplit
 
+from sizeup import fence as fence_mod
 from sizeup import sourcekeys
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -424,6 +425,8 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
         t0 = 0.0                         # when the request was read (perf_counter): Server-Timing and the log (#284)
         c0 = 0.0                         # ... and this thread's CPU then (thread_time): the request's own CPU (#425)
         code = 0                         # the status last sent
+        refused0 = 0                     # this thread's refused writes when the request began (sizeup/fence.py, #501)
+        answered = False                 # its status line is sent
 
         def parse_request(self) -> bool:
             """Every request, whatever its method and however many on one connection: its clock starts once its
@@ -497,6 +500,11 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
             """The answer. With an ETag the browser already has (If-None-Match): 304, no body. Text and JSON
             over GZIP_MIN go gzipped to a browser that takes it (gz: already compressed), unless the
             handler did that itself (Content-Encoding)."""
+            if code < 400 and fence_mod.refused() != self.refused0:
+                # a write this request made was refused (not the leader, #501), even if a handler caught it on the
+                # way: never a success for it, a 503 to try again (with the leader)
+                return self._updating()
+            self.answered = True
             h = dict(headers or {})
             if code == 200 and h.get("ETag") and etag_matches(self.headers.get("If-None-Match"), h["ETag"]):
                 code, body = 304, b""
@@ -565,6 +573,7 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
             return self._send(code, body, ctype, h)
 
         def _redirect(self, where: str) -> None:
+            self.answered = True
             self.send_response(302)
             self.send_header("Location", where)
             self.send_header("Content-Length", "0")
@@ -576,12 +585,24 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
             self._send(503, UPDATING, "application/json", {"Retry-After": "2", "Cache-Control": "no-store",
                                                            "Connection": "close"})
 
+        def _fenced(self, call: Callable[[], None]) -> None:
+            """call (the request's own handler); a write it made refused (FencedWrite: this task isn't the leader any
+            more, sizeup/fence.py, #501): 503 + Retry-After, as the Gate answers (nothing was taken: the station's
+            outbox, the console, send it again)."""
+            self.refused0, self.answered = fence_mod.refused(), False
+            try:
+                call()
+            except fence_mod.FencedWrite:
+                if not self.answered:
+                    return self._updating()
+                self.close_connection = True
+
         def do_GET(self) -> None:
             if gate.refuse(write=False):
                 return self._updating()
             gate.enter()
             try:
-                self._get()
+                self._fenced(self._get)
             finally:
                 gate.leave()
                 if perf is not None:
@@ -592,7 +613,7 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                 return self._updating()
             gate.enter()
             try:
-                self._post()
+                self._fenced(self._post)
             finally:
                 gate.leave()
                 if perf is not None:
@@ -954,6 +975,7 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
             when EventSource reconnects, ?since= when the page already has the state from a GET), then each push's changed sections (Broadcaster), each with its id. Nothing
             changed but the clock: {"_delta":1,"time":...}, so the page knows the stream is alive.
             gzip (a browser that takes it): one stream, flushed at each event (Z_SYNC_FLUSH)."""
+            self.answered = True
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "text/event-stream")
             self.send_header("Cache-Control", "no-store, no-transform")
