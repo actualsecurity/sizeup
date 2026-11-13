@@ -7,6 +7,7 @@ import re
 import shutil
 import subprocess
 import threading
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -16,6 +17,7 @@ from sizeup import config as config_mod
 from sizeup.cad.api import CadApi
 from sizeup.cad.service import Cad
 from sizeup.cloud.access import Identity
+from tests.test_access import jwks, keys  # noqa: F401 (fixtures)
 from tests.test_cad import make_cad
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -48,18 +50,54 @@ def test_the_key_comes_from_env_or_the_config_and_none_means_off(tmp_path, monke
     assert KEY not in repr(c) and KEY not in repr(Cad.from_config(c).s)    # a dumped config never shows it
 
 
-def test_a_bad_key_is_refused_without_repeating_it(tmp_path, monkeypatch):
+def test_a_malformed_key_is_off_not_a_crash_and_never_repeated(tmp_path, monkeypatch):
+    """A hand-edited SSM value must not stop the hub: street view is off, one line says so, never the value."""
     p = tmp_path / "c.toml"
     p.write_text("")
     bad = "AIza secret with spaces 1234567890"
     monkeypatch.setenv("SIZEUP_GOOGLE_MAPS_KEY", bad)
-    with pytest.raises(config_mod.ConfigError, match="streetview.google_key") as e:
-        config_mod.load(p)
-    assert "secret" not in str(e.value) and "1234567890" not in str(e.value)
-    p.write_text('[streetview]\nbogus = 1\n')
+    c = config_mod.load(p)
+    assert c.streetview_google_key == "" and c.streetview_key_bad is True
+    monkeypatch.setenv("SIZEUP_GOOGLE_MAPS_KEY", KEY)
+    assert config_mod.load(p).streetview_key_bad is False
+    p.write_text('[streetview]\nbogus = 1\n')                              # an unknown key in the file: as every section
     monkeypatch.delenv("SIZEUP_GOOGLE_MAPS_KEY")
     with pytest.raises(config_mod.ConfigError):
         config_mod.load(p)
+
+
+def test_the_hub_starts_with_a_malformed_key_and_logs_one_line(tmp_path, monkeypatch, capsys):
+    from dataclasses import replace
+    from tests.test_cloud import HubRun, hub_cfg
+    p = tmp_path / "c.toml"
+    p.write_text("")
+    bad = "AIza secret with spaces 1234567890"
+    monkeypatch.setenv("SIZEUP_GOOGLE_MAPS_KEY", bad)
+    loaded = config_mod.load(p)
+    h = HubRun(replace(hub_cfg(tmp_path), streetview_google_key=loaded.streetview_google_key,
+                       streetview_key_bad=loaded.streetview_key_bad))
+    try:
+        code, body = _http(h.url + "/api/cad/streetview")
+        assert code == 200 and body == {"provider": ""}
+    finally:
+        h.close()
+    out = capsys.readouterr()
+    text = out.out + out.err
+    assert text.count("street view off") == 1
+    assert "secret" not in text and "1234567890" not in text
+
+
+def _http(url, headers=None):
+    r = urllib.request.Request(url, headers=headers or {})
+    try:
+        with urllib.request.urlopen(r, timeout=10) as resp:
+            return resp.status, json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        raw = e.read()
+        try:
+            return e.code, json.loads(raw)
+        except ValueError:
+            return e.code, raw
 
 
 def test_the_page_gets_the_key_only_when_one_is_set_and_never_cached():
@@ -235,3 +273,216 @@ console.log(JSON.stringify([S.bearing(pano, P), S.bearing(pano, S.facePoint(P, [
                                                       text=True, check=True, timeout=30).stdout)
     assert to_point == 0
     assert 20 < to_building < 70                                              # north-east, into the building
+
+
+# -- the map's gestures in node, on a small fake DOM: pick mode, the long press, Esc ------------------------------------------
+
+GESTURES = r"""
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+class El {
+  constructor(tag, cls = "") { this.tag = tag; this.className = cls; this.children = []; this.attrs = {}; this.style = {};
+    this.parentNode = null; this.hidden = false; this.ls = {}; this.id = "";
+    this.classList = { add() {}, remove() {}, toggle() {}, contains: () => false }; }
+  set textContent(t) { this._t = t; } get textContent() { return this._t || ""; }
+  append(...c) { for (const x of c) if (x && typeof x === "object") { x.parentNode = this; this.children.push(x); } }
+  remove() { if (this.parentNode) { this.parentNode.children = this.parentNode.children.filter((c) => c !== this); this.parentNode = null; } }
+  setAttribute(k, v) { this.attrs[k] = String(v); } getAttribute(k) { return k in this.attrs ? this.attrs[k] : null; }
+  addEventListener(t, f) { (this.ls[t] = this.ls[t] || []).push(f); }
+  contains(n) { for (let x = n; x; x = x.parentNode) if (x === this) return true; return false; }
+  matches(sel) { const [tag, cls] = sel.includes(".") ? sel.split(".") : [sel, ""];
+    return (!tag || this.tag === tag) && (!cls || (" " + this.className + " ").includes(" " + cls + " ")); }
+  closest(sel) { for (let x = this; x; x = x.parentNode) if (x.matches && x.matches(sel)) return x; return null; }
+  querySelector(sel) { for (const c of this.children) { if (c.matches(sel)) return c; const d = c.querySelector(sel); if (d) return d; } return null; }
+  focus() {} getBoundingClientRect() { return { left: 0, top: 0, width: 800, height: 600 }; }
+  get offsetWidth() { return 100; } get offsetHeight() { return 40; }
+}
+const winLs = {};
+global.window = global;
+global.addEventListener = (t, f, cap) => { (winLs[t] = winLs[t] || []).push(f); };
+const docLs = {};
+global.document = { body: new El("body"), head: new El("head"), documentElement: { clientWidth: 1000 },
+  createElement: (t) => new El(t), addEventListener: (t, f) => { (docLs[t] = docLs[t] || []).push(f); },
+  querySelector: (sel) => document.body.querySelector(sel) };
+global.innerHeight = 800;
+global.fetch = async () => ({ ok: true, json: async () => ({ provider: "google", key: "k" }) });
+let VIEW = "overview";
+global.cad = { who: { enforced: false }, sel: 7, hooks: [] };
+global.canDo = () => true;
+global.viewTab = () => VIEW;
+const groups = [];
+global.MapLayers = { addGroup(g) { groups.push(g); } };
+
+function fakeMap(hostId) {
+  const host = new El("div", "cm-host"); host.id = hostId || "";
+  const container = new El("div", "cm-canvas"), cc = new El("div", "maplibregl-canvas-container");
+  const canvas = new El("canvas", "maplibregl-canvas"); canvas.style.cursor = "grab";
+  const marker = new El("div", "maplibregl-marker"), chip = new El("span", "cm-rig");
+  marker.append(chip); cc.append(canvas, marker); container.append(cc); host.append(container);
+  const ctrls = new El("div", "cm-ctrls"), layers = new El("button", "cm-btn sm"); ctrls.append(layers); host.append(ctrls);
+  const ml = {};
+  const map = { on(t, f) { (ml[t] = ml[t] || []).push(f); }, getCanvas: () => canvas, getCanvasContainer: () => cc,
+    getContainer: () => container, unproject: ([x, y]) => ({ lat: 41 + y * 1e-5, lng: -73.66 + x * 1e-5 }),
+    project: () => [0, 0], getStyle: () => ({ layers: [] }), queryRenderedFeatures: () => [] };
+  const control = { map, host, btn: layers, focused: null };
+  for (const g of groups) g.attach(control);
+  return { map, ml, canvas, cc, marker, chip, ctrls, control, others: 0, btn: ctrls.children[1] };
+}
+// a click as the browser delivers it: the window's capturing listeners first, then the target's (the map's own)
+function click(m, target, x = 50, y = 60) {
+  const ev = { type: "click", target, clientX: x, clientY: y, stopped: false, dp: false,
+    stopPropagation() { this.stopped = true; }, preventDefault() { this.dp = true; } };
+  for (const f of winLs.click || []) { f(ev); if (ev.stopped) return ev; }
+  m.others++;                                   // newcall-map clicked(), a pre-plan placement, a firehouse's rig list ...
+  return ev;
+}
+function down(x, y) { for (const f of docLs.pointerdown || []) f({ clientX: x, clientY: y, target: document.body }); }
+function key(k, prevented = false) {
+  const ev = { key: k, defaultPrevented: prevented, preventDefault() { this.defaultPrevented = true; this.dp = true; } };
+  for (const f of winLs.keydown || []) f(ev);
+  return ev;
+}
+const touch = (el, t, x = 50, y = 60) => { for (const f of el.ls[t] || []) f({ target: el === undefined ? null : el._t || el,
+  touches: t === "touchend" ? [] : [{ clientX: x, clientY: y }] }); };
+function touchOn(m, target, t) { for (const f of m.cc.ls[t] || []) f({ target, touches: t === "touchend" ? [] : [{ clientX: 50, clientY: 60 }] }); }
+const menus = () => document.body.children.filter((c) => c.matches(".sv-menu"));
+
+(async () => {
+  require(process.argv[2]);
+  const S = window.StreetView, out = {};
+  const m = fakeMap();
+  await sleep(20);                                  // the key arrives
+  out.btnShown = !m.btn.hidden;
+  // pick mode: the armed click is the pick, nobody else's; the cursor as it was before
+  m.btn.ls.click[0]({ stopPropagation() {} });
+  out.armed = m.btn.attrs["aria-pressed"]; out.cursorArmed = m.canvas.style.cursor;
+  down(50, 60); const ev = click(m, m.canvas, 50, 60);
+  out.pick = { swallowed: ev.stopped && ev.dp, others: m.others, at: S.lastAt(), pressed: m.btn.attrs["aria-pressed"],
+               cursor: m.canvas.style.cursor };
+  // a pan while armed (moved between down and up) is not a pick
+  m.btn.ls.click[0]({ stopPropagation() {} });
+  down(10, 10); const pan = click(m, m.canvas, 100, 100);
+  out.pan = { taken: pan.stopped, pressed: m.btn.attrs["aria-pressed"] };
+  // a rig chip (a marker) on the armed map is the pick too, not the rig's click
+  down(5, 5); const onChip = click(m, m.chip, 5, 5);
+  out.chip = { taken: onChip.stopped, pressed: m.btn.attrs["aria-pressed"] };
+  // Esc: one already taken (#464's alignment, a dialog) leaves the pick alone; a free one ends it
+  m.btn.ls.click[0]({ stopPropagation() {} });
+  key("Escape", true); out.escTaken = m.btn.attrs["aria-pressed"];
+  const e2 = key("Escape"); out.escFree = [m.btn.attrs["aria-pressed"], !!e2.dp];
+  // a change of view (cad.js render hooks) or of the hash ends it
+  m.btn.ls.click[0]({ stopPropagation() {} });
+  VIEW = "radio"; for (const f of cad.hooks) f(); out.viewChange = m.btn.attrs["aria-pressed"]; VIEW = "overview";
+  m.btn.ls.click[0]({ stopPropagation() {} });
+  for (const f of winLs.hashchange || []) f({}); out.hashChange = m.btn.attrs["aria-pressed"];
+  // never while the pre-plan editor places a point
+  const form = new El("form", "pp-form card"); document.body.append(form);
+  m.btn.ls.click[0]({ stopPropagation() {} }); out.whileEditing = m.btn.attrs["aria-pressed"];
+  form.remove();
+  // the new call's map: no button without a call, never armed
+  const nc = fakeMap("nc-map"); await sleep(5); for (const f of cad.hooks) f();
+  out.newCall = { hidden: nc.btn.hidden };
+  nc.btn.ls.click[0]({ stopPropagation() {} }); out.newCall.pressed = nc.btn.attrs["aria-pressed"];
+  down(50, 60); const ncClick = click(nc, nc.canvas); out.newCall.mapGotIt = !ncClick.stopped && nc.others === 1;
+  // the long press: a menu; the lift's click swallowed, the next one not
+  touchOn(m, m.canvas, "touchstart"); await sleep(S.LONG_MS + 100);
+  out.lpMenus = menus().length;
+  const first = menus()[0];
+  // Android's contextmenu for the same press: no second menu
+  for (const f of m.ml.contextmenu) f({ originalEvent: { clientX: 50, clientY: 60, preventDefault() {} }, point: { x: 50, y: 60 }, lngLat: { lat: 41, lng: -73.66 } });
+  out.lpOnce = menus().length === 1 && menus()[0] === first;
+  touchOn(m, m.canvas, "touchend");
+  const before = m.others; const lift = click(m, m.canvas);
+  out.lift = { swallowed: lift.stopped, others: m.others - before };
+  const later = click(m, m.canvas); out.nextClick = !later.stopped;
+  first.remove();
+  // a long press on a mark (a rig, a dragged pre-plan point): nothing
+  await sleep(900);
+  touchOn(m, m.chip, "touchstart"); await sleep(S.LONG_MS + 100);
+  out.onMarker = menus().length;
+  touchOn(m, m.chip, "touchend");
+  console.log(JSON.stringify(out));
+  process.exit(0);
+})();
+"""
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_pick_mode_long_press_and_esc_on_a_fake_page(tmp_path):
+    h = tmp_path / "g.js"
+    h.write_text(GESTURES)
+    r = subprocess.run([NODE, str(h), str(STATIC / "streetview.js")], capture_output=True, text=True, timeout=30)
+    assert r.returncode == 0, r.stderr
+    out = json.loads(r.stdout)
+    assert out["btnShown"] is True
+    assert out["armed"] == "true" and out["cursorArmed"] == "crosshair"
+    p = out["pick"]
+    assert p["swallowed"] and p["others"] == 0                               # nobody else saw the click
+    assert p["at"] == {"lat": pytest.approx(41 + 60e-5), "lon": pytest.approx(-73.66 + 50e-5)}
+    assert p["pressed"] == "false" and p["cursor"] == "grab"                 # the cursor it had, not ""
+    assert out["pan"] == {"taken": False, "pressed": "true"}
+    assert out["chip"] == {"taken": True, "pressed": "false"}
+    assert out["escTaken"] == "true" and out["escFree"] == ["false", True]
+    assert out["viewChange"] == "false" and out["hashChange"] == "false"
+    assert out["whileEditing"] == "false"
+    assert out["newCall"] == {"hidden": True, "pressed": "false", "mapGotIt": True}
+    assert out["lpMenus"] == 1 and out["lpOnce"] is True
+    assert out["lift"] == {"swallowed": True, "others": 0} and out["nextClick"] is True
+    assert out["onMarker"] == 0
+
+
+def test_the_pre_plan_editor_is_still_seen_by_its_form():
+    """streetview.js knows the editor is on by its form (preplan.js edit(): form.pp-form, gone on cancelEdit)."""
+    pp = (STATIC / "preplan.js").read_text()
+    assert 'const f = el("form", "pp-form card");' in pp
+    assert "if (e.host) { e.host.replaceChildren(); show(e.host, false); }" in pp
+    assert 'const ppEditing = () => !!document.querySelector("form.pp-form");' in (STATIC / "streetview.js").read_text()
+    assert '$("#nc-map")' in (STATIC / "newcall-map.js").read_text()          # the new call's map, by its host
+
+
+# -- the endpoint behind Cloudflare Access, and on a station ------------------------------------------------------------------
+
+def test_behind_access_a_viewer_gets_the_key_and_nobody_unsigned_does(tmp_path, keys, jwks):
+    from tests.test_access import AUD, TEAM, jwt
+    from tests.test_cloud import HubRun, hub_cfg
+    from tests.test_roles import VAL, people
+    h = HubRun(hub_cfg(tmp_path, cloud_access_team=TEAM, cloud_access_aud=AUD, streetview_google_key=KEY))
+    try:
+        h.server.access.certs_url = jwks.url
+        h.server.access.log = lambda m: None
+        people(h.app.cad)
+        code, body = _http(h.url + "/api/cad/streetview")
+        assert code == 401 and KEY not in json.dumps(body if isinstance(body, dict) else {"raw": body.decode()})
+        code, body = _http(h.url + "/api/cad/streetview", {"Cf-Access-Jwt-Assertion": jwt(keys[0], email=VAL)})
+        assert code == 200 and body == {"provider": "google", "key": KEY}      # a viewer looks at the map too
+    finally:
+        h.close()
+
+
+def test_a_station_refuses_it_like_the_rest_of_the_cad(tmp_path):
+    from tests.test_station_page import raw, serve, station_app
+    app = station_app(tmp_path)
+    server, port = serve(app)
+    try:
+        code, _, body = raw(port, "/api/cad/streetview")
+        assert code == 409 and "the CAD is on the hub" in json.loads(body)["error"]
+    finally:
+        server.shutdown()
+        app.stop()
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_headings_stay_in_0_to_359(tmp_path):
+    h = tmp_path / "d.js"
+    h.write_text(r"""
+global.window = global;
+global.document = { addEventListener() {}, createElement() { return {}; } };
+global.addEventListener = () => {};
+require(process.argv[2]);
+const S = window.StreetView;
+const near = S.bearing({ lat: 41.0, lon: -73.66 }, { lat: 41.001, lon: -73.66 - 1e-9 });   // a hair west of north
+console.log(JSON.stringify({ labels: [359.6, 359.4, 360, -0.4, 0, 720.2, -90].map(S.degLabel), near }));
+""")
+    out = json.loads(subprocess.run([NODE, str(h), str(STATIC / "streetview.js")], capture_output=True, text=True, check=True,
+                                    timeout=30).stdout)
+    assert out["labels"] == ["0°", "359°", "0°", "0°", "0°", "0°", "270°"]
+    assert 0 <= out["near"] < 360 and out["near"] in (0, 359.9)

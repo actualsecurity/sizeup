@@ -34,7 +34,8 @@ window.StreetView = (() => {
     const y = Math.sin(dl) * Math.cos(f2);
     const x = Math.cos(f1) * Math.sin(f2) - Math.sin(f1) * Math.cos(f2) * Math.cos(dl);
     const deg = (Math.atan2(y, x) * 180) / Math.PI;
-    return Math.round(((deg + 360) % 360) * 10) / 10;
+    const r = Math.round(((deg % 360) + 360) % 360 * 10) / 10;
+    return r >= 360 ? r - 360 : r;                           // [0, 360): 359.96 rounds to 0, not 360
   }
   // a polygon ring's centroid [lon, lat] (by area; a degenerate ring: the mean of its points)
   function centroid(ring) {
@@ -174,6 +175,7 @@ window.StreetView = (() => {
     },
     open(at, opts = {}) {
       this.build();
+      this.lastAt = at;
       const seq = ++this.seq;
       this.target = opts.face || null;
       this.setDate("");
@@ -245,7 +247,7 @@ window.StreetView = (() => {
       const pov = this.pano && this.pano.getPov();
       if (!pov) return;
       if (this.mark) this.mark.setRotation(pov.heading);
-      this.facing.textContent = `${Math.round(((pov.heading % 360) + 360) % 360)}°`;
+      this.facing.textContent = degLabel(pov.heading);
       this.facing.title = "Facing (compass degrees)";
     },
     // the viewer's small map: built on the first open (the dialog must be showing to size it)
@@ -315,11 +317,15 @@ window.StreetView = (() => {
   };
 
   // ---- the menu at a point (right-click, long press) ------------------------------------------------------------------
-  const MENU = { el: null, at: 0 };
+  const MENU = { el: null, at: 0, swallow: 0, down: null };
+  const SWALLOW_MS = 400;                 // the click a touch screen makes when the long press lifts: not a map click
   function menuClose() {
     if (MENU.el) { MENU.el.remove(); MENU.el = null; }
   }
+  // one menu per gesture: Android sends contextmenu on a long press too, and our own timer would open a second
+  const justOpened = () => !!MENU.el && Date.now() - MENU.at < 800;
   function menuOpen(x, y, lngLat, sm) {
+    if (justOpened()) return false;
     const items = menuItems(current());
     if (!items.length) return false;
     menuClose();
@@ -343,7 +349,7 @@ window.StreetView = (() => {
       });
       el.append(b);
     }
-    el.addEventListener("keydown", (e) => { if (e.key === "Escape") { e.stopPropagation(); menuClose(); } });
+    el.addEventListener("keydown", (e) => { if (e.key === "Escape") { e.stopPropagation(); e.preventDefault(); menuClose(); } });
     document.body.append(el);
     const vw = document.documentElement.clientWidth, vh = window.innerHeight;
     el.style.left = `${Math.max(8, Math.min(x, vw - el.offsetWidth - 8))}px`;
@@ -355,12 +361,32 @@ window.StreetView = (() => {
     return true;
   }
   document.addEventListener("pointerdown", (e) => {          // anywhere else closes it (not the lift of the long press)
-    if (MENU.el && !MENU.el.contains(e.target) && Date.now() - MENU.at > 400) menuClose();
+    MENU.down = { x: e.clientX, y: e.clientY };
+    if (MENU.el && !MENU.el.contains(e.target) && Date.now() - MENU.at > SWALLOW_MS) menuClose();
   }, true);
+  // Before anything else sees a click (the window, capturing): the one a long press's lift makes, and the armed pick's,
+  // so the new call's map, a pre-plan placement, a pin or a firehouse's rig list never take it as theirs too.
+  window.addEventListener("click", (e) => {
+    if (Date.now() < MENU.swallow && !(MENU.el && MENU.el.contains(e.target))) {
+      MENU.swallow = 0;
+      e.stopPropagation(); e.preventDefault();
+      return;
+    }
+    for (const m of maps) if (m.armed && m.takeClick(e)) return;
+  }, true);
+  // Esc: one thing at a time. Whatever took it first (a dialog, the pre-plan editor, #464's alignment) keeps it.
   window.addEventListener("keydown", (e) => {
-    if (e.key === "Escape" && MENU.el) menuClose();
-    if (e.key === "Escape") for (const m of maps) m.disarm();
+    if (e.key !== "Escape" || e.defaultPrevented) return;
+    if (MENU.el) { menuClose(); e.preventDefault(); return; }
+    for (const m of maps) if (m.armed) { m.disarm(); e.preventDefault(); return; }
   });
+  window.addEventListener("hashchange", () => { for (const m of maps) m.disarm(); });
+  // the pre-plan editor (preplan.js) is placing or moving a point: its form is on the page while it is
+  const ppEditing = () => !!document.querySelector("form.pp-form");
+  // the view on screen and its call (cad.js viewTab, cad.sel): a pick belongs to the view it was armed in
+  const where = () => `${typeof viewTab === "function" ? viewTab() : ""}|${typeof cad !== "undefined" ? cad.sel : ""}`;
+  // a degree heading as shown: 0 to 359 (359.6 is 0, never "360")
+  const degLabel = (deg) => `${Math.round(((Number(deg) % 360) + 360) % 360) % 360}°`;
 
   // ---- one map: its button, its menu, its long press ------------------------------------------------------------------
   class SVMap {
@@ -368,6 +394,8 @@ window.StreetView = (() => {
       this.control = control;
       this.map = control.map;
       this.armed = false;
+      // the new call's map (newcall-map.js, manual): its clicks pick the call's location; no pick mode there
+      this.manual = !!(control.host && control.host.id === "nc-map");
       const ctrls = control.btn && control.btn.parentNode;
       this.btn = h("button", "cm-btn sm icon sv-btn");
       this.btn.type = "button";
@@ -383,42 +411,44 @@ window.StreetView = (() => {
         const r = map.getCanvas().getBoundingClientRect();
         menuOpen(oe.clientX != null ? oe.clientX : r.left + e.point.x, oe.clientY != null ? oe.clientY : r.top + e.point.y, e.lngLat, this);
       });
-      map.on("click", (e) => {
-        if (!this.armed) return;
-        this.disarm();
-        this.openAt({ lat: e.lngLat.lat, lon: e.lngLat.lng }, null);
-      });
-      map.on("movestart", (e) => { if (e.originalEvent && Date.now() - MENU.at > 400) menuClose(); });
+      map.on("movestart", (e) => { if (e.originalEvent && Date.now() - MENU.at > SWALLOW_MS) menuClose(); });
       this.longPress(map.getCanvasContainer());
       maps.add(this);
       this.sync();
     }
-    // a long press on a touch screen (iOS Safari sends no contextmenu)
+    // a long press on a touch screen (iOS Safari sends no contextmenu); not on a mark (a rig, a dragged pre-plan point)
     longPress(el) {
-      let t = null, x0 = 0, y0 = 0;
+      let t = null, x0 = 0, y0 = 0, fired = false;
       const cancel = () => { if (t) { clearTimeout(t); t = null; } };
       el.addEventListener("touchstart", (e) => {
         cancel();
+        fired = false;
         if (e.touches.length !== 1) return;
+        if (e.target && e.target.closest && e.target.closest(".maplibregl-marker")) return;
         x0 = e.touches[0].clientX; y0 = e.touches[0].clientY;
         t = setTimeout(() => {
           t = null;
           const r = this.map.getCanvas().getBoundingClientRect();
-          menuOpen(x0, y0, this.map.unproject([x0 - r.left, y0 - r.top]), this);
+          fired = menuOpen(x0, y0, this.map.unproject([x0 - r.left, y0 - r.top]), this) || justOpened();
         }, LONG_MS);
       }, { passive: true });
       el.addEventListener("touchmove", (e) => {
         const p = e.touches[0];
         if (!p || Math.hypot(p.clientX - x0, p.clientY - y0) > MOVE_PX) cancel();
       }, { passive: true });
-      el.addEventListener("touchend", cancel, { passive: true });
-      el.addEventListener("touchcancel", cancel, { passive: true });
+      el.addEventListener("touchend", () => {
+        cancel();
+        if (fired || justOpened()) MENU.swallow = Date.now() + SWALLOW_MS;   // the lift's click is not a tap on the map
+        fired = false;
+      }, { passive: true });
+      el.addEventListener("touchcancel", () => { cancel(); fired = false; }, { passive: true });
     }
     sync() {
       const m = current();
-      this.btn.hidden = m === "off";
+      this.btn.hidden = m === "off" || (this.manual && !this.call());
       this.btn.title = m === "notice" ? "Street view: key not set" : "Street view";
       this.btn.setAttribute("aria-label", this.btn.title);
+      if (this.armed && where() !== this.armedIn) this.disarm();        // the view or its call changed
     }
     call() {
       const inc = this.control.focused;
@@ -432,15 +462,40 @@ window.StreetView = (() => {
       if (this.armed) { this.disarm(); return; }
       const at = this.call();
       if (at) { this.openAt(at, at); return; }
-      this.armed = true;                         // no call here: the next click on the map picks the spot
+      this.arm();
+    }
+    // no call here: the next click on the map picks the spot
+    arm() {
+      if (this.manual || ppEditing()) return false;    // the map's clicks are someone else's just now
+      for (const m of maps) if (m !== this) m.disarm();
+      this.armed = true;
+      this.armedIn = where();
       this.btn.setAttribute("aria-pressed", "true");
-      try { this.map.getCanvas().style.cursor = "crosshair"; } catch (_) { /* */ }
+      try { const c = this.map.getCanvas(); this.cursor = c.style.cursor; c.style.cursor = "crosshair"; } catch (_) { /* */ }
+      return true;
     }
     disarm() {
       if (!this.armed) return;
       this.armed = false;
       this.btn.setAttribute("aria-pressed", "false");
-      try { this.map.getCanvas().style.cursor = ""; } catch (_) { /* */ }
+      try { this.map.getCanvas().style.cursor = this.cursor || ""; } catch (_) { /* */ }
+      this.cursor = "";
+    }
+    // an armed map's click (the window's capturing listener): on this map's canvas, it is the pick and nobody else's
+    takeClick(e) {
+      let canvas;
+      try { canvas = this.map.getCanvas(); } catch (_) { return false; }
+      const t = e.target;
+      const onMap = t === canvas || !!(t && t.closest && t.closest(".maplibregl-marker") && this.map.getContainer().contains(t));
+      if (!onMap) return false;                        // its controls, the page: as ever
+      const d = MENU.down;
+      if (d && Math.hypot(e.clientX - d.x, e.clientY - d.y) > 4) return false;   // the end of a pan: not a pick
+      e.stopPropagation(); e.preventDefault();
+      if (ppEditing() || where() !== this.armedIn) { this.disarm(); return true; }
+      const r = canvas.getBoundingClientRect(), ll = this.map.unproject([e.clientX - r.left, e.clientY - r.top]);
+      this.disarm();
+      this.openAt({ lat: ll.lat, lon: ll.lng }, null);
+      return true;
     }
     // at {lat, lon}; face: the call's point (or null: a spot picked on the map, faced from the panorama towards it)
     openAt(at, face) {
@@ -473,6 +528,8 @@ window.StreetView = (() => {
   if (window.MapLayers && MapLayers.addGroup) MapLayers.addGroup({ attach });
 
 
-  return { RADIUS_M, LONG_MS, bearing, centroid, inRing, facePoint, dateLabel, mode, scriptUrl, menuItems, config,
+  if (typeof cad !== "undefined" && cad.hooks) cad.hooks.push(syncAll);   // every render: a pick left behind by a view change
+  return { RADIUS_M, LONG_MS, SWALLOW_MS, degLabel, bearing, centroid, inRing, facePoint, dateLabel, mode, scriptUrl, menuItems, config,
+           lastAt: () => V.lastAt || null,
            open: (at, face) => (current() === "on" ? V.open(at, { face }) : null) };
 })();

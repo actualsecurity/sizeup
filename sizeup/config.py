@@ -349,6 +349,7 @@ class Config:
     # Maps JavaScript API; env SIZEUP_GOOGLE_MAPS_KEY first (the hub: SSM /sizeup-hub/google-maps-key). "" or "none":
     # off (an admin sees "Street view: key not set"). Never logged; the page gets it only from GET /api/cad/streetview.
     streetview_google_key: str = field(default="", repr=False)
+    streetview_key_bad: bool = False                # a value that is not a key: off (App logs it once)
     vessels_receiver: bool = False
     vessels_sdr: str = ""
     vessels_gain: str = "auto"
@@ -996,14 +997,15 @@ def _vessels(data: dict, base: Path, sdrs: tuple[str, ...], adsb_sdr: str = "") 
 
 def _streetview(data: dict) -> dict:
     """[streetview] google_key / env SIZEUP_GOOGLE_MAPS_KEY -> streetview_google_key ("" = off). "none" (the SSM
-    placeholder before a key exists) is off too. A bad value is refused without ever repeating it."""
+    placeholder before a key exists) is off too, and so is a value that isn't a key's shape (streetview_key_bad: the
+    app logs one line, never the value)."""
     sv = _take(data.get("streetview", {}), "streetview", {"google_key"})
     key = _env("SIZEUP_GOOGLE_MAPS_KEY", str(sv.get("google_key", ""))).strip()
     if key.lower() in ("none", "off", "-"):
         key = ""
     if key and not re.fullmatch(r"[A-Za-z0-9_-]{20,128}", key):
-        raise ConfigError("streetview.google_key / SIZEUP_GOOGLE_MAPS_KEY: a Google Maps API key (letters, digits, _ and -; "
-                          "\"none\" for off)")
+        # never a ConfigError: a hand-edited SSM value would stop the hub from starting at all; off, said once by the app
+        return dict(streetview_google_key="", streetview_key_bad=True)
     return dict(streetview_google_key=key)
 
 

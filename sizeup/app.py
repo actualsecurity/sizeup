@@ -524,6 +524,8 @@ class App:
                     if cfg.p25_dir else None)
         # PCFD's own dispatch console: incidents, units, run cards (state/cad.sqlite).
         self.cad = Cad.from_config(cfg, geocoder=self._geocode_text if self.gaz is not None else None, log=log)
+        if getattr(cfg, "streetview_key_bad", False):   # never the value (static/streetview.js: off)
+            log("street view off: SIZEUP_GOOGLE_MAPS_KEY / [streetview] google_key is not a Google API key")
         _mark("cad")
         if self.gaz is not None:           # the place search over the same gazetteer (a note's "@", #67)
             from sizeup.geo.intersections import IntersectionSearch
