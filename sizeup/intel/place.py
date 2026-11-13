@@ -110,7 +110,7 @@ def hq_towns(text: str, system: str, service: str) -> list[str]:
     for c in sysd.get("callsigns") or []:
         said = str(c.get("said") or "")
         if (str(c.get("service") or "") != service or str(c.get("role") or "") != "headquarters" or not said.isdigit()
-                or not re.search(rf"(?<![A-Za-z0-9-]){re.escape(said)}(?![A-Za-z0-9])", text or "")):
+                or not re.search(rf"(?<![A-Za-z0-9-]){re.escape(said)}(?![A-Za-z0-9-])", text or "")):
             continue
         town = re.sub(r"\s+(PD|Police.*)$", "", str(c.get("department") or "")).strip()
         if town and town not in out:

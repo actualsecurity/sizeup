@@ -757,7 +757,7 @@ class App:
         intel.notifier, intel.public_url, intel.leader = self.pushes.notifier(notify.INTEL), cfg.cloud_public_url, self._atc_leader
         if self.gaz is not None:
             from sizeup.intel.place import Locator
-            intel.locate = Locator(self.gaz)
+            intel.locate = Locator(self.gaz, places=self.cad.place_index)      # exits and markers too
         log(self.pushes.line())
         _mark("prealert + pushes")
         self.cad.alarms.public_url = cfg.cloud_public_url
