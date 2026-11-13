@@ -1901,7 +1901,8 @@ async function sPushes(card) {
   card.replaceChildren(sCardHead("Push notifications", "", sHelp("Pushes go to our own ntfy topics, by kind. Status & health: "
     + "station health (silent, behind, a dongle or program down, the disk, the whisper queue), Amazon Transcribe failing and its "
     + "monthly limit, and their recoveries. Alerts: the emergency buttons, a mayday, an aircraft emergency, their acknowledgements "
-    + "and all clears. Only one topic set: everything goes to it. A name set here wins over SSM and the config file; empty uses "
+    + "and all clears. Pre-alerts (intel): radio pre-alerts (police / fire chatter); not set: the alerts topic. "
+    + "Only one of alerts / status set: everything goes to it. A name set here wins over SSM and the config file; empty uses "
     + `them. Never Tapout's topics (${d.forbidden.join(", ")}): refused. ${d.min_len} to ${d.max_len} letters, digits, - and _; `
     + "ntfy topics are public by name, so make them long and random. Only admins see the names.")), ...kids);
 }

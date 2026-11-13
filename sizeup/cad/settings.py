@@ -2316,7 +2316,7 @@ class Editor:
     # topics are public by name): never in the export, the audit log (a fingerprint there), the activity or the logs.
 
     def _notify_op(self, action: str, body: dict, op: str) -> dict:
-        """set {key: alerts | status, topic} ("" = the default) | off {key} | reset {key} | server {value} ("" = the
+        """set {key: alerts | status | intel, topic} ("" = the default) | off {key} | reset {key} | server {value} ("" = the
         default) | test {key}: a marked test push to the topic in effect. Admins (sizeup/cad/api.py WRITES)."""
         from sizeup import notify
         p = getattr(self.cad, "pushes", None)
@@ -2336,7 +2336,7 @@ class Editor:
             self.cad.log(p.line() + " (Settings changed)")
             return out
         if key not in notify.KINDS:
-            raise CadError("key: alerts or status")
+            raise CadError("key: alerts, status or intel")
         def said(v) -> str:                          # never the name: the audit log is open to everyone signed in
             if not isinstance(v, dict):
                 d, src = p.defaults[key]
