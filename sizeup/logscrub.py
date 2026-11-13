@@ -80,6 +80,10 @@ _AUTH = re.compile(r"(?i)\b(bearer|basic|digest|ntlm|negotiate)\s+[^\s,;]+")
 _USERINFO = re.compile(r"(?i)\b([a-z][a-z0-9+.-]{1,15}://)?[^/\s:@'\"]+:[^/\s'\"]*@(?=[\w.\[-])")
 _AFTER_AUTH = re.compile(r"(?i)\b(?:credentials?|creds|login|log-?on|logged in|sign(?:ed)?[ -]?in|auth\w*|user(?:name)?)\b")
 _PAIR = re.compile(r"(?<![\w/])([\w.+@-]+):(?!\d{2}\b)([^\s,;)\]}\"']+)")         # user:password (not 12:30)
+_CRED_WORDS = re.compile(r"(?i)\b(credentials?|creds)\s+(\S+)\s+(?!\[)(\S+)")      # credentials <user> <secret>
+_EXC_TUPLE = re.compile(r"\b(\w*(?:Login|Auth|Credential)\w*)\(\s*(['\"])(?:\\.|(?!\2).)*\2\s*,[^)]*\)")
+_SPACE_TOKEN = re.compile(r"(?i)\b(token|api[ _-]?key|apikey)\s+(?!(?:is|was|for|from|missing|set|not|expired|ok|refused|"
+                          r"invalid|rejected|changed|saved|valid|\[)\b)(?=\S*[0-9A-Z_/+=-])(\S{6,})")
 _TUPLE = re.compile(r"\(\s*(['\"])(?:\\.|(?!\1).)*\1\s*,\s*(['\"])(?:\\.|(?!\2).)*\2\s*\)")
 _QUERY = re.compile(r"(?i)([?&](?:" + _KEY + r"|p|pw|pin|pass|code|key|x-amz-[a-z-]+)=)[^&\s#\"']+")
 _AWS_KEY_ID = re.compile(r"\b(?:AKIA|ASIA|AROA|AIDA|AGPA|ANPA|ANVA|AIPA)[A-Z0-9]{16}\b")
@@ -238,6 +242,9 @@ def scrub(line: str) -> str | None:
     s = _KV.sub(lambda m: m.group(1) + REDACTED, s)
     s = _SHORT_KV.sub(lambda m: m.group(1) + REDACTED, s)
     s = _SSM.sub(lambda m: m.group(1) + REDACTED, s)
+    s = _EXC_TUPLE.sub(lambda m: m.group(1) + "(" + REDACTED + ")", s)
+    s = _CRED_WORDS.sub(lambda m: f"{m.group(1)} {m.group(2)} {REDACTED}", s)
+    s = _SPACE_TOKEN.sub(lambda m: m.group(1) + " " + REDACTED, s)
     if _AFTER_AUTH.search(s):
         s = _CODE.sub(lambda m: m.group(1) + REDACTED, s)
         s = _TUPLE.sub("(" + REDACTED + ")", s)

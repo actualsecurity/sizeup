@@ -37,7 +37,8 @@ def take_credentials(names=(), environ=None) -> Path | None:
     return _dir
 
 
-SECRET_NAME = re.compile(r"(?i)pass|pwd|token|secret|key|pin|otp|cred|cookie|session")   # a credential that is a secret
+# Every credstore value is a secret but non-secret configuration (a user name, a region, a URL or host, a bucket)
+NOT_SECRET = re.compile(r"(?i)user|login|account|region|url|host|endpoint|bucket")
 USER_NAME = re.compile(r"(?i)^(.*?)[_-]?(?:user(?:name)?|login|account)$")
 _hosts: set[str] = set()
 
@@ -71,9 +72,9 @@ def _host_of(v: str) -> str:
 def _register(name: str, value: str, store: dict[str, str]) -> None:
     from sizeup import logscrub
     logscrub.secret_name(name)
-    if SECRET_NAME.search(name):
+    if not NOT_SECRET.search(name):
         logscrub.secret(value, short=True)
-        m = re.match(r"(?i)^(.*?)[_-]?(?:pass(?:word|wd)?|pwd)$", name)
+        m = re.match(r"(?i)^(.*?)[_-]?(?:pass(?:word|wd)?|pwd|pw|secret|phrase)$", name)
         if m is not None:                       # its login's user, for the base64 of user:password
             for u in (f"{m.group(1)}_USER", f"{m.group(1)}_USERNAME", f"{m.group(1)}_LOGIN", f"{m.group(1)}USER"):
                 if store.get(u):
@@ -84,7 +85,8 @@ def _register(name: str, value: str, store: dict[str, str]) -> None:
 
 def register_secrets() -> None:
     """The station's secrets into the log scrub (sizeup/logscrub.py): a station log line with one of them never leaves
-    the station. Secret fields only (a password, token, key ...: SECRET_NAME); a user name or a region is not a secret
+    the station. Every credstore value but non-secret configuration (NOT_SECRET: a user name, a region, a URL or host,
+    a bucket) is a secret; a user name or a region is not
     (it would drop every line that says it), but its name is redacted and a login's base64(user:password) is
     registered. A credential that is a URL or a host name is kept as one of the adapter's hosts (adapter_hosts())."""
     from sizeup import logscrub

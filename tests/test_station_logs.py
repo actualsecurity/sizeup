@@ -83,7 +83,7 @@ def test_repro_basic_auth_of_a_registered_login():
     ("pass hunter2", None), ("mysql -p hunter2 db", "mysql -p [redacted] db"), ("mysql -phunter2", "mysql -p [redacted]"),
     ("curl -u bob:hunter2 https://x.example", "curl -u [redacted] https://x.example"),
     ("--user bob:hunter2", "--user [redacted]"), ("connect bob:hunter2@host.example", "connect [redacted]@host.example"),
-    ("credentials for bob:hunter2", "credentials for bob:[redacted]"),
+    ("credentials for bob:hunter2", "credentials for [redacted]"),
     ("login with ('bob', 'hunter2')", "login with ([redacted])"),
     ("{'Name': '/x', 'Value': 'hunter2', 'Type': 'SecureString'}", "{'Name': '/x', 'Value': [redacted], 'Type': 'SecureString'}"),
     ("Value=hunter2 Type=SecureString", "Value=[redacted] Type=SecureString"),
@@ -153,6 +153,29 @@ def test_repro2_usernames_and_regions_are_not_secrets(tmp_path, monkeypatch):
 ])
 def test_repro2_scrub_additions(line, want):
     logscrub.secret_name("FEEDX_PASS")
+    assert logscrub.scrub(line) == want
+
+
+def test_repro3_every_credstore_value_but_config_is_a_secret(tmp_path, monkeypatch):
+    from sizeup import procenv
+    for n, v in (("FEED_PW", "Zq9-hidden"), ("FEED_AUTH", "au7h-val"), ("FEED_USER", "dispatch"),
+                 ("SIZEUP_SSM_REGION", "us-east-1"), ("FEED_HOST", "cad.example.net")):
+        (tmp_path / f"sizeup-adapter.{n}").write_text(v + "\n")
+    monkeypatch.setattr(procenv, "_dir", tmp_path)
+    procenv.register_secrets()
+    assert logscrub.scrub("x Zq9-hidden") is None and logscrub.scrub("x au7h-val") is None
+    assert logscrub.scrub("dispatch mode: 60 Control") == "dispatch mode: 60 Control"
+    assert logscrub.scrub("aws region us-east-1") == "aws region us-east-1"
+
+
+@pytest.mark.parametrize("line,want", [
+    ("credentials bob Hunt3r2", "credentials bob [redacted]"),
+    ("feedx.LoginError('bob', 'Hunt3r2')", "feedx.LoginError([redacted])"),
+    ("AuthFailed(\"bob\", \"x\", 3)", "AuthFailed([redacted])"),
+    ("using token Abc123xyz", "using token [redacted]"), ("api key K3y-abcdef", "api key [redacted]"),
+    ("hub link: token missing", "hub link: token missing"), ("station token is set", "station token is set"),
+])
+def test_repro3_optional_scrub_forms(line, want):
     assert logscrub.scrub(line) == want
 
 
