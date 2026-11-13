@@ -477,7 +477,9 @@ def test_stt_class_follows_the_tier_and_never_passes_fire_traffic(two):
     assert app._stt_priority(item, "tg:307") == URGENT
     assert LIVE < app._stt_priority(item, "p25:mrrs:9211") < LOW and app._stt_priority(item, "p25:mrrs:9212") == LOW
     assert app.channel_pref("p25:mrrs:9211")["transcribe"] and not app.channel_pref("p25:mrrs:9049")["transcribe"]
-    assert app.channel_pref("p25:mrrs:9211")["engine"] == "local" and t.system == "mrrs"
+    # PD dispatch defaults to AWS (radio-intel PR 3), on the local model where AWS isn't set up
+    assert app.channel_pref("p25:mrrs:9211")["engine"] == "aws" and t.system == "mrrs"
+    assert app.stt_engine("p25:mrrs:9211") == "local" and app.channel_pref("p25:mrrs:9049")["engine"] == "local"
     assert app.set_talkgroup(PD, None, None, "record", "mrrs") is None
     assert not app.channel_pref("p25:mrrs:9211")["transcribe"]
     assert "no talkgroup 307 on mrrs" in app.set_talkgroup(307, None, None, "alert", "mrrs")
@@ -601,7 +603,7 @@ def test_rows_from_before_get_their_source_by_the_county_system(tmp_path):
     s.db.execute("INSERT INTO radio_traffic (id, start, end, channel, talkgroup, updated_at) VALUES ('f1', 1, 2, 'FG1', NULL, 1)")
     s.db.execute("INSERT INTO radio_traffic (id, start, end, channel, talkgroup, mhz, updated_at) VALUES ('a1', 1, 2, 'HPN Tower', NULL, 118.575, 1)")
     s.db.commit()
-    s.db.close()
+    s.shutdown()
     db = sqlite3.connect(path)                       # as it was before this release: none of the columns
     for index in ("source_start", "service_start", "system_start", "dept_start", "safety"):     # the Radio page's too (#415)
         db.execute(f"DROP INDEX radio_traffic_{index}")
@@ -761,7 +763,8 @@ def test_context_speech_to_text_is_under_every_class_of_ours_and_is_shed(two):
     finally:
         appmod.AIRBAND_FIRST.discard("HPN Tower")
     alert, text = app._stt_priority(t, "p25:mrrs:9211"), app._stt_priority(t, "p25:mrrs:9212")
-    assert alert == stt.CONTEXT and text == stt.LOW and all(p < alert <= text for p in ours)
+    # PD dispatch is set to AWS (radio-intel PR 3) and there is none here: whisper is all it gets, CONTEXT_FALLBACK
+    assert alert == stt.CONTEXT_FALLBACK and text == stt.LOW and all(p < alert <= text for p in ours)
     assert stt.SHED_AFTER[stt.CONTEXT] <= 600 and stt.CONTEXT not in stt.LIVE_CLASSES     # shed; never "behind" by it
     # in the queue itself: a fire clip that comes later is still taken first, and a waiting context clip is shed
     clock, dropped = {"t": 100.0}, []

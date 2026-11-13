@@ -8,10 +8,13 @@ FROM python:3.14-slim
 ARG TARGETARCH
 ARG SIZEUP_BUILD=""
 # Litestream (continuous SQLite backup to S3, deploy/hub/entrypoint.sh), pinned, checked against the
-# release's checksums.txt: github.com/benbjohnson/litestream/releases/tag/v0.5.17
-ARG LITESTREAM_VERSION=0.5.17
-ARG LITESTREAM_SHA256_ARM64=f8ca4a050095c1efbda2c4365172e61bf9d955ea0d9ac42f448b52e51819baa5
-ARG LITESTREAM_SHA256_AMD64=cfb371176d164437ae869f8351cfde49bd1804ae71c61923f75c9cba9c9c006d
+# release's checksums.txt: github.com/benbjohnson/litestream/releases/tag/v0.5.18. At least 0.5.18: its snapshot
+# after a stale WAL position holds every frame (litestream#1547) and its read lock survives a `litestream sync`
+# request (#1579), which the takeover now sends right after `litestream replicate` starts (docs/cloud.md
+# "Replicate before migrate").
+ARG LITESTREAM_VERSION=0.5.18
+ARG LITESTREAM_SHA256_ARM64=922a09e6a7ac67f2095571894dc6382e94e1dd4cdd9674883ddf1a8e74ab982d
+ARG LITESTREAM_SHA256_AMD64=d3687b9fd0f2e9426bbd3da828429ff3f1dfc5c9b74d54fdf028e4ee510e7dea
 
 # The slim image has no curl: Python fetches the tarball, sha256sum checks it.
 RUN set -eu; \

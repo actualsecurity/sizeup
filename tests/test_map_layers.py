@@ -198,7 +198,7 @@ def test_an_old_database_gets_the_column(tmp_path):
     import sqlite3
     db = tmp_path / "old.sqlite"
     api = CadApi(make_cad(tmp_path))
-    api.cad.store.db.close() if hasattr(api.cad.store.db, "close") else None
+    api.cad.shutdown()
     con = sqlite3.connect(str(tmp_path / "cad.sqlite"))
     con.execute("ALTER TABLE incidents DROP COLUMN map_layers")
     con.commit()

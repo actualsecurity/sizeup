@@ -118,7 +118,7 @@ def test_the_column_is_added_to_an_old_database_and_filled_from_its_alarms(tmp_p
     other = row(cad, id="1325-2-call_131", radio_id="21000")
     cad.alarms.on_traffic(dict(tx(t["id"], source="DOT Dispatch 1", talkgroup=1325, radio_id="21514", emergency=True),
                                start=t["start"], end=t["end"]))
-    cad.store.db.close()
+    cad.shutdown()
     db = sqlite3.connect(tmp_path / "cad.sqlite")           # the database as the last release left it
     for col in ("emergency", "evidence", "kept"):
         db.execute(f"ALTER TABLE radio_traffic DROP COLUMN {col}")

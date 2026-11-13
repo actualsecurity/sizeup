@@ -1,25 +1,46 @@
-# Reception test (Settings > Radios)
+# Reception test (Settings > Radios > Receivers)
 
-Can this station hear another P25 system (MTA MRRS) with a dongle it already has? The test lends ONE dongle to the
-system for a while, measures what trunk-recorder decodes, and gives the dongle back. Code:
-`sizeup/radio/reception.py`. Issue: #410.
+Can this station hear a trunked P25 system with a dongle it already has: the county's own system from another
+antenna, or another system (MTA MRRS)? The test lends ONE dongle to the system for a while, measures what
+trunk-recorder decodes, and gives the dongle back. Code: `sizeup/radio/reception.py`, `sizeup/radio/probes.py`.
+Issues: #410, #436.
 
 **Not yet run on a real radio.** Do the [first real run](#first-real-run) below before you trust a number.
 
 ## Run it
 
-1. Settings > Radios > Receivers > **Reception test** (on the hub or on the station's own page; admins only).
-2. Pick the side, the dongle, the time, and type an antenna note (which antenna, where, pointing where).
+1. **On the hub**: Settings > Radios > **Receivers** > **Reception test** (a signed-in admin). It is on that tab only:
+   not on Channels, Tones, Radio IDs, Vocabulary, Speech-to-text, the Radio page or the station's own page. The hub
+   runs the test on the station through its job queue, as every other switch.
+2. Pick the target, the dongle, the time, and type an antenna note (which antenna, where, pointing where).
 3. **Start**. If the dongle runs a job, you are asked to pause it. **Stop** ends a test early; its numbers are kept.
 
 | Field | What it is |
 |---|---|
-| Side | One 2.4 MHz dongle takes in one side of the system's span at a time: `770` (4 listed control channels) or `773` (3). **Both, in turn** runs one after the other on the same dongle, each for the time picked. |
+| Target | Every trunked P25 system: **County** (the county's site, below), then each side of each system in `deploy/trunk-recorder/systems/` (`MRRS 770`, `MRRS 773`: one 2.4 MHz dongle takes in one side at a time) and **both sides**, one after the other on the same dongle, each for the time picked. Conventional channels (FM paging, the firegrounds, the airband) are not targets. |
 | SDR | The dongle to lend. Greyed out: held by another app, unplugged, already on this system, or a fire dongle. |
 | Time | 15 min, 1 h, 4 h a side, or until stopped (ends by itself after 24 h). |
 | Sample | Minutes each captured call can be played before it is deleted (default 10, 0 = keep none, at most 60). |
 
 Start with 15 min on each side to find the control channel, then 1 h or more on the side that has it to count voice.
+
+## The county's system
+
+The county's P25 system is the main trunk-recorder's (`deploy/trunk-recorder/config.json`, Fire/EMS 15), on a fire
+dongle that is never lent. To test it from another dongle, sizeup makes a **probe-only** system per site of that
+config (`sizeup/radio/probes.py`): `<recorder_dir>/systems/probe-<site>/` with the site's control channels and
+sources, the county's talkgroups, its own `shortName`, and its own capture directory beside the county's
+(`captures/p25-probe-<site>`). It is used only by the reception test, on the lent dongle:
+
+- The county's `config.json`, `talkgroups.csv`, state file (`p25_recorder.json`) and capture directory are read or
+  left alone, never written. The county's trunk-recorder is never stopped, restarted or reconfigured for it.
+- On the station the trunk-recorder service runs it as one more system (`p25_recorder.probe-<site>.json`, its own
+  status and claims, at a lower priority): off until a test gives it a dongle. If the county's trunk-recorder is given
+  that dongle, the probe stops at once and lets it go.
+- Its job ("County probe") is never a dongle job in Settings > Radios, and the county's own dongle is refused like
+  every fire dongle.
+- `probe.json` marks the directory: `sizeup/radio/systems.py` never loads it as a system (a release from before it
+  can't either: it is left out).
 
 ## The dongle
 
@@ -63,6 +84,7 @@ Start with 15 min on each side to find the control channel, then 1 h or more on 
 | Site | The system ID, WACN, NAC, RFSS and site the control channel announced, against the site as listed in the system's `config.json`. "NOT as listed" = another site's control channel. |
 | Signal | **Control**: its level over the noise floor, from an `rtl_power` sweep of every side taken before trunk-recorder gets the dongle (left out when `rtl_power` isn't installed). **Voice SNR**: signal minus noise as trunk-recorder measured it on captured calls. Both are relative, uncalibrated dB: compare antennas with them, not stations. |
 | Voice | Calls this dongle captured (its side only), per hour, their audio, and decode errors per second of audio. |
+| TG hits/h | Grants per hour on the system's alert talkgroups, either side: the county's are our fire alert talkgroups (`[p25] incident_talkgroups`), another system's those of the `alert` tier in its `talkgroups.csv`. Hover for which. |
 | Encrypted | Grants on encrypted talkgroups and on talkgroups not in the file. A count only. |
 | Talkgroup table | **Grants**: key-ups the control channel announced, whichever side the voice is on. **Off side**: grants on a voice channel this dongle doesn't cover. **Calls**, **/h**, **Audio**, **Err/s**: the voice captured on this side. |
 
@@ -87,10 +109,22 @@ numbers are of the rest.
 `"controlWarnRate": -1`, which MRRS's `config.json` sets; a build that ignores it logs only the bad ones). Then the
 rate can't be judged and the grade comes from the site and the grants: both seen = Good, one = Marginal, never None.
 
-The hint under the verdict says what to try, e.g. "Control channel decodes 40% of the time: try a directional (yagi)
+The hint (hover the verdict) says what to try, e.g. "Control channel decodes 40% of the time: try a directional (yagi)
 antenna toward Harrison". The antenna advice and the watched talkgroups are the system's own
 (`"sizeup"."reception"` in `deploy/trunk-recorder/systems/<name>/config.json`). A test of both sides takes its best
 side's verdict.
+
+## The history
+
+One row per test: when, target, dongle (and the job it paused), time per side, the verdict, the control channel,
+the share decoded, TG hits/h, the antenna note.
+
+- A test that ran its course shows a verdict per side: green **Good**, amber **Marginal**, red **None** (heard
+  nothing).
+- A test that was **stopped**, **failed** or **interrupted** (sizeup stopped mid-test; restored after a crash or a
+  restart) shows a grey chip instead, e.g. "stopped at 3m", never a verdict colour. Hover for why. A side that measured
+  nothing has no verdict and its Decoded is "—", never "0%".
+- The note is text with a pencil: click it to edit, Enter or leaving the field saves, Escape puts it back.
 
 ## What a test can't show
 
@@ -112,10 +146,11 @@ side's verdict.
 - Captured calls stay on the station as a rolling sample (first 60 s of each, at most 40) for the minutes set, then
   they are deleted. Never a talkgroup switched Off, never an encrypted call. All samples are deleted when sizeup
   stops and when it starts. On the hub they are fetched from the station when played and never stored.
-- A captured call is another system's audio, so it is **listened to from the hub**: Settings > Radios there, a
-  signed-in admin. The hub asks the station for the call when it is played and stores nothing. The station's own
-  page (and an all-in-one install, or a hub without Access) shows only how many calls are kept, "sample: listen from
-  the hub": no list, no audio (`GET /api/reception/sample` answers 403 there).
+- A captured call is listened to **from the hub** only: Settings > Radios > Receivers there, a signed-in admin. The
+  hub asks the station for the call when it is played and stores nothing. The station's own page has no reception
+  test card at all; an all-in-one install, or a hub without Access, shows only how many calls are kept ("listen from
+  the hub"): no list, no audio (`GET /api/reception/sample` answers 403 there).
+- The county probe's captured calls follow the county talkgroup's Record switch; never an encrypted one.
 - The state (the running test, the history; the list of captured calls only for a signed-in person) is
   `GET /api/reception`, admins only. It is not in the
   state everyone gets; only "lent to reception test" on the dongle's row is.
@@ -133,7 +168,7 @@ Nothing here has run on a radio yet. Do this once, with someone at the station P
 Set-up:
 - A spare dongle, or an airband one (HPN Tower suggested). Never a fire dongle (they can't be picked).
 - The 770 side, 15 min.
-- From the **station's own page**, not the hub.
+- From the **hub** (Settings > Radios > Receivers), with someone at the station PC.
 - The other app (shortfinal) closed.
 - Not near an auto-update: check Settings > System that the station runs the hub's build first.
 - **Installing this release restarts the trunk-recorder service** (its supervisor changed), so Fire/EMS 15 loses
@@ -165,6 +200,9 @@ Watch, in this order:
     stays "n/a" with calls captured, that build doesn't measure it.
 12. From the hub: Stop answers at once ("Stopping …"), no error, and the end shows up in the history and the activity log.
 13. The captured-calls list is empty once the Sample minutes have passed after the last call.
+14. County, 15 min, on a spare: `systems/probe-<site>/trunk-recorder.log` gets the decode-rate lines, and
+    `python3 -I /usr/local/lib/sizeup/trunkrecd.py status` shows the county's `tr_pid` unchanged from before the test
+    to after it; `p25_recorder.json` (the county's) is not rewritten by the test.
 
 ## API
 

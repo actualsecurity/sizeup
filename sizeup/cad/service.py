@@ -206,6 +206,7 @@ class Cad:
         # (sizeup/fence.py; the App sets it); on_dispatch: a dispatch is logged, or its voice is on its row: push the
         # state now (the web server's poke), once each.
         self.voice = VoiceQueue(self._voice_job, log)
+        self._shut = False                             # shutdown() done
         self.may_write: Callable[[], bool] = lambda: True
         self.on_dispatch: Callable[[], None] | None = None
         self.voice_stale_s, self.voice_budget_s = VOICE_STALE_S, VOICE_BUDGET_S
@@ -1284,6 +1285,26 @@ class Cad:
         left = self.voice.stop(wait_s)
         if left:
             self.log(f"CAD: {len(left)} dispatch voice(s) not rendered before the stop: left for the next start")
+
+    def shutdown(self, wait_s: float = 5.0) -> None:
+        """Done with this CAD (a test's teardown, --init-state, a tool): the workers that write to the store stopped and
+        joined (each up to wait_s), then the store's connection closed, so no thread is left using it as it closes.
+        Again: nothing. (Not close(): that one closes an incident.)"""
+        if self._shut:
+            return
+        self._shut = True
+        steps = (("incident sources", lambda: self.sources.stop(wait_s)),
+                 ("radio log", lambda: self.radiolog.stop(wait_s, closing=True)),
+                 ("address history", self.addrs.stop),
+                 ("dispatch voice", lambda: (self.voice.stop(0.0), self.voice.join(wait_s))))   # a render ends by itself
+        try:
+            for name, stop in steps:         # one that fails never skips the rest, nor the close
+                try:
+                    stop()
+                except Exception as e:  # noqa: BLE001
+                    self.log(f"CAD: shutdown: {name}: {type(e).__name__}: {e}")
+        finally:
+            self.store.shutdown()
 
     def preview(self, iid: int, body: dict) -> dict:
         """The dispatch as it would go out now. Nothing is assigned or logged. An event that already had a

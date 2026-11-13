@@ -176,12 +176,12 @@ def test_an_older_database_gets_the_indexes_on_open(tmp_path):
     c = cad(tmp_path, clock)
     for name in ("radio_traffic_tg_start", "radio_traffic_channel_start"):
         c.store.db.execute(f"DROP INDEX {name}")
-    c.store.db.close()
+    c.shutdown()
     for _ in range(2):                                                 # and opening again changes nothing
         c = cad(tmp_path, clock)
         names = {r["name"] for r in c.store.q("SELECT name FROM sqlite_master WHERE type = 'index'")}
         assert {"radio_traffic_tg_start", "radio_traffic_channel_start"} <= names
-        c.store.db.close()
+        c.shutdown()
 
 
 # -- the page: the header counts each section against its own limit ----------------------------------------------
