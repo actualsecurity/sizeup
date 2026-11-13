@@ -20,7 +20,12 @@ set of transmissions changes and written to the SAME key, so the link already on
 
 The bucket: SIZEUP_AUDIO_BUCKET (the hub's audio bucket), prefix listen/. The hub's task role needs PutObject / GetObject
 on listen/*, and a lifecycle rule removes listen/ objects after a day (sizeup-aws/27-listen-links.sh, run by a person).
-Until then the first upload is refused: the status says "not configured" and it is tried again only after RETRY_S.
+Until then the first upload is refused (403): the status says "not configured" and it is tried again only after RETRY_S;
+any other failure (a timeout, the network) is tried again after RETRY_SOON_S.
+
+Nothing here makes the push wait: link() presigns the (random, not yet written) key and returns at once; the stitching
+and the upload run on the "listen" thread, which also does refresh()'s work (the engine thread only queues it). The
+presigned URL is signed with credentials that outlive it (else they are fetched again first).
 """
 
 from __future__ import annotations
@@ -43,7 +48,9 @@ PREFIX = "listen/"
 RATE = 8000
 GAP_S = 0.35
 TICK_S = 0.06
-RETRY_S = 3600.0
+RETRY_S = 3600.0               # the bucket refused (403: the IAM grant isn't there): tried again after this long
+RETRY_SOON_S = 60.0            # anything else (a timeout, a 5xx, the network): tried again after this long
+CRED_MARGIN_S = 300.0          # presign with credentials that outlive the link by at least this much
 LATE_S = 180.0                 # transcripts and clips arrive after the transmission: keep refreshing this much longer
 MAX_CLIPS = 40
 MAX_SECONDS = 600.0
@@ -140,11 +147,13 @@ def encode(x: np.ndarray, kbps: int = 24, ffmpeg: str | None = None) -> tuple[by
 class S3ListenStore:
     """put / presign on the hub's audio bucket (sizeup/attachments.py S3, SigV4 with the task role)."""
 
-    def __init__(self, bucket: str, region: str = "", endpoint: str = "", send=None, creds=None):
+    def __init__(self, bucket: str, region: str = "", endpoint: str = "", send=None, creds=None, clock=time.time):
         from sizeup import aws
         from sizeup.attachments import S3
         self.aws = aws
         self.creds = creds or aws.credentials
+        self.own_creds = creds is None
+        self.clock = clock
         self.s3 = S3(bucket, region, endpoint, send=send, creds=self.creds)
 
     def put(self, key: str, body: bytes, ctype: str) -> None:
@@ -153,20 +162,35 @@ class S3ListenStore:
     def presign(self, key: str, expires_s: int, ctype: str) -> str:
         from urllib.parse import quote
         url = f"{self.s3.url(key)}?response-content-disposition=inline&response-content-type={quote(ctype, safe='')}"
-        return self.aws.presign(url, self.creds(), self.s3.region, "s3", expires=int(expires_s))
+        c = self.creds()
+        if c.expires is not None and c.expires - self.clock() < expires_s + CRED_MARGIN_S and self.own_creds:
+            self.aws.forget_credentials()          # the task role's: fetched again, so the link outlives its expiry
+            c = self.creds()
+        return self.aws.presign(url, c, self.s3.region, "s3", expires=int(expires_s))
+
+
+def refused(e: Exception) -> bool:
+    """The bucket said no for good (403: the grant isn't there), not a passing failure."""
+    return getattr(e, "status", 0) == 403
 
 
 class Listen:
     def __init__(self, store, rows: Callable[[list, float, float], list[dict]], clip: Callable[[str], bytes | None],
                  settings: Callable[[], dict] | None = None, clock: Callable[[], float] = time.time,
-                 log: Callable[[str], None] = print, ffmpeg: str | None = None, token=lambda: secrets.token_urlsafe(24)):
-        self.store, self.rows, self.clip = store, rows, clip
+                 log: Callable[[str], None] = print, ffmpeg: str | None = None, token=lambda: secrets.token_urlsafe(24),
+                 tiers: Callable[[list], dict] | None = None, worker: bool = True):
+        self.store, self.rows, self.clip, self.tiers = store, rows, clip, tiers
         self.settings = settings or (lambda: {})
         self.clock, self.log, self.ffmpeg, self.token = clock, log, ffmpeg, token
         self.items: dict[str, Item] = {}
         self.why = "" if store is not None else "no audio bucket (SIZEUP_AUDIO_BUCKET)"
         self._refused_at = 0.0
+        self._retry_at = 0.0
         self._lock = threading.Lock()
+        self.worker = worker
+        self._jobs: list[str] = []
+        self._wake = threading.Condition()
+        self._thread: threading.Thread | None = None
 
     def cfg(self) -> dict:
         out = dict(DEFAULTS)
@@ -184,18 +208,25 @@ class Listen:
         return {"configured": self.configured, "why": self.why if not self.configured else "", "active": len(self.items),
                 "enabled": bool(self.cfg()["listen"])}
 
+    def _ffmpeg(self) -> bool:
+        return bool(self.ffmpeg if self.ffmpeg is not None else shutil.which("ffmpeg"))
+
+    # -- the clips ------------------------------------------------------------------------------------------------
+
     def _clips(self, it: Item, c: dict) -> list[str]:
         t0, t1 = it.first_at - float(c["listen_before_s"]), it.last_at + float(c["listen_after_s"])
         rows = self.rows(it.sources, t0, t1) or []
-        excluded = {str(r["id"]) for r in rows if str(r.get("tier") or "") in EXCLUDED_TIERS}
-        ids = {str(r["id"]): float(r.get("start") or 0) for r in rows if str(r["id"]) not in excluded}
-        for tid in it.traffic_ids:                        # its own, even when the window query missed one
-            if str(tid) not in excluded:
-                ids.setdefault(str(tid), it.first_at)
-        return [t for t, _s in sorted(ids.items(), key=lambda x: (x[1], x[0]))][:MAX_CLIPS]
+        tier = {str(r["id"]): str(r.get("tier") or "") for r in rows}
+        missing = [str(t) for t in it.traffic_ids if str(t) not in tier]
+        if missing and self.tiers is not None:          # its own transmissions outside the window: their tiers too
+            tier.update({str(k): str(v or "") for k, v in (self.tiers(missing) or {}).items()})
+        start = {str(r["id"]): float(r.get("start") or 0) for r in rows}
+        ok = [t for t in dict.fromkeys([*start, *map(str, it.traffic_ids)])
+              if t in tier and tier[t] not in EXCLUDED_TIERS]          # unknown tier: never (fail closed)
+        return sorted(ok, key=lambda t: (start.get(t, it.first_at), t))[:MAX_CLIPS]
 
     def _make(self, it: Item, c: dict) -> bool:
-        """Stitch and upload (the same key); False when there is nothing to play or the bucket refused it."""
+        """Stitch and upload (the same key); False when there is nothing to play or the upload failed."""
         ids = self._clips(it, c)
         audio = [(t, self.clip(t)) for t in ids]
         audio = [(t, a) for t, a in audio if a]
@@ -210,39 +241,47 @@ class Listen:
         body, ctype, _ext = encode(x, int(c["listen_kbps"]), self.ffmpeg)
         try:
             self.store.put(it.key, body, ctype)
-        except Exception as e:  # noqa: BLE001 - a link that can't be made is just not in the push
-            self._refused_at = self.clock()
-            self.why = f"not configured: the audio bucket refused listen/ ({type(e).__name__}); run sizeup-aws 27"
-            self.log(f"listen: upload refused ({type(e).__name__}): no Listen links for an hour")
+        except Exception as e:  # noqa: BLE001 - a link that can't be made is just a link that doesn't play
+            if refused(e):
+                self._refused_at = self.clock()
+                self.why = f"not configured: the audio bucket refused listen/ ({type(e).__name__}); run sizeup-aws 27"
+                self.log(f"listen: upload refused ({type(e).__name__}): no Listen links for an hour")
+            else:
+                self._retry_at = self.clock() + RETRY_SOON_S
+                self.log(f"listen: upload failed ({type(e).__name__}): trying again in a minute")
             return False
         it.clips, it.made_at, it.content_type, it.bytes, it.versions = key_set, self.clock(), ctype, len(body), it.versions + 1
         return True
 
+    # -- the interface ------------------------------------------------------------------------------------------
+
     def link(self, ref: str, sources, traffic_ids, first_at: float, last_at: float) -> str | None:
-        """A presigned URL that plays the transmissions around this pre-alert, or None."""
+        """A presigned URL for this pre-alert's audio, at once (the file is written on the listen thread), or None."""
         c = self.cfg()
         if not c["listen"] or not self.configured:
             return None
         with self._lock:
             it = self.items.get(ref)
             if it is None:
-                ext = "m4a" if (self.ffmpeg if self.ffmpeg is not None else shutil.which("ffmpeg")) else "wav"
-                it = Item(key=f"{PREFIX}{self.token()}.{ext}", sources=list(sources), traffic_ids=list(traffic_ids),
-                          first_at=float(first_at), last_at=float(last_at), refs=[ref])
+                ff = self._ffmpeg()
+                it = Item(key=f"{PREFIX}{self.token()}.{'m4a' if ff else 'wav'}", sources=list(sources),
+                          traffic_ids=list(traffic_ids), first_at=float(first_at), last_at=float(last_at), refs=[ref],
+                          content_type="audio/mp4" if ff else "audio/wav")
+                self.items[ref] = it
             else:
                 it.traffic_ids = list(dict.fromkeys([*it.traffic_ids, *traffic_ids]))
                 it.last_at = max(it.last_at, float(last_at))
-            if not self._make(it, c):
-                return None
-            self.items[ref] = it
         try:
-            return self.store.presign(it.key, int(float(c["listen_expiry_min"]) * 60), it.content_type)
+            url = self.store.presign(it.key, int(float(c["listen_expiry_min"]) * 60), it.content_type)
         except Exception as e:  # noqa: BLE001
             self.log(f"listen: presign failed ({type(e).__name__})")
             return None
+        self._queue(ref)
+        return url
 
     def refresh(self, now: float | None = None) -> int:
-        """Stitch again what changed while an item's after-window is open; forget items past it. Uploads made."""
+        """Queue what may have new transmissions (its after-window still open); forget what is past. Never stitches
+        or uploads here (the engine's thread calls it): the listen thread does. Items queued."""
         now = self.clock() if now is None else now
         c = self.cfg()
         n = 0
@@ -251,9 +290,48 @@ class Listen:
                 end = it.last_at + float(c["listen_after_s"]) + LATE_S
                 if now > max(end, it.first_at + float(c["listen_expiry_min"]) * 60):
                     del self.items[ref]
-                    continue
-                if now <= end:
-                    before = it.versions
-                    self._make(it, c)
-                    n += it.versions - before
+                elif now <= end and now >= self._retry_at:
+                    self._jobs.append(ref)
+                    n += 1
+        self._kick()
         return n
+
+    # -- the listen thread ------------------------------------------------------------------------------------
+
+    def _queue(self, ref: str) -> None:
+        with self._lock:
+            self._jobs.append(ref)
+        self._kick()
+
+    def _kick(self) -> None:
+        if not self.worker:
+            return
+        with self._wake:
+            self._wake.notify()
+        if self._thread is None or not self._thread.is_alive():
+            self._thread = threading.Thread(target=self._run, name="listen", daemon=True)
+            self._thread.start()
+
+    def _run(self) -> None:
+        while True:
+            if not self.drain():
+                with self._wake:
+                    if not self._jobs and not self._wake.wait(timeout=60.0) and not self._jobs:
+                        return
+
+    def drain(self) -> int:
+        """Do the queued work here and now (the listen thread; tests). Uploads made."""
+        n = 0
+        while True:
+            with self._lock:
+                jobs, self._jobs = list(dict.fromkeys(self._jobs)), []
+            if not jobs:
+                return n
+            c = self.cfg()
+            for ref in jobs:
+                it = self.items.get(ref)
+                if it is None or not self.configured:
+                    continue
+                before = it.versions
+                self._make(it, c)
+                n += it.versions - before

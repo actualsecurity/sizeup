@@ -2421,7 +2421,13 @@ class App:
                 return []
             return cad.store.q(f"SELECT id, start, tier, source FROM radio_traffic WHERE source IN ({','.join('?' * len(src))}) "
                                "AND start BETWEEN ? AND ? ORDER BY start LIMIT 200", (*src, t0, t1))
-        return Listen(store, rows, self.clip, settings=lambda: intel.policy.cfg, log=log)
+        def tiers(ids):
+            ids = [str(x) for x in ids][:40]
+            if not ids:
+                return {}
+            return {r["id"]: r["tier"] for r in cad.store.q(
+                f"SELECT id, tier FROM radio_traffic WHERE id IN ({','.join('?' * len(ids))})", ids)}
+        return Listen(store, rows, self.clip, settings=lambda: intel.policy.cfg, log=log, tiers=tiers)
 
     def _atc_leader(self) -> bool:
         """The CAD of record holding the hub's lease (#254: sizeup/fence.py), or all-in-one (no fence)."""

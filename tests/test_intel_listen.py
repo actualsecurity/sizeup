@@ -59,10 +59,13 @@ class Radio:
     def query(self, sources, t0, t1):
         return [r for r in self.rows if r["source"] in sources and t0 <= r["start"] <= t1]
 
+    def tiers(self, ids):
+        return {r["id"]: r["tier"] for r in self.rows if r["id"] in ids}
+
 
 def listen(radio, bucket, clock, **cfg):
     return L.Listen(bucket, radio.query, radio.audio.get, settings=lambda: cfg, clock=clock, log=lambda m: None,
-                    ffmpeg="")
+                    ffmpeg="", tiers=radio.tiers, worker=False)
 
 
 def segments(wav: bytes) -> list[float]:
@@ -88,7 +91,8 @@ def test_clips_are_stitched_oldest_first_with_a_gap_and_a_tick_between():
     b = FakeBucket()
     lk = listen(r, b, Clock(1030))
     url = lk.link("intel:1", ["p25:mrrs:9211"], ["b"], 1010, 1010)
-    assert url
+    assert url and b.puts == []                          # the link at once; the file on the listen thread
+    assert lk.drain() == 1
     [(key, body, ctype)] = b.puts
     assert ctype == "audio/wav" and segments(body) == [2.0, 1.0, 0.5]
     x = L.read_wav(body)
@@ -106,7 +110,20 @@ def test_the_window_takes_context_before_and_after_and_nothing_else():
     b = FakeBucket()
     lk = listen(r, b, Clock(1005), listen_before_s=45, listen_after_s=60)
     assert lk.link("intel:1", ["p25:mrrs:9211"], ["hit"], 1000, 1000)
+    lk.drain()
     assert lk.items["intel:1"].clips == ("pre", "hit")
+
+
+def test_the_alerts_own_transmissions_are_checked_too():
+    r = Radio()
+    r.add("hit", 1000, 1.0, 500)
+    r.add("own-rec", 400, 1.0, 600, tier="record")       # its own, outside the window, record only: never
+    r.audio["unknown"] = tone(700, 1.0)                  # no row at all: its tier unknown, never
+    b = FakeBucket()
+    lk = listen(r, b, Clock(1005))
+    lk.link("intel:1", ["p25:mrrs:9211"], ["hit", "own-rec", "unknown"], 1000, 1000)
+    lk.drain()
+    assert lk.items["intel:1"].clips == ("hit",)
 
 
 def test_later_transmissions_restitch_to_the_same_key():
@@ -116,10 +133,13 @@ def test_later_transmissions_restitch_to_the_same_key():
     clock = Clock(1002)
     lk = listen(r, b, clock)
     url = lk.link("intel:7", ["p25:mrrs:9211"], ["hit"], 1000, 1000)
-    assert lk.refresh(1010) == 0                          # nothing new: no upload
+    assert lk.drain() == 1
+    lk.refresh(1010)
+    assert lk.drain() == 0 and len(b.puts) == 1          # nothing new: no upload
     r.add("readback", 1030, 1.5, 650)
     clock.t = 1035
-    assert lk.refresh(1035) == 1
+    lk.refresh(1035)
+    assert b.puts[1:] == [] and lk.drain() == 1           # refresh only queues; the listen thread uploads
     assert [k for k, _b, _c in b.puts] == [b.puts[0][0]] * 2 and segments(b.puts[-1][1]) == [1.0, 1.5]
     assert lk.link("intel:7", ["p25:mrrs:9211"], ["hit", "readback"], 1000, 1030).split("?")[0] == url.split("?")[0]
     clock.t = 1000 + 60 + L.LATE_S + 20 * 60 + 1
@@ -134,6 +154,7 @@ def test_keys_are_random_and_carry_nothing_of_the_event():
     lk = listen(r, b, Clock(1001))
     lk.link("intel:42", ["p25:mrrs:9211"], ["9211-1790000000.1_0.0-call_5"], 1000, 1000)
     lk.link("intel:43", ["p25:mrrs:9211"], ["9211-1790000000.1_0.0-call_5"], 1000, 1000)
+    lk.drain()
     keys = [k for k, _b, _c in b.puts]
     assert len(set(keys)) == 2
     for k in keys:
@@ -170,10 +191,47 @@ def test_off_not_configured_and_refused():
     none = L.Listen(None, r.query, r.audio.get, clock=Clock(1001), log=lambda m: None)
     assert none.link("i", ["p25:mrrs:9211"], ["hit"], 1000, 1000) is None and not none.status()["configured"]
     bad = listen(r, FakeBucket(refuse=True), Clock(1001))
-    assert bad.link("i", ["p25:mrrs:9211"], ["hit"], 1000, 1000) is None
+    bad.link("i", ["p25:mrrs:9211"], ["hit"], 1000, 1000)
+    bad.drain()
     st = bad.status()
     assert not st["configured"] and "27" in st["why"]
-    assert listen(r, FakeBucket(), Clock(1001)).link("i", ["p25:mrrs:9999"], ["gone"], 1000, 1000) is None  # no audio
+    assert bad.link("j", ["p25:mrrs:9211"], ["hit"], 1000, 1000) is None     # refused (403): an hour off
+
+
+def test_only_a_403_turns_the_links_off_for_an_hour():
+    class Flaky(FakeBucket):
+        def put(self, key, body, ctype):
+            raise aws.AwsError("S3 PUT: timed out", "Network", 0)
+    r = Radio()
+    r.add("hit", 1000, 1.0, 500)
+    clock = Clock(1001)
+    lk = listen(r, Flaky(), clock)
+    lk.link("i", ["p25:mrrs:9211"], ["hit"], 1000, 1000)
+    lk.drain()
+    assert lk.status()["configured"] and lk.link("j", ["p25:mrrs:9211"], ["hit"], 1000, 1000)
+    lk.drain()
+    lk.refresh(1002)
+    assert lk._jobs == []                                    # a minute before it is tried again
+    clock.t = 1001 + L.RETRY_SOON_S + 1
+    assert lk.refresh(clock.t) >= 1
+
+
+def test_the_presign_uses_credentials_that_outlive_the_link(monkeypatch):
+    now = [1000.0]
+    issued = []
+
+    def creds():
+        c = aws.Credentials("AKIDEXAMPLE", "secret", "token", expires=now[0] + (600 if not issued else 6 * 3600))
+        return c
+
+    def fresh():
+        issued.append(1)
+    monkeypatch.setattr(aws, "forget_credentials", fresh)
+    st = L.S3ListenStore("audio-bucket-example", "us-east-1", send=lambda *a: (200, {}, b""), creds=creds,
+                         clock=lambda: now[0])
+    st.own_creds = True                                     # as with the task role's
+    st.presign("listen/abc.wav", 20 * 60, "audio/wav")
+    assert issued == [1]                                    # 10 min left < 20 min + margin: fetched again
 
 
 def test_the_push_carries_a_listen_action_and_a_plain_link(tmp_path):
@@ -190,6 +248,7 @@ def test_the_push_carries_a_listen_action_and_a_plain_link(tmp_path):
         e = cad.intel
         e.notifier, e.locate = p.notifier(notify.INTEL), example_locate
         e.listen = listen(r, b, Clock(now + 1))
+        e.listen.worker = True                               # the listen thread writes the file after the push
         cad.comms.record({"id": "t1", "start": now, "end": now + 1, "source": "MRRS PD", "talkgroup": 9211, "system": "mrrs",
                           "source_key": "p25:mrrs:9211", "service": "police", "tier": "alert", "unit": "",
                           "text": "shots fired at Sample St and Test Rd", "status": "done", "model": "whisper"})
