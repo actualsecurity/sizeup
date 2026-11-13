@@ -141,7 +141,7 @@ def test_the_startup_line_says_where_each_kind_goes_never_the_names():
     assert line(OUR_ALERTS, "", "config") == \
         "notify: alerts \u2192 topic set (config file), status \u2192 the alerts topic (no status topic set)" + intel
     assert line("", OUR_STATUS) == ("notify: alerts \u2192 the status topic (no alerts topic set), "
-                                    "status \u2192 topic set (SSM)" + intel)
+                                    "status \u2192 topic set (SSM), intel \u2192 the status topic (no intel topic set)")
     assert line("", "").startswith("notify: no pushes")
     for out in (both, line(OUR_ALERTS, ""), line("", OUR_STATUS)):
         assert OUR_ALERTS not in out and OUR_STATUS not in out
@@ -222,3 +222,34 @@ def test_intel_topic_from_the_config_and_env_refuses_tapouts(tmp_path, monkeypat
         cfg.write_text(f'[alerts]\nintel_topic = "{bad}"\n')
         with pytest.raises(ConfigError, match="intel_topic"):
             load(cfg)
+
+
+def test_a_mayday_never_waits_behind_pre_alerts_on_the_shared_topic(monkeypatch):
+    import threading
+    stuck, sent = threading.Event(), []
+
+    def slow(server, topic, title, body, priority=3, tags=(), click="", timeout=10.0, who=None, actions=()):
+        if title.startswith("PD"):
+            stuck.wait(10)                          # ntfy slow for the pre-alerts
+        sent.append(title)
+        return {}
+    monkeypatch.setattr(notify, "publish", slow)
+    p = notify.Pushes("https://ntfy.sh", OUR_ALERTS, "", log=lambda m: None)
+    i, a = p.notifier(notify.INTEL), p.notifier(notify.ALERTS)
+    assert i.topic == a.topic == OUR_ALERTS and i.current() is not a.current()      # one topic, two queues
+    for k in range(3):
+        assert i.send(f"PD \u00b7 pre-alert {k}", "x")
+    assert a.send("MAYDAY", "Emergency button", priority=5)
+    assert a.flush(5) and sent == ["MAYDAY"]                                         # not behind the stuck ones
+    stuck.set()
+    assert i.flush(5) and sorted(sent) == sorted(["MAYDAY"] + [f"PD \u00b7 pre-alert {k}" for k in range(3)])
+    s = notify.Pushes("https://ntfy.sh", OUR_ALERTS, OUR_STATUS, log=lambda m: None)
+    assert s.notifier(notify.ALERTS).current() is not s.notifier(notify.INTEL).current()
+
+
+def test_the_line_names_the_topic_intel_really_shares():
+    only_status = notify.Pushes("https://ntfy.sh", "", OUR_STATUS, log=lambda m: None)
+    assert only_status.line().endswith("intel \u2192 the status topic (no intel topic set)")
+    assert only_status.page()["kinds"][2]["source_text"] == "shared (the status topic)"
+    both = notify.Pushes("https://ntfy.sh", OUR_ALERTS, OUR_STATUS, log=lambda m: None)
+    assert both.line().endswith("intel \u2192 the alerts topic (no intel topic set)")
