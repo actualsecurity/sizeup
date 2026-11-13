@@ -1713,11 +1713,11 @@ class Cad:
             limit = max(1, min(int(one("limit") or PAGE), PAGE_MAX))
         except ValueError:
             raise CadError("limit: a number") from None
-        changed, at = when("changed"), when("at")
+        changed, at = one("changed") or None, when("at")       # changed: a page's cursor, as it was given
         got = self.comms.page(
             main_tgs, self.s.airband, view=view, system=one("system"), group=one("group"), source=keys("source", SOURCES_MAX),
             service=service, tier=one("tier").lower(), dept=one("dept"), safety=one("safety") in ("1", "true", "on"),
-            mute=keys("mute", MUTE_MAX), before=before, changed=None if changed is None else int(changed), at=at, limit=limit,
+            mute=keys("mute", MUTE_MAX), before=before, changed=changed, at=at, limit=limit,
             unit=one("unit"), channel=one("channel"), event=one("event"),
             pcfd=pcfd if one("pcfd") in ("1", "true", "on") else None, since=when("since"), until=when("until"),
             kind={"radio": "radio", "notes": "notes"}.get(one("type"), ""), text=one("q"),

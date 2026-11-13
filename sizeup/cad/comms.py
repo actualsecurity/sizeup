@@ -62,6 +62,7 @@ speech-to-text updates the copied text. Adding and removing each write a line in
 from __future__ import annotations
 
 import json
+import os
 import re
 import sqlite3
 import time
@@ -127,7 +128,7 @@ CREATE TABLE IF NOT EXISTS radio_changes (
 CREATE INDEX IF NOT EXISTS radio_changes_id ON radio_changes(traffic_id);
 CREATE INDEX IF NOT EXISTS radio_changes_oseq ON radio_changes(oseq);
 """
-CHANGES_COLS = {"seq", "traffic_id", "system", "gone", "oseq"}
+CURSOR = re.compile(r"(?P<kind>[so])(?P<n>\d{1,15})-(?P<run>[0-9a-f]{8})")
 INSERT_CHANGE = ("INSERT INTO radio_changes (traffic_id, system, gone, oseq) VALUES (?, ?, ?, "
                  "CASE WHEN ? THEN (SELECT IFNULL(MAX(oseq), 0) + 1 FROM radio_changes) END)")
 # The triggers an earlier build of this branch hung on the tables: taken off at every start
@@ -218,13 +219,14 @@ class Comms:
         self.changes_floor_o = 0         # the same in oseq (a reader who may not see another system's traffic)
         self._quiet = False              # the open transaction wrote only another system's data (quiet())
         self._tc = 0                     # the connection's total_changes when the last transaction was told of
+        self._run = os.urandom(4).hex()  # this run, in every change cursor (cursor())
         self._trimmed = self._trimmed_o = 0     # the newest seq / oseq trimmed from the log (a cursor below: reload)
         self._pending: list = []         # (id, system | None, gone) touched in the open transaction
         self._retry_at = 0.0             # a broken log: when to try writing to it again
         self._said_broken = False
         self.ours_rev = 0                # changes every reader may know of (rev_for)
         self.log = lambda m: None        # set by the CAD
-        self._logged = 0                 # transmissions logged since the change log was last trimmed
+        self._logged = {True: 0, False: 0}   # transmissions logged since the log was last trimmed, each kind (_everyones)
         with self.store.lock:
             self.store.db.executescript(KEPT_SCHEMA)
         self._open_changes()
@@ -322,10 +324,11 @@ class Comms:
                 self._dispatcher_links(db, tid, call_id, turn, bool(disp), links)
             self.rev += 1
             out = sorted(r[0] for r in db.execute("SELECT incident_id FROM radio_links WHERE traffic_id = ?", (tid,)))
-        self._logged += 1
-        if self._logged >= CHANGES_TRIM_EVERY:
-            self._logged = 0
-            self._trim_changes()
+        kind = self._everyones(tid, system)              # each kind trimmed by its own count: never by the other's
+        self._logged[kind] += 1
+        if self._logged[kind] >= CHANGES_TRIM_EVERY:
+            self._logged[kind] = 0
+            self._trim_changes(kind)
         self._heard(tid)
         return out
 
@@ -678,14 +681,18 @@ class Comms:
         transaction (the CAD's write lock held only that long), pause_s apart. The number deleted."""
         now = self.clock()
         with self.store.tx() as db:                    # radio_activity (encrypted talkgroups' counts): its own ages
-            db.execute("DELETE FROM radio_activity WHERE minute < ?", (int((now - ACTIVITY_KEEP_S) // 60),))
-            db.execute("UPDATE radio_activity SET radios = '' WHERE radios != '' AND minute < ?",
-                       (int((now - ACTIVITY_RADIOS_S) // 60),))
+            old, aged = int((now - ACTIVITY_KEEP_S) // 60), int((now - ACTIVITY_RADIOS_S) // 60)
+            going = [r[0] for r in db.execute(
+                "SELECT DISTINCT source FROM radio_activity WHERE minute < ? OR (radios != '' AND minute < ?)", (old, aged))]
+            db.execute("DELETE FROM radio_activity WHERE minute < ?", (old,))
+            db.execute("UPDATE radio_activity SET radios = '' WHERE radios != '' AND minute < ?", (aged,))
+            if not any(self._everyones("", (sources.parse(k) or ("", 0))[0]) for k in going):
+                self.quiet()                           # only another system's minutes went: no other reader's rev moves
         tpol, apol = self.policies()
         alarms = bool(self.store.q("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'alarms'"))
         record = "emergency = 1 OR kept != ''" + (" OR id IN (SELECT traffic_id FROM alarms)" if alarms else "")
         n = 0
-        noted = 0                                      # rows noted to the change log one by one; past CHANGES_MAX: a reset
+        noted = {True: 0, False: 0}                    # rows noted one by one, each kind; past CHANGES_MAX: that kind's reset
         for cond, params, days in self._groups(tpol, apol):
             cutoff, after = now - days * 86400, float("-inf")
             while True:
@@ -705,11 +712,14 @@ class Comms:
                         if not gone:
                             continue
                         n += 1
-                        noted += 1
-                        if noted <= CHANGES_MAX:       # (the change log: written after the commit, store.after_commit)
+                        kind = self._everyones(r["id"], r["system"])
+                        noted[kind] += 1
+                        if noted[kind] <= CHANGES_MAX:  # (the change log: written after the commit, store.after_commit)
                             self.touch(r["id"], r["system"], gone=True)
-                        elif noted == CHANGES_MAX + 1:
-                            self.touch_reset()         # a big clear-out: the pages ask afresh
+                        elif noted[kind] == CHANGES_MAX + 1:
+                            # a big clear-out: the pages ask afresh; of another system's rows: only the readers who may
+                            # see them (that reset is theirs, so how many went is never told to anyone else)
+                            self.touch_reset() if kind else self.touch("reset", r["system"])
                 after = rows[-1]["start"]
                 if len(rows) < self.PRUNE_BATCH:
                     break
@@ -891,11 +901,15 @@ class Comms:
                 for name in OLD_CHANGE_TRIGGERS:
                     db.execute(f"DROP TRIGGER IF EXISTS {name}")
                 cols = {r[1] for r in db.execute("PRAGMA table_info(radio_changes)")}
-                if cols and not CHANGES_COLS <= cols:
+                if cols and not {"seq", "traffic_id", "system", "gone"} <= cols:
                     db.execute("DROP TABLE radio_changes")
+                elif cols and "oseq" not in cols:
+                    # the shape before oseq: the column added (its entries: NULL, nobody's but a reader's who may see
+                    # everything), seq kept as it was so it only ever grows. Once; a start after writes nothing.
+                    db.execute("ALTER TABLE radio_changes ADD COLUMN oseq INTEGER")
                 db.executescript(CHANGES_SCHEMA)            # (nothing is written here: a start leaves the database as it was)
                 # A cursor from before this start: told to reload (what ran at the start, and any entry an earlier run
-                # couldn't write, are not in the log). Read only.
+                # couldn't write, are not in the log): it names another run (cursor()). Read only.
                 top = db.execute("SELECT MAX(seq), MAX(oseq) FROM radio_changes").fetchone()
                 self.changes_floor, self.changes_floor_o = int(top[0] or 0), int(top[1] or 0)
                 self.changes_broken = False
@@ -935,6 +949,18 @@ class Comms:
         except Exception:  # noqa: BLE001
             pass
 
+    def cursor(self, n: int, sees: bool) -> str:
+        """A page's change cursor: which sequence it counts in (s: seq, a reader who may see everything; o: oseq), the
+        entry, and this run (a cursor from before a start names another and is told to reload)."""
+        return f"{'s' if sees else 'o'}{int(n)}-{self._run}"
+
+    def _read_cursor(self, token, sees: bool) -> int | None:
+        """The entry of a cursor this reader may be answered from; None: not one (another sequence or run, garbled)."""
+        m = CURSOR.fullmatch(str(token or "").strip())
+        if m is None or m["kind"] != ("s" if sees else "o") or m["run"] != self._run:
+            return None
+        return int(m["n"])
+
     def _forget_changes(self) -> None:
         self._pending, self._quiet = [], False
 
@@ -946,7 +972,7 @@ class Comms:
     @staticmethod
     def _everyones(tid: str, system) -> bool:
         """A change every reader may know of: ours, a note, a reset (not another P25 system's, nor an unknown one's)."""
-        return tid == "reset" or (system is not None and system in sources.OURS_SYSTEMS)
+        return (tid == "reset" and system is None) or (system is not None and system in sources.OURS_SYSTEMS)
 
     def flush_changes(self) -> None:
         """The change notes of the transaction just committed, written to the log: its own statements, after the fact.
@@ -1002,7 +1028,10 @@ class Comms:
                             raise
                     if self.changes_broken or any(r[0] == "reset" for r in rows):
                         # written again after a gap, or a reset: what was missed can't be told: older cursors reload
-                        self.changes_floor, self.changes_floor_o = int(top or 0), int(top_o or 0)
+                        # (in oseq only for a gap or every reader's reset: another system's is not the others' to know)
+                        self.changes_floor = int(top or 0)
+                        if self.changes_broken or any(r[0] == "reset" and r[3] for r in rows):
+                            self.changes_floor_o = int(top_o or 0)
                         self.changes_broken = self._said_broken = False
         except Exception as e:  # noqa: BLE001 - never the writer's problem
             self._changes_off(f"an entry could not be written ({type(e).__name__}: {e})")
@@ -1023,26 +1052,30 @@ class Comms:
         finally:
             db.execute(f"PRAGMA busy_timeout = {int(was)}")
 
-    def _trim_changes(self) -> None:
+    def _trim_changes(self, kind: bool | None = None) -> None:
         """The change log held near its newest CHANGES_KEPT entries of each kind, every CHANGES_TRIM_EVERY transmissions
-        logged and after a prune (never at the start: a start writes nothing). Every reader's entries by their own oseq,
-        another system's by seq: how much of one is kept never depends on the other's volume. Its own statements, after
-        the write; a failure is only a longer log."""
+        of that kind logged and after a prune (never at the start: a start writes nothing). Every reader's entries by
+        their own oseq, another system's by seq: how much of one is kept, and when it is trimmed, never depends on the
+        other's volume. kind: True every reader's, False another system's, None both. Its own statements, after the
+        write; a failure is only a longer log."""
         try:
             with self.store.lock:
                 db = self.store.db
                 if not db.in_transaction:
                     with self._quick(db):
-                        cut = db.execute("SELECT seq, oseq FROM radio_changes WHERE oseq <= (SELECT MAX(oseq) FROM radio_changes) - ? "
-                                         "ORDER BY oseq DESC LIMIT 1", (CHANGES_KEPT,)).fetchone()
+                        cut = None if kind is False else db.execute(
+                            "SELECT seq, oseq FROM radio_changes WHERE oseq <= (SELECT MAX(oseq) FROM radio_changes) - ? "
+                            "ORDER BY oseq DESC LIMIT 1", (CHANGES_KEPT,)).fetchone()
                         if cut is not None:
                             db.execute("DELETE FROM radio_changes WHERE oseq <= ?", (cut[1],))
                             self._trimmed, self._trimmed_o = max(self._trimmed, int(cut[0])), max(self._trimmed_o, int(cut[1]))
-                        cut = db.execute("SELECT seq FROM radio_changes WHERE oseq IS NULL ORDER BY seq DESC "
-                                         "LIMIT 1 OFFSET ?", (CHANGES_KEPT,)).fetchone()
+                        cut = None if kind is True else db.execute(
+                            "SELECT seq FROM radio_changes WHERE oseq IS NULL ORDER BY seq DESC LIMIT 1 OFFSET ?",
+                            (CHANGES_KEPT,)).fetchone()
                         if cut is not None:
                             db.execute("DELETE FROM radio_changes WHERE oseq IS NULL AND seq <= ?", (cut[0],))
                             self._trimmed = max(self._trimmed, int(cut[0]))
+                        self._tc = db.total_changes            # the log's own writes: no reader's rev moves for them
         except Exception:  # noqa: BLE001
             pass
 
@@ -1058,7 +1091,7 @@ class Comms:
 
     def page(self, main_tgs, not_main=(), *, view: str = "", system: str = "", group: str = "", source=(),
              service: str = "", tier: str = "", dept: str = "", safety: bool = False, mute=(),
-             before: tuple[float, str] | None = None, changed: int | None = None, at: float | None = None,
+             before: tuple[float, str] | None = None, changed: str | None = None, at: float | None = None,
              limit: int = PAGE, unit: str = "", channel: str = "", event: str = "", pcfd: list[str] | None = None,
              since: float | None = None, until: float | None = None, kind: str = "", text: str = "",
              emergency: bool = False, context: bool | None = None) -> dict:
@@ -1101,14 +1134,15 @@ class Comms:
             hi = 0
         cursor = hi
         narrowed = bool(srcs or system or group or service or tier or dept or safety or view in SERVICE_VIEWS)
-        out = {"rows": [], "older": False, "newer": False, "next": "", "cursor": cursor, "reload": False, "gone": []}
+        out = {"rows": [], "older": False, "newer": False, "next": "", "cursor": self.cursor(cursor, sees), "reload": False,
+               "gone": []}
 
         cond, args = [], []
         if not sees:
             cond.append(f"+t.system IN {sources.OURS_SQL}")
             # Nothing is walked for rows this reader can't have: another system's sources are dropped before any SQL,
-            # and a system, view or service with no source of ours answers at once (no index walk over the hidden
-            # rows, whose number would show in how long it takes)
+            # and a system, view or service with no source of ours answers at once, a department is walked along our
+            # sources (no index walk over the hidden rows, whose number would show in how long it takes)
             if system and sources.is_context({"system": system}):
                 return out
             seen = [r for r in self.sources_seen() if not sources.is_context(r)]
@@ -1122,12 +1156,22 @@ class Comms:
                     return out
                 if len(theirs) <= BRANCH_MAX:
                     srcs = theirs
+            if dept and not srcs and not (group or tier):
+                # a department is a row's own, not a source's: walked along our sources only (radio_traffic_dept_start
+                # would walk another system's rows of that department too)
+                mine_d = [r["source"] for r in seen if not system or r["system"] == system]
+                if not mine_d:
+                    return out
+                if len(mine_d) <= BRANCH_MAX:
+                    srcs = mine_d
         for col, val in (("t.system", system), ("t.service", view if view in SERVICE_VIEWS else ""), ("t.service", service)):
             if val:
                 cond.append(f"{col} = ?")
                 args.append(val)
         if dept:
-            cond.append("t.dept != '' AND t.dept = ?")           # as radio_traffic_dept_start is declared
+            # as radio_traffic_dept_start is declared; walked by source instead for a reader who may not see another
+            # system (+: not that index)
+            cond.append("t.dept != '' AND t.dept = ?" if sees else "+t.dept != '' AND +t.dept = ?")
             args.append(dept)
         ours = self._ours_branches(main_tgs, not_main)
         ours_sql = "(" + " OR ".join(f"({c})" for c, _ in ours) + ")"
@@ -1179,9 +1223,11 @@ class Comms:
         notes_ok = kind in ("", "notes") and channel in ("", NOTES) and not emergency and not narrowed
         radio: list[dict] = []
         if changed is not None:
-            changed = int(changed)
-            if self.changes_broken or changed > hi or changed < floor:
-                return {**out, "reload": True}                   # no log now, a gap, another database's cursor, or older than is kept
+            changed = self._read_cursor(changed, sees)
+            if changed is None or self.changes_broken or changed > hi or changed < floor:
+                # not a cursor this reader was given in this run (another sequence, another start, another database),
+                # no log now, a gap, or older than is kept
+                return {**out, "reload": True}
             # Another system's changes are not this reader's to know of: not as rows, not as `gone`, not in the count
             # (nor an id with any entry of another system's, or of none: radio_changes_id)
             ours = sources.OURS_SQL
