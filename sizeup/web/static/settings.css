@@ -343,4 +343,8 @@
     .s-prow .s-t-name { padding-inline-start: 0; }
     .s-unnamed .s-t-act:not(.s-t-naming) { flex: 0 0 auto; margin-inline-start: auto; }
   }
+
+  /* Settings > Radios > Squelch (squelch-panel.js) */
+  .sq-table .sq-in { inline-size: 5.5em; }
+  .sq-table td.warn { color: var(--warn); font-weight: 600; }
 }

@@ -1100,8 +1100,24 @@ class HubApp(App):
         if "p25_systems" not in (self.hub.status or {}):
             # a station from before #409 refuses a whole map with a "p25:<system>:<tg>" key in it: left out for it
             prefs = {k: v for k, v in prefs.items() if not k.startswith("p25:")}
+        # each FM channel's squelch: only to a station that takes it (one before it refuses a 4th argument)
+        sq = None
+        if self._squelch_ok():          # what of it fits the station's channels, as it reported them (the station agrees)
+            kinds = {r.get("label"): r.get("channel_kind") for r in self.hub.radio_rows() if r.get("channel_kind")}
+            sq = channels.fit_squelch(self._sq_ov, kinds, self.squelch_defaults)[0]
         return {"prefs": prefs, "aws": {"ok": ok, "why": why, "reserve": reserve}, "tones": dict(self._tone_ov),
-                "sig": channels.sig(prefs, ok, self._tone_ov, reserve)}
+                "squelch": sq, "sig": channels.sig(prefs, ok, self._tone_ov, reserve, sq)}
+
+    def squelch_defaults(self, key: str) -> dict:
+        """The station's receiver defaults, as it reported them (its config's, not the hub's)."""
+        hub = getattr(self, "hub", None)          # (None while App's __init__ runs)
+        rows = hub.radio_rows() if hub is not None else []
+        row = next((r for r in rows if r.get("label") == key), None) or {}
+        d = row.get("squelch_default")
+        return {f: d.get(f) for f in channels.SQUELCH} if isinstance(d, dict) else super().squelch_defaults(key)
+
+    def _squelch_ok(self) -> bool:
+        return bool(((self.hub.status or {}).get("channels") or {}).get("squelch_ok"))
 
     def channels_check_tones(self) -> None:
         """A pair named here: the station gets it with the next channel push (the signature changed)."""
@@ -1125,7 +1141,8 @@ class HubApp(App):
 
         def push() -> None:
             try:
-                res = self.hub.remote("set_channel_prefs", want["prefs"], want["aws"], want["tones"])
+                res = self.hub.remote("set_channel_prefs", want["prefs"], want["aws"], want["tones"],
+                                      *([want["squelch"]] if want["squelch"] is not None else []))
                 if isinstance(res, dict) and self.hub.status is not None:
                     self.hub.status["channels"] = res
                 self._chan_push["error"] = ""
@@ -1145,6 +1162,8 @@ class HubApp(App):
         got = (self.hub.status or {}).get("channels") or {}
         if not self.hub.status:
             return {"state": "offline", "detail": "No station has reported yet: these apply when it connects"}
+        if got.get("sig") == want["sig"] and self._sq_ov and not self._squelch_ok():
+            return {"state": "pending", "detail": "The station runs an older sizeup: update it to apply the squelch"}
         if got.get("sig") == want["sig"]:
             return {"state": "applied", "detail": "Applied on the station"}
         if not self.hub.connected():
