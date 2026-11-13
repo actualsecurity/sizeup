@@ -132,6 +132,7 @@ class IntelEngine:
         self.public_url = ""
         self.leader = lambda: True            # live: the CAD of record holding the lease (the app sets it)
         self.notifier = None                  # live: notify.Pushes' INTEL KindNotifier (the app sets it)
+        self.listen = None                    # live: listen.Listen, the push's "Listen" link (the app sets it)
         self.windows: dict[tuple[str, str], Window] = {}
         self.packs: list = []
         self.cfg: dict = {}
@@ -244,6 +245,8 @@ class IntelEngine:
         if now - self._ticked >= TICK_S and self.leader():
             self._ticked = now
             self.tick(now)
+            if self.listen is not None:
+                self.listen.refresh(now)      # later transmissions into the links already pushed
             if now - self._pruned >= PRUNE_S and hasattr(self.events, "prune"):
                 self._pruned = now
                 self.events.prune(now)
@@ -547,8 +550,19 @@ class LiveSink:
         n = self.engine.notifier
         if not d.would_push or d.message is None or n is None or not self.engine.leader():
             return
-        m = d.message
-        if not n.send(m["title"], m["body"], m["priority"], m["tags"], m["click"]):
+        m = dict(d.message)
+        actions = []
+        lk = self.engine.listen
+        if lk is not None:
+            try:
+                url = lk.link(f"intel:{ev.id}", [ev.source_key], ev.traffic_ids, ev.first_at, ev.last_at)
+            except Exception as e:  # noqa: BLE001 - the push goes without its link
+                self.engine.log(f"intel: listen link: {type(e).__name__}")
+                url = None
+            if url:
+                m["body"] = f"{m['body']}\nListen: {url}"
+                actions = [{"label": "Listen", "url": url}]
+        if not n.send(m["title"], m["body"], m["priority"], m["tags"], m["click"], **({"actions": actions} if actions else {})):
             self.engine.log(f"intel: event {ev.id}: no pre-alert topic in effect (or the queue is full): not pushed")
 
     def digest(self, evs: list[Event]) -> None:

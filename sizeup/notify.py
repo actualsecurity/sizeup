@@ -187,9 +187,10 @@ def _priority(p) -> int:
 
 
 def publish(server: str, topic: str, title: str, body: str, priority: int | str = 3,
-            tags: Iterable[str] = (), click: str = "", timeout: float = TIMEOUT_S, who=None) -> dict:
+            tags: Iterable[str] = (), click: str = "", timeout: float = TIMEOUT_S, who=None, actions=()) -> dict:
     """One message to ntfy: its answer ({id, time, ...}). NotifyError when it can't be sent or was refused.
-    who: a Who / dict: rendered into the title (compose())."""
+    who: a Who / dict: rendered into the title (compose()). actions: ntfy "view" buttons, [{label, url}] (https only,
+    at most 3: a radio pre-alert's "Listen", sizeup/intel/listen.py)."""
     server = (server or DEFAULT_SERVER).rstrip("/")
     why = server_problem(server) or topic_problem(topic)
     if why:
@@ -199,6 +200,10 @@ def publish(server: str, topic: str, title: str, body: str, priority: int | str 
            "priority": _priority(priority), "tags": [str(t)[:40] for t in tags if str(t).strip()][:5]}
     if click and urlsplit(click).scheme in ("https", "http"):
         msg["click"] = click
+    acts = [{"action": "view", "label": str(a.get("label") or "Open")[:40], "url": str(a["url"]), "clear": False}
+            for a in actions or () if isinstance(a, dict) and urlsplit(str(a.get("url") or "")).scheme == "https"][:3]
+    if acts:
+        msg["actions"] = acts
     req = Request(server + "/", data=json.dumps(msg).encode(), method="POST",
                   headers={"Content-Type": "application/json", "User-Agent": "sizeup-notify"})
     try:
@@ -246,12 +251,12 @@ class Notifier:
         return bool(self.topic)
 
     def send(self, title: str, body: str, priority: int | str = 3, tags: Iterable[str] = (), click: str = "",
-             who=None) -> bool:
+             who=None, actions=()) -> bool:
         """Queued for sending: True; off or the queue full: False. who: a Who / dict (compose())."""
         if not self.enabled:
             return False
         try:
-            self._q.put_nowait((title, body, priority, tuple(tags), click, Who.of(who)))
+            self._q.put_nowait((title, body, priority, tuple(tags), click, Who.of(who), tuple(actions or ())))
         except queue.Full:
             self.log("notify: too many waiting: dropped " + repr(title[:80]))
             return False
@@ -281,10 +286,10 @@ class Notifier:
             finally:
                 self._q.task_done()
 
-    def _deliver(self, title, body, priority, tags, click, who=None) -> None:
+    def _deliver(self, title, body, priority, tags, click, who=None, actions=()) -> None:
         for attempt in range(len(self.retries) + 1):
             try:
-                publish(self.server, self.topic, title, body, priority, tags, click, who=who)
+                publish(self.server, self.topic, title, body, priority, tags, click, who=who, actions=actions)
                 self.sent += 1
                 self.last_error = ""
                 self.last_at, self.last_ok = time.time(), True
@@ -357,9 +362,9 @@ class KindNotifier:
     last_error = property(lambda self: self._of("last_error", ""))
 
     def send(self, title: str, body: str, priority: int | str = 3, tags: Iterable[str] = (), click: str = "",
-             who=None) -> bool:
+             who=None, actions=()) -> bool:
         n = self.current()
-        return n.send(title, body, priority, tags, click, who=who) if n is not None else False
+        return n.send(title, body, priority, tags, click, who=who, actions=actions) if n is not None else False
 
     def flush(self, timeout: float = 10.0) -> bool:
         return all(n.flush(timeout) for n in self.pushes.made())

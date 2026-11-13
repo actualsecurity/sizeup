@@ -150,6 +150,24 @@ window.IntelSettings = (() => {
       el("span", "dim small", `24 h: ${c24.events || 0} events · ${c24.pushed || 0} pushed · ${c24.suppressed || 0} held`));
     for (const x of caps.querySelectorAll("input")) x.disabled = !admin;
     kids.push(caps);
+    // the push's "Listen" link (sizeup/intel/listen.py): the audio around the alert, behind a short-lived link
+    const ls = d.listen || {};
+    const [llab, lcb] = sCheck("Listen link", s.listen, "A link in each push that plays the transmissions around it (no sign-in; it expires)");
+    lcb.disabled = !admin;
+    lcb.addEventListener("change", () => post({ action: "set", key: "listen", value: lcb.checked }, lcb.checked ? "Listen links on" : "Listen links off"));
+    const lrow = el("div", "row");
+    const lnum = (key, min, max, label) => num(s[key], min, max, 1, (v) => post({ action: "set", key, value: v }), label);
+    lrow.append(llab,
+      el("span", "dim small", "min"), lnum("listen_expiry_min", 1, 720, "Minutes the link plays"),
+      el("span", "dim small", "before s"), lnum("listen_before_s", 0, 600, "Seconds of the same source before the first transmission"),
+      el("span", "dim small", "after s"), lnum("listen_after_s", 0, 600, "Seconds after the last (stitched again as they arrive)"),
+      el("span", "dim small", "kbps"), lnum("listen_kbps", 16, 64, "Bitrate (AAC when ffmpeg is there, else 8 kHz WAV)"),
+      el("span", "spacer"));
+    const lst = el("span", ls.configured ? "chip s-state default" : "chip s-state edited", ls.configured ? "ready" : "not configured");
+    if (!ls.configured) lst.title = ls.why || "";
+    lrow.append(lst);
+    for (const x of lrow.querySelectorAll("input")) x.disabled = !admin;
+    kids.push(lrow);
     for (const p of d.packs) {
       const ph = el("div", "row");
       ph.append(el("b", "s-eta-l", `${p.label} (${p.name})`),
