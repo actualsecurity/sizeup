@@ -84,7 +84,8 @@ from typing import Callable
 from sizeup import channels, sourcekeys
 from sizeup import tz
 from sizeup import app as app_mod
-from sizeup.app import AIRBAND_FIRST, CLIP_ID, RENAMED, STT_FIRST, App, AwsJob, channels_model, traffic_key
+from sizeup.app import (AIRBAND_FIRST, CLIP_ID, RENAMED, STT_FIRST, WHISPER_FALLBACK_STATION, App, AwsJob, channels_model,
+                        traffic_key)
 from sizeup.cad.dispatcher import AudioUnavailable
 from sizeup.cad.radios import fm_system
 from sizeup.cloud.autoupdate import describe
@@ -912,6 +913,8 @@ class HubApp(App):
         if job.alt is not None:                    # "both": the station's text stays
             return
         self._aws_asked[job.id] = time.time()      # (the sweep: no text from the station either -> failed)
+        self._stt_state(job.page if job.kind == "page" and job.page is not None else self._find(job.id)[0], job.id,
+                        "pending", f"{WHISPER_FALLBACK_STATION} (AWS failed: {why[:80]})")
 
         def ask() -> None:
             err = ""
@@ -930,14 +933,26 @@ class HubApp(App):
                 n, err = 0, str(e)
             if n:
                 return
+            item = job.page if job.kind == "page" and job.page is not None else self._find(job.id)[0]
+            if item is not None and (getattr(item, "raw", "") or getattr(item, "text", "")
+                                     or getattr(item, "status", "") not in ("pending", "remote")):
+                return                             # its text came meanwhile (a late AWS answer, the station's whisper)
             note = f"{channels_model()} failed ({why[:80]}); station: {err or 'no recording to re-run'}"
             if job.kind == "page" and job.page is not None:
                 job.page.status, job.page.model = "error", note
+                self._stt_row(job.id, "error", note)
                 self.sync()
             else:
                 self._retext(job.id, "", "error", None, note, why="transcription failed:")
                 self.sync()
         threading.Thread(target=ask, name="aws-fallback", daemon=True).start()
+
+    def _stt_state(self, item, cid: str, status: str, model: str) -> None:
+        """The page or transmission (in memory) and its log row (App._stt_row) say the same: which engine has it now,
+        so a later write of the item to the log (_page_to_cad, _to_cad) never puts back "(AWS)"."""
+        if item is not None and not (getattr(item, "raw", "") or getattr(item, "text", "")):
+            item.status, item.model = status, model
+        self._stt_row(cid, status, model)
 
     def _aws_pending(self) -> list[tuple[object, str, str]]:
         """Every page and transmission still waiting for Amazon Transcribe: (item, its channel key, kind)."""
@@ -962,6 +977,7 @@ class HubApp(App):
             pcm = wav_pcm(wav, getattr(item, "voice_offset_s", 0.0) if page is not None else 0.0) if wav else None
             if ok and pcm is not None and item.end > now - RECOVER_S:
                 self._aws_since[item.id] = now
+                self._stt_state(item, item.id, "pending", channels_model())    # the log says AWS again
                 self.aws.submit(key, AwsJob(kind, item.id, key, page=page), pcm)
                 again += 1
                 continue
@@ -1019,6 +1035,7 @@ class HubApp(App):
         item.flagged = True
         if kind == "page":
             item.status, item.model = "error", note
+            self._stt_row(item.id, "error", note)
         else:
             self._retext(item.id, "", "error", None, note, why="transcription failed:")
         self.sync()

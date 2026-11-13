@@ -592,6 +592,19 @@ class Comms:
             self._heard(tid)
         return bool(n)
 
+    def set_stt(self, tid: str, status: str, model: str) -> bool:
+        """Where a transmission's speech-to-text stands, its text left as it is: the status ("pending", "error") and
+        the engine doing it or that failed (model), so the log never says "Transcribing on the hub (AWS)" for a clip
+        whisper took over from AWS, or one that failed. Only a row still waiting (pending or remote, no text): a text
+        that came first (a fast whisper, a late AWS answer) is never put back to waiting or failed."""
+        with self.store.tx() as db:
+            n = db.execute("UPDATE radio_traffic SET status = ?, model = ?, updated_at = ? WHERE id = ? "
+                           "AND status IN ('pending', 'remote') AND text = ''",
+                           (status, model, self.clock(), tid)).rowcount
+            if n:
+                self.rev += 1
+        return bool(n)
+
     def set_alt(self, tid: str, alt: dict) -> bool:
         """The other engine's text ("both"), the transcript left as it is."""
         with self.store.tx() as db:
@@ -1461,7 +1474,8 @@ def _tones(r: dict, paging=(), names_ours=None) -> dict:
         except (TypeError, ValueError):
             r[k] = []
     r["page"] = page_kind(r["tones"], r.get("channel") or "", paging)
-    r["names_ours"] = (names_ours(r.get("text") or "") if names_ours and r["page"] in ("other", "unknown", "none")
+    bare = r["page"] in ("unknown", "none")       # a list of bare numbers counts only then (feed.Matcher.units_named)
+    r["names_ours"] = (names_ours(r.get("text") or "", bare) if names_ours and r["page"] in ("other", "unknown", "none")
                        else [])
     return r
 
