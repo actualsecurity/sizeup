@@ -679,7 +679,7 @@ class Supervisor:
 
     def _report(self, code: int | None) -> None:
         """A task that ends badly (a failed takeover, the app exiting, fenced, an unclean release, a crash): recorded
-        in S3 and pushed before it exits (sizeup/replicawatch.py); the replica checks stop."""
+        in S3 and pushed before it exits, within replicawatch.REPORT_S (sizeup/replicawatch.py); the checks stop."""
         if self.watch is None:
             return
         self.watch.stop.set()
@@ -688,7 +688,7 @@ class Supervisor:
         kind, why = self.failure or (("unclean_release", "the last changes weren't confirmed in S3") if code == 0
                                      else ("exited", self.events[-1] if self.events else "?"))
         try:
-            self.watch.task_failed(kind, why, 1 if code is None else code)
+            self.watch.report(kind, why, 1 if code is None else code)     # within 20 s in all, DNS included
         except Exception as e:  # noqa: BLE001 - never in the way of the exit
             log(f"handoff: the failure couldn't be reported ({type(e).__name__}: {e})")
 

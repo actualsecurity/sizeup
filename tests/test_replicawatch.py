@@ -87,7 +87,8 @@ def watch_for(s3: FakeS3, who: str, tmp: Path, ntfy, clock=None, logs=None, **kw
     store = store_for(s3, who)
     lg = logs.append if logs is not None else (lambda m: None)
     pusher = Pusher(store, ntfy.url, TOPIC, wall=clock or time.time, log=lg)
-    kw.setdefault("check", lambda p, full: integrity(p, full))
+    kw.setdefault("check", lambda p, full, cancel: integrity(p, full))
+    kw.setdefault("standby_first_s", 0.0)
     return ReplicaWatch(store, pusher, who, tmp / who / "run", tmp / who / "work", wall=clock or time.time, log=lg,
                         poll_s=0.02, **kw)
 
@@ -139,6 +140,9 @@ def test_the_check_runs_in_a_child_process_and_says_the_same(tmp_path):
     r = rw.run_check(bad, full=False, timeout=60)
     assert r["ok"] is False and "in database main" in r["result"]
     assert rw.run_check(make_db(tmp_path / "good.sqlite"), full=True, timeout=60) == {"ok": True, "result": "ok"}
+    t0 = time.monotonic()
+    r = rw.run_check(bad, full=True, cancel=lambda: True, timeout=60)      # the role changed: killed, nothing said
+    assert r.get("cancelled") and r["ok"] is None and time.monotonic() - t0 < 10
 
 
 def test_a_snapshot_is_taken_only_while_the_follower_holds_still(tmp_path):
@@ -175,7 +179,7 @@ def test_the_standby_catches_a_corrupt_replica_and_pushes_once_then_ok_again(tmp
 
     clock.t += 600
     w.standby_round(sup)                                                    # still bad 10 min later: not pushed again
-    assert len(ntfy.got) == 1 and any("not pushed (one replica push per 30 min)" in m for m in logs)
+    assert len(ntfy.got) == 1 and any("not pushed (one replica_corrupt push per 30 min)" in m for m in logs)
     shutil.copy(good, sup.staged("cad"))                                    # fixed
     clock.t += 600
     w.standby_round(sup)
@@ -198,7 +202,7 @@ def test_a_standby_supervisor_runs_the_checks_and_pushes_before_any_takeover(wor
     until(lambda: a.sup.role == "active")
     b = Task(world, "B", tmp_path)
     b.sup.watch = watch_for(world.s3, "B", tmp_path, ntfy, leader_interval_s=0,
-                            check=lambda p, full: {"ok": False, "result": "*** in database main ***"} if p.name == "cad.sqlite"
+                            check=lambda p, full, cancel: {"ok": False, "result": "*** in database main ***"} if p.name == "cad.sqlite"
                             else {"ok": True, "result": "ok"})
     b.start()
     until(lambda: len(ntfy.got) >= 1, what="the standby's push")
@@ -210,41 +214,108 @@ def test_a_standby_supervisor_runs_the_checks_and_pushes_before_any_takeover(wor
 
 # -- the leader --------------------------------------------------------------------------------------------------------
 
-def test_with_no_standby_the_leader_restores_the_replica_and_checks_it(tmp_path, ntfy):
-    s3, clock = FakeS3(), Clock()
-    src = {"cad": corrupt(make_db(tmp_path / "cad.sqlite")), "hub": make_db(tmp_path / "hub.sqlite"),
-           "audio": make_db(tmp_path / "audio.sqlite", 50)}
-    restored = []
+class FakeFollower:
+    """`litestream restore -f` as the leader's watcher sees it: restores src into out (its -txid sidecar), runs until
+    stopped; code 0 with no file: no backup (-if-replica-exists); another code: a failed restore, its stderr logged."""
 
-    def restore(db, db_path, out):                                           # litestream restore, stubbed
-        restored.append(db)
+    started: list = []
+
+    def __init__(self, src: Path | None, out: Path, code=None, err: str = ""):
+        self.pid, self.code = None, code
         out.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy(src[db], out)
-        return 0x2a
-    w = watch_for(s3, "A", tmp_path, ntfy, clock, restore=restore, audio_every=4)
+        if src is not None and code is None:
+            shutil.copy(src, out)
+            Path(f"{out}-txid").write_text(f"{0x2a:016x}\n")
+        if err:
+            Path(f"{out}.log").write_text(err)
+        FakeFollower.started.append(out.name)
+
+    def poll(self):
+        return self.code
+
+    def terminate(self):
+        self.code = 0 if self.code is None else self.code
+
+    def wait(self, timeout=None):
+        return self.code
+
+
+def leader(tmp_path, s3, ntfy, src: dict, clock=None, logs=None, **kw):
+    """A watcher on an active Supervisor with FakeFollowers of src ({db: path | None (no backup) | ("fail", text)})."""
+    def follower(db, db_path, out):
+        x = src.get(db)
+        if isinstance(x, tuple):
+            return FakeFollower(None, out, code=1, err=x[1])
+        return FakeFollower(x, out, code=0 if x is None else None)
+    w = watch_for(s3, "A", tmp_path, ntfy, clock, logs, follower=follower, **kw)
     sup = SimpleNamespace(role="active", env=SimpleNamespace(db_path=lambda db: tmp_path / "data" / f"{db}.sqlite"))
-    out = w.leader_round(sup)
-    assert restored == ["cad", "hub", "audio"] and out["cad"]["ok"] is False and out["cad"]["by"] == "leader"
-    assert out["cad"]["txid"] == f"{0x2a:016x}" and [m["title"] for m in ntfy.got] == ["Replica corrupt: cad.sqlite"]
-    assert not list((tmp_path / "A" / "work").glob("*.sqlite"))
-    restored.clear()
-    clock.t += 900
-    w.leader_round(sup)                                                      # round 2: audio only every 4th
-    assert restored == ["cad", "hub"]
+    w.start_followers(sup)
+    w.serving_at = w.mono()
+    return w, sup
 
 
-def test_the_leader_skips_what_a_standby_verified_recently(tmp_path, ntfy):
+def test_the_leader_checks_its_own_followers_files_pausing_each(tmp_path, ntfy):
     s3, clock = FakeS3(), Clock()
-    sb = standby(tmp_path / "B", {db: make_db(tmp_path / f"{db}.sqlite", 50) for db in rw.DBS})
-    watch_for(s3, "B", tmp_path, ntfy, clock).standby_round(sb)
-    restored = []
-    w = watch_for(s3, "A", tmp_path, ntfy, clock, restore=lambda db, p, out: restored.append(db))
-    sup = SimpleNamespace(role="active", env=SimpleNamespace(db_path=lambda db: tmp_path / db))
-    clock.t += 300
-    assert w.leader_round(sup) == {} and restored == []
+    FakeFollower.started.clear()
+    w, sup = leader(tmp_path, s3, ntfy, {"cad": corrupt(make_db(tmp_path / "cad.sqlite")), "hub": make_db(tmp_path / "hub.sqlite"),
+                                         "audio": make_db(tmp_path / "audio.sqlite", 50)}, clock)
+    w.tend_followers(sup)
+    assert w.leader_round(sup) is False
+    doc = s3.doc(KEY)
+    assert doc["checks"]["cad"]["ok"] is False and doc["checks"]["cad"]["by"] == "leader"
+    assert doc["checks"]["cad"]["txid"] == f"{0x2a:016x}" and doc["checks"]["hub"]["ok"] is True
+    assert [m["title"] for m in ntfy.got] == ["Replica corrupt: cad.sqlite"] and ntfy.got[0]["priority"] == 5
+    # each follower was stopped for its check and started again (it resumes from its -txid)
+    assert FakeFollower.started.count("cad.sqlite") == 2 and set(w.followers) == set(rw.DBS)
+    assert not Path(f"{w._out('hub')}-shm").exists()                      # nothing of our read left beside it
+
+
+def test_the_leaders_first_round_waits_for_its_followers_then_says_not_verifiable(tmp_path, ntfy):
+    s3, clock = FakeS3(), Clock()
+    w, sup = leader(tmp_path, s3, ntfy, {db: make_db(tmp_path / f"{db}.sqlite", 50) for db in rw.DBS}, clock)
+    Path(f"{w._out('audio')}-txid").unlink()                               # audio still restoring
+    assert w.leader_round(sup) is True and s3.doc(KEY)["checks"].keys() == {"cad", "hub"}
+    w.serving_at = w.mono() - rw.RESTORE_S - 1                             # ten minutes on, still not
+    w.leader_round(sup)
+    assert s3.doc(KEY)["checks"]["audio"]["ok"] is None and "not restored" in s3.doc(KEY)["checks"]["audio"]["result"]
+
+
+def test_a_missing_backup_is_not_verifiable_and_pushed_after_two_rounds(tmp_path, ntfy):
+    s3, clock = FakeS3(), Clock()
+    w, sup = leader(tmp_path, s3, ntfy, {"cad": None, "hub": make_db(tmp_path / "hub.sqlite", 50),
+                                         "audio": make_db(tmp_path / "audio.sqlite", 50)}, clock)
+    w.tend_followers(sup)
+    w.leader_round(sup)
+    assert s3.doc(KEY)["checks"]["cad"]["result"] == "no backup in S3" and ntfy.got == []
     clock.t += 900
     w.leader_round(sup)
-    assert restored == ["cad", "hub"]                       # (no file restored by the stub: treated as no backup)
+    assert [(m["title"], m["priority"]) for m in ntfy.got] == [("Replica not verifiable: cad.sqlite", 4)]
+    assert "cad" in s3.doc(KEY)["failing"]
+
+
+def test_a_failed_restore_is_pushed_at_once_as_possible_corruption(tmp_path, ntfy):
+    s3, clock = FakeS3(), Clock()
+    w, sup = leader(tmp_path, s3, ntfy, {"cad": ("fail", "level=ERROR msg=\"restore\" error=\"ltx checksum mismatch\"\n"),
+                                         "hub": make_db(tmp_path / "hub.sqlite", 50), "audio": make_db(tmp_path / "audio.sqlite", 50)},
+                     clock)
+    w.tend_followers(sup)
+    assert [(m["title"], m["priority"]) for m in ntfy.got] == [("Replica restore failed (possible corruption): cad.sqlite", 5)]
+    assert "checksum mismatch" in ntfy.got[0]["message"] and "cad" in s3.doc(KEY)["failing"]
+    assert "cad" not in w.followers and w.fstate["cad"]["restart_at"] is not None     # started again after a backoff
+
+
+def test_each_push_kind_has_its_own_slot(tmp_path, ntfy):
+    s3, clock = FakeS3(), Clock()
+    w, sup = leader(tmp_path, s3, ntfy, {"cad": None, "hub": make_db(tmp_path / "hub.sqlite", 50),
+                                         "audio": make_db(tmp_path / "audio.sqlite", 50)}, clock)
+    w.tend_followers(sup)
+    w.leader_round(sup)
+    clock.t += 60
+    w.leader_round(sup)                                                    # cad not verifiable: pushed (4)
+    shutil.copy(corrupt(make_db(tmp_path / "hub2.sqlite")), w._out("hub"))
+    clock.t += 60
+    w.leader_round(sup)                                                    # then hub corrupt: never held back by it
+    assert [m["title"] for m in ntfy.got] == ["Replica not verifiable: cad.sqlite", "Replica corrupt: hub.sqlite"]
 
 
 # -- a task that fails ------------------------------------------------------------------------------------------------
@@ -315,6 +386,35 @@ def test_the_rate_limit_is_per_kind_shared_by_every_task_and_kept_in_s3(tmp_path
     assert s3.doc(KEY)["pushed"]["task"] == clock.t
 
 
+def test_a_push_is_recorded_only_once_ntfy_took_it_with_one_retry(tmp_path):
+    s3, clock, calls = FakeS3(), Clock(), []
+
+    def down(*a, **kw):
+        calls.append(a[2])
+        raise rw.notify.NotifyError("can't reach ntfy")
+    p = Pusher(store_for(s3, "A"), "http://127.0.0.1:1", TOPIC, wall=clock, log=lambda m: None, publish=down, sleep=lambda s: None)
+    assert p.push("replica_corrupt", "Replica corrupt: cad.sqlite", "x") is False
+    assert calls == ["Replica corrupt: cad.sqlite"] * 2 and (s3.doc(KEY) or {}).get("pushed") is None   # slot still free
+    p.publish = lambda *a, **kw: calls.append("ok")
+    assert p.push("replica_corrupt", "Replica corrupt: cad.sqlite", "x") is True
+    assert s3.doc(KEY)["pushed"]["replica_corrupt"] == clock.t
+
+
+def test_the_failure_report_never_outlasts_its_deadline(tmp_path, ntfy):
+    s3 = FakeS3()
+    slow = s3.sender("A")
+
+    def hang(*a, **kw):
+        time.sleep(3)
+        return slow(*a, **kw)
+    store = WatchStore(S3Object("bucket", KEY, "us-east-1", endpoint="https://s3.test", send=hang, creds=lambda: CREDS))
+    w = ReplicaWatch(store, Pusher(store, ntfy.url, TOPIC, log=lambda m: None), "A", tmp_path / "run", tmp_path / "w",
+                     log=lambda m: None)
+    t0 = time.monotonic()
+    assert w.report("takeover_failed", "RuntimeError: x", 1, deadline_s=0.5) is False
+    assert time.monotonic() - t0 < 1.5
+
+
 def test_s3_unreachable_still_pushes_and_no_topic_never_does(tmp_path, ntfy):
     s3, logs = FakeS3(), []
     s3.down.add("A")
@@ -374,46 +474,61 @@ dc = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(dc)
 
 
-def test_the_deploy_check_fails_on_a_corrupt_or_missing_replica_with_a_clear_message(tmp_path, monkeypatch, capsys):
-    files = {"cad": corrupt(make_db(tmp_path / "cad.sqlite")), "hub": make_db(tmp_path / "hub.sqlite")}
+BUILD = "c" * 40
 
-    def restore(cfg, db, work):                                       # litestream restore, stubbed
-        if db not in files:
-            raise RuntimeError("no backup in S3")
-        out = work / "restored" / f"{db}.sqlite"
-        out.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy(files[db], out)
-        return out
-    monkeypatch.setattr(dc, "litestream_restore", restore)
+
+def record(**kw):
+    """replica-watch.json as the new leader writes it (made-up times and task ids)."""
+    d = {"leader": {"task": "t-new", "build": BUILD, "serving_at": 1000.0}, "failing": {},
+         "checks": {db: {"at": 1130.0, "ok": True, "result": "ok", "mode": "quick_check", "by": "leader"} for db in rw.DBS}}
+    d.update(kw)
+    return d
+
+
+def test_the_deploy_check_reads_only_the_record_and_waits_for_the_new_leaders_checks():
+    v = dc.replica_verdict
+    assert v(None, BUILD)[0] == dc.WAIT
+    assert v(record(leader={"build": "d" * 40, "serving_at": 1}), BUILD)[0] == dc.WAIT     # the old leader still
+    old = record()
+    old["checks"]["audio"]["at"] = 900.0                                   # verified before this leader served
+    assert v(old, BUILD) == (dc.WAIT, "the leader (serving since 00:16:40 UTC) hasn't verified audio yet")
+    assert v(record(), BUILD)[0] == dc.OK
+    bad = record()
+    bad["checks"]["cad"].update(ok=False, result="*** in database main ***\nTree 7 page 4183 cell 12: bad")
+    assert v(bad, BUILD) == (dc.FAIL, "cad.sqlite: corrupt (quick_check by the leader at 00:18:50 UTC): "
+                                     "*** in database main *** · Tree 7 page 4183 cell 12: bad")
+    unv = record(failing={"hub": 1100.0})
+    unv["checks"]["hub"].update(ok=None, result="no backup in S3")
+    assert v(unv, BUILD)[0] == dc.FAIL and "hub.sqlite: not verifiable" in v(unv, BUILD)[1]   # never "corrupt"
+
+
+def test_the_deploy_check_polls_until_verified_or_times_out(monkeypatch, capsys):
+    c = Clock(0.0)
+    seq = [None, record(leader={"build": "d" * 40, "serving_at": 1}), record()]
+    got = iter(seq + [seq[-1]] * 10)
+    ok, msg = dc.wait_replicas(lambda: next(got), BUILD, timeout=600, every=20, clock=c, sleep=lambda s: setattr(c, "t", c.t + s),
+                               out=lambda m: None)
+    assert ok and "cad.sqlite: ok" in msg
+    ok, msg = dc.wait_replicas(lambda: None, BUILD, timeout=60, every=20, clock=c, sleep=lambda s: setattr(c, "t", c.t + s),
+                               out=lambda m: None)
+    assert not ok and msg.startswith("not verified within 1 min")
+    bad = record(failing={"cad": 1100.0})
+    bad["checks"]["cad"].update(ok=False, result="*** in database main ***")
+    monkeypatch.setattr(dc, "fetch_watch", lambda bucket, key: bad)
     monkeypatch.setenv("GITHUB_ACTIONS", "true")
-    assert dc.main(["replicas", "--taskdef", str(ROOT / "deploy/aws/taskdef.json"), "--region", "us-east-1"]) == 1
-    out = capsys.readouterr().out
-    assert "::error title=Replica bad::cad.sqlite: CORRUPT: *** in database main ***" in out
-    assert "::error title=Replica bad::audio.sqlite: can't be restored: no backup in S3" in out
-    assert "hub.sqlite: ok" in out and "Replica bad::hub" not in out
-    files["cad"] = make_db(tmp_path / "cad2.sqlite")
-    files["audio"] = make_db(tmp_path / "audio.sqlite", 50)
-    assert dc.main(["replicas", "--taskdef", str(ROOT / "deploy/aws/taskdef.json")]) == 0
-    assert "::notice title=Replicas verified::cad.sqlite: ok" in capsys.readouterr().out
+    assert dc.main(["replicas", "--build", BUILD, "--taskdef", str(ROOT / "deploy/aws/taskdef.json"), "--every", "0"]) == 1
+    assert "::error title=Replica check failed::cad.sqlite: corrupt (quick_check by the leader" in capsys.readouterr().out
+    keys = []
+    monkeypatch.setattr(dc, "fetch_watch", lambda bucket, key: keys.append((bucket, key)) or record())
+    assert dc.main(["replicas", "--build", BUILD, "--taskdef", str(ROOT / "deploy/aws/taskdef.json")]) == 0
+    assert keys[0][0].startswith("sizeup-hub-backups-") and keys[0][1] == "sizeup-hub/replica-watch.json"   # one key only
 
 
-def test_the_deploy_check_reads_the_bucket_from_the_task_definition(tmp_path):
-    bucket, prefix = dc.taskdef_backup(str(ROOT / "deploy/aws/taskdef.json"))
-    assert bucket.startswith("sizeup-hub-backups-") and prefix == "sizeup-hub"
-    cfg = dc.litestream_config(bucket, prefix, "us-east-1", ["cad"], tmp_path).read_text()
-    assert f"bucket: {bucket}" in cfg and "path: sizeup-hub/cad.sqlite" in cfg and "region: us-east-1" in cfg
-    res = dc.check_replicas(["hub"], lambda db: (_ for _ in ()).throw(RuntimeError("AccessDenied")), dc.integrity,
-                            out=lambda m: None)
-    assert res == [("hub", False, "hub.sqlite: can't be restored: AccessDenied")]
-    assert dc.main(["replicas", "--dbs", "cad,other"]) == 2
-
-
-def test_the_workflow_checks_the_replicas_after_the_deploy_with_the_pinned_litestream():
+def test_the_workflow_reads_the_record_and_never_restores_a_database():
     wf = (ROOT / ".github/workflows/deploy.yml").read_text()
-    step = wf[wf.index("- name: The replicas restore and pass integrity_check"):wf.index("- name: Wait for the station")]
-    assert "python3 tools/deploy_check.py replicas" in step and "sha256sum -c" in step
-    assert "LITESTREAM_SHA256_AMD64" in step and "!cancelled()" in step
-    assert wf.index("id: deploy") < wf.index("- name: The replicas restore")
+    step = wf[wf.index("- name: The new leader verified the replicas"):wf.index("- name: Wait for the station")]
+    assert 'python3 tools/deploy_check.py replicas --build "$SHA"' in step and "steps.deploy.outcome == 'success'" in step
+    assert "litestream" not in wf.lower() and "integrity_check" not in step     # no database ever reaches a runner
 
 
 @pytest.fixture

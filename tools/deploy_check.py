@@ -15,14 +15,15 @@ the station recorded as "no runtime change"); the station's update log line is p
 station's update failed or was rolled back, auto-update is paused there, the token is refused, or the time ran
 out. Exit 2: bad arguments or no token (the workflow skips the step with a warning before that).
 
-    python3 tools/deploy_check.py replicas [--taskdef deploy/aws/taskdef.json] [--dbs cad,hub,audio] [--quick]
+    python3 tools/deploy_check.py replicas --build <sha> [--timeout 600] [--every 20] [--taskdef deploy/aws/taskdef.json]
 
-After the deploy serves (2026-11-13: a corrupt cad.sqlite replica sat unnoticed until the next takeover failed): each
-replica's latest is restored from S3 (`litestream restore`, the runner's litestream: the Dockerfile's version) into a
-temp dir and checked read-only with PRAGMA integrity_check (--quick: quick_check). The bucket and prefix are the task
-definition's LITESTREAM_BUCKET / LITESTREAM_PATH; the region AWS_REGION; credentials the deploy role's (env), which may
-read the backups (sizeup-aws step 28). Exit 1 with "<db>.sqlite: ..." for a file that is bad, has no backup or can't be
-restored; nothing of the files' contents is printed (the log is public), only SQLite's check lines.
+After the deploy serves (2026-11-13: a corrupt cad.sqlite replica sat unnoticed until the next takeover failed): the hub
+verifies its own replicas (sizeup/replicawatch.py: the new leader's followers, checked 2 min after it serves) and keeps
+the results in ONE object, s3://<LITESTREAM_BUCKET>/<LITESTREAM_PATH>/replica-watch.json. This reads only that object
+(`aws s3api get-object`: the deploy role may GetObject that one key and nothing else, sizeup-aws step 28; no database
+ever leaves AWS) until the leader of this build has said it serves and every file has a check after that. Exit 1 when a
+file is failing (corrupt, or not verifiable), or nothing was verified in time. It prints SQLite's check lines and the
+times, never anything of the files' contents.
 """
 
 from __future__ import annotations
@@ -30,8 +31,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import shutil
-import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -119,9 +118,10 @@ def wait_for(get: Callable[[], tuple[dict | None, str, int]], build: str, timeou
         sleep(min(every, max(0.0, timeout - (clock() - t0))))
 
 
-# -- the replicas, restored and checked after the deploy ---------------------------------------------------------------
+# -- the replicas, as the new leader verified them -----------------------------------------------------------------------
 
 DBS = ("cad", "hub", "audio")
+KEY = "replica-watch.json"
 
 
 def taskdef_backup(path: str) -> tuple[str, str]:
@@ -137,101 +137,108 @@ def taskdef_backup(path: str) -> tuple[str, str]:
     return bucket, (str(env.get("LITESTREAM_PATH") or "").strip() or "sizeup-hub").strip("/")
 
 
-def litestream_config(bucket: str, prefix: str, region: str, dbs, work: Path) -> Path:
-    """A litestream.yml for restoring only (deploy/hub/litestream.yml's replicas; the "path"s are never opened)."""
-    lines = ["dbs:"]
-    for db in dbs:
-        lines += [f"  - path: {work / 'live' / (db + '.sqlite')}", "    replica:", "      type: s3",
-                  f"      bucket: {bucket}", f"      path: {prefix}/{db}.sqlite"] + ([f"      region: {region}"] if region else [])
-    cfg = work / "litestream.yml"
-    cfg.write_text("\n".join(lines) + "\n")
-    return cfg
-
-
-def litestream_restore(cfg: Path, db: str, work: Path, timeout: float = 900.0) -> Path:
-    """The latest of db restored into work: its path. RuntimeError: no backup, or it couldn't."""
-    out = work / "restored" / f"{db}.sqlite"
-    out.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        r = subprocess.run(["litestream", "restore", "-config", str(cfg), "-o", str(out), str(work / "live" / f"{db}.sqlite")],
-                           capture_output=True, text=True, timeout=timeout)
-    except subprocess.TimeoutExpired:
-        raise RuntimeError(f"the restore took over {timeout:.0f} s") from None
-    except FileNotFoundError:
-        raise RuntimeError("no litestream on this runner") from None
-    if r.returncode != 0:
-        err = (r.stderr or r.stdout).strip()
-        if "no matching backup files" in err or "no snapshots available" in err:
-            raise RuntimeError("no backup in S3")
-        raise RuntimeError(f"litestream restore failed: {err[-300:]}")
-    if not out.exists():
-        raise RuntimeError("litestream restore wrote nothing")
-    return out
-
-
-def integrity(path: Path, full: bool = True) -> tuple[bool, str]:
-    """(ok, SQLite's answer): integrity_check (or quick_check), read-only, never the rows themselves."""
-    try:
-        con = sqlite3.connect(Path(path).resolve().as_uri() + "?mode=ro", uri=True)
+def fetch_watch(bucket: str, key: str, timeout: float = 30.0) -> dict | None:
+    """The record (None: not there yet). RuntimeError: AWS refused or couldn't be reached."""
+    with tempfile.TemporaryDirectory() as d:
+        out = Path(d) / "w.json"
         try:
-            rows = con.execute(f"PRAGMA {'integrity_check' if full else 'quick_check'}(20)").fetchall()
-        finally:
-            con.close()
-    except sqlite3.DatabaseError as e:
-        return False, f"{type(e).__name__}: {e}"
-    text = "; ".join(str(r[0]) for r in rows)
-    return text == "ok", text
-
-
-def check_replicas(dbs, restore: Callable[[str], Path], check: Callable[[Path], tuple[bool, str]],
-                   out: Callable[[str], None] = print) -> list[tuple[str, bool, str]]:
-    """Each replica restored and checked: [(db, ok, what to say)]. A restore that fails is a failure too."""
-    res = []
-    for db in dbs:
-        t0 = time.monotonic()
+            r = subprocess.run(["aws", "s3api", "get-object", "--bucket", bucket, "--key", key, str(out)],
+                               capture_output=True, text=True, timeout=timeout)
+        except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+            raise RuntimeError(f"aws s3api get-object: {type(e).__name__}") from None
+        if r.returncode != 0:
+            if "NoSuchKey" in r.stderr:
+                return None
+            raise RuntimeError(f"aws s3api get-object: {r.stderr.strip()[-200:]}")
         try:
-            path = restore(db)
-            ok, text = check(path)
-            size = path.stat().st_size if path.exists() else 0
-            msg = f"{db}.sqlite: {'ok' if ok else 'CORRUPT: ' + text[:500]} ({size / 1e6:.0f} MB, {time.monotonic() - t0:.0f} s)"
-        except Exception as e:  # noqa: BLE001 - said, and a failure
-            ok, msg = False, f"{db}.sqlite: can't be restored: {e}"
-        out(msg)
-        res.append((db, ok, msg))
-    return res
+            doc = json.loads(out.read_text())
+        except ValueError:
+            raise RuntimeError(f"{key}: not JSON") from None
+    return doc if isinstance(doc, dict) else None
+
+
+def _hm(t) -> str:
+    return time.strftime("%H:%M:%S", time.gmtime(float(t))) + " UTC" if isinstance(t, (int, float)) else "?"
+
+
+def _what(db: str, c: dict) -> str:
+    """One file's last check, as the log says it: corrupt (the check said so) or not verifiable (it couldn't check)."""
+    state = "corrupt" if c.get("ok") is False else "not verifiable" if c.get("ok") is None else "ok"
+    detail = " · ".join(str(c.get("result") or "").splitlines()[:3])[:400]
+    return (f"{db}.sqlite: {state} ({c.get('mode') or 'check'} by the {c.get('by') or '?'} at {_hm(c.get('at'))})"
+            + (f": {detail}" if state != "ok" and detail else ""))
+
+
+def replica_verdict(doc: dict | None, build: str) -> tuple[str, str]:
+    """(OK | WAIT | FAIL, what to say) for the record as read now."""
+    if doc is None:
+        return WAIT, f"no {KEY} yet"
+    checks = doc.get("checks") if isinstance(doc.get("checks"), dict) else {}
+    failing = doc.get("failing") if isinstance(doc.get("failing"), dict) else {}
+    if failing:
+        return FAIL, "; ".join(_what(db, checks.get(db) or {}) for db in sorted(failing))
+    lead = doc.get("leader") if isinstance(doc.get("leader"), dict) else {}
+    if not same_build(lead.get("build"), build):
+        return WAIT, f"the leader of {build[:7]} hasn't said it serves yet (now: {str(lead.get('build') or '?')[:7]})"
+    since = float(lead.get("serving_at") or 0)
+    waiting, bad, good = [], [], []
+    for db in DBS:
+        c = checks.get(db) if isinstance(checks.get(db), dict) else None
+        if c is None or float(c.get("at") or 0) < since:
+            waiting.append(db)
+        elif c.get("ok") is True:
+            good.append(_what(db, c))
+        elif c.get("ok") is False:
+            bad.append(_what(db, c))
+        else:
+            waiting.append(db)                        # not verifiable once: the hub says so after two (failing)
+    if bad:
+        return FAIL, "; ".join(bad)
+    if waiting:
+        return WAIT, f"the leader (serving since {_hm(since)}) hasn't verified {', '.join(waiting)} yet"
+    return OK, "; ".join(good)
+
+
+def wait_replicas(get: Callable[[], dict | None], build: str, timeout: float = 600.0, every: float = 20.0,
+                  clock: Callable[[], float] = time.monotonic, sleep: Callable[[float], None] = time.sleep,
+                  out: Callable[[str], None] = print) -> tuple[bool, str]:
+    t0, said, msg = clock(), "", ""
+    while True:
+        try:
+            v, msg = replica_verdict(get(), build)
+        except RuntimeError as e:
+            v, msg = WAIT, f"can't read {KEY}: {e}"
+        if msg != said:
+            out(f"[{int(clock() - t0):4d} s] {msg}")
+            said = msg
+        if v != WAIT:
+            return v == OK, msg
+        if clock() - t0 >= timeout:
+            return False, f"not verified within {timeout / 60:g} min of the deploy (last: {msg})"
+        sleep(min(every, max(0.0, timeout - (clock() - t0))))
 
 
 def replicas_main(argv: list[str]) -> int:
-    ap = argparse.ArgumentParser(prog="deploy_check.py replicas", description="restore each replica and integrity_check it")
+    ap = argparse.ArgumentParser(prog="deploy_check.py replicas", description="wait for the new leader to verify the replicas")
+    ap.add_argument("--build", required=True)
     ap.add_argument("--taskdef", default="deploy/aws/taskdef.json")
-    ap.add_argument("--dbs", default=",".join(DBS))
-    ap.add_argument("--region", default=os.environ.get("AWS_REGION", ""))
-    ap.add_argument("--quick", action="store_true", help="quick_check instead of integrity_check")
+    ap.add_argument("--timeout", type=float, default=600.0)
+    ap.add_argument("--every", type=float, default=20.0)
     a = ap.parse_args(argv)
-    dbs = [x.strip() for x in a.dbs.split(",") if x.strip()]
-    if not dbs or any(x not in DBS for x in dbs):
-        print(f"replica check: --dbs from {', '.join(DBS)}", file=sys.stderr)
-        return 2
     try:
         bucket, prefix = taskdef_backup(a.taskdef)
     except (OSError, ValueError) as e:
         print(f"replica check: {e}", file=sys.stderr)
         return 2
     gh = os.environ.get("GITHUB_ACTIONS") == "true"
-    work = Path(tempfile.mkdtemp(prefix="replica-check-"))
-    try:
-        cfg = litestream_config(bucket, prefix, a.region, dbs, work)
-        print(f"replica check: restoring {', '.join(dbs)} from the backups ({prefix}/) and checking them")
-        res = check_replicas(dbs, lambda db: litestream_restore(cfg, db, work), lambda p: integrity(p, not a.quick))
-    finally:
-        shutil.rmtree(work, ignore_errors=True)
-    bad = [m for _, ok, m in res if not ok]
-    if not bad:
-        print(f"::notice title=Replicas verified::{'; '.join(m for _, _, m in res)}" if gh else "replicas verified")
+    print(f"replica check: waiting up to {a.timeout / 60:g} min for the leader of {a.build[:7]} to verify the replicas "
+          f"({prefix}/{KEY}; the first check is 2 min after it serves)")
+    ok, msg = wait_replicas(lambda: fetch_watch(bucket, f"{prefix}/{KEY}"), a.build, a.timeout, a.every)
+    if ok:
+        print(f"::notice title=Replicas verified::{msg}" if gh else f"replicas verified: {msg}")
         return 0
-    for m in bad:
-        print(f"::error title=Replica bad::{m} · a takeover or cold start from it would fail; fix it before the next "
-              "deploy (docs/cloud.md \"Replica checks\")" if gh else f"replica BAD: {m}")
+    print(f"::error title=Replica check failed::{msg} · a takeover or cold start from a bad replica would fail; see "
+          "Settings > Health > Replicas and docs/cloud.md \"Replica checks\"" if gh else f"replica check FAILED: {msg}")
     return 1
 
 
