@@ -329,7 +329,7 @@ def test_the_monthly_budget_stops_new_audio():
     fake = FakeTranscribe()
     res, kv = Results(), {}
     usage = Usage(kv.get, kv.__setitem__)
-    usage.add(25 / tr.PRICE_PER_MIN * 60 - 10, 0)     # $25 less 10 s worth spent this month
+    usage.add(25 / tr.PRICE_PER_MIN * 60 - 0.2, 0)    # $25 less 0.2 s worth: no room for a 0.5 s clip (no minimum, #423)
     t = AwsTranscriber(Settings(endpoint=fake.url, pace=50), usage, res.ok, res.fail, log=lambda m: None,
                        limit_usd=lambda: 25.0)
     try:
