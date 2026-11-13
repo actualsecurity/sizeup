@@ -37,9 +37,9 @@ its task runs the Cloudflare connector. Every task is one of:
             at most OVERLAP_S and never past shortly before ECS's SIGKILL: two connectors on the tunnel for a
             moment, never none. If nobody took the lock within RETAKE_S it is taken back and this task serves on
             until shortly before ECS kills it, then drains again. A taker that failed and gave it back is taken
-            back from too: from our own files if its release says "pristine_from" our positions (nothing but its
-            Litestream's snapshot of them in the replica), else from the replica like a new task (its migration
-            wrote), time allowing. Then the `leader` file goes (the connector stops) and this exits.
+            back from our own files if its release says "pristine_from" our positions (nothing but its
+            Litestream's snapshot of them in the replica); not if anything else moved the replica (its migration
+            wrote: not taken back; the next task restores). Then the `leader` file goes (the connector stops) and this exits.
   FENCED    the lease isn't ours or fresh: the app and Litestream are SIGKILLed at once, the `leader` file goes,
             exit 3 (ECS replaces the task). The app's own watchdog (sizeup/fence.py) does the same from inside.
 
@@ -107,7 +107,7 @@ OVERLAP_S = 180.0              # the released connector, at most (and never past
 KILL_MARGIN_S = 3.0            # ... it stops this long before ECS's SIGKILL, cleanly
 INIT_S = 300.0                 # the app opening / migrating the databases after the gate says "init"
 REPLICATING_S = 120.0          # Litestream's position of each file confirmed (before "init", and after it): each its own
-TAKEBACK_S = 60.0              # a takeover from the replica by the old leader (its retake refused): needs this much
+REPLICATION_TOTAL_S = 150.0    # ... and all of them, every round, in all: a hung Litestream fails the takeover
 MIN_LITESTREAM = (0, 5, 18)    # litestream#1547 (a snapshot from a stale WAL offset), #1579 (the read lock after a sync)
 SKIP_CHECKS_ENV = "SIZEUP_HANDOFF_SKIP_REPLICATION_CHECKS"   # the operator's escape hatch (docs/cloud.md): "1"
 APP_LISTEN_S = 30.0            # the app's port answering ("updating") after the gate says "run"
@@ -290,6 +290,24 @@ class Env:
             raise RuntimeError(f"litestream restore {db}: no txid")
         return n
 
+    def checkpoint(self, path: Path) -> None:
+        """Everything in path's WAL into the file, the WAL emptied and gone (PRAGMA wal_checkpoint(TRUNCATE), then
+        the last connection closed). Only with nothing else open on it. RuntimeError if SQLite couldn't."""
+        if not Path(f"{path}-wal").exists():
+            return
+        con = sqlite3.connect(path, isolation_level=None)
+        try:
+            busy, _log, _done = con.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+        finally:
+            con.close()
+        if busy:
+            raise RuntimeError(f"{path.name}: the checkpoint was blocked (something still has it open)")
+        wal = Path(f"{path}-wal")
+        if wal.exists() and wal.stat().st_size > 0:
+            raise RuntimeError(f"{path.name}: its WAL not empty after the checkpoint")
+        for s in ("-wal", "-shm"):                # (an empty WAL kept by SQLITE_FCNTL_PERSIST_WAL builds: macOS)
+            Path(f"{path}{s}").unlink(missing_ok=True)
+
     def litestream_version(self) -> tuple[int, ...] | None:
         """`litestream version` as numbers; None if it can't say."""
         try:
@@ -419,7 +437,8 @@ class Supervisor:
                  STOP_TIMEOUT_S=STOP_TIMEOUT_S, REDRAIN_S=REDRAIN_S, RENEW_S=leaderlock.RENEW_S,
                  RETAKE_MIN_LEFT_S=RETAKE_MIN_LEFT_S, CREATED_WAIT_S=CREATED_WAIT_S, KILL_MARGIN_S=KILL_MARGIN_S,
                  INIT_S=INIT_S, APP_LISTEN_S=APP_LISTEN_S, WARM_APP_RETRY_S=WARM_APP_RETRY_S,
-                 WARM_APP_MAX_FAILS=WARM_APP_MAX_FAILS, REPLICATING_S=REPLICATING_S, TAKEBACK_S=TAKEBACK_S)
+                 WARM_APP_MAX_FAILS=WARM_APP_MAX_FAILS, REPLICATING_S=REPLICATING_S,
+                 REPLICATION_TOTAL_S=REPLICATION_TOTAL_S)
         t.update(timing or {})
         self.t = t
         self.role = "starting"
@@ -451,6 +470,7 @@ class Supervisor:
         self.positions: dict | None = None
         self.released_positions: dict | None = None
         self.promoted: dict[str, tuple | None] = {}   # each file as promoted (fingerprint): untouched until Litestream has it
+        self._confirm_by: float | None = None          # the replication confirms' overall deadline (this takeover)
         self.first_positions: dict[str, int] = {}      # Litestream's first position of each, its snapshot of the untouched file
         self.app_told = False                          # the app was told "init" / "run" in this takeover: it may have written
         self.failed_takeover = False                   # step_down after a takeover that failed (a release may be "pristine")
@@ -1046,8 +1066,10 @@ class Supervisor:
         upload keeps the takeover short (docs/cloud.md: ~9 s for 1.2 GB locally); S3 has it all by the release
         (`sync -wait` when draining)."""
         got: dict[str, int] = {}
+        if self._confirm_by is None:
+            self._confirm_by = self.mono() + self.t["REPLICATION_TOTAL_S"]
         for db in dbs:
-            end = self.mono() + self.t["REPLICATING_S"]
+            end = min(self.mono() + self.t["REPLICATING_S"], self._confirm_by)
             while True:
                 self.must_hold()
                 if self.litestream is None or self.litestream.poll() is not None:
@@ -1058,8 +1080,8 @@ class Supervisor:
                     break
                 except Exception as e:
                     if self.mono() >= end:
-                        raise RuntimeError(f"Litestream didn't confirm {db} in "
-                                           f"{self.t['REPLICATING_S']:.0f} s: {e}") from None
+                        raise RuntimeError(f"Litestream didn't confirm {db} in time ({self.t['REPLICATING_S']:.0f} s "
+                                           f"a file, {self.t['REPLICATION_TOTAL_S']:.0f} s in all): {e}") from None
                     self.sleep(0.5)
             was = base.get(db)
             ok = (local >= 1 if was is None else local > was if first_start else local >= was) \
@@ -1087,6 +1109,7 @@ class Supervisor:
             app = self._start_app()
         self.app = app
         base = {db: txid(v) for db, v in (self.positions or {}).items()}
+        self._confirm_by = None                     # (REPLICATION_TOTAL_S from the first confirm)
         self._check_untouched()
         self.litestream = self.env.replicate()
         self.write_lease()
@@ -1350,12 +1373,8 @@ class Supervisor:
                               "failed taker's snapshot of our own files (pristine): taking it back from them")
                     base = here
                 elif here != ours:
-                    if self._time_left() > self.t["REDRAIN_S"] + self.t["RETAKE_MIN_LEFT_S"] + self.t["TAKEBACK_S"]:
-                        self.note(f"the replica moved on since our release ({ours} -> {here}): taking over from "
-                                  "the replica like a new task")
-                        return self._take_back_from_replica(prev)
-                    self.note(f"the replica moved on since our release ({ours} -> {here}): not taking it back "
-                              "(no time left for a takeover from it)")
+                    self.note(f"the replica moved on since our release ({ours} -> {here}): not taking it back (its "
+                              "writes are newer than our files; the next task, or a rolled-back deploy's, restores)")
                     self.lock.release(prev.get("positions") if isinstance(prev.get("positions"), dict) else None,
                                       bool(prev.get("clean")))
                     return None
@@ -1377,8 +1396,13 @@ class Supervisor:
         try:
             self.must_hold()
             if base is not None:                      # our files are the data; Litestream snapshots them afresh
-                for db in DBS:
+                for db in DBS:                        # (nothing runs on them: the app and Litestream are stopped)
+                    self.env.checkpoint(self.env.db_path(db))     # no WAL left for a Litestream without state
+                    there = sidecars(self.env.db_path(db))
+                    if there:
+                        raise RuntimeError(f"{db}.sqlite: {', '.join(there)} still there after the checkpoint")
                     shutil.rmtree(self.env.db_path(db).with_name(f".{db}.sqlite-litestream"), ignore_errors=True)
+            self._confirm_by = None
             self.litestream = self.env.replicate()
             self.write_lease()
             mine = {db: txid(v) for db, v in self.released_positions.items()} if base is None else base
@@ -1404,34 +1428,6 @@ class Supervisor:
             self.note(f"taking back failed: {e}")
             if isinstance(e, ReplicaMismatch):
                 self._stop_mismatched()
-            return self.step_down(code=1, overlap=False, retake=False)
-        self.role = "active"
-        deadline = (self.term_at or self.mono()) + self.t["STOP_TIMEOUT_S"] - self.t["REDRAIN_S"]
-        return self.active(deadline=deadline, retake=False)
-
-
-    def _take_back_from_replica(self, prev: dict) -> int:
-        """Our retake refused (the replica holds a failed taker's writes): take over from the replica like any new
-        task (a full restore: no followers here), then serve until shortly before ECS stops this task, as a retake
-        does. The old image must open what the failed migration left (extra columns, indexes, tables)."""
-        self.role = "takeover"
-        self.timing = Phases("take-back", clock=self.mono)
-        self.released_positions = None
-        self.failed_takeover = self.app_told = False
-        self.first_positions = {}
-        self.start_renewing()
-        positions = prev.get("positions") if isinstance(prev.get("positions"), dict) else {}
-        try:
-            self._promote(prev, positions)
-            self.must_hold()
-            self._start_writer()
-        except _Fenced:
-            raise
-        except Exception as e:
-            self.note(f"taking over from the replica failed: {type(e).__name__}: {e}")
-            if isinstance(e, ReplicaMismatch):
-                self._stop_mismatched()
-            self.stop_warm_app()
             return self.step_down(code=1, overlap=False, retake=False)
         self.role = "active"
         deadline = (self.term_at or self.mono()) + self.t["STOP_TIMEOUT_S"] - self.t["REDRAIN_S"]

@@ -157,8 +157,8 @@ def test_a_migration_with_autocheckpoints_leaves_its_pages_in_the_main_file_and_
 
 def test_this_build_starts_on_a_newer_builds_half_applied_migration(tmp_path):
     """A migration on a newer image that failed half way (autocommit) leaves its columns, indexes and tables in the
-    replica; when the old leader takes over from it (sizeup/handoff.py _take_back_from_replica) this build must still
-    open the files and log traffic. What it can't take: a newer user_version (Store refuses it: a migration must not
+    replica; when the deploy is rolled back, the old image's task takes over from it and must still open the files
+    and log traffic. What it can't take: a newer user_version (Store refuses it: a migration must not
     bump it, docs/cloud.md "Replicate before migrate")."""
     cfg, paths = hub_with_a_radio_log(tmp_path)
     db = sqlite3.connect(paths[0], isolation_level=None)

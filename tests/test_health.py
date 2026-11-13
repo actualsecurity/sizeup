@@ -144,6 +144,17 @@ def test_an_old_litestream_on_the_hub_is_a_warning_on_the_panel(monkeypatch):
     assert "litestream" not in r.keys()
 
 
+def test_the_takeover_override_is_a_warning_on_the_panel(monkeypatch):
+    monkeypatch.setenv("SIZEUP_HANDOFF_SKIP_REPLICATION_CHECKS", "1")
+    r = Rig()
+    r.at(0, status=station_status())
+    (a,) = [a for a in r.h.alerts() if a["key"] == "replication_checks"]
+    assert a["severity"] == "warning" and "SIZEUP_HANDOFF_SKIP_REPLICATION_CHECKS=1" in a["text"]
+    monkeypatch.delenv("SIZEUP_HANDOFF_SKIP_REPLICATION_CHECKS")
+    r.at(10, status=station_status())
+    assert "replication_checks" not in r.keys()
+
+
 def test_while_silent_nothing_else_starts_or_clears():
     r = Rig()
     r.at(0, status=station_status(radios=[radio("FG1", open=True, open_s=200.0, stuck=True)]))

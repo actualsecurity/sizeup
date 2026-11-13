@@ -400,6 +400,9 @@ class FakeEnv(Env):
     def litestream_version(self):
         return self.world.ls_version
 
+    def checkpoint(self, path):
+        self.calls.append(f"checkpoint {Path(path).stem}")
+
     def replicate(self):
         self.calls.append("replicate")
         self.confirmed = set()
@@ -858,12 +861,15 @@ def test_a_taker_whose_migration_fails_before_writing_is_taken_back_from_the_old
     assert {db: world.replica[db] for db in DBS} == {db: 107 for db in DBS}  # + B's Litestream snapshot, only
     until(lambda: a.sup.role == "active" and "A" in world.alive["app"], what="A takes it back")
     assert any("pristine" in e and "taking it back" in e for e in a.sup.events)
+    c = a.env.calls
+    second = [i for i, x in enumerate(c) if x == "replicate"][1]
+    assert all(f"checkpoint {db}" in c[:second] for db in DBS)              # no WAL left for the fresh Litestream
     assert {db: world.replica[db] for db in DBS} == {db: 108 for db in DBS}  # A's Litestream: a fresh snapshot of its files
     assert a.wait(10) == 0 and world.violations == []
 
 
-def test_a_taker_whose_migration_failed_half_way_is_taken_over_from_the_replica_by_the_old_leader(world, tmp_path):
-    a = Task(world, "A", tmp_path, STOP_TIMEOUT_S=12.0, TAKEBACK_S=1.0).start()
+def test_a_taker_whose_migration_failed_half_way_is_not_taken_back_and_the_next_task_restores_it(world, tmp_path):
+    a = Task(world, "A", tmp_path).start()
     until(lambda: a.sup.role == "active")
     b = Task(world, "B", tmp_path).start()
     until(lambda: b.sup.role == "standby" and b.sup.warm())
@@ -872,11 +878,29 @@ def test_a_taker_whose_migration_failed_half_way_is_taken_over_from_the_replica_
     until(lambda: b.code is not None, what="B gives up")
     assert not any("released as pristine" in e for e in b.sup.events)
     assert world.replica["cad"] == 110                        # 106, B's snapshot, its 3 changes
-    until(lambda: a.sup.role == "active" and "A" in world.alive["app"], timeout=15, what="A takes over from the replica")
-    assert any("taking over from the replica like a new task" in e for e in a.sup.events)
-    assert [c for c in a.env.calls if c.startswith("restore")] == [f"restore {db}" for db in DBS]
-    assert a.sup.positions == {"cad": f"{110:016x}", "hub": f"{107:016x}", "audio": f"{107:016x}"}
-    assert a.wait(15) == 0 and world.violations == []
+    assert a.wait(10) == 0                                    # as on main: A's files are behind, never resumed from
+    assert any("moved on since our release" in e and "not taking it back" in e for e in a.sup.events)
+    assert "A" not in world.alive["app"] and not any(c.startswith("restore") for c in a.env.calls)
+    c = Task(world, "C", tmp_path).start()                    # the rollback's task: from the replica, B's changes in it
+    until(lambda: c.sup.role == "active", what="C active")
+    assert c.sup.positions == {"cad": f"{110:016x}", "hub": f"{107:016x}", "audio": f"{107:016x}"}
+    assert world.violations == []
+    finish(c)
+
+
+def test_a_hung_litestream_fails_the_takeover_within_the_overall_cap(world, tmp_path):
+    a = Task(world, "A", tmp_path, REPLICATING_S=30.0, REPLICATION_TOTAL_S=0.6)
+    calls = []
+
+    def hung(db, timeout, wait=True):
+        calls.append(db)
+        raise RuntimeError("litestream sync cad: context deadline exceeded")
+    a.env.position = hung
+    t0 = time.monotonic()
+    a.start()
+    assert a.wait() == 1 and time.monotonic() - t0 < 10
+    assert any("didn't confirm cad in time" in e and "s in all" in e for e in a.sup.events)
+    assert "init_state" not in a.env.calls
 
 
 def test_the_operators_override_lets_a_false_positive_through_loudly(world, tmp_path):

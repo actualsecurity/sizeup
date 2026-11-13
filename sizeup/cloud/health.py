@@ -42,6 +42,8 @@ notice when it clears:
                   Fire/EMS 15 keep AWS within the reserve, sizeup/transcribe.py)
     litestream    the hub's Litestream older than 0.5.18 (its supervisor says so: sizeup/handoff.py      warning
                   MIN_LITESTREAM, SIZEUP_LITESTREAM_WARNING): an image with the old pin
+    replication_checks  the hub runs with SIZEUP_HANDOFF_SKIP_REPLICATION_CHECKS=1 (docs/cloud.md: an       warning
+                  operator's override for a false positive, to be removed)
 
 While the station is silent (or before it first reports) the other conditions keep the state they had:
 nothing starts or clears on old data.
@@ -157,7 +159,8 @@ MUTE_KINDS = {"adsb": "ADS-B receiver down", "whisper": "Speech-to-text down", "
               "silent": "Station silent", "behind": "Station behind the hub", "update": "Station update failed",
               "outbox": "Station's events backing up", "disk": "Station disk full",
               "transcribe": "Amazon Transcribe failing", "aws_budget": "Amazon Transcribe monthly limit",
-              "hub_errors": "Hub errors", "litestream": "Litestream too old"}
+              "hub_errors": "Hub errors", "litestream": "Litestream too old",
+              "replication_checks": "Takeover checks skipped"}
 MUTE_TIMED_ONLY = ("silent", "trunk", "job")   # critical ones: muted for a time only, never until unmuted
 
 
@@ -786,6 +789,11 @@ class StationHealth:
         if lw:
             out["litestream"] = {"severity": "warning", "title": "Litestream too old", "text": lw[:300],
                                  "since": self.__dict__.setdefault("_litestream_since", now)}
+        if os.environ.get("SIZEUP_HANDOFF_SKIP_REPLICATION_CHECKS", "").strip() == "1":   # the operator's override
+            out["replication_checks"] = {
+                "severity": "warning", "title": "Takeover checks skipped",
+                "text": "SIZEUP_HANDOFF_SKIP_REPLICATION_CHECKS=1: the replica's checks at a takeover are off · remove "
+                        "it in the next deploy", "since": self.__dict__.setdefault("_skip_since", now)}
         silent, since = self._silent(now)
         if silent:
             out["silent"] = {"severity": "critical", "title": "Station silent",

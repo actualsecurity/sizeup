@@ -2912,22 +2912,22 @@ A refusal in 2 or 3 SIGKILLs Litestream (no last sync of a file it disagrees wit
 the task exits 1 and nothing is served from it. A retake (the old task taking its lock back) confirms its own
 Litestream at its release before its app starts.
 
-**A new image whose takeover fails never takes the hub down.** Its Litestream has already put a snapshot in the
-replica (position + 1), so the replica has "moved on" from the old leader's release, which used to stop the old
-leader from taking its lock back:
+**When a new image's takeover fails.** Its Litestream has already put a snapshot in the replica (position + 1)
+before `init`, so the replica has "moved on" from the old leader's release. What happens then:
 
-* **Failed before its app wrote anything** (never told `init`, or its migration raised before writing: every file
-  still at Litestream's first position after the last sync): its release says `"pristine_from": <the positions it
-  promoted>`. The replica then holds nothing but a snapshot of the old leader's own files. The old leader takes the
-  lock back from its own files, Litestream started afresh on them (its local state dropped: a new snapshot of them
-  on top).
-* **Failed after its migration wrote** (autocommit: part of it applied): the replica holds real changes. The old
-  leader takes over **from the replica** like any new task (a full restore, no followers), if ECS leaves it the time
-  (`TAKEBACK_S` 60 s more than a retake needs), and serves until shortly before ECS stops it, as a retake does.
-  This build opens a newer build's half-applied migration (extra columns, indexes, tables:
-  `tests/test_startup_writes.py`). It can't open a newer `user_version` (the store refuses a schema newer than
-  its own): **a migration must not bump `user_version`** unless its rollback is planned.
-* Either way the circuit breaker rolls the deploy back, and the old image's next task takes over from the replica.
+* **It failed before its app wrote anything** (never told `init`, or its migration raised before writing: every
+  file still at Litestream's first position after the last sync): its release says `"pristine_from": <the
+  positions it promoted>`, and the replica holds nothing but a snapshot of the old leader's own files. The old
+  leader takes the lock back from its own files (each checkpointed, `PRAGMA wal_checkpoint(TRUNCATE)`, and its
+  Litestream state dropped: a fresh snapshot of them on top) and serves until shortly before ECS's SIGKILL, as any
+  retake: **at most ~30–50 s more service** (stopTimeout 120 s, less the drain and the failed takeover).
+* **Otherwise** (its migration wrote: autocommit, part of it applied; or it failed later): the old leader doesn't
+  take it back (its files are behind the replica) and exits as before. ECS starts the new image again, which fails
+  again, until the **circuit breaker rolls the deploy back**; the rolled-back image's task then takes over from the
+  replica normally. The hub is down (Cloudflare 1033) for that time. That image opens the newer build's
+  half-applied migration (extra columns, indexes, tables: `tests/test_startup_writes.py`); it can't open a newer
+  `user_version` (the store refuses a schema newer than its own), so **a migration must not bump `user_version`**
+  unless its rollback is planned.
 
 **The operator's override.** `SIZEUP_HANDOFF_SKIP_REPLICATION_CHECKS=1` in the hub container's environment skips
 the checks above (untouched files, Litestream's positions, "database behind replica", the followers' clean stop),
@@ -2935,6 +2935,19 @@ said as a `WARNING` at every takeover and in the supervisor's `/healthz` (`"repl
 order itself (Litestream before `init`) stays. Runbook: a takeover refused by one of these checks → **roll the
 task definition back first** (the old image takes over as before); set the override only if a check is
 demonstrably a false positive, and remove it in the next deploy.
+
+The override is also on the app's Health panel while it is set (`replication_checks`, a warning).
+
+**Each takeover's confirmations** have their own budget per file (`REPLICATING_S`, 120 s) and one overall cap
+(`REPLICATION_TOTAL_S`, 150 s, both rounds): a hung Litestream fails the takeover inside the old connector's
+overlap instead of holding "takeover" for minutes.
+
+**The first rollout of this** (and any deploy after a takeover): the new leader's first snapshot of every file (the
+whole file: ~1.2 GB) goes to S3 in the background after it serves. **Let it finish before any further deploy**:
+wait ~5 minutes after `active: serving`, or until `litestream restore -dry-run` (read-only) shows the replica past
+the takeover's `its first positions …` line for each file. A drain that logs
+`<db> not confirmed in S3` means its release was **unclean** (no positions): the next takeover still restores what
+the replica has, but nothing vouches that the last changes reached it.
 
 **Litestream's version.** The supervisor says `WARNING: Litestream 0.5.17 is older than 0.5.18 …` at start if the
 image carries an older one, and the Health panel shows it (`litestream`, a warning).

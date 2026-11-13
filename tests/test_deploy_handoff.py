@@ -399,6 +399,26 @@ def test_the_quick_check_is_a_normal_read_only_open_and_refuses_sidecars(tmp_pat
     assert env.quick_check(db).startswith("refused: cad.sqlite-shm")
 
 
+def test_the_checkpoint_before_a_fresh_litestream_leaves_no_wal_and_keeps_every_row(tmp_path):
+    import sqlite3
+    from sizeup.handoff import Env, sidecars
+    env = Env("cfg.toml", tmp_path, "ls.yml", "sock", 0)
+    src = tmp_path / "src.sqlite"
+    c = sqlite3.connect(src, isolation_level=None)
+    c.execute("PRAGMA journal_mode = WAL")
+    c.execute("PRAGMA wal_autocheckpoint = 0")              # (as Litestream's own connection: the WAL keeps it all)
+    c.execute("CREATE TABLE t (x)")
+    c.executemany("INSERT INTO t VALUES (?)", [(i,) for i in range(500)])
+    db = tmp_path / "cad.sqlite"                            # a file with its rows still in its WAL (a WAL kept on)
+    shutil.copyfile(src, db)
+    shutil.copyfile(f"{src}-wal", f"{db}-wal")
+    c.close()
+    assert Path(f"{db}-wal").stat().st_size > 0
+    env.checkpoint(db)
+    assert sidecars(db) == []
+    assert sqlite3.connect(db).execute("SELECT count(*) FROM t").fetchone()[0] == 500
+
+
 def test_litestreams_behind_replica_line_is_read():
     from sizeup.handoff import behind_replica
     line = ('time=2026-11-12T23:32:37.835-05:00 level=INFO msg="detected database behind replica" system=store '
