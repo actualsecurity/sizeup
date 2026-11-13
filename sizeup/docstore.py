@@ -14,7 +14,7 @@ that expire in minutes, never public.
                  signature (response-content-type, response-content-disposition, response-cache-control): the browser
                  gets the bytes from S3's own origin, never the hub's, so a file can't read the hub's cookies or
                  pages. The map's overlay loads the plan with CORS (the bucket's CORS rule, sizeup-aws
-                 20-preplan-docs.sh: GET from the hub's origin only). A delete removes the current version; the
+                 22-preplan-docs.sh: GET from the hub's origin only). A delete removes the current version; the
                  bucket's lifecycle removes the old one 30 days later.
     FsDocStore   the same on a local folder (dev, tests: SIZEUP_PREPLAN_DOCS_DIR, else <the CAD's folder>/preplan-docs
                  off the hub). link() is None: the hub serves the bytes itself (nosniff, Content-Disposition, a
