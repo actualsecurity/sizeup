@@ -22,7 +22,7 @@ import re
 from datetime import datetime
 from urllib.parse import quote
 
-SPACED_PLATE = re.compile(r"\b[A-Z]{2,4}[\s-]\d{3,4}\b")
+from sizeup.intel.place import SPACED_PLATE  # noqa: E402  (route labels excepted: "NY 120", "US 1")
 HOUSE = re.compile(r"^\s*(\d+)[A-Za-z]?\s+(.+)$")
 DATE = re.compile(r"\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b|\b(?:dob|d\.o\.b|born)\b", re.I)
 RADIO_ID = re.compile(r"\b\d{6,}\b")
