@@ -856,9 +856,10 @@ def test_the_child_gets_none_of_the_hubs_environment(monkeypatch):
         return real(*a, **kw)
     monkeypatch.setattr(docfiles.subprocess, "run", run)
     assert docfiles.render(pdf(), 1)["png"].startswith(b"\x89PNG")
-    env, = seen
-    assert env is not None and not [k for k in env if k.startswith(("SIZEUP_", "AWS_"))]
-    assert set(env) <= {"PATH", "LC_ALL"}
+    assert len(seen) == 2                                                       # the render, then the recheck
+    for env in seen:
+        assert env is not None and not [k for k in env if k.startswith(("SIZEUP_", "AWS_"))]
+        assert set(env) <= {"PATH", "LC_ALL"}
     # and in the child itself
     out = real([docfiles.sys.executable, "-I", "-c", "import os, json; print(json.dumps(sorted(os.environ)))"],
                env=docfiles.child_env(), capture_output=True, text=True, check=True)
@@ -1470,3 +1471,67 @@ def test_honest_pypdf_output_of_every_shape_passes(api):
     assert code == 200, out
     stored = stored_pdf(api, out["doc"]["id"])
     assert b"trailer 1 0 R stream" in stored                                    # the note kept, as text
+
+
+# -- the parser review of #464 ------------------------------------------------------------------------------------------
+
+def test_no_input_is_quadratic_for_the_parser():
+    """A long run of digits and a letter once took the number pattern hours (it held the GIL)."""
+    import time as _time
+    from sizeup import pdfcheck
+    for word in (b"1" * 1_000_000 + b"x", b"1" * 1_000_000, b"." + b"1" * 1_000_000 + b"x"):
+        data = b"%PDF-1.4\n1 0 obj\n" + word + b"\nendobj\n"
+        t0 = _time.perf_counter()
+        assert pdfcheck.check(data).startswith("bad")
+        assert _time.perf_counter() - t0 < 0.5
+    t0 = _time.perf_counter()
+    assert pdfcheck.NUMBER.fullmatch(b"1" * 1_000_000 + b"x") is None           # the pattern itself: linear
+    assert _time.perf_counter() - t0 < 0.5
+    t0 = _time.perf_counter()
+    big = b"%PDF-1.4\n1 0 obj\n" + b"1" * 1_000_000 + b"x\nendobj\n"
+    with pytest.raises(docfiles.Refused):
+        docfiles.recheck_pdf(big, len(big))
+    assert _time.perf_counter() - t0 < 5
+
+
+def test_only_what_pypdf_writes_comments_and_odd_spacing_included():
+    honest = text_pdf(b"Lobby")
+    docfiles.recheck_pdf(honest, len(honest))
+    x = re.search(rb"startxref\n(\d+)\n", honest)
+    for bad in (honest.replace(b"1 0 obj\n", b"1 %x\n0 obj\n", 1),                      # a comment in a head
+                honest.replace(b"/Type /Font", b"/Type /Font %x\n"),                     # a comment in a value
+                honest.replace(b"1 0 obj\n", b"1  0 obj\n", 1),                         # two spaces
+                honest.replace(b"1 0 obj\n", b"01 0 obj\n", 1),                         # a leading zero
+                honest.replace(b"\nendobj\n2 0 obj", b" endobj\n2 0 obj", 1),          # endobj not on its line
+                honest.replace(b"\nendobj\n2 0 obj", b"\nendobj\n\n2 0 obj", 1),     # a gap between objects
+                honest.replace(x.group(0), b"startxref\n+" + x.group(1) + b"\n"),       # startxref with a sign
+                honest.replace(x.group(0), b"startxref\n0" + x.group(1) + b"\n"),       # with a leading zero
+                honest.replace(b"%%EOF\n", b"%%EOF\n%%EOF\n")):                         # something after %%EOF
+        assert bad != honest
+        with pytest.raises(docfiles.Refused):
+            docfiles.recheck_pdf(bad, len(bad))
+
+
+def test_a_slow_check_is_a_refusal_and_the_hub_stays_free(monkeypatch):
+    import time as _time
+    monkeypatch.setattr(docfiles, "RECHECK_S", 0.3)
+    slow = b"%PDF-1.4\n1 0 obj\n[" + b"1 " * 3_000_000 + b"]\nendobj\n"           # millions of tokens: seconds
+    out = {}
+
+    def run():
+        t0 = _time.perf_counter()
+        try:
+            docfiles.recheck_pdf(slow, len(slow))
+            out["r"] = "passed"
+        except docfiles.Refused:
+            out["r"] = "refused"
+        out["s"] = _time.perf_counter() - t0
+    th = threading.Thread(target=run)
+    th.start()
+    n, t0 = 0, _time.perf_counter()
+    while _time.perf_counter() - t0 < 0.2:                                     # the hub's own threads keep running
+        n += 1
+    th.join(10)
+    assert out == {"r": "refused", "s": out["s"]} and out["s"] < 3
+    assert n > 10_000
+    assert docfiles._RENDER._value == 1                                         # the render slot back
