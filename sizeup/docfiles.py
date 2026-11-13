@@ -491,6 +491,9 @@ CLEAN_MAX_BYTES = 64 * 1024 * 1024
 STREAM_AT = re.compile(rb"(?<=[>\s])stream\r?\n")
 OBJ_AT = re.compile(rb"(\d+)\s+(\d+)\s+obj\b")
 XREF_ROW = re.compile(rb"(\d{10}) (\d{5}) ([nf])")
+XREF_SUB = re.compile(rb"\s*(\d+)\s+(\d+)\s*\r?\n")
+REF = re.compile(rb"(?<![\d.])(\d+)\s+(\d+)\s+R\b")
+TRAILER_KEYS = {b"Size", b"Root", b"Info", b"ID"}
 LENGTH = re.compile(rb"/Length\s+(\d+)(\s+\d+\s+R)?")
 END_AT = re.compile(rb"\r?\n?endstream\b")
 
@@ -502,8 +505,12 @@ def recheck_pdf(pdf: bytes, original: int) -> None:
     (written direct by pypdf): text that says "Stair A/AA" or pixels that happen to spell a name are not objects, and
     nothing in them runs. A stream whose length can't be followed to its endstream: refused. And what a reader would
     open must be what was checked: exactly one classic xref table and trailer (no xref stream, no incremental update),
-    every object it names starting at an object head outside every stream, every head found named by it; so no object
-    can hide in a stream's bytes. Refused otherwise too."""
+    every object it names starting at an object head outside every stream, every head found named by it; the table
+    starting at object 0; the trailer only /Size (the highest object named plus one), /Root, /Info and /ID (no /Prev or
+    /XRefStm: an older section a reader would use too; no /Encrypt); and every "N G R" outside the streams' bytes an
+    object the table names, the same generation. So no object can hide in a stream's bytes or be reached any other way.
+    Fail closed: the word "trailer", or something like "1 0 R", inside a kept string (an annotation's text) refuses the
+    file too. Refused otherwise too."""
     bad = Refused("the PDF couldn't be cleaned: print it to a new PDF")
     if len(pdf) > min(CLEAN_MAX_BYTES, 2 * original + (1 << 20)):
         raise bad
@@ -520,7 +527,7 @@ def recheck_pdf(pdf: bytes, original: int) -> None:
         found = list(OBJ_AT.finditer(pdf, i, m.start()))
         if not found:
             raise bad
-        heads.update((h.start(), int(h.group(1))) for h in found)
+        heads.update((h.start(), (int(h.group(1)), int(h.group(2)))) for h in found)
         lm = None
         for lm in LENGTH.finditer(pdf, found[-1].start(), m.start()):
             pass                                      # its dictionary's /Length (the last one before the stream)
@@ -533,7 +540,7 @@ def recheck_pdf(pdf: bytes, original: int) -> None:
         i = tail.end()
     names(pdf[i:])
     outside.append(pdf[i:])
-    heads.update((h.start(), int(h.group(1))) for h in OBJ_AT.finditer(pdf, i))
+    heads.update((h.start(), (int(h.group(1)), int(h.group(2)))) for h in OBJ_AT.finditer(pdf, i))
     # what a reader opens: the one classic cross-reference table (pypdf always writes one, and no incremental update);
     # every object it names starts at a head found outside every stream, and every head found is the one it names
     # (nothing hidden in a stream's bytes can be reached: a compromised child can't smuggle an object past this)
@@ -549,26 +556,45 @@ def recheck_pdf(pdf: bytes, original: int) -> None:
     if any(a <= x < b for a, b in _streams(pdf)):
         raise bad
     j = x + 4
-    named: dict[int, int] = {}
+    named: dict[int, tuple[int, int]] = {}            # offset -> (object number, generation): the in-use entries
+    first_sub, total = None, 0
     while True:
-        sub = re.compile(rb"\s*(\d+)\s+(\d+)\s*\r?\n").match(pdf, j)
+        sub = XREF_SUB.match(pdf, j)
         if sub is None:
             break
         first, count = int(sub.group(1)), int(sub.group(2))
+        first_sub = first if first_sub is None else first_sub
         j = sub.end()
         for k in range(count):
             row = XREF_ROW.match(pdf, j)
             if row is None:
                 raise bad
             if row.group(3) == b"n":
-                named[int(row.group(1))] = first + k
+                named[int(row.group(1))] = (first + k, int(row.group(2)))
             j = row.end()
             while j < len(pdf) and pdf[j:j + 1] in b" \r\n":
                 j += 1
-    if not re.match(rb"\s*trailer\b", pdf[j:j + 64]) or not named:
+        total = max(total, first + count)
+    tr = re.compile(rb"\s*trailer\s*<<(.*?)>>\s*startxref\b", re.S).match(pdf, j)
+    if tr is None or not named or first_sub != 0 or any(num == 0 for num, _ in named.values()):
+        raise bad                                     # the table starts at object 0, the free head
+    if named != dict(heads):                          # each named object at a head outside the streams, and back
         raise bad
-    if named != {off: num for off, num in heads.items()}:   # each named object at a head outside the streams, and back
+    # the trailer: only /Size, /Root, /Info, /ID (no /Prev or /XRefStm: an older section a reader would also use, no
+    # /Encrypt); /Size the highest object named plus one
+    trailer = tr.group(1)
+    keys = {m.group(1) for m in NAME.finditer(trailer)}
+    if not keys <= TRAILER_KEYS or b"Root" not in keys:
         raise bad
+    size = re.search(rb"/Size\s+(\d+)", trailer)
+    if size is None or int(size.group(1)) != max(num for num, _ in named.values()) + 1:
+        raise bad
+    # every reference outside the streams' bytes (the trailer's /Root and /Info included) is to an object in use, the
+    # same generation (a reference to anything else would be found by a reader some other way)
+    live = set(named.values())
+    for m in REF.finditer(rest):
+        if (int(m.group(1)), int(m.group(2))) not in live:
+            raise bad
 
 
 def _streams(pdf: bytes) -> list[tuple[int, int]]:

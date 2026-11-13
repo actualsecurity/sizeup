@@ -1327,3 +1327,75 @@ def test_what_pypdf_writes_passes_the_recheck(api):
         r = docfiles.render(raw, 1)                                             # the recheck runs inside
         assert r["pdf"].startswith(b"%PDF-")
         docfiles.recheck_pdf(r["pdf"], len(raw))
+
+
+def prev_hidden_pdf() -> bytes:
+    """#464 (the hole after the xref check): the trailer's /Prev points into object 9's stream bytes, where an older
+    xref section and trailer name a hidden catalog (1) with an /OpenAction and the JavaScript action (6) it opens. The
+    main table leaves 1 and 6 out."""
+    out, offs = b"%PDF-1.4\n", {}
+    for n, o in ((2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>"),
+                 (3, b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] >>")):
+        offs[n] = len(out)
+        out += f"{n} 0 obj\n".encode() + o + b"\nendobj\n"
+    offs[9] = len(out)
+    one = b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R /OpenAction 6 0 R >>\nendobj\n"
+    six = b"6 0 obj\n<< /S /JavaScript /JS (app.alert(1)) >>\nendobj\n"
+    # the stream's bytes start right after "stream\n": work out where they will land, then write the inner section
+    head_len = len(b"9 0 obj\n<< /Length 0000 >>\nstream\n")
+    data0 = offs[9] + head_len
+    inner_x = data0 + len(one) + len(six)
+    inner = (one + six + b"xref\n1 1\n" + f"{data0:010d} 00000 n \n".encode() + b"6 1\n"
+             + f"{data0 + len(one):010d} 00000 n \n".encode() + b"trailer\n<< /Size 10 /Root 1 0 R >>\n")
+    out += b"9 0 obj\n<< /Length " + f"{len(inner):04d}".encode() + b" >>\nstream\n" + inner + b"\nendstream\nendobj\n"
+    assert out.index(b"xref", offs[9]) == inner_x
+    xref = len(out)
+    rows = [b"0000000000 65535 f \n"] + [(f"{offs[n]:010d} 00000 n \n" if n in offs else "0000000000 65535 f \n").encode()
+                                         for n in range(1, 10)]
+    out += b"xref\n0 10\n" + b"".join(rows)
+    return out + f"trailer\n<< /Size 10 /Root 1 0 R /Prev {inner_x} >>\nstartxref\n{xref}\n%%EOF\n".encode()
+
+
+def test_the_whole_class_of_hidden_sections_and_references_is_refused():
+    data = prev_hidden_pdf()
+    from pypdf import PdfReader
+    assert "/OpenAction" in PdfReader(io.BytesIO(data)).trailer["/Root"]          # a reader uses the hidden catalog
+    with pytest.raises(docfiles.Refused):
+        docfiles.recheck_pdf(data, len(data))
+    honest = text_pdf(b"Stair A/AA")
+    docfiles.recheck_pdf(honest, len(honest))
+    tr = re.search(rb"trailer\n<< (.*?) >>", honest)
+    size = int(re.search(rb"/Size (\d+)", honest).group(1))
+    for extra in (b" /Prev 9", b" /XRefStm 9", b" /Encrypt 2 0 R", b" /Example 1"):     # the trailer allow-list
+        bad = honest.replace(tr.group(0), tr.group(0)[:-3] + extra + b" >>")
+        with pytest.raises(docfiles.Refused):
+            docfiles.recheck_pdf(bad, len(bad))
+    for bad in (honest.replace(tr.group(0), tr.group(0)[:-3] + b" /Info 99 0 R >>"),            # dangling
+                honest.replace(b"/Parent 2 0 R", b"/Parent 2 0 R /Example 7 0 R"),             # dangling, in a page
+                honest.replace(b"/Parent 2 0 R", b"/Parent 2 3 R"),                             # the wrong generation
+                honest.replace(f"/Size {size}".encode(), f"/Size {size + 1}".encode()),         # the wrong /Size
+                honest.replace(b"xref\n0 ", b"xref\n1 ")):                                    # not from object 0
+        assert bad != honest
+        with pytest.raises(docfiles.Refused):
+            docfiles.recheck_pdf(bad, len(bad))
+
+
+@pytest.mark.skipif(not HAVE_PDFIUM, reason="pypdf / pypdfium2 not installed")
+def test_honest_pypdf_output_still_passes_the_whole_recheck(api):
+    import random
+    w, h = 512, 1024
+    px = bytearray(random.Random(11).randbytes(w * h))
+    px[100:110] = b"9 0 R /JS "
+    content = b"q 200 0 0 400 0 0 cm /Im1 Do Q"
+    scan = _assemble([b"<< /Type /Catalog /Pages 2 0 R >>", b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+                      b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 400] /Resources << /XObject << /Im1 5 0 R >> >> "
+                      b"/Contents 4 0 R >>",
+                      b"<< /Length " + str(len(content)).encode() + b" >>\nstream\n" + content + b"\nendstream",
+                      b"<< /Type /XObject /Subtype /Image /Width " + str(w).encode() + b" /Height " + str(h).encode()
+                      + b" /ColorSpace /DeviceGray /BitsPerComponent 8 /Length " + str(len(px)).encode()
+                      + b" >>\nstream\n" + bytes(px) + b"\nendstream"])
+    for raw in (pdf(pages=3), text_pdf(b"Stair A/AA"), scan):
+        r = docfiles.render(raw, 1)                                             # the recheck runs inside
+        docfiles.recheck_pdf(r["pdf"], len(raw))
+    code, out = upload(api, scan, kind="inspection", title="Scan", floor="")
+    assert code == 200, out
