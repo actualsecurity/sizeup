@@ -7,7 +7,9 @@ hub has it, so a dropped internet link or a hub redeploy loses nothing.
                              on it, so a new outbox (file deleted) starts over instead of being skipped
 
 Bounded: queued audio over max_audio_bytes drops the OLDEST audio first (the event stays, marked
-audio_dropped); metadata (transcripts, pages, radio IDs) is never dropped.
+audio_dropped); metadata (transcripts, pages, radio IDs) is never dropped. Context audio (#409: another P25
+system's clips, add(context=True)) has its own smaller budget (CONTEXT_SHARE of the limit) and goes first when the
+whole is over: a hub outage never costs a fire clip for a police one.
 """
 
 from __future__ import annotations
@@ -18,6 +20,8 @@ import sqlite3
 import threading
 import time
 from pathlib import Path
+
+CONTEXT_SHARE = 0.2
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS outbox (
@@ -48,6 +52,8 @@ class Outbox:
         self.db.execute("PRAGMA journal_mode = WAL")
         self.db.execute("PRAGMA synchronous = NORMAL")
         self.db.executescript(SCHEMA)
+        if "context" not in {r[1] for r in self.db.execute("PRAGMA table_info(outbox)")}:
+            self.db.execute("ALTER TABLE outbox ADD COLUMN context INTEGER NOT NULL DEFAULT 0")
         row = self.db.execute("SELECT value FROM meta WHERE key = 'epoch'").fetchone()
         if row is None:
             self.db.execute("INSERT INTO meta (key, value) VALUES ('epoch', ?)", (secrets.token_hex(8),))
@@ -55,13 +61,33 @@ class Outbox:
         self.epoch: str = row[0]
         self.audio_bytes = int(self.db.execute("SELECT COALESCE(SUM(LENGTH(audio)), 0) FROM outbox").fetchone()[0])
         self.dropped_audio = 0          # this run: events whose audio was dropped to stay under the limit
+        self.context_bytes = int(self.db.execute("SELECT COALESCE(SUM(LENGTH(audio)), 0) FROM outbox WHERE context = 1").fetchone()[0])
 
-    def add(self, kind: str, data: dict, audio: bytes | None = None, at: float | None = None) -> int:
+    def _drop_context(self, limit: int, whole: bool) -> None:
+        """Context audio, oldest first, until it is inside its own budget (whole: until the whole outbox is too)."""
+        while self.context_bytes > limit or (whole and self.audio_bytes > self.max_audio_bytes and self.context_bytes > 0):
+            old = self.db.execute("SELECT seq, LENGTH(audio) FROM outbox WHERE audio IS NOT NULL AND context = 1 "
+                                  "ORDER BY seq LIMIT 20").fetchall()
+            if not old:
+                self.context_bytes = 0
+                return
+            for seq, n in old:
+                self.db.execute("UPDATE outbox SET audio = NULL, audio_dropped = 1 WHERE seq = ?", (seq,))
+                self.audio_bytes -= n
+                self.context_bytes -= n
+                self.dropped_audio += 1
+                if self.context_bytes <= limit and not (whole and self.audio_bytes > self.max_audio_bytes):
+                    return
+
+    def add(self, kind: str, data: dict, audio: bytes | None = None, at: float | None = None, context: bool = False) -> int:
         with self._lock:
-            cur = self.db.execute("INSERT INTO outbox (at, kind, data, audio) VALUES (?, ?, ?, ?)",
+            cur = self.db.execute("INSERT INTO outbox (at, kind, data, audio, context) VALUES (?, ?, ?, ?, ?)",
                                   (time.time() if at is None else at, kind, json.dumps(data, separators=(",", ":"), default=_plain),
-                                   audio))
+                                   audio, int(bool(context))))
             self.audio_bytes += len(audio or b"")
+            if context:
+                self.context_bytes += len(audio or b"")
+            self._drop_context(int(self.max_audio_bytes * CONTEXT_SHARE), whole=True)
             while self.audio_bytes > self.max_audio_bytes:
                 old = self.db.execute("SELECT seq, LENGTH(audio) FROM outbox WHERE audio IS NOT NULL "
                                       "ORDER BY seq LIMIT 20").fetchall()
@@ -95,6 +121,7 @@ class Outbox:
         with self._lock:
             n = self.db.execute("DELETE FROM outbox WHERE seq <= ?", (int(upto),)).rowcount
             self.audio_bytes = int(self.db.execute("SELECT COALESCE(SUM(LENGTH(audio)), 0) FROM outbox").fetchone()[0])
+            self.context_bytes = int(self.db.execute("SELECT COALESCE(SUM(LENGTH(audio)), 0) FROM outbox WHERE context = 1").fetchone()[0])
             return n
 
     def pending(self) -> tuple[int, float | None]:

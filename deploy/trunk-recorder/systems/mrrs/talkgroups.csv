@@ -1,0 +1,21 @@
+Decimal,Hex,Alpha Tag,Mode,Description,Tag,Category,Priority,Tier,Service,Department
+9211,23fb,PD Dispatch,T,"Port Chester / Rye / Rye Brook PD dispatch",Police,MRRS,1,alert,police,
+9212,23fc,PD Tac,T,"Port Chester / Rye / Rye Brook PD tactical",Police,MRRS,2,text,police,
+9213,23fd,PD Secure,TE,"Port Chester / Rye / Rye Brook PD secure",Police,MRRS,3,activity,police,
+9570,2562,PC-Rye EMS,T,"Port Chester / Rye / Rye Brook EMS (secondary: primary EMS is on the county system)",EMS,MRRS,1,alert,ems,
+9563,255b,Harrison PD-EMS,T,"Harrison PD / EMS dispatch",Police,MRRS,2,text,police,Harrison PD
+9564,255c,Harrison PD Tac,T,"Harrison PD tactical",Police,MRRS,3,record,police,Harrison PD
+9121,23a1,MNR Fire Brigade,T,"Metro-North Fire Brigade dispatch",Metro-North,MRRS,2,text,transit,Metro-North
+9122,23a2,MNR Fire Brigade Tac,T,"Metro-North Fire Brigade tactical",Metro-North,MRRS,3,record,transit,Metro-North
+9127,23a7,MNR Fire Marshal,T,"Metro-North Fire Marshal dispatch",Metro-North,MRRS,3,record,transit,Metro-North
+9128,23a8,MNR OEM,T,"Metro-North OEM dispatch",Metro-North,MRRS,2,text,transit,Metro-North
+9000,2328,MTA PD Systemwide,T,"MTA PD systemwide",MTA Police,MRRS,3,record,police,MTA PD
+9015,2337,MTA PD D8,T,"MTA PD District 8 dispatch",MTA Police,MRRS,3,record,police,MTA PD
+9048,2358,MTA PD D6-7-11,T,"MTA PD Districts 6 / 7 / 11 dispatch",MTA Police,MRRS,2,text,police,MTA PD
+9049,2359,MTA PD D6-7-11 Tac 1,T,"MTA PD Districts 6 / 7 / 11 tactical",MTA Police,MRRS,3,record,police,MTA PD
+9071,236f,MTA PD D6-7-11 Tac 2,T,"MTA PD Districts 6 / 7 / 11 tactical",MTA Police,MRRS,3,record,police,MTA PD
+9050,235a,MTA PD Secure,TE,"MTA PD secure",MTA Police,MRRS,3,activity,police,MTA PD
+9406,24be,Regional Emergency,T,"NYS regional emergency (interop)",Interop,MRRS,2,text,other,
+6091,17cb,NYS Watch Center,T,"NYS Watch Center",Interop,MRRS,3,record,other,
+8000,1f40,NYSP Interop,T,"NYSP interop",Interop,MRRS,3,record,police,
+8002,1f42,LE Interop,T,"Law enforcement interop",Interop,MRRS,3,record,police,

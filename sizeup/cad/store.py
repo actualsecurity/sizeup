@@ -219,6 +219,15 @@ CREATE TABLE IF NOT EXISTS radio_traffic (
   emergency INTEGER NOT NULL DEFAULT 0, -- the radio's emergency button (P25 call JSON, MDC-1200, FleetSync: #128)
   evidence TEXT NOT NULL DEFAULT '',    -- an emergency's raw P25 call record (trunk-recorder's JSON, JSON), for audit
   kept TEXT NOT NULL DEFAULT '',        -- why it was kept on a talkgroup switched off: emergency (the window, #128)
+  -- its source, by its system (#409, #415, sizeup/sourcekeys.py): talkgroup numbers repeat between P25 systems
+  source TEXT NOT NULL DEFAULT '',      -- p25:<system>:<tg> | fm:<label> | air:<label>
+  system TEXT NOT NULL DEFAULT '',      -- westchester | mrrs | analog | airband
+  "group" TEXT NOT NULL DEFAULT '',     -- the talkgroup file's group (Police, Fire/EMS ...)
+  service TEXT NOT NULL DEFAULT '',     -- fire | police | ems | transit | air | other
+  ours INTEGER NOT NULL DEFAULT 0,      -- in "Our calls" (never another system's)
+  dept TEXT NOT NULL DEFAULT '',        -- the talker's department (#412)
+  tier TEXT NOT NULL DEFAULT '',        -- another system's talkgroup: alert | text | record (sizeup/tiers.py)
+  safety TEXT NOT NULL DEFAULT '',      -- scene safety (#411): '' | suggested | confirmed | dismissed
   updated_at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS radio_traffic_start ON radio_traffic(start);
@@ -510,6 +519,29 @@ class Store:
                 self.db.execute(f"ALTER TABLE radio_traffic ADD COLUMN {col} TEXT NOT NULL DEFAULT ''")
         if tcols and "mhz" not in tcols:                  # the frequency an airband row was heard on (#260: NY Approach
             self.db.execute("ALTER TABLE radio_traffic ADD COLUMN mhz REAL")   # changes by the time of day), 2026-11-06
+        # Every row's source, qualified by its system (#409, #415: talkgroup numbers repeat between P25 systems), 2026-11-10.
+        # "group" is the talkgroup file's; ours: in "Our calls"; dept / safety: for #412 / #411 (nothing writes them yet).
+        for col, kind in (("source", "TEXT NOT NULL DEFAULT ''"), ("system", "TEXT NOT NULL DEFAULT ''"),
+                          ('"group"', "TEXT NOT NULL DEFAULT ''"), ("service", "TEXT NOT NULL DEFAULT ''"),
+                          ("ours", "INTEGER NOT NULL DEFAULT 0"), ("dept", "TEXT NOT NULL DEFAULT ''"),
+                          ("tier", "TEXT NOT NULL DEFAULT ''"), ("safety", "TEXT NOT NULL DEFAULT ''")):
+            if tcols and col.strip('"') not in tcols:
+                self.db.execute(f"ALTER TABLE radio_traffic ADD COLUMN {col} {kind}")
+        if tcols:
+            self.db.execute("CREATE INDEX IF NOT EXISTS radio_traffic_source_start ON radio_traffic(source, start)")
+        if tcols and self.db.execute("SELECT 1 FROM radio_traffic WHERE source = '' LIMIT 1").fetchone():
+            # The rows from before (source ''): all the county system's (the only one there was), or an analog
+            # channel's (an airband row is the one with its frequency, #260; the airband rows from before that are
+            # put right by the channel's label, Comms.fix_air). Every open, only the rows still without one: a
+            # migration cut short is finished by the next start.
+            from sizeup.sourcekeys import COUNTY
+            self.db.execute("UPDATE radio_traffic SET system = ?, source = 'p25:' || ? || ':' || talkgroup "
+                            "WHERE source = '' AND talkgroup IS NOT NULL", (COUNTY, COUNTY))
+            self.db.execute("UPDATE radio_traffic SET system = 'airband', service = 'air', source = 'air:' || channel "
+                            "WHERE source = '' AND talkgroup IS NULL AND mhz IS NOT NULL")
+            self.db.execute("UPDATE radio_traffic SET system = 'analog', service = 'fire', ours = 1, "
+                            "source = 'fm:' || channel WHERE source = '' AND talkgroup IS NULL AND mhz IS NULL")
+            self.migrated.append("radio_traffic.source (every transmission's source, by its system)")
         radcols = {r["name"] for r in self.db.execute("PRAGMA table_info(radios)")}
         if radcols and "last_channel" not in radcols:        # where a radio was last heard (#163), 2026-10-14
             self.db.execute("ALTER TABLE radios ADD COLUMN last_channel TEXT NOT NULL DEFAULT ''")

@@ -910,6 +910,33 @@ with open(dst + ".tmp", "w") as f:
 os.replace(dst + ".tmp", dst)       # (replaces whatever is there, a link included: never written through)
 PY
   as_user mkdir -p -m 0750 "$STATE/captures/p25" "$STATE/captures/p25-tmp" "$STATE/captures/clips"
+  # The other P25 systems (#409: deploy/trunk-recorder/systems/<name>/, sizeup/radio/systems.py), each in its own
+  # directory under trunk-recorder's: its config.json (capture paths absolute, under $STATE) and talkgroups.csv.
+  # Nothing of them runs until Settings > Radios gives one a dongle (trunkrecd.py SystemSupervisor).
+  if [ -d "$rel/deploy/trunk-recorder/systems" ]; then
+    for sysdir in "$rel"/deploy/trunk-recorder/systems/*/; do
+      [ -f "$sysdir/config.json" ] || continue
+      sysname=$(basename "$sysdir")
+      case "$sysname" in *[!a-z0-9_-]*|'') continue ;; esac
+      as_user mkdir -p -m 0755 "$TR_DIR/systems/$sysname"
+      as_user rm -f "$TR_DIR/systems/$sysname/talkgroups.csv"
+      as_user install -m 0644 "$sysdir/talkgroups.csv" "$TR_DIR/systems/$sysname/talkgroups.csv"
+      as_user python3 - "$sysdir/config.json" "$TR_DIR/systems/$sysname/config.json" "$STATE/captures" "$sysname" <<'PY'
+import json, os, sys
+src, dst, captures, name = sys.argv[1:5]
+c = json.load(open(src))
+c["captureDir"] = f"{captures}/p25-{name}"
+c["tempDir"] = f"{captures}/p25-{name}-tmp"
+for s in c.get("systems", []):
+    s["talkgroupsFile"] = "talkgroups.csv"
+    s["unitScript"] = "../../unit-event.sh"
+with open(dst + ".tmp", "w") as f:
+    json.dump(c, f, indent=2)
+os.replace(dst + ".tmp", dst)
+PY
+      as_user mkdir -p -m 0750 "$STATE/captures/p25-$sysname" "$STATE/captures/p25-$sysname-tmp"
+    done
+  fi
   # The builds this release was staged with, then the release itself: renames, nothing rebuilt.
   while IFS= read -r pair; do
     case "${pair%%=*}" in rtl-sdr|trunk-recorder|whisper|readsb) ;; *) continue ;; esac

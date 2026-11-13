@@ -66,12 +66,15 @@ import re
 import time
 from datetime import datetime
 
+from sizeup import sourcekeys as sources
 from sizeup.cad import airport
 from sizeup.cad.radios import is_dispatcher
 from sizeup.cad.store import TZ
 
 TURN = re.compile(r"^(?P<call>.+)-t(?P<k>\d+)$")
 NOTES = "Notes"          # the /comms "channel" of event notes tagged with a unit
+ACTIVITY_RADIOS_S = 7 * 24 * 3600    # radio_activity: which radios keyed is kept this long (the counts longer)
+ACTIVITY_KEEP_S = 90 * 24 * 3600     # radio_activity: its per-minute counts kept this long
 # Transmissions on no event: their transcripts and metadata kept a year by default (90 days before #414), per channel /
 # talkgroup in Settings > System > Audio retention ("transcript_retention"), never shorter than their audio
 # ("audio_retention"); linked ones: always; a record (an emergency, a keep, an alarm) as long as the audio bucket keeps
@@ -116,6 +119,16 @@ CREATE TABLE IF NOT EXISTS radio_link_kept (
   operator TEXT NOT NULL DEFAULT '',
   PRIMARY KEY (traffic_id, incident_id)
 );
+-- Activity per source per minute (#409, #415): an encrypted talkgroup's key-ups are only ever here (never a
+-- transmission row: nothing of it is recorded), with the radio IDs that keyed; every other source's are counted too.
+CREATE TABLE IF NOT EXISTS radio_activity (
+  source TEXT NOT NULL,                 -- p25:<system>:<tg> | fm:<label> | air:<label> (sizeup/sourcekeys.py)
+  minute INTEGER NOT NULL,              -- unix time // 60
+  calls INTEGER NOT NULL DEFAULT 0,
+  seconds REAL NOT NULL DEFAULT 0,
+  radios TEXT NOT NULL DEFAULT '',      -- radio IDs heard that minute, comma-separated (encrypted sources)
+  PRIMARY KEY (source, minute)
+);
 """
 # A link that keeps its transmission: any but an unconfirmed mention / fireground one
 SURE_LINK = ("(l.why NOT IN ('mention', 'fireground') OR EXISTS (SELECT 1 FROM radio_link_kept k "
@@ -137,6 +150,9 @@ class Comms:
         self.tactical, self.incident_tgs, self.paging = set(tactical), set(incident_tgs), set(paging)
         self.airport_tgs = set(airport_tgs)      # the Airport Incident talkgroup(s): an open Airport event's (#87)
         self.rev = 0            # bumped on every new or changed transmission (the /comms page polls it)
+        # Another P25 system's rows (#409) are only ever read out for a signed-in person (sourcekeys.may_see_context):
+        # True here only when the server verifies every reader (the hub behind Access), for the state all share
+        self.context_broadcast = False
         # The airband rows' ATC talker (sizeup/atc_talkers.py AtcTalkers.decorate, #252): set by the CAD; rows in place
         self.atc = None
         self.fix = None                 # rows -> rows: the status hints' decorate (sizeup/cad/statushints.py)
@@ -183,6 +199,16 @@ class Comms:
             ev = evidence_json(t.get("evidence"))
             mhz = t.get("mhz")                  # the frequency heard on (an airband row, #260); kept when not sent again
             mhz = round(float(mhz), 4) if isinstance(mhz, (int, float)) and not isinstance(mhz, bool) and mhz > 0 else None
+            # its source, by its system (#409 / #415: sizeup/sourcekeys.py); another P25 system's is context only
+            system = str(t.get("system") or "")
+            other = bool(system) and p25 and system != sources.COUNTY
+            skey = str(t.get("source_key") or "") or sources.of_row(t.get("source") or "", t.get("talkgroup"), system,
+                                                                    air=mhz is not None)
+            system = system or (sources.COUNTY if p25 else "airband" if mhz is not None else "analog")
+            src = (skey, system, str(t.get("group") or "")[:60], str(t.get("service") or "")[:16],
+                   int(bool(t.get("ours")) and not other), str(t.get("dept") or "")[:60], str(t.get("tier") or "")[:16])
+            disp = 0 if other else disp          # "60 Ctrl ..." is the county's dispatcher, never another system's
+            rigs = [] if other else rigs
             vals = (call_id, turn, start, float(t.get("end") or start), t.get("source") or "", t.get("talkgroup"),
                     talker, t.get("radio_id") or "", ", ".join(rigs), disp, t.get("text") or "", t.get("status") or "",
                     t.get("model") or "", tones, t.get("voice_at"), seq, note, int(bool(t.get("emergency"))),
@@ -193,11 +219,21 @@ class Comms:
                            "voice_at = ?, tone_seq = ?, id_note = ?, emergency = MAX(emergency, ?), "
                            "kept = COALESCE(NULLIF(?, ''), kept), evidence = COALESCE(NULLIF(?, ''), evidence), "
                            "mhz = COALESCE(?, mhz), updated_at = ? WHERE id = ?", (*vals, tid))
+                db.execute('UPDATE radio_traffic SET source = ?, system = ?, "group" = ?, service = ?, ours = ?, dept = ?, '
+                           "tier = ? WHERE id = ?", (*src, tid))
             else:
                 db.execute("INSERT INTO radio_traffic (call_id, turn, start, end, channel, talkgroup, talker, radio_id, rig, "
                            "dispatcher, text, status, model, tones, voice_at, tone_seq, id_note, emergency, kept, evidence, "
                            "mhz, updated_at, id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                            (*vals, tid))
+                db.execute('UPDATE radio_traffic SET source = ?, system = ?, "group" = ?, service = ?, ours = ?, dept = ?, '
+                           "tier = ? WHERE id = ?", (*src, tid))
+                self._count(db, skey, start, max(0.0, float(t.get("end") or start) - start))
+            if other:
+                # Another system's units never put traffic on our incidents by a rule (#415): no unit, airport or
+                # dispatcher link. Only a person's own link does (link()).
+                self.rev += 1
+                return sorted(r[0] for r in db.execute("SELECT incident_id FROM radio_links WHERE traffic_id = ?", (tid,)))
             off = {r[0] for r in db.execute("SELECT incident_id FROM radio_link_exclusions WHERE traffic_id = ?", (tid,))}
             links: dict[int, tuple[str, str]] = {}
             for rig in rigs:
@@ -216,6 +252,82 @@ class Comms:
             self.rev += 1
             out = sorted(r[0] for r in db.execute("SELECT incident_id FROM radio_links WHERE traffic_id = ?", (tid,)))
         self._heard(tid)
+        return out
+
+    @staticmethod
+    def _count(db, source: str, at: float, seconds: float = 0.0, calls: int = 1, radios=()) -> None:
+        """radio_activity: one more call on this source in the minute of `at`."""
+        ids = ",".join(dict.fromkeys(str(x) for x in radios if x))
+        cur = db.execute("SELECT radios FROM radio_activity WHERE source = ? AND minute = ?", (source, int(at // 60))).fetchone()
+        if cur is None:
+            db.execute("INSERT INTO radio_activity (source, minute, calls, seconds, radios) VALUES (?, ?, ?, ?, ?)",
+                       (source, int(at // 60), calls, seconds, ids[:400]))
+            return
+        both = ",".join(dict.fromkeys([x for x in cur[0].split(",") if x] + [x for x in ids.split(",") if x]))
+        db.execute("UPDATE radio_activity SET calls = calls + ?, seconds = seconds + ?, radios = ? WHERE source = ? "
+                   "AND minute = ?", (calls, seconds, both[:400], source, int(at // 60)))
+
+    def fix_air(self, labels) -> int:
+        """Rows of the airband channels logged as analog (from before a row said which it was: no frequency on them):
+        their source, system and service put right, and never "ours". The number changed."""
+        labels = [str(x) for x in labels if x]
+        if not labels:
+            return 0
+        with self.store.tx() as db:
+            return db.execute("UPDATE radio_traffic SET source = 'air:' || channel, system = 'airband', service = 'air', "
+                              f"ours = 0 WHERE talkgroup IS NULL AND system != 'airband' AND channel IN "
+                              f"({','.join('?' * len(labels))})", labels).rowcount
+
+    def activity(self, source: str, minute: int, calls: int, radios=(), seconds: float = 0.0) -> None:
+        """Key-ups on a source that leaves no transmission rows (an encrypted talkgroup, #409): {source, minute,
+        calls, radios} as the station counted them, added to that minute."""
+        if not sources.is_talkgroup(source) or calls <= 0:
+            return
+        with self.store.tx() as db:
+            self._count(db, source, minute * 60.0, seconds, int(calls), radios)
+
+    def activity_rows(self, since: float, source: str = "", limit: int = 2000) -> list[dict]:
+        """[{source, minute, calls, seconds, radios}] since then, newest first (GET /api/cad/comms/activity, admins)."""
+        return self.store.q("SELECT source, minute, calls, seconds, radios FROM radio_activity WHERE minute >= ? "
+                            + ("AND source = ? " if source else "") + "ORDER BY minute DESC LIMIT ?",
+                            (int(since // 60), *([source] if source else []), int(limit)))
+
+    def audio_per_day(self, days: float = 7.0) -> dict[str, float]:
+        """Seconds of audio logged per day, per tier, over the last `days` (the expected storage, sizeup/tiers.py)."""
+        since = self.clock() - days * 86400
+        first = self.store.one("SELECT MIN(start) AS a FROM radio_traffic WHERE tier != '' AND start >= ?", (since,))
+        span = max(3600.0, self.clock() - (first["a"] if first and first["a"] else since)) / 86400
+        return {r["tier"]: (r["s"] or 0.0) / span for r in self.store.q(
+            "SELECT tier, SUM(end - start) AS s FROM radio_traffic WHERE tier != '' AND start >= ? GROUP BY tier", (since,))}
+
+    def context_clips(self, ids: list[str], days: dict[str, float]) -> dict[str, tuple[int, bool]]:
+        """Of these clip ids, another P25 system's (#409): {id: (rank, extended)}. rank: what goes first when its audio
+        has to (record 0, text 1, alert 2); extended: its tier's retention still keeps it. A clip on a CAD event, with
+        an alarm or an emergency is a record like any other, not context: left out (kept_for_events)."""
+        rank = {"record": 0, "text": 1, "alert": 2}
+        tiered: dict[str, str] = {}
+        for k in range(0, len(ids), 500):
+            chunk = list(ids[k:k + 500])
+            tiered.update((r["id"], r["tier"]) for r in self.store.q(
+                f"SELECT id, tier FROM radio_traffic WHERE id IN ({','.join('?' * len(chunk))}) AND system NOT IN "
+                "('', 'analog', 'airband', ?) AND talkgroup IS NOT NULL", (*chunk, sources.COUNTY)))
+        if not tiered:
+            return {}
+        record = self.kept_for_events(list(tiered))
+        ext = self.kept_for_tier([i for i in tiered if i not in record], days)
+        return {i: (rank.get(t, 0), i in ext) for i, t in tiered.items() if i not in record}
+
+    def kept_for_tier(self, ids: list[str], days: dict[str, float]) -> set[str]:
+        """Of these clip ids, the ones a tier's own retention still keeps ([storage] tier_keep_days, sizeup/tiers.py)."""
+        out: set[str] = set()
+        now = self.clock()
+        keep = {t: d for t, d in days.items() if d and d > 0}
+        for k in range(0, len(ids), 500):
+            chunk = list(ids[k:k + 500])
+            for tier, d in keep.items():
+                out.update(r["id"] for r in self.store.q(
+                    f"SELECT id FROM radio_traffic WHERE id IN ({','.join('?' * len(chunk))}) AND tier = ? AND start >= ?",
+                    (*chunk, tier, now - d * 86400)))
         return out
 
     def _heard(self, tid: str) -> None:
@@ -296,9 +408,9 @@ class Comms:
         got: set[int] = set()
         with self.store.tx() as db:
             rows = db.execute("SELECT id, call_id, turn, start, talkgroup, dispatcher FROM radio_traffic WHERE rig = '' AND "
-                              + ("talkgroup IS NULL" if fm else "talkgroup IS NOT NULL")
+                              + ("talkgroup IS NULL" if fm else "talkgroup IS NOT NULL AND system IN ('', ?)")
                               + " AND (', ' || radio_id || ', ') LIKE ? ORDER BY start DESC LIMIT ?",
-                              (f"%, {rid}, %", RELINK_MAX)).fetchall()
+                              (*([] if fm else [sources.COUNTY]), f"%, {rid}, %", RELINK_MAX)).fetchall()
             for r in rows:
                 db.execute("UPDATE radio_traffic SET rig = ?, id_note = '', updated_at = ? WHERE id = ?",
                            (unit, self.clock(), r["id"]))
@@ -363,8 +475,9 @@ class Comms:
             db.execute("DELETE FROM radio_link_exclusions WHERE traffic_id = ? AND incident_id = ?", (tid, iid))
             db.execute("INSERT INTO radio_links (traffic_id, incident_id, why, unit) VALUES (?, ?, 'manual', ?)",
                        (tid, iid, operator))
-            said = (t["text"] or "").strip()
-            self.store._event(db, iid, "radio", f"Radio traffic added: {_when(t)} {_who(t)} on {t['channel']}"
+            # (another P25 system's row, #419: when and which channel only; the timeline is read without a sign-in)
+            said = "" if sources.is_context(t) else (t["text"] or "").strip()
+            self.store._event(db, iid, "radio", f"Radio traffic added: {_row_line(t)}"
                               + (f": \u201c{said[:160]}{'…' if len(said) > 160 else ''}\u201d" if said else ""), operator)
             self.rev += 1
         return {"linked": True, "why": "manual"}
@@ -387,7 +500,7 @@ class Comms:
                 db.execute("INSERT OR REPLACE INTO radio_link_exclusions (traffic_id, incident_id, at, operator, why, unit) "
                            "VALUES (?, ?, ?, ?, ?, ?)", (tid, iid, self.clock(), operator, old["why"], old["unit"]))
             name = re.sub(r"\s*<[^<>\s]+@[^<>\s]+>$", "", operator).strip()
-            self.store._event(db, iid, "radio", f"Radio {_when(t)} {_who(t)} on {t['channel']} removed from this event"
+            self.store._event(db, iid, "radio", f"Radio {_row_line(t)} removed from this event"
                               + (f" (auto: {why_text(old['why'], old['unit'])})" if auto else "")
                               + (f" by {name}" if name else ""), operator)
             self.rev += 1
@@ -458,12 +571,15 @@ class Comms:
         chs = sorted(set(tpol.ch) | set(apol.ch))
         days = lambda ch, tg: max(tpol.keep_days(ch, tg), apol.keep_days(ch, tg))   # noqa: E731
         no_ch = f"channel NOT IN ({','.join('?' * len(chs))})" if chs else "1"
-        no_tg = f"(talkgroup IS NULL OR talkgroup NOT IN ({','.join('?' * len(tgs))}))" if tgs else "1"
+        # "tg:<n>" is ours: another P25 system's row (#409, the same number is another talkgroup there) goes by its channel
+        ours = f"system IN {sources.OURS_SQL}"
+        no_tg = (f"(talkgroup IS NULL OR NOT {ours} OR talkgroup NOT IN ({','.join('?' * len(tgs))}))"
+                 if tgs else "1")
         out = []
         for tg in tgs:
             for ch in chs:
-                out.append(("talkgroup = ? AND channel = ?", (tg, ch), days(ch, tg)))
-            out.append((f"talkgroup = ? AND {no_ch}", (tg, *chs), days("", tg)))
+                out.append((f"talkgroup = ? AND {ours} AND channel = ?", (tg, ch), days(ch, tg)))
+            out.append((f"talkgroup = ? AND {ours} AND {no_ch}", (tg, *chs), days("", tg)))
         for ch in chs:
             out.append((f"channel = ? AND {no_tg}", (ch, *tgs), days(ch, None)))
         out.append((f"{no_tg} AND {no_ch}", (*tgs, *chs), days("", None)))
@@ -476,6 +592,10 @@ class Comms:
         per channel / talkgroup group ((talkgroup, start), (channel, start), (start)), deleted PRUNE_BATCH rows a
         transaction (the CAD's write lock held only that long), pause_s apart. The number deleted."""
         now = self.clock()
+        with self.store.tx() as db:                    # radio_activity (encrypted talkgroups' counts): its own ages
+            db.execute("DELETE FROM radio_activity WHERE minute < ?", (int((now - ACTIVITY_KEEP_S) // 60),))
+            db.execute("UPDATE radio_activity SET radios = '' WHERE radios != '' AND minute < ?",
+                       (int((now - ACTIVITY_RADIOS_S) // 60),))
         tpol, apol = self.policies()
         alarms = bool(self.store.q("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'alarms'"))
         record = "emergency = 1 OR kept != ''" + (" OR id IN (SELECT traffic_id FROM alarms)" if alarms else "")
@@ -551,7 +671,8 @@ class Comms:
         rows = self.store.q(f"SELECT t.*, l.incident_id, l.why, l.unit AS link_unit, EXISTS (SELECT 1 FROM radio_link_kept k "
                             f"WHERE k.traffic_id = l.traffic_id AND k.incident_id = l.incident_id) AS link_kept FROM radio_links l "
                             f"JOIN radio_traffic t ON t.id = l.traffic_id WHERE l.incident_id IN ({','.join('?' * len(ids))}) "
-                            f"ORDER BY t.start DESC", ids)
+                            + ("" if self._sees_context() else f"AND t.system IN {sources.OURS_SQL} ")
+                            + "ORDER BY t.start DESC", ids)
         for r in rows:
             lst = out[r.pop("incident_id")]
             if len(lst) < limit:
@@ -638,13 +759,15 @@ class Comms:
         if w is not None:
             where, args = w
             fm = "t.talkgroup IS NULL" + (f" AND t.channel NOT IN ({','.join('?' * len(not_main))})" if not_main else "")
-            for cond, extra in [(fm, list(not_main))] + [("t.talkgroup = ?", [tg]) for tg in main_tgs]:
+            county = f"+t.system IN ('', '{sources.COUNTY}')"      # (as view=ours will: never another system's number)
+            for cond, extra in [(fm, list(not_main))] + [(f"t.talkgroup = ? AND {county}", [tg]) for tg in main_tgs]:
                 main += self._fetch(where + [cond], args + extra, main_limit)
             # +t.talkgroup: no index on it, so the newest-first walk stays on the start (or channel) index; never NULL
             # inside the NOT (NULL IN (...) is NULL, and NOT NULL would drop an airband row from both sections)
             mine = "+t.talkgroup IS NULL" + (f" AND +t.channel NOT IN ({','.join('?' * len(not_main))})" if not_main else "")
             if main_tgs:
-                mine = f"({mine}) OR (+t.talkgroup IS NOT NULL AND +t.talkgroup IN ({','.join('?' * len(main_tgs))}))"
+                mine = (f"({mine}) OR (+t.talkgroup IS NOT NULL AND +t.talkgroup IN ({','.join('?' * len(main_tgs))}) "
+                        f"AND {county})")
             other = self._fetch(where + [f"NOT ({mine})"], args + list(not_main) + main_tgs, limit)
         main = sorted(main, key=lambda r: -r["start"])[:main_limit]
         self._decorate(main + other)
@@ -699,7 +822,12 @@ class Comms:
             where.append("(" + " OR ".join([RIG_LIKE.format(col="t.rig")] * len(pats)) + ")")
             args += pats
 
+    def _sees_context(self) -> bool:
+        return sources.may_see_context(self.context_broadcast)
+
     def _fetch(self, where, args, limit) -> list[dict]:
+        if not self._sees_context():
+            where = list(where) + [f"+t.system IN {sources.OURS_SQL}"]     # (+: the walk stays on its index)
         return self.store.q("SELECT t.*, 'radio' AS kind FROM radio_traffic t"
                             + (" WHERE " + " AND ".join(f"({w})" for w in where) if where else "")
                             + " ORDER BY t.start DESC LIMIT ?", (*args, limit))
@@ -867,6 +995,12 @@ def _when(t) -> str:
 
 def _who(t) -> str:
     return t["rig"] or t["talker"] or t["radio_id"] or "radio"
+
+
+def _row_line(t) -> str:
+    """A transmission as an event's timeline names it: "14:02:11 E63 on FG1". Another P25 system's (#419): when and
+    on which channel only, never who (its talker, its radio ID) nor what was said."""
+    return f"{_when(t)} on {t['channel']}" if sources.is_context(t) else f"{_when(t)} {_who(t)} on {t['channel']}"
 
 
 def _like(w: str) -> str:

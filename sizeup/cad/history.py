@@ -40,6 +40,7 @@ from collections import OrderedDict
 from datetime import datetime
 from pathlib import Path
 
+from sizeup import sourcekeys
 from sizeup.cad import addrkey
 from sizeup.cad.store import TZ, CadError
 
@@ -306,7 +307,8 @@ class AddressHistory:
 
     def _index_radio(self, limit: int = BATCH) -> int:
         """Index up to limit queued transcripts: read, repair (outside the lock), then one short write."""
-        rows = self.store.q("SELECT t.rowid AS rid, t.id, t.text, t.alt_text, t.channel, t.talkgroup, t.rig, t.dispatcher "
+        rows = self.store.q("SELECT t.rowid AS rid, t.id, t.text, t.alt_text, t.channel, t.talkgroup, t.rig, t.dispatcher, "
+                            "t.system "
                             "FROM fts_radio_queue q JOIN radio_traffic t ON t.rowid = q.rid ORDER BY q.rid DESC LIMIT ?",
                             (limit,))
         gone = [r["rid"] for r in self.store.q("SELECT q.rid FROM fts_radio_queue q LEFT JOIN radio_traffic t "
@@ -320,7 +322,9 @@ class AddressHistory:
                 fix(shown)                              # the status words put back (statusrepair.py): "fixed_text"
             except Exception as e:  # noqa: BLE001 - the heard text is still indexed
                 self.log(f"CAD history: status repair: {type(e).__name__}")
-        docs = [(r["rid"], "\n".join(x for x in dict.fromkeys((r["text"], r.get("alt_text"), r.get("fixed_text"))) if x))
+        # another P25 system's transcript (#419, context) is never indexed: a search would show its words to anyone
+        docs = [(r["rid"], "" if sourcekeys.is_context(r) else
+                 "\n".join(x for x in dict.fromkeys((r["text"], r.get("alt_text"), r.get("fixed_text"))) if x))
                 for r in shown]
         with self.store.lock:
             db = self.store.db

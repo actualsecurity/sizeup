@@ -1,0 +1,70 @@
+{
+  "ver": 2,
+  "sizeup": {
+    "label": "MRRS",
+    "name": "Metro-25 / MTA MRRS",
+    "jobs": ["MRRS 770", "MRRS 773"],
+    "site": {
+      "name": "Zone 3 Simulcast (southern Westchester)",
+      "wacn": "91FE8",
+      "sysid": ["26D", "26E"],
+      "rfss": 81,
+      "site": 81,
+      "nac": "051",
+      "phase": 2,
+      "source": "RadioReference (community-maintained)"
+    },
+    "reception": {
+      "watch": [9211, 9570],
+      "antenna": "a directional (yagi) antenna toward Harrison, the nearest subsite; no LNA near the 700 MHz cell bands",
+      "caveat": "Some traffic is carried over LTE and never on RF."
+    }
+  },
+  "sources": [
+    {
+      "center": 770312500,
+      "rate": 2400000,
+      "error": 0,
+      "gain": 40,
+      "digitalRecorders": 4,
+      "driver": "osmosdr",
+      "device": "rtl=mrrs-770"
+    },
+    {
+      "center": 773081250,
+      "rate": 2400000,
+      "error": 0,
+      "gain": 40,
+      "digitalRecorders": 4,
+      "driver": "osmosdr",
+      "device": "rtl=mrrs-773"
+    }
+  ],
+  "systems": [
+    {
+      "shortName": "mrrs",
+      "type": "p25",
+      "modulation": "qpsk",
+      "control_channels": [
+        769906250,
+        770181250,
+        770468750,
+        770718750,
+        772481250,
+        773031250,
+        773681250
+      ],
+      "talkgroupsFile": "talkgroups.csv",
+      "recordUnknown": false,
+      "hideUnknownTalkgroups": true,
+      "compressWav": false,
+      "minTransmissionDuration": 0,
+      "transmissionArchive": false,
+      "unitScript": "../../unit-event.sh"
+    }
+  ],
+  "captureDir": "../../../../captures/p25-mrrs",
+  "controlWarnRate": -1,
+  "logLevel": "info",
+  "tempDir": "../../../../captures/p25-mrrs-tmp"
+}

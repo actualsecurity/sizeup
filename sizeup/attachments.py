@@ -58,6 +58,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Iterator
 
+from sizeup.sourcekeys import OURS_SQL, is_context
 from sizeup import aws
 
 RETENTION_S = 365 * 86400
@@ -552,7 +553,7 @@ class Attachments:
             "SELECT l.traffic_id AS tid, l.incident_id AS iid, l.why, l.unit FROM radio_links l "
             "JOIN radio_traffic t ON t.id = l.traffic_id JOIN incidents i ON i.id = l.incident_id "
             "LEFT JOIN attachments a ON a.kind = 'radio' AND a.incident_id = l.incident_id AND a.ref = l.traffic_id "
-            "WHERE t.end < ? AND t.end > ? AND (a.id IS NULL OR (a.status = 'failed' AND a.tries < ? "
+            f"WHERE t.system IN {OURS_SQL} AND t.end < ? AND t.end > ? AND (a.id IS NULL OR (a.status = 'failed' AND a.tries < ? "
             "AND COALESCE(a.retry_at, 0) <= ?)) ORDER BY t.start LIMIT ?",
             (now - SETTLE_S, now - RETENTION_S, TRIES, now, limit))
         n = 0
@@ -576,7 +577,9 @@ class Attachments:
         network's (_transient) never counts against TRIES."""
         s3 = self._need()
         t = self.store.one("SELECT * FROM radio_traffic WHERE id = ?", (tid,))
-        if t is None:
+        if t is None or is_context(t):
+            # another P25 system's clip (#419) is never an attachment, whoever linked it: the store keeps a year under
+            # Object Lock, and context audio has its own short retention behind the sign-in
             return "skipped"
         inc = self._incident(iid)
         now = self.clock()
