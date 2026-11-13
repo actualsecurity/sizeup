@@ -49,6 +49,7 @@ window.SearchView = (() => {
     st.page = Math.max(0, Number(p.get("page")) || 0);
     st.tab = ["notes", "preplan"].includes(p.get("tab")) ? p.get("tab") : st.tab;
     fillLists();
+    sizer();
     for (const k of KEYS) {
       const n = $(INPUT[k]);
       if (n.tagName === "SELECT" && st.q[k] && ![...n.options].some((o) => o.value === st.q[k])) n.append(new Option(st.q[k], st.q[k]));
@@ -218,6 +219,54 @@ window.SearchView = (() => {
     } catch (e) { UI.toast(e.message, "err"); }
   }
 
+  // ---- the map's height: dragged by its bottom edge, like the incident's map (incident-map.js's handle, Panels.separator)
+  // Remembered per viewer: localStorage "sizeup.searchMap" {h} (px, in try/catch); null = the layout's own (cad.css).
+  // Kept within H_MIN px and 85% of the window, again when the window changes. MapLibre's resize() once a frame while
+  // dragging and once after. clampH() is the arithmetic (pure: tests/test_search_map.py).
+  const H_KEY = "sizeup.searchMap", H_MIN = 160, H_MAX_VH = 0.85;
+  function clampH(want, vh) {
+    if (want == null || !Number.isFinite(want) || want <= 0) return null;
+    const hi = Math.max(H_MIN, Math.floor(vh * H_MAX_VH));
+    return Math.round(Math.max(H_MIN, Math.min(hi, want)));
+  }
+  if (typeof document === "undefined") return { clampH, H_KEY, H_MIN, H_MAX_VH };
+
+  function savedH() {
+    try {
+      const v = (JSON.parse(localStorage.getItem(H_KEY) || "{}") || {}).h;
+      return Number.isFinite(v) && v > 0 ? v : null;
+    } catch (_) { return null; }
+  }
+  function rememberH() {
+    try { localStorage.setItem(H_KEY, JSON.stringify({ h: sz.h })); } catch (_) { /* this page view only */ }
+  }
+  const sz = { h: savedH(), sep: null, frame: 0 };
+  const box = () => $("#sv-mapbox");
+  function sizeMap() {
+    const h = clampH(sz.h, innerHeight);
+    if (h == null) box().style.removeProperty("--sv-map-h"); else box().style.setProperty("--sv-map-h", `${h}px`);
+    if (sz.sep) sz.sep.sync();
+  }
+  function mapResize() { if (st.map) { try { st.map.resize(); } catch (_) { /* gone */ } } }
+  function sizer() {                         // panels.js loads after this file: made on the first open, or once loaded
+    if (sz.sep || !window.Panels || !Panels.separator) return;
+    sz.sep = Panels.separator($("#sv-map-h"), {
+      orient: "horizontal", grow: 1, label: "Resize the map", controls: "sv-mapbox",
+      min: () => H_MIN, max: () => Math.max(H_MIN, Math.floor(innerHeight * H_MAX_VH)),
+      value: () => Math.round(box().getBoundingClientRect().height),
+      set: (px, done) => {
+        sz.h = clampH(px, innerHeight);
+        sizeMap();
+        if (done) { rememberH(); mapResize(); }
+        else if (!sz.frame) sz.frame = requestAnimationFrame(() => { sz.frame = 0; mapResize(); });
+      },
+      reset: () => { sz.h = null; rememberH(); sizeMap(); mapResize(); },
+    });
+  }
+  sizeMap();
+  addEventListener("resize", sizeMap);
+  document.addEventListener("DOMContentLoaded", sizer);
+
   // ---- wiring ------------------------------------------------------------------------------------------------------
   $("#sv-filters").addEventListener("submit", (e) => { e.preventDefault(); if (st.tab !== "calls") { st.q.where = $("#sv-where").value.trim(); tab(st.tab); } else submit(0); });
   $("#sv-clear").addEventListener("click", () => { for (const k of KEYS) $(INPUT[k]).value = ""; submit(0); });
@@ -228,5 +277,5 @@ window.SearchView = (() => {
   $("#sv-note-add").addEventListener("click", () => window.AddrHistory.noteForm($("#sv-note-form"), { where: $("#sv-where").value.trim() }, runNotes));
   cad.hooks.push(() => { if (cad.search) fillLists(); });     // the lists and units, once the state has them
 
-  return { open, close };
+  return { open, close, clampH, H_KEY, H_MIN, H_MAX_VH };
 })();

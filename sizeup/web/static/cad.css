@@ -704,8 +704,12 @@
   .sv-table tr.retired { color: var(--dim); }
   .sv-hit b { color: var(--text); }
   .sv-pager { justify-content: center; gap: var(--s-3); }
-  .sv-mapbox { position: relative; block-size: calc(var(--map-h) * 0.75); border-radius: var(--radius);
-               border: var(--bw) solid var(--line); overflow: hidden; }
+  /* its height: the layout's, or what the viewer dragged its bottom edge to (--sv-map-h, search-view.js; the incident
+     map's handle, .dmap-h); the map clips itself so the handle can reach out into the gap */
+  .sv-mapbox { position: relative; block-size: var(--sv-map-h, calc(var(--map-h) * 0.75)); border-radius: var(--radius);
+               border: var(--bw) solid var(--line); }
+  .sv-mapbox > :is(.sv-map, .nomap) { border-radius: calc(var(--radius) - var(--bw)); overflow: hidden; }
+  body.row-dragging .sv-mapbox > :not(.dmap-handle) { pointer-events: none; }
   .sv-map { position: absolute; inset: 0; }
   .sv-table td.num { white-space: nowrap; }
   .sv-notes { display: flex; flex-direction: column; gap: var(--s-2); }
