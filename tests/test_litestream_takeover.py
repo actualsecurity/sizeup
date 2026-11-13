@@ -200,7 +200,7 @@ def test_a_takeover_with_a_big_migration_leaves_the_replica_exactly_the_live_fil
         assert sup.role == "active", sup.events[-5:]
         ev = sup.events
         replicating = next(i for i, e in enumerate(ev) if e.startswith("Litestream replicates"))
-        assert replicating < next(i for i, e in enumerate(ev) if e.startswith("migrated and in S3"))
+        assert replicating < next(i for i, e in enumerate(ev) if e.startswith("migrated, Litestream at"))
         # Litestream started on the promoted files with no state of its own: "behind replica", db_txid 0, the
         # replica exactly where it was promoted from (the expected one; anything else would have been fatal)
         until(lambda: len(env.behind_events) == len(DBS), timeout=10, what="the behind-replica lines")

@@ -2886,19 +2886,58 @@ checkpoints from running under Litestream could be dropped after a `litestream s
 1. The promoted files must be **untouched** since they were verified: no `-wal` / `-shm` / `-journal` beside them,
    the same size, mtime and 100-byte header (`fingerprint`). Else `REFUSED: cad.sqlite was written before
    Litestream replicates it`.
-2. `litestream replicate` starts. For each promoted file `litestream sync -wait` (the control socket) must answer
-   a position **past** the one promoted (Litestream's own first snapshot, of the untouched file) and in S3 (the
-   replica at least there). Else `REFUSED: Litestream's position of … doesn't follow the position promoted`.
+2. `litestream replicate` starts. For each promoted file `litestream sync` (the control socket, no `-wait`) must
+   answer a position **past** the one promoted: Litestream's own first snapshot of the untouched file, read under
+   its read lock (from here every write goes through the WAL it reads). Else `REFUSED: Litestream's position of …
+   doesn't follow the position promoted`. The upload goes on in the background (a release waits for all of it,
+   `sync -wait`): waiting for it here would add the whole snapshot's upload to every takeover.
 3. Litestream's stderr is watched: one `detected database behind replica` per promoted file is expected (no
    local state, `db_txid=0`, the replica exactly at the position promoted). Any other (a local position that isn't
    0, a replica somewhere else) is fatal: `REFUSED: Litestream found … behind its replica`.
 4. Only then does the app migrate (`init`), every page of it through the WAL Litestream reads. Then every file is
-   confirmed in S3 again (new files of a very first start included: Litestream's first sync of a file with no
-   replica is a full snapshot from WAL offset 0) before the gate says `run`.
+   confirmed again (new files of a very first start included: Litestream's first sync of a file with no replica is
+   a full snapshot from WAL offset 0) before the gate says `run`. Each file has its own budget (`REPLICATING_S`,
+   120 s). All three are needed before `init`: `--init-state` opens hub and audio too (`journal_mode = WAL` on a
+   follower's copy writes its header).
+
+**What it costs.** Litestream snapshotted the promoted files at every takeover before too, only after `run`, beside
+the app's start; now that snapshot comes before `init`. Measured with a local file replica (an M-series Mac, NVMe),
+cad 900 MB + audio 275 MB + hub: **~9 s** until Litestream has all three synced locally, ~9.5 s with the upload.
+The snapshot is the whole file (2.2 GB of LTX for two of them: barely compressed). On Fargate (0.5 vCPU, its
+ephemeral disk, S3 at tens of MB/s) expect **~15–30 s** before `init` (an estimate: not measured there), within the
+old connector's overlap (it stays until the new leader serves, at most until 3 s before ECS's SIGKILL at 120 s;
+the drain takes ~20 s and a takeover ~50 s).
 
 A refusal in 2 or 3 SIGKILLs Litestream (no last sync of a file it disagrees with) and releases the lock unclean;
 the task exits 1 and nothing is served from it. A retake (the old task taking its lock back) confirms its own
 Litestream at its release before its app starts.
+
+**A new image whose takeover fails never takes the hub down.** Its Litestream has already put a snapshot in the
+replica (position + 1), so the replica has "moved on" from the old leader's release, which used to stop the old
+leader from taking its lock back:
+
+* **Failed before its app wrote anything** (never told `init`, or its migration raised before writing: every file
+  still at Litestream's first position after the last sync): its release says `"pristine_from": <the positions it
+  promoted>`. The replica then holds nothing but a snapshot of the old leader's own files. The old leader takes the
+  lock back from its own files, Litestream started afresh on them (its local state dropped: a new snapshot of them
+  on top).
+* **Failed after its migration wrote** (autocommit: part of it applied): the replica holds real changes. The old
+  leader takes over **from the replica** like any new task (a full restore, no followers), if ECS leaves it the time
+  (`TAKEBACK_S` 60 s more than a retake needs), and serves until shortly before ECS stops it, as a retake does.
+  This build opens a newer build's half-applied migration (extra columns, indexes, tables:
+  `tests/test_startup_writes.py`). It can't open a newer `user_version` (the store refuses a schema newer than
+  its own): **a migration must not bump `user_version`** unless its rollback is planned.
+* Either way the circuit breaker rolls the deploy back, and the old image's next task takes over from the replica.
+
+**The operator's override.** `SIZEUP_HANDOFF_SKIP_REPLICATION_CHECKS=1` in the hub container's environment skips
+the checks above (untouched files, Litestream's positions, "database behind replica", the followers' clean stop),
+said as a `WARNING` at every takeover and in the supervisor's `/healthz` (`"replication_checks": "skipped"`). The
+order itself (Litestream before `init`) stays. Runbook: a takeover refused by one of these checks → **roll the
+task definition back first** (the old image takes over as before); set the override only if a check is
+demonstrably a false positive, and remove it in the next deploy.
+
+**Litestream's version.** The supervisor says `WARNING: Litestream 0.5.17 is older than 0.5.18 …` at start if the
+image carries an older one, and the Health panel shows it (`litestream`, a warning).
 
 **The staged copy** is checked before it is promoted: its follower must have stopped cleanly (exit 0 on SIGTERM;
 a SIGKILL may have cut an LTX file half-written into it), no `-wal` / `-shm` / `-journal` beside it (a follower
@@ -2909,7 +2948,8 @@ which reads the main file alone).
 the takeover its time (`INIT_S` 300 s) and S3 the rewritten pages (`REPLICATING_S`). Keep it one-time (nothing left
 for the next start: `tests/test_startup_writes.py` fails when a start on an up-to-date database writes more than a
 few pages), and keep big backfills out of the start (in the background, in batches, after "run"). Never run
-`--init-state` on a hub's replicated file by hand. Tests: `tests/test_handoff.py` (the order, every refusal),
+`--init-state` on a hub's replicated file by hand. Tests: `tests/test_handoff.py` (the order, every refusal, a
+failed migration taken back from, the override),
 `tests/test_litestream_takeover.py` (a takeover with the real Litestream and a #419-sized migration: the replica
 restores to exactly the live files; skipped without `litestream` on PATH), `tests/test_deploy_handoff.py`.
 
@@ -2937,6 +2977,11 @@ stays (`litestream restore -txid <old position>` gives the state before), and th
    file (integrity_check, the content), then releases the lock with the new position. Any failure: the lock is
    released unclean and it says so; the old history is untouched either way.
 5. Start the hub again (`--desired-count 1`). Its takeover restores the reseeded replica and quick-checks it.
+
+There is no "undo" of a reseed as such: restore the state wanted (`-txid <old position>`), verify it, and reseed
+again from that file (a second new snapshot on top). The old history isn't kept for ever either: Litestream's
+retention (the hub's, from its next start) prunes old LTX files (L0 files once compacted, snapshots past a day);
+then only the bucket's noncurrent versions (30 days, its lifecycle rule) still hold them.
 
 `tests/test_reseed_replica.py` rehearses it against a local file replica (`--file-replica DIR`).
 

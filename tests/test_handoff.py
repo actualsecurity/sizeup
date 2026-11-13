@@ -249,6 +249,8 @@ class World:
         self.rogue = False                  # something else moves the replica (a writer from before the lock)
         self.ls_first: dict[str, int] = {}  # Litestream's first position past the replica's (+1: its own snapshot)
         self.follower_hangs: set[str] = set()   # whose followers need a SIGKILL to stop
+        self.ls_version = (0, 5, 18)
+        self.init_fails: dict[str, int] = {}    # whose app's migration fails at "init", after writing this many changes
         self.pids = 1000
 
     def event(self, task: str, what: str) -> None:
@@ -339,6 +341,13 @@ class FakeApp(FakeProc):
                 if unseen or self.task not in self.world.alive["litestream"]:
                     self.world.violations.append(f"{self.task} migrated {unseen or 'everything'} before Litestream "
                                                  "replicated it")
+                if self.task in self.world.init_fails:
+                    n = self.world.init_fails[self.task]
+                    if n:
+                        self.env.written = {"cad": n}              # a migration in autocommit, part of it applied
+                    self._say("error: OperationalError: a made-up migration failed")
+                    self._end(1)
+                    return
                 for db in DBS:
                     self.env.db_path(db).touch()
                 self._say("ok")
@@ -388,23 +397,28 @@ class FakeEnv(Env):
         out.write_bytes(b"SQLite format 3\0")
         return self.world.replica[db]
 
+    def litestream_version(self):
+        return self.world.ls_version
+
     def replicate(self):
         self.calls.append("replicate")
         self.confirmed = set()
         self.snapshotted: set[str] = set()
         return FakeProc(self.world, self.task, "litestream")
 
-    def position(self, db, timeout):
+    def position(self, db, timeout, wait=True):
         """`litestream sync -wait` while the app may run: Litestream's first sync of a promoted file is its own
         snapshot, one past the replica (ls_first overrides it); a file with no replica yet once the app made it; a
-        Litestream started again by the same task (a retake) has its own state: no snapshot."""
+        Litestream with its own state of the file (a retake: the .<db>.sqlite-litestream dir) takes none."""
         self.calls.append(f"position {db}")
         assert self.task in self.world.alive["litestream"]
         if self.world.replica[db] is None:
             if not self.db_path(db).exists():
                 raise RuntimeError(f"litestream sync {db}: database not found")
             self.world.replica[db] = 0
-        if db not in self.snapshotted and self.calls.count("replicate") == 1:   # (again: its own local state, kept)
+        meta = self.db_path(db).with_name(f".{db}.sqlite-litestream")    # Litestream's own state of the file
+        if db not in self.snapshotted and not meta.exists():  # none (a promoted file): its own snapshot first
+            meta.mkdir(parents=True, exist_ok=True)
             self.snapshotted.add(db)
             self.world.replica[db] = self.world.ls_first.pop(db, self.world.replica[db] + 1)
         self.confirmed.add(db)
@@ -826,6 +840,75 @@ def test_a_retake_confirms_litestream_at_its_own_release_before_the_app(world, t
     assert second < min(i for i, x in enumerate(c) if x.startswith("position") and i > second) \
         < [i for i, x in enumerate(c) if x == "app start"][-1]
     assert a.wait(10) == 0 and world.violations == []
+
+
+# -- a migration that fails on the new image never takes the hub down -----------------------------------------------
+
+def test_a_taker_whose_migration_fails_before_writing_is_taken_back_from_the_old_leaders_files(world, tmp_path):
+    a = Task(world, "A", tmp_path).start()
+    until(lambda: a.sup.role == "active")
+    b = Task(world, "B", tmp_path).start()
+    until(lambda: b.sup.role == "standby" and b.sup.warm())
+    world.init_fails["B"] = 0                                 # B's migration raises at once: nothing written
+    a.sup.on_term()
+    until(lambda: b.code is not None, what="B gives up")
+    assert b.code == 1 and any("released as pristine" in e for e in b.sup.events)
+    rel = next(p for p in reversed(world.s3.puts) if p["who"] == "B" and p["state"] == "released")
+    assert rel["pristine_from"] == {db: f"{106:016x}" for db in DBS}        # A's release
+    assert {db: world.replica[db] for db in DBS} == {db: 107 for db in DBS}  # + B's Litestream snapshot, only
+    until(lambda: a.sup.role == "active" and "A" in world.alive["app"], what="A takes it back")
+    assert any("pristine" in e and "taking it back" in e for e in a.sup.events)
+    assert {db: world.replica[db] for db in DBS} == {db: 108 for db in DBS}  # A's Litestream: a fresh snapshot of its files
+    assert a.wait(10) == 0 and world.violations == []
+
+
+def test_a_taker_whose_migration_failed_half_way_is_taken_over_from_the_replica_by_the_old_leader(world, tmp_path):
+    a = Task(world, "A", tmp_path, STOP_TIMEOUT_S=12.0, TAKEBACK_S=1.0).start()
+    until(lambda: a.sup.role == "active")
+    b = Task(world, "B", tmp_path).start()
+    until(lambda: b.sup.role == "standby" and b.sup.warm())
+    world.init_fails["B"] = 3                                 # part of B's migration applied (autocommit), then it raised
+    a.sup.on_term()
+    until(lambda: b.code is not None, what="B gives up")
+    assert not any("released as pristine" in e for e in b.sup.events)
+    assert world.replica["cad"] == 110                        # 106, B's snapshot, its 3 changes
+    until(lambda: a.sup.role == "active" and "A" in world.alive["app"], timeout=15, what="A takes over from the replica")
+    assert any("taking over from the replica like a new task" in e for e in a.sup.events)
+    assert [c for c in a.env.calls if c.startswith("restore")] == [f"restore {db}" for db in DBS]
+    assert a.sup.positions == {"cad": f"{110:016x}", "hub": f"{107:016x}", "audio": f"{107:016x}"}
+    assert a.wait(15) == 0 and world.violations == []
+
+
+def test_the_operators_override_lets_a_false_positive_through_loudly(world, tmp_path):
+    a = Task(world, "A", tmp_path)
+    a.sup.skip_checks = True
+    _wrote_before_litestream(a, "wal")
+    a.start()
+    until(lambda: a.sup.role == "active", what="A active")
+    assert any("SIZEUP_HANDOFF_SKIP_REPLICATION_CHECKS=1" in e and "SKIPPED" in e for e in a.sup.events)
+    assert any("let through" in e and "cad.sqlite" in e for e in a.sup.events)
+    assert a.sup.status()["replication_checks"] == "skipped"
+    finish(a)
+
+
+def test_a_stale_journal_beside_the_destination_goes_before_the_promote(world, tmp_path):
+    a = Task(world, "A", tmp_path)
+    j = Path(f"{a.env.db_path('cad')}-journal")
+    j.write_bytes(b"a stale rollback journal")
+    a.start()
+    until(lambda: a.sup.role == "active", what="A active")
+    assert not j.exists()
+    finish(a)
+
+
+def test_an_old_litestream_is_said_loudly_and_reaches_the_health_panel(world, tmp_path):
+    world.ls_version = (0, 5, 17)
+    a = Task(world, "A", tmp_path).start()
+    until(lambda: a.sup.role == "active", what="A active")
+    assert any(e.startswith("WARNING: Litestream 0.5.17 is older than 0.5.18") for e in a.sup.events)
+    assert "0.5.17" in a.sup.status()["litestream_warning"]
+    assert "0.5.17" in a.sup.app_env["SIZEUP_LITESTREAM_WARNING"]
+    finish(a)
 
 
 # -- the app's fence ------------------------------------------------------------------------------------------------

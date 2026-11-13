@@ -17,6 +17,12 @@ exactly the file. Nothing is deleted or overwritten by this tool: the old histor
 -txid <old position>` still restores the state before. (Litestream applies its usual retention while it runs, as
 the hub's own does; with the bucket's versioning anything it removes stays recoverable as a noncurrent version.)
 
+There is no "undo" of a reseed as such: to go back, restore the state wanted (`litestream restore -txid <old
+position>`), verify it, and reseed again from that file: a second new snapshot on top. And the old history doesn't
+stay restorable for ever: Litestream's retention (the hub's, from its next start) prunes LTX files past their
+retention (old L0 files once compacted, snapshots past a day), and then only the bucket's noncurrent versions (kept
+30 days by its lifecycle rule) still hold them.
+
 Needs Litestream >= 0.5.18 (its snapshot after a stale WAL position holds every frame: litestream#1547), the
 hub's LITESTREAM_BUCKET / LITESTREAM_PATH / LITESTREAM_REGION, and AWS credentials in the environment
 (`eval "$(aws configure export-credentials --format env)"`) for both the lock and Litestream.
@@ -292,7 +298,12 @@ def apply(args, db, scratch, cfg, sock, lock, info, have) -> int:
         positions = dict(prev.get("positions") or {}) if isinstance(prev.get("positions"), dict) else {}
         positions[db] = f"{got:016x}"
         stop.set()
-        lock.release(positions, True)                               # every change of the reseed is in the replica
+        try:
+            lock.release(positions, True)                           # every change of the reseed is in the replica
+        except leaderlock.LockLost as e:
+            raise Refused(f"the lock was no longer ours at the release ({e}). The reseed IS in the replica (position "
+                          f"{got}); read the lock (who holds it now?) before anything else, and make sure no hub "
+                          "started meanwhile") from None
         released = True
         say(f"released the lock: positions {positions}")
         say("next: set the hub's desired count back to 1; its takeover restores the reseeded replica")

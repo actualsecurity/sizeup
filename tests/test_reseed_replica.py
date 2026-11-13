@@ -195,3 +195,25 @@ def test_apply_asks_first(tmp_path, capsys):
                        confirm=lambda q: "no")
     assert code == 1 and "not confirmed: nothing written" in capsys.readouterr().out
     assert _listing(rep) == before and s3.doc()["holder"] == "hub-task"
+
+
+@needs_ls
+def test_a_lock_lost_at_the_release_is_said_plainly(tmp_path, capsys):
+    from sizeup.leaderlock import LockLost
+    rep, live, n = _replica(tmp_path)
+    s3 = FakeS3()
+    _held_then_released(s3, n)
+    lock = lock_for(s3, "operator")
+    real = lock.release
+
+    def release(positions, clean, extra=None):
+        if clean:
+            lock.generation = 0
+            raise LockLost("the lock was written by someone else (now: a-made-up-task)")
+        return real(positions, clean, extra)
+    lock.release = release
+    code = tool().main(["--db", "cad", "--file", str(_verified(tmp_path, live)), "--file-replica", str(rep),
+                        "--scratch", str(tmp_path / "scratch"), "--apply", "--yes"], lock=lock)
+    out = capsys.readouterr().out
+    assert code == 2 and "Traceback" not in out
+    assert "REFUSED: the lock was no longer ours at the release" in out and "The reseed IS in the replica" in out

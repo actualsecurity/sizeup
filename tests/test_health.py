@@ -132,6 +132,18 @@ def test_silent_starts_after_three_minutes_pushes_once_and_clears_with_a_recover
     assert r.n.msgs[-1]["title"] == "Station silent 3 min · PCFD station · last heard " + tz.hhmm(T0 + t + 300)
 
 
+def test_an_old_litestream_on_the_hub_is_a_warning_on_the_panel(monkeypatch):
+    monkeypatch.setenv("SIZEUP_LITESTREAM_WARNING", "Litestream 0.5.17 is older than 0.5.18: made-up detail")
+    r = Rig()
+    r.at(0, status=station_status())
+    (a,) = [a for a in r.h.alerts() if a["key"] == "litestream"]
+    assert a["severity"] == "warning" and "0.5.17" in a["text"]
+    assert "litestream" in [x["key"] for x in r.h.panel()["alerts"]]
+    monkeypatch.delenv("SIZEUP_LITESTREAM_WARNING")
+    r.at(10, status=station_status())
+    assert "litestream" not in r.keys()
+
+
 def test_while_silent_nothing_else_starts_or_clears():
     r = Rig()
     r.at(0, status=station_status(radios=[radio("FG1", open=True, open_s=200.0, stuck=True)]))
