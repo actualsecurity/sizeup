@@ -2939,8 +2939,8 @@ demonstrably a false positive, and remove it in the next deploy.
 The override is also on the app's Health panel while it is set (`replication_checks`, a warning).
 
 **Each takeover's confirmations** have their own budget per file (`REPLICATING_S`, 120 s) and one overall cap
-(`REPLICATION_TOTAL_S`, 150 s, both rounds): a hung Litestream fails the takeover inside the old connector's
-overlap instead of holding "takeover" for minutes.
+(`REPLICATION_TOTAL_S`, 150 s, both rounds): a hung Litestream fails the takeover within a few minutes, not
+indefinitely.
 
 **The first rollout of this** (and any deploy after a takeover): the new leader's first snapshot of every file (the
 whole file: ~1.2 GB) goes to S3 in the background after it serves. **Let it finish before any further deploy**:
