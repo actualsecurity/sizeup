@@ -171,8 +171,8 @@ def display_limits(key: str) -> tuple[float, float]:
 
 def load_firehouses(path: str | Path | None = None) -> list[dict]:
     """data/firehouses.json: [{name, address, ll: [lon, lat], short?, egress?, ingress?}]; [] if it can't be read.
-    egress / ingress: {lat, lon, street}, the bay-door apron and the street the rigs pull out onto (and back in
-    from: ingress, the same as egress unless given); a bad one is left out (sizeup/cad/routes.py: the address's
+    egress / ingress: {lat, lon, street, via?}, the bay-door apron and the street the rigs pull out onto (and back in
+    from: ingress, the same as egress unless given; via "lot": back in through a lot); a bad one is left out (sizeup/cad/routes.py: the address's
     street then)."""
     try:
         fh = json.loads(Path(path or FIREHOUSES).read_text())["firehouses"]
@@ -185,12 +185,14 @@ def load_firehouses(path: str | Path | None = None) -> list[dict]:
 
 
 def _gate(v) -> dict | None:
-    """A firehouse's egress / ingress, checked: {lat, lon, street} (street may be ''), or None."""
+    """A firehouse's egress / ingress, checked: {lat, lon, street, via?} (street may be ''; via "lot": it joins a
+    lot's drive aisles, not a street: sizeup/cad/routes.py honours it for an ingress only), or None."""
     if not isinstance(v, dict) or not _num(v.get("lat")) or not _num(v.get("lon")):
         return None
     if not (-90 <= v["lat"] <= 90 and -180 <= v["lon"] <= 180):
         return None
-    return {"lat": float(v["lat"]), "lon": float(v["lon"]), "street": str(v.get("street") or "")[:80]}
+    return {"lat": float(v["lat"]), "lon": float(v["lon"]), "street": str(v.get("street") or "")[:80],
+            **({"via": "lot"} if v.get("via") == "lot" else {})}
 
 
 def display_value(key: str, v) -> float:
