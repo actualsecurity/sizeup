@@ -62,9 +62,14 @@ TICK_S = 15.0
 PRUNE_S = 3600.0
 PRUNE_FIRST_S = 3 * 3600.0             # the first prune this long after start (never in the startup's busy minutes)
 UNIT_MENTION = re.compile(r"\b(car|unit|adam|boy|charlie|david|sector|post|rmp|patrol)\s+(\d{1,4}[a-z]?)\b", re.I)
-NEW_CALL = re.compile(r"\b(new call|second call|another (call|one|report|caller)|additional (call|report|caller)s?|"
-                      r"different (call|location|address))\b", re.I)
-DISPATCH_WORDS = re.compile(r"disp|dispatch|\bhq\b|headquarters|control|console|desk|\bpd\b", re.I)
+# a new incident: only these ("another caller", "another one", "additional callers" are MORE of the same one)
+NEW_CALL = re.compile(r"\b(new call|second call|another call|different (call|location|address))\b", re.I)
+# a moving incident's new place ("now at", "last seen", "fled", "heading", "continuing", "still")
+MOVE_WORDS = re.compile(r"\b(now at|now on|last seen|fled|fleeing|heading|continuing|still|turned onto|turning onto)\b", re.I)
+# a dispatcher / HQ talker (they voice every job); never a unit's alias such as "RYE PD CAR 3"
+DISPATCH_WORDS = re.compile(r"\bdisp\b|dispatch|\bhq\b|headquarters|\bcontrol\b|console|\bdesk\b", re.I)
+PEOPLE = {"weapons", "edp", "dispute"}   # incidents about a person, who may move ("last seen at")
+SAFETY = {"weapons", "barricade", "water_rescue", "fire_report"}   # never ended by a disregard that names nothing
 SAME_PLACE_M = 150.0                   # two places this close are the same incident's
 STOP_WORDS = {"from", "with", "that", "this", "the", "and", "into", "front", "near", "area", "call", "calls", "caller",
               "report", "reported", "respond", "units", "unit", "male", "female", "person", "subject", "someone"}
@@ -349,7 +354,10 @@ class IntelEngine:
         if talker and not disp and UNIT_MENTION.fullmatch(talker):
             units.add(talker.lower())
         entry = Entry(at, hits, text, who, suppressed, talker, frozenset(units), disp)
-        if self.locate is not None and not suppressed:
+        if self.locate is not None and not suppressed and (
+                hits or any(not e.confirmed or pack.category(e.category).get("moves")
+                            or (e.category in PEOPLE and MOVE_WORDS.search(text))
+                            for e in self._open_for(pack, None, key, at, self._merge_span(pack)))):
             entry.place = self._where(pack, row, key, [text], list(who))
         win.entries[tid] = entry
         win.prune(max(e.at for e in win.entries.values()), pack.window_s)
@@ -375,7 +383,8 @@ class IntelEngine:
                 changed.append(ev)
         if not hits and not suppressed:       # a read-back with no rule words: may still place an open event
             for ev in self._open_for(pack, None, key, at, self._merge_span(pack)):
-                if (ev.category not in event_of and not ev.confirmed and self.locate is not None
+                moving = self._moving(pack, ev, win.entries[tid])
+                if (ev.category not in event_of and (not ev.confirmed or moving) and self.locate is not None
                         and self._same_job(pack, ev, win.entries[tid], ws, mine)):
                     up = self._relocate(pack, ev, row, key, win, tid, at)
                     if up is not None:
@@ -482,15 +491,37 @@ class IntelEngine:
         A row with another category's rule words is another job."""
         if mine - {ev.category, rules_mod.WILD, "routine"}:
             return False
-        mine_entries = self._event_entries(pack, ev)
-        if entry.units & frozenset(u for e in mine_entries for u in e.units):
-            return True
         if self.category_words(pack, ev.category) & set(ws):
             return True
         if entry.place is not None and ev.precision != "none" and same_place(entry.place, ev.place()):
             return True
-        return bool(entry.talker and not entry.dispatcher
-                    and entry.talker in {e.talker for e in mine_entries if e.talker and not e.dispatcher})
+        mine_entries = self._event_entries(pack, ev)
+        shared = entry.units & frozenset(u for e in mine_entries for u in e.units)
+        if shared and not self._busy(pack, ev, shared):
+            return True                       # (a unit on two or more open jobs: only words or the place tie it)
+        if (entry.talker and not entry.dispatcher
+                and entry.talker in {e.talker for e in mine_entries if e.talker and not e.dispatcher}):
+            return True
+        # "now at", "last seen at": the one moving incident open on this source
+        movable = lambda e: pack.category(e.category).get("moves") or e.category in PEOPLE      # noqa: E731
+        if MOVE_WORDS.search(entry.text) and movable(ev):
+            return [e.id for e in self._open_for(pack, None, ev.source_key, entry.at, self._merge_span(pack))
+                    if movable(e)] == [ev.id]
+        return False
+
+    def _busy(self, pack, ev: Event, units) -> bool:
+        """These units are on another open job too (then they tie by words or place only)."""
+        for e in self._open_for(pack, None, ev.source_key, self.clock(), self._merge_span(pack)):
+            if e.id != ev.id and units & frozenset(u for x in self._event_entries(pack, e) for u in x.units):
+                return True
+        return False
+
+    def _moving(self, pack, ev: Event, entry) -> bool:
+        """A row that moves this event's place: a moving category (pursuit), or the words of a move ("last seen",
+        "fled", "now at") about a person (a suspect, an EDP); a fire, a crash, an alarm never move."""
+        if pack.category(ev.category).get("moves"):
+            return True
+        return ev.category in PEOPLE and bool(MOVE_WORDS.search(entry.text))
 
     def _texts(self, pack, key: str, tids) -> list[str]:
         win = self.windows.get((pack.name, key))
@@ -526,18 +557,25 @@ class IntelEngine:
         speaks = any(r.category == cat and w > 0 for r, w in entry.hits)     # the row itself says this category
         rp = entry.place if speaks else None
         fresh = bool(NEW_CALL.search(entry.text))
-        ev = None
-        if not fresh:
-            for e in self._open_for(pack, cat, key, at, self._merge_span(pack)):
-                ep = e.place() if e.precision != "none" else None
-                if rp is None and (speaks or self._same_job(pack, e, entry, rules_mod.words(entry.text), {cat})):
-                    ev = e                    # no place said ("still smoke showing"): the open one (#492 re-check)
-                elif rp is not None and ep is not None and same_place(rp, ep):
-                    ev = e                    # the same place again
-                elif rp is not None and ep is None and e.last_at >= at - pack.window_s:
-                    ev = e                    # the place, right after a call-out that had none
-                if ev is not None:
-                    break
+        ev, moved, reopened = None, False, False
+        for e in self._open_for(pack, cat, key, at, self._merge_span(pack)):
+            ep = e.place() if e.precision != "none" else None
+            if rp is not None and ep is not None and same_place(rp, ep):
+                ev = e                        # the same place again ("another caller ...": more of the same)
+            elif fresh:
+                continue                      # "new call": another place, or none said: a new incident
+            elif rp is None and (speaks or self._same_job(pack, e, entry, rules_mod.words(entry.text), {cat})):
+                ev = e                        # no place said ("still smoke showing"): the open one (#492 re-check)
+            elif rp is not None and ep is None and e.last_at >= at - pack.window_s:
+                ev = e                        # the place, right after a call-out that had none
+            elif (rp is not None and ep is not None and self._moving(pack, e, entry)
+                  and (cd.get("moves") or self._same_job(pack, e, entry, rules_mod.words(entry.text), {cat}))):
+                ev, moved = e, True           # a moving incident ("now at", a pursuit): its place moves
+            if ev is not None:
+                break
+        if ev is not None and ev.note == "possibly cancelled" and speaks:
+            reopened = True                   # a nameless disregard, then the call again: it stands, pushed again
+            ev.note = "re-opened"
         if ev is None and not speaks:
             return None                       # a cue alone (another job's "respond to ...") never makes an event
         # its traffic: the rows that say this category (and this one when it ties), never another job's cue
@@ -548,20 +586,22 @@ class IntelEngine:
         if ev is None:
             place = rp if rp is not None else self._where(
                 pack, row, key, self._texts(pack, key, tids), [w for t in tids if t in win.entries for w in win.entries[t].who])
-        elif not ev.confirmed and tid in tids:
+        elif (not ev.confirmed or moved) and tid in tids:
             place = rp if rp is not None else entry.place
         subject = f"{pack.name}:{cat}:{place.key}" if place is not None and place.key else ""
         if ev is None and subject and not fresh:
             ev = next((e for e in self.events.open_events() if e.subject == subject), None)
-        if ev is None:
+        if ev is None and not fresh:
+            # a new report of what was just disregarded or dismissed (the same place, or none on the same source) is
+            # new evidence: the event comes back and pushes again (#492 re-check: never hidden by a mute)
             mute = float(self.policy.cfg.get("mute_min", 15)) * 60
-            if mute:
-                for c in self.events.recent_closed(pack.name, cat, now - mute):
-                    cp = c.place() if c.precision != "none" else None
-                    if (place is None and cp is None and c.source_key == key) or (
-                            place is not None and cp is not None and same_place(place, cp)):
-                        mode = lowest(mode, "log")     # ended / dismissed just now, same subject: recorded, never shown
-                        break
+            for c in self.events.recent_closed(pack.name, cat, now - mute) if mute else []:
+                cp = c.place() if c.precision != "none" else None
+                if (place is None and cp is None and c.source_key == key) or (
+                        place is not None and cp is not None and same_place(place, cp)):
+                    ev, reopened = c, True
+                    ev.status, ev.note = "open", "re-opened"
+                    break
         before = copy.deepcopy(ev) if ev is not None else None
         rules = sorted({(r.id, r.v, round(float(w), 4)) for _t, r, w in contrib})
         if ev is None:
@@ -570,7 +610,7 @@ class IntelEngine:
                        dept=str(row.get("dept") or ""), first_at=at, status="open")
             change = "raised"
         else:
-            change = "updated"
+            change = "reopened" if reopened else "updated"
         ev.last_at = max(ev.last_at, at)
         ev.what_score = round(max(what, ev.what_score if change == "updated" else 0.0), 4)
         ev.level = level(ev.what_score)
@@ -580,25 +620,33 @@ class IntelEngine:
         ev.mode = mode if change == "raised" else max(ev.mode, mode, key=mode_rank)
         ev.priority = max(int(cd.get("priority", 3)), ev.priority if change == "updated" else 0)
         ev.until = max(ev.until, ev.last_at + float(cd.get("ttl_min", 45)) * 60)
-        if place is not None and (ev.precision == "none" or place.confirmed or place.where_score > ev.where_score):
+        if place is not None and (moved or ev.precision == "none" or place.confirmed or place.where_score > ev.where_score):
             ev.set_place(place)
+            if moved:
+                ev.note = "moved"
         ev.subject = f"{pack.name}:{cat}:{ev.place().key or key}"
         if before is not None and _same(before, ev):
             return None                       # idempotent: the same row again changes nothing
         ev.updated_at = now
         self.events.save(ev)
-        self._after(pack, ev, change, now, before)
+        self._after(pack, ev, change, now, before, moved=moved and before is not None and before.precision != "none"
+                    and not same_place(before.place(), ev.place()))
         return ev
 
     def _relocate(self, pack, ev: Event, row, key, win, tid, at) -> Event | None:
-        place = win.entries[tid].place                 # its own words only (a tied row: _same_job said so)
-        return self._set_place(pack, ev, place, key, tid, at)
+        entry = win.entries[tid]
+        place = entry.place                            # its own words only (a tied row: _same_job said so)
+        move = (place is not None and ev.precision != "none" and not same_place(place, ev.place())
+                and self._moving(pack, ev, entry))
+        return self._set_place(pack, ev, place, key, tid, at, move)
 
-    def _set_place(self, pack, ev: Event, place, key, tid, at) -> Event | None:
-        if place is None or not (ev.precision == "none" or place.confirmed or place.where_score > ev.where_score):
+    def _set_place(self, pack, ev: Event, place, key, tid, at, move: bool = False) -> Event | None:
+        if place is None or not (move or ev.precision == "none" or place.confirmed or place.where_score > ev.where_score):
             return None
         before = copy.deepcopy(ev)
         ev.set_place(place)
+        if move:
+            ev.note = "moved"
         ev.last_at = max(ev.last_at, at)
         ev.traffic_ids = list(dict.fromkeys([*ev.traffic_ids, tid]))
         ev.subject = f"{pack.name}:{ev.category}:{place.key or key}"
@@ -606,7 +654,7 @@ class IntelEngine:
             return None
         ev.updated_at = self.clock()
         self.events.save(ev)
-        self._after(pack, ev, "updated", ev.updated_at, before)
+        self._after(pack, ev, "updated", ev.updated_at, before, moved=move)
         return ev
 
     def _inference(self, pack, row, key, tid, win, at, cats, mine, event_of, hits) -> list[Event]:
@@ -710,8 +758,15 @@ class IntelEngine:
         entry = win.entries.get(tid) if win is not None else None
         open_ = self._open_for(pack, None, key, at, self._merge_span(pack))
         named = [ev for ev in open_ if entry is not None and self._same_job(pack, ev, entry, list(ws))]
-        # what it names (a unit, a place, the category's words); naming nothing, the current window's own events
-        for ev in named or [ev for ev in open_ if current & set(ev.traffic_ids)]:
+        # what it names (a unit, a place, the category's words); naming nothing, the current window's own events, but
+        # never a safety call (shots, a barricade, a fire, a water rescue): that one is only "possibly cancelled"
+        for ev in [] if named else [ev for ev in open_ if current & set(ev.traffic_ids) and ev.category in SAFETY]:
+            ev.note, ev.updated_at = "possibly cancelled", self.clock()
+            ev.traffic_ids = list(dict.fromkeys([*ev.traffic_ids, tid]))
+            self.events.save(ev)
+            self.sink.event(ev, "updated")
+            out.append(ev)
+        for ev in named or [ev for ev in open_ if current & set(ev.traffic_ids) and ev.category not in SAFETY]:
             ev.status, ev.updated_at = "ended", self.clock()
             ev.traffic_ids = list(dict.fromkeys([*ev.traffic_ids, tid]))
             self.events.save(ev)
@@ -731,9 +786,9 @@ class IntelEngine:
         with self._lock:
             self._consume(ev.pack, ev.source_key)
 
-    def _after(self, pack, ev: Event, change: str, now: float, before: Event | None) -> None:
-        self.sink.event(ev, change)
-        d = self.policy.decide(ev, change, now, before)
+    def _after(self, pack, ev: Event, change: str, now: float, before: Event | None, moved: bool = False) -> None:
+        self.sink.event(ev, "updated" if change == "reopened" else change)
+        d = self.policy.decide(ev, change, now, before, moved)
         if d.would_push:
             cat = pack.category(ev.category)
             doubtful = push_mod.doubtful_number(ev.label_full, self._texts(pack, ev.source_key, ev.traffic_ids))

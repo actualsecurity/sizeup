@@ -13,8 +13,10 @@ test pre-alert topic from day one, caps generous for testing):
     max_repush         2        ... and at most this many times per event
     merge_min          20       an open event of the same pack, category and source this recent takes a new mention
                                 ("still smoke showing", a repeated "shots fired"): updated, not pushed again
-    mute_min           15       after an event ends ("disregard") or is dismissed, the same pack, category and source
-                                (or place) raise nothing new this long
+    mute_min           15       after an event ends ("disregard") or is dismissed, a new report of it this soon (the
+                                same place, or no place on the same source) re-opens it and pushes again
+    move_min           5        a moving incident (a pursuit, "now at", "last seen at") pushes its new place at most
+                                this often
     place_repush_min   5        the place first heard within this long after the first push pushes once more,
                                 whatever repush_min says (the read-back follows the call-out by a minute or two)
     max_age_min        15       a transmission older than this (a startup backfill, a late re-record) is never a
@@ -33,10 +35,10 @@ from sizeup.intel.model import Decision, Event, mode_rank
 
 DEFAULTS = {"enabled": True, "push": True, "per_hour": 30, "per_day": 200, "per_category_hour": 10, "repush_min": 10,
             "max_repush": 2, "quiet_from": "", "quiet_to": "", "digest_min": 15, "max_age_min": 15,
-            "merge_min": 20, "mute_min": 15, "place_repush_min": 5}
+            "merge_min": 20, "mute_min": 15, "place_repush_min": 5, "move_min": 5}
 LIMITS = {"per_hour": (1, 1000), "per_day": (1, 10000), "per_category_hour": (1, 1000), "repush_min": (0, 1440),
           "max_repush": (0, 20), "digest_min": (1, 1440), "max_age_min": (1, 1440),
-          "merge_min": (1, 240), "mute_min": (0, 240), "place_repush_min": (0, 60)}
+          "merge_min": (1, 240), "mute_min": (0, 240), "place_repush_min": (0, 60), "move_min": (1, 120)}
 LEVELS = ((0.8, "high"), (0.6, "medium"), (0.0, "low"))
 
 
@@ -110,15 +112,22 @@ class Policy:
         return (len(self.sent) >= self.cfg["per_day"] or len(hour) >= self.cfg["per_hour"]
                 or sum(1 for _a, c in hour if c == cat) >= self.cfg["per_category_hour"])
 
-    def decide(self, ev: Event, change: str, now: float, before: Event | None = None) -> Decision:
-        """The verdict for this change of ev (before: the event as it was, for an update)."""
+    def decide(self, ev: Event, change: str, now: float, before: Event | None = None, moved: bool = False) -> Decision:
+        """The verdict for this change of ev (before: the event as it was, for an update). moved: a moving incident's
+        new place (at most one push per move_min). "reopened": a new report right after a disregard: pushed again."""
         prio = int(ev.priority)
         if mode_rank(ev.mode) < mode_rank("push"):
             return Decision(ev.mode, False, "shadow" if ev.mode == "shadow" else "", prio)
-        if change not in ("raised", "updated") or ev.status != "open":
+        if change not in ("raised", "updated", "reopened") or ev.status != "open":
             return Decision(ev.mode, False, "", prio)
         repush = False
-        if change == "updated" or ev.pushed_at is not None:
+        if moved and ev.pushed_at is not None:
+            if now - ev.pushed_at < self.cfg["move_min"] * 60:
+                return Decision(ev.mode, False, "merged", prio)
+            repush = True
+        elif change == "reopened":
+            repush = ev.pushed_at is not None
+        elif change == "updated" or ev.pushed_at is not None:
             if ev.pushed_at is None:
                 pass                              # never pushed (held, quiet): an update may push it now
             elif before is None or not escalated(before, ev):

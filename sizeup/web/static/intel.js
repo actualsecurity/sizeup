@@ -50,6 +50,7 @@ window.IntelCard = (() => {
       sug.title = "The model's reading, not the rules': on the map only, never pushed";
       li.append(sug);
     }
+    if (e.note) li.append(el("div", "aa-loc approx", e.note));          // "possibly cancelled", "moved", "re-opened"
     const src = el("div", "aa-src", `${deps.time(e.first_at)} · ${(e.traffic_ids || []).length} tx`);
     for (const id of (e.traffic_ids || []).slice(-4)) {
       const b = el("button", "mini play", st.playing === id ? "■" : "▶");
