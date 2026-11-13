@@ -30,6 +30,8 @@
                           address history and search (#403, sizeup/cad/history.py): incidents' address / building keys
                           (addr_key, bldg_key, addr_street, addr_how, addr_label), the FTS5 index; made on open there
       premise_notes, premise_acks   notes on a building, shown on every call there (#403, sizeup/cad/premise.py)
+      preplan_points      a building's features at exact points (Knox box, FDC ...), on the map of every call there
+                          (#456, sizeup/cad/preplan.py; made there)
       prealerts          phone pre-alerts from Tapout's ntfy feed and how each ended (sizeup/prealert.py,
                           made there; its events: kind 'prealert', in the event log, not the unit log)
 
