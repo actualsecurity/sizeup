@@ -1189,7 +1189,7 @@ class StationHealth:
         n = self.notifier
         if n is None or not n.enabled:
             return
-        # (the old address, kept so the pushes are as they were: settings.js opens Settings > Health from it, #203)
+        # (the old address, kept so the pushes are as they were: settings.js opens Settings > Station > Health from it, #203)
         click = f"{self.public_url}/cad#settings/station/health" if self.public_url else ""
         who = a.get("who") or None
         if recovered:

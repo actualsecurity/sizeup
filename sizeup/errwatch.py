@@ -417,7 +417,7 @@ class ErrorWatch:
                 top = max(self.sigs.values(), key=lambda x: len(x.times), default=None)
                 title = f"Hub errors: {_fmt(n5)} in 5 min" + (
                     f" · top {self._name(top)} ×{_fmt(len(top.times))}" if top is not None and top.times else "")
-                out.append((title, f"More than {_fmt(limit)} error lines in 5 min. Details: Settings > Health."))
+                out.append((title, f"More than {_fmt(limit)} error lines in 5 min. Details: Settings > Station > Health."))
             # back to normal: every pushed signature at or under K (a trickle is normal), the total under its own
             calm = [s for s in self.sigs.values() if s.alerting and now - s.over_at >= QUIET_S]
             loud = [s for s in self.sigs.values() if s.alerting and now - s.over_at < QUIET_S]
@@ -453,7 +453,7 @@ class ErrorWatch:
 
     def _spike(self, sig: _Sig, now: float, k: int) -> tuple[str, str]:
         title = f"Hub errors: {self._name(sig)} ×{_fmt(sig.count)} in {_dur(now - sig.first)} · since {tz.hhmm(sig.first)}"
-        return title, f"{_fmt(len(sig.times))} in the last 5 min (more than {k}). Details: Settings > Health."
+        return title, f"{_fmt(len(sig.times))} in the last 5 min (more than {k}). Details: Settings > Station > Health."
 
     def run(self, stop: threading.Event) -> None:
         """The hub-errors thread: reads the queued lines every DRAIN_S, decides every TICK_S."""

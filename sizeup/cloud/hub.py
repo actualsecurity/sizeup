@@ -317,10 +317,10 @@ class Hub:
 
     def station_row(self) -> dict:
         """The Station row of the radios (everyone's state push): its connection only. Its health alerts are the
-        admins' (Settings > Health, GET /api/cad/health, #203); the page links the row there for an admin."""
+        admins' (Settings > Station > Health, GET /api/cad/health, #203); the page links the row there for an admin."""
         h = self.health()
         return {"label": "Station", "mhz": None, "state": h["state"], "word": h["word"],
-                "detail": h["detail"] + " · Station health: Settings > Health (admins)",
+                "detail": h["detail"] + " · Station health: Settings > Station > Health (admins)",
                 "open": False, "quieting_db": None, "restarts": 0, "last_heard": self.last_seen,
                 "link": "#settings/station/health"}
 
