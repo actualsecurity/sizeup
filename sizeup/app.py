@@ -2455,13 +2455,25 @@ class App:
             page = job.page
             if page.audio is not None:
                 page.status, page.model, page.stt = "pending", "", ""
+                self._stt_row(page.id, "pending", f"{WHISPER_FALLBACK} (AWS failed: {why[:80]})")
                 self.stt.submit(page, page.voice, URGENT, job.channel)
                 return
-            page.status = "error"
+            page.status, page.model = "error", f"{channels_model()} (failed: {why[:80]})"  # type: ignore[attr-defined]
+            self._stt_row(page.id, "error", page.model)
             self._save_page(page)
             return
-        if not self._rerun_local([job.id]):
+        if self._rerun_local([job.id]):
+            self._stt_row(job.id, "pending", f"{WHISPER_FALLBACK} (AWS failed: {why[:80]})")
+        else:
             self._retext(job.id, "", "error", None, f"{channels_model()} (failed: {why[:80]})", why="AWS Transcribe")
+
+    def _stt_row(self, cid: str, status: str, model: str) -> None:
+        """The log's row says where its speech-to-text stands now (Comms.set_stt): which engine has it, or that it
+        failed, while its text is still to come (the text, when it comes, says which engine wrote it)."""
+        try:
+            self.cad.comms.set_stt(cid, status, model[:200])
+        except Exception as e:  # the CAD must never stop the monitor
+            log(f"CAD: could not update the communications log: {type(e).__name__}: {e}")
 
     def _aws_late(self, job: AwsJob, text: str, conf: float | None) -> None:
         """AWS answered after the job's deadline (#195): its fallback ran already, so the late text never takes
@@ -3708,6 +3720,12 @@ def channels_reserve(app) -> tuple:
         return tuple(aws.s.reserve_channels)
     from sizeup.transcribe import RESERVE_CHANNELS
     return RESERVE_CHANNELS
+
+
+# The model a row shows while whisper does a clip AWS couldn't (the station's on the hub): "Transcribing (whisper)" in
+# the log, never "(AWS)"; whisper's own model name replaces it with the text (cad.js sttSaid).
+WHISPER_FALLBACK = "whisper"
+WHISPER_FALLBACK_STATION = "whisper on the station"
 
 
 def channels_model() -> str:

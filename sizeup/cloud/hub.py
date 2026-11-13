@@ -84,7 +84,8 @@ from typing import Callable
 from sizeup import channels, sourcekeys
 from sizeup import tz
 from sizeup import app as app_mod
-from sizeup.app import AIRBAND_FIRST, CLIP_ID, RENAMED, STT_FIRST, App, AwsJob, channels_model, traffic_key
+from sizeup.app import (AIRBAND_FIRST, CLIP_ID, RENAMED, STT_FIRST, WHISPER_FALLBACK_STATION, App, AwsJob, channels_model,
+                        traffic_key)
 from sizeup.cad.dispatcher import AudioUnavailable
 from sizeup.cad.radios import fm_system
 from sizeup.cloud.autoupdate import describe
@@ -907,6 +908,7 @@ class HubApp(App):
         if job.alt is not None:                    # "both": the station's text stays
             return
         self._aws_asked[job.id] = time.time()      # (the sweep: no text from the station either -> failed)
+        self._stt_row(job.id, "pending", f"{WHISPER_FALLBACK_STATION} (AWS failed: {why[:80]})")
 
         def ask() -> None:
             err = ""
@@ -928,6 +930,7 @@ class HubApp(App):
             note = f"{channels_model()} failed ({why[:80]}); station: {err or 'no recording to re-run'}"
             if job.kind == "page" and job.page is not None:
                 job.page.status, job.page.model = "error", note
+                self._stt_row(job.id, "error", note)
                 self.sync()
             else:
                 self._retext(job.id, "", "error", None, note, why="transcription failed:")
@@ -1014,6 +1017,7 @@ class HubApp(App):
         item.flagged = True
         if kind == "page":
             item.status, item.model = "error", note
+            self._stt_row(item.id, "error", note)
         else:
             self._retext(item.id, "", "error", None, note, why="transcription failed:")
         self.sync()

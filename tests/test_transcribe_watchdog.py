@@ -578,3 +578,51 @@ def test_when_aws_can_take_audio_again_what_failed_meanwhile_goes_to_it(tmp_path
     finally:
         hub.close()
         fake.close()
+
+
+def _page_event(pid, seq=1):
+    """A voice page the station sent for Amazon Transcribe on the hub (status "remote", stt "aws"): synthetic."""
+    from sizeup.cad.dispatcher import wav_bytes
+    now = time.time()
+    return {"seq": seq, "at": now, "type": "page",
+            "data": {"id": pid, "label": "South 2", "mhz": 470.2, "start": now - 6, "end": now, "kind": "voice",
+                     "status": "remote", "departments": [], "quieting_db": 25.0, "tones": [], "raw": "",
+                     "confidence": None, "voice_offset_s": 0.0, "tone_seq": [], "stt": "aws", "model": "aws-transcribe"},
+            "audio": base64.b64encode(wav_bytes((voice(6.0)[::2] * 32767).astype(np.int16), 8000)).decode()}
+
+
+def test_a_page_aws_failed_on_never_says_transcribing_on_the_hub_aws_in_the_log(tmp_path):
+    # The radio log's row for a page AWS couldn't do: "remote" (Transcribing on the hub (AWS)) until then; the
+    # station's whisper asked (model "whisper on the station ..."); the station offline: "error", never "remote" for good
+    fake = FakeTranscribe(refuse=403)
+    hub = HubRun(hub_cfg(tmp_path, **aws_cfg(fake)))
+    seen = []
+    set_stt = hub.app.cad.comms.set_stt
+    hub.app.cad.comms.set_stt = lambda tid, status, model: seen.append((status, model)) or set_stt(tid, status, model)
+    try:
+        assert call(hub.url + "/api/station/events", "POST", {"epoch": "e1", "events": [_page_event("South_2-100")]})[0] == 200
+        assert wait(lambda: seen, 10)
+        assert seen[0][0] == "pending" and seen[0][1].startswith("whisper on the station (AWS failed")
+        assert wait(lambda: (_row(hub, "South_2-100") or {}).get("status") == "error", 40)
+        r = _row(hub, "South_2-100")
+        assert r["model"].startswith("aws-transcribe failed") and "station" in r["model"]
+    finally:
+        hub.close()
+        fake.close()
+
+
+def test_a_page_flagged_by_the_sweep_says_failed_in_the_log(tmp_path):
+    fake = FakeTranscribe()
+    hub = HubRun(hub_cfg(tmp_path, **aws_cfg(fake)))
+    try:
+        hub.app.aws.submit = lambda *a, **k: None                  # the job is lost
+        assert call(hub.url + "/api/station/events", "POST", {"epoch": "e1", "events": [_page_event("South_2-101")]})[0] == 200
+        assert wait(lambda: (_row(hub, "South_2-101") or {}).get("status") == "remote", 5)   # AWS on the hub has it
+        assert wait(lambda: any(p.id == "South_2-101" and p.status == "pending" for p in hub.app.pages), 5)
+        hub.app._aws_asked["South_2-101"] = time.time() - 1000      # the station's whisper asked, never answered
+        assert hub.app._aws_sweep() == 1
+        r = _row(hub, "South_2-101")
+        assert r["status"] == "error" and "failed" in r["model"]
+    finally:
+        hub.close()
+        fake.close()

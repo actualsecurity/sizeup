@@ -521,6 +521,17 @@ class Comms:
             self._heard(tid)
         return bool(n)
 
+    def set_stt(self, tid: str, status: str, model: str) -> bool:
+        """Where a transmission's speech-to-text stands, its text left as it is: the status ("pending", "error") and
+        the engine doing it or that failed (model), so the log never says "Transcribing on the hub (AWS)" for a clip
+        whisper took over from AWS, or one that failed."""
+        with self.store.tx() as db:
+            n = db.execute("UPDATE radio_traffic SET status = ?, model = ?, updated_at = ? WHERE id = ?",
+                           (status, model, self.clock(), tid)).rowcount
+            if n:
+                self.rev += 1
+        return bool(n)
+
     def set_alt(self, tid: str, alt: dict) -> bool:
         """The other engine's text ("both"), the transcript left as it is."""
         with self.store.tx() as db:

@@ -160,27 +160,27 @@ def test_a_page_naming_our_units_with_tones_not_ours_is_flagged_with_the_ring_be
     page_row(app, "pmine", t0 + 120, [(903.2, 810.2)], "Engine 64, 209 Westchester Avenue")
     rows = {r["id"]: r for r in app.cad.feed.rows(limit=10)}
     r = rows["p0704"]
-    assert r["page"] == "unknown" and r["names_ours"] == ["E64", "E62", "R40"] and r["events"] == []
+    assert r["page"] == "unknown" and r["names_ours"] == ["R40"] and r["events"] == []     # "6462": bare, not E64/E62
     assert r["prealert"]["status"] == "expired" and abs(r["prealert"]["at"] - (t0 - 77)) < 1
     assert rows["pfv"]["names_ours"] == [] and "prealert" not in rows["pfv"]
     assert rows["pmine"]["names_ours"] == []                               # ours: an event, nothing to flag
     radio = {x["id"]: x for x in app.cad.comms.query(limit=10, kind="radio")}        # the Radio view's rows too
-    assert radio["p0704"]["names_ours"] == ["E64", "E62", "R40"] and radio["pfv"]["names_ours"] == []
+    assert radio["p0704"]["names_ours"] == ["R40"] and radio["pfv"]["names_ours"] == []
     assert app.cad.store.incidents() == []                                 # still not an event (#80)
 
 
 def test_units_named_as_said(tmp_path):
     app = app_with_list(tmp_path)
     f = app.cad.feed.names_ours
-    assert f(TEXT_0704) == ["E64", "E62", "R40"]
+    assert f(TEXT_0704) == ["R40"]
     assert f("Engine 64, Ladder 30, 23 91 respond") == ["E64", "L30", "2391"]
-    assert f("64, 62 to 1 Main Street") == ["E64", "E62"]
+    assert f("64, 62 to 1 Main Street") == []             # bare numbers: never a unit
     for none in ("64 King Street, structure fire", "Sixty Control, 60 Control to all units", "time out 1432",
                  "Fairview 34 Longdale Avenue", "Engine 25, 42 Stratton Road"):
         assert f(none) == [], none
 
 
-def test_a_bare_number_is_an_engine_or_a_chief_never_a_ladder(tmp_path):
+def test_a_bare_number_is_never_a_unit(tmp_path):
     # 2026-10-14 11:38 South 2, Fairview tones: STT garbled "Ladder 12, 1230 Manhattan Avenue" and the repeat
     # "...Ladder 12 122. 30, that's 30 Manhattan Avenue": the bare "30" was read as Rye Brook's L30.
     app = app_with_list(tmp_path)
@@ -191,6 +191,37 @@ def test_a_bare_number_is_an_engine_or_a_chief_never_a_ladder(tmp_path):
     assert f(fairview) == []
     assert f("30, 31 to the alarm") == []                  # no engine 30/31: bare numbers never become ladders
     assert f("Ladder 30 and Engine 60") == ["L30", "E60"]  # said as a unit, it counts
-    assert f("64, 62, Rescue 40") == ["E64", "E62", "R40"]
-    assert f("62. 64 to 100 King Street") == ["E62", "E64"]
+    assert f("64, 62, Rescue 40") == ["R40"]
+    assert f("62. 64 to 100 King Street") == []
     assert f("we have 64, that's on Westchester Ave") == []
+
+
+def test_a_bare_number_next_to_another_departments_unit_names_none_of_ours(tmp_path):
+    # 60 Control on another department's page: a bare number, a run number and a mutual-aid EMS unit. Rye Brook's
+    # Engine 14 is never "14" alone, nor E64 "64": an apparatus word or the code as written ("E14") is.
+    app = app_with_list(tmp_path)
+    f = app.cad.feed.names_ours
+    for none in ("17 4410 with XPD EMS 31, that's 31 Example Drive", "14, 4410 with XPD EMS 31, that's 31 Example Drive",
+                 "14 to 4410 with XPD EMS 31", "14. 4410, XPD EMS 31", "64, 4410 with XPD EMS 31", "14 44 10 with XPD EMS 31",
+                 "60, 61 to the alarm", "Box 14", "I'm 60 seconds out", "e14 and r40"):
+        assert f(none) == [], none
+    assert f("Engine 14 with XPD EMS 31 to 31 Example Drive") == ["E14"]
+    assert f("E14, E-60 and Rescue 40") == ["E14", "E60", "R40"]
+
+
+def test_a_chiefs_number_is_never_a_house_number_or_another_agencys(tmp_path):
+    app = app_with_list(tmp_path)
+    f = app.cad.feed.names_ours
+    assert f("2391 responding") == ["2391"] and f("23 91, Engine 61 on location") == ["2391", "E61"]
+    for none in ("2391 Example Drive", "2662 North Example Road", "number 2391", "#2391", "XPD EMS 2391", "PD 26 62"):
+        assert f(none) == [], none
+
+
+def test_a_page_with_other_tones_and_a_bare_number_is_not_flagged(tmp_path):
+    app = app_with_list(tmp_path)
+    t0 = time.time() - 3600
+    page_row(app, "pbare", t0, [(700.0, 900.0)], "14, 4410 with XPD EMS 31, that's 31 Example Drive")
+    page_row(app, "pnamed", t0 + 60, [(700.0, 900.0)], "Engine 14, 4410 with XPD EMS 31, 31 Example Drive")
+    rows = {r["id"]: r for r in app.cad.feed.rows(limit=10)}
+    assert rows["pbare"]["page"] != "ours" and rows["pbare"]["names_ours"] == []
+    assert rows["pnamed"]["page"] != "ours" and rows["pnamed"]["names_ours"] == ["E14"]
