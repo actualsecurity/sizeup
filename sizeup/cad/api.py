@@ -68,8 +68,8 @@ GET  /api/cad/preplan/docs?incident=<id> | where=<address>
                                           configured}; anyone signed in and active; admin-only ones: admins only
 GET  /api/cad/preplan/docs/<id>           {doc, footprint}: one, and its building's county footprint (the align tool)
 GET  /api/cad/preplan/docs/<id>/file | /plan (?dl=1)
-                                          the file, or a floor plan's picture: 302 to a presigned link that expires in 2
-                                          minutes (S3), or the bytes (a folder: nosniff, Content-Disposition, a CSP);
+                                          the file, or a floor plan's picture, streamed by the hub from the store (no
+                                          links to it): nosniff, Content-Disposition, no-store, a CSP; 503 when busy;
                                           in the person's activity ("Opened site doc 12")
 POST /api/cad/preplan/docs                the file itself as the body (at most 25 MB: PDF, PNG, JPEG by content), with
                                           X-Sizeup-Doc: URI-encoded JSON {kind, title, floor?, page?, admin_only?,
@@ -755,9 +755,9 @@ class CadApi:
 
     def _docs_get(self, path: str, query: str, who) -> tuple:
         """GET /api/cad/preplan/docs(?incident= | where=), /docs/<id>, /docs/<id>/file | plan (#459): anyone signed in
-        and active (a deactivated person: no); an admin-only document: admins (anyone else: 404, as if none). A file: a
-        302 to a presigned link (S3: from S3's own origin, its type and Content-Disposition signed into it), or the bytes
-        with nosniff, Content-Disposition and a CSP that runs nothing."""
+        and active (a deactivated person: no); an admin-only document: admins (anyone else: 404, as if none). A file:
+        streamed by the hub from the store (never a link to it), with its type, Content-Disposition, nosniff, no-store,
+        no-referrer and a CSP that runs nothing (sandbox for pictures); 503 when every download slot is taken."""
         may = self._doc_reader(who)
         if may is None:
             return _json(403, {"error": "Account deactivated"})
@@ -771,16 +771,18 @@ class CadApi:
                 f = docs.file(int(m.group(1)), m.group(2), may, who.email if who is not None else "",
                               dl=(q.get("dl") or [""])[0] == "1")
         except CadError as e:
+            from sizeup.cad.preplan_docs import Busy
             msg = str(e)
+            if isinstance(e, Busy):
+                return 503, json.dumps({"error": msg}).encode(), JSON, {"Retry-After": "2", "Cache-Control": "no-store"}
             return _json(404 if msg.startswith("no ") else 400, {"error": msg})
         if not DOC_FILE.fullmatch(path):
             return 404, b"not found\n", "text/plain"
-        h = {"Cache-Control": "private, no-store", "Referrer-Policy": "no-referrer", "X-Content-Type-Options": "nosniff"}
-        if "url" in f:
-            return 302, b"", "text/plain", {**h, "Location": f["url"]}
         csp = ("default-src 'none'; frame-ancestors 'self'" if f["ctype"] == "application/pdf"
                else "default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; sandbox; frame-ancestors 'self'")
-        return 200, f["body"], f["ctype"], {**h, "Content-Disposition": f["disposition"], "Content-Security-Policy": csp}
+        return 200, f["stream"], f["ctype"], {"Cache-Control": "private, no-store", "Referrer-Policy": "no-referrer",
+                                              "X-Content-Type-Options": "nosniff", "Content-Disposition": f["disposition"],
+                                              "Content-Security-Policy": csp}
 
     def _doc_reader(self, who) -> str | None:
         """A site document reader's standing: "admin" | "dispatcher" | "viewer"; None: deactivated (no documents). Without

@@ -1,47 +1,60 @@
 """Where pre-plan site documents' bytes live (#459, sizeup/cad/preplan_docs.py): floor plans, site plans, inspection
-sheets, Tier II, contact sheets, photos. Alarm, Knox and security layouts among them: private, read only through links
-that expire in minutes, never public.
+sheets, Tier II, contact sheets, photos. Alarm, Knox and security layouts among them: private, and read only through the
+hub, by someone signed in. There are no links to the store itself (no presigned URLs, no public objects).
 
-    s3://<SIZEUP_PREPLAN_DOCS_BUCKET>/<prefix>/<ref>/original.<pdf|png|jpg>   what was uploaded (photos without their
-                                                                           metadata: sizeup/docfiles.py)
-                                                  /plan.png               a PDF floor plan's page, rendered (the overlay)
+    <prefix>/<ref>/original.<pdf|png|jpg>   what was uploaded, as stored (sizeup/docfiles.py: a PDF saved again without
+                                            its actions or metadata, a picture without its metadata)
+                  /plan.png                 a plan's picture (the map's overlay)
 
     S3DocStore   the hub: the private backup bucket (sizeup-aws 1-base.sh: Block Public Access, versioned, old versions
-                 kept 30 days, SSE-S3 by default), prefix "preplan-docs": the task role already reads, writes and
-                 deletes any key there (task-backups.json), so no new IAM. Every PUT with SSE-S3 and checksums
-                 (sizeup/attachments.py S3). Reading: link() is a presigned GET (SigV4 query auth, the task role's
-                 session) that expires in LINK_S, its answer's type, Content-Disposition and Cache-Control fixed by the
-                 signature (response-content-type, response-content-disposition, response-cache-control): the browser
-                 gets the bytes from S3's own origin, never the hub's, so a file can't read the hub's cookies or
-                 pages. The map's overlay loads the plan with CORS (the bucket's CORS rule, sizeup-aws
-                 22-preplan-docs.sh: GET from the hub's origin only). A delete removes the current version; the
-                 bucket's lifecycle removes the old one 30 days later.
-    FsDocStore   the same on a local folder (dev, tests: SIZEUP_PREPLAN_DOCS_DIR, else <the CAD's folder>/preplan-docs
-                 off the hub). link() is None: the hub serves the bytes itself (nosniff, Content-Disposition, a
-                 sandboxing CSP), behind the same sign-in.
+                 kept 30 days, SSE-S3 by default), prefix "preplan-docs": the task role already reads, writes, deletes
+                 and lists there (task-backups.json), so no new IAM, no CORS. Every PUT with SSE-S3 and checksums
+                 (sizeup/attachments.py S3). open() is a signed GET whose answer is read in CHUNK pieces as the hub
+                 sends them on (READ_S on each read), never the whole file in memory. A delete removes the current
+                 version; the bucket's lifecycle removes the old one 30 days later.
+    FsDocStore   the same on a local folder (dev, tests: SIZEUP_PREPLAN_DOCS_DIR, else <the CAD's folder>/preplan-docs off
+                 the hub), files 0600.
 
-from_env(): the bucket (SIZEUP_PREPLAN_DOCS_BUCKET, prefix SIZEUP_PREPLAN_DOCS_PREFIX; SIZEUP_PREPLAN_DOCS_LINKS=0: no
-presigned links, the hub reads the bytes and serves them itself), else a folder, else None (a hub with no bucket:
-uploads say "not configured"; a task's disk doesn't outlive a deploy). pages(): the sweep's listing (preplan_docs.py).
+Both are served the same way (sizeup/cad/preplan_docs.py file(), sizeup/cad/api.py): the hub streams open()'s pieces
+with the document's type, Content-Disposition (site-doc-<id>.<ext>), nosniff, no-store, no-referrer and a CSP that runs
+nothing. pages(): the sweep's listing.
+
+from_env(): the bucket (SIZEUP_PREPLAN_DOCS_BUCKET, prefix SIZEUP_PREPLAN_DOCS_PREFIX), else a folder, else None (a hub
+with no bucket: uploads say "not configured"; a task's disk doesn't outlive a deploy).
 """
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
-import urllib.parse
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Callable
 
 from sizeup import aws
 
-LINK_S = 120                      # a presigned link, at most this long (s)
 PREFIX = "preplan-docs"
 SAFE_KEY = re.compile(r"[a-z0-9-]{1,40}(/[0-9a-f]{16}/(original\.(pdf|png|jpg)|plan\.png))")
+CHUNK = 64 * 1024                 # a streamed document's pieces
+READ_S = 15.0                     # S3: the connection, and each read of the answer
 
 
 class DocStoreError(OSError):
     pass
+
+
+class Opened:
+    """A stored object being read: its length and its pieces; close() once done (or the client left)."""
+
+    def __init__(self, length: int, pieces, close: Callable[[], None]):
+        self.length, self.pieces, self._close = int(length), pieces, close
+
+    def close(self) -> None:
+        fn, self._close = self._close, None
+        if fn is not None:
+            fn()
 
 
 class DocStore:
@@ -60,12 +73,11 @@ class DocStore:
     def get(self, key: str) -> bytes:
         raise NotImplementedError
 
-    def delete(self, key: str) -> None:
+    def open(self, key: str) -> Opened:
         raise NotImplementedError
 
-    def link(self, key: str, ctype: str, disposition: str, expires: int = LINK_S) -> str | None:
-        """A URL the browser may GET for expires seconds, or None: the hub serves get() itself."""
-        return None
+    def delete(self, key: str) -> None:
+        raise NotImplementedError
 
 
 class FsDocStore(DocStore):
@@ -100,6 +112,18 @@ class FsDocStore(DocStore):
         except FileNotFoundError:
             raise DocStoreError("missing") from None
 
+    def open(self, key: str) -> Opened:
+        try:
+            f = open(self._path(key), "rb")
+        except FileNotFoundError:
+            raise DocStoreError("missing") from None
+        size = os.fstat(f.fileno()).st_size
+
+        def pieces():
+            while b := f.read(CHUNK):
+                yield b
+        return Opened(size, pieces, f.close)
+
     def delete(self, key: str) -> None:
         p = self._path(key)
         p.unlink(missing_ok=True)
@@ -109,14 +133,24 @@ class FsDocStore(DocStore):
             pass
 
 
+def _urlopen(url: str, headers: dict, timeout: float):
+    """(status, headers, a readable answer): the default opener (tests give their own)."""
+    req = urllib.request.Request(url, headers=headers, method="GET")
+    try:
+        r = urllib.request.urlopen(req, timeout=timeout)
+        return r.status, dict(r.headers.items()), r
+    except urllib.error.HTTPError as e:
+        return e.code, dict(e.headers.items()) if e.headers else {}, e
+
+
 class S3DocStore(DocStore):
     def __init__(self, bucket: str, prefix: str = PREFIX, region: str = "", endpoint: str = "", send: Callable | None = None,
-                 creds: Callable[[], aws.Credentials] = aws.credentials, links: bool = True):
+                 creds: Callable[[], aws.Credentials] = aws.credentials, opener: Callable | None = None):
         from sizeup.attachments import S3
         self.s3 = S3(bucket, region, endpoint, send=send, creds=creds)
         self.bucket, self.prefix, self.creds = bucket, prefix, creds
-        self.links = links             # False: no presigned links, the hub reads the bytes and serves them itself
-        self.name = f"s3://{bucket}/{prefix}/" + ("" if links else " (served by the hub)")
+        self.opener = opener or _urlopen
+        self.name = f"s3://{bucket}/{prefix}/"
 
     def pages(self, prefix: str):
         """ListObjectsV2 under prefix (s3:ListBucket on the bucket), a page at a time: [(key, last modified)]."""
@@ -138,6 +172,26 @@ class S3DocStore(DocStore):
         except aws.AwsError as e:
             raise DocStoreError(f"S3 GET: {e.code or e.status}") from None
 
+    def open(self, key: str) -> Opened:
+        """A signed GET (headers, never a link), its answer read CHUNK at a time as it is sent on."""
+        url = self.s3.url(key)
+        empty = hashlib.sha256(b"").hexdigest()
+        try:
+            signed = aws.sign("GET", url, {"x-amz-content-sha256": empty}, b"", self.creds(), self.s3.region, "s3",
+                              payload_sha=empty)
+            status, hdrs, r = self.opener(url, {k: v for k, v in signed.items() if k != "Host"}, READ_S)
+        except (aws.AwsError, OSError) as e:
+            raise DocStoreError(f"S3 GET: {getattr(e, 'code', '') or type(e).__name__}") from None
+        if status != 200:
+            r.close()
+            raise DocStoreError(f"S3 GET: {status}")
+        length = int({k.lower(): v for k, v in hdrs.items()}.get("content-length") or 0)
+
+        def pieces():
+            while b := r.read(CHUNK):
+                yield b
+        return Opened(length, pieces, r.close)
+
     def delete(self, key: str) -> None:
         try:
             status, _, _ = self.s3._call("DELETE", key, {})
@@ -145,20 +199,6 @@ class S3DocStore(DocStore):
             raise DocStoreError(f"S3 DELETE: {e.code or e.status}") from None
         if status not in (200, 204, 404):
             raise DocStoreError(f"S3 DELETE: {status}")
-
-    def link(self, key: str, ctype: str, disposition: str, expires: int = LINK_S) -> str | None:
-        if not self.links:
-            return None
-        q = urllib.parse.urlencode([("response-cache-control", "private, no-store"),
-                                    ("response-content-disposition", disposition), ("response-content-type", ctype)],
-                                   quote_via=urllib.parse.quote)
-        try:
-            creds = self.creds()
-        except aws.AwsError as e:
-            raise DocStoreError(f"S3 link: {e.code}") from None
-        # S3's query authentication signs no payload: UNSIGNED-PAYLOAD
-        return aws.presign(f"{self.s3.url(key)}?{q}", creds, self.s3.region, "s3", min(int(expires), LINK_S),
-                           payload_hash="UNSIGNED-PAYLOAD")
 
 
 def from_env(log: Callable[[str], None] = print, default_dir: str | Path | None = None) -> DocStore | None:
@@ -168,8 +208,7 @@ def from_env(log: Callable[[str], None] = print, default_dir: str | Path | None 
         log("pre-plan documents: SIZEUP_PREPLAN_DOCS_PREFIX must be lowercase letters, digits and dashes: not configured")
         return None
     if bucket:
-        # SIZEUP_PREPLAN_DOCS_LINKS=0: no presigned links, every byte through the hub behind the sign-in
-        st: DocStore = S3DocStore(bucket, prefix, links=os.environ.get("SIZEUP_PREPLAN_DOCS_LINKS", "1").strip() != "0")
+        st: DocStore = S3DocStore(bucket, prefix)
     elif os.environ.get("SIZEUP_PREPLAN_DOCS_DIR", "").strip():
         st = FsDocStore(os.environ["SIZEUP_PREPLAN_DOCS_DIR"].strip(), prefix)
     elif default_dir is not None:

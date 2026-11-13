@@ -9,8 +9,8 @@
 //   The plan     an "image" source (its four corners: top left, top right, bottom right, bottom left) and a raster
 //                layer, under the pre-plan points (preplan.js) and so under the route lines, rigs' lines and the
 //                firehouses; the rigs and call pins are DOM marks over every map layer. Over the county layers.
-//                Its picture comes through the hub: /api/cad/preplan/docs/<id>/plan answers with a presigned link
-//                that expires in two minutes (or the bytes, on a dev box).
+//                Its picture comes from the hub itself (same origin: WebGL needs no CORS), streamed from the store:
+//                /api/cad/preplan/docs/<id>/plan, behind the sign-in like every page.
 //   Align        dispatchers and admins, a plan's menu: it starts on the footprint's oriented box (the smallest
 //                rectangle around the county footprint; "N" its north-up box), the image's long side along the
 //                box's, its top as near north as the box allows; then drag the middle to move, the round handle to

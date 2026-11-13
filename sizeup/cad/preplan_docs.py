@@ -14,9 +14,9 @@ sizeup/cad/preplan.py): its building key (sizeup/cad/addrkey.py) and the county 
                    admin_only, active (0: deleted, its bytes gone),
                    who uploaded it and when, who changed it last, who aligned it last.
 
-The bytes: sizeup/docstore.py (a private bucket, presigned links that expire in two minutes; a folder in dev). What may be
-uploaded: sizeup/docfiles.py (PDF, PNG, JPEG by their first bytes; at most MAX_BYTES; photos without EXIF / GPS; PDFs
-without scripts).
+The bytes: sizeup/docstore.py (a private bucket prefix, read only by the hub and streamed to the person; a folder in
+dev). What may be uploaded: sizeup/docfiles.py (PDF, PNG, JPEG by their first bytes; at most MAX_BYTES; photos without
+EXIF / GPS; PDFs saved again without their actions, scripts or metadata).
 
 Who: anyone signed in sees the documents, an admin-only one only admins (to everyone else it doesn't exist: not in a
 list, a count, the audit's text or a link). Dispatchers and admins upload, edit, align and delete (the API's WRITES);
@@ -56,6 +56,9 @@ SIDE_M = (1.0, 1000.0)                      # a plan's side, metres
 SECTION = "preplan_docs"
 UPLOADS = threading.BoundedSemaphore(2)     # read at once (each up to 25 MB): server.py takes one before the body
 UPLOAD_WAIT_S = 5.0
+DOWNLOADS = threading.BoundedSemaphore(4)   # documents being sent at once (each: a store connection, a server thread)
+DOWNLOAD_WAIT_S = 2.0
+DOWNLOAD_WRITE_S = 30.0                     # server.py: a client that takes no bytes this long is dropped
 SWEEP_MARGIN_S = 6 * 3600.0                 # the sweep: an object no document names, this old
 SWEEP_FIRST_S, SWEEP_EVERY_S = 900.0, 6 * 3600.0
 SWEEP_MAX_N, SWEEP_SHARE, SWEEP_MIN_ALLOW = 50, 0.2, 10      # its circuit breaker
@@ -158,6 +161,10 @@ def check_corners(v, near: tuple[float, float] | None) -> list[list[float]]:
     if not all(x < 0 for x in cross):
         raise CadError("corners: a plan the right way round (not crossed or mirrored)")
     return out
+
+
+class Busy(CadError):
+    """Every download slot is taken (the API answers 503)."""
 
 
 class PreplanDocs:
@@ -269,8 +276,9 @@ class PreplanDocs:
         return {"doc": self.shown(d), "footprint": fp["geometry"] if fp else None, "gen": self.gen}
 
     def file(self, did: int, part: str, may: str, email: str = "", dl: bool = False) -> dict:
-        """GET /api/cad/preplan/docs/<id>/file | plan: {url} (a presigned link) or {body, ctype}; and {disposition}. The
-        file name is the document's number, never its title."""
+        """GET /api/cad/preplan/docs/<id>/file | plan: {stream (sizeup/attachments.py Stream: the store's pieces as they
+        are read), ctype, disposition}. The file name is the document's number, never its title. At most DOWNLOADS at
+        once (each holds a store connection and a server thread while it is sent): Busy after DOWNLOAD_WAIT_S."""
         d = self._row(did, may)
         if self.store is None:
             raise CadError("Site documents not configured")
@@ -285,15 +293,23 @@ class PreplanDocs:
         disposition = f'{"attachment" if dl else "inline"}; filename="{fname}"'
         key = self.store.key(d["ref"], name)
         self._seen(email, did, part)
+        from sizeup.attachments import Stream
         from sizeup.docstore import DocStoreError
+        if not DOWNLOADS.acquire(timeout=DOWNLOAD_WAIT_S):
+            raise Busy("Busy: try again in a moment")
         try:
-            url = self.store.link(key, ctype, disposition)
-            if url is not None:
-                return {"url": url, "ctype": ctype, "disposition": disposition}
-            return {"body": self.store.get(key), "ctype": ctype, "disposition": disposition}
+            opened = self.store.open(key)
         except DocStoreError as e:
+            DOWNLOADS.release()
             self.cad.log(f"CAD site doc {did}: {e}")
             raise CadError("Not available now: try again") from None
+
+        def done() -> None:
+            try:
+                opened.close()
+            finally:
+                DOWNLOADS.release()
+        return {"stream": Stream(opened.length, opened.pieces, done), "ctype": ctype, "disposition": disposition}
 
     def _seen(self, email: str, did: int, part: str) -> None:
         """Opening a document is in the person's activity (kind "search": what they read), at most once per VIEW_S."""

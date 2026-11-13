@@ -471,6 +471,20 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                                    b"<p>Sign in through Cloudflare Access to use sizeup: reload this page.</p>",
                               "text/html; charset=utf-8") or False
 
+        def _doc_file(self, path: str, query: str) -> None:
+            """GET /api/cad/preplan/docs/<id>/file | plan (#459): streamed from the store; a client that takes no bytes
+            for DOWNLOAD_WRITE_S is dropped (the store's connection and the download slot are let go: Stream.close)."""
+            from sizeup.cad.preplan_docs import DOWNLOAD_WRITE_S
+            before = self.connection.gettimeout()
+            self.connection.settimeout(DOWNLOAD_WRITE_S)
+            try:
+                return self._send(*cad.get(path, query, self.who))
+            finally:
+                try:
+                    self.connection.settimeout(before)
+                except OSError:
+                    pass
+
         def _upload_doc(self, path: str) -> None:
             """POST /api/cad/preplan/docs (#459): a site document, the file itself as the body (at most MAX_DOC_BODY),
             its details in X-Sizeup-Doc (a header a page elsewhere can't send without a CORS preflight). Who may is
@@ -669,6 +683,8 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                                           {"Cache-Control": "no-store"})
                 return self._send(200, json.dumps(out, separators=(",", ":")).encode(), "application/json",
                                   {"Cache-Control": "no-store"})
+            if path.startswith("/api/cad/preplan/docs/") and path.endswith(("/file", "/plan")) and cad is not None:
+                return self._doc_file(path, url.query)
             if path.startswith("/api/cad/") and cad is not None:
                 return self._send(*self._data(path, url.query, cad.get(path, url.query, self.who)))
             if path.startswith("/static/"):

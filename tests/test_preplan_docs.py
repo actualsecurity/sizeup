@@ -13,9 +13,8 @@ import struct
 import subprocess
 import threading
 import zlib
-from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import parse_qs, quote, urlsplit
+from urllib.parse import quote, urlsplit
 
 import pytest
 
@@ -125,6 +124,8 @@ def upload(api, data, email=JULIAN, **meta):
 
 def get(api, path, query="", email=None):
     code, raw, ctype, *h = api.get(path, query, who(email))
+    if hasattr(raw, "read_all"):                       # a document: streamed (sizeup/attachments.py Stream)
+        raw = raw.read_all()
     return code, (json.loads(raw) if "json" in ctype else raw), (h[0] if h else {})
 
 
@@ -319,7 +320,9 @@ def test_unauthenticated_requests_are_refused_by_the_server(api):
         assert req("POST", "/api/cad/preplan/docs", png(), {"X-Sizeup-Doc": meta})[0] == 401
         assert req("POST", "/api/cad/preplan/docs", png(), {"X-Sizeup-Doc": meta, "X-Test-Email": VAL})[0] == 403
         code, body, r = req("GET", f"/api/cad/preplan/docs/{did}/file", headers={"X-Test-Email": VAL})
-        assert code == 200 and body.startswith(b"\x89PNG")
+        stored = next(Path(api.cad.preplan_docs.store.root).rglob("original.png")).read_bytes()
+        assert code == 200 and body == stored and int(r.getheader("Content-Length")) == len(stored)   # streamed, whole
+        assert r.getheader("Referrer-Policy") == "no-referrer" and r.getheader("Location") is None
         assert r.getheader("X-Content-Type-Options") == "nosniff"
         assert r.getheader("Content-Disposition") == f'inline; filename="site-doc-{did}.png"'
         assert "sandbox" in r.getheader("Content-Security-Policy") and "no-store" in r.getheader("Cache-Control")
@@ -375,11 +378,13 @@ def test_admin_only_documents_are_hidden_from_everyone_else(api):
     assert c.preplan_docs.for_incident(c.store.incident(api.iid), "viewer") == []
 
 
-# -- storage: presigned links ------------------------------------------------------------------------------------------------
+# -- storage: streamed by the hub, never linked ----------------------------------------------------------------------------
 
 class FakeS3:
+    """The bucket: send() for PUT / GET / DELETE (sizeup/attachments.py S3), opener() for a streamed GET."""
+
     def __init__(self):
-        self.objects, self.calls = {}, []
+        self.objects, self.calls, self.opened = {}, [], []
 
     def __call__(self, method, url, headers, body, timeout):
         key = urlsplit(url).path.lstrip("/")
@@ -394,49 +399,82 @@ class FakeS3:
             return 204, {}, b""
         return 400, {}, b""
 
+    def opener(self, url, headers, timeout):
+        u = urlsplit(url)
+        key = u.path.lstrip("/")
+        r = io.BytesIO(self.objects[key][0] if key in self.objects else b"<Code>NoSuchKey</Code>")
+        self.opened.append({"url": url, "query": u.query, "headers": headers, "timeout": timeout, "r": r})
+        return (200 if key in self.objects else 404), {"Content-Length": str(len(r.getvalue()))}, r
+
 
 def s3_store():
     fake = FakeS3()
-    st = docstore.S3DocStore("example-bucket", "preplan-docs", region="us-east-1", send=fake,
+    st = docstore.S3DocStore("example-bucket", "preplan-docs", region="us-east-1", send=fake, opener=fake.opener,
                              creds=lambda: aws.Credentials("AKIDEXAMPLE", "secret", "session-token"))
     return st, fake
 
 
-def test_s3_links_are_presigned_and_expire_in_two_minutes(api):
+def test_documents_are_streamed_by_the_hub_and_never_linked(api, monkeypatch):
+    monkeypatch.setattr(docstore, "CHUNK", 16)
     st, fake = s3_store()
     api.cad.preplan_docs.store = st
     code, out = upload(api, png(), email=JULIAN)
     assert code == 200
     did = out["doc"]["id"]
     (key, (body, ctype)), = [(k, v) for k, v in fake.objects.items() if "/original." in k]
-    assert any(k.endswith("/plan.png") for k in fake.objects)
     assert re.fullmatch(r"preplan-docs/[0-9a-f]{16}/original\.png", key) and ctype == "image/png"
     put = next(h for m, k, h in fake.calls if m == "PUT")
     assert put["x-amz-server-side-encryption"] == "AES256"
-    code, raw, h = get(api, f"/api/cad/preplan/docs/{did}/file", "", VAL)
-    assert code == 302 and raw == b""
-    assert h["Cache-Control"] == "private, no-store" and h["Referrer-Policy"] == "no-referrer"
-    u = urlsplit(h["Location"])
-    q = parse_qs(u.query)
-    assert u.netloc == "example-bucket.s3.us-east-1.amazonaws.com" and u.path == f"/{key}"
-    assert q["X-Amz-Expires"] == ["120"] and q["X-Amz-SignedHeaders"] == ["host"] and q["X-Amz-Signature"]
-    assert q["response-content-type"] == ["image/png"]
-    assert q["response-content-disposition"] == [f'inline; filename="site-doc-{did}.png"']
-    assert q["response-cache-control"] == ["private, no-store"]
-    assert "First floor" not in h["Location"]                             # never the title
-    assert int(q["X-Amz-Expires"][0]) <= 300
-    assert st.link(key, "image/png", "inline", expires=3600).count("X-Amz-Expires=120") == 1       # never longer
-    # the signature is S3's query authentication: UNSIGNED-PAYLOAD
-    at_ = datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
-    a = aws.presign("https://example-bucket.s3.us-east-1.amazonaws.com/k", aws.Credentials("A", "S"), "us-east-1", "s3",
-                    120, at=at_, payload_hash="UNSIGNED-PAYLOAD")
-    b = aws.presign("https://example-bucket.s3.us-east-1.amazonaws.com/k", aws.Credentials("A", "S"), "us-east-1", "s3",
-                    120, at=at_)
-    assert a != b
-    # a delete removes the bytes
+    code, stream, ctype, h = api.get(f"/api/cad/preplan/docs/{did}/file", "", who(VAL))
+    assert code == 200 and ctype == "image/png" and len(stream) == len(body)
+    assert h == {"Cache-Control": "private, no-store", "Referrer-Policy": "no-referrer", "X-Content-Type-Options": "nosniff",
+                 "Content-Disposition": f'inline; filename="site-doc-{did}.png"',
+                 "Content-Security-Policy": "default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; sandbox; "
+                                            "frame-ancestors 'self'"}
+    pieces = list(stream)
+    assert len(pieces) > 1 and all(len(x) <= 16 for x in pieces) and b"".join(pieces) == body     # in chunks, the same bytes
+    stream.close()
+    o, = fake.opened
+    assert o["r"].closed and o["query"] == "" and o["timeout"] == docstore.READ_S             # a signed GET, no link
+    assert o["headers"]["Authorization"].startswith("AWS4-HMAC-SHA256 ")
+    assert "Location" not in h and not any("X-Amz" in str(v) for v in h.values())
+    code, raw, h = get(api, f"/api/cad/preplan/docs/{did}/plan", "", VAL)
+    assert code == 200 and raw == fake.objects[key.replace("original.png", "plan.png")][0] and h["X-Content-Type-Options"] == "nosniff"
+    code, raw, h = get(api, f"/api/cad/preplan/docs/{did}/file", "dl=1", VAL)
+    assert h["Content-Disposition"] == f'attachment; filename="site-doc-{did}.png"'
+    assert ppd.DOWNLOADS._value == 4                                      # every slot given back
     assert call(api, f"/api/cad/preplan/docs/{did}", {"action": "delete"}, JULIAN)[0] == 200
     assert fake.objects == {}
     assert get(api, f"/api/cad/preplan/docs/{did}/file", "", VAL)[0] == 404
+
+
+def test_no_presigned_link_is_ever_made_for_a_document():
+    root = Path(__file__).resolve().parent.parent / "sizeup"
+    for f in ("docstore.py", "cad/preplan_docs.py", "cad/api.py", "web/server.py", "web/static/preplan-docs.js"):
+        src = (root / f).read_text()
+        assert "presign(" not in src and "X-Amz-Expires" not in src and "response-content-disposition" not in src, f
+    assert not [p for p in root.rglob("*.py") if "SIZEUP_PREPLAN_DOCS_LINKS" in p.read_text()]
+    assert not hasattr(docstore.S3DocStore, "link")
+
+
+def test_downloads_at_once_are_bounded(api, monkeypatch):
+    monkeypatch.setattr(ppd, "DOWNLOAD_WAIT_S", 0.05)
+    did = upload(api, png())[1]["doc"]["id"]
+    held = []
+    for _ in range(4):
+        code, stream, _, _ = api.get(f"/api/cad/preplan/docs/{did}/file", "", who(VAL))
+        assert code == 200
+        held.append(stream)                                              # a slow client: still sending
+    code, raw, ctype, h = api.get(f"/api/cad/preplan/docs/{did}/file", "", who(VAL))
+    assert code == 503 and h["Retry-After"] and "Busy" in json.loads(raw)["error"]
+    held.pop().close()                                                   # one done (or dropped)
+    code, stream, _, _ = api.get(f"/api/cad/preplan/docs/{did}/file", "", who(VAL))
+    assert code == 200
+    stream.close()
+    for x in held:
+        x.close()
+    assert ppd.DOWNLOADS._value == 4
+    assert ppd.DOWNLOAD_WRITE_S <= 60                                     # server.py drops a client that takes nothing
 
 
 def test_without_storage_uploads_say_so(api):
@@ -942,13 +980,3 @@ def test_local_files_are_never_readable_by_others(tmp_path):
     k = st.key("0123456789abcdef", "original.png")
     st.put(k, b"x", "image/png")
     assert os.stat(tmp_path / k).st_mode & 0o777 == 0o600
-
-
-def test_the_s3_store_can_serve_through_the_hub_instead_of_links(api):
-    st, fake = s3_store()
-    st.links = False
-    api.cad.preplan_docs.store = st
-    did = upload(api, png())[1]["doc"]["id"]
-    code, raw, h = get(api, f"/api/cad/preplan/docs/{did}/file", "", VAL)
-    assert code == 200 and raw.startswith(b"\x89PNG") and h["X-Content-Type-Options"] == "nosniff"
-    assert "Location" not in h
