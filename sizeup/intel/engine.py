@@ -592,15 +592,14 @@ class IntelEngine:
         if ev is None and subject and not fresh:
             ev = next((e for e in self.events.open_events() if e.subject == subject), None)
         if ev is None and not fresh:
-            # a new report of what was just disregarded or dismissed (the same place, or none on the same source) is
-            # new evidence: the event comes back and pushes again (#492 re-check: never hidden by a mute)
+            # a person's Dismiss holds: a new mention of a dismissed event's subject within mute_min is recorded at log,
+            # never re-opened or pushed (only a nameless disregard's "possibly cancelled" event comes back, above)
             mute = float(self.policy.cfg.get("mute_min", 15)) * 60
             for c in self.events.recent_closed(pack.name, cat, now - mute) if mute else []:
                 cp = c.place() if c.precision != "none" else None
-                if (place is None and cp is None and c.source_key == key) or (
-                        place is not None and cp is not None and same_place(place, cp)):
-                    ev, reopened = c, True
-                    ev.status, ev.note = "open", "re-opened"
+                if c.status == "dismissed" and ((place is None and cp is None and c.source_key == key) or (
+                        place is not None and cp is not None and same_place(place, cp))):
+                    mode = lowest(mode, "log")
                     break
         before = copy.deepcopy(ev) if ev is not None else None
         rules = sorted({(r.id, r.v, round(float(w), 4)) for _t, r, w in contrib})
