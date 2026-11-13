@@ -178,18 +178,23 @@ def test_the_call_out_and_the_read_back_are_one_event_and_the_read_back_places_i
     [up] = e.feed(row("t2", "units respond to 100 Example Ave", 5030))          # the cue: same window, now placed
     assert up.id == ev.id and up.precision == "address" and up.traffic_ids == ["t1", "t2"]
     assert len({x[0].id for x in sink.events}) == 1                              # never a second event
-    # a place found within repush_min (10 min): not pushed again (held as "merged"), the map has it
-    assert [d.would_push for _e, d in sink.pushes] == [True, False] and sink.pushes[1][1].suppressed == "merged"
+    # the place first heard 30 s after the first push: pushed once more, whatever repush_min (10) says (M1)
+    assert [d.would_push for _e, d in sink.pushes] == [True, True] and sink.pushes[1][1].repush
+    assert sink.pushes[1][1].message["body"].startswith("100 Example Ave")
+    clock.t = 5100
+    e.feed(row("t3", "units respond to 100 Example Ave, smoke now from the roof", 5100))
+    assert len([d for _e, d in sink.pushes if d.would_push]) == 2            # nothing new: no third push
 
 
 def test_a_read_back_with_no_rule_words_confirms_the_place():
     clock = Clock(5000)
     e, sink = engine(clock=clock)
-    [ev] = e.feed(row("t1", "smoke coming from the house, maybe 100 Example Ave", 5000))
+    [ev] = e.feed(row("t1", "smoke coming from the house, maybe 100 Example Ave", 5000, talker="Unit 7"))
     assert ev.precision == "address" and not ev.confirmed
     clock.t = 5040
-    [up] = e.feed(row("t2", "copy, 100 Example Ave", 5040))                      # no rule words: a read-back
-    assert up.id == ev.id and up.confirmed and up.traffic_ids == ["t1", "t2"]
+    assert e.feed(row("t2", "car 5 copy, en route to 100 Example Ave", 5040, talker="Unit 5")) == []   # another job
+    [up] = e.feed(row("t3", "copy, 100 Example Ave", 5050, talker="Unit 7"))     # the same talker: its read-back
+    assert up.id == ev.id and up.confirmed and up.traffic_ids == ["t1", "t3"]
 
 
 def test_a_place_found_later_pushes_again_once_within_the_repush_limits():
@@ -205,13 +210,18 @@ def test_a_place_found_later_pushes_again_once_within_the_repush_limits():
     assert pushed[1].message["title"] == "PD · Smoke / fire reported · Port Chester"
 
 
-def test_the_window_closes_and_a_later_mention_is_a_new_event():
+def test_the_same_incident_mentioned_again_updates_and_never_pushes_again():
     clock = Clock(1000)
     e, sink = engine(clock=clock)
     [a] = e.feed(row("t1", "smoke coming from the roof", 1000))
-    clock.t = 1000 + 600
-    [b] = e.feed(row("t2", "smoke coming from the roof", 1600))
-    assert a.id != b.id
+    for k, t in enumerate((1300, 1600, 2000)):                      # "still smoke showing" every few minutes (H3)
+        clock.t = t
+        out = e.feed(row(f"t{k + 2}", "still smoke showing from the roof", t))
+        assert [x.id for x in out] in ([a.id], [])
+    assert sum(d.would_push for _e, d in sink.pushes) == 1
+    clock.t = 1000 + 1000 + 21 * 60                                 # past merge_min (20) after the last: a new one
+    [b] = e.feed(row("t9", "smoke coming from the roof", clock.t))
+    assert b.id != a.id
 
 
 def test_the_same_place_from_another_source_merges():
@@ -287,7 +297,7 @@ def test_rate_caps_hold_pushes_and_a_digest_counts_them():
     e, sink = engine({"intel": {"per_hour": 2, "digest_min": 15}}, clock=clock)
     for i in range(4):
         clock.t = 10_000 + i * 300
-        e.feed(row(f"t{i}", "shots fired", clock.t))
+        e.feed(row(f"t{i}", "shots fired", clock.t, source=f"p25:mrrs:92{i}"))        # four sources: four events
     ds = [d for _e, d in sink.pushes]
     assert [d.would_push for d in ds] == [True, True, False, False] and ds[2].suppressed == "rate"
     e.tick(10_000 + 3 * 300 + 15 * 60)
@@ -327,7 +337,7 @@ def test_unconfirmed_places_say_so():
     ev = Event(id=3, domain="police", category="weapons", precision="address", label_full="100 Example Ave, Rye",
                town="Rye", confirmed=False, first_at=0, level="high", priority=5)
     m = push_mod.compose(ev, "PD", {"label": "Weapon / shots", "tag": "warning"})
-    assert m["body"].startswith("100 Example Ave (unconfirmed) · ")
+    assert m["body"].startswith("Example Ave, 100 blk (unconfirmed) · ")        # never the house number (H1)
 
 
 @pytest.mark.parametrize("label, forbidden, why", [
@@ -348,6 +358,14 @@ def test_a_scrubbed_push_is_withheld_and_said_so():
     def bad_locate(text, scope):
         return Place("landmark", 41, -73, 75, "Officer Sample Park, Rye", "Rye", True, 0.9)
     e, sink = engine(locate=bad_locate)
+    [ev] = e.feed(row("t1", "shots fired by the park", 1000, talker="Officer Sample"))
+    assert ev.precision == "none"                                    # a label naming the talker is no place (L7)
+    [(_e, d)] = sink.pushes
+    assert d.would_push and "Officer" not in d.message["title"] + d.message["body"]
+
+    def bad_town(text, scope):
+        return Place("landmark", 41, -73, 75, "Example Park", "Officer Sample", True, 0.9)
+    e, sink = engine(locate=bad_town)
     [ev] = e.feed(row("t1", "shots fired by the park", 1000, talker="Officer Sample"))
     [(_e, d)] = sink.pushes
     assert not d.would_push and d.suppressed == "scrub" and ev.suppressed == "scrub" and ev.pushed_at is None
@@ -663,3 +681,117 @@ def test_consider_only_enqueues_on_the_callers_thread(live, monkeypatch):
     with cad.store.lock:                                               # even under the caller's store lock
         cad.comms.on_context_text("c1-t0")
     assert called == [] and n.sent == [] and cad.intel._q.qsize() == 1
+
+
+# -- the #492 review ---------------------------------------------------------------------------------------------------
+
+@pytest.mark.parametrize("text, gone", [
+    ("vehicle New York ABC 1234 heading down Example Ave", "1234"),
+    ("plate ABC-1234 heading down Example Ave", "1234"),
+    ("silver sedan ABC 1234 on Example Ave", "1234"),
+    ("ID 1452 Example Ave", "1452"),
+    ("radio 1452 at Example Ave", "1452"),
+    ("DOB 01/02/1990, lives on Example Ave", "1990"),
+])
+def test_h1_plate_and_id_digits_never_reach_the_gazetteer(text, gone):
+    out = place_mod.strip(text, "mrrs", "police")
+    assert gone not in out and "Example Ave" in out
+    assert "100" in place_mod.strip("unit 3 at 100 Example Ave", "mrrs", "police")      # only the unit's number goes
+
+
+def test_h1_a_number_said_after_an_id_word_is_never_pushed_as_the_address():
+    def plate_locate(text, scope):
+        return Place("address", 41.0, -73.66, 25.0, "1234 Example Ave, Port Chester", "Port Chester", True, 0.9)
+    e, sink = engine(locate=plate_locate)
+    e.feed(row("t1", "shots fired, suspect vehicle ID 1234 Example Ave", 1000))
+    [(_e, d)] = [(x, d) for x, d in sink.pushes if d.would_push]
+    assert "1234" not in d.message["body"] and d.message["body"].startswith("Example Ave · ")
+    assert push_mod.scrub({"title": "", "body": "ABC 1234 Example Ave"}) == "plate"
+
+
+def test_h2_disregard_then_a_routine_cue_never_pushes_again():
+    clock = Clock(1000)
+    e, sink = engine(clock=clock)
+    e.feed(row("t1", "shots fired at Sample St and Test Rd", 1000))
+    e.feed(row("t2", "disregard, units disregard", 1010))
+    for k, text in enumerate(("respond to Sample St", "report of shots fired at Sample St and Test Rd")):
+        clock.t = 1020 + k * 60
+        e.feed(row(f"t{3 + k}", text, clock.t))
+    assert sum(d.would_push for _e, d in sink.pushes) == 1
+    clock.t = 1010 + 16 * 60                                     # past mute_min (15): a new mention is a new event
+    assert e.feed(row("t9", "shots fired at Sample St and Test Rd", clock.t))
+
+
+def test_h2_a_dismissed_event_doesnt_come_straight_back(live):
+    cad, n = live
+    cad.comms.record(ctx_row("c1-t0", "shots fired at Sample St and Test Rd", cad.clock()))
+    cad.intel.consider("c1-t0")
+    cad.intel.drain()
+    [ev] = cad.intel.events.open_events()
+    cad.intel_admin.dismiss(ev.id, {"operator": "Lt. Test"})
+    cad.comms.record(ctx_row("c2-t0", "units respond, shots fired at Sample St and Test Rd", cad.clock() + 5))
+    cad.intel.consider("c2-t0")
+    cad.intel.drain()
+    assert len(n.sent) == 1 and cad.intel.events.open_events() == []
+
+
+def test_h4_intel_writes_never_bump_the_cad_rev(live):
+    cad, n = live
+    cad.comms.record(ctx_row("c1-t0", "respond to 100 Example Ave, smoke coming from the house", cad.clock()))
+    rev, irev = cad.store.rev, cad.intel.events.rev
+    cad.intel.consider("c1-t0")
+    cad.intel.drain()
+    assert n.sent and cad.store.rev == rev and cad.intel.events.rev > irev
+    cad.comms.context_broadcast = True
+    assert cad.state()["intel"]["open"]                          # the card reads by intel's own rev
+
+
+def test_m3_the_kill_switch_enabled_and_quiet_hours_stop_the_digest():
+    for extra in ({"push": False}, {"quiet_from": "00:00", "quiet_to": "23:59"}):
+        clock = Clock(10_000)
+        e, sink = engine({"intel": {"per_hour": 1, "digest_min": 15}}, clock=clock)
+        for i in range(3):
+            clock.t = 10_000 + i * 60
+            e.feed(row(f"t{i}", "shots fired", clock.t, source=f"p25:mrrs:92{i}"))
+        e.policy.configure({"per_hour": 1, "digest_min": 15, **extra})
+        e.tick(10_000 + 3600)
+        assert sink.digests == [], extra
+
+
+def test_m4_the_rules_are_admins_only_and_l3_shadow_events_too(rig):
+    cad, api = rig
+    assert get(api, "/api/cad/intel", who=JULIAN)[0] == 403 and get(api, "/api/cad/intel", who=VAL)[0] == 403
+    assert get(api, "/api/cad/intel", who=COREY)[0] == 200
+    cad.intel_admin.settings_op("category", {"pack": "police", "category": "alarm", "mode": "shadow"}, "test")
+    cad.comms.record(ctx_row("c7-t0", "commercial fire alarm activation at the plaza", cad.clock() + 1))
+    cad.intel.consider("c7-t0")
+    cad.intel.drain()
+    viewer = get(api, "/api/cad/intel/events", "mode=shadow,log,map,push&status=all", VAL)[1]["events"]
+    admin = get(api, "/api/cad/intel/events", "mode=shadow,log,map,push&status=all", COREY)[1]["events"]
+    assert all(e["mode"] in ("map", "push") for e in viewer) and any(e["mode"] == "shadow" for e in admin)
+
+
+def test_m5_the_first_prune_waits_hours_and_l2_a_forwarding_station_queues_nothing(tmp_path):
+    cad = make_cad(tmp_path)
+    from sizeup.intel.engine import PRUNE_FIRST_S, PRUNE_S
+    assert cad.intel._pruned - cad.clock() >= PRUNE_FIRST_S - PRUNE_S - 5
+    cad.intel.active = lambda: False
+    cad.intel.consider("x")
+    assert cad.intel._q.qsize() == 0
+
+
+def test_l1_counted_only_once_the_sink_takes_it():
+    class Refusing(RecordingSink):
+        def push(self, ev, d):
+            super().push(ev, d)
+            return False
+    e = IntelEngine(settings={}, events=MemoryEvents(), sink=Refusing(), locate=example_locate, thread=False, clock=Clock())
+    [ev] = e.feed(row("t1", "shots fired", 1000))
+    assert ev.pushed_at is None and ev.push_count == 0 and e.policy.sent == [] and ev.suppressed == "unsent"
+
+
+def test_l6_the_hash_covers_towns_scope_and_context_factor():
+    d = json.loads((rules_mod.DATA / "police.json").read_text())
+    h = rules_mod.ruleset_hash(rules_mod.load_packs([d]))
+    for k, v in (("towns", {"p25:mrrs:9211": ["Rye"]}), ("context_factor", 0.2), ("scope", {"services": ["police"]})):
+        assert rules_mod.ruleset_hash(rules_mod.load_packs([dict(d, **{k: v})])) != h, k

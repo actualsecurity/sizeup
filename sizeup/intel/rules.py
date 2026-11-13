@@ -278,7 +278,8 @@ def load_packs(paths_or_dicts=None, overrides: dict | None = None) -> list[Pack]
 
 def ruleset_hash(packs: list[Pack]) -> str:
     """A short hash of everything that decides a hit (the packs' sources as compiled, with their overrides)."""
-    blob = json.dumps([[p.name, p.version, p.mode, p.threshold, p.window_s, p.categories,
+    blob = json.dumps([[p.name, p.version, p.mode, p.threshold, p.window_s, p.categories, p.context_factor, p.towns,
+                        p.scope,
                         [[r.id, r.v, r.w, r.mode, r.enabled, r.category, [x.src for x in r.any], [x.src for x in r.nots]]
                          for r in p.rules], [x.src for x in p.suppress]] for p in packs], sort_keys=True, default=str)
     return hashlib.sha256(blob.encode()).hexdigest()[:12]
