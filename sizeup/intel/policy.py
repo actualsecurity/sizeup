@@ -22,6 +22,9 @@ test pre-alert topic from day one, caps generous for testing):
     max_age_min        15       a transmission older than this (a startup backfill, a late re-record) is never a
                                 pre-alert: a restart doesn't replay old pushes
     quiet_from / quiet_to  ""   "HH:MM" local: no pushes in between (log and map go on); "" = none
+    listen             True     a "Listen" link on each push (sizeup/intel/listen.py), playable listen_expiry_min (20),
+                                listen_before_s (45) before the first transmission to listen_after_s (60) after the
+                                last, at listen_kbps (24)
 
 Over a cap the event is kept (and shown) with suppressed "rate"; a digest of them goes out every digest_min (15) at
 priority 2, counts only.
@@ -35,10 +38,14 @@ from sizeup.intel.model import Decision, Event, mode_rank
 
 DEFAULTS = {"enabled": True, "push": True, "per_hour": 30, "per_day": 200, "per_category_hour": 10, "repush_min": 10,
             "max_repush": 2, "quiet_from": "", "quiet_to": "", "digest_min": 15, "max_age_min": 15,
-            "merge_min": 20, "mute_min": 15, "place_repush_min": 5, "move_min": 5}
+            "merge_min": 20, "mute_min": 15, "place_repush_min": 5, "move_min": 5,
+            # the push's "Listen" link (sizeup/intel/listen.py): on, minutes it plays, seconds around the alert, bitrate
+            "listen": True, "listen_expiry_min": 20, "listen_before_s": 45, "listen_after_s": 60, "listen_kbps": 24}
+BOOLS = ("enabled", "push", "listen")
 LIMITS = {"per_hour": (1, 1000), "per_day": (1, 10000), "per_category_hour": (1, 1000), "repush_min": (0, 1440),
           "max_repush": (0, 20), "digest_min": (1, 1440), "max_age_min": (1, 1440),
-          "merge_min": (1, 240), "mute_min": (0, 240), "place_repush_min": (0, 60), "move_min": (1, 120)}
+          "merge_min": (1, 240), "mute_min": (0, 240), "place_repush_min": (0, 60), "move_min": (1, 120), "listen_expiry_min": (1, 720),
+          "listen_before_s": (0, 600), "listen_after_s": (0, 600), "listen_kbps": (16, 64)}
 LEVELS = ((0.8, "high"), (0.6, "medium"), (0.0, "low"))
 
 
@@ -54,7 +61,7 @@ def settings(ov: dict | None) -> dict:
     """The "intel" section over the defaults (bad values: the default)."""
     out = dict(DEFAULTS)
     for k, v in (ov or {}).items():
-        if k in ("enabled", "push") and isinstance(v, bool):
+        if k in BOOLS and isinstance(v, bool):
             out[k] = v
         elif k in LIMITS and isinstance(v, (int, float)) and not isinstance(v, bool) and LIMITS[k][0] <= v <= LIMITS[k][1]:
             out[k] = int(v)
