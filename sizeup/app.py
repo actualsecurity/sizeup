@@ -621,7 +621,8 @@ class App:
             fence = Fence.from_env(log=log)      # the hub's single-writer lock (sizeup/handoff.py): uploads only while ours
             self.fence = fence
             if fence is not None:                 # a dispatch's voice, attached after the answer (#426): the writer's only
-                self.cad.may_write = fence.ok
+                self.cad.may_write = fence.ok     # ... and every write to cad.sqlite, a GET's side effects too (#501)
+                self.cad.store.db.log = log
             self.cache_mirror = CacheMirror.from_env(Path(cfg.cad_db).parent, log=log, fence=fence.ok if fence else None)
         self._layers_lock = threading.Lock()
         self._layers_on = False                   # start_layers() asked for, stop_layers() not since

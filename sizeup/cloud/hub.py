@@ -635,6 +635,8 @@ class HubApp(App):
                                  shared_device="", dispatch_tts_python=""))
         self.receivers, self.modes = [], []
         self.audio.may_write = self._may_write_audio
+        self.mdb.may_write = self._may_write_audio       # hub.sqlite too: a fenced task writes neither (#501)
+        self.mdb.db.log = self.audio.db.log = log
         self.audio.may_delete = self._may_delete_audio
         self.hub = Hub(self, cfg, log)
         # station health (GitHub #79): the alerts, the admins' Settings > Health (#203), the push to the status topic in effect (Settings, else

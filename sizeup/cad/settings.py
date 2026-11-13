@@ -2429,7 +2429,11 @@ class Editor:
         if not EMAIL.fullmatch(email):
             raise CadError("not an email address")
         r = self.store.one("SELECT name, callsign FROM operators WHERE email = ?", (email,))
-        if r is None:
+        if r is None and not self.store.may_write():
+            # a fenced hub task (not the leader, sizeup/fence.py, #501): signed in all the same, as a dispatcher named
+            # by their email, nothing written; the leader adds them on their next request there
+            r = {"name": email, "callsign": ""}
+        elif r is None:
             with self.store.tx() as db:
                 row = db.execute("SELECT id, name, callsign, email FROM operators WHERE email = ? OR name = ?",
                                  (email, email)).fetchone()

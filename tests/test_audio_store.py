@@ -308,9 +308,12 @@ def test_one_uploader_at_a_time(tmp_path):
 
 def test_only_the_leader_uploads_or_deletes(tmp_path):
     bucket = FakeBucket()
-    leader = {"ok": False}
+    leader = {"ok": True}
     a = db(tmp_path, s3store(bucket), may_write=lambda: leader["ok"])
-    a.put("FG1-5", tone(), "clip", at=time.time() - 10 * DAY, channel="FG1")
+    a.put("FG1-5", tone(), "clip", at=time.time() - 10 * DAY, channel="FG1")      # spooled while the leader
+    leader["ok"] = False
+    a.put("FG1-6", tone(), "clip", channel="FG1")          # not the leader: not written at all (#501)
+    assert a.db.execute("SELECT COUNT(*) FROM audio WHERE id = 'FG1-6'").fetchone()[0] == 0
     assert a.upload_pending() == 0 and a.prune_clips(time.time()) == 0 and a.has("FG1-5") and bucket.calls == []
     leader["ok"] = True
     assert a.upload_pending() == 1

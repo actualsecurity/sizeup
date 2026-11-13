@@ -375,9 +375,10 @@ def test_a_start_fails_the_rows_left_pending_too_long_ago(voice, tmp_path):
     assert (d["audio"], d["has_audio"], d["audio_note"]) == ("failed", False, service.VOICE_RESTARTED)
     assert any("1 dispatch(es) left waiting for their voice" in m for m in said) and later.resume_voice() == 0
     assert [a["name"] for a in later.store.full(iid)["assignments"]] == ["E60"]   # the dispatch itself: all there
-    # young at the open, too old by the time the voice is wired: failed then, not rendered
-    cad.dispatch(iid, {"unit_ids": [uid(cad, "E61")], "operator": "JD"})
-    now = [time.time()]
+    # young at the open, too old by the time the voice is wired: failed then, not rendered (the fenced process
+    # writes nothing at all, #501: the next one dispatches it)
+    later.dispatch(iid, {"unit_ids": [uid(cad, "E61")], "operator": "JD"})
+    now = [time.time() + 60]                                     # (later's clock)
     third = Cad(Settings(db=str(tmp_path / "cad.sqlite")), log=said.append, clock=lambda: now[0])
     assert rows(third, iid)[1]["audio"] == "pending"
     now[0] += 60
@@ -418,10 +419,16 @@ def test_the_audio_blobs_are_the_writers_only(tmp_path):
     with wave.open(buf, "wb") as w:
         w.setnchannels(1), w.setsampwidth(2), w.setframerate(16000), w.writeframes(b"\0\0" * 1600)
     riff = buf.getvalue()
-    cad.remote_voice = lambda args: (riff, "Voice: Kokoro am_michael")           # the station's voice, as the hub gets it
+    back = threading.Event()
+
+    def remote(args):
+        back.wait(5)
+        return riff, "Voice: Kokoro am_michael"                  # the station's voice, as the hub gets it
+    cad.remote_voice = remote
     iid = call(cad)
-    cad.may_write = lambda: False
-    cad.dispatch(iid, {"unit_ids": [uid(cad, "E60")], "operator": "JD"})
+    cad.dispatch(iid, {"unit_ids": [uid(cad, "E60")], "operator": "JD"})        # logged by the leader ...
+    cad.may_write = lambda: False                                # ... fenced before its voice is back (#501: the
+    back.set()                                                   # fenced process writes nothing at all)
     assert cad.voice.wait(5) and Blobs.puts == [] and rows(cad, iid)[0]["audio"] == "pending"
     cad.may_write = lambda: True
     cad.dispatch(iid, {"unit_ids": [uid(cad, "E61")], "operator": "JD"})

@@ -176,6 +176,16 @@ def _bool(body: dict, key: str) -> bool | None:
 
 
 class Cad:
+    @property
+    def may_write(self) -> Callable[[], bool]:
+        """The hub's single-writer fence (sizeup/fence.py; the App sets it): the store's, so that while it says False
+        nothing at all is written to cad.sqlite, a GET's side effects included (#501)."""
+        return self.store.may_write
+
+    @may_write.setter
+    def may_write(self, fn: Callable[[], bool]) -> None:
+        self.store.may_write = fn
+
     def __init__(self, s: Settings, geocoder: Callable[[str], list[dict] | None] | None = None,
                  log: Callable[[str], None] = print, clock: Callable[[], float] = time.time):
         self.s, self.geocoder, self.log, self.clock = s, geocoder, log, clock

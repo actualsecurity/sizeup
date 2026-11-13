@@ -53,6 +53,7 @@ from pathlib import Path
 from sizeup import tz
 from sizeup.cad import lists as lists_mod
 from sizeup.cad.lists import Lists
+from sizeup.fence import GuardedConnection
 
 TZ = tz.TZ                  # America/New_York: the console's time zone (sizeup/tz.py)
 # "Name <email>" when the operator signed in through Cloudflare Access (sizeup/cloud/access.py).
@@ -413,7 +414,9 @@ class Store:
         self.lists = lists or lists_mod.load()
         if self.path != ":memory:":
             Path(self.path).parent.mkdir(parents=True, exist_ok=True)
-        self.db = sqlite3.connect(self.path, check_same_thread=False, isolation_level=None)
+        # GuardedConnection (sizeup/fence.py, #501): no write gets through while may_write() says False (the hub's
+        # fence, set by the App), whoever makes it: a GET's side effects on a fenced task are skipped, never written
+        self.db = sqlite3.connect(self.path, check_same_thread=False, isolation_level=None, factory=GuardedConnection)
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA foreign_keys = ON")
         if self.path != ":memory:":
@@ -737,6 +740,15 @@ class Store:
 
     # -- plumbing -----------------------------------------------------------------------------------
 
+    @property
+    def may_write(self):
+        """May this process write the file now (the hub's fence, sizeup/fence.py; always True without one)?"""
+        return getattr(self, "_may_write", None) or self.db.may_write
+
+    @may_write.setter
+    def may_write(self, fn) -> None:
+        self._may_write = self.db.may_write = fn
+
     def tx(self):
         """`with store.tx() as db:` one transaction under the lock."""
         store = self
@@ -750,8 +762,11 @@ class Store:
             def __exit__(self, et, e, tb):
                 done = False
                 try:
-                    store.db.execute("ROLLBACK" if et else "COMMIT")
-                    done = not et
+                    # not ours any more (#501): rolled back, no rev, the rollback hook (the connection would refuse
+                    # the COMMIT anyway: this keeps the push and the change notes out of it too)
+                    keep = not et and store.may_write()
+                    store.db.execute("COMMIT" if keep else "ROLLBACK")
+                    done = keep
                     if done:
                         store.rev += 1
                 finally:
