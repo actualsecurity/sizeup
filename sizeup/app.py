@@ -3407,6 +3407,15 @@ def start_app(cfg: Config) -> App:
     return app.start()
 
 
+def adapter_password(cfg: Config):
+    """The hub's write-only station adapter password (sizeup/cloud/adapterpass.py): its SSM name and key from the
+    environment (the task definition); None off the hub."""
+    if cfg.cloud_role != "hub":
+        return None
+    from sizeup.cloud.adapterpass import AdapterPassword
+    return AdapterPassword.from_env(log=log)
+
+
 def make_server(app: App, fence=None, listener=None) -> WebServer:
     cfg = app.cfg
     server = WebServer(cfg.host, cfg.port, app.scene(), app.state, app.clip, app.close_incident, app.set_mode,
@@ -3419,7 +3428,7 @@ def make_server(app: App, fence=None, listener=None) -> WebServer:
                        vessels=app.vessels,
                        airband_ab=app.airband_ab if cfg.cloud_role != "hub" else None,
                        fence=fence, health_fn=lambda: app.health_extra(fence), listener=listener,
-                       perf=getattr(app, "perf", None))
+                       perf=getattr(app, "perf", None), adapter_password=adapter_password(cfg))
 
     def changed() -> None:             # a new talker is pushed at once, not on the next second
         server.poke()

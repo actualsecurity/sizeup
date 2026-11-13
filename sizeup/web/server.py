@@ -59,6 +59,12 @@ GET  /api/cad/perf/profile[?format=folded]  the last profile again (folded: its 
 GET  /api/cad/health           the hub only: Settings > Health (sizeup/cloud/health.py, #79, #203): the station's
                                health, its alerts and 24 h of their history; admins only (sizeup/cad/api.py
                                ADMIN_READS), polled by the tab while open, never in the state push
+GET  /api/cad/adapter-password the hub only: Settings > Health's station adapter password card (sizeup/cloud/adapterpass.py):
+                               its SSM version, when and who saved it, the next save, the adapter's state; admins only
+                               (ADMIN_READS); never the value, which the hub can't read
+POST /api/cad/adapter-password {"password", "again", "confirm"?}  admins, JSON with X-Sizeup-Action: adapter-password
+                               only: one new SSM version (write-only). Refused before the body is read for anyone
+                               else; at most one per 5 min; never logged, audited, answered or raised with the value
 GET  /api/cad/datasources, POST /api/cad/datasources/<key>/refresh
                                Settings > Data sources (sizeup/datasources.py, #186): every data pull, Refresh now
                                (sizeup/cad/api.py); polled by the panel while open, never in the state push
@@ -367,7 +373,8 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                  role: str = "", roads=None, gis=None, trains=None, weather=None, station_health=None, stream_gzip: bool = True,
                  aircraft=None, roadwork=None, set_adsb: Callable[[str], str | None] | None = None, vessels=None,
                  airband_ab: Callable[..., str | None] | None = None,
-                 gate: Gate | None = None, health_fn: Callable[[], dict] | None = None, perf=None):
+                 gate: Gate | None = None, health_fn: Callable[[], dict] | None = None, perf=None,
+                 adapter_password=None):
     """cad: a CadApi (sizeup/cad/api.py) and cad_b its own broadcaster (the console's state is
     small and separate from the monitor's, so neither page carries the other's). station: the hub's
     ingest (sizeup/cloud/hub.py Hub), which checks the station's token before reading any body.
@@ -385,7 +392,8 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
     station_health: the hub's StationHealth (sizeup/cloud/health.py): GET /api/cad/health.
     gate: draining and the hub's single-writer fence (Gate).
     health_fn: more for /healthz, asked on every check (cheap): the role, and what is still loading in the
-        background (#251). /healthz is 200 as soon as this serves the CAD, whatever is still loading."""
+        background (#251). /healthz is 200 as soon as this serves the CAD, whatever is still loading.
+    adapter_password: the hub's (sizeup/cloud/adapterpass.py AdapterPassword): /api/cad/adapter-password."""
     assets = Assets(STATIC_DIR)
     gate = gate or Gate()
     hub_says = json.dumps({"error": "this is the hub: station forwarding is switched on the station"}).encode()
@@ -640,6 +648,13 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                                           {"Cache-Control": "no-store"})
                 return self._send(200, json.dumps(out, separators=(",", ":")).encode(), "application/json",
                                   {"Cache-Control": "no-store"})
+            if path == ADAPTER_PASSWORD and adapter_password is not None and cad is not None:
+                if self.who is None:
+                    return self._send(403, b'{"error":"sign in"}', "application/json")
+                if (no := cad.read_refused(path, self.who)) is not None:
+                    return self._send(*no)
+                return self._send(200, json.dumps(adapter_password.status(cad.cad.store), separators=(",", ":")).encode(),
+                                  "application/json", {"Cache-Control": "no-store"})
             if path.startswith("/api/cad/") and cad is not None:
                 return self._send(*self._data(path, url.query, cad.get(path, url.query, self.who)))
             if path.startswith("/static/"):
@@ -700,6 +715,8 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                 return self._send(409, station_says(), "application/json")
             if path == "/api/cad/perf/profile" and perf is not None:
                 return self._profile(path)
+            if path == ADAPTER_PASSWORD and adapter_password is not None and cad is not None:
+                return self._adapter_password(path)
             if path.startswith("/api/cad/") and cad is not None:
                 try:
                     n = int(self.headers.get("Content-Length") or 0)
@@ -875,6 +892,81 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                 return self._send(202, json.dumps({"running": True, **p}).encode(), "application/json")
             self._send(200, json.dumps(out, separators=(",", ":")).encode(), "application/json", {"Cache-Control": "no-store"})
 
+        def _adapter_password(self, path: str) -> None:
+            """POST /api/cad/adapter-password: an admin's new station adapter password, written to SSM (write-only).
+            Who, the header and the length are checked before a byte of the body is read; the body is read into a
+            bytearray that is zeroed once parsed; the values go on as Hidden. Every answer and log line here is fixed
+            text or AWS's error code: never the body, never an exception's text."""
+            from sizeup.cloud.adapterpass import Hidden, SaveRefused
+
+            def no(code: int, msg: str, **more) -> None:
+                self.close_connection = True
+                return self._send(code, json.dumps({"error": msg, **more}).encode(), "application/json",
+                                  {"Cache-Control": "no-store"})
+            ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+            if ctype != "application/json" or self.headers.get("X-Sizeup-Action") != "adapter-password":
+                return no(400, "JSON with X-Sizeup-Action: adapter-password only")
+            if self.who is None:                  # never without a verified person (Cloudflare Access)
+                return no(403, "sign in")
+            if (refused := cad.permit(path, self.who, client=self._client())):
+                self.close_connection = True      # (the body, unread)
+                return self._send(*refused)
+            try:
+                n = int(self.headers.get("Content-Length") or "")
+            except ValueError:
+                n = -1
+            if not 0 < n <= ADAPTER_PASSWORD_BODY:
+                return no(400, "Bad or too large body")
+            raw = bytearray(n)
+            new = again = None
+            try:
+                view, got = memoryview(raw), 0
+                while got < n:
+                    k = self.rfile.readinto(view[got:])
+                    if not k:
+                        break
+                    got += k
+                view.release()
+                if got != n:
+                    return no(400, "Bad body")
+                try:
+                    body = json.loads(raw)
+                except (ValueError, UnicodeDecodeError):
+                    return no(400, "Bad JSON")
+                finally:
+                    raw[:] = bytes(len(raw))
+                if not isinstance(body, dict) or not isinstance(body.get("password"), str) \
+                        or not isinstance(body.get("again"), str):
+                    return no(400, "Bad request")
+                new, again = Hidden(body.pop("password")), Hidden(body.pop("again"))
+                confirm = body.get("confirm") is True
+                body.clear()
+                email = getattr(self.who, "email", "") or ""
+                try:
+                    operator = cad.cad.settings.standing(email)["operator"] if email else ""
+                except Exception:  # noqa: BLE001
+                    operator = ""
+                try:
+                    out = adapter_password.save(new, again, confirm, email, operator, cad.cad.store)
+                except SaveRefused as e:           # (its text is fixed: adapterpass.py)
+                    if e.status in (409, 429):
+                        cad.refused(path, self.who, str(e), self._client())
+                    extra = {"wait_s": round(e.wait_s)} if e.wait_s else {}
+                    if e.maybe_saved:
+                        extra["maybe_saved"] = True
+                    return self._send(e.status, json.dumps({"error": str(e), **extra}).encode(), "application/json",
+                                      {"Cache-Control": "no-store"})
+            except Exception as e:  # noqa: BLE001 - never its text (a value could be in it)
+                print(f"adapter password: save failed: {type(e).__name__}", flush=True)
+                return no(500, "Failed")
+            finally:
+                for h in (new, again):
+                    if h is not None:
+                        h.drop()
+                new = again = None
+            cad.did(path, self.who, {}, out, self._client())
+            return self._send(200, json.dumps({"ok": True, **out}).encode(), "application/json", {"Cache-Control": "no-store"})
+
         def _stream(self, b: Broadcaster) -> None:
             """SSE: the whole state first (or, with an id from this boot, only what changed since: Last-Event-ID
             when EventSource reconnects, ?since= when the page already has the state from a GET), then each push's changed sections (Broadcaster), each with its id. Nothing
@@ -926,6 +1018,8 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
     return Handler
 
 
+ADAPTER_PASSWORD = "/api/cad/adapter-password"
+ADAPTER_PASSWORD_BODY = 65536   # two values of at most 4 KB each, JSON-escaped
 PROFILE_WAIT_S = 60.0   # POST /api/cad/perf/profile answers with the profile up to this long; longer: 202, then GET
 
 
@@ -939,7 +1033,7 @@ class WebServer:
                  health: dict | None = None, access=None, access_log: Callable[[str], None] | None = None,
                  station_mode=None, role: str = "", roads=None, gis=None, trains=None, weather=None, station_health=None,
                  aircraft=None, roadwork=None, set_adsb=None, fence=None, health_fn: Callable[[], dict] | None = None,
-                 airband_ab=None, listener=None, vessels=None, perf=None):
+                 airband_ab=None, listener=None, vessels=None, perf=None, adapter_password=None):
         """listener: a socket already bound and listening on (host, port) to serve from (sizeup/app.py run_gated: the
         hub's port answered "updating" while the app was built; the connections that came meanwhile are served)."""
         self.access = access
@@ -965,7 +1059,7 @@ class WebServer:
             json.dumps(health or {"ok": True}, separators=(",", ":")).encode(), access, access_log, station_mode, role,
             roads, gis, trains, weather, station_health, aircraft=aircraft, roadwork=roadwork, set_adsb=set_adsb,
             vessels=vessels,
-            airband_ab=airband_ab, gate=self.gate, health_fn=health_fn, perf=perf))
+            airband_ab=airband_ab, gate=self.gate, health_fn=health_fn, perf=perf, adapter_password=adapter_password))
         if listener is not None:
             self.httpd.socket.close()                 # (the one TCPServer made, never bound)
             self.httpd.socket = listener

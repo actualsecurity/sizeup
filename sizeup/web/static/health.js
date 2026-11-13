@@ -490,6 +490,7 @@ const StationHealth = (() => {
       perfCard = el("div", "card s-card hl-card");
       node.append(perfCard);
     }
+    if (window.AdapterPasswordCard) AdapterPasswordCard.mount(node, perfCard);   // the station adapter's password
     if (last) render(last);
     renderPerf();
     poll();

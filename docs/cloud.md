@@ -855,6 +855,20 @@ Incidents come in from ranked sources. The interface is in `sizeup/sources/__ini
   (#305) is queued in the runner's `Resets` (`sizeup/sources/resets.py`) and runs `reset()` on the adapter's own thread before its next poll.
 - **Station only:** the hub refuses to load or run adapters (`HubRefused`). It only applies the station's forwarded
   events. The hub only ever sees an exception's type, never its text.
+- **The adapter's password, set from the hub (write-only):** Settings > Health > Station adapter password, admins only
+  (`sizeup/cloud/adapterpass.py`, `POST /api/cad/adapter-password`). A new password typed twice becomes the next
+  version of the station's SSM SecureString (`ssm:PutParameter` with the adapter's own KMS key); the station picks it up
+  as it does any new version (about 5 min). The hub can't read it back: its roles keep an explicit Deny on
+  `GetParameter*`, history, delete and label for `/sizeup-station/*` and on `kms:Decrypt` for the key; it may only
+  `PutParameter` that one parameter, `kms:Encrypt` through SSM for it, and `ssm:DescribeParameters` (metadata: the
+  version and when). The parameter's name and key come from the task definition (`SIZEUP_ADAPTER_PASSWORD_PARAM`,
+  `SIZEUP_ADAPTER_PASSWORD_KEY`, from `/sizeup-hub/...` by name), never the repo; without them the card says "Not
+  configured". Each save is one log-on attempt on the shared county account, so: at most one save per 5 min (after
+  the last save here or the last change in SSM), and while a source is stopped on refused log-ons ("login ...") only
+  with an explicit confirm. Each save is in the settings audit (who, when, the version) and the person's activity;
+  a save AWS didn't answer is audited as "no answer" and counts. The value is never logged, audited, answered or put
+  in an exception's text (AWS's own error message isn't kept, only its code). The hub never logs into the county app.
+  The department's CLI script still works the same; the card then shows the version as "not from the hub".
 - **Measurement:** each source's first-seen time per incident, and its lead over paging. Settings > Health shows both.
 - **Pre-alerts never make an incident.** These include a dispatcher on the feed's talkgroups opening a call to us,
   "incoming additional alarm" or "stand by for a page" naming us, and the phone ring. They show as "Possible incoming"

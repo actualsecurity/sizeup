@@ -17,6 +17,8 @@
               {"name":"SIZEUP_STATUS_TOPIC","valueFrom":"arn:aws:ssm:us-east-1:504804195561:parameter/sizeup-hub/status-topic"},
               {"name":"SIZEUP_511NY_USER","valueFrom":"arn:aws:ssm:us-east-1:504804195561:parameter/sizeup-hub/511ny-user"},
               {"name":"SIZEUP_511NY_PASS","valueFrom":"arn:aws:ssm:us-east-1:504804195561:parameter/sizeup-hub/511ny-pass"},
+              {"name":"SIZEUP_ADAPTER_PASSWORD_PARAM","valueFrom":"/sizeup-hub/adapter-password-param"},
+              {"name":"SIZEUP_ADAPTER_PASSWORD_KEY","valueFrom":"/sizeup-hub/adapter-password-key"},
               {"name":"SIZEUP_AISSTREAM_KEY","valueFrom":"arn:aws:ssm:us-east-1:504804195561:parameter/sizeup-hub/aisstream-key"}],
    "mountPoints":[{"sourceVolume":"shared","containerPath":"/run/sizeup-shared"},
                   {"sourceVolume":"dvr","containerPath":"/data/dvr","readOnly":false}],
