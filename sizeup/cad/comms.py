@@ -212,6 +212,9 @@ class Comms:
         self.fix = None                 # rows -> rows: the status hints' decorate (sizeup/cad/statushints.py)
         self.names_ours = None  # text -> [our unit codes] (the feed's matcher, #115): a page not ours naming them
         self.on_text = None     # traffic id -> None: a transcript arrived or changed (status suggestions, #37)
+        # traffic id -> None: a transcript arrived or changed on another P25 system's row (context only; the intel
+        # pre-alerts); never called for our rows. Called after the transaction has committed, never under store.lock.
+        self.on_context_text = None
         self._revs: dict = {}   # name -> (rev, value): what _per_rev made
         self.changes_broken = False      # an entry couldn't be written: every ?changed= answers reload (flush_changes)
         self.changes_floor = 0           # cursors below this are told to reload (the log has a gap before it)
@@ -300,34 +303,41 @@ class Comms:
                            "tier = ? WHERE id = ?", (*src, tid))
                 self._count(db, skey, start, max(0.0, float(t.get("end") or start) - start))
             self.touch(tid)
-            if other:
+            if not other:
                 # Another system's units never put traffic on our incidents by a rule (#415): no unit, airport or
                 # dispatcher link. Only a person's own link does (link()).
-                self.rev += 1
-                return sorted(r[0] for r in db.execute("SELECT incident_id FROM radio_links WHERE traffic_id = ?", (tid,)))
-            off = {r[0] for r in db.execute("SELECT incident_id FROM radio_link_exclusions WHERE traffic_id = ?", (tid,))}
-            links: dict[int, tuple[str, str]] = {}
-            for rig in rigs:
-                for r in db.execute(self.ON_EVENT_BY_UNIT, (rig, start, start)).fetchall():
-                    links.setdefault(r["incident_id"], ("unit", rig))
-            # No ID, no link (#163): an unidentified FG1 radio stays in the Radio view, whoever's call is running.
-            if p25 and known and t.get("talkgroup") in self.airport_tgs:
-                open_ap = db.execute(self.OPEN_AIRPORT, (airport.TYPE, start, start)).fetchall()
-                if len(open_ap) == 1:           # the Airport Incident talkgroup: the one open airport event's
-                    links.setdefault(open_ap[0]["id"], ("airport", ""))
-            for iid, (why, unit) in links.items():
-                if iid not in off:              # a person took it off that event: not again
-                    self._auto(db, tid, iid, why, unit)
-            if p25 and turn is not None and t.get("talkgroup") in self.incident_tgs:
-                self._dispatcher_links(db, tid, call_id, turn, bool(disp), links)
+                self._rule_links(db, tid, call_id, turn, p25, known, start, rigs, t.get("talkgroup"), bool(disp))
             self.rev += 1
             out = sorted(r[0] for r in db.execute("SELECT incident_id FROM radio_links WHERE traffic_id = ?", (tid,)))
+        if other:
+            if (t.get("text") or "").strip():
+                self._heard_context(tid)            # committed: the intel pre-alerts, never our consumers (on_text)
+            return out
         self._logged += 1
         if self._logged >= CHANGES_TRIM_EVERY:
             self._logged = 0
             self._trim_changes()
         self._heard(tid)
         return out
+
+    def _rule_links(self, db, tid: str, call_id: str, turn, p25: bool, known: bool, start: float, rigs: list[str],
+                    tg, disp: bool) -> None:
+        """record()'s automatic links for one of our rows: a unit on the event, the airport talkgroup, dispatch."""
+        off = {r[0] for r in db.execute("SELECT incident_id FROM radio_link_exclusions WHERE traffic_id = ?", (tid,))}
+        links: dict[int, tuple[str, str]] = {}
+        for rig in rigs:
+            for r in db.execute(self.ON_EVENT_BY_UNIT, (rig, start, start)).fetchall():
+                links.setdefault(r["incident_id"], ("unit", rig))
+        # No ID, no link (#163): an unidentified FG1 radio stays in the Radio view, whoever's call is running.
+        if p25 and known and tg in self.airport_tgs:
+            open_ap = db.execute(self.OPEN_AIRPORT, (airport.TYPE, start, start)).fetchall()
+            if len(open_ap) == 1:           # the Airport Incident talkgroup: the one open airport event's
+                links.setdefault(open_ap[0]["id"], ("airport", ""))
+        for iid, (why, unit) in links.items():
+            if iid not in off:              # a person took it off that event: not again
+                self._auto(db, tid, iid, why, unit)
+        if p25 and turn is not None and tg in self.incident_tgs:
+            self._dispatcher_links(db, tid, call_id, turn, disp, links)
 
     @staticmethod
     def _count(db, source: str, at: float, seconds: float = 0.0, calls: int = 1, radios=()) -> None:
@@ -414,6 +424,14 @@ class Comms:
                 self.on_text(tid)
             except Exception as e:  # noqa: BLE001 - a suggestion never stops the log
                 print(f"CAD: status suggestion for {tid}: {type(e).__name__}: {e}")
+
+    def _heard_context(self, tid: str) -> None:
+        """on_context_text, once the write has committed: whatever it does or raises never reaches the write."""
+        if self.on_context_text is not None:
+            try:
+                self.on_context_text(tid)
+            except Exception as e:  # noqa: BLE001 - a pre-alert never stops the log
+                self.log(f"CAD: context transcript {tid}: {type(e).__name__}: {e}")
 
     # A unit's assignment covering time T: from when it was put on the event until it cleared.
     ON_EVENT_BY_UNIT = ("SELECT DISTINCT a.incident_id FROM assignments a JOIN units u ON u.id = a.unit_id "
@@ -590,7 +608,8 @@ class Comms:
 
     def retext(self, tid: str, text: str, status: str, model: str = "", alt: dict | None = None) -> bool:
         """New text for a transmission. alt {text, model}: the other engine's transcript, kept to compare
-        ("both": Amazon Transcribe's is the text, whisper's the alternative)."""
+        ("both": Amazon Transcribe's is the text, whisper's the alternative). Another P25 system's row goes to
+        on_context_text only, never to on_text (as in record())."""
         with self.store.tx() as db:
             self.touch(tid)
             if alt is not None:
@@ -598,10 +617,14 @@ class Comms:
                            (str(alt.get("text") or ""), str(alt.get("model") or ""), tid))
             n = db.execute("UPDATE radio_traffic SET text = ?, status = ?, model = ?, updated_at = ? WHERE id = ?",
                            (text, status, model, self.clock(), tid)).rowcount
+            row = db.execute("SELECT system, talkgroup FROM radio_traffic WHERE id = ?", (tid,)).fetchone() if n else None
             if n:
                 self.rev += 1
         if n:
-            self._heard(tid)
+            if row is not None and row["talkgroup"] is not None and sources.is_context(row):
+                self._heard_context(tid)
+            else:
+                self._heard(tid)
         return bool(n)
 
     def set_alt(self, tid: str, alt: dict) -> bool:
