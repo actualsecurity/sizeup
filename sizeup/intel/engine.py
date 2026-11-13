@@ -658,7 +658,11 @@ class IntelEngine:
             target = self.events.get(job["event_id"]) if job["event_id"] else None
             if (job["why"] == "uncertain" and cat in pack.categories and res.confidence > 0 and win is not None
                     and tid in win.entries):
-                agree = cat == job["unsure"] and bool(c["infer_agree_push"])
+                own = self._scores(pack, win).get(cat)                 # the rules' OWN score, before the model's
+                # "agree" may push only when the rules already say this much themselves and the model is sure: the model
+                # never escalates on its own (an MVA into an MVA with injuries, an alarm into a fire) (#504 re-check)
+                agree = (cat == job["unsure"] and bool(c["infer_agree_push"]) and own is not None
+                         and own[0] >= float(c["infer_agree_min"]) and res.confidence >= float(c["infer_agree_conf"]))
                 rule = rules_mod.Rule(f"infer.{c['infer_provider']}", 1, cat,
                                       round(min(1.0, res.confidence * float(c["infer_weight"])), 4), [], [],
                                       str(c["infer_mode"]) if agree else lowest(str(c["infer_mode"]), str(c["infer_alone_mode"])),
@@ -680,10 +684,11 @@ class IntelEngine:
                             target = ev
             if target is None or target.status != "open" or target.confirmed or not res.location or self.locate is None:
                 return out
-            if not infer_mod.said(res.location, job["text"]):
+            loc = infer_mod.said(res.location, job["text"])
+            if not loc:
                 return out                    # words the transcript never said: never a place
             try:
-                place = self.locate(res.location, self._scope(pack, row, key))      # the gazetteer decides
+                place = self.locate(loc, self._scope(pack, row, key))      # the gazetteer decides
             except Exception:  # noqa: BLE001
                 place = None
             if place is None or push_mod.scrub_label(place.label, self._who(pack, target)):

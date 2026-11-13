@@ -135,7 +135,10 @@ class IntelAdmin:
                 "place": e["label_full"], "town": e["town"], "alts": e["alts"], "basis": e["basis"], "mode": e["mode"],
                 "priority": e["priority"], "pushed_at": e["pushed_at"], "suppressed": e["suppressed"],
                 "traffic_ids": e["traffic_ids"][-12:], "rules": e["rules"], "accept": bool(p.accept) if p else False,
-                "dismissed_by": e.get("dismissed_by", "")}
+                "dismissed_by": e.get("dismissed_by", ""),
+                # the model's category when it is the model's alone (not pushed): "model: MVA with injuries?" on the card
+                "suggested": (cat.get("label") or e["category"]) if any(str(r[0]).startswith("infer.") for r in e["rules"] or [])
+                and e["mode"] != "push" else ""}
 
     def state(self, now: float | None = None) -> dict | None:
         """The console's card: open events at map or push, newest first; None for a viewer who may not see them."""

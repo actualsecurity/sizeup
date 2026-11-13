@@ -45,6 +45,11 @@ window.IntelCard = (() => {
     const loc = el("div", "aa-loc" + (e.confirmed ? "" : " approx"), where(e));
     if (!e.confirmed && e.place) loc.title = ["Unconfirmed", e.basis, ...(e.alts || []).map((a) => `or ${a.label}`)].filter(Boolean).join("\n");
     li.append(loc);
+    if (e.suggested) {
+      const sug = el("div", "aa-loc approx", `model: ${e.suggested}?`);
+      sug.title = "The model's reading, not the rules': on the map only, never pushed";
+      li.append(sug);
+    }
     const src = el("div", "aa-src", `${deps.time(e.first_at)} · ${(e.traffic_ids || []).length} tx`);
     for (const id of (e.traffic_ids || []).slice(-4)) {
       const b = el("button", "mini play", st.playing === id ? "■" : "▶");

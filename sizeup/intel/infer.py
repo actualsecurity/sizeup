@@ -12,9 +12,11 @@ The model is asked, as JSON (structured output; the category an enum of the pack
 a one-line summary with no names. Then:
 
     category    one more hit, rule "infer.<provider>", weight confidence x infer_weight (0.6). It may push only when the
-                model AGREES with the rules (the category the rules were unsure about) and infer_agree_push is on; a
-                category the model alone brings is held to infer_alone_mode ("map"): on the card and the map, never a
-                push. A push otherwise needs the rules to reach their own threshold.
+                model AGREES with the rules: the category the rules were unsure about, the rules' own score for it at
+                least infer_agree_min (0.5) and the model's confidence at least infer_agree_conf (0.8), with
+                infer_agree_push on. Anything else (a category the model alone brings, a weak rule the model would
+                escalate: an MVA into an MVA with injuries) is held to infer_alone_mode ("map"): on the card as the
+                model's suggestion ("model: MVA with injuries?"), never a push.
     where       NEVER trusted as said: its street words must be in the transcript, then the gazetteer (place.Locator)
                 must find it; even so it is UNCONFIRMED (the push says street and block only, never a house number the
                 model gave), and it never replaces a place the rules confirmed
@@ -59,9 +61,11 @@ PRICES = {"anthropic.claude-haiku-5-5": (0.10, 0.50), "us.anthropic.claude-haiku
 DEFAULTS = {"infer": False, "infer_provider": "bedrock", "infer_model": "anthropic.claude-haiku-5-5",
             "infer_region": "us-east-1", "infer_daily_cap": 200, "infer_budget_usd": 5.0, "infer_low": 0.3,
             "infer_weight": 0.6, "infer_mode": "push", "infer_alone_mode": "map", "infer_agree_push": True,
+            "infer_agree_min": 0.5, "infer_agree_conf": 0.8,
             "infer_sample_pct": 0, "infer_usd_in": None, "infer_usd_out": None}
 LIMITS = {"infer_daily_cap": (0, 10000), "infer_budget_usd": (0, 500), "infer_low": (0, 1), "infer_weight": (0, 1),
-          "infer_sample_pct": (0, 100), "infer_usd_in": (0, 100), "infer_usd_out": (0, 500)}
+          "infer_sample_pct": (0, 100), "infer_usd_in": (0, 100), "infer_usd_out": (0, 500), "infer_agree_min": (0, 1),
+          "infer_agree_conf": (0, 1)}
 BACKOFF_S = 600.0
 CALL_TIMEOUT_S = 12.0
 PLACE_REASK_S = 600.0
@@ -124,11 +128,18 @@ def clean_text(text: str) -> str:
     return t[-TEXT_MAX:]
 
 
-def said(location: str, text: str) -> bool:
-    """Every telling word of the model's location (not the street type, not a number) is in the transcript."""
+def said(location: str, text: str) -> str:
+    """The model's location as far as the transcript says it: "" when a telling word of it (not the street type) is
+    not in the transcript; without its house number when that number isn't (the street alone)."""
     words = {w for w in re.findall(r"[a-z]+", (location or "").lower()) if len(w) >= 3 and w not in STREET_WORDS}
     have = set(re.findall(r"[a-z]+", (text or "").lower()))
-    return bool(words) and words <= have
+    if not words or not words <= have:
+        return ""
+    loc = (location or "").strip()
+    m = re.match(r"^\s*(\d+[A-Za-z]?)\s+(.*)$", loc)
+    if m and m.group(1).lower() not in set(re.findall(r"\d+[a-z]?", (text or "").lower())):
+        loc = m.group(2)                      # a number the transcript never said: dropped
+    return loc
 
 
 def prompt(req: Request) -> str:
@@ -296,6 +307,8 @@ class Inference:
         """Ask within the caps: on the infer thread (live) or here (replay); done(job, result) gets the answer.
         False: not asked (off, a cap, backing off, the queue full)."""
         now = self.clock()
+        if not self.allowed(now)[0]:
+            return False                          # off (or capped): no table, no usage read, nothing at all
         self._ensure()                            # the leader's first call: the table, and the usage so far
         with self._lock:
             ok, _why = self.allowed(now)

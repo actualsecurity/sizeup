@@ -53,15 +53,26 @@ def test_off_by_default():
 
 
 def test_only_what_the_rules_leave_uncertain_is_asked_and_agreement_may_push():
-    e, sink, p = setup(provider=FakeProvider(I.Result("mva_injury", 0.8, "none", "", "Crash with an injury.")))
+    e, sink, p = setup(provider=FakeProvider(I.Result("mva_injury", 0.9, "none", "", "Crash with an injury.")))
     e.feed(row("t1", "shots fired at Sample St and Test Rd", 1000))           # sure and placed: never asked
     e.feed(row("t0", "copy that", 1005))                                     # no hit: never asked
     assert p.asked == []
-    e.feed(row("t2", "report of an MVA on Example Ave, caller states someone hurt", 1010))   # 0.3 + cue: unsure
+    e.feed(row("t2", "report of an MVA on Example Ave, priority call", 1010))  # the rules' own 0.52: unsure, not weak
     assert len(p.asked) == 1 and "MVA" in p.asked[0].text
     [ev] = events(e, "mva_injury")
-    assert ["infer.bedrock", 1, 0.48] in ev.rules and ev.mode == "push"     # the model AGREES with the rules
+    assert ["infer.bedrock", 1, 0.54] in ev.rules and ev.mode == "push"     # the model AGREES, the rules say enough
     assert any(d.would_push for x, d in sink.pushes if x.category == "mva_injury")
+
+
+def test_the_model_never_escalates_a_weak_rule_into_a_push():
+    # the reviewer's case: "report of an MVA" (the rules 0.44) and the model sure of injuries: map, never a push
+    e, sink, p = setup(provider=FakeProvider(I.Result("mva_injury", 1.0, "none", "", "x")))
+    e.feed(row("t1", "report of an MVA on Example Ave", 1000))
+    [ev] = events(e, "mva_injury")
+    assert ev.mode == "map" and not any(d.would_push for _x, d in sink.pushes)
+    e2, sink2, _p = setup(provider=FakeProvider(I.Result("mva_injury", 0.6, "none", "", "x")))
+    e2.feed(row("t1", "report of an MVA on Example Ave, priority call", 1000))    # enough rules, an unsure model
+    assert [x.mode for x in events(e2, "mva_injury")] == ["map"]
 
 
 def test_the_model_alone_never_pushes():
@@ -89,15 +100,22 @@ def test_its_place_must_be_said_found_and_is_never_confirmed():
     [ev] = events(e, "weapons")
     assert len(p.asked) == 1 and ev.precision == "none"
 
+    asked = []
+
     def loc(t, s):
-        return Place("address", 41.0, -73.66, 25.0, "100 Example Ave, Port Chester", "Port Chester", True, 0.9) \
-            if t.startswith("100") else None
+        asked.append(t)
+        if t == "100 Example Ave":
+            return Place("address", 41.0, -73.66, 25.0, "100 Example Ave, Port Chester", "Port Chester", True, 0.9)
+        if t == "Example Ave":
+            return Place("street", 41.0, -73.66, 300.0, "Example Ave, Port Chester", "Port Chester", True, 0.7)
+        return None
     e, sink, p = setup(provider=FakeProvider(I.Result("weapons", 0.9, "address", "100 Example Ave", "x")), locate=loc)
-    e.feed(row("t1", "shots fired, shots fired, over by Example Ave", 1000))
+    e.feed(row("t1", "shots fired, shots fired, over by Example Ave", 1000))   # the street said, never the 100
     [ev] = events(e, "weapons")
-    assert ev.precision == "address" and not ev.confirmed and "place from inference" in ev.basis
-    bodies = [d.message["body"] for _x, d in sink.pushes if d.would_push]
-    assert bodies and "100 Example Ave" not in bodies[-1] and "Example Ave, 100 blk" in bodies[-1]   # street and block
+    assert "Example Ave" in asked and "100 Example Ave" not in asked          # the model's number dropped
+    assert ev.precision == "street" and not ev.confirmed and "place from inference" in ev.basis
+    assert I.said("100 Example Ave", "units to 100 Example Ave") == "100 Example Ave"
+    assert I.said("100 Example Ave", "units to Example Ave") == "Example Ave" and I.said("Quarry Ln", "x") == ""
 
 
 def test_it_never_replaces_a_place_the_rules_confirmed():
@@ -213,6 +231,13 @@ def test_the_bedrock_provider_calls_the_mantle_client_with_structured_output(mon
     assert calls["output_config"]["effort"] == "low" and "temperature" not in calls and "thinking" not in calls
 
 
+def test_off_means_no_table_and_no_usage_read(tmp_path):
+    from tests.test_cad import make_cad
+    cad = make_cad(tmp_path)
+    cad.intel.infer.submit(I.Request("x", {}, []), {}, lambda j, r: None)
+    assert cad.store.one("SELECT name FROM sqlite_master WHERE name = 'intel_infer'") is None
+
+
 def test_settings_turn_it_on_refuse_unpriced_models_and_no_table_at_start(tmp_path):
     from sizeup.cad.api import CadApi
     from tests.test_cad import make_cad
@@ -235,3 +260,16 @@ def test_settings_turn_it_on_refuse_unpriced_models_and_no_table_at_start(tmp_pa
     st = cad.intel.infer.status()
     assert st["daily_cap"] == 50 and st["model"] == "us.anthropic.claude-haiku-5-5"
     assert cad.store.one("SELECT name FROM sqlite_master WHERE name = 'intel_infer'") is None
+
+
+def test_the_card_shows_the_models_suggestion(tmp_path):
+    from tests.test_cad import make_cad
+    cad = make_cad(tmp_path)
+    eng = cad.intel
+    eng.infer = I.Inference(lambda: {**eng.policy.cfg, "infer": True}, clock=cad.clock, log=lambda m: None,
+                            provider=FakeProvider(I.Result("mva_injury", 1.0, "none", "", "x")))
+    eng.locate = example_locate
+    eng.feed(row("t1", "report of an MVA on Example Ave", cad.clock()))
+    cad.comms.context_broadcast = True
+    [shown] = cad.intel_state()["open"]
+    assert shown["mode"] == "map" and shown["suggested"] == "MVA with injuries"
