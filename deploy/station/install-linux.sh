@@ -869,6 +869,8 @@ activate() {
   done
   install -D -m 0644 "$sys/systemd/journald-sizeup.conf" /etc/systemd/journald.conf.d/sizeup.conf
   install -d -m 2755 -o root -g systemd-journal /var/log/journal 2>/dev/null || install -d -m 2755 /var/log/journal
+  # the station's own units' journal, read by sizeup-station to ship it (scrubbed) to the hub: sizeup/cloud/logship.py
+  if getent group systemd-journal >/dev/null; then usermod -a -G systemd-journal "$SVC_USER"; fi
   rm -f "$ETC/build.env"                       # (before #58; the release's BUILD file says it now)
   # A config from before #58 read the talkgroups from the old checkout, which goes away: trunk-recorder's copy.
   if grep -qF "$LEGACY_APP/deploy/trunk-recorder/talkgroups.csv" "$CONF" 2>/dev/null; then

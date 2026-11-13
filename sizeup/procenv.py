@@ -13,11 +13,13 @@ again. credential(name) is how an adapter reads one (sizeup.cloud.adapters re-ex
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 
 _dir: Path | None = None
 _names: set[str] = set()
 STRIP = ("CREDENTIALS_DIRECTORY",)
+SECRET_ENV = re.compile(r"TOKEN|SECRET|PASS|CREDENTIAL|ACCESS_CLIENT|_KEY$|API_KEY")
 
 
 def take_credentials(names=(), environ=None) -> Path | None:
@@ -31,7 +33,30 @@ def take_credentials(names=(), environ=None) -> Path | None:
     _names.update(str(n) for n in names or ())
     for n in _names:
         env.pop(n, None)
+    register_secrets()
     return _dir
+
+
+def register_secrets() -> None:
+    """Every credential's name and value (and the station's own secrets in the environment) into the log scrub
+    (sizeup/logscrub.py): a station log line with one of them never leaves the station."""
+    from sizeup import logscrub
+    for k, v in os.environ.items():
+        if SECRET_ENV.search(k):
+            logscrub.secret(v)
+    d = _dir
+    if d is None:
+        return
+    try:
+        files = [f for f in d.iterdir() if f.is_file()]
+    except OSError:
+        return
+    for f in files:
+        logscrub.secret_name(f.name.removeprefix("sizeup-adapter."))
+        try:
+            logscrub.secret(f.read_text().rstrip("\n"))
+        except OSError:
+            pass
 
 
 def credential(name: str) -> str:
@@ -40,9 +65,13 @@ def credential(name: str) -> str:
         return ""
     for n in (f"sizeup-adapter.{name}", name):          # (ImportCredential= / LoadCredential= name it so)
         try:
-            return (_dir / n).read_text().rstrip("\n")
+            v = (_dir / n).read_text().rstrip("\n")
         except OSError:
             continue
+        from sizeup import logscrub
+        logscrub.secret(v)                                # never in a station log line that leaves (logship.py)
+        logscrub.secret_name(name)
+        return v
     return ""
 
 

@@ -57,6 +57,10 @@ GET  /api/cad/preplan?bbox=w,s,e,n | incident=<id> | where=<address> | (all=1)
                                           of those, every point: admins. ETag (304); restricted kinds per person
 GET  /api/cad/preplan/where?lat=&lon=&incident_id= | where= | point=&link=
                                           the editor's: the building a point there belongs to (dispatchers and admins)
+GET  /api/cad/logs?source=station|hub|all&unit=&level=&q=&start=&end=&limit=
+                                          Logs Insights over the station's logs and the hub's (sizeup/cloud/cwlogs.py),
+                                          newest first, bounded (7 days, 500 rows); /status: set up or not, today's
+                                          volume, the station's shipper. The hub's only; a signed-in admin only
 GET  /api/cad/preplan.csv                 every active point: admins only (ADMIN_READS); in the person's activity
 POST /api/cad/preplan                     {kind, lat, lon, label?, note?, level?, priority?, review_by?, incident_id |
                                           where?, link?: auto | building | call | point}
@@ -805,6 +809,27 @@ class CadApi:
         self.cad.settings.note(str(body.get("operator") or ""), "system", f"datasources/{key}", f"last fetched {was}", src.action)
         return {"ok": True, "running": row["running"], "source": row}
 
+    def _logs(self, path: str, query: str, who) -> tuple[int, bytes, str]:
+        """GET /api/cad/logs (Logs Insights, bounded) and /api/cad/logs/status: the hub's only, and only for an admin
+        with a verified sign-in (stricter than ADMIN_READS, so not in it: never without one)."""
+        sl = getattr(self.cad, "station_logs", None)
+        if sl is None:
+            return _json(404, {"error": "logs are on the hub"})
+        if who is None or not getattr(who, "email", ""):
+            return _json(403, {"error": "Admins only: sign in"})
+        try:
+            if self.cad.settings.standing(who.email)["may"] != "admin":
+                return _json(403, {"error": "Admins only: the logs (Settings > Station > Logs)"})
+        except CadError:
+            return _json(403, {"error": "Admins only: the logs (Settings > Station > Logs)"})
+        from sizeup.cloud.cwlogs import LogsError
+        if path.endswith("/status"):
+            return _json(200, sl.status())
+        try:
+            return _json(200, sl.query(parse_qs(query)))
+        except LogsError as e:
+            return _json(e.status, {"error": str(e)})
+
     def get(self, path: str, query: str, who=None) -> tuple[int, bytes, str]:
         with sourcekeys.request_context(who):       # another system's traffic: a signed-in person only (#419)
             return self._get(path, query, who)
@@ -813,6 +838,8 @@ class CadApi:
         if (no := self.read_refused(path, who)) is not None:
             return no
         try:
+            if path in ("/api/cad/logs", "/api/cad/logs/status"):
+                return self._logs(path, query, who)
             if path == "/api/cad/datasources":
                 return self._datasources(parse_qs(query), who)
             if path == "/api/cad/notify":
