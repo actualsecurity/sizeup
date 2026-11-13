@@ -1043,38 +1043,55 @@ document.addEventListener("click", (e) => {
 // row): ours (the alarm, alarm_level "alarm") a red EMERGENCY chip (MAYDAY ... for words alone) and a red row;
 // someone else's (a notice) amber "Emergency (not ours)" and an amber edge; then who acknowledged it and when, and
 // the all clear. A flag with no alarm of its own (the same radio again, its alarm still open): amber, "Emergency button".
+// Someone else's emergency on a service Settings > Radios > Emergencies doesn't list (fire and EMS by default: a bus,
+// DOT, transit, another town's police) is quiet: a muted "EM" chip, its detail in the hover, no row mark.
+const EM_LOUD = ["fire", "ems"];
+function emLoud(t) {
+  if (t.alarm_level === "alarm" || t.ours || (t.safety && t.safety !== "dismissed")) return true;   // ours, scene safety
+  const set = typeof cad !== "undefined" && cad.state && cad.state.radio_emergencies;
+  return (set && Array.isArray(set.prominent) ? set.prominent : EM_LOUD).includes(t.service || "other");
+}
 function emergencyChip(t) {
   if (!t.emergency && !t.alarm_id) return null;
   const ours = t.alarm_level === "alarm";
+  const quiet = !ours && !emLoud(t);
   const said = (t.keywords || []).map((k) => String(k).replace(/ \.\.\. /g, " … ")).join(", ");
   const stuck = !ours && t.alarm_stuck;            // its flag turned out stuck (#190): said, and quieter
   const text = ours ? (t.emergency ? "EMERGENCY" : (said || "alarm").toUpperCase())
     : stuck ? "Emergency flag stuck" : t.alarm_level === "notice" ? "Emergency (not ours)" : "Emergency button";
-  const c = el("span", `chip emergency${ours ? "" : " em-other"}${stuck ? " em-stuck" : ""}`, `${t.drill ? "DRILL · " : ""}${text}`);
+  const cls = quiet ? "chip em-quiet" : `chip emergency${ours ? "" : " em-other"}${stuck ? " em-stuck" : ""}`;
+  const c = el("span", cls, `${t.drill ? "DRILL · " : ""}${quiet ? "EM" : text}`);
   const how = !t.emergency ? `Heard on the radio: ${said}`
     : t.alarm_via ? `The radio's emergency button (${t.alarm_via})`
     : t.talkgroup !== null && t.talkgroup !== undefined ? "The radio's emergency button (P25: flagged by the system)"
     : "The radio's emergency button";
-  c.title = how + (t.alarm_level === "notice" ? ". Not our talkgroup or radio: a notice"
+  const done = quiet ? alarmDoneText(t) : "";      // quiet: what it was, and who acked it, in the hover only
+  c.title = (quiet ? `${text}. ` : "") + how + (t.alarm_level === "notice" ? ". Not our talkgroup or radio: a notice"
     : t.alarm_level ? "" : ". Its alarm is on an earlier transmission")
     + (stuck ? `. Emergency flag stuck on ${t.alarm_stuck}: it went on flagging routine calls, so its later flags `
-      + "are not emergencies (no new alarm, the emergency window not renewed)" : "");
+      + "are not emergencies (no new alarm, the emergency window not renewed)" : "") + (done ? `. ${done}` : "");
   return c;
 }
-function alarmDone(t) {
+function alarmDoneText(t) {
   const who = (x) => (x || "").replace(/\s*<[^>]*>\s*$/, "");
-  const out = [];
-  if (t.clear_at) out.push(`all clear ${who(t.clear_by)} ${fmtTime(t.clear_at)}`);
-  else if (t.ack_at) out.push(`acked by ${who(t.ack_by)} ${fmtTime(t.ack_at)}`);
-  return out.length ? el("span", "dim small em-ack", `· ${out.join(" · ")}`) : null;
+  if (t.clear_at) return `all clear ${who(t.clear_by)} ${fmtTime(t.clear_at)}`;
+  if (t.ack_at) return `acked by ${who(t.ack_by)} ${fmtTime(t.ack_at)}`;
+  return "";
+}
+function alarmDone(t) {
+  const out = alarmDoneText(t);
+  return out ? el("span", "dim small em-ack", `· ${out}`) : null;
 }
 // What of the emergency a row's redraw depends on (every list's signature: Radio, the feed, an event's Radio card)
-const emSig = (t) => [t.emergency, t.alarm_id, t.alarm_level, t.keywords, t.ack_at, t.clear_at, t.drill, t.kept, t.alarm_stuck];
+const emSig = (t) => [t.emergency, t.alarm_id, t.alarm_level, t.keywords, t.ack_at, t.clear_at, t.drill, t.kept, t.alarm_stuck,
+                      (t.emergency || t.alarm_id || t.kept) && emLoud(t)];
 // A transmission kept only because of an emergency (its talkgroup's Record is off): why it is in the log at all
 function keptChip(t) {
   if (t.kept !== "emergency") return null;
-  const c = el("span", "chip kept", "kept: emergency window");
-  c.title = "Record is off for this talkgroup: kept because of an emergency (the emergency window: its talkgroup and "
+  const loud = emLoud(t);
+  const c = loud ? el("span", "chip kept", "kept: emergency window") : el("span", "em-dot", "•");   // quiet: a dot
+  c.title = (loud ? "" : "Kept: emergency window. ")
+    + "Record is off for this talkgroup: kept because of an emergency (the emergency window: its talkgroup and "
     + "the radio that pressed it, until the alarm's All clear or a few minutes after the last emergency key-up)";
   return c;
 }
@@ -1110,7 +1127,8 @@ function radioRow(t, ctx = {}) {
     meta.append(f);
   }
   const em = emergencyChip(t);                            // the emergency button / a mayday (#128): can't be missed
-  if (em) {
+  if (em && em.className === "chip em-quiet") meta.append(em);       // someone else's, quiet: the chip only
+  else if (em) {
     li.classList.add("emergency", t.alarm_level === "alarm" ? "em-ours" : "em-other");
     meta.append(em);
     const done = alarmDone(t);

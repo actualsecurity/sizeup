@@ -396,19 +396,41 @@ const src = fs.readFileSync(process.argv[2], "utf8");
 const grab = (re) => { const m = src.match(re); if (!m) throw new Error("not found: " + re); return m[0]; };
 global.el = (tag, cls, text) => ({ tag, cls: cls || "", text: text === undefined ? "" : String(text), title: "" });
 global.fmtTime = (t) => (t ? "19:59" : "");
-eval(grab(/^function emergencyChip\(t\) \{[\s\S]*?^\}/m) + "\n" + grab(/^function alarmDone\(t\) \{[\s\S]*?^\}/m) + "\n"
+global.cad = { state: {} };
+eval(grab(/^const EM_LOUD = .*$/m) + "\n" + grab(/^function emLoud\(t\) \{[\s\S]*?^\}/m) + "\n"
+     + grab(/^function emergencyChip\(t\) \{[\s\S]*?^\}/m) + "\n" + grab(/^function alarmDoneText\(t\) \{[\s\S]*?^\}/m) + "\n"
+     + grab(/^function alarmDone\(t\) \{[\s\S]*?^\}/m) + "\n"
      + grab(/^function keptChip\(t\) \{[\s\S]*?^\}/m) + "\nglobal.emergencyChip = emergencyChip; global.alarmDone = alarmDone; "
-     + "global.keptChip = keptChip;");
+     + "global.keptChip = keptChip; global.emLoud = emLoud;");
 const out = {};
 const pick = (n) => (n ? { cls: n.cls, text: n.text } : null);
-out.notice = pick(emergencyChip({ emergency: 1, alarm_id: 7, alarm_level: "notice", talkgroup: 1325 }));
+out.notice = pick(emergencyChip({ emergency: 1, alarm_id: 7, alarm_level: "notice", talkgroup: 1325, service: "fire" }));
 out.ours = pick(emergencyChip({ emergency: 1, alarm_id: 8, alarm_level: "alarm", talkgroup: 307 }));
 out.mayday = pick(emergencyChip({ emergency: 0, alarm_id: 9, alarm_level: "alarm", keywords: ["mayday"] }));
-out.flagOnly = pick(emergencyChip({ emergency: 1, alarm_id: null, alarm_level: "" }));
+out.flagOnly = pick(emergencyChip({ emergency: 1, alarm_id: null, alarm_level: "", service: "ems" }));
 out.none = pick(emergencyChip({ emergency: 0, alarm_id: null }));
 out.acked = pick(alarmDone({ ack_by: "Corey <c@x>", ack_at: 1 }));
 out.cleared = pick(alarmDone({ ack_by: "Corey", ack_at: 1, clear_by: "Val", clear_at: 2 }));
-out.kept = pick(keptChip({ kept: "emergency" }));
+out.kept = pick(keptChip({ kept: "emergency", service: "fire" }));
+// Settings > Radios > Emergencies (default fire, EMS): a bus's button (transit, not ours) is a muted EM, the detail in the
+// hover; its window's kept rows a dot. Ours, our channel and a scene-safety row stand out whatever the service.
+const full = (n) => (n ? { cls: n.cls, text: n.text, title: n.title } : null);
+out.bus = full(emergencyChip({ emergency: 1, alarm_id: 7, alarm_level: "notice", talkgroup: 4100, service: "transit",
+                               ack_by: "Dana <d@x>", ack_at: 1 }));
+out.busStuck = pick(emergencyChip({ emergency: 1, alarm_id: 7, alarm_level: "notice", service: "other", alarm_stuck: "VAN7 (4107)" }));
+out.busDrill = pick(emergencyChip({ emergency: 1, alarm_id: 7, alarm_level: "notice", service: "transit", drill: true }));
+out.busKept = full(keptChip({ kept: "emergency", service: "transit" }));
+out.oursOnTransit = pick(emergencyChip({ emergency: 1, alarm_id: 8, alarm_level: "alarm", service: "transit" }));
+out.ourChannel = pick(emergencyChip({ emergency: 1, alarm_id: null, alarm_level: "", service: "other", ours: 1 }));
+out.safety = pick(emergencyChip({ emergency: 1, alarm_id: 9, alarm_level: "notice", service: "police", safety: "officer" }));
+out.dismissed = pick(emergencyChip({ emergency: 1, alarm_id: 9, alarm_level: "notice", service: "police", safety: "dismissed" }));
+out.noService = pick(emergencyChip({ emergency: 1, alarm_id: 9, alarm_level: "notice" }));
+cad.state.radio_emergencies = { prominent: ["fire", "ems", "transit"] };
+out.busLoud = pick(emergencyChip({ emergency: 1, alarm_id: 7, alarm_level: "notice", service: "transit" }));
+out.busKeptLoud = pick(keptChip({ kept: "emergency", service: "transit" }));
+cad.state.radio_emergencies = { prominent: [] };
+out.fireQuiet = pick(emergencyChip({ emergency: 1, alarm_id: 7, alarm_level: "notice", service: "fire" }));
+out.oursStill = pick(emergencyChip({ emergency: 1, alarm_id: 8, alarm_level: "alarm", service: "fire" }));
 out.notKept = pick(keptChip({ kept: "" }));
 console.log(JSON.stringify(out));
 """
@@ -452,6 +474,19 @@ def test_the_row_chip_and_the_folded_group_in_the_pages_own_code(tmp_path):
     assert out["flagOnly"]["text"] == "Emergency button" and out["none"] is None
     assert out["acked"]["text"] == "· acked by Corey 19:59" and out["cleared"]["text"] == "· all clear Val 19:59"
     assert out["kept"]["text"] == "kept: emergency window" and out["notKept"] is None
+    # quiet: someone else's on a service that isn't prominent (default fire, EMS)
+    assert (out["bus"]["cls"], out["bus"]["text"]) == ("chip em-quiet", "EM")
+    assert out["bus"]["title"].startswith("Emergency (not ours). ") and out["bus"]["title"].endswith(". acked by Dana 19:59")
+    assert out["busStuck"] == {"cls": "chip em-quiet", "text": "EM"} and out["busDrill"]["text"] == "DRILL · EM"
+    assert (out["busKept"]["cls"], out["busKept"]["text"]) == ("em-dot", "•")
+    assert out["busKept"]["title"].startswith("Kept: emergency window. ")
+    assert out["noService"]["cls"] == "chip em-quiet" and out["dismissed"]["cls"] == "chip em-quiet"
+    assert out["oursOnTransit"] == {"cls": "chip emergency", "text": "EMERGENCY"}
+    assert out["ourChannel"]["cls"] == "chip emergency em-other" and out["safety"]["cls"] == "chip emergency em-other"
+    # the setting: transit made prominent stands out as before; none prominent quiets even fire, never ours
+    assert out["busLoud"] == {"cls": "chip emergency em-other", "text": "Emergency (not ours)"}
+    assert out["busKeptLoud"]["text"] == "kept: emergency window"
+    assert out["fireQuiet"]["cls"] == "chip em-quiet" and out["oursStill"]["cls"] == "chip emergency"
     h = tmp_path / "groups.js"
     h.write_text(GROUPS_HARNESS)
     groups = json.loads(subprocess.run([NODE, str(h), str(STATIC / "radio-view.js")], capture_output=True, text=True,
@@ -460,3 +495,88 @@ def test_the_row_chip_and_the_folded_group_in_the_pages_own_code(tmp_path):
     # then the rest, newest first. Someone else's emergency doesn't take over the snippet (#190: low-key)
     assert [(x["name"], x["emergency"]) for x in groups] == [("DOT Dispatch 1", "other"), ("WCPD PSD", ""), ("WCPD Ch 1", "")]
     assert groups[0]["snippet"] == "go ahead" and groups[1]["until"] == 999
+
+
+# -- Settings > Radios > Emergencies: whose emergencies (not ours) stand out on the Radio page -----------------------
+
+
+def test_the_prominent_services_are_a_radios_setting(tmp_path):
+    """Default fire and EMS; set and reset by an admin, audited under Radios, in the state push for the Radio page,
+    exported and imported again. Presentation only: someone else's button still raises its notice, never a push."""
+    cad = make_cad(tmp_path)
+    page = cad.settings.page()["radio_emergencies"]
+    assert page == {"prominent": ["fire", "ems"], "default": ["fire", "ems"], "edited": False,
+                    "choices": ["fire", "police", "ems", "transit", "air", "other"]}
+    assert cad.state()["radio_emergencies"] == {"prominent": ["fire", "ems"]}
+    assert needs("/api/cad/settings/radio_emergencies") == "admin"
+    out = cad.settings_post("radio_emergencies", {"action": "set", "key": "prominent", "value": ["transit", "fire"],
+                                                  "operator": "Lt. Test"})
+    assert out["radio_emergencies"]["prominent"] == ["fire", "transit"] and out["radio_emergencies"]["edited"]
+    assert cad.state()["radio_emergencies"] == {"prominent": ["fire", "transit"]}
+    def audit():
+        return [r for r in cad.settings.audit_log("radios") if r["key"] == "radio_emergencies/prominent"]
+    (a,) = audit()
+    assert (a["operator"], a["old"], a["new"]) == ("Lt. Test", "fire, ems", "fire, transit")
+    # the same again: nothing written, nothing audited
+    cad.settings_post("radio_emergencies", {"action": "set", "key": "prominent", "value": ["fire", "transit"], "operator": "Lt. Test"})
+    assert len(audit()) == 1
+    for bad in (["bus"], "fire", None):
+        with pytest.raises(Exception, match="prominent"):
+            cad.settings_post("radio_emergencies", {"action": "set", "key": "prominent", "value": bad, "operator": "Lt. Test"})
+    with pytest.raises(Exception, match="key: prominent"):
+        cad.settings_post("radio_emergencies", {"action": "set", "key": "other", "value": [], "operator": "Lt. Test"})
+    exp = cad.settings_export()
+    assert exp["overrides"]["radio_emergencies"] == {"prominent": ["fire", "transit"]}
+    assert cad.settings_post("import", {"action": "dry_run", "settings": exp, "operator": "Lt. Test"})
+    exp["overrides"]["radio_emergencies"] = {"prominent": ["bus"]}
+    with pytest.raises(Exception, match="radio_emergencies"):
+        cad.settings_post("import", {"action": "dry_run", "settings": exp, "operator": "Lt. Test"})
+    cad.settings_post("radio_emergencies", {"action": "set", "key": "prominent", "value": [], "operator": "Lt. Test"})
+    assert cad.state()["radio_emergencies"] == {"prominent": []}
+    cad.settings_post("radio_emergencies", {"action": "reset", "key": "prominent", "operator": "Lt. Test"})
+    assert cad.settings.page()["radio_emergencies"]["edited"] is False
+    assert cad.state()["radio_emergencies"] == {"prominent": ["fire", "ems"]}
+    assert [r["new"] for r in audit()][:2] == ["fire, ems", "none"]
+
+
+def test_someone_elses_button_is_still_a_notice_and_never_pushed(tmp_path):
+    """The setting changes only how the Radio page draws it: the notice, its row and its window are as before, and a
+    notice is never pushed (only our alarms are)."""
+    cad = make_cad(tmp_path)
+    pushed = []
+    cad.alarms._push = lambda a: pushed.append(a)
+    t = row(cad, id="4100-1-call_1", source="Metro Transit 1", talkgroup=4100, unit="VAN7", radio_id="4107")
+    a = cad.alarms.on_traffic(dict(tx(t["id"], source="Metro Transit 1", talkgroup=4100, unit="VAN7", radio_id="4107",
+                                      emergency=True), start=t["start"], end=t["end"]))
+    assert a["level"] == "notice" and pushed == []
+    r = rows_of(cad)[t["id"]]
+    assert (r["emergency"], r["alarm_level"]) == (1, "notice") and "service" in r and "ours" in r and "safety" in r
+
+
+QUIET_GROUPS = r"""
+global.emLoud = (t) => t.alarm_level === "alarm" || !!t.ours || ["fire", "ems"].includes(t.service || "other");
+const rows2 = [
+  { id: "q1", talkgroup: 4100, channel: "Metro Transit 1", start: 260, text: "", status: "no_speech", service: "transit",
+    emergency: 1, alarm_id: 7, alarm_level: "notice" },
+  { id: "q2", talkgroup: 4100, channel: "Metro Transit 1", start: 270, text: "copy", status: "done", service: "transit", kept: "emergency" },
+  { id: "f1", talkgroup: 4200, channel: "Other Town Fire", start: 150, text: "", status: "no_speech", service: "fire",
+    emergency: 1, alarm_id: 8, alarm_level: "notice" },
+  { id: "p1", talkgroup: 383, channel: "WCPD Ch 1", start: 300, text: "10-4", status: "done", service: "police" },
+].sort((x, y) => y.start - x.start);
+const g2 = RadioView.otherGroups(rows2, [{ talkgroup: 4100, until: 999 }]);
+console.log(JSON.stringify(g2.map((x) => ({ name: x.name, emergency: x.emergency, quiet: !!x.quiet }))));
+"""
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_quiet_emergency_doesnt_move_its_folded_talkgroup_up(tmp_path):
+    """Someone else's on a service that isn't prominent: its folded talkgroup keeps its place (newest first) and is
+    marked quiet (a muted EM, its window a dot); another town's fire emergency still goes above the quiet ones."""
+    h = tmp_path / "groups.js"
+    head, _ = GROUPS_HARNESS.split("const rows = [", 1)       # the same stand-in page, these rows
+    h.write_text(head + QUIET_GROUPS)
+    got = json.loads(subprocess.run([NODE, str(h), str(STATIC / "radio-view.js")], capture_output=True, text=True,
+                                    check=True, timeout=30).stdout)
+    assert got == [{"name": "Other Town Fire", "emergency": "other", "quiet": False},
+                   {"name": "WCPD Ch 1", "emergency": "", "quiet": False},
+                   {"name": "Metro Transit 1", "emergency": "other", "quiet": True}]

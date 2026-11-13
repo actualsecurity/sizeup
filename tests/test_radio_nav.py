@@ -58,7 +58,10 @@ global.Radio = { fillPaging(box, paging, done) { paged.push([box === $("#rn-pagi
 const offered = [];
 global.RadioLive = { offer(x) { offered.push(x.map((t) => t.id)); } };
 global.RadioView = { rowSig: (t) => JSON.stringify([t.text]), row: (t) => { const li = new El("li", "rt"); li.append(new El("div", "txt", t.text)); return li; } };
-global.cad = { state: { comms_rev: "1", talking: [], alarms: { windows: [] }, paging: null }, hooks: [], txRev: 0 };
+// police made prominent here (Settings > Radios > Emergencies), so someone else's police emergency stands out; the
+// default (fire, EMS) is the quiet scenario's
+global.cad = { state: { comms_rev: "1", talking: [], alarms: { windows: [] }, paging: null,
+                        radio_emergencies: { prominent: ["fire", "ems", "police"] } }, hooks: [], txRev: 0 };
 
 // ---- the hub: made-up rows and sources; every request waits until the test lets it go -------------------------------
 const NOW = 600000;
@@ -121,6 +124,13 @@ const ids = () => st.rows.map((t) => t.id);
                      return { views: h.views.map((v) => v.id), systems: h.systems.map((x) => x.label), rows: h.rows.map((x) => x.key),
                               pinned: h.pinned.map((x) => x.key), flagged: h.flagged.map((x) => x.key) }; })(),
     seenKept: [Object.keys(N.prefs(JSON.stringify({ seen: many })).seen).length, "k1499" in N.prefs(JSON.stringify({ seen: many })).seen, "k0" in N.prefs(JSON.stringify({ seen: many })).seen],
+    // the default (fire, EMS): someone else's transit / police emergency is quiet; ours never is
+    quiet: (() => { const q = N.model(SRC.map((s) => (s.key === "p25:metro:9100" ? { ...s, emergency: "other" }
+                                                      : s.key === "p25:metro:9001" ? { ...s, emergency: "ours" }
+                                                      : s.key === "p25:metro:9003" ? { ...s, emergency: "other" } : s)),
+                                      N.prefs(null), NOW, new Set(), { "fm:FG1": 777 }, ["fire", "ems"]);
+                    return { rows: Object.fromEntries(q.rows.map((s) => [s.key, [s.em, s.quiet]])), flagged: q.flagged.map((s) => s.key),
+                             views: Object.fromEntries(q.views.map((v) => [v.id, v.em])) }; })(),
     merged: N.merged([{ id: "c", start: 3 }, { id: "b", start: 2 }], [{ id: "b", start: 2 }, { id: "a", start: 1 }, { id: "z", start: 9 }]).map((t) => t.id),
   });
   if (process.argv[4] === "pure") return console.log(JSON.stringify(out));
@@ -212,6 +222,19 @@ const ids = () => st.rows.map((t) => t.id);
   T.sources(true); await drain();
   out.allOnlyEm = { views: $("#rn-views").children.filter((b) => b.children.some((c) => c.className.includes("emergency"))).map((b) => b.dataset.view),
                     button: $("#rn-open").children.map((c) => c.className) };
+  // ---- the default (fire, EMS): a transit emergency, not ours, is a muted EM on its channel and nothing else ----
+  cad.state.radio_emergencies = { prominent: ["fire", "ems"] };
+  SRC = SRC.map((s) => ({ ...s, emergency: s.key === "p25:metro:9100" ? "other" : "" }));
+  st.srcRev = ""; st.srcAt = 0;
+  T.set({ view: "all", source: "" }); T.sources(true); await drain();
+  const walk = (n) => [n, ...n.children.flatMap(walk)];
+  out.quietDom = { flags: [$("#rn-flags").hidden, $("#rn-flags").children.length],
+                   tree: walk($("#rn-tree")).filter((c) => /em-quiet|emergency/.test(c.className)).map((c) => [c.className, c.textContent, c.title]),
+                   views: $("#rn-views").children.filter((b) => b.children.some((c) => /emergency|em-quiet/.test(c.className))).map((b) => b.dataset.view),
+                   button: $("#rn-open").children.map((c) => c.className) };
+  cad.state.radio_emergencies = { prominent: ["fire", "ems", "transit"] };     // transit made prominent: as before
+  st.railSig = ""; st.flagSig = ""; T.render();
+  out.loudDom = { flags: $("#rn-flags").children.map((c) => [c.className, c.textContent]) };
   // ---- a page going out now: over the list here too ----
   cad.state.paging = { channel: "South 2" }; cad.hooks.forEach((h) => h());
   out.paging = paged.slice(-1)[0].slice(0, 2);
@@ -365,3 +388,18 @@ def test_the_page_never_carries_the_scripts_insides(tmp_path):
     out = run(tmp_path, scenario="plain")
     assert out["test"] is False and "test" not in out["keys"]
     assert "RADIO_NAV_TEST" not in "".join((STATIC / f).read_text() for f in ("cad.html", "cad.js", "radio-view.js"))
+
+
+def test_someone_elses_emergency_off_the_prominent_services_is_quiet(out):
+    """Settings > Radios > Emergencies (default fire, EMS): a transit or police emergency that isn't ours is a muted EM
+    on its channel only: no banner over the list, no mark on its view or Sources. Ours always stands out; a service
+    made prominent stands out as before."""
+    q = out["quiet"]
+    assert q["rows"]["p25:metro:9100"] == ["other", True] and q["rows"]["p25:metro:9003"] == ["other", True]
+    assert q["rows"]["p25:metro:9001"] == ["ours", False] and q["rows"]["fm:FG1"] == ["other", False]   # ours; our window
+    assert q["flagged"] == ["fm:FG1", "p25:metro:9001"]
+    assert q["views"]["transit"] == "" and q["views"]["police"] == "ours"
+    d = out["quietDom"]
+    assert d["flags"] == [True, 0] and d["views"] == [] and d["button"] == [""]
+    assert d["tree"] == [["chip em-quiet", "EM", "Emergency (not ours)"]]          # the detail in the hover
+    assert out["loudDom"]["flags"] == [["chip emergency em-other", "Emergency (not ours): Rail Ops"]]
