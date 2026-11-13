@@ -53,7 +53,8 @@ RUN groupadd --system --gid 10001 sizeup \
 WORKDIR /app
 COPY pyproject.toml ./
 COPY sizeup ./sizeup
-RUN pip install --no-cache-dir . && rm -rf build
+# [docs]: PDFium (pypdfium2) for a PDF floor plan's page (#459, sizeup/docfiles.py)
+RUN pip install --no-cache-dir ".[docs]" && rm -rf build
 COPY data ./data
 COPY deploy/hub ./deploy/hub
 COPY deploy/trunk-recorder/talkgroups.csv ./deploy/trunk-recorder/talkgroups.csv

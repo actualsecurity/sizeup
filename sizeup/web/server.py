@@ -115,6 +115,7 @@ from urllib.parse import parse_qsl, urlsplit
 
 STATIC_DIR = Path(__file__).parent / "static"
 MAX_CAD_BODY = 65536
+MAX_DOC_BODY = 25 * 1024 * 1024      # a site document upload (#459, sizeup/cad/preplan_docs.py MAX_BYTES)
 # role = "station": the only CAD routes served, (method, path): what Settings > Radios (radio-controls.js) uses
 STATION_CAD = {("GET", "/api/cad/stt"), ("POST", "/api/cad/settings/channels"), ("POST", "/api/cad/settings/stt")}
 
@@ -470,6 +471,26 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                                    b"<p>Sign in through Cloudflare Access to use sizeup: reload this page.</p>",
                               "text/html; charset=utf-8") or False
 
+        def _upload_doc(self, path: str) -> None:
+            """POST /api/cad/preplan/docs (#459): a site document, the file itself as the body (at most MAX_DOC_BODY),
+            its details in X-Sizeup-Doc (a header a page elsewhere can't send without a CORS preflight). Who may is
+            checked before the body is read; a refused or oversized one is never read."""
+            if self.who is not None and (refused := cad.permit(path, self.who, client=self._client())):
+                self.close_connection = True     # the body is left unread
+                return self._send(*refused)
+            if not self.headers.get("X-Sizeup-Doc"):
+                self.close_connection = True
+                return self._send(400, b'{"error":"X-Sizeup-Doc: the document\'s details"}', "application/json")
+            try:
+                n = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                n = -1
+            if not 0 < n <= MAX_DOC_BODY:
+                self.close_connection = True
+                return self._send(413, b'{"error":"a file of at most 25 MB"}', "application/json")
+            return self._send(*cad.upload(path, self.headers.get("X-Sizeup-Doc") or "", self.rfile.read(n), self.who,
+                                          self._client()))
+
         def _client(self) -> tuple[str, str]:
             """(ip, browser) for the activity log: the visitor's address as Cloudflare saw it."""
             h = self.headers
@@ -700,6 +721,8 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                 return self._send(409, station_says(), "application/json")
             if path == "/api/cad/perf/profile" and perf is not None:
                 return self._profile(path)
+            if path == "/api/cad/preplan/docs" and cad is not None:
+                return self._upload_doc(path)
             if path.startswith("/api/cad/") and cad is not None:
                 try:
                     n = int(self.headers.get("Content-Length") or 0)

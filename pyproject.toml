@@ -10,7 +10,9 @@ requires-python = ">=3.11"
 dependencies = ["numpy>=1.26"]
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "pytest-xdist>=3.5"]
+# docs: the hub renders a PDF floor plan's page to a picture (#459, sizeup/docfiles.py); the hub image installs it
+docs = ["pypdfium2>=4.30,<6"]
+dev = ["pytest>=8", "pytest-xdist>=3.5", "pypdfium2>=4.30,<6", "Pillow>=10"]
 
 [tool.setuptools.packages.find]
 include = ["sizeup*"]

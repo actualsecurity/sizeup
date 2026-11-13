@@ -638,6 +638,11 @@ class App:
         self.attachments.camera = self.roads.camera
         self.attachments.audio = self.clip
         self.cad.attachments = self.attachments
+        # Pre-plan site documents (#459, sizeup/docstore.py): the bucket on the hub; off the hub a folder beside the CAD
+        # (a hub's own disk doesn't outlive a deploy: none there without the bucket)
+        from sizeup import docstore
+        self.cad.preplan_docs.store = docstore.from_env(
+            log=log, default_dir=None if cfg.cloud_role == "hub" or not cfg.cad_db else Path(cfg.cad_db).parent / "preplan-docs")
         # Road projects & closures (sizeup/roadprojects.py, #185): the Thruway's and 511NY's roadwork through roads,
         # the villages' road notices (placed by the gazetteer, or listed), any WZDx feed configured; read while someone looks.
         self.roadwork = prov["roadwork"]
