@@ -49,7 +49,8 @@ Reset to default = drop the override (one item, or a whole section).
                                    (#376, sizeup/cad/mapview.py DISPLAY_DEFAULTS; Settings > System > Map display, admins)
     premise_visibility             key a premise-note category ("medical") -> "dispatcher" | "admin": who may see its notes
                                    (not set: everyone signed in; #403, sizeup/cad/premise.py; Settings > System > Address
-                                   notes, admins)
+                                   notes, admins); also a pre-plan point kind ("knox_box", "gate_access": #456,
+                                   sizeup/cad/preplan.py RESTRICTABLE)
     audio_retention                key "_default" | a channel's label ("FG1", "HPN Tower") | "tg:<n>" -> days (0.5 to 365): how
                                    long the hub keeps that channel's clips, the ones already kept too (#414,
                                    sizeup/audiostore.py keep_days; Settings > System > Audio retention, admins)
@@ -143,6 +144,14 @@ PAGE_SECTION[MAPD_SECTION] = "system"
 PREMISE_SECTION = "premise_visibility"
 PAGE_SECTION[PREMISE_SECTION] = "system"
 PREMISE_LEVELS = ("everyone", "dispatcher", "admin")
+
+
+def _visibility_keys() -> dict[str, str]:
+    """premise_visibility's keys: the premise-note categories, and the pre-plan point kinds an admin may restrict (#456,
+    sizeup/cad/preplan.py RESTRICTABLE: the Knox boxes, the gate codes)."""
+    from sizeup.cad.preplan import KINDS, RESTRICTABLE
+    from sizeup.cad.premise import CATEGORIES
+    return {**CATEGORIES, **{k: f"Pre-plan: {KINDS[k]}" for k in RESTRICTABLE}}
 # How long each channel's / talkgroup's clips are kept on the hub (#414, sizeup/audiostore.py keep_days): Settings >
 # System > Audio retention, admins, audited as System; applies to the clips already kept at the next prune.
 RET_SECTION = audiostore.RETENTION_SECTION
@@ -779,18 +788,16 @@ class Editor:
 
     def premise_page(self, ov: dict | None = None) -> dict:
         """Settings > System > Address notes (#403): each category, who may see it (everyone | dispatcher | admin)."""
-        from sizeup.cad.premise import CATEGORIES
         e = ((self.overrides() if ov is None else ov).get(PREMISE_SECTION) or {})
         return {k: {"label": lab, "value": e.get(k, "everyone"), "edited": k in e, "choices": list(PREMISE_LEVELS)}
-                for k, lab in CATEGORIES.items()}
+                for k, lab in _visibility_keys().items()}
 
     def _premise_op(self, action: str, body: dict, op: str) -> dict:
         """set {key: a category, value: everyone | dispatcher | admin} | reset {key}: admins (who may see that category's
         premise notes: the state push carries only what everyone may see)."""
-        from sizeup.cad.premise import CATEGORIES
         key = body.get("key")
-        if key not in CATEGORIES:
-            raise CadError(f"key: {', '.join(CATEGORIES)}")
+        if key not in _visibility_keys():
+            raise CadError(f"key: {', '.join(_visibility_keys())}")
         cur = (self.overrides().get(PREMISE_SECTION) or {}).get(key, "everyone")
         if action == "reset":
             v = "everyone"
@@ -2500,8 +2507,7 @@ class Editor:
             except ValueError as e:
                 raise CadError(f"overrides.{MAPD_SECTION}: {e}") from None
         for k, v in (ov.get(PREMISE_SECTION) or {}).items():  # sizeup/cad/premise.py (#403)
-            from sizeup.cad.premise import CATEGORIES
-            if k not in CATEGORIES or v not in PREMISE_LEVELS[1:]:
+            if k not in _visibility_keys() or v not in PREMISE_LEVELS[1:]:
                 raise CadError(f"overrides.{PREMISE_SECTION}: {k!r} -> {v!r} (a category -> dispatcher | admin)")
         for sec in (RET_SECTION, TRS_SECTION):                 # sizeup/audiostore.py (#414)
             for k, v in (ov.get(sec) or {}).items():

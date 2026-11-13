@@ -228,7 +228,7 @@
   .d-tides .wx-tides-body, .b-marine .wx-tides-body { min-inline-size: 0; }
   @container hdr (width < 1100px) { .wx-now { display: none; } }
   .ap-line { color: var(--info); overflow-wrap: anywhere; }
-  .ap-fields { display: grid; grid-template-columns: repeat(auto-fill, minmax(9rem, 1fr)); gap: var(--s-2) var(--s-3); margin: 0;
+  .ap-fields { display: grid; grid-template-columns: repeat(auto-fill, minmax(8.5rem, 1fr)); gap: var(--s-2) var(--s-3); margin: 0;
     padding: var(--s-2) var(--s-3); border: var(--bw) solid var(--line); border-radius: var(--radius); min-inline-size: 0; }
   .ap-fields[hidden] { display: none; }
   .ap-fields > legend { display: flex; align-items: center; gap: var(--s-1); padding-inline: var(--s-1); font-size: var(--fs-sm); line-height: var(--lh-sm); color: var(--text-2); }
@@ -943,4 +943,31 @@
   .auto-src.undone { color: var(--dim); text-decoration: line-through; }
   .auto-undo { color: var(--dim); }
   .auto-close { display: flex; align-items: center; gap: var(--s-2); }
+
+  /* Pre-plan points (#456, preplan.js): the list under the call's map, the editor, the Search page's tab */
+  .pp-box, .pp-formhost { grid-column: 2; min-inline-size: 0; }
+  @container (width < 44rem) { .pp-box, .pp-formhost { grid-column: auto; } }
+  .pp-box { display: flex; flex-direction: column; gap: var(--s-1); }
+  .pp-head { display: flex; align-items: center; gap: var(--s-2); }
+  .pp-title { font-weight: 700; }
+  .pp-list { display: flex; flex-direction: column; gap: var(--s-0); margin: 0; padding: 0; list-style: none; }
+  .pp-row { display: flex; align-items: center; gap: var(--s-2); min-inline-size: 0; }
+  .pp-row.near .pp-go { color: var(--text-2); }
+  .pp-go { display: inline-flex; align-items: center; gap: var(--s-2); flex: 1 1 auto; min-inline-size: 0; justify-content: flex-start;
+           text-align: start; background: none; border-color: transparent; font-weight: 600; overflow-wrap: anywhere; }
+  .pp-ico { inline-size: var(--s-5); block-size: var(--s-5); flex: none; }
+  .pp-near { --c: var(--info); color: var(--info); }
+  .pp-form { display: flex; flex-direction: column; gap: var(--s-2); padding: var(--s-2) var(--s-3); margin-block: var(--s-2); }
+  .pp-form-head { display: flex; align-items: baseline; gap: var(--s-2); }
+  .pp-form textarea { resize: vertical; min-block-size: var(--ctl-lg); }
+  .pp-kinds { display: grid; grid-template-columns: repeat(auto-fill, minmax(8.5rem, 1fr)); gap: var(--s-1); }
+  .pp-kind { justify-content: flex-start; gap: var(--s-2); font-weight: 400; }
+  .pp-kind[aria-checked="true"] { border-color: var(--accent); background: var(--raised); font-weight: 700; }
+  .pp-fields { flex-wrap: wrap; gap: var(--s-2); }
+  .pp-level { inline-size: 6rem; }
+  .pp-bldg { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-1); overflow-wrap: anywhere; }
+  .pp-link { max-inline-size: 100%; }
+  .pp-mark { cursor: grab; filter: drop-shadow(0 0 2px rgba(0, 0, 0, 0.8)); }
+  .pp-mark-i { inline-size: var(--s-7); block-size: var(--s-7); display: block; }
+  .pp-toggle img { inline-size: var(--s-4); block-size: var(--s-4); }
 }
