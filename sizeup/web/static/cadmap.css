@@ -563,4 +563,57 @@
   /* a phone: Map and Cameras only (camwall.js shows the map for the others) */
   @media (max-width: 640px) { .ov-layout button:is([data-layout="side"], [data-layout="stacked"]) { display: none; } }
   @media (max-width: 640px) { .cm-big { inline-size: 100vw; block-size: 100%; border-radius: 0; } }
+
+  /* ---- street view (streetview.js): the viewer dialog, its map's marks, the map's menu ---------------------------------
+     Wide: the panorama beside a small map. A phone or an iPad (narrow or touch): full-screen, the map inset bottom-left. */
+  .sv-btn[aria-pressed="true"] { background: var(--pressed); border-color: var(--accent); }
+  .sv-menu { min-inline-size: 12rem; }
+  .sv-overlay { padding: var(--s-4); }
+  .sv-dialog { inline-size: min(96vw, 112rem); block-size: 90vh; }
+  .sv-head {
+    display: flex; align-items: center; gap: var(--s-3); flex: none; padding: var(--s-1) var(--s-1) var(--s-1) var(--s-3);
+    min-block-size: calc(var(--ctl-sm) + 2 * var(--s-1)); border-block-end: var(--bw) solid var(--line);
+    font-size: var(--fs-sm); line-height: var(--lh-sm);
+  }
+  .sv-date { font-weight: 700; color: var(--text); font-variant-numeric: tabular-nums; }
+  .sv-facing { font-variant-numeric: tabular-nums; }
+  .sv-head .spacer { flex: 1; }
+  .sv-body { position: relative; flex: 1; min-block-size: 0; display: grid; grid-template-columns: minmax(0, 3fr) minmax(16rem, 2fr); }
+  .sv-pano { position: relative; min-block-size: 0; background: var(--bg); }
+  .sv-pano.sv-dim { visibility: hidden; }
+  .sv-map { position: relative; min-block-size: 0; border-inline-start: var(--bw) solid var(--line); }
+  .sv-empty {
+    position: absolute; inset-block-start: 40%; inset-inline-start: 30%; transform: translateX(-50%); z-index: var(--z-map);
+    padding: var(--s-1) var(--s-3); font-size: var(--fs-sm); line-height: var(--lh-sm); color: var(--text-2);
+    background: var(--raised); border: var(--bw) solid var(--line-strong); border-radius: var(--radius); white-space: nowrap;
+  }
+  /* where the viewer stands: a dot with a wedge the way it faces (rotated by MapLibre) */
+  .sv-mark {
+    inline-size: calc(var(--ico-lg) * 1.75); block-size: calc(var(--ico-lg) * 1.75); border-radius: 50%; pointer-events: none;
+  }
+  .sv-mark::before {
+    content: ""; position: absolute; inset: 0; background: color-mix(in srgb, var(--accent) 55%, transparent);
+    clip-path: polygon(50% 50%, 22% 0, 78% 0);
+  }
+  .sv-mark::after {
+    content: ""; position: absolute; inset: 0; margin: auto; inline-size: var(--ico-sm); block-size: var(--ico-sm); border-radius: 50%;
+    background: var(--accent); border: var(--bw-mark) solid var(--on-accent); box-shadow: 0 1px 4px rgba(0, 0, 0, 0.7);
+  }
+  .sv-mark.sv-nohead::before { display: none; }
+  .sv-target {
+    inline-size: var(--ico-sm); block-size: var(--ico-sm); border-radius: 50%; background: var(--warn);
+    border: var(--bw-mark) solid var(--on-warn); box-shadow: 0 1px 4px rgba(0, 0, 0, 0.7);
+  }
+  @media (max-width: 1100px), (pointer: coarse) {
+    .sv-overlay { padding: 0; }
+    .sv-dialog { inline-size: 100vw; block-size: 100dvh; max-block-size: 100dvh; border-radius: 0; border: 0; }
+    .sv-body { display: block; }
+    .sv-pano { position: absolute; inset: 0; }
+    .sv-map {
+      position: absolute; inset-block: auto var(--s-3); inset-inline: var(--s-3) auto; inline-size: min(50vw, 20rem);
+      block-size: 28vh; z-index: var(--z-map); border: var(--bw) solid var(--line-strong); border-radius: var(--radius);
+      overflow: hidden; box-shadow: var(--elev-dialog);
+    }
+    .sv-empty { inset-inline-start: 50%; }
+  }
 }

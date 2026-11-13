@@ -344,6 +344,12 @@ class Config:
     # [vessels.receiver]: our own AIS receiver (AIS-catcher on one RTL-SDR at the station, sizeup-ais.service,
     # sizeup/radio/aisd.py); off until the dongle and a marine VHF antenna are in. sdr: that dongle's exact USB serial,
     # kept out of sizeup's own radios; json: the decoder's messages file ("" = sizeup/radio/aisd.py MESSAGES).
+    # [streetview] (static/streetview.js): 360-degree street imagery on the CAD maps, in the app (Google Maps JavaScript
+    # API, StreetViewPanorama). google_key: a browser key restricted by HTTP referrer to the hub's address and to the
+    # Maps JavaScript API; env SIZEUP_GOOGLE_MAPS_KEY first (the hub: SSM /sizeup-hub/google-maps-key). "" or "none":
+    # off (an admin sees "Street view: key not set"). Never logged; the page gets it only from GET /api/cad/streetview.
+    streetview_google_key: str = field(default="", repr=False)
+    streetview_key_bad: bool = False                # a value that is not a key: off (App logs it once)
     vessels_receiver: bool = False
     vessels_sdr: str = ""
     vessels_gain: str = "auto"
@@ -422,6 +428,8 @@ def hub_url_problem(url: str) -> str:
 #   SIZEUP_MTA_KEY                    [trains] key: only should the MTA require one again (none needed, 2026-10-14)
 #   SIZEUP_AISSTREAM_KEY              [vessels] aisstream_key: aisstream.io's API key (the hub: SSM
 #                                     /sizeup-hub/aisstream-key); none: that source is off
+#   SIZEUP_GOOGLE_MAPS_KEY            [streetview] google_key: the Street View browser key (referrer-restricted; the
+#                                     hub: SSM /sizeup-hub/google-maps-key); "" or "none": street view off
 def _env(name: str, default):
     v = os.environ.get(name, "").strip()
     return v if v else default
@@ -987,6 +995,20 @@ def _vessels(data: dict, base: Path, sdrs: tuple[str, ...], adsb_sdr: str = "") 
                 vessels_sdr=sdr, vessels_gain=gain, vessels_ppm=ppm, vessels_receiver_json=js)
 
 
+def _streetview(data: dict) -> dict:
+    """[streetview] google_key / env SIZEUP_GOOGLE_MAPS_KEY -> streetview_google_key ("" = off). "none" (the SSM
+    placeholder before a key exists) is off too, and so is a value that isn't a key's shape (streetview_key_bad: the
+    app logs one line, never the value)."""
+    sv = _take(data.get("streetview", {}), "streetview", {"google_key"})
+    key = _env("SIZEUP_GOOGLE_MAPS_KEY", str(sv.get("google_key", ""))).strip()
+    if key.lower() in ("none", "off", "-"):
+        key = ""
+    if key and not re.fullmatch(r"[A-Za-z0-9_-]{20,128}", key):
+        # never a ConfigError: a hand-edited SSM value would stop the hub from starting at all; off, said once by the app
+        return dict(streetview_google_key="", streetview_key_bad=True)
+    return dict(streetview_google_key=key)
+
+
 def _bbox(v, what: str, max_deg: float = 3.0) -> tuple[float, float, float, float]:
     try:
         w, s, e, n = (float(x) for x in v)
@@ -1251,7 +1273,7 @@ def load(path: str | Path) -> Config:
         raise ConfigError(f"{path}: {e}") from e
     _take(data, "config", {"station", "web", "radio", "tones", "stt", "p25", "mdc", "units", "storage", "map",
                            "cad", "dispatch", "cloud", "prealert", "roads", "roadwork", "gis", "trains", "weather", "alerts",
-                           "aircraft", "geo", "atc", "adapter", "routing", "vessels"})
+                           "aircraft", "geo", "atc", "adapter", "routing", "vessels", "streetview"})
     adapter_env = _adapter(data)
     st = _take(data.get("station", {}), "station", {"id", "name", "auto_update", "lat", "lon"})
     if not isinstance(st.get("auto_update", True), bool):
@@ -1522,5 +1544,5 @@ def load(path: str | Path) -> Config:
         cloud_state="" if cloud.get("cloud_role") == "hub" else rel_state("state/cloud.json"),
         **_geo(data),
         **_atc(data, base),
-        **pa, **_alerts(data, pa), **_roads(data), **_roadwork(data), **_gis(data), **_routing(data), **_trains(data), **_weather(data), **aircraft, **vessels,
+        **pa, **_alerts(data, pa), **_roads(data), **_roadwork(data), **_gis(data), **_routing(data), **_trains(data), **_weather(data), **aircraft, **vessels, **_streetview(data),
     )

@@ -63,6 +63,8 @@ POST /api/cad/preplan                     {kind, lat, lon, label?, note?, level?
 POST /api/cad/preplan/<id>                {kind?, label?, note?, level?, priority?, review_by?, lat?, lon?, link?,
                                           action?: delete | restore (admins)}. Both: dispatchers and admins, in the
                                           Settings audit log (section "preplan")
+GET  /api/cad/streetview                  {provider: "google", key} with a key set ([streetview] google_key: a browser
+                                          key restricted by referrer), else {provider: ""}; no-store, never logged
 GET  /api/cad/admin                       record counts and the next event number
 GET  /api/cad/whoami                      {email, name, callsign, source: "access" | "none", role, enforced}: who
                                           signed in; with Access also {active, may, bootstrap, admins: [names]}
@@ -758,6 +760,13 @@ class CadApi:
         p = getattr(self.cad, "pushes", None)
         return _json(200, {"configured": False} if p is None else {"configured": True, **p.page()})
 
+    def _streetview(self) -> tuple[int, bytes, str, dict]:
+        """GET /api/cad/streetview (static/streetview.js): the browser key, asked once when a map first offers street
+        view. Only the key goes out (it works only from the hub's address); never cached, never in a log."""
+        key = getattr(self.cad.s, "streetview_key", "") or ""
+        out = {"provider": "google", "key": key} if key else {"provider": ""}
+        return 200, json.dumps(out, separators=(",", ":")).encode(), JSON, {"Cache-Control": "no-store"}
+
     def _dvr_pin(self, cid: str, body: dict) -> dict:
         """POST /api/cad/cameras/<id>/dvr/pin {on}: keep recording this camera until unpinned, or stop (#277)."""
         fn = getattr(self.cad, "dvr_pin", None)
@@ -810,6 +819,8 @@ class CadApi:
                 return _json(200, self.cad.settings_audit_log(parse_qs(query), self._may(who)))
             if path == "/api/cad/stt":
                 return _json(200, self.cad.settings.stt_page())
+            if path == "/api/cad/streetview":
+                return self._streetview()
             if path == "/api/cad/tones":
                 return _json(200, self.cad.tone_names())
             if path == "/api/cad/state":
