@@ -1065,6 +1065,12 @@ def _serve(app, monkeypatch, access: bool):
     monkeypatch.setattr(appmod, "access_verifier", lambda cfg: Access() if access else None)
     server = appmod.make_server(app)
     threading.Thread(target=server.serve_forever, daemon=True).start()
+    # /api/state is the latest push, and the first one is built by the server's own thread: until then it is {} (a
+    # request that won that race once: KeyError 'loose_traffic'). Waited for, then served.
+    end = time.monotonic() + 30
+    while server.broadcaster.snapshot()[0] == 0 and time.monotonic() < end:
+        time.sleep(0.01)
+    assert server.broadcaster.snapshot()[0] > 0, "the server never pushed its first state"
     return server, f"http://127.0.0.1:{server.httpd.server_address[1]}"
 
 

@@ -279,15 +279,17 @@ def test_a_preview_is_the_text_only_and_its_audio_an_explicit_second_call(voice)
 
 def test_a_voice_not_started_in_time_is_not_rendered_and_one_render_cannot_hold_the_queue(voice):
     cad = make_cad()
-    cad.voice_stale_s = 0.3
     iid = call(cad)
     first = cad.dispatch(iid, {"unit_ids": [uid(cad, "E60")], "operator": "JD"})
-    assert voice.started.wait(2)
+    assert voice.started.wait(30)
+    # Only the second one's deadline is short. (Both were 0.3 s once: on a loaded machine the worker thread, made at
+    # the first dispatch, came to the first job later than that, called it too late too, and nothing was ever said.)
+    cad.voice_stale_s = 0.3
     late = cad.dispatch(iid, {"unit_ids": [uid(cad, "E61")], "operator": "JD"})     # waits behind a slow one
-    time.sleep(0.4)
+    time.sleep(0.4)                                              # past its deadline (longer on a busy machine: later still)
     n = len(voice.said)
     voice.release()
-    assert cad.voice.wait(5)
+    assert cad.voice.wait(30)
     got = rows(cad, iid)
     assert (got[0]["audio"], got[1]["audio"], got[1]["audio_note"]) == ("ready", "failed", service.VOICE_LATE)
     assert len(voice.said) == n + 1                              # the first one's time out; nothing said for the late one
@@ -300,7 +302,7 @@ def test_a_voice_not_started_in_time_is_not_rendered_and_one_render_cannot_hold_
     sid = call(slow)
     voice.gate.clear()
     slow.dispatch(sid, {"unit_ids": [uid(slow, "E60")], "operator": "JD"})
-    assert slow.voice.wait(3) and voice.held()                   # given up while the voice is still at it
+    assert slow.voice.wait(4) and voice.held()                   # given up while the voice is still at it (held 5 s)
     d = rows(slow, sid)[0]
     assert (d["audio"], d["audio_note"]) == ("failed", service.VOICE_SLOW)
 

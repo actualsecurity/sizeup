@@ -242,8 +242,18 @@ global.requestAnimationFrame = (f) => { frames.push(f); return frames.length; };
 
 LOAD = r"""
 // A fake clock (#404): only the frames move it, 25 ms a frame, so a busy machine can't stretch a second of frames.
-const T0 = Date.now(), P0 = performance.now(); let dt = 0;
+// performance.now() starts at an hour, as on a page long open, never at node's own age: the loop's first tick is due
+// when a frame's time is FRAME_MS..MAX_FRAME_MS past 0, so a node that took over ~0.2 s to start (a loaded machine)
+// ticked on the first frame and one that started fast never did, and the two went different ways from there.
+// setTimeout is on the fake clock too (spin() runs what is due): the loop sleeps on one between an estimate's ticks
+// and after the last rig settles (#453), and a real timer never fires in a script that never yields, so a loop put
+// to sleep stayed asleep and asked for no frame again. The handle is shaped like node's (_idleTimeout, _onTimeout:
+// the tests read them). setInterval stays node's: the once-a-second ages are not driven here.
+const T0 = Date.now(), P0 = 3600e3; let dt = 0;
 Date.now = () => T0 + dt; performance.now = () => P0 + dt;
+const sleeping = new Set();
+global.setTimeout = (f, ms) => { const t = { _onTimeout: f, _idleTimeout: ms || 0, at: dt + (ms || 0) }; sleeping.add(t); return t; };
+global.clearTimeout = (t) => { sleeping.delete(t); };
 for (const f of ["motion.js", "glide.js", "mapfollow.js", "cadmap.js"]) eval(fs.readFileSync(IN.static + "/" + f, "utf8"));
 const host = new El("div");
 const rm = new CadMap.RigMap(host, { scene: { home: { center: [-73.68, 41.02], zoom: 13 }, firehouses: [] }, pins: true, unset: false,
@@ -255,7 +265,7 @@ const chip = (u) => L.chips.get(u);
 const cls = (u) => chip(u).el.className.split(/\s+/).filter((c) => !c.startsWith("maplibregl-"));
 const follow = () => host.find("cm-follow")[0];
 const followText = () => follow().find("ac-follow-t")[0].textContent;
-const spin = (ms) => { dt += ms; };
+const spin = (ms) => { dt += ms; for (const t of [...sleeping]) if (sleeping.has(t) && t.at <= dt) { sleeping.delete(t); t._onTimeout(); } };
 const lng = (u) => chip(u).marker.getLngLat().lng;
 const run = (n, ms) => { for (let i = 0; i < n; i++) { spin(ms); const fs_ = frames.splice(0); for (const f of fs_) f(performance.now()); } };
 const withFix = (u, patch) => ({ ...cad.state.map, markers: cad.state.map.markers.map((m) => (m.unit === u ? { ...m, ...patch } : m)) });

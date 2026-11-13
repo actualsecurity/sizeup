@@ -5,8 +5,10 @@ from __future__ import annotations
 
 import json
 import struct
+import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -125,9 +127,16 @@ def test_find_sets_only_whole_ones(tmp_path, monkeypatch):
     assert [s.path.name for s in replay.find_sets("adsb")] == ["a"]
 
 
+def fake_run(monkeypatch, run) -> None:
+    """The tool's own `subprocess`, replaced: only what replay_sync runs goes to `run`. (subprocess.run itself was
+    patched once: for the length of a test every thread in the process ran the fake, and a thread an earlier test file
+    left behind in this xdist worker put its own command first in the list of what "the tool" ran.)"""
+    monkeypatch.setattr(replay_sync, "subprocess", SimpleNamespace(run=run, TimeoutExpired=subprocess.TimeoutExpired))
+
+
 def test_push_refuses_without_the_flag(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("SIZEUP_REPLAY_DIR", str(tmp_path))
-    monkeypatch.setattr(replay_sync.subprocess, "run", lambda *a, **k: pytest.fail("ran aws"))
+    fake_run(monkeypatch, lambda *a, **k: pytest.fail("ran aws"))
     assert replay_sync.main(["push"]) == 2 and replay_sync.main(["push", "--dryrun"]) == 2
     assert "refused" in capsys.readouterr().err
 
@@ -151,7 +160,7 @@ def ran_aws(monkeypatch, head_rc: int = 0) -> list:
         rc = head_rc if args[1:3] == ["s3api", "head-bucket"] else 0
         return type("R", (), {"returncode": rc, "stderr": "An error occurred (404) when calling the HeadBucket "
                                                           "operation: Not Found" if rc else ""})()
-    monkeypatch.setattr(replay_sync.subprocess, "run", run)
+    fake_run(monkeypatch, run)
     return ran
 
 
@@ -229,7 +238,7 @@ def test_check_rejects_symlinks(tmp_path):
 
 def test_push_checks_the_cache_first(tmp_path, monkeypatch):
     monkeypatch.setenv("SIZEUP_REPLAY_DIR", str(tmp_path))
-    monkeypatch.setattr(replay_sync.subprocess, "run", lambda *a, **k: pytest.fail("ran aws"))
+    fake_run(monkeypatch, lambda *a, **k: pytest.fail("ran aws"))
     audio_set(tmp_path, clips=[dict(AIR, id="Dispatch-1794066000000")])
     assert replay_sync.main(["push", "--write-to-s3"]) == 1
 
@@ -241,7 +250,7 @@ def test_push_checks_the_cache_first(tmp_path, monkeypatch):
     "s3://sizeup-replay-fixtures-504804195561", "s3://another-bucket/replay-fixtures/v1", "/tmp/x"])
 def test_push_and_pull_only_to_a_replay_fixtures_location(tmp_path, monkeypatch, url):
     monkeypatch.setenv("SIZEUP_REPLAY_DIR", str(tmp_path))
-    monkeypatch.setattr(replay_sync.subprocess, "run", lambda *a, **k: pytest.fail("ran aws"))
+    fake_run(monkeypatch, lambda *a, **k: pytest.fail("ran aws"))
     assert replay_sync.main(["--s3", url, "push", "--write-to-s3"]) == 2
     assert replay_sync.main(["--s3", url, "pull"]) == 2
     monkeypatch.setenv("SIZEUP_REPLAY_S3", url)
@@ -277,7 +286,7 @@ def test_no_sync_unless_the_bucket_is_there_and_ours(tmp_path, monkeypatch, caps
 
 def test_version_digits_are_ascii_only(tmp_path, monkeypatch):
     monkeypatch.setenv("SIZEUP_REPLAY_DIR", str(tmp_path))
-    monkeypatch.setattr(replay_sync.subprocess, "run", lambda *a, **k: pytest.fail("ran aws"))
+    fake_run(monkeypatch, lambda *a, **k: pytest.fail("ran aws"))
     assert replay_sync.main(["--s3", "s3://sizeup-replay-fixtures-504804195561/v\u0661", "pull"]) == 2   # Arabic-Indic 1
 
 
