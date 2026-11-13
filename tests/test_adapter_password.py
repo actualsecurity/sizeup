@@ -426,11 +426,31 @@ def test_aws_credentials_missing_or_ssm_unconfigured(hub, tmp_path):
         raise aws.AwsError("no AWS credentials", "NoCredentials")
     hub.ap.creds = none
     code, out, _ = post(hub, {"password": SECRET, "again": SECRET})
-    assert code == 502 and out["error"] == "No AWS credentials"
+    assert code == 502 and out["error"] == "Can't read the version from AWS: not saved"
     hub.ap._name = ""
     code, st, _ = get(hub)
     assert not st["configured"] and st["why_not"] == "Not configured"
     assert post(hub, {"password": SECRET, "again": SECRET})[0] == 404
+
+
+def test_no_save_when_the_version_cant_be_read(hub):
+    """Without SSM's LastModifiedDate the 5-min gap would count only this hub's saves (not the CLI's): refused."""
+    real = hub.ssm.__call__
+
+    def describe_fails(url, headers, body, timeout):
+        if headers["X-Amz-Target"] == "AmazonSSM.DescribeParameters":
+            return 400, json.dumps({"__type": "AccessDeniedException", "message": "no"}).encode()
+        return real(url, headers, body, timeout)
+    hub.ap.send = describe_fails
+    code, out, _ = post(hub, {"password": SECRET, "again": SECRET})
+    assert code == 502 and out["error"] == "Can't read the version from AWS: not saved" and hub.ssm.puts() == []
+
+    def none_yet(url, headers, body, timeout):        # the parameter isn't there yet (ParameterNotFound): may save
+        if headers["X-Amz-Target"] == "AmazonSSM.DescribeParameters":
+            return 200, b'{"Parameters": []}'
+        return real(url, headers, body, timeout)
+    hub.ap.send = none_yet
+    assert post(hub, {"password": SECRET, "again": SECRET})[0] == 200 and len(hub.ssm.puts()) == 1
 
 
 def test_one_save_at_a_time():

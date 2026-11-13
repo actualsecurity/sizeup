@@ -310,13 +310,20 @@ const StationHealth = (() => {
       const btn = el("button", "", `Reset ${name}`);
       btn.title = x.reason || "failing";
       btn.addEventListener("click", async () => {
-        if (!confirm(`Reset ${name} on the station?\n${x.reason || "failing"}`)) return;
+        // versions the county refused in 24 h (the adapter's Health): a Reset from here keeps them, and is one more
+        // log-on on the shared account: said, and confirmed explicitly (the server asks for it too)
+        const m = /refused versions 24 h: (\d+)/.exec(x.reason || "");
+        const refused = m ? Number(m[1]) : 0;
+        const ask = refused ? `Reset ${name} on the station?\n${refused} password version(s) refused in 24 h. `
+          + "A reset from here keeps them (3 in 24 h: only a reset at the station clears them) and may be one more "
+          + `log-on on the shared county account.\n${x.reason}` : `Reset ${name} on the station?\n${x.reason || "failing"}`;
+        if (!confirm(ask)) return;
         btn.disabled = true;
         let msg;
         try {
           const res = await fetch("/api/sources/reset", { method: "POST",
                                                            headers: { "Content-Type": "application/json", "X-Sizeup-Action": "reset" },
-                                                           body: JSON.stringify({ source: x.source }) });
+                                                           body: JSON.stringify({ source: x.source, confirm_refused: refused > 0 }) });
           const d = await res.json().catch(() => ({}));
           msg = res.ok ? (d.result || "Reset asked") : (d.error || `HTTP ${res.status}`);
         } catch (e) { msg = String(e); }

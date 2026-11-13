@@ -207,3 +207,73 @@ def test_a_reset_in_flight_holds_up_another_for_that_source():
     assert lim.take("feed") == 0
     lim.finish("feed", True)
     assert lim.blocked("feed") == 300
+
+
+def test_the_origin_reaches_an_adapter_that_takes_it_and_an_older_one_still_resets():
+    """sizeup-county keeps the refused SSM versions on a reset from the hub; only a station reset clears them."""
+    got = []
+
+    class New(Feed):
+        def reset(self, origin=""):
+            got.append(origin)
+
+    class Kw(Feed):
+        def reset(self, **kw):
+            got.append(kw.get("origin"))
+    res = Resets()
+    for origin in ("hub", "local", "", "bogus"):
+        res.request("feed", "x", origin)
+        assert res.run_due(New(), lambda m: None) == "reset"
+    assert got == ["hub", "local", "", ""]                      # (unknown: none, which the adapter takes as the hub's)
+    res.request("feed", "x", "local")
+    res.run_due(Kw(), lambda m: None)
+    old = Feed()
+    res.request("feed", "x", "hub")
+    assert res.run_due(old, lambda m: None) == "reset" and len(old.resets) == 1     # reset() without arguments
+    assert got[-1] == "local"
+    # the fallback Resets (before #304) do the same
+    fb = adapters._Resets()
+    fb.request("feed", "x", "hub")
+    fb.run_due(New(), lambda m: None)
+    assert got[-1] == "hub"
+
+
+def test_the_hub_job_says_hub_and_the_station_cli_says_local(monkeypatch):
+    from sizeup.cloud import adapters as ad
+    seen = []
+    monkeypatch.setattr(ad, "request_reset", lambda runner, source, by="", log=print, origin="": (
+        seen.append(origin) or {"ok": True, "result": "x"}))
+    from sizeup.cloud.stationmode import StationMode
+    sm = StationMode.__new__(StationMode)
+    sm.app, sm.log = None, lambda m: None
+    sm.sources_reset({"source": "feed"})
+    assert seen == ["local"]
+    import inspect
+    from sizeup.cloud import station as st
+    src = inspect.getsource(st)
+    assert 'on the hub", self.log, origin="hub")' in src
+
+
+def test_the_hubs_reset_needs_a_confirm_while_versions_were_refused(tmp_path):
+    hub = HubRun(hub_cfg(tmp_path))
+    st = station(station_cfg(tmp_path, hub.url), {})
+    feed = Feed()
+    st.sources_runner = Runner(feed)
+    try:
+        assert wait(lambda: hub.app.hub.connected(), 5)
+        hub.app.cad.sources.on_health({"source": "feed", "label": "Feed", "rank": 1, "state": "failing",
+                                       "reason": "login (manual reset needed); refused versions 24 h: 2", "at": 1.0})
+        code, body = reset(hub.url, "feed")
+        assert code == 409 and body["refused"] == 2 and "confirm" in body["error"] and feed.resets == []
+        req = urllib.request.Request(hub.url + "/api/sources/reset", method="POST",
+                                     data=json.dumps({"source": "feed", "confirm_refused": True}).encode(),
+                                     headers={"Content-Type": "application/json", "X-Sizeup-Action": "reset"})
+        with urllib.request.urlopen(req, timeout=40) as r:
+            assert r.status == 200
+        assert wait(lambda: feed.resets, 3)
+    finally:
+        st.sources_runner.stop.set()
+        st.link.stop()
+        hub.close()
+    js = (__import__("pathlib").Path(__file__).resolve().parent.parent / "sizeup" / "web" / "static" / "health.js").read_text()
+    assert "confirm_refused: refused > 0" in js and "refused versions 24 h" in js

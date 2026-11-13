@@ -871,6 +871,11 @@ Incidents come in from ranked sources. The interface is in `sizeup/sources/__ini
   a save AWS didn't answer is audited as "no answer" and counts. The value is never logged, audited, answered or put
   in an exception's text (AWS's own error message isn't kept, only its code). The hub never logs into the county app.
   The department's CLI script still works the same; the card then shows the version as "not from the hub".
+  No save while SSM can't say the version (DescribeParameters failing, other than "not there yet"): without its
+  last-modified time the gap would count only the hub's own saves. Resets: the station tells the adapter where a
+  reset came from (`reset(origin="hub" | "local")`, through `Resets`); sizeup-county keeps the refused SSM versions on
+  a reset from the hub, so 3 refused in 24 h stay MANUAL until a reset AT THE STATION. While its Health says
+  "refused versions 24 h: N", the hub's Reset asks for an explicit confirm (409 without `confirm_refused`).
 - **Measurement:** each source's first-seen time per incident, and its lead over paging. Settings > Health shows both.
 - **Pre-alerts never make an incident.** These include a dispatcher on the feed's talkgroups opening a call to us,
   "incoming additional alarm" or "stand by for a page" naming us, and the phone ring. They show as "Possible incoming"

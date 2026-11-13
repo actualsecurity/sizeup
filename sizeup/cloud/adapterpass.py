@@ -26,9 +26,10 @@ Each save is ONE log-on attempt on the department's shared county account (the a
 refused versions in 24 h stop it for a person's reset), hence the gap, the confirm and the warning on the page.
 
 The value: wrapped in Hidden from the moment the request body is parsed (repr/str "<hidden>"), put only into the
-signed request's body (a bytearray, zeroed after it is sent), never in a log, the audit, an answer or an exception's
-text. AWS's own error message is never kept (a ValidationException can quote the value back): its code only. Python
-can't wipe a str; nothing keeps a reference past the request.
+signed request's body, never in a log, the audit, an answer or an exception's text. AWS's own error message is never
+kept (a ValidationException can quote the value back): its code only. Every reference is dropped once the request is
+sent (the body buffer is also overwritten, best effort); Python can't wipe the str and bytes copies it made on the
+way, which live in the hub's memory until they are collected.
 """
 
 from __future__ import annotations
@@ -64,6 +65,9 @@ CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 # is one more attempt, so it needs the admin's explicit confirm
 STOPPED_RE = re.compile(r"^login\b")
 MANUAL_RE = re.compile(r"manual reset")
+# the adapter's Health counts the SSM versions the county refused in 24 h (sizeup-county): a Reset from the hub keeps
+# them, and while there are any it needs an explicit confirm (Settings > Health)
+REFUSED_RE = re.compile(r"refused versions 24 h: (\d{1,3})")
 
 # send(url, headers, body, timeout) -> (HTTP status, body): urllib by default, a fake in tests
 Sender = Callable[[str, dict, "bytes | bytearray", float], "tuple[int, bytes]"]
@@ -141,7 +145,8 @@ def problem(new: str) -> str:
 
 def station_sources(store) -> list[dict]:
     """The station's incident sources as last reported (source_health; stale or not): {source, label, state, reason,
-    at, stopped, manual}. stopped: refused log-ons stopped it (a save is one more attempt)."""
+    at, stopped, manual, refused}. stopped: refused log-ons stopped it (a save is one more attempt); refused: SSM
+    versions the county refused in 24 h (the hub's Reset needs a confirm while > 0)."""
     try:
         rows = store.q("SELECT source, label, state, reason, at, COALESCE(received, at) AS got FROM source_health "
                        "ORDER BY rank, source")
@@ -151,8 +156,10 @@ def station_sources(store) -> list[dict]:
     for r in rows:
         reason = str(r["reason"] or "")
         stopped = r["state"] == "failing" and bool(STOPPED_RE.match(reason))
+        m = REFUSED_RE.search(reason)
         out.append({"source": r["source"], "label": r["label"], "state": r["state"], "reason": reason[:200],
-                    "at": r["got"], "stopped": stopped, "manual": stopped and bool(MANUAL_RE.search(reason))})
+                    "at": r["got"], "stopped": stopped, "manual": stopped and bool(MANUAL_RE.search(reason)),
+                    "refused": int(m.group(1)) if m else 0})
     return out
 
 
@@ -247,7 +254,7 @@ class AdapterPassword:
         except aws.AwsError as e:
             raise SaveRefused("No AWS credentials", 502, code=e.code or "NoCredentials") from None
         hdrs = aws.sign("POST", url, {"Content-Type": "application/x-amz-json-1.1", "X-Amz-Target": target},
-                        bytes(body), c, self.region, "ssm")
+                        body, c, self.region, "ssm")
         try:
             status, data = self.send(url, {k: v for k, v in hdrs.items() if k != "Host"}, body, TIMEOUT_S)
         except Exception:  # noqa: BLE001 - a timeout, no route, a dropped connection: never its text
@@ -347,6 +354,9 @@ class AdapterPassword:
 
     def _save(self, new: Hidden, confirm: bool, by: str, operator: str, store) -> dict:
         meta = self.describe(fresh=True)
+        if meta.get("error") and meta["error"] != "Not in SSM yet":
+            # without SSM's LastModifiedDate the gap would count only this hub's own saves (not the CLI's): no save
+            raise SaveRefused("Can't read the version from AWS: not saved", 502, code="describe")
         if (w := self.wait_s(store, meta)) > 0:
             raise SaveRefused(f"Next save in {max(1, round(w / 60))} min", 429, wait_s=w)
         if any(s["stopped"] for s in station_sources(store)) and confirm is not True:
@@ -369,7 +379,7 @@ class AdapterPassword:
                 self.log(f"adapter password: save by {by or who} refused by AWS: {e.code or 'error'}")
             raise
         finally:
-            for i in range(len(body)):      # the only bytes of it we made: zeroed
+            for i in range(len(body)):      # best effort (the str and bytes made on the way can't be wiped)
                 body[i] = 0
             new.drop()
         try:

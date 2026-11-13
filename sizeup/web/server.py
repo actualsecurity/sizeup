@@ -889,6 +889,15 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                         raise ValueError("source: a source id")
                 except ValueError as e:
                     return self._send(400, json.dumps({"error": str(e)}).encode(), "application/json")
+                if station is not None and cad is not None and body.get("confirm_refused") is not True:
+                    # the hub's Reset keeps the refused SSM versions (sizeup-county), but while there are any it is one
+                    # more log-on on a shared account: an explicit confirm
+                    from sizeup.cloud.adapterpass import station_sources
+                    refused = max([s["refused"] for s in station_sources(cad.cad.store) if not src or s["source"] == src]
+                                  + [0])
+                    if refused:
+                        return self._send(409, json.dumps({"error": f"{refused} password version(s) refused in 24 h: confirm",
+                                                           "refused": refused}).encode(), "application/json")
                 if (wait_s := reset_limit.take(src)) > 0:
                     return self._send(429, json.dumps({"error": f"reset again in {wait_s / 60:.0f} min (one per 5 min)"})
                                       .encode(), "application/json")
@@ -967,7 +976,8 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
         def _adapter_password(self, path: str) -> None:
             """POST /api/cad/adapter-password: an admin's new station adapter password, written to SSM (write-only).
             Who, the header and the length are checked before a byte of the body is read; the body is read into a
-            bytearray that is zeroed once parsed; the values go on as Hidden. Every answer and log line here is fixed
+            bytearray, overwritten once parsed (best effort: Python can't wipe the strings it made); the values go on
+            as Hidden and every reference is dropped at the end of the request. Every answer and log line here is fixed
             text or AWS's error code: never the body, never an exception's text."""
             from sizeup.cloud.adapterpass import Hidden, SaveRefused
 

@@ -104,13 +104,13 @@ class _Resets:
     that adapter (before its next poll)."""
 
     def __init__(self):
-        self._want: dict[str, str] = {}             # source -> who asked
+        self._want: dict[str, tuple[str, str]] = {}   # source -> (who asked, origin)
         self._lock = threading.Lock()
         self.wake: Callable[[str], None] | None = None   # the runner's: cut a back-off short for that source
 
-    def request(self, source: str, by: str = "") -> None:
+    def request(self, source: str, by: str = "", origin: str = "") -> None:
         with self._lock:
-            self._want[source] = by
+            self._want[source] = (by, origin)
         if self.wake is not None:
             self.wake(source)
 
@@ -124,14 +124,15 @@ class _Resets:
         with self._lock:
             if source not in self._want:
                 return None
-            by = self._want.pop(source)
+            by, origin = self._want.pop(source)
         who = f" (asked by {by})" if by else ""
         fn = getattr(adapter, "reset", None)
         if not callable(fn):
             log(f"incident sources: {source}: reset{who}: it has no reset(): nothing to do")
             return "no reset(): nothing to do"
         try:
-            fn()
+            from sizeup.sources.resets import call_reset
+            call_reset(fn, origin)
         except Exception as e:  # noqa: BLE001 - an adapter's bug never stops the station
             log(f"incident sources: {source}: reset{who} failed: {type(e).__name__}")    # (its type only: no secrets)
             return f"failed: {type(e).__name__}"
@@ -139,8 +140,10 @@ class _Resets:
         return "reset"
 
 
-def request_reset(runner, source: str, by: str = "", log: Callable[[str], None] = print) -> dict:
-    """A reset of one source ("" = every source that has reset()), queued for its own thread. {ok, result | error}."""
+def request_reset(runner, source: str, by: str = "", log: Callable[[str], None] = print, origin: str = "") -> dict:
+    """A reset of one source ("" = every source that has reset()), queued for its own thread. {ok, result | error}.
+    origin: "hub" (an admin's Reset on the hub) | "local" (a person at the station): passed on to the adapter's
+    reset(origin=...) when it takes it (only a local one may clear caps that guard a shared account)."""
     source = str(source or "").strip()
     if source and not SOURCE_ID.fullmatch(source):
         return {"ok": False, "error": "source: a source id"}
@@ -160,7 +163,7 @@ def request_reset(runner, source: str, by: str = "", log: Callable[[str], None] 
             continue
         if resets is None:
             return {"ok": False, "error": "this station's runner can't reset yet (#297: Resets)"}
-        resets.request(src, by)
+        resets.request(src, by, origin)
         out.append(f"{src}: reset asked (runs before its next poll)")
     log(f"incident sources: reset of {source or 'all'} asked by {by or 'someone'}: {'; '.join(out)}")
     return {"ok": True, "result": "; ".join(out)}

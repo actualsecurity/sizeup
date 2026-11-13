@@ -399,7 +399,7 @@ class StationLink:
             elif kind == "sources_reset":               # an admin on the hub: an incident source's reset() (#301)
                 a = job.get("args") if isinstance(job.get("args"), dict) else {}
                 res = request_reset(getattr(self.app, "sources_runner", None), str(a.get("source") or ""),
-                                    f"{a.get('by') or 'an admin'} on the hub", self.log)
+                                    f"{a.get('by') or 'an admin'} on the hub", self.log, origin="hub")
             else:
                 res = {"ok": False, "error": f"this station doesn't know job {kind!r}"}
         except Exception as e:  # a bad job must never take the station down
