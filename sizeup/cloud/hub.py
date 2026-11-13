@@ -1096,7 +1096,10 @@ class HubApp(App):
             # a station from before #409 refuses a whole map with a "p25:<system>:<tg>" key in it: left out for it
             prefs = {k: v for k, v in prefs.items() if not k.startswith("p25:")}
         # each FM channel's squelch: only to a station that takes it (one before it refuses a 4th argument)
-        sq = dict(self._sq_ov) if self._squelch_ok() else None
+        sq = None
+        if self._squelch_ok():          # what of it fits the station's channels, as it reported them (the station agrees)
+            kinds = {r.get("label"): r.get("channel_kind") for r in self.hub.radio_rows() if r.get("channel_kind")}
+            sq = channels.fit_squelch(self._sq_ov, kinds, self.squelch_defaults)[0]
         return {"prefs": prefs, "aws": {"ok": ok, "why": why, "reserve": reserve}, "tones": dict(self._tone_ov),
                 "squelch": sq, "sig": channels.sig(prefs, ok, self._tone_ov, reserve, sq)}
 

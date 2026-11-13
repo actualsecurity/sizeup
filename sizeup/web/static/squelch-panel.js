@@ -155,6 +155,19 @@ window.SquelchPanel = (() => {
     const kids = [];
     if (!(d.channels || []).length) kids.push(el("div", "empty", "No FM channels reported"));
     else kids.push(t);
+    for (const o of d.orphans || []) {     // set for a channel that is gone, renamed or paging: not applied
+      const r = el("div", "row small warn");
+      const what = FIELDS.filter((f) => o.set[f[0]] !== undefined).map((f) => `${f[1]} ${o.set[f[0]]}`).join(" · ");
+      r.append(el("span", "", `${o.key}: ${what} · not applied`));
+      r.title = "No traffic channel by this name on the station: left out of what it gets";
+      if (!ro()) {
+        const b = el("button", "mini", "Delete");
+        b.type = "button";
+        b.addEventListener("click", () => reset(o.key));
+        r.append(b);
+      }
+      kids.push(r);
+    }
     const sync = d.sync || {};
     if (sync.state && sync.state !== "local") {
       const s = el("div", `dim small${sync.state === "pending" || sync.state === "offline" ? " warn" : ""}`,

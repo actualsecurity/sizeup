@@ -173,6 +173,24 @@ def norm_squelch(m) -> dict:
     return out
 
 
+def fit_squelch(m, kinds: dict, defaults) -> tuple[dict, list[str]]:
+    """What of a squelch map applies to a station: its traffic channels only (a channel renamed, gone or now paging:
+    left out, never an error that would stop the rest of the channel push), close under open with the station's
+    own defaults (defaults(key) -> {open_db, close_db, min_open_s}). The hub (against what the station reported)
+    and the station (against its own) leave out the same entries, so their signatures agree. -> (kept, why not)."""
+    kept, why = {}, []
+    for k, v in norm_squelch(m).items():
+        if kinds.get(k) != "traffic":
+            why.append(f"{k}: {kinds.get(k) or 'no such'} channel")
+            continue
+        eff = {**(defaults(k) or {}), **v}
+        if eff.get("open_db") is not None and eff.get("close_db") is not None and eff["close_db"] >= eff["open_db"]:
+            why.append(f"{k}: close {eff['close_db']:g} dB not under open {eff['open_db']:g} dB")
+            continue
+        kept[k] = v
+    return kept, why
+
+
 def check_squelch(m) -> dict:
     """A whole squelch map from the hub: checked, cleaned. ValueError."""
     if not isinstance(m, dict) or len(m) > 50:

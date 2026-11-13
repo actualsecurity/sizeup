@@ -312,9 +312,12 @@ def test_a_chattering_squelch_is_a_hint_not_an_alert():
     r = Rig()
     r.at(0, status=station_status(radios=[radio("FG1", short_per_min=0.4), radio("South 2", short_per_min=None)]))
     assert [c["hint"] for c in r.h.model()["channels"]] == ["", ""]
-    r.at(10, status=station_status(radios=[radio("FG1", short_per_min=4.2)]))
+    r.at(10, status=station_status(radios=[radio("FG1", short_per_min=4.2, channel_kind="traffic"),
+                                            radio("South 2", short_per_min=3.0, channel_kind="paging")]))
     m = r.h.model()
     assert "squelch chattering: 4.2 short opens/min" in m["channels"][0]["hint"] and m["channels"][0]["short_per_min"] == 4.2
+    assert "raise Open" in m["channels"][0]["hint"]
+    assert "raise Open" not in m["channels"][1]["hint"] and "check antenna" in m["channels"][1]["hint"]   # paging: read-only
     assert m["hints"][0]["channel"] == "FG1" and r.keys() == [] and r.n.msgs == []
 
 def test_the_model_has_what_the_panel_shows():

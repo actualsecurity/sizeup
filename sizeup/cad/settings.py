@@ -1809,6 +1809,30 @@ class Editor:
         if not row.get("editable"):
             raise CadError(f"{key}: {row.get('kind') or 'not a traffic'} channel: its squelch is read-only")
 
+    def _import_squelch(self, sq: dict) -> tuple[dict, list[str]]:
+        """An imported squelch section: invalid entries and a channel the station reports as paging (read-only)
+        skipped; one no station has reported (a fresh hub, a channel gone) kept, left out of the push until a traffic
+        channel by that name is there (channels.fit_squelch). -> (kept, notes)."""
+        ctx = self.cad.radio_ctx
+        rows = {c["key"]: c for c in ctx.squelch_state()["channels"]} if ctx is not None else {}
+        kept, notes = {}, []
+        for k, v in sq.items():
+            try:
+                c = channels_mod.clean_squelch(k, v)
+            except ValueError as e:
+                notes.append(f"squelch {k}: skipped ({e})")
+                continue
+            if not c:
+                continue
+            row = rows.get(k)
+            if row is not None and not row.get("editable"):
+                notes.append(f"squelch {k}: skipped ({row.get('kind') or 'not a traffic'} channel: read-only)")
+                continue
+            if row is None:
+                notes.append(f"squelch {k}: kept, not applied until a traffic channel {k} is reported")
+            kept[k] = c
+        return kept, notes
+
     def replace_squelch(self, m: dict, operator: str) -> bool:
         """The whole squelch map as the hub sent it. True when anything changed."""
         cur = self.squelch_overrides()
@@ -2571,15 +2595,9 @@ class Editor:
                 channels_mod.clean(k, v)
             except ValueError as e:
                 raise CadError(f"overrides.channels.{k}: {e}") from None
-        sq = ov.get(channels_mod.SQUELCH_SECTION)
-        if sq is not None:
-            for k, v in sq.items():
-                try:
-                    channels_mod.clean_squelch(k, v)
-                    self._squelch_editable(k)
-                except (ValueError, CadError) as e:
-                    raise CadError(f"overrides.squelch.{k}: {e}") from None
-            ov[channels_mod.SQUELCH_SECTION] = channels_mod.norm_squelch(sq)      # empty entries dropped
+        if channels_mod.SQUELCH_SECTION in ov:
+            # never the whole backup refused over a squelch entry: what can't apply is skipped, said in the notes
+            ov[channels_mod.SQUELCH_SECTION], self._import_notes = self._import_squelch(ov[channels_mod.SQUELCH_SECTION])
         for k, v in (ov.get(TONES_SECTION) or {}).items():
             key, val = self._clean_tone(v, f"overrides.tones.{k}")
             if key != k:
@@ -2719,7 +2737,9 @@ class Editor:
     def _import_op(self, action: str, body: dict, op: str, guard: bool = False) -> dict:
         if action not in ("dry_run", "apply"):
             raise CadError("action: dry_run or apply")
+        self._import_notes = []
         ov, cards, ops, L = self._check_import(body.get("settings"))
+        notes = list(self._import_notes)
         if guard and ops is not None:         # the operators as apply (below) would leave them
             after = {o["name"]: dict(o) for o in self.operators()}
             for o in ops:
@@ -2762,7 +2782,7 @@ class Editor:
                     changes.append({"section": "users", "store": "operators", "key": o["name"],
                                     "change": "added" if h is None else "changed", "old": old, "new": new})
         if action == "dry_run":
-            return {"ok": True, "dry_run": True, "changes": changes,
+            return {"ok": True, "dry_run": True, "changes": changes, "notes": notes,
                     "note": "Nothing changed yet. Operators not in the file are kept; run cards and edits are replaced."}
         now = self.store.clock()
         with self.store.tx() as db:
@@ -2804,4 +2824,4 @@ class Editor:
             self.cad.radio_ctx.channels_changed()
         if self.cad.radio_ctx is not None and any(c["store"] == TONES_SECTION for c in changes):
             self.cad.radio_ctx.tones_changed()
-        return {"ok": True, "dry_run": False, "changes": changes}
+        return {"ok": True, "dry_run": False, "changes": changes, "notes": notes}

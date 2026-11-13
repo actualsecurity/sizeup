@@ -2093,7 +2093,7 @@ async function sImportFile(input) {
   try { data = JSON.parse(await f.text()); } catch (e) { sMsg(`${f.name}: not JSON (${e.message})`); return; }
   try {
     const r = await api("POST", "/api/cad/settings/import", { action: "dry_run", settings: data, operator: operator() });
-    S.importing = { name: f.name, data, changes: r.changes, note: r.note };
+    S.importing = { name: f.name, data, changes: r.changes, note: r.note, notes: r.notes || [] };
     sShowImport();
   } catch (e) {
     S.importing = null;
@@ -2126,7 +2126,8 @@ function sShowImport() {
   const row = el("div", "row");
   row.append(el("b", "", `${im.name}: ${im.changes.length ? `${im.changes.length} change${im.changes.length === 1 ? "" : "s"}` : "no changes"}`),
     el("span", "spacer"), cancel, apply);
-  box.replaceChildren(row, el("p", "dim small", im.note || ""), ...(im.changes.length ? [el("div", "tscroll").appendChild(t).parentNode] : []));
+  box.replaceChildren(row, el("p", "dim small", im.note || ""), ...(im.notes || []).map((n) => el("div", "small warn", n)),
+    ...(im.changes.length ? [el("div", "tscroll").appendChild(t).parentNode] : []));
 }
 
 // ---- wiring ---------------------------------------------------------------------------------------

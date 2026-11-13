@@ -1193,7 +1193,10 @@ class App:
             self._heard(fm_system(h), h, at=seg.end, channel=ch.label)
         self.live.fm_segment(ch.label, ids, seg.start, seg.end)
         tid = f"{ch.label.replace(' ', '')}-{int(seg.start * 1000)}" if record else ""
-        self._keyup_pool.submit(self._keyup, ch.label, seg, bool(ids), not low_energy, tid)   # after the close
+        try:
+            self._keyup_pool.submit(self._keyup, ch.label, seg, bool(ids), not low_energy, tid)   # after the close
+        except RuntimeError:            # shut down (a flush at exit): no estimate, nothing else changes
+            pass
         emergency = any(e for _h, e in found)        # the radio's emergency button (MDC / FleetSync, #128)
         live_key = self.tap.alarm_key(ch.label, seg.start, seg.end) if emergency else ""
         if not record:              # squelch, MDC IDs and "talking now" stay live; nothing is kept
@@ -2602,7 +2605,7 @@ class App:
         squelch (none from a hub before it: this station's stay). Applied here and kept (this station's own
         Settings overrides, audited as "hub"); the squelch at once, on the running receivers."""
         clean = channels.check_map(prefs)
-        sq = self._check_squelch(channels.check_squelch(squelch)) if squelch is not None else None
+        sq = self._check_squelch(squelch) if squelch is not None else None
         if sq is not None and self.cad.settings.replace_squelch(sq, "hub"):
             self._sq_ov = channels.norm_squelch(self.cad.settings.squelch_overrides())
             self._apply_squelch()
@@ -2637,16 +2640,14 @@ class App:
         c = next((c for c in self.cfg.channels if c.label == key and c.kind != "airband"), None)
         return {"open_db": float(c.squelch_db) if c is not None else 10.0, "close_db": CLOSE_DB, "min_open_s": MIN_OPEN_S}
 
-    def _check_squelch(self, m: dict) -> dict:
-        """The hub's squelch map against this station's channels: traffic channels only (a paging channel's squelch is
-        never set: a high Open would mute a page), close under open with this station's own defaults. ValueError."""
-        for key, v in m.items():
-            if self._kind.get(key) != "traffic":
-                raise ValueError(f"squelch {key}: not a traffic channel here (paging squelch is read-only)")
-            eff = {**self.squelch_defaults(key), **v}
-            if eff["close_db"] >= eff["open_db"]:
-                raise ValueError(f"squelch {key}: close {eff['close_db']:g} dB not under open {eff['open_db']:g} dB")
-        return m
+    def _check_squelch(self, m) -> dict:
+        """The hub's squelch map against this station's channels (channels.fit_squelch): traffic channels only (a
+        paging channel's squelch is never set: a high Open would mute a page), close under open with this station's
+        own defaults. What doesn't fit is left out and logged, never refused: the rest of the push still applies."""
+        kept, why = channels.fit_squelch(m, self._kind, self.squelch_defaults)
+        if why:
+            log("squelch from the hub: left out " + "; ".join(why))
+        return kept
 
     def _apply_squelch(self) -> None:
         """Each FM receiver's squelch as set (else its default), on the running squelch: no restart."""
@@ -2706,7 +2707,10 @@ class App:
                          "running": {f: r.get(f) for f in channels.SQUELCH},
                          "hiss_db": r.get("hiss_db"), "quieting_db": r.get("quieting_db"), "floor_db": r.get("floor_db"),
                          "short_per_min": r.get("short_per_min"), "keyups": r.get("keyups")})
-        return {"channels": rows, "sync": self.channels_sync(), "chatter_per_min": channels.CHATTER_PER_MIN,
+        ed = {r["key"] for r in rows if r["editable"]}
+        orphans = [{"key": k, "set": v} for k, v in sorted(self._sq_ov.items()) if k not in ed]   # renamed, gone, paging
+        return {"channels": rows, "orphans": orphans, "sync": self.channels_sync(),
+                "chatter_per_min": channels.CHATTER_PER_MIN,
                 "ranges": {f: list(v) for f, v in channels.SQUELCH.items()}}
 
     def channels_sync(self) -> dict:

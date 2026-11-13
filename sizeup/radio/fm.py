@@ -639,10 +639,14 @@ def _power(x: np.ndarray, n: int) -> np.ndarray:
 
 def ctcss_estimate(audio: np.ndarray, rate: int = RATE) -> tuple[str, float | None]:
     """An estimate of the CTCSS (PL) tone on a transmission's audio (as demodulated: the sub-audible tone is still
-    in it): ("tone", Hz), ("none", None): no line stands out, or ("unsure", Hz or None): too short to resolve the
-    neighbouring tones (97.4 / 100.0 are 2.6 Hz apart), a line next to mains hum, or hum as strong as the tone.
-    The power spectra of the contiguous runs of dead air (each phase-continuous, never spliced) are added; with too
-    little of them, the whole clip's. A diagnostic (Settings > Radios > Squelch), never a gate."""
+    in it): ("tone", Hz), ("none", None): no line stands out, or ("unsure", Hz or None).
+
+    Only dead air is trusted: the runs of it at least CTCSS_RUN_S long (each phase-continuous, never spliced),
+    their power spectra added. "tone" needs the line CTCSS_OVER_DB over the band, CTCSS_MARGIN_DB over the next
+    tone (97.4 / 100.0 are 2.6 Hz apart) and over mains hum, not beside a hum line, and the same tone the strongest
+    in at least two separate pieces of dead air (a voice harmonic wanders; a PL doesn't). With too little dead air
+    the whole clip is looked at, and says at most "unsure": speech's harmonics sit in the same 60-260 Hz. A
+    diagnostic (Settings > Radios > Squelch), never a gate."""
     a = np.asarray(audio, dtype=np.float64)[:int(CTCSS_MAX_S * rate)]
     if len(a) < rate // 2 or not np.any(a):
         return "unsure", None
@@ -661,25 +665,32 @@ def ctcss_estimate(audio: np.ndarray, rate: int = RATE) -> tuple[str, float | No
             if (e - k) * FRAME >= CTCSS_RUN_S * rate:
                 runs.append(a[k * FRAME:e * FRAME])
             k = e
-    if sum(len(r) for r in runs) < rate:
+    run_len = int(CTCSS_RUN_S * rate)
+    pieces = [r[i * (len(r) // m):(i + 1) * (len(r) // m)] for r in runs for m in [max(1, len(r) // run_len)]
+              for i in range(m)]
+    whole = len(pieces) < 2
+    if whole:
         runs = [a]
     n = 1 << int(np.ceil(np.log2(max(4 * rate, 4 * max(len(r) for r in runs)))))
-    spec = sum(_power(r, n) for r in runs)
     f = np.fft.rfftfreq(n, 1 / rate)
-    floor = float(np.median(spec[(f >= 60) & (f <= 260)])) + 1e-18
+    band = (f >= 60) & (f <= 260)
+    near = {t: (f >= t - CTCSS_TOL_HZ) & (f <= t + CTCSS_TOL_HZ) for t in (*CTCSS_HZ, *HUM_HZ)}
 
-    def line(hz: float) -> float:
-        return float(spec[(f >= hz - CTCSS_TOL_HZ) & (f <= hz + CTCSS_TOL_HZ)].max())
+    def pick(spec: np.ndarray) -> tuple[float, dict, float]:
+        p = {t: float(spec[near[t]].max()) for t in CTCSS_HZ}
+        return max(p, key=p.get), p, float(np.median(spec[band])) + 1e-18
 
-    p = {t: line(t) for t in CTCSS_HZ}
-    best = max(p, key=p.get)
+    spec = sum(_power(r, n) for r in runs)
+    best, p, floor = pick(spec)
     if 10 * np.log10(p[best] / floor) < CTCSS_OVER_DB:
         return "none", None
     margin = 10 ** (CTCSS_MARGIN_DB / 10)
     other = max(v for t, v in p.items() if abs(t - best) > 2 * CTCSS_TOL_HZ)
-    hum = max(line(h) for h in HUM_HZ)
-    if (other * margin > p[best] or hum * margin > p[best]
+    hum = max(float(spec[near[h]].max()) for h in HUM_HZ)
+    if (whole or other * margin > p[best] or hum * margin > p[best]
             or any(abs(best - h) <= 2 * CTCSS_TOL_HZ for h in HUM_HZ)):
+        return "unsure", best
+    if sum(1 for x in pieces if pick(_power(x, n))[0] == best) < 2:
         return "unsure", best
     return "tone", best
 
