@@ -64,7 +64,6 @@ the same restart-forever loop, status, live tap and App._segment. Its "quieting_
 from __future__ import annotations
 
 import os
-import select
 import sys
 import time
 from collections import deque
@@ -77,7 +76,7 @@ import numpy as np
 from sizeup import atc_hours
 from sizeup.radio import channelize
 from sizeup.radio.amtones import detone, find_tones
-from sizeup.radio.fm import FRAME, RATE, STALL_S, STUCK_S, Channel, NfmReceiver, Segment, _mmss
+from sizeup.radio.fm import FRAME, RATE, STALL_S, STUCK_S, Channel, NfmReceiver, Segment, _mmss, readable
 from sizeup.tz import TZ
 
 AM_RATE = 12000                # rtl_fm's AM output rate (shortfinal's RATE)
@@ -697,8 +696,7 @@ class AmReceiver(NfmReceiver):
         win_t, win_frames = None, 0                      # #275: the channelizer's output against real time
         self.rate_pct = None
         while not self._stop.is_set() and proc.poll() is None:
-            r, _, _ = select.select([fd], [], [], 1.0)
-            if not r:
+            if not readable(fd, 1.0):
                 if time.monotonic() - last > STALL_S:
                     self.detail = "rtl_fm stalled" if not multi else "rtl_sdr stalled"
                     return got
