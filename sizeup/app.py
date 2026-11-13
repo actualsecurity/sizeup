@@ -2462,9 +2462,9 @@ class App:
             self._stt_row(page.id, "error", page.model)
             self._save_page(page)
             return
-        if self._rerun_local([job.id]):
-            self._stt_row(job.id, "pending", f"{WHISPER_FALLBACK} (AWS failed: {why[:80]})")
-        else:
+        # (said first: a fast whisper finishing before this line would otherwise be put back to "Transcribing")
+        self._stt_row(job.id, "pending", f"{WHISPER_FALLBACK} (AWS failed: {why[:80]})")
+        if not self._rerun_local([job.id]):
             self._retext(job.id, "", "error", None, f"{channels_model()} (failed: {why[:80]})", why="AWS Transcribe")
 
     def _stt_row(self, cid: str, status: str, model: str) -> None:

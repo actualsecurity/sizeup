@@ -20,8 +20,9 @@ the key-ups of unknown radios in between).
 
 A page whose tones aren't ours but whose text names our units (#115, South 2 2026-10-14 07:04: "6462 to rescue
 40, ... Westchester County Airport", tones nobody's code matched) is flagged (rows[i]["names_ours"]: the unit
-codes, Matcher.units_named: as written or said, "Engine 64", "E64", "Rescue 40", "23 91"; never a bare number,
-"64" or "14, 4410 with ... EMS 31": too often an address, a run number or another department's unit): it still never
+codes, Matcher.units_named: as written or said, "Engine 64", "E64", "Rescue 40", "23 91"; never a bare number alone,
+"14, 4410 with ... EMS 31"; on unknown or no tones only, a list of two or more bare numbers all ours, "6462 to ...",
+"64, 62 to ..."): it still never
 queues an event (ours by our tones only, #80), but the desk sees it, with a phone pre-alert that rang in the minutes
 before it and went unanswered (rows[i]["prealert"]).
 """
@@ -44,15 +45,22 @@ DEFAULT_LIMIT = 6
 MAX_LIMIT = 50
 DEFAULT_PHRASES = ("Port Chester", "Rye Brook", "PC dispatch", "Port Chester dispatch", "PCFD", "headquarters")
 PREALERT_BEFORE_S, PREALERT_AFTER_S = 10 * 60, 60      # a ring this long before (after) a flagged page goes with it
-# A unit whose code is all digits (a chief's "2391"), heard as a number: never one that is a house number before a
-# street ("2391 Example Drive"), a "number 2391" / "#2391" / "box 2391", or another agency's ("EMS 2391", "PD 2391").
+# A chief's code (all digits, "2391") heard as a number is never a house number read out before a street ("2391 Example
+# Drive", unless a command or status word follows: "2391 Example Drive command" is the chief naming his command), a
+# "number 2391" / "#2391" / "box 2391", or another agency's ("EMS 2391", "PD-2391"). Only a chief's: an EMS unit's
+# own code after "EMS" / "Medic" ("Port Chester EMS 7711") is that unit.
 STREET_WORDS = (r"street|st|avenue|ave|road|rd|drive|dr|lane|ln|court|ct|place|pl|boulevard|blvd|terrace|ter|parkway|pkwy|"
                 r"circle|cir|highway|hwy|turnpike|tpke|plaza|square|sq|alley|trail|crescent|extension|ext")
-NOT_AFTER = ("number ", "no. ", "no ", "#", "# ", "box ", "apt ", "apartment ", "unit ", "suite ", "room ", "ems ", "pd ",
-             "medic ", "ambulance ", "police ")
-NUMBER_GUARD_BEFORE = "".join(f"(?<!{re.escape(w)})" for w in NOT_AFTER)
-NUMBER_GUARD_AFTER = r"(?!\s+(?-i:[A-Z][\w'-]*\s+){1,3}(?:" + STREET_WORDS + r")\b)"
-
+COMMAND_WORDS = (r"command|establishing|on\s+location|on\s+scene|staging|staged|responding|en\s+route|in\s+service|"
+                 r"available|arriving|on\s+the\s+air|returning")
+NOT_AFTER_WORDS = ("number", "no.", "no", "box", "apt", "apartment", "suite", "room", "ems", "pd", "medic",
+                   "ambulance", "police")
+NUMBER_GUARD_BEFORE = "(?<!#)(?<!# )" + "".join(f"(?<!\\b{re.escape(w)}{sep})" for w in NOT_AFTER_WORDS for sep in (" ", "-"))
+NUMBER_GUARD_AFTER = (r"(?!\s+(?-i:[A-Z][\w'-]*\s+){1,3}(?:" + STREET_WORDS + r")\b(?![\s.,]*(?:" + COMMAND_WORDS
+                      + r")\b))")
+# 60 Control's bare numbers in a list ("64, 62 to ...", "6462 to Rescue 40"): Matcher.units_named(text, bare_lists=True)
+BARE_RUN = re.compile(r"(?<![\w.,#-])(\d{2}|\d{4})((?:\s*(?:,|&|\band\b)?\s*(?:\d{2}|\d{4})(?![\w]))*)(?![\w])", re.I)
+BARE_TOKEN = re.compile(r"\d{2,4}")
 
 def _phrase_re(p: str) -> str:
     """'Port Chester' -> Port[\\s-]*Chester ('Portchester', 'Port-Chester'); an acronym 'PCFD' also
@@ -71,24 +79,28 @@ def _number_re(n: str) -> str:
     return r"[\s-]?".join(re.escape(d) for d in n) if len(n) <= 2 else re.escape(n[:2]) + r"[\s-]?" + re.escape(n[2:])
 
 
-def unit_forms(code: str, spoken: str = "") -> list[str]:
+def unit_forms(code: str, spoken: str = "", kind: str = "") -> list[str]:
     """Regex alternatives for a unit as it is written or said: 'E60' / 'E-60' / 'Engine 60' / 'Engine 6-0';
     '2391' / '23 91' / '23-91'; 'TL2' / 'Tower Ladder 2'. A code's letters only in capitals ('E60', never "I'm 60" as
-    M60); a code of digits only never as a house number, "number ...", or another agency's ("EMS 2391"): NUMBER_GUARD_*.
+    M60); a chief's code (kind "chief", digits only) never as a house number, "number ...", or another agency's
+    ("EMS 2391"): NUMBER_GUARD_*.
     The patterns are compiled case-insensitive (re.I) by the callers."""
     out = []
     m = re.fullmatch(r"([A-Z]+)(\d+)", code)
     if m:
         out.append(r"(?-i:" + re.escape(m[1]) + r")[\s-]?" + _number_re(m[2]))
-    elif code.isdigit():
+    elif code.isdigit() and kind == "chief":
         out.append(NUMBER_GUARD_BEFORE + _number_re(code) + NUMBER_GUARD_AFTER)
+    elif code.isdigit():
+        out.append(_number_re(code))
     else:
         out.append(re.escape(code))
     sp = (spoken or "").strip()
     if sp and sp != code:
         words = sp.split()
         if all(w.isdigit() for w in words):                 # "23 91"
-            out.append(NUMBER_GUARD_BEFORE + _number_re("".join(words)) + NUMBER_GUARD_AFTER)
+            n = _number_re("".join(words))
+            out.append(NUMBER_GUARD_BEFORE + n + NUMBER_GUARD_AFTER if kind == "chief" else n)
         else:
             out.append(r"[\s-]+".join(_number_re(w) if w.isdigit() else re.escape(w) for w in words))
     return list(dict.fromkeys(out))
@@ -101,6 +113,7 @@ class FeedCfg:
     limit: int = DEFAULT_LIMIT
     phrases: tuple[str, ...] = DEFAULT_PHRASES
     units: dict[str, str] = field(default_factory=dict)      # code -> spoken: PCFD's and Rye Brook's units
+    kinds: dict[str, str] = field(default_factory=dict)      # code -> kind ("chief", "engine" ...)
 
 
 def load_cfg(lists: Lists) -> FeedCfg:
@@ -135,26 +148,53 @@ def load_cfg(lists: Lists) -> FeedCfg:
     units = {c: str(u.get("spoken") or "") for c, u in lists.units.items()
              if u.get("kind", "agency") in PCFD_KINDS and not u.get("mutual_aid")
              and (not u.get("department") or u.get("department") in joint)}
-    return FeedCfg(title.strip(), tuple(dict.fromkeys(tgs)), limit, tuple(p.strip() for p in phrases), units)
+    kinds = {c: str(lists.units[c].get("kind") or "") for c in units}
+    return FeedCfg(title.strip(), tuple(dict.fromkeys(tgs)), limit, tuple(p.strip() for p in phrases), units, kinds)
 
 
 class Matcher:
     """Is a transmission about us? match(text, talker, rig) -> the reason ('Port Chester', 'E60'), or ''."""
 
-    def __init__(self, phrases: tuple[str, ...] | list[str], units: dict[str, str]):
+    def __init__(self, phrases: tuple[str, ...] | list[str], units: dict[str, str], kinds: dict[str, str] | None = None):
+        kinds = kinds or {}
         self.phrases = [(p, re.compile(r"(?<![\w])" + _phrase_re(p) + r"(?![\w])", re.I)) for p in phrases]
-        self.units = [(c, re.compile(r"(?<![\w])(?:" + "|".join(unit_forms(c, sp)) + r")(?![\w])", re.I))
+        self.units = [(c, re.compile(r"(?<![\w])(?:" + "|".join(unit_forms(c, sp, kinds.get(c, ""))) + r")(?![\w])", re.I))
                       for c, sp in units.items()]
         self.codes = set(units)
+        # a bare number in a list: an engine's ("64" = E64), a chief's 4 digits as said ("2391")
+        self.bare = {c[1:]: c for c in units if re.fullmatch(r"E\d{2}", c)}
+        self.bare.update({c: c for c in units if c.isdigit() and len(c) == 4})
 
-    def units_named(self, text: str) -> list[str]:
+    def units_named(self, text: str, bare_lists: bool = False) -> list[str]:
         """Every unit of ours the text names, in order, once each, as written or said ("E64", "Engine 64", "Rescue 40",
-        "23 91"). Never a bare number: "64, 62 to ..." or "14, 4410 with ... EMS 31" names no unit (a house number, a run
-        number, another department's or an EMS unit's number read as Engine 64 or Rye Brook's Engine 14), so a wrong
-        "names our units" flag never shows; a page of ours comes with our tones anyway."""
+        "23 91"). A bare number never alone: "14, 4410 with ... EMS 31" names no unit (a run number, another department's
+        or an EMS unit's number read as Rye Brook's Engine 14). bare_lists (a page whose tones are unknown or none, never
+        a recognised other department's, #115): 60 Control's list of bare numbers counts when it has at least two and
+        every one is ours ("64, 62 to ...", "6462 to Rescue 40": E64, E62); one number not ours and none of it does."""
         text = text or ""
         found = [(m.start(), c) for c, rx in self.units for m in rx.finditer(text)]
+        if bare_lists:
+            found += self._bare_lists(text)
         return list(dict.fromkeys(c for _, c in sorted(found)))
+
+    def _bare_lists(self, text: str) -> list[tuple[int, str]]:
+        out = []
+        for m in BARE_RUN.finditer(text):
+            before, after = text[:m.start()].rstrip(), text[m.end():]
+            if re.search(r"(?:\bnumber|\bno\.?|#|\bbox)$", before, re.I) or re.match(r"\s*control\b", after, re.I):
+                continue
+            if not re.match(NUMBER_GUARD_AFTER, after, re.I):
+                continue                                    # "64 62 Example Street": a house number
+            codes: list[tuple[int, str]] = []
+            for t in BARE_TOKEN.finditer(m.group(0)):
+                n, at = t.group(0), m.start() + t.start()
+                if len(n) == 4 and n not in self.bare:      # "6462": 64 and 62
+                    codes += [(at, self.bare.get(n[:2], "")), (at + 2, self.bare.get(n[2:], ""))]
+                else:
+                    codes.append((at, self.bare.get(n, "")))
+            if len(codes) >= 2 and all(c for _, c in codes):
+                out += codes
+        return out
 
     def match(self, text: str = "", talker: str = "", rig: str = "") -> str:
         for r in (x.strip() for x in (rig or "").split(",")):
@@ -177,9 +217,9 @@ class Feed:
         self._for = None
         self._refresh()
 
-    def names_ours(self, text: str) -> list[str]:
+    def names_ours(self, text: str, bare_lists: bool = False) -> list[str]:
         self._refresh()
-        return self.matcher.units_named(text)
+        return self.matcher.units_named(text, bare_lists)
 
     def _rings(self, start: float) -> list[dict]:
         """Phone pre-alerts (sizeup/prealert.py) that rang in the minutes around a flagged page and weren't matched."""
@@ -193,7 +233,7 @@ class Feed:
         L = self._lists()
         if L is not self._for:
             self.cfg = load_cfg(L)
-            self.matcher = Matcher(self.cfg.phrases, self.cfg.units)
+            self.matcher = Matcher(self.cfg.phrases, self.cfg.units, self.cfg.kinds)
             self._for = L
 
     def rows(self, limit: int | None = None, talkgroups: tuple[int, ...] | None = None) -> list[dict]:

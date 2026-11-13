@@ -160,21 +160,21 @@ def test_a_page_naming_our_units_with_tones_not_ours_is_flagged_with_the_ring_be
     page_row(app, "pmine", t0 + 120, [(903.2, 810.2)], "Engine 64, 209 Westchester Avenue")
     rows = {r["id"]: r for r in app.cad.feed.rows(limit=10)}
     r = rows["p0704"]
-    assert r["page"] == "unknown" and r["names_ours"] == ["R40"] and r["events"] == []     # "6462": bare, not E64/E62
+    assert r["page"] == "unknown" and r["names_ours"] == ["E64", "E62", "R40"] and r["events"] == []
     assert r["prealert"]["status"] == "expired" and abs(r["prealert"]["at"] - (t0 - 77)) < 1
     assert rows["pfv"]["names_ours"] == [] and "prealert" not in rows["pfv"]
     assert rows["pmine"]["names_ours"] == []                               # ours: an event, nothing to flag
     radio = {x["id"]: x for x in app.cad.comms.query(limit=10, kind="radio")}        # the Radio view's rows too
-    assert radio["p0704"]["names_ours"] == ["R40"] and radio["pfv"]["names_ours"] == []
+    assert radio["p0704"]["names_ours"] == ["E64", "E62", "R40"] and radio["pfv"]["names_ours"] == []
     assert app.cad.store.incidents() == []                                 # still not an event (#80)
 
 
 def test_units_named_as_said(tmp_path):
     app = app_with_list(tmp_path)
     f = app.cad.feed.names_ours
-    assert f(TEXT_0704) == ["R40"]
+    assert f(TEXT_0704) == ["R40"] and f(TEXT_0704, True) == ["E64", "E62", "R40"]   # bare: unknown tones only
     assert f("Engine 64, Ladder 30, 23 91 respond") == ["E64", "L30", "2391"]
-    assert f("64, 62 to 1 Main Street") == []             # bare numbers: never a unit
+    assert f("64, 62 to 1 Main Street") == [] and f("64, 62 to 1 Main Street", True) == ["E64", "E62"]
     for none in ("64 King Street, structure fire", "Sixty Control, 60 Control to all units", "time out 1432",
                  "Fairview 34 Longdale Avenue", "Engine 25, 42 Stratton Road"):
         assert f(none) == [], none
@@ -225,3 +225,35 @@ def test_a_page_with_other_tones_and_a_bare_number_is_not_flagged(tmp_path):
     rows = {r["id"]: r for r in app.cad.feed.rows(limit=10)}
     assert rows["pbare"]["page"] != "ours" and rows["pbare"]["names_ours"] == []
     assert rows["pnamed"]["page"] != "ours" and rows["pnamed"]["names_ours"] == ["E14"]
+
+
+def test_a_list_of_bare_numbers_counts_only_on_unknown_tones_all_ours_and_two_or_more(tmp_path):
+    app = app_with_list(tmp_path)
+    f = app.cad.feed.names_ours
+    assert f("64, 62 to 1 Example Street", True) == ["E64", "E62"]
+    assert f("6462 to Rescue 40", True) == ["E64", "E62", "R40"]
+    assert f("64 and 14 to the alarm", True) == ["E64", "E14"]
+    for none in ("64 to 1 Example Street", "64, 17 to the alarm", "14, 4410 with XPD EMS 31", "14 44 10 with XPD EMS 31",
+                 "64 62 Example Street", "number 64, 62", "box 64, 62"):
+        assert f(none, True) == [], none
+    assert f("60 Control, 64, 62 respond", True) == ["E64", "E62"]
+    t0 = time.time() - 3600
+    page_row(app, "punk", t0, [(700.0, 900.0)], "64, 62 to 1 Example Street")        # tones nobody's: unknown
+    page_row(app, "poth", t0 + 60, [(581.4, 796.7)], "64, 62 to 1 Example Street")   # another department's tones
+    page_row(app, "pnone", t0 + 120, [], "64, 62 to 1 Example Street")               # no tones decoded
+    rows = {r["id"]: r for r in app.cad.feed.rows(limit=10)}
+    assert rows["punk"]["page"] == "unknown" and rows["punk"]["names_ours"] == ["E64", "E62"]
+    assert rows["poth"]["page"] == "other" and rows["poth"]["names_ours"] == []
+    assert rows["pnone"]["page"] == "none" and rows["pnone"]["names_ours"] == ["E64", "E62"]
+
+
+def test_a_chief_naming_his_command_at_a_street_is_still_named(tmp_path):
+    f = app_with_list(tmp_path).cad.feed.names_ours
+    assert f("2391 Example Street command") == ["2391"]
+    assert f("2391 North Example Avenue Command establishing") == ["2391"]
+    assert f("2391 Example Road, on location") == ["2391"]
+    assert f("unit 2391 responding") == ["2391"]
+    assert f("2391 Example Drive") == []                                         # a house number read out
+    assert f("piano 2391 responding") == ["2391"] and f("problems 2391 responding") == ["2391"]   # word-bound: not "no"/"ems"
+    for none in ("EMS-2391", "PD-23 91", "no. 2391", "No 2391"):
+        assert f(none) == [], none

@@ -626,3 +626,92 @@ def test_a_page_flagged_by_the_sweep_says_failed_in_the_log(tmp_path):
     finally:
         hub.close()
         fake.close()
+
+
+# -- a text that comes first is never put back to "Transcribing" or "failed" (#472 review) ----------------------------
+
+def test_set_stt_only_changes_a_row_still_waiting(tmp_path):
+    from tests.test_cad import make_cad
+    cad = make_cad(tmp_path)
+    now = time.time()
+    for tid, text, status in (("FG1-w", "", "pending"), ("FG1-r", "", "remote"), ("FG1-d", "a text came", "done"),
+                              ("FG1-n", "", "no_speech")):
+        cad.record_traffic({"id": tid, "start": now - 3, "end": now, "source": "FG1", "talkgroup": None, "unit": "",
+                            "rig": "", "radio_id": "", "text": text, "status": status, "model": "aws-transcribe"})
+    for tid in ("FG1-w", "FG1-r", "FG1-d", "FG1-n"):
+        cad.comms.set_stt(tid, "pending", "whisper (AWS failed: x)")
+    got = {r["id"]: (r["status"], r["model"]) for r in cad.store.q("SELECT id, status, model FROM radio_traffic")}
+    assert got["FG1-w"] == got["FG1-r"] == ("pending", "whisper (AWS failed: x)")
+    assert got["FG1-d"] == ("done", "aws-transcribe") and got["FG1-n"] == ("no_speech", "aws-transcribe")
+
+
+def test_a_whisper_that_finishes_at_once_is_not_put_back_to_transcribing(tmp_path):
+    from sizeup.app import App
+    from tests.test_channels import CountingWhisper, comms_row
+    from tests.test_cloud import base
+    fake = FakeTranscribe(refuse=403)
+    app = App(base(clips_dir=str(tmp_path / "clips"), **aws_cfg(fake)))
+    app.stt.client = CountingWhisper({})
+    app.stt.start()
+
+    def instant(ids, *a, **k):                       # the local model done before _aws_failed's next line
+        app._retext(ids[0], "whisper heard this", "done", None, "m.bin")
+        return 1
+    app._rerun_local = instant
+    try:
+        tid = fm_segment(app)
+        assert wait(lambda: (comms_row(app, tid) or {}).get("text") == "whisper heard this", 10)
+        time.sleep(0.3)
+        r = comms_row(app, tid)
+        assert (r["status"], r["model"], r["text"]) == ("done", "m.bin", "whisper heard this")
+    finally:
+        app.stop()
+        fake.close()
+
+
+def test_the_hubs_fallback_never_fails_a_row_whose_text_came_meanwhile(tmp_path):
+    from sizeup.cloud.hub import StationOffline
+    fake = FakeTranscribe(refuse=403)
+    hub = HubRun(hub_cfg(tmp_path, **aws_cfg(fake)))
+
+    def remote(fn, ids, *a, **k):                    # the text arrives, then the station "can't" (a race)
+        hub.app._retext(ids[0], "whisper got there", "done", None, "m.bin")
+        raise StationOffline("the station went away")
+    hub.app.hub.remote = remote
+    try:
+        assert call(hub.url + "/api/station/events", "POST", {"epoch": "e1", "events": [_pending_event("FG1-7")]})[0] == 200
+        assert wait(lambda: (_row(hub, "FG1-7") or {}).get("text") == "whisper got there", 15)
+        time.sleep(0.5)
+        r = _row(hub, "FG1-7")
+        assert (r["status"], r["model"], r["text"]) == ("done", "m.bin", "whisper got there")
+    finally:
+        hub.close()
+        fake.close()
+
+
+def test_after_a_restart_the_row_says_where_the_job_went(tmp_path):
+    fake = FakeTranscribe()
+    hub = HubRun(hub_cfg(tmp_path, **aws_cfg(fake)))
+    try:
+        sent = []
+        hub.app.aws.submit = lambda *a, **k: sent.append(a)          # held: the label is what is looked at
+        assert call(hub.url + "/api/station/events", "POST", {"epoch": "e1", "events": [_page_event("South_2-102")]})[0] == 200
+        assert wait(lambda: any(p.id == "South_2-102" and p.status == "pending" for p in hub.app.pages), 5)
+        hub.app.cad.comms.set_stt("South_2-102", "pending", "whisper on the station (AWS failed: x)")   # before the restart
+        hub.app._aws_since.clear()
+        assert hub.app._aws_recover() == 1 and sent                      # AWS can take it: back to AWS
+        r = _row(hub, "South_2-102")
+        assert (r["status"], r["model"]) == ("pending", "aws-transcribe")
+        page = next(p for p in hub.app.pages if p.id == "South_2-102")
+        assert (page.status, page.model) == ("pending", "aws-transcribe")
+        # without AWS: the station's whisper, said so on the row and the page
+        hub.app._aws_since.clear()
+        aws, hub.app.aws = hub.app.aws, None
+        hub.app.hub.remote = lambda *a, **k: 1                         # the station takes it
+        assert hub.app._aws_recover() == 1
+        assert wait(lambda: (_row(hub, "South_2-102") or {}).get("model", "").startswith("whisper on the station"), 5)
+        assert page.model.startswith("whisper on the station") and page.status == "pending"
+        hub.app.aws = aws
+    finally:
+        hub.close()
+        fake.close()

@@ -715,3 +715,22 @@ def test_an_undo_while_the_widened_rerun_waits_still_takes_the_unit_off(rig, mon
     monkeypatch.undo()
     log.backfill_units(iid)                                            # the rerun: E61 seen as taken off
     assert "307-1-call_1-t0" not in rig.links(iid)
+
+
+# -- a unit named by its number in the radio log (#472 review) ---------------------------------------------------------
+
+@pytest.mark.parametrize("code, text", [
+    ("7711", "Port Chester EMS 7711 on location"), ("7711", "EMS 77 11 on scene"), ("7711", "Medic 7711 transporting"),
+    ("7711", "ambulance 77 11 en route"), ("7711", "EMS-7711 on location"), ("2391", "unit 2391 on location"),
+    ("2391", "2391 Example Street command"), ("2391", "2391 Example Avenue Command establishing"),
+])
+def test_an_ems_unit_after_ems_words_and_a_chief_at_his_command_are_named(rig, code, text):
+    row = rig.cad.store.one("SELECT name, spoken, kind FROM units WHERE name = ?", (code,))
+    assert row is not None and row["kind"] == ("ems" if code == "7711" else "chief")
+    assert rig.cad.radiolog._unit_rx(code, row["spoken"]).search(text), text
+
+
+@pytest.mark.parametrize("text", ["2391 Example Drive", "number 2391", "#2391", "box 2391", "EMS 2391", "PD-23 91"])
+def test_a_chiefs_number_as_an_address_or_another_agencys_is_not_named(rig, text):
+    row = rig.cad.store.one("SELECT spoken FROM units WHERE name = '2391'")
+    assert not rig.cad.radiolog._unit_rx("2391", row["spoken"]).search(text), text
