@@ -318,13 +318,15 @@ window.StreetView = (() => {
 
   // ---- the menu at a point (right-click, long press) ------------------------------------------------------------------
   const MENU = { el: null, at: 0, swallow: 0, down: null };
-  const SWALLOW_MS = 400;                 // the click a touch screen makes when the long press lifts: not a map click
+  const SWALLOW_MS = 400;
+  const TOUCH_OFF = 10;                   // px between the finger and a long press's menu                 // the click a touch screen makes when the long press lifts: not a map click
   function menuClose() {
     if (MENU.el) { MENU.el.remove(); MENU.el = null; }
   }
   // one menu per gesture: Android sends contextmenu on a long press too, and our own timer would open a second
   const justOpened = () => !!MENU.el && Date.now() - MENU.at < 800;
-  function menuOpen(x, y, lngLat, sm) {
+  // touch: beside the finger, not under it (above and to the right, else below)
+  function menuOpen(x, y, lngLat, sm, touch = false) {
     if (justOpened()) return false;
     const items = menuItems(current());
     if (!items.length) return false;
@@ -343,6 +345,9 @@ window.StreetView = (() => {
       if (it.disabled) b.setAttribute("aria-disabled", "true");
       b.addEventListener("click", (e) => {
         e.stopPropagation();
+        // a pointer's click counts only with a press that began on the menu after it opened (not the long press's
+        // own lift); a key's (detail 0) always
+        if (e.detail !== 0 && !MENU.fresh) return;
         if (it.disabled) return;
         menuClose();
         sm.openAt({ lat: lngLat.lat, lon: lngLat.lng }, null);
@@ -352,16 +357,20 @@ window.StreetView = (() => {
     el.addEventListener("keydown", (e) => { if (e.key === "Escape") { e.stopPropagation(); e.preventDefault(); menuClose(); } });
     document.body.append(el);
     const vw = document.documentElement.clientWidth, vh = window.innerHeight;
-    el.style.left = `${Math.max(8, Math.min(x, vw - el.offsetWidth - 8))}px`;
-    el.style.top = `${Math.max(8, Math.min(y, vh - el.offsetHeight - 8))}px`;
+    const w = el.offsetWidth, hh = el.offsetHeight;
+    const left = touch ? x + TOUCH_OFF : x, top = touch ? (y - TOUCH_OFF - hh >= 8 ? y - TOUCH_OFF - hh : y + TOUCH_OFF) : y;
+    el.style.left = `${Math.max(8, Math.min(left, vw - w - 8))}px`;
+    el.style.top = `${Math.max(8, Math.min(top, vh - hh - 8))}px`;
     MENU.el = el;
     MENU.at = Date.now();
+    MENU.fresh = false;
     const first = el.querySelector(".menu-item");
     if (first) first.focus({ preventScroll: true });
     return true;
   }
   document.addEventListener("pointerdown", (e) => {          // anywhere else closes it (not the lift of the long press)
     MENU.down = { x: e.clientX, y: e.clientY };
+    if (MENU.el && MENU.el.contains(e.target)) MENU.fresh = true;
     if (MENU.el && !MENU.el.contains(e.target) && Date.now() - MENU.at > SWALLOW_MS) menuClose();
   }, true);
   // Before anything else sees a click (the window, capturing): the one a long press's lift makes, and the armed pick's,
@@ -374,15 +383,28 @@ window.StreetView = (() => {
     }
     for (const m of maps) if (m.armed && m.takeClick(e)) return;
   }, true);
-  // Esc: one thing at a time. Whatever took it first (a dialog, the pre-plan editor, #464's alignment) keeps it.
+  // Esc, first (the window, capturing): while a pick is armed or our menu is open it is ours alone, so the console's Esc
+  // (UI.keys -> cad.js escapeView: cancel a form, discard a new call being typed) never also runs. A dialog's Esc, or
+  // one already taken, is left alone.
   window.addEventListener("keydown", (e) => {
     if (e.key !== "Escape" || e.defaultPrevented) return;
-    if (MENU.el) { menuClose(); e.preventDefault(); return; }
-    for (const m of maps) if (m.armed) { m.disarm(); e.preventDefault(); return; }
-  });
+    if (window.UI && UI.dialog && UI.dialog.isOpen && UI.dialog.isOpen()) return;
+    let mine = false;
+    if (MENU.el) { menuClose(); mine = true; }
+    for (const m of maps) if (m.armed) { m.disarm(); mine = true; }
+    if (mine) { e.preventDefault(); e.stopImmediatePropagation(); }
+  }, true);
   window.addEventListener("hashchange", () => { for (const m of maps) m.disarm(); });
   // the pre-plan editor (preplan.js) is placing or moving a point: its form is on the page while it is
-  const ppEditing = () => !!document.querySelector("form.pp-form");
+  // the pre-plan editor owns the map's clicks: its own signal when it gives one (Preplan.editing(), body
+  // data-pp-editing), else a pre-plan form showing on the page (preplan.js edit(), #464's documents: form.pp-form)
+  function ppEditing() {
+    try { if (window.Preplan && typeof Preplan.editing === "function") return !!Preplan.editing(); } catch (_) { /* */ }
+    if (document.body && document.body.dataset && document.body.dataset.ppEditing) return document.body.dataset.ppEditing === "1";
+    const forms = document.querySelectorAll ? document.querySelectorAll("form.pp-form") : [];
+    for (const f of forms) if (f.getClientRects && f.getClientRects().length) return true;
+    return false;
+  }
   // the view on screen and its call (cad.js viewTab, cad.sel): a pick belongs to the view it was armed in
   const where = () => `${typeof viewTab === "function" ? viewTab() : ""}|${typeof cad !== "undefined" ? cad.sel : ""}`;
   // a degree heading as shown: 0 to 359 (359.6 is 0, never "360")
@@ -429,7 +451,7 @@ window.StreetView = (() => {
         t = setTimeout(() => {
           t = null;
           const r = this.map.getCanvas().getBoundingClientRect();
-          fired = menuOpen(x0, y0, this.map.unproject([x0 - r.left, y0 - r.top]), this) || justOpened();
+          fired = menuOpen(x0, y0, this.map.unproject([x0 - r.left, y0 - r.top]), this, true) || justOpened();
         }, LONG_MS);
       }, { passive: true });
       el.addEventListener("touchmove", (e) => {
@@ -466,7 +488,8 @@ window.StreetView = (() => {
     }
     // no call here: the next click on the map picks the spot
     arm() {
-      if (this.manual || ppEditing()) return false;    // the map's clicks are someone else's just now
+      if (this.manual) return false;                   // the new call's map: its clicks are the call's location
+      if (ppEditing()) { toast("Finish the pre-plan edit first"); return false; }
       for (const m of maps) if (m !== this) m.disarm();
       this.armed = true;
       this.armedIn = where();

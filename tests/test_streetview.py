@@ -293,6 +293,9 @@ class El {
     return (!tag || this.tag === tag) && (!cls || (" " + this.className + " ").includes(" " + cls + " ")); }
   closest(sel) { for (let x = this; x; x = x.parentNode) if (x.matches && x.matches(sel)) return x; return null; }
   querySelector(sel) { for (const c of this.children) { if (c.matches(sel)) return c; const d = c.querySelector(sel); if (d) return d; } return null; }
+  querySelectorAll(sel) { const out = []; for (const c of this.children) { if (c.matches(sel)) out.push(c); out.push(...c.querySelectorAll(sel)); } return out; }
+  getClientRects() { for (let x = this; x; x = x.parentNode) if (x.hidden) return []; return this.parentNode ? [{}] : []; }
+  get dataset() { return this._ds || (this._ds = {}); }
   focus() {} getBoundingClientRect() { return { left: 0, top: 0, width: 800, height: 600 }; }
   get offsetWidth() { return 100; } get offsetHeight() { return 40; }
 }
@@ -302,7 +305,9 @@ global.addEventListener = (t, f, cap) => { (winLs[t] = winLs[t] || []).push(f); 
 const docLs = {};
 global.document = { body: new El("body"), head: new El("head"), documentElement: { clientWidth: 1000 },
   createElement: (t) => new El(t), addEventListener: (t, f) => { (docLs[t] = docLs[t] || []).push(f); },
-  querySelector: (sel) => document.body.querySelector(sel) };
+  querySelector: (sel) => document.body.querySelector(sel), querySelectorAll: (sel) => document.body.querySelectorAll(sel) };
+const toasts = [];
+global.UI = { toast: (t) => toasts.push(t), dialog: { isOpen: () => false, open() {}, close() {} } };
 global.innerHeight = 800;
 global.fetch = async () => ({ ok: true, json: async () => ({ provider: "google", key: "k" }) });
 let VIEW = "overview";
@@ -336,9 +341,14 @@ function click(m, target, x = 50, y = 60) {
   return ev;
 }
 function down(x, y) { for (const f of docLs.pointerdown || []) f({ clientX: x, clientY: y, target: document.body }); }
+// a key as the browser delivers it: the window's capturing listeners, then the console's (ui.js UI.keys, document
+// bubble -> cad.js escapeView: in new-call mode, #new-cancel, the call being typed discarded)
+const page = { newCall: true, discarded: false };
 function key(k, prevented = false) {
-  const ev = { key: k, defaultPrevented: prevented, preventDefault() { this.defaultPrevented = true; this.dp = true; } };
-  for (const f of winLs.keydown || []) f(ev);
+  const ev = { key: k, defaultPrevented: prevented, stopped: false, preventDefault() { this.defaultPrevented = true; this.dp = true; },
+               stopImmediatePropagation() { this.stopped = true; }, stopPropagation() { this.stopped = true; } };
+  for (const f of winLs.keydown || []) { f(ev); if (ev.stopped) return ev; }
+  if (k === "Escape" && page.newCall) page.discarded = true;
   return ev;
 }
 const touch = (el, t, x = 50, y = 60) => { for (const f of el.ls[t] || []) f({ target: el === undefined ? null : el._t || el,
@@ -368,7 +378,10 @@ const menus = () => document.body.children.filter((c) => c.matches(".sv-menu"));
   // Esc: one already taken (#464's alignment, a dialog) leaves the pick alone; a free one ends it
   m.btn.ls.click[0]({ stopPropagation() {} });
   key("Escape", true); out.escTaken = m.btn.attrs["aria-pressed"];
-  const e2 = key("Escape"); out.escFree = [m.btn.attrs["aria-pressed"], !!e2.dp];
+  page.discarded = false;
+  const e2 = key("Escape"); out.escFree = [m.btn.attrs["aria-pressed"], !!e2.dp, page.discarded];
+  const e3 = key("Escape"); out.escUnarmed = page.discarded;           // not armed: the console's Esc as ever
+  page.discarded = false;
   // a change of view (cad.js render hooks) or of the hash ends it
   m.btn.ls.click[0]({ stopPropagation() {} });
   VIEW = "radio"; for (const f of cad.hooks) f(); out.viewChange = m.btn.attrs["aria-pressed"]; VIEW = "overview";
@@ -376,8 +389,13 @@ const menus = () => document.body.children.filter((c) => c.matches(".sv-menu"));
   for (const f of winLs.hashchange || []) f({}); out.hashChange = m.btn.attrs["aria-pressed"];
   // never while the pre-plan editor places a point
   const form = new El("form", "pp-form card"); document.body.append(form);
-  m.btn.ls.click[0]({ stopPropagation() {} }); out.whileEditing = m.btn.attrs["aria-pressed"];
-  form.remove();
+  m.btn.ls.click[0]({ stopPropagation() {} }); out.whileEditing = [m.btn.attrs["aria-pressed"], toasts.slice(-1)[0]];
+  form.hidden = true;                                                 // a form left hidden on the page is no edit
+  m.btn.ls.click[0]({ stopPropagation() {} }); out.hiddenForm = m.btn.attrs["aria-pressed"];
+  key("Escape"); form.remove();
+  document.body.dataset.ppEditing = "1";                              // the editor's own signal, when it gives one
+  m.btn.ls.click[0]({ stopPropagation() {} }); out.signal = m.btn.attrs["aria-pressed"];
+  delete document.body.dataset.ppEditing; page.discarded = false;
   // the new call's map: no button without a call, never armed
   const nc = fakeMap("nc-map"); await sleep(5); for (const f of cad.hooks) f();
   out.newCall = { hidden: nc.btn.hidden };
@@ -387,6 +405,12 @@ const menus = () => document.body.children.filter((c) => c.matches(".sv-menu"));
   touchOn(m, m.canvas, "touchstart"); await sleep(S.LONG_MS + 100);
   out.lpMenus = menus().length;
   const first = menus()[0];
+  out.lpAt = [first.style.left, first.style.top];                    // beside the finger (50, 60), not under it
+  // the lift lands on the item: no press began on the menu, so it does nothing; a real tap on it does
+  const item = first.querySelector(".menu-item");
+  const lastBefore = S.lastAt();
+  item.ls.click[0]({ detail: 1, stopPropagation() {} });
+  out.liftOnItem = menus().length === 1 && S.lastAt() === lastBefore;
   // Android's contextmenu for the same press: no second menu
   for (const f of m.ml.contextmenu) f({ originalEvent: { clientX: 50, clientY: 60, preventDefault() {} }, point: { x: 50, y: 60 }, lngLat: { lat: 41, lng: -73.66 } });
   out.lpOnce = menus().length === 1 && menus()[0] === first;
@@ -394,6 +418,9 @@ const menus = () => document.body.children.filter((c) => c.matches(".sv-menu"));
   const before = m.others; const lift = click(m, m.canvas);
   out.lift = { swallowed: lift.stopped, others: m.others - before };
   const later = click(m, m.canvas); out.nextClick = !later.stopped;
+  for (const f of docLs.pointerdown || []) f({ clientX: 61, clientY: 21, target: item });
+  item.ls.click[0]({ detail: 1, stopPropagation() {} });
+  out.tapOnItem = menus().length === 0 && S.lastAt() !== lastBefore;
   first.remove();
   // a long press on a mark (a rig, a dragged pre-plan point): nothing
   await sleep(900);
@@ -421,21 +448,32 @@ def test_pick_mode_long_press_and_esc_on_a_fake_page(tmp_path):
     assert p["pressed"] == "false" and p["cursor"] == "grab"                 # the cursor it had, not ""
     assert out["pan"] == {"taken": False, "pressed": "true"}
     assert out["chip"] == {"taken": True, "pressed": "false"}
-    assert out["escTaken"] == "true" and out["escFree"] == ["false", True]
+    assert out["escTaken"] == "true"
+    assert out["escFree"] == ["false", True, False]                          # disarmed; the new call kept
+    assert out["escUnarmed"] is True                                         # not armed: the console's Esc as before
     assert out["viewChange"] == "false" and out["hashChange"] == "false"
-    assert out["whileEditing"] == "false"
+    assert out["whileEditing"] == ["false", "Finish the pre-plan edit first"]
+    assert out["hiddenForm"] == "true" and out["signal"] == "false"
     assert out["newCall"] == {"hidden": True, "pressed": "false", "mapGotIt": True}
     assert out["lpMenus"] == 1 and out["lpOnce"] is True
+    assert out["lpAt"] != ["50px", "60px"] and out["lpAt"][0] == "60px"      # 10 px right of the finger
+    assert out["liftOnItem"] is True and out["tapOnItem"] is True
     assert out["lift"] == {"swallowed": True, "others": 0} and out["nextClick"] is True
     assert out["onMarker"] == 0
 
 
 def test_the_pre_plan_editor_is_still_seen_by_its_form():
-    """streetview.js knows the editor is on by its form (preplan.js edit(): form.pp-form, gone on cancelEdit)."""
+    """streetview.js knows the editor is on by its signal when it gives one, else by a pre-plan form showing: preplan.js
+    edit() (gone on cancelEdit) and #464's documents (preplan-docs.js: its upload form and the floor plan's alignment)."""
     pp = (STATIC / "preplan.js").read_text()
     assert 'const f = el("form", "pp-form card");' in pp
     assert "if (e.host) { e.host.replaceChildren(); show(e.host, false); }" in pp
-    assert 'const ppEditing = () => !!document.querySelector("form.pp-form");' in (STATIC / "streetview.js").read_text()
+    docs = STATIC / "preplan-docs.js"
+    if docs.exists():                                                       # #464, once merged
+        assert docs.read_text().count('el("form", "pp-form card")') >= 1
+    sv = (STATIC / "streetview.js").read_text()
+    assert 'document.querySelectorAll("form.pp-form")' in sv and "f.getClientRects().length" in sv
+    assert "Preplan.editing()" in sv and "dataset.ppEditing" in sv
     assert '$("#nc-map")' in (STATIC / "newcall-map.js").read_text()          # the new call's map, by its host
 
 
