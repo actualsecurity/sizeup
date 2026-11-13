@@ -119,3 +119,26 @@ def test_no_cue_no_gazetteer_work(gaz):
             calls.append(k)
             raise AttributeError(k)
     assert P.Locator(G())("copy that, back in service", SCOPE) is None and calls == []
+
+
+# -- the #502 review --------------------------------------------------------------------------------------------------
+
+def test_an_address_with_its_cross_street_is_the_address_confirmed(gaz):
+    p = P.Locator(gaz)("shots fired 120 Example Ave at Sample St", SCOPE)
+    assert p.precision == "address" and p.label.startswith("120 Example Ave") and p.confirmed
+
+
+@pytest.mark.parametrize("text, kept", [("266 Sample St", "266 Sample St"), ("K9 unit 120 Example Ave", "120 Example Ave"),
+                                        ("plate is 120 Example Ave", "120 Example Ave")])
+def test_a_number_followed_by_its_street_stays_an_address(text, kept):
+    assert kept in P.strip(text, "mrrs", "police")
+
+
+@pytest.mark.parametrize("text, gone", [("266 respond to 40 Example Ave", "266"), ("ID 1452 Example Ave", "1452"),
+                                        ("plate is abc 1234 heading down Example Ave", "1234")])
+def test_ids_plates_and_callsigns_alone_still_go(text, gone):
+    assert gone not in P.strip(text, "mrrs", "police").split()
+
+
+def test_a_relative_or_landmark_cue_is_worth_the_gazetteer():
+    assert P.has_cue("units to the area of the park") and P.has_cue("in front of the school")

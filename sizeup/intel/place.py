@@ -92,7 +92,14 @@ def callsigns(system: str, service: str) -> list[str]:
 NUMBER_CUES = {"plate", "plates", "tag", "tags", "registration", "reg", "radio", "id", "ids", "unit", "units", "car", "cars",
                "badge", "dob", "birth", "born", "york", "ny", "connecticut", "ct", "jersey", "nj", "pennsylvania", "pa",
                "sector", "post", "rmp", "number", "plated"}
+# ... of which a unit's number may be followed by an address ("K9 unit 120 Example Ave": 120 is the house number), an ID's
+# or a plate's never ("ID 1452 Example Ave": fail closed)
+UNIT_WORDS = {"unit", "units", "car", "cars", "sector", "post", "rmp", "number"}
+ID_WORDS = {"id", "ids", "radio", "badge", "dob", "birth", "born"}          # numbers only: never an address after them
+FILLER = {"is", "number", "reads", "of", "was", "say", "says"}
+NOT_PLATE = {"at", "on", "to", "the", "in", "and", "by", "for", "a", "an", "from", "near", "is", "of", "was"}
 SPACED_PLATE = re.compile(r"\b[A-Z]{2,4}[\s-]\d{3,4}\b")                  # ABC 1234, ABC-1234 (as written, upper case)
+STREET_NEXT = re.compile(rf"^\s*(?:[A-Za-z]+\.?\s+){{0,3}}?{SUFFIX}\b", re.I)
 TOKEN = re.compile(r"\S+")
 
 
@@ -108,15 +115,20 @@ def cued_numbers(text: str) -> list[str]:
             i += 1
             continue
         j = i + 1
+        while j < len(toks) and toks[j] in FILLER:
+            j += 1
         letters = []
-        while j < len(toks) and len(letters) < 2 and re.fullmatch(r"[a-z]{1,4}", toks[j]) and toks[j] not in NUMBER_CUES:
+        while (j < len(toks) and len(letters) < 2 and re.fullmatch(r"[a-z]{1,4}", toks[j]) and toks[j] not in NUMBER_CUES
+               and toks[j] not in NOT_PLATE):
             letters.append(toks[j])
             j += 1
         digits = []
         while j < len(toks) and len(digits) < 2 and re.search(r"\d", toks[j]):
             digits.append(toks[j])
             j += 1
-        if digits:
+        if digits and toks[i] not in ID_WORDS and not letters and STREET_NEXT.match(" ".join(toks[j:j + 4])):
+            i = j                             # "K9 unit 120 Example Ave", "plate is 120 Example Ave": the address
+        elif digits:
             out += letters + digits
             i = j
         else:
@@ -146,12 +158,13 @@ def strip(text: str, system: str = "", service: str = "") -> str:
     t = SPACED_PLATE.sub(" ", t)
     t = _drop_cued(t)
     t = TEN_CODE.sub(" ", t)
-    t = UNIT_NUM.sub(" ", t)
+    t = UNIT_NUM.sub(lambda m: m.group(0) if STREET_NEXT.match(t[m.end():]) else " ", t)
     t = TIME.sub(" ", t)
     t = MIXED.sub(" ", t)
     for said in callsigns(system, service):
-        if said.isdigit():                              # the number alone: never inside 2662 / DPT266 / CHIEF266
-            t = re.sub(rf"(?<![A-Za-z0-9]){re.escape(said)}(?![A-Za-z0-9])", " ", t)
+        if said.isdigit():                              # the number alone: never inside 2662 / DPT266 / CHIEF266, and
+            pat = re.compile(rf"(?<![A-Za-z0-9]){re.escape(said)}(?![A-Za-z0-9])")    # never "266 Sample St" (an address)
+            t = pat.sub(lambda m: m.group(0) if STREET_NEXT.match(m.string[m.end():]) else " ", t)
     return re.sub(r"\s+", " ", t).strip()
 
 
@@ -175,7 +188,7 @@ def has_cue(text: str) -> bool:
     from sizeup.cad.radiolog import addresses_in
     t = text or ""
     return bool(addresses_in(t)) or bool(CROSS_CUE.search(t) or SPOKEN_CROSS.search(t) or BLOCK.search(t)
-                                          or HIGHWAY.search(t))
+                                          or HIGHWAY.search(t) or RELATIVE.search(t))
 
 
 def _readbacks(text: str, label: str) -> int:
@@ -229,6 +242,18 @@ class Locator:
                 cands.append(p)
         if not cands:
             return None
+        # "120 Example Ave at Sample St": the house number and its street heard, the cross street meeting it confirms the
+        # ADDRESS (never the bare corner instead)
+        addr = next((p for p in cands if p.precision == "address"), None)
+        if addr is not None:
+            street = re.sub(r"^\d+[A-Za-z]?\s+", "", addr.label.split(",")[0]).strip().lower()
+            for p in cands:
+                if p.precision == "intersection" and p.confirmed and street and street in p.label.lower():
+                    addr.confirmed = True
+                    addr.radius_m = RADIUS["address"]
+                    addr.basis = "; ".join(x for x in (addr.basis, "at " + p.label.split(",")[0]) if x)
+                    cands = [addr]
+                    break
         best = min(cands, key=lambda p: (not p.confirmed, RANK.get(p.precision, 9), -p.where_score))
         rel = RELATIVE.search(clean)
         if rel:
@@ -275,7 +300,7 @@ class Locator:
         m = BLOCK.search(clean)
         if not m:
             return None
-        number = int(m.group(1)) * (100 if m.group(2).lower() == "hundred" else 100)
+        number = int(m.group(1)) * 100                 # "1 hundred block" and "100 block" alike
         street = m.group(3)
         hits = [c for c in self.gaz.candidates(f"{number} {street}") if c.kind in ("address", "street")
                 and (not towns or c.municipality in towns)]
