@@ -50,17 +50,27 @@ PREALERT_BEFORE_S, PREALERT_AFTER_S = 10 * 60, 60      # a ring this long before
 # "number 2391" / "#2391" / "box 2391", or another agency's ("EMS 2391", "PD-2391"). Only a chief's: an EMS unit's
 # own code after "EMS" / "Medic" ("Port Chester EMS 7711") is that unit.
 STREET_WORDS = (r"street|st|avenue|ave|road|rd|drive|dr|lane|ln|court|ct|place|pl|boulevard|blvd|terrace|ter|parkway|pkwy|"
-                r"circle|cir|highway|hwy|turnpike|tpke|plaza|square|sq|alley|trail|crescent|extension|ext")
-COMMAND_WORDS = (r"command|establishing|on\s+location|on\s+scene|staging|staged|responding|en\s+route|in\s+service|"
-                 r"available|arriving|on\s+the\s+air|returning")
+                r"circle|cir|highway|hwy|turnpike|tpke|plaza|square|sq|alley|trail|crescent|extension|ext|way|walk|row|"
+                r"path|park|point|pt|close|crossing|xing|green|heights|hts|hill|ridge|run|loop|bend|commons|mews|gardens|"
+                r"gdns|landing|pike|expressway|expy|freeway|fwy|route|rte|ave\.|st\.|rd\.")
+# a street's name before its suffix: 1-3 words, never "on the", "to the" ... ("2391 on the road" is the chief)
+STREET_NAME = r"(?:(?!(?:to|on|the|at|in|of|a|an|is|and|for|from|with|by|en|we|i|my|our|your|you|be|are|will|can|back)\b)[\w'.-]+\s+){1,3}"
+COMMAND_WORDS = (r"(?:(?:is|to|has|in|assuming|taking)\s+)?(?:command|establishing|on\s+location|on\s+scene|staging|staged|"
+                 r"responding|en\s+route|in\s+service|available|arriving|on\s+the\s+air|returning)")
 NOT_AFTER_WORDS = ("number", "no.", "no", "box", "apt", "apartment", "suite", "room", "ems", "pd", "medic",
                    "ambulance", "police")
 NUMBER_GUARD_BEFORE = "(?<!#)(?<!# )" + "".join(f"(?<!\\b{re.escape(w)}{sep})" for w in NOT_AFTER_WORDS for sep in (" ", "-"))
-NUMBER_GUARD_AFTER = (r"(?!\s+(?-i:[A-Z][\w'-]*\s+){1,3}(?:" + STREET_WORDS + r")\b(?![\s.,]*(?:" + COMMAND_WORDS
-                      + r")\b))")
+NUMBER_GUARD_AFTER = (r"(?!\s*,?\s+" + STREET_NAME + r"(?:" + STREET_WORDS + r")(?!\w)(?![\s.,]*" + COMMAND_WORDS + r"\b))")
 # 60 Control's bare numbers in a list ("64, 62 to ...", "6462 to Rescue 40"): Matcher.units_named(text, bare_lists=True)
 BARE_RUN = re.compile(r"(?<![\w.,#-])(\d{2}|\d{4})((?:\s*(?:,|&|\band\b)?\s*(?:\d{2}|\d{4})(?![\w]))*)(?![\w])", re.I)
 BARE_TOKEN = re.compile(r"\d{2,4}")
+# ... never a time, a run / incident / phone / room number, a count of minutes, a house number read out:
+BARE_NOT_AFTER = re.compile(r"(?:\b(?:number|no\.?|box|time(?:\s+out)?|hours?|incident|event|run|call(?:\s+back)?|"
+                            r"rooms?|phone|apt|apartment|suite|unit)|#|\d[\s.-]*)$", re.I)
+BARE_NOT_BEFORE = re.compile(r"\s*(?:control|minutes?|mins?|seconds?|secs?|hours?|hrs?)\b", re.I)
+BARE_STREET = re.compile(r"\s*,?\s+" + STREET_NAME + r"(?:" + STREET_WORDS + r"|post)(?!\w)", re.I)
+# a single "6462" read as 64 and 62 only in the #115 shape: "6462 to ...", "6462 Rescue 40", "6462."
+SPLIT_NEXT = re.compile(r"\s*(?:to\b|(?:engine|ladder|tower|rescue|utility|marine|medic|car|truck)\b|[.;!?]|$)", re.I)
 
 def _phrase_re(p: str) -> str:
     """'Port Chester' -> Port[\\s-]*Chester ('Portchester', 'Port-Chester'); an acronym 'PCFD' also
@@ -181,10 +191,11 @@ class Matcher:
         out = []
         for m in BARE_RUN.finditer(text):
             before, after = text[:m.start()].rstrip(), text[m.end():]
-            if re.search(r"(?:\bnumber|\bno\.?|#|\bbox)$", before, re.I) or re.match(r"\s*control\b", after, re.I):
-                continue
-            if not re.match(NUMBER_GUARD_AFTER, after, re.I):
-                continue                                    # "64 62 Example Street": a house number
+            if BARE_NOT_AFTER.search(before) or BARE_NOT_BEFORE.match(after) or BARE_STREET.match(after):
+                continue                                    # "time out 1458", "60, 62 minutes", "6462 Example Way"
+            tokens = BARE_TOKEN.findall(m.group(0))
+            if len(tokens) == 1 and not SPLIT_NEXT.match(after):
+                continue                                    # "6462, Example Street": one number, not a list
             codes: list[tuple[int, str]] = []
             for t in BARE_TOKEN.finditer(m.group(0)):
                 n, at = t.group(0), m.start() + t.start()

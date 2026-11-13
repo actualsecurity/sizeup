@@ -257,3 +257,34 @@ def test_a_chief_naming_his_command_at_a_street_is_still_named(tmp_path):
     assert f("piano 2391 responding") == ["2391"] and f("problems 2391 responding") == ["2391"]   # word-bound: not "no"/"ems"
     for none in ("EMS-2391", "PD-23 91", "no. 2391", "No 2391"):
         assert f(none) == [], none
+
+
+# -- bare-number lists: no false flags (#472 re-check) --------------------------------------------------------------
+
+@pytest.mark.parametrize("text", [
+    "time out 1458", "1459 hours", "incident 6061", "event 6162", "run 6061", "6014, Example Street",
+    "6462, Example Street", "6460 Example Way", "1460 Example Way", "6462 main street", "6062 Boston Post",
+    "60, 62 minutes", "we'll be 60, 62 seconds", "rooms 58, 59", "call back 914 555 6462",
+    "14, 4410 with XPD EMS 31", "6460 Example Walk", "6462 Example Row", "6462 Example Path", "6462 Example Park",
+    "6462 Example Point", "6462 Example Terrace", "6462 Example Plaza",
+])
+def test_a_bare_number_that_is_not_60_controls_list_names_no_unit(tmp_path, text):
+    assert app_with_list(tmp_path).cad.feed.names_ours(text, True) == []
+
+
+@pytest.mark.parametrize("text, units", [
+    ("64, 62 to 1 Main Street", ["E64", "E62"]), ("6462 to Rescue 40", ["E64", "E62", "R40"]),
+    ("64 and 62", ["E64", "E62"]), ("64 & 62", ["E64", "E62"]), ("58 59 60 61", ["E58", "E59", "E60", "E61"]),
+    (TEXT_0704, ["E64", "E62", "R40"]),
+])
+def test_60_controls_list_of_our_engines_is_still_named(tmp_path, text, units):
+    assert app_with_list(tmp_path).cad.feed.names_ours(text, True) == units
+
+
+@pytest.mark.parametrize("text, units", [
+    ("2391 Example Street is command", ["2391"]), ("2391 Example Street to command", ["2391"]),
+    ("2391 en route", ["2391"]), ("2391 Ladder 31 en route", ["2391", "L31"]), ("2391 Example Way", []),
+    ("2391 main street", []),
+])
+def test_a_chief_at_a_street_is_named_only_when_he_takes_command(tmp_path, text, units):
+    assert app_with_list(tmp_path).cad.feed.names_ours(text) == units
