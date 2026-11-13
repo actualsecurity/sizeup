@@ -64,6 +64,14 @@ it to the road. Nothing here runs per frame: a move is made once, and only a sta
                     first build, so a restart or a hot/cold handover goes on from the same estimate
     a live fix      always wins: no move, any trip forgotten
 
+Firehouse gates (the bay doors): a route from a rig in quarters (placed at its station, or a fix within GATE_M of it)
+starts at its firehouse's egress, the bay-door apron, and joins the street the rigs pull out onto; a trip home ends
+at its ingress the same way (data/firehouses.json egress / ingress: {lat, lon, street}; roadgraph.snap_gate). A
+firehouse with none: from its point onto the street of its address, else the nearest public street, never a lot's
+service road while a street is within roadgraph.GATE_SNAP_M. The recommendation's estimates (to_one) start at the
+same gate, so the run card and the map agree. A route already made (or kept across a restart) stays as it was; only
+a new one uses the gate.
+
 The markers of rigs on a trip home are rewritten here (place "returning" at the estimate, or "station" once there);
 The recommendation agrees with the map: Cad.locations lays trip_at() (a rig's place on its trip home, or home) over
 mapview.locate's straight-line return (service.py _with_trips).
@@ -74,6 +82,7 @@ from __future__ import annotations
 import bisect
 import json
 import math
+import re
 import threading
 import time
 from collections import deque
@@ -102,6 +111,7 @@ HOLD_MAX_M = 150.0            # ... at most this short of the call
 LAST_FIX_S = TRAIL_S          # a last live fix this recent (the maps no longer draw it) starts its next trip
 OUT_S = 6 * 3600.0            # older, away from its station: where it is is unknown (not moved)
 PLACED = ("station", "returning", "enroute")   # placed by status (no live fix, not at a call); "enroute": started here
+GATE_M = 40.0                 # a start (or a home) this near a firehouse's point or its egress: by its gate
 SAVE_KEY = "routes.motion"    # the trips and the moves, kept in the CAD's meta (a restart or a handover goes on with them)
 
 
@@ -167,6 +177,25 @@ class Routes:
         if got is None or got["g"] != id(g):
             return {}, 0
         return got["pen"], got["sig"]
+
+    def gate_of(self, ll, way: str = "egress") -> tuple[list, str] | None:
+        """The firehouse gate a rig at ll leaves by (way "egress") or comes home by ("ingress"): ([lon, lat] of the
+        apron, the street it joins) for the nearest firehouse within GATE_M of ll (its point or its gates); a
+        firehouse with none given: its own point and its address's street. None: no firehouse near."""
+        if ll is None:
+            return None
+        best = None
+        for f in self.firehouses() or ():
+            try:
+                g = f.get(way) or f.get("egress")
+                pts = [f["ll"]] + [[x["lon"], x["lat"]] for x in (f.get("egress"), f.get("ingress")) if x]
+                d = min(_m(ll, p) for p in pts)
+            except (KeyError, TypeError, ValueError):
+                continue
+            if d <= GATE_M and (best is None or d < best[0]):
+                gate = ([g["lon"], g["lat"]], g.get("street") or "") if g else (list(f["ll"]), street_of(f.get("address")))
+                best = (d, gate)
+        return best[1] if best else None
 
     def _home(self, station: str):
         for f in self.firehouses() or ():
@@ -421,8 +450,10 @@ class Routes:
         key, a, t0, number = rel
         r = None
         if g is not None:
+            gate = self.gate_of(home, "ingress")                   # in by the bay doors
             try:
-                r = g.route(a, home, p, pen()[0], wrongway_m=0.0, call=roadgraph.LOCAL)
+                r = g.route(a, gate[0] if gate else home, p, pen()[0], wrongway_m=0.0, call=roadgraph.LOCAL,
+                            b_gate=gate[1] if gate else None)
             except Exception as e:  # noqa: BLE001 - the straight line then
                 self.log(f"routes: way home: {type(e).__name__}: {e}")
             self.stats["routed"] += 1
@@ -485,11 +516,13 @@ class Routes:
         """start: (where, True) to route from where the estimate has it now, rolling on (#453); else its marker."""
         here = [m["lon"], m["lat"]]
         a = list(start[0]) if start else here
+        gate = None if start else self.gate_of(a)                  # in quarters: out by the bay doors
         fix = m.get("place") == "position"
         hd = m.get("heading") if fix and isinstance(m.get("speed"), (int, float)) and m["speed"] >= AWAY_MIN_MPS else None
         t0 = time.monotonic()
         try:
-            r = g.route(a, m["line_to"], p, pen, heading=hd, wrongway_m=p.wrongway_m, call=call)
+            r = g.route(gate[0] if gate else a, m["line_to"], p, pen, heading=hd, wrongway_m=p.wrongway_m, call=call,
+                        a_gate=gate[1] if gate else None)
         except Exception as e:  # noqa: BLE001 - one route's trouble: the straight line, as before
             self.log(f"routes: {m['unit']}: {type(e).__name__}: {e}")
             r = None
@@ -622,7 +655,13 @@ class Routes:
         p = self.params()
         try:
             pen, _ = self.penalties(g, self.clock())
-            return g.to_one(origins, to, p, pen, wrongway_m=p.wrongway_m, call=self.call_of(inc))
+            pts, gates = {}, {}
+            for k, ll in origins.items():
+                gate = self.gate_of(ll)                            # in quarters: from its gate, as the map's route
+                pts[k] = gate[0] if gate else ll
+                if gate:
+                    gates[k] = gate[1]
+            return g.to_one(pts, to, p, pen, wrongway_m=p.wrongway_m, call=self.call_of(inc), gates=gates)
         except Exception as e:  # noqa: BLE001 - the straight-line estimate then
             self.log(f"routes: estimates by road: {type(e).__name__}: {e}")
             return {}
@@ -643,6 +682,13 @@ def _next_change(items: list[dict], now: float) -> float:
         except Exception:  # noqa: BLE001 - one record we can't read
             continue
     return nxt
+
+
+def street_of(address: str | None) -> str:
+    """The street of a firehouse's address ("51-53 Grace Church St" -> "Grace Church St"); '' for none."""
+    a = re.split(r"[,(]", address or "")[0]
+    a = re.sub(r"^\s*\d+[a-z]?(?:\s*[-\u2013/]\s*\d+[a-z]?)?\s+", "", a, flags=re.I).strip()
+    return a if re.search(r"[a-z]", a, re.I) else ""
 
 
 def _m(a, b) -> float:
