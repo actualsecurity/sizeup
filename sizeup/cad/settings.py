@@ -608,7 +608,7 @@ class Editor:
                 raise CadError(str(e)) from None
         else:
             raise CadError("action: set or reset")
-        shown = (lambda x: ("on" if x else "off") if key == "on" else ", ".join(x) or "none" if isinstance(x, list) else str(x))
+        shown = (lambda x: ("on" if x else "off") if key in ("on", "adapter") else ", ".join(x) or "none" if isinstance(x, list) else str(x))
         out = self._commit([(LOGS_SECTION, key, REMOVE if v == d and type(v) is type(d) else v)], op,
                            [("system", f"{LOGS_SECTION}/{key}", shown(cur), shown(v))])
         sl = getattr(self.cad, "station_logs", None)
@@ -824,7 +824,7 @@ class Editor:
             v = self._errors_value(key, body.get("value"))
         else:
             raise CadError("action: set or reset")
-        shown = (lambda x: ("on" if x else "off") if key == "on" else str(x))
+        shown = (lambda x: ("on" if x else "off") if key in ("on", "adapter") else str(x))
         out = self._commit([(ERR_SECTION, key, REMOVE if v == d and type(v) is type(d) else v)], op,
                            [("system", f"{ERR_SECTION}/{key}", shown(cur), shown(v))])
         return {**out, "hub_errors": self.errors_page()}

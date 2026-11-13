@@ -36,8 +36,9 @@ const StationLogsView = (() => {
       const c = el("span", `chip ${st.state === "ok" ? "hl-ok" : st.state === "off" ? "dim" : "hl-bad"}`, `Station ${st.state}`);
       c.title = st.reason || "";
       const n = el("span", "dim", `spool ${kb(st.spool_bytes)} · sent ${(st.sent_lines || 0).toLocaleString()}`);
-      n.title = `Since the station started · dropped: ${st.dropped_secret || 0} credential, ${st.dropped_level || 0} level, `
-        + `${st.repeats || 0} repeats, ${st.dropped_spool || 0} batches over the spool cap`;
+      n.title = `Since the station started · dropped: ${st.dropped_secret || 0} credential, ${st.dropped_adapter || 0} adapter, `
+        + `${st.dropped_level || 0} level, ${st.repeats || 0} repeats, ${st.dropped_error || 0} errors, `
+        + `${st.dropped_spool || 0} batches over the spool cap, ${st.rejected || 0} refused by the hub`;
       box.append(c, n);
     } else box.append(el("span", "chip dim", "Station —"));
     if (status.error) box.append(Object.assign(el("span", "warn", "!"), { title: status.error }));
@@ -50,13 +51,32 @@ const StationLogsView = (() => {
     const admin = canDo("admin");
     const card = sCard(sCardHead("Shipping", s.on.value ? `${s.level.value}+` : "off",
       sHelp("The station sends its sizeup units' journal every ~45 s, gzipped, over its hub link. Credentials are "
-        + "redacted; a line that still looks like one is dropped. The same line repeated is sent 5 times per 10 min, then "
+        + "redacted; a line that still looks like one is dropped. The adapter's own lines stay on the station unless turned on. The same line repeated is sent 5 times per 10 min, then "
         + "counted. Kept on the station's disk (50 MB) while the hub or CloudWatch is away.")));
     const [lab, cb] = sCheck(s.on.label, s.on.value, "Off: the station reads nothing");
     cb.disabled = !admin;
     cb.addEventListener("change", () => sPost("station_logs", { action: "set", key: "on", value: cb.checked },
       `Station logs: ${cb.checked ? "on" : "off"}`));
-    card.append(lab);
+    const r1 = el("div", "row");
+    r1.append(lab);
+    card.append(r1);
+    const [alab, acb] = sCheck(s.adapter.label, s.adapter.value,
+      "The incident-source adapter's own lines (county CAD details). Off: left on the station");
+    acb.disabled = !admin;
+    acb.addEventListener("change", () => {
+      if (!acb.checked) {
+        sPost("station_logs", { action: "set", key: "adapter", value: false }, "Adapter lines: off");
+        return;
+      }
+      acb.checked = false;
+      sAsk("Ship the adapter's own lines? They can hold county CAD details. Credentials are scrubbed, but a line "
+        + "the scrub misses would reach CloudWatch.", () => sPost("station_logs", { action: "set", key: "adapter", value: true },
+        "Adapter lines: on"), "Ship them");
+    });
+    const r2 = el("div", "row");
+    r2.append(alab);
+    card.append(r2);
+    if (s.adapter.value) card.append(el("div", "warn small", "Adapter lines are shipped"));
     const lv = sSelect(s.levels.map((v) => [v, v]), s.level.value,
       (v) => sPost("station_logs", { action: "set", key: "level", value: v }, `Least level: ${v}`), s.level.label);
     const keep = sSelect(s.retention_choices.map((v) => [String(v), `${v} d`]), String(s.retention_days.value),

@@ -7,8 +7,10 @@ on the hub in **Settings > Station > Logs** (admins).
 
 ```
 station journald (sizeup-* units)
-  -> sizeup-station: journalctl every 15 s, filter, scrub, cut repeats      sizeup/cloud/logship.py, sizeup/logscrub.py
-  -> <state>/logspool/*.json.gz (a batch every ~45 s, 50 MB cap)
+  -> sizeup-logread (user sizeup-logs, in systemd-journal, no network)     sizeup/cloud/logread.py
+     -> /var/lib/sizeup-logs/*.jsonl (only the sizeup-* units' entries, 20 MB cap)
+  -> sizeup-station: filter, leave the adapter's lines, scrub, cut repeats  sizeup/cloud/logship.py, sizeup/logscrub.py
+  -> <state>/logspool/*.json.gz (a batch every ~45 s or at 5000 lines / 512 KB; 50 MB cap)
   -> POST /api/station/logs (the station token + Access service token)     the link the station already has
   -> hub: filter and scrub again, PutLogEvents                             sizeup/cloud/cwlogs.py
   -> CloudWatch Logs /sizeup/station (Infrequent Access, 30 days)
@@ -16,18 +18,33 @@ station journald (sizeup-* units)
 
 - **No AWS key on the station.** The hub writes with its task role.
 - **No third-party log service.** Everything stays in the department's account: county CAD app details never leave it.
-- **Scrub, fail closed.** A line with a known credential value (the station token, the Access service token, any
-  adapter credential read from the credstore or SSM) is dropped. Credential-shaped text is redacted: `key=value` pairs
-  naming a password, token, secret, cookie or session; `Bearer` / `Basic` auth; a URL's `user:password@`; credential
-  query parameters; AWS key ids and secrets; JWTs; long mixed-case tokens. Adapter credential names are replaced by
-  `[credential]`. A line that still names a password with a value after it is dropped. The hub runs the same scrub
-  again before writing.
+- **Only the reader reads the journal.** `sizeup-logread` runs as its own user (`sizeup-logs`, in `systemd-journal`)
+  with no network, and hands over only the `sizeup-*` units' entries. The sizeup user (the web UI, the adapter) is
+  not in `systemd-journal`: it never sees sshd, sudo or anything else in the journal.
+- **The adapter's own lines stay on the station** unless an admin turns on *Ship the adapter's own lines* (with a
+  warning): lines naming an installed adapter (entry point, module, distribution, source id or label, read at
+  runtime), the runner's `incident sources:` lines, a third-party Python logger's `[log name]` lines and traceback
+  frames in site-packages. Counted as "adapter" in the drop counts.
+- **Scrub, fail closed** (on the station, where every credential is known). Text is NFKC-normalised and zero-width
+  characters removed first. A line with a known credential value is dropped: the station token, the Access service
+  token and the status token (from the environment and the config), every adapter credential from the credstore
+  (short ones as whole words) or SSM, in any of its forms (URL-encoded, JSON-, HTML- or repr-escaped, base64, base64 of
+  `user:password` with or without `Basic `), checked on the whole line before it is cut. The whole value is redacted
+  for `key=value` / `key: value` / JSON pairs naming a password, pw, p, pin, pass, token, secret, key, cookie, session,
+  auth or an SSM `Value`; a credential's name used as a key; `-p`, `--password`, `-u`, `--user` on a command line;
+  Bearer / Basic / Digest auth; `user:password@host`; `user:password` and `('user', 'password')` after login or
+  credential words; credential query parameters; AWS key ids and secrets; JWTs; long mixed-case tokens. Adapter
+  credential names become `[credential]`. A password-like word still followed by anything is dropped. A scrub that
+  fails drops its line and the shipping goes on.
+- **The hub's pass** runs the same patterns again before writing, and on every row it shows, with only the hub's own
+  values (its tokens and the secrets in its environment): a second pattern pass, not a second copy of the station's.
 - **Cheap.** Debug is never sent (level threshold, default info). The same line (numbers ignored) goes 5 times per
   10 min per unit, then one `[repeated N× in 10 min]` line. Batches are gzipped.
 - **Offline.** Batches wait on the station's disk (50 MB, oldest dropped first) until the hub and CloudWatch take them.
 
-The sizeup user reads the journal as a member of `systemd-journal` (`install-linux.sh` adds it when it switches
-releases). Without it the station says "no journal access" and sends nothing.
+`install-linux.sh` creates `sizeup-logs`, `/var/lib/sizeup-logs` (2770, group sizeup) and `sizeup-logread.service` when it
+switches to a release that has them. Without the reader the station says "no journal" and sends nothing. A batch the
+hub refuses outright (400 / 413) is set aside in `logspool/rejected`, never retried.
 
 ## Set up
 
@@ -43,7 +60,8 @@ releases). Without it the station says "no journal access" and sends nothing.
 | Least level | info | debug, info, warning, error |
 | Only these units | all | e.g. `sizeup-station, sizeup-update` |
 | Never these units | none | e.g. `sizeup-ais` |
-| Keep (days) | 30 | the log group's retention (the hub sets it) |
+| Ship the adapter's own lines | off | asks first: they can hold county CAD details |
+| Keep (days) | 30 | the log group's retention, 7 days to a year (the hub sets it) |
 
 ## Querying
 

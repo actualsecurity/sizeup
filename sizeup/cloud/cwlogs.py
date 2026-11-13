@@ -1,7 +1,9 @@
 """The hub's side of the station's logs: into CloudWatch Logs (/sizeup/station), and the admins' Logs view.
 
 The station ships its journal over the link it already has (sizeup/cloud/logship.py, POST /api/station/logs, the
-station token). The hub filters and scrubs it again (sizeup/logscrub.py: either pass alone is enough) and writes it
+station token), scrubbed there with every station credential known. The hub filters it and runs the same scrub
+patterns again (sizeup/logscrub.py) with only the hub's own values (its tokens and the secrets in its environment): a
+second pattern pass, not a second copy of the station's value check. Then it writes it
 with the task role (PutLogEvents) to the department's own AWS account: no third-party log service, ever (the county
 CAD rule: its details never leave the department).
 
@@ -19,10 +21,12 @@ CAD rule: its details never leave the department).
 
 Settings (the CAD settings' SECTION "station_logs", Settings > Station > Logs, admins, audited as System):
     on              true | false: the station ships at all
+    adapter         true | false (default false): the incident-source adapter's own lines are shipped too (county CAD
+                    details and credentials live there; scrubbed all the same)
     level           debug | info | warning | error: the least level sent (default info: debug stays on the station)
     include         [units]: only these (empty: every sizeup unit)
     exclude         [units]: never these
-    retention_days  one of RETENTION_DAYS (default 30): the group's retention
+    retention_days  one of RETENTION_DAYS (default 30, at least 7): the group's retention
 """
 
 from __future__ import annotations
@@ -39,10 +43,10 @@ from typing import Callable
 from sizeup import aws, logscrub
 
 SECTION = "station_logs"
-DEFAULTS = {"on": True, "level": "info", "include": [], "exclude": [], "retention_days": 30}
+DEFAULTS = {"on": True, "level": "info", "include": [], "exclude": [], "adapter": False, "retention_days": 30}
 LABELS = {"on": "Ship station logs", "level": "Least level", "include": "Only these units",
-          "exclude": "Never these units", "retention_days": "Keep (days)"}
-RETENTION_DAYS = (1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365)     # CloudWatch's values (up to a year here)
+          "exclude": "Never these units", "adapter": "Ship the adapter's own lines", "retention_days": "Keep (days)"}
+RETENTION_DAYS = (7, 14, 30, 60, 90, 120, 150, 180, 365)     # CloudWatch's values, a week to a year here
 UNIT = re.compile(r"[A-Za-z0-9@._:-]{1,64}")
 KNOWN_UNITS = ("sizeup-station", "sizeup-whisper", "sizeup-trunk-recorder", "sizeup-update", "sizeup-health",
                "sizeup-adsb", "sizeup-ais", "sizeup-usbfs")
@@ -96,9 +100,9 @@ def config(stored: dict | None) -> dict:
 
 def check_value(key: str, v):
     """A setting's value as kept, or ValueError with why."""
-    if key == "on":
+    if key in ("on", "adapter"):
         if not isinstance(v, bool):
-            raise ValueError("on: true or false")
+            raise ValueError(f"{key}: true or false")
         return v
     if key == "level":
         if v not in logscrub.LEVELS:
@@ -118,8 +122,8 @@ def check_value(key: str, v):
 
 
 def station_config(c: dict) -> dict:
-    """What the station is told (its filter): on, level, include, exclude."""
-    return {k: c[k] for k in ("on", "level", "include", "exclude")}
+    """What the station is told (its filter): on, level, include, exclude, adapter."""
+    return {k: c[k] for k in ("on", "level", "include", "exclude", "adapter")}
 
 
 # -- CloudWatch ---------------------------------------------------------------------------------------------------

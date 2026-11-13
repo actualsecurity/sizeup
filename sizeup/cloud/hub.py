@@ -715,6 +715,9 @@ class HubApp(App):
         # the station's logs into CloudWatch, and Settings > Station > Logs (sizeup/cloud/cwlogs.py): no AWS call until
         # the station sends a batch or an admin opens Logs; "not configured" until sizeup-aws step 25 has run
         from sizeup.cloud.cwlogs import SECTION as LOGS_SECTION, StationLogs
+        from sizeup import logscrub, procenv
+        procenv.register_secrets()                      # the hub's own secrets in its environment: never in a log row
+        logscrub.secret(self.hub.token, self.hub.status_token)
         self.station_logs = StationLogs(settings=lambda: self.cad.settings.section(LOGS_SECTION),
                                         station_status=lambda: self.hub.status, log=log)
         self.cad.station_logs = self.station_logs

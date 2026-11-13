@@ -54,7 +54,7 @@ def register_secrets() -> None:
     for f in files:
         logscrub.secret_name(f.name.removeprefix("sizeup-adapter."))
         try:
-            logscrub.secret(f.read_text().rstrip("\n"))
+            logscrub.secret(f.read_text().rstrip("\n"), short=True)
         except OSError:
             pass
 
@@ -69,7 +69,7 @@ def credential(name: str) -> str:
         except OSError:
             continue
         from sizeup import logscrub
-        logscrub.secret(v)                                # never in a station log line that leaves (logship.py)
+        logscrub.secret(v, short=True)                    # never in a station log line that leaves (logship.py)
         logscrub.secret_name(name)
         return v
     return ""

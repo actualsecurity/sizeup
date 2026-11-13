@@ -20,8 +20,9 @@
                        updater's last result go up in the status ("version")
     aircraft thread    POST /api/station/aircraft: our ADS-B receiver's aircraft (#235, aircraftlink.py), read every
                        second, what changed, every 1-5 s as the hub asks; dropped (never queued) while it's offline
-    logs thread        POST /api/station/logs: this station's journal, scrubbed and gzipped, every ~45 s, spooled on
-                       disk while the hub is away (logship.py); the hub writes it to CloudWatch (cwlogs.py)
+    logs thread        POST /api/station/logs: this station's journal (sizeup-logread hands it over: logread.py),
+                       scrubbed and gzipped, every ~45 s, spooled on disk while the hub is away (logship.py); the hub
+                       writes it to CloudWatch (cwlogs.py)
     vessels thread     POST /api/station/vessels: our AIS receiver's vessels (#402, vessellink.py), only with
                        [vessels.receiver] enabled; the whole list every 5-30 s as the hub asks; never queued
     jobs thread        GET /api/station/jobs?wait=25 (long poll: the station never takes inbound
@@ -148,8 +149,9 @@ class StationLink:
         self.aircraft = AircraftForwarder(app, cfg, self._client, log)
         # our AIS receiver's vessels (#402, sizeup/cloud/vessellink.py): only with [vessels.receiver] enabled
         self.vessels = VesselForwarder(cfg, self._client, log)
-        # the station's journal, scrubbed, to the hub and CloudWatch (sizeup/cloud/logship.py): spooled on disk
-        self.logs = LogShipper(cfg, self._client, log)
+        # the station's journal (handed over by sizeup-logread), scrubbed, to the hub and CloudWatch
+        # (sizeup/cloud/logship.py): spooled on disk; the incident-source adapter's lines stay here unless Settings say
+        self.logs = LogShipper(cfg, self._client, log, app=app)
         app.events, app.link = self.emit, self
         app.cad.cloud = self.cad_cloud
         n, _ = self.outbox.pending()

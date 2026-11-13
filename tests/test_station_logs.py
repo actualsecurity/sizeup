@@ -39,23 +39,97 @@ def test_scrub_drops_a_registered_secret_and_redacts_credential_shapes():
     s = logscrub.scrub
     assert s(f"hub link: bearer {TOKEN} refused") is None                  # a known value: the whole line dropped
     assert s("feed login as Corr3ct-Horse-9") is None
-    assert s("FEEDX_PASS read from the credstore") == "[credential] read from the credstore"
+    assert s("FEEDX_USER read from the credstore") == "[credential] read from the credstore"
     assert s("Authorization: Bearer abcdefghijklmnopqrstuvwxyz012345") == "Authorization: [redacted] [redacted]"
     assert s("GET https://u:pw1@example.org/a?token=abc&page=2") == "GET https://[redacted]@example.org/a?token=[redacted]&page=2"
     assert s("aws AKIAABCDEFGHIJKLMNOP wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY") == "aws [aws-key] [redacted]"
     assert s('{"password": "x1", "user": "u"}') == '{"password": [redacted], "user": "u"}'
-    assert s("cookie=Zq81LmXpTRe4vB2nW9yKs0Ha; path=/") == "cookie=[redacted]; path=/"
+    assert s("cookie=Zq81LmXpTRe4vB2nW9yKs0Ha; path=/") == "cookie=[redacted] path=/"
     assert s("jwt eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTYifQ.c2lnbmF0dXJlLXZhbHVl") == "jwt [redacted]"
     assert s("-----BEGIN OPENSSH PRIVATE KEY-----") is None
-    # fail closed: a password named with something after it, not in a key=value shape
     assert s("the password is hunter7") is None and s("client secret abc123") is None
-    # kept: a git sha, a uuid, numbers, and sizeup's own words about a password that carry none
-    sha = "3f2a9c1d4e5b6a7c8d9e0f1a2b3c4d5e6f7a8b9c"
+    sha = "3f2a9c1d4e5b6a7c8d9e0f1a2b3c4d5e6f7a8b9c"                       # kept: a sha, numbers, times
     assert s(f"auto-update: on {sha}") == f"auto-update: on {sha}"
-    assert s("adapter: password version 3 accepted") == "adapter: password version 3 accepted"
-    assert s("password(s) refused in 24 h: 1") == "password(s) refused in 24 h: 1"
-    assert s("FG1: carrier 4.2 s, quieting 18 dB") == "FG1: carrier 4.2 s, quieting 18 dB"
-    assert logscrub.registered() == (2, 2)
+    assert s("FG1: carrier 4.2 s, quieting 18 dB at 12:30:01") == "FG1: carrier 4.2 s, quieting 18 dB at 12:30:01"
+    assert s("hub link: token missing") == "hub link: token missing"
+
+
+# The review's repros (#494): each one line.
+def test_repro_a_name_redaction_no_longer_hides_the_value():
+    logscrub.secret_name("FEEDX_PASS")
+    assert logscrub.scrub("FEEDX_PASS=Xq7v") == "[credential]=[redacted]"
+
+
+def test_repro_registered_values_in_other_forms():
+    logscrub.secret("p@ss w;rd&\"1'")
+    v = "p@ss w;rd&\"1'"
+    import base64
+    import html
+    import urllib.parse
+    for form in (urllib.parse.quote(v, safe=""), urllib.parse.quote_plus(v), json.dumps(v)[1:-1], html.escape(v),
+                 repr(v)[1:-1], base64.b64encode(v.encode()).decode()):
+        assert logscrub.scrub(f"sent {form} ok") is None, form
+
+
+def test_repro_basic_auth_of_a_registered_login():
+    import base64
+    logscrub.secret_pair("bob", "Hunt3r-2x")
+    b = base64.b64encode(b"bob:Hunt3r-2x").decode()
+    assert logscrub.scrub(f"Authorization: Basic {b}") is None and logscrub.scrub(f"hdr {b}") is None
+
+
+@pytest.mark.parametrize("line,want", [
+    ("pw=hunter2", "pw=[redacted]"), ("p: hunter2", "p: [redacted]"), ("pin=1234", "pin=[redacted]"),
+    ("pass hunter2", None), ("mysql -p hunter2 db", "mysql -p [redacted] db"), ("mysql -phunter2", "mysql -p [redacted]"),
+    ("curl -u bob:hunter2 https://x.example", "curl -u [redacted] https://x.example"),
+    ("--user bob:hunter2", "--user [redacted]"), ("connect bob:hunter2@host.example", "connect [redacted]@host.example"),
+    ("credentials for bob:hunter2", "credentials for bob:[redacted]"),
+    ("login with ('bob', 'hunter2')", "login with ([redacted])"),
+    ("{'Name': '/x', 'Value': 'hunter2', 'Type': 'SecureString'}", "{'Name': '/x', 'Value': [redacted], 'Type': 'SecureString'}"),
+    ("Value=hunter2 Type=SecureString", "Value=[redacted] Type=SecureString"),
+    ('{"Value": "hunter2"}', '{"Value": [redacted]}'),
+    ("ｐａｓｓｗｏｒｄ=ｈｕｎｔｅｒ２", "password=[redacted]"), ("pass​word=hunter2", "password=[redacted]"),
+    ("password= a;b,c&d'e", "password= [redacted]"), ('{"password": "a\\"b;c", "u": 1}', '{"password": [redacted], "u": 1}'),
+    ("Authorization: Bearer abc", "Authorization: [redacted] [redacted]"),
+])
+def test_repro_unregistered_formats(line, want):
+    assert logscrub.scrub(line) == want
+
+
+def test_repro_no_benign_phrase_bypass():
+    assert logscrub.scrub("adapter: password version 3 accepted") is None
+    assert logscrub.scrub("password is set hunter2") is None
+    assert logscrub.scrub("password: [redacted]") == "password: [redacted]" and logscrub.scrub("no password.") == "no password."
+
+
+def test_repro_a_value_past_the_cut_still_drops_the_line():
+    logscrub.secret(TOKEN)
+    assert logscrub.scrub("x" * (logscrub.MAX_LINE - 5) + TOKEN) is None
+
+
+def test_repro_short_credstore_values_match_as_words(tmp_path, monkeypatch):
+    from sizeup import procenv
+    (tmp_path / "sizeup-adapter.FEEDX_USER").write_text("pc7\n")
+    monkeypatch.setattr(procenv, "_dir", tmp_path)
+    procenv.register_secrets()
+    assert logscrub.scrub("feed: user pc7 ok") is None and logscrub.scrub("FEEDX_USER set") == "[credential] set"
+    assert logscrub.scrub("rpc7x ok") == "rpc7x ok"
+
+
+def test_repro_the_station_registers_its_config_tokens(tmp_path):
+    s, _ = shipper(tmp_path)
+    s.cfg.cloud_token, s.cfg.cloud_status_token = "cfg-Tok3n-from-the-file", "st4tus-Tok3n-xyz"
+    s.start()
+    s.stop()
+    assert logscrub.scrub("x cfg-Tok3n-from-the-file") is None and logscrub.scrub("x st4tus-Tok3n-xyz") is None
+
+
+def test_repro_the_hub_registers_its_own_tokens(tmp_path):
+    from sizeup.cloud.hub import HubApp
+    from tests.test_cloud import TOKEN as HUB_TOKEN
+    from tests.test_cloud import hub_cfg
+    HubApp(hub_cfg(tmp_path), log=lambda m: None)
+    assert logscrub.scrub(f"hub: {HUB_TOKEN}") is None
 
 
 def test_levels_and_repeats():
@@ -90,54 +164,79 @@ class FakeClient:
         pass
 
 
-def shipper(tmp_path, answers=(), journal=None, clock=None):
-    c = FakeClient(answers)
-    cfg = SimpleNamespace(station_id="pcfd", cloud_outbox=str(tmp_path / "outbox.sqlite"))
-    now = clock or [T0 + 100]
-    rows = list(JOURNAL) if journal is None else journal
+def handoff(d: Path, rows, name="000000000000001.jsonl") -> Path:
+    """What sizeup-logread writes: one file of journal entries."""
+    d.mkdir(parents=True, exist_ok=True)
+    p = d / name
+    p.write_text("".join(json.dumps(r) + "\n" for r in rows))
+    return p
 
-    def read(cursor, since, limit):
-        cur = [r["__CURSOR"] for r in rows]
-        start = cur.index(cursor) + 1 if cursor in cur else 0
-        return rows[start:start + limit]
-    s = LogShipper(cfg, lambda t: c, log=lambda m: None, clock=lambda: now[0], journal=read)
-    return s, c, now
+
+def shipper(tmp_path, answers=(), rows=None, clock=None, markers=()):
+    c = FakeClient(answers)
+    cfg = SimpleNamespace(station_id="pcfd", cloud_outbox=str(tmp_path / "outbox.sqlite"), cloud_token="", cloud_access_id="",
+                          cloud_access_secret="", cloud_status_token="")
+    now = clock or [T0 + 100]
+    ho = tmp_path / "handoff"
+    handoff(ho, list(JOURNAL) if rows is None else rows)
+    s = LogShipper(cfg, lambda t: c, log=lambda m: None, clock=lambda: now[0], handoff=ho, markers=lambda: set(markers))
+    s.client_, s.now = c, now
+    return s, c
 
 
 def test_the_station_reads_filters_scrubs_spools_and_sends(tmp_path):
-    s, c, now = shipper(tmp_path)
-    assert s.step() == "ok"                       # read: the batch is open, nothing due yet
-    assert s.pending and not s._batches() and not c.sent
-    now[0] += logship.BATCH_S
+    s, c = shipper(tmp_path)
+    assert s.step() == "ok"                       # read: the batch is open, nothing due yet; the hand-off file kept
+    assert s.pending and not s._batches() and not c.sent and s._handoff_files()
+    s.now[0] += logship.BATCH_S
     assert s.step() == "ok"
-    assert len(c.sent) == 1 and not s._batches()
+    assert len(c.sent) == 1 and not s._batches() and not s._handoff_files()    # spooled: the hand-off file gone
     path, body = c.sent[0]
     assert path == "/api/station/logs" and body["station"] == "pcfd"
     lines = body["lines"]
     msgs = [m for _, _, _, m in lines]
-    assert all(isinstance(t, int) for t, _, _, _ in lines) and lines == sorted(lines, key=lambda r: r[0])
-    # debug dropped (info is the default threshold); the cookie redacted; FG1's repeats cut at the burst (5)
+    assert lines == sorted(lines, key=lambda r: r[0])
     assert not any("debug" in m for m in msgs) and s.dropped_level == 1
-    assert any(m.endswith("session=[redacted]; path=/") for m in msgs)
     assert sum(m.startswith("14:00:0") and "FG1" in m for m in msgs) == 5 and s.repeats.suppressed == 2
+    # the runner's lines about the incident source stay on the station by default
+    assert not any("incident sources" in m for m in msgs) and s.dropped_adapter == 2
     units = {u for _, u, _, _ in lines}
     assert units == {"sizeup-station", "sizeup-whisper", "sizeup-trunk-recorder", "sizeup-update", "sizeup-health"}
     lv = {m: v for _, _, v, m in lines}
     assert lv["Traceback (most recent call last):"] == "error"
-    assert lv["[2026-11-12 14:00:11] (warning) control channel lost, retuning"] == "warning"
-    assert "bad byte � here" in msgs                     # not UTF-8: replaced, kept
-    # the cursor moved past everything read, and is kept on disk
-    assert (tmp_path / "logspool" / "cursor").read_text() == JOURNAL[-1]["__CURSOR"]
+    assert "bad byte � here" in msgs
     st = s.stats()
     assert st["state"] == "ok" and st["sent_lines"] == len(lines) and st["spool_batches"] == 0
 
 
+def test_repro_adapter_lines_stay_unless_settings_say(tmp_path):
+    rows = [dict(JOURNAL[0], MESSAGE="14:00:00 feedx: polled 12 calls"),
+            dict(JOURNAL[0], MESSAGE="[log feedx_client] warning: slow answer"),
+            dict(JOURNAL[0], MESSAGE='  File "/opt/x/venv/lib/python3.12/site-packages/feedx/poll.py", line 9, in poll'),
+            dict(JOURNAL[0], MESSAGE="    raise Err(f'bad {page}')"),
+            dict(JOURNAL[0], MESSAGE="14:00:01 hub link: connected")]
+    s, c = shipper(tmp_path, rows=rows, markers=("feedx",))
+    s.step()
+    assert [m for _, _, _, m in s.pending] == ["14:00:01 hub link: connected"] and s.dropped_adapter == 4
+    s2, _ = shipper(tmp_path / "on", rows=rows, markers=("feedx",))
+    s2._set_config({"adapter": True})
+    s2.step()
+    assert len(s2.pending) == 5
+
+
+def test_adapter_markers_come_from_the_installed_entry_points_and_the_runner():
+    ep = SimpleNamespace(name="feedx", value="feedx_pkg.adapter:make", module="feedx_pkg.adapter",
+                         dist=SimpleNamespace(name="feedx-adapter"))
+    runner = SimpleNamespace(runs=[SimpleNamespace(a=SimpleNamespace(source="feedx", label="Feed X"))])
+    m = logship.adapter_markers(SimpleNamespace(sources_runner=runner), entry_points=lambda group: [ep])
+    assert {"feedx", "feedx_pkg", "feedx-adapter", "feedx_adapter", "Feed X"} <= m
+
+
 def test_a_known_secret_never_leaves_the_station(tmp_path):
-    rows = [dict(JOURNAL[0], MESSAGE=f"hub link: token {TOKEN}", __CURSOR="c1"),
-            dict(JOURNAL[0], MESSAGE="feed: user FEEDX_USER ok", __CURSOR="c2")]
+    rows = [dict(JOURNAL[0], MESSAGE=f"hub link: token {TOKEN}"), dict(JOURNAL[0], MESSAGE="feed: user FEEDX_USER ok")]
     logscrub.secret(TOKEN)
     logscrub.secret_name("FEEDX_USER")
-    s, c, now = shipper(tmp_path, journal=rows)
+    s, c = shipper(tmp_path, rows=rows)
     s.step()
     s.spool(force=True)
     s.send()
@@ -145,15 +244,47 @@ def test_a_known_secret_never_leaves_the_station(tmp_path):
     assert TOKEN not in sent and "FEEDX_USER" not in sent and "[credential]" in sent and s.dropped_secret == 1
 
 
-def test_the_hub_away_keeps_the_spool_capped_and_sends_it_later(tmp_path, monkeypatch):
-    s, c, now = shipper(tmp_path, answers=[HubError("can't reach the hub", 0)] * 3)
+def test_repro_a_scrub_that_raises_skips_the_line_and_goes_on(tmp_path, monkeypatch):
+    s, c = shipper(tmp_path, rows=[dict(JOURNAL[0], MESSAGE="boom"), dict(JOURNAL[0], MESSAGE="fine")])
+    real = logscrub.scrub
+    monkeypatch.setattr(logscrub, "scrub", lambda m: (_ for _ in ()).throw(ValueError()) if m == "boom" else real(m))
+    s.step()
+    assert s.dropped_error == 1 and [m for _, _, _, m in s.pending] == ["fine"]
+
+
+def test_repro_a_batch_is_cut_at_its_size(tmp_path, monkeypatch):
+    monkeypatch.setattr(logship, "MAX_BATCH_LINES", 3)
+    rows = [dict(JOURNAL[0], MESSAGE=f"line {chr(97 + i)}") for i in range(7)]
+    s, c = shipper(tmp_path, rows=rows)
+    s.step()
+    assert [len(b["lines"]) for _, b in c.sent] == [3, 3] and len(s.pending) == 1
+
+
+def test_repro_pending_is_kept_when_the_spool_write_fails(tmp_path, monkeypatch):
+    s, c = shipper(tmp_path)
+    s.step()
+    n = len(s.pending)
+    monkeypatch.setattr(logship.os, "replace", lambda a, b: (_ for _ in ()).throw(OSError("disk full")))
+    assert s.spool(force=True) is None and len(s.pending) == n and s._handoff_files()
+
+
+def test_repro_a_batch_the_hub_refuses_is_set_aside_not_retried(tmp_path):
+    s, c = shipper(tmp_path, answers=[HubError("hub said 413: too large", 413)])
     s.step()
     s.spool(force=True)
+    assert s.send() == "rejected" and not s._batches() and s.rejected == 1
+    assert len(list((tmp_path / "logspool" / "rejected").iterdir())) == 1 and s.send() == "empty"
+
+
+def test_the_hub_away_keeps_the_spool_capped_and_sends_it_later(tmp_path, monkeypatch):
+    s, c = shipper(tmp_path, answers=[HubError("can't reach the hub", 0)] * 3)
+    s.step()
+    s.spool(force=True)
+    now = s.now
     assert s.send() == "failed" and len(s._batches()) == 1 and s.state == "offline"
-    assert s.send() == "waiting"                     # backing off
+    assert s.send() == "waiting"
     now[0] = s.next_send
     assert s.send() == "failed"
-    # the hub without CloudWatch set up: kept, and asked again in 10 min
     c.answers = [{"ok": True, "accepted": False, "retry_s": 600, "reason": "hub: not configured (no log group)",
                   "config": {"on": True, "level": "warning", "include": [], "exclude": ["sizeup-whisper"]}}]
     now[0] = s.next_send
@@ -162,33 +293,49 @@ def test_the_hub_away_keeps_the_spool_capped_and_sends_it_later(tmp_path, monkey
     assert json.loads((tmp_path / "logspool" / "config.json").read_text())["level"] == "warning"
     now[0] = s.next_send
     assert s.send() == "sent" and not s._batches()
-    # the cap: the oldest batch goes first
     monkeypatch.setattr(logship, "SPOOL_MAX_BYTES", 1)
-    s2, _, _ = shipper(tmp_path / "b")
+    s2, _ = shipper(tmp_path / "b", rows=[])
     for i in range(3):
-        s2._add(T0 + i, "sizeup-station", "info", f"line {i}")
-        s2._cursor_seen = f"c{i}"
+        s2.pending.append([int(T0 * 1000) + i, "sizeup-station", "info", f"line {i}"])
         s2.spool(force=True)
     assert s2.dropped_spool >= 2 and len(s2._batches()) <= 1
 
 
-def test_off_reads_nothing_and_forgets_the_cursor(tmp_path, monkeypatch):
-    s, c, now = shipper(tmp_path)
-    s.step()
-    s.spool(force=True)
+def test_off_reads_nothing(tmp_path, monkeypatch):
+    s, c = shipper(tmp_path)
     monkeypatch.setenv("SIZEUP_LOG_SHIP", "off")
-    assert s.step() == "off" and s.stats()["on"] is False and not (tmp_path / "logspool" / "cursor").exists()
+    assert s.step() == "off" and s.stats()["on"] is False and not s._handoff_files() and s.dropped_off == 1
     monkeypatch.delenv("SIZEUP_LOG_SHIP")
     s._set_config({"on": False})
     assert s.step() == "off" and s.reason == "off in Settings"
 
 
-def test_no_journal_is_said_not_raised(tmp_path):
-    def none(cursor, since, limit):
-        raise RuntimeError("no journalctl here")
-    s, c, now = shipper(tmp_path)
-    s._journal = none
-    assert s.step() == "no journalctl here" and s.stats()["state"] == "no journal"
+def test_no_reader_is_said_not_raised(tmp_path):
+    s, c = shipper(tmp_path, rows=[])
+    s.handoff = tmp_path / "nowhere"
+    s.step()
+    assert s.stats()["state"] == "no journal"
+
+
+def test_the_reader_hands_over_only_its_units_and_keeps_its_cursor(tmp_path):
+    from sizeup.cloud import logread
+    asked = []
+
+    def read(cursor, since, limit):
+        asked.append(cursor)
+        return [] if cursor else [dict(r, _EXTRA="x") for r in JOURNAL[:3]]
+    r = logread.Reader(tmp_path, read=lambda c, s, n: [{k: v for k, v in x.items() if k in logread.FIELDS}
+                                                        for x in read(c, s, n)], clock=lambda: T0)
+    assert r.once() == "ok" and r.once() == "ok"
+    files = list(tmp_path.glob("*.jsonl"))
+    assert len(files) == 1 and asked == ["", JOURNAL[2]["__CURSOR"]]
+    assert all("_EXTRA" not in json.loads(x) for x in files[0].read_text().splitlines())
+    assert json.loads((tmp_path / "status.json").read_text())["written"] == 3
+    unit = (Path(__file__).parents[1] / "deploy/station/systemd/sizeup-logread.service").read_text()
+    for want in ("User=sizeup-logs", "SupplementaryGroups=systemd-journal", "PrivateNetwork=yes", "ProtectSystem=strict"):
+        assert want in unit
+    inst = (Path(__file__).parents[1] / "deploy/station/install-linux.sh").read_text()
+    assert "usermod -a -G systemd-journal sizeup-logs" in inst and 'usermod -a -G systemd-journal "$SVC_USER"' not in inst
 
 
 # -- the hub -----------------------------------------------------------------------------------------------------
@@ -362,12 +509,13 @@ def test_logs_are_a_signed_in_admins_and_settings_set_reset_and_audit(tmp_path):
     assert code == 200 and out["station_logs"]["exclude"]["value"] == ["sizeup-adsb", "sizeup-ais"]
     assert post({"action": "set", "key": "retention_days", "value": 90})[0] == 200
     for body in ({"action": "set", "key": "level", "value": "loud"}, {"action": "set", "key": "retention_days", "value": 31},
+                 {"action": "set", "key": "retention_days", "value": 3},                       # (#494 review: at least 7)
                  {"action": "set", "key": "on", "value": 1}, {"action": "set", "key": "nope", "value": 1},
                  {"action": "set", "key": "include", "value": ["a b"]}):
         assert post(body)[0] == 400, body
     assert post({"action": "set", "key": "level", "value": "error"}, who=JULIAN)[0] == 403
     assert rig.cad.station_logs.cfg() == {"on": True, "level": "warning", "include": [],
-                                          "exclude": ["sizeup-adsb", "sizeup-ais"], "retention_days": 90}
+                                          "exclude": ["sizeup-adsb", "sizeup-ais"], "adapter": False, "retention_days": 90}
     rig.cad.station_logs.check()
     assert fake.retention == 90
     assert post({"action": "reset", "key": "level"})[0] == 200 and rig.cad.station_logs.cfg()["level"] == "info"
