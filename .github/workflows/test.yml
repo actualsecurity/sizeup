@@ -23,6 +23,16 @@ jobs:
           python-version: "3.14"
           cache: pip
       - run: pip install -e ".[dev]"
+      - name: Litestream (the hub image's pin, sha256-checked: the real-Litestream takeover and reseed tests)
+        env:
+          LITESTREAM_VERSION: "0.5.18"
+          LITESTREAM_SHA256_AMD64: d3687b9fd0f2e9426bbd3da828429ff3f1dfc5c9b74d54fdf028e4ee510e7dea
+        run: |
+          set -eu
+          curl -fsSL -o /tmp/litestream.tgz "https://github.com/benbjohnson/litestream/releases/download/v${LITESTREAM_VERSION}/litestream-${LITESTREAM_VERSION}-linux-x86_64.tar.gz"
+          echo "${LITESTREAM_SHA256_AMD64}  /tmp/litestream.tgz" | sha256sum -c -
+          sudo tar -xzf /tmp/litestream.tgz -C /usr/local/bin litestream
+          litestream version
       - run: python -m pytest -q -p no:cacheprovider -n auto --dist loadfile
 
   image:
