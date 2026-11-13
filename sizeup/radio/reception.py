@@ -92,6 +92,9 @@ QUIET_S = 3600.0                      # no grant on a watched talkgroup this lon
 SWEEP_BIN_HZ = 6250
 SWEEP_TIMEOUT_S = 30.0
 SAMPLE_ID = re.compile(r"[0-9a-f]{12}")
+PROBE_CLEAN_S = 60.0                  # (#436) a probe's capture directory is capped this often ...
+PROBE_KEEP_S = 600.0                  # ... its calls older than this removed (a test takes them within seconds) ...
+PROBE_MAX_BYTES = 200 * 1024 * 1024   # ... and the oldest over this (janitor.SYSTEM_MAX_BYTES)
 
 CC_AT = re.compile(r"(?:Started with|Retuning to) Control Channel:\s*(?P<mhz>[\d.]+)\s*MHz", re.I)
 CC_FREQ = re.compile(r"freq:\s*(?P<mhz>[\d.]+)\s*MHz\s+Control Channel Message Decode Rate", re.I)
@@ -613,6 +616,7 @@ class Tests:
         self.active: dict | None = None
         self.probe: Probe | None = None
         self.probes: dict[str, ProbeRuntime] = {}  # (#436) the county's sites, probe-only: setup_probes()
+        self._probes_cleaned = 0.0
         self.samples: list[dict] = []
         self.history: list[dict] = self._load_history()
         self.owed: dict | None = self._load_owed()
@@ -707,6 +711,7 @@ class Tests:
                                   list(getattr(app, "modes", ())) + list(getattr(app, "_sys_jobs", {})), self.log):
             rec = trunk_recorder.make_system(sysd.name, sysd.label, cfg.p25_recorder, sysd.dir, self.log)
             self.probes[sysd.name] = ProbeRuntime(sysd, rec, app.tg, lambda rt, call: self.on_call(rt, call), self.log)
+        probes.stale(cfg.p25_recorder_dir, list(self.probes), self.log)   # a site gone: its probe (marked) with it
 
     def targets(self) -> list:
         """Every system a test can be run on: the county's sites (probe-only), then the other systems."""
@@ -850,7 +855,9 @@ class Tests:
         alert = self.health(now)
         return {"systems": [{"name": rt.system.name, "label": rt.system.label,
                              "kind": "county" if rt.system.probe_only else "system",
-                             "jobs": [{"job": s.job, "mhz": round(s.center / 1e6, 5)} for s in rt.system.sources],
+                             "jobs": [{"job": s.job, "mhz": round(s.center / 1e6, 5),
+                                       "cc": [round(f / 1e6, 5) for f in rt.system.covered([s.index])]}
+                                      for s in rt.system.sources],
                              "watch": list(rt.system.reception.get("watch") or []),
                              "alert": [{"tg": tg, "name": (rt.system.talkgroups.get(tg) or {}).get("name") or f"TG {tg}"}
                                        for tg in self._alert(rt)],
@@ -1374,6 +1381,7 @@ class Tests:
         with self._lock:
             now = self.clock()
             self._prune(now)
+            self._clean_probes(now)
             self._retry_owed(now)
             t = self.active
             if t is None:
@@ -1499,19 +1507,37 @@ class Tests:
         deleted, unless the system has a dongle of its own now."""
         if not force and any(m in rt.system.jobs for m in self.app.assign.values()):
             return
-        d = Path(rt.system.capture_dir)
-        try:
-            kids = list(d.iterdir()) if d.is_dir() else []
-        except OSError:
-            kids = []
-        for k in kids:
+        cap = Path(rt.system.capture_dir)
+        for d in (cap, cap.with_name(cap.name + "-tmp")):     # and its temp directory (trunk-recorder's tempDir)
             try:
-                if k.is_dir() and not k.is_symlink():
-                    shutil.rmtree(k, ignore_errors=True)
-                else:
-                    k.unlink()
+                kids = list(d.iterdir()) if d.is_dir() else []
             except OSError:
-                pass
+                kids = []
+            for k in kids:
+                try:
+                    if k.is_dir() and not k.is_symlink():
+                        shutil.rmtree(k, ignore_errors=True)
+                    else:
+                        k.unlink()
+                except OSError:
+                    pass
+
+    def _clean_probes(self, now: float) -> None:
+        """(#436) A probe's captures and temp files, capped while a test runs (an "until stopped" county test never
+        fills the disk): janitor.clean_system every PROBE_CLEAN_S, calls older than PROBE_KEEP_S (a test's are taken
+        within seconds) and at most PROBE_MAX_BYTES. The app's janitor cleans only the systems of the config."""
+        if not self.probes or now - self._probes_cleaned < PROBE_CLEAN_S:
+            return
+        self._probes_cleaned = now
+        from sizeup import janitor
+        for rt in self.probes.values():
+            try:
+                got = janitor.clean_system(Path(rt.system.capture_dir), PROBE_KEEP_S, PROBE_MAX_BYTES, now=now)
+                if got.get("over"):
+                    self.log(f"reception: {rt.system.label} probe's captures over {PROBE_MAX_BYTES / 1e6:.0f} MB: "
+                             f"{got['over']} oldest call(s) removed")
+            except Exception as e:  # noqa: BLE001 - a cleanup, never in the way
+                self.log(f"reception: {rt.system.label} probe's captures not cleaned: {type(e).__name__}: {e}")
 
     def _prune(self, now: float) -> None:
         keep = [s for s in self.samples if now - s["kept"] < s["keep_s"]][:SAMPLES_MAX]

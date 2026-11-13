@@ -252,3 +252,104 @@ def test_a_stopped_side_that_measured_nothing_has_no_verdict_a_finished_one_says
     h = app.reception_state()["history"][0]
     assert h["status"] == "done" and h["verdict"]["grade"] == "none" and h["halves"][0]["grade"] == "none"
     assert reception.unjudged([{"cc": {"windows": 0}, "verdict": {"grade": "none"}}], "done")[0]["verdict"]
+
+
+# -- the probe's config: an allow-list of the county's; names; stale directories; its captures ------------------------------
+
+
+def test_nothing_of_the_county_site_but_how_to_decode_it_is_copied(tmp_path):
+    """An upload, a call log, an archive, an API key or a plugin on the county site (none today) would make a probe's
+    calls the county's; the county source's dongle, correction and gain are its fire dongle's."""
+    work = system_dir(tmp_path).parent.parent
+    conf = json.loads((work / "config.json").read_text())
+    leaks = {"uploadScript": "./upload.sh", "apiKey": "k-0000", "broadcastifyApiKey": "b-0000",
+             "broadcastifySystemId": 4242, "callLog": True, "audioArchive": True, "transmissionArchive": True,
+             "uploadServer": "https://example.invalid", "bcfyCallsServer": "https://example.invalid", "plugins": [1]}
+    conf["systems"][0].update(leaks)
+    conf["sources"][0].update(device="rtl=v4-fire-serial", error=1234, gain=29.7, ppm=3, agc=True)
+    conf["plugins"] = [{"name": "rdioscanner_uploader", "server": "https://example.invalid", "apiKey": "x"}]
+    (work / "config.json").write_text(json.dumps(conf))
+    probes.county(work, {307})
+    probe = json.loads((work / "systems" / COUNTY / "config.json").read_text())
+    text = json.dumps(probe)
+    for key in [*leaks, "device", "error", "ppm", "agc", "plugins", "v4-fire-serial", "example.invalid", "k-0000"]:
+        assert key not in text or (key, probe["systems"][0].get(key)) in (
+            ("callLog", False), ("transmissionArchive", False)), key
+    assert probe["systems"][0]["callLog"] is False and probe["systems"][0]["transmissionArchive"] is False
+    src = probe["sources"][0]
+    assert src == {"center": conf["sources"][0]["center"], "rate": conf["sources"][0]["rate"], "driver": "osmosdr",
+                   "digitalRecorders": conf["sources"][0]["digitalRecorders"], "gain": probes.PROBE_GAIN}
+    assert set(probe) == {"ver", "sources", "systems", "captureDir", "tempDir", "controlWarnRate", "logLevel"}
+    # what decodes it stays
+    assert probe["systems"][0]["modulation"] == conf["systems"][0]["modulation"]
+    assert probe["systems"][0]["control_channels"] == conf["systems"][0]["control_channels"]
+
+
+def test_two_sites_never_share_a_probe_name(tmp_path):
+    long = "a-very-long-county-site-name"
+    names = [probes._name(long[:-1] + c, ()) for c in "xy"]
+    assert len(set(names)) == 2 and all(len(n) <= probes.NAME_MAX and trunkrecd.SYSTEM_NAME.fullmatch(n) for n in names)
+    assert probes._name("westchester") == COUNTY                              # a plain name stays as it is
+    assert probes._name("West Chester!") != probes._name("westchester")       # only other characters: its own name
+    assert probes._name("westchester", {COUNTY}) != COUNTY                   # taken: a name of its own
+    work = system_dir(tmp_path).parent.parent
+    conf = json.loads((work / "config.json").read_text())
+    conf["systems"] = [dict(conf["systems"][0], shortName=long + "x"), dict(conf["systems"][0], shortName=long + "y")]
+    (work / "config.json").write_text(json.dumps(conf))
+    made = probes.county(work, ())
+    assert len({p.name for p in made}) == 2 and len({p.dir for p in made}) == 2
+
+
+def test_a_stale_probe_directory_goes_only_with_its_marker(tmp_path):
+    work = system_dir(tmp_path).parent.parent
+    probes.county(work, ())
+    old = work / "systems" / "probe-gone"
+    old.mkdir()
+    (old / "config.json").write_text("{}")
+    (old / probes.MARK).write_text(json.dumps({"probe": True}))
+    mine = work / "systems" / "probe-handmade"                                # someone's own: no marker
+    mine.mkdir()
+    (mine / "config.json").write_text("{}")
+    fake = work / "systems" / "probe-fake"                                    # a marker that isn't ours
+    fake.mkdir()
+    (fake / probes.MARK).write_text("not json")
+    assert probes.stale(work, [COUNTY]) == ["probe-gone"]
+    assert not old.exists() and mine.exists() and fake.exists() and (work / "systems" / COUNTY).exists()
+    assert (work / "systems" / "mrrs").exists()
+
+
+def test_dir_installs_never_copy_a_probe_directory():
+    sh = (TR.parent / "station" / "install-linux.sh").read_text()
+    assert "--exclude '/deploy/trunk-recorder/systems/probe-*'" in sh
+    assert '[ ! -f "$sysdir/probe.json" ] || continue' in sh
+
+
+def test_a_probes_captures_are_capped_while_it_runs_and_wiped_after(lab, monkeypatch):
+    import os
+    app, clock = lab, Clock()
+    running(app, clock)
+    pr = app.reception.probes[COUNTY]
+    pr.recorder.status = lambda: {"state": "ok", "detail": "", "restarts": 0}
+    monkeypatch.setattr(reception, "PROBE_MAX_BYTES", 10_000)
+    assert app.reception_post({"action": "start", "system": COUNTY, "job": "County probe", "sdr": "spare",
+                               "minutes": 0}) is None
+    cap = Path(pr.system.capture_dir)
+    tmp = cap.with_name(cap.name + "-tmp")
+    day = cap / "2027" / "1" / "15"
+    day.mkdir(parents=True, exist_ok=True)
+    tmp.mkdir(parents=True, exist_ok=True)
+    for k in range(8):                                                        # 8 x 4 kB: over the cap
+        f = day / f"307-{k}.wav"
+        f.write_bytes(b"\0" * 4000)
+        os.utime(f, (clock.t - 100 + k, clock.t - 100 + k))
+    stuck = tmp / "stuck.wav"
+    stuck.write_bytes(b"\0" * 10)
+    os.utime(stuck, (clock.t - 7200, clock.t - 7200))                         # an old temp file
+    clock.t += reception.PROBE_CLEAN_S + 1
+    app.reception.tick()
+    left = sorted(p.name for p in day.glob("*.wav"))
+    assert left == ["307-6.wav", "307-7.wav"] and not stuck.exists()          # the newest, under the cap
+    assert app.reception.active is not None                                   # the test runs on
+    (tmp / "open.wav").write_bytes(b"\0")
+    app.reception_post({"action": "stop"})
+    assert not list(cap.rglob("*")) and not list(tmp.rglob("*"))              # both wiped at the end

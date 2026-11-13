@@ -1171,10 +1171,11 @@ def test_the_state_says_what_can_be_tested_and_on_which_dongle(lab):
     # (#436) the county's P25 site first (probe-only, from its trunk-recorder config), then the systems config's
     assert st["systems"] == [
         {"name": "probe-westchester", "label": "County", "kind": "county", "watch": [307, 333],
-         "jobs": [{"job": "County probe", "mhz": 477.19375}],
+         "jobs": [{"job": "County probe", "mhz": 477.19375, "cc": [476.075, 476.1125, 476.2125, 476.2375]}],
          "alert": [{"tg": 307, "name": "Fire/EMS 15"}, {"tg": 333, "name": "Airport Incident"}], "caveat": ""},
         {"name": "mrrs", "label": "MRRS", "kind": "system", "watch": [PD, EMS],
-         "jobs": [{"job": "MRRS 770", "mhz": 770.3125}, {"job": "MRRS 773", "mhz": 773.08125}],
+         "jobs": [{"job": "MRRS 770", "mhz": 770.3125, "cc": [769.90625, 770.18125, 770.46875, 770.71875]},
+                  {"job": "MRRS 773", "mhz": 773.08125, "cc": [772.48125, 773.03125, 773.68125]}],
          "alert": [{"tg": PD, "name": "PD Dispatch"}, {"tg": EMS, "name": "PC-Rye EMS"}],
          "caveat": "Some traffic is carried over LTE and never on RF."}]
     assert st["durations"] == [15, 60, 240, 0] and st["keep_min"] == 10.0 and st["active"] is None and st["history"] == []

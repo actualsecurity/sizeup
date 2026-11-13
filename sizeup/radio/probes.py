@@ -24,9 +24,11 @@ the reception test (sizeup/radio/reception.py) runs one, on a lent dongle (never
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
+import shutil
 from pathlib import Path
 
 from sizeup.radio.systems import P25System, Source, read_talkgroups
@@ -36,14 +38,68 @@ PREFIX = "probe-"
 MARK = "probe.json"
 NAME_MAX = 24                        # trunkrecd.SYSTEM_NAME
 ANTENNA = "an outside antenna, higher, toward the county site"
+# What of a county site is copied (an ALLOW-list, #436): how to decode and record it. Never an upload, a call log, an
+# archive, an API key or a plugin's setting: a probe's calls are never sent or logged as the county's.
+SITE_KEYS = ("type", "modulation", "control_channels", "squelch", "digitalLevels", "analogLevels", "compressWav",
+             "minDuration", "minTransmissionDuration", "maxDuration", "hideEncrypted", "talkgroupDisplayFormat",
+             "decodeMDC", "decodeFSync", "decodeStar", "decodeTPS", "conventionalTalkgroups")
+# ... and of a county source: its span and how many recorders. Never its dongle ("device": the county's fire dongle),
+# its frequency correction or its gain (that dongle's); the lent dongle gets PROBE_GAIN.
+SOURCE_KEYS = ("center", "rate", "driver", "digitalRecorders", "analogRecorders")
+PROBE_GAIN = 40
 
 
 def is_probe(directory: str | Path) -> bool:
     return (Path(directory) / MARK).is_file()
 
 
-def _name(short: str) -> str:
-    return (PREFIX + (re.sub(r"[^a-z0-9_-]", "", str(short).lower()) or "county"))[:NAME_MAX]
+def _name(short: str, used=()) -> str:
+    """probe-<site>, at most NAME_MAX; two sites that come out the same (cut, or only other characters) get a short
+    hash of their own name."""
+    clean = re.sub(r"[^a-z0-9_-]", "", str(short).lower()) or "county"
+    name = (PREFIX + clean)[:NAME_MAX]
+    if name in used or clean != str(short).lower() or len(PREFIX + clean) > NAME_MAX:
+        tag = hashlib.sha1(str(short).encode()).hexdigest()[:6]
+        name = (PREFIX + clean)[:NAME_MAX - 7] + "-" + tag
+    return name
+
+
+def source_conf(x: dict) -> dict:
+    out = {k: x[k] for k in SOURCE_KEYS if k in x}
+    out["gain"] = PROBE_GAIN
+    return out
+
+
+def site_conf(s: dict, name: str, unit_script: str | None) -> dict:
+    out = {k: s[k] for k in SITE_KEYS if k in s}
+    out.update(shortName=name, talkgroupsFile="talkgroups.csv", recordUnknown=False, hideUnknownTalkgroups=True,
+               transmissionArchive=False, callLog=False)
+    if unit_script:
+        out["unitScript"] = unit_script
+    return out
+
+
+def stale(recorder_dir: str | Path, keep, log=lambda m: None) -> list[str]:
+    """Probe directories this release no longer makes (a site gone or renamed): removed. Only one with our marker
+    (probe.json saying "probe": true) is ever removed; anything else under systems/ is never touched."""
+    gone = []
+    base = Path(recorder_dir) / SYSTEMS
+    try:
+        dirs = [d for d in base.iterdir() if d.name.startswith(PREFIX) and d.is_dir() and not d.is_symlink()]
+    except OSError:
+        return gone
+    for d in dirs:
+        if d.name in set(keep):
+            continue
+        try:
+            mark = json.loads((d / MARK).read_text())
+        except (OSError, ValueError):
+            continue
+        if isinstance(mark, dict) and mark.get("probe") is True:
+            shutil.rmtree(d, ignore_errors=True)
+            gone.append(d.name)
+            log(f"reception: stale county probe {d.name} removed")
+    return gone
 
 
 def _write(path: Path, text: str) -> None:
@@ -77,10 +133,11 @@ def county(recorder_dir: str | Path, alert_tgs=(), taken_jobs=(), log=lambda m: 
     cap = Path(os.path.abspath(cap if cap.is_absolute() else base / cap))
     taken = {str(j).lower() for j in taken_jobs}
     alert = sorted({int(t) for t in alert_tgs})
-    out = []
+    out, used = [], set()
     for s in sites:
         short = str(s.get("shortName") or "county")
-        name = _name(short)
+        name = _name(short, used)
+        used.add(name)
         label = "County" if len(sites) == 1 else f"County {short}"
         try:
             ccs = [float(f) for f in s["control_channels"]]
@@ -108,13 +165,9 @@ def county(recorder_dir: str | Path, alert_tgs=(), taken_jobs=(), log=lambda m: 
             log(f"reception: county probe {name} not made: {e}")
             continue
         if write:
-            site = {k: v for k, v in s.items() if k not in ("unitScript", "talkgroupsFile", "shortName")}
-            site.update(shortName=name, talkgroupsFile="talkgroups.csv", recordUnknown=False,
-                        hideUnknownTalkgroups=True, transmissionArchive=False)
-            if s.get("unitScript"):
-                us = str(s["unitScript"])
-                site["unitScript"] = us if us.startswith("/") else os.path.relpath(base / us, d)
-            tr = {"ver": conf.get("ver", 2), "sources": [dict(x) for x in mine], "systems": [site],
+            us = str(s.get("unitScript") or "")
+            site = site_conf(s, name, (us if us.startswith("/") else os.path.relpath(base / us, d)) if us else None)
+            tr = {"ver": conf.get("ver", 2), "sources": [source_conf(x) for x in mine], "systems": [site],
                   "captureDir": str(pcap), "tempDir": f"{pcap}-tmp", "controlWarnRate": -1,
                   "logLevel": conf.get("logLevel", "info")}
             try:

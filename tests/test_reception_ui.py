@@ -95,7 +95,7 @@ class N {
   addEventListener(t, f) { (this.on[t] = this.on[t] || []).push(f); }
   removeEventListener() {}
   fire(t, ev = {}) { const e = Object.assign({ type: t, target: this, preventDefault() { this.prevented = true; } }, ev); let n = this; while (n) { for (const f of n.on[t] || []) f(e); n = ev.bubbles ? n.parentNode : null; } return e; }
-  click() { if (!this.disabled) this.fire("click", { bubbles: true }); }
+  click() { if (this.disabled) return; if (this.tagName === "BUTTON" && focused !== this) { const was = focused; focused = this; if (was) was.fire("blur"); } this.fire("click", { bubbles: true }); }   // a browser focuses a clicked button
   focus() { focused = this; }
   blur() { if (focused === this) { focused = null; this.fire("blur"); } }
   select() {}
@@ -152,6 +152,7 @@ const card = (box) => box.children.find((c) => (c.textContent || "").startsWith(
                     tab: c.dataset.rtab, cards: box.children.filter((k) => (k.textContent || "").startsWith("Reception test")).length };
   // the target select: every trunked P25 target, nothing else
   out.targets = c.querySelector("select.rx-target").children.map((o) => [o.value, o.textContent]);
+  out.targetTips = c.querySelector("select.rx-target").children.map((o) => o.title);
   out.notes = c.querySelectorAll("input").filter((i) => /rx-note/.test(i.className)).map((i) => i.className);
   // the history
   const rows = hrows(c).filter((r) => r.dataset.id);
@@ -171,6 +172,9 @@ const card = (box) => box.children.find((c) => (c.textContent || "").startsWith(
   row = hrows(c).find((r) => r.dataset.id === IN.edit);
   const inp = row.querySelector("input.rx-note-edit");
   out.editing = { value: inp.value, focused: document.activeElement === inp };
+  // a poll while typing never redraws the field away
+  RadioControls._rx.renderReception();
+  out.typingKept = c.querySelector("input.rx-note-edit") === inp;
   inp.value = "  yagi on the mast, north  ";
   const e = inp.fire("keydown", { key: "Enter" });
   out.enter = { prevented: !!e.prevented };
@@ -213,9 +217,10 @@ COUNTY_ALERT = [{"tg": 307, "name": "Fire/EMS 15"}, {"tg": 333, "name": "TG 333"
 MRRS_ALERT = [{"tg": 9211, "name": "PD Dispatch"}]
 RX = {
     "systems": [{"name": "probe-westchester", "label": "County", "kind": "county",
-                 "jobs": [{"job": "County probe", "mhz": 477.19375}], "watch": [307, 333], "alert": COUNTY_ALERT, "caveat": ""},
+                 "jobs": [{"job": "County probe", "mhz": 477.19375, "cc": [476.075, 476.1125]}], "watch": [307, 333], "alert": COUNTY_ALERT, "caveat": ""},
                 {"name": "mrrs", "label": "MRRS", "kind": "system",
-                 "jobs": [{"job": "MRRS 770", "mhz": 770.3125}, {"job": "MRRS 773", "mhz": 773.08125}],
+                 "jobs": [{"job": "MRRS 770", "mhz": 770.3125, "cc": [769.90625, 770.18125]},
+                          {"job": "MRRS 773", "mhz": 773.08125, "cc": [772.48125]}],
                  "watch": [9211], "alert": MRRS_ALERT, "caveat": ""}],
     "durations": [15, 60, 240, 0], "keep_min": 10.0,
     "dongles": [{"serial": "spare", "name": "spare", "job": "Off", "refuse": "", "protected": ""},
@@ -271,9 +276,12 @@ def test_the_card_is_on_receivers_only_and_never_on_the_station_page(ui):
 
 
 def test_the_targets_are_the_county_and_each_side_of_each_system(ui):
-    assert ui["targets"] == [["probe-westchester|County probe", "County · 477.19375"],
-                             ["mrrs|MRRS 770", "MRRS 770 · 770.3125"], ["mrrs|MRRS 773", "MRRS 773 · 773.08125"],
+    # each by its first control channel (not the dongle's centre); the others in the hover
+    assert ui["targets"] == [["probe-westchester|County probe", "County · 476.075"],
+                             ["mrrs|MRRS 770", "MRRS 770 · 769.90625"], ["mrrs|MRRS 773", "MRRS 773 · 772.48125"],
                              ["mrrs|MRRS 770,MRRS 773", "MRRS both sides"]]
+    assert ui["targetTips"][0] == "Control channels 476.075, 476.1125 MHz (dongle centred on 477.19375)"
+    assert ui["targetTips"][3] == "MRRS 770: 769.90625, 770.18125\nMRRS 773: 772.48125"
     for fm in ("FG1", "South 2", "HPN Tower", "Fire/EMS 15"):
         assert not any(fm in t for t, _ in ui["targets"])
 
@@ -313,7 +321,7 @@ def test_tg_hits_per_hour_is_the_systems_alert_talkgroups(ui):
 def test_the_note_is_edited_in_place_and_saved_by_the_note_action(ui):
     rows = {r["id"]: r for r in ui["rows"]}
     assert rows["a00000000003"]["note"] == "whip on the roof" and rows["a00000000001"]["note"] == "—"
-    assert ui["editing"] == {"value": "whip on the roof", "focused": True}
+    assert ui["editing"] == {"value": "whip on the roof", "focused": True} and ui["typingKept"]
     assert ui["enter"] == {"prevented": True}
     assert ui["posted"] == [{"action": "note", "id": "a00000000003", "note": "yagi on the mast, north"}]
     assert ui["escape"] == {"posted": 0, "input": False}

@@ -346,7 +346,7 @@ window.RadioControls = (() => {
   const RX_GRADE = { good: ["Good", "ok"], marginal: ["Marginal", "warn"], none: ["None", "err"] };
   const RX_ENDED = { stopped: "stopped", failed: "failed", interrupted: "interrupted" };
   const RX_WHY = { stopped: "Stopped", failed: "Failed", interrupted: "Restored after a crash or restart" };
-  const rxSt = { busy: false, error: "", key: "", histKey: "", sampleKey: "", editing: "" };
+  const rxSt = { busy: false, error: "", key: "", histKey: "", sampleKey: "", editing: "", drawnEditing: "" };
   const hms = (s) => { const n = Math.max(0, Math.floor(s || 0)); return n < 3600 ? mmss(n) : `${Math.floor(n / 3600)}:${String(Math.floor(n / 60) % 60).padStart(2, "0")}:${String(n % 60).padStart(2, "0")}`; };
   const num = (v, unit = "") => (v == null ? "—" : `${v}${unit}`);
   const plural = (n, w) => `${n} ${w}${n === 1 ? "" : "s"}`;
@@ -364,12 +364,20 @@ window.RadioControls = (() => {
     return sys && sys.jobs.length > 1 ? String(job || "").split(" ").pop() : "";
   }
 
-  // The target select's rows: [value "system|job,job", text]: each side of each system, then "both" for two
+  // The target select's rows: [value "system|job,job", text, disabled, title]: each side of each system by its first
+  // control channel (the others, and the dongle's centre, in the hover), then "both" for a system of two sides
   function rxTargets(systems) {
     const out = [];
     for (const s of systems || []) {
-      for (const j of s.jobs) out.push([`${s.name}|${j.job}`, `${s.label}${rxSideOf(s, j.job) ? ` ${rxSideOf(s, j.job)}` : ""} · ${j.mhz}`]);
-      if (s.jobs.length > 1) out.push([`${s.name}|${s.jobs.map((j) => j.job).join(",")}`, `${s.label} both sides`]);
+      for (const j of s.jobs) {
+        const cc = j.cc && j.cc.length ? j.cc : [j.mhz];
+        out.push([`${s.name}|${j.job}`, `${s.label}${rxSideOf(s, j.job) ? ` ${rxSideOf(s, j.job)}` : ""} · ${cc[0]}`, false,
+                  `Control channels ${cc.join(", ")} MHz (dongle centred on ${j.mhz})`]);
+      }
+      if (s.jobs.length > 1) {
+        out.push([`${s.name}|${s.jobs.map((j) => j.job).join(",")}`, `${s.label} both sides`, false,
+                  s.jobs.map((j) => `${j.job}: ${(j.cc && j.cc.length ? j.cc : [j.mhz]).join(", ")}`).join("\n")]);
+      }
     }
     return out;
   }
@@ -437,9 +445,7 @@ window.RadioControls = (() => {
     pen.addEventListener("click", () => {
       rxSt.editing = h.id;
       rxSt.histKey = "";
-      renderReception();
-      const i = st.n.rxHist.querySelector(".rx-note-edit");
-      if (i) { i.focus(); i.select(); }
+      renderReception();                             // (redrawn whatever has the focus; the field is focused there)
     });
     box.append(pen);
     td.append(box);
@@ -517,7 +523,7 @@ window.RadioControls = (() => {
     const key = JSON.stringify(rows);
     if (sel.dataset.key === key) return;
     const was = keep != null ? keep : sel.value;
-    sel.replaceChildren(...rows.map(([v, t, off]) => { const o = new Option(t, v); o.disabled = !!off; return o; }));
+    sel.replaceChildren(...rows.map(([v, t, off, tip]) => { const o = new Option(t, v); o.disabled = !!off; if (tip) o.title = tip; return o; }));
     sel.dataset.key = key;
     if (rows.some(([v, , off]) => String(v) === was && !off)) sel.value = was;
     else { const first = rows.find((r) => !r[2]); sel.value = first ? first[0] : ""; }
@@ -704,9 +710,14 @@ window.RadioControls = (() => {
       }
     }
     // the past tests
+    // Redrawn when it changed, but never under the note being typed (a focused .rx-note-edit); an edit started or
+    // ended always redraws, whatever has the focus (a clicked pencil is focused), and the new field gets the focus
     const hkey = JSON.stringify([rx.history, locked, rxSt.editing]);
-    if (hkey !== rxSt.histKey && !n.rxHist.contains(document.activeElement)) {
+    const typing = document.activeElement && n.rxHist.contains(document.activeElement)
+      && document.activeElement.classList.contains("rx-note-edit");
+    if (hkey !== rxSt.histKey && (!typing || rxSt.editing !== rxSt.drawnEditing)) {
       rxSt.histKey = hkey;
+      rxSt.drawnEditing = rxSt.editing;
       if (!rx.history.length) n.rxHist.replaceChildren();
       else {
         const t = el("table", "table rx-history"), hr = el("tr"), tb = el("tbody"), thead = el("thead");
@@ -725,6 +736,8 @@ window.RadioControls = (() => {
         thead.append(hr);
         t.append(thead, tb);
         n.rxHist.replaceChildren(t);
+        const i = rxSt.editing ? n.rxHist.querySelector(".rx-note-edit") : null;
+        if (i && document.activeElement !== i) { i.focus(); i.select(); }
       }
     }
   }

@@ -651,6 +651,7 @@ make_release() {
   if [ "$SIZEUP_SOURCE" = dir ]; then
     rsync -a --exclude /.git --exclude /.venv --exclude /.claude --exclude /state --exclude /captures \
       --exclude /models --exclude /config.toml --exclude /build --exclude '__pycache__' --exclude '*.egg-info' \
+      --exclude '/deploy/trunk-recorder/systems/probe-*' \
       "$OPT_FROM_DIR/" "$tmp/"
   else
     repo_git archive --format=tar "$sha" | tar -x -C "$tmp"
@@ -916,6 +917,7 @@ PY
   if [ -d "$rel/deploy/trunk-recorder/systems" ]; then
     for sysdir in "$rel"/deploy/trunk-recorder/systems/*/; do
       [ -f "$sysdir/config.json" ] || continue
+      [ ! -f "$sysdir/probe.json" ] || continue        # a reception probe (#436): sizeup makes it on the station
       sysname=$(basename "$sysdir")
       case "$sysname" in *[!a-z0-9_-]*|'') continue ;; esac
       as_user mkdir -p -m 0755 "$TR_DIR/systems/$sysname"
