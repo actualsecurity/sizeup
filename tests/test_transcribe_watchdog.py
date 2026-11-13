@@ -14,7 +14,7 @@ import pytest
 
 from sizeup import datasources as ds
 from sizeup.stt import LIVE, RERUN, STALE_S, URGENT, SttQueue
-from sizeup.transcribe import (AwsTranscriber, ChannelWorker, Settings, Usage, WebSocket, WsError, _handshake_error,
+from sizeup.transcribe import (PRICE_PER_MIN, AwsTranscriber, ChannelWorker, Settings, Usage, WebSocket, WsError, _handshake_error,
                                classify, deadline_for)
 from tests.fake_transcribe import FakeTranscribe, tone8k
 from tests.test_channels import AWS_TEXT, aws_cfg
@@ -292,7 +292,7 @@ def test_past_the_limit_pages_and_fire_ems_15_keep_aws_within_the_reserve():
     fake = FakeTranscribe()
     res, kv = Results(), {}
     usage = Usage(kv.get, kv.__setitem__)
-    usage.add(25 / 0.024 * 60 + 60, 0)                       # just over $25
+    usage.add(25 / PRICE_PER_MIN * 60 + 60, 0)               # just over $25
     t = quick(fake, res, kv=kv)
     t.usage = usage
     try:
@@ -300,7 +300,7 @@ def test_past_the_limit_pages_and_fire_ems_15_keep_aws_within_the_reserve():
         assert t.available("tg:307")[0] and t.available("South 2")[0] and not t.available("FG1")[0]
         b = t.budget()
         assert b["pct"] >= 100 and b["reserve"] == ["South 2", "tg:307"] and "reserve" in b["reserve_text"]
-        usage.add(5 / 0.024 * 60, 0)                         # past $30: the reserve is used up too
+        usage.add(5 / PRICE_PER_MIN * 60, 0)                 # past $30: the reserve is used up too
         assert not t.available("tg:307")[0] and "reserve" in t.available("tg:307")[1] and t.budget()["reserve"] == []
     finally:
         t.stop()

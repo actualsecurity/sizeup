@@ -40,6 +40,11 @@ URGENT, HIGH, LIVE, RERUN, LOW = -2, -1, 0, 1, 2
 # and shed when it waits: fire traffic never queues behind police. Their `text` talkgroups are LOW.
 CONTEXT = 1.5
 CONTEXT_MAX_WAIT_S = 600.0  # a context system's alert clip waiting this long is shed: a late pre-alert is no use
+# ... unless it is on whisper only because AWS can't take it (its own budget used up, radio-intel PR 3): then it is the
+# pre-alerts' only text, so it goes before the other context clips (still under every class of ours, re-runs included)
+# and waits longer before it is shed.
+CONTEXT_FALLBACK = 1.25
+CONTEXT_FALLBACK_MAX_WAIT_S = 1800.0
 STALE = 3                   # (kept for callers: a class's stale items now go after its fresh ones, not after all)
 QUEUE_MAX = 2000            # items waiting at most: past it the worst one goes (lowest priority, then oldest)
 CHANNEL_CAP = 400           # one channel's items waiting at most: past it that channel's worst one goes
@@ -52,9 +57,12 @@ LOW_MAX_WAIT_S = 900.0      # a context talkgroup's clip waiting this long is sh
 BEHIND_S = 120.0            # the oldest live clip waiting this long: "behind" (context clips get one greedy pass)
 RATE_WINDOW_S = 1800.0      # clips in / out per hour are counted over this long
 LIVE_CLASSES = (URGENT, HIGH, LIVE)
-SHED_AFTER = {HIGH: HIGH_MAX_WAIT_S, CONTEXT: CONTEXT_MAX_WAIT_S, LOW: LOW_MAX_WAIT_S}
+SHED_AFTER = {HIGH: HIGH_MAX_WAIT_S, CONTEXT: CONTEXT_MAX_WAIT_S, CONTEXT_FALLBACK: CONTEXT_FALLBACK_MAX_WAIT_S,
+              LOW: LOW_MAX_WAIT_S}
+CONTEXT_CLASSES = (CONTEXT_FALLBACK, CONTEXT)
 SHED = "skipped: busy"      # what a shed clip's reason starts with: its status is "skipped", not "error" (re-runnable)
-CLASS_NAMES = {URGENT: "urgent", HIGH: "high", LIVE: "live", RERUN: "rerun", CONTEXT: "context", LOW: "low"}
+CLASS_NAMES = {URGENT: "urgent", HIGH: "high", LIVE: "live", RERUN: "rerun", CONTEXT_FALLBACK: "context-fallback",
+               CONTEXT: "context", LOW: "low"}
 
 
 def wav_bytes(audio: np.ndarray, rate: int = 16000) -> bytes:
@@ -207,6 +215,8 @@ class SttQueue:
         self._cv = threading.Condition()
         self._seq = itertools.count()
         self.dropped = self.skipped = self.shed = 0
+        self.shed_context = 0                     # of those shed, another P25 system's alert clips (police dispatch)
+        self._shed_ctx_at: deque = deque()        # ... when, over RATE_WINDOW_S x 2 (the last hour)
         self.last_drop: dict | None = None
         self._in: deque = deque()                 # (at, channel, priority, fallback) of each clip put, RATE_WINDOW_S
 
@@ -273,11 +283,15 @@ class SttQueue:
         old = [e for e in self._items if e[0] in LIVE_CLASSES and now - e[5] >= MAX_WAIT_S and e not in shed]
         for e in old + shed:
             self._items.remove(e)
+        for e in shed:
+            if e[0] in CONTEXT_CLASSES:           # lost recall on the police pre-alerts: counted, never just quiet
+                self.shed_context += 1
+                self._shed_ctx_at.append(now)
         skips.extend((e[2], f"waited {int((now - e[5]) // 60)} min for speech-to-text: skipped, "
                                     "too far behind (Re-transcribe it if it matters)") for e in old)
         sheds.extend((e[2], f"{SHED}: speech-to-text {int((now - e[5]) // 60)} min behind, "
                             + ("an airband clip is no use late" if e[0] == HIGH else
-                               "another system's talkgroup" if e[0] == CONTEXT else "a context talkgroup")
+                               "another system's talkgroup" if e[0] in CONTEXT_CLASSES else "a context talkgroup")
                             + " (Re-transcribe it if it matters)") for e in shed)
         if not self._items:
             return None
@@ -307,6 +321,13 @@ class SttQueue:
     def get_nowait(self) -> tuple:
         return self.get(timeout=0)
 
+    def _shed_context_h(self, now: float) -> int:
+        """Context alert clips shed in the last hour."""
+        with self._cv:
+            while self._shed_ctx_at and now - self._shed_ctx_at[0] > 3600.0:
+                self._shed_ctx_at.popleft()
+            return len(self._shed_ctx_at)
+
     def behind(self) -> bool:
         """The oldest live clip (any class but re-runs) has waited BEHIND_S."""
         now = self.clock()
@@ -334,7 +355,7 @@ class SttQueue:
         for _at, ch, _p, _f in arrived:
             came[ch or "?"] = came.get(ch or "?", 0) + 1
         return {"queued": len(items), "urgent": sum(1 for e in live if e[0] == URGENT),
-                "context": sum(1 for e in items if e[0] == CONTEXT),       # another P25 system's alert clips (#409)
+                "context": sum(1 for e in items if e[0] in CONTEXT_CLASSES),   # another P25 system's alert clips (#409)
                 "high": sum(1 for e in live if e[0] == HIGH), "live": len(live), "low": len(low),
                 "rerun": sum(1 for e in items if e[0] == RERUN),
                 "fallback": sum(1 for e in items if e[6]),
@@ -347,6 +368,7 @@ class SttQueue:
                 "in_fallback_h": round(sum(1 for x in arrived if x[3]) * per_h),
                 "in_top": [(ch, round(n * per_h)) for ch, n in sorted(came.items(), key=lambda kv: -kv[1])[:3]],
                 "dropped": self.dropped, "skipped": self.skipped, "shed": self.shed, "last_drop": self.last_drop,
+                "shed_context": self.shed_context, "shed_context_h": self._shed_context_h(now),
                 "max": self.maxsize, "stale_s": STALE_S, "max_wait_s": MAX_WAIT_S, "low_max_wait_s": LOW_MAX_WAIT_S,
                 "high_max_wait_s": HIGH_MAX_WAIT_S}
 
@@ -414,7 +436,7 @@ class Transcriber:
             prio, _n, item, audio = self._q.get()
             self._working = True
             # behind: a context talkgroup's clip gets one greedy pass (no temperature fallback), #300
-            fast = {"fast": True} if prio in (LOW, CONTEXT) and self._q.behind() else {}
+            fast = {"fast": True} if prio in (LOW, *CONTEXT_CLASSES) and self._q.behind() else {}
             for attempt in range(3):
                 try:
                     t0 = time.monotonic()

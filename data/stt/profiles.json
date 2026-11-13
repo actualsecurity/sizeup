@@ -1,0 +1,17 @@
+{
+  "_about": "Speech-to-text profiles for another P25 system's talkgroups (radio-intel PR 3; sizeup/stt_vocab.py profile()). A source key (sizeup/sourcekeys.py: p25:<system>:<tg>) names its profile, else its service does. prompt: whisper's text, police phrasing only, never a talker's or a person's name; the headquarters' callsigns (data/pd_units.json) and the busiest streets of the towns (the gazetteer, at runtime) are added to it. vocabulary: the Amazon Transcribe custom vocabulary those sources use (stt_vocab.police_phrases(), kept apart from the fire one).",
+  "profiles": {
+    "police": {
+      "prompt": "Police dispatch. 10-4, 10-20. Respond to, en route, on scene, in the area, be advised, all units, copy, negative, disregard.",
+      "towns": ["Port Chester", "Rye", "Rye Brook"],
+      "prompt_streets": 30,
+      "vocabulary": "sizeup-pd"
+    }
+  },
+  "sources": {
+    "p25:mrrs:9211": "police"
+  },
+  "services": {
+    "police": "police"
+  }
+}

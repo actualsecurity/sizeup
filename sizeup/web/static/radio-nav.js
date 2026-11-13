@@ -21,10 +21,11 @@
 // no per-viewer state on the hub).
 //
 // Per viewer, remembered: the rail folded (a strip of view marks with their counts), pinned channels (a Pinned group
-// on top of the tree, in every view) and muted ones (not in All, no count). One of Our calls is never muted (a mute
-// from before it became Main is dropped), and a mute never hides an emergency: the hub leaves neither out. An
-// emergency on any channel shows over the list in every view (folded rail and phone too), with "Recording until"
-// while its window is open (#128), and marks its channel, its view and the phone's Sources button.
+// on top of the tree, in every view) and muted ones (not in All, no count). One of Our calls or a fire channel of ours
+// is never muted (a mute from before is dropped), and a mute never hides an emergency: the hub leaves neither out. An
+// emergency (an alarm row not yet cleared, the tree's `emergency`; an emergency window alone marks nothing) shows over
+// the list in every view (folded rail and phone too), and marks its channel, its view and the phone's Sources button;
+// "Recording until" while a talkgroup's emergency window is open (#128).
 // On a phone the rail is a sheet behind Sources (Escape closes it).
 // A service is told by a letter in a shape (F P E T A), never by colour alone. The tier is a short code (PA TX REC OFF
 // ENC), its meaning in the hover. Another system's traffic comes only to a viewer who may see it (the hub decides).
@@ -70,7 +71,9 @@ window.RadioNav = (() => {
     return n;
   }
   // The mutes that count: never one of Our calls (a channel muted, then made Main: its mute is dropped)
-  const mutesFor = (mutes, sources) => { const ours = new Set(sources.filter((s) => s.ours).map((s) => s.key)); return mutes.filter((k) => !ours.has(k)); };
+  // ... nor a fire channel of ours, in any view (the hub says so: mutable false)
+  const fixed = (s) => !!s.ours || s.mutable === false;
+  const mutesFor = (mutes, sources) => { const ours = new Set(sources.filter(fixed).map((s) => s.key)); return mutes.filter((k) => !ours.has(k)); };
   const emText = (s) => (s.em === "ours" ? "EMERGENCY" : s.stuck ? `Emergency flag stuck on ${s.stuck}` : "Emergency (not ours)");
   // The services whose emergencies stand out when they aren't ours (Settings > Radios > Emergencies; cad.js emLoud):
   // anyone else's (a bus, DOT) is quiet: a muted EM on its channel only, never over the list, its view or Sources.
@@ -87,10 +90,11 @@ window.RadioNav = (() => {
       const mute = mutes.has(s.key);
       const t = TIER[s.tier] || null;
       const until = windows[s.key] || null;
-      const em = s.emergency || (until ? "other" : "");
+      const em = s.emergency || "";
       return { ...s, mute, pin: pins.has(s.key), n: mute ? 0 : unread(s, p.seen[s.key], now),
                live: !!s.live || live.has(s.key), recent: !!s.last && now - s.last < RECENT_S,
-               em, quiet: !!em && em !== "ours" && !s.ours && !loud.includes(s.service || "other"),
+               // quiet: someone else's emergency (or its window alone) on a service that doesn't stand out
+               em, quiet: !!(em || until) && em !== "ours" && !s.ours && !loud.includes(s.service || "other"),
                until, code: t ? t[0] : "", tip: t ? t[1] : "" };
     });
     const views = VIEWS.filter(([v]) => v === "ours" || v === "all" || rows.some((s) => inView(s, v))).map(([id, name, mark, service]) => {
@@ -339,8 +343,9 @@ window.RadioNav = (() => {
   }
   function windowKeys() {
     const out = {};
+    // a window is the county's talkgroup's (sizeup/cad/alarms.py Windows.state: {talkgroup, channel, until, ...})
     for (const w of (cad.state && cad.state.alarms && cad.state.alarms.windows) || []) {
-      if (w.until) out[w.source || `p25:${w.system || "westchester"}:${w.talkgroup}`] = w.until;
+      if (w.until && w.talkgroup !== undefined && w.talkgroup !== null) out[`p25:westchester:${w.talkgroup}`] = w.until;
     }
     return out;
   }
@@ -362,7 +367,7 @@ window.RadioNav = (() => {
     pin.setAttribute("aria-pressed", String(s.pin));
     pin.setAttribute("aria-label", `Pin ${s.name}`);
     row.append(b, pin);
-    if (!s.ours) {                                    // Our calls are never muted
+    if (!fixed(s)) {                                  // Our calls and our fire channels are never muted
       const mute = el("button", "rn-act quiet sm icon", s.mute ? "✕" : "♪");
       mute.type = "button";
       mute.dataset.mute = s.key;
