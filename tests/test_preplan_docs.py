@@ -113,6 +113,17 @@ def api(cad):
     return a
 
 
+def wait_for(cond, timeout=10.0):
+    """cond() true within timeout (a server thread finishing what it does after its answer), polled."""
+    import time as _time
+    end = _time.monotonic() + timeout
+    while not cond():
+        if _time.monotonic() > end:
+            return False
+        _time.sleep(0.01)
+    return True
+
+
 def who(email):
     return Identity(email=email) if email else None
 
@@ -508,11 +519,7 @@ def test_a_client_gone_before_its_headers_gives_its_slot_back(api, monkeypatch):
                 conn.getresponse().read()
             conn.close()
         cls.end_headers = real
-        import time as _time
-        end = _time.monotonic() + 5
-        while ppd.STREAMS._value != 2 and _time.monotonic() < end:
-            _time.sleep(0.02)
-        assert ppd.STREAMS._value == 2                                    # every slot back
+        assert wait_for(lambda: ppd.STREAMS._value == 2)                  # every slot back (the handlers' finally)
         conn = http.client.HTTPConnection("127.0.0.1", srv.httpd.server_address[1], timeout=10)
         conn.request("GET", f"/api/cad/preplan/docs/{did}/file")
         assert conn.getresponse().status == 200
@@ -1097,7 +1104,8 @@ def test_a_stalled_upload_lets_its_slot_go(api, monkeypatch):
         conn.send(b"\x89PNG" + b"\0" * 100)                                     # a little, then nothing
         r = conn.getresponse()
         assert r.status == 408
-        assert ppd.UPLOADS._value == 2
+        # the handler gives the slot back in its finally, after the answer is on its way: wait for it, a while at most
+        assert wait_for(lambda: ppd.UPLOADS._value == 2)
     finally:
         srv.httpd.shutdown()
     assert ppd.UPLOAD_READ_S and ppd.UPLOAD_DEADLINE_S <= 600
