@@ -30,7 +30,7 @@ KEY = "p25:mrrs:9211"                 # the police dispatch source key, as the p
 
 
 class Clock:
-    def __init__(self, t=1_800_000_000.0):
+    def __init__(self, t=1050.0):
         self.t = t
 
     def __call__(self):
@@ -627,3 +627,39 @@ def test_sql_and_memory_events_round_trip(tmp_path):
 
 def test_may_see_context_is_the_gate():
     assert sourcekeys.may_see_context(False) is False and sourcekeys.may_see_context(True) is True
+
+
+# -- the on_context_text hook's contract (#483 review): it fires again, on the caller's thread ------------------------
+
+def test_a_startup_backfill_of_old_rows_pushes_nothing(live):
+    cad, n = live
+    now = cad.clock()
+    for i, (text, _c) in enumerate(TRIGGER):
+        tid = f"old{i}-t0"
+        cad.comms.record(ctx_row(tid, text, now - 3600 - i))          # an hour old: the backfill replays them
+        cad.comms.on_context_text(tid)
+    cad.intel.drain()
+    assert n.sent == [] and cad.intel.events.open_events() == [] and cad.intel.stale == len(TRIGGER)
+    cad.intel_admin.settings_op("set", {"key": "max_age_min", "value": 120}, "test")     # configurable
+    cad.comms.on_context_text("old0-t0")
+    cad.intel.drain()
+    assert len(n.sent) == 1
+
+
+def test_the_hook_firing_again_for_the_same_text_does_nothing(live):
+    cad, n = live
+    cad.comms.record(ctx_row("c1-t0", "shots fired at Sample St and Test Rd", cad.clock()))
+    for _ in range(5):                                                 # every re-record with replace=True
+        cad.comms.on_context_text("c1-t0")
+    cad.intel.drain()
+    assert len(n.sent) == 1 and len(cad.intel.events.open_events()) == 1
+
+
+def test_consider_only_enqueues_on_the_callers_thread(live, monkeypatch):
+    cad, n = live
+    called = []
+    monkeypatch.setattr(cad.intel, "feed", lambda row: called.append(row))
+    monkeypatch.setattr(cad.intel, "_one", lambda tid: called.append(tid))
+    with cad.store.lock:                                               # even under the caller's store lock
+        cad.comms.on_context_text("c1-t0")
+    assert called == [] and n.sent == [] and cad.intel._q.qsize() == 1
