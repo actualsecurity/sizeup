@@ -1039,11 +1039,40 @@ class Alarms:
     def state(self, now: float | None = None) -> dict:
         """The screens' part of the CAD state: open alarms (until acknowledged), notices, the just acknowledged."""
         now = self.clock() if now is None else now
+        notices = self._rows("a.ack_at IS NULL AND a.level = 'notice' AND a.created_at >= ?", (now - NOTICE_S,), 10)
+        for a in notices:
+            a["quiet"] = self._quiet(a["traffic_id"])
+        windows = self.windows.state(now)
+        for w in windows:
+            w["quiet"] = not w.get("ours") and self._quiet(alarm_id=w.get("alarm_id"), tg=w.get("talkgroup"))
         return {"drill": bool(self.config()["drill"]),   # no clock here: the state has it, and the push sends what changed (#137)
                 "open": self._rows("a.ack_at IS NULL AND a.level = 'alarm'", (), 20),
-                "notices": self._rows("a.ack_at IS NULL AND a.level = 'notice' AND a.created_at >= ?", (now - NOTICE_S,), 10),
+                "notices": notices,
                 "recent": self._rows("a.ack_at >= ?", (now - RECENT_S,), 10),
-                "windows": self.windows.state(now)}
+                "windows": windows}
+
+    def _quiet(self, traffic_id: str = "", alarm_id=None, tg=None) -> bool:
+        """Someone else's emergency on a service Settings > Radios > Emergencies doesn't list (fire and EMS by default:
+        a bus, DOT): the screens show no strip and no toast for it, only the muted EM on its row in Radio (cad.js
+        emLoud, the same rule). By its transmission's row (traffic_id, an alarm's, or the talkgroup's newest): not
+        quiet when the row is ours or a scene-safety one, or isn't in the log. Presentation only."""
+        try:
+            if not traffic_id and alarm_id is not None:
+                a = self.store.one("SELECT traffic_id FROM alarms WHERE id = ?", (alarm_id,))
+                traffic_id = (a or {}).get("traffic_id") or ""
+            if traffic_id:
+                r = self.store.one("SELECT service, ours, safety FROM radio_traffic WHERE id = ?", (traffic_id,))
+            elif tg is not None:
+                r = self.store.one("SELECT service, ours, safety FROM radio_traffic WHERE talkgroup = ? "
+                                   "ORDER BY start DESC LIMIT 1", (tg,))
+            else:
+                r = None
+        except Exception:  # noqa: BLE001 - no log table here: shown as before
+            return False
+        if r is None or r["ours"] or (r["safety"] and r["safety"] != "dismissed"):
+            return False
+        loud = getattr(self.cad, "em_prominent", None)
+        return (r["service"] or "other") not in (("fire", "ems") if loud is None else loud)
 
     def history(self, limit: int = 200) -> list[dict]:
         rows = self._rows("1 = 1", (), 100000)

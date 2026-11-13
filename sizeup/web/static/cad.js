@@ -1482,6 +1482,12 @@ function txMenuItems(t) {
     }
     items.push("-");
   }
+  // a quiet emergency (emLoud: no strip under the header for it, alarm.js): seen / resolved from its row
+  if (canDo("dispatch") && t.alarm_id && !t.clear_at && !emLoud(t)) {
+    if (!t.ack_at) items.push({ label: "Acknowledge emergency", run: () => alarmTx(t, "ack") });
+    if (t.emergency) items.push({ label: "All clear", hint: "ends the emergency window", run: () => alarmTx(t, "clear") });
+    items.push("-");
+  }
   if (canDo("admin")) {
     const waiting = rerunWaiting(t);
     items.push({ label: waiting ? "Re-transcribing…" : "Re-transcribe", disabled: t.has_audio === false || waiting,
@@ -1502,6 +1508,15 @@ function addToPage(t) {
     hint: cur && i.id === cur.id ? "current" : "", checked: on.has(i.id), disabled: on.has(i.id),
     run: () => linkTx(t, i),
   }));
+}
+async function alarmTx(t, what) {       // what: "ack" | "clear" (POST /api/cad/alarm/<id>/ack | clear)
+  try {
+    await api("POST", `/api/cad/alarm/${t.alarm_id}/${what}`, { operator: operator() });
+    UI.toast(what === "ack" ? "Acknowledged" : "All clear", "ok");
+  } catch (err) {
+    UI.toast(`${what === "ack" ? "Not acknowledged" : "No all clear"}: ${err.message}`, "err");
+  }
+  txChanged();
 }
 function txChanged() {                   // a link changed: the Radio view asks again now (the feed and the incident: the state push)
   window.dispatchEvent(new CustomEvent("sizeup:tx-changed"));

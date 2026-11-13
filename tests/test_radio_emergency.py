@@ -580,3 +580,124 @@ def test_a_quiet_emergency_doesnt_move_its_folded_talkgroup_up(tmp_path):
     assert got == [{"name": "Other Town Fire", "emergency": "other", "quiet": False},
                    {"name": "WCPD Ch 1", "emergency": "", "quiet": False},
                    {"name": "Metro Transit 1", "emergency": "other", "quiet": True}]
+
+
+# -- the CAD-wide notice strip and toast (alarm.js) follow the same rule -------------------------------------------------
+
+
+def _button(cad, tid, source, tg, service, unit, rid):
+    t = row(cad, id=tid, source=source, talkgroup=tg, unit=unit, radio_id=rid, service=service)
+    return cad.alarms.on_traffic(dict(tx(tid, source=source, talkgroup=tg, unit=unit, radio_id=rid, emergency=True),
+                                      start=t["start"], end=t["end"]))
+
+
+def test_the_state_says_which_notices_and_windows_are_quiet(tmp_path):
+    """Someone else's button on transit: its notice and its window are in the state as before (still raised, still
+    kept, still acknowledged and cleared by id), marked quiet for the screens. Another town's fire: not quiet. The
+    setting moves it; All clear from the row's menu is the same POST."""
+    cad = make_cad(tmp_path)
+    bus = _button(cad, "4100-1-call_1", "Metro Transit 1", 4100, "transit", "VAN7", "4107")
+    fire = _button(cad, "4200-1-call_1", "Other Town Fire", 4200, "fire", "E901", "5901")
+    assert (bus["level"], fire["level"]) == ("notice", "notice")
+    s = cad.alarms.state()
+    assert {a["id"]: a["quiet"] for a in s["notices"]} == {bus["id"]: True, fire["id"]: False}
+    assert {w["talkgroup"]: w["quiet"] for w in s["windows"]} == {4100: True, 4200: False}
+    cad.settings_post("radio_emergencies", {"action": "set", "key": "prominent", "value": ["fire", "ems", "transit"],
+                                            "operator": "Lt. Test"})
+    assert [a["quiet"] for a in cad.alarms.state()["notices"]] == [False, False]
+    cad.settings_post("radio_emergencies", {"action": "set", "key": "prominent", "value": [], "operator": "Lt. Test"})
+    s = cad.alarms.state()
+    assert [a["quiet"] for a in s["notices"]] == [True, True] and [w["quiet"] for w in s["windows"]] == [True, True]
+    cad.settings_post("radio_emergencies", {"action": "reset", "key": "prominent", "operator": "Lt. Test"})
+    # ours is never quiet, whatever its row's service: an alarm, and its window ours
+    ours = _button(cad, "FG1-7", "FG1", None, "other", "E64 P1", "6401")
+    assert ours["level"] == "alarm" and all(a["id"] != ours["id"] for a in cad.alarms.state()["notices"])
+    # the quiet one is acknowledged and cleared like any (the row's menu on the Radio page posts these)
+    cad.alarm_ack(bus["id"], {"operator": "Lt. Test"})
+    assert rows_of(cad)["4100-1-call_1"]["ack_by"] == "Lt. Test"
+    cad.alarm_clear(bus["id"], {"operator": "Lt. Test"})
+    assert rows_of(cad)["4100-1-call_1"]["clear_at"] and 4100 not in {w["talkgroup"] for w in cad.alarms.state()["windows"]}
+
+
+STRIP_HARNESS = r"""
+const fs = require("fs");
+class El {
+  constructor(tag) { this.tagName = tag.toUpperCase(); this.className = ""; this.textContent = ""; this.children = []; this.hidden = false;
+    this.title = ""; this.attrs = {}; }
+  get classList() { return { toggle() {}, add() {}, remove() {}, contains: () => false }; }
+  append(...ns) { for (const n of ns) if (n && typeof n === "object") this.children.push(n); }
+  replaceChildren(...ns) { this.children = []; this.append(...ns); }
+  setAttribute(k, v) { this.attrs[k] = v; } addEventListener() {} after() {}
+  get text() { return [this.textContent, ...this.children.map((c) => c.text)].filter(Boolean).join(""); }
+}
+const body = new El("body");
+global.window = global;
+global.document = { createElement: (t) => new El(t), body, addEventListener() {}, querySelector: () => null };
+const toasts = [];
+global.UI = { toast: (...a) => toasts.push(a) };
+global.cad = { state: { alarms: { open: [], notices: [], recent: [], windows: [] } }, hooks: [] };
+eval(fs.readFileSync(process.argv[2], "utf8"));
+const strip = () => body.children.find((n) => n.className === "alarm-notices");
+const notice = (id, who, channel, quiet) => ({ id, who, channel, at: 1000, text: "", emergency: 1, talkgroup: id * 100, quiet });
+const win = (id, quiet) => ({ talkgroup: id * 100, channel: `TG ${id * 100}`, until: 2000, alarm_id: id, radios: [], quiet });
+const out = {};
+const push = (alarms) => { cad.state.alarms = { open: [], recent: [], ...alarms }; cad.hooks.forEach((h) => h());
+                           return { hidden: strip().hidden, rows: strip().hidden ? [] : strip().children.map((r) => r.text), toasts: toasts.splice(0) }; };
+out.first = push({ notices: [], windows: [] });
+out.quiet = push({ notices: [notice(1, "VAN7", "Metro Transit 1", true)], windows: [win(1, true)] });
+out.quietAcked = push({ notices: [], recent: [{ ...notice(1, "VAN7", "Metro Transit 1", true), ack_by: "Dana", what: "emergency button" }], windows: [win(1, true)] });
+out.loud = push({ notices: [notice(1, "VAN7", "Metro Transit 1", true), notice(2, "E901", "Other Town Fire", false)], windows: [win(1, true), win(2, false)] });
+out.loudWindowOnly = push({ notices: [], windows: [win(1, true), win(2, false)] });
+console.log(JSON.stringify(out));
+"""
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_quiet_notice_has_no_strip_and_no_toast_a_prominent_one_does(tmp_path):
+    h = tmp_path / "strip.js"
+    h.write_text(STRIP_HARNESS)
+    out = json.loads(subprocess.run([NODE, str(h), str(STATIC / "alarm.js")], capture_output=True, text=True,
+                                    check=True, timeout=30).stdout)
+    assert out["first"] == {"hidden": True, "rows": [], "toasts": []}
+    assert out["quiet"] == {"hidden": True, "rows": [], "toasts": []}            # nothing, on any page; its window neither
+    assert out["quietAcked"] == {"hidden": True, "rows": [], "toasts": []}       # nor "Alarm acknowledged by"
+    loud = out["loud"]
+    assert loud["hidden"] is False and len(loud["rows"]) == 1
+    assert loud["rows"][0].startswith("Emergency button (not ours) E901 on Other Town Fire") and "Recording until" in loud["rows"][0]
+    assert loud["toasts"] == [["Emergency button: E901 on Other Town Fire", "alert", "Not ours · notice"]]
+    w = out["loudWindowOnly"]                                                     # acknowledged: the prominent window's own line
+    assert w["hidden"] is False and len(w["rows"]) == 1 and "TG 200" in w["rows"][0] and w["toasts"] == []
+
+
+MENU_HARNESS = r"""
+const fs = require("fs");
+const src = fs.readFileSync(process.argv[2], "utf8");
+const grab = (re) => { const m = src.match(re); if (!m) throw new Error("not found: " + re); return m[0]; };
+global.cad = { state: {} };
+global.pageMenuItems = () => []; global.rerunWaiting = () => false; global.addToPage = () => [];
+let may = "dispatch";
+global.canDo = (x) => x === "dispatch" && may === "dispatch";
+eval(grab(/^const EM_LOUD = .*$/m) + "\n" + grab(/^function emLoud\(t\) \{[\s\S]*?^\}/m) + "\n"
+     + grab(/^function txMenuItems\(t\) \{[\s\S]*?^\}/m) + "\nglobal.txMenuItems = txMenuItems;");
+const labels = (t) => txMenuItems(t).filter((i) => i.label).map((i) => i.label);
+const bus = { id: "x", alarm_id: 7, alarm_level: "notice", emergency: 1, service: "transit", text: "" };
+const out = { bus: labels(bus), acked: labels({ ...bus, ack_at: 1 }), cleared: labels({ ...bus, ack_at: 1, clear_at: 2 }),
+              fire: labels({ ...bus, service: "fire" }), plain: labels({ id: "y", service: "transit" }) };
+may = "viewer";
+out.viewer = labels(bus);
+console.log(JSON.stringify(out));
+"""
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_quiet_emergency_is_acknowledged_and_cleared_from_its_rows_menu(tmp_path):
+    """No strip for it, so its row's menu has Acknowledge and All clear (dispatchers); a prominent one keeps the strip's."""
+    h = tmp_path / "menu.js"
+    h.write_text(MENU_HARNESS)
+    out = json.loads(subprocess.run([NODE, str(h), str(STATIC / "cad.js")], capture_output=True, text=True,
+                                    check=True, timeout=30).stdout)
+    assert out["bus"][-3:] == ["Acknowledge emergency", "All clear", "Copy text"]
+    assert "Acknowledge emergency" not in out["acked"] and "All clear" in out["acked"]
+    for k in ("cleared", "fire", "plain", "viewer"):
+        assert "All clear" not in out[k] and "Acknowledge emergency" not in out[k], k
+    assert "/api/cad/alarm/${t.alarm_id}/${what}" in (STATIC / "cad.js").read_text()
