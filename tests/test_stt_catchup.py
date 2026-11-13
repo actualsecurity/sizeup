@@ -625,6 +625,39 @@ def test_a_fire_clip_that_goes_to_aws_restarts_the_quiet_spell(tmp_path):
         fake.close()
 
 
+def test_a_forgotten_event_or_alarm_stops_pausing_it_after_12_hours(tmp_path):
+    """An event nobody closed, an alarm nobody acknowledged: only while created or updated in the last 12 h, so the
+    catch-up never starves for ever."""
+    from sizeup.app import CATCHUP_PAUSE_MAX_S, App
+    assert CATCHUP_PAUSE_MAX_S == 12 * 3600
+    app = App(base(clips_dir=str(tmp_path / "clips")))
+    try:
+        db, now = app.cad.store.db, time.time()
+        old, recent = now - CATCHUP_PAUSE_MAX_S - 60, now - CATCHUP_PAUSE_MAX_S + 60
+        iid = app.cad.create({"type": "ALARM", "subtype": "CO-RESD"})["id"]
+        assert app._catchup_pause() == "an event is open"
+        db.execute("UPDATE incidents SET created_at = ?, accepted_at = ? WHERE id = ?", (old, old, iid))
+        db.execute("UPDATE events SET at = ? WHERE incident_id = ?", (old, iid))
+        assert app._catchup_pause() == ""                                      # open, untouched for 12 h: no pause
+        db.execute("UPDATE incidents SET status = 'active' WHERE id = ?", (iid,))
+        assert app._catchup_pause() == ""
+        db.execute("UPDATE incidents SET accepted_at = ? WHERE id = ?", (recent, iid))
+        assert app._catchup_pause() == "an event is open"                      # taken within 12 h
+        db.execute("UPDATE incidents SET accepted_at = ? WHERE id = ?", (old, iid))
+        app.cad.note(iid, {"text": "still working", "operator": "JD"})         # anything logged on it: updated
+        assert app._catchup_pause() == "an event is open"
+        db.execute("UPDATE incidents SET status = 'closed' WHERE id = ?", (iid,))
+        app.cad.alarms.on_traffic({"id": "FG1-1", "start": now - 2, "end": now, "source": "FG1", "talkgroup": None,
+                                   "unit": "", "rig": "", "radio_id": "", "text": "mayday mayday mayday"})
+        assert app._catchup_pause() == "an alarm is open"
+        db.execute("UPDATE alarms SET created_at = ?, updated_at = ?", (old, old))
+        assert app._catchup_pause() == ""                                      # never acknowledged, 12 h old: no pause
+        db.execute("UPDATE alarms SET updated_at = ?", (recent,))
+        assert app._catchup_pause() == "an alarm is open"
+    finally:
+        app.stop()
+
+
 # -- a person's Re-transcribe, the station's update --------------------------------------------------------------------
 
 

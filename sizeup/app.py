@@ -150,6 +150,7 @@ AIRBAND_FIRST: set[str] = set()   # ... and the airband channels (HPN ATC, #233:
 ATC_CEILING_FT = 10000   # the station's own ADS-B: aircraft above this aren't talking to HPN Tower (the ATC prompt, #257)
 CATCHUP_BATCH_MAX = 10     # catch_up(): at most this many shed clips a call (sizeup/sttcatchup.py)
 CATCHUP_QUEUED_S = 1800.0  # a page queued (nobody took it yet) this recently is an open event: the catch-up waits
+CATCHUP_PAUSE_MAX_S = 12 * 3600.0   # an open event or alarm created or updated longer ago than this no longer pauses it
 CATCHUP_AWS_PCT = 80.0     # the catch-up stops using the police AWS budget at this much of its month
 MIN_SPEECH_S = 0.15      # less sound than this above the dead-air floor (and no tones) = a mic click
 LIVE_WATCH_S = 0.2       # FG1 talking watcher: how often the squelch is looked at (the MDC ID: radio/tap.py)
@@ -2260,13 +2261,19 @@ class App:
     def _catchup_pause(self) -> str:
         """Why nothing is caught up now ("" = go): fire work comes first, whichever engine would run the catch-up.
         An event of ours open (an emergency one: pending or active, or a page just queued), an alarm not yet
-        acknowledged or an emergency window open, a carrier open or someone talking on the station."""
+        acknowledged (either one created or updated in the last 12 h) or an emergency window open, a carrier open or someone talking on the station."""
         now = time.time()
         store = self.cad.store
-        if store.one("SELECT 1 AS x FROM incidents WHERE emergency = 1 AND (status IN ('pending', 'active') "
-                     "OR (status = 'queued' AND created_at >= ?)) LIMIT 1", (now - CATCHUP_QUEUED_S,)):
+        # (bounded: an event nobody closed or an alarm nobody acknowledged, untouched for CATCHUP_PAUSE_MAX_S, no longer
+        # pauses it, so the catch-up can't starve for ever)
+        cut = now - CATCHUP_PAUSE_MAX_S
+        if store.one("SELECT 1 AS x FROM incidents i WHERE emergency = 1 AND ((status IN ('pending', 'active') "
+                     "AND (created_at >= ? OR accepted_at >= ? OR EXISTS (SELECT 1 FROM events e WHERE e.incident_id = i.id "
+                     "AND e.at >= ?))) OR (status = 'queued' AND created_at >= ?)) LIMIT 1",
+                     (cut, cut, cut, now - CATCHUP_QUEUED_S)):
             return "an event is open"
-        if store.one("SELECT 1 AS x FROM alarms WHERE ack_at IS NULL AND level = 'alarm' LIMIT 1"):
+        if store.one("SELECT 1 AS x FROM alarms WHERE ack_at IS NULL AND level = 'alarm' "
+                     "AND (created_at >= ? OR updated_at >= ?) LIMIT 1", (cut, cut)):
             return "an alarm is open"
         if self.cad.alarms.windows.state(now):
             return "an emergency window is open"

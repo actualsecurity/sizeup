@@ -718,7 +718,8 @@ clips at a time. Nothing is read or written for 5 min after the start.
   stay skipped. Rows that can't go now (given up, not transcribed, too long) are sorted out before the
   limit, so the clips behind them get their turn.
 - **Fire first.** Nothing is caught up, on whisper or on AWS, while an emergency event is pending or
-  active (or a page was queued in the last 30 min), an alarm is unacknowledged, an emergency window is
+  active (or a page was queued in the last 30 min), an alarm is unacknowledged (either one created or
+  updated in the last 12 h, so a forgotten one never starves it), an emergency window is
   open, a carrier is open or someone is talking. After that, whisper is used only once the station
   reports no fire, airband, live or alert clip waiting and at most 5 clips in its queue.
 - **On the station** a catch-up clip sits under every other class (`stt.CATCHUP`). It starts only after
