@@ -316,6 +316,108 @@ def test_a_stopped_adapter_and_a_silent_station_show_at_once(tmp_path):
     assert (t["state"], t["acting"]) == ("stale", False) and t["reason"].startswith("no report since")
 
 
+class _Flaky(FakeFeed):
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.raises = 0
+
+    def poll(self):
+        if self.raises:
+            self.raises -= 1
+            raise TimeoutError("read timed out")
+        return super().poll()
+
+
+def test_one_poll_exception_never_flips_the_primary_and_three_in_a_row_show_failing(tmp_path):
+    rig = Rig(tmp_path, _Flaky())
+    steps = _Steps(rig)
+    steps.until(300)
+    rig.feed.raises = 1                                    # one timeout: backing off, held as ok
+    steps.until(600)
+    assert all(k != "source_health" or d["state"] in ("ok", "backing_off") for k, d in rig.sent)
+    assert rig.cad.sources.state()["acting"] == "County feed"
+    rig.feed.raises = 3                                    # three in a row: failing, but the runner's (hysteresis)
+    steps.until(1200)
+    states = [d["state"] for k, d in rig.sent if k == "source_health"]
+    assert "failing" in states and not any(d.get("stopped") for k, d in rig.sent if k == "source_health")
+    rig.feed.raises = 10 ** 6                              # it keeps raising: shown failing once the run is DEMOTE_S old
+    steps.until(1200 + DEMOTE_S + 400)
+    t = rig.cad.sources.state()["tiers"][0]
+    assert (t["state"], t["acting"]) == ("failing", False) and t["reason"] == "TimeoutError"
+
+
+H = {"source": "county", "label": "County feed", "rank": 1}
+
+
+def _report(rig, t: float, state: str, reason: str = "", **kw) -> dict:
+    rig.at(t)
+    rig.cad.sources.on_health(dict(H, state=state, reason=reason, at=T0 + t, **kw))
+    return rig.cad.sources.state()["tiers"][0]
+
+
+def test_alternating_ok_and_bad_settles_bad_and_needs_promote_s_clean_to_come_back(tmp_path):
+    rig = Rig(tmp_path)
+    _report(rig, 0, "ok")
+    t = 0.0
+    for i in range(1, 12):                                 # bad, ok, bad, ok ... every 30 s from ok
+        t = 30.0 * i
+        _report(rig, t, "stale" if i % 2 else "ok", "no list in 40 s" if i % 2 else "")
+        if t < 30 + DEMOTE_S:
+            assert rig.cad.sources.acting()["source"] == "county", t
+    assert t >= 30 + DEMOTE_S
+    for dt in (0, 20, 40):                                 # bad from 30 + DEMOTE_S on, whatever the last report said
+        rig.at(t + dt)
+        assert rig.cad.sources.acting()["source"] == PAGING, (t, dt)
+    _report(rig, t + 30, "ok")                             # then clean: back only after PROMOTE_S of ok
+    rig.at(t + 30 + PROMOTE_S - 1)
+    assert rig.cad.sources.acting()["source"] == PAGING
+    rig.at(t + 30 + PROMOTE_S)
+    assert rig.cad.sources.acting()["source"] == "county"
+
+
+def test_mostly_bad_with_an_ok_every_85_s_shows_bad(tmp_path):
+    rig = Rig(tmp_path)
+    _report(rig, 0, "ok")
+    for t in range(30, 600, 5):
+        _report(rig, t, "ok" if t % 85 == 0 else "backing_off", "" if t % 85 == 0 else "HTTP 503")
+        if t >= 30 + DEMOTE_S:
+            assert rig.cad.sources.acting()["source"] == PAGING, t
+
+
+def test_a_cold_hub_takes_the_first_report_after_a_long_silence_as_it_is(tmp_path):
+    rig = Rig(tmp_path)
+    _report(rig, 0, "ok")
+    rig.at(600)                                            # the hub down 10 min: the row is silent, stale
+    assert rig.cad.sources.tiers()[0]["state"] == "stale"
+    rig.cad.sources = src.Sources(rig.cad, clock=rig.clock, log=lambda m: None)   # a hub starting now
+    t = _report(rig, 610, "ok")
+    assert (t["state"], t["acting"]) == ("ok", True)       # unknown, not bad: no PROMOTE_S
+    # silent while this hub ran: it was shown stale, so ok again needs PROMOTE_S
+    rig.at(610 + REPORT_STALE_S + 60)
+    assert rig.cad.sources.tiers()[0]["state"] == "stale"
+    _report(rig, 610 + REPORT_STALE_S + 70, "ok")
+    assert rig.cad.sources.acting()["source"] == PAGING
+    rig.at(610 + REPORT_STALE_S + 70 + PROMOTE_S)
+    assert rig.cad.sources.acting()["source"] == "county"
+
+
+def test_the_hover_s_last_ok_only_when_not_plainly_ok(tmp_path):
+    rig = Rig(tmp_path)
+    assert _report(rig, 0, "ok")["ok_s"] is None
+    t = _report(rig, 30, "stale", "no list yet")           # pending: still ok, the age shown
+    assert (t["state"], t["ok_s"]) == ("ok", 30)
+    assert _report(rig, 60, "ok")["ok_s"] is None          # back before DEMOTE_S: plainly ok again
+    assert _report(rig, 90, "failing", "login", stopped=True)["ok_s"] == 30
+    assert rig.cad.sources.state()["tiers"][-1]["ok_s"] is None                      # paging: never
+
+
+def test_only_the_adapter_s_own_failing_skips_the_hysteresis(tmp_path):
+    rig = Rig(tmp_path)
+    _report(rig, 0, "ok")
+    assert _report(rig, 30, "failing", "x")["state"] == "ok"                    # no "stopped": the hysteresis
+    assert _report(rig, 60, "failing", "x", stopped=True)["state"] == "failing"   # the adapter stopped: at once
+
+
 def test_a_late_older_health_report_never_overwrites_a_newer_one(tmp_path):
     rig = Rig(tmp_path)
     h = {"source": "county", "label": "County feed", "rank": 1}
@@ -722,7 +824,11 @@ def test_the_reason_sent_never_carries_the_exceptions_text(tmp_path):
             raise RuntimeError("GET https://user:secret@feed.example/x failed")
     r = SourceRunner([Leaky(clock=clock)], lambda k, d: sent.append((k, d)), log=lambda m: None, clock=clock)
     r.step(r.runs[0])
+    assert sent[-1][1]["state"] == "backing_off" and sent[-1][1]["reason"] == "RuntimeError"   # one raise: no outage yet
+    r.step(r.runs[0])
+    r.step(r.runs[0])
     assert sent[-1][1]["state"] == "failing" and sent[-1][1]["reason"] == "RuntimeError"
+    assert sent[-1][1]["stopped"] is False                 # the runner's, not the adapter's own: the hysteresis applies
     assert "secret" not in json.dumps(sent)
 
 

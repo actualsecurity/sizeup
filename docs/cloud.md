@@ -801,9 +801,12 @@ Incidents come in from ranked sources. The interface is in `sizeup/sources/__ini
 - **Health:** a feed reports `ok`, `backing_off`, `failing` or `stale`, and a feed with no report for 3 min counts as
   stale (by the hub's clock). Paging is healthy while the station is connected. The first healthy tier is the acting primary. The console
   pill shows it (`County feed · backing off · Paging primary`), and so does Settings > Health. Hysteresis: a feed shown
-  ok goes bad (and the acting primary moves) only once its reports have said so for 90 s, and is ok again only after
-  60 s of `ok`; `failing` and no report for 3 min show at once. A station restart's one-cycle "no list yet" never
-  flips it. The pill's hover has what was reported meanwhile and the last ok report's age.
+  ok goes bad (and the acting primary moves) only once a bad run has lasted 90 s (an `ok` that hasn't held 60 s
+  doesn't end the run), and is ok again only after 60 s of `ok`. Shown at once: `failing` from the adapter itself
+  (it stopped) and no report for 3 min; a feed silent since before the hub started is unknown, and its first report
+  is taken as it is. A `poll()` that raises is `backing_off` (the exception's type), `failing` from the third in a
+  row. A station restart's one-cycle "no list yet" never flips it. The pill's hover has what was reported meanwhile
+  and, when the feed isn't plainly ok, the last ok report's age.
 - **Matching:** only an open incident (queued, pending or active) created within 20 min, with nothing on it from the
   same source.
   - Locations are first cut to their street part. A named place after `:` or `@`, `;…`, `(…)`, `[…]`, the town after a

@@ -5,12 +5,14 @@ own and hands what changed to sink(kind, data):
 
     "source_event"   {source, label, rank, seen_at, first_seen, event: FeedEvent.as_dict()}: a new event, or one that
                      changed since it was last sent (the whole event: the hub works out what changed)
-    "source_health"  {source, label, rank, state, reason, since, at}: on every change, and every HEARTBEAT_S
+    "source_health"  {source, label, rank, state, reason, since, at, stopped}: on every change, and every HEARTBEAT_S.
+                     stopped: the adapter's own health() says "failing" (the hub shows it at once, no hysteresis)
     "source_seen"    {source, label, rank, at, ids, complete}: the event ids in the last good poll's snapshot, every
                      SEEN_EVERY_S (the hub flags an open report the feed no longer lists)
 
 On a station the sink is the outbox to the hub (App._emit: durable, in order); all-in-one it is the CAD's Sources here. A
-failing adapter never stops the others or the station: poll() raising is "failing" with its reason, and the runner
+failing adapter never stops the others or the station: poll() raising is "backing_off" with its reason ("failing" from
+the RAISE_FAILING_AFTER-th raise in a row: one timeout is no outage), and the runner
 backs off (doubling poll_s up to MAX_BACKOFF_S) while the adapter's own health() still says what it says.
 """
 
@@ -24,7 +26,8 @@ import time
 from pathlib import Path
 from typing import Callable, Iterable
 
-from sizeup.sources import (ENTRY_POINT_GROUP, ENV_MODULES, ENV_PATH, MAX_BACKOFF_S, MAX_SEEN_IDS, MIN_POLL_S, RESERVED,
+from sizeup.sources import (ENTRY_POINT_GROUP, ENV_MODULES, ENV_PATH, MAX_BACKOFF_S, MAX_SEEN_IDS, MIN_POLL_S,
+                            RAISE_FAILING_AFTER, RESERVED,
                             SEEN_EVERY_S, SOURCE_ID, TRIGGER_MAX, TRIGGER_MIN_S, TRIGGER_WINDOW_S, Adapter, FeedEvent,
                             Health, SourceContext, SourceError)
 from sizeup.sources.resets import Resets      # #297 owns it; #305's sizeup/cloud/adapters.py imports it from here
@@ -171,7 +174,7 @@ class SourceRunner:
             events = list(a.poll())
             r.error, r.fails = "", 0
             ok = True
-        except Exception as e:  # noqa: BLE001 - the feed's trouble: "failing", never the station's
+        except Exception as e:  # noqa: BLE001 - the feed's trouble (backing off, then failing), never the station's
             events, ok = [], False
             r.fails += 1
             r.error = type(e).__name__              # the type only: its text may hold a URL or a credential
@@ -248,12 +251,14 @@ class SourceRunner:
 
     def _health(self, r: _Run, now: float) -> None:
         a = r.a
+        stopped = False
         try:
             h = a.health().check()
+            stopped = h.state == "failing"              # the adapter itself says so (it stopped): shown at once
         except Exception as e:  # noqa: BLE001
             h = Health("failing", f"health(): {type(e).__name__}")
         if r.error and h.state == "ok":                 # poll() raised though health() says ok: it isn't
-            h = Health("failing", r.error)
+            h = Health("failing" if r.fails >= RAISE_FAILING_AFTER else "backing_off", r.error)
         key = (h.state, h.reason)
         if key == r.health and now - r.health_at < HEARTBEAT_S:
             return
@@ -261,7 +266,7 @@ class SourceRunner:
             self.log(f"incident sources: {a.label}: {h.state.replace('_', ' ')}" + (f" ({h.reason})" if h.reason else ""))
         r.health, r.health_at = key, now
         self.sink("source_health", {"source": a.source, "label": a.label, "rank": a.rank, "state": h.state,
-                                    "reason": h.reason[:200], "since": h.since, "at": now})
+                                    "reason": h.reason[:200], "since": h.since, "at": now, "stopped": stopped})
 
     # -- threads ---------------------------------------------------------------------------------------------------
 

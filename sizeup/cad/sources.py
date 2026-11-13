@@ -7,9 +7,11 @@ sizeup/sources/runner.py (they come here as "source_event" / "source_health" thr
                REPORT_STALE_S old (older: "stale"); paging is healthy while the station is connected (paging_ok). The
                acting primary is the first healthy tier, promoted and demoted automatically (the console's pill and
                Settings > Health say which). Hysteresis: a feed shown ok goes bad (and the acting primary moves) only
-               once its reports have said so for DEMOTE_S, and is ok again only after PROMOTE_S of "ok" (a station
-               restart's "no list yet" for one runner cycle never flips it); "failing" and no report for
-               REPORT_STALE_S show at once. The pill's hover has what was reported meanwhile and the last ok report
+               once a bad run has lasted DEMOTE_S (an ok that hasn't held PROMOTE_S doesn't end the run), and is ok
+               again only after PROMOTE_S of "ok" (a station restart's "no list yet" for one runner cycle never flips
+               it). Shown at once: the adapter's own "failing" (it stopped) and no report for REPORT_STALE_S; a row
+               silent since before this hub started is unknown, its first report taken as it is. The pill's hover has
+               what was reported meanwhile and, when not plainly ok, the last ok report's age
     create     never delayed: a page for us makes its incident at once whatever the feeds' health (an occasional
                duplicate is acceptable, a delay is not), and so does a feed's new event, unless it attaches (below).
                A feed event already closed (or in service) when first seen is recorded and never makes an incident
@@ -128,7 +130,7 @@ PAGE_LAG_S = 8 * 60.0                  # a "misheard" page this long after the f
 FUZZY_UNITS = 2                        # apparatus a page and a feed's incident share for a misheard street to join
 SAME_CALL_BEFORE_S = 60.0              # ... and an event first seen closed or old: dispatched at most this before it
 REPORT_STALE_S = 180.0
-DEMOTE_S = 90.0                        # a feed shown ok goes bad only after its reports said so this long (hysteresis)
+DEMOTE_S = 90.0                        # a feed shown ok goes bad only after a bad run this long (hysteresis)
 PROMOTE_S = 60.0                       # ... and a bad one is ok again only after this long of "ok"
 FORGET_S = 24 * 3600.0                 # a feed silent this long is off the tiers (taken off the station)
 INCOMING_S = 300.0
@@ -147,10 +149,12 @@ CREATE TABLE IF NOT EXISTS source_health (
   since REAL,
   at REAL NOT NULL,                     -- when the station reported it (the station's clock)
   received REAL,                        -- when the hub got it (the hub's clock: the stale check's)
-  flip_at REAL,                         -- the hub's clock: when the reported state last went ok <-> not ok
-  held_state TEXT,                      -- ... and what was shown then: still shown until the flip has held (tiers)
+  bad_since REAL,                       -- the hub's clock: a bad run's start, cleared once ok has held (hysteresis)
+  ok_since REAL,                        -- ... the current ok run's start
+  held_state TEXT,                      -- ... the bad state shown when it began: shown until the ok run has held
   held_reason TEXT,
-  ok_at REAL                            -- the hub's clock: the last "ok" report (the pill's hover)
+  ok_at REAL,                           -- the hub's clock: the last "ok" report (the pill's hover)
+  stopped INTEGER                       -- 1: the adapter's own health() said "failing" (shown at once)
 );
 CREATE TABLE IF NOT EXISTS source_reports (
   source TEXT NOT NULL,                 -- the adapter's source id, or 'paging'
@@ -745,13 +749,15 @@ class Sources:
         with self.store.lock:
             self.store.db.executescript(SCHEMA)
             for table, col in (("source_health", "received REAL"), ("source_reports", "gone_at REAL"),
-                               ("source_health", "flip_at REAL"), ("source_health", "held_state TEXT"),
-                               ("source_health", "held_reason TEXT"), ("source_health", "ok_at REAL")):
+                               ("source_health", "bad_since REAL"), ("source_health", "ok_since REAL"),
+                               ("source_health", "held_state TEXT"), ("source_health", "held_reason TEXT"),
+                               ("source_health", "ok_at REAL"), ("source_health", "stopped INTEGER")):
                 have = {r[1] for r in self.store.db.execute(f"PRAGMA table_info({table})")}
                 if col.split()[0] not in have:
                     self.store.db.execute(f"ALTER TABLE {table} ADD COLUMN {col}")
         self._towns_for = None
         self._acting_logged: tuple | None = None   # (source, label) of the acting primary last logged
+        self._started = clock()                    # a row silent since before this: unknown, not bad (on_health)
         try:
             self._note_acting()
         except Exception:  # noqa: BLE001 - only the log's starting point
@@ -832,9 +838,10 @@ class Sources:
     # -- health and tiers ----------------------------------------------------------------------------------------------
 
     def on_health(self, d: dict) -> None:
-        """A "source_health" from the station: kept when newer than the one we have. A report whose ok-ness differs
-        from the last one starts a flip (flip_at, the hub's clock) and keeps what was shown until then (held_*): tiers()
-        shows the new state only once it has held for DEMOTE_S (going bad) or PROMOTE_S (ok again)."""
+        """A "source_health" from the station: kept when newer than the one we have. The hysteresis' clocks (the hub's):
+        bad_since, the start of a bad run, cleared only once "ok" has held PROMOTE_S (an ok that hasn't never resets
+        it); ok_since, the start of the current ok run; held_*, the bad state shown when that ok run began (still shown
+        until it has held). stopped: the adapter's own health() says "failing" (shown at once)."""
         src = str(d.get("source") or "")
         state = str(d.get("state") or "")
         at = d.get("at")
@@ -843,28 +850,46 @@ class Sources:
         rank = d.get("rank") if isinstance(d.get("rank"), int) and 1 <= d.get("rank") <= 99 else 1
         label = str(d.get("label") or src)[:60]
         reason = str(d.get("reason") or "")[:200]
+        ok = state == "ok"
         with self._lock:
             now = self.clock()
             old = self.store.one("SELECT *, COALESCE(received, at) AS got FROM source_health WHERE source = ?", (src,))
             if old is not None and float(at) < old["at"]:
                 return                                       # an older report arriving late: the newer one stands
-            held, flip_at, ok_at = None, now, (now if state == "ok" else None)
-            if old is not None:
-                ok_at = now if state == "ok" else old["ok_at"]
-                held, flip_at = ((old["held_state"], old["held_reason"]) if old["held_state"] else None), old["flip_at"]
-                if (state == "ok") != (self._reported(old, now)[0] == "ok"):
+            fresh = (None if ok else now - DEMOTE_S), (now if ok else None), None, None   # bad_since, ok_since, held:
+            #                                                                    nothing shown before, so shown as it is
+            if old is None or (now - old["got"] > REPORT_STALE_S and old["got"] < self._started):
+                bad_since, ok_since, held_state, held_reason = fresh   # nothing known (a cold hub): taken as it is
+            elif now - old["got"] > REPORT_STALE_S:          # silent while this hub ran: shown stale, so bad already
+                bad_since = min(x for x in (old["bad_since"], now - DEMOTE_S) if x is not None)
+                ok_since, (held_state, held_reason) = (now if ok else None), (("stale", self._reported(old, now)[1])
+                                                                              if ok else (None, None))
+            else:
+                bad_since, ok_since, held_state, held_reason = (old["bad_since"], old["ok_since"], old["held_state"],
+                                                                old["held_reason"])
+                was_ok = old["state"] == "ok"
+                if ok and not was_ok:                        # an ok run starts: what was shown stays until it holds
                     shown = self._shown(old, now)
-                    held, flip_at = (shown[0], shown[1]), now
+                    ok_since = now
+                    held_state, held_reason = (shown[0], shown[1]) if shown[0] != "ok" else (None, None)
+                elif ok and bad_since is not None and now - (ok_since or now) >= PROMOTE_S:
+                    bad_since, held_state, held_reason = None, None, None    # ok has held: clean
+                elif not ok and was_ok:
+                    if bad_since is None or (ok_since is not None and now - ok_since >= PROMOTE_S):
+                        bad_since = now                      # a new bad run (an ok that hadn't held keeps the old one)
+                    ok_since, held_state, held_reason = None, None, None
             with self.store.tx() as db:
-                db.execute("INSERT INTO source_health (source, label, rank, state, reason, since, at, received, flip_at, "
-                           "held_state, held_reason, ok_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                db.execute("INSERT INTO source_health (source, label, rank, state, reason, since, at, received, bad_since, "
+                           "ok_since, held_state, held_reason, ok_at, stopped) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
                            "ON CONFLICT(source) DO UPDATE SET label = excluded.label, rank = excluded.rank, "
                            "state = excluded.state, reason = excluded.reason, since = excluded.since, at = excluded.at, "
-                           "received = excluded.received, flip_at = excluded.flip_at, held_state = excluded.held_state, "
-                           "held_reason = excluded.held_reason, ok_at = excluded.ok_at",
+                           "received = excluded.received, bad_since = excluded.bad_since, ok_since = excluded.ok_since, "
+                           "held_state = excluded.held_state, held_reason = excluded.held_reason, ok_at = excluded.ok_at, "
+                           "stopped = excluded.stopped",
                            (src, label, rank, state, reason, d.get("since") if isinstance(d.get("since"), (int, float))
-                            else None, float(at), now, flip_at, held[0] if held else None, held[1] if held else None,
-                            ok_at))
+                            else None, float(at), now, bad_since, ok_since, held_state, held_reason,
+                            now if ok else (old["ok_at"] if old is not None else None),
+                            1 if state == "failing" and d.get("stopped") is True else 0))
             self._note_acting(now)
 
     @staticmethod
@@ -877,19 +902,21 @@ class Sources:
 
     @staticmethod
     def _shown(r: dict, now: float) -> tuple[str, str, bool]:
-        """(state, reason, settled) after the hysteresis: a flip shows once it has held for DEMOTE_S (ok -> anything
-        else) or PROMOTE_S (back to ok); until then what was shown before, its reason saying what was reported. A
-        "failing" report (the adapter stopped) and no report for REPORT_STALE_S (itself several heartbeats) show at once."""
+        """(state, reason, settled) after the hysteresis: bad is shown once the bad run (bad_since) is DEMOTE_S old while
+        the reports still say so, ok again once it has held PROMOTE_S; until then what was shown, its reason saying what
+        was reported. Shown at once: the adapter's own "failing" (stopped) and silence for REPORT_STALE_S."""
         state, reason = Sources._reported(r, now)
-        held = r["held_state"]
-        if not held or (held == "ok") == (state == "ok") or now - r["got"] > REPORT_STALE_S or state == "failing":
+        if now - r["got"] > REPORT_STALE_S:
             return state, reason, True
-        wait = PROMOTE_S if state == "ok" else DEMOTE_S
-        flip = r["flip_at"] if r["flip_at"] is not None else r["got"]
-        if now - flip >= wait:
+        bad_since = r["bad_since"]
+        if state == "ok":
+            ok_for = now - (r["ok_since"] if r["ok_since"] is not None else r["got"])
+            if bad_since is None or ok_for >= PROMOTE_S or not r["held_state"]:
+                return state, reason, True               # shown as reported (a bad run's clock may still be running)
+            return r["held_state"], "; ".join(x for x in (f"ok {_dur(ok_for)}", r["held_reason"] or "") if x)[:200], False
+        if (r["stopped"] and state == "failing") or bad_since is None or now - bad_since >= DEMOTE_S:
             return state, reason, True
-        note = f"{state.replace('_', ' ')} {_dur(now - flip)}" + (f": {reason}" if reason else "")
-        return held, "; ".join(x for x in (note, r["held_reason"] or "") if x)[:200], False
+        return "ok", (f"{state.replace('_', ' ')} {_dur(now - bad_since)}" + (f": {reason}" if reason else ""))[:200], False
 
     def tiers(self, now: float | None = None) -> list[dict]:
         """Every tier, best first: {source, label, rank, state, reason, at, ok_at, healthy, acting}. A feed's state is
@@ -898,15 +925,15 @@ class Sources:
         out = []
         for r in self.store.q("SELECT *, COALESCE(received, at) AS got FROM source_health WHERE COALESCE(received, at) >= ? "
                               "ORDER BY rank, source", (now - FORGET_S,)):
-            state, reason, _ = self._shown(r, now)
+            state, reason, settled = self._shown(r, now)
             out.append({"source": r["source"], "label": r["label"], "rank": r["rank"], "state": state, "reason": reason,
-                        "at": r["at"], "ok_at": r["ok_at"], "healthy": state == "ok"})
+                        "at": r["at"], "ok_at": r["ok_at"], "settled": settled, "healthy": state == "ok"})
         try:
             pok = bool(self.paging_ok())
         except Exception:  # noqa: BLE001
             pok = False
         out.append({"source": PAGING, "label": PAGING_LABEL, "rank": PAGING_RANK, "state": "ok" if pok else "failing",
-                    "reason": "" if pok else "station offline", "at": now, "ok_at": now if pok else None, "healthy": pok})
+                    "reason": "" if pok else "station offline", "at": now, "ok_at": None, "settled": True, "healthy": pok})
         acting = next((t for t in out if t["healthy"]), None)
         for t in out:
             t["acting"] = t is acting
@@ -1900,7 +1927,8 @@ class Sources:
         tiers = self.tiers(now)
         acting = next((t for t in tiers if t["acting"]), None)
         return {"tiers": [dict({k: t[k] for k in ("source", "label", "rank", "state", "reason", "acting")},
-                               ok_s=None if t["ok_at"] is None else max(0, round(now - t["ok_at"]))) for t in tiers],
+                               ok_s=None if t["ok_at"] is None or (t["state"] == "ok" and t["settled"])
+                               else max(0, round(now - t["ok_at"]))) for t in tiers],
                 "acting": acting["label"] if acting else "", "feeds": sum(1 for t in tiers if t["source"] != PAGING),
                 "incoming": self.incoming(now)}
 
