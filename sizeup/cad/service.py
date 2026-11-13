@@ -18,7 +18,7 @@ import re
 import shutil
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Callable
@@ -95,6 +95,7 @@ class Settings:
     airport_talkgroups: tuple[int, ...] = (333,)        # P25 Airport Incident: an open Airport event's (#87)
     airband: tuple[str, ...] = ()                  # HPN ATC channels (#233): never Main in Radio (busy, not ours)
     radio_seed: str = ""                           # "" = data/radio_ids.json
+    streetview_key: str = field(default="", repr=False)   # [streetview] google_key: GET /api/cad/streetview ("" = off)
 
 
 def _short(why: str, n: int = 160) -> str:
@@ -366,7 +367,8 @@ class Cad:
                             tactical=tuple(c.label for c in cfg.channels if c.kind == "traffic") or ("FG1",),
                             paging=tuple(c.label for c in cfg.channels if c.kind == "paging") or ("South 2",),
                             airband=tuple(c.label for c in cfg.channels if c.kind == "airband"),
-                            incident_talkgroups=tuple(sorted(cfg.p25_incident_talkgroups))),
+                            incident_talkgroups=tuple(sorted(cfg.p25_incident_talkgroups)),
+                            streetview_key=cfg.streetview_google_key),
                    geocoder=geocoder, log=log)
 
     # -- state ----------------------------------------------------------------------------------

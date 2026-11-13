@@ -10,6 +10,7 @@
 #   SIZEUP_ALERT_TOPIC     the alarms' pushes (emergency, mayday, aircraft): our own ntfy topic (SSM /sizeup-hub/alert-topic)
 #   SIZEUP_STATUS_TOPIC    station health / Amazon Transcribe pushes: our own ntfy topic (SSM /sizeup-hub/status-topic)
 #   SIZEUP_AISSTREAM_KEY   the Vessels layer's aisstream.io key (SSM /sizeup-hub/aisstream-key; docs/vessels.md); none: off
+#   SIZEUP_GOOGLE_MAPS_KEY street view's browser key, referrer-restricted (SSM /sizeup-hub/google-maps-key); "none": off
 # Run it on a Mac or Linux box without radios:
 #   SIZEUP_STATE_DIR=$(mktemp -d) SIZEUP_STATION_TOKEN=... python -m sizeup --config deploy/hub/config.hub.toml
 

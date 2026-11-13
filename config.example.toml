@@ -505,3 +505,9 @@ heartbeat_stale_min = 90             # no heartbeat (or restart) this long: "Tap
 # sdr = ""                                   # e.g. "ais162"
 # gain = "auto"                              # or dB
 # ppm = 0                                    # a non-TCXO dongle's correction
+
+# [streetview]: 360-degree street imagery in the CAD maps (static/streetview.js; Google Maps JavaScript API). A browser
+# key restricted by HTTP referrer to the hub's address and to the Maps JavaScript API only: env SIZEUP_GOOGLE_MAPS_KEY
+# (the hub: SSM /sizeup-hub/google-maps-key; never in a committed file). No key (or "none"): off; admins see "key not set".
+# [streetview]
+# google_key = ""
