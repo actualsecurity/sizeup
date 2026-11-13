@@ -68,14 +68,16 @@ window.SquelchPanel = (() => {
     const [key, , unit, help] = f;
     const [lo, hi, step] = ranges[key] || [0, 100, 0.1];
     const i = el("input", "sq-in");
-    Object.assign(i, { type: "number", min: lo, max: hi, step, disabled: ro() });
+    const locked = !c.editable;            // paging (South 2): read-only, a high Open would mute the pages
+    Object.assign(i, { type: "number", min: lo, max: hi, step, disabled: ro() || locked });
     const set = c.set[key];
     const dflt = c.default[key];
     i.value = set === undefined ? "" : set;
     i.placeholder = dflt === undefined || dflt === null ? "" : String(dflt);
     const run = c.running[key];
     i.title = `${help}\nDefault ${dflt ?? "—"} ${unit}` + (run !== undefined && run !== null ? ` · running ${run} ${unit}` : "")
-      + "\nEmpty: the default";
+      + (locked ? `\nRead-only: ${c.kind || "not a traffic"} channel. A high Open would mute its pages; stays at the default.`
+        : "\nEmpty: the default");
     i.setAttribute("aria-label", `${c.key} ${f[1]}`);
     i.addEventListener("change", () => save(c.key, key, i.value.trim()));
     return i;
@@ -95,7 +97,8 @@ window.SquelchPanel = (() => {
       ["Floor dB", "Idle hiss the quieting is measured from (relative dB)"], ["Now dB", "Quieting now"],
       ["Short/min", `Opens with nothing kept, per minute (last 5 min). ${chatter}+: chattering on noise, raise Open`],
       ["Key-ups 1 h", "Transmissions kept in the last hour · bare: no speech, no ID"],
-      ["PL", "CTCSS tone heard per key-up (last hour). none: no tone, so not one of our radios (FG1 runs PL 100)"], ["", ""]]) {
+      ["PL est.", "Estimated CTCSS tone per key-up (last hour). none: no tone line heard; unsure: too short, speech or hum. "
+        + "FG1 runs PL 100: a key-up without it may be another user or interference"], ["", ""]]) {
       const th = el("th", "", h);
       if (tip) th.title = tip;
       head.append(th);
@@ -129,13 +132,17 @@ window.SquelchPanel = (() => {
       if (k && k.no_speech) {
         ku.title = `Bare key-ups: ${k.bare_s.join(", ")} s · quieting ${k.bare_q.join(", ")} dB`
           + "\nLast: " + k.recent.map((r) => `${new Date(r[0] * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`
-            + ` ${r[1]} s ${r[2]} dB ${r[3] ? `PL ${r[3]}` : "no PL"}${r[4] ? " ID" : ""}${r[5] ? "" : " bare"}`).join("; ");
+            + ` ${r[1]} s ${r[2]} dB PL est. ${r[3] === "tone" ? r[4] : r[3]}${r[5] ? " ID" : ""}${r[6] ? "" : " bare"}`).join("; ");
       }
       const pl = el("td", k && k.tones.none ? "warn" : "", k ? Object.entries(k.tones).map(([t, n]) => `${t}×${n}`).join(" · ") || "—" : "—");
-      pl.dataset.l = "PL";
+      pl.dataset.l = "PL est.";
       tr.append(ku, pl);
       const act = el("td");
-      if (Object.keys(c.set || {}).length && !ro()) {
+      if (!c.editable) {
+        const lk = el("span", "dim small", "Read-only");
+        lk.title = "Paging channel: its squelch stays at the receiver's default (a high Open would mute pages)";
+        act.append(lk);
+      } else if (Object.keys(c.set || {}).length && !ro()) {
         const b = el("button", "mini", "Default");
         b.type = "button";
         b.title = `${c.key}: back to the defaults`;

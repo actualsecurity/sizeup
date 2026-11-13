@@ -54,6 +54,7 @@ import threading
 import time
 import wave
 from collections import OrderedDict, deque
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -67,8 +68,8 @@ from sizeup.cad.alarms import STUCK_WITHIN_S
 from sizeup.cad.api import CadApi
 from sizeup.dispatch import parse, split_joined
 from sizeup.incidents import IncidentStore, Traffic
-from sizeup.radio.fm import (CLOSE_DB, MIN_OPEN_S, RATE, Channel, NfmReceiver, Segment, ctcss_tone, id_burst_frames,
-                              speech_seconds, voice_floor_db)
+from sizeup.radio.fm import (CLOSE_DB, MIN_OPEN_S, RATE, Channel, NfmReceiver, Segment, ctcss_estimate, id_burst_frames,
+                              pl_text, speech_seconds, voice_floor_db)
 from sizeup.radio.am import AmReceiver
 from sizeup.radio.am import Extra as AmExtra
 from sizeup.radio.am import Schedule as AmSchedule
@@ -573,10 +574,12 @@ class App:
         # Transcribe where this process may call it ([stt] aws: the hub; sizeup/transcribe.py).
         self.cad.radio_ctx = self
         self._chan_ov: dict = self._channel_overrides()
-        self._sq_ov: dict = self.cad.settings.squelch_overrides()       # each FM channel's squelch (Settings)
+        self._sq_ov: dict = channels.norm_squelch(self.cad.settings.squelch_overrides())   # each FM channel's squelch
         # each traffic channel's recent key-ups (end, s, quieting dB, CTCSS Hz, ID, speech): Settings > Radios > Squelch
         self._keyups: dict[str, deque] = {}
-        self._keyup_pl: dict[str, float | None] = {}    # a kept key-up's tone, for its "no speech" log line
+        self._keyup_pl: dict[str, tuple] = {}    # a kept key-up's PL estimate, for its "no speech" log line
+        # the PL estimate's own thread: never on the close (the live entry's end, the ID flash, the clip)
+        self._keyup_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="keyup-pl")
         self._apply_squelch()
         # Tone pairs named from the console (Settings "tones", #80): merged into the plan, with the names
         # that count as ours; the hub sends them to the station with the channel choices.
@@ -1186,10 +1189,11 @@ class App:
         # mic click (stt.Transcriber), dropped in _transcribed.
         low_energy = speech_seconds(seg.audio) < MIN_SPEECH_S
         ids = list(dict.fromkeys(h for h, _e in found))
-        pl = self._keyup(ch.label, seg, bool(ids), not low_energy)
         for h in ids:
             self._heard(fm_system(h), h, at=seg.end, channel=ch.label)
         self.live.fm_segment(ch.label, ids, seg.start, seg.end)
+        tid = f"{ch.label.replace(' ', '')}-{int(seg.start * 1000)}" if record else ""
+        self._keyup_pool.submit(self._keyup, ch.label, seg, bool(ids), not low_energy, tid)   # after the close
         emergency = any(e for _h, e in found)        # the radio's emergency button (MDC / FleetSync, #128)
         live_key = self.tap.alarm_key(ch.label, seg.start, seg.end) if emergency else ""
         if not record:              # squelch, MDC IDs and "talking now" stay live; nothing is kept
@@ -1199,9 +1203,6 @@ class App:
         t = Traffic(f"{ch.label.replace(' ', '')}-{int(seg.start * 1000)}", ch.label, seg.start, seg.end,
                     "", status="pending", unit=", ".join(units), rig=self.radios.rig_mdc(ids), radio_id=", ".join(ids))
         t.low_energy = low_energy  # type: ignore[attr-defined]
-        if len(self._keyup_pl) > 500:
-            self._keyup_pl.clear()
-        self._keyup_pl[t.id] = pl
         if id_note:
             t.id_note = id_note    # type: ignore[attr-defined]
         self._keep_bursts(t.id, seg)
@@ -1713,9 +1714,10 @@ class App:
                 # A key-up with nothing said (mic click): still shown, as who keyed and when, with
                 # its clip; just no transcript.
                 item.text = ""
-                pl = self._keyup_pl.pop(item.id, "?")
+                with self._lock:
+                    pl = self._keyup_pl.pop(item.id, None)
                 log(f"{item.source}: key-up ({item.end - item.start:.1f} s, no speech"
-                    + ("" if pl == "?" else f", PL {pl:g}" if pl else ", no PL") + ")"
+                    + (f", {pl_text(pl)}" if pl else "") + ")"
                     + (f" · unit {item.unit}" if item.unit else ""))
             if hasattr(item, "raw_audio"):
                 del item.raw_audio
@@ -2535,7 +2537,7 @@ class App:
 
     def channels_changed(self) -> None:
         self._chan_ov = self._channel_overrides()
-        self._sq_ov = self.cad.settings.squelch_overrides()
+        self._sq_ov = channels.norm_squelch(self.cad.settings.squelch_overrides())
         self._apply_squelch()
         log("speech-to-text channels: " + (", ".join(f"{k} {v}" for k, v in sorted(self._chan_ov.items())) or "the defaults"))
 
@@ -2600,9 +2602,9 @@ class App:
         squelch (none from a hub before it: this station's stay). Applied here and kept (this station's own
         Settings overrides, audited as "hub"); the squelch at once, on the running receivers."""
         clean = channels.check_map(prefs)
-        sq = channels.check_squelch(squelch) if squelch is not None else None
+        sq = self._check_squelch(channels.check_squelch(squelch)) if squelch is not None else None
         if sq is not None and self.cad.settings.replace_squelch(sq, "hub"):
-            self._sq_ov = self.cad.settings.squelch_overrides()
+            self._sq_ov = channels.norm_squelch(self.cad.settings.squelch_overrides())
             self._apply_squelch()
         changed = self.cad.settings.replace_channels(clean, "hub")
         self._chan_ov = self._channel_overrides()
@@ -2635,40 +2637,56 @@ class App:
         c = next((c for c in self.cfg.channels if c.label == key and c.kind != "airband"), None)
         return {"open_db": float(c.squelch_db) if c is not None else 10.0, "close_db": CLOSE_DB, "min_open_s": MIN_OPEN_S}
 
+    def _check_squelch(self, m: dict) -> dict:
+        """The hub's squelch map against this station's channels: traffic channels only (a paging channel's squelch is
+        never set: a high Open would mute a page), close under open with this station's own defaults. ValueError."""
+        for key, v in m.items():
+            if self._kind.get(key) != "traffic":
+                raise ValueError(f"squelch {key}: not a traffic channel here (paging squelch is read-only)")
+            eff = {**self.squelch_defaults(key), **v}
+            if eff["close_db"] >= eff["open_db"]:
+                raise ValueError(f"squelch {key}: close {eff['close_db']:g} dB not under open {eff['open_db']:g} dB")
+        return m
+
     def _apply_squelch(self) -> None:
         """Each FM receiver's squelch as set (else its default), on the running squelch: no restart."""
         for r in getattr(self, "receivers", []):
             label = r.channel.label
-            if self._kind.get(label) == "airband" or isinstance(r, AmReceiver):
-                continue
+            if self._kind.get(label) != "traffic" or isinstance(r, AmReceiver):
+                continue                    # paging (South 2): always the receiver's own; airband: its own squelch
             s = {**self.squelch_defaults(label), **(self._sq_ov.get(label) or {})}
             if r.set_squelch(s["open_db"], s["close_db"], s["min_open_s"]) and label in self._sq_ov:
                 log(f"{label}: squelch opens at {s['open_db']:g} dB, closes under {s['close_db']:g} dB, "
                     f"keeps {s['min_open_s']:g} s or more")
 
-    def _keyup(self, label: str, seg: Segment, has_id: bool, speech: bool) -> float | None:
+    def _keyup(self, label: str, seg: Segment, has_id: bool, speech: bool, tid: str = "") -> tuple:
         """A traffic channel's transmission, for telling real key-ups from interference: its length, quieting,
-        CTCSS tone (FG1 runs PL 100: a carrier without it is someone else's, or not a radio), ID, speech."""
+        estimated CTCSS tone (radio/fm.py ctcss_estimate), ID, speech. On its own thread (_keyup_pool)."""
         try:
-            pl = ctcss_tone(seg.audio)
+            est = ctcss_estimate(seg.audio)
         except Exception:  # noqa: BLE001 - a diagnostic, never in the way of the transmission
-            pl = None
+            est = ("unsure", None)
         with self._lock:
             self._keyups.setdefault(label, deque(maxlen=300)).append(
-                (seg.end, round(seg.end - seg.start, 1), round(float(seg.quieting_db), 1), pl, has_id, speech))
-        return pl
+                (seg.end, round(seg.end - seg.start, 1), round(float(seg.quieting_db), 1), est[0], est[1], has_id, speech))
+            if tid:
+                if len(self._keyup_pl) > 500:
+                    self._keyup_pl.clear()
+                self._keyup_pl[tid] = est
+        return est
 
     def keyups(self, label: str, now: float | None = None, window_s: float = 3600.0) -> dict:
-        """The last hour's key-ups on a channel: how many, without speech, by CTCSS tone ("none": no tone), the
-        lengths and quieting of the ones without speech, and the last few."""
+        """The last hour's key-ups on a channel: how many, without speech, by estimated CTCSS tone ("none": no line,
+        "unsure"), the lengths and quieting of the ones without speech, and the last few
+        ([end, s, quieting, verdict, Hz, ID, speech])."""
         now = time.time() if now is None else now
         with self._lock:
             rows = [k for k in self._keyups.get(label, ()) if now - k[0] <= window_s]
         tones: dict[str, int] = {}
         for k in rows:
-            key = f"{k[3]:g}" if k[3] else "none"
+            key = f"{k[4]:g}" if k[3] == "tone" else k[3]
             tones[key] = tones.get(key, 0) + 1
-        bare = [k for k in rows if not k[5] and not k[4]]
+        bare = [k for k in rows if not k[6] and not k[5]]
         return {"n": len(rows), "no_speech": len(bare), "tones": tones,
                 "bare_s": sorted(k[1] for k in bare)[:50], "bare_q": sorted(k[2] for k in bare)[:50],
                 "recent": [list(k) for k in rows[-8:]]}
@@ -2680,7 +2698,9 @@ class App:
             if not isinstance(r, dict) or "min_open_s" not in r:
                 continue
             key = r.get("label")
+            kind = r.get("channel_kind") or ""
             rows.append({"key": key, "mhz": r.get("mhz"), "state": r.get("state"), "open": bool(r.get("open")),
+                         "kind": kind, "editable": kind == "traffic",
                          "set": dict(self._sq_ov.get(key) or {}),
                          "default": r.get("squelch_default") or self.squelch_defaults(key),
                          "running": {f: r.get(f) for f in channels.SQUELCH},
@@ -3397,6 +3417,7 @@ class App:
             st = r.status()
             if "min_open_s" in st:                   # the noise squelch: its defaults, for Settings on the hub
                 st["squelch_default"] = self.squelch_defaults(r.channel.label)
+                st["channel_kind"] = self._kind.get(r.channel.label, "")    # only traffic squelch is editable
                 if self._kind.get(r.channel.label) == "traffic":
                     st["keyups"] = self.keyups(r.channel.label)
             if self.shared and r.channel.label not in self.assign.values():

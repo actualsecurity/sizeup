@@ -241,6 +241,10 @@ class NoiseSquelch:
                  shorts: deque | None = None):
         self.open_db, self.close_db, self.clock, self.drop_db = open_db, close_db, clock, drop_db
         self.min_frames = min_frames(min_open_s)
+        # set_params(): (open_db, close_db, min_frames) as one tuple, taken by feed() at a frame's start (_applied:
+        # the one it took), so a frame never sees a mixed set
+        self._pending: tuple[float, float, int] | None = None
+        self._applied: tuple[float, float, int] | None = None
         # wall-clock times of opens that closed with nothing kept (the receiver's, across rtl_fm restarts)
         self.shorts: deque[float] = shorts if shorts is not None else deque(maxlen=2000)
         self._keyed = False
@@ -296,6 +300,16 @@ class NoiseSquelch:
             self._keyed = any(v >= self.close_db for v in self._qs[self.min_frames - 1:])
         return self._keyed
 
+    def set_params(self, open_db: float, close_db: float, min_open_s: float | None) -> None:
+        """New thresholds from another thread (Settings): one reference swap, taken at the next frame."""
+        self._pending = (float(open_db), float(close_db), min_frames(min_open_s))
+
+    @property
+    def params(self) -> tuple[float, float, int]:
+        """(open_db, close_db, min_frames) as set: the pending set if the next frame hasn't taken it yet."""
+        p = self._pending
+        return p if p is not None and p is not self._applied else (self.open_db, self.close_db, self.min_frames)
+
     def short_per_min(self, now: float | None = None) -> float:
         """Opens that closed with nothing kept (under min_open_s), per minute over the last SHORT_WINDOW_S."""
         now = self.clock() if now is None else now
@@ -331,6 +345,10 @@ class NoiseSquelch:
         return float(10 * np.log10(self.hiss / self._lvl))
 
     def feed(self, frame: np.ndarray) -> Segment | None:
+        p = self._pending
+        if p is not None and p is not self._applied:
+            self._applied = p
+            self.open_db, self.close_db, self.min_frames = p
         spec = np.abs(np.fft.rfft(frame * self._win)) ** 2
         lvl = self._lvl = float(spec[self._hf].mean()) + 1e-12
         self._n += 1
@@ -601,40 +619,75 @@ class NoiseSquelch:
         return seg
 
 
-# The standard CTCSS (PL) tones, Hz. FG1 runs PL 100.0 (docs/PLAN.md): a carrier without it is not one of ours.
+# The standard CTCSS (PL) tones, Hz. FG1 runs PL 100.0 (docs/PLAN.md): a carrier without it may be another user or interference.
 CTCSS_HZ = (67.0, 69.3, 71.9, 74.4, 77.0, 79.7, 82.5, 85.4, 88.5, 91.5, 94.8, 97.4, 100.0, 103.5, 107.2, 110.9,
             114.8, 118.8, 123.0, 127.3, 131.8, 136.5, 141.3, 146.2, 151.4, 156.7, 159.8, 162.2, 165.5, 167.9, 171.3,
             173.8, 177.3, 179.9, 183.5, 186.2, 189.9, 192.8, 196.6, 199.5, 203.5, 206.5, 210.7, 218.1, 225.7, 229.1,
             233.6, 241.8, 250.3, 254.1)
-CTCSS_OVER_DB = 12.0           # the tone's bin this far over the 60-260 Hz band's median: a tone is there
+CTCSS_OVER_DB = 12.0           # a tone's line this far over the 60-260 Hz band's median: something is there
+CTCSS_MARGIN_DB = 6.0          # ... and this far over the next tone (not its own line) and mains hum: which tone
+CTCSS_TOL_HZ = 0.6             # a radio's tone this close to its nominal
 CTCSS_MAX_S = 4.0              # looked for in the first 4 s
+CTCSS_RUN_S = 0.4              # dead air between words: runs at least this long, each its own spectrum
+HUM_HZ = (60.0, 120.0, 180.0, 240.0)
 
 
-def ctcss_tone(audio: np.ndarray, rate: int = RATE) -> float | None:
-    """The CTCSS tone on a transmission's audio (as demodulated: the sub-audible tone is still in it), None if none
-    stands out (or under 0.5 s of audio). For telling our key-ups from interference or another user (Settings >
-    Radios > Squelch)."""
-    a = np.asarray(audio, dtype=np.float64)
-    fr = [a[i:i + FRAME] for i in range(0, len(a) - FRAME + 1, FRAME)]
-    if rate == RATE and fr:      # the dead air between words: a voice's harmonics sit in the same 60-260 Hz
-        quiet = [f for f, sp in zip(fr, speech_frames(fr)) if not sp]
-        if len(quiet) * FRAME >= rate // 2:
-            a = np.concatenate(quiet)
-    x = a[:int(CTCSS_MAX_S * rate)]
-    if len(x) < rate // 2 or not np.any(x):
-        return None
-    n = 1 << int(np.ceil(np.log2(max(len(x), 4 * rate))))          # >= 0.25 Hz bins
-    spec = np.abs(np.fft.rfft((x - x.mean()) * np.hanning(len(x)), n)) ** 2
+def _power(x: np.ndarray, n: int) -> np.ndarray:
+    w = np.hanning(len(x))
+    return np.abs(np.fft.rfft((x - x.mean()) * w, n)) ** 2 / float(np.sum(w ** 2))
+
+
+def ctcss_estimate(audio: np.ndarray, rate: int = RATE) -> tuple[str, float | None]:
+    """An estimate of the CTCSS (PL) tone on a transmission's audio (as demodulated: the sub-audible tone is still
+    in it): ("tone", Hz), ("none", None): no line stands out, or ("unsure", Hz or None): too short to resolve the
+    neighbouring tones (97.4 / 100.0 are 2.6 Hz apart), a line next to mains hum, or hum as strong as the tone.
+    The power spectra of the contiguous runs of dead air (each phase-continuous, never spliced) are added; with too
+    little of them, the whole clip's. A diagnostic (Settings > Radios > Squelch), never a gate."""
+    a = np.asarray(audio, dtype=np.float64)[:int(CTCSS_MAX_S * rate)]
+    if len(a) < rate // 2 or not np.any(a):
+        return "unsure", None
+    runs: list[np.ndarray] = []
+    if rate == RATE:
+        fr = [a[i:i + FRAME] for i in range(0, len(a) - FRAME + 1, FRAME)]
+        sp = speech_frames(fr)
+        k = 0
+        while k < len(fr):
+            if sp[k]:
+                k += 1
+                continue
+            e = k
+            while e < len(fr) and not sp[e]:
+                e += 1
+            if (e - k) * FRAME >= CTCSS_RUN_S * rate:
+                runs.append(a[k * FRAME:e * FRAME])
+            k = e
+    if sum(len(r) for r in runs) < rate:
+        runs = [a]
+    n = 1 << int(np.ceil(np.log2(max(4 * rate, 4 * max(len(r) for r in runs)))))
+    spec = sum(_power(r, n) for r in runs)
     f = np.fft.rfftfreq(n, 1 / rate)
-    band = spec[(f >= 60) & (f <= 260)]
-    floor = float(np.median(band)) + 1e-18
-    best, hz = 0.0, None
-    for t in CTCSS_HZ:
-        i = int(round(t * n / rate))
-        v = float(spec[max(0, i - 1):i + 2].max())
-        if v > best:
-            best, hz = v, t
-    return hz if 10 * np.log10(best / floor) >= CTCSS_OVER_DB else None
+    floor = float(np.median(spec[(f >= 60) & (f <= 260)])) + 1e-18
+
+    def line(hz: float) -> float:
+        return float(spec[(f >= hz - CTCSS_TOL_HZ) & (f <= hz + CTCSS_TOL_HZ)].max())
+
+    p = {t: line(t) for t in CTCSS_HZ}
+    best = max(p, key=p.get)
+    if 10 * np.log10(p[best] / floor) < CTCSS_OVER_DB:
+        return "none", None
+    margin = 10 ** (CTCSS_MARGIN_DB / 10)
+    other = max(v for t, v in p.items() if abs(t - best) > 2 * CTCSS_TOL_HZ)
+    hum = max(line(h) for h in HUM_HZ)
+    if (other * margin > p[best] or hum * margin > p[best]
+            or any(abs(best - h) <= 2 * CTCSS_TOL_HZ for h in HUM_HZ)):
+        return "unsure", best
+    return "tone", best
+
+
+def pl_text(est: tuple[str, float | None]) -> str:
+    """'PL est. 100', 'PL est. none', 'PL est. unsure': for a log line."""
+    v, hz = est
+    return f"PL est. {hz:g}" if v == "tone" else f"PL est. {v}"
 
 
 def min_frames(min_open_s: float | None) -> int:
@@ -697,8 +750,7 @@ class NfmReceiver:
         if new == (self.open_db, self.close_db, self.min_open_s):
             return False
         self.open_db, self.close_db, self.min_open_s = new
-        sq = self.squelch
-        sq.open_db, sq.close_db, sq.min_frames = new[0], new[1], min_frames(new[2])
+        self.squelch.set_params(*new)       # the running one, at its next frame (new ones: from the fields above)
         return True
 
     def argv(self, dev: str | None = None) -> list[str]:
@@ -738,11 +790,12 @@ class NfmReceiver:
                # in quieting dB down from the idle hiss (hiss_db: that reference, relative dB)
                "open_s": round(open_s, 1) if open_s is not None else None,
                "stuck": bool(open_s is not None and open_s >= STUCK_S and self.state == "ok"),
-               "open_db": sq.open_db, "close_db": sq.close_db,
+               "open_db": sq.params[0] if hasattr(sq, "params") else sq.open_db,
+               "close_db": sq.params[1] if hasattr(sq, "params") else sq.close_db,
                "hiss_db": round(hiss, 1) if hiss is not None else None,
                "floor_db": round(sq.floor, 1) if sq.floor is not None else None}
         if hasattr(sq, "min_frames"):           # the noise squelch (Settings > Radios > Squelch): not airband's
-            out["min_open_s"] = round(sq.min_frames * FRAME / RATE, 2)
+            out["min_open_s"] = round(sq.params[2] * FRAME / RATE, 2)
             out["short_per_min"] = round(sq.short_per_min(self.clock()), 1)
         if sq.holding and self.state == "ok":
             # Between a page's carrier dropping and the continuation window ending: not "RX" (nothing

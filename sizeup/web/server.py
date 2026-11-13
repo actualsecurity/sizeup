@@ -126,8 +126,8 @@ from sizeup import sourcekeys
 STATIC_DIR = Path(__file__).parent / "static"
 MAX_CAD_BODY = 65536
 # role = "station": the only CAD routes served, (method, path): what Settings > Radios (radio-controls.js) uses
-STATION_CAD = {("GET", "/api/cad/stt"), ("POST", "/api/cad/settings/channels"), ("POST", "/api/cad/settings/stt"),
-               ("GET", "/api/cad/squelch"), ("POST", "/api/cad/settings/squelch")}
+# (not the squelch: set on the CAD of record only, Settings > Radios > Squelch; the station applies what the hub sends)
+STATION_CAD = {("GET", "/api/cad/stt"), ("POST", "/api/cad/settings/channels"), ("POST", "/api/cad/settings/stt")}
 
 # Caching (#137). Static files: the pages name each by its content (/static/cad.js?v=<hash>, rewritten as the
 # page is served), and a named version is kept a year; a file asked for without it (or an old one) is

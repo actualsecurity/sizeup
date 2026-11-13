@@ -159,6 +159,20 @@ def clean_squelch(key: str, raw: dict) -> dict:
     return out
 
 
+def norm_squelch(m) -> dict:
+    """A stored squelch map as the hub sends it and the station keeps it (the same on both, so their signatures
+    agree): each entry cleaned, empty or invalid ones dropped."""
+    out = {}
+    for k, v in (m.items() if isinstance(m, dict) else ()):
+        try:
+            c = clean_squelch(k, v)
+        except ValueError:
+            continue
+        if c:
+            out[k] = c
+    return out
+
+
 def check_squelch(m) -> dict:
     """A whole squelch map from the hub: checked, cleaned. ValueError."""
     if not isinstance(m, dict) or len(m) > 50:

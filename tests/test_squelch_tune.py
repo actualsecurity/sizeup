@@ -77,7 +77,9 @@ def test_the_receiver_takes_new_settings_live_through_the_tap():
     assert r.set_squelch(14.0, 8.0, 0.5) and not r.set_squelch(14.0, 8.0, 0.5)
     st = r.status()                             # the running squelch (under the tap), not just the next one
     assert (st["open_db"], st["close_db"], st["min_open_s"]) == (14.0, 8.0, 0.5)
-    assert r.squelch._sq.open_db == 14.0
+    assert r.squelch._sq.open_db == 10.0        # taken whole at its next frame, never mid-frame
+    r.squelch.feed(frames(hiss(0.05))[0])
+    assert (r.squelch._sq.open_db, r.squelch._sq.close_db, r.squelch._sq.min_frames) == (14.0, 8.0, 10)
     fresh = r.new_squelch()                     # an rtl_fm restart: the same settings, the count carried over
     assert (fresh.open_db, fresh.close_db, fresh.min_frames, len(fresh.shorts)) == (14.0, 8.0, 10, 2)
 
@@ -117,7 +119,7 @@ def test_settings_set_audit_apply_live_and_reset(tmp_path):
     fg1 = app._receiver("FG1")
     assert (fg1.open_db, fg1.close_db, fg1.squelch.min_frames) == (10.0, 6.0, 6)
     app.cad.settings.post("squelch", {"action": "set", "key": "FG1", "open_db": 13, "min_open_s": 0.5, "operator": "admin@example.org"})
-    assert (fg1.open_db, fg1.squelch.open_db, fg1.squelch.min_frames) == (13.0, 13.0, 10)     # live, no restart
+    assert (fg1.open_db, fg1.squelch.params) == (13.0, (13.0, 6.0, 10))                       # live, no restart
     assert app._receiver("South 2").open_db == 10.0                                           # per channel
     a = app.cad.settings.audit_log("radios")[0]
     assert a["key"] == "squelch/FG1" and a["operator"] == "admin@example.org"
@@ -131,8 +133,7 @@ def test_settings_set_audit_apply_live_and_reset(tmp_path):
     app.cad.settings.post("squelch", {"action": "set", "key": "FG1", "open_db": None, "operator": "admin@example.org"})
     assert fg1.open_db == 10.0 and app.cad.settings.squelch_overrides() == {"FG1": {"min_open_s": 0.5}}
     app.cad.settings.post("squelch", {"action": "reset", "key": "FG1", "operator": "admin@example.org"})
-    assert app.cad.settings.squelch_overrides() == {} and fg1.squelch.min_frames == 6
-    assert fg1.squelch.open_db == 10.0
+    assert app.cad.settings.squelch_overrides() == {} and fg1.squelch.params == (10.0, 6.0, 6)
 
 
 def test_a_noise_opening_is_not_talking_on_the_watcher(tmp_path):
@@ -161,7 +162,7 @@ def test_the_hub_sends_the_squelch_and_the_station_applies_it_live(tmp_path):
         assert wait(lambda: hub.get("/api/state")["channels"]["sync"]["state"] == "applied", 10)
         code, _ = hub_post(hub, "squelch", {"action": "set", "key": "FG1", "open_db": 15, "close_db": 9})
         assert code == 200
-        assert wait(lambda: st._receiver("FG1").squelch.open_db == 15.0, 10)
+        assert wait(lambda: st._receiver("FG1").squelch.params[0] == 15.0, 10)
         assert st._receiver("FG1").close_db == 9.0 and st.cad.settings.audit_log("radios")[0]["operator"] == "hub"
         assert wait(lambda: hub.get("/api/state")["channels"]["sync"]["state"] == "applied", 10)
         page = hub.get("/api/cad/squelch")
@@ -171,7 +172,7 @@ def test_the_hub_sends_the_squelch_and_the_station_applies_it_live(tmp_path):
                     ["running"]["open_db"] == 15.0, 15)
         assert row["default"]["open_db"] == 10.0          # the station's, as it reported them
         assert hub_post(hub, "squelch", {"action": "reset", "key": "FG1"})[0] == 200
-        assert wait(lambda: st._receiver("FG1").squelch.open_db == 10.0, 10)
+        assert wait(lambda: st._receiver("FG1").squelch.params[0] == 10.0, 10)
     finally:
         if st is not None:
             st.link.stop()
@@ -199,17 +200,40 @@ def test_an_older_station_gets_no_squelch_argument(tmp_path):
 # -- telling real key-ups from interference ------------------------------------------------------------------------
 
 
-def test_the_ctcss_tone_of_a_key_up_with_or_without_speech():
-    from sizeup.radio.fm import ctcss_tone
+def radio_voice(s):
+    """Speech as a radio sends it: high-passed at 300 Hz (radios keep their TX audio out of the CTCSS band)."""
+    v = voice(s)
+    F = np.fft.rfft(v)
+    F[np.fft.rfftfreq(len(v), 1 / RATE) < 300] *= 0.03
+    return np.fft.irfft(F, len(v))
+
+
+@pytest.mark.parametrize("hz", [67.0, 88.5, 97.4, 100.0, 127.3, 151.4, 156.7])
+@pytest.mark.parametrize("dur", [2.5, 1.2])
+def test_the_pl_estimate_with_and_without_speech(hz, dur):
+    from sizeup.radio.fm import ctcss_estimate
+    t = np.arange(int(dur * RATE)) / RATE
+    dead = 0.02 * rng.standard_normal(len(t))
+    pl = 0.05 * np.sin(2 * np.pi * hz * t + 1.0)
+    assert ctcss_estimate(dead + pl) == ("tone", hz)                        # a bare key-up
+    assert ctcss_estimate(radio_voice(dur) + dead + pl) == ("tone", hz)     # with speech over it
+    # never the tone next to it: 97.4 is never read as 100 (and the other way round)
+
+
+def test_the_pl_estimate_says_none_or_unsure_rather_than_guess():
+    from sizeup.radio.fm import ctcss_estimate, pl_text
     t = np.arange(int(2.5 * RATE)) / RATE
     dead = 0.02 * rng.standard_normal(len(t))
-    pl100 = 0.05 * np.sin(2 * np.pi * 100.0 * t)
-    assert ctcss_tone(dead + pl100) == 100.0                # a bare key-up from one of ours
-    assert ctcss_tone(dead) is None                         # a carrier with no tone: not ours, or not a radio
-    assert ctcss_tone(dead + 0.05 * np.sin(2 * np.pi * 156.7 * t)) == 156.7
-    assert ctcss_tone(voice(2.5) + dead + pl100) == 100.0  # speech's own low harmonics don't win
-    assert ctcss_tone(voice(2.5) + dead) is None
-    assert ctcss_tone(hiss(2.5)) is None and ctcss_tone(np.zeros(RATE)) is None and ctcss_tone(dead[:RATE // 4]) is None
+    assert ctcss_estimate(dead) == ("none", None)                           # a carrier with no tone
+    assert ctcss_estimate(hiss(2.5))[0] == "none"
+    assert ctcss_estimate(dead + 0.05 * np.sin(2 * np.pi * 180.0 * t))[0] == "unsure"     # 180 Hz hum: not 179.9
+    hum = 0.05 * np.sin(2 * np.pi * 60.0 * t)
+    assert ctcss_estimate(dead + hum + 0.05 * np.sin(2 * np.pi * 100.0 * t))[0] == "unsure"   # hum as strong
+    assert ctcss_estimate(dead[:RATE // 3] + 0.05 * np.sin(2 * np.pi * 100.0 * t[:RATE // 3])) == ("unsure", None)
+    assert ctcss_estimate(np.zeros(RATE)) == ("unsure", None)               # an ID-only key-up (blanked)
+    assert ctcss_estimate(radio_voice(2.5) + dead)[0] != "tone"
+    assert [pl_text(e) for e in (("tone", 100.0), ("none", None), ("unsure", 97.4))] == [
+        "PL est. 100", "PL est. none", "PL est. unsure"]
 
 
 def test_key_ups_by_tone_reach_the_squelch_page(tmp_path):
@@ -219,12 +243,105 @@ def test_key_ups_by_tone_reach_the_squelch_page(tmp_path):
     dead = (0.02 * rng.standard_normal(len(t))).astype(np.float32)
     now = 2_000_000_000.0
     tone = (dead + 0.05 * np.sin(2 * np.pi * 100.0 * t)).astype(np.float32)
-    assert app._keyup("FG1", Segment(now - 100, now - 98, tone, 25.0), False, False) == 100.0
-    assert app._keyup("FG1", Segment(now - 50, now - 48, dead, 14.0), False, False) is None
-    assert app._keyup("FG1", Segment(now - 20, now - 17, tone, 30.0), True, True) == 100.0
+    assert app._keyup("FG1", Segment(now - 100, now - 98, tone, 25.0), False, False, "FG1-1") == ("tone", 100.0)
+    assert app._keyup("FG1", Segment(now - 50, now - 48, dead, 14.0), False, False) == ("none", None)
+    assert app._keyup("FG1", Segment(now - 20, now - 17, tone, 30.0), True, True) == ("tone", 100.0)
     app._keyup("FG1", Segment(now - 7200, now - 7198, dead, 14.0), False, False)            # over an hour ago
     k = app.keyups("FG1", now)
     assert (k["n"], k["no_speech"], k["tones"]) == (3, 2, {"100": 2, "none": 1})
+    assert app._keyup_pl["FG1-1"] == ("tone", 100.0)                    # for its "no speech" log line
     assert k["bare_s"] == [2.0, 2.0] and k["bare_q"] == [14.0, 25.0] and len(k["recent"]) == 3
     row = next(r for r in app.radio_status() if r["label"] == "FG1")
     assert "keyups" in row and "keyups" not in next(r for r in app.radio_status() if r["label"] == "South 2")
+
+
+# -- review: paging read-only, import, the station's own values, empty entries -------------------------------------
+
+
+def test_a_paging_channels_squelch_is_read_only(tmp_path):
+    app = App(base(clips_dir=str(tmp_path / "clips")))
+    rows = {c["key"]: c for c in app.cad.settings.squelch_page()["channels"]}
+    assert (rows["South 2"]["kind"], rows["South 2"]["editable"]) == ("paging", False) and rows["FG1"]["editable"]
+    for body in ({"open_db": 30}, {"min_open_s": 2.0}, {"open_db": 11}):
+        with pytest.raises(CadError, match="read-only"):
+            app.cad.settings.post("squelch", {"action": "set", "key": "South 2", **body, "operator": "admin@example.org"})
+    with pytest.raises(CadError):
+        app.cad.settings.post("squelch", {"action": "set", "key": "NOPE", "open_db": 12, "operator": "admin@example.org"})
+    assert app.cad.settings.squelch_overrides() == {} and app._receiver("South 2").squelch.params == (10.0, 6.0, 6)
+    with pytest.raises(ValueError, match="paging"):         # nor from a hub
+        app.set_channel_prefs({}, None, None, {"South 2": {"open_db": 30.0}})
+    assert app._receiver("South 2").squelch.params == (10.0, 6.0, 6) and app.cad.settings.squelch_overrides() == {}
+    data = app.cad.settings.export()                         # nor from an imported file
+    data["overrides"]["squelch"] = {"South 2": {"open_db": 30.0}}
+    with pytest.raises(CadError, match="read-only"):
+        app.cad.settings.post("import", {"action": "apply", "settings": data})
+
+
+def test_an_import_applies_the_squelch_live_and_drops_empty_entries(tmp_path):
+    app = App(base(clips_dir=str(tmp_path / "clips")))
+    data = app.cad.settings.export()
+    data["overrides"]["squelch"] = {"FG1": {"open_db": 12.0}}
+    app.cad.settings.post("import", {"action": "apply", "settings": data, "operator": "admin@example.org"})
+    assert app._sq_ov == {"FG1": {"open_db": 12.0}} and app._receiver("FG1").squelch.params[0] == 12.0
+    data["overrides"]["squelch"] = {"FG1": {}}
+    app.cad.settings.post("import", {"action": "apply", "settings": data, "operator": "admin@example.org"})
+    assert app._sq_ov == {} and app._receiver("FG1").squelch.params[0] == 10.0
+    assert channels.norm_squelch({"FG1": {}, "South 2": {"open_db": 99}, "tg:307": {"open_db": 12}}) == {}
+
+
+def test_an_import_on_the_hub_reaches_the_station(tmp_path):
+    hub = HubRun(hub_cfg(tmp_path))
+    st = None
+    try:
+        st = station(station_cfg(tmp_path, hub.url), {})
+        assert wait(lambda: any(c["key"] == "FG1" for c in hub.app.cad.settings.squelch_page()["channels"]), 10)
+        data = hub.app.cad.settings.export()
+        data["overrides"]["squelch"] = {"FG1": {"open_db": 13.0}}
+        hub.app.cad.settings.post("import", {"action": "apply", "settings": data, "operator": "admin@example.org"})
+        assert hub.app._sq_ov == {"FG1": {"open_db": 13.0}}
+        assert wait(lambda: st._receiver("FG1").squelch.params[0] == 13.0, 10)
+        assert wait(lambda: hub.get("/api/state")["channels"]["sync"]["state"] == "applied", 10)
+    finally:
+        if st is not None:
+            st.link.stop()
+        hub.close()
+
+
+def test_close_is_checked_against_the_stations_own_open(tmp_path):
+    from sizeup.config import ChannelCfg
+    from tests.test_channels import hub_post
+    # the hub's own config says FG1 opens at 15; the station's (the one that counts) at 10
+    hub = HubRun(hub_cfg(tmp_path, channels=(ChannelCfg("South 2", 470.2, "paging"),
+                                             ChannelCfg("FG1", 453.0375, "traffic", squelch_db=15.0))))
+    st = None
+    try:
+        st = station(station_cfg(tmp_path, hub.url), {})
+        assert wait(lambda: any(c["key"] == "FG1" for c in hub.get("/api/cad/squelch")["channels"]), 10)
+        row = next(c for c in hub.get("/api/cad/squelch")["channels"] if c["key"] == "FG1")
+        assert row["default"]["open_db"] == 10.0
+        code, body = hub_post(hub, "squelch", {"action": "set", "key": "FG1", "close_db": 12})
+        assert code >= 400 and "under open (10" in str(body)
+        code, _ = hub_post(hub, "squelch", {"action": "set", "key": "South 2", "open_db": 30})
+        assert code >= 400                                            # paging: refused on the hub too
+        with pytest.raises(ValueError, match="not under open 10"):     # the station checks its own, too
+            st.set_channel_prefs({}, None, None, {"FG1": {"close_db": 12.0}})
+    finally:
+        if st is not None:
+            st.link.stop()
+        hub.close()
+
+
+def test_station_local_squelch_edits_are_refused(tmp_path):
+    """A station forwarding to a hub: the squelch is the hub's (channels_locked), and the station page has no route."""
+    from sizeup.web.server import STATION_CAD
+    assert not any("squelch" in p for _m, p in STATION_CAD)
+    hub = HubRun(hub_cfg(tmp_path))
+    st = None
+    try:
+        st = station(station_cfg(tmp_path, hub.url), {})
+        with pytest.raises(CadError, match="hub"):
+            st.cad.settings.post("squelch", {"action": "set", "key": "FG1", "open_db": 12})
+    finally:
+        if st is not None:
+            st.link.stop()
+        hub.close()

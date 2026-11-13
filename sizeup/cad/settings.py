@@ -1767,9 +1767,7 @@ class Editor:
         key = body.get("key")
         dflt = ctx.squelch_defaults(key) if ctx is not None and isinstance(key, str) else {}
         if action == "set":
-            known = [c["key"] for c in ctx.squelch_state()["channels"]] if ctx is not None else []
-            if known and key not in known:
-                raise CadError(f"key: one of {', '.join(known)}")
+            self._squelch_editable(key)
             try:
                 vals = channels_mod.clean_squelch(key, {f: body.get(f) for f in channels_mod.SQUELCH})
             except ValueError as e:
@@ -1798,6 +1796,18 @@ class Editor:
         if ctx is not None:
             ctx.channels_changed()
         return out
+
+    def _squelch_editable(self, key) -> None:
+        """Only a traffic channel's squelch is set here, one the station has reported (with its own defaults). A paging
+        channel's (South 2: the tone-outs, 60 Control) is read-only: an Open over the pages' quieting mutes them."""
+        ctx = self.cad.radio_ctx
+        rows = {c["key"]: c for c in ctx.squelch_state()["channels"]} if ctx is not None else {}
+        row = rows.get(key) if isinstance(key, str) else None
+        if row is None:
+            ed = [k for k, c in rows.items() if c.get("editable")]
+            raise CadError(f"key: one of {', '.join(ed)}" if ed else "no traffic channel's squelch reported yet")
+        if not row.get("editable"):
+            raise CadError(f"{key}: {row.get('kind') or 'not a traffic'} channel: its squelch is read-only")
 
     def replace_squelch(self, m: dict, operator: str) -> bool:
         """The whole squelch map as the hub sent it. True when anything changed."""
@@ -2561,11 +2571,15 @@ class Editor:
                 channels_mod.clean(k, v)
             except ValueError as e:
                 raise CadError(f"overrides.channels.{k}: {e}") from None
-        for k, v in (ov.get(channels_mod.SQUELCH_SECTION) or {}).items():
-            try:
-                ov[channels_mod.SQUELCH_SECTION][k] = channels_mod.clean_squelch(k, v)
-            except ValueError as e:
-                raise CadError(f"overrides.squelch.{k}: {e}") from None
+        sq = ov.get(channels_mod.SQUELCH_SECTION)
+        if sq is not None:
+            for k, v in sq.items():
+                try:
+                    channels_mod.clean_squelch(k, v)
+                    self._squelch_editable(k)
+                except (ValueError, CadError) as e:
+                    raise CadError(f"overrides.squelch.{k}: {e}") from None
+            ov[channels_mod.SQUELCH_SECTION] = channels_mod.norm_squelch(sq)      # empty entries dropped
         for k, v in (ov.get(TONES_SECTION) or {}).items():
             key, val = self._clean_tone(v, f"overrides.tones.{k}")
             if key != k:
@@ -2785,7 +2799,8 @@ class Editor:
         self._use(L, ov)
         self.store.sync_units()
         self.store.rev += 1
-        if self.cad.radio_ctx is not None and any(c["store"] in (channels_mod.SECTION, "stt") for c in changes):
+        if self.cad.radio_ctx is not None and any(c["store"] in (channels_mod.SECTION, "stt", channels_mod.SQUELCH_SECTION)
+                                                  for c in changes):
             self.cad.radio_ctx.channels_changed()
         if self.cad.radio_ctx is not None and any(c["store"] == TONES_SECTION for c in changes):
             self.cad.radio_ctx.tones_changed()
