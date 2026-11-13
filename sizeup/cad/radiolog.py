@@ -52,7 +52,8 @@ import time
 from sizeup import sourcekeys as sources
 from sizeup.cad.comms import AUTO_UNSURE
 from sizeup.cad.feed import unit_forms
-from sizeup.cad.sources import ABBR, INTERSECTION, NOISE, PAGING, SUFFIXES, _street, place_key, same_place, street_part
+from sizeup.cad.sources import (ABBR, INTERSECTION, NOISE, PAGING, SUFFIXES, _street, match_address, place_key, same_place,
+                                street_part)
 
 LEAD_S = 120.0
 MAX_PER_TX = 3
@@ -192,7 +193,7 @@ def addresses_in(text: str) -> list[str]:
 def sent_elsewhere(text: str, inc: dict) -> bool:
     """The transmission sends someone to another place than this incident's: "respond to <somewhere else>", or a
     numbered address (with or without its suffix) that isn't this incident's."""
-    mine = [x for x in (inc["address"], inc["place_address"]) if x]
+    mine = [x for x in (match_address(inc), inc["place_address"]) if x]
 
     def here(frag: str) -> bool:
         return any(address_hit(frag, a) or same_place(frag, street_part(a)) for a in mine) or \
@@ -356,7 +357,7 @@ class RadioLog:
         # it says (#163: "only add them if we know it"); only a known fireground channel takes it
         unknown = t["talkgroup"] is None and not paging and not t["rig"]
         if text and not unknown:
-            by_place = [i["id"] for i in incs if any(address_hit(text, a) for a in (i["address"], i["place_address"]) if a)]
+            by_place = [i["id"] for i in incs if any(address_hit(text, a) for a in (match_address(i), i["place_address"]) if a)]
             what = "address"
             if not by_place:
                 by_place = [i["id"] for i in incs if i["place"] and place_hit(text, i["place"])]

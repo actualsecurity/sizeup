@@ -256,14 +256,14 @@ def test_a_page_never_attaches_to_a_manual_incident(tmp_path):
     rig.at(600)
     got = rig.page()
     assert got["id"] != m["id"] and got["source"] == "60 Control page"
-    assert rig.feed_lines(m["id"]) == [f"Possibly the same as #{got['id']}: 12 Example Avenue"]    # noted, not buried
+    assert rig.feed_lines(m["id"]) == [f"Possibly the same as #{got['id']}: 12 Example Ave"]    # noted, not buried
     # the same place as a manual call: its own incident still, noted on both
     same = rig.cad.create({"type": "ALARM", "subtype": "COMM", "address": "400 Sample Street", "operator": "Lt. Test"})
     rig.at(700)
     p2 = rig.page("p2", OTHER_PAGE, fresh=True)
     assert p2["id"] not in (m["id"], same["id"])
     assert f"Possibly the same as #{same['number']}: 400 Sample Street" in rig.feed_lines(p2["id"])
-    assert rig.feed_lines(same["id"]) == [f"Possibly the same as #{p2['id']}: 400 Sample Street"]
+    assert rig.feed_lines(same["id"]) == [f"Possibly the same as #{p2['id']}: 400 Sample St"]   # the page's address, normalised
 
 
 def test_two_places_are_two_calls_whatever_the_units_and_cleared_units_never_match(tmp_path):
@@ -338,7 +338,8 @@ def test_a_page_that_beats_the_feed_gets_the_feeds_report_after_it_is_accepted(t
     rig.poll()
     [inc] = rig.incidents()
     assert (inc["id"], inc["status"], inc["type"]) == (page["id"], "pending", "STRU")
-    assert inc["address"] == "12 Example Avenue"                    # the same place: the page's wording stays
+    assert inc["address"] == "12 Example Ave"                       # the same place: the page's address stays
+    assert inc["address_raw"] == "12 Example Avenue"                # ... and the words it was made from
     assert rig.cad.store.one("SELECT incident_id FROM source_reports WHERE ref = 'A1'")["incident_id"] == page["id"]
     assert any(x.startswith("County feed attached") for x in rig.feed_lines(inc["id"]))
 
@@ -1841,7 +1842,8 @@ def test_a_feed_incident_is_titled_in_proper_case_and_matches_as_before(tmp_path
     rig.poll()
     [inc] = rig.incidents()
     assert inc["address"] == f"12 Example Ave, {t1}"
-    assert f"at 12 Example Ave {t1}" in inc["remarks"] and snake not in inc["remarks"]
+    assert f"at 12 Example Ave, {t1}" in inc["remarks"] and snake not in inc["remarks"]
+    assert inc["address_raw"] == f"12 EXAMPLE AVE {snake}"         # the feed's text, for matching and audit
     # the same location again (another field changes): no location line, the title stays
     rig.feed.put("A1", type="ALARM/COMM", location=f"12 EXAMPLE AVE {snake}", units=("E60", "L31"),
                  times={"dispatched": T0})

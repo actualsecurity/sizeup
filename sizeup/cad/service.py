@@ -773,8 +773,8 @@ class Cad:
 
     @staticmethod
     def _place(f: dict, old: dict | None = None) -> None:
-        """A named place's location (#204): the address is shown "<street address> @ <place>" ("575 Boston Post Rd @
-        Whole Foods Market"; "@ Whole Foods Market" when the data has no street address), and the place and its street
+        """A named place's location (#204): the address is shown "<street address> @ <place>" ("40 Example Rd @
+        Sample Market"; "@ Sample Market" when the data has no street address), and the place and its street
         address are kept on their own (place, place_address). place given: the address made from it (place_address,
         else what the address says before the "@", else the address typed). An edit of the address alone keeps the place
         while the address still ends with "@ <place>" (the street address typed in front of it); else the place goes."""
@@ -2134,8 +2134,9 @@ class Cad:
                 sub, note = "", note or f"subtype heard as {sub}, not one for {self.lists.type_label(typ)}: pick the subtype"
             except ValueError:                         # a data file without that code: leave it to the operator
                 typ, sub, note = "", "", note or f"type heard: {inc.incident_type}"
-        f = {"type": typ, "subtype": sub, "type_note": note,
-             "address": (address or "")[:200], "cross_street": cross[:200], "remarks": remarks,
+        raw = (address or "")[:200]                    # matched as it is (sources.match_address); stored normalised
+        f = {"type": typ, "subtype": sub, "type_note": note, "address": self._page_address(raw, geo if sure else {}, towns),
+             "address_raw": raw, "cross_street": cross[:200], "remarks": remarks,
              "lat": geo.get("lat") if sure else None, "lon": geo.get("lon") if sure else None,
              "geo_label": (geo.get("label") or "")[:200] if sure else "", "geo_alts": json.dumps(alts) if alts else ""}
         if typ == airport.TYPE:                        # the tower's facts as the page says them (#105)
@@ -2151,7 +2152,7 @@ class Cad:
             data = {"f": f, "ref": ref, "pages": list(getattr(inc, "pages", []) or []), "type_heard": inc.incident_type,
                     "towns": list(towns), "lines": lines}
             at = (inc.page_starts or [inc.opened])[0]
-            how, got = self.sources.page(str(inc.id), at, f["address"] or heard, list(inc.units or []), data)
+            how, got = self.sources.page(str(inc.id), at, f["address_raw"] or heard, list(inc.units or []), data)
             if how == "attached":
                 self._page_enrich(got, inc, f, lines)         # its scope too (#370)
                 self.auto.on_page(got, list(inc.units or []), at)   # 60 Control mode: "paged", its units (#311, #365)
@@ -2172,7 +2173,7 @@ class Cad:
             # its own card, made from less than it says now (the tones half, a first reading): matched again (#365)
             data = {"f": f, "ref": ref, "pages": list(getattr(inc, "pages", []) or []), "type_heard": inc.incident_type,
                     "towns": list(towns), "lines": lines}
-            how, got = self.sources.rematch_page(str(inc.id), old["id"], at, f["address"] or heard,
+            how, got = self.sources.rematch_page(str(inc.id), old["id"], at, f["address_raw"] or heard,
                                                  list(inc.units or []), data)
             if how == "attached":
                 self._page_enrich(got, inc, f, lines)     # its scope too (#370)
@@ -2190,14 +2191,25 @@ class Cad:
             return old
         fill = {k: v for k, v in f.items() if k == "remarks" or
                 (k not in ("type", "subtype", "type_note", "geo_alts") and v not in (None, "") and old[k] in (None, ""))}
+        if "address" not in fill:                      # the text an address came from goes only with that address
+            fill.pop("address_raw", None)
         if old["geo_alts"] and sure:                   # the repeat confirmed what the first reading couldn't (#176)
-            fill.update(address=f["address"], cross_street=f["cross_street"], lat=f["lat"], lon=f["lon"],
+            fill.update(address=f["address"], address_raw=f["address_raw"], cross_street=f["cross_street"], lat=f["lat"], lon=f["lon"],
                         geo_label=f["geo_label"], geo_alts="")
         elif old["geo_alts"] and alts:                 # still unconfirmed: the readings as they stand now
             fill["geo_alts"] = f["geo_alts"]
         if not old["type"] and typ:                    # the repeat said what it is
             fill.update(type=typ, subtype=sub, type_note=note)
         return self.store.update_incident(old["id"], fill, log=False)
+
+    def _page_address(self, raw: str, geo: dict, towns: tuple[str, ...]) -> str:
+        """A page's location as the incident stores it (sources.normal_location): the town it names, else the map's
+        reading's when it is sure of one. An unconfirmed location (#176) gets no town it doesn't name: never a street
+        list's guess (and lists.event_town reads only the heard words, address_raw)."""
+        from sizeup.cad.sources import checked_location, normal_location
+        self.sources._towns()
+        return checked_location(raw, normal_location(raw, geo_label=str(geo.get("label") or ""), within=towns,
+                                                     guess=bool(geo.get("label"))))
 
     @staticmethod
     def _page_towns(inc) -> tuple[str, ...]:

@@ -197,7 +197,8 @@ def test_an_unconfirmed_page_is_not_placed_and_offers_the_readings(gaz):
     inc = store.on_page("p1", ["Port Chester FD"], parse("Port Chester fire, 135 South Remon Street, odor of gas"), at=1000.0)
     assert inc.geo["confirmed"] is False
     ev = cad.from_monitor(inc)
-    assert ev["lat"] is None and ev["geo_label"] == "" and ev["address"] == "135 South Remon Street"
+    assert ev["lat"] is None and ev["geo_label"] == "" and ev["address"] == "135 S Remon St"
+    assert ev["address_raw"] == "135 South Remon Street"            # matched as heard; no town guessed
     assert "location unconfirmed" in ev["remarks"] and "location as heard: 135 South Remon Street" in ev["remarks"]
     card = next(i for i in cad.state()["incidents"] if i["id"] == ev["id"])
     alts = card["geo_alts"]

@@ -242,7 +242,8 @@ class AddressHistory:
         if not ids:
             return 0
         marks = ",".join("?" * len(ids))
-        rows = self.store.q(f"SELECT id, address, place_address, geo_label, lat, lon FROM incidents WHERE id IN ({marks})", ids)
+        rows = self.store.q(f"SELECT id, address, address_raw, place_address, geo_label, lat, lon FROM incidents WHERE id IN ({marks})",
+                            ids)
         keyed = [(self.key_of(r).as_dict(), r) for r in rows]
         with self.store.lock:
             db = self.store.db

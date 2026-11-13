@@ -142,9 +142,9 @@ def event(cad, **kw):
 
 def test_an_incident_keeps_the_place_and_its_address_apart(tmp_path):
     cad = make_cad(tmp_path)
-    inc = event(cad, address="575 Boston Post Rd @ Whole Foods Market", place="Whole Foods Market", lat=40.99242, lon=-73.675505)
+    inc = event(cad, address="40 Example Rd @ Sample Market", place="Sample Market", lat=40.99242, lon=-73.675505)
     assert (inc["address"], inc["place"], inc["place_address"]) == \
-        ("575 Boston Post Rd @ Whole Foods Market", "Whole Foods Market", "575 Boston Post Rd")
+        ("40 Example Rd @ Sample Market", "Sample Market", "40 Example Rd")
     # no street address in the data: "@ <place>" at its own point; the dispatcher types the address in front later
     inc = event(cad, address="", place="Lyon Park", lat=41.001, lon=-73.664)
     assert (inc["address"], inc["place"], inc["place_address"], inc["lat"]) == ("@ Lyon Park", "Lyon Park", "", 41.001)
@@ -161,8 +161,8 @@ def test_an_incident_keeps_the_place_and_its_address_apart(tmp_path):
 
 
 def test_said_on_the_air_without_the_at_sign():
-    w = where({"address": "575 Boston Post Rd @ Whole Foods Market", "cross_street": "S Regent St and High St"})
-    assert "@" not in w and "Whole Foods Market" in w and "575" in w and "cross of" in w
+    w = where({"address": "40 Example Rd @ Sample Market", "cross_street": "S Regent St and High St"})
+    assert "@" not in w and "Sample Market" in w and "40" in w and "cross of" in w
     assert where({"address": "@ Lyon Park"}) == "Lyon Park"
 
 
