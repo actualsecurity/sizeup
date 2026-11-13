@@ -1953,6 +1953,116 @@ doubling to 6 h; the copy we had stays.
 Tests: `tests/test_rail_assets.py`, all synthetic geometry (four parallel tracks, a portal every 100 m, a
 milepost every tenth, also laid along the recorded static feed's line); no Metro-North features in the repo.
 
+## More P25 systems: MTA MRRS (#408, #409)
+
+A second trunked system beside the county's: Metro-25 / MTA MRRS, for Port Chester / Rye / Rye Brook PD, their EMS
+talkgroup, Metro-North and MTA PD. Its traffic is **pre-alert and safety context only**: never Main, never on our
+incident by a rule, never an incident source.
+
+### The system (as listed, community-maintained)
+
+| | |
+|---|---|
+| System | Metro-25 / MTA MRRS, P25 Phase II (TDMA), 700 MHz, system IDs 26D and 26E, WACN 91FE8 |
+| Site | Zone 3 Simulcast (southern Westchester), RFSS 81, site 81, NAC 051 |
+| Frequencies | 769.90625, 770.18125, 770.46875, 770.71875, 772.48125, 773.03125, 773.68125 MHz. Which are control channels is not confirmed (769.90625 was the last one reported): trunk-recorder tries the list |
+| Span | ~3.8 MHz: two 2.4 MHz RTL-SDRs (jobs `MRRS 770` and `MRRS 773`), or one wider SDR |
+
+All of it is data, in `deploy/trunk-recorder/systems/mrrs/`: `config.json` (trunk-recorder's config plus a `"sizeup"`
+block with the label, one job name per source and the site facts) and `talkgroups.csv`. Another system is another
+directory. Adding a talkgroup is one line.
+
+**Hardware**: two more RTL-SDRs and a 700 MHz antenna. The site is simulcast, so `modulation: qpsk` (CQPSK/LSM) as on
+the county system, and Phase II (TDMA). Port Chester is a known weak spot for this site (the nearest subsite is in
+Harrison, beside the railroad): a directional 700 MHz antenna aimed at the Harrison subsite is the fix being
+bought, and an LNA near the
+700 MHz cell bands may make it worse. Some traffic is carried over LTE and is never on RF. Try the reception first
+(#410).
+
+### How it runs
+
+- Each system has its own trunk-recorder process, working directory, log and capture directory
+  (`captures/p25-<name>`). On the station it is a second supervisor inside `sizeup-trunk-recorder`
+  (`trunkrecd.py SystemSupervisor`), told through `state/p25_recorder.<name>.json`. The county's trunk-recorder is
+  never restarted for another system's sake.
+- **Settings > Radios** gives a dongle one of the system's jobs (one per source). The system runs on the sources that
+  have a dongle, with the control channels those cover; with none, nothing runs. These jobs are never auto-assigned,
+  so MRRS is off until a person gives it dongles.
+- The shared dongle claims hold: each dongle is claimed under its job, a dongle another app holds is never taken, and
+  then nothing of that system starts.
+- Its calls come in through their own ingest: only the talkgroups in its file. `recordUnknown` is off.
+
+### Tiers
+
+A talkgroup of another system has a tier, not Record / Main / Transcribe (`sizeup/tiers.py`):
+
+| Tier | Kept | Speech-to-text | STT class |
+|---|---|---|---|
+| `alert` | audio + text | yes; may raise a pre-alert (#411) | context: under every class of ours, shed after 10 min |
+| `text` | audio + text | yes | low: shed when whisper is behind |
+| `record` | audio | no | none |
+| `off` | nothing | no | none |
+| `activity` | when it was active, which radios | never (encrypted) | none |
+
+- The default is the file's `Tier` column. With none, a talkgroup is `record` (no STT cost) and an encrypted one is
+  `activity`. Settings > Radios > Channels changes it per talkgroup.
+- An encrypted talkgroup is only ever `activity` or `off`. Nothing of it is recorded or decoded. Its key-ups are
+  counted per minute with the radio IDs (`radio_activity`), from the control channel's grants.
+- Neither tier is ever ahead of the pages, Fire/EMS 15, the firegrounds, the airband, a Main talkgroup or a
+  person's re-run. Fire traffic never queues behind police.
+- A talkgroup granted on the system that is not in the file is counted as unknown (count, last heard), shown on
+  Settings > Radios, so the file can grow from real traffic.
+
+**Retention**: `[storage] tier_keep_days` (default `{ alert = 30, text = 0, record = 7 }`; 0 = the usual
+`audio_keep_hours`). A clip on a CAD event, with an alarm or an emergency is a record as before. Settings > Radios
+shows the expected storage, from the last 7 days of audio per tier.
+
+**It never costs our own audio anything**
+- Hub: a tier only keeps a clip past the usual hours. Context clips have their own budget
+  (`[storage] context_audio_max_mb`, default 100), and over the audio cap every context clip goes before any clip of
+  ours (lowest tier, then oldest, first).
+- Station outbox: context audio waits in a fifth of the outbox's audio limit and is dropped first, so a hub outage
+  never costs a fire clip.
+- Station disk: the janitor cleans each system's capture and temp directories, 200 MB at most per system.
+- CPU: its trunk-recorder runs niced below the county's.
+- Health: a context system down is shown in the panel only, never an alert or a push. Status rows carry no radio IDs.
+- A system directory that can't be used (a bad file, a talkgroup number or a name of ours used again) is left out and
+  logged. The rest starts.
+- Version skew: a hub from before this is not sent another system's rows; a station from before this is not sent
+  `p25:` channel keys.
+
+### Who sees it
+
+Another system's transcripts and audio are served only to a verified, signed-in person: the hub behind Cloudflare
+Access. One predicate decides (`sourcekeys.may_see_context`), by the row's system, not its service word.
+
+- The station's own page, an all-in-one install and a hub without Access serve none of it: no rows, text, ids or
+  audio in `/api/state`, `/api/stream`, `/api/cad/state`, `/api/cad/comms`, `/api/cad/feed`,
+  `/api/cad/incident/<id>` (a row a person linked is left out) or `/api/audio/<id>.wav` (404).
+- The station still records it and forwards it to the hub.
+- Its words are never written to a log.
+
+### Source keys (#415)
+
+Talkgroup and radio IDs are only unique inside one system, so every source has a qualified key
+(`sizeup/sourcekeys.py`):
+
+| Key | Source |
+|---|---|
+| `p25:<system>:<tg>` | a talkgroup: `p25:westchester:307`, `p25:mrrs:9211` |
+| `fm:<label>`, `air:<label>` | an analog channel, an airband channel |
+
+- `tg:307` still means the county's talkgroup 307, and the county's settings stay saved under the old names, so a
+  release from before this reads them back. Another system's are only ever written qualified
+  (`talkgroups_systems.json`, the `p25:<system>:<tg>` channel keys).
+- Every row of the radio log carries `source`, `system`, `group`, `service` (fire / police / ems / transit / air /
+  other), `ours`, `dept`, `tier` and `safety`. Rows from before were given their source when the columns were added.
+- Until every reader of a bare `talkgroup` number is qualified (the 60 Control feed, the alarm windows, the status
+  hints, the health hints), a system that lists a talkgroup number already used here is left out when the config
+  loads.
+- Another system's radio IDs are never looked up in, or learned into, our radio registry. Its units never link a
+  transmission to our incident by the unit, dispatcher or mention rule. A person's own link still does.
+
 ## Aircraft near HPN (shortfinal's picture)
 
 > "can we pull in the shortfinal components into this as additional layers? the way we implemented the data

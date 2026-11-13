@@ -10,6 +10,11 @@
 // polled every 2 s while this section is open) and /api/cad/stt (the vocabulary);
 // every switch is a POST the server allows admins only (sizeup/cad/api.py WRITES): for anyone else the
 // controls are locked here too (cad.js roLock). Closing the paged incident is a dispatcher's.
+// The reception test (#410, state "reception", POST /api/reception): one dongle lent to one side of another P25
+// system for a while; its numbers, a verdict, the calls it captured to listen to, and the past tests with their
+// antenna notes. Its state is GET /api/reception, admins only (never in /api/state). On the hub it is the station's
+// (the hub sends the POST on, and fetches a sample as it is played). A dongle lent to a test is marked on its row
+// above and its job buttons are locked; a fire dongle can't be picked at all.
 //
 //   RadioControls.mount(box)   when Settings > Radios opens (settings.js)
 "use strict";
@@ -26,6 +31,11 @@ window.RadioControls = (() => {
                rerunBusy: false, rerunMsg: "", confirm: null, confirmTimer: 0, closing: null, closeTimer: 0, n: {},
                stt: null, sttTimer: 0, vocabMsg: "", vocabBusy: false, vocabDirty: false };
   const ENGINES = [["local", "Local"], ["aws", "AWS"], ["both", "Both"]];
+  // Another P25 system's talkgroup has a tier instead of Record / Main / Transcribe (#409, sizeup/tiers.py)
+  const TIERS = [["alert", "Alert"], ["text", "Transcribe"], ["record", "Record only"], ["off", "Off"], ["activity", "Activity only"]];
+  const TIER_HELP = "Alert: recorded, transcribed, may raise a pre-alert.\nTranscribe: recorded and transcribed.\n"
+    + "Record only: audio kept, no speech-to-text.\nOff: dropped.\nActivity only: encrypted, never decoded; "
+    + "only when it was active and which radios.";
   const ENGINE_HELP = "Local: whisper.cpp large-v3 on the station (whisper-server, port 8179).\n"
     + "AWS: Amazon Transcribe streaming, called from the hub (its task role): $0.024 a minute, at least 15 s a stream; "
     + "the station skips whisper and sends the clip.\nBoth: whisper on the station and AWS on the hub; AWS's text is "
@@ -70,6 +80,9 @@ window.RadioControls = (() => {
       n.groups = el("div", "tg-groups rc-groups");
       n.groups.addEventListener("click", onSwitch);
       n.groups.addEventListener("change", onEngine);
+      n.groups.addEventListener("change", onTier);
+      n.systems = el("div", "dim small rc-systems");   // the other P25 systems: state, unknown talkgroups (#409)
+      n.tiers = el("div", "dim small rc-tiers");       // each tier's audio retention and the expected storage
       n.sync = el("div", "small rc-sync");
       n.cost = el("div", "dim small rc-cost");
       n.limitHit = el("p", "notice rc-limit");     // the monthly AWS limit reached (#195): not just a dim line
@@ -81,6 +94,9 @@ window.RadioControls = (() => {
       n.rerunMsg = el("span", "dim small");
       const tools = el("div", "row");
       tools.append(n.filter, n.tgSum);
+      n.rx = el("div", "rx");                        // the reception test (#410)
+      n.rx.append(...rxBuild());
+      n.rxCard = tab("receivers", card("Reception test", RX_HELP, n.rx));
       n.inc = el("div", "row");
       n.close = el("button", "ro-ok", "Close");        // a dispatcher's (ro-ok: not locked with the admin switches)
       n.close.type = "button";
@@ -94,12 +110,13 @@ window.RadioControls = (() => {
              + "no auto-assign ever do. Admins name it with Use for ADS-B on its row, or release it.\nTwo dongles with one serial "
              + "(a factory 00000001) can't be told apart: neither is opened by it until one is renamed; the box above the "
              + "dongles says how.", n.radios, n.dups, n.sdr, n.adsb, n.storage)),
+        n.rxCard,
         tab("receivers", card("Paged incident", "The incident the station opened from the last page: Main traffic attaches to it until it "
              + "goes quiet. Close it when the call is over.", n.inc)),
         tab("channels", card("Channels", "Record: keeps its transmissions (off for FG1, FG2 or South 2: the receiver keeps running, squelch, "
              + "MDC IDs and Talking now stay live, nothing is kept).\nMain: up front in Radio and on our incident; "
              + "the rest are folded under Other talkgroups.\nTranscribe: speech-to-text at all.\nEngine:\n" + ENGINE_HELP,
-             n.sync, n.limitHit, n.cost, tools, n.tgErr, n.groups)),
+             n.sync, n.limitHit, n.cost, n.systems, n.tiers, tools, n.tgErr, n.groups)),
         tab("vocabulary", card("Vocabulary", "Words Amazon Transcribe should expect: unit names, places, streets. AWS takes letters only, "
              + "so numbers go spelled out (Engine 60 \u2192 Engine-sixty) and come back as written. Saved here, sent to "
              + "AWS with Push (the hub's vocabulary sizeup-pcfd), used by new streams once it is Ready.", ...vocabCard())),
@@ -122,6 +139,11 @@ window.RadioControls = (() => {
         st.stateId = s ? r.headers.get("X-State-Id") || "" : "";
         if (s && !s.error) { st.state = s; settle(); render(); }
       }
+      if (!ro()) {                                   // the reception tests (#410): the admins' own, not in the state
+        const x = await fetch("/api/reception", { cache: "no-store" });
+        st.rx = x.ok ? (await x.json()).reception : null;
+      } else st.rx = null;
+      renderReception();
     } catch (_) { /* the next poll tries again */ }
     st.timer = setTimeout(poll, POLL_MS);
   }
@@ -266,6 +288,7 @@ window.RadioControls = (() => {
       setText(row.querySelector(".sdr-label"), (list.length > 1 ? `SDR ${x.name || x.serial}` : "SDR") + (x.present ? "" : " unplugged")
               + (x.ambiguous ? " · serial shared: not opened" : "")
               + (x.held_by ? `: ${x.held_by.app} ${x.held_by.mode}` : "")
+              + (x.lent ? (x.lent.owed ? ` · ${x.lent.paused} NOT restored yet` : ` · lent to reception test · ${x.lent.paused === "Off" ? "was Off" : `${x.lent.paused} paused`}`) : "")
               + (x.set_by === "auto" && x.mode !== "Off" ? ` · ${x.mode} · auto` : ""));   // given by [radio] auto_assign
       setText(row.querySelector(".sdr-err"), st.sdrError);
       const nm = (x.name && x.name !== x.serial ? `${x.name} (serial ${x.serial})` : x.serial) + (x.product ? `, ${x.product}` : "");
@@ -281,14 +304,344 @@ window.RadioControls = (() => {
         b.classList.toggle("active", m === x.mode);
         b.classList.toggle("elsewhere", !!there);
         b.title = there ? `${m} is on SDR ${there.name || there.serial}: click to move it here` : "";
-        b.disabled = !!sdr.switching || st.sdrBusy || ro();
+        // lent to a reception test: locked (Stop the test instead); still owed its job: only that job, "restore now"
+        b.disabled = !!sdr.switching || st.sdrBusy || ro() || !!(x.lent && !(x.lent.owed && m === x.lent.paused));
+        if (x.lent && x.lent.owed && m === x.lent.paused) b.title = `Restore ${m} now (not restored after the reception test: retried every few seconds)`;
       }
+      row.classList.toggle("lent", !!x.lent);
       const ad = row.querySelector(".adsb-use");
       if (ad) {                                       // offered only while no dongle is reserved for ADS-B
         ad.hidden = !sdr.adsb || !!sdr.adsb.serial || !x.serial || ro();
         ad.disabled = st.adsbBusy;
       }
     }
+  }
+
+  // ---- the reception test (#410) ------------------------------------------------------------------------------------
+
+  const RX_HELP = "Can this station hear the system with a dongle it already has?\nLend one dongle to one side of the "
+    + "system's span (a 2.4 MHz dongle takes in one side at a time; Both runs them one after the other). The job that "
+    + "dongle runs is paused and comes back when the test ends, is stopped or fails, and after a restart. A dongle "
+    + "another app holds is never taken. Fire dongles (the county trunk, paging, a fireground) can't be lent.\nControl: the control channel found, its decode rate "
+    + "(about 40 messages/s is full strength), the share of the time it decoded (10/s or more in a 3 s window), the "
+    + "longest dropout, each of the windows there should have been.\nSite: what the control channel said it is, against the site as listed.\nGrants: key-ups the "
+    + "control channel announced, on either side. Calls: voice this dongle captured (its side only). Off side: grants "
+    + "on a voice channel this dongle doesn't cover.\nVerdict: Good = decoded 90% of the time or more at 30 messages/s "
+    + "or more; None = under 5%; Marginal = between, another site, or voice with over 5 errors/s. The numbers are a "
+    + "first guess, not calibrated.\nNothing of a test is transcribed or "
+    + "kept as radio traffic. Encrypted talkgroups are counted only. The calls it captured can be played here for a "
+    + "few minutes (Sample), then they are deleted.\nSome traffic is carried over LTE and is never on the air: a "
+    + "scanner misses it too.";
+  const RX_TIMES = { 15: "15 min", 60: "1 h", 240: "4 h", 0: "Until stopped" };
+  const RX_GRADE = { good: ["Good", "ok"], marginal: ["Marginal", ""], none: ["None", "err"] };
+  const rxSt = { busy: false, error: "", key: "", histKey: "", sampleKey: "" };
+  const hms = (s) => { const n = Math.max(0, Math.floor(s || 0)); return n < 3600 ? mmss(n) : `${Math.floor(n / 3600)}:${String(Math.floor(n / 60) % 60).padStart(2, "0")}:${String(n % 60).padStart(2, "0")}`; };
+  const rxSide = (job) => String(job || "").split(" ").pop();
+  const num = (v, unit = "") => (v == null ? "–" : `${v}${unit}`);
+
+  function rxSelect(cls, label, title) {
+    const s = el("select", `sm ${cls}`);
+    s.setAttribute("aria-label", label);
+    s.title = title;
+    return s;
+  }
+
+  function rxBuild() {
+    const n = st.n;
+    n.rxSys = rxSelect("rx-sys", "System", "The system to test");
+    n.rxJob = rxSelect("rx-job", "Side", "The side of the span the dongle listens to. Both: one after the other, each for the time picked.");
+    n.rxSdr = rxSelect("rx-sdr", "SDR", "The dongle to lend. Greyed out: held by another app, unplugged, or a fire dongle (never lent).");
+    n.rxTime = rxSelect("rx-time", "Time", "How long each side is measured. Until stopped ends by itself after 24 h.");
+    n.rxKeep = el("input", "sm rx-keep");
+    Object.assign(n.rxKeep, { type: "number", min: 0, max: 60, step: 1, value: 10 });
+    n.rxKeep.setAttribute("aria-label", "Sample minutes");
+    const keep = el("label", "rx-keep-l small", "Sample ");
+    keep.append(n.rxKeep, " min");
+    keep.title = "How long each captured call can be played here before it is deleted. 0: no audio is kept.";
+    n.rxNote = el("input", "sm rx-note");
+    Object.assign(n.rxNote, { type: "text", maxLength: 200, placeholder: "Antenna note", autocomplete: "off" });
+    n.rxNote.setAttribute("aria-label", "Antenna note");
+    n.rxNote.title = "Which antenna, where, pointing where: kept with the test, to compare";
+    n.rxGo = el("button", "primary sm", "Start");
+    n.rxGo.type = "button";
+    n.rxGo.addEventListener("click", rxStart);
+    n.rxForm = el("div", "row rx-form");
+    n.rxForm.append(n.rxSys, n.rxJob, n.rxSdr, n.rxTime, keep, n.rxNote, n.rxGo);
+    for (const x of [n.rxSdr, n.rxJob]) x.addEventListener("change", () => { rxSt.key = ""; renderReception(); });
+    n.rxAlert = el("p", "notice err rx-alert");
+    n.rxAlert.hidden = true;
+    n.rxPause = el("div", "small rx-pause");
+    n.rxErr = el("div", "sdr-err");
+    n.rxLive = el("div", "rx-live");
+    n.rxSamples = el("div", "rx-samples");
+    n.rxHist = el("div", "rx-hist");
+    n.rxHist.addEventListener("change", rxNoteChange);
+    return [n.rxAlert, n.rxForm, n.rxPause, n.rxErr, n.rxLive, n.rxSamples, n.rxHist];
+  }
+
+  function rxOptions(sel, rows, keep) {       // rows: [value, text, disabled]
+    const key = JSON.stringify(rows);
+    if (sel.dataset.key === key) return;
+    const was = keep != null ? keep : sel.value;
+    sel.replaceChildren(...rows.map(([v, t, off]) => { const o = new Option(t, v); o.disabled = !!off; return o; }));
+    sel.dataset.key = key;
+    if (rows.some(([v, , off]) => String(v) === was && !off)) sel.value = was;
+    else { const first = rows.find((r) => !r[2]); sel.value = first ? first[0] : ""; }
+  }
+
+  function rxPill(grade) {
+    const [word, cls] = RX_GRADE[grade] || ["–", "off"];
+    return el("span", `pill ${cls}`, word);
+  }
+
+  function rxSpark(series, stepS) {           // the decode rate over the side: 0 to 45 messages/s
+    const ns = "http://www.w3.org/2000/svg", w = 120, h = 20;
+    const svg = document.createElementNS(ns, "svg");
+    svg.setAttribute("viewBox", `0 0 ${w} ${h}`);
+    svg.setAttribute("class", "rx-spark");
+    svg.setAttribute("role", "img");
+    const title = document.createElementNS(ns, "title");
+    title.textContent = `Decode rate over time, one point per ${Math.round(stepS / 60)} min (0 to 45 messages/s)`;
+    const line = document.createElementNS(ns, "polyline");
+    const pts = series.length > 1 ? series : [series[0] || 0, series[0] || 0];
+    line.setAttribute("points", pts.map((v, i) => `${(i * w / (pts.length - 1)).toFixed(1)},${(h - 1 - Math.min(45, v) / 45 * (h - 2)).toFixed(1)}`).join(" "));
+    svg.append(title, line);
+    return svg;
+  }
+
+  function rxRow(tb, label, title, ...cells) {
+    const tr = el("tr");
+    const th = el("th", "", label);
+    th.scope = "row";
+    th.title = title;
+    const td = el("td"), row = el("div", "row");
+    row.append(...cells.map((c) => (typeof c === "string" ? el("span", "", c) : c)));
+    td.append(row);
+    tr.append(th, td);
+    tb.append(tr);
+  }
+
+  function rxSideBlock(h, running) {          // one side's numbers: a finished one, or the running one so far
+    const box = el("div", "rx-side");
+    const cc = h.cc, v = h.verdict || {}, site = h.site || {}, sig = h.signal || {};
+    const head = el("div", "row");
+    head.append(rxPill(v.grade), el("b", "", `${h.job} · ${h.mhz} MHz`), el("span", "dim small", `${hms(h.seconds)}${running ? " so far" : ""}`));
+    box.append(head);
+    if (v.hint) box.append(el("p", "small rx-hint", v.hint));
+    const t = el("table", "table rx-nums"), tb = el("tbody");
+    const ctl = [cc.found ? `${cc.mhz} MHz · ${num(cc.rate, "/s")} · decoded ${cc.decoded_pct}%`
+      : cc.windows ? `not found · ${num(cc.rate, "/s")} · decoded ${cc.decoded_pct}%` : "no decode rate logged",
+      cc.windows ? ` · dropout ${hms(cc.dropout_s)} · ${cc.retunes} retune${cc.retunes === 1 ? "" : "s"}` : ""].join("");
+    const cells = [ctl];
+    if (cc.series && cc.series.length) cells.push(rxSpark(cc.series, cc.series_step_s));
+    rxRow(tb, "Control", "The control channel found, its mean decode rate (about 40 messages/s is full strength), the share of "
+      + "3 s windows with 10/s or more, the longest run under that, and how often trunk-recorder moved to another "
+      + "listed frequency.\n" + (cc.per_freq || []).map((f) => `${f.mhz}: ${f.rate}/s, decoded ${f.decoded_pct}% (${f.windows} windows)`).join("\n"), ...cells);
+    const seen = site.seen || {};
+    rxRow(tb, "Site", "What the control channel said it is, against the site as listed", Object.keys(seen).length
+      ? ["sysid", "wacn", "nac", "rfss", "site"].filter((k) => seen[k] != null).map((k) => `${k.toUpperCase()} ${seen[k]}`).join(" · ")
+        + (site.match === true ? " · as listed" : site.match === false ? ` · NOT as listed (${site.differs.join(", ")})` : "")
+      : "not decoded");
+    const sw = sig.sweep;
+    rxRow(tb, "Signal", "Control: the control channel's level over the noise floor, swept before the test (rtl_power). Voice: the "
+      + "signal-to-noise ratio trunk-recorder measured on the calls it captured.\n"
+      + (sw ? sw.channels.map((c) => `${c.mhz}: ${c.over_db >= 0 ? "+" : ""}${c.over_db} dB`).join("\n") : "No sweep (rtl_power not found)."),
+      [sig.cc_over_db != null ? `control +${sig.cc_over_db} dB over floor` : sw ? `strongest listed +${Math.max(...sw.channels.map((c) => c.over_db))} dB over floor` : "",
+       sig.voice_snr_db != null ? `voice SNR ${sig.voice_snr_db} dB` : ""].filter(Boolean).join(" · ") || "n/a");
+    const vo = h.voice;
+    rxRow(tb, "Voice", "Calls this dongle captured (its side only): how many, per hour, their audio, decode errors per second of audio",
+      vo.calls ? `${vo.calls} call${vo.calls === 1 ? "" : "s"} · ${num(vo.calls_per_h, "/h")} · ${hms(vo.audio_s)} · ${num(vo.err_per_s, " err/s")}` : "none captured");
+    rxRow(tb, "Encrypted", "Grants on encrypted talkgroups: counted, never decoded, no radio ID kept. Unknown: talkgroups not in the system's file.",
+      `${h.encrypted_grants} grant${h.encrypted_grants === 1 ? "" : "s"} · unknown ${h.unknown_grants}`);
+    t.append(tb);
+    box.append(t);
+    if (h.talkgroups.length) {
+      const g = el("table", "table rx-tgs"), gh = el("tr"), gb = el("tbody");
+      for (const [c, tip] of [["Talkgroup", ""], ["Grants", "Key-ups the control channel announced, on either side of the span"],
+                              ["Off side", "Grants on a voice channel this dongle doesn't cover"], ["Calls", "Voice calls captured on this side"],
+                              ["/h", "Calls per hour"], ["Audio", ""], ["Err/s", "Decode errors per second of audio"]]) {
+        const th = el("th", "", c);
+        th.title = tip;
+        gh.append(th);
+      }
+      for (const r of h.talkgroups) {
+        const tr = el("tr", r.watch ? "rx-watch" : "");
+        tr.append(el("td", "", `${r.tg} ${r.name}`), el("td", "num", String(r.grants)), el("td", "num", String(r.uncovered)),
+                  el("td", "num", String(r.calls)), el("td", "num", num(r.calls_per_h)), el("td", "num", hms(r.audio_s)), el("td", "num", num(r.err_per_s)));
+        gb.append(tr);
+      }
+      const thead = el("thead");
+      thead.append(gh);
+      g.append(thead, gb);
+      box.append(g);
+    }
+    return box;
+  }
+
+  function renderReception() {
+    const n = st.n, rx = st.rx;
+    if (!n.rxCard) return;
+    show(n.rxCard, !!rx);
+    if (!rx) return;
+    setText(n.rxAlert, rx.alert || "");
+    show(n.rxAlert, !!rx.alert);
+    const a = rx.active, locked = ro();
+    // the form
+    show(n.rxForm, !a);
+    show(n.rxPause, !a);
+    rxOptions(n.rxSys, rx.systems.map((x) => [x.name, x.label]));
+    show(n.rxSys, rx.systems.length > 1);
+    const sys = rx.systems.find((x) => x.name === n.rxSys.value) || rx.systems[0];
+    rxOptions(n.rxJob, [...sys.jobs.map((j) => [j.job, `${rxSide(j.job)} side · ${j.mhz}`]),
+                        ...(sys.jobs.length > 1 ? [[sys.jobs.map((j) => j.job).join("|"), "Both, in turn"]] : [])]);
+    rxOptions(n.rxTime, rx.durations.map((m) => [String(m), RX_TIMES[m] || `${m} min`, m === 0 && n.rxJob.value.includes("|")]));
+    rxOptions(n.rxSdr, rx.dongles.map((d) => [d.serial, `SDR ${d.name} · ${d.job}${d.refuse ? ` · ${d.protected ? "fire: not lendable" : d.refuse}` : ""}`, !!d.refuse]));
+    const d = rx.dongles.find((x) => x.serial === n.rxSdr.value && !x.refuse);
+    setText(n.rxPause, !d ? "No dongle to lend" : d.job === "Off" ? "" : `Pauses ${d.job} on SDR ${d.name}; restored after`);
+    n.rxGo.disabled = rxSt.busy || locked || !d;
+    for (const x of [n.rxSys, n.rxJob, n.rxSdr, n.rxTime, n.rxKeep, n.rxNote]) x.disabled = locked;
+    setText(n.rxErr, rxSt.error);
+    // the running test
+    const key = JSON.stringify([a && [a.id, a.step, a.phase, a.halves.length, a.running, Math.floor((a.now - (a.phase_started || a.now)) / 2)], locked, rxSt.busy]);
+    if (key !== rxSt.key) {
+      rxSt.key = key;
+      const kids = [];
+      if (a) {
+        const head = el("div", "row rx-run");
+        const job = a.plan[a.phase], total = a.minutes ? a.minutes * 60 : 0;
+        const went = a.phase_started ? a.now - a.phase_started : 0;
+        const paused = el("span", "pill rx-paused", a.was && a.was !== "Off" ? `${a.was} PAUSED` : "");
+        paused.title = "This job is off its dongle while the test runs. It comes back when the test ends, is stopped or fails.";
+        show(paused, !!(a.was && a.was !== "Off"));
+        head.append(el("b", "", a.step === "stopping" ? `Stopping ${job}` : a.step === "starting" ? `Starting ${job}`
+                                : `${job}${a.plan.length > 1 ? ` (${a.phase + 1} of ${a.plan.length})` : ""}`),
+                    el("span", "", `SDR ${a.sdr_name}`),
+                    el("span", "", a.step !== "running" ? "" : total ? `${hms(went)} of ${hms(total)}` : `${hms(went)}, until stopped`),
+                    paused);
+        const stop = el("button", "sm", "Stop");
+        stop.type = "button";
+        stop.title = "End the test now: its numbers so far are kept, the dongle goes back to its job";
+        stop.disabled = rxSt.busy || locked || a.step === "stopping";
+        stop.addEventListener("click", () => rxPost({ action: "stop" }));
+        head.append(stop);
+        kids.push(head, ...a.halves.map((h) => rxSideBlock(h, false)));
+        if (a.running) kids.push(rxSideBlock(a.running, true));
+      }
+      n.rxLive.replaceChildren(...kids);
+    }
+    // the calls it captured, while they are kept
+    // (#419) where nobody is signed in (the station's own page): only how many, and where to listen
+    const skey = rx.samples_at === "hub" ? `hub:${rx.samples_kept || 0}` : rx.samples.map((s) => s.id).join("|");
+    if (skey !== rxSt.sampleKey) {
+      rxSt.sampleKey = skey;
+      const rows = rx.samples.map((s) => {
+        const row = el("div", "row rx-sample");
+        row.dataset.id = s.id;
+        const au = el("audio");
+        Object.assign(au, { controls: true, preload: "none", src: `/api/reception/sample?id=${encodeURIComponent(s.id)}` });
+        row.append(el("span", "num", fmtTime(s.at, true)), el("span", "", `${s.tg} ${s.name}`),
+                   el("span", "dim", `${hms(s.seconds)} · ${s.errors} err`), au, el("span", "dim small rx-left"));
+        return row;
+      });
+      n.rxSamples.replaceChildren(...(rx.samples_at === "hub"
+        ? (rx.samples_kept ? [el("div", "dim small", `${rx.samples_kept} captured call${rx.samples_kept === 1 ? "" : "s"} \u00b7 sample: listen from the hub`)] : [])
+        : rows.length ? [el("div", "dim small", "Captured calls (deleted after their minutes)"), ...rows] : []));
+    }
+    for (const s of rx.samples) {
+      const row = [...n.rxSamples.children].find((r) => r.dataset.id === s.id);
+      if (row) setText(row.querySelector(".rx-left"), `deleted in ${hms(s.keep_s - s.age_s)}`);
+    }
+    // the past tests
+    const hkey = JSON.stringify([rx.history, locked]);
+    if (hkey !== rxSt.histKey && !n.rxHist.contains(document.activeElement)) {
+      rxSt.histKey = hkey;
+      if (!rx.history.length) n.rxHist.replaceChildren();
+      else {
+        const watch = sys.watch[0];
+        const t = el("table", "table rx-history"), hr = el("tr"), tb = el("tbody"), thead = el("thead");
+        for (const [c, tip] of [["When", ""], ["Side", ""], ["SDR", "The dongle lent, and the job it paused"], ["Time", "Measured, per side"],
+                                ["Verdict", "Per side. Hover for the hint."], ["Control", "The control channel found, MHz"],
+                                ["Decoded", "Share of the time the control channel decoded, and its mean rate"],
+                                [watch ? `${watch} /h` : "Calls /h", "Voice calls captured per hour" + (watch ? ` on talkgroup ${watch}` : "")],
+                                ["Antenna note", "Which antenna, where, pointing where"]]) {
+          const th = el("th", "", c);
+          th.title = tip;
+          hr.append(th);
+        }
+        for (const h of rx.history) {
+          const tr = el("tr");
+          const hs = h.halves || [];
+          const join = (f) => hs.map(f).join(" / ") || "–";
+          const verdict = el("td");
+          hs.forEach((x) => { const p = rxPill(x.grade); p.title = x.hint || ""; verdict.append(p, " "); });
+          if (h.status !== "done") verdict.append(el("span", "dim small", h.status));
+          if (h.restored_ok === false) verdict.append(el("span", "pill err", "not restored"));
+          verdict.title = [h.why, h.restored && `SDR ${h.sdr_name}: ${h.restored}`].filter(Boolean).join("\n");
+          const note = el("input", "sm rx-note");
+          Object.assign(note, { type: "text", maxLength: 200, value: h.note || "", disabled: locked, placeholder: "Antenna note" });
+          note.setAttribute("aria-label", "Antenna note");
+          note.dataset.id = h.id;
+          const nt = el("td");
+          nt.append(note);
+          const per = (x) => { const w = (x.watch || []).find((y) => y.tg === watch); return w ? num(w.calls_per_h) + (w.grants && !w.calls ? ` (${w.grants} grants)` : "") : num(x.calls); };
+          tr.append(el("td", "t", fmtTime(h.started)),
+                    el("td", "", join((x) => rxSide(x.job))), el("td", "", h.sdr_name + (h.was && h.was !== "Off" ? ` (${h.was})` : "")),
+                    el("td", "num", join((x) => hms(x.seconds))), verdict, el("td", "num", join((x) => num(x.cc_mhz))),
+                    el("td", "num", join((x) => `${num(x.decoded_pct, "%")} ${num(x.rate, "/s")}`)), el("td", "num", join(per)), nt);
+          tb.append(tr);
+        }
+        thead.append(hr);
+        t.append(thead, tb);
+        n.rxHist.replaceChildren(t);
+      }
+    }
+  }
+
+  async function rxPost(body) {
+    if (rxSt.busy || ro()) return false;
+    rxSt.busy = true;
+    rxSt.error = "";
+    renderReception();
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), 20000);
+    let ok = false;
+    try {
+      const r = await fetch("/api/reception", { method: "POST", headers: { "Content-Type": "application/json" },
+                                                body: JSON.stringify(body), signal: ctl.signal });
+      ok = r.ok;
+      if (!r.ok) rxSt.error = ((await r.json().catch(() => ({}))).error) || `refused (${r.status})`;
+    } catch (e) {
+      rxSt.error = e.name === "AbortError" ? "no answer from the server, try again" : "couldn't reach the server";
+    } finally {
+      clearTimeout(timer);
+      rxSt.busy = false;
+      rxSt.key = "";
+      renderReception();
+      poll();                                        // the test's new state now, not at the next poll
+    }
+    return ok;
+  }
+
+  async function rxStart() {
+    const n = st.n, rx = st.rx;
+    const d = rx && rx.dongles.find((x) => x.serial === n.rxSdr.value && !x.refuse);
+    if (!d || ro()) return;
+    const minutes = Number(n.rxTime.value), jobs = n.rxJob.value.split("|");
+    const body = { action: "start", system: n.rxSys.value, jobs, sdr: d.serial, minutes, keep_min: Number(n.rxKeep.value) || 0, note: n.rxNote.value };
+    const span = (RX_TIMES[minutes] || "").toLowerCase() + (jobs.length > 1 ? " a side" : "");
+    if (d.job !== "Off") {
+      const yes = await UI.confirm(`Pause ${d.job} on SDR ${d.name} for the test (${span})? ${d.job} is not heard meanwhile. `
+        + "It comes back when the test ends, is stopped or fails, and after a restart.",
+        { ok: `Pause ${d.job}`, title: "Reception test", danger: false });
+      if (!yes) return;
+      body.pause = d.job;
+    }
+    if (await rxPost(body)) n.rxNote.value = "";
+  }
+
+  function rxNoteChange(e) {
+    const i = e.target.closest("input.rx-note");
+    if (i && i.dataset.id) rxPost({ action: "note", id: i.dataset.id, note: i.value });
   }
 
   // ---- the ADS-B receiver (#235): reserved by serial, its decoder's state ------------------------------------------
@@ -374,7 +727,7 @@ window.RadioControls = (() => {
     }
   }
 
-  async function setSdrMode(mode, serial) {
+  async function setSdrMode(mode, serial, confirm) {
     if (st.sdrBusy || ro()) return;
     st.sdrBusy = true;
     st.sdrError = "";
@@ -383,8 +736,19 @@ window.RadioControls = (() => {
     const timer = setTimeout(() => ctl.abort(), 15000);      // never leave the switches disabled
     try {
       const r = await fetch("/api/mode", { method: "POST", headers: { "Content-Type": "application/json" },
-                                           body: JSON.stringify(serial ? { mode, sdr: serial } : { mode }), signal: ctl.signal });
-      if (!r.ok) st.sdrError = ((await r.json().catch(() => ({}))).error) || `switch refused (${r.status})`;
+                                           body: JSON.stringify({ mode, ...(serial ? { sdr: serial } : {}), ...(confirm ? { confirm: true } : {}) }),
+                                           signal: ctl.signal });
+      if (!r.ok) {
+        const why = ((await r.json().catch(() => ({}))).error) || `switch refused (${r.status})`;
+        // a fire job's dongle to another P25 system's job (#409): the server asks, the person says so, sent again
+        if (!confirm && why.startsWith("confirm: ")) {
+          clearTimeout(timer);
+          st.sdrBusy = false;
+          if (await UI.confirm(why.slice(9), { ok: `Give it to ${mode}`, danger: true })) return setSdrMode(mode, serial, true);
+          return renderSdr();
+        }
+        st.sdrError = why;
+      }
     } catch (e) {
       st.sdrError = e.name === "AbortError" ? "no answer from the server, try again" : "couldn't reach the server";
     } finally {
@@ -482,7 +846,11 @@ window.RadioControls = (() => {
   // state.talkgroups is the truth. A switch shows at once (pending) until a push agrees, or 8 s.
 
   function talkgroups() {
-    const rows = ((st.state && st.state.talkgroups) || []).map((r) => ({ ...r, ...chan(`tg:${r.tg}`), record: r.record }));
+    const rows = ((st.state && st.state.talkgroups) || []).map((r) => {
+      const c = chan(r.key || `tg:${r.tg}`);
+      if (r.tier_set) c.transcribe = r.tier === "alert" || r.tier === "text";      // its tier says (#409)
+      return { ...r, ...c, ckey: r.key || `tg:${r.tg}`, record: r.record };
+    });
     return st.pending.size ? rows.map((r) => (st.pending.has(r.tg) ? { ...r, ...st.pending.get(r.tg).vals, pending: true } : r)) : rows;
   }
   // Channel choices (sizeup/channels.py): the default (AWS for [stt] aws_channels, no text for [stt] record_only),
@@ -567,6 +935,47 @@ window.RadioControls = (() => {
     if (!s || s.disabled || ro()) return;
     const li = s.closest(".tg-row"), key = li.dataset.ckey;
     setChannel(key, "engine", s.value, li.dataset.label || key);
+  }
+  async function onTier(e) {
+    const s = e.target.closest("select.tg-tier");
+    if (!s || s.disabled || ro()) return;
+    const li = s.closest(".tg-row");
+    st.error = "";
+    try {
+      await post("/api/talkgroup", { source: li.dataset.source, tier: s.value });
+    } catch (err) {
+      st.error = `Couldn't change the tier of ${li.dataset.label}: ${err.message}`;
+    }
+    renderTalkgroups();
+  }
+  function systemLabel(name) {
+    const sys = ((st.state && st.state.p25_systems) || []).find((x) => x.name === name);
+    return sys ? sys.label : String(name || "").toUpperCase();
+  }
+  function tierSelect() {
+    const sel = el("select", "tg-tier sm");
+    for (const [v, label] of TIERS) sel.append(new Option(label, v));
+    sel.setAttribute("aria-label", "Tier");
+    sel.title = TIER_HELP;
+    return sel;
+  }
+  // The other P25 systems (state.p25_systems) and the tiers' retention (state.channels.tiers): one line each
+  function renderSystems() {
+    const n = st.n, sys = (st.state && st.state.p25_systems) || [], t = ((st.state && st.state.channels) || {}).tiers;
+    const jobs = (x) => x.jobs.map((j) => `${j.job}${j.sdr ? ` on ${j.sdr}` : ""}`).join(", ");
+    setText(n.systems, sys.map((x) => `${x.label}: ${x.state}`
+      + (x.cc && x.cc.rate != null ? ` · control ${x.cc.rate}/s` : "")
+      + (x.unknown && x.unknown.length ? ` · ${x.unknown.length} unknown TG${x.unknown.length === 1 ? "" : "s"}` : "")
+      + (x.encrypted && x.encrypted.length ? ` · encrypted last ${fmtTime(x.encrypted[0].at)}` : "")).join(" · "));
+    n.systems.title = sys.map((x) => `${x.title}\n${jobs(x)}\n${x.detail || ""}`
+      + (x.unknown && x.unknown.length ? "\nNot in its talkgroups file: " + x.unknown.slice(0, 20).map((u) => `${u.tg} ×${u.count}`).join(", ") : "")).join("\n\n");
+    show(n.systems, sys.length > 0);
+    const hours = (st.state && st.state.storage && st.state.storage.audio_hours) || 12;
+    const keep = (r) => (r.keep_days ? `${r.keep_days} d` : `${hours} h`);
+    setText(n.tiers, t && sys.length ? "Audio kept: " + t.storage.tiers.map((r) => `${r.label} ${keep(r)}`).join(" · ")
+      + ` · ≈ ${t.storage.mb} MB ($${t.storage.usd_month.toFixed(2)}/mo)` : "");
+    if (t) n.tiers.title = "Expected storage, from the last 7 days of audio per tier.\n" + t.storage.tiers.map((r) => `${r.label}: ${Math.round(r.s_per_day / 60)} min/day, ${r.mb} MB`).join("\n");
+    show(n.tiers, !!(t && sys.length));
   }
   async function setGroup(group, record) {
     const rows = ((st.state && st.state.talkgroups) || []).filter((r) => (r.group || "") === group && !(record && r.encrypted));
@@ -669,6 +1078,7 @@ window.RadioControls = (() => {
   }
 
   function renderTalkgroups() {
+    renderSystems();
     if (!st.box) return;
     renderSync();
     const n = st.n, rows = talkgroups(), lock = ro();
@@ -687,8 +1097,9 @@ window.RadioControls = (() => {
     show(n.tgErr, !!st.error);
     const by = new Map();
     for (const r of shown) {
-      if (!by.has(r.group || "")) by.set(r.group || "", []);
-      by.get(r.group || "").push(r);
+      const gk = (r.tier_set ? `${r.system}\u0001` : "") + (r.group || "");     // (#409) never blended into a county group
+      if (!by.has(gk)) by.set(gk, []);
+      by.get(gk).push(r);
     }
     const rank = (g) => { const i = GROUP_ORDER.indexOf(g); return i < 0 ? GROUP_ORDER.length - 1 : i; };
     const groups = [...by.entries()].sort((a, b) => rank(a[0]) - rank(b[0]) || a[0].localeCompare(b[0]))
@@ -696,7 +1107,7 @@ window.RadioControls = (() => {
                                                          || a.name.localeCompare(b.name, "en", { numeric: true })) }));
     if (fm.length) groups.unshift({ g: "\u0000fm", fm: true, list: fm });
     const rowSig = (r) => JSON.stringify([r.name, r.record, r.main, r.encrypted, r.count, r.last, r.dropped, !!r.pending, fmtTime(r.last),
-                                         st.confirm === r.tg, lock, r.transcribe, r.engine, r.effective, !!r.cpending, channelNote(r),
+                                         st.confirm === r.tg, lock, r.transcribe, r.engine, r.effective, !!r.cpending, channelNote(r), r.tier,
                                          (((st.state && st.state.channels) || {}).sync || {}).state]);
     syncList(n.groups, groups, {
       key: (x) => `g:${x.g}`,
@@ -718,7 +1129,8 @@ window.RadioControls = (() => {
           setText(gcount, `${x.list.length} channel${x.list.length === 1 ? "" : "s"}, squelch + MDC IDs`);
           show(gsw, false);
         } else {
-          show(gsw, true);
+          const other = x.list.length > 0 && !!x.list[0].tier_set;      // another P25 system's: tiers, row by row
+          show(gsw, !other);
           const dec = x.list.filter((r) => !r.encrypted), on = dec.filter((r) => r.record).length;
           const all = dec.length > 0 && on === dec.length, mixed = on > 0 && !all;
           gsw.dataset.group = x.g;
@@ -726,13 +1138,13 @@ window.RadioControls = (() => {
           gsw.classList.toggle("mixed", mixed);
           gsw.disabled = !dec.length || lock;
           gsw.title = !dec.length ? "All encrypted" : all ? `Recording all ${dec.length}: tap to stop` : `Record all ${dec.length} (encrypted stay off)`;
-          setText(gchip, groupName(x.g));
+          setText(gchip, other ? `${systemLabel(x.list[0].system)} \u00b7 ${groupName(x.list[0].group)}` : groupName(x.g));
           gchip.style.setProperty("--c", groupColor(x.g));
           const m = x.list.filter((r) => r.main).length, hd = x.list.filter((r) => r.count).length;
           setText(gcount, `${x.list.length} TG${x.list.length === 1 ? "" : "s"}` + (m ? `, ${m} main` : "") + (hd ? `, ${hd} heard` : ""));
         }
         syncList(ol, x.list, {
-          key: (r) => (r.fm ? r.key : String(r.tg)),
+          key: (r) => (r.fm ? r.key : String(r.tg)),      // (talkgroup numbers are unique across the systems here)
           sig: rowSig,
           make: () => {
             const li = el("li", "tg-row");
@@ -741,7 +1153,7 @@ window.RadioControls = (() => {
             const info = el("div", "tg-info");
             info.append(el("span", "tg-heard"), el("span", "tg-note"));
             const sw = el("div", "tg-sw");
-            sw.append(switchButton("record"), switchButton("main"), switchButton("transcribe"), engineSelect());
+            sw.append(switchButton("record"), switchButton("main"), switchButton("transcribe"), engineSelect(), tierSelect());
             li.append(id, info, sw);
             return li;
           },
@@ -751,7 +1163,8 @@ window.RadioControls = (() => {
             const [heard, note] = info.children;
             const confirming = !r.fm && st.confirm === r.tg;
             li.dataset.fm = r.fm ? "1" : "";
-            li.dataset.ckey = r.fm ? r.chan : `tg:${r.tg}`;
+            li.dataset.ckey = r.fm ? r.chan : r.ckey;
+            li.dataset.source = r.source || "";
             li.dataset.label = r.name;
             li.className = "tg-row" + (r.main ? " main" : "") + (r.encrypted ? " enc" : "") + (r.record ? "" : " norec")
               + (r.pending || r.cpending ? " pending" : "") + (confirming ? " confirm" : "") + (r.effective === "aws" || r.effective === "both" ? " aws" : "");
@@ -770,14 +1183,22 @@ window.RadioControls = (() => {
             setText(note, t);
             note.className = "tg-note" + (confirming ? " warn" : r.encrypted ? " enc" : "");
             show(note, !!t);
-            const [recB, mainB, sttB, engS] = sw.children;
+            const [recB, mainB, sttB, engS, tierS] = sw.children;
+            show(tierS, !!r.tier_set);                    // another system's talkgroup: its tier is the switch
+            if (r.tier_set) {
+              if (tierS.value !== r.tier) tierS.value = r.tier;
+              for (const o of tierS.options) o.disabled = r.encrypted ? !["activity", "off"].includes(o.value) : o.value === "activity";
+              tierS.disabled = lock;
+            }
             setSwitch(recB, !!r.record, confirming ? "Record?" : "Record");
             recB.title = r.record ? "Recording: transmissions kept (and transcribed if Transcribe is on)"
               : r.fm ? "Not recording: the receiver runs (squelch, MDC IDs, Talking now), nothing is kept"
               : r.encrypted ? "Encrypted: can't be decoded" : "Not recording: calls dropped";
             setSwitch(mainB, !!r.main, "Main");
             mainB.title = r.main ? "Main: up front in Radio, on our incident" : "Other: folded in Radio";
-            show(mainB, !r.fm);
+            show(mainB, !r.fm && !r.tier_set);
+            show(recB, !r.tier_set);
+            show(sttB, !r.tier_set);
             setSwitch(sttB, !!r.transcribe, "Transcribe");
             sttB.title = r.transcribe ? "Speech-to-text on" : "Kept without a transcript";
             if (engS.value !== r.engine) engS.value = r.engine;

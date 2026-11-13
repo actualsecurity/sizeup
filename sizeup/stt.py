@@ -35,6 +35,11 @@ SHORT_S = 1.5
 # the station's whisper fell 9 h behind and the newest clips were refused and lost; #300: it fell 60-80 min behind
 # because the context talkgroups alone bring more clips than it can do (each costs the same ~16 s, however short).
 URGENT, HIGH, LIVE, RERUN, LOW = -2, -1, 0, 1, 2
+# Another P25 system's `alert` talkgroups (#409, sizeup/tiers.py: police dispatch on MTA MRRS): a class of their own,
+# under every class of ours (pages, Fire/EMS 15, the firegrounds, the airband, the Main talkgroups, a person's re-run)
+# and shed when it waits: fire traffic never queues behind police. Their `text` talkgroups are LOW.
+CONTEXT = 1.5
+CONTEXT_MAX_WAIT_S = 600.0  # a context system's alert clip waiting this long is shed: a late pre-alert is no use
 STALE = 3                   # (kept for callers: a class's stale items now go after its fresh ones, not after all)
 QUEUE_MAX = 2000            # items waiting at most: past it the worst one goes (lowest priority, then oldest)
 CHANNEL_CAP = 400           # one channel's items waiting at most: past it that channel's worst one goes
@@ -47,9 +52,9 @@ LOW_MAX_WAIT_S = 900.0      # a context talkgroup's clip waiting this long is sh
 BEHIND_S = 120.0            # the oldest live clip waiting this long: "behind" (context clips get one greedy pass)
 RATE_WINDOW_S = 1800.0      # clips in / out per hour are counted over this long
 LIVE_CLASSES = (URGENT, HIGH, LIVE)
-SHED_AFTER = {HIGH: HIGH_MAX_WAIT_S, LOW: LOW_MAX_WAIT_S}
+SHED_AFTER = {HIGH: HIGH_MAX_WAIT_S, CONTEXT: CONTEXT_MAX_WAIT_S, LOW: LOW_MAX_WAIT_S}
 SHED = "skipped: busy"      # what a shed clip's reason starts with: its status is "skipped", not "error" (re-runnable)
-CLASS_NAMES = {URGENT: "urgent", HIGH: "high", LIVE: "live", RERUN: "rerun", LOW: "low"}
+CLASS_NAMES = {URGENT: "urgent", HIGH: "high", LIVE: "live", RERUN: "rerun", CONTEXT: "context", LOW: "low"}
 
 
 def wav_bytes(audio: np.ndarray, rate: int = 16000) -> bytes:
@@ -271,7 +276,8 @@ class SttQueue:
         skips.extend((e[2], f"waited {int((now - e[5]) // 60)} min for speech-to-text: skipped, "
                                     "too far behind (Re-transcribe it if it matters)") for e in old)
         sheds.extend((e[2], f"{SHED}: speech-to-text {int((now - e[5]) // 60)} min behind, "
-                            + ("an airband clip is no use late" if e[0] == HIGH else "a context talkgroup")
+                            + ("an airband clip is no use late" if e[0] == HIGH else
+                               "another system's talkgroup" if e[0] == CONTEXT else "a context talkgroup")
                             + " (Re-transcribe it if it matters)") for e in shed)
         if not self._items:
             return None
@@ -328,6 +334,7 @@ class SttQueue:
         for _at, ch, _p, _f in arrived:
             came[ch or "?"] = came.get(ch or "?", 0) + 1
         return {"queued": len(items), "urgent": sum(1 for e in live if e[0] == URGENT),
+                "context": sum(1 for e in items if e[0] == CONTEXT),       # another P25 system's alert clips (#409)
                 "high": sum(1 for e in live if e[0] == HIGH), "live": len(live), "low": len(low),
                 "rerun": sum(1 for e in items if e[0] == RERUN),
                 "fallback": sum(1 for e in items if e[6]),
@@ -407,7 +414,7 @@ class Transcriber:
             prio, _n, item, audio = self._q.get()
             self._working = True
             # behind: a context talkgroup's clip gets one greedy pass (no temperature fallback), #300
-            fast = {"fast": True} if prio == LOW and self._q.behind() else {}
+            fast = {"fast": True} if prio in (LOW, CONTEXT) and self._q.behind() else {}
             for attempt in range(3):
                 try:
                     t0 = time.monotonic()
