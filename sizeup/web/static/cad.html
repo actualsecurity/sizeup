@@ -658,7 +658,11 @@ Slots go in order. A kind takes the next available unit of that kind (regular ap
     <section id="s-dispatch" class="s-panel" data-s="dispatch" hidden></section>
     <section id="s-users" class="s-panel" data-s="users" hidden></section>
     <section id="s-system" class="s-panel" data-s="system" hidden></section>
-    <section id="s-health" class="s-panel" data-s="health" hidden></section>
+    <section id="s-station" class="s-panel" data-s="station" hidden>
+      <div id="s-station-tabs" class="s-tabs tabs" aria-label="Station"></div>
+      <div id="s-station-health" class="s-station-part" data-stab="health" hidden></div>
+      <div class="s-station-part" data-stab="link" hidden><div id="s-hublink" class="card s-card" hidden></div></div>
+    </section>
     <section id="s-data" class="s-panel" data-s="data" hidden></section>
     <section id="s-radios" class="s-panel" data-s="radios" hidden>
       <div class="s-head view-head"><h2 class="view-title">Radios</h2></div>

@@ -286,8 +286,8 @@ it changes nothing.
   muted kinds in its header); it isn't pushed. One pushed before it was muted still gets its "Recovered". Audited as
   System. Default: none.
 
-**The panel:** Settings → **Health**, a tab of its own shown to admins on the hub (also the Station row in
-Settings → Radios → Receivers, for an admin; the pushes' old link `#settings/system/health` lands there): links
+**The panel:** Settings → **Station → Health**, a tab shown to admins on the hub (also the Station row in
+Settings → Radios → Receivers, for an admin; the old links `#settings/health` and `#settings/system/health` land there): links
 to Push notifications and Amazon Transcribe's row in Data sources, then the alerts now, the hints, then the station (connected, last state post,
 clock difference, sizeup and machine up since), the version (station and hub builds, the state, the last
 update with its timings and log line, failed builds), the outbox and the system (CPU, load, memory, disk,

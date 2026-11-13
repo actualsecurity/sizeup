@@ -49,7 +49,7 @@ While the station is silent (or before it first reports) the other conditions ke
 nothing starts or clears on old data.
 
 One channel or talkgroup silent is never an alert (#258: fireground is quiet for hours, HPN Tower closes overnight,
-Fire/EMS 15 can be quiet for an hour): it is a hint in the panel (Settings > Health), with when it was last heard,
+Fire/EMS 15 can be quiet for an hour): it is a hint in the panel (Settings > Station > Health), with when it was last heard,
 once it is silent HINT_FACTOR (3) times its usual gap and at least HINT_MIN_S (30 min). An FM channel whose squelch
 opens on noise (CHATTER_PER_MIN short opens a minute, sizeup/radio/fm.py) is a hint too. The usual gap:
 
@@ -74,7 +74,7 @@ trunk-recorder writes, so its last_heard is the system's last call:
              (sizeup/radio/recorder.py ControlChannel) lasting CC_LOST_S: the alert at once, whatever the window
     clears   at the next call (or the control channel decoding again)
 
-Each alert is logged once when it starts and once when it clears, shown to admins on Settings > Health
+Each alert is logged once when it starts and once when it clears, shown to admins on Settings > Station > Health
 (GET /api/cad/health, static/health.js; never in the state push nor as a banner, #203), and pushed to the
 status topic ([alerts] status_topic, else ntfy_topic: sizeup/notify.py route()): at most one push per condition per repeat_min (15), plus its recovery (only for an episode that was pushed).
 
@@ -84,12 +84,12 @@ push and no "Recovered"; "Recovered" is pushed only once it has settled (with ho
 episode's push says so. Each alert's own grace (held()) is as before.
 
 Muted (#340, Settings > System > Push notifications, admins): an alert kind (MUTE_KINDS) muted, until a time or until
-unmuted (settings section MUTE_SECTION, kind -> {"until": epoch | null}), is shown on Settings > Health as before,
+unmuted (settings section MUTE_SECTION, kind -> {"until": epoch | null}), is shown on Settings > Station > Health as before,
 marked muted, and not pushed; one pushed before the mute still gets its "Recovered". The hub's own error spikes (sizeup/errwatch.py) are "hub_errors".
 Alerts and 24 h of their history are kept in hub.sqlite (meta "health"), so a redeploy neither forgets nor
 repeats them.
 
-    GET /api/cad/health        the panel (Settings > Health): the model, the alerts, the history, the
+    GET /api/cad/health        the panel (Settings > Station > Health): the model, the alerts, the history, the
                                thresholds; admins only (sizeup/cad/api.py ADMIN_READS, #203)
     GET /api/station/status    the deploy check (tools/deploy_check.py): the hub's build, the station's, its
                                update state and last update line, the alerts. Read only: the station token
@@ -1203,8 +1203,8 @@ class StationHealth:
         n = self.notifier
         if n is None or not n.enabled:
             return
-        # (the old address, kept so the pushes are as they were: settings.js opens Settings > Health from it, #203)
-        click = f"{self.public_url}/cad#settings/system/health" if self.public_url else ""
+        # (the old address, kept so the pushes are as they were: settings.js opens Settings > Station > Health from it, #203)
+        click = f"{self.public_url}/cad#settings/station/health" if self.public_url else ""
         who = a.get("who") or None
         if recovered:
             flap = f", back {a['flap_n']}× before it settled" if a.get("flap_n") else ""
@@ -1235,7 +1235,7 @@ class StationHealth:
     # -- what people and CI read ------------------------------------------------------------------------------------
 
     def alerts(self) -> list[dict]:
-        """The active alerts, worst first then oldest (Settings > Health, the deploy check)."""
+        """The active alerts, worst first then oldest (Settings > Station > Health, the deploy check)."""
         now = self.clock()
         mutes = self._mutes(now)
         with self._lock:
