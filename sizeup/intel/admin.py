@@ -24,6 +24,7 @@ verified sign-in gate, the same as context traffic), on the API and in the conso
 from __future__ import annotations
 
 import copy
+import re
 
 from sizeup import sourcekeys
 from sizeup.cad.store import CadError
@@ -84,6 +85,7 @@ class IntelAdmin:
         return {"settings": eng.policy.cfg, "defaults": policy_mod.DEFAULTS, "edited": sorted(ov["intel"]),
                 "packs": packs, "modes": list(MODES), "ruleset_hash": eng.ruleset_hash(), "counts_24h": counts,
                 "verdicts": list(VERDICTS), "queue": {"dropped": eng.dropped, "errors": eng.errors},
+                "infer": eng.infer.status() if eng.infer is not None else {"on": False, "ready": False, "why": "not here"},
                 "may_edit": True}
 
     def events(self, q: dict, admin: bool = False) -> dict:
@@ -133,7 +135,10 @@ class IntelAdmin:
                 "place": e["label_full"], "town": e["town"], "alts": e["alts"], "basis": e["basis"], "mode": e["mode"],
                 "priority": e["priority"], "pushed_at": e["pushed_at"], "suppressed": e["suppressed"],
                 "traffic_ids": e["traffic_ids"][-12:], "rules": e["rules"], "accept": bool(p.accept) if p else False,
-                "dismissed_by": e.get("dismissed_by", ""), "note": e.get("note", "")}
+                "dismissed_by": e.get("dismissed_by", ""), "note": e.get("note", ""),
+                # the model's category when it is the model's alone (not pushed): "model: MVA with injuries?" on the card
+                "suggested": (cat.get("label") or e["category"]) if any(str(r[0]).startswith("infer.") for r in e["rules"] or [])
+                and e["mode"] != "push" else ""}
 
     def state(self, now: float | None = None) -> dict | None:
         """The console's card: open events at map or push, newest first; None for a viewer who may not see them."""
@@ -178,7 +183,32 @@ class IntelAdmin:
         ov = self._ov()
         trial = copy.deepcopy(ov)
         audit_key, old, new = "", None, None
-        if action == "set":
+        if action == "set" and str(body.get("key") or "").startswith("infer"):
+            from sizeup.intel import infer as infer_mod
+            key, v = str(body.get("key")), body.get("value")
+            if key not in infer_mod.DEFAULTS:
+                raise CadError(f"key: {' | '.join(infer_mod.DEFAULTS)}")
+            if key in ("infer", "infer_agree_push"):
+                if not isinstance(v, bool):
+                    raise CadError(f"{key}: true or false")
+            elif key == "infer_provider":
+                if v not in infer_mod.PROVIDERS:
+                    raise CadError(f"infer_provider: {' | '.join(infer_mod.PROVIDERS)}")
+            elif key in ("infer_mode", "infer_alone_mode"):
+                v = _mode(v, key)
+            elif key in ("infer_model", "infer_region"):
+                if not isinstance(v, str) or not re.fullmatch(r"[A-Za-z0-9._:/-]{2,120}", v):
+                    raise CadError(f"{key}: letters, digits and . _ : / - (a Bedrock model id or region)")
+                cur = {**infer_mod.DEFAULTS, **ov["intel"]}
+                if key == "infer_model" and infer_mod.price({**cur, "infer_model": v}) is None:
+                    raise CadError(f"infer_model: no known price for {v}: set infer_usd_in and infer_usd_out first "
+                                   f"(known: {', '.join(sorted(infer_mod.PRICES))})")
+            else:
+                lo, hi = infer_mod.LIMITS[key]
+                v = _f(v, lo, hi, key)
+            changes = [("intel", key, REMOVE if v == infer_mod.DEFAULTS[key] else v)]
+            audit_key, old, new = f"intel/{key}", ov["intel"].get(key, infer_mod.DEFAULTS[key]), v
+        elif action == "set":
             key = body.get("key")
             if key not in policy_mod.DEFAULTS:
                 raise CadError(f"key: {' | '.join(policy_mod.DEFAULTS)}")

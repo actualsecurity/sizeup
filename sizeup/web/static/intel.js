@@ -45,6 +45,11 @@ window.IntelCard = (() => {
     const loc = el("div", "aa-loc" + (e.confirmed ? "" : " approx"), where(e));
     if (!e.confirmed && e.place) loc.title = ["Unconfirmed", e.basis, ...(e.alts || []).map((a) => `or ${a.label}`)].filter(Boolean).join("\n");
     li.append(loc);
+    if (e.suggested) {
+      const sug = el("div", "aa-loc approx", `model: ${e.suggested}?`);
+      sug.title = "The model's reading, not the rules': on the map only, never pushed";
+      li.append(sug);
+    }
     if (e.note) li.append(el("div", "aa-loc approx", e.note));          // "possibly cancelled", "moved", "re-opened"
     const src = el("div", "aa-src", `${deps.time(e.first_at)} · ${(e.traffic_ids || []).length} tx`);
     for (const id of (e.traffic_ids || []).slice(-4)) {
@@ -152,6 +157,27 @@ window.IntelSettings = (() => {
       el("span", "dim small", `24 h: ${c24.events || 0} events · ${c24.pushed || 0} pushed · ${c24.suppressed || 0} held`));
     for (const x of caps.querySelectorAll("input")) x.disabled = !admin;
     kids.push(caps);
+    // the model behind the rules (sizeup/intel/infer.py): off until sizeup-aws 26 has run; capped
+    const inf = d.infer || {};
+    const [ilab, icb] = sCheck("Inference", !!s.infer, "An LLM (Bedrock, the department's account) only where the rules are unsure; its place is checked against the map data");
+    icb.disabled = !admin;
+    icb.addEventListener("change", () => post({ action: "set", key: "infer", value: icb.checked }, icb.checked ? "Inference on" : "Inference off"));
+    const irow = el("div", "row");
+    const inum = (key, min, max, step, label) => num(s[key] ?? "", min, max, step, (v) => post({ action: "set", key, value: v }), label);
+    const model = sInput(s.infer_model || "", 120, "Model id", (v) => post({ action: "set", key: "infer_model", value: v }), "mono");
+    model.title = "Bedrock model id (default anthropic.claude-haiku-5-5)";
+    const spent = "$" + (inf.usd_month || 0).toFixed(2);
+    irow.append(ilab, model,
+      el("span", "dim small", "/day"), inum("infer_daily_cap", 0, 10000, 1, "Calls a day at most"),
+      el("span", "dim small", "$/month"), inum("infer_budget_usd", 0, 500, 1, "Budget a month (from the tokens each call reports)"),
+      el("span", "dim small", "sample %"), inum("infer_sample_pct", 0, 100, 1, "Of rows with a hit: asked and recorded only (evaluation)"),
+      el("span", "spacer"),
+      el("span", "dim small", (inf.calls_today || 0) + " today · " + spent + " this month"));
+    const ist = el("span", inf.ready ? "chip s-state default" : "chip s-state edited", inf.ready ? "ready" : (inf.on ? "held" : "off"));
+    if (inf.why) ist.title = inf.why;
+    irow.append(ist);
+    for (const x of irow.querySelectorAll("input")) x.disabled = !admin;
+    kids.push(irow);
     // detection on/off and quiet hours (no pushes in between; the card and the map go on)
     const [elab, ecb] = sCheck("Detection", s.enabled, "Off: no transmission is read for pre-alerts at all");
     ecb.disabled = !admin;

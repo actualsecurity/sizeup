@@ -44,6 +44,7 @@ Intel never writes incidents, radio_links, incoming or alarms.
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import math
 import re
@@ -153,6 +154,7 @@ class IntelEngine:
         self.leader = lambda: True            # live: the CAD of record holding the lease (the app sets it)
         self.active = lambda: True            # live: False on a station forwarding to a hub (no thread runs there)
         self.notifier = None                  # live: notify.Pushes' INTEL KindNotifier (the app sets it)
+        self.infer = None                     # infer.Inference: the model behind the rules (off unless set and on)
         self.windows: dict[tuple[str, str], Window] = {}
         self.packs: list = []
         self.cfg: dict = {}
@@ -274,6 +276,8 @@ class IntelEngine:
             if now - self._pruned >= PRUNE_S and hasattr(self.events, "prune"):
                 self._pruned = now
                 self.events.prune(now)
+                if self.infer is not None:
+                    self.infer.prune(now)
 
     def _restore(self) -> None:
         if self.store is None:
@@ -385,6 +389,11 @@ class IntelEngine:
                     up = self._relocate(pack, ev, row, key, win, tid, at)
                     if up is not None:
                         changed.append(up)
+        if self.infer is not None and hits and not suppressed:
+            try:
+                changed += self._inference(pack, row, key, tid, win, at, cats, mine, event_of, hits)
+            except Exception as e:  # noqa: BLE001 - the model never stops the rules
+                self.log(f"intel: inference: {type(e).__name__}")
         keep = {r.id for r, _w in hits}
         if known and hasattr(self.sink, "clear"):
             self.sink.clear(tid, keep)
@@ -628,6 +637,9 @@ class IntelEngine:
         place = entry.place                            # its own words only (a tied row: _same_job said so)
         move = (place is not None and ev.precision != "none" and not same_place(place, ev.place())
                 and self._moving(pack, ev, entry))
+        return self._set_place(pack, ev, place, key, tid, at, move)
+
+    def _set_place(self, pack, ev: Event, place, key, tid, at, move: bool = False) -> Event | None:
         if place is None or not (move or ev.precision == "none" or place.confirmed or place.where_score > ev.where_score):
             return None
         before = copy.deepcopy(ev)
@@ -643,6 +655,99 @@ class IntelEngine:
         self.events.save(ev)
         self._after(pack, ev, "updated", ev.updated_at, before, moved=move)
         return ev
+
+    def _inference(self, pack, row, key, tid, win, at, cats, mine, event_of, hits) -> list[Event]:
+        """Ask the model about what the rules left uncertain (infer.py). Never waits for it: the answer comes back in
+        _infer_done (on the infer thread live, inline in replay). A sample is asked and recorded, never acted on."""
+        from sizeup.intel import infer as infer_mod
+        c = self.infer.cfg()
+        why, ev_for, unsure = "", None, ""
+        for cat, (what, _contrib, _m) in cats.items():
+            cd = pack.category(cat)
+            thr = cd.get("threshold") if cd.get("threshold") is not None else pack.threshold
+            if float(c["infer_low"]) <= what < thr and mine & {cat, rules_mod.WILD}:
+                why, unsure = "uncertain", cat
+                break
+        if not why:
+            now = self.clock()
+            ev_for = next((e for e in event_of.values() if (e.precision == "none" or not e.confirmed)
+                           and now - self.infer.asked.get(e.id or 0, -1e18) >= infer_mod.PLACE_REASK_S), None)
+            if ev_for is not None:
+                why = "place"
+                self.infer.asked[ev_for.id or 0] = now
+        if not why and int(c["infer_sample_pct"]) and int(hashlib.sha256(tid.encode()).hexdigest(), 16) % 100 < int(c["infer_sample_pct"]):
+            why = "sample"
+        if not why:
+            return []
+        text = self._window_text(win)
+        req = infer_mod.Request(text, {k: v["label"] for k, v in pack.categories.items()}, pack.towns_for(key), key)
+        job = {"pack": pack.name, "key": key, "tid": tid, "row": dict(row), "at": at, "why": why, "unsure": unsure,
+               "event_id": ev_for.id if ev_for else None, "text": text}
+        self.infer.submit(req, job, self._infer_done)
+        return []
+
+    def _infer_done(self, job: dict, res) -> list[Event]:
+        """The model's answer (#504 review): its category backs the rules (a push only when they agree, else
+        infer_alone_mode); its place only if its words are in the transcript and the gazetteer finds it, UNCONFIRMED,
+        never over a place the rules confirmed."""
+        from sizeup.intel import infer as infer_mod
+        if res is None or res.refused or job["why"] == "sample" or not self.leader():
+            return []
+        out: list[Event] = []
+        with self._lock:
+            pack = self.pack(job["pack"])
+            if pack is None:
+                return []
+            c = self.infer.cfg()
+            key, tid, at, row = job["key"], job["tid"], job["at"], job["row"]
+            win = self.windows.get((pack.name, key))
+            cat = res.category
+            target = self.events.get(job["event_id"]) if job["event_id"] else None
+            if (job["why"] == "uncertain" and cat in pack.categories and res.confidence > 0 and win is not None
+                    and tid in win.entries):
+                own = self._scores(pack, win).get(cat)                 # the rules' OWN score, before the model's
+                # "agree" may push only when the rules already say this much themselves and the model is sure: the model
+                # never escalates on its own (an MVA into an MVA with injuries, an alarm into a fire) (#504 re-check)
+                agree = (cat == job["unsure"] and bool(c["infer_agree_push"]) and own is not None
+                         and own[0] >= float(c["infer_agree_min"]) and res.confidence >= float(c["infer_agree_conf"]))
+                rule = rules_mod.Rule(f"infer.{c['infer_provider']}", 1, cat,
+                                      round(min(1.0, res.confidence * float(c["infer_weight"])), 4), [], [],
+                                      str(c["infer_mode"]) if agree else lowest(str(c["infer_mode"]), str(c["infer_alone_mode"])),
+                                      True, {})
+                entry = win.entries[tid]
+                entry.hits = [*entry.hits, (rule, rule.w)]        # a new list: the row's own report has its hits already
+                self.sink.hit(Hit(tid, rule.id, rule.v, rule.w, cat, pack.name, at, None))
+                got = self._scores(pack, win).get(cat)
+                cd = pack.category(cat)
+                thr = cd.get("threshold") if cd.get("threshold") is not None else pack.threshold
+                if got and got[0] >= thr:
+                    mode = lowest(pack.mode, cd.get("mode", "push"), got[2])
+                    if not agree:
+                        mode = lowest(mode, str(c["infer_alone_mode"]))        # the model alone: never a push
+                    if mode != "off":
+                        ev = self._raise(pack, row, key, cat, cd, got[0], got[1], mode, win, at, tid)
+                        if ev is not None:
+                            out.append(ev)
+                            target = ev
+            if target is None or target.status != "open" or target.confirmed or not res.location or self.locate is None:
+                return out
+            loc = infer_mod.said(res.location, job["text"])
+            if not loc:
+                return out                    # words the transcript never said: never a place
+            try:
+                place = self.locate(loc, self._scope(pack, row, key))      # the gazetteer decides
+            except Exception:  # noqa: BLE001
+                place = None
+            if place is None or push_mod.scrub_label(place.label, self._who(pack, target)):
+                return out
+            place.confirmed = False                # the model's reading: never confirmed
+            place.radius_m = max(place.radius_m, 150.0)
+            place.basis = "; ".join(x for x in (place.basis, "place from inference") if x)
+            up = self._set_place(pack, target, place, key, tid, at)
+            if up is not None:
+                self.infer.mark_used(res.record_id, place.label)
+                out.append(up)
+        return out
 
     def _end_window(self, pack, key: str, at: float, tid: str, win=None, ws=()) -> list[Event]:
         """ "Disregard" / "cancel" ends only the events of the current window's transmissions, or those it ties to by

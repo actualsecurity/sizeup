@@ -322,6 +322,9 @@ class Cad:
         from sizeup.intel.engine import IntelEngine
         self.intel = IntelEngine(settings=lambda: {k: self.settings.section(k) for k in ("intel", "intel_packs", "intel_rules")},
                                  store=self.store, clock=clock, log=log, tz=TZ)
+        from sizeup.intel.infer import Inference           # the model behind the rules: off unless Settings turn it on
+        self.intel.infer = Inference(settings=lambda: self.intel.policy.cfg, store=self.store, clock=clock, log=log, tz=TZ,
+                                     worker=True)            # its calls on the "infer" thread, never the engine's
         self.intel_admin = IntelAdmin(self, self.intel)
         self.comms.on_context_text = self.intel.consider      # called by comms.py once PR 0 adds the hook
         # The place search (sizeup/geo/places.py, #67): the app sets place_source, a function that builds the
