@@ -30,6 +30,11 @@ from its own config's defaults, so the map the hub sends has the hub's record_on
 (for_station(): {"transcribe": false} unless Settings says otherwise): a plain choice that any station
 applies, one from before record_only included.
 
+Squelch (Settings > Radios > Squelch): an FM channel's noise squelch, open_db / close_db (quieting under the idle
+hiss) and min_open_s (carrier shorter than this: nothing kept, never "talking"; sizeup/radio/fm.py). Its own
+section ("squelch", key the channel's label, value only what differs from the receiver's default), audited, and
+sent to the station with the channel choices (set_channel_prefs' squelch, in the same signature), applied live.
+
 An "aws" or "both" channel uses the local model whenever AWS can't take audio (no AWS here or on the
 hub, no credentials, the monthly limit reached): effective().
 """
@@ -47,6 +52,10 @@ KEY = re.compile(r"tg:\d{1,9}|p25:[a-z][a-z0-9_-]{0,23}:\d{1,9}|[A-Za-z0-9][A-Za
 DEFAULT_AWS = ("South 2", "FG1", "FG2", "tg:307")
 DEFAULT_RECORD_ONLY: tuple[str, ...] = ()
 SECTION = "channels"
+SQUELCH_SECTION = "squelch"
+# field -> (low, high, step): what Settings takes. Defaults: the receiver's (radio/fm.py OPEN_DB, CLOSE_DB, MIN_OPEN_S)
+SQUELCH = {"open_db": (4.0, 30.0, 0.5), "close_db": (2.0, 28.0, 0.5), "min_open_s": (0.1, 2.0, 0.05)}
+CHATTER_PER_MIN = 2.0      # short opens (nothing kept) per minute, over 5 min: the squelch chattering on noise (a hint)
 
 
 def tg_key(tg: int) -> str:
@@ -116,17 +125,45 @@ def effective(p: dict, aws_ok: bool) -> str:
     return eng if eng == "local" or aws_ok else "local"
 
 
-def sig(overrides: dict, aws_ok: bool, tones: dict | None = None, reserve=None) -> str:
+def sig(overrides: dict, aws_ok: bool, tones: dict | None = None, reserve=None, squelch: dict | None = None) -> str:
     """The same choices + the same AWS availability (+ the same named tone pairs, #80; + the channels that keep
-    AWS past the monthly limit, #195) -> the same short signature (hub and station). None of those: the
-    signature from before them."""
+    AWS past the monthly limit, #195; + the squelch settings) -> the same short signature (hub and station). None
+    of those: the signature from before them."""
     d = {"prefs": {k: {f: v for f, v in sorted(o.items())} for k, o in sorted(overrides.items())}, "aws": bool(aws_ok)}
+    if squelch:
+        d["squelch"] = {k: {f: v for f, v in sorted(o.items())} for k, o in sorted(squelch.items())}
     if tones:
         d["tones"] = {k: tones[k] for k in sorted(tones)}
     if reserve and not aws_ok:
         d["reserve"] = sorted(str(k) for k in reserve)
     raw = json.dumps(d, sort_keys=True, separators=(",", ":"))
     return hashlib.sha1(raw.encode()).hexdigest()[:12]
+
+
+def clean_squelch(key: str, raw: dict) -> dict:
+    """{open_db?, close_db?, min_open_s?} for an FM channel (checked, rounded to its step). ValueError."""
+    if not isinstance(key, str) or not KEY.fullmatch(key) or is_tg(key):
+        raise ValueError("key: an FM channel's label (FG1)")
+    if not isinstance(raw, dict):
+        raise ValueError("an object")
+    out = {}
+    for f, (lo, hi, step) in SQUELCH.items():
+        v = raw.get(f)
+        if v is None:
+            continue
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not lo <= float(v) <= hi:
+            raise ValueError(f"{f}: {lo:g} to {hi:g}")
+        out[f] = round(round(float(v) / step) * step, 2)
+    if "open_db" in out and "close_db" in out and out["close_db"] >= out["open_db"]:
+        raise ValueError("close_db: under open_db")
+    return out
+
+
+def check_squelch(m) -> dict:
+    """A whole squelch map from the hub: checked, cleaned. ValueError."""
+    if not isinstance(m, dict) or len(m) > 50:
+        raise ValueError("squelch: an object")
+    return {k: c for k, v in m.items() if (c := clean_squelch(k, v))}
 
 
 def phrases_sig(phrases: list[str]) -> str:

@@ -46,7 +46,8 @@ nothing starts or clears on old data.
 
 One channel or talkgroup silent is never an alert (#258: fireground is quiet for hours, HPN Tower closes overnight,
 Fire/EMS 15 can be quiet for an hour): it is a hint in the panel (Settings > Health), with when it was last heard,
-once it is silent HINT_FACTOR (3) times its usual gap and at least HINT_MIN_S (30 min). The usual gap:
+once it is silent HINT_FACTOR (3) times its usual gap and at least HINT_MIN_S (30 min). An FM channel whose squelch
+opens on noise (CHATTER_PER_MIN short opens a minute, sizeup/radio/fm.py) is a hint too. The usual gap:
 
     learned  from the channel's own gaps between transmissions (the last GAPS_MAX; each also filed under the 6-hour
              part of the day it started in, station time: 00-06, 06-12, 12-18, 18-24), GAPS_MIN of them first
@@ -111,6 +112,7 @@ from pathlib import Path
 from typing import Callable
 
 from sizeup import tz
+from sizeup.channels import CHATTER_PER_MIN
 from sizeup.cloud.autoupdate import public, same_build, short
 
 TICK_S = 5.0
@@ -649,10 +651,16 @@ class StationHealth:
                 hint = (f"quiet {_dur(quiet)} (last {_hhmm(heard + hub.skew)}; usual gap {_dur(usual)}) · "
                         + ("no alert: only the whole P25 system going quiet is one" if label.startswith("tg:") else
                            "no alert; if unexpected, check antenna and dongle"))
+            short = r.get("short_per_min")
+            if isinstance(short, (int, float)) and short >= CHATTER_PER_MIN and r.get("state") == "ok":
+                # the squelch opening on noise (sizeup/radio/fm.py): nothing kept, never shown as talking
+                hint = (hint + " · " if hint else "") + (f"squelch chattering: {short:g} short opens/min · "
+                                                         "raise Open in Settings > Radios > Squelch")
             chans.append({"label": label, "name": r.get("name") or label, "usual_now_s": usual,
                           "mhz": r.get("mhz"), "state": r.get("state"), "word": r.get("word") or "",
                           "detail": str(r.get("detail") or "")[:200], "open": bool(r.get("open")),
                           "open_s": r.get("open_s"), "stuck": bool(r.get("stuck")), "quieting_db": r.get("quieting_db"),
+                          "short_per_min": short if isinstance(short, (int, float)) else None,
                           "restarts": r.get("restarts", 0), "last_heard": heard + hub.skew if heard else None,
                           "quiet_s": quiet, "typical_gap_s": typical, "gaps": len(gaps), "hint": hint})
         out["channels"] = chans

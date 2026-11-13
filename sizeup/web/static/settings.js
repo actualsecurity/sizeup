@@ -28,8 +28,8 @@ const S_SECTIONS = [["lists", "Lists"], ["runcards", "Run cards"], ["units", "Un
   ["users", "Users"], ["system", "System"], ["health", "Health"], ["radios", "Radios"], ["data", "Data sources"]];
 // Settings > Radios, one tab per part (#115; the Lists page's tabs): which RadioControls card, the Tones page and the
 // Radio IDs editor each go under (data-rtab on each).
-const S_RADIO_TABS = [["receivers", "Receivers"], ["channels", "Channels"], ["tones", "Tones"], ["ids", "Radio IDs"],
-  ["vocabulary", "Vocabulary"], ["stt", "Speech-to-text"]];
+const S_RADIO_TABS = [["receivers", "Receivers"], ["channels", "Channels"], ["squelch", "Squelch"], ["tones", "Tones"],
+  ["ids", "Radio IDs"], ["vocabulary", "Vocabulary"], ["stt", "Speech-to-text"]];
 const S_RC_TABS = new Set(["receivers", "channels", "vocabulary", "stt"]);    // radio-controls.js's cards
 const S_TONE_TYPES = [["fire", "Fire"], ["ems", "EMS"], ["police", "Police"], ["other", "Other"]];   // the services (#122)
 const S_LISTS = [["event_types", "Event types"], ["event_subtypes", "Event subtypes"], ["type_subtypes", "Subtypes per type"],
@@ -252,6 +252,7 @@ function sRadioTab() {
   show(rc, S_RC_TABS.has(S.rtab));
   if (S_RC_TABS.has(S.rtab) && window.RadioControls) RadioControls.mount(rc);    // receivers, talkgroups, vocabulary
   for (const n of panel.querySelectorAll("[data-rtab]")) show(n, n.dataset.rtab === S.rtab);
+  if (S.rtab === "squelch" && window.SquelchPanel) SquelchPanel.mount($("#settings-squelch"));   // squelch-panel.js
 }
 
 function sRadios() {

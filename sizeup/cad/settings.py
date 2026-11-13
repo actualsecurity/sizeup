@@ -104,7 +104,8 @@ EMAIL = re.compile(r"[^@\s<>]{1,64}@[^@\s<>]{1,190}\.[^@\s<>]{1,63}")
 PAGE_SECTION = {**{s: "lists" for s in LIST_SECTIONS}, "event_class": "lists", "geo_town_order": "lists", "status_flow": "lists",
                 "type_subtypes": "lists",
                 "units": "units", "dispatch_wording": "dispatch", "dispatch_tones": "dispatch", "dispatch": "dispatch",
-                "channels": "radios", "stt": "radios", "places": "lists", "tones": "radios", "alarms": "system"}
+                "channels": "radios", "stt": "radios", "places": "lists", "tones": "radios", "alarms": "system",
+                channels_mod.SQUELCH_SECTION: "radios"}
 # The camera wall's area (#125, sizeup/roads.py Roads.area): Settings > System.
 WALL_SECTION, WALL_KEYS, WALL_MARGIN = "camera_wall", ("margin_m", "include", "exclude"), (0, 5000, 1000)
 PAGE_SECTION[WALL_SECTION] = "system"
@@ -995,6 +996,7 @@ class Editor:
         fn = {"event_class": self._class_op, "status_flow": self._flow_op, "type_subtypes": self._map_op, "geo_town_order": self._towns_op, "units": self._units_op,
               "dispatch": self._dispatch_op, "users": self._users_op, "runcards": self._cards_op,
               "import": self._import_op, "channels": self._channels_op, "stt": self._stt_op,
+              channels_mod.SQUELCH_SECTION: self._squelch_op,
               "places": self._places_op, TONES_SECTION: self._tones_op, WALL_SECTION: self._wall_op, DS_SECTION: self._ds_op,
               NOTIFY_SECTION: self._notify_op, ATC_SECTION: self._atc_op, ERR_SECTION: self._errors_op, MAPD_SECTION: self._mapd_op, PREMISE_SECTION: self._premise_op, RET_SECTION: self._retention_op,
               TRS_SECTION: lambda a, b, o: self._retention_op(a, b, o, TRS_SECTION), MUTE_SECTION: self._mutes_op, DEPT_SECTION: self._dept_op, "alarms": lambda a, b, o: self.cad.alarms.settings_op(a, b, o)}.get(section)
@@ -1750,6 +1752,70 @@ class Editor:
             ctx.channels_changed()
         return out
 
+    # -- an FM channel's squelch (Settings > Radios > Squelch; sizeup/channels.py, sizeup/radio/fm.py) --------------
+
+    def squelch_overrides(self) -> dict:
+        return dict(self.overrides().get(channels_mod.SQUELCH_SECTION) or {})
+
+    def _squelch_op(self, action: str, body: dict, op: str) -> dict:
+        """set {key, open_db?, close_db?, min_open_s?} (null: back to the receiver's default) | reset {key}. Audited."""
+        ctx = self.cad.radio_ctx
+        locked = ctx.channels_locked() if ctx is not None else ""
+        if locked:
+            raise CadError(locked)
+        ov = self.squelch_overrides()
+        key = body.get("key")
+        dflt = ctx.squelch_defaults(key) if ctx is not None and isinstance(key, str) else {}
+        if action == "set":
+            known = [c["key"] for c in ctx.squelch_state()["channels"]] if ctx is not None else []
+            if known and key not in known:
+                raise CadError(f"key: one of {', '.join(known)}")
+            try:
+                vals = channels_mod.clean_squelch(key, {f: body.get(f) for f in channels_mod.SQUELCH})
+            except ValueError as e:
+                raise CadError(str(e)) from None
+            cur = dict(ov.get(key) or {})
+            for f in channels_mod.SQUELCH:
+                if f in body and body[f] is None:
+                    cur.pop(f, None)
+            new = {k: v for k, v in {**cur, **vals}.items() if v != dflt.get(k)}
+            eff = {**dflt, **new}
+            if eff.get("open_db") is not None and eff.get("close_db") is not None and eff["close_db"] >= eff["open_db"]:
+                raise CadError(f"close {eff['close_db']:g} dB: under open ({eff['open_db']:g} dB)")
+            if new == (ov.get(key) or {}):
+                return {"ok": True}
+            before = {**dflt, **(ov.get(key) or {})}
+            out = self._commit([(channels_mod.SQUELCH_SECTION, key, new or REMOVE)], op,
+                               [("radios", f"squelch/{key}", before, eff)])
+        elif action == "reset":
+            key = _text(key, "key", 40)
+            if key not in ov:
+                return {"ok": True}
+            out = self._commit([(channels_mod.SQUELCH_SECTION, key, REMOVE)], op,
+                               [("radios", f"squelch/{key}", {**dflt, **ov[key]}, "default")])
+        else:
+            raise CadError("action: set or reset")
+        if ctx is not None:
+            ctx.channels_changed()
+        return out
+
+    def replace_squelch(self, m: dict, operator: str) -> bool:
+        """The whole squelch map as the hub sent it. True when anything changed."""
+        cur = self.squelch_overrides()
+        sec = channels_mod.SQUELCH_SECTION
+        changes = [(sec, k, REMOVE) for k in cur if k not in m]
+        changes += [(sec, k, v) for k, v in m.items() if cur.get(k) != v]
+        if not changes:
+            return False
+        self._commit(changes, operator, [("radios", f"squelch/{k}", cur.get(k), None if v is REMOVE else v)
+                                         for _s, k, v in changes])
+        return True
+
+    def squelch_page(self) -> dict:
+        """GET /api/cad/squelch: each FM channel's squelch as set and as running, the noise floor, the short opens."""
+        ctx = self.cad.radio_ctx
+        return ctx.squelch_state() if ctx is not None else {"channels": [], "sync": {"state": "local", "detail": ""}}
+
     def replace_channels(self, prefs: dict, operator: str) -> bool:
         """The whole channel map as the hub sent it (the station applying the CAD of record's choices).
         True when anything changed."""
@@ -2495,6 +2561,11 @@ class Editor:
                 channels_mod.clean(k, v)
             except ValueError as e:
                 raise CadError(f"overrides.channels.{k}: {e}") from None
+        for k, v in (ov.get(channels_mod.SQUELCH_SECTION) or {}).items():
+            try:
+                ov[channels_mod.SQUELCH_SECTION][k] = channels_mod.clean_squelch(k, v)
+            except ValueError as e:
+                raise CadError(f"overrides.squelch.{k}: {e}") from None
         for k, v in (ov.get(TONES_SECTION) or {}).items():
             key, val = self._clean_tone(v, f"overrides.tones.{k}")
             if key != k:
