@@ -206,7 +206,7 @@ def test_the_map_route_and_the_run_card_estimate_agree_from_the_gate():
     rt = one(r, going(to), NOW + 1)
     assert rt["by"] == "road" and rt["coords"][0] == pytest.approx(APRON)
     assert not [p for p in rt["coords"] if p[1] > SOUTH["ll"][1] + 0.0002]         # never north into the lot
-    est = r.to_one({"E63": SOUTH["ll"]}, to)
+    est = r.to_one({"E63": SOUTH["ll"]}, to, quarters={"E63": SOUTH["name"]})
     assert est["E63"][0] == pytest.approx(rt["s"], abs=0.6) and est["E63"][1] == pytest.approx(rt["m"], abs=2)
     assert r.to_one({"X": [-73.6681, 40.9935]}, to)["X"] is not None             # away from a firehouse: as before
 
@@ -219,7 +219,8 @@ def test_the_trip_home_ends_at_the_apron_and_the_recommendation_follows():
     clear = {"incident_id": 5, "number": "26-000005", "lat": to[1], "lon": to[0], "cleared_at": NOW}
     m = mapview.place(unit, "free", SOUTH, None, None, NOW + 10, fire=True, clear=clear, params=P)
     back = one(r, m, NOW + 10, "back")
-    assert back["coords"][-1] == pytest.approx(APRON) and back["coords"][0] == pytest.approx(to, abs=1e-4)
+    assert back["coords"][-2] == pytest.approx(APRON) and back["coords"][0] == pytest.approx(to, abs=1e-4)
+    assert back["coords"][-1] == pytest.approx(SOUTH["ll"])                        # then into the bays: no jump at the end
     assert not [p for p in back["coords"] if p[1] > SOUTH["ll"][1] + 0.0002]
     done = r.trips["E63"]["move"]["done_at"]
     assert r.trip_at("E63", done + 1) == {"home": True, "ll": SOUTH["ll"]}
@@ -273,8 +274,88 @@ def test_the_console_recommendation_and_the_map_agree_from_the_south_end():
     c.unit_status(uid("E61"), {"status": "AV", **op})
     clock.t += 5
     back = next(x for x in c.state()["map"]["routes"] if x["unit"] == "E61")
-    assert back["kind"] == "back" and back["coords"][-1] == pytest.approx(APRON)
+    assert back["kind"] == "back" and back["coords"][-2] == pytest.approx(APRON)
+    assert back["coords"][-1] == pytest.approx(SOUTH["ll"])
     assert c.locations()["E61"]["where"] == "returning"
     clock.t = back["move"]["done_at"] + 1
     loc = c.locations()["E61"]
     assert loc["where"] == "station" and loc["ll"] == SOUTH["ll"]
+
+
+# ---- only a rig in quarters goes by the gate ---------------------------------------------------------------------------
+
+NEAR = {                                                      # made-up points on streets just off the South End
+    "Central Ave": [-73.66453, 40.99565],                    # ~39 m south of its point
+    "Don Bosco Pl": [-73.66482, 40.99630],
+    "Midland Ave": [-73.66500, 40.99613],
+}
+
+
+def test_a_rig_near_but_not_in_quarters_is_routed_from_where_it_is():
+    """On location at a call beside the firehouse, or driving by: its route starts where it is and its estimate is
+    the plain one, whatever firehouse is near. Only its own station, by status or a live fix there, is quarters."""
+    g = south_end_graph()
+    to = CALLS["west"]
+    for name, ll in NEAR.items():
+        r = routes_on(g)
+        assert r.to_one({"X": ll}, to)["X"] == pytest.approx(g.to_one({"X": ll}, to, P)["X"]), name   # on the road
+        hq = next(f for f in FIREHOUSES if f.get("short") == "HQ")
+        m = going(to, place="position", lon=ll[0], lat=ll[1], at=NOW, station=hq["name"])        # an HQ rig going by
+        rt = one(r, m, NOW + 1)
+        plain = g.route(ll, to, P)
+        assert rt["coords"][0] == pytest.approx(plain["coords"][0]) and rt["coords"][0] != pytest.approx(APRON), name
+        assert rt["s"] == round(plain["s"]), name
+    own = going(to, place="position", lon=NEAR["Central Ave"][0], lat=NEAR["Central Ave"][1], at=NOW)
+    assert one(routes_on(g), own, NOW + 1)["coords"][0] == pytest.approx(APRON)    # its own station, a live fix there
+
+
+def test_the_card_gates_only_the_rigs_it_says_are_in_quarters():
+    from sizeup.cad import runcards
+    g = south_end_graph()
+    r = routes_on(g)
+    to = CALLS["south"]
+    where = {"E63": {"ll": SOUTH["ll"], "on_road": False, "label": "from South End", "station": SOUTH["name"]},
+             "E64": {"ll": NEAR["Central Ave"], "on_road": True, "label": "at 26-000001", "station": SOUTH["name"]}}
+    units = [{"id": 1, "name": "E63"}, {"id": 2, "name": "E64"}]
+    est = runcards.estimates(units, where, {"lat": to[1], "lon": to[0]}, P, r.to_one)
+    gated = g.route(APRON, to, P, a_gate="Grace Church St")
+    plain = g.route(NEAR["Central Ave"], to, P)
+    assert est[1]["eta_s"] == round(gated["s"] + P.turnout_min * 60)
+    assert est[2]["eta_s"] == round(g.to_one({"E64": NEAR["Central Ave"]}, to, P)["E64"][0])
+    assert est[2]["eta_s"] == pytest.approx(plain["s"], abs=1)
+
+
+def test_a_route_worked_out_again_on_the_apron_goes_out_the_same_gate_rolling_on():
+    """The call moves in the first seconds of the move, while the rig is still on the apron: routed again from the
+    gate (never a plain snap from the apron, which could find a lot), from where it was on it (no jump back)."""
+    g = south_end_graph()
+    r = routes_on(g)
+    first = one(r, going(CALLS["south"]), NOW + 1)
+    lead = r.cache[("E63", 7)]["gate"][2]
+    assert first["coords"][0] == pytest.approx(APRON) and lead > 5
+    t = NOW + 1.5                                                                  # a metre or two out, still on the apron
+    was = one(r, going(CALLS["south"]), t)["along_m"]
+    assert 0 < was < lead
+    again = one(r, going(CALLS["north"]), t)
+    assert r.stats["why"].get("new", 0) >= 2
+    assert again["coords"][0] == pytest.approx(APRON) and again["along_m"] == pytest.approx(was, abs=1)
+    assert again["move"]["ease_s"] == 0                                            # rolling on
+    late = one(r, going(CALLS["west"]), NOW + 30)                                  # well out on the street: from there
+    assert late["coords"][0] != pytest.approx(APRON) and late["along_m"] == 0
+
+
+def test_a_rig_on_a_parkway_by_a_firehouse_keeps_the_parkway_rule():
+    """A rig back from a call, on the Hutch, 30 m from a firehouse that is not its own: not in quarters, so it drives
+    on along the parkway to an exit as before (#396), on the map and in the estimate."""
+    from tests.test_rig_routes import DX, DY, LAT0, LON0, freeway, limited_in
+    g = freeway(parkway=True)
+    fhs = [{"name": "HQ", "address": "1 Long Road", "ll": at(0, 0)},
+           {"name": "Parkside", "address": "5 Long Road", "ll": at(5, -0.65)}]
+    r = routes_on(g, firehouses=lambda: fhs)
+    on_hutch = at(5, -1)
+    to = [LON0 + 20 * DX, LAT0 + 0.5 * DY]
+    m = going(to, place="position", lon=on_hutch[0], lat=on_hutch[1], at=NOW, station="HQ")
+    rt = one(r, m, NOW + 1)
+    plain = g.route(on_hutch, to, P)
+    assert limited_in(g, plain) == {2} and rt["coords"] == plain["coords"]
+    assert r.to_one({"E60": on_hutch}, to, quarters={})["E60"] == pytest.approx(g.to_one({"E60": on_hutch}, to, P)["E60"])
