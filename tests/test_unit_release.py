@@ -228,7 +228,7 @@ def _stuck_db(tmp_path, clock):
         db.execute("UPDATE assignments SET cleared_at = ? WHERE incident_id = ? AND cleared_at IS NULL", (clock.t, a["id"]))
         db.execute("UPDATE incidents SET status = 'closed', closed_at = ?, disposition = ? WHERE id = ?",
                    (clock.t, c.lists.disposition_codes[0], a["id"]))
-    c.store.db.close()
+    c.shutdown()
     return a, b
 
 
@@ -252,7 +252,7 @@ def test_startup_repair_releases_units_stuck_on_a_closed_call(tmp_path):
     # The closed call's chronology is not rewritten.
     assert not any("released" in t for t in texts(c, a["id"]))
     # Idempotent: a second start changes nothing and logs nothing.
-    c.store.db.close()
+    c.shutdown()
     logs.clear()
     rev_rows = sqlite3.connect(tmp_path / "cad.sqlite").execute("SELECT COUNT(*) FROM unit_history").fetchone()[0]
     c = start(tmp_path, clock, logs)

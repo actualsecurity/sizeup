@@ -7,7 +7,7 @@ public data only. Each run copies them into a fresh temp state dir with new, emp
 way the container does (`--init-state`, then the app; no Litestream, no S3), with every outside request sent to a
 dead proxy (nothing is fetched, nothing leaves this machine), and reports, from the process start:
 
-    init-state      the `--init-state` step (the entrypoint runs it before Litestream starts)
+    init-state      the `--init-state` step (the hub runs it once Litestream replicates the files)
     healthz         the first 200 from /healthz
     cad             the first 200 from /api/cad/state (the CAD is usable)
     layers          /api/cad/gis says no layer is loading any more

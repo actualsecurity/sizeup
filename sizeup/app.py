@@ -498,6 +498,7 @@ class App:
         self.modes = [c.label for c in cfg.channels] + ([P25_MODE] if self.recorder else []) + list(self._sys_jobs)
         if self.shared:
             self.modes.append(OFF_MODE)
+        self.reception.setup_probes()         # (#436) the county's P25 sites, probe-only: never a mode here
         first = cfg.start_mode if cfg.start_mode in self.modes else (self.modes[0] if self.modes else OFF_MODE)
         self.assign: dict[str, str] = {sd: (first if k == 0 else OFF_MODE) for k, sd in enumerate(self._listed)}
         # Who set each dongle's mode: "person" (the web app, here or the hub's) or "auto" (_auto_assign).
@@ -3838,7 +3839,7 @@ class App:
             self.p25.start()
         for rt in self.systems.values():
             rt.ingest.start()
-        if self.systems:
+        if self.systems or self.reception.probes:
             self.reception.start_thread()
         if self.vocab is not None and self.vocab.state()["state"] == "PENDING":
             self.vocab.poll()
@@ -4195,7 +4196,7 @@ def init_state(cfg: Config) -> list[str]:
     made: list[str] = []
     if not cfg.cad_db:
         return made
-    Cad.from_config(cfg, log=log).store.db.close()     # the schema, its migrations, the seeded lists
+    Cad.from_config(cfg, log=log).shutdown()           # the schema, its migrations, the seeded lists
     made.append(cfg.cad_db)
     if cfg.cloud_role == "hub":
         from sizeup.cloud.hubstore import AudioDb, MonitorDb
@@ -4211,7 +4212,8 @@ def main(argv: list[str] | None = None) -> int:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--config", default="config.toml")
     ap.add_argument("--init-state", action="store_true",
-                    help="create / migrate the databases and exit (the hub container runs this before Litestream)")
+                    help="create / migrate the databases and exit (never on a replicated file Litestream isn't "
+                         "replicating: docs/cloud.md \"Replicate before migrate\")")
     args = ap.parse_args(argv)
     try:
         cfg = load(args.config)
@@ -4270,8 +4272,10 @@ def run_gated(cfg: Config, gate: Path) -> int:
     write until the supervisor says so through the gate file (and the lease file says the lock is ours):
 
         (standby)  prewarm(): imports, the gazetteer, the map providers and their caches, the ATC rules; then wait
-        "init"     the takeover: the databases promoted. --init-state's work, here (no new Python to start); the
-                   answer ("ok" / "error: ...") in <gate>.answer; then wait while the supervisor starts Litestream
+        "init"     the takeover: the databases promoted and Litestream already replicating each (the supervisor
+                   confirmed it: docs/cloud.md "Replicate before migrate"). --init-state's work, here (no new Python
+                   to start): the migrations; the answer ("ok" / "error: ...") in <gate>.answer; then wait while the
+                   supervisor confirms they are in S3
         "run"      the port listens at once ("updating": the supervisor starts the connector beside it), the app is
                    built and takes the socket over: the CAD serves
 
@@ -4301,7 +4305,7 @@ def run_gated(cfg: Config, gate: Path) -> int:
         log(f"sizeup: databases ready ({cfg.cad_db or 'in memory'})")
         t.mark("init-state")
         _wait_gate(gate, ("run",))
-        t.mark("litestream")                      # (the supervisor starts it meanwhile)
+        t.mark("replicated")                      # (the supervisor confirms the migrations are in S3 meanwhile)
     early = None
     try:
         from sizeup.web.updating import serve_updating

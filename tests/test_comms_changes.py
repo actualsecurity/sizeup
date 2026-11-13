@@ -93,6 +93,10 @@ def writers(c):
         ("record again", lambda: c.comms.record(tx("fg-new", t + 20, rig="E63", radio_id="4242098", text="the same row, its words in")),
          "fg-new", lambda: row(c, "fg-new")["text"] == "the same row, its words in"),
         ("record context", lambda: c.comms.record(other("pd-new", t + 21)), "pd-new", lambda: row(c, "pd-new")["system"] == "metro"),
+        ("record waiting", lambda: c.comms.record(dict(tx("fg-w", t + 22, text=""), status="pending", model="aws-transcribe")), "fg-w",
+         lambda: row(c, "fg-w")["status"] == "pending"),
+        ("set_stt", lambda: c.comms.set_stt("fg-w", "pending", "whisper (AWS failed: made up)"), "fg-w",
+         lambda: row(c, "fg-w")["model"] == "whisper (AWS failed: made up)"),
         ("retext", lambda: c.comms.retext("fg-2", "its transcript", "done", alt={"text": "another", "model": "m"}), "fg-2",
          lambda: row(c, "fg-2")["text"] == "its transcript"),
         ("set_alt", lambda: c.comms.set_alt("fg-2", {"text": "a third reading", "model": "m"}), "fg-2",
@@ -126,7 +130,7 @@ def writers(c):
     ]
 
 
-WRITERS = {"record", "retext", "set_alt", "rerun_done", "link", "unlink", "link_pages", "relink", "retag_pages", "fix_air", "prune"}
+WRITERS = {"record", "retext", "set_alt", "set_stt", "rerun_done", "link", "unlink", "link_pages", "relink", "retag_pages", "fix_air", "prune"}
 # Public methods of Comms that write nothing a row of the Radio page shows (activity: the per-minute counts)
 READERS = {"activity", "activity_rows", "audio_per_day", "context_clips", "emergencies", "events_of", "facets", "for_incidents",
            "id_stats", "kept_for_events", "kept_for_tier", "minute_counts", "page", "policies", "query", "source_names",
@@ -285,14 +289,14 @@ def test_an_earlier_builds_triggers_are_taken_off_at_the_start(tmp_path):
     c.store.db.executescript(
         "CREATE TRIGGER radio_changes_t_ins AFTER INSERT ON radio_traffic BEGIN INSERT INTO no_such_table VALUES (1); END;"
         "CREATE TRIGGER radio_changes_a_upd AFTER UPDATE ON alarms BEGIN INSERT INTO no_such_table VALUES (1); END;")
-    c.store.db.close()
+    c.shutdown()
     again = cad(tmp_path, c.clockref, airband=("Tower",))
     assert not change_triggers(again.store)
     assert again.record_traffic(tx("fg-after", c.clockref.t + 60, rig="E63")) == [c.inc["id"]]
     assert not again.comms.changes_broken
     dump = lambda db: "\n".join(db.iterdump())             # noqa: E731
     before = dump(again.store.db)
-    again.store.db.close()
+    again.shutdown()
     assert dump(cad(tmp_path, c.clockref, airband=("Tower",)).store.db) == before       # a start writes nothing
 
 

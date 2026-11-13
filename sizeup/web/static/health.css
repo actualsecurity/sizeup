@@ -1,4 +1,4 @@
-/* Station health (GitHub #79, health.js): Settings > Health, the admins' tab (#203; no banner under the header).
+/* Station health (GitHub #79, health.js): Settings > Station > Health, the admins' tab (#203; no banner under the header).
    Layout and composition on the tokens only (style.css). */
 
 @layer views {
@@ -33,6 +33,19 @@
   .chip.hl-ok { --c: var(--ok); }
   .chip.hl-bad { --c: var(--err); }
   .chip.hl-warn { --c: var(--warn); }
+
+  /* ---- Settings > Station: its tabs, and Logs (logs.js) ------------------------------------------------- */
+  #s-station-tabs { margin-block-end: var(--gutter); }
+  .s-station-part { display: flex; flex-direction: column; gap: var(--gutter); }
+  .s-station-part[hidden] { display: none; }
+  .lg-status { flex-wrap: wrap; gap: var(--s-1) var(--s-3); margin-block-end: var(--s-2); }
+  .lg-bar { flex-wrap: wrap; gap: var(--s-2); margin-block-end: var(--s-2); }
+  .lg-bar .lg-text { flex: 1 1 12rem; min-inline-size: 8rem; }
+  .lg-table td { vertical-align: top; font-size: var(--fs-sm); line-height: var(--lh-sm); }
+  .lg-table .lg-msg { white-space: pre-wrap; overflow-wrap: anywhere; min-inline-size: 20rem; }
+  .lg-table .nowrap { white-space: nowrap; }
+  .lg-table tr.lg-error td:nth-child(4) { color: var(--err); font-weight: 600; }
+  .lg-table tr.lg-warning td:nth-child(4) { color: var(--warn); }
 
   /* the hub's Station row (Settings > Radios > Receivers): opens Settings > Health, for an admin */
   .pill.radio.link { cursor: pointer; }

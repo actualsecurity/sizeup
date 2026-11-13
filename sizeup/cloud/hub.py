@@ -24,6 +24,10 @@ runs on a bare Linux box with Python + numpy.
                                   [vessel records], rx?}, gzipped, the whole list every 5 s while someone looks (or a
                                   marine call is open), else every 30 s -> {ok, n, every}. Into the Vessels layer's
                                   "receiver" feed (sizeup/vessels.py StationFeed), never the state push
+    POST /api/station/logs        the station's journal, scrubbed, gzipped (sizeup/cloud/logship.py): {v, station, batch,
+                                  lines: [[ms, unit, level, msg]]} -> {ok, accepted, config, retry_s?}: into CloudWatch
+                                  Logs /sizeup/station (sizeup/cloud/cwlogs.py), or "not configured" until sizeup-aws
+                                  step 25 has run (the station keeps its spool)
     GET  /api/station/hello      {ok}: the token works (the station's Test connection; not counted as "seen")
     GET  /api/station/status     read only, for the deploy check (tools/deploy_check.py): the hub's build, the
                                  station's version and last update, the health alerts (sizeup/cloud/health.py).
@@ -103,6 +107,7 @@ MAX_STATE_BODY = 4 * 1024 * 1024
 MAX_RESULT_BODY = 16 * 1024 * 1024
 MAX_AIRCRAFT_BODY = 512 * 1024        # 300 aircraft as JSON are ~30 KB; gzipped, a few
 MAX_VESSELS_BODY = 512 * 1024         # 500 vessel records as JSON are ~150 KB; gzipped, far less
+MAX_LOGS_BODY = 4 * 1024 * 1024       # a station log batch, gzipped (sizeup/cloud/logship.py: ~512 KB before gzip)
 LIVE_STALE_S = 8.0       # a "talking now" snapshot older than this is dropped (the station resends every 2 s)
 TTS_WAIT_S = 20.0        # the dispatch voice: the station renders it; longer than this = text only
 CALL_WAIT_S = 12.0       # an SDR / talkgroup switch (the monitor's switch gives up at 15 s)
@@ -320,12 +325,12 @@ class Hub:
 
     def station_row(self) -> dict:
         """The Station row of the radios (everyone's state push): its connection only. Its health alerts are the
-        admins' (Settings > Health, GET /api/cad/health, #203); the page links the row there for an admin."""
+        admins' (Settings > Station > Health, GET /api/cad/health, #203); the page links the row there for an admin."""
         h = self.health()
         return {"label": "Station", "mhz": None, "state": h["state"], "word": h["word"],
-                "detail": h["detail"] + " · Station health: Settings > Health (admins)",
+                "detail": h["detail"] + " · Station health: Settings > Station > Health (admins)",
                 "open": False, "quieting_db": None, "restarts": 0, "last_heard": self.last_seen,
-                "link": "#settings/health"}
+                "link": "#settings/station/health"}
 
     def radio_rows(self) -> list[dict]:
         """The Station row, then the station's own rows as it reported them, or, offline, marked
@@ -351,10 +356,10 @@ class Hub:
 
     def cad_cloud(self) -> dict:
         """The CAD state's cloud (everyone's state push): the station's connection, for the header pill. No health
-        alerts here (#203): those are on the admins' Settings > Health, from GET /api/cad/health."""
+        alerts here (#203): those are on the admins' Settings > Station > Health, from GET /api/cad/health."""
         h = self.health()
         return {"role": "hub", "state": h["state"], "word": h["word"], "detail": h["detail"],
-                "health_url": "/cad#settings/health"}
+                "health_url": "/cad#settings/station/health"}
 
     # -- jobs ------------------------------------------------------------------------------------------
 
@@ -376,7 +381,7 @@ class Hub:
         return res
 
     def reset_source(self, source: str, by: str = "") -> dict:
-        """POST /api/sources/reset (an admin, Settings > Health): the station's incident source's reset() (#301), as a
+        """POST /api/sources/reset (an admin, Settings > Station > Health): the station's incident source's reset() (#301), as a
         sources_reset job over the station's authenticated jobs channel. Logged with who asked (their Access
         identity; never a credential). ValueError for a bad source, StationOffline / RuntimeError from the station."""
         from sizeup.cloud.adapters import SOURCE_ID
@@ -450,6 +455,8 @@ class Hub:
                 return self._aircraft(body(MAX_AIRCRAFT_BODY), headers)
             if method == "POST" and path == "/api/station/vessels":
                 return self._vessels(body(MAX_VESSELS_BODY), headers)
+            if method == "POST" and path == "/api/station/logs":
+                return self._logs(body(MAX_LOGS_BODY), headers)
             if method == "POST" and (m := JOB_PATH.fullmatch(path)):
                 raw = body(MAX_RESULT_BODY)
                 if raw is None:
@@ -541,6 +548,18 @@ class Hub:
         if layer is None:
             return _json(404, {"error": "no vessels layer here"})
         return _json(200, layer.station_ingest(json.loads(raw or b"{}")))
+
+    def _logs(self, raw: bytes | None, headers) -> tuple[int, bytes, str]:
+        """The station's journal, scrubbed (sizeup/cloud/logship.py): into CloudWatch (sizeup/cloud/cwlogs.py)."""
+        sink = getattr(self.app, "station_logs", None)
+        if sink is None:
+            return _json(404, {"error": "no station logs here"})
+        try:
+            code, out = sink.ingest(raw, headers)
+        except Exception as e:  # noqa: BLE001 - never in the way of the station's link
+            self.log(f"station logs: {type(e).__name__}")
+            return _json(503, {"error": f"station logs: {type(e).__name__}"})
+        return _json(code, out)
 
     def _retry(self, seq: int) -> bool:
         """A source_event failed to apply: True while it still has tries left (left unacked, the station sends it
@@ -640,13 +659,13 @@ class HubApp(App):
         self.audio.may_write = self._may_write_audio
         self.audio.may_delete = self._may_delete_audio
         self.hub = Hub(self, cfg, log)
-        # station health (GitHub #79): the alerts, the admins' Settings > Health (#203), the push to the status topic in effect (Settings, else
+        # station health (GitHub #79): the alerts, the admins' Settings > Station > Health (#203), the push to the status topic in effect (Settings, else
         # [alerts] status_topic, else ntfy_topic: notify.Pushes; never Tapout's): App.pushes' STATUS kind (the same
         # Notifier as the emergency alarms when both kinds share a topic: one queue in order)
         from sizeup.notify import STATUS
         notifier = self.pushes.notifier(STATUS)
         self.health = self.hub.health_ = StationHealth(self.hub, cfg, self.mdb, notifier, log)
-        # The incident sources (#297): paging is a tier only while the station is connected; Settings > Health shows them.
+        # The incident sources (#297): paging is a tier only while the station is connected; Settings > Station > Health shows them.
         self.cad.sources.paging_ok = self.hub.connected
         self.cad.sources.trigger = self._sources_poll_now      # a pre-alert here: the station's adapters poll now
         self.health.sources = self.cad.sources.panel
@@ -655,14 +674,14 @@ class HubApp(App):
         from sizeup import errwatch
         pub = (cfg.cloud_public_url or "").rstrip("/")
         self.error_watch = errwatch.ErrorWatch(notifier, settings=lambda: self.cad.settings.section(errwatch.SECTION), log=log,
-                                               click=f"{pub}/cad#settings/system/health" if pub else "", db=self.mdb,
+                                               click=f"{pub}/cad#settings/station/health" if pub else "", db=self.mdb,
                                                muted=lambda: self.health.muted("hub_errors"))
         # an alert kind muted in Settings > System > Push notifications (#340): shown on Health, not pushed
         from sizeup.cloud.health import MUTE_SECTION
         self.health.mutes = lambda: self.cad.settings.section(MUTE_SECTION)
         self.health.errors = self.error_watch
         if not notifier.enabled:
-            log("health: no push for station alerts (no status or alerts topic in effect): Settings > Health and log only")
+            log("health: no push for station alerts (no status or alerts topic in effect): Settings > Station > Health and log only")
         self.live = self.hub.live                      # main() sets on_change to push the display
         self.cad.live = self.live.state
         # the Radio page's source tree (#415): the station's talkgroups and systems, as its state says them
@@ -696,6 +715,15 @@ class HubApp(App):
         from sizeup.perf import Perf
         self.perf = Perf(log=log)
         self._perf_sizes()
+        # the station's logs into CloudWatch, and Settings > Station > Logs (sizeup/cloud/cwlogs.py): no AWS call until
+        # the station sends a batch or an admin opens Logs; "not configured" until sizeup-aws step 25 has run
+        from sizeup.cloud.cwlogs import SECTION as LOGS_SECTION, StationLogs
+        from sizeup import logscrub, procenv
+        procenv.register_secrets()                      # the hub's own secrets in its environment: never in a log row
+        logscrub.secret(self.hub.token, self.hub.status_token)
+        self.station_logs = StationLogs(settings=lambda: self.cad.settings.section(LOGS_SECTION),
+                                        station_status=lambda: self.hub.status, log=log)
+        self.cad.station_logs = self.station_logs
         app_mod._mark("hub")
 
     def _perf_sizes(self) -> None:
@@ -1067,7 +1095,7 @@ class HubApp(App):
             if now - seen >= PENDING_FLAG_S:
                 self._pending_seen.pop(p.id, None)
                 self._aws_give_up(p, "page", f"no text from the station's speech-to-text in {PENDING_FLAG_S / 60:.0f} min "
-                                             "(it may be behind: Settings > Health); it comes up if it arrives",
+                                             "(it may be behind: Settings > Station > Health); it comes up if it arrives",
                                   model="speech-to-text")
                 n += 1
         return n

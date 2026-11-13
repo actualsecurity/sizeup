@@ -318,7 +318,7 @@ class StationMode:
         if link is not None and not self.problem:
             return link.status_row()
         return {"label": "Hub", "mhz": None, "state": "down", "word": "not sending",
-                "detail": f"forwarding to the hub is on, but {self.problem or 'starting'}: Settings > System > Station",
+                "detail": f"forwarding to the hub is on, but {self.problem or 'starting'}: Settings > Station > Hub link",
                 "open": False, "quieting_db": None, "restarts": 0, "last_heard": None}
 
     def cad_cloud(self) -> dict | None:
