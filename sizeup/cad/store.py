@@ -420,6 +420,9 @@ class Store:
             self.db.execute("PRAGMA journal_mode = WAL")
         self.lock = threading.RLock()
         self.rev = 0          # bumped on every change: the page refetches nothing, it's pushed
+        # after a transaction is committed / rolled back (tx()); touch(id, system): a row of the radio log changed in
+        # the open transaction (the Radio page's change notes: set by Comms, sizeup/cad/comms.py)
+        self.after_commit = self.after_rollback = self.touch = None
         self.migrated: list[str] = []      # what a migration did, for the log
         self.on_assigned = None            # fn(incident id, [unit names]): units just put on it (assign); never raises here
         self.on_unassigned = None          # fn(incident id): a unit just taken off it (cleared, moved); never raises here
@@ -525,6 +528,13 @@ class Store:
                 self.db.execute(f"ALTER TABLE radio_traffic ADD COLUMN {col} {kind}")
         if tcols:
             self.db.execute("CREATE INDEX IF NOT EXISTS radio_traffic_source_start ON radio_traffic(source, start)")
+            # The Radio page's views (#415), an index walk each: a service's, a system's, a department's and the scene-safety
+            # rows (GET /api/cad/comms ?view= ?service= ?system= ?dept= ?safety=), 2026-11-10.
+            self.db.execute("CREATE INDEX IF NOT EXISTS radio_traffic_service_start ON radio_traffic(service, start)")
+            self.db.execute("CREATE INDEX IF NOT EXISTS radio_traffic_system_start ON radio_traffic(system, start)")
+            self.db.execute("CREATE INDEX IF NOT EXISTS radio_traffic_dept_start ON radio_traffic(dept, start) WHERE dept != ''")
+            self.db.execute("CREATE INDEX IF NOT EXISTS radio_traffic_safety ON radio_traffic(start) "
+                            "WHERE safety != '' AND safety != 'dismissed'")
         if tcols and self.db.execute("SELECT 1 FROM radio_traffic WHERE source = '' LIMIT 1").fetchone():
             # The rows from before (source ''): all the county system's (the only one there was), or an analog
             # channel's (an airband row is the one with its frequency, #260; the airband rows from before that are
@@ -738,11 +748,22 @@ class Store:
                 return store.db
 
             def __exit__(self, et, e, tb):
+                done = False
                 try:
                     store.db.execute("ROLLBACK" if et else "COMMIT")
-                    if not et:
+                    done = not et
+                    if done:
                         store.rev += 1
                 finally:
+                    # What rides on a transaction without being part of it (the Radio page's change notes,
+                    # sizeup/cad/comms.py): told only once the write is committed, or that it was not. Best effort:
+                    # nothing it does or fails at reaches the caller, whose data is stored (or rolled back) by now.
+                    hook = store.after_commit if done else store.after_rollback
+                    try:
+                        if hook is not None:
+                            hook()
+                    except Exception:  # noqa: BLE001
+                        pass
                     store.lock.release()
                 return False
         return _Tx()
@@ -1463,6 +1484,8 @@ class Store:
         with self.tx() as db:
             self._event(db, iid, kind, text, operator, units=",".join(units),
                         places=json.dumps(list(places), separators=(",", ":")) if places else "")
+            if units and self.touch is not None:        # a note tagged with a unit is a row of the Radio page
+                self.touch("note-new", "")
 
     def has_dispatch(self, iid: int) -> bool:
         return self.one("SELECT 1 AS x FROM dispatches WHERE incident_id = ? LIMIT 1", (iid,)) is not None

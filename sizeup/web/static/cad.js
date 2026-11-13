@@ -3947,7 +3947,7 @@ function focusSearch() {
     .find((n) => n.getClientRects().length && !n.closest("[hidden]"));
   if (here) { here.focus(); here.select(); return; }
   location.hash = "#radio";
-  setTimeout(() => { $("#rv-q").focus(); $("#rv-q").select(); }, 0);
+  setTimeout(() => { const q = window.RadioNav && RadioNav.on ? $("#rn-q") : $("#rv-q"); q.focus(); q.select(); }, 0);
 }
 function escapeView(fromField) {
   if (fromField) return;

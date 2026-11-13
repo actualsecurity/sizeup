@@ -661,6 +661,11 @@ class HubApp(App):
             log("health: no push for station alerts (no status or alerts topic in effect): Settings > Health and log only")
         self.live = self.hub.live                      # main() sets on_change to push the display
         self.cad.live = self.live.state
+        # the Radio page's source tree (#415): the station's talkgroups and systems, as its state says them
+        self.cad.source_rows = lambda: self.hub.talkgroups or []
+        self.cad.source_systems = lambda: {self.tg.county: "County", **{
+            str(x.get("name")): str(x.get("label") or x.get("name")) for x in ((self.hub.status or {}).get("p25_systems") or [])
+            if isinstance(x, dict) and x.get("name")}}
         self.paging_state = self.live.paging_state     # the station's page going out now
         self.cad.remote_voice = self.hub.render_voice
         self.cad.audio_blobs = self.audio
