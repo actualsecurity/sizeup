@@ -122,10 +122,13 @@ class Policy:
             return Decision(ev.mode, False, "", prio)
         repush = False
         if moved and ev.pushed_at is not None:
-            if now - ev.pushed_at < self.cfg["move_min"] * 60:
-                return Decision(ev.mode, False, "merged", prio)
+            if now - ev.pushed_at < self.cfg["move_min"] * 60 or ev.push_count > self.cfg["max_repush"]:
+                return Decision(ev.mode, False, "merged", prio)        # a move counts toward max_repush too
             repush = True
         elif change == "reopened":
+            if ev.pushed_at is not None and (now - ev.pushed_at < self.cfg["repush_min"] * 60
+                                             or ev.push_count > self.cfg["max_repush"]):
+                return Decision(ev.mode, False, "merged", prio)        # re-opens obey repush_min and max_repush
             repush = ev.pushed_at is not None
         elif change == "updated" or ev.pushed_at is not None:
             if ev.pushed_at is None:

@@ -737,8 +737,8 @@ def test_h2_a_dismissed_event_doesnt_come_straight_back(live):
     cad.comms.record(ctx_row("c2-t0", "units respond, shots fired at Sample St and Test Rd", cad.clock() + 5))
     cad.intel.consider("c2-t0")
     cad.intel.drain()
-    [back] = cad.intel.events.open_events()                       # a new report of it: new evidence, it comes back
-    assert back.id == ev.id and back.note == "re-opened" and len(n.sent) == 2
+    [again] = cad.intel.events.open_events()                      # a person's Dismiss holds: recorded at log only
+    assert again.id != ev.id and again.mode == "log" and len(n.sent) == 1
 
 
 def test_h4_intel_writes_never_bump_the_cad_rev(live):
@@ -843,8 +843,8 @@ def test_r2_the_mute_is_by_place_never_by_source():
     e.feed(row("t1", "shots fired at 100 Example Ave", 1000))
     e.feed(row("t2", "disregard, units disregard, shots fired call cancelled", 1010))
     clock.t = 1100
-    [same] = e.feed(row("t3", "shots fired at 100 Example Ave", 1100))      # the same place again: re-opened, pushed
-    assert same.status == "open" and same.note == "re-opened"
+    [same] = e.feed(row("t3", "shots fired at 100 Example Ave", 1100))      # after a NAMED disregard: a new event
+    assert same.status == "open" and same.mode == "push"
     clock.t = 1110
     [other] = e.feed(row("t4", "shots fired at Sample St and Test Rd", 1110))   # another place: a new pre-alert
     assert other.id != same.id and other.mode == "push" and len(pushed(sink)) == 3
@@ -957,7 +957,8 @@ def test_t3_a_nameless_disregard_never_ends_shots_and_the_repeat_pushes():
     assert x.id == a.id and x.status == "open" and x.note == "possibly cancelled"
     clock.t = 1020 + 4 * 60
     [y] = e.feed(row("t3", "shots fired, 100 Example Ave, multiple callers", clock.t))
-    assert y.id == a.id and y.note == "re-opened" and len(pushed(sink)) == 2
+    assert y.id == a.id and y.note == "re-opened" and len(pushed(sink)) == 1   # re-opened; within repush_min (10)
+    # (a re-open past repush_min pushes again: test_u2)
 
 
 def test_t4_a_unit_alias_is_no_dispatcher_and_a_busy_unit_ties_by_words_only():
@@ -995,3 +996,26 @@ def test_t2_a_suspect_last_seen_moves_the_one_open_weapons_call():
     clock.t = 1090
     [m] = e.feed(row("t2", "suspect last seen at Sample St and Test Rd", 1090, talker="DISP"))
     assert m.id == a.id and m.label_full.startswith("Sample St") and m.note == "moved" and len(e.events.all()) == 1
+
+
+
+# -- round 3: Dismiss holds; re-opens and moves obey the repush limits ------------------------------------------------
+
+def test_u2_shots_and_disregard_alternating_never_flood():
+    clock = Clock(1000)
+    e, sink = engine(clock=clock)
+    for k in range(12):                                             # every minute for 11 minutes
+        clock.t = 1000 + k * 60
+        text = "shots fired at 100 Example Ave" if k % 2 == 0 else "disregard my last"
+        e.feed(row(f"t{k}", text, clock.t))
+    assert len(pushed(sink)) == 2 and len(e.events.all()) == 1     # the first, and one re-open past repush_min (10)
+
+
+def test_u3_moves_count_toward_max_repush():
+    clock = Clock(1000)
+    e, sink = engine(clock=clock)
+    places = ("at 100 Example Ave", "now at Sample St and Test Rd")
+    for k in range(12):                                             # a pursuit moving every 5.5 minutes for an hour
+        clock.t = 1000 + k * 330
+        e.feed(row(f"t{k}", f"car 3 in pursuit, {places[k % 2]}", clock.t, talker="DISP"))
+    assert len(pushed(sink)) == 1 + e.policy.cfg["max_repush"] and len(e.events.all()) == 1   # 1 + 2 moves, then no more
