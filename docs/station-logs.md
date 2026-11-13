@@ -18,18 +18,22 @@ station journald (sizeup-* units)
 
 - **No AWS key on the station.** The hub writes with its task role.
 - **No third-party log service.** Everything stays in the department's account: county CAD app details never leave it.
-- **Only the reader reads the journal.** `sizeup-logread` runs as its own user (`sizeup-logs`, in `systemd-journal`)
+- **Only the reader reads the journal.** `sizeup-logread` runs as its own user and group (`sizeup-logs`, in `systemd-journal`)
   with no network, and hands over only the `sizeup-*` units' entries. The sizeup user (the web UI, the adapter) is
   not in `systemd-journal`: it never sees sshd, sudo or anything else in the journal.
 - **The adapter's own lines stay on the station** unless an admin turns on *Ship the adapter's own lines* (with a
   warning): lines naming an installed adapter (entry point, module, distribution, source id or label, read at
-  runtime), the runner's `incident sources:` lines, a third-party Python logger's `[log name]` lines and traceback
+  runtime, without case; and its hosts: the host of any URL or host name among its non-secret credentials), the
+  runner's `incident sources:` lines, a traceback's exception line after a withheld frame, `sizeup-update` lines naming
+  its distribution, `basicConfig`-style `LEVEL:logger:` lines, a third-party Python logger's `[log name]` lines and traceback
   frames in site-packages. Counted as "adapter" in the drop counts.
 - **Scrub, fail closed** (on the station, where every credential is known). Text is NFKC-normalised and zero-width
   characters removed first. A line with a known credential value is dropped: the station token, the Access service
-  token and the status token (from the environment and the config), every adapter credential from the credstore
-  (short ones as whole words) or SSM, in any of its forms (URL-encoded, JSON-, HTML- or repr-escaped, base64, base64 of
-  `user:password` with or without `Basic `), checked on the whole line before it is cut. The whole value is redacted
+  token and the status token (from the environment and the config), and every secret field of the adapter's
+  credentials (a password, token, key, PIN: not a user name or a region) from the credstore (short ones as whole
+  words) or SSM, in any of its forms (upper and lower case, hex, URL-encoded, JSON-, HTML- or repr-escaped, base64 at
+  any alignment, so the base64 of `user:password` is caught whatever the user), checked on the whole line before it is
+  cut. Cyrillic and Greek lookalike letters and `\xNN` escapes are mapped to ASCII before the key words are matched. The whole value is redacted
   for `key=value` / `key: value` / JSON pairs naming a password, pw, p, pin, pass, token, secret, key, cookie, session,
   auth or an SSM `Value`; a credential's name used as a key; `-p`, `--password`, `-u`, `--user` on a command line;
   Bearer / Basic / Digest auth; `user:password@host`; `user:password` and `('user', 'password')` after login or

@@ -875,11 +875,12 @@ activate() {
   # the journal reader (sizeup-logread, docs/station-logs.md): a user of its own in systemd-journal, never the sizeup user
   if [ -f "$sys/systemd/sizeup-logread.service" ]; then
     getent group systemd-journal >/dev/null || groupadd --system systemd-journal
+    getent group sizeup-logs >/dev/null || groupadd --system sizeup-logs
     if ! id sizeup-logs >/dev/null 2>&1; then
-      useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin --gid "$SVC_USER" \
+      useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin --gid sizeup-logs \
         --comment "sizeup station journal reader" sizeup-logs
     fi
-    usermod -a -G systemd-journal sizeup-logs
+    usermod -g sizeup-logs -a -G systemd-journal sizeup-logs
     install -d -m 2770 -o sizeup-logs -g "$SVC_USER" /var/lib/sizeup-logs
     install -D -m 0644 "$sys/../../sizeup/cloud/logread.py" "$LIB/logread.py"
   fi

@@ -1,6 +1,6 @@
 """The station's journal reader (sizeup-logread.service): the only part of the station that reads the system journal.
 
-It runs as a user of its own (sizeup-logs, in systemd-journal) with the system python3 (stdlib only, like aisd.py),
+It runs as a user of its own (sizeup-logs, its own group, in systemd-journal) with the system python3 (stdlib only, like aisd.py),
 without network, and hands sizeup-station ONLY the entries of the station's own units (`journalctl -u 'sizeup-*'`): the
 web UI and the incident-source adapter, which run as the sizeup user, never get to read sshd, sudo or anything else
 in the journal.
@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import secrets
 import shutil
 import subprocess
 import sys
@@ -73,6 +74,30 @@ def journal(cursor: str, since: float, limit: int) -> list[dict]:
     return out
 
 
+def _write(d: Path, name: str, text: str) -> None:
+    """text as d/name, atomically: a temp file of a random name made with O_EXCL | O_NOFOLLOW (the sizeup user, who can
+    write in d, can't plant a link for it to follow), then renamed over name (a rename replaces a link, never follows)."""
+    tmp = d / f".{secrets.token_hex(8)}.tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o640)
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+        os.replace(tmp, d / name)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def _read(p: Path) -> str:
+    """A small file of ours, never through a link."""
+    fd = os.open(p, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    with os.fdopen(fd) as f:
+        return f.read(4096)
+
+
 class Reader:
     def __init__(self, d: str | Path = DIR, read=journal, clock=time.time):
         self.dir, self.read, self.clock = Path(d), read, clock
@@ -86,10 +111,7 @@ class Reader:
 
     def _status(self) -> None:
         try:
-            tmp = self.dir / ".status.tmp"
-            tmp.write_text(json.dumps(self.st))
-            os.chmod(tmp, 0o640)
-            os.replace(tmp, self.dir / "status.json")
+            _write(self.dir, "status.json", json.dumps(self.st))
         except OSError:
             pass
 
@@ -111,7 +133,7 @@ class Reader:
             self._status()
             return "full"
         try:
-            cursor = (self.dir / "cursor").read_text().strip()
+            cursor = _read(self.dir / "cursor").strip()
         except OSError:
             cursor = ""
         try:
@@ -124,15 +146,9 @@ class Reader:
         if rows:
             last = next((r.get("__CURSOR") for r in reversed(rows) if r.get("__CURSOR")), "")
             seq = int(now * 1000)
-            path = self.dir / f"{seq:015d}.jsonl"
-            tmp = self.dir / f".{path.name}.tmp"
-            tmp.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows))
-            os.chmod(tmp, 0o640)
-            os.replace(tmp, path)
+            _write(self.dir, f"{seq:015d}.jsonl", "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows))
             if last:
-                c = self.dir / ".cursor.tmp"
-                c.write_text(last)
-                os.replace(c, self.dir / "cursor")
+                _write(self.dir, "cursor", last)
             self.st["written"] += len(rows)
         self._status()
         return "ok"

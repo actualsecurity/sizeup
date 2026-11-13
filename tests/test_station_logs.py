@@ -39,8 +39,8 @@ def test_scrub_drops_a_registered_secret_and_redacts_credential_shapes():
     s = logscrub.scrub
     assert s(f"hub link: bearer {TOKEN} refused") is None                  # a known value: the whole line dropped
     assert s("feed login as Corr3ct-Horse-9") is None
-    assert s("FEEDX_USER read from the credstore") == "[credential] read from the credstore"
-    assert s("Authorization: Bearer abcdefghijklmnopqrstuvwxyz012345") == "Authorization: [redacted] [redacted]"
+    assert s("FEEDX_USER read from the credstore") == "[credential] [redacted] from the credstore"   # (a name + a space: its value)
+    assert s("Authorization: Bearer abcdefghijklmnopqrstuvwxyz012345") == "Authorization: [redacted]"
     assert s("GET https://u:pw1@example.org/a?token=abc&page=2") == "GET https://[redacted]@example.org/a?token=[redacted]&page=2"
     assert s("aws AKIAABCDEFGHIJKLMNOP wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY") == "aws [aws-key] [redacted]"
     assert s('{"password": "x1", "user": "u"}') == '{"password": [redacted], "user": "u"}'
@@ -90,7 +90,7 @@ def test_repro_basic_auth_of_a_registered_login():
     ('{"Value": "hunter2"}', '{"Value": [redacted]}'),
     ("ｐａｓｓｗｏｒｄ=ｈｕｎｔｅｒ２", "password=[redacted]"), ("pass​word=hunter2", "password=[redacted]"),
     ("password= a;b,c&d'e", "password= [redacted]"), ('{"password": "a\\"b;c", "u": 1}', '{"password": [redacted], "u": 1}'),
-    ("Authorization: Bearer abc", "Authorization: [redacted] [redacted]"),
+    ("Authorization: Bearer abc", "Authorization: [redacted]"), ("sent Bearer abc", "sent Bearer [redacted]"),
 ])
 def test_repro_unregistered_formats(line, want):
     assert logscrub.scrub(line) == want
@@ -109,11 +109,70 @@ def test_repro_a_value_past_the_cut_still_drops_the_line():
 
 def test_repro_short_credstore_values_match_as_words(tmp_path, monkeypatch):
     from sizeup import procenv
-    (tmp_path / "sizeup-adapter.FEEDX_USER").write_text("pc7\n")
+    (tmp_path / "sizeup-adapter.FEEDX_PIN").write_text("pc7\n")
     monkeypatch.setattr(procenv, "_dir", tmp_path)
     procenv.register_secrets()
-    assert logscrub.scrub("feed: user pc7 ok") is None and logscrub.scrub("FEEDX_USER set") == "[credential] set"
+    assert logscrub.scrub("feed: entered pc7 ok") is None and logscrub.scrub("FEEDX_PIN is missing") == "[credential] [redacted] missing"
     assert logscrub.scrub("rpc7x ok") == "rpc7x ok"
+
+
+# Re-review repros (#494)
+def test_repro2_base64_of_user_password_at_any_alignment(tmp_path, monkeypatch):
+    import base64
+    from sizeup import procenv
+    (tmp_path / "sizeup-adapter.FEEDX_USER").write_text("bob\n")
+    (tmp_path / "sizeup-adapter.FEEDX_PASS").write_text("Tr0ub&dor3x\n")
+    monkeypatch.setattr(procenv, "_dir", tmp_path)
+    procenv.register_secrets()
+    for user in ("bob", "ab12", "x", "someone.else"):
+        b = base64.b64encode(f"{user}:Tr0ub&dor3x".encode()).decode()
+        assert logscrub.scrub(f"Authorization: Basic {b}") is None and logscrub.scrub(f"hdr {b} ok") is None, user
+
+
+def test_repro2_usernames_and_regions_are_not_secrets(tmp_path, monkeypatch):
+    from sizeup import procenv
+    for n, v in (("FEEDX_USER", "dispatch"), ("SIZEUP_SSM_REGION", "us-east-1"), ("FEEDX_URL", "https://cad.example.net/app"),
+                 ("FEEDX_PASS", "Tr0ub&dor3x")):
+        (tmp_path / f"sizeup-adapter.{n}").write_text(v + "\n")
+    monkeypatch.setattr(procenv, "_dir", tmp_path)
+    procenv.register_secrets()
+    assert logscrub.scrub("dispatch mode: 60 Control") == "dispatch mode: 60 Control"
+    assert logscrub.scrub("aws region us-east-1") == "aws region us-east-1"
+    assert logscrub.scrub("x Tr0ub&dor3x") is None and "cad.example.net" in procenv.adapter_hosts()
+
+
+@pytest.mark.parametrize("line,want", [
+    ("FEEDX_PASS hunter2", "[credential] [redacted]"), ("FEEDX_PASS -> hunter2", "[credential] -> [redacted]"),
+    ("password => hunter2", "password => [redacted]"), ("password=correct horse battery", "password=[redacted]"),
+    ("passcode: 1234", "passcode: [redacted]"), ("api key: abc", "api key: [redacted]"), ("apikey=abc", "apikey=[redacted]"),
+    ("key=abc", "key=[redacted]"), ("token=abc", "token=[redacted]"), ("otp: 123456", "otp: [redacted]"),
+    ("login code: 123456", "login code: [redacted]"), ("Authorization: Token abc123", "Authorization: [redacted]"),
+    ("Authorization: NTLM TlRMTVNTUAAB", "Authorization: [redacted]"),
+    ("ftp://bob:p@ss@host.example/x", "ftp://[redacted]@host.example/x"),
+    ("p\u0430ssword=x", "password=[redacted]"), ("\u03c1assword=x", "password=[redacted]"), ("p\\x61ssword=x", "password=[redacted]"),
+])
+def test_repro2_scrub_additions(line, want):
+    logscrub.secret_name("FEEDX_PASS")
+    assert logscrub.scrub(line) == want
+
+
+def test_repro2_upper_and_hex_forms_of_a_value():
+    logscrub.secret("Tr0ub&dor3x")
+    assert logscrub.scrub("x TR0UB&DOR3X") is None and logscrub.scrub("x " + b"Tr0ub&dor3x".hex()) is None
+    assert logscrub.scrub("x " + b"Tr0ub&dor3x".hex().upper()) is None
+
+
+def test_repro2_the_reader_never_follows_a_planted_link(tmp_path):
+    from sizeup.cloud import logread
+    target = tmp_path / "elsewhere"
+    target.write_text("keep")
+    d = tmp_path / "ho"
+    d.mkdir()
+    (d / "status.json").symlink_to(target)
+    (d / "cursor").symlink_to(target)
+    r = logread.Reader(d, read=lambda c, s, n: [dict(JOURNAL[0])], clock=lambda: T0)
+    assert r.once() == "ok"
+    assert target.read_text() == "keep" and not (d / "status.json").is_symlink()
 
 
 def test_repro_the_station_registers_its_config_tokens(tmp_path):
@@ -227,9 +286,46 @@ def test_repro_adapter_lines_stay_unless_settings_say(tmp_path):
 def test_adapter_markers_come_from_the_installed_entry_points_and_the_runner():
     ep = SimpleNamespace(name="feedx", value="feedx_pkg.adapter:make", module="feedx_pkg.adapter",
                          dist=SimpleNamespace(name="feedx-adapter"))
-    runner = SimpleNamespace(runs=[SimpleNamespace(a=SimpleNamespace(source="feedx", label="Feed X"))])
-    m = logship.adapter_markers(SimpleNamespace(sources_runner=runner), entry_points=lambda group: [ep])
-    assert {"feedx", "feedx_pkg", "feedx-adapter", "feedx_adapter", "Feed X"} <= m
+    runner = SimpleNamespace(runs=[SimpleNamespace(a=SimpleNamespace(source="feedx", label="Feed X",
+                                                                     base_url="https://CAD.example.net/x"))])
+    m = logship.adapter_markers(SimpleNamespace(sources_runner=runner), entry_points=lambda group: [ep],
+                                hosts={"feed-host.example.org"})
+    assert {"feedx", "feedx_pkg", "feedx-adapter", "feedx_adapter", "feed x", "cad.example.net", "feed-host.example.org"} <= m
+
+
+def test_repro2_adapter_withholding_gaps(tmp_path):
+    st = dict(JOURNAL[0])
+    rows = [dict(st, MESSAGE="14:00:00 FEEDX: polled"),                                     # case
+            dict(st, MESSAGE="GET https://cad.example.net/api failed"),                     # its host
+            dict(st, MESSAGE="Traceback (most recent call last):"),
+            dict(st, MESSAGE='  File "/opt/x/venv/lib/python3.12/site-packages/feedx/poll.py", line 9, in poll'),
+            dict(st, MESSAGE="    raise Err(page)"),
+            dict(st, MESSAGE="feedx.Err: the county said no for unit E63"),                 # the exception line
+            dict(st, MESSAGE="[log sizeup_feedx] warning: slow"),                            # sizeup_<adapter>'s logger
+            dict(st, MESSAGE="WARNING:urllib3.connectionpool:Retrying (Retry(total=2)) /api"),   # basicConfig's format
+            dict(st, _SYSTEMD_UNIT="sizeup-update.service", MESSAGE="adapter: staged sizeup-feedx 1a2b3c4"),
+            dict(st, MESSAGE="14:00:01 hub link: connected")]
+    s, c = shipper(tmp_path, rows=rows, markers=("feedx", "sizeup-feedx", "cad.example.net"))
+    s.step()
+    assert [m for _, _, _, m in s.pending] == ["Traceback (most recent call last):", "14:00:01 hub link: connected"]
+    assert s.dropped_adapter == 8
+
+
+def test_repro2_basicconfig_handlers_get_the_tag():
+    import logging
+    root = logging.getLogger()
+    saved = list(root.handlers)
+    try:
+        for h in saved:
+            root.removeHandler(h)
+        h = logging.StreamHandler()
+        root.addHandler(h)
+        logship.install_log_tags()
+        assert isinstance(h.formatter, logship._Tag)
+    finally:
+        root.removeHandler(h)
+        for x in saved:
+            root.addHandler(x)
 
 
 def test_a_known_secret_never_leaves_the_station(tmp_path):
@@ -335,7 +431,8 @@ def test_the_reader_hands_over_only_its_units_and_keeps_its_cursor(tmp_path):
     for want in ("User=sizeup-logs", "SupplementaryGroups=systemd-journal", "PrivateNetwork=yes", "ProtectSystem=strict"):
         assert want in unit
     inst = (Path(__file__).parents[1] / "deploy/station/install-linux.sh").read_text()
-    assert "usermod -a -G systemd-journal sizeup-logs" in inst and 'usermod -a -G systemd-journal "$SVC_USER"' not in inst
+    assert "usermod -g sizeup-logs -a -G systemd-journal sizeup-logs" in inst and 'usermod -a -G systemd-journal "$SVC_USER"' not in inst
+    assert "Group=sizeup-logs" in unit and "--gid sizeup-logs" in inst
 
 
 # -- the hub -----------------------------------------------------------------------------------------------------

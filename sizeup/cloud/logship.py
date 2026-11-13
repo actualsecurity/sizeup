@@ -62,7 +62,9 @@ REJECT = (400, 413, 415, 422)          # the hub will never take this batch
 DEFAULT_CONFIG = {"on": True, "level": "info", "include": [], "exclude": [], "adapter": False}
 ADAPTER_GROUP = "sizeup.incident_sources"
 LOG_TAG = re.compile(r"^\s*(?:\d\d:\d\d:\d\d\s+)?\[log ([\w.-]+)\]")
+BASIC = re.compile(r"^\s*(?:DEBUG|INFO|WARNING|ERROR|CRITICAL):([\w.-]+):")    # logging.basicConfig's own format
 FRAME = re.compile(r'^\s*File "[^"]*(?:site-packages|dist-packages)/')
+TRACEBACK = "Traceback (most recent call last):"
 
 
 def _env_off() -> bool:
@@ -101,9 +103,11 @@ def unit_ok(unit: str, cfg: dict) -> bool:
     return not inc or unit in inc
 
 
-def adapter_markers(app=None, entry_points=None) -> set[str]:
-    """What names the incident-source adapter in a line: its entry points' names, modules (top package) and
-    distributions, and the runner's sources (id, label). Read at runtime: the repo names none of them."""
+def adapter_markers(app=None, entry_points=None, hosts=None) -> set[str]:
+    """What names the incident-source adapter in a line (lower case: matched without case): its entry points' names,
+    modules (top package) and distributions, the runner's sources (id, label), and its hosts (the host of each URL or
+    host name among its non-secret credentials, and of an adapter's base_url / url / host attribute). Read at runtime:
+    the repo names none of them."""
     out: set[str] = set()
     try:
         if entry_points is None:
@@ -118,10 +122,18 @@ def adapter_markers(app=None, entry_points=None) -> set[str]:
     except Exception:  # noqa: BLE001 - broken metadata: the other markers still hold
         pass
     runner = getattr(app, "sources_runner", None) if app is not None else None
+    from sizeup import procenv
     for r in getattr(runner, "runs", None) or []:
         a = getattr(r, "a", None)
         out.update(str(getattr(a, k, "") or "") for k in ("source", "label"))
-    return {m for m in out if len(m) >= 3 and m not in ("sizeup", "sources")}
+        for k in ("base_url", "url", "host", "hostname"):
+            h = procenv._host_of(str(getattr(a, k, "") or ""))
+            out.add(h)
+    try:
+        out |= set(procenv.adapter_hosts() if hosts is None else hosts)
+    except Exception:  # noqa: BLE001
+        pass
+    return {m.lower() for m in out if len(m) >= 3 and m.lower() not in ("sizeup", "sources")}
 
 
 class _Tag(logging.Formatter):
@@ -132,9 +144,13 @@ class _Tag(logging.Formatter):
 def install_log_tags() -> None:
     """Python logging (what the adapter or a library may use: sizeup itself prints) says its logger's name, so the
     shipper can leave a third party's lines on the station: a stderr handler on the root logger, WARNING and up (as
-    logging's last resort prints them), when nothing else is set up."""
+    logging's last resort prints them). Run again every few minutes: when something (an adapter's basicConfig) put
+    its own handlers there, their stream handlers get the tag too."""
     root = logging.getLogger()
     if root.handlers:
+        for h in root.handlers:
+            if isinstance(h, logging.StreamHandler) and not isinstance(h.formatter, _Tag):
+                h.setFormatter(_Tag("%(message)s"))
         return
     h = logging.StreamHandler(sys.stderr)
     h.setFormatter(_Tag("%(message)s"))
@@ -165,6 +181,7 @@ class LogShipper:
         self.batch_started = 0.0
         self.consumed: list[Path] = []         # hand-off files whose lines are in pending (deleted once spooled)
         self._skip_frame: dict[str, bool] = {}
+        self._tb: dict[str, dict] = {}            # a traceback going on, per unit: whether a frame was withheld
         self.seq = 0
         self.next_send = 0.0
         self.fails = 0
@@ -207,27 +224,43 @@ class LogShipper:
         if now - self._markers_at > 300:
             self._markers_at = now
             try:
-                self._markers = set(self._markers_fn() or ())
+                self._markers = {m.lower() for m in (self._markers_fn() or ()) if m}
             except Exception:  # noqa: BLE001
                 pass
+            if self._thread is not None:
+                install_log_tags()              # (again: an adapter may have called basicConfig since)
         return self._markers
 
     # -- filter and batch ----------------------------------------------------------------------------------
 
     def is_adapter(self, unit: str, msg: str) -> bool:
         """The incident-source adapter's (or a third-party library's) own line, or the runner's about it."""
-        if unit == "sizeup-station":
-            m = LOG_TAG.match(msg)
-            if m and not m.group(1).startswith("sizeup"):
+        low = msg.lower()
+        hit = any(k in low for k in self.markers())
+        if unit != "sizeup-station":
+            return hit                                  # (sizeup-update naming the adapter's distribution, ...)
+        tb = self._tb.get(unit)
+        if msg.startswith(TRACEBACK):
+            self._tb[unit] = tb = {"tainted": hit}
+        elif tb is not None and not msg[:1].isspace():
+            del self._tb[unit]                          # the traceback's last line: the exception
+            return hit or tb["tainted"]
+        for rx in (LOG_TAG, BASIC):
+            m = rx.match(msg)
+            if m and m.group(1).split(".")[0] != "sizeup":    # a third party's logger (sizeup_<adapter> too)
                 return True
-            if "incident sources:" in msg or "incident source " in msg:
-                return True
-            if FRAME.match(msg):
-                self._skip_frame[unit] = True          # ... and the frame's source line after it
-                return True
-            if self._skip_frame.pop(unit, False) and msg.startswith("    "):
-                return True
-        return any(k in msg for k in self.markers())
+        if "incident sources:" in msg or "incident source " in msg:
+            return True
+        if FRAME.match(msg) or (hit and tb is not None):
+            self._skip_frame[unit] = True               # ... and the frame's source line after it
+            if tb is not None:
+                tb["tainted"] = True
+            return True
+        if self._skip_frame.pop(unit, False) and msg.startswith("    "):
+            return True
+        if hit and tb is not None:
+            tb["tainted"] = True
+        return hit
 
     def take(self, raw: dict) -> None:
         """One journal entry: kept (into the batch, which is spooled when full) or counted as dropped."""

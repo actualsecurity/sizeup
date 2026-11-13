@@ -6,9 +6,11 @@ before anything is written to CloudWatch and before a line is shown, but knows o
 secrets): the station's pass is the one that drops a line with a known value; the hub's is a second pattern pass.
 
     scrub(line)          the line with credentials redacted, or None: DROP it (fail closed). In order:
-                           1. normalised: NFKC (fullwidth letters become ASCII), zero-width and format characters gone
-                           2. DROPPED when it holds a registered value in any of its forms (as is, URL-encoded, JSON-,
-                              HTML- or repr-escaped, base64, base64 of user:password, with or without "Basic "):
+                           1. normalised: NFKC (fullwidth letters become ASCII), zero-width and format characters gone,
+                              backslash-x and backslash-u escapes decoded, Cyrillic and Greek lookalikes mapped to Latin
+                           2. DROPPED when it holds a registered value in any of its forms (as is, upper / lower case,
+                              hex, URL-encoded, JSON-, HTML- or repr-escaped, base64 at any of the 3 alignments: so the
+                              base64 of any "user:" + password, with or without "Basic "):
                               checked on the WHOLE line, before any cut. Short values (from the credstore) match as a
                               whole word only
                            3. dropped: a private key
@@ -57,17 +59,25 @@ _ZW = re.compile(r"[\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff\u
 
 # a value: a quoted string to its closing quote (escapes inside it), else the whole token
 _VAL = r"(?!\[(?:redacted|credential)\])(\"(?:\\.|[^\"\\])*\"?|'(?:\\.|[^'\\])*'?|\S+)"
-_KEY = (r"(?:pass(?:word|wd|phrase)?|pwd|secret|token|api[_-]?key|access[_-]?key|secret[_-]?key|private[_-]?key"
+_SEP = r"\s*(?:=>|->|:|=(?!>))\s*"                                               # key = / : / => / -> value
+_KEY = (r"(?:pass(?:word|wd|phrase|code)?|pwd|secret|token|api[ _-]?key|access[_-]?key|secret[_-]?key|private[_-]?key|otp"
         r"|client[_-]?secret|client[_-]?id|session(?:[_-]?id)?|cookie|set-cookie|auth(?:orization)?|credentials?"
         r"|x-amz-security-token|x-amz-signature|cf-access-client-(?:id|secret)|cf_authorization|sig(?:nature)?)")
-_KV = re.compile(r"(?i)(\b[\w.-]*" + _KEY + r"[\w.-]*[\"']?\s*[:=]\s*)" + _VAL)
-_SHORT_KV = re.compile(r"(?i)((?<![\w.-])[\"']?(?:p|pw|pin|pwd|pass|passwd)[\"']?\s*[:=]\s*)" + _VAL)
-_SSM = re.compile(r"((?<![\w.-])[\"']?Value[\"']?\s*[:=]\s*)" + _VAL)            # an SSM parameter echoed
+_KV = re.compile(r"(?i)(\b[\w.-]*" + _KEY + r"[\w.-]*[\"']?" + _SEP + ")" + _VAL)
+_SHORT_KV = re.compile(r"(?i)((?<![\w.-])[\"']?(?:p|pw|pin|pwd|pass|passwd|key|otp)[\"']?" + _SEP + ")" + _VAL)
+_SSM = re.compile(r"((?<![\w.-])[\"']?Value[\"']?" + _SEP + ")" + _VAL)            # an SSM parameter echoed
+# a password-like key with an unquoted value: everything to the end of the line (a value may have spaces in it)
+_PW_LINE = re.compile(r"(?i)(\b[\w.-]*(?:pass(?:word|wd|phrase|code)?|pwd)[\w.-]*[\"']?" + _SEP + r")(?![\"'\[])(\S.*)$")
+# an Authorization header, any scheme: everything after it (to the closing quote, a comma, a brace or the end)
+_AUTHZ = re.compile(r"(?i)(\b(?:proxy-)?authorization[\"']?" + _SEP + r")(?!\[redacted)"
+                    r"(\"(?:\\.|[^\"\\])*\"?|'(?:\\.|[^'\\])*'?|[^,;}\n]+)")
+_CODE = re.compile(r"(?i)((?<![\w.-])[\"']?code[\"']?" + _SEP + ")" + _VAL)          # code=... after an auth word
 _CLI = re.compile(r"(?i)((?<!\S)(?:-p|-u|--user|--pass(?:word)?|--passwd|--token|--secret|--auth|--credentials?)"
                   r"(?:\s+|=))" + _VAL)
 _CLI_P = re.compile(r"(?<!\S)(-p)(?=\S)(\S+)")                                  # mysql-style -pPASSWORD
-_AUTH = re.compile(r"(?i)\b(bearer|basic|digest)\s+[^\s,;]+")
-_USERINFO = re.compile(r"(?i)\b([a-z][a-z0-9+.-]{1,15}://)?[^/\s:@'\"]+:[^/\s@'\"]+@(?=[\w.\[-])")
+_AUTH = re.compile(r"(?i)\b(bearer|basic|digest|ntlm|negotiate)\s+[^\s,;]+")
+# user:password@host, the password to the LAST @ before the host (an @ inside the password stays redacted)
+_USERINFO = re.compile(r"(?i)\b([a-z][a-z0-9+.-]{1,15}://)?[^/\s:@'\"]+:[^/\s'\"]*@(?=[\w.\[-])")
 _AFTER_AUTH = re.compile(r"(?i)\b(?:credentials?|creds|login|log-?on|logged in|sign(?:ed)?[ -]?in|auth\w*|user(?:name)?)\b")
 _PAIR = re.compile(r"(?<![\w/])([\w.+@-]+):(?!\d{2}\b)([^\s,;)\]}\"']+)")         # user:password (not 12:30)
 _TUPLE = re.compile(r"\(\s*(['\"])(?:\\.|(?!\1).)*\1\s*,\s*(['\"])(?:\\.|(?!\2).)*\2\s*\)")
@@ -79,15 +89,32 @@ _JWT = re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}
 _LONG = re.compile(r"(?<![A-Za-z0-9/+_=-])[A-Za-z0-9/+_=-]{32,}(?![A-Za-z0-9/+_=-])")
 _PRIVATE_KEY = re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----|PuTTY-User-Key-File|\bssh-(?:rsa|ed25519) AAAA")
 # after the patterns: a password-like word followed by anything but a redaction, punctuation or the end: dropped
-_LEFT = re.compile(r"(?i)(?<![\w-])(?:pass(?:word|wd|phrase)?|pwd|pw|pin|secret)s?(?![\w-])"
+_LEFT = re.compile(r"(?i)(?<![\w-])(?:pass(?:word|wd|phrase|code)?|pwd|pw|pin|secret|otp)s?(?![\w-])"
                    r"(?![\"']?\s*[:=]?\s*[\"']?\[(?:redacted|credential)\])(?=\s*[:=]?\s*[\"']?[\w\[{(<$%@#!*~^&+-])")
 
 
+def _b64_aligned(b: bytes) -> set[str]:
+    """The base64 of b wherever it sits in a longer string ("user:" + b, b + "@host"): for each of the 3 alignments,
+    only the characters that depend on b alone (the ones mixed with what comes before or after are trimmed)."""
+    out = set()
+    for k in (0, 1, 2):
+        enc = base64.b64encode(b"\0" * k + b).decode()
+        lead = -(-8 * k // 6)                        # the characters the k bytes before reach into
+        end = 4 * ((k + len(b)) // 3)                # past this, the characters depend on what follows
+        frag = enc[lead:end]
+        if len(frag) >= 6:
+            out.add(frag)
+    return out
+
+
 def _forms(v: str) -> set[str]:
-    """v as it may appear in a log line: as is, URL-encoded, JSON-, HTML- and repr-escaped, and base64."""
-    out = {v, urllib.parse.quote(v, safe=""), urllib.parse.quote_plus(v), json.dumps(v)[1:-1],
+    """v as it may appear in a log line: as is, upper and lower case, URL-encoded, JSON-, HTML- and repr-escaped, hex,
+    and base64 at any alignment (so the base64 of "user:" + v or of v + anything is caught too)."""
+    b = v.encode()
+    out = {v, v.upper(), v.lower(), urllib.parse.quote(v, safe=""), urllib.parse.quote_plus(v), json.dumps(v)[1:-1],
            json.dumps(v, ensure_ascii=False)[1:-1], html.escape(v), html.escape(v, quote=False), repr(v)[1:-1],
-           base64.b64encode(v.encode()).decode().rstrip("=")}
+           base64.b64encode(b).decode().rstrip("="), b.hex(), b.hex().upper()}
+    out |= _b64_aligned(b)
     return {f for f in out if f}
 
 
@@ -150,8 +177,30 @@ def _aws_secret(s: str) -> str:
     return re.sub(r"(?<![A-Za-z0-9/+])[A-Za-z0-9/+]{40}(?![A-Za-z0-9/+=])", one, s)
 
 
+# Cyrillic and Greek letters that look like Latin ones: a "pаssword" with a Cyrillic а is still a password key
+_HOMOGLYPHS = str.maketrans({
+    "а": "a", "в": "b", "е": "e", "к": "k", "м": "m", "н": "h", "о": "o", "р": "p", "с": "c", "т": "t", "у": "y", "х": "x",
+    "і": "i", "ј": "j", "ѕ": "s", "ԁ": "d", "ԛ": "q", "ԝ": "w", "ӏ": "l", "ѡ": "w",
+    "А": "A", "В": "B", "Е": "E", "К": "K", "М": "M", "Н": "H", "О": "O", "Р": "P", "С": "C", "Т": "T", "Х": "X",
+    "І": "I", "Ј": "J", "Ѕ": "S",
+    "α": "a", "ο": "o", "ρ": "p", "ε": "e", "ι": "i", "κ": "k", "ν": "v", "τ": "t", "υ": "u", "χ": "x", "ω": "w",
+    "Α": "A", "Β": "B", "Ε": "E", "Ζ": "Z", "Η": "H", "Ι": "I", "Κ": "K", "Μ": "M", "Ν": "N", "Ο": "O", "Ρ": "P",
+    "Τ": "T", "Υ": "Y", "Χ": "X"})
+_ESC = re.compile(r"\\x([0-9a-fA-F]{2})|\\u([0-9a-fA-F]{4})")
+
+
+def _unescape(m: re.Match) -> str:
+    try:
+        return chr(int(m.group(1) or m.group(2), 16))
+    except ValueError:
+        return m.group(0)
+
+
 def normalise(line: str) -> str:
     s = unicodedata.normalize("NFKC", str(line))
+    s = _ZW.sub("", s)
+    s = _ESC.sub(_unescape, s)
+    s = unicodedata.normalize("NFKC", s).translate(_HOMOGLYPHS)
     s = _ZW.sub("", s)
     return s.replace("\r", " ").replace("\0", " ").replace("\t", " ")
 
@@ -177,17 +226,20 @@ def scrub(line: str) -> str | None:
     if len(s) > MAX_LINE:
         s = s[:MAX_LINE] + " …"
     names_rx = sorted(names, key=len, reverse=True)
-    for n in names_rx:                                   # a credential's name as a key: its value goes
-        s = re.sub(r"(" + re.escape(n) + r"[\"']?\s*[:=]\s*)" + _VAL, lambda m: m.group(1) + REDACTED, s)
+    for n in names_rx:                                   # a credential's name as a key (=, :, =>, ->, a space): its value
+        s = re.sub(r"(" + re.escape(n) + r"[\"']?(?:" + _SEP + r"|\s+))" + _VAL, lambda m: m.group(1) + REDACTED, s)
     s = _USERINFO.sub(lambda m: (m.group(1) or "") + REDACTED + "@", s)
+    s = _AUTHZ.sub(lambda m: m.group(1) + REDACTED, s)
     s = _AUTH.sub(lambda m: m.group(1) + " " + REDACTED, s)
     s = _QUERY.sub(lambda m: m.group(1) + REDACTED, s)
     s = _CLI.sub(lambda m: m.group(1) + REDACTED, s)
     s = _CLI_P.sub(lambda m: m.group(1) + " " + REDACTED, s)
+    s = _PW_LINE.sub(lambda m: m.group(1) + REDACTED, s)
     s = _KV.sub(lambda m: m.group(1) + REDACTED, s)
     s = _SHORT_KV.sub(lambda m: m.group(1) + REDACTED, s)
     s = _SSM.sub(lambda m: m.group(1) + REDACTED, s)
     if _AFTER_AUTH.search(s):
+        s = _CODE.sub(lambda m: m.group(1) + REDACTED, s)
         s = _TUPLE.sub("(" + REDACTED + ")", s)
         s = _PAIR.sub(lambda m: m.group(1) + ":" + REDACTED, s)
     s = _AWS_KEY_ID.sub("[aws-key]", s)

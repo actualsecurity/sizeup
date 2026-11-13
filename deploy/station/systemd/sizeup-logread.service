@@ -1,6 +1,7 @@
 # The station's journal reader (sizeup/cloud/logread.py, docs/station-logs.md): the only part of the station that reads
-# the system journal. Its own user (sizeup-logs, in systemd-journal), no network, nothing writable but its hand-off
-# directory: it writes only the sizeup-* units' entries to /var/lib/sizeup-logs, which sizeup-station scrubs and ships
+# the system journal. Its own user and group (sizeup-logs, in systemd-journal), no network, nothing writable but its hand-off
+# directory: it writes only the sizeup-* units' entries to /var/lib/sizeup-logs (setgid sizeup: the files are group
+# sizeup, readable by sizeup-station, which scrubs them and ships them
 # to the hub (sizeup/cloud/logship.py). The sizeup user (the web UI, the incident-source adapter) never reads the journal.
 # Installed by install-linux.sh; edit there, not here.
 [Unit]
@@ -12,7 +13,7 @@ StartLimitIntervalSec=0
 [Service]
 Type=simple
 User=sizeup-logs
-Group=sizeup
+Group=sizeup-logs
 SupplementaryGroups=systemd-journal
 UMask=0027
 ExecStart=/usr/bin/python3 -I /usr/local/lib/sizeup/logread.py run
