@@ -62,6 +62,9 @@
   .cm-rig.rig-dot { padding: 0; inline-size: var(--s-2); block-size: var(--s-2); border-radius: 50%; font-size: 0; line-height: 0;
                     border-color: rgba(17, 19, 21, 0.85); box-shadow: 0 0 2px rgba(0, 0, 0, 0.7); }
   .cm-rig.rig-dot > *, .cm-rig.rig-dot::before { display: none; }
+  /* a dot is a rig's target too (#473): at least --ctl-sm across (24 px; 44 px on a coarse pointer), the dot as it is */
+  .cm-rig.rig-dot::after { content: ""; position: absolute; inset-block-start: 50%; inset-inline-start: 50%;
+    inline-size: var(--ctl-sm); block-size: var(--ctl-sm); transform: translate(-50%, -50%); border-radius: 50%; }
   .cm-rig.rig-dot.act { inline-size: var(--s-3); block-size: var(--s-3); border: 2px solid #fff; box-shadow: 0 0 0 1px rgba(17, 19, 21, 0.85), 0 1px 4px rgba(0, 0, 0, 0.7); }
   .cm-rig.rig-dot.act.outer { border: 2px dashed var(--c); }
   /* out of service: smaller and fainter than an idle dot, but a thin light ring keeps it findable on dark tiles */
@@ -379,6 +382,11 @@
     font-size: var(--fs-sm); line-height: var(--lh-sm); font-weight: 700; color: var(--text); white-space: nowrap;
     background: color-mix(in srgb, var(--bg) 90%, transparent); border: var(--bw) solid var(--line-strong); border-radius: var(--radius); }
   .ac-follow .ico { flex: none; color: var(--text-2); }
+  /* a follow ended at quarters (cadmap.js toast): a word where the follow chip was, for a few seconds */
+  .cm-toast { position: absolute; inset-block-end: calc(var(--ctl-sm) + var(--s-6)); inset-inline-start: 50%; transform: translateX(-50%);
+    z-index: var(--z-map); padding: 0 var(--s-2); font-size: var(--fs-sm); line-height: var(--lh-sm); color: var(--text); white-space: nowrap;
+    background: color-mix(in srgb, var(--bg) 90%, transparent); border: var(--bw) solid var(--line-strong); border-radius: var(--radius); pointer-events: none; }
+  .cm-toast[hidden] { display: none; }
   .ac-follow.alerted { border-color: var(--accent-text); }
   .ac-follow.alerted .ico { color: var(--accent-text); }
   .ac-follow-t { min-inline-size: 0; overflow: hidden; text-overflow: ellipsis; }

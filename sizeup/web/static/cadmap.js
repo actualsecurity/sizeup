@@ -398,7 +398,8 @@ window.CadMap = (() => {
   const routeOf = (M, m) => ((M && M.routes) || []).find((r) => r.kind !== "back" && r.unit === m.unit && r.incident_id === m.incident_id) || null;
   // ---- estimated motion along the route (#453) ----------------------------------------------------------------------
   const EST_MS = 125;                  // an estimated rig moved and turned at most ~8 Hz
-  const SETTLE_MS = 1200;              // a rig taking a new place (on location, released, home) glides there this long
+  const SETTLE_MS = 1200;
+  const TOAST_MS = 3000;              // a rig taking a new place (on location, released, home) glides there this long
   const backOf = (M, m) => ((M && M.routes) || []).find((r) => r.kind === "back" && r.unit === m.unit) || null;
   const geos = new WeakMap();          // a route (one state's object) -> its points and metres along (once)
   function geoOf(r) {
@@ -671,8 +672,8 @@ window.CadMap = (() => {
     // (SETTLE_MS: from where it was drawn, and its fan-out offset with it); position, offset and --rot only
     put(rec) {
       const m = rec.m, M = this.data && this.data.map, now = Date.now();
-      const e = m.est ? motionOf(m, M) : null;
-      let ll = e ? e.ll : [m.lon, m.lat], off = rec.off || [0, 0];
+      const e = m.est ? motionOf(m, M) : null, live = m.place === "position" && typeof m.at === "number";
+      let ll = live ? fixWhere(m, M) : e ? e.ll : [m.lon, m.lat], off = rec.off || [0, 0];
       const s = rec.settle;
       if (s) {
         const k = Math.min(1, (now - s.t0) / SETTLE_MS), q = k * k * (3 - 2 * k);
@@ -716,6 +717,7 @@ window.CadMap = (() => {
         const pxPerS = v / metresPerPx;
         ms = Math.max(FRAME_MS, Math.min(MAX_FRAME_MS, pxPerS > 0 ? 1000 * STEP_PX / pxPerS : MAX_FRAME_MS));
       } catch (_) { ms = FRAME_MS; }
+      if (this.fol && this.fol.id) return FRAME_MS;   // followed (an estimate too): the camera kept on it smoothly
       return fix || this.settling ? ms : Math.max(EST_MS, ms);
     }
     // #453: whether any rig here moves by the estimate or glides to a new place now (frames wanted), and the fastest
@@ -733,7 +735,10 @@ window.CadMap = (() => {
     tick() {
       let moved = false;
       for (const rec of this.chips.values()) {
-        if (rec.m.place === "position") { rec.marker.setLngLat(this.where(rec.m)); moved = true; }
+        if (rec.m.place === "position") {                    // a live fix (handed over from an estimate: glided)
+          if (rec.settle) this.put(rec); else rec.marker.setLngLat(this.where(rec.m));
+          moved = true;
+        }
         else if (rec.m.est || rec.settle) {                 // #453: the estimate on, a glide to a new place
           if (!rec.moving && !rec.settle) continue;
           const e = this.put(rec);
@@ -755,15 +760,40 @@ window.CadMap = (() => {
       if (!f || !f.id) return;
       const rec = this.chips.get(f.id);
       if (!rec) { f.stop(); return; }
+      const m = rec.m;
+      // an estimate on its way home, followed: once home (in quarters, reported in quarters, out of service) the follow
+      // ends where the camera is, with a word (no jump to the firehouse's fan-out)
+      if (!this.folTrip || this.folTrip.unit !== m.unit) this.folTrip = { unit: m.unit, back: false };
+      if (m.est) this.folTrip.back = !!m.home_line;
+      else if (this.folTrip.back && m.place === "station") {
+        this.folTrip = null;
+        f.stop();
+        this.toast(`${m.unit} ${m.look === "oos" ? "out of service" : "in quarters"}`);
+        return;
+      }
       const ll = rec.marker.getLngLat();
       f.pan([ll.lng, ll.lat]);
       if (!force && f.chipShown()) return;
-      const m = rec.m, st = statusOf(this.data && this.data.lists, m.status), fx = fixAge(m, this.data && this.data.map);
+      const st = statusOf(this.data && this.data.lists, m.status), fx = fixAge(m, this.data && this.data.map);
       const r = routeOf(this.data && this.data.map, m);      // by road (#360): "~3 min · 1.2 mi"
-      const text = [`Following ${m.unit}`, st.name, m.est ? "est." : "", r ? r.text : "", fx ? `${agoS(fx.age)} ago` : ""]
+      const what = m.est && m.home_line ? "Returning" : st.name;
+      const text = [`Following ${m.unit}`, what, m.est ? "est." : "", r ? r.text : "", fx ? `${agoS(fx.age)} ago` : ""]
         .filter(Boolean).join(" · ");                       // #453: an estimate says so in words
       f.chip(text, r ? `${rec.el.title}, ${r.text} ${r.by === "line" ? "straight line" : "by road"} (est.)` : rec.el.title,
              { stale: !!(fx && fx.stale) });
+    }
+
+    // a short word at the foot of the map (a follow ended at quarters), gone after TOAST_MS
+    toast(text) {
+      if (!this.toastEl) {
+        this.toastEl = h("div", "cm-toast");
+        this.toastEl.setAttribute("role", "status");
+        this.opts.host.append(this.toastEl);
+      }
+      this.toastEl.textContent = text;
+      this.toastEl.hidden = false;
+      clearTimeout(this.toastT);
+      this.toastT = setTimeout(() => { this.toastEl.hidden = true; }, TOAST_MS);
     }
 
     drawPins(incidents, lists) {
@@ -893,16 +923,17 @@ window.CadMap = (() => {
         }
         // #453: a new place (not a live fix's: that is at once) glides there from where it was drawn
         const pk = `${m.place}|${m.group}`;
-        if (rec.pk && rec.pk !== pk && m.place !== "position" && !rec.pk.startsWith("position|")) {
+        // (a live fix taking over from an estimate glides too; a live fix to another live fix: glide.js)
+        if (rec.pk && rec.pk !== pk && !rec.pk.startsWith("position|")) {
           const ll = rec.marker.getLngLat();
           if (ll) rec.settle = { ll: [ll.lng, ll.lat], off: rec.offAt || rec.off || [0, 0], t0: Date.now() };
-        } else if (m.place === "position") rec.settle = null;
+        } else if (m.place === "position" && rec.pk && rec.pk.startsWith("position|")) rec.settle = null;
         rec.pk = pk;
         rec.m = m;
         rec.size = sz;
         rec.off = off;
         rec.pri = lit.some(Boolean) || talk ? 0 : cl === "act" ? 1 : cl === "idle" ? 2 : 3;   // its code placed in this order
-        if (fx) rec.marker.setLngLat(this.where(m));            // drawn on between fixes (glide.js), every draw
+        if (fx && !rec.settle) rec.marker.setLngLat(this.where(m));   // drawn on between fixes (glide.js), every draw
         else {                                                  // #453: its estimate (or its place), every draw
           const est = this.put(rec);
           rec.moving = !!(est && est.moving);
@@ -950,7 +981,7 @@ window.CadMap = (() => {
                    m.incident_number ? `on ${m.incident_number}` : "",
                    talk === "talking" ? "TX now" : talk ? "TX ended" : ""].filter(Boolean).join(", ");
         e.setAttribute("aria-label", e.title);
-        if (m.place === "position") { rec.marker.setLngLat(this.where(m)).setOffset(off); rec.offAt = off; }
+        if (m.place === "position" && !rec.settle) { rec.marker.setLngLat(this.where(m)).setOffset(off); rec.offAt = off; }
       }
       for (const [name, rec] of this.chips) if (!seen.has(name)) { rec.marker.remove(); this.chips.delete(name); }
       this.estScan();
@@ -1221,14 +1252,16 @@ window.CadMap = (() => {
       return typeof e === "function" ? !!e() : !!e;
     }
 
-    // a rig clicked: followed (#358), and its home-station picker (an admin) or its box (its call one click away);
-    // a map that follows nothing (the new call's): its call opened, as before
-    // a rig clicked: as before #358 (an admin: its home-station picker; else its call opened). Following starts from a
-    // row's ⌖, the picker's Follow, or (a rig on no call, where a click did nothing) its box's Follow.
+    // A map that follows (#473): a click follows the rig, as a plane's does, whatever drew it (a live fix, an estimate
+    // on its way to a call or home, held, overdue, at its firehouse or at a call), and opens its box: its call and (an
+    // admin) its home station one click away. A map that follows nothing (the wall board, the new call's): as before.
     chipClick(m) {
+      if (this.onFollow) {
+        if (!(this.fol && this.fol.id === m.unit)) this.onFollow(m.unit);
+        return this.openInfo(m);
+      }
       if (this.editable() && m.fire && m.id != null) return this.openPicker(m.id, m.unit, m.station, m);
       if (m.incident_id && this.opts.onPick) return this.opts.onPick(m.incident_id);
-      if (this.onFollow) this.openInfo(m);
     }
     followButton(m) {
       const f = h("button", "mini", "Follow");
@@ -1243,16 +1276,26 @@ window.CadMap = (() => {
       const st = statusOf(this.data && this.data.lists, m.status);
       const head = h("div", "cm-pop-head");
       head.append(h("b", "", m.unit));
-      const line = h("div", "dim small", st.name);
+      const line = h("div", "dim small", [st.name, m.est ? "est." : "", m.incident_number ? `on ${m.incident_number}` : ""]
+        .filter(Boolean).join(" · "));
       const row = h("div", "row");
-      const f = this.followButton(m);
-      const x = h("button", "mini quiet", "Close");
-      x.type = "button";
-      x.addEventListener("click", (e) => { e.stopPropagation(); this.closePicker(); });
-      row.append(f, x);
+      const btn = (text, fn) => {
+        const b = h("button", "mini", text);
+        b.type = "button";
+        b.addEventListener("click", (e) => { e.stopPropagation(); fn(); });
+        row.append(b);
+        return b;
+      };
+      if (!(this.fol && this.fol.id === m.unit) && this.onFollow) btn("Follow", () => { this.closePicker(); this.onFollow(m.unit); });
+      if (m.incident_id && this.opts.onPick && (!this.focus || this.focus.id !== m.incident_id)) {
+        btn(`Open ${m.incident_number || "call"}`, () => { this.closePicker(); this.opts.onPick(m.incident_id); });
+      }
+      if (this.editable() && m.fire && m.id != null) btn("Home station", () => this.openPicker(m.id, m.unit, m.station, m));
+      const x = btn("Close", () => this.closePicker());
+      x.className = "mini quiet";
       this.pop.replaceChildren(head, line, row);
       this.pop.hidden = false;
-      f.focus();                                       // Escape closes it (the pop's keydown)
+      row.children[0].focus();                         // Escape closes it (the pop's keydown)
     }
 
     openPicker(id, name, current, m) {
@@ -1281,7 +1324,7 @@ window.CadMap = (() => {
           go.addEventListener("click", () => { this.closePicker(); this.opts.onPick(m.incident_id); });
           line.append(" ", go);
         }
-        if (this.onFollow && this.chips.has(m.unit)) line.append(" ", this.followButton(m));   // #358
+        if (this.onFollow && this.chips.has(m.unit) && !(this.fol && this.fol.id === m.unit)) line.append(" ", this.followButton(m));   // #358
       }
       const row = h("div", "row");
       row.append(sel, save, cancel);
