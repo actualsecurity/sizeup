@@ -68,6 +68,7 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
     <section>
       <div class="q-head"><h2 title="Pages to accept or dismiss">60 Control</h2><span id="tapout" class="tapout" hidden></span></div>
       <ol id="q-incoming" class="pa-list" hidden aria-live="assertive" aria-label="Possible incoming"></ol>
+      <ol id="q-intel" class="pa-list" hidden aria-live="polite" aria-label="Radio pre-alerts"></ol>
       <ol id="q-airport" class="pa-list" hidden aria-live="assertive" aria-label="Airport pre-alerts"></ol>
       <ol id="q-prealert" class="pa-list" hidden aria-live="assertive" aria-label="Phone pre-alerts"></ol>
       <ol id="q-queued" class="list q"></ol>
@@ -733,6 +734,7 @@ Slots go in order. A kind takes the next available unit of that kind (regular ap
 <script src="/static/incoming.js"></script>
 <script src="/static/dispatchmode.js"></script>
 <script src="/static/airport-alerts.js"></script>
+<script src="/static/intel.js"></script>
 <script src="/static/cad.js"></script>
 <script src="/static/status-hints.js"></script>
 <script src="/static/radio-ids.js"></script>
@@ -748,6 +750,7 @@ Slots go in order. A kind takes the next available unit of that kind (regular ap
 <script src="/static/hublink.js"></script>
 <script src="/static/health.js"></script>
 <script src="/static/datasources.js"></script>
+<script src="/static/stt-fix.js"></script>
 <script src="/static/settings.js"></script>
 <script src="/static/board.js"></script>
 <script src="/static/panels.js"></script>

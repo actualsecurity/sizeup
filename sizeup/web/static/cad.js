@@ -624,6 +624,8 @@ function renderPrealert() {
     AirportAlerts.notify(aa);
   }
   show($("#csv-airport-alerts"), !!aa);
+  // radio pre-alerts (intel.js, sizeup/intel #411): signed-in viewers only (the state carries none otherwise)
+  if (window.IntelCard && !BOARD) IntelCard.column($("#q-intel"), cad.state && cad.state.intel, { ...deps, readonly: false });
 }
 function queueExtra(i) {              // what the queue card shows from the call's summary (#217), for its signature
   const o = isOpen(i) ? callSummary(i.id) : null;
@@ -1468,6 +1470,7 @@ function txMenuItems(t) {
     const waiting = rerunWaiting(t);
     items.push({ label: waiting ? "Re-transcribing…" : "Re-transcribe", disabled: t.has_audio === false || waiting,
                  hint: t.has_audio === false ? "audio expired" : "", run: () => rerunTx(t) });
+    if (window.SttFix) items.push({ label: "Correct transcript", run: () => SttFix.open(t) });   // stt-fix.js
   }
   items.push({ label: "Copy text", disabled: !t.text, run: () => copyText(t) });
   return items;

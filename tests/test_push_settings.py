@@ -138,7 +138,7 @@ def test_viewers_and_dispatchers_can_neither_read_nor_change_the_topics(rig):
     assert code == 200 and out["configured"]
     by = {k["kind"]: k for k in out["kinds"]}
     assert by["status"]["topic"] == SSM_STATUS and by["status"]["source"] == "ssm" and by["alerts"]["topic"] == SSM_ALERTS
-    assert [k["kind"] for k in out["kinds"]] == ["status", "alerts"]
+    assert [k["kind"] for k in out["kinds"]] == ["status", "alerts", "intel"]
 
 
 def test_the_test_push_is_marked_goes_to_the_topic_in_effect_and_is_audited(rig):
@@ -207,3 +207,24 @@ def test_the_hub_status_endpoint_and_the_health_panel_never_name_a_topic(tmp_pat
         assert "notify: alerts → topic set (SSM), status → topic set (SSM)" in shown
     finally:
         app.stop()
+
+
+def test_the_intel_topic_is_set_tested_turned_off_and_audited_like_the_others(rig):
+    INTEL = notify.INTEL
+    assert rig.eff(INTEL) == {"topic": SSM_ALERTS, "source": "fallback"}          # day one: the alerts topic
+    by = {k["kind"]: k for k in rig.page()[1]["kinds"]}
+    assert by["intel"]["label"] == notify.LABELS[INTEL] and by["intel"]["source_text"] == "shared (the alerts topic)"
+    assert rig.post({"action": "test", "key": "intel"})[0] == 200
+    assert rig.fake.got[-1]["topic"] == SSM_ALERTS and rig.fake.got[-1]["title"] == "sizeup test: intel topic"
+    own = "pcfd-xmpl-intel-thread"
+    assert rig.post({"action": "set", "key": "intel", "topic": own})[0] == 200
+    assert rig.eff(INTEL) == {"topic": own, "source": "settings"} and rig.eff(ALERTS)["topic"] == SSM_ALERTS
+    code, out = rig.post({"action": "set", "key": "intel", "topic": "pcfd-phone-prealert"})
+    assert code == 400 and "Tapout" in out["error"]
+    assert rig.post({"action": "off", "key": "intel"})[0] == 200
+    assert rig.eff(INTEL)["topic"] == "" and rig.eff(ALERTS)["topic"] == SSM_ALERTS
+    assert rig.post({"action": "reset", "key": "intel"})[0] == 200 and rig.eff(INTEL)["source"] == "fallback"
+    audit = rig.cad.settings_audit_log({"section": ["system"]})["audit"]
+    assert {a["key"] for a in audit} >= {"notify/intel", "notify/intel/test"}
+    assert own not in json.dumps(audit) and own not in "\n".join(rig.logs)
+    assert rig.post({"action": "set", "key": "nope", "topic": own})[0] == 400

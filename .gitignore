@@ -242,3 +242,9 @@ deploy/hub/*.sqlite*
 sizeup-replay/
 .sizeup-replay/
 *.ltx
+
+# transcript corrections and intel replay outputs (sizeup/cad/sttfix.py, tools/stt_eval.py, tools/intel_replay.py):
+# private, never committed
+stt-corrections*.jsonl
+*.stt-eval.json
+*.intel-replay.json

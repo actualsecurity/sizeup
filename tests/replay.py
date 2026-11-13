@@ -15,6 +15,8 @@ local cache outside the repo:
     kind    adsb     ADS-B snapshots around HPN over a window (tools/capture_fixture.py adsb)
             camera   511NY CARS-Hub HLS playlists and segments (tools/capture_fixture.py camera)
             audio    airband clips restored read-only from the hub's Litestream backup (tools/capture_fixture.py audio)
+            mrrs-intel  radio log rows and county-CAD auto-labels for the intel replay (tools/intel_replay.py --capture):
+                     LOCAL ONLY, never pushed (they hold police transcripts; tools/replay_sync.py LOCAL_ONLY)
 
 Get it:      .venv/bin/python tools/replay_sync.py pull          (read-only S3 download)
 Capture:     .venv/bin/python tools/capture_fixture.py adsb|camera|audio ...
@@ -42,7 +44,7 @@ from pathlib import Path
 
 import pytest
 
-KINDS = ("adsb", "camera", "audio")
+KINDS = ("adsb", "camera", "audio", "mrrs-intel")
 MANIFEST = "manifest.json"
 MANIFEST_VERSION = 1
 
@@ -134,8 +136,9 @@ def find_sets(kind: str, root: Path | None = None) -> list[ReplaySet]:
 
 
 def why_missing(kind: str) -> str:
-    return (f"no '{kind}' replay data in {cache_dir()} (private, never in git: tools/replay_sync.py pull, or "
-            f"tools/capture_fixture.py {kind}; set SIZEUP_REPLAY_DIR to use another folder)")
+    how = ("tools/intel_replay.py --capture, local only" if kind == "mrrs-intel"
+           else f"tools/replay_sync.py pull, or tools/capture_fixture.py {kind}")
+    return f"no '{kind}' replay data in {cache_dir()} (private, never in git: {how}; set SIZEUP_REPLAY_DIR to use another folder)"
 
 
 # ---- the pytest plugin (loaded by tests/conftest.py) ---------------------------------------------------------------

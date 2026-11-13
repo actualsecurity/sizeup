@@ -743,12 +743,21 @@ class App:
             return env_is if s == "env" else (s or "config")
         self.pushes = notify.Pushes(
             cfg.alerts_ntfy_server, cfg.alerts_ntfy_topic, cfg.alerts_status_topic,
-            sources={notify.ALERTS: src(cfg.alerts_ntfy_topic_source), notify.STATUS: src(cfg.alerts_status_topic_source)},
+            sources={notify.ALERTS: src(cfg.alerts_ntfy_topic_source), notify.STATUS: src(cfg.alerts_status_topic_source),
+                     notify.INTEL: src(cfg.alerts_intel_topic_source)},
+            intel_topic=cfg.alerts_intel_topic,
             server_source=src(cfg.alerts_ntfy_server_source) if cfg.alerts_ntfy_server_source != "default" else "default",
             settings=lambda: self.cad.settings.section(notify.SECTION),
             also_forbidden=(cfg.prealert_ring_topic, cfg.prealert_status_topic), log=log)
         self.cad.pushes = self.pushes
         self.cad.alarms.notifier = self.pushes.notifier(notify.ALERTS)
+        # Radio pre-alerts (sizeup/intel, #411): pushed on the INTEL kind (no topic of its own: the alerts topic), by the
+        # CAD of record holding the lease only; located over the gazetteer (read only). Its thread starts in start().
+        intel = self.cad.intel
+        intel.notifier, intel.public_url, intel.leader = self.pushes.notifier(notify.INTEL), cfg.cloud_public_url, self._atc_leader
+        if self.gaz is not None:
+            from sizeup.intel.place import Locator
+            intel.locate = Locator(self.gaz)
         log(self.pushes.line())
         _mark("prealert + pushes")
         self.cad.alarms.public_url = cfg.cloud_public_url
@@ -3566,6 +3575,8 @@ class App:
             self.tts.start()
         self.stt.start()
         threading.Thread(target=self._janitor, name="janitor", daemon=True).start()
+        if not self.forwarding():
+            self.cad.intel.start()                # radio pre-alerts (sizeup/intel): the "intel" thread
         self.attachments.start()                  # linked transmissions copied to the attachments bucket (#323)
         threading.Thread(target=self.cad.place_index, name="places", daemon=True).start()   # built before the first "@"
         threading.Thread(target=self._watch_fm, name="talking", daemon=True).start()

@@ -130,6 +130,9 @@ PAGE_SECTION[NOTIFY_SECTION] = "system"
 MODE_SECTION = "dispatch_mode"
 PAGE_SECTION[MODE_SECTION] = "dispatch"
 KEPT_SECTIONS = (NOTIFY_SECTION, MODE_SECTION)
+# Radio pre-alerts (sizeup/intel, #411): Settings > System > Intel, audited as System (sizeup/intel/admin.py).
+INTEL_SECTIONS = ("intel", "intel_packs", "intel_rules")
+PAGE_SECTION.update({k: "system" for k in INTEL_SECTIONS})
 # The hub's own error spikes (#285, sizeup/errwatch.py): Settings > System > Hub error alerts, audited as System.
 ERR_SECTION = errwatch.SECTION
 PAGE_SECTION[ERR_SECTION] = "system"
@@ -999,7 +1002,8 @@ class Editor:
               channels_mod.SQUELCH_SECTION: self._squelch_op,
               "places": self._places_op, TONES_SECTION: self._tones_op, WALL_SECTION: self._wall_op, DS_SECTION: self._ds_op,
               NOTIFY_SECTION: self._notify_op, ATC_SECTION: self._atc_op, ERR_SECTION: self._errors_op, MAPD_SECTION: self._mapd_op, PREMISE_SECTION: self._premise_op, RET_SECTION: self._retention_op,
-              TRS_SECTION: lambda a, b, o: self._retention_op(a, b, o, TRS_SECTION), MUTE_SECTION: self._mutes_op, DEPT_SECTION: self._dept_op, "alarms": lambda a, b, o: self.cad.alarms.settings_op(a, b, o)}.get(section)
+              TRS_SECTION: lambda a, b, o: self._retention_op(a, b, o, TRS_SECTION), MUTE_SECTION: self._mutes_op, DEPT_SECTION: self._dept_op, "alarms": lambda a, b, o: self.cad.alarms.settings_op(a, b, o),
+              "intel": lambda a, b, o: self.cad.intel_admin.settings_op(a, b, o)}.get(section)
         if fn is None:
             raise CadError(f"no settings section {section!r}")
         if section in ("users", "import"):
@@ -2316,7 +2320,7 @@ class Editor:
     # topics are public by name): never in the export, the audit log (a fingerprint there), the activity or the logs.
 
     def _notify_op(self, action: str, body: dict, op: str) -> dict:
-        """set {key: alerts | status, topic} ("" = the default) | off {key} | reset {key} | server {value} ("" = the
+        """set {key: alerts | status | intel, topic} ("" = the default) | off {key} | reset {key} | server {value} ("" = the
         default) | test {key}: a marked test push to the topic in effect. Admins (sizeup/cad/api.py WRITES)."""
         from sizeup import notify
         p = getattr(self.cad, "pushes", None)
@@ -2336,7 +2340,7 @@ class Editor:
             self.cad.log(p.line() + " (Settings changed)")
             return out
         if key not in notify.KINDS:
-            raise CadError("key: alerts or status")
+            raise CadError("key: alerts, status or intel")
         def said(v) -> str:                          # never the name: the audit log is open to everyone signed in
             if not isinstance(v, dict):
                 d, src = p.defaults[key]
