@@ -53,7 +53,7 @@ from pathlib import Path
 from sizeup import tz
 from sizeup.cad import lists as lists_mod
 from sizeup.cad.lists import Lists
-from sizeup.fence import GuardedConnection, in_bookkeeping, refuse
+from sizeup.fence import GuardedConnection, refuse
 
 TZ = tz.TZ                  # America/New_York: the console's time zone (sizeup/tz.py)
 # "Name <email>" when the operator signed in through Cloudflare Access (sizeup/cloud/access.py).
@@ -762,11 +762,11 @@ class Store:
             def __exit__(self, et, e, tb):
                 done = keep = False
                 try:
-                    # not ours any more (#501): rolled back, no rev, the rollback hook, and FencedWrite to the caller
-                    # (outside bookkeeping): nothing it wrote is kept, and it must not answer as if it were
-                    keep = not et and store.may_write()
+                    # not ours any more, or a write in it refused or skipped (#501): rolled back, no rev, the rollback
+                    # hook, and FencedWrite to the caller, bookkeeping or not (an end is never a quiet "committed")
+                    keep = not et and store.may_write() and not getattr(store.db, "tainted", False)
                     store.db.execute("COMMIT" if keep else "ROLLBACK")
-                    done = keep
+                    done = keep and not store.db.in_transaction       # (a COMMIT that took)
                     if done:
                         store.rev += 1
                 finally:
@@ -780,7 +780,7 @@ class Store:
                     except Exception:  # noqa: BLE001
                         pass
                     store.lock.release()
-                if not et and not keep and not in_bookkeeping():
+                if not et and not keep:
                     refuse("a transaction")
                 return False
         return _Tx()

@@ -110,8 +110,8 @@ def test_a_transaction_the_lease_ran_out_in_keeps_nothing_and_says_so(tmp_path):
     db.execute("BEGIN")
     db.execute("INSERT INTO t VALUES ('a', '1')")
     sw.ours = False
-    with bookkeeping():
-        db.execute("COMMIT")                                         # bookkeeping: rolled back, quietly
+    with bookkeeping(), pytest.raises(FencedWrite):
+        db.execute("COMMIT")                                         # an end: rolled back and refused, bookkeeping or not
     sw.ours = True
     assert db.execute("SELECT COUNT(*) FROM t").fetchone()[0] == 0
 
@@ -128,9 +128,9 @@ def test_the_store_commits_only_while_ours_and_opens_as_before(tmp_path):
             db.execute("INSERT INTO meta (key, value) VALUES ('k', 'v')")
     with pytest.raises(FencedWrite):
         store.meta_put("k2", "v2")
-    with bookkeeping():
-        with store.tx() as db:                                       # all bookkeeping: rolled back, nothing raised
-            db.execute("INSERT INTO meta (key, value) VALUES ('k', 'v')")
+    with bookkeeping(), pytest.raises(FencedWrite):
+        with store.tx() as db:                                       # a tx's end: rolled back and refused, bookkeeping
+            db.execute("INSERT INTO meta (key, value) VALUES ('k', 'v')")     # or not (its write: skipped)
     assert store.meta_get("k") is None and store.meta_get("k2") is None and store.rev == rev and rolled == [1, 1]
     sw.ours = True
     with store.tx() as db:
@@ -449,10 +449,52 @@ def test_a_flip_back_never_commits_half_a_transaction(tmp_path, end):
         sw.ours = False
         db.execute("INSERT INTO meta (key, value) VALUES ('b', '2')")
         sw.ours = True
-        db.execute("COMMIT")
+        with pytest.raises(FencedWrite):                                      # an end is never a quiet "committed"
+            db.execute("COMMIT")
     assert store.meta_get("a") is None
     store.meta_put("c", "3")                                                  # clean again afterwards
     assert store.meta_get("c") == "3"
+
+
+def test_a_tainted_tx_in_bookkeeping_is_never_reported_committed(tmp_path):
+    """#509 re-review: inside bookkeeping, a tainted transaction's end used to come back SKIPPED, and tx() took that
+    for a COMMIT (rev bumped, after_commit run)."""
+    store = Store(tmp_path / "cad.sqlite")
+    sw, hooks = Switch(), []
+    store.may_write = sw
+    store.after_commit, store.after_rollback = (lambda: hooks.append("commit")), (lambda: hooks.append("rollback"))
+    rev = store.rev
+    with bookkeeping():
+        with pytest.raises(FencedWrite):
+            with store.tx() as c:
+                c.execute("INSERT INTO meta (key, value) VALUES ('a', '1')")
+                sw.ours = False
+                c.execute("INSERT INTO meta (key, value) VALUES ('b', '2')")     # skipped (bookkeeping): tainted
+                sw.ours = True                                                    # a late renew before the end
+        with pytest.raises(FencedWrite):                                          # the connection's own end, too
+            store.db.execute("BEGIN IMMEDIATE")
+            store.db.execute("INSERT INTO meta (key, value) VALUES ('a', '1')")
+            sw.ours = False
+            store.db.execute("INSERT INTO meta (key, value) VALUES ('b', '2')")
+            sw.ours = True
+            store.db.execute("COMMIT")
+    assert store.rev == rev and hooks == ["rollback"] and store.meta_get("a") is None and not store.db.in_transaction
+
+
+def test_a_renew_that_just_landed_is_read_before_the_fence_latches(tmp_path):
+    """#509 re-review PoC: the cached lease (read at 100.3) has run out, the file (renewed since) says 120.2: ok() reads
+    the file again before it says no, so a healthy leader is never latched off (and never exits)."""
+    from sizeup.fence import Fence
+    lease, now, exited = tmp_path / "lease.json", [100.0], []
+    lease.write_text(json.dumps({"generation": 3, "valid_until": 100.32}))
+    f = Fence(lease, mono=lambda: now[0], log=lambda m: None, exit_fn=exited.append, kill=lambda p, s: None)
+    now[0] = 100.3
+    assert f.ok()                                                    # cached: valid until 100.32
+    lease.write_text(json.dumps({"generation": 3, "valid_until": 120.2}))     # the renew lands
+    now[0] = 100.35                                                  # the cache (0.05 s old) says expired
+    assert f.ok() and f.check() and not f.fenced and exited == []
+    now[0] = 120.3                                                   # really gone: no, and latched
+    assert not f.ok() and not f.check() and f.fenced and exited == [75]
 
 
 def test_the_monitor_cache_is_not_poisoned_by_a_refused_sync(tmp_path):

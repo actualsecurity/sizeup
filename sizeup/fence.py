@@ -194,12 +194,13 @@ class GuardedConnection(sqlite3.Connection):
         self.tainted = False
         self._said = -1e18
 
-    def _refuse(self, sql: str) -> bool:
-        """Not ours: True for a bookkeeping write (skipped), else FencedWrite (counted on this thread too)."""
+    def _refuse(self, sql: str, end: bool = False) -> bool:
+        """Not ours: True for a bookkeeping write (skipped), else FencedWrite (counted on this thread too). end: a
+        transaction's end that was rolled back: always refused, bookkeeping or not (never a quiet "committed")."""
         if self.in_transaction:
             self.tainted = True
         what = " ".join(sql.split()[:3])[:60]
-        book = in_bookkeeping()
+        book = in_bookkeeping() and not end
         if book:
             self.skipped += 1
         else:
@@ -225,7 +226,7 @@ class GuardedConnection(sqlite3.Connection):
             return False
         super().rollback()
         self.tainted = False
-        return self._refuse(sql)
+        return self._refuse(sql, end=True)
 
     def _gate(self, sql: str) -> bool:
         """Before a statement: False = run it; True = skip it (bookkeeping); FencedWrite = refused."""
@@ -346,16 +347,24 @@ class Fence:
     def ok(self) -> bool:
         if self.fenced:
             return False
-        d = self.lease()
-        try:
-            ours = int(d.get("generation") or 0) > 0 and self.mono() < float(d.get("valid_until") or 0)
-        except (TypeError, ValueError):
-            ours = False
+        ours = self._ours(self.lease())
+        if not ours:
+            # the cached lease (up to READ_EVERY_S old) says no: read the file itself once before saying so (and
+            # latching): a renew that just landed keeps a healthy leader writing
+            with self._mu:
+                self._read_at = -1e9
+            ours = self._ours(self.lease())
         if ours:
             self._was_ours = True
         elif self._was_ours:
             self.fenced = True                # lost once: never ours again in this process
         return ours
+
+    def _ours(self, d: dict) -> bool:
+        try:
+            return int(d.get("generation") or 0) > 0 and self.mono() < float(d.get("valid_until") or 0)
+        except (TypeError, ValueError):
+            return False
 
     def generation(self) -> int:
         try:
