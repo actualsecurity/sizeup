@@ -1,0 +1,89 @@
+# Towns a location may name besides the CAD's own lists (sizeup/cad/sources.py known_town): every municipality of
+# Westchester County, NY (its 6 cities, 19 towns and 23 villages; a town and a village or city of the same name are one
+# entry), the hamlets commonly used as postal town names there, and Greenwich, CT with its sections. Public geography:
+# NYS Department of State municipal listing and USPS place names. One name per line, as shown; "Town of X" works for any.
+# cities
+Mount Vernon
+New Rochelle
+Peekskill
+Rye
+White Plains
+Yonkers
+# towns
+Bedford
+Cortlandt
+Eastchester
+Greenburgh
+Harrison
+Lewisboro
+Mamaroneck
+Mount Kisco
+Mount Pleasant
+New Castle
+North Castle
+North Salem
+Ossining
+Pelham
+Pound Ridge
+Scarsdale
+Somers
+Yorktown
+# villages
+Ardsley
+Briarcliff Manor
+Bronxville
+Buchanan
+Croton-on-Hudson
+Dobbs Ferry
+Elmsford
+Hastings-on-Hudson
+Irvington
+Larchmont
+Pelham Manor
+Pleasantville
+Port Chester
+Rye Brook
+Sleepy Hollow
+Tarrytown
+Tuckahoe
+# hamlets used as postal towns
+Armonk
+Baldwin Place
+Banksville
+Bedford Hills
+Chappaqua
+Cortlandt Manor
+Crompond
+Cross River
+Croton Falls
+Edgemont
+Goldens Bridge
+Granite Springs
+Hartsdale
+Hawthorne
+Jefferson Valley
+Katonah
+Lincolndale
+Millwood
+Mohegan Lake
+Montrose
+North White Plains
+Purchase
+Purdys
+Scarborough
+Shrub Oak
+South Salem
+Thornwood
+Valhalla
+Verplanck
+Vista
+Waccabuc
+West Harrison
+Yorktown Heights
+# Greenwich, CT and its sections
+Greenwich
+Byram
+Cos Cob
+Glenville
+Old Greenwich
+Riverside

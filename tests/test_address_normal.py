@@ -501,3 +501,27 @@ def test_a_persons_edit_during_the_backfill_is_never_overwritten(tmp_path):
     for iid in (same, bad):
         got = rig.cad.store.incident(iid)
         assert (got["address"], got["address_raw"]) == ("20 Example Ave", "")
+
+
+# -- the county's towns (data/westchester_towns.txt) -------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("raw,want", [
+    ("EXAMPLETON RD/SAMPLE AVE BEDFORD", "Exampleton Rd & Sample Ave, Bedford"),          # a farther town of the county
+    ("12 SAMPLE CT SOMERS", "12 Sample Ct, Somers"),
+    ("12 SAMPLE CT VALHALLA", "12 Sample Ct, Valhalla"),                                  # a postal hamlet
+    ("12 SAMPLE CT GREENWICH CT", "12 Sample Ct, Greenwich"),                             # the neighbour across the line
+    ("12 SAMPLE AVE MAIN", "12 Sample Ave Main, Port Chester"),                           # still not towns
+    ("12 SAMPLE AVE CLUBHOUSE", "12 Sample Ave Clubhouse, Port Chester"),
+])
+def test_any_county_town_typed_last_is_its_town(raw, want):
+    assert normal_location(raw, typed=True) == want
+
+
+def test_county_town_spellings_and_town_of_forms():
+    assert normal_location("12 SAMPLE CT CROTON_ON_HUDSON", typed=True) == "12 Sample Ct, Croton-on-Hudson"
+    assert normal_location("12 SAMPLE CT", town="Town of Somers", typed=True) == "12 Sample Ct, Town of Somers"
+    assert normal_location("12 SAMPLE CT", town="SOMERS_T", typed=True) == "12 Sample Ct, Town of Somers"
+    assert normal_location("12 SAMPLE CT", town="NEW_CASTLE", typed=True) == "12 Sample Ct, New Castle"
+    assert src.known_town("Town of Bedford") and src.known_town("MOUNT_KISCO_V") and not src.known_town("Town of Main")
+    assert len([k for k in src.county_towns() if k]) >= 80

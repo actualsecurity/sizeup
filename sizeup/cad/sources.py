@@ -463,6 +463,24 @@ STATE_CODES = {"ny", "ct", "nj", "pa", "ma", "usa"}
 
 
 EXTRA_TOWNS: frozenset = frozenset()          # more towns a location may name (set_known_towns: the joint-response towns)
+COUNTY_TOWNS_FILE = Path(__file__).resolve().parents[2] / "data" / "westchester_towns.txt"
+_COUNTY: dict = {}                            # the county's towns (COUNTY_TOWNS_FILE): {name words: name as shown}
+
+
+def county_towns() -> dict[tuple[str, ...], str]:
+    """Every Westchester municipality, its postal hamlets and Greenwich, CT (data/westchester_towns.txt), read once."""
+    global _COUNTY
+    if not _COUNTY:
+        out = {}
+        try:
+            for line in COUNTY_TOWNS_FILE.read_text().splitlines():
+                name = line.split("#")[0].strip()
+                if name:
+                    out[tuple(re.findall(r"[a-z0-9]+", name.lower()))] = name
+        except OSError:
+            pass
+        _COUNTY = out or {(): ""}
+    return _COUNTY
 
 
 def set_known_towns(names) -> None:
@@ -472,7 +490,8 @@ def set_known_towns(names) -> None:
 
 def known_town(text: str) -> bool:
     """A town this CAD knows: a listed town or alias (set_towns), a town of the street lists (set_streets: the
-    gazetteer's, neighbours included), a joint-response town (set_known_towns), or "Town of X" for one of those. Words
+    gazetteer's, neighbours included), a joint-response town (set_known_towns), one of the county's (county_towns: any
+    Westchester municipality or postal hamlet, Greenwich, CT), or "Town of X" for one of those. Words
     typed after a street, or a feed's town, are a town only then ("12 SAMPLE AVE CLUBHOUSE" never is)."""
     key = tuple(re.findall(r"[a-z0-9]+", str(text or "").lower().replace("_", " ")))
     if len(key) >= 2 and key[-1] in TOWN_KIND:          # SAMPLE_V, SAMPLE_T: the county's village / town of Sample
@@ -480,7 +499,7 @@ def known_town(text: str) -> bool:
     if not key or any(w in NOT_TOWN for w in key[-1:]):
         return False
     streets = {tuple(re.findall(r"[a-z0-9]+", t)) for t in STREETS}
-    known = lambda k: k in TOWN_OF or k in streets or k in EXTRA_TOWNS
+    known = lambda k: k in TOWN_OF or k in streets or k in EXTRA_TOWNS or k in county_towns()
     return known(key) or (key[:2] == ("town", "of") and len(key) > 2 and known(key[2:]))
 
 
@@ -509,7 +528,7 @@ def town_label(text: str) -> str:
         return ""
     if key in TOWN_OF and key not in LISTED and key[:2] != ("town", "of"):   # an alias: its town ("rye city" -> "Rye";
         key = tuple(re.findall(r"[a-z0-9]+", TOWN_OF[key]))                  # never a town's own villages' alias)
-    return TOWN_NAME.get(key) or proper_case(" ".join(key))
+    return TOWN_NAME.get(key) or county_towns().get(key) or proper_case(" ".join(key))
 
 
 def _cut(words: list[str]) -> int | None:
