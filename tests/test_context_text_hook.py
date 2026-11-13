@@ -12,7 +12,7 @@ from sizeup import sourcekeys
 from sizeup.radio import systems
 
 from tests.test_p25_systems import make_system
-from tests.test_radios import Clock, cad, tx
+from tests.test_radios import Clock, cad, tx, uid
 
 PD = 9001
 
@@ -163,18 +163,44 @@ def test_context_rows_never_reach_a_fire_consumer(c):
     assert ("consider", "307-3-call_1-t0") in seen
 
 
+def _copy_as_context(c, tid, new):
+    """Our row again, byte for byte, but on another P25 system ("metro"): only system and source differ."""
+    row = dict(c.store.one("SELECT * FROM radio_traffic WHERE id = ?", (tid,)))
+    row.update(id=new, system="metro", source=f"p25:metro:{row['talkgroup']}")
+    cols = list(row)
+    with c.store.tx() as db:
+        db.execute(f"INSERT INTO radio_traffic ({', '.join(f'[{k}]' for k in cols)}) VALUES ({', '.join('?' * len(cols))})",
+                   [row[k] for k in cols])
+    return c.store.one("SELECT * FROM radio_traffic WHERE id = ?", (new,))
+
+
 def test_the_consumers_own_guards_still_hold_for_a_context_row(c):
-    """on_text never brings them a context row now; their is_context guards stay as a second line, called directly."""
+    """on_text never brings them a context row now; their is_context guards stay as a second line. Called directly,
+    each consumer acts on our row (the positive control) and on nothing for the identical row of another system."""
+    inc = c.create({"type": "STRU", "address": "17 Quillfeather Ln", "operator": "op"})
+    c.dispatch(inc["id"], {"unit_ids": [uid(c, "E62")], "operator": "op"})
+    c.clockref.t += 30                                       # heard after the dispatch
     t = c.clockref.t
-    words = "mayday mayday engine sixty three on scene blorpville alert level two"
-    c.record_traffic(ctx("metro-g", t - 5, words, tg=307))
-    row = c.store.one("SELECT * FROM radio_traffic WHERE id = ?", ("metro-g",))
-    assert c.hints.consider("metro-g") == []
-    assert c.sources.consider_radio("metro-g") is None
-    assert c.radiolog.matches(row) == {}
-    assert c.radiolog.consider("metro-g") == []
-    assert c.store.q("SELECT * FROM status_hints WHERE traffic_id = ?", ("metro-g",)) == []
-    assert c.store.q("SELECT * FROM radio_links WHERE traffic_id = ?", ("metro-g",)) == []
+    c.comms.on_text = None                                   # the consumers run only when this test calls them
+    c.record_traffic(ours("307-1-call_1-t0", t, "Engine 62 on location") | {"rig": "E62", "unit": "E62"})
+    c.record_traffic(dict(tx("307-2-call_2-t0", t + 1, "Fire/EMS 15", unit="60 Ctrl OP 6", tg=307,
+                             text="Engine 64, 60 Control"), ours=True, service="fire", group="Fire"))
+    # said: E62 (on the call) on location; called: 60 Control opening a call to E64 (not on one)
+    said, called = (c.store.one("SELECT * FROM radio_traffic WHERE id = ?", (x,))
+                    for x in ("307-1-call_1-t0", "307-2-call_2-t0"))
+    ctx_said, ctx_called = _copy_as_context(c, said["id"], "metro-g1"), _copy_as_context(c, called["id"], "metro-g2")
+    # the rows of another system first (nothing of ours made yet that could hide what they would make): nothing
+    assert c.hints.consider(ctx_said["id"]) == []
+    assert c.sources.consider_radio(ctx_called["id"]) is None
+    assert c.radiolog.matches(ctx_said) == {} and c.radiolog.consider(ctx_said["id"]) == []
+    assert c.store.q("SELECT * FROM status_hints") == []
+    # the positive control: the same rows of ours
+    assert [h["unit"] for h in c.hints.consider(said["id"])] == ["E62"]
+    assert c.sources.consider_radio(called["id"]) is not None
+    assert inc["id"] in c.radiolog.matches(said)
+    assert [r["traffic_id"] for r in c.store.q("SELECT traffic_id FROM status_hints")] == [said["id"]]
+    assert [r["ref"] for r in c.store.q("SELECT ref FROM incoming")] == [called["id"]]
+    assert c.store.q("SELECT * FROM radio_links WHERE traffic_id LIKE 'metro-%'") == []
 
 
 @pytest.mark.parametrize("row", [
