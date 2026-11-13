@@ -617,6 +617,7 @@ class Comms:
                            "AND status IN ('pending', 'remote') AND text = ''",
                            (status, model, self.clock(), tid)).rowcount
             if n:
+                self.touch(tid)                         # the row's status shows on the Radio page (#415 ?changed=)
                 self.rev += 1
         return bool(n)
 
