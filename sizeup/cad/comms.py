@@ -598,6 +598,7 @@ class Comms:
         whisper took over from AWS, or one that failed. Only a row still waiting (pending or remote, no text): a text
         that came first (a fast whisper, a late AWS answer) is never put back to waiting or failed."""
         with self.store.tx() as db:
+            self.touch(tid)
             n = db.execute("UPDATE radio_traffic SET status = ?, model = ?, updated_at = ? WHERE id = ? "
                            "AND status IN ('pending', 'remote') AND text = ''",
                            (status, model, self.clock(), tid)).rowcount
