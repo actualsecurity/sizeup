@@ -16,9 +16,23 @@ What comes out first (strip()):
 Then a cheap pre-filter: an address-like phrase (sizeup/cad/radiolog.py addresses_in), an intersection cue ("X and
 Y", "corner of"), or a "block of": no cue, no gazetteer work (the hub has half a vCPU).
 
-The reading's precision: address | intersection | landmark | street (pagegeo's kinds), confirmed when the page locator
-confirms it (cross streets, read-back). Unconfirmed readings are never exact: the map draws them hollow (PR 5), the
-alternatives go with them.
+The reading's precision: address | intersection | block | landmark | street (pagegeo's kinds), confirmed when the page
+locator confirms it (cross streets, read-back). Unconfirmed readings are never exact: the map draws them hollow (PR 5),
+the alternatives go with them.
+
+Spoken forms beyond what a page says (radiogeo depth):
+    "X and Y", "X at Y", "corner of X and Y"   the intersection search (sizeup/geo/intersections.py) as a second
+                                               opinion: one meeting point in the source's towns is the place
+    "the 100 block of X", "1 hundred block"    the block: that number's point on X, said as "100 block of X", radius
+                                               BLOCK_M, never an exact address
+    "in front of / rear of / across from / area of / vicinity of <place>"   the place, its radius widened
+    "I-95 northbound exit 21", "287 mile marker 10"   the highway exit or marker (the place search, when given)
+Per-domain thresholds (DOMAIN_PARAMS): police transcripts are noisier than a page, so a reading needs a higher score to
+be confirmed and a sound-alike street must be closer. pagegeo's own values (pages) are unchanged.
+HQ narrowing: a headquarters callsign said alone (data/pd_units.json, on its own system and service: police "908" is
+Port Chester PD's, "266" Rye PD's) holds the reading to that department's town first.
+WHERE score: the locator's, + READBACK_BONUS for each further transmission in the window that repeats the street, -
+RIVAL_PENALTY when another reading is close behind; 0..1.
 """
 
 from __future__ import annotations
@@ -41,6 +55,19 @@ CROSS_CUE = re.compile(r"\b(?:corner of|intersection of|at the corner|block of)\
                        re.I)
 KIND_PRECISION = {"address": "address", "intersection": "intersection", "landmark": "landmark", "street": "street"}
 RADIUS = {"address": 25.0, "intersection": 40.0, "landmark": 75.0, "street": 300.0, "block": 120.0, "town": 0.0, "none": 0.0}
+RANK = {"address": 0, "intersection": 1, "block": 2, "landmark": 3, "street": 4, "town": 5, "none": 6}
+DOMAIN_PARAMS = {"police": {"confirm": 0.8, "rival": 0.1, "rival_m": 200, "sound_min": 0.7, "corner_m": 200}}
+CORNER_M = 200.0               # "N <street> at <cross>": the address confirms only this close to where they meet
+READBACK_BONUS, RIVAL_PENALTY = 0.08, 0.15
+SUFFIX = (r"(?:st|street|ave|avenue|av|rd|road|pl|place|ln|lane|dr|drive|blvd|boulevard|ct|court|pkwy|parkway|ter|terrace|"
+          r"way|hwy|highway|tpke|turnpike|cir|circle)")
+STREET = rf"((?:[a-z]+\s+){{0,3}}?[a-z]+\s+{SUFFIX})"
+SPOKEN_CROSS = re.compile(rf"(?:corner of\s+|intersection of\s+)?{STREET}\s+(?:and|at|&|by)\s+{STREET}\b", re.I)
+BLOCK = re.compile(rf"\b(?:the\s+)?(\d{{1,2}})\s*(hundred|00)\s+block\s+(?:of\s+)?{STREET}\b", re.I)
+RELATIVE = re.compile(r"\b(in front of|rear of|behind|across from|across the street from|area of|vicinity of|near)\b", re.I)
+HIGHWAY = re.compile(r"\b((?:i-?|interstate\s+|route\s+|rte\s+)?(?:95|287|684|hutch(?:inson)?(?:\s+river\s+parkway)?|"
+                     r"merritt(?:\s+parkway)?|cross\s+county)\b[^.]{0,40}?\b(?:exit\s+\d{1,3}[a-z]?|"
+                     r"(?:mile\s+marker|mile\s+post|milepost|mm)\s+\d{1,3}(?:\.\d)?))", re.I)
 
 
 @lru_cache(maxsize=1)
@@ -145,33 +172,122 @@ def strip(text: str, system: str = "", service: str = "") -> str:
     t = TIME.sub(" ", t)
     t = MIXED.sub(" ", t)
     for said in callsigns(system, service):
-        if said.isdigit():                              # the number alone: never inside 2662 / DPT266 / CHIEF266
-            t = re.sub(rf"(?<![A-Za-z0-9]){re.escape(said)}(?![A-Za-z0-9])", " ", t)
+        if said.isdigit():                              # the number alone: never inside 2662 / DPT266 / CHIEF266, and
+            pat = re.compile(rf"(?<![A-Za-z0-9]){re.escape(said)}(?![A-Za-z0-9])")    # never "266 Sample St" (an address)
+            t = pat.sub(lambda m: m.group(0) if STREET_NEXT.match(m.string[m.end():]) else " ", t)
     return re.sub(r"\s+", " ", t).strip()
 
 
+def hq_towns(text: str, system: str, service: str) -> list[str]:
+    """The towns of the headquarters whose callsign is said alone (data/pd_units.json, this system and service only)."""
+    sysd = ((_units_file().get("systems") or {}).get(system or "") or {})
+    out = []
+    for c in sysd.get("callsigns") or []:
+        said = str(c.get("said") or "")
+        if (str(c.get("service") or "") != service or str(c.get("role") or "") != "headquarters" or not said.isdigit()
+                or not re.search(rf"(?<![A-Za-z0-9-]){re.escape(said)}(?![A-Za-z0-9-])", text or "")):
+            continue
+        town = re.sub(r"\s+(PD|Police.*)$", "", str(c.get("department") or "")).strip()
+        if town and town not in out:
+            out.append(town)
+    return out
+
+
 def has_cue(text: str) -> bool:
-    """Worth the gazetteer: an address-like phrase, an intersection or block cue."""
+    """Worth the gazetteer: an address-like phrase, an intersection, block or highway cue."""
     from sizeup.cad.radiolog import addresses_in
-    return bool(addresses_in(text)) or bool(CROSS_CUE.search(text or ""))
+    t = text or ""
+    return bool(addresses_in(t)) or bool(CROSS_CUE.search(t) or SPOKEN_CROSS.search(t) or BLOCK.search(t)
+                                          or HIGHWAY.search(t) or RELATIVE.search(t))
+
+
+def _readbacks(text: str, label: str) -> int:
+    """How many transmissions of the window (" . " between them) name the reading's street."""
+    street = re.sub(r"^\d+[a-z]?\s+", "", (label or "").split(",")[0], flags=re.I).strip().lower()
+    words = [w for w in re.findall(r"[a-z]+", street) if len(w) > 2][:2]
+    if not words:
+        return 0
+    return sum(1 for part in (text or "").lower().split(" . ") if all(w in part for w in words))
 
 
 class Locator:
-    """locate(text, scope) over a gazetteer; read only."""
+    """locate(text, scope) over a gazetteer; read only. places: a function returning the place search
+    (sizeup/geo/places.py PlaceIndex, the CAD's place_index) for highway exits and markers; None: none."""
 
-    def __init__(self, gaz):
+    def __init__(self, gaz, places=None):
         self.gaz = gaz
+        self.places = places
+        self._cross = None
 
     def __call__(self, text: str, scope: dict) -> Place | None:
         return self.locate(text, scope)
 
+    def cross(self):
+        if self._cross is None and self.gaz is not None:
+            from sizeup.geo.intersections import IntersectionSearch
+            self._cross = IntersectionSearch(self.gaz)
+        return self._cross
+
     def locate(self, text: str, scope: dict) -> Place | None:
-        clean = strip(text, str(scope.get("system") or ""), str(scope.get("service") or ""))
+        system, service = str(scope.get("system") or ""), str(scope.get("service") or "")
+        clean = strip(text, system, service)
         if not clean or not has_cue(clean) or self.gaz is None:
             return None
+        towns = list(scope.get("towns") or ())
+        hq = [t for t in hq_towns(text, system, service) if not towns or t in towns]
+        params = DOMAIN_PARAMS.get(str(scope.get("pack") or service), {})
+        cands: list[Place] = []
+        for home in ([hq] if hq else []) + [towns]:
+            p = self._page(clean, tuple(home), params)
+            if p is not None:
+                cands.append(p)
+                if p.confirmed:
+                    break
+        for fn in (self._spoken_cross, self._block, self._highway):
+            try:
+                p = fn(clean, towns, hq)
+            except Exception:  # noqa: BLE001 - one form failing never loses the others
+                p = None
+            if p is not None:
+                cands.append(p)
+        if not cands:
+            return None
+        # "120 Example Ave at Sample St": the house number and its street heard, the cross street meeting it confirms the
+        # ADDRESS (never the bare corner instead)
+        addr = next((p for p in cands if p.precision == "address"), None)
+        if addr is not None:
+            street = re.sub(r"^\d+[A-Za-z]?\s+", "", addr.label.split(",")[0]).strip().lower()
+            corner_m = float(params.get("corner_m", CORNER_M))
+            for p in cands:
+                if p.precision != "intersection" or not p.confirmed or not street or street not in p.label.lower():
+                    continue
+                d = _dist_m(addr, p)
+                corner = p.label.split(",")[0]
+                if d <= corner_m:             # the address is at that corner: the cross street confirms it
+                    addr.confirmed = True
+                    addr.radius_m = RADIUS["address"]
+                    addr.basis = "; ".join(x for x in (addr.basis, f"at {corner}") if x)
+                    cands = [addr]
+                elif not addr.confirmed:      # the number is far from the corner said: misheard, the corner it is
+                    p.basis = "; ".join(x for x in (p.basis, f"{addr.label.split(',')[0]} is {int(d)} m from {corner}: "
+                                                             "the number taken as misheard") if x)
+                    cands = [p]
+                else:
+                    addr.basis = "; ".join(x for x in (addr.basis, f"{int(d)} m from {corner}") if x)
+                break
+        best = min(cands, key=lambda p: (not p.confirmed, RANK.get(p.precision, 9), -p.where_score))
+        rel = RELATIVE.search(clean)
+        if rel:
+            best.radius_m = max(best.radius_m * 2, 100.0)
+            best.basis = "; ".join(x for x in (best.basis, rel.group(1).lower()) if x)
+        n = _readbacks(clean, best.label)
+        best.where_score = round(max(0.0, min(1.0, best.where_score + READBACK_BONUS * max(0, n - 1)
+                                              - (RIVAL_PENALTY if best.alts and not best.confirmed else 0.0))), 3)
+        return best
+
+    def _page(self, clean: str, home: tuple, params: dict) -> Place | None:
         from sizeup.geo.pagegeo import locator
-        towns = tuple(scope.get("towns") or ())
-        g = locator(self.gaz).locate(clean, towns)
+        g = locator(self.gaz).locate(clean, home, params)
         b = g.best
         if b is None:
             return None
@@ -180,3 +296,61 @@ class Locator:
         return Place(precision=prec, lat=m.lat, lon=m.lon, radius_m=RADIUS[prec] if g.confirmed else max(RADIUS[prec], 150.0),
                      label=m.label, town=m.municipality or "", confirmed=bool(g.confirmed), where_score=round(float(b.score), 3),
                      alts=[r.as_alt() for r in g.alternatives[:4]], basis=g.why or b.why())
+
+    def _spoken_cross(self, clean: str, towns: list, hq: list) -> Place | None:
+        cx = self.cross()
+        if cx is None:
+            return None
+        for m in SPOKEN_CROSS.finditer(clean):
+            res = cx.search(f"{m.group(1)} & {m.group(2)}") or {}
+            rows = [r for r in res.get("results") or [] if not towns or r["town"] in towns]
+            if hq:
+                rows = [r for r in rows if r["town"] in hq] or rows
+            if not rows:
+                continue
+            r = rows[0]
+            sure = len(rows) == 1 and r.get("exact", 0) >= 1
+            return Place("intersection", r["lat"], r["lon"], RADIUS["intersection"] if sure else 150.0, r["label"],
+                         r["town"], sure, round(float(r.get("confidence", 0.8)) * (1.0 if sure else 0.8), 3),
+                         [{"label": x["label"], "lat": x["lat"], "lon": x["lon"], "kind": "intersection", "town": x["town"],
+                           "confidence": x.get("confidence")} for x in rows[1:5]],
+                         "said as two streets" if sure else f"{len(rows)} places where they meet")
+        return None
+
+    def _block(self, clean: str, towns: list, hq: list) -> Place | None:
+        m = BLOCK.search(clean)
+        if not m:
+            return None
+        number = int(m.group(1)) * 100                 # "1 hundred block" and "100 block" alike
+        street = m.group(3)
+        hits = [c for c in self.gaz.candidates(f"{number} {street}") if c.kind in ("address", "street")
+                and (not towns or c.municipality in towns)]
+        if hq:
+            hits = [c for c in hits if c.municipality in hq] or hits
+        if not hits:
+            return None
+        c = hits[0]
+        name = (c.street or street).strip()
+        label = f"{number} block of {name}, {c.municipality}" if c.municipality else f"{number} block of {name}"
+        return Place("block", c.lat, c.lon, RADIUS["block"], label, c.municipality or "", False,
+                     round(min(0.9, float(c.confidence)), 3), [], "said as a block")
+
+    def _highway(self, clean: str, towns: list, hq: list) -> Place | None:
+        m = HIGHWAY.search(clean)
+        if not m or self.places is None:
+            return None
+        ix = self.places() if callable(self.places) else self.places
+        if ix is None:
+            return None
+        for r in ix.search(m.group(1), limit=3):
+            if r.get("kind") in ("exit", "milemarker"):
+                return Place("landmark", r["lat"], r["lon"], 300.0, r["label"], r.get("sub") or "", False,
+                             round(float(r.get("quality", 0.6)), 3), [], "highway " + r["kind"])
+        return None
+
+
+def _dist_m(a, b) -> float:
+    import math
+    if None in (a.lat, a.lon, b.lat, b.lon):
+        return float("inf")
+    return math.hypot((a.lat - b.lat) * 110_574.0, (a.lon - b.lon) * 111_320.0 * math.cos(math.radians(a.lat)))
