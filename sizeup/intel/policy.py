@@ -11,6 +11,12 @@ test pre-alert topic from day one, caps generous for testing):
     per_category_hour  10       ... an hour of one category
     repush_min         10       an escalation (higher level, a place found or confirmed) pushes again at most this often
     max_repush         2        ... and at most this many times per event
+    merge_min          20       an open event of the same pack, category and source this recent takes a new mention
+                                ("still smoke showing", a repeated "shots fired"): updated, not pushed again
+    mute_min           15       after an event ends ("disregard") or is dismissed, the same pack, category and source
+                                (or place) raise nothing new this long
+    place_repush_min   5        the place first heard within this long after the first push pushes once more,
+                                whatever repush_min says (the read-back follows the call-out by a minute or two)
     max_age_min        15       a transmission older than this (a startup backfill, a late re-record) is never a
                                 pre-alert: a restart doesn't replay old pushes
     quiet_from / quiet_to  ""   "HH:MM" local: no pushes in between (log and map go on); "" = none
@@ -26,9 +32,11 @@ from datetime import datetime
 from sizeup.intel.model import Decision, Event, mode_rank
 
 DEFAULTS = {"enabled": True, "push": True, "per_hour": 30, "per_day": 200, "per_category_hour": 10, "repush_min": 10,
-            "max_repush": 2, "quiet_from": "", "quiet_to": "", "digest_min": 15, "max_age_min": 15}
+            "max_repush": 2, "quiet_from": "", "quiet_to": "", "digest_min": 15, "max_age_min": 15,
+            "merge_min": 20, "mute_min": 15, "place_repush_min": 5}
 LIMITS = {"per_hour": (1, 1000), "per_day": (1, 10000), "per_category_hour": (1, 1000), "repush_min": (0, 1440),
-          "max_repush": (0, 20), "digest_min": (1, 1440), "max_age_min": (1, 1440)}
+          "max_repush": (0, 20), "digest_min": (1, 1440), "max_age_min": (1, 1440),
+          "merge_min": (1, 240), "mute_min": (0, 240), "place_repush_min": (0, 60)}
 LEVELS = ((0.8, "high"), (0.6, "medium"), (0.0, "low"))
 
 
@@ -115,7 +123,9 @@ class Policy:
                 pass                              # never pushed (held, quiet): an update may push it now
             elif before is None or not escalated(before, ev):
                 return Decision(ev.mode, False, "", prio)
-            elif ev.push_count > self.cfg["max_repush"] or now - ev.pushed_at < self.cfg["repush_min"] * 60:
+            elif ev.push_count > self.cfg["max_repush"]:
+                return Decision(ev.mode, False, "merged", prio)
+            elif now - ev.pushed_at < self.cfg["repush_min"] * 60 and not self.place_found(before, ev, now):
                 return Decision(ev.mode, False, "merged", prio)
             else:
                 repush = True
@@ -129,12 +139,26 @@ class Policy:
             return Decision(ev.mode, False, "rate", prio)
         return Decision(ev.mode, True, "", prio, repush)
 
+    def place_found(self, before: Event, ev: Event, now: float) -> bool:
+        """The place first heard soon after the first push (the read-back): one more push, whatever repush_min says.
+        Chosen over holding the first push for a read-back: the call-out's push is never late, and it costs at most
+        one more push per event (#492 review, M1)."""
+        return (before.precision == "none" and ev.precision != "none" and ev.push_count == 1
+                and ev.pushed_at is not None and now - ev.pushed_at <= self.cfg["place_repush_min"] * 60)
+
+    def may_digest(self, now: float) -> bool:
+        """The digest obeys what a push obeys: enabled, the kill switch, quiet hours."""
+        return bool(self.cfg["enabled"]) and bool(self.cfg["push"]) and not quiet(self.cfg, now, self.tz)
+
     def sent_now(self, ev: Event, now: float) -> None:
         self.sent.append((now, ev.category))
 
     def digest_due(self, now: float) -> list[int]:
         """The held event ids, when a digest is due (and forgets them); else []."""
-        if not self.held or now - self.digest_at < self.cfg["digest_min"] * 60:
+        if self.held and not (self.cfg["enabled"] and self.cfg["push"]):
+            self.held = []                        # off: nothing held is ever sent later
+            return []
+        if not self.held or now - self.digest_at < self.cfg["digest_min"] * 60 or not self.may_digest(now):
             return []
         out, self.held, self.digest_at = self.held, [], now
         return out

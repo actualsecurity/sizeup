@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import threading
+from contextlib import contextmanager
 from dataclasses import fields
 
 from sizeup.intel.model import Event
@@ -108,14 +109,41 @@ class MemoryEvents:
     def all(self) -> list[Event]:
         return sorted(self.rows.values(), key=lambda e: e.id or 0)
 
+    def recent_closed(self, pack: str, category: str, source_key: str, subject: str, since: float) -> bool:
+        return any(e.status in ("ended", "dismissed") and e.pack == pack and e.category == category
+                   and (e.source_key == source_key or (subject and e.subject == subject)) and e.updated_at >= since
+                   for e in self.rows.values())
+
 
 class SqlEvents:
     """Events in cad.sqlite (the live store)."""
 
     def __init__(self, store):
         self.store = store
+        self.rev = 0                       # bumped on every intel write: the console's intel card reads by it
         with store.lock:
             store.db.executescript(SCHEMA)
+
+    @contextmanager
+    def _w(self):
+        """One transaction under the store's lock WITHOUT store.rev (#492 review, H4: intel writes are not CAD changes;
+        a police transmission must not rebuild every console's state), the way sizeup/cad/activity.py writes."""
+        with self.store.lock:
+            db = self.store.db
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                yield db
+            except BaseException:
+                db.execute("ROLLBACK")
+                raise
+            db.execute("COMMIT")
+            self.rev += 1
+
+    def recent_closed(self, pack: str, category: str, source_key: str, subject: str, since: float) -> bool:
+        """An event of this pack and category, on this source (or at this place), ended or dismissed since then."""
+        return self.store.one("SELECT 1 AS x FROM intel_events WHERE status IN ('ended', 'dismissed') AND pack = ? AND "
+                              "category = ? AND (source_key = ? OR (? != '' AND subject = ?)) AND updated_at >= ? LIMIT 1",
+                              (pack, category, source_key, subject, subject, since)) is not None
 
     def open_events(self) -> list[Event]:
         return [row_event(r) for r in self.store.q("SELECT * FROM intel_events WHERE status = 'open'")]
@@ -129,7 +157,7 @@ class SqlEvents:
         for k in EVENT_COLS:
             v = getattr(ev, k)
             vals.append(json.dumps(v) if k in JSON_COLS else int(v) if isinstance(v, bool) else v)
-        with self.store.tx() as db:
+        with self._w() as db:
             if ev.id is None:
                 cur = db.execute(f"INSERT INTO intel_events ({', '.join(EVENT_COLS)}) VALUES ({', '.join('?' * len(EVENT_COLS))})",
                                  vals)
@@ -147,14 +175,14 @@ class SqlEvents:
         return out
 
     def dismiss(self, eid: int, operator: str, now: float) -> bool:
-        with self.store.tx() as db:
+        with self._w() as db:
             return bool(db.execute("UPDATE intel_events SET status = 'dismissed', dismissed_by = ?, updated_at = ? "
                                    "WHERE id = ? AND status = 'open'", (operator[:120], now, eid)).rowcount)
 
     def feedback(self, eid: int | None, tid: str | None, verdict: str, operator: str, now: float,
                  corrected: dict | None = None, corrected_category: str = "") -> int:
         ev = self.get(eid) if eid is not None else None
-        with self.store.tx() as db:
+        with self._w() as db:
             cur = db.execute("INSERT INTO intel_feedback (event_id, traffic_id, verdict, corrected, corrected_category, rules, "
                              "ruleset_hash, operator, at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                              (eid, tid, verdict, json.dumps(corrected) if corrected else "", corrected_category[:40],
@@ -162,7 +190,7 @@ class SqlEvents:
             return int(cur.lastrowid)
 
     def hit(self, h) -> None:
-        with self.store.tx() as db:
+        with self._w() as db:
             db.execute("INSERT INTO intel_hits (traffic_id, rule_id, rule_rev, weight, category, pack, event_id, at) "
                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(traffic_id, rule_id) DO UPDATE SET rule_rev = excluded.rule_rev, "
                        "weight = excluded.weight, category = excluded.category, pack = excluded.pack, "
@@ -171,7 +199,7 @@ class SqlEvents:
 
     def clear_hits(self, tid: str, keep: set[str]) -> None:
         """A re-transcription: the rules that no longer hit this transmission go (idempotent per traffic id)."""
-        with self.store.tx() as db:
+        with self._w() as db:
             if keep:
                 db.execute(f"DELETE FROM intel_hits WHERE traffic_id = ? AND rule_id NOT IN ({','.join('?' * len(keep))})",
                            (tid, *sorted(keep)))
@@ -192,7 +220,7 @@ class SqlEvents:
         return {"events": r.get("events") or 0, "pushed": r.get("pushed") or 0, "suppressed": r.get("suppressed") or 0}
 
     def prune(self, now: float) -> int:
-        with self.store.tx() as db:
+        with self._w() as db:
             n = db.execute("DELETE FROM intel_events WHERE last_at < ? AND status != 'open'", (now - KEEP_EVENTS_S,)).rowcount
             n += db.execute("DELETE FROM intel_hits WHERE at < ?", (now - KEEP_HITS_S,)).rowcount
             n += db.execute("DELETE FROM intel_feedback WHERE at < ?", (now - KEEP_FEEDBACK_S,)).rowcount
