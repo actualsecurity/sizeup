@@ -125,6 +125,7 @@ from sizeup import sourcekeys
 
 STATIC_DIR = Path(__file__).parent / "static"
 MAX_CAD_BODY = 65536
+MAX_DOC_BODY = 25 * 1024 * 1024      # a site document upload (#459, sizeup/cad/preplan_docs.py MAX_BYTES)
 # role = "station": the only CAD routes served, (method, path): what Settings > Radios (radio-controls.js) uses
 # (not the squelch: set on the CAD of record only, Settings > Radios > Squelch; the station applies what the hub sends)
 STATION_CAD = {("GET", "/api/cad/stt"), ("POST", "/api/cad/settings/channels"), ("POST", "/api/cad/settings/stt")}
@@ -483,6 +484,78 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                                    b"<p>Sign in through Cloudflare Access to use sizeup: reload this page.</p>",
                               "text/html; charset=utf-8") or False
 
+        def _doc_file(self, path: str, query: str) -> None:
+            """GET /api/cad/preplan/docs/<id>/file | plan (#459): streamed from the store; a client that takes no bytes
+            for DOWNLOAD_WRITE_S is dropped (the store's connection and the download slot are let go: Stream.close)."""
+            from sizeup.cad.preplan_docs import DOWNLOAD_WRITE_S
+            before = self.connection.gettimeout()
+            self.connection.settimeout(DOWNLOAD_WRITE_S)
+            try:
+                return self._send(*cad.get(path, query, self.who))
+            finally:
+                try:
+                    self.connection.settimeout(before)
+                except OSError:
+                    pass
+
+        def _upload_doc(self, path: str) -> None:
+            """POST /api/cad/preplan/docs (#459): a site document, the file itself as the body (at most MAX_DOC_BODY),
+            its details in X-Sizeup-Doc (a header a page elsewhere can't send without a CORS preflight). Who may is
+            checked before the body is read; a refused or oversized one is never read."""
+            if self.who is not None and (refused := cad.permit(path, self.who, client=self._client())):
+                self.close_connection = True     # the body is left unread
+                return self._send(*refused)
+            if not self.headers.get("X-Sizeup-Doc"):
+                self.close_connection = True
+                return self._send(400, b'{"error":"X-Sizeup-Doc: the document\'s details"}', "application/json")
+            try:
+                n = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                n = -1
+            if not 0 < n <= MAX_DOC_BODY:
+                self.close_connection = True
+                return self._send(413, b'{"error":"a file of at most 25 MB"}', "application/json")
+            from sizeup.cad.preplan_docs import UPLOAD_WAIT_S, UPLOADS
+            if not UPLOADS.acquire(timeout=UPLOAD_WAIT_S):  # a slot before the body is read (memory: 2 at most)
+                self.close_connection = True     # the body is left unread
+                return self._send(503, b'{"error":"Busy with other uploads: try again in a moment"}', "application/json",
+                                  {"Retry-After": "5"})
+            try:
+                data = self._read_doc(n)
+                if data is None:                 # stalled or cut short: the slot is let go, the connection closed
+                    self.close_connection = True
+                    return self._send(408, b'{"error":"the upload stalled: try again"}', "application/json")
+                return self._send(*cad.upload(path, self.headers.get("X-Sizeup-Doc") or "", data, self.who,
+                                              self._client()))
+            finally:
+                UPLOADS.release()
+
+        def _read_doc(self, n: int) -> bytes | None:
+            """The upload's n bytes, each read within UPLOAD_READ_S and all of them within UPLOAD_DEADLINE_S; None when
+            the client stalls or stops short (it can't hold one of the two upload slots for long)."""
+            from sizeup.cad.preplan_docs import UPLOAD_DEADLINE_S, UPLOAD_READ_S
+            before = self.connection.gettimeout()
+            self.connection.settimeout(UPLOAD_READ_S)
+            end = time.monotonic() + UPLOAD_DEADLINE_S
+            parts, got = [], 0
+            try:
+                while got < n:
+                    if time.monotonic() > end:
+                        return None
+                    b = self.rfile.read1(min(65536, n - got))     # what has come, up to 64 KB (a read each)
+                    if not b:
+                        return None
+                    parts.append(b)
+                    got += len(b)
+                return b"".join(parts)
+            except (TimeoutError, OSError):
+                return None
+            finally:
+                try:
+                    self.connection.settimeout(before)
+                except OSError:
+                    pass
+
         def _client(self) -> tuple[str, str]:
             """(ip, browser) for the activity log: the visitor's address as Cloudflare saw it."""
             h = self.headers
@@ -507,28 +580,32 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                     body = gz if gz is not None else gzip.compress(body, 5)
                     h["Content-Encoding"] = "gzip"
             h.setdefault("Server-Timing", f"app;dur={self._ms():.1f}")     # the time to the answer, gzip included (#284)
-            self.send_response(code)
-            unsized = not isinstance(body, (bytes, bytearray, memoryview)) and getattr(body, "length", 0) is None
-            if code != 304:
-                self.send_header("Content-Type", ctype)
-                if unsized:                       # a body made as it goes (an export, #323): to the end of the connection
-                    h["Connection"] = "close"
-                    self.close_connection = True
-                else:
-                    self.send_header("Content-Length", str(len(body)))
-            for k, v in h.items():
-                self.send_header(k, v)
-            if "Cache-Control" not in h:
-                self.send_header("Cache-Control", "no-store")
-            self.end_headers()
             streamed = not isinstance(body, (bytes, bytearray, memoryview))   # sizeup/attachments.py Stream (#323)
-            try:
+            try:                                  # a streamed body is closed whatever happens from here (#459: the
+                self.send_response(code)          # client gone before its headers too: its slot, its store connection)
+                unsized = streamed and getattr(body, "length", 0) is None
+                if code != 304:
+                    self.send_header("Content-Type", ctype)
+                    if unsized:                   # a body made as it goes (an export, #323): to the end of the connection
+                        h["Connection"] = "close"
+                        self.close_connection = True
+                    else:
+                        self.send_header("Content-Length", str(len(body)))
+                for k, v in h.items():
+                    self.send_header(k, v)
+                if "Cache-Control" not in h:
+                    self.send_header("Cache-Control", "no-store")
+                self.end_headers()
                 if code == 304:
                     return
                 if self.command != "HEAD":
                     try:
                         if streamed:
+                            deadline = getattr(body, "deadline", None)    # a whole download, at most this (#459)
                             for piece in body:
+                                if deadline is not None and time.monotonic() > deadline:
+                                    self.close_connection = True
+                                    break
                                 self.wfile.write(piece)
                         else:
                             self.wfile.write(body)
@@ -653,6 +730,8 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                                           {"Cache-Control": "no-store"})
                 return self._send(200, json.dumps(out, separators=(",", ":")).encode(), "application/json",
                                   {"Cache-Control": "no-store"})
+            if path.startswith("/api/cad/preplan/docs/") and path.endswith(("/file", "/plan")) and cad is not None:
+                return self._doc_file(path, url.query)
             if path.startswith("/api/cad/") and cad is not None:
                 return self._send(*self._data(path, url.query, cad.get(path, url.query, self.who)))
             if path.startswith("/static/"):
@@ -742,6 +821,8 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                 return self._send(409, station_says(), "application/json")
             if path == "/api/cad/perf/profile" and perf is not None:
                 return self._profile(path)
+            if path == "/api/cad/preplan/docs" and cad is not None:
+                return self._upload_doc(path)
             if path.startswith("/api/cad/") and cad is not None:
                 try:
                     n = int(self.headers.get("Content-Length") or 0)

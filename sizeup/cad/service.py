@@ -33,6 +33,7 @@ from sizeup.cad.comms import (COUNT_MINUTES, MAIN_LIMIT, MAX_ROWS, MUTE_MAX, OTH
 from sizeup.cad.history import AddressHistory
 from sizeup.cad.premise import Premise
 from sizeup.cad.preplan import Preplan
+from sizeup.cad.preplan_docs import PreplanDocs
 from sizeup.cad.feed import Feed
 from sizeup.cad.newids import NewIds
 from sizeup.cad.statushints import StatusHints
@@ -365,6 +366,9 @@ class Cad:
         # every call there. gis: the county layers (the app sets it: the building footprints a point is linked to).
         self.preplan = Preplan(self)
         self.gis = None
+        # Site documents (#459, sizeup/cad/preplan_docs.py): a building's floor plans (on the call's map) and other
+        # documents; .store: where their bytes are (sizeup/docstore.py; the app sets it)
+        self.preplan_docs = PreplanDocs(self)
 
     @classmethod
     def from_config(cls, cfg, geocoder=None, log=print) -> Cad:
@@ -419,6 +423,7 @@ class Cad:
                 "feed": self.feed.state(),
                 "overview": mapview.overview(incs, self.s.tactical),
                 "preplan": self.preplan.state(),          # #456: the write generation, the kinds kept to some roles
+                "preplan_docs": self.preplan_docs.state(),  # #459: the site documents' write generation
                 # Settings > System > ATC talkers (#252): the switches, for the rows' chips and the map
                 "atc": {"identify": self.atc_talkers.identify, "map": self.atc_talkers.on_map,
                         "channels": sorted(self.atc_talkers.channels)},
@@ -1880,7 +1885,8 @@ class Cad:
     def settings_audit_log(self, q: dict, may: str = "admin") -> dict:
         """may: the reader's standing; a premise note's rows of a category they may not see (now) without its text (#403)."""
         rows = self.premise.redact_audit(self.settings.audit_log((q.get("section") or [""])[0][:40]), may)
-        return {"audit": self.preplan.redact_audit(rows, may)}          # and a pre-plan point's (#456)
+        rows = self.preplan.redact_audit(rows, may)                     # and a pre-plan point's (#456)
+        return {"audit": self.preplan_docs.redact_audit(rows, may)}     # and an admin-only site document's (#459)
 
     # -- location suggestions -----------------------------------------------------------------------
 

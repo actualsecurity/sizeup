@@ -1043,4 +1043,15 @@
   .pp-mark { cursor: grab; filter: drop-shadow(0 0 2px rgba(0, 0, 0, 0.8)); }
   .pp-mark-i { inline-size: var(--s-7); block-size: var(--s-7); display: block; }
   .pp-toggle img { inline-size: var(--s-4); block-size: var(--s-4); }
+  /* site documents (#459, preplan-docs.js) */
+  .ppd-plans { flex-wrap: wrap; gap: var(--s-2); align-items: center; }
+  .ppd-opacity { inline-size: 7rem; flex: 0 1 auto; }
+  .ppd-body { flex: 1 1 auto; padding: 0; align-items: center; justify-content: center; background: var(--sunken, var(--bg)); }
+  .ppd-img { max-inline-size: 100%; max-block-size: 100%; object-fit: contain; }
+  .ppd-frame { inline-size: 100%; block-size: 100%; min-block-size: 60vh; border: 0; background: #fff; }
+  .ppd-h { inline-size: var(--s-5); block-size: var(--s-5); border: 2px solid #15181B; background: #F2F3F5; box-shadow: 0 0 2px rgba(0, 0, 0, 0.8); }
+  .ppd-h.corner { border-radius: 2px; cursor: move; }
+  .ppd-h.mid { inline-size: var(--s-6); block-size: var(--s-6); border-radius: 50%; background: var(--accent); cursor: grab; }
+  .ppd-h.rot { border-radius: 50%; cursor: grab; }
+  .ppd-h.scl { cursor: nwse-resize; background: #15181B; border-color: #F2F3F5; }
 }

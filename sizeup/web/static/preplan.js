@@ -578,6 +578,7 @@ window.Preplan = (() => {
       return;
     }
     loadSearch();
+    if (window.PreplanDocs) PreplanDocs.search(st.search.where, searchMap);     // its site documents (#459)
   }
   function searchMap() {
     const s = st.search;
@@ -622,7 +623,10 @@ window.Preplan = (() => {
     const at = s.data && s.data.point;
     edit({ map: s.pm, host: $("#sv-pp-form"), ctx: { where: s.where }, center: at ? [at[1], at[0]] : null, done: () => loadSearch() });
   }
-  function closeSearch() { if (st.search) { st.search.seq++; if (st.edit && st.edit.map === st.search.pm) cancelEdit(); } }
+  function closeSearch() {
+    if (st.search) { st.search.seq++; if (st.edit && st.edit.map === st.search.pm) cancelEdit(); }
+    if (window.PreplanDocs) PreplanDocs.closeSearch();
+  }
 
   const api_ = { KINDS, PREF_KEY, LAYER_ZOOM, line, beforeId, features, padBox, inside };
   if (typeof document === "undefined") return api_;

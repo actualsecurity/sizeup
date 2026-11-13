@@ -781,6 +781,7 @@ function renderDetail() {
   renderComments(inc);
   renderMap(inc);
   if (window.Preplan) Preplan.card(inc, { readonly: BOARD || !canDo("dispatch") });   // its building's points (#456)
+  if (window.PreplanDocs) PreplanDocs.card(inc, { readonly: BOARD || !canDo("dispatch") });   // its site documents (#459)
   renderOnUnits(inc);
   renderAddUnit(inc);
   show($("#d-attach"), open && inc.status !== "queued");

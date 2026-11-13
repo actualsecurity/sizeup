@@ -10,7 +10,10 @@ requires-python = ">=3.11"
 dependencies = ["numpy>=1.26"]
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "pytest-xdist>=3.5"]
+# docs: site documents (#459, sizeup/docfiles.py): pypdf checks and cleans a PDF, PDFium draws its page, Pillow a plan
+# picture; the hub image installs it
+docs = ["pypdfium2>=4.30,<6", "pypdf>=5,<8", "Pillow>=10"]
+dev = ["pytest>=8", "pytest-xdist>=3.5", "pypdfium2>=4.30,<6", "pypdf>=5,<8", "Pillow>=10"]
 
 [tool.setuptools.packages.find]
 include = ["sizeup*"]
