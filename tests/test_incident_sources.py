@@ -14,7 +14,8 @@ import types
 import pytest
 
 from sizeup.cad import sources as src
-from sizeup.cad.sources import MATCH_WINDOW_S, PAGING, REPORT_STALE_S, norm_unit, same_place, units_match
+from sizeup.cad.sources import (DEMOTE_S, MATCH_WINDOW_S, PAGING, PROMOTE_S, REPORT_STALE_S, norm_unit, same_place,
+                                units_match)
 from sizeup.dispatch import parse
 from sizeup.incidents import IncidentStore
 from sizeup.sources import FeedEvent, Health, SourceError
@@ -224,6 +225,8 @@ def test_promotion_when_the_primary_fails_and_demotion_when_it_recovers(tmp_path
     rig.feed.recover()
     rig.at(30)
     rig.poll()
+    assert rig.cad.sources.state()["acting"] == "Paging"   # ok again only once it has held PROMOTE_S
+    rig.at(30 + PROMOTE_S)
     assert rig.cad.sources.state()["acting"] == "County feed"
     rig.at(30 + REPORT_STALE_S + 1)                        # no report since: stale, paging acts again
     t = rig.cad.sources.tiers()[0]
@@ -231,6 +234,94 @@ def test_promotion_when_the_primary_fails_and_demotion_when_it_recovers(tmp_path
     assert rig.cad.sources.state()["acting"] == "Paging"
     rig.cad.sources.paging_ok = lambda: False              # the station offline: nothing healthy
     assert rig.cad.sources.acting() is None
+
+
+class _Steps:
+    """A runner driven like its thread: a step every max(MIN_POLL_S, poll_s) on the rig's clock (the hub's too)."""
+
+    def __init__(self, rig):
+        self.rig, self.t = rig, 0.0
+
+    def until(self, t: float) -> None:
+        while self.t <= t:
+            self.rig.at(self.t)
+            self.rig.cad.sources.tick()
+            self.t += self.rig.runner.step(self.rig.runner.runs[0])
+
+
+def test_a_station_restart_s_no_list_yet_never_flips_the_primary(tmp_path):
+    """The flap seen live: each station restart (an auto-update after a hub deploy) reported "stale: no list yet" for
+    one runner cycle (30 s) and the pill went "stale · Paging primary" and back. Now it stays ok, the hover says why."""
+    logs = []
+    rig = Rig(tmp_path)
+    rig.cad.sources.log = logs.append
+    steps = _Steps(rig)
+    steps.until(600)                                       # ok, and nothing new for 10 min: fresh all along (heartbeats)
+    assert rig.cad.sources.acting()["source"] == "county"
+    logs.clear()                                           # (its first report: "Paging -> County feed")
+    rig.feed.outage("stale", "no list yet")                # the restarted adapter before its first list
+    steps.until(645)                                       # the step at 630 reports it
+    t = rig.cad.sources.state()["tiers"][0]
+    assert (t["state"], t["acting"]) == ("ok", True) and t["reason"].startswith("stale ") and "no list yet" in t["reason"]
+    assert t["ok_s"] is not None and 0 < t["ok_s"] <= 60
+    rig.feed.recover()                                     # its first list: ok on the next step
+    steps.until(1200)
+    assert rig.cad.sources.acting()["source"] == "county" and rig.cad.sources.state()["tiers"][0]["reason"] == ""
+    assert not [m for m in logs if "acting primary" in m]
+
+
+def test_a_real_outage_still_shows_within_a_bounded_time_and_recovery_needs_promote_s(tmp_path):
+    logs = []
+    rig = Rig(tmp_path)
+    rig.cad.sources.log = logs.append
+    steps = _Steps(rig)
+    steps.until(300)
+    logs.clear()
+    rig.feed.outage("stale", "no list in 40 s")
+    went = 330.0                                           # the next step reports it
+    steps.until(went + DEMOTE_S - 1)
+    assert rig.cad.sources.acting()["source"] == "county"
+    steps.until(went + DEMOTE_S + 5)                       # the ticker settles it: stale, paging acts, logged once
+    t = rig.cad.sources.state()["tiers"][0]
+    assert (t["state"], t["acting"], rig.cad.sources.state()["acting"]) == ("stale", False, "Paging")
+    assert logs == ["incident sources: acting primary County feed -> Paging"]
+    rig.feed.recover()                                     # one good report, then bad again: Paging never flaps out
+    steps.until(went + DEMOTE_S + 40)
+    assert rig.cad.sources.state()["acting"] == "Paging"
+    assert rig.cad.sources.state()["tiers"][0]["reason"].startswith("ok ")
+    rig.feed.outage("backing_off", "HTTP 503")
+    steps.until(went + DEMOTE_S + 200)
+    assert rig.cad.sources.state()["acting"] == "Paging" and len(logs) == 1
+    rig.feed.recover()
+    back = went + DEMOTE_S + 210                           # the next step after it recovered
+    steps.until(back + PROMOTE_S - 1)
+    assert rig.cad.sources.state()["acting"] == "Paging"
+    steps.until(back + PROMOTE_S + 5)
+    assert rig.cad.sources.state()["acting"] == "County feed"
+    assert logs[-1] == "incident sources: acting primary Paging -> County feed"
+
+
+def test_a_stopped_adapter_and_a_silent_station_show_at_once(tmp_path):
+    rig = Rig(tmp_path)
+    steps = _Steps(rig)
+    steps.until(120)
+    rig.feed.outage("failing", "login")                    # the adapter stopped itself: no grace
+    steps.until(150)
+    assert rig.cad.sources.state()["acting"] == "Paging"
+    rig.feed.recover()
+    steps.until(300)
+    assert rig.cad.sources.state()["acting"] == "County feed"
+    rig.at(300 + REPORT_STALE_S + 31)                      # the station silent (the last report at 270 + ... ): stale now
+    t = rig.cad.sources.tiers()[0]
+    assert (t["state"], t["acting"]) == ("stale", False) and t["reason"].startswith("no report since")
+
+
+def test_a_late_older_health_report_never_overwrites_a_newer_one(tmp_path):
+    rig = Rig(tmp_path)
+    h = {"source": "county", "label": "County feed", "rank": 1}
+    rig.cad.sources.on_health(dict(h, state="ok", at=T0 + 10))
+    rig.cad.sources.on_health(dict(h, state="failing", reason="x", at=T0 + 5))
+    assert rig.cad.sources.tiers()[0]["state"] == "ok"
 
 
 def test_a_feed_event_never_attaches_to_a_closed_incident_sharing_a_unit(tmp_path):

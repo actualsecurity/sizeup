@@ -800,7 +800,10 @@ Incidents come in from ranked sources. The interface is in `sizeup/sources/__ini
   but still open (an outage, a first run) makes its incident, noted "first seen N after its dispatch".
 - **Health:** a feed reports `ok`, `backing_off`, `failing` or `stale`, and a feed with no report for 3 min counts as
   stale (by the hub's clock). Paging is healthy while the station is connected. The first healthy tier is the acting primary. The console
-  pill shows it (`County feed · backing off · Paging primary`), and so does Settings > Health.
+  pill shows it (`County feed · backing off · Paging primary`), and so does Settings > Health. Hysteresis: a feed shown
+  ok goes bad (and the acting primary moves) only once its reports have said so for 90 s, and is ok again only after
+  60 s of `ok`; `failing` and no report for 3 min show at once. A station restart's one-cycle "no list yet" never
+  flips it. The pill's hover has what was reported meanwhile and the last ok report's age.
 - **Matching:** only an open incident (queued, pending or active) created within 20 min, with nothing on it from the
   same source.
   - Locations are first cut to their street part. A named place after `:` or `@`, `;…`, `(…)`, `[…]`, the town after a
