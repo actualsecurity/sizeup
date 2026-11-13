@@ -77,10 +77,13 @@ sizeup/sources/runner.py (they come here as "source_event" / "source_health" thr
                another open incident, and its page matched again now takes this incident, for the same call
     stale      the station sends the ids still in each feed's snapshot ("source_seen"): an open report the feed no
                longer lists is noted once on its incident and flagged in Settings > Health
-    address    a feed's location is shown (and said) as its street part and known town, in proper case as the map's
-               labels are ("12 Example Ave, Sample Village": shown_location, proper_case; display only, matching reads
-               lower case). An incident titled before keeps its title until the feed moves it. The addresses a feed put on
-               an incident are recorded (feed_addresses) so a push never carries them (alarms.push_address)
+    address    a feed's or a page's location is stored normalised (normal_location): its streets as the gazetteer
+               spells them, else suffixes and directions abbreviated, in proper case, an intersection "A Rd & B Ave",
+               and its town ("12 Example Ave, Sample Village"; out of area too, from the feed's town token). Every
+               view reads that. The text it came from is kept as address_raw and matching reads that (match_address):
+               exactly what it read before. A person's address has none. Rows stored before are normalised once at
+               start (backfill_addresses: never a person's, a count in the log). The addresses a feed put on an
+               incident are recorded (feed_addresses) so a push never carries them (alarms.push_address)
     logs       our incident ids and the source's label only: never the feed's ids, types, locations or an exception's text
     departments a feed's department entries (department_units(): {code: department}, Settings' "department_units"
                over the data file's; #370) are a whole department paged, never a unit: never a unit in common here,
@@ -433,6 +436,179 @@ def _town_text(s: str) -> str:
         if words and tuple(w.lower() for w in words) in TOWN_OF:
             return _title_town(words)
     return ""
+
+
+# -- the stored address (normal_location) ----------------------------------------------------------------------------
+# An incident's address is stored normalised; the text it came from is kept beside it (incidents.address_raw) and that
+# is what matching reads (match_address). A county town token's kind: SAMPLE_V a village, SAMPLE_C a city (both the
+# name alone), SAMPLE_T the town ("Town of Sample").
+TOWN_KIND = {"v": (), "c": (), "t": ("town", "of")}
+
+
+def town_label(text: str) -> str:
+    """A town as shown, from any spelling: 'RYE_BROOK' / 'rye brook' -> 'Rye Brook' (a listed town as the list spells
+    it; an alias as its town), 'SAMPLE_V' -> 'Sample', 'SAMPLE_T' -> 'Town of Sample', 'OTHERTOWN' -> 'Othertown' (one
+    not known: its words in proper case); '' for none."""
+    low = [w.lower() for w in re.split(r"[_\s,]+", str(text or "").strip()) if w]
+    if len(low) >= 2 and low[-1] in TOWN_KIND:
+        low = [*TOWN_KIND[low[-1]], *low[:-1]]
+    key = tuple(re.findall(r"[a-z0-9]+", " ".join(low)))
+    if not key:
+        return ""
+    if key in TOWN_OF and key not in LISTED and key[:2] != ("town", "of"):   # an alias: its town ("rye city" -> "Rye";
+        key = tuple(re.findall(r"[a-z0-9]+", TOWN_OF[key]))                  # never a town's own villages' alias)
+    return TOWN_NAME.get(key) or proper_case(" ".join(key))
+
+
+def _cut(words: list[str]) -> int | None:
+    """The suffix's index in a street's words (ABBR applied), as _street finds it; None for none."""
+    cut = next((i for i, w in enumerate(words) if w in SUFFIXES
+                and any(x not in DIRECTIONS and x not in SUFFIXES for x in words[:i])), None)
+    if cut is None and len(words) >= 2 and words[-1] in SUFFIXES:
+        cut = len(words) - 1
+    return cut
+
+
+def _street_words(piece: str) -> tuple[str, list[str], list[str]]:
+    """'12 NORTH EXAMPLE AVENUE EXTENSION OTHERTOWN' -> ('12', ['n', 'EXAMPLE', 'ave', 'ext'], ['OTHERTOWN']): the
+    house number, the street's words with its suffix and directions abbreviated (a direction only beside a name of
+    other words: "NORTH ST" stays), and the words after the suffix that are neither a direction nor EXT (the tail: a
+    typed location's town)."""
+    toks = re.findall(r"[A-Za-z0-9]+(?:['\u2019.-][A-Za-z0-9]+)*", piece)
+    num = toks.pop(0) if toks and re.fullmatch(r"\d+[a-z]?", toks[0], re.I) else ""
+    mapped = [ABBR.get(w.lower(), w.lower()) for w in toks]
+    cut = _cut(mapped)
+    end = cut if cut is not None else len(toks)
+    named = any(m not in DIRECTIONS and m not in SUFFIXES for m in mapped[:end])
+    out, tail = [], []
+    for i, (w, m) in enumerate(zip(toks, mapped)):
+        if cut is not None and i > cut:
+            if tail or (m not in DIRECTIONS and w.lower() not in EXT):
+                tail.append(w)
+            else:
+                out.append(EXT.get(w.lower(), m))
+        elif i == cut and w.lower() != "saint":
+            out.append(m)
+        elif (m in DIRECTIONS and named and w.lower() != m and (i == 0 or mapped[i - 1] in DIRECTIONS)
+              and (i + 1 >= len(mapped) or mapped[i + 1] not in NOISE)):
+            out.append(m)                                  # NORTH EXAMPLE AVE -> N Example Ave (never "South of ...")
+        else:
+            out.append(w)
+    return num, out, tail
+
+
+def _canonical(num: str, words: list[str], towns: list[str]) -> str:
+    """The gazetteer's spelling of this street (set_streets) in those towns ('Example Ave'), with its house number;
+    '' when it isn't exactly one of their streets (the same name, directions and suffix; never a fuzzy match: a
+    misheard street stays as heard)."""
+    _, pre, suffix, name, post = _street(" ".join(words))
+    if not name:
+        return ""
+    look = [t for t in towns if t in STREETS] or ([] if not suffix else list(STREETS))
+    got = {w for t in look for _, st, w in STREETS.get(t, ()) if "(" not in w
+           and st[2] == name and st[0] == pre and st[3] == post and (st[1] == suffix or not suffix)}
+    return f"{num} {got.pop()}".strip() if len(got) == 1 else ""
+
+
+def _street_towns(piece: str) -> list[str]:
+    """The towns whose street lists have this street exactly (set_streets)."""
+    k = place_key(piece)
+    if k is None or k[0] != "addr" or not k[3]:
+        return []
+    return sorted(t for t, rows in STREETS.items() if any(st == k[2:] for _, st, _ in rows))
+
+
+def _town_token(x: str) -> bool:
+    """A town in a location's text: a known one ('rye brook'), or the county's town token ('SAMPLE_V', 'OTHER_TOWN')."""
+    key = tuple(w.lower() for w in re.findall(r"[A-Za-z0-9]+", x))
+    return bool(key) and (key in TOWN_OF or "_" in x)
+
+
+def normal_location(s: str, *, town: str = "", geo_label: str = "", within=(), fallback: str = "",
+                    typed: bool = False) -> str:
+    """A location as an incident stores it: '12 NORTH EXAMPLE AVENUE RYE_BROOK' -> '12 N Example Ave, Rye Brook';
+    'EXAMPLETON RD/SAMPLE AVE OTHERTOWN' (typed) -> 'Exampleton Rd & Sample Ave, Othertown'. Its street part
+    (street_part: no named place, unit or floor), each street as the gazetteer spells it when it is exactly one of
+    its streets (else its suffix and directions abbreviated), in proper case (proper_case), an intersection's streets
+    joined " & ", then ", " and its town: the one the text names (a known town, a town token), else the feed's (town:
+    its town token), else the words a typed location has after its last street's suffix, else the map's (geo_label
+    "..., Town"), else the one town whose streets have it (among within when given: a page's tones' towns), else
+    fallback (a feed's jurisdiction). A named place alone: "@ Sample School, Town". Display and search only: matching
+    reads the text it came from (match_address)."""
+    s = " ".join(str(s or "").split())
+    if not s:
+        return ""
+    m = re.fullmatch(r"(.+?)\s+between\s+(.+?)\s+and\s+([^,]+?)(,\s*.+)?", s, re.I)
+    if m and not typed:                                    # a block, as the map names it: "A St between B St and C Ave, Town"
+        whole = normal_location(m.group(1) + (m.group(4) or ""), town=town, geo_label=geo_label, within=within,
+                                fallback=fallback)
+        a, _, where = whole.partition(", ")
+        b, c = (normal_location(x).partition(", ")[0] for x in (m.group(2), m.group(3)))
+        return (f"{a} between {b} and {c}" + (f", {where}" if where else ""))[:200]
+    if not typed and "," in s and not _town_token(s.split(",", 1)[1]) and "@" not in s:
+        return proper_case(s)[:200]                        # words after a comma that aren't a town: not an address, as said
+    part = street_part(s)
+    found = ""
+    toks = part.split()
+    for t in TOWNS:                                        # a known town at its end
+        n = len(t)
+        if len(toks) > n and tuple(w.lower() for w in toks[-n:]) == t \
+                and any(not re.fullmatch(r"\d+[a-z]?", w, re.I) for w in toks[:-n]):
+            part, found = " ".join(toks[:-n]), town_label(" ".join(toks[-n:]))
+            break
+    if not found:
+        head = re.split(r"\s:\s|@", s)[0]
+        found = next((town_label(x) for x in [*re.findall(r"\(([^)]*)\)", s), *s.split(",")[1:2],
+                                              *re.findall(r"\b[A-Za-z0-9]+(?:_[A-Za-z0-9]+)+\b", head),
+                                              *re.findall(r"\b[A-Z0-9]+(?:_[A-Z0-9]+)+\s*$", s)]   # "... : @PLACE TOWN_V"
+                      if _town_token(x)), "")
+    if not found and str(town or "").strip():
+        hint = [w.lower() for w in re.split(r"[_\s]+", str(town).strip()) if w]
+        toks = part.split()
+        if len(toks) > len(hint) and [w.lower() for w in toks[-len(hint):]] == hint:
+            part = " ".join(toks[:-len(hint)])            # the feed's town typed at the end: said once
+        found = town_label(town)
+    parsed = [_street_words(p) for p in INTERSECTION.split(part) if p.strip()] if part else []
+    if not typed and parsed and not any(num or _cut([ABBR.get(w.lower(), w.lower()) for w in words])
+                                        for num, words, _ in parsed):   # heard words with no house number and no
+        return (proper_case(s) + (f", {found}" if found and not s.lower().endswith(found.lower()) else ""))[:200]  # suffix
+    if typed and not found and parsed and parsed[-1][2]:
+        found = town_label(" ".join(parsed[-1][2]))        # "... SAMPLE AVE OTHERTOWN": the county types the town last
+        parsed[-1] = (parsed[-1][0], parsed[-1][1], [])
+    if not found and "," in (geo_label or ""):
+        found = town_label(geo_label.rsplit(",", 1)[1])
+    if not found and parsed:
+        inside = {str(t).lower() for t in within or ()}
+        where = [t for t in _street_towns(" ".join(x for x in (parsed[0][0], *parsed[0][1]) if x))
+                 if not inside or t in inside]
+        found = town_label(where[0]) if len(where) == 1 else ""
+    if not found and str(fallback or "").strip():
+        found = town_label(fallback)
+    look = [t for t in dict.fromkeys([found.lower(), *(str(t).lower() for t in within or ())]) if t]
+    streets = []
+    for num, words, tail in parsed:
+        if words or num:
+            text = _canonical(num, words, look) or proper_case(" ".join(x for x in (num, *words) if x))
+            streets.append(text + (f" {proper_case(' '.join(tail))}" if tail else ""))
+    if streets:
+        text = " & ".join(streets)
+    else:
+        m = re.search(r"@\s*([^():;\[\],@]+)", s)
+        name = " ".join(re.split(r"\s+-\s+", m.group(1))[0].split()) if m else ""
+        text = f"@ {proper_case(name)}" if name else proper_case(s)
+    if found and text.lower().endswith(", " + found.lower()):
+        found = ""                                         # it says so already
+    return (text + (f", {found}" if found else ""))[:200]
+
+
+def match_address(inc) -> str:
+    """The location matching reads for an incident: the text its address was made from (address_raw: a feed's, a
+    page's), else its address (a person's, or one from before address_raw)."""
+    try:
+        raw = inc["address_raw"]
+    except (KeyError, IndexError):
+        raw = ""
+    return raw or inc["address"] or ""
 
 
 # Display casing (proper_case): words kept upper case, a few lower case inside a name, route designators, "Mac" names
@@ -911,7 +1087,7 @@ class Sources:
         rows = [r for r in rows if r["id"] != exclude]       # the report's own incident (rematch_page)
         street = self._on_street(location, at, rows)
         exact = here and any(inc["id"] not in taken and any(same_place(location, x) for x in
-                             (inc["address"], inc["place_address"], inc["geo_label"]) if place_key(x) is not None)
+                             (match_address(inc), inc["place_address"], inc["geo_label"]) if place_key(x) is not None)
                              for inc in rows)
         best = None
         bkey = None
@@ -921,7 +1097,7 @@ class Sources:
         for inc in rows:
             on = split_units(drop_departments(self._units_of(inc["id"])))
             common = units_match(units, on)
-            theirs = [x for x in (inc["address"], inc["place_address"], inc["geo_label"]) if place_key(x) is not None]
+            theirs = [x for x in (match_address(inc), inc["place_address"], inc["geo_label"]) if place_key(x) is not None]
             same = here and bool(theirs) and any(same_place(location, x) for x in theirs)
             heard = inc["source"] == PAGE_SOURCE and not self._has_feed(inc["id"])   # its location is a page's
             half = here and not same and any(same_place_halved(location, x, source == PAGING, heard) for x in theirs)
@@ -1036,7 +1212,7 @@ class Sources:
         for inc in rows:
             if abs(inc["created_at"] - at) > SAME_CALL_S:
                 continue
-            for x in (inc["address"], inc["place_address"], inc["geo_label"]):
+            for x in (match_address(inc), inc["place_address"], inc["geo_label"]):
                 s = street_of(x)
                 if s is not None and s[1] == mine[1] and _towns_agree(location, x):
                     out[inc["id"]] = out.get(inc["id"], False) or s[0] != mine[0]
@@ -1080,15 +1256,27 @@ class Sources:
         return self.store.one("SELECT * FROM source_reports WHERE incident_id = ? AND source != ? AND merged_into = '' "
                               "ORDER BY rank, first_seen LIMIT 1", (iid, PAGING))
 
-    def _location_fields(self, iid: int, loc: str) -> dict:
-        """The fields for a feed's location: the address, and a new pin only when no person set one."""
-        shown = shown_location(loc)
-        f = {"address": shown, "place": "", "place_address": "", "geo_alts": ""}
+    def _location_fields(self, iid: int, loc: str, data: dict | None = None) -> dict:
+        """The fields for a feed's location: the address (normalised, with the feed's text it came from), and a new pin
+        only when no person set one."""
+        f = {"address": "", "address_raw": loc, "place": "", "place_address": "", "geo_alts": ""}
+        geo = self.store.incident(iid)["geo_label"]
         if "pin" not in self.manual(iid):
-            g = {"address": shown, "lat": None, "lon": None, "geo_label": ""}
+            g = {"address": shown_location(loc), "lat": None, "lon": None, "geo_label": ""}
             self.cad._auto_geo(g)
             f.update(lat=g["lat"], lon=g["lon"], geo_label=g["geo_label"])
+            geo = g["geo_label"]
+        f["address"] = self.normal(loc, data, geo)
         return f
+
+    def normal(self, loc: str, data: dict | None = None, geo_label: str = "") -> str:
+        """A feed's location as the incident stores it (normal_location): the town its text names, else the feed's town
+        token, else the words it types after the street, else the map's, else the street lists', else its
+        jurisdiction."""
+        self._towns()
+        x = (data or {}).get("extra") or {}
+        return normal_location(loc, town=str(x.get("town") or ""), geo_label=geo_label, typed=True,
+                               fallback=str(x.get("jurisdiction") or ""))
 
     def feed_use(self, iid: int, field: str, operator: str = "") -> dict:
         """'Use <feed>'s type / location': the best feed's value over a person's, logged as theirs."""
@@ -1108,7 +1296,7 @@ class Sources:
             loc = (d.get("location") or "").strip()
             if not loc:
                 raise CadError(f"{r['label']} has no location")
-            f = self._location_fields(iid, loc)
+            f = self._location_fields(iid, loc, d)
         inc = self.store.update_incident(iid, f, operator=operator)
         if field == "location":
             self._fed_address(iid)
@@ -1151,6 +1339,7 @@ class Sources:
         now = self.clock()
         seen = float(d.get("first_seen") or d.get("seen_at") or now)
         data = ev.as_dict()
+        self._towns()                                        # the towns and streets the address is written with
         with self._lock:
             rep = self._report(ev.source, ev.event_id)
             if rep and rep["merged_into"]:                   # retired: the feed merged it into another event
@@ -1265,10 +1454,11 @@ class Sources:
     def _create_feed(self, source: str, ref: str, data: dict, label: str) -> int:
         typ, sub, note = self.cad.map_type(data["type"], label)
         loc = data["location"].strip()
-        f = {"type": typ, "subtype": sub, "type_note": note, "address": shown_location(loc),
-             "remarks": (f"{label} event {ref}: {data['type'] or 'type not given'} at {proper_case(loc) or '(no location)'}"
-                         + (f"; units {', '.join(data['units'])}" if data["units"] else ""))[:4000]}
-        self.cad._auto_geo(f)
+        f = {"type": typ, "subtype": sub, "type_note": note, "address": shown_location(loc)}
+        self.cad._auto_geo(f)                                # placed as before: the feed's street part and known town
+        f.update(address=self.normal(loc, data, f.get("geo_label") or ""), address_raw=loc)
+        f["remarks"] = (f"{label} event {ref}: {data['type'] or 'type not given'} at {f['address'] or '(no location)'}"
+                        + (f"; units {', '.join(data['units'])}" if data["units"] else ""))[:4000]
         via = ""                     # never "60 Control": the console says the feed's label (the sheet has no code for it)
         iid = self.store.create_incident(**f, received_via=via, source=FEED_SOURCE, source_ref=f"feed:{source}:{ref}",
                                          status="queued")
@@ -1367,13 +1557,14 @@ class Sources:
                 fields.update(type=typ, subtype=sub, type_note=note)
         loc = new["location"].strip()
         if loc and (loc != old["location"].strip() or attach):
-            differs = not created and not same_place(loc, inc["address"])
+            differs = not created and not same_place(loc, match_address(inc))
+            shown = self.normal(loc, new, inc["geo_label"])
             if auth and differs and "location" in hand:
-                notes.append((now, f"{label}: location {shown_location(loc)} (kept the location set by hand)"))
+                notes.append((now, f"{label}: location {shown} (kept the location set by hand)"))
             elif not created:
-                notes.append((now, f"{pre}: location {shown_location(loc)}"))
+                notes.append((now, f"{pre}: location {shown}"))
             if auth and differs and "location" not in hand:
-                fields.update(self._location_fields(iid, loc))
+                fields.update(self._location_fields(iid, loc, new))
         if new["units"] != list(old["units"]):
             added = [u for u in new["units"] if u not in old["units"]]
             gone = [u for u in old["units"] if u not in new["units"]]
@@ -1629,12 +1820,12 @@ class Sources:
                     continue                                 # possibly another open call: a person decides
                 d = json.loads(rep["data"] or "{}")
                 typ = str((d.get("f") or {}).get("type") or p["type"] or "")
-                best, _ = self.match_all(PAGING, rep["first_seen"], d.get("location") or p["address"],
+                best, _ = self.match_all(PAGING, rep["first_seen"], d.get("location") or match_address(p),
                                          d.get("units") or [], typ, exclude=p["id"], towns=d.get("towns") or ())
                 if best is not None and best["id"] == iid and self._page_same_call(best, rep["first_seen"], typ):
                     out.append(p)
                 elif inc["source"] == ALERT_SOURCE:          # the airport alert level's incident (#369): as page() joins it
-                    al = self.alert_incident(PAGING, rep["first_seen"], typ, d.get("location") or p["address"],
+                    al = self.alert_incident(PAGING, rep["first_seen"], typ, d.get("location") or match_address(p),
                                              str((d.get("f") or {}).get("subtype") or p["subtype"] or ""),
                                              heard_aircraft(d) or str(p.get("acft_type") or ""))
                     if al is not None and al["id"] == iid:
@@ -1727,8 +1918,47 @@ class Sources:
                 self.log(f"incident sources: {type(e).__name__}")
 
     def start(self) -> Sources:
+        try:
+            self.backfill_addresses()
+        except Exception as e:  # noqa: BLE001 - the addresses stay as they were; the feeds go on
+            self.log(f"incident sources: address backfill: {type(e).__name__}")
         threading.Thread(target=self.run, name="incident-sources", daemon=True).start()
         return self
+
+    def backfill_addresses(self) -> int:
+        """The addresses a feed or a page wrote before they were stored normalised (address_raw ''), open and closed:
+        each normalised (normal_location; a feed's from its report's text, town token and jurisdiction), the old
+        address kept as address_raw, so matching reads exactly what it read before. Never one a person set (manual_edits
+        "location", or an incident a person made), nor one whose normal form isn't the same place (same_place). Safe
+        to run again (a row done has its address_raw) and on an empty database. The log says how many, nothing else."""
+        self._towns()
+        rows = self.store.q("SELECT i.* FROM incidents i WHERE i.address_raw = '' AND i.address != '' AND i.source IN "
+                            "(?, ?) AND NOT EXISTS (SELECT 1 FROM manual_edits m WHERE m.incident_id = i.id AND "
+                            "m.field = 'location')", (FEED_SOURCE, PAGE_SOURCE))
+        n = 0
+        for inc in rows:
+            old = inc["address"]
+            fed = self.feed_address(inc["id"], old)
+            if fed:
+                r = self._best_feed(inc["id"])
+                d = json.loads(r["data"] or "{}") if r else {}
+                text = (d.get("location") or "").strip()
+                new = self.normal(text if text and same_place(text, old) else old, d, inc["geo_label"])
+            else:
+                rep = self.store.one("SELECT data FROM source_reports WHERE incident_id = ? AND source = ?", (inc["id"], PAGING))
+                towns = (json.loads(rep["data"] or "{}").get("towns") or []) if rep else []
+                new = normal_location(old, geo_label=inc["geo_label"] if inc["lat"] is not None else "", within=towns)
+            if not new or not (same_place(old, new) or (place_key(old) is None and place_key(new) is None)):
+                new = old                                    # not sure it is the same place: as it was
+            with self.store.tx() as db:
+                cur = db.execute("UPDATE incidents SET address = ?, address_raw = ? WHERE id = ? AND address = ? AND "
+                                 "address_raw = ''", (new, old, inc["id"], old))
+                if fed and cur.rowcount:
+                    db.execute("INSERT OR IGNORE INTO feed_addresses (incident_id, address) VALUES (?, ?)", (inc["id"], new))
+            n += bool(cur.rowcount) and new != old
+        if n:
+            self.log(f"incident sources: {n} stored addresses normalised")
+        return n
 
     def stop(self) -> None:
         self._stop.set()
@@ -1772,8 +2002,8 @@ class Sources:
                 if typ and (typ, sub) != (inc["type"], inc["subtype"]):
                     use["type"] = d["type"]
             loc = (d.get("location") or "").strip()
-            if "location" in h and loc and not same_place(loc, inc["address"]):
-                use["location"] = shown_location(loc)        # shown (the button's hover): proper case
+            if "location" in h and loc and not same_place(loc, match_address(inc)):
+                use["location"] = self.normal(loc, d)        # shown (the button's hover): as it would be stored
             inc["feed"] = {"label": r["label"], "event_id": r["ref"], **{k: x[k] for k in EXTRA_SHOWN if k in x}, "use": use}
         return incs
 
