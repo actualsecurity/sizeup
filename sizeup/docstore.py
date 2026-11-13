@@ -7,9 +7,9 @@ hub, by someone signed in. There are no links to the store itself (no presigned 
                   /plan.png                 a plan's picture (the map's overlay)
 
     S3DocStore   the hub: the private backup bucket (sizeup-aws 1-base.sh: Block Public Access, versioned, old versions
-                 kept 30 days, SSE-S3 by default), prefix "preplan-docs": the task role already reads, writes, deletes
-                 and lists there (task-backups.json), so no new IAM, no CORS. Every PUT with SSE-S3 and checksums
-                 (sizeup/attachments.py S3). open() is a signed GET whose answer is read in CHUNK pieces as the hub
+                 kept 30 days, SSE-S3 by default), prefix "preplan-docs": the task role already reads, writes and
+                 deletes there (task-backups.json; nothing here lists the bucket), so no new IAM, no CORS. Every
+                 PUT with SSE-S3 and checksums (sizeup/attachments.py S3). open() is a signed GET whose answer is read in CHUNK pieces as the hub
                  sends them on (READ_S on each read), never the whole file in memory. A delete removes the current
                  version; the bucket's lifecycle removes the old one 30 days later.
     FsDocStore   the same on a local folder (dev, tests: SIZEUP_PREPLAN_DOCS_DIR, else <the CAD's folder>/preplan-docs off
@@ -17,7 +17,7 @@ hub, by someone signed in. There are no links to the store itself (no presigned 
 
 Both are served the same way (sizeup/cad/preplan_docs.py file(), sizeup/cad/api.py): the hub streams open()'s pieces
 with the document's type, Content-Disposition (site-doc-<id>.<ext>), nosniff, no-store, no-referrer and a CSP that runs
-nothing. pages(): the sweep's listing.
+nothing.
 
 from_env(): the bucket (SIZEUP_PREPLAN_DOCS_BUCKET, prefix SIZEUP_PREPLAN_DOCS_PREFIX), else a folder, else None (a hub
 with no bucket: uploads say "not configured"; a task's disk doesn't outlive a deploy).
@@ -36,6 +36,7 @@ from typing import Callable
 from sizeup import aws
 
 PREFIX = "preplan-docs"
+PREFIX_OK = re.compile(r"preplan-docs(-[a-z0-9]{1,20})?")     # the bucket's other prefixes are never ours to write or delete
 SAFE_KEY = re.compile(r"[a-z0-9-]{1,40}(/[0-9a-f]{16}/(original\.(pdf|png|jpg)|plan\.png))")
 CHUNK = 64 * 1024                 # a streamed document's pieces
 READ_S = 15.0                     # S3: the connection, and each read of the answer
@@ -100,12 +101,6 @@ class FsDocStore(DocStore):
             f.write(body)
         tmp.replace(p)
 
-    def pages(self, prefix: str):
-        """[(key, last modified)] under prefix, a page at a time (the sweep)."""
-        base = self.root / prefix
-        if base.is_dir():
-            yield [(str(f.relative_to(self.root)), f.stat().st_mtime) for f in sorted(base.rglob("*")) if f.is_file()]
-
     def get(self, key: str) -> bytes:
         try:
             return self._path(key).read_bytes()
@@ -152,14 +147,6 @@ class S3DocStore(DocStore):
         self.opener = opener or _urlopen
         self.name = f"s3://{bucket}/{prefix}/"
 
-    def pages(self, prefix: str):
-        """ListObjectsV2 under prefix (s3:ListBucket on the bucket), a page at a time: [(key, last modified)]."""
-        from sizeup.audiostore import S3AudioStore, StoreError
-        try:
-            yield from S3AudioStore.pages(self, prefix)          # (it uses only self.s3)
-        except StoreError as e:
-            raise DocStoreError(f"S3 list: {e}") from None
-
     def put(self, key: str, body: bytes, ctype: str) -> None:
         try:
             self.s3.put(key, body, ctype)
@@ -180,7 +167,7 @@ class S3DocStore(DocStore):
             signed = aws.sign("GET", url, {"x-amz-content-sha256": empty}, b"", self.creds(), self.s3.region, "s3",
                               payload_sha=empty)
             status, hdrs, r = self.opener(url, {k: v for k, v in signed.items() if k != "Host"}, READ_S)
-        except (aws.AwsError, OSError) as e:
+        except Exception as e:                   # the network, AWS, a malformed answer (http.client.HTTPException ...)
             raise DocStoreError(f"S3 GET: {getattr(e, 'code', '') or type(e).__name__}") from None
         if status != 200:
             r.close()
@@ -188,8 +175,11 @@ class S3DocStore(DocStore):
         length = int({k.lower(): v for k, v in hdrs.items()}.get("content-length") or 0)
 
         def pieces():
-            while b := r.read(CHUNK):
-                yield b
+            try:
+                while b := r.read(CHUNK):
+                    yield b
+            except Exception as e:               # cut short mid-way: the server's send loop ends, close() still runs
+                raise DocStoreError(f"S3 GET: {type(e).__name__}") from None
         return Opened(length, pieces, r.close)
 
     def delete(self, key: str) -> None:
@@ -204,8 +194,10 @@ class S3DocStore(DocStore):
 def from_env(log: Callable[[str], None] = print, default_dir: str | Path | None = None) -> DocStore | None:
     bucket = os.environ.get("SIZEUP_PREPLAN_DOCS_BUCKET", "").strip()
     prefix = (os.environ.get("SIZEUP_PREPLAN_DOCS_PREFIX", "").strip().strip("/") or PREFIX)
-    if not re.fullmatch(r"[a-z0-9-]{1,40}", prefix):
-        log("pre-plan documents: SIZEUP_PREPLAN_DOCS_PREFIX must be lowercase letters, digits and dashes: not configured")
+    taken = {os.environ.get("LITESTREAM_PATH", "").strip().strip("/"), "sizeup-hub", "replay-fixtures", "cache"}
+    if not PREFIX_OK.fullmatch(prefix) or prefix in taken:
+        log("pre-plan documents: SIZEUP_PREPLAN_DOCS_PREFIX must be preplan-docs or preplan-docs-<name> (never the "
+            "database's or another prefix of the bucket): not configured")
         return None
     if bucket:
         st: DocStore = S3DocStore(bucket, prefix)

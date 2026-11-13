@@ -60,7 +60,7 @@ def jpeg_with_gps(orientation=6):
     exif[0x010F] = "ExampleCam"                            # Make
     exif[0x0112] = orientation
     gps = exif.get_ifd(0x8825)
-    gps[1], gps[2], gps[3], gps[4] = "N", (41.0, 0.0, 7.5), "W", (73.0, 39.0, 36.0)
+    gps[1], gps[2], gps[3], gps[4] = "N", (0.0, 30.0, 0.0), "E", (0.0, 30.0, 0.0)          # 0.5 N, 0.5 E: nowhere real
     buf = io.BytesIO()
     im.save(buf, "JPEG", exif=exif, comment=b"Example comment")
     assert PIL
@@ -442,7 +442,7 @@ def test_documents_are_streamed_by_the_hub_and_never_linked(api, monkeypatch):
     assert code == 200 and raw == fake.objects[key.replace("original.png", "plan.png")][0] and h["X-Content-Type-Options"] == "nosniff"
     code, raw, h = get(api, f"/api/cad/preplan/docs/{did}/file", "dl=1", VAL)
     assert h["Content-Disposition"] == f'attachment; filename="site-doc-{did}.png"'
-    assert ppd.DOWNLOADS._value == 4                                      # every slot given back
+    assert ppd.STREAMS._value == 12 and ppd.READS._value == 4            # every slot given back
     assert call(api, f"/api/cad/preplan/docs/{did}", {"action": "delete"}, JULIAN)[0] == 200
     assert fake.objects == {}
     assert get(api, f"/api/cad/preplan/docs/{did}/file", "", VAL)[0] == 404
@@ -457,24 +457,90 @@ def test_no_presigned_link_is_ever_made_for_a_document():
     assert not hasattr(docstore.S3DocStore, "link")
 
 
-def test_downloads_at_once_are_bounded(api, monkeypatch):
+def test_downloads_at_once_are_bounded_and_plans_hold_a_slot_only_while_read(api, monkeypatch):
     monkeypatch.setattr(ppd, "DOWNLOAD_WAIT_S", 0.05)
+    monkeypatch.setattr(ppd, "STREAMS", threading.BoundedSemaphore(2))
+    monkeypatch.setattr(ppd, "READS", threading.BoundedSemaphore(1))
     did = upload(api, png())[1]["doc"]["id"]
     held = []
-    for _ in range(4):
+    for _ in range(2):
         code, stream, _, _ = api.get(f"/api/cad/preplan/docs/{did}/file", "", who(VAL))
-        assert code == 200
+        assert code == 200 and stream.deadline > 0
         held.append(stream)                                              # a slow client: still sending
     code, raw, ctype, h = api.get(f"/api/cad/preplan/docs/{did}/file", "", who(VAL))
     assert code == 503 and h["Retry-After"] and "Busy" in json.loads(raw)["error"]
+    for _ in range(3):                                                   # the plan: read whole, its slot back at once
+        code, body, ctype, _ = api.get(f"/api/cad/preplan/docs/{did}/plan", "", who(VAL))
+        assert code == 200 and isinstance(body, bytes) and body.startswith(b"\x89PNG") and ppd.READS._value == 1
     held.pop().close()                                                   # one done (or dropped)
     code, stream, _, _ = api.get(f"/api/cad/preplan/docs/{did}/file", "", who(VAL))
     assert code == 200
+    import time as _time
+    assert abs(stream.deadline - (_time.monotonic() + ppd.DOWNLOAD_DEADLINE_S)) < 5     # a whole download: 120 s at most
     stream.close()
     for x in held:
         x.close()
-    assert ppd.DOWNLOADS._value == 4
-    assert ppd.DOWNLOAD_WRITE_S <= 60                                     # server.py drops a client that takes nothing
+    assert ppd.STREAMS._value == 2
+    assert ppd.DOWNLOAD_WRITE_S <= 60 and ppd.DOWNLOAD_DEADLINE_S <= 120
+
+
+def test_a_client_gone_before_its_headers_gives_its_slot_back(api, monkeypatch):
+    """#464 re-review A: a reset while the headers are written still closes the stream (the slot, the store's read)."""
+    from sizeup.web.server import WebServer
+    monkeypatch.setattr(ppd, "STREAMS", threading.BoundedSemaphore(2))
+    monkeypatch.setattr(ppd, "DOWNLOAD_WAIT_S", 0.05)
+    did = upload(api, png())[1]["doc"]["id"]
+    srv = WebServer("127.0.0.1", 0, {}, dict, lambda cid: None, lambda i: False, cad=api)
+    threading.Thread(target=srv.httpd.serve_forever, daemon=True).start()
+    cls = srv.httpd.RequestHandlerClass
+    real = cls.end_headers
+
+    def reset(self):
+        raise ConnectionResetError("the client reset")
+    try:
+        cls.end_headers = reset
+        for _ in range(5):                                               # more than there are slots
+            conn = http.client.HTTPConnection("127.0.0.1", srv.httpd.server_address[1], timeout=10)
+            conn.request("GET", f"/api/cad/preplan/docs/{did}/file")
+            with pytest.raises((http.client.HTTPException, OSError)):
+                conn.getresponse().read()
+            conn.close()
+        cls.end_headers = real
+        import time as _time
+        end = _time.monotonic() + 5
+        while ppd.STREAMS._value != 2 and _time.monotonic() < end:
+            _time.sleep(0.02)
+        assert ppd.STREAMS._value == 2                                    # every slot back
+        conn = http.client.HTTPConnection("127.0.0.1", srv.httpd.server_address[1], timeout=10)
+        conn.request("GET", f"/api/cad/preplan/docs/{did}/file")
+        assert conn.getresponse().status == 200
+    finally:
+        cls.end_headers = real
+        srv.httpd.shutdown()
+
+
+def test_a_failing_store_read_gives_its_slot_back(api, monkeypatch):
+    import http.client as hc
+    did = upload(api, png())[1]["doc"]["id"]
+    st = api.cad.preplan_docs.store
+    for part in ("file", "plan"):
+        for err in (hc.IncompleteRead(b""), ValueError("bad"), docstore.DocStoreError("S3 GET: 500")):
+            def boom(key, err=err):
+                raise err
+            monkeypatch.setattr(st, "open", boom)
+            if isinstance(err, docstore.DocStoreError):
+                assert api.get(f"/api/cad/preplan/docs/{did}/{part}", "", who(VAL))[0] == 400
+            else:
+                with pytest.raises(type(err)):                              # (the server answers 500, the slot is back)
+                    api.get(f"/api/cad/preplan/docs/{did}/{part}", "", who(VAL))
+    assert ppd.STREAMS._value == 12 and ppd.READS._value == 4
+    s3, fake = s3_store()
+
+    def bad_opener(url, headers, timeout):
+        raise hc.BadStatusLine("x")
+    s3.opener = bad_opener
+    with pytest.raises(docstore.DocStoreError):
+        s3.open("preplan-docs/0123456789abcdef/original.png")
 
 
 def test_without_storage_uploads_say_so(api):
@@ -613,6 +679,8 @@ def test_the_script_draws_the_plan_under_the_points_and_uploads_with_its_header(
     assert 'type: "image"' in src and 'type: "raster"' in src
     assert 'const ABOVE = ["pp-edit-fp", "pp-icons", "pp-labels", "cm-lines", "cm-trail", "cm-routes", "firehouse"];' in src
     assert '"raster-opacity"' in src and "setCoordinates(" in src
+    # a plan that did not load (503: the hub busy): tried again after 1, 3, 8 s (#464 re-review C)
+    assert "const RETRY_MS = [1000, 3000, 8000];" in src and 'this.map.on("error"' in src and "retry()" in src
     # the upload: the file as the body, its details in X-Sizeup-Doc; opened through the hub's link
     assert '"X-Sizeup-Doc": encodeURIComponent(JSON.stringify(' in src
     assert "`/api/cad/preplan/docs/${d.id}/file`" in src
@@ -899,7 +967,6 @@ def test_the_upload_slot_is_taken_before_the_body_is_read(api, monkeypatch):
 
 
 def test_a_delete_marks_the_row_first_and_the_sweep_takes_what_was_left(api, monkeypatch):
-    import time as _time
     c = api.cad
     st = c.preplan_docs.store
     did = upload(api, png(), kind="photo", title="Rear", floor="")[1]["doc"]["id"]
@@ -911,43 +978,155 @@ def test_a_delete_marks_the_row_first_and_the_sweep_takes_what_was_left(api, mon
     code, out = call(api, f"/api/cad/preplan/docs/{did}", {"action": "delete"}, JULIAN)
     assert code == 200 and out["doc"]["active"] is False                       # deleted for everyone at once
     assert get(api, f"/api/cad/preplan/docs/{did}/file", "", COREY)[0] == 404
-    left = list(Path(st.root).rglob("original.*"))
-    assert len(left) == 1                                                      # the bytes: still there
+    assert len(list(Path(st.root).rglob("original.*"))) == 1                   # the bytes: still there
+    assert c.store.q("SELECT purged FROM preplan_docs WHERE id = ?", (did,))[0]["purged"] is None
     monkeypatch.setattr(st, "delete", real)
-    assert c.preplan_docs.sweep(now=_time.time()) == 0                         # not yet: inside the margin
-    assert c.preplan_docs.sweep(now=_time.time() + ppd.SWEEP_MARGIN_S + 60) == 1
+    assert c.preplan_docs.sweep() == 1                                          # a deleted row: its objects go
     assert not list(Path(st.root).rglob("original.*"))
+    assert c.store.q("SELECT purged FROM preplan_docs WHERE id = ?", (did,))[0]["purged"] is not None
+    assert c.preplan_docs.sweep() == 0                                          # once
     assert "site doc" in "\n".join(map(str, c.logged)) and "Rear" not in "\n".join(map(str, c.logged))
 
 
-def test_the_sweep_keeps_what_documents_name_and_stops_when_too_much_would_go(api, tmp_path):
+def test_the_sweep_never_deletes_what_no_row_names_after_a_restore(api):
+    """#464 re-review B: the database restored to an earlier point (rows gone out from under their objects): nothing of
+    theirs is deleted, however old. Only deleted rows' objects, and unfinished uploads' after the margin."""
     import time as _time
     c = api.cad
     st = c.preplan_docs.store
-    keep = upload(api, png(), kind="photo", title="Rear", floor="")[1]["doc"]
-    later = _time.time() + ppd.SWEEP_MARGIN_S + 60
-    outside = Path(st.root) / "other" / "0123456789abcdef" / "original.png"
-    outside.parent.mkdir(parents=True)
-    outside.write_bytes(b"x")
+    kept = [upload(api, png(), kind="photo", title=f"Doc {i}", floor="")[1]["doc"]["id"] for i in range(3)]
+    with c.store.tx() as db:                                                   # "restored": these rows never were
+        db.execute("DELETE FROM preplan_docs")
+    objects = sorted(Path(st.root).rglob("original.*"))
+    assert len(objects) == 3 and kept
+    much_later = _time.time() + 30 * 86400
+    assert c.preplan_docs.sweep(now=much_later) == 0
+    assert sorted(Path(st.root).rglob("original.*")) == objects                # every object still there
     stray = Path(st.root) / "preplan-docs" / "0123456789abcdef" / "original.png"
     stray.parent.mkdir(parents=True)
     stray.write_bytes(b"x")
-    odd = Path(st.root) / "preplan-docs" / "notes.txt"
-    odd.write_bytes(b"x")
+    assert c.preplan_docs.sweep(now=much_later) == 0 and stray.exists()        # no row: never ours to delete
+    # an upload that never finished: its row pending, its objects the sweep's once the margin has passed
+    did = upload(api, png(), kind="photo", title="Half", floor="")[1]["doc"]["id"]
+    with c.store.tx() as db:
+        db.execute("UPDATE preplan_docs SET active = ? WHERE id = ?", (ppd.PENDING, did))
+    assert get(api, "/api/cad/preplan/docs", f"incident={api.iid}", COREY)[1]["docs"] == []      # never shown
+    assert get(api, f"/api/cad/preplan/docs/{did}/file", "", COREY)[0] == 404
+    assert c.preplan_docs.sweep(now=_time.time()) == 0                          # inside the margin
     c.preplan_docs.may_write = lambda: False
-    assert c.preplan_docs.sweep(now=later) == 0 and stray.exists()            # only the leader
+    assert c.preplan_docs.sweep(now=much_later) == 0                            # only the leader
     c.preplan_docs.may_write = lambda: True
-    assert c.preplan_docs.sweep(now=later) == 1
-    assert not stray.exists() and outside.exists() and odd.exists()           # its own shape, under its prefix only
-    assert len(list(Path(st.root).rglob("original.png"))) == 2                # the document's own: kept (and outside)
-    for i in range(ppd.SWEEP_MAX_N + 5):
-        f = Path(st.root) / "preplan-docs" / f"{i:016x}" / "original.pdf"
-        f.parent.mkdir(parents=True, exist_ok=True)
-        f.write_bytes(b"x")
-    assert c.preplan_docs.sweep(now=later) == 0                               # the circuit breaker
-    assert "too many, nothing deleted" in c.preplan_docs.sweep_status
-    assert len(list((Path(st.root) / "preplan-docs").rglob("original.pdf"))) == ppd.SWEEP_MAX_N + 5
-    assert keep["id"]
+    assert c.preplan_docs.sweep(now=much_later) == 1
+    assert len(list(Path(st.root).rglob("original.*"))) == 4                   # the 3 restored-away + the stray: kept
+    assert ppd.SWEEP_MIN_ALLOW == 0 and ppd.SWEEP_FIRST_S >= 72 * 3600          # never in a process's first 72 h
+    assert not hasattr(docstore.FsDocStore, "pages") and not hasattr(docstore.S3DocStore, "pages")   # it never lists
+
+
+def test_an_upload_writes_its_row_before_its_objects(api, monkeypatch):
+    c = api.cad
+    st = c.preplan_docs.store
+    seen = []
+    real = st.put
+
+    def put(key, body, ctype):
+        seen.append([r["active"] for r in c.store.q("SELECT active FROM preplan_docs")])
+        return real(key, body, ctype)
+    monkeypatch.setattr(st, "put", put)
+    did = upload(api, png(), kind="photo", title="Rear", floor="")[1]["doc"]["id"]
+    assert seen == [[ppd.PENDING]]                                              # the row first, pending
+    assert c.store.q("SELECT active FROM preplan_docs WHERE id = ?", (did,))[0]["active"] == ppd.ACTIVE
+
+    def failing(key, body, ctype):
+        raise docstore.DocStoreError("S3 PUT: 503")
+    monkeypatch.setattr(st, "put", failing)
+    assert upload(api, png(), kind="photo", title="Lost", floor="")[0] == 400
+    row = c.store.q("SELECT * FROM preplan_docs ORDER BY id DESC LIMIT 1")[0]
+    assert row["active"] == ppd.PENDING and row["purged"] is not None           # nothing left behind to sweep
+
+
+@pytest.mark.skipif(not HAVE_PDFIUM, reason="pypdf / pypdfium2 not installed")
+def test_the_hub_checks_the_childs_copy_again(monkeypatch):
+    """#464 re-review D: whatever the child returns is looked at again before it is stored."""
+    for name in (b"/JS", b"/JavaScript", b"/OpenAction", b"/AA", b"/Launch", b"/URI", b"/EmbeddedFile", b"/ObjStm",
+                 b"/J#53"):
+        with pytest.raises(docfiles.Refused):
+            docfiles.recheck_pdf(b"%PDF-1.4\n1 0 obj << " + name + b" 2 0 R >> endobj\n%%EOF", 1000)
+    with pytest.raises(docfiles.Refused):
+        docfiles.recheck_pdf(b"%PDF-1.4\n" + b"x" * (3 << 20), 1000)              # bigger than it can be
+    docfiles.recheck_pdf(b"%PDF-1.4\n1 0 obj << /Type /Page >> endobj\n%%EOF", 1000)
+    real = docfiles._child
+
+    def lying_child(mode, data, page, max_px):                                  # a child that returns something active
+        info, pdf, png = real(mode, data, page, max_px)
+        assert b"/Type /Page\n" in pdf
+        return info, pdf.replace(b"/Type /Page\n", b"/Type /Page\n/AA << >>\n", 1), png
+    monkeypatch.setattr(docfiles, "_child", lying_child)
+    with pytest.raises(docfiles.Refused):
+        docfiles.render(pdf(), 1)
+
+
+def test_the_prefix_is_never_another_tenant_of_the_bucket(monkeypatch):
+    for k in ("SIZEUP_PREPLAN_DOCS_BUCKET", "SIZEUP_PREPLAN_DOCS_DIR", "SIZEUP_PREPLAN_DOCS_PREFIX", "LITESTREAM_PATH"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("SIZEUP_PREPLAN_DOCS_BUCKET", "example-bucket")
+    monkeypatch.setenv("LITESTREAM_PATH", "example-db")
+    for bad in ("sizeup-hub", "example-db", "replay-fixtures", "cache", "other", "preplan"):
+        monkeypatch.setenv("SIZEUP_PREPLAN_DOCS_PREFIX", bad)
+        assert docstore.from_env(log=lambda m: None) is None, bad
+    for good in ("preplan-docs", "preplan-docs-test"):
+        monkeypatch.setenv("SIZEUP_PREPLAN_DOCS_PREFIX", good)
+        assert docstore.from_env(log=lambda m: None).prefix == good
+
+
+def test_a_stalled_upload_lets_its_slot_go(api, monkeypatch):
+    """#464 re-review 9: a client that announces a body and stops sending is cut off; its upload slot is back."""
+    from sizeup.web.server import WebServer
+    monkeypatch.setattr(ppd, "UPLOAD_READ_S", 0.3)
+    srv = WebServer("127.0.0.1", 0, {}, dict, lambda cid: None, lambda i: False, cad=api)
+    threading.Thread(target=srv.httpd.serve_forever, daemon=True).start()
+    try:
+        conn = http.client.HTTPConnection("127.0.0.1", srv.httpd.server_address[1], timeout=10)
+        conn.putrequest("POST", "/api/cad/preplan/docs")
+        meta = quote(json.dumps({"kind": "photo", "title": "x", "incident_id": api.iid}))
+        for k, v in {"X-Sizeup-Doc": meta, "Content-Length": str(1024 * 1024)}.items():
+            conn.putheader(k, v)
+        conn.endheaders()
+        conn.send(b"\x89PNG" + b"\0" * 100)                                     # a little, then nothing
+        r = conn.getresponse()
+        assert r.status == 408
+        assert ppd.UPLOADS._value == 2
+    finally:
+        srv.httpd.shutdown()
+    assert ppd.UPLOAD_READ_S and ppd.UPLOAD_DEADLINE_S <= 600
+
+
+def test_the_supervisor_is_made_non_dumpable_too():
+    src = (Path(__file__).resolve().parent.parent / "sizeup" / "handoff.py").read_text()
+    main = src[src.index("def main("):]
+    assert 'import__("sizeup.docfiles", fromlist=["no_dump"]).no_dump()' in main[:1500]
+
+
+@pytest.mark.skipif(not HAVE_PDFIUM, reason="pypdf / pypdfium2 not installed")
+def test_an_images_own_metadata_is_dropped_from_the_stored_pdf(api):
+    img = zlib.compress(bytes(4 * 4))
+    xmp = b"<x:xmpmeta>Example Author</x:xmpmeta>"
+    objs = [b"<< /Type /Catalog /Pages 2 0 R >>", b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Resources << /XObject << /Im1 5 0 R >> >> "
+            b"/Contents 4 0 R >>",
+            b"<< /Length 22 >>\nstream\nq 50 0 0 50 0 0 cm /Im1 Do Q\nendstream",
+            b"<< /Type /XObject /Subtype /Image /Width 4 /Height 4 /ColorSpace /DeviceGray /BitsPerComponent 8 "
+            b"/Filter /FlateDecode /Metadata 6 0 R /Length " + str(len(img)).encode() + b" >>\nstream\n" + img + b"\nendstream",
+            b"<< /Type /Metadata /Subtype /XML /Length " + str(len(xmp)).encode() + b" >>\nstream\n" + xmp + b"\nendstream"]
+    out, offs = b"%PDF-1.4\n", []
+    for n, o in enumerate(objs, 1):
+        offs.append(len(out))
+        out += f"{n} 0 obj\n".encode() + o + b"\nendobj\n"
+    xref = len(out)
+    out += f"xref\n0 {len(objs) + 1}\n0000000000 65535 f \n".encode() + b"".join(f"{o:010d} 00000 n \n".encode() for o in offs)
+    out += f"trailer\n<< /Size {len(objs) + 1} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n".encode()
+    code, res = upload(api, out, kind="inspection", title="Annual", floor="")
+    assert code == 200, res
+    assert b"Example Author" not in inflated(stored_pdf(api, res["doc"]["id"]))
 
 
 def test_plan_pictures_are_upright_and_at_most_4096_a_side(api):

@@ -1116,6 +1116,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--config", default=os.environ.get("SIZEUP_CONFIG", "/app/deploy/hub/config.hub.toml"))
     ap.add_argument("--litestream-config", default="/app/deploy/hub/litestream.yml")
     args = ap.parse_args(argv)
+    __import__("sizeup.docfiles", fromlist=["no_dump"]).no_dump()   # non-dumpable: a same-user child can't read us (#459)
     state = Path(os.environ.get("SIZEUP_STATE_DIR", "/data"))
     run_dir = Path(os.environ.get("SIZEUP_RUN_DIR", "/tmp/sizeup-run"))
     shared = Path(os.environ.get("SIZEUP_SHARED_DIR", "/run/sizeup-shared"))

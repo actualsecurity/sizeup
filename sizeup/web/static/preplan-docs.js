@@ -32,6 +32,7 @@ window.PreplanDocs = (() => {
   const ABOVE = ["pp-edit-fp", "pp-icons", "pp-labels", "cm-lines", "cm-trail", "cm-routes", "firehouse"];
   const OPACITY_KEY = "sizeup.planOpacity";
   const MAX_MB = 25;
+  const RETRY_MS = [1000, 3000, 8000];                   // a plan that didn't load (503: the hub busy, the network)
 
   // ---- pure helpers (tests/test_preplan_docs.py runs these in node) -------------------------------------------------
   const KX = (lat) => 111320 * Math.cos(lat * Math.PI / 180), KY = 110574;
@@ -454,6 +455,8 @@ window.PreplanDocs = (() => {
       this.control = control;
       this.map = control.map;
       this.drawn = null;                                   // {id, url, corners, opacity}
+      this.tries = 0;
+      this.map.on("error", (e) => { if (e && (e.sourceId === SRC || (e.source && e.source.id === SRC))) this.retry(); });
       maps.add(this);
       this.sync();
     }
@@ -494,6 +497,7 @@ window.PreplanDocs = (() => {
           map.addLayer({ id: LAYER, type: "raster", source: SRC, paint: { "raster-opacity": w.opacity, "raster-fade-duration": 0 } },
                        beforeId(ids()));
         } else if (!this.drawn || this.drawn.url !== url) {
+          this.tries = 0;
           map.getSource(SRC).updateImage({ url, coordinates: w.corners });
         } else if (JSON.stringify(this.drawn.corners) !== JSON.stringify(w.corners)) {
           map.getSource(SRC).setCoordinates(w.corners);
@@ -503,6 +507,17 @@ window.PreplanDocs = (() => {
         if (b && order[order.indexOf(LAYER) + 1] !== b) map.moveLayer(LAYER, b);    // pre-plan points came in later: under them
         this.drawn = { url, corners: w.corners, opacity: w.opacity };
       } catch (e) { console.error("site doc plan", e.message); }
+    }
+    // the plan's picture didn't load: again after 1, 3, 8 s (the same plan, a fresh request), then it stays off
+    retry() {
+      if (!this.drawn || this.tries >= RETRY_MS.length) return;
+      const d = this.drawn, n = ++this.tries;
+      clearTimeout(this.retryT);
+      this.retryT = setTimeout(() => {
+        const src = this.map.getSource(SRC);
+        if (!src || !this.drawn || this.drawn.url !== d.url) return;            // another plan meanwhile
+        src.updateImage({ url: `${d.url}&try=${n}`, coordinates: d.corners });
+      }, RETRY_MS[n - 1]);
     }
     refresh() { this.sync(); }
     keys() { return []; }

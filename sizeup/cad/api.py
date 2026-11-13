@@ -780,7 +780,7 @@ class CadApi:
             return 404, b"not found\n", "text/plain"
         csp = ("default-src 'none'; frame-ancestors 'self'" if f["ctype"] == "application/pdf"
                else "default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; sandbox; frame-ancestors 'self'")
-        return 200, f["stream"], f["ctype"], {"Cache-Control": "private, no-store", "Referrer-Policy": "no-referrer",
+        return 200, f["stream"] if "stream" in f else f["body"], f["ctype"], {"Cache-Control": "private, no-store", "Referrer-Policy": "no-referrer",
                                               "X-Content-Type-Options": "nosniff", "Content-Disposition": f["disposition"],
                                               "Content-Security-Policy": csp}
 

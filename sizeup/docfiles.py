@@ -18,7 +18,10 @@ photos without their metadata; a PDF page rendered to a picture for the floor-pl
     plan_image(data)     in the same child: a plan picture the right way up (EXIF orientation), at most MAX_PX a side.
     The child: -I, an environment of its own (child_env(): no secrets), niced, RLIMIT_CPU and RLIMIT_AS, one at a time,
     a timeout; a malformed file can crash or stall it, not the hub. no_dump(): the hub's memory and environ not readable
-    by it.
+    by it (the app and the hot/cold supervisor, sizeup/handoff.py, both call it). Accepted residual risk: the Litestream
+    process runs as the same user and stays readable to it (its environ has the same AWS role, nothing more).
+    recheck_pdf(): the hub looks at the child's copy again before it is stored.
+    Not removed: EXIF inside a PDF's own JPEG (DCTDecode) images; an image's or form's /Metadata (XMP) is.
 
 Pure standard library here; the child process needs pypdf, pypdfium2 and Pillow.
 """
@@ -326,6 +329,10 @@ def attached(o):
     keys = set(o.keys())
     if keys & {"/EmbeddedFiles", "/EF", "/XFA", "/RichMediaContent"} or o.get("/Type") == "/EmbeddedFile":
         refuse("attachment")
+    if o.get("/Subtype") in ("/Image", "/Form"):          # an image's or a form's own XMP: gone with the rest
+        for key in ("/Metadata", "/PieceInfo"):
+            if key in o:
+                del o[key]
 
 def active(o):
     if set(o.keys()) & ACTION_KEYS or o.get("/S") in ACTION_S and ("/Type" not in o or o.get("/Type") == "/Action"):
@@ -466,8 +473,28 @@ def render(data: bytes, page: int = 1, max_px: int = MAX_PX) -> dict | None:
         raise Refused(f"page: 1 to {info.get('pages')}")
     if not pdf.startswith(b"%PDF-") or (page >= 1 and not png.startswith(b"\x89PNG")):
         raise Refused("the PDF couldn't be read")
+    recheck_pdf(pdf, len(data))
     return {"pages": int(info["pages"]), "w": info.get("w"), "h": info.get("h"), "pdf": pdf, "png": png,
             "limits": info.get("rlimit") or ""}
+
+
+# the names the hub looks for again in the child's copy before it is stored (it trusts nothing the child says)
+CLEAN_NEVER = {b"JS", b"JavaScript", b"OpenAction", b"AA", b"Launch", b"URI", b"EmbeddedFile", b"EmbeddedFiles", b"XFA",
+               b"SubmitForm", b"ImportData", b"GoToR", b"GoToE", b"Rendition", b"RichMedia", b"Encrypt", b"ObjStm"}
+CLEAN_MAX_BYTES = 64 * 1024 * 1024
+
+
+def recheck_pdf(pdf: bytes, original: int) -> None:
+    """The sanitised copy, looked at again here in the hub: none of CLEAN_NEVER as a name anywhere in its bytes (pypdf
+    writes every object uncompressed and in no object stream, so nothing can hide), and no bigger than 64 MB or than
+    twice the original and a megabyte. Refused otherwise. (A name inside a compressed page content stream is a drawing
+    operand, not an object: nothing there runs.)"""
+    if len(pdf) > min(CLEAN_MAX_BYTES, 2 * original + (1 << 20)):
+        raise Refused("the PDF couldn't be cleaned: print it to a new PDF")
+    for m in NAME.finditer(pdf):
+        name = HEX.sub(lambda h: bytes((int(h.group(1), 16),)), m.group(1)) if b"#" in m.group(1) else m.group(1)
+        if name in CLEAN_NEVER:
+            raise Refused("the PDF couldn't be cleaned: print it to a new PDF")
 
 
 def plan_image(data: bytes, max_px: int = MAX_PX) -> dict | None:

@@ -508,10 +508,40 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                 return self._send(503, b'{"error":"Busy with other uploads: try again in a moment"}', "application/json",
                                   {"Retry-After": "5"})
             try:
-                return self._send(*cad.upload(path, self.headers.get("X-Sizeup-Doc") or "", self.rfile.read(n), self.who,
+                data = self._read_doc(n)
+                if data is None:                 # stalled or cut short: the slot is let go, the connection closed
+                    self.close_connection = True
+                    return self._send(408, b'{"error":"the upload stalled: try again"}', "application/json")
+                return self._send(*cad.upload(path, self.headers.get("X-Sizeup-Doc") or "", data, self.who,
                                               self._client()))
             finally:
                 UPLOADS.release()
+
+        def _read_doc(self, n: int) -> bytes | None:
+            """The upload's n bytes, each read within UPLOAD_READ_S and all of them within UPLOAD_DEADLINE_S; None when
+            the client stalls or stops short (it can't hold one of the two upload slots for long)."""
+            from sizeup.cad.preplan_docs import UPLOAD_DEADLINE_S, UPLOAD_READ_S
+            before = self.connection.gettimeout()
+            self.connection.settimeout(UPLOAD_READ_S)
+            end = time.monotonic() + UPLOAD_DEADLINE_S
+            parts, got = [], 0
+            try:
+                while got < n:
+                    if time.monotonic() > end:
+                        return None
+                    b = self.rfile.read1(min(65536, n - got))     # what has come, up to 64 KB (a read each)
+                    if not b:
+                        return None
+                    parts.append(b)
+                    got += len(b)
+                return b"".join(parts)
+            except (TimeoutError, OSError):
+                return None
+            finally:
+                try:
+                    self.connection.settimeout(before)
+                except OSError:
+                    pass
 
         def _client(self) -> tuple[str, str]:
             """(ip, browser) for the activity log: the visitor's address as Cloudflare saw it."""
@@ -537,28 +567,32 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                     body = gz if gz is not None else gzip.compress(body, 5)
                     h["Content-Encoding"] = "gzip"
             h.setdefault("Server-Timing", f"app;dur={self._ms():.1f}")     # the time to the answer, gzip included (#284)
-            self.send_response(code)
-            unsized = not isinstance(body, (bytes, bytearray, memoryview)) and getattr(body, "length", 0) is None
-            if code != 304:
-                self.send_header("Content-Type", ctype)
-                if unsized:                       # a body made as it goes (an export, #323): to the end of the connection
-                    h["Connection"] = "close"
-                    self.close_connection = True
-                else:
-                    self.send_header("Content-Length", str(len(body)))
-            for k, v in h.items():
-                self.send_header(k, v)
-            if "Cache-Control" not in h:
-                self.send_header("Cache-Control", "no-store")
-            self.end_headers()
             streamed = not isinstance(body, (bytes, bytearray, memoryview))   # sizeup/attachments.py Stream (#323)
-            try:
+            try:                                  # a streamed body is closed whatever happens from here (#459: the
+                self.send_response(code)          # client gone before its headers too: its slot, its store connection)
+                unsized = streamed and getattr(body, "length", 0) is None
+                if code != 304:
+                    self.send_header("Content-Type", ctype)
+                    if unsized:                   # a body made as it goes (an export, #323): to the end of the connection
+                        h["Connection"] = "close"
+                        self.close_connection = True
+                    else:
+                        self.send_header("Content-Length", str(len(body)))
+                for k, v in h.items():
+                    self.send_header(k, v)
+                if "Cache-Control" not in h:
+                    self.send_header("Cache-Control", "no-store")
+                self.end_headers()
                 if code == 304:
                     return
                 if self.command != "HEAD":
                     try:
                         if streamed:
+                            deadline = getattr(body, "deadline", None)    # a whole download, at most this (#459)
                             for piece in body:
+                                if deadline is not None and time.monotonic() > deadline:
+                                    self.close_connection = True
+                                    break
                                 self.wfile.write(piece)
                         else:
                             self.wfile.write(body)

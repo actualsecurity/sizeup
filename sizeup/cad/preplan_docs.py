@@ -25,8 +25,10 @@ audit log (section "preplan_docs"); an admin-only document's rows are its id and
 admins see them at all. The server log never gets a title, a file name or a corner: the activity line says "Aligned site
 doc 12".
 
-A delete marks the row deleted, then deletes its objects; sweep() (the leader, every SWEEP_EVERY_S) deletes objects under
-the store's prefix that no active document names, SWEEP_MARGIN_S old, behind a circuit breaker.
+An upload writes its row first (pending), then its objects, then makes the row active; a delete marks the row deleted,
+then deletes its objects (purged: when they are confirmed gone). sweep() (the leader, every SWEEP_EVERY_S, never in a
+process's first 72 h) finishes what didn't: only documents whose row says deleted, or pending and SWEEP_MARGIN_S old.
+It never lists the store, so an object no row names (a database restored to an earlier point) is never deleted.
 """
 
 from __future__ import annotations
@@ -56,12 +58,22 @@ SIDE_M = (1.0, 1000.0)                      # a plan's side, metres
 SECTION = "preplan_docs"
 UPLOADS = threading.BoundedSemaphore(2)     # read at once (each up to 25 MB): server.py takes one before the body
 UPLOAD_WAIT_S = 5.0
-DOWNLOADS = threading.BoundedSemaphore(4)   # documents being sent at once (each: a store connection, a server thread)
+UPLOAD_READ_S, UPLOAD_DEADLINE_S = 30.0, 300.0   # server.py: each read of an upload's body, and all of it
+# Downloads: a plan's picture (at most 4096 x 4096) is read whole while it holds a READS slot (only for the store's read),
+# then sent from memory; a document is streamed from the store while it holds a STREAMS slot (the whole transfer, at
+# most DOWNLOAD_DEADLINE_S). Each waits DOWNLOAD_WAIT_S for its slot, then 503 (the page tries the plan again).
+READS = threading.BoundedSemaphore(4)
+STREAMS = threading.BoundedSemaphore(12)
+DOWNLOADS = STREAMS                         # (the name the tests and the docs use for the documents' slots)
 DOWNLOAD_WAIT_S = 2.0
 DOWNLOAD_WRITE_S = 30.0                     # server.py: a client that takes no bytes this long is dropped
-SWEEP_MARGIN_S = 6 * 3600.0                 # the sweep: an object no document names, this old
-SWEEP_FIRST_S, SWEEP_EVERY_S = 900.0, 6 * 3600.0
-SWEEP_MAX_N, SWEEP_SHARE, SWEEP_MIN_ALLOW = 50, 0.2, 10      # its circuit breaker
+DOWNLOAD_DEADLINE_S = 120.0                 # server.py: a whole document, at most this
+PLAN_MAX_BYTES = 64 * 1024 * 1024           # a plan's picture read whole: never more than this
+SWEEP_MARGIN_S = 6 * 3600.0                 # the sweep: a deleted or never finished document, this old
+SWEEP_FIRST_S, SWEEP_EVERY_S = 72 * 3600.0, 6 * 3600.0   # never in a process's (a takeover's) first 72 h
+SWEEP_MAX_N = 50                            # documents purged a pass, at most
+SWEEP_MIN_ALLOW = 0                         # objects no row names: never deleted
+PENDING, DELETED, ACTIVE = -1, 0, 1         # preplan_docs.active
 VIEW_S = 600.0                              # the same person opening the same document: in their activity once a while
 AUDITED = ("kind", "title", "floor", "mime", "bytes", "sha256", "pages", "page", "bldg_key", "building_ref", "link",
            "corners", "admin_only", "active")
@@ -89,7 +101,8 @@ CREATE TABLE IF NOT EXISTS preplan_docs (
   plan_w INTEGER, plan_h INTEGER,
   corners TEXT,                         -- JSON [[lon, lat] x 4]: TL TR BR BL; NULL: not aligned
   admin_only INTEGER NOT NULL DEFAULT 0,
-  active INTEGER NOT NULL DEFAULT 1,
+  active INTEGER NOT NULL DEFAULT 1,    -- 1 | 0: deleted | -1: pending (its upload not finished)
+  purged REAL,                          -- a deleted or abandoned one: when its objects were confirmed gone
   created_by TEXT NOT NULL DEFAULT '',
   created_at REAL NOT NULL,
   updated_by TEXT NOT NULL DEFAULT '',
@@ -265,7 +278,7 @@ class PreplanDocs:
 
     def _row(self, did: int, may: str, active: bool = True) -> dict:
         d = self.db.one("SELECT * FROM preplan_docs WHERE id = ?", (did,))
-        if d is None or not self.may_see(d, may) or (active and not d["active"]):
+        if d is None or not self.may_see(d, may) or (active and d["active"] != ACTIVE):
             raise CadError(f"no document {did}")             # an admin-only one, to anyone else: none
         return d
 
@@ -295,21 +308,40 @@ class PreplanDocs:
         self._seen(email, did, part)
         from sizeup.attachments import Stream
         from sizeup.docstore import DocStoreError
-        if not DOWNLOADS.acquire(timeout=DOWNLOAD_WAIT_S):
+        slots = READS if part == "plan" else STREAMS
+        if not slots.acquire(timeout=DOWNLOAD_WAIT_S):
             raise Busy("Busy: try again in a moment")
         try:
             opened = self.store.open(key)
-        except DocStoreError as e:
-            DOWNLOADS.release()
-            self.cad.log(f"CAD site doc {did}: {e}")
-            raise CadError("Not available now: try again") from None
+        except BaseException as e:               # the slot back whatever went wrong
+            slots.release()
+            if isinstance(e, DocStoreError):
+                self.cad.log(f"CAD site doc {did}: {e}")
+                raise CadError("Not available now: try again") from None
+            raise
+        if part == "plan":                       # read whole, the slot let go, sent from memory
+            try:
+                if opened.length > PLAN_MAX_BYTES:
+                    raise CadError(f"no plan for document {did}")
+                body = b"".join(opened.pieces())
+            except (DocStoreError, OSError) as e:
+                self.cad.log(f"CAD site doc {did}: plan: {type(e).__name__}")
+                raise CadError("Not available now: try again") from None
+            finally:
+                try:
+                    opened.close()
+                finally:
+                    slots.release()
+            return {"body": body, "ctype": ctype, "disposition": disposition}
 
         def done() -> None:
             try:
                 opened.close()
             finally:
-                DOWNLOADS.release()
-        return {"stream": Stream(opened.length, opened.pieces, done), "ctype": ctype, "disposition": disposition}
+                slots.release()
+        stream = Stream(opened.length, opened.pieces, done)
+        stream.deadline = time.monotonic() + DOWNLOAD_DEADLINE_S      # server.py stops sending after it
+        return {"stream": stream, "ctype": ctype, "disposition": disposition}
 
     def _seen(self, email: str, did: int, part: str) -> None:
         """Opening a document is in the person's activity (kind "search": what they read), at most once per VIEW_S."""
@@ -457,6 +489,22 @@ class PreplanDocs:
             raise CadError(str(e)) from None
         clean = p["stored"]
         ref = secrets.token_hex(8)
+        op = str(meta.get("operator") or "")[:320]
+        now = self.cad.clock()
+        lat, lon = ctx["lat"], ctx["lon"]
+        # the row first, pending: an object is never written that no row names (a restore of the database to before it
+        # leaves no object the sweep could mistake; one that never finished is the sweep's, by its row)
+        with self.db.tx() as db:
+            cur = db.execute(
+                "INSERT INTO preplan_docs (ref, bldg_key, addr_key, building_ref, link, addr_label, lat, lon, cell, kind, "
+                "title, floor, mime, bytes, sha256, pages, page, plan, plan_w, plan_h, admin_only, active, created_by, "
+                "created_at, updated_by, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
+                "?, ?, ?, ?, ?, ?)",
+                (ref, a["bldg_key"], a["addr_key"], a["building_ref"], a["link"], (a["addr_label"] or "")[:200], lat, lon,
+                 cell_of(lat, lon) if lat is not None else None, f["kind"], f["title"], f["floor"], mime, len(clean),
+                 hashlib.sha256(clean).hexdigest(), p["pages"], p["page"], p["plan"], p["plan_w"], p["plan_h"],
+                 f.get("admin_only", 0), PENDING, op, now, op, now))
+            did = cur.lastrowid
         keys = [store.key(ref, f"original.{docfiles.MIMES[mime]}")]
         from sizeup.docstore import DocStoreError
         try:
@@ -465,36 +513,24 @@ class PreplanDocs:
                 keys.append(store.key(ref, "plan.png"))
                 store.put(keys[1], p["png"], "image/png")
         except DocStoreError as e:
-            self.cad.log(f"CAD site doc upload: {e}")
-            self._drop(keys)                                     # what isn't dropped now, the sweep takes
+            self.cad.log(f"CAD site doc upload {did}: {e}")
+            if self._drop(keys):                                 # what isn't dropped now, the sweep takes (its row)
+                self._purged(did)
             raise CadError("Not stored: try again") from None
-        op = str(meta.get("operator") or "")[:320]
-        now = self.cad.clock()
-        lat, lon = ctx["lat"], ctx["lon"]
-        try:
-            with self.db.tx() as db:
-                cur = db.execute(
-                    "INSERT INTO preplan_docs (ref, bldg_key, addr_key, building_ref, link, addr_label, lat, lon, cell, kind, "
-                    "title, floor, mime, bytes, sha256, pages, page, plan, plan_w, plan_h, admin_only, active, created_by, "
-                    "created_at, updated_by, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
-                    "?, 1, ?, ?, ?, ?)",
-                    (ref, a["bldg_key"], a["addr_key"], a["building_ref"], a["link"], (a["addr_label"] or "")[:200], lat, lon,
-                     cell_of(lat, lon) if lat is not None else None, f["kind"], f["title"], f["floor"], mime, len(clean),
-                     hashlib.sha256(clean).hexdigest(), p["pages"], p["page"], p["plan"], p["plan_w"], p["plan_h"],
-                     f.get("admin_only", 0), op, now, op, now))
-                d = dict(db.execute("SELECT * FROM preplan_docs WHERE id = ?", (cur.lastrowid,)).fetchone())
-                self._audit(db, op, d, None, {k: d[k] for k in AUDITED}, bool(d["admin_only"]))
-        except Exception:
-            self._drop(keys)
-            raise
+        with self.db.tx() as db:
+            db.execute("UPDATE preplan_docs SET active = ? WHERE id = ?", (ACTIVE, did))
+            d = dict(db.execute("SELECT * FROM preplan_docs WHERE id = ?", (did,)).fetchone())
+            self._audit(db, op, d, None, {k: d[k] for k in AUDITED}, bool(d["admin_only"]))
         self._bump()
         return {"ok": True, "doc": self.shown(d)}
 
+    def _purged(self, did: int) -> None:
+        with self.db.tx() as db:
+            db.execute("UPDATE preplan_docs SET purged = ? WHERE id = ?", (self.cad.clock(), did))
+
     def _keys(self, d: dict) -> list[str]:
-        keys = [self.store.key(d["ref"], f"original.{docfiles.MIMES[d['mime']]}")]
-        if d["plan"] == "plan.png":
-            keys.append(self.store.key(d["ref"], "plan.png"))
-        return keys
+        """Every object a document can have (deleting one that isn't there is fine)."""
+        return [self.store.key(d["ref"], f"original.{docfiles.MIMES[d['mime']]}"), self.store.key(d["ref"], "plan.png")]
 
     def _drop(self, keys: list[str]) -> bool:
         """Delete these objects; False when one couldn't be (it stays for the sweep: no row names it)."""
@@ -580,8 +616,8 @@ class PreplanDocs:
                 old = {k: d[k] for k in aud}
                 self._audit(db, op, d, old, aud, bool(d["admin_only"]) or bool(changes.get("admin_only")))
             d = dict(db.execute("SELECT * FROM preplan_docs WHERE id = ?", (did,)).fetchone())
-        if act == "delete":
-            self._drop(self._keys(before))                       # the row says deleted already; a failure: the sweep
+        if act == "delete" and self._drop(self._keys(before)):    # the row says deleted already; a failure: the sweep
+            self._purged(did)
         elif before["plan"] == "plan.png" and d["plan"] != "plan.png":
             self._drop([self.store.key(d["ref"], "plan.png")])   # no longer a plan: its picture goes
         self._bump()
@@ -596,63 +632,38 @@ class PreplanDocs:
             self.cad.log(f"CAD site doc {d['id']}: {e}")
             raise CadError("Not available now: try again") from None
 
-    # -- the sweep: objects no live document names --------------------------------------------------------------------
+    # -- the sweep: deleted and abandoned documents' objects ----------------------------------------------------------
 
     def sweep(self, now: float | None = None) -> int:
-        """Objects under the store's prefix that no active document names (an upload whose row was never written, a
-        delete whose bytes couldn't be deleted then, an old plan picture), older than SWEEP_MARGIN_S: deleted. Only
-        the leader (may_write), only keys of the documents' own shape under the prefix, and a circuit breaker: more
-        than SWEEP_MAX_N, or more than SWEEP_SHARE of what was looked at (SWEEP_MIN_ALLOW whatever the share), and
-        nothing is deleted (a wrong or empty database would otherwise empty the prefix); sweep_status says why. The
-        number deleted."""
-        from sizeup.docstore import SAFE_KEY, DocStoreError
+        """The objects of documents whose row says they are gone: deleted ones whose delete couldn't finish, and uploads
+        that never did (pending, SWEEP_MARGIN_S old). It never lists the store and never deletes an object no row names:
+        after the database is restored to an earlier point, the documents uploaded since have no row, and their objects
+        stay. Only the leader (may_write), never in a process's first SWEEP_FIRST_S (start()), at most SWEEP_MAX_N
+        documents a pass. The number of documents purged."""
+        from sizeup.docstore import DocStoreError
         self.sweep_status = ""
-        st = self.store
-        if st is None or not hasattr(st, "pages") or not self.may_write():
+        if self.store is None or not self.may_write():
             return 0
-        now = time.time() if now is None else now
-        top = st.prefix + "/"
-        looked, orphans = 0, []
-
-        def named(keys: list[str]) -> set[str]:
-            refs = sorted({k.split("/")[1] for k in keys})
-            rows = self.db.q(f"SELECT ref, mime, plan FROM preplan_docs WHERE active = 1 AND ref IN "
-                             f"({','.join('?' * len(refs))})", refs) if refs else []
-            out = set()
-            for r in rows:
-                out.add(f"{top}{r['ref']}/original.{docfiles.MIMES.get(r['mime'], '?')}")
-                if r["plan"] == "plan.png":
-                    out.add(f"{top}{r['ref']}/plan.png")
-            return out
-        try:
-            for page in st.pages(top):
-                old = [k for k, t in page if t < now - SWEEP_MARGIN_S and k.startswith(top) and SAFE_KEY.fullmatch(k)]
-                if not old:
-                    continue
-                looked += len(old)
-                keep = named(old)
-                orphans += [k for k in old if k not in keep]
-                if len(orphans) > SWEEP_MAX_N:
-                    break
-        except DocStoreError as e:
-            self.sweep_status = f"listing failed ({e})"
-            return 0
-        if len(orphans) > SWEEP_MAX_N or len(orphans) > max(SWEEP_MIN_ALLOW, SWEEP_SHARE * looked):
-            self.sweep_status = (f"{len(orphans)}{'+' if len(orphans) > SWEEP_MAX_N else ''} of {looked} objects named "
-                                 "by no document: too many, nothing deleted")
-            self.cad.log(f"CAD site docs sweep stopped: {self.sweep_status}")
-            return 0
+        now = self.cad.clock() if now is None else now
+        rows = self.db.q("SELECT * FROM preplan_docs WHERE purged IS NULL AND (active = ? OR (active = ? AND created_at < ?)) "
+                         "ORDER BY id LIMIT ?", (DELETED, PENDING, now - SWEEP_MARGIN_S, SWEEP_MAX_N + 1))
+        if len(rows) > SWEEP_MAX_N:
+            self.sweep_status = f"more than {SWEEP_MAX_N} documents to purge: {SWEEP_MAX_N} this pass"
+            rows = rows[:SWEEP_MAX_N]
         n = 0
-        for k in orphans:
-            if not self.may_write() or k in named([k]):          # looked at again: a row written meanwhile
-                continue
+        for d in rows:
+            if not self.may_write():
+                break
             try:
-                st.delete(k)
-                n += 1
+                for k in self._keys(d):
+                    self.store.delete(k)
             except DocStoreError as e:
-                self.cad.log(f"CAD site docs sweep: {e}")
+                self.cad.log(f"CAD site docs sweep: document {d['id']}: {e}")
+                continue
+            self._purged(d["id"])
+            n += 1
         if n:
-            self.cad.log(f"CAD site docs sweep: {n} object(s) no document names, deleted")
+            self.cad.log(f"CAD site docs sweep: {n} deleted or unfinished document(s), their objects deleted")
         return n
 
     def start(self):
