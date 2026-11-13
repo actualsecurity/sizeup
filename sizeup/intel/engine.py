@@ -58,6 +58,7 @@ from sizeup.intel.policy import Policy, level
 TICK_S = 15.0
 PRUNE_S = 3600.0
 QUEUE_MAX = 5000
+SEEN_MAX = 20000                       # traffic ids remembered with their text (the same text again: skipped)
 ROW_SQL = ("SELECT id, start, end, source, system, service, dept, tier, talkgroup, channel, talker, rig, radio_id, text, "
            "alt_text, model FROM radio_traffic WHERE id = ?")
 SECTIONS = ("intel", "intel_packs", "intel_rules")
@@ -141,6 +142,8 @@ class IntelEngine:
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
         self.dropped = 0
+        self.stale = 0                        # rows too old to be a pre-alert (a backfill, a late re-record): skipped
+        self._seen: dict[str, int] = {}
         self.errors = 0
         self.last_error = ""
         self._ticked = 0.0
@@ -182,7 +185,9 @@ class IntelEngine:
 
     def consider(self, tid) -> None:
         """A transcript arrived or changed (Cad._on_text for our channels, Comms.on_context_text for context ones):
-        queued, never waits. Without a thread (replay): nothing to do here, feed() rows directly."""
+        queued, never waits. It runs on the caller's thread (transcription, the station-apply thread, the AWS
+        callback): no rules, gazetteer, model or push here, and nothing written; the "intel" thread does all of that
+        (through store.tx(), never under the caller's store.lock). Without a thread (replay): feed() rows directly."""
         if not self.threaded or not self.enabled:
             return
         try:
@@ -273,6 +278,20 @@ class IntelEngine:
         text = str(row.get("text") or "")
         if not tid:
             return []
+        # The hook fires again for the same row (every re-record, a startup backfill of old rows): a row older than
+        # max_age_min is history, never a pre-alert (a restart must not replay old pushes); the same text again is
+        # nothing new (idempotent per traffic id, and cheap)
+        start = float(row.get("start") or 0.0)
+        if start and self.clock() - start > float(self.policy.cfg.get("max_age_min", 15)) * 60:
+            self.stale += 1
+            return []
+        sig = hash((text, str(row.get("alt_text") or "")))
+        if self._seen.get(tid) == sig:
+            return []
+        self._seen[tid] = sig
+        if len(self._seen) > SEEN_MAX:
+            for k in list(self._seen)[: SEEN_MAX // 2]:
+                del self._seen[k]
         out: list[Event] = []
         with self._lock:
             for pack in self.packs:
