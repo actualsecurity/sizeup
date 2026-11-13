@@ -483,12 +483,14 @@ def render(data: bytes, page: int = 1, max_px: int = MAX_PX) -> dict | None:
 
 # the names the hub looks for again in the child's copy before it is stored (it trusts nothing the child says)
 CLEAN_NEVER = {b"JS", b"JavaScript", b"OpenAction", b"AA", b"Launch", b"URI", b"EmbeddedFile", b"EmbeddedFiles", b"XFA",
-               b"SubmitForm", b"ImportData", b"GoToR", b"GoToE", b"Rendition", b"RichMedia", b"Encrypt", b"ObjStm"}
+               b"SubmitForm", b"ImportData", b"GoToR", b"GoToE", b"Rendition", b"RichMedia", b"Encrypt", b"ObjStm",
+               b"XRef"}
 CLEAN_MAX_BYTES = 64 * 1024 * 1024
 
 
 STREAM_AT = re.compile(rb"(?<=[>\s])stream\r?\n")
-OBJ_AT = re.compile(rb"\d+\s+\d+\s+obj\b")
+OBJ_AT = re.compile(rb"(\d+)\s+(\d+)\s+obj\b")
+XREF_ROW = re.compile(rb"(\d{10}) (\d{5}) ([nf])")
 LENGTH = re.compile(rb"/Length\s+(\d+)(\s+\d+\s+R)?")
 END_AT = re.compile(rb"\r?\n?endstream\b")
 
@@ -498,7 +500,10 @@ def recheck_pdf(pdf: bytes, original: int) -> None:
     writes every object uncompressed and in no object stream, so nothing can hide), and no bigger than 64 MB or than
     twice the original and a megabyte. A stream's own bytes (page drawing, an image's pixels) are skipped by its /Length
     (written direct by pypdf): text that says "Stair A/AA" or pixels that happen to spell a name are not objects, and
-    nothing in them runs. A stream whose length can't be followed to its endstream: refused. Refused otherwise too."""
+    nothing in them runs. A stream whose length can't be followed to its endstream: refused. And what a reader would
+    open must be what was checked: exactly one classic xref table and trailer (no xref stream, no incremental update),
+    every object it names starting at an object head outside every stream, every head found named by it; so no object
+    can hide in a stream's bytes. Refused otherwise too."""
     bad = Refused("the PDF couldn't be cleaned: print it to a new PDF")
     if len(pdf) > min(CLEAN_MAX_BYTES, 2 * original + (1 << 20)):
         raise bad
@@ -508,14 +513,16 @@ def recheck_pdf(pdf: bytes, original: int) -> None:
             name = HEX.sub(lambda h: bytes((int(h.group(1), 16),)), m.group(1)) if b"#" in m.group(1) else m.group(1)
             if name in CLEAN_NEVER:
                 raise bad
-    i = 0
+    i, outside, heads = 0, [], {}                     # the bytes outside streams; every object head found there
     while (m := STREAM_AT.search(pdf, i)) is not None:
         names(pdf[i:m.start()])                       # the objects before it, its own dictionary included
-        heads = list(OBJ_AT.finditer(pdf, i, m.start()))
-        if not heads:
+        outside.append(pdf[i:m.start()])
+        found = list(OBJ_AT.finditer(pdf, i, m.start()))
+        if not found:
             raise bad
+        heads.update((h.start(), int(h.group(1))) for h in found)
         lm = None
-        for lm in LENGTH.finditer(pdf, heads[-1].start(), m.start()):
+        for lm in LENGTH.finditer(pdf, found[-1].start(), m.start()):
             pass                                      # its dictionary's /Length (the last one before the stream)
         if lm is None or lm.group(2):                 # none, or an indirect one: can't be followed
             raise bad
@@ -525,6 +532,62 @@ def recheck_pdf(pdf: bytes, original: int) -> None:
             raise bad
         i = tail.end()
     names(pdf[i:])
+    outside.append(pdf[i:])
+    heads.update((h.start(), int(h.group(1))) for h in OBJ_AT.finditer(pdf, i))
+    # what a reader opens: the one classic cross-reference table (pypdf always writes one, and no incremental update);
+    # every object it names starts at a head found outside every stream, and every head found is the one it names
+    # (nothing hidden in a stream's bytes can be reached: a compromised child can't smuggle an object past this)
+    rest = b"".join(outside)
+    if rest.count(b"trailer") != 1 or rest.count(b"startxref") != 1:
+        raise bad
+    sx = re.search(rb"startxref\s+(\d+)\s+%%EOF\s*$", pdf)
+    if sx is None:
+        raise bad
+    x = int(sx.group(1))
+    if not pdf.startswith(b"xref", x):
+        raise bad
+    if any(a <= x < b for a, b in _streams(pdf)):
+        raise bad
+    j = x + 4
+    named: dict[int, int] = {}
+    while True:
+        sub = re.compile(rb"\s*(\d+)\s+(\d+)\s*\r?\n").match(pdf, j)
+        if sub is None:
+            break
+        first, count = int(sub.group(1)), int(sub.group(2))
+        j = sub.end()
+        for k in range(count):
+            row = XREF_ROW.match(pdf, j)
+            if row is None:
+                raise bad
+            if row.group(3) == b"n":
+                named[int(row.group(1))] = first + k
+            j = row.end()
+            while j < len(pdf) and pdf[j:j + 1] in b" \r\n":
+                j += 1
+    if not re.match(rb"\s*trailer\b", pdf[j:j + 64]) or not named:
+        raise bad
+    if named != {off: num for off, num in heads.items()}:   # each named object at a head outside the streams, and back
+        raise bad
+
+
+def _streams(pdf: bytes) -> list[tuple[int, int]]:
+    """[(start, end)] of every stream's bytes, followed as recheck_pdf follows them."""
+    out, i = [], 0
+    while (m := STREAM_AT.search(pdf, i)) is not None:
+        found = list(OBJ_AT.finditer(pdf, i, m.start()))
+        lm = None
+        for lm in LENGTH.finditer(pdf, found[-1].start() if found else i, m.start()):
+            pass
+        if lm is None or lm.group(2):
+            return out
+        end = m.end() + int(lm.group(1))
+        out.append((m.end(), end))
+        tail = END_AT.match(pdf, end)
+        if tail is None:
+            return out
+        i = tail.end()
+    return out
 
 
 def plan_image(data: bytes, max_px: int = MAX_PX) -> dict | None:

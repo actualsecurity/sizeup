@@ -1055,7 +1055,8 @@ def test_the_hub_checks_the_childs_copy_again(monkeypatch):
             docfiles.recheck_pdf(b"%PDF-1.4\n1 0 obj << " + name + b" 2 0 R >> endobj\n%%EOF", 1000)
     with pytest.raises(docfiles.Refused):
         docfiles.recheck_pdf(b"%PDF-1.4\n" + b"x" * (3 << 20), 1000)              # bigger than it can be
-    docfiles.recheck_pdf(b"%PDF-1.4\n1 0 obj << /Type /Page >> endobj\n%%EOF", 1000)
+    honest = text_pdf(b"Lobby")
+    docfiles.recheck_pdf(honest, len(honest))
     real = docfiles._child
 
     def lying_child(mode, data, page, max_px):                                  # a child that returns something active
@@ -1277,3 +1278,52 @@ def test_plans_in_flight_are_bounded_in_bytes_and_deadlines_scale_with_size(api,
     # no fixed short cut-off: idle 30 s (server.py), and the whole at least 10 min or the size at 100 KB/s
     assert ppd.download_s(1000) == 600 and ppd.download_s(200_000_000) == 2000
     assert ppd.DOWNLOAD_WRITE_S == 30
+
+
+def hidden_objects_pdf() -> bytes:
+    """#464 final check (the hole): object 9's stream bytes hold a whole catalog with an /OpenAction and the JavaScript
+    action it opens; the cross-reference table points into them and the trailer's /Root is that catalog."""
+    inner = (b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R /OpenAction 6 0 R >>\nendobj\n"
+             b"6 0 obj\n<< /S /JavaScript /JS (app.alert(1)) >>\nendobj\n")
+    out, offs = b"%PDF-1.4\n", {}
+    for n, o in ((2, b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>"),
+                 (3, b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] >>")):
+        offs[n] = len(out)
+        out += f"{n} 0 obj\n".encode() + o + b"\nendobj\n"
+    offs[9] = len(out)
+    head = b"9 0 obj\n<< /Length " + str(len(inner)).encode() + b" >>\nstream\n"
+    out += head
+    offs[1] = len(out)
+    offs[6] = len(out) + inner.index(b"6 0 obj")
+    out += inner + b"\nendstream\nendobj\n"
+    xref = len(out)
+    rows = [b"0000000000 65535 f \n"] + [(f"{offs[n]:010d} 00000 n \n" if n in offs else "0000000000 65535 f \n").encode()
+                                         for n in range(1, 10)]
+    out += b"xref\n0 10\n" + b"".join(rows)
+    return out + f"trailer\n<< /Size 10 /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n".encode()
+
+
+def test_objects_hidden_in_a_streams_bytes_are_refused():
+    data = hidden_objects_pdf()
+    from pypdf import PdfReader
+    root = PdfReader(io.BytesIO(data)).trailer["/Root"]
+    assert "/OpenAction" in root                                               # a reader does open it with its action
+    with pytest.raises(docfiles.Refused):
+        docfiles.recheck_pdf(data, len(data))
+    honest = text_pdf(b"Stair A/AA")
+    docfiles.recheck_pdf(honest, len(honest))
+    # an incremental update (a second xref and trailer), an xref stream, an xref offset into a stream: refused
+    more = honest + b"xref\n0 1\n0000000000 65535 f \ntrailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n9\n%%EOF\n"
+    stream_at = honest.index(b"stream\n") + len(b"stream\n")                  # inside the page's content stream
+    for bad in (more, honest.replace(b"/Type /Font", b"/Type /XRef"),
+                re.sub(rb"startxref\n\d+", f"startxref\n{stream_at}".encode(), honest)):
+        with pytest.raises(docfiles.Refused):
+            docfiles.recheck_pdf(bad, len(bad))
+
+
+@pytest.mark.skipif(not HAVE_PDFIUM, reason="pypdf / pypdfium2 not installed")
+def test_what_pypdf_writes_passes_the_recheck(api):
+    for raw in (pdf(pages=3), text_pdf(b"Stair A/AA"), objstm_pdf(b"[3 0 R /Fit]")):
+        r = docfiles.render(raw, 1)                                             # the recheck runs inside
+        assert r["pdf"].startswith(b"%PDF-")
+        docfiles.recheck_pdf(r["pdf"], len(raw))
