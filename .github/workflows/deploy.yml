@@ -41,12 +41,23 @@ jobs:
       # secret is missing never starts, and the service would roll to it. Names only (ssm:DescribeParameters: metadata,
       # never a value; sizeup-aws/23-deploy-ssm-describe.sh grants it).
       - name: Every secret the task definition names is in SSM
+        shell: bash
         run: |
-          names=$(python3 tools/taskdef_params.py deploy/aws/taskdef.json)
+          err=$(mktemp)
+          cant() {   # AWS refused or unreachable: say so, never "missing"
+            c=$(grep -oE '\([A-Za-z]+(Exception|Error)?\)' "$err" | head -n1 | tr -d '()' || true)
+            echo "::error title=Could not check SSM::could not check SSM: ${c:-$(head -n1 "$err" | cut -c1-200)} ($1); nothing was deployed"
+            exit 1
+          }
+          acct=$(aws sts get-caller-identity --query Account --output text 2>"$err") || cant "sts get-caller-identity"
+          names=$(python3 tools/taskdef_params.py deploy/aws/taskdef.json --region "$AWS_REGION" --account "$acct") || {
+            echo "::error title=Task definition secrets::deploy/aws/taskdef.json: see the line above; nothing was deployed"
+            exit 1
+          }
           found=$(aws ssm describe-parameters \
             --parameter-filters "Key=Name,Option=Equals,Values=$(paste -sd, - <<<"$names")" \
-            --query 'Parameters[].Name' --output text | tr '\t' '\n')
-          missing=$(comm -23 <(sort -u <<<"$names") <(sort -u <<<"$found"))
+            --query 'Parameters[].Name' --output text 2>"$err") || cant "ssm describe-parameters"
+          missing=$(comm -23 <(sort -u <<<"$names") <(tr '\t' '\n' <<<"$found" | sort -u))
           if [ -n "$missing" ]; then
             for n in $missing; do
               echo "::error title=Missing SSM parameter::$n is named in deploy/aws/taskdef.json but not in SSM: create it (sizeup-aws) before deploying; nothing was deployed"
