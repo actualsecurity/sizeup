@@ -378,6 +378,71 @@ def test_a_followers_position_is_its_txid_sidecar(real_env, tmp_path):
     assert real_env.applied(out) == 255
 
 
+def test_the_quick_check_is_a_normal_read_only_open_and_refuses_sidecars(tmp_path):
+    import sqlite3
+    from sizeup.handoff import Env
+    env = Env("cfg.toml", tmp_path, "ls.yml", "sock", 0)
+    db = tmp_path / "cad.sqlite"
+    c = sqlite3.connect(db)
+    c.execute("PRAGMA journal_mode = WAL")                   # a WAL-mode header, as a restore / follower leaves it
+    c.execute("CREATE TABLE t (x)")
+    c.execute("INSERT INTO t VALUES (1)")
+    c.commit()
+    c.close()
+    assert not Path(f"{db}-wal").exists()
+    assert env.quick_check(db) == "ok"
+    assert not any(Path(f"{db}{s}").exists() for s in ("-wal", "-shm"))   # the read-only open's own, removed
+    Path(f"{db}-wal").write_bytes(b"x")                      # state nobody verified (an immutable open ignored it)
+    assert env.quick_check(db).startswith("refused: cad.sqlite-wal beside it")
+    Path(f"{db}-wal").unlink()
+    Path(f"{db}-shm").write_bytes(b"x")
+    assert env.quick_check(db).startswith("refused: cad.sqlite-shm")
+
+
+def test_the_checkpoint_before_a_fresh_litestream_leaves_no_wal_and_keeps_every_row(tmp_path):
+    import sqlite3
+    from sizeup.handoff import Env, sidecars
+    env = Env("cfg.toml", tmp_path, "ls.yml", "sock", 0)
+    src = tmp_path / "src.sqlite"
+    c = sqlite3.connect(src, isolation_level=None)
+    c.execute("PRAGMA journal_mode = WAL")
+    c.execute("PRAGMA wal_autocheckpoint = 0")              # (as Litestream's own connection: the WAL keeps it all)
+    c.execute("CREATE TABLE t (x)")
+    c.executemany("INSERT INTO t VALUES (?)", [(i,) for i in range(500)])
+    db = tmp_path / "cad.sqlite"                            # a file with its rows still in its WAL (a WAL kept on)
+    shutil.copyfile(src, db)
+    shutil.copyfile(f"{src}-wal", f"{db}-wal")
+    c.close()
+    assert Path(f"{db}-wal").stat().st_size > 0
+    env.checkpoint(db)
+    assert sidecars(db) == []
+    assert sqlite3.connect(db).execute("SELECT count(*) FROM t").fetchone()[0] == 500
+
+
+def test_litestreams_behind_replica_line_is_read():
+    from sizeup.handoff import behind_replica
+    line = ('time=2026-11-12T23:32:37.835-05:00 level=INFO msg="detected database behind replica" system=store '
+            'db=cad.sqlite db_txid=0000000000000000 replica_txid=000000000000002c\n')
+    assert behind_replica(line) == {"db": "cad", "db_txid": 0, "replica_txid": 44}
+    assert behind_replica('level=INFO msg="detected database behind replica" db="/data/hub.sqlite" '
+                          'db_txid=0000000000000003 replica_txid=0000000000000009') == \
+        {"db": "hub", "db_txid": 3, "replica_txid": 9}
+    assert behind_replica('level=INFO msg="fetched latest L0 file from replica" db=cad.sqlite') is None
+
+
+def test_litestreams_stderr_is_passed_on_and_watched(tmp_path, capfd):
+    from sizeup.handoff import Proc
+    seen = []
+    p = Proc("x", [sys.executable, "-c", "import sys; sys.stderr.write('one\\ntwo\\n')"], on_stderr=seen.append)
+    assert p.p.wait(10) == 0
+    for _ in range(100):
+        if len(seen) == 2:
+            break
+        time.sleep(0.02)
+    assert seen == ["one\n", "two\n"]
+    assert "one\ntwo\n" in capfd.readouterr().err
+
+
 def test_litestream_config_has_the_control_socket_and_logs_on_stderr():
     text = (ROOT / "deploy/hub/litestream.yml").read_text()
     assert "socket:\n  enabled: true\n  path: ${LITESTREAM_SOCKET}" in text and "stderr: true" in text

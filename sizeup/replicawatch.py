@@ -388,6 +388,8 @@ class ReplicaWatch:
         self.followers: dict[str, object] = {}            # the leader's own (db -> a Popen-like)
         self.fstate: dict[str, dict] = {}                 # db -> {fails, restart_at, missing}
         self.serving_at: float | None = None              # monotonic: this task serves since
+        self.to_start: list[str] = []                     # the leader's followers not started yet (one at a time)
+        self.start_at = 0.0                               # ... from then (monotonic)
 
     # -- the loop ------------------------------------------------------------------------------------------------
 
@@ -399,7 +401,7 @@ class ReplicaWatch:
     def _loop(self, sup) -> None:
         nxt_standby = nxt_leader = None
         nxt_refresh = 0.0
-        was_active = False
+        prev = None
         try:
             while not self.stop.is_set() and sup.role not in ("done", "fenced"):
                 try:
@@ -411,12 +413,11 @@ class ReplicaWatch:
                             self.standby_round(sup)
                             nxt_standby = self.mono() + self.interval_s
                     elif sup.role == "active":
-                        if not was_active:
-                            was_active = True
+                        if prev != "active":                       # serving: first, or again after a retake
                             self.serving()
                             self.serving_at = now
                             if self.leader_interval_s > 0:
-                                self.start_followers(sup)
+                                self.start_followers(sup, at=now + self.leader_first_s)
                             nxt_leader = now + self.leader_first_s
                         if self.leader_interval_s > 0:
                             self.tend_followers(sup)
@@ -430,6 +431,7 @@ class ReplicaWatch:
                         self.stop_followers()                      # draining: nothing of ours in its way
                 except Exception as e:  # noqa: BLE001 - the watcher never takes the supervisor down
                     self.log(f"replica-watch: {type(e).__name__}: {e}")
+                prev = sup.role
                 self.stop.wait(self.poll_s)
         finally:
             self.stop_followers()
@@ -495,12 +497,21 @@ class ReplicaWatch:
         finally:
             errlog.close()
 
-    def start_followers(self, sup) -> None:
-        """Fresh: whatever an earlier task left in the work dir goes (its position may be another replica's)."""
+    def start_followers(self, sup, at: float | None = None) -> None:
+        """Fresh (whatever was in the work dir goes: an earlier task's or this one's from before a retake, frozen since):
+        from `at` (monotonic; LEADER_FIRST_S after it serves, out of the new leader's busiest minute), one at a time in
+        DBS order: each starts once the one before has done its first restore (tend_followers)."""
+        self.stop_followers()
         shutil.rmtree(self.work, ignore_errors=True)
         self.work.mkdir(parents=True, exist_ok=True)
-        for db in DBS:
-            self._start_follower(sup, db)
+        self.fstate.clear()
+        self.to_start = list(DBS)
+        self.start_at = self.mono() if at is None else at
+        self.tend_followers(sup)
+
+    def _restoring(self) -> bool:
+        """A follower still doing its first restore."""
+        return any(p.poll() is None and self.applied(db) is None for db, p in self.followers.items())
 
     def _start_follower(self, sup, db: str) -> None:
         Path(f"{self._out(db)}.log").unlink(missing_ok=True)
@@ -522,7 +533,11 @@ class ReplicaWatch:
         """A follower that exited: with no file (-if-replica-exists) the replica has no backup; with an error, the
         restore failed (an LTX checksum mismatch, ...): said at once, started again after a backoff."""
         now = self.mono()
+        if self.to_start and now >= self.start_at and not self._restoring() and sup.role == "active":
+            self._start_follower(sup, self.to_start.pop(0))
         for db in DBS:
+            if db in self.to_start:
+                continue
             st = self.fstate.setdefault(db, {"fails": 0, "restart_at": None, "missing": False})
             p = self.followers.get(db)
             if p is None:
@@ -540,11 +555,16 @@ class ReplicaWatch:
                 continue
             st["fails"] += 1
             st["restart_at"] = now + min(FOLLOWER_BACKOFF[1], FOLLOWER_BACKOFF[0] * 2 ** (st["fails"] - 1))
-            why = _tail(Path(f"{self._out(db)}.log")) or f"exited {code}"
-            r = self._result(db, {"ok": None, "result": f"litestream restore failed: {why}"}, False, "leader",
-                             self.applied(db), 0.0, "follower")
-            r["restore_failed"] = True
-            self.log(f"handoff: replica check FAILED: {db}.sqlite: restore failed (possible corruption): {why}")
+            tail = _tail(Path(f"{self._out(db)}.log"))
+            if code > 0 and "error" in tail.lower():         # Litestream said why: possibly the replica itself
+                r = self._result(db, {"ok": None, "result": f"litestream restore failed: {tail}"}, False, "leader",
+                                 self.applied(db), 0.0, "follower")
+                r["restore_failed"] = True
+                self.log(f"handoff: replica check FAILED: {db}.sqlite: restore failed (possible corruption): {tail}")
+            else:                                            # killed (OOM -9, a SIGTERM from elsewhere), or silent
+                how = f"killed by signal {-code}" if code < 0 else f"exited {code}"
+                r = self._result(db, {"ok": None, "result": f"the follower {how}" + (f": {tail}" if tail else "")}, False,
+                                 "leader", self.applied(db), 0.0, "follower")
             self.record({db: r})
 
     def leader_round(self, sup) -> bool:

@@ -20,11 +20,13 @@ its task runs the Cloudflare connector. Every task is one of:
             one can take over in seconds.
   TAKEOVER  lock taken (generation + 1): the replica's last position is read (`restore -dry-run`, the three at
             once), at least the positions the old leader released with; the followers catch up to it (only the
-            last few changes: seconds), are stopped, quick-checked and moved into /data; the gate says "init" (the
-            app does --init-state's work), `litestream replicate`, the gate says "run": the app's port answers
-            "updating" at once, so the `leader` file is written then (the connector registers while the app is
-            built); the app's /healthz; once the connector is up too, phase "serving" in the lock. One timing
-            line says where the time went.
+            last few changes: seconds), are stopped (cleanly, or nothing is promoted), quick-checked (a normal
+            read-only open, no -wal / -shm beside them) and moved into /data; `litestream replicate`, and its
+            first position of every promoted file confirmed (THE ORDERING RULE, below); the gate says
+            "init" (the app does --init-state's work: the migrations); every file confirmed again; the gate
+            says "run": the app's port answers "updating" at once, so the `leader` file is written then (the
+            connector registers while the app is built); the app's /healthz; once the connector is up too, phase
+            "serving" in the lock. One timing line says where the time went.
   ACTIVE    the lock renewed every 10 s. Not renewed for 20 s, or written by someone else: FENCED (below).
   DRAINING  SIGTERM (ECS, after the new task is healthy): phase "draining"; the app stops taking requests (503 +
             Retry-After), finishes those in flight and exits; port 8090 answers 503 + Retry-After from here;
@@ -34,8 +36,10 @@ its task runs the Cloudflare connector. Every task is one of:
             of it) until the new leader says "serving" in the lock (its app answers and its connector is up), for
             at most OVERLAP_S and never past shortly before ECS's SIGKILL: two connectors on the tunnel for a
             moment, never none. If nobody took the lock within RETAKE_S it is taken back and this task serves on
-            until shortly before ECS kills it, then drains again. Then the `leader` file goes (the connector
-            stops) and this exits.
+            until shortly before ECS kills it, then drains again. A taker that failed and gave it back is taken
+            back from our own files if its release says "pristine_from" our positions (nothing but its
+            Litestream's snapshot of them in the replica); not if anything else moved the replica (its migration
+            wrote: not taken back; the next task restores). Then the `leader` file goes (the connector stops) and this exits.
   FENCED    the lease isn't ours or fresh: the app and Litestream are SIGKILLed at once, the `leader` file goes,
             exit 3 (ECS replaces the task). The app's own watchdog (sizeup/fence.py) does the same from inside.
 
@@ -46,13 +50,32 @@ it in S3 and pushes to the status topic before it exits (docs/cloud.md "Replica 
 Never two writers: a task writes only between taking the lock and releasing it (or 20 s after its last
 successful renew, 15 s before anyone may take it over). Release happens only after the app and Litestream have
 exited.
+
+THE ORDERING RULE (docs/cloud.md "Replicate before migrate"): nothing writes a database before `litestream
+replicate` has confirmed it (synced it locally: its snapshot read, its read lock held). A promoted file is exactly the replica's last position; Litestream (with no
+local state of its own: "detected database behind replica db_txid=0", expected) takes its first snapshot of that
+untouched file, and only then may the app migrate it, every page of the migration going through the WAL Litestream
+reads. A migration run before Litestream (as until 2026-11) leaves pages in the main file that Litestream never saw
+in the WAL; a replica built from that mixed old and new pages once (an out-of-order b-tree page), and every later
+takeover refused it. So, before anything writes:
+  * the promoted files must be untouched since they were verified (no -wal / -shm / -journal, the same size,
+    mtime and header): else "written before Litestream replicates it", refused;
+  * Litestream's first position of each must follow the replica's (above the position promoted);
+  * a "detected database behind replica" from Litestream other than that expected first one (a local position
+    that isn't 0, or a replica that isn't at the position promoted) is fatal: nothing is served from it.
+A file with no replica at all (the very first start) is created by the app; Litestream's first sync of it is a
+full snapshot from WAL offset 0 (nothing before it to miss), confirmed before the gate says "run". The upload
+to S3 goes on meanwhile; a release waits for all of it (`litestream sync -wait`).
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
+import re
+import shutil
 import signal
 import sqlite3
 import subprocess
@@ -74,6 +97,7 @@ from sizeup.web.updating import serve_updating
 
 DBS = ("cad", "hub", "audio")
 CHECKED = ("cad", "hub")       # quick-checked before they are promoted (audio: big, clips only)
+SIDECARS = ("-wal", "-shm", "-journal")   # never beside a staged or promoted file: SQLite state nobody verified
 
 POLL_S = 1.0                   # the lock, while standing by (0.25 s once the leader says "draining")
 CATCHUP_S = 30.0               # a follower reaching the target position (else: a full restore)
@@ -86,6 +110,10 @@ LITESTREAM_STOP_S = 40.0       # Litestream after SIGTERM (it syncs once more it
 OVERLAP_S = 180.0              # the released connector, at most (and never past STOP_TIMEOUT_S - KILL_MARGIN_S)
 KILL_MARGIN_S = 3.0            # ... it stops this long before ECS's SIGKILL, cleanly
 INIT_S = 300.0                 # the app opening / migrating the databases after the gate says "init"
+REPLICATING_S = 120.0          # Litestream's position of each file confirmed (before "init", and after it): each its own
+REPLICATION_TOTAL_S = 150.0    # ... and all of them, every round, in all: a hung Litestream fails the takeover
+MIN_LITESTREAM = (0, 5, 18)    # litestream#1547 (a snapshot from a stale WAL offset), #1579 (the read lock after a sync)
+SKIP_CHECKS_ENV = "SIZEUP_HANDOFF_SKIP_REPLICATION_CHECKS"   # the operator's escape hatch (docs/cloud.md): "1"
 APP_LISTEN_S = 30.0            # the app's port answering ("updating") after the gate says "run"
 WARM_APP_RETRY_S = 30.0        # a warm (standby) app that exited: started again after this long
 WARM_APP_MAX_FAILS = 3         # ... at most this often; then the standby stays unhealthy (ECS rolls the deploy back)
@@ -117,16 +145,66 @@ def last_json(text: str) -> dict:
     raise ValueError("no JSON answer")
 
 
+BEHIND_RE = re.compile(r'msg="detected database behind replica".*?\bdb="?([^"\s]+)"?.*?\bdb_txid=([0-9a-fA-F]+)'
+                       r'.*?\breplica_txid=([0-9a-fA-F]+)')
+
+
+def behind_replica(line: str) -> dict | None:
+    """Litestream's "detected database behind replica" log line (db.go checkDatabaseBehindReplica): which file, its
+    local position and the replica's. None for any other line."""
+    m = BEHIND_RE.search(line)
+    if not m:
+        return None
+    name = Path(m.group(1)).name
+    return {"db": name[:-len(".sqlite")] if name.endswith(".sqlite") else name,
+            "db_txid": int(m.group(2), 16), "replica_txid": int(m.group(3), 16)}
+
+
+def sidecars(path: Path) -> list[str]:
+    """SQLite's own files beside path (-wal, -shm, -journal) that exist: their names."""
+    return [Path(f"{path}{s}").name for s in SIDECARS if Path(f"{path}{s}").exists()]
+
+
+def fingerprint(path: Path) -> tuple | None:
+    """What changes when anything writes the file: size, mtime and its 100-byte header (the change counter, the
+    journal mode). None: no file."""
+    try:
+        st = path.stat()
+        with open(path, "rb") as f:
+            head = f.read(100)
+    except FileNotFoundError:
+        return None
+    return (st.st_size, st.st_mtime_ns, hashlib.sha256(head).hexdigest())
+
+
 # -- processes ---------------------------------------------------------------------------------------------
 
 class Proc:
     """A child process in its own process group. If the supervisor dies, so does the container (it is the
     container's main process under the init the task definition turns on), and every child with it."""
 
-    def __init__(self, name: str, argv: list[str], env: dict | None = None):
+    def __init__(self, name: str, argv: list[str], env: dict | None = None,
+                 on_stderr: Callable[[str], None] | None = None):
         self.name = name
-        self.p = subprocess.Popen(argv, env=env, start_new_session=True)
+        piped = dict(stderr=subprocess.PIPE, text=True, errors="replace") if on_stderr is not None else {}
+        self.p = subprocess.Popen(argv, env=env, start_new_session=True, **piped)
         self.pid = self.p.pid
+        if on_stderr is not None:
+            threading.Thread(target=self._pump, args=(on_stderr,), name="stderr-pump", daemon=True).start()
+
+    def _pump(self, on_line: Callable[[str], None]) -> None:
+        """Its stderr, line by line, passed on to ours (the container log) and to on_line. Always drained: a full
+        pipe would stall the child."""
+        for line in self.p.stderr:
+            try:
+                sys.stderr.write(line)
+                sys.stderr.flush()
+            except (OSError, ValueError):
+                pass
+            try:
+                on_line(line)
+            except Exception:
+                pass
 
     def poll(self) -> int | None:
         return self.p.poll()
@@ -168,6 +246,7 @@ class Env:
         self.config, self.state_dir, self.ls_config, self.socket = config, state_dir, ls_config, socket_path
         self.port, self.connector_ready_url = port, connector_ready_url
         self.python = sys.executable
+        self.behind_events: list[dict] = []     # Litestream's "detected database behind replica", as they come
 
     def db_path(self, db: str) -> Path:
         return self.state_dir / f"{db}.sqlite"
@@ -215,20 +294,61 @@ class Env:
             raise RuntimeError(f"litestream restore {db}: no txid")
         return n
 
-    def replicate(self) -> Proc:
-        return Proc("litestream", ["litestream", "replicate", "-config", self.ls_config])
+    def checkpoint(self, path: Path) -> None:
+        """Everything in path's WAL into the file, the WAL emptied and gone (PRAGMA wal_checkpoint(TRUNCATE), then
+        the last connection closed). Only with nothing else open on it. RuntimeError if SQLite couldn't."""
+        if not Path(f"{path}-wal").exists():
+            return
+        con = sqlite3.connect(path, isolation_level=None)
+        try:
+            busy, _log, _done = con.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+        finally:
+            con.close()
+        if busy:
+            raise RuntimeError(f"{path.name}: the checkpoint was blocked (something still has it open)")
+        wal = Path(f"{path}-wal")
+        if wal.exists() and wal.stat().st_size > 0:
+            raise RuntimeError(f"{path.name}: its WAL not empty after the checkpoint")
+        for s in ("-wal", "-shm"):                # (an empty WAL kept by SQLITE_FCNTL_PERSIST_WAL builds: macOS)
+            Path(f"{path}{s}").unlink(missing_ok=True)
 
-    def sync(self, db: str, timeout: float) -> int:
-        """Every change of db in S3: the replica's position. RuntimeError if Litestream can't say so."""
-        r = self._ls("sync", "-wait", "-json", "-timeout", str(max(1, int(timeout))), "-socket", self.socket,
-                     str(self.db_path(db)), timeout=timeout + 5)
+    def litestream_version(self) -> tuple[int, ...] | None:
+        """`litestream version` as numbers; None if it can't say."""
+        try:
+            r = self._ls("version", timeout=30)
+        except (OSError, subprocess.SubprocessError):
+            return None
+        m = re.search(r"(\d+)\.(\d+)\.(\d+)", (r.stdout or "") + (r.stderr or ""))
+        return tuple(int(x) for x in m.groups()) if m else None
+
+    def replicate(self) -> Proc:
+        """`litestream replicate`; its stderr is watched for "detected database behind replica" (behind_events)."""
+        self.behind_events.clear()
+
+        def watch(line: str) -> None:
+            ev = behind_replica(line)
+            if ev is not None:
+                self.behind_events.append(ev)
+        return Proc("litestream", ["litestream", "replicate", "-config", self.ls_config], on_stderr=watch)
+
+    def position(self, db: str, timeout: float, wait: bool = True) -> tuple[int, int | None]:
+        """`litestream sync`: (Litestream's position of db, the replica's). wait: only once every change up to it
+        is in S3 (-wait); else once Litestream has synced the file locally (its LTX file written: it has read the
+        file, and holds its read lock), the upload to follow. RuntimeError if Litestream can't say so (not up yet,
+        not replicating it, S3 refused)."""
+        r = self._ls("sync", *(["-wait"] if wait else []), "-json", "-timeout", str(max(1, int(timeout))), "-socket",
+                     self.socket, str(self.db_path(db)), timeout=timeout + 5)
         if r.returncode != 0:
             raise RuntimeError(f"litestream sync {db}: {(r.stderr or r.stdout).strip()[-300:]}")
         d = last_json(r.stdout)
         local, replica = txid(d.get("txid")), txid(d.get("replica_txid"))
-        if local is None or replica is None or replica < local:
+        if local is None or (wait and (replica is None or replica < local)):
             raise RuntimeError(f"litestream sync {db}: replica at {replica}, the database at {local}")
-        return replica
+        return local, replica
+
+    def sync(self, db: str, timeout: float) -> int:
+        """Every change of db in S3: the replica's position. RuntimeError if Litestream can't say so."""
+        return self.position(db, timeout)[1]
 
     def start_app(self, env: dict) -> Proc:
         """The app, gated (env has SIZEUP_APP_GATE: sizeup/app.py run_gated): it warms up and waits for the gate."""
@@ -267,11 +387,24 @@ class Env:
         return self._get(self.connector_ready_url)
 
     def quick_check(self, path: Path) -> str:
-        con = sqlite3.connect(f"file:{path}?immutable=1", uri=True)
+        """PRAGMA quick_check through a normal read-only open: SQLite's own view of the file (an immutable open
+        read the main file alone and would pass a file whose -wal said otherwise). Refused outright with a -wal,
+        -shm or -journal beside it: a follower writes the main file only, so one is state nobody verified. The
+        empty -wal / -shm the read-only open of a WAL-mode file makes are removed again."""
+        there = sidecars(path)
+        if there:
+            return f"refused: {', '.join(there)} beside it (not a follower's clean copy)"
+        con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
         try:
-            return str(con.execute("PRAGMA quick_check").fetchone()[0])
+            res = str(con.execute("PRAGMA quick_check").fetchone()[0])
         finally:
             con.close()
+        wal = Path(f"{path}-wal")
+        if wal.exists() and wal.stat().st_size > 0:
+            return f"refused: {wal.name} written by a read-only open"
+        for s in SIDECARS:
+            Path(f"{path}{s}").unlink(missing_ok=True)
+        return res
 
     def warm_caches(self, deadline_s: float) -> None:
         from sizeup.cachesync import CacheMirror
@@ -309,7 +442,8 @@ class Supervisor:
                  STOP_TIMEOUT_S=STOP_TIMEOUT_S, REDRAIN_S=REDRAIN_S, RENEW_S=leaderlock.RENEW_S,
                  RETAKE_MIN_LEFT_S=RETAKE_MIN_LEFT_S, CREATED_WAIT_S=CREATED_WAIT_S, KILL_MARGIN_S=KILL_MARGIN_S,
                  INIT_S=INIT_S, APP_LISTEN_S=APP_LISTEN_S, WARM_APP_RETRY_S=WARM_APP_RETRY_S,
-                 WARM_APP_MAX_FAILS=WARM_APP_MAX_FAILS)
+                 WARM_APP_MAX_FAILS=WARM_APP_MAX_FAILS, REPLICATING_S=REPLICATING_S,
+                 REPLICATION_TOTAL_S=REPLICATION_TOTAL_S)
         t.update(timing or {})
         self.t = t
         self.role = "starting"
@@ -340,6 +474,13 @@ class Supervisor:
         self.events: list[str] = []               # what happened, in order (the tests read it)
         self.positions: dict | None = None
         self.released_positions: dict | None = None
+        self.promoted: dict[str, tuple | None] = {}   # each file as promoted (fingerprint): untouched until Litestream has it
+        self._confirm_by: float | None = None          # the replication confirms' overall deadline (this takeover)
+        self.first_positions: dict[str, int] = {}      # Litestream's first position of each, its snapshot of the untouched file
+        self.app_told = False                          # the app was told "init" / "run" in this takeover: it may have written
+        self.failed_takeover = False                   # step_down after a takeover that failed (a release may be "pristine")
+        self.skip_checks = os.environ.get(SKIP_CHECKS_ENV, "").strip() == "1"
+        self.litestream_warning = ""                   # Litestream older than MIN_LITESTREAM (the Health panel shows it)
         self.app_env: dict = dict(os.environ)
         self.failure: tuple[str, str] | None = None   # (kind, why) this task ends badly for (replicawatch.TITLES)
         self.unclean = False                          # it released the lock without every change confirmed in S3
@@ -439,7 +580,9 @@ class Supervisor:
                 "loading": list((app or {}).get("loading") or []),
                 "generation": self.lock.generation, "holder": leaderlock.short(self.lock.holder),
                 "leader": leaderlock.short((self.lock.last_seen or {}).get("holder", "")),
-                "leader_phase": (self.lock.last_seen or {}).get("phase")}
+                "leader_phase": (self.lock.last_seen or {}).get("phase"),
+                **({"litestream_warning": self.litestream_warning} if self.litestream_warning else {}),
+                **({"replication_checks": "skipped"} if self.skip_checks else {})}
 
     def control(self) -> None:
         sup = self
@@ -491,10 +634,15 @@ class Supervisor:
                 log(f"handoff: follower {db} exited {code}: started again")
                 self.followers[db] = self.env.follower(db, self.staged(db))
 
-    def stop_followers(self) -> None:
-        for p in self.followers.values():
-            p.stop(15.0)
+    def stop_followers(self) -> dict[str, int | None]:
+        """Each follower that was running, stopped: its exit code (0: it stopped cleanly, between two LTX files;
+        -9: SIGKILLed, maybe half way through writing one into the file)."""
+        codes: dict[str, int | None] = {}
+        for db, p in self.followers.items():
+            if p.poll() is None:
+                codes[db] = p.stop(15.0)
         self.followers.clear()
+        return codes
 
     # -- the app, warm before the takeover (#264) ------------------------------------------------------------
 
@@ -505,6 +653,8 @@ class Supervisor:
         self.gate_answer_file.unlink(missing_ok=True)
         self.app_warm.clear()
         self.app_env = dict(os.environ, SIZEUP_LEASE_FILE=str(self.lease_file), SIZEUP_APP_GATE=str(self.gate_file))
+        if self.litestream_warning:
+            self.app_env["SIZEUP_LITESTREAM_WARNING"] = self.litestream_warning
         self._warm_app_at = self.mono()
         return self.env.start_app(self.app_env)
 
@@ -647,6 +797,17 @@ class Supervisor:
         self.drop_lease()
         return EXIT_FENCED
 
+    def check_litestream_version(self) -> None:
+        """Said loudly (and on the Health panel, through the app) when Litestream is older than MIN_LITESTREAM."""
+        get = getattr(self.env, "litestream_version", None)
+        ver = get() if get is not None else None
+        if ver is None or tuple(ver) >= MIN_LITESTREAM:
+            return
+        have, want = ".".join(map(str, ver)), ".".join(map(str, MIN_LITESTREAM))
+        self.litestream_warning = (f"Litestream {have} is older than {want}: its snapshots can drop WAL frames "
+                                   "(litestream#1547) and its read lock can be lost after a sync (#1579)")
+        self.note(f"WARNING: {self.litestream_warning}. Deploy an image with Litestream {want} or later")
+
     # -- main ----------------------------------------------------------------------------------------------
 
     def on_term(self, *_a) -> None:
@@ -657,6 +818,7 @@ class Supervisor:
 
     def run(self) -> int:
         self.leader_file.unlink(missing_ok=True)       # never left over from anything
+        self.check_litestream_version()
         self.control()
         threading.Thread(target=self._beat, name="heartbeat", daemon=True).start()
         if self.watch is not None:
@@ -743,6 +905,7 @@ class Supervisor:
         positions = prev.get("positions") if isinstance(prev.get("positions"), dict) else {}
         self.note(f"takeover: generation {self.lock.generation}"
                   + (f", the old leader released at {positions}" if positions else ""))
+        self._say_skip()
         try:
             self._promote(prev, positions)
             self.must_hold()
@@ -752,6 +915,9 @@ class Supervisor:
         except Exception as e:
             self.note(f"takeover failed: {type(e).__name__}: {e}")
             self.failure = ("takeover_failed", f"{type(e).__name__}: {e}")
+            if isinstance(e, ReplicaMismatch):
+                self._stop_mismatched()
+            self.failed_takeover = True
             if self.timing is not None:
                 log(f"handoff: {self.timing.line('failed')}")
             self.stop_warm_app()
@@ -808,7 +974,7 @@ class Supervisor:
             if want is None:
                 continue
             bound = self.t["CATCHUP_S"] if db in self.follow_done else self.t["RESTORE_S"]
-            end = self.mono() + bound
+            end = self.mono() + bound if db in self.followers else self.mono()   # none (a take-back): restore at once
             while (self.env.applied(self.staged(db)) or 0) < want and self.mono() < end:
                 self.must_hold()
                 self.check_followers()
@@ -825,7 +991,14 @@ class Supervisor:
                     raise RuntimeError(f"{db}: restored to {got}, the replica is at {want}")
                 Path(str(self.staged(db)) + "-txid").write_text(f"{got:016x}\n")
         t.mark("catch-up")
-        self.stop_followers()
+        stopped = self.stop_followers()
+        for db, code in stopped.items():
+            if target.get(db) is not None and code != 0 and self._skipped(f"the follower of {db} exited {code}"):
+                continue
+            if target.get(db) is not None and code != 0:
+                self.note(f"REFUSED: the follower of {db} didn't stop cleanly (exit {code}"
+                          + (", SIGKILLed" if code == -signal.SIGKILL else "") + "): its copy may be half written")
+                raise RuntimeError(f"{db}: the follower didn't stop cleanly (exit {code}): not promoted")
         # We hold the lock: nobody may move the replica now. If it moved, something else writes to it (a hub
         # from before the lock, still running beside us): never promote.
         if prev.get("_created"):
@@ -843,15 +1016,21 @@ class Supervisor:
             got = self.env.applied(self.staged(db))
             if got != want:
                 raise RuntimeError(f"{db}: at {got} after the followers stopped, not {want}")
+            there = sidecars(self.staged(db))
+            if there:
+                self.note(f"REFUSED: {', '.join(there)} beside the staged {db}.sqlite: a follower writes the main "
+                          "file only, so that is state nobody verified")
+                raise RuntimeError(f"{db}: {', '.join(there)} beside the staged copy: not promoted")
             if db in CHECKED:
                 res = self.env.quick_check(self.staged(db))
                 if res != "ok":
+                    self.note(f"REFUSED: {db}.sqlite quick_check: {res[:200]}")
                     raise RuntimeError(f"{db}.sqlite quick_check: {res[:200]}")
         t.mark("verify")
         self.must_hold()
         for db, want in target.items():
             dest = self.env.db_path(db)
-            for p in (dest, Path(f"{dest}-wal"), Path(f"{dest}-shm")):
+            for p in (dest, *(Path(f"{dest}{s}") for s in SIDECARS)):
                 p.unlink(missing_ok=True)
             meta = dest.with_name(f".{dest.name}-litestream")
             if meta.exists():
@@ -860,13 +1039,100 @@ class Supervisor:
             if want is not None:
                 os.replace(self.staged(db), dest)
             Path(f"{self.staged(db)}-txid").unlink(missing_ok=True)
+            self.promoted[db] = fingerprint(dest)
         self.positions = {db: (f"{n:016x}" if n is not None else None) for db, n in target.items()}
         t.mark("promote")
         self.note(f"promoted: {self.positions}")
 
+    # -- replicate before migrate (the module doc's ordering rule) ------------------------------------------
+
+    def _say_skip(self) -> None:
+        if self.skip_checks:
+            self.note(f"WARNING: {SKIP_CHECKS_ENV}=1: the replication checks (untouched files, Litestream's "
+                      "positions, 'database behind replica', the followers' clean stop) are SKIPPED for this "
+                      "takeover. An operator's override for a false positive only: remove it once past")
+
+    def _skipped(self, what: str) -> bool:
+        """With the operator's override: the failed check said loudly and let through."""
+        if self.skip_checks:
+            self.note(f"WARNING: {what}: let through ({SKIP_CHECKS_ENV}=1)")
+            return True
+        return False
+
+    def _check_untouched(self) -> None:
+        """Every promoted file exactly as verified, nothing beside it: nothing has written it before Litestream
+        replicates it. ReplicaMismatch if something did."""
+        for db in DBS:
+            dest = self.env.db_path(db)
+            there = sidecars(dest)
+            if there or fingerprint(dest) != self.promoted.get(db):
+                what = f"{', '.join(there)} beside it" if there else "changed since it was verified"
+                if self._skipped(f"{db}.sqlite {what}"):
+                    continue
+                self.note(f"REFUSED: {db}.sqlite was written before Litestream replicates it ({what}): Litestream "
+                          "would replicate pages it never saw in the WAL")
+                raise ReplicaMismatch(f"{db}.sqlite written before Litestream replicates it ({what})")
+
+    def _check_behind(self, base: dict[str, int | None], first_start: bool) -> None:
+        """Litestream's "detected database behind replica" lines so far. Expected once per promoted file on a
+        takeover (first_start): no local state (db_txid 0) and the replica exactly at the position promoted, so its
+        snapshot is of the untouched file. Anything else is fatal: the replica and the file disagree."""
+        for ev in list(getattr(self.env, "behind_events", [])):
+            db = ev.get("db")
+            if first_start and ev.get("db_txid") == 0 and db in base and base[db] is not None \
+                    and ev.get("replica_txid") == base[db]:
+                continue
+            if self._skipped(f"Litestream found {db} behind its replica ({ev.get('db_txid')} < {ev.get('replica_txid')})"):
+                continue
+            self.note(f"REFUSED: Litestream found {db} behind its replica (the file at {ev.get('db_txid')}, the "
+                      f"replica at {ev.get('replica_txid')}, promoted at {base.get(db)}): the replica and the file "
+                      "disagree; nothing is served from it")
+            raise ReplicaMismatch(f"{db}: Litestream found the database behind the replica "
+                                  f"({ev.get('db_txid')} < {ev.get('replica_txid')})")
+
+    def _confirm_replicating(self, dbs, base: dict[str, int | None], first_start: bool) -> dict[str, int]:
+        """`litestream sync` (no -wait) for each of dbs until it answers: Litestream replicates it, has synced it
+        locally (its first LTX file: a snapshot of the untouched file read under its read lock; from here every
+        write goes through the WAL it reads) and keeps uploading it. On a takeover (first_start) that position must
+        be past the one promoted (its own snapshot); on a retake (its own state kept) at least it. ReplicaMismatch
+        otherwise. Each file has REPLICATING_S of its own (a big one's snapshot takes its time). Not waiting for the
+        upload keeps the takeover short (docs/cloud.md: ~9 s for 1.2 GB locally); S3 has it all by the release
+        (`sync -wait` when draining)."""
+        got: dict[str, int] = {}
+        if self._confirm_by is None:
+            self._confirm_by = self.mono() + self.t["REPLICATION_TOTAL_S"]
+        for db in dbs:
+            end = min(self.mono() + self.t["REPLICATING_S"], self._confirm_by)
+            while True:
+                self.must_hold()
+                if self.litestream is None or self.litestream.poll() is not None:
+                    raise RuntimeError(f"Litestream exited ({self.litestream.poll() if self.litestream else None}) "
+                                       f"before it replicated {db}")
+                try:
+                    local, replica = self.env.position(db, max(1.0, min(30.0, end - self.mono())), wait=False)
+                    break
+                except Exception as e:
+                    if self.mono() >= end:
+                        raise RuntimeError(f"Litestream didn't confirm {db} in time ({self.t['REPLICATING_S']:.0f} s "
+                                           f"a file, {self.t['REPLICATION_TOTAL_S']:.0f} s in all): {e}") from None
+                    self.sleep(0.5)
+            was = base.get(db)
+            ok = (local >= 1 if was is None else local > was if first_start else local >= was) \
+                and (replica is None or replica <= local)
+            if not ok and self._skipped(f"Litestream's position of {db} {local} (replica {replica}), promoted {was}"):
+                ok = True
+            if not ok:
+                self.note(f"REFUSED: Litestream's position of {db} ({local}, the replica {replica}) doesn't follow "
+                          f"the position promoted ({was})")
+                raise ReplicaMismatch(f"{db}: Litestream at {local} (replica {replica}), promoted at {was}")
+            got[db] = local
+        self._check_behind(base, first_start)
+        return got
+
     def _start_writer(self) -> None:
-        """The warm app opens the databases ("init"), Litestream, the app serves ("run"): its port answers at once,
-        so the leader file (the connector) goes in then; its /healthz; the connector up; "serving"."""
+        """Litestream, confirmed replicating every promoted file; the warm app opens and migrates the databases
+        ("init"); every file confirmed again; the app serves ("run"): its port answers at once, so the leader
+        file (the connector) goes in then; its /healthz; the connector up; "serving"."""
         t = self.timing or Phases("takeover", clock=self.mono)
         self.must_hold()
         app = self.warm_app if self.warm_app is not None and self.warm_app.poll() is None else None
@@ -875,8 +1141,22 @@ class Supervisor:
             self.note("no warm app: one started now (it warms up first)")
             app = self._start_app()
         self.app = app
+        base = {db: txid(v) for db, v in (self.positions or {}).items()}
+        self._confirm_by = None                     # (REPLICATION_TOTAL_S from the first confirm)
+        self._check_untouched()
+        self.litestream = self.env.replicate()
+        self.write_lease()
+        have = [db for db in DBS if base.get(db) is not None]
+        got = self._confirm_replicating(have, base, first_start=True)
+        self.first_positions = dict(got)
+        self.note(f"Litestream replicates {', '.join(have) or 'nothing yet (no replica)'}"
+                  + (f": its first positions {got} (its snapshots of the untouched files)" if got else "")
+                  + "; the app may write now")
+        t.mark("litestream")
+        self.must_hold()
         self.write_lease()                          # fresh for the app's fence, which it reads at the gate
         self.gate_answer_file.unlink(missing_ok=True)
+        self.app_told = True                        # from here the replica may hold the app's writes
         self._gate("init")
         end = self.mono() + self.t["INIT_S"]
         while True:
@@ -892,11 +1172,11 @@ class Supervisor:
                 raise RuntimeError(f"the app didn't open the databases in {self.t['INIT_S']:.0f} s")
             self.sleep(0.05)
         t.mark("init-state")
+        got = self._confirm_replicating(DBS, base, first_start=True)   # the migrations synced (and new files replicated)
+        self.note(f"migrated, Litestream at {got}")
+        t.mark("replicated")
         self.must_hold()
-        self.litestream = self.env.replicate()
-        self.write_lease()
-        t.mark("litestream")
-        self.must_hold()
+        self.free_port()                            # (a take-back: the "updating" answer held it since the drain)
         self._gate("run")
         self.note("app started")
         end = self.mono() + self.t["APP_LISTEN_S"]
@@ -936,6 +1216,14 @@ class Supervisor:
         self.note(f"active: serving, generation {self.lock.generation}"
                   + ("" if ready else "; the connector isn't up yet: the old one stays until it is"))
         log(f"handoff: {t.line()}")
+
+    def _stop_mismatched(self) -> None:
+        """The replica and the file disagree: Litestream SIGKILLed (no last sync of the file it disagrees with),
+        the app stopped; the release that follows is unclean (no positions)."""
+        if self.litestream is not None:
+            self.litestream.kill()
+            self.litestream = None
+        self.note("Litestream stopped without a last sync; see docs/cloud.md \"Reseeding a replica\"")
 
     def _leader_file_now(self, why: str) -> None:
         self.must_hold()
@@ -1012,8 +1300,9 @@ class Supervisor:
             t.mark("litestream")
         self.must_hold()
         self.stop_renewing()
+        extra = self._pristine(positions, clean)
         try:
-            released = self.lock.release(positions if clean else None, clean)
+            released = self.lock.release(positions if clean else None, clean, extra)
         except LockLost as e:
             raise _Fenced(f"lost the lock before releasing it: {e}") from None
         except LockError as e:
@@ -1034,6 +1323,24 @@ class Supervisor:
         self.note("leader file removed: the connector stops")
         self.role = "done"
         return code
+
+    def _pristine(self, positions: dict, clean: bool) -> dict | None:
+        """A takeover that failed before its app wrote anything leaves the replica at the positions it promoted plus
+        only its own Litestream's snapshot of those untouched files: the same data. Its release says so
+        ("pristine_from": the positions promoted), and the old leader may take it back from its own files
+        (_retake). "Before the app wrote": never told "init", or every file still at Litestream's first position
+        after the last sync (a migration that failed before writing a thing)."""
+        if not self.failed_takeover or not self.positions:
+            return None
+        promoted = {db: txid(v) for db, v in self.positions.items()}
+        if any(promoted.get(db) is None for db in DBS):
+            return None                                 # a file made by this task: not the old leader's
+        if self.app_told:
+            at = {db: txid(positions.get(db)) for db in DBS} if clean else {}
+            if not clean or at != self.first_positions:
+                return None
+        self.note(f"released as pristine: nothing but Litestream's snapshot of the files promoted at {self.positions}")
+        return {"pristine_from": dict(self.positions)}
 
     def overlap(self, released_etag: str, retake: bool) -> int | None:
         """The connector stays up ("updating") until the new leader says "serving" in the lock: its app answers and
@@ -1084,6 +1391,7 @@ class Supervisor:
         replica is still where we left it: our own release untouched, or a new task that took it and gave it back
         without writing anything (its Litestream never ran). Anything else (it wrote, then failed) means our files
         are behind: never resumed from (the next task restores)."""
+        base: dict | None = None                      # the replica moved by a pristine taker: Litestream starts afresh
         try:
             if etag == released_etag:
                 if not self.lock.retake(released_etag):
@@ -1094,13 +1402,21 @@ class Supervisor:
                     return None
                 here = {db: self.env.plan(db) for db in DBS}
                 ours = {db: txid(v) for db, v in self.released_positions.items()}
-                if here != ours:
-                    self.note(f"the replica moved on since our release ({ours} -> {here}): not taking it back")
+                pf = prev.get("pristine_from")
+                if here != ours and isinstance(pf, dict) and {db: txid(pf.get(db)) for db in DBS} == ours:
+                    self.note(f"the replica moved on since our release ({ours} -> {here}), by nothing but the "
+                              "failed taker's snapshot of our own files (pristine): taking it back from them")
+                    base = here
+                elif here != ours:
+                    self.note(f"the replica moved on since our release ({ours} -> {here}): not taking it back (its "
+                              "writes are newer than our files; the next task, or a rolled-back deploy's, restores)")
                     self.lock.release(prev.get("positions") if isinstance(prev.get("positions"), dict) else None,
                                       bool(prev.get("clean")))
                     return None
         except LockLost:
             return None
+        except _Fenced:
+            raise
         except Exception as e:  # LockError, the replica unreadable: not taken back
             log(f"handoff: not taken back ({type(e).__name__}: {e})")
             if self.lock.generation > 0:
@@ -1114,8 +1430,18 @@ class Supervisor:
         self.start_renewing()
         try:
             self.must_hold()
+            if base is not None:                      # our files are the data; Litestream snapshots them afresh
+                for db in DBS:                        # (nothing runs on them: the app and Litestream are stopped)
+                    self.env.checkpoint(self.env.db_path(db))     # no WAL left for a Litestream without state
+                    there = sidecars(self.env.db_path(db))
+                    if there:
+                        raise RuntimeError(f"{db}.sqlite: {', '.join(there)} still there after the checkpoint")
+                    shutil.rmtree(self.env.db_path(db).with_name(f".{db}.sqlite-litestream"), ignore_errors=True)
+            self._confirm_by = None
             self.litestream = self.env.replicate()
             self.write_lease()
+            mine = {db: txid(v) for db, v in self.released_positions.items()} if base is None else base
+            self._confirm_replicating([db for db in DBS if mine.get(db) is not None], mine, first_start=base is not None)
             self.app = self._start_app()
             end = self.mono() + self.t["APP_READY_S"]
             while self._gate_answer() != "warm":     # "updating" from here until the app takes the port
@@ -1136,6 +1462,8 @@ class Supervisor:
         except Exception as e:
             self.note(f"taking back failed: {e}")
             self.failure = ("retake_failed", f"{type(e).__name__}: {e}")
+            if isinstance(e, ReplicaMismatch):
+                self._stop_mismatched()
             return self.step_down(code=1, overlap=False, retake=False)
         self.role = "active"
         deadline = (self.term_at or self.mono()) + self.t["STOP_TIMEOUT_S"] - self.t["REDRAIN_S"]
@@ -1144,6 +1472,10 @@ class Supervisor:
 
 class _Fenced(Exception):
     pass
+
+
+class ReplicaMismatch(RuntimeError):
+    """The replica and the local file disagree (or would): never served, never synced again."""
 
 
 def main(argv: list[str] | None = None) -> int:

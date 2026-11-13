@@ -220,10 +220,10 @@ class FakeFollower:
 
     started: list = []
 
-    def __init__(self, src: Path | None, out: Path, code=None, err: str = ""):
+    def __init__(self, src: Path | None, out: Path, code=None, err: str = "", hold: bool = False):
         self.pid, self.code = None, code
         out.parent.mkdir(parents=True, exist_ok=True)
-        if src is not None and code is None:
+        if src is not None and code is None and not hold:
             shutil.copy(src, out)
             Path(f"{out}-txid").write_text(f"{0x2a:016x}\n")
         if err:
@@ -244,12 +244,16 @@ def leader(tmp_path, s3, ntfy, src: dict, clock=None, logs=None, **kw):
     """A watcher on an active Supervisor with FakeFollowers of src ({db: path | None (no backup) | ("fail", text)})."""
     def follower(db, db_path, out):
         x = src.get(db)
+        if isinstance(x, tuple) and x[0] == "signal":
+            return FakeFollower(None, out, code=-9)
         if isinstance(x, tuple):
             return FakeFollower(None, out, code=1, err=x[1])
         return FakeFollower(x, out, code=0 if x is None else None)
     w = watch_for(s3, "A", tmp_path, ntfy, clock, logs, follower=follower, **kw)
     sup = SimpleNamespace(role="active", env=SimpleNamespace(db_path=lambda db: tmp_path / "data" / f"{db}.sqlite"))
     w.start_followers(sup)
+    for _ in rw.DBS:                                    # one at a time, each once the one before has restored
+        w.tend_followers(sup)
     w.serving_at = w.mono()
     return w, sup
 
@@ -302,6 +306,108 @@ def test_a_failed_restore_is_pushed_at_once_as_possible_corruption(tmp_path, ntf
     assert [(m["title"], m["priority"]) for m in ntfy.got] == [("Replica restore failed (possible corruption): cad.sqlite", 5)]
     assert "checksum mismatch" in ntfy.got[0]["message"] and "cad" in s3.doc(KEY)["failing"]
     assert "cad" not in w.followers and w.fstate["cad"]["restart_at"] is not None     # started again after a backoff
+
+
+def test_the_leaders_followers_start_late_and_one_at_a_time(tmp_path, ntfy):
+    s3, clock = FakeS3(), Clock()
+    files = {db: make_db(tmp_path / f"{db}.sqlite", 50) for db in rw.DBS}
+    held = {}
+
+    def follower(db, db_path, out):                    # restores only when the test says so
+        held[db] = (files[db], out)
+        return FakeFollower(files[db], out, hold=True)
+    w = watch_for(s3, "A", tmp_path, ntfy, clock, follower=follower)
+    sup = SimpleNamespace(role="active", env=SimpleNamespace(db_path=lambda db: tmp_path / "data" / f"{db}.sqlite"))
+    w.start_followers(sup, at=w.mono() + 3600)          # not yet: the new leader's busiest minute
+    assert held == {}
+    w.start_at = w.mono()
+    w.tend_followers(sup)
+    w.tend_followers(sup)
+    assert list(held) == ["cad"]                        # hub waits while cad does its first restore
+    src, out = held["cad"]
+    shutil.copy(src, out)
+    Path(f"{out}-txid").write_text("2a\n")
+    w.tend_followers(sup)
+    assert list(held) == ["cad", "hub"]
+
+
+def test_after_a_retake_the_leaders_followers_start_again(tmp_path, ntfy):
+    s3 = FakeS3()
+    FakeFollower.started.clear()
+    files = {db: make_db(tmp_path / f"{db}.sqlite", 50) for db in rw.DBS}
+    w = watch_for(s3, "A", tmp_path, ntfy, follower=lambda db, p, out: FakeFollower(files[db], out),
+                  leader_first_s=0.0, leader_interval_s=3600.0)
+    sup = SimpleNamespace(role="active", env=SimpleNamespace(db_path=lambda db: tmp_path / "data" / f"{db}.sqlite"),
+                          follow_done=set(), followers={}, no_replica=set())
+    w.start(sup)
+    try:
+        until(lambda: len(w.followers) == 3, what="the followers")
+        sup.role = "draining"
+        until(lambda: not w.followers, what="stopped while draining")
+        n = len(FakeFollower.started)
+        sup.role = "active"                              # taken back
+        until(lambda: len(w.followers) == 3 and len(FakeFollower.started) >= n + 3, what="started again")
+        assert s3.doc(KEY)["leader"]["task"] == "A"
+    finally:
+        w.stop.set()
+        w.thread.join(5)
+
+
+def test_a_follower_killed_by_a_signal_is_not_verifiable_not_corruption(tmp_path, ntfy):
+    s3, clock = FakeS3(), Clock()
+    w, sup = leader(tmp_path, s3, ntfy, {"cad": ("signal", ""), "hub": make_db(tmp_path / "hub.sqlite", 50),
+                                         "audio": make_db(tmp_path / "audio.sqlite", 50)}, clock)
+    w.tend_followers(sup)
+    c = s3.doc(KEY)["checks"]["cad"]
+    assert c["ok"] is None and c["result"] == "the follower killed by signal 9" and not c.get("restore_failed")
+    assert ntfy.got == [] and "cad" not in s3.doc(KEY)["failing"]       # (pushed as "not verifiable" after 2, at 4)
+
+
+@pytest.mark.skipif(shutil.which("litestream") is None, reason="needs litestream on PATH")
+def test_with_real_litestream_the_leaders_follower_verifies_then_a_corrupt_ltx_is_possible_corruption(tmp_path, ntfy):
+    """A local file replica made by `litestream replicate`, followed by the leader's real `restore -f`: verified; then one
+    of the replica's LTX files damaged: the follower exits with Litestream's checksum error, pushed at once (5)."""
+    import subprocess
+    data, rep = tmp_path / "data", tmp_path / "rep"
+    data.mkdir()
+    cfg = tmp_path / "ls.yml"
+    cfg.write_text("logging:\n  stderr: true\ndbs:\n" + "".join(
+        f"  - path: {data}/{db}.sqlite\n    replica:\n      type: file\n      path: {rep}/{db}.sqlite\n" for db in rw.DBS))
+    for db in rw.DBS:
+        make_db(data / f"{db}.sqlite", 300)
+    ls = subprocess.Popen(["litestream", "replicate", "-config", str(cfg)], stdout=subprocess.DEVNULL,
+                          stderr=subprocess.DEVNULL)
+    try:
+        until(lambda: all(list((rep / f"{db}.sqlite").rglob("*.ltx")) for db in rw.DBS), timeout=30, what="the replica")
+        time.sleep(2)
+    finally:
+        ls.terminate()
+        ls.wait(30)
+    s3, clock = FakeS3(), Clock()
+    w = watch_for(s3, "A", tmp_path, ntfy, clock, follow_s=1.0, check=rw.run_check)
+    w.ls_config = str(cfg)
+    sup = SimpleNamespace(role="active", env=SimpleNamespace(db_path=lambda db: data / f"{db}.sqlite"))
+    w.start_followers(sup)
+    w.serving_at = w.mono()
+
+    def restored():
+        w.tend_followers(sup)
+        return all(w.applied(db) is not None for db in rw.DBS)
+    try:
+        until(restored, timeout=60, what="the followers' first restores")
+        assert w.leader_round(sup) is False
+        assert {db: c["ok"] for db, c in s3.doc(KEY)["checks"].items()} == {db: True for db in rw.DBS}
+        assert ntfy.got == []
+        ltx = sorted((rep / "cad.sqlite").rglob("*.ltx"))[-1]
+        b = bytearray(ltx.read_bytes())
+        b[len(b) // 2:len(b) // 2 + 32] = b"\xa5" * 32
+        ltx.write_bytes(bytes(b))
+        w.start_followers(sup)                                     # a fresh restore of the damaged replica
+        until(lambda: (w.tend_followers(sup), bool(ntfy.got))[1], timeout=60, what="the push")
+    finally:
+        w.stop_followers()
+    assert ntfy.got[0]["title"] == "Replica restore failed (possible corruption): cad.sqlite" and ntfy.got[0]["priority"] == 5
+    assert "litestream restore failed: Error: " in ntfy.got[0]["message"]      # (its words depend on where the damage is)
 
 
 def test_each_push_kind_has_its_own_slot(tmp_path, ntfy):
