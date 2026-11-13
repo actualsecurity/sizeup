@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import uuid
 import os
 import re
 import shutil
@@ -80,14 +81,17 @@ from sizeup.radio.livepage import HOLD_S, LivePaging
 from sizeup.radio import sdr as sdr_lookup
 from sizeup.radio import adsbd
 from sizeup.radio import recorder as trunk_recorder
+from sizeup.radio import reception
+from sizeup.radio import systems as p25_systems
 from sizeup.radio.page import Page, PageHold, assemble, decode_tones, page_from_dict, recording_note
 from sizeup.radio.tap import LiveTap
 from sizeup.cad import tonelist
 from sizeup.radio.tones import ToneEvent, TonePlan, base_name
 from sizeup.talkers import talker_prompt
 from sizeup import channels
-from sizeup.stt import HIGH, LIVE, LOW, RERUN, SHED, URGENT, Transcriber, WhisperClient, radio_voice, wav_bytes
+from sizeup.stt import CONTEXT, HIGH, LIVE, LOW, RERUN, SHED, URGENT, Transcriber, WhisperClient, radio_voice, wav_bytes
 from sizeup.talkgroups import TalkgroupPrefs
+from sizeup import sourcekeys as sources, tiers
 from sizeup.tts import TtsService
 from sizeup.web.server import WebServer
 from sizeup.procenv import child_env
@@ -122,6 +126,14 @@ def geo_of(m) -> dict | None:
 # Channels renamed by an update (#275, sizeup/cloud/configupdate.py "airband-names"): a dongle's job saved under the old
 # name (state/sdr_modes.json) is the renamed channel's.
 RENAMED = {"NY Approach": "NY App 126.4/120.8", "NY Approach 124.65": "NY App 124.65"}
+def traffic_key(t) -> str:
+    """Where a transmission's speech-to-text choices are (sizeup/channels.py): its channel, "tg:<n>" for the county
+    system's talkgroup, "p25:<system>:<n>" for another system's (#409)."""
+    if t.talkgroup is None:
+        return t.source
+    return sources.channel_key(getattr(t, "system", ""), t.talkgroup)
+
+
 P25_MODE = P25_JOB         # the shared-dongle mode that runs trunk-recorder ("Fire/EMS 15")
 OFF_MODE = "Off"           # the shared dongle released for other programs (sizeup keeps running)
 SWITCH_PAUSE_S = 1.0       # between stopping one program on the shared dongle and starting the next
@@ -424,10 +436,11 @@ class App:
         self._load_pages()
         self.tg = TalkgroupPrefs(cfg.p25_tg_info or {k: {"name": v} for k, v in cfg.p25_talkgroups.items()},
                                  set(cfg.p25_incident_talkgroups),
-                                 (self.clips_dir.parent / "talkgroups.json") if self.clips_dir else None)
+                                 (self.clips_dir.parent / "talkgroups.json") if self.clips_dir else None,
+                                 others={x.name: x.talkgroups for x in cfg.p25_systems})   # (#409: MTA MRRS)
         for t in list(self.store.loose) + [t for i in self.store.incidents for t in i.traffic]:
             if t.talkgroup is not None:
-                self.tg.seed(t.talkgroup, t.end)
+                self.tg.seed(t.talkgroup, t.end, getattr(t, "system", ""))
         self._last_tones_only: Page | None = None
         self.pagehold = PageHold(self.plan)   # paging: a page waits out its continuation window
         self.receivers = [make_receiver(cfg, c, c.device, self._segment, self._heard_elsewhere) for c in cfg.channels]
@@ -452,7 +465,29 @@ class App:
         self._listed: list[str] = [sd for sd in (list(cfg.sdrs) or ([cfg.shared_device] if cfg.shared_device else []))
                                    if not self._sdr_ignored(sd)]
         self.shared = bool(self._listed) or cfg.sdr_auto
-        self.modes = [c.label for c in cfg.channels] + ([P25_MODE] if self.recorder else [])
+        # More P25 systems (#409, sizeup/radio/systems.py: MTA MRRS): each its own trunk-recorder, on the sources a
+        # dongle was given for in Settings > Radios (one job per source; never auto-assigned). None on the hub.
+        self.systems: dict[str, p25_systems.Runtime] = {}
+        if cfg.p25_recorder and cfg.p25_dir:
+            for sysd in cfg.p25_systems:
+                self.systems[sysd.name] = p25_systems.Runtime(
+                    sysd, trunk_recorder.make_system(sysd.name, sysd.label, cfg.p25_recorder, sysd.dir, log), self.tg,
+                    self._call_system, log, self.clips_dir.parent if self.clips_dir else None,
+                    on_activity=self._p25_activity)
+        sources.set_context_talkgroups(tg for x in cfg.p25_systems for tg in x.talkgroups)
+        for why in cfg.p25_system_problems:       # a system directory that can't be used: said, the rest runs
+            log(f"p25 systems: left out: {why}")
+        self._sys_jobs: dict[str, tuple[p25_systems.Runtime, int]] = {
+            x.job: (rt, x.index) for rt in self.systems.values() for x in rt.system.sources}
+        self._booting = False                 # start(): each system's dongles are handed over together
+        # The reception test (#410, sizeup/radio/reception.py): one dongle lent to one side of such a system for a
+        # while, measured instead of kept; the job it paused comes back after (and at a restart: start()).
+        self.reception = reception.Tests(self, Path(cfg.clips_dir).parent if cfg.clips_dir else None, log)
+        self.reception.on_end = self._reception_ended
+        # Every reader of this server is a verified, signed-in person (the hub behind Cloudflare Access: make_app).
+        # Only then is another system's traffic in the state all clients share (sizeup/sourcekeys.py may_see_context).
+        self.access_enforced = False
+        self.modes = [c.label for c in cfg.channels] + ([P25_MODE] if self.recorder else []) + list(self._sys_jobs)
         if self.shared:
             self.modes.append(OFF_MODE)
         first = cfg.start_mode if cfg.start_mode in self.modes else (self.modes[0] if self.modes else OFF_MODE)
@@ -594,6 +629,7 @@ class App:
         # ("camera_wall": margin, include, exclude), our departments for the municipal fallback; Settings >
         # System shows every camera with where it falls (cad.camera_area).
         self.roads.gis = self.gis
+        self.cad.gis = self.gis                    # pre-plan points: the building footprint a point is in (#456)
         self.roads.ours = tuple(cfg.cad_monitor_departments)
         self.roads.wall_settings = lambda: self.cad.settings.overrides().get("camera_wall") or {}
         self.cad.camera_area = self.roads.settings_rows
@@ -837,6 +873,13 @@ class App:
         audio_s, history_s = self.cfg.audio_keep_hours * 3600, self.keep_s
         self.storage = janitor.clean(self.clips_dir.parent, self.clips_dir,
                                      Path(self.cfg.p25_dir) if self.cfg.p25_dir else None, audio_s, history_s)
+        # (#409) each other system's own capture and temp directories (never on the hub: it has no recorder)
+        for sysd in (self.cfg.p25_systems if self.cfg.p25_recorder and self.cfg.p25_dir else ()):
+            got = janitor.clean_system(Path(sysd.capture_dir), audio_s)
+            self.storage["deleted"] = self.storage.get("deleted", 0) + got["deleted"]
+            if got["over"]:
+                log(f"storage: {sysd.label}'s captures were over {janitor.SYSTEM_MAX_BYTES / 1e6:.0f} MB: "
+                    f"{got['over']} oldest call(s) removed")
         now = time.time()
         with self._lock:
             for cid in [c for c, (_, t) in self.clips.items() if now - t > audio_s]:
@@ -1390,6 +1433,131 @@ class App:
                     self._transcribed(t)
         self._drop_recorder_files(call, keep_record)  # sizeup's clip is the one copy kept
 
+    def _call_system(self, rt, call: Call) -> None:
+        """A finished call on another P25 system (#409, sizeup/radio/systems.py), by its talkgroup's tier
+        (sizeup/tiers.py). Context only: never Main, never on our incident; its radio IDs are another system's, so
+        never looked up in our registry (no rig) nor learned into it; its emergency flags raise none of our alarms."""
+        name, tg = rt.system.name, call.talkgroup
+        if self.reception.on_call(rt, call):         # a reception test (#410): counted there, nothing of it kept
+            return self._drop_recorder_files(call, False)
+        tier = self.tg.tier(tg, name)
+        if call.encrypted and tier in tiers.RECORDED:
+            # the call says it was encrypted, whatever the file says of its talkgroup: nothing of it is kept
+            log(f"p25 {name}: {call.label} {call.id}: encrypted call on a talkgroup listed as clear: not kept")
+            tier = tiers.ACTIVITY
+        if tier not in tiers.RECORDED:               # off, or encrypted (never recorded: nothing to keep)
+            self.tg.seen(tg, dropped=True, system=name)
+            self._drop_recorder_files(call, False)
+            return
+        self.tg.seen(tg, system=name)
+        info = rt.system.talkgroups.get(tg, {})
+        key = sources.channel_key(name, tg)
+        eng = "off" if tier == tiers.RECORD else channels.effective(
+            dict(self.channel_pref(key), transcribe=True), self.aws_ok(key)[0])
+        if call.audio is not None:
+            for pc in split_turns(call):
+                t = Traffic(pc.id, call.label, pc.start, pc.end, "", status="pending", unit=pc.talker,
+                            talkgroup=call.talkgroup, rig="", radio_id=", ".join(src for src, _t in pc.pairs if src))
+                t.fm = False  # type: ignore[attr-defined]
+                # the row's source (#415): its system, never a talkgroup number alone; context, so never "ours"
+                t.system, t.tier, t.ours = name, tier, False  # type: ignore[attr-defined]
+                t.source_key = sources.p25(name, tg)  # type: ignore[attr-defined]
+                t.group, t.service = info.get("group") or "", info.get("service") or "other"  # type: ignore[attr-defined]
+                t.dept = info.get("department") or ""  # type: ignore[attr-defined]
+                self._keep_clip(t.id, radio_voice(pc.audio, deemph=False), processed=True)
+                self._keep_source(t.id, pc.audio)
+                if pc.stt:
+                    self._stt(t, pc.audio, eng, key)
+                else:
+                    t.raw, t.confidence, t.status, t.model = "", None, "no_speech", ""  # type: ignore[attr-defined]
+                    t.stt = ""  # type: ignore[attr-defined]
+                    self._transcribed(t)
+        self._drop_recorder_files(call, False)
+
+    def _p25_activity(self, source: str, minute: int, calls: int, radios: list[str]) -> None:
+        """A minute's key-ups on an encrypted talkgroup (#409): to the radio log's activity table (the hub's, from a
+        station). Never a transmission row: nothing of it is recorded."""
+        if self.forwarding():
+            return self._emit("activity", {"source": source, "minute": minute, "calls": calls, "radios": radios})
+        try:
+            self.cad.comms.activity(source, minute, calls, radios)
+        except Exception as e:  # noqa: BLE001 - the CAD must never stop the monitor
+            log(f"CAD: could not log activity on {source}: {type(e).__name__}: {e}")
+
+    def talkgroups_state(self) -> list[dict]:
+        """TalkgroupPrefs.state(), each row with a tier: its own (another system's), else what its switches amount to
+        (sizeup/tiers.py derived; "tier_set": False: changed by Record / Transcribe, not by a tier)."""
+        rows = self.tg.state()
+        for r in rows:
+            r["tier_set"] = r["tier"] is not None
+            if r["tier"] is None:
+                r["tier"] = tiers.derived(r["record"], self.channel_pref(r["key"])["transcribe"],
+                                          r["encrypted"])
+        return rows
+
+    def p25_systems_state(self) -> list[dict]:
+        """state()["p25_systems"] (#409): each other system with its jobs and dongles, what runs, its control channel,
+        the unknown talkgroups seen on it and its encrypted activity. [] with none (the hub shows its station's)."""
+        return [rt.state(self.assign) for rt in self.systems.values()]
+
+    def reception_post(self, body: dict, by: str = "", tid: str = "") -> str | None:
+        """POST /api/reception (#410): start, stop or annotate a reception test. None, or why not. by: who asked: kept
+        HERE, in the CAD of record, under the test's id (for the activity row when it ends), never with the test
+        itself: a station gets only the id the hub made (tid) and stores no person."""
+        start = isinstance(body, dict) and body.get("action") == "start"
+        if not reception.SAMPLE_ID.fullmatch(str(tid or "")):
+            tid = uuid.uuid4().hex[:12] if start else ""
+        err = self._reception_send(body, tid)
+        if start and not err and by:
+            self._reception_who(tid, str(by))
+        return err
+
+    def _reception_send(self, body: dict, tid: str) -> str | None:
+        return self.reception.post(body, tid)
+
+    def _reception_who(self, tid: str, by: str | None = None) -> str:
+        """Who started test `tid` (by given: remember it; the last 80 are kept, in the CAD's own store)."""
+        try:
+            m = json.loads(self.cad.store.meta_get("reception_by") or "{}")
+            m = m if isinstance(m, dict) else {}
+            if by:
+                m[tid] = by[:200]
+                self.cad.store.meta_put("reception_by", json.dumps(dict(list(m.items())[-80:])))
+            return str(m.get(tid) or "")
+        except Exception as e:  # noqa: BLE001 - a log row's name, never in the way
+            log(f"reception test: who started {tid} not kept: {type(e).__name__}")
+            return ""
+
+    def reception_state(self) -> dict | None:
+        """GET /api/reception: the reception tests' state (admins: its history and sample list are never in the
+        state everyone gets)."""
+        return self.reception.state()
+
+    def _reception_ended(self, t: dict) -> None:
+        """A reception test is over (or its paused job is back at last): in the activity of who started it. On a
+        station the hub writes it, from the station's report (sizeup/cloud/hub.py)."""
+        by = "" if self.cfg.cloud_role == "station" else self._reception_who(str(t.get("id") or ""))
+        if not by:
+            return
+        try:
+            self.cad.activity.record(by, "action", "reception test", reception.ended_text(t), "",
+                                     reception.restored_ok(t))
+        except Exception as e:  # noqa: BLE001 - a log row, never in the way
+            log(f"reception test: activity row not written: {type(e).__name__}: {e}")
+
+    def reception_sample(self, sid: str) -> bytes | None:
+        """GET /api/reception/sample?id=: a call a reception test captured, while it is kept."""
+        return self.reception.sample(sid)
+
+    def reception_sample_b64(self, sid: str) -> str:
+        return self.reception.sample_b64(sid)
+
+    def set_talkgroup_tier(self, tg: int, tier: str, system: str = "") -> str | None:
+        err = self.tg.set_tier(int(tg), str(tier), system)
+        if not err:
+            log(f"talkgroup {system}:{tg} ({self.tg.name(int(tg), system)}): tier={self.tg.tier(int(tg), system)}")
+        return err
+
     def _p25_ours(self, call: Call, turns) -> bool:
         """The flag is ours (alarms.counts_as_ours): its talkgroup is one of our fire channels, or the radio that
         flagged is on one of our rigs. Never second-guessed (Windows.flag)."""
@@ -1412,8 +1580,9 @@ class App:
 
     def _alarm(self, t: Traffic, text: str | None = None) -> None:
         """A transmission (new, or new text) to the alarms: the CAD of record raises them. A station forwarding
-        to a hub doesn't (the hub does, from the same transmission)."""
-        if self.forwarding():
+        to a hub doesn't (the hub does, from the same transmission). Another P25 system's (#409) raises none,
+        whichever way it comes (new, a re-run's text, the hub's copy)."""
+        if self.forwarding() or getattr(t, "system", ""):
             return
         d = {"id": t.id, "start": t.start, "end": t.end, "source": t.source, "talkgroup": t.talkgroup, "unit": t.unit,
              "rig": t.rig, "radio_id": t.radio_id, "text": t.text if text is None else text,
@@ -1524,7 +1693,11 @@ class App:
             item.text = getattr(item, "raw", "")
             # attach: the station's talkgroup choice when this came from one (hub); pairs: P25 talkers
             attach = item.__dict__.pop("attach", None)
-            attach = (item.talkgroup is None or self.tg.main(item.talkgroup)) if attach is None else bool(attach)
+            other = getattr(item, "system", "")          # another P25 system's (#409): never attached
+            attach = (not other and (item.talkgroup is None or self.tg.main(item.talkgroup))) if attach is None \
+                else bool(attach) and not other
+            if item.talkgroup is not None:
+                item.ours = attach  # type: ignore[attr-defined]   (in "Our calls", #415: the station's Main choice)
             pairs = item.__dict__.pop("pairs", None)
             if item.status == "no_speech":
                 # A key-up with nothing said (mic click): still shown, as who keyed and when, with
@@ -1539,9 +1712,12 @@ class App:
             self._emit("traffic", dict(item.as_dict(), attach=attach, pairs=pairs), item.id)
             self.store.on_traffic(item, attach=attach)
             self._to_cad(item)
-            self._alarm(item)
+            if not getattr(item, "system", ""):      # another system's traffic (#409) raises none of our alarms
+                self._alarm(item)
             self._atc(item)
-            if item.status != "no_speech":
+            if item.status != "no_speech" and other:
+                log(f"{item.source}: transmission {item.id} ({item.status})")     # (#419: its words never in a log)
+            elif item.status != "no_speech":
                 log(f"{item.source}: {'[' + item.unit + '] ' if item.unit else ''}{item.text or '(' + item.status + ')'}")
             return
         if isinstance(item, Rerun):
@@ -1724,14 +1900,41 @@ class App:
                                      "id_note": getattr(t, "id_note", ""),
                                      # the emergency button (#128), its raw call record, kept by its window
                                      "emergency": bool(getattr(t, "emergency", False)),
-                                     "evidence": getattr(t, "evidence", None), "kept": getattr(t, "kept", "")},
+                                     "evidence": getattr(t, "evidence", None), "kept": getattr(t, "kept", ""),
+                                     # #409: the P25 system it was heard on ("": the county's, or FM) and its tier
+                                     **self._row_source(t)},
                                     replace=replace)
         except Exception as e:  # the CAD must never stop the monitor
             log(f"CAD: could not log a transmission: {type(e).__name__}: {e}")
 
+    def _row_source(self, t: Traffic) -> dict:
+        """A transmission's source for the radio log (#409 / #415, sizeup/sourcekeys.py): {source_key, system, group,
+        service, ours, dept, tier}. Another P25 system's row carries its own (App._call_system); the county's
+        talkgroups and the analog channels are worked out here."""
+        if getattr(t, "system", ""):
+            return {"source_key": getattr(t, "source_key", ""), "system": t.system, "group": getattr(t, "group", ""),
+                    "service": getattr(t, "service", ""), "ours": False, "dept": getattr(t, "dept", ""),
+                    "tier": getattr(t, "tier", "")}
+        if t.talkgroup is None:
+            kind = next((c.kind for c in self.cfg.channels if c.label == t.source), "")
+            air = kind == "airband"
+            return {"source_key": sources.fm(t.source, kind), "system": "airband" if air else "analog",
+                    "group": "Airband" if air else "Analog", "service": sources.service(kind=kind or "traffic"),
+                    "ours": not air, "dept": "", "tier": ""}
+        info = self.tg.info.get(t.talkgroup, {})
+        return {"source_key": sources.p25(self.tg.county, t.talkgroup), "system": self.tg.county,
+                "group": info.get("group") or "", "service": sources.service(info.get("group") or ""),
+                "ours": bool(getattr(t, "ours", self.tg.main(t.talkgroup))), "dept": "", "tier": ""}
+
     def _backfill(self) -> None:
         """Traffic saved before radio IDs were tied to rigs: the rig from its talker text, and every
         transmission still in the history into the communications log (ones already there are left)."""
+        try:        # airband rows from before a row said so (#409's source columns): never analog, never "ours"
+            fixed = self.cad.comms.fix_air([c.label for c in self.cfg.channels if c.kind == "airband"])
+            if fixed:
+                log(f"CAD: {fixed} earlier airband transmission(s) given their source")
+        except Exception as e:  # noqa: BLE001 - the CAD must never stop the monitor
+            log(f"CAD: airband sources not fixed: {type(e).__name__}: {e}")
         rows = list(self.store.loose) + [t for i in self.store.incidents for t in i.traffic]
         n = 0
         for t in rows:
@@ -1860,7 +2063,7 @@ class App:
         t = next((t for t in list(self.store.loose) + [t for i in self.store.incidents for t in i.traffic] if t.id == cid), None)
         if t is None:
             return None, ""
-        return t, channels.tg_key(t.talkgroup) if t.talkgroup is not None else t.source
+        return t, traffic_key(t)
 
     def _rerun_pcm(self, item) -> np.ndarray | None:
         """A recording as Amazon Transcribe takes it (int16, 8 kHz), or None."""
@@ -1921,7 +2124,7 @@ class App:
         keys: dict[str, str] = {}           # live: each one's channel, for its class (_stt_priority)
         for t in traffic:
             if (want is None or t.id in want) and t.id not in busy and t.id not in seen:
-                keys[t.id] = channels.tg_key(t.talkgroup) if t.talkgroup is not None else t.source
+                keys[t.id] = traffic_key(t)
                 got = self._rerun_audio(t.id, getattr(t, "fm", self._kind.get(t.source) != "airband"))
                 if got:
                     low = speech_seconds(got[0]) < MIN_SPEECH_S  # same mic-click rule as the live pass
@@ -2031,7 +2234,8 @@ class App:
             self._alarm(t, text)                       # the words came later (Amazon Transcribe, a re-run)
             self._atc(t, text)
         if changed:
-            log(f"{why} {cid}: {text or '(no speech)'}")
+            # (another P25 system's words are never in a log, #419)
+            log(f"{why} {cid}: " + ("(text changed)" if self.clip_is_context(cid) else text or "(no speech)"))
         self._emit("retext", {"id": cid, "text": text, "status": status, "confidence": confidence, "model": model,
                               **({"alt": alt} if alt is not None else {})})
         return changed
@@ -2043,7 +2247,11 @@ class App:
         """{record, transcribe, engine} for "FG1" / "South 2" / "tg:307" (a talkgroup's record is its own switch)."""
         p = channels.pref(key, self._chan_ov, self.cfg.stt_aws_channels, self.cfg.stt_record_only)
         if channels.is_tg(key):
-            p["record"] = self.tg.record(int(key[3:]))
+            tsys, tgn = channels.tg_of(key)
+            p["record"] = self.tg.record(tgn, tsys)
+            tier = self.tg.tier(tgn, tsys)
+            if tier is not None:                 # another system's talkgroup (#409): Transcribe is its tier's
+                p["transcribe"] = tier in tiers.TRANSCRIBED
         return p
 
     def aws_ok(self, key: str | None = None) -> tuple[bool, str]:
@@ -2091,7 +2299,11 @@ class App:
             return URGENT
         if key in AIRBAND_FIRST:
             return HIGH
-        if channels.is_tg(key) and not self.tg.main(int(key[3:])):
+        if channels.is_tg(key) and (tier := self.tg.tier(*channels.tg_of(key)[::-1])) is not None:
+            # another system's talkgroup (#409): by its tier, in classes under every one of ours and shed when
+            # they wait (sizeup/stt.py CONTEXT): fire traffic never queues behind police
+            return CONTEXT if tier == tiers.ALERT else LOW
+        if channels.is_tg(key) and not self.tg.main(*channels.tg_of(key)[::-1]):
             return LOW
         return LIVE
 
@@ -2265,7 +2477,8 @@ class App:
         if getattr(item, "status", "") in ("error", "skipped") and job.alt is None and not job.rerun:
             log(f"aws transcribe: {job.kind} {job.id}: a late answer, and the fallback had none: it is the text")
             return self._aws_done(job, text, conf)
-        log(f"aws transcribe: {job.kind} {job.id}: a late answer, kept as the alternative: {text}")
+        log(f"aws transcribe: {job.kind} {job.id}: a late answer, kept as the alternative"
+            + ("" if self.clip_is_context(job.id) else f": {text}"))
         self._set_alt(job.id, text, f"{channels_model()} (late)")
 
     def _aws_changed(self) -> None:
@@ -2407,7 +2620,21 @@ class App:
                 "fm": [{"key": c.label, "kind": c.kind, "mhz": c.mhz,
                         **({"schedule": plan_text(c)} if getattr(c, "schedule", ()) or getattr(c, "also", ()) else {})}
                        for c in self.cfg.channels],
-                "sync": self.channels_sync(), "aws": self.aws_status()}
+                "sync": self.channels_sync(), "aws": self.aws_status(), "tiers": self.tiers_state()}
+
+    def tiers_state(self) -> dict:
+        """The talkgroup tiers (#409, sizeup/tiers.py): how long each tier's audio is kept ([storage] tier_keep_days)
+        and the storage that comes to, from the audio logged per tier in the last 7 days (worked out every 10 minutes)."""
+        days = self.cfg.tier_keep_days
+        at, per_day = getattr(self, "_tier_audio", (0.0, {}))
+        if time.monotonic() - at > 600 or not at:
+            try:
+                per_day = self.cad.comms.audio_per_day() if self.cfg.p25_systems else {}
+            except Exception:  # noqa: BLE001 - an estimate, never in the way of the state
+                per_day = {}
+            self._tier_audio = (time.monotonic(), per_day)
+        return {"keep_days": days, "labels": tiers.LABELS,
+                "storage": tiers.storage(per_day, days, self.cfg.audio_keep_hours)}
 
     # -- state --------------------------------------------------------------------------------------
 
@@ -2566,6 +2793,8 @@ class App:
                 return f"SDR {self.sdr_name(serial)} is in use by {held.get('app', 'another app')} ({held.get('mode', '?')})"
             if why := self._ambiguity(serial):
                 return f"SDR {self.sdr_name(serial)}: {why}"
+            if self.reception.holds(serial):
+                return f"SDR {self.sdr_name(serial)} is lent to a reception test: stop it first"
         old = self.adsb_sdr
         if serial == old:
             return None
@@ -2629,7 +2858,14 @@ class App:
         if self._mode_file:
             try:
                 by = {sd: b for sd, b in self.set_by.items() if sd in self.assign}
-                self._mode_file.write_text(json.dumps({**self.assign, "_set_by": by}))
+                modes = dict(self.assign)
+                lent = self.reception.lent()        # (#410) a dongle lent to a reception test is saved on its own job
+                if lent is not None:
+                    modes[lent[0]] = lent[1]
+                    by.pop(lent[0], None)
+                    if lent[2]:
+                        by[lent[0]] = lent[2]
+                self._mode_file.write_text(json.dumps({**modes, "_set_by": by}))
             except OSError:
                 pass
 
@@ -2669,6 +2905,9 @@ class App:
         """The dongle the program for `mode` (its rtl_fm, or trunk-recorder) is running on, if any."""
         if mode == P25_MODE:
             return self.recorder.on() if self.recorder is not None else None
+        if mode in self._sys_jobs:
+            rt, k = self._sys_jobs[mode]
+            return rt.recorder.source_on(k)
         r = self._receiver(mode)
         return getattr(r.device, "serial", None) if r is not None and not r._stop.is_set() else None
 
@@ -2795,7 +3034,8 @@ class App:
             if m == OFF_MODE or self.set_by.get(sd) != "auto" or self._program_on(m) != sd:
                 self._failing.discard(sd)
                 continue
-            r = self.recorder if m == P25_MODE else self._receiver(m)
+            r = self.recorder if m == P25_MODE else self._sys_jobs[m][0].recorder if m in self._sys_jobs \
+                else self._receiver(m)
             st = r.status() if r is not None else {}
             if st.get("state") == "down" and st.get("restarts", 0) >= SDR_FAILING_RESTARTS:
                 if sd not in self._failing:
@@ -2892,6 +3132,9 @@ class App:
         if mode == P25_MODE:
             self.recorder.device_fn, self.recorder.device_name = self._dongle(serial), self.sdr_name(serial)
             self.recorder.start()
+        elif mode in self._sys_jobs:                # one source of another system (#409): its trunk-recorder (re)starts
+            rt, k = self._sys_jobs[mode]
+            rt.recorder.give(k, self._dongle(serial), mode, apply=not self._booting)
         else:
             r = self._receiver(mode)
             if r is not None:
@@ -2920,24 +3163,42 @@ class App:
                 log(f"sdr: {m} was running on SDR {self.sdr_name(sd)}, the ADS-B receiver's dongle: stopped")
                 self._stop_mode(m, f"SDR {self.sdr_name(sd)} is reserved for ADS-B", sd)
 
-    def _stop_mode(self, mode: str, why: str, serial: str) -> None:
+    def _stop_mode(self, mode: str, why: str, serial: str, release: bool = True) -> None:
         """Stop `mode`'s program if it runs on this dongle (not when it runs on another one: two dongles
-        can hold one job, a person's kept beside a replacement's) and release the dongle."""
+        can hold one job, a person's kept beside a replacement's) and release the dongle (release False: sizeup's
+        claim on it stays, for the program that takes it next: a reception test's hand-off, #410)."""
         on = self._program_on(mode) if mode != OFF_MODE else None
         if on is None or on == serial:
             if mode == P25_MODE:
                 self.recorder.stop(why)
+            elif mode in self._sys_jobs:
+                rt, k = self._sys_jobs[mode]
+                rt.recorder.take(k, why)                 # the system runs on with its other source(s), or stops
             elif mode != OFF_MODE:
                 r = self._receiver(mode)
                 if r is not None:
                     r.stop()
-        claims.release(serial)
+        if release:
+            claims.release(serial)
 
-    def set_mode(self, mode: str, sdr: str | None = None, by: str = "person") -> str | None:
+    CONFIRM = "confirm: "       # what a refusal that only needs the person's confirm starts with (the UI asks, then resends)
+
+    def fire_job(self, mode: str) -> bool:
+        """A job of ours a dongle shouldn't lose by one click: the county's trunk-recorder, paging, a fireground."""
+        return mode == P25_MODE or any(c.label == mode and c.kind in ("paging", "traffic") for c in self.cfg.channels)
+
+    def set_mode(self, mode: str, sdr: str | None = None, by: str = "person", confirm: bool = False) -> str | None:
         """Give dongle `sdr` (default: the first) a channel, Fire/EMS 15 (trunk-recorder) or Off.
         A mode already running on another dongle moves here (that dongle goes Off, which auto-assign
         may fill on its next start: a person didn't choose that Off). `by` is recorded per dongle;
         a person's choice, Off included, is never changed by auto-assign."""
+        err = self._set_mode(mode, sdr, by, confirm)
+        if err is None:                 # (#410) only a switch that worked ends what a reception test still owed it
+            rows = self.sdrs
+            self.reception.switched(sdr or (rows[0] if rows else ""), mode)
+        return err
+
+    def _set_mode(self, mode: str, sdr: str | None, by: str, confirm: bool) -> str | None:
         if not self.shared:
             return "each channel has its own dongle: nothing to switch"
         rows = self.sdrs
@@ -2946,6 +3207,15 @@ class App:
             return f"no SDR {sdr!r} plugged in" + (f"; one of {', '.join(rows)}" if rows else "")
         if mode not in self.modes:
             return f"unknown mode {mode!r}; one of {', '.join(self.modes)}"
+        # (#410) a dongle lent to a reception test: any switch of it ends the test and its paused job comes back
+        # (said in the answer); one still owed its job: that job picked is "restore now"
+        lent = self.reception.person_switch(mode, sdr)
+        if lent is not None:
+            return lent or None
+        was = self.assign.get(sdr, OFF_MODE)
+        if mode in self._sys_jobs and self.fire_job(was) and not confirm:
+            # (#409) another system's job never takes a dongle off the fire side without the person saying so
+            return f"{self.CONFIRM}SDR {self.sdr_name(sdr)} runs {was}. Giving it to {mode} stops {was} on it."
         held = claims.other(sdr) if mode != OFF_MODE else None
         if held:
             return f"SDR {self.sdr_name(sdr)} is in use by {held.get('app', 'another app')} ({held.get('mode', '?')})"
@@ -2982,11 +3252,21 @@ class App:
                 self.switching = False
         return None
 
-    def set_talkgroup(self, tg: int, record: bool | None = None, main: bool | None = None) -> str | None:
-        """POST /api/talkgroup: record = keep its calls; main = main list + attach to our incident."""
+    def set_talkgroup(self, tg: int, record: bool | None = None, main: bool | None = None,
+                      tier: str | None = None, system: str = "") -> str | None:
+        """POST /api/talkgroup: record = keep its calls; main = main list + attach to our incident. Another system's
+        talkgroup (#409: `system`, "" = the county's): tier = alert | text | record | off | activity."""
         if not self.p25:
             return "no P25 configured"
-        self.tg.set(int(tg), record, main)
+        system = "" if system == self.tg.county else str(system or "")
+        if system and not self.tg.known(int(tg), system):
+            return f"no talkgroup {tg} on {system}"
+        if tier is not None:
+            return self.set_talkgroup_tier(tg, tier, system)
+        self.tg.set(int(tg), record, main, system)
+        if system:
+            log(f"talkgroup {system}:{tg} ({self.tg.name(int(tg), system)}): tier={self.tg.tier(int(tg), system)}")
+            return None
         log(f"talkgroup {tg} ({self.tg.name(int(tg))}): record={self.tg.record(int(tg))} main={self.tg.main(int(tg))}")
         return None
 
@@ -3022,6 +3302,7 @@ class App:
                           "mode": self.assign.get(sd, OFF_MODE), "present": sd in plugged,
                           "ambiguous": self._ambiguity(sd, devs),   # "" or why nothing of ours opens it now
                           "set_by": self.set_by.get(sd),       # "person", "auto" or None (a default / unknown)
+                          "lent": self.reception.lent_row(sd),  # (#410) lent to a reception test: {paused, owed}
                           "held_by": ({"app": c.get("app"), "mode": c.get("mode")} if (c := claims.other(sd)) else None)}
                          for sd in rows]}
 
@@ -3043,6 +3324,8 @@ class App:
                 else:
                     st["detail"] = rs["detail"] + (" · " + st["detail"] if st.get("detail") else "")
             out.append(st)
+        for rt in self.systems.values():                # (#409) one row per other system
+            out.append(rt.status(self.assign.values()))
         out.append({"label": "STT", "mhz": None, "state": self.whisper.state, "detail": self.whisper.detail,
                     "open": False, "quieting_db": None, "restarts": 0, "last_heard": None})
         engine = self.cfg.dispatch_tts_engine
@@ -3058,6 +3341,42 @@ class App:
         """POST /api/incident/<id>/close (the monitor's incident, not the CAD's)."""
         return self.store.close(iid)
 
+    def _hide_context(self, st: dict) -> dict:
+        """The state as served where nobody is signed in (the station's own page, all-in-one, a hub without Access;
+        sizeup/sourcekeys.py may_see_context, #419): none of another system's traffic, nothing its control channel
+        showed, and no activity on its talkgroups (count, last heard, dropped: their names and tiers stay). In place;
+        the hub calls it again after it puts the station's lists in."""
+        if sources.may_see_context(self.access_enforced):
+            return st
+        st["loose_traffic"] = [t for t in st.get("loose_traffic") or [] if not sources.is_context(t)]
+        for inc in st.get("incidents") or []:
+            inc["traffic"] = [t for t in inc.get("traffic") or [] if not sources.is_context(t)]
+        st["p25_systems"] = [dict(x, unknown=[], encrypted=[], last_heard=None, cc=None)
+                             for x in st.get("p25_systems") or [] if isinstance(x, dict)]
+        st["talkgroups"] = [dict(r, count=0, last=None, dropped=0) if isinstance(r, dict) and sources.is_context(r) else r
+                            for r in st.get("talkgroups") or []]
+        st["radios"] = [dict(r, last_heard=None, detail="") if isinstance(r, dict) and r.get("system") else r
+                        for r in st.get("radios") or []]
+        return st
+
+    def clip_is_context(self, cid: str) -> bool:
+        """This clip is another P25 system's (#419: served only to a signed-in person). By its row here, by the
+        radio log's, else by the talkgroup its id starts with ("9211-..."). A row that says so is context even when its
+        talkgroup has since left the file. (An id has dots of its own, "9211-1790954731.970_770181250.1-call_5": only
+        the source copy's ".src" is taken off.)"""
+        base = cid[:-4] if cid.endswith(".src") else cid
+        for t in list(self.store.loose) + [t for i in self.store.incidents for t in i.traffic]:
+            if t.id == base:
+                return sources.is_context(t.__dict__)
+        try:
+            row = self.cad.store.one("SELECT system FROM radio_traffic WHERE id = ?", (base,))
+        except Exception:  # noqa: BLE001 - no log to ask: by its id
+            row = None
+        if row is not None:
+            return sources.is_context(row)
+        m = re.match(r"(\d{1,9})-", base)
+        return bool(m) and int(m.group(1)) in sources.context_talkgroups()
+
     def has_clip(self, cid: str) -> bool:
         with self._lock:
             if cid in self.clips:
@@ -3072,11 +3391,13 @@ class App:
         st = {"time": time.time(), "radios": self.radio_status(), **self.store.state(), "pages": pages, "sdr": self.sdr(),
               "storage": getattr(self, "storage", None),
               "rerun": dict(self.rerun, pending=len(self._rerun_ids)),
-              "talkgroups": self.tg.state() if self.p25 else [],
+              "talkgroups": self.talkgroups_state() if self.p25 else [],
+              "p25_systems": self.p25_systems_state(),
               "talking": self.live.state(),
               "paging": self.paging_state(),
               "prealert": self.cad.prealert_state(),
               "channels": self.channels_state()}
+        self._hide_context(st)
         # Tell the display which entries have a recording (so ▶ isn't a dead button).
         with self._lock:
             busy = set(self._rerun_ids)
@@ -3119,11 +3440,21 @@ class App:
         threading.Thread(target=self.cad.place_index, name="places", daemon=True).start()   # built before the first "@"
         threading.Thread(target=self._watch_fm, name="talking", daemon=True).start()
         if self.shared:
-            for sd, m in list(self.assign.items()):  # each dongle runs what was picked for it
-                if not self._start_mode(m, sd):         # held by shortfinal now: don't fight for it
-                    self.assign[sd] = OFF_MODE
-                    self.set_by.pop(sd, None)
+            self.reception.recover()          # (#410) a test that never ended: its dongle starts on its own job
+            self._booting = True
+            try:
+                for sd, m in list(self.assign.items()):  # each dongle runs what was picked for it
+                    if not self._start_mode(m, sd):         # held by shortfinal now: don't fight for it
+                        self.assign[sd] = OFF_MODE
+                        self.set_by.pop(sd, None)
+            finally:
+                self._booting = False
             self._save_modes()
+            for rt in self.systems.values():            # (#409) each system once, on all the dongles it has
+                if rt.recorder.sources:
+                    rt.recorder.start()
+                elif getattr(rt.recorder, "unit", False):
+                    rt.recorder.stop(f"no dongle on {rt.system.label}")
             if getattr(self.recorder, "unit", False) and P25_MODE not in self.assign.values():
                 # trunk-recorder's own service may still run what the sizeup before this one asked: no dongle has it now
                 self.recorder.stop(f"no dongle on {P25_MODE}")
@@ -3138,6 +3469,10 @@ class App:
                 self.recorder.start()
         if self.p25:
             self.p25.start()
+        for rt in self.systems.values():
+            rt.ingest.start()
+        if self.systems:
+            self.reception.start_thread()
         if self.vocab is not None and self.vocab.state()["state"] == "PENDING":
             self.vocab.poll()
         if getattr(self, "atc_vocab", None) is not None and self.atc_vocab.state()["state"] == "PENDING":
@@ -3320,6 +3655,7 @@ class App:
     def stop(self) -> None:
         self._stopping.set()
         self.cad.stop_voice()                # dispatch voices still rendering get a moment (#426); the rest: the next start's
+        self.reception.shutdown()              # (#410) a running reception test ends here: its dongle back on its job
         self.attachments.stop()
         for r in self.receivers:
             r.stop()
@@ -3332,6 +3668,12 @@ class App:
             self.recorder.shutdown()           # its own service (the station) keeps running: the next sizeup adopts it
         if self.p25:
             self.p25.stop()
+        for rt in self.systems.values():
+            rt.recorder.shutdown()
+            rt.ingest.stop()
+            rt.activity.flush(everything=True)
+            rt.activity.save()
+        self.tg.save_unknown()
         for sd in list(self.assign):
             claims.release(sd)
         self.whisper.stop()
@@ -3427,8 +3769,12 @@ def make_server(app: App, fence=None, listener=None) -> WebServer:
                        aircraft=app.aircraft, roadwork=app.roadwork, set_adsb=app.set_adsb_receiver,
                        vessels=app.vessels,
                        airband_ab=app.airband_ab if cfg.cloud_role != "hub" else None,
+                       reception=(app.reception_post, app.reception_sample, app.reception_state),
                        fence=fence, health_fn=lambda: app.health_extra(fence), listener=listener,
-                       perf=getattr(app, "perf", None), adapter_password=adapter_password(cfg))
+                       perf=getattr(app, "perf", None), clip_context=app.clip_is_context,
+                       adapter_password=adapter_password(cfg))
+    # another system's traffic in the shared state only where every reader is verified (#419)
+    app.access_enforced = app.cad.comms.context_broadcast = server.access_enforced
 
     def changed() -> None:             # a new talker is pushed at once, not on the next second
         server.poke()
@@ -3619,7 +3965,12 @@ def serve(cfg: Config, fence=None, phases=None, early=None) -> int:
     server = make_server(app, fence, listener)
     t.mark("server")
     if threading.current_thread() is threading.main_thread():
-        signal.signal(signal.SIGTERM, lambda *_: server.drain())
+        def term(*_a) -> None:
+            # (#410) a running reception test ends NOW, in its own thread: its dongle is back on its job while the
+            # requests in flight drain (up to 10 s), not after; App.stop() then finds nothing left to end
+            threading.Thread(target=app.reception.shutdown, name="reception-stop", daemon=True).start()
+            server.drain()
+        signal.signal(signal.SIGTERM, term)
     sm = app.station
     role = (" · hub (fed by the station, no radios)" if cfg.cloud_role == "hub"
             else f" · station, forwarding to {sm.hub_url}" if sm is not None and sm.forward else "")

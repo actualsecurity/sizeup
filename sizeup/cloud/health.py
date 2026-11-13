@@ -307,6 +307,24 @@ class Metrics:
                 "mem_total": mem_total, "temp_c": self.temp_c(), "disk_path": str(self.disk_path)[:200], **disk}
 
 
+LONG_NUMBER = re.compile(r"(?<![\d.])\d{5,}(?!\d|\.\d)")
+NOT_AN_ID = re.compile(r"(?:rate|freq\w*|center|centre|hz|count|pid)\W*$", re.I)
+
+
+def no_ids(detail) -> str:
+    """A recorder's detail for the health report: trunk-recorder's own output lines can name a radio (its ID), so
+    any long whole number in it is left out, whatever follows it (a full stop, a comma, a bracket); a frequency or a
+    sample rate ("476075000 Hz", "rate: 2400000") stays."""
+    text = str(detail or "")
+
+    def one(m) -> str:
+        after = text[m.end():m.end() + 8].lstrip().lower()
+        if after.startswith(("mhz", "hz", "khz", "/sec", "sps")) or NOT_AN_ID.search(text[:m.start()][-16:]):
+            return m.group(0)                       # a frequency or a rate, by what is written around it
+        return "#"
+    return LONG_NUMBER.sub(one, text)[:200]
+
+
 def station_metrics(app, metrics: Metrics) -> dict:
     """status["health"] in the station's state post: the machine, and each radio program as it really runs
     (the rows say "off" for a job no dongle has; here every job with whether it is expected to run)."""
@@ -322,11 +340,21 @@ def station_metrics(app, metrics: Metrics) -> dict:
         jobs[st.get("label", "?")] = {"state": st.get("state"), "restarts": st.get("restarts", 0),
                                       "detail": str(st.get("detail") or "")[:200],
                                       "expected": (not shared) or st.get("label") in assigned}
+    for rt in (getattr(app, "systems", None) or {}).values():      # (#409) each other P25 system's dongle jobs
+        try:
+            rs = rt.recorder.status()
+        except Exception:  # noqa: BLE001
+            continue
+        for job in rt.system.jobs:
+            # context: a context system's job is never an alert (the hub shows it in the panel only)
+            jobs[job] = {"state": rs.get("state") if job in assigned else "off", "restarts": rs.get("restarts", 0),
+                         "detail": no_ids(rs.get("detail")), "expected": (not shared) or job in assigned,
+                         "context": True}
     rec = getattr(app, "recorder", None)
     if rec is not None and getattr(app, "p25", None) is not None:
         rs = rec.status()
         out["recorder"] = {"state": rs.get("state"), "restarts": rs.get("restarts", 0),
-                           "detail": str(rs.get("detail") or "")[:200],
+                           "detail": no_ids(rs.get("detail")),
                            "expected": (not shared) or P25_JOB in assigned}
         cc = getattr(rec, "cc", None)
         if cc is not None:
@@ -344,6 +372,12 @@ def station_metrics(app, metrics: Metrics) -> dict:
         except Exception:
             pass
     out["jobs"] = jobs
+    rx = getattr(app, "reception", None)
+    if rx is not None:
+        try:
+            out["reception"] = rx.health()          # (#410) a job a reception test paused and didn't give back
+        except Exception:  # noqa: BLE001 - a report, never in the way
+            pass
     usb = getattr(app, "usb", None)
     if callable(usb):
         try:
@@ -573,10 +607,16 @@ class StationHealth:
             dongles.append({"serial": str(d.get("serial") or ""), "name": str(d.get("name") or d.get("serial") or ""),
                             "present": bool(d.get("present")), "job": job, "set_by": d.get("set_by"),
                             "held_by": d.get("held_by"), "ambiguous": str(d.get("ambiguous") or "")[:300],
+                            "context": bool(js.get("context")),      # another P25 system's job (#409): never an alert
                             "running": bool(d.get("present")) and job != "Off" and js.get("state") == "ok",
                             "state": js.get("state") if job != "Off" else "off", "restarts": js.get("restarts", 0),
                             "detail": str(js.get("detail") or "")[:200]})
         out["dongles"] = dongles
+        rx = hl.get("reception") if isinstance(hl.get("reception"), dict) else None      # (#410)
+        out["reception"] = ({"job": str(rx.get("job") or "")[:60], "sdr": str(rx.get("sdr") or "")[:60],
+                             "text": str(rx.get("text") or "")[:300], "push": bool(rx.get("push")),
+                             "since": rx.get("since") if isinstance(rx.get("since"), (int, float)) else None}
+                            if rx and rx.get("text") else None)
         out["shared"] = bool(sdr and sdr.get("shared"))
         usb = hl.get("usb") if isinstance(hl.get("usb"), dict) else {}
         dups = usb.get("duplicates") if isinstance(usb.get("duplicates"), list) else (sdr or {}).get("duplicates") or []
@@ -770,7 +810,15 @@ class StationHealth:
             out[f"dup:{x['serial']}"] = {"severity": "critical", "title": f"Duplicate dongle serial {x['serial']}",
                                          "text": (x["text"] or f"{len(x['indexes'])} dongles share serial {x['serial']}") + "." + on,
                                          "since": now}
+        rx = m.get("reception")
+        if rx:
+            # (#410) a job a reception test paused is still paused after the test (or wasn't given back): always in
+            # the panel; pushed when it paused one of our jobs (a spare dongle left Off: the panel only)
+            out["reception"] = {"severity": "critical" if rx["push"] else "warning", "title": "Reception test: job not restored",
+                                "text": rx["text"], "since": rx["since"] or now, "quiet": not rx["push"]}
         for d in m["dongles"]:
+            if d.get("context"):
+                continue                                 # a context system down is shown in the panel, never pushed
             if not d["present"]:
                 held(f"sdr:{d['serial']}", 0, {"severity": "critical", "title": f"SDR {d['name']} gone",
                                                "text": f"dongle {d['name']} ({d['serial']}) unplugged or not found"
@@ -843,7 +891,7 @@ class StationHealth:
     def _notify_ok(self, a: dict, now: float) -> bool:
         """Old enough to push (NOTIFY_AFTER); the whisper backlog only while it is still that far behind now, not one
         nearly caught up (#300)."""
-        if now - float(a["since"]) < NOTIFY_AFTER.get(a["key"], 0.0):
+        if now - float(a["since"]) < NOTIFY_AFTER.get(a["key"], 0.0) or a.get("quiet"):
             return False
         return a["key"] != "stt_backlog" or self._stt_oldest >= STT_NOTIFY_S
 
@@ -1028,6 +1076,10 @@ class StationHealth:
                 else:
                     self._escalate(a, c)
                     a.update(severity=c["severity"], title=c["title"], text=c["text"], who=c.get("who") or a.get("who") or {})
+                if c.get("quiet"):
+                    a["quiet"] = True                    # the panel only (#410: nothing of ours is affected)
+                else:
+                    a.pop("quiet", None)
             for key in list(self.active):
                 if key in conds:
                     continue

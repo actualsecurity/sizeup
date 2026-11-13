@@ -124,11 +124,17 @@ def test_every_admin_only_get_the_scripts_make_is_in_the_read_map():
     scripts = "".join(js(n) for n in JS_FILES)
     for path, literal, script in (("/api/cad/notify", '"/api/cad/notify"', "settings.js"),
                                   ("/api/cad/health", '"/api/cad/health"', "health.js"),
-                                  ("/api/cad/search.csv", "`/api/cad/search.csv?", "search-view.js")):
+                                  ("/api/cad/search.csv", "`/api/cad/search.csv?", "search-view.js"),
+                                  ("/api/cad/preplan.csv", '"/api/cad/preplan.csv"', "preplan.js")):     # (#456)
         assert literal in js(script), f"{script} doesn't read {path}"
         assert path in ADMIN_READS, path
-    assert set(ADMIN_READS) == {"/api/cad/notify", "/api/cad/health", "/api/cad/perf", "/api/cad/perf/profile",   # (perf: #425)
-                                "/api/cad/search.csv", "/api/cad/adapter-password"}   # (#403, #460)
+    # ... and a reception test's captured audio (#410: served by server.py, played in Settings > Radios)
+    assert "/api/reception/sample?id=" in js("radio-controls.js") and '"/api/reception"' in js("radio-controls.js")
+    # (perf: #425; #403: the Search CSV; #456: the pre-plan CSV; + #409: which radios keyed an encrypted talkgroup,
+    # which no script reads yet)
+    assert set(ADMIN_READS) == {"/api/cad/notify", "/api/cad/health", "/api/cad/perf", "/api/cad/perf/profile",
+                                "/api/cad/search.csv", "/api/cad/preplan.csv", "/api/cad/comms/activity",
+                                "/api/reception", "/api/reception/sample", "/api/cad/adapter-password"}   # (+ #460)
     assert '"/api/cad/adapter-password"' in js("adapterpass.js")
     assert "/api/cad/adapter-password" not in scripts.replace(js("adapterpass.js"), "")   # only its card reads it
     assert '"/api/cad/perf"' in js("health.js") and '"/api/cad/perf/profile' in js("health.js")

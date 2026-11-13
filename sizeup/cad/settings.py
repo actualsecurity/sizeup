@@ -49,7 +49,8 @@ Reset to default = drop the override (one item, or a whole section).
                                    (#376, sizeup/cad/mapview.py DISPLAY_DEFAULTS; Settings > System > Map display, admins)
     premise_visibility             key a premise-note category ("medical") -> "dispatcher" | "admin": who may see its notes
                                    (not set: everyone signed in; #403, sizeup/cad/premise.py; Settings > System > Address
-                                   notes, admins)
+                                   notes, admins); also a pre-plan point kind ("knox_box", "gate_access": #456,
+                                   sizeup/cad/preplan.py RESTRICTABLE)
     audio_retention                key "_default" | a channel's label ("FG1", "HPN Tower") | "tg:<n>" -> days (0.5 to 365): how
                                    long the hub keeps that channel's clips, the ones already kept too (#414,
                                    sizeup/audiostore.py keep_days; Settings > System > Audio retention, admins)
@@ -89,7 +90,7 @@ from sizeup.cad import dispatcher, eta, mapview, runcards, tonelist
 from sizeup.cad import lists as lists_mod
 from sizeup.cad.lists import CLASSES, CODE, COLOR, LIST_SECTIONS, LONG_CODE, RESPONSES, ROLES, ListsError
 from sizeup.cad.store import OPERATOR_MAX, SCHEMA_VERSION, TZ, CadError
-from sizeup import audiostore, errwatch, polly
+from sizeup import audiostore, errwatch, polly, sourcekeys
 from sizeup.cloud import health as health_mod
 from sizeup.radio.tones import pair_key
 from sizeup.tts import KOKORO_VOICES
@@ -143,6 +144,14 @@ PAGE_SECTION[MAPD_SECTION] = "system"
 PREMISE_SECTION = "premise_visibility"
 PAGE_SECTION[PREMISE_SECTION] = "system"
 PREMISE_LEVELS = ("everyone", "dispatcher", "admin")
+
+
+def _visibility_keys() -> dict[str, str]:
+    """premise_visibility's keys: the premise-note categories, and the pre-plan point kinds an admin may restrict (#456,
+    sizeup/cad/preplan.py RESTRICTABLE: the Knox boxes, the gate codes)."""
+    from sizeup.cad.preplan import KINDS, RESTRICTABLE
+    from sizeup.cad.premise import CATEGORIES
+    return {**CATEGORIES, **{k: f"Pre-plan: {KINDS[k]}" for k in RESTRICTABLE}}
 # How long each channel's / talkgroup's clips are kept on the hub (#414, sizeup/audiostore.py keep_days): Settings >
 # System > Audio retention, admins, audited as System; applies to the clips already kept at the next prune.
 RET_SECTION = audiostore.RETENTION_SECTION
@@ -567,6 +576,16 @@ class Editor:
         out["audio_retention"] = self.retention_page(ov)
         return out
 
+    def _context_channel(self, channel: str) -> bool:
+        """This channel's newest transmission is another P25 system's (#409; one indexed row: (channel, start))."""
+        if not channel:
+            return False
+        try:
+            r = self.store.q("SELECT system FROM radio_traffic WHERE channel = ? ORDER BY start DESC LIMIT 1", (channel,))
+        except Exception:  # noqa: BLE001 (no radio log, or one without the system column)
+            return False
+        return bool(r) and sourcekeys.is_context(r[0])
+
     def retention_page(self, ov: dict | None = None) -> dict | None:
         """Settings > System > Audio retention (#414): the defaults and every channel / talkgroup with clips or days of
         its own: clips, bytes, the audio's days and the transcripts' days in effect (talkgroup > channel > default;
@@ -583,12 +602,13 @@ class Editor:
         tpol = audiostore.Retention(tr, audiostore.TRANSCRIPT_DEFAULT_DAYS)
         rows: dict[str, dict] = {}
         live_n = live_b = 0
+        hide = None if sourcekeys.may_see_context() else self._context_channel
         for c in blobs.channels():
             live_n += c["clips"]
             live_b += c["bytes"]
             key = audiostore.retention_key(c["channel"], c["talkgroup"])
-            if not key:
-                continue
+            if not key or (hide is not None and hide(c["channel"])):
+                continue                    # another P25 system's channel: its clips only to a signed-in person (#419)
             x = rows.setdefault(key, {"key": key, "label": c["channel"] or key, "channel": c["channel"],
                                       "talkgroup": c["talkgroup"], "clips": 0, "bytes": 0})
             x["clips"] += c["clips"]
@@ -779,18 +799,16 @@ class Editor:
 
     def premise_page(self, ov: dict | None = None) -> dict:
         """Settings > System > Address notes (#403): each category, who may see it (everyone | dispatcher | admin)."""
-        from sizeup.cad.premise import CATEGORIES
         e = ((self.overrides() if ov is None else ov).get(PREMISE_SECTION) or {})
         return {k: {"label": lab, "value": e.get(k, "everyone"), "edited": k in e, "choices": list(PREMISE_LEVELS)}
-                for k, lab in CATEGORIES.items()}
+                for k, lab in _visibility_keys().items()}
 
     def _premise_op(self, action: str, body: dict, op: str) -> dict:
         """set {key: a category, value: everyone | dispatcher | admin} | reset {key}: admins (who may see that category's
         premise notes: the state push carries only what everyone may see)."""
-        from sizeup.cad.premise import CATEGORIES
         key = body.get("key")
-        if key not in CATEGORIES:
-            raise CadError(f"key: {', '.join(CATEGORIES)}")
+        if key not in _visibility_keys():
+            raise CadError(f"key: {', '.join(_visibility_keys())}")
         cur = (self.overrides().get(PREMISE_SECTION) or {}).get(key, "everyone")
         if action == "reset":
             v = "everyone"
@@ -1703,7 +1721,9 @@ class Editor:
             for key, v in vals.items():
                 if channels_mod.is_tg(key) and "record" in v:
                     rec = v.pop("record")
-                    err = ctx.set_talkgroup(int(key[3:]), rec) if ctx is not None else "no talkgroups here"
+                    tsys, tgn = channels_mod.tg_of(key)       # (#409) another system's: with its system
+                    err = "no talkgroups here" if ctx is None else (
+                        ctx.set_talkgroup(tgn, rec, None, None, tsys) if tsys else ctx.set_talkgroup(tgn, rec))
                     if err:
                         raise CadError(err)
                 if not v:
@@ -2500,8 +2520,7 @@ class Editor:
             except ValueError as e:
                 raise CadError(f"overrides.{MAPD_SECTION}: {e}") from None
         for k, v in (ov.get(PREMISE_SECTION) or {}).items():  # sizeup/cad/premise.py (#403)
-            from sizeup.cad.premise import CATEGORIES
-            if k not in CATEGORIES or v not in PREMISE_LEVELS[1:]:
+            if k not in _visibility_keys() or v not in PREMISE_LEVELS[1:]:
                 raise CadError(f"overrides.{PREMISE_SECTION}: {k!r} -> {v!r} (a category -> dispatcher | admin)")
         for sec in (RET_SECTION, TRS_SECTION):                 # sizeup/audiostore.py (#414)
             for k, v in (ov.get(sec) or {}).items():

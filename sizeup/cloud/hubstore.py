@@ -439,7 +439,9 @@ class AudioDb:
 
     def prune_clips(self, older_than: float, kept: Callable[[list[str]], set[str]] | None = None,
                     kept_older_than: float | None = None, batch: int = 200, pause_s: float = 0.0,
-                    max_rows: int | None = None, policy=None, now: float | None = None) -> int:
+                    max_rows: int | None = None, policy=None, now: float | None = None,
+                    context: Callable[[list[str]], dict[str, tuple[int, bool]]] | None = None,
+                    context_max_bytes: int | None = None) -> int:
         """The audio retention (#251, #414, docs/cloud.md "Audio retention"). Clips (kind 'clip'; never the dispatch
         audio) go once older than their own retention: the policy's (sizeup/audiostore.py Retention: the channel's or
         talkgroup's days in Settings, worked out in SQL at every prune, so a change applies to the clips already
@@ -449,7 +451,13 @@ class AudioDb:
         oldest of those that aren't a record. The scan reads SCAN_PAGE rows at a time on the read connection (no
         lock held between pages); store objects go first (DeleteObjects, 1000 a call), then the rows whose objects
         are gone, in transactions of at most `batch` rows, pause_s apart; at most max_rows this call (None: all).
-        The number deleted."""
+        The number deleted.
+
+        Context audio (#409: another P25 system's clips; context(ids) -> {id: (rank, extended)}: rank 0 goes first,
+        extended: its tier still keeps it past its retention) never costs our own audio anything. A tier only extends
+        a clip past its retention; context clips have their own budget (context_max_bytes, over their bytes wherever
+        kept: over it the lowest rank, then the oldest, go); and over the cap every context clip goes before any clip
+        of ours."""
         now = time.time() if now is None else now
         expr, params = policy.sql(now) if policy is not None else ("?", [older_than])
         n, cur_at, cur_rowid = 0, float("-inf"), -1
@@ -465,8 +473,12 @@ class AudioDb:
                              (older_than, cur_at, cur_at, cur_rowid, last[0], last[0], last[1], *params))
             cur_at, cur_rowid = last
             if due:
-                keep = kept([a for a, _ in due]) if kept is not None else set()
-                gone = [aid for aid, at in due if aid not in keep or (kept_older_than is not None and at < kept_older_than)]
+                ids = [a for a, _ in due]
+                keep = kept(ids) if kept is not None else set()
+                ext = context(ids) if context is not None else {}
+                gone = [aid for aid, at in due
+                        if (aid not in keep and not ext.get(aid, (0, False))[1])
+                        or (aid in keep and kept_older_than is not None and at < kept_older_than)]
                 if max_rows is not None:
                     gone = gone[:max(0, max_rows - n)]
                 n += self._delete(gone, batch, pause_s)
@@ -475,21 +487,44 @@ class AudioDb:
             if not end:
                 break
         total = self.bytes()
+        over: list[str] = []
+        ctx: dict[str, tuple[int, bool]] = {}
+        if context is not None and (context_max_bytes is not None or total > self.max_bytes):
+            # every clip with its bytes wherever kept (audio.sqlite or the store), oldest first
+            sizes = self._scan("SELECT id, CASE WHEN LENGTH(wav) > 0 THEN LENGTH(wav) ELSE bytes END, stored, "
+                               "LENGTH(wav) FROM audio WHERE kind = 'clip' ORDER BY at")
+            ctx = context([r[0] for r in sizes]) if sizes else {}
+            if ctx:
+                # context clips: the lowest tier first, then the oldest (sizes is oldest first: a stable sort keeps that)
+                mine = sorted((r for r in sizes if r[0] in ctx), key=lambda r: ctx[r[0]][0])
+                used = sum(r[1] or 0 for r in mine)
+                budget = context_max_bytes if context_max_bytes is not None else used
+                for aid, size, stored, in_db in mine:
+                    if used <= budget and total <= self.max_bytes:
+                        break
+                    # inside the budget, only a clip still in audio.sqlite helps the cap (the cap counts those bytes
+                    # alone): one already in the store stays
+                    if used <= budget and not (stored == 'db' and in_db):
+                        continue
+                    over.append(aid)
+                    used -= size or 0
+                    if stored == 'db':
+                        total -= in_db or 0
         if total > self.max_bytes:
             sizes = self._scan("SELECT id, LENGTH(wav) FROM audio WHERE stored = 'db' AND kind = 'clip' "
                                "AND LENGTH(wav) > 0 ORDER BY at")
             keep = kept([r[0] for r in sizes]) if kept is not None and sizes else set()
-            over = []
             for aid, size in sizes:
                 if total <= self.max_bytes:
                     break
-                if aid in keep:
+                if aid in keep or aid in ctx:
                     continue
                 over.append(aid)
                 total -= size
+        if over:
             n += self._delete(over, batch, pause_s)
-            if total > self.max_bytes:
-                self.over_cap = total               # the records alone are over the cap: kept (the retention decides)
+        if total > self.max_bytes:
+            self.over_cap = total                   # the records alone are over the cap: kept (the retention decides)
         return n
 
     over_cap = 0

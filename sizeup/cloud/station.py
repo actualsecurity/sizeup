@@ -25,7 +25,7 @@
     jobs thread        GET /api/station/jobs?wait=25 (long poll: the station never takes inbound
                        connections): "tts" renders a dispatch with the local voice; "call" runs
                        set_mode / set_talkgroup / set_talkgroup_group / retranscribe / transcribe_now /
-                       set_channel_prefs
+                       reception_post / reception_sample_b64 (a reception test, #410) / set_channel_prefs
                        (Settings > Radios > Channels, as the hub has them) / emergency_all_clear (an
                        alarm's All clear: the emergency window here, App._call's keep decision) here
 
@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import base64
 import io
+import json
 import tempfile
 import threading
 import time
@@ -67,7 +68,9 @@ CALLS = ("set_mode", "set_talkgroup", "set_talkgroup_group", "retranscribe", "se
          "emergency_all_clear",       # an alarm's All clear on the hub: the emergency window here closes (#128)
          "transcribe_now",            # the hub's fallback when Amazon Transcribe can't: whisper at live priority (#195)
          "set_adsb_receiver",         # Settings > Radios on the hub: the dongle reserved for ADS-B (#235)
-         "sources_poll_now")          # a pre-alert on the hub: the CAD feed adapters here poll now (#297)
+         "sources_poll_now",          # a pre-alert on the hub: the CAD feed adapters here poll now (#297)
+         "reception_post",            # Settings > Radios on the hub: a reception test here (#410)
+         "reception_sample_b64")      # ... and a call it captured, to listen to (never stored on the hub)
 
 
 def clip_8k(wav: bytes | None) -> bytes | None:
@@ -114,6 +117,15 @@ class StationLink:
         self.app, self.cfg, self.log = app, cfg, log
         self.updates = updates or Watch(log=log)
         self.outbox = outbox or Outbox(cfg.cloud_outbox or ":memory:", int(cfg.cloud_outbox_max_mb * 1024 * 1024))
+        # what the hub last said it knows (#409), kept beside the outbox: a station starting while the hub is away
+        # still queues another system's rows for it
+        self._caps_file = (Path(cfg.cloud_outbox).with_name("hub_caps.json")
+                           if cfg.cloud_outbox and cfg.cloud_outbox != ":memory:" else None)
+        try:
+            if self._caps_file is not None and self._caps_file.is_file():
+                self.hub_caps = frozenset(str(c) for c in json.loads(self._caps_file.read_text()))
+        except (OSError, ValueError, TypeError):
+            pass
         self._client = client or (lambda timeout: HubClient(cfg.cloud_hub_url, cfg.cloud_token, cfg.cloud_access_id,
                                                             cfg.cloud_access_secret, timeout))
         self._stop = threading.Event()
@@ -141,9 +153,26 @@ class StationLink:
 
     # -- the app's side ---------------------------------------------------------------------------
 
+    hub_caps: frozenset = frozenset()       # what the hub says it knows ("caps" in its answers): "p25_systems" (#409)
+
+    def _set_caps(self, caps) -> None:
+        caps = frozenset(str(c) for c in (caps or []))
+        if caps != self.hub_caps:
+            self.hub_caps = caps
+            try:
+                if getattr(self, "_caps_file", None) is not None:
+                    self._caps_file.write_text(json.dumps(sorted(caps)))
+            except OSError:
+                pass
+
     def emit(self, kind: str, data: dict, clip: str | None = None) -> None:
+        # Another P25 system's (#409): a hub from before it would file the row as the county's talkgroup of that
+        # number, so it is not sent there (the station's own page still has it); its audio waits in its own budget.
+        context = kind == "activity" or (kind in ("traffic", "alarm") and bool(data.get("system")))
+        if context and "p25_systems" not in self.hub_caps:
+            return
         audio = clip_8k(self.app.clip(clip)) if clip else None
-        self.outbox.add(kind, data, audio)
+        self.outbox.add(kind, data, audio, context=context)
         self._wake.set()
 
     def live_changed(self) -> None:
@@ -294,6 +323,8 @@ class StationLink:
                "radios": [r for r in app.radio_status() if r.get("label") != "Hub"],
                "sdr": app.sdr(), "rerun": dict(app.rerun, pending=len(app._rerun_ids)),
                "channels": app.channels_applied(),
+               "p25_systems": app.p25_systems_state(),       # (#409) the other P25 systems: jobs, state, activity
+               "reception": app.reception.state(),           # (#410) the reception test: its numbers, the history
                "outbox": {"pending": n, "oldest": oldest, "dropped_audio": self.outbox.dropped_audio},
                "version": self.version()}
         try:
@@ -301,7 +332,7 @@ class StationLink:
         except Exception as e:  # health is a report: never in the way of the status itself
             out["health"] = {"error": f"{type(e).__name__}: {e}"[:200]}
         if talkgroups:
-            out["talkgroups"] = app.tg.state() if app.p25 else []
+            out["talkgroups"] = app.talkgroups_state() if app.p25 else []
         return out
 
     def _state(self) -> None:
@@ -316,7 +347,7 @@ class StationLink:
             body: dict = {"at": now, "talking": talking, "paging": paging}
             if self._status_now or now - last_status >= STATUS_S:
                 tgs = self.app.tg.state() if self.app.p25 else []
-                sig = [(r["tg"], r["record"], r["main"]) for r in tgs]
+                sig = [(r["tg"], r["record"], r["main"], r.get("system"), r.get("tier")) for r in tgs]
                 send_tg = sig != tg_sig or now - last_tg >= TALKGROUPS_S
                 body["status"] = self.status(talkgroups=False)
                 if send_tg:
@@ -325,10 +356,13 @@ class StationLink:
                 r = client.request("POST", "/api/station/state", body, timeout=10.0)
                 self._ok()
                 self.updates.hub(r.get("build") if isinstance(r, dict) else None)
+                if isinstance(r, dict):
+                    self._set_caps(r.get("caps"))
                 if "status" in body:
                     last_status, self._status_now = now, False
                     if "talkgroups" in body["status"]:
-                        last_tg, tg_sig = now, [(r["tg"], r["record"], r["main"]) for r in body["status"]["talkgroups"]]
+                        last_tg, tg_sig = now, [(r["tg"], r["record"], r["main"], r.get("system"), r.get("tier"))
+                                                for r in body["status"]["talkgroups"]]
                 backoff.ok()
             except HubError as e:
                 self._fail(e)

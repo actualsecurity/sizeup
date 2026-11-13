@@ -51,6 +51,18 @@ POST /api/cad/premise                     {incident_id | where, text, category?,
 POST /api/cad/premise/<id>                {text?, category?, priority?, review_at?, expires_at?, action?: expire | restore}
 POST /api/cad/premise/<id>/ack            {incident_id}: seen on that call. All three: dispatchers and admins, in the
                                           Settings audit log (section "premise")
+GET  /api/cad/preplan?bbox=w,s,e,n | incident=<id> | where=<address> | (all=1)
+                                          pre-plan points (#456, sizeup/cad/preplan.py): {points, gen}; a viewport (the
+                                          map's Pre-plan layer, at most 0.05 deg a side), a call's, a building's; with none
+                                          of those, every point: admins. ETag (304); restricted kinds per person
+GET  /api/cad/preplan/where?lat=&lon=&incident_id= | where= | point=&link=
+                                          the editor's: the building a point there belongs to (dispatchers and admins)
+GET  /api/cad/preplan.csv                 every active point: admins only (ADMIN_READS); in the person's activity
+POST /api/cad/preplan                     {kind, lat, lon, label?, note?, level?, priority?, review_by?, incident_id |
+                                          where?, link?: auto | building | call | point}
+POST /api/cad/preplan/<id>                {kind?, label?, note?, level?, priority?, review_by?, lat?, lon?, link?,
+                                          action?: delete | restore (admins)}. Both: dispatchers and admins, in the
+                                          Settings audit log (section "preplan")
 GET  /api/cad/admin                       record counts and the next event number
 GET  /api/cad/whoami                      {email, name, callsign, source: "access" | "none", role, enforced}: who
                                           signed in; with Access also {active, may, bootstrap, admins: [names]}
@@ -149,6 +161,8 @@ POST /api/cad/radio-id                    {system: mdc | fleetsync, radio_id, un
                                           new FG1 radio is (#163, the state's radio_ids; sizeup/cad/newids.py): unit
                                           names it (its transmissions go on that unit's events), label just says who,
                                           ignore stops asking; dispatchers and admins, only for an ID nobody has set
+GET  /api/cad/comms/activity?source=&hours=   per-minute activity per source (#409: an encrypted talkgroup's key-ups
+                                          and which radios keyed, a week at most); admins only (ADMIN_READS)
 GET  /api/cad/comms?unit=&channel=&event=&pcfd=1&emergency=1&since=&until=&main_limit=&limit=&rev=
                                           every transmission (newest first) with its rig, radio ID, events, the
                                           emergency button and its alarm (emergency=1: only those, #128); Main
@@ -242,6 +256,7 @@ import re
 from datetime import datetime
 from urllib.parse import parse_qs, unquote
 
+from sizeup import sourcekeys
 from sizeup.cad import airport
 from sizeup.cad.activity import CSV_MAX_ROWS, KINDS, MAX_ROWS
 from sizeup.cad.service import Cad
@@ -255,6 +270,7 @@ INCIDENT = re.compile(r"/api/cad/incident/(\d{1,9})(?:/(accept|dismiss|close|reo
 SUGGEST = re.compile(r"/api/cad/incident/(\d{1,9})/units")
 HERE = re.compile(r"/api/cad/incident/(\d{1,9})/here")                          # History here (#403)
 PREMISE = re.compile(r"/api/cad/premise(?:/(\d{1,9})(?:/(ack))?)?")              # premise notes (#403)
+PREPLAN = re.compile(r"/api/cad/preplan(?:/(\d{1,9}))?")                         # pre-plan points (#456)
 EXPORT = re.compile(r"/api/cad/export/([a-z-]{1,20}\.csv)")
 UNIT = re.compile(r"/api/cad/unit/(\d{1,9})/status")
 UNIT_STATION = re.compile(r"/api/cad/unit/(\d{1,9})/station")
@@ -278,9 +294,13 @@ DS_READERS = ("admin", "dispatcher")      # who may see Settings > Data sources 
 ADMIN_READS = {
     "/api/cad/notify": "the push topics' names are secret",                  # Settings > System > Push notifications
     "/api/cad/health": "station health is for admins (Settings > Health)",   # #203: off the header, on an admin tab
+    "/api/reception": "reception tests are the admins' (Settings > Radios)",          # #410 (server.py serves both)
+    "/api/reception/sample": "a reception test's audio is for the admin running it",
+    "/api/cad/comms/activity": "radio activity (which radios keyed) is for admins",   # #409: encrypted talkgroups
     "/api/cad/perf": "the hub's CPU and memory are for admins (Settings > Health)",          # #425 (sizeup/perf.py)
     "/api/cad/perf/profile": "the hub's CPU profile is for admins (Settings > Health)",
     "/api/cad/search.csv": "the search export is for admins",                # #403: many calls at once, off the hub
+    "/api/cad/preplan.csv": "the pre-plan export is for admins",              # #456: every Knox box at once
     "/api/cad/adapter-password": "the station adapter's password is for admins (Settings > Health)",   # server.py
 }
 
@@ -299,6 +319,7 @@ WRITES = (
     (ALARM_CLEAR, "dispatch"),                                              # ... and resolved: its window closed
     (re.compile(r"/api/cad/radio-id"), "dispatch"),                          # who a new FG1 radio is (#163)
     (PREMISE, "dispatch"),                                                  # premise notes: add, edit, expire, seen (#403)
+    (PREPLAN, "dispatch"),                                                  # pre-plan points: add, edit, move, delete (#456)
     (re.compile(r"/api/incident/[^/]{1,80}/close"), "dispatch"),            # the monitor's incident list (server.py)
     (UNIT_STATION, "admin"),                                                # a unit's home station: Settings > Units
     (re.compile(r"/api/cad/settings/(?:channels|stt)"), "admin"),           # Settings > Radios: record / transcribe /
@@ -458,6 +479,25 @@ def _premise(m, b, o, c):
     return f"Edited address note {nid}: {', '.join(k for k in b if k not in ('operator', 'action', '_may')) or 'nothing'}", ""
 
 
+def _preplan(m, b, o, c):
+    """A pre-plan point (#456): its number and kind, never its label, note, building or point (the server log has this
+    line; the Settings audit log has the rest)."""
+    from sizeup.cad.preplan import KINDS
+    p = o.get("point") or {}
+    pid = m.group(1) or p.get("id") or ""
+    if m.group(1) is None:
+        n = _number(c, b.get("incident_id")) if b.get("incident_id") not in (None, "") else ""
+        return f"Added pre-plan point {pid} ({KINDS.get(p.get('kind'), '')})" + (f" from {n}" if n else ""), n
+    act = str(b.get("action") or "")
+    if act in ("delete", "restore"):
+        return f"{'Deleted' if act == 'delete' else 'Restored'} pre-plan point {pid}", ""
+    changed = [k for k in o.get("changed") or [] if k not in ("lat", "lon", "bldg_key", "building_ref", "link")]
+    moved = any(k in (o.get("changed") or []) for k in ("lat", "lon"))
+    if moved and not changed:
+        return f"Moved pre-plan point {pid}", ""
+    return f"{'Moved and edited' if moved else 'Edited'} pre-plan point {pid}: {', '.join(changed) or 'nothing'}", ""
+
+
 def _prealert_at(o) -> str:
     from sizeup.prealert import _hms
     return _hms(o.get("at")) or "?"
@@ -491,6 +531,7 @@ DOES = (
         + (f" (its transmissions on {', '.join(o.get('linked') or [])})" if o.get("linked") else ""),
         (o.get("linked") or [""])[0])),
     (PREMISE, _premise),
+    (PREPLAN, _preplan),
     (UNIT_STATION, lambda m, b, o, c: (f"Changed settings: {o.get('name', '')} station {_clip(b.get('station'), 40) or 'unset'}", "")),
     (re.compile(r"/api/cad/settings/channels"), _channels),
     (re.compile(r"/api/cad/settings/stt"), _stt),
@@ -515,6 +556,10 @@ DOES = (
     (re.compile(r"/api/talkgroup"), lambda m, b, o, c: (f"Talkgroup {b.get('tg')}: {_toggles(b) or 'no change'}", "")),
     (re.compile(r"/api/talkgroup-group"), lambda m, b, o, c: (f"Talkgroups {_clip(b.get('group'), 40)}: {_toggles(b) or 'no change'}", "")),
     (re.compile(r"/api/mode"), lambda m, b, o, c: (f"Radio mode: {_clip(b.get('mode'), 30)}" + (f" ({_clip(b['sdr'], 30)})" if b.get("sdr") else ""), "")),
+    (re.compile(r"/api/reception"), lambda m, b, o, c: (
+        (f"Reception test started: {_clip(', '.join(map(str, b.get('jobs') or [b.get('job')])), 40)} on SDR {_clip(b.get('sdr'), 30)}"
+         + (f", pausing {_clip(b.get('pause'), 30)}" if b.get("pause") else "")) if b.get("action") == "start"
+        else "Reception test stopped" if b.get("action") == "stop" else "Reception test: antenna note", "")),
     (re.compile(r"/api/adsb-receiver"), lambda m, b, o, c: ((f"Named SDR {_clip(b.get('sdr'), 30)} the ADS-B receiver"
                                                             if b.get("sdr") else "Unnamed the ADS-B receiver's SDR"), "")),
     (re.compile(r"/api/retranscribe"), lambda m, b, o, c: ("Retranscribe: every recording" if b.get("all")
@@ -662,6 +707,32 @@ class CadApi:
                 "Content-Disposition": f'attachment; filename="{name}"', "Cache-Control": "no-store"}
         return _json(200, out)
 
+    def _preplan(self, path: str, query: str, who) -> tuple:
+        """GET /api/cad/preplan(?bbox= | incident= | where= | all), /preplan/where (the editor's: dispatchers and admins)
+        and /preplan.csv (admins, ADMIN_READS: in the person's activity, kind "search"). The layer's answer has an ETag
+        of the write generation, the reader's standing and the query (304 when unchanged: server.py _send); a call's
+        points have none (they follow the call's address, pin and status)."""
+        may, q = self._may(who), parse_qs(query)
+        pp = self.cad.preplan
+        if path == "/api/cad/preplan/where":
+            if may == "viewer":
+                return _json(403, {"error": "placing a pre-plan point is for dispatchers and admins"})
+            return _json(200, pp.preview(q, may))
+        if path == "/api/cad/preplan.csv":
+            data, n = pp.csv()
+            if who is not None and who.email:
+                self.cad.activity.record(who.email, "search", "GET /api/cad/preplan.csv", f"CSV: pre-plan points: {n}")
+            name = f"preplan-{datetime.now(TZ).strftime('%Y%m%d-%H%M')}.csv"
+            return 200, data, "text/csv; charset=utf-8", {"Content-Disposition": f'attachment; filename="{name}"',
+                                                          "Cache-Control": "no-store"}
+        etag = pp.etag(query, may)
+        try:
+            out = pp.get(q, may)
+        except PermissionError as e:
+            return _json(403, {"error": f"Admins only: {e}"})
+        h = {"ETag": etag, "Cache-Control": "private, no-cache"} if etag else {"Cache-Control": "no-store"}   # a call's: never a 304
+        return 200, json.dumps(out, separators=(",", ":")).encode(), JSON, h
+
     def _may(self, who) -> str:
         """The viewer's standing for what they may read (premise notes' categories, #403): "admin" | "dispatcher" |
         "viewer"; without a verified person (all-in-one) nothing is checked: "admin"."""
@@ -720,6 +791,10 @@ class CadApi:
         return {"ok": True, "running": row["running"], "source": row}
 
     def get(self, path: str, query: str, who=None) -> tuple[int, bytes, str]:
+        with sourcekeys.request_context(who):       # another system's traffic: a signed-in person only (#419)
+            return self._get(path, query, who)
+
+    def _get(self, path: str, query: str, who=None) -> tuple[int, bytes, str]:
         if (no := self.read_refused(path, who)) is not None:
             return no
         try:
@@ -755,6 +830,18 @@ class CadApi:
                 return _json(200, self.cad.radio_registry())
             if path == "/api/cad/comms":
                 return _json(200, self.cad.comms_query(parse_qs(query)))
+            if path == "/api/cad/comms/activity":      # per-minute activity per source (#409); ?source=&hours= (24)
+                # which radios keyed an encrypted talkgroup: a verified, signed-in admin only (read_refused checks the
+                # admin when someone is signed in; with nobody verified, never: sourcekeys.may_see_context)
+                if not sourcekeys.may_see_context():
+                    return _json(403, {"error": "radio activity needs a sign-in (Cloudflare Access)"})
+                q = parse_qs(query)
+                try:
+                    hours = min(24.0 * 90, max(0.1, float((q.get("hours") or ["24"])[0])))
+                except ValueError:
+                    hours = 24.0
+                return _json(200, {"rows": self.cad.comms.activity_rows(self.cad.clock() - hours * 3600,
+                                                                        (q.get("source") or [""])[0][:80])})
             if path == "/api/cad/feed":
                 return _json(200, self.cad.feed_query(parse_qs(query)))
             if path == "/api/cad/rigs":
@@ -765,6 +852,8 @@ class CadApi:
                 return self._search(parse_qs(query), who, csv=path.endswith(".csv"))
             if path == "/api/cad/premise":
                 return _json(200, self.cad.premise.listing(parse_qs(query), self._may(who)))
+            if path in ("/api/cad/preplan", "/api/cad/preplan/where", "/api/cad/preplan.csv"):
+                return self._preplan(path, query, who)
             if m := HERE.fullmatch(path):
                 return _json(200, self.cad.addrs.here(int(m.group(1)), self._may(who)))
             if m := SUGGEST.fullmatch(path):
@@ -800,6 +889,10 @@ class CadApi:
         return 404, b"not found\n", "text/plain"
 
     def post(self, path: str, raw: bytes, who=None, client: tuple[str, str] = NO_CLIENT) -> tuple[int, bytes, str]:
+        with sourcekeys.request_context(who):
+            return self._post(path, raw, who, client)
+
+    def _post(self, path: str, raw: bytes, who=None, client: tuple[str, str] = NO_CLIENT) -> tuple[int, bytes, str]:
         try:
             body = json.loads(raw or b"{}")
         except ValueError as e:
@@ -815,7 +908,7 @@ class CadApi:
                 if refused := self.permit(path, who, body, st, client):
                     return refused
                 body["operator"] = st["operator"]
-                if PREMISE.fullmatch(path):
+                if PREMISE.fullmatch(path) or PREPLAN.fullmatch(path):
                     body["_may"] = st["may"]
             out = self._write(path, body, signed)
         except LastAdmin as e:
@@ -877,6 +970,8 @@ class CadApi:
             if m.group(1) is None:
                 return c.premise.create(body)
             return (c.premise.ack if m.group(2) else c.premise.edit)(int(m.group(1)), body)
+        if m := PREPLAN.fullmatch(path):
+            return c.preplan.create(body) if m.group(1) is None else c.preplan.edit(int(m.group(1)), body)
         if m := DATASOURCE.fullmatch(path):
             return self._ds_refresh(unquote(m.group(1)), body)
         if m := DVR_PIN.fullmatch(path):

@@ -183,6 +183,7 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
         <span id="sv-tabs" class="seg" role="group" aria-label="Show">
           <button type="button" data-tab="calls" aria-pressed="true" title="Past calls">Calls</button>
           <button type="button" data-tab="notes" aria-pressed="false" title="Premise notes: shown on every call at the building">Address notes</button>
+          <button type="button" data-tab="preplan" aria-pressed="false" title="Pre-plan points: a building's Knox box, FDC, shutoffs on the map">Pre-plan</button>
         </span>
         <a id="sv-csv" class="nav sm" href="#" download hidden title="These results as a spreadsheet (admins; in your activity)">CSV</a>
       </div>
@@ -212,6 +213,18 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
         <div id="sv-note-form" hidden></div>
         <div class="tscroll"><table class="evtable db sv-table"><thead><tr><th>Address</th><th>Note</th><th>Priority</th><th>Review by</th><th>By</th><th><span class="sr-only">Actions</span></th></tr></thead>
           <tbody id="sv-note-rows"></tbody></table></div>
+      </div>
+      <!-- pre-plan points (#456, preplan.js): one building's (the address box), on its own map, to add, edit, move and
+           delete; every point and the CSV: admins -->
+      <div id="sv-preplan" class="sv-body" hidden>
+        <div class="sv-mapbox"><div id="sv-pp-map" class="sv-map"></div></div>
+        <div class="sv-results">
+          <div class="row"><span class="spacer"></span>
+            <a id="sv-pp-csv" class="nav sm" href="#" download hidden title="Every pre-plan point (admins; in your activity)">CSV</a>
+            <button id="sv-pp-add" type="button" class="sm" hidden><svg class="ico" aria-hidden="true"><use href="/static/icons.svg#i-plus"/></svg>Point</button></div>
+          <div id="sv-pp-form" class="pp-formhost" hidden></div>
+          <ol id="sv-pp-rows" class="pp-list"></ol>
+        </div>
       </div>
     </div>
 
@@ -388,6 +401,9 @@ if (location.pathname.replace(/\/+$/, "") === "/monitor") document.documentEleme
             <div id="d-map-h" class="dmap-handle dmap-h" hidden></div>
             <div id="d-map-c" class="dmap-handle dmap-c" hidden></div>
           </div>
+          <!-- pre-plan points at this building (#456, preplan.js): "Knox box · Front door left", on the map too; + Point -->
+          <div id="d-preplan-form" class="pp-formhost" hidden></div>
+          <div id="d-preplan" class="pp-box" hidden aria-label="Pre-plan points"></div>
           <div id="d-cams" class="ml-cams" hidden aria-label="Cameras"></div>
           <div id="d-trains" class="ml-cams tr-panel" hidden aria-label="Trains approaching"></div>
           <div id="d-vessels" class="ml-cams" hidden aria-label="Vessels nearby"></div>
@@ -691,6 +707,7 @@ Slots go in order. A kind takes the next available unit of that kind (regular ap
 <script src="/static/radio-view.js"></script>
 <script src="/static/addr-history.js"></script>
 <script src="/static/search-view.js"></script>
+<script src="/static/preplan.js"></script>
 <script src="/static/radio-controls.js"></script>
 <script src="/static/hublink.js"></script>
 <script src="/static/adapterpass.js"></script>

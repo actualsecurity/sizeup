@@ -10,12 +10,20 @@ GET  /api/stream[?since=<id>]  SSE: the whole state, then each second only the s
                                clock); each event's id resumes a reconnect (Last-Event-ID); gzip when accepted
 GET  /api/audio/<id>.wav       a page or transmission clip
 POST /api/incident/<id>/close  close an incident by hand
-POST /api/talkgroup {"tg": 307, "record": bool?, "main": bool?}  per-talkgroup switches (state "talkgroups")
+POST /api/talkgroup {"tg": 307, "record": bool?, "main": bool?, "tier": str?}  per-talkgroup switches (state "talkgroups"; tier: #409)
 POST /api/talkgroup-group {"group": "County Police", "record": bool?, "main": bool?}  a whole section
 POST /api/mode {"mode": ...}  one shared dongle: hand it to a channel or trunk-recorder (state "sdr")
 POST /api/adsb-receiver {"sdr": serial | "", "confirm": true}  admins: name (or unname) the station's ADS-B dongle
                         (#235; App.set_adsb_receiver; the hub sends it to the station): reserved for its decoder,
                         never one of the radios (state "sdr".adsb). Without "confirm": true it is refused
+POST /api/reception {"action": "start" | "stop" | "note", ...}  admins: a reception test (#410, sizeup/radio/reception.py:
+                        one dongle lent to one side of another P25 system; state "reception"); the hub sends it to
+                        the station
+GET  /api/reception            its state: the running test and the history (admins); the list of captured calls only
+                               to a verified, signed-in person (the hub), else just how many are kept (#419)
+GET  /api/reception/sample?id=<id>  a call a reception test captured, while it is kept (minutes, then deleted): a
+                               signed-in admin only, i.e. from the hub, which fetches it from the station; 403 on the
+                               station's own page, all-in-one and a hub without Access
 Every POST on the station (and all-in-one; not the hub, behind Cloudflare Access) is refused 403 when a browser says
 it came from another site (#307: Sec-Fetch-Site not same-origin / none, else an Origin not this host): it binds
 127.0.0.1, but a page open in the station PC's browser could still post. Its own page, and tools with neither header
@@ -118,6 +126,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Callable
 from urllib.parse import parse_qsl, urlsplit
+
+from sizeup import sourcekeys
 
 STATIC_DIR = Path(__file__).parent / "static"
 MAX_CAD_BODY = 65536
@@ -372,10 +382,11 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                  access=None, access_log: Callable[[str], None] | None = None, station_mode=None,
                  role: str = "", roads=None, gis=None, trains=None, weather=None, station_health=None, stream_gzip: bool = True,
                  aircraft=None, roadwork=None, set_adsb: Callable[[str], str | None] | None = None, vessels=None,
-                 airband_ab: Callable[..., str | None] | None = None,
+                 airband_ab: Callable[..., str | None] | None = None, reception=None,
                  gate: Gate | None = None, health_fn: Callable[[], dict] | None = None, perf=None,
-                 adapter_password=None):
-    """cad: a CadApi (sizeup/cad/api.py) and cad_b its own broadcaster (the console's state is
+                 clip_context: Callable[[str], bool] | None = None, adapter_password=None):
+    """clip_context(id): the clip is another P25 system's (#419): served only to a signed-in person
+    (sizeup/sourcekeys.py may_see_context), a 404 to anyone else. cad: a CadApi (sizeup/cad/api.py) and cad_b its own broadcaster (the console's state is
     small and separate from the monitor's, so neither page carries the other's). station: the hub's
     ingest (sizeup/cloud/hub.py Hub), which checks the station's token before reading any body.
     access: an AccessVerifier (sizeup/cloud/access.py): who signed in, required on the hub.
@@ -665,8 +676,37 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                 return self._state(b, url.query, None)
             if path == "/api/stream":
                 return self._stream(b)
+            if path == "/api/reception" and reception is not None:
+                # the reception tests (#410): their state, history and sample list; admins only, never in /api/state
+                if cad is not None and (no := cad.read_refused(path, self.who)) is not None:
+                    return self._send(*no)
+                rx = reception[2]()
+                with sourcekeys.request_context(self.who):
+                    seen = sourcekeys.may_see_context()
+                if isinstance(rx, dict) and not seen:
+                    # The numbers of a test (decode rate, signal, counts, history) carry no content and show where
+                    # the test is run. The captured calls are another system's audio (#419): their list (talkgroup,
+                    # time, id) only to a signed-in person, i.e. from the hub; here only how many are kept.
+                    rx = dict(rx, samples=[], samples_kept=len(rx.get("samples") or []), samples_at="hub")
+                return self._send(200, json.dumps({"reception": rx}, separators=(",", ":"), default=str).encode(),
+                                  "application/json", {"Cache-Control": "no-store"})
+            if path == "/api/reception/sample" and reception is not None:
+                # a call a reception test captured (#410): admins only, never cached, gone after its minutes
+                if cad is not None and (no := cad.read_refused(path, self.who)) is not None:
+                    return self._send(*no)
+                with sourcekeys.request_context(self.who):
+                    seen = sourcekeys.may_see_context()
+                if not seen:        # another system's audio: a verified, signed-in person only (#419): from the hub
+                    return self._send(403, b'{"error":"listen to a captured call from the hub (signed in)"}',
+                                      "application/json", {"Cache-Control": "no-store"})
+                wav = reception[1](dict(parse_qsl(url.query)).get("id", ""))
+                return (self._send(200, wav, "audio/wav", {"Cache-Control": "no-store"}) if wav
+                        else self._send(404, b"no such sample\n", "text/plain"))
             if path.startswith("/api/audio/") and path.endswith(".wav"):
-                wav = clip(path[len("/api/audio/"):-4])
+                cid = path[len("/api/audio/"):-4]
+                with sourcekeys.request_context(self.who):
+                    hidden = clip_context is not None and not sourcekeys.may_see_context() and clip_context(cid)
+                wav = None if hidden else clip(cid)     # another system's audio: a signed-in person only (#419)
                 return self._send(200, wav, "audio/wav") if wav else self._send(404, b"no such clip\n", "text/plain")
             if path == "/healthz":
                 if health_fn is not None:
@@ -732,7 +772,18 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                 try:
                     n = int(self.headers.get("Content-Length") or 0)
                     body = json.loads(self.rfile.read(min(n, 1024)) or b"{}")
-                    err = set_talkgroup(int(body["tg"]), body.get("record"), body.get("main"))
+                    if body.get("tier") is not None or body.get("system") or body.get("source"):
+                        # another P25 system's talkgroup (#409): {"source": "p25:<system>:<tg>"} or {"tg", "system"}
+                        from sizeup import sourcekeys as _sources
+                        got = _sources.parse(str(body["source"])) if body.get("source") else (
+                            str(body.get("system") or ""), int(body["tg"]))
+                        if got is None:
+                            raise ValueError("source: p25:<system>:<talkgroup>")
+                        tier = body.get("tier")
+                        err = set_talkgroup(got[1], body.get("record"), body.get("main"),
+                                            None if tier is None else str(tier), got[0])
+                    else:
+                        err = set_talkgroup(int(body["tg"]), body.get("record"), body.get("main"))
                 except (ValueError, KeyError, TypeError) as e:
                     err = f"bad request: {e}"
                 if err:
@@ -754,7 +805,10 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                 try:
                     n = int(self.headers.get("Content-Length") or 0)
                     body = json.loads(self.rfile.read(min(n, 1024)) or b"{}")
-                    err = set_mode(str(body["mode"]), str(body["sdr"]) if body.get("sdr") else None)
+                    sdr_arg = str(body["sdr"]) if body.get("sdr") else None
+                    # "confirm": a fire job's dongle given to another P25 system's job, said twice (#409)
+                    err = (set_mode(str(body["mode"]), sdr_arg, confirm=True) if body.get("confirm") is True
+                           else set_mode(str(body["mode"]), sdr_arg))
                 except (ValueError, KeyError, TypeError) as e:
                     err = f"bad request: {e}"
                 if err:
@@ -770,6 +824,19 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                 except (ValueError, KeyError, TypeError) as e:
                     err = f"bad request: {e}"
                 if err:
+                    return self._send(400, json.dumps({"error": err}).encode(), "application/json")
+                self._did(path, body)
+                return self._send(200, b'{"ok":true}', "application/json")
+            if path == "/api/reception" and reception is not None:
+                try:
+                    n = int(self.headers.get("Content-Length") or 0)
+                    body = json.loads(self.rfile.read(min(n, 2048)) or b"{}")
+                    err = reception[0](body, getattr(self.who, "email", "") or "")
+                except (ValueError, KeyError, TypeError) as e:
+                    err = f"bad request: {e}"
+                if err:
+                    if self.who is not None and cad is not None and getattr(self.who, "email", ""):
+                        cad.refused(path, self.who, str(err)[:160], self._client())      # a refused attempt: logged too
                     return self._send(400, json.dumps({"error": err}).encode(), "application/json")
                 self._did(path, body)
                 return self._send(200, b'{"ok":true}', "application/json")
@@ -794,6 +861,11 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                     n = int(self.headers.get("Content-Length") or 0)
                     body = json.loads(self.rfile.read(min(n, 65536)) or b"{}")
                     ids = None if body.get("all") else [str(i) for i in body["ids"]][:2000]
+                    with sourcekeys.request_context(self.who):
+                        hidden = (ids is not None and clip_context is not None and not sourcekeys.may_see_context()
+                                  and any(clip_context(i) for i in ids))
+                    if hidden:                   # another P25 system's transmission (#419): a signed-in person only
+                        return self._send(403, b'{"error":"sign in to re-run that transmission"}', "application/json")
                     queued = retranscribe(ids)
                 except (ValueError, KeyError, TypeError, AttributeError) as e:
                     return self._send(400, json.dumps({"error": f"bad request: {e}"}).encode(), "application/json")
@@ -1033,10 +1105,14 @@ class WebServer:
                  health: dict | None = None, access=None, access_log: Callable[[str], None] | None = None,
                  station_mode=None, role: str = "", roads=None, gis=None, trains=None, weather=None, station_health=None,
                  aircraft=None, roadwork=None, set_adsb=None, fence=None, health_fn: Callable[[], dict] | None = None,
-                 airband_ab=None, listener=None, vessels=None, perf=None, adapter_password=None):
+                 airband_ab=None, listener=None, vessels=None, perf=None, reception=None,
+                 clip_context: Callable[[str], bool] | None = None, adapter_password=None):
         """listener: a socket already bound and listening on (host, port) to serve from (sizeup/app.py run_gated: the
         hub's port answered "updating" while the app was built; the connections that came meanwhile are served)."""
         self.access = access
+        # every page and API call is a verified, signed-in person's (Cloudflare Access): only then does the state all
+        # clients share carry another P25 system's traffic (#419, sizeup/sourcekeys.py may_see_context)
+        self.access_enforced = access is not None
         self.gate = Gate(fence)
         self.station = station
         self.broadcaster = Broadcaster(state_fn)
@@ -1059,7 +1135,8 @@ class WebServer:
             json.dumps(health or {"ok": True}, separators=(",", ":")).encode(), access, access_log, station_mode, role,
             roads, gis, trains, weather, station_health, aircraft=aircraft, roadwork=roadwork, set_adsb=set_adsb,
             vessels=vessels,
-            airband_ab=airband_ab, gate=self.gate, health_fn=health_fn, perf=perf, adapter_password=adapter_password))
+            airband_ab=airband_ab, reception=reception, gate=self.gate, health_fn=health_fn, perf=perf,
+            clip_context=clip_context, adapter_password=adapter_password))
         if listener is not None:
             self.httpd.socket.close()                 # (the one TCPServer made, never bound)
             self.httpd.socket = listener

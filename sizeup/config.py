@@ -90,6 +90,11 @@ class Config:
     p25_tg_info: dict[int, dict] = field(default_factory=dict)   # tg -> {name, group, encrypted}  # attach to our incident (others: context)
     p25_aliases: dict[str, str] = field(default_factory=dict)
     p25_emergency_window_min: float = 10.0   # the emergency button keeps its talkgroup and radio this long (#128)
+    # More P25 systems (#409: <recorder_dir or the talkgroups file's folder>/systems/<name>/, sizeup/radio/systems.py)
+    p25_systems: tuple = ()
+    tier_keep_days: dict = field(default_factory=lambda: {"alert": 30.0, "text": 0.0, "record": 7.0})
+    context_audio_max_mb: float = 100.0      # hub: another system's clips kept at most (their own budget, inside the cap)
+    p25_system_problems: tuple = ()          # a system directory that couldn't be used: said, that system left out
     mdc_aliases: dict[str, str] = field(default_factory=dict)   # MDC-1200 unit ID ("0611") -> name
     unit_departments: dict[str, str] = field(default_factory=dict)  # "Engine 60" -> "Port Chester FD"
     unit_callsigns: dict[str, str] = field(default_factory=dict)    # "2398" -> "2398 Duty Officer"
@@ -1233,6 +1238,10 @@ def _adapter(data: dict) -> tuple:
     return tuple(env)
 
 
+def rel_dir(base: Path, p: str) -> str:
+    return str((base / p).resolve()) if p and not Path(p).is_absolute() else p
+
+
 def load(path: str | Path) -> Config:
     path = Path(path)
     base = path.parent
@@ -1358,8 +1367,33 @@ def load(path: str | Path) -> Config:
             p25_tgs[int(r["Decimal"])] = r["Alpha Tag"]
             p25_info[int(r["Decimal"])] = {"name": r["Alpha Tag"], "group": r.get("Tag") or "",
                                            "encrypted": "E" in (r.get("Mode") or "").upper()}
+    # More P25 systems (#409), from their directories beside trunk-recorder's config (or the talkgroups file: the hub)
+    from sizeup import tiers as tiers_mod
+    from sizeup.radio import systems as p25_systems_mod
+    sys_base = ""
+    if p25.get("recorder_dir"):
+        sys_base = str(base / p25["recorder_dir"])
+    elif p25.get("talkgroups_file"):
+        sys_base = str((base / p25["talkgroups_file"]).parent)
+    # One that can't be used (a bad file, a talkgroup number or a name of ours used again) is left out and said
+    # (Config.p25_system_problems): another system never keeps the fire side from starting.
+    sys_problems: list[str] = []
+    ours_tgs = {*p25_tgs, 307, 333, 301, *(int(x) for x in p25.get("incident_talkgroups", [307, 333]))}
+    more_systems = p25_systems_mod.discover(sys_base, ours_tgs, [c.label for c in channels] + [P25_JOB, "Off"],
+                                            problems=sys_problems, county_capture=rel_dir(base, p25.get("capture_dir", "")))
     storage = _take(data.get("storage", {}), "storage", {"clips_dir", "keep_hours", "audio_keep_hours", "audio_keep_event_days",
-                                                         "audio_prune_batch", "audio_offpeak"})
+                                                         "audio_prune_batch", "audio_offpeak", "tier_keep_days",
+                                                         "context_audio_max_mb"})
+    try:
+        tier_days = tiers_mod.keep_days(storage.get("tier_keep_days"))
+    except ValueError as e:
+        raise ConfigError(f"storage.tier_keep_days: {e}") from None
+    try:
+        context_mb = float(storage.get("context_audio_max_mb", 100))
+    except (TypeError, ValueError):
+        context_mb = -1.0
+    if not 0 <= context_mb <= 100000:
+        raise ConfigError("storage.context_audio_max_mb: megabytes, 0 or more")
     try:
         keep_event_days = float(storage.get("audio_keep_event_days", 365))
         prune_batch = int(storage.get("audio_prune_batch", 200))
@@ -1462,6 +1496,8 @@ def load(path: str | Path) -> Config:
         p25_talkgroups=p25_tgs, p25_tg_info=p25_info,
         p25_incident_talkgroups=frozenset(int(x) for x in p25.get("incident_talkgroups", [307, 333])),
         p25_aliases={str(k): v for k, v in p25.get("aliases", {}).items()}, p25_emergency_window_min=em_window,
+        p25_systems=more_systems, tier_keep_days=tier_days, context_audio_max_mb=context_mb,
+        p25_system_problems=tuple(sys_problems),
         mdc_aliases={str(k).upper(): v for k, v in mdc.get("aliases", {}).items()},
         unit_departments=unit_departments, unit_callsigns=unit_callsigns,
         shared_device=radio.get("shared_device", "") or (sdrs[0] if sdrs else ""), start_mode=radio.get("start_mode", ""),

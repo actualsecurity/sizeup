@@ -21,6 +21,7 @@ docs/
 deploy/station/
 deploy/trunk-recorder/*
 !deploy/trunk-recorder/talkgroups.csv
+!deploy/trunk-recorder/systems
 deploy/hub/*.sqlite*
 Dockerfile
 .dockerignore

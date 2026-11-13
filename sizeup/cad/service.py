@@ -23,6 +23,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
+from sizeup import sourcekeys
 from sizeup import polly
 from sizeup.cad import airport, dispatcher, eta, export, mapview, runcards
 from sizeup.cad.activity import Activity
@@ -31,6 +32,7 @@ from sizeup.cad.automode import AutoDispatch
 from sizeup.cad.comms import MAIN_LIMIT, MAX_ROWS, OTHER_LIMIT, Comms
 from sizeup.cad.history import AddressHistory
 from sizeup.cad.premise import Premise
+from sizeup.cad.preplan import Preplan
 from sizeup.cad.feed import Feed
 from sizeup.cad.newids import NewIds
 from sizeup.cad.statushints import StatusHints
@@ -349,6 +351,10 @@ class Cad:
         # notes (sizeup/cad/premise.py): what crews should know about a building, on every call there.
         self.addrs = AddressHistory(self, clock=clock, log=log)
         self.premise = Premise(self)
+        # Pre-plan points (#456, sizeup/cad/preplan.py): where a building's Knox box, FDC, shutoffs ... are, on the map of
+        # every call there. gis: the county layers (the app sets it: the building footprints a point is linked to).
+        self.preplan = Preplan(self)
+        self.gis = None
 
     @classmethod
     def from_config(cls, cfg, geocoder=None, log=print) -> Cad:
@@ -374,6 +380,7 @@ class Cad:
             self.addrs.key_open()                         # a new or moved address keyed first: its notes show (#403)
             incs = self._with_radio(self.store.incidents())
             self.premise.decorate(incs)
+            self.preplan.decorate(incs)                   # its building's pre-plan points (#456)
             try:
                 self.sources.decorate(incs)               # a feed's jurisdiction and run numbers on the incident (#297)
             except Exception as e:  # noqa: BLE001
@@ -401,6 +408,7 @@ class Cad:
                 "users_rev": self._users_rev(),
                 "feed": self.feed.state(),
                 "overview": mapview.overview(incs, self.s.tactical),
+                "preplan": self.preplan.state(),          # #456: the write generation, the kinds kept to some roles
                 # Settings > System > ATC talkers (#252): the switches, for the rows' chips and the map
                 "atc": {"identify": self.atc_talkers.identify, "map": self.atc_talkers.on_map,
                         "channels": sorted(self.atc_talkers.channels)},
@@ -447,8 +455,8 @@ class Cad:
             except Exception as e:  # noqa: BLE001 - a notice never stops the transcript
                 self.log(f"CAD: possible incoming: {type(e).__name__}: {e}")
             try:                                          # "alert level N" for the airport (#369)
-                t = self.store.one("SELECT id, channel, talkgroup, start, text, talker, dispatcher FROM radio_traffic WHERE id = ?", (tid,))
-                if t:
+                t = self.store.one("SELECT id, channel, talkgroup, start, text, talker, dispatcher, system FROM radio_traffic WHERE id = ?", (tid,))
+                if t and not sourcekeys.is_context(t):
                     self.airport_watch.heard_radio(t)
             except Exception as e:  # noqa: BLE001 - a pre-alert never stops the transcript
                 self.log(f"CAD: airport alert level: {type(e).__name__}: {e}")
@@ -1571,7 +1579,9 @@ class Cad:
         # made a moment ago, for COMMS_CACHE_S (#284). Only "talking" is live.
         pcfd = [u["name"] for u in self.radios.units if is_pcfd(u)]
         main_tgs = [tg for tg in self.comms.talkgroups() if self.main_tg(tg)]
-        key = (now_rev, tuple(pcfd), tuple(main_tgs), tuple(sorted((k, tuple(v)) for k, v in q.items() if k != "rev")))
+        # (+ whether this reader may be shown another P25 system's rows, #419: an answer is never another reader's)
+        key = (now_rev, tuple(pcfd), tuple(main_tgs), tuple(sorted((k, tuple(v)) for k, v in q.items() if k != "rev")),
+               self.comms._sees_context())
         hit = self._comms_cache.get(key)
         if hit is not None and time.monotonic() - hit[0] < COMMS_CACHE_S:
             return {**hit[1], "talking": talking}
@@ -1662,7 +1672,8 @@ class Cad:
 
     def settings_audit_log(self, q: dict, may: str = "admin") -> dict:
         """may: the reader's standing; a premise note's rows of a category they may not see (now) without its text (#403)."""
-        return {"audit": self.premise.redact_audit(self.settings.audit_log((q.get("section") or [""])[0][:40]), may)}
+        rows = self.premise.redact_audit(self.settings.audit_log((q.get("section") or [""])[0][:40]), may)
+        return {"audit": self.preplan.redact_audit(rows, may)}          # and a pre-plan point's (#456)
 
     # -- location suggestions -----------------------------------------------------------------------
 
