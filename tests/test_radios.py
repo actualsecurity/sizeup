@@ -402,6 +402,7 @@ def test_traffic_links_to_the_event_while_the_unit_is_on_it_and_not_after(tmp_pa
 def test_comms_api_filters(tmp_path):
     clock = Clock()
     c = cad(tmp_path, clock)
+    c.radiolog.inline = True             # (the units backfill on this thread: its write never lands between two asks)
     a = _event_with(c, ["E63"], clock)
     clock.t += 5
     c.record_traffic(tx("FG1-1", clock.t, rig="E63", radio_id="6301"))
