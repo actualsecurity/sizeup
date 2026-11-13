@@ -1399,3 +1399,66 @@ def test_honest_pypdf_output_still_passes_the_whole_recheck(api):
         docfiles.recheck_pdf(r["pdf"], len(raw))
     code, out = upload(api, scan, kind="inspection", title="Scan", floor="")
     assert code == 200, out
+
+
+# -- recheck_pdf: a strict parser, not patterns -------------------------------------------------------------------------
+
+def test_a_word_inside_a_string_is_a_string():
+    """#464: "stream" inside a string once made the old pattern skip over a direct /OpenAction and a /Names JavaScript
+    tree; tokenised, the string is a string and the names are names."""
+    bypass = _assemble([
+        b"<< /Type /Catalog /Pages 2 0 R /Note (look: stream\n) /Length 60 "
+        b"/OpenAction << /S /JavaScript /JS (app.alert(1)) >> /Names << /JavaScript << /Names [(a) 3 0 R] >> >> >>",
+        b"<< /Type /Pages /Kids [4 0 R] /Count 1 >>",
+        b"<< /S /JavaScript /JS (app.alert(2)) >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] >>"])
+    with pytest.raises(docfiles.Refused):
+        docfiles.recheck_pdf(bypass, len(bypass))
+    early_end = _assemble([
+        b"<< /Type /Catalog /Pages 2 0 R /Note (endstream endobj 9 0 obj << /OpenAction 1 0 R >> endobj) >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Annots [4 0 R] >>",
+        b"<< /Type /Annot /Subtype /Square /Rect [0 0 10 10] /Contents (trailer 1 0 R stream \\) (nested) /AA) >>"])
+    docfiles.recheck_pdf(early_end, len(early_end))                             # names inside strings: just text
+    as_key = early_end.replace(b"/Subtype /Square", b"/Subtype /Square /AA << >>")
+    with pytest.raises(docfiles.Refused):                                       # the same name as a real key: refused
+        docfiles.recheck_pdf(as_key, len(as_key))
+    escaped = early_end.replace(b"/Subtype /Square", b"/Subtype /Square /#41A << >>")
+    with pytest.raises(docfiles.Refused):                                       # #xx decoded: /AA
+        docfiles.recheck_pdf(escaped, len(escaped))
+
+
+def test_the_parser_refuses_anything_off_the_narrow_shape():
+    honest = text_pdf(b"Lobby")
+    docfiles.recheck_pdf(honest, len(honest))
+    length = re.search(rb"<< /Length (\d+) >>", honest)
+    for bad in (honest.replace(b"%PDF-1.4", b"%PDX-1.4"),                                   # the header
+                honest + b"junk",                                                              # bytes after %%EOF
+                honest.replace(b"/Type /Font", b"/Type /Font {"),                             # a brace
+                honest.replace(b"/Type /Font", b"/Type /Font unknownword"),                   # a word that isn't one
+                honest.replace(length.group(0), b"<< /Length 2 0 R >>"),                       # an indirect /Length
+                honest.replace(length.group(0), f"<< /Length {int(length.group(1)) + 1} >>".encode()),   # off by one
+                honest.replace(b"endobj\n2 0 obj", b"endobj\n1 0 obj", 1),                   # an object twice
+                honest.replace(b"/Type /Font", b"/Type /Font " + b"[" * 100 + b"]" * 100),   # nested too deep
+                honest.replace(b"/Type /Font", b"/Type /Font /Type /Font")):                  # a key twice
+        assert bad != honest
+        with pytest.raises(docfiles.Refused):
+            docfiles.recheck_pdf(bad, len(bad))
+    for poc in (hidden_objects_pdf(), prev_hidden_pdf()):                                     # the earlier ones too
+        with pytest.raises(docfiles.Refused):
+            docfiles.recheck_pdf(poc, len(poc))
+
+
+@pytest.mark.skipif(not HAVE_PDFIUM, reason="pypdf / pypdfium2 not installed")
+def test_honest_pypdf_output_of_every_shape_passes(api):
+    annotated = _assemble([
+        b"<< /Type /Catalog /Pages 2 0 R >>", b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] /Annots [4 0 R] >>",
+        b"<< /Type /Annot /Subtype /Text /Rect [10 10 30 30] /Contents (trailer 1 0 R stream endstream %%EOF) >>"])
+    for raw in (pdf(pages=3), pdf(pages=200), text_pdf(b"Stair A/AA"), annotated):
+        r = docfiles.render(raw, 1)                                             # the recheck runs inside
+        docfiles.recheck_pdf(r["pdf"], len(raw))
+    code, out = upload(api, annotated, kind="preplan", title="Notes", floor="")
+    assert code == 200, out
+    stored = stored_pdf(api, out["doc"]["id"])
+    assert b"trailer 1 0 R stream" in stored                                    # the note kept, as text

@@ -481,139 +481,295 @@ def render(data: bytes, page: int = 1, max_px: int = MAX_PX) -> dict | None:
             "limits": info.get("rlimit") or ""}
 
 
-# the names the hub looks for again in the child's copy before it is stored (it trusts nothing the child says)
-CLEAN_NEVER = {b"JS", b"JavaScript", b"OpenAction", b"AA", b"Launch", b"URI", b"EmbeddedFile", b"EmbeddedFiles", b"XFA",
-               b"SubmitForm", b"ImportData", b"GoToR", b"GoToE", b"Rendition", b"RichMedia", b"Encrypt", b"ObjStm",
-               b"XRef"}
+# the names the hub refuses in the child's copy before it is stored (it trusts nothing the child says)
+CLEAN_NEVER = {b"JS", b"JavaScript", b"OpenAction", b"AA", b"Launch", b"URI", b"SubmitForm", b"ImportData", b"GoToR",
+               b"GoToE", b"Rendition", b"RichMedia", b"EmbeddedFile", b"EmbeddedFiles", b"XFA", b"Encrypt", b"ObjStm",
+               b"XRef", b"Prev", b"XRefStm"}
 CLEAN_MAX_BYTES = 64 * 1024 * 1024
-
-
-STREAM_AT = re.compile(rb"(?<=[>\s])stream\r?\n")
-OBJ_AT = re.compile(rb"(\d+)\s+(\d+)\s+obj\b")
-XREF_ROW = re.compile(rb"(\d{10}) (\d{5}) ([nf])")
-XREF_SUB = re.compile(rb"\s*(\d+)\s+(\d+)\s*\r?\n")
-REF = re.compile(rb"(?<![\d.])(\d+)\s+(\d+)\s+R\b")
 TRAILER_KEYS = {b"Size", b"Root", b"Info", b"ID"}
-LENGTH = re.compile(rb"/Length\s+(\d+)(\s+\d+\s+R)?")
-END_AT = re.compile(rb"\r?\n?endstream\b")
+MAX_DEPTH = 64                    # arrays and dictionaries nested, at most
+MAX_TOKENS = 4_000_000            # tokens in a whole file, at most (stream bytes aren't tokens)
+
+WS = b" \t\n\r\f\0"
+DELIM = b"()<>[]{}/%"
+KEYWORDS = {b"obj", b"endobj", b"stream", b"endstream", b"xref", b"trailer", b"startxref", b"R", b"true", b"false",
+            b"null"}
+NUMBER = re.compile(rb"[+-]?(?:\d+\.?\d*|\.\d+)")
+XREF_SUB = re.compile(rb"(\d+) (\d+)[ \t]*\r?\n")
+XREF_ROW = re.compile(rb"(\d{10}) (\d{5}) ([nf])(?: \r?\n| \r|\r\n)")
+EOF_TAIL = re.compile(rb"[ \t\r\n\f\0]*%%EOF[ \t\r\n\f\0]*\Z")
 
 
-def recheck_pdf(pdf: bytes, original: int) -> None:
-    """The sanitised copy, looked at again here in the hub: none of CLEAN_NEVER as a whole name in its objects (pypdf
-    writes every object uncompressed and in no object stream, so nothing can hide), and no bigger than 64 MB or than
-    twice the original and a megabyte. A stream's own bytes (page drawing, an image's pixels) are skipped by its /Length
-    (written direct by pypdf): text that says "Stair A/AA" or pixels that happen to spell a name are not objects, and
-    nothing in them runs. A stream whose length can't be followed to its endstream: refused. And what a reader would
-    open must be what was checked: exactly one classic xref table and trailer (no xref stream, no incremental update),
-    every object it names starting at an object head outside every stream, every head found named by it; the table
-    starting at object 0; the trailer only /Size (the highest object named plus one), /Root, /Info and /ID (no /Prev or
-    /XRefStm: an older section a reader would use too; no /Encrypt); and every "N G R" outside the streams' bytes an
-    object the table names, the same generation. So no object can hide in a stream's bytes or be reached any other way.
-    Fail closed: the word "trailer", or something like "1 0 R", inside a kept string (an annotation's text) refuses the
-    file too. Refused otherwise too."""
-    bad = Refused("the PDF couldn't be cleaned: print it to a new PDF")
-    if len(pdf) > min(CLEAN_MAX_BYTES, 2 * original + (1 << 20)):
-        raise bad
+class Name(bytes):
+    """A PDF name (its #xx escapes undone), told apart from a string."""
 
-    def names(part: bytes) -> None:
-        for m in NAME.finditer(part):
-            name = HEX.sub(lambda h: bytes((int(h.group(1), 16),)), m.group(1)) if b"#" in m.group(1) else m.group(1)
-            if name in CLEAN_NEVER:
-                raise bad
-    i, outside, heads = 0, [], {}                     # the bytes outside streams; every object head found there
-    while (m := STREAM_AT.search(pdf, i)) is not None:
-        names(pdf[i:m.start()])                       # the objects before it, its own dictionary included
-        outside.append(pdf[i:m.start()])
-        found = list(OBJ_AT.finditer(pdf, i, m.start()))
-        if not found:
-            raise bad
-        heads.update((h.start(), (int(h.group(1)), int(h.group(2)))) for h in found)
-        lm = None
-        for lm in LENGTH.finditer(pdf, found[-1].start(), m.start()):
-            pass                                      # its dictionary's /Length (the last one before the stream)
-        if lm is None or lm.group(2):                 # none, or an indirect one: can't be followed
-            raise bad
-        end = m.end() + int(lm.group(1))
-        tail = END_AT.match(pdf, end)
-        if end > len(pdf) or tail is None:
-            raise bad
-        i = tail.end()
-    names(pdf[i:])
-    outside.append(pdf[i:])
-    heads.update((h.start(), (int(h.group(1)), int(h.group(2)))) for h in OBJ_AT.finditer(pdf, i))
-    # what a reader opens: the one classic cross-reference table (pypdf always writes one, and no incremental update);
-    # every object it names starts at a head found outside every stream, and every head found is the one it names
-    # (nothing hidden in a stream's bytes can be reached: a compromised child can't smuggle an object past this)
-    rest = b"".join(outside)
-    if rest.count(b"trailer") != 1 or rest.count(b"startxref") != 1:
-        raise bad
-    sx = re.search(rb"startxref\s+(\d+)\s+%%EOF\s*$", pdf)
-    if sx is None:
-        raise bad
-    x = int(sx.group(1))
-    if not pdf.startswith(b"xref", x):
-        raise bad
-    if any(a <= x < b for a, b in _streams(pdf)):
-        raise bad
-    j = x + 4
-    named: dict[int, tuple[int, int]] = {}            # offset -> (object number, generation): the in-use entries
-    first_sub, total = None, 0
+
+class Ref(tuple):
+    """N G R."""
+
+
+class _Bad(Exception):
+    pass
+
+
+class _Lexer:
+    """PDF tokens from pos on: ("num", int | float), ("name", Name), ("str", bytes), ("[",), ("]",), ("<<",), (">>",),
+    ("kw", keyword). Comments and whitespace skipped; anything else (a brace, an unknown word, a bad escape): _Bad."""
+
+    def __init__(self, data: bytes):
+        self.d, self.pos, self.n = data, 0, 0
+
+    def skip(self) -> None:
+        d, i = self.d, self.pos
+        while i < len(d):
+            c = d[i]
+            if c in WS:
+                i += 1
+            elif c == 0x25:                                    # % a comment, to the end of the line
+                while i < len(d) and d[i] not in b"\r\n":
+                    i += 1
+            else:
+                break
+        self.pos = i
+
+    def next(self) -> tuple:
+        self.skip()
+        self.n += 1
+        if self.n > MAX_TOKENS:
+            raise _Bad("too many tokens")
+        d, i = self.d, self.pos
+        if i >= len(d):
+            raise _Bad("end of file")
+        c = d[i:i + 1]
+        if c == b"(":
+            return self._string()
+        if c == b"<":
+            if d[i + 1:i + 2] == b"<":
+                self.pos = i + 2
+                return ("<<",)
+            j = d.find(b">", i + 1)
+            if j < 0:
+                raise _Bad("hex string")
+            body = bytes(b for b in d[i + 1:j] if b not in WS)
+            if not re.fullmatch(rb"[0-9A-Fa-f]*", body):
+                raise _Bad("hex string")
+            self.pos = j + 1
+            return ("str", bytes.fromhex((body + b"0" * (len(body) % 2)).decode()))
+        if c == b">":
+            if d[i + 1:i + 2] != b">":
+                raise _Bad("stray >")
+            self.pos = i + 2
+            return (">>",)
+        if c in (b"[", b"]"):
+            self.pos = i + 1
+            return (c.decode(),)
+        if c == b"/":
+            j = i + 1
+            while j < len(d) and d[j] not in WS and d[j] not in DELIM:
+                j += 1
+            raw = d[i + 1:j]
+            out = bytearray()
+            k = 0
+            while k < len(raw):
+                if raw[k] == 0x23:                             # #xx
+                    h = raw[k + 1:k + 3]
+                    if len(h) != 2 or not re.fullmatch(rb"[0-9A-Fa-f]{2}", h):
+                        raise _Bad("name escape")
+                    out.append(int(h, 16))
+                    k += 3
+                else:
+                    out.append(raw[k])
+                    k += 1
+            self.pos = j
+            return ("name", Name(bytes(out)))
+        if c in b"{})":
+            raise _Bad("delimiter")
+        j = i
+        while j < len(d) and d[j] not in WS and d[j] not in DELIM:
+            j += 1
+        word = d[i:j]
+        self.pos = j
+        if NUMBER.fullmatch(word):
+            return ("num", float(word) if b"." in word else int(word))
+        if word in KEYWORDS:
+            return ("kw", word)
+        raise _Bad("unknown word")
+
+    def _string(self) -> tuple:
+        d, i, depth, out = self.d, self.pos + 1, 1, bytearray()
+        while i < len(d):
+            c = d[i]
+            if c == 0x5C:                                      # \ escapes the next byte (what it means doesn't matter here)
+                if i + 1 >= len(d):
+                    break
+                out += d[i:i + 2]
+                i += 2
+                continue
+            if c == 0x28:
+                depth += 1
+            elif c == 0x29:
+                depth -= 1
+                if depth == 0:
+                    self.pos = i + 1
+                    return ("str", bytes(out))
+            out.append(c)
+            i += 1
+        raise _Bad("unterminated string")
+
+    def peek(self, k: int = 1) -> list[tuple]:
+        save, n = self.pos, self.n
+        try:
+            return [self.next() for _ in range(k)]
+        except _Bad:
+            return []
+        finally:
+            self.pos, self.n = save, n
+
+
+def _value(lx: _Lexer, tok: tuple, refs: list, depth: int = 0):
+    """One value whose first token is tok (an int may be the start of N G R)."""
+    if depth > MAX_DEPTH:
+        raise _Bad("too deep")
+    kind = tok[0]
+    if kind == "num":
+        if isinstance(tok[1], int) and tok[1] >= 0:
+            ahead = lx.peek(2)
+            if len(ahead) == 2 and ahead[0][0] == "num" and isinstance(ahead[0][1], int) and ahead[0][1] >= 0 \
+                    and ahead[1] == ("kw", b"R"):
+                lx.next()
+                lx.next()
+                r = Ref((tok[1], ahead[0][1]))
+                refs.append(r)
+                return r
+        return tok[1]
+    if kind == "name":
+        if tok[1] in CLEAN_NEVER:
+            raise _Bad("active name")
+        return tok[1]
+    if kind == "str":
+        return tok[1]
+    if kind == "kw" and tok[1] in (b"true", b"false", b"null"):
+        return tok[1]
+    if kind == "[":
+        out = []
+        while (t := lx.next()) != ("]",):
+            out.append(_value(lx, t, refs, depth + 1))
+        return out
+    if kind == "<<":
+        out = {}
+        while (t := lx.next()) != (">>",):
+            if t[0] != "name":
+                raise _Bad("dictionary key")
+            if t[1] in CLEAN_NEVER:
+                raise _Bad("active name")
+            if t[1] in out:
+                raise _Bad("key twice")
+            out[t[1]] = _value(lx, lx.next(), refs, depth + 1)
+        return out
+    raise _Bad("unexpected token")
+
+
+def parse_clean_pdf(pdf: bytes) -> dict:
+    """pypdf's honest output, exactly: "%PDF-x.y", then N G obj <value> endobj ... (a stream only right after a
+    dictionary with a direct integer /Length that lands on endstream), then one xref table, one trailer, startxref and
+    %%EOF; nothing else. {objects: {num: (gen, offset, value)}, trailer, refs}. _Bad otherwise."""
+    if not re.match(rb"%PDF-\d\.\d[\r\n]", pdf):
+        raise _Bad("header")
+    lx = _Lexer(pdf)
+    objects: dict[int, tuple] = {}
+    refs: list = []
     while True:
-        sub = XREF_SUB.match(pdf, j)
-        if sub is None:
+        lx.skip()
+        head = lx.pos
+        t = lx.next()
+        if t == ("kw", b"xref"):
+            xref_at = head
             break
+        g, o = lx.next(), lx.next()
+        if t[0] != "num" or g[0] != "num" or o != ("kw", b"obj") or not isinstance(t[1], int) \
+                or not isinstance(g[1], int) or t[1] < 1 or g[1] < 0 or t[1] in objects:
+            raise _Bad("object head")
+        value = _value(lx, lx.next(), refs)
+        t2 = lx.next()
+        if t2 == ("kw", b"stream"):
+            if not isinstance(value, dict) or type(value.get(Name(b"Length"))) is not int or value[Name(b"Length")] < 0:
+                raise _Bad("stream length")
+            d, i = pdf, lx.pos
+            if d[i:i + 2] == b"\r\n":
+                i += 2
+            elif d[i:i + 1] == b"\n":
+                i += 1
+            else:
+                raise _Bad("stream keyword")
+            end = i + value[Name(b"Length")]
+            m = re.compile(rb"(?:\r\n|\n)endstream").match(d, end)   # its EOL, then endstream (pypdf: "\nendstream")
+            if end > len(d) or m is None:
+                raise _Bad("stream end")
+            lx.pos = m.end()
+            t2 = lx.next()
+        if t2 != ("kw", b"endobj"):
+            raise _Bad("endobj")
+        objects[t[1]] = (g[1], head, value)
+    # the table: subsections of fixed-width rows, the first from object 0, the free head
+    j = lx.pos
+    while pdf[j:j + 1] in (b" ", b"\t", b"\r", b"\n"):
+        j += 1
+    named: dict[int, tuple[int, int]] = {}
+    first_sub = None
+    while (sub := XREF_SUB.match(pdf, j)) is not None:
         first, count = int(sub.group(1)), int(sub.group(2))
         first_sub = first if first_sub is None else first_sub
         j = sub.end()
         for k in range(count):
             row = XREF_ROW.match(pdf, j)
             if row is None:
-                raise bad
+                raise _Bad("xref row")
+            num = first + k
             if row.group(3) == b"n":
-                named[int(row.group(1))] = (first + k, int(row.group(2)))
+                if num in named or num == 0:
+                    raise _Bad("xref entry")
+                named[num] = (int(row.group(2)), int(row.group(1)))
             j = row.end()
-            while j < len(pdf) and pdf[j:j + 1] in b" \r\n":
-                j += 1
-        total = max(total, first + count)
-    tr = re.compile(rb"\s*trailer\s*<<(.*?)>>\s*startxref\b", re.S).match(pdf, j)
-    if tr is None or not named or first_sub != 0 or any(num == 0 for num, _ in named.values()):
-        raise bad                                     # the table starts at object 0, the free head
-    if named != dict(heads):                          # each named object at a head outside the streams, and back
-        raise bad
-    # the trailer: only /Size, /Root, /Info, /ID (no /Prev or /XRefStm: an older section a reader would also use, no
-    # /Encrypt); /Size the highest object named plus one
-    trailer = tr.group(1)
-    keys = {m.group(1) for m in NAME.finditer(trailer)}
-    if not keys <= TRAILER_KEYS or b"Root" not in keys:
-        raise bad
-    size = re.search(rb"/Size\s+(\d+)", trailer)
-    if size is None or int(size.group(1)) != max(num for num, _ in named.values()) + 1:
-        raise bad
-    # every reference outside the streams' bytes (the trailer's /Root and /Info included) is to an object in use, the
-    # same generation (a reference to anything else would be found by a reader some other way)
-    live = set(named.values())
-    for m in REF.finditer(rest):
-        if (int(m.group(1)), int(m.group(2))) not in live:
-            raise bad
+    if first_sub != 0:
+        raise _Bad("xref start")
+    lx.pos = j
+    if lx.next() != ("kw", b"trailer") or lx.next() != ("<<",):
+        raise _Bad("trailer")
+    trailer = _value(lx, ("<<",), refs)
+    if lx.next() != ("kw", b"startxref"):
+        raise _Bad("startxref")
+    sx = lx.next()
+    if sx[0] != "num" or sx[1] != xref_at or not EOF_TAIL.match(pdf, lx.pos):
+        raise _Bad("startxref / %%EOF")
+    # each object listed once, at its own head; nothing listed that isn't there
+    if named != {num: (gen, off) for num, (gen, off, _) in objects.items()}:
+        raise _Bad("xref offsets")
+    if not set(trailer) <= TRAILER_KEYS or Name(b"Root") not in trailer:
+        raise _Bad("trailer keys")
+    if trailer.get(Name(b"Size")) != max(objects) + 1:
+        raise _Bad("/Size")
+    live = {(num, gen) for num, (gen, _, _) in objects.items()}
+    for r in refs:
+        if tuple(r) not in live:
+            raise _Bad("dangling reference")
+    if not isinstance(trailer[Name(b"Root")], Ref):
+        raise _Bad("/Root")
+    return {"objects": objects, "trailer": trailer, "refs": refs}
 
 
-def _streams(pdf: bytes) -> list[tuple[int, int]]:
-    """[(start, end)] of every stream's bytes, followed as recheck_pdf follows them."""
-    out, i = [], 0
-    while (m := STREAM_AT.search(pdf, i)) is not None:
-        found = list(OBJ_AT.finditer(pdf, i, m.start()))
-        lm = None
-        for lm in LENGTH.finditer(pdf, found[-1].start() if found else i, m.start()):
-            pass
-        if lm is None or lm.group(2):
-            return out
-        end = m.end() + int(lm.group(1))
-        out.append((m.end(), end))
-        tail = END_AT.match(pdf, end)
-        if tail is None:
-            return out
-        i = tail.end()
-    return out
+def recheck_pdf(pdf: bytes, original: int) -> None:
+    """The sanitised copy, looked at again here in the hub before it is stored: parsed whole, strictly, as the narrow
+    subset pypdf writes (parse_clean_pdf: a real tokenizer, so a word inside a string is a string and a stream's bytes
+    are skipped only after a dictionary with a direct /Length that lands on endstream). No name of CLEAN_NEVER anywhere
+    as a token, the trailer only /Size (right), /Root, /Info and /ID, one xref table whose offsets are the objects' own
+    heads, every reference to an object in use, no bigger than 64 MB or than twice the original and a megabyte. Anything
+    else: refused."""
+    if len(pdf) > min(CLEAN_MAX_BYTES, 2 * original + (1 << 20)):
+        raise Refused("the PDF couldn't be cleaned: print it to a new PDF")
+    try:
+        parse_clean_pdf(pdf)
+    except (_Bad, ValueError, IndexError, RecursionError):
+        raise Refused("the PDF couldn't be cleaned: print it to a new PDF") from None
 
 
 def plan_image(data: bytes, max_px: int = MAX_PX) -> dict | None:
