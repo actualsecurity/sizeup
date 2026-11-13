@@ -109,10 +109,9 @@ class MemoryEvents:
     def all(self) -> list[Event]:
         return sorted(self.rows.values(), key=lambda e: e.id or 0)
 
-    def recent_closed(self, pack: str, category: str, source_key: str, subject: str, since: float) -> bool:
-        return any(e.status in ("ended", "dismissed") and e.pack == pack and e.category == category
-                   and (e.source_key == source_key or (subject and e.subject == subject)) and e.updated_at >= since
-                   for e in self.rows.values())
+    def recent_closed(self, pack: str, category: str, since: float) -> list[Event]:
+        return [e for e in self.rows.values() if e.status in ("ended", "dismissed") and e.pack == pack
+                and e.category == category and e.updated_at >= since]
 
 
 class SqlEvents:
@@ -139,11 +138,11 @@ class SqlEvents:
             db.execute("COMMIT")
             self.rev += 1
 
-    def recent_closed(self, pack: str, category: str, source_key: str, subject: str, since: float) -> bool:
-        """An event of this pack and category, on this source (or at this place), ended or dismissed since then."""
-        return self.store.one("SELECT 1 AS x FROM intel_events WHERE status IN ('ended', 'dismissed') AND pack = ? AND "
-                              "category = ? AND (source_key = ? OR (? != '' AND subject = ?)) AND updated_at >= ? LIMIT 1",
-                              (pack, category, source_key, subject, subject, since)) is not None
+    def recent_closed(self, pack: str, category: str, since: float) -> list[Event]:
+        """The events of this pack and category ended or dismissed since then (the mute compares their places)."""
+        return [row_event(r) for r in self.store.q(
+            "SELECT * FROM intel_events WHERE status IN ('ended', 'dismissed') AND pack = ? AND category = ? AND "
+            "updated_at >= ? LIMIT 50", (pack, category, since))]
 
     def open_events(self) -> list[Event]:
         return [row_event(r) for r in self.store.q("SELECT * FROM intel_events WHERE status = 'open'")]

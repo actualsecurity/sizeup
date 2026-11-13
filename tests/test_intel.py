@@ -175,7 +175,8 @@ def test_the_call_out_and_the_read_back_are_one_event_and_the_read_back_places_i
     [ev] = e.feed(row("t1", "report of smoke coming from a house", 5000))
     assert ev.precision == "none" and ev.label_full == ""
     clock.t = 5030
-    [up] = e.feed(row("t2", "units respond to 100 Example Ave", 5030))          # the cue: same window, now placed
+    assert e.feed(row("t2x", "units respond to Sample St and Test Rd", 5020)) == []    # a cue alone: another job's
+    [up] = e.feed(row("t2", "units respond to 100 Example Ave for the smoke", 5030))  # the cue that says the smoke
     assert up.id == ev.id and up.precision == "address" and up.traffic_ids == ["t1", "t2"]
     assert len({x[0].id for x in sink.events}) == 1                              # never a second event
     # the place first heard 30 s after the first push: pushed once more, whatever repush_min (10) says (M1)
@@ -192,7 +193,7 @@ def test_a_read_back_with_no_rule_words_confirms_the_place():
     [ev] = e.feed(row("t1", "smoke coming from the house, maybe 100 Example Ave", 5000, talker="Unit 7"))
     assert ev.precision == "address" and not ev.confirmed
     clock.t = 5040
-    assert e.feed(row("t2", "car 5 copy, en route to 100 Example Ave", 5040, talker="Unit 5")) == []   # another job
+    assert e.feed(row("t2", "car 5 copy, en route to Sample St and Test Rd", 5040, talker="Unit 5")) == []   # another job
     [up] = e.feed(row("t3", "copy, 100 Example Ave", 5050, talker="Unit 7"))     # the same talker: its read-back
     assert up.id == ev.id and up.confirmed and up.traffic_ids == ["t1", "t3"]
 
@@ -732,7 +733,7 @@ def test_h2_a_dismissed_event_doesnt_come_straight_back(live):
     cad.comms.record(ctx_row("c2-t0", "units respond, shots fired at Sample St and Test Rd", cad.clock() + 5))
     cad.intel.consider("c2-t0")
     cad.intel.drain()
-    assert len(n.sent) == 1 and cad.intel.events.open_events() == []
+    assert len(n.sent) == 1 and [x.mode for x in cad.intel.events.open_events()] == ["log"]   # recorded, never shown
 
 
 def test_h4_intel_writes_never_bump_the_cad_rev(live):
@@ -795,3 +796,111 @@ def test_l6_the_hash_covers_towns_scope_and_context_factor():
     h = rules_mod.ruleset_hash(rules_mod.load_packs([d]))
     for k, v in (("towns", {"p25:mrrs:9211": ["Rye"]}), ("context_factor", 0.2), ("scope", {"services": ["police"]})):
         assert rules_mod.ruleset_hash(rules_mod.load_packs([dict(d, **{k: v})])) != h, k
+
+
+# -- the #492 re-check: merge, mute and same-job ----------------------------------------------------------------------
+
+def pushed(sink):
+    return [(e.category, d.message["body"].split(" · ")[0]) for e, d in sink.pushes if d.would_push]
+
+
+def test_r1_a_new_place_or_a_new_call_is_a_new_incident():
+    clock = Clock(1000)
+    e, sink = engine(clock=clock)
+    [a] = e.feed(row("t1", "shots fired at 100 Example Ave", 1000))
+    clock.t = 1480                                                    # 8 min later: another call, another place
+    [b] = e.feed(row("t2", "new call, shots fired at Sample St and Test Rd", 1480))
+    assert b.id != a.id and b.label_full.startswith("Sample St")
+    clock.t = 1600
+    [c] = e.feed(row("t3", "shots fired at Sample St and Test Rd", 1600, source="p25:mrrs:9212"))   # the same place
+    assert c.id == b.id
+    clock.t = 1700
+    [d] = e.feed(row("t4", "shots fired again at 100 Example Ave", 1700))       # no "new call", but another place
+    assert d.id == a.id
+    assert [x[0] for x in pushed(sink)] == ["weapons", "weapons"]
+
+
+def test_r2_an_unrelated_disregard_ends_nothing_and_mutes_nothing():
+    clock = Clock(1000)
+    e, sink = engine(clock=clock)
+    [a] = e.feed(row("t1", "shots fired at 100 Example Ave", 1000))
+    clock.t = 1300
+    assert e.feed(row("t2", "car 4, disregard the lockout call", 1300)) == []
+    assert e.events.get(a.id).status == "open"
+    clock.t = 1400
+    [g] = e.feed(row("t3", "male with a gun at Sample St and Test Rd", 1400))
+    assert g.id != a.id and g.mode == "push" and len(pushed(sink)) == 2
+
+
+def test_r2_the_mute_is_by_place_never_by_source():
+    clock = Clock(1000)
+    e, sink = engine(clock=clock)
+    e.feed(row("t1", "shots fired at 100 Example Ave", 1000))
+    e.feed(row("t2", "disregard, units disregard, shots fired call cancelled", 1010))
+    clock.t = 1100
+    [same] = e.feed(row("t3", "shots fired at 100 Example Ave", 1100))      # the same place a moment later: logged
+    assert same.mode == "log"
+    clock.t = 1110
+    [other] = e.feed(row("t4", "shots fired at Sample St and Test Rd", 1110))   # another place: a real pre-alert
+    assert other.mode == "push" and len(pushed(sink)) == 2
+
+
+def test_r3_the_dispatchers_next_job_never_places_this_one():
+    clock = Clock(1000)
+    e, sink = engine(clock=clock)
+    [a] = e.feed(row("t1", "shots fired, caller couldn't say where", 1000, talker="DISP"))
+    clock.t = 1030
+    assert e.feed(row("t2", "car 5, Sample St and Test Rd, lost wallet", 1030, talker="DISP")) == []
+    assert e.events.get(a.id).precision == "none" and len(pushed(sink)) == 1        # no place, no repush
+    clock.t = 1040
+    assert e.feed(row("t3", "car 6, Sample St and Test Rd", 1040, talker="")) == []   # a blank talker: no tie either
+    assert e.events.get(a.id).precision == "none"
+
+
+def test_r4_a_unit_tied_to_the_event_places_it_from_its_own_report():
+    clock = Clock(1000)
+    e, sink = engine(clock=clock)
+    [a] = e.feed(row("t1", "car 3 respond, shots fired", 1000, talker="DISP"))
+    clock.t = 1060
+    [up] = e.feed(row("t2", "car 3 to dispatch, I'm at Sample St and Test Rd", 1060, talker=""))
+    assert up.id == a.id and up.label_full.startswith("Sample St")
+    assert [x[1] for x in pushed(sink)] == ["location not heard", "Sample St & Test Rd"]   # the M1 repush, tied
+
+
+@pytest.mark.parametrize("text", ["all units go to 120 Example Ave", "house number 120 Example Ave",
+                                  "K9 unit 120 Example Ave", "plate is 120 Example Ave"])
+def test_r5_real_house_numbers_stay(text):
+    assert "120 Example Ave" in place_mod.strip(text, "mrrs", "police")
+
+
+@pytest.mark.parametrize("label", ["NY 120 at Example Ave", "US 1 and Example Ave", "RT 120 Sample St"])
+def test_r5_route_labels_are_no_plates(label):
+    assert push_mod.scrub({"title": "", "body": label}) == "" and label.split()[1] in place_mod.strip(label)
+
+
+def test_end_to_end_a_dispatchers_evening():
+    """Two incidents on the police dispatch channel interleaved with routine traffic, a third job disregarded, and units
+    reporting where they are: exactly two open events, each at its own place, one ended, three pushes."""
+    clock = Clock(1000)
+    e, sink = engine(clock=clock)
+    script = [
+        (1000, "DISP", "car 3 respond to 100 Example Ave, report of smoke coming from the house"),
+        (1020, "DISP", "car 7, parking complaint at the plaza"),
+        (1040, "", "car 3 copy, en route"),
+        (1100, "DISP", "units respond, shots fired at Sample St and Test Rd"),
+        (1130, "DISP", "car 9 respond to the lot, commercial fire alarm activation"),
+        (1160, "DISP", "car 9 disregard, alarm company cancelled"),
+        (1200, "", "car 3 on scene, smoke showing from the roof"),
+        (1260, "", "car 5 to dispatch, I'm at Sample St and Test Rd"),
+        (1300, "DISP", "car 7 clear of the parking complaint"),
+    ]
+    for k, (t, talker, text) in enumerate(script):
+        clock.t = t
+        e.feed(row(f"s{k}", text, t, talker=talker))
+    by = {x.category: x for x in e.events.all()}
+    assert set(by) == {"fire_report", "weapons", "alarm"}
+    assert by["fire_report"].status == "open" and by["fire_report"].label_full.startswith("100 Example Ave")
+    assert by["weapons"].status == "open" and by["weapons"].label_full.startswith("Sample St")
+    assert by["alarm"].status == "ended"
+    assert set(by["fire_report"].traffic_ids) == {"s0", "s6"} and "s7" not in by["fire_report"].traffic_ids
+    assert pushed(sink) == [("fire_report", "100 Example Ave"), ("weapons", "Sample St & Test Rd"), ("alarm", "location not heard")]
