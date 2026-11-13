@@ -324,6 +324,7 @@ ADMIN_READS = {
     "/api/cad/perf/profile": "the hub's CPU profile is for admins (Settings > Health)",
     "/api/cad/search.csv": "the search export is for admins",                # #403: many calls at once, off the hub
     "/api/cad/preplan.csv": "the pre-plan export is for admins",              # #456: every Knox box at once
+    "/api/cad/intel": "the radio pre-alert rules are for admins (Settings > System > Intel)",   # #411: rule phrases
 }
 
 # Who may POST what (enforced only with a verified sign-in, see above): "dispatch" = dispatchers and
@@ -786,6 +787,15 @@ class CadApi:
             pass
         return _json(403, {"error": f"Admins only: {why}"})
 
+    def _admin(self, who) -> bool:
+        """A verified admin (with nobody verified: no, the shadow and log pre-alerts stay hidden)."""
+        if who is None or not who.email:
+            return False
+        try:
+            return self.cad.settings.standing(who.email)["may"] == "admin"
+        except CadError:
+            return False
+
     def _notify(self, who) -> tuple[int, bytes, str]:
         """GET /api/cad/notify: Settings > System > Push notifications, admins only (ADMIN_READS: a topic's name is its
         only secret)."""
@@ -880,7 +890,7 @@ class CadApi:
                 if not sourcekeys.may_see_context(self.cad.comms.context_broadcast):
                     return _json(403, {"error": "radio pre-alerts need a sign-in (Cloudflare Access)"})
                 ia = self.cad.intel_admin
-                return _json(200, ia.page() if path == "/api/cad/intel" else ia.events(parse_qs(query)))
+                return _json(200, ia.page() if path == "/api/cad/intel" else ia.events(parse_qs(query), self._admin(who)))
             if path == "/api/cad/feed":
                 return _json(200, self.cad.feed_query(parse_qs(query)))
             if path == "/api/cad/rigs":

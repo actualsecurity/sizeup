@@ -319,6 +319,11 @@ SOURCES = {"settings": "Settings", "ssm": "SSM", "env": "environment", "config":
 TEST_TITLE = "sizeup test: {kind} topic"
 
 
+def lane(kind: str) -> str:
+    """The queue a kind's pushes wait in: INTEL its own, never ahead of (or in front of) the alarms."""
+    return "intel" if kind == INTEL else "main"
+
+
 def other(kind: str) -> str:
     """The kind this one falls back to when it has no topic of its own (FALLBACK)."""
     return FALLBACK[kind]
@@ -367,7 +372,7 @@ class KindNotifier:
         return n.send(title, body, priority, tags, click, who=who, actions=actions) if n is not None else False
 
     def flush(self, timeout: float = 10.0) -> bool:
-        return all(n.flush(timeout) for n in self.pushes.made())
+        return all(n.flush(timeout) for n in self.pushes.made(lane(self.kind)))
 
 
 class Pushes:
@@ -389,7 +394,9 @@ class Pushes:
         self.log, self.kw = log, kw
         self.publish = publish                    # the test push (tests: a fake)
         self.tests: dict[str, dict] = {}          # kind -> the last test push {at, ok, error}
-        self._made: dict[tuple[str, str], Notifier] = {}
+        # one Notifier (one queue, one thread) per (server, topic, lane): radio pre-alerts (INTEL) have a lane of their
+        # own, so a mayday on the alerts topic never waits behind them in a queue, even when they share the topic
+        self._made: dict[tuple[str, str, str], Notifier] = {}
         self._lock = threading.Lock()
         self.kinds = {k: KindNotifier(self, k) for k in KINDS}
 
@@ -438,6 +445,15 @@ class Pushes:
                 return {"topic": ot, "source": "fallback"}
         return {"topic": t, "source": src}
 
+    def shared(self, kind: str, ov: dict | None = None) -> str:
+        """Whose topic a kind on "fallback" is really on: intel follows the alerts, which may themselves be on the
+        status topic (then it is the status topic, and the line says so)."""
+        ov = self._ov() if ov is None else ov
+        k = other(kind)
+        if kind == INTEL and not self._own(ALERTS, ov)[0]:
+            k = STATUS
+        return k
+
     def line(self) -> str:
         """Where each kind goes, for the log: never a topic's name."""
         ov = self._ov()
@@ -449,7 +465,7 @@ class Pushes:
         def say(k: str) -> str:
             e = eff[k]
             if e["source"] == "fallback":
-                return f"the {other(k)} topic (no {k} topic set)"
+                return f"the {self.shared(k, ov)} topic (no {k} topic set)"
             if e["source"] == "off":
                 return "off (Settings)"
             return f"topic set ({SOURCES[e['source']]})" if e["topic"] else "off"
@@ -463,18 +479,18 @@ class Pushes:
     def notifier_now(self, kind: str) -> Notifier | None:
         ov = self._ov()
         t = self.effective(kind, ov)["topic"]
-        return self._notifier(self.server(ov)[0], t) if t else None
+        return self._notifier(self.server(ov)[0], t, lane(kind)) if t else None
 
-    def _notifier(self, server: str, topic: str) -> Notifier:
+    def _notifier(self, server: str, topic: str, ln: str = "main") -> Notifier:
         with self._lock:
-            n = self._made.get((server, topic))
+            n = self._made.get((server, topic, ln))
             if n is None:
-                n = self._made[(server, topic)] = Notifier(server, topic, self.log, **self.kw)
+                n = self._made[(server, topic, ln)] = Notifier(server, topic, self.log, **self.kw)
             return n
 
-    def made(self) -> list[Notifier]:
+    def made(self, ln: str | None = None) -> list[Notifier]:
         with self._lock:
-            return list(self._made.values())
+            return [n for k, n in self._made.items() if ln is None or k[2] == ln]
 
     def test(self, kind: str) -> dict:
         """A clearly marked test push to the kind's topic in effect, now: {at, ok, error}. NotifyError: no topic."""
@@ -501,11 +517,11 @@ class Pushes:
         for k in (STATUS, ALERTS, INTEL):
             e = self.effective(k, ov)
             with self._lock:
-                n = self._made.get((srv, e["topic"])) if e["topic"] else None
+                n = self._made.get((srv, e["topic"], lane(k))) if e["topic"] else None
             mine = ov.get(k) if isinstance(ov.get(k), dict) else {}
             dt, dsrc = self.defaults[k]
             kinds.append({"kind": k, "label": LABELS[k], "topic": e["topic"], "source": e["source"],
-                          "source_text": SOURCES[e["source"]] + (f" (the {other(k)} topic)" if e["source"] == "fallback" else ""),
+                          "source_text": SOURCES[e["source"]] + (f" (the {self.shared(k, ov)} topic)" if e["source"] == "fallback" else ""),
                           "settings": {"topic": str(mine.get("topic") or ""), "off": bool(mine.get("off"))},
                           "default": {"topic": dt, "source": dsrc if dt else "none", "source_text": SOURCES[dsrc if dt else "none"]},
                           "last": ({"at": n.last_at, "ok": n.last_ok, "error": n.last_error, "sent": n.sent, "failed": n.failed}

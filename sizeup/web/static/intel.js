@@ -127,7 +127,7 @@ window.IntelSettings = (() => {
     try {
       d = await api("GET", "/api/cad/intel");
     } catch (e) {
-      card.hidden = /sign-in|403/i.test(e.message);
+      card.hidden = /sign-in|403|admins only/i.test(e.message);
       card.replaceChildren(sCardHead("Intel"), el("div", "error", `Intel: ${e.message}`));
       return;
     }
@@ -169,6 +169,24 @@ window.IntelSettings = (() => {
     lrow.append(lst);
     for (const x of lrow.querySelectorAll("input")) x.disabled = !admin;
     kids.push(lrow);
+    // detection on/off and quiet hours (no pushes in between; the card and the map go on)
+    const [elab, ecb] = sCheck("Detection", s.enabled, "Off: no transmission is read for pre-alerts at all");
+    ecb.disabled = !admin;
+    ecb.addEventListener("change", () => post({ action: "set", key: "enabled", value: ecb.checked }, ecb.checked ? "Intel on" : "Intel off"));
+    const hm = (key, label) => {
+      const i = el("input", "s-num");
+      i.type = "time";
+      i.value = s[key] || "";
+      i.title = label;
+      i.setAttribute("aria-label", label);
+      i.disabled = !admin;
+      i.addEventListener("change", () => post({ action: "set", key, value: i.value }));
+      return i;
+    };
+    const qrow = el("div", "row");
+    qrow.append(elab, el("span", "dim small", "quiet"), hm("quiet_from", "Quiet from (no pushes; empty: none)"),
+      el("span", "dim small", "to"), hm("quiet_to", "Quiet until"));
+    kids.push(qrow);
     for (const p of d.packs) {
       const ph = el("div", "row");
       ph.append(el("b", "s-eta-l", `${p.label} (${p.name})`),

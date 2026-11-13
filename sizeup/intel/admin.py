@@ -52,6 +52,7 @@ def _mode(v, what: str) -> str:
 class IntelAdmin:
     def __init__(self, cad, engine):
         self.cad, self.engine = cad, engine
+        self._state = None
 
     # -- reading ----------------------------------------------------------------------------------------------------
 
@@ -86,8 +87,9 @@ class IntelAdmin:
                 "listen": eng.listen.status() if eng.listen is not None else {"configured": False, "why": "not here"},
                 "may_edit": True}
 
-    def events(self, q: dict) -> dict:
-        """GET /api/cad/intel/events?since=&bbox=w,s,e,n&mode=map,push&status=open|all&limit=: the map layer's."""
+    def events(self, q: dict, admin: bool = False) -> dict:
+        """GET /api/cad/intel/events?since=&bbox=w,s,e,n&mode=map,push&status=open|all&limit=: the map layer's. The
+        shadow and log events (rules being tuned) only for an admin."""
         if not sourcekeys.may_see_context(self.cad.comms.context_broadcast):
             raise CadError("intel needs a sign-in")
         now = self.cad.clock()
@@ -98,7 +100,8 @@ class IntelAdmin:
             since = float(one("since", "0") or 0)
         except ValueError:
             raise CadError("since: unix seconds") from None
-        modes = [m for m in one("mode", "map,push").split(",") if m in MODES] or ["map", "push"]
+        allowed = MODES if admin else ("map", "push")
+        modes = [m for m in one("mode", "map,push").split(",") if m in allowed] or ["map", "push"]
         status = one("status", "open")
         try:
             limit = max(1, min(EVENTS_MAX, int(one("limit", "200"))))
@@ -138,8 +141,12 @@ class IntelAdmin:
         if not sourcekeys.may_see_context(self.cad.comms.context_broadcast) or not hasattr(self.engine.events, "rows"):
             return None
         now = self.cad.clock() if now is None else now
-        rows = self.engine.events.rows("status = 'open' AND mode IN ('map', 'push') AND until > ?", (now,), 20)
-        return {"open": [self.shown(r) for r in rows]}
+        # read again only when intel wrote something (its own rev, never store.rev) or a minute passed (until)
+        key = (getattr(self.engine.events, "rev", 0), int(now // 60))
+        if self._state is None or self._state[0] != key:
+            rows = self.engine.events.rows("status = 'open' AND mode IN ('map', 'push') AND until > ?", (now,), 20)
+            self._state = (key, {"open": [self.shown(r) for r in rows]})
+        return self._state[1]
 
     # -- a person's verdict -----------------------------------------------------------------------------------------
 
@@ -147,6 +154,9 @@ class IntelAdmin:
         op = str(body.get("operator") or "")[:120]
         if not self.engine.events.dismiss(eid, op, self.cad.clock()):
             raise CadError(f"no open pre-alert {eid}")
+        ev = self.engine.events.get(eid)
+        if ev is not None:
+            self.engine.dismissed(ev)             # its window spent; mute_min keeps it from coming straight back
         self.engine.events.feedback(eid, None, str(body.get("verdict") or "noise") if body.get("verdict") in VERDICTS
                                     else "noise", op, self.cad.clock())
         return {"ok": True}
