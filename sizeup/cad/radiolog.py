@@ -216,6 +216,7 @@ class RadioLog:
         self._q: queue.Queue | None = None
         self._qlock = threading.Lock()
         self._stopped = False
+        self._threads: list[threading.Thread] = []      # the units worker and backfills running: stop(wait_s) joins them
         with self.store.lock:
             self.store.db.executescript(SCHEMA)
             for table, col in (("radiolog_units", "again INTEGER NOT NULL DEFAULT 0"),
@@ -448,8 +449,15 @@ class RadioLog:
                 self.cad.log(f"CAD: radio log backfill: {type(e).__name__}")
         if self.inline:
             run()
-        else:
-            threading.Thread(target=run, name="radiolog-backfill", daemon=True).start()
+        elif not self._stopped:                          # stopped: the store may be closing under it
+            self._spawn(run, "radiolog-backfill")
+
+    def _spawn(self, target, name: str) -> None:
+        t = threading.Thread(target=target, name=name, daemon=True)
+        with self._qlock:
+            self._threads = [x for x in self._threads if x.is_alive()]
+            self._threads.append(t)
+        t.start()
 
     # -- units added later (#370) ---------------------------------------------------------------------------------------
 
@@ -643,9 +651,11 @@ class RadioLog:
             self._units_run(iid)
             return
         with self._qlock:
-            if self._q is None:
+            start = self._q is None
+            if start:
                 self._q = queue.Queue()
-                threading.Thread(target=self._units_worker, name="radiolog-units", daemon=True).start()
+        if start:
+            self._spawn(self._units_worker, "radiolog-units")
         self._q.put(iid)
 
     def start(self) -> RadioLog:
@@ -655,12 +665,20 @@ class RadioLog:
             self.units_soon(r["id"])
         return self
 
-    def stop(self) -> None:
-        """The worker ends after what it is doing (what was queued is picked up again at the next start)."""
+    def stop(self, wait_s: float = 0.0) -> list[threading.Thread]:
+        """The worker ends after what it is doing (what was queued is picked up again at the next start). wait_s: the
+        units worker and the backfills still running are joined for up to that long in all (before the store is
+        closed under them, Cad.shutdown). The threads still running after it."""
         self._stopped = True
         with self._qlock:
             if self._q is not None:
                 self._q.put(None)
+            threads = list(self._threads)
+        deadline = time.monotonic() + wait_s
+        for t in threads:
+            if t is not threading.current_thread():
+                t.join(max(0.0, deadline - time.monotonic()))
+        return [t for t in threads if t.is_alive()]
 
     def _units_worker(self) -> None:
         while True:

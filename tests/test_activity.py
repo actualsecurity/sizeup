@@ -214,7 +214,7 @@ def test_an_older_database_gets_the_table(tmp_path):
     cad = make_cad(tmp_path)
     cad.store.db.execute("DROP TABLE user_activity")
     cad.store.db.execute("ALTER TABLE operators DROP COLUMN last_ua")
-    cad.store.db.close()
+    cad.shutdown()
     cad = make_cad(tmp_path)
     assert cad.store.q("SELECT * FROM user_activity") == []
     assert "last_ua" in {r["name"] for r in cad.store.q("PRAGMA table_info(operators)")}

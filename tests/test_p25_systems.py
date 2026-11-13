@@ -601,7 +601,7 @@ def test_rows_from_before_get_their_source_by_the_county_system(tmp_path):
     s.db.execute("INSERT INTO radio_traffic (id, start, end, channel, talkgroup, updated_at) VALUES ('f1', 1, 2, 'FG1', NULL, 1)")
     s.db.execute("INSERT INTO radio_traffic (id, start, end, channel, talkgroup, mhz, updated_at) VALUES ('a1', 1, 2, 'HPN Tower', NULL, 118.575, 1)")
     s.db.commit()
-    s.db.close()
+    s.shutdown()
     db = sqlite3.connect(path)                       # as it was before this release: none of the columns
     for index in ("source_start", "service_start", "system_start", "dept_start", "safety"):     # the Radio page's too (#415)
         db.execute(f"DROP INDEX radio_traffic_{index}")
