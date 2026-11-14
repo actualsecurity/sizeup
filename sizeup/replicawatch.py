@@ -40,7 +40,9 @@ included: on a thread of its own, joined with that deadline). S3 unreadable: pus
 The topic is the env's (SSM /sizeup-hub/status-topic, else the alerts topic: notify.route()), else the config file's
 [alerts]: a Settings override lives in the CAD database, which the supervisor never opens. So it also can't see the
 topics protected in Settings (Settings' pre-alert topics and its protected list): it refuses only the config's and
-env's [prealert] ones (notify.topic_problem); its topic comes from the env / config, never from Settings. Never a topic's name in a log line.
+env's [prealert] ones (notify.topic_problem); its topic comes from the env / config, never from Settings. The static
+backstop (notify.always_protected(): a few names by hash) needs neither: status_topic() refuses such a topic and says
+so, the Pusher refuses it without a retry, and notify.publish() would refuse it again. Never a topic's name in a log line.
 """
 
 from __future__ import annotations
@@ -283,9 +285,11 @@ class WatchStore:
 
 # -- pushes ---------------------------------------------------------------------------------------------------------
 
-def status_topic(config: str = "", env: dict | None = None) -> tuple[str, str, tuple[str, ...]]:
+def status_topic(config: str = "", env: dict | None = None,
+                 log: Callable[[str], None] | None = None) -> tuple[str, str, tuple[str, ...]]:
     """(the ntfy server, the STATUS topic in effect or "", topics never to publish to) from the env (SSM) over the
-    config file's [alerts]; [prealert]'s topics refused like Tapout's."""
+    config file's [alerts]; [prealert]'s topics refused like Tapout's, and the static backstop
+    (notify.always_protected()) always: said in the log (never the name)."""
     env = os.environ if env is None else env
     al, pre = {}, {}
     if config:
@@ -302,6 +306,10 @@ def status_topic(config: str = "", env: dict | None = None) -> tuple[str, str, t
     alert = (env.get("SIZEUP_ALERT_TOPIC") or str(al.get("ntfy_topic") or "")).strip()
     status = (env.get("SIZEUP_STATUS_TOPIC") or str(al.get("status_topic") or "")).strip()
     server = (env.get("SIZEUP_ALERT_SERVER") or str(al.get("ntfy_server") or "") or notify.DEFAULT_SERVER).strip()
+    for what, t in (("alerts", alert), ("status", status)):
+        if t and log is not None and (notify.always_protected(t) or notify.topic_problem(t, forbid) == notify.PROTECTED_WHY):
+            log(f"replica-watch: the {what} topic is a protected topic (one sizeup only subscribes to): REFUSED, "
+                "never published to; set a topic of our own")
     topic = notify.route(alert if not notify.topic_problem(alert, forbid) else "",
                          status if not notify.topic_problem(status, forbid) else "")[notify.STATUS]
     return server.rstrip("/"), topic, forbid
@@ -322,7 +330,14 @@ class Pusher:
 
     @property
     def on(self) -> bool:
-        return bool(self.topic) and not notify.topic_problem(self.topic, self.forbid)
+        return bool(self.topic) and not self.refused
+
+    @property
+    def refused(self) -> bool:
+        """The topic is one never published to: the static backstop (notify.always_protected()) or a subscribed one
+        (or not a topic name at all)."""
+        return bool(self.topic) and (notify.always_protected(self.topic)
+                                     or bool(notify.topic_problem(self.topic, self.forbid)))
 
     def push(self, kind: str, title: str, body: str, priority: int = 4, tags: tuple = ("rotating_light", "sizeup"),
              limit: bool = True, known: dict | None = None) -> bool:
@@ -338,6 +353,9 @@ class Pusher:
             if isinstance(last, (int, float)) and now - float(last) < self.every_s:
                 self.log(f"replica-watch: {title}: not pushed (one {kind} push per {self.every_s / 60:g} min)")
                 return False
+        if self.refused:        # no attempt, no retry: publish() would refuse it as well
+            self.log(f"replica-watch: {title}: the status topic is refused (protected, or not a topic of ours): not pushed")
+            return False
         if not self.on:
             self.log(f"replica-watch: {title}: no status topic: not pushed")
             return False
@@ -809,7 +827,7 @@ def from_env(holder: str, run_dir: Path, state_dir: Path, ls_config: str, config
     prefix = (env.get("LITESTREAM_PATH", "").strip() or "sizeup-hub").strip("/")
     obj = S3Object(bucket, f"{prefix}/{KEY}", env.get("LITESTREAM_REGION", "").strip()) if bucket else None
     store = WatchStore(obj)
-    server, topic, forbid = status_topic(config, env)
+    server, topic, forbid = status_topic(config, env, log)
     pusher = Pusher(store, server, topic, forbid, every_s=_minutes(env, "SIZEUP_REPLICA_PUSH_MIN", PUSH_EVERY_S), log=log)
     w = ReplicaWatch(store, pusher, holder, run_dir, state_dir / ".replica-check", ls_config,
                      build=env.get("SIZEUP_BUILD", "").strip(),

@@ -642,3 +642,46 @@ def test_the_workflow_reads_the_record_and_never_restores_a_database():
 @pytest.fixture
 def world():
     return World()
+
+
+# -- the static backstop (notify.PROTECTED_SHA256): the supervisor never reads Settings, so nothing is derived here ----
+BACKSTOP = "invented-backstop-topic-0001"        # made up: its hash is put in the set for the test
+
+
+@pytest.fixture
+def backstop(monkeypatch):
+    import hashlib
+
+    import sizeup.notify as notify
+    monkeypatch.setattr(notify, "PROTECTED_SHA256", frozenset({hashlib.sha256(BACKSTOP.encode()).hexdigest()}))
+    return BACKSTOP
+
+
+def test_a_backstop_topic_is_never_the_status_topic_and_the_log_says_refused(tmp_path, backstop):
+    logs = []
+    assert rw.status_topic("", {"SIZEUP_STATUS_TOPIC": BACKSTOP}, logs.append)[1] == ""        # nothing subscribed here
+    assert rw.status_topic("", {"SIZEUP_ALERT_TOPIC": BACKSTOP.upper()}, logs.append)[1] == ""
+    assert len(logs) == 2 and all("REFUSED" in m and "protected" in m for m in logs)
+    assert rw.status_topic("", {"SIZEUP_STATUS_TOPIC": BACKSTOP, "SIZEUP_ALERT_TOPIC": TOPIC}, logs.append)[1] == TOPIC
+    cfg = tmp_path / "c.toml"
+    cfg.write_text(f'[alerts]\nstatus_topic = "{BACKSTOP}"\n')
+    assert rw.status_topic(str(cfg), {}, logs.append)[1] == "" and rw.status_topic(str(cfg), {})[1] == ""
+    w = rw.from_env("A", tmp_path / "run", tmp_path, "ls.yml", str(cfg), env={}, log=logs.append)
+    assert w.pusher.topic == "" and not w.pusher.on
+    assert not any(BACKSTOP in m.lower() for m in logs)
+
+
+def test_the_pusher_refuses_a_backstop_topic_without_a_request_or_a_retry(ntfy, backstop, monkeypatch):
+    import sizeup.notify as notify
+    s3, logs, slept, asked = FakeS3(), [], [], []
+    p = Pusher(store_for(s3, "A"), ntfy.url, BACKSTOP, log=logs.append, sleep=slept.append)    # forbid: nothing derived
+    assert p.refused and not p.on
+    assert p.push("task", "Hub takeover failed", "x") is False and p.push("replica_ok", "t", "x", limit=False) is False
+    assert slept == [] and p.sent == [] and ntfy.got == []
+    assert all("refused" in m for m in logs) and not any(BACKSTOP in m for m in logs)
+    # and were the Pusher's own check gone: notify.publish (what it calls) refuses before any request
+    monkeypatch.setattr(Pusher, "refused", property(lambda self: False))
+    monkeypatch.setattr(notify, "urlopen", lambda *a, **k: asked.append(a))
+    assert p.on and p.push("task", "Hub takeover failed", "x") is False
+    assert asked == [] and ntfy.got == [] and p.sent == [] and not any(BACKSTOP in m for m in logs)
+    assert "pushed" not in (store_for(s3, "A").read() or {})

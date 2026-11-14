@@ -347,3 +347,61 @@ def test_a_changed_or_cleared_prealert_topic_stays_protected(tmp_path):
         assert code == 400 and "protected" in out["error"], name
     assert r.p.problem(old)
     assert old not in json.dumps(r.cad.settings_audit_log({"section": ["system"]})["audit"])
+
+
+# -- the static backstop: refused with an empty derived set (a hub whose Settings name no pre-alert topics yet) ------
+BACKSTOP = "invented-backstop-topic-0001"        # made up: its hash is put in the set for the test
+
+
+@pytest.fixture
+def backstop(monkeypatch):
+    import hashlib
+    monkeypatch.setattr(notify, "PROTECTED_SHA256", frozenset({hashlib.sha256(BACKSTOP.encode()).hexdigest()}))
+    return BACKSTOP
+
+
+def test_a_backstop_topic_is_refused_with_an_empty_derived_set(backstop):
+    fake, logs = FakePublish(), []
+    p = Pushes("http://127.0.0.1:9", BACKSTOP, SSM_STATUS, sources={ALERTS: "ssm", STATUS: "ssm"}, log=logs.append,
+               retries=())
+    p.publish = fake
+    assert p.protected() == ()                                     # nothing subscribed, nothing listed: nothing derived
+    assert "protected" in p.problem(BACKSTOP) and "protected" in p.problem(BACKSTOP.upper())
+    assert p.problem(SSM_STATUS) == ""
+    assert p.effective(ALERTS)["topic"] != BACKSTOP                # the alerts kind never resolves to it
+    assert all(n.topic != BACKSTOP for n in p.made())
+    assert p.effective(STATUS)["topic"] == SSM_STATUS              # ours still goes out
+    over = {"alerts": {"topic": SSM_ALERTS}, "status": {"topic": BACKSTOP.title()}}      # ... nor from Settings
+    q = Pushes("http://127.0.0.1:9", SSM_ALERTS, SSM_STATUS, settings=lambda: over, log=logs.append, retries=())
+    q.publish = fake
+    assert q.protected() == () and q.effective(STATUS)["topic"].lower() != BACKSTOP
+    for pushes, kind in ((p, ALERTS), (q, STATUS)):
+        try:
+            pushes.test(kind)
+        except NotifyError:
+            pass
+    assert all(m["topic"].lower() != BACKSTOP for m in fake.got)
+    assert not any(BACKSTOP in m.lower() for m in logs)
+
+
+def test_a_backstop_topic_can_not_be_set_in_settings(tmp_path, backstop):
+    r = Rig(tmp_path)
+    code, out = r.post({"action": "set", "key": "status", "topic": BACKSTOP})
+    assert code == 400 and "protected" in out["error"] and BACKSTOP not in out["error"]
+    assert r.p.effective(STATUS)["topic"] == SSM_STATUS
+
+
+def test_a_failed_settings_read_stays_failed_whatever_a_later_read_says():
+    ok = {"on": False}
+
+    def settings():
+        if not ok["on"]:
+            raise RuntimeError("db locked")
+        return {}
+    p = Pushes("http://127.0.0.1:9", SSM_ALERTS, SSM_STATUS, settings=settings, log=lambda m: None)
+    bad = p._ov()                                                  # one thread's read fails ...
+    ok["on"] = True
+    good = p._ov()                                                 # ... another's, meanwhile, works
+    assert notify.UNKNOWN in p.protected(bad) and p.problem(SSM_ALERTS, bad)       # the failed one still fails closed
+    assert notify.UNKNOWN not in p.protected(good) and p.problem(SSM_ALERTS, good) == ""
+    assert p.effective(ALERTS, bad)["topic"] == "" and p.effective(ALERTS, good)["topic"] == SSM_ALERTS
