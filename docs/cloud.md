@@ -2612,8 +2612,12 @@ Camera snapshots and the weather's radar tiles are not kept (minutes old at most
 **Durability.** A deploy or any clean handover loses **nothing**: the draining leader asks Litestream for a sync of
 each file (`litestream sync -wait`), which reads the WAL and uploads everything at once, and releases the lock with
 those exact positions; the new task catches up to them before it promotes anything. A hub that is **killed** (a
-crash, an OOM, a fence, the host gone) loses what it wrote since Litestream's last sync: **up to ~30 s** (it was
-~1 s).
+crash, an OOM, a fence, the host gone) loses what it wrote since Litestream's last *successful* sync: **up to
+~30 s while Litestream is healthy** (it was ~1 s). It can be more: after a sync error (S3 unreachable or refusing,
+the disk full) Litestream waits one interval more, then twice that, and so on up to 5 minutes between tries, for
+both the read of the WAL and the upload; and while Litestream itself is down (it exited: the supervisor starts it
+again after 2 s, doubling to 60 s) nothing is replicated at all. Neither loses anything by itself: the next sync
+that works carries everything. Only a hub killed in that stretch loses that much.
 
 **Why.** Every object Litestream writes to S3 and every listing it makes is a billed request (S3's
 "Requests-Tier1": PUT and LIST). At Litestream's defaults it read each database's WAL every second and uploaded one
@@ -2657,9 +2661,73 @@ and a takeover against the real Litestream with this very file):
 | The fence (20 s to stop writing, 35 s before anyone takes over) | Nothing to do with Litestream's cadence: the app and Litestream are killed. |
 | The replica checks ([below](#replica-checks)) | The followers poll at their own interval and apply whatever is there; nothing compares a replica's age in seconds. |
 
+**By hand.** Any `litestream ... -config /app/deploy/hub/litestream.yml` needs `SIZEUP_LITESTREAM_SYNC_S` in its
+environment, like `LITESTREAM_BUCKET` / `LITESTREAM_PATH` / `LITESTREAM_REGION` (a restore too: the whole file is
+parsed). The image sets it; anywhere else: `SIZEUP_LITESTREAM_SYNC_S=30 litestream restore ...`. Without it
+Litestream stops at once with a YAML error about the duration `s`.
+
+**A canary in the log.** Litestream reads a database for the first time at its first tick, 30 s after it starts,
+unless it is asked sooner; the supervisor always asks (`litestream sync`: at a takeover, a retake, and after it
+starts Litestream again). Litestream's `timeout waiting for db initialization` (repeated by the supervisor as
+`handoff: LITESTREAM NOT READY`) therefore means a database sat unreplicated for 30 s after a start: something
+started Litestream without asking. Worth a CloudWatch metric filter beside "replica check FAILED".
+
 **What a standby costs.** A follower that finds no new L0 file looks through every other level too (nine or more
 listings instead of one). With the leader writing every 30 s that is most of a standby's one-second polls: a few
 thousand listings per deploy (a few cents), only while a standby runs.
+
+### Litestream started again under the app
+
+**The hazard** (found in review of #522, in Litestream 0.5.18; it was there at the 1 s cadence too). While
+Litestream runs, its read lock keeps SQLite from restarting the WAL past what Litestream has read. If Litestream
+exits while the app serves (a crash, an OOM kill, even a clean SIGTERM), that lock is gone: the app's autocheckpoint
+moves the frames written meanwhile into the main file and the WAL starts again from its beginning. A Litestream
+started then can find the frame it last read still lying in the WAL file, past the new and shorter WAL, conclude
+that nothing was missed (`verifyWithExecutor` / `detectFullCheckpoint`) and carry on from the new WAL's start
+**without a snapshot**. Every page written in the gap is then stale in the replica for good, and nothing says so:
+`integrity_check` of a restore is ok, `litestream sync -wait` answers 0, no error is logged. Removing Litestream's
+state (`.cad.sqlite-litestream`) does not help.
+
+**The rule: TRUNCATE before Litestream is started again.** Before the supervisor starts Litestream again on files
+the app has open (`sizeup/handoff.py` `_restart_litestream`), it runs `PRAGMA wal_checkpoint(TRUNCATE)` on each
+(a short-lived connection, a busy timeout, tried again while a reader or writer is in its way, 20 s in all) and
+goes on only when it completed (busy 0). After that the WAL is empty, or its frame at the offset Litestream
+remembers carries a new salt; either way Litestream's first sync of the file is a **full snapshot** in the same
+chain of files the followers apply. Litestream 0.5.18 has no command to force a snapshot from a running
+`replicate` (`-force-snapshot` is for `-once` only and writes a snapshot-level file that followers don't apply);
+this is the way. Then Litestream is asked for a sync at once.
+`tests/test_litestream_takeover.py` kills the real Litestream under an app, lets the WAL restart, and compares a
+restore with the live file: it fails without the checkpoint.
+
+**When the checkpoint can't be done** (20 s of a reader or writer in its way): Litestream is started all the
+same, since no replication at all is worse, and the file is **suspect**:
+
+* the log says `WARNING: REPLICA UNVERIFIED` and `replica check FAILED: not verifiable` (the CloudWatch filter's
+  words); a status push "Replica not verifiable: cad.sqlite" (4); Settings > Health > Replicas shows the file as
+  **unverified**, whatever its last check said (a stale page passes `quick_check`), with a critical alert;
+* the supervisor tries again every minute (doubling to 10 min): Litestream stopped, the checkpoint, started. Once
+  it completes: "Replica OK again";
+* at a drain, with the app stopped, nothing can be in the checkpoint's way: Litestream is stopped, the file
+  checkpointed, Litestream started, and its `sync -wait` uploads the snapshot before the release;
+* a file still suspect after that: the release is **unclean** (no positions, the old task never takes it back,
+  "Hub released unclean"). The next task serves what the replica has; what was written in the gap can then be
+  missing, and the record says so ("took over from a replica not verifiable ...").
+
+**Every restart is said.** Each time Litestream is started again under the serving app: a status push "Hub
+Litestream restarted" (4, its own slot) and a line in Health's Replicas row, also when the checkpoint was done and
+nothing is wrong: it should never happen, and it is the moment to look.
+
+**Where Litestream is started, and on what:**
+
+| where | the files | safe because |
+|---|---|---|
+| A takeover (`_start_writer`) | just promoted, untouched (checked: no `-wal`, the same size, mtime and header), no Litestream state | its first sync is a snapshot of each file |
+| While serving, after it exited (`active`) | the app is writing them | **the TRUNCATE rule above** |
+| A suspect file's retries, and the drain's (`active`, `_heal_at_drain`) | as above; at the drain nothing has them open | the TRUNCATE itself |
+| A retake of our own release (`_retake`) | exactly as Litestream left them: the app had exited before its last sync, and nothing ran since | nothing was written that it didn't read; a release with a suspect file is unclean and never taken back |
+| A retake after a taker's pristine release (`_retake`) | our own, with nothing open | checkpointed (TRUNCATE) and Litestream's state removed: a snapshot |
+| `tools/reseed_replica.py` | a copy in a scratch folder, no state | a snapshot |
+| The followers (`restore -f`: a standby's, the replica checks') | they only read the replica | they never write it |
 
 ### Audio retention
 
@@ -3139,6 +3207,9 @@ which deploys again. To have the check itself say so, run it by hand with AWS cr
   * `replica_corrupt` "Replica corrupt: cad.sqlite" (5);
   * `replica_restore` "Replica restore failed (possible corruption)" (5, on the first occurrence);
   * `replica_unverifiable` "Replica not verifiable" (4, after 2 rounds);
+  * `litestream` "Hub Litestream restarted" (4: it exited under the serving app and was started again), and
+    `replica_suspect` "Replica not verifiable" (4, at once) when that was without a checkpoint of the file
+    ([Litestream started again under the app](#litestream-started-again-under-the-app));
   * `task` "Hub takeover failed", ... (4);
   * `task_loop` "Hub crash-looping" (5);
   * "Replica OK again" and "Hub serving again" (3, no limit).
@@ -3149,7 +3220,8 @@ which deploys again. To have the check itself say so, run it by hand with AWS cr
   like `leader.json`, under the task role's existing `backups` policy. The leader copies it to
   `$SIZEUP_RUN_DIR/replica-watch.json` every minute for the app.
 * **Settings > Health** shows the **Replicas** row: each file's result (ok, corrupt, not verifiable, stale), when it
-  was verified and by whom, plus the task failures of the last 24 h. A failing file also shows as the critical alert
+  was verified and by whom (unverified: Litestream was started again without a checkpoint of it), plus the task
+  events of the last 24 h (failures, and every Litestream restart). A failing file also shows as the critical alert
   "Replica corrupt" or "Replica not verifiable". The panel only shows that alert: the supervisor has already pushed it.
 * **CloudWatch** is the backstop for a task that dies without pushing (`sizeup-aws/28-replica-watch.sh`). It adds
   metric filters on `/ecs/sizeup-hub` and alarms on step 13's SNS → `sizeup-hub-alarm-ntfy` path:

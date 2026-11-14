@@ -43,7 +43,7 @@ SYNC_S = handoff.LITESTREAM_SYNC_S                  # the hub's cadence: nothing
 APP = r'''
 import os, signal, sqlite3, sys, time
 from pathlib import Path
-gate, data, mark, migrate = Path(sys.argv[1]), Path(sys.argv[2]), Path(sys.argv[3]), sys.argv[4] == "1"
+gate, data, mark, migrate, quiet = Path(sys.argv[1]), Path(sys.argv[2]), Path(sys.argv[3]), sys.argv[4] == "1", sys.argv[4] == "q"
 answer = Path(f"{gate}.answer")
 stop = []
 signal.signal(signal.SIGTERM, lambda *a: stop.append(1))
@@ -71,8 +71,9 @@ c = conn("cad")
 mark.write_text("serving")
 i = 0
 while not stop:
-    c.execute("INSERT INTO radio_traffic (id, start, channel, text) VALUES (?, ?, 'FG1', 'made-up words after the takeover')",
-              (f"new-{os.getpid()}-{i}", time.time())); i += 1
+    if not quiet:                       # (quiet: the databases open, as an app has them; the test does the writing)
+        c.execute("INSERT INTO radio_traffic (id, start, channel, text) VALUES (?, ?, 'FG1', 'made-up words after the takeover')",
+                  (f"new-{os.getpid()}-{i}", time.time())); i += 1
     time.sleep(0.01)
 c.close()
 mark.unlink()
@@ -82,17 +83,17 @@ mark.unlink()
 class RealEnv(Env):
     """The real Litestream calls; the app is APP; no connector, no caches."""
 
-    def __init__(self, root: Path, ls_config: Path, socket: str, migrate: bool):
+    def __init__(self, root: Path, ls_config: Path, socket: str, migrate: bool, quiet: bool = False):
         super().__init__("cfg.toml", root / "data", str(ls_config), socket, port=0)
         self.state_dir.mkdir(parents=True, exist_ok=True)
-        self.root, self.migrate = root, migrate
+        self.root, self.migrate = root, "q" if quiet else migrate
         self.mark = root / "serving"
 
     def start_app(self, env):
         script = self.root / "app.py"
         script.write_text(APP)
         return handoff.Proc("app", [sys.executable, str(script), env["SIZEUP_APP_GATE"], str(self.state_dir),
-                                    str(self.mark), "1" if self.migrate else "0"])
+                                    str(self.mark), "q" if self.migrate == "q" else "1" if self.migrate else "0"])
 
     def app_answers(self):
         return self.mark.exists()
@@ -338,3 +339,137 @@ def test_a_clean_handover_at_the_30_s_cadence_loses_no_row_and_waits_for_no_tick
     assert code_b == [0], b.events[-5:]
     for db in DBS:                                                  # and B's own release: the replica is its files
         assert snapshot(restored(tmp, env_b.ls_config, db, to="after")) == snapshot(env_b.db_path(db)), db
+
+
+# -- Litestream started again under the serving app (sizeup/handoff.py "TRUNCATE BEFORE LITESTREAM IS STARTED AGAIN") --
+
+def serving_leader(rig, quiet: bool = True):
+    """A leader serving from a seeded replica: (env, supervisor, its exit codes, its thread)."""
+    tmp, config = rig
+    cfg_s, sock_s = config("S")
+    first_leader(tmp / "S", cfg_s, sock_s)
+    s3 = FakeS3()
+    seed = lock_for(s3, "S")
+    seed.try_take()
+    seed.release({db: f"{n:016x}" for db, n in
+                  ((db, Env("cfg.toml", tmp / "S" / "data", str(cfg_s), sock_s, 0).plan(db)) for db in DBS)}, clean=True)
+    cfg, sock = config("A")
+    env = RealEnv(tmp / "A", cfg, sock, migrate=False, quiet=quiet)
+    sup = Supervisor(lock_for(s3, "A"), env, tmp / "A" / "run", tmp / "A" / "shared", control_port=0,
+                     timing=dict(POLL_S=0.1, RETAKE_S=1e9, OVERLAP_S=0.1))
+    code: list = []
+    th = threading.Thread(target=lambda: code.append(sup.run()), daemon=True)
+    th.start()
+    until(lambda: sup.role == "active" or code, timeout=120, what="the leader active")
+    assert sup.role == "active", sup.events[-5:]
+    return env, sup, code, th
+
+
+def counters(path: Path) -> tuple:
+    c = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        assert c.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+        return (c.execute("SELECT count(*), coalesce(sum(length(pad)), 0) FROM made_up_t").fetchone(),
+                hash(tuple(c.execute("SELECT k, v FROM made_up_u ORDER BY k"))),
+                c.execute("SELECT sum(v) FROM made_up_u").fetchone()[0])
+    finally:
+        c.close()
+
+
+def test_litestream_killed_under_the_app_and_started_again_misses_nothing_written_meanwhile(rig, monkeypatch):
+    """The replica divergence (PR #522's review): Litestream dies under a serving app; the app writes on, its
+    checkpoint moves those frames into the main file, and the WAL starts again, shorter than where Litestream had
+    read to. Started again as it was, Litestream 0.5.18 finds its last frame still lying in the WAL file and
+    carries on with no snapshot: the pages written in the gap stay stale in the replica, integrity_check ok,
+    `sync -wait` 0. The supervisor's TRUNCATE checkpoint before it starts Litestream again forces the snapshot: a
+    restore must be the live file."""
+    monkeypatch.setattr(handoff, "LITESTREAM_BACKOFF", (4.0, 4.0))          # (room for the gap's writes)
+    tmp, _ = rig
+    env, sup, code, th = serving_leader(rig)
+    try:
+        c = sqlite3.connect(env.db_path("cad"), isolation_level=None, timeout=5)
+        c.execute("PRAGMA wal_autocheckpoint = 0")                          # (the test says when, as exp2 did)
+        c.execute("CREATE TABLE made_up_t (id INTEGER PRIMARY KEY, ts REAL, pad BLOB)")
+        c.execute("CREATE TABLE made_up_u (k INTEGER PRIMARY KEY, v INTEGER, pad TEXT)")
+        c.execute("BEGIN")
+        c.executemany("INSERT INTO made_up_u VALUES (?, 0, ?)", [(i, "x" * 200) for i in range(3000)])
+        c.execute("COMMIT")
+
+        def ins(n: int) -> None:
+            for _ in range(n):
+                c.execute("INSERT INTO made_up_t (ts, pad) VALUES (?, randomblob(1500))", (time.time(),))
+        ins(20)
+        asked(env, "cad")
+        ins(150)                                                            # (under Litestream's own checkpoint size)
+        asked(env, "cad")                                                   # Litestream has read to here: a long WAL
+        ls0 = sup.litestream
+        ls0.kill()                                                          # ... and dies
+        c.execute("UPDATE made_up_u SET v = v + 1")                         # the gap: every row of u rewritten
+        ins(60)
+        assert c.execute("PRAGMA wal_checkpoint(PASSIVE)").fetchone()[0] == 0   # the app's autocheckpoint
+        ins(30)                                                             # the WAL restarted, shorter than before
+        until(lambda: sup.litestream is not ls0 and sup.litestream is not None and sup.litestream.poll() is None,
+              timeout=30, what="Litestream started again")
+        ins(5)
+        asked(env, "cad")                                                   # sync -wait says all is in the replica
+        live = counters(env.db_path("cad"))
+        assert live[2] == 3000
+        assert counters(restored(tmp, env.ls_config, "cad", to="gap")) == live
+        assert getattr(sup, "suspect", {}) == {} and sup.role == "active"
+        c.close()
+    finally:
+        sup.on_term()
+        th.join(60)
+    assert code == [0], sup.events[-5:]
+    assert sup.released_positions                                           # a clean release: nothing was suspect
+    assert counters(restored(tmp, env.ls_config, "cad", to="end")) == counters(env.db_path("cad"))
+
+
+def test_litestream_killed_under_a_steadily_writing_app_and_started_again_misses_nothing(rig):
+    """The same at a natural rate: SQLite's default autocheckpoint, a writer at ~200 commits a second, Litestream
+    SIGKILLed and started again by the supervisor 2 s later, as on the hub. (Without the TRUNCATE this one fails only
+    when the restarted WAL happens to be shorter than where Litestream had read to: the test above pins that.)"""
+    tmp, _ = rig
+    env, sup, code, th = serving_leader(rig)
+    stop = threading.Event()
+
+    def writer() -> None:
+        import random
+        rnd = random.Random(7)
+        w = sqlite3.connect(env.db_path("cad"), isolation_level=None, timeout=5)
+        while not stop.is_set():
+            w.execute("BEGIN IMMEDIATE")
+            w.execute("INSERT INTO made_up_t (ts, pad) VALUES (?, randomblob(600))", (time.time(),))
+            for _ in range(2):
+                w.execute("UPDATE made_up_u SET v = v + 1 WHERE k = ?", (rnd.randrange(30000),))
+            w.execute("COMMIT")
+            time.sleep(0.005)
+        w.close()
+    wt = threading.Thread(target=writer, daemon=True)
+    try:
+        c = sqlite3.connect(env.db_path("cad"), isolation_level=None, timeout=5)
+        c.execute("CREATE TABLE made_up_t (id INTEGER PRIMARY KEY, ts REAL, pad BLOB)")
+        c.execute("CREATE TABLE made_up_u (k INTEGER PRIMARY KEY, v INTEGER, pad TEXT)")
+        c.execute("BEGIN")
+        c.executemany("INSERT INTO made_up_u VALUES (?, 0, ?)", [(i, "x" * 200) for i in range(30000)])
+        c.execute("COMMIT")
+        c.close()
+        asked(env, "cad")
+        wt.start()
+        time.sleep(1.0)
+        asked(env, "cad", wait=False)                                       # (a tick: Litestream well into the WAL)
+        ls0 = sup.litestream
+        ls0.kill()
+        until(lambda: sup.litestream is not ls0 and sup.litestream is not None and sup.litestream.poll() is None,
+              timeout=30, what="Litestream started again")
+        time.sleep(4.0)                                                     # it writes on under the new Litestream
+        stop.set()
+        wt.join(10)
+        asked(env, "cad")
+        assert counters(restored(tmp, env.ls_config, "cad", to="gap")) == counters(env.db_path("cad"))
+        assert getattr(sup, "suspect", {}) == {}
+    finally:
+        stop.set()
+        sup.on_term()
+        th.join(60)
+    assert code == [0], sup.events[-5:]

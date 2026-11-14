@@ -248,6 +248,8 @@ class World:
         self.app_fails: set[str] = set()
         self.rogue = False                  # something else moves the replica (a writer from before the lock)
         self.rogue_at: float | None = None  # ... once, at this time (monotonic): its Litestream's next sync
+        self.truncate_busy: dict[str, float] = {}   # db -> until when (monotonic) a TRUNCATE checkpoint of it is busy
+        self.checkpoint_fails: set[str] = set()     # ... and whose checkpoint with the app stopped fails too
         self.ls_first: dict[str, int] = {}  # Litestream's first position past the replica's (+1: its own snapshot)
         self.follower_hangs: set[str] = set()   # whose followers need a SIGKILL to stop
         self.ls_version = (0, 5, 18)
@@ -406,6 +408,15 @@ class FakeEnv(Env):
 
     def checkpoint(self, path):
         self.calls.append(f"checkpoint {Path(path).stem}")
+        assert self.task not in self.world.alive["litestream"] and self.task not in self.world.alive["app"]
+        if Path(path).stem in self.world.checkpoint_fails:
+            raise RuntimeError(f"{Path(path).name}: the checkpoint was blocked")
+
+    def truncate_wal(self, path, busy_s=2.0):
+        db = Path(path).stem
+        self.calls.append(f"truncate {db}")
+        assert self.task not in self.world.alive["litestream"]      # never under a running Litestream
+        return "busy (a reader or a writer in its way)" if time.monotonic() < self.world.truncate_busy.get(db, 0) else ""
 
     def replicate(self):
         self.calls.append("replicate")
@@ -742,7 +753,99 @@ def test_a_litestream_started_again_while_serving_is_asked_to_sync_at_once(world
           what="a sync of each file asked for")
     time.sleep(1.3)
     assert len([c for c in a.env.calls[n:] if c.startswith("position")]) == len(DBS)      # once each: not a poll
+    # ... and only after a TRUNCATE checkpoint of every file: its first sync of each is then a full snapshot
+    assert a.env.calls[n:n + 4] == [*(f"truncate {db}" for db in DBS), "replicate"]
+    assert a.sup.suspect == {} and a.sup.restarts == 1
     assert a.sup.role == "active" and finish(a) == 0 and world.violations == []
+    assert world.s3.doc()["clean"] is True
+
+
+def test_the_truncate_checkpoint_says_done_only_when_it_completed(tmp_path):
+    import sqlite3
+    env = Env("cfg.toml", tmp_path, "ls.yml", "sock", port=0)
+    path = env.db_path("cad")
+    assert env.truncate_wal(path) == ""                                # no file: nothing was written
+    app = sqlite3.connect(path, isolation_level=None)                 # the app: its connection stays open
+    app.execute("PRAGMA journal_mode = WAL")
+    app.execute("CREATE TABLE made_up (i INTEGER PRIMARY KEY, s TEXT)")
+    app.executemany("INSERT INTO made_up (s) VALUES (?)", [("made-up",)] * 50)
+    wal = Path(f"{path}-wal")
+    assert wal.stat().st_size > 0
+    reader = sqlite3.connect(path, isolation_level=None)
+    reader.execute("BEGIN")
+    reader.execute("SELECT count(*) FROM made_up").fetchone()          # a read in its way (as Litestream's would be)
+    app.execute("INSERT INTO made_up (s) VALUES ('made-up')")
+    assert "busy" in env.truncate_wal(path, busy_s=0.2) and wal.stat().st_size > 0
+    reader.execute("COMMIT")
+    assert env.truncate_wal(path, busy_s=0.2) == "" and wal.stat().st_size == 0
+    app.execute("INSERT INTO made_up (s) VALUES ('made-up')")          # and the app writes on
+    assert app.execute("SELECT count(*) FROM made_up").fetchone()[0] == 52
+    reader.close()
+    app.close()
+
+
+class FakeWatch:
+    """sizeup/replicawatch.py ReplicaWatch as the supervisor uses it: what it was told."""
+
+    def __init__(self):
+        self.stop, self.told, self.reports = threading.Event(), [], []
+
+    def start(self, sup):
+        pass
+
+    def litestream_restarted(self, why, unverified, healed=()):
+        self.told.append((why, dict(unverified), list(healed)))
+
+    def report(self, kind, why, code):
+        self.reports.append(kind)
+
+
+def restarted(world, tmp_path, monkeypatch, busy: dict, **timing) -> tuple:
+    monkeypatch.setattr(handoff, "LITESTREAM_BACKOFF", (0.1, 0.5))
+    a = Task(world, "A", tmp_path, TRUNCATE_S=0.5, **timing)
+    a.sup.watch = FakeWatch()
+    a.start()
+    until(lambda: a.sup.role == "active")
+    world.truncate_busy = {db: time.monotonic() + s for db, s in busy.items()}
+    a.sup.litestream._end(1)
+    until(lambda: a.sup.restarts == 1, what="Litestream started again")
+    return a, a.sup.watch
+
+
+def test_a_restart_is_always_told_to_the_replica_watch(world, tmp_path, monkeypatch):
+    a, watch = restarted(world, tmp_path, monkeypatch, {})
+    until(lambda: watch.told, what="told")
+    assert watch.told == [("Litestream exited 1 while the app served", {}, [])]
+    assert finish(a) == 0 and watch.reports == []
+
+
+def test_a_file_that_cant_be_truncated_is_suspect_and_healed_by_the_next_try(world, tmp_path, monkeypatch):
+    a, watch = restarted(world, tmp_path, monkeypatch, {"hub": 1.2}, SUSPECT_RETRY_S=0.4)
+    assert set(a.sup.suspect) == {"hub"} and a.sup.role == "active"          # started all the same, said loudly
+    assert any("REPLICA UNVERIFIED" in e and "hub.sqlite" in e for e in a.sup.events)
+    until(lambda: a.sup.suspect == {} and a.sup.restarts >= 2, what="healed")    # Litestream stopped, TRUNCATE, started
+    until(lambda: len(watch.told) >= 2, what="told")
+    assert set(watch.told[0][1]) == {"hub"} and watch.told[-1][1:] == ({}, ["hub"])
+    assert finish(a) == 0 and world.s3.doc()["clean"] is True and world.violations == []
+
+
+def test_a_file_still_suspect_at_the_drain_is_checkpointed_with_the_app_stopped(world, tmp_path, monkeypatch):
+    a, _ = restarted(world, tmp_path, monkeypatch, {"cad": 60.0})
+    n = len(a.env.calls)
+    assert set(a.sup.suspect) == {"cad"}
+    assert finish(a) == 0
+    assert "checkpoint cad" in a.env.calls[n:] and a.sup.suspect == {}         # nothing in its way now
+    d = world.s3.doc()
+    assert d["clean"] is True and d["positions"] and world.violations == []
+
+
+def test_a_file_suspect_to_the_end_makes_the_release_unclean(world, tmp_path, monkeypatch):
+    world.checkpoint_fails = {"cad"}
+    a, watch = restarted(world, tmp_path, monkeypatch, {"cad": 60.0})
+    assert finish(a) == 0
+    d = world.s3.doc()
+    assert d["state"] == "released" and d["clean"] is False and not d.get("positions")
+    assert any("released unclean: cad suspect" in e for e in a.sup.events) and watch.reports == ["unclean_release"]
 
 
 def test_a_follower_that_falls_behind_falls_back_to_a_full_restore(world, tmp_path):
