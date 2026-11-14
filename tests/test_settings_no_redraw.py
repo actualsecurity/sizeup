@@ -100,7 +100,7 @@ class Site:
         self.clips += 1
         big = self.clips % 3 == 0
         self.audio.put(f"clip-{self.clips}", CLIP * (5 if big else 1), at=time.time(), channel="PC repeater" if big else "FG1")
-        self.audio._channels = (0.0, [])
+        self.audio._channels = (float("-inf"), [])
 
     def another_admin_mutes_an_alert(self):
         """A change to the settings themselves from another console: the page has something to redraw."""
