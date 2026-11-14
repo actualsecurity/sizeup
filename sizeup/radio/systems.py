@@ -175,6 +175,9 @@ def discover(base: str | Path | None, taken_tgs=(), taken_jobs=(), problems: lis
         if (d / "probe.json").is_file():          # (#436) a reception test's probe of the county: never a system here
             continue
         try:
+            if name.lower() in sources.RESERVED_SYSTEMS:    # its rows would read as ours (sourcekeys.is_context)
+                raise SystemError_(f"{d}: the system name {name!r} is reserved (ours: "
+                                   f"{', '.join(sources.RESERVED_SYSTEMS)})")
             s = load(d)
             both = sorted(set(s.talkgroups) & tgs)
             if both:
