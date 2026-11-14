@@ -726,6 +726,16 @@ class Channel:
     ctcss: float | None = None
 
 
+def readable(fd: int, wait_s: float) -> bool:
+    """Something to read on fd within wait_s (audio, or its end). poll(), not select(): select() refuses a descriptor
+    numbered 1024 or more (FD_SETSIZE) with a ValueError, whatever else is asked of it (#457)."""
+    if not hasattr(select, "poll"):
+        return bool(select.select([fd], [], [], wait_s)[0])
+    p = select.poll()
+    p.register(fd, select.POLLIN)
+    return bool(p.poll(max(0.0, wait_s) * 1000.0))
+
+
 class NfmReceiver:
     """rtl_fm on one channel, feeding a NoiseSquelch; finished segments go to on_segment."""
 
@@ -917,8 +927,7 @@ class NfmReceiver:
         buf, got, last = b"", False, time.monotonic()
         need = FRAME * 2
         while not self._stop.is_set() and proc.poll() is None:
-            r, _, _ = select.select([fd], [], [], 1.0)
-            if not r:
+            if not readable(fd, 1.0):
                 if time.monotonic() - last > STALL_S:
                     self.detail = "rtl_fm stalled"
                     return got

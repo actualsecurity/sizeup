@@ -24,6 +24,7 @@ import threading
 from typing import Callable
 
 from sizeup.cad.export import _csv, ts
+from sizeup.fence import bookkeeping
 
 KINDS = ("signin", "action", "refused", "search")   # search: a Search page query or its CSV (#403)
 KEEP_S = 90 * 86400            # rows older than this are dropped
@@ -39,7 +40,8 @@ CSV_COLUMNS = ["Time", "Name", "Email", "Kind", "Summary", "Incident #", "OK", "
 
 class Activity:
     """One per Cad (sizeup/cad/service.py). Writes go straight to the store under its lock, outside
-    any transaction of its own (no store.rev bump: nothing on the boards changed)."""
+    any transaction of its own (no store.rev bump: nothing on the boards changed). They are bookkeeping
+    (sizeup/fence.py): a fenced hub task skips them (#501) and still answers the request."""
 
     def __init__(self, store, log: Callable[[str], None] = print, clock: Callable[[], float] | None = None):
         self.store, self.log = store, log
@@ -60,7 +62,7 @@ class Activity:
             return
         now = self.clock()
         summary, route, ip, ua = summary[:SUMMARY_MAX], route[:ROUTE_MAX], ip[:64], ua[:UA_MAX]
-        with self.store.lock:
+        with self.store.lock, bookkeeping():
             self.store.db.execute(
                 "INSERT INTO user_activity (at, email, kind, route, summary, incident_number, ok, ip, ua, session) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -84,7 +86,7 @@ class Activity:
                                       (email, session[:64])):      # a restart doesn't sign everyone in again
             self.record(email, "signin", route, "Signed in", ip=ip, ua=ua, session=session)
         if new or due:
-            with self.store.lock:
+            with self.store.lock, bookkeeping():
                 n = self.store.db.execute("UPDATE operators SET last_seen = ?, last_ip = ?, last_ua = ? WHERE email = ?",
                                           (now, ip[:64], ua[:UA_MAX], email)).rowcount
             if n:          # not on the list yet (named on their first whoami): try again next request
@@ -94,7 +96,7 @@ class Activity:
     def prune(self) -> int:
         now = self.clock()
         self._pruned = now
-        with self.store.lock:
+        with self.store.lock, bookkeeping():
             n = self.store.db.execute("DELETE FROM user_activity WHERE at < ?", (now - KEEP_S,)).rowcount
         if n:
             self.log(f"CAD activity: dropped {n} rows older than {KEEP_S // 86400} days")

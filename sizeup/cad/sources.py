@@ -733,6 +733,7 @@ class Sources:
         # enriches the incident as for a page that joined it (transcript, cross streets, 60 Control mode's units)
         self.on_page_swept: Callable[[dict, int, dict], None] | None = None
         self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
         with self.store.lock:
             self.store.db.executescript(SCHEMA)
             for table, col in (("source_health", "received REAL"), ("source_reports", "gone_at REAL")):
@@ -1727,11 +1728,16 @@ class Sources:
                 self.log(f"incident sources: {type(e).__name__}")
 
     def start(self) -> Sources:
-        threading.Thread(target=self.run, name="incident-sources", daemon=True).start()
+        self._thread = threading.Thread(target=self.run, name="incident-sources", daemon=True)
+        self._thread.start()
         return self
 
-    def stop(self) -> None:
+    def stop(self, wait_s: float = 0.0) -> None:
+        """The ticker ends after its tick; wait_s: joined for up to that long (Cad.shutdown, before the store closes)."""
         self._stop.set()
+        t = self._thread
+        if wait_s and t is not None and t is not threading.current_thread():
+            t.join(wait_s)
 
     def poke(self, reason: str) -> None:
         """Paging tones, a radio pre-alert, the phone ring: the adapters poll now (never raises)."""
