@@ -169,6 +169,8 @@ def get(names: Iterable[str], read: Reader = credential, send: Sender | None = N
             raise SsmError("bad answer") from None
         if not isinstance(value, str) or not value or any(c in value for c in "\n\r\0"):
             raise SsmError("bad value")
+        from sizeup import logscrub
+        logscrub.secret(value)              # never in a station log line that leaves (sizeup/cloud/logship.py)
         out[name] = Param(name, value, version, modified)
     return out
 

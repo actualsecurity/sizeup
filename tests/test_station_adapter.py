@@ -475,7 +475,7 @@ def test_make_app_on_the_hub_runs_the_guard(monkeypatch):
     seen = []
     monkeypatch.setattr(adapters, "hub_guard", lambda role, log: seen.append(role) or [])
     import sizeup.cloud.hub as hub
-    monkeypatch.setattr(hub, "HubApp", lambda cfg, log: "hub")
+    monkeypatch.setattr(hub, "HubApp", lambda cfg, log, fence=None: "hub")
     cfg = type("C", (), {"cloud_role": "hub"})()
     assert app_mod.make_app(cfg) == "hub" and seen == ["hub"]
 

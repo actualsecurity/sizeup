@@ -63,6 +63,20 @@ POST /api/cad/preplan                     {kind, lat, lon, label?, note?, level?
 POST /api/cad/preplan/<id>                {kind?, label?, note?, level?, priority?, review_by?, lat?, lon?, link?,
                                           action?: delete | restore (admins)}. Both: dispatchers and admins, in the
                                           Settings audit log (section "preplan")
+GET  /api/cad/preplan/docs?incident=<id> | where=<address>
+                                          a building's site documents (#459, sizeup/cad/preplan_docs.py): {docs, gen,
+                                          configured}; anyone signed in and active; admin-only ones: admins only
+GET  /api/cad/preplan/docs/<id>           {doc, footprint}: one, and its building's county footprint (the align tool)
+GET  /api/cad/preplan/docs/<id>/file | /plan (?dl=1)
+                                          the file, or a floor plan's picture, streamed by the hub from the store (no
+                                          links to it): nosniff, Content-Disposition, no-store, a CSP; 503 when busy;
+                                          in the person's activity ("Opened site doc 12")
+POST /api/cad/preplan/docs                the file itself as the body (at most 25 MB: PDF, PNG, JPEG by content), with
+                                          X-Sizeup-Doc: URI-encoded JSON {kind, title, floor?, page?, admin_only?,
+                                          incident_id | where} (server.py reads it before the 64 KB JSON limit)
+POST /api/cad/preplan/docs/<id>           {title?, kind?, floor?, page?, admin_only? (admins), corners? ([[lon, lat] x 4]
+                                          | null), action?: delete}. Both: dispatchers and admins, in the Settings audit
+                                          log (section "preplan_docs")
 GET  /api/cad/admin                       record counts and the next event number
 GET  /api/cad/whoami                      {email, name, callsign, source: "access" | "none", role, enforced}: who
                                           signed in; with Access also {active, may, bootstrap, admins: [names]}
@@ -99,6 +113,10 @@ GET  /api/cad/tones                       {named: [pairs named here], choices: [
                                           list), services, names, ours: the ours entities' names}
 GET  /api/cad/stt                         Settings > Radios > Vocabulary: {vocabulary: {phrases, edited, suggestions,
                                           aws (as sent), skipped, sig, state}, limit, aws (where it runs, this month's cost)}
+GET  /api/cad/squelch                     Settings > Radios > Squelch: {channels: [{key, set, default, running, hiss_db,
+                                          quieting_db, floor_db, short_per_min}], sync, chatter_per_min, ranges}
+POST /api/cad/settings/squelch            {action: set {key, open_db?, close_db?, min_open_s?: null = default} | reset {key}}:
+                                          an FM channel's squelch, applied live on the station (sizeup/channels.py): admins
 GET  /api/cad/export/<name>.csv           incidents | calls | unit-history | event-log, the sheet's columns
 GET  /api/cad/dispatch/<id>.wav           a logged dispatch's audio
 GET  /api/cad/audio/<key>.wav             a preview's audio
@@ -167,6 +185,12 @@ GET  /api/cad/comms?unit=&channel=&event=&pcfd=1&emergency=1&since=&until=&main_
                                           every transmission (newest first) with its rig, radio ID, events, the
                                           emergency button and its alarm (emergency=1: only those, #128); Main
                                           and Other each their own newest main_limit (200) / limit (300), #241
+                                          The Radio page's views (#415): any of ?view=ours|police|ems|transit|air|all
+                                          ?system= ?group= ?source= ?service= ?tier= ?dept= ?safety=1 ?mute= ?before=
+                                          ?changed= ?at= gives one page {rows, older, newer, next, cursor, reload}
+                                          (Cad.comms_query). Another system's rows: only to a viewer who may see them
+GET  /api/cad/comms/sources?rev=          the Radio page's tree: {live, sources: [{key, system, group, name, service,
+                                          tier, ours, last, counts: [[minutes ago, calls]], emergency}]} (Cad.comms_sources)
 GET  /api/cad/feed?limit=&tg=307,333      the pinned 60 Control feed: newest transmissions on the incident
                                           talkgroup(s), pc = why it is talking to us (sizeup/cad/feed.py)
 POST /api/cad/incident/<id>/link          {traffic_id, operator}  put a transmission on the event (why manual)
@@ -217,6 +241,10 @@ POST /api/cad/datasources/<key>/refresh   {operator?}  Refresh now: runs in the 
                                           ({ok, source: the row, running}); 429 {error} when refused (refreshing already,
                                           too soon after the last, or the source is resting); admins; in the person's
                                           activity and the Settings audit log
+GET  /api/cad/logs?source=station|hub|all&unit=&level=&q=&start=&end=&limit=
+                                          Logs Insights over the station's logs and the hub's (sizeup/cloud/cwlogs.py),
+                                          newest first, bounded (7 days, 500 rows); /status: set up or not, today's
+                                          volume, the station's shipper. The hub's only; a signed-in admin only
 GET  /api/cad/notify                      Settings > System > Push notifications (sizeup/notify.py Pushes): each kind's
                                           topic in effect and where it came from (Settings / SSM / config / off), the
                                           last push and test; admins only (the names are secret; ADMIN_READS)
@@ -245,6 +273,18 @@ POST /api/cad/settings/audio_retention    {action: set {key: _default | a channe
 POST /api/cad/settings/transcript_retention  {action: set {key: _default | a channel's name | tg:<n>, value: days} |
                                           reset {key}}: how long the radio log keeps that channel's transcripts and
                                           metadata (never shorter than its audio; sizeup/cad/comms.py prune); admins
+GET  /api/cad/intel                       Settings > System > Intel (sizeup/intel/admin.py): the packs, categories and rules
+                                          with their modes, weights and 7-day hits, the policy (kill switch, caps)
+GET  /api/cad/intel/events?since=&bbox=w,s,e,n&mode=map,push&status=open|all&limit=
+                                          radio pre-alert events (the map layer's): {events: [{id, pack, category, label,
+                                          what, level, where, precision, confirmed, lat, lon, radius_m, place, town, alts,
+                                          mode, status, first_at, last_at, until, traffic_ids ...}], now}. Both: anyone
+                                          signed in (sourcekeys.may_see_context), 403 otherwise
+POST /api/cad/intel/<id>/dismiss          {verdict?}  a pre-alert that is nothing (dispatchers and admins)
+POST /api/cad/intel/<id>/feedback         {verdict: useful | noise | wrong_place | wrong_type | late | missed, category?}
+                                          anyone signed in
+POST /api/cad/settings/intel              {action: set | pack | category | rule | local | reset, ...}: Settings > System >
+                                          Intel; admins; audited
 POST /api/cad/settings/alert_mutes        {action: mute {key: a health alert kind, hours?} | unmute {key}}: shown on
                                           Settings > Health, not pushed (#340, sizeup/cloud/health.py); admins
 """
@@ -271,6 +311,8 @@ SUGGEST = re.compile(r"/api/cad/incident/(\d{1,9})/units")
 HERE = re.compile(r"/api/cad/incident/(\d{1,9})/here")                          # History here (#403)
 PREMISE = re.compile(r"/api/cad/premise(?:/(\d{1,9})(?:/(ack))?)?")              # premise notes (#403)
 PREPLAN = re.compile(r"/api/cad/preplan(?:/(\d{1,9}))?")                         # pre-plan points (#456)
+DOCS = re.compile(r"/api/cad/preplan/docs(?:/(\d{1,9}))?")                       # site documents (#459)
+DOC_FILE = re.compile(r"/api/cad/preplan/docs/(\d{1,9})/(file|plan)")
 EXPORT = re.compile(r"/api/cad/export/([a-z-]{1,20}\.csv)")
 UNIT = re.compile(r"/api/cad/unit/(\d{1,9})/status")
 UNIT_STATION = re.compile(r"/api/cad/unit/(\d{1,9})/station")
@@ -280,6 +322,7 @@ SETTINGS = re.compile(r"/api/cad/settings/([a-z_]{1,30})")
 PREALERT = re.compile(r"/api/cad/prealert/(\d{1,9})/dismiss")
 AIRPORT_ALERT = re.compile(r"/api/cad/airport-alert/(\d{1,9})/(accept|dismiss)")
 HINT = re.compile(r"/api/cad/hint/(\d{1,9})/(accept|dismiss)")
+INTEL_EVENT = re.compile(r"/api/cad/intel/(\d{1,9})/(dismiss|feedback)")        # radio pre-alerts (sizeup/intel)
 ALARM_ACK = re.compile(r"/api/cad/alarm/(\d{1,9})/ack")
 ALARM_CLEAR = re.compile(r"/api/cad/alarm/(\d{1,9})/clear")
 DISPATCH_MODE = re.compile(r"/api/cad/dispatch-mode")
@@ -301,6 +344,7 @@ ADMIN_READS = {
     "/api/cad/perf/profile": "the hub's CPU profile is for admins (Settings > Health)",
     "/api/cad/search.csv": "the search export is for admins",                # #403: many calls at once, off the hub
     "/api/cad/preplan.csv": "the pre-plan export is for admins",              # #456: every Knox box at once
+    "/api/cad/intel": "the radio pre-alert rules are for admins (Settings > System > Intel)",   # #411: rule phrases
 }
 
 # Who may POST what (enforced only with a verified sign-in, see above): "dispatch" = dispatchers and
@@ -314,11 +358,14 @@ WRITES = (
     (PREALERT, "dispatch"),                                                 # a phone pre-alert that is nothing
     (AIRPORT_ALERT, "dispatch"),                                            # an airport pre-alert: an event, or nothing
     (HINT, "dispatch"),                                                     # a status suggested from the radio (#37)
+    (re.compile(r"/api/cad/intel/\d{1,9}/dismiss"), "dispatch"),             # a radio pre-alert that is nothing
+    (re.compile(r"/api/cad/intel/\d{1,9}/feedback"), "read"),                # ... a vote on it: anyone signed in
     (ALARM_ACK, "dispatch"),                                                # an emergency alarm seen (#128)
     (ALARM_CLEAR, "dispatch"),                                              # ... and resolved: its window closed
     (re.compile(r"/api/cad/radio-id"), "dispatch"),                          # who a new FG1 radio is (#163)
     (PREMISE, "dispatch"),                                                  # premise notes: add, edit, expire, seen (#403)
     (PREPLAN, "dispatch"),                                                  # pre-plan points: add, edit, move, delete (#456)
+    (DOCS, "dispatch"),                                                     # site documents: upload, edit, align, delete (#459)
     (re.compile(r"/api/incident/[^/]{1,80}/close"), "dispatch"),            # the monitor's incident list (server.py)
     (UNIT_STATION, "admin"),                                                # a unit's home station: Settings > Units
     (re.compile(r"/api/cad/settings/(?:channels|stt)"), "admin"),           # Settings > Radios: record / transcribe /
@@ -452,6 +499,14 @@ def _channels(m, b, o, c):
     return f"Channel {_clip(b.get('key'), 30)}: {what or 'no change'}", ""
 
 
+def _squelch(m, b, o, c):
+    key = _clip(b.get("key"), 30)
+    if str(b.get("action") or "") == "reset":
+        return f"Squelch {key}: back to the default", ""
+    what = ", ".join(f"{k} {'default' if b[k] is None else b[k]}" for k in ("open_db", "close_db", "min_open_s") if k in b)
+    return f"Squelch {key}: {what or 'unchanged'}", ""
+
+
 def _stt(m, b, o, c):
     act, key = str(b.get("action") or ""), str(b.get("key") or "")
     if act == "push":
@@ -496,6 +551,22 @@ def _preplan(m, b, o, c):
     return f"{'Moved and edited' if moved else 'Edited'} pre-plan point {pid}: {', '.join(changed) or 'nothing'}", ""
 
 
+def _docs(m, b, o, c):
+    """A site document (#459): its number and kind, never its title, file name, floor or corners."""
+    from sizeup.cad.preplan_docs import KINDS
+    d = o.get("doc") or {}
+    did = m.group(1) or d.get("id") or ""
+    if m.group(1) is None:
+        n = _number(c, b.get("incident_id")) if b.get("incident_id") not in (None, "") else ""
+        return f"Uploaded site doc {did} ({KINDS.get(d.get('kind'), '')})" + (f" from {n}" if n else ""), n
+    if b.get("action") == "delete":
+        return f"Deleted site doc {did}", ""
+    changed = [k for k in o.get("changed") or [] if k != "corners"]
+    if "corners" in (o.get("changed") or []):
+        return f"Aligned site doc {did}" + (f" and edited: {', '.join(changed)}" if changed else ""), ""
+    return f"Edited site doc {did}: {', '.join(changed) or 'nothing'}", ""
+
+
 def _prealert_at(o) -> str:
     from sizeup.prealert import _hms
     return _hms(o.get("at")) or "?"
@@ -530,9 +601,11 @@ DOES = (
         (o.get("linked") or [""])[0])),
     (PREMISE, _premise),
     (PREPLAN, _preplan),
+    (DOCS, _docs),
     (UNIT_STATION, lambda m, b, o, c: (f"Changed settings: {o.get('name', '')} station {_clip(b.get('station'), 40) or 'unset'}", "")),
     (re.compile(r"/api/cad/settings/channels"), _channels),
     (re.compile(r"/api/cad/settings/stt"), _stt),
+    (re.compile(r"/api/cad/settings/squelch"), _squelch),
     (SETTINGS, _settings),
     (re.compile(r"/api/cad/runcards"), lambda m, b, o, c: (f"Changed settings: run card {_clip(b.get('type'), 50)} saved", "")),
     (re.compile(r"/api/cad/runcards/delete"), lambda m, b, o, c: (f"Changed settings: run card {_clip(b.get('type'), 50)} deleted", "")),
@@ -729,6 +802,70 @@ class CadApi:
         h = {"ETag": etag, "Cache-Control": "private, no-cache"} if etag else {"Cache-Control": "no-store"}   # a call's: never a 304
         return 200, json.dumps(out, separators=(",", ":")).encode(), JSON, h
 
+    def _docs_get(self, path: str, query: str, who) -> tuple:
+        """GET /api/cad/preplan/docs(?incident= | where=), /docs/<id>, /docs/<id>/file | plan (#459): anyone signed in
+        and active (a deactivated person: no); an admin-only document: admins (anyone else: 404, as if none). A file:
+        streamed by the hub from the store (never a link to it), with its type, Content-Disposition, nosniff, no-store,
+        no-referrer and a CSP that runs nothing (sandbox for pictures); 503 when every download slot is taken."""
+        may = self._doc_reader(who)
+        if may is None:
+            return _json(403, {"error": "Account deactivated"})
+        docs, q = self.cad.preplan_docs, parse_qs(query)
+        try:
+            if path == "/api/cad/preplan/docs":
+                return 200, json.dumps(docs.get(q, may), separators=(",", ":")).encode(), JSON, {"Cache-Control": "no-store"}
+            if m := DOCS.fullmatch(path):
+                return _json(200, docs.one(int(m.group(1)), may))
+            if m := DOC_FILE.fullmatch(path):
+                f = docs.file(int(m.group(1)), m.group(2), may, who.email if who is not None else "",
+                              dl=(q.get("dl") or [""])[0] == "1")
+        except CadError as e:
+            from sizeup.cad.preplan_docs import Busy
+            msg = str(e)
+            if isinstance(e, Busy):
+                return 503, json.dumps({"error": msg}).encode(), JSON, {"Retry-After": "2", "Cache-Control": "no-store"}
+            return _json(404 if msg.startswith("no ") else 400, {"error": msg})
+        if not DOC_FILE.fullmatch(path):
+            return 404, b"not found\n", "text/plain"
+        csp = ("default-src 'none'; frame-ancestors 'self'" if f["ctype"] == "application/pdf"
+               else "default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; sandbox; frame-ancestors 'self'")
+        return 200, f["stream"], f["ctype"], {"Cache-Control": "private, no-store", "Referrer-Policy": "no-referrer",
+                                              "X-Content-Type-Options": "nosniff", "Content-Disposition": f["disposition"],
+                                              "Content-Security-Policy": csp}
+
+    def _doc_reader(self, who) -> str | None:
+        """A site document reader's standing: "admin" | "dispatcher" | "viewer"; None: deactivated (no documents). Without
+        a verified person (all-in-one, a dev box): "viewer" (never an admin-only document)."""
+        if who is None or not who.email:
+            return "viewer"
+        try:
+            st = self.cad.settings.standing(who.email)
+        except CadError:
+            return None
+        return st["may"] if st["active"] else None
+
+    def upload(self, path: str, header: str, raw: bytes, who=None, client: tuple[str, str] = NO_CLIENT) -> tuple:
+        """POST /api/cad/preplan/docs (#459): the file as the body, its details in the X-Sizeup-Doc header (server.py:
+        after permit(), up to 25 MB). The same checks as post(): the person's standing, the operator, their activity."""
+        from sizeup.cad.preplan_docs import meta_of
+        c = self.cad
+        signed = who is not None and bool(who.email)
+        try:
+            body = meta_of(header)
+            if signed:
+                st = c.settings.standing(who.email)
+                if refused := self.permit(path, who, body, st, client):
+                    return refused
+                body["operator"] = st["operator"]
+                body["_may"] = st["may"]
+            else:
+                body["_may"] = "dispatcher"        # all-in-one (roles not enforced): an editor, never an admin
+            out = c.preplan_docs.upload(body, raw)
+        except CadError as e:
+            return _json(400, {"error": str(e)})
+        self.did(path, who, body, out, client)
+        return _json(200, out)
+
     def _may(self, who) -> str:
         """The viewer's standing for what they may read (premise notes' categories, #403): "admin" | "dispatcher" |
         "viewer"; without a verified person (all-in-one) nothing is checked: "admin"."""
@@ -751,6 +888,15 @@ class CadApi:
         except CadError:
             pass
         return _json(403, {"error": f"Admins only: {why}"})
+
+    def _admin(self, who) -> bool:
+        """A verified admin (with nobody verified: no, the shadow and log pre-alerts stay hidden)."""
+        if who is None or not who.email:
+            return False
+        try:
+            return self.cad.settings.standing(who.email)["may"] == "admin"
+        except CadError:
+            return False
 
     def _notify(self, who) -> tuple[int, bytes, str]:
         """GET /api/cad/notify: Settings > System > Push notifications, admins only (ADMIN_READS: a topic's name is its
@@ -786,6 +932,27 @@ class CadApi:
         self.cad.settings.note(str(body.get("operator") or ""), "system", f"datasources/{key}", f"last fetched {was}", src.action)
         return {"ok": True, "running": row["running"], "source": row}
 
+    def _logs(self, path: str, query: str, who) -> tuple[int, bytes, str]:
+        """GET /api/cad/logs (Logs Insights, bounded) and /api/cad/logs/status: the hub's only, and only for an admin
+        with a verified sign-in (stricter than ADMIN_READS, so not in it: never without one)."""
+        sl = getattr(self.cad, "station_logs", None)
+        if sl is None:
+            return _json(404, {"error": "logs are on the hub"})
+        if who is None or not getattr(who, "email", ""):
+            return _json(403, {"error": "Admins only: sign in"})
+        try:
+            if self.cad.settings.standing(who.email)["may"] != "admin":
+                return _json(403, {"error": "Admins only: the logs (Settings > Station > Logs)"})
+        except CadError:
+            return _json(403, {"error": "Admins only: the logs (Settings > Station > Logs)"})
+        from sizeup.cloud.cwlogs import LogsError
+        if path.endswith("/status"):
+            return _json(200, sl.status())
+        try:
+            return _json(200, sl.query(parse_qs(query)))
+        except LogsError as e:
+            return _json(e.status, {"error": str(e)})
+
     def get(self, path: str, query: str, who=None) -> tuple[int, bytes, str]:
         with sourcekeys.request_context(who):       # another system's traffic: a signed-in person only (#419)
             return self._get(path, query, who)
@@ -794,6 +961,8 @@ class CadApi:
         if (no := self.read_refused(path, who)) is not None:
             return no
         try:
+            if path in ("/api/cad/logs", "/api/cad/logs/status"):
+                return self._logs(path, query, who)
             if path == "/api/cad/datasources":
                 return self._datasources(parse_qs(query), who)
             if path == "/api/cad/notify":
@@ -810,6 +979,8 @@ class CadApi:
                 return _json(200, self.cad.settings_audit_log(parse_qs(query), self._may(who)))
             if path == "/api/cad/stt":
                 return _json(200, self.cad.settings.stt_page())
+            if path == "/api/cad/squelch":
+                return _json(200, self.cad.settings.squelch_page())
             if path == "/api/cad/tones":
                 return _json(200, self.cad.tone_names())
             if path == "/api/cad/state":
@@ -826,6 +997,8 @@ class CadApi:
                 return _json(200, self.cad.radio_registry())
             if path == "/api/cad/comms":
                 return _json(200, self.cad.comms_query(parse_qs(query)))
+            if path == "/api/cad/comms/sources":
+                return _json(200, self.cad.comms_sources(parse_qs(query)))
             if path == "/api/cad/comms/activity":      # per-minute activity per source (#409); ?source=&hours= (24)
                 # which radios keyed an encrypted talkgroup: a verified, signed-in admin only (read_refused checks the
                 # admin when someone is signed in; with nobody verified, never: sourcekeys.may_see_context)
@@ -838,6 +1011,11 @@ class CadApi:
                     hours = 24.0
                 return _json(200, {"rows": self.cad.comms.activity_rows(self.cad.clock() - hours * 3600,
                                                                         (q.get("source") or [""])[0][:80])})
+            if path in ("/api/cad/intel", "/api/cad/intel/events"):    # radio pre-alerts: a signed-in person only
+                if not sourcekeys.may_see_context(self.cad.comms.context_broadcast):
+                    return _json(403, {"error": "radio pre-alerts need a sign-in (Cloudflare Access)"})
+                ia = self.cad.intel_admin
+                return _json(200, ia.page() if path == "/api/cad/intel" else ia.events(parse_qs(query), self._admin(who)))
             if path == "/api/cad/feed":
                 return _json(200, self.cad.feed_query(parse_qs(query)))
             if path == "/api/cad/rigs":
@@ -850,6 +1028,8 @@ class CadApi:
                 return _json(200, self.cad.premise.listing(parse_qs(query), self._may(who)))
             if path in ("/api/cad/preplan", "/api/cad/preplan/where", "/api/cad/preplan.csv"):
                 return self._preplan(path, query, who)
+            if path.startswith("/api/cad/preplan/docs"):
+                return self._docs_get(path, query, who)
             if m := HERE.fullmatch(path):
                 return _json(200, self.cad.addrs.here(int(m.group(1)), self._may(who)))
             if m := SUGGEST.fullmatch(path):
@@ -904,8 +1084,10 @@ class CadApi:
                 if refused := self.permit(path, who, body, st, client):
                     return refused
                 body["operator"] = st["operator"]
-                if PREMISE.fullmatch(path) or PREPLAN.fullmatch(path):
+                if PREMISE.fullmatch(path) or PREPLAN.fullmatch(path) or DOCS.fullmatch(path):
                     body["_may"] = st["may"]
+            elif DOCS.fullmatch(path):
+                body["_may"] = "dispatcher"            # all-in-one: an editor of site documents, never an admin (#459)
             out = self._write(path, body, signed)
         except LastAdmin as e:
             if signed:
@@ -946,6 +1128,11 @@ class CadApi:
             return c.airport_alert(int(m.group(1)), m.group(2), body)
         if m := HINT.fullmatch(path):
             return c.hint(int(m.group(1)), m.group(2), body)
+        if m := INTEL_EVENT.fullmatch(path):
+            if not sourcekeys.may_see_context(c.comms.context_broadcast):
+                raise CadError("radio pre-alerts need a sign-in (Cloudflare Access)")
+            ia = c.intel_admin
+            return (ia.dismiss if m.group(2) == "dismiss" else ia.feedback)(int(m.group(1)), body)
         if m := ALARM_ACK.fullmatch(path):
             return c.alarm_ack(int(m.group(1)), body)
         if m := ALARM_CLEAR.fullmatch(path):
@@ -968,6 +1155,10 @@ class CadApi:
             return (c.premise.ack if m.group(2) else c.premise.edit)(int(m.group(1)), body)
         if m := PREPLAN.fullmatch(path):
             return c.preplan.create(body) if m.group(1) is None else c.preplan.edit(int(m.group(1)), body)
+        if m := DOCS.fullmatch(path):
+            if m.group(1) is None:
+                raise CadError("upload: the file as the body, its details in X-Sizeup-Doc")
+            return c.preplan_docs.edit(int(m.group(1)), body)
         if m := DATASOURCE.fullmatch(path):
             return self._ds_refresh(unquote(m.group(1)), body)
         if m := DVR_PIN.fullmatch(path):

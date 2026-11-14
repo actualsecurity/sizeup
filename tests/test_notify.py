@@ -120,23 +120,28 @@ def test_the_notifier_sends_in_order_from_its_own_thread(ntfy):
 # Stand-ins shaped like the hub's real topics (which live only in SSM: ntfy topics are readable by name, and this
 # repository is public): "status" / "alerts" inside a longer name of our own.
 OUR_ALERTS, OUR_STATUS = "pcfd-xmpl-alerts", "pcfd-xmpl-status"
+OUR_INTEL = "pcfd-xmpl-intel-thread"
 
 
 def test_each_kind_goes_to_its_own_topic_and_one_topic_takes_both():
-    assert notify.route(OUR_ALERTS, OUR_STATUS) == {notify.ALERTS: OUR_ALERTS, notify.STATUS: OUR_STATUS}
-    assert notify.route(OUR_ALERTS, "") == {notify.ALERTS: OUR_ALERTS, notify.STATUS: OUR_ALERTS}   # as before
-    assert notify.route("", OUR_STATUS) == {notify.ALERTS: OUR_STATUS, notify.STATUS: OUR_STATUS}
-    assert notify.route("", " ") == {notify.ALERTS: "", notify.STATUS: ""}                          # no pushes
+    A, S, I = notify.ALERTS, notify.STATUS, notify.INTEL
+    assert notify.route(OUR_ALERTS, OUR_STATUS) == {A: OUR_ALERTS, S: OUR_STATUS, I: OUR_ALERTS}
+    assert notify.route(OUR_ALERTS, "") == {A: OUR_ALERTS, S: OUR_ALERTS, I: OUR_ALERTS}   # as before
+    assert notify.route("", OUR_STATUS) == {A: OUR_STATUS, S: OUR_STATUS, I: OUR_STATUS}
+    assert notify.route("", " ") == {A: "", S: "", I: ""}                                    # no pushes
+    assert notify.route(OUR_ALERTS, OUR_STATUS, OUR_INTEL)[I] == OUR_INTEL
 
 
 def test_the_startup_line_says_where_each_kind_goes_never_the_names():
     def line(a, st, src="ssm"):
         return notify.Pushes("https://ntfy.sh", a, st, sources={notify.ALERTS: src, notify.STATUS: src}).line()
     both = line(OUR_ALERTS, OUR_STATUS)
-    assert both == "notify: alerts \u2192 topic set (SSM), status \u2192 topic set (SSM)"
+    intel = ", intel \u2192 the alerts topic (no intel topic set)"
+    assert both == "notify: alerts \u2192 topic set (SSM), status \u2192 topic set (SSM)" + intel
     assert line(OUR_ALERTS, "", "config") == \
-        "notify: alerts \u2192 topic set (config file), status \u2192 the alerts topic (no status topic set)"
-    assert line("", OUR_STATUS) == "notify: alerts \u2192 the status topic (no alerts topic set), status \u2192 topic set (SSM)"
+        "notify: alerts \u2192 topic set (config file), status \u2192 the alerts topic (no status topic set)" + intel
+    assert line("", OUR_STATUS) == ("notify: alerts \u2192 the status topic (no alerts topic set), "
+                                    "status \u2192 topic set (SSM), intel \u2192 the status topic (no intel topic set)")
     assert line("", "").startswith("notify: no pushes")
     for out in (both, line(OUR_ALERTS, ""), line("", OUR_STATUS)):
         assert OUR_ALERTS not in out and OUR_STATUS not in out
@@ -166,3 +171,85 @@ def test_tapouts_topics_are_refused_by_exact_name_not_by_a_word_in_ours(ours):
     assert topic_problem(ours, ("firehouse-ring-xyz",)) == ""
     for theirs in ("pcfd-status", "pcfd-phone-prealert", "firehouse-ring-xyz"):
         assert "Tapout" in topic_problem(theirs, ("firehouse-ring-xyz",))
+
+
+# -- the third kind: radio-intelligence pre-alerts (INTEL) ----------------------------------------------------------
+
+def test_intel_falls_back_to_the_alerts_topic_and_never_the_other_way():
+    assert notify.KINDS == (notify.ALERTS, notify.STATUS, notify.INTEL)
+    assert notify.FALLBACK == {notify.STATUS: notify.ALERTS, notify.ALERTS: notify.STATUS, notify.INTEL: notify.ALERTS}
+    assert notify.other(notify.INTEL) == notify.ALERTS and notify.other(notify.ALERTS) == notify.STATUS
+    p = notify.Pushes("https://ntfy.sh", OUR_ALERTS, OUR_STATUS, log=lambda m: None)
+    assert p.effective(notify.INTEL) == {"topic": OUR_ALERTS, "source": "fallback"}
+    # only a status topic: the alerts share it, and intel follows the alerts there
+    p = notify.Pushes("https://ntfy.sh", "", OUR_STATUS, log=lambda m: None)
+    assert p.effective(notify.INTEL) == {"topic": OUR_STATUS, "source": "fallback"}
+    # an intel topic of its own: the alerts never fall back to it
+    p = notify.Pushes("https://ntfy.sh", "", "", intel_topic=OUR_INTEL, sources={notify.INTEL: "env"}, log=lambda m: None)
+    assert p.effective(notify.INTEL) == {"topic": OUR_INTEL, "source": "env"}
+    assert p.effective(notify.ALERTS)["topic"] == "" and p.effective(notify.STATUS)["topic"] == ""
+    assert notify.Pushes("https://ntfy.sh", "", "", log=lambda m: None).effective(notify.INTEL)["topic"] == ""
+
+
+def test_intel_follows_the_alerts_off_and_its_own_topic_splits_it_off(ntfy):
+    ov = {}
+    p = notify.Pushes(ntfy.url, OUR_ALERTS, OUR_STATUS, settings=lambda: ov, log=lambda m: None)
+    n = p.notifier(notify.INTEL)
+    n.send("PD \u00b7 Smoke reported \u00b7 Example Town", "Example Ave \u00b7 14:32")
+    assert n.flush(5) and [m["body"]["topic"] for m in ntfy.got] == [OUR_ALERTS]
+    ov[notify.INTEL] = {"topic": OUR_INTEL}                     # Settings: the "intel thread", no restart
+    n.send("PD \u00b7 MVA \u00b7 Example Town", "Sample St")
+    assert n.flush(5) and ntfy.got[-1]["body"]["topic"] == OUR_INTEL
+    ov[notify.INTEL] = {"off": True}
+    assert not n.enabled and not n.send("x", "y")
+    del ov[notify.INTEL]
+    ov[notify.ALERTS] = {"off": True}                           # the alerts off: intel with no topic of its own too
+    assert p.effective(notify.INTEL) == {"topic": "", "source": "none"} and not n.enabled
+    assert p.effective(notify.STATUS)["topic"] == OUR_STATUS
+
+
+def test_intel_topic_from_the_config_and_env_refuses_tapouts(tmp_path, monkeypatch):
+    from sizeup.config import ConfigError, load
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(f'[alerts]\nntfy_topic = "{OUR_ALERTS}"\nintel_topic = "{OUR_INTEL}"\n')
+    c = load(cfg)
+    assert (c.alerts_intel_topic, c.alerts_intel_topic_source) == (OUR_INTEL, "config")
+    monkeypatch.setenv("SIZEUP_INTEL_TOPIC", OUR_INTEL + "-env")
+    c = load(cfg)
+    assert (c.alerts_intel_topic, c.alerts_intel_topic_source) == (OUR_INTEL + "-env", "env")
+    monkeypatch.delenv("SIZEUP_INTEL_TOPIC")
+    for bad in ("pcfd-phone-prealert", "pcfd-status", "short"):
+        cfg.write_text(f'[alerts]\nintel_topic = "{bad}"\n')
+        with pytest.raises(ConfigError, match="intel_topic"):
+            load(cfg)
+
+
+def test_a_mayday_never_waits_behind_pre_alerts_on_the_shared_topic(monkeypatch):
+    import threading
+    stuck, sent = threading.Event(), []
+
+    def slow(server, topic, title, body, priority=3, tags=(), click="", timeout=10.0, who=None, actions=()):
+        if title.startswith("PD"):
+            stuck.wait(10)                          # ntfy slow for the pre-alerts
+        sent.append(title)
+        return {}
+    monkeypatch.setattr(notify, "publish", slow)
+    p = notify.Pushes("https://ntfy.sh", OUR_ALERTS, "", log=lambda m: None)
+    i, a = p.notifier(notify.INTEL), p.notifier(notify.ALERTS)
+    assert i.topic == a.topic == OUR_ALERTS and i.current() is not a.current()      # one topic, two queues
+    for k in range(3):
+        assert i.send(f"PD \u00b7 pre-alert {k}", "x")
+    assert a.send("MAYDAY", "Emergency button", priority=5)
+    assert a.flush(5) and sent == ["MAYDAY"]                                         # not behind the stuck ones
+    stuck.set()
+    assert i.flush(5) and sorted(sent) == sorted(["MAYDAY"] + [f"PD \u00b7 pre-alert {k}" for k in range(3)])
+    s = notify.Pushes("https://ntfy.sh", OUR_ALERTS, OUR_STATUS, log=lambda m: None)
+    assert s.notifier(notify.ALERTS).current() is not s.notifier(notify.INTEL).current()
+
+
+def test_the_line_names_the_topic_intel_really_shares():
+    only_status = notify.Pushes("https://ntfy.sh", "", OUR_STATUS, log=lambda m: None)
+    assert only_status.line().endswith("intel \u2192 the status topic (no intel topic set)")
+    assert only_status.page()["kinds"][2]["source_text"] == "shared (the status topic)"
+    both = notify.Pushes("https://ntfy.sh", OUR_ALERTS, OUR_STATUS, log=lambda m: None)
+    assert both.line().endswith("intel \u2192 the alerts topic (no intel topic set)")

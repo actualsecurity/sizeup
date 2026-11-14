@@ -26,7 +26,7 @@ browser's user agent or a name in a message can't become part of a notice (the s
     type     a known exception name (Python's built-in ones, the classes sizeup defines, a few common library ones;
              from a traceback: the class Python printed); anything else is "error"
 
-The last message seen (digits stripped, at most MSG_MAX characters) is kept as a sample for Settings > Health (admins)
+The last message seen (digits stripped, at most MSG_MAX characters) is kept as a sample for Settings > Station > Health (admins)
 only: a notice names the source, the type and the count, never a message.
 
 When (tick(), every TICK_S):
@@ -42,10 +42,10 @@ When (tick(), every TICK_S):
 What was pushed when (and what is still alerting) is kept in hub.sqlite (meta "errwatch"): a redeploy doesn't push a
 fault that is still going again before its hour is up.
 
-A one-off error (or a few) is never a notice: it shows on Settings > Health with the rest.
+A one-off error (or a few) is never a notice: it shows on Settings > Station > Health with the rest.
 
 Settings > System > Hub error alerts (the CAD settings' SECTION, admins): on / off, K and the total. Read at every
-tick: no restart. Off: still counted for Settings > Health, nothing pushed.
+tick: no restart. Off: still counted for Settings > Station > Health, nothing pushed.
 """
 
 from __future__ import annotations
@@ -80,7 +80,7 @@ MAX_ALL = 2 * LIMITS["total"][1]               # ... and of every error line: mo
 MAX_QUEUE = 20000           # lines waiting to be read (about 5 MB at most); past this they are dropped (counted)
 PANEL_DRAIN = 1000          # panel() (a Health request's thread) reads at most this many: the hub-errors thread does
 PENDING_S = 1.0             # a traceback's last line waits this long for "During handling ..." (chained: once)
-TOP = 8                     # Settings > Health: the top signatures shown
+TOP = 8                     # Settings > Station > Health: the top signatures shown
 META = "errwatch"           # hub.sqlite meta key
 
 TS = re.compile(r"^\s*\d{1,2}:\d\d:\d\d(?:[.,]\d+)?\s+")
@@ -178,7 +178,7 @@ class _Sig:
         self.pushed_at = 0.0                            # its last notice
         self.alerting = False                           # pushed, not yet back to normal
         self.over_at = 0.0                              # its last line while it was over K
-        self.sample = ""                                # the last message (Settings > Health only)
+        self.sample = ""                                # the last message (Settings > Station > Health only)
 
 
 def _fmt(n: int) -> str:
@@ -192,7 +192,7 @@ def _dur(s: float) -> str:
 
 class ErrorWatch:
     """feed() each line (queued); drain() reads them (the hub-errors thread); tick() decides the notices; panel() for
-    Settings > Health. notifier: what Pushes' notifier(STATUS) gives (send, enabled); settings(): the CAD settings'
+    Settings > Station > Health. notifier: what Pushes' notifier(STATUS) gives (send, enabled); settings(): the CAD settings'
     SECTION ({} without); db: hub.sqlite's MonitorDb (get / put), where the notices' state is kept."""
 
     def __init__(self, notifier=None, settings: Callable[[], dict] | None = None, clock: Callable[[], float] = time.time,
@@ -208,7 +208,7 @@ class ErrorWatch:
         self.total_pushed_at = 0.0
         self.total_alerting = False
         self.total_high = 0.0                            # the last tick the total was over its threshold
-        self.pushes: deque = deque(maxlen=20)            # the notices sent: {at, title} (Settings > Health)
+        self.pushes: deque = deque(maxlen=20)            # the notices sent: {at, title} (Settings > Station > Health)
         self._cfg = dict(DEFAULTS)                       # the settings last read (kept when they can't be)
         self._q: queue.SimpleQueue = queue.SimpleQueue()
         self._tb: dict[str, dict] = {}                   # stream -> the traceback being read {module}
@@ -417,7 +417,7 @@ class ErrorWatch:
                 top = max(self.sigs.values(), key=lambda x: len(x.times), default=None)
                 title = f"Hub errors: {_fmt(n5)} in 5 min" + (
                     f" · top {self._name(top)} ×{_fmt(len(top.times))}" if top is not None and top.times else "")
-                out.append((title, f"More than {_fmt(limit)} error lines in 5 min. Details: Settings > Health."))
+                out.append((title, f"More than {_fmt(limit)} error lines in 5 min. Details: Settings > Station > Health."))
             # back to normal: every pushed signature at or under K (a trickle is normal), the total under its own
             calm = [s for s in self.sigs.values() if s.alerting and now - s.over_at >= QUIET_S]
             loud = [s for s in self.sigs.values() if s.alerting and now - s.over_at < QUIET_S]
@@ -453,7 +453,7 @@ class ErrorWatch:
 
     def _spike(self, sig: _Sig, now: float, k: int) -> tuple[str, str]:
         title = f"Hub errors: {self._name(sig)} ×{_fmt(sig.count)} in {_dur(now - sig.first)} · since {tz.hhmm(sig.first)}"
-        return title, f"{_fmt(len(sig.times))} in the last 5 min (more than {k}). Details: Settings > Health."
+        return title, f"{_fmt(len(sig.times))} in the last 5 min (more than {k}). Details: Settings > Station > Health."
 
     def run(self, stop: threading.Event) -> None:
         """The hub-errors thread: reads the queued lines every DRAIN_S, decides every TICK_S."""
@@ -467,7 +467,7 @@ class ErrorWatch:
             except Exception as e:  # noqa: BLE001 - the watcher must never die
                 self.log(f"errors: {type(e).__name__}")
 
-    # -- Settings > Health (admins) -----------------------------------------------------------------------------
+    # -- Settings > Station > Health (admins) -------------------------------------------------------------------
 
     def panel(self, now: float | None = None) -> dict:
         self.drain(PANEL_DRAIN)
