@@ -173,3 +173,49 @@ def test_json_never_inside_the_repo(restored):
     with pytest.raises(SystemExit):
         stt_eval.main(["--db", str(db), "--json", str(stt_eval.ROOT / "x.stt-eval.json")])
     assert not (stt_eval.ROOT / "x.stt-eval.json").exists()
+
+
+# -- numbers as radio says them: never an error ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("said, want", [
+    ("stretch a hundred feet", ["stretch", "a", "hundred", "feet"]),
+    ("fifteen hundred hours", ["1500", "hours"]),
+    ("twenty five hundred gallons", ["2500", "gallons"]),
+    ("ten hundred", ["1000"]),
+    ("hundred block", ["hundred", "block"]),
+    ("the 400 hundred block", ["the", "400", "hundred", "block"]),
+    ("hundred", ["hundred"]),
+    ("two hundred hundred", ["200", "hundred"]),
+    ("four hundred fifty six example ave", ["456", "example", "ave"]),
+    ("one hundred twelve", ["112"]),
+    ("five hundred five", ["505"]),
+    ("one two three sample street", ["123", "sample", "st"]),
+    ("four oh five", ["405"]),
+    ("one twenty first", ["121st"]),
+    ("hundred twenty first street", ["hundred", "21st", "st"]),
+])
+def test_spoken_numbers(said, want):
+    assert stt_eval.words(said) == want
+    assert stt_eval.tokens(said) and stt_eval.wer(said, said)[0] == 0
+
+
+def test_no_wording_makes_the_normaliser_raise():
+    """Random runs of number words, digits, ordinals and ordinary words: words() / tokens() and the metrics never raise,
+    and every token is kept as a numeral or as the word it was."""
+    import random
+    rng = random.Random(487)
+    vocab = (list(stt_eval.UNITS) + list(stt_eval.TEENS) + list(stt_eval.TENS) + list(stt_eval.ORDINALS)
+             + ["hundred", "oh", "a", "the", "block", "engine", "example", "avenue", "street", "0", "5", "12", "400", ""])
+    for _ in range(4000):
+        said = " ".join(rng.choice(vocab) for _ in range(rng.randint(0, 9)))
+        ws = stt_eval.words(said)
+        assert all(isinstance(w, str) and w for w in ws), said
+        assert len(ws) <= len(said.split()), said
+        stt_eval.tokens(said)
+        other = " ".join(rng.choice(vocab) for _ in range(rng.randint(0, 9)))
+        stt_eval.evaluate([{"start": 0.0, "ref": said, "tags": [], "domain": "", "hyps": {"whisper": other, "aws": said}}])
+
+
+def test_a_run_that_cannot_be_read_is_left_as_said(monkeypatch):
+    monkeypatch.setattr(stt_eval, "_numbers", lambda ws: 1 / 0)
+    assert stt_eval.words("engine one two hundred") == ["engine", "one", "two", "hundred"]

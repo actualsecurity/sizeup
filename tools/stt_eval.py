@@ -46,7 +46,6 @@ from __future__ import annotations
 import argparse
 import json
 import re
-import sqlite3
 import sys
 from collections import Counter
 from datetime import datetime
@@ -57,6 +56,7 @@ sys.path.insert(0, str(ROOT))
 
 from sizeup.cad.radiolog import UNIT_WORDS, addresses_in  # noqa: E402
 from sizeup.cad.store import TZ  # noqa: E402
+from sizeup.intel.replay import LiveDatabase, open_ro  # noqa: E402
 
 UNITS = {"zero": 0, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9,
          "niner": 9}
@@ -78,40 +78,63 @@ def _is_num(w: str, in_run: bool) -> bool:
             or (len(w) == 1 and w.isdigit()))
 
 
-def _run(ws: list[str]) -> str:
-    """A run of number words (and single digits) -> one numeral, the way radio says numbers."""
-    out, i = "", 0
+def _small(ws: list[str], i: int) -> tuple[int | None, int]:
+    """The number under 100 that starts at ws[i] ("twenty five", "fifteen", "five", "5", "oh") and how many words it
+    took; (None, 0): none starts here (a "hundred", the end)."""
+    if i >= len(ws):
+        return None, 0
+    w = ws[i]
+    if w in TENS:
+        if i + 1 < len(ws) and UNITS.get(ws[i + 1], 0) > 0:
+            return TENS[w] + UNITS[ws[i + 1]], 2
+        return TENS[w], 1
+    if w in TEENS:
+        return TEENS[w], 1
+    if w in UNITS:
+        return UNITS[w], 1
+    if w == "oh":
+        return 0, 1
+    if len(w) == 1 and w.isdigit():
+        return int(w), 1
+    return None, 0
+
+
+def _numbers(ws: list[str]) -> list[str]:
+    out: list[str] = []
+    digits, i = "", 0
     while i < len(ws):
-        w = ws[i]
-        if w in TENS:
-            v = TENS[w]
-            if i + 1 < len(ws) and (ws[i + 1] in UNITS and UNITS[ws[i + 1]] > 0):
-                v += UNITS[ws[i + 1]]
-                i += 1
-            chunk = str(v)
-        elif w in TEENS:
-            chunk = str(TEENS[w])
-        elif w == "oh":
-            chunk = "0"
-        elif w.isdigit():
-            chunk = w
-        else:
-            chunk = str(UNITS[w])
-        if i + 1 < len(ws) and ws[i + 1] == "hundred" and len(chunk) == 1:
+        v, n = _small(ws, i)
+        if v is None:                  # a "hundred" with no number before it ("a hundred feet", "hundred block"), or
+            if digits:                 # anything else: it stays a word
+                out.append(digits)
+                digits = ""
+            out.append(ws[i])
             i += 1
-            rest = ""
-            j = i + 1
-            if j < len(ws) and ws[j] in TENS:            # "four hundred fifty six"
-                rest = str(TENS[ws[j]] + (UNITS[ws[j + 1]] if j + 1 < len(ws) and ws[j + 1] in UNITS else 0))
-                i = j + (1 if j + 1 < len(ws) and ws[j + 1] in UNITS else 0)
-            elif j < len(ws) and ws[j] in TEENS:
-                rest, i = str(TEENS[ws[j]]), j
-            elif j < len(ws) and ws[j] in UNITS:
-                rest, i = str(UNITS[ws[j]]), j
-            chunk = str(int(chunk) * 100 + int(rest or 0))
-        out += chunk
-        i += 1
+            continue
+        chunk = str(v)
+        i += n
+        if v > 0 and i < len(ws) and ws[i] == "hundred":       # "four hundred fifty six", "fifteen hundred", "ten hundred"
+            i += 1
+            rest, n = _small(ws, i)
+            if rest is not None and rest > 0 and ws[i] != "oh":
+                i += n
+            else:
+                rest = 0
+            chunk = str(v * 100 + rest)
+        digits += chunk
+    if digits:
+        out.append(digits)
     return out
+
+
+def _run(ws: list[str]) -> list[str]:
+    """A run of number words (and single digits) -> its numeral(s), the way radio says numbers: "one two three" 123,
+    "four hundred fifty six" 456, "fifteen hundred" 1500. Total: whatever the run holds, it never raises; a word that
+    fits no number (a "hundred" on its own) stays a word, and should anything else go wrong the run is left as said."""
+    try:
+        return _numbers(ws)
+    except Exception:  # noqa: BLE001  (an evaluation never stops for one clip's wording)
+        return list(ws)
 
 
 def words(text: str) -> list[str]:
@@ -126,10 +149,13 @@ def words(text: str) -> list[str]:
         if run:
             if w in ORDINALS and run[-1] in TENS and ORDINALS[w][0] < 10:     # "twenty first" -> 21st
                 k, suf = ORDINALS[w]
-                out.append(f"{_run(run[:-1]) if len(run) > 1 else ''}{TENS[run[-1]] + k}{suf}")
+                head = _run(run[:-1])
+                glued = head[-1] if head and head[-1].isdigit() else ""       # "one twenty first" -> 121st
+                out.extend(head[:-1] if glued else head)
+                out.append(f"{glued}{TENS[run[-1]] + k}{suf}")
                 run = []
                 continue
-            out.append(_run(run))
+            out.extend(_run(run))
             run = []
         if w in ORDINALS:
             n, suf = ORDINALS[w]
@@ -137,7 +163,7 @@ def words(text: str) -> list[str]:
         else:
             out.append(w)
     if run:
-        out.append(_run(run))
+        out.extend(_run(run))
     return out
 
 
@@ -298,10 +324,7 @@ def _hyps(pairs) -> dict:
 
 def from_db(path: Path, all_rows: bool, domain: str, since: float | None, until: float | None) -> list[dict]:
     """The references from a restored cad.sqlite, opened read-only (never written)."""
-    wal = Path(f"{path}-wal")                      # a restore has none: immutable too, so no -wal / -shm is made beside it
-    still = "" if wal.is_file() and wal.stat().st_size else "&immutable=1"
-    con = sqlite3.connect(f"file:{path}?mode=ro{still}", uri=True)
-    con.row_factory = sqlite3.Row
+    con = open_ro(path)                            # never the live database; nothing made beside a restore
     try:
         where, args = ["1"], []
         if not all_rows:
@@ -444,7 +467,11 @@ def main(argv=None) -> int:
     a = ap.parse_args(argv)
     out_path = outside_repo(a.json) if a.json else None
     since, until = when(a.since), when(a.until)
-    refs = from_db(a.db, a.all, a.domain, since, until) if a.db else from_jsonl(a.jsonl, a.all, since, until)
+    try:
+        refs = from_db(a.db, a.all, a.domain, since, until) if a.db else from_jsonl(a.jsonl, a.all, since, until)
+    except LiveDatabase as e:
+        print(f"refused: {e}", file=sys.stderr)
+        return 2
     phrases = ([ln.strip() for ln in a.prompt_words.read_text().splitlines() if ln.strip()] if a.prompt_words
                else default_prompt_words())
     out = evaluate(refs, parse_variants(a.variant), phrases)
