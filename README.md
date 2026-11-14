@@ -23,11 +23,11 @@ With no `[cloud]` section it runs all-in-one, for local development.
 | Incident sources | External CAD feeds first, paging as the backup; reports matched to one incident; pre-alerts never create an incident |
 | Radio log | Every transmission with its rig, radio ID, channel and events; views per service; re-run a transcript |
 | Alarms | The radio emergency button (P25, MDC, FleetSync) and mayday keywords, acknowledged at the console and pushed |
-| Pre-alerts | The headquarters phone ringing (read only), airport alerts from ATC and ADS-B, radio-intelligence rule packs |
+| Pre-alerts | The headquarters phone ringing (read only; its topics are set in Settings), airport alerts from ATC and ADS-B, radio-intelligence rule packs with an optional LLM stage behind them (off by default, capped) and a Listen link on the push |
 | Maps | Rigs and their probable routes, aircraft near HPN, Metro-North trains, vessels (AIS), highway cameras and DVR, road closures, county GIS, weather |
 | Buildings | Address history, premise notes, pre-plan points and site documents (floor plans on the map), incident attachments |
 | Search | Full-text search over incidents, the chronology and the radio log |
-| Notifications | ntfy pushes in three kinds: alerts, system status, radio intel |
+| Notifications | ntfy pushes in three kinds: alerts, system status, radio intel. Topics that sizeup reads are protected: never published to |
 | Operations | Litestream replication to S3, hot/cold deploys behind a single-writer lock, replica checks, station auto-update and health |
 
 Dispatch audio plays at the console. Nothing transmits on the air.

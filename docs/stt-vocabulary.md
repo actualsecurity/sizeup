@@ -93,11 +93,10 @@ has to be a file in S3, and in the measurement it gave the same words as the lis
 
 A phrase over a limit is listed under `skipped` with the reason. Duplicates after conversion are dropped silently.
 
-## Known issue: hyphens in transcripts
+## Hyphens in transcripts
 
-Phrases are sent in the list form, with hyphens, and AWS writes them back the same way in transcripts
-("Boston-Post-Road"). `respell()` only rewrites phrases that have digits, so street, town and department names are
-stored and shown with the hyphens. Issue #518; the fix is in open PR #519.
+AWS writes a list-form phrase back with its hyphens ("Boston-Post-Road"); the hub writes it back as written. See
+[Hyphens](#hyphens) below (issue #518, PR #519).
 
 ## Pushing to AWS
 

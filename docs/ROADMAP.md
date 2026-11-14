@@ -68,8 +68,7 @@ itemised. An issue marked "open" is still open after the PR listed for it merged
 | The core and the police pack: rules, window, events, policy, push, Settings > Intel, the console card, the events API (plan PR 1) | #492 | part of #411 |
 | Police STT profile, police AWS budget, PD audio budget (plan PR 3) | #495 | #490 |
 
-PR #499 (Listen links), #502 (radiogeo depth) and #504 (the inference stage) were merged into stacked branches, not
-main. They reach main with PR #517 (see In flight).
+| Listen links on the push, radiogeo depth (spoken intersections, blocks, relative cues, exits and markers, cross streets) and the inference stage (Bedrock, off by default, capped; backs the rules, never pushes alone): the content of PR #499, #502, #504 | #517 | part of #411 |
 
 ### Incidents and dispatch
 
@@ -77,12 +76,14 @@ main. They reach main with PR #517 (see In flight).
 |---|---|---|
 | Ranked incident sources with automatic fallback; private adapters on the station only; adapter credentials from SSM | #304, #305, #417 | #297, #301 |
 | Dispatch modes and the per-incident radio log | #318 | #311 |
-| Pages joined to feed incidents; full department vs specific units | #367, #373, #387, #398, #399 | #365, #370 |
+| Pages joined to feed incidents; full department vs specific units | #367, #373, #387, #398, #399, #519 (full department from the tones and the feed) | #365, #370, #518 |
 | Department placeholders: assigned first, released when their unit signs on | #400, #431 | |
 | Dispatch answers before its voice is rendered | #429 | #426 |
 | CAD search, History here, premise notes | #421 | #403 |
 | Pre-plan points and site documents on the call's map | #458, #464 | #456, #459 |
 | Units back to Available when their call closes | #236 | #232 |
+| AWS vocabulary phrases shown without their hyphens (on arrival and on read) | #519 | #518 |
+| Pre-alert topics in Settings > System > Push notifications; the protected set derived, fails closed; no private names in the repo | #521 | |
 | Page geocoding: cross streets, read-backs, named places; intersection search; proper-case addresses | #181, #214, #388 | #176, #213 |
 | Airport events: FAA Alert 1/2/3, the souls scale | #109 | #105 |
 | Incident view and new call entry: layout, comments, rig tiles, resizable map | #207, #208, #211, #212, #222, #223, #224, #234 | #204, #205, #209, #210, #216 to #221, #231 |
@@ -91,7 +92,7 @@ main. They reach main with PR #517 (see In flight).
 
 | What | PRs | Issues |
 |---|---|---|
-| Rigs: follow, routes by road, estimated motion, overhead icons, firehouse bay doors, local streets first | #359, #361, #363, #377, #395, #396, #432, #455, #477, #478 | #358, #360 (open), #376, #384, #393, #427, #453, #473 |
+| Rigs: follow, routes by road, estimated motion, overhead icons, firehouse bay doors (Rye Brook: back in through the PD lot), local streets first | #359, #361, #363, #377, #395, #396, #432, #455, #477, #478, #485 | #358, #360 (open), #376, #384, #393, #427, #453, #473 |
 | Vessels (AIS): aisstream.io and our own receiver ([vessels.md](vessels.md)) | #416 | #402 |
 | Trains: Metro-North on the map, to scale, TrainTime data, numbered tracks, poles and mileposts | #138, #152, #165, #166, #174, #175, #366, #374, #378, #389, #392, #394, #452 | #131, #151, #162, #164, #362, #371, #375, #379, #385, #390, #451 |
 | Aircraft near HPN: two public feeds, our own ADS-B receiver, emergency squawks, follow | #161, #169, #171, #182, #240, #265, #272, #287, #309, #319, #333, #355 | #155, #179, #235, #262, #269, #279, #313, #315, #352 |
@@ -126,10 +127,7 @@ main. They reach main with PR #517 (see In flight).
 
 | PR | What | Issue |
 |---|---|---|
-| #519 | AWS vocabulary phrases written back without their hyphens; full department from the tones and the feed | #518 |
-| #517 | intel: Listen links, radiogeo depth and the inference stage onto main (the content of PR #499, #502, #504) | part of #411 |
 | #491 | Radio intel plan PR 7: replay/backtest, STT evaluation, transcript corrections | #487, #428 |
-| #485 | Rye Brook firehouse: out onto King St, back in through the lot | |
 | #475 | Incident addresses stored normalised; matching keeps the source's text | |
 | #471 | Incident sources: health hysteresis so a station restart never flips the primary | |
 | #465 | Settings > Health: set the station adapter's password from the hub (write-only) | #460 |
@@ -139,7 +137,7 @@ main. They reach main with PR #517 (see In flight).
 
 | Area | Issues |
 |---|---|
-| Speech-to-text | #518 hyphenated vocabulary phrases, full-department pages (PR #519); #196 the station's whisper can't keep up; #124 free fixes (the price is done, #423; the hyphens are #518) |
+| Speech-to-text | #196 the station's whisper can't keep up; #124 free fixes (the price is done, #423; the hyphens, #518, are done) |
 | MRRS (umbrella #408) | #410 reception probe (PR #436, #479 merged); #411 PD pre-alerts and scene-safety markers; #412 learned PD roster; #413 Metro-North / MTA PD traffic on trains and track locations |
 | Hub | #498 the 2026-11-13 outage write-up (PR #497, #506, #507, #509 merged; the process items remain); #446 hub CPU; #247 deploys without downtime (PR #254 merged); #33 settings after the October deploys |
 | Station | #32 move to the Windows PC; #460 adapter password from the hub (PR #465) |
@@ -195,7 +193,7 @@ Only arcs an issue or PR backs. Each row says what exists and what is planned.
 
 | Arc | Exists on main | Planned | Backing |
 |---|---|---|---|
-| Radio intelligence | The core, the police rule pack, Settings > Intel with 7-day counts per rule, the console card with Dismiss and feedback buttons, the events API | Listen links, radiogeo depth and the inference stage (PR #517); a police activity map layer on the events API (plan PR 5, named in PR #492); a dry run on save in Settings > Intel (plan PR 6, named in PR #491); replay and corrections (PR #491); scene-safety markers (#411); the learned PD roster (#412); tie and move tuning (#510); train and track locations (#413) | #408, #411, #412, #413, #510, #487; PR #492, #517, #491 |
+| Radio intelligence | The core, the police rule pack, Settings > Intel with 7-day counts per rule, the console card with Dismiss and feedback buttons, the events API, Listen links, radiogeo depth, the inference stage (off until Settings turn it on and AWS is set up) | a police activity map layer on the events API (plan PR 5, named in PR #492); a dry run on save in Settings > Intel (plan PR 6, named in PR #491); replay and corrections (PR #491); scene-safety markers (#411); the learned PD roster (#412); tie and move tuning (#510); train and track locations (#413) | #408, #411, #412, #413, #510, #487; PR #492, #517, #491 |
 | Whisper hosting | whisper.cpp on the station; AWS on the main channels | Decide between hosted Whisper turbo, our own box, or AWS (#123); the station's backlog (#196) | #123, #196 |
 | Rig AVL | The map side: one fix per unit into `Cad.positions`, follow, routes, estimated motion | A provider. None is built until a source is chosen ([cad-plan.md](cad-plan.md)) | #358 (closed: the map side), #43 |
 | Audio archive | Audio in S3 with per-channel retention | Daily bundles in cold storage for training and evaluation sets | #428 |

@@ -155,6 +155,10 @@ Two engines, chosen per channel in Settings > Radios (`sizeup/channels.py`): `lo
   its own, kept up with the operators seen near HPN (`sizeup/atc_vocab.py`). Per-source profiles are in
   `data/stt/profiles.json`. ATC transcripts are normalised and callsigns snapped to aircraft on ADS-B
   (`atc_normalize.py`, `atc_snap.py`).
+- **Hyphens.** AWS writes a vocabulary phrase back with hyphens ("Example-Post-Road"). `transcribe.Display` turns each
+  known phrase back to its written form on arrival and again when a stored transcript is read (radio log rows, an event's
+  remarks and timeline, the monitor's pages); stored text is never rewritten, and the radio log search treats a hyphen
+  and a space alike. Nothing is sent to AWS for it.
 - **Talker hints.** Radio aliases heard on the call are passed to whisper as a prompt (`sizeup/talkers.py`).
 - **Catch-up.** Shed clips are run again when the engine is idle and no event, alarm or carrier of ours is open. The
   re-run is quiet: nothing alerts on words that may be hours old (`sizeup/sttcatchup.py`).
@@ -172,8 +176,8 @@ Two engines, chosen per channel in Settings > Radios (`sizeup/channels.py`): `lo
 | Run cards | Event type (and subtype) to ordered slots; recommendations use estimated drive time and where each rig is now | `runcards.py`, `eta.py`, `mapview.py` |
 | Dispatch | Composed text, alert tones and a rendered voice. Transmit is off: `NullTransmitter` is the only transmitter. | `dispatcher.py`, `speech.py`, `voicequeue.py`, `transmit.py` |
 | Dispatch modes | Who moves a feed's incident through the call: 60 Control (default) or PCFD | `automode.py` |
-| Who was dispatched | Full department or specific units, from the tones and the page | `scope.py` |
-| Rig routes | The probable path of each responding rig on a road graph built from OpenStreetMap; motion estimates; routes leave and enter firehouses by the bay doors. `Cad.positions` is the single hook for a live AVL feed; no provider sets it yet. | `routes.py`, `roadgraph.py`, `mapview.py` |
+| Who was dispatched | Full department or specific units. Page: apparatus named gives units; else a department's tones plus a call type, "full department" said (as speech-to-text hears it), or its own all-call tones with a place and no test or meeting wording give the full department. Feed: a department entry or placeholder with no unit listed, or a comment that says so. The page's reading shows whenever it has one. | `scope.py` |
+| Rig routes | The probable path of each responding rig on a road graph built from OpenStreetMap; motion estimates; routes leave and enter firehouses by the bay doors (an ingress may be `via: "lot"`, back in through a lot's drive aisles). `Cad.positions` is the single hook for a live AVL feed; no provider sets it yet. | `routes.py`, `roadgraph.py`, `mapview.py` |
 | Alarms | Emergency button and mayday, acknowledged and cleared at the console, pushed | `alarms.py` |
 | Radios | Radio ID to rig registry (MDC, FleetSync, P25); new IDs are asked about, never guessed | `radios.py`, `newids.py` |
 | Tone book | Agencies, places, services and their tone pairs | `tonelist.py` |
@@ -234,23 +238,47 @@ pushed. It never creates an incident.
 
 | kind | source | module |
 |---|---|---|
-| Phone | The headquarters phone ringing, from a separate device's ntfy feed. Read only: every request is a GET, and sizeup refuses to publish to that feed. | `sizeup/prealert.py` |
+| Phone | The headquarters phone ringing, from a separate device's ntfy feed. Read only: every request is a GET, and sizeup refuses to publish to that feed. Its topics are set in Settings > System > Push notifications (or env), never in the repo; none set: the feed is off and Health says "not configured". | `sizeup/prealert.py` |
 | Airport | ATC transcripts matched to rules (`data/atc/rules.json`); watches that build over several transmissions (a go-around followed through frequency changes); emergency squawks on ADS-B; "alert level N" on the fire radio | `atc.py`, `airport_watch.py`, `cad/airport_alerts.py`, `cad/airport.py` |
 | Radio intel | Rule packs over another system's transcripts | `sizeup/intel/` |
 
-**Radio intelligence** (`sizeup/intel/`), as on main:
+**Radio intelligence** (`sizeup/intel/`):
 
 1. `Comms.on_context_text` hands each context transcript's id to the engine after commit (`cad/service.py`).
 2. A rule pack (`data/intel/police.json`, with Settings over it) scores phrases per category. Rows from one source
    within a window merge, so a call-out and its read-back are one candidate (`rules.py`, `engine.py`).
-3. The window's words go through the page locator, held to the source's home towns (`place.py`).
-4. The policy decides whether to push: a mode ladder (off / shadow / log / map / push), a kill switch, quiet hours,
+3. The window's words go through the locator (`place.py`), held to the source's home towns. Beyond what a page says, it
+   reads spoken intersections ("X and Y", "corner of"), blocks ("the 100 block of X", never an exact address), relative
+   cues ("rear of", "across from": a wider radius), and highway exits and mile markers (the place search). An address
+   confirms by a cross street only within `corner_m` (200 m) of where they meet. A headquarters callsign said alone
+   narrows to that department's town. Police text needs a higher score to confirm than a page (`DOMAIN_PARAMS`).
+4. Where the rules leave a category uncertain, or an event's place unconfirmed, the **inference stage** may ask a model
+   (below).
+5. The policy decides whether to push: a mode ladder (off / shadow / log / map / push), a kill switch, quiet hours,
    rate caps and re-push limits (`policy.py`).
-5. The push is composed from an allow-list of fields and scrubbed; a failed scrub sends nothing (`push.py`).
+6. The push is composed from an allow-list of fields and scrubbed; a failed scrub sends nothing (`push.py`). It carries
+   a **Listen** link and a ntfy "Listen" button (`listen.py`, `notify.py` `actions`).
+
+**Listen** (`listen.py`; on by default, needs `SIZEUP_AUDIO_BUCKET`): the event's transmissions plus the same source's
+from 45 s before to 60 s after, stitched into one file (AAC at 24 kbps with ffmpeg, else 8 kHz WAV; the hub image has
+no ffmpeg), written under a random key in the audio bucket's `listen/` prefix and linked by a presigned URL that
+expires (20 min). There is no sign-in on the link. Record-only, encrypted and activity-tier sources are never included.
+The file is restitched under the same key as later transmissions arrive. It never delays the push (its own thread); a
+403 from the bucket reads "not configured" and is retried after an hour.
+
+**Inference** (`infer.py`; off by default, `infer = false`): an LLM behind the rules, on Amazon Bedrock in the
+department's own account (the Anthropic SDK's Bedrock client, `.[intel-llm]` in the hub image). It runs on its own
+thread and never holds the engine. It is asked only about a candidate the rules left between `infer_low` (0.3) and the
+threshold, an event whose place is unconfirmed (at most once per 10 min), or a sampled few (`infer_sample_pct`,
+recorded only). What is sent has radio IDs and plate-like tokens removed. Its answer backs the rules: it may push only
+when it agrees with the category the rules were unsure about, their own score is at least 0.5 and its confidence at
+least 0.8; anything else is held to `map` ("model: X?" on the card), never a push. Its place counts only if its words
+are in the transcript and the gazetteer finds them, and is never confirmed or over a confirmed one. Capped by
+`infer_daily_cap` (200 calls a day) and `infer_budget_usd` ($5 a month); a model with no known price is refused. Its
+log, `intel_infer` in `cad.sqlite`, is kept 90 days.
 
 Events, hits and feedback are in `cad.sqlite` and hold no transcript text, only transmission ids (`events.py`). Intel
-never writes incidents, radio links or alarms. Pending, not on main: listen links, deeper radio geolocation and
-an inference stage (PR #517), and replay / backtest tooling (PR #491).
+never writes incidents, radio links or alarms. Not on main: replay / backtest tooling (PR #491).
 
 ## Map and data layers
 
@@ -279,10 +307,13 @@ schedule per pull, in Settings.
 |---|---|
 | alerts | Emergency buttons, mayday, aircraft emergency squawks, airport pre-alerts, their acknowledgements and all clears |
 | status | Station health, Amazon Transcribe failing or over budget, hub error spikes, replica and takeover failures |
-| intel | Radio-intelligence pre-alerts. Falls back to the alerts topic until it has its own. |
+| intel | Radio-intelligence pre-alerts, with a Listen button. Falls back to the alerts topic until it has its own. |
 
-Topic names are secrets: set by env / SSM or Settings, shown to admins only, never logged or exported. The phone
-pre-alert's own topics are refused at three layers so sizeup can never page the crew by mistake.
+Topic names are secrets: set by env / SSM or Settings, shown to admins only, never logged or exported. sizeup never
+publishes to a **protected** topic: the set is derived, not listed in code (every topic the app subscribes to for the
+phone pre-alert, from env, Settings or config, plus extras an admin lists). It is refused in config, in Settings and by the
+Notifier before every request. If Settings can't be read, nothing is published (fail closed). The pre-alert topics and the
+protected list are in Settings > System > Push notifications; a retired pre-alert topic stays protected.
 
 ## Voice
 
@@ -343,7 +374,7 @@ Summary only. The detail, with the reasons, is in [`cloud.md`](cloud.md): "Deplo
 | Station link | A bearer token (constant-time compare) plus an Access service token. With no token configured the hub refuses every station call. |
 | Adapter credentials | The incident-source adapter and its credentials exist only on the station: systemd credentials, never environment variables (`sizeup/procenv.py`). A credential kept in SSM is read by the station's own IAM user; the hub never holds that key and its roles are denied the prefix (`cloud/adapterssm.py`). A failing adapter reports only the exception type. |
 | Context and police rows | Another system's rows, text, ids and audio are served only to a verified signed-in person (`sourcekeys.may_see_context`). The station's own page, all-in-one and a hub without Access serve none. Their words are never written to a log. |
-| Pushes | An intel push carries the category, town, address or block, time and level. Never transcript words, a talker, a radio ID, a plate or a person's name. A scrub checks the result and fails closed (`intel/push.py`). |
+| Pushes | An intel push carries the category, town, address or block, time and level. Never transcript words, a talker, a radio ID, a plate or a person's name. A scrub checks the result and fails closed (`intel/push.py`). Its Listen link is a presigned S3 URL with no sign-in: random key, expires in 20 min, removed by a one-day lifecycle rule on the `listen/` prefix, which a person sets up (`intel/listen.py`). |
 | Station logs | Read by a separate user with no network (`cloud/logread.py`), scrubbed on the station with its credential values, scrubbed again on the hub (`logscrub.py`, `cloud/logship.py`, `cloud/cwlogs.py`, [`station-logs.md`](station-logs.md)). |
 | Uploads | A site document's type is taken from its bytes. Photos lose their metadata. A PDF is cleaned and re-checked in a separate process. Documents are served only by the hub behind sign-in: no presigned links (`docfiles.py`, `pdfcheck.py`, `docstore.py`). |
 | Cross-site posts | The station and all-in-one refuse a POST a browser says came from another site (`web/server.py`). |
@@ -395,7 +426,7 @@ Packages:
 |---|---|
 | `sizeup/radio/` | Receivers and decoders: `fm`, `am`, `channelize`, `amtones`, `tones`, `page`, `livepage`, `tap`, `mdc1200`, `fleetsync`, `p25`, `recorder`, `trunkrecd`, `systems`, `probes`, `reception`, `live`, `sdr`, `sdrserial`, `claims`, `adsbd`, `aisd` |
 | `sizeup/cad/` | The CAD (see [the CAD](#the-cad)) |
-| `sizeup/intel/` | Radio intelligence: `rules`, `engine`, `events`, `model`, `place`, `policy`, `push`, `admin` |
+| `sizeup/intel/` | Radio intelligence: `rules`, `engine`, `events`, `model`, `place`, `policy`, `push`, `admin`, `infer`, `listen` |
 | `sizeup/sources/` | The incident-source adapter interface and the station's runner |
 | `sizeup/cloud/` | Hub and station: `hub`, `hubstore`, `station`, `client`, `outbox`, `autoupdate`, `configupdate`, `health`, `access`, `stationmode`, `adapters`, `adapterssm`, `aircraftlink`, `vessellink`, `logread`, `logship`, `cwlogs` |
 | `sizeup/geo/` | The gazetteer, page location, place and intersection search |
@@ -408,7 +439,7 @@ system is in `static/style.css`.
 
 **Stdlib-only programs.** `cloud/autoupdate.py`, `cloud/configupdate.py`, `cloud/logread.py`, `radio/adsbd.py`,
 `radio/aisd.py` and `radio/trunkrecd.py` run under the station's system Python. `pdfcheck.py` runs isolated on the hub.
-The hub image installs numpy plus the `docs` extra (pypdf, pypdfium2, Pillow); there is no boto3.
+The hub image installs numpy plus the `docs` extra (pypdf, pypdfium2, Pillow) and the `intel-llm` extra (the Anthropic SDK with boto3, pinned in `deploy/hub/constraints-intel-llm.txt`), used only by `intel/infer.py`. Nothing else uses boto3.
 
 ## Tests and tools
 
@@ -430,16 +461,15 @@ Not built, as the code says:
 - **Transmit.** Dispatch audio plays at the console only. There is no radio transmit path (`cad/transmit.py`).
 - **Rig AVL.** `Cad.positions` is a hook with no provider. Rig positions on the maps are estimates from status and
   routes.
+- **Inference and Listen need AWS set up by a person** (a Bedrock model grant, a `listen/` prefix with its lifecycle
+  rule). Inference is off until Settings turn it on; Listen shows "not configured" until the bucket accepts the upload.
 - **AIS receiver.** The decoder service exists; it is off until a dongle and antenna are installed.
 
 Open pull requests (2026-11-14):
 
 | PR | title |
 |---|---|
-| #519 | AWS vocabulary phrases without their hyphens; full department from the tones and the feed |
-| #517 | intel: Listen links, radiogeo depth and the inference stage onto main (#499, #502, #504) |
 | #491 | Radio intel PR 7: replay/backtest, STT eval, transcript corrections |
-| #485 | Rye Brook: out onto King St, back in through the PD lot (firehouse ingress via a lot) |
 | #475 | Store incident addresses normalised; matching keeps the source's text |
 | #471 | Incident sources: health hysteresis so a station restart never flips the primary |
 | #465 | Settings > Health: set the station adapter password from the hub (write-only) |

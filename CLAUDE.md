@@ -46,18 +46,18 @@ layer), `deploy/station/README.md`, `docs/ROADMAP.md`, `docs/cad-plan.md`. Work 
 | `sizeup/app.py` | the App: receivers -> STT -> state; the cloud seams (`_emit`, `_transcribed`, `make_app`); `main()` and the gated hub start |
 | `sizeup/config.py` | config loading (unknown keys refused); `config.example.toml`, `deploy/station/config.station.toml`, `deploy/hub/config.hub.toml` |
 | `sizeup/radio/` | SDRs (`sdr.py`, `sdrserial.py`), dongle claims (`claims.py`), FM and squelch (`fm.py`, `tap.py`), paging/tones, P25 (`p25.py`, `recorder.py`, `trunkrecd.py`), more P25 systems (`systems.py`), MDC/FleetSync, AM airband (`am.py`, `channelize.py`), ADS-B and AIS services (`adsbd.py`, `aisd.py`), the reception test (`reception.py`, `probes.py`) |
-| `sizeup/stt.py`, `transcribe.py`, `stt_vocab.py`, `sttcatchup.py`, `channels.py` | speech-to-text: the whisper queue, Amazon Transcribe (budgets, watchdog, breaker), vocabularies, shed clips caught up, per-channel engine choice |
+| `sizeup/stt.py`, `transcribe.py` (also `Display`: vocabulary phrases without AWS's hyphens), `stt_vocab.py`, `sttcatchup.py`, `channels.py` | speech-to-text: the whisper queue, Amazon Transcribe (budgets, watchdog, breaker), vocabularies, shed clips caught up, per-channel engine choice |
 | `sizeup/talkgroups.py`, `tiers.py`, `sourcekeys.py` | talkgroup switches, tiers of other P25 systems, one key per radio source and who may see context rows |
 | `sizeup/cad/` | the CAD: `store.py` (SQLite, `tx()`), `service.py`, `api.py`, dispatcher, run cards, alarms, settings, activity log, the airport |
 | `sizeup/cad/sources.py`, `automode.py`, `sizeup/sources/` | incident sources ranked and matched, dispatch modes, the station's adapter interface and runner |
 | `sizeup/cad/comms.py`, `radiolog.py`, `statushints.py` | the radio log (rows, links, change log, views), the per-incident radio log, status suggestions |
 | `sizeup/cad/history.py`, `premise.py`, `preplan.py`, `preplan_docs.py`, `sizeup/attachments.py` | address history and search, premise notes, pre-plan points, site documents, incident attachments |
 | `sizeup/cad/routes.py`, `mapview.py`, `sizeup/roadgraph.py` | rig positions and probable routes on the road graph |
-| `sizeup/intel/` | radio intelligence: rule packs (`data/intel/`), engine, events, place, push policy and the scrubbed push |
+| `sizeup/intel/` | radio intelligence: rule packs (`data/intel/`), engine, events, place (the locator: intersections, blocks, exits), push policy and the scrubbed push, `listen.py` (presigned Listen links), `infer.py` (the LLM stage on Bedrock: off by default, capped, backs the rules, never pushes alone) |
 | `sizeup/cloud/` | `station.py` (link), `outbox.py`, `hub.py`, `hubstore.py`, `autoupdate.py`, `configupdate.py`, `health.py`, `access.py`, `stationmode.py`, `adapters.py`, `adapterssm.py`, the station's logs (`logread.py`, `logship.py`, `cwlogs.py`), `aircraftlink.py`, `vessellink.py` |
 | `sizeup/handoff.py`, `leaderlock.py`, `fence.py`, `replicawatch.py` | the hub's hot/cold deploy supervisor, its S3 lock, the app's side of fencing, the replica checks and failure pushes |
 | `sizeup/audiostore.py`, `docstore.py`, `docfiles.py`, `pdfcheck.py`, `cachesync.py` | S3: clip audio, site documents and their checks, the map caches' copies |
-| `sizeup/notify.py`, `prealert.py`, `errwatch.py` | ntfy pushes (alerts, status, intel), the phone pre-alert (read only), the hub's error spikes |
+| `sizeup/notify.py`, `prealert.py`, `errwatch.py` | ntfy pushes (alerts, status, intel), the phone pre-alert (read only; its topics are in Settings, not the repo), the protected-topic set (derived, fails closed), the hub's error spikes |
 | `sizeup/dispatch.py`, `polly.py`, `tts.py`, `tts_server.py` | page parsing; the dispatch voice (Amazon Polly, Kokoro) |
 | `sizeup/geo/`, `gis.py`, `roads.py`, `roadprojects.py`, `dvr.py` | gazetteer and geocoding, county GIS layers, highway layers and cameras, road closures, the camera DVR |
 | `sizeup/aircraft.py`, `atc*.py`, `airport_watch.py`, `trains.py`, `traintime.py`, `railassets.py`, `vessels.py`, `weather.py` | map layers, ATC transcription and airport watches |

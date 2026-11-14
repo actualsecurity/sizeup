@@ -1155,11 +1155,19 @@ Incidents come in from ranked sources. The interface is in `sizeup/sources/__ini
 - **Units added later (#370):** when an incident gains units (the feed lists them, the radio or a person puts them on),
   the radio log is matched again for those units from its dispatch (the feed's dispatched time, else the page's, else
   when it was made) less a minute, on a worker. Every guard holds; nothing is linked twice.
-- **Full department or specific units (#370, `sizeup/cad/scope.py`):** the page sets it first (its departments' tones
-  and a call type: "Full department (<dept>)"; apparatus named: "Specific units"). The page is the dispatch: its
-  reading stands on every path, and the latest page wins (an upgrade to the full department widens the radio log's
-  backfill to every unit from the call's dispatch). The feed's unit list is the label only when no page was heard; a
-  disagreement is one timeline line ("Page: all PCFD · feed: units"). A feed's department entries are configured on the hub
+- **Full department or specific units (#370, `sizeup/cad/scope.py`):** the page sets it first. Apparatus named:
+  "Specific units". None named: "Full department (<dept>)" for each department whose tones were heard, when the page
+  gives a call type or says "full department" (as speech-to-text hears it too: "full of pots"), or, with neither, when
+  the tones are a department's own all-call and the words hold a place and nothing of a test, meeting or advisory. The
+  page is the dispatch: its reading stands on every path, and the latest page wins (an upgrade to the full department
+  widens the radio log's backfill to every unit from the call's dispatch). The feed's reading is the label only when
+  the page gave none: a department entry on its unit list, a department's placeholder with no apparatus listed, or a
+  comment that is a line of the dispatch and says so ("full department", "all companies"). Apparatus the page named is
+  never overridden; a disagreement is one timeline line ("Page: all PCFD · feed: units").
+- **Call type from the other source.** A feed incident with no type of ours, whose type field gives none, takes one from
+  a comment that is a type line (marked `~` or the first comment, at most 5 words, none that takes it back such as
+  "not", "cancel", "hold"; `sources.dispatch_lines`), never over a type already set; failing that, the page's type
+  fills in until the feed says one (`Cad._page_enrich`). The feed's own type field still wins. A feed's department entries are configured on the hub
   (`POST /api/cad/settings/department_units {action: set, key: <code>, value: <department>}`, admins; never in the
   repo). They are never a unit: never dispatched (the timeline says "<dept> paged"; our department's accepts the call)
   and never a unit in common between two reports.
@@ -2778,19 +2786,22 @@ events**: what police or fire chatter said is happening, and where. It runs on t
 all-in-one; a station forwarding to a hub queues nothing), on its own `intel` thread, on the leader only. Intel
 never writes incidents, radio links, "possible incoming" or alarms.
 
-**In this tree:** the rule engine, the event store, the place reading, the push policy and composer, Settings and
-the console's card. **Not in this tree yet** (planned): a "Listen" link on the push, a map layer over the events API,
-and model inference behind the rules. sizeup-aws `26-intel-bedrock.sh` and `27-listen-links.sh` prepare AWS for
-those; nothing in this tree uses them.
+**In this tree:** the rule engine, the event store, the place reading (spoken intersections, blocks, relative cues,
+highway exits and markers), the push policy and composer, the Listen link, the inference stage, Settings and the
+console's card. **Not in this tree yet** (planned): a map layer over the events API, replay / backtest (PR #491).
+sizeup-aws `26-intel-bedrock.sh` and `27-listen-links.sh` prepare AWS for inference and Listen; both are run by a
+person ([Listen](#listen-links-and-inference-intel) below).
 
 | Part | File | What |
 |---|---|---|
 | Packs | `data/intel/*.json` (`police.json`: 11 categories, 17 rules; generic phrases only), Settings laid over them | which sources a pack reads (source keys or globs, services), its categories (label, priority, time to live, mode), phrase rules with weights, "suppress" phrases ("disregard", "training") |
 | Engine | `engine.py` | a row joins its source's window (`window_s`, 120); per category the rules' weights combine (noisy-OR, dampers); at the threshold (0.6) it is an event: the open one of that pack, category and source, or the one at the same place, else a new one |
-| Place | `place.py` | the window's words through the page locator, held to the source's home towns, after callsigns, car numbers, 10-codes, plates and times are taken out. Precision: address, intersection, landmark or street; unconfirmed is never exact |
+| Place | `place.py` | the window's words through the page locator, held to the source's home towns, after callsigns, car numbers, 10-codes, plates and times are taken out. Also "X and Y" / "corner of" through the intersection search, "the 100 block of X", "rear of / across from" (radius widened), highway exits and mile markers (the place search), and a headquarters callsign said alone narrows to its town. Police text confirms at a higher score than a page (`DOMAIN_PARAMS`). An address confirms by its cross street only within `corner_m` (200 m) of where they meet; a number far from the corner is taken as misheard. Precision: address, intersection, block, landmark or street; unconfirmed is never exact |
 | Policy | `policy.py` | whether a change is pushed: the mode ladder, the kill switch, quiet hours, the caps (below) |
 | Push | `push.py` | composed from an allow-list of fields, then scrubbed, failing closed |
-| Store | `events.py` | `intel_events` (90 days), `intel_hits` (every hit, 30 days), `intel_feedback` (a year) in `cad.sqlite`: no transcript text, transmissions by id |
+| Listen | `listen.py` | a link in the push to the audio around it ([below](#listen-links-and-inference-intel)) |
+| Inference | `infer.py` | an LLM behind the rules, off by default, capped ([below](#listen-links-and-inference-intel)) |
+| Store | `events.py` | `intel_events` (90 days), `intel_hits` (every hit, 30 days), `intel_feedback` (a year) in `cad.sqlite`: no transcript text, transmissions by id. `intel_infer` (90 days, made on first use by the leader) holds the model's calls |
 | Settings, API, card | `admin.py`, `static/intel.js` | Settings > System > Intel; the 60 Control column's card |
 
 **How it is fed (the context text hook, #483).** `Comms.record()` and `Comms.retext()` tell one of two hooks once
@@ -2823,7 +2834,8 @@ alerts'): title "PD · Smoke / fire reported · *town*"; body the gazetteer's ad
 the street and block with "(unconfirmed)", else "location not heard", then the time and the level (low, medium,
 high). Never in it: transcript words, a talker, a radio ID, a plate, a date of birth, a person's name; a push that
 fails the scrub is not sent (suppressed "scrub", logged without the text). It opens
-`<public url>/radio?view=police&intel=<id>`, behind Cloudflare Access.
+`<public url>/radio?view=police&intel=<id>`, behind Cloudflare Access. With Listen on, the body ends with
+`Listen: <url>` and the push has a "Listen" button (ntfy `view` action, https only).
 
 **Who sees it:** everyone signed in with a verified sign-in (`sourcekeys.may_see_context`, as for context traffic);
 no one on a station page, an all-in-one or a hub without Access.
@@ -2838,6 +2850,38 @@ no one on a station page, an all-in-one or a hub without Access.
 
 The console's card (the 60 Control column): one row per open event at `map` or `push`: category and town, the place
 (a hollow "?" when unconfirmed), play its clips, Useful / Noise, Dismiss. Tests: `tests/test_intel.py`.
+
+### Listen links and inference (intel)
+
+**Listen** (`sizeup/intel/listen.py`; #499). The transmissions of the event, plus every transmission on the same source
+from `listen_before_s` (45) before the first to `listen_after_s` (60) after the last, oldest first with a short gap
+between, stitched into one mono file: AAC in M4A at `listen_kbps` (24) when ffmpeg is there, else 8 kHz 16-bit WAV
+(the hub image has no ffmpeg; about 1 MB a minute). Sources that are record-only, encrypted or activity tier are
+never included, nor a row whose audio is gone.
+
+| | |
+|---|---|
+| Where | the audio bucket (`SIZEUP_AUDIO_BUCKET`), prefix `listen/`, key `listen/<32 random characters>.<ext>`, no metadata. The task role needs Put / Get on `listen/*`; a one-day lifecycle rule removes the objects (`sizeup-aws/27-listen-links.sh`, run by a person) |
+| Link | a presigned GET, valid `listen_expiry_min` (20), **with no sign-in**: the key is unguessable and short-lived. Signed with credentials that outlive it |
+| Updates | while the after-window is open (and 3 min more, transcripts come late) the file is stitched again under the same key whenever the set of transmissions changes, so the link already on a phone plays the newest |
+| Failure | never delays the push (stitching and upload are on the `listen` thread). A 403 (the grant isn't there) shows "not configured" and is retried after an hour; anything else after a minute. No bucket: off |
+| Settings | System > Intel: Listen on / off, minutes, seconds before and after, kbps (`listen`, `listen_expiry_min`, `listen_before_s`, `listen_after_s`, `listen_kbps`) |
+
+**Inference** (`sizeup/intel/infer.py`; #504). Off by default (`infer`, Settings > System > Intel). The rules decide
+first; the model is asked only where they are unsure: a category scoring between `infer_low` (0.3) and its threshold, an
+event whose place is unheard or unconfirmed (at most once per 10 min per event), or a sample (`infer_sample_pct`,
+default 0: asked and recorded, never acted on). It runs on the `infer` thread with a 12 s timeout and no retries, so it
+never holds the engine; a failure is logged by type and the rules carry on.
+
+| | |
+|---|---|
+| Provider | `bedrock`: Amazon Bedrock in the department's own AWS account, through the Anthropic SDK with the hub task role; `infer_model` (default `anthropic.claude-haiku-5-5`), `infer_region` (`us-east-1`). The SDK and boto3 are the image's `intel-llm` extra, pinned in `deploy/hub/constraints-intel-llm.txt`. AWS side: `sizeup-aws/26-intel-bedrock.sh`, run by a person |
+| Sent | the window's transcript (at most 4,000 characters) with radio IDs (6+ digits) and plate-like tokens taken out, the pack's category names and the source's towns. Never talkers or aliases |
+| Category | one more hit, rule `infer.<provider>`, weight confidence x `infer_weight` (0.6). It may push only when it **agrees** with the category the rules were unsure about, their own score is at least `infer_agree_min` (0.5), its confidence at least `infer_agree_conf` (0.8) and `infer_agree_push` is on. Otherwise (a category it alone brings, a stronger one than the rules') it is held to `infer_alone_mode` (`map`): the card shows "model: MVA with injuries?", no push |
+| Place | only if its street words are in the transcript and the gazetteer finds them; always unconfirmed (street and block in the push, never a house number it gave); never over a place the rules confirmed |
+| Summary | kept in `intel_infer` for the console and evaluation; never in a push |
+| Cost | `infer_daily_cap` (200 calls a day) and `infer_budget_usd` ($5 a month), counted from the tokens each call reports at the model's price (known ids in `infer.PRICES`; for another id set `infer_usd_in` / `infer_usd_out` first, or Settings refuses the model). Roughly $0.0003 a call on Haiku, so a full day of calls is about $2 a month |
+| Status | the Settings row shows ready / held / off, calls today and spend this month |
 
 ## Pre-plan points and site documents (#456, #459)
 
@@ -3570,8 +3614,8 @@ account's own values). Each is run by hand, once unless noted, and is safe to ru
 | 22 | `22-preplan-docs.sh` | changes nothing: checks the backups bucket is fit for site documents | [Pre-plan points and site documents](#pre-plan-points-and-site-documents-456-459) |
 | 23 | `23-deploy-ssm-describe.sh` | `ssm:DescribeParameters` for the deploy role | [the deploy's SSM guard](#a-deploy-that-checks-itself) |
 | 25 | `25-station-logs.sh` | the log group `/sizeup/station`, the task role's policy | [Station logs](#station-logs-cloudwatch) |
-| 26 | `26-intel-bedrock.sh` | a model grant for pre-alert inference | not used by this tree yet ([Radio pre-alerts](#radio-pre-alerts-intel)) |
-| 27 | `27-listen-links.sh` | a `listen/` prefix in the audio bucket for the push's Listen link | not used by this tree yet |
+| 26 | `26-intel-bedrock.sh` | a model grant for pre-alert inference | [Listen links and inference](#listen-links-and-inference-intel); inference stays off until Settings turn it on |
+| 27 | `27-listen-links.sh` | a `listen/` prefix in the audio bucket, with a one-day lifecycle rule, for the push's Listen link | [Listen links and inference](#listen-links-and-inference-intel) |
 | 28 | `28-replica-watch.sh` | the deploy role may read `replica-watch.json`; metric filters and alarms for a bad replica and task churn | [Replica checks](#replica-checks) |
 
 Also there: `status.sh` (read-only: where the setup stands) and `env.sh` (the names the steps share). A step that adds a
