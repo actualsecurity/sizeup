@@ -422,7 +422,7 @@ def test_v10_migrates_an_old_database_keeping_every_edit(tmp_path):
     st._v9_to_v10(st.db)
     st.db.execute("COMMIT")
     assert dump(st.db) == h
-    st.db.close()
+    st.shutdown()
     again = make_cad(tmp_path)
     assert again.store.migrated == [] and dump(again.store.db) == h
 

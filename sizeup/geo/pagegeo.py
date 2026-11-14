@@ -426,9 +426,12 @@ class PageLocator:
 
     # ------------------------------------------------------------------ the page
 
-    def locate(self, text: str, home=()) -> PageGeo:
+    def locate(self, text: str, home=(), params: dict | None = None) -> PageGeo:
         """Every reading of the page's location, best first, and whether the best one is confirmed. home: the towns
-        of the page's tones (``home_towns``); none = no jurisdiction to hold it to (the gazetteer's town order)."""
+        of the page's tones (``home_towns``); none = no jurisdiction to hold it to (the gazetteer's town order).
+        params: another domain's thresholds {confirm, rival, rival_m, sound_min} (radio pre-alerts, sizeup/intel/place.py);
+        none: this module's (CONFIRM, RIVAL, RIVAL_M, SOUND_MIN), as pages have always used."""
+        prm = {"confirm": CONFIRM, "rival": RIVAL, "rival_m": RIVAL_M, "sound_min": SOUND_MIN, **(params or {})}
         gaz = self.gaz
         tokens = tokenize(text or "")
         mentions = gaz._street_mentions(tokens)
@@ -512,7 +515,7 @@ class PageLocator:
                 for sid in pool:
                     if sid not in cands:
                         s = self._name_sim(heard, sid, True)
-                        if s >= SOUND_MIN:
+                        if s >= prm["sound_min"]:
                             offer(sid, s, "sound-alike")
             for sid in cross_streets:
                 if sid not in cands:
@@ -606,11 +609,12 @@ class PageLocator:
                 alts.append(r)
             if len(alts) == 4:
                 break
-        ok, why = self._confirm(best, rest, groups)
+        ok, why = self._confirm(best, rest, groups, prm)
         return PageGeo(best, ok, alts, crosses_heard, why)
 
     @staticmethod
-    def _confirm(b: Reading, rest: list[Reading], groups) -> tuple[bool, str]:
+    def _confirm(b: Reading, rest: list[Reading], groups, prm: dict | None = None) -> tuple[bool, str]:
+        prm = prm or {"confirm": CONFIRM, "rival": RIVAL, "rival_m": RIVAL_M}
         exact = b.match.precision in ("exact", "interpolated")
         if not b.allowed:
             return False, f"{b.match.municipality} is not this page's town"
@@ -630,12 +634,12 @@ class PageLocator:
             if unclear:
                 return False, "the street name was not clear and no cross street was said"
             return False, "the house number is not on that street and no cross street was said"
-        if b.score < CONFIRM:
+        if b.score < prm["confirm"]:
             return False, f"low confidence ({b.score:.2f})"
         for r in rest:
-            if r.score < b.score - RIVAL:
+            if r.score < b.score - prm["rival"]:
                 break
-            if _dist(r.match.lat, r.match.lon, b.match.lat, b.match.lon) > RIVAL_M:
+            if _dist(r.match.lat, r.match.lon, b.match.lat, b.match.lon) > prm["rival_m"]:
                 return False, f"two readings fit: {b.match.label} and {r.match.label}"
         return True, ""
 

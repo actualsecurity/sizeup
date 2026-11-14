@@ -346,7 +346,7 @@ def test_a_rig_just_made_active_is_full_for_a_minute(tmp_path):
     dot; an idle rig just set (E60) stays in its badge. When E63's minute runs out it is laid out again: a dot."""
     data = page_state()
     import time as _t
-    now = _t.time()
+    now = data["now"] = _t.time()                    # (the page's clock starts here: the 50 s below are 50 s)
     for m in data["map"]["markers"]:
         m["status_at"] = {"E63": now - 10, "E60": now - 5}.get(m["unit"], now - 3600)
     o = run(tmp_path, SNAP + r"""

@@ -7,6 +7,8 @@ No radios, no network. Every transmission, unit, talkgroup number and address he
 from __future__ import annotations
 
 import json
+import re
+import time
 
 import pytest
 
@@ -15,6 +17,7 @@ from sizeup.cad.api import CadApi
 from sizeup.cad.comms import CHANGES_MAX, KEEP_UNLINKED_S, PAGE, PAGE_MAX
 from sizeup.cad.service import CadError
 from sizeup.cloud.access import Identity
+from tests.test_comms_changes import entry
 from tests.test_radios import Clock, _event_with, cad, tx
 
 PD, TRANSIT, MAIN = 9001, 9002, 307
@@ -37,6 +40,7 @@ def c(tmp_path):
     c = cad(tmp_path, clock, airband=("Tower",))
     c.clockref = clock
     c.comms.context_broadcast = True          # as on the hub behind Access: every reader is a signed-in person (#419)
+    c.radiolog.inline = True                  # (the units backfill on the test's thread: no write lands mid-test)
     t = clock.t
     c.record_traffic(tx("fg-1", t - 50, rig="E63", radio_id="4242098"))
     c.record_traffic(dict(tx(f"{MAIN}-1-call_1-t0", t - 40, "Fire/EMS 15", "E60", "E60", MAIN), ours=True, service="fire",
@@ -206,8 +210,13 @@ def test_changed_gives_everything_that_changed_since_the_cursor(c):
     for i in range(CHANGES_MAX + 5):
         c.record_traffic(other(f"burst-{i}", c.clockref.t + 2))
     assert q(c, view="police", changed=cur)["reload"] is True
-    assert q(c, view="police", changed=cur + 10 ** 9)["reload"] is True
-    c.store.db.execute("DELETE FROM radio_changes WHERE seq <= ?", (cur + 50,))
+    assert q(c, view="police", changed=c.comms.cursor(entry(cur) + 10 ** 9, True))["reload"] is True
+    import sizeup.cad.comms as comms_mod                        # older than what is kept: trimmed past it
+    kept, comms_mod.CHANGES_KEPT = comms_mod.CHANGES_KEPT, 50
+    try:
+        c.comms._trim_changes()
+    finally:
+        comms_mod.CHANGES_KEPT = kept
     assert q(c, view="police", changed=cur)["reload"] is True
 
 
@@ -299,9 +308,20 @@ def test_every_view_walks_an_index(c):
     assert "PRIMARY KEY" in " ".join(str(r[3]) for r in c.store.db.execute(
         "EXPLAIN QUERY PLAN SELECT DISTINCT traffic_id FROM radio_changes WHERE seq > ? AND seq <= ?", (1, 2)))
     gated = " ".join(str(r[3]) for r in c.store.db.execute(
-        "EXPLAIN QUERY PLAN SELECT DISTINCT c.traffic_id FROM radio_changes c WHERE c.seq > ? AND c.seq <= ? AND c.system IN ('') "
-        "AND NOT EXISTS (SELECT 1 FROM radio_changes x WHERE x.traffic_id = c.traffic_id AND x.system IS NULL)", (1, 2)))
-    assert "radio_changes_system" in gated and "radio_changes_id" in gated      # the gate on changes: by system and seq, then by id
+        "EXPLAIN QUERY PLAN SELECT DISTINCT c.traffic_id FROM radio_changes c WHERE c.oseq > ? AND c.oseq <= ? "
+        "AND NOT EXISTS (SELECT 1 FROM radio_changes x WHERE x.traffic_id = c.traffic_id AND x.oseq IS NULL)", (1, 2)))
+    assert "radio_changes_oseq" in gated and "radio_changes_id" in gated        # the gate on changes: by oseq, then by id
+    # oseq's index is partial (an older log's entries, all NULL, aren't in it: the upgrade writes next to nothing), so
+    # every newest-oseq read says oseq IS NOT NULL to use it
+    import sizeup.cad.comms as comms_mod
+    assert "WHERE oseq IS NOT NULL" in c.store.one("SELECT sql FROM sqlite_master WHERE name = 'radio_changes_oseq'")["sql"]
+    assert "(SELECT IFNULL(MAX(oseq), 0) + 1 FROM radio_changes WHERE oseq IS NOT NULL)" in comms_mod.INSERT_CHANGE
+    for sql, args in ((comms_mod.TOPS, ()), ("SELECT MAX(oseq) AS hi FROM radio_changes WHERE oseq IS NOT NULL", ()),
+                      ("SELECT IFNULL(MAX(oseq), 0) + 1 FROM radio_changes WHERE oseq IS NOT NULL", ()),
+                      ("SELECT seq, oseq FROM radio_changes WHERE oseq <= (SELECT MAX(oseq) FROM radio_changes WHERE oseq IS "
+                       "NOT NULL) - ? ORDER BY oseq DESC LIMIT 1", (5,))):
+        plan = " ".join(str(r[3]) for r in c.store.db.execute("EXPLAIN QUERY PLAN " + sql, args))
+        assert "radio_changes_oseq" in plan and "SCAN radio_changes" not in plan, (sql, plan)
     assert "radio_activity_minute" in " ".join(str(r[3]) for r in c.store.db.execute(
         "EXPLAIN QUERY PLAN SELECT source, minute, calls FROM radio_activity WHERE minute > ? AND minute <= ?", (1, 2)))
 
@@ -369,10 +389,12 @@ def test_a_reader_who_may_not_see_another_system_is_told_nothing_of_its_changes(
     api, who = CadApi(c), Identity(email="someone@example.org")
 
     def changed(view, cursor, w=None):
+        if cursor is None:                                      # everything since this start, in this reader's sequence
+            cursor = c.comms.cursor(c.comms.changes_floor, True) if w else c.comms.cursor(c.comms.changes_floor_o, False)
         code, raw, _ = api.get("/api/cad/comms", f"view={view}&changed={cursor}", w)
         assert code == 200
         return json.loads(raw)
-    start = c.comms.changes_floor                            # everything since this start
+    start = None
     for view in ("all", "ours", "police"):
         out = changed(view, start)                              # ... for nobody signed in
         blob = json.dumps(out)
@@ -381,7 +403,7 @@ def test_a_reader_who_may_not_see_another_system_is_told_nothing_of_its_changes(
     assert sorted(changed("all", start)["gone"] + ids(changed("all", start))) == sorted(["555-1-call_2-t0", f"{MAIN}-1-call_1-t0", "fg-1", "twr-1"])
     seen = changed("ours", start, who)
     assert {"pd-1", "pd-2", "tr-1"} <= set(seen["gone"])       # a signed-in reader: off this view, by id
-    cur = changed("all", start)["cursor"]
+    cur, cur_s = changed("all", start)["cursor"], changed("all", start, who)["cursor"]
     # a context row's transcript, a link on it, its deletion: nothing, for any view
     inc = _event_with(c, ["E63"], c.clockref)
     c.comms.retext("pd-1", "changed words", "done")
@@ -392,12 +414,13 @@ def test_a_reader_who_may_not_see_another_system_is_told_nothing_of_its_changes(
     for view in ("all", "ours", "police"):
         out = changed(view, cur)
         assert out["rows"] == [] and out["gone"] == [] and out["reload"] is False, view
-    assert sorted(changed("all", cur, who)["gone"]) == ["tr-1"] and sorted(ids(changed("all", cur, who))) == ["pd-1", "pd-2"]
+    assert sorted(changed("all", cur_s, who)["gone"]) == ["tr-1"] and sorted(ids(changed("all", cur_s, who))) == ["pd-1", "pd-2"]
+    assert changed("all", cur, who)["reload"] is True and changed("all", cur_s)["reload"] is True     # the other's sequence
     # so many context changes that a signed-in reader is told to reload: nobody else is
-    cur = changed("all", start)["cursor"]
+    cur, cur_s = changed("all", start)["cursor"], changed("all", start, who)["cursor"]
     for i in range(CHANGES_MAX + 5):
         c.record_traffic(other(f"burst-{i}", c.clockref.t + 2))
-    assert changed("all", cur, who)["reload"] is True
+    assert changed("all", cur_s, who)["reload"] is True
     assert changed("all", cur) == {**changed("all", cur), "rows": [], "gone": [], "reload": False}
 
 
@@ -466,8 +489,9 @@ def test_every_filter_and_the_tree_tell_a_reader_who_is_not_signed_in_nothing_of
             f"source=p25:metro:{PD}", f"source=p25:metro:{PD},p25:metro:{TRANSIT}", "view=all&safety=1",
             f"view=all&mute=p25:metro:{TRANSIT}", "view=police&q=kite", "service=police&tier=text&dept=South+PD",
             f"view=police&before={signed['next']}", f"view=all&before={signed['next']}", f"view=police&at={int(t)}",
-            f"view=all&at={int(t - 20)}&limit=3", f"view=police&changed={c.comms.changes_floor}",
-            f"view=all&changed={c.comms.changes_floor}", f"view=all&event={c.store.incident(inc['id'])['number']}"]
+            f"view=all&at={int(t - 20)}&limit=3", f"view=police&changed={c.comms.cursor(c.comms.changes_floor_o, False)}",
+            f"view=all&changed={c.comms.cursor(c.comms.changes_floor_o, False)}",
+            f"view=all&changed={c.comms.cursor(c.comms.changes_floor, True)}", f"view=all&event={c.store.incident(inc['id'])['number']}"]
     for query in asks:
         blob = json.dumps(get("/api/cad/comms", query))
         assert not [n for n in needles if n in blob], (query, [n for n in needles if n in blob])
@@ -490,7 +514,7 @@ def test_every_filter_and_the_tree_tell_a_reader_who_is_not_signed_in_nothing_of
     assert ids(get("/api/cad/comms", "tier=record", who)) == ["tr-1"]
     assert ids(get("/api/cad/comms", "dept=South+PD", who)) == ["pd-9", "pd-2"]
     assert ids(get("/api/cad/comms", f"view=police&before={signed['next']}", who)) == ["pd-2", "pd-1"]
-    assert "pd-9" in ids(get("/api/cad/comms", f"view=police&changed={c.comms.changes_floor}", who))
+    assert "pd-9" in ids(get("/api/cad/comms", f"view=police&changed={c.comms.cursor(c.comms.changes_floor, True)}", who))
     assert inc["id"] in [e["id"] for e in get("/api/cad/comms", "view=all", who)["events"]]
     by = {s["key"]: s for s in get("/api/cad/comms/sources", "", who)["sources"]}
     pd = by[f"p25:metro:{PD}"]
@@ -519,3 +543,239 @@ def test_main_s_batched_prune_notes_each_row_gone_and_a_big_clear_out_as_one_res
     assert c.comms.prune() >= 6
     assert q(c, view="ours", changed=cur)["reload"] is True
     assert c.store.one("SELECT COUNT(*) AS n FROM radio_changes WHERE traffic_id = 'reset'")["n"] >= 1
+
+
+def test_no_answer_to_any_cursor_of_a_reader_not_signed_in_moves_with_another_systems_traffic(c):
+    """#441 review blocker: the change cursor was an oracle (changed=cursor+k said reload exactly past the newest entry
+    of ANY system, so it counted another system's transmissions and, polled, timed them). Now such a reader's cursor,
+    its bounds and the trim are all in oseq: every answer, for every k, is the same before and after."""
+    api = CadApi(c)
+
+    def get(query):
+        code, raw, _ = api.get("/api/cad/comms", query, None)
+        assert code == 200
+        return json.loads(raw)
+
+    def answers():
+        first = get("view=ours")
+        cur = first["cursor"]
+        return [first["cursor"], first["rev"], get("view=all")["cursor"]] + [
+            get(f"view={v}&changed={c.comms.cursor(entry(cur) + k, False)}") for v in ("ours", "all", "police")
+            for k in range(-3, 40)]
+    before = answers()
+    t = c.clockref.t
+    for i in range(25):                                         # another system: rows, a transcript, key-ups, a prune
+        c.record_traffic(other(f"pd-n{i}", t + 100 + i, text="made-up words"))
+    c.comms.retext("pd-n0", "other made-up words", "done")
+    c.comms.activity("p25:metro:9003", int(t // 60), 6, ["4100031"])
+    assert answers() == before
+    c.record_traffic(tx("fg-z", t + 200, rig="E63"))            # one of ours: the cursor moves by one entry, no more
+    after = get("view=ours")
+    assert entry(after["cursor"]) == entry(before[0]) + 1 and after["rev"] != before[1]
+    assert ids(get(f"view=ours&changed={before[0]}")) == ["fg-z"]
+
+
+def test_an_incident_edit_moves_the_rev_of_a_reader_not_signed_in(c):
+    """Rows carry their incidents' number, type, address and status: an edit moves every reader's rev (the station
+    board asks again), and the row comes back with the new address."""
+    inc = _event_with(c, ["E63"], c.clockref)
+    c.record_traffic(tx("fg-a", c.clockref.t + 1, rig="E63", radio_id="4242098"))
+    api = CadApi(c)
+    get = lambda q: json.loads(api.get("/api/cad/comms", q, None)[1])     # noqa: E731
+    pushed = lambda: c.state()["comms_rev"]                               # noqa: E731
+    c.comms.context_broadcast = False                                     # the station's own page
+
+    def settled():
+        """The dispatch's own background work (the voice queue) done: a GET and the push agree on one rev."""
+        c.voice.wait(10)
+        for _ in range(100):
+            got = get("type=radio")
+            if pushed() == got["rev"]:
+                return got
+            time.sleep(0.05)
+        raise AssertionError("the rev never settled")
+    first = settled()
+    c.update(inc["id"], {"address": "1 Invented Way", "operator": "Lt. Sample"})
+    again = get(f"type=radio&rev={first['rev']}")
+    assert "unchanged" not in again and again["rev"] != first["rev"]
+    assert settled()["rev"] != first["rev"]                               # the push moved with it
+    row = next(r for r in again["rows"] if r["id"] == "fg-a")
+    assert [e["address"] for e in row["events"]] == ["1 Invented Way"]
+
+
+def test_a_reader_not_signed_in_walks_none_of_another_systems_rows(c):
+    """A view, service, group or tier with no source of ours answers without walking the rows it can't have (how
+    long it took would tell how many there are): no query reads radio_traffic's rows."""
+    api = CadApi(c)
+    c.comms.sources_seen()                                      # (the per-rev source list: warm, as any page has it)
+    seen = []
+    c.store.db.set_trace_callback(seen.append)
+    try:
+        for query in ("view=police", "service=police", "view=transit", "group=Police", "group=Transit", "tier=text",
+                      "tier=record", "system=metro", f"source=p25:metro:{PD}", "service=police&tier=text"):
+            del seen[:]
+            code, raw, _ = api.get("/api/cad/comms", query, None)
+            assert code == 200 and json.loads(raw)["rows"] == [], query
+            walks = [s for s in seen if re.search(r"FROM (json_each\(\?\) j CROSS JOIN )?radio_traffic t\b", s)]
+            assert walks == [], (query, walks)
+        # a department is a row's own: walked along our sources only (never radio_traffic_dept_start, which holds
+        # another system's rows of it too)
+        for query in ("dept=South+PD", "dept=North+PD", "view=all&dept=South+PD"):
+            del seen[:]
+            code, raw, _ = api.get("/api/cad/comms", query, None)
+            assert code == 200 and json.loads(raw)["rows"] == [], query
+            walks = [x for x in seen if re.search(r"FROM radio_traffic t\b", x)]
+            assert walks and all("t.source = " in x for x in walks), (query, walks)
+            plans = " ".join(str(r[3]) for x in walks for r in c.store.db.execute("EXPLAIN QUERY PLAN " + x))
+            assert "radio_traffic_dept_start" not in plans and "radio_traffic_source_start" in plans, (query, plans)
+    finally:
+        c.store.db.set_trace_callback(None)
+    # signed in: the same asks do read them
+    who = Identity(email="someone@example.org")
+    assert ids(json.loads(api.get("/api/cad/comms", "group=Police", who)[1])) == ["pd-2", "pd-1"]
+    assert ids(json.loads(api.get("/api/cad/comms", "dept=South+PD", who)[1])) == ["pd-2"]
+
+
+def test_a_cursor_from_before_a_start_is_told_to_reload(c, tmp_path):
+    """The log's seq outlives a restart, so a page held across one would be answered from it, missing what ran at the
+    start (the migrations' rewrites, the alarms' retention) and any entry the run before couldn't write: the floor is
+    the log's newest entry at the start (read only: a start writes nothing)."""
+    cur = q(c, view="ours")["cursor"]
+    with sourcekeys.request_context(None):
+        anon = q(c, view="ours")["cursor"]
+    c.record_traffic(tx("fg-late", c.clockref.t + 1, rig="E63"))        # logged before the stop
+    last = q(c, view="ours")["cursor"]                                   # ... and a cursor at the very last entry
+    c.store.db.close()
+    again = cad(tmp_path, c.clockref, airband=("Tower",))
+    again.comms.context_broadcast = True
+    assert q(again, view="ours", changed=cur)["reload"] is True
+    assert q(again, view="ours", changed=last)["reload"] is True         # at the floor itself: another run's
+    with sourcekeys.request_context(None):
+        assert q(again, view="ours", changed=anon)["reload"] is True
+        fresh_anon = q(again, view="ours")["cursor"]
+    fresh = q(again, view="ours")["cursor"]
+    again.record_traffic(tx("fg-after", c.clockref.t + 5, rig="E63"))
+    out = q(again, view="ours", changed=fresh)
+    assert out["reload"] is False and ids(out) == ["fg-after"]
+    with sourcekeys.request_context(None):
+        out = q(again, view="ours", changed=fresh_anon)
+        assert out["reload"] is False and ids(out) == ["fg-after"]
+
+
+def test_fire_channels_of_ours_are_never_muted(c):
+    """Fire channels can't be muted: Our calls, and any fire source of ours (a county fire talkgroup not marked Main),
+    in All too; the tree says which can't (mutable false)."""
+    t = c.clockref.t
+    c.record_traffic(dict(tx("7001-1-call_7-t0", t - 2, "Fire Ops 9", tg=7001), service="fire", group="Fire"))
+    out = q(c, view="all", mute="p25:westchester:7001,p25:westchester:555,fm:FG1")
+    assert "7001-1-call_7-t0" in ids(out) and "fg-1" in ids(out) and "555-1-call_2-t0" not in ids(out)
+    by = {s["key"]: s for s in c.comms_sources()["sources"]}
+    assert by["p25:westchester:7001"]["mutable"] is False and by["fm:FG1"]["mutable"] is False
+    assert by["p25:westchester:555"]["mutable"] is True and by[f"p25:metro:{PD}"]["mutable"] is True
+
+
+def test_the_state_push_tells_who_is_talking_through_the_same_gate(c):
+    c.live = lambda: [{"system": "p25", "tg": MAIN, "channel": "Fire/EMS 15"},
+                      {"system": "p25", "tg": PD, "p25_system": "metro", "channel": "PD Dispatch", "rig": "Car 7"}]
+    c.comms.context_broadcast = False                          # the station's own page, an all-in-one
+    assert [e["channel"] for e in c.state()["talking"]] == ["Fire/EMS 15"]
+    with sourcekeys.request_context(Identity(email="someone@example.org")):
+        assert len(c.state()["talking"]) == 2
+
+
+def test_cursors_say_their_sequence_and_run(c):
+    """A cursor is "s<seq>-<run>" for a reader who may see everything, "o<oseq>-<run>" for one who may not: one from the
+    other sequence, another run, or none of these is told to reload (never answered from a different count)."""
+    signed = q(c, view="ours")["cursor"]
+    with sourcekeys.request_context(None):
+        anon = q(c, view="ours")["cursor"]
+        assert anon.startswith("o") and q(c, view="ours", changed=anon)["reload"] is False
+        for bad in (signed, str(entry(anon)), f"o{entry(anon)}-00000000", "x", "o-1-" + anon.split("-")[1]):
+            assert q(c, view="ours", changed=bad)["reload"] is True, bad
+    assert signed.startswith("s") and q(c, view="ours", changed=signed)["reload"] is False
+    assert q(c, view="ours", changed=anon)["reload"] is True
+
+
+def test_another_systems_traffic_trims_prunes_and_resets_move_nothing_a_reader_not_signed_in_is_told(c, monkeypatch):
+    """The oracle test again with a small log (CHANGES_KEPT, CHANGES_TRIM_EVERY, CHANGES_MAX): another system's rows
+    crossing the trim, its transcripts, key-ups, a no-op transaction after a trim, and a real prune of its old rows and
+    old key-up minutes past CHANGES_MAX (its own reset): a reader not signed in gets the same answer to every cursor, the
+    same rev and the same tree rev. A signed-in reader is told to reload by that reset."""
+    import sizeup.cad.comms as comms_mod
+    monkeypatch.setattr(comms_mod, "CHANGES_KEPT", 5)
+    monkeypatch.setattr(comms_mod, "CHANGES_TRIM_EVERY", 3)
+    monkeypatch.setattr(comms_mod, "CHANGES_MAX", 4)
+    t = c.clockref.t
+    for i in range(4):
+        c.record_traffic(tx(f"fg-o{i}", t + 1 + i, rig="E63"))
+    c.comms.prune()                                             # (a scheduled prune: the log's steady state, before)
+    api, who = CadApi(c), Identity(email="someone@example.org")
+
+    def get(path, query, w=None):
+        code, raw, _ = api.get(path, query, w)
+        assert code == 200
+        return json.loads(raw)
+
+    def answers():
+        first = get("/api/cad/comms", "view=ours")
+        cur = entry(first["cursor"])
+        return [first["cursor"], first["rev"], get("/api/cad/comms", "type=radio")["rev"],
+                get("/api/cad/comms/sources", "")["rev"].rsplit(".", 2)[0]] + [
+            get("/api/cad/comms", f"view={v}&changed={c.comms.cursor(cur + k, False)}")
+            for v in ("ours", "all") for k in range(-12, 6)]
+    before = answers()
+    signed_cur = get("/api/cad/comms", "view=all", who)["cursor"]
+    for i in range(25):                                         # crosses the trim of the other system's entries
+        c.record_traffic(other(f"pd-y{i}", t + 100 + i, text="made-up words"))
+    c.comms.retext("pd-y1", "other made-up words", "done")
+    c.comms.set_alt("pd-y1", {"text": "made-up alt", "model": "m"})
+    c.comms.rerun_done("pd-y1", "same")
+    c.comms.activity("p25:metro:9003", int(t // 60), 4, ["4100012"])
+    with c.store.tx():
+        pass                                                    # a no-op transaction after the log's own trims
+    # its rows and its key-up minutes grown old (as time would make them): a real prune, past CHANGES_MAX of them
+    with c.store.tx() as db:
+        db.execute("UPDATE radio_traffic SET start = ? WHERE id LIKE 'pd-y%'", (t - KEEP_UNLINKED_S - 3 * 86400,))
+        c.comms.quiet()
+    c.comms.activity("p25:metro:9003", int((t - comms_mod.ACTIVITY_KEEP_S) // 60) - 5, 2, ["4100012"])
+    assert c.comms.prune() == 25
+    assert answers() == before
+    assert get("/api/cad/comms", f"view=all&changed={signed_cur}", who)["reload"] is True     # their reset
+    # the log's own trim is never a change: a no-op after it moves no rev
+    rev = get("/api/cad/comms", "view=ours")["rev"]
+    c.comms._trim_changes()
+    with c.store.tx():
+        pass
+    assert get("/api/cad/comms", "view=ours")["rev"] == rev
+    # one of our key-up minutes going old does move it (a minute of ours went)
+    c.comms.activity("p25:westchester:4100099", int((t - comms_mod.ACTIVITY_KEEP_S) // 60) - 5, 2, ["4100013"])
+    rev = get("/api/cad/comms", "view=ours")["rev"]
+    c.comms.prune()
+    assert get("/api/cad/comms", "view=ours")["rev"] != rev
+
+
+def test_an_older_change_log_gains_oseq_and_keeps_its_seq(c, tmp_path):
+    """The log of the build before oseq: the column added at the start (not the table made again), so seq only grows
+    and no cursor from before can match a new entry; its entries are nobody's but a reader's who may see everything."""
+    db = c.store.db
+    db.execute("DROP INDEX radio_changes_oseq")
+    db.execute("ALTER TABLE radio_changes DROP COLUMN oseq")
+    db.executemany("INSERT INTO radio_changes (traffic_id, system, gone) VALUES (?, '', 0)", [(f"old-{i}",) for i in range(30)])
+    db.commit()
+    top = db.execute("SELECT MAX(seq) FROM radio_changes").fetchone()[0]
+    old = q(c, view="ours")["cursor"]
+    db.close()
+    again = cad(tmp_path, c.clockref, airband=("Tower",))
+    again.comms.context_broadcast = True
+    cols = {r[1] for r in again.store.db.execute("PRAGMA table_info(radio_changes)")}
+    assert "oseq" in cols and not again.comms.changes_broken
+    assert again.store.db.execute("SELECT MAX(seq) FROM radio_changes").fetchone()[0] == top          # kept, not made again
+    assert again.comms.changes_floor == top and q(again, view="ours", changed=old)["reload"] is True
+    fresh = q(again, view="ours")["cursor"]
+    again.record_traffic(tx("fg-new", c.clockref.t + 9, rig="E63"))
+    assert again.store.db.execute("SELECT seq FROM radio_changes WHERE traffic_id = 'fg-new'").fetchone()[0] > top
+    assert ids(q(again, view="ours", changed=fresh)) == ["fg-new"]
+    with sourcekeys.request_context(None):
+        fresh_o = q(again, view="ours")["cursor"]
+        again.record_traffic(tx("fg-new2", c.clockref.t + 10, rig="E63"))
+        assert ids(q(again, view="ours", changed=fresh_o)) == ["fg-new2"]

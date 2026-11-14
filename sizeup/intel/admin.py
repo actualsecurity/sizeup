@@ -85,6 +85,7 @@ class IntelAdmin:
         return {"settings": eng.policy.cfg, "defaults": policy_mod.DEFAULTS, "edited": sorted(ov["intel"]),
                 "packs": packs, "modes": list(MODES), "ruleset_hash": eng.ruleset_hash(), "counts_24h": counts,
                 "verdicts": list(VERDICTS), "queue": {"dropped": eng.dropped, "errors": eng.errors},
+                "listen": eng.listen.status() if eng.listen is not None else {"configured": False, "why": "not here"},
                 "infer": eng.infer.status() if eng.infer is not None else {"on": False, "ready": False, "why": "not here"},
                 "may_edit": True}
 
@@ -213,7 +214,7 @@ class IntelAdmin:
             if key not in policy_mod.DEFAULTS:
                 raise CadError(f"key: {' | '.join(policy_mod.DEFAULTS)}")
             v = body.get("value")
-            if key in ("enabled", "push"):
+            if key in policy_mod.BOOLS:
                 if not isinstance(v, bool):
                     raise CadError(f"{key}: true or false")
             elif key in ("quiet_from", "quiet_to"):

@@ -30,7 +30,7 @@ from collections import defaultdict
 
 WIDTHS = (1920, 1366, 390)
 SECTIONS = ("lists", "runcards", "units", "dispatch", "users", "system", "radios")
-RADIO_TABS = ("channels", "tones", "ids", "vocabulary", "stt")       # Settings > Radios's tabs (#115; "receivers": radios)
+RADIO_TABS = ("channels", "tones", "ids", "vocabulary", "stt", "emergencies")       # Settings > Radios's tabs (#115; "receivers": radios)
 VIEWS = ([("dispatch", "/cad", "incident"), ("new", "/cad", "new"), ("overview", "/cad", None), ("radio", "/cad#radio", None)]
          + [(f"settings-{s}", f"/cad#settings/{s}", None) for s in SECTIONS]
          + [(f"settings-radios-{t}", f"/cad#settings/radios/{t}", None) for t in RADIO_TABS]

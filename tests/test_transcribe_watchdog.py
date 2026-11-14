@@ -14,7 +14,7 @@ import pytest
 
 from sizeup import datasources as ds
 from sizeup.stt import LIVE, RERUN, STALE_S, URGENT, SttQueue
-from sizeup.transcribe import (AwsTranscriber, ChannelWorker, Settings, Usage, WebSocket, WsError, _handshake_error,
+from sizeup.transcribe import (PRICE_PER_MIN, AwsTranscriber, ChannelWorker, Settings, Usage, WebSocket, WsError, _handshake_error,
                                classify, deadline_for)
 from tests.fake_transcribe import FakeTranscribe, tone8k
 from tests.test_channels import AWS_TEXT, aws_cfg
@@ -144,11 +144,16 @@ def test_a_hung_stream_times_out_falls_back_and_the_channel_goes_on():
     t = quick(fake, res, logs, connect=hangs_first(hung), deadline_min_s=0.8, deadline_factor=0.0, stall_s=0.3)
     try:
         t.submit("tg:307", "a", tone8k(400, 0.5))
-        assert wait(lambda: "a" in res.failed, 5)
+        assert wait(lambda: "a" in res.failed, 30)
         assert res.failed["a"].startswith("AWS timed out") and not res.done
-        assert hung.aborted and any("cutting its stream" in m for m in logs)       # the stuck send was cut
-        t.submit("tg:307", "b", tone8k(400, 0.5))                                  # the channel goes on
-        assert wait(lambda: "b" in res.done, 8) and res.done["b"][0] == "Engine 60 on location."
+        # The stuck send is cut stall_s after the thread's last progress: usually before the deadline, but on a busy
+        # machine the thread got to its send late and the deadline came first. Either order: waited for, not assumed.
+        assert wait(lambda: hung.aborted and any("cutting its stream" in m for m in logs), 30)
+        # The channel goes on. Its next job gets a real deadline: 0.8 s was there to time the hung one out, and a
+        # loaded runner can take longer than that over a good answer (it timed out too, and this failed).
+        t.s.deadline_min_s = 60.0
+        t.submit("tg:307", "b", tone8k(400, 0.5))
+        assert wait(lambda: "b" in res.done, 60) and res.done["b"][0] == "Engine 60 on location."
         h = t.health()
         assert h["timeouts"] == 1 and h["state"] == "ok" and h["last_ok"] and "a" not in res.late
     finally:
@@ -292,7 +297,7 @@ def test_past_the_limit_pages_and_fire_ems_15_keep_aws_within_the_reserve():
     fake = FakeTranscribe()
     res, kv = Results(), {}
     usage = Usage(kv.get, kv.__setitem__)
-    usage.add(25 / 0.024 * 60 + 60, 0)                       # just over $25
+    usage.add(25 / PRICE_PER_MIN * 60 + 60, 0)               # just over $25
     t = quick(fake, res, kv=kv)
     t.usage = usage
     try:
@@ -300,7 +305,7 @@ def test_past_the_limit_pages_and_fire_ems_15_keep_aws_within_the_reserve():
         assert t.available("tg:307")[0] and t.available("South 2")[0] and not t.available("FG1")[0]
         b = t.budget()
         assert b["pct"] >= 100 and b["reserve"] == ["South 2", "tg:307"] and "reserve" in b["reserve_text"]
-        usage.add(5 / 0.024 * 60, 0)                         # past $30: the reserve is used up too
+        usage.add(5 / PRICE_PER_MIN * 60, 0)                 # past $30: the reserve is used up too
         assert not t.available("tg:307")[0] and "reserve" in t.available("tg:307")[1] and t.budget()["reserve"] == []
     finally:
         t.stop()

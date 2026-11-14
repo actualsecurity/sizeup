@@ -139,10 +139,11 @@ talker_prompt = "off"              # "ids": hint each call with who keyed up ("7
 # All-in-one with AWS credentials in the environment could set aws = true too.
 # aws = false
 # aws_region = ""                  # "" = AWS_REGION / AWS_DEFAULT_REGION, else us-east-1
-# aws_channels = ["South 2", "FG1", "FG2", 307, "HPN Tower"]   # engine "aws" by default; Settings > Radios changes any
+# aws_channels = ["South 2", "FG1", "FG2", 307, "HPN Tower", "p25:mrrs:9211"]   # engine "aws" by default; Settings > Radios changes any
 #                                  # channel (left out: every airband channel is added, #233)
 # record_only = []                # e.g. [383, 3127]: recorded, not transcribed unless Settings says so
 # aws_monthly_limit_usd = 25       # until Settings > Radios sets one; reached: AWS channels use whisper
+# aws_context_budget_usd = 15      # another P25 system's talkgroups (police): their own monthly limit, apart from ours
 # aws_idle_s = 120                 # a channel's stream ends this long after its last transmission
 # aws_pace = 2.0                   # audio sent this many times faster than real time
 # aws_vocabulary = "sizeup-pcfd"   # the custom vocabulary (Settings > Radios > Vocabulary, Push)
@@ -184,7 +185,8 @@ audio_keep_hours = 12              # every WAV under captures/ (clips, skipped c
 # back only in the off-peak hours [start, end), New York time.
 # audio_keep_event_days = 365
 # tier_keep_days = { alert = 30, text = 0, record = 7 }   # another P25 system's talkgroups, by tier (#409); 0 = audio_keep_hours
-# context_audio_max_mb = 100       # hub: another P25 system's clips at most (their own budget, inside the audio cap)
+# context_audio_max_mb = 8000      # hub: another P25 system's clips at most, wherever kept (S3 too): a runaway bound;
+#                                   tier_keep_days decides (30 days of PD alert audio is ~2-4 GB)
 # audio_prune_batch = 200
 # audio_offpeak = [2, 5]
 

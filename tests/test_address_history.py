@@ -140,7 +140,7 @@ def test_parse_and_street_text():
 def test_an_older_database_gets_the_columns_and_is_backfilled(tmp_path):
     c = make_cad(tmp_path, geocoder=fake_geocode)
     ids = [c.store.create_incident(type="ALARM", subtype="COMM", address=f"{n} Example Ave") for n in (100, 100, 102)]
-    c.store.db.close()
+    c.shutdown()
     db = sqlite3.connect(tmp_path / "cad.sqlite")            # as it was before #403: none of it
     for t in ("addr_queue", "here_rev", "fts_radio_queue"):
         db.execute(f"DROP TABLE {t}")
@@ -626,7 +626,7 @@ def test_migration_messages_are_logged(tmp_path):
     from sizeup.cad.service import Cad, Settings
     logged = []
     c = make_cad(tmp_path, geocoder=fake_geocode)
-    c.store.db.close()
+    c.shutdown()
     db = sqlite3.connect(tmp_path / "cad.sqlite")
     db.execute("DROP TRIGGER here_rev_inc2")
     db.execute("DROP TRIGGER here_rev_asg2")
