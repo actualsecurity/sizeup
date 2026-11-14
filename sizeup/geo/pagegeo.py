@@ -15,6 +15,9 @@ How a page is read here (``PageLocator.locate``):
 2. The streets each could be: the gazetteer's fuzzy readings in any town; sound-alikes (edit distance over the
    street's spoken forms, the vocabulary of streets the STT is primed with) among the streets of the page's own
    towns only; and the streets that run between the two cross streets heard.
+   Two streets joined by "and" right after an address with no such word ("40 Example Road, the Sample Gym. Sample
+   Street and Test Street ...") are its cross streets only for a reading whose street both of them meet
+   (``_implied``): a pair that doesn't is not a cross-street pair and changes nothing.
 3. The cross streets ("between A and B", "cross of A"): a reading is checked where they meet its street (the TIGER
    street centrelines and their intersections in data/gazetteer.sqlite): both meet it and the house number lies
    between them = "all"; one does (the other misheard) = "partial"; cross streets said but none meets it = "none".
@@ -63,6 +66,7 @@ BETWEEN_PERP_M = 120          # ... or between the two meeting points, at most t
 BLOCK_MAX_M = 1500            # two cross streets meeting a street farther apart than this aren't a block
 PLACE_NEAR_M = 200            # a named place backs an address this close
 PLACE_CROSS_M = 150           # a named place this close to a cross street's centreline: it meets it
+IMPLIED_GAP = 4               # two streets joined by "and" at most this many words after an address: maybe its cross streets
 NAME_SURE = 0.85              # a name heard this well needs only one cross street (the other misheard)
 NAME_EXACT = 0.95             # ... and with no cross street said, this well
 W_NAME, W_ALL, W_PARTIAL = 0.45, 0.35, 0.25
@@ -303,6 +307,31 @@ class PageLocator:
                 groups.append(group)
         return groups
 
+    def _implied(self, tokens: list[str], mentions, addrs) -> dict[int, list]:
+        """{an address's start: a cross-street group} for two typed streets joined by "and" within IMPLIED_GAP words
+        after it, no cross-street word in between (those are _crosses'). Only a candidate: locate() uses it for a
+        reading whose street both of them meet."""
+        out: dict[int, list] = {}
+        strong = [m for m in mentions if m.strong]
+        for start, end, *_rest in addrs:
+            for a in strong:
+                gap = tokens[end:a.start] if a.start >= end else None
+                if gap is None or len([x for x in gap if x != BOUNDARY]) > IMPLIED_GAP or gap.count(BOUNDARY) > 2 \
+                        or any(x in CROSS_MARKERS or x.isdigit() for x in gap):
+                    continue
+                b = next((m for m in strong if m.start == a.end + 1 and tokens[a.end] == "and"), None)
+                if b is not None:
+                    out[start] = [(a.text, self._cross_cands(a)), (b.text, self._cross_cands(b))]
+                    break
+        return out
+
+    def _both_meet(self, sid: int, group) -> bool:
+        """Both streets of an implied pair meet street sid, and neither is sid itself."""
+        for _text, cands in group:
+            if any(c == sid for c, _s in cands) or not any(self._meets(sid, c) for c, _s in cands):
+                return False
+        return True
+
     def _cross_cands(self, m) -> list[tuple[int, float]]:
         s = m.text.replace(" ", "")
         best: dict[int, float] = dict(m.cands)
@@ -426,9 +455,12 @@ class PageLocator:
 
     # ------------------------------------------------------------------ the page
 
-    def locate(self, text: str, home=()) -> PageGeo:
+    def locate(self, text: str, home=(), params: dict | None = None) -> PageGeo:
         """Every reading of the page's location, best first, and whether the best one is confirmed. home: the towns
-        of the page's tones (``home_towns``); none = no jurisdiction to hold it to (the gazetteer's town order)."""
+        of the page's tones (``home_towns``); none = no jurisdiction to hold it to (the gazetteer's town order).
+        params: another domain's thresholds {confirm, rival, rival_m, sound_min} (radio pre-alerts, sizeup/intel/place.py);
+        none: this module's (CONFIRM, RIVAL, RIVAL_M, SOUND_MIN), as pages have always used."""
+        prm = {"confirm": CONFIRM, "rival": RIVAL, "rival_m": RIVAL_M, "sound_min": SOUND_MIN, **(params or {})}
         gaz = self.gaz
         tokens = tokenize(text or "")
         mentions = gaz._street_mentions(tokens)
@@ -447,6 +479,7 @@ class PageLocator:
             allowed = None
         groups = self._crosses(tokens, mentions)
         crosses_heard = list(dict.fromkeys(t for g in groups for t, _c in g))
+        implied = self._implied(tokens, mentions, addrs)
 
         def town(muni: str, span: tuple[int, int]) -> float | None:
             if allowed is None:
@@ -512,7 +545,7 @@ class PageLocator:
                 for sid in pool:
                     if sid not in cands:
                         s = self._name_sim(heard, sid, True)
-                        if s >= SOUND_MIN:
+                        if s >= prm["sound_min"]:
                             offer(sid, s, "sound-alike")
             for sid in cross_streets:
                 if sid not in cands:
@@ -532,7 +565,14 @@ class PageLocator:
                     lat, lon, q, precision = res
                     if not typed and precision == "approximate":
                         continue
-                    checked, names = self._check_point(sid, tuple(float(v) for v in _xy(lat, lon)), groups)
+                    P = tuple(float(v) for v in _xy(lat, lon))
+                    checked, names = self._check_point(sid, P, groups)
+                    pair = implied.get(start)
+                    if checked != "all" and pair is not None and self._both_meet(sid, pair):
+                        got = self._check_point(sid, P, [pair])      # only ever in its favour: a pair it isn't
+                        if got[0] == "all" or (got[0] == "partial" and checked in ("", "none")):   # between counts for nothing
+                            checked, names = got
+                            crosses_heard.extend(t for t, _c in pair if t not in crosses_heard)
                     placed_all |= checked == "all"
                     tw = town(muni, (start, end))
                     score = W_NAME * sim * q + cross_part(checked, sim) + (tw or 0.0)
@@ -606,11 +646,12 @@ class PageLocator:
                 alts.append(r)
             if len(alts) == 4:
                 break
-        ok, why = self._confirm(best, rest, groups)
+        ok, why = self._confirm(best, rest, groups, prm)
         return PageGeo(best, ok, alts, crosses_heard, why)
 
     @staticmethod
-    def _confirm(b: Reading, rest: list[Reading], groups) -> tuple[bool, str]:
+    def _confirm(b: Reading, rest: list[Reading], groups, prm: dict | None = None) -> tuple[bool, str]:
+        prm = prm or {"confirm": CONFIRM, "rival": RIVAL, "rival_m": RIVAL_M}
         exact = b.match.precision in ("exact", "interpolated")
         if not b.allowed:
             return False, f"{b.match.municipality} is not this page's town"
@@ -630,12 +671,12 @@ class PageLocator:
             if unclear:
                 return False, "the street name was not clear and no cross street was said"
             return False, "the house number is not on that street and no cross street was said"
-        if b.score < CONFIRM:
+        if b.score < prm["confirm"]:
             return False, f"low confidence ({b.score:.2f})"
         for r in rest:
-            if r.score < b.score - RIVAL:
+            if r.score < b.score - prm["rival"]:
                 break
-            if _dist(r.match.lat, r.match.lon, b.match.lat, b.match.lon) > RIVAL_M:
+            if _dist(r.match.lat, r.match.lon, b.match.lat, b.match.lon) > prm["rival_m"]:
                 return False, f"two readings fit: {b.match.label} and {r.match.label}"
         return True, ""
 

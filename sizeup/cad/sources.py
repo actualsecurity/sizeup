@@ -63,7 +63,11 @@ sizeup/sources/runner.py (they come here as "source_event" / "source_health" thr
                report makes its own incident, noted "possibly the same as #N" on both
     authority  the best-ranked report's type and location are applied to a field no person has edited, whatever the
                status (manual_edits: type, location, pin); otherwise a timeline note, and the incident view
-               offers "Use <feed>'s <field>" (feed_use). A pin a person set is never cleared
+               offers "Use <feed>'s <field>" (feed_use). A pin a person set is never cleared. An incident with no
+               type at all, on a feed whose type field gives none of ours: a comment that is a type line gives it
+               (dispatch_lines: marked or the first, short, nothing taken back; _comment_type), never over a type
+               already set by anyone; else the page's type fills in (Cad._page_enrich: the backup). The feed's own
+               type field still wins when it says one
     timeline   every change a feed reports is an entry on the incident (kind "feed"): type, location, units, each time
                (per unit too), each new comment at its own time (not an empty one, nor the same words within
                COMMENT_REPEAT_S), closed
@@ -137,6 +141,25 @@ SAME_CALL_BEFORE_S = 60.0              # ... and an event first seen closed or o
 REPORT_STALE_S = 180.0
 FORGET_S = 24 * 3600.0                 # a feed silent this long is off the tiers (taken off the station)
 INCOMING_S = 300.0
+TYPE_COMMENT_WORDS = 5                 # a feed's comment this short may be its type line ("general fire alarm")
+# ... never one that takes something back or reports on it ("NOT A STRUCTURE FIRE", "HOLD FOR MVA", "CANCEL FIRE
+# ALARM", "CAR FIRE EXTINGUISHED", "ALARM RESET PER THE KEYHOLDER")
+COMMENT_NOT_A_LINE = re.compile(r"\b(?:cancel\w*|not|no|hold\w*|out|extinguished|reset|per|disregard\w*)\b", re.I)
+
+
+def dispatch_lines(comments) -> list[str]:
+    """A feed's comments that may be a line of the dispatch itself (its type, who it is for), their leading mark
+    dropped: marked ("~...") or the event's first comment, at most TYPE_COMMENT_WORDS words, and none of
+    COMMENT_NOT_A_LINE's. Any other comment is a narrative or a status note: never read for a type or a scope."""
+    out = []
+    for i, c in enumerate(comments or ()):
+        raw = str(c[1] if isinstance(c, (list, tuple)) and len(c) > 1 else c).strip()
+        words = re.sub(r"^[^A-Za-z0-9]+", "", raw).strip()
+        if not words or not (i == 0 or raw.startswith("~")):
+            continue
+        if len(words.split()) <= TYPE_COMMENT_WORDS and not COMMENT_NOT_A_LINE.search(words):
+            out.append(words)
+    return out
 COMMENT_REPEAT_S = 600.0               # a feed's comment with the same words this soon after: not a new line
 TICK_S = 5.0
 BACKFILL_DELAY_S = 300.0               # old addresses' backfill: nothing until this long after the start ...
@@ -1662,6 +1685,13 @@ class Sources:
                 notes.append((now, f"{pre}: type {new['type']}"))
             if auth and differs and "type" not in hand:
                 fields.update(type=typ, subtype=sub, type_note=note)
+        if ("type" not in fields and auth and "type" not in hand and not inc["type"]
+                and not self.cad.map_type(new["type"], label)[0]):
+            # the incident has no type at all and the feed's type field gives none of ours: a comment that is a type
+            # line gives it ("authority"). Never over a type already set, whoever set it
+            typ, sub, note = self._comment_type(new["comments"], label)
+            if typ:
+                fields.update(type=typ, subtype=sub, type_note=note)
         loc = new["location"].strip()
         if loc and (loc != old["location"].strip() or attach):
             differs = not created and not same_place(loc, match_address(inc))
@@ -1720,6 +1750,15 @@ class Sources:
             with self.store.tx() as db:
                 for at, text in notes:
                     self.store._event(db, iid, "feed", text[:2000], at=at)
+
+    def _comment_type(self, comments, label: str) -> tuple[str, str, str]:
+        """(TYPE, SUBTYPE, note) from a feed's comment that is a type line (dispatch_lines: "~GENERAL FIRE ALARM")
+        and a type of ours as Cad.map_type reads it. ("", "", "") without one."""
+        for words in dispatch_lines(comments):
+            typ, sub, note = self.cad.map_type(words, label)
+            if typ:
+                return typ, sub, note
+        return "", "", ""
 
     def _feed_closed(self, iid: int, source: str, ref: str, label: str) -> bool:
         """The feed closed its event: the queued incident only it made, untouched by anyone, is dismissed. True if so."""

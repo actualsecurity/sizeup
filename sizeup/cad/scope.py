@@ -1,15 +1,23 @@
 """Who was dispatched (#370): a whole department, or specific units. One label per incident, shown on the incident and
 its queue card (inc["scope"]).
 
-    page   the page is usually heard first and sets it at once: the departments' tones only, plus a call type ->
-           "Full department (<dept>)" for each department whose tones were heard; apparatus named in it ->
-           "Specific units"; neither (no type, no apparatus) -> nothing
-    feed   an external CAD feed's unit list (its best-ranked report): a department entry (Sources.department_units:
-           a code that means a whole department) -> "Full department (<dept>)" for each one listed, apparatus with
-           none -> "Specific units". Only when no page was heard for it: the page is the dispatch itself, so its
-           reading stands on every path (attached, a card moved or swept onto it, a repeat, the page first or the feed
-           first) and the feed only confirms it. A disagreement is one terse timeline line (kind "feed"): "Page: all
-           PCFD · feed: units" (the page heard after the feed), "Feed: units · page: all PCFD" (the feed after it)
+    page   the page is usually heard first and sets it at once: apparatus named in it -> "Specific units", and only
+           then. None named: "Full department (<dept>)" for each department whose tones were heard, when it gives a
+           call type or says so ("full department", as speech-to-text hears it too: said_full); or, with neither, when
+           the tones are a department's own all-call (all_call: never a role's or another service's) and its words
+           hold a place and nothing of a test, a meeting or an advisory (has_place, NOT_A_CALL: never the tones half
+           alone); otherwise nothing
+    feed   an external CAD feed's report (its best-ranked one), read by from_units: "Full department (<dept>)" for a
+           department entry on its unit list (Sources.department_units: a code that means a whole department), for a
+           department's placeholder with no apparatus listed ("department dispatched, no unit yet": Lists.placeholder,
+           its department), or for a comment that is a line of the dispatch and says so outright (FEED_FULL; "general
+           fire alarm" is a call type, not this); apparatus with none of those -> "Specific units"
+    both   shown(): the page's reading whenever it has one. Apparatus a page named is never overridden: the feed's
+           reading is in the hover and one timeline line. The feed's is the label only when the page gave none (no
+           page yet, or one that named nobody and nothing above applied); two "full" readings name both departments.
+           A feed's apparatus list never changes a page's full department either: units listed as they sign on are no
+           evidence against it. A disagreement is one terse timeline line (kind "feed"): "Page: all PCFD · feed:
+           units" (the page heard after the feed), "Feed: units · page: all PCFD" (the feed after it)
     later  a later page's reading replaces an earlier one, upgrade or downgrade ("Page: units → all PCFD"), on the
            incident it is matched to whatever its status; a feed never changes a page's. An upgrade (specific units
            -> full department) needs evidence (upgrade()): a repeat that only lost the unit names (speech-to-text)
@@ -27,7 +35,8 @@ from __future__ import annotations
 import json
 import re
 
-from sizeup.cad.sources import PAGING, dept_code, is_placeholder
+from sizeup.cad.fuzzy import skeleton
+from sizeup.cad.sources import PAGING, dept_code, dispatch_lines, is_placeholder
 from sizeup.radio.tones import base_name
 
 FULL, UNITS = "full", "units"
@@ -83,32 +92,110 @@ def _said(kind: str, departments) -> str:
     return "units" if kind == UNITS else ""
 
 
-def from_page(tone_departments, units, incident_type: str) -> tuple[str, list[str]] | None:
-    """(kind, departments) as the page says it, else None."""
+def all_call(tone_departments) -> list[str]:
+    """The departments whose own all-call tones were heard: "Port Chester FD", the tone book's "Port Chester · Fire".
+    Never a role's pair ("Port Chester · Fire · Chiefs") nor another service's ("... · EMS")."""
+    out = []
+    for d in tone_departments or ():
+        n = str(d or "").removesuffix(" (heard)").removesuffix(" (est.)")
+        parts = n.split(" · ")
+        if n and (len(parts) == 1 or (len(parts) == 2 and parts[1] == "Fire")) and n not in out:
+            out.append(n)
+    return out
+
+
+# A page with a department's tones that is no dispatch (the weekly test, a meeting, a wake, an advisory, a relocation,
+# an alarm taken back): its tones alone never make it a full department
+NOT_A_CALL = re.compile(r"\btest(?:ing|s)?\b|\bmeetings?\b|\bdisregard\w*|\bcancel\w*|\bbe advised\b|\battention all members\b"
+                        r"|\bwake\b|\bfuneral\b|\brelocat\w*|\bdrills?\b|\bannouncements?\b", re.I)
+
+
+def has_place(text: str) -> bool:
+    """A house number and street, or a named road, in a page's words (sizeup/dispatch.py's own patterns)."""
+    from sizeup.dispatch import ADDRESS, STREET, _norm
+    t = _norm(str(text or ""))
+    return bool(t) and (ADDRESS.search(t) is not None or STREET.search(t) is not None)
+
+
+def from_page(tone_departments, units, incident_type: str, text: str = "") -> tuple[str, list[str]] | None:
+    """(kind, departments) as the page says it, else None. "Specific units" only when it names apparatus; text: the
+    page's words, for a full department said and for the all-call default: a department's own tones (all_call), words
+    heard with a place in them (has_place: never the tones half alone, nor an empty transcript) and nothing of
+    NOT_A_CALL."""
     depts = list(dict.fromkeys(base_name(d) for d in tone_departments or () if d))
     if units:
         return UNITS, []
-    if depts and incident_type and incident_type != "Unknown":
+    if not depts:
+        return None
+    if (incident_type and incident_type != "Unknown") or said_full(text, depts):
         return FULL, depts
+    own = list(dict.fromkeys(base_name(d) for d in all_call(tone_departments)))
+    if own and has_place(text) and not NOT_A_CALL.search(text or ""):
+        return FULL, own
     return None
 
 
-def from_units(units, departments: dict[str, str]) -> tuple[str, list[str]] | None:
-    """(kind, departments) from a feed's unit list and its department entries {code: department}, else None."""
+# A department-level dispatch said outright in a feed's comment. "general fire alarm" is a call type (an alarm
+# activation), never this: sizeup/cad/sources.py reads it for the type alone.
+FEED_FULL = re.compile(r"\bfull\s+(?:department|dept)\b|\ball\s+companies\b"
+                       r"|\bgeneral\s+alarm\s+(?:assignment|response)\b|\bfull\s+(?:assignment|response)\b", re.I)
+
+
+def from_units(units, departments: dict[str, str], placeholder_of=None, comments=()) -> tuple[str, list[str]] | None:
+    """(kind, departments) from a feed's report, else None. Full: a department entry on its unit list (departments:
+    {code: department}); a department's placeholder with no apparatus listed (placeholder_of(code) -> its department's
+    name, "" for any other code: "department dispatched, no unit yet"; with apparatus the list is all it says, since
+    a placeholder may be on a single-unit call too); or a comment that is a line of the dispatch and says so outright
+    (sources.dispatch_lines, FEED_FULL: naming no department by itself). Apparatus with none of those: units."""
     codes = {dept_code(k): v for k, v in departments.items() if dept_code(k)}
-    depts = list(dict.fromkeys(codes[dept_code(u)] for u in units or () if dept_code(u) in codes))
-    if depts:
+    rigs = any(dept_code(u) and not is_placeholder(u) for u in units or ())
+    depts = []
+    for u in units or ():
+        name = codes.get(dept_code(u)) or (placeholder_of(u) if placeholder_of is not None and not rigs else "")
+        if name and name not in depts:
+            depts.append(name)
+    if depts or any(FEED_FULL.search(c) for c in dispatch_lines(comments)):
         return FULL, depts
-    if any(dept_code(u) and not is_placeholder(u) for u in units or ()):    # a placeholder is never "Specific units"
+    if rigs:                                                               # a placeholder is never "Specific units"
         return UNITS, []
     return None
 
 
-def page_line(departments, units, tone_departments, incident_type: str, feed: str = "") -> str:
+def _merged(a, b) -> list[str]:
+    """Two readings' departments as one list, one entry per department (dept_key), a's first."""
+    out, seen = [], set()
+    for d in [*a, *b]:
+        k = dept_key(d) or d
+        if k not in seen:
+            seen.add(k)
+            out.append(d)
+    return out
+
+
+def _differ(page, feed) -> bool:
+    """The page's and the feed's readings say otherwise (a feed's "full" from a comment names no department: it
+    agrees with any full department the page read)."""
+    if page is None or feed is None or tuple(page) == tuple(feed):
+        return False
+    return not (page[0] == feed[0] == FULL and not feed[1])
+
+
+def shown(page, feed) -> tuple[str, tuple[str, list] | None]:
+    """("page" | "feed" | "", the reading shown) from the page's and the feed's ((kind, departments) or None). The
+    page's whenever it has one: apparatus it named is never overridden (the feed's reading is the hover's), and two
+    "full" readings name both departments. The feed's only when the page gave none."""
+    if page is not None:
+        if page[0] == FULL and feed is not None and feed[0] == FULL:
+            return "page", (FULL, _merged(page[1], feed[1]))
+        return "page", page
+    return ("feed", feed) if feed is not None else ("", None)
+
+
+def page_line(departments, units, tone_departments, incident_type: str, feed: str = "", text: str = "") -> str:
     """One timeline line for who a page paged (#370, with #365's page on a feed's incident): "Page: all PCFD",
-    "Page: PCFD · units Engine 60, Ladder 31", "Page: tones PCFD" (no call type), and " · feed: units" when the
-    feed's label says otherwise. "" when it named nobody."""
-    got = from_page(tone_departments, units, incident_type)
+    "Page: PCFD · units Engine 60, Ladder 31", "Page: tones PCFD" (a test, a role's tones), and " · feed: units" when
+    the feed's label says otherwise. "" when it named nobody."""
+    got = from_page(tone_departments, units, incident_type, text)
     names = ", ".join(abbrev(base_name(d)) for d in dict.fromkeys(departments or ()) if d)
     if got is not None and got[0] == FULL:
         said = _said(*got)
@@ -143,8 +230,55 @@ def dept_key(name: str) -> str:
 # A full-department dispatch said in words. "all units / companies / apparatus" only as the order to respond ("all units
 # respond", "all units, please respond"): on its own it is also how advisories and clears start ("all units be advised",
 # "all units clear", "all units responding, be advised" to whoever was sent), so it upgrades only with "respond" right after.
-FULL_WORDS = re.compile(r"\bfull\s+(?:department|response|assignment)\b|\bgeneral\s+alarm\b|\ball[\s-]+hands\b"
+FULL_WORDS = re.compile(r"\bfull\s+(?:department|dept|response|assignment)\b|\bgeneral\s+alarm\b|\ball[\s-]+hands\b"
                         r"|\ball\s+(?:units|companies|apparatus)\s*,?\s*(?:please\s+)?respond\b", re.I)
+# "full department" as speech-to-text hears it, by its consonants (fuzzy.skeleton's way; d as t, v as f): "depart",
+# "the part", "dept", "of pots", "apartment". Read only right after a department's or town's name and right before the
+# house number (said_full).
+DEPT_SOUND = re.compile(r"[tf]pr?t(?:mnts?|s)?|pr?tmnts?")
+FILLER = r"(?:\s+(?:fire|department|dept|fd))*"
+TAKEN_BACK = re.compile(r"\b(?:not|no|cancel\w*|disregard\w*)\b")     # ... in the words before it: never said
+# "full apartment" is "full department" only when no word of a real apartment follows
+APARTMENT_NEXT = {"fire", "building", "complex", "house", "number", "on", "floor", "at"}
+
+
+def _consonants(words) -> str:
+    s = skeleton("x" + "".join(re.sub(r"[^a-z]", "", w.lower()) for w in words))[1:]
+    return re.sub(r"(.)\1+", r"\1", s.replace("d", "t").replace("v", "f"))
+
+
+def _clause_before(t: str, pos: int) -> str:
+    """The words of this sentence before pos (back to the last full stop or semicolon)."""
+    return re.split(r"[.;]", t[:pos])[-1]
+
+
+def said_full(text: str, names=()) -> bool:
+    """A full-department dispatch said in a page's words. FULL_WORDS outright; or "full" and the one or two words
+    after it sounding like "department" ("Exampletown full of pots 40 40 Example Road"): right after one of these
+    departments' or towns' names (names: as the tones or the lists say them; their town part is what is matched) and
+    with the house number next in that sentence, as a page is read ("full of pride", "full day parade": never; "full
+    apartment complex / fire / building": an apartment). Never when the words before it in its sentence take it back
+    ("not", "no", "cancel", "disregard")."""
+    from sizeup.dispatch import _norm
+    raw = str(text or "")
+    t = _norm(raw)
+    for m in FULL_WORDS.finditer(t):
+        if not TAKEN_BACK.search(_clause_before(t, m.start())):
+            return True
+    for key in sorted({dept_key(n) for n in names or ()} - {""}):
+        for m in re.finditer(rf"\b{re.escape(key)}{FILLER}[\s,:]+full\b[\s,]*((?:[a-z]+\s?){{1,2}})", t):
+            if TAKEN_BACK.search(_clause_before(t, m.start())):
+                continue
+            words = m.group(1).split()
+            for k in range(1, len(words) + 1):
+                if not DEPT_SOUND.fullmatch(_consonants(words[:k])):
+                    continue
+                rest = re.findall(r"[a-z0-9]+|[.;]", t[m.start(1) + len(" ".join(words[:k])):])
+                if words[k - 1].startswith("apartment") and rest and (rest[0] in APARTMENT_NEXT or rest[0].isdigit()):
+                    continue
+                if rest and rest[0].isdigit():           # the house number comes next: "... full of pots 40 40 ..."
+                    return True
+    return False
 
 
 def upgrade(inc, seen_tones) -> bool:
@@ -161,7 +295,7 @@ def upgrade(inc, seen_tones) -> bool:
     texts = list(getattr(inc, "page_text", None) or [])
     if not texts:
         return False
-    if FULL_WORDS.search(texts[-1]):
+    if said_full(texts[-1], [*tones, *(getattr(inc, "departments", None) or ())]):
         return True
     if len(texts) < 2:
         return False
@@ -196,7 +330,8 @@ class Scope:
             return "", False
         tones, typ = getattr(inc, "tone_departments", ()), getattr(inc, "incident_type", "")
         units = latest_units(inc, self.roster())
-        got = from_page(tones, units, typ)
+        text = (list(getattr(inc, "page_text", None) or []) or [""])[-1]
+        got = from_page(tones, units, typ, text)
         if got is None:
             return "", True                              # nothing to keep: the line says what it heard
         heard = list(dict.fromkeys([*(tones or []), *(getattr(inc, "departments", None) or [])]))
@@ -209,7 +344,8 @@ class Scope:
             units = []
             line = before[2] if len(before) > 2 else ""
             return self._reading(iid, *got, note=note, line=line, tones=seen)
-        return self._reading(iid, *got, note=note, line=page_line(heard, list(units or []), tones, typ), tones=seen)
+        return self._reading(iid, *got, note=note, line=page_line(heard, list(units or []), tones, typ, text=text),
+                             tones=seen)
 
     @staticmethod
     def _feed_of(r) -> tuple[str, list] | None:
@@ -235,13 +371,14 @@ class Scope:
         with self.store.tx() as db:
             r = db.execute("SELECT * FROM dispatch_scope WHERE incident_id = ?", (iid,)).fetchone()
             feed = self._feed_of(r)
-            said = _said(*feed) if feed is not None and feed != (kind, depts) else ""
+            said = _said(*feed) if _differ((kind, depts), feed) else ""
             if said and self._noted(db, iid, _said(kind, depts), said):
                 said = ""                                 # said once already, whichever came first
             before = _parse(r["page"]) if r is not None else None
             if r is not None and r["page"] == reading:
                 return said, False
             was = self._shown(r) if r is not None else None
+            now_kind = shown((kind, depts), feed)[1][0]
             db.execute("INSERT INTO dispatch_scope (incident_id, kind, departments, source, at, page, feed) "
                        "VALUES (?, ?, ?, 'page', ?, ?, ?) ON CONFLICT(incident_id) DO UPDATE SET kind = excluded.kind, "
                        "departments = excluded.departments, source = 'page', at = excluded.at, page = excluded.page, "
@@ -251,9 +388,9 @@ class Scope:
                 self.store._event(db, iid, "feed", f"Page: {_said(*before)} → {_said(kind, depts)}", at=now)
             elif note and said and before is None:
                 self.store._event(db, iid, "feed", f"Page: {_said(kind, depts)} · feed: {said}", at=now)
-        if kind == FULL and (was is None or was[0] != FULL):
+        if now_kind == FULL and (was is None or was[0] != FULL):
             self._widened(iid)
-        elif kind != FULL and was is not None and was[0] == FULL:
+        elif now_kind != FULL and was is not None and was[0] == FULL:
             self._narrowed(iid)
         return said, True
 
@@ -285,11 +422,17 @@ class Scope:
         except Exception as e:  # noqa: BLE001 - the label stands whatever this does
             self.cad.log(f"CAD: dispatch scope: radio log: {type(e).__name__}")
 
-    @staticmethod
-    def _shown(r) -> tuple[str, list]:
-        """What a row shows: the page's reading when there is one (a row from before the page won may still hold the
-        feed's label in kind), else its label."""
-        return _parse(r["page"]) or (r["kind"], json.loads(r["departments"]))
+    @classmethod
+    def _pick(cls, r) -> tuple[str, tuple[str, list]]:
+        """("page" | "feed", the reading) a row shows (shown(): the feed's department-level dispatch, else the
+        page's, else the feed's; a row from before the feed column: its label)."""
+        who, got = shown(_parse(r["page"]), cls._feed_of(r))
+        return (who, got) if got is not None else (r["source"], (r["kind"], json.loads(r["departments"])))
+
+    @classmethod
+    def _shown(cls, r) -> tuple[str, list]:
+        """What a row shows (_pick)."""
+        return cls._pick(r)[1]
 
     def full(self, iid: int) -> bool:
         """Full department paged (as shown)."""
@@ -313,16 +456,27 @@ class Scope:
             if not db.execute("SELECT 1 FROM events WHERE incident_id = ? AND kind = 'tones' AND text = ?", (dst, text)).fetchone():
                 self.store._event(db, dst, "tones", text, "Paging", at=self.store.clock())
 
+    def _placeholder_dept(self, code) -> str:
+        """The department a placeholder code on a feed's unit list stands for ("department dispatched, no unit yet":
+        Lists.placeholder, department_of), "" for any other code."""
+        try:
+            L = self.cad.lists
+            return (L.department_of(str(code)) or "") if L.placeholder(str(code)) else ""
+        except (AttributeError, TypeError):
+            return ""
+
     def on_feed(self, iid: int | None) -> None:
-        """A feed's report applied to this incident: its unit list is the label only when no page was heard for it;
-        otherwise it confirms the page's, or a line says it differs (once per feed reading). Never changes a page's."""
+        """A feed's report applied to this incident: its reading (from_units) kept beside the page's; which one is the
+        label: shown() (the page's whenever it has one). A line says where the two differ (once per feed reading)."""
         if not iid:
             return
         rep = self.store.one("SELECT data, label FROM source_reports WHERE incident_id = ? AND source != ? AND merged_into = '' "
                              "ORDER BY rank, first_seen LIMIT 1", (iid, PAGING))
         if rep is None:
             return
-        got = from_units(json.loads(rep["data"] or "{}").get("units") or [], self.cad.sources.department_units())
+        data = json.loads(rep["data"] or "{}")
+        got = from_units(data.get("units") or [], self.cad.sources.department_units(), self._placeholder_dept,
+                         data.get("comments") or [])
         if got is None:
             return
         kind, depts = got
@@ -332,21 +486,25 @@ class Scope:
             if self._feed_of(r) == (kind, depts):
                 return
             page = _parse(r["page"]) if r is not None else None
+            was = self._shown(r) if r is not None else None
             if page is None:                              # no page heard: the feed's is the label
                 db.execute("INSERT INTO dispatch_scope (incident_id, kind, departments, source, at, feed) "
                            "VALUES (?, ?, ?, 'feed', ?, ?) ON CONFLICT(incident_id) DO UPDATE SET kind = excluded.kind, "
                            "departments = excluded.departments, source = 'feed', at = excluded.at, feed = excluded.feed",
                            (iid, kind, json.dumps(depts), now, json.dumps([kind, depts])))
-            else:                                         # the page's stands
+            else:
                 db.execute("UPDATE dispatch_scope SET feed = ? WHERE incident_id = ?", (json.dumps([kind, depts]), iid))
-                if page != (kind, depts) and not self._noted(db, iid, _said(*page), _said(kind, depts)):
+                if _differ(page, (kind, depts)) and not self._noted(db, iid, _said(*page), _said(kind, depts)):
                     self.store._event(db, iid, "feed", f"Feed: {_said(kind, depts)} · page: {_said(*page)}", at=now)
-        if page is None and kind == FULL and (r is None or r["kind"] != FULL):
+            after = self._shown(db.execute("SELECT * FROM dispatch_scope WHERE incident_id = ?", (iid,)).fetchone())
+        if after[0] == FULL and (was is None or was[0] != FULL):
             self._widened(iid)
+        elif after[0] != FULL and was is not None and was[0] == FULL:
+            self._narrowed(iid)
 
     def decorate(self, incs: list[dict]) -> list[dict]:
-        """inc["scope"] = {kind, departments, short, label, paged, source: page | feed, feed: the feed's reading as the
-        timeline says it when it differs from the page's, else ""} or None."""
+        """inc["scope"] = {kind, departments, short, label, paged, source: page | feed (whose reading is shown), feed:
+        the feed's reading as the timeline says it when it differs from the page's, else ""} or None."""
         ids = [i["id"] for i in incs]
         rows: dict[int, dict] = {}
         for k in range(0, len(ids), 500):
@@ -355,11 +513,11 @@ class Scope:
                 rows[r["incident_id"]] = r
         for inc in incs:
             r = rows.get(inc["id"])
-            kind, depts = self._shown(r) if r else ("", [])
+            who, (kind, depts) = self._pick(r) if r else ("", ("", []))
             lab = label(kind, depts) if r else ""
             page, feed = (_parse(r["page"]), self._feed_of(r)) if r else (None, None)
-            differs = _said(*feed) if page is not None and feed is not None and feed != page else ""
+            differs = _said(*feed) if _differ(page, feed) else ""
             inc["scope"] = {"kind": kind, "departments": depts, "short": short(kind, depts), "label": lab,
-                            "paged": f"Paged: {lab[:1].lower()}{lab[1:]}", "source": "page" if page else r["source"],
+                            "paged": f"Paged: {lab[:1].lower()}{lab[1:]}", "source": who,
                             "feed": differs} if r else None
         return incs
