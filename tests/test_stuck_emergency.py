@@ -198,13 +198,13 @@ def test_not_ours_is_a_notice_raised_once_ours_an_alarm_each_time(tmp_path):
     at = time.time() - 600
     a1 = cad.alarms.on_traffic(dict(tx("1325-1", source="DOT Dispatch 1", talkgroup=1325, radio_id="21237",
                                        emergency=True), start=at, end=at + 2))
-    cad.alarm_ack(a1["id"], {"operator": "Corey"})                       # seen ...
+    cad.alarm_ack(a1["id"], {"operator": "Casey"})                       # seen ...
     a2 = cad.alarms.on_traffic(dict(tx("1325-2", source="DOT Dispatch 1", talkgroup=1325, radio_id="21237",
                                        emergency=True), start=at + 240, end=at + 242))
     assert a1["level"] == "notice" and a2["id"] == a1["id"]               # ... and the same radio again: still one
     o1 = cad.alarms.on_traffic(dict(tx("307-1", source="Fire/EMS 15", talkgroup=307, radio_id="2391001",
                                        emergency=True), start=at, end=at + 2))
-    cad.alarm_ack(o1["id"], {"operator": "Corey"})
+    cad.alarm_ack(o1["id"], {"operator": "Casey"})
     o2 = cad.alarms.on_traffic(dict(tx("307-2", source="Fire/EMS 15", talkgroup=307, radio_id="2391001",
                                        emergency=True), start=at + 240, end=at + 242))
     assert o1["level"] == o2["level"] == "alarm" and o2["id"] != o1["id"]  # ours: as before (#128)

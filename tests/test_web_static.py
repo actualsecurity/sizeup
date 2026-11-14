@@ -136,9 +136,11 @@ def test_every_admin_only_get_the_scripts_make_is_in_the_read_map():
     # (perf: #425; #403: the Search CSV; #456: the pre-plan CSV; + #409: which radios keyed an encrypted talkgroup,
     # which no script reads yet)
     assert set(ADMIN_READS) == {"/api/cad/notify", "/api/cad/health", "/api/cad/perf", "/api/cad/perf/profile",
-                                "/api/cad/search.csv", "/api/cad/preplan.csv", "/api/cad/comms/activity",
-                                "/api/reception", "/api/reception/sample", "/api/cad/stt/corrections",
-                                "/api/cad/stt/corrections.jsonl", "/api/cad/intel"}
+                                "/api/cad/search.csv", "/api/cad/preplan.csv", "/api/cad/comms/activity", "/api/cad/intel",
+                                "/api/reception", "/api/reception/sample", "/api/cad/adapter-password",   # (+ #460)
+                                "/api/cad/stt/corrections", "/api/cad/stt/corrections.jsonl"}
+    assert '"/api/cad/adapter-password"' in js("adapterpass.js")
+    assert "/api/cad/adapter-password" not in scripts.replace(js("adapterpass.js"), "")   # only its card reads it
     assert '"/api/cad/perf"' in js("health.js") and '"/api/cad/perf/profile' in js("health.js")
     assert "/api/cad/perf" not in scripts.replace(js("health.js"), "")        # only the tab reads it
     assert "/api/cad/health" not in scripts.replace(js("health.js"), "")      # only the tab reads it

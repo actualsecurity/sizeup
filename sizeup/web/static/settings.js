@@ -25,12 +25,12 @@ const S = {
 };
 // The sections, by what they are about: the CAD's lists and run cards, people, the radios, the station (its health, its
 // logs, its hub link) and the hub's data sources, then System (records, backup, audit, the hub's own switches).
-// Station (sStationTab): Health and Logs are the admins' on the hub (#203: the server refuses their data to anyone
+// Station (sStationTab): Health, Logs and Adapter (the adapter's password, adapterpass.js) are the admins' on the hub (#203: the server refuses their data to anyone
 // else), Hub link this machine's forwarding (not on the hub). #settings/health and #settings/system/health still land
 // on Station > Health (old links in pushes and bookmarks).
 const S_SECTIONS = [["lists", "Lists"], ["runcards", "Run cards"], ["units", "Units"], ["dispatch", "Dispatch"],
   ["users", "Users"], ["radios", "Radios"], ["station", "Station"], ["data", "Data sources"], ["system", "System"]];
-const S_STATION_TABS = [["health", "Health"], ["logs", "Logs"], ["link", "Hub link"]];
+const S_STATION_TABS = [["health", "Health"], ["logs", "Logs"], ["adapter", "Adapter"], ["link", "Hub link"]];
 // Settings > Radios, one tab per part (#115; the Lists page's tabs): which RadioControls card, the Tones page and the
 // Radio IDs editor each go under (data-rtab on each).
 const S_RADIO_TABS = [["receivers", "Receivers"], ["channels", "Channels"], ["squelch", "Squelch"], ["tones", "Tones"],
@@ -1920,6 +1920,7 @@ function sStationPanel(panel) {
   }
   if (S.stab === "health") sHealth($("#s-station-health"));
   if (S.stab === "logs" && window.StationLogsView) StationLogsView.mount($("#s-station-logs"));
+  if (S.stab === "adapter" && window.AdapterPasswordCard) AdapterPasswordCard.mount($("#s-station-adapter"));
   if (S.stab === "link") sStation();
 }
 function sHealth(panel) {
@@ -1976,6 +1977,33 @@ async function sPushes(card) {
     k.test ? `Test ${when(k.test.at)} ${k.test.ok ? "sent" : `failed (${k.test.error})`}` : ""].filter(Boolean).join(" · ");
     kids.push(head, now, row, last);
   }
+  // The feeds sizeup SUBSCRIBES to (Tapout's phone pre-alert) and the topics never published to: names only in Settings.
+  const pa = d.prealert || {};
+  for (const [k, key, label, hint] of [["ring", "prealert_ring", "Pre-alert ring topic", "The topic sizeup reads for a ringing station phone (read only; never published to). Empty: no pre-alerts. SIZEUP_PREALERT_RING_TOPIC overrides this."],
+    ["status", "prealert_status", "Pre-alert status topic", "The topic sizeup reads for the ring detector's heartbeat (read only; never published to). Empty: no heartbeat watch. SIZEUP_PREALERT_STATUS_TOPIC overrides this."]]) {
+    const f = pa[k];
+    if (!f) continue;
+    const head = el("div", "row");
+    head.append(el("b", "s-eta-l", label), el("span", `chip s-state ${f.topic ? "edited" : "default"}`, S_PUSH_FROM[f.source] || f.source), sHelp(hint));
+    const now = el("div", "dim small");
+    if (f.topic) now.append(el("span", "", "Reading: "), el("span", "mono", f.topic), el("span", "", ` (${f.source_text})`));
+    else now.append(Object.assign(el("span", f.source === "off" ? "" : "warn", f.source === "off" ? "Off" : "Not set: no pre-alerts yet"),
+      { title: "Set it once here: the feed starts within seconds" }));
+    const input = sInput(f.settings, d.max_len, `${label} (read only)`, null, "mono");
+    const row = el("div", "row");
+    row.append(input,
+      sBtn("Save", "Start reading this topic (within seconds)", () => sPost("notify", { action: "set", key, topic: input.value.trim() }, `${label}: saved`), "primary"),
+      ...(f.settings || f.off ? [sBtn("Clear", "Remove the Settings value", () => sPost("notify", { action: "reset", key }, `${label}: cleared`))] : []),
+      ...(f.off ? [] : [sBtn("Turn off", "Stop reading it", () => sPost("notify", { action: "off", key }, `${label}: off`), "danger-quiet")]));
+    kids.push(head, now, row);
+  }
+  const prot = (d.protected && d.protected.listed) || [];
+  const protIn = sInput(prot.join(", "), 1000, "Extra protected topics (comma separated)", null, "mono");
+  const protRow = el("div", "row");
+  protRow.append(el("b", "s-eta-l", "Protected"), protIn,
+    sBtn("Save", "Topics sizeup never publishes to, besides the ones it reads", () => sPost("notify", { action: "set", key: "protected", topics: protIn.value.trim() }, "Protected topics saved"), "primary"),
+    sHelp(`Never published to: every topic read above, plus these (${d.protected ? d.protected.count : 0} in all). A push topic can't be one of them.`));
+  kids.push(protRow);
   const srv = sInput(d.server.settings, 200, `ntfy server (empty: ${d.server.default})`, null, "mono");
   const sRow = el("div", "row");
   sRow.append(el("span", "s-eta-l", "ntfy server"), srv,
@@ -1993,7 +2021,7 @@ async function sPushes(card) {
     + "monthly limit, and their recoveries. Alerts: the emergency buttons, a mayday, an aircraft emergency, their acknowledgements "
     + "and all clears. Pre-alerts (intel): radio pre-alerts (police / fire chatter); not set: the alerts topic. "
     + "Only one of alerts / status set: everything goes to it. A name set here wins over SSM and the config file; empty uses "
-    + `them. Never Tapout's topics (${d.forbidden.join(", ")}): refused. ${d.min_len} to ${d.max_len} letters, digits, - and _; `
+    + `them. Never a protected topic (the ones read for pre-alerts, and the extras listed): refused. ${d.min_len} to ${d.max_len} letters, digits, - and _; `
     + "ntfy topics are public by name, so make them long and random. Only admins see the names.")), ...kids);
 }
 // Health alerts muted (#340, health.py MUTE_KINDS): still on Settings > Station > Health, not pushed (nor their recovery).

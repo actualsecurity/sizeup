@@ -316,7 +316,7 @@ def test_an_incident_taken_in_under_pcfd_stays_manual(rig):
 
 
 def test_the_switch_is_for_dispatchers_and_admins_and_audited(tmp_path):
-    from tests.test_roles import JULIAN, VAL, people
+    from tests.test_roles import JORDAN, VAL, people
     rig = AutoRig(tmp_path)
     api = CadApi(rig.cad)
     people(rig.cad)
@@ -327,19 +327,19 @@ def test_the_switch_is_for_dispatchers_and_admins_and_audited(tmp_path):
         return code, json.loads(raw)
     code, out = post("/api/cad/dispatch-mode", {"mode": "pcfd"}, VAL)
     assert code == 403 and rig.cad.auto.mode() == "60control"
-    code, out = post("/api/cad/dispatch-mode", {"mode": "pcfd"}, JULIAN)
+    code, out = post("/api/cad/dispatch-mode", {"mode": "pcfd"}, JORDAN)
     assert code == 200 and out["mode"] == "pcfd" and rig.cad.auto.mode() == "pcfd"
-    code, out = post("/api/cad/dispatch-mode", {"mode": "auto"}, JULIAN)
+    code, out = post("/api/cad/dispatch-mode", {"mode": "auto"}, JORDAN)
     assert code == 400
     a = rig.cad.settings.audit_log("dispatch")[0]
     assert (a["key"], json.loads(a["old"]), json.loads(a["new"]), a["operator"]) == \
-        ("dispatch_mode", "60 Control dispatching", "PCFD dispatching", "Julian <julian@example.org>")
+        ("dispatch_mode", "60 Control dispatching", "PCFD dispatching", "Jordan <jordan@example.org>")
     st = rig.cad.state()["dispatch_mode"]
-    assert st["mode"] == "pcfd" and st["by"] == "Julian <julian@example.org>"
-    assert "Dispatch mode: PCFD dispatching" in [r["summary"] for r in rig.cad.activity.rows(JULIAN, "action", None, 5)]
-    post("/api/cad/dispatch-mode", {"mode": "60control"}, JULIAN)
+    assert st["mode"] == "pcfd" and st["by"] == "Jordan <jordan@example.org>"
+    assert "Dispatch mode: PCFD dispatching" in [r["summary"] for r in rig.cad.activity.rows(JORDAN, "action", None, 5)]
+    post("/api/cad/dispatch-mode", {"mode": "60control"}, JORDAN)
     assert rig.cad.auto.mode() == "60control" and len(rig.cad.settings.audit_log("dispatch")) == 2
-    assert rig.cad.state()["dispatch_mode"]["by"] == "Julian <julian@example.org>"
+    assert rig.cad.state()["dispatch_mode"]["by"] == "Jordan <jordan@example.org>"
 
 
 def test_the_mode_is_not_a_setting_to_export_or_import(rig):

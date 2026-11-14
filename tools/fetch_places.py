@@ -90,7 +90,7 @@ class Calibration(NamedTuple):
     points: list[CalPoint]
 
 
-# 60 Control's own mileage (GitHub #83: Julian's photos of the CAD commonplace lists, 2026-10-13), per
+# 60 Control's own mileage (GitHub #83: photos of the CAD commonplace lists, 2026-10-13), per
 # road and side. The positions: an exit at its OSM motorway_junction node (where the ramp leaves), a
 # bridge where the cross street's OSM way crosses the carriageway, the state line where the OSM boundary
 # does. For the roads in LRS_ROUTES the offset between NYSDOT's milepoints and these is fitted (the mean

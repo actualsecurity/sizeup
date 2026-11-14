@@ -151,7 +151,7 @@ function operator() {
   const pick = $("#operator-pick");
   return (pick.hidden ? $("#operator").value : pick.value).trim();
 }
-// "Corey <corey@example.org>": an operator who signed in through Cloudflare Access (the hub,
+// "Casey <casey@example.org>": an operator who signed in through Cloudflare Access (the hub,
 // sizeup/cloud/access.py). Shown by name with the email as the tooltip; a typed name as it is.
 function opParts(s) {
   const m = /^(.*\S) <([^<>\s]+@[^<>\s]+)>$/.exec(s || "");

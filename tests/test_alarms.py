@@ -22,7 +22,7 @@ from sizeup.radio.p25 import parse_call, split_call
 from tests.test_cad import make_cad, uid
 from tests.test_cloud import HubRun, TOKEN, base, call as http, hub_cfg
 from tests.test_p25 import LABELS, T0, day_dir, tr_call
-from tests.test_roles import COREY, JULIAN, VAL, people
+from tests.test_roles import CASEY, JORDAN, VAL, people
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -37,7 +37,7 @@ def _notify_stays_local(monkeypatch):
 
     def local_only(req, *a, **kw):
         assert urlsplit(req.full_url).hostname in ("127.0.0.1", "localhost"), req.full_url
-        assert json.loads(req.data)["topic"] not in ("pcfd-phone-prealert", "pcfd-status")
+        assert json.loads(req.data)["topic"] not in ("example-ring-topic", "example-status-topic")
         return real(req, *a, **kw)
     monkeypatch.setattr(notify, "urlopen", local_only)
 
@@ -214,9 +214,9 @@ def test_the_emergency_button_ours_or_on_our_channel_alarms_elsewhere_a_notice(t
     st = cad.state()["alarms"]
     assert [x["id"] for x in st["notices"]] == [pd["id"]] and pd["id"] not in [x["id"] for x in st["open"]]
     # configurable: "alarm" makes it the full alarm, "off" nothing
-    cad.settings_post("alarms", {"action": "set", "key": "other", "value": "off", "operator": "Corey"})
+    cad.settings_post("alarms", {"action": "set", "key": "other", "value": "off", "operator": "Casey"})
     assert cad.alarms.on_traffic(tx("p-4", source="WCPD Ch 1", talkgroup=383, radio_id="5550002", emergency=True)) is None
-    cad.settings_post("alarms", {"action": "set", "key": "other", "value": "alarm", "operator": "Corey"})
+    cad.settings_post("alarms", {"action": "set", "key": "other", "value": "alarm", "operator": "Casey"})
     assert cad.alarms.on_traffic(tx("p-5", source="WCPD Ch 1", talkgroup=383, radio_id="5550003",
                                     emergency=True))["level"] == "alarm"
 
@@ -228,20 +228,20 @@ def test_an_old_transmission_raises_nothing(tmp_path):
 
 def test_the_fire_channels_and_words_are_settings(tmp_path):
     cad = make_cad(tmp_path)
-    cad.settings_post("alarms", {"action": "set", "key": "keywords", "value": ["code red"], "operator": "Corey"})
+    cad.settings_post("alarms", {"action": "set", "key": "keywords", "value": ["code red"], "operator": "Casey"})
     assert cad.alarms.on_traffic(tx("k-1", "mayday mayday")) is None
     assert cad.alarms.on_traffic(tx("k-2", "Code Red on the roof"))["keywords"] == ["code red"]
-    cad.settings_post("alarms", {"action": "set", "key": "channels", "value": ["FG2"], "operator": "Corey"})
+    cad.settings_post("alarms", {"action": "set", "key": "channels", "value": ["FG2"], "operator": "Casey"})
     assert cad.alarms.on_traffic(tx("k-3", "code red", source="FG1")) is None
     assert cad.alarms.on_traffic(tx("k-4", "code red", source="FG2"))
     audit = cad.settings.audit_log("system")
     assert {r["key"] for r in audit} >= {"alarms/keywords", "alarms/channels"}
-    cad.settings_post("alarms", {"action": "reset", "key": "keywords", "operator": "Corey"})
+    cad.settings_post("alarms", {"action": "reset", "key": "keywords", "operator": "Casey"})
     assert cad.alarms.config()["keywords"] == list(KEYWORDS)
     # the settings export imports again
     exp = cad.settings_export()
     assert exp["overrides"]["alarms"]["channels"] == ["FG2"]
-    assert cad.settings_post("import", {"action": "dry_run", "settings": exp, "operator": "Corey"})
+    assert cad.settings_post("import", {"action": "dry_run", "settings": exp, "operator": "Casey"})
 
 
 # -- the event, acknowledge, roles, drill -------------------------------------------------------------------------
@@ -258,15 +258,15 @@ def test_linked_to_the_open_event_of_the_rig_and_acknowledged_in_its_chronology(
     assert a["incident_id"] == inc["id"] and a["incident_number"] == num and a["named"] == ["E64", "L31"]
     lines = [e["text"] for e in cad.full(inc["id"])["events"] if e["kind"] == "alarm"]
     assert lines == [f"EMERGENCY: E64 P1 mayday on FG1 at {alarms_mod._hms(t['start'])}"]
-    got = cad.alarm_ack(a["id"], {"operator": "Corey <corey@example.org>"})
-    assert got["ack_by"] == "Corey <corey@example.org>" and got["ack_at"]
+    got = cad.alarm_ack(a["id"], {"operator": "Casey <casey@example.org>"})
+    assert got["ack_by"] == "Casey <casey@example.org>" and got["ack_at"]
     lines = [e["text"] for e in cad.full(inc["id"])["events"] if e["kind"] == "alarm"]
-    assert lines[-1] == (f"EMERGENCY: E64 P1 mayday on FG1 at {alarms_mod._hms(t['start'])}; acknowledged by Corey "
+    assert lines[-1] == (f"EMERGENCY: E64 P1 mayday on FG1 at {alarms_mod._hms(t['start'])}; acknowledged by Casey "
                          f"at {alarms_mod._hms(got['ack_at'])}")
     st = cad.state()["alarms"]
     assert not st["open"] and [x["id"] for x in st["recent"]] == [a["id"]]
     with pytest.raises(Exception, match="already acknowledged"):
-        cad.alarm_ack(a["id"], {"operator": "Julian"})
+        cad.alarm_ack(a["id"], {"operator": "Jordan"})
     with pytest.raises(Exception, match="operator"):
         cad.alarm_ack(cad.alarms.on_traffic(tx("FG1-10", "mayday mayday"))["id"], {"operator": ""})
 
@@ -295,13 +295,13 @@ def test_acknowledge_is_for_dispatchers_and_admins(tmp_path):
         return code, json.loads(raw)
     code, out = post(f"/api/cad/alarm/{a['id']}/ack", {}, VAL)                # a viewer sees it, can't acknowledge
     assert code == 403 and api.cad.alarms.get(a["id"])["ack_at"] is None
-    code, out = post("/api/cad/settings/alarms", {"action": "set", "key": "drill", "value": True}, JULIAN)
+    code, out = post("/api/cad/settings/alarms", {"action": "set", "key": "drill", "value": True}, JORDAN)
     assert code == 403                                                         # drill mode: admins
-    code, out = post(f"/api/cad/alarm/{a['id']}/ack", {"operator": "typed name"}, JULIAN)
-    assert code == 200 and out["ack_by"].startswith("Julian") and "julian@example.org" in out["ack_by"]
-    acts = api.cad.activity.rows(JULIAN, "action", None, 10)
+    code, out = post(f"/api/cad/alarm/{a['id']}/ack", {"operator": "typed name"}, JORDAN)
+    assert code == 200 and out["ack_by"].startswith("Jordan") and "jordan@example.org" in out["ack_by"]
+    acts = api.cad.activity.rows(JORDAN, "action", None, 10)
     assert acts and acts[0]["summary"].startswith("Acknowledged the emergency alarm")
-    code, out = post("/api/cad/settings/alarms", {"action": "set", "key": "drill", "value": True}, COREY)
+    code, out = post("/api/cad/settings/alarms", {"action": "set", "key": "drill", "value": True}, CASEY)
     assert code == 200 and out["alarms"]["drill"] is True
     code, raw, _ = api.get("/api/cad/alarms", "", Identity(email=VAL))
     assert code == 200 and json.loads(raw)["drill"] is True
@@ -309,11 +309,11 @@ def test_acknowledge_is_for_dispatchers_and_admins(tmp_path):
 
 def test_drill_mode_labels_the_alarm_and_its_chronology(tmp_path):
     cad = make_cad(tmp_path)
-    cad.settings_post("alarms", {"action": "set", "key": "drill", "value": True, "operator": "Corey"})
+    cad.settings_post("alarms", {"action": "set", "key": "drill", "value": True, "operator": "Casey"})
     a = cad.alarms.on_traffic(tx(text="mayday mayday", rig="E64", radio_id="6401"))
     assert a["drill"] and alarms_mod.line(a).startswith("DRILL — EMERGENCY: E64 mayday on FG1")
     assert cad.state()["alarms"]["drill"] is True
-    cad.settings_post("alarms", {"action": "set", "key": "drill", "value": False, "operator": "Corey"})
+    cad.settings_post("alarms", {"action": "set", "key": "drill", "value": False, "operator": "Casey"})
     assert not cad.alarms.on_traffic(tx("FG1-2", text="mayday mayday"))["drill"]
 
 
@@ -337,15 +337,15 @@ def test_each_alarm_and_its_acknowledgement_is_pushed_with_who_and_where(tmp_pat
     assert m["title"].startswith("MAYDAY") and "E64 P1 (Engine 64)" in m["title"] and "on FG1" in m["title"]
     assert num in m["title"] and "100 S Ridge St" in m["title"]
     assert "heard: “mayday mayday mayday" in m["message"] and "units named: E64, L31" in m["message"]
-    cad.alarm_ack(a["id"], {"operator": "Corey"})
+    cad.alarm_ack(a["id"], {"operator": "Casey"})
     assert cad.alarms.notifier.flush(5) and len(ntfy.got) == 2
-    assert ntfy.got[1]["title"].startswith("Acknowledged: MAYDAY") and "acknowledged by Corey" in ntfy.got[1]["message"]
+    assert ntfy.got[1]["title"].startswith("Acknowledged: MAYDAY") and "acknowledged by Casey" in ntfy.got[1]["message"]
     # a notice is not pushed
     cad.alarms.on_traffic(tx("p-9", source="WCPD Ch 1", talkgroup=383, radio_id="5550001", emergency=True))
     assert cad.alarms.notifier.flush(5) and len(ntfy.got) == 2
 
 
-def test_the_push_topic_is_config_and_never_tapouts(tmp_path, monkeypatch):
+def test_the_push_topic_is_config_and_never_a_subscribed_one(tmp_path, monkeypatch):
     for k in ("SIZEUP_ALERT_TOPIC", "SIZEUP_ALERT_SERVER"):
         monkeypatch.delenv(k, raising=False)
     cfg = tmp_path / "config.toml"
@@ -353,9 +353,9 @@ def test_the_push_topic_is_config_and_never_tapouts(tmp_path, monkeypatch):
     assert load(cfg).alerts_ntfy_topic == "sizeup-test-alarms-0123"
     cfg.write_text("")
     assert load(cfg).alerts_ntfy_topic == ""                       # empty by default: no pushes
-    for topic in ("pcfd-phone-prealert", "pcfd-status"):
-        cfg.write_text(f'[alerts]\nntfy_topic = "{topic}"\n')
-        with pytest.raises(ConfigError, match="Tapout"):
+    for topic in ("example-ring-topic", "example-status-topic"):
+        cfg.write_text(f'[prealert]\nring_topic = "example-ring-topic"\nstatus_topic = "example-status-topic"\n[alerts]\nntfy_topic = "{topic}"\n')
+        with pytest.raises(ConfigError, match="protected"):
             load(cfg)
 
 

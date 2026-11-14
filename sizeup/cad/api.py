@@ -6,7 +6,7 @@ Who: on the hub behind Cloudflare Access the server hands each request the verif
 Users), whatever the page sent: post() is the one place every write goes through. Without Access,
 `operator` is what the page sent (the Operator field), as before.
 
-Roles (user, 2026-10-08: "now that i added julian and myself, myself as an admin i should only be
+Roles (user, 2026-10-08: "now that i added a colleague and myself, myself as an admin i should only be
 the one to make changes?"): with that verified person, every POST is checked against WRITES first
 (permit(); server.py asks the same for its own POSTs): admins change anything, dispatchers run
 calls, viewers (and deactivated users) only look; a 403 {"error"} otherwise, logged. Until there is
@@ -360,6 +360,7 @@ ADMIN_READS = {
     "/api/cad/preplan.csv": "the pre-plan export is for admins",              # #456: every Knox box at once
     "/api/cad/stt/corrections": "transcript corrections are for admins",      # the STT reference set (sttfix.py)
     "/api/cad/stt/corrections.jsonl": "the transcript corrections export is for admins",   # #428's JSONL
+    "/api/cad/adapter-password": "the station adapter's password is for admins (Settings > Station > Adapter)",   # server.py
     "/api/cad/intel": "the radio pre-alert rules are for admins (Settings > System > Intel)",   # #411: rule phrases
 }
 
@@ -392,6 +393,7 @@ WRITES = (
     (DATASOURCE, "admin"),                                                  # a data source's Refresh now (#186)
     (re.compile(r"/api/cad/perf/profile"), "admin"),                        # a CPU profile of the hub (#425, server.py)
     (STT_CORRECTION, "admin"),                                              # a hand-corrected transcript (sttfix.py)
+    (re.compile(r"/api/cad/adapter-password"), "admin"),                    # the station adapter's password (server.py)
     (DVR_PIN, "dispatch"),                                                  # keep recording a camera (#277)
     (DVR_CLIP, "dispatch"),                                                 # save a camera clip on an event (#323)
     (ATTACHMENT, "admin"),                                                  # delete an event's attachment (#323)
@@ -639,6 +641,8 @@ DOES = (
                                      _number(c, (o.get("attachment") or {}).get("incident_id")))),
     (DATASOURCE, lambda m, b, o, c: (f"Refreshed data source: {_clip((o.get('source') or {}).get('name') or unquote(m.group(1)), 60)}", "")),
     (re.compile(r"/api/cad/perf/profile"), lambda m, b, o, c: (f"Profiled the hub's CPU ({_clip(b.get('seconds'), 6)} s)", "")),
+    # never the body (it held the password): the version SSM gave, from the answer
+    (re.compile(r"/api/cad/adapter-password"), lambda m, b, o, c: (f"Saved the station adapter password (v{int(o.get('version') or 0)})", "")),
     (re.compile(r"/api/talkgroup"), lambda m, b, o, c: (f"Talkgroup {b.get('tg')}: {_toggles(b) or 'no change'}", "")),
     (re.compile(r"/api/talkgroup-group"), lambda m, b, o, c: (f"Talkgroups {_clip(b.get('group'), 40)}: {_toggles(b) or 'no change'}", "")),
     (re.compile(r"/api/mode"), lambda m, b, o, c: (f"Radio mode: {_clip(b.get('mode'), 30)}" + (f" ({_clip(b['sdr'], 30)})" if b.get("sdr") else ""), "")),

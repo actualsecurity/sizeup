@@ -35,7 +35,11 @@ Reset to default = drop the override (one item, or a whole section).
                                    list, never written into it (sizeup/app.py _apply_named_tones)
     camera_wall                    key "margin_m" -> metres around our fire districts, "include" / "exclude" -> [camera
                                    ids]: the camera wall's area (#125, Settings > System; sizeup/roads.py Roads.area)
-    notify                         key "alerts" | "status" -> {"topic": name} | {"off": true}, "server" -> the ntfy URL:
+    notify                         key "alerts" | "status" -> {"topic": name} | {"off": true}, "server" -> the ntfy URL;
+                                   "prealert_ring" | "prealert_status" -> {"topic": name} | {"off": true}: the Tapout feed
+                                   sizeup SUBSCRIBES to (env SIZEUP_PREALERT_*_TOPIC wins; none set: that feed is off),
+                                   "protected" -> {"topics": [names]}: more topics never published to (the subscribed
+                                   ones always are). None of these names is in the repo.
                                    the push topics by kind over env / SSM / the config (sizeup/notify.py Pushes;
                                    Settings > System > Push notifications, admins). Secret by name: never exported,
                                    kept through an import, a fingerprint in the audit log
@@ -2481,6 +2485,8 @@ class Editor:
                                [("system", f"{NOTIFY_SECTION}/server", old, v or f"default {p.default_server[0]}")])
             self.cad.log(p.line() + " (Settings changed)")
             return out
+        if key in (notify.PREALERT_RING, notify.PREALERT_STATUS, notify.PROTECTED):
+            return self._notify_protected_op(action, body, op, key, p, cur)
         if key not in notify.KINDS:
             raise CadError("key: alerts, status or intel")
         def said(v) -> str:                          # never the name: the audit log is open to everyone signed in
@@ -2522,6 +2528,86 @@ class Editor:
         self.cad.log(p.line() + " (Settings changed)")
         return out
 
+    def _notify_protected_op(self, action: str, body: dict, op: str, key: str, p, cur: dict) -> dict:
+        """The pre-alert topics sizeup subscribes to (prealert_ring / prealert_status: set {topic} | off | reset) and the
+        extra topics never published to (protected: set {topics: [..] | "a, b"} | reset). Never a name in the audit log.
+        A name that is one of our own push topics in effect is refused (it would silence them: protected topics are
+        never published to), and a subscribed topic can't be both feeds."""
+        from sizeup import notify
+        import re as _re
+        label = {notify.PREALERT_RING: "Pre-alert ring topic", notify.PREALERT_STATUS: "Pre-alert status topic",
+                 notify.PROTECTED: "Protected topics"}[key]
+        ours = {p.effective(k)["topic"].lower() for k in notify.KINDS if p.effective(k)["topic"]}
+
+        def check(t: str) -> str:
+            if not notify.TOPIC.fullmatch(t):
+                return f"{t[:20]!r}: letters, digits, - and _ (at most 64)"
+            if t.lower() in ours:
+                return "that is one of our own push topics in effect: it can't also be protected"
+            return ""
+        old = cur.get(key)
+        if key == notify.PROTECTED:
+            if action == "reset" or (action == "set" and not body.get("topics")):
+                new = REMOVE
+            elif action == "set":
+                raw = body["topics"]
+                names = _re.split(r"[\s,;]+", raw) if isinstance(raw, str) else raw
+                if not isinstance(names, list) or len(names) > 50:
+                    raise CadError("topics: a list of up to 50 ntfy topic names")
+                names = list(dict.fromkeys(str(n).strip() for n in names if str(n).strip()))
+                for n in names:
+                    if check(n):
+                        raise CadError(f"{label}: {check(n)}")
+                new = {"topics": names}
+            else:
+                raise CadError("action: set or reset")
+            said = lambda v: (f"{len(v['topics'])} listed" if isinstance(v, dict) else "none")      # noqa: E731
+        else:
+            if action == "set":
+                t = _text(body.get("topic"), "topic", 64, required=False)
+                if t:
+                    if check(t):
+                        raise CadError(f"{label}: {check(t)}")
+                    other = cur.get(notify.PREALERT_STATUS if key == notify.PREALERT_RING else notify.PREALERT_RING)
+                    if isinstance(other, dict) and str(other.get("topic") or "").lower() == t.lower():
+                        raise CadError(f"{label}: the ring and status topics must differ")
+                    new = {"topic": t}
+                else:
+                    new = REMOVE
+            elif action == "off":
+                new = {"off": True}
+            elif action == "reset":
+                if old is None:
+                    raise CadError(f"{label} is on its default already")
+                new = REMOVE
+            else:
+                raise CadError("action: set, off or reset")
+            said = lambda v: ("default" if not isinstance(v, dict) else "off" if v.get("off")      # noqa: E731
+                              else f"Settings: {notify.fingerprint(str(v.get('topic') or ''))}")
+        if (old is None and new is REMOVE) or old == new:
+            return {"ok": True}
+        changes = [(NOTIFY_SECTION, key, new)]
+        audit = [("system", f"{NOTIFY_SECTION}/{key}", said(old), said(None if new is REMOVE else new))]
+        gone = str(old.get("topic") or "").strip() if isinstance(old, dict) and key != notify.PROTECTED else ""
+        newt = str(new.get("topic") or "").strip() if isinstance(new, dict) else ""
+        if gone and gone.lower() != newt.lower():
+            # a topic read until now (it may page people) leaves the feed but stays protected: never a publishable topic
+            listed = list(((cur.get(notify.PROTECTED) or {}).get("topics")) or [])
+            if gone.lower() not in {x.lower() for x in listed}:
+                listed.append(gone)
+                changes.append((NOTIFY_SECTION, notify.PROTECTED, {"topics": listed}))
+                audit.append(("system", f"{NOTIFY_SECTION}/{notify.PROTECTED}", f"{len(listed) - 1} listed",
+                              f"{len(listed)} listed (a retired feed topic)"))
+        out = self._commit(changes, op, audit)
+        self.cad.log(f"notify: {label} changed in Settings")
+        sync = getattr(getattr(self.cad, "prealert", None), "sync_topics", None)
+        if sync is not None:
+            try:
+                sync()
+            except Exception as e:  # noqa: BLE001 - the next tick follows it
+                self.cad.log(f"notify: pre-alert topics: {type(e).__name__}")
+        return out
+
     def note(self, operator: str, section: str, key: str, old, new) -> None:
         """An audit row for something done from Settings that isn't a setting (a data source's Refresh now, #186)."""
         with self.store.tx() as db:
@@ -2561,7 +2647,7 @@ class Editor:
 
     # Signed in through Cloudflare Access (sizeup/cloud/access.py, 2026-10-07): the verified email is
     # who did it. What's recorded as the operator is "Name <email>" (just the email until someone
-    # names it here), so the chronology reads "Corey" (cad.js shows the name, the email as its
+    # names it here), so the chronology reads "Casey" (cad.js shows the name, the email as its
     # tooltip) and the audit can't mix up two people with one name.
 
     @staticmethod

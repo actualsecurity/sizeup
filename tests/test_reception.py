@@ -31,7 +31,7 @@ from sizeup.radio.recorder import SystemUnitRecorder
 from tests.test_health import access_hub, call, jwt, keys, jwks, people, req, station_status  # noqa: F401  (fixtures)
 from tests.test_p25 import tr_call
 from tests.test_p25_systems import MRRS, finder, service, system_dir
-from tests.test_roles import COREY, DEE, JULIAN, VAL
+from tests.test_roles import CASEY, DEE, JORDAN, VAL
 from tests.test_trunk_recorder_unit import SERVICE_PID
 
 PD, PD_SECURE, EMS = 9211, 9213, 9570
@@ -1325,7 +1325,7 @@ def test_on_the_hub_only_an_admin_sees_or_runs_a_reception_test(keys, access_hub
     st = station_status()
     st["reception"] = RX_REPORT
     assert call(h.url + "/api/station/state", "POST", {"at": 1, "status": st})[0] == 200
-    for who in (JULIAN, VAL, DEE):
+    for who in (JORDAN, VAL, DEE):
         for path in ("/api/reception", "/api/reception/sample?id=0123456789ab"):
             code, out = req(h.url + path, headers=as_(who))
             assert code == 403 and out["error"].startswith("Admins only") and "whip" not in json.dumps(out), (who, path)
@@ -1335,14 +1335,14 @@ def test_on_the_hub_only_an_admin_sees_or_runs_a_reception_test(keys, access_hub
         code, state = req(h.url + "/api/state", headers=as_(who))
         assert code == 200 and "reception" not in state and "whip on the roof" not in json.dumps(state)
     assert req(h.url + "/api/reception")[0] == 401             # nobody: not even that
-    code, out = req(h.url + "/api/reception", headers=as_(COREY))
+    code, out = req(h.url + "/api/reception", headers=as_(CASEY))
     assert code == 200 and out["reception"]["history"][0]["note"] == "whip on the roof"
     assert len(out["reception"]["samples"]) == 1 and "samples_at" not in out["reception"]     # signed in: the list
     # ... and the call itself: the hub asks the station for it (its job queue), for a signed-in admin only
     import base64
     asked = []
     h.app.hub.remote = lambda fn, *a, **k: asked.append((fn, a)) or base64.b64encode(b"RIFF-made-up").decode()
-    code, wav = req(h.url + "/api/reception/sample?id=0123456789ab", headers=as_(COREY))
+    code, wav = req(h.url + "/api/reception/sample?id=0123456789ab", headers=as_(CASEY))
     assert code == 200 and wav[:4] == b"RIFF" and asked == [("reception_sample_b64", ("0123456789ab",))]
     assert req(h.url + "/api/reception/sample?id=0123456789ab")[0] == 401 and len(asked) == 1     # nobody: never asked
 
@@ -1355,12 +1355,12 @@ def activity(h) -> list[tuple]:
 def test_the_hub_logs_refused_attempts_and_how_each_test_ended(keys, access_hub):  # noqa: F811
     h = access_hub
     people(h.app.cad)
-    admin = {"Cf-Access-Jwt-Assertion": jwt(keys[0], email=COREY)}
+    admin = {"Cf-Access-Jwt-Assertion": jwt(keys[0], email=CASEY)}
     # refused (here: no station to run it; on the station: a held or protected dongle, its words): logged as refused
     code, out = req(h.url + "/api/reception", "POST", {"action": "start", "job": "MRRS 770", "sdr": "00000101",
                                                        "pause": "South 2"}, headers=admin)
     assert code == 400 and out["error"]
-    assert [(a[0], a[1], a[3]) for a in activity(h)] == [(COREY, "refused", 0)] and "Refused: reception" in activity(h)[0][2]
+    assert [(a[0], a[1], a[3]) for a in activity(h)] == [(CASEY, "refused", 0)] and "Refused: reception" in activity(h)[0][2]
     # a start that goes through: the station is sent the test's id, never who asked; the hub keeps who under it
     sent = []
     h.app._switch = lambda fn, *a: sent.append((fn, a)) and None
@@ -1368,16 +1368,16 @@ def test_the_hub_logs_refused_attempts_and_how_each_test_ended(keys, access_hub)
     assert req(h.url + "/api/reception", "POST", body, headers=admin)[0] == 200
     (fn, (got, by, tid)), = sent
     assert (fn, got, by) == ("reception_post", body, "") and reception.SAMPLE_ID.fullmatch(tid)
-    assert h.app._reception_who(tid) == COREY and COREY not in json.dumps(sent)
-    assert activity(h)[1] == (COREY, "action", "Reception test started: MRRS 770 on SDR 00000104, pausing HPN Tower", 1)
-    h.app._reception_who("aaaaaaaaaaaa", COREY)                # (the made-up report's tests below were his too)
-    h.app._reception_who("bbbbbbbbbbbb", COREY)
+    assert h.app._reception_who(tid) == CASEY and CASEY not in json.dumps(sent)
+    assert activity(h)[1] == (CASEY, "action", "Reception test started: MRRS 770 on SDR 00000104, pausing HPN Tower", 1)
+    h.app._reception_who("aaaaaaaaaaaa", CASEY)                # (the made-up report's tests below were his too)
+    h.app._reception_who("bbbbbbbbbbbb", CASEY)
     # the station's report: a test that ended is a row of who started it, once, with what became of the dongle
     st = station_status()
     st["reception"] = RX_REPORT
     for _ in range(3):
         assert call(h.url + "/api/station/state", "POST", {"at": 1, "status": st})[0] == 200
-    assert activity(h)[2:] == [(COREY, "action", "Reception test done: MRRS 770 on SDR 104 · marginal · HPN Tower restored", 1)]
+    assert activity(h)[2:] == [(CASEY, "action", "Reception test done: MRRS 770 on SDR 104 · marginal · HPN Tower restored", 1)]
     # ... a Stop from here answers before the dongle is back: its outcome arrives the same way, late or not restored
     late = json.loads(json.dumps(RX_REPORT))
     late["history"].insert(0, dict(late["history"][0], id="bbbbbbbbbbbb", status="stopped", restored_ok=False,
@@ -1385,7 +1385,7 @@ def test_the_hub_logs_refused_attempts_and_how_each_test_ended(keys, access_hub)
                                    restored="HPN Tower NOT restored yet (in use by shortfinal (AM 118.575)): retrying"))
     st["reception"] = late
     assert call(h.url + "/api/station/state", "POST", {"at": 2, "status": st})[0] == 200
-    assert activity(h)[3] == (COREY, "action", "Reception test stopped (SDR 104 was switched in Settings > Radios): MRRS 770 "
+    assert activity(h)[3] == (CASEY, "action", "Reception test stopped (SDR 104 was switched in Settings > Radios): MRRS 770 "
                               "on SDR 104 · marginal · HPN Tower NOT restored yet (in use by shortfinal (AM 118.575)): "
                               "retrying", 0)
     late["history"][0].update(restored="HPN Tower restored (after 3 tries)", restored_ok=True)

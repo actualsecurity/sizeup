@@ -85,15 +85,15 @@ const fs = require("fs");
 const src = fs.readFileSync(process.argv[2], "utf8");
 eval(process.argv[3]);
 const inc = { id: 7, remarks: "ZONE 1 - GENERAL", created_at: 100, source: "manual", events: [
-  { id: 1, kind: "created", at: 100, text: "Event created", operator: "Corey" },
-  { id: 2, kind: "note", at: 110, text: "first", operator: "Corey" },
-  { id: 3, kind: "status", at: 120, text: "E63 dispatched", operator: "Corey" },
+  { id: 1, kind: "created", at: 100, text: "Event created", operator: "Casey" },
+  { id: 2, kind: "note", at: 110, text: "first", operator: "Casey" },
+  { id: 3, kind: "status", at: 120, text: "E63 dispatched", operator: "Casey" },
   { id: 4, kind: "note", at: 130, text: "E63 stated that the alarm is resetting", units: "E63", operator: "Sam" },
   { id: 5, kind: "system", at: 140, text: "Caller info", operator: "" },
 ]};
 const page = { id: 8, remarks: "SMOKE IN THE BUILDING", created_at: 50, source: "60 Control page", events: [
   { id: 9, kind: "created", at: 50, text: "From 60 Control page", operator: "" },
-  { id: 10, kind: "accepted", at: 60, text: "Accepted", operator: "Corey" },
+  { id: 10, kind: "accepted", at: 60, text: "Accepted", operator: "Casey" },
 ]};
 const pick = (xs) => xs.map((e) => [e.id, e.kind, e.at, e.operator || "", e.text]);
 console.log(JSON.stringify({
@@ -112,12 +112,12 @@ def test_the_remarks_first_then_the_comments_in_time_order(tmp_path):
     out = json.loads(subprocess.run([NODE, str(h), str(STATIC / "cad.js"), fn], capture_output=True, text=True,
                                     check=True, timeout=30).stdout)
     # the remarks first, at the call's time, by who took it; then the comments only, oldest first (newest at the bottom)
-    assert out["only"] == [["remarks", "remarks", 100, "Corey", "ZONE 1 - GENERAL"],
-                           [2, "note", 110, "Corey", "first"],
+    assert out["only"] == [["remarks", "remarks", 100, "Casey", "ZONE 1 - GENERAL"],
+                           [2, "note", 110, "Casey", "first"],
                            [4, "note", 130, "Sam", "E63 stated that the alarm is resetting"]]
     # Everything: every entry in the Timeline's order, the remarks still first
     assert [x[0] for x in out["all"]] == ["remarks", 1, 2, 3, 4, 5]
-    assert out["none"] == [[2, "note", 110, "Corey", "first"], [4, "note", 130, "Sam", "E63 stated that the alarm is resetting"]]
+    assert out["none"] == [[2, "note", 110, "Casey", "first"], [4, "note", 130, "Sam", "E63 stated that the alarm is resetting"]]
     # a page's remarks are the page's: by 60 Control, not by who accepted it
     assert out["page"] == [["remarks", "remarks", 50, "60 Control page", "SMOKE IN THE BUILDING"]]
 

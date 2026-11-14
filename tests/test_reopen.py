@@ -14,7 +14,7 @@ from sizeup.cad.api import CadApi, needs
 from sizeup.cad.store import TZ, CadError
 from sizeup.cloud.access import Identity
 from tests.test_cad import Clock, by_name, local, make_cad, texts, uid
-from tests.test_roles import COREY, JULIAN, VAL, api, call  # noqa: F401  (fixtures)
+from tests.test_roles import CASEY, JORDAN, VAL, api, call  # noqa: F401  (fixtures)
 
 STATIC = Path(__file__).resolve().parent.parent / "sizeup" / "web" / "static"
 
@@ -37,11 +37,11 @@ def test_closed_with_units_reopens_active_disposition_into_the_chronology(tmp_pa
     before = cad.store.full(iid)
     assert (before["status"], before["disposition"]) == ("closed", "COMPLETE") and before["closed_at"] == clock.t
     clock.t += 600                                              # 16:41, closed at 16:31
-    inc = cad.reopen(iid, {"operator": "Julian <julian@example.org>"})
+    inc = cad.reopen(iid, {"operator": "Jordan <jordan@example.org>"})
     assert (inc["status"], inc["disposition"], inc["closed_at"], inc["number"]) == ("active", "", None, before["number"])
     full = cad.store.full(iid)
-    assert full["events"][-1]["kind"] == "reopened" and full["events"][-1]["operator"] == "Julian <julian@example.org>"
-    assert texts(cad, iid)[-1] == "Reopened by Julian; was Complete at 16:31"
+    assert full["events"][-1]["kind"] == "reopened" and full["events"][-1]["operator"] == "Jordan <jordan@example.org>"
+    assert texts(cad, iid)[-1] == "Reopened by Jordan; was Complete at 16:31"
     # no unit comes back by itself: E60 stays cleared and available; the dispatcher adds units again
     assert all(a["cleared_at"] for a in full["assignments"]) and by_name(cad, "E60")["incident_id"] is None
     assert [i["id"] for i in cad.store.incidents() if i["status"] == "active"] == [iid]
@@ -106,27 +106,27 @@ def test_an_open_event_cant_be_reopened(tmp_path):
 
 def test_reopen_is_a_dispatcher_write_audited_and_refused_to_a_viewer(api):  # noqa: F811
     assert needs("/api/cad/incident/7/reopen") == "dispatch"
-    code, inc = call(api, "/api/cad/incident", {"type": "STRU", "address": "209 Westchester Ave"}, JULIAN)
+    code, inc = call(api, "/api/cad/incident", {"type": "STRU", "address": "209 Westchester Ave"}, JORDAN)
     iid, n = inc["id"], inc["number"]
-    assert call(api, f"/api/cad/incident/{iid}/reopen", {}, JULIAN) == (400, {"error": "Event pending: not closed"})
-    assert call(api, f"/api/cad/incident/{iid}/close", {"disposition": "COMPLETE"}, JULIAN)[0] == 200
+    assert call(api, f"/api/cad/incident/{iid}/reopen", {}, JORDAN) == (400, {"error": "Event pending: not closed"})
+    assert call(api, f"/api/cad/incident/{iid}/close", {"disposition": "COMPLETE"}, JORDAN)[0] == 200
     assert call(api, f"/api/cad/incident/{iid}/reopen", {}, VAL) == (403, {"error": "Dispatchers and admins only (you: viewer)"})
     closed = api.cad.store.incident(iid)
     assert closed["status"] == "closed"
-    code, out = call(api, f"/api/cad/incident/{iid}/reopen", {}, JULIAN)
+    code, out = call(api, f"/api/cad/incident/{iid}/reopen", {}, JORDAN)
     assert code == 200 and out["status"] == "pending" and out["number"] == n
     assert api.cad.store.q("SELECT operator FROM events WHERE incident_id = ? AND kind = 'reopened'", (iid,)) \
-        == [{"operator": "Julian <julian@example.org>"}]            # the signed-in person, whatever the page sent
-    assert texts(api.cad, iid)[-1] == f"Reopened by Julian; was Complete at {datetime.fromtimestamp(closed['closed_at'], TZ):%H:%M}"
+        == [{"operator": "Jordan <jordan@example.org>"}]            # the signed-in person, whatever the page sent
+    assert texts(api.cad, iid)[-1] == f"Reopened by Jordan; was Complete at {datetime.fromtimestamp(closed['closed_at'], TZ):%H:%M}"
     rows =[(r["email"], r["kind"], r["summary"], r["incident_number"]) for r in api.cad.activity.rows()]
     assert (VAL, "refused", f"Refused: incident/{iid}/reopen (needs dispatch; viewer)", n) in rows
-    assert (JULIAN, "action", f"Reopened {n}: pending", n) in rows
+    assert (JORDAN, "action", f"Reopened {n}: pending", n) in rows
     # an admin may too, and the activity row for a page without a number says so
-    assert call(api, f"/api/cad/incident/{iid}/close", {"disposition": "COMPLETE"}, COREY)[0] == 200
-    assert call(api, f"/api/cad/incident/{iid}/reopen", {}, COREY)[0] == 200
+    assert call(api, f"/api/cad/incident/{iid}/close", {"disposition": "COMPLETE"}, CASEY)[0] == 200
+    assert call(api, f"/api/cad/incident/{iid}/reopen", {}, CASEY)[0] == 200
     pid = api.cad.store.create_incident(type="ALARM", source="60 Control page", source_ref="monitor:p", status="queued")
-    assert call(api, f"/api/cad/incident/{pid}/dismiss", {}, JULIAN)[0] == 200
-    assert call(api, f"/api/cad/incident/{pid}/reopen", {}, JULIAN)[1]["status"] == "queued"
+    assert call(api, f"/api/cad/incident/{pid}/dismiss", {}, JORDAN)[0] == 200
+    assert call(api, f"/api/cad/incident/{pid}/reopen", {}, JORDAN)[1]["status"] == "queued"
     assert api.cad.activity.rows()[0]["summary"] == "Reopened a 60 Control page: queued"
 
 
