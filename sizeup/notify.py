@@ -51,10 +51,15 @@ Push notifications > Phone pre-alert topics), plus the extra ones an admin lists
 refuses them (and anything that isn't a plain topic name), the config refuses them ([alerts] ntfy_topic), and the Notifier
 refuses them again right before every request is made: a mistake in one place can't page the crew. The match is the
 whole name (case aside): a topic of ours that merely contains one of those names is fine.
+
+Under the derived set, a static backstop (PROTECTED_SHA256, always_protected()): the SHA-256 of a few names refused
+everywhere and always, whatever was derived (nothing yet, Settings unread, a caller that passes no protected set):
+topic_problem(), publish() itself before any request, the Notifier, the replica watch (sizeup/replicawatch.py).
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import queue
 import re
@@ -69,6 +74,18 @@ from urllib.request import Request, urlopen
 DEFAULT_SERVER = "https://ntfy.sh"
 # No topic name is written here or anywhere in the repo: the topics never published to are derived (Pushes.protected()).
 TOPIC = re.compile(r"[-_A-Za-z0-9]{1,64}")
+# A backstop, not the mechanism: the SHA-256 (of the name, stripped and lowercased) of topics that are never published
+# to even when the derived set is empty or was not passed (a fresh install before an admin fills Settings; the replica
+# watch, which never reads Settings; a direct publish() call). These are names that were once public in this
+# repository's history, so a hash gives nothing away that the history doesn't; the names themselves stay out of the
+# code. The derived set (Pushes.protected(): whatever the app subscribes to, plus Settings' list) remains the main
+# mechanism and covers any topic subscribed to later: do not grow this list instead of deriving.
+PROTECTED_SHA256 = frozenset({
+    "3b22c9d680acd78cc304eb48198373baf3945c93237275506cce4e3cf5db7fc1",
+    "a12ee8b929f57c479d30c4970a460764933b683fce54a56850899d2d5be71347",
+})
+PROTECTED_WHY = ("that is a protected topic (one sizeup subscribes to, or that Settings lists as protected): never "
+                 "publish there; choose a new, long random topic of our own")
 MIN_TOPIC_LEN = 12          # a short name is easy to guess (and to read along with)
 PRIORITIES = {"min": 1, "low": 2, "default": 3, "high": 4, "urgent": 5, "max": 5}
 ALERTS, STATUS = "alerts", "status"     # the kinds of push (route()): incident alarms; the system's own health
@@ -148,16 +165,24 @@ def compose(title: str, who=None) -> str:
     return f"{title} · {line}" if line and title else (title or line)
 
 
+def always_protected(topic: str) -> bool:
+    """True for a topic of the static backstop (PROTECTED_SHA256): never published to, whatever the derived set says."""
+    t = str(topic or "").strip().lower()
+    return bool(t) and hashlib.sha256(t.encode("utf-8", "replace")).hexdigest() in PROTECTED_SHA256
+
+
 def topic_problem(topic: str, protected: Iterable[str] = ()) -> str:
     """"" for a topic sizeup may publish to, else why not. protected: the topics it never publishes to (the ones it
-    subscribes to, and any an admin added), by whole name, case aside."""
+    subscribes to, and any an admin added), by whole name, case aside. The static backstop (always_protected()) is
+    refused too, whatever protected holds. Never the name in the answer."""
     t = (topic or "").strip()
+    if always_protected(t):
+        return PROTECTED_WHY
     if not TOPIC.fullmatch(t):
         return "an ntfy topic name: letters, digits, - and _ (at most 64)"
     banned = {str(x).strip().lower() for x in protected if str(x).strip()}
     if t.lower() in banned:
-        return ("that is a protected topic (one sizeup subscribes to, or that Settings lists as protected): never "
-                "publish there; choose a new, long random topic of our own")
+        return PROTECTED_WHY
     if len(t) < MIN_TOPIC_LEN:
         return f"at least {MIN_TOPIC_LEN} characters: ntfy topics are public by name, so make it long and random"
     return ""
@@ -194,7 +219,10 @@ def publish(server: str, topic: str, title: str, body: str, priority: int | str 
     """One message to ntfy: its answer ({id, time, ...}). NotifyError when it can't be sent or was refused.
     who: a Who / dict: rendered into the title (compose()). actions: ntfy "view" buttons, [{label, url}] (https only,
     at most 3: a radio pre-alert's "Listen", sizeup/intel/listen.py). protected: topics refused by whole name
-    (Pushes.protected())."""
+    (Pushes.protected()). The static backstop (always_protected()) is refused here whatever protected is: this is the
+    function that makes the request, so no caller can reach such a topic through it."""
+    if always_protected(topic):
+        raise NotifyError(PROTECTED_WHY)
     server = (server or DEFAULT_SERVER).rstrip("/")
     why = server_problem(server) or topic_problem(topic, protected)
     if why:
@@ -302,7 +330,8 @@ class Notifier:
         for attempt in range(len(self.retries) + 1):
             try:
                 prot = self._protected()
-                if UNKNOWN in prot or topic_problem(self.topic, prot):    # protected since this Notifier was made
+                # protected since this Notifier was made (or, the static backstop, always)
+                if UNKNOWN in prot or always_protected(self.topic) or topic_problem(self.topic, prot):
                     raise NotifyError("not sent: a protected topic (one sizeup subscribes to)")
                 publish(self.server, self.topic, title, body, priority, tags, click, who=who, actions=actions)
                 self.sent += 1
@@ -394,6 +423,12 @@ class KindNotifier:
         return all(n.flush(timeout) for n in self.pushes.made(lane(self.kind)))
 
 
+class _Settings(dict):
+    """One read of the CAD settings' SECTION, with whether that read failed: the state travels with the read (not on
+    the Pushes, where a concurrent good read on another thread could clear a failed one's)."""
+    unreadable = False
+
+
 class Pushes:
     """Where each kind of push goes now, and the Notifiers that send them: one per (server, topic), so kinds that
     share a topic share its queue, in order. defaults: the config's topics with where each came from ("ssm",
@@ -423,26 +458,26 @@ class Pushes:
         self._made: dict[tuple[str, str, str], Notifier] = {}
         self._lock = threading.Lock()
         self.kinds = {k: KindNotifier(self, k) for k in KINDS}
-        self._unreadable = False                  # the last Settings read failed: what is protected can't be known
 
     # -- what is in effect ---------------------------------------------------------------------------------------
 
-    def _ov(self) -> dict:
+    def _ov(self) -> _Settings:
+        """Settings' section now. .unreadable: this read failed, so what is protected can't be known (protected())."""
         try:
             d = self.settings() or {}
-            self._unreadable = False
         except Exception as e:  # noqa: BLE001 - the CAD's settings unreadable: the config's topics, and FAIL CLOSED
             self.log(f"notify: Settings unreadable ({type(e).__name__}): the config's topics; nothing is published")
-            self._unreadable = True
-            d = {}
-        return d if isinstance(d, dict) else {}
+            out = _Settings()
+            out.unreadable = True
+            return out
+        return _Settings(d) if isinstance(d, dict) else _Settings()
 
     def protected(self, ov: dict | None = None) -> tuple[str, ...]:
         """Every topic never published to: the ones subscribed to (config, env, Settings' pre-alert topics) and the extra
         ones listed in Settings. Derived at every call: nothing static."""
         ov = self._ov() if ov is None else ov
         out = list(self.also_forbidden) + [t for t, _ in self.prealert_defaults.values()]
-        if self._unreadable:                  # Settings may protect topics we can't see: the sentinel blocks every send
+        if getattr(ov, "unreadable", False):  # Settings may protect topics we can't see: the sentinel blocks every send
             out.append(UNKNOWN)
         for k in (PREALERT_RING, PREALERT_STATUS):
             v = ov.get(k)
@@ -493,6 +528,8 @@ class Pushes:
         return out
 
     def problem(self, topic: str, ov: dict | None = None) -> str:
+        if always_protected(topic):           # the static backstop: whatever was derived, readable or not
+            return PROTECTED_WHY
         prot = self.protected(ov)
         if UNKNOWN in prot:
             return "Settings unreadable: can't tell which topics are protected"

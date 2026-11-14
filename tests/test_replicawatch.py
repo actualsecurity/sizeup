@@ -575,6 +575,72 @@ def test_health_shows_the_replicas_row_and_a_quiet_alert_even_with_the_station_s
     assert Rig().h.panel()["replicas"] is None                       # not on ECS: no row
 
 
+# -- Litestream started again under the serving app (sizeup/handoff.py _restart_litestream) --------------------------------
+
+def test_a_litestream_restart_is_always_recorded_and_pushed_and_is_no_failed_task(tmp_path, ntfy):
+    s3, clock = FakeS3(), Clock()
+    w = watch_for(s3, "A", tmp_path, ntfy, clock)
+    for _ in range(4):                                         # (never a crash loop: the task serves)
+        w.litestream_restarted("Litestream exited 1 while the app served", {})
+        clock.t += 31 * 60
+    assert [(m["title"], m["priority"]) for m in ntfy.got] == [("Hub Litestream restarted", 4)] * 4
+    assert "a full snapshot of each follows" in ntfy.got[0]["message"]
+    d = s3.doc(KEY)
+    assert [e["kind"] for e in d["events"]] == ["litestream_restarted"] * 4 and d["suspect"] == {}
+    watch_for(s3, "B", tmp_path, ntfy, clock).task_failed("takeover_failed", "made-up", 1)
+    assert [m["title"] for m in ntfy.got[4:]] == ["Hub takeover failed"]
+
+
+def test_a_restart_without_the_checkpoint_marks_the_file_suspect_until_it_is_done(tmp_path, ntfy):
+    s3, clock, logs = FakeS3(), Clock(), []
+    w = watch_for(s3, "A", tmp_path, ntfy, clock, logs)
+    w.litestream_restarted("Litestream exited 1 while the app served", {"cad": "busy (a reader or a writer in its way)"})
+    assert (ntfy.got[-1]["title"], ntfy.got[-1]["priority"]) == ("Replica not verifiable: cad.sqlite", 4)
+    assert "WITHOUT a TRUNCATE checkpoint" in ntfy.got[-1]["message"]
+    assert any("replica check FAILED" in m for m in logs)      # the CloudWatch metric filter's words
+    d = s3.doc(KEY)
+    assert set(d["suspect"]) == {"cad"} and d["suspect"]["cad"]["task"] == "A" and d["events"][-1]["kind"] == "replica_suspect"
+    state = json.loads((tmp_path / "A" / "run" / "replica-watch.json").read_text())
+    assert set(state["suspect"]) == {"cad"}                    # the app's Health reads it
+    # a check of the file passing changes nothing: a stale page passes quick_check
+    w.record({"cad": w._result("cad", {"ok": True, "result": "ok"}, False, "leader", 5, 0.1, "")})
+    assert set(s3.doc(KEY)["suspect"]) == {"cad"}
+    clock.t += 60
+    w.litestream_restarted("another TRUNCATE checkpoint of the suspect files", {}, ["cad"])
+    assert s3.doc(KEY)["suspect"] == {} and ntfy.got[-1]["title"] == "Replica OK again: cad.sqlite"
+
+
+def test_another_task_serving_turns_a_suspect_file_into_history(tmp_path, ntfy):
+    s3, clock = FakeS3(), Clock()
+    watch_for(s3, "A", tmp_path, ntfy, clock).litestream_restarted("Litestream exited 1 while the app served", {"hub": "busy"})
+    clock.t += 300
+    watch_for(s3, "B", tmp_path, ntfy, clock).serving()
+    d = s3.doc(KEY)
+    assert d["suspect"] == {} and d["events"][-1]["kind"] == "replica_suspect" and "took over" in d["events"][-1]["why"]
+
+
+def test_health_shows_a_suspect_replica_as_unverified_whatever_its_last_check_said():
+    from tests.test_health import Rig
+    r = Rig()
+    now = r.hub.now
+    state = {"checks": {"cad": {"at": now - 60, "ok": True, "result": "ok", "mode": "quick_check", "by": "leader"}},
+             "failing": {}, "leader_interval_s": 900,
+             "suspect": {"cad": {"at": now - 30, "why": "busy (a reader or a writer in its way)", "task": "A"}},
+             "events": [{"at": now - 30, "kind": "replica_suspect", "why": "made-up", "code": None},
+                        {"at": now - 20, "kind": "litestream_restarted", "why": "made-up", "code": None}]}
+    r.h.replicas = lambda: state
+    r.at(60, post=False)
+    a = r.h.active["replica:cad"]
+    assert a["severity"] == "critical" and a["title"] == "Replica not verifiable: cad.sqlite" and a.get("quiet")
+    rep = r.h.panel()["replicas"]
+    rows = {x["db"]: x for x in rep["rows"]}
+    assert rows["cad"]["state"] == "suspect" and "busy" in rows["cad"]["error"]
+    assert [e["kind"] for e in rep["events"]] == ["litestream_restarted", "replica_suspect"]
+    state["suspect"] = {}
+    r.at(120, post=False)
+    assert "replica:cad" not in r.h.active and {x["db"]: x for x in r.h.panel()["replicas"]["rows"]}["cad"]["state"] == "ok"
+
+
 # -- the deploy's check ---------------------------------------------------------------------------------------------------
 
 spec = importlib.util.spec_from_file_location("deploy_check", ROOT / "tools" / "deploy_check.py")
@@ -642,3 +708,46 @@ def test_the_workflow_reads_the_record_and_never_restores_a_database():
 @pytest.fixture
 def world():
     return World()
+
+
+# -- the static backstop (notify.PROTECTED_SHA256): the supervisor never reads Settings, so nothing is derived here ----
+BACKSTOP = "invented-backstop-topic-0001"        # made up: its hash is put in the set for the test
+
+
+@pytest.fixture
+def backstop(monkeypatch):
+    import hashlib
+
+    import sizeup.notify as notify
+    monkeypatch.setattr(notify, "PROTECTED_SHA256", frozenset({hashlib.sha256(BACKSTOP.encode()).hexdigest()}))
+    return BACKSTOP
+
+
+def test_a_backstop_topic_is_never_the_status_topic_and_the_log_says_refused(tmp_path, backstop):
+    logs = []
+    assert rw.status_topic("", {"SIZEUP_STATUS_TOPIC": BACKSTOP}, logs.append)[1] == ""        # nothing subscribed here
+    assert rw.status_topic("", {"SIZEUP_ALERT_TOPIC": BACKSTOP.upper()}, logs.append)[1] == ""
+    assert len(logs) == 2 and all("REFUSED" in m and "protected" in m for m in logs)
+    assert rw.status_topic("", {"SIZEUP_STATUS_TOPIC": BACKSTOP, "SIZEUP_ALERT_TOPIC": TOPIC}, logs.append)[1] == TOPIC
+    cfg = tmp_path / "c.toml"
+    cfg.write_text(f'[alerts]\nstatus_topic = "{BACKSTOP}"\n')
+    assert rw.status_topic(str(cfg), {}, logs.append)[1] == "" and rw.status_topic(str(cfg), {})[1] == ""
+    w = rw.from_env("A", tmp_path / "run", tmp_path, "ls.yml", str(cfg), env={}, log=logs.append)
+    assert w.pusher.topic == "" and not w.pusher.on
+    assert not any(BACKSTOP in m.lower() for m in logs)
+
+
+def test_the_pusher_refuses_a_backstop_topic_without_a_request_or_a_retry(ntfy, backstop, monkeypatch):
+    import sizeup.notify as notify
+    s3, logs, slept, asked = FakeS3(), [], [], []
+    p = Pusher(store_for(s3, "A"), ntfy.url, BACKSTOP, log=logs.append, sleep=slept.append)    # forbid: nothing derived
+    assert p.refused and not p.on
+    assert p.push("task", "Hub takeover failed", "x") is False and p.push("replica_ok", "t", "x", limit=False) is False
+    assert slept == [] and p.sent == [] and ntfy.got == []
+    assert all("refused" in m for m in logs) and not any(BACKSTOP in m for m in logs)
+    # and were the Pusher's own check gone: notify.publish (what it calls) refuses before any request
+    monkeypatch.setattr(Pusher, "refused", property(lambda self: False))
+    monkeypatch.setattr(notify, "urlopen", lambda *a, **k: asked.append(a))
+    assert p.on and p.push("task", "Hub takeover failed", "x") is False
+    assert asked == [] and ntfy.got == [] and p.sent == [] and not any(BACKSTOP in m for m in logs)
+    assert "pushed" not in (store_for(s3, "A").read() or {})

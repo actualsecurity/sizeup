@@ -66,6 +66,35 @@ takeover refused it. So, before anything writes:
 A file with no replica at all (the very first start) is created by the app; Litestream's first sync of it is a
 full snapshot from WAL offset 0 (nothing before it to miss), confirmed before the gate says "run". The upload
 to S3 goes on meanwhile; a release waits for all of it (`litestream sync -wait`).
+
+HOW OFTEN THE REPLICA IS WRITTEN (deploy/hub/litestream.yml, docs/cloud.md "How often the replica is written"). Left
+alone, Litestream reads each WAL into a new LTX file, one more S3 PUT, only every SIZEUP_LITESTREAM_SYNC_S seconds
+(30; it was every second: the S3 request bill). So a leader that is killed or fenced loses up to that much of its
+newest writes. Nothing here waits for that tick, and a handoff loses nothing:
+  * `litestream sync` (the takeover's confirms, position(wait=False)) and `litestream sync -wait` (the drain,
+    sync()) make Litestream read the WAL NOW, and -wait uploads it all before it answers: whatever the interval;
+  * a Litestream started again while serving is asked for a sync at once (_kick), not after a tick (and only
+    after a TRUNCATE checkpoint of every file: the next rule);
+  * the followers poll S3 at their own interval (1 s: a standby; SIZEUP_REPLICA_FOLLOW_S: the leader's checks),
+    whatever the leader's;
+  * the one wait that is about another writer's cadence: a first lock ever (CREATED_WAIT_S), where the replica
+    must hold still for longer than one interval (created_wait_s()).
+
+TRUNCATE BEFORE LITESTREAM IS STARTED AGAIN (docs/cloud.md "Litestream started again under the app"). While
+Litestream runs, its read lock keeps the app's checkpoints from restarting the WAL past what it has read. When it
+exits under a serving app (a crash, an OOM, even a clean SIGTERM) that lock is gone: the app's autocheckpoint moves
+the frames written meanwhile into the main file and the WAL starts again. A Litestream started then (0.5.18
+verifyWithExecutor / detectFullCheckpoint) can find the frame it last read still lying in the WAL file, past the new
+frames, decide nothing was missed, and carry on from the new WAL's start with NO snapshot: the pages written in the
+gap are stale in the replica for good, with no error anywhere (integrity_check ok, `sync -wait` 0). So before
+Litestream is started again on files the app may have written (active(): _restart_litestream; nowhere else is it
+started on such files): `PRAGMA wal_checkpoint(TRUNCATE)` on each, completed (busy 0). After it the WAL is empty or
+has a new salt at the offset Litestream remembers, and either way Litestream's first sync is a full snapshot (an LTX
+file of every page, in the chain the followers apply). A file whose TRUNCATE couldn't be done in TRUNCATE_S:
+Litestream is started all the same (no replication at all is worse), the file is SUSPECT: said loudly, recorded and
+pushed (replicawatch.litestream_restarted), tried again (Litestream stopped, TRUNCATE, started) every
+SUSPECT_RETRY, and once more at the drain, when the app is gone and nothing can be in a checkpoint's way; still
+suspect then: the release is unclean (no positions, no retake, "Hub released unclean").
 """
 
 from __future__ import annotations
@@ -105,12 +134,13 @@ RESTORE_S = 600.0              # a full restore, or a cold start's followers (no
 APP_READY_S = 120.0            # the app answering /healthz after it is started
 CONNECTOR_READY_S = 30.0       # cloudflared connected to the edge (not fatal: "serving" is said anyway)
 APP_STOP_S = 30.0              # the app, after SIGTERM, before SIGKILL
-SYNC_S = 45.0                  # `litestream sync -wait` for the three files, in all
+SYNC_S = 45.0                  # `litestream sync -wait` for the three files, in all (asked for: no waiting for a tick)
 LITESTREAM_STOP_S = 40.0       # Litestream after SIGTERM (it syncs once more itself)
 OVERLAP_S = 180.0              # the released connector, at most (and never past STOP_TIMEOUT_S - KILL_MARGIN_S)
 KILL_MARGIN_S = 3.0            # ... it stops this long before ECS's SIGKILL, cleanly
 INIT_S = 300.0                 # the app opening / migrating the databases after the gate says "init"
 REPLICATING_S = 120.0          # Litestream's position of each file confirmed (before "init", and after it): each its own
+                               # (`litestream sync`: read at once; the time is a big file's snapshot, never a tick)
 REPLICATION_TOTAL_S = 150.0    # ... and all of them, every round, in all: a hung Litestream fails the takeover
 MIN_LITESTREAM = (0, 5, 18)    # litestream#1547 (a snapshot from a stale WAL offset), #1579 (the read lock after a sync)
 SKIP_CHECKS_ENV = "SIZEUP_HANDOFF_SKIP_REPLICATION_CHECKS"   # the operator's escape hatch (docs/cloud.md): "1"
@@ -121,14 +151,47 @@ RETAKE_S = 20.0                # nobody took it: take it back
 STOP_TIMEOUT_S = 120.0         # the task definition's stopTimeout: ECS SIGKILLs this long after SIGTERM
 REDRAIN_S = 40.0               # after a retake: drain again this long before the SIGKILL
 RETAKE_MIN_LEFT_S = 30.0       # ... and only with this much more left than REDRAIN_S
-CREATED_WAIT_S = 3.0           # the very first lock: the replica must hold still this long (no writer from before it)
+SYNC_ENV = "SIZEUP_LITESTREAM_SYNC_S"
+LITESTREAM_SYNC_S = 30         # Litestream reads each WAL into a file for S3 this often (litestream.yml monitor-interval)
+LITESTREAM_SYNC_RANGE = (1, 300)   # ... what SYNC_ENV may say (whole seconds)
+CREATED_MARGIN_S = 10.0        # ... and an upload, on top of one interval, before a writer from before the lock shows
+CREATED_WAIT_S = LITESTREAM_SYNC_S + CREATED_MARGIN_S   # the very first lock: the replica must hold still this long
 LITESTREAM_BACKOFF = (2.0, 60.0)
+KICK_S = 30.0                  # a Litestream started again while serving: asked to sync at once, tried this long
+TRUNCATE_S = 20.0              # ... and before that: a TRUNCATE checkpoint of every file, in all (else: suspect)
+SUSPECT_RETRY = (60.0, 600.0)  # a suspect file: Litestream stopped, TRUNCATE tried again, started: this often (doubling)
+SUSPECT_STOP_S = 15.0          # ... Litestream's stop for that
+NOT_READY_RE = re.compile(r'msg="timeout waiting for db initialization"')
 
 EXIT_FENCED = 3
 
 
 def log(msg: str) -> None:
     print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {msg}", flush=True)
+
+
+def sync_interval_s(environ=None) -> int:
+    """SIZEUP_LITESTREAM_SYNC_S as whole seconds within LITESTREAM_SYNC_RANGE (deploy/hub/litestream.yml expands it
+    into a duration: anything else there and Litestream wouldn't start). Unset or empty: LITESTREAM_SYNC_S; not a
+    whole number: that too, said in the log; out of range: the nearest bound."""
+    raw = str((os.environ if environ is None else environ).get(SYNC_ENV, "") or "").strip()
+    if not raw:
+        return LITESTREAM_SYNC_S
+    try:
+        n = int(raw)
+    except ValueError:
+        log(f"handoff: {SYNC_ENV}={raw!r} is not a whole number of seconds: {LITESTREAM_SYNC_S} s")
+        return LITESTREAM_SYNC_S
+    lo, hi = LITESTREAM_SYNC_RANGE
+    if not lo <= n <= hi:
+        log(f"handoff: {SYNC_ENV}={n} is outside {lo}-{hi} s: {min(hi, max(lo, n))} s")
+    return min(hi, max(lo, n))
+
+
+def created_wait_s(sync_s: float) -> float:
+    """How long the replica must hold still under a first lock ever: a hub from before the lock, still running,
+    puts a file in S3 at most every sync interval, so longer than one (plus its upload)."""
+    return float(sync_s) + CREATED_MARGIN_S
 
 
 def last_json(text: str) -> dict:
@@ -270,6 +333,8 @@ class Env:
         return n
 
     def follower(self, db: str, out: Path) -> Proc:
+        """`litestream restore -f`: db restored into out, then every new file in S3 applied, S3 asked every second
+        (its own interval, whatever the leader's: a release is seen within a second of its last upload)."""
         out.parent.mkdir(parents=True, exist_ok=True)
         return Proc(f"follower {db}", ["litestream", "restore", "-f", "-follow-interval", "1s", "-if-replica-exists",
                                        "-config", self.ls_config, "-o", str(out), str(self.db_path(db))])
@@ -312,6 +377,25 @@ class Env:
         for s in ("-wal", "-shm"):                # (an empty WAL kept by SQLITE_FCNTL_PERSIST_WAL builds: macOS)
             Path(f"{path}{s}").unlink(missing_ok=True)
 
+    def truncate_wal(self, path: Path, busy_s: float = 2.0) -> str:
+        """PRAGMA wal_checkpoint(TRUNCATE) on a file the app has open (a connection of our own, closed at once;
+        busy_s for a reader or a writer in its way): "" once it completed (busy 0: every frame in the main file,
+        the WAL emptied, its next frame under a new salt), else why not. No file: "" (nothing was written)."""
+        if not path.exists():
+            return ""
+        try:
+            con = sqlite3.connect(path, timeout=busy_s, isolation_level=None)
+            try:
+                con.execute(f"PRAGMA busy_timeout = {max(1, int(busy_s * 1000))}")
+                row = con.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+            finally:
+                con.close()
+        except sqlite3.Error as e:
+            return f"{type(e).__name__}: {e}"
+        if not row or row[0]:
+            return "busy (a reader or a writer in its way)"
+        return ""
+
     def litestream_version(self) -> tuple[int, ...] | None:
         """`litestream version` as numbers; None if it can't say."""
         try:
@@ -329,13 +413,18 @@ class Env:
             ev = behind_replica(line)
             if ev is not None:
                 self.behind_events.append(ev)
+            if NOT_READY_RE.search(line):                 # the canary (docs/cloud.md): nobody asked it for a sync
+                log("handoff: LITESTREAM NOT READY: a database sat unreplicated since Litestream started "
+                    "(\"timeout waiting for db initialization\")")
         return Proc("litestream", ["litestream", "replicate", "-config", self.ls_config], on_stderr=watch)
 
     def position(self, db: str, timeout: float, wait: bool = True) -> tuple[int, int | None]:
         """`litestream sync`: (Litestream's position of db, the replica's). wait: only once every change up to it
         is in S3 (-wait); else once Litestream has synced the file locally (its LTX file written: it has read the
-        file, and holds its read lock), the upload to follow. RuntimeError if Litestream can't say so (not up yet,
-        not replicating it, S3 refused)."""
+        file, and holds its read lock), the upload to follow. Either way Litestream reads the WAL when asked, not
+        at its next tick (monitor-interval), and -wait uploads every LTX file not in S3 yet before it answers
+        (Litestream 0.5.18 Store.SyncDB: DB.Sync, then Replica.Sync). RuntimeError if Litestream can't say so (not
+        up yet, not replicating it, S3 refused)."""
         r = self._ls("sync", *(["-wait"] if wait else []), "-json", "-timeout", str(max(1, int(timeout))), "-socket",
                      self.socket, str(self.db_path(db)), timeout=timeout + 5)
         if r.returncode != 0:
@@ -443,7 +532,8 @@ class Supervisor:
                  RETAKE_MIN_LEFT_S=RETAKE_MIN_LEFT_S, CREATED_WAIT_S=CREATED_WAIT_S, KILL_MARGIN_S=KILL_MARGIN_S,
                  INIT_S=INIT_S, APP_LISTEN_S=APP_LISTEN_S, WARM_APP_RETRY_S=WARM_APP_RETRY_S,
                  WARM_APP_MAX_FAILS=WARM_APP_MAX_FAILS, REPLICATING_S=REPLICATING_S,
-                 REPLICATION_TOTAL_S=REPLICATION_TOTAL_S)
+                 REPLICATION_TOTAL_S=REPLICATION_TOTAL_S, TRUNCATE_S=TRUNCATE_S, SUSPECT_RETRY_S=SUSPECT_RETRY[0],
+                 SUSPECT_STOP_S=SUSPECT_STOP_S)
         t.update(timing or {})
         self.t = t
         self.role = "starting"
@@ -483,6 +573,8 @@ class Supervisor:
         self.litestream_warning = ""                   # Litestream older than MIN_LITESTREAM (the Health panel shows it)
         self.app_env: dict = dict(os.environ)
         self.failure: tuple[str, str] | None = None   # (kind, why) this task ends badly for (replicawatch.TITLES)
+        self.suspect: dict[str, str] = {}             # db -> why: Litestream started again on it without a TRUNCATE
+        self.restarts = 0                             # Litestream started again under the serving app, so often
         self.unclean = False                          # it released the lock without every change confirmed in S3
 
     # -- small helpers ------------------------------------------------------------------------------------
@@ -1002,7 +1094,15 @@ class Supervisor:
         # We hold the lock: nobody may move the replica now. If it moved, something else writes to it (a hub
         # from before the lock, still running beside us): never promote.
         if prev.get("_created"):
-            self.sleep(self.t["CREATED_WAIT_S"])   # longer than Litestream's 1 s sync: an old writer would show
+            # No lock before ours: a hub from before the lock could still be running. Its Litestream puts a file
+            # in S3 only every sync interval (SIZEUP_LITESTREAM_SYNC_S), and nothing can make it sync sooner, so
+            # the replica must hold still for longer than one. Only ever on the very first start in a bucket.
+            end = self.mono() + self.t["CREATED_WAIT_S"]
+            log(f"handoff: a first lock: the replica must hold still for {self.t['CREATED_WAIT_S']:.0f} s "
+                "(longer than one Litestream sync interval: no writer from before the lock)")
+            while self.mono() < end:
+                self.must_hold()
+                self.sleep(max(0.0, min(1.0, end - self.mono())))
         again = self._plan_all()
         for v in again.values():
             if isinstance(v, Exception):
@@ -1236,6 +1336,7 @@ class Supervisor:
         backoff = LITESTREAM_BACKOFF[0]
         restart_at = None
         asked_at = self.mono()
+        heal_in, heal_at = self.t["SUSPECT_RETRY_S"], None      # a suspect file: the TRUNCATE tried again
         while True:
             self.must_hold()
             if self.lock.phase == "connecting" and self.mono() - asked_at >= 1.0:
@@ -1258,10 +1359,101 @@ class Supervisor:
                     restart_at = self.mono() + backoff
                 elif self.mono() >= restart_at:
                     self.must_hold()
-                    self.litestream = self.env.replicate()
-                    self.write_lease()
+                    self._restart_litestream(f"Litestream exited {self.litestream.poll()} while the app served")
                     backoff, restart_at = min(backoff * 2, LITESTREAM_BACKOFF[1]), None
+                    heal_in, heal_at = self.t["SUSPECT_RETRY_S"], None
+            elif self.suspect and self.litestream is not None:
+                if heal_at is None:
+                    heal_at = self.mono() + heal_in
+                elif self.mono() >= heal_at:
+                    self.must_hold()
+                    log(f"handoff: {', '.join(sorted(self.suspect))} still suspect: Litestream stopped for another "
+                        "TRUNCATE checkpoint")
+                    self.litestream.stop(self.t["SUSPECT_STOP_S"])
+                    self.must_hold()
+                    self._restart_litestream("another TRUNCATE checkpoint of the suspect files")
+                    heal_in, heal_at = min(heal_in * 2, max(SUSPECT_RETRY[1], heal_in)), None
             self.sleep(0.25)
+
+    def _truncate_all(self, bound: float) -> dict[str, str]:
+        """A TRUNCATE checkpoint of every database, each tried until it completed, bound seconds in all: those it
+        couldn't be done for, and why. Litestream isn't running (the module doc's rule)."""
+        end, failed = self.mono() + bound, {}
+        for db in DBS:
+            while True:
+                self.must_hold()
+                try:
+                    why = self.env.truncate_wal(self.env.db_path(db), max(0.2, min(2.0, end - self.mono())))
+                except Exception as e:  # noqa: BLE001 - whatever it was: not done
+                    why = f"{type(e).__name__}: {e}"
+                if not why:
+                    break
+                if self.mono() >= end:
+                    failed[db] = why
+                    break
+                self.sleep(0.2)
+        return failed
+
+    def _restart_litestream(self, why: str) -> None:
+        """Litestream started again under the serving app (the module doc: TRUNCATE BEFORE ...): a TRUNCATE
+        checkpoint of every file first, so its first sync of each is a full snapshot and nothing written while it
+        was down is missed; then asked to sync at once (_kick). A file that couldn't be truncated in TRUNCATE_S is
+        suspect from here: said, recorded, pushed, tried again (active()), the release unclean (step_down)."""
+        was = dict(self.suspect)
+        failed = self._truncate_all(self.t["TRUNCATE_S"])
+        self.must_hold()
+        self.litestream = self.env.replicate()
+        self.write_lease()
+        self.restarts += 1
+        self.suspect = failed
+        if failed:
+            self.note(f"WARNING: REPLICA UNVERIFIED: {why}; started again WITHOUT a TRUNCATE checkpoint of "
+                      + ", ".join(f"{db}.sqlite ({w})" for db, w in failed.items())
+                      + f" in {self.t['TRUNCATE_S']:.0f} s: what the app wrote while Litestream was down may be "
+                      "missing from the replica with no error. Tried again; a release while it lasts is unclean")
+        else:
+            self.note(f"{why}: started again after a TRUNCATE checkpoint of every file (Litestream snapshots each: "
+                      "nothing written while it was down is missed)"
+                      + (f"; {', '.join(sorted(was))} no longer suspect" if was else ""))
+        self._kick(self.litestream)
+        tell = getattr(self.watch, "litestream_restarted", None)
+        if tell is not None:                         # S3 and a push: never on this thread (the lease is watched here)
+            threading.Thread(target=self._told, args=(tell, why, dict(failed), sorted(set(was) - set(failed))),
+                             name="litestream-restarted", daemon=True).start()
+
+    def _told(self, tell, why: str, failed: dict, healed: list) -> None:
+        try:
+            tell(why, failed, healed)
+        except Exception as e:  # noqa: BLE001 - never in the way
+            log(f"handoff: Litestream's restart couldn't be recorded ({type(e).__name__}: {e})")
+
+    def _kick(self, ls: Proc) -> None:
+        """A Litestream started again while the app writes: asked to sync every file now (`litestream sync`),
+        instead of at its first tick a whole sync interval later (what the app wrote while it was down would sit
+        unreplicated that much longer). On a thread of its own (the lease is watched meanwhile), each second until
+        every file answered (its socket takes a moment), for KICK_S at most, and only while this Litestream runs
+        and this task serves: a drain asks for its own sync."""
+        def mine() -> bool:
+            return self.litestream is ls and ls.poll() is None and self.role == "active"
+
+        def run() -> None:
+            left, end, why = list(DBS), self.mono() + KICK_S, None
+            while left and mine() and self.mono() < end:
+                time.sleep(1.0)
+                for db in list(left):
+                    if not mine():
+                        return
+                    try:
+                        self.env.position(db, 5.0, wait=False)
+                        left.remove(db)
+                    except Exception as e:
+                        why = e
+            if not left:
+                log("handoff: Litestream, started again, synced every file when asked")
+            elif mine():
+                log(f"handoff: Litestream, started again, didn't sync {', '.join(left)} when asked ({why}): at its "
+                    "next tick")
+        threading.Thread(target=run, name="litestream-kick", daemon=True).start()
 
     # -- stepping down ---------------------------------------------------------------------------------------
 
@@ -1276,6 +1468,7 @@ class Supervisor:
             self.app = None
         t.mark("app")
         self.must_hold()
+        self._heal_at_drain()
         positions, clean = {}, self.litestream is not None
         end = self.mono() + self.t["SYNC_S"]
         if self.litestream is not None:
@@ -1298,6 +1491,10 @@ class Supervisor:
             self.litestream.stop(self.t["LITESTREAM_STOP_S"])
             self.litestream = None
             t.mark("litestream")
+        if self.suspect and clean:
+            self.note(f"released unclean: {', '.join(sorted(self.suspect))} suspect since Litestream was started "
+                      "again without a TRUNCATE checkpoint (the replica may lack what was written while it was down)")
+            clean = False
         self.must_hold()
         self.stop_renewing()
         extra = self._pristine(positions, clean)
@@ -1323,6 +1520,30 @@ class Supervisor:
         self.note("leader file removed: the connector stops")
         self.role = "done"
         return code
+
+    def _heal_at_drain(self) -> None:
+        """A file still suspect at the drain: the app is gone, so nothing is in a checkpoint's way. Litestream
+        stopped, the TRUNCATE (Env.checkpoint: nothing else has the file open), Litestream started: its sync of the
+        file (the `sync -wait` that follows) is a full snapshot, and the replica is the file again. A file it
+        couldn't be done for stays suspect (the release unclean)."""
+        if not self.suspect or self.litestream is None or self.litestream.poll() is not None:
+            return
+        log(f"handoff: {', '.join(sorted(self.suspect))} suspect: the app has stopped, a TRUNCATE checkpoint now")
+        self.litestream.stop(self.t["SUSPECT_STOP_S"])
+        left = {}
+        for db, why in self.suspect.items():
+            try:
+                self.env.checkpoint(self.env.db_path(db))
+            except Exception as e:  # noqa: BLE001
+                left[db] = f"{why}; at the drain: {e}"
+        self.must_hold()
+        self.litestream = self.env.replicate()
+        self.write_lease()
+        healed = sorted(set(self.suspect) - set(left))
+        self.suspect = left
+        if healed:
+            self.note(f"{', '.join(healed)} no longer suspect: checkpointed with the app stopped, Litestream "
+                      "snapshots it before the release")
 
     def _pristine(self, positions: dict, clean: bool) -> dict | None:
         """A takeover that failed before its app wrote anything leaves the replica at the positions it promoted plus
@@ -1490,6 +1711,8 @@ def main(argv: list[str] | None = None) -> int:
     shared = Path(os.environ.get("SIZEUP_SHARED_DIR", "/run/sizeup-shared"))
     run_dir.mkdir(parents=True, exist_ok=True)
     os.environ.setdefault("LITESTREAM_SOCKET", str(run_dir / "litestream.sock"))
+    sync_s = sync_interval_s()
+    os.environ[SYNC_ENV] = str(sync_s)             # litestream.yml expands it: Litestream and every follower get it
     lock = leaderlock.from_env(log=log)
     if lock is None:
         print("sizeup.handoff: LITESTREAM_BUCKET is not set", file=sys.stderr)
@@ -1510,10 +1733,12 @@ def main(argv: list[str] | None = None) -> int:
         watch = replicawatch.from_env(lock.holder, run_dir, state, args.litestream_config, args.config, log=log)
     except Exception as e:  # noqa: BLE001 - never in the way of the hub
         log(f"handoff: replica watch off ({type(e).__name__}: {e})")
-    sup = Supervisor(lock, env, run_dir, shared, int(os.environ.get("SIZEUP_CONTROL_PORT", "8089")), watch=watch)
+    sup = Supervisor(lock, env, run_dir, shared, int(os.environ.get("SIZEUP_CONTROL_PORT", "8089")), watch=watch,
+                     timing={"CREATED_WAIT_S": created_wait_s(sync_s)})
     signal.signal(signal.SIGTERM, sup.on_term)
     signal.signal(signal.SIGINT, sup.on_term)
     log(f"handoff: this task is {leaderlock.short(lock.holder)}; the lock is s3://{lock.obj.bucket}/{lock.obj.key}")
+    log(f"handoff: Litestream reads each WAL into a file for S3 every {sync_s} s ({SYNC_ENV}); a handoff syncs at once")
     return sup.run()
 
 
