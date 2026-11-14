@@ -442,7 +442,7 @@ def live(tmp_path):
 def test_live_a_context_row_becomes_an_event_and_one_intel_push(live):
     cad, n = live
     cad.comms.record(ctx_row("c1-t0", "respond to 100 Example Ave, smoke coming from the house", cad.clock()))
-    cad.comms.on_context_text("c1-t0")                     # what comms.py calls once PR 0 lands
+    cad.comms.on_context_text("c1-t0")                     # record() already called it (#483); again: no harm
     assert cad.intel.drain() == 1
     [ev] = cad.intel.events.open_events()
     assert ev.category == "fire_report" and ev.label_full == "100 Example Ave, Port Chester"

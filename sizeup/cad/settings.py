@@ -25,7 +25,8 @@ Reset to default = drop the override (one item, or a whole section).
     channels                       key "FG1" | "South 2" | "tg:307" -> {record?, transcribe?, engine?}: which channel is
                                    kept, transcribed, and by what (sizeup/channels.py; Settings > Radios)
     stt                            key "vocabulary" -> [phrases] (Amazon Transcribe's custom vocabulary),
-                                   "aws_monthly_limit_usd" -> the monthly AWS limit (sizeup/transcribe.py)
+                                   "aws_monthly_limit_usd" -> the monthly AWS limit (sizeup/transcribe.py),
+                                   "aws_context_budget_usd" -> another P25 system's (police) own monthly AWS limit
     tones                          the tone book (#80, #115, #122; sizeup/cad/tonelist.py): key "A/B" -> a pair named
                                    here {a_hz, b_hz, places, service, role?, confirmed?, page?} (#84/#115: {name, ...});
                                    "A/B@<name in the list>" -> an edit to a row of data/westchester_tones.csv {list,
@@ -60,6 +61,8 @@ Reset to default = drop the override (one item, or a whole section).
     datasources                    key a data source ("gis:hydrants", "aircraft:registry") -> off | hourly | daily | weekly |
                                    monthly: how often the registry refreshes it (#186, Settings > Data sources;
                                    sizeup/datasources.py); not set: the source's default
+    station_logs                   key "on" | "level" | "include" | "exclude" | "retention_days": the station's logs into
+                                   CloudWatch (sizeup/cloud/cwlogs.py; Settings > Station > Logs, admins)
     department_units               key a feed's department entry code -> the department it pages ("Port Chester FD"), or
                                    {"name", "accepts": true}: a whole department, never a unit (#370,
                                    sizeup/cad/sources.py; admins, no panel); never a board unit's code
@@ -91,6 +94,7 @@ from sizeup.cad import lists as lists_mod
 from sizeup.cad.lists import CLASSES, CODE, COLOR, LIST_SECTIONS, LONG_CODE, RESPONSES, ROLES, ListsError
 from sizeup.cad.store import OPERATOR_MAX, SCHEMA_VERSION, TZ, CadError
 from sizeup import audiostore, errwatch, polly, sourcekeys
+from sizeup.cloud import cwlogs
 from sizeup.cloud import health as health_mod
 from sizeup.radio.tones import pair_key
 from sizeup.tts import KOKORO_VOICES
@@ -147,7 +151,34 @@ PAGE_SECTION[MAPD_SECTION] = "system"
 # audited as System. key a category -> "dispatcher" | "admin" (the least standing); not set: everyone signed in.
 PREMISE_SECTION = "premise_visibility"
 PAGE_SECTION[PREMISE_SECTION] = "system"
+# Which services' emergencies the Radio page shows prominently when they aren't ours (Settings > Radios > Emergencies):
+# a banner, a highlighted row, the full "Emergency (not ours)" chip. Any other service's: a muted "EM" chip only.
+# Ours (our fire channels, our rigs, scene safety) always stand out, and so does a source whose service isn't known
+# (blank): quiet is only for a service that is known and not listed. "other" (Trunk Ops, Interop, Special Events, OEM:
+# where a mutual-aid firefighter or an unmapped portable of ours could be) is prominent by default.
+# Presentation only: what is recorded, kept, alarmed and pushed doesn't change. Admins, audited as Radios.
+# key "prominent" -> [services] (sourcekeys.SERVICES).
+EM_SECTION, EM_DEFAULT = "radio_emergencies", ("fire", "ems", "other")
+PAGE_SECTION[EM_SECTION] = "radios"
 PREMISE_LEVELS = ("everyone", "dispatcher", "admin")
+# The station's logs into CloudWatch (sizeup/cloud/cwlogs.py): Settings > Station > Logs, admins, audited as System.
+LOGS_SECTION = cwlogs.SECTION
+PAGE_SECTION[LOGS_SECTION] = "system"
+
+
+def em_value(v) -> list[str]:
+    """A list of services (sourcekeys.SERVICES), in their order, each once; CadError otherwise. Empty: none stand out."""
+    if not isinstance(v, list) or any(x not in sourcekeys.SERVICES for x in v):
+        raise CadError(f"prominent: a list of {', '.join(sourcekeys.SERVICES)}")
+    return [x for x in sourcekeys.SERVICES if x in v]
+
+
+def em_prominent(e) -> list[str]:
+    """The stored section's services, or the default (fire, EMS, other) when unset or unreadable."""
+    try:
+        return em_value((e or {})["prominent"])
+    except (KeyError, TypeError, CadError):
+        return list(EM_DEFAULT)
 
 
 def _visibility_keys() -> dict[str, str]:
@@ -180,6 +211,7 @@ WORDING = (("new", "First dispatch"), ("add_on", "Added to the assignment"), ("u
            ("respond", "Upgrade: more units"))
 MAX_TONES, MAX_GROUPS, MAX_CHANNELS = 8, 4, 8
 MAX_VOCAB, MAX_PHRASE_CHARS = 1500, 100
+STT_KEYS = ("vocabulary", "aws_monthly_limit_usd", "aws_context_budget_usd")   # the "stt" section's keys
 MAX_VOCAB_BYTES = 50_000          # AWS's limit; also keeps the Settings request under its 64 KB
 MAX_PLACE_NAMES = 300
 TONES_SECTION, MAX_NAMED_TONES, TONE_HZ = "tones", 400, tonelist.TONE_HZ     # the decoder's band (radio/tones.py)
@@ -424,6 +456,7 @@ class Editor:
         self.cad.atc_vocab_refresh = bool(a.get("vocab", True))
         self.cad.map_display = mapview.display_zooms(ov.get(MAPD_SECTION))     # the maps' rigs by zoom (#376)
         self.cad.premise_visible = dict(ov.get(PREMISE_SECTION) or {})     # premise notes by category (#403)
+        self.cad.em_prominent = em_prominent(ov.get(EM_SECTION))          # the Radio page's loud emergencies
         self.cad._state = None
 
     def _commit(self, changes: list[tuple[str, str, object]], operator: str, audit: list[tuple[str, str, object, object]],
@@ -576,9 +609,43 @@ class Editor:
         out["hub_errors"] = self.errors_page(ov)
         out["map_display"] = self.mapd_page(ov)
         out["premise_visibility"] = self.premise_page(ov)
+        out["radio_emergencies"] = self.em_page(ov)
         out["alert_mutes"] = self.mutes_page(ov)
         out["audio_retention"] = self.retention_page(ov)
+        out["station_logs"] = self.logs_page(ov)
         return out
+
+    def logs_page(self, ov: dict | None = None) -> dict:
+        """Settings > Station > Logs: each setting, its default and whether it is edited."""
+        e = ((self.overrides() if ov is None else ov).get(LOGS_SECTION) or {})
+        c = cwlogs.config(e)
+        return {k: {"label": cwlogs.LABELS[k], "value": c[k], "default": d, "edited": k in e}
+                for k, d in cwlogs.DEFAULTS.items()} | {"levels": list(cwlogs.logscrub.LEVELS),
+                                                         "retention_choices": list(cwlogs.RETENTION_DAYS)}
+
+    def _logs_op(self, action: str, body: dict, op: str) -> dict:
+        """set {key, value} | reset {key}: admins."""
+        key = body.get("key")
+        if key not in cwlogs.DEFAULTS:
+            raise CadError(f"key: one of {', '.join(cwlogs.DEFAULTS)}")
+        d = cwlogs.DEFAULTS[key]
+        cur = cwlogs.config(self.section(LOGS_SECTION))[key]
+        if action == "reset":
+            v = d
+        elif action == "set":
+            try:
+                v = cwlogs.check_value(key, body.get("value"))
+            except ValueError as e:
+                raise CadError(str(e)) from None
+        else:
+            raise CadError("action: set or reset")
+        shown = (lambda x: ("on" if x else "off") if key in ("on", "adapter") else ", ".join(x) or "none" if isinstance(x, list) else str(x))
+        out = self._commit([(LOGS_SECTION, key, REMOVE if v == d and type(v) is type(d) else v)], op,
+                           [("system", f"{LOGS_SECTION}/{key}", shown(cur), shown(v))])
+        sl = getattr(self.cad, "station_logs", None)
+        if key == "retention_days" and sl is not None:
+            sl.checked = 0.0                 # applied at the next look (the Logs view's status, or the next batch)
+        return {**out, "station_logs": self.logs_page()}
 
     def _context_channel(self, channel: str) -> bool:
         """This channel's newest transmission is another P25 system's (#409; one indexed row: (channel, start))."""
@@ -788,7 +855,7 @@ class Editor:
             v = self._errors_value(key, body.get("value"))
         else:
             raise CadError("action: set or reset")
-        shown = (lambda x: ("on" if x else "off") if key == "on" else str(x))
+        shown = (lambda x: ("on" if x else "off") if key in ("on", "adapter") else str(x))
         out = self._commit([(ERR_SECTION, key, REMOVE if v == d and type(v) is type(d) else v)], op,
                            [("system", f"{ERR_SECTION}/{key}", shown(cur), shown(v))])
         return {**out, "hub_errors": self.errors_page()}
@@ -827,6 +894,29 @@ class Editor:
         out = self._commit([(PREMISE_SECTION, key, REMOVE if v == "everyone" else v)], op,
                            [("system", f"{PREMISE_SECTION}/{key}", cur, v)])
         return {**out, "premise_visibility": self.premise_page()}
+
+    def em_page(self, ov: dict | None = None) -> dict:
+        """Settings > Radios > Emergencies: the services whose emergencies (not ours) stand out on the Radio page."""
+        e = ((self.overrides() if ov is None else ov).get(EM_SECTION) or {})
+        return {"prominent": em_prominent(e), "default": list(EM_DEFAULT), "edited": "prominent" in e,
+                "choices": list(sourcekeys.SERVICES)}
+
+    def _em_op(self, action: str, body: dict, op: str) -> dict:
+        """set {key: prominent, value: [services]} | reset {key: prominent}: admins, audited as Radios."""
+        if body.get("key") != "prominent":
+            raise CadError("key: prominent")
+        cur = em_prominent(self.overrides().get(EM_SECTION))
+        if action == "reset":
+            v = list(EM_DEFAULT)
+        elif action == "set":
+            v = em_value(body.get("value"))
+        else:
+            raise CadError("action: set or reset")
+        if v == cur:                                    # nothing changes: nothing written, nothing audited
+            return {"ok": True, "radio_emergencies": self.em_page()}
+        out = self._commit([(EM_SECTION, "prominent", REMOVE if v == list(EM_DEFAULT) else v)], op,
+                           [("radios", f"{EM_SECTION}/prominent", ", ".join(cur) or "none", ", ".join(v) or "none")])
+        return {**out, "radio_emergencies": self.em_page()}
 
     def _mapd_op(self, action: str, body: dict, op: str) -> dict:
         """set {key: detail_zoom | active_zoom | board_detail_zoom | board_active_zoom, value} | reset {key}: admins."""
@@ -1001,8 +1091,8 @@ class Editor:
               "import": self._import_op, "channels": self._channels_op, "stt": self._stt_op,
               channels_mod.SQUELCH_SECTION: self._squelch_op,
               "places": self._places_op, TONES_SECTION: self._tones_op, WALL_SECTION: self._wall_op, DS_SECTION: self._ds_op,
-              NOTIFY_SECTION: self._notify_op, ATC_SECTION: self._atc_op, ERR_SECTION: self._errors_op, MAPD_SECTION: self._mapd_op, PREMISE_SECTION: self._premise_op, RET_SECTION: self._retention_op,
-              TRS_SECTION: lambda a, b, o: self._retention_op(a, b, o, TRS_SECTION), MUTE_SECTION: self._mutes_op, DEPT_SECTION: self._dept_op, "alarms": lambda a, b, o: self.cad.alarms.settings_op(a, b, o),
+              NOTIFY_SECTION: self._notify_op, ATC_SECTION: self._atc_op, ERR_SECTION: self._errors_op, MAPD_SECTION: self._mapd_op, PREMISE_SECTION: self._premise_op, EM_SECTION: self._em_op, RET_SECTION: self._retention_op,
+              TRS_SECTION: lambda a, b, o: self._retention_op(a, b, o, TRS_SECTION), MUTE_SECTION: self._mutes_op, LOGS_SECTION: self._logs_op, DEPT_SECTION: self._dept_op, "alarms": lambda a, b, o: self.cad.alarms.settings_op(a, b, o),
               "intel": lambda a, b, o: self.cad.intel_admin.settings_op(a, b, o)}.get(section)
         if fn is None:
             raise CadError(f"no settings section {section!r}")
@@ -2122,13 +2212,14 @@ class Editor:
         return out
 
     @staticmethod
-    def _limit(v) -> float:
+    def _limit(v, key: str = "aws_monthly_limit_usd") -> float:
         if isinstance(v, bool) or not isinstance(v, (int, float)) or not 0 <= v <= 10000:
-            raise CadError("aws_monthly_limit_usd: 0 to 10000 (dollars)")
+            raise CadError(f"{key}: 0 to 10000 (dollars)")
         return round(float(v), 2)
 
     def _stt_op(self, action: str, body: dict, op: str) -> dict:
-        """set {key: vocabulary | aws_monthly_limit_usd, value} | reset {key} | push (the vocabulary to AWS)."""
+        """set {key: vocabulary | aws_monthly_limit_usd | aws_context_budget_usd, value} | reset {key} | push (the
+        vocabularies to AWS)."""
         ctx = self.cad.radio_ctx
         cur = self.stt_values()
         if action == "push":
@@ -2142,8 +2233,8 @@ class Editor:
             return {"ok": st.get("state") != "error", "vocabulary": st, **({"error": st["reason"]}
                                                                            if st.get("state") == "error" else {})}
         key = _text(body.get("key"), "key", 40)
-        if key not in ("vocabulary", "aws_monthly_limit_usd"):
-            raise CadError("key: vocabulary or aws_monthly_limit_usd")
+        if key not in STT_KEYS:
+            raise CadError("key: vocabulary, aws_monthly_limit_usd or aws_context_budget_usd")
         if action == "set":
             if key == "vocabulary":
                 v = self._vocab_list(body.get("value"))
@@ -2151,8 +2242,8 @@ class Editor:
                 new = REMOVE if v == dflt else v
                 shown = (f"{len(cur[key])} phrases" if key in cur else "default"), f"{len(v)} phrases"
             else:
-                v = self._limit(body.get("value"))
-                dflt = ctx.aws_limit_default() if ctx is not None else 25.0
+                v = self._limit(body.get("value"), key)
+                dflt = self._limit_default(key)
                 new = REMOVE if v == dflt else v
                 shown = cur.get(key, dflt), v
             out = self._commit([("stt", key, new)], op, [("radios", f"stt/{key}", *shown)])
@@ -2175,7 +2266,20 @@ class Editor:
         v = self.stt_values().get("aws_monthly_limit_usd")
         if isinstance(v, (int, float)) and not isinstance(v, bool):
             return float(v)
+        return self._limit_default("aws_monthly_limit_usd")
+
+    def aws_context_limit(self) -> float:
+        """Another P25 system's (police) own monthly AWS limit: never ours, nor our reserve (radio-intel PR 3)."""
+        v = self.stt_values().get("aws_context_budget_usd")
+        if isinstance(v, (int, float)) and not isinstance(v, bool):
+            return float(v)
+        return self._limit_default("aws_context_budget_usd")
+
+    def _limit_default(self, key: str) -> float:
         ctx = self.cad.radio_ctx
+        if key == "aws_context_budget_usd":
+            fn = getattr(ctx, "aws_context_limit_default", None)
+            return float(fn()) if fn is not None else 15.0
         return ctx.aws_limit_default() if ctx is not None else 25.0
 
     def stt_page(self) -> dict:
@@ -2192,6 +2296,8 @@ class Editor:
                                "state": ctx.vocabulary_state() if ctx is not None else {"state": "none"}},
                 "limit": {"value": self.aws_limit(), "default": ctx.aws_limit_default() if ctx is not None else 25.0,
                           "edited": "aws_monthly_limit_usd" in cur},
+                "context_limit": {"value": self.aws_context_limit(), "default": self._limit_default("aws_context_budget_usd"),
+                                  "edited": "aws_context_budget_usd" in cur},
                 "aws": ctx.aws_status() if ctx is not None else {"enabled": False}}
 
     # -- the camera wall's area (#125): the margin around our fire districts, cameras always / never on it ---------
@@ -2426,6 +2532,11 @@ class Editor:
     def recorded(name: str, email: str) -> str:
         return email if not name or name.lower() == email else f"{name} <{email}>"
 
+    def _unlinked(self, email: str) -> dict | None:
+        """An operator entered by hand with this email as its name and no email yet: the leader's person() links it
+        (sets its email); a fenced task (#501) reads it as it would be, its role and active as they are."""
+        return self.store.one("SELECT name, callsign, role, active FROM operators WHERE name = ? AND email = ''", (email,))
+
     def person(self, email: str) -> dict:
         """{email, name, callsign, operator} for a verified email. An email not on the list is added
         (named by its email, a dispatcher) so an admin can give it a name in Settings > Users."""
@@ -2433,7 +2544,12 @@ class Editor:
         if not EMAIL.fullmatch(email):
             raise CadError("not an email address")
         r = self.store.one("SELECT name, callsign FROM operators WHERE email = ?", (email,))
-        if r is None:
+        if r is None and not self.store.may_write():
+            # a fenced hub task (not the leader, sizeup/fence.py, #501): signed in all the same, nothing written: the
+            # row the leader would give them (one entered by hand under this email as its name), else a dispatcher
+            # named by their email; the leader adds them on their next request there
+            r = self._unlinked(email) or {"name": email, "callsign": ""}
+        elif r is None:
             with self.store.tx() as db:
                 row = db.execute("SELECT id, name, callsign, email FROM operators WHERE email = ? OR name = ?",
                                  (email, email)).fetchone()
@@ -2465,7 +2581,9 @@ class Editor:
         """person() plus {role, active, may, bootstrap, admins}: may = what they may do now (admin |
         dispatcher | viewer), bootstrap = no admin yet (anyone signed in may do anything)."""
         p = self.person(email)
-        r = self.store.one("SELECT role, active FROM operators WHERE email = ?", (p["email"],)) or {"role": "dispatcher", "active": 1}
+        r = (self.store.one("SELECT role, active FROM operators WHERE email = ?", (p["email"],))
+             or (None if self.store.may_write() else self._unlinked(p["email"]))      # fenced: as the leader would
+             or {"role": "dispatcher", "active": 1})
         admins = self.admins()
         active = bool(r["active"])
         may = "admin" if not admins else r["role"] if active and r["role"] in OPERATOR_ROLES else "viewer"
@@ -2626,6 +2744,14 @@ class Editor:
                 mapview.display_value(k, v)
             except ValueError as e:
                 raise CadError(f"overrides.{MAPD_SECTION}: {e}") from None
+        e = ov.get(EM_SECTION) or {}                          # Settings > Radios > Emergencies
+        if set(e) - {"prominent"}:
+            raise CadError(f"overrides.{EM_SECTION}: prominent only")
+        if "prominent" in e:
+            try:
+                e["prominent"] = em_value(e["prominent"])
+            except CadError as x:
+                raise CadError(f"overrides.{EM_SECTION}.{x}") from None
         for k, v in (ov.get(PREMISE_SECTION) or {}).items():  # sizeup/cad/premise.py (#403)
             if k not in _visibility_keys() or v not in PREMISE_LEVELS[1:]:
                 raise CadError(f"overrides.{PREMISE_SECTION}: {k!r} -> {v!r} (a category -> dispatcher | admin)")
@@ -2654,12 +2780,13 @@ class Editor:
             except CadError as e:
                 raise CadError(f"overrides.{DEPT_SECTION}.{e}") from None
         st = ov.get("stt") or {}
-        if set(st) - {"vocabulary", "aws_monthly_limit_usd"}:
-            raise CadError("overrides.stt: vocabulary and aws_monthly_limit_usd only")
+        if set(st) - set(STT_KEYS):
+            raise CadError("overrides.stt: vocabulary, aws_monthly_limit_usd and aws_context_budget_usd only")
         if "vocabulary" in st:
             self._vocab_list(st["vocabulary"])
-        if "aws_monthly_limit_usd" in st:
-            self._limit(st["aws_monthly_limit_usd"])
+        for k in ("aws_monthly_limit_usd", "aws_context_budget_usd"):
+            if k in st:
+                self._limit(st[k], k)
         L = self.build(ov)
         for k in eta.KEYS:
             if k in d:

@@ -651,6 +651,7 @@ make_release() {
   if [ "$SIZEUP_SOURCE" = dir ]; then
     rsync -a --exclude /.git --exclude /.venv --exclude /.claude --exclude /state --exclude /captures \
       --exclude /models --exclude /config.toml --exclude /build --exclude '__pycache__' --exclude '*.egg-info' \
+      --exclude '/deploy/trunk-recorder/systems/probe-*' \
       "$OPT_FROM_DIR/" "$tmp/"
   else
     repo_git archive --format=tar "$sha" | tar -x -C "$tmp"
@@ -783,7 +784,7 @@ preflight() {
   # an error says what failed. (Not "adsbd.py help | grep -q usage": its usage exits 2, and under
   # pipefail that fails the pipeline even when grep matches. That refused 919cfc2.)
   local f
-  for f in sizeup/radio/adsbd.py sizeup/radio/aisd.py sizeup/radio/trunkrecd.py sizeup/cloud/autoupdate.py sizeup/cloud/configupdate.py tools/stt_diag.py; do
+  for f in sizeup/radio/adsbd.py sizeup/radio/aisd.py sizeup/radio/trunkrecd.py sizeup/cloud/autoupdate.py sizeup/cloud/configupdate.py sizeup/cloud/logread.py tools/stt_diag.py; do
     [ -f "$rel/$f" ] || continue
     if out=$(python3 -I -B -c 'import importlib.util as u, sys
 s = u.spec_from_file_location("preflight_check", sys.argv[1]); m = u.module_from_spec(s)
@@ -816,6 +817,8 @@ whisper_argv() { timeout 5 runuser -u "$SVC_USER" -- head -c 8192 /run/sizeup-wh
 adsb_sig() { { cat "$LIB/adsbd.py" /etc/systemd/system/sizeup-adsb.service 2>/dev/null; readlink -f "$OPT/readsb" 2>/dev/null; } | sha256sum | cut -c1-16; }
 # what sizeup-ais runs (#402): its supervisor and its unit (AIS-catcher is installed by hand: README "AIS receiver")
 ais_sig() { { cat "$LIB/aisd.py" /etc/systemd/system/sizeup-ais.service 2>/dev/null || true; } | sha256sum | cut -c1-16; }
+# what sizeup-logread runs (the station's journal reader, docs/station-logs.md)
+logread_sig() { { cat "$LIB/logread.py" /etc/systemd/system/sizeup-logread.service 2>/dev/null || true; } | sha256sum | cut -c1-16; }
 # what sizeup-trunk-recorder runs (#71): its supervisor and its unit, the trunk-recorder and librtlsdr builds behind the
 # links, its config.json and talkgroups.csv (the sizeup user's directory: read as that user, bounded, never waiting
 # long). Restarted only when one of them changed: a Python-only update leaves P25 on its control channel.
@@ -839,11 +842,12 @@ trunk_recorder_service() {
 }
 
 activate() {
-  local name=$1 rel="$RELEASES/$1" sys pair t want have t0 t1 adsb_was ais_was tr_was leaving
+  local name=$1 rel="$RELEASES/$1" sys pair t want have t0 t1 adsb_was ais_was tr_was leaving logread_was
   [ -f "$rel/.complete" ] || die "no staged release $name in $RELEASES"
   step "switch to release $name"
   adsb_was=$(adsb_sig)
   ais_was=$(ais_sig)
+  logread_was=$(logread_sig)
   tr_was=$(tr_sig)
   # The system files: the release's own, or (a release from before #58) this installer's.
   sys="$rel/deploy/station"
@@ -861,7 +865,7 @@ activate() {
   # trunk-recorder's supervisor (#71; a release from before it runs trunk-recorder inside sizeup-station)
   [ ! -f "$sys/../../sizeup/radio/trunkrecd.py" ] || install -D -m 0644 "$sys/../../sizeup/radio/trunkrecd.py" "$LIB/trunkrecd.py"
   for t in sizeup-usbfs.service sizeup-station.service sizeup-whisper.service sizeup-health.service sizeup-health.timer \
-           sizeup-update.service sizeup-update.path sizeup-update.timer sizeup-ais.service \
+           sizeup-update.service sizeup-update.path sizeup-update.timer sizeup-ais.service sizeup-logread.service \
            sizeup-adsb.service sizeup-trunk-recorder.service; do
     [ -f "$sys/systemd/$t" ] || continue                       # (sizeup-adsb: from before #235; sizeup-trunk-recorder: #71;
                                                                # sizeup-usbfs: #269)
@@ -869,6 +873,18 @@ activate() {
   done
   install -D -m 0644 "$sys/systemd/journald-sizeup.conf" /etc/systemd/journald.conf.d/sizeup.conf
   install -d -m 2755 -o root -g systemd-journal /var/log/journal 2>/dev/null || install -d -m 2755 /var/log/journal
+  # the journal reader (sizeup-logread, docs/station-logs.md): a user of its own in systemd-journal, never the sizeup user
+  if [ -f "$sys/systemd/sizeup-logread.service" ]; then
+    getent group systemd-journal >/dev/null || groupadd --system systemd-journal
+    getent group sizeup-logs >/dev/null || groupadd --system sizeup-logs
+    if ! id sizeup-logs >/dev/null 2>&1; then
+      useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin --gid sizeup-logs \
+        --comment "sizeup station journal reader" sizeup-logs
+    fi
+    usermod -g sizeup-logs -a -G systemd-journal sizeup-logs
+    install -d -m 2770 -o sizeup-logs -g "$SVC_USER" /var/lib/sizeup-logs
+    install -D -m 0644 "$sys/../../sizeup/cloud/logread.py" "$LIB/logread.py"
+  fi
   rm -f "$ETC/build.env"                       # (before #58; the release's BUILD file says it now)
   # A config from before #58 read the talkgroups from the old checkout, which goes away: trunk-recorder's copy.
   if grep -qF "$LEGACY_APP/deploy/trunk-recorder/talkgroups.csv" "$CONF" 2>/dev/null; then
@@ -916,6 +932,7 @@ PY
   if [ -d "$rel/deploy/trunk-recorder/systems" ]; then
     for sysdir in "$rel"/deploy/trunk-recorder/systems/*/; do
       [ -f "$sysdir/config.json" ] || continue
+      [ ! -f "$sysdir/probe.json" ] || continue        # a reception probe (#436): sizeup makes it on the station
       sysname=$(basename "$sysdir")
       case "$sysname" in *[!a-z0-9_-]*|'') continue ;; esac
       as_user mkdir -p -m 0755 "$TR_DIR/systems/$sysname"
@@ -957,6 +974,7 @@ PY
     sizeup-update.path sizeup-update.timer
   [ ! -f /etc/systemd/system/sizeup-adsb.service ] || systemctl enable --quiet sizeup-adsb.service
   [ ! -f /etc/systemd/system/sizeup-ais.service ] || systemctl enable --quiet sizeup-ais.service
+  [ ! -f /etc/systemd/system/sizeup-logread.service ] || systemctl enable --quiet sizeup-logread.service
   # no usbfs buffer limit (#269), at every boot and now, before the dongles' services (re)start; never fails the switch
   if [ -f /etc/systemd/system/sizeup-usbfs.service ]; then
     systemctl enable --quiet sizeup-usbfs.service || warn "sizeup-usbfs: couldn't enable it"
@@ -993,6 +1011,14 @@ PY
     else
       systemctl restart sizeup-ais.service
       say "sizeup-ais: (re)started (AIS-catcher runs only on the dongle named for AIS)"
+    fi
+  fi
+  # the journal reader: left running unless it changed (a restart re-reads from its cursor: nothing lost)
+  if [ -f /etc/systemd/system/sizeup-logread.service ]; then
+    if systemctl is-active --quiet sizeup-logread.service && [ "$logread_was" = "$(logread_sig)" ]; then
+      say "sizeup-logread: unchanged, left running"
+    else
+      systemctl restart sizeup-logread.service || warn "sizeup-logread: didn't start (systemctl status sizeup-logread)"
     fi
   fi
   systemctl restart sizeup-health.timer
@@ -1184,6 +1210,7 @@ activate "$NAME"
 if command -v systemd-analyze >/dev/null; then
   systemd-analyze verify /etc/systemd/system/sizeup-station.service /etc/systemd/system/sizeup-whisper.service \
     /etc/systemd/system/sizeup-adsb.service /etc/systemd/system/sizeup-ais.service /etc/systemd/system/sizeup-trunk-recorder.service \
+    /etc/systemd/system/sizeup-logread.service \
     /etc/systemd/system/sizeup-usbfs.service /etc/systemd/system/sizeup-health.timer /etc/systemd/system/sizeup-update.path \
     /etc/systemd/system/sizeup-update.timer || warn "systemd-analyze verify complained (above)"
 fi

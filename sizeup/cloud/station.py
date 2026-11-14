@@ -20,6 +20,9 @@
                        updater's last result go up in the status ("version")
     aircraft thread    POST /api/station/aircraft: our ADS-B receiver's aircraft (#235, aircraftlink.py), read every
                        second, what changed, every 1-5 s as the hub asks; dropped (never queued) while it's offline
+    logs thread        POST /api/station/logs: this station's journal (sizeup-logread hands it over: logread.py),
+                       scrubbed and gzipped, every ~45 s, spooled on disk while the hub is away (logship.py); the hub
+                       writes it to CloudWatch (cwlogs.py)
     vessels thread     POST /api/station/vessels: our AIS receiver's vessels (#402, vessellink.py), only with
                        [vessels.receiver] enabled; the whole list every 5-30 s as the hub asks; never queued
     jobs thread        GET /api/station/jobs?wait=25 (long poll: the station never takes inbound
@@ -55,6 +58,7 @@ from sizeup.cloud.adapters import request_reset
 from sizeup.cloud.autoupdate import Watch
 from sizeup.cloud.client import Backoff, HubClient, HubError
 from sizeup.cloud.health import Metrics, station_metrics
+from sizeup.cloud.logship import LogShipper
 from sizeup.cloud.outbox import Outbox
 from sizeup.cloud.vessellink import VesselForwarder
 from sizeup.tts import VoiceCfg
@@ -145,6 +149,9 @@ class StationLink:
         self.aircraft = AircraftForwarder(app, cfg, self._client, log)
         # our AIS receiver's vessels (#402, sizeup/cloud/vessellink.py): only with [vessels.receiver] enabled
         self.vessels = VesselForwarder(cfg, self._client, log)
+        # the station's journal (handed over by sizeup-logread), scrubbed, to the hub and CloudWatch
+        # (sizeup/cloud/logship.py): spooled on disk; the incident-source adapter's lines stay here unless Settings say
+        self.logs = LogShipper(cfg, self._client, log, app=app)
         app.events, app.link = self.emit, self
         app.cad.cloud = self.cad_cloud
         n, _ = self.outbox.pending()
@@ -187,6 +194,7 @@ class StationLink:
             self._threads.append(t)
         self.aircraft.start()
         self.vessels.start()                  # (idle unless [vessels.receiver] enabled)
+        self.logs.start()
         return self
 
     @property
@@ -204,6 +212,7 @@ class StationLink:
         self._live_wake.set()
         self.aircraft.stop()
         self.vessels.stop()
+        self.logs.stop()
 
     # -- health -------------------------------------------------------------------------------------
 
@@ -327,6 +336,10 @@ class StationLink:
                "reception": app.reception.state(),           # (#410) the reception test: its numbers, the history
                "outbox": {"pending": n, "oldest": oldest, "dropped_audio": self.outbox.dropped_audio},
                "version": self.version()}
+        try:
+            out["logship"] = self.logs.stats()
+        except Exception as e:  # noqa: BLE001 - a report
+            out["logship"] = {"state": "error", "reason": type(e).__name__}
         try:
             out["health"] = station_metrics(app, self.metrics)
         except Exception as e:  # health is a report: never in the way of the status itself

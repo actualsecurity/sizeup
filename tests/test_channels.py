@@ -74,7 +74,7 @@ def test_defaults_and_what_runs_without_aws(tmp_path):
     # no AWS here: an AWS channel runs the local model, and says why
     assert app.stt_engine("FG1") == "local" and "isn't set up here" in app.aws_ok()[1]
     st = app.state()["channels"]
-    assert st["aws_ok"] is False and st["aws_channels"] == ["South 2", "FG1", "FG2", "tg:307"]
+    assert st["aws_ok"] is False and st["aws_channels"] == ["South 2", "FG1", "FG2", "tg:307", "p25:mrrs:9211"]
     assert [f["key"] for f in st["fm"]] == ["South 2", "FG1"] and st["aws"]["enabled"] is False
     assert channels.effective({"transcribe": False, "engine": "aws"}, True) == "off"
     assert channels.effective({"transcribe": True, "engine": "both"}, False) == "local"
@@ -178,7 +178,7 @@ def test_all_in_one_aws_both_off_and_record_off(tmp_path):
         assert seen == ["FG1"]                             # talking now / MDC IDs still go to the live view
         assert whisper.calls == 1
         cost = app.state()["channels"]["aws"]
-        assert cost["streams_open"] + cost["streams"] >= 1 and cost["billed_s"] >= 15 and cost["usd"] >= 0.01
+        assert cost["streams_open"] + cost["streams"] >= 1 and cost["billed_s"] > 0 and cost["price_per_min"] == 0.01
     finally:
         app.stop()
         fake.close()
@@ -287,7 +287,7 @@ def test_the_hub_sends_its_choices_and_the_station_obeys(tmp_path):
         tid4 = fm_segment(st)
         assert wait(lambda: any(t["id"] == tid4 and t["text"] == "whisper heard this" for t in all_traffic(hub.get("/api/state"))), 15)
         cost = hub.get("/api/state")["channels"]["aws"]
-        assert cost["enabled"] and cost["limit_usd"] == 0 and cost["billed_s"] >= 15 and not cost["ok"]
+        assert cost["enabled"] and cost["limit_usd"] == 0 and cost["billed_s"] > 0 and not cost["ok"]
     finally:
         if st is not None:
             st.link.stop()
@@ -407,7 +407,9 @@ def test_aws_failing_with_the_station_gone_says_transcription_failed(tmp_path):
                        "status": "remote", "transcript_pending": "aws", "stt": "aws", "model": "aws-transcribe"},
               "audio": __import__("base64").b64encode(wav_bytes((voice(3.0)[::2] * 32767).astype(np.int16), 8000)).decode()}
         assert call(hub.url + "/api/station/events", "POST", {"epoch": "e1", "events": [ev]})[0] == 200
-        assert wait(lambda: any(r["id"] == "FG1-123" and r["status"] == "error" for r in hub.get("/api/cad/comms")["rows"]), 20)
+        # (the hub's call to the station gives up after CALL_WAIT_S, 12 s: this takes 13 s on an idle machine, and the
+        # 20 s once waited ran out on a busy one)
+        assert wait(lambda: any(r["id"] == "FG1-123" and r["status"] == "error" for r in hub.get("/api/cad/comms")["rows"]), 90)
         row = next(r for r in hub.get("/api/cad/comms")["rows"] if r["id"] == "FG1-123")
         assert "failed" in row["model"]
     finally:

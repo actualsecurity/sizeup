@@ -135,7 +135,7 @@ def test_the_overflow_spike_one_notice_an_hour_then_back_to_normal():
     assert len(n.got) == 1
     first = n.got[0]
     assert first["title"].startswith("Hub errors: aircraft OverflowError ×") and first["title"].endswith("· since 16:13")
-    assert first["priority"] == 4 and first["click"] == "https://hub.example/cad" and "Settings > Health" in first["body"]
+    assert first["priority"] == 4 and first["click"] == "https://hub.example/cad" and "Settings > Station > Health" in first["body"]
     assert any(m.startswith("errors: Hub errors: aircraft OverflowError") for m in logs)
     p = w.panel()
     assert p["top"][0]["source"] == "aircraft" and p["top"][0]["count"] == 1500 and p["alerting"]
