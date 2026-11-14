@@ -448,7 +448,7 @@ Settings > Station > Health (`static/health.js`), top to bottom. A row with noth
 | Alerts now | each alert that is on: severity, since when, where, pushed or muted | anything is red |
 | Hints | a channel quiet for longer than usual, a squelch opening on noise, context clips shed, the police budget used up | never pushed: read with the Channels row |
 | Incident sources | each source's tier, state (ok, backing off, failing, stale), reason, last report, which one is the acting primary; each source's lead over paging; reports a feed no longer lists | the console pill says "Paging primary" |
-| Map feeds | feeds with a fallback (MTA TrainTime, else GTFS-realtime): ok / fallback and why, last read | the trains look coarse |
+| Feeds | feeds with a fallback (MTA TrainTime, else GTFS-realtime) and the phone pre-alert (Tapout; "not configured" until its topic is set): ok / fallback and why, last read | the trains look coarse |
 | Station | connected or offline, last state post, clock skew, sizeup and machine up since, host | "Station offline" |
 | Version | station and hub builds, the update state, the last update with its timings and log line, failed builds, the adapter (with Reset when a source is failing) | after a deploy; "Station behind" |
 | Outbox and system | events waiting and the oldest, clips dropped, CPU, load, memory, disk, temperature | "events backing up", "disk full" |
@@ -478,9 +478,11 @@ the top signatures with their last message (admins only). The access log (`http 
 
 ### The alert and status topics (ntfy)
 
-Pushes go to **topics of our own** on ntfy.sh, never Tapout's: `pcfd-phone-prealert` pages the fire
-crew's phones and `pcfd-status` is Tapout's own health feed. The config refuses both (and whatever
-`[prealert]` names), and `sizeup/notify.py` refuses them again before any request. The refusal is by
+Pushes go to **topics of our own** on ntfy.sh, never Tapout's: the pre-alert ring topic pages the fire
+crew's phones and the status topic is Tapout's own health feed. The refusal covers a derived **protected set** (the
+`[prealert]` topics, the env topics, the Settings pre-alert topics, plus an admin "Protected" list in Settings > System >
+Push notifications), checked in config, in Settings and by `sizeup/notify.py` before every request against the live set
+(unreadable set: nothing is published). The refusal is by
 exact name: a topic of ours with "status" in it is fine. No topic: no push (banner and log only); that is
 the default.
 
@@ -964,15 +966,21 @@ line rings it posts to ntfy.sh; sizeup reads that feed (`sizeup/prealert.py`, `[
 config) and shows each ring as a **pre-alert**: a possible incoming call, often before 60 Control
 pages it.
 
-**Read only.** `pcfd-phone-prealert` is the fire crew's real alert channel: sizeup only subscribes
+**Read only.** The ring topic is the fire crew's real alert channel (its name lives in Settings, not in the repo): sizeup only subscribes
 (every request is a `GET`, checked by `tests/test_prealert.py`) and never publishes to it or to any
 ntfy topic. Don't post to it by hand "to test" either: it pages the crew. Tests use a local fake
 ntfy server only.
 
+**Topics live in the database, not the repo.** Admins set them in Settings > System > Push notifications:
+"Pre-alert ring topic" (`prealert_ring`), "Pre-alert status topic" (`prealert_status`) and "Protected" (extra
+topics never published to). Precedence: env `SIZEUP_PREALERT_RING_TOPIC` / `SIZEUP_PREALERT_STATUS_TOPIC`, then
+Settings, then `[prealert]` in the config; a change applies within ~2 s, no restart. Unset: the feed is off (no
+request, no retry), the 60 Control header says "Tapout: not configured" and Health > Feeds shows the same.
+
 | topic | Tapout sends | sizeup does |
 |---|---|---|
-| `ring_topic` (`pcfd-phone-prealert`) | title `STATION PHONE RINGING`, max priority, message `Incoming call on the station line at 2026-10-08 14:03:21 EDT.` (late: `Phone rang ~45s ago at ... (alert delayed by network).`); a commissioning test is `[TEST] STATION PHONE RINGING` | a pre-alert {at, source "Tapout HQ phone", message, ntfy id}; a test is shown as "Test ring" and never matched |
-| `status_topic` (`pcfd-status`) | `Tapout heartbeat` hourly (`... hourly check-in, seq 12 ...`), `Tapout restarted` at boot, warnings (`Detector line STUCK active`, `ALERT DELIVERY FAILED`, `Low memory`), OTA lifecycle | Tapout's health: "Tapout: ok, heartbeat 12 min ago"; over `heartbeat_stale_min` (90) "no heartbeat for 2 h" in warning; never heard: "no heartbeat yet" |
+| `ring_topic` | title `STATION PHONE RINGING`, max priority, message `Incoming call on the station line at 2026-10-08 14:03:21 EDT.` (late: `Phone rang ~45s ago at ... (alert delayed by network).`); a commissioning test is `[TEST] STATION PHONE RINGING` | a pre-alert {at, source "Tapout HQ phone", message, ntfy id}; a test is shown as "Test ring" and never matched |
+| `status_topic` | `Tapout heartbeat` hourly (`... hourly check-in, seq 12 ...`), `Tapout restarted` at boot, warnings (`Detector line STUCK active`, `ALERT DELIVERY FAILED`, `Low memory`), OTA lifecycle | Tapout's health: "Tapout: ok, heartbeat 12 min ago"; over `heartbeat_stale_min` (90) "no heartbeat for 2 h" in warning; never heard: "no heartbeat yet" |
 
 **Where it runs:** the CAD of record only: the **hub**, or all-in-one. While a station forwards to a hub it doesn't
 subscribe (logged): the hub does on its own, so it works whether or not the station is connected, and nobody gets two
@@ -1011,8 +1019,8 @@ its outcome, when, the seconds from ring to outcome and the event number, for re
 [prealert]                       # leave the section out: off
 enabled = true
 server = "https://ntfy.sh"       # SIZEUP_PREALERT_SERVER overrides (a local test server)
-ring_topic = "pcfd-phone-prealert"
-status_topic = "pcfd-status"
+ring_topic = ""                  # set in Settings > System > Push notifications (or env)
+status_topic = ""
 expire_min = 5
 heartbeat_stale_min = 90
 ```
@@ -2125,7 +2133,7 @@ optional value is ignored. An answer that isn't a list of records, or in which m
 fail, is a **change of shape** and counts as a bad poll, like an HTTP error or a timeout. The last good read
 stays merged for up to 90 s; after **3 bad polls in a row** (`FALLBACK_AFTER`) the layer is GTFS-realtime
 alone, exactly as before #362, until a poll reads again. Settings > Data sources (*Metro-North GPS, cars,
-load (MTA TrainTime)*: the reason as its error) and Settings > Station > Health (*Map feeds*: ok / fallback and why)
+load (MTA TrainTime)*: the reason as its error) and Settings > Station > Health (*Feeds*: ok / fallback and why)
 show it. A failure backs off (20 s doubling to 10 min; a 429 5 min; 401 / 403 30 min).
 
 ```toml
@@ -2534,8 +2542,7 @@ User, 2026-10-14 (#161): *"yes they should"* (raise sizeup's alarm and send a pu
 7700**, or the aircraft's **own emergency status** (minimum fuel, no radio, medical ...), **within 15 nm of HPN
 below 18,000 ft** (or on the ground), from a message no older than 15 s, raises **the emergency alarm**
 (`sizeup/cad/alarms.py`, #128: every console and wall board, the alarm sound, acknowledged by a dispatcher)
-and **its push** to the alerts topic (`[alerts] ntfy_topic`, else `status_topic`) when one is set (never Tapout's `pcfd-phone-prealert` or
-`pcfd-status`: refused in three places; no topic: the alarm only). It works while nobody looks at the map:
+and **its push** to the alerts topic (`[alerts] ntfy_topic`, else `status_topic`) when one is set (never Tapout's pre-alert topics: refused in the protected set, checked in config, Settings and before every send; no topic: the alarm only). It works while nobody looks at the map:
 the emergency watch reads the primary feed every 15 s (`[aircraft] alarms = false` turns it off).
 
 * **One alarm per aircraft per emergency.** Still squawking: the same alarm. Not seen in emergency for a
