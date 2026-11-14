@@ -45,8 +45,8 @@ Three ways to run it:
 | 2. Install | elevated PowerShell: `powershell -ExecutionPolicy Bypass -File .\install-windows.ps1` | `sudo ./install-linux.sh` |
 | 3. Add the deploy key it prints | GitHub > the repo > Settings > Deploy keys, write access off | same |
 | 4. Enter the secrets when asked (hidden) | station token, Access Client ID and Secret | same |
-| 5. Check | `wsl -d Ubuntu-24.04 -u root sizeup-station doctor` | `sudo sizeup-station doctor` |
-| 6. Plug in the dongles | attached to WSL within ~10 s; each gets a job by itself | each gets a job by itself |
+| 5. Plug in the dongles | attached to WSL within ~10 s; each gets a job by itself | each gets a job by itself |
+| 6. Check (with no dongle plugged in, `doctor` says FAIL "no RTL-SDR on USB") | `wsl -d Ubuntu-24.04 -u root sizeup-station doctor` | `sudo sizeup-station doctor` |
 | 7. Look | http://localhost:8091 | http://localhost:8091 |
 
 After that it runs by itself: it starts at boot, restarts itself, and follows the hub's build

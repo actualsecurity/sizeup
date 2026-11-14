@@ -3,7 +3,7 @@
 Where this is going, in what order, and what has to be decided first. Updated when the direction changes, not every PR.
 Day-to-day work lives in [GitHub issues](https://github.com/actualsecurity/sizeup/issues).
 
-Last rebuilt from the issues and PRs on 2026-11-14 (main at `b2fea80`, PR #515). A bare `#n` is an issue; PRs are marked
+Last rebuilt from the issues and PRs on 2026-11-14 (main at `56dc3c7`, PR #522). A bare `#n` is an issue; PRs are marked
 "PR".
 
 ## What sizeup is for
@@ -64,7 +64,7 @@ itemised. An issue marked "open" is still open after the PR listed for it merged
 | What | PRs | Issues |
 |---|---|---|
 | The context-transcript hook (plan PR 0) | #483 | |
-| Replay / backtest over stored radio rows (`tools/intel_replay.py`), STT evaluation (`tools/stt_eval.py`), admin transcript corrections and their export (plan PR 7) | #491 | #487, #428 |
+| Replay / backtest over stored radio rows (`tools/intel_replay.py`), STT evaluation (`tools/stt_eval.py`), admin transcript corrections and their export (plan PR 7) | #491 | #487, #428 (open: the archive) |
 | The INTEL push kind | #486 | |
 | The core and the police pack: rules, window, events, policy, push, Settings > Intel, the console card, the events API (plan PR 1) | #492 | part of #411 |
 | Police STT profile, police AWS budget, PD audio budget (plan PR 3) | #495 | #490 |
@@ -132,6 +132,7 @@ itemised. An issue marked "open" is still open after the PR listed for it merged
 |---|---|---|
 | #462 | Street view: 360° street imagery in the CAD maps | #461 |
 | #520 | Documentation refresh (this PR) | |
+| #528 | Settings: no redraw under you; a refused save says why next to its field | #527 |
 
 ## Now
 
@@ -139,8 +140,9 @@ itemised. An issue marked "open" is still open after the PR listed for it merged
 |---|---|
 | Speech-to-text | #196 the station's whisper can't keep up; #124 free fixes (the price is done, #423; the hyphens, #518, are done) |
 | MRRS (umbrella #408) | #410 reception probe (PR #436, #479 merged); #411 PD pre-alerts and scene-safety markers; #412 learned PD roster; #413 Metro-North / MTA PD traffic on trains and track locations |
-| Hub | #498 the 2026-11-13 outage write-up (PR #497, #506, #507, #509 merged; the process items remain); #446 hub CPU; #247 deploys without downtime (PR #254 merged); #33 settings after the October deploys |
-| Station | #32 move to the Windows PC; #460 adapter password from the hub (PR #465) |
+| Hub | #498 the 2026-11-13 outage write-up (PR #497, #506, #507, #509 merged; the process items remain); #523 a replica can diverge when Litestream restarts under the app (the TRUNCATE checkpoint merged in PR #522; issue open); #446 hub CPU; #247 deploys without downtime (PR #254 merged); #33 settings after the October deploys |
+| Station | #32 move to the Windows PC |
+| Settings | #527 the page redraws under you, typed text is lost, a refused save shows no reason (PR #528) |
 | Incidents | #51 the two call-notification websites as a feed; #323 incident attachments stored one way (backend in PR #328, #344) |
 | Maps | #360 probable routes (PR #361, #363 merged); #185 road projects layer (PR #189 merged) |
 | Development | #281 split the largest files; #364 a per-test timeout; #317 two races in test code |
@@ -173,7 +175,7 @@ left, then closing.
 | Radio | #450 radio views follow-ups |
 | Station | #42 second station for redundancy; #339 refuse a non-localhost Host |
 | Repo | #296 third-party ntfy topic names out of the public repo |
-| Tests | #481, #480, #468 flaky tests |
+| Tests | #481, #480, #468 flaky tests; #529 a speech-to-text re-run test failed once under parallel pytest |
 | Also `waiting` | #45 station alerting; #43 responder status and location from a vendor; #41 transmit over a PCFD radio |
 
 ## Waiting

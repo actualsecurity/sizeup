@@ -1,4 +1,4 @@
-"""A 60 Control page whose street speech-to-text misheard joins the County CAD Times incident for the same call
+"""A 60 Control page whose street speech-to-text misheard joins the county feed incident for the same call
 (sizeup/cad/fuzzy.py, sizeup/cad/sources.py heard_place): a misspelled street, a house number with a digit too many,
 another type and run-together engine numbers. Guards: an exactly-right street with another number, a known street in
 another district town, no street list, a missing direction, another town, two near streets, another house with

@@ -110,6 +110,8 @@ No `[cloud]` section = today's all-in-one, unchanged.
 - [Station logs (CloudWatch)](#station-logs-cloudwatch)
 - [Where the hub's CPU goes (#425)](#where-the-hubs-cpu-goes-425)
 - [The hub's storage](#the-hubs-storage)
+  - [How often the replica is written](#how-often-the-replica-is-written)
+  - [Litestream started again under the app](#litestream-started-again-under-the-app)
   - [Audio retention](#audio-retention)
   - [Audio in S3 (#414)](#audio-in-s3-414)
   - [Starting: the CAD first (#251)](#starting-the-cad-first-251)
@@ -139,6 +141,8 @@ No `[cloud]` section = today's all-in-one, unchanged.
 | Rolling back | the task definition (the previous image takes over from the replica); [Back to stop-then-start](#back-to-stop-then-start) for code without the lock; [Audio in S3](#audio-in-s3-414) "Rollback" for a release from before #414 |
 | A replica no longer restores | [Reseeding a replica](#reseeding-a-replica) (by hand, the hub stopped) |
 | A push: "Replica corrupt", "Replica not verifiable", "Hub takeover failed", "Hub crash-looping" | [Replica checks](#replica-checks): the push kinds, the record, the CloudWatch alarms |
+| A push: "Hub Litestream restarted", or a replica shown as unverified | [Litestream started again under the app](#litestream-started-again-under-the-app): the TRUNCATE rule, the retries, what an unclean release means |
+| What a killed hub loses; the S3 request bill; `SIZEUP_LITESTREAM_SYNC_S` | [How often the replica is written](#how-often-the-replica-is-written) |
 | Reading Settings > Station > Health | [What each Health row means](#what-each-health-row-means), [the alerts](#station-health-and-alerts) |
 | The station is offline, behind or failed an update | [Failure behaviour](#failure-behaviour), [Station updates](#station-updates-it-follows-the-hubs-build); its logs: [Station logs](#station-logs-cloudwatch) |
 | Setting up or changing the push topics | [The alert and status topics (ntfy)](#the-alert-and-status-topics-ntfy) |
@@ -457,7 +461,7 @@ Settings > Station > Health (`static/health.js`), top to bottom. A row with noth
 | Speech-to-text queue (station) | waiting by class, the oldest live clip, the pace, dropped / skipped / shed, and **Catch-up**: "4 waiting · 12 caught up (24 h) · 1 gave up · paused: …" | "Speech-to-text behind"; clips "Skipped: busy" |
 | Amazon Transcribe (hub) | state, last answer, failing since and why, the breaker (closed, open until, half-open), waiting for AWS, counts, this month against the limit | "Amazon Transcribe failing", the budget alerts |
 | Hub errors | the error rate, since the start, whether a push is on, the last notices, the top signatures | a "Hub errors" push |
-| Replicas | each file: ok, corrupt, not verifiable or stale (no check for 3 leader intervals), when it was verified and by whom; unverified when Litestream was started again without a checkpoint of it; the task events of the last 24 h (failures, and every Litestream restart) | any replica push; before a risky deploy |
+| Replicas | each file: ok, corrupt, not verifiable, stale (no check for 3 leader intervals) or not checked (no check yet), when it was verified and by whom; unverified when Litestream was started again without a checkpoint of it; the task events of the last 24 h (failures, and every Litestream restart) | any replica push; before a risky deploy |
 | Dongles | each dongle: plugged in, its job, running, restarts | "SDR gone", "*job* not running" |
 | P25 trunk | the system's last call, the window in effect, the control channel's decode rate | "P25 trunk silent" |
 | Channels | each channel: state, last heard, quiet for, its usual gap, squelch, quieting, restarts, hint | one channel seems dead |
@@ -2951,7 +2955,8 @@ inspection sheets, hazmat / Tier II, contact sheets, photos), opened in the app.
 | Deleting | the row is marked deleted, then its objects go. The bucket is versioned: the bytes are really gone 30 days later (its lifecycle rule) |
 | Who | anyone signed in sees a building's documents; an admin-only one exists only for admins. Dispatchers and admins upload, edit, align and delete; only an admin makes one admin-only. Audited (section `preplan_docs`); the server log never gets a title, a file name or a corner |
 
-The hub image carries pypdf, PDFium and Pillow for this (`pip install ".[docs]"`); without them a PDF is refused.
+The hub image carries pypdf, PDFium and Pillow for this (the `docs` extra: the `Dockerfile` runs
+`pip install ".[docs,intel-llm]"`); without them a PDF is refused.
 Tests: `tests/test_preplan.py`, `tests/test_preplan_docs.py`.
 
 ## Station logs (CloudWatch)
@@ -3729,8 +3734,10 @@ may read the record: `python3 tools/deploy_check.py replicas --build <sha>`. A m
 **not verifiable** is never a timeout: treat it as real.
 
 * **Pushes** go to the STATUS topic, from the env (SSM `/sizeup-hub/status-topic`, else the alerts topic) or the config
-  file. A Settings override is in the CAD database, which the supervisor never opens. Tapout's and `[prealert]`'s
-  topics are refused. Each kind has its own slot, so one kind never holds back another, and each is pushed at most
+  file. A Settings override is in the CAD database, which the supervisor never opens. The `[prealert]` topics of the env and the
+  config file are refused by exact name. Pre-alert topics and the protected list kept only in Settings are not
+  visible to the supervisor: against those only the static hash backstop stands (`notify.always_protected()`), so a
+  topic protected only in Settings is not refused here. Each kind has its own slot, so one kind never holds back another, and each is pushed at most
   once per `SIZEUP_REPLICA_PUSH_MIN` (30):
   * `replica_corrupt` "Replica corrupt: cad.sqlite" (5);
   * `replica_restore` "Replica restore failed (possible corruption)" (5, on the first occurrence);
@@ -3793,7 +3800,7 @@ account's own values). Each is run by hand, once unless noted, and is safe to ru
 | 17 | `17-adapter-rotate-key.sh` | rotates the station's access key, in two runs (any time) | the same |
 | 18 | `18-audio-storage.sh` | the audio bucket, its lifecycle, the task role's policy | [Audio in S3](#audio-in-s3-414) |
 | 19 | `19-incident-audio-forever.sh` | the attachments bucket's lifecycle by a `keep` tag, and tagging for the task role | not used by this tree yet: attachments here are kept a year |
-| 20 | `20-hub-password-write.sh` | lets the hub write (never read) the adapter's password | not used by this tree yet |
+| 20 | `20-hub-password-write.sh` | lets the hub write (never read) the adapter's password | Settings > Station > Adapter (`sizeup/cloud/adapterpass.py`, #465) |
 | 21 | `21-google-maps-key.sh` | a street-view browser key into SSM | not used by this tree yet |
 | 22 | `22-preplan-docs.sh` | changes nothing: checks the backups bucket is fit for site documents | [Pre-plan points and site documents](#pre-plan-points-and-site-documents-456-459) |
 | 23 | `23-deploy-ssm-describe.sh` | `ssm:DescribeParameters` for the deploy role | [the deploy's SSM guard](#a-deploy-that-checks-itself) |
@@ -3809,7 +3816,8 @@ secret the task definition names must run **before** the deploy that names it
 ## Packaging and the Fargate task
 
 `Dockerfile`: `python:3.14-slim`, linux/arm64 (amd64 builds too), non-root user `sizeup` (uid 10001), `pip install
-".[docs]"` (pypdf, PDFium and Pillow for [site documents](#pre-plan-points-and-site-documents-456-459)), `data/`
+".[docs,intel-llm]"` (pypdf, PDFium and Pillow for [site documents](#pre-plan-points-and-site-documents-456-459); the
+Anthropic SDK with boto3 for the intel inference stage, pinned by `deploy/hub/constraints-intel-llm.txt`), `data/`
 included, Litestream 0.5.18 pinned and sha256-checked, health check on `/healthz` (a Python one-liner: slim has no
 curl). `/healthz` answers 200 with `{ok, version, build, role, station, public_url}` while the process serves (it
 doesn't depend on the station). Build with `--build-arg SIZEUP_BUILD=$(git rev-parse HEAD)`: the full sha (the deploy

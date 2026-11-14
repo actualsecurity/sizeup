@@ -54,10 +54,10 @@ layer), `deploy/station/README.md`, `docs/ROADMAP.md`, `docs/cad-plan.md`. Work 
 | `sizeup/cad/history.py`, `premise.py`, `preplan.py`, `preplan_docs.py`, `sizeup/attachments.py` | address history and search, premise notes, pre-plan points, site documents, incident attachments |
 | `sizeup/cad/routes.py`, `mapview.py`, `sizeup/roadgraph.py` | rig positions and probable routes on the road graph |
 | `sizeup/intel/` | radio intelligence: rule packs (`data/intel/`), engine, events, place (the locator: intersections, blocks, exits), push policy and the scrubbed push, `listen.py` (presigned Listen links), `infer.py` (the LLM stage on Bedrock: off by default, capped, backs the rules, never pushes alone) |
-| `sizeup/cloud/` | `station.py` (link), `outbox.py`, `hub.py`, `hubstore.py`, `autoupdate.py`, `configupdate.py`, `health.py`, `access.py`, `stationmode.py`, `adapters.py`, `adapterssm.py`, the station's logs (`logread.py`, `logship.py`, `cwlogs.py`), `aircraftlink.py`, `vessellink.py` |
+| `sizeup/cloud/` | `station.py` (link), `outbox.py`, `hub.py`, `hubstore.py`, `autoupdate.py`, `configupdate.py`, `health.py`, `access.py`, `stationmode.py`, `adapters.py`, `adapterssm.py`, `adapterpass.py` (the adapter's password written from the hub, never read), the station's logs (`logread.py`, `logship.py`, `cwlogs.py`), `aircraftlink.py`, `vessellink.py` |
 | `sizeup/handoff.py`, `leaderlock.py`, `fence.py`, `replicawatch.py` | the hub's hot/cold deploy supervisor, its S3 lock, the app's side of fencing, the replica checks and failure pushes |
 | `sizeup/audiostore.py`, `docstore.py`, `docfiles.py`, `pdfcheck.py`, `cachesync.py` | S3: clip audio, site documents and their checks, the map caches' copies |
-| `sizeup/notify.py`, `prealert.py`, `errwatch.py` | ntfy pushes (alerts, status, intel), the phone pre-alert (read only; its topics are in Settings, not the repo), the protected-topic set (derived, fails closed), the hub's error spikes |
+| `sizeup/notify.py`, `prealert.py`, `errwatch.py` | ntfy pushes (alerts, status, intel), the phone pre-alert (read only; its topics are in Settings, not the repo), the protected-topic set (derived, fails closed; a static backstop of hashed names under it), the hub's error spikes |
 | `sizeup/dispatch.py`, `polly.py`, `tts.py`, `tts_server.py` | page parsing; the dispatch voice (Amazon Polly, Kokoro) |
 | `sizeup/geo/`, `gis.py`, `roads.py`, `roadprojects.py`, `dvr.py` | gazetteer and geocoding, county GIS layers, highway layers and cameras, road closures, the camera DVR |
 | `sizeup/aircraft.py`, `atc*.py`, `airport_watch.py`, `trains.py`, `traintime.py`, `railassets.py`, `vessels.py`, `weather.py` | map layers, ATC transcription and airport watches |
@@ -95,8 +95,8 @@ caffeinate -i perl -e 'alarm 1500; exec @ARGV' .venv/bin/python -m pytest -q
       it (e.g. it fails on main too, or fails intermittently with the cause identified). If it really is flaky, file an
       issue for it.
 - [ ] **Regression tests use realistic data**: real captured or recorded shapes from `tests/fixtures/` or `tools/record_*`.
-      Never test only with data you invented to match your own assumption. Where a replay set covers it (#283,
-      `tests/replay.py`, `tests/test_replay_*.py`), add a replay test built from real captures.
+      Never test only with data you invented to match your own assumption. Once the replay fixtures exist (#283), add a
+      replay test built from real captures.
 - [ ] **Any UI change ships with a screenshot in the PR.**
 - [ ] **UI copy is concise and data-first:** one line per fact, no "how it works" sentences. Explanations go in
       tooltips, and source and freshness go in a small footer.

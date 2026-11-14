@@ -49,6 +49,7 @@ flowchart LR
   HAPP <--> AWS["Amazon Transcribe, Polly"]
   LS --> S3[("S3: replicas, audio, attachments, documents, caches, lock")]
   HAPP --> S3
+  HAPP --> EFS[("EFS: camera DVR")]
   HAPP --> NTFY["ntfy: alerts, status, intel"]
   FEEDS["public feeds: NWS, MTA, 511NY, Thruway, county GIS, adsb.lol, aisstream"] --> HAPP
   PHONE["phone pre-alert (ntfy, read only)"] --> HAPP
@@ -275,9 +276,11 @@ when it agrees with the category the rules were unsure about, their own score is
 least 0.8; anything else is held to `map` ("model: X?" on the card), never a push. Its place counts only if its words
 are in the transcript and the gazetteer finds them, and is never confirmed or over a confirmed one. Capped by
 `infer_daily_cap` (200 calls a day) and `infer_budget_usd` ($5 a month); a model with no known price is refused. Its
-log, `intel_infer` in `cad.sqlite`, is kept 90 days.
+log, `intel_infer` in `cad.sqlite`, is kept 90 days. Each row holds the model's category, confidence, location and
+summary (the model's own words about the traffic), plus tokens and cost.
 
-Events, hits and feedback are in `cad.sqlite` and hold no transcript text, only transmission ids (`events.py`). Intel
+Events, hits and feedback are in `cad.sqlite` and hold no transcript text, only transmission ids (`events.py`); the
+inference log above is the one intel table that holds text about the traffic. Intel
 never writes incidents, radio links or alarms. Replay / backtest runs the same engine over stored rows in memory (`intel/replay.py`, `tools/intel_replay.py`).
 
 ## Map and data layers
@@ -349,6 +352,10 @@ Summary only. The detail, with the reasons, is in [`cloud.md`](cloud.md): "Deplo
   4. `litestream replicate` starts and confirms its first position of each file. Only then may the app migrate
      (replicate before migrate).
   5. The app serves; the connector registers. The old task's connector stays up until the new leader says serving.
+
+  If Litestream exits under the serving app, the supervisor runs a TRUNCATE checkpoint on each file before it starts
+  Litestream again, so the first sync is a full snapshot. When the checkpoint can't be done the file is marked
+  unverified, pushed and retried, and a release with such a file is unclean (#522, #523).
 - **Fence** (`sizeup/fence.py`). The supervisor writes a lease file at each renew. The app refuses writes when the lease
   is not fresh, kills Litestream and itself, and never lets a write in again in that process. A fenced write is never
   silent: 503 for a request, no ack for a station event (the outbox sends it again to the next leader).
@@ -371,12 +378,12 @@ Summary only. The detail, with the reasons, is in [`cloud.md`](cloud.md): "Deplo
 | boundary | how it holds |
 |---|---|
 | No inbound ports | The hub is reached only through the Cloudflare Tunnel. The station binds `127.0.0.1` and only connects out. |
-| Sign-in | Cloudflare Access (one-time PIN by email). The hub verifies the Access JWT on every request (`cloud/access.py`); the operator on every write is that verified person. |
+| Sign-in | Cloudflare Access (one-time PIN by email). With `[cloud] access_team` and `access_aud` both set, the hub verifies the Access JWT on every page and CAD API request (`cloud/access.py`, `web/server.py` `_admit`); the operator on every write is that verified person. Two paths are not checked for a person: `/healthz` (the container health check) and `/api/station/` (its own bearer token, next row). With either setting empty there is no verifier at the hub: only Cloudflare's edge stands in front, and the Operator field is free text. |
 | Roles | `admin`, `dispatcher`, `viewer`; premise-note categories can be limited by role (`cad/settings.py`). |
-| Station link | A bearer token (constant-time compare) plus an Access service token. With no token configured the hub refuses every station call. |
-| Adapter credentials | The incident-source adapter and its credentials exist only on the station: systemd credentials, never environment variables (`sizeup/procenv.py`). A credential kept in SSM is read by the station's own IAM user; the hub never holds that key and its roles are denied the prefix (`cloud/adapterssm.py`). A failing adapter reports only the exception type. |
-| Context and police rows | Another system's rows, text, ids and audio are served only to a verified signed-in person (`sourcekeys.may_see_context`). The station's own page, all-in-one and a hub without Access serve none. Their words are never written to a log. |
-| Pushes | An intel push carries the category, town, address or block, time and level. Never transcript words, a talker, a radio ID, a plate or a person's name. A scrub checks the result and fails closed (`intel/push.py`). Its Listen link is a presigned S3 URL with no sign-in: random key, expires in 20 min, removed by a one-day lifecycle rule on the `listen/` prefix, which a person sets up (`intel/listen.py`). |
+| Station link | A bearer token, checked by the hub (constant-time compare, `cloud/hub.py` `_auth`), plus an Access service token, which only Cloudflare's edge checks: the hub itself checks the bearer alone. With no token configured the hub refuses every station call. |
+| Adapter credentials | The incident-source adapter runs only on the station, and only the station can read its credentials: systemd credentials, never environment variables (`sizeup/procenv.py`). A credential kept in SSM is read by the station's own IAM user (`cloud/adapterssm.py`). The hub can write one, never read it: an admin may type a new adapter password into Settings > Station > Adapter, and the hub puts it into SSM as a new version (`cloud/adapterpass.py`, #465). The value is kept out of logs, the audit, answers and errors. The hub's roles are denied reading and decrypting that parameter by the department's setup scripts, which are outside this repo. A failing adapter reports only the exception type. |
+| Context and police rows | The hub's pages and API serve another system's rows, text, ids and audio only to a verified signed-in person (`sourcekeys.may_see_context`). The station's own page, all-in-one and a hub without Access serve none. Their words are never written to a log. The one way such audio leaves without a sign-in is an intel push's Listen link (next row). |
+| Pushes | An intel push carries the category, town, address or block, time and level. Never transcript words, a talker, a radio ID, a plate or a person's name. A scrub checks the result and fails closed (`intel/push.py`). Its Listen link is a presigned S3 URL to the event's stitched audio, with no sign-in: whoever holds the link can play it until it expires; random key, expires in 20 min, removed by a one-day lifecycle rule on the `listen/` prefix, which a person sets up (`intel/listen.py`). |
 | Station logs | Read by a separate user with no network (`cloud/logread.py`), scrubbed on the station with its credential values, scrubbed again on the hub (`logscrub.py`, `cloud/logship.py`, `cloud/cwlogs.py`, [`station-logs.md`](station-logs.md)). |
 | Uploads | A site document's type is taken from its bytes. Photos lose their metadata. A PDF is cleaned and re-checked in a separate process. Documents are served only by the hub behind sign-in: no presigned links (`docfiles.py`, `pdfcheck.py`, `docstore.py`). |
 | Cross-site posts | The station and all-in-one refuse a POST a browser says came from another site (`web/server.py`). |
@@ -392,7 +399,8 @@ In rough order of how much each can move. No figures here beyond the limits the 
 | Fargate | One task (0.5 vCPU, 2 GB arm64) all the time; two for a few minutes per deploy |
 | Amazon Transcribe | Billed per second of audio sent. Two monthly limits in code (fire and context pools), a meter per channel, 80 % and 100 % pushes, fallback to whisper |
 | S3 audio | Uncompressed WAV. Bounded by retention per channel, talkgroup and tier, and a size cap for context audio |
-| S3 attachments | Camera clips and transmissions attached to an incident, kept a year. The camera DVR itself is on the task's disk (a rolling window, a camera limit), not S3. |
+| S3 attachments | Camera clips and transmissions attached to an incident, kept a year. The camera DVR itself is not in S3 (next row). |
+| EFS | The hub's camera DVR (`/data/dvr`, an EFS volume in `deploy/aws/taskdef.json`, shared between tasks so it survives a deploy; `sizeup/dvr.py`). Bounded by its rolling window and camera limit. |
 | S3 replicas | Litestream's history of three databases. Audio bytes were moved out of SQLite to keep these small. |
 | CloudWatch Logs | Station logs: filtered, repeat-limited, one log group |
 | Amazon Polly | A few seconds per dispatch |
@@ -430,7 +438,7 @@ Packages:
 | `sizeup/cad/` | The CAD (see [the CAD](#the-cad)) |
 | `sizeup/intel/` | Radio intelligence: `rules`, `engine`, `events`, `model`, `place`, `policy`, `push`, `admin`, `infer`, `listen` |
 | `sizeup/sources/` | The incident-source adapter interface and the station's runner |
-| `sizeup/cloud/` | Hub and station: `hub`, `hubstore`, `station`, `client`, `outbox`, `autoupdate`, `configupdate`, `health`, `access`, `stationmode`, `adapters`, `adapterssm`, `aircraftlink`, `vessellink`, `logread`, `logship`, `cwlogs` |
+| `sizeup/cloud/` | Hub and station: `hub`, `hubstore`, `station`, `client`, `outbox`, `autoupdate`, `configupdate`, `health`, `access`, `stationmode`, `adapters`, `adapterssm`, `adapterpass` (the adapter's password written from the hub), `aircraftlink`, `vessellink`, `logread`, `logship`, `cwlogs` |
 | `sizeup/geo/` | The gazetteer, page location, place and intersection search |
 | `sizeup/web/` | `server.py` (stdlib HTTP, server-sent events) and `static/` (plain JS and CSS, MapLibre vendored) |
 
