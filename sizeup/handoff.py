@@ -43,6 +43,10 @@ its task runs the Cloudflare connector. Every task is one of:
   FENCED    the lease isn't ours or fresh: the app and Litestream are SIGKILLed at once, the `leader` file goes,
             exit 3 (ECS replaces the task). The app's own watchdog (sizeup/fence.py) does the same from inside.
 
+Replica checks and failure pushes (sizeup/replicawatch.py, Supervisor.watch): the standby checks copies of what it
+follows, the leader restores and checks the replica now and then, and a task that ends badly (failure, unclean) records
+it in S3 and pushes to the status topic before it exits (docs/cloud.md "Replica checks").
+
 Never two writers: a task writes only between taking the lock and releasing it (or 20 s after its last
 successful renew, 15 s before anyone may take it over). Release happens only after the app and Litestream have
 exited.
@@ -426,8 +430,9 @@ def serve(port: int, handler, host: str = "127.0.0.1") -> ThreadingHTTPServer | 
 class Supervisor:
     def __init__(self, lock: LeaderLock, env: Env, run_dir: Path, shared_dir: Path, control_port: int = 8089,
                  mono: Callable[[], float] = time.monotonic, sleep: Callable[[float], None] = time.sleep,
-                 timing: dict | None = None):
+                 timing: dict | None = None, watch=None):
         self.lock, self.env = lock, env
+        self.watch = watch                        # sizeup/replicawatch.py ReplicaWatch: replica checks, failures pushed
         self.run_dir, self.shared = run_dir, shared_dir
         self.control_port = control_port
         self.mono, self.sleep = mono, sleep
@@ -477,6 +482,8 @@ class Supervisor:
         self.skip_checks = os.environ.get(SKIP_CHECKS_ENV, "").strip() == "1"
         self.litestream_warning = ""                   # Litestream older than MIN_LITESTREAM (the Health panel shows it)
         self.app_env: dict = dict(os.environ)
+        self.failure: tuple[str, str] | None = None   # (kind, why) this task ends badly for (replicawatch.TITLES)
+        self.unclean = False                          # it released the lock without every change confirmed in S3
 
     # -- small helpers ------------------------------------------------------------------------------------
 
@@ -814,14 +821,38 @@ class Supervisor:
         self.check_litestream_version()
         self.control()
         threading.Thread(target=self._beat, name="heartbeat", daemon=True).start()
+        if self.watch is not None:
+            self.watch.start(self)
+        code: int | None = None
         try:
-            return self._run()
+            code = self._run()
         except _Fenced as e:
-            return self.fence(str(e))
+            self.failure = ("fenced", str(e))
+            code = self.fence(str(e))
+        except Exception as e:
+            self.failure = ("crashed", f"{type(e).__name__}: {e}")
+            raise
         finally:
             self._port_stop.set()
             if self.updating_srv is not None:
                 self.updating_srv.shutdown()
+            self._report(code)
+        return code
+
+    def _report(self, code: int | None) -> None:
+        """A task that ends badly (a failed takeover, the app exiting, fenced, an unclean release, a crash): recorded
+        in S3 and pushed before it exits, within replicawatch.REPORT_S (sizeup/replicawatch.py); the checks stop."""
+        if self.watch is None:
+            return
+        self.watch.stop.set()
+        if code == 0 and self.failure is None and not self.unclean:
+            return
+        kind, why = self.failure or (("unclean_release", "the last changes weren't confirmed in S3") if code == 0
+                                     else ("exited", self.events[-1] if self.events else "?"))
+        try:
+            self.watch.report(kind, why, 1 if code is None else code)     # within 20 s in all, DNS included
+        except Exception as e:  # noqa: BLE001 - never in the way of the exit
+            log(f"handoff: the failure couldn't be reported ({type(e).__name__}: {e})")
 
     def _beat(self) -> None:
         while self.role not in ("done",):
@@ -851,6 +882,7 @@ class Supervisor:
                 errors_since = errors_since or self.mono()
                 log(f"handoff: lock not readable ({e})")
                 if self.mono() - errors_since > self.t["RESTORE_S"]:
+                    self.failure = ("lock_unreadable", f"the lock unreadable for {self.t['RESTORE_S']:.0f} s: {e}")
                     self.note("the lock unreadable too long: exiting")
                     self.stop_followers()
                     self.stop_warm_app()
@@ -882,6 +914,7 @@ class Supervisor:
             raise
         except Exception as e:
             self.note(f"takeover failed: {type(e).__name__}: {e}")
+            self.failure = ("takeover_failed", f"{type(e).__name__}: {e}")
             if isinstance(e, ReplicaMismatch):
                 self._stop_mismatched()
             self.failed_takeover = True
@@ -1217,6 +1250,7 @@ class Supervisor:
                 return self.step_down(code=0, overlap=True, retake=False)
             if self.app is not None and self.app.poll() is not None:
                 self.note(f"the app exited {self.app.poll()}: handing over")
+                self.failure = ("app_exited", f"the app exited {self.app.poll()} while serving")
                 return self.step_down(code=1, overlap=False, retake=False)
             if self.litestream is not None and self.litestream.poll() is not None:
                 if restart_at is None:
@@ -1279,6 +1313,7 @@ class Supervisor:
         self.role = "released"
         t.mark("release")
         self.note(f"released: {positions if clean else 'unclean'}")
+        self.unclean = self.unclean or not clean
         log(f"handoff: {t.line(self._since_term())}")
         if overlap:
             res = self.overlap(released, retake)
@@ -1426,6 +1461,7 @@ class Supervisor:
             raise
         except Exception as e:
             self.note(f"taking back failed: {e}")
+            self.failure = ("retake_failed", f"{type(e).__name__}: {e}")
             if isinstance(e, ReplicaMismatch):
                 self._stop_mismatched()
             return self.step_down(code=1, overlap=False, retake=False)
@@ -1467,7 +1503,13 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     env = Env(args.config, state, args.litestream_config, os.environ["LITESTREAM_SOCKET"],
               int(os.environ.get("SIZEUP_PORT", "8090")))
-    sup = Supervisor(lock, env, run_dir, shared, int(os.environ.get("SIZEUP_CONTROL_PORT", "8089")))
+    watch = None
+    try:                                           # replica checks and failure pushes (sizeup/replicawatch.py)
+        from sizeup import replicawatch
+        watch = replicawatch.from_env(lock.holder, run_dir, state, args.litestream_config, args.config, log=log)
+    except Exception as e:  # noqa: BLE001 - never in the way of the hub
+        log(f"handoff: replica watch off ({type(e).__name__}: {e})")
+    sup = Supervisor(lock, env, run_dir, shared, int(os.environ.get("SIZEUP_CONTROL_PORT", "8089")), watch=watch)
     signal.signal(signal.SIGTERM, sup.on_term)
     signal.signal(signal.SIGINT, sup.on_term)
     log(f"handoff: this task is {leaderlock.short(lock.holder)}; the lock is s3://{lock.obj.bucket}/{lock.obj.key}")

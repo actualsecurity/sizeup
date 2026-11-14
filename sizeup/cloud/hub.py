@@ -677,6 +677,11 @@ class HubApp(App):
         from sizeup.cloud.health import MUTE_SECTION
         self.health.mutes = lambda: self.cad.settings.section(MUTE_SECTION)
         self.health.errors = self.error_watch
+        # the replicas as the supervisor last verified them (sizeup/replicawatch.py): Health's Replicas row and alert
+        if os.environ.get("LITESTREAM_BUCKET", "").strip():
+            from sizeup import replicawatch
+            rw_state = Path(os.environ.get("SIZEUP_RUN_DIR", "/tmp/sizeup-run")) / replicawatch.STATE_FILE
+            self.health.replicas = lambda: replicawatch.read_state(rw_state)
         if not notifier.enabled:
             log("health: no push for station alerts (no status or alerts topic in effect): Settings > Station > Health and log only")
         self.live = self.hub.live                      # main() sets on_change to push the display
