@@ -10,7 +10,7 @@ import pytest
 
 from sizeup.cad.api import CadApi, needs
 from tests.test_radios import Clock, _event_with, cad, tx
-from tests.test_roles import COREY, JULIAN, VAL, api, call  # noqa: F401  (fixture)
+from tests.test_roles import CASEY, JORDAN, VAL, api, call  # noqa: F401  (fixture)
 
 
 @pytest.fixture
@@ -41,7 +41,7 @@ def test_a_manual_link_removed_is_gone(c):
     assert post(c, f"/api/cad/incident/{a['id']}/link", {"traffic_id": "307-m-call_1", "operator": "Lt. Ruiz"})[1]["linked"]
     assert radio(c, a["id"]) == {"307-m-call_1": "manual"}
     code, r = post(c, f"/api/cad/incident/{a['id']}/unlink", {"traffic_id": "307-m-call_1",
-                                                              "operator": "Corey <corey@example.org>"})
+                                                              "operator": "Casey <casey@example.org>"})
     assert code == 200 and r == {"unlinked": True, "why": "manual", "excluded": False, "incident_id": a["id"],
                                  "number": a["number"]}
     assert radio(c, a["id"]) == {}
@@ -50,7 +50,7 @@ def test_a_manual_link_removed_is_gone(c):
     assert not c.store.q("SELECT * FROM radio_link_exclusions")                     # a manual one: just gone
     lines = chronology(c, a["id"])
     assert lines[0].startswith("Radio traffic added: ") and "60 Ctrl OP 7 on Fire/EMS 15" in lines[0]
-    assert lines[1].endswith("60 Ctrl OP 7 on Fire/EMS 15 removed from this event by Corey") and lines[1].startswith("Radio ")
+    assert lines[1].endswith("60 Ctrl OP 7 on Fire/EMS 15 removed from this event by Casey") and lines[1].startswith("Radio ")
     # again: nothing to remove; bad ones refused
     assert post(c, f"/api/cad/incident/{a['id']}/unlink", {"traffic_id": "307-m-call_1"})[1]["unlinked"] is False
     assert post(c, f"/api/cad/incident/{a['id']}/unlink", {"traffic_id": "nope"})[0] == 400
@@ -104,20 +104,20 @@ def test_each_row_says_every_event_it_is_on(c):
 
 
 def test_who_may_remove_and_what_their_activity_says(api):  # noqa: F811
-    code, inc = call(api, "/api/cad/incident", {"type": "STRU", "address": "209 Westchester Ave"}, JULIAN)
+    code, inc = call(api, "/api/cad/incident", {"type": "STRU", "address": "209 Westchester Ave"}, JORDAN)
     assert code == 200
     api.cad.record_traffic(tx("307-z-call_1", api.cad.clock(), "Fire/EMS 15", "", "60 Ctrl OP 7", 307, "Port Chester"))
     path = f"/api/cad/incident/{inc['id']}"
     assert needs(f"{path}/unlink") == "dispatch"
     assert call(api, f"{path}/link", {"traffic_id": "307-z-call_1"}, VAL)[0] == 403
-    assert call(api, f"{path}/link", {"traffic_id": "307-z-call_1"}, JULIAN)[0] == 200
+    assert call(api, f"{path}/link", {"traffic_id": "307-z-call_1"}, JORDAN)[0] == 200
     assert call(api, f"{path}/unlink", {"traffic_id": "307-z-call_1"}, VAL)[0] == 403
-    code, r = call(api, f"{path}/unlink", {"traffic_id": "307-z-call_1", "operator": "someone else"}, JULIAN)
+    code, r = call(api, f"{path}/unlink", {"traffic_id": "307-z-call_1", "operator": "someone else"}, JORDAN)
     assert code == 200 and r["unlinked"]
     acts = [(x["email"], x["kind"], x["summary"]) for x in api.cad.activity.rows()]
-    assert (JULIAN, "action", f"Removed a transmission from {inc['number']}") in acts
-    assert (JULIAN, "action", f"Linked a transmission to {inc['number']}") in acts
+    assert (JORDAN, "action", f"Removed a transmission from {inc['number']}") in acts
+    assert (JORDAN, "action", f"Linked a transmission to {inc['number']}") in acts
     assert any(e == VAL and k == "refused" and "unlink" in s for e, k, s in acts)
     line = [e for e in api.cad.full(inc["id"])["events"] if e["kind"] == "radio"][-1]
-    assert line["text"].endswith("removed from this event by Julian") and line["operator"] == "Julian <julian@example.org>"
-    assert call(api, f"{path}/unlink", {"traffic_id": "307-z-call_1"}, COREY)[1]["unlinked"] is False
+    assert line["text"].endswith("removed from this event by Jordan") and line["operator"] == "Jordan <jordan@example.org>"
+    assert call(api, f"{path}/unlink", {"traffic_id": "307-z-call_1"}, CASEY)[1]["unlinked"] is False

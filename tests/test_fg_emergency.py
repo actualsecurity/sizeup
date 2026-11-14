@@ -143,7 +143,7 @@ def test_fleetsync_emergency_alarms_at_the_key_up_raw_then_named_by_the_registry
     row = app.radios.get("fleetsync", "167-1002")                       # heard: in the registry, unmapped
     assert row and not row["unit"]
     # the department maps it (Settings > Radios > Radio IDs): named from then on
-    app.radios.save({"system": "fleetsync", "radio_id": "167-1002", "unit": "E64", "label": "TK-5220 portable"}, "Corey")
+    app.radios.save({"system": "fleetsync", "radio_id": "167-1002", "unit": "E64", "label": "TK-5220 portable"}, "Casey")
     assert app.radios.rig_mdc(["167-1002"]) == "E64"
 
 

@@ -19,7 +19,7 @@ from sizeup.radio.fm import RATE, Channel, Segment
 from sizeup.radio.tones import ToneCode, ToneDetector, ToneEvent, TonePlan
 from tests.test_app import FakeWhisper, cfg, tone, voice, wait
 from tests.test_cad import make_cad
-from tests.test_roles import COREY, JULIAN, VAL, call, people
+from tests.test_roles import CASEY, JORDAN, VAL, call, people
 
 ROOT = Path(__file__).resolve().parent.parent
 LIST = load(ROOT / "config.example.toml").tones          # data/westchester_tones.csv

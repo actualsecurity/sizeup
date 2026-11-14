@@ -435,7 +435,7 @@ def test_comms_text_search_and_main_flag_for_the_radio_view(tmp_path):
     c.record_traffic(tx("FG1-1", clock.t + 1, rig="E63", text="Engine 63 on location"))
     c.record_traffic(tx("307-1-call_1", clock.t + 2, "Fire/EMS 15", "E60", "E60", 307, text="Engine 60 responding"))
     c.record_traffic(tx("359-1-call_1", clock.t + 3, "WCPD PSD", "", "1234", 359, text="unit 12, 100% copy"))
-    c.note(a["id"], {"text": "E63 stated that the engine is in service", "units": ["E63"], "operator": "Corey"})
+    c.note(a["id"], {"text": "E63 stated that the engine is in service", "units": ["E63"], "operator": "Casey"})
     get = lambda q: json.loads(CadApi(c).get("/api/cad/comms", q)[1])["rows"]
     found = get("q=ENGINE")
     assert [r["id"] for r in found][:2] == ["307-1-call_1", "FG1-1"] and [r["kind"] for r in found][2:] == ["note"]

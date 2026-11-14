@@ -135,7 +135,7 @@ const StationHealth = (() => {
     }
     if ((d.feeds || []).length) {   // map feeds with a fallback (#362: MTA TrainTime, else GTFS-realtime)
       const feedCls = (s) => (s === "ok" ? "hl-ok" : s === "fallback" || s === "error" ? "hl-bad" : "dim");
-      kids.push(el("h3", "hl-sub", "Map feeds"), table(["Feed", "State", "Reason", "Last read", "Fallback"],
+      kids.push(el("h3", "hl-sub", "Feeds"), table(["Feed", "State", "Reason", "Last read", "Fallback"],
         d.feeds.map((f) => [f.label, [f.state, feedCls(f.state)], f.why || "",
           f.at ? `${when(f.at)} (${longDur(serverNow() - f.at)} ago)` : "never", f.fallback || ""]), ""));
     }
@@ -336,15 +336,23 @@ const StationHealth = (() => {
     for (const x of failing) {
       const name = x.label || x.source;
       const btn = el("button", "", `Reset ${name}`);
-      btn.title = x.reason || "failing";
+      btn.title = (x.reason || "failing") + (/refused versions 24 h/.test(x.reason || "")
+        ? ". A reset from the hub keeps the refused versions and never resends a refused password; it lifts other "
+          + "stops, or tries a new version once. 3 refused in 24 h: only a reset at the station clears them" : "");
       btn.addEventListener("click", async () => {
-        if (!confirm(`Reset ${name} on the station?\n${x.reason || "failing"}`)) return;
+        // versions the county refused in 24 h (the adapter's Health): a Reset from here keeps them, and is one more
+        // log-on on the shared account: said, and confirmed explicitly (the server asks for it too)
+        const m = /refused versions 24 h: (\d+)/.exec(x.reason || "");
+        const refused = m ? Number(m[1]) : 0;
+        const ask = refused ? `Reset ${name}?\n${refused} refused in 24 h: a refused password isn't resent. Save a new one first.`
+          : `Reset ${name} on the station?\n${x.reason || "failing"}`;
+        if (!confirm(ask)) return;
         btn.disabled = true;
         let msg;
         try {
           const res = await fetch("/api/sources/reset", { method: "POST",
                                                            headers: { "Content-Type": "application/json", "X-Sizeup-Action": "reset" },
-                                                           body: JSON.stringify({ source: x.source }) });
+                                                           body: JSON.stringify({ source: x.source, confirm_refused: refused > 0 }) });
           const d = await res.json().catch(() => ({}));
           msg = res.ok ? (d.result || "Reset asked") : (d.error || `HTTP ${res.status}`);
         } catch (e) { msg = String(e); }

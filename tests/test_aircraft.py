@@ -747,7 +747,7 @@ class Watch:
     def __init__(self, tmp_path, notifier=None, drill=False):
         self.cad = make_cad(tmp_path)
         if drill:
-            self.cad.settings_post("alarms", {"action": "set", "key": "drill", "value": True, "operator": "Corey"})
+            self.cad.settings_post("alarms", {"action": "set", "key": "drill", "value": True, "operator": "Casey"})
         self.cad.alarms.notifier = notifier
         self.clock = Clock(T1)
         self.ly = layer(self.clock)
@@ -834,12 +834,12 @@ def test_drill_mode_marks_the_aircraft_alarm_and_its_push(tmp_path, ntfy):
     assert ntfy.got[0]["priority"] == 3 and "not a real emergency" in ntfy.got[0]["message"]
 
 
-def test_no_topic_raises_the_alarm_only_and_tapouts_topics_are_never_used(tmp_path):
+def test_no_topic_raises_the_alarm_only_and_subscribed_topics_are_never_used(tmp_path):
     w = Watch(tmp_path, None)
     w.feed(squawking())
     assert len(w.alarms()) == 1                             # the alarm, no push
-    for topic in ("pcfd-phone-prealert", "pcfd-status"):
-        n = Notifier("http://127.0.0.1:9", topic, lambda m: None)
+    for topic in ("example-ring-topic", "example-status-topic"):
+        n = Notifier("http://127.0.0.1:9", topic, lambda m: None, protected=lambda: ("example-ring-topic", "example-status-topic"))
         assert not n.enabled and n.send("x", "y") is False
 
 
