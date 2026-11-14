@@ -431,7 +431,7 @@ def test_tool_json_never_inside_the_repo(restored):
 
 def test_a_replay_sends_nothing_and_opens_nothing_writable(restored, monkeypatch):
     """The real engine and the gazetteer over a read-only copy: no socket is ever connected (no push, no request of
-    any kind) and every SQLite connection is mode=ro. The file is the same bytes afterwards, with nothing beside it."""
+    any kind) and every SQLite connection is read-only (or in memory). The file is the same bytes afterwards, with nothing beside it."""
     import socket
     opened, real = [], sqlite3.connect
 
@@ -451,5 +451,7 @@ def test_a_replay_sends_nothing_and_opens_nothing_writable(restored, monkeypatch
     run = rp.replay(rp.load_rows(con), settings=rp.read_settings(con), locate=rp.gazetteer_locator())
     con.close()
     assert run.rec.events and any(run.rec.would_push(e) for e in run.rec.events)       # it would have pushed: recorded only
-    assert opened and all("mode=ro" in p and uri for p, uri in opened), opened
+    # nothing that could write a file: mode=ro / immutable URIs, or an index built in memory (the gazetteer's own)
+    assert opened and not [(p, uri) for p, uri in opened
+                           if p != ":memory:" and not (uri and p.startswith("file:") and ("mode=ro" in p or "immutable=1" in p))]
     assert restored.read_bytes() == before and sorted(p.name for p in restored.parent.iterdir()) == beside
