@@ -785,7 +785,8 @@ class App:
         intel.active = lambda: not self.forwarding()      # a station forwarding to the hub queues nothing (no thread)
         if self.gaz is not None:
             from sizeup.intel.place import Locator
-            intel.locate = Locator(self.gaz)
+            intel.locate = Locator(self.gaz, places=self.cad.place_index)      # exits and markers too
+        intel.listen = self._intel_listen(intel)
         log(self.pushes.line())
         _mark("prealert + pushes")
         self.cad.alarms.public_url = cfg.cloud_public_url
@@ -2697,6 +2698,28 @@ class App:
                 r.tick()
             except Exception as e:  # noqa: BLE001 - the aircraft layer goes on
                 log(f"atc vocabulary: {type(e).__name__}: {e}")
+
+    def _intel_listen(self, intel):
+        """The pre-alert pushes' "Listen" link (sizeup/intel/listen.py): the transmissions around it, stitched, behind a
+        short-lived presigned URL on the audio bucket's listen/ prefix. No bucket: off ("not configured")."""
+        from sizeup.intel.listen import Listen, S3ListenStore
+        bucket = os.environ.get("SIZEUP_AUDIO_BUCKET", "").strip()
+        store = S3ListenStore(bucket) if bucket else None
+        cad = self.cad
+
+        def rows(sources, t0, t1):
+            src = [str(x) for x in sources if x][:8]
+            if not src:
+                return []
+            return cad.store.q(f"SELECT id, start, tier, source FROM radio_traffic WHERE source IN ({','.join('?' * len(src))}) "
+                               "AND start BETWEEN ? AND ? ORDER BY start LIMIT 200", (*src, t0, t1))
+        def tiers(ids):
+            ids = [str(x) for x in ids][:40]
+            if not ids:
+                return {}
+            return {r["id"]: r["tier"] for r in cad.store.q(
+                f"SELECT id, tier FROM radio_traffic WHERE id IN ({','.join('?' * len(ids))})", ids)}
+        return Listen(store, rows, self.clip, settings=lambda: intel.policy.cfg, log=log, tiers=tiers)
 
     def _atc_leader(self) -> bool:
         """The CAD of record holding the hub's lease (#254: sizeup/fence.py), or all-in-one (no fence)."""
