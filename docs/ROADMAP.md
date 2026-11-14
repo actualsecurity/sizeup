@@ -129,7 +129,7 @@ itemised. An issue marked "open" is still open after the PR listed for it merged
 | #491 | Radio intel plan PR 7: replay/backtest, STT evaluation, transcript corrections | #487, #428 |
 | #475 | Incident addresses stored normalised; matching keeps the source's text | |
 | #471 | Incident sources: health hysteresis so a station restart never flips the primary | |
-| #465 | Settings > Health: set the station adapter's password from the hub (write-only) | #460 |
+| #465 | Settings > Station > Health: set the station adapter's password from the hub (write-only) | #460 |
 | #462 | Street view: 360° street imagery in the CAD maps | #461 |
 | #522 | Litestream: one file to S3 every 30 s, not every second (S3 request costs) | |
 | #520 | Documentation refresh (this PR) | |

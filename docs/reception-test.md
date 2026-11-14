@@ -77,7 +77,7 @@ sources, the county's talkgroups, its own `shortName`, and its own capture direc
 - If sizeup never comes back, the trunk-recorder service stops the test's system by itself 2 min after the side's
   end (`"until"` in the system's state file) and lets the dongle go.
 - A job that can't be given back (the other app got the dongle first) is **owed**: tried again every 5 s until it is
-  back. Meanwhile the panel and Settings > Health say so, and it is pushed. The dongle's row says "<job> NOT restored
+  back. Meanwhile the panel and Settings > Station > Health say so, and it is pushed. The dongle's row says "<job> NOT restored
   yet" and only that job's button works ("restore now": tried at once). A click that is refused (the other app still
   has the dongle) changes nothing: the job stays owed. From the API, another job for that dongle that really starts
   ends the retrying.

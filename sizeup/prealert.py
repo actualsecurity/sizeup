@@ -658,7 +658,7 @@ class PreAlerts:
                 "feeds": [self.ring_stream.state(), self.status_stream.state()]}
 
     def feed_health(self) -> dict:
-        """Settings > Health's row for the pre-alert feed: ok / error, or not configured (no topic set: the first-run hint)."""
+        """Settings > Station > Health's row for the pre-alert feed: ok / error, or not configured (no topic set: the first-run hint)."""
         ring = self.ring_stream
         if not ring.topic:
             return {"key": "prealert", "label": "Phone pre-alert (Tapout)", "state": "not configured",

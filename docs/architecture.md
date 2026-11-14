@@ -208,7 +208,7 @@ that lock. On the hub every write also goes through a guarded connection: a task
   street-only report, a doubled house number and a misheard street (`cad/fuzzy.py`). Anything that may be the same but
   cannot be proved is noted "possibly the same" on both, never joined silently.
 - **Promotion.** A feed is healthy while its last report says ok and is fresh; primaries are promoted and demoted
-  automatically. The console and Settings > Health say which is acting.
+  automatically. The console and Settings > Station > Health say which is acting.
 - **Adapters run only on the station.** The hub refuses to load one (`sizeup/cloud/adapters.py`,
   `sources/runner.py`); it receives only forwarded `source_event` / `source_health` events through the outbox.
 
@@ -351,7 +351,7 @@ Summary only. The detail, with the reasons, is in [`cloud.md`](cloud.md): "Deplo
   is not fresh, kills Litestream and itself, and never lets a write in again in that process. A fenced write is never
   silent: 503 for a request, no ack for a station event (the outbox sends it again to the next leader).
 - **Replica watch** (`sizeup/replicawatch.py`). The standby and the leader restore and `quick_check` the replicas on a
-  timer (a full `integrity_check` daily). Results go to an S3 record, Settings > Health and the status topic. A task
+  timer (a full `integrity_check` daily). Results go to an S3 record, Settings > Station > Health and the status topic. A task
   that ends badly records it and pushes before it exits; repeated failures push as a crash loop.
 - **CI and deploy** (`.github/workflows/`):
 
@@ -472,5 +472,5 @@ Open pull requests (2026-11-14):
 | #491 | Radio intel PR 7: replay/backtest, STT eval, transcript corrections |
 | #475 | Store incident addresses normalised; matching keeps the source's text |
 | #471 | Incident sources: health hysteresis so a station restart never flips the primary |
-| #465 | Settings > Health: set the station adapter password from the hub (write-only) |
+| #465 | Settings > Station > Health: set the station adapter password from the hub (write-only) |
 | #462 | Street view: 360° street imagery in the CAD maps (#461) |
