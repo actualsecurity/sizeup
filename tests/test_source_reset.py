@@ -210,7 +210,7 @@ def test_a_reset_in_flight_holds_up_another_for_that_source():
 
 
 def test_the_origin_reaches_an_adapter_that_takes_it_and_an_older_one_still_resets():
-    """sizeup-county keeps the refused SSM versions on a reset from the hub; only a station reset clears them."""
+    """The private adapter keeps the refused SSM versions on a reset from the hub; only a station reset clears them."""
     got = []
 
     class New(Feed):

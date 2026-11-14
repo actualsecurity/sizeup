@@ -67,7 +67,7 @@ CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 # is one more attempt, so it needs the admin's explicit confirm
 STOPPED_RE = re.compile(r"^login\b")
 MANUAL_RE = re.compile(r"manual reset")
-# the adapter's Health counts the SSM versions the county refused in 24 h (sizeup-county): a Reset from the hub keeps
+# the adapter's Health counts the SSM versions the county refused in 24 h (the private adapter): a Reset from the hub keeps
 # them, and while there are any it needs an explicit confirm (Settings > Station > Health)
 REFUSED_RE = re.compile(r"refused versions 24 h: (\d{1,3})")
 

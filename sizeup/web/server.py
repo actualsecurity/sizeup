@@ -993,7 +993,7 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                 except ValueError as e:
                     return self._send(400, json.dumps({"error": str(e)}).encode(), "application/json")
                 if station is not None and cad is not None and body.get("confirm_refused") is not True:
-                    # the hub's Reset keeps the refused SSM versions (sizeup-county), but while there are any it is one
+                    # the hub's Reset keeps the refused SSM versions (the private adapter), but while there are any it is one
                     # more log-on on a shared account: an explicit confirm
                     from sizeup.cloud.adapterpass import station_sources
                     refused = max([s["refused"] for s in station_sources(cad.cad.store) if not src or s["source"] == src]
