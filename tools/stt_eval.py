@@ -116,7 +116,10 @@ def _numbers(ws: list[str]) -> list[str]:
         if v > 0 and i < len(ws) and ws[i] == "hundred":       # "four hundred fifty six", "fifteen hundred", "ten hundred"
             i += 1
             rest, n = _small(ws, i)
-            if rest is not None and rest > 0 and ws[i] != "oh":
+            if i + 1 < len(ws) and ws[i] == "oh" and (_small(ws, i + 1)[0] or 0) in range(1, 10) \
+                    and _small(ws, i + 1)[1] == 1:               # "nine hundred oh five": 905
+                rest, n = _small(ws, i + 1)[0], 2
+            if rest is not None and rest > 0:
                 i += n
             else:
                 rest = 0
