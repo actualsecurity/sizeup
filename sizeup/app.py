@@ -777,7 +777,7 @@ class App:
         intel.active = lambda: not self.forwarding()      # a station forwarding to the hub queues nothing (no thread)
         if self.gaz is not None:
             from sizeup.intel.place import Locator
-            intel.locate = Locator(self.gaz)
+            intel.locate = Locator(self.gaz, places=self.cad.place_index)      # exits and markers too
         intel.listen = self._intel_listen(intel)
         log(self.pushes.line())
         _mark("prealert + pushes")
