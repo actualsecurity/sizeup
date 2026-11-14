@@ -24,7 +24,8 @@ all-in-one), on its own thread, a few at a time:
                 call to the station that itself failed counts for nothing
 
 Nothing is written here: no startup migration, no bulk write. The rows change only through the re-run path, one at
-a time, as each clip finishes. The first look is START_DELAY_S after the start. stats(): the backlog waiting, the
+a time, as each clip finishes. A write refused because this task isn't the leader any more (FencedWrite,
+sizeup/fence.py) ends the tick: said in the log once, nothing more until may_run() says it is the leader again. The first look is START_DELAY_S after the start. stats(): the backlog waiting, the
 clips given up on and the clips caught up in the last 24 h (Settings > Health, next to the shed counts).
 """
 
@@ -34,6 +35,7 @@ import threading
 import time
 from typing import Callable
 
+from sizeup.fence import FencedWrite
 from sizeup.stt import CATCHUP_MAX_CLIP_S
 
 TICK_S = 15.0              # how often it looks
@@ -95,6 +97,7 @@ class CatchUp:
         self._sent: dict[str, tuple[int, float]] = {}       # id -> (times sent by this process, last sent)
         self._whisper_at = 0.0                               # the last batch handed to whisper
         self._caught: tuple[float, int | None] = (0.0, None)  # (read at, the 24 h count)
+        self._fenced = False                                 # a write was refused (not the leader): said once
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self.state: dict = {"on": None, "waiting": None, "gave_up": None, "caught_24h": None, "last_at": None,
@@ -152,8 +155,24 @@ class CatchUp:
         return n
 
     def tick(self, now: float | None = None) -> int:
-        """One look: the counts, and when there is room a few clips sent. How many were sent."""
+        """One look: the counts, and when there is room a few clips sent. How many were sent. A write refused on the
+        way (FencedWrite: the lease ran out in this tick) ends it: logged once, and nothing is looked at again until
+        may_run() has said this is the leader."""
         now = self.clock() if now is None else now
+        if self._fenced:
+            if not self.may_run():
+                self.state.update(last_at=now, waiting=None, gave_up=None, caught_24h=None, why="not the CAD of record")
+                return 0
+            self._fenced = False                         # the leader again
+        try:
+            return self._look(now)
+        except FencedWrite as e:
+            self._fenced = True
+            self.state.update(waiting=None, gave_up=None, caught_24h=None, why="not the CAD of record")
+            self.log(f"speech-to-text catch-up: stopped until this is the leader again: {e}")
+            return 0
+
+    def _look(self, now: float) -> int:
         on, max_age_h = self.settings()
         since = now - max_age_h * 3600.0
         self.state.update(on=bool(on), max_age_h=max_age_h, last_at=now, error="")

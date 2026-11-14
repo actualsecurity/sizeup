@@ -8,7 +8,6 @@ at quarters with a word; a live fix taking over glides onto the fix; placeholder
 cadmap.js in node with the stand-in MapLibre (tests/test_unit_follow.py), on states from the real hub code
 (tests/test_rig_route_motion.py page_state: the downtown OSM extract, made-up calls and statuses)."""
 
-import time
 
 from tests.test_rig_route_motion import OP, PRE, STATIC, metres, page_state
 from tests.test_unit_follow import needs_node, run
@@ -89,7 +88,7 @@ def test_a_followed_trip_home_ends_at_quarters_with_a_word_and_no_jump(tmp_path)
     back = next(r for r in data["map"]["routes"] if r["unit"] == "E61")
     clock.t = back["move"]["done_at"] + 1
     data["home"] = c.state()["map"]                                              # the hub has it home: "station"
-    clock.t = time.time()
+    clock.t = data["now"]
     oos = [dict(m, look="oos", status="OS") if m["unit"] == "E61" else m for m in data["home"]["markers"]]
     data["oos"] = dict(data["home"], markers=oos)
     o = run(tmp_path, FOLLOW + r"""
@@ -111,7 +110,7 @@ out.oos = [rm.fol.id, toast.textContent];
 def test_a_live_fix_mid_follow_is_handed_over_smoothly(tmp_path):
     *_, data = page_state()
     e61 = next(m for m in data["map"]["markers"] if m["unit"] == "E61")
-    data["fixed"] = dict(data["map"], markers=[dict(e61, place="position", lon=-73.6672, lat=41.0030, at=time.time() - 1,
+    data["fixed"] = dict(data["map"], markers=[dict(e61, place="position", lon=-73.6672, lat=41.0030, at=data["now"] - 1,
                                                     heading=90.0, speed=0.0) if m is e61 else m for m in data["map"]["markers"]])
     o = run(tmp_path, FOLLOW + r"""
 click("E61"); go(10, 16); out.was = ll("E61");

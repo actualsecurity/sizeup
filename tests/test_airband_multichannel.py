@@ -133,13 +133,18 @@ def test_the_chain_is_flat_and_a_planned_centre_keeps_out_the_image():
 def test_a_dongle_with_two_channels_costs_little_more_than_one():
     rate = 2_560_000
     iq = iq_u8(synth(rate, [-890000, 860000], secs=2.0).tobytes())
-    took = {}
-    for n in (1, 2, 4):
-        ch = Channelizer(rate, list(np.linspace(-0.89e6, 0.89e6, n) + 12_345))
-        t0 = time.process_time()
-        ch.feed(iq)
-        took[n] = (time.process_time() - t0) / 2.0                 # CPU seconds per second of capture
-    assert took[2] < 0.25 and took[4] < took[1] * 1.6 + 0.01       # the FFT is shared: each channel adds a little
+    # This thread's own CPU (never the process's: another test's leftover thread is in that), and the best of three
+    # rounds for each: on a loaded runner one reading is stretched by its neighbours (caches, a shared core), the
+    # least stretched of three much less. The bounds are as they were.
+    took = {1: [], 2: [], 4: []}
+    for _ in range(3):
+        for n in took:
+            ch = Channelizer(rate, list(np.linspace(-0.89e6, 0.89e6, n) + 12_345))
+            t0 = time.thread_time()
+            ch.feed(iq)
+            took[n].append((time.thread_time() - t0) / 2.0)        # CPU seconds per second of capture
+    took = {n: min(ts) for n, ts in took.items()}
+    assert took[2] < 0.25 and took[4] < took[1] * 1.6 + 0.01, took  # the FFT is shared: each channel adds a little
 
 
 # -- the receiver: rtl_fm for one, the channelizer for several (only when on, and not covered) -------------------------

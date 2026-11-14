@@ -53,6 +53,7 @@ from pathlib import Path
 from sizeup import tz
 from sizeup.cad import lists as lists_mod
 from sizeup.cad.lists import Lists
+from sizeup.fence import GuardedConnection, refuse
 
 TZ = tz.TZ                  # America/New_York: the console's time zone (sizeup/tz.py)
 # "Name <email>" when the operator signed in through Cloudflare Access (sizeup/cloud/access.py).
@@ -413,7 +414,9 @@ class Store:
         self.lists = lists or lists_mod.load()
         if self.path != ":memory:":
             Path(self.path).parent.mkdir(parents=True, exist_ok=True)
-        self.db = sqlite3.connect(self.path, check_same_thread=False, isolation_level=None)
+        # GuardedConnection (sizeup/fence.py, #501): no write gets through while may_write() says False (the hub's
+        # fence, set by the App), whoever makes it: a GET's side effects on a fenced task are skipped, never written
+        self.db = sqlite3.connect(self.path, check_same_thread=False, isolation_level=None, factory=GuardedConnection)
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA foreign_keys = ON")
         if self.path != ":memory:":
@@ -738,6 +741,15 @@ class Store:
 
     # -- plumbing -----------------------------------------------------------------------------------
 
+    @property
+    def may_write(self):
+        """May this process write the file now (the hub's fence, sizeup/fence.py; always True without one)?"""
+        return getattr(self, "_may_write", None) or self.db.may_write
+
+    @may_write.setter
+    def may_write(self, fn) -> None:
+        self._may_write = self.db.may_write = fn
+
     def tx(self):
         """`with store.tx() as db:` one transaction under the lock."""
         store = self
@@ -755,7 +767,7 @@ class Store:
                 return store.db
 
             def __exit__(self, et, e, tb):
-                done = False
+                done = keep = False
                 try:
                     if et:
                         # The caller's error is the one raised: a ROLLBACK that fails too (FULL, IOERR: SQLite may
@@ -766,19 +778,32 @@ class Store:
                             except Exception:  # noqa: BLE001
                                 pass
                     else:
-                        try:
-                            store.db.execute("COMMIT")
-                        except BaseException:
-                            # IOERR, FULL, BUSY: the transaction is still open on the connection. Rolled back here,
-                            # else the next autocommit write (meta_put, a prune) silently joins it after the lock
-                            # is released. The COMMIT's error is the one raised.
+                        # not ours any more, or a write in it refused or skipped (#501): rolled back, no rev, the
+                        # rollback hook, and FencedWrite to the caller, bookkeeping or not (an end is never a quiet
+                        # "committed"). Raised below, once the lock is given back.
+                        keep = store.may_write() and not getattr(store.db, "tainted", False)
+                        if not keep:
                             if store.db.in_transaction:
                                 try:
                                     store.db.execute("ROLLBACK")
                                 except Exception:  # noqa: BLE001
                                     pass
-                            raise
-                        done = True
+                        else:
+                            try:
+                                store.db.execute("COMMIT")
+                            except BaseException:
+                                # IOERR, FULL, BUSY, or the guard's FencedWrite (the lease ran out just now: it has
+                                # rolled back already): a transaction still open on the connection is rolled back
+                                # here, else the next autocommit write (meta_put, a prune) silently joins it after
+                                # the lock is released. The COMMIT's error is the one raised.
+                                if store.db.in_transaction:
+                                    try:
+                                        store.db.execute("ROLLBACK")
+                                    except Exception:  # noqa: BLE001
+                                        pass
+                                raise
+                            done = not store.db.in_transaction       # (a COMMIT that took)
+                    if done:
                         store.rev += 1
                 finally:
                     # What rides on a transaction without being part of it (the Radio page's change notes,
@@ -792,6 +817,8 @@ class Store:
                         pass
                     finally:                         # even a KeyboardInterrupt in a hook never keeps the lock
                         store.lock.release()
+                if not et and not keep:
+                    refuse("a transaction")
                 return False
         return _Tx()
 

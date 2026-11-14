@@ -236,3 +236,46 @@ def test_address_history_stop_from_its_own_thread(tmp_path):
     c.addrs._thread = threading.current_thread()          # as if its own worker stopped it: no join on itself
     c.addrs.stop()
     c.shutdown()
+
+
+# -- the fence (#501) in tx() ------------------------------------------------------------------------------------------
+
+@pytest.mark.parametrize("where", ["body", "body-swallowed", "end", "commit"])
+def test_a_fenced_write_in_tx_leaves_the_lock_free_and_no_transaction(where):
+    """FencedWrite out of tx() (a write refused in its body, raised or swallowed there; the lease gone by its end; or
+    gone between tx()'s own look and the guard's at COMMIT): rolled back, the rollback hook, no rev, and the lock
+    given back, so the next writer (once ours again) is neither held up nor joined to a left-over transaction."""
+    from sizeup.fence import FencedWrite
+
+    s = Store(":memory:")
+    ours = [True]
+    looks = []
+
+    def may_write() -> bool:
+        looks.append(1)
+        if where == "commit" and len(looks) == 2:          # tx() looked (True); the guard's look at COMMIT: gone
+            ours[0] = False
+        return ours[0]
+    s.may_write = may_write
+    seen, rev = hooks(s), s.rev
+    with pytest.raises(FencedWrite):
+        with s.tx() as db:
+            db.execute("INSERT INTO meta (key, value) VALUES ('a', '1')")
+            del looks[:]
+            if where != "commit":                           # (there the flip happens in may_write itself)
+                ours[0] = False
+            if where == "body":
+                db.execute("INSERT INTO meta (key, value) VALUES ('b', '2')")
+            elif where == "body-swallowed":
+                try:
+                    db.execute("INSERT INTO meta (key, value) VALUES ('b', '2')")
+                except FencedWrite:
+                    pass
+                ours[0] = True                              # a late renew: tainted all the same
+    assert not s.db.in_transaction and lock_free(s)
+    assert seen == ["rollback"] and s.rev == rev
+    ours[0] = True
+    assert s.meta_get("a") is None and s.meta_get("b") is None
+    with s.tx() as db:                                      # the next transaction: its own, committed
+        db.execute("INSERT INTO meta (key, value) VALUES ('c', '3')")
+    assert s.meta_get("c") == "3" and seen == ["rollback", "commit"] and lock_free(s)

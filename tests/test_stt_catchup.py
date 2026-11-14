@@ -283,6 +283,71 @@ def test_a_failed_station_call_burns_no_tries_and_a_refused_clip_is_given_up():
     assert set(cu._sent) == {"c0", "c2"}
 
 
+def test_a_write_refused_on_a_fenced_task_stops_it_quietly_until_it_is_the_leader_again():
+    from sizeup.fence import FencedWrite
+    now = 100000.0
+    cu, sent, st = rig(rows_at(now, 3))
+    said = []
+    cu.log = said.append
+
+    def fenced(cid, why):                                   # the lease ran out in this tick: the row's write is refused
+        raise FencedWrite("not the leader: UPDATE refused (nothing written)")
+    cu.give_up = fenced
+    st["whisper"] = lambda specs: {"queued": [], "refused": {"c0": "no recording on the station"}, "hold": ""}
+    assert cu.tick(now) == 0 and len(said) == 1 and "leader" in said[0]          # no crash: said once
+    assert cu._sent == {} and cu.stats()["why"] == "not the CAD of record" and cu.stats()["error"] == ""
+    st["may"] = False                                       # (the fence says so from here on)
+    for k in range(1, 5):
+        assert cu.tick(now + 15 * k) == 0
+    assert len(said) == 1 and len(sent["whisper"]) == 1 and cu.stats()["waiting"] is None
+    st["may"] = True                                        # the leader again: it goes on
+    st["whisper"] = lambda specs: {"queued": [s["id"] for s in specs], "refused": {}, "hold": ""}
+    assert cu.tick(now + 90) == 3 and len(said) == 1
+
+
+def test_the_thread_outlives_a_refused_write():
+    from sizeup.fence import FencedWrite
+    cu, sent, st = rig([])
+    said, ticks = [], []
+    cu.log = said.append
+
+    def scan(since, limit, sort):
+        ticks.append(1)
+        st["may"] = False
+        raise FencedWrite("not the leader: UPDATE refused (nothing written)")
+    cu.scan = scan
+    old, sttcatchup.TICK_S = sttcatchup.TICK_S, 0.01
+    try:
+        cu.start(0.0)
+        wait(lambda: cu.stats()["why"] == "not the CAD of record" and ticks)
+        time.sleep(0.1)
+        assert cu._thread.is_alive() and len(said) == 1 and len(ticks) == 1
+    finally:
+        cu.stop()
+        sttcatchup.TICK_S = old
+
+
+def test_a_fenced_all_in_one_gives_up_no_row_and_says_it_is_not_the_cad_of_record(tmp_path, monkeypatch):
+    from sizeup.app import App
+    from sizeup.fence import FencedWrite
+    app = App(base(clips_dir=str(tmp_path / "clips"), cad_db=str(tmp_path / "cad.sqlite")))
+    try:
+        tid = shed_one(app, monkeypatch)
+        before = comms_row(app, tid)
+        app.cad.store.may_write = lambda: False             # the lease ran out (sizeup/fence.py)
+        with pytest.raises(FencedWrite):
+            app._catchup_give_up(tid, "no recording")       # refused, and said to the driver (never swallowed)
+        assert comms_row(app, tid) == before
+        app.catchup.give_up = app._catchup_give_up
+        app.catchup.to_whisper = lambda specs: {"queued": [], "refused": {tid: "no recording"}, "hold": ""}
+        app.catchup.whisper_ready = lambda after: (True, "")
+        app.catchup.pause = lambda: ""
+        assert app.catchup.tick() == 0 and app.catchup.stats()["why"] == "not the CAD of record"
+        assert comms_row(app, tid) == before
+    finally:
+        app.stop()
+
+
 def test_rows_that_cant_go_never_keep_the_ones_behind_them_from_their_turn():
     now = 100000.0
     spent = rows_at(now, 100, tries=2)                      # the 100 newest: given up

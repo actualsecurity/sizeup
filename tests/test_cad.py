@@ -1198,7 +1198,7 @@ def test_api_stream_pushes_cad_state(server):
 
 # -- nothing transmits ---------------------------------------------------------------------------------
 
-def test_only_the_null_transmitter_exists_in_m1(tmp_path):
+def test_only_the_null_transmitter_exists_in_m1(tmp_path, monkeypatch):
     assert isinstance(make_transmitter(False), NullTransmitter)
     with pytest.raises(ValueError):
         make_transmitter(True)
@@ -1215,11 +1215,16 @@ def test_only_the_null_transmitter_exists_in_m1(tmp_path):
     for mod in ("serial", "sounddevice", "pyaudio", "hid", "gpiozero", "RPi", "simpleaudio", "pygame"):
         assert not re.search(rf"^\s*(import|from)\s+{mod}\b", src, re.M), mod
     assert "afplay" not in src
+    # The words, made up: on a Mac the default voice is the real `say` (two runs of it and of afconvert for one
+    # dispatch), and with the machine busy that took longer than the 10 s this waited. What is checked here is the
+    # transmitter, on every machine with audio to send (a Linux runner had none: no `say`).
+    monkeypatch.setattr(dispatcher, "tts", lambda text, voice="", rate_wpm=0: np.full(8000, 0.1, np.float32))
     cad = make_cad()
     iid = cad.create({"type": "ALARM", "subtype": "CO-RESD"})["id"]
     cad.s.tones = ()
     r = cad.dispatch(iid, {"unit_ids": [uid(cad, "E60")], "operator": "JD"})
-    assert r["transmitted"] is False and cad.voice.wait(10) and cad.transmitter.sent[-1][1] == r["text"]
+    assert r["transmitted"] is False and cad.voice.wait(60) and cad.transmitter.sent[-1][1] == r["text"]
+    assert cad.transmitter.sent[-1][2] > 0 and cad.store.full(iid)["dispatches"][0]["transmitted"] is False   # audio, not keyed
 
 
 def test_config_cad_sections(tmp_path):

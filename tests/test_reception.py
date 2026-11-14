@@ -919,7 +919,7 @@ def test_stop_is_immediate_during_the_sweep(lab, tmp_path):
     app.reception.inline = False
     (tmp_path / "rtl_power").write_text("#!/bin/sh\n")
     app.cfg = replace(app.cfg, rtl_fm=str(tmp_path / "rtl_fm"))
-    sweeping, killed = threading.Event(), threading.Event()
+    sweeping, killed, let_go = threading.Event(), threading.Event(), threading.Event()
 
     class Proc:
         kill = staticmethod(killed.set)
@@ -927,21 +927,47 @@ def test_stop_is_immediate_during_the_sweep(lab, tmp_path):
     def hanging(binary, index, listed, center, rate, started=None):
         started(Proc())
         sweeping.set()
-        killed.wait(20)
+        killed.wait(60)
+        let_go.wait(60)                        # killed, and still not back: Stop has to answer without it
         return None
     app.reception.sweep_fn = hanging
     assert start(app, "air", pause="HPN Tower") is None
-    assert sweeping.wait(5) and app.reception.active["step"] == "starting" and app.assign["air"] == "Off"
+    assert sweeping.wait(30) and app.reception.active["step"] == "starting" and app.assign["air"] == "Off"
     assert app.reception_state()["active"]["step"] == "starting"            # (the state never waits on the sweep)
-    t0 = time.monotonic()
     assert app.reception_post({"action": "stop"}) is None
-    assert time.monotonic() - t0 < 0.5 and killed.is_set()
-    end = time.time() + 5
-    while time.time() < end and app.reception.active is not None:
+    # No clock (a loaded runner stretched this past 0.5 s): the sweep is still held, so the answer did not wait for
+    # the test's thread; the test is still there, being stopped, and rtl_power was killed.
+    assert killed.is_set() and not let_go.is_set() and app.reception.active is not None
+    assert app.reception_state()["active"]["step"] == "stopping" and app.reception.history == []
+    let_go.set()
+    end = time.monotonic() + 30
+    while time.monotonic() < end and app.reception.active is not None:
         time.sleep(0.02)
-    h = app.reception.history[0]
+    assert app.reception.active is None
+    h = app.reception.history[0]               # (#503) there as soon as the test is not: never a moment with neither
     assert (h["status"], h["restored"], h["halves"]) == ("stopped", "HPN Tower restored", [])
     assert app.assign["air"] == "HPN Tower" and json.loads((claims.DIR / "air.json").read_text())["mode"] == "HPN Tower"
+
+
+def test_an_ended_test_is_in_the_history_before_it_stops_being_the_running_one(lab):
+    """#503: the page reads the state without the lock. A test that ends is never missing from both (its row was
+    written after `active` was cleared, and the modes file and the capture wipe came in between), and never in both."""
+    app = lab
+    running(app)
+    assert start(app, "air", pause="HPN Tower") is None
+    tid = app.reception.active["id"]
+    seen = []
+
+    def look(*a, **k):
+        st = app.reception_state()
+        seen.append(((st["active"] or {}).get("id"), [h["id"] for h in st["history"]]))
+    write, save = app.reception._write, app._save_modes
+    app.reception._write = lambda path, doc: (look(), write(path, doc))[1]      # the history row being written
+    app._save_modes = lambda: (look(), save())[1]                               # the first thing after `active` goes
+    assert app.reception_post({"action": "stop"}) is None
+    assert (tid, []) in seen and (None, [tid]) in seen                          # running, then history
+    assert all(got in ((tid, []), (None, [tid])) for got in seen), seen         # never neither, never both
+    assert [h["id"] for h in app.reception.history] == [tid] and app.reception.active is None
 
 
 def test_an_end_that_raises_is_ended_again_and_stop_always_works(lab):
@@ -1256,8 +1282,15 @@ def test_the_web_server_starts_stops_and_serves_a_sample(lab):
         sid = app.reception_state()["samples"][0]["id"]
         assert sid not in raw.decode() and "radio_id" not in raw.decode()
         server.poke()
-        time.sleep(0.3)
-        state = json.loads(get("/api/state")[1])
+
+        def lent():                 # the state everyone gets is rebuilt by the server's own thread after the poke: waited
+            state = json.loads(get("/api/state")[1])        # for, not slept for (0.3 s was once too short: "lent" None)
+            row = next((x for x in state["sdr"]["sdrs"] if x["serial"] == "air"), None)
+            return state if row and row.get("lent") else None
+        end = time.monotonic() + 30
+        while (state := lent()) is None and time.monotonic() < end:
+            time.sleep(0.05)
+        assert state is not None, "the lent dongle never reached /api/state"
         assert "reception" not in state and "samples" not in json.dumps(state)
         assert next(x for x in state["sdr"]["sdrs"] if x["serial"] == "air")["lent"]["paused"] == "HPN Tower"
         for q in (sid, "000000000000"):                           # its audio: refused here, whatever the id
