@@ -441,8 +441,7 @@ def live(tmp_path):
 
 def test_live_a_context_row_becomes_an_event_and_one_intel_push(live):
     cad, n = live
-    cad.comms.record(ctx_row("c1-t0", "respond to 100 Example Ave, smoke coming from the house", cad.clock()))
-    cad.comms.on_context_text("c1-t0")                     # record() already called it (#483); again: no harm
+    cad.comms.record(ctx_row("c1-t0", "respond to 100 Example Ave, smoke coming from the house", cad.clock()))   # the hook (#483)
     assert cad.intel.drain() == 1
     [ev] = cad.intel.events.open_events()
     assert ev.category == "fire_report" and ev.label_full == "100 Example Ave, Port Chester"
@@ -477,9 +476,7 @@ def test_context_rows_never_reach_the_fire_consumers(live, monkeypatch):
     monkeypatch.setattr(cad.intel, "consider", lambda tid: q.append(tid))
     cad.comms.on_context_text = cad.intel.consider
     cad.comms.record(ctx_row("c9-t0", "shots fired", cad.clock()))
-    assert seen == []                                      # record() of a context row: no on_text at all
-    cad.comms.on_context_text("c9-t0")
-    assert q == ["c9-t0"] and seen == []
+    assert q == ["c9-t0"] and seen == []                   # record() of a context row: on_context_text (a str tid), no on_text
 
 
 def test_pushes_only_from_the_leader(live):
@@ -659,8 +656,7 @@ def test_a_startup_backfill_of_old_rows_pushes_nothing(live):
     now = cad.clock()
     for i, (text, _c) in enumerate(TRIGGER):
         tid = f"old{i}-t0"
-        cad.comms.record(ctx_row(tid, text, now - 3600 - i))          # an hour old: the backfill replays them
-        cad.comms.on_context_text(tid)
+        cad.comms.record(ctx_row(tid, text, now - 3600 - i))          # an hour old: the backfill replays them (the hook)
     cad.intel.drain()
     assert n.sent == [] and cad.intel.events.open_events() == [] and cad.intel.stale == len(TRIGGER)
     cad.intel_admin.settings_op("set", {"key": "max_age_min", "value": 120}, "test")     # configurable
