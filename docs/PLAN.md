@@ -26,7 +26,7 @@ Everything in the original scope is built. What differs from the plan below:
 | Deploy: systemd, over-the-air updates (F5) | Done | The station follows the hub's build (`sizeup/cloud/autoupdate.py`, `deploy/station/`); the hub deploys on a merge to main. |
 | A single box at the firehouse | Changed | Split into a station (the radios, at the South End firehouse) and a hub in the cloud ([cloud.md](cloud.md)). |
 | SDRTrunk / OP25 as P25 fallbacks | Dropped | trunk-recorder decodes the county system; no fallback was needed. |
-| Fine-tune whisper on corrected local clips | Still planned | The corrections and the archive they need: #428, PR #491. |
+| Fine-tune whisper on corrected local clips | Still planned | The corrections side is built (admin corrections and an export, #487); the audio archive it needs is #428. |
 
 Added since, outside this plan: the CAD ([cad-plan.md](cad-plan.md)), HPN ATC and airport pre-alerts, a second P25
 system (MTA MRRS, context only), radio pre-alerts (`sizeup/intel/`), and the map layers (cameras, trains, aircraft,

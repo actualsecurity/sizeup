@@ -278,7 +278,7 @@ are in the transcript and the gazetteer finds them, and is never confirmed or ov
 log, `intel_infer` in `cad.sqlite`, is kept 90 days.
 
 Events, hits and feedback are in `cad.sqlite` and hold no transcript text, only transmission ids (`events.py`). Intel
-never writes incidents, radio links or alarms. Not on main: replay / backtest tooling (PR #491).
+never writes incidents, radio links or alarms. Replay / backtest runs the same engine over stored rows in memory (`intel/replay.py`, `tools/intel_replay.py`).
 
 ## Map and data layers
 
@@ -451,7 +451,7 @@ The hub image installs numpy plus the `docs` extra (pypdf, pypdfium2, Pillow) an
   them. See the [README](../README.md).
 - `tools/`: data builders (`fetch_addresses.py`, `fetch_places.py`, `fetch_airport.py`, `fetch_train_tracks.py`,
   `learn_trains_points.py`), fixture recorders, deploy helpers (`deploy_check.py`, `taskdef_params.py`), replica tools
-  (`ltx.py`, `reseed_replica.py`), diagnostics (`stt_diag.py`, `stt_cost.py`, `startup_bench.py`, `airband_ab.py`,
+  (`ltx.py`, `reseed_replica.py`), diagnostics (`stt_diag.py`, `stt_cost.py`, `stt_eval.py`, `intel_replay.py`, `startup_bench.py`, `airband_ab.py`,
   `atc_eval.py`, `mdc_decode.py`, `ny511_probe.py`) and `ui_consistency.py`.
 
 ## Known gaps / in flight
@@ -469,8 +469,4 @@ Open pull requests (2026-11-14):
 
 | PR | title |
 |---|---|
-| #491 | Radio intel PR 7: replay/backtest, STT eval, transcript corrections |
-| #475 | Store incident addresses normalised; matching keeps the source's text |
-| #471 | Incident sources: health hysteresis so a station restart never flips the primary |
-| #465 | Settings > Station > Health: set the station adapter password from the hub (write-only) |
 | #462 | Street view: 360° street imagery in the CAD maps (#461) |

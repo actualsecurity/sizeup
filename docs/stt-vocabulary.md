@@ -188,4 +188,4 @@ and talker prompt got 25.5% WER, 72.5% key-token recall, 67% callsigns and 76% s
   stays at 8 kHz.
 
 The ATC and police vocabularies have no measurement of this kind here. A general evaluation tool (`tools/stt_eval.py`)
-is in open PR #491.
+is on main.

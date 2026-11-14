@@ -126,6 +126,8 @@ def test_every_admin_only_get_the_scripts_make_is_in_the_read_map():
                                   ("/api/cad/health", '"/api/cad/health"', "health.js"),
                                   ("/api/cad/search.csv", "`/api/cad/search.csv?", "search-view.js"),
                                   ("/api/cad/preplan.csv", '"/api/cad/preplan.csv"', "preplan.js"),      # (#456)
+                                  ("/api/cad/stt/corrections", '"/api/cad/stt/corrections"', "stt-fix.js"),   # the STT
+                                  ("/api/cad/stt/corrections.jsonl", '"/api/cad/stt/corrections.jsonl"', "stt-fix.js"),
                                   ("/api/cad/intel", '"/api/cad/intel"', "intel.js")):     # the pre-alert rules (#411)
         assert literal in js(script), f"{script} doesn't read {path}"
         assert path in ADMIN_READS, path
@@ -135,7 +137,8 @@ def test_every_admin_only_get_the_scripts_make_is_in_the_read_map():
     # which no script reads yet)
     assert set(ADMIN_READS) == {"/api/cad/notify", "/api/cad/health", "/api/cad/perf", "/api/cad/perf/profile",
                                 "/api/cad/search.csv", "/api/cad/preplan.csv", "/api/cad/comms/activity", "/api/cad/intel",
-                                "/api/reception", "/api/reception/sample", "/api/cad/adapter-password"}   # (+ #460)
+                                "/api/reception", "/api/reception/sample", "/api/cad/adapter-password",   # (+ #460)
+                                "/api/cad/stt/corrections", "/api/cad/stt/corrections.jsonl"}
     assert '"/api/cad/adapter-password"' in js("adapterpass.js")
     assert "/api/cad/adapter-password" not in scripts.replace(js("adapterpass.js"), "")   # only its card reads it
     assert '"/api/cad/perf"' in js("health.js") and '"/api/cad/perf/profile' in js("health.js")

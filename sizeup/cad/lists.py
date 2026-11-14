@@ -451,10 +451,12 @@ class Lists:
 
     def event_town(self, inc: dict) -> str:
         """Where an event is: its map point's town (the label ends ', Rye Brook'), else a town typed in
-        the location ('940 King St, Rye Brook'), else ''."""
+        the location ('940 King St, Rye Brook'), else ''. The location as its source gave it (address_raw, a
+        feed's or a page's: sources.match_address), never a town the stored address only shows (a jurisdiction,
+        a street list's guess: sources.normal_location); a person's address as typed."""
         if inc.get("lat") is not None and "," in (inc.get("geo_label") or ""):
             return self.town_of(inc["geo_label"].rsplit(",", 1)[1])
-        typed = self.towns_typed(inc.get("address") or "")
+        typed = self.towns_typed(inc.get("address_raw") or inc.get("address") or "")
         return typed[0] if typed else ""
 
     def joint_call(self, inc: dict) -> str:

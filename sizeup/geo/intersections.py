@@ -111,9 +111,9 @@ def parse(text: str, is_place=None) -> Query | None:
     left, sep = parts[0], (parts[1] or parts[2] or "").lower()
     right = parts[3]
     if not left.strip() or not right.strip():
-        return None                          # "@ Whole Foods", "King St &" (the cross street still to come)
+        return None                          # "@ Sample Mkt", "King St &" (the cross street still to come)
     if sep == "@" and is_place is not None and is_place(right.strip()):
-        return None                          # "... @ Whole Foods Market": a named place (#204)
+        return None                          # "... @ Sample Market": a named place (#204)
     a = _side(left)
     b = _side(right)
     if a is None or b is None:

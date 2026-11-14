@@ -167,7 +167,8 @@ def test_the_page_card_shows_the_gazetteer_street_but_keeps_the_heard_one(tmp_pa
     streets({"port chester": ["Sampleworth Pl", "Specimen St"]})
     rig = Rig(tmp_path)
     p = rig.cad.store.incident(rig.page("p1", gas_page())["id"])
-    assert p["address"] == "220 Samplewerth Place"                       # matched as heard
+    assert p["address"] == "220 Samplewerth Pl"                          # as heard, never snapped, no town guessed
+    assert p["address_raw"] == "220 Samplewerth Place"                   # matched as heard
     assert "the map's street: 220 Sampleworth Pl, Port Chester" in p["remarks"]
     assert p["lat"] is None                                              # never a pin by itself
 

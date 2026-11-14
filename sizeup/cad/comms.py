@@ -82,6 +82,10 @@ ACTIVITY_KEEP_S = 90 * 24 * 3600     # radio_activity: its per-minute counts kep
 # talkgroup in Settings > System > Audio retention ("transcript_retention"), never shorter than their audio
 # ("audio_retention"); linked ones: always; a record (an emergency, a keep, an alarm) as long as the audio bucket keeps
 # any clip (its lifecycle hard max; [storage] audio_keep_event_days is at most that).
+# A hand-corrected transmission (sizeup/cad/sttfix.py: stt_corrections) is a keeper: never pruned here, and its audio a
+# record like a clip on a CAD event (kept_for_events), while Settings > System > Transcript corrections > Keep corrected
+# clips is on (the default): the corrected audio with its text is the speech-to-text training set.
+CORRECTIONS_SECTION, CORRECTIONS_KEEP = "stt_corrections", "keep"
 KEEP_UNLINKED_S = 365 * 24 * 3600
 KEEP_RECORD_S = 400 * 24 * 3600
 MAX_ROWS = 500
@@ -778,10 +782,18 @@ class Comms:
         out.append((f"{no_tg} AND {no_ch}", (*tgs, *chs), days("", None)))
         return out
 
+    def corrections_kept(self) -> bool:
+        """Hand-corrected transmissions are keepers (CORRECTIONS_SECTION: on unless switched off), and there is a
+        corrections table to say which."""
+        if self._section(CORRECTIONS_SECTION).get(CORRECTIONS_KEEP, True) is False:
+            return False
+        return bool(self.store.q("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'stt_corrections'"))
+
     def prune(self, pause_s: float = 0.0) -> int:
         """Transmissions on no event, once older than the longer of their transcripts' retention (Settings, per channel /
         talkgroup, 365 days by default) and their audio's: a transcript never goes before its audio. A record
-        (emergency, kept, an alarm) not before KEEP_RECORD_S either; one linked to an event, never. One indexed query
+        (emergency, kept, an alarm) not before KEEP_RECORD_S either; one linked to an event, never; nor a hand-corrected
+        one (corrections_kept). One indexed query
         per channel / talkgroup group ((talkgroup, start), (channel, start), (start)), deleted PRUNE_BATCH rows a
         transaction (the CAD's write lock held only that long), pause_s apart. The number deleted."""
         now = self.clock()
@@ -796,6 +808,10 @@ class Comms:
         tpol, apol = self.policies()
         alarms = bool(self.store.q("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'alarms'"))
         record = "emergency = 1 OR kept != ''" + (" OR id IN (SELECT traffic_id FROM alarms)" if alarms else "")
+        fixed = self.corrections_kept()
+        not_fixed = " AND id NOT IN (SELECT traffic_id FROM stt_corrections)" if fixed else ""
+        still_not_fixed = (" AND NOT EXISTS (SELECT 1 FROM stt_corrections c WHERE c.traffic_id = radio_traffic.id)"
+                           if fixed else "")
         n = 0
         noted = {True: 0, False: 0}                    # rows noted one by one, each kind; past CHANGES_MAX: that kind's reset
         for cond, params, days in self._groups(tpol, apol):
@@ -803,7 +819,7 @@ class Comms:
             while True:
                 rows = self.store.q(
                     f"SELECT rowid AS r, id, system, start FROM radio_traffic WHERE {cond} AND start < ? AND start >= ? "
-                    f"AND id NOT IN (SELECT l.traffic_id FROM radio_links l WHERE {SURE_LINK}) "
+                    f"AND id NOT IN (SELECT l.traffic_id FROM radio_links l WHERE {SURE_LINK}){not_fixed} "
                     f"AND NOT (start >= ? AND ({record})) ORDER BY start LIMIT ?",
                     (*params, cutoff, after, now - KEEP_RECORD_S, self.PRUNE_BATCH))
                 if not rows:
@@ -812,7 +828,7 @@ class Comms:
                     for r in rows:
                         gone = db.execute(f"DELETE FROM radio_traffic WHERE rowid = ? AND NOT EXISTS (SELECT 1 FROM "
                                           f"radio_links l WHERE l.traffic_id = radio_traffic.id AND {SURE_LINK}) "
-                                          f"AND NOT (start >= ? AND ({record}))",
+                                          f"AND NOT (start >= ? AND ({record})){still_not_fixed}",
                                           (r["r"], now - KEEP_RECORD_S)).rowcount
                         if not gone:
                             continue
@@ -835,14 +851,19 @@ class Comms:
 
     def kept_for_events(self, ids: list[str]) -> set[str]:
         """Of these clip ids, the ones whose audio is a record (the hub's audio retention, #251): on a CAD event
-        (radio_links, any why but an unconfirmed mention / fireground one, #311), with an alarm, or with the emergency button or an emergency window's keep."""
+        (radio_links, any why but an unconfirmed mention / fireground one, #311), with an alarm, or with the emergency button or an emergency window's keep;
+        or hand-corrected (corrections_kept: the training set's audio)."""
         out: set[str] = set()
+        fixed = self.corrections_kept()
         for k in range(0, len(ids), 500):
             chunk = list(ids[k:k + 500])
             marks = ",".join("?" * len(chunk))
             sql = (f"SELECT l.traffic_id AS id FROM radio_links l WHERE l.traffic_id IN ({marks}) AND {SURE_LINK} "
                    f"UNION SELECT id FROM radio_traffic WHERE id IN ({marks}) AND (emergency = 1 OR kept != '')")
             out.update(r["id"] for r in self.store.q(sql, chunk * 2))
+            if fixed:
+                out.update(r["id"] for r in self.store.q(
+                    f"SELECT traffic_id AS id FROM stt_corrections WHERE traffic_id IN ({marks})", chunk))
             try:
                 out.update(r["id"] for r in self.store.q(f"SELECT traffic_id AS id FROM alarms WHERE traffic_id IN ({marks})", chunk))
             except Exception:  # (a CAD without the alarms table yet)

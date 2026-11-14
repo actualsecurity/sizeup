@@ -64,6 +64,7 @@ itemised. An issue marked "open" is still open after the PR listed for it merged
 | What | PRs | Issues |
 |---|---|---|
 | The context-transcript hook (plan PR 0) | #483 | |
+| Replay / backtest over stored radio rows (`tools/intel_replay.py`), STT evaluation (`tools/stt_eval.py`), admin transcript corrections and their export (plan PR 7) | #491 | #487, #428 |
 | The INTEL push kind | #486 | |
 | The core and the police pack: rules, window, events, policy, push, Settings > Intel, the console card, the events API (plan PR 1) | #492 | part of #411 |
 | Police STT profile, police AWS budget, PD audio budget (plan PR 3) | #495 | #490 |
@@ -73,6 +74,7 @@ itemised. An issue marked "open" is still open after the PR listed for it merged
 
 | What | PRs | Issues |
 |---|---|---|
+| Incident addresses stored normalised, the source's text kept for matching; source health hysteresis so a station restart never flips the primary | #475, #471 | |
 | Ranked incident sources with automatic fallback; private adapters on the station only; adapter credentials from SSM | #304, #305, #417 | #297, #301 |
 | Dispatch modes and the per-incident radio log | #318 | #311 |
 | Pages joined to feed incidents; full department vs specific units | #367, #373, #387, #398, #399, #519 (full department from the tones and the feed) | #365, #370, #518 |
@@ -106,6 +108,7 @@ itemised. An issue marked "open" is still open after the PR listed for it merged
 |---|---|---|
 | Replicate before migrate; replica watch; a fenced task writes nothing; store transaction safety | #497, #506, #507, #509 | #498 (open), #501 |
 | Hot/cold deploys with a standby task; faster start; deploy stops on a missing secret | #254, #255, #292, #469 | #247 (open), #251, #264 |
+| Settings > Station > Adapter: the station adapter's password set from the hub, write-only | #465 | #460 |
 | Station logs to CloudWatch through the hub; Settings > Station | #493, #494 | #488, #489 |
 | Built-in profiler; hub measured and sped up; 0.5 vCPU | #299, #298, #437 | #284, #425 |
 | Station health, alerts, push topics (status vs alerts), per-alert mute, error-rate notices | #144, #199, #206, #250, #261, #290, #342 | #79, #203, #242, #258, #285, #340 |
@@ -126,10 +129,6 @@ itemised. An issue marked "open" is still open after the PR listed for it merged
 
 | PR | What | Issue |
 |---|---|---|
-| #491 | Radio intel plan PR 7: replay/backtest, STT evaluation, transcript corrections | #487, #428 |
-| #475 | Incident addresses stored normalised; matching keeps the source's text | |
-| #471 | Incident sources: health hysteresis so a station restart never flips the primary | |
-| #465 | Settings > Station > Health: set the station adapter's password from the hub (write-only) | #460 |
 | #462 | Street view: 360° street imagery in the CAD maps | #461 |
 | #522 | Litestream: one file to S3 every 30 s, not every second (S3 request costs) | |
 | #520 | Documentation refresh (this PR) | |
@@ -153,7 +152,7 @@ left, then closing.
 
 | Area | Issues |
 |---|---|
-| Radio intelligence | #510 event tie and move tuning after PR #492; #487 replay, STT evaluation, corrections (PR #491); #448 privacy-review follow-ups for context systems |
+| Radio intelligence | #510 event tie and move tuning after PR #492; #448 privacy-review follow-ups for context systems |
 | Radio | #119 more channels (the Port Chester repeater, PC local fireground); #418 Metro-North train dispatch on analog VHF; #415 Radio page navigation; #397 read-backs merged into a unit's clip; #444 dispatch voice playback; #440 incident audio kept until deleted (PR #443 merged); #75 place chips in the Radio list; #38 transmission menu targets |
 | Audio | #428 training / evaluation archive: daily bundles in cold storage |
 | HPN ATC | #351 re-check an accident pre-alert against ADS-B; #383 controller wording credited to the named aircraft; #158 airport status and TFRs |
@@ -194,11 +193,11 @@ Only arcs an issue or PR backs. Each row says what exists and what is planned.
 
 | Arc | Exists on main | Planned | Backing |
 |---|---|---|---|
-| Radio intelligence | The core, the police rule pack, Settings > Intel with 7-day counts per rule, the console card with Dismiss and feedback buttons, the events API, Listen links, radiogeo depth, the inference stage (off until Settings turn it on and AWS is set up) | a police activity map layer on the events API (plan PR 5, named in PR #492); a dry run on save in Settings > Intel (plan PR 6, named in PR #491); replay and corrections (PR #491); scene-safety markers (#411); the learned PD roster (#412); tie and move tuning (#510); train and track locations (#413) | #408, #411, #412, #413, #510, #487; PR #492, #517, #491 |
+| Radio intelligence | The core, the police rule pack, Settings > Intel with 7-day counts per rule, the console card with Dismiss and feedback buttons, the events API, Listen links, radiogeo depth, the inference stage (off until Settings turn it on and AWS is set up) | a police activity map layer on the events API (plan PR 5, named in PR #492); a dry run on save in Settings > Intel (plan PR 6); scene-safety markers (#411); the learned PD roster (#412); tie and move tuning (#510); train and track locations (#413) | #408, #411, #412, #413, #510, #487; PR #492, #517, #491 |
 | Whisper hosting | whisper.cpp on the station; AWS on the main channels | Decide between hosted Whisper turbo, our own box, or AWS (#123); the station's backlog (#196) | #123, #196 |
 | Rig AVL | The map side: one fix per unit into `Cad.positions`, follow, routes, estimated motion | A provider. None is built until a source is chosen ([cad-plan.md](cad-plan.md)) | #358 (closed: the map side), #43 |
 | Audio archive | Audio in S3 with per-channel retention | Daily bundles in cold storage for training and evaluation sets | #428 |
-| Transcript corrections and replay | | Admin corrections, an export, `tools/stt_eval.py`, the intel replay | #487; PR #491 |
+| Transcript corrections and replay | Admin corrections, an export, `tools/stt_eval.py`, the intel replay (PR #491) | Fine-tuning on corrected clips, which needs the audio archive | #487, #428 |
 | Street view | | 360° street imagery in the CAD maps; later a sandboxed iframe | #461, #467; PR #462 |
 | iPad header | | The CAD header fits 820 px | #470 |
 | Flaky tests | PR #516 | #513, #500, #449, #481, #480 remain; #503, #468, #457 are named by PR #516 and still open | as listed |
