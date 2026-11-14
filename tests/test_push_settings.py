@@ -23,7 +23,7 @@ class FakePublish:
     def __init__(self, error=""):
         self.got, self.error = [], error
 
-    def __call__(self, server, topic, title, body, priority=3, tags=(), click="", timeout=10.0, who=None):
+    def __call__(self, server, topic, title, body, priority=3, tags=(), click="", timeout=10.0, who=None, protected=()):
         if self.error:
             raise NotifyError(self.error)
         self.got.append({"server": server, "topic": topic, "title": title, "body": body, "priority": priority})
@@ -303,3 +303,47 @@ def test_the_ring_and_status_topics_must_differ_and_not_be_our_push_topics(tmp_p
     assert r.post({"action": "set", "key": "prealert_status", "topic": "EXAMPLE-FEED-ONE"})[0] == 400
     code, out = r.post({"action": "set", "key": "prealert_ring", "topic": SSM_ALERTS})
     assert code == 400 and "own push topic" in out["error"]
+
+
+def test_unreadable_settings_fail_closed_nothing_is_published(tmp_path):
+    from sizeup.notify import Notifier
+    ok, fake = {"on": True}, FakePublish()
+
+    def settings():
+        if not ok["on"]:
+            raise RuntimeError("db locked")
+        return {}
+    got = []
+    import sizeup.notify as nm
+    p = Pushes("http://127.0.0.1:9", SSM_ALERTS, SSM_STATUS, settings=settings, log=lambda m: None, retries=())
+    n = p.notifier(ALERTS).current()
+    orig, nm.publish = nm.publish, lambda *a, **k: got.append(a) or {}
+    try:
+        assert n.send("x", "y") and n.flush(5) and len(got) == 1
+        ok["on"] = False                                  # Settings (the protected list) can't be read now
+        assert n.send("x", "y") and n.flush(5)
+        assert len(got) == 1 and n.failed == 1
+        assert p.problem(SSM_ALERTS) and p.effective(ALERTS)["topic"] == ""
+        p.publish = fake
+        with pytest.raises(NotifyError):
+            p.test(ALERTS)
+        assert fake.got == []
+        ok["on"] = True
+        assert n.send("x", "y") and n.flush(5) and len(got) == 2        # readable again: back to normal
+    finally:
+        nm.publish = orig
+
+
+def test_a_changed_or_cleared_prealert_topic_stays_protected(tmp_path):
+    r = Rig(tmp_path, alerts="", status="")
+    r.p.prealert_defaults = {"ring": ("", ""), "status": ("", "")}
+    r.p.also_forbidden = ()
+    old = "example-retired-feed"
+    assert r.post({"action": "set", "key": "prealert_ring", "topic": old})[0] == 200
+    assert r.post({"action": "set", "key": "prealert_ring", "topic": "example-new-feed"})[0] == 200
+    assert r.post({"action": "reset", "key": "prealert_ring"})[0] == 200          # cleared: the feed is off
+    for name in (old, "example-new-feed"):
+        code, out = r.post({"action": "set", "key": "alerts", "topic": name.upper()})
+        assert code == 400 and "protected" in out["error"], name
+    assert r.p.problem(old)
+    assert old not in json.dumps(r.cad.settings_audit_log({"section": ["system"]})["audit"])

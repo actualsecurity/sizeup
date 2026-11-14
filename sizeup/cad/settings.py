@@ -2582,8 +2582,19 @@ class Editor:
                               else f"Settings: {notify.fingerprint(str(v.get('topic') or ''))}")
         if (old is None and new is REMOVE) or old == new:
             return {"ok": True}
-        out = self._commit([(NOTIFY_SECTION, key, new)], op,
-                           [("system", f"{NOTIFY_SECTION}/{key}", said(old), said(None if new is REMOVE else new))])
+        changes = [(NOTIFY_SECTION, key, new)]
+        audit = [("system", f"{NOTIFY_SECTION}/{key}", said(old), said(None if new is REMOVE else new))]
+        gone = str(old.get("topic") or "").strip() if isinstance(old, dict) and key != notify.PROTECTED else ""
+        newt = str(new.get("topic") or "").strip() if isinstance(new, dict) else ""
+        if gone and gone.lower() != newt.lower():
+            # a topic read until now (it may page people) leaves the feed but stays protected: never a publishable topic
+            listed = list(((cur.get(notify.PROTECTED) or {}).get("topics")) or [])
+            if gone.lower() not in {x.lower() for x in listed}:
+                listed.append(gone)
+                changes.append((NOTIFY_SECTION, notify.PROTECTED, {"topics": listed}))
+                audit.append(("system", f"{NOTIFY_SECTION}/{notify.PROTECTED}", f"{len(listed) - 1} listed",
+                              f"{len(listed)} listed (a retired feed topic)"))
+        out = self._commit(changes, op, audit)
         self.cad.log(f"notify: {label} changed in Settings")
         sync = getattr(getattr(self.cad, "prealert", None), "sync_topics", None)
         if sync is not None:

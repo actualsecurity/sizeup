@@ -38,8 +38,9 @@ included: on a thread of its own, joined with that deadline). S3 unreadable: pus
 "replica check FAILED" (a CloudWatch metric filter, sizeup-aws step 28: the backstop).
 
 The topic is the env's (SSM /sizeup-hub/status-topic, else the alerts topic: notify.route()), else the config file's
-[alerts]: a Settings override lives in the CAD database, which the supervisor never opens. Tapout's topics and the
-[prealert] ones are refused (notify.topic_problem). Never a topic's name in a log line.
+[alerts]: a Settings override lives in the CAD database, which the supervisor never opens. So it also can't see the
+topics protected in Settings (Settings' pre-alert topics and its protected list): it refuses only the config's and
+env's [prealert] ones (notify.topic_problem); its topic comes from the env / config, never from Settings. Never a topic's name in a log line.
 """
 
 from __future__ import annotations

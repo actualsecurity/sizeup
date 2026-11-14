@@ -250,7 +250,7 @@ class Notifier:
         try:
             return tuple(self.protected())
         except Exception:  # noqa: BLE001 - can't tell what is protected: publish nowhere (a caller's refusal below)
-            return ("\0",)
+            return (UNKNOWN,)
 
     @property
     def enabled(self) -> bool:
@@ -296,7 +296,7 @@ class Notifier:
         for attempt in range(len(self.retries) + 1):
             try:
                 prot = self._protected()
-                if prot == ("\0",) or topic_problem(self.topic, prot):    # protected since this Notifier was made
+                if UNKNOWN in prot or topic_problem(self.topic, prot):    # protected since this Notifier was made
                     raise NotifyError("not sent: a protected topic (one sizeup subscribes to)")
                 publish(self.server, self.topic, title, body, priority, tags, click, who=who)
                 self.sent += 1
@@ -324,6 +324,7 @@ class Notifier:
 SECTION = "notify"
 # More keys of the section (the names stay in the DB, never in the repo): the Tapout pre-alert feed's topics, which the app
 # subscribes to (sizeup/prealert.py; an env var overrides), and the extra topics never published to ({"topics": [...]}).
+UNKNOWN = "\0"      # in protected(): Settings could not be read, so any topic might be protected
 PREALERT_RING, PREALERT_STATUS, PROTECTED = "prealert_ring", "prealert_status", "protected"
 LABELS = {ALERTS: "Alerts topic", STATUS: "Status & health topic", INTEL: "Pre-alerts (intel) topic"}
 SOURCES = {"settings": "Settings", "ssm": "SSM", "env": "environment", "config": "config file", "default": "default",
@@ -416,14 +417,17 @@ class Pushes:
         self._made: dict[tuple[str, str, str], Notifier] = {}
         self._lock = threading.Lock()
         self.kinds = {k: KindNotifier(self, k) for k in KINDS}
+        self._unreadable = False                  # the last Settings read failed: what is protected can't be known
 
     # -- what is in effect ---------------------------------------------------------------------------------------
 
     def _ov(self) -> dict:
         try:
             d = self.settings() or {}
-        except Exception as e:  # noqa: BLE001 - the CAD's settings unreadable: the config's topics
-            self.log(f"notify: Settings unreadable ({type(e).__name__}): the config's topics")
+            self._unreadable = False
+        except Exception as e:  # noqa: BLE001 - the CAD's settings unreadable: the config's topics, and FAIL CLOSED
+            self.log(f"notify: Settings unreadable ({type(e).__name__}): the config's topics; nothing is published")
+            self._unreadable = True
             d = {}
         return d if isinstance(d, dict) else {}
 
@@ -432,6 +436,8 @@ class Pushes:
         ones listed in Settings. Derived at every call: nothing static."""
         ov = self._ov() if ov is None else ov
         out = list(self.also_forbidden) + [t for t, _ in self.prealert_defaults.values()]
+        if self._unreadable:                  # Settings may protect topics we can't see: the sentinel blocks every send
+            out.append(UNKNOWN)
         for k in (PREALERT_RING, PREALERT_STATUS):
             v = ov.get(k)
             if isinstance(v, dict) and v.get("topic"):
@@ -481,7 +487,10 @@ class Pushes:
         return out
 
     def problem(self, topic: str, ov: dict | None = None) -> str:
-        return topic_problem(topic, self.protected(ov))
+        prot = self.protected(ov)
+        if UNKNOWN in prot:
+            return "Settings unreadable: can't tell which topics are protected"
+        return topic_problem(topic, prot)
 
     def server(self, ov: dict | None = None) -> tuple[str, str]:
         """(the ntfy server, where it came from)."""
@@ -574,7 +583,7 @@ class Pushes:
         try:
             self.publish(srv, e["topic"], TEST_TITLE.format(kind=kind),
                          f"A test push from Settings > System > Push notifications ({LABELS[kind]}). Nothing has happened.",
-                         priority=2, tags=("test_tube", "sizeup"))
+                         priority=2, tags=("test_tube", "sizeup"), protected=self.protected())
         except NotifyError as x:
             out.update(ok=False, error=str(x))
         self.tests[kind] = out
