@@ -409,7 +409,7 @@ class Rerun:
     service: str = ""
 
 class App:
-    def __init__(self, cfg: Config):
+    def __init__(self, cfg: Config, fence=None):
         self.cfg = cfg
         self.plan = TonePlan(list(cfg.tones))
         self.whisper = WhisperService(cfg.stt_server, cfg.stt_model, cfg.stt_port, cfg.stt_threads, cfg.stt_beam_size,
@@ -623,10 +623,14 @@ class App:
         if cfg.cloud_role != "station" and cfg.cad_db:
             from sizeup.cachesync import CacheMirror
             from sizeup.fence import Fence
-            fence = Fence.from_env(log=log)      # the hub's single-writer lock (sizeup/handoff.py): uploads only while ours
+            # the hub's single-writer lock (sizeup/handoff.py): uploads only while ours. The one fence of this process
+            # (#501): main / run_gated hand it here through serve, so the Gate and the databases never disagree
+            fence = fence if fence is not None else Fence.from_env(log=log)
             self.fence = fence
             if fence is not None:                 # a dispatch's voice, attached after the answer (#426): the writer's only
-                self.cad.may_write = fence.ok
+                self.cad.may_write = fence.ok     # ... and every write to cad.sqlite, a GET's side effects too (#501)
+                self.cad.store.db.log = log
+                self.cad.store.db.on_refuse = fence.check     # a write refused: Litestream killed, the process gone
             self.cache_mirror = CacheMirror.from_env(Path(cfg.cad_db).parent, log=log, fence=fence.ok if fence else None)
         self._layers_lock = threading.Lock()
         self._layers_on = False                   # start_layers() asked for, stop_layers() not since
@@ -3975,7 +3979,7 @@ def channels_model() -> str:
     return MODEL
 
 
-def make_app(cfg: Config) -> App:
+def make_app(cfg: Config, fence=None) -> App:
     """The app for this config's role: the hub (no radios: fed by the station, sizeup/cloud/hub.py),
     or all-in-one, forwarding to the hub as the station when that is on (config.toml's [cloud] role
     = "station" until Settings > System > Station changes it: sizeup/cloud/stationmode.py)."""
@@ -3983,26 +3987,26 @@ def make_app(cfg: Config) -> App:
         from sizeup.cloud.adapters import hub_guard
         from sizeup.cloud.hub import HubApp
         hub_guard(cfg.cloud_role, log)     # incident-source adapters: the station's only (#301), never loaded here
-        return HubApp(cfg, log=log)
+        return HubApp(cfg, log=log, fence=fence)
     # the incident-source adapter's credentials (#301): files under $CREDENTIALS_DIRECTORY only, out of os.environ before
     # anything is started (sizeup/procenv.py)
     from sizeup.procenv import take_credentials
     take_credentials(cfg.adapter_env)
-    app = App(cfg)
+    app = App(cfg, fence=fence)
     from sizeup.cloud.stationmode import StationMode
     StationMode(app, cfg, log=log)     # on: sets app.events / app.link now, so nothing is missed
     app.prealert_sync()                # state/cloud.json may say otherwise than config.toml
     return app
 
 
-def start_app(cfg: Config) -> App:
+def start_app(cfg: Config, fence=None) -> App:
     """make_app() and start it; the hub's log is read for its own error spikes first (#285, sizeup/errwatch.py)."""
     if cfg.cloud_role == "hub":
         # #284: Python's sqlite3 lets the GIL go at every row it steps, and waits up to the switch interval to get it
         # back while another thread computes (a GIS layer's refresh, the state push): 5 ms a row by default, so a
         # 500-row Radio view took 1-2 s whenever anything else was busy. 1 ms: about 5x less, for a little switching.
         sys.setswitchinterval(HUB_SWITCH_S)
-    app = make_app(cfg)
+    app = make_app(cfg, fence)
     if getattr(app, "error_watch", None) is not None:      # the hub: its own error spikes to the status topic
         from sizeup import errwatch
         errwatch.install(app.error_watch)
@@ -4207,7 +4211,7 @@ def serve(cfg: Config, fence=None, phases=None, early=None) -> int:
     t = phases if phases is not None else Phases("startup")
     _STARTUP = t
     try:
-        app = start_app(cfg)                      # make_app, the hub's errwatch on its log (#285), start
+        app = start_app(cfg, fence)               # make_app, the hub's errwatch on its log (#285), start
     finally:
         _STARTUP = None
     t.mark("start")
