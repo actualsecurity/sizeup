@@ -67,7 +67,6 @@ itemised. An issue marked "open" is still open after the PR listed for it merged
 | The INTEL push kind | #486 | |
 | The core and the police pack: rules, window, events, policy, push, Settings > Intel, the console card, the events API (plan PR 1) | #492 | part of #411 |
 | Police STT profile, police AWS budget, PD audio budget (plan PR 3) | #495 | #490 |
-
 | Listen links on the push, radiogeo depth (spoken intersections, blocks, relative cues, exits and markers, cross streets) and the inference stage (Bedrock, off by default, capped; backs the rules, never pushes alone): the content of PR #499, #502, #504 | #517 | part of #411 |
 
 ### Incidents and dispatch
@@ -132,6 +131,8 @@ itemised. An issue marked "open" is still open after the PR listed for it merged
 | #471 | Incident sources: health hysteresis so a station restart never flips the primary | |
 | #465 | Settings > Health: set the station adapter's password from the hub (write-only) | #460 |
 | #462 | Street view: 360° street imagery in the CAD maps | #461 |
+| #522 | Litestream: one file to S3 every 30 s, not every second (S3 request costs) | |
+| #520 | Documentation refresh (this PR) | |
 
 ## Now
 

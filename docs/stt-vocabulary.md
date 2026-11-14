@@ -70,7 +70,7 @@ names a profile; the profile names the vocabulary).
 |---|---|---|
 | Say it | `spoken()`: ordinals and digits spelled the way they are said; `&` and `/` said | "Engine 60" → "Engine sixty"; "2398" → "twenty three ninety eight"; "3rd" → "third" |
 | Clean it | Letters, apostrophes and periods only. Letter-by-letter acronyms keep their periods | "S.S.U. 15" → "S.S.U. fifteen" |
-| Join it | Words joined with hyphens: AWS's list form has no spaces | "Boston-Post-Road", "Engine-sixty", "ten-four" |
+| Join it | Words joined with hyphens: AWS's list form has no spaces | "Example-Post-Road", "Engine-sixty", "ten-four" |
 
 A phrase with digits also gets a respell entry ("engine sixty" → "Engine 60"). `respell()` applies the entries to each
 AWS result, longest first, matching the words with spaces or hyphens between them.
@@ -95,7 +95,7 @@ A phrase over a limit is listed under `skipped` with the reason. Duplicates afte
 
 ## Hyphens in transcripts
 
-AWS writes a list-form phrase back with its hyphens ("Boston-Post-Road"); the hub writes it back as written. See
+AWS writes a list-form phrase back with its hyphens ("Example-Post-Road"); the hub writes it back as written. See
 [Hyphens](#hyphens) below (issue #518, PR #519).
 
 ## Pushing to AWS
