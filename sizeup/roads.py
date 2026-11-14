@@ -2044,8 +2044,10 @@ class Roads:
         if cam is None or not cam.get("video") or self._stop.is_set():
             return False
         host = urlsplit(cam["video"]).netloc
-        last = self._probe.get(cid)
         with self._probe_lock:
+            # (read under the lock, #468: a probe that ended between a read out here and the lock was neither "being
+            # probed" nor "probed lately", and the camera was probed twice in one sweep)
+            last = self._probe.get(cid)
             if (cid in self._probing or self._host_timeouts.get(host, 0) >= PROBE_HOST_TIMEOUTS
                     or (last is not None and self.clock() - last["at"] < PROBE_FRESH_S)):
                 return False

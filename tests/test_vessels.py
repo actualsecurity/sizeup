@@ -668,3 +668,49 @@ def test_the_websocket_client_handshake_frames_ping_and_close():
     srv.close()
     assert got["ua"] == "test-agent" and got["sent"] == '{"hello": 1}' and got["pong"] == bytes([0x8A])
     assert [json.loads(m)["MessageType"] for m in msgs if m] == ["PositionReport"]
+
+
+def test_a_descriptor_numbered_past_1023_can_still_be_waited_on():
+    """#457: late in a long run in one process (and on a hub that has been up a while) a new socket or pipe gets a
+    number of 1024 or more, and select() refuses it whatever is asked ("filedescriptor out of range in select()"). The
+    websocket client and the receivers' pumps wait with poll()."""
+    import fcntl
+    import os
+    import resource
+    import select
+
+    from sizeup.radio.fm import readable
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    want = 1100
+    if soft != resource.RLIM_INFINITY and soft < want:
+        if hard != resource.RLIM_INFINITY and hard < want:
+            pytest.skip(f"no descriptor past 1023 allowed here (limit {hard})")
+        resource.setrlimit(resource.RLIMIT_NOFILE, (want, hard))
+    a, b = socket.socketpair()
+    r, w = os.pipe()
+    high = socket.socket(fileno=fcntl.fcntl(a.fileno(), fcntl.F_DUPFD, 1024))
+    rhigh = fcntl.fcntl(r, fcntl.F_DUPFD, 1024)
+    try:
+        assert high.fileno() >= 1024 and rhigh >= 1024
+        with pytest.raises(ValueError):
+            select.select([rhigh], [], [], 0)                    # what it was
+        ws = WebSocket(high)
+        assert ws._ready(0.0) is False and readable(rhigh, 0.0) is False
+        b.sendall(bytes([0x81, 2]) + b"hi")
+        os.write(w, b"\0" * 8)
+        assert ws._ready(10.0) is True and readable(rhigh, 10.0) is True
+        assert next(ws.messages(idle_s=10)) == b"hi"
+        os.close(w)
+        os.read(rhigh, 64)
+        assert readable(rhigh, 10.0) is True and os.read(rhigh, 64) == b""      # the end of the audio: read, as before
+    finally:
+        if soft != resource.RLIM_INFINITY and soft < want:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))
+        for s in (a, b, high):
+            s.close()
+        for fd in (r, rhigh):
+            os.close(fd)
+        try:
+            os.close(w)
+        except OSError:
+            pass

@@ -145,7 +145,6 @@ def fake_rtl_fm(tmp_path, audio):
 def test_rx_and_the_live_page_end_when_the_audio_stalls_mid_page(tmp_path, monkeypatch):
     from sizeup.radio.livepage import LivePaging
     from sizeup.radio.tap import LiveTap
-    monkeypatch.setattr(fm, "STALL_S", 0.5)
     got, events, seen_open = [], [], threading.Event()
     exe = fake_rtl_fm(tmp_path, np.concatenate([hiss(4.0), south2_page()[: RATE * 8]]))   # cut mid-voice
     r = NfmReceiver(exe, "", None, Channel(470.2, "South 2"), lambda c, s: got.append(s), events.append, **PAGING)
@@ -154,14 +153,18 @@ def test_rx_and_the_live_page_end_when_the_audio_stalls_mid_page(tmp_path, monke
     orig = r._watch_open
 
     def watch():
-        if r.squelch.open:
+        if r.squelch.open and not seen_open.is_set():
+            # The stall is made short only now, with the page being heard. Set before the start it also timed the
+            # start itself: on a loaded machine the fake rtl_fm took over 0.5 s to write its first byte, was taken
+            # for stalled and started again, over and over, and the squelch never opened in the 10 s waited.
+            monkeypatch.setattr(fm, "STALL_S", 0.5)
             seen_open.set()
         orig()
     r._watch_open = watch
     r.start()
     try:
-        deadline = time.time() + 10
-        while not got and time.time() < deadline:
+        deadline = time.monotonic() + 60
+        while not got and time.monotonic() < deadline:
             time.sleep(0.05)
         assert seen_open.is_set() and got and got[0].reason == "stall"
         st = r.status()

@@ -144,11 +144,16 @@ def test_a_hung_stream_times_out_falls_back_and_the_channel_goes_on():
     t = quick(fake, res, logs, connect=hangs_first(hung), deadline_min_s=0.8, deadline_factor=0.0, stall_s=0.3)
     try:
         t.submit("tg:307", "a", tone8k(400, 0.5))
-        assert wait(lambda: "a" in res.failed, 5)
+        assert wait(lambda: "a" in res.failed, 30)
         assert res.failed["a"].startswith("AWS timed out") and not res.done
-        assert hung.aborted and any("cutting its stream" in m for m in logs)       # the stuck send was cut
-        t.submit("tg:307", "b", tone8k(400, 0.5))                                  # the channel goes on
-        assert wait(lambda: "b" in res.done, 8) and res.done["b"][0] == "Engine 60 on location."
+        # The stuck send is cut stall_s after the thread's last progress: usually before the deadline, but on a busy
+        # machine the thread got to its send late and the deadline came first. Either order: waited for, not assumed.
+        assert wait(lambda: hung.aborted and any("cutting its stream" in m for m in logs), 30)
+        # The channel goes on. Its next job gets a real deadline: 0.8 s was there to time the hung one out, and a
+        # loaded runner can take longer than that over a good answer (it timed out too, and this failed).
+        t.s.deadline_min_s = 60.0
+        t.submit("tg:307", "b", tone8k(400, 0.5))
+        assert wait(lambda: "b" in res.done, 60) and res.done["b"][0] == "Engine 60 on location."
         h = t.health()
         assert h["timeouts"] == 1 and h["state"] == "ok" and h["last_ok"] and "a" not in res.late
     finally:
