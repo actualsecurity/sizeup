@@ -864,6 +864,11 @@ class AwsTranscriber:
             w.put(job)
         self._watch()
 
+    def open_jobs(self, channel: str | None = None) -> int:
+        """Jobs submitted with no outcome yet (from that channel): the catch-up waits for none (sizeup/sttcatchup.py)."""
+        with self._lock:
+            return sum(1 for j in self._open if channel is None or j.channel == channel)
+
     def give_up(self, match: Callable[[object], bool], why: str) -> bool:
         """Fail every open job whose item matches as timed out (on_fail: its fallback). The hub's sweep, for an
         item still "Transcribing" past its deadline. True if there was one."""
@@ -1052,7 +1057,8 @@ class AwsTranscriber:
         self.timeouts_n += 1
         self.last_error, self.last_error_at = why, time.time()
         self.log(f"aws transcribe {job.channel}: {why}: the fallback takes it")
-        self._record_fail("timeout", why, job.channel)
+        if not getattr(job.item, "catchup", False):      # (a catch-up clip never opens the breaker fire shares)
+            self._record_fail("timeout", why, job.channel)
         try:
             self.on_fail(job.item, why)
         except Exception as e:
@@ -1407,7 +1413,9 @@ class ChannelWorker(threading.Thread):
         reason = classify(kind, msg)
         self.o.last_error, self.o.last_error_at = why, time.time()
         jobs = [j for j in jobs if j.state == "open"]
-        if jobs or reason in HARD:                        # (an idle stream that dropped is no failure of AWS's)
+        # (an idle stream that dropped is no failure of AWS's; nor, for the breaker fire shares, one that held only
+        # shed clips being caught up, sizeup/sttcatchup.py)
+        if any(not getattr(j.item, "catchup", False) for j in jobs) or reason in HARD:
             self.o._record_fail(reason, why, self.channel)
         if reason in HARD:
             aws.forget_credentials()

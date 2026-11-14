@@ -28,6 +28,7 @@
     jobs thread        GET /api/station/jobs?wait=25 (long poll: the station never takes inbound
                        connections): "tts" renders a dispatch with the local voice; "call" runs
                        set_mode / set_talkgroup / set_talkgroup_group / retranscribe / transcribe_now /
+                       catch_up (shed clips caught up, sizeup/sttcatchup.py) /
                        reception_post / reception_sample_b64 (a reception test, #410) / set_channel_prefs
                        (Settings > Radios > Channels, as the hub has them) / emergency_all_clear (an
                        alarm's All clear: the emergency window here, App._call's keep decision) here
@@ -71,6 +72,7 @@ CONNECTED_S = 15.0       # no answer from the hub this long = not connected (the
 CALLS = ("set_mode", "set_talkgroup", "set_talkgroup_group", "retranscribe", "set_channel_prefs",
          "emergency_all_clear",       # an alarm's All clear on the hub: the emergency window here closes (#128)
          "transcribe_now",            # the hub's fallback when Amazon Transcribe can't: whisper at live priority (#195)
+         "catch_up",                  # shed clips caught up (sizeup/sttcatchup.py): whisper, under every other clip
          "set_adsb_receiver",         # Settings > Radios on the hub: the dongle reserved for ADS-B (#235)
          "sources_poll_now",          # a pre-alert on the hub: the CAD feed adapters here poll now (#297)
          "reception_post",            # Settings > Radios on the hub: a reception test here (#410)
@@ -330,7 +332,7 @@ class StationLink:
         n, oldest = self.outbox.pending()
         out = {"id": self.cfg.station_id, "name": self.cfg.station_name,
                "radios": [r for r in app.radio_status() if r.get("label") != "Hub"],
-               "sdr": app.sdr(), "rerun": dict(app.rerun, pending=len(app._rerun_ids)),
+               "sdr": app.sdr(), "rerun": dict(app.rerun, pending=len(app._rerun_ids - app._catchup_ids)),
                "channels": app.channels_applied(),
                "p25_systems": app.p25_systems_state(),       # (#409) the other P25 systems: jobs, state, activity
                "reception": app.reception.state(),           # (#410) the reception test: its numbers, the history
