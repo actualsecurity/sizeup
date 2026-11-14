@@ -121,8 +121,16 @@ def test_full_department_from_the_page_tones(rig):
     assert queued[inc["id"]]["scope"]["short"] == "Full dept"          # on the queue card too
 
 
-def test_no_label_from_tones_without_a_call_type(rig):
+def test_the_departments_tones_and_an_address_without_a_call_type_are_the_full_department(rig):
+    """The department's own all-call tones, an address and no apparatus named: full department, whatever the type."""
     inc = rig.page(text="Port Chester Fire Department, 12 Example Avenue, cross of Sample Street. Time out 1432.")
+    assert rig.cad.full(inc["id"])["scope"]["short"] == "Full dept"
+
+
+@pytest.mark.parametrize("text", ["", "Port Chester on a test, test only. Time out 1432.",
+                                  "Port Chester Fire Department, time out 1432."])
+def test_no_label_from_tones_without_a_call_type_or_a_place(rig, text):
+    inc = rig.page(text=text)
     assert rig.cad.full(inc["id"])["scope"] is None
 
 
