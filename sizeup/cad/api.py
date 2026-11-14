@@ -273,6 +273,19 @@ POST /api/cad/settings/audio_retention    {action: set {key: _default | a channe
 POST /api/cad/settings/transcript_retention  {action: set {key: _default | a channel's name | tg:<n>, value: days} |
                                           reset {key}}: how long the radio log keeps that channel's transcripts and
                                           metadata (never shorter than its audio; sizeup/cad/comms.py prune); admins
+GET  /api/cad/stt/corrections           hand-corrected transcripts: counts (n, reference, per domain; keep: corrected
+                                          clips are keepers, kept: how many are); admins (ADMIN_READS)
+GET  /api/cad/stt/corrections.jsonl     ?since=&until=&channel=&reference=1: the corrected clips as #428's JSONL (sizeup/cad/
+                                          sttfix.py; + system, service, correction.based_on); admins only (ADMIN_READS);
+                                          in the person's activity (kind "search"). Over 50,000 clips: X-Sizeup-Truncated,
+                                          X-Sizeup-Next-Since and a last line {truncated, limit, next_since} (?since= that)
+GET  /api/cad/stt/correction/<id>       a transmission's transcripts, what the editor starts from (prefill: {text, engine})
+                                          and its correction (null: none); admins
+POST /api/cad/stt/correction/<id>       {corrected, domain?, tags?: [{kind, start, end, value?}], reference?, based_on?} |
+                                          {delete: true}: admins; in the Settings audit log (section stt_corrections: the
+                                          admin, counts, no words; another system's: redacted for a reader with no sign-in)
+POST /api/cad/settings/stt_corrections  {action: set, key: keep, value: true | false} | {action: reset, key: keep}: a
+                                          corrected clip is a keeper (its transcript never pruned, its audio a record): admins
 GET  /api/cad/intel                       Settings > System > Intel (sizeup/intel/admin.py): the packs, categories and rules
                                           with their modes, weights and 7-day hits, the policy (kill switch, caps)
 GET  /api/cad/intel/events?since=&bbox=w,s,e,n&mode=map,push&status=open|all&limit=
@@ -330,6 +343,7 @@ DATASOURCE = re.compile(r"/api/cad/datasources/([A-Za-z0-9_.:%-]{1,200})/refresh
 DVR_PIN = re.compile(r"/api/cad/cameras/([A-Za-z0-9_.:-]{1,64})/dvr/pin")      # keep recording a camera (#277)
 DVR_CLIP = re.compile(r"/api/cad/cameras/([A-Za-z0-9_.:-]{1,64})/dvr/clip")    # a camera clip on an event (#323)
 ATTACHMENT = re.compile(r"/api/cad/attachments/([0-9a-f]{16})(?:/(index\.m3u8|(\d{1,6})\.ts|audio\.wav|download|delete))?")
+STT_CORRECTION = re.compile(r"/api/cad/stt/correction/([A-Za-z0-9_.:-]{1,120})")     # a hand-corrected transcript
 INCIDENT_ATTACHMENTS = re.compile(r"/api/cad/incident/(\d{1,9})/(attachments|attachments/audit|export\.zip)")
 DS_READERS = ("admin", "dispatcher")      # who may see Settings > Data sources (#186)
 # The GETs only an admin may read (with a verified sign-in, like WRITES): path -> why, in the 403. The rest of the
@@ -344,6 +358,8 @@ ADMIN_READS = {
     "/api/cad/perf/profile": "the hub's CPU profile is for admins (Settings > Health)",
     "/api/cad/search.csv": "the search export is for admins",                # #403: many calls at once, off the hub
     "/api/cad/preplan.csv": "the pre-plan export is for admins",              # #456: every Knox box at once
+    "/api/cad/stt/corrections": "transcript corrections are for admins",      # the STT reference set (sttfix.py)
+    "/api/cad/stt/corrections.jsonl": "the transcript corrections export is for admins",   # #428's JSONL
     "/api/cad/adapter-password": "the station adapter's password is for admins (Settings > Station > Adapter)",   # server.py
     "/api/cad/intel": "the radio pre-alert rules are for admins (Settings > System > Intel)",   # #411: rule phrases
 }
@@ -376,6 +392,7 @@ WRITES = (
     (re.compile(r"/api/cad/radios(?:/delete)?"), "admin"),                 # the radio-ID registry
     (DATASOURCE, "admin"),                                                  # a data source's Refresh now (#186)
     (re.compile(r"/api/cad/perf/profile"), "admin"),                        # a CPU profile of the hub (#425, server.py)
+    (STT_CORRECTION, "admin"),                                              # a hand-corrected transcript (sttfix.py)
     (re.compile(r"/api/cad/adapter-password"), "admin"),                    # the station adapter's password (server.py)
     (DVR_PIN, "dispatch"),                                                  # keep recording a camera (#277)
     (DVR_CLIP, "dispatch"),                                                 # save a camera clip on an event (#323)
@@ -806,6 +823,25 @@ class CadApi:
         h = {"ETag": etag, "Cache-Control": "private, no-cache"} if etag else {"Cache-Control": "no-store"}   # a call's: never a 304
         return 200, json.dumps(out, separators=(",", ":")).encode(), JSON, h
 
+    def _stt_fix(self, path: str, query: str, who) -> tuple:
+        """The hand-corrected transcripts (sizeup/cad/sttfix.py): admins only. The counts and the JSONL are in ADMIN_READS
+        (read_refused has checked them); one transmission's is checked here. The export is in the person's activity
+        (kind "search": the count only) and never cached."""
+        if self._may(who) != "admin":
+            return _json(403, {"error": "Admins only: transcript corrections are for admins"})
+        fx = self.cad.stt_fix
+        if m := STT_CORRECTION.fullmatch(path):
+            return _json(200, fx.get(m.group(1)))
+        if path == "/api/cad/stt/corrections":
+            return _json(200, fx.counts())
+        data, n, more = fx.export_jsonl(parse_qs(query))
+        if who is not None and who.email:
+            self.cad.activity.record(who.email, "search", "GET /api/cad/stt/corrections.jsonl",
+                                     f"JSONL: transcript corrections: {n}{' (truncated)' if more else ''}")
+        name = f"stt-corrections-{datetime.now(TZ).strftime('%Y%m%d-%H%M')}.jsonl"
+        return 200, data, "application/x-ndjson; charset=utf-8", {"Content-Disposition": f'attachment; filename="{name}"',
+                                                                  "Cache-Control": "no-store", **more}
+
     def _docs_get(self, path: str, query: str, who) -> tuple:
         """GET /api/cad/preplan/docs(?incident= | where=), /docs/<id>, /docs/<id>/file | plan (#459): anyone signed in
         and active (a deactivated person: no); an admin-only document: admins (anyone else: 404, as if none). A file:
@@ -1032,6 +1068,8 @@ class CadApi:
                 return _json(200, self.cad.premise.listing(parse_qs(query), self._may(who)))
             if path in ("/api/cad/preplan", "/api/cad/preplan/where", "/api/cad/preplan.csv"):
                 return self._preplan(path, query, who)
+            if path in ("/api/cad/stt/corrections", "/api/cad/stt/corrections.jsonl") or STT_CORRECTION.fullmatch(path):
+                return self._stt_fix(path, query, who)
             if path.startswith("/api/cad/preplan/docs"):
                 return self._docs_get(path, query, who)
             if m := HERE.fullmatch(path):
@@ -1159,6 +1197,8 @@ class CadApi:
             return (c.premise.ack if m.group(2) else c.premise.edit)(int(m.group(1)), body)
         if m := PREPLAN.fullmatch(path):
             return c.preplan.create(body) if m.group(1) is None else c.preplan.edit(int(m.group(1)), body)
+        if m := STT_CORRECTION.fullmatch(path):
+            return c.stt_fix.save(m.group(1), body)
         if m := DOCS.fullmatch(path):
             if m.group(1) is None:
                 raise CadError("upload: the file as the body, its details in X-Sizeup-Doc")

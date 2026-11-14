@@ -198,6 +198,9 @@ PAGE_SECTION[RET_SECTION] = "system"
 # ... and its transcripts and metadata (the CAD's radio log, sizeup/cad/comms.py prune): the same keys, longer by default
 TRS_SECTION = audiostore.TRANSCRIPT_SECTION
 PAGE_SECTION[TRS_SECTION] = "system"
+# Hand-corrected transcripts (sizeup/cad/sttfix.py): "keep" (default on): a corrected clip and its audio are keepers.
+FIX_SECTION = "stt_corrections"
+PAGE_SECTION[FIX_SECTION] = "system"
 WALL_ID = re.compile(r"[A-Za-z0-9_.:-]{1,64}")      # sizeup/roads.py CAMERA_ID
 MAX_WALL_IDS = 200
 AUDIT_SECTIONS = ("lists", "run cards", "units", "dispatch", "users", "system", "radios")
@@ -1098,7 +1101,8 @@ class Editor:
               "places": self._places_op, TONES_SECTION: self._tones_op, WALL_SECTION: self._wall_op, DS_SECTION: self._ds_op,
               NOTIFY_SECTION: self._notify_op, ATC_SECTION: self._atc_op, ERR_SECTION: self._errors_op, MAPD_SECTION: self._mapd_op, PREMISE_SECTION: self._premise_op, EM_SECTION: self._em_op, RET_SECTION: self._retention_op,
               TRS_SECTION: lambda a, b, o: self._retention_op(a, b, o, TRS_SECTION), MUTE_SECTION: self._mutes_op, LOGS_SECTION: self._logs_op, DEPT_SECTION: self._dept_op, "alarms": lambda a, b, o: self.cad.alarms.settings_op(a, b, o),
-              "intel": lambda a, b, o: self.cad.intel_admin.settings_op(a, b, o)}.get(section)
+              "intel": lambda a, b, o: self.cad.intel_admin.settings_op(a, b, o),
+              FIX_SECTION: lambda a, b, o: self.cad.stt_fix.settings_op(a, b, o)}.get(section)
         if fn is None:
             raise CadError(f"no settings section {section!r}")
         if section in ("users", "import"):
@@ -2850,6 +2854,9 @@ class Editor:
         a = ov.get(ATC_SECTION) or {}
         if set(a) - set(ATC_KEYS) or any(not isinstance(v, bool) for v in a.values()):
             raise CadError("overrides.atc: identify and map, true or false")
+        fx = ov.get(FIX_SECTION) or {}
+        if set(fx) - {"keep"} or any(not isinstance(v, bool) for v in fx.values()):
+            raise CadError(f"overrides.{FIX_SECTION}: keep, true or false")
         for k, v in (ov.get(ERR_SECTION) or {}).items():      # sizeup/errwatch.py (#285)
             if k not in errwatch.DEFAULTS:
                 raise CadError(f"overrides.{ERR_SECTION}: {', '.join(errwatch.DEFAULTS)} only")

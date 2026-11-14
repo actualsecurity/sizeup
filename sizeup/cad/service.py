@@ -32,6 +32,7 @@ from sizeup.cad.comms import (COUNT_MINUTES, MAIN_LIMIT, MAX_ROWS, MUTE_MAX, OTH
                               VIEWS, Comms)
 from sizeup.cad.history import AddressHistory
 from sizeup.cad.premise import Premise
+from sizeup.cad.sttfix import SttCorrections
 from sizeup.cad.preplan import Preplan
 from sizeup.cad.preplan_docs import PreplanDocs
 from sizeup.cad.feed import Feed
@@ -388,6 +389,8 @@ class Cad:
         # Pre-plan points (#456, sizeup/cad/preplan.py): where a building's Knox box, FDC, shutoffs ... are, on the map of
         # every call there. gis: the county layers (the app sets it: the building footprints a point is linked to).
         self.preplan = Preplan(self)
+        # Hand-corrected transcripts (sizeup/cad/sttfix.py): the private reference set for speech-to-text evaluation (#428)
+        self.stt_fix = SttCorrections(self)
         self.gis = None
         # Site documents (#459, sizeup/cad/preplan_docs.py): a building's floor plans (on the call's map) and other
         # documents; .store: where their bytes are (sizeup/docstore.py; the app sets it)
@@ -1937,7 +1940,8 @@ class Cad:
         """may: the reader's standing; a premise note's rows of a category they may not see (now) without its text (#403)."""
         rows = self.premise.redact_audit(self.settings.audit_log((q.get("section") or [""])[0][:40]), may)
         rows = self.preplan.redact_audit(rows, may)                     # and a pre-plan point's (#456)
-        return {"audit": self.preplan_docs.redact_audit(rows, may)}     # and an admin-only site document's (#459)
+        rows = self.preplan_docs.redact_audit(rows, may)                # and an admin-only site document's (#459)
+        return {"audit": self.stt_fix.redact_audit(rows)}               # and a correction of another system's transmission
 
     # -- location suggestions -----------------------------------------------------------------------
 

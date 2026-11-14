@@ -2647,6 +2647,7 @@ with the department):
 |---|---|---|
 | a clip on no event | **30 days** on the hub (12 h before #414), or its channel's / talkgroup's days | `audio_keep_hours = 720` (`deploy/hub/config.hub.toml`); **Settings > System > Audio retention** (#414) |
 | a clip that is a record: on a CAD event (any link: unit, dispatcher, airport, manual, page), with an alarm, or with the emergency button / an emergency window's keep | **365 days**, or its channel's days if longer | `audio_keep_event_days = 365` (0..400; 0 = forever, in S3 the bucket's 400-day hard max) |
+| a clip whose transcript an admin corrected (`stt_corrections`, below) | a record like the row above, while **Keep corrected clips** is on (the default) | **Settings > System > Transcript corrections** |
 | a clip attached to an incident | its copy in the attachments bucket: a year ([Incident attachments](#incident-attachments-323)), whatever this says | |
 | dispatch audio (with the dispatch log) | forever (unchanged); unused previews as long as the clips (30 days; the task's disk copy a day) | |
 | the size cap `[cloud] audio_max_mb` (500) | the bytes **still in `audio.sqlite`** (all of them without S3): drops the oldest clips **that aren't records** only; records over it are kept and the log says so | |
@@ -2669,8 +2670,32 @@ days, audited as System, retroactive). A row goes once older than **the longer**
 days, so a transcript can outlive its audio but never goes first. A record (an emergency, a keep, an alarm) is kept as
 long as the audio bucket keeps any clip (400 days); a transmission linked to an event, with its links, always. A row
 whose audio is gone shows **"Audio expired"** (a dash in place of the play button). The hub's monitor history
-(`hub.sqlite`: the live display, `[storage] keep_hours`, 24 h) is the display, not the record: unchanged. The
-speech-to-text corrections (`stt_corrections`) are to follow the same rule.
+(`hub.sqlite`: the live display, `[storage] keep_hours`, 24 h) is the display, not the record: unchanged.
+
+**A corrected clip is a keeper** (#487, the corrections side of #428; `sizeup/cad/sttfix.py`). An admin corrects a
+transmission's transcript from its "⋯" menu on the Radio page (**Correct transcript**: the words as said, tagged
+spans, Reference). The corrected audio with its text is the speech-to-text training and evaluation set, so while
+**Settings > System > Transcript corrections > Keep corrected clips** is on (the default; `POST
+/api/cad/settings/stt_corrections {action: set, key: keep, value}`, admins, audited as System):
+
+- the transmission is **never pruned** from the radio log, whatever its channel's transcript retention
+  (`Comms.prune`), like one linked to an event;
+- its audio is **a record** (`Comms.kept_for_events`): kept as a clip on a CAD event is (`audio_keep_event_days`,
+  and never dropped by the size cap). In S3 the bucket's 400-day hard max still applies: longer needs #428's bundles.
+
+The card shows how many corrected clips are kept. Switched off, a corrected transmission and its audio go by their
+channel's retention again at the next pass (retroactively), and the correction goes with its transmission (`ON
+DELETE CASCADE`). An admin's **Delete** in the dialog removes a correction at once; its clip is then an ordinary one.
+This holds for another system's (police) transmissions too: a corrected one is kept past its tier's retention.
+
+The corrections live in `cad.sqlite` (`stt_corrections`), keyed by the clip id (`traffic_id` = `radio_traffic.id` =
+#428's `clip_id`), not in `hub.sqlite`: the transcripts they correct and both prunes' decisions are there. The table
+is created `IF NOT EXISTS` at open (no schema bump, no backfill). Saves and deletes are admin-only, fenced (a task
+that is not the leader answers 503) and in the Settings audit log under the admin, with counts only: never the
+words nor a hash of them; a correction of another system's transmission is redacted there for a reader without a
+verified sign-in. They leave the hub only through the admin-only JSONL export (`GET
+/api/cad/stt/corrections.jsonl`: #428's line shape plus `system`, `service` and `correction.based_on`; past 50,000
+clips it says so and `?since=` continues), which is recorded in the person's activity.
 
 **What it costs**: the card's first line is what is kept now: the live audio (clips, GB, its S3 Standard storage a
 month at $0.023/GB), the transcripts (rows) and the incident audio (radio clips copied to incidents' attachments:
