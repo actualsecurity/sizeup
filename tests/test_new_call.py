@@ -25,7 +25,7 @@ from sizeup.geo.gazetteer import SCHEMA, Gazetteer
 from sizeup.geo.pagegeo import block_of, location_detail, place_address, what_is_here
 from sizeup.geo.places import PlaceIndex
 from tests.test_cad import make_cad
-from tests.test_roles import COREY, JULIAN, VAL, call, people
+from tests.test_roles import CASEY, JORDAN, VAL, call, people
 
 STATIC = Path(__file__).resolve().parent.parent / "sizeup" / "web" / "static"
 EXTRACT = Path(__file__).parent / "fixtures" / "gazetteer" / "regent_176.json"
@@ -232,10 +232,10 @@ def test_permissions_are_unchanged(tmp_path, regent):
     api = CadApi(wired(tmp_path, regent))
     people(api.cad)
     assert call(api, "/api/cad/incident", {"type": "STRU", "address": "x @ Y", "place": "Y"}, VAL)[0] == 403
-    code, inc = call(api, "/api/cad/incident", {"type": "STRU", "address": "x @ Y", "place": "Y"}, JULIAN)
+    code, inc = call(api, "/api/cad/incident", {"type": "STRU", "address": "x @ Y", "place": "Y"}, JORDAN)
     assert code == 200 and inc["place"] == "Y"
     assert call(api, f"/api/cad/incident/{inc['id']}", {"address": "z @ Y"}, VAL)[0] == 403
-    assert call(api, f"/api/cad/incident/{inc['id']}", {"address": "z @ Y"}, COREY)[0] == 200
+    assert call(api, f"/api/cad/incident/{inc['id']}", {"address": "z @ Y"}, CASEY)[0] == 200
     # the map's lookups only read: anyone signed in, a viewer too
     for path, q in (("/api/cad/geocode/here", f"lat={REGENT_135[0]}&lon={REGENT_135[1]}"), ("/api/cad/geocode", "q=135+s+regent")):
         assert api.get(path, q, Identity(email=VAL))[0] == 200

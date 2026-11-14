@@ -197,7 +197,7 @@ def test_users_rev_moves_only_when_settings_users_change(hub):
     before = json.loads(hub.get("/api/cad/state")[2])["users_rev"]
     hub.cad.create({"type": "ALARM", "address": "1 Main St", "operator": "JD"})
     assert json.loads(hub.get("/api/cad/state")[2])["users_rev"] == before             # an event: no
-    post(hub.cad, "users", action="add", name="Corey", role="admin")
+    post(hub.cad, "users", action="add", name="Casey", role="admin")
     assert json.loads(hub.get("/api/cad/state")[2])["users_rev"] != before
 
 

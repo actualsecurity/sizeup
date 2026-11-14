@@ -24,7 +24,7 @@ from sizeup.intel.events import MemoryEvents, SqlEvents
 from sizeup.intel.model import Event, Place
 from sizeup.intel.policy import Policy
 from tests.test_cad import make_cad
-from tests.test_roles import COREY, JULIAN, VAL, call, people
+from tests.test_roles import CASEY, JORDAN, VAL, call, people
 
 KEY = "p25:mrrs:9211"                 # the police dispatch source key, as the pack's scope names it
 
@@ -554,7 +554,7 @@ def rig(tmp_path):
     return cad, CadApi(cad)
 
 
-def get(api, path, query="", who=COREY):
+def get(api, path, query="", who=CASEY):
     code, raw, _ = api.get(path, query, Identity(email=who) if who else None)
     return code, json.loads(raw)
 
@@ -562,7 +562,7 @@ def get(api, path, query="", who=COREY):
 def test_events_api_is_for_anyone_signed_in_and_nobody_else(rig):
     cad, api = rig
     assert get(api, "/api/cad/intel/events", who=None)[0] == 403
-    for who in (COREY, JULIAN, VAL):
+    for who in (CASEY, JORDAN, VAL):
         code, out = get(api, "/api/cad/intel/events", "mode=map,push", who)
         assert code == 200, out
         [ev] = out["events"]
@@ -588,10 +588,10 @@ def test_dismiss_is_a_dispatchers_and_feedback_anyones(rig):
     assert call(api, f"/api/cad/intel/{ev.id}/feedback", {"verdict": "useful"}, VAL)[0] == 200
     assert call(api, f"/api/cad/intel/{ev.id}/feedback", {"verdict": "great"}, VAL)[0] == 400
     assert call(api, f"/api/cad/intel/{ev.id}/dismiss", {}, VAL)[0] == 403
-    assert call(api, f"/api/cad/intel/{ev.id}/dismiss", {}, JULIAN)[0] == 200
+    assert call(api, f"/api/cad/intel/{ev.id}/dismiss", {}, JORDAN)[0] == 200
     assert cad.intel.events.open_events() == []
     rows = cad.store.q("SELECT verdict, operator, rules FROM intel_feedback ORDER BY id")
-    assert [r["verdict"] for r in rows] == ["useful", "noise"] and all("Julian" in r["operator"] or "Val" in r["operator"] for r in rows)
+    assert [r["verdict"] for r in rows] == ["useful", "noise"] and all("Jordan" in r["operator"] or "Val" in r["operator"] for r in rows)
     assert counts(cad)["incidents"] == 0
 
 
@@ -600,8 +600,8 @@ def test_settings_change_modes_caps_and_rules_audited_and_checked(rig):
     code, out = get(api, "/api/cad/intel")
     assert code == 200 and out["settings"]["push"] is True and out["packs"][0]["name"] == "police"
     assert {r["id"]: r for r in out["packs"][0]["rules"]}["pd.shots"]["hits"] == 1
-    post = lambda b, who=COREY: call(api, "/api/cad/settings/intel", b, who)      # noqa: E731
-    assert post({"action": "set", "key": "push", "value": False}, JULIAN)[0] == 403
+    post = lambda b, who=CASEY: call(api, "/api/cad/settings/intel", b, who)      # noqa: E731
+    assert post({"action": "set", "key": "push", "value": False}, JORDAN)[0] == 403
     assert post({"action": "set", "key": "push", "value": False})[0] == 200 and cad.intel.policy.cfg["push"] is False
     assert post({"action": "set", "key": "per_hour", "value": 0})[0] == 400
     assert post({"action": "set", "key": "per_hour", "value": 60})[0] == 200 and cad.intel.policy.cfg["per_hour"] == 60
@@ -762,14 +762,14 @@ def test_m3_the_kill_switch_enabled_and_quiet_hours_stop_the_digest():
 
 def test_m4_the_rules_are_admins_only_and_l3_shadow_events_too(rig):
     cad, api = rig
-    assert get(api, "/api/cad/intel", who=JULIAN)[0] == 403 and get(api, "/api/cad/intel", who=VAL)[0] == 403
-    assert get(api, "/api/cad/intel", who=COREY)[0] == 200
+    assert get(api, "/api/cad/intel", who=JORDAN)[0] == 403 and get(api, "/api/cad/intel", who=VAL)[0] == 403
+    assert get(api, "/api/cad/intel", who=CASEY)[0] == 200
     cad.intel_admin.settings_op("category", {"pack": "police", "category": "alarm", "mode": "shadow"}, "test")
     cad.comms.record(ctx_row("c7-t0", "commercial fire alarm activation at the plaza", cad.clock() + 1))
     cad.intel.consider("c7-t0")
     cad.intel.drain()
     viewer = get(api, "/api/cad/intel/events", "mode=shadow,log,map,push&status=all", VAL)[1]["events"]
-    admin = get(api, "/api/cad/intel/events", "mode=shadow,log,map,push&status=all", COREY)[1]["events"]
+    admin = get(api, "/api/cad/intel/events", "mode=shadow,log,map,push&status=all", CASEY)[1]["events"]
     assert all(e["mode"] in ("map", "push") for e in viewer) and any(e["mode"] == "shadow" for e in admin)
 
 

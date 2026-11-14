@@ -26,7 +26,7 @@ from sizeup.cloud.access import Identity
 from tests.test_address_history import fake_geocode
 from tests.test_cad import make_cad
 from tests.test_preplan import LON, NODE, STATIC, at, fake_gis, lat_of
-from tests.test_roles import COREY, DEE, JULIAN, VAL, call, people
+from tests.test_roles import CASEY, DEE, JORDAN, VAL, call, people
 
 HAVE_PDFIUM = docfiles.can_render()
 
@@ -128,7 +128,7 @@ def who(email):
     return Identity(email=email) if email else None
 
 
-def upload(api, data, email=JULIAN, **meta):
+def upload(api, data, email=JORDAN, **meta):
     m = {"kind": "floor_plan", "title": "First floor", "floor": "1", "incident_id": api.iid, **meta}
     code, raw, _ = api.upload("/api/cad/preplan/docs", quote(json.dumps(m)), data, who(email))
     return code, json.loads(raw)
@@ -278,11 +278,11 @@ def test_a_pdf_plan_is_rendered_from_the_chosen_page(api):
     assert abs(d["plan_w"] / d["plan_h"] - 600 / 450) < 0.01               # page 2: 600 x 450 pt
     plan = next((Path(api.cad.preplan_docs.store.root)).rglob("plan.png")).read_bytes()
     assert docfiles.png_size(plan) == (d["plan_w"], d["plan_h"])
-    code, out = call(api, f"/api/cad/preplan/docs/{d['id']}", {"page": 3}, JULIAN)          # another page
+    code, out = call(api, f"/api/cad/preplan/docs/{d['id']}", {"page": 3}, JORDAN)          # another page
     assert code == 200 and out["doc"]["page"] == 3 and out["changed"] == ["page"]
     assert out["doc"]["corners"] is None
     assert abs(out["doc"]["plan_w"] / out["doc"]["plan_h"] - 600 / 500) < 0.01
-    assert call(api, f"/api/cad/preplan/docs/{d['id']}", {"page": 9}, JULIAN)[0] == 400
+    assert call(api, f"/api/cad/preplan/docs/{d['id']}", {"page": 9}, JORDAN)[0] == 400
     assert upload(api, pdf(pages=1), page=4)[0] == 400
 
 
@@ -340,10 +340,10 @@ def test_unauthenticated_requests_are_refused_by_the_server(api):
         assert "sandbox" in r.getheader("Content-Security-Policy") and "no-store" in r.getheader("Cache-Control")
         code, body, r = req("GET", f"/api/cad/preplan/docs/{did}/file?dl=1", headers={"X-Test-Email": VAL})
         assert r.getheader("Content-Disposition").startswith("attachment;")
-        code, body, r = req("POST", "/api/cad/preplan/docs", png(), {"X-Sizeup-Doc": meta, "X-Test-Email": JULIAN})
+        code, body, r = req("POST", "/api/cad/preplan/docs", png(), {"X-Sizeup-Doc": meta, "X-Test-Email": JORDAN})
         assert code == 200, body
-        assert req("POST", "/api/cad/preplan/docs", png(), {"X-Test-Email": JULIAN})[0] == 400        # no details
-        big = {"X-Sizeup-Doc": meta, "X-Test-Email": JULIAN, "Content-Length": str(30 * 1024 * 1024)}
+        assert req("POST", "/api/cad/preplan/docs", png(), {"X-Test-Email": JORDAN})[0] == 400        # no details
+        big = {"X-Sizeup-Doc": meta, "X-Test-Email": JORDAN, "Content-Length": str(30 * 1024 * 1024)}
         conn = http.client.HTTPConnection("127.0.0.1", srv.httpd.server_address[1], timeout=10)
         conn.putrequest("POST", "/api/cad/preplan/docs")
         for k, v in big.items():
@@ -357,36 +357,36 @@ def test_unauthenticated_requests_are_refused_by_the_server(api):
 def test_admin_only_documents_are_hidden_from_everyone_else(api):
     c = api.cad
     assert upload(api, png(), admin_only=True)[0] == 400                      # a dispatcher can't make one
-    code, out = upload(api, png(), email=COREY, admin_only=True, title="Alarm panel layout", kind="preplan")
+    code, out = upload(api, png(), email=CASEY, admin_only=True, title="Alarm panel layout", kind="preplan")
     assert code == 200 and out["doc"]["admin_only"] is True
     did = out["doc"]["id"]
     upload(api, png(), title="Lobby")
-    for email in (VAL, JULIAN):
+    for email in (VAL, JORDAN):
         docs = get(api, "/api/cad/preplan/docs", f"incident={api.iid}", email)[1]["docs"]
         assert [d["title"] for d in docs] == ["Lobby"], email
         assert get(api, f"/api/cad/preplan/docs/{did}", "", email)[0] == 404
         assert get(api, f"/api/cad/preplan/docs/{did}/file", "", email)[0] == 404
         assert get(api, f"/api/cad/preplan/docs/{did}/plan", "", email)[0] == 404
     for body in ({"title": "x"}, {"action": "delete"}, {"admin_only": False}):
-        code, out = call(api, f"/api/cad/preplan/docs/{did}", body, JULIAN)
+        code, out = call(api, f"/api/cad/preplan/docs/{did}", body, JORDAN)
         assert code == 400 and out["error"] == f"no document {did}", body              # as if there were none
-    assert len(get(api, "/api/cad/preplan/docs", f"incident={api.iid}", COREY)[1]["docs"]) == 2
-    rows = [r for r in get(api, "/api/cad/settings/audit", f"section={ppd.SECTION}", JULIAN)[1]["audit"]]
+    assert len(get(api, "/api/cad/preplan/docs", f"incident={api.iid}", CASEY)[1]["docs"]) == 2
+    rows = [r for r in get(api, "/api/cad/settings/audit", f"section={ppd.SECTION}", JORDAN)[1]["audit"]]
     assert rows and not [r for r in rows if r["key"].split()[0] == str(did)]          # not there at all
     assert not any("Alarm" in (r["old"] or "") + (r["new"] or "") + r["key"] for r in rows)
-    mine = [r for r in get(api, "/api/cad/settings/audit", f"section={ppd.SECTION}", COREY)[1]["audit"]
+    mine = [r for r in get(api, "/api/cad/settings/audit", f"section={ppd.SECTION}", CASEY)[1]["audit"]
             if r["key"].split()[0] == str(did)]
     assert json.loads(mine[0]["new"]) == {"admin_only": True, "changed": sorted(ppd.AUDITED)}      # redacted once
     # a document made admin-only later: its earlier rows too
-    lobby = next(d for d in get(api, "/api/cad/preplan/docs", f"incident={api.iid}", COREY)[1]["docs"] if d["title"] == "Lobby")
-    assert call(api, f"/api/cad/preplan/docs/{lobby['id']}", {"admin_only": True}, JULIAN)[0] == 400
-    assert call(api, f"/api/cad/preplan/docs/{lobby['id']}", {"admin_only": True}, COREY)[0] == 200
-    rows = get(api, "/api/cad/settings/audit", f"section={ppd.SECTION}", JULIAN)[1]["audit"]
+    lobby = next(d for d in get(api, "/api/cad/preplan/docs", f"incident={api.iid}", CASEY)[1]["docs"] if d["title"] == "Lobby")
+    assert call(api, f"/api/cad/preplan/docs/{lobby['id']}", {"admin_only": True}, JORDAN)[0] == 400
+    assert call(api, f"/api/cad/preplan/docs/{lobby['id']}", {"admin_only": True}, CASEY)[0] == 200
+    rows = get(api, "/api/cad/settings/audit", f"section={ppd.SECTION}", JORDAN)[1]["audit"]
     assert not any("Lobby" in (r["old"] or "") + (r["new"] or "") + r["key"] for r in rows)
     assert not [r for r in rows if r["key"].split()[0] == str(lobby["id"])]
     assert not any('"changed":["admin_only","changed"]' in (r["new"] or "") for r in
-                   get(api, "/api/cad/settings/audit", f"section={ppd.SECTION}", COREY)[1]["audit"])
-    assert any("Lobby" in (r["new"] or "") for r in get(api, "/api/cad/settings/audit", f"section={ppd.SECTION}", COREY)[1]["audit"])
+                   get(api, "/api/cad/settings/audit", f"section={ppd.SECTION}", CASEY)[1]["audit"])
+    assert any("Lobby" in (r["new"] or "") for r in get(api, "/api/cad/settings/audit", f"section={ppd.SECTION}", CASEY)[1]["audit"])
     assert c.preplan_docs.for_incident(c.store.incident(api.iid), "viewer") == []
 
 
@@ -430,7 +430,7 @@ def test_documents_are_streamed_by_the_hub_and_never_linked(api, monkeypatch):
     monkeypatch.setattr(docstore, "CHUNK", 16)
     st, fake = s3_store()
     api.cad.preplan_docs.store = st
-    code, out = upload(api, png(), email=JULIAN)
+    code, out = upload(api, png(), email=JORDAN)
     assert code == 200
     did = out["doc"]["id"]
     (key, (body, ctype)), = [(k, v) for k, v in fake.objects.items() if "/original." in k]
@@ -455,7 +455,7 @@ def test_documents_are_streamed_by_the_hub_and_never_linked(api, monkeypatch):
     code, raw, h = get(api, f"/api/cad/preplan/docs/{did}/file", "dl=1", VAL)
     assert h["Content-Disposition"] == f'attachment; filename="site-doc-{did}.png"'
     assert ppd.STREAMS._value == 12 and ppd.READS._value == 4            # every slot given back
-    assert call(api, f"/api/cad/preplan/docs/{did}", {"action": "delete"}, JULIAN)[0] == 200
+    assert call(api, f"/api/cad/preplan/docs/{did}", {"action": "delete"}, JORDAN)[0] == 200
     assert fake.objects == {}
     assert get(api, f"/api/cad/preplan/docs/{did}/file", "", VAL)[0] == 404
 
@@ -587,7 +587,7 @@ def test_a_call_lists_its_buildings_documents_in_order_and_never_a_neighbours(ap
     assert [d["title"] for d in docs] == ["Basement", "Ground", "Second floor", "Tier II"]
     d = docs[0]
     assert (d["bldg_key"], d["building_ref"], d["by"], d["plan"], d["corners"]) == (
-        "100|example ave|port chester", "buildings/7100", "Julian", True, None)
+        "100|example ave|port chester", "buildings/7100", "Jordan", True, None)
     assert [d["title"] for d in get(api, "/api/cad/preplan/docs", "where=100+Example+Ave", VAL)[1]["docs"]][:1] == ["Basement"]
     assert [d["title"] for d in get(api, "/api/cad/preplan/docs", f"incident={other}", VAL)[1]["docs"]] == ["Next door"]
     # a call with no address at all, its pin on the building: the footprint's documents, "nearby"
@@ -602,19 +602,19 @@ def test_align_saves_four_corners_audited_and_validated(api):
     out = get(api, f"/api/cad/preplan/docs/{did}", "", VAL)[1]
     assert out["footprint"]["type"] == "Polygon"                          # the snap's footprint
     corners = box_corners(lat_of(100), LON)
-    code, out = call(api, f"/api/cad/preplan/docs/{did}", {"corners": corners}, JULIAN)
-    assert code == 200 and out["changed"] == ["corners"] and out["doc"]["aligned_by"] == "Julian"
+    code, out = call(api, f"/api/cad/preplan/docs/{did}", {"corners": corners}, JORDAN)
+    assert code == 200 and out["changed"] == ["corners"] and out["doc"]["aligned_by"] == "Jordan"
     assert out["doc"]["corners"] == [[round(x, 8) for x in p] for p in corners]
     mirrored = [corners[1], corners[0], corners[3], corners[2]]
     crossed = [corners[0], corners[2], corners[1], corners[3]]
     far = [[x + 0.02, y] for x, y in corners]
     tiny = box_corners(lat_of(100), LON, 0.000001, 0.000001)
     for bad in (mirrored, crossed, far, tiny, corners[:3], [["a", 1]] * 4, [[float("nan"), 41]] * 4):
-        assert call(api, f"/api/cad/preplan/docs/{did}", {"corners": bad}, JULIAN)[0] == 400, bad
-    doc = call(api, f"/api/cad/preplan/docs/{did}", {"corners": None}, JULIAN)[1]["doc"]
+        assert call(api, f"/api/cad/preplan/docs/{did}", {"corners": bad}, JORDAN)[0] == 400, bad
+    doc = call(api, f"/api/cad/preplan/docs/{did}", {"corners": None}, JORDAN)[1]["doc"]
     assert doc["corners"] is None
     other = upload(api, pdf(), kind="contacts", title="Owner", floor="")[1]["doc"]["id"]
-    assert call(api, f"/api/cad/preplan/docs/{other}", {"corners": corners}, JULIAN)[0] == 400   # not a plan
+    assert call(api, f"/api/cad/preplan/docs/{other}", {"corners": corners}, JORDAN)[0] == 400   # not a plan
     audit = c.store.q("SELECT * FROM settings_audit WHERE section = ? ORDER BY id", (ppd.SECTION,))
     assert [a["key"] for a in audit][:3] == [f"{did} Floor plan"] * 3
     assert json.loads(audit[0]["new"])["title"] == "First floor"
@@ -626,18 +626,18 @@ def test_align_saves_four_corners_audited_and_validated(api):
 def test_every_upload_edit_alignment_and_delete_is_audited(api):
     c = api.cad
     did = upload(api, png())[1]["doc"]["id"]
-    call(api, f"/api/cad/preplan/docs/{did}", {"title": "Ground floor", "floor": "G"}, JULIAN)
-    call(api, f"/api/cad/preplan/docs/{did}", {"corners": box_corners(lat_of(100), LON)}, JULIAN)
-    call(api, f"/api/cad/preplan/docs/{did}", {"action": "delete"}, COREY)
+    call(api, f"/api/cad/preplan/docs/{did}", {"title": "Ground floor", "floor": "G"}, JORDAN)
+    call(api, f"/api/cad/preplan/docs/{did}", {"corners": box_corners(lat_of(100), LON)}, JORDAN)
+    call(api, f"/api/cad/preplan/docs/{did}", {"action": "delete"}, CASEY)
     audit = c.store.q("SELECT * FROM settings_audit WHERE section = ? ORDER BY id", (ppd.SECTION,))
     assert [sorted(json.loads(a["new"])) for a in audit] == [sorted(ppd.AUDITED), ["floor", "title"], ["corners"], ["active"]]
-    assert [a["operator"].split(" <")[0] for a in audit] == ["Julian", "Julian", "Julian", "Corey"]
+    assert [a["operator"].split(" <")[0] for a in audit] == ["Jordan", "Jordan", "Jordan", "Casey"]
     acts = [r["summary"] for r in c.activity.rows(kind="action")][:4]
     assert acts == [f"Deleted site doc {did}", f"Aligned site doc {did}", f"Edited site doc {did}: floor, title",
                     f"Uploaded site doc {did} (Floor plan)" + (f" from {c.store.incident(api.iid)['number']}"
                                                               if c.store.incident(api.iid)["number"] else "")]
     assert not list((Path(c.preplan_docs.store.root)).rglob("*.png"))    # the bytes are gone
-    assert get(api, "/api/cad/preplan/docs", f"incident={api.iid}", COREY)[1]["docs"] == []
+    assert get(api, "/api/cad/preplan/docs", f"incident={api.iid}", CASEY)[1]["docs"] == []
     sha = c.store.q("SELECT sha256 FROM preplan_docs WHERE id = ?", (did,))[0]["sha256"]
     assert sha == hashlib.sha256(docfiles.clean_png(png())[0]).hexdigest()   # the record keeps what was there
 
@@ -650,9 +650,9 @@ def test_no_titles_filenames_notes_or_coordinates_in_the_logs(api):
     code, out = upload(api, png(), title="Knox box behind blue door", floor="Mezzanine")
     did = out["doc"]["id"]
     corners = box_corners(0.5123456, 0.5432198)
-    call(api, f"/api/cad/preplan/docs/{did}", {"title": "Alarm panel code room"}, JULIAN)
-    call(api, f"/api/cad/preplan/docs/{did}", {"corners": [[x, y] for x, y in box_corners(lat_of(100), LON)]}, JULIAN)
-    call(api, f"/api/cad/preplan/docs/{did}", {"corners": corners}, JULIAN)          # refused: too far
+    call(api, f"/api/cad/preplan/docs/{did}", {"title": "Alarm panel code room"}, JORDAN)
+    call(api, f"/api/cad/preplan/docs/{did}", {"corners": [[x, y] for x, y in box_corners(lat_of(100), LON)]}, JORDAN)
+    call(api, f"/api/cad/preplan/docs/{did}", {"corners": corners}, JORDAN)          # refused: too far
     get(api, f"/api/cad/preplan/docs/{did}/file", "", VAL)
     upload(api, SVG, title="evil-plan.svg")
     c.preplan_docs.store = s3_store()[0]
@@ -929,21 +929,21 @@ def test_one_render_at_a_time(monkeypatch):
 def test_another_page_clears_the_alignment_and_says_so(api):
     c = api.cad
     did = upload(api, pdf(pages=2), page=1)[1]["doc"]["id"]
-    assert call(api, f"/api/cad/preplan/docs/{did}", {"corners": box_corners(lat_of(100), LON)}, JULIAN)[0] == 200
-    code, out = call(api, f"/api/cad/preplan/docs/{did}", {"page": 2}, JULIAN)
+    assert call(api, f"/api/cad/preplan/docs/{did}", {"corners": box_corners(lat_of(100), LON)}, JORDAN)[0] == 200
+    code, out = call(api, f"/api/cad/preplan/docs/{did}", {"page": 2}, JORDAN)
     assert code == 200 and out["doc"]["corners"] is None and out["changed"] == ["corners", "page"]
     last = c.store.q("SELECT * FROM settings_audit WHERE section = ? ORDER BY id DESC LIMIT 1", (ppd.SECTION,))[0]
     assert json.loads(last["new"])["corners"] is None and json.loads(last["old"])["corners"]
     assert f"Aligned site doc {did} and edited: page" in [r["summary"] for r in c.activity.rows(kind="action")][:1]
     # a kind that isn't a plan: no picture, no corners
-    out = call(api, f"/api/cad/preplan/docs/{did}", {"kind": "inspection"}, JULIAN)[1]
+    out = call(api, f"/api/cad/preplan/docs/{did}", {"kind": "inspection"}, JORDAN)[1]
     assert out["doc"]["plan"] is False and out["doc"]["corners"] is None
     assert not list(Path(c.preplan_docs.store.root).rglob("plan.png"))
 
 
 def test_without_a_verified_person_the_reader_is_a_viewer(api):
     c = api.cad
-    did = upload(api, png(), email=COREY, admin_only=True, title="Panel")[1]["doc"]["id"]
+    did = upload(api, png(), email=CASEY, admin_only=True, title="Panel")[1]["doc"]["id"]
     assert get(api, "/api/cad/preplan/docs", f"incident={api.iid}", None)[1]["docs"] == []          # all-in-one: a viewer
     assert get(api, f"/api/cad/preplan/docs/{did}/file", "", None)[0] == 404
     with pytest.raises(ppd.CadError):
@@ -985,9 +985,9 @@ def test_a_delete_marks_the_row_first_and_the_sweep_takes_what_was_left(api, mon
     def broken(key):
         raise docstore.DocStoreError("S3 DELETE: 503")
     monkeypatch.setattr(st, "delete", broken)
-    code, out = call(api, f"/api/cad/preplan/docs/{did}", {"action": "delete"}, JULIAN)
+    code, out = call(api, f"/api/cad/preplan/docs/{did}", {"action": "delete"}, JORDAN)
     assert code == 200 and out["doc"]["active"] is False                       # deleted for everyone at once
-    assert get(api, f"/api/cad/preplan/docs/{did}/file", "", COREY)[0] == 404
+    assert get(api, f"/api/cad/preplan/docs/{did}/file", "", CASEY)[0] == 404
     assert len(list(Path(st.root).rglob("original.*"))) == 1                   # the bytes: still there
     assert c.store.q("SELECT purged FROM preplan_docs WHERE id = ?", (did,))[0]["purged"] is None
     monkeypatch.setattr(st, "delete", real)
@@ -1020,8 +1020,8 @@ def test_the_sweep_never_deletes_what_no_row_names_after_a_restore(api):
     did = upload(api, png(), kind="photo", title="Half", floor="")[1]["doc"]["id"]
     with c.store.tx() as db:
         db.execute("UPDATE preplan_docs SET active = ? WHERE id = ?", (ppd.PENDING, did))
-    assert get(api, "/api/cad/preplan/docs", f"incident={api.iid}", COREY)[1]["docs"] == []      # never shown
-    assert get(api, f"/api/cad/preplan/docs/{did}/file", "", COREY)[0] == 404
+    assert get(api, "/api/cad/preplan/docs", f"incident={api.iid}", CASEY)[1]["docs"] == []      # never shown
+    assert get(api, f"/api/cad/preplan/docs/{did}/file", "", CASEY)[0] == 404
     assert c.preplan_docs.sweep(now=_time.time()) == 0                          # inside the margin
     c.preplan_docs.may_write = lambda: False
     assert c.preplan_docs.sweep(now=much_later) == 0                            # only the leader
@@ -1210,7 +1210,7 @@ def test_a_delete_that_cant_record_purged_still_answers(api, monkeypatch):
         raise sqlite3.OperationalError("database is locked")
     monkeypatch.setattr(c.preplan_docs, "_purged", lambda d, real=c.preplan_docs._purged: (
         monkeypatch.setattr(c.store, "tx", tx), real(d), monkeypatch.setattr(c.store, "tx", real)))
-    code, out = call(api, f"/api/cad/preplan/docs/{did}", {"action": "delete"}, JULIAN)
+    code, out = call(api, f"/api/cad/preplan/docs/{did}", {"action": "delete"}, JORDAN)
     assert code == 200 and out["doc"]["active"] is False                        # done, whatever the purged mark did
     monkeypatch.undo()
     assert c.store.q("SELECT active, purged FROM preplan_docs WHERE id = ?", (did,))[0]["active"] == ppd.DELETED

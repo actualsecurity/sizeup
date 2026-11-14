@@ -29,7 +29,7 @@ alias, rig, radio ID), the channel, the time, the transcript and where the words
 drill (Settings: `drill` on), the open event it belongs to and who acknowledged it when. The event: the one
 the transmission is on in the communications log (comms.py: the rig's, or the one call on FG1), else an open
 event the rig is assigned to; its chronology gets "EMERGENCY: E64 P1 mayday on FG1 at 14:32:10" and,
-acknowledged, "...; acknowledged by Corey at 14:32:40" (kind "alarm").
+acknowledged, "...; acknowledged by Casey at 14:32:40" (kind "alarm").
 
 An alarm stays on every console and wall board (/cad, /monitor: static/alarm.js) until someone acknowledges
 it (POST /api/cad/alarm/<id>/ack: dispatchers and admins); a notice can be acknowledged the same way and

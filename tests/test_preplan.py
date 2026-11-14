@@ -18,7 +18,7 @@ from sizeup.cloud.access import Identity
 from sizeup.gis import DEFAULT_LAYERS, Gis, geometry_bbox
 from tests.test_address_history import fake_geocode
 from tests.test_cad import make_cad
-from tests.test_roles import COREY, JULIAN, VAL, call, people
+from tests.test_roles import CASEY, JORDAN, VAL, call, people
 
 STATIC = Path(__file__).resolve().parent.parent / "sizeup" / "web" / "static"
 NODE = shutil.which("node") or shutil.which("node", path="/opt/homebrew/bin:/usr/local/bin")
@@ -251,27 +251,27 @@ def test_crud_audit_and_roles(api):
     c, iid = api.cad, api.iid
     body = {"incident_id": iid, "kind": "knox_box", "lat": lat_of(100), "lon": LON, "label": "Front door left", "note": "Code 1234"}
     assert call(api, "/api/cad/preplan", body, VAL)[0] == 403              # viewers only look
-    code, out = call(api, "/api/cad/preplan", body, JULIAN)
+    code, out = call(api, "/api/cad/preplan", body, JORDAN)
     assert code == 200
     p = out["point"]
-    assert (p["kind"], p["label"], p["note"], p["by"], p["bldg_key"]) == ("knox_box", "Front door left", "Code 1234", "Julian",
+    assert (p["kind"], p["label"], p["note"], p["by"], p["bldg_key"]) == ("knox_box", "Front door left", "Code 1234", "Jordan",
                                                                           "100|example ave|port chester")
-    code, out = call(api, f"/api/cad/preplan/{p['id']}", {"label": "Front door right", "level": "1", "review_by": "2027-06-30"}, JULIAN)
+    code, out = call(api, f"/api/cad/preplan/{p['id']}", {"label": "Front door right", "level": "1", "review_by": "2027-06-30"}, JORDAN)
     assert code == 200 and (out["point"]["label"], out["point"]["level"]) == ("Front door right", "1")
-    code, out = call(api, f"/api/cad/preplan/{p['id']}", {"lat": lat_of(100) + 0.00002, "lon": LON}, JULIAN)
+    code, out = call(api, f"/api/cad/preplan/{p['id']}", {"lat": lat_of(100) + 0.00002, "lon": LON}, JORDAN)
     assert code == 200 and out["changed"] == ["lat"]
-    assert call(api, f"/api/cad/preplan/{p['id']}", {"action": "restore"}, JULIAN)[0] == 400       # restore: admins
-    code, out = call(api, f"/api/cad/preplan/{p['id']}", {"action": "delete"}, JULIAN)
+    assert call(api, f"/api/cad/preplan/{p['id']}", {"action": "restore"}, JORDAN)[0] == 400       # restore: admins
+    code, out = call(api, f"/api/cad/preplan/{p['id']}", {"action": "delete"}, JORDAN)
     assert code == 200 and out["point"]["active"] is False
     assert pushed(c, iid) == []
-    assert call(api, f"/api/cad/preplan/{p['id']}", {"action": "restore"}, COREY)[0] == 200
+    assert call(api, f"/api/cad/preplan/{p['id']}", {"action": "restore"}, CASEY)[0] == 200
     audit = c.store.q("SELECT * FROM settings_audit WHERE section = 'preplan' ORDER BY id")
     assert [a["key"] for a in audit] == [f"{p['id']} Knox box"] * 5
     assert json.loads(audit[0]["new"])["note"] == "Code 1234"
     assert [json.loads(a["new"]) for a in audit[1:]] == [
         {"label": "Front door right", "level": "1", "review_by": json.loads(audit[1]["new"])["review_by"]},
         {"lat": round(lat_of(100) + 0.00002, 7)}, {"active": 0}, {"active": 1}]
-    assert [a["operator"].split(" <")[0] for a in audit] == ["Julian"] * 4 + ["Corey"]
+    assert [a["operator"].split(" <")[0] for a in audit] == ["Jordan"] * 4 + ["Casey"]
     acts = [r["summary"] for r in c.activity.rows(kind="action")]
     number = c.store.incident(iid)["number"]
     assert acts[:5] == [f"Restored pre-plan point {p['id']}", f"Deleted pre-plan point {p['id']}",
@@ -281,33 +281,33 @@ def test_crud_audit_and_roles(api):
     assert not any("Front" in s or "1234" in s or "41." in s for s in acts)
     for bad in ({"kind": "pool"}, {"label": "x" * 61}, {"note": "x" * 301}, {"level": "x" * 21}, {"priority": 7},
                 {"lat": "north"}, {"review_by": "soon"}):
-        code, out = call(api, "/api/cad/preplan", {**body, **bad}, JULIAN)
+        code, out = call(api, "/api/cad/preplan", {**body, **bad}, JORDAN)
         assert code == 400, bad
 
 
 def test_restricted_kinds_are_per_person_in_reads_writes_and_the_audit(api):
     c, iid = api.cad, api.iid
     knox = c.preplan.create({"incident_id": iid, "kind": "knox_box", "lat": lat_of(100), "lon": LON, "note": "Box behind sign"})["point"]
-    call(api, f"/api/cad/preplan/{knox['id']}", {"note": "Box behind the sign"}, JULIAN)          # written in the clear
-    code, out = call(api, "/api/cad/settings/premise_visibility", {"action": "set", "key": "knox_box", "value": "dispatcher"}, JULIAN)
+    call(api, f"/api/cad/preplan/{knox['id']}", {"note": "Box behind the sign"}, JORDAN)          # written in the clear
+    code, out = call(api, "/api/cad/settings/premise_visibility", {"action": "set", "key": "knox_box", "value": "dispatcher"}, JORDAN)
     assert code == 403                                                 # admins only
-    code, out = call(api, "/api/cad/settings/premise_visibility", {"action": "set", "key": "knox_box", "value": "dispatcher"}, COREY)
+    code, out = call(api, "/api/cad/settings/premise_visibility", {"action": "set", "key": "knox_box", "value": "dispatcher"}, CASEY)
     assert code == 200 and out["premise_visibility"]["knox_box"] == {
         "label": "Pre-plan: Knox box", "value": "dispatcher", "edited": True, "choices": ["everyone", "dispatcher", "admin"]}
     assert set(out["premise_visibility"]) >= {"gate_access", "medical"}
     assert pushed(c, iid) == []
     assert get(api, "/api/cad/preplan", f"incident={iid}", VAL)[1]["points"] == []
-    assert [p["id"] for p in get(api, "/api/cad/preplan", f"incident={iid}", JULIAN)[1]["points"]] == [knox["id"]]
+    assert [p["id"] for p in get(api, "/api/cad/preplan", f"incident={iid}", JORDAN)[1]["points"]] == [knox["id"]]
     code, out = call(api, f"/api/cad/preplan/{knox['id']}", {"note": "x"}, VAL)
     assert code == 403
     rows = [r for r in get(api, "/api/cad/settings/audit", "section=preplan", VAL)[1]["audit"] if r["section"] == "preplan"]
     assert len(rows) == 2 and not any("sign" in (r["old"] or "") + (r["new"] or "") + r["key"] for r in rows)
     assert json.loads(rows[0]["new"]) == {"kind": "knox_box", "changed": ["note"]}
-    assert any("sign" in (r["new"] or "") for r in get(api, "/api/cad/settings/audit", "section=preplan", JULIAN)[1]["audit"])
-    call(api, f"/api/cad/preplan/{knox['id']}", {"note": "Box by the door"}, JULIAN)               # written restricted
+    assert any("sign" in (r["new"] or "") for r in get(api, "/api/cad/settings/audit", "section=preplan", JORDAN)[1]["audit"])
+    call(api, f"/api/cad/preplan/{knox['id']}", {"note": "Box by the door"}, JORDAN)               # written restricted
     last = c.store.q("SELECT * FROM settings_audit WHERE section = 'preplan' ORDER BY id DESC LIMIT 1")[0]
     assert last["key"] == str(knox["id"]) and "door" not in last["old"] + last["new"]
-    code, out = call(api, "/api/cad/settings/premise_visibility", {"action": "set", "key": "fdc", "value": "admin"}, COREY)
+    code, out = call(api, "/api/cad/settings/premise_visibility", {"action": "set", "key": "fdc", "value": "admin"}, CASEY)
     assert code == 400                                                 # only the Knox boxes and the gates
 
 
@@ -320,14 +320,14 @@ def test_the_viewport_fetch_with_etag(api):
     assert code == 200 and [p["id"] for p in out["points"]] == [a["id"]]
     assert h["ETag"].startswith('W/"pp-') and "no-cache" in h["Cache-Control"]
     assert get(api, "/api/cad/preplan", f"bbox={box}", VAL)[2]["ETag"] == h["ETag"]         # unchanged: the same tag
-    assert get(api, "/api/cad/preplan", f"bbox={box}", JULIAN)[2]["ETag"] != h["ETag"]      # another standing: its own
+    assert get(api, "/api/cad/preplan", f"bbox={box}", JORDAN)[2]["ETag"] != h["ETag"]      # another standing: its own
     c.preplan.edit(a["id"], {"label": "Side A"})
     assert get(api, "/api/cad/preplan", f"bbox={box}", VAL)[2]["ETag"] != h["ETag"]         # a write: a new one
     code, out, _ = get(api, "/api/cad/preplan", f"bbox={LON - 0.1},40.9,{LON + 0.1},41.1", VAL)
     assert code == 400                                                 # a whole town at once: no
     assert get(api, "/api/cad/preplan", "", VAL)[0] == 403             # every point: admins
-    assert get(api, "/api/cad/preplan", "", JULIAN)[0] == 403
-    assert len(get(api, "/api/cad/preplan", "", COREY)[1]["points"]) == 2
+    assert get(api, "/api/cad/preplan", "", JORDAN)[0] == 403
+    assert len(get(api, "/api/cad/preplan", "", CASEY)[1]["points"]) == 2
 
 
 def test_the_server_answers_304_for_the_viewport(api):
@@ -345,13 +345,13 @@ def test_the_list_and_csv_are_admins_and_the_building_view_is_one_building(api):
     assert [p["label"] for p in out["points"]] == ["Side A"] and out["key"]["bldg_key"] == "100|example ave|port chester"
     assert out["point"] == [pytest.approx(lat_of(100)), LON]
     assert get(api, "/api/cad/preplan", "where=Zqxv", VAL)[0] == 400
-    assert get(api, "/api/cad/preplan.csv", "", JULIAN)[0] == 403
-    code, raw, _ = get(api, "/api/cad/preplan.csv", "", COREY)
+    assert get(api, "/api/cad/preplan.csv", "", JORDAN)[0] == 403
+    code, raw, _ = get(api, "/api/cad/preplan.csv", "", CASEY)
     lines = raw.decode("utf-8-sig").splitlines()
     assert code == 200 and lines[0].startswith("Building,Kind,Label,Note,Level") and len(lines) == 3
-    assert [r["summary"] for r in c.activity.rows(kind="search", email=COREY)] == ["CSV: pre-plan points: 2"]
+    assert [r["summary"] for r in c.activity.rows(kind="search", email=CASEY)] == ["CSV: pre-plan points: 2"]
     assert get(api, "/api/cad/preplan/where", f"lat={lat_of(100)}&lon={LON}", VAL)[0] == 403
-    code, out, _ = get(api, "/api/cad/preplan/where", f"lat={lat_of(102)}&lon={LON}&incident_id={api.iid}", JULIAN)
+    code, out, _ = get(api, "/api/cad/preplan/where", f"lat={lat_of(102)}&lon={LON}&incident_id={api.iid}", JORDAN)
     assert code == 200 and out["addr_label"] == "102 Example Ave, Port Chester" and out["geometry"]["type"] == "Polygon"
 
 
@@ -362,10 +362,10 @@ def test_no_label_note_or_coordinates_in_the_server_log(api):
     c.log = log.append
     secret = {"label": "Behind blue door", "note": "Gate code 4321"}
     code, out = call(api, "/api/cad/preplan", {"incident_id": api.iid, "kind": "gate_access", "lat": 41.0123456, "lon": -73.6543219,
-                                                **secret}, JULIAN)
+                                                **secret}, JORDAN)
     pid = out["point"]["id"]
-    call(api, f"/api/cad/preplan/{pid}", {"note": "Gate code 9876", "lat": 41.0123999, "lon": -73.6543999}, JULIAN)
-    call(api, f"/api/cad/preplan/{pid}", {"action": "delete"}, JULIAN)
+    call(api, f"/api/cad/preplan/{pid}", {"note": "Gate code 9876", "lat": 41.0123999, "lon": -73.6543999}, JORDAN)
+    call(api, f"/api/cad/preplan/{pid}", {"action": "delete"}, JORDAN)
     get(api, "/api/cad/preplan", "bbox=-73.66,41.0,-73.65,41.02", VAL)
     c.preplan._at = lambda *a: (_ for _ in ()).throw(RuntimeError("Gate code 4321 at 41.0123456"))
     c._state = None
@@ -473,13 +473,13 @@ def test_a_calls_points_have_no_etag_and_follow_a_rekeyed_call(api):
     c.preplan.create({"kind": "knox_box", "lat": lat_of(100), "lon": LON, "label": "A"})
     c.preplan.create({"kind": "fdc", "lat": lat_of(102), "lon": LON, "label": "B"})
     c.state()                                                              # the call keyed (to 100)
-    code, out, h = get(api, "/api/cad/preplan", f"incident={api.iid}", JULIAN)
+    code, out, h = get(api, "/api/cad/preplan", f"incident={api.iid}", JORDAN)
     assert [p["label"] for p in out["points"]] == ["A"]
     assert "ETag" not in h and h["Cache-Control"] == "no-store"            # never a 304 for a call
     c.update(api.iid, {"address": "102 Example Ave", "lat": lat_of(102), "lon": LON})
     c.state()                                                              # keyed again
-    assert [p["label"] for p in get(api, "/api/cad/preplan", f"incident={api.iid}", JULIAN)[1]["points"]] == ["B"]
-    assert "ETag" in get(api, "/api/cad/preplan", "where=100+Example+Ave", JULIAN)[2]
+    assert [p["label"] for p in get(api, "/api/cad/preplan", f"incident={api.iid}", JORDAN)[1]["points"]] == ["B"]
+    assert "ETag" in get(api, "/api/cad/preplan", "where=100+Example+Ave", JORDAN)[2]
 
 
 def test_the_preview_of_a_point_they_may_not_see_or_a_deleted_one_is_no_point(api, monkeypatch):
@@ -490,9 +490,9 @@ def test_the_preview_of_a_point_they_may_not_see_or_a_deleted_one_is_no_point(ap
     monkeypatch.setattr(pp, "VISIBLE_TO", {"knox_box": "admin"})
     q = f"lat={lat_of(102)}&lon={LON}&point="
     for pid in (knox["id"], gone["id"], 999):
-        code, out, _ = get(api, "/api/cad/preplan/where", q + str(pid), JULIAN)
+        code, out, _ = get(api, "/api/cad/preplan/where", q + str(pid), JORDAN)
         assert (code, out) == (400, {"error": f"no point {pid}"}), pid       # the same answer as a point that never was
-    assert get(api, "/api/cad/preplan/where", q + str(knox["id"]), COREY)[0] == 200
+    assert get(api, "/api/cad/preplan/where", q + str(knox["id"]), CASEY)[0] == 200
 
 
 def test_a_neighbours_footprint_with_no_address_is_never_the_calls(cad):
@@ -553,18 +553,18 @@ def test_older_audit_rows_of_a_since_restricted_kind_are_redacted(api, monkeypat
     p = c.preplan.create({"kind": "knox_box", "lat": lat_of(100), "lon": LON, "note": "Box behind sign"})["point"]
     c.preplan.edit(p["id"], {"kind": "fdc", "note": "Side A"})            # now an FDC: the first row still says Knox box
     monkeypatch.setattr(pp, "VISIBLE_TO", {"knox_box": "admin"})
-    rows = [r for r in get(api, "/api/cad/settings/audit", "section=preplan", JULIAN)[1]["audit"] if r["section"] == "preplan"]
+    rows = [r for r in get(api, "/api/cad/settings/audit", "section=preplan", JORDAN)[1]["audit"] if r["section"] == "preplan"]
     assert len(rows) == 2 and not any("sign" in (r["old"] or "") + (r["new"] or "") for r in rows)
     assert {json.loads(r["new"])["kind"] for r in rows} == {"knox_box"}
-    assert any("sign" in (r["new"] or "") for r in get(api, "/api/cad/settings/audit", "section=preplan", COREY)[1]["audit"])
+    assert any("sign" in (r["new"] or "") for r in get(api, "/api/cad/settings/audit", "section=preplan", CASEY)[1]["audit"])
 
 
 def test_a_kind_they_may_not_see_cannot_be_created(api, monkeypatch):
     monkeypatch.setattr(pp, "VISIBLE_TO", {"knox_box": "admin"})
     body = {"incident_id": api.iid, "kind": "knox_box", "lat": lat_of(100), "lon": LON}
-    code, out = call(api, "/api/cad/preplan", body, JULIAN)
+    code, out = call(api, "/api/cad/preplan", body, JORDAN)
     assert code == 400 and "knox_box" not in out["error"] and "fdc" in out["error"]
-    assert call(api, "/api/cad/preplan", body, COREY)[0] == 200
+    assert call(api, "/api/cad/preplan", body, CASEY)[0] == 200
     api.cad._state = None
     assert api.cad.state()["preplan"]["levels"] == {"knox_box": "admin"}   # the page leaves it out of the picker
     src = (STATIC / "preplan.js").read_text()
@@ -577,7 +577,7 @@ def test_the_editors_preview_writes_nothing(api):
     iid = c.store.create_incident(type="STRU", address="102 Example Ave", lat=lat_of(102), lon=LON)
     assert c.store.one("SELECT id FROM addr_queue WHERE id = ?", (iid,))   # not keyed yet
     rev = c.store.rev
-    code, out, _ = get(api, "/api/cad/preplan/where", f"lat={lat_of(102)}&lon={LON}&incident_id={iid}", JULIAN)
+    code, out, _ = get(api, "/api/cad/preplan/where", f"lat={lat_of(102)}&lon={LON}&incident_id={iid}", JORDAN)
     assert code == 200 and out["bldg_key"] == "102|example ave|port chester"
     assert c.store.rev == rev and c.store.one("SELECT id FROM addr_queue WHERE id = ?", (iid,))
 
@@ -614,10 +614,10 @@ def test_the_previews_footprint_choice_saves_on_a_call_keyed_meanwhile(api):
     c.gis = fake_gis(numbers=(100, 102, 104))
     iid = c.store.create_incident(type="STRU", address="104 Example Ave", lat=lat_of(104), lon=LON)
     q = f"lat={lat_of(104)}&lon={LON}&incident_id={iid}"
-    out = get(api, "/api/cad/preplan/where", q, JULIAN)[1]               # the call not keyed yet: its footprint, a choice
+    out = get(api, "/api/cad/preplan/where", q, JORDAN)[1]               # the call not keyed yet: its footprint, a choice
     assert out["choices"]["building"] == "104 Example Ave, Port Chester"
     code, out = call(api, "/api/cad/preplan", {"incident_id": iid, "kind": "fdc", "lat": lat_of(104), "lon": LON,
-                                               "link": "building"}, JULIAN)  # keyed on save: the same building
+                                               "link": "building"}, JORDAN)  # keyed on save: the same building
     assert code == 200 and out["point"]["bldg_key"] == "104|example ave|port chester"
 
 

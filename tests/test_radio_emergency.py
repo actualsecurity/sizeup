@@ -72,9 +72,9 @@ def test_a_row_logged_without_the_flag_lights_up_from_its_alarm(tmp_path):
         (1, a["id"], "notice", [], "", None)
     p = got[plain["id"]]
     assert (p["emergency"], p["alarm_id"], p["alarm_level"], p["keywords"]) == (0, None, "", [])
-    cad.alarm_ack(a["id"], {"operator": "Corey"})
+    cad.alarm_ack(a["id"], {"operator": "Casey"})
     r = rows_of(cad)[t["id"]]
-    assert r["ack_by"] == "Corey" and r["ack_at"] and r["clear_at"] is None
+    assert r["ack_by"] == "Casey" and r["ack_at"] and r["clear_at"] is None
     # a mayday heard (words, no button) is on its row too, ours: the full alarm
     m = row(cad, id="FG1-9", source="FG1", talkgroup=None, unit="E64 P1", radio_id="6401", rig="E64",
             text="mayday mayday mayday", status="done")
@@ -300,18 +300,18 @@ def test_record_off_keeps_the_talkgroup_and_the_radio_until_all_clear(tmp_path):
     assert [(w["talkgroup"], w["radios"]) for w in win] == [(1325, ["21514"])] and win[0]["alarm_id"]
     # acknowledged (seen) it keeps running ...
     aid = app.cad.state()["alarms"]["notices"][0]["id"]
-    app.cad.alarm_ack(aid, {"operator": "Corey"})
+    app.cad.alarm_ack(aid, {"operator": "Casey"})
     app._call(c("1325-3", 1325, "1325001", now + 60))
     assert texts[-1].id.split("-t")[0] == "1325-3"
     # ... All clear (resolved) ends it: the switch is respected again
-    a = app.cad.alarm_clear(aid, {"operator": "Corey"})
-    assert a["clear_by"] == "Corey" and a["clear_at"] and app.cad.state()["alarms"]["windows"] == []
+    a = app.cad.alarm_clear(aid, {"operator": "Casey"})
+    assert a["clear_by"] == "Casey" and a["clear_at"] and app.cad.state()["alarms"]["windows"] == []
     n = len(texts)
     app._call(c("1325-4", 1325, "1325001", now + 70))
     app._call(c("383-3", 383, "21514", now + 80))
     assert len(texts) == n
     with pytest.raises(Exception):
-        app.cad.alarm_clear(aid, {"operator": "Corey"})             # once
+        app.cad.alarm_clear(aid, {"operator": "Casey"})             # once
     # a talkgroup with Record on is untouched by all this
     app.tg.set(1325, record=True)
     app._call(c("1325-5", 1325, "1325001", now + 90))
@@ -342,9 +342,9 @@ def test_all_clear_goes_from_the_hub_to_the_station(tmp_path):
         a = hub.app.cad.alarms.on_traffic(dict(tx("1325-1", source="DOT Dispatch 1", talkgroup=1325, radio_id="21514",
                                                   emergency=True), start=at, end=at + 15))
         assert [w["talkgroup"] for w in hub.app.cad.state()["alarms"]["windows"]] == [1325]
-        hub.app.cad.alarm_ack(a["id"], {"operator": "Corey"})
+        hub.app.cad.alarm_ack(a["id"], {"operator": "Casey"})
         assert sent == [] and hub.app.cad.state()["alarms"]["windows"]       # seen is not resolved
-        hub.app.cad.alarm_clear(a["id"], {"operator": "Corey"})
+        hub.app.cad.alarm_clear(a["id"], {"operator": "Casey"})
         deadline = time.time() + 5
         while not sent and time.time() < deadline:
             time.sleep(0.02)
@@ -409,8 +409,8 @@ out.ours = pick(emergencyChip({ emergency: 1, alarm_id: 8, alarm_level: "alarm",
 out.mayday = pick(emergencyChip({ emergency: 0, alarm_id: 9, alarm_level: "alarm", keywords: ["mayday"] }));
 out.flagOnly = pick(emergencyChip({ emergency: 1, alarm_id: null, alarm_level: "", service: "ems" }));
 out.none = pick(emergencyChip({ emergency: 0, alarm_id: null }));
-out.acked = pick(alarmDone({ ack_by: "Corey <c@x>", ack_at: 1 }));
-out.cleared = pick(alarmDone({ ack_by: "Corey", ack_at: 1, clear_by: "Val", clear_at: 2 }));
+out.acked = pick(alarmDone({ ack_by: "Casey <c@x>", ack_at: 1 }));
+out.cleared = pick(alarmDone({ ack_by: "Casey", ack_at: 1, clear_by: "Val", clear_at: 2 }));
 out.kept = pick(keptChip({ kept: "emergency", service: "fire" }));
 // Settings > Radios > Emergencies (default fire, EMS): a bus's button (transit, not ours) is a muted EM, the detail in the
 // hover; its window's kept rows a dot. Ours, our channel and a scene-safety row stand out whatever the service.
@@ -483,7 +483,7 @@ def test_the_row_chip_and_the_folded_group_in_the_pages_own_code(tmp_path):
     assert out["ours"] == {"cls": "chip emergency", "text": "EMERGENCY"}
     assert out["mayday"] == {"cls": "chip emergency", "text": "MAYDAY"}
     assert out["flagOnly"]["text"] == "Emergency button" and out["none"] is None
-    assert out["acked"]["text"] == "· acked by Corey 19:59" and out["cleared"]["text"] == "· all clear Val 19:59"
+    assert out["acked"]["text"] == "· acked by Casey 19:59" and out["cleared"]["text"] == "· all clear Val 19:59"
     assert out["kept"]["text"] == "kept: emergency window" and out["notKept"] is None
     # quiet: someone else's on a service that isn't prominent (default fire, EMS)
     assert (out["bus"]["cls"], out["bus"]["text"]) == ("chip em-quiet", "EM")

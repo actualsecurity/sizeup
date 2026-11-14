@@ -44,11 +44,13 @@ Turn off = no pushes of that kind. Read at every send: no restart. A test push (
 goes to the topic in effect. The names are shown to admins only: never in the audit log (a fingerprint),
 the activity, the settings export, the status endpoint or the logs.
 
-NEVER Tapout's topics: pcfd-phone-prealert pages the fire crew's phones, pcfd-status is Tapout's own
-health feed. sizeup only reads those (sizeup/prealert.py). topic_problem() refuses them (and anything that
-isn't a plain topic name), the config refuses them ([alerts] ntfy_topic), and publish() refuses them again
-right before a request is made: a mistake in one place can't page the crew. The match is the whole name
-(case aside): a topic of ours that merely contains "status" or "prealert" is fine.
+NEVER a protected topic: the ones sizeup SUBSCRIBES to (Tapout's pre-alert feed, sizeup/prealert.py: one pages the
+fire crew's phones) are only read. No topic name is in the code or the repo: the protected set is DERIVED, every
+topic the app is configured to subscribe to ([prealert] in the config, SIZEUP_PREALERT_*_TOPIC, or Settings > System >
+Push notifications > Phone pre-alert topics), plus the extra ones an admin lists there (Pushes.protected()). topic_problem()
+refuses them (and anything that isn't a plain topic name), the config refuses them ([alerts] ntfy_topic), and the Notifier
+refuses them again right before every request is made: a mistake in one place can't page the crew. The match is the
+whole name (case aside): a topic of ours that merely contains one of those names is fine.
 """
 
 from __future__ import annotations
@@ -65,8 +67,7 @@ from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
 DEFAULT_SERVER = "https://ntfy.sh"
-# Tapout's topics (sizeup/prealert.py, firehouse-ring-alerter): never published to, whatever the config says.
-FORBIDDEN = frozenset({"pcfd-phone-prealert", "pcfd-status"})
+# No topic name is written here or anywhere in the repo: the topics never published to are derived (Pushes.protected()).
 TOPIC = re.compile(r"[-_A-Za-z0-9]{1,64}")
 MIN_TOPIC_LEN = 12          # a short name is easy to guess (and to read along with)
 PRIORITIES = {"min": 1, "low": 2, "default": 3, "high": 4, "urgent": 5, "max": 5}
@@ -147,15 +148,16 @@ def compose(title: str, who=None) -> str:
     return f"{title} · {line}" if line and title else (title or line)
 
 
-def topic_problem(topic: str, also_forbidden: Iterable[str] = ()) -> str:
-    """"" for a topic sizeup may publish to, else why not."""
+def topic_problem(topic: str, protected: Iterable[str] = ()) -> str:
+    """"" for a topic sizeup may publish to, else why not. protected: the topics it never publishes to (the ones it
+    subscribes to, and any an admin added), by whole name, case aside."""
     t = (topic or "").strip()
     if not TOPIC.fullmatch(t):
         return "an ntfy topic name: letters, digits, - and _ (at most 64)"
-    banned = {x.lower() for x in FORBIDDEN} | {str(x).strip().lower() for x in also_forbidden if str(x).strip()}
+    banned = {str(x).strip().lower() for x in protected if str(x).strip()}
     if t.lower() in banned:
-        return (f"{t!r} is Tapout's topic (it pages the fire crew / reports Tapout's health): never publish there; "
-                "choose a new, long random topic of our own")
+        return ("that is a protected topic (one sizeup subscribes to, or that Settings lists as protected): never "
+                "publish there; choose a new, long random topic of our own")
     if len(t) < MIN_TOPIC_LEN:
         return f"at least {MIN_TOPIC_LEN} characters: ntfy topics are public by name, so make it long and random"
     return ""
@@ -187,11 +189,12 @@ def _priority(p) -> int:
 
 
 def publish(server: str, topic: str, title: str, body: str, priority: int | str = 3,
-            tags: Iterable[str] = (), click: str = "", timeout: float = TIMEOUT_S, who=None) -> dict:
+            tags: Iterable[str] = (), click: str = "", timeout: float = TIMEOUT_S, who=None,
+            protected: Iterable[str] = ()) -> dict:
     """One message to ntfy: its answer ({id, time, ...}). NotifyError when it can't be sent or was refused.
-    who: a Who / dict: rendered into the title (compose())."""
+    who: a Who / dict: rendered into the title (compose()). protected: topics refused by whole name (Pushes.protected())."""
     server = (server or DEFAULT_SERVER).rstrip("/")
-    why = server_problem(server) or topic_problem(topic)
+    why = server_problem(server) or topic_problem(topic, protected)
     if why:
         raise NotifyError(why)
     title = compose(str(title), who)
@@ -227,10 +230,12 @@ class Notifier:
     enabled False) without a topic. A message that can't go after a few tries is logged and dropped."""
 
     def __init__(self, server: str, topic: str, log: Callable[[str], None] = print,
-                 sleep: Callable[[float], None] = time.sleep, retries: tuple[float, ...] = RETRIES):
+                 sleep: Callable[[float], None] = time.sleep, retries: tuple[float, ...] = RETRIES,
+                 protected: Callable[[], Iterable[str]] | None = None):
         self.server, self.topic, self.log = (server or DEFAULT_SERVER).rstrip("/"), (topic or "").strip(), log
         self.sleep, self.retries = sleep, retries
-        why = (server_problem(self.server) or topic_problem(self.topic)) if self.topic else ""
+        self.protected = protected or (lambda: ())      # asked again at every request: Settings can add to it any time
+        why = (server_problem(self.server) or topic_problem(self.topic, self._protected())) if self.topic else ""
         if why:
             log(f"notify: off: {why}")
             self.topic = ""
@@ -240,6 +245,12 @@ class Notifier:
         self._q: queue.Queue = queue.Queue(maxsize=200)
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
+
+    def _protected(self) -> tuple[str, ...]:
+        try:
+            return tuple(self.protected())
+        except Exception:  # noqa: BLE001 - can't tell what is protected: publish nowhere (a caller's refusal below)
+            return ("\0",)
 
     @property
     def enabled(self) -> bool:
@@ -284,6 +295,9 @@ class Notifier:
     def _deliver(self, title, body, priority, tags, click, who=None) -> None:
         for attempt in range(len(self.retries) + 1):
             try:
+                prot = self._protected()
+                if prot == ("\0",) or topic_problem(self.topic, prot):    # protected since this Notifier was made
+                    raise NotifyError("not sent: a protected topic (one sizeup subscribes to)")
                 publish(self.server, self.topic, title, body, priority, tags, click, who=who)
                 self.sent += 1
                 self.last_error = ""
@@ -308,6 +322,9 @@ class Notifier:
 # effect on the next push, no restart. Never in the settings export (a topic's name is its only secret).
 
 SECTION = "notify"
+# More keys of the section (the names stay in the DB, never in the repo): the Tapout pre-alert feed's topics, which the app
+# subscribes to (sizeup/prealert.py; an env var overrides), and the extra topics never published to ({"topics": [...]}).
+PREALERT_RING, PREALERT_STATUS, PROTECTED = "prealert_ring", "prealert_status", "protected"
 LABELS = {ALERTS: "Alerts topic", STATUS: "Status & health topic", INTEL: "Pre-alerts (intel) topic"}
 SOURCES = {"settings": "Settings", "ssm": "SSM", "env": "environment", "config": "config file", "default": "default",
            "fallback": "shared", "off": "turned off in Settings", "none": "not set"}
@@ -373,12 +390,14 @@ class KindNotifier:
 class Pushes:
     """Where each kind of push goes now, and the Notifiers that send them: one per (server, topic), so kinds that
     share a topic share its queue, in order. defaults: the config's topics with where each came from ("ssm",
-    "env", "config"); settings(): the CAD settings' SECTION ({} without); also_forbidden: the configured
-    [prealert] topics (refused by exact name like Tapout's)."""
+    "env", "config"); settings(): the CAD settings' SECTION ({} without); also_forbidden: topics refused by exact
+    name; prealert: {"ring": (topic, source), "status": ...}, the config's topics for the pre-alert feed (subscribed to,
+    so refused too). Settings' own pre-alert topics and its list of protected topics are refused as well (protected())."""
 
     def __init__(self, server: str = DEFAULT_SERVER, alert_topic: str = "", status_topic: str = "",
                  sources: dict | None = None, server_source: str = "default", settings: Callable[[], dict] | None = None,
-                 also_forbidden: Iterable[str] = (), log: Callable[[str], None] = print, intel_topic: str = "", **kw):
+                 also_forbidden: Iterable[str] = (), log: Callable[[str], None] = print, intel_topic: str = "",
+                 prealert: dict | None = None, **kw):
         src = sources or {}
         self.defaults = {ALERTS: ((alert_topic or "").strip(), src.get(ALERTS) or "config"),
                          STATUS: ((status_topic or "").strip(), src.get(STATUS) or "config"),
@@ -386,6 +405,9 @@ class Pushes:
         self.default_server = ((server or DEFAULT_SERVER).rstrip("/"), server_source)
         self.settings = settings or (lambda: {})
         self.also_forbidden = tuple(str(x) for x in also_forbidden if str(x).strip())
+        pa = prealert or {}      # the config's pre-alert topics: {"ring": (topic, source), "status": (topic, source)}
+        self.prealert_defaults = {k: ((pa.get(k) or ("", ""))[0].strip(), (pa.get(k) or ("", ""))[1] or "config")
+                                  for k in ("ring", "status")}
         self.log, self.kw = log, kw
         self.publish = publish                    # the test push (tests: a fake)
         self.tests: dict[str, dict] = {}          # kind -> the last test push {at, ok, error}
@@ -405,8 +427,61 @@ class Pushes:
             d = {}
         return d if isinstance(d, dict) else {}
 
-    def problem(self, topic: str) -> str:
-        return topic_problem(topic, self.also_forbidden)
+    def protected(self, ov: dict | None = None) -> tuple[str, ...]:
+        """Every topic never published to: the ones subscribed to (config, env, Settings' pre-alert topics) and the extra
+        ones listed in Settings. Derived at every call: nothing static."""
+        ov = self._ov() if ov is None else ov
+        out = list(self.also_forbidden) + [t for t, _ in self.prealert_defaults.values()]
+        for k in (PREALERT_RING, PREALERT_STATUS):
+            v = ov.get(k)
+            if isinstance(v, dict) and v.get("topic"):
+                out.append(str(v["topic"]))
+        v = ov.get(PROTECTED)
+        if isinstance(v, dict) and isinstance(v.get("topics"), list):
+            out += [str(x) for x in v["topics"]]
+        return tuple(x.strip() for x in out if x and x.strip())
+
+    def prealert_topics(self, ov: dict | None = None) -> dict:
+        """The topics sizeup SUBSCRIBES to for Tapout's pre-alert feed: {"ring": {topic, source}, "status": {...}}, source
+        env | settings | config | none. The env var (SIZEUP_PREALERT_*_TOPIC) wins over Settings, which wins over the config
+        file; none set: "" (the feed is off, Health says "not configured")."""
+        ov = self._ov() if ov is None else ov
+        out = {}
+        for k, key in (("ring", PREALERT_RING), ("status", PREALERT_STATUS)):
+            dt, dsrc = self.prealert_defaults[k]
+            v = ov.get(key)
+            mine = str(v.get("topic") or "").strip() if isinstance(v, dict) else ""
+            if dt and dsrc == "env":
+                out[k] = {"topic": dt, "source": "env"}
+            elif isinstance(v, dict) and v.get("off"):
+                out[k] = {"topic": "", "source": "off"}
+            elif mine and TOPIC.fullmatch(mine):
+                out[k] = {"topic": mine, "source": "settings"}
+            elif dt:
+                out[k] = {"topic": dt, "source": dsrc}
+            else:
+                out[k] = {"topic": "", "source": "none"}
+        if out["ring"]["topic"] and out["ring"]["topic"].lower() == out["status"]["topic"].lower():
+            out["status"] = {"topic": "", "source": "none"}      # one name for both: only the ring one is read
+        return out
+
+    def prealert_page(self, ov: dict | None = None) -> dict:
+        """Settings > System > Push notifications, the pre-alert topics (admins: the names): in effect, from where, and
+        what Settings holds."""
+        ov = self._ov() if ov is None else ov
+        eff = self.prealert_topics(ov)
+        out = {}
+        for k, key in (("ring", PREALERT_RING), ("status", PREALERT_STATUS)):
+            v = ov.get(key) if isinstance(ov.get(key), dict) else {}
+            dt, dsrc = self.prealert_defaults[k]
+            out[k] = {"topic": eff[k]["topic"], "source": eff[k]["source"],
+                      "source_text": SOURCES.get(eff[k]["source"], eff[k]["source"]),
+                      "settings": str(v.get("topic") or ""), "off": bool(v.get("off")),
+                      "default": {"topic": dt, "source_text": SOURCES.get(dsrc if dt else "none")}}
+        return out
+
+    def problem(self, topic: str, ov: dict | None = None) -> str:
+        return topic_problem(topic, self.protected(ov))
 
     def server(self, ov: dict | None = None) -> tuple[str, str]:
         """(the ntfy server, where it came from)."""
@@ -421,10 +496,10 @@ class Pushes:
             if v.get("off"):
                 return "", "off"
             t = str(v.get("topic") or "").strip()
-            if t and not self.problem(t):
+            if t and not self.problem(t, ov):
                 return t, "settings"
         t, src = self.defaults[kind]
-        return (t, src) if t and not self.problem(t) else ("", "none")
+        return (t, src) if t and not self.problem(t, ov) else ("", "none")
 
     def effective(self, kind: str, ov: dict | None = None) -> dict:
         """{topic ("" = no push), source: settings | ssm | env | config | fallback (the other kind's) | off | none}.
@@ -480,7 +555,7 @@ class Pushes:
         with self._lock:
             n = self._made.get((server, topic, ln))
             if n is None:
-                n = self._made[(server, topic, ln)] = Notifier(server, topic, self.log, **self.kw)
+                n = self._made[(server, topic, ln)] = Notifier(server, topic, self.log, protected=self.protected, **self.kw)
             return n
 
     def made(self, ln: str | None = None) -> list[Notifier]:
@@ -493,6 +568,8 @@ class Pushes:
         if not e["topic"]:
             raise NotifyError(f"no {kind} topic in effect ({SOURCES[e['source']]}): nothing to test")
         srv = self.server()[0]
+        if self.problem(e["topic"]):
+            raise NotifyError(f"no {kind} topic in effect: {self.problem(e['topic'])}")
         out = {"at": time.time(), "ok": True, "error": "", "source": e["source"]}
         try:
             self.publish(srv, e["topic"], TEST_TITLE.format(kind=kind),
@@ -524,5 +601,7 @@ class Pushes:
                           "test": self.tests.get(k)})
         return {"kinds": kinds, "server": {"value": srv, "source": ssrc, "settings": str(ov.get("server") or ""),
                                            "default": self.default_server[0]},
-                "forbidden": sorted(FORBIDDEN | set(self.also_forbidden)), "min_len": MIN_TOPIC_LEN, "max_len": 64,
+                "protected": {"listed": list(((ov.get(PROTECTED) or {}).get("topics")) or []) if isinstance(ov.get(PROTECTED), dict) else [],
+                              "count": len(set(x.lower() for x in self.protected(ov)))},
+                "prealert": self.prealert_page(ov), "min_len": MIN_TOPIC_LEN, "max_len": 64,
                 "line": self.line()}

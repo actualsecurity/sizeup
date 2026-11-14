@@ -296,7 +296,8 @@ def status_topic(config: str = "", env: dict | None = None) -> tuple[str, str, t
             pre = data.get("prealert") if isinstance(data.get("prealert"), dict) else {}
         except (OSError, ValueError):
             pass
-    forbid = tuple(str(pre.get(k) or "") for k in ("ring_topic", "status_topic") if pre.get(k))
+    forbid = tuple(x for x in (env.get("SIZEUP_PREALERT_RING_TOPIC") or str(pre.get("ring_topic") or ""),
+                               env.get("SIZEUP_PREALERT_STATUS_TOPIC") or str(pre.get("status_topic") or "")) if x.strip())
     alert = (env.get("SIZEUP_ALERT_TOPIC") or str(al.get("ntfy_topic") or "")).strip()
     status = (env.get("SIZEUP_STATUS_TOPIC") or str(al.get("status_topic") or "")).strip()
     server = (env.get("SIZEUP_ALERT_SERVER") or str(al.get("ntfy_server") or "") or notify.DEFAULT_SERVER).strip()

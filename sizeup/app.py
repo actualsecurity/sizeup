@@ -756,8 +756,13 @@ class App:
         self.weather.speaker = self._weather_voice
         if cfg.prealert_enabled:
             from sizeup.prealert import PreAlerts
-            self.prealert = PreAlerts(self.cad, cfg.prealert_server, cfg.prealert_ring_topic, cfg.prealert_status_topic,
-                                      cfg.prealert_expire_min, cfg.prealert_heartbeat_stale_min, log=log)
+            # the topics: env over Settings (the DB) over the config file (Pushes.prealert_topics); none set: the feed is off
+            def _pa_topics():
+                p = getattr(self, "pushes", None)          # built just below: no topic until then
+                t = p.prealert_topics() if p is not None else {"ring": {"topic": ""}, "status": {"topic": ""}}
+                return t["ring"]["topic"], t["status"]["topic"]
+            self.prealert = PreAlerts(self.cad, cfg.prealert_server, "", "", cfg.prealert_expire_min,
+                                      cfg.prealert_heartbeat_stale_min, log=log, topics=_pa_topics)
             self.prealert_sync()
         # Pushes (sizeup/notify.py Pushes, [alerts]): our own ntfy topics by kind: the emergency alarms
         # (sizeup/cad/alarms.py, #128, aircraft squawks too) to the alerts topic; station health and Amazon
@@ -775,7 +780,9 @@ class App:
             intel_topic=cfg.alerts_intel_topic,
             server_source=src(cfg.alerts_ntfy_server_source) if cfg.alerts_ntfy_server_source != "default" else "default",
             settings=lambda: self.cad.settings.section(notify.SECTION),
-            also_forbidden=(cfg.prealert_ring_topic, cfg.prealert_status_topic), log=log)
+            also_forbidden=(cfg.prealert_ring_topic, cfg.prealert_status_topic),
+            prealert={"ring": (cfg.prealert_ring_topic, cfg.prealert_ring_source),
+                      "status": (cfg.prealert_status_topic, cfg.prealert_status_source)}, log=log)
         self.cad.pushes = self.pushes
         self.cad.alarms.notifier = self.pushes.notifier(notify.ALERTS)
         # Radio pre-alerts (sizeup/intel, #411): pushed on the INTEL kind (no topic of its own: the alerts topic), by the

@@ -20,7 +20,7 @@ from sizeup.radio.fm import RATE, Channel, Segment
 from sizeup.radio.tones import ToneCode, base_name
 from tests.test_app import FakeWhisper, cfg, tone, voice, wait
 from tests.test_cad import make_cad
-from tests.test_roles import COREY, JULIAN, VAL, call, people
+from tests.test_roles import CASEY, JORDAN, VAL, call, people
 from tests.test_tone_settings import page_row
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -190,14 +190,14 @@ def test_viewers_and_dispatchers_read_admins_edit(tmp_path):
     api.cad.log = lambda m: None
     people(api.cad)
     body = {"action": "set", "a_hz": 788.5, "b_hz": 953.7, "places": ["Harrison"], "service": "ems", "role": "Rescue"}
-    for who in (VAL, JULIAN):
+    for who in (VAL, JORDAN):
         for b in (body, {"action": "merge", "key": "harrison|ems", "into": {"places": ["Rye"], "service": "ems"}},
                   {"action": "entity", "key": "harrison|ems", "ours": True}):
             code_, out = call(api, "/api/cad/settings/tones", b, who)
             assert code_ == 403 and "Admins only" in out["error"]
         code_, raw, _ = api.get("/api/cad/settings", "", Identity(email=who))
         assert code_ == 200 and "entities" in json.loads(raw)["tones"]
-    assert call(api, "/api/cad/settings/tones", body, COREY)[0] == 200
+    assert call(api, "/api/cad/settings/tones", body, CASEY)[0] == 200
     assert api.cad.settings.tone_overrides()["788.5/953.7"] == {"places": ["Harrison"], "service": "ems", "a_hz": 788.5,
                                                                "b_hz": 953.7, "role": "Rescue"}
 

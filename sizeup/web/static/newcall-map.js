@@ -1,7 +1,7 @@
 // The new call's map (GitHub #204): a big map on the right of the New incident form that plots the location while the
 // call is being taken, before it is created.
 //
-// Julian (a dispatcher), relayed 2026-11-02: "personally, I like a big map. So when im talking to someone, i can look at
+// A dispatcher, relayed 2026-11-02: "personally, I like a big map. So when im talking to someone, i can look at
 // the location it plots on while im typing in the call to verify where it is or do a better pick ... I can look around
 // for other addresses or cross streets that may be better. So i like having a map on the right side thats big".
 //
