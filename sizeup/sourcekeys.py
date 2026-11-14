@@ -36,7 +36,8 @@ TG_KEY = re.compile(r"tg:(?P<tg>\d{1,9})")
 SERVICE_WORDS = (("police", {"police", "pd", "law", "sheriff", "wcpd", "mtapd", "nysp", "le"}),
                  ("fire", {"fire", "hazmat"}),
                  ("ems", {"ems", "hospital", "medic", "medics", "ambulance"}),
-                 ("transit", {"transit", "railroad", "rail", "mta", "dot", "bus", "metro-north", "mnr"}),
+                 ("transit", {"transit", "paratransit", "railroad", "rail", "mta", "dot", "bus", "buses", "bee-line", "beeline",
+                              "metro-north", "mnr"}),
                  ("air", {"airband", "atc", "aviation"}))
 OURS_SYSTEMS = ("", COUNTY, "analog", "airband")      # the systems whose rows are not "context"
 RESERVED_SYSTEMS = tuple(x for x in OURS_SYSTEMS if x)  # never another P25 system's name (systems.discover refuses it)

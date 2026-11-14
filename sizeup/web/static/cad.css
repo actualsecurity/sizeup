@@ -265,6 +265,10 @@
   .og.emergency.em-other > .og-head { box-shadow: none; }
   /* a flag that turned out stuck (#190): still said, quieter than an emergency */
   .chip.emergency.em-other.em-stuck { color: var(--text-2); background: transparent; border-style: dashed; letter-spacing: normal; }
+  /* someone else's emergency on a service Settings > Radios > Emergencies doesn't list (a bus, DOT): "EM", muted, the
+     detail in its hover; nothing marks the row or the talkgroup. Kept for its window: a dot (cad.js emLoud) */
+  .chip.em-quiet { color: var(--text-2); background: transparent; border-color: var(--line); cursor: help; }
+  .em-dot { color: var(--text-2); cursor: help; }
   .og-flags { display: inline-flex; flex-wrap: wrap; align-items: center; gap: var(--s-1); min-inline-size: 0; }
   #rv-other-em { margin-inline-start: var(--s-2); }
   .feed-list > li.skipped.names-ours { margin-inline-end: 0; }

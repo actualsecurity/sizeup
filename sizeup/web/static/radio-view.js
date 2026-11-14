@@ -253,6 +253,8 @@ window.RadioView = (() => {
       const em = g.calls.filter(isEm);
       g.emergency = !em.length ? "" : em.some((t) => t.alarm_level === "alarm") ? "ours" : "other";
       g.stuck = g.emergency === "other" ? ((em.find((t) => t.alarm_stuck) || {}).alarm_stuck || "") : "";
+      // someone else's on a service that doesn't stand out (cad.js emLoud: a bus, DOT): a muted EM, not moved up
+      g.quiet = g.emergency === "other" && typeof emLoud === "function" && !em.some(emLoud);
       if (g.emergency === "ours") {                 // the snippet: our emergency, not whatever came last
         const e = em[0];
         g.snippet = `${e.rig || e.talker || e.radio_id || "Radio"}: ${e.text || "emergency button, no speech"}`;
@@ -260,8 +262,9 @@ window.RadioView = (() => {
       }
       const w = g.tg !== null && g.tg !== undefined ? wins.find((x) => x.talkgroup === g.tg) : null;
       g.until = w ? w.until : null;
+      if (g.until && !g.emergency && typeof emLoud === "function" && !g.calls.some(emLoud)) g.quiet = true;
     }
-    const rank = (g) => (g.emergency === "ours" ? 2 : g.emergency || g.until ? 1 : 0);
+    const rank = (g) => (g.emergency === "ours" ? 2 : g.quiet ? 0 : g.emergency || g.until ? 1 : 0);
     return groups.sort((a, b) => (rank(b) - rank(a)) || (b.last - a.last));
   }
   const emText = (g) => (g.emergency === "ours" ? "EMERGENCY" : g.stuck ? `Emergency flag stuck on ${g.stuck}` : "Emergency (not ours)");
@@ -303,7 +306,7 @@ window.RadioView = (() => {
     sec.classList.toggle("open", open);
     tog.setAttribute("aria-expanded", String(open));
     setText($("#rv-other-sum"), rest.length ? `${rest.length} TX, ${groups.length} TG${groups.length === 1 ? "" : "s"}` : "None");
-    const emg = groups.filter((g) => g.emergency);       // the whole section folded: its head says so too
+    const emg = groups.filter((g) => g.emergency && !g.quiet);   // the whole section folded: its head says so too
     const badge = $("#rv-other-em");
     if (badge) {
       show(badge, emg.length > 0);
@@ -315,7 +318,7 @@ window.RadioView = (() => {
     const few = groups.length <= 2 && active();    // filtered down to a talkgroup or two: open them
     syncList(box, groups, {
       key: (g) => g.key,
-      sig: (g) => JSON.stringify([groupOpen(g, few), g.name, g.calls.length, g.last, g.snippet, g.emergency, g.stuck, g.until,
+      sig: (g) => JSON.stringify([groupOpen(g, few), g.name, g.calls.length, g.last, g.snippet, g.emergency, g.stuck, g.quiet, g.until,
                                   groupOpen(g, few) ? g.calls.map(rowSig) : 0, g.calls.map((t) => t.id)]),
       make: () => {
         const li = el("li", "og");
@@ -331,15 +334,20 @@ window.RadioView = (() => {
         const [head, calls] = li.children;
         const [caret, name, num, flags, last, snip] = head.children;
         const fl = [];
-        if (g.emergency) fl.push(el("span", `chip emergency${g.emergency === "ours" ? "" : " em-other"}${g.stuck ? " em-stuck" : ""}`, emText(g)));
+        if (g.quiet && g.emergency) {
+          const q = el("span", "chip em-quiet", "EM");
+          q.title = emText(g);
+          fl.push(q);
+        } else if (g.emergency) fl.push(el("span", `chip emergency${g.emergency === "ours" ? "" : " em-other"}${g.stuck ? " em-stuck" : ""}`, emText(g)));
         if (g.until) {
-          const u = el("span", "chip kept", `Recording until ${fmtTime(g.until)} (emergency)`);
-          u.title = "The emergency window: everything on this talkgroup is kept until then, even with Record off "
+          const u = g.quiet ? el("span", "em-dot", "•") : el("span", "chip kept", `Recording until ${fmtTime(g.until)} (emergency)`);
+          u.title = (g.quiet ? `Recording until ${fmtTime(g.until)} (emergency). ` : "")
+            + "The emergency window: everything on this talkgroup is kept until then, even with Record off "
             + "(the alarm's All clear ends it)";
           fl.push(u);
         }
         flags.replaceChildren(...fl);
-        li.className = (isOpen ? "og open" : "og") + (g.emergency ? ` emergency em-${g.emergency}` : "");
+        li.className = (isOpen ? "og open" : "og") + (g.emergency && !g.quiet ? ` emergency em-${g.emergency}` : "");
         head.setAttribute("aria-expanded", String(isOpen));
         setText(caret, isOpen ? "▾" : "▸");
         setText(name, g.name);

@@ -34,7 +34,7 @@ const S_STATION_TABS = [["health", "Health"], ["logs", "Logs"], ["link", "Hub li
 // Settings > Radios, one tab per part (#115; the Lists page's tabs): which RadioControls card, the Tones page and the
 // Radio IDs editor each go under (data-rtab on each).
 const S_RADIO_TABS = [["receivers", "Receivers"], ["channels", "Channels"], ["squelch", "Squelch"], ["tones", "Tones"],
-  ["ids", "Radio IDs"], ["vocabulary", "Vocabulary"], ["stt", "Speech-to-text"]];
+  ["ids", "Radio IDs"], ["vocabulary", "Vocabulary"], ["stt", "Speech-to-text"], ["emergencies", "Emergencies"]];
 const S_RC_TABS = new Set(["receivers", "channels", "vocabulary", "stt"]);    // radio-controls.js's cards
 const S_TONE_TYPES = [["fire", "Fire"], ["ems", "EMS"], ["police", "Police"], ["other", "Other"]];   // the services (#122)
 const S_LISTS = [["event_types", "Event types"], ["event_subtypes", "Event subtypes"], ["type_subtypes", "Subtypes per type"],
@@ -269,6 +269,37 @@ function sRadioTab() {
 function sRadios() {
   const box = $("#settings-tones");
   if (box && S.rtab === "tones") box.replaceChildren(...sTonePage(S.data.tones));
+  const em = $("#settings-emergencies");
+  if (em && S.rtab === "emergencies" && S.data.radio_emergencies) em.replaceChildren(sEmergencies(S.data.radio_emergencies));
+}
+
+// Settings > Radios > Emergencies: whose emergencies (not ours) stand out on the Radio page: a banner over the list,
+// the row marked, the full chip. Any other service's: a muted EM chip only. Presentation only. Admins, audited.
+const S_EM_LABELS = { fire: "Fire", ems: "EMS", police: "Police", transit: "Transit", air: "Air", other: "Other" };
+function sEmergencies(e) {
+  const card = sCard(sCardHead("Emergencies", "", sHelp("Someone else's emergency button on these services stands out on the "
+    + "Radio page (a banner over the list, the row marked). On any other service (a bus, DOT): a muted EM chip, its "
+    + "detail in the hover. Ours (our fire channels, our rigs, scene safety) and a channel with no known service always "
+    + "stand out. What is recorded, kept, "
+    + "alarmed and pushed doesn't change.")));
+  card.id = "s-radio-emergencies";
+  const row = el("div", "row");
+  row.append(el("span", "s-eta-l", "Prominent"));
+  for (const k of e.choices) {
+    const [lab, cb] = sCheck(S_EM_LABELS[k] || k, e.prominent.includes(k));
+    cb.disabled = !canDo("admin");
+    cb.addEventListener("change", () => {
+      const v = e.choices.filter((x) => (x === k ? cb.checked : e.prominent.includes(x)));
+      sPost("radio_emergencies", { action: "set", key: "prominent", value: v },
+        `Prominent emergencies: ${v.map((x) => S_EM_LABELS[x] || x).join(", ") || "none"}`);
+    });
+    row.append(lab);
+  }
+  row.append(sState(e.edited ? "edited" : "default"), el("span", "spacer"));
+  if (e.edited && canDo("admin")) row.append(sBtn("Reset", `Default: ${e.default.map((x) => S_EM_LABELS[x] || x).join(", ")}`,
+    () => sPost("radio_emergencies", { action: "reset", key: "prominent" }, "Prominent emergencies: default")));
+  card.append(row);
+  return card;
 }
 
 const sHz = (v) => (v ? Number(v).toFixed(1) : "—");

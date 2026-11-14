@@ -1557,6 +1557,7 @@ def with_alarms(store, rows: list[dict]) -> list[dict]:
     ack_by / ack_at (seen), clear_by / clear_at (all clear), drill, alarm_stuck (its flag turned out stuck, #190: on
     whom) (ALARM_COLS when none); emergency (0/1) from the row or its alarm; evidence as a dict (None when not kept)."""
     got: dict[str, dict] = {}
+    rig_ours = getattr(store, "rig_ours", None)                # set by Alarms (sizeup/cad/alarms.py)
     tids = [r["id"] for r in rows if r.get("kind", "radio") == "radio"]
     if tids and has_alarms(store):
         cols = {r["name"] for r in store.q("PRAGMA table_info(alarms)")}
@@ -1581,6 +1582,9 @@ def with_alarms(store, rows: list[dict]) -> list[dict]:
                      clear_by=a["clear_by"] or "", clear_at=a["clear_at"], drill=bool(a["drill"]),
                      alarm_stuck=a["stuck"] or "")
         r["emergency"] = int(bool(r.get("emergency")) or bool(a and a["emergency"]))
+        # one of our rigs keyed it (the radio registry): its emergency stands out on any talkgroup (cad.js emLoud),
+        # also a repeat press that has no alarm row of its own
+        r["em_ours"] = bool((r["emergency"] or r.get("kept")) and rig_ours is not None and r.get("rig") and rig_ours(r["rig"]))
         try:
             r["evidence"] = json.loads(r["evidence"]) if r.get("evidence") else None
         except (TypeError, ValueError):
