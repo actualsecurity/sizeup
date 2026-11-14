@@ -491,3 +491,61 @@ def test_the_editor_script_sends_the_engine_and_shows_what_is_kept():
     src = (STATIC / "stt-fix.js").read_text()
     assert "d.prefill" in src and "based_on: first.engine" in src
     assert '"/api/cad/settings/stt_corrections"' in src and "corrected clips kept" in src
+
+
+KEEP_HARNESS = r"""
+const fs = require("fs");
+const made = [];
+const el = (tag, cls, text) => {
+  const n = { tag, cls, textContent: text || "", kids: [], on: {}, attrs: {},
+              append(...k) { this.kids.push(...k); }, setAttribute(k, v) { this.attrs[k] = v; },
+              addEventListener(ev, fn) { this.on[ev] = fn; } };
+  made.push(n);
+  return n;
+};
+const posts = [], asked = [];
+let answer = false;
+const env = {
+  window: {}, el, sCard: (...k) => ({ kids: k }), sCardHead: (t) => t, operator: () => "Sam Sample",
+  api: async (method, path, body) => {
+    if (method === "POST") { posts.push([path, body.value]); return { stt_corrections: { n: 3, reference: 1, keep: body.value, kept: body.value ? 3 : 0, domains: {} } }; }
+    return { n: 3, reference: 1, keep: true, kept: 3, domains: { fire: { n: 3 } } };
+  },
+  UI: { confirm: async (text, o) => { asked.push([text, o.ok]); return answer; }, busy: (p) => p, toast: () => {} },
+};
+new Function(...Object.keys(env), fs.readFileSync(process.argv[2], "utf8"))(...Object.values(env));
+(async () => {
+  env.window.SttFix.card();
+  await new Promise((r) => setTimeout(r, 5));
+  const keep = made.find((n) => n.tag === "input");
+  const info = made.find((n) => n.tag === "span" && /kept/.test(n.textContent));
+  const out = { shown: info.textContent, steps: [] };
+  const flip = async (to, yes) => {
+    answer = yes; keep.checked = to;
+    await keep.on.change();
+    out.steps.push({ checked: keep.checked, posts: posts.length, asked: asked.length });
+  };
+  await flip(false, false);     // off, cancelled: nothing sent, the box back on
+  await flip(false, true);      // off, confirmed: sent
+  await flip(true, false);      // on: never asked
+  out.asked = asked; out.posts = posts;
+  console.log(JSON.stringify(out));
+})();
+"""
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_switching_keep_off_asks_first_and_says_how_many(tmp_path):
+    """Off lets the next prune delete the corrected clips past their retention for good: it asks first, naming how many
+    are kept, and a cancel puts the box back with nothing sent. Switching on never asks."""
+    import subprocess
+    h = tmp_path / "keep.js"
+    h.write_text(KEEP_HARNESS)
+    out = json.loads(subprocess.run([NODE, str(h), str(STATIC / "stt-fix.js")], capture_output=True, text=True,
+                                    check=True, timeout=30).stdout)
+    assert out["shown"].endswith("3 corrected clips kept")
+    assert out["steps"] == [{"checked": True, "posts": 0, "asked": 1},      # cancelled
+                            {"checked": False, "posts": 1, "asked": 2},     # confirmed
+                            {"checked": True, "posts": 2, "asked": 2}]      # on: no question
+    assert out["asked"] == [["Stop keeping 3 corrected clips?", "Stop keeping"]] * 2
+    assert out["posts"] == [["/api/cad/settings/stt_corrections", False], ["/api/cad/settings/stt_corrections", True]]

@@ -200,12 +200,20 @@ window.SttFix = (() => {
     const keepL = el("label", "inline");
     keepL.append(keep, " Keep corrected clips");
     keepL.title = "A corrected transmission and its audio are never pruned (the training set). Off: they go by their channel's retention";
+    let kept = 0;
     const show = (n) => {
+      kept = n.kept || 0;
       const doms = Object.entries(n.domains || {}).map(([k, v]) => `${k} ${v.n}`).join(" · ");
       keep.checked = n.keep !== false;
       info.textContent = `${n.n} · ${n.reference} reference${doms ? ` · ${doms}` : ""} · ${n.kept} corrected clips kept`;
     };
     keep.addEventListener("change", async () => {
+      // off: the next prune deletes the corrected clips past their retention, for good. On needs no asking
+      if (!keep.checked && !(await UI.confirm(`Stop keeping ${kept} corrected clip${kept === 1 ? "" : "s"}?`,
+                                              { ok: "Stop keeping" }))) {
+        keep.checked = true;
+        return;
+      }
       try {
         const out = await UI.busy(api("POST", "/api/cad/settings/stt_corrections",
                                       { action: "set", key: "keep", value: keep.checked, operator: operator() }), keep);
