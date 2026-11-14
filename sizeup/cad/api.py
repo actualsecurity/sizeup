@@ -315,6 +315,7 @@ ADMIN_READS = {
     "/api/cad/perf/profile": "the hub's CPU profile is for admins (Settings > Health)",
     "/api/cad/search.csv": "the search export is for admins",                # #403: many calls at once, off the hub
     "/api/cad/preplan.csv": "the pre-plan export is for admins",              # #456: every Knox box at once
+    "/api/cad/adapter-password": "the station adapter's password is for admins (Settings > Health)",   # server.py
 }
 
 # Who may POST what (enforced only with a verified sign-in, see above): "dispatch" = dispatchers and
@@ -342,6 +343,7 @@ WRITES = (
     (re.compile(r"/api/cad/radios(?:/delete)?"), "admin"),                 # the radio-ID registry
     (DATASOURCE, "admin"),                                                  # a data source's Refresh now (#186)
     (re.compile(r"/api/cad/perf/profile"), "admin"),                        # a CPU profile of the hub (#425, server.py)
+    (re.compile(r"/api/cad/adapter-password"), "admin"),                    # the station adapter's password (server.py)
     (DVR_PIN, "dispatch"),                                                  # keep recording a camera (#277)
     (DVR_CLIP, "dispatch"),                                                 # save a camera clip on an event (#323)
     (ATTACHMENT, "admin"),                                                  # delete an event's attachment (#323)
@@ -572,6 +574,8 @@ DOES = (
                                      _number(c, (o.get("attachment") or {}).get("incident_id")))),
     (DATASOURCE, lambda m, b, o, c: (f"Refreshed data source: {_clip((o.get('source') or {}).get('name') or unquote(m.group(1)), 60)}", "")),
     (re.compile(r"/api/cad/perf/profile"), lambda m, b, o, c: (f"Profiled the hub's CPU ({_clip(b.get('seconds'), 6)} s)", "")),
+    # never the body (it held the password): the version SSM gave, from the answer
+    (re.compile(r"/api/cad/adapter-password"), lambda m, b, o, c: (f"Saved the station adapter password (v{int(o.get('version') or 0)})", "")),
     (re.compile(r"/api/talkgroup"), lambda m, b, o, c: (f"Talkgroup {b.get('tg')}: {_toggles(b) or 'no change'}", "")),
     (re.compile(r"/api/talkgroup-group"), lambda m, b, o, c: (f"Talkgroups {_clip(b.get('group'), 40)}: {_toggles(b) or 'no change'}", "")),
     (re.compile(r"/api/mode"), lambda m, b, o, c: (f"Radio mode: {_clip(b.get('mode'), 30)}" + (f" ({_clip(b['sdr'], 30)})" if b.get("sdr") else ""), "")),

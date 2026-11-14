@@ -4007,6 +4007,15 @@ def start_app(cfg: Config) -> App:
     return app.start()
 
 
+def adapter_password(cfg: Config):
+    """The hub's write-only station adapter password (sizeup/cloud/adapterpass.py), an optional feature: its SSM name
+    and key are looked up in SSM at first use (nothing is asked here); None off the hub."""
+    if cfg.cloud_role != "hub":
+        return None
+    from sizeup.cloud.adapterpass import AdapterPassword
+    return AdapterPassword(log=log)
+
+
 def make_server(app: App, fence=None, listener=None) -> WebServer:
     cfg = app.cfg
     server = WebServer(cfg.host, cfg.port, app.scene(), app.state, app.clip, app.close_incident, app.set_mode,
@@ -4020,7 +4029,8 @@ def make_server(app: App, fence=None, listener=None) -> WebServer:
                        airband_ab=app.airband_ab if cfg.cloud_role != "hub" else None,
                        reception=(app.reception_post, app.reception_sample, app.reception_state),
                        fence=fence, health_fn=lambda: app.health_extra(fence), listener=listener,
-                       perf=getattr(app, "perf", None), clip_context=app.clip_is_context)
+                       perf=getattr(app, "perf", None), clip_context=app.clip_is_context,
+                       adapter_password=adapter_password(cfg))
     # another system's traffic in the shared state only where every reader is verified (#419)
     app.access_enforced = app.cad.comms.context_broadcast = server.access_enforced
 
