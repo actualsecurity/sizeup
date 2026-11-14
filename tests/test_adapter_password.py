@@ -1,4 +1,4 @@
-"""The station adapter's password set from the hub (Settings > Health, sizeup/cloud/adapterpass.py): write-only to SSM,
+"""The station adapter's password set from the hub (Settings > Station > Adapter, sizeup/cloud/adapterpass.py): write-only to SSM,
 admins only, at most one save per 5 min, a confirm while the adapter is stopped on refused log-ons, and the value never
 in a log, the audit, the activity, an answer, an error page or an exception, whatever AWS answers.
 
@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from sizeup import aws
+from sizeup import aws, logscrub
 from sizeup.cad.api import ADMIN_READS, CadApi, needs, summarize
 from sizeup.cloud import adapterpass
 from sizeup.cloud.access import Identity
@@ -83,6 +83,14 @@ class Access:
     def identify(self, headers):
         e = headers.get("X-Test-User")
         return Identity(email=e) if e else None
+
+
+@pytest.fixture(autouse=True)
+def _nothing_registered():
+    """The log scrub's registry is the process's (sizeup/logscrub.py): empty before and after each test here."""
+    logscrub.forget()
+    yield
+    logscrub.forget()
 
 
 @pytest.fixture
@@ -510,4 +518,67 @@ def test_the_card_is_write_only_and_keeps_nothing():
     for bad in ("localStorage", "sessionStorage", "console.", "store("):
         assert bad not in js, bad
     assert "1 log-on attempt on the shared county account" in js       # the warning on screen
-    assert "AdapterPasswordCard.mount(node, perfCard)" in (ROOT / "sizeup" / "web" / "static" / "health.js").read_text()
+    # its own tab, Settings > Station > Adapter (an admin's, on the hub: sStationTabs), not a card under Health
+    static = ROOT / "sizeup" / "web" / "static"
+    settings = (static / "settings.js").read_text()
+    assert '["logs", "Logs"], ["adapter", "Adapter"], ["link", "Hub link"]' in settings
+    assert 'AdapterPasswordCard.mount($("#s-station-adapter"))' in settings
+    assert '<div id="s-station-adapter" class="s-station-part" data-stab="adapter" hidden></div>' in html
+    assert "AdapterPasswordCard" not in (static / "health.js").read_text()
+    tabs = re.search(r"^function sStationTabs\(\) \{(.*?)^\}", settings, re.S | re.M).group(1)
+    assert 'k === "link" ? !sIsHub() : hubAdmin' in tabs               # every tab but Hub link: the hub's admins only
+
+
+def test_a_save_on_a_hub_that_is_no_longer_the_leader_is_a_503_never_a_quiet_ok(hub, capfd):
+    """#509: the lease runs out during the save, so the audit's write is refused (FencedWrite). The answer is the
+    Gate's 503 + Retry-After, nothing is audited here, and the value is still nowhere."""
+    hub.cad.may_write = lambda: False
+    try:
+        code, out, raw = post(hub, {"password": SECRET, "again": SECRET})
+    finally:
+        hub.cad.may_write = lambda: True
+    assert code == 503 and "ok" not in out
+    assert hub.cad.store.q("SELECT 1 FROM settings_audit WHERE key = 'station adapter password'") == []
+    io = capfd.readouterr()
+    assert not leaks(raw, io.out, io.err, *everything(hub))
+
+
+# -- the log scrub (sizeup/logscrub.py, #494) ------------------------------------------------------------------------
+
+def test_a_saved_password_is_registered_with_the_log_scrub(hub, capfd):
+    """A log line that ever holds the value the hub wrote (as typed, JSON-escaped, URL-encoded, base64) is dropped by
+    the scrub: registered before anything is sent, in memory only."""
+    assert logscrub.registered() == (0, 0)
+    line = "feed: log-on refused for {} at the county"
+    assert logscrub.scrub(line.format(SECRET)) is not None             # (unknown so far: only the shapes are redacted)
+    registered_at_put = []
+    send = hub.ap.send
+
+    def watched(url, headers, body, timeout):
+        if headers.get("X-Amz-Target") == "AmazonSSM.PutParameter":
+            registered_at_put.append(logscrub.scrub(line.format(SECRET)) is None)
+        return send(url, headers, body, timeout)
+    hub.ap.send = watched
+    code, _, raw = post(hub, {"password": SECRET, "again": SECRET})
+    assert code == 200 and registered_at_put == [True]
+    import base64
+    import urllib.parse
+    for form in (SECRET, json.dumps(SECRET), urllib.parse.quote(SECRET), base64.b64encode(SECRET.encode()).decode()):
+        assert logscrub.scrub(line.format(form)) is None, "a form of it got through"
+    assert logscrub.scrub("feed: polled, 3 events") == "feed: polled, 3 events"
+    io = capfd.readouterr()
+    assert not leaks(raw, io.out, io.err, *everything(hub))
+
+
+def test_the_log_scrub_knows_a_value_aws_may_have_saved_and_a_short_one_but_not_a_refused_one(hub):
+    hub.ssm.put_answer = (500, b'{"__type":"InternalServerError"}')    # no answer worth the name: it may have saved
+    code, out, _ = post(hub, {"password": SECRET, "again": SECRET})
+    assert code == 502 and out.get("maybe_saved") and logscrub.scrub(f"sent {SECRET} on") is None
+    logscrub.forget()
+    code, _, _ = post(hub, {"password": SECRET, "again": SECRET + "x"})          # they differ: never sent, not kept
+    assert code == 400 and logscrub.registered() == (0, 0)
+    hub.ssm.put_answer = None
+    hub.clock.t += adapterpass.MIN_GAP_S + 1
+    code, _, _ = post(hub, {"password": "Ab1!", "again": "Ab1!"})                 # shorter than the scrub's MIN_SECRET
+    assert code == 200 and logscrub.scrub("log-on with Ab1! refused") is None
+    assert logscrub.scrub("tab1!x is no password") is not None                    # ... as a whole word only

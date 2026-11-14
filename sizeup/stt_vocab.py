@@ -176,3 +176,161 @@ def table(phrases: list[str]) -> str:
         sounds = SOUNDS_LIKE.get(a, "")
         lines.append(f"{a}\t\t{sounds}\t{written}")
     return "\n".join(lines) + "\n"
+
+
+# -- police (another P25 system's PD dispatch: radio-intel PR 3) ------------------------------------------------------
+# A profile per source (data/stt/profiles.json): whisper's prompt and the Amazon Transcribe vocabulary `sizeup-pd`, both
+# apart from the fire ones above. Nothing here names a person: the callsigns are the headquarters' (data/pd_units.json,
+# role "headquarters"), the places come from the gazetteer at runtime (streets as said, public landmarks only), and the
+# phrasing is generic. A police "266" is the Rye PD headquarters' callsign in this namespace only: sizeup-pd's respelling
+# is used on the police sources alone (transcribe.AwsTranscriber.channel_respell), never on fire text, and the fire
+# vocabulary (sizeup-pcfd) is never used on a police source.
+PROFILES_FILE = DATA / "stt" / "profiles.json"
+PD_UNITS_FILE = DATA / "pd_units.json"
+# The APCO-style 10-codes heard on police dispatch, written as said ("10-4" -> "ten-four" on AWS, respelled back).
+TEN_CODES = tuple(f"10-{n}" for n in (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 13, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 26,
+                                      27, 28, 29, 30, 31, 32, 33, 34, 36, 37, 38, 39, 41, 42, 45, 46, 50, 52, 53, 54, 55,
+                                      56, 59, 61, 62, 65, 66, 70, 71, 73, 75, 77, 80, 84, 85, 90, 97, 98, 99))
+POLICE_PHRASING = ("respond to", "en route", "on scene", "in the area", "be advised", "all units", "any unit",
+                   "headquarters", "dispatch", "complainant", "caller states", "suspect", "vehicle", "plate",
+                   "registration", "license", "warrant", "domestic", "disturbance", "aided case", "motor vehicle accident",
+                   "M.V.A.", "E.D.P.", "shots fired", "pursuit", "back up", "cover car", "sector", "patrol",
+                   "negative", "affirmative", "disregard", "copy", "stand by", "in custody", "transport")
+POLICE_PLACES = ("Village of Port Chester", "City of Rye", "Village of Rye Brook", "Town of Rye", "Harrison",
+                 "Greenwich", "Byram", "Mamaroneck", "Purchase", "Westchester County")
+# Gazetteer landmark categories that are public places (the rest, e.g. offices, small shops, a historic house or a small
+# congregation, may carry a person's name). Never a firehouse: its name ("... Engine & Hose ...") is the fire namespace's.
+PUBLIC_LANDMARKS = re.compile(r"^(?:school|park|police|library|post_office|cemetery|municipal"
+                              r"|amenity=(?:school|library|townhall|courthouse|community_centre"
+                              r"|theatre|cinema|grave_yard|public_building)|leisure=(?:park|golf_course|marina|stadium"
+                              r"|nature_reserve)|shop=(?:mall|shopping_center|supermarket|department_store)"
+                              r"|tourism=(?:attraction|hotel|museum)"
+                              r"|historic=(?:memorial|monument|district|battlefield|fort|ruins|milestone))$")
+# A place named for a person's home ("<name> House", "... Homestead"): left out whatever its category.
+PERSON_PLACE = re.compile(r"\b(?:house|homestead|residence|mansion|estate)\b", re.I)
+FIRE_WORDS = re.compile(r"\b(?:fire|engine|ladder|hose|hook|rescue|firehouse)\b", re.I)
+LANDMARK_WORDS = 6               # a landmark name longer than this many words isn't said on the air as written
+
+
+def profiles(path: Path | None = None) -> dict:
+    import json
+    p = path or PROFILES_FILE
+    try:
+        d = json.loads(p.read_text())
+    except (OSError, ValueError):
+        return {"profiles": {}, "sources": {}, "services": {}}
+    return {k: d.get(k) if isinstance(d.get(k), dict) else {} for k in ("profiles", "sources", "services")}
+
+
+def profile(source_key: str = "", service: str = "", path: Path | None = None) -> dict | None:
+    """A source's speech-to-text profile (data/stt/profiles.json): by its source key, else its service; None for none.
+    The profile as written, with "name"."""
+    d = profiles(path)
+    name = d["sources"].get(str(source_key or "")) or d["services"].get(str(service or "").lower())
+    prof = d["profiles"].get(name) if name else None
+    return dict(prof, name=name) if isinstance(prof, dict) else None
+
+
+def vocabulary_sources(name: str, path: Path | None = None) -> list[str]:
+    """The source keys whose profile streams with this AWS vocabulary (channel_vocabulary on the hub)."""
+    d = profiles(path)
+    return [k for k, prof in d["sources"].items()
+            if isinstance(d["profiles"].get(prof), dict) and d["profiles"][prof].get("vocabulary") == name]
+
+
+def hq_callsigns(data: Path = DATA, service: str = "police") -> list[str]:
+    """The headquarters' callsigns as said ("908", "266", "Headquarters"), from data/pd_units.json (role headquarters)."""
+    import json
+    try:
+        d = json.loads((data / "pd_units.json").read_text())
+    except (OSError, ValueError):
+        return []
+    out = []
+    for sysd in (d.get("systems") or {}).values():
+        for c in (sysd or {}).get("callsigns") or ():
+            if c.get("service") == service and c.get("role") == "headquarters" and c.get("said"):
+                out.append(str(c["said"]))
+    return list(dict.fromkeys(out))
+
+
+def _clean_name(n: str) -> str:
+    return " ".join(re.sub(r"\(.*?\)", "", str(n)).split())
+
+
+def town_streets(towns, gazetteer: Path | None = None, per_town: int | None = None) -> list[str]:
+    """Every street of these towns (addresses or a street line there), as written in the gazetteer, the busiest first;
+    per_town: only that many of each town's busiest, taken in turn (for a short prompt)."""
+    p = gazetteer or (DATA / "gazetteer.sqlite")
+    towns = [str(t) for t in towns]
+    if not p.is_file() or not towns:
+        return []
+    c = sqlite3.connect(f"file:{p}?immutable=1", uri=True)
+    try:
+        q = ",".join("?" * len(towns))
+        rows = c.execute(f"SELECT s.name, x.muni, SUM(x.n) AS n FROM streets s JOIN ("
+                         f"SELECT street_id, muni, COUNT(*) AS n FROM addresses WHERE muni IN ({q}) GROUP BY street_id, muni "
+                         f"UNION ALL SELECT street_id, muni, 0 FROM lines WHERE muni IN ({q}) GROUP BY street_id, muni"
+                         f") x ON x.street_id = s.id GROUP BY s.id, x.muni ORDER BY n DESC, s.name", (*towns, *towns)).fetchall()
+    finally:
+        c.close()
+    if per_town is None:
+        return list(dict.fromkeys(n for n in (_clean_name(r[0]) for r in rows) if n))
+    by: dict[str, list[str]] = {t: [] for t in towns}
+    for name, muni, _n in rows:
+        name = _clean_name(name)
+        if name and name not in by[muni] and len(by[muni]) < per_town:
+            by[muni].append(name)
+    out: list[str] = []
+    for i in range(per_town):
+        for t in towns:
+            if i < len(by[t]):
+                out.append(by[t][i])
+    return list(dict.fromkeys(out))
+
+
+def town_landmarks(towns, gazetteer: Path | None = None) -> list[str]:
+    """The gazetteer's public landmarks in these towns (PUBLIC_LANDMARKS: schools, parks, places of worship, town halls,
+    malls ...), by name and alias, as said."""
+    p = gazetteer or (DATA / "gazetteer.sqlite")
+    towns = [str(t) for t in towns]
+    if not p.is_file() or not towns:
+        return []
+    c = sqlite3.connect(f"file:{p}?immutable=1", uri=True)
+    try:
+        rows = c.execute(f"SELECT name, aliases, category FROM landmarks WHERE muni IN ({','.join('?' * len(towns))}) "
+                         "ORDER BY name", towns).fetchall()
+    finally:
+        c.close()
+    out = []
+    for name, aliases, cat in rows:
+        if (not PUBLIC_LANDMARKS.match(str(cat or "")) or FIRE_WORDS.search(f"{name} {aliases}")
+                or PERSON_PLACE.search(f"{name} {aliases}")):
+            continue
+        for n in [name, *str(aliases or "").split("|")]:
+            n = _clean_name(n)
+            if n and len(n.split()) <= LANDMARK_WORDS:
+                out.append(n)
+    return list(dict.fromkeys(out))
+
+
+def police_phrases(towns=("Port Chester", "Rye", "Rye Brook"), data: Path = DATA,
+                   gazetteer: Path | None = None) -> list[str]:
+    """The sizeup-pd vocabulary as written, in priority order (the push keeps the first transcribe.MAX_PHRASES within
+    AWS's 50 KB): the headquarters' callsigns, the 10-codes, police phrasing, the towns, every street of the towns as
+    said (transcribe.street_spoken), their public landmarks. No fire callsign, no person."""
+    from sizeup.transcribe import street_spoken
+    out = [*hq_callsigns(data), *TEN_CODES, *POLICE_PHRASING, *(str(t) for t in towns), *POLICE_PLACES,
+           *(street_spoken(s) for s in town_streets(towns, gazetteer)), *town_landmarks(towns, gazetteer)]
+    return list(dict.fromkeys(" ".join(p.split()) for p in out if p and p.strip()))
+
+
+def police_prompt(prof: dict, data: Path = DATA, gazetteer: Path | None = None) -> str:
+    """whisper's prompt for a police source: the profile's phrasing, the headquarters' callsigns, the towns and the
+    busiest prompt_streets streets of the towns as said. Never a talker's or a person's name (no talker_prompt)."""
+    from sizeup.transcribe import street_spoken
+    towns = [str(t) for t in prof.get("towns") or ()]
+    n = int(prof.get("prompt_streets") or 0)
+    per = -(-n // len(towns)) if towns and n > 0 else 0
+    streets = [street_spoken(s) for s in town_streets(towns, gazetteer, per_town=per)][:n] if per else []
+    parts = [str(prof.get("prompt") or "").strip(), ", ".join(hq_callsigns(data)), ", ".join(towns), ", ".join(streets)]
+    return " ".join(p if p.endswith(".") else p + "." for p in parts if p)

@@ -30,8 +30,15 @@ from its own config's defaults, so the map the hub sends has the hub's record_on
 (for_station(): {"transcribe": false} unless Settings says otherwise): a plain choice that any station
 applies, one from before record_only included.
 
+Squelch (Settings > Radios > Squelch): an FM channel's noise squelch, open_db / close_db (quieting under the idle
+hiss) and min_open_s (carrier shorter than this: nothing kept, never "talking"; sizeup/radio/fm.py). Its own
+section ("squelch", key the channel's label, value only what differs from the receiver's default), audited, and
+sent to the station with the channel choices (set_channel_prefs' squelch, in the same signature), applied live.
+
 An "aws" or "both" channel uses the local model whenever AWS can't take audio (no AWS here or on the
-hub, no credentials, the monthly limit reached): effective().
+hub, no credentials, the monthly limit reached): effective(). Another P25 system's talkgroup ("p25:mrrs:9211", police
+dispatch: AWS by default, radio-intel PR 3) has its own monthly budget: the hub's word on AWS lists it under "reserve"
+when only ours is used up, and under "deny" when only its own is (the station's whisper takes it).
 """
 
 from __future__ import annotations
@@ -47,6 +54,10 @@ KEY = re.compile(r"tg:\d{1,9}|p25:[a-z][a-z0-9_-]{0,23}:\d{1,9}|[A-Za-z0-9][A-Za
 DEFAULT_AWS = ("South 2", "FG1", "FG2", "tg:307")
 DEFAULT_RECORD_ONLY: tuple[str, ...] = ()
 SECTION = "channels"
+SQUELCH_SECTION = "squelch"
+# field -> (low, high, step): what Settings takes. Defaults: the receiver's (radio/fm.py OPEN_DB, CLOSE_DB, MIN_OPEN_S)
+SQUELCH = {"open_db": (4.0, 30.0, 0.5), "close_db": (2.0, 28.0, 0.5), "min_open_s": (0.1, 2.0, 0.05)}
+CHATTER_PER_MIN = 2.0      # short opens (nothing kept) per minute, over 5 min: the squelch chattering on noise (a hint)
 
 
 def tg_key(tg: int) -> str:
@@ -116,17 +127,94 @@ def effective(p: dict, aws_ok: bool) -> str:
     return eng if eng == "local" or aws_ok else "local"
 
 
-def sig(overrides: dict, aws_ok: bool, tones: dict | None = None, reserve=None) -> str:
+AWS_KEYS_MAX = 16          # channels in the hub's reserve / deny lists (the airband, the pages, Fire/EMS 15, police)
+
+
+def hub_aws(aws: dict) -> dict:
+    """The hub's word on AWS as the station keeps it (set_channel_prefs): ok, why, reserve (channels that keep AWS past
+    our limit) and, when there is one, deny (context channels past their own budget, radio-intel PR 3)."""
+    out = {"ok": bool(aws.get("ok")), "why": str(aws.get("why") or "")[:300],
+           "reserve": [str(k)[:40] for k in (aws.get("reserve") or [])][:AWS_KEYS_MAX]}
+    if aws.get("deny"):
+        out.update(deny=[str(k)[:40] for k in aws["deny"]][:AWS_KEYS_MAX], deny_why=str(aws.get("deny_why") or "")[:300])
+    return out
+
+
+def sig(overrides: dict, aws_ok: bool, tones: dict | None = None, reserve=None, squelch: dict | None = None,
+        deny=None) -> str:
     """The same choices + the same AWS availability (+ the same named tone pairs, #80; + the channels that keep
-    AWS past the monthly limit, #195) -> the same short signature (hub and station). None of those: the
-    signature from before them."""
+    AWS past the monthly limit, #195; + the squelch settings; + the context channels past their own AWS budget while
+    ours isn't, radio-intel PR 3) -> the same short signature (hub and station). None of those: the signature from
+    before them."""
     d = {"prefs": {k: {f: v for f, v in sorted(o.items())} for k, o in sorted(overrides.items())}, "aws": bool(aws_ok)}
+    if squelch:
+        d["squelch"] = {k: {f: v for f, v in sorted(o.items())} for k, o in sorted(squelch.items())}
     if tones:
         d["tones"] = {k: tones[k] for k in sorted(tones)}
     if reserve and not aws_ok:
         d["reserve"] = sorted(str(k) for k in reserve)
+    if deny:
+        d["deny"] = sorted(str(k) for k in deny)
     raw = json.dumps(d, sort_keys=True, separators=(",", ":"))
     return hashlib.sha1(raw.encode()).hexdigest()[:12]
+
+
+def clean_squelch(key: str, raw: dict) -> dict:
+    """{open_db?, close_db?, min_open_s?} for an FM channel (checked, rounded to its step). ValueError."""
+    if not isinstance(key, str) or not KEY.fullmatch(key) or is_tg(key):
+        raise ValueError("key: an FM channel's label (FG1)")
+    if not isinstance(raw, dict):
+        raise ValueError("an object")
+    out = {}
+    for f, (lo, hi, step) in SQUELCH.items():
+        v = raw.get(f)
+        if v is None:
+            continue
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not lo <= float(v) <= hi:
+            raise ValueError(f"{f}: {lo:g} to {hi:g}")
+        out[f] = round(round(float(v) / step) * step, 2)
+    if "open_db" in out and "close_db" in out and out["close_db"] >= out["open_db"]:
+        raise ValueError("close_db: under open_db")
+    return out
+
+
+def norm_squelch(m) -> dict:
+    """A stored squelch map as the hub sends it and the station keeps it (the same on both, so their signatures
+    agree): each entry cleaned, empty or invalid ones dropped."""
+    out = {}
+    for k, v in (m.items() if isinstance(m, dict) else ()):
+        try:
+            c = clean_squelch(k, v)
+        except ValueError:
+            continue
+        if c:
+            out[k] = c
+    return out
+
+
+def fit_squelch(m, kinds: dict, defaults) -> tuple[dict, list[str]]:
+    """What of a squelch map applies to a station: its traffic channels only (a channel renamed, gone or now paging:
+    left out, never an error that would stop the rest of the channel push), close under open with the station's
+    own defaults (defaults(key) -> {open_db, close_db, min_open_s}). The hub (against what the station reported)
+    and the station (against its own) leave out the same entries, so their signatures agree. -> (kept, why not)."""
+    kept, why = {}, []
+    for k, v in norm_squelch(m).items():
+        if kinds.get(k) != "traffic":
+            why.append(f"{k}: {kinds.get(k) or 'no such'} channel")
+            continue
+        eff = {**(defaults(k) or {}), **v}
+        if eff.get("open_db") is not None and eff.get("close_db") is not None and eff["close_db"] >= eff["open_db"]:
+            why.append(f"{k}: close {eff['close_db']:g} dB not under open {eff['open_db']:g} dB")
+            continue
+        kept[k] = v
+    return kept, why
+
+
+def check_squelch(m) -> dict:
+    """A whole squelch map from the hub: checked, cleaned. ValueError."""
+    if not isinstance(m, dict) or len(m) > 50:
+        raise ValueError("squelch: an object")
+    return {k: c for k, v in m.items() if (c := clean_squelch(k, v))}
 
 
 def phrases_sig(phrases: list[str]) -> str:

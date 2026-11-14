@@ -1,4 +1,4 @@
-"""The station adapter's county password, set from the hub (Settings > Health): write-only.
+"""The station adapter's county password, set from the hub (Settings > Station > Adapter): write-only.
 
 The station's adapter reads its password from AWS SSM (sizeup/cloud/adapterssm.py, PR #417): a SecureString under a
 KMS key of its own that only the station's IAM user may decrypt with. An admin may also save a new version here
@@ -13,7 +13,7 @@ back, and it never logs into the county app itself.
                                  (ssm:GetParameter on exactly those two: the department's setup script makes them and
                                  grants it). Cached (RESOLVED_S); a failed or missing lookup is "Not configured" and is
                                  asked again at most every RETRY_S. Neither the task definition nor the repo names them.
-    status(store)                what Settings > Health shows: the version and when it was saved (DescribeParameters,
+    status(store)                what the card shows: the version and when it was saved (DescribeParameters,
                                  cached), who saved it (this hub's own audit, if it was saved here), when the next
                                  save may go, and the station's adapter state (the source_health rows)
     save(new, again, confirm, by, operator, store)
@@ -29,7 +29,9 @@ The value: wrapped in Hidden from the moment the request body is parsed (repr/st
 signed request's body, never in a log, the audit, an answer or an exception's text. AWS's own error message is never
 kept (a ValidationException can quote the value back): its code only. Every reference is dropped once the request is
 sent (the body buffer is also overwritten, best effort); Python can't wipe the str and bytes copies it made on the
-way, which live in the hub's memory until they are collected.
+way, which live in the hub's memory until they are collected. One copy is kept on purpose: a value that passed the
+checks is registered with the log scrub (sizeup/logscrub.py secret(), in memory only, never written down) before
+anything is sent, so a log line that ever holds it (a station's batch, the Logs view's rows) is dropped.
 """
 
 from __future__ import annotations
@@ -66,7 +68,7 @@ CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 STOPPED_RE = re.compile(r"^login\b")
 MANUAL_RE = re.compile(r"manual reset")
 # the adapter's Health counts the SSM versions the county refused in 24 h (sizeup-county): a Reset from the hub keeps
-# them, and while there are any it needs an explicit confirm (Settings > Health)
+# them, and while there are any it needs an explicit confirm (Settings > Station > Health)
 REFUSED_RE = re.compile(r"refused versions 24 h: (\d{1,3})")
 
 # send(url, headers, body, timeout) -> (HTTP status, body): urllib by default, a fake in tests
@@ -342,6 +344,8 @@ class AdapterPassword:
             raise SaveRefused("They differ")
         if why := problem(new.reveal()):
             raise SaveRefused(why)
+        from sizeup import logscrub
+        logscrub.secret(new.reveal(), short=True)       # before anything is sent: never in a log line that is shown
         with self._lock:
             if self._busy:
                 raise SaveRefused("A save is going", 409)

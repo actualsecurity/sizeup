@@ -54,6 +54,7 @@ import threading
 import time
 import wave
 from collections import OrderedDict, deque
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -67,7 +68,8 @@ from sizeup.cad.alarms import STUCK_WITHIN_S
 from sizeup.cad.api import CadApi
 from sizeup.dispatch import parse, split_joined
 from sizeup.incidents import IncidentStore, Traffic
-from sizeup.radio.fm import RATE, Channel, NfmReceiver, Segment, id_burst_frames, speech_seconds, voice_floor_db
+from sizeup.radio.fm import (CLOSE_DB, MIN_OPEN_S, RATE, Channel, NfmReceiver, Segment, ctcss_estimate, id_burst_frames,
+                              pl_text, speech_seconds, voice_floor_db)
 from sizeup.radio.am import AmReceiver
 from sizeup.radio.am import Extra as AmExtra
 from sizeup.radio.am import Schedule as AmSchedule
@@ -89,7 +91,8 @@ from sizeup.cad import tonelist
 from sizeup.radio.tones import ToneEvent, TonePlan, base_name
 from sizeup.talkers import talker_prompt
 from sizeup import channels
-from sizeup.stt import CONTEXT, HIGH, LIVE, LOW, RERUN, SHED, URGENT, Transcriber, WhisperClient, radio_voice, wav_bytes
+from sizeup.stt import (CATCHUP, CATCHUP_MAX_CLIP_S, CATCHUP_NOTE, CONTEXT, CONTEXT_FALLBACK, HIGH, LIVE, LOW, RERUN, SHED, URGENT,
+                        Transcriber, WhisperClient, radio_voice, wav_bytes)
 from sizeup.talkgroups import TalkgroupPrefs
 from sizeup import sourcekeys as sources, tiers
 from sizeup.tts import TtsService
@@ -145,6 +148,10 @@ EVIDENCE_LIST = 200        # an emergency call's record (App._p25_evidence): at 
 STT_FIRST = ("tg:307", "FG1", "FG2")
 AIRBAND_FIRST: set[str] = set()   # ... and the airband channels (HPN ATC, #233: the pre-alerts), filled by App
 ATC_CEILING_FT = 10000   # the station's own ADS-B: aircraft above this aren't talking to HPN Tower (the ATC prompt, #257)
+CATCHUP_BATCH_MAX = 10     # catch_up(): at most this many shed clips a call (sizeup/sttcatchup.py)
+CATCHUP_QUEUED_S = 1800.0  # a page queued (nobody took it yet) this recently is an open event: the catch-up waits
+CATCHUP_PAUSE_MAX_S = 12 * 3600.0   # an open event or alarm created or updated longer ago than this no longer pauses it
+CATCHUP_AWS_PCT = 80.0     # the catch-up stops using the police AWS budget at this much of its month
 MIN_SPEECH_S = 0.15      # less sound than this above the dead-air floor (and no tones) = a mic click
 LIVE_WATCH_S = 0.2       # FG1 talking watcher: how often the squelch is looked at (the MDC ID: radio/tap.py)
 ID_EDGE_S = 1.0          # an FG1 key-up with no ID: a burst is looked for this close to either end of the carrier (#163)
@@ -387,6 +394,7 @@ class AwsJob:
     page: object = None
     rerun: bool = False       # a person asked for it again (re-transcribe): the text is replaced, the result said
     recovered: bool = False   # left waiting by a restart (the hub): its fallback waits for the station to reconnect
+    catchup: bool = False     # a shed clip caught up (sizeup/sttcatchup.py): quiet (no alerts), a failed try on its row
 
 
 @dataclass
@@ -402,9 +410,12 @@ class Rerun:
     raw: str = ""
     confidence: float | None = None
     as_alt: bool = False      # "both" re-run: this text is the alternative to compare, not the text
+    source_key: str = ""      # its channel key ("p25:mrrs:9211"): another P25 system's profile (data/stt/profiles.json)
+    service: str = ""
+    catchup: bool = False     # a shed clip caught up (sizeup/sttcatchup.py): quiet, not in a person's re-run progress
 
 class App:
-    def __init__(self, cfg: Config):
+    def __init__(self, cfg: Config, fence=None):
         self.cfg = cfg
         self.plan = TonePlan(list(cfg.tones))
         self.whisper = WhisperService(cfg.stt_server, cfg.stt_model, cfg.stt_port, cfg.stt_threads, cfg.stt_beam_size,
@@ -424,6 +435,7 @@ class App:
         self.storage: dict | None = None
         self._rerun_ids: set[str] = set()
         self.rerun = {"total": 0, "done": 0, "changed": 0, "failed": 0}
+        self._catchup_ids: set[str] = set()       # the re-runs in _rerun_ids that are the catch-up's (no person's)
         self._rerun_note: dict[str, str] = {}     # id -> why a re-run didn't go the channel's way ("AWS unavailable ...")
         self.clips: OrderedDict[str, tuple[np.ndarray, float]] = OrderedDict()   # id -> (pcm, saved at)
         self.clips_dir = Path(cfg.clips_dir) if cfg.clips_dir else None
@@ -490,6 +502,7 @@ class App:
         self.modes = [c.label for c in cfg.channels] + ([P25_MODE] if self.recorder else []) + list(self._sys_jobs)
         if self.shared:
             self.modes.append(OFF_MODE)
+        self.reception.setup_probes()         # (#436) the county's P25 sites, probe-only: never a mode here
         first = cfg.start_mode if cfg.start_mode in self.modes else (self.modes[0] if self.modes else OFF_MODE)
         self.assign: dict[str, str] = {sd: (first if k == 0 else OFF_MODE) for k, sd in enumerate(self._listed)}
         # Who set each dongle's mode: "person" (the web app, here or the hub's) or "auto" (_auto_assign).
@@ -538,6 +551,7 @@ class App:
             self.cad.here_source = lambda lat, lon, places: what_is_here(self.gaz, lat, lon, places)
         # Radio ID -> rig, and who is transmitting right now (both pages' "talking").
         self.radios = self.cad.radios
+        self.catchup = self._catchup_make()        # shed clips caught up later (sizeup/sttcatchup.py), from start()
         self.live = LiveTalk(resolve=self.radios.resolve, tg_name=self.tg.name, main=self.tg.main,
                              learn=lambda src, alias, at: self._heard("p25", src, alias, at), debug=log)
         if self.p25 is not None:        # a finished call's key-ups checked against the live grants (issue #62)
@@ -568,10 +582,21 @@ class App:
         # Radio view's rows too.
         self.cad.comms.names_ours = self.cad.feed.names_ours
         self.cad.main_tg = self.tg.main
+        # the Radio page's source tree (#415, Cad.comms_sources): the talkgroups as Settings > Radios lists them, and each
+        # system's label (the county's is its name: it has none of its own)
+        self.cad.source_rows = self.talkgroups_state
+        self.cad.source_systems = lambda: {self.tg.county: "County", **{x.name: x.label for x in self.cfg.p25_systems}}
         # Per-channel record / transcribe / engine (Settings > Radios, sizeup/channels.py) and Amazon
         # Transcribe where this process may call it ([stt] aws: the hub; sizeup/transcribe.py).
         self.cad.radio_ctx = self
         self._chan_ov: dict = self._channel_overrides()
+        self._sq_ov: dict = channels.norm_squelch(self.cad.settings.squelch_overrides())   # each FM channel's squelch
+        # each traffic channel's recent key-ups (end, s, quieting dB, CTCSS Hz, ID, speech): Settings > Radios > Squelch
+        self._keyups: dict[str, deque] = {}
+        self._keyup_pl: dict[str, tuple] = {}    # a kept key-up's PL estimate, for its "no speech" log line
+        # the PL estimate's own thread: never on the close (the live entry's end, the ID flash, the clip)
+        self._keyup_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="keyup-pl")
+        self._apply_squelch()
         # Tone pairs named from the console (Settings "tones", #80): merged into the plan, with the names
         # that count as ours; the hub sends them to the station with the channel choices.
         self._tone_ov: dict = {}
@@ -582,7 +607,8 @@ class App:
         self._hub_aws = self._load_hub_aws()
         self._aws_wait: dict[str, tuple[np.ndarray, str]] = {}
         self._vocab_suggest: list[str] | None = None
-        self.aws = self.vocab = self.atc_vocab = None
+        self.aws = self.vocab = self.atc_vocab = self.pd_vocab = None
+        self.pd_sources: list[str] = []
         _mark("radio")
         if cfg.stt_aws:
             self._aws_setup()
@@ -605,10 +631,14 @@ class App:
         if cfg.cloud_role != "station" and cfg.cad_db:
             from sizeup.cachesync import CacheMirror
             from sizeup.fence import Fence
-            fence = Fence.from_env(log=log)      # the hub's single-writer lock (sizeup/handoff.py): uploads only while ours
+            # the hub's single-writer lock (sizeup/handoff.py): uploads only while ours. The one fence of this process
+            # (#501): main / run_gated hand it here through serve, so the Gate and the databases never disagree
+            fence = fence if fence is not None else Fence.from_env(log=log)
             self.fence = fence
             if fence is not None:                 # a dispatch's voice, attached after the answer (#426): the writer's only
-                self.cad.may_write = fence.ok
+                self.cad.may_write = fence.ok     # ... and every write to cad.sqlite, a GET's side effects too (#501)
+                self.cad.store.db.log = log
+                self.cad.store.db.on_refuse = fence.check     # a write refused: Litestream killed, the process gone
             self.cache_mirror = CacheMirror.from_env(Path(cfg.cad_db).parent, log=log, fence=fence.ok if fence else None)
         self._layers_lock = threading.Lock()
         self._layers_on = False                   # start_layers() asked for, stop_layers() not since
@@ -673,6 +703,16 @@ class App:
         self.attachments.camera = self.roads.camera
         self.attachments.audio = self.clip
         self.cad.attachments = self.attachments
+        # Pre-plan site documents (#459, sizeup/docstore.py): the bucket on the hub; off the hub a folder beside the CAD
+        # (a hub's own disk doesn't outlive a deploy: none there without the bucket)
+        from sizeup import docstore
+        self.cad.preplan_docs.store = docstore.from_env(
+            log=log, default_dir=None if cfg.cloud_role == "hub" or not cfg.cad_db else Path(cfg.cad_db).parent / "preplan-docs")
+        if self.fence is not None:
+            self.cad.preplan_docs.may_write = self.fence.ok      # only the leader sweeps the store
+        if cfg.cloud_role == "hub":
+            from sizeup.docfiles import no_dump
+            no_dump()               # a PDF renderer (same user) can't read this process's environ or memory (#459)
         # Road projects & closures (sizeup/roadprojects.py, #185): the Thruway's and 511NY's roadwork through roads,
         # the villages' road notices (placed by the gazetteer, or listed), any WZDx feed configured; read while someone looks.
         self.roadwork = prov["roadwork"]
@@ -730,12 +770,22 @@ class App:
             return env_is if s == "env" else (s or "config")
         self.pushes = notify.Pushes(
             cfg.alerts_ntfy_server, cfg.alerts_ntfy_topic, cfg.alerts_status_topic,
-            sources={notify.ALERTS: src(cfg.alerts_ntfy_topic_source), notify.STATUS: src(cfg.alerts_status_topic_source)},
+            sources={notify.ALERTS: src(cfg.alerts_ntfy_topic_source), notify.STATUS: src(cfg.alerts_status_topic_source),
+                     notify.INTEL: src(cfg.alerts_intel_topic_source)},
+            intel_topic=cfg.alerts_intel_topic,
             server_source=src(cfg.alerts_ntfy_server_source) if cfg.alerts_ntfy_server_source != "default" else "default",
             settings=lambda: self.cad.settings.section(notify.SECTION),
             also_forbidden=(cfg.prealert_ring_topic, cfg.prealert_status_topic), log=log)
         self.cad.pushes = self.pushes
         self.cad.alarms.notifier = self.pushes.notifier(notify.ALERTS)
+        # Radio pre-alerts (sizeup/intel, #411): pushed on the INTEL kind (no topic of its own: the alerts topic), by the
+        # CAD of record holding the lease only; located over the gazetteer (read only). Its thread starts in start().
+        intel = self.cad.intel
+        intel.notifier, intel.public_url, intel.leader = self.pushes.notifier(notify.INTEL), cfg.cloud_public_url, self._atc_leader
+        intel.active = lambda: not self.forwarding()      # a station forwarding to the hub queues nothing (no thread)
+        if self.gaz is not None:
+            from sizeup.intel.place import Locator
+            intel.locate = Locator(self.gaz)
         log(self.pushes.line())
         _mark("prealert + pushes")
         self.cad.alarms.public_url = cfg.cloud_public_url
@@ -967,11 +1017,38 @@ class App:
         talkers on this call as they're said on the air."""
         if self._kind.get(getattr(item, "source", "")) == "airband":
             return self._atc_prompt(getattr(item, "source", ""))
+        prof = self._stt_profile(item)
+        if prof is not None:          # another P25 system's police (radio-intel PR 3): its own words, never a talker's name
+            return self._profile_prompt(prof)
         parts = [self.cfg.stt_prompt]
         if self.cfg.stt_talker_prompt != "off":
             parts.append(talker_prompt(getattr(item, "unit", "") or "", getattr(item, "start", None),
                                        with_time=self.cfg.stt_talker_prompt == "ids+time"))
         return " ".join(p for p in parts if p)
+
+    @staticmethod
+    def _stt_profile(item) -> dict | None:
+        """The speech-to-text profile (data/stt/profiles.json) of another P25 system's source, None for any of ours."""
+        key = str(getattr(item, "source_key", "") or "")
+        got = sources.parse(key) if key else None
+        if got is None or got[0] == sources.COUNTY:
+            return None
+        from sizeup import stt_vocab
+        return stt_vocab.profile(sources.p25(*got), str(getattr(item, "service", "") or ""))
+
+    def _profile_prompt(self, prof: dict) -> str:
+        """whisper's prompt for a profile (stt_vocab.police_prompt: phrasing, the headquarters, the towns' streets),
+        worked out once per profile."""
+        cache = self.__dict__.setdefault("_profile_prompts", {})
+        name = str(prof.get("name") or "")
+        if name not in cache:
+            from sizeup import stt_vocab
+            try:
+                cache[name] = stt_vocab.police_prompt(prof)
+            except Exception as e:  # noqa: BLE001 - a missing gazetteer: the profile's own words only
+                log(f"speech-to-text: profile {name}: {type(e).__name__}: {e}")
+                cache[name] = str(prof.get("prompt") or "")
+        return cache[name]
 
     def _atc_prompt(self, channel: str = "") -> str:
         """whisper's prompt on an airband channel (#233): HPN's words, then the callsigns of the aircraft nearest the field
@@ -1183,6 +1260,11 @@ class App:
         for h in ids:
             self._heard(fm_system(h), h, at=seg.end, channel=ch.label)
         self.live.fm_segment(ch.label, ids, seg.start, seg.end)
+        tid = f"{ch.label.replace(' ', '')}-{int(seg.start * 1000)}" if record else ""
+        try:
+            self._keyup_pool.submit(self._keyup, ch.label, seg, bool(ids), not low_energy, tid)   # after the close
+        except RuntimeError:            # shut down (a flush at exit): no estimate, nothing else changes
+            pass
         emergency = any(e for _h, e in found)        # the radio's emergency button (MDC / FleetSync, #128)
         live_key = self.tap.alarm_key(ch.label, seg.start, seg.end) if emergency else ""
         if not record:              # squelch, MDC IDs and "talking now" stay live; nothing is kept
@@ -1703,7 +1785,10 @@ class App:
                 # A key-up with nothing said (mic click): still shown, as who keyed and when, with
                 # its clip; just no transcript.
                 item.text = ""
-                log(f"{item.source}: key-up ({item.end - item.start:.1f} s, no speech)"
+                with self._lock:
+                    pl = self._keyup_pl.pop(item.id, None)
+                log(f"{item.source}: key-up ({item.end - item.start:.1f} s, no speech"
+                    + (f", {pl_text(pl)}" if pl else "") + ")"
                     + (f" · unit {item.unit}" if item.unit else ""))
             if hasattr(item, "raw_audio"):
                 del item.raw_audio
@@ -1977,7 +2062,8 @@ class App:
             if self._kind.get(label) != "traffic":
                 continue
             sq = r.squelch
-            on = sq.open and (not self.shared or label in self.assign.values())
+            # keyed: the carrier held min_open_s (radio/fm.py): a noise opening is never "talking"
+            on = sq.open and bool(getattr(sq, "keyed", True)) and (not self.shared or label in self.assign.values())
             st = self._fm_live.get(label)
             if not on:
                 if st is not None:
@@ -2077,7 +2163,8 @@ class App:
     def _rerun_split(self, ids: list[str]) -> tuple[int, list[str], list[str]]:
         """The ids whose channel is on AWS go to it now: (how many, the ones for the local model, the ones
         whose local text is the alternative ("both"))."""
-        ok, why = self.aws.available() if self.aws is not None else (False, "Amazon Transcribe isn't set up here")
+        from sizeup.transcribe import is_context
+        ok0, why0 = self.aws.available() if self.aws is not None else (False, "Amazon Transcribe isn't set up here")
         n, local, alt = 0, [], []
         for cid in dict.fromkeys(ids):
             item, key = self._find(cid)
@@ -2085,6 +2172,7 @@ class App:
             if eng not in ("aws", "both"):
                 local.append(cid)
                 continue
+            ok, why = self.aws.available(key) if self.aws is not None and is_context(key) else (ok0, why0)
             pcm = self._rerun_pcm(item) if ok else None
             if pcm is None:
                 self._rerun_note[cid] = f"AWS unavailable ({why if not ok else 'no recording for it here'})"
@@ -2104,6 +2192,184 @@ class App:
         live priority (pages, Fire/EMS 15 and the firegrounds first), not behind live traffic like a re-run."""
         return self._rerun_local(list(ids or []), live=True)
 
+    def catch_up(self, specs: list) -> dict:
+        """Shed clips caught up on the local model (sizeup/sttcatchup.py; the hub's call to its station): each
+        {id, key, source, unit, start, service} queued as a re-run in the CATCHUP class, under every other clip and
+        started only once no clip of ours has come in for a while (sizeup/stt.py). The transmission's own fields when
+        it is still in memory, else the spec's (a station restarted since).
+        -> {queued: [ids], refused: {id: why} (no recording here, too long: they stay skipped), hold: why none was
+        taken now ("" = taken)}."""
+        out: dict = {"queued": [], "refused": {}, "hold": ""}
+        hold = self._update_waiting()
+        if hold:                                           # an update never waits on the catch-up: it yields
+            for item in self.stt.withdraw_catchup():
+                self._catchup_forget(getattr(item, "id", ""))
+            out["hold"] = hold
+            return out
+        for d in list(specs or [])[:CATCHUP_BATCH_MAX]:
+            if not isinstance(d, dict):
+                continue
+            cid = str(d.get("id") or "")
+            if not CLIP_ID.fullmatch(cid) or ".." in cid:
+                continue
+            with self._lock:
+                if cid in self._rerun_ids:                 # here already (the last batch's, or a person's re-run)
+                    out["queued"].append(cid)
+                    continue
+            t, key = self._find(cid)
+            if t is not None and not isinstance(t, Traffic):
+                continue                                   # (pages are never shed)
+            key = key or str(d.get("key") or "")[:60]
+            source = t.source if t is not None else str(d.get("source") or "")[:60]
+            fm = getattr(t, "fm", None) if t is not None else None
+            if fm is None:
+                fm = not channels.is_tg(key) and self._kind.get(source) != "airband"
+            got = self._rerun_audio(cid, bool(fm))
+            if not got:
+                out["refused"][cid] = "no recording on the station"
+                continue
+            if len(got[0]) / RATE > CATCHUP_MAX_CLIP_S:
+                out["refused"][cid] = f"longer than {CATCHUP_MAX_CLIP_S:g} s"
+                continue
+            start = t.start if t is not None else d.get("start")
+            job = Rerun(cid, "traffic", got[1], speech_seconds(got[0]) < MIN_SPEECH_S,
+                        (t.unit if t is not None else str(d.get("unit") or ""))[:120],
+                        float(start) if isinstance(start, (int, float)) else None, source_key=key,
+                        service=(getattr(t, "service", "") if t is not None else str(d.get("service") or ""))[:16] or "",
+                        catchup=True)
+            with self._lock:
+                if cid in self._rerun_ids:
+                    out["queued"].append(cid)
+                    continue
+                self._rerun_ids.add(cid)
+                self._catchup_ids.add(cid)
+            self._rerun_note[cid] = CATCHUP_NOTE
+            self.stt.submit(job, got[0], priority=CATCHUP)     # (dropped at once: _stt_dropped says so on its row)
+            out["queued"].append(cid)
+        if out["queued"]:
+            log(f"speech-to-text catch-up: {len(out['queued'])} shed clip(s) queued")
+        return out
+
+    def _catchup_forget(self, cid: str) -> None:
+        """A catch-up re-run taken back before it ran (an update is waiting): as if never asked, no try counted."""
+        with self._lock:
+            self._rerun_ids.discard(cid)
+            self._catchup_ids.discard(cid)
+        self._rerun_note.pop(cid, None)
+
+    def _update_waiting(self) -> str:
+        """The station's auto-update waiting for a quiet moment (or switching now): why the catch-up holds, else ""."""
+        try:
+            upd = self.station.updates.status().get("update") or {} if self.station is not None else {}
+        except Exception:  # noqa: BLE001 - a status that can't be read is no reason to hold
+            return ""
+        return "a station update is waiting" if upd.get("state") in ("waiting", "updating") else ""
+
+    # -- shed clips caught up (sizeup/sttcatchup.py): the CAD of record drives it, the station's whisper runs it ------
+
+    def _catchup_make(self):
+        from sizeup import sttcatchup
+        comms = self.cad.comms
+        oldest = sttcatchup.MAX_AGE_RANGE_H[1] * 3600.0
+        return sttcatchup.CatchUp(settings=self.cad.settings.stt_catchup, may_run=self._catchup_may_run,
+                                  pause=self._catchup_pause, scan=comms.shed_clips,
+                                  caught=lambda since: comms.caught_up(since, since - oldest),
+                                  route=self._catchup_route, whisper_ready=self._catchup_whisper_ready,
+                                  aws_idle=self._catchup_aws_idle, to_whisper=self._catchup_whisper,
+                                  to_aws=self._catchup_aws, give_up=self._catchup_give_up, log=log)
+
+    def _catchup_may_run(self) -> bool:
+        """All-in-one only: a station forwarding to a hub is caught up by the hub (its catch_up call). Under a lease
+        (sizeup/fence.py): only while it is ours and fresh."""
+        fence = getattr(self, "fence", None)
+        return not self.forwarding() and (fence is None or fence.ok())
+
+    def _catchup_pause(self) -> str:
+        """Why nothing is caught up now ("" = go): fire work comes first, whichever engine would run the catch-up.
+        An event of ours open (an emergency one: pending or active, or a page just queued), an alarm not yet
+        acknowledged (either one created or updated in the last 12 h) or an emergency window open, a carrier open or someone talking on the station."""
+        now = time.time()
+        store = self.cad.store
+        # (bounded: an event nobody closed or an alarm nobody acknowledged, untouched for CATCHUP_PAUSE_MAX_S, no longer
+        # pauses it, so the catch-up can't starve for ever)
+        cut = now - CATCHUP_PAUSE_MAX_S
+        if store.one("SELECT 1 AS x FROM incidents i WHERE emergency = 1 AND ((status IN ('pending', 'active') "
+                     "AND (created_at >= ? OR accepted_at >= ? OR EXISTS (SELECT 1 FROM events e WHERE e.incident_id = i.id "
+                     "AND e.at >= ?))) OR (status = 'queued' AND created_at >= ?)) LIMIT 1",
+                     (cut, cut, cut, now - CATCHUP_QUEUED_S)):
+            return "an event is open"
+        if store.one("SELECT 1 AS x FROM alarms WHERE ack_at IS NULL AND level = 'alarm' "
+                     "AND (created_at >= ? OR updated_at >= ?) LIMIT 1", (cut, cut)):
+            return "an alarm is open"
+        if self.cad.alarms.windows.state(now):
+            return "an emergency window is open"
+        try:
+            rows = self.radio_status()
+        except Exception:  # noqa: BLE001 - a status that can't be read: not known to be quiet
+            return "the radios' status isn't known"
+        opened = [str(r.get("label")) for r in rows if r.get("open")]
+        if opened:
+            return "carrier open on " + ", ".join(opened)
+        if self.live.state():
+            return "someone is talking"
+        return ""
+
+    def _catchup_route(self, key: str) -> str:
+        """aws | whisper | "" (not transcribed now): AWS only on another system's talkgroup (police) set to AWS while
+        its own budget has room and is under CATCHUP_AWS_PCT of its month (the rest is for what is heard live),
+        never our pool nor its reserve; otherwise the local model."""
+        from sizeup.transcribe import is_context
+        p = self.channel_pref(key)
+        if not p.get("transcribe", True):
+            return ""
+        if (p.get("engine") in ("aws", "both") and is_context(key) and self.aws is not None
+                and self.aws.available(key)[0] and self.aws.context_budget()["pct"] < CATCHUP_AWS_PCT):
+            return "aws"
+        return "whisper"
+
+    def _catchup_whisper_ready(self, after: float) -> tuple[bool, str]:
+        from sizeup.sttcatchup import whisper_idle
+        if getattr(self.whisper, "state", "ok") != "ok":
+            return False, "whisper not ready"
+        return whisper_idle(self.stt.stats())
+
+    def _catchup_aws_idle(self, key: str) -> bool:
+        return self.aws is not None and self.aws.open_jobs(key) == 0
+
+    def _catchup_whisper(self, specs: list[dict]) -> dict | None:
+        """{queued, refused, hold} (catch_up), None when the call itself failed (the hub: its station)."""
+        return self.catch_up(specs)
+
+    def _catchup_pcm(self, cid: str, key: str, source: str):
+        """A shed clip as Amazon Transcribe takes it (int16, 8 kHz), or None."""
+        from sizeup.transcribe import pcm8k
+        got = self._rerun_audio(cid, not channels.is_tg(key) and self._kind.get(source) != "airband")
+        return pcm8k(radio_voice(got[0], deemph=got[1], nr=False), RATE) if got else None
+
+    def _catchup_aws(self, row: dict) -> tuple[bool, str]:
+        """One shed clip to Amazon Transcribe (a context channel, its own budget): the re-run path (AwsJob rerun).
+        (sent, why it never can be: no recording)."""
+        cid, key = str(row.get("id") or ""), str(row.get("key") or "")
+        if self.aws is None or not CLIP_ID.fullmatch(cid) or not self.aws.available(key)[0]:
+            return False, ""
+        pcm = self._catchup_pcm(cid, key, str(row.get("source") or ""))
+        if pcm is None:
+            return False, "no recording"
+        self._rerun_note[cid] = CATCHUP_NOTE
+        self.aws.submit(key, AwsJob("traffic", cid, key, rerun=True, catchup=True), pcm)
+        return True, ""
+
+    def _catchup_give_up(self, cid: str, why: str) -> None:
+        """A shed clip that can never be caught up (no recording, too long): said on its row, counted as given up."""
+        from sizeup.fence import FencedWrite
+        from sizeup.sttcatchup import MAX_TRIES
+        try:
+            self.cad.comms.rerun_done(cid, f"failed: {why[:160]}; {CATCHUP_NOTE} try {MAX_TRIES}")
+        except FencedWrite:     # not the leader any more (sizeup/fence.py): the catch-up stops (CatchUp.tick)
+            raise
+        except Exception as e:  # the CAD must never stop the monitor
+            log(f"CAD: could not note a catch-up: {type(e).__name__}: {e}")
+
     def _rerun_local(self, ids: list[str] | None = None, as_alt: bool = False, live: bool = False) -> int:
         """The local model again on recordings still on disk (ids=None: all of them). Queued behind live
         traffic (live: as live traffic, for the hub's fallback); results replace the text and keep the old
@@ -2111,6 +2377,19 @@ class App:
         want = set(ids) if ids is not None else None
         jobs: list[tuple[float, Rerun, np.ndarray]] = []
         seen: set[str] = set()
+        promoted = 0
+        if want is not None and not as_alt and not live:
+            # one the catch-up holds, asked for by a person: now a re-run of theirs (RERUN: ahead of the context clips)
+            with self._lock:
+                mine = [c for c in want if c in self._catchup_ids]
+            for cid in mine:
+                item = self.stt.promote(lambda it, c=cid: isinstance(it, Rerun) and it.id == c)
+                with self._lock:
+                    self._catchup_ids.discard(cid)
+                if item is not None:
+                    item.catchup = False
+                    self._rerun_note.pop(cid, None)
+                promoted += 1                       # (running right now: its result is the one the person waits for)
         with self._lock:
             pages = [p for p in self.pages if p.status != "no_voice"]
             busy = set(self._rerun_ids)
@@ -2128,13 +2407,14 @@ class App:
                 got = self._rerun_audio(t.id, getattr(t, "fm", self._kind.get(t.source) != "airband"))
                 if got:
                     low = speech_seconds(got[0]) < MIN_SPEECH_S  # same mic-click rule as the live pass
-                    jobs.append((t.start, Rerun(t.id, "traffic", got[1], low, t.unit, t.start, as_alt=as_alt), got[0]))
+                    jobs.append((t.start, Rerun(t.id, "traffic", got[1], low, t.unit, t.start, as_alt=as_alt,
+                                                source_key=keys[t.id], service=getattr(t, "service", "") or ""), got[0]))
                     seen.add(t.id)
         jobs.sort(key=lambda j: -j[0])  # newest first: what's on screen updates first
         with self._lock:
-            if not self._rerun_ids:  # a new batch: restart the progress count
+            if not self._rerun_ids - self._catchup_ids:  # a new batch: restart the progress count
                 self.rerun = {"total": 0, "done": 0, "changed": 0, "failed": 0}
-            n = 0
+            n = promoted
             for _start, job, audio in jobs:
                 key = keys.get(job.id, "")
                 prio = RERUN if not live else self._stt_priority(job, key)
@@ -2154,12 +2434,17 @@ class App:
             if job.status != "error":
                 self._set_alt(job.id, text, model)
         elif job.status != "error":
-            changed = self._retext(job.id, text, job.status, job.confidence, model)
+            # (a shed clip caught up hours later: its words are old, nothing that alerts hears them)
+            changed = self._retext(job.id, text, job.status, job.confidence, model, quiet=job.catchup)
+            # (a restarted station no longer has the transmission to compare: a skipped clip with words now has changed)
+            changed = changed or (job.catchup and bool(text))
         with self._lock:
             self._rerun_ids.discard(job.id)
-            self.rerun["done"] += 1
-            self.rerun["changed"] += changed
-            self.rerun["failed"] += job.status == "error"
+            self._catchup_ids.discard(job.id)
+            if not job.catchup:               # (a catch-up is no person's re-run: not in its progress)
+                self.rerun["done"] += 1
+                self.rerun["changed"] += changed
+                self.rerun["failed"] += job.status == "error"
         if not job.as_alt:
             self._rerun_finish(job.id, "failed: speech-to-text error" if job.status == "error"
                                else "changed" if changed else "same", model)
@@ -2169,9 +2454,20 @@ class App:
         didn't run the channel's way). On the transmission (rerun_at, rerun_result) and the page, and to
         the hub (a "rerun" event): the Re-transcribe menu item shows it."""
         note = self._rerun_note.pop(cid, "")
-        if note and not result.startswith("failed"):
-            note += ": the local model ran"
-        result = (result + (f"; {note}" if note else ""))[:300]
+        tail = f"; {CATCHUP_NOTE}"
+        if note == CATCHUP_NOTE or result.endswith(tail):
+            # a shed clip caught up: "changed; catch-up", and a failed try numbered on the CAD of record (the count is
+            # the row's own: it outlives a restart and a handover)
+            result = result.removesuffix(tail)[:240] + tail
+            if result.startswith("failed") and not self.forwarding():
+                try:
+                    result += f" try {self.cad.comms.catchup_tries(cid) + 1}"
+                except Exception:  # noqa: BLE001 - the count never stops the result
+                    result += " try 1"
+        else:
+            if note and not result.startswith("failed"):
+                note += ": the local model ran"
+            result = (result + (f"; {note}" if note else ""))[:300]
         with self._lock:
             page = next((p for p in self.pages if p.id == cid), None)
         if page is not None:
@@ -2199,10 +2495,13 @@ class App:
         self._emit("alt_text", {"id": cid, **alt})
 
     def _retext(self, cid: str, text: str, status: str, confidence: float | None, model: str,
-                alt: dict | None = None, why: str = "re-run") -> bool:
+                alt: dict | None = None, why: str = "re-run", quiet: bool = False) -> bool:
         """New text for a page or transmission already on screen (a re-run here, or one the station
         sent the hub, or Amazon Transcribe's), the old text kept in its history. True = the text changed.
-        alt {text, model}: the other engine's transcript, kept to compare ("both")."""
+        alt {text, model}: the other engine's transcript, kept to compare ("both"). quiet: a shed clip caught up
+        (sizeup/sttcatchup.py): its words may be hours old, so the text, history and change log are written as ever
+        but nothing that alerts hears it: no alarm, no ATC or airport pre-alert, no status hint, possible incoming or
+        dispatch step (Comms.retext notify=False), here and on the hub ("catchup" on the retext event)."""
         changed = False
         with self._lock:
             page = next((p for p in self.pages if p.id == cid), None)
@@ -2225,19 +2524,19 @@ class App:
         changed = changed or (old is not None and old != text)
         self.store.retext(cid, text, status, confidence, model, alt=alt)
         try:
-            self.cad.comms.retext(cid, text, status, model, alt)
+            self.cad.comms.retext(cid, text, status, model, alt, notify=not quiet)
         except Exception as e:  # the CAD must never stop the monitor
             log(f"CAD: could not update the communications log: {type(e).__name__}: {e}")
         t = next((x for x in list(self.store.loose) + [x for i in self.store.incidents for x in i.traffic]
                   if x.id == cid), None)
-        if t is not None and text:
+        if t is not None and text and not quiet:
             self._alarm(t, text)                       # the words came later (Amazon Transcribe, a re-run)
             self._atc(t, text)
         if changed:
             # (another P25 system's words are never in a log, #419)
             log(f"{why} {cid}: " + ("(text changed)" if self.clip_is_context(cid) else text or "(no speech)"))
         self._emit("retext", {"id": cid, "text": text, "status": status, "confidence": confidence, "model": model,
-                              **({"alt": alt} if alt is not None else {})})
+                              **({"alt": alt} if alt is not None else {}), **({"catchup": True} if quiet else {})})
         return changed
 
 
@@ -2259,6 +2558,8 @@ class App:
         Fire/EMS 15 keep it within the reserve)? Forwarding to a hub: what the hub last said (it runs it);
         else this process's own (the hub; all-in-one with [stt] aws and credentials)."""
         if self.forwarding():
+            if key is not None and key in (self._hub_aws.get("deny") or ()):    # the police budget used up (PR 3)
+                return False, str(self._hub_aws.get("deny_why") or self._hub_aws.get("why") or "")
             ok = bool(self._hub_aws.get("ok")) or (key is not None and key in (self._hub_aws.get("reserve") or ()))
             return ok, "" if ok else str(self._hub_aws.get("why") or "")
         if self.aws is None:
@@ -2272,6 +2573,8 @@ class App:
     def _stt(self, item, audio: np.ndarray, eng: str, key: str) -> None:
         """One transmission or page to speech-to-text the way its channel says (audio: whisper's 16 kHz input)."""
         item.stt = eng if eng in ("aws", "both") else ""
+        if self._stt_priority(item, key) in (URGENT, HIGH, LIVE):
+            self.stt.ours_heard()              # ours, whichever engine takes it (AWS too): the catch-up's quiet spell
         if eng == "off":                       # kept, not transcribed
             item.raw, item.confidence, item.status = "", None, "off"
             item.model = ""
@@ -2301,11 +2604,18 @@ class App:
             return HIGH
         if channels.is_tg(key) and (tier := self.tg.tier(*channels.tg_of(key)[::-1])) is not None:
             # another system's talkgroup (#409): by its tier, in classes under every one of ours and shed when
-            # they wait (sizeup/stt.py CONTEXT): fire traffic never queues behind police
-            return CONTEXT if tier == tiers.ALERT else LOW
+            # they wait (sizeup/stt.py CONTEXT): fire traffic never queues behind police. One set to AWS that AWS can't
+            # take now (its own budget used up, radio-intel PR 3): whisper is its only text, CONTEXT_FALLBACK
+            if tier != tiers.ALERT:
+                return LOW
+            return CONTEXT_FALLBACK if self._aws_fallback(key) else CONTEXT
         if channels.is_tg(key) and not self.tg.main(*channels.tg_of(key)[::-1]):
             return LOW
         return LIVE
+
+    def _aws_fallback(self, key: str) -> bool:
+        """A channel set to AWS (or both) that AWS can't take now: whisper is all it gets."""
+        return self.channel_pref(key).get("engine") in ("aws", "both") and not self.aws_ok(key)[0]
 
     def _stt_dropped(self, item, why: str) -> None:
         """The whisper queue dropped or skipped it (sizeup/stt.py SttQueue, #195): it says so ("Transcription
@@ -2315,7 +2625,8 @@ class App:
             with self._lock:
                 had = item.id in self._rerun_ids
                 self._rerun_ids.discard(item.id)
-                if had:
+                self._catchup_ids.discard(item.id)
+                if had and not item.catchup:    # (the catch-up's: still skipped, a failed try on its row, tried again)
                     self.rerun["done"] += 1
                     self.rerun["failed"] += 1
             if not item.as_alt:
@@ -2330,7 +2641,7 @@ class App:
 
     def _aws_setup(self) -> None:
         from sizeup import aws as aws_mod
-        from sizeup.transcribe import AwsTranscriber, Settings as AwsSettings, Usage, Vocabulary, respell
+        from sizeup.transcribe import PD_VOCABULARY, AwsTranscriber, Settings as AwsSettings, Usage, Vocabulary, respell
         cfg, store = self.cfg, self.cad.store
         reg = aws_mod.region(cfg.stt_aws_region)
         self.aws_usage = Usage(store.meta_get, store.meta_put)
@@ -2350,12 +2661,25 @@ class App:
                                               reserve_channels=tuple(dict.fromkeys((*RESERVE_CHANNELS, *airband)))),
                                   self.aws_usage, self._aws_done, self._aws_failed, log=log,
                                   limit_usd=self.cad.settings.aws_limit,
+                                  context_limit_usd=self.cad.settings.aws_context_limit,
                                   respell=lambda t: respell(t, self.vocab.state()["respell"]),
                                   on_late=self._aws_late, on_change=self._aws_changed)
         if self.vocab.ready():
             self.aws.vocabulary = cfg.stt_aws_vocabulary
         if self.atc_vocab is not None and self.atc_vocab.ready():
             self._atc_vocab_ready(self.atc_vocab.name)
+        # Police on another P25 system (radio-intel PR 3): their own vocabulary (sizeup-pd, stt_vocab.police_phrases) and
+        # respelling on their sources only, pushed with the PCFD one; never the fire vocabulary on them, nor theirs on ours
+        from sizeup import stt_vocab
+        self.pd_sources = stt_vocab.vocabulary_sources(PD_VOCABULARY)
+        self.pd_vocab = None
+        if self.pd_sources:
+            self.pd_vocab = Vocabulary(reg, store.meta_get, store.meta_put, PD_VOCABULARY, cfg.stt_aws_api_endpoint,
+                                       log=log, on_ready=self._pd_vocab_ready, key="aws_vocabulary_pd")
+            for k in self.pd_sources:
+                self.aws.channel_respell[k] = lambda t: respell(t, self.pd_vocab.state()["respell"])
+            if self.pd_vocab.ready():
+                self._pd_vocab_ready(self.pd_vocab.name)
         log(f"speech-to-text: Amazon Transcribe streaming ({reg}) for the channels set to AWS in Settings > Radios")
 
     def _atc_view(self, view, now) -> None:
@@ -2397,6 +2721,30 @@ class App:
                 self.aws.channel_vocabulary[c.label] = name
                 log(f"aws transcribe: custom vocabulary {name} in use on {c.label} from its next stream")
 
+    def _pd_vocab_pending(self) -> None:
+        """sizeup-pd is being updated: the police sources' new streams go without it until it is READY again."""
+        if self.aws is None:
+            return
+        for k in getattr(self, "pd_sources", ()):
+            self.aws.channel_vocabulary.pop(k, None)
+
+    def _pd_vocab_ready(self, name: str) -> None:
+        """sizeup-pd is READY: the police sources' next streams use it (and only theirs)."""
+        if self.aws is None:
+            return
+        for k in getattr(self, "pd_sources", ()):
+            if self.aws.channel_vocabulary.get(k) != name:
+                self.aws.channel_vocabulary[k] = name
+                log(f"aws transcribe: custom vocabulary {name} in use on {k} from its next stream")
+
+    def police_vocabulary(self) -> list[str]:
+        """sizeup-pd's phrases (stt_vocab.police_phrases over the police profile's towns), worked out once."""
+        if getattr(self, "_pd_phrases", None) is None:
+            from sizeup import stt_vocab
+            prof = (stt_vocab.profiles()["profiles"].get("police") or {})
+            self._pd_phrases = stt_vocab.police_phrases(tuple(prof.get("towns") or ("Port Chester", "Rye", "Rye Brook")))
+        return list(self._pd_phrases)
+
     def _vocab_ready(self, name: str) -> None:
         if self.aws is not None and self.aws.vocabulary != name:
             self.aws.vocabulary = name
@@ -2421,7 +2769,8 @@ class App:
 
     def _aws_alt(self, item, pcm: np.ndarray, key: str) -> None:
         """"both": the local text is in; Amazon Transcribe's becomes the text, the local one the alternative."""
-        if self.aws is None or not self.aws.available()[0]:
+        from sizeup.transcribe import is_context
+        if self.aws is None or not self.aws.available(key if is_context(key) else None)[0]:
             return
         alt = {"text": getattr(item, "text", "") if isinstance(item, Traffic) else getattr(item, "raw", ""),
                "model": getattr(item, "model", "") or ""}
@@ -2431,7 +2780,8 @@ class App:
     def _aws_done(self, job: AwsJob, text: str, conf: float | None) -> None:
         status = "done" if text else "no_speech"
         if job.rerun:
-            changed = self._retext(job.id, text, status, conf, channels_model(), why="AWS Transcribe re-run")
+            changed = self._retext(job.id, text, status, conf, channels_model(), why="AWS Transcribe re-run",
+                                   quiet=job.catchup)
             return self._rerun_finish(job.id, "changed" if changed else "same", channels_model())
         if job.kind == "page" and job.alt is None:
             page = job.page
@@ -2442,6 +2792,9 @@ class App:
 
     def _aws_failed(self, job: AwsJob, why: str) -> None:
         """Never dropped: the local model takes it ("both": the local text simply stays)."""
+        if job.catchup:                       # still skipped: a failed try on its row, the catch-up tries it again later
+            log(f"aws transcribe: catch-up {job.id}: {why}: left skipped")
+            return self._rerun_finish(job.id, f"failed: AWS: {why[:80]}")
         log(f"aws transcribe: {job.kind} {job.id}: {why}" + ("" if job.alt is not None else ": using the local model"))
         if job.rerun:
             self._rerun_note[job.id] = f"AWS failed ({why[:80]})"
@@ -2455,13 +2808,25 @@ class App:
             page = job.page
             if page.audio is not None:
                 page.status, page.model, page.stt = "pending", "", ""
+                self._stt_row(page.id, "pending", f"{WHISPER_FALLBACK} (AWS failed: {why[:80]})")
                 self.stt.submit(page, page.voice, URGENT, job.channel)
                 return
-            page.status = "error"
+            page.status, page.model = "error", f"{channels_model()} (failed: {why[:80]})"  # type: ignore[attr-defined]
+            self._stt_row(page.id, "error", page.model)
             self._save_page(page)
             return
+        # (said first: a fast whisper finishing before this line would otherwise be put back to "Transcribing")
+        self._stt_row(job.id, "pending", f"{WHISPER_FALLBACK} (AWS failed: {why[:80]})")
         if not self._rerun_local([job.id]):
             self._retext(job.id, "", "error", None, f"{channels_model()} (failed: {why[:80]})", why="AWS Transcribe")
+
+    def _stt_row(self, cid: str, status: str, model: str) -> None:
+        """The log's row says where its speech-to-text stands now (Comms.set_stt): which engine has it, or that it
+        failed, while its text is still to come (the text, when it comes, says which engine wrote it)."""
+        try:
+            self.cad.comms.set_stt(cid, status, model[:200])
+        except Exception as e:  # the CAD must never stop the monitor
+            log(f"CAD: could not update the communications log: {type(e).__name__}: {e}")
 
     def _aws_late(self, job: AwsJob, text: str, conf: float | None) -> None:
         """AWS answered after the job's deadline (#195): its fallback ran already, so the late text never takes
@@ -2474,7 +2839,7 @@ class App:
         item, _key = self._find(job.id)
         if item is None:
             return
-        if getattr(item, "status", "") in ("error", "skipped") and job.alt is None and not job.rerun:
+        if getattr(item, "status", "") in ("error", "skipped") and job.alt is None and (not job.rerun or job.catchup):
             log(f"aws transcribe: {job.kind} {job.id}: a late answer, and the fallback had none: it is the text")
             return self._aws_done(job, text, conf)
         log(f"aws transcribe: {job.kind} {job.id}: a late answer, kept as the alternative"
@@ -2508,6 +2873,29 @@ class App:
     def aws_limit_default(self) -> float:
         return float(self.cfg.stt_aws_limit_usd)
 
+    def aws_context_limit_default(self) -> float:
+        return float(self.cfg.stt_aws_context_limit_usd)
+
+    def context_aws_keys(self) -> list[str]:
+        """Another P25 system's talkgroups set to AWS or both (their own budget, transcribe.CONTEXT): the ones the
+        station must hear about separately when only one of the two budgets is used up."""
+        from sizeup.transcribe import is_context
+        keys = {*self._chan_ov, *self.cfg.stt_aws_channels}
+        return sorted(k for k in keys if is_context(k) and self.channel_pref(k).get("engine") in ("aws", "both"))
+
+    def aws_split(self, ok: bool) -> tuple[list[str], list[str], str]:
+        """(context keys that keep AWS while ours can't, context keys that can't while ours can, why): the police
+        budget and ours are apart (radio-intel PR 3), so one running out never moves the other's channels."""
+        ctx = self.context_aws_keys() if self.aws is not None else []
+        if not ctx:
+            return [], [], ""
+        cok, cwhy = self.aws.available(ctx[0])        # one pool, one breaker: the same answer for every context key
+        if ok and not cok:
+            return [], ctx, cwhy
+        if not ok and cok:
+            return ctx, [], ""
+        return [], [], ""
+
     def _channel_overrides(self) -> dict:
         """The channel choices (renamed_overrides), the old names' moved and dropped in the store too (#307)."""
         stored = self.cad.settings.channel_overrides()
@@ -2522,6 +2910,8 @@ class App:
 
     def channels_changed(self) -> None:
         self._chan_ov = self._channel_overrides()
+        self._sq_ov = channels.norm_squelch(self.cad.settings.squelch_overrides())
+        self._apply_squelch()
         log("speech-to-text channels: " + (", ".join(f"{k} {v}" for k, v in sorted(self._chan_ov.items())) or "the defaults"))
 
     def vocabulary_suggestions(self) -> list[str]:
@@ -2547,6 +2937,9 @@ class App:
             r = getattr(self, "atc_refresh", None)             # ... with the operators seen near HPN lately (#257)
             self._atc_vocab_pending()
             st = dict(st, atc=self.atc_vocab.push(r.phrases() if r is not None else atc.vocabulary()["phrases"]))
+        if getattr(self, "pd_vocab", None) is not None:        # the police sources' own (radio-intel PR 3)
+            self._pd_vocab_pending()
+            st = dict(st, pd=self.pd_vocab.push(self.police_vocabulary()))
         return st
 
     def vocabulary_state(self) -> dict:
@@ -2558,6 +2951,10 @@ class App:
             a = self.atc_vocab.state()
             a.pop("respell", None)
             st["atc"] = a
+        if getattr(self, "pd_vocab", None) is not None:
+            a = self.pd_vocab.state()
+            a.pop("respell", None)
+            st["pd"] = a
         return st
 
     def aws_status(self) -> dict:
@@ -2566,7 +2963,7 @@ class App:
         if self.aws is None:
             return {"enabled": False, "where": "hub" if self.forwarding() else "none", "ok": ok, "why": why}
         return {"enabled": True, "where": "here", "ok": ok, "why": why, **self.aws.spent(),
-                "price_per_min": self.aws.s.price_per_min, **self.aws.status()}
+                "price_per_min": self.aws.s.price_per_min, "context": self.aws.context_budget(), **self.aws.status()}
 
     # -- the hub's choices on the station (the set_channel_prefs job) ------------------------------------------
 
@@ -2576,21 +2973,28 @@ class App:
         except ValueError:
             d = {}
         return {"ok": bool(d.get("ok")), "why": str(d.get("why") or "the hub hasn't said whether it can use AWS yet"),
-                "reserve": [str(k) for k in (d.get("reserve") or [])]}
+                "reserve": [str(k) for k in (d.get("reserve") or [])],
+                **({"deny": [str(k) for k in d["deny"]], "deny_why": str(d.get("deny_why") or "")}
+                   if d.get("deny") else {})}
 
-    def set_channel_prefs(self, prefs: dict, aws: dict | None = None, tones: dict | None = None) -> dict:
-        """From the hub (CAD of record): its whole channel map, whether it can take AWS audio now, and the
-        tone pairs named there (#80; a hub from before sends none: this station's stay). Applied here and
-        kept (this station's own Settings overrides, audited as "hub")."""
+    def set_channel_prefs(self, prefs: dict, aws: dict | None = None, tones: dict | None = None,
+                          squelch: dict | None = None) -> dict:
+        """From the hub (CAD of record): its whole channel map, whether it can take AWS audio now, the
+        tone pairs named there (#80; a hub from before sends none: this station's stay) and the FM channels'
+        squelch (none from a hub before it: this station's stay). Applied here and kept (this station's own
+        Settings overrides, audited as "hub"); the squelch at once, on the running receivers."""
         clean = channels.check_map(prefs)
+        sq = self._check_squelch(squelch) if squelch is not None else None
+        if sq is not None and self.cad.settings.replace_squelch(sq, "hub"):
+            self._sq_ov = channels.norm_squelch(self.cad.settings.squelch_overrides())
+            self._apply_squelch()
         changed = self.cad.settings.replace_channels(clean, "hub")
         self._chan_ov = self._channel_overrides()
         if isinstance(tones, dict) and self.cad.settings.replace_tones(tones, "hub"):
             self._apply_named_tones()
             changed = True
         if isinstance(aws, dict):
-            new = {"ok": bool(aws.get("ok")), "why": str(aws.get("why") or "")[:300],
-                   "reserve": [str(k)[:40] for k in (aws.get("reserve") or [])][:8]}
+            new = channels.hub_aws(aws)
             if new != self._hub_aws:
                 self._hub_aws = new
                 self.cad.store.meta_put("hub_aws", json.dumps(new))
@@ -2603,7 +3007,90 @@ class App:
     def channels_applied(self) -> dict:
         """What this station runs (its state push: the hub compares sig)."""
         return {"prefs": self._chan_ov, "aws": dict(self._hub_aws), "tones": len(self._tone_ov),
-                "sig": channels.sig(self._chan_ov, self._hub_aws["ok"], self._tone_ov, self._hub_aws.get("reserve"))}
+                "squelch": self._sq_ov, "squelch_ok": True,       # (takes the squelch: a hub sends it)
+                "deny_ok": True,                                  # (takes aws.deny: radio-intel PR 3)
+                "sig": channels.sig(self._chan_ov, self._hub_aws["ok"], self._tone_ov, self._hub_aws.get("reserve"),
+                                    self._sq_ov, self._hub_aws.get("deny"))}
+
+    # -- an FM channel's squelch (Settings > Radios > Squelch; sizeup/radio/fm.py) ---------------------------
+
+    def squelch_defaults(self, key: str) -> dict:
+        """The receiver's own: open at the config's squelch_db, close CLOSE_DB, MIN_OPEN_S (the hub: the station's)."""
+        c = next((c for c in self.cfg.channels if c.label == key and c.kind != "airband"), None)
+        return {"open_db": float(c.squelch_db) if c is not None else 10.0, "close_db": CLOSE_DB, "min_open_s": MIN_OPEN_S}
+
+    def _check_squelch(self, m) -> dict:
+        """The hub's squelch map against this station's channels (channels.fit_squelch): traffic channels only (a
+        paging channel's squelch is never set: a high Open would mute a page), close under open with this station's
+        own defaults. What doesn't fit is left out and logged, never refused: the rest of the push still applies."""
+        kept, why = channels.fit_squelch(m, self._kind, self.squelch_defaults)
+        if why:
+            log("squelch from the hub: left out " + "; ".join(why))
+        return kept
+
+    def _apply_squelch(self) -> None:
+        """Each FM receiver's squelch as set (else its default), on the running squelch: no restart."""
+        for r in getattr(self, "receivers", []):
+            label = r.channel.label
+            if self._kind.get(label) != "traffic" or isinstance(r, AmReceiver):
+                continue                    # paging (South 2): always the receiver's own; airband: its own squelch
+            s = {**self.squelch_defaults(label), **(self._sq_ov.get(label) or {})}
+            if r.set_squelch(s["open_db"], s["close_db"], s["min_open_s"]) and label in self._sq_ov:
+                log(f"{label}: squelch opens at {s['open_db']:g} dB, closes under {s['close_db']:g} dB, "
+                    f"keeps {s['min_open_s']:g} s or more")
+
+    def _keyup(self, label: str, seg: Segment, has_id: bool, speech: bool, tid: str = "") -> tuple:
+        """A traffic channel's transmission, for telling real key-ups from interference: its length, quieting,
+        estimated CTCSS tone (radio/fm.py ctcss_estimate), ID, speech. On its own thread (_keyup_pool)."""
+        try:
+            est = ctcss_estimate(seg.audio)
+        except Exception:  # noqa: BLE001 - a diagnostic, never in the way of the transmission
+            est = ("unsure", None)
+        with self._lock:
+            self._keyups.setdefault(label, deque(maxlen=300)).append(
+                (seg.end, round(seg.end - seg.start, 1), round(float(seg.quieting_db), 1), est[0], est[1], has_id, speech))
+            if tid:
+                if len(self._keyup_pl) > 500:
+                    self._keyup_pl.clear()
+                self._keyup_pl[tid] = est
+        return est
+
+    def keyups(self, label: str, now: float | None = None, window_s: float = 3600.0) -> dict:
+        """The last hour's key-ups on a channel: how many, without speech, by estimated CTCSS tone ("none": no line,
+        "unsure"), the lengths and quieting of the ones without speech, and the last few
+        ([end, s, quieting, verdict, Hz, ID, speech])."""
+        now = time.time() if now is None else now
+        with self._lock:
+            rows = [k for k in self._keyups.get(label, ()) if now - k[0] <= window_s]
+        tones: dict[str, int] = {}
+        for k in rows:
+            key = f"{k[4]:g}" if k[3] == "tone" else k[3]
+            tones[key] = tones.get(key, 0) + 1
+        bare = [k for k in rows if not k[6] and not k[5]]
+        return {"n": len(rows), "no_speech": len(bare), "tones": tones,
+                "bare_s": sorted(k[1] for k in bare)[:50], "bare_q": sorted(k[2] for k in bare)[:50],
+                "recent": [list(k) for k in rows[-8:]]}
+
+    def squelch_state(self) -> dict:
+        """GET /api/cad/squelch: each FM channel's squelch as set, as running, its noise floor and short opens."""
+        rows = []
+        for r in self.radio_status():
+            if not isinstance(r, dict) or "min_open_s" not in r:
+                continue
+            key = r.get("label")
+            kind = r.get("channel_kind") or ""
+            rows.append({"key": key, "mhz": r.get("mhz"), "state": r.get("state"), "open": bool(r.get("open")),
+                         "kind": kind, "editable": kind == "traffic",
+                         "set": dict(self._sq_ov.get(key) or {}),
+                         "default": r.get("squelch_default") or self.squelch_defaults(key),
+                         "running": {f: r.get(f) for f in channels.SQUELCH},
+                         "hiss_db": r.get("hiss_db"), "quieting_db": r.get("quieting_db"), "floor_db": r.get("floor_db"),
+                         "short_per_min": r.get("short_per_min"), "keyups": r.get("keyups")})
+        ed = {r["key"] for r in rows if r["editable"]}
+        orphans = [{"key": k, "set": v} for k, v in sorted(self._sq_ov.items()) if k not in ed]   # renamed, gone, paging
+        return {"channels": rows, "orphans": orphans, "sync": self.channels_sync(),
+                "chatter_per_min": channels.CHATTER_PER_MIN,
+                "ranges": {f: list(v) for f, v in channels.SQUELCH.items()}}
 
     def channels_sync(self) -> dict:
         if self.forwarding():
@@ -2614,9 +3101,15 @@ class App:
         """Settings > Radios > Channels: the choices, what AWS can do, where they stand, the cost."""
         ok, why = self.aws_ok()
         reserve = ([k for k in channels_reserve(self) if self.aws_ok(k)[0]] if not ok else [])
+        if self.forwarding():
+            deny = list(self._hub_aws.get("deny") or [])
+            reserve += [k for k in self._hub_aws.get("reserve") or [] if k not in reserve] if not ok else []
+        else:
+            more, deny, _why = self.aws_split(ok)
+            reserve += more
         return {"prefs": self._chan_ov, "aws_channels": list(self.cfg.stt_aws_channels),
                 "record_only": list(self.cfg.stt_record_only), "aws_ok": ok, "aws_why": why,
-                "aws_reserve": reserve,
+                "aws_reserve": reserve, "aws_deny": deny,
                 "fm": [{"key": c.label, "kind": c.kind, "mhz": c.mhz,
                         **({"schedule": plan_text(c)} if getattr(c, "schedule", ()) or getattr(c, "also", ()) else {})}
                        for c in self.cfg.channels],
@@ -3079,6 +3572,7 @@ class App:
         r = make_receiver(self.cfg, c, self._dongle(serial), self._segment, self._heard_elsewhere)
         self.tap.attach(r)
         self.receivers[self.receivers.index(old)] = r
+        self._apply_squelch()
         return r
 
     def _running(self, r) -> bool:
@@ -3310,6 +3804,11 @@ class App:
         out = []
         for r in self.receivers:
             st = r.status()
+            if "min_open_s" in st:                   # the noise squelch: its defaults, for Settings on the hub
+                st["squelch_default"] = self.squelch_defaults(r.channel.label)
+                st["channel_kind"] = self._kind.get(r.channel.label, "")    # only traffic squelch is editable
+                if self._kind.get(r.channel.label) == "traffic":
+                    st["keyups"] = self.keyups(r.channel.label)
             if self.shared and r.channel.label not in self.assign.values():
                 st.update(state="off", detail=self._off_detail(), open=False, quieting_db=None, open_s=None, stuck=False)
             out.append(st)
@@ -3435,8 +3934,12 @@ class App:
         if self.tts:
             self.tts.start()
         self.stt.start()
+        self.catchup.start()                      # its first look minutes from now: nothing written at start
         threading.Thread(target=self._janitor, name="janitor", daemon=True).start()
+        if not self.forwarding():
+            self.cad.intel.start()                # radio pre-alerts (sizeup/intel): the "intel" thread
         self.attachments.start()                  # linked transmissions copied to the attachments bucket (#323)
+        self.cad.preplan_docs.start()             # site documents: objects no document names, swept (#459)
         threading.Thread(target=self.cad.place_index, name="places", daemon=True).start()   # built before the first "@"
         threading.Thread(target=self._watch_fm, name="talking", daemon=True).start()
         if self.shared:
@@ -3471,12 +3974,14 @@ class App:
             self.p25.start()
         for rt in self.systems.values():
             rt.ingest.start()
-        if self.systems:
+        if self.systems or self.reception.probes:
             self.reception.start_thread()
         if self.vocab is not None and self.vocab.state()["state"] == "PENDING":
             self.vocab.poll()
         if getattr(self, "atc_vocab", None) is not None and self.atc_vocab.state()["state"] == "PENDING":
             self.atc_vocab.poll()
+        if getattr(self, "pd_vocab", None) is not None and self.pd_vocab.state()["state"] == "PENDING":
+            self.pd_vocab.poll()
         if self.station is not None:
             self.station.start()
         elif self.link is not None:
@@ -3654,9 +4159,11 @@ class App:
 
     def stop(self) -> None:
         self._stopping.set()
+        self.catchup.stop()
         self.cad.stop_voice()                # dispatch voices still rendering get a moment (#426); the rest: the next start's
         self.reception.shutdown()              # (#410) a running reception test ends here: its dongle back on its job
         self.attachments.stop()
+        self.cad.preplan_docs.stop()
         for r in self.receivers:
             r.stop()
         for page in self.pagehold.flush():   # pages still in their continuation window: as they are
@@ -3710,12 +4217,18 @@ def channels_reserve(app) -> tuple:
     return RESERVE_CHANNELS
 
 
+# The model a row shows while whisper does a clip AWS couldn't (the station's on the hub): "Transcribing (whisper)" in
+# the log, never "(AWS)"; whisper's own model name replaces it with the text (cad.js sttSaid).
+WHISPER_FALLBACK = "whisper"
+WHISPER_FALLBACK_STATION = "whisper on the station"
+
+
 def channels_model() -> str:
     from sizeup.transcribe import MODEL
     return MODEL
 
 
-def make_app(cfg: Config) -> App:
+def make_app(cfg: Config, fence=None) -> App:
     """The app for this config's role: the hub (no radios: fed by the station, sizeup/cloud/hub.py),
     or all-in-one, forwarding to the hub as the station when that is on (config.toml's [cloud] role
     = "station" until Settings > System > Station changes it: sizeup/cloud/stationmode.py)."""
@@ -3723,26 +4236,26 @@ def make_app(cfg: Config) -> App:
         from sizeup.cloud.adapters import hub_guard
         from sizeup.cloud.hub import HubApp
         hub_guard(cfg.cloud_role, log)     # incident-source adapters: the station's only (#301), never loaded here
-        return HubApp(cfg, log=log)
+        return HubApp(cfg, log=log, fence=fence)
     # the incident-source adapter's credentials (#301): files under $CREDENTIALS_DIRECTORY only, out of os.environ before
     # anything is started (sizeup/procenv.py)
     from sizeup.procenv import take_credentials
     take_credentials(cfg.adapter_env)
-    app = App(cfg)
+    app = App(cfg, fence=fence)
     from sizeup.cloud.stationmode import StationMode
     StationMode(app, cfg, log=log)     # on: sets app.events / app.link now, so nothing is missed
     app.prealert_sync()                # state/cloud.json may say otherwise than config.toml
     return app
 
 
-def start_app(cfg: Config) -> App:
+def start_app(cfg: Config, fence=None) -> App:
     """make_app() and start it; the hub's log is read for its own error spikes first (#285, sizeup/errwatch.py)."""
     if cfg.cloud_role == "hub":
         # #284: Python's sqlite3 lets the GIL go at every row it steps, and waits up to the switch interval to get it
         # back while another thread computes (a GIS layer's refresh, the state push): 5 ms a row by default, so a
         # 500-row Radio view took 1-2 s whenever anything else was busy. 1 ms: about 5x less, for a little switching.
         sys.setswitchinterval(HUB_SWITCH_S)
-    app = make_app(cfg)
+    app = make_app(cfg, fence)
     if getattr(app, "error_watch", None) is not None:      # the hub: its own error spikes to the status topic
         from sizeup import errwatch
         errwatch.install(app.error_watch)
@@ -3829,7 +4342,7 @@ def init_state(cfg: Config) -> list[str]:
     made: list[str] = []
     if not cfg.cad_db:
         return made
-    Cad.from_config(cfg, log=log).store.db.close()     # the schema, its migrations, the seeded lists
+    Cad.from_config(cfg, log=log).shutdown()           # the schema, its migrations, the seeded lists
     made.append(cfg.cad_db)
     if cfg.cloud_role == "hub":
         from sizeup.cloud.hubstore import AudioDb, MonitorDb
@@ -3845,7 +4358,8 @@ def main(argv: list[str] | None = None) -> int:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--config", default="config.toml")
     ap.add_argument("--init-state", action="store_true",
-                    help="create / migrate the databases and exit (the hub container runs this before Litestream)")
+                    help="create / migrate the databases and exit (never on a replicated file Litestream isn't "
+                         "replicating: docs/cloud.md \"Replicate before migrate\")")
     args = ap.parse_args(argv)
     try:
         cfg = load(args.config)
@@ -3904,8 +4418,10 @@ def run_gated(cfg: Config, gate: Path) -> int:
     write until the supervisor says so through the gate file (and the lease file says the lock is ours):
 
         (standby)  prewarm(): imports, the gazetteer, the map providers and their caches, the ATC rules; then wait
-        "init"     the takeover: the databases promoted. --init-state's work, here (no new Python to start); the
-                   answer ("ok" / "error: ...") in <gate>.answer; then wait while the supervisor starts Litestream
+        "init"     the takeover: the databases promoted and Litestream already replicating each (the supervisor
+                   confirmed it: docs/cloud.md "Replicate before migrate"). --init-state's work, here (no new Python
+                   to start): the migrations; the answer ("ok" / "error: ...") in <gate>.answer; then wait while the
+                   supervisor confirms they are in S3
         "run"      the port listens at once ("updating": the supervisor starts the connector beside it), the app is
                    built and takes the socket over: the CAD serves
 
@@ -3935,7 +4451,7 @@ def run_gated(cfg: Config, gate: Path) -> int:
         log(f"sizeup: databases ready ({cfg.cad_db or 'in memory'})")
         t.mark("init-state")
         _wait_gate(gate, ("run",))
-        t.mark("litestream")                      # (the supervisor starts it meanwhile)
+        t.mark("replicated")                      # (the supervisor confirms the migrations are in S3 meanwhile)
     early = None
     try:
         from sizeup.web.updating import serve_updating
@@ -3954,7 +4470,7 @@ def serve(cfg: Config, fence=None, phases=None, early=None) -> int:
     t = phases if phases is not None else Phases("startup")
     _STARTUP = t
     try:
-        app = start_app(cfg)                      # make_app, the hub's errwatch on its log (#285), start
+        app = start_app(cfg, fence)               # make_app, the hub's errwatch on its log (#285), start
     finally:
         _STARTUP = None
     t.mark("start")

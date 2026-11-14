@@ -1,8 +1,8 @@
-// The station adapter's county password (sizeup/cloud/adapterpass.py): Settings > Health, admins, the hub only.
+// The station adapter's county password (sizeup/cloud/adapterpass.py): Settings > Station > Adapter, admins, the hub only.
 // Write-only: a new password typed twice goes to POST /api/cad/adapter-password, which saves it as the next SSM
 // version; the hub can't read it back, and nothing here keeps it (no form element: never a GET with it in the URL; the
 // fields are emptied as the request goes). GET /api/cad/adapter-password: the version, when and who saved it, the
-// next save, the station adapter's state. Its own card and poll, so typing is never wiped by Health's 5 s render.
+// next save, the station adapter's state. Its own card and poll, so typing is never wiped by another panel's render.
 const AdapterPasswordCard = (() => {
   const POLL_MS = 15000;
   let card = null, status = null, form = null, timer = null, busy = false, saving = false, last = null, said = "";
@@ -34,7 +34,7 @@ const AdapterPasswordCard = (() => {
     confirmBox.type = "checkbox";
     confirmLabel.append(confirmBox, el("span", "", "Stopped on refused log-ons: save anyway"));
     confirmLabel.title = "The adapter stopped after the county refused its log-ons. A new version lifts a login stop for "
-      + "one attempt; a manual stop also needs Reset (Health above)";
+      + "one attempt; a manual stop also needs Reset (Station > Health)";
     confirmLabel.hidden = true;
     saveBtn = el("button", "primary", "Save");
     saveBtn.type = "button";
@@ -130,7 +130,7 @@ const AdapterPasswordCard = (() => {
     if (again && isOpen()) timer = setTimeout(poll, POLL_MS);
   }
 
-  // health.js, each mount of Settings > Health: the card (made once), then the poll.
+  // settings.js, each render of Settings > Station > Adapter: the card (made once), then the poll.
   function mount(node, before) {
     if (!card || !node.contains(card)) {
       card = el("div", "card s-card hl-card");

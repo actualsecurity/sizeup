@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Callable
 
 from sizeup.audiostore import PREFIX, StoreError, object_key
+from sizeup.fence import GuardedConnection
 from sizeup.incidents import Incident, IncidentStore, Traffic
 
 MONITOR_SCHEMA = """
@@ -70,7 +71,8 @@ SWEEP_MARGIN_S = 3600.0              # ... and never an object uploaded within t
 def _connect(path: str, incremental: bool = False) -> sqlite3.Connection:
     if path != ":memory:":
         Path(path).parent.mkdir(parents=True, exist_ok=True)
-    db = sqlite3.connect(path, check_same_thread=False, isolation_level=None)
+    # the writer's connection: no write gets through while its may_write() says False (the hub's fence, #501)
+    db = sqlite3.connect(path, check_same_thread=False, isolation_level=None, factory=GuardedConnection)
     if incremental and not db.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchone():
         # a new file: free pages handed back a few at a time, off-peak (AudioDb.incremental_vacuum, #251); before
         # WAL, which writes the header. An older file keeps auto_vacuum off (turning it on is a whole VACUUM, a
@@ -91,6 +93,15 @@ class MonitorDb:
         self.db.executescript(MONITOR_SCHEMA)
         self._lock = threading.Lock()
         self._written: dict[tuple[str, str], str] = {}     # (table, id) -> doc as last written
+
+    @property
+    def may_write(self) -> Callable[[], bool]:
+        """Only the leader writes hub.sqlite (the fence, set by HubApp; #501): the connection skips every write else."""
+        return getattr(self, "_may_write", None) or self.db.may_write
+
+    @may_write.setter
+    def may_write(self, fn: Callable[[], bool]) -> None:
+        self._may_write = self.db.may_write = fn
 
     # -- meta (the station's events applied so far) ---------------------------------------------------
 
@@ -154,6 +165,7 @@ class MonitorDb:
         for p in page_docs:
             rows[("pages", p["id"])] = (_dump(p), p.get("start") or 0.0)
         n = 0
+        written: dict[tuple[str, str], str | None] = {}    # into _written only once COMMIT has landed (#501)
         with self._lock:
             self.db.execute("BEGIN")
             try:
@@ -171,16 +183,22 @@ class MonitorDb:
                     else:
                         self.db.execute("INSERT INTO pages (id, start, doc) VALUES (?, ?, ?) ON CONFLICT(id) DO "
                                         "UPDATE SET start = excluded.start, doc = excluded.doc", (key, v[1], v[0]))
-                    self._written[(table, key)] = v[0]
+                    written[(table, key)] = v[0]
                     n += 1
                 for (table, key) in [k for k in self._written if k not in rows]:
                     self.db.execute(f"DELETE FROM {table} WHERE id = ?", (key,))
-                    del self._written[(table, key)]
+                    written[(table, key)] = None
                     n += 1
                 self.db.execute("COMMIT")
             except Exception:
-                self.db.execute("ROLLBACK")
+                if self.db.in_transaction:
+                    self.db.execute("ROLLBACK")
                 raise
+            for k, doc in written.items():
+                if doc is None:
+                    self._written.pop(k, None)
+                else:
+                    self._written[k] = doc
         return n
 
 
@@ -216,7 +234,7 @@ class AudioDb:
             self.ro, self.scan = self._reader(), self._reader()
         self.max_bytes = int(max_bytes)
         self.store, self.cache, self.log = store, cache, log
-        self.may_write = may_write or (lambda: True)
+        self.may_write = may_write or (lambda: True)      # the writer connection's own guard too (#501)
         # deletes from the store (the retention's, the orphan sweep's): only with a real lease that is ours and fresh
         # (the hub's fence); without one (a local hub, a test) nothing is ever deleted from a store
         self.may_delete = may_delete or (lambda: False)
@@ -234,6 +252,14 @@ class AudioDb:
         self._said: dict[str, float] = {}
         self._missing = 0
         self.wake = threading.Event()              # put() -> the uploader, at once
+
+    @property
+    def may_write(self) -> Callable[[], bool]:
+        return getattr(self, "_may_write", None) or self.db.may_write
+
+    @may_write.setter
+    def may_write(self, fn: Callable[[], bool]) -> None:
+        self._may_write = self.db.may_write = fn
 
     def _say(self, what: str, msg: str, every_s: float = 600.0) -> None:
         now = time.monotonic()
