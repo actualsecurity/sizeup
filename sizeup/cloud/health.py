@@ -151,6 +151,12 @@ SETTLE_FLAPPING_S = 30 * 60.0   # ... this long for one flapping:
 FLAP_N = 3                  # back this many times ...
 FLAP_WINDOW_S = 3600.0      # ... within this long
 HUB_OWN = ("silent", "transcribe", "aws_budget80", "aws_budget")   # decided on the hub's own data, the station silent or not
+REPLICA_STALE = 3.0         # the Replicas row says "stale" when the last check is this many leader intervals old
+
+
+def hub_own(key: str) -> bool:
+    """Decided on the hub's own data (the replicas too: "replica:cad"), the station silent or not."""
+    return key in HUB_OWN or str(key).startswith("replica:")
 MUTE_SECTION = "alert_mutes"    # the CAD settings section of the mutes (sizeup/cad/settings.py _mutes_op)
 # The alert kinds an admin may mute (#340): the part of an alert's key before ":" (aws_budget80 is aws_budget's).
 MUTE_KINDS = {"adsb": "ADS-B receiver down", "whisper": "Speech-to-text down", "stt_backlog": "Speech-to-text behind",
@@ -514,6 +520,7 @@ class StationHealth:
         self._clear_at: dict[str, float] = {}        # an alert's real clear time when it clears later than that
         self.settling: dict[str, dict] = {}          # cleared, not yet settled (#340): back before SETTLE_S, one episode
         self.mutes: Callable[[], dict] | None = None   # the mutes' settings section (#340): HubApp sets it
+        self.replicas: Callable[[], dict | None] | None = None   # the supervisor's replica checks (sizeup/replicawatch.py)
         self._load()
         self._first_saved = {k: v for k, v in self._first.items() if k in self.settling}
 
@@ -817,6 +824,7 @@ class StationHealth:
                                              "higher limit (Settings > Radios)" + (f" · {bud['reserve_text']}"
                                                                                   if bud.get("reserve_text") else ""),
                                      "since": float(bud.get("limit_since") or now)}
+        out.update(self._replica_alerts())                       # the hub's own too
         lw = os.environ.get("SIZEUP_LITESTREAM_WARNING", "").strip()   # the hub's supervisor (sizeup/handoff.py)
         if lw:
             out["litestream"] = {"severity": "warning", "title": "Litestream too old", "text": lw[:300],
@@ -944,6 +952,57 @@ class StationHealth:
                 a["who"] = self._who(k, m)
         return out, True
 
+    def _replica_state(self) -> dict | None:
+        if self.replicas is None:
+            return None
+        try:
+            d = self.replicas()
+        except Exception:  # noqa: BLE001 - never in the way of the rest
+            return None
+        return d if isinstance(d, dict) else None
+
+    def _replica_alerts(self) -> dict[str, dict]:
+        """"Replica corrupt" for each file the supervisor's last check found bad (or couldn't check twice running).
+        Quiet: the supervisor pushed it already, at once (sizeup/replicawatch.py), with its own limit."""
+        d = self._replica_state() or {}
+        out: dict[str, dict] = {}
+        for db, c in (d.get("checks") or {}).items():
+            if not isinstance(c, dict) or db not in (d.get("failing") or {}):
+                continue
+            e = c.get("last_error") if c.get("ok") is not False and isinstance(c.get("last_error"), dict) else c
+            corrupt = c.get("ok") is False
+            out[f"replica:{db}"] = {
+                "severity": "critical", "quiet": True,
+                "title": f"Replica {'corrupt' if corrupt else 'not verifiable'}: {db}.sqlite",
+                "text": f"{e.get('mode') or 'check'}: {' · '.join(str(e.get('result') or '').splitlines()[:2])[:120]} · {e.get('by') or '?'} "
+                        f"{_hhmm(e.get('at'))} · a takeover from it would fail",
+                "since": float((d.get("failing") or {}).get(db) or e.get("at") or 0) or self.clock()}
+        return out
+
+    def replicas_panel(self, now: float) -> dict | None:
+        """Settings > Health's Replicas row: each file's last check (result, when, by whom), the last task failures."""
+        d = self._replica_state()
+        if d is None:
+            return None
+        every = float(d.get("leader_interval_s") or 900.0) or 900.0
+        rows = []
+        for db in ("cad", "hub", "audio"):
+            c = (d.get("checks") or {}).get(db)
+            if not isinstance(c, dict):
+                rows.append({"db": db, "state": "none"})
+                continue
+            ok = c.get("ok")
+            state = "ok" if ok is True else "corrupt" if ok is False else "error"
+            if state == "ok" and now - float(c.get("at") or 0) > REPLICA_STALE * every * (4 if db == "audio" else 1):
+                state = "stale"
+            le = c.get("last_error") if isinstance(c.get("last_error"), dict) else None
+            rows.append({"db": db, "state": state, "at": c.get("at"), "result": str(c.get("result") or "")[:200],
+                         "mode": c.get("mode"), "by": c.get("by"), "txid": c.get("txid"), "secs": c.get("secs"),
+                         "error": str(le.get("result") or "")[:200] if le else "", "error_at": le.get("at") if le else None})
+        events = [{k: e.get(k) for k in ("at", "kind", "why", "code")} for e in (d.get("events") or [])
+                  if isinstance(e, dict) and now - float(e.get("at") or 0) <= HISTORY_S]
+        return {"rows": rows, "events": events[-5:][::-1]}
+
     def _notify_ok(self, a: dict, now: float) -> bool:
         """Old enough to push (NOTIFY_AFTER); the whisper backlog only while it is still that far behind now, not one
         nearly caught up (#300)."""
@@ -1047,8 +1106,10 @@ class StationHealth:
 
     def _who(self, key: str, m: dict) -> dict:
         """Who / where an alert is about (sizeup/notify.py Who): the station, the dongle, the channel."""
-        w: dict = {"station": m["station"]["name"] or m["station"]["id"] or "the station"}
         kind, _, arg = key.partition(":")
+        if kind == "replica":
+            return {}                                    # the hub's own files: no station in it
+        w: dict = {"station": m["station"]["name"] or m["station"]["id"] or "the station"}
         if kind == "silent":
             last = self.hub.last_state
             w["detail"] = f"last heard {_hhmm(last)}" if last else "never reported"
@@ -1139,7 +1200,7 @@ class StationHealth:
             for key in list(self.active):
                 if key in conds:
                     continue
-                if key not in HUB_OWN and not judged:
+                if not hub_own(key) and not judged:
                     continue                             # the station's data is old: leave it as it was
                 a = self.active.pop(key)
                 a["cleared"] = self._clear_at.pop(key, now)
@@ -1150,7 +1211,7 @@ class StationHealth:
             cut = now - HISTORY_S
             self.history = [h for h in self.history if (h.get("cleared") or now) >= cut][-HISTORY_MAX:]
             for key, a in list(self.settling.items()):
-                if (key not in HUB_OWN and not judged) or now - float(a["cleared"]) < self._settle_s(a) \
+                if (not hub_own(key) and not judged) or now - float(a["cleared"]) < self._settle_s(a) \
                         or key in self._first:          # (held() sees it again, within its grace: not clear)
                     continue                             # not settled yet (or can't tell: the station is silent)
                 self._settle(key, now, mutes)
@@ -1303,6 +1364,7 @@ class StationHealth:
                            "last_error": getattr(n, "last_error", ""), "last_push": max(pushed.values(), default=None),
                            "muted": [{"kind": k, "label": MUTE_KINDS[k], "until": u} for k, u in self._mutes(now).items()]},
                 "errors": self.errors.panel() if self.errors is not None else None,
+                "replicas": self.replicas_panel(now),
                 "thresholds": {"silent_min": self.silent_s / 60, "behind_min": self.behind_s / 60,
                                "down_min": self.down_s / 60, "outbox_min": self.outbox_s / 60,
                                "disk_pct": self.disk_pct, "repeat_min": self.repeat_s / 60,

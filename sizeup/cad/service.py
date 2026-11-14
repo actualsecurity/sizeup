@@ -209,6 +209,7 @@ class Cad:
         self.firehouses = mapview.load_firehouses()          # the maps' stations (a unit's home station is one)
         self.eta = eta.Params()                              # the ETA estimates' settings (Settings > Dispatch)
         self.map_display = mapview.display_zooms()           # the rigs' zooms on the maps (Settings > System, #376)
+        self.em_prominent = list(settings_mod.EM_DEFAULT)    # the Radio page's loud emergencies (Settings > Radios)
         self._clears: tuple[int, dict] | None = None         # (rev, Store.recent_clears): returning rigs
         self.settings = settings_mod.Editor(self)           # the Settings page's edits over the data file
         # Per-person activity on the hub (sizeup/cad/activity.py): who signed in, did and was refused what.
@@ -422,6 +423,8 @@ class Cad:
                 # Settings > System > ATC talkers (#252): the switches, for the rows' chips and the map
                 "atc": {"identify": self.atc_talkers.identify, "map": self.atc_talkers.on_map,
                         "channels": sorted(self.atc_talkers.channels)},
+                # Settings > Radios > Emergencies: whose emergencies (not ours) stand out on the Radio page
+                "radio_emergencies": {"prominent": list(self.em_prominent)},
             })
         st = self._state[1]
         now = self.clock()

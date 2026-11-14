@@ -216,6 +216,11 @@ class Comms:
         self.fix = None                 # rows -> rows: the status hints' decorate (sizeup/cad/statushints.py)
         self.names_ours = None  # text -> [our unit codes] (the feed's matcher, #115): a page not ours naming them
         self.on_text = None     # traffic id -> None: a transcript arrived or changed (status suggestions, #37)
+        # traffic id -> None: a transcript arrived or changed on another P25 system's row (context only; the intel
+        # pre-alerts); never called for our rows. Called after the transaction has committed, never under store.lock.
+        # May fire again for the same tid (replace re-records, the startup backfill of old rows): a consumer dedupes
+        # by tid + text, ignores a stale `start`, and queues rather than blocks (it runs on the writer's thread).
+        self.on_context_text = None
         self._revs: dict = {}   # name -> (rev, value): what _per_rev made
         self.changes_broken = False      # an entry couldn't be written: every ?changed= answers reload (flush_changes)
         self.changes_floor = 0           # cursors below this are told to reload (the log has a gap before it)
@@ -251,7 +256,8 @@ class Comms:
         """One transmission: {id, start, end, source, talkgroup, unit (talker as heard), rig, radio_id,
         text, status, model, emergency?, evidence?}. Returns the event ids it is linked to. replace=False: skip
         one already logged (the startup backfill). An emergency once logged stays (a later write without the
-        flag never clears it), and so does its evidence."""
+        flag never clears it), and so does its evidence. Must not be called with store.lock held: the hooks
+        (on_text, on_context_text) run on the caller's thread after commit."""
         tid = str(t["id"])
         p25 = t.get("talkgroup") is not None
         call_id, turn = split_call(tid, p25)
@@ -274,7 +280,7 @@ class Comms:
             mhz = round(float(mhz), 4) if isinstance(mhz, (int, float)) and not isinstance(mhz, bool) and mhz > 0 else None
             # its source, by its system (#409 / #415: sizeup/sourcekeys.py); another P25 system's is context only
             system = str(t.get("system") or "")
-            other = bool(system) and p25 and system != sources.COUNTY
+            other = sources.other_p25({"talkgroup": t.get("talkgroup"), "system": system})
             skey = str(t.get("source_key") or "") or sources.of_row(t.get("source") or "", t.get("talkgroup"), system,
                                                                     air=mhz is not None)
             system = system or (sources.COUNTY if p25 else "airband" if mhz is not None else "analog")
@@ -305,28 +311,16 @@ class Comms:
                            "tier = ? WHERE id = ?", (*src, tid))
                 self._count(db, skey, start, max(0.0, float(t.get("end") or start) - start))
             self.touch(tid)
-            if other:
+            if not other:
                 # Another system's units never put traffic on our incidents by a rule (#415): no unit, airport or
                 # dispatcher link. Only a person's own link does (link()).
-                self.rev += 1
-                return sorted(r[0] for r in db.execute("SELECT incident_id FROM radio_links WHERE traffic_id = ?", (tid,)))
-            off = {r[0] for r in db.execute("SELECT incident_id FROM radio_link_exclusions WHERE traffic_id = ?", (tid,))}
-            links: dict[int, tuple[str, str]] = {}
-            for rig in rigs:
-                for r in db.execute(self.ON_EVENT_BY_UNIT, (rig, start, start)).fetchall():
-                    links.setdefault(r["incident_id"], ("unit", rig))
-            # No ID, no link (#163): an unidentified FG1 radio stays in the Radio view, whoever's call is running.
-            if p25 and known and t.get("talkgroup") in self.airport_tgs:
-                open_ap = db.execute(self.OPEN_AIRPORT, (airport.TYPE, start, start)).fetchall()
-                if len(open_ap) == 1:           # the Airport Incident talkgroup: the one open airport event's
-                    links.setdefault(open_ap[0]["id"], ("airport", ""))
-            for iid, (why, unit) in links.items():
-                if iid not in off:              # a person took it off that event: not again
-                    self._auto(db, tid, iid, why, unit)
-            if p25 and turn is not None and t.get("talkgroup") in self.incident_tgs:
-                self._dispatcher_links(db, tid, call_id, turn, bool(disp), links)
+                self._rule_links(db, tid, call_id, turn, p25, known, start, rigs, t.get("talkgroup"), bool(disp))
             self.rev += 1
             out = sorted(r[0] for r in db.execute("SELECT incident_id FROM radio_links WHERE traffic_id = ?", (tid,)))
+        if other:
+            if (t.get("text") or "").strip():
+                self._heard_context(tid)            # committed: the intel pre-alerts, never our consumers (on_text)
+            return out
         kind = self._everyones(tid, system)              # each kind trimmed by its own count: never by the other's
         self._logged[kind] += 1
         if self._logged[kind] >= CHANGES_TRIM_EVERY:
@@ -334,6 +328,25 @@ class Comms:
             self._trim_changes(kind)
         self._heard(tid)
         return out
+
+    def _rule_links(self, db, tid: str, call_id: str, turn, p25: bool, known: bool, start: float, rigs: list[str],
+                    tg, disp: bool) -> None:
+        """record()'s automatic links for one of our rows: a unit on the event, the airport talkgroup, dispatch."""
+        off = {r[0] for r in db.execute("SELECT incident_id FROM radio_link_exclusions WHERE traffic_id = ?", (tid,))}
+        links: dict[int, tuple[str, str]] = {}
+        for rig in rigs:
+            for r in db.execute(self.ON_EVENT_BY_UNIT, (rig, start, start)).fetchall():
+                links.setdefault(r["incident_id"], ("unit", rig))
+        # No ID, no link (#163): an unidentified FG1 radio stays in the Radio view, whoever's call is running.
+        if p25 and known and tg in self.airport_tgs:
+            open_ap = db.execute(self.OPEN_AIRPORT, (airport.TYPE, start, start)).fetchall()
+            if len(open_ap) == 1:           # the Airport Incident talkgroup: the one open airport event's
+                links.setdefault(open_ap[0]["id"], ("airport", ""))
+        for iid, (why, unit) in links.items():
+            if iid not in off:              # a person took it off that event: not again
+                self._auto(db, tid, iid, why, unit)
+        if p25 and turn is not None and tg in self.incident_tgs:
+            self._dispatcher_links(db, tid, call_id, turn, disp, links)
 
     @staticmethod
     def _count(db, source: str, at: float, seconds: float = 0.0, calls: int = 1, radios=()) -> None:
@@ -420,6 +433,14 @@ class Comms:
                 self.on_text(tid)
             except Exception as e:  # noqa: BLE001 - a suggestion never stops the log
                 print(f"CAD: status suggestion for {tid}: {type(e).__name__}: {e}")
+
+    def _heard_context(self, tid: str) -> None:
+        """on_context_text, once the write has committed: whatever it does or raises never reaches the write."""
+        if self.on_context_text is not None:
+            try:
+                self.on_context_text(tid)
+            except Exception as e:  # noqa: BLE001 - a pre-alert never stops the log
+                self.log(f"CAD: context transcript {tid}: {type(e).__name__}: {e}")
 
     # A unit's assignment covering time T: from when it was put on the event until it cleared.
     ON_EVENT_BY_UNIT = ("SELECT DISTINCT a.incident_id FROM assignments a JOIN units u ON u.id = a.unit_id "
@@ -597,10 +618,12 @@ class Comms:
     def retext(self, tid: str, text: str, status: str, model: str = "", alt: dict | None = None,
                notify: bool = True) -> bool:
         """New text for a transmission. alt {text, model}: the other engine's transcript, kept to compare
-        ("both": Amazon Transcribe's is the text, whisper's the alternative). notify=False: a shed clip caught up
-        hours later (sizeup/sttcatchup.py): stored and in the change log like any text, but on_text isn't told, so
-        nothing that acts on what was just said (status hints, possible incoming, the airport, a dispatch mode's
-        step) acts on old words."""
+        ("both": Amazon Transcribe's is the text, whisper's the alternative). Another P25 system's row goes to
+        on_context_text only, never to on_text (as in record()). Must not be called with store.lock held: the hooks
+        run on the caller's thread after commit. notify=False: a shed clip caught up hours later
+        (sizeup/sttcatchup.py): stored and in the change log like any text, but neither hook is told, so nothing
+        that acts on what was just said (status hints, possible incoming, the airport, a dispatch mode's step, the
+        context pre-alerts) acts on old words."""
         with self.store.tx() as db:
             self.touch(tid)
             if alt is not None:
@@ -608,10 +631,14 @@ class Comms:
                            (str(alt.get("text") or ""), str(alt.get("model") or ""), tid))
             n = db.execute("UPDATE radio_traffic SET text = ?, status = ?, model = ?, updated_at = ? WHERE id = ?",
                            (text, status, model, self.clock(), tid)).rowcount
+            row = db.execute("SELECT system, talkgroup FROM radio_traffic WHERE id = ?", (tid,)).fetchone() if n else None
             if n:
                 self.rev += 1
         if n and notify:
-            self._heard(tid)
+            if row is not None and sources.other_p25(row):
+                self._heard_context(tid)
+            else:
+                self._heard(tid)
         return bool(n)
 
     def set_stt(self, tid: str, status: str, model: str) -> bool:
@@ -1588,6 +1615,7 @@ def with_alarms(store, rows: list[dict]) -> list[dict]:
     ack_by / ack_at (seen), clear_by / clear_at (all clear), drill, alarm_stuck (its flag turned out stuck, #190: on
     whom) (ALARM_COLS when none); emergency (0/1) from the row or its alarm; evidence as a dict (None when not kept)."""
     got: dict[str, dict] = {}
+    rig_ours = getattr(store, "rig_ours", None)                # set by Alarms (sizeup/cad/alarms.py)
     tids = [r["id"] for r in rows if r.get("kind", "radio") == "radio"]
     if tids and has_alarms(store):
         cols = {r["name"] for r in store.q("PRAGMA table_info(alarms)")}
@@ -1612,6 +1640,9 @@ def with_alarms(store, rows: list[dict]) -> list[dict]:
                      clear_by=a["clear_by"] or "", clear_at=a["clear_at"], drill=bool(a["drill"]),
                      alarm_stuck=a["stuck"] or "")
         r["emergency"] = int(bool(r.get("emergency")) or bool(a and a["emergency"]))
+        # one of our rigs keyed it (the radio registry): its emergency stands out on any talkgroup (cad.js emLoud),
+        # also a repeat press that has no alarm row of its own
+        r["em_ours"] = bool((r["emergency"] or r.get("kept")) and rig_ours is not None and r.get("rig") and rig_ours(r["rig"]))
         try:
             r["evidence"] = json.loads(r["evidence"]) if r.get("evidence") else None
         except (TypeError, ValueError):

@@ -75,6 +75,7 @@ const StationHealth = (() => {
       const r = el("div", `hb-row ${a.severity === "critical" ? "critical" : "warning"}`);
       const where = whoText(a.who);
       const rec = a.muted ? (a.muted_until ? `Muted until ${when(a.muted_until)}` : "Muted")
+        : String(a.key || "").startsWith("replica:") ? "Pushed by the supervisor"   // (sizeup/replicawatch.py, at once)
         : !n.on ? "Not pushed (push off)" : a.pushed ? "Pushed" : "Not pushed yet";
       const flap = th.flap_n && a.flaps >= th.flap_n ? `flapping, back ${a.flaps}× in 1 h` : "";
       const det = el("span", "hb-detail dim small", [where, rec, flap].filter(Boolean).join(" · "));
@@ -250,6 +251,23 @@ const StationHealth = (() => {
       if ((er.top || []).length) kids.push(table(["Source", "Type", "Last message (digits stripped)", "Last 5 min", "This spike", "Since", "Last", "Total"],
         er.top.map((s) => [s.source, s.type, s.message, [s.last5, s.last5 > er.per_signature ? "hl-bad" : ""], s.count,
           when(s.first), when(s.last), s.total]), ""));
+    }
+    const rp = d.replicas;
+    if (rp) {             // the replicas as the supervisor last verified them (sizeup/replicawatch.py)
+      const rcls = (s) => (s === "ok" ? "hl-ok" : s === "stale" || s === "none" ? "dim" : "hl-bad");
+      const word = { ok: "ok", corrupt: "corrupt", error: "not verifiable", stale: "stale", none: "not checked" };
+      const hd = el("h3", "hl-sub", "Replicas");
+      hd.title = "Litestream's S3 copies, read-only: the standby checks a copy of what it follows; else the leader restores "
+        + "one from S3 and checks it. quick_check, integrity_check (full) now and then. Bad: pushed at once";
+      kids.push(hd, table(["Database", "Result", "Verified", "By"], rp.rows.map((r) => {
+        const res = el("span", rcls(r.state), word[r.state] || r.state);
+        res.title = [r.state !== "ok" && r.result ? r.result : "", r.error ? `last error ${when(r.error_at)}: ${r.error}` : "",
+          r.txid ? `txid ${r.txid}` : "", r.secs !== null && r.secs !== undefined ? `${r.secs} s` : ""].filter(Boolean).join("\n");
+        return [r.db, res, r.at ? `${when(r.at)} (${longDur(serverNow() - r.at)} ago)` : "—",
+          r.by ? `${r.by} · ${r.mode === "integrity_check" ? "full" : "quick"}` : ""];
+      }), ""));
+      if ((rp.events || []).length) kids.push(table(["Task failed", "Why", "Exit"],
+        rp.events.map((e) => [when(e.at), [e.why || e.kind, "hl-bad"], e.code]), ""));
     }
     kids.push(el("h3", "hl-sub", "Dongles"));
     for (const x of h.duplicates || []) {        // two dongles, one serial (#242): neither is opened by it

@@ -11,6 +11,7 @@
 //   Browsers play sound only after a click or key on the page: any one unlocks it, and until then the header
 //   and the overlay say "Tap to enable alarm sound".
 //   Notices (the button on someone else's talkgroup): a strip under the header, no sound, until acknowledged.
+//   A quiet one (a service Settings > Radios > Emergencies doesn't list: a bus, DOT): no strip, no toast.
 //   The emergency window ("windows": the button's talkgroup and radio kept, Record on or off, until
 //   [p25] emergency_window_min after its last key-up): "Recording until 20:09" on the card, the notice, and
 //   after the acknowledgement its own line in the strip, each with All clear (dispatchers and admins: resolved,
@@ -324,8 +325,10 @@ window.Alarm = (() => {
     const open = (s.open || []).filter((a) => !st.acked.has(a.id));
     const fresh = st.seen ? open.filter((a) => !st.seen.has(a.id)) : [];
     st.open = open;
-    st.notices = (s.notices || []).filter((a) => !st.acked.has(a.id));
-    st.windows = (s.windows || []).filter((w) => !st.cleared.has(w.alarm_id));
+    // quiet (the hub's word: someone else's, on a service Settings > Radios > Emergencies doesn't list): no strip, no
+    // toast, on any page; its row in Radio has the muted EM, and Acknowledge / All clear in its menu
+    st.notices = (s.notices || []).filter((a) => !st.acked.has(a.id) && !a.quiet);
+    st.windows = (s.windows || []).filter((w) => !st.cleared.has(w.alarm_id) && !w.quiet);
     for (const a of s.recent || []) {
       if (st.seen && st.seen.has(a.id) && !st.acked.has(a.id)) {
         UI.toast(`Alarm acknowledged by ${(a.ack_by || "").replace(/\s*<[^>]*>\s*$/, "")}`, "ok",

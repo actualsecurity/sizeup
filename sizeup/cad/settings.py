@@ -148,10 +148,34 @@ PAGE_SECTION[MAPD_SECTION] = "system"
 # audited as System. key a category -> "dispatcher" | "admin" (the least standing); not set: everyone signed in.
 PREMISE_SECTION = "premise_visibility"
 PAGE_SECTION[PREMISE_SECTION] = "system"
+# Which services' emergencies the Radio page shows prominently when they aren't ours (Settings > Radios > Emergencies):
+# a banner, a highlighted row, the full "Emergency (not ours)" chip. Any other service's: a muted "EM" chip only.
+# Ours (our fire channels, our rigs, scene safety) always stand out, and so does a source whose service isn't known
+# (blank): quiet is only for a service that is known and not listed. "other" (Trunk Ops, Interop, Special Events, OEM:
+# where a mutual-aid firefighter or an unmapped portable of ours could be) is prominent by default.
+# Presentation only: what is recorded, kept, alarmed and pushed doesn't change. Admins, audited as Radios.
+# key "prominent" -> [services] (sourcekeys.SERVICES).
+EM_SECTION, EM_DEFAULT = "radio_emergencies", ("fire", "ems", "other")
+PAGE_SECTION[EM_SECTION] = "radios"
 PREMISE_LEVELS = ("everyone", "dispatcher", "admin")
 # The station's logs into CloudWatch (sizeup/cloud/cwlogs.py): Settings > Station > Logs, admins, audited as System.
 LOGS_SECTION = cwlogs.SECTION
 PAGE_SECTION[LOGS_SECTION] = "system"
+
+
+def em_value(v) -> list[str]:
+    """A list of services (sourcekeys.SERVICES), in their order, each once; CadError otherwise. Empty: none stand out."""
+    if not isinstance(v, list) or any(x not in sourcekeys.SERVICES for x in v):
+        raise CadError(f"prominent: a list of {', '.join(sourcekeys.SERVICES)}")
+    return [x for x in sourcekeys.SERVICES if x in v]
+
+
+def em_prominent(e) -> list[str]:
+    """The stored section's services, or the default (fire, EMS, other) when unset or unreadable."""
+    try:
+        return em_value((e or {})["prominent"])
+    except (KeyError, TypeError, CadError):
+        return list(EM_DEFAULT)
 
 
 def _visibility_keys() -> dict[str, str]:
@@ -430,6 +454,7 @@ class Editor:
         self.cad.atc_vocab_refresh = bool(a.get("vocab", True))
         self.cad.map_display = mapview.display_zooms(ov.get(MAPD_SECTION))     # the maps' rigs by zoom (#376)
         self.cad.premise_visible = dict(ov.get(PREMISE_SECTION) or {})     # premise notes by category (#403)
+        self.cad.em_prominent = em_prominent(ov.get(EM_SECTION))          # the Radio page's loud emergencies
         self.cad._state = None
 
     def _commit(self, changes: list[tuple[str, str, object]], operator: str, audit: list[tuple[str, str, object, object]],
@@ -582,6 +607,7 @@ class Editor:
         out["hub_errors"] = self.errors_page(ov)
         out["map_display"] = self.mapd_page(ov)
         out["premise_visibility"] = self.premise_page(ov)
+        out["radio_emergencies"] = self.em_page(ov)
         out["alert_mutes"] = self.mutes_page(ov)
         out["audio_retention"] = self.retention_page(ov)
         out["station_logs"] = self.logs_page(ov)
@@ -867,6 +893,29 @@ class Editor:
                            [("system", f"{PREMISE_SECTION}/{key}", cur, v)])
         return {**out, "premise_visibility": self.premise_page()}
 
+    def em_page(self, ov: dict | None = None) -> dict:
+        """Settings > Radios > Emergencies: the services whose emergencies (not ours) stand out on the Radio page."""
+        e = ((self.overrides() if ov is None else ov).get(EM_SECTION) or {})
+        return {"prominent": em_prominent(e), "default": list(EM_DEFAULT), "edited": "prominent" in e,
+                "choices": list(sourcekeys.SERVICES)}
+
+    def _em_op(self, action: str, body: dict, op: str) -> dict:
+        """set {key: prominent, value: [services]} | reset {key: prominent}: admins, audited as Radios."""
+        if body.get("key") != "prominent":
+            raise CadError("key: prominent")
+        cur = em_prominent(self.overrides().get(EM_SECTION))
+        if action == "reset":
+            v = list(EM_DEFAULT)
+        elif action == "set":
+            v = em_value(body.get("value"))
+        else:
+            raise CadError("action: set or reset")
+        if v == cur:                                    # nothing changes: nothing written, nothing audited
+            return {"ok": True, "radio_emergencies": self.em_page()}
+        out = self._commit([(EM_SECTION, "prominent", REMOVE if v == list(EM_DEFAULT) else v)], op,
+                           [("radios", f"{EM_SECTION}/prominent", ", ".join(cur) or "none", ", ".join(v) or "none")])
+        return {**out, "radio_emergencies": self.em_page()}
+
     def _mapd_op(self, action: str, body: dict, op: str) -> dict:
         """set {key: detail_zoom | active_zoom | board_detail_zoom | board_active_zoom, value} | reset {key}: admins."""
         key = body.get("key")
@@ -1040,7 +1089,7 @@ class Editor:
               "import": self._import_op, "channels": self._channels_op, "stt": self._stt_op,
               channels_mod.SQUELCH_SECTION: self._squelch_op,
               "places": self._places_op, TONES_SECTION: self._tones_op, WALL_SECTION: self._wall_op, DS_SECTION: self._ds_op,
-              NOTIFY_SECTION: self._notify_op, ATC_SECTION: self._atc_op, ERR_SECTION: self._errors_op, MAPD_SECTION: self._mapd_op, PREMISE_SECTION: self._premise_op, RET_SECTION: self._retention_op,
+              NOTIFY_SECTION: self._notify_op, ATC_SECTION: self._atc_op, ERR_SECTION: self._errors_op, MAPD_SECTION: self._mapd_op, PREMISE_SECTION: self._premise_op, EM_SECTION: self._em_op, RET_SECTION: self._retention_op,
               TRS_SECTION: lambda a, b, o: self._retention_op(a, b, o, TRS_SECTION), MUTE_SECTION: self._mutes_op, LOGS_SECTION: self._logs_op, DEPT_SECTION: self._dept_op, "alarms": lambda a, b, o: self.cad.alarms.settings_op(a, b, o)}.get(section)
         if fn is None:
             raise CadError(f"no settings section {section!r}")
@@ -2405,7 +2454,7 @@ class Editor:
     # topics are public by name): never in the export, the audit log (a fingerprint there), the activity or the logs.
 
     def _notify_op(self, action: str, body: dict, op: str) -> dict:
-        """set {key: alerts | status, topic} ("" = the default) | off {key} | reset {key} | server {value} ("" = the
+        """set {key: alerts | status | intel, topic} ("" = the default) | off {key} | reset {key} | server {value} ("" = the
         default) | test {key}: a marked test push to the topic in effect. Admins (sizeup/cad/api.py WRITES)."""
         from sizeup import notify
         p = getattr(self.cad, "pushes", None)
@@ -2425,7 +2474,7 @@ class Editor:
             self.cad.log(p.line() + " (Settings changed)")
             return out
         if key not in notify.KINDS:
-            raise CadError("key: alerts or status")
+            raise CadError("key: alerts, status or intel")
         def said(v) -> str:                          # never the name: the audit log is open to everyone signed in
             if not isinstance(v, dict):
                 d, src = p.defaults[key]
@@ -2711,6 +2760,14 @@ class Editor:
                 mapview.display_value(k, v)
             except ValueError as e:
                 raise CadError(f"overrides.{MAPD_SECTION}: {e}") from None
+        e = ov.get(EM_SECTION) or {}                          # Settings > Radios > Emergencies
+        if set(e) - {"prominent"}:
+            raise CadError(f"overrides.{EM_SECTION}: prominent only")
+        if "prominent" in e:
+            try:
+                e["prominent"] = em_value(e["prominent"])
+            except CadError as x:
+                raise CadError(f"overrides.{EM_SECTION}.{x}") from None
         for k, v in (ov.get(PREMISE_SECTION) or {}).items():  # sizeup/cad/premise.py (#403)
             if k not in _visibility_keys() or v not in PREMISE_LEVELS[1:]:
                 raise CadError(f"overrides.{PREMISE_SECTION}: {k!r} -> {v!r} (a category -> dispatcher | admin)")

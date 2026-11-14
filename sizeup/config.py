@@ -209,6 +209,9 @@ class Config:
     # whatever [prealert] names): refused here and in sizeup/notify.py.
     alerts_ntfy_topic: str = ""
     alerts_status_topic: str = ""
+    # intel_topic: radio-intelligence pre-alerts (sizeup/intel; env SIZEUP_INTEL_TOPIC). "" = the alerts' topic.
+    alerts_intel_topic: str = ""
+    alerts_intel_topic_source: str = ""
     alerts_ntfy_topic_source: str = ""     # where each came from: "env" (the hub: SSM) | "config" | "" (unset)
     alerts_status_topic_source: str = ""   # (Settings > System > Push notifications shows it; Settings win over both)
     alerts_ntfy_server_source: str = "default"
@@ -417,6 +420,7 @@ def hub_url_problem(url: str) -> str:
 #                                secret; the hub: SSM /sizeup-hub/alert-topic)
 #   SIZEUP_STATUS_TOPIC          [alerts] status_topic (our status / health push topic; the hub: SSM
 #                                /sizeup-hub/status-topic)
+#   SIZEUP_INTEL_TOPIC           [alerts] intel_topic (radio pre-alerts; unset: the alerts topic)
 #   SIZEUP_511NY_USER / _PASS         [roads]: 511NY's username and password for the CARS API and CARS-Hub (only
 #                                     ever here; the hub: SSM /sizeup-hub/511ny-user, /sizeup-hub/511ny-pass)
 #   SIZEUP_STATUS_TOKEN               [cloud] status_token: the deploy check's read-only bearer
@@ -526,13 +530,14 @@ def _alerts(data: dict, prealert: dict) -> dict:
     thresholds (sizeup/cloud/health.py). No section: the defaults, no push unless SIZEUP_ALERT_TOPIC or
     SIZEUP_STATUS_TOPIC is set. Tapout's topics (and whatever [prealert] names) are refused, by exact name."""
     from sizeup.notify import server_problem, topic_problem
-    al = _take(data.get("alerts", {}), "alerts", {"ntfy_topic", "status_topic", "ntfy_server", "silent_min",
+    al = _take(data.get("alerts", {}), "alerts", {"ntfy_topic", "status_topic", "intel_topic", "ntfy_server", "silent_min",
                                                   "behind_min", "down_min", "outbox_min", "disk_pct", "repeat_min",
                                                   "p25_silent_min", "p25_silent_night_min",
                                                   "main_channels"})   # (#242's, inert since #258: read, ignored)
     tapout = (prealert.get("prealert_ring_topic", ""), prealert.get("prealert_status_topic", ""))
     topics, sources = {}, {}
-    for key, env in (("ntfy_topic", "SIZEUP_ALERT_TOPIC"), ("status_topic", "SIZEUP_STATUS_TOPIC")):
+    for key, env in (("ntfy_topic", "SIZEUP_ALERT_TOPIC"), ("status_topic", "SIZEUP_STATUS_TOPIC"),
+                     ("intel_topic", "SIZEUP_INTEL_TOPIC")):
         t = _env(env, str(al.get(key, ""))).strip()
         why = topic_problem(t, tapout) if t else ""
         if why:
@@ -558,6 +563,7 @@ def _alerts(data: dict, prealert: dict) -> dict:
                      "config" if str(al.get("ntfy_server", "")).strip() else "default")
     return dict(alerts_ntfy_topic=topic, alerts_status_topic=topics["status_topic"], alerts_ntfy_server=server,
                 alerts_ntfy_topic_source=sources["ntfy_topic"], alerts_status_topic_source=sources["status_topic"],
+                alerts_intel_topic=topics["intel_topic"], alerts_intel_topic_source=sources["intel_topic"],
                 alerts_ntfy_server_source=server_source, **out)
 
 

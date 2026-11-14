@@ -307,14 +307,16 @@ heartbeat_stale_min = 90             # no heartbeat (or restart) this long: "Tap
 #                 outbox backing up, its disk filling, its whisper queue behind; Amazon Transcribe failing and
 #                 its monthly budget at 80 % / 100 %; shown as a banner on /cad and /monitor, logged, and pushed
 #                 (at most once per alert per repeat_min, plus its recovery)
-# Only one set: everything goes to it. ntfy topics are public by name: long random ones (e.g.
+#   intel_topic   radio pre-alerts (sizeup/intel: police / fire chatter, what and where); empty: the alerts topic
+# Only one of ntfy_topic / status_topic set: everything goes to it. ntfy topics are public by name: long random ones (e.g.
 # `openssl rand -hex 12`). NEVER Tapout's topics (pcfd-phone-prealert pages the fire crew; pcfd-status):
 # refused (by exact name) here and again before every send. Empty or left out: no pushes. Env
-# SIZEUP_ALERT_TOPIC / SIZEUP_STATUS_TOPIC / SIZEUP_ALERT_SERVER win, and Settings > System > Push
+# SIZEUP_ALERT_TOPIC / SIZEUP_STATUS_TOPIC / SIZEUP_INTEL_TOPIC / SIZEUP_ALERT_SERVER win, and Settings > System > Push
 # notifications (admins) wins over both, live.
 # [alerts]
 # ntfy_topic = ""
 # status_topic = ""
+# intel_topic = ""
 # ntfy_server = "https://ntfy.sh"
 # silent_min = 3                     # station health: no state post from the station this long
 # behind_min = 15                    # on another build than the hub this long

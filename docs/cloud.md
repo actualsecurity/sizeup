@@ -317,14 +317,15 @@ crew's phones and `pcfd-status` is Tapout's own health feed. The config refuses 
 exact name: a topic of ours with "status" in it is fine. No topic: no push (banner and log only); that is
 the default.
 
-Two kinds, two topics (`sizeup/notify.py` `route()`):
+Three kinds (`sizeup/notify.py` `route()`):
 
 | Kind | Setting (hub: SSM) | What |
 |---|---|---|
 | alerts | `[alerts] ntfy_topic` / `SIZEUP_ALERT_TOPIC` (`/sizeup-hub/alert-topic`) | Emergency buttons (P25, MDC, FleetSync), the fireground mayday, aircraft emergency squawks; their acknowledgements, all clears and "Ended" notices |
 | status | `[alerts] status_topic` / `SIZEUP_STATUS_TOPIC` (`/sizeup-hub/status-topic`) | Station health (silent, behind, update failed, dongle gone, job / whisper / trunk-recorder down, stuck channel, outbox, disk, whisper queue), "Amazon Transcribe failing", its monthly budget at 80 % / 100 %, the hub's own error spikes (#285), and every recovery notice |
+| intel | `[alerts] intel_topic` / `SIZEUP_INTEL_TOPIC` (no SSM parameter yet; set it in Settings) | Radio pre-alerts (`sizeup/intel`): what police / fire chatter reported and where. No topic of its own: they go where the alerts go |
 
-Only one of the two set: both kinds go to it. The app logs at startup where each kind goes
+Only one of alerts / status set: both kinds go to it; intel follows the alerts unless it has its own. The app logs at startup where each kind goes
 ("notify: alerts → topic set (SSM), status → topic set (SSM)"), never the names.
 
 **Settings > System > Push notifications** (admins only) changes either topic, and the ntfy server, without a
@@ -3054,6 +3055,63 @@ retention (the hub's, from its next start) prunes old LTX files (L0 files once c
 then only the bucket's noncurrent versions (30 days, its lifecycle rule) still hold them.
 
 `tests/test_reseed_replica.py` rehearses it against a local file replica (`--file-replica DIR`).
+
+## Replica checks
+
+On 2026-11-13 a corrupt `cad.sqlite` replica sat unnoticed for ~110 min, until the next deploy's takeover failed its
+quick_check. Then every new task crash-looped for ~35 min (Cloudflare 1033) until someone opened a browser. These
+layers now catch both cases (`sizeup/replicawatch.py`, run on a thread of the supervisor):
+
+| what | when | how |
+|---|---|---|
+| **Leader check** (the main one: desired count 1, so normally no standby runs) | 2 min after the leader serves, then every `SIZEUP_REPLICA_LEADER_CHECK_MIN` (15); a file not restored yet is looked at again each minute | The leader runs its own low-rate followers of all three files into `/data/.replica-check`, at nice 19: `litestream restore -f -follow-interval SIZEUP_REPLICA_FOLLOW_S` (60 s). They start 2 min after it serves, out of its busiest minute, and one at a time (cad, then hub, then audio): each starts once the one before has done its first restore. Only the first restore is full; after that they apply only new changes. After a retake (the role back to active), they start again from scratch. For each check, a follower is stopped, its file checked and the follower started again (it resumes from its `-txid`), which is the same path a takeover depends on. A follower that exits non-zero with Litestream error output (an LTX checksum mismatch, ...) is reported at once as "restore failed (possible corruption)". One killed by a signal (OOM, a SIGTERM from elsewhere) or exiting silently is "not verifiable". A follower with no file means there is no backup: not verifiable. A file not restored after 10 min is also not verifiable. |
+| **Standby check** (while one runs) | 3 min after its followers restored, then every `SIZEUP_REPLICA_CHECK_MIN` (10); never during a takeover or a drain | It copies each followed file in 8 MB pieces. The copy counts only if the `-txid` sidecar, size and mtime don't change while it is made, so the follow the takeover needs never pauses. The copy stops the moment the role changes. A file the standby's follower found no backup of is not verifiable. |
+| **The check** | | It runs read-only (not immutable) in a child process at nice 19 and is killed when the role changes or the task stops. It runs `quick_check`, and `integrity_check` once every `SIZEUP_REPLICA_FULL_H` (24) hours per file. |
+| **Task failure** | a takeover fails, the app exits, the task is fenced, a release is unclean, the supervisor crashes | The event goes into S3 and is pushed before the task exits, all within 20 s (DNS included). Three or more failures in 10 min send a separate push, "Hub crash-looping". The next task that serves pushes "Hub serving again". |
+| **Deploy check** | after each deploy (`deploy.yml`) | `tools/deploy_check.py replicas` reads **only** `replica-watch.json`; no database ever reaches a GitHub runner. It waits until the leader of this build has recorded that it serves and every file has a check after that. The job fails if a file is failing (corrupt or not verifiable), or if nothing was verified within 10 min. |
+
+**A red replica check that may be spurious.** The deploy check allows 10 min from the end of the ECS step. The leader's
+followers start 2 min after it serves and restore one at a time, so if the first restore of `cad.sqlite` takes longer
+than ~8 min (a big file, slow S3), the check times out with "not verified within 10 min … hasn't verified cad yet"
+although nothing is wrong. That message is not a failure of the replica. Look at Settings > Health > Replicas: `ok` for
+all three with a time after the deploy settles it. Don't re-run the deploy job for this: GitHub re-runs the whole job,
+which deploys again. To have the check itself say so, run it by hand with AWS credentials that may read the record:
+`python3 tools/deploy_check.py replicas --build <sha>`. A message naming a file as **corrupt** or **not verifiable** is never a timeout: treat it as real.
+
+* **Pushes** go to the STATUS topic, from the env (SSM `/sizeup-hub/status-topic`, else the alerts topic) or the config
+  file. A Settings override is in the CAD database, which the supervisor never opens. Tapout's and `[prealert]`'s
+  topics are refused. Each kind has its own slot, so one kind never holds back another, and each is pushed at most
+  once per `SIZEUP_REPLICA_PUSH_MIN` (30):
+  * `replica_corrupt` "Replica corrupt: cad.sqlite" (5);
+  * `replica_restore` "Replica restore failed (possible corruption)" (5, on the first occurrence);
+  * `replica_unverifiable` "Replica not verifiable" (4, after 2 rounds);
+  * `task` "Hub takeover failed", ... (4);
+  * `task_loop` "Hub crash-looping" (5);
+  * "Replica OK again" and "Hub serving again" (3, no limit).
+
+  A push's time is recorded in S3 only after ntfy took it (one retry). If S3 is unreadable, the push is sent anyway.
+* **The shared record** is `s3://<bucket>/sizeup-hub/replica-watch.json`: the last check per file, the files failing,
+  the last 30 task events, the push times and the leader serving now (task, build, since). It uses conditional writes,
+  like `leader.json`, under the task role's existing `backups` policy. The leader copies it to
+  `$SIZEUP_RUN_DIR/replica-watch.json` every minute for the app.
+* **Settings > Health** shows the **Replicas** row: each file's result (ok, corrupt, not verifiable, stale), when it
+  was verified and by whom, plus the task failures of the last 24 h. A failing file also shows as the critical alert
+  "Replica corrupt" or "Replica not verifiable". The panel only shows that alert: the supervisor has already pushed it.
+* **CloudWatch** is the backstop for a task that dies without pushing (`sizeup-aws/28-replica-watch.sh`). It adds
+  metric filters on `/ecs/sizeup-hub` and alarms on step 13's SNS → `sizeup-hub-alarm-ntfy` path:
+  * `sizeup-hub-replica-bad`: a "replica check FAILED" line in any of the last 8 periods of 15 min, so it pages once
+    per incident;
+  * `sizeup-hub-task-churn`: more than 3 task starts in 10 min.
+
+  The same script lets the deploy role GetObject the record (that one key).
+* **Budget on the leader** (0.5 vCPU, 2 GB, 20 GB ephemeral disk):
+  * **Disk:** a second copy of each file in `/data/.replica-check`, as big as the files.
+  * **Memory:** three `litestream restore -f` processes, tens of MB each.
+  * **CPU:** following costs almost nothing after the first restore. Each `quick_check` reads the whole file at nice
+    19, every 15 min; `integrity_check` runs once a day. The check log line gives each one's seconds.
+  * **S3:** each follower LISTs its replica every 60 s, roughly 3 × 1,440 polls a day, about $0.65–1.30 a month at
+    $0.005/1,000.
+  * **Deploy:** one GetObject of a few KB.
 
 ## Packaging and the Fargate task
 

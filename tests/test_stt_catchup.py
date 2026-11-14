@@ -566,9 +566,37 @@ def test_a_police_clip_caught_up_reaches_no_hook_on_the_hub(tmp_path):
         ev = {"seq": 3, "at": now, "type": "retext", "data": {"id": tid, "text": "Car 12 clear", "status": "done", "model": "m.bin"}}
         assert call(hub.url + "/api/station/events", "POST", {"epoch": "e1", "events": [ev]})[0] == 200
         assert wait(lambda: row().get("text") == "Car 12 clear", 10)
-        assert heard["text"] + heard["context"] == [tid]                               # (a person's re-run: heard)
+        assert heard == {"text": [], "context": [tid]}                                 # (a person's re-run: its own hook)
     finally:
         hub.close()
+
+
+def test_a_catch_up_retext_of_a_context_row_calls_neither_hook(tmp_path):
+    """Comms.retext routes another P25 system's row to on_context_text and ours to on_text; notify=False (a shed clip
+    caught up) gates both: the text and the change note are written, neither hook hears it."""
+    from sizeup.app import App
+    app = App(base(clips_dir=str(tmp_path / "clips")))
+    try:
+        comms, now = app.cad.comms, time.time()
+        record(app, "pd-1", now - 600, tg=9211, system="mrrs", tier="alert")       # another system's (context)
+        record(app, "fm-1", now - 600)                                             # ours
+        heard = {"text": [], "context": []}
+        comms.on_text, comms.on_context_text = heard["text"].append, heard["context"].append
+        rev = comms.rev
+        assert comms.retext("pd-1", "Car 12 out with one at the plaza", "done", "m.bin", notify=False)
+        assert comms.retext("fm-1", "Car 12 clear of the scene", "done", "m.bin", notify=False)
+        assert heard == {"text": [], "context": []} and comms.rev == rev + 2
+        got = {r["id"]: r["text"] for r in app.cad.store.q("SELECT id, text FROM radio_traffic")}
+        assert got == {"pd-1": "Car 12 out with one at the plaza", "fm-1": "Car 12 clear of the scene"}
+        # the same texts as any other re-run: each to its own hook
+        assert comms.retext("pd-1", "Car 12 clear", "done", "m.bin") and comms.retext("fm-1", "Car 12 clear", "done", "m.bin")
+        assert heard == {"text": ["fm-1"], "context": ["pd-1"]}
+        # ... and through the app's quiet retext (the catch-up's path) neither
+        app._retext("pd-1", "Car 12 back in service", "done", 0.9, "m.bin", quiet=True)
+        app._retext("fm-1", "Car 12 back in service", "done", 0.9, "m.bin", quiet=True)
+        assert heard == {"text": ["fm-1"], "context": ["pd-1"]}
+    finally:
+        app.stop()
 
 
 # -- fire first: what pauses it ----------------------------------------------------------------------------------------
