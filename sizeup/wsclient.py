@@ -120,7 +120,13 @@ class WebSocket:
         """Data to read within wait_s (TLS bytes already decrypted count)."""
         if self.buf or (hasattr(self.sock, "pending") and self.sock.pending()):
             return True
-        return bool(select.select([self.sock], [], [], wait_s)[0])
+        if not hasattr(select, "poll"):
+            return bool(select.select([self.sock], [], [], wait_s)[0])
+        # poll(), not select(): select() refuses a descriptor numbered 1024 or more (FD_SETSIZE) with a ValueError,
+        # and a process that has been up a while with many files open hands out such numbers (#457)
+        p = select.poll()
+        p.register(self.sock, select.POLLIN)
+        return bool(p.poll(max(0.0, wait_s) * 1000.0))
 
     def messages(self, idle_s: float | None = None):
         """Each whole text or binary message's bytes, until the server closes. idle_s: when no frame starts within that
