@@ -45,6 +45,11 @@ window.IntelCard = (() => {
     const loc = el("div", "aa-loc" + (e.confirmed ? "" : " approx"), where(e));
     if (!e.confirmed && e.place) loc.title = ["Unconfirmed", e.basis, ...(e.alts || []).map((a) => `or ${a.label}`)].filter(Boolean).join("\n");
     li.append(loc);
+    if (e.suggested) {
+      const sug = el("div", "aa-loc approx", `model: ${e.suggested}?`);
+      sug.title = "The model's reading, not the rules': on the map only, never pushed";
+      li.append(sug);
+    }
     if (e.note) li.append(el("div", "aa-loc approx", e.note));          // "possibly cancelled", "moved", "re-opened"
     const src = el("div", "aa-src", `${deps.time(e.first_at)} · ${(e.traffic_ids || []).length} tx`);
     for (const id of (e.traffic_ids || []).slice(-4)) {
@@ -152,6 +157,45 @@ window.IntelSettings = (() => {
       el("span", "dim small", `24 h: ${c24.events || 0} events · ${c24.pushed || 0} pushed · ${c24.suppressed || 0} held`));
     for (const x of caps.querySelectorAll("input")) x.disabled = !admin;
     kids.push(caps);
+    // the push's "Listen" link (sizeup/intel/listen.py): the audio around the alert, behind a short-lived link
+    const ls = d.listen || {};
+    const [llab, lcb] = sCheck("Listen link", s.listen, "A link in each push that plays the transmissions around it (no sign-in; it expires)");
+    lcb.disabled = !admin;
+    lcb.addEventListener("change", () => post({ action: "set", key: "listen", value: lcb.checked }, lcb.checked ? "Listen links on" : "Listen links off"));
+    const lrow = el("div", "row");
+    const lnum = (key, min, max, label) => num(s[key], min, max, 1, (v) => post({ action: "set", key, value: v }), label);
+    lrow.append(llab,
+      el("span", "dim small", "min"), lnum("listen_expiry_min", 1, 720, "Minutes the link plays"),
+      el("span", "dim small", "before s"), lnum("listen_before_s", 0, 600, "Seconds of the same source before the first transmission"),
+      el("span", "dim small", "after s"), lnum("listen_after_s", 0, 600, "Seconds after the last (stitched again as they arrive)"),
+      el("span", "dim small", "kbps"), lnum("listen_kbps", 16, 64, "Bitrate (AAC when ffmpeg is there, else 8 kHz WAV)"),
+      el("span", "spacer"));
+    const lst = el("span", ls.configured ? "chip s-state default" : "chip s-state edited", ls.configured ? "ready" : "not configured");
+    if (!ls.configured) lst.title = ls.why || "";
+    lrow.append(lst);
+    for (const x of lrow.querySelectorAll("input")) x.disabled = !admin;
+    kids.push(lrow);
+    // the model behind the rules (sizeup/intel/infer.py): off until sizeup-aws 26 has run; capped
+    const inf = d.infer || {};
+    const [ilab, icb] = sCheck("Inference", !!s.infer, "An LLM (Bedrock, the department's account) only where the rules are unsure; its place is checked against the map data");
+    icb.disabled = !admin;
+    icb.addEventListener("change", () => post({ action: "set", key: "infer", value: icb.checked }, icb.checked ? "Inference on" : "Inference off"));
+    const irow = el("div", "row");
+    const inum = (key, min, max, step, label) => num(s[key] ?? "", min, max, step, (v) => post({ action: "set", key, value: v }), label);
+    const model = sInput(s.infer_model || "", 120, "Model id", (v) => post({ action: "set", key: "infer_model", value: v }), "mono");
+    model.title = "Bedrock model id (default anthropic.claude-haiku-5-5)";
+    const spent = "$" + (inf.usd_month || 0).toFixed(2);
+    irow.append(ilab, model,
+      el("span", "dim small", "/day"), inum("infer_daily_cap", 0, 10000, 1, "Calls a day at most"),
+      el("span", "dim small", "$/month"), inum("infer_budget_usd", 0, 500, 1, "Budget a month (from the tokens each call reports)"),
+      el("span", "dim small", "sample %"), inum("infer_sample_pct", 0, 100, 1, "Of rows with a hit: asked and recorded only (evaluation)"),
+      el("span", "spacer"),
+      el("span", "dim small", (inf.calls_today || 0) + " today · " + spent + " this month"));
+    const ist = el("span", inf.ready ? "chip s-state default" : "chip s-state edited", inf.ready ? "ready" : (inf.on ? "held" : "off"));
+    if (inf.why) ist.title = inf.why;
+    irow.append(ist);
+    for (const x of irow.querySelectorAll("input")) x.disabled = !admin;
+    kids.push(irow);
     // detection on/off and quiet hours (no pushes in between; the card and the map go on)
     const [elab, ecb] = sCheck("Detection", s.enabled, "Off: no transmission is read for pre-alerts at all");
     ecb.disabled = !admin;

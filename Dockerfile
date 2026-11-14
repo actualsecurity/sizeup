@@ -57,7 +57,10 @@ WORKDIR /app
 COPY pyproject.toml ./
 COPY sizeup ./sizeup
 # [docs]: pypdf, PDFium (pypdfium2) and Pillow for site documents (#459, sizeup/docfiles.py)
-RUN pip install --no-cache-dir ".[docs]" && rm -rf build
+# [intel-llm]: the Anthropic SDK (Bedrock Mantle client + boto3) for radio pre-alert inference (sizeup/intel/infer.py; off
+# until Settings turn it on), at the exact versions of deploy/hub/constraints-intel-llm.txt (reproducible images)
+COPY deploy/hub/constraints-intel-llm.txt ./
+RUN pip install --no-cache-dir -c constraints-intel-llm.txt ".[docs,intel-llm]" && rm -rf build
 COPY data ./data
 COPY deploy/hub ./deploy/hub
 COPY deploy/trunk-recorder/talkgroups.csv ./deploy/trunk-recorder/talkgroups.csv

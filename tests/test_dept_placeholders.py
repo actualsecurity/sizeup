@@ -215,7 +215,8 @@ def test_never_a_unit_in_common_nor_specific_units_nor_heard(rig):
     rig.poll()
     a, b = rig.iid("A1"), rig.iid("B1")
     assert a != b and not any("possibly the same" in e for e in events(rig, a) + events(rig, b))
-    assert rig.cad.full(a)["scope"] is None                            # a placeholder alone: not "Specific units"
+    s = rig.cad.full(a)["scope"]                                       # a placeholder alone: its department, from the feed
+    assert (s["short"], s["source"], s["departments"]) == ("Full dept", "feed", ["Port Chester FD"])
     rig.feed.change("A1", units=("DPTA", "E60"))
     rig.poll()
     assert rig.cad.full(a)["scope"]["short"] == "Specific units"

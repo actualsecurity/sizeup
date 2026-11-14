@@ -67,6 +67,11 @@ on the air ("Engine 60" -> "Engine-sixty", "23 98" -> "twenty-three-ninety-eight
 writes those words, so respell() turns "Engine sixty" back into "Engine 60" in the text. The list Settings
 suggests: channels.vocabulary_suggestions + the county's callsigns and places (sizeup/stt_vocab.py,
 docs/stt-vocabulary.md). At most MAX_PHRASES phrases and AWS's 50 KB (MAX_BYTES).
+
+AWS writes a list-form phrase back WITH its hyphens ("Example-Post-Road"). Display turns every phrase of the
+vocabulary lists back into its written form ("Example Post Road") in each result as it comes in (_done: finals, a
+stream's last partial, a late answer kept as the alternative), and again when a stored transcript is read
+(docs/stt-vocabulary.md). Only a whole token that is a known phrase: any other hyphenated word stays as it is.
 """
 
 from __future__ import annotations
@@ -696,8 +701,10 @@ class AwsTranscriber:
                  context_limit_usd: Callable[[], float] = lambda: CONTEXT_LIMIT_USD,
                  creds: Callable[[], aws.Credentials] = aws.credentials, respell: Callable[[str], str] = lambda t: t,
                  on_late: Callable[[object, str, float | None], None] = lambda item, text, conf: None,
-                 on_change: Callable[[], None] = lambda: None, clock: Callable[[], float] = time.time):
+                 on_change: Callable[[], None] = lambda: None, clock: Callable[[], float] = time.time,
+                 display: Callable[[str], str] = lambda t: t):
         self.s, self.usage, self.on_done, self.on_fail, self.log = s, usage, on_done, on_fail, log
+        self.display = display                 # vocabulary phrases without AWS's hyphens (Display), every channel
         self.limit_usd, self.connect, self.creds, self.respell = limit_usd, connect, creds, respell
         self.on_late, self.on_change, self.clock = on_late, on_change, clock
         self.context_limit_usd = context_limit_usd
@@ -1023,6 +1030,10 @@ class AwsTranscriber:
             text = self._respell_for(job.channel)(text)
         except Exception as e:
             self.log(f"aws transcribe: respell: {type(e).__name__}: {e}")
+        try:                                         # its own step: a respelling that failed still loses its hyphens
+            text = self.display(text)
+        except Exception as e:
+            self.log(f"aws transcribe: vocabulary display: {type(e).__name__}")
         if self._resolve(job, "done"):
             self.done_n += 1
             self._record_ok()
@@ -1546,6 +1557,87 @@ def respell(text: str, mapping: dict[str, str]) -> str:
         text = re.sub(r"(?<![A-Za-z])" + r"[\s-]+".join(re.escape(w) for w in said.split()) + r"(?![A-Za-z])",
                       written, text, flags=re.I)
     return text
+
+
+def display_map(phrases) -> dict[str, str]:
+    """{"example-post-road": "Example Post Road"}: each phrase of several words as AWS writes it back (to_aws, lower
+    case) -> as it is written. A phrase with digits or signs is written as its words ("Fire two": respell() is what
+    writes digits, and only where that is safe); one written with hyphens keeps them ("Sample-on-Hudson")."""
+    out: dict[str, str] = {}
+    for p in phrases or ():
+        p = " ".join(str(p).split())
+        a, _why = to_aws(p) if p else (None, "")
+        if not a or "-" not in a:
+            continue
+        plain = re.fullmatch(r"[A-Za-z'. -]+", p) is not None and [w.strip(".'") for w in p.replace("-", " ").split()] == \
+            [w.strip(".'") for w in a.split("-")]
+        out.setdefault(a.lower(), p if plain else a.replace("-", " "))
+    return out
+
+
+HYPHENATED = re.compile(r"(?<![A-Za-z0-9'-])[A-Za-z][A-Za-z'.]*(?:-[A-Za-z'.]+)+(?![A-Za-z0-9-])")
+DISPLAY_ENDINGS = ("", ".", "'s", "'s.", "s'", "s'.", "s", "s.", "'", "'.")   # as the phrase was said: "...-Street's"
+
+
+def dehyphen(text: str, mapping: dict[str, str]) -> str:
+    """Vocabulary phrases AWS wrote with hyphens back to how they're written: "Example-Post-Road" -> "Example Post
+    Road", whatever the case, a possessive or plural ending kept ("Sample-Street's" -> "Sample Street's"). Only a whole
+    hyphenated token that is a phrase of the vocabulary (display_map): "twenty-three", "T-bone" and a name written with
+    hyphens stay as they are."""
+    if not mapping or not text or "-" not in text:
+        return text
+
+    def one(m: re.Match) -> str:
+        tok = m.group(0)
+        low = tok.lower()
+        for end in DISPLAY_ENDINGS:
+            if end and not low.endswith(end):
+                continue
+            written = mapping.get(low[:len(low) - len(end)] if end else low)
+            if written is not None:
+                return written + tok[len(tok) - len(end):] if end else written
+        return tok
+    return HYPHENATED.sub(one, text)
+
+
+class Display:
+    """dehyphen() over the vocabulary lists as they are now: lists() -> the phrases of every vocabulary pushed from
+    here (the edited list, the suggestions it started from, the police sources'). Read again at most every ttl_s; the
+    map is rebuilt only when the lists changed. Works on what AWS already has: nothing is sent to AWS."""
+
+    def __init__(self, lists: Callable[[], list], ttl_s: float = 60.0, clock: Callable[[], float] = time.monotonic,
+                 log: Callable[[str], None] = print):
+        self.lists, self.ttl_s, self.clock, self.log = lists, ttl_s, clock, log
+        self._lock = threading.Lock()
+        self._at: float | None = None
+        self._tried = False
+        self._sig, self._map = None, {}
+
+    def mapping(self) -> dict[str, str]:
+        now = self.clock()
+        with self._lock:
+            if self._at is not None and now - self._at < self.ttl_s:
+                return self._map
+            if self._tried:                        # the others use the last map while this one reads the lists
+                self._at = now
+        self._build()                              # never under the lock: lists() reads the CAD's settings
+        with self._lock:
+            self._at, self._tried = now, True
+        return self._map
+
+    def _build(self) -> None:
+        try:
+            phrases = [str(p) for p in self.lists() or ()]
+            sig = hash(tuple(phrases))
+            if sig != self._sig:
+                self._sig, self._map = sig, display_map(phrases)
+        except Exception as e:  # noqa: BLE001 - a transcript is never lost to its spelling
+            self.log(f"aws transcribe: vocabulary display: {type(e).__name__}")
+
+    def __call__(self, text: str) -> str:
+        if not isinstance(text, str) or "-" not in text:
+            return text
+        return dehyphen(text, self.mapping())
 
 
 STREET_WORDS = {"St": "Street", "Ave": "Avenue", "Rd": "Road", "Dr": "Drive", "Ln": "Lane", "Pl": "Place", "Ct": "Court",
