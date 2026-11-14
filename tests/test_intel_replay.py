@@ -455,3 +455,56 @@ def test_a_replay_sends_nothing_and_opens_nothing_writable(restored, monkeypatch
     assert opened and not [(p, uri) for p, uri in opened
                            if p != ":memory:" and not (uri and p.startswith("file:") and ("mode=ro" in p or "immutable=1" in p))]
     assert restored.read_bytes() == before and sorted(p.name for p in restored.parent.iterdir()) == beside
+
+
+# -- open_ro: one place, never the live database, immutable only for a bare file ------------------------------------------
+
+def test_immutable_only_when_neither_a_wal_nor_a_shm_is_there(restored, monkeypatch):
+    uris, real = [], sqlite3.connect
+
+    def connect(*a, **kw):
+        uris.append(str(a[0]))
+        return real(*a, **kw)
+    monkeypatch.setattr(sqlite3, "connect", connect)
+    rp.open_ro(restored).close()
+    assert uris[-1].endswith("?mode=ro&immutable=1")
+    for side in ("-shm", "-wal"):                       # either one there (even empty): through the WAL, never immutable
+        p = Path(f"{restored}{side}")
+        p.write_bytes(b"")
+        rp.open_ro(restored).close()
+        assert uris[-1].endswith("?mode=ro"), side
+        for q in restored.parent.glob("cad.sqlite-*"):
+            q.unlink()
+    assert "sqlite3.connect" not in (Path(intel_replay.__file__).parent / "stt_eval.py").read_text()     # one helper
+    assert "sqlite3.connect" not in Path(intel_replay.__file__).read_text()
+
+
+def test_the_live_database_is_refused(restored, tmp_path, monkeypatch, capsys):
+    """A path in a running sizeup's state directory ($SIZEUP_STATE_DIR, its state/, the image's /data, a station's
+    /var/lib/sizeup, this checkout's state/): refused by open_ro, and by both tools with a clear error (exit 2)."""
+    import stt_eval
+    assert rp.open_ro(restored) is not None                                   # a copy elsewhere: fine
+    monkeypatch.setenv("SIZEUP_STATE_DIR", str(tmp_path))
+    with pytest.raises(rp.LiveDatabase, match="restored copy"):
+        rp.open_ro(restored)
+    with pytest.raises(rp.LiveDatabase):
+        rp.open_ro(tmp_path / "." / "cad.sqlite")                             # however it is spelled
+    assert intel_replay.main(["--db", str(restored), "--no-place"]) == 2
+    assert "restored copy" in capsys.readouterr().err
+    assert stt_eval.main(["--db", str(restored)]) == 2
+    assert "restored copy" in capsys.readouterr().err
+    monkeypatch.setenv("SIZEUP_STATE_DIR", str(tmp_path.parent))              # <state dir>/state/cad.sqlite too
+    (tmp_path.parent / "state").mkdir(exist_ok=True)
+    live = tmp_path.parent / "state" / "cad.sqlite"
+    live.write_bytes(restored.read_bytes())
+    with pytest.raises(rp.LiveDatabase):
+        rp.open_ro(live)
+    monkeypatch.delenv("SIZEUP_STATE_DIR")
+    root = Path(rp.__file__).resolve().parent.parent.parent
+    for known in ("/data/cad.sqlite", "/var/lib/sizeup/state/cad.sqlite", root / "state" / "cad.sqlite"):
+        with pytest.raises(rp.LiveDatabase):
+            rp.refuse_live(known)
+    link = tmp_path / "elsewhere.sqlite"
+    link.symlink_to(root / "state" / "cad.sqlite")                            # nor through a link to it
+    with pytest.raises(rp.LiveDatabase):
+        rp.refuse_live(link)

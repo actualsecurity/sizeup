@@ -203,7 +203,11 @@ def main(argv=None) -> int:
     ap.add_argument("--pin", action="store_true")
     ap.add_argument("--json", type=Path, help="also write the aggregates here (never into the repo)")
     a = ap.parse_args(argv)
-    return run(a)
+    try:
+        return run(a)
+    except rp.LiveDatabase as e:
+        print(f"refused: {e}", file=sys.stderr)
+        return 2
 
 
 def run(a) -> int:

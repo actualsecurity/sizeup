@@ -132,16 +132,53 @@ def gazetteer_locator():
 
 # -- the rows ------------------------------------------------------------------------------------------------------------
 
+class LiveDatabase(ValueError):
+    """The path is a running sizeup's own database: the tools read a restored copy, never the live file."""
+
+
+def live_dirs() -> list[Path]:
+    """Where a running sizeup keeps its databases: $SIZEUP_STATE_DIR (and its state/), the hub image's /data, a
+    station's /var/lib/sizeup (deploy/), and this checkout's own state/ (config.py: cad.db = state/cad.sqlite)."""
+    import os
+    dirs = [Path("/data"), Path("/var/lib/sizeup"), Path("/var/lib/sizeup/state"),
+            Path(__file__).resolve().parent.parent.parent / "state"]
+    env = os.environ.get("SIZEUP_STATE_DIR", "").strip()
+    if env:
+        dirs += [Path(env).expanduser(), Path(env).expanduser() / "state"]
+    out = []
+    for d in dirs:
+        try:
+            out.append(d.resolve())
+        except OSError:
+            continue
+    return out
+
+
+def refuse_live(path: str | Path) -> Path:
+    """The path, resolved, unless it is in one of live_dirs() (LiveDatabase): a database a running sizeup writes."""
+    p = Path(path).expanduser()
+    try:
+        r = p.resolve()
+    except OSError:
+        r = p.absolute()
+    if r.parent in live_dirs():
+        raise LiveDatabase(f"{p} is a live sizeup database ({r.parent} is a state directory): use a restored copy "
+                           "somewhere else (litestream restore -o /tmp/..., or a copy of the file with nothing writing it)")
+    return r
+
+
 def open_ro(path: str | Path) -> sqlite3.Connection:
-    """A restored cad.sqlite, read-only: SQLite refuses every write on this connection (mode=ro, query_only).
-    A restore has no -wal beside it: it is then opened immutable too, so SQLite makes no -wal / -shm next to the
-    file either (a read-only connection to a WAL-mode file otherwise creates both, empty). A copy that came with a
-    -wal holding changes is read through it (mode=ro alone): the main file is never written either way."""
-    p = Path(path)
+    """A restored cad.sqlite, read-only: SQLite refuses every write on this connection (mode=ro, query_only). The one
+    place the tools open a database (tools/intel_replay.py, tools/stt_eval.py).
+
+    Never the live database (refuse_live: LiveDatabase). A restore has no -wal and no -shm beside it: only then is it
+    opened immutable too, so SQLite makes neither next to the file (a read-only connection to a WAL-mode file otherwise
+    creates both, empty). With either there (a copy taken while its writer was open, or another reader on it right
+    now) it is read through the WAL, mode=ro alone: the main file is never written either way."""
+    p = refuse_live(path)
     if not p.is_file():
         raise FileNotFoundError(str(p))
-    wal = Path(f"{p}-wal")
-    still = "" if wal.is_file() and wal.stat().st_size else "&immutable=1"
+    still = "" if Path(f"{p}-wal").exists() or Path(f"{p}-shm").exists() else "&immutable=1"
     con = sqlite3.connect(f"file:{p}?mode=ro{still}", uri=True)
     con.row_factory = sqlite3.Row
     con.execute("PRAGMA query_only = ON")
