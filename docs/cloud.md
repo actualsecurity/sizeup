@@ -168,7 +168,7 @@ pages of its own ([the station page](#the-station-page)).
 | One event can't be applied | Logged and counted in the Station row; the ones behind it still apply. |
 | Station offline during a dispatch | Text-only dispatch with the reason, immediately. |
 | Station slow to render | After 20 s, text only; a late answer is discarded. |
-| Hub redeployed | A hot/cold handoff ([Deploys](#deploys-the-hotcold-handoff)): the new task waits warm beside the old one, which drains, puts its last changes in S3 and hands over. The page shows "Reconnecting… (update in progress)" for roughly 10–20 s and carries on; the station retries within seconds. Nothing written is lost (every change is confirmed in S3 before the lock is released). Lost: the in-memory "talking now" and station status (back within 5 s), a tones-only page waiting for its separate voice transmission. Received clips survive (in `audio.sqlite`: [Audio retention](#audio-retention)). The new app serves the CAD at once and reads the map layers' caches (already restored by the standby) in the background: each layer says "loading" for a few seconds. A hub that crashes: the lease runs out in 35 s and a standby (if any) takes over; else ECS starts a task that restores cold (as before: minutes), losing up to ~1 s of the newest writes. |
+| Hub redeployed | A hot/cold handoff ([Deploys](#deploys-the-hotcold-handoff)): the new task waits warm beside the old one, which drains, puts its last changes in S3 and hands over. The page shows "Reconnecting… (update in progress)" for roughly 10–20 s and carries on; the station retries within seconds. Nothing written is lost (every change is confirmed in S3 before the lock is released). Lost: the in-memory "talking now" and station status (back within 5 s), a tones-only page waiting for its separate voice transmission. Received clips survive (in `audio.sqlite`: [Audio retention](#audio-retention)). The new app serves the CAD at once and reads the map layers' caches (already restored by the standby) in the background: each layer says "loading" for a few seconds. A hub that crashes: the lease runs out in 35 s and a standby (if any) takes over; else ECS starts a task that restores cold (as before: minutes). Either way a crash (not a deploy) loses up to ~30 s of the newest writes: [How often the replica is written](#how-often-the-replica-is-written). |
 | Clocks differ | Transmission times are the station's clock; the hub warns in the Station row above 5 s. Keep both on NTP. |
 | Late delivery | Events that arrive after an outage are applied as they arrive: the monitor attaches traffic to whatever incident is active then; the CAD links by the transmission's own time. |
 | A station update doesn't come up | Switched back to the release that ran before within 90 s; that build isn't tried again until the hub moves on. The Station row says "update to ... failed". |
@@ -2607,6 +2607,60 @@ sent. A failed upload is logged and tried again later (5 min doubling to 6 h), n
 without `LITESTREAM_BUCKET` (compose, a Mac) or with `SIZEUP_CACHE_S3=off`: the caches are then local only.
 Camera snapshots and the weather's radar tiles are not kept (minutes old at most, fetched again at once).
 
+### How often the replica is written
+
+**Durability.** A deploy or any clean handover loses **nothing**: the draining leader asks Litestream for a sync of
+each file (`litestream sync -wait`), which reads the WAL and uploads everything at once, and releases the lock with
+those exact positions; the new task catches up to them before it promotes anything. A hub that is **killed** (a
+crash, an OOM, a fence, the host gone) loses what it wrote since Litestream's last sync: **up to ~30 s** (it was
+~1 s).
+
+**Why.** Every object Litestream writes to S3 and every listing it makes is a billed request (S3's
+"Requests-Tier1": PUT and LIST). At Litestream's defaults it read each database's WAL every second and uploaded one
+small file per read that found changes, around the clock, for three databases, and listed the replica every 15 s
+whether anything had changed or not: the hub ran at about 200,000 such requests a day. Measured against a counting
+stand-in for S3 (two databases written all the time, one idle, 640 s from a fresh start): 1,287 PUTs and listings
+at the defaults (174,000 a day), 163 with the settings below (22,000 a day; start-up aside, about 12,000).
+
+**What is set** (`deploy/hub/litestream.yml`; Litestream 0.5.18, read from its source and measured):
+
+| key | value | default | what it does |
+|---|---|---|---|
+| `monitor-interval` (each database) | `SIZEUP_LITESTREAM_SYNC_S` s (30) | 1 s | How often Litestream reads the WAL into a new L0 LTX file. **This is the cadence**: one file, one PUT, per read that found changes. |
+| `sync-interval` (each replica) | 1 s | 1 s | How soon a finished LTX file is uploaded. Left alone on purpose: every L0 file is uploaded, one PUT each, whenever this fires, so raising it saves nothing (measured: 61 uploads in 65 s at `sync-interval: 30s` alone, 65 at the defaults, 3 with `monitor-interval: 30s`) and would add its length to what a crash can lose. |
+| `levels` | 5 min, 30 min, 1 h | 30 s, 5 min, 1 h | L0 files are merged into L1, L1 into L2, L2 into L3. At 30 s an L1 file would be a copy of each L0 file, and each merge costs a PUT and three or more listings. |
+| `l0-retention-check-interval` | 5 min | 15 s | Looks for merged L0 files older than `l0-retention` (5 min, the default: the followers read L0). Two or more listings per database each time, changes or not; L0 files are also cleared after every L1 merge. |
+
+Unchanged: a full snapshot of each file daily, kept a day (with every level's files since it). A restore, a
+follower and the takeover's plan read whatever files are there, of every level, so replicas written before this
+and after it restore alike, and an older image can follow and restore a replica this one wrote. Restoring to a
+moment in the past (`litestream restore -timestamp` / `-txid`) lands on a file boundary: every 30 s for the last
+5 to 10 minutes, every 5 minutes before that (it was every second, then every 30 s).
+
+`SIZEUP_LITESTREAM_SYNC_S` (whole seconds, 1 to 300) is set to 30 in the image (the `Dockerfile`'s `ENV`, so every
+process in the container has it: Litestream refuses a config whose interval is empty), defaulted again by the
+entrypoint and checked by the supervisor (not a number: 30, said in the log). Put it in the task definition's
+environment to change it: no code change. Smaller: less lost in a crash, more requests (about 2,900 PUTs a day per
+database at 30 s, 86,400 at 1 s).
+
+**Nothing in a handoff waits for the 30 s** (`sizeup/handoff.py`; `tests/test_litestream_takeover.py` runs a drain
+and a takeover against the real Litestream with this very file):
+
+| step | how it gets its answer |
+|---|---|
+| The takeover's two confirms (Litestream's first position of each promoted file; again after the migrations) | `litestream sync`: Litestream reads the file and its WAL when asked. Its budgets (120 s a file, 150 s in all) are for a big file's snapshot. |
+| The drain's last sync (45 s in all) | `litestream sync -wait`: reads the WAL and uploads every file not in S3 yet before it answers. |
+| The standby's catch-up | Its followers ask S3 every second (`-follow-interval 1s`), whatever the leader's cadence; the release's positions are in S3 before the lock says so. |
+| A retake | The replica's position is read (`restore -dry-run`), Litestream confirmed with `litestream sync`. |
+| Litestream started again under the serving app (it exited) | Asked for a sync of each file at once; by itself it would first read the WAL a whole interval later. |
+| A first lock ever in a bucket | The one real wait: 40 s (above), because a writer from before the lock can't be asked. |
+| The fence (20 s to stop writing, 35 s before anyone takes over) | Nothing to do with Litestream's cadence: the app and Litestream are killed. |
+| The replica checks ([below](#replica-checks)) | The followers poll at their own interval and apply whatever is there; nothing compares a replica's age in seconds. |
+
+**What a standby costs.** A follower that finds no new L0 file looks through every other level too (nine or more
+listings instead of one). With the leader writing every 30 s that is most of a standby's one-second polls: a few
+thousand listings per deploy (a few cents), only while a standby runs.
+
 ### Audio retention
 
 `audio.sqlite` and its S3 bucket (the hub; `sizeup/cloud/hub.py` `_audio_retention`, `hubstore.py`
@@ -2852,7 +2906,7 @@ stateDiagram-v2
   only once every file is restored and the caches are back: ECS stops the old task only then. That can take
   minutes (`audio.sqlite` is the big one): the health check's start period is 300 s.
 * **TAKEOVER** reads the replica's last position (`litestream restore -dry-run`, the three files at once); the lock
-  is held, so nothing can move it. The followers need only the last few changes: **seconds, not a restore**. A follower that doesn't get
+  is held, so nothing can move it. The followers (asking S3 every second, whatever the leader's cadence) need only the last few changes: **seconds, not a restore**. A follower that doesn't get
   there in 30 s falls back to a full restore. Refused, never promoted: a replica behind the release; no backup at
   all although a leader ran before (an empty start would be replicated over the real data); a replica that moves
   while this task holds the lock (another writer: e.g. a hub from before the lock); a follower that needed a
@@ -2864,8 +2918,8 @@ stateDiagram-v2
   progress", 503 + Retry-After), so the `leader` file goes in then and the new connector registers while the app
   is built; the real server takes the same socket over (nothing refused in between). "serving" goes in the lock
   once the app's /healthz is 200 and the connector is up.
-* **DRAINING** confirms every change is in S3 (`litestream sync -wait`: the replica's position must reach the
-  database's) before the lock is released. Port 8090 answers 503 + Retry-After ("update in progress") from the
+* **DRAINING** confirms every change is in S3 (`litestream sync -wait`: Litestream reads the WAL and uploads at
+  once, whatever its intervals; the replica's position must reach the database's) before the lock is released. Port 8090 answers 503 + Retry-After ("update in progress") from the
   moment the draining app lets go of it (it used to refuse connections for ~11 s while the app stopped:
   Cloudflare's 502).
 * **RELEASED**: the old connector stays up (answering "update in progress") until the new leader says "serving"
@@ -2907,10 +2961,10 @@ gap users see is the handoff only.
 |---|---|
 | The new task can't restore / warm | It never reports healthy; ECS never stops the old one; the circuit breaker rolls back. |
 | The new task fails after taking the lock | It hands the lock back (released). Unused: the old task takes it back. Used: ECS's next task (or the rollback's) restores and takes over. |
-| The leader crashes or freezes | Its lease runs out: it has stopped writing 20 s after its last renew; a standby takes over at 35 s, else ECS's replacement starts cold. |
+| The leader crashes or freezes | Its lease runs out: it has stopped writing 20 s after its last renew; a standby takes over at 35 s, else ECS's replacement starts cold. What it wrote since Litestream's last sync (up to ~30 s) isn't in S3: [How often the replica is written](#how-often-the-replica-is-written). |
 | S3 unreachable for the leader | The same: it fences itself (exit 3) after 20 s; nobody else can write either until the lock is readable. |
 | A stale leader (split brain) | Its next renew is refused (412): it is killed at once. Its generation is behind; it can't release or renew. |
-| A cold start (no lock object yet) | Created with `If-None-Match: *` (generation 1); the replica must hold still for 3 s first. |
+| A cold start (no lock object yet) | Created with `If-None-Match: *` (generation 1); the replica must hold still for 40 s first: longer than one Litestream sync interval (`SIZEUP_LITESTREAM_SYNC_S` + 10 s), so a hub from before the lock, still writing, would show. Only ever on the first start in a bucket; a takeover from a release never waits. |
 
 **Rolling out** (the order matters: old code with `maximumPercent=200` would run two writers):
 1. Deploy this code with the service still at minimum 0 % / maximum 100 % (stop, then start, as before). Check
@@ -3128,7 +3182,9 @@ One task, desired count 1, ephemeral disk:
   * `LITESTREAM_BUCKET` set: `python -m sizeup.handoff`, the supervisor ([Deploys](#deploys-the-hotcold-handoff)):
     the leader lock, the standby's followers, then `litestream replicate` (no `-exec`) and `python -m sizeup` as
     its children, with `deploy/hub/litestream.yml` (bucket from `LITESTREAM_BUCKET`, prefix `LITESTREAM_PATH`
-    default `sizeup-hub`, region `LITESTREAM_REGION` default `AWS_REGION`, a control socket for `litestream sync`;
+    default `sizeup-hub`, region `LITESTREAM_REGION` default `AWS_REGION`, a control socket for `litestream sync`,
+    the WAL read into a file for S3 every `SIZEUP_LITESTREAM_SYNC_S` seconds, default 30, set in the image:
+    [How often the replica is written](#how-often-the-replica-is-written);
     credentials from the **task role**, no keys). Its `/healthz` is on port 8089 (the task's health check).
   * unset: just `python -m sizeup` (local dev).
   * Environment: `SIZEUP_STATION_TOKEN` (secret from SSM), `SIZEUP_PUBLIC_URL`, `SIZEUP_SHARED_DIR`, optionally

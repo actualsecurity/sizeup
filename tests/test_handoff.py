@@ -247,6 +247,7 @@ class World:
         self.connector_down: set[str] = set()       # whose cloudflared never connects
         self.app_fails: set[str] = set()
         self.rogue = False                  # something else moves the replica (a writer from before the lock)
+        self.rogue_at: float | None = None  # ... once, at this time (monotonic): its Litestream's next sync
         self.ls_first: dict[str, int] = {}  # Litestream's first position past the replica's (+1: its own snapshot)
         self.follower_hangs: set[str] = set()   # whose followers need a SIGKILL to stop
         self.ls_version = (0, 5, 18)
@@ -373,6 +374,9 @@ class FakeEnv(Env):
     def plan(self, db):
         self.calls.append(f"plan {db}")
         if self.world.rogue and self.world.replica[db] is not None:
+            self.world.replica[db] += 1
+        if self.world.rogue_at is not None and time.monotonic() >= self.world.rogue_at and db == "cad":
+            self.world.rogue_at = None
             self.world.replica[db] += 1
         return self.world.replica[db]
 
@@ -695,6 +699,50 @@ def test_a_replica_that_moves_while_we_hold_the_lock_is_never_promoted(world, tm
     a = Task(world, "A", tmp_path).start()
     assert a.wait() == 1
     assert "app" not in a.env.calls and any("another writer" in e for e in a.sup.events)
+
+
+# -- Litestream's cadence (SIZEUP_LITESTREAM_SYNC_S: the WAL read into a file for S3 every 30 s, not every second) ---
+
+def test_a_first_lock_waits_longer_than_one_sync_interval_for_a_writer_from_before_it(world, tmp_path):
+    # a hub from before the lock syncs only every interval: the wait must be longer than one, whatever it is set to
+    assert handoff.CREATED_WAIT_S > handoff.LITESTREAM_SYNC_S >= 30
+    assert handoff.created_wait_s(30) == 40 and handoff.created_wait_s(120) > 120 and handoff.created_wait_s(1) > 1
+    world.rogue_at = time.monotonic() + 0.6                   # its next sync lands well after the takeover's first look
+    a = Task(world, "A", tmp_path, CREATED_WAIT_S=1.0).start()
+    assert a.wait() == 1
+    assert "app" not in a.env.calls and "replicate" not in a.env.calls
+    assert any("another writer" in e for e in a.sup.events)
+
+
+def test_only_a_first_lock_waits_a_takeover_from_a_release_never_does(world, tmp_path):
+    a = Task(world, "A", tmp_path).start()
+    until(lambda: a.sup.role == "active")
+    b = Task(world, "B", tmp_path, CREATED_WAIT_S=1e9).start()          # (it would never finish waiting)
+    until(lambda: b.sup.warm() and b.sup.role == "standby", what="B warm")
+    a.sup.on_term()
+    until(lambda: b.sup.role == "active", what="B active")
+    assert a.wait() == 0 and finish(b) == 0 and world.violations == []
+
+
+@pytest.mark.parametrize("raw, want", [(None, 30), ("", 30), ("30", 30), (" 45 ", 45), ("1", 1), ("0", 1), ("-5", 1),
+                                       ("100000", 300), ("30s", 30), ("2.5", 30), ("soon", 30)])
+def test_the_sync_interval_from_the_environment_is_always_a_duration_litestream_takes(raw, want):
+    assert handoff.sync_interval_s({} if raw is None else {handoff.SYNC_ENV: raw}) == want
+
+
+def test_a_litestream_started_again_while_serving_is_asked_to_sync_at_once(world, tmp_path, monkeypatch):
+    # by itself it would first read the WAL a whole interval after it started: what the app wrote meanwhile unreplicated
+    monkeypatch.setattr(handoff, "LITESTREAM_BACKOFF", (0.1, 0.5))
+    a = Task(world, "A", tmp_path).start()
+    until(lambda: a.sup.role == "active")
+    n = len(a.env.calls)
+    a.sup.litestream._end(1)                                  # Litestream dies under the serving app
+    until(lambda: a.env.calls[n:].count("replicate") == 1, what="Litestream started again")
+    until(lambda: [c for c in a.env.calls[n:] if c.startswith("position")] == [f"position {db}" for db in DBS],
+          what="a sync of each file asked for")
+    time.sleep(1.3)
+    assert len([c for c in a.env.calls[n:] if c.startswith("position")]) == len(DBS)      # once each: not a poll
+    assert a.sup.role == "active" and finish(a) == 0 and world.violations == []
 
 
 def test_a_follower_that_falls_behind_falls_back_to_a_full_restore(world, tmp_path):

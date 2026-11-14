@@ -7,6 +7,11 @@ each file does its app migrate (8 columns, an index, 3 full-table UPDATEs, with 
 of #419) and serve. What the replica holds afterwards must be exactly the live files, and the next takeover's quick
 check must pass.
 
+Litestream runs with the hub's own deploy/hub/litestream.yml (its intervals and levels; only the S3 replicas are
+local folders): the WAL read every 30 s when nobody asks (SIZEUP_LITESTREAM_SYNC_S). So whatever is replicated
+here within seconds is replicated because the supervisor asked (`litestream sync`), never by a tick: a drain and
+a takeover must neither lose a row nor wait for one.
+
 Needs `litestream` on PATH (the hub image has it; `brew install litestream` locally): skipped without it.
 Every row here is invented."""
 
@@ -23,13 +28,15 @@ from pathlib import Path
 
 import pytest
 
-from sizeup import handoff
+from sizeup import handoff, leaderlock
 from sizeup.handoff import DBS, Env, Supervisor, fingerprint, sidecars
 from tests.test_handoff import FakeS3, lock_for, until
 
 pytestmark = pytest.mark.skipif(shutil.which("litestream") is None, reason="needs litestream on PATH")
 
 ROWS = 20000
+ROOT = Path(__file__).resolve().parent.parent
+SYNC_S = handoff.LITESTREAM_SYNC_S                  # the hub's cadence: nothing here may wait for it
 
 # The gated app (sizeup/app.py run_gated's protocol): "warm", then on "init" the migration, "ok"; on "run" it writes
 # and serves (a marker file), until SIGTERM.
@@ -109,13 +116,21 @@ def rig(tmp_path):
     replica = tmp_path / "replica"
 
     def config(task: str) -> tuple[Path, str]:
+        """The hub's litestream.yml for this task: its S3 replicas turned into folders, its ${...} filled in."""
         data = tmp_path / task / "data"
         sock = str(sock_dir / f"{task}.sock")
         cfg = tmp_path / task / "litestream.yml"
         cfg.parent.mkdir(parents=True, exist_ok=True)
-        cfg.write_text(f"socket:\n  enabled: true\n  path: {sock}\nlogging:\n  stderr: true\ndbs:\n" + "".join(
-            f"  - path: {data}/{db}.sqlite\n    replica:\n      type: file\n      path: {replica}/{db}.sqlite\n"
-            for db in DBS))
+        y = (ROOT / "deploy/hub/litestream.yml").read_text()
+        assert y.count("      type: s3\n") == len(DBS) and y.count("${SIZEUP_LITESTREAM_SYNC_S}s") == len(DBS)
+        y = "".join(line for line in y.splitlines(keepends=True)
+                    if not line.lstrip().startswith(("bucket:", "region:")))
+        for a, b in (("      type: s3\n", "      type: file\n"), ("${LITESTREAM_PATH}", str(replica)),
+                     ("${SIZEUP_STATE_DIR}", str(data)), ("${LITESTREAM_SOCKET}", sock),
+                     ("${SIZEUP_LITESTREAM_SYNC_S}", str(SYNC_S))):
+            y = y.replace(a, b)
+        assert not any("${" in line.split("#")[0] for line in y.splitlines()), y
+        cfg.write_text(y)
         return cfg, sock
     yield tmp_path, config
     shutil.rmtree(sock_dir, ignore_errors=True)
@@ -143,20 +158,32 @@ def first_leader(root: Path, cfg: Path, sock: str) -> None:
                            for j in range(i, i + 1000)])
             c.execute("COMMIT")
             if i == ROWS // 2:
-                time.sleep(1.2)                                     # (more than one sync: a history of LTX files)
+                asked(env, "cad", wait=False)                       # (more than one sync: a history of LTX files)
         c.close()
         for db in DBS:
-            end = time.monotonic() + 30
-            while True:
-                try:
-                    env.sync(db, 30)
-                    break
-                except RuntimeError:
-                    if time.monotonic() > end:
-                        raise
-                    time.sleep(0.2)                                 # (its control socket, a moment after it starts)
+            asked(env, db)
     finally:
         ls.stop(30)
+
+
+def asked(env: Env, db: str, wait: bool = True) -> tuple[int, int | None]:
+    """`litestream sync` (-wait) of db, now: (Litestream's position, the replica's)."""
+    end = time.monotonic() + 30
+    while True:
+        try:
+            return env.position(db, 30, wait=wait)
+        except RuntimeError:
+            if time.monotonic() > end:
+                raise
+            time.sleep(0.2)                                         # (its control socket, a moment after it starts)
+
+
+def ids(path: Path) -> set[str]:
+    c = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        return {r[0] for r in c.execute("SELECT id FROM radio_traffic")}
+    finally:
+        c.close()
 
 
 def snapshot(path: Path) -> tuple:
@@ -169,8 +196,8 @@ def snapshot(path: Path) -> tuple:
         c.close()
 
 
-def restored(root: Path, cfg: Path, db: str) -> Path:
-    out = root / "check" / f"{db}.sqlite"
+def restored(root: Path, cfg: Path, db: str, to: str = "check") -> Path:
+    out = root / to / f"{db}.sqlite"
     out.parent.mkdir(parents=True, exist_ok=True)
     r = subprocess.run(["litestream", "restore", "-config", str(cfg), "-o", str(out), str(Path(str(cfg)).parent /
                         "data" / f"{db}.sqlite")], capture_output=True, text=True, timeout=120)
@@ -245,3 +272,69 @@ def test_the_supervisor_checks_the_staged_copy_like_the_real_one(rig):
     assert sidecars(out)                                            # a writer leaves its WAL beside it ...
     c.close()
     assert fingerprint(out) != fp                                   # ... and the file changed
+
+
+def test_a_clean_handover_at_the_30_s_cadence_loses_no_row_and_waits_for_no_tick(rig):
+    """Litestream reads the WAL only every 30 s by itself (the hub's litestream.yml), so seconds after a takeover the
+    replica is behind the leader's file. SIGTERM: the drain's `litestream sync -wait` puts every committed row in the
+    replica at once and releases at that position; the standby's followers reach it within their own second, and
+    it serves: in seconds, not after a tick, and with every row the old leader ever committed."""
+    assert SYNC_S >= 30
+    tmp, config = rig
+    cfg_s, sock_s = config("S")
+    first_leader(tmp / "S", cfg_s, sock_s)                          # the replica as some leader before left it
+    s3 = FakeS3()
+    seed = lock_for(s3, "S")
+    seed.try_take()
+    seed.release({db: f"{n:016x}" for db, n in
+                  ((db, Env("cfg.toml", tmp / "S" / "data", str(cfg_s), sock_s, 0).plan(db)) for db in DBS)}, clean=True)
+
+    def task(name: str) -> tuple[RealEnv, Supervisor, list, threading.Thread]:
+        cfg, sock = config(name)
+        env = RealEnv(tmp / name, cfg, sock, migrate=False)
+        sup = Supervisor(lock_for(s3, name), env, tmp / name / "run", tmp / name / "shared", control_port=0,
+                         timing=dict(POLL_S=0.1, RETAKE_S=1e9))
+        code: list = []
+        th = threading.Thread(target=lambda: code.append(sup.run()), daemon=True)
+        th.start()
+        return env, sup, code, th
+
+    env_a, a, code_a, th_a = task("A")
+    b = th_b = None
+    try:
+        until(lambda: a.role == "active" or code_a, timeout=120, what="A active")
+        assert a.role == "active", a.events[-5:]
+        env_b, b, code_b, th_b = task("B")
+        until(lambda: (b.role == "standby" and b.warm()) or code_b, timeout=120, what="B a warm standby")
+        time.sleep(3.0)                                             # A's app writes on; Litestream's tick is far off
+        # no tick since the takeover's last confirm: the replica lacks what the app wrote since (a crash now would
+        # lose it: the price of the cadence) ...
+        before = env_a.plan("cad")
+        behind = ids(restored(tmp, env_a.ls_config, "cad", to="before"))
+        assert len(ids(env_a.db_path("cad")) - behind) > 50
+        t0 = time.monotonic()
+        a.on_term()                                                 # ... and a clean handover loses none of it
+        until(lambda: a.role in ("released", "done") or code_a, timeout=60, what="A released")
+        drain_s = time.monotonic() - t0
+        until(lambda: b.role == "active" or code_b, timeout=60, what="B active")
+        handover_s = time.monotonic() - t0
+        th_a.join(60)
+        assert code_a == [0] and b.role == "active", (a.events[-5:], b.events[-5:])
+        released = {db: leaderlock.txid(v) for db, v in a.released_positions.items()}
+        assert released["cad"] > before                             # the drain's sync moved the replica, at once
+        assert {db: leaderlock.txid(v) for db, v in b.positions.items()} == released    # promoted exactly there
+        old = ids(env_a.db_path("cad"))                             # every row A committed, its last one included
+        assert len(old) > len(behind) and old <= ids(env_b.db_path("cad"))
+        assert not any("REFUSED" in e or "full restore" in e for e in b.events)
+        print(f"\nreal Litestream, WAL read every {SYNC_S} s: drain {drain_s:.1f} s, SIGTERM to the new leader "
+              f"serving {handover_s:.1f} s ({len(old - behind)} rows only the drain's sync replicated)")
+        assert drain_s < SYNC_S / 2 and handover_s - drain_s < SYNC_S / 2     # seconds: nothing waited for a tick
+    finally:
+        for sup, th in ((a, th_a), (b, th_b)):
+            if sup is not None:
+                sup.t.update(OVERLAP_S=0.1)
+                sup.on_term()
+                th.join(60)
+    assert code_b == [0], b.events[-5:]
+    for db in DBS:                                                  # and B's own release: the replica is its files
+        assert snapshot(restored(tmp, env_b.ls_config, db, to="after")) == snapshot(env_b.db_path(db)), db

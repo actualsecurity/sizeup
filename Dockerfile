@@ -66,12 +66,17 @@ COPY deploy/trunk-recorder/systems ./deploy/trunk-recorder/systems
 
 # sizeup finds data/ next to its package (data/gazetteer.sqlite, cad_lists.json, ...), so it runs from
 # /app (PYTHONPATH) rather than the site-packages copy; `pip install .` brings numpy.
+# SIZEUP_LITESTREAM_SYNC_S: how often Litestream reads each database's WAL into a file for S3 (deploy/hub/
+# litestream.yml expands it; docs/cloud.md "How often the replica is written"). Here so that every process in the
+# container has it, an operator's `litestream restore -config ...` in a shell included; the task definition may
+# override it.
 ENV PYTHONPATH=/app \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     SIZEUP_CONFIG=/app/deploy/hub/config.hub.toml \
     SIZEUP_STATE_DIR=/data \
     SIZEUP_PORT=8090 \
+    SIZEUP_LITESTREAM_SYNC_S=30 \
     SIZEUP_BUILD=${SIZEUP_BUILD}
 
 USER sizeup

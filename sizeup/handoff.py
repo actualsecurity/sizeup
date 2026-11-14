@@ -66,6 +66,18 @@ takeover refused it. So, before anything writes:
 A file with no replica at all (the very first start) is created by the app; Litestream's first sync of it is a
 full snapshot from WAL offset 0 (nothing before it to miss), confirmed before the gate says "run". The upload
 to S3 goes on meanwhile; a release waits for all of it (`litestream sync -wait`).
+
+HOW OFTEN THE REPLICA IS WRITTEN (deploy/hub/litestream.yml, docs/cloud.md "How often the replica is written"). Left
+alone, Litestream reads each WAL into a new LTX file, one more S3 PUT, only every SIZEUP_LITESTREAM_SYNC_S seconds
+(30; it was every second: the S3 request bill). So a leader that is killed or fenced loses up to that much of its
+newest writes. Nothing here waits for that tick, and a handoff loses nothing:
+  * `litestream sync` (the takeover's confirms, position(wait=False)) and `litestream sync -wait` (the drain,
+    sync()) make Litestream read the WAL NOW, and -wait uploads it all before it answers: whatever the interval;
+  * a Litestream started again while serving is asked for a sync at once (_kick), not after a tick;
+  * the followers poll S3 at their own interval (1 s: a standby; SIZEUP_REPLICA_FOLLOW_S: the leader's checks),
+    whatever the leader's;
+  * the one wait that is about another writer's cadence: a first lock ever (CREATED_WAIT_S), where the replica
+    must hold still for longer than one interval (created_wait_s()).
 """
 
 from __future__ import annotations
@@ -105,12 +117,13 @@ RESTORE_S = 600.0              # a full restore, or a cold start's followers (no
 APP_READY_S = 120.0            # the app answering /healthz after it is started
 CONNECTOR_READY_S = 30.0       # cloudflared connected to the edge (not fatal: "serving" is said anyway)
 APP_STOP_S = 30.0              # the app, after SIGTERM, before SIGKILL
-SYNC_S = 45.0                  # `litestream sync -wait` for the three files, in all
+SYNC_S = 45.0                  # `litestream sync -wait` for the three files, in all (asked for: no waiting for a tick)
 LITESTREAM_STOP_S = 40.0       # Litestream after SIGTERM (it syncs once more itself)
 OVERLAP_S = 180.0              # the released connector, at most (and never past STOP_TIMEOUT_S - KILL_MARGIN_S)
 KILL_MARGIN_S = 3.0            # ... it stops this long before ECS's SIGKILL, cleanly
 INIT_S = 300.0                 # the app opening / migrating the databases after the gate says "init"
 REPLICATING_S = 120.0          # Litestream's position of each file confirmed (before "init", and after it): each its own
+                               # (`litestream sync`: read at once; the time is a big file's snapshot, never a tick)
 REPLICATION_TOTAL_S = 150.0    # ... and all of them, every round, in all: a hung Litestream fails the takeover
 MIN_LITESTREAM = (0, 5, 18)    # litestream#1547 (a snapshot from a stale WAL offset), #1579 (the read lock after a sync)
 SKIP_CHECKS_ENV = "SIZEUP_HANDOFF_SKIP_REPLICATION_CHECKS"   # the operator's escape hatch (docs/cloud.md): "1"
@@ -121,14 +134,43 @@ RETAKE_S = 20.0                # nobody took it: take it back
 STOP_TIMEOUT_S = 120.0         # the task definition's stopTimeout: ECS SIGKILLs this long after SIGTERM
 REDRAIN_S = 40.0               # after a retake: drain again this long before the SIGKILL
 RETAKE_MIN_LEFT_S = 30.0       # ... and only with this much more left than REDRAIN_S
-CREATED_WAIT_S = 3.0           # the very first lock: the replica must hold still this long (no writer from before it)
+SYNC_ENV = "SIZEUP_LITESTREAM_SYNC_S"
+LITESTREAM_SYNC_S = 30         # Litestream reads each WAL into a file for S3 this often (litestream.yml monitor-interval)
+LITESTREAM_SYNC_RANGE = (1, 300)   # ... what SYNC_ENV may say (whole seconds)
+CREATED_MARGIN_S = 10.0        # ... and an upload, on top of one interval, before a writer from before the lock shows
+CREATED_WAIT_S = LITESTREAM_SYNC_S + CREATED_MARGIN_S   # the very first lock: the replica must hold still this long
 LITESTREAM_BACKOFF = (2.0, 60.0)
+KICK_S = 30.0                  # a Litestream started again while serving: asked to sync at once, tried this long
 
 EXIT_FENCED = 3
 
 
 def log(msg: str) -> None:
     print(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {msg}", flush=True)
+
+
+def sync_interval_s(environ=None) -> int:
+    """SIZEUP_LITESTREAM_SYNC_S as whole seconds within LITESTREAM_SYNC_RANGE (deploy/hub/litestream.yml expands it
+    into a duration: anything else there and Litestream wouldn't start). Unset or empty: LITESTREAM_SYNC_S; not a
+    whole number: that too, said in the log; out of range: the nearest bound."""
+    raw = str((os.environ if environ is None else environ).get(SYNC_ENV, "") or "").strip()
+    if not raw:
+        return LITESTREAM_SYNC_S
+    try:
+        n = int(raw)
+    except ValueError:
+        log(f"handoff: {SYNC_ENV}={raw!r} is not a whole number of seconds: {LITESTREAM_SYNC_S} s")
+        return LITESTREAM_SYNC_S
+    lo, hi = LITESTREAM_SYNC_RANGE
+    if not lo <= n <= hi:
+        log(f"handoff: {SYNC_ENV}={n} is outside {lo}-{hi} s: {min(hi, max(lo, n))} s")
+    return min(hi, max(lo, n))
+
+
+def created_wait_s(sync_s: float) -> float:
+    """How long the replica must hold still under a first lock ever: a hub from before the lock, still running,
+    puts a file in S3 at most every sync interval, so longer than one (plus its upload)."""
+    return float(sync_s) + CREATED_MARGIN_S
 
 
 def last_json(text: str) -> dict:
@@ -270,6 +312,8 @@ class Env:
         return n
 
     def follower(self, db: str, out: Path) -> Proc:
+        """`litestream restore -f`: db restored into out, then every new file in S3 applied, S3 asked every second
+        (its own interval, whatever the leader's: a release is seen within a second of its last upload)."""
         out.parent.mkdir(parents=True, exist_ok=True)
         return Proc(f"follower {db}", ["litestream", "restore", "-f", "-follow-interval", "1s", "-if-replica-exists",
                                        "-config", self.ls_config, "-o", str(out), str(self.db_path(db))])
@@ -334,8 +378,10 @@ class Env:
     def position(self, db: str, timeout: float, wait: bool = True) -> tuple[int, int | None]:
         """`litestream sync`: (Litestream's position of db, the replica's). wait: only once every change up to it
         is in S3 (-wait); else once Litestream has synced the file locally (its LTX file written: it has read the
-        file, and holds its read lock), the upload to follow. RuntimeError if Litestream can't say so (not up yet,
-        not replicating it, S3 refused)."""
+        file, and holds its read lock), the upload to follow. Either way Litestream reads the WAL when asked, not
+        at its next tick (monitor-interval), and -wait uploads every LTX file not in S3 yet before it answers
+        (Litestream 0.5.18 Store.SyncDB: DB.Sync, then Replica.Sync). RuntimeError if Litestream can't say so (not
+        up yet, not replicating it, S3 refused)."""
         r = self._ls("sync", *(["-wait"] if wait else []), "-json", "-timeout", str(max(1, int(timeout))), "-socket",
                      self.socket, str(self.db_path(db)), timeout=timeout + 5)
         if r.returncode != 0:
@@ -1002,7 +1048,15 @@ class Supervisor:
         # We hold the lock: nobody may move the replica now. If it moved, something else writes to it (a hub
         # from before the lock, still running beside us): never promote.
         if prev.get("_created"):
-            self.sleep(self.t["CREATED_WAIT_S"])   # longer than Litestream's 1 s sync: an old writer would show
+            # No lock before ours: a hub from before the lock could still be running. Its Litestream puts a file
+            # in S3 only every sync interval (SIZEUP_LITESTREAM_SYNC_S), and nothing can make it sync sooner, so
+            # the replica must hold still for longer than one. Only ever on the very first start in a bucket.
+            end = self.mono() + self.t["CREATED_WAIT_S"]
+            log(f"handoff: a first lock: the replica must hold still for {self.t['CREATED_WAIT_S']:.0f} s "
+                "(longer than one Litestream sync interval: no writer from before the lock)")
+            while self.mono() < end:
+                self.must_hold()
+                self.sleep(max(0.0, min(1.0, end - self.mono())))
         again = self._plan_all()
         for v in again.values():
             if isinstance(v, Exception):
@@ -1261,7 +1315,36 @@ class Supervisor:
                     self.litestream = self.env.replicate()
                     self.write_lease()
                     backoff, restart_at = min(backoff * 2, LITESTREAM_BACKOFF[1]), None
+                    self._kick(self.litestream)
             self.sleep(0.25)
+
+    def _kick(self, ls: Proc) -> None:
+        """A Litestream started again while the app writes: asked to sync every file now (`litestream sync`),
+        instead of at its first tick a whole sync interval later (what the app wrote while it was down would sit
+        unreplicated that much longer). On a thread of its own (the lease is watched meanwhile), each second until
+        every file answered (its socket takes a moment), for KICK_S at most, and only while this Litestream runs
+        and this task serves: a drain asks for its own sync."""
+        def mine() -> bool:
+            return self.litestream is ls and ls.poll() is None and self.role == "active"
+
+        def run() -> None:
+            left, end, why = list(DBS), self.mono() + KICK_S, None
+            while left and mine() and self.mono() < end:
+                time.sleep(1.0)
+                for db in list(left):
+                    if not mine():
+                        return
+                    try:
+                        self.env.position(db, 5.0, wait=False)
+                        left.remove(db)
+                    except Exception as e:
+                        why = e
+            if not left:
+                log("handoff: Litestream, started again, synced every file when asked")
+            elif mine():
+                log(f"handoff: Litestream, started again, didn't sync {', '.join(left)} when asked ({why}): at its "
+                    "next tick")
+        threading.Thread(target=run, name="litestream-kick", daemon=True).start()
 
     # -- stepping down ---------------------------------------------------------------------------------------
 
@@ -1490,6 +1573,8 @@ def main(argv: list[str] | None = None) -> int:
     shared = Path(os.environ.get("SIZEUP_SHARED_DIR", "/run/sizeup-shared"))
     run_dir.mkdir(parents=True, exist_ok=True)
     os.environ.setdefault("LITESTREAM_SOCKET", str(run_dir / "litestream.sock"))
+    sync_s = sync_interval_s()
+    os.environ[SYNC_ENV] = str(sync_s)             # litestream.yml expands it: Litestream and every follower get it
     lock = leaderlock.from_env(log=log)
     if lock is None:
         print("sizeup.handoff: LITESTREAM_BUCKET is not set", file=sys.stderr)
@@ -1510,10 +1595,12 @@ def main(argv: list[str] | None = None) -> int:
         watch = replicawatch.from_env(lock.holder, run_dir, state, args.litestream_config, args.config, log=log)
     except Exception as e:  # noqa: BLE001 - never in the way of the hub
         log(f"handoff: replica watch off ({type(e).__name__}: {e})")
-    sup = Supervisor(lock, env, run_dir, shared, int(os.environ.get("SIZEUP_CONTROL_PORT", "8089")), watch=watch)
+    sup = Supervisor(lock, env, run_dir, shared, int(os.environ.get("SIZEUP_CONTROL_PORT", "8089")), watch=watch,
+                     timing={"CREATED_WAIT_S": created_wait_s(sync_s)})
     signal.signal(signal.SIGTERM, sup.on_term)
     signal.signal(signal.SIGINT, sup.on_term)
     log(f"handoff: this task is {leaderlock.short(lock.holder)}; the lock is s3://{lock.obj.bucket}/{lock.obj.key}")
+    log(f"handoff: Litestream reads each WAL into a file for S3 every {sync_s} s ({SYNC_ENV}); a handoff syncs at once")
     return sup.run()
 
 
