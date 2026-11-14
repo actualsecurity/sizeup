@@ -150,7 +150,7 @@ def join_and(names: list[str]) -> str:
 
 
 def where(incident: dict) -> str:
-    # a named place (#204): "575 Boston Post Rd @ Whole Foods Market" is said "575 Boston Post Road, Whole Foods Market"
+    # a named place (#204): "40 Example Rd @ Sample Market" is said "40 Example Road, Sample Market"
     address = incident.get("address") or ""
     w = spoken_street(re.sub(r"\s*@\s*", ", ", address).strip(" ,"))
     cross = incident.get("cross_street") or ""

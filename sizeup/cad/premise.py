@@ -341,7 +341,7 @@ class Premise:
             raise CadError("where: a street address (123 Example Ave)")
         L = self.cad.lists
         inc = {"address": text} | ({"lat": point[0], "lon": point[1]} if point else {})
-        k = addrkey.key_incident(inc, L.geo_town_aliases, L.town_of, self.cad.geocoder, L.event_town(inc))
+        k = addrkey.key_incident(inc, L.geo_town_aliases, L.town_of, self.cad.geocoder, L.event_town(inc))   # (typed: no address_raw)
         sure = k.how == "gazetteer" or (point is not None and k.how == "geo") or (self.cad.geocoder is None and k.how == "text")
         if not sure:
             raise CadError("Not an address the map knows: check the spelling, or add the note from a call there")
