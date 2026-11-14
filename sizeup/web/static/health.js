@@ -255,7 +255,7 @@ const StationHealth = (() => {
     const rp = d.replicas;
     if (rp) {             // the replicas as the supervisor last verified them (sizeup/replicawatch.py)
       const rcls = (s) => (s === "ok" ? "hl-ok" : s === "stale" || s === "none" ? "dim" : "hl-bad");
-      const word = { ok: "ok", corrupt: "corrupt", error: "not verifiable", stale: "stale", none: "not checked" };
+      const word = { ok: "ok", corrupt: "corrupt", error: "not verifiable", stale: "stale", none: "not checked", suspect: "unverified" };
       const hd = el("h3", "hl-sub", "Replicas");
       hd.title = "Litestream's S3 copies, read-only: the standby checks a copy of what it follows; else the leader restores "
         + "one from S3 and checks it. quick_check, integrity_check (full) now and then. Bad: pushed at once";
@@ -266,8 +266,9 @@ const StationHealth = (() => {
         return [r.db, res, r.at ? `${when(r.at)} (${longDur(serverNow() - r.at)} ago)` : "—",
           r.by ? `${r.by} · ${r.mode === "integrity_check" ? "full" : "quick"}` : ""];
       }), ""));
-      if ((rp.events || []).length) kids.push(table(["Task failed", "Why", "Exit"],
-        rp.events.map((e) => [when(e.at), [e.why || e.kind, "hl-bad"], e.code]), ""));
+      if ((rp.events || []).length) kids.push(table(["Task event", "Why", "Exit"],
+        rp.events.map((e) => [when(e.at), [e.why || e.kind, e.kind === "litestream_restarted" ? "" : "hl-bad"],
+          e.code === null || e.code === undefined ? "" : e.code]), ""));
     }
     kids.push(el("h3", "hl-sub", "Dongles"));
     for (const x of h.duplicates || []) {        // two dongles, one serial (#242): neither is opened by it

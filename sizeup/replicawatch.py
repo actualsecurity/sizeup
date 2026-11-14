@@ -31,6 +31,16 @@ recorded in S3 only once ntfy took it, one retry):
     task                   "Hub takeover failed", ...                             4   a task that ends badly
     task_loop              "Hub crash-looping: N failed tasks in 10 min"          5   LOOP_N in LOOP_WINDOW_S
     serving                "Hub serving again"                                    3   (no limit) after task pushes
+    litestream             "Hub Litestream restarted"                             4   it exited under the serving app
+    replica_suspect        "Replica not verifiable: cad.sqlite"                   4   ... and was started again without
+                                                                                      a TRUNCATE checkpoint of the file
+
+Litestream started again under the serving app (Supervisor._restart_litestream -> litestream_restarted()): always an
+event in the record (Health's Replicas row) and a push. With a TRUNCATE checkpoint of every file first it snapshots
+each, and that is all. A file it couldn't be done for is SUSPECT ("suspect" in the record: what the app wrote while
+Litestream was down may be missing from the replica, and no check can tell: a stale page passes quick_check), shown as
+"unverified" whatever its last check said, until this task managed the checkpoint after all ("Replica OK again") or
+another task serves (then it is history: an event).
 
 A task that ends badly (Supervisor.run(): a takeover that failed, the app exiting, fenced, an unclean release, the
 supervisor crashing) records an event in the S3 object and pushes before it exits, all within REPORT_S (20 s, DNS
@@ -84,6 +94,7 @@ FOLLOWER_BACKOFF = (60.0, 900.0)
 EVENTS_MAX = 30
 LOOP_WINDOW_S = 600.0       # task failures within this long ...
 LOOP_N = 3                  # ... this many: a crash loop
+NOT_FAILURES = ("unclean_release", "litestream_restarted", "replica_suspect")   # events that are no failed task
 SERVING_AGAIN_S = 6 * 3600.0   # "serving again" only for failures pushed this recently
 PUSH_TIMEOUT_S = 5.0
 REPORT_S = 20.0             # a failing task's record and push, in all, before it exits
@@ -719,6 +730,7 @@ class ReplicaWatch:
         try:
             self.run_dir.mkdir(parents=True, exist_ok=True)
             out = {"at": self.wall(), "checks": doc.get("checks") or {}, "failing": doc.get("failing") or {},
+                   "suspect": doc.get("suspect") or {},
                    "events": (doc.get("events") or [])[-10:], "interval_s": self.interval_s,
                    "leader_interval_s": self.leader_interval_s}
             fd, tmp = tempfile.mkstemp(prefix=f".{STATE_FILE}.", dir=self.run_dir)
@@ -759,7 +771,7 @@ class ReplicaWatch:
         except Exception as e:  # noqa: BLE001
             self.log(f"replica-watch: can't record the failure ({type(e).__name__}: {e})")
             doc = {"events": [ev]}
-        recent = [e for e in doc.get("events") or [] if isinstance(e, dict) and e.get("kind") != "unclean_release"
+        recent = [e for e in doc.get("events") or [] if isinstance(e, dict) and e.get("kind") not in NOT_FAILURES
                   and now - float(e.get("at") or 0) <= LOOP_WINDOW_S]
         if len(recent) >= LOOP_N:                         # the outage first: its own slot, priority 5
             kinds = sorted({str(e.get("kind")) for e in recent})
@@ -770,6 +782,46 @@ class ReplicaWatch:
         self.pusher.push("task", TITLES.get(kind, TITLES["exited"]), body, priority=4,
                          known=known if known is not None else {})
 
+    def litestream_restarted(self, why: str, unverified: dict[str, str], healed: list[str] | tuple = ()) -> None:
+        """Litestream was started again under the serving app (the supervisor's _restart_litestream): an event in the
+        record and a push, always (a suspect moment). unverified (db -> why its TRUNCATE checkpoint couldn't be done
+        first): suspect in the record until healed (this task managed the checkpoint after all: "Replica OK again")."""
+        now, me = self.wall(), leaderlock.short(self.holder)
+        ok = not unverified
+        text = (f"{why}: started again after a TRUNCATE checkpoint of every file (a full snapshot of each follows)" if ok
+                else f"{why}: started again WITHOUT a TRUNCATE checkpoint of "
+                     + ", ".join(f"{db}.sqlite ({w})" for db, w in unverified.items())
+                     + ": what was written while it was down may be missing from the replica")[:300]
+        ev = {"at": now, "kind": "litestream_restarted" if ok else "replica_suspect", "why": text, "code": None, "task": me}
+        self.log(f"handoff: {'Litestream restarted' if ok else 'replica check FAILED: not verifiable'}: {text}")
+
+        def add(d: dict) -> None:
+            d["events"] = ((d.get("events") or []) + [ev])[-EVENTS_MAX:]
+            sus = dict(d.get("suspect") or {})
+            for db in healed:
+                sus.pop(db, None)
+            for db, w in unverified.items():
+                sus[db] = {"at": (sus.get(db) or {}).get("at") or now, "why": str(w)[:200], "task": me}
+            d["suspect"] = sus
+        known = None
+        try:
+            known = self.store.update(add)
+            self.write_state(known)
+        except Exception as e:  # noqa: BLE001 - S3 unreadable: pushed anyway
+            self.log(f"replica-watch: can't record Litestream's restart ({type(e).__name__}: {e})")
+        k = known if known is not None else {}
+        if ok:
+            self.pusher.push("litestream", "Hub Litestream restarted", text, priority=4, known=k)
+        else:
+            self.pusher.push("replica_suspect", "Replica not verifiable: " + ", ".join(f"{db}.sqlite" for db in unverified),
+                             f"{text} · tried again every minute or so; a deploy before \"Replica OK again\" may lose "
+                             "those writes", priority=4, known=k)
+        for db in healed:
+            if db not in unverified:
+                self.pusher.push("replica_ok", f"Replica OK again: {db}.sqlite",
+                                 f"TRUNCATE checkpoint done at {_hhmm(now)}: Litestream snapshots the file", priority=3,
+                                 tags=("white_check_mark", "sizeup"), limit=False)
+
     def serving(self) -> None:
         """A task serves: it says so in the record (task, build, since: the deploy's check waits for it), and "Hub
         serving again" if task failures were pushed (and not yet answered) recently."""
@@ -778,6 +830,14 @@ class ReplicaWatch:
 
         def mark(d: dict) -> None:
             d["leader"] = {"task": leaderlock.short(self.holder), "build": self.build, "serving_at": now}
+            old = {db: x for db, x in (d.get("suspect") or {}).items()
+                   if not isinstance(x, dict) or x.get("task") != leaderlock.short(self.holder)}
+            if old:                                   # another task's: this one serves what the replica had (history)
+                d["suspect"] = {db: x for db, x in d["suspect"].items() if db not in old}
+                d["events"] = ((d.get("events") or []) + [{
+                    "at": now, "kind": "replica_suspect", "code": None, "task": leaderlock.short(self.holder),
+                    "why": f"took over from a replica not verifiable since Litestream's restart: {', '.join(sorted(old))}"}]
+                               )[-EVENTS_MAX:]
             p = d.get("pushed") or {}
             last = max(float(p.get(k) or 0) for k in ("task", "task_loop"))
             if last and last > float(d.get("serving_again") or 0) and now - last <= SERVING_AGAIN_S:
@@ -791,7 +851,7 @@ class ReplicaWatch:
         self.write_state(doc)
         if was:
             n = sum(1 for e in doc.get("events") or [] if isinstance(e, dict) and float(e.get("at") or 0) >= was[0] - LOOP_WINDOW_S
-                    and e.get("kind") != "unclean_release")
+                    and e.get("kind") not in NOT_FAILURES)
             self.pusher.push("serving", "Hub serving again", f"a task serves since {_hhmm(now)} after {n} failed task(s)",
                              priority=3, tags=("white_check_mark", "sizeup"), limit=False)
 
