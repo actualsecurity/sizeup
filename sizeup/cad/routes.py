@@ -66,7 +66,8 @@ it to the road. Nothing here runs per frame: a move is made once, and only a sta
 
 Firehouse gates (the bay doors): a route from a rig in quarters (by status: placed at its station; or a live fix within
 AT_HOME_KM of its own station) starts at its firehouse's egress, the bay-door apron, and joins the street the rigs pull
-out onto; a trip home ends at its ingress the same way (data/firehouses.json egress / ingress: {lat, lon, street}; roadgraph.snap_gate). A
+out onto; a trip home ends at its ingress the same way (data/firehouses.json egress / ingress: {lat, lon, street}; roadgraph.snap_gate); an
+ingress "via": "lot" comes back in through a lot instead, by its drive aisles (Rye Brook: the PD lot behind it). A
 firehouse with none: from its point onto the street of its address, else the nearest public street, never a lot's
 service road while a street is within roadgraph.GATE_SNAP_M. The recommendation's estimates (to_one) start at the
 same gate for the rigs it says are in quarters, so the run card and the map agree; a rig near a firehouse but not in
@@ -185,13 +186,15 @@ class Routes:
     @staticmethod
     def gate(f: dict | None, way: str = "egress") -> tuple[list, str] | None:
         """A firehouse's gate, out (way "egress") or in ("ingress", else its egress): ([lon, lat] of the apron, the
-        street it joins); a firehouse with none given: its own point and its address's street."""
+        street it joins: roadgraph.LOT for an ingress through a lot, its drive aisles allowed); a firehouse with none
+        given: its own point and its address's street."""
         if not f:
             return None
         try:
             g = f.get(way) or f.get("egress")
             if g:
-                return [float(g["lon"]), float(g["lat"])], str(g.get("street") or "")
+                lot = way == "ingress" and f.get("ingress") is g and g.get("via") == "lot"      # never on the way out
+                return [float(g["lon"]), float(g["lat"])], roadgraph.LOT if lot else str(g.get("street") or "")
             return [float(f["ll"][0]), float(f["ll"][1])], street_of(f.get("address"))
         except (KeyError, TypeError, ValueError, IndexError):
             return None
