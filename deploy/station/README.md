@@ -515,7 +515,7 @@ The adapter stays out of the **public** deploy check: the update's result line (
 own failures say only "the adapter" (no reason, repo name or commit; a release name's adapter commit becomes
 `+adapter`), because `GET /api/station/status` passes them to `tools/deploy_check.py`, which prints them into the
 GitHub Actions log of this public repo. The adapter's own words are in state.json `adapter`, `last.adapter_why`, the
-station's journal and `/var/log/sizeup-update.log`, and the hub's Settings > Health (behind Cloudflare Access).
+station's journal and `/var/log/sizeup-update.log`, and the hub's Settings > Station > Health (behind Cloudflare Access).
 
 ### A credential kept in AWS SSM
 
@@ -757,7 +757,7 @@ station").
      `no signal` means nothing decoded for 2 minutes (antenna, filter, LNA, bias-tee).
    * `sizeup-station logs` (`journalctl -u sizeup-adsb`): `adsb: readsb on adsb1090 (device #N), gain auto, bias-tee off`.
    * Settings > Radios: *ADS-B receiver (reserved) · decoding: N aircraft, X messages/s · to the hub every 1 s*.
-   * The hub's Settings > Health: *ADS-B receiver (station)*, messages a second, last message, *To the hub: ok*.
+   * The hub's Settings > Station > Health: *ADS-B receiver (station)*, messages a second, last message, *To the hub: ok*.
    * The CAD map's Aircraft layer: click an aircraft near HPN: the box's foot says *Our receiver · hh:mm:ss*, and its
      "i" *Position: ADS-B ..., 1090 MHz*; the layer box lists *Receiver (station) · adsb1090 · 1090 MHz: N aircraft*.
 
@@ -981,7 +981,7 @@ the same serial as "V3 #2", and Fire/EMS 15 (tg:307) stopped reaching the hub wi
   dongle); it isn't restarted on it. Dongles with serials of their own keep working.
 * **Silence:** only the whole P25 system going quiet is an alert ("P25 trunk silent", critical: no call on any
   talkgroup for 20 min, 60 min into the night, or trunk-recorder losing the control channel). One talkgroup or channel
-  silent (tg:307, FG1, South 2, HPN Tower ...) is a hint in Settings > Health only
+  silent (tg:307, FG1, South 2, HPN Tower ...) is a hint in Settings > Station > Health only
   ([docs/cloud.md](../../docs/cloud.md#station-health-and-alerts)).
 
 **The fix: `sizeup-station sdr-serial <index|current-serial> <new-serial>`** gives one dongle a new serial, safely:
