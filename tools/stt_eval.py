@@ -298,7 +298,9 @@ def _hyps(pairs) -> dict:
 
 def from_db(path: Path, all_rows: bool, domain: str, since: float | None, until: float | None) -> list[dict]:
     """The references from a restored cad.sqlite, opened read-only (never written)."""
-    con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    wal = Path(f"{path}-wal")                      # a restore has none: immutable too, so no -wal / -shm is made beside it
+    still = "" if wal.is_file() and wal.stat().st_size else "&immutable=1"
+    con = sqlite3.connect(f"file:{path}?mode=ro{still}", uri=True)
     con.row_factory = sqlite3.Row
     try:
         where, args = ["1"], []

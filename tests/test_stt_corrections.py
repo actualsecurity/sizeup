@@ -205,3 +205,62 @@ def test_an_engine_that_heard_nothing_is_exported_as_empty(cad):
 ])
 def test_domain_of_a_rows_service(service, system, domain):
     assert sttfix.domain_of({"service": service, "system": system}) == domain
+
+
+# -- the rules for a table in cad.sqlite (docs/cloud.md "Writing a migration", #501, #509) -------------------------------
+
+def test_a_start_with_the_table_there_writes_nothing(tmp_path):
+    """Created IF NOT EXISTS, once: no backfill, no rewrite. A start on a database that has the table (and corrections
+    in it) writes no page for it, and opens no second connection to cad.sqlite."""
+    import sqlite3
+    from tests.test_startup_writes import wal_frames_written
+    cad = make_cad(tmp_path)
+    for i in range(200):
+        tx(cad, f"c{i}", f"made-up transmission {i}")
+        cad.stt_fix.save(f"c{i}", {"corrected": f"Made-up transmission {i}", "reference": i % 2 == 0})
+    path = tmp_path / "cad.sqlite"
+    opened, real = [], sqlite3.connect
+
+    def connect(*a, **kw):
+        opened.append(a[0] if a else kw.get("database"))
+        return real(*a, **kw)
+    sqlite3.connect = connect
+    try:
+        written = wal_frames_written([path], lambda: sttfix.SttCorrections(cad))
+    finally:
+        sqlite3.connect = real
+    assert written == {"cad": 0}
+    assert [str(o) for o in opened if "mode=ro" not in str(o)] == [str(path)]     # only the test's own counting reader
+    assert cad.stt_fix.counts()["n"] == 200
+
+
+def test_a_fenced_task_writes_no_correction_and_says_so(tmp_path):
+    """Not the leader (sizeup/fence.py): a save or a delete raises FencedWrite out of the API (the web server answers
+    503 + Retry-After: nothing written, nothing audited, never a 200); reading and the export go on (the export's
+    activity row is bookkeeping: skipped)."""
+    from sizeup.fence import FencedWrite
+    api = CadApi(make_cad(tmp_path))
+    people(api.cad)
+    store = api.cad.store
+    tx(api.cad, "c1", "engine 60 en route")
+    tx(api.cad, "c2", "ladder 30 on location")
+    me = Identity(email=COREY)
+    assert api.post("/api/cad/stt/correction/c1", json.dumps({"corrected": "Engine 60 en route"}).encode(), me)[0] == 200
+    audits = store.one("SELECT COUNT(*) AS n FROM settings_audit WHERE section = ?", (sttfix.SECTION,))["n"]
+    acts = len(api.cad.activity.rows(COREY, None, None, 100))
+    rev, ours = store.rev, [False]
+    store.may_write = lambda: ours[0]
+    with pytest.raises(FencedWrite):
+        api.post("/api/cad/stt/correction/c2", json.dumps({"corrected": "Ladder 30 on location"}).encode(), me)
+    with pytest.raises(FencedWrite):
+        api.post("/api/cad/stt/correction/c1", json.dumps({"delete": True}).encode(), me)
+    assert not store.db.in_transaction and store.rev == rev
+    assert json.loads(api.get("/api/cad/stt/correction/c2", "", me)[1])["correction"] is None
+    assert json.loads(api.get("/api/cad/stt/correction/c1", "", me)[1])["correction"]["corrected"] == "Engine 60 en route"
+    out = api.get("/api/cad/stt/corrections.jsonl", "", me)
+    assert out[0] == 200 and len(out[1].decode().splitlines()) == 1
+    assert store.one("SELECT COUNT(*) AS n FROM settings_audit WHERE section = ?", (sttfix.SECTION,))["n"] == audits
+    assert len(api.cad.activity.rows(COREY, None, None, 100)) == acts
+    ours[0] = True                                                             # the leader again: it writes
+    assert api.post("/api/cad/stt/correction/c2", json.dumps({"corrected": "Ladder 30 on location"}).encode(), me)[0] == 200
+    assert api.cad.stt_fix.counts()["n"] == 2

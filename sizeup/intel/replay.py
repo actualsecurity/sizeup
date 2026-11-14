@@ -36,9 +36,12 @@ import time
 from collections import defaultdict
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
-from typing import Callable, Iterable, Protocol
+from typing import TYPE_CHECKING, Callable, Iterable
 
 from sizeup.intel import labels as lab
+
+if TYPE_CHECKING:
+    from sizeup.intel.engine import IntelEngine
 
 ROW_COLUMNS = ("id", "start", "end", "source", "system", "service", "dept", "tier", "talkgroup", "channel", "talker",
                "rig", "radio_id", "dispatcher", "text", "alt_text", "model", "alt_model", "status")
@@ -48,13 +51,6 @@ FLUSH_S = 6 * 3600.0               # after the last row: time moved on this far,
 WHAT_RIGHT = ("tp", "near", "time_only")
 LABELLED = WHAT_RIGHT + ("false_place", "none")    # precision's denominator (never unlabelled, ambiguous, no_time)
 SHED = "skipped: busy"             # sizeup/stt.py SHED: what a shed clip's model line says
-
-
-class Pipeline(Protocol):
-    """The intel core's engine as replay drives it (see the module doc); tests pass a stand-in with the same shape."""
-    def feed(self, row: dict): ...
-    def tick(self, now: float): ...
-    def ruleset_hash(self) -> str: ...
 
 
 def _d(x) -> dict:
@@ -106,11 +102,13 @@ class Recorder:
         return any(d.get("would_push") for d in self.decisions.get(eid, ()))
 
 
-PipelineFactory = Callable[[Recorder, "Path | None", Callable[[], float]], Pipeline]
+# What builds the engine for a run: core_pipeline below. (The metrics' own tests pass one that builds a small
+# engine-shaped object with exact, placed events: tests/test_intel_replay.py.)
+PipelineFactory = Callable[[Recorder, "Path | None", Callable[[], float]], "IntelEngine"]
 
 
 def core_pipeline(sink: Recorder, rules: Path | None, clock: Callable[[], float], settings: dict | None = None,
-                  locate=None) -> Pipeline:
+                  locate=None) -> IntelEngine:
     """The intel core's engine, offline: in-memory events, no store, no thread. rules: a pack file in place of
     data/intel/*.json; settings: the Settings snapshot (read_settings), its overrides on either."""
     from sizeup.intel import events, rules as rules_mod
@@ -135,11 +133,16 @@ def gazetteer_locator():
 # -- the rows ------------------------------------------------------------------------------------------------------------
 
 def open_ro(path: str | Path) -> sqlite3.Connection:
-    """A restored cad.sqlite, read-only: SQLite refuses every write on this connection (mode=ro, query_only)."""
+    """A restored cad.sqlite, read-only: SQLite refuses every write on this connection (mode=ro, query_only).
+    A restore has no -wal beside it: it is then opened immutable too, so SQLite makes no -wal / -shm next to the
+    file either (a read-only connection to a WAL-mode file otherwise creates both, empty). A copy that came with a
+    -wal holding changes is read through it (mode=ro alone): the main file is never written either way."""
     p = Path(path)
     if not p.is_file():
         raise FileNotFoundError(str(p))
-    con = sqlite3.connect(f"file:{p}?mode=ro", uri=True)
+    wal = Path(f"{p}-wal")
+    still = "" if wal.is_file() and wal.stat().st_size else "&immutable=1"
+    con = sqlite3.connect(f"file:{p}?mode=ro{still}", uri=True)
     con.row_factory = sqlite3.Row
     con.execute("PRAGMA query_only = ON")
     return con
@@ -207,11 +210,7 @@ def replay(rows: list[dict], factory: PipelineFactory | None = None, rules: Path
         feed_s.append(time.perf_counter() - t0)
     now[0] += FLUSH_S
     p.tick(now[0])
-    try:
-        rs = p.ruleset_hash()
-    except Exception:  # noqa: BLE001
-        rs = ""
-    return Run(rows, rec, feed_s, rs)
+    return Run(rows, rec, feed_s, p.ruleset_hash())
 
 
 def _pct(xs: list[float], q: float) -> float | None:

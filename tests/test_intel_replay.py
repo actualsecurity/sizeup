@@ -147,7 +147,24 @@ def test_the_real_engine_replays_read_only_and_writes_nothing(restored):
         assert all("message" not in d for d in ds)
     assert any(d["has_message"] for ds in run.rec.decisions.values() for d in ds)
     assert restored.read_bytes() == before and counts(restored) == rows_before
-    assert not list(restored.parent.glob("*.sqlite-wal")) or before == restored.read_bytes()
+    assert sorted(p.name for p in restored.parent.iterdir()) == ["cad.sqlite"]     # no -wal, no -shm: nothing made
+
+
+def test_a_copy_with_a_wal_is_read_through_it_and_never_written(tmp_path):
+    """A copy taken while its writer was open (a -wal with changes beside it): the rows in the WAL are read, and the
+    main file stays the same bytes (never checkpointed by the replay's connection)."""
+    cad = make_cad(tmp_path)
+    row(cad, "w1", T0, "unit 12 smoke showing 100 example ave")
+    path = tmp_path / "cad.sqlite"
+    assert Path(f"{path}-wal").stat().st_size > 0
+    before = path.read_bytes()
+    con = rp.open_ro(path)
+    assert [r["id"] for r in rp.load_rows(con)] == ["w1"]
+    with pytest.raises(sqlite3.OperationalError):
+        con.execute("DELETE FROM radio_traffic")
+    con.close()
+    assert path.read_bytes() == before
+    cad.store.db.close()
 
 
 def test_the_clock_is_each_rows_start(restored):
@@ -410,3 +427,29 @@ def test_tool_json_never_inside_the_repo(restored):
     with pytest.raises(SystemExit):
         intel_replay.main(["--db", str(restored), "--no-place", "--json", str(intel_replay.ROOT / "x.intel-replay.json")])
     assert not (intel_replay.ROOT / "x.intel-replay.json").exists()
+
+
+def test_a_replay_sends_nothing_and_opens_nothing_writable(restored, monkeypatch):
+    """The real engine and the gazetteer over a read-only copy: no socket is ever connected (no push, no request of
+    any kind) and every SQLite connection is mode=ro. The file is the same bytes afterwards, with nothing beside it."""
+    import socket
+    opened, real = [], sqlite3.connect
+
+    def connect(*a, **kw):
+        opened.append((str(a[0]), kw.get("uri", False)))
+        return real(*a, **kw)
+
+    def no_network(*a, **kw):
+        raise AssertionError("a replay never touches the network")
+    monkeypatch.setattr(sqlite3, "connect", connect)
+    monkeypatch.setattr(socket.socket, "connect", no_network)
+    monkeypatch.setattr(socket.socket, "connect_ex", no_network)
+    monkeypatch.setattr(socket, "create_connection", no_network)
+    before, beside = restored.read_bytes(), sorted(p.name for p in restored.parent.iterdir())
+    assert intel_replay.main(["--db", str(restored), "--labels"]) == 0
+    con = rp.open_ro(restored)
+    run = rp.replay(rp.load_rows(con), settings=rp.read_settings(con), locate=rp.gazetteer_locator())
+    con.close()
+    assert run.rec.events and any(run.rec.would_push(e) for e in run.rec.events)       # it would have pushed: recorded only
+    assert opened and all("mode=ro" in p and uri for p, uri in opened), opened
+    assert restored.read_bytes() == before and sorted(p.name for p in restored.parent.iterdir()) == beside
