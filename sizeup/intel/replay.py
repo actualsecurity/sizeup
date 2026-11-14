@@ -18,7 +18,13 @@ Used by tools/intel_replay.py (a restored cad.sqlite, aggregates only), the priv
 Metrics (metrics()):
     rules / categories   hits, events, would-push, labelled, what-right (tp + near + time_only), precision
     recall               of the county CAD's incidents of a label class in the span, the share some event had first
-                         or within the window (sizeup/intel/labels.py), and the lead time (median, p90; > 0: earlier)
+                         or within the window (sizeup/intel/labels.py), and the lead time (median, p90; > 0: earlier),
+                         two ways: lead_s_* from the START of the row that raised the event (optimistic: as if it
+                         were heard and transcribed the instant it began; the replay's own clock), and
+                         lead_heard_s_* from when the live system could have had its words: the row's END plus a
+                         transcription delay (heard_delay: the clip's own length plus the median speech-to-text
+                         latency of the rows, estimated from updated_at - end where stored; or a fixed number of
+                         seconds, tools/intel_replay.py --stt-delay)
     place                address-resolved rate (address or intersection), error median / p90 in metres, false-place
                          rate (> 300 m off, of the labelled same-call events with a point)
     pushes_per_day       would-push decisions over the span's days (digests counted apart)
@@ -44,7 +50,8 @@ if TYPE_CHECKING:
     from sizeup.intel.engine import IntelEngine
 
 ROW_COLUMNS = ("id", "start", "end", "source", "system", "service", "dept", "tier", "talkgroup", "channel", "talker",
-               "rig", "radio_id", "dispatcher", "text", "alt_text", "model", "alt_model", "status")
+               "rig", "radio_id", "dispatcher", "text", "alt_text", "model", "alt_model", "status", "updated_at")
+STT_LATENCY_MAX_S = 900.0          # updated_at - end past this is no transcription time (an edit, a catch-up re-run)
 SETTINGS_SECTIONS = ("intel", "intel_packs", "intel_rules")       # the engine's (sizeup/intel/engine.py SECTIONS)
 TICK_EVERY_S = 15.0                # the live thread's TICK_S
 FLUSH_S = 6 * 3600.0               # after the last row: time moved on this far, every window closed, every event ended
@@ -70,6 +77,7 @@ class Recorder:
         self.hits: list[dict] = []
         self.events: dict[str, dict] = {}         # id -> the latest snapshot (+ raised_at: the clock at its first raise)
         self.decisions: dict[str, list[dict]] = defaultdict(list)
+        self.feeding: str | None = None            # the row being fed (replay() sets it): which row raised an event
         self.digests = 0                           # digests due (events held over a rate cap)
         self.digested = 0                          # ... the events in them
 
@@ -86,6 +94,7 @@ class Recorder:
         eid = str(e.get("id"))
         prev = self.events.get(eid)
         e["raised_at"] = prev["raised_at"] if prev else self.clock()
+        e["raised_tid"] = prev.get("raised_tid") if prev else self.feeding
         e["last_change"] = change
         self.events[eid] = e
 
@@ -221,8 +230,33 @@ def load_rows(db: sqlite3.Connection, since: float | None = None, until: float |
 # -- the run -------------------------------------------------------------------------------------------------------------
 
 class Run:
-    def __init__(self, rows: list[dict], rec: Recorder, feed_s: list[float], ruleset: str):
+    def __init__(self, rows: list[dict], rec: Recorder, feed_s: list[float], ruleset: str, engine=None):
         self.rows, self.rec, self.feed_s, self.ruleset = rows, rec, feed_s, ruleset
+        self.engine = engine               # what ran (the IntelEngine): for the tests of what it was given
+
+
+def stt_latency(rows: list[dict]) -> float | None:
+    """The rows' median speech-to-text latency in seconds, as far as the radio log stores it: updated_at - end of the
+    rows with a transcript (updated_at is the row's last write: for most rows, its text arriving), leaving out anything
+    past STT_LATENCY_MAX_S (an edit, a later re-run). None: not stored (an older capture), or no such row."""
+    xs = []
+    for r in rows:
+        try:
+            d = float(r.get("updated_at")) - float(r.get("end"))
+        except (TypeError, ValueError):
+            continue
+        if (r.get("text") or "") and 0.0 <= d <= STT_LATENCY_MAX_S:
+            xs.append(d)
+    return _pct(xs, 0.5)
+
+
+def heard_at(row: dict, latency: float | None, fixed: float | None = None) -> float:
+    """When the live system could have had this row's words: its end + `fixed` seconds when given, else + the clip's
+    own length (transcribing takes about as long as the audio) + the median speech-to-text latency (0 when unknown)."""
+    start, end = float(row.get("start") or 0.0), float(row.get("end") or row.get("start") or 0.0)
+    if fixed is not None:
+        return end + max(0.0, float(fixed))
+    return end + max(0.0, end - start) + (latency or 0.0)
 
 
 def replay(rows: list[dict], factory: PipelineFactory | None = None, rules: Path | None = None,
@@ -242,12 +276,14 @@ def replay(rows: list[dict], factory: PipelineFactory | None = None, rules: Path
         if now[0] - last_tick >= TICK_EVERY_S:
             p.tick(now[0])
             last_tick = now[0]
+        rec.feeding = str(r.get("id"))
         t0 = time.perf_counter()
         p.feed(r)
         feed_s.append(time.perf_counter() - t0)
+    rec.feeding = None
     now[0] += FLUSH_S
     p.tick(now[0])
-    return Run(rows, rec, feed_s, p.ruleset_hash())
+    return Run(rows, rec, feed_s, p.ruleset_hash(), p)
 
 
 def _pct(xs: list[float], q: float) -> float | None:
@@ -261,9 +297,14 @@ def _rate(a: int, b: int) -> float | None:
     return round(a / b, 3) if b else None
 
 
-def metrics(run: Run, incidents: list[dict] | None = None, categories: dict | None = None) -> dict:
-    """The run's aggregates (see the module doc). incidents: the county's (labels.county_incidents), None: no labels."""
+def metrics(run: Run, incidents: list[dict] | None = None, categories: dict | None = None,
+            stt_delay_s: float | None = None) -> dict:
+    """The run's aggregates (see the module doc). incidents: the county's (labels.county_incidents), None: no labels.
+    stt_delay_s: a fixed transcription delay after each row's end for the lead-once-transcribed figures (None: the
+    clip's length + the rows' median speech-to-text latency)."""
     rows, rec = run.rows, run.rec
+    by_id = {str(r["id"]): r for r in rows}
+    latency = stt_latency(rows)
     span = (rows[-1]["start"] - rows[0]["start"]) if len(rows) > 1 else 0.0
     days = max(span / 86400.0, 1.0 / 24)
     starts = {r["id"]: float(r["start"]) for r in rows}
@@ -316,13 +357,29 @@ def metrics(run: Run, incidents: list[dict] | None = None, categories: dict | No
         lo, hi = (rows[0]["start"], rows[-1]["end"]) if rows else (0.0, 0.0)
         inside = [k for k, x in enumerate(incidents) if lo <= x["t"] <= hi]
         firsts: dict[int, float] = {}
-        for x in labelled.values():
+        heard: dict[int, float] = {}
+        for eid, x in labelled.items():
             k = x.get("incident")
             if k is not None and x["label"] in WHAT_RIGHT and x["lead_s"] is not None:
                 firsts[k] = max(firsts.get(k, -1e18), x["lead_s"])      # the earliest event's lead
+                e = rec.events.get(str(eid)) or {}
+                raiser = by_id.get(str(e.get("raised_tid")))
+                if raiser is None:           # (an event whose raising row isn't known: its earliest transmission)
+                    known = [by_id[str(t)] for t in (e.get("traffic_ids") or []) if str(t) in by_id]
+                    raiser = min(known, key=lambda r: float(r["start"])) if known else None
+                if raiser is not None:
+                    lead = float(incidents[k]["t"]) - heard_at(raiser, latency, stt_delay_s)
+                    heard[k] = max(heard.get(k, -1e18), round(lead, 1))
         leads = [firsts[k] for k in inside if k in firsts]
+        leads_heard = [heard[k] for k in inside if k in heard]
         recall = {"county_incidents": len(inside), "matched": len(leads), "recall": _rate(len(leads), len(inside)),
+                  # from the raising row's START: optimistic (heard and transcribed the instant it began)
                   "lead_s_median": _pct(leads, 0.5), "lead_s_p90": _pct(leads, 0.9),
+                  # from the raising row's END + the transcription delay: what the live system could have had
+                  "lead_heard_s_median": _pct(leads_heard, 0.5), "lead_heard_s_p90": _pct(leads_heard, 0.9),
+                  "heard_delay": ({"mode": "fixed", "seconds": float(stt_delay_s)} if stt_delay_s is not None else
+                                  {"mode": "clip_length+median_stt_latency",
+                                   "stt_latency_s_median": None if latency is None else round(latency, 1)}),
                   "by_class": {cls: {"n": sum(1 for k in inside if incidents[k]["cls"] == cls),
                                      "matched": sum(1 for k in inside if incidents[k]["cls"] == cls and k in firsts)}
                                for cls in sorted({incidents[k]["cls"] for k in inside})}}
@@ -365,7 +422,8 @@ def diff(a: Run, b: Run, ma: dict, mb: dict) -> dict:
     def head(m):
         r = m.get("recall") or {}
         return {"events": m["events"], "pushes_per_day": m["pushes_per_day"], "recall": r.get("recall"),
-                "lead_s_median": r.get("lead_s_median"), "false_place": m["place"]["false_place"],
+                "lead_from_start_s_median": r.get("lead_s_median"),
+                "lead_once_transcribed_s_median": r.get("lead_heard_s_median"), "false_place": m["place"]["false_place"],
                 "address_resolved": m["place"]["address_resolved"]}
     return {"events_gained": len(kb - ka), "events_lost": len(ka - kb), "pushes_gained": len(pb - pa),
             "pushes_lost": len(pa - pb), "a": head(ma), "b": head(mb)}

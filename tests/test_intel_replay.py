@@ -223,7 +223,8 @@ def test_county_labels_are_a_pure_read_of_stored_incidents(restored):
     # incident or the plain fire alarm
     assert [x["cls"] for x in incs] == ["fire", "fire", "hazmat", "fire", "aided"]
     assert incs[0]["t"] == T0 + 600                                              # the incident's earliest report
-    assert set(incs[0]) == {"t", "cls", "lat", "lon"}                            # never the county's type or location text
+    assert set(incs[0]) == {"t", "cls", "lat", "lon", "st"}                      # never the county's type or location text
+    assert incs[0]["st"] == lab.street_id("7 EXAMPLE AVENUE, Sampletown") and len(incs[0]["st"]) == 12   # a hash only
     assert "INVENTED" not in json.dumps(incs) and "EXAMPLE" not in json.dumps(incs)
     for q in (lab.QUERY, lab.FEEDS):
         assert q.lstrip().upper().startswith("SELECT")
@@ -299,6 +300,13 @@ def test_metrics(restored):
     assert r["county_incidents"] == 4 and r["matched"] == 2                  # A1, A2, A3, A9 in the span
     assert r["by_class"] == {"fire": {"n": 3, "matched": 2}, "hazmat": {"n": 1, "matched": 0}}
     assert r["lead_s_median"] == 50 and r["lead_s_p90"] == 600              # the clock: each row's start
+    # ... and once transcribed: the raising row's end (start + 5) + the clip's length (5) + the median STT latency (0:
+    # these rows' updated_at is their start, so none is stored)
+    assert r["lead_heard_s_median"] == 40 and r["lead_heard_s_p90"] == 590
+    assert r["heard_delay"] == {"mode": "clip_length+median_stt_latency", "stt_latency_s_median": None}
+    fixed = rp.metrics(rp.replay(rows, toy), incs, stt_delay_s=20)["recall"]
+    assert fixed["heard_delay"] == {"mode": "fixed", "seconds": 20.0}
+    assert fixed["lead_heard_s_median"] == 25 and fixed["lead_s_median"] == 50      # end + 20 s; the optimistic one as before
     assert m["place"]["address_resolved"] == 1.0
     assert m["place"]["false_place"] == 0.5 and m["place"]["error_m_p90"] > 300
     assert m["latency"]["raise_s_median"] == 0 and m["latency"]["feed_ms_p50"] is not None
@@ -353,7 +361,7 @@ def test_capture_a_local_only_set(restored, tmp_path, monkeypatch, capsys):
     (s,) = find_sets("mrrs-intel")
     assert len(list(s.jsonl("rows.jsonl.gz"))) == 5 and len(list(s.jsonl("incidents.jsonl.gz"))) == 4
     with gzip.open(s.file("incidents.jsonl.gz"), "rt") as f:
-        assert all(set(json.loads(x)) == {"t", "cls", "lat", "lon"} for x in f)
+        assert all(set(json.loads(x)) == {"t", "cls", "lat", "lon", "st"} for x in f)
     assert json.loads(s.file("settings.json").read_text()) == {"intel": {}, "intel_packs": {}, "intel_rules": {}}
     assert replay_sync.check(cache) == []
     captured = (s.manifest["captured_from"], s.manifest["captured_to"], s.manifest["expires"])
@@ -430,27 +438,41 @@ def test_tool_json_never_inside_the_repo(restored):
 
 
 def test_a_replay_sends_nothing_and_opens_nothing_writable(restored, monkeypatch):
-    """The real engine and the gazetteer over a read-only copy: no socket is ever connected (no push, no request of
-    any kind) and every SQLite connection is read-only (or in memory). The file is the same bytes afterwards, with nothing beside it."""
+    """The real engine and the gazetteer over a read-only copy: no socket call is ever made (recorded, not raised: the
+    engine's own `except Exception` would swallow a raise), the engine has no notifier, no listen links and no model
+    behind it, and every SQLite connection is read-only (or in memory). The file is the same bytes afterwards, with
+    nothing beside it."""
     import socket
     opened, real = [], sqlite3.connect
+    net: list[tuple] = []
 
     def connect(*a, **kw):
         opened.append((str(a[0]), kw.get("uri", False)))
         return real(*a, **kw)
 
-    def no_network(*a, **kw):
-        raise AssertionError("a replay never touches the network")
+    def spy(name, answer=None):
+        def call(*a, **kw):
+            net.append((name, a[1:] if name.startswith("socket.") else a))
+            return answer
+        return call
     monkeypatch.setattr(sqlite3, "connect", connect)
-    monkeypatch.setattr(socket.socket, "connect", no_network)
-    monkeypatch.setattr(socket.socket, "connect_ex", no_network)
-    monkeypatch.setattr(socket, "create_connection", no_network)
+    for name in ("connect", "connect_ex", "send", "sendall", "sendto", "bind", "listen"):
+        monkeypatch.setattr(socket.socket, name, spy(f"socket.{name}", 0))
+    monkeypatch.setattr(socket, "create_connection", spy("create_connection"))
+    monkeypatch.setattr(socket, "getaddrinfo", spy("getaddrinfo", []))
+    import urllib.request
+    monkeypatch.setattr(urllib.request, "urlopen", spy("urlopen"))
     before, beside = restored.read_bytes(), sorted(p.name for p in restored.parent.iterdir())
     assert intel_replay.main(["--db", str(restored), "--labels"]) == 0
     con = rp.open_ro(restored)
     run = rp.replay(rp.load_rows(con), settings=rp.read_settings(con), locate=rp.gazetteer_locator())
     con.close()
     assert run.rec.events and any(run.rec.would_push(e) for e in run.rec.events)       # it would have pushed: recorded only
+    assert net == []                                                                 # nothing reached for the network
+    eng = run.engine
+    assert type(eng).__name__ == "IntelEngine" and eng.sink is run.rec
+    assert eng.infer is None and eng.notifier is None and eng.listen is None and eng.store is None
+    assert eng.threaded is False and eng._thread is None and eng.errors == 0
     # nothing that could write a file: mode=ro / immutable URIs, or an index built in memory (the gazetteer's own)
     assert opened and not [(p, uri) for p, uri in opened
                            if p != ":memory:" and not (uri and p.startswith("file:") and ("mode=ro" in p or "immutable=1" in p))]
@@ -508,3 +530,75 @@ def test_the_live_database_is_refused(restored, tmp_path, monkeypatch, capsys):
     link.symlink_to(root / "state" / "cad.sqlite")                            # nor through a link to it
     with pytest.raises(rp.LiveDatabase):
         rp.refuse_live(link)
+
+
+# -- lead time both ways; the same street, the wrong end ------------------------------------------------------------------
+
+def test_stt_latency_from_what_the_rows_store():
+    rows = [{"id": "a", "start": 0.0, "end": 4.0, "updated_at": 10.0, "text": "made up"},           # 6 s
+            {"id": "b", "start": 10.0, "end": 12.0, "updated_at": 20.0, "text": "made up"},         # 8 s
+            {"id": "c", "start": 20.0, "end": 25.0, "updated_at": 35.0, "text": "made up"},         # 10 s
+            {"id": "d", "start": 30.0, "end": 31.0, "updated_at": 90000.0, "text": "made up"},      # an edit days on
+            {"id": "e", "start": 40.0, "end": 41.0, "updated_at": 43.0, "text": ""},                # no transcript
+            {"id": "f", "start": 50.0, "end": 51.0, "updated_at": "", "text": "made up"}]           # not stored
+    assert rp.stt_latency(rows) == 8.0 and rp.stt_latency(rows[3:]) is None and rp.stt_latency([]) is None
+    assert rp.heard_at(rows[0], 8.0) == 4.0 + 4.0 + 8.0              # end + the clip's length + the median latency
+    assert rp.heard_at(rows[0], None) == 8.0 and rp.heard_at(rows[0], 8.0, fixed=30) == 34.0
+
+
+def test_the_tool_labels_both_lead_times(restored, capsys):
+    db = sqlite3.connect(restored)                                  # transcripts that arrived 7 s after each row's end
+    db.execute("UPDATE radio_traffic SET updated_at = end + 7 WHERE text != ''")
+    db.commit()
+    db.close()                                                      # (checkpointed: a bare file again)
+    monkeypatch_toy = rp.core_pipeline
+    rp.core_pipeline = toy
+    try:
+        assert intel_replay.main(["--db", str(restored), "--labels", "--no-place"]) == 0
+        out = capsys.readouterr().out
+        assert "lead from the row's start (optimistic: heard the instant it began): median 50 s · p90 600 s" in out
+        assert "lead once transcribed (row end + clip length + median STT latency 7 s): median 33 s · p90 583 s" in out
+        assert intel_replay.main(["--db", str(restored), "--labels", "--no-place", "--stt-delay", "60"]) == 0
+        assert "lead once transcribed (row end + 60 s): median -15 s · p90 535 s" in capsys.readouterr().out
+    finally:
+        rp.core_pipeline = monkeypatch_toy
+
+
+def test_the_same_street_past_two_km_is_a_false_place():
+    """An event of the right class and time, more than NEAR_M from the county's point: "none" (no such call), unless
+    its place is on the incident's own street: then it is the call, placed at the wrong end (false_place)."""
+    far = (41.0300, -73.6600)                                        # ~3.3 km north of the incident
+    incs = [{"t": T0 + 300, "cls": "fire", "lat": 41.0000, "lon": -73.6600, "st": lab.street_id("100 Example Ave")}]
+    ev = {"id": 1, "category": "fire_report", "first_at": T0, "lat": far[0], "lon": far[1], "precision": "address"}
+    same = lab.match([dict(ev, label_full="2400 Example Avenue, Sampletown")], incs)[0]
+    assert same["label"] == "false_place" and same["incident"] == 0 and same["error_m"] > lab.NEAR_M and same["lead_s"] == 300
+    assert lab.match([dict(ev, label_full="2400 Sample St")], incs)[0]["label"] == "none"          # another street
+    assert lab.match([dict(ev, label_full="")], incs)[0]["label"] == "none"                        # no street to compare
+    assert lab.match([dict(ev, label_full="2400 Example Ave")], [dict(incs[0], st="")])[0]["label"] == "none"
+    assert lab.match([dict(ev, label_full="2400 Example Ave")], [dict(incs[0], t=T0 + 4 * 3600)])[0]["label"] == "none"   # not in time
+    near = lab.match([dict(ev, lat=41.0001, lon=-73.6601, label_full="100 Example Ave")], incs)[0]
+    assert near["label"] == "tp"                                                                    # within NEAR_M: as before
+    # it counts against the place, never as a match for recall
+    class R:
+        pass
+    run = R()
+    run.rows = [{"id": "r1", "start": T0, "end": T0 + 5, "status": "done", "model": "m"}]
+    run.rec = rp.Recorder(lambda: T0)
+    run.rec.feeding = "r1"
+    run.rec.event(dict(ev, label_full="2400 Example Avenue", traffic_ids=["r1"], rules=[["pd.x", 1, 0.7]]), "raised")
+    run.feed_s, run.ruleset = [0.001], "x"
+    m = rp.metrics(run, [dict(incs[0], t=T0 + 3)])
+    assert m["categories"]["fire_report"]["false_place"] == 1 and m["place"]["false_place"] == 1.0
+    assert m["recall"]["matched"] == 0
+
+
+@pytest.mark.parametrize("a, b, same", [
+    ("100 Example Ave", "2400 EXAMPLE AVENUE, Sampletown", True),
+    ("the 400 block of Example Avenue", "12 Example Ave", True),
+    ("100 Example Ave", "100 Sample St", False),
+    ("Example Ave & Sample St", "9 Example Avenue", True),
+    ("", "100 Example Ave", False), ("12", "100 Example Ave", False),
+])
+def test_street_id(a, b, same):
+    assert (lab.street_id(a) == lab.street_id(b) and lab.street_id(a) != "") is same
+    assert "example" not in lab.street_id(a).lower()

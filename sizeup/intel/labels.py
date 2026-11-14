@@ -6,9 +6,11 @@ A PURE READ of what cad.sqlite already stores. No request of any kind reaches th
 else): the reports the station's adapter already made (source_reports, sizeup/cad/sources.py) and the CAD incidents
 they are on (incidents) are read with SELECTs only, from a connection the caller opened read-only. Of a report's data
 only its times are read (`times.dispatched`, else first_seen); its type and location text are never read, printed or
-returned. Nothing here writes.
+returned. Of OUR incident, its type, its point and its address; the address is reduced at once to `st`, a short hash
+of its street's name (street_id), only to tell "the same street, the wrong end of it" from "a different call": the
+address itself is never returned, printed or captured. Nothing here writes.
 
-    county_incidents(db, since, until)   [{t, cls, lat, lon}] one per CAD incident a county feed reported
+    county_incidents(db, since, until)   [{t, cls, lat, lon, st}] one per CAD incident a county feed reported
     match(events, incidents)             each event's label: tp | near | false_place | time_only | none | unlabelled
 
 Which reports count (a positive filter, never "anything but paging"): those of the county feeds, by their adapter's
@@ -24,12 +26,14 @@ against anything of the county's.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import re
 import sqlite3
 
 from sizeup.cad.sources import FEED_SOURCE
+from sizeup.geo.normalize import street_key
 
 WINDOW_S = 45 * 60                 # an event and the county's incident at most this far apart in time
 NEAR_M = 2000.0                    # ... and this far apart in space to be the same call at all
@@ -57,12 +61,29 @@ PAD_S = 6 * 3600.0                 # reports read this far around the window (an
 # away, on an incident not dismissed; grouped per incident in county_incidents().
 FEEDS = "SELECT DISTINCT source_ref FROM incidents WHERE source = ? AND source_ref LIKE 'feed:%'"
 QUERY = """
-SELECT r.incident_id, r.first_seen, r.data, i.type, i.subtype, i.lat, i.lon
+SELECT r.incident_id, r.first_seen, r.data, i.type, i.subtype, i.lat, i.lon, i.address
 FROM source_reports r JOIN incidents i ON i.id = r.incident_id
 WHERE r.source IN ({feeds}) AND r.merged_into = '' AND i.status != 'dismissed'
   AND r.first_seen >= ? AND r.first_seen < ?
 ORDER BY r.incident_id, r.first_seen
 """
+
+
+def street_id(where: str) -> str:
+    """An address or a place label reduced to its street: a short hash of the street's normalised name ("100 Example
+    Avenue, Sampletown" and "the 400 block of EXAMPLE AVE" are the same street), '' when it names none. A hash, so no
+    address text is carried in a label."""
+    a = re.split(r"[,(@]", where or "")[0]
+    a = re.sub(r"^\s*(?:the\s+)?\d+\s+block(?:\s+of)?\s+", "", a, flags=re.I)
+    a = re.sub(r"^\s*\d+[a-z]?(?:\s*[-\u2013/]\s*\d+[a-z]?)?\s+", "", a, flags=re.I)
+    a = re.split(r"\s+(?:&|and|at|x)\s+|\s*/\s*", a, flags=re.I)[0]
+    if not re.search(r"[a-z]", a, re.I):
+        return ""
+    try:
+        key = street_key(a)
+    except Exception:  # noqa: BLE001  (an odd label is no street)
+        return ""
+    return hashlib.sha256(key.encode()).hexdigest()[:12] if key else ""
 
 
 def class_of_category(category: str, overrides: dict | None = None) -> str | None:
@@ -115,25 +136,26 @@ def county_feeds(db: sqlite3.Connection) -> list[str]:
 def county_incidents(db: sqlite3.Connection, since: float, until: float, types: dict | None = None,
                      feeds: list[str] | None = None) -> list[dict]:
     """The county CAD's incidents in [since - WINDOW_S, until + WINDOW_S) of a label class, one per incident:
-    {t, cls, lat, lon} (lat / lon None: not geocoded). A pure read (FEEDS, QUERY)."""
+    {t, cls, lat, lon, st} (lat / lon None: not geocoded; st: street_id of our incident's address, '' none). A pure
+    read (FEEDS, QUERY)."""
     feeds = [f for f in (county_feeds(db) if feeds is None else feeds) if f and f != "paging"]
     if not feeds:
         return []
     sql = QUERY.format(feeds=",".join("?" * len(feeds)))
     lo, hi = since - WINDOW_S, until + WINDOW_S
     per: dict[int, dict] = {}
-    for iid, first_seen, data, code, sub, lat, lon in db.execute(sql, (*feeds, lo - PAD_S, hi + PAD_S)):
+    for iid, first_seen, data, code, sub, lat, lon, address in db.execute(sql, (*feeds, lo - PAD_S, hi + PAD_S)):
         t = _when(first_seen, data)
         cur = per.get(iid)
         if cur is None:
-            per[iid] = {"t": t, "code": code, "sub": sub, "lat": lat, "lon": lon}
+            per[iid] = {"t": t, "code": code, "sub": sub, "lat": lat, "lon": lon, "st": street_id(address)}
         elif t < cur["t"]:
             cur["t"] = t
     out = []
     for x in sorted(per.values(), key=lambda x: x["t"]):
         cls = class_of_type(x["code"], x["sub"], types)
         if cls and lo <= x["t"] < hi:
-            out.append({"t": x["t"], "cls": cls, "lat": x["lat"], "lon": x["lon"]})
+            out.append({"t": x["t"], "cls": cls, "lat": x["lat"], "lon": x["lon"], "st": x["st"]})
     return out
 
 
@@ -144,14 +166,16 @@ def metres(lat1, lon1, lat2, lon2) -> float:
 
 
 def match(events: list[dict], incidents: list[dict], categories: dict | None = None) -> list[dict]:
-    """Each event ({id, category, first_at, lat?, lon?, precision?}) labelled against the county's incidents:
+    """Each event ({id, category, first_at, lat?, lon?, precision?, label_full?}) labelled against the county's incidents:
 
         unlabelled   its category has no label class (dispute, pursuit ...): not counted either way
         none         no county incident of its class within WINDOW_S and NEAR_M: a false positive (or one the county
                      never had: precision is a lower bound)
         tp           the same call, placed within TP_M of the county's point
         near         the same call, between TP_M and FALSE_PLACE_M off (an address read as the next house)
-        false_place  the same call, more than FALSE_PLACE_M off
+        false_place  the same call, more than FALSE_PLACE_M off; and an event more than NEAR_M from every candidate but
+                     on the same street as one (street_id of its place label = the incident's st): the right street
+                     placed at the wrong end, not "no such call"
         time_only    the same call by time and class, but the event or the incident has no point (one candidate only)
         ambiguous    no point to tell, and two or more candidates of its class in the window: not counted either way
         no_time      the event has no first_at (0 or missing): never matched, not counted
@@ -177,8 +201,13 @@ def match(events: list[dict], incidents: list[dict], categories: dict | None = N
         lat, lon = ev.get("lat"), ev.get("lon")
         placed = [(metres(lat, lon, x["lat"], x["lon"]), k, x) for k, x in cands
                   if lat is not None and lon is not None and x["lat"] is not None and x["lon"] is not None]
+        st = street_id(ev.get("label_full") or "")
+        far = [p for p in placed if p[0] > NEAR_M and st and p[2].get("st") == st]
         placed = [p for p in placed if p[0] <= NEAR_M]
-        if placed:
+        if not placed and far:
+            d, k, x = min(far, key=lambda p: (abs(p[2]["t"] - t), p[0]))
+            res.update(incident=k, error_m=round(d, 1), lead_s=round(x["t"] - t, 1), label="false_place")
+        elif placed:
             d, k, x = min(placed, key=lambda p: (p[0], abs(p[2]["t"] - t)))
             tp = TP_M.get(ev.get("precision") or "", TP_M_DEFAULT)
             res.update(incident=k, error_m=round(d, 1), lead_s=round(x["t"] - t, 1),

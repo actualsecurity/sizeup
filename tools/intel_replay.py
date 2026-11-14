@@ -23,6 +23,10 @@ classes: {"types": {"fire": ["STRU", ...]}, "categories": {"fire_report": "fire"
 --feeds: the county feeds' source ids (default: the feeds that made incidents of their own; labels.county_feeds).
 --rules: a pack file for the intel engine's loader (else data/intel/*.json); the copy's intel Settings apply to either.
 --no-place: no gazetteer (else place.Locator over data/gazetteer.sqlite, read only, as the live engine).
+--stt-delay: the lead time is printed two ways: from the start of the row that raised the event (optimistic), and
+once transcribed: that row's end + the clip's length + the rows' median speech-to-text latency (as stored), or with
+--stt-delay S its end + S seconds.
+--db never takes the live database (a state directory's file is refused): a restored copy somewhere else.
 """
 
 from __future__ import annotations
@@ -105,8 +109,15 @@ def show(m: dict) -> None:
           f"· pushes {m['pushes']} ({m['pushes_per_day']}/day) · digests {m.get('digests', 0)} · shed clips {m['shed']}")
     r = m.get("recall")
     if r:
-        print(f"recall {pct(r['recall'])} ({r['matched']}/{r['county_incidents']} county incidents) · lead median "
+        print(f"recall {pct(r['recall'])} ({r['matched']}/{r['county_incidents']} county incidents)")
+        hd = r.get("heard_delay") or {}
+        how = (f"row end + {hd['seconds']:g} s" if hd.get("mode") == "fixed" else
+               "row end + clip length + median STT latency "
+               + (f"{hd['stt_latency_s_median']:g} s" if hd.get("stt_latency_s_median") is not None else "(not stored: 0 s)"))
+        print(f"  lead from the row's start (optimistic: heard the instant it began): median "
               f"{num(r['lead_s_median'], ' s')} · p90 {num(r['lead_s_p90'], ' s')}")
+        print(f"  lead once transcribed ({how}): median {num(r.get('lead_heard_s_median'), ' s')} · p90 "
+              f"{num(r.get('lead_heard_s_p90'), ' s')}")
         for cls, v in r["by_class"].items():
             print(f"  {cls}: {v['matched']}/{v['n']}")
     p = m["place"]
@@ -149,7 +160,7 @@ def capture(rows: list[dict], incidents: list[dict], name: str, settings: dict |
     write_manifest(d, KIND, source="a local restore of the hub's cad.sqlite", how=" ".join(sys.argv),
                    captured_from=lo, captured_to=hi,
                    files={"rows.jsonl.gz": "radio_traffic rows (the replay's columns), oldest first",
-                          "incidents.jsonl.gz": "county CAD auto-labels: {t, cls, lat, lon} only",
+                          "incidents.jsonl.gz": "county CAD auto-labels: {t, cls, lat, lon, st (a hash of the street name)} only",
                           "settings.json": "the copy's intel Settings sections (intel, intel_packs, intel_rules)"},
                    notes="PRIVATE, local only: never pushed (tools/replay_sync.py), never in git",
                    extra={"expires": time.time() + KEEP_DAYS * 86400})
@@ -199,6 +210,9 @@ def main(argv=None) -> int:
     ap.add_argument("--labels", nargs="?", const=True, default=None, metavar="MAP.json")
     ap.add_argument("--feeds", default="", help="the county feeds' source ids (default: the feeds that made incidents)")
     ap.add_argument("--no-place", action="store_true", help="no gazetteer: events without a place")
+    ap.add_argument("--stt-delay", type=float, default=None, metavar="SECONDS",
+                    help="the lead once transcribed: this long after a row's end (default: the clip's length + the rows' "
+                         "median speech-to-text latency)")
     ap.add_argument("--capture", metavar="NAME")
     ap.add_argument("--pin", action="store_true")
     ap.add_argument("--json", type=Path, help="also write the aggregates here (never into the repo)")
@@ -242,14 +256,14 @@ def run(a) -> int:
     if a.diff:
         ra = rp.replay(rows, rules=a.diff[0], settings=settings, locate=locate)
         rb = rp.replay(rows, rules=a.diff[1], settings=settings, locate=locate)
-        ma, mb = rp.metrics(ra, incidents, cats), rp.metrics(rb, incidents, cats)
+        ma, mb = rp.metrics(ra, incidents, cats, a.stt_delay), rp.metrics(rb, incidents, cats, a.stt_delay)
         out = rp.diff(ra, rb, ma, mb)
         print(f"B against A over {len(rows)} rows: events +{out['events_gained']} -{out['events_lost']} · pushes "
               f"+{out['pushes_gained']} -{out['pushes_lost']}")
         for k in out["a"]:
             print(f"  {k}: {out['a'][k]} -> {out['b'][k]}")
     else:
-        out = rp.metrics(rp.replay(rows, rules=a.rules, settings=settings, locate=locate), incidents, cats)
+        out = rp.metrics(rp.replay(rows, rules=a.rules, settings=settings, locate=locate), incidents, cats, a.stt_delay)
         show(out)
         if a.pin and s is not None:
             pin(s, out)
