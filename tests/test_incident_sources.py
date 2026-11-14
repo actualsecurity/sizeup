@@ -418,6 +418,27 @@ def test_only_the_adapter_s_own_failing_skips_the_hysteresis(tmp_path):
     assert _report(rig, 60, "failing", "x", stopped=True)["state"] == "failing"   # the adapter stopped: at once
 
 
+def test_a_stopped_failing_once_shown_stays_bad_until_ok_has_held(tmp_path):
+    """The adapter stopped ("failing", shown at once), then a milder bad report inside DEMOTE_S: bad stays on screen
+    and paging stays the acting primary. Only "ok" held for PROMOTE_S brings the feed back."""
+    rig = Rig(tmp_path)
+    _report(rig, 0, "ok")
+    assert _report(rig, 30, "failing", "login", stopped=True)["state"] == "failing"
+    t = _report(rig, 60, "backing_off", "TimeoutError")              # 30 s into the bad run: under DEMOTE_S
+    assert (t["state"], t["acting"]) == ("backing_off", False) and rig.cad.sources.acting()["source"] == PAGING
+    assert _report(rig, 80, "stale", "no list yet")["state"] == "stale"
+    # ... and through an ok that hasn't held: failing (stopped) -> ok -> backing_off never shows ok either
+    assert _report(rig, 90, "ok")["state"] == "stale"
+    assert _report(rig, 100, "backing_off", "TimeoutError")["state"] == "backing_off"
+    assert _report(rig, 110, "ok")["state"] == "backing_off"         # held: what was shown
+    rig.at(110 + PROMOTE_S - 1)
+    assert rig.cad.sources.acting()["source"] == PAGING
+    rig.at(110 + PROMOTE_S)
+    assert rig.cad.sources.acting()["source"] == "county" and rig.cad.sources.tiers()[0]["state"] == "ok"
+    # a bad report that was never shown keeps its grace, as before
+    assert _report(rig, 110 + PROMOTE_S + 30, "backing_off", "TimeoutError")["state"] == "ok"
+
+
 def test_a_late_older_health_report_never_overwrites_a_newer_one(tmp_path):
     rig = Rig(tmp_path)
     h = {"source": "county", "label": "County feed", "rank": 1}

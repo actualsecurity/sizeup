@@ -570,15 +570,29 @@ def test_a_saved_password_is_registered_with_the_log_scrub(hub, capfd):
     assert not leaks(raw, io.out, io.err, *everything(hub))
 
 
-def test_the_log_scrub_knows_a_value_aws_may_have_saved_and_a_short_one_but_not_a_refused_one(hub):
+def test_the_log_scrub_knows_only_a_value_that_is_sent(hub):
+    """Registered once the gap and the confirm have passed, just before the request: a value refused for the gap, for
+    the missing confirm or because the two differ never is; one AWS may have saved is. A value shorter than the
+    scrub's MIN_SECRET is never registered (as a whole word it would drop ordinary log lines)."""
     hub.ssm.put_answer = (500, b'{"__type":"InternalServerError"}')    # no answer worth the name: it may have saved
     code, out, _ = post(hub, {"password": SECRET, "again": SECRET})
     assert code == 502 and out.get("maybe_saved") and logscrub.scrub(f"sent {SECRET} on") is None
     logscrub.forget()
-    code, _, _ = post(hub, {"password": SECRET, "again": SECRET + "x"})          # they differ: never sent, not kept
+    other = "An0ther-made-up-value"
+    code, _, _ = post(hub, {"password": other, "again": other})                   # inside the 5 min gap: refused
+    assert code == 429 and logscrub.registered() == (0, 0) and logscrub.scrub(f"sent {other} on") is not None
+    code, _, _ = post(hub, {"password": other, "again": other + "x"})             # they differ
     assert code == 400 and logscrub.registered() == (0, 0)
     hub.ssm.put_answer = None
     hub.clock.t += adapterpass.MIN_GAP_S + 1
-    code, _, _ = post(hub, {"password": "Ab1!", "again": "Ab1!"})                 # shorter than the scrub's MIN_SECRET
-    assert code == 200 and logscrub.scrub("log-on with Ab1! refused") is None
-    assert logscrub.scrub("tab1!x is no password") is not None                    # ... as a whole word only
+    stop_source(hub)
+    code, _, _ = post(hub, {"password": other, "again": other})                   # stopped, no confirm: refused
+    assert code == 409 and logscrub.registered() == (0, 0)
+    code, _, _ = post(hub, {"password": other, "again": other, "confirm": True})
+    assert code == 200 and logscrub.scrub(f"sent {other} on") is None             # sent: registered
+    logscrub.forget()
+    hub.clock.t += adapterpass.MIN_GAP_S + 1
+    assert len("Ab1!x") < logscrub.MIN_SECRET
+    code, _, _ = post(hub, {"password": "Ab1!x", "again": "Ab1!x", "confirm": True})
+    assert code == 200 and logscrub.registered() == (0, 0)                        # too short to match on: not registered
+    assert logscrub.scrub("log-on with Ab1!x refused") is not None
