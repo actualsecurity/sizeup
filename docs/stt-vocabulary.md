@@ -43,7 +43,7 @@ stored with the hyphens. The hub now writes every phrase of the lists back as wr
   plural ending kept. "twenty-three", "T-bone" and a name the list itself writes with hyphens stay as they are.
 - **Stored transcripts are shown the same way when read**, never rewritten: the Radio log's rows, an event's
   remarks and timeline, and the monitor's pages go through the same map on their way out. No migration, nothing
-  at start.
+  at start. The Radio log's search treats a hyphen and a space the same, so the old rows are found either way.
 
 Not done: pushing the table form, whose DisplayAs would make AWS write the spaces itself. It needs the vocabulary
 as a file in S3 (`VocabularyFileUri`: a bucket the task may write and Transcribe may read), where the push today

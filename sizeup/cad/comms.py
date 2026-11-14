@@ -922,8 +922,7 @@ class Comms:
     def _notes(self, unit, event, pcfd, since, until, limit, words=()) -> list[dict]:
         where, args = ["e.kind = 'note'", "e.units != ''"], []
         for w in words:
-            where.append("LOWER(e.text) LIKE ? ESCAPE '\\'")
-            args.append(f"%{_like(w)}%")
+            _word_where(where, args, "e.text", w)
         if unit:
             where.append("(',' || e.units || ',') LIKE ?")
             args.append(f"%,{unit},%")
@@ -1492,8 +1491,7 @@ class Comms:
         if emergency:
             where.append(EMERGENCY_WHERE if has_alarms(self.store) else "t.emergency = 1")
         for w in words:
-            where.append("LOWER(t.text) LIKE ? ESCAPE '\\'")
-            args.append(f"%{_like(w)}%")
+            _word_where(where, args, "t.text", w)
         if unit:
             self._rig_where(where, args, [unit])
         if channel:
@@ -1724,6 +1722,18 @@ def _row_line(t) -> str:
     """A transmission as an event's timeline names it: "14:02:11 E63 on FG1". Another P25 system's (#419): when and
     on which channel only, never who (its talker, its radio ID) nor what was said."""
     return f"{_when(t)} on {t['channel']}" if sources.is_context(t) else f"{_when(t)} {_who(t)} on {t['channel']}"
+
+
+def _word_where(where: list, args: list, col: str, w: str) -> None:
+    """One searched word against a text column, a hyphen and a space the same on both sides: "sample-street" finds
+    "Sample Street" and the rows stored as AWS wrote them ("Sample-Street"), and the other way round. A word with no
+    hyphen is one LIKE as before (it is found inside either spelling)."""
+    if "-" not in w:
+        where.append(f"LOWER({col}) LIKE ? ESCAPE '\\'")
+        args.append(f"%{_like(w)}%")
+        return
+    where.append(f"(LOWER({col}) LIKE ? ESCAPE '\\' OR LOWER(REPLACE({col}, '-', ' ')) LIKE ? ESCAPE '\\')")
+    args += [f"%{_like(w)}%", f"%{_like(w.replace('-', ' '))}%"]
 
 
 def _like(w: str) -> str:

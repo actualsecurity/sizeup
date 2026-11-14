@@ -118,7 +118,7 @@ def test_a_slash_before_the_house_number_is_never_a_unit():
 # -- the call: the feed first, then the page -------------------------------------------------------------------------
 
 
-def test_the_misheard_page_after_the_feed_joins_it_and_the_feeds_department_dispatch_stands(tmp_path):
+def test_the_misheard_page_after_the_feed_joins_it_and_its_scope_wins(tmp_path):
     rig = AutoRig(tmp_path)
     depts(rig, DPTA="Port Chester FD")                                   # the department entry: never apparatus
     rig.mode("pcfd")
@@ -128,7 +128,7 @@ def test_the_misheard_page_after_the_feed_joins_it_and_the_feeds_department_disp
     assert got["id"] == a and len(open_incidents(rig)) == 1             # one incident, no queued card
     inc = rig.cad.store.incident(a)
     assert inc["address"].upper().startswith("20 SAMPLEWORTH PL")       # the feed's location stands
-    assert scope_of(rig, a)[:2] == ("Full dept", "feed")                # the feed's department entry: the dispatch
+    assert scope_of(rig, a)[:2] == ("Specific units", "page")           # the page's reading wins (#387)
     assert any(x.startswith("60 Control page ") and "Samplewerth" in x for x in tones(rig, a))   # its transcript on it
     assert rig.cad.store.one("SELECT incident_id FROM source_reports WHERE source = 'paging'")["incident_id"] == a
 

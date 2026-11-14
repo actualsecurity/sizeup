@@ -519,9 +519,8 @@ function callLive(o) {
 const txNow = (name) => { const t = window.Radio && Radio.talkingFor(name); return !!t && !t.ended; };
 
 // The scope chip's hover (#370): "Paged: full department (Port Chester FD)", then where it came from ("From page",
-// " · feed: units" when the county feed says otherwise; "From feed · page: units" when the feed's department-level
-// dispatch is the one shown)
-const scopeTip = (sc) => `${sc.paged}\nFrom ${sc.source === "feed" ? "feed" : "page"}${sc.feed ? ` · feed: ${sc.feed}` : ""}${sc.page ? ` · page: ${sc.page}` : ""}`;
+// " · feed: units" when the county feed disagreed: the page stands)
+const scopeTip = (sc) => `${sc.paged}\nFrom ${sc.source === "feed" ? "feed" : "page"}${sc.feed ? ` · feed: ${sc.feed}` : ""}`;
 function queueItem() {
   const li = el("li", "qi item");
   li.tabIndex = 0;

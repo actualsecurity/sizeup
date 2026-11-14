@@ -1027,9 +1027,13 @@ class AwsTranscriber:
 
     def _done(self, job: Job, text: str, conf: float | None) -> None:
         try:
-            text = self.display(self._respell_for(job.channel)(text))
+            text = self._respell_for(job.channel)(text)
         except Exception as e:
             self.log(f"aws transcribe: respell: {type(e).__name__}: {e}")
+        try:                                         # its own step: a respelling that failed still loses its hyphens
+            text = self.display(text)
+        except Exception as e:
+            self.log(f"aws transcribe: vocabulary display: {type(e).__name__}")
         if self._resolve(job, "done"):
             self.done_n += 1
             self._record_ok()

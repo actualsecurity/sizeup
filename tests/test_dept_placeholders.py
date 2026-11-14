@@ -206,7 +206,7 @@ def test_startup_frees_placeholders_whose_unit_already_signed_on_on_open_calls_o
 # -- never apparatus ---------------------------------------------------------------------------------------------------
 
 
-def test_never_a_unit_in_common_nor_specific_units_nor_heard_and_its_department_is_the_scope(rig):
+def test_never_a_unit_in_common_nor_specific_units_nor_heard(rig):
     rig.mode("pcfd")
     rig.cad.sources._towns()
     assert drop_departments(["DPTA", "E60"]) == ["E60"] and units_match(["DPTA"], ["DPTA"]) == set()
@@ -215,11 +215,11 @@ def test_never_a_unit_in_common_nor_specific_units_nor_heard_and_its_department_
     rig.poll()
     a, b = rig.iid("A1"), rig.iid("B1")
     assert a != b and not any("possibly the same" in e for e in events(rig, a) + events(rig, b))
-    s = rig.cad.full(a)["scope"]                                       # a placeholder: its department dispatched
+    s = rig.cad.full(a)["scope"]                                       # a placeholder alone: its department, from the feed
     assert (s["short"], s["source"], s["departments"]) == ("Full dept", "feed", ["Port Chester FD"])
     rig.feed.change("A1", units=("DPTA", "E60"))
     rig.poll()
-    assert rig.cad.full(a)["scope"]["short"] == "Full dept"            # a unit signed on: never "Specific units"
+    assert rig.cad.full(a)["scope"]["short"] == "Specific units"
     assert "DPTA" not in {b[0] for b in rig.cad.radiolog.board().values()}
 
 
