@@ -608,6 +608,7 @@ class App:
         self._aws_wait: dict[str, tuple[np.ndarray, str]] = {}
         self._vocab_suggest: list[str] | None = None
         self.aws = self.vocab = self.atc_vocab = self.pd_vocab = None
+        self.display = None                     # vocabulary phrases without AWS's hyphens (transcribe.Display)
         self.pd_sources: list[str] = []
         _mark("radio")
         if cfg.stt_aws:
@@ -792,7 +793,8 @@ class App:
         intel.active = lambda: not self.forwarding()      # a station forwarding to the hub queues nothing (no thread)
         if self.gaz is not None:
             from sizeup.intel.place import Locator
-            intel.locate = Locator(self.gaz)
+            intel.locate = Locator(self.gaz, places=self.cad.place_index)      # exits and markers too
+        intel.listen = self._intel_listen(intel)
         log(self.pushes.line())
         _mark("prealert + pushes")
         self.cad.alarms.public_url = cfg.cloud_public_url
@@ -2648,7 +2650,8 @@ class App:
 
     def _aws_setup(self) -> None:
         from sizeup import aws as aws_mod
-        from sizeup.transcribe import PD_VOCABULARY, AwsTranscriber, Settings as AwsSettings, Usage, Vocabulary, respell
+        from sizeup.transcribe import (PD_VOCABULARY, AwsTranscriber, Display, Settings as AwsSettings, Usage, Vocabulary,
+                                       respell)
         cfg, store = self.cfg, self.cad.store
         reg = aws_mod.region(cfg.stt_aws_region)
         self.aws_usage = Usage(store.meta_get, store.meta_put)
@@ -2670,7 +2673,7 @@ class App:
                                   limit_usd=self.cad.settings.aws_limit,
                                   context_limit_usd=self.cad.settings.aws_context_limit,
                                   respell=lambda t: respell(t, self.vocab.state()["respell"]),
-                                  on_late=self._aws_late, on_change=self._aws_changed)
+                                  on_late=self._aws_late, on_change=self._aws_changed, display=self._display_setup(Display))
         if self.vocab.ready():
             self.aws.vocabulary = cfg.stt_aws_vocabulary
         if self.atc_vocab is not None and self.atc_vocab.ready():
@@ -2704,6 +2707,28 @@ class App:
                 r.tick()
             except Exception as e:  # noqa: BLE001 - the aircraft layer goes on
                 log(f"atc vocabulary: {type(e).__name__}: {e}")
+
+    def _intel_listen(self, intel):
+        """The pre-alert pushes' "Listen" link (sizeup/intel/listen.py): the transmissions around it, stitched, behind a
+        short-lived presigned URL on the audio bucket's listen/ prefix. No bucket: off ("not configured")."""
+        from sizeup.intel.listen import Listen, S3ListenStore
+        bucket = os.environ.get("SIZEUP_AUDIO_BUCKET", "").strip()
+        store = S3ListenStore(bucket) if bucket else None
+        cad = self.cad
+
+        def rows(sources, t0, t1):
+            src = [str(x) for x in sources if x][:8]
+            if not src:
+                return []
+            return cad.store.q(f"SELECT id, start, tier, source FROM radio_traffic WHERE source IN ({','.join('?' * len(src))}) "
+                               "AND start BETWEEN ? AND ? ORDER BY start LIMIT 200", (*src, t0, t1))
+        def tiers(ids):
+            ids = [str(x) for x in ids][:40]
+            if not ids:
+                return {}
+            return {r["id"]: r["tier"] for r in cad.store.q(
+                f"SELECT id, tier FROM radio_traffic WHERE id IN ({','.join('?' * len(ids))})", ids)}
+        return Listen(store, rows, self.clip, settings=lambda: intel.policy.cfg, log=log, tiers=tiers)
 
     def _atc_leader(self) -> bool:
         """The CAD of record holding the hub's lease (#254: sizeup/fence.py), or all-in-one (no fence)."""
@@ -2743,6 +2768,23 @@ class App:
             if self.aws.channel_vocabulary.get(k) != name:
                 self.aws.channel_vocabulary[k] = name
                 log(f"aws transcribe: custom vocabulary {name} in use on {k} from its next stream")
+
+    def _display_setup(self, Display):
+        """AWS writes a vocabulary phrase back with its hyphens ("Example-Post-Road"): each result as it comes in
+        (AwsTranscriber.display) and the transcripts stored before, when they are read (the Radio log's rows, an
+        event's remarks and timeline, the monitor's pages), get the phrase as written. From the lists as they are:
+        nothing sent to AWS, nothing stored rewritten."""
+        self.display = Display(self._display_lists, log=log)
+        self.cad.comms.display = self.store.display = self.display
+        return self.display
+
+    def _display_lists(self) -> list[str]:
+        """Every phrase a vocabulary pushed from here can hold: the list as edited, the suggestions it started from,
+        the police sources' own."""
+        out = [*self.cad.settings.vocabulary(), *self.vocabulary_suggestions()]
+        if getattr(self, "pd_sources", None):
+            out += self.police_vocabulary()
+        return out
 
     def police_vocabulary(self) -> list[str]:
         """sizeup-pd's phrases (stt_vocab.police_phrases over the police profile's towns), worked out once."""
