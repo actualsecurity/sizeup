@@ -16,6 +16,7 @@ const S = {
   data: null, sig: "", sigLive: "", loading: false, again: null, deferred: false, pressDeferred: false, deferFresh: false, pressing: 0, msgT: null,
   boardsOpen: null, audit: "", auditRows: null, auditFor: "", admin: null, importing: null,
   previewT: null, previewSeq: 0, tsOpen: new Set(),
+  saved: "", pressT: null, refreshDue: false,                            // the section a save of ours just changed; the press's time limit
   act: null, actEmail: "", actKind: "", actKey: "", actAt: 0,
   rtab: store("sizeup.cad.settings.radios") || "receivers",        // Settings > Radios: the tab (#settings/radios/<tab>)
   toneQ: "", toneShow: "", toneType: "", toneEdit: null, unnamedEdit: null,      // Radios > Tones (#115, #122)
@@ -136,17 +137,23 @@ function short(v) {
 // redraw (sKeep); a card that only reports (Push notifications) is updated in place, node by node (sMorph).
 
 const S_TEXTY = "input:not([type=file]):not([type=checkbox]):not([type=radio]):not([type=color]):not([type=range]), textarea";
-function sFields(root) {           // key -> field: its data-key, else its label and which of them it is
+// key -> field: its data-key; else its row's (data-row: a unit's or a list item's code), its label and which of them it
+// is in that row; with no row, its label and which of them it is in the section (n: how many of each there are).
+function sFields(root) {
   const out = new Map(), n = {};
   for (const f of root.querySelectorAll(S_TEXTY)) {
     let k = f.dataset.key;
     if (!k) {
-      const b = f.getAttribute("aria-label") || f.placeholder || f.name || f.type;
+      const row = f.closest("[data-row]");
+      const b = (row && root.contains(row) ? `${row.dataset.row}/` : "") + (f.getAttribute("aria-label") || f.placeholder || f.name || f.type);
       n[b] = (n[b] || 0) + 1;
       k = `${b}#${n[b]}`;
+      f._label = b;
+      f._rowed = !!(row && root.contains(row));
     }
     out.set(k, f);
   }
+  out.n = n;
   return out;
 }
 function sStamp(root) {            // what each field showed when it was drawn: differs = typed, not saved
@@ -156,8 +163,11 @@ function sKeep(root, build, text = true) {
   const sc = $("#settings .s-content"), page = document.scrollingElement;
   const top = sc ? sc.scrollTop : 0, ptop = page ? page.scrollTop : 0;
   const held = [];
+  let was = {};
   if (text) {
-    for (const [k, f] of sFields(root)) {
+    const fields = sFields(root);
+    was = fields.n;
+    for (const [k, f] of fields) {
       const on = f === document.activeElement;
       if (!on && (f._base === undefined || f.value === f._base)) continue;
       let a = null, b = null;
@@ -170,8 +180,11 @@ function sKeep(root, build, text = true) {
     const now = sFields(root);
     for (const h of held) {
       const f = now.get(h.k);
-      // the same field: by its data-key, or still showing what it showed (a list that moved under it: not guessed)
-      if (!f || !(f === h.f || f.dataset.key || h.base === undefined || f.value === h.base)) continue;
+      if (!f) continue;
+      // The same field: itself, or by its data-key, or by its row. Else by its place among its like, only while there
+      // are as many of them as before and it still shows what it showed: rows that came, went or moved are not guessed
+      // at (the text is dropped rather than put in another row's field).
+      if (!(f === h.f || f.dataset.key || f._rowed) && (was[f._label] !== now.n[f._label] || (h.base !== undefined && f.value !== h.base))) continue;
       if (f !== h.f) { f._base = f.value; f.value = h.value; }
       if (h.on && document.activeElement !== f) {
         f.focus({ preventScroll: true });
@@ -185,10 +198,13 @@ function sKeep(root, build, text = true) {
 }
 // old becomes neu without being rebuilt: same shape = only the text and attributes that differ change (a field keeps
 // its element, its focus and what was typed in it); another shape = that part's children are replaced (sKeep).
-const S_MORPH_ATTRS = ["class", "title", "placeholder", "aria-label", "aria-invalid", "href", "hidden", "data-help"];
+const S_MORPH_ATTRS = ["class", "title", "placeholder", "aria-label", "aria-invalid", "aria-describedby", "href", "hidden", "data-help"];
 function sMorph(old, neu) {
   const a = [...old.childNodes], b = [...neu.childNodes];
-  if (a.length !== b.length || a.some((c, i) => c.nodeType !== b[i].nodeType || c.nodeName !== b[i].nodeName || c.type !== b[i].type)) {
+  // (a button is the same button only with the same label and the same data-act: the old node keeps its old click)
+  const other = (c, n) => c.nodeType !== n.nodeType || c.nodeName !== n.nodeName || c.type !== n.type
+    || (c.nodeType === 1 && (c.dataset.act !== n.dataset.act || (c.tagName === "BUTTON" && c.textContent !== n.textContent)));
+  if (a.length !== b.length || a.some((c, i) => other(c, b[i]))) {
     sKeep(old, () => old.replaceChildren(...b));
     return;
   }
@@ -213,20 +229,69 @@ function sMorph(old, neu) {
     sMorph(c, n);
   });
 }
+// A card whose buttons read their own fields and data (Emergency alarms, Intel, Audio retention, Camera wall) is never
+// patched: it is drawn off the page and swapped in whole, only when it differs from what was drawn last, and never
+// while a field in it has the focus or text typed and not saved, or a button of the section is being pressed (must:
+// after a save of its own, which starts it clean).
+function sBusy(root) {
+  const a = document.activeElement;
+  if (a && root.contains(a) && a.matches("input:not([type=file]):not([type=checkbox]), textarea, select")) return true;
+  return [...root.querySelectorAll(S_TEXTY)].some((f) => f._base !== undefined && f.value !== f._base);
+}
+function sCardSig(card) {
+  return card.innerHTML + JSON.stringify([...card.querySelectorAll("input, textarea, select")].map((f) => (f.type === "checkbox" ? f.checked : f.value)));
+}
+function sCardSwap(card, next, must) {
+  const sig = sCardSig(next);
+  if (card.hidden !== next.hidden) card.hidden = next.hidden;
+  if (card._sig === sig && !must) return false;
+  if (!must && card._sig !== undefined && (sBusy(card) || sPressing())) return false;
+  sStamp(next);
+  sKeep(card, () => card.replaceChildren(...next.childNodes), false);
+  card._sig = sig;
+  return true;
+}
+async function sCardMount(card, mount, must) {          // mount(node): reads, then fills node (alarm.js, intel.js)
+  if (!card) return;
+  const seq = card._seq = (card._seq || 0) + 1;
+  if (must) card._must = true;          // (it holds for whichever read lands: a newer one takes this one's place)
+  const next = card.cloneNode(false);
+  next.removeAttribute("id");
+  await mount(next);
+  if (seq !== card._seq) return;          // (a newer read is on its way)
+  if (card._sig !== undefined && next.querySelector(":scope > .error")) return;          // a read that failed: what is shown stays
+  sCardSwap(card, next, card._must);
+  card._must = false;
+}
 
 // ---- load / save ----------------------------------------------------------------------------------
 
 // The settings as they are now. The CAD's rev moves with every call, unit and transmission (sHook), the settings
 // seldom: the section is drawn again only when what it shows changed (or must: a save of ours), and then keeps the
-// scroll position, the focus and typed text (fresh: the form that was just saved starts clean). What moves with the
-// calls (a list item's "used 12×" and "3 now", a unit's status and its call) is on Lists and Units only: elsewhere it
-// redraws nothing.
+// scroll position, the focus and typed text (fresh: the form that was just saved starts clean).
+// "What it shows" is by section (S_PART_OF: a part of the settings drawn in one section only; a part not named is
+// everyone's), and without what moves with the calls and the radio (S_LIVE_KEYS: a list item's "used 12×" and "3 now",
+// a unit's status and its call, the clips and bytes kept per channel, the cameras streaming). Those redraw Lists and
+// Units, which show them on every row (S_LIVE); in System their cards are updated in place (sRefresh).
+const S_PART_OF = { lists: "lists", titles: "lists", units: "units", unit_kinds: "units", boards: "units", dispatch: "dispatch",
+  operators: "users", tones: "radios", radio_emergencies: "radios", station_logs: "station",
+  system: "system", audit_sections: "system", atc: "system", hub_errors: "system", map_display: "system",
+  premise_visibility: "system", audio_retention: "system", camera_wall: "system", alert_mutes: "system" };
 const S_LIVE = new Set(["lists", "units"]);
-const S_LIVE_KEYS = { lists: new Set(["used", "now"]), units: new Set(["used", "status", "incident_number"]) };
-function sSigs(d) {                // [the settings, the settings and what moves with the calls]
-  const part = (k) => JSON.stringify(d[k], (f, v) => (S_LIVE_KEYS[k].has(f) ? undefined : v));
-  const rest = JSON.stringify({ ...d, rev: 0, lists: 0, units: 0 });
-  return [rest + part("lists") + part("units"), rest + JSON.stringify([d.lists, d.units])];
+const S_LIVE_KEYS = { lists: new Set(["used", "now"]), units: new Set(["used", "status", "incident_number"]),
+  audio_retention: new Set(["clips", "bytes", "totals"]), camera_wall: new Set(["n", "streams"]) };
+function sSigs(d, sec) {           // [the section's settings, those and what moves with the calls]
+  const quiet = [], live = [];
+  for (const k of Object.keys(d).sort()) {
+    if (k === "rev" || (S_PART_OF[k] && S_PART_OF[k] !== sec)) continue;
+    let v = d[k];
+    // (the retention rows come largest first: their order moves with the bytes)
+    if (k === "audio_retention" && v && v.rows) v = { ...v, rows: [...v.rows].sort((a, b) => (a.key < b.key ? -1 : 1)) };
+    const all = JSON.stringify(v), drop = S_LIVE_KEYS[k];
+    live.push(k, all);
+    quiet.push(k, drop ? JSON.stringify(v, (f, x) => (drop.has(f) ? undefined : x)) : all);
+  }
+  return [quiet.join("\n"), live.join("\n")];
 }
 async function sLoad(opts = {}) {
   if (S.loading) {
@@ -236,11 +301,12 @@ async function sLoad(opts = {}) {
   S.loading = true;
   try {
     const d = await api("GET", "/api/cad/settings");
-    const [sig, live] = sSigs(d);
-    const same = !!S.data && sig === S.sig && (live === S.sigLive || !S_LIVE.has(S.section));
+    const [sig, live] = sSigs(d, S.section);
+    const same = !!S.data && S.sigSec === S.section && sig === S.sig && (live === S.sigLive || !S_LIVE.has(S.section));
     S.data = d;
     S.sig = sig;
     S.sigLive = live;
+    S.sigSec = S.section;
     if (!same || opts.must) sRender(false, !opts.fresh);
     if (same || S.deferred || S.pressDeferred) sRefresh();          // (a redraw that waits: what reports doesn't)
   } catch (e) {
@@ -250,14 +316,24 @@ async function sLoad(opts = {}) {
     if (S.again) { const again = S.again; S.again = null; sLoad(again); }
   }
 }
-// No redraw (nothing in the settings changed, or it waits for a field): what reports on the CAD moves in place (the
-// record counts, the pushes sent; Users: who was seen when, at most every 15 s).
+// No redraw (nothing in the section's settings changed, or it waits for a field): what is read apart from the settings
+// or moves with the CAD catches up in place. System: the record counts, the audit log, the pushes sent, Emergency
+// alarms and Intel (their own reads: another admin's change, the 24 h counts), the audio kept and the cameras on the
+// wall. Users: who was seen when, at most every 15 s.
 function sRefresh() {
+  if (sPressing()) { S.refreshDue = true; return; }          // (a row could change under the press: once it is over)
+  S.refreshDue = false;
   if (S.section === "users") sActivity();
   if (S.section !== "system") return;
   sCounts();
+  sAudit();
   const card = $("#s-pushes");
   if (card && card.dataset.built) sPushes(card);
+  if (window.Alarm) sCardMount($("#s-alarms"), Alarm.mountSettings);
+  if (window.IntelSettings) sCardMount($("#s-intel"), IntelSettings.mount);
+  const kept = $("#s-audio-retention"), wall = $("#s-camera-wall");
+  if (kept && S.data.audio_retention) sCardSwap(kept, sAudioRetention(S.data.audio_retention));
+  if (wall && S.data.camera_wall) sCardSwap(wall, sCameraWall(S.data.camera_wall));
 }
 
 async function sPost(section, body, done) {
@@ -272,6 +348,7 @@ async function sPost(section, body, done) {
     const r = await api("POST", `/api/cad/settings/${section}`, { ...body, operator: op });
     sMsg(done || "Saved", true);
     S.auditFor = "";
+    S.saved = section;          // (its own card starts clean: sSystem)
     await sLoad({ must: true, fresh: true });
     return r;
   } catch (e) {
@@ -334,7 +411,11 @@ function sRoute() {
     RadiosPanel.mount($("#settings-radios"), { operator });
   }
   if (sec === "radios") sRadioTab();
-  if (S.data) sRender(true);
+  if (S.data) {
+    sRender(true);
+    [S.sig, S.sigLive] = sSigs(S.data, sec);          // (drawn as it is: the load that follows redraws only what is new)
+    S.sigSec = sec;
+  }
   sLoad();
 }
 
@@ -360,12 +441,15 @@ function sRender(force, keep = !force) {
   const fn = { lists: sLists, units: sUnits, dispatch: sDispatch, users: sUsers, system: sSystem, station: sStationPanel,
     radios: sRadios, data: sData }[S.section];
   if (fn) sKeep(panel, () => fn(panel), keep && !(fresh && !force));
+  S.saved = "";
 }
-function sPressing() { return Date.now() - S.pressing < 5000; }
+const S_PRESS_MS = 5000;           // a press with no release (the pointer left the window): over after this long
+function sPressing() { return Date.now() - S.pressing < S_PRESS_MS; }
 function sDeferredNow(pressed) {       // a redraw that waited: once the focus has left the section, or the press is over
   const p = S.section && $(`#s-${S.section}`);
   if (!p || sPressing()) return;
   if ((pressed && S.pressDeferred) || (S.deferred && !p.contains(document.activeElement))) sRender();
+  if (pressed && S.refreshDue) sRefresh();
 }
 
 // ---- radios: the tabs, and Tones (sTonePage, #115; the rest of the section is radios-panel.js, radio-controls.js) ----
@@ -879,6 +963,7 @@ function sTypeMap() {
 function sItemRow(sec, x, i, n) {
   const deleted = x.state === "deleted";
   const li = el("li", "s-row" + (x.retired ? " retired" : "") + (deleted ? " deleted" : ""));
+  li.dataset.row = x.code;
   const ord = el("span", "s-ord");
   const up = sBtn("↑", "Move up", () => sPost(sec, { action: "move", code: x.code, dir: -1 }, `${x.code} up`), "mini");
   const down = sBtn("↓", "Move down", () => sPost(sec, { action: "move", code: x.code, dir: 1 }, `${x.code} down`), "mini");
@@ -1235,6 +1320,7 @@ function sUnits(panel) {
 
 function sUnitRow(u, i, n, kinds, boards) {
   const li = el("li", "s-row unit" + (u.retired ? " retired" : ""));
+  li.dataset.row = u.code;          // (sFields: text typed in this row stays this unit's)
   const edit = (unit, what) => sPost("units", { action: "edit", code: u.code, unit }, `${u.code}: ${what}`);
   if (!u.retired) {
     const ord = el("span", "s-ord");
@@ -1824,9 +1910,9 @@ function sSystem(panel) {
   if (S.importing) sShowImport();
   sCounts();
   sAudit();
-  if (window.Alarm) Alarm.mountSettings($("#s-alarms"));
+  if (window.Alarm) sCardMount(alarms, Alarm.mountSettings, S.saved === "alarms");
   sPushes(pushes);
-  if (window.IntelSettings) IntelSettings.mount(intel);
+  if (window.IntelSettings) sCardMount(intel, IntelSettings.mount, S.saved === "intel");
 }
 
 // Who is talking on HPN Tower (#252, sizeup/atc_talkers.py): the callsign heard on each airband row, matched to ADS-B,
@@ -1998,6 +2084,7 @@ function sAudioRetention(r) {
     x.append(el("span", "s-eta-l", "Format"), sel, el("span", "spacer"));
     card.append(x);
   }
+  card._sig = sCardSig(card);          // (as drawn: sCardSwap)
   return card;
 }
 
@@ -2079,12 +2166,14 @@ function sPushErr(card, key, text) {
 }
 function sPushErrLine(key) {
   const e = el("div", "error", S.pushErr[key] || "");
+  e.id = `s-push-err-${key}`;
   e.dataset.err = key;
   e.setAttribute("role", "alert");
   return e;
 }
 function sPushField(card, key, input) {
   input.dataset.key = key;
+  input.setAttribute("aria-describedby", `s-push-err-${key}`);
   if (S.pushErr[key]) input.setAttribute("aria-invalid", "true");
   input.addEventListener("input", () => { if (S.pushErr[key]) sPushErr(card, key, ""); });
   return input;
@@ -2133,6 +2222,7 @@ async function sPushes(card) {
   if (seq !== S.pushSeq) return;          // (a newer read is on its way)
   if (!d || !d.configured) { card.hidden = true; return; }
   const when = (t) => (t ? fmtTime(t, true) : "");
+  const act = (what, b) => { b.dataset.act = what; return b; };          // what the button does (sMorph: never another's click)
   const kids = [];
   for (const k of d.kinds) {
     const head = el("div", "row");
@@ -2144,14 +2234,14 @@ async function sPushes(card) {
     input.minLength = d.min_len;
     const row = el("div", "row");
     row.append(input,
-      sBtn("Save", "This topic, from Settings", () => sPushPost(card, k.kind, k.label, { action: "set", key: k.kind, topic: input.value.trim() }, `${k.label}: saved`, input), "primary"),
-      ...(k.settings.topic || k.settings.off ? [sBtn("Use default", `The default: ${k.default.topic ? k.default.source_text : "not set"}`,
-        () => sPushPost(card, k.kind, k.label, { action: "reset", key: k.kind }, `${k.label}: back to the default`))] : []),
-      ...(k.settings.off ? [] : [sBtn("Turn off", "No pushes of this kind until it is set again",
+      act("set", sBtn("Save", "This topic, from Settings", () => sPushPost(card, k.kind, k.label, { action: "set", key: k.kind, topic: input.value.trim() }, `${k.label}: saved`, input), "primary")),
+      ...(k.settings.topic || k.settings.off ? [act("reset", sBtn("Use default", `The default: ${k.default.topic ? k.default.source_text : "not set"}`,
+        () => sPushPost(card, k.kind, k.label, { action: "reset", key: k.kind }, `${k.label}: back to the default`)))] : []),
+      ...(k.settings.off ? [] : [act("off", sBtn("Turn off", "No pushes of this kind until it is set again",
         () => sAsk(`Turn off ${k.label.toLowerCase()} pushes? None reach a phone until it is set again.`,
-          () => sPushPost(card, k.kind, k.label, { action: "off", key: k.kind }, `${k.label}: off`), "Turn off"), "danger-quiet")]),
+          () => sPushPost(card, k.kind, k.label, { action: "off", key: k.kind }, `${k.label}: off`), "Turn off"), "danger-quiet"))]),
       el("span", "spacer"),
-      sBtn("Send test push", k.topic ? `“sizeup test: ${k.kind} topic” to the topic in effect` : "No topic in effect", () => sPushTest(card, k), k.topic ? "" : "quiet"));
+      act("test", sBtn("Send test push", k.topic ? `“sizeup test: ${k.kind} topic” to the topic in effect` : "No topic in effect", () => sPushTest(card, k), k.topic ? "" : "quiet")));
     const last = el("div", "dim small");
     const lp = k.last;
     last.textContent = [lp ? `Last push ${when(lp.at)} ${lp.ok ? "sent" : `failed (${lp.error})`} · ${lp.sent} sent · ${lp.failed} failed`
@@ -2174,9 +2264,9 @@ async function sPushes(card) {
     const input = sPushField(card, key, sInput(f.settings, d.max_len, `${label} (read only)`, null, "mono"));
     const row = el("div", "row");
     row.append(input,
-      sBtn("Save", "Start reading this topic (within seconds)", () => sPushPost(card, key, label, { action: "set", key, topic: input.value.trim() }, `${label}: saved`, input), "primary"),
-      ...(f.settings || f.off ? [sBtn("Clear", "Remove the Settings value", () => sPushPost(card, key, label, { action: "reset", key }, `${label}: cleared`))] : []),
-      ...(f.off ? [] : [sBtn("Turn off", "Stop reading it", () => sPushPost(card, key, label, { action: "off", key }, `${label}: off`), "danger-quiet")]));
+      act("set", sBtn("Save", "Start reading this topic (within seconds)", () => sPushPost(card, key, label, { action: "set", key, topic: input.value.trim() }, `${label}: saved`, input), "primary")),
+      ...(f.settings || f.off ? [act("reset", sBtn("Clear", "Remove the Settings value", () => sPushPost(card, key, label, { action: "reset", key }, `${label}: cleared`)))] : []),
+      ...(f.off ? [] : [act("off", sBtn("Turn off", "Stop reading it", () => sPushPost(card, key, label, { action: "off", key }, `${label}: off`), "danger-quiet"))]));
     kids.push(head, now, row, sPushErrLine(key));
   }
   const prot = (d.protected && d.protected.listed) || [];
@@ -2310,11 +2400,14 @@ function sCameraWall(w) {
     sc.append(t);
     kids.push(sc);
   } else if (w.cameras) kids.push(el("div", "empty", "No cameras from the highway sources yet"));
-  return sCard(sCardHead("Camera wall", w.n != null ? `${w.n} on the wall` : "",
+  const card = sCard(sCardHead("Camera wall", w.n != null ? `${w.n} on the wall` : "",
     sHelp("The Cameras button on the Overview and the wall board shows every camera in our area: inside our fire districts "
       + "(the county's, Port Chester FD's includes Rye Brook) or within the margin around them, so the I-95 and I-287 cameras "
       + "at our edges count. Always and Never put a camera on or take it off by hand. Down cameras stay on, folded into one tile.")),
     ...kids);
+  card.id = "s-camera-wall";
+  card._sig = sCardSig(card);          // (as drawn: sCardSwap)
+  return card;
 }
 
 // ---- station: Hub link (forwarding to the hub, sizeup/cloud/stationmode.py) -------------------------
@@ -2358,6 +2451,9 @@ async function sAudit() {
       return;
     }
   }
+  const sig = JSON.stringify(S.auditRows || []);
+  if (box._sig === sig && box.firstElementChild && box.firstElementChild.matches("table")) return;
+  box._sig = sig;
   const t = el("table", "evtable s-audit");
   const head = el("tr");
   for (const h of ["When", "Who", "Section", "What", "Was", "Now"]) head.append(el("th", "", h));
@@ -2452,7 +2548,11 @@ function sShowImport() {
   }));
   for (const p of document.querySelectorAll(".s-panel")) {
     p.addEventListener("focusout", () => setTimeout(() => sDeferredNow(false), 0));
-    p.addEventListener("pointerdown", () => { S.pressing = Date.now(); });
+    p.addEventListener("pointerdown", () => {
+      S.pressing = Date.now();
+      clearTimeout(S.pressT);          // no pointerup ever comes: what waited for it is drawn all the same
+      S.pressT = setTimeout(() => { S.pressing = 0; sDeferredNow(true); }, S_PRESS_MS + 50);
+    });
   }
   for (const ev of ["pointerup", "pointercancel"]) {       // (the click comes right after the pointerup)
     window.addEventListener(ev, () => { if (S.pressing) setTimeout(() => { S.pressing = 0; sDeferredNow(true); }, 80); });
