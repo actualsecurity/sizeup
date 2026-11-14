@@ -98,6 +98,7 @@ from sizeup.cloud.hubstore import AudioDb, MonitorDb
 from sizeup.incidents import Traffic
 from sizeup.radio.page import page_from_dict
 from sizeup.sources import SourceError
+from sizeup.stt import CATCHUP_NOTE
 from sizeup.transcribe import RESERVE_CHANNELS, deadline_for
 
 JSON = "application/json"
@@ -118,6 +119,8 @@ RESEND_S = 6 * 3600.0    # AWS back (a new month, a higher limit): what failed o
 RESEND_MAX = 200         # ... at most this many, the newest first
 RECOVER_S = 3600.0       # after a restart: what waited for AWS less than this goes to AWS again, older to whisper
 RECOVER_WAIT_S = 120.0   # ... to whisper: waiting this long for the station to reconnect first
+CATCHUP_STATUS_S = 30.0  # shed clips caught up: the station's whisper judged idle only on a report this fresh
+CATCHUP_REFUSED_S = 600.0  # ... and a station that refuses the call (an older build) isn't asked again for this long
 JOB_PATH = re.compile(r"/api/station/jobs/([0-9a-f]{16})")
 EXTRA = re.compile(r"[a-z][a-z0-9_]{0,30}")      # a transmission's field names, as the station sends them
 
@@ -257,6 +260,7 @@ class Hub:
         self.live = RemoteLive(app.radios.resolve)
         self.last_seen: float | None = None
         self.last_state: float | None = None     # the station's last state post (station health: "silent")
+        self.status_at: float | None = None      # ... the last one with its status (the catch-up's word on whisper)
         self.status_token = status_token(self.token, getattr(cfg, "cloud_status_token", ""))
         self.health_: StationHealth | None = None  # station health and alerts (HubApp sets it)
         self.polling = 0
@@ -497,7 +501,7 @@ class Hub:
             tgs = st.pop("talkgroups", None)
             if isinstance(tgs, list):
                 self.talkgroups = tgs
-            self.status = st
+            self.status, self.status_at = st, now
             if self.health_ is not None:
                 self.health_.observe(st)           # each channel's gaps, for the silence hints
             self.app.channels_check()          # the station runs other channel choices than these: send them
@@ -629,6 +633,7 @@ class HubApp(App):
     switches through jobs, and the state lives in SQLite (hubstore.py)."""
 
     def __init__(self, cfg, log: Callable[[str], None] = print):
+        self._catchup_refused_until = 0.0              # the station refused catch_up (an older build): not asked before
         self._aws_since: dict[str, float] = {}         # id -> when Amazon Transcribe got it (the sweep's clock)
         self._aws_asked: dict[str, float] = {}         # id -> when the station's whisper was asked instead
         self._aws_late_wait: set[str] = set()          # timed out, not a priority channel: AWS's late answer is the text
@@ -748,6 +753,9 @@ class HubApp(App):
         # context clips the station's whisper shed (#300, radio-intel PR 3): lost recall that would otherwise look quiet
         self.perf.gauge("stt_shed_context", lambda: ((self.hub.status or {}).get("health") or {}).get("stt_queue", {})
                         .get("shed_context") if isinstance(getattr(self.hub, "status", None), dict) else None)
+        # ... and caught up later (sizeup/sttcatchup.py): the backlog waiting, and caught up in the last 24 h
+        self.perf.gauge("stt_catchup_waiting", lambda: self.catchup.stats().get("waiting"))
+        self.perf.gauge("stt_caught_up_24h", lambda: self.catchup.stats().get("caught_24h"))
         self.perf.gauge("dvr_segments", lambda: sum(len(c.get("segs") or ()) for c in list(getattr(dvr, "_cams", {}).values()))
                         if dvr is not None else None)
 
@@ -779,7 +787,8 @@ class HubApp(App):
                 return
             alt = d.get("alt") if isinstance(d.get("alt"), dict) else None
             self._retext(pid, str(d.get("text") or ""), str(d.get("status") or "done"),
-                         d.get("confidence"), str(d.get("model") or ""), alt=alt)
+                         d.get("confidence"), str(d.get("model") or ""), alt=alt,
+                         quiet=bool(d.get("catchup")))      # (a shed clip caught up: old words, nothing alerts)
         elif kind == "rerun":                         # a re-run on the station is over (changed, same or failed)
             self._rerun_finish(self._id(d), str(d.get("result") or "")[:200], str(d.get("model") or "")[:80])
         elif kind == "alt_text":                      # "both" re-run: the station's whisper text, to compare
@@ -933,6 +942,10 @@ class HubApp(App):
         """Amazon Transcribe couldn't: the station's whisper does it (retranscribe, the text comes back as
         a retext event); a station that can't: "transcription failed", said on the transmission. Timed out on a
         channel that isn't a priority one: AWS's late answer is awaited instead (_whisper_fallback)."""
+        if job.catchup:                            # a shed clip caught up: still skipped, a failed try on its row
+            self.hub.log(f"aws transcribe: catch-up {job.id}: {why}: left skipped")
+            self._rerun_finish(job.id, f"failed: AWS: {why[:80]}")
+            return self.sync()
         late = (job.alt is None and not job.rerun and not job.recovered and why.startswith("AWS timed out")
                 and not self._whisper_fallback(job))
         self.hub.log(f"aws transcribe: {job.kind} {job.id}: {why}" + (
@@ -1112,7 +1125,8 @@ class HubApp(App):
                                                                            and not getattr(it, "raw", "")))
                 and self.channel_pref(key)["engine"] == "aws"
                 and self.aws.available(key)[0]
-                and (it.id not in self._aws_since or it.id in self._aws_asked)]     # (not one AWS is doing now)
+                and (it.id not in self._aws_since or it.id in self._aws_asked)     # (not one AWS is doing now)
+                and self._rerun_note.get(it.id) != CATCHUP_NOTE]                    # (nor one the catch-up sent it)
         todo.sort(key=lambda x: -x[0].end)
         n = 0
         for it, key, kind in todo[:RESEND_MAX]:
@@ -1431,6 +1445,54 @@ class HubApp(App):
             self._rerun_finish(cid, f"failed: {err or 'the station has no recording to re-run'}")
         self.sync()
 
+    # -- shed clips caught up (sizeup/sttcatchup.py): driven here, the station's whisper runs them (catch_up) ------
+
+    def _catchup_may_run(self) -> bool:
+        """The leader with a fresh lease only (sizeup/fence.py): a standby changes no rows."""
+        return self._may_write_audio() and not self._stopping.is_set()
+
+    def _catchup_whisper_ready(self, after: float) -> tuple[bool, str]:
+        """The station's whisper idle, by its last report, and that report sent after the last batch was handed over
+        (so a batch still waiting there is seen before another goes)."""
+        from sizeup.sttcatchup import whisper_idle
+        if not self.hub.connected():
+            return False, "station offline"
+        last = getattr(self.hub, "status_at", None) or 0.0
+        if last <= after or time.time() - last > CATCHUP_STATUS_S:
+            return False, "waiting for the station's report"
+        hl = (self.hub.status or {}).get("health")
+        hl = hl if isinstance(hl, dict) else {}
+        wh = hl.get("whisper") if isinstance(hl.get("whisper"), dict) else {}
+        if wh.get("state") not in (None, "ok"):
+            return False, "whisper not ready"
+        return whisper_idle(hl.get("stt_queue"))
+
+    def _catchup_whisper(self, specs: list[dict]) -> dict | None:
+        """The station's whisper (its catch_up call): {queued, refused, hold}. None: the call itself failed (offline,
+        a network error, an older station that refuses it): no clip was tried, so none is counted as tried. A station
+        that doesn't know the call isn't asked again for CATCHUP_REFUSED_S."""
+        now = time.time()
+        if now < self._catchup_refused_until:
+            return None
+        try:
+            got = self.hub.remote("catch_up", specs, timeout=CALL_WAIT_S)
+        except (StationOffline, RuntimeError, TypeError, ValueError) as e:
+            if "not allowed" in str(e):
+                self._catchup_refused_until = now + CATCHUP_REFUSED_S
+            self.hub.log(f"speech-to-text catch-up: not sent to the station: {str(e)[:160]}"
+                         + (f" (asked again in {CATCHUP_REFUSED_S / 60:.0f} min)" if "not allowed" in str(e) else ""))
+            return None
+        if not isinstance(got, dict):
+            return None
+        refused = got.get("refused") if isinstance(got.get("refused"), dict) else {}
+        return {"queued": [str(x) for x in got.get("queued") or [] if isinstance(x, str)],
+                "refused": {str(k): str(v)[:160] for k, v in refused.items()}, "hold": str(got.get("hold") or "")[:160]}
+
+    def _catchup_pcm(self, cid: str, key: str, source: str):
+        from sizeup.transcribe import wav_pcm
+        wav = self.audio.get(cid)
+        return wav_pcm(wav, 0.0) if wav else None
+
     def _rerun_pcm(self, item):
         from sizeup.transcribe import wav_pcm
         wav = self.audio.get(item.id)
@@ -1631,6 +1693,7 @@ class HubApp(App):
         threading.Thread(target=self.health.run, args=(self._stopping,), name="station-health", daemon=True).start()
         threading.Thread(target=self.error_watch.run, args=(self._stopping,), name="hub-errors", daemon=True).start()
         threading.Thread(target=self._aws_watch, name="aws-sweep", daemon=True).start()
+        self.catchup.start()                      # its first look minutes from now: no writes at start
         self.perf.start()
         self._started = True                      # the phone pre-alert: the hub's own subscription
         self.prealert_sync()
@@ -1648,6 +1711,7 @@ class HubApp(App):
         from sizeup.timing import Phases
         t = Phases("stop")                             # the drain's share of a deploy (#264): where it goes
         self._stopping.set()
+        self.catchup.stop()
         self.perf.stop()
         if self.prealert is not None:
             self.prealert.stop()

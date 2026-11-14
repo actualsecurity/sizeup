@@ -391,7 +391,8 @@ def test_the_pre_alert_takes_the_facilitys_aircraft():
             self.got.append(a)
             return {"id": len(self.got)}, True
     al = Alerts()
-    w = AtcWatch(al, ["NY Approach", "HPN Tower"], Rules.load(), aircraft=lambda: [FAR_IN, CLOSE])
+    w = AtcWatch(al, ["NY Approach", "HPN Tower"], Rules.load(), aircraft=lambda: [FAR_IN, CLOSE],
+                 clock=lambda: 3.0)             # (heard as it ends: a transcript of an old transmission raises nothing)
     w.heard({"id": "a", "source": "NY Approach", "start": 1.0, "end": 2.0,
              "text": "JetBlue one two three four declaring an emergency, engine fire"})
     w.heard({"id": "b", "source": "HPN Tower", "start": 1.0, "end": 2.0,

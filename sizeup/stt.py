@@ -61,8 +61,18 @@ SHED_AFTER = {HIGH: HIGH_MAX_WAIT_S, CONTEXT: CONTEXT_MAX_WAIT_S, CONTEXT_FALLBA
               LOW: LOW_MAX_WAIT_S}
 CONTEXT_CLASSES = (CONTEXT_FALLBACK, CONTEXT)
 SHED = "skipped: busy"      # what a shed clip's reason starts with: its status is "skipped", not "error" (re-runnable)
+# A shed clip caught up later (sizeup/sttcatchup.py): under every other class, and started only once no clip of ours
+# (URGENT, HIGH, LIVE; one that went to AWS counts too) has come in for CATCHUP_QUIET_S, nor since the start, so fire
+# traffic never waits behind one. One greedy pass each, one try, CATCHUP_TIMEOUT_S at most, CATCHUP_MAX_CLIP_S of audio
+# at most: it can never hold the one worker for minutes.
+CATCHUP = 3
+CATCHUP_QUIET_S = 90.0
+CATCHUP_TIMEOUT_S = 20.0
+CATCHUP_MAX_CLIP_S = 30.0
+CATCHUP_NOTE = "catch-up"  # its re-run result's note ("changed; catch-up"): what Settings > Health counts
 CLASS_NAMES = {URGENT: "urgent", HIGH: "high", LIVE: "live", RERUN: "rerun", CONTEXT_FALLBACK: "context-fallback",
-               CONTEXT: "context", LOW: "low"}
+               CONTEXT: "context", LOW: "low", CATCHUP: "catchup"}
+NOT_LIVE = (RERUN, CATCHUP)  # asked for again, not heard now: never stale, not counted as arriving
 
 
 def wav_bytes(audio: np.ndarray, rate: int = 16000) -> bytes:
@@ -172,7 +182,8 @@ class WhisperClient:
     def __init__(self, url: str, timeout_s: float = 60.0):
         self.url, self.timeout_s = url, timeout_s
 
-    def transcribe(self, audio16k: np.ndarray, prompt: str = "", fast: bool = False) -> tuple[str, float | None]:
+    def transcribe(self, audio16k: np.ndarray, prompt: str = "", fast: bool = False,
+                   timeout_s: float | None = None) -> tuple[str, float | None]:
         """fast: one greedy pass, no temperature fallback (whisper-server decodes a hard clip up to 5 more times at
         higher temperatures): the context talkgroups' clips while the queue is behind (#300)."""
         pad = np.zeros(8000, dtype=np.float32)  # whisper likes a little silence around speech
@@ -191,7 +202,7 @@ class WhisperClient:
         parts.append(f"--{boundary}--\r\n".encode())
         req = urllib.request.Request(self.url, data=b"".join(parts), method="POST",
                                      headers={"Content-Type": f"multipart/form-data; boundary={boundary}"})
-        with urllib.request.urlopen(req, timeout=self.timeout_s) as r:
+        with urllib.request.urlopen(req, timeout=timeout_s or self.timeout_s) as r:
             out = json.load(r)
         text = " ".join(str(out.get("text", "")).split())
         probs = [w.get("probability") for s in out.get("segments", []) for w in s.get("words", [])
@@ -219,10 +230,12 @@ class SttQueue:
         self._shed_ctx_at: deque = deque()        # ... when, over RATE_WINDOW_S x 2 (the last hour)
         self.last_drop: dict | None = None
         self._in: deque = deque()                 # (at, channel, priority, fallback) of each clip put, RATE_WINDOW_S
+        self._ours_at = self.clock()              # the last clip of ours heard (from the start on): catch-up waits
+        self._hold_until = 0.0                    # a catch-up clip held for quiet until then (get() wakes for it)
 
     def _key(self, e: list, now: float) -> tuple:
         prio, seq, at = e[0], e[1], e[5]
-        if prio != RERUN and now - at >= STALE_S:
+        if prio not in NOT_LIVE and now - at >= STALE_S:
             return (prio, 1, -seq)                # waited too long: after its class's fresh ones, the newest first
         return (prio, 0, seq)
 
@@ -233,9 +246,34 @@ class SttQueue:
             return (k[0], k[1], -x[1])
         return max(items, key=rank)
 
-    def qsize(self) -> int:
+    def qsize(self, catchup: bool = True) -> int:
+        """Items waiting (catchup=False: not counting the catch-up's)."""
         with self._cv:
-            return len(self._items)
+            return sum(1 for e in self._items if catchup or e[0] != CATCHUP)
+
+    def ours_heard(self) -> None:
+        """A clip of ours was just heard, whichever engine takes it (one that went to AWS never enters this queue):
+        the catch-up's quiet spell starts again."""
+        with self._cv:
+            self._ours_at = self.clock()
+
+    def promote(self, match: Callable[[object], bool], priority: int = RERUN):
+        """A waiting catch-up item a person asked for now: moved to `priority`. The item, or None (not waiting)."""
+        with self._cv:
+            for e in self._items:
+                if e[0] == CATCHUP and match(e[2]):
+                    e[0] = priority
+                    self._cv.notify()
+                    return e[2]
+        return None
+
+    def withdraw(self, priority: int = CATCHUP) -> list:
+        """Every waiting item of that class taken out (the station is about to update): the items."""
+        with self._cv:
+            out = [e for e in self._items if e[0] == priority]
+            for e in out:
+                self._items.remove(e)
+        return [e[2] for e in out]
 
     def put(self, entry: tuple, fallback: bool = False) -> bool:
         """entry (priority, seq-or-None, item, audio[, channel]). fallback: the hub's, for a clip AWS couldn't do.
@@ -247,7 +285,9 @@ class SttQueue:
         out: list[tuple[object, str]] = []
         with self._cv:
             self._items.append(e)
-            if prio != RERUN:
+            if prio in LIVE_CLASSES:
+                self._ours_at = now
+            if prio not in NOT_LIVE:
                 self._in.append((now, channel, prio, bool(fallback)))
                 while self._in and now - self._in[0][0] > RATE_WINDOW_S:
                     self._in.popleft()
@@ -293,9 +333,13 @@ class SttQueue:
                             + ("an airband clip is no use late" if e[0] == HIGH else
                                "another system's talkgroup" if e[0] in CONTEXT_CLASSES else "a context talkgroup")
                             + " (Re-transcribe it if it matters)") for e in shed)
+        self._hold_until = 0.0
         if not self._items:
             return None
         e = min(self._items, key=lambda x: self._key(x, now))
+        if e[0] == CATCHUP and now - self._ours_at < CATCHUP_QUIET_S:
+            self._hold_until = self._ours_at + CATCHUP_QUIET_S     # fire traffic just came in: more may follow
+            return None
         self._items.remove(e)
         return (e[0], e[1], e[2], e[3])
 
@@ -313,6 +357,9 @@ class SttQueue:
                     left = None if end is None else end - time.monotonic()
                     if left is not None and left <= 0:
                         raise queue.Empty
+                    if self._hold_until:          # only a held catch-up clip: look again once it is quiet
+                        hold = max(0.05, self._hold_until - self.clock())
+                        left = hold if left is None else min(left, hold)
                     self._cv.wait(left)
         finally:
             self._dropped(skips, "skipped")
@@ -332,7 +379,7 @@ class SttQueue:
         """The oldest live clip (any class but re-runs) has waited BEHIND_S."""
         now = self.clock()
         with self._cv:
-            return any(e[0] != RERUN and now - e[5] >= BEHIND_S for e in self._items)
+            return any(e[0] not in NOT_LIVE and now - e[5] >= BEHIND_S for e in self._items)
 
     def stats(self) -> dict:
         """Depth by kind, the oldest clip's wait, where they come from: station status and health (the backlog
@@ -348,7 +395,7 @@ class SttQueue:
         oldest_low = min((e[5] for e in low), default=None)
         waiting: dict[str, int] = {}
         for e in items:
-            if e[0] != RERUN:
+            if e[0] not in NOT_LIVE:
                 waiting[e[4] or "?"] = waiting.get(e[4] or "?", 0) + 1
         per_h = 3600.0 / RATE_WINDOW_S
         came: dict[str, int] = {}
@@ -357,7 +404,9 @@ class SttQueue:
         return {"queued": len(items), "urgent": sum(1 for e in live if e[0] == URGENT),
                 "context": sum(1 for e in items if e[0] in CONTEXT_CLASSES),   # another P25 system's alert clips (#409)
                 "high": sum(1 for e in live if e[0] == HIGH), "live": len(live), "low": len(low),
+                "ours_ago_s": round(now - self._ours_at, 1),     # since a clip of ours was last heard (or the start)
                 "rerun": sum(1 for e in items if e[0] == RERUN),
+                "catchup": sum(1 for e in items if e[0] == CATCHUP),       # shed clips caught up (sizeup/sttcatchup.py)
                 "fallback": sum(1 for e in items if e[6]),
                 "stale": sum(1 for e in live if now - e[5] >= STALE_S),
                 "oldest_at": oldest, "oldest_s": round(now - oldest, 1) if oldest is not None else None,
@@ -390,11 +439,23 @@ class Transcriber:
         self._drop_thread: threading.Thread | None = None
         self.last_error = ""
         self._working = False
+        self._prio = LIVE                         # the class of the item being transcribed
         self._took: deque = deque(maxlen=50)      # (finished at, seconds) of the last transcriptions: whisper's pace
 
-    def busy(self) -> int:
-        """Transcriptions queued or running (the station's auto-update waits for none before a restart)."""
-        return self._q.qsize() + (1 if self._working else 0)
+    def busy(self, catchup: bool = True) -> int:
+        """Transcriptions queued or running (the station's auto-update waits for none before a restart;
+        catchup=False: not counting the catch-up's, which never hold an update up)."""
+        working = self._working and (catchup or self._prio != CATCHUP)
+        return self._q.qsize(catchup) + (1 if working else 0)
+
+    def ours_heard(self) -> None:
+        self._q.ours_heard()
+
+    def promote(self, match: Callable[[object], bool], priority: int = RERUN):
+        return self._q.promote(match, priority)
+
+    def withdraw_catchup(self) -> list:
+        return self._q.withdraw(CATCHUP)
 
     def submit(self, item, audio: np.ndarray, priority: int = LIVE, channel: str | None = None,
                fallback: bool = False) -> bool:
@@ -434,10 +495,14 @@ class Transcriber:
         while True:
             self._working = False
             prio, _n, item, audio = self._q.get()
-            self._working = True
+            self._prio, self._working = prio, True
             # behind: a context talkgroup's clip gets one greedy pass (no temperature fallback), #300
             fast = {"fast": True} if prio in (LOW, *CONTEXT_CLASSES) and self._q.behind() else {}
-            for attempt in range(3):
+            tries = 3
+            if prio == CATCHUP:
+                # a shed clip caught up: one greedy pass, one try, a short timeout, no backoff: never minutes of whisper
+                fast, tries = {"fast": True, "timeout_s": CATCHUP_TIMEOUT_S}, 1
+            for attempt in range(tries):
                 try:
                     t0 = time.monotonic()
                     # No noise reduction for the model: on the FG1 bench it cut the whine 15 dB for listening
@@ -448,7 +513,8 @@ class Transcriber:
                     break
                 except Exception as e:
                     self.last_error = f"{type(e).__name__}: {e}"[:160]
-                    time.sleep(self.RETRY_S[attempt])
+                    if tries > 1:
+                        time.sleep(self.RETRY_S[attempt])
             else:
                 item.status = "error"
                 self.on_done(item)
