@@ -1318,7 +1318,7 @@ def test_the_hub_serves_layers_and_snapshots_to_a_signed_in_viewer(tmp_path, key
     try:
         h.server.access.certs_url = jwks.url
         h.server.access.log = lambda m: None
-        post(h.app.cad, "users", action="add", name="Corey", email="corey@example.org", role="admin")
+        post(h.app.cad, "users", action="add", name="Casey", email="casey@example.org", role="admin")
         post(h.app.cad, "users", action="add", name="Val", email="val@example.org", role="viewer")
         assert wait_for(lambda: all(h.app.roads.ny.status[f]["at"] for f in ("events", "signs"))
                         and h.app.roads.carshub.status["cameras"]["at"])

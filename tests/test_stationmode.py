@@ -110,12 +110,12 @@ def test_the_choice_survives_a_restart_and_wins_over_config_toml(tmp_path, monke
     cfg = cfg_(tmp_path, cloud_role="station", cloud_hub_url=url)
     app = make_app(cfg)
     assert app.station.forward is True and app.station.state()["from"] == "config" and app.link is not None
-    app.station.set({"forward": False, "operator": "Corey"})
+    app.station.set({"forward": False, "operator": "Casey"})
     assert json.loads(Path(cfg.cloud_state).read_text())["forward"] is False
 
     again = make_app(cfg)                                 # config.toml still says station: the UI's off wins
     assert again.station.forward is False and again.link is None and again.station.state()["from"] == "settings"
-    again.station.set({"forward": True, "hub_url": url + "/", "operator": "Corey"})
+    again.station.set({"forward": True, "hub_url": url + "/", "operator": "Casey"})
 
     third = make_app(cfg_(tmp_path))                      # config.toml all-in-one: the UI's on wins
     assert third.station.forward is True and third.station.hub_url == url and third.events is not None

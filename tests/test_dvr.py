@@ -19,7 +19,7 @@ from sizeup.dvr import Dvr
 from tests.test_cad import make_cad
 from tests.test_hlsseg import Origin, gop, segment
 from tests.test_roads import Clock, load_cfg, make
-from tests.test_roles import COREY, JULIAN, VAL, call, people
+from tests.test_roles import CASEY, JORDAN, VAL, call, people
 
 CAM = "1ne01370s"                       # the Thruway's I-95 exit 21 camera (HLS)
 SNAP_ONLY = "1cw00250w"
@@ -339,13 +339,13 @@ def test_only_dispatchers_and_admins_keep_a_camera_recording_and_it_is_in_their_
     assert needs(path) == "dispatch"
     code, out = call(a, path, {"on": True}, VAL)
     assert code == 403 and asked == []
-    code, out = call(a, path, {"on": True}, JULIAN)
+    code, out = call(a, path, {"on": True}, JORDAN)
     assert code == 200 and out["dvr"] == {"pinned": True} and asked == [(CAM, True)]
-    assert any(x["summary"] == f"Kept camera {CAM} recording" for x in a.cad.activity.rows(JULIAN, "", None, 20))
-    code, out = call(a, path, {"on": "yes"}, COREY)
+    assert any(x["summary"] == f"Kept camera {CAM} recording" for x in a.cad.activity.rows(JORDAN, "", None, 20))
+    code, out = call(a, path, {"on": "yes"}, CASEY)
     assert code == 400 and "true or false" in out["error"]
     a.cad.dvr_pin = None
-    assert call(a, path, {"on": False}, COREY)[0] == 400
+    assert call(a, path, {"on": False}, CASEY)[0] == 400
 
 
 def test_the_config(tmp_path):

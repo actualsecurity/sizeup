@@ -19,6 +19,7 @@ window.Incoming = (() => {
     return n;
   }
   const word = (s) => String(s || "").replace(/_/g, " ");
+  const ago = (s) => (s < 90 ? `${s} s` : s < 5400 ? `${Math.round(s / 60)} min` : `${Math.round(s / 3600)} h`) + " ago";
 
   function pill(node, s) {
     if (!node) return;
@@ -32,7 +33,8 @@ window.Incoming = (() => {
     if (node.textContent !== text) node.textContent = text;
     node.className = `pill ${bad ? "err" : "ok"}`;
     node.title = tiers.map((t) => `${t.rank >= 1000 ? "backup" : `tier ${t.rank}`}: ${t.label} · ${word(t.state)}`
-      + (t.reason ? ` (${t.reason})` : "") + (t.acting ? " · primary" : "")).join("\n");
+      + (t.reason ? ` (${t.reason})` : "") + (t.acting ? " · primary" : "")
+      + (t.rank < 1000 && t.ok_s != null ? ` · last ok ${ago(t.ok_s)}` : "")).join("\n");
   }
 
   function column(list, s, deps) {

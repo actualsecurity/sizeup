@@ -196,8 +196,13 @@ class Config:
     # all-in-one; never a station forwarding to a hub). Off unless the section is in the config.
     prealert_enabled: bool = False
     prealert_server: str = "https://ntfy.sh"
-    prealert_ring_topic: str = "pcfd-phone-prealert"
-    prealert_status_topic: str = "pcfd-status"
+    # The topics are NOT in the repo: unset = that feed is off (Health: "not configured") until an admin sets them in
+    # Settings > System > Push notifications. Env (SIZEUP_PREALERT_RING_TOPIC / _STATUS_TOPIC) overrides Settings,
+    # which overrides [prealert] ring_topic / status_topic. sizeup never publishes to them (notify.py protected()).
+    prealert_ring_topic: str = ""
+    prealert_status_topic: str = ""
+    prealert_ring_source: str = ""        # "env" | "config" | "" (unset)
+    prealert_status_source: str = ""
     prealert_expire_min: float = 5.0
     prealert_heartbeat_stale_min: float = 90.0
     # [alerts] (sizeup/notify.py; docs/cloud.md "Station health and alerts"): our OWN ntfy topics for pushes that
@@ -205,8 +210,7 @@ class Config:
     # emergency buttons, mayday, aircraft squawks; env SIZEUP_ALERT_TOPIC, the hub: SSM /sizeup-hub/alert-topic),
     # status_topic for the system's health (sizeup/cloud/health.py, #79: station health, Amazon Transcribe and its
     # budget; env SIZEUP_STATUS_TOPIC, the hub: SSM /sizeup-hub/status-topic). Only one set: everything goes there;
-    # neither: no pushes. And station health's thresholds. Never Tapout's topics (pcfd-phone-prealert, pcfd-status,
-    # whatever [prealert] names): refused here and in sizeup/notify.py.
+    # neither: no pushes. And station health's thresholds. Never the topics [prealert] subscribes to: refused here and in sizeup/notify.py.
     alerts_ntfy_topic: str = ""
     alerts_status_topic: str = ""
     # intel_topic: radio-intelligence pre-alerts (sizeup/intel; env SIZEUP_INTEL_TOPIC). "" = the alerts' topic.
@@ -416,6 +420,8 @@ def hub_url_problem(url: str) -> str:
 #   SIZEUP_PUBLIC_URL, SIZEUP_HUB_URL [cloud] public_url / hub_url
 #   SIZEUP_ACCESS_TEAM / _AUD         [cloud] access_team / access_aud (hub: Cloudflare Access identity)
 #   SIZEUP_PREALERT_SERVER            [prealert] server (a local test server instead of ntfy.sh)
+#   SIZEUP_PREALERT_RING_TOPIC / _STATUS_TOPIC  [prealert] ring_topic / status_topic: the feed sizeup subscribes to
+#                                (read only; wins over Settings; neither set anywhere: that feed is off)
 #   SIZEUP_ALERT_TOPIC / _SERVER [alerts] ntfy_topic / ntfy_server (our alarms' push topic: a name is its only
 #                                secret; the hub: SSM /sizeup-hub/alert-topic)
 #   SIZEUP_STATUS_TOPIC          [alerts] status_topic (our status / health push topic; the hub: SSM
@@ -507,9 +513,14 @@ def _prealert(data: dict) -> dict:
     m = re.fullmatch(r"(https?)://([^/:?#]+)(:\d+)?", server)
     if not m or (m.group(1) == "http" and m.group(2) not in ("127.0.0.1", "localhost", "::1")):
         raise ConfigError('prealert.server: the ntfy server, "https://ntfy.sh" (plain http only to this machine)')
-    topics = {k: str(pa.get(k, d)) for k, d in (("ring_topic", "pcfd-phone-prealert"), ("status_topic", "pcfd-status"))}
-    if not all(re.fullmatch(r"[-_A-Za-z0-9]{1,64}", t) for t in topics.values()) or len(set(topics.values())) != 2:
-        raise ConfigError("prealert.ring_topic / status_topic: two different ntfy topics (letters, digits, - and _)")
+    topics, tsrc = {}, {}
+    for k, env in (("ring_topic", "SIZEUP_PREALERT_RING_TOPIC"), ("status_topic", "SIZEUP_PREALERT_STATUS_TOPIC")):
+        topics[k] = _env(env, str(pa.get(k, ""))).strip()
+        tsrc[k] = ("env" if os.environ.get(env, "").strip() else "config") if topics[k] else ""
+    given = [t for t in topics.values() if t]
+    if not all(re.fullmatch(r"[-_A-Za-z0-9]{1,64}", t) for t in given) or len({t.lower() for t in given}) != len(given):
+        raise ConfigError("prealert.ring_topic / status_topic: two different ntfy topics (letters, digits, - and _), "
+                          "or empty (set them in Settings > System > Push notifications)")
     try:
         expire, stale = float(pa.get("expire_min", 5)), float(pa.get("heartbeat_stale_min", 90))
     except (TypeError, ValueError):
@@ -520,7 +531,8 @@ def _prealert(data: dict) -> dict:
     if not isinstance(enabled, bool):
         raise ConfigError("prealert.enabled: true or false")
     return dict(prealert_enabled=enabled, prealert_server=server, prealert_ring_topic=topics["ring_topic"],
-                prealert_status_topic=topics["status_topic"], prealert_expire_min=expire,
+                prealert_status_topic=topics["status_topic"], prealert_ring_source=tsrc["ring_topic"],
+                prealert_status_source=tsrc["status_topic"], prealert_expire_min=expire,
                 prealert_heartbeat_stale_min=stale)
 
 
@@ -528,13 +540,13 @@ def _alerts(data: dict, prealert: dict) -> dict:
     """[alerts] -> Config fields: our ntfy topics for pushes (sizeup/notify.py route(): ntfy_topic for the
     emergency alarms, #128; status_topic for station health, #79, and Amazon Transcribe) and station health's
     thresholds (sizeup/cloud/health.py). No section: the defaults, no push unless SIZEUP_ALERT_TOPIC or
-    SIZEUP_STATUS_TOPIC is set. Tapout's topics (and whatever [prealert] names) are refused, by exact name."""
+    SIZEUP_STATUS_TOPIC is set. The topics [prealert] subscribes to are refused, by exact name."""
     from sizeup.notify import server_problem, topic_problem
     al = _take(data.get("alerts", {}), "alerts", {"ntfy_topic", "status_topic", "intel_topic", "ntfy_server", "silent_min",
                                                   "behind_min", "down_min", "outbox_min", "disk_pct", "repeat_min",
                                                   "p25_silent_min", "p25_silent_night_min",
                                                   "main_channels"})   # (#242's, inert since #258: read, ignored)
-    tapout = (prealert.get("prealert_ring_topic", ""), prealert.get("prealert_status_topic", ""))
+    tapout = (prealert.get("prealert_ring_topic", ""), prealert.get("prealert_status_topic", ""))   # subscribed: protected
     topics, sources = {}, {}
     for key, env in (("ntfy_topic", "SIZEUP_ALERT_TOPIC"), ("status_topic", "SIZEUP_STATUS_TOPIC"),
                      ("intel_topic", "SIZEUP_INTEL_TOPIC")):

@@ -13,7 +13,7 @@ import pytest
 from sizeup.cad.api import needs
 from sizeup.cad.store import CadError
 from tests.test_radios import Clock, _event_with, cad, uid
-from tests.test_roles import COREY, JULIAN, VAL, api, call  # noqa: F401  (fixture)
+from tests.test_roles import CASEY, JORDAN, VAL, api, call  # noqa: F401  (fixture)
 
 
 def row(c, iid, name):
@@ -121,18 +121,18 @@ def test_already_assigned_out_of_service_and_bad_requests(quiet):
 
 def test_permissions_and_activity(api):  # noqa: F811
     assert needs("/api/cad/incident/7/attach", {"status": "RS"}) == "dispatch"
-    code, inc = call(api, "/api/cad/incident", {"type": "STRU", "address": "209 Westchester Ave"}, JULIAN)
+    code, inc = call(api, "/api/cad/incident", {"type": "STRU", "address": "209 Westchester Ave"}, JORDAN)
     iid, chief = inc["id"], uid(api.cad, "2395")
     path, body = f"/api/cad/incident/{iid}/attach", {"unit_ids": [chief], "status": "RS"}
     assert call(api, path, body, VAL) == (403, {"error": "Dispatchers and admins only (you: viewer)"})
     assert api.cad.store.unit(chief)["incident_id"] is None
-    code, out = call(api, path, body, JULIAN)
+    code, out = call(api, path, body, JORDAN)
     assert code == 200 and out["status"] == "RS"
     ev = next(e for e in api.cad.full(iid)["events"] if "2395" in e["text"])
-    assert (ev["text"], ev["operator"]) == ("2395 added responding (not dispatched)", "Julian <julian@example.org>")
-    acts = api.cad.activity.rows(JULIAN, "action")
+    assert (ev["text"], ev["operator"]) == ("2395 added responding (not dispatched)", "Jordan <jordan@example.org>")
+    acts = api.cad.activity.rows(JORDAN, "action")
     assert acts[0]["summary"] == f"Added 2395 to {inc['number']} responding (not dispatched)"
-    assert call(api, path, body, COREY) == (400, {"error": "Already on this event: 2395"})
+    assert call(api, path, body, CASEY) == (400, {"error": "Already on this event: 2395"})
 
 
 # -- incident command: one per event --------------------------------------------------------------------------
@@ -203,9 +203,9 @@ def test_one_commander_after_rapid_and_concurrent_changes(tmp_path):
 
 
 def test_command_in_the_activity(api):  # noqa: F811
-    code, inc = call(api, "/api/cad/incident", {"type": "STRU", "address": "209 Westchester Ave"}, JULIAN)
+    code, inc = call(api, "/api/cad/incident", {"type": "STRU", "address": "209 Westchester Ave"}, JORDAN)
     iid, e63, chief = inc["id"], uid(api.cad, "E63"), uid(api.cad, "2392")
-    assert call(api, f"/api/cad/incident/{iid}/dispatch", {"unit_ids": [e63, chief]}, JULIAN)[0] == 200
+    assert call(api, f"/api/cad/incident/{iid}/dispatch", {"unit_ids": [e63, chief]}, JORDAN)[0] == 200
     for u in (chief, e63):
-        assert call(api, f"/api/cad/unit/{u}/status", {"status": "IC"}, JULIAN)[0] == 200
-    assert api.cad.activity.rows(JULIAN, "action")[0]["summary"] == f"Set E63 to IC on {inc['number']}; command from 2392"
+        assert call(api, f"/api/cad/unit/{u}/status", {"status": "IC"}, JORDAN)[0] == 200
+    assert api.cad.activity.rows(JORDAN, "action")[0]["summary"] == f"Set E63 to IC on {inc['number']}; command from 2392"

@@ -607,15 +607,15 @@ def test_a_query_answers_rows_with_the_hubs_lines_scrubbed_too():
 def test_logs_are_a_signed_in_admins_and_settings_set_reset_and_audit(tmp_path):
     from sizeup.cloud.access import Identity
     from tests.test_push_settings import Rig
-    from tests.test_roles import COREY, JULIAN, call
+    from tests.test_roles import CASEY, JORDAN, call
     rig = Rig(tmp_path)
-    get = lambda p, q="", who=COREY: rig.api.get(p, q, Identity(email=who) if who else None)   # noqa: E731
+    get = lambda p, q="", who=CASEY: rig.api.get(p, q, Identity(email=who) if who else None)   # noqa: E731
     assert get("/api/cad/logs/status")[0] == 404                      # not the hub: nothing there
     fake = FakeLogs()
     rig.cad.station_logs = sink(fake, status={"logship": {"state": "ok", "spool_bytes": 0}})
     rig.cad.station_logs.settings = lambda: rig.cad.settings.section(cwlogs.SECTION)
     assert get("/api/cad/logs/status", who=None)[0] == 403             # never without a verified sign-in
-    assert get("/api/cad/logs/status", who=JULIAN)[0] == 403           # a dispatcher
+    assert get("/api/cad/logs/status", who=JORDAN)[0] == 403           # a dispatcher
     code, raw, _ = get("/api/cad/logs/status")
     st = json.loads(raw)
     assert code == 200 and st["configured"] is True and st["station"]["state"] == "ok" and st["settings"]["level"] == "info"
@@ -623,7 +623,7 @@ def test_logs_are_a_signed_in_admins_and_settings_set_reset_and_audit(tmp_path):
     assert code == 400
     code, raw, _ = get("/api/cad/logs", "source=all")
     assert code == 200 and len(json.loads(raw)["rows"]) == 2
-    post = lambda body, who=COREY: call(rig.api, "/api/cad/settings/station_logs", body, who)   # noqa: E731
+    post = lambda body, who=CASEY: call(rig.api, "/api/cad/settings/station_logs", body, who)   # noqa: E731
     assert post({"action": "set", "key": "level", "value": "warning"})[0] == 200
     code, out = post({"action": "set", "key": "exclude", "value": "sizeup-ais, sizeup-adsb.service"})
     assert code == 200 and out["station_logs"]["exclude"]["value"] == ["sizeup-adsb", "sizeup-ais"]
@@ -633,7 +633,7 @@ def test_logs_are_a_signed_in_admins_and_settings_set_reset_and_audit(tmp_path):
                  {"action": "set", "key": "on", "value": 1}, {"action": "set", "key": "nope", "value": 1},
                  {"action": "set", "key": "include", "value": ["a b"]}):
         assert post(body)[0] == 400, body
-    assert post({"action": "set", "key": "level", "value": "error"}, who=JULIAN)[0] == 403
+    assert post({"action": "set", "key": "level", "value": "error"}, who=JORDAN)[0] == 403
     assert rig.cad.station_logs.cfg() == {"on": True, "level": "warning", "include": [],
                                           "exclude": ["sizeup-adsb", "sizeup-ais"], "adapter": False, "retention_days": 90}
     rig.cad.station_logs.check()

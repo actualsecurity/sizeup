@@ -241,14 +241,14 @@ def test_off_means_no_table_and_no_usage_read(tmp_path):
 def test_settings_turn_it_on_refuse_unpriced_models_and_no_table_at_start(tmp_path):
     from sizeup.cad.api import CadApi
     from tests.test_cad import make_cad
-    from tests.test_roles import COREY, JULIAN, call, people
+    from tests.test_roles import CASEY, JORDAN, call, people
     cad = make_cad(tmp_path)
     assert cad.store.one("SELECT name FROM sqlite_master WHERE name = 'intel_infer'") is None     # never at start
     people(cad)
     api = CadApi(cad)
-    post = lambda b, who=COREY: call(api, "/api/cad/settings/intel", b, who)      # noqa: E731
+    post = lambda b, who=CASEY: call(api, "/api/cad/settings/intel", b, who)      # noqa: E731
     assert cad.intel.infer.status()["on"] is False
-    assert post({"action": "set", "key": "infer", "value": True}, JULIAN)[0] == 403
+    assert post({"action": "set", "key": "infer", "value": True}, JORDAN)[0] == 403
     assert post({"action": "set", "key": "infer", "value": True})[0] == 200 and cad.intel.infer.status()["on"]
     assert post({"action": "set", "key": "infer_daily_cap", "value": 50})[0] == 200
     assert post({"action": "set", "key": "infer_model", "value": "us.anthropic.claude-haiku-5-5"})[0] == 200

@@ -12,7 +12,7 @@ from sizeup.config import ConfigError
 from sizeup.gis import DEFAULT_LAYERS
 from tests.test_cad import make_cad
 from tests.test_gis import load_cfg
-from tests.test_roles import JULIAN, VAL, call, people
+from tests.test_roles import JORDAN, VAL, call, people
 
 STATIC = Path(__file__).resolve().parent.parent / "sizeup" / "web" / "static"
 ICONS = ("hydrant", "fire-station", "police", "hospital", "nursing-home", "school", "worship", "ambulance", "train", "bus",
@@ -184,12 +184,12 @@ def test_an_events_map_layers_round_trip_and_who_may(tmp_path):
     assert code == 200 and api.cad.store.full(iid)["map_layers"] is None
     # roles on the hub: a dispatcher may, a viewer may not (the page keeps a viewer's choice in the browser)
     people(api.cad)
-    assert call(api, f"/api/cad/incident/{iid}", {"map_layers": layers}, JULIAN)[0] == 200
+    assert call(api, f"/api/cad/incident/{iid}", {"map_layers": layers}, JORDAN)[0] == 200
     assert call(api, f"/api/cad/incident/{iid}", {"map_layers": None}, VAL)[0] == 403
     assert api.cad.store.full(iid)["map_layers"] == layers
     # a closed event keeps what it had
-    assert call(api, f"/api/cad/incident/{iid}/close", {"disposition": "COMPLETE", "operator": "JD"}, JULIAN)[0] == 200
-    code, out = call(api, f"/api/cad/incident/{iid}", {"map_layers": None}, JULIAN)
+    assert call(api, f"/api/cad/incident/{iid}/close", {"disposition": "COMPLETE", "operator": "JD"}, JORDAN)[0] == 200
+    code, out = call(api, f"/api/cad/incident/{iid}", {"map_layers": None}, JORDAN)
     assert code == 400 and "closed" in out["error"]
     assert api.cad.store.full(iid)["map_layers"] == layers
 

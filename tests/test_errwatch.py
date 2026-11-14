@@ -9,7 +9,7 @@ import pytest
 from sizeup import errwatch, tz
 from sizeup.errwatch import ErrorWatch, LineTee, classify
 from tests.test_push_settings import Rig
-from tests.test_roles import COREY, call
+from tests.test_roles import CASEY, call
 
 T0 = datetime(2026, 11, 7, 16, 13, 0, tzinfo=tz.TZ).timestamp()
 OVERFLOW = "aircraft: adsb feed: OverflowError: cannot convert float infinity to integer (at aircraft.py:{n}; logged once)"
@@ -227,7 +227,7 @@ def test_settings_set_reset_audit_and_the_watch_reads_them_live(tmp_path):
     w = ErrorWatch(FakeNotifier(), settings=lambda: rig.cad.settings.section(errwatch.SECTION))
     page = rig.cad.settings_get()["hub_errors"]
     assert {k: page[k]["value"] for k in errwatch.DEFAULTS} == errwatch.DEFAULTS
-    post = lambda body: call(rig.api, "/api/cad/settings/hub_errors", body, COREY)       # noqa: E731
+    post = lambda body: call(rig.api, "/api/cad/settings/hub_errors", body, CASEY)       # noqa: E731
     code, out = post({"action": "set", "key": "per_signature", "value": 25})
     assert code == 200 and out["hub_errors"]["per_signature"] == {**page["per_signature"], "value": 25, "edited": True}
     assert post({"action": "set", "key": "on", "value": False})[0] == 200
@@ -243,7 +243,7 @@ def test_settings_set_reset_audit_and_the_watch_reads_them_live(tmp_path):
     ex = rig.cad.settings_export()
     assert ex["overrides"]["hub_errors"] == {"on": False}
     ex["overrides"]["hub_errors"] = {"total": 0}
-    code, out = call(rig.api, "/api/cad/settings/import", {"action": "apply", "settings": ex}, COREY)
+    code, out = call(rig.api, "/api/cad/settings/import", {"action": "apply", "settings": ex}, CASEY)
     assert code == 400 and "hub_errors" in out["error"]
 
 
