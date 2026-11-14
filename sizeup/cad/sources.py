@@ -63,7 +63,9 @@ sizeup/sources/runner.py (they come here as "source_event" / "source_health" thr
                report makes its own incident, noted "possibly the same as #N" on both
     authority  the best-ranked report's type and location are applied to a field no person has edited, whatever the
                status (manual_edits: type, location, pin); otherwise a timeline note, and the incident view
-               offers "Use <feed>'s <field>" (feed_use). A pin a person set is never cleared
+               offers "Use <feed>'s <field>" (feed_use). A pin a person set is never cleared. A feed whose type field
+               gives no type of ours: a short comment that is a type line gives it (_comment_type), over a page's
+               guess too; with neither, the page's type fills in (Cad._page_enrich: the backup) until the feed says one
     timeline   every change a feed reports is an entry on the incident (kind "feed"): type, location, units, each time
                (per unit too), each new comment at its own time (not an empty one, nor the same words within
                COMMENT_REPEAT_S), closed
@@ -127,6 +129,7 @@ SAME_CALL_BEFORE_S = 60.0              # ... and an event first seen closed or o
 REPORT_STALE_S = 180.0
 FORGET_S = 24 * 3600.0                 # a feed silent this long is off the tiers (taken off the station)
 INCOMING_S = 300.0
+TYPE_COMMENT_WORDS = 5                 # a feed's comment this short may be its type line ("general fire alarm")
 COMMENT_REPEAT_S = 600.0               # a feed's comment with the same words this soon after: not a new line
 TICK_S = 5.0
 PANEL_MAX = 50
@@ -1366,6 +1369,13 @@ class Sources:
                 notes.append((now, f"{pre}: type {new['type']}"))
             if auth and differs and "type" not in hand:
                 fields.update(type=typ, subtype=sub, type_note=note)
+        if "type" not in fields and auth and "type" not in hand and not self.cad.map_type(new["type"], label)[0]:
+            # no type of ours from the feed's type field: a comment that is a type line gives it ("authority")
+            seen = {(float(a), b) for a, b in old["comments"]}
+            fresh = [c for c in new["comments"] if attach or created or (float(c[0]), c[1]) not in seen]
+            typ, sub, note = self._comment_type(fresh, label)
+            if typ and (typ != inc["type"] or (sub and sub != inc["subtype"])):
+                fields.update(type=typ, subtype=sub, type_note=note)
         loc = new["location"].strip()
         if loc and (loc != old["location"].strip() or attach):
             differs = not created and not same_place(loc, inc["address"])
@@ -1423,6 +1433,18 @@ class Sources:
             with self.store.tx() as db:
                 for at, text in notes:
                     self.store._event(db, iid, "feed", text[:2000], at=at)
+
+    def _comment_type(self, comments, label: str) -> tuple[str, str, str]:
+        """(TYPE, SUBTYPE, note) from a feed's comment that is a type line: at most TYPE_COMMENT_WORDS words after any
+        leading mark ("~GENERAL FIRE ALARM") and a type of ours as Cad.map_type reads it. A longer comment is a
+        narrative, never read for a type. ("", "", "") without one."""
+        for c in comments or ():
+            words = re.sub(r"^[^A-Za-z0-9]+", "", str(c[1])).strip()
+            if words and len(words.split()) <= TYPE_COMMENT_WORDS:
+                typ, sub, note = self.cad.map_type(words, label)
+                if typ:
+                    return typ, sub, note
+        return "", "", ""
 
     def _feed_closed(self, iid: int, source: str, ref: str, label: str) -> bool:
         """The feed closed its event: the queued incident only it made, untouched by anyone, is dismissed. True if so."""
