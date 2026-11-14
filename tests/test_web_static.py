@@ -125,7 +125,8 @@ def test_every_admin_only_get_the_scripts_make_is_in_the_read_map():
     for path, literal, script in (("/api/cad/notify", '"/api/cad/notify"', "settings.js"),
                                   ("/api/cad/health", '"/api/cad/health"', "health.js"),
                                   ("/api/cad/search.csv", "`/api/cad/search.csv?", "search-view.js"),
-                                  ("/api/cad/preplan.csv", '"/api/cad/preplan.csv"', "preplan.js")):     # (#456)
+                                  ("/api/cad/preplan.csv", '"/api/cad/preplan.csv"', "preplan.js"),      # (#456)
+                                  ("/api/cad/intel", '"/api/cad/intel"', "intel.js")):     # the pre-alert rules (#411)
         assert literal in js(script), f"{script} doesn't read {path}"
         assert path in ADMIN_READS, path
     # ... and a reception test's captured audio (#410: served by server.py, played in Settings > Radios)
@@ -133,7 +134,7 @@ def test_every_admin_only_get_the_scripts_make_is_in_the_read_map():
     # (perf: #425; #403: the Search CSV; #456: the pre-plan CSV; + #409: which radios keyed an encrypted talkgroup,
     # which no script reads yet)
     assert set(ADMIN_READS) == {"/api/cad/notify", "/api/cad/health", "/api/cad/perf", "/api/cad/perf/profile",
-                                "/api/cad/search.csv", "/api/cad/preplan.csv", "/api/cad/comms/activity",
+                                "/api/cad/search.csv", "/api/cad/preplan.csv", "/api/cad/comms/activity", "/api/cad/intel",
                                 "/api/reception", "/api/reception/sample"}
     assert '"/api/cad/perf"' in js("health.js") and '"/api/cad/perf/profile' in js("health.js")
     assert "/api/cad/perf" not in scripts.replace(js("health.js"), "")        # only the tab reads it

@@ -302,10 +302,11 @@ class StationMode:
         if talking:
             out.append(f"{len(talking)} talking")
         stt = getattr(app, "stt", None)
-        n = stt.busy() if stt is not None and hasattr(stt, "busy") else 0
+        # (shed clips being caught up, sizeup/sttcatchup.py, never hold an update up: not counted, here or below)
+        n = stt.busy(catchup=False) if stt is not None and hasattr(stt, "busy") else 0
         if n:
             out.append(f"{n} transcription(s) in flight")
-        rerun = len(getattr(app, "_rerun_ids", ()) or ())
+        rerun = len(set(getattr(app, "_rerun_ids", ()) or ()) - set(getattr(app, "_catchup_ids", ()) or ()))
         if rerun:
             out.append(f"{rerun} re-run(s) pending")
         return ", ".join(out)
