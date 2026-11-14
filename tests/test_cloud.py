@@ -542,7 +542,8 @@ def test_the_hub_config_starts_with_no_radio_programs_on_the_path(tmp_path):
     port = free_port()
     env = {"PATH": "/usr/bin:/bin", "HOME": str(tmp_path), "SIZEUP_STATE_DIR": str(tmp_path / "data"),
            "SIZEUP_PORT": str(port), "SIZEUP_STATION_TOKEN": TOKEN, "SIZEUP_PUBLIC_URL": "https://sizeup.example.org",
-           "SIZEUP_PREALERT_SERVER": ntfy.url}
+           "SIZEUP_PREALERT_SERVER": ntfy.url,       # the shipped config has no topic: the env (or Settings) names them
+           "SIZEUP_PREALERT_RING_TOPIC": "example-ring-topic", "SIZEUP_PREALERT_STATUS_TOPIC": "example-status-topic"}
     proc = subprocess.Popen([sys.executable, "-m", "sizeup", "--config", str(ROOT / "deploy/hub/config.hub.toml")],
                             cwd=ROOT, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     try:
@@ -560,7 +561,7 @@ def test_the_hub_config_starts_with_no_radio_programs_on_the_path(tmp_path):
         kids = subprocess.run(["pgrep", "-P", str(proc.pid)], capture_output=True, text=True).stdout.split()
         assert kids == []                                         # no whisper-server, no voice server, no rtl_fm
         # the CAD of record subscribes to the phone pre-alert, read only
-        assert wait(lambda: ntfy.gets("pcfd-phone-prealert") and ntfy.gets("pcfd-status"), 10)
+        assert wait(lambda: ntfy.gets("example-ring-topic") and ntfy.gets("example-status-topic"), 10)
         assert {m for m, _, _ in ntfy.requests} == {"GET"}
     finally:
         proc.terminate()

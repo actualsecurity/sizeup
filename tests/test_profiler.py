@@ -16,7 +16,7 @@ from sizeup.perf import (FIRST_LINE_TICKS, HOUR_TICKS, HTTP, KEEP_TICKS, Busy, P
 from tests.test_access import AUD, TEAM, jwks, jwt, keys, req  # noqa: F401  (fixtures)
 from tests.test_app import wait
 from tests.test_cloud import HubRun, hub_cfg
-from tests.test_roles import COREY, DEE, JULIAN, VAL, people
+from tests.test_roles import CASEY, DEE, JORDAN, VAL, people
 
 ROOT = Path(__file__).resolve().parent.parent
 # Never in anything the profiler says: a topic in a thread's name, a query string, who asked, an address typed in.
@@ -734,21 +734,21 @@ def test_only_an_admin_reads_the_cpu_table_or_runs_a_profile(keys, access_hub): 
     h = access_hub
     people(h.app.cad)
     assert req(h.url + "/api/cad/perf")[0] == 401
-    for who in (JULIAN, VAL, DEE):                                     # a dispatcher, a viewer, a deactivated dispatcher
+    for who in (JORDAN, VAL, DEE):                                     # a dispatcher, a viewer, a deactivated dispatcher
         for path in ("/api/cad/perf", "/api/cad/perf/profile", "/api/cad/perf/profile?format=folded"):
             code, out = req(h.url + path, headers=as_(keys[0], who))
             assert code == 403 and out["error"].startswith("Admins only") and "threads" not in out, (who, path)
         code, out = req(h.url + "/api/cad/perf/profile", "POST", {"seconds": 1}, as_(keys[0], who))
         assert code == 403 and "error" in out and "folded" not in out, who
     assert h.app.perf.last_profile is None and h.app.perf.snapshot()["profile"]["running"] is False     # none ran
-    code, out = req(h.url + "/api/cad/perf", headers=as_(keys[0], COREY))
+    code, out = req(h.url + "/api/cad/perf", headers=as_(keys[0], CASEY))
     assert code == 200 and {"threads", "windows", "process", "routes", "hours", "gauges", "uptime_s"} <= set(out)
-    code, out = req(h.url + "/api/cad/perf/profile", "POST", {"seconds": 1}, as_(keys[0], COREY))
+    code, out = req(h.url + "/api/cad/perf/profile", "POST", {"seconds": 1}, as_(keys[0], CASEY))
     assert code == 200 and out["samples"] > 0 and "folded" in out
     rows = h.app.cad.activity.rows()                                   # who profiled, and who was refused, in the activity
     said = {(r["email"], r["summary"]) for r in rows}
-    assert (COREY, "Profiled the hub's CPU (1.0 s)") in said
-    assert (JULIAN, "Refused: perf/profile (needs admin; dispatcher)") in said
+    assert (CASEY, "Profiled the hub's CPU (1.0 s)") in said
+    assert (JORDAN, "Refused: perf/profile (needs admin; dispatcher)") in said
 
 
 def test_the_hub_counts_its_threads_and_requests_and_says_nothing_of_anyone(keys, access_hub):  # noqa: F811
@@ -756,7 +756,7 @@ def test_the_hub_counts_its_threads_and_requests_and_says_nothing_of_anyone(keys
     the table, a profile and its folded stacks: thread groups, functions, file:line and path families only."""
     h = access_hub
     people(h.app.cad)
-    admin = as_(keys[0], COREY)
+    admin = as_(keys[0], CASEY)
     stop = threading.Event()
     t = threading.Thread(target=burner, args=(stop,), name=f"ntfy-{TOPIC}", daemon=True)
     t.start()
@@ -793,7 +793,7 @@ def test_the_hub_counts_its_threads_and_requests_and_says_nothing_of_anyone(keys
     if ThreadClock().kind != "none":
         assert prof["threads"][0]["thread"] == "ntfy" and prof["self"][0]["fn"].startswith("spin (tests/test_profiler.py:")
     said = json.dumps([prof, table, last]) + folded.decode()
-    for secret in (TOPIC, "s3cr3t", "token=", "q=12", STREET, "Elm", COREY, COREY.lower(), JULIAN, "9001", "?", "Cf-Access",
+    for secret in (TOPIC, "s3cr3t", "token=", "q=12", STREET, "Elm", CASEY, CASEY.lower(), JORDAN, "9001", "?", "Cf-Access",
                    str(Path.home())):
         assert secret not in said, secret
     assert not re.search(r"[\w.+-]+@[\w-]+\.\w+", said)                 # nobody's address
@@ -803,7 +803,7 @@ def test_the_hub_counts_its_threads_and_requests_and_says_nothing_of_anyone(keys
 def test_one_profile_at_a_time_over_http(access_hub, keys):  # noqa: F811
     h = access_hub
     people(h.app.cad)
-    admin = as_(keys[0], COREY)
+    admin = as_(keys[0], CASEY)
     code, out = req(h.url + "/api/cad/perf/profile", "POST", {"seconds": 20, "wait": False}, admin)
     assert code == 202 and out == {"running": True, "seconds": 20.0, "hz": 25.0}        # 25 Hz unless asked
     code, out = req(h.url + "/api/cad/perf/profile", "POST", {"seconds": 1}, admin)

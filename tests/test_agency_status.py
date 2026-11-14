@@ -29,7 +29,7 @@ from sizeup.cad import lists as lists_mod
 from sizeup.cad.api import needs
 from sizeup.cad.store import CadError
 from tests.test_cad import make_cad, uid
-from tests.test_roles import JULIAN, VAL, api, call  # noqa: F401  (fixture)
+from tests.test_roles import JORDAN, VAL, api, call  # noqa: F401  (fixture)
 from tests.test_settings import post
 
 STATIC = Path(__file__).resolve().parent.parent / "sizeup" / "web" / "static"
@@ -209,11 +209,11 @@ def test_permissions_are_unchanged(api):  # noqa: F811
     code, _ = call(api, f"/api/cad/incident/{iid}/attach", {"unit_ids": [rb], "operator": "Val"}, VAL)
     assert code == 403
     assert next(u for u in c.store.units() if u["id"] == rb)["incident_id"] is None
-    code, out = call(api, f"/api/cad/incident/{iid}/attach", {"unit_ids": [rb], "operator": "Julian"}, JULIAN)
+    code, out = call(api, f"/api/cad/incident/{iid}/attach", {"unit_ids": [rb], "operator": "Jordan"}, JORDAN)
     assert code == 200 and out["ok"]
     code, _ = call(api, f"/api/cad/unit/{rb}/status", {"status": "RS", "operator": "Val"}, VAL)
     assert code == 403
-    code, _ = call(api, f"/api/cad/unit/{rb}/status", {"status": "RS", "operator": "Julian"}, JULIAN)
+    code, _ = call(api, f"/api/cad/unit/{rb}/status", {"status": "RS", "operator": "Jordan"}, JORDAN)
     assert code == 200
     assert next(u for u in c.store.units() if u["id"] == rb)["status"] == "RS"
 

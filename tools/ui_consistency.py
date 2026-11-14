@@ -177,7 +177,7 @@ def measure(base, views, shots=None, prefix="after"):
                 phone = w < 600
                 ctx = b.new_context(viewport={"width": w, "height": 1080 if w == 1920 else 768 if w == 1366 else 844},
                                     is_mobile=phone, has_touch=phone)
-                ctx.add_init_script("try { localStorage.setItem('sizeup.cad.operator', 'Corey'); } catch (e) {}")
+                ctx.add_init_script("try { localStorage.setItem('sizeup.cad.operator', 'Casey'); } catch (e) {}")
                 pg = ctx.new_page()
                 errs = []
                 pg.on("pageerror", lambda e, errs=errs: errs.append(str(e)))

@@ -1,4 +1,4 @@
-"""sizeup/notify.py: pushes through ntfy, against a local fake ntfy; never Tapout's topics."""
+"""sizeup/notify.py: pushes through ntfy, against a local fake ntfy; never a protected (subscribed) topic."""
 import json
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -72,19 +72,32 @@ def test_who_goes_into_the_title_the_same_way_for_every_caller(ntfy):
     assert ntfy.got[0]["body"]["title"] == "MAYDAY · E64 P1 (Engine 64) on FG1 · 26-000015 100 S Ridge St"
 
 
-@pytest.mark.parametrize("topic", ["pcfd-phone-prealert", "pcfd-status", "PCFD-Phone-Prealert", " pcfd-status "])
-def test_tapouts_topics_are_refused_before_any_request(ntfy, topic):
-    assert "Tapout" in topic_problem(topic)
-    with pytest.raises(NotifyError, match="Tapout"):
-        publish(ntfy.url, topic, "x", "y")
-    n = Notifier(ntfy.url, topic, log=lambda m: None)
+@pytest.mark.parametrize("topic", ["example-ring-topic", "example-status-topic", "Example-Ring-Topic", " example-status-topic "])
+def test_protected_topics_are_refused_before_any_request(ntfy, topic):
+    prot = ("example-ring-topic", "example-status-topic")        # derived in the app: what it subscribes to
+    assert "protected" in topic_problem(topic, prot)
+    with pytest.raises(NotifyError, match="protected"):
+        publish(ntfy.url, topic, "x", "y", protected=prot)
+    n = Notifier(ntfy.url, topic, log=lambda m: None, protected=lambda: prot)
     assert not n.enabled and not n.send("x", "y")
     assert ntfy.got == []
 
 
+def test_a_topic_protected_after_the_notifier_was_made_is_never_published_to(ntfy):
+    prot = []
+    n = Notifier(ntfy.url, TOPIC, log=lambda m: None, protected=lambda: prot, retries=())
+    assert n.send("x", "y") and n.flush(5) and len(ntfy.got) == 1
+    prot.append(TOPIC.upper())                         # an admin lists it (any case) in Settings
+    assert n.send("x", "y") and n.flush(5)
+    assert len(ntfy.got) == 1 and n.failed == 1
+    n2 = Notifier(ntfy.url, TOPIC, log=lambda m: None, protected=lambda: 1 / 0, retries=())     # can't tell: publish nowhere
+    n2.send("x", "y")
+    assert n2.flush(5) and len(ntfy.got) == 1
+
+
 def test_bad_topics_and_servers_are_refused():
     assert topic_problem("short") and topic_problem("has space in it") and topic_problem("a/b-path-like-topic")
-    assert topic_problem("my-own-topic", also_forbidden=["my-own-topic"])
+    assert topic_problem("my-own-topic", protected=["my-own-topic"])
     assert topic_problem(TOPIC) == ""
     with pytest.raises(NotifyError, match="https"):
         publish("http://ntfy.example.org", TOPIC, "x", "y")
@@ -165,12 +178,13 @@ def test_each_kind_has_its_notifier_and_one_topic_serving_both_shares_one_queue(
     assert not none.notifier(notify.ALERTS).enabled and not none.notifier(notify.STATUS).send("x", "y")
 
 
-@pytest.mark.parametrize("ours", [OUR_STATUS, OUR_ALERTS, "pcfd-sizeup-health", "x-pcfd-status", "pcfd-status-2",
-                                  "pcfd-phone-prealert-test", "my-firehouse-ring-xyz"])
-def test_tapouts_topics_are_refused_by_exact_name_not_by_a_word_in_ours(ours):
-    assert topic_problem(ours, ("firehouse-ring-xyz",)) == ""
-    for theirs in ("pcfd-status", "pcfd-phone-prealert", "firehouse-ring-xyz"):
-        assert "Tapout" in topic_problem(theirs, ("firehouse-ring-xyz",))
+@pytest.mark.parametrize("ours", [OUR_STATUS, OUR_ALERTS, "pcfd-sizeup-health", "x-example-status-topic", "example-status-topic-2",
+                                  "example-ring-topic-test", "my-firehouse-ring-xyz"])
+def test_protected_topics_are_refused_by_exact_name_not_by_a_word_in_ours(ours):
+    prot = ("example-status-topic", "example-ring-topic", "firehouse-ring-xyz")
+    assert topic_problem(ours, prot[2:]) == ""
+    for theirs in prot:
+        assert "protected" in topic_problem(theirs, prot)
 
 
 # -- the third kind: radio-intelligence pre-alerts (INTEL) ----------------------------------------------------------
@@ -208,7 +222,7 @@ def test_intel_follows_the_alerts_off_and_its_own_topic_splits_it_off(ntfy):
     assert p.effective(notify.STATUS)["topic"] == OUR_STATUS
 
 
-def test_intel_topic_from_the_config_and_env_refuses_tapouts(tmp_path, monkeypatch):
+def test_intel_topic_from_the_config_and_env_refuses_the_subscribed_topics(tmp_path, monkeypatch):
     from sizeup.config import ConfigError, load
     cfg = tmp_path / "config.toml"
     cfg.write_text(f'[alerts]\nntfy_topic = "{OUR_ALERTS}"\nintel_topic = "{OUR_INTEL}"\n')
@@ -218,8 +232,9 @@ def test_intel_topic_from_the_config_and_env_refuses_tapouts(tmp_path, monkeypat
     c = load(cfg)
     assert (c.alerts_intel_topic, c.alerts_intel_topic_source) == (OUR_INTEL + "-env", "env")
     monkeypatch.delenv("SIZEUP_INTEL_TOPIC")
-    for bad in ("pcfd-phone-prealert", "pcfd-status", "short"):
-        cfg.write_text(f'[alerts]\nintel_topic = "{bad}"\n')
+    for bad in ("example-ring-topic", "example-status-topic", "short"):
+        cfg.write_text(f'[prealert]\nring_topic = "example-ring-topic"\nstatus_topic = "example-status-topic"\n'
+                       f'[alerts]\nintel_topic = "{bad}"\n')
         with pytest.raises(ConfigError, match="intel_topic"):
             load(cfg)
 

@@ -150,10 +150,10 @@ def test_naming_a_radio_in_settings_takes_its_transmissions_too(tmp_path):
     c.record_traffic(tx("FG1-1", clock.t, unit="3B07", radio_id="3B07"))
     c.record_traffic(tx("FG1-2", clock.t + 1, unit="3B07", radio_id="3B07"))
     c.record_traffic(tx("FG1-3", clock.t + 2, rig="E63", unit="3B07, 6301", radio_id="3B07, 6301"))   # named already: kept
-    c.save_radio({"system": "mdc", "radio_id": "3B07", "unit": "L31", "operator": "Corey"})
+    c.save_radio({"system": "mdc", "radio_id": "3B07", "unit": "L31", "operator": "Casey"})
     assert radio(c, a["id"]) == {"FG1-1": "unit", "FG1-2": "unit"}
     # a person took one off the call: naming the radio again doesn't put it back
-    c.unlink_traffic(a["id"], {"traffic_id": "FG1-2", "operator": "Corey"})
+    c.unlink_traffic(a["id"], {"traffic_id": "FG1-2", "operator": "Casey"})
     with c.store.tx() as db:
         db.execute("UPDATE radio_traffic SET rig = '' WHERE id = 'FG1-2'")
     c.comms.relink("mdc", "3B07", "L31")

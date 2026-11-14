@@ -25,7 +25,7 @@ from sizeup.fence import FencedWrite, GuardedConnection, bookkeeping, is_write
 from tests.test_access import AUD, TEAM, Jwks, Key, jwt
 from tests.test_cad import make_cad
 from tests.test_cloud import HubRun, hub_cfg
-from tests.test_roles import COREY, people
+from tests.test_roles import CASEY, people
 
 NEWBIE = "newbie@example.org"
 
@@ -176,26 +176,26 @@ def changes(api) -> int:
 
 
 def test_the_leader_still_records_activity(api):
-    who = Identity(email=COREY, session="1760000000")
+    who = Identity(email=CASEY, session="1760000000")
     api.visit(who, ("203.0.113.9", "UA"), "GET /cad")
     api.get("/api/cad/search", "text=smoke", who)
     api.get("/api/cad/search.csv", "text=smoke", who)
-    kinds = [r["kind"] for r in api.cad.activity.rows(email=COREY)]
+    kinds = [r["kind"] for r in api.cad.activity.rows(email=CASEY)]
     assert kinds == ["search", "search", "signin"]
-    assert api.cad.activity.seen(COREY)[0]["last_seen"] is not None
+    assert api.cad.activity.seen(CASEY)[0]["last_seen"] is not None
 
 
 def test_a_fenced_task_records_nothing_but_answers(api):
     api.sw.ours = False
     n = changes(api)
-    who = Identity(email=COREY, session="1760000001")
+    who = Identity(email=CASEY, session="1760000001")
     api.visit(who, ("203.0.113.9", "UA"), "GET /cad")
     for path, q in (("/api/cad/search", "text=smoke"), ("/api/cad/search.csv", "text=smoke"), ("/api/cad/preplan.csv", ""),
                     ("/api/cad/whoami", ""), ("/api/cad/state", ""), ("/api/cad/history", ""),
                     ("/api/cad/export/activity.csv", "")):
         assert api.get(path, q, who)[0] == 200, path
     assert changes(api) == n and api.cad.activity.rows() == []
-    assert api.cad.activity.seen(COREY)[0]["last_seen"] is None
+    assert api.cad.activity.seen(CASEY)[0]["last_seen"] is None
 
 
 def test_a_first_sign_in_on_a_fenced_task_is_let_in_and_not_added(api):
@@ -206,7 +206,7 @@ def test_a_first_sign_in_on_a_fenced_task_is_let_in_and_not_added(api):
     assert code == 200 and (me["email"], me["name"], me["role"], me["may"], me["source"]) == (
         NEWBIE, NEWBIE, "dispatcher", "dispatcher", "access")
     st = api.cad.settings.standing(NEWBIE)
-    assert st["operator"] == NEWBIE and st["admins"] == ["Corey"]
+    assert st["operator"] == NEWBIE and st["admins"] == ["Casey"]
     assert api.cad.settings.operators() == ops and changes(api) == n and api.cad.settings.audit_log("users")[0]["key"] != NEWBIE
     # ... a dispatcher's POST is the leader's to take (the Gate answers 503 there first); a viewer's read is still a read
     api.sw.ours = True
@@ -216,8 +216,8 @@ def test_a_first_sign_in_on_a_fenced_task_is_let_in_and_not_added(api):
 
 def test_history_here_and_search_key_nothing_on_a_fenced_task(api):
     c = api.cad
-    inc = c.create({"type": "STRU", "address": "100 Example St", "operator": "Corey"})
-    c.close(inc["id"], {"disposition": "NO ACTION", "operator": "Corey"})
+    inc = c.create({"type": "STRU", "address": "100 Example St", "operator": "Casey"})
+    c.close(inc["id"], {"disposition": "NO ACTION", "operator": "Casey"})
     api.sw.ours = False
     queued = c.store.q("SELECT id FROM addr_queue")
     n = changes(api)
@@ -295,7 +295,7 @@ def fenced_hub(tmp_path, keys, monkeypatch):
 
 def test_a_fenced_hub_serves_its_pages_and_writes_none_of_its_databases(fenced_hub, keys):
     h = fenced_hub
-    admin = {"Cf-Access-Jwt-Assertion": jwt(keys[0], email=COREY)}
+    admin = {"Cf-Access-Jwt-Assertion": jwt(keys[0], email=CASEY)}
     assert req(h.url + "/api/cad/whoami", headers=admin)[0] == 200           # the leader: signed in, added
     code, inc = post(h.url + "/api/cad/incident", {"type": "STRU", "address": "100 Example St"}, admin)
     assert code == 200
@@ -314,7 +314,7 @@ def test_a_fenced_hub_serves_its_pages_and_writes_none_of_its_databases(fenced_h
     totals = {k: db.total_changes for k, db in dbs.items()}
     files = {k: file_bytes(h.dir / f"{k}.sqlite") for k in dbs}
     new = {"Cf-Access-Jwt-Assertion": jwt(keys[0], email=NEWBIE, iat=int(time.time()) - 5)}     # a first sign-in
-    again = {"Cf-Access-Jwt-Assertion": jwt(keys[0], email=COREY, iat=int(time.time()) - 7)}    # a new Access login
+    again = {"Cf-Access-Jwt-Assertion": jwt(keys[0], email=CASEY, iat=int(time.time()) - 7)}    # a new Access login
     pages = ["/cad", "/", "/api/cad/state", "/api/state", "/api/cad/whoami", "/api/cad/history", f"/api/cad/incident/{iid}",
              f"/api/cad/incident/{old['id']}/here", "/api/cad/search?text=Made-up", "/api/cad/search?where=200+Sample+Ave",
              "/api/cad/search.csv?text=Made-up", "/api/cad/preplan.csv", "/api/cad/export/incidents.csv",
@@ -609,7 +609,7 @@ def test_no_data_path_answers_success_while_fenced(fenced_hub, keys, monkeypatch
     swallows still turns its answer into a 503."""
     from tests.test_cloud import TOKEN
     h = fenced_hub
-    admin = {"Cf-Access-Jwt-Assertion": jwt(keys[0], email=COREY)}
+    admin = {"Cf-Access-Jwt-Assertion": jwt(keys[0], email=CASEY)}
     code, inc = post(h.url + "/api/cad/incident", {"type": "STRU", "address": "100 Example St"}, admin)
     assert code == 200
     e60 = next(u["id"] for u in h.app.cad.store.units() if u["name"] == "E60")
@@ -645,7 +645,7 @@ def test_no_data_path_answers_success_while_fenced(fenced_hub, keys, monkeypatch
 def test_bookkeeping_is_still_skipped_quietly(fenced_hub, keys):
     h = fenced_hub
     h.fence()
-    who = {"Cf-Access-Jwt-Assertion": jwt(keys[0], email=COREY, iat=int(time.time()) - 3)}
+    who = {"Cf-Access-Jwt-Assertion": jwt(keys[0], email=CASEY, iat=int(time.time()) - 3)}
     for p in ("/api/cad/whoami", "/api/cad/search?text=x", "/api/cad/search.csv?text=x"):
         assert req(h.url + p, headers=who)[0] == 200
     assert h.app.cad.store.db.skipped > 0 and h.app.cad.store.db.refused == 0 and h.exits == []

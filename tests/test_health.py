@@ -13,7 +13,7 @@ from sizeup.cloud.hubstore import MonitorDb
 from sizeup.config import ConfigError, load
 from tests.test_access import TEAM, AUD, jwt, keys, jwks, req  # noqa: F401  (fixtures)
 from tests.test_cloud import TOKEN, HubRun, call, hub_cfg
-from tests.test_roles import COREY, DEE, JULIAN, VAL, people
+from tests.test_roles import CASEY, DEE, JORDAN, VAL, people
 
 HUB = "a" * 40
 OLD = "b" * 40
@@ -455,12 +455,12 @@ def test_only_an_admin_sees_station_health_and_it_is_never_in_the_state_push(key
     h.app.health.tick()
     (a,) = h.app.health.alerts()
     assert a["key"] == "sdr:00000102"
-    for who in (JULIAN, VAL, DEE):
+    for who in (JORDAN, VAL, DEE):
         code, out = req(h.url + "/api/cad/health", headers=as_(who))
         assert code == 403 and out["error"].startswith("Admins only") and a["title"] not in json.dumps(out), who
-    code, p = req(h.url + "/api/cad/health", headers=as_(COREY))
+    code, p = req(h.url + "/api/cad/health", headers=as_(CASEY))
     assert code == 200 and [x["key"] for x in p["alerts"]] == [a["key"]] and p["alerts"][0]["pushed"] is False
-    for who in (COREY, JULIAN, VAL):                               # the state is everyone's: none of it there, admins' too
+    for who in (CASEY, JORDAN, VAL):                               # the state is everyone's: none of it there, admins' too
         for path in ("/api/cad/state", "/api/state"):
             code, s = req(h.url + path, headers=as_(who))
             text = json.dumps(s)
@@ -471,7 +471,7 @@ def test_only_an_admin_sees_station_health_and_it_is_never_in_the_state_push(key
     # an incident-level alarm is not a health banner: an aircraft's 7700 still reaches everyone's state (alarm.js)
     aid = h.app.cad.alarms.on_aircraft({"hex": "a1b2c3", "code": "7700", "at": time.time(), "meaning": "emergency",
                                         "flight": "TST123"})
-    for who in (JULIAN, VAL):
+    for who in (JORDAN, VAL):
         code, s = req(h.url + "/api/cad/state", headers=as_(who))
         assert code == 200 and aid in [x["id"] for x in s["alarms"]["open"]], who
 
@@ -484,17 +484,23 @@ def _toml(tmp_path, text):
     return p
 
 
-@pytest.mark.parametrize("topic", ["pcfd-phone-prealert", "pcfd-status"])
-def test_the_config_refuses_tapouts_topics(tmp_path, monkeypatch, topic):
-    with pytest.raises(ConfigError, match="Tapout"):
-        load(_toml(tmp_path, f'[alerts]\nntfy_topic = "{topic}"\n'))
+@pytest.mark.parametrize("topic", ["example-ring-topic", "example-status-topic"])
+def test_the_config_refuses_the_subscribed_topics(tmp_path, monkeypatch, topic):
+    pa = '[prealert]\nring_topic = "example-ring-topic"\nstatus_topic = "example-status-topic"\n'
+    with pytest.raises(ConfigError, match="protected"):
+        load(_toml(tmp_path, pa + f'[alerts]\nntfy_topic = "{topic}"\n'))
     monkeypatch.setenv("SIZEUP_ALERT_TOPIC", topic)
-    with pytest.raises(ConfigError, match="Tapout"):
-        load(_toml(tmp_path, ""))
+    with pytest.raises(ConfigError, match="protected"):
+        load(_toml(tmp_path, pa))
+    monkeypatch.delenv("SIZEUP_ALERT_TOPIC")
+    # the subscribed topics can come from the env alone (SSM): protected all the same
+    monkeypatch.setenv("SIZEUP_PREALERT_RING_TOPIC", "example-env-ring-topic")
+    with pytest.raises(ConfigError, match="protected"):
+        load(_toml(tmp_path, '[prealert]\n[alerts]\nntfy_topic = "Example-Env-Ring-Topic"\n'))
 
 
 def test_the_config_refuses_the_configured_prealert_topics_too(tmp_path):
-    with pytest.raises(ConfigError, match="Tapout"):
+    with pytest.raises(ConfigError, match="protected"):
         load(_toml(tmp_path, '[prealert]\nring_topic = "firehouse-ring-xyz"\n[alerts]\nntfy_topic = "firehouse-ring-xyz"\n'))
 
 
@@ -538,28 +544,29 @@ def test_the_status_topic_from_the_config_or_the_env_validated_like_the_alert_to
         load(_toml(tmp_path, '[alerts]\nstatus_topic = "short"\n'))
 
 
-@pytest.mark.parametrize("topic", ["pcfd-phone-prealert", "pcfd-status", "PCFD-Status"])
-def test_the_status_topic_refuses_tapouts_topics(tmp_path, monkeypatch, topic):
-    with pytest.raises(ConfigError, match="Tapout"):
-        load(_toml(tmp_path, f'[alerts]\nstatus_topic = "{topic}"\n'))
+@pytest.mark.parametrize("topic", ["example-ring-topic", "example-status-topic", "Example-Status-Topic"])
+def test_the_status_topic_refuses_the_subscribed_topics(tmp_path, monkeypatch, topic):
+    pa = '[prealert]\nring_topic = "example-ring-topic"\nstatus_topic = "example-status-topic"\n'
+    with pytest.raises(ConfigError, match="protected"):
+        load(_toml(tmp_path, pa + f'[alerts]\nstatus_topic = "{topic}"\n'))
     monkeypatch.setenv("SIZEUP_STATUS_TOPIC", topic)
-    with pytest.raises(ConfigError, match="SIZEUP_STATUS_TOPIC: .*Tapout"):
-        load(_toml(tmp_path, ""))
+    with pytest.raises(ConfigError, match="SIZEUP_STATUS_TOPIC: .*protected"):
+        load(_toml(tmp_path, pa))
 
 
 def test_the_status_topic_refuses_the_configured_prealert_topics_too(tmp_path):
-    with pytest.raises(ConfigError, match="Tapout"):
+    with pytest.raises(ConfigError, match="protected"):
         load(_toml(tmp_path, '[prealert]\nstatus_topic = "firehouse-status-xyz"\n[alerts]\nstatus_topic = "firehouse-status-xyz"\n'))
-    with pytest.raises(ConfigError, match="Tapout"):
+    with pytest.raises(ConfigError, match="protected"):
         load(_toml(tmp_path, '[prealert]\nring_topic = "firehouse-ring-xyz"\n[alerts]\nstatus_topic = "firehouse-ring-xyz"\n'))
 
 
 def test_a_topic_of_ours_with_status_in_its_name_is_not_tapouts(tmp_path, monkeypatch):
     """The refusal is the whole name: "status" (or "prealert") inside a name of ours is fine, for either topic."""
-    for name in (OUR_STATUS, "pcfd-status-of-ours", "pcfd-phone-prealert-ours"):
+    for name in (OUR_STATUS, "example-status-topic-of-ours", "example-ring-topic-ours"):
         monkeypatch.setenv("SIZEUP_STATUS_TOPIC", name)
         monkeypatch.setenv("SIZEUP_ALERT_TOPIC", name.replace("status", "alerts"))
-        c = load(_toml(tmp_path, '[prealert]\n'))                     # Tapout's default topics are the ones refused
+        c = load(_toml(tmp_path, '[prealert]\nring_topic = "example-ring-topic"\nstatus_topic = "example-status-topic"\n'))          # the subscribed topics are the ones refused
         assert c.alerts_status_topic == name and c.alerts_ntfy_topic == name.replace("status", "alerts")
 
 

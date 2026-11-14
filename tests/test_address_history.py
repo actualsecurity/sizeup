@@ -16,7 +16,7 @@ from sizeup.cad.history import ADDR_COLUMNS, fts_query, wait_idle
 from sizeup.cad.premise import rank
 from sizeup.cloud.access import Identity
 from tests.test_cad import make_cad, uid
-from tests.test_roles import COREY, JULIAN, VAL, call, people
+from tests.test_roles import CASEY, JORDAN, VAL, call, people
 
 ALIASES = lists.load().geo_town_aliases
 # An invented gazetteer: street -> (as written, town, lat of number 0, lon), each number 10 m further north
@@ -380,11 +380,11 @@ def test_viewers_search_admins_export(api):
     assert get(api, "/api/cad/search", "", VAL)[0] == 200
     code, out = get(api, "/api/cad/search.csv", "", VAL)
     assert code == 403 and "Admins only" in out["error"]
-    assert get(api, "/api/cad/search.csv", "", JULIAN)[0] == 403
-    code, raw = get(api, "/api/cad/search.csv", "unit=E60", COREY)
+    assert get(api, "/api/cad/search.csv", "", JORDAN)[0] == 403
+    code, raw = get(api, "/api/cad/search.csv", "unit=E60", CASEY)
     lines = raw.decode("utf-8-sig").splitlines()
     assert code == 200 and lines[0].startswith("Number,Received,Closed,Type") and len(lines) == 3
-    assert [r["summary"] for r in api.cad.activity.rows(kind="search", email=COREY)] == ["CSV: Searched unit=E60: 2 results"]
+    assert [r["summary"] for r in api.cad.activity.rows(kind="search", email=CASEY)] == ["CSV: Searched unit=E60: 2 results"]
 
 
 def test_history_here_api(api):
@@ -400,23 +400,23 @@ def test_notes_crud_audit_and_roles(api):
     code, out = call(api, "/api/cad/premise", {"incident_id": iid, "text": "Knox box at side door", "category": "access"}, VAL)
     assert code == 403                                                    # viewers only look
     code, out = call(api, "/api/cad/premise", {"incident_id": iid, "text": "Knox box at side door", "category": "access"},
-                     JULIAN)
+                     JORDAN)
     assert code == 200
     n = out["note"]
     assert (n["label"], n["category"], n["priority"], n["author_name"], n["active"]) == (
-        "100 Example Ave, Port Chester", "access", 2, "Julian", True)
-    code, out = call(api, f"/api/cad/premise/{n['id']}", {"text": "Knox box at rear door", "priority": 1}, JULIAN)
+        "100 Example Ave, Port Chester", "access", 2, "Jordan", True)
+    code, out = call(api, f"/api/cad/premise/{n['id']}", {"text": "Knox box at rear door", "priority": 1}, JORDAN)
     assert code == 200 and out["note"]["text"] == "Knox box at rear door" and out["note"]["priority"] == 1
-    code, out = call(api, f"/api/cad/premise/{n['id']}", {"action": "expire"}, COREY)
+    code, out = call(api, f"/api/cad/premise/{n['id']}", {"action": "expire"}, CASEY)
     assert code == 200 and out["note"]["active"] is False
     assert get(api, "/api/cad/premise", "", VAL)[1]["notes"] == []
     assert len(get(api, "/api/cad/premise", "all=1&where=100+example+ave", VAL)[1]["notes"]) == 1
     audit = api.cad.store.q("SELECT * FROM settings_audit WHERE section = 'premise' ORDER BY id")
     assert [json.loads(a["new"] or "null") for a in audit][1:] == [{"text": "Knox box at rear door", "priority": 1}, {"active": 0}]
-    assert [a["operator"].split(" <")[0] for a in audit] == ["Julian", "Julian", "Corey"]
+    assert [a["operator"].split(" <")[0] for a in audit] == ["Jordan", "Jordan", "Casey"]
     acts = [r["summary"] for r in api.cad.activity.rows(kind="action")]
     assert f"Expired address note {n['id']}" in acts and not any("Knox" in s for s in acts)   # never the text
-    code, out = call(api, "/api/cad/premise", {"where": "Example Ave / Sample St", "text": "x"}, JULIAN)
+    code, out = call(api, "/api/cad/premise", {"where": "Example Ave / Sample St", "text": "x"}, JORDAN)
     assert code == 400
 
 
@@ -437,10 +437,10 @@ def test_notes_surface_on_open_incidents_ranked_with_acks(hist):
     assert [n["id"] for n in by[stru]["premise"]] == [h["id"], b["id"], a["id"]]            # priority, then hazard/hoarding
     assert [n["id"] for n in by[ems]["premise"]] == [h["id"], a["id"], b["id"]]              # ... then medical first
     assert by[elsewhere]["premise"] == []
-    out = c.premise.ack(h["id"], {"incident_id": stru, "operator": "Julian <julian@example.org>"})
-    assert out["ack"]["by"] == "Julian"
+    out = c.premise.ack(h["id"], {"incident_id": stru, "operator": "Jordan <jordan@example.org>"})
+    assert out["ack"]["by"] == "Jordan"
     by = {i["id"]: i for i in c.state()["incidents"]}
-    assert by[stru]["premise"][0]["ack"]["by"] == "Julian" and by[ems]["premise"][0]["ack"] is None   # per incident
+    assert by[stru]["premise"][0]["ack"]["by"] == "Jordan" and by[ems]["premise"][0]["ack"] is None   # per incident
     clock.t += 5
     c.premise.edit(h["id"], {"text": "Propane tanks moved to garage"})                         # edited: asked again
     by = {i["id"]: i for i in c.state()["incidents"]}
@@ -617,7 +617,7 @@ def test_category_visibility_is_configurable(api, monkeypatch):
     pushed = next(i for i in c.state()["incidents"] if i["id"] == iid)["premise"]
     assert [n["category"] for n in pushed] == ["access"]                 # the push is everyone's
     assert [n["category"] for n in get(api, f"/api/cad/incident/{iid}/here", "", VAL)[1]["notes"]] == ["access"]
-    here = get(api, f"/api/cad/incident/{iid}/here", "", JULIAN)[1]["notes"]
+    here = get(api, f"/api/cad/incident/{iid}/here", "", JORDAN)[1]["notes"]
     assert sorted(n["category"] for n in here) == ["access", "medical"]
     assert [n["category"] for n in get(api, "/api/cad/premise", "", VAL)[1]["notes"]] == ["access"]
 
@@ -698,25 +698,25 @@ def test_a_request_catch_up_is_bounded_and_keys_outside_the_lock(hist):
 def test_note_visibility_is_an_audited_admin_setting(api):
     c, iid = api.cad, api.calls["ems"]
     med = c.premise.create({"incident_id": iid, "text": "On home oxygen", "category": "medical"})["note"]
-    code, out = call(api, "/api/cad/settings/premise_visibility", {"action": "set", "key": "medical", "value": "admin"}, JULIAN)
+    code, out = call(api, "/api/cad/settings/premise_visibility", {"action": "set", "key": "medical", "value": "admin"}, JORDAN)
     assert code == 403                                                 # admins only
-    code, out = call(api, "/api/cad/settings/premise_visibility", {"action": "set", "key": "medical", "value": "admin"}, COREY)
+    code, out = call(api, "/api/cad/settings/premise_visibility", {"action": "set", "key": "medical", "value": "admin"}, CASEY)
     assert code == 200 and out["premise_visibility"]["medical"]["value"] == "admin"
-    assert call(api, "/api/cad/settings/premise_visibility", {"action": "set", "key": "medical", "value": "x"}, COREY)[0] == 400
+    assert call(api, "/api/cad/settings/premise_visibility", {"action": "set", "key": "medical", "value": "x"}, CASEY)[0] == 400
     (a,) = c.store.q("SELECT * FROM settings_audit WHERE key = 'premise_visibility/medical'")
     assert (a["section"], a["old"], a["new"]) == ("system", "everyone", "admin")
     assert '"premise_visibility": {"medical": "admin"}' in json.dumps(c.settings_export())      # in the settings file
     # a dispatcher may no longer see, edit or acknowledge it, and gets no text back
-    code, out = call(api, f"/api/cad/premise/{med['id']}", {"text": "changed"}, JULIAN)
+    code, out = call(api, f"/api/cad/premise/{med['id']}", {"text": "changed"}, JORDAN)
     assert code == 400 and "no note" in out["error"]
-    code, out = call(api, f"/api/cad/premise/{med['id']}/ack", {"incident_id": iid}, JULIAN)
+    code, out = call(api, f"/api/cad/premise/{med['id']}/ack", {"incident_id": iid}, JORDAN)
     assert code == 400 and "no note" in out["error"]
-    code, out = call(api, f"/api/cad/premise/{med['id']}", {"priority": 1}, COREY)
+    code, out = call(api, f"/api/cad/premise/{med['id']}", {"priority": 1}, CASEY)
     assert code == 200 and out["note"]["text"] == "On home oxygen"
     last = c.store.q("SELECT * FROM settings_audit WHERE section = 'premise' ORDER BY id DESC LIMIT 1")[0]
     assert last["key"] == str(med["id"]) and "oxygen" not in (last["old"] + last["new"]) and "Example" not in last["key"]
     assert json.loads(last["new"]) == {"category": "medical", "changed": ["priority"]}
-    code, out = call(api, "/api/cad/settings/premise_visibility", {"action": "reset", "key": "medical"}, COREY)
+    code, out = call(api, "/api/cad/settings/premise_visibility", {"action": "reset", "key": "medical"}, CASEY)
     assert out["premise_visibility"]["medical"]["value"] == "everyone"
     assert [n["id"] for n in get(api, f"/api/cad/incident/{iid}/here", "", VAL)[1]["notes"]] == [med["id"]]
 
@@ -724,20 +724,20 @@ def test_note_visibility_is_an_audited_admin_setting(api):
 def test_the_settings_audit_hides_older_rows_of_a_newly_restricted_category(api):
     c, iid = api.cad, api.calls["ems"]
     med = c.premise.create({"incident_id": iid, "text": "On home oxygen", "category": "medical"})["note"]
-    call(api, f"/api/cad/premise/{med['id']}", {"text": "On home oxygen, 2nd floor"}, JULIAN)    # written in the clear
+    call(api, f"/api/cad/premise/{med['id']}", {"text": "On home oxygen, 2nd floor"}, JORDAN)    # written in the clear
     assert call(api, "/api/cad/settings/premise_visibility", {"action": "set", "key": "medical", "value": "admin"},
-                COREY)[0] == 200
+                CASEY)[0] == 200
 
     def rows(email):
         code, out = get(api, "/api/cad/settings/audit", "section=premise", email)
         assert code == 200
         return [r for r in out["audit"] if r["section"] == "premise"]
-    for who_ in (JULIAN, VAL):
+    for who_ in (JORDAN, VAL):
         seen = rows(who_)
         assert len(seen) == 2 and not any("oxygen" in (r["old"] or "") + (r["new"] or "") + r["key"] for r in seen)
         assert {r["key"] for r in seen} == {str(med["id"])}
         assert json.loads(seen[0]["new"]) == {"category": "medical", "changed": ["text"]}
-    assert any("oxygen" in (r["new"] or "") for r in rows(COREY))       # an admin still reads it all
+    assert any("oxygen" in (r["new"] or "") for r in rows(CASEY))       # an admin still reads it all
     assert any("oxygen" in (r["new"] or "") for r in c.store.q("SELECT new FROM settings_audit WHERE section = 'premise'"))
 
 
