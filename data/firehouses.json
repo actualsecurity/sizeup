@@ -1,12 +1,14 @@
 {
   "_source": "Addresses: NERIS (neris.fsri.org FD36119816) and ryebrookny.gov; coordinates: NYS Geocoder, 2026-10-01",
-  "_egress": "egress (ingress: the same unless given): the bay-door apron {lat, lon} and the street the rigs pull out onto; routes start and end there (sizeup/cad/routes.py). Without it: the firehouse's point and its address's street. South End: the apron on the building's west face, OpenStreetMap 2026-11-12",
+  "_egress": "egress (ingress: the same unless given): the bay-door apron {lat, lon} and the street the rigs pull out onto; routes start and end there (sizeup/cad/routes.py). Without it: the firehouse's point and its address's street. ingress via \"lot\": back in through a lot, joining its drive aisles (service roads) rather than a street. South End: the apron on the building's west face; Rye Brook: out the north-east face onto King St, back in through the rear (the Village Hall / PD lot, from King St) at the south-west face; OpenStreetMap 2026-11-12",
   "firehouses": [
     {"name": "PCFD Headquarters", "short": "HQ", "address": "209 Westchester Ave", "ll": [-73.66692, 41.00253]},
     {"name": "Washington Park", "short": "Wash Pk", "address": "464 Westchester Ave", "ll": [-73.67621, 41.00489]},
     {"name": "South End (Putnam & Mellor)", "short": "South End", "address": "51-53 Grace Church St", "ll": [-73.66453, 40.99600],
      "egress": {"lat": 40.99597, "lon": -73.66483, "street": "Grace Church St"}},
     {"name": "Brooksville Engine & Hose #5", "short": "Brooksville", "address": "509 Willett Ave", "ll": [-73.65962, 41.01177]},
-    {"name": "Rye Brook Firehouse", "short": "Rye Brook", "address": "940 King St", "ll": [-73.67464, 41.03513]}
+    {"name": "Rye Brook Firehouse", "short": "Rye Brook", "address": "940 King St", "ll": [-73.67464, 41.03513],
+     "egress": {"lat": 41.03528, "lon": -73.67430, "street": "King St"},
+     "ingress": {"lat": 41.03504, "lon": -73.67488, "via": "lot"}}
   ]
 }

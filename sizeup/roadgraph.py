@@ -90,6 +90,7 @@ GROUP = {"motorway": ("highway", 1.0), "trunk": ("highway", 0.9), "primary": ("a
 SERVICE_SKIP = ("parking_aisle", "drive-through", "driveway")
 SERVICE = CLASSES.index("service")
 GATE_SNAP_M = 75.0                    # a firehouse's gate (snap_gate): its street, or else a public street, this near
+LOT = "*lot"                          # snap_gate's street for an ingress through a lot: its drive aisles (service) too
 MPS_PER_MPH = 0.44704
 WRONGWAY_MPH = 10.0                   # the wrong-way final stretch: slowly
 UTURN_S = 20.0                        # starting against the rig's heading
@@ -657,7 +658,13 @@ class Graph:
         """Where a rig leaving (or coming back into) a firehouse joins the roads: the nearest point on `street` (its
         name or ref, roadprojects.street_key) within max_m; else the nearest public street within max_m (never a
         service road, such as a lot's aisle or a side drive, nor a motorway); else snap(). Only roads on self.main.
-        The snap's "by": "street" | "public" | "nearest"."""
+        street LOT (an ingress through a lot): the nearest drivable way within max_m, a lot's service aisle included.
+        The snap's "by": "street" | "public" | "lot" | "nearest"."""
+        if street == LOT:
+            s = self.snap(lon, lat, max_m=max_m, motorway_m=SNAP_M)
+            if s is not None:
+                return dict(s, by="lot")
+            street = ""
         x, y = self.to_xy(lon, lat)
         want = street_key(street) if street else ""
         best: dict[str, tuple | None] = {"street": None, "public": None}
