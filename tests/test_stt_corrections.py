@@ -13,7 +13,7 @@ from sizeup.cad import sttfix
 from sizeup.cad.api import ADMIN_READS, CadApi, needs
 from sizeup.cloud.access import Identity
 from tests.test_cad import make_cad
-from tests.test_roles import COREY, JULIAN, people
+from tests.test_roles import CASEY, JORDAN, people
 
 CONTRACT = {"clip_id", "channel", "talkgroup", "talker", "start", "end", "asr", "fixed_text", "correction"}
 EXTENSIONS = {"system", "service"}                 # ours, beside #428's fields (and correction.based_on)
@@ -115,7 +115,7 @@ def test_another_systems_row_only_behind_a_sign_in(cad):
         cad.stt_fix.get("p1")
     with pytest.raises(CadError):
         cad.stt_fix.save("p1", {"corrected": "Car 12 respond to 100 Example Ave"})
-    with sourcekeys.request_context(Identity(email=COREY)):
+    with sourcekeys.request_context(Identity(email=CASEY)):
         cad.stt_fix.save("p1", {"corrected": "Car 12 respond to 100 Example Ave", "reference": True})
         assert cad.stt_fix.get("p1")["correction"]["domain"] == "police"
         assert cad.stt_fix.counts()["n"] == 1
@@ -156,19 +156,19 @@ def test_admin_only_api(tmp_path):
     assert needs("/api/cad/stt/correction/c1") == "admin"
     assert {"/api/cad/stt/corrections", "/api/cad/stt/corrections.jsonl"} <= set(ADMIN_READS)
     body = json.dumps({"corrected": "Engine 60 en route", "reference": True}).encode()
-    assert api.post("/api/cad/stt/correction/c1", body, Identity(email=JULIAN))[0] == 403
-    assert api.get("/api/cad/stt/correction/c1", "", Identity(email=JULIAN))[0] == 403
-    assert api.get("/api/cad/stt/corrections", "", Identity(email=JULIAN))[0] == 403
-    assert api.get("/api/cad/stt/corrections.jsonl", "", Identity(email=JULIAN))[0] == 403
-    code, raw, _ = api.post("/api/cad/stt/correction/c1", body, Identity(email=COREY))
-    assert code == 200 and json.loads(raw)["correction"]["by"].startswith("Corey")
-    assert json.loads(api.get("/api/cad/stt/corrections", "", Identity(email=COREY))[1])["reference"] == 1
-    out = api.get("/api/cad/stt/corrections.jsonl", "reference=1", Identity(email=COREY))
+    assert api.post("/api/cad/stt/correction/c1", body, Identity(email=JORDAN))[0] == 403
+    assert api.get("/api/cad/stt/correction/c1", "", Identity(email=JORDAN))[0] == 403
+    assert api.get("/api/cad/stt/corrections", "", Identity(email=JORDAN))[0] == 403
+    assert api.get("/api/cad/stt/corrections.jsonl", "", Identity(email=JORDAN))[0] == 403
+    code, raw, _ = api.post("/api/cad/stt/correction/c1", body, Identity(email=CASEY))
+    assert code == 200 and json.loads(raw)["correction"]["by"].startswith("Casey")
+    assert json.loads(api.get("/api/cad/stt/corrections", "", Identity(email=CASEY))[1])["reference"] == 1
+    out = api.get("/api/cad/stt/corrections.jsonl", "reference=1", Identity(email=CASEY))
     assert out[0] == 200 and out[2].startswith("application/x-ndjson") and out[3]["Cache-Control"] == "no-store"
     line = json.loads(out[1].decode().splitlines()[0])
-    assert line["clip_id"] == "c1" and line["correction"]["by"] == "Corey"      # the name: never the sign-in email
-    assert api.get("/api/cad/stt/correction/nope", "", Identity(email=COREY))[0] == 400
-    acts = api.cad.activity.rows(COREY, "search", None, 10)
+    assert line["clip_id"] == "c1" and line["correction"]["by"] == "Casey"      # the name: never the sign-in email
+    assert api.get("/api/cad/stt/correction/nope", "", Identity(email=CASEY))[0] == 400
+    acts = api.cad.activity.rows(CASEY, "search", None, 10)
     assert any("transcript corrections: 1" in (a.get("summary") or "") for a in acts)
 
 
@@ -248,10 +248,10 @@ def test_a_fenced_task_writes_no_correction_and_says_so(tmp_path):
     store = api.cad.store
     tx(api.cad, "c1", "engine 60 en route")
     tx(api.cad, "c2", "ladder 30 on location")
-    me = Identity(email=COREY)
+    me = Identity(email=CASEY)
     assert api.post("/api/cad/stt/correction/c1", json.dumps({"corrected": "Engine 60 en route"}).encode(), me)[0] == 200
     audits = store.one("SELECT COUNT(*) AS n FROM settings_audit WHERE section = ?", (sttfix.SECTION,))["n"]
-    acts = len(api.cad.activity.rows(COREY, None, None, 100))
+    acts = len(api.cad.activity.rows(CASEY, None, None, 100))
     rev, ours = store.rev, [False]
     store.may_write = lambda: ours[0]
     with pytest.raises(FencedWrite):
@@ -264,7 +264,7 @@ def test_a_fenced_task_writes_no_correction_and_says_so(tmp_path):
     out = api.get("/api/cad/stt/corrections.jsonl", "", me)
     assert out[0] == 200 and len(out[1].decode().splitlines()) == 1
     assert store.one("SELECT COUNT(*) AS n FROM settings_audit WHERE section = ?", (sttfix.SECTION,))["n"] == audits
-    assert len(api.cad.activity.rows(COREY, None, None, 100)) == acts
+    assert len(api.cad.activity.rows(CASEY, None, None, 100)) == acts
     ours[0] = True                                                             # the leader again: it writes
     assert api.post("/api/cad/stt/correction/c2", json.dumps({"corrected": "Ladder 30 on location"}).encode(), me)[0] == 200
     assert api.cad.stt_fix.counts()["n"] == 2
@@ -278,12 +278,12 @@ def test_the_audit_names_the_admin_as_every_section_does(tmp_path):
     api = CadApi(make_cad(tmp_path))
     people(api.cad)
     tx(api.cad, "c1", "engine 60 en route")
-    me = Identity(email=COREY)
+    me = Identity(email=CASEY)
     assert api.post("/api/cad/stt/correction/c1", json.dumps({"corrected": "Engine 60 en route"}).encode(), me)[0] == 200
     assert api.post("/api/cad/stt/correction/c1", json.dumps({"delete": True}).encode(), me)[0] == 200
-    standing = api.cad.settings.standing(COREY)["operator"]
+    standing = api.cad.settings.standing(CASEY)["operator"]
     ops = {r["operator"] for r in api.cad.settings.audit_log(sttfix.SECTION)}
-    assert ops == {standing} and COREY in standing
+    assert ops == {standing} and CASEY in standing
     api.cad.stt_fix.save("c1", {"corrected": "Engine 60 en route", "operator": standing})
     assert api.cad.stt_fix.get("c1")["correction"]["by"] == sttfix.name_only(standing) and "@" not in sttfix.name_only(standing)
 
@@ -297,7 +297,7 @@ def test_another_systems_corrections_are_redacted_in_the_audit_for_a_reader_with
        service="police", talker="")
     tx(cad, "p2", "car 14 on location", channel="PD Dispatch", talkgroup=9211, system="mrrs", service="police", talker="")
     cad.stt_fix.save("c1", {"corrected": "Engine 60 en route", "operator": "JD"})
-    with sourcekeys.request_context(Identity(email=COREY)):
+    with sourcekeys.request_context(Identity(email=CASEY)):
         cad.stt_fix.save("p1", {"corrected": "Car 12 respond to 100 Example Ave", "reference": True, "operator": "JD",
                                 "tags": [{"kind": "address", "start": 18, "end": 33}]})
         cad.stt_fix.save("p2", {"corrected": "Car 14 on location", "operator": "JD"})
@@ -372,9 +372,9 @@ def test_the_keep_setting_is_an_admins(tmp_path):
     people(api.cad)
     body = json.dumps({"action": "set", "key": "keep", "value": False}).encode()
     assert needs("/api/cad/settings/stt_corrections") == "admin"
-    assert api.post("/api/cad/settings/stt_corrections", body, Identity(email=JULIAN))[0] == 403
-    assert api.post("/api/cad/settings/stt_corrections", body, Identity(email=COREY))[0] == 200
-    assert json.loads(api.get("/api/cad/stt/corrections", "", Identity(email=COREY))[1])["keep"] is False
+    assert api.post("/api/cad/settings/stt_corrections", body, Identity(email=JORDAN))[0] == 403
+    assert api.post("/api/cad/settings/stt_corrections", body, Identity(email=CASEY))[0] == 200
+    assert json.loads(api.get("/api/cad/stt/corrections", "", Identity(email=CASEY))[1])["keep"] is False
     exported = api.cad.settings_export()
     assert exported["overrides"]["stt_corrections"] == {"keep": False}        # and it travels with a settings backup
 
@@ -395,11 +395,11 @@ def test_the_export_says_when_it_stopped_at_the_limit(tmp_path):
     old = sttfix.EXPORT_MAX
     sttfix.EXPORT_MAX = 2
     try:
-        out = api.get("/api/cad/stt/corrections.jsonl", "", Identity(email=COREY))
+        out = api.get("/api/cad/stt/corrections.jsonl", "", Identity(email=CASEY))
     finally:
         sttfix.EXPORT_MAX = old
     assert out[0] == 200 and out[3]["X-Sizeup-Truncated"] == "2" and out[1].decode().count("\n") == 3
-    assert any("(truncated)" in (a.get("summary") or "") for a in api.cad.activity.rows(COREY, "search", None, 10))
+    assert any("(truncated)" in (a.get("summary") or "") for a in api.cad.activity.rows(CASEY, "search", None, 10))
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools"))
     import stt_eval                                                             # the evaluation skips the last line
     f = tmp_path / "x.jsonl"
