@@ -101,7 +101,7 @@ def test_from_the_jsonl_export(restored, tmp_path):
     _db, _ = restored
     cad = make_cad(tmp_path)                                       # the same file, opened again
     with sourcekeys.request_context(Identity(email="admin@example.org")):
-        data, n = cad.stt_fix.export_jsonl({"reference": ["1"]})
+        data, n, _ = cad.stt_fix.export_jsonl({"reference": ["1"]})
     p = tmp_path / "stt-corrections.jsonl"
     p.write_bytes(data)
     refs = stt_eval.from_jsonl(p, False, None, None)

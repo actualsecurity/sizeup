@@ -1940,7 +1940,8 @@ class Cad:
         """may: the reader's standing; a premise note's rows of a category they may not see (now) without its text (#403)."""
         rows = self.premise.redact_audit(self.settings.audit_log((q.get("section") or [""])[0][:40]), may)
         rows = self.preplan.redact_audit(rows, may)                     # and a pre-plan point's (#456)
-        return {"audit": self.preplan_docs.redact_audit(rows, may)}     # and an admin-only site document's (#459)
+        rows = self.preplan_docs.redact_audit(rows, may)                # and an admin-only site document's (#459)
+        return {"audit": self.stt_fix.redact_audit(rows)}               # and a correction of another system's transmission
 
     # -- location suggestions -----------------------------------------------------------------------
 

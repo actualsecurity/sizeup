@@ -3,8 +3,11 @@
 //
 //   SttFix.open(t)   a transmission's "Correct transcript" dialog (its "⋯" menu, cad.js): the words as said, spans tagged
 //                    (address, callsign, category: select the words, then the kind), Reference, Save / Delete.
-//                    GET /api/cad/stt/correction/<id>; POST the same {corrected, domain, tags, reference} | {delete}
-//   SttFix.card()    Settings > System: the counts and the JSONL export (GET /api/cad/stt/corrections, .jsonl)
+//                    GET /api/cad/stt/correction/<id>; POST the same {corrected, domain, tags, reference, based_on} |
+//                    {delete}. The box starts from the text of the engine that produced the row (prefill), and the
+//                    correction records which engine that was (based_on).
+//   SttFix.card()    Settings > System: the counts, "Keep corrected clips" (POST /api/cad/settings/stt_corrections) and
+//                    the JSONL export (GET /api/cad/stt/corrections, .jsonl)
 //
 // Every node is built with textContent: a transcript is never parsed as markup.
 "use strict";
@@ -14,13 +17,41 @@ window.SttFix = (() => {
   const engine = (m) => (/^aws/i.test(m || "") ? "AWS" : m ? "Whisper" : "STT");
   const enc = (id) => encodeURIComponent(id);
 
-  // tags keep their words: an edit moves a tag to where its words are now, or drops it
-  function refit(tags, text) {
+  // Tags keep their words through an edit, by offset: the edit is the one span that changed between the text before
+  // and after (the common prefix and suffix stay), and its length change moves every tag behind it. A tag in front of
+  // the edit stays; one whose own words were edited keeps what is left of them (dropped when nothing is). Never by
+  // looking the words up: "61" is in "Engine 61 to 61 Example Ave" twice.
+  function refit(tags, text, before) {
+    if (before === undefined || before === text) {
+      return tags.filter((g) => g.start >= 0 && g.end <= text.length && g.start < g.end)
+        .map((g) => ({ ...g, text: text.slice(g.start, g.end) }));
+    }
+    const max = Math.min(before.length, text.length);
+    let a = 0;
+    while (a < max && before[a] === text[a]) a++;
+    let z = 0;
+    while (z < max - a && before[before.length - 1 - z] === text[text.length - 1 - z]) z++;
+    const cut = before.length - z;              // the edit replaced before[a, cut) ...
+    const put = text.length - z;                // ... with text[a, put)
+    const delta = put - cut;
+    const typed = text.slice(a, put);
     const out = [];
     for (const g of tags) {
-      if (text.slice(g.start, g.end) === g.text) { out.push(g); continue; }
-      const i = text.indexOf(g.text);
-      if (g.text && i >= 0) out.push({ ...g, start: i, end: i + g.text.length });
+      let s = g.start, e = g.end;
+      if (e < a || (e === a && (cut > a || !typed || /\s/.test(typed)))) {
+        // in front of the edit: as it was
+      } else if (e === a) {
+        e = put;                                 // typed on at the end of its last word: the word grew
+      } else if (s >= cut) {
+        s += delta;                              // behind the edit: moved by its length change
+        e += delta;
+      } else {                                   // the edit touched its words: what is left of them, with what was typed
+        s = s <= a ? s : put;                    // in them (starting inside what was replaced: from after the new words)
+        e = e >= cut ? e + delta : a;
+      }
+      while (s < e && /\s/.test(text[s])) s++;
+      while (e > s && /\s/.test(text[e - 1])) e--;
+      if (s < e) out.push({ ...g, start: s, end: e, text: text.slice(s, e) });
     }
     return out;
   }
@@ -55,7 +86,9 @@ window.SttFix = (() => {
       body.append(p);
     }
     const area = el("textarea");
-    Object.assign(area, { rows: 3, maxLength: 2000, value: c ? c.corrected : (d.text || ""), spellcheck: true });
+    // a new correction starts from the text of the engine that produced the row, and says which engine that was
+    const first = d.prefill || { text: d.text || "", engine: d.model || "" };
+    Object.assign(area, { rows: 3, maxLength: 2000, value: c ? c.corrected : first.text, spellcheck: true });
     area.setAttribute("aria-label", "As said");
     let tags = ((c && c.tags) || []).map((g) => ({ ...g, text: (c.corrected || "").slice(g.start, g.end) }));
     const chips = el("div", "row");
@@ -68,7 +101,8 @@ window.SttFix = (() => {
         return x;
       }));
     };
-    area.addEventListener("input", () => { tags = refit(tags, area.value); drawTags(); });
+    let was = area.value;
+    area.addEventListener("input", () => { tags = refit(tags, area.value, was); was = area.value; drawTags(); });
     const catVal = el("input");
     Object.assign(catVal, { type: "text", maxLength: 40, placeholder: "category", spellcheck: false });
     catVal.setAttribute("aria-label", "Category name for a category tag");
@@ -132,12 +166,13 @@ window.SttFix = (() => {
       const text = area.value.trim();
       if (!text) { err.textContent = "Type the words as said"; err.hidden = false; return; }
       const lead = area.value.length - area.value.trimStart().length;      // the server trims: the spans move with it
-      const out = refit(tags, area.value).map((g) => ({ kind: g.kind, start: g.start - lead, end: g.end - lead,
+      const out = refit(tags, area.value, was).map((g) => ({ kind: g.kind, start: g.start - lead, end: g.end - lead,
                                                         ...(g.value ? { value: g.value } : {}) }))
         .filter((g) => g.start >= 0 && g.end <= text.length);
       try {
         await UI.busy(api("POST", `/api/cad/stt/correction/${enc(t.id)}`, { corrected: text, domain: dom.value, tags: out,
-                                                                           reference: ref.checked, operator: operator() }), yes);
+                                                                           reference: ref.checked, operator: operator(),
+                                                                           ...(c ? {} : { based_on: first.engine || "" }) }), yes);
         UI.toast(ref.checked ? "Saved · reference" : "Saved", "ok", out.length ? `${out.length} tag${out.length > 1 ? "s" : ""}` : "");
         UI.dialog.close(ov);
       } catch (ex) { err.textContent = ex.message; err.hidden = false; }
@@ -159,14 +194,32 @@ window.SttFix = (() => {
     const refOnly = el("a", "nav", "References only");
     refOnly.href = "/api/cad/stt/corrections.jsonl?reference=1";
     refOnly.setAttribute("download", "");
+    const keep = el("input");
+    keep.type = "checkbox";
+    keep.checked = true;
+    const keepL = el("label", "inline");
+    keepL.append(keep, " Keep corrected clips");
+    keepL.title = "A corrected transmission and its audio are never pruned (the training set). Off: they go by their channel's retention";
+    const show = (n) => {
+      const doms = Object.entries(n.domains || {}).map(([k, v]) => `${k} ${v.n}`).join(" · ");
+      keep.checked = n.keep !== false;
+      info.textContent = `${n.n} · ${n.reference} reference${doms ? ` · ${doms}` : ""} · ${n.kept} corrected clips kept`;
+    };
+    keep.addEventListener("change", async () => {
+      try {
+        const out = await UI.busy(api("POST", "/api/cad/settings/stt_corrections",
+                                      { action: "set", key: "keep", value: keep.checked, operator: operator() }), keep);
+        show(out.stt_corrections);
+      } catch (ex) {
+        keep.checked = !keep.checked;
+        UI.toast(`Can't save: ${ex.message}`, "err");
+      }
+    });
     const row = el("div", "row");
-    row.append(info, el("span", "spacer"), a, refOnly);
+    row.append(info, el("span", "spacer"), keepL, a, refOnly);
     const box = sCard(sCardHead("Transcript corrections"), row);
     box.id = "s-stt-fix";
-    api("GET", "/api/cad/stt/corrections").then((n) => {
-      const doms = Object.entries(n.domains || {}).map(([k, v]) => `${k} ${v.n}`).join(" · ");
-      info.textContent = `${n.n} · ${n.reference} reference${doms ? ` · ${doms}` : ""}`;
-    }).catch(() => { info.textContent = "—"; });
+    api("GET", "/api/cad/stt/corrections").then(show).catch(() => { info.textContent = "—"; });
     return box;
   }
 

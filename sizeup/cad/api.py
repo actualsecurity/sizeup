@@ -273,12 +273,19 @@ POST /api/cad/settings/audio_retention    {action: set {key: _default | a channe
 POST /api/cad/settings/transcript_retention  {action: set {key: _default | a channel's name | tg:<n>, value: days} |
                                           reset {key}}: how long the radio log keeps that channel's transcripts and
                                           metadata (never shorter than its audio; sizeup/cad/comms.py prune); admins
-GET  /api/cad/stt/corrections           hand-corrected transcripts: counts (n, reference, per domain); admins (ADMIN_READS)
+GET  /api/cad/stt/corrections           hand-corrected transcripts: counts (n, reference, per domain; keep: corrected
+                                          clips are keepers, kept: how many are); admins (ADMIN_READS)
 GET  /api/cad/stt/corrections.jsonl     ?since=&until=&channel=&reference=1: the corrected clips as #428's JSONL (sizeup/cad/
-                                          sttfix.py); admins only (ADMIN_READS); in the person's activity (kind "search")
-GET  /api/cad/stt/correction/<id>       a transmission's transcripts and its correction (null: none); admins
-POST /api/cad/stt/correction/<id>       {corrected, domain?, tags?: [{kind, start, end, value?}], reference?} | {delete: true}:
-                                          admins; in the Settings audit log (section stt_corrections: no words)
+                                          sttfix.py; + system, service, correction.based_on); admins only (ADMIN_READS);
+                                          in the person's activity (kind "search"). Over 50,000 clips: X-Sizeup-Truncated,
+                                          X-Sizeup-Next-Since and a last line {truncated, limit, next_since} (?since= that)
+GET  /api/cad/stt/correction/<id>       a transmission's transcripts, what the editor starts from (prefill: {text, engine})
+                                          and its correction (null: none); admins
+POST /api/cad/stt/correction/<id>       {corrected, domain?, tags?: [{kind, start, end, value?}], reference?, based_on?} |
+                                          {delete: true}: admins; in the Settings audit log (section stt_corrections: the
+                                          admin, counts, no words; another system's: redacted for a reader with no sign-in)
+POST /api/cad/settings/stt_corrections  {action: set, key: keep, value: true | false} | {action: reset, key: keep}: a
+                                          corrected clip is a keeper (its transcript never pruned, its audio a record): admins
 GET  /api/cad/intel                       Settings > System > Intel (sizeup/intel/admin.py): the packs, categories and rules
                                           with their modes, weights and 7-day hits, the policy (kill switch, caps)
 GET  /api/cad/intel/events?since=&bbox=w,s,e,n&mode=map,push&status=open|all&limit=
@@ -823,13 +830,13 @@ class CadApi:
             return _json(200, fx.get(m.group(1)))
         if path == "/api/cad/stt/corrections":
             return _json(200, fx.counts())
-        data, n = fx.export_jsonl(parse_qs(query))
+        data, n, more = fx.export_jsonl(parse_qs(query))
         if who is not None and who.email:
             self.cad.activity.record(who.email, "search", "GET /api/cad/stt/corrections.jsonl",
-                                     f"JSONL: transcript corrections: {n}")
+                                     f"JSONL: transcript corrections: {n}{' (truncated)' if more else ''}")
         name = f"stt-corrections-{datetime.now(TZ).strftime('%Y%m%d-%H%M')}.jsonl"
         return 200, data, "application/x-ndjson; charset=utf-8", {"Content-Disposition": f'attachment; filename="{name}"',
-                                                                  "Cache-Control": "no-store"}
+                                                                  "Cache-Control": "no-store", **more}
 
     def _docs_get(self, path: str, query: str, who) -> tuple:
         """GET /api/cad/preplan/docs(?incident= | where=), /docs/<id>, /docs/<id>/file | plan (#459): anyone signed in

@@ -138,7 +138,7 @@ def writers(c):
 
 WRITERS = {"record", "retext", "set_alt", "set_stt", "rerun_done", "link", "unlink", "link_pages", "relink", "retag_pages", "fix_air", "prune"}
 # Public methods of Comms that write nothing a row of the Radio page shows (activity: the per-minute counts)
-READERS = {"activity", "activity_rows", "audio_per_day", "context_clips", "emergencies", "events_of", "facets", "for_incidents",
+READERS = {"activity", "activity_rows", "audio_per_day", "context_clips", "corrections_kept", "emergencies", "events_of", "facets", "for_incidents",
            "id_stats", "kept_for_events", "kept_for_tier", "minute_counts", "page", "policies", "query", "cursor", "source_names",
            "rev_for", "sources_seen", "split", "talkgroups",
            "shed_clips", "catchup_tries", "catchup_tries_of", "caught_up"}         # (the speech-to-text catch-up's, sizeup/sttcatchup.py)
