@@ -40,12 +40,16 @@ notice when it clears:
     aws_budget80  this month's Amazon Transcribe cost at BUDGET_WARN (80 %) of the limit   warning
     aws_budget    ... at the limit: the AWS channels use the station's whisper (pages and   critical
                   Fire/EMS 15 keep AWS within the reserve, sizeup/transcribe.py)
+    litestream    the hub's Litestream older than 0.5.18 (its supervisor says so: sizeup/handoff.py      warning
+                  MIN_LITESTREAM, SIZEUP_LITESTREAM_WARNING): an image with the old pin
+    replication_checks  the hub runs with SIZEUP_HANDOFF_SKIP_REPLICATION_CHECKS=1 (docs/cloud.md: an       warning
+                  operator's override for a false positive, to be removed)
 
 While the station is silent (or before it first reports) the other conditions keep the state they had:
 nothing starts or clears on old data.
 
 One channel or talkgroup silent is never an alert (#258: fireground is quiet for hours, HPN Tower closes overnight,
-Fire/EMS 15 can be quiet for an hour): it is a hint in the panel (Settings > Health), with when it was last heard,
+Fire/EMS 15 can be quiet for an hour): it is a hint in the panel (Settings > Station > Health), with when it was last heard,
 once it is silent HINT_FACTOR (3) times its usual gap and at least HINT_MIN_S (30 min). An FM channel whose squelch
 opens on noise (CHATTER_PER_MIN short opens a minute, sizeup/radio/fm.py) is a hint too. The usual gap:
 
@@ -70,7 +74,7 @@ trunk-recorder writes, so its last_heard is the system's last call:
              (sizeup/radio/recorder.py ControlChannel) lasting CC_LOST_S: the alert at once, whatever the window
     clears   at the next call (or the control channel decoding again)
 
-Each alert is logged once when it starts and once when it clears, shown to admins on Settings > Health
+Each alert is logged once when it starts and once when it clears, shown to admins on Settings > Station > Health
 (GET /api/cad/health, static/health.js; never in the state push nor as a banner, #203), and pushed to the
 status topic ([alerts] status_topic, else ntfy_topic: sizeup/notify.py route()): at most one push per condition per repeat_min (15), plus its recovery (only for an episode that was pushed).
 
@@ -80,12 +84,12 @@ push and no "Recovered"; "Recovered" is pushed only once it has settled (with ho
 episode's push says so. Each alert's own grace (held()) is as before.
 
 Muted (#340, Settings > System > Push notifications, admins): an alert kind (MUTE_KINDS) muted, until a time or until
-unmuted (settings section MUTE_SECTION, kind -> {"until": epoch | null}), is shown on Settings > Health as before,
+unmuted (settings section MUTE_SECTION, kind -> {"until": epoch | null}), is shown on Settings > Station > Health as before,
 marked muted, and not pushed; one pushed before the mute still gets its "Recovered". The hub's own error spikes (sizeup/errwatch.py) are "hub_errors".
 Alerts and 24 h of their history are kept in hub.sqlite (meta "health"), so a redeploy neither forgets nor
 repeats them.
 
-    GET /api/cad/health        the panel (Settings > Health): the model, the alerts, the history, the
+    GET /api/cad/health        the panel (Settings > Station > Health): the model, the alerts, the history, the
                                thresholds; admins only (sizeup/cad/api.py ADMIN_READS, #203)
     GET /api/station/status    the deploy check (tools/deploy_check.py): the hub's build, the station's, its
                                update state and last update line, the alerts. Read only: the station token
@@ -147,6 +151,12 @@ SETTLE_FLAPPING_S = 30 * 60.0   # ... this long for one flapping:
 FLAP_N = 3                  # back this many times ...
 FLAP_WINDOW_S = 3600.0      # ... within this long
 HUB_OWN = ("silent", "transcribe", "aws_budget80", "aws_budget")   # decided on the hub's own data, the station silent or not
+REPLICA_STALE = 3.0         # the Replicas row says "stale" when the last check is this many leader intervals old
+
+
+def hub_own(key: str) -> bool:
+    """Decided on the hub's own data (the replicas too: "replica:cad"), the station silent or not."""
+    return key in HUB_OWN or str(key).startswith("replica:")
 MUTE_SECTION = "alert_mutes"    # the CAD settings section of the mutes (sizeup/cad/settings.py _mutes_op)
 # The alert kinds an admin may mute (#340): the part of an alert's key before ":" (aws_budget80 is aws_budget's).
 MUTE_KINDS = {"adsb": "ADS-B receiver down", "whisper": "Speech-to-text down", "stt_backlog": "Speech-to-text behind",
@@ -155,7 +165,8 @@ MUTE_KINDS = {"adsb": "ADS-B receiver down", "whisper": "Speech-to-text down", "
               "silent": "Station silent", "behind": "Station behind the hub", "update": "Station update failed",
               "outbox": "Station's events backing up", "disk": "Station disk full",
               "transcribe": "Amazon Transcribe failing", "aws_budget": "Amazon Transcribe monthly limit",
-              "hub_errors": "Hub errors"}
+              "hub_errors": "Hub errors", "litestream": "Litestream too old",
+              "replication_checks": "Takeover checks skipped"}
 MUTE_TIMED_ONLY = ("silent", "trunk", "job")   # critical ones: muted for a time only, never until unmuted
 
 
@@ -185,6 +196,25 @@ def status_token(station_token: str, configured: str = "") -> str:
     if not station_token:
         return ""
     return hmac.new(station_token.encode(), STATUS_KEY, hashlib.sha256).hexdigest()
+
+
+def context_hints(sq: dict | None, tr: dict | None) -> list[dict]:
+    """Settings > Health hints for another P25 system's police (radio-intel PR 3), never alerts: context clips the
+    station's whisper shed in the last hour (lost recall, not quiet), and the police AWS budget used up (whisper)."""
+    out = []
+    n = (sq or {}).get("shed_context_h")
+    ctx = ((tr or {}).get("budget") or {}).get("context") or {}
+    denied = bool(ctx) and ctx.get("ok") is False
+    if isinstance(n, int) and n > 0:
+        # on whisper only because its AWS budget is used up: its pre-alerts are being lost, a warning, not a note
+        out.append({"channel": "PD", "level": "warn" if denied else "info",
+                    "text": f"{n} context clip{'s' if n != 1 else ''} shed in the last hour (whisper busy"
+                            + (", PD AWS budget used up" if denied else "") + "): not transcribed, pre-alerts "
+                            + ("missed" if denied else "may be missed")})
+    if ctx and ctx.get("ok") is False:
+        out.append({"channel": "PD", "level": "info", "text": f"AWS budget used: ${ctx.get('usd', 0):.2f} / ${ctx.get('limit_usd', 0):g} in "
+                                             f"{ctx.get('month', '')} · on the station's whisper (Settings > Radios)"})
+    return out
 
 
 def _hhmm(t: float | None) -> str:
@@ -490,6 +520,7 @@ class StationHealth:
         self._clear_at: dict[str, float] = {}        # an alert's real clear time when it clears later than that
         self.settling: dict[str, dict] = {}          # cleared, not yet settled (#340): back before SETTLE_S, one episode
         self.mutes: Callable[[], dict] | None = None   # the mutes' settings section (#340): HubApp sets it
+        self.replicas: Callable[[], dict | None] | None = None   # the supervisor's replica checks (sizeup/replicawatch.py)
         self._load()
         self._first_saved = {k: v for k, v in self._first.items() if k in self.settling}
 
@@ -676,7 +707,9 @@ class StationHealth:
         out["stt_queue"] = {k: sq.get(k) for k in ("queued", "urgent", "high", "live", "low", "rerun", "fallback", "stale",
                                                    "oldest_s", "oldest_low_s", "top", "in_h", "in_low_h", "in_fallback_h",
                                                    "in_top", "service_s", "out_h", "dropped", "skipped", "shed",
+                                                   "shed_context", "shed_context_h", "catchup",
                                                    "last_drop", "last_error", "max", "working")} if sq else None
+        out["stt_catchup"] = self._catchup()
         started = hl.get("started")
         out["system"] = {k: hl.get(k) for k in ("host", "cpu_pct", "load1", "cpus", "mem_pct", "mem_total", "temp_c",
                                                  "disk_pct", "disk_free", "disk_total", "disk_path")}
@@ -696,6 +729,7 @@ class StationHealth:
             ad["hub"] = sf.stats() if sf is not None else None
         out["adsb"] = ad
         out["transcribe"] = self._transcribe()
+        out["hints"] += context_hints(out["stt_queue"], out["transcribe"])
         return out
 
     def _usual(self, label: str, heard: float, snow: float, gaps_min: int) -> float | None:
@@ -734,6 +768,16 @@ class StationHealth:
                                                "retunes": cc.get("retunes"),
                                                "last_retune": cc["last_retune"] + skew
                                                if isinstance(cc.get("last_retune"), (int, float)) else None}}
+
+    def _catchup(self) -> dict | None:
+        """Shed clips caught up (sizeup/sttcatchup.py): on, the backlog waiting, caught up in the last 24 h."""
+        cu = getattr(getattr(self.hub, "app", None), "catchup", None)
+        if cu is None:
+            return None
+        try:
+            return cu.stats()
+        except Exception as e:  # never in the way of the rest
+            return {"error": f"{type(e).__name__}: {e}"}
 
     def _transcribe(self) -> dict | None:
         """Amazon Transcribe's health on the hub (HubApp.aws_health()), None when it isn't set up here."""
@@ -780,6 +824,16 @@ class StationHealth:
                                              "higher limit (Settings > Radios)" + (f" · {bud['reserve_text']}"
                                                                                   if bud.get("reserve_text") else ""),
                                      "since": float(bud.get("limit_since") or now)}
+        out.update(self._replica_alerts())                       # the hub's own too
+        lw = os.environ.get("SIZEUP_LITESTREAM_WARNING", "").strip()   # the hub's supervisor (sizeup/handoff.py)
+        if lw:
+            out["litestream"] = {"severity": "warning", "title": "Litestream too old", "text": lw[:300],
+                                 "since": self.__dict__.setdefault("_litestream_since", now)}
+        if os.environ.get("SIZEUP_HANDOFF_SKIP_REPLICATION_CHECKS", "").strip() == "1":   # the operator's override
+            out["replication_checks"] = {
+                "severity": "warning", "title": "Takeover checks skipped",
+                "text": "SIZEUP_HANDOFF_SKIP_REPLICATION_CHECKS=1: the replica's checks at a takeover are off · remove "
+                        "it in the next deploy", "since": self.__dict__.setdefault("_skip_since", now)}
         silent, since = self._silent(now)
         if silent:
             out["silent"] = {"severity": "critical", "title": "Station silent",
@@ -898,6 +952,57 @@ class StationHealth:
                 a["who"] = self._who(k, m)
         return out, True
 
+    def _replica_state(self) -> dict | None:
+        if self.replicas is None:
+            return None
+        try:
+            d = self.replicas()
+        except Exception:  # noqa: BLE001 - never in the way of the rest
+            return None
+        return d if isinstance(d, dict) else None
+
+    def _replica_alerts(self) -> dict[str, dict]:
+        """"Replica corrupt" for each file the supervisor's last check found bad (or couldn't check twice running).
+        Quiet: the supervisor pushed it already, at once (sizeup/replicawatch.py), with its own limit."""
+        d = self._replica_state() or {}
+        out: dict[str, dict] = {}
+        for db, c in (d.get("checks") or {}).items():
+            if not isinstance(c, dict) or db not in (d.get("failing") or {}):
+                continue
+            e = c.get("last_error") if c.get("ok") is not False and isinstance(c.get("last_error"), dict) else c
+            corrupt = c.get("ok") is False
+            out[f"replica:{db}"] = {
+                "severity": "critical", "quiet": True,
+                "title": f"Replica {'corrupt' if corrupt else 'not verifiable'}: {db}.sqlite",
+                "text": f"{e.get('mode') or 'check'}: {' · '.join(str(e.get('result') or '').splitlines()[:2])[:120]} · {e.get('by') or '?'} "
+                        f"{_hhmm(e.get('at'))} · a takeover from it would fail",
+                "since": float((d.get("failing") or {}).get(db) or e.get("at") or 0) or self.clock()}
+        return out
+
+    def replicas_panel(self, now: float) -> dict | None:
+        """Settings > Health's Replicas row: each file's last check (result, when, by whom), the last task failures."""
+        d = self._replica_state()
+        if d is None:
+            return None
+        every = float(d.get("leader_interval_s") or 900.0) or 900.0
+        rows = []
+        for db in ("cad", "hub", "audio"):
+            c = (d.get("checks") or {}).get(db)
+            if not isinstance(c, dict):
+                rows.append({"db": db, "state": "none"})
+                continue
+            ok = c.get("ok")
+            state = "ok" if ok is True else "corrupt" if ok is False else "error"
+            if state == "ok" and now - float(c.get("at") or 0) > REPLICA_STALE * every * (4 if db == "audio" else 1):
+                state = "stale"
+            le = c.get("last_error") if isinstance(c.get("last_error"), dict) else None
+            rows.append({"db": db, "state": state, "at": c.get("at"), "result": str(c.get("result") or "")[:200],
+                         "mode": c.get("mode"), "by": c.get("by"), "txid": c.get("txid"), "secs": c.get("secs"),
+                         "error": str(le.get("result") or "")[:200] if le else "", "error_at": le.get("at") if le else None})
+        events = [{k: e.get(k) for k in ("at", "kind", "why", "code")} for e in (d.get("events") or [])
+                  if isinstance(e, dict) and now - float(e.get("at") or 0) <= HISTORY_S]
+        return {"rows": rows, "events": events[-5:][::-1]}
+
     def _notify_ok(self, a: dict, now: float) -> bool:
         """Old enough to push (NOTIFY_AFTER); the whisper backlog only while it is still that far behind now, not one
         nearly caught up (#300)."""
@@ -1001,8 +1106,10 @@ class StationHealth:
 
     def _who(self, key: str, m: dict) -> dict:
         """Who / where an alert is about (sizeup/notify.py Who): the station, the dongle, the channel."""
-        w: dict = {"station": m["station"]["name"] or m["station"]["id"] or "the station"}
         kind, _, arg = key.partition(":")
+        if kind == "replica":
+            return {}                                    # the hub's own files: no station in it
+        w: dict = {"station": m["station"]["name"] or m["station"]["id"] or "the station"}
         if kind == "silent":
             last = self.hub.last_state
             w["detail"] = f"last heard {_hhmm(last)}" if last else "never reported"
@@ -1093,7 +1200,7 @@ class StationHealth:
             for key in list(self.active):
                 if key in conds:
                     continue
-                if key not in HUB_OWN and not judged:
+                if not hub_own(key) and not judged:
                     continue                             # the station's data is old: leave it as it was
                 a = self.active.pop(key)
                 a["cleared"] = self._clear_at.pop(key, now)
@@ -1104,7 +1211,7 @@ class StationHealth:
             cut = now - HISTORY_S
             self.history = [h for h in self.history if (h.get("cleared") or now) >= cut][-HISTORY_MAX:]
             for key, a in list(self.settling.items()):
-                if (key not in HUB_OWN and not judged) or now - float(a["cleared"]) < self._settle_s(a) \
+                if (not hub_own(key) and not judged) or now - float(a["cleared"]) < self._settle_s(a) \
                         or key in self._first:          # (held() sees it again, within its grace: not clear)
                     continue                             # not settled yet (or can't tell: the station is silent)
                 self._settle(key, now, mutes)
@@ -1189,8 +1296,8 @@ class StationHealth:
         n = self.notifier
         if n is None or not n.enabled:
             return
-        # (the old address, kept so the pushes are as they were: settings.js opens Settings > Health from it, #203)
-        click = f"{self.public_url}/cad#settings/system/health" if self.public_url else ""
+        # (the old address, kept so the pushes are as they were: settings.js opens Settings > Station > Health from it, #203)
+        click = f"{self.public_url}/cad#settings/station/health" if self.public_url else ""
         who = a.get("who") or None
         if recovered:
             flap = f", back {a['flap_n']}× before it settled" if a.get("flap_n") else ""
@@ -1221,7 +1328,7 @@ class StationHealth:
     # -- what people and CI read ------------------------------------------------------------------------------------
 
     def alerts(self) -> list[dict]:
-        """The active alerts, worst first then oldest (Settings > Health, the deploy check)."""
+        """The active alerts, worst first then oldest (Settings > Station > Health, the deploy check)."""
         now = self.clock()
         mutes = self._mutes(now)
         with self._lock:
@@ -1257,6 +1364,7 @@ class StationHealth:
                            "last_error": getattr(n, "last_error", ""), "last_push": max(pushed.values(), default=None),
                            "muted": [{"kind": k, "label": MUTE_KINDS[k], "until": u} for k, u in self._mutes(now).items()]},
                 "errors": self.errors.panel() if self.errors is not None else None,
+                "replicas": self.replicas_panel(now),
                 "thresholds": {"silent_min": self.silent_s / 60, "behind_min": self.behind_s / 60,
                                "down_min": self.down_s / 60, "outbox_min": self.outbox_s / 60,
                                "disk_pct": self.disk_pct, "repeat_min": self.repeat_s / 60,

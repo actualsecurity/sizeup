@@ -21,10 +21,11 @@
 // no per-viewer state on the hub).
 //
 // Per viewer, remembered: the rail folded (a strip of view marks with their counts), pinned channels (a Pinned group
-// on top of the tree, in every view) and muted ones (not in All, no count). One of Our calls is never muted (a mute
-// from before it became Main is dropped), and a mute never hides an emergency: the hub leaves neither out. An
-// emergency on any channel shows over the list in every view (folded rail and phone too), with "Recording until"
-// while its window is open (#128), and marks its channel, its view and the phone's Sources button.
+// on top of the tree, in every view) and muted ones (not in All, no count). One of Our calls or a fire channel of ours
+// is never muted (a mute from before is dropped), and a mute never hides an emergency: the hub leaves neither out. An
+// emergency (an alarm row not yet cleared, the tree's `emergency`; an emergency window alone marks nothing) shows over
+// the list in every view (folded rail and phone too), and marks its channel, its view and the phone's Sources button;
+// "Recording until" while a talkgroup's emergency window is open (#128).
 // On a phone the rail is a sheet behind Sources (Escape closes it).
 // A service is told by a letter in a shape (F P E T A), never by colour alone. The tier is a short code (PA TX REC OFF
 // ENC), its meaning in the hover. Another system's traffic comes only to a viewer who may see it (the hub decides).
@@ -70,22 +71,36 @@ window.RadioNav = (() => {
     return n;
   }
   // The mutes that count: never one of Our calls (a channel muted, then made Main: its mute is dropped)
-  const mutesFor = (mutes, sources) => { const ours = new Set(sources.filter((s) => s.ours).map((s) => s.key)); return mutes.filter((k) => !ours.has(k)); };
+  // ... nor a fire channel of ours, in any view (the hub says so: mutable false)
+  const fixed = (s) => !!s.ours || s.mutable === false;
+  const mutesFor = (mutes, sources) => { const ours = new Set(sources.filter(fixed).map((s) => s.key)); return mutes.filter((k) => !ours.has(k)); };
   const emText = (s) => (s.em === "ours" ? "EMERGENCY" : s.stuck ? `Emergency flag stuck on ${s.stuck}` : "Emergency (not ours)");
-  // live: source keys transmitting now; windows: {source key: until} of the open emergency windows
-  function model(sources, p, now, live = new Set(), windows = {}) {
+  // The services whose emergencies stand out when they aren't ours (Settings > Radios > Emergencies; cad.js emLoud):
+  // anyone else's (a bus, DOT) is quiet: a muted EM on its channel only, never over the list, its view or Sources.
+  const EM_LOUD = ["fire", "ems", "other"];
+  const loudServices = () => {
+    const v = typeof cad !== "undefined" && cad.state && cad.state.radio_emergencies;
+    return v && Array.isArray(v.prominent) ? v.prominent : EM_LOUD;
+  };
+  // live: source keys transmitting now; windows: {source key: until} of the open emergency windows; loud: the services
+  // whose emergencies (not ours) stand out
+  function model(sources, p, now, live = new Set(), windows = {}, loud = loudServices()) {
     const pins = new Set(p.pins), mutes = new Set(mutesFor(p.mutes, sources));
     const rows = sources.map((s) => {
       const mute = mutes.has(s.key);
       const t = TIER[s.tier] || null;
       const until = windows[s.key] || null;
+      const em = s.emergency || "";
       return { ...s, mute, pin: pins.has(s.key), n: mute ? 0 : unread(s, p.seen[s.key], now),
                live: !!s.live || live.has(s.key), recent: !!s.last && now - s.last < RECENT_S,
-               em: s.emergency || (until ? "other" : ""), until, code: t ? t[0] : "", tip: t ? t[1] : "" };
+               // quiet: someone else's emergency (or its window alone) on a service that is known and doesn't
+               // stand out; a source with no service is never quiet
+               em, quiet: !!(em || until) && em !== "ours" && !s.ours && !!s.service && !loud.includes(s.service),
+               until, code: t ? t[0] : "", tip: t ? t[1] : "" };
     });
     const views = VIEWS.filter(([v]) => v === "ours" || v === "all" || rows.some((s) => inView(s, v))).map(([id, name, mark, service]) => {
       const mine = rows.filter((s) => inView(s, id));
-      const em = mine.filter((s) => s.em);            // an emergency shows on its views, muted or not
+      const em = mine.filter((s) => s.em && !s.quiet);     // an emergency shows on its views, muted or not (quiet: never)
       return { id, name, mark, service, n: id === "all" ? 0 : mine.reduce((a, s) => a + s.n, 0), live: mine.some((s) => s.live && !s.mute),
                em: em.some((s) => s.em === "ours") ? "ours" : em.length ? "other" : "" };
     });
@@ -99,7 +114,7 @@ window.RadioNav = (() => {
       g.sources.push(s);
       g.n += s.n;
     }
-    return { views, systems, pinned: rows.filter((s) => s.pin), rows, flagged: rows.filter((s) => s.em || s.until) };
+    return { views, systems, pinned: rows.filter((s) => s.pin), rows, flagged: rows.filter((s) => (s.em || s.until) && !s.quiet) };
   }
   // The first page asked again while older pages are on screen: the fresh page, then what was loaded under it
   function merged(fresh, have) {
@@ -305,8 +320,8 @@ window.RadioNav = (() => {
     c.title = `${n} new`;
     return c;
   }
-  function emChip(em, text, title) {
-    const c = el("span", "chip emergency" + (em === "ours" ? "" : " em-other"), text || "EM");
+  function emChip(em, text, title, quiet = false) {
+    const c = el("span", quiet ? "chip em-quiet" : "chip emergency" + (em === "ours" ? "" : " em-other"), text || "EM");
     c.title = title || (em === "ours" ? "Emergency" : "Emergency (not ours)");
     return c;
   }
@@ -329,8 +344,9 @@ window.RadioNav = (() => {
   }
   function windowKeys() {
     const out = {};
+    // a window is the county's talkgroup's (sizeup/cad/alarms.py Windows.state: {talkgroup, channel, until, ...})
     for (const w of (cad.state && cad.state.alarms && cad.state.alarms.windows) || []) {
-      if (w.until) out[w.source || `p25:${w.system || "westchester"}:${w.talkgroup}`] = w.until;
+      if (w.until && w.talkgroup !== undefined && w.talkgroup !== null) out[`p25:westchester:${w.talkgroup}`] = w.until;
     }
     return out;
   }
@@ -342,7 +358,7 @@ window.RadioNav = (() => {
     b.title = [`${s.system_label || s.system} › ${s.group || "Other"}`, s.tip, s.department].filter(Boolean).join(" · ");
     b.append(dot(s), el("span", "trunc", s.name));
     if (s.code) b.append(el("span", "rn-tier", s.code));
-    if (s.em) b.append(emChip(s.em, "EM", emText(s)));
+    if (s.em) b.append(emChip(s.em, "EM", emText(s), s.quiet));
     b.append(el("span", "spacer"));
     if (s.n) b.append(count(s.n, s.ours));
     const pin = el("button", "rn-act quiet sm icon", "★");
@@ -352,7 +368,7 @@ window.RadioNav = (() => {
     pin.setAttribute("aria-pressed", String(s.pin));
     pin.setAttribute("aria-label", `Pin ${s.name}`);
     row.append(b, pin);
-    if (!s.ours) {                                    // Our calls are never muted
+    if (!fixed(s)) {                                  // Our calls and our fire channels are never muted
       const mute = el("button", "rn-act quiet sm icon", s.mute ? "✕" : "♪");
       mute.type = "button";
       mute.dataset.mute = s.key;
@@ -367,7 +383,7 @@ window.RadioNav = (() => {
     if (!dom || !st.open) return;
     const m = model(st.src, st.p, now(), liveKeys(), windowKeys());
     const here = (v) => v.id === st.f.view && !st.f.source;
-    const sig = JSON.stringify([st.f.view, st.f.source, st.p.rail, st.sheet, m.views, m.rows.map((s) => [s.key, s.name, s.n, s.live, s.recent, s.pin, s.mute, s.em, s.stuck, s.until, s.code])]);
+    const sig = JSON.stringify([st.f.view, st.f.source, st.p.rail, st.sheet, m.views, m.rows.map((s) => [s.key, s.name, s.n, s.live, s.recent, s.pin, s.mute, s.em, s.quiet, s.stuck, s.until, s.code])]);
     if (sig === st.railSig) return;
     st.railSig = sig;
     $("#rn").classList.toggle("mini", !st.p.rail);
@@ -412,7 +428,7 @@ window.RadioNav = (() => {
     // the phone's Sources button: what the other views hold (the rail is behind it)
     const away = m.views.filter((v) => !here(v) && v.id !== "all");
     // (an emergency on any channel not on screen, also one that is in no view but All)
-    const off = m.rows.filter((x) => x.em && !(st.f.source ? x.key === st.f.source : inView(x, st.f.view)));
+    const off = m.rows.filter((x) => x.em && !x.quiet && !(st.f.source ? x.key === st.f.source : inView(x, st.f.view)));
     const n = away.reduce((a, v) => a + v.n, 0), em = off.some((x) => x.em === "ours") ? "ours" : off.length ? "other" : "";
     $("#rn-open").replaceChildren(el("span", "", "Sources"), ...(em ? [emChip(em)] : []),
                                   ...(n ? [count(n, away.some((v) => v.id === "ours" && v.n))] : []));
