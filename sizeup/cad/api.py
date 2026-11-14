@@ -63,6 +63,20 @@ POST /api/cad/preplan                     {kind, lat, lon, label?, note?, level?
 POST /api/cad/preplan/<id>                {kind?, label?, note?, level?, priority?, review_by?, lat?, lon?, link?,
                                           action?: delete | restore (admins)}. Both: dispatchers and admins, in the
                                           Settings audit log (section "preplan")
+GET  /api/cad/preplan/docs?incident=<id> | where=<address>
+                                          a building's site documents (#459, sizeup/cad/preplan_docs.py): {docs, gen,
+                                          configured}; anyone signed in and active; admin-only ones: admins only
+GET  /api/cad/preplan/docs/<id>           {doc, footprint}: one, and its building's county footprint (the align tool)
+GET  /api/cad/preplan/docs/<id>/file | /plan (?dl=1)
+                                          the file, or a floor plan's picture, streamed by the hub from the store (no
+                                          links to it): nosniff, Content-Disposition, no-store, a CSP; 503 when busy;
+                                          in the person's activity ("Opened site doc 12")
+POST /api/cad/preplan/docs                the file itself as the body (at most 25 MB: PDF, PNG, JPEG by content), with
+                                          X-Sizeup-Doc: URI-encoded JSON {kind, title, floor?, page?, admin_only?,
+                                          incident_id | where} (server.py reads it before the 64 KB JSON limit)
+POST /api/cad/preplan/docs/<id>           {title?, kind?, floor?, page?, admin_only? (admins), corners? ([[lon, lat] x 4]
+                                          | null), action?: delete}. Both: dispatchers and admins, in the Settings audit
+                                          log (section "preplan_docs")
 GET  /api/cad/admin                       record counts and the next event number
 GET  /api/cad/whoami                      {email, name, callsign, source: "access" | "none", role, enforced}: who
                                           signed in; with Access also {active, may, bootstrap, admins: [names]}
@@ -285,6 +299,8 @@ SUGGEST = re.compile(r"/api/cad/incident/(\d{1,9})/units")
 HERE = re.compile(r"/api/cad/incident/(\d{1,9})/here")                          # History here (#403)
 PREMISE = re.compile(r"/api/cad/premise(?:/(\d{1,9})(?:/(ack))?)?")              # premise notes (#403)
 PREPLAN = re.compile(r"/api/cad/preplan(?:/(\d{1,9}))?")                         # pre-plan points (#456)
+DOCS = re.compile(r"/api/cad/preplan/docs(?:/(\d{1,9}))?")                       # site documents (#459)
+DOC_FILE = re.compile(r"/api/cad/preplan/docs/(\d{1,9})/(file|plan)")
 EXPORT = re.compile(r"/api/cad/export/([a-z-]{1,20}\.csv)")
 UNIT = re.compile(r"/api/cad/unit/(\d{1,9})/status")
 UNIT_STATION = re.compile(r"/api/cad/unit/(\d{1,9})/station")
@@ -333,6 +349,7 @@ WRITES = (
     (re.compile(r"/api/cad/radio-id"), "dispatch"),                          # who a new FG1 radio is (#163)
     (PREMISE, "dispatch"),                                                  # premise notes: add, edit, expire, seen (#403)
     (PREPLAN, "dispatch"),                                                  # pre-plan points: add, edit, move, delete (#456)
+    (DOCS, "dispatch"),                                                     # site documents: upload, edit, align, delete (#459)
     (re.compile(r"/api/incident/[^/]{1,80}/close"), "dispatch"),            # the monitor's incident list (server.py)
     (UNIT_STATION, "admin"),                                                # a unit's home station: Settings > Units
     (re.compile(r"/api/cad/settings/(?:channels|stt)"), "admin"),           # Settings > Radios: record / transcribe /
@@ -518,6 +535,22 @@ def _preplan(m, b, o, c):
     return f"{'Moved and edited' if moved else 'Edited'} pre-plan point {pid}: {', '.join(changed) or 'nothing'}", ""
 
 
+def _docs(m, b, o, c):
+    """A site document (#459): its number and kind, never its title, file name, floor or corners."""
+    from sizeup.cad.preplan_docs import KINDS
+    d = o.get("doc") or {}
+    did = m.group(1) or d.get("id") or ""
+    if m.group(1) is None:
+        n = _number(c, b.get("incident_id")) if b.get("incident_id") not in (None, "") else ""
+        return f"Uploaded site doc {did} ({KINDS.get(d.get('kind'), '')})" + (f" from {n}" if n else ""), n
+    if b.get("action") == "delete":
+        return f"Deleted site doc {did}", ""
+    changed = [k for k in o.get("changed") or [] if k != "corners"]
+    if "corners" in (o.get("changed") or []):
+        return f"Aligned site doc {did}" + (f" and edited: {', '.join(changed)}" if changed else ""), ""
+    return f"Edited site doc {did}: {', '.join(changed) or 'nothing'}", ""
+
+
 def _prealert_at(o) -> str:
     from sizeup.prealert import _hms
     return _hms(o.get("at")) or "?"
@@ -552,6 +585,7 @@ DOES = (
         (o.get("linked") or [""])[0])),
     (PREMISE, _premise),
     (PREPLAN, _preplan),
+    (DOCS, _docs),
     (UNIT_STATION, lambda m, b, o, c: (f"Changed settings: {o.get('name', '')} station {_clip(b.get('station'), 40) or 'unset'}", "")),
     (re.compile(r"/api/cad/settings/channels"), _channels),
     (re.compile(r"/api/cad/settings/stt"), _stt),
@@ -752,6 +786,70 @@ class CadApi:
         h = {"ETag": etag, "Cache-Control": "private, no-cache"} if etag else {"Cache-Control": "no-store"}   # a call's: never a 304
         return 200, json.dumps(out, separators=(",", ":")).encode(), JSON, h
 
+    def _docs_get(self, path: str, query: str, who) -> tuple:
+        """GET /api/cad/preplan/docs(?incident= | where=), /docs/<id>, /docs/<id>/file | plan (#459): anyone signed in
+        and active (a deactivated person: no); an admin-only document: admins (anyone else: 404, as if none). A file:
+        streamed by the hub from the store (never a link to it), with its type, Content-Disposition, nosniff, no-store,
+        no-referrer and a CSP that runs nothing (sandbox for pictures); 503 when every download slot is taken."""
+        may = self._doc_reader(who)
+        if may is None:
+            return _json(403, {"error": "Account deactivated"})
+        docs, q = self.cad.preplan_docs, parse_qs(query)
+        try:
+            if path == "/api/cad/preplan/docs":
+                return 200, json.dumps(docs.get(q, may), separators=(",", ":")).encode(), JSON, {"Cache-Control": "no-store"}
+            if m := DOCS.fullmatch(path):
+                return _json(200, docs.one(int(m.group(1)), may))
+            if m := DOC_FILE.fullmatch(path):
+                f = docs.file(int(m.group(1)), m.group(2), may, who.email if who is not None else "",
+                              dl=(q.get("dl") or [""])[0] == "1")
+        except CadError as e:
+            from sizeup.cad.preplan_docs import Busy
+            msg = str(e)
+            if isinstance(e, Busy):
+                return 503, json.dumps({"error": msg}).encode(), JSON, {"Retry-After": "2", "Cache-Control": "no-store"}
+            return _json(404 if msg.startswith("no ") else 400, {"error": msg})
+        if not DOC_FILE.fullmatch(path):
+            return 404, b"not found\n", "text/plain"
+        csp = ("default-src 'none'; frame-ancestors 'self'" if f["ctype"] == "application/pdf"
+               else "default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; sandbox; frame-ancestors 'self'")
+        return 200, f["stream"], f["ctype"], {"Cache-Control": "private, no-store", "Referrer-Policy": "no-referrer",
+                                              "X-Content-Type-Options": "nosniff", "Content-Disposition": f["disposition"],
+                                              "Content-Security-Policy": csp}
+
+    def _doc_reader(self, who) -> str | None:
+        """A site document reader's standing: "admin" | "dispatcher" | "viewer"; None: deactivated (no documents). Without
+        a verified person (all-in-one, a dev box): "viewer" (never an admin-only document)."""
+        if who is None or not who.email:
+            return "viewer"
+        try:
+            st = self.cad.settings.standing(who.email)
+        except CadError:
+            return None
+        return st["may"] if st["active"] else None
+
+    def upload(self, path: str, header: str, raw: bytes, who=None, client: tuple[str, str] = NO_CLIENT) -> tuple:
+        """POST /api/cad/preplan/docs (#459): the file as the body, its details in the X-Sizeup-Doc header (server.py:
+        after permit(), up to 25 MB). The same checks as post(): the person's standing, the operator, their activity."""
+        from sizeup.cad.preplan_docs import meta_of
+        c = self.cad
+        signed = who is not None and bool(who.email)
+        try:
+            body = meta_of(header)
+            if signed:
+                st = c.settings.standing(who.email)
+                if refused := self.permit(path, who, body, st, client):
+                    return refused
+                body["operator"] = st["operator"]
+                body["_may"] = st["may"]
+            else:
+                body["_may"] = "dispatcher"        # all-in-one (roles not enforced): an editor, never an admin
+            out = c.preplan_docs.upload(body, raw)
+        except CadError as e:
+            return _json(400, {"error": str(e)})
+        self.did(path, who, body, out, client)
+        return _json(200, out)
+
     def _may(self, who) -> str:
         """The viewer's standing for what they may read (premise notes' categories, #403): "admin" | "dispatcher" |
         "viewer"; without a verified person (all-in-one) nothing is checked: "admin"."""
@@ -900,6 +998,8 @@ class CadApi:
                 return _json(200, self.cad.premise.listing(parse_qs(query), self._may(who)))
             if path in ("/api/cad/preplan", "/api/cad/preplan/where", "/api/cad/preplan.csv"):
                 return self._preplan(path, query, who)
+            if path.startswith("/api/cad/preplan/docs"):
+                return self._docs_get(path, query, who)
             if m := HERE.fullmatch(path):
                 return _json(200, self.cad.addrs.here(int(m.group(1)), self._may(who)))
             if m := SUGGEST.fullmatch(path):
@@ -954,8 +1054,10 @@ class CadApi:
                 if refused := self.permit(path, who, body, st, client):
                     return refused
                 body["operator"] = st["operator"]
-                if PREMISE.fullmatch(path) or PREPLAN.fullmatch(path):
+                if PREMISE.fullmatch(path) or PREPLAN.fullmatch(path) or DOCS.fullmatch(path):
                     body["_may"] = st["may"]
+            elif DOCS.fullmatch(path):
+                body["_may"] = "dispatcher"            # all-in-one: an editor of site documents, never an admin (#459)
             out = self._write(path, body, signed)
         except LastAdmin as e:
             if signed:
@@ -1018,6 +1120,10 @@ class CadApi:
             return (c.premise.ack if m.group(2) else c.premise.edit)(int(m.group(1)), body)
         if m := PREPLAN.fullmatch(path):
             return c.preplan.create(body) if m.group(1) is None else c.preplan.edit(int(m.group(1)), body)
+        if m := DOCS.fullmatch(path):
+            if m.group(1) is None:
+                raise CadError("upload: the file as the body, its details in X-Sizeup-Doc")
+            return c.preplan_docs.edit(int(m.group(1)), body)
         if m := DATASOURCE.fullmatch(path):
             return self._ds_refresh(unquote(m.group(1)), body)
         if m := DVR_PIN.fullmatch(path):
