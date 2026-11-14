@@ -336,6 +336,9 @@ class Cad:
         from sizeup.intel.engine import IntelEngine
         self.intel = IntelEngine(settings=lambda: {k: self.settings.section(k) for k in ("intel", "intel_packs", "intel_rules")},
                                  store=self.store, clock=clock, log=log, tz=TZ)
+        from sizeup.intel.infer import Inference           # the model behind the rules: off unless Settings turn it on
+        self.intel.infer = Inference(settings=lambda: self.intel.policy.cfg, store=self.store, clock=clock, log=log, tz=TZ,
+                                     worker=True)            # its calls on the "infer" thread, never the engine's
         self.intel_admin = IntelAdmin(self, self.intel)
         self.comms.on_context_text = self.intel.consider      # comms.py calls it with the str tid, after commit (#483)
         # The place search (sizeup/geo/places.py, #67): the app sets place_source, a function that builds the
@@ -502,7 +505,24 @@ class Cad:
             except Exception as e:  # noqa: BLE001 - a pre-alert never stops the transcript
                 self.log(f"CAD: airport alert level: {type(e).__name__}: {e}")
 
+    def _display_incs(self, incs: list[dict]) -> None:
+        """A page's transcript in an event's remarks and timeline as shown: vocabulary phrases without AWS's hyphens
+        (comms.display: transcribe.Display). At read time, in place on the copies served; nothing stored changes."""
+        fn = self.comms.display
+        if fn is None:
+            return
+        for inc in incs:
+            if isinstance(inc.get("remarks"), str) and "-" in inc["remarks"]:
+                inc["remarks"] = fn(inc["remarks"])
+            for e in inc.get("events") or []:
+                if isinstance(e, dict) and isinstance(e.get("text"), str) and "-" in e["text"]:
+                    e["text"] = fn(e["text"])
+
     def _decorate_auto(self, incs: list[dict]) -> list[dict]:
+        try:
+            self._display_incs(incs)
+        except Exception as e:  # noqa: BLE001 - as stored
+            self.log(f"CAD: transcript display: {type(e).__name__}")
         try:
             self.auto.decorate(incs)                      # #311: each automatic step, its source and its undo
         except Exception as e:  # noqa: BLE001
@@ -2333,14 +2353,16 @@ class Cad:
         PCFD · units Engine 60, Ladder 31", with " · feed: units" when the feed's label says otherwise). In 60
         Control mode AutoDispatch.on_page dispatches the units it named that are on our boards; in PCFD mode they stay
         that line for a person. Its cross streets fill the incident's when it has none and no person set its
-        location. The feed's type and location stand: the page's are only noted (Sources._page_attached)."""
+        location. The feed's type and location stand: the page's are only noted (Sources._page_attached); a feed
+        with no type of ours gets the page's until it says one."""
         cur = self.store.incident(iid)
         have = {e["text"] for e in self.store.q("SELECT text FROM events WHERE incident_id = ? AND kind = 'tones'", (iid,))}
         depts = list(dict.fromkeys([*(getattr(inc, "tone_departments", None) or []), *(getattr(inc, "departments", None) or [])]))
         feed, _ = self._page_scope(iid, inc, note=False)
         texts = [x[:2000] for x in lines]
         base = self.scope.line(iid) or scope_mod.page_line(depts, scope_mod.latest_units(inc, self.scope.roster()),
-                                                           getattr(inc, "tone_departments", ()), inc.incident_type)
+                                                           getattr(inc, "tone_departments", ()), inc.incident_type,
+                                                           text=(list(inc.page_text or []) or [""])[-1])
         if base and not any(x == base or x.startswith(base + " · feed: ") for x in have):   # once per reading
             texts.append(base + (f" · feed: {feed}" if feed else ""))   # (feed: "" when that disagreement is said)
         new = [x for x in dict.fromkeys(texts) if x not in have]
@@ -2354,6 +2376,19 @@ class Cad:
             try:
                 self.store.update_incident(iid, {"cross_street": cross}, operator="Paging", log=False)
             except CadError:
+                pass
+        # The feed is the primary and the page its backup: a feed that gave no type of ours leaves the page's in (and
+        # its subtype under the same type), until the feed says one (Sources._apply). Never over a person's.
+        typ, sub = f.get("type") or "", f.get("subtype") or ""
+        fill = {}
+        if typ and not cur["type"]:
+            fill = {"type": typ, "subtype": sub, "type_note": f.get("type_note") or ""}
+        elif typ and sub and typ == cur["type"] and not cur["subtype"]:
+            fill = {"subtype": sub, "type_note": ""}
+        if fill and cur["status"] in ("queued", "pending", "active") and "type" not in self.sources.manual(iid):
+            try:
+                self.store.update_incident(iid, fill, operator="Paging", log=False)
+            except (CadError, ValueError):
                 pass
 
     def _create_from_page(self, data: dict) -> int:
