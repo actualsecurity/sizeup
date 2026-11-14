@@ -32,8 +32,8 @@ A factory is `factory(ctx: SourceContext) -> Adapter | Iterable[Adapter]`. An ad
                          An event left out is never deleted, but the runner sends the ids of each poll's snapshot every
                          SEEN_EVERY_S ("source_seen"), and the hub flags an open report the feed no longer lists. It may
                          raise: the runner reports the
-                         source "failing" (the exception's TYPE only as the reason: never its text, which may hold a URL
-                         or a credential) and calls it again after poll_s, doubling to MAX_BACKOFF_S while it keeps
+                         source "backing_off", "failing" from the RAISE_FAILING_AFTER-th raise in a row (the exception's
+                         TYPE only as the reason: never its text, which may hold a URL or a credential) and calls it again after poll_s, doubling to MAX_BACKOFF_S while it keeps
                          raising. A bad event is skipped on its own; the others still go
     health() -> Health   how the feed is doing now; asked after every poll()
     close() -> None      optional: called once when the station stops
@@ -104,6 +104,7 @@ SOURCE_ID = re.compile(r"[a-z0-9][a-z0-9_-]{0,31}")
 RESERVED = ("paging",)
 MIN_POLL_S = 30.0                      # gentle polling: never more often than this, whatever poll_s says
 MAX_BACKOFF_S = 300.0
+RAISE_FAILING_AFTER = 3                # poll() raising: "backing_off" until this many in a row, then "failing"
 MAX_UNITS, MAX_COMMENTS, MAX_TEXT = 60, 500, 2000
 MAX_ALIASES = 50
 MAX_UNIT_LEN = 32
