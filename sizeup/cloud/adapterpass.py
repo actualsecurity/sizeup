@@ -30,8 +30,8 @@ signed request's body, never in a log, the audit, an answer or an exception's te
 kept (a ValidationException can quote the value back): its code only. Every reference is dropped once the request is
 sent (the body buffer is also overwritten, best effort); Python can't wipe the str and bytes copies it made on the
 way, which live in the hub's memory until they are collected. One copy is kept on purpose: a value that passed the
-checks is registered with the log scrub (sizeup/logscrub.py secret(), in memory only, never written down) before
-anything is sent, so a log line that ever holds it (a station's batch, the Logs view's rows) is dropped.
+checks, the gap and the confirm, of at least 6 characters, is registered with the log scrub (sizeup/logscrub.py
+secret(), in memory only, never written down) just before it is sent, so a log line that ever holds it (a station's batch, the Logs view's rows) is dropped.
 """
 
 from __future__ import annotations
@@ -344,8 +344,6 @@ class AdapterPassword:
             raise SaveRefused("They differ")
         if why := problem(new.reveal()):
             raise SaveRefused(why)
-        from sizeup import logscrub
-        logscrub.secret(new.reveal(), short=True)       # before anything is sent: never in a log line that is shown
         with self._lock:
             if self._busy:
                 raise SaveRefused("A save is going", 409)
@@ -367,6 +365,12 @@ class AdapterPassword:
             raise SaveRefused("The adapter is stopped after refused log-ons: confirm to save", 409)
         old = f"v{meta['version']}" if meta.get("version") else ""
         who = operator or by or "someone"
+        # this value is going to SSM (the gap and the confirm passed): never in a log line that is shown. Only one the
+        # scrub matches as a value (logscrub.MIN_SECRET characters): a shorter one, matched as a word, would drop
+        # ordinary log lines
+        from sizeup import logscrub
+        if len(new.reveal()) >= logscrub.MIN_SECRET:
+            logscrub.secret(new.reveal())
         doc = {"Name": self.name, "Value": new.reveal(), "Type": "SecureString", "KeyId": self.key, "Overwrite": True,
                "Description": DESCRIPTION}
         body = bytearray(json.dumps(doc, separators=(",", ":")).encode())

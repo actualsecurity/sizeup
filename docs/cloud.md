@@ -931,8 +931,8 @@ Incidents come in from ranked sources. The interface is in `sizeup/sources/__ini
   the last save here or the last change in SSM), and while a source is stopped on refused log-ons ("login ...") only
   with an explicit confirm. Each save is in the settings audit (who, when, the version) and the person's activity;
   a save AWS didn't answer is audited as "no answer" and counts. The value is never logged, audited, answered or put
-  in an exception's text (AWS's own error message isn't kept, only its code). A value that passed the checks is
-  registered with the log scrub (`logscrub.secret`, in memory only) before it is sent, so a log line holding it is
+  in an exception's text (AWS's own error message isn't kept, only its code). A value about to be sent (the gap and the
+  confirm passed; 6 characters or more) is registered with the log scrub (`logscrub.secret`, in memory only), so a log line holding it is
   dropped from the station's shipped logs and the Logs view. The hub never logs into the county app.
   The department's CLI script still works the same; the card then shows the version as "not from the hub".
   No save while SSM can't say the version (DescribeParameters failing, other than "not there yet"): without its

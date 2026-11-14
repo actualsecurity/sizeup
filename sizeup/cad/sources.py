@@ -902,6 +902,10 @@ class Sources:
                     if bad_since is None or (ok_since is not None and now - ok_since >= PROMOTE_S):
                         bad_since = now                      # a new bad run (an ok that hadn't held keeps the old one)
                     ok_since, held_state, held_reason = None, None, None
+                if not ok and self._shown(old, now)[0] != "ok":
+                    # bad was on screen already (a stopped "failing" is shown at once): a milder bad report after it
+                    # never flips it back to ok. Only "ok" held for PROMOTE_S does
+                    bad_since = min(now - DEMOTE_S, bad_since if bad_since is not None else now)
             with self.store.tx() as db:
                 db.execute("INSERT INTO source_health (source, label, rank, state, reason, since, at, received, bad_since, "
                            "ok_since, held_state, held_reason, ok_at, stopped) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
@@ -928,7 +932,9 @@ class Sources:
     def _shown(r: dict, now: float) -> tuple[str, str, bool]:
         """(state, reason, settled) after the hysteresis: bad is shown once the bad run (bad_since) is DEMOTE_S old while
         the reports still say so, ok again once it has held PROMOTE_S; until then what was shown, its reason saying what
-        was reported. Shown at once: the adapter's own "failing" (stopped) and silence for REPORT_STALE_S."""
+        was reported. Shown at once: the adapter's own "failing" (stopped) and silence for REPORT_STALE_S. Once bad
+        has been shown, any bad report after it is shown too (on_health dates the bad run back): "failing" (stopped)
+        then "backing_off" stays bad until "ok" has held PROMOTE_S."""
         state, reason = Sources._reported(r, now)
         if now - r["got"] > REPORT_STALE_S:
             return state, reason, True

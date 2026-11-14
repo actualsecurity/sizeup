@@ -22,7 +22,7 @@ from sizeup.cloud.access import Identity
 from sizeup.cloud.adapterpass import AdapterPassword, Hidden, SaveRefused, problem, station_sources
 from sizeup.web.server import WebServer
 from tests.test_cad import make_cad
-from tests.test_roles import COREY, JULIAN, VAL, people
+from tests.test_roles import CASEY, JORDAN, VAL, people
 
 ROOT = Path(__file__).resolve().parent.parent
 NAME = "/sizeup-station/adapter/TEST_FEED_PASS"
@@ -111,7 +111,7 @@ def hub(tmp_path):
     srv.shutdown()
 
 
-def post(h, body, who=COREY, headers=None, raw=None):
+def post(h, body, who=CASEY, headers=None, raw=None):
     hdr = {"Content-Type": "application/json", "X-Sizeup-Action": "adapter-password"} if headers is None else headers
     if who:
         hdr["X-Test-User"] = who
@@ -129,7 +129,7 @@ def post(h, body, who=COREY, headers=None, raw=None):
             return e.code, {}, out
 
 
-def get(h, who=COREY):
+def get(h, who=CASEY):
     req = urllib.request.Request(h.url + "/api/cad/adapter-password", headers={"X-Test-User": who} if who else {})
     try:
         with urllib.request.urlopen(req, timeout=10) as r:
@@ -294,13 +294,13 @@ def test_an_admin_saves_a_new_version_and_only_ssm_ever_sees_it(hub, capfd):
     assert not leaks(json.dumps(put["headers"]))                # (the signature is over it, the value isn't in it)
     # the audit: who, when, the version; the person's activity: what they did; the log: the version and who
     audit = hub.cad.store.q("SELECT * FROM settings_audit WHERE key = 'station adapter password'")
-    assert [(a["operator"], a["old"], a["new"], a["at"]) for a in audit] == [(f"Corey <{COREY}>", "v4", "v5", hub.clock())]
+    assert [(a["operator"], a["old"], a["new"], a["at"]) for a in audit] == [(f"Casey <{CASEY}>", "v4", "v5", hub.clock())]
     acts = hub.cad.store.q("SELECT summary, route FROM user_activity WHERE kind = 'action'")
     assert {"summary": "Saved the station adapter password (v5)", "route": "POST /api/cad/adapter-password"} in acts
-    assert any(m == f"adapter password: v5 saved by {COREY}" for m in hub.logs)
+    assert any(m == f"adapter password: v5 saved by {CASEY}" for m in hub.logs)
     # the page: the version, when, who (from the hub's own audit), the next save in 5 min
     code, st, sraw = get(hub)
-    assert code == 200 and st["version"] == 5 and st["saved_here"] and st["saved_by"] == f"Corey <{COREY}>" and st["wait_s"] == 300
+    assert code == 200 and st["version"] == 5 and st["saved_here"] and st["saved_by"] == f"Casey <{CASEY}>" and st["wait_s"] == 300
     assert "LastModifiedUser" not in sraw.decode() and "000000000000" not in sraw.decode()
     io = capfd.readouterr()
     assert not leaks(raw, sraw, io.out, io.err, *everything(hub))
@@ -321,7 +321,7 @@ def test_the_status_never_reads_the_value(hub):
 
 def test_admins_only_and_refused_before_the_body_is_read(hub):
     assert needs("/api/cad/adapter-password") == "admin" and "/api/cad/adapter-password" in ADMIN_READS
-    for who in (JULIAN, VAL):
+    for who in (JORDAN, VAL):
         code, out, raw = post(hub, {"password": SECRET, "again": SECRET}, who=who)
         assert code == 403 and "Admins only" in out["error"]
         assert get(hub, who)[0] == 403
@@ -471,14 +471,14 @@ def test_one_save_at_a_time():
         return ssm(url, headers, body, timeout)
     cad = make_cad()
     ap = AdapterPassword(NAME, KEY, send=slow, log=lambda m: None, creds=lambda: aws.Credentials("AKIDEXAMPLE", "x"))
-    t = threading.Thread(target=lambda: (ap.save(Hidden("a"), Hidden("a"), False, COREY, "Corey", cad.store), done.set()))
+    t = threading.Thread(target=lambda: (ap.save(Hidden("a"), Hidden("a"), False, CASEY, "Casey", cad.store), done.set()))
     t.start()
     for _ in range(100):
         if ap._busy:
             break
         threading.Event().wait(0.01)
     with pytest.raises(SaveRefused) as e:
-        ap.save(Hidden("b"), Hidden("b"), False, COREY, "Corey", cad.store)
+        ap.save(Hidden("b"), Hidden("b"), False, CASEY, "Casey", cad.store)
     assert e.value.status == 409
     gate.set()
     t.join(5)
@@ -494,7 +494,7 @@ def test_the_body_buffer_is_zeroed_after_sending():
     cad = make_cad()
     ap = AdapterPassword(NAME, KEY, send=keep, log=lambda m: None, creds=lambda: aws.Credentials("AKIDEXAMPLE", "x"))
     new = Hidden(SECRET)
-    assert ap.save(new, Hidden(SECRET), False, COREY, "Corey", cad.store)["version"] == 9
+    assert ap.save(new, Hidden(SECRET), False, CASEY, "Casey", cad.store)["version"] == 9
     put = seen[-1]
     assert isinstance(put, bytearray) and set(put) == {0} and new.reveal() == ""
 
@@ -570,15 +570,29 @@ def test_a_saved_password_is_registered_with_the_log_scrub(hub, capfd):
     assert not leaks(raw, io.out, io.err, *everything(hub))
 
 
-def test_the_log_scrub_knows_a_value_aws_may_have_saved_and_a_short_one_but_not_a_refused_one(hub):
+def test_the_log_scrub_knows_only_a_value_that_is_sent(hub):
+    """Registered once the gap and the confirm have passed, just before the request: a value refused for the gap, for
+    the missing confirm or because the two differ never is; one AWS may have saved is. A value shorter than the
+    scrub's MIN_SECRET is never registered (as a whole word it would drop ordinary log lines)."""
     hub.ssm.put_answer = (500, b'{"__type":"InternalServerError"}')    # no answer worth the name: it may have saved
     code, out, _ = post(hub, {"password": SECRET, "again": SECRET})
     assert code == 502 and out.get("maybe_saved") and logscrub.scrub(f"sent {SECRET} on") is None
     logscrub.forget()
-    code, _, _ = post(hub, {"password": SECRET, "again": SECRET + "x"})          # they differ: never sent, not kept
+    other = "An0ther-made-up-value"
+    code, _, _ = post(hub, {"password": other, "again": other})                   # inside the 5 min gap: refused
+    assert code == 429 and logscrub.registered() == (0, 0) and logscrub.scrub(f"sent {other} on") is not None
+    code, _, _ = post(hub, {"password": other, "again": other + "x"})             # they differ
     assert code == 400 and logscrub.registered() == (0, 0)
     hub.ssm.put_answer = None
     hub.clock.t += adapterpass.MIN_GAP_S + 1
-    code, _, _ = post(hub, {"password": "Ab1!", "again": "Ab1!"})                 # shorter than the scrub's MIN_SECRET
-    assert code == 200 and logscrub.scrub("log-on with Ab1! refused") is None
-    assert logscrub.scrub("tab1!x is no password") is not None                    # ... as a whole word only
+    stop_source(hub)
+    code, _, _ = post(hub, {"password": other, "again": other})                   # stopped, no confirm: refused
+    assert code == 409 and logscrub.registered() == (0, 0)
+    code, _, _ = post(hub, {"password": other, "again": other, "confirm": True})
+    assert code == 200 and logscrub.scrub(f"sent {other} on") is None             # sent: registered
+    logscrub.forget()
+    hub.clock.t += adapterpass.MIN_GAP_S + 1
+    assert len("Ab1!x") < logscrub.MIN_SECRET
+    code, _, _ = post(hub, {"password": "Ab1!x", "again": "Ab1!x", "confirm": True})
+    assert code == 200 and logscrub.registered() == (0, 0)                        # too short to match on: not registered
+    assert logscrub.scrub("log-on with Ab1!x refused") is not None
