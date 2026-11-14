@@ -1046,7 +1046,13 @@ Incidents come in from ranked sources. The interface is in `sizeup/sources/__ini
   but still open (an outage, a first run) makes its incident, noted "first seen N after its dispatch".
 - **Health:** a feed reports `ok`, `backing_off`, `failing` or `stale`, and a feed with no report for 3 min counts as
   stale (by the hub's clock). Paging is healthy while the station is connected. The first healthy tier is the acting primary. The console
-  pill shows it (`County feed · backing off · Paging primary`), and so does Settings > Station > Health.
+  pill shows it (`County feed · backing off · Paging primary`), and so does Settings > Station > Health. Hysteresis: a feed shown
+  ok goes bad (and the acting primary moves) only once a bad run has lasted 90 s (an `ok` that hasn't held 60 s
+  doesn't end the run), and is ok again only after 60 s of `ok`. Shown at once: `failing` from the adapter itself
+  (it stopped) and no report for 3 min; a feed silent since before the hub started is unknown, and its first report
+  is taken as it is. A `poll()` that raises is `backing_off` (the exception's type), `failing` from the third in a
+  row. A station restart's one-cycle "no list yet" never flips it. The pill's hover has what was reported meanwhile
+  and, when the feed isn't plainly ok, the last ok report's age.
 - **Matching:** only an open incident (queued, pending or active) created within 20 min, with nothing on it from the
   same source.
   - Locations are first cut to their street part. A named place after `:` or `@`, `;…`, `(…)`, `[…]`, the town after a
@@ -1113,6 +1119,30 @@ Incidents come in from ranked sources. The interface is in `sizeup/sources/__ini
 - **Reset:** an adapter that stopped itself is reset by an admin on Settings > Station > Health (`POST
   /api/sources/reset`, a `sources_reset` job, at most one per source per 5 min) or on the station (`sudo
   sizeup-station adapter reset`); it runs on the adapter's own thread before its next poll (`sizeup/cloud/adapters.py`).
+- **The adapter's password, set from the hub (write-only):** Settings > Station > Adapter, admins only
+  (`sizeup/cloud/adapterpass.py`, `POST /api/cad/adapter-password`). A new password typed twice becomes the next
+  version of the station's SSM SecureString (`ssm:PutParameter` with the adapter's own KMS key); the station picks it up
+  as it does any new version (about 5 min). The hub can't read it back: its roles keep an explicit Deny on
+  `GetParameter*`, history, delete and label for `/sizeup-station/*` and on `kms:Decrypt` for the key; it may only
+  `PutParameter` that one parameter, `kms:Encrypt` through SSM for it, and `ssm:DescribeParameters` (metadata: the
+  version and when). It is optional and the task definition doesn't know about it: at first use the hub reads the
+  parameter's name and the key from two plain String parameters of its own, `/sizeup-hub/adapter-password-param` and
+  `/sizeup-hub/adapter-password-key` (names only, `ssm:GetParameter` on exactly those two), cached 10 min; absent or
+  unreadable, the card says "Not configured", a save is refused, and it is asked again at most every 3 min. The real
+  names never appear in the repo. Each save is one log-on attempt on the shared county account, so: at most one save per 5 min (after
+  the last save here or the last change in SSM), and while a source is stopped on refused log-ons ("login ...") only
+  with an explicit confirm. Each save is in the settings audit (who, when, the version) and the person's activity;
+  a save AWS didn't answer is audited as "no answer" and counts. The value is never logged, audited, answered or put
+  in an exception's text (AWS's own error message isn't kept, only its code). A value that passed the checks is
+  registered with the log scrub (`logscrub.secret`, in memory only) before it is sent, so a log line holding it is
+  dropped from the station's shipped logs and the Logs view. The hub never logs into the county app.
+  The department's CLI script still works the same; the card then shows the version as "not from the hub".
+  No save while SSM can't say the version (DescribeParameters failing, other than "not there yet"): without its
+  last-modified time the gap would count only the hub's own saves. Resets: the station tells the adapter where a
+  reset came from (`reset(origin="hub" | "local")`, through `Resets`); the county adapter keeps the refused SSM versions on
+  a reset from the hub, so 3 refused in 24 h stay MANUAL until a reset AT THE STATION, and a hub reset never resends
+  a password already refused (it keeps a "login" stop until SSM has a new version). While its Health says
+  "refused versions 24 h: N", the hub's Reset asks for an explicit confirm (409 without `confirm_refused`).
 - **Measurement:** each source's first-seen time per incident, and its lead over paging. Settings > Station > Health
   shows both.
 - **Pre-alerts never make an incident.** These include a dispatcher on the feed's talkgroups opening a call to us,
