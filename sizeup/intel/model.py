@@ -99,6 +99,7 @@ class Event:
     push_count: int = 0
     suppressed: str = ""               # rate | quiet | shadow | merged | scrub | off | "" (pushed, or not to push)
     updated_at: float = 0.0
+    note: str = ""                     # "possibly cancelled" (a nameless disregard of a safety call), "moved", "re-opened"
     near_incident: int | None = None   # scene-safety overlay only (PR 9); never a radio link
     incident_id: int | None = None     # only after a person's Accept, and only for a pack with accept: true
 

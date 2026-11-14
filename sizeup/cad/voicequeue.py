@@ -9,6 +9,7 @@ False) and the caller fails its row at once, so a dispatch never waits for room.
     q.put(job)                      False: full, or stopped
     q.wait(timeout)                 True once nothing is queued or being worked on (the tests, a drain)
     q.stop(timeout)                 no new jobs; waits; the jobs not finished (queued: dropped; being worked on: it ends)
+    q.join(timeout)                 after stop(): the worker thread ended
 """
 
 from __future__ import annotations
@@ -59,6 +60,14 @@ class VoiceQueue:
     def wait(self, timeout: float | None = None) -> bool:
         with self._cond:
             return self._cond.wait_for(lambda: not self._jobs and self._busy is None, timeout)
+
+    def join(self, timeout: float | None = None) -> bool:
+        """After stop(): the worker joined (within timeout). True once it has ended (or never started)."""
+        t = self._thread
+        if t is not None and t is not threading.current_thread():
+            t.join(timeout)
+            return not t.is_alive()
+        return True
 
     def stop(self, timeout: float = 0.0) -> list:
         """No new jobs. What is queued gets `timeout` to finish; returns the jobs that didn't (they are dropped; the

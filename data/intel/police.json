@@ -19,7 +19,7 @@
     "aided": {"label": "Aided / unresponsive", "ttl_min": 30, "priority": 4, "mode": "push", "tag": "ambulance"},
     "hazmat": {"label": "Gas / hazmat", "ttl_min": 60, "priority": 4, "mode": "push", "tag": "biohazard"},
     "water_rescue": {"label": "Water rescue", "ttl_min": 60, "priority": 5, "mode": "push", "tag": "ocean"},
-    "pursuit": {"label": "Pursuit", "ttl_min": 20, "priority": 3, "mode": "push", "tag": "rotating_light"},
+    "pursuit": {"label": "Pursuit", "ttl_min": 20, "priority": 3, "mode": "push", "tag": "rotating_light", "moves": true},
     "edp": {"label": "EDP", "ttl_min": 60, "priority": 3, "mode": "push", "tag": "warning", "safety": true},
     "dispute": {"label": "Dispute / fight", "ttl_min": 30, "priority": 3, "mode": "push", "tag": "rotating_light", "safety": true},
     "alarm": {"label": "Alarm", "ttl_min": 20, "priority": 2, "mode": "push", "tag": "bell"}

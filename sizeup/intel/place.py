@@ -34,8 +34,6 @@ PD_UNITS = Path(__file__).resolve().parents[2] / "data" / "pd_units.json"
 UNIT_CUES = r"(?:car|unit|units|sector|post|badge|adam|boy|david|charlie|patrol|rmp|squad|sergeant|sgt|lieutenant|lt|officer)"
 TEN_CODE = re.compile(r"\b(?:10|ten)[-\s](?:\d{1,3}|one|two|three|four|five|six|seven|eight|nine)\b", re.I)
 UNIT_NUM = re.compile(rf"\b{UNIT_CUES}\s+\d{{1,4}}\b", re.I)
-PLATE = re.compile(r"\b(?:plate|tag|registration)s?\b(?:\s+(?:number|of|is|reads|new york|ny|connecticut|ct|nj|new jersey)){0,3}"
-                   r"(?:\s+[A-Za-z0-9]{1,8}){1,3}", re.I)
 MIXED = re.compile(r"\b(?=[A-Za-z]*\d)(?=\d*[A-Za-z])[A-Za-z0-9]{5,8}\b")      # ABC1234: letters AND digits
 TIME = re.compile(r"\b\d{1,2}:\d{2}\b|\b\d{3,4}\s+hours\b", re.I)
 CROSS_CUE = re.compile(r"\b(?:corner of|intersection of|at the corner|block of)\b|\b\w+\s+(?:and|at|&)\s+\w+\s+"
@@ -63,12 +61,87 @@ def callsigns(system: str, service: str) -> list[str]:
     return out
 
 
+# Words after which the next number is never a house number (#492 review: "...New York ABC 1234 heading down <street>"
+# read as "1234 <street>", "ID 1452 <street>" as "1452 <street>"). Two kinds:
+#   plate words: a plate's letters may come first ("york abc 1234", "plate is abc 1234"); a number alone followed by a
+#                street is the address after all ("plate is 120 Example Ave")
+#   digit words: the number right after ("car 3", "radio 1452", "ID 1452"); a unit's number followed by a street is an
+#                address ("K9 unit 120 Example Ave"), an ID's never. Never "units" (plural: "all units go to 120 ...") or
+#                "house number"
+PLATE_CUES = {"plate", "plates", "tag", "tags", "registration", "reg", "plated", "york", "ny", "connecticut", "ct",
+              "jersey", "nj", "pennsylvania", "pa"}
+UNIT_DIGIT_CUES = {"unit", "car", "sector", "post", "rmp"}
+ID_DIGIT_CUES = {"radio", "id", "badge", "dob", "birth", "born"}
+NUMBER_CUES = PLATE_CUES | UNIT_DIGIT_CUES | ID_DIGIT_CUES
+FILLER = {"is", "reads", "of", "was", "number"}
+NOT_PLATE = {"at", "on", "to", "the", "in", "and", "by", "for", "a", "an", "from", "near", "is", "of", "was", "go", "all"}
+SUFFIX = (r"(?:st|street|ave|avenue|av|rd|road|pl|place|ln|lane|dr|drive|blvd|boulevard|ct|court|pkwy|parkway|ter|terrace|"
+          r"way|hwy|highway|tpke|turnpike|cir|circle)")
+STREET_NEXT = re.compile(rf"^\s*(?:[A-Za-z]+\.?\s+){{0,3}}?{SUFFIX}\b", re.I)
+# ABC 1234, ABC-1234 as written (upper case); never a route label ("NY 120", "US 1", "RT 120", "CR 104")
+SPACED_PLATE = re.compile(r"\b(?!(?:NY|US|SR|CR|RT|RTE|CT|NJ|PA|I|ROUTE|HWY|EXIT|MM)[\s-])[A-Z]{2,4}[\s-]\d{3,4}\b")
+TOKEN = re.compile(r"\S+")
+
+
+def cued_numbers(text: str) -> list[str]:
+    """The tokens a cue word makes not-an-address, in order ("york abc 1234" -> abc, 1234; "id 1452" -> 1452;
+    "unit 3 at 100 Example Ave" -> 3)."""
+    toks = [m.group(0).strip(".,;:!?()\"'").lower() for m in TOKEN.finditer(text or "")]
+    out: list[str] = []
+    i = 0
+    while i < len(toks):
+        cue = toks[i]
+        if cue not in NUMBER_CUES or (cue == "number" and i and toks[i - 1] == "house"):
+            i += 1
+            continue
+        j = i + 1
+        letters: list[str] = []
+        if cue in PLATE_CUES:
+            while j < len(toks) and toks[j] in FILLER:
+                j += 1
+            while (j < len(toks) and len(letters) < 2 and re.fullmatch(r"[a-z]{1,4}", toks[j])
+                   and toks[j] not in NUMBER_CUES and toks[j] not in NOT_PLATE):
+                letters.append(toks[j])
+                j += 1
+        elif j < len(toks) and toks[j] == "number":
+            j += 1
+        digits = []
+        while j < len(toks) and len(digits) < (2 if cue in PLATE_CUES else 1) and re.search(r"\d", toks[j]):
+            digits.append(toks[j])
+            j += 1
+        if digits and cue not in ID_DIGIT_CUES and not letters and STREET_NEXT.match(" ".join(toks[j:j + 4])):
+            i = j                             # "K9 unit 120 Example Ave", "plate is 120 Example Ave": the address
+        elif digits:
+            out += letters + digits
+            i = j
+        else:
+            i += 1
+    return out
+
+
+def _drop_cued(t: str) -> str:
+    """The text without the tokens cued_numbers() names, one occurrence each, in order."""
+    bad = cued_numbers(t)
+    if not bad:
+        return t
+    out = []
+    for w in t.split():
+        k = w.strip(".,;:!?()\"'").lower()
+        if bad and k == bad[0]:
+            bad.pop(0)
+            continue
+        out.append(w)
+    return " ".join(out)
+
+
 def strip(text: str, system: str = "", service: str = "") -> str:
-    """The text with the police tokens that read as house numbers blanked (see the module's doc)."""
+    """The text with the police tokens that read as house numbers blanked (see the module's doc). Fails closed: a
+    number after a plate / ID / unit / date-of-birth word, and a spaced or hyphenated plate, never reach the gazetteer."""
     t = text or ""
-    t = PLATE.sub(" ", t)
+    t = SPACED_PLATE.sub(" ", t)
+    t = _drop_cued(t)
     t = TEN_CODE.sub(" ", t)
-    t = UNIT_NUM.sub(" ", t)
+    t = UNIT_NUM.sub(lambda m: m.group(0) if STREET_NEXT.match(m.string[m.end():]) else " ", t)
     t = TIME.sub(" ", t)
     t = MIXED.sub(" ", t)
     for said in callsigns(system, service):
@@ -104,7 +177,6 @@ class Locator:
             return None
         m = b.match
         prec = KIND_PRECISION.get(m.kind, "street")
-        others = g.alternatives if g.confirmed else g.alternatives
         return Place(precision=prec, lat=m.lat, lon=m.lon, radius_m=RADIUS[prec] if g.confirmed else max(RADIUS[prec], 150.0),
                      label=m.label, town=m.municipality or "", confirmed=bool(g.confirmed), where_score=round(float(b.score), 3),
-                     alts=[r.as_alt() for r in others[:4]], basis=g.why or b.why())
+                     alts=[r.as_alt() for r in g.alternatives[:4]], basis=g.why or b.why())

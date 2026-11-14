@@ -45,6 +45,7 @@ window.IntelCard = (() => {
     const loc = el("div", "aa-loc" + (e.confirmed ? "" : " approx"), where(e));
     if (!e.confirmed && e.place) loc.title = ["Unconfirmed", e.basis, ...(e.alts || []).map((a) => `or ${a.label}`)].filter(Boolean).join("\n");
     li.append(loc);
+    if (e.note) li.append(el("div", "aa-loc approx", e.note));          // "possibly cancelled", "moved", "re-opened"
     const src = el("div", "aa-src", `${deps.time(e.first_at)} · ${(e.traffic_ids || []).length} tx`);
     for (const id of (e.traffic_ids || []).slice(-4)) {
       const b = el("button", "mini play", st.playing === id ? "■" : "▶");
@@ -127,7 +128,7 @@ window.IntelSettings = (() => {
     try {
       d = await api("GET", "/api/cad/intel");
     } catch (e) {
-      card.hidden = /sign-in|403/i.test(e.message);
+      card.hidden = /sign-in|403|admins only/i.test(e.message);
       card.replaceChildren(sCardHead("Intel"), el("div", "error", `Intel: ${e.message}`));
       return;
     }
@@ -146,10 +147,29 @@ window.IntelSettings = (() => {
       el("span", "dim small", "/day"), num(s.per_day, 1, 10000, 1, (v) => post({ action: "set", key: "per_day", value: v }), "Pushes a day"),
       el("span", "dim small", "/cat/h"), num(s.per_category_hour, 1, 1000, 1, (v) => post({ action: "set", key: "per_category_hour", value: v }), "Pushes an hour, one category"),
       el("span", "dim small", "repush min"), num(s.repush_min, 0, 1440, 1, (v) => post({ action: "set", key: "repush_min", value: v }), "Minutes between pushes of one event"),
+      el("span", "dim small", "max age min"), num(s.max_age_min, 1, 1440, 1, (v) => post({ action: "set", key: "max_age_min", value: v }), "A transmission older than this is never a pre-alert (a restart replays nothing)"),
       el("span", "spacer"),
       el("span", "dim small", `24 h: ${c24.events || 0} events · ${c24.pushed || 0} pushed · ${c24.suppressed || 0} held`));
     for (const x of caps.querySelectorAll("input")) x.disabled = !admin;
     kids.push(caps);
+    // detection on/off and quiet hours (no pushes in between; the card and the map go on)
+    const [elab, ecb] = sCheck("Detection", s.enabled, "Off: no transmission is read for pre-alerts at all");
+    ecb.disabled = !admin;
+    ecb.addEventListener("change", () => post({ action: "set", key: "enabled", value: ecb.checked }, ecb.checked ? "Intel on" : "Intel off"));
+    const hm = (key, label) => {
+      const i = el("input", "s-num");
+      i.type = "time";
+      i.value = s[key] || "";
+      i.title = label;
+      i.setAttribute("aria-label", label);
+      i.disabled = !admin;
+      i.addEventListener("change", () => post({ action: "set", key, value: i.value }));
+      return i;
+    };
+    const qrow = el("div", "row");
+    qrow.append(elab, el("span", "dim small", "quiet"), hm("quiet_from", "Quiet from (no pushes; empty: none)"),
+      el("span", "dim small", "to"), hm("quiet_to", "Quiet until"));
+    kids.push(qrow);
     for (const p of d.packs) {
       const ph = el("div", "row");
       ph.append(el("b", "s-eta-l", `${p.label} (${p.name})`),

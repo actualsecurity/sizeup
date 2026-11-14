@@ -219,7 +219,7 @@ def compile_pack(d: dict, packs_ov: dict | None = None, rules_ov: dict | None = 
                    "ttl_min": _num(cd.get("ttl_min", 45), 1, 24 * 60, f"{name}.{c}.ttl_min"),
                    "priority": int(_num(cd.get("priority", 3), 1, 5, f"{name}.{c}.priority")),
                    "mode": _mode(cd.get("mode", "push"), f"{name}.{c}.mode"),
-                   "tag": str(cd.get("tag") or ""), "safety": bool(cd.get("safety")),
+                   "tag": str(cd.get("tag") or ""), "safety": bool(cd.get("safety")), "moves": bool(cd.get("moves")),
                    "threshold": (_num(cd["threshold"], 0, 1, f"{name}.{c}.threshold") if cd.get("threshold") is not None else None)}
     rules = []
     seen = set()
@@ -278,7 +278,8 @@ def load_packs(paths_or_dicts=None, overrides: dict | None = None) -> list[Pack]
 
 def ruleset_hash(packs: list[Pack]) -> str:
     """A short hash of everything that decides a hit (the packs' sources as compiled, with their overrides)."""
-    blob = json.dumps([[p.name, p.version, p.mode, p.threshold, p.window_s, p.categories,
+    blob = json.dumps([[p.name, p.version, p.mode, p.threshold, p.window_s, p.categories, p.context_factor, p.towns,
+                        p.scope,
                         [[r.id, r.v, r.w, r.mode, r.enabled, r.category, [x.src for x in r.any], [x.src for x in r.nots]]
                          for r in p.rules], [x.src for x in p.suppress]] for p in packs], sort_keys=True, default=str)
     return hashlib.sha256(blob.encode()).hexdigest()[:12]

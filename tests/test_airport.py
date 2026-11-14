@@ -317,11 +317,11 @@ def test_an_old_database_gets_the_remarks_column(tmp_path):
     s = Store(str(p))
     with s.tx() as db:
         db.execute("ALTER TABLE run_cards DROP COLUMN remarks")
-    s.db.close()
+    s.shutdown()
     s2 = Store(str(p))
     assert "remarks" in {r["name"] for r in s2.db.execute("PRAGMA table_info(run_cards)")}
     assert all(c["remarks"] == "" for c in runcards.cards(s2))                 # old cards keep ''
-    s2.db.close()
+    s2.shutdown()
 
 
 # --------------------------------------------------------------------------- a page or dispatch naming the airport
@@ -476,13 +476,13 @@ def test_an_old_database_gets_the_airport_columns(tmp_path):
         for col, _ in __import__("sizeup.cad.store", fromlist=["AIRPORT_COLUMNS"]).AIRPORT_COLUMNS:
             db.execute(f"ALTER TABLE incidents DROP COLUMN {col}")
         db.execute("INSERT INTO incidents (type, subtype, source, status, created_at) VALUES ('AIRPORT', 'ALERT-2', 'manual', 'pending', 1)")
-    s.db.close()
+    s.shutdown()
     s2 = Store(str(p))
     cols = {r["name"] for r in s2.db.execute("PRAGMA table_info(incidents)")}
     assert {"acft_type", "acft_eta", "acft_souls", "acft_level", "acft_cargo"} <= cols
     old = s2.one("SELECT * FROM incidents")
     assert old["acft_type"] == "" and old["acft_souls"] is None and old["acft_level"] is None     # old events have none
-    s2.db.close()
+    s2.shutdown()
 
 
 def test_a_60_control_page_naming_the_airport_opens_an_airport_event_with_the_level():

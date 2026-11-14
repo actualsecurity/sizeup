@@ -227,7 +227,14 @@ def test_a_hub_with_fg2_and_a_station_without_it(tmp_path):
         st = station(station_cfg(tmp_path, hub.url), {3: "Engine 63 on location"})         # South 2 and FG1 only
         assert call(hub.url + "/api/cad/settings/channels", "POST",
                     {"action": "set", "key": "FG2", "engine": "local"}, token=None)[0] == 200
-        assert wait(lambda: hub.get("/api/state")["channels"]["sync"]["state"] == "applied", 10)
+
+        def synced():
+            # /api/state is the latest push. One built before the change says "applied" too (the station's defaults
+            # matched the hub's then), and on a loaded runner that was still the one served (#500): so the push that
+            # has the change in it, and is applied.
+            ch = hub.get("/api/state")["channels"]
+            return (ch["prefs"].get("FG2") or {}).get("engine") == "local" and ch["sync"]["state"] == "applied"
+        assert wait(synced, 30)
         assert st.channel_pref("FG2")["engine"] == "local" and "FG2" not in [c.label for c in st.cfg.channels]
         assert [x["key"] for x in hub.get("/api/state")["channels"]["fm"]] == ["South 2", "FG1", "FG2"]
     finally:

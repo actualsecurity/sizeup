@@ -1034,6 +1034,28 @@ def test_a_host_whose_probes_time_out_is_left_alone_until_the_next_sweep(monkeyp
     assert len([u for u in f.urls if "skyvdn" in u]) == 2 * roads_mod.PROBE_HOST_TIMEOUTS
 
 
+def test_a_probe_that_ends_just_as_its_camera_is_queued_again_is_not_run_twice(monkeypatch):
+    """#468: the sweep asks for a camera's probe twice (as its still goes down, and after it). The first probe ending
+    between the second ask's look at the last probe and its taking the lock was neither "being probed" nor "probed
+    lately": the camera was probed again, and the host's four timeouts were three cameras'. Here that moment, made:
+    the probe ends right after any read of the probes made without the lock."""
+    clock = Clock()
+    r, f, video = stale_stills(clock, monkeypatch, workers=1)
+    f.gate.set()
+    cid = video[0]
+
+    class Probes(dict):
+        def get(self, k, d=None):
+            was = super().get(k, d)
+            if k == cid and not r._probe_lock.locked():          # read with the lock not held: the probe ends now
+                self[k] = {"at": clock.t, "ok": False}
+                r._probing.discard(k)
+            return was
+    r._probe = Probes()
+    r._probing.add(cid)                                          # being probed
+    assert r.probe_soon(cid) is False and r._probe_q.empty()     # not queued a second time
+
+
 def test_a_few_dead_cameras_never_stop_the_probes_of_the_others_on_their_host(monkeypatch):
     # every 511NY camera streams from one host: two dead cameras on it (timing out, even back to back) are not a
     # dead host. An answered probe starts the count again, and every other camera is still probed
