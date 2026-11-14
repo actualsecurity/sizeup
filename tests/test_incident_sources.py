@@ -1213,7 +1213,7 @@ def test_a_feed_location_is_shown_and_said_as_its_street_part(tmp_path):
     rig.feed.put("B1", type="EMS", location="@SAMPLE PARK - SAMPLE VILLAGE", units=("E62",), times={"dispatched": T0})
     rig.poll()
     a, b = rig.incidents()
-    assert (a["address"], b["address"]) == ("12 Example Ave", "@ Sample Park")
+    assert (a["address"], b["address"]) == ("12 Example Ave (Sample School)", "@ Sample Park")   # its place kept
     assert src.shown_location("") == "" and src.shown_location("12-14 EXAMPLE AVE 3RD FL") == "12 Example Ave"
 
 
@@ -1842,7 +1842,7 @@ def test_a_feed_incident_is_titled_in_proper_case_and_matches_as_before(tmp_path
     rig.poll()
     [inc] = rig.incidents()
     assert inc["address"] == f"12 Example Ave, {t1}"
-    assert f"at 12 Example Ave, {t1}" in inc["remarks"] and snake not in inc["remarks"]
+    assert f"at 12 Example Ave {t1}" in inc["remarks"] and snake not in inc["remarks"]
     assert inc["address_raw"] == f"12 EXAMPLE AVE {snake}"         # the feed's text, for matching and audit
     # the same location again (another field changes): no location line, the title stays
     rig.feed.put("A1", type="ALARM/COMM", location=f"12 EXAMPLE AVE {snake}", units=("E60", "L31"),

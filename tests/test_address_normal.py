@@ -9,7 +9,7 @@ import pytest
 
 from sizeup.cad import dispatcher, mapview
 from sizeup.cad import sources as src
-from sizeup.cad.sources import match_address, normal_location, same_place, same_place_halved, shown_location, town_label
+from sizeup.cad.sources import checked_location, match_address, normal_location, same_place, same_place_halved, shown_location, town_label
 from tests.test_incident_sources import T0, Rig, towns
 from tests.test_street_only import open_incidents, possibly
 
@@ -44,9 +44,9 @@ def snake(t: str) -> str:
     ("12 OTHER ST", {"geo_label": "12 Other St, Port Chester"}, "12 Other St, Port Chester"),           # the map's town
     ("EXAMPLETON RD/SAMPLE AVE OTHERTOWN", {"typed": True}, "Exampleton Rd & Sample Ave, Othertown"),  # out of area
     ("EXAMPLETON RD/SAMPLE AVE OTHERTOWN", {"typed": True, "town": "Othertown"}, "Exampleton Rd & Sample Ave, Othertown"),
-    ("12 SAMPLE CT :3RD FL REAR OTHER_V", {"typed": True}, "12 Sample Ct, Other"),       # a village's token
+    ("12 SAMPLE CT :3RD FL REAR OTHER_V", {"typed": True}, "12 Sample Ct 3rd Fl Rear, Other"),   # a village's token; the floor kept
     ("12 SAMPLE DR OTHER_T", {"typed": True}, "12 Sample Dr, Town of Other"),
-    ("12 SAMPLE AVE : @SAMPLE SCHOOL - FRONT (E1) OTHER_V", {"typed": True}, "12 Sample Ave, Other"),
+    ("12 SAMPLE AVE : @SAMPLE SCHOOL - FRONT (E1) OTHER_V", {"typed": True}, "12 Sample Ave (Sample School), Other"),
     ("12 NORTH EXAMPLE STREET RYE_BROOK", {}, "12 N Example St, Rye Brook"),       # suffix and direction abbreviated
     ("12 NORTH ST", {}, "12 North St, Port Chester"),                               # a direction that is the name stays
     ("8 SAMPLEWOOD AVENUE EXTENSION WEST", {}, "8 Samplewood Ave Ext W"),
@@ -119,7 +119,7 @@ def test_a_feed_incident_stores_the_normal_address_and_its_raw_text(tmp_path):
     rig.poll()
     [inc] = rig.incidents()
     assert inc["address"] == f"40 N Example St, {t3}" and inc["address_raw"] == f"40 NORTH EXAMPLE STREET {snake(t3)}"
-    assert f"at 40 N Example St, {t3}" in inc["remarks"]
+    assert f"at 40 North Example Street {t3}" in inc["remarks"]     # the remarks: the feed's whole text, as before
     rig.page()                                                     # unchanged matching: the page elsewhere is its own
     assert len(rig.incidents()) == 2
 
@@ -200,6 +200,10 @@ def test_the_views_show_the_normal_address(tmp_path):
 # -- the backfill ----------------------------------------------------------------------------------------------------
 
 
+KEY_CHECK_0 = ("incident sources: address backfill: 0 premise notes / pre-plan rows whose address key would change "
+               "(0 keyed rows checked)")
+
+
 def old_row(rig, address: str, source: str = "CAD feed", ref: str = "", feed_text: str = "", status: str = "queued") -> int:
     """An incident as the hub stored it before (no address_raw), with the feed's report when feed_text is given."""
     iid = rig.cad.store.create_incident(address=address, source=source, source_ref=ref or None, status="queued")
@@ -236,7 +240,7 @@ def test_the_backfill_normalises_old_rows_once_and_keeps_what_matching_read(tmp_
         assert match_address(got[i]) == before[i]
     assert got[hand]["address"] == "12 SAMPLE LN" and got[mine]["address"] == "12 SAMPLE LN"   # a person's: never
     assert rig.cad.sources.feed_address(a, got[a]["address"])                     # still never in a push
-    assert logs == ["incident sources: 3 stored addresses normalised"]           # a count, nothing else
+    assert logs == [KEY_CHECK_0, "incident sources: 3 stored addresses normalised"]   # counts, nothing else
     assert rig.cad.sources.backfill_addresses() == 0                              # twice: nothing more
     assert {r["id"]: (r["address"], r["address_raw"]) for r in rig.incidents()} == {
         i: (r["address"], r["address_raw"]) for i, r in got.items()}
@@ -542,7 +546,7 @@ def test_one_bad_row_never_stops_the_backfill_nor_comes_back(tmp_path):
     assert rig.cad.store.incident(good)["address"] == "14 Example Ave, Rye Brook"
     b = rig.cad.store.incident(bad)
     assert (b["address"], b["address_raw"]) == ("12 EXAMPLE AVE", "12 EXAMPLE AVE")   # marked: never retried
-    assert logs == ["incident sources: 1 stored addresses normalised, 1 left as they were (failed)"]
+    assert logs == [KEY_CHECK_0, "incident sources: 1 stored addresses normalised, 1 left as they were (failed)"]
     assert rig.cad.sources.backfill_addresses() == 0
 
 
@@ -570,10 +574,23 @@ def test_a_trailing_word_is_a_town_only_when_known(raw, want):
     assert normal_location(raw, typed=True) == want
 
 
-def test_a_feeds_town_hint_is_filtered_by_the_same_list():
-    """Whatever an adapter release sends as its town, only a known one is shown."""
+def test_a_feeds_own_town_is_shown_as_given_and_never_replaced_by_a_local_one():
+    """The feed names a town this CAD doesn't know: shown as given, in proper case, its state dropped, and nothing is
+    guessed over it: not the street lists' town, not the jurisdiction. A word that is never a town isn't one."""
+    assert not src.known_town("Farawayton") and "specimen st" in {n.lower() for n in STREETS["port chester"]}
+    kw = {"typed": True, "fallback": "Port Chester"}
+    assert normal_location("12 OTHER RD", town="FARAWAYTON", **kw) == "12 Other Rd, Farawayton"
+    assert normal_location("12 SPECIMEN ST", town="FARAWAYTON", **kw) == "12 Specimen St, Farawayton"   # a local street's name
+    assert normal_location("12 OTHER RD", town="FARAWAYTON CT", **kw) == "12 Other Rd, Farawayton"       # a trailing state
+    assert normal_location("12 OTHER RD FARAWAYTON CT", town="FARAWAYTON CT", **kw) == "12 Other Rd, Farawayton"
+    assert normal_location("12 OTHER RD FARAWAYTON", town="Farawayton, CT", **kw) == "12 Other Rd, Farawayton"
+    assert normal_location("12 OTHER RD", town="FAR_AWAY_TON", **kw) == "12 Other Rd, Far Away Ton"
+    assert checked_location("12 OTHER RD", normal_location("12 OTHER RD", town="FARAWAYTON", **kw)) == "12 Other Rd, Farawayton"
+    # no town given, or none that can be one: the guesses as before
+    assert normal_location("12 OTHER RD", town="", **kw) == "12 Other Rd, Port Chester"
+    assert normal_location("12 OTHER RD", town="UNKNOWN", **kw) == "12 Other Rd, Port Chester"
+    assert normal_location("12 OTHER RD", town="N/A", **kw) == "12 Other Rd, Port Chester"
     assert normal_location("12 OTHER ST BASEMENT", town="Basement", typed=True) == "12 Other St Basement"
-    assert normal_location("12 OTHER ST", town="Unknownville", typed=True, fallback="Rye Brook") == "12 Other St, Rye Brook"
     assert normal_location("12 OTHER ST OTHERTOWN", town="Othertown", typed=True) == "12 Other St, Othertown"
     assert normal_location("12 OTHER ST", town="OTHERTOWN_T", typed=True) == "12 Other St, Town of Othertown"
 
@@ -634,3 +651,200 @@ def test_county_town_spellings_and_town_of_forms():
     assert normal_location("12 SAMPLE CT", town="NEW_CASTLE", typed=True) == "12 Sample Ct, New Castle"
     assert src.known_town("Town of Bedford") and src.known_town("MOUNT_KISCO_V") and not src.known_town("Town of Main")
     assert len([k for k in src.county_towns() if k]) >= 80
+
+
+# -- the final review: units and places kept, fractions, names, the address keys -------------------------------------
+
+
+@pytest.mark.parametrize("raw,kw,want", [
+    ("12 EXAMPLE AVE :APT 3B REAR RYE_BROOK", {"typed": True}, "12 Example Ave Apt 3B Rear, Rye Brook"),
+    ("12 EXAMPLE AVE : @SAMPLE DINER RYE_BROOK", {"typed": True}, "12 Example Ave (Sample Diner), Rye Brook"),
+    ("12 EXAMPLE AVE APT 3B : @SAMPLE DINER", {"typed": True}, "12 Example Ave Apt 3B (Sample Diner), Rye Brook"),
+    ("12 EXAMPLE AVE #2B RYE_BROOK", {"typed": True}, "12 Example Ave #2B, Rye Brook"),
+    ("12-14 EXAMPLE AVE 3RD FL", {"typed": True}, "12 Example Ave 3rd Fl, Rye Brook"),
+    ("12 EXAMPLE AVE :REAR", {"typed": True}, "12 Example Ave Rear, Rye Brook"),
+    ("12 EXAMPLE AVE APT 3 rye brook", {"typed": True}, "12 Example Ave Apt 3, Rye Brook"),        # the town isn't the unit's
+    ("12 Sample Lane apartment 3", {}, "12 Sample Ln Apt 3, Rye Brook"),                           # heard
+    ("12 Sample Lane building is fully involved with heavy fire", {}, "12 Sample Ln, Rye Brook"),  # heard: not a unit
+    ("@SAMPLE SCHOOL (12 EXAMPLE AVE)", {"typed": True}, "12 Example Ave, Rye Brook"),             # as before
+    ("12 1/2 EXAMPLE AVE", {"typed": True}, "12 1/2 Example Ave, Rye Brook"),                      # a fraction: one house
+    ("12 1/2 OTHER RD", {}, "12 1/2 Other Rd"),
+    ("12 1/2 EXAMPLE AVE & SAMPLE LN", {"typed": True}, "12 1/2 Example Ave & Sample Ln, Rye Brook"),
+    ("EXAMPLE AVE/SAMPLE LN", {"typed": True}, "Example Ave & Sample Ln, Rye Brook"),              # a slash is still two streets
+    ("12 THE CIRCLE", {"typed": True}, "12 The Circle"),                                           # the name, never "The Cir"
+    ("12 THE TERRACE OTHERTOWN", {"typed": True}, "12 The Terrace, Othertown"),
+    ("12 SAMPLE CIRCLE", {"typed": True}, "12 Sample Cir"),                                        # a suffix after a name
+    ("12 CIRCLE DRIVE", {"typed": True}, "12 Circle Dr"),
+    ("12 Example Avenue in Rye Brook", {}, "12 Example Ave, Rye Brook"),                           # heard: no stray "In"
+    ("12 Example Avenue in the village of Rye Brook", {}, "12 Example Ave, Rye Brook"),
+    ("12 INN RD rye brook", {}, "12 Inn Rd, Rye Brook"),
+])
+def test_units_places_fractions_and_names(raw, kw, want):
+    got = normal_location(raw, **kw)
+    assert got == want and checked_location(raw, got) == want
+
+
+def test_a_direction_that_a_known_street_is_written_with_stays_a_word():
+    """"East End Ave" is on the street list (in one town): the feed's event in another town, or a second town that
+    writes it the same, still reads "East End Ave"; a direction before a street not written so is abbreviated."""
+    old = src.STREETS
+    try:
+        src.set_streets({**STREETS, "rye brook": [*STREETS["rye brook"], "East End Ave"]})
+        kw = {"typed": True}
+        assert normal_location("12 EAST END AVE", **kw) == "12 East End Ave, Rye Brook"
+        assert normal_location("12 EAST END AVE", town="PORT_CHESTER", **kw) == "12 East End Ave, Port Chester"
+        assert normal_location("12 EAST END AVE", town="FARAWAYTON", **kw) == "12 East End Ave, Farawayton"
+        assert normal_location("12 E END AVE", town="PORT_CHESTER", **kw) == "12 E End Ave, Port Chester"   # as typed
+        assert normal_location("12 EAST OTHER AVE", town="PORT_CHESTER", **kw) == "12 E Other Ave, Port Chester"
+        assert normal_location("12 NORTH EXAMPLE STREET RYE_BROOK") == "12 N Example St, Rye Brook"   # written "N Example St"
+    finally:
+        src.STREETS = old
+
+
+def test_a_changed_house_number_is_never_stored():
+    """checked_location: the same street with another number isn't the same reading."""
+    assert checked_location("12 1/2 EXAMPLE AVE", "12 1 & 2 Example Ave") == "12 1/2 Example Ave"
+    assert checked_location("12 1/2 EXAMPLE AVE", "12 Example Ave") == "12 1/2 Example Ave"
+    assert checked_location("12A EXAMPLE AVE", "12 Example Ave") == "12A Example Ave"
+    assert checked_location("12 EXAMPLE AVE", "12 Example Ave, Rye Brook") == "12 Example Ave, Rye Brook"
+    assert checked_location("12-14 EXAMPLE AVE 3RD FL", "12 Example Ave 3rd Fl, Rye Brook") == "12 Example Ave 3rd Fl, Rye Brook"
+    assert checked_location("5 1ST ST", "5 1st St") == "5 1st St" and checked_location("US 1 & SAMPLE CIRCLE", "US 1 & Sample Cir") == "US 1 & Sample Cir"
+
+
+def test_a_feeds_apartment_floor_and_place_are_shown_everywhere_and_kept_in_the_remarks(tmp_path):
+    """The reviewer's repro: ":APT 3B REAR" and ": @SAMPLE DINER" were on no screen. Now the address every view reads
+    has them, and the remarks keep the feed's whole text as they did before addresses were normalised."""
+    _, _, t3 = towns()
+    rig = Rig(tmp_path)
+    rig.feed.put("A1", type="ALARM/COMM", location=f"12 EXAMPLE AVE :APT 3B REAR {snake(t3)}", units=("E60",),
+                 times={"dispatched": T0})
+    rig.feed.put("B1", type="EMS", location=f"14 EXAMPLE AVE : @SAMPLE DINER {snake(t3)}", units=("E62",),
+                 times={"dispatched": T0})
+    rig.poll()
+    a, b = rig.incidents()
+    assert a["address"] == f"12 Example Ave Apt 3B Rear, {t3}" and b["address"] == f"14 Example Ave (Sample Diner), {t3}"
+    assert "Apt 3B Rear" in a["remarks"] and "Sample Diner" in b["remarks"]
+    assert a["address_raw"] == f"12 EXAMPLE AVE :APT 3B REAR {snake(t3)}"
+    st = rig.cad.state()                                           # the API: the list, the call panel, queue cards
+    shown = {i["id"]: i["address"] for i in st["incidents"]}
+    assert "Apt 3B Rear" in shown[a["id"]] and "(Sample Diner)" in shown[b["id"]]
+    cards = {c["id"]: c["address"] for c in mapview.overview(st["incidents"])}                    # overview / wallboard
+    assert "Apt 3B Rear" in cards[a["id"]] and "(Sample Diner)" in cards[b["id"]]
+    pins = mapview.map_slice([], [dict(a, lat=41.0, lon=-73.6), dict(b, lat=41.0, lon=-73.6)], None, [])["incidents"]
+    assert ["Apt 3B Rear" in pins[0]["address"], "(Sample Diner)" in pins[1]["address"]] == [True, True]   # map labels
+    assert dispatcher.where(a).startswith("12 Example Avenue") and "Sample Diner" in dispatcher.where(b)   # the voice
+    # a push never carries a feed's address at all (#297): with the unit and place it still doesn't
+    assert rig.cad.alarms.push_address({"incident_id": a["id"]}, a["address"]) == ""
+    assert rig.cad.alarms.push_address({"incident_id": b["id"]}, b["address"]) == ""
+    # matching is as before: a page for the building joins it, whatever the unit
+    rig.feed.put("A1", type="ALARM/COMM", location=f"12 EXAMPLE AVE :APT 4C {snake(t3)}", units=("E60",),
+                 times={"dispatched": T0})
+    rig.poll()
+    assert rig.cad.store.incident(a["id"])["address"] == f"12 Example Ave Apt 3B Rear, {t3}"      # the same place: not moved
+    assert f"County feed: location 12 Example Ave Apt 4C, {t3}" in rig.feed_lines(a["id"])        # ... but said
+
+
+KEY_SAMPLE = [  # (the address as stored before, its source, the feed's text when a feed wrote it)
+    ("12 Example Ave", "CAD feed", "12 EXAMPLE AVE :APT 3B REAR"),
+    ("14 Example Ave, Rye Brook", "CAD feed", "14 EXAMPLE AVE RYE_BROOK"),
+    ("16 Example Ave", "CAD feed", "16 EXAMPLE AVE : @SAMPLE DINER"),
+    ("18 Other Rd", "CAD feed", "18 OTHER RD"),                              # unplaced: normalising adds a town
+    ("12 Specimen St", "CAD feed", "12 SPECIMEN STREET"),
+    ("12 Sample Ln", "CAD feed", ""),                                       # its feed report gone
+    ("Exampleton Rd & Sample Ave", "CAD feed", "EXAMPLETON RD/SAMPLE AVE"),
+    ("@ Sample School", "CAD feed", "@SAMPLE SCHOOL - FRONT"),
+    ("12 1/2 Example Ave", "CAD feed", "12 1/2 EXAMPLE AVE"),
+    ("12 The Circle", "CAD feed", "12 THE CIRCLE"),
+    ("12 Sample Lane", "60 Control page", ""),
+    ("12 Sample Lane apartment 3", "60 Control page", ""),
+    ("40 North Example Street in Rye Brook", "60 Control page", ""),
+    ("12 Other Road", "60 Control page", ""),
+    ("23 Sample Ln, Rye Brook", "60 Control page", ""),
+    ("12A EXAMPLE AVE REAR", "60 Control page", ""),
+]
+
+
+def keyed(rig) -> dict:
+    rig.cad.addrs.catch_up(2000, transcripts=False)
+    return {r["id"]: tuple(r[c] for c in ("addr_key", "bldg_key", "addr_street", "addr_how", "addr_label"))
+            for r in rig.cad.store.q("SELECT * FROM incidents")}
+
+
+def test_no_address_key_changes_when_old_rows_are_normalised(tmp_path):
+    """Premise notes, pre-plan points and documents are stored under an incident's building key. The keys are made from
+    the form the address had before (key_address), so the backfill changes none: every row of a sample, placed or not,
+    has exactly the keys it had; the read-only check before the backfill counts 0 and says so."""
+    logs: list[str] = []
+    rig = Rig(tmp_path)
+    rig.cad.sources.log = logs.append
+    ids = [old_row(rig, addr, source=source, ref=f"E{k}", feed_text=text) for k, (addr, source, text) in enumerate(KEY_SAMPLE)]
+    before = keyed(rig)
+    assert sum(1 for i in ids if before[i][1]) >= 12                             # most have a building key
+    now = rig.clock()
+    with rig.cad.store.tx() as db:                                               # something stored under every key
+        for i in ids:
+            if before[i][1]:
+                db.execute("INSERT INTO premise_notes (bldg_key, addr_key, label, category, text, created_at, updated_at) "
+                           "VALUES (?, ?, ?, 'hazard', 'made-up note', ?, ?)", (before[i][1], before[i][0], before[i][4], now, now))
+    noted = len(rig.cad.store.q("SELECT 1 FROM premise_notes"))
+    old_addresses = {i: rig.cad.store.incident(i)["address"] for i in ids}
+    changed = rig.cad.sources.backfill_addresses()
+    assert changed >= 8                                                          # the addresses did change ...
+    assert sum(1 for i in ids if rig.cad.store.incident(i)["address"] != old_addresses[i]) == changed
+    assert keyed(rig) == before                                                  # ... and not one key
+    assert logs[0] == (f"incident sources: address backfill: 0 premise notes / pre-plan rows whose address key would "
+                       f"change ({noted} keyed rows checked)")
+    for i in ids:                                                                # every note still found from its incident
+        if before[i][1]:
+            assert rig.cad.store.q("SELECT 1 FROM premise_notes WHERE bldg_key = ?", (rig.cad.store.incident(i)["bldg_key"],))
+
+
+def test_a_new_feed_or_page_incident_is_keyed_as_it_was_before_normalising(tmp_path):
+    """A new incident's keys come from the same inputs as before: a feed's text as shown_location wrote it, a page's
+    heard words. The unit, the place and a guessed town in the stored address change nothing."""
+    from sizeup.cad import addrkey
+    rig = Rig(tmp_path)
+    L = rig.cad.lists
+    texts = [t for _a, s, t in KEY_SAMPLE if t] + ["12 OTHER RD FARAWAYTON CT", "12 EXAMPLE AVE APT 3B : @SAMPLE DINER RYE_BROOK"]
+    for k, text in enumerate(texts):
+        rig.feed.put(f"A{k}", type="ALARM/COMM", location=text, units=("E60",), times={"dispatched": T0 + 3600 * k},
+                     extra={"town": "FARAWAYTON CT"} if "FARAWAYTON" in text else {})
+        rig.at(3600 * k)
+        rig.poll()
+    got = keyed(rig)
+    rows = rig.cad.store.q("SELECT * FROM incidents ORDER BY id")
+    assert len(rows) == len(texts)
+    for r, text in zip(rows, texts):
+        assert r["address_raw"] == text
+        was = {**r, "address": shown_location(text), "address_raw": ""}          # the row as main stored it
+        want = addrkey.key_incident(was, L.geo_town_aliases, L.town_of, rig.cad.geocoder, L.event_town(was)).as_dict()
+        assert got[r["id"]] == tuple(want[c] for c in ("addr_key", "bldg_key", "addr_street", "addr_how", "addr_label")), text
+    # a page's: its heard words, as before
+    page = rig.cad.store.create_incident(address="12 Sample Ln Apt 3, Rye Brook", address_raw="12 Sample Lane apartment 3",
+                                         source="60 Control page", status="queued")
+    was = {"address": "12 Sample Lane apartment 3"}
+    want = addrkey.key_incident(was, L.geo_town_aliases, L.town_of, rig.cad.geocoder, L.event_town(was)).as_dict()
+    assert keyed(rig)[page][:2] == (want["addr_key"], want["bldg_key"])
+
+
+def test_the_backfill_does_nothing_while_a_key_would_change(tmp_path, monkeypatch):
+    """The read-only check: were the keys ever made from another form, the notes stored under them would be counted,
+    said in the log, and no row normalised."""
+    logs: list[str] = []
+    rig = Rig(tmp_path)
+    rig.cad.sources.log = logs.append
+    a = old_row(rig, "18 Other Rd", ref="E1", feed_text="18 OTHER RD")
+    b = old_row(rig, "12 Example Ave", ref="E2", feed_text="12 EXAMPLE AVE")
+    before = keyed(rig)
+    now = rig.clock()
+    with rig.cad.store.tx() as db:
+        for _ in range(2):
+            db.execute("INSERT INTO premise_notes (bldg_key, addr_key, label, category, text, created_at, updated_at) "
+                       "VALUES (?, ?, '', 'hazard', 'made-up note', ?, ?)", (before[a][1], before[a][0], now, now))
+        db.execute("INSERT INTO preplan_points (bldg_key, kind, label, lat, lon, cell, created_at, updated_at) "
+                   "VALUES (?, 'fdc', 'made-up', 41.0, -73.6, '', ?, ?)", (before[a][1], now, now))
+    monkeypatch.setattr(src, "key_address", lambda inc, fed: inc["address_raw"] + ", Port Chester")   # the keys of the
+    assert rig.cad.sources.backfill_addresses() == 0                             # normalised form: a town gained
+    assert logs == ["incident sources: address backfill: 3 premise notes / pre-plan rows whose address key would change "
+                    "(1 keyed rows checked); nothing normalised"]
+    assert [rig.cad.store.incident(i)["address_raw"] for i in (a, b)] == ["", ""] and keyed(rig) == before
