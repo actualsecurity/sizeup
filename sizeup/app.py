@@ -748,7 +748,9 @@ class App:
             return env_is if s == "env" else (s or "config")
         self.pushes = notify.Pushes(
             cfg.alerts_ntfy_server, cfg.alerts_ntfy_topic, cfg.alerts_status_topic,
-            sources={notify.ALERTS: src(cfg.alerts_ntfy_topic_source), notify.STATUS: src(cfg.alerts_status_topic_source)},
+            sources={notify.ALERTS: src(cfg.alerts_ntfy_topic_source), notify.STATUS: src(cfg.alerts_status_topic_source),
+                     notify.INTEL: src(cfg.alerts_intel_topic_source)},
+            intel_topic=cfg.alerts_intel_topic,
             server_source=src(cfg.alerts_ntfy_server_source) if cfg.alerts_ntfy_server_source != "default" else "default",
             settings=lambda: self.cad.settings.section(notify.SECTION),
             also_forbidden=(cfg.prealert_ring_topic, cfg.prealert_status_topic), log=log)
