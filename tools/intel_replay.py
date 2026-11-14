@@ -160,7 +160,7 @@ def capture(rows: list[dict], incidents: list[dict], name: str, settings: dict |
     write_manifest(d, KIND, source="a local restore of the hub's cad.sqlite", how=" ".join(sys.argv),
                    captured_from=lo, captured_to=hi,
                    files={"rows.jsonl.gz": "radio_traffic rows (the replay's columns), oldest first",
-                          "incidents.jsonl.gz": "county CAD auto-labels: {t, cls, lat, lon, st (a hash of the street name)} only",
+                          "incidents.jsonl.gz": "county CAD auto-labels: {t, cls, lat, lon, st (the street, as a reversible hash of its name: sensitive)} only",
                           "settings.json": "the copy's intel Settings sections (intel, intel_packs, intel_rules)"},
                    notes="PRIVATE, local only: never pushed (tools/replay_sync.py), never in git",
                    extra={"expires": time.time() + KEEP_DAYS * 86400})

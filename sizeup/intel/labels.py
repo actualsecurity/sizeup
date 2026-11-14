@@ -8,7 +8,10 @@ they are on (incidents) are read with SELECTs only, from a connection the caller
 only its times are read (`times.dispatched`, else first_seen); its type and location text are never read, printed or
 returned. Of OUR incident, its type, its point and its address; the address is reduced at once to `st`, a short hash
 of its street's name (street_id), only to tell "the same street, the wrong end of it" from "a different call": the
-address itself is never returned, printed or captured. Nothing here writes.
+house number and the rest of the address are never returned, printed or captured. `st` is NOT anonymous: an unsalted
+hash of a street name is reversible by hashing the gazetteer's streets, so it names the street to anyone with the
+set. It is kept only in memory and in the local `mrrs-intel` capture sets (never pushed, never in git), and is as
+sensitive as the rest of such a set. Nothing here writes.
 
     county_incidents(db, since, until)   [{t, cls, lat, lon, st}] one per CAD incident a county feed reported
     match(events, incidents)             each event's label: tp | near | false_place | time_only | none | unlabelled
@@ -71,8 +74,9 @@ ORDER BY r.incident_id, r.first_seen
 
 def street_id(where: str) -> str:
     """An address or a place label reduced to its street: a short hash of the street's normalised name ("100 Example
-    Avenue, Sampletown" and "the 400 block of EXAMPLE AVE" are the same street), '' when it names none. A hash, so no
-    address text is carried in a label."""
+    Avenue, Sampletown" and "the 400 block of EXAMPLE AVE" are the same street), '' when it names none. The hash only
+    keeps the street's words out of what is printed or read by eye: it is unsalted and short, so it can be reversed
+    with a list of street names (the gazetteer). Treat it as the street's name: sensitive, local capture sets only."""
     a = re.split(r"[,(@]", where or "")[0]
     a = re.sub(r"^\s*(?:the\s+)?\d+\s+block(?:\s+of)?\s+", "", a, flags=re.I)
     a = re.sub(r"^\s*\d+[a-z]?(?:\s*[-\u2013/]\s*\d+[a-z]?)?\s+", "", a, flags=re.I)
