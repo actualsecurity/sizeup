@@ -74,7 +74,7 @@ itemised. An issue marked "open" is still open after the PR listed for it merged
 
 | What | PRs | Issues |
 |---|---|---|
-| Incident addresses stored normalised, the source's text kept for matching; source health hysteresis so a station restart never flips the primary | #475, #471 | |
+| Incident addresses stored normalised, the source's text kept for matching; source health hysteresis so a station restart never flips the primary; a shown failing stays bad until ok holds | #475, #471, #524 | |
 | Ranked incident sources with automatic fallback; private adapters on the station only; adapter credentials from SSM | #304, #305, #417 | #297, #301 |
 | Dispatch modes and the per-incident radio log | #318 | #311 |
 | Pages joined to feed incidents; full department vs specific units | #367, #373, #387, #398, #399, #519 (full department from the tones and the feed) | #365, #370, #518 |
@@ -84,7 +84,7 @@ itemised. An issue marked "open" is still open after the PR listed for it merged
 | Pre-plan points and site documents on the call's map | #458, #464 | #456, #459 |
 | Units back to Available when their call closes | #236 | #232 |
 | AWS vocabulary phrases shown without their hyphens (on arrival and on read) | #519 | #518 |
-| Pre-alert topics in Settings > System > Push notifications; the protected set derived, fails closed; no private names in the repo | #521 | |
+| Pre-alert topics in Settings > System > Push notifications; the protected set derived, fails closed; a static hashed backstop under it; no private names in the repo | #521, #526 | |
 | Page geocoding: cross streets, read-backs, named places; intersection search; proper-case addresses | #181, #214, #388 | #176, #213 |
 | Airport events: FAA Alert 1/2/3, the souls scale | #109 | #105 |
 | Incident view and new call entry: layout, comments, rig tiles, resizable map | #207, #208, #211, #212, #222, #223, #224, #234 | #204, #205, #209, #210, #216 to #221, #231 |
@@ -106,6 +106,7 @@ itemised. An issue marked "open" is still open after the PR listed for it merged
 
 | What | PRs | Issues |
 |---|---|---|
+| Litestream: one file to S3 every 30 s, not every second (S3 request costs); a TRUNCATE checkpoint before Litestream is started again under the app | #522 | |
 | Replicate before migrate; replica watch; a fenced task writes nothing; store transaction safety | #497, #506, #507, #509 | #498 (open), #501 |
 | Hot/cold deploys with a standby task; faster start; deploy stops on a missing secret | #254, #255, #292, #469 | #247 (open), #251, #264 |
 | Settings > Station > Adapter: the station adapter's password set from the hub, write-only | #465 | #460 |
@@ -130,7 +131,6 @@ itemised. An issue marked "open" is still open after the PR listed for it merged
 | PR | What | Issue |
 |---|---|---|
 | #462 | Street view: 360° street imagery in the CAD maps | #461 |
-| #522 | Litestream: one file to S3 every 30 s, not every second (S3 request costs) | |
 | #520 | Documentation refresh (this PR) | |
 
 ## Now

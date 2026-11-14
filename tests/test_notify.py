@@ -178,7 +178,7 @@ def test_each_kind_has_its_notifier_and_one_topic_serving_both_shares_one_queue(
     assert not none.notifier(notify.ALERTS).enabled and not none.notifier(notify.STATUS).send("x", "y")
 
 
-@pytest.mark.parametrize("ours", [OUR_STATUS, OUR_ALERTS, "pcfd-sizeup-health", "x-example-status-topic", "example-status-topic-2",
+@pytest.mark.parametrize("ours", [OUR_STATUS, OUR_ALERTS, "pcfd-xmpl-health", "x-example-status-topic", "example-status-topic-2",
                                   "example-ring-topic-test", "my-firehouse-ring-xyz"])
 def test_protected_topics_are_refused_by_exact_name_not_by_a_word_in_ours(ours):
     prot = ("example-status-topic", "example-ring-topic", "firehouse-ring-xyz")
@@ -268,3 +268,52 @@ def test_the_line_names_the_topic_intel_really_shares():
     assert only_status.page()["kinds"][2]["source_text"] == "shared (the status topic)"
     both = notify.Pushes("https://ntfy.sh", OUR_ALERTS, OUR_STATUS, log=lambda m: None)
     assert both.line().endswith("intel \u2192 the alerts topic (no intel topic set)")
+
+
+# -- the static backstop (notify.PROTECTED_SHA256): refused whatever was derived ------------------------------------
+BACKSTOP = "invented-backstop-topic-0001"        # made up for these tests: its hash is put in the set, never a real one
+
+
+@pytest.fixture
+def backstop(monkeypatch):
+    import hashlib
+    monkeypatch.setattr(notify, "PROTECTED_SHA256", frozenset({hashlib.sha256(BACKSTOP.encode()).hexdigest()}))
+    return BACKSTOP
+
+
+def test_the_backstop_is_sha256_hashes_only_and_no_ordinary_topic_matches():
+    import re
+    assert notify.PROTECTED_SHA256 and all(re.fullmatch(r"[0-9a-f]{64}", h) for h in notify.PROTECTED_SHA256)
+    assert not notify.always_protected(TOPIC) and not notify.always_protected("") and not notify.always_protected(None)
+    assert topic_problem(TOPIC) == ""
+
+
+@pytest.mark.parametrize("spelled", [BACKSTOP, BACKSTOP.upper(), f"  {BACKSTOP.title()} "])
+def test_a_backstop_topic_is_refused_with_nothing_derived_and_never_named(ntfy, backstop, monkeypatch, spelled):
+    assert notify.always_protected(spelled)
+    why = topic_problem(spelled)                                   # no derived set at all
+    assert why == topic_problem(spelled, ()) == notify.PROTECTED_WHY and "protected" in why
+    assert BACKSTOP not in why.lower()
+    assert topic_problem(spelled, [TOPIC]) == why                  # ... and whatever the derived set holds
+    assert topic_problem(BACKSTOP + "-ours") == "" and topic_problem("our-" + BACKSTOP) == ""      # the whole name only
+    asked = []
+    monkeypatch.setattr(notify, "urlopen", lambda *a, **k: asked.append(a) or (_ for _ in ()).throw(AssertionError("a request")))
+    for kw in ({}, {"protected": ()}, {"protected": [TOPIC]}):     # publish() itself, whatever the caller passed
+        with pytest.raises(NotifyError, match="protected") as e:
+            publish(ntfy.url, spelled, "x", "y", **kw)
+        assert BACKSTOP not in str(e.value).lower()
+    assert asked == [] and ntfy.got == []
+
+
+def test_the_notifier_never_publishes_to_a_backstop_topic(ntfy, backstop, monkeypatch):
+    logs = []
+    n = Notifier(ntfy.url, BACKSTOP, log=logs.append)              # no protected callable: nothing derived
+    assert not n.enabled and not n.send("x", "y")
+    assert logs and "protected" in logs[0] and not any(BACKSTOP in m for m in logs)
+    n = Notifier(ntfy.url, TOPIC, log=logs.append, retries=())     # made for a fine topic ...
+    n.topic = BACKSTOP                                             # ... the check right before the request still holds
+    called = []
+    monkeypatch.setattr(notify, "publish", lambda *a, **k: called.append(a) or {})
+    assert n.send("x", "y") and n.flush(5)
+    assert called == [] and ntfy.got == [] and n.failed == 1 and "protected" in n.last_error
+    assert not any(BACKSTOP in m for m in logs)

@@ -312,7 +312,8 @@ schedule per pull, in Settings.
 Topic names are secrets: set by env / SSM or Settings, shown to admins only, never logged or exported. sizeup never
 publishes to a **protected** topic: the set is derived, not listed in code (every topic the app subscribes to for the
 phone pre-alert, from env, Settings or config, plus extras an admin lists). It is refused in config, in Settings and by the
-Notifier before every request. If Settings can't be read, nothing is published (fail closed). The pre-alert topics and the
+Notifier before every request. If Settings can't be read, nothing is published (fail closed). Under the derived set,
+a static backstop refuses a few names always, held in code as SHA-256 hashes only (`notify.py` `always_protected()`). The pre-alert topics and the
 protected list are in Settings > System > Push notifications; a retired pre-alert topic stays protected.
 
 ## Voice
@@ -332,7 +333,8 @@ plays at the console. Nothing transmits on the air.
 Summary only. The detail, with the reasons, is in [`cloud.md`](cloud.md): "Deploys: the hot/cold handoff",
 "Replicate before migrate", "Reseeding a replica", "Replica checks" and "The hub's storage".
 
-- **Litestream** replicates the three databases to S3 continuously. A Fargate task's disk is thrown away, so a new task
+- **Litestream** replicates the three databases to S3 continuously (the WAL read into a file for S3 every 30 s: a clean
+  handover loses nothing, a killed hub up to ~30 s of its newest writes). A Fargate task's disk is thrown away, so a new task
   restores from the replica.
 - **Leader lock** (`sizeup/leaderlock.py`): one object in the backups bucket, changed only with S3 conditional writes.
   At most one task holds it. Only the holder writes the databases, runs `litestream replicate` and runs the Cloudflare

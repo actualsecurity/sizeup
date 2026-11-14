@@ -977,6 +977,13 @@ class StationHealth:
                 "text": f"{e.get('mode') or 'check'}: {' · '.join(str(e.get('result') or '').splitlines()[:2])[:120]} · {e.get('by') or '?'} "
                         f"{_hhmm(e.get('at'))} · a takeover from it would fail",
                 "since": float((d.get("failing") or {}).get(db) or e.get("at") or 0) or self.clock()}
+        for db, x in (d.get("suspect") or {}).items():       # Litestream restarted without a checkpoint of the file
+            if isinstance(x, dict) and db in ("cad", "hub", "audio"):
+                out[f"replica:{db}"] = {
+                    "severity": "critical", "quiet": True, "title": f"Replica not verifiable: {db}.sqlite",
+                    "text": f"Litestream restarted without a checkpoint ({str(x.get('why') or '?')[:80]}) · leader "
+                            f"{_hhmm(x.get('at'))} · writes may be missing from it",
+                    "since": float(x.get("at") or 0) or self.clock()}
         return out
 
     def replicas_panel(self, now: float) -> dict | None:
@@ -986,8 +993,17 @@ class StationHealth:
             return None
         every = float(d.get("leader_interval_s") or 900.0) or 900.0
         rows = []
+        suspect = d.get("suspect") if isinstance(d.get("suspect"), dict) else {}
         for db in ("cad", "hub", "audio"):
             c = (d.get("checks") or {}).get(db)
+            x = suspect.get(db)
+            if isinstance(x, dict):                           # whatever its last check said: no check can tell
+                c = c if isinstance(c, dict) else {}
+                rows.append({"db": db, "state": "suspect", "at": c.get("at"), "mode": c.get("mode"), "by": c.get("by"),
+                             "txid": c.get("txid"), "secs": c.get("secs"), "error_at": x.get("at"),
+                             "result": "Litestream restarted without a TRUNCATE checkpoint: writes may be missing",
+                             "error": str(x.get("why") or "")[:200]})
+                continue
             if not isinstance(c, dict):
                 rows.append({"db": db, "state": "none"})
                 continue

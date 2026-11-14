@@ -261,6 +261,23 @@ def test_every_replicated_database_is_followed_by_the_standby_and_in_the_release
     assert not (ROOT / "deploy/hub/litestream-audio.yml").exists()
 
 
+def test_litestream_reads_each_wal_every_30_s_and_uploads_at_once():
+    # the S3 request bill: one LTX file (one PUT) per read of the WAL that found changes, so monitor-interval is the
+    # cadence (docs/cloud.md "How often the replica is written"); sync-interval alone would only upload them later
+    from sizeup import handoff
+    ls = (ROOT / "deploy/hub/litestream.yml").read_text()
+    code = [line.split("#")[0].rstrip() for line in ls.splitlines()]
+    assert code.count("    monitor-interval: ${SIZEUP_LITESTREAM_SYNC_S}s") == len(handoff.DBS)
+    assert code.count("      sync-interval: 1s") == len(handoff.DBS)
+    assert "l0-retention-check-interval: 5m" in code
+    assert [c.strip() for c in code if c.strip().startswith("- interval:")] == ["- interval: 5m", "- interval: 30m",
+                                                                               "- interval: 1h"]
+    # the default, the same everywhere it is given: the image (every process in it), the entrypoint, the supervisor
+    assert handoff.SYNC_ENV == "SIZEUP_LITESTREAM_SYNC_S" and handoff.LITESTREAM_SYNC_S == 30
+    assert "    SIZEUP_LITESTREAM_SYNC_S=30 \\\n" in (ROOT / "Dockerfile").read_text()
+    assert 'export SIZEUP_LITESTREAM_SYNC_S="${SIZEUP_LITESTREAM_SYNC_S:-30}"' in (ROOT / "deploy/hub/entrypoint.sh").read_text()
+
+
 class FakeFence:
     def __init__(self, ok=True):
         self.fresh = ok
