@@ -15,7 +15,7 @@ from sizeup.geo.gazetteer import Gazetteer
 from sizeup.geo.places import PlaceIndex
 from tests.test_cad import make_cad, uid
 from tests.test_places import PC, RB, fixture_gazetteer
-from tests.test_roles import JULIAN, VAL, people
+from tests.test_roles import JORDAN, VAL, people
 from tests.test_settings import post
 
 
@@ -62,7 +62,7 @@ def test_near_is_the_point_given_or_the_events(cad):
 
 def test_viewers_may_search_places(cad):
     people(cad)
-    for email in (VAL, JULIAN):                    # a viewer, a dispatcher: GETs are read only
+    for email in (VAL, JORDAN):                    # a viewer, a dispatcher: GETs are read only
         code, r = get(cad, "/api/cad/places", "q=lyon", Identity(email=email))
         assert code == 200 and r["places"][0]["label"] == "Lyon Park"
 
@@ -220,5 +220,5 @@ def test_only_admins_set_place_names(cad):
     people(cad)
     where = {"label": "Lyon Park", "lat": 41.0, "lon": -73.66}
     code, raw, _ = CadApi(cad).post("/api/cad/settings/places", json.dumps({"action": "set", "name": "the green",
-                                                                            "place": where}).encode(), Identity(email=JULIAN))
+                                                                            "place": where}).encode(), Identity(email=JORDAN))
     assert code == 403

@@ -141,6 +141,25 @@ whisper takes a text prompt per clip, not a vocabulary. `App._prompt()` (`sizeup
 | A source with a profile (police) | The profile's phrasing, the headquarters' callsigns, the towns, and the towns' busiest streets (`prompt_streets`, 30). Never a talker's name |
 | Everything else | `[stt] prompt` (empty by default), plus the talkers on the call when `[stt] talker_prompt` is `ids` or `ids+time` |
 
+### Hyphens
+
+AWS writes a list-form phrase back the way it was sent, hyphens included ("Example-Post-Road"). `respell()` only
+ever mapped the phrases with digits, so once streets, towns and departments were in the list their names were
+stored with the hyphens. The hub now writes every phrase of the lists back as written ("Example Post Road"):
+
+- **On arrival** (`transcribe.Display`, `AwsTranscriber._done`): each result, a late answer kept as the
+  alternative included, after `respell()`. The map is built from the lists as they are (the edited list, the
+  suggestions, the police sources' own), so it works on the vocabulary AWS already has: nothing is sent to AWS.
+- **Only known phrases.** A whole hyphenated token that is a phrase of the lists, in any case, with a possessive or
+  plural ending kept. "twenty-three", "T-bone" and a name the list itself writes with hyphens stay as they are.
+- **Stored transcripts are shown the same way when read**, never rewritten: the Radio log's rows, an event's
+  remarks and timeline, and the monitor's pages go through the same map on their way out. No migration, nothing
+  at start. The Radio log's search treats a hyphen and a space the same, so the old rows are found either way.
+
+Not done: pushing the table form, whose DisplayAs would make AWS write the spaces itself. It needs the vocabulary
+as a file in S3 (`VocabularyFileUri`: a bucket the task may write and Transcribe may read), where the push today
+sends `Phrases` inline and needs neither. The hub's own mapping is the fix either way.
+
 ## Measurement (2026-11)
 
 The fire and county list only. 146 real transmissions from 60 Control, Fire/EMS 10-19 and FG1, scored against a

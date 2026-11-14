@@ -86,7 +86,7 @@ def test_the_filters_apply_to_both_sections(tmp_path):
              ("o-em", t + 3003, "DOT Dispatch 1", 1325, "E14", "mayday", 1)])
     for tid in ("FG1-hit", "o-hit"):
         c.link_traffic(a["id"], {"traffic_id": tid, "operator": "Lt. Ruiz"})
-    c.note(a["id"], {"text": "E63 stated ladder pipe in service", "units": ["E63"], "operator": "Corey"})
+    c.note(a["id"], {"text": "E63 stated ladder pipe in service", "units": ["E63"], "operator": "Casey"})
     note = lambda d: [r["id"] for r in d["rows"] if r["kind"] == "note"]
 
     def both(q, main, other, notes=0):
@@ -126,7 +126,7 @@ def test_each_section_is_capped_on_its_own(tmp_path):
     a = _event_with(c, ["E63"], clock)
     for k in range(3):
         clock.t += 100_000
-        c.note(a["id"], {"text": f"E63 note {k}", "units": ["E63"], "operator": "Corey"})
+        c.note(a["id"], {"text": f"E63 note {k}", "units": ["E63"], "operator": "Casey"})
     d = get(c, "main_limit=4")
     main, other = split(d)
     assert len(main) == 4 and sum(i.startswith("note-") for i in main) == 3 and len(other) == OTHER_LIMIT

@@ -6,7 +6,7 @@ Who: on the hub behind Cloudflare Access the server hands each request the verif
 Users), whatever the page sent: post() is the one place every write goes through. Without Access,
 `operator` is what the page sent (the Operator field), as before.
 
-Roles (user, 2026-10-08: "now that i added julian and myself, myself as an admin i should only be
+Roles (user, 2026-10-08: "now that i added a colleague and myself, myself as an admin i should only be
 the one to make changes?"): with that verified person, every POST is checked against WRITES first
 (permit(); server.py asks the same for its own POSTs): admins change anything, dispatchers run
 calls, viewers (and deactivated users) only look; a 403 {"error"} otherwise, logged. Until there is

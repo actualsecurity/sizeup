@@ -27,10 +27,10 @@ from sizeup.config import ConfigError, load
 from sizeup.prealert import NtfyStream, PreAlerts, parse_ring, parse_status
 from tests.test_cad import make_cad, monitor_incident
 from tests.test_cloud import HubRun, base, hub_cfg, station_cfg
-from tests.test_roles import COREY, JULIAN, VAL, call, people
+from tests.test_roles import CASEY, JORDAN, VAL, call, people
 
 ROOT = Path(__file__).resolve().parent.parent
-RING, STATUS = "pcfd-phone-prealert", "pcfd-status"
+RING, STATUS = "example-ring-topic", "example-status-topic"
 RING_TITLE, RING_TEXT = "STATION PHONE RINGING", "Incoming call on the station line at 2026-10-08 14:03:21 EDT."
 HB_TEXT = ("Ring detector still online (hourly check-in, seq 12). 2026-10-08 13:00:00 EDT. Rings since boot: 3. "
            "Free heap 181234 B, largest block 110580 B.")
@@ -237,7 +237,7 @@ def test_tapouts_messages_parse():
 
 
 def test_a_ring_is_a_pre_alert_in_the_cad_within_a_second_and_keepalives_are_ignored(tmp_path, ntfy):
-    app = App(base(cad_db=str(tmp_path / "cad.sqlite"), prealert_enabled=True, prealert_server=ntfy.url))
+    app = App(base(cad_db=str(tmp_path / "cad.sqlite"), prealert_enabled=True, prealert_ring_topic=RING, prealert_status_topic=STATUS, prealert_server=ntfy.url))
     pushed = []
     app.prealert.on_change = lambda: pushed.append(time.time())
     app.prealert.start()
@@ -414,18 +414,18 @@ def test_dismiss_is_for_dispatchers_and_admins_and_is_in_their_activity(tmp_path
     p = pa.ring(ring_msg(at=clock.t))
     code, out = call(api, f"/api/cad/prealert/{p['id']}/dismiss", {"reason": "wrong number"}, VAL)
     assert code == 403 and pa.get(p["id"])["status"] == "open"
-    code, out = call(api, f"/api/cad/prealert/{p['id']}/dismiss", {"reason": "wrong number", "operator": "Corey"}, JULIAN)
-    assert code == 200 and (out["status"], out["operator"], out["note"]) == ("dismissed", "Julian <julian@example.org>",
+    code, out = call(api, f"/api/cad/prealert/{p['id']}/dismiss", {"reason": "wrong number", "operator": "Casey"}, JORDAN)
+    assert code == 200 and (out["status"], out["operator"], out["note"]) == ("dismissed", "Jordan <jordan@example.org>",
                                                                               "wrong number")
     hms = prealert_mod._hms(p["at"])
-    assert [(r["kind"], r["summary"]) for r in api.cad.activity.rows(JULIAN)][:1] == [
+    assert [(r["kind"], r["summary"]) for r in api.cad.activity.rows(JORDAN)][:1] == [
         ("action", f"Dismissed the phone pre-alert of {hms}: wrong number")]
     assert any(r["kind"] == "refused" and "prealert" in r["route"] for r in api.cad.activity.rows(VAL))
     ev = api.cad.store.one("SELECT * FROM events WHERE kind = 'prealert' ORDER BY id DESC")
-    assert (ev["text"], ev["operator"]) == (f"Phone pre-alert {hms} dismissed: wrong number", "Julian <julian@example.org>")
-    code, out = call(api, f"/api/cad/prealert/{p['id']}/dismiss", {}, COREY)
+    assert (ev["text"], ev["operator"]) == (f"Phone pre-alert {hms} dismissed: wrong number", "Jordan <jordan@example.org>")
+    code, out = call(api, f"/api/cad/prealert/{p['id']}/dismiss", {}, CASEY)
     assert code == 400 and "already dismissed" in out["error"]
-    assert call(api, "/api/cad/prealert/999/dismiss", {}, COREY)[0] == 400
+    assert call(api, "/api/cad/prealert/999/dismiss", {}, CASEY)[0] == 400
     # no pre-alerts here: a 400 that says why
     api.cad.prealert = None
     code, out = call(api, f"/api/cad/prealert/{p['id']}/dismiss", {})
@@ -457,11 +457,66 @@ def test_tapout_health_from_the_heartbeat(tmp_path):
     assert offline(cad).tapout()["word"] == "no heartbeat for 2 h"
 
 
+# -- no topic in the repo: Settings (the DB) sets them, env overrides, none = off ----------------------------------------
+
+
+def test_with_no_topic_set_the_feed_is_off_not_configured_and_never_crashes_or_loops(tmp_path, ntfy):
+    app = App(base(cad_db=str(tmp_path / "cad.sqlite"), prealert_enabled=True, prealert_server=ntfy.url))
+    pa = app.prealert
+    assert pa is not None and pa.ring_stream.topic == "" and pa.status_stream.topic == ""
+    pa.start()
+    try:
+        time.sleep(0.5)
+        assert ntfy.requests == [] and pa.running                      # no request, no retry loop
+        t = app.cad.state()["prealert"]["tapout"]
+        assert (t["state"], t["word"]) == ("unconfigured", "not configured") and "Settings > System" in t["detail"]
+        assert [f["configured"] for f in app.cad.state()["prealert"]["feeds"]] == [False, False]
+        h = pa.feed_health()
+        assert (h["state"], h["label"]) == ("not configured", "Phone pre-alert (Tapout)") and "Settings" in h["why"]
+    finally:
+        pa.stop()
+
+
+def test_the_ring_topic_set_in_settings_starts_the_feed_and_changes_follow_with_no_restart(tmp_path, ntfy):
+    from tests.test_roles import CASEY as ADMIN
+    app = App(base(cad_db=str(tmp_path / "cad.sqlite"), prealert_enabled=True, prealert_server=ntfy.url))
+    api = CadApi(app.cad)
+    ids = people(app.cad)
+    app.prealert.start()
+    try:
+        assert ntfy.requests == []
+        code, _ = call(api, "/api/cad/settings/notify", {"action": "set", "key": "prealert_ring", "topic": RING}, ADMIN)
+        assert code == 200
+        assert wait(lambda: ntfy.gets(RING))                           # subscribed within seconds, status still off
+        assert ntfy.gets(STATUS) == [] and app.prealert.status_stream.topic == ""
+        mid = ntfy.add(RING)
+        assert wait(lambda: app.cad.state()["prealert"]["open"], 3)
+        # the topic in effect is protected from publishing, in any case
+        assert app.pushes.problem(RING) and app.pushes.problem(RING.upper())
+        code, _ = call(api, "/api/cad/settings/notify", {"action": "set", "key": "prealert_status", "topic": STATUS}, ADMIN)
+        assert code == 200 and wait(lambda: ntfy.gets(STATUS))
+        code, _ = call(api, "/api/cad/settings/notify", {"action": "off", "key": "prealert_ring"}, ADMIN)
+        assert code == 200 and app.prealert.ring_stream.topic == ""
+        n = len(ntfy.gets(RING))
+        time.sleep(0.4)
+        assert len(ntfy.gets(RING)) == n and mid                         # cleared: no more reads
+    finally:
+        app.prealert.stop()
+
+
+def test_the_env_topic_overrides_settings_and_is_protected(tmp_path, ntfy):
+    app = App(base(cad_db=str(tmp_path / "cad.sqlite"), prealert_enabled=True, prealert_server=ntfy.url,
+                   prealert_ring_topic="example-env-ring", prealert_ring_source="env"))
+    app.cad.settings_post("notify", {"action": "set", "key": "prealert_ring", "topic": "example-db-ring", "operator": "x"})
+    assert app.pushes.prealert_topics()["ring"] == {"topic": "example-env-ring", "source": "env"}
+    assert app.pushes.problem("EXAMPLE-ENV-RING") and app.pushes.problem("example-db-ring")
+
+
 # -- where it runs ----------------------------------------------------------------------------------------------
 
 
 def test_the_hub_subscribes_and_shows_it_station_independent(tmp_path, ntfy):
-    hub = HubRun(hub_cfg(tmp_path, prealert_enabled=True, prealert_server=ntfy.url))
+    hub = HubRun(hub_cfg(tmp_path, prealert_enabled=True, prealert_ring_topic=RING, prealert_status_topic=STATUS, prealert_server=ntfy.url))
     try:
         assert wait(lambda: ntfy.gets(RING) and ntfy.gets(STATUS))
         ntfy.add(STATUS, "Tapout heartbeat", HB_TEXT, ("green_heart",), 1)
@@ -478,7 +533,7 @@ def test_the_hub_subscribes_and_shows_it_station_independent(tmp_path, ntfy):
 def test_a_station_forwarding_to_a_hub_doesnt_subscribe_and_follows_the_station_switch(tmp_path, ntfy):
     """Forwarding on (config or Settings > Station > Hub link): the hub is the CAD of record and has the
     pre-alert, so this station doesn't (one alert). Switched off at runtime: it subscribes; on again: it stops."""
-    app = make_app(station_cfg(tmp_path, "http://127.0.0.1:9", prealert_enabled=True, prealert_server=ntfy.url))
+    app = make_app(station_cfg(tmp_path, "http://127.0.0.1:9", prealert_enabled=True, prealert_ring_topic=RING, prealert_status_topic=STATUS, prealert_server=ntfy.url))
     try:
         assert app.station.forward and app.cad.prealert is None and app.cad.state()["prealert"] is None
         assert app.state()["prealert"] is None
@@ -512,8 +567,15 @@ def test_off_without_the_section_and_the_config(tmp_path, monkeypatch):
     p.write_text("[prealert]\n")
     c = load(p)
     assert (c.prealert_enabled, c.prealert_server, c.prealert_ring_topic, c.prealert_status_topic, c.prealert_expire_min,
-            c.prealert_heartbeat_stale_min) == (True, "https://ntfy.sh", RING, STATUS, 5.0, 90.0)
-    for bad, why in (('server = "http://ntfy.sh"', "server"), ('ring_topic = "pcfd-status"', "two different"),
+            c.prealert_heartbeat_stale_min) == (True, "https://ntfy.sh", "", "", 5.0, 90.0)     # no default topic: Settings sets it
+    p.write_text(f'[prealert]\nring_topic = "{RING}"\nstatus_topic = "{STATUS}"\n')
+    c = load(p)
+    assert (c.prealert_ring_topic, c.prealert_ring_source, c.prealert_status_topic) == (RING, "config", STATUS)
+    monkeypatch.setenv("SIZEUP_PREALERT_RING_TOPIC", "example-ring-from-env")
+    c = load(p)
+    assert (c.prealert_ring_topic, c.prealert_ring_source) == ("example-ring-from-env", "env")
+    monkeypatch.delenv("SIZEUP_PREALERT_RING_TOPIC")
+    for bad, why in (('server = "http://ntfy.sh"', "server"), (f'ring_topic = "{RING}"\nstatus_topic = "{RING.upper()}"', "two different"),
                      ('ring_topic = "a/b"', "topic"), ("expire_min = 0", "expire_min"), ("enabled = 1", "enabled"),
                      ("topic = 1", "unknown key")):
         p.write_text(f"[prealert]\n{bad}\n")
@@ -523,8 +585,7 @@ def test_off_without_the_section_and_the_config(tmp_path, monkeypatch):
     p.write_text("[prealert]\nenabled = false\n")
     c = load(p)
     assert (c.prealert_enabled, c.prealert_server) == (False, "http://127.0.0.1:8999")
-    ex = load(ROOT / "config.example.toml")
-    assert ex.prealert_enabled and ex.prealert_ring_topic == RING
+    assert load(ROOT / "config.example.toml").prealert_enabled
 
 
 # -- read only ------------------------------------------------------------------------------------------------
@@ -556,11 +617,12 @@ def test_the_module_only_ever_issues_get():
     assert code_strings and not [s for s in code_strings if re.search(r"\b(POST|PUT|PATCH|DELETE)\b(?! FROM)", s)]
 
 
-def test_the_shipped_configs_read_tapout_and_say_never_to_publish():
-    for f in ("config.example.toml", "deploy/hub/config.hub.toml"):
-        text = (ROOT / f).read_text()
-        sec = text[text.index("[prealert]"):]
-        assert 'ring_topic = "pcfd-phone-prealert"' in sec and "never" in text[text.index("prealert") - 600:].lower(), f
+def test_the_hub_config_has_no_prealert_topic_and_says_never_to_publish():
+    text = (ROOT / "deploy/hub/config.hub.toml").read_text()
+    sec = text[text.index("[prealert]"):]
+    c = load(ROOT / "deploy/hub/config.hub.toml")
+    assert c.prealert_enabled and c.prealert_ring_topic == "" and c.prealert_status_topic == ""
+    assert "Settings > System" in sec and "never publishes" in text[text.index("[prealert]"):].lower()
 
 
 def test_an_unexpected_error_on_the_stream_never_kills_the_listener(monkeypatch):

@@ -295,7 +295,7 @@ def test_a_newer_suggestion_for_the_unit_supersedes(tmp_path):
 
 def test_api_permissions_and_activity(tmp_path):
     from sizeup.cloud.access import Identity
-    from tests.test_roles import JULIAN, VAL, people
+    from tests.test_roles import JORDAN, VAL, people
     c, clock, inc = setup(tmp_path)
     api = CadApi(c)
     people(c)
@@ -309,14 +309,14 @@ def test_api_permissions_and_activity(tmp_path):
     code, out = post(f"/api/cad/hint/{by['E64']}/accept", VAL)              # a viewer sees it, can't take it
     assert code == 403 and status(c, "E64") == "DP"
     assert sorted(h["unit"] for h in json.loads(api.get("/api/cad/state", "")[1])["status_hints"]) == ["E62", "E64"]
-    code, out = post(f"/api/cad/hint/{by['E64']}/accept", JULIAN)
+    code, out = post(f"/api/cad/hint/{by['E64']}/accept", JORDAN)
     assert code == 200 and status(c, "E64") == "OL"
-    assert c.store.full(inc["id"])["events"][-1]["operator"] == "Julian <julian@example.org>"
-    code, out = post(f"/api/cad/hint/{by['E62']}/dismiss", JULIAN)
+    assert c.store.full(inc["id"])["events"][-1]["operator"] == "Jordan <jordan@example.org>"
+    code, out = post(f"/api/cad/hint/{by['E62']}/dismiss", JORDAN)
     assert code == 200 and status(c, "E62") == "DP"
-    acts = [a["summary"] for a in c.activity.rows(JULIAN, "action", None, 10)]
+    acts = [a["summary"] for a in c.activity.rows(JORDAN, "action", None, 10)]
     assert f"Accepted the radio's E64 OL on {inc['number']}" in acts and "Dismissed the radio's E62 OL" in acts
-    code, out = post("/api/cad/hint/9999/accept", JULIAN)
+    code, out = post("/api/cad/hint/9999/accept", JORDAN)
     assert code == 400 and out["error"] == "no suggestion 9999"
 
 

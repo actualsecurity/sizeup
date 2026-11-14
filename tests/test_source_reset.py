@@ -31,7 +31,7 @@ def reset(url, source, headers=None):
             return r.status, json.loads(r.read())
     except urllib.error.HTTPError as e:
         return e.code, json.loads(e.read() or b"{}")
-from tests.test_roles import COREY, JULIAN, VAL, people
+from tests.test_roles import CASEY, JORDAN, VAL, people
 
 
 class Feed:
@@ -75,11 +75,11 @@ def test_reset_runs_on_the_adapters_own_thread_and_is_a_noop_without_reset():
     feed, other = Feed(), NoReset()
     r = Runner(feed, other)
     try:
-        out = request_reset(r, "feed", "corey@example.org", r.logs.append)
+        out = request_reset(r, "feed", "casey@example.org", r.logs.append)
         assert out == {"ok": True, "result": "feed: reset asked (runs before its next poll)"}
         assert wait(lambda: feed.resets, 3)
         assert feed.resets == [r.threads["feed"]] and feed.resets[0] != threading.get_ident()
-        assert any("reset (asked by corey@example.org)" in ln for ln in r.logs)
+        assert any("reset (asked by casey@example.org)" in ln for ln in r.logs)
         out = request_reset(r, "other", "x", r.logs.append)
         assert out["ok"] and out["result"] == "other: no reset(): nothing to do"
         assert not r.resets.pending("other")                       # nothing queued for it
@@ -140,8 +140,8 @@ def test_reset_is_admin_only_and_logs_who_asked(tmp_path):
     api = CadApi(make_cad(tmp_path))
     api.cad.log = lambda m: None
     people(api.cad)
-    assert api.permit("/api/sources/reset", Identity(email=COREY)) is None                    # an admin: yes
-    for who in (JULIAN, VAL):                                                                 # a dispatcher, a viewer
+    assert api.permit("/api/sources/reset", Identity(email=CASEY)) is None                    # an admin: yes
+    for who in (JORDAN, VAL):                                                                 # a dispatcher, a viewer
         code, raw, _ = api.permit("/api/sources/reset", Identity(email=who))
         assert code == 403 and b"Admins only" in raw
     # the hub logs who asked (the Access identity), never more than the source and the answer
@@ -150,9 +150,9 @@ def test_reset_is_admin_only_and_logs_who_asked(tmp_path):
     h = Hub.__new__(Hub)
     h.log = logs.append
     h.call = lambda kind, args, timeout: sent.append((kind, args)) or {"ok": True, "result": "feed: reset asked"}
-    assert h.reset_source("feed", COREY) == {"ok": True, "result": "feed: reset asked"}
-    assert sent == [("sources_reset", {"source": "feed", "by": COREY})]
-    assert logs[0] == f"incident sources: reset of feed asked by {COREY}"
+    assert h.reset_source("feed", CASEY) == {"ok": True, "result": "feed: reset asked"}
+    assert sent == [("sources_reset", {"source": "feed", "by": CASEY})]
+    assert logs[0] == f"incident sources: reset of feed asked by {CASEY}"
 
 
 def test_the_health_panel_has_the_reset_button_only_for_failing_sources():

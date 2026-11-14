@@ -359,3 +359,76 @@ def test_a_rig_on_a_parkway_by_a_firehouse_keeps_the_parkway_rule():
     plain = g.route(on_hutch, to, P)
     assert limited_in(g, plain) == {2} and rt["coords"] == plain["coords"]
     assert r.to_one({"E60": on_hutch}, to, quarters={})["E60"] == pytest.approx(g.to_one({"E60": on_hutch}, to, P)["E60"])
+
+
+# ---- Rye Brook: out onto King St, back in through the PD lot ------------------------------------------------------------
+# The user: the rigs leave onto King St and come back through the PD parking lot, pulling in straight (drive-through
+# bays). Its ingress is "via": "lot": the trip home joins the lot's drive aisles (OSM service ways, entered from King
+# St between the firehouse and Village Hall), not a street. Real extract: tests/fixtures/osm/ryebrook_firehouse.json.
+
+RB_OSM = ROOT / "tests" / "fixtures" / "osm" / "ryebrook_firehouse.json"
+RB = next(f for f in FIREHOUSES if f.get("short") == "Rye Brook")
+RB_OUT = [RB["egress"]["lon"], RB["egress"]["lat"]]
+RB_IN = [RB["ingress"]["lon"], RB["ingress"]["lat"]]
+RB_CALLS = {"north": [-73.6760, 41.0370], "south": [-73.6722, 41.0330], "west": [-73.6780, 41.0335],
+            "east": [-73.6710, 41.0370]}                         # made-up points on the streets around it
+
+
+def rb_graph():
+    return Graph(build(json.loads(RB_OSM.read_text())))
+
+
+def rb_going(to, **kw):
+    ll = RB["ll"]
+    return dict(going(to, **kw), unit="E70", group=f"station:{RB['name']}", lon=ll[0], lat=ll[1], station=RB["name"])
+
+
+def test_rye_brook_has_an_egress_onto_king_st_and_an_ingress_through_the_lot():
+    assert RB["egress"]["street"] == "King St" and "via" not in RB["egress"]
+    assert RB["ingress"]["via"] == "lot"
+    r = routes_on(rb_graph())
+    assert r.gate(RB) == (RB_OUT, "King St") and r.gate(RB, "ingress") == (RB_IN, rg.LOT)
+    assert r.gate(SOUTH, "ingress") == r.gate(SOUTH) == (APRON, "Grace Church St")   # no ingress: the egress
+
+
+def test_rye_brook_trip_home_goes_through_the_lot_and_ends_at_the_bays():
+    g = rb_graph()
+    for name, to in RB_CALLS.items():
+        r = routes_on(g)
+        unit = {"name": "E70", "status": "AV", "status_at": NOW}
+        clear = {"incident_id": 5, "number": "26-000005", "lat": to[1], "lon": to[0], "cleared_at": NOW}
+        m = mapview.place(unit, "free", RB, None, None, NOW + 10, fire=True, clear=clear, params=P)
+        back = one(r, m, NOW + 10, "back")
+        assert back["coords"][-1] == pytest.approx(RB["ll"]) and back["coords"][-2] == pytest.approx(RB_IN), name
+        way = [e for e, _ in g.route(to, RB_IN, P, wrongway_m=0, b_gate=rg.LOT)["way"]]
+        assert g.cls(way[-1]) == "service" and any("King Street" in g.name(e) for e in way), name   # King St, the lot
+        # in from the lot's King St entrance, between the firehouse and Village Hall, never by the King St apron
+        assert any(eta.haversine_km(p, [-73.674113, 41.035167]) * 1000 < 3 for p in back["coords"]), name
+        assert not any(eta.haversine_km(p, RB_OUT) * 1000 < 3 for p in back["coords"]), name
+    plain = routes_on(g, firehouses=lambda: [dict(RB, ingress=None)])                    # before: in the way it goes out
+    unit = {"name": "E70", "status": "AV", "status_at": NOW}
+    clear = {"incident_id": 5, "number": "26-000005", "lat": RB_CALLS["north"][1], "lon": RB_CALLS["north"][0],
+             "cleared_at": NOW}
+    m = mapview.place(unit, "free", RB, None, None, NOW + 10, fire=True, clear=clear, params=P)
+    assert one(plain, m, NOW + 10, "back")["coords"][-2] == pytest.approx(RB_OUT)
+
+
+def test_rye_brook_leaves_onto_king_st_and_its_run_card_ignores_the_ingress():
+    g = rb_graph()
+    to = RB_CALLS["south"]
+    r = routes_on(g)
+    rt = one(r, rb_going(to), NOW + 1)
+    assert rt["coords"][0] == pytest.approx(RB_OUT)
+    first = g.route(RB_OUT, to, P, a_gate="King St")["way"]
+    assert not [e for e, _ in first if g.cls(e) == "service"]
+    est = r.to_one({"E70": RB["ll"]}, to, quarters={"E70": RB["name"]})
+    assert est["E70"][0] == pytest.approx(rt["s"], abs=0.6)
+    no_in = routes_on(g, firehouses=lambda: [dict(RB, ingress=None)])
+    assert no_in.to_one({"E70": RB["ll"]}, to, quarters={"E70": RB["name"]}) == est     # the ingress: home only
+
+
+def test_a_lot_ingress_is_never_used_on_the_way_out():
+    f = {"name": "X", "address": "1 Example St", "ll": [-73.7, 41.0],
+         "egress": {"lat": 41.0, "lon": -73.7, "street": "Example St", "via": "lot"}}
+    assert Routes.gate(f) == ([-73.7, 41.0], "Example St")
+    assert Routes.gate(f, "ingress") == ([-73.7, 41.0], "Example St")                # an egress's "via": ignored

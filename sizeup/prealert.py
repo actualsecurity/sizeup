@@ -4,14 +4,19 @@ sign of a call, before 60 Control pages it, so the CAD shows it at the top of th
 as a pre-alert (user, 2026-10-08: "lets receive that feed as a possible pre-alert of a possible
 incoming call").
 
-    [prealert] ring_topic   (pcfd-phone-prealert)  real ring alerts only, max priority:
+    ring topic   real ring alerts only, max priority:
                             title "STATION PHONE RINGING" (a commissioning test: "[TEST] STATION PHONE RINGING"),
                             message "Incoming call on the station line at 2026-06-26 14:03:21 EDT."
                             or, delivered late, "Phone rang ~45s ago at ... (alert delayed by network)."
-    [prealert] status_topic (pcfd-status)  "Tapout heartbeat" hourly ("Ring detector still online
+    status topic "Tapout heartbeat" hourly ("Ring detector still online
                             (hourly check-in, seq 12). ..."), "Tapout restarted" at boot, warnings
                             ("Detector line STUCK active", "ALERT DELIVERY FAILED", "Low memory"),
                             OTA lifecycle. The heartbeat is the silent-failure canary.
+
+The topics' names are not in the repo: they come from Settings > System > Push notifications (the CAD settings, the
+DB), overridden by SIZEUP_PREALERT_RING_TOPIC / _STATUS_TOPIC, else [prealert] ring_topic / status_topic
+(sizeup/notify.py Pushes.prealert_topics). A topic not set = that feed is off (NoFeed), and Health says "not configured";
+a change in Settings is picked up within seconds (sync_topics). They are also protected: notify.py never publishes to them.
 
 READ ONLY. The ring topic is the fire crew's real alert channel: sizeup never publishes to it, or to
 Tapout's status topic (user, 2026-10-08: "never send to it, we can read from it though"). Every request in
@@ -128,11 +133,11 @@ class NtfyStream:
     CONNECT_TIMEOUT = 20.0
 
     def __init__(self, server: str, topic: str, on_message: Callable[[dict], None], log: Callable[[str], None] = print,
-                 first_since: str = FIRST_SINCE, clock: Callable[[], float] = time.time):
+                 first_since: str = FIRST_SINCE, clock: Callable[[], float] = time.time, label: str = "feed"):
         if not TOPIC.fullmatch(topic):
             raise ValueError(f"ntfy topic: letters, digits, - and _ ({topic!r})")
         self.server, self.topic, self.on_message, self.log = server.rstrip("/"), topic, on_message, log
-        self.first_since, self.clock = first_since, clock
+        self.first_since, self.clock, self.label = first_since, clock, label    # label: what logs call it (never the name)
         self.last_id = ""                      # resume point: since=<this>
         self.connected = False
         self.connected_at: float | None = None
@@ -149,7 +154,7 @@ class NtfyStream:
         return f"{self.server}/{self.topic}/json?since={quote(self.last_id or self.first_since, safe='')}"
 
     def start(self) -> NtfyStream:
-        self._thread = threading.Thread(target=self._run, name=f"ntfy-{self.topic}", daemon=True)
+        self._thread = threading.Thread(target=self._run, name=f"ntfy-{self.label}", daemon=True)
         self._thread.start()
         return self
 
@@ -163,7 +168,7 @@ class NtfyStream:
                 pass
 
     def state(self) -> dict:
-        return {"topic": self.topic, "connected": self.connected, "connected_at": self.connected_at,
+        return {"feed": self.label, "configured": True, "connected": self.connected, "connected_at": self.connected_at,
                 "last_event_at": self.last_event_at, "down_since": self.down_since, "error": self.last_error}
 
     def _delay(self, e: Exception | None) -> float:
@@ -202,7 +207,7 @@ class NtfyStream:
                 self.failures += 1
             wait = self._delay(err) if err is not None else self.BACKOFF_START
             if err is not None and (self.failures in (1, 5) or self.failures % 30 == 0 or isinstance(err, HTTPError)):
-                self.log(f"prealert: ntfy {self.topic}: {self.last_error}; retrying in {wait:.0f} s")
+                self.log(f"prealert: ntfy {self.label}: {self.last_error}; retrying in {wait:.0f} s")
             self._stop.wait(wait)
 
     def _read(self) -> None:
@@ -240,7 +245,7 @@ class NtfyStream:
                     try:
                         self.on_message(msg)
                     except Exception as e:  # noqa: BLE001 - one bad message never stops the feed
-                        self.log(f"prealert: ntfy {self.topic}: message {mid}: {type(e).__name__}: {e}")
+                        self.log(f"prealert: ntfy {self.label}: message {mid}: {type(e).__name__}: {e}")
                 if ev in ("open", "keepalive", "message"):
                     self.last_event_at = now
                     if not self.connected:          # some servers skip "open"
@@ -254,6 +259,31 @@ class NtfyStream:
 
 
 # -- what a message says -------------------------------------------------------------------------------
+
+
+class NoFeed:
+    """A feed with no topic set: does nothing (never a request), not connected, never "down"."""
+    topic = ""
+    server = ""
+    on_message = None
+    first_since = FIRST_SINCE
+    last_id = ""
+    connected = False
+    connected_at = last_event_at = down_since = None
+    last_error = ""
+
+    def __init__(self, label: str = "feed"):
+        self.label = label
+
+    def start(self) -> NoFeed:
+        return self
+
+    def stop(self) -> None:
+        pass
+
+    def state(self) -> dict:
+        return {"feed": self.label, "configured": False, "connected": False, "connected_at": None, "last_event_at": None,
+                "down_since": None, "error": ""}
 
 
 def parse_ring(msg: dict) -> dict:
@@ -292,9 +322,11 @@ class PreAlerts:
     """The CAD's phone pre-alerts and Tapout's health. Built by the app on the CAD of record
     (App: all-in-one or hub), attached as cad.prealert."""
 
-    def __init__(self, cad, server: str = "https://ntfy.sh", ring_topic: str = "pcfd-phone-prealert",
-                 status_topic: str = "pcfd-status", expire_min: float = 5.0, heartbeat_stale_min: float = 90.0,
-                 log: Callable[[str], None] = print):
+    def __init__(self, cad, server: str = "https://ntfy.sh", ring_topic: str = "", status_topic: str = "",
+                 expire_min: float = 5.0, heartbeat_stale_min: float = 90.0, log: Callable[[str], None] = print,
+                 topics: Callable[[], tuple[str, str]] | None = None):
+        """ring_topic / status_topic: fixed ("" = that feed off); topics(): (ring, status) asked every few seconds instead
+        (the app: env over Settings over the config), so Settings can set or change them with no restart."""
         self.cad, self.store, self.log = cad, cad.store, log
         self.clock = cad.clock
         self.expire_s = float(expire_min) * 60
@@ -309,12 +341,53 @@ class PreAlerts:
                 if stmt.strip():
                     self.store.db.execute(stmt)
         self.health = self._load_health()
-        self.ring_stream = NtfyStream(server, ring_topic, self.ring, log)
-        # The status topic's first look goes back a heartbeat period and a half: the last one is
-        # still there, so "heartbeat 40 min ago" survives a restart without waiting an hour.
-        self.status_stream = NtfyStream(server, status_topic, self.status, log,
-                                        first_since=f"{max(1, int(round(heartbeat_stale_min)))}m")
+        self._topics = topics or (lambda: (ring_topic, status_topic))
+        ring, status = self._wanted()
+        self.ring_stream = self._feed("ring", ring)
+        self.status_stream = self._feed("status", status)
         self.prune()
+
+    def _wanted(self) -> tuple[str, str]:
+        try:
+            ring, status = self._topics()
+        except Exception as e:  # noqa: BLE001 - Settings unreadable: the feeds stay as they are
+            self.log(f"prealert: topics unreadable ({type(e).__name__})")
+            return (self.ring_stream.topic, self.status_stream.topic) if hasattr(self, "status_stream") else ("", "")
+        ok = lambda t: (t or "").strip() if TOPIC.fullmatch((t or "").strip()) else ""      # noqa: E731
+        return ok(ring), ok(status)
+
+    def _feed(self, which: str, topic: str, last_id: str = ""):
+        """The stream for a topic ("" = none set: NoFeed). The status feed's first look goes back a heartbeat period and a
+        half: the last heartbeat is still there, so "heartbeat 40 min ago" survives a restart without waiting an hour."""
+        if not topic:
+            return NoFeed(which)
+        if which == "ring":
+            f = NtfyStream(self.server, topic, self.ring, self.log, label=which)
+        else:
+            f = NtfyStream(self.server, topic, self.status, self.log, label=which,
+                           first_since=f"{max(1, int(round(self.stale_s / 60)))}m")
+        f.last_id = last_id
+        return f
+
+    def sync_topics(self) -> bool:
+        """Follow the topics in effect: a feed whose topic was set, changed or cleared is stopped and made again (a new
+        topic starts fresh; the same one resumes). True when something changed. Never logs a name."""
+        with self._lock:
+            ring, status = self._wanted()
+            changed = False
+            for which, topic in (("ring", ring), ("status", status)):
+                cur = getattr(self, f"{which}_stream")
+                if cur.topic == topic:
+                    continue
+                cur.stop()
+                new = self._feed(which, topic)
+                setattr(self, f"{which}_stream", new)
+                if self.running:
+                    new.start()
+                self.log(f"prealert: {which} feed {'set' if topic else 'cleared'}"
+                         + (f" ({'subscribed' if self.running else 'will subscribe'}, read-only)" if topic else ""))
+                changed = True
+            return changed
 
     # -- lifecycle ----------------------------------------------------------------------------------
 
@@ -328,19 +401,20 @@ class PreAlerts:
         with self._lock:
             if self.running:
                 return self
+            self.sync_topics()                          # the topics in effect now (Settings, env, config)
             if self._stopping.is_set():               # stopped before: fresh threads, same resume point
                 old = (self.ring_stream, self.status_stream)
-                self.ring_stream, self.status_stream = (
-                    NtfyStream(o.server, o.topic, o.on_message, self.log, o.first_since) for o in old)
-                for new, o in zip((self.ring_stream, self.status_stream), old):
-                    new.last_id = o.last_id
+                self.ring_stream = self._feed("ring", old[0].topic, old[0].last_id)
+                self.status_stream = self._feed("status", old[1].topic, old[1].last_id)
                 self._stopping = threading.Event()
             self.ring_stream.start()
             self.status_stream.start()
             self._thread = threading.Thread(target=self._expiry, args=(self._stopping,), name="prealert-expiry", daemon=True)
             self._thread.start()
-        self.log(f"prealert: subscribed (read-only) to {self.server}/{self.ring_stream.topic} (rings) and "
-                 f"/{self.status_stream.topic} (Tapout status); pre-alerts expire after {self.expire_s / 60:g} min")
+        on = [n for n, f in (("rings", self.ring_stream), ("Tapout status", self.status_stream)) if f.topic]
+        self.log(f"prealert: subscribed (read-only) to {self.server}: " + (" and ".join(on) if on else "nothing")
+                 + (f"; pre-alerts expire after {self.expire_s / 60:g} min" if on
+                    else " (no topic set: Settings > System > Push notifications)"))
         return self
 
     def stop(self) -> None:
@@ -353,6 +427,8 @@ class PreAlerts:
         n = 0
         while not stopping.wait(2.0):
             try:
+                if self.sync_topics():
+                    self.on_change()
                 if self.tick():
                     self.on_change()
                 n += 1
@@ -545,21 +621,27 @@ class PreAlerts:
         if w and now - w["at"] < LIST_S:
             parts.append(f"warning {_ts(w['at'])}: {w['title']}" + (f": {w['message']}" if w["message"] else ""))
         feed = self.status_stream
-        if not feed.connected and feed.down_since is not None:
-            parts.append(f"status feed ({feed.topic}) not connected since {_ts(feed.down_since)}"
+        if not self.ring_stream.topic and not feed.topic:
+            return {"state": "unconfigured", "word": "not configured", "at": None,
+                    "detail": "No pre-alert topic is set: Settings > System > Push notifications (admins)"}
+        if feed.topic and not feed.connected and feed.down_since is not None:
+            parts.append(f"status feed not connected since {_ts(feed.down_since)}"
                          + (f": {feed.last_error}" if feed.last_error else ""))
-        if not self.ring_stream.connected and self.ring_stream.down_since is not None:
-            parts.append(f"ring feed ({self.ring_stream.topic}) not connected since {_ts(self.ring_stream.down_since)}"
+        if not self.ring_stream.topic:
+            parts.append("ring topic not set: no pre-alerts (Settings > System > Push notifications)")
+        elif not self.ring_stream.connected and self.ring_stream.down_since is not None:
+            parts.append(f"ring feed not connected since {_ts(self.ring_stream.down_since)}"
                          + (f": {self.ring_stream.last_error}" if self.ring_stream.last_error else ""))
         detail = "; ".join(parts)
         if last is None:
             return {"state": "unknown", "word": "no heartbeat yet", "at": None,
-                    "detail": detail or f"nothing heard from Tapout on {feed.topic} yet"}
+                    "detail": detail or ("nothing heard from Tapout yet" if feed.topic
+                                                  else "status topic not set: no heartbeat to watch")}
         age = now - last["at"]
         what = "heartbeat" if last["kind"] == "heartbeat" else "restarted"
         if age > self.stale_s:
             return {"state": "warn", "word": f"no heartbeat for {_ago(age)}", "at": last["at"], "detail": detail}
-        if not self.ring_stream.connected and self.ring_stream.down_since is not None:
+        if self.ring_stream.topic and not self.ring_stream.connected and self.ring_stream.down_since is not None:
             return {"state": "warn", "word": f"ring feed offline since {_hms(self.ring_stream.down_since)}",
                     "at": last["at"], "detail": detail}
         return {"state": "ok", "word": f"ok, {what} {_ago(age)} ago", "at": last["at"], "detail": detail}
@@ -574,6 +656,16 @@ class PreAlerts:
                 "open": [p for p in items if p["status"] == "open"],
                 "tapout": self.tapout(now),
                 "feeds": [self.ring_stream.state(), self.status_stream.state()]}
+
+    def feed_health(self) -> dict:
+        """Settings > Health's row for the pre-alert feed: ok / error, or not configured (no topic set: the first-run hint)."""
+        ring = self.ring_stream
+        if not ring.topic:
+            return {"key": "prealert", "label": "Phone pre-alert (Tapout)", "state": "not configured",
+                    "why": "Set the ring topic in Settings > System > Push notifications", "at": None}
+        state = "ok" if ring.connected else ("error" if ring.down_since is not None else "starting")
+        return {"key": "prealert", "label": "Phone pre-alert (Tapout)", "state": state,
+                "why": ring.last_error if state == "error" else "", "at": ring.last_event_at}
 
     def csv(self) -> bytes:
         """GET /api/cad/export/prealerts.csv: every ring kept (90 days) with its outcome, oldest first."""

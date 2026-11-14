@@ -527,20 +527,22 @@ def test_s3_unreachable_still_pushes_and_no_topic_never_does(tmp_path, ntfy):
     assert Pusher(store_for(s3, "A"), ntfy.url, TOPIC, log=logs.append).push("task", "Hub takeover failed", "x") is True
     assert any("pushing anyway" in m for m in logs) and len(ntfy.got) == 1
     assert Pusher(store_for(s3, "B"), ntfy.url, "", log=logs.append).push("task", "t", "x") is False
-    for refused in ("pcfd-phone-prealert", "pcfd-status"):
-        p = Pusher(store_for(s3, "C"), ntfy.url, refused, log=logs.append)
+    for refused in ("example-ring-topic", "example-status-topic"):
+        p = Pusher(store_for(s3, "C"), ntfy.url, refused, forbid=("example-ring-topic", "example-status-topic"), log=logs.append)
         assert not p.on and p.push("replica", "t", "x") is False
     assert len(ntfy.got) == 1 and not any(TOPIC in m for m in logs)       # never a topic's name in the log
 
 
-def test_the_status_topic_comes_from_the_env_over_the_config_and_tapouts_are_refused(tmp_path):
+def test_the_status_topic_comes_from_the_env_over_the_config_and_subscribed_topics_are_refused(tmp_path):
     cfg = tmp_path / "c.toml"
     cfg.write_text('[alerts]\nstatus_topic = "sizeup-test-from-config"\n[prealert]\nring_topic = "sizeup-test-ring-topic"\n')
     assert rw.status_topic(str(cfg), {})[1] == "sizeup-test-from-config"
     assert rw.status_topic(str(cfg), {"SIZEUP_STATUS_TOPIC": TOPIC})[1] == TOPIC
     assert rw.status_topic("", {"SIZEUP_ALERT_TOPIC": TOPIC})[1] == TOPIC        # only one set: it gets both kinds
     assert rw.status_topic(str(cfg), {"SIZEUP_STATUS_TOPIC": "sizeup-test-ring-topic"})[1] == ""      # [prealert]'s: refused
-    assert rw.status_topic("", {"SIZEUP_STATUS_TOPIC": "pcfd-status"})[1] == ""
+    assert rw.status_topic("", {"SIZEUP_STATUS_TOPIC": "example-status-topic"})[1] != ""   # nothing subscribed here: fine
+    env = {"SIZEUP_PREALERT_STATUS_TOPIC": "example-status-topic"}                       # subscribed (env): refused
+    assert rw.status_topic("", {**env, "SIZEUP_STATUS_TOPIC": "Example-Status-Topic"})[1] == ""
     w = rw.from_env("A", tmp_path / "run", tmp_path, "ls.yml", str(cfg),
                     env={"SIZEUP_REPLICA_CHECK_MIN": "5", "SIZEUP_REPLICA_LEADER_CHECK_MIN": "0", "SIZEUP_REPLICA_PUSH_MIN": "60"},
                     log=lambda m: None)
