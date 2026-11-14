@@ -476,7 +476,7 @@ def test_the_hub_subscribes_and_shows_it_station_independent(tmp_path, ntfy):
 
 
 def test_a_station_forwarding_to_a_hub_doesnt_subscribe_and_follows_the_station_switch(tmp_path, ntfy):
-    """Forwarding on (config or Settings > System > Station): the hub is the CAD of record and has the
+    """Forwarding on (config or Settings > Station > Hub link): the hub is the CAD of record and has the
     pre-alert, so this station doesn't (one alert). Switched off at runtime: it subscribes; on again: it stops."""
     app = make_app(station_cfg(tmp_path, "http://127.0.0.1:9", prealert_enabled=True, prealert_server=ntfy.url))
     try:

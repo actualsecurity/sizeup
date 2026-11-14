@@ -69,7 +69,7 @@ CATCHUP = 3
 CATCHUP_QUIET_S = 90.0
 CATCHUP_TIMEOUT_S = 20.0
 CATCHUP_MAX_CLIP_S = 30.0
-CATCHUP_NOTE = "catch-up"  # its re-run result's note ("changed; catch-up"): what Settings > Health counts
+CATCHUP_NOTE = "catch-up"  # its re-run result's note ("changed; catch-up"): what Settings > Station > Health counts
 CLASS_NAMES = {URGENT: "urgent", HIGH: "high", LIVE: "live", RERUN: "rerun", CONTEXT_FALLBACK: "context-fallback",
                CONTEXT: "context", LOW: "low", CATCHUP: "catchup"}
 NOT_LIVE = (RERUN, CATCHUP)  # asked for again, not heard now: never stale, not counted as arriving

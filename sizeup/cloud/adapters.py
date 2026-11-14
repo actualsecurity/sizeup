@@ -13,7 +13,7 @@ that lazy import raises ImportError.
 
 Reset (#301): an adapter may stop itself ("failing: login (manual reset needed)") to protect a shared account, and
 nobody may be at the station. The OPTIONAL `Adapter.reset() -> None` (an addition to #297's interface) clears that.
-It is asked for by an admin on the hub (Settings > Health, POST /api/sources/reset: a sources_reset job over the
+It is asked for by an admin on the hub (Settings > Station > Health, POST /api/sources/reset: a sources_reset job over the
 station's authenticated jobs channel) or on the station (sudo sizeup-station adapter reset [source]), and always runs
 on the adapter's own thread: request_reset() only queues it in the runner's Resets, and the runner's loop calls
 Resets.run_due(adapter) before each poll (#297's SourceRunner: `self.resets = Resets()`, then

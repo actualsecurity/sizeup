@@ -9,7 +9,7 @@ const DataSourcesPanel = (() => {
   const POLL_MS = 15000, RUN_MS = 2000;
   const EVERY = [["off", "Off"], ["hourly", "Hourly"], ["daily", "Daily"], ["weekly", "Weekly"], ["monthly", "Monthly"]];
   let panel = null, box = null, data = null, timer = null, busy = false, opts = {}, err = "", watching = new Set();
-  let focused = "";                 // opts.focus (#settings/data/<key>, e.g. from Settings > Health): scrolled to once
+  let focused = "";                 // opts.focus (#settings/data/<key>, e.g. from Settings > Station > Health): scrolled to once
 
   const isOpen = () => !!panel && !panel.hidden && !document.hidden && document.body.contains(panel);
 

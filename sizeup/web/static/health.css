@@ -47,6 +47,6 @@
   .lg-table tr.lg-error td:nth-child(4) { color: var(--err); font-weight: 600; }
   .lg-table tr.lg-warning td:nth-child(4) { color: var(--warn); }
 
-  /* the hub's Station row (Settings > Radios > Receivers): opens Settings > Health, for an admin */
+  /* the hub's Station row (Settings > Radios > Receivers): opens Settings > Station > Health, for an admin */
   .pill.radio.link { cursor: pointer; }
 }

@@ -219,7 +219,7 @@ window.RadioControls = (() => {
         if (r.tower) lines.push(`HPN tower ${r.tower.hours} local: ${r.tower.open ? "open" : "closed, 118.575 is CTAF"} until ${r.tower.next}`);
         lines.push(`state: ${state}${r.open ? " · squelch open" : ""}`);
         node.title = lines.join("\n");
-        // the hub's Station row: opens Settings > Health (#79), an admin's only (#203)
+        // the hub's Station row: opens Settings > Station > Health (#79), an admin's only (#203)
         if (r.link && (typeof canDo !== "function" || canDo("admin"))) {
           node.classList.add("link");
           node.tabIndex = 0;

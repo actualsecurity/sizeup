@@ -545,7 +545,7 @@ def test_the_station_link_adds_each_sources_health_from_the_real_runner():
                             {"source": "other", "label": "Other", "state": "ok", "reason": ""}]
     assert ad["state"] == "failing" and "Feed failing (ConnectionError)" in ad["text"] and "pw@" not in str(ad)
     assert logs == []
-    # the hub: Settings > Health's adapter row, and the Reset button's data (failing sources only)
+    # the hub: Settings > Station > Health's adapter row, and the Reset button's data (failing sources only)
     hub = FakeHub()
     hub.last_state = hub.now
     hub.status = station_status(version={"build": hub.build, "hub": hub.build, "update": {}, "adapter": ad})

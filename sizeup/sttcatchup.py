@@ -26,7 +26,7 @@ all-in-one), on its own thread, a few at a time:
 Nothing is written here: no startup migration, no bulk write. The rows change only through the re-run path, one at
 a time, as each clip finishes. A write refused because this task isn't the leader any more (FencedWrite,
 sizeup/fence.py) ends the tick: said in the log once, nothing more until may_run() says it is the leader again. The first look is START_DELAY_S after the start. stats(): the backlog waiting, the
-clips given up on and the clips caught up in the last 24 h (Settings > Health, next to the shed counts).
+clips given up on and the clips caught up in the last 24 h (Settings > Station > Health, next to the shed counts).
 """
 
 from __future__ import annotations
@@ -239,6 +239,6 @@ class CatchUp:
         self._sent[cid] = (n + 1, now)
 
     def stats(self) -> dict:
-        """Settings > Health: on, the backlog waiting, given up, caught up in the last 24 h, why it waits (if it does)."""
+        """Settings > Station > Health: on, the backlog waiting, given up, caught up in the last 24 h, why it waits (if it does)."""
         return {k: self.state.get(k) for k in ("on", "max_age_h", "waiting", "gave_up", "caught_24h", "last_at", "why",
                                                "sent", "error")}

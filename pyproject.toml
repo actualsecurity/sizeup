@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "sizeup"
 version = "0.0.1"
-description = "Fire dispatch situational display for Port Chester FD: tones, pages, 60 Control and fireground traffic, transcribed and mapped"
+description = "Self-dispatch CAD and radio monitor for Port Chester FD (hub and station)"
 requires-python = ">=3.11"
 dependencies = ["numpy>=1.26"]
 

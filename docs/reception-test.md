@@ -3,9 +3,18 @@
 Can this station hear a trunked P25 system with a dongle it already has: the county's own system from another
 antenna, or another system (MTA MRRS)? The test lends ONE dongle to the system for a while, measures what
 trunk-recorder decodes, and gives the dongle back. Code: `sizeup/radio/reception.py`, `sizeup/radio/probes.py`.
-Issues: #410, #436.
+Issues: #410, #436, #479.
 
 **Not yet run on a real radio.** Do the [first real run](#first-real-run) below before you trust a number.
+
+| Section | What |
+|---|---|
+| [Run it](#run-it) | Where the test is and its fields. |
+| [The county's system](#the-countys-system) | The probe that never touches the live recorder. |
+| [The dongle](#the-dongle) | What may be lent, and how its job comes back. |
+| [The numbers](#the-numbers-per-side), [the verdict](#the-verdict), [the history](#the-history) | Reading a result. |
+| [What a test can't show](#what-a-test-cant-show), [what is kept](#what-is-kept) | Limits and privacy. |
+| [First real run](#first-real-run), [API](#api) | The checklist for the first test on the air. |
 
 ## Run it
 
@@ -47,7 +56,7 @@ sources, the county's talkgroups, its own `shortName`, and its own capture direc
 - **Fire dongles are never lent**: the county trunk (Fire/EMS 15), paging and the firegrounds. They are greyed out
   and the station refuses them ("protected: not lendable"), whatever the request says. Lend a spare or an airband
   dongle.
-- A dongle another app holds (the shared claims, `docs/handoff-shortfinal-dongles.md`) is never taken. Switch it Off
+- A dongle another app holds (the shared claims, [handoff-shortfinal-dongles.md](handoff-shortfinal-dongles.md)) is never taken. Switch it Off
   in that app first. sizeup's claim on the lent dongle is kept from the job it ran, through the test, to the job it
   gets back: there is no moment in which the other app could take it. (On the Linux station the trunk-recorder
   service holds the claim while the test runs and renames it from one side to the next; when it lets go at the end,
@@ -92,6 +101,9 @@ Grants without calls mean the talkgroup is active on RF but its voice channel is
 or expect to need the second dongle.
 
 ## The verdict
+
+**None** means a finished side that heard nothing. A side that measured nothing in a test that was stopped, failed
+or interrupted has no verdict, and such a test's row never shows a verdict colour ([the history](#the-history)).
 
 | Verdict | When |
 |---|---|
@@ -170,7 +182,8 @@ Set-up:
 - The 770 side, 15 min.
 - From the **hub** (Settings > Radios > Receivers), with someone at the station PC.
 - The other app (shortfinal) closed.
-- Not near an auto-update: check Settings > System that the station runs the hub's build first.
+- Not near an auto-update: check first that the station runs the hub's build (Settings > Station > Health,
+  "Version": Station build and Hub build; or `sizeup-station autoupdate status` on the station).
 - **Installing this release restarts the trunk-recorder service** (its supervisor changed), so Fire/EMS 15 loses
   its control channel for a few seconds. Install when no call is active.
 

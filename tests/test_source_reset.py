@@ -1,5 +1,5 @@
 """An incident source's remote reset (#301): an adapter that stopped itself ("failing: login (manual reset needed)") is
-reset from the hub's Settings > Health by an admin (a sources_reset job over the station's jobs channel) or on the
+reset from the hub's Settings > Station > Health by an admin (a sources_reset job over the station's jobs channel) or on the
 station (sizeup-station adapter reset); reset() runs on the adapter's own thread; one without reset() is a no-op."""
 
 from __future__ import annotations

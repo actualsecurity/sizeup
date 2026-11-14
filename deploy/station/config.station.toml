@@ -182,7 +182,7 @@ gain = "auto"                      # readsb --gain: auto (an LNA in front makes 
 bias_tee = false                   # true ONLY for an LNA powered up the coax (4.5 V); false for its own supply or none
 
 [cloud]
-role = "station"                   # forward to the hub (Settings > System > Station switches it, kept in state/cloud.json)
+role = "station"                   # forward to the hub (Settings > Station > Hub link switches it, kept in state/cloud.json)
 hub_url = "https://sizeup.actualsecurity.org"
 # outbox = "state/outbox.sqlite"   # default, under SIZEUP_STATE_DIR: survives restarts and outages
 # outbox_max_mb = 300

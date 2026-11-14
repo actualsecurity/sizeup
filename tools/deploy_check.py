@@ -238,7 +238,7 @@ def replicas_main(argv: list[str]) -> int:
         print(f"::notice title=Replicas verified::{msg}" if gh else f"replicas verified: {msg}")
         return 0
     print(f"::error title=Replica check failed::{msg} · a takeover or cold start from a bad replica would fail; see "
-          "Settings > Health > Replicas and docs/cloud.md \"Replica checks\"" if gh else f"replica check FAILED: {msg}")
+          "Settings > Station > Health > Replicas and docs/cloud.md \"Replica checks\"" if gh else f"replica check FAILED: {msg}")
     return 1
 
 

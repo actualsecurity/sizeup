@@ -1,14 +1,18 @@
 # Station logs
 
 The station's journal, in one place with the hub's own logs: CloudWatch Logs in the department's AWS account. Read it
-on the hub in **Settings > Station > Logs** (admins).
+on the hub in **Settings > Station > Logs** (admins). Code: `sizeup/cloud/logread.py`, `sizeup/cloud/logship.py`,
+`sizeup/logscrub.py`, `sizeup/cloud/cwlogs.py`. Issue: #494.
+
+On the station PC itself the journal is read as before: `sizeup-station logs -f`
+([deploy/station/README.md](../deploy/station/README.md#the-sizeup-station-command)).
 
 ## How it gets there
 
 ```
 station journald (sizeup-* units)
   -> sizeup-logread (user sizeup-logs, in systemd-journal, no network)     sizeup/cloud/logread.py
-     -> /var/lib/sizeup-logs/*.jsonl (only the sizeup-* units' entries, 20 MB cap)
+     -> /var/lib/sizeup-logs/*.jsonl (only the sizeup-* units' entries, every 10 s, 20 MB cap)
   -> sizeup-station: filter, leave the adapter's lines, scrub, cut repeats  sizeup/cloud/logship.py, sizeup/logscrub.py
   -> <state>/logspool/*.json.gz (a batch every ~45 s or at 5000 lines / 512 KB; 50 MB cap)
   -> POST /api/station/logs (the station token + Access service token)     the link the station already has
@@ -46,9 +50,23 @@ station journald (sizeup-* units)
   10 min per unit, then one `[repeated N× in 10 min]` line. Batches are gzipped.
 - **Offline.** Batches wait on the station's disk (50 MB, oldest dropped first) until the hub and CloudWatch take them.
 
-`install-linux.sh` creates `sizeup-logs`, `/var/lib/sizeup-logs` (2770, group sizeup) and `sizeup-logread.service` when it
-switches to a release that has them. Without the reader the station says "no journal" and sends nothing. A batch the
-hub refuses outright (400 / 413) is set aside in `logspool/rejected`, never retried.
+## On the station
+
+| What | Where | Notes |
+|---|---|---|
+| The reader | `sizeup-logread.service`, `/usr/local/lib/sizeup/logread.py`, the system python3 | User and group `sizeup-logs`, in `systemd-journal`. No network (`PrivateNetwork`), no access to `/var/lib/sizeup`, `/etc/sizeup`, `/etc/credstore` or the releases. |
+| The hand-off | `/var/lib/sizeup-logs/*.jsonl` (directory 2770, owner `sizeup-logs`, group `sizeup`) | Read every 10 s from the reader's journal cursor; the first read takes the last 10 min. At most 20 MB waiting: past it the reader writes nothing and keeps its cursor, so nothing is lost while `sizeup-station` is down. After 6 h of that the oldest files go. `status.json` there says `ok`, `full` or `no journal`. |
+| The spool | `/var/lib/sizeup/state/logspool/*.json.gz` | Scrubbed batches waiting for the hub. 50 MB, oldest dropped first. |
+| Rejected batches | `/var/lib/sizeup/state/logspool/rejected/` | A batch the hub will never take (HTTP 400, 413, 415 or 422). Set aside, said once in the log, never retried. The last 5 are kept. |
+| Off | `SIZEUP_LOG_SHIP=off` in `/etc/sizeup/station.env`, or the setting below | The hand-off files are deleted unread. |
+
+`install-linux.sh` creates the user, the directory and the service when it switches to a release that has them. An
+update restarts the reader only when `logread.py` or its unit changed; it carries on from its cursor. Without the
+reader the station says "no journal" and sends nothing.
+
+Checks on the station: `systemctl status sizeup-logread`, `journalctl -u sizeup-logread`, and
+`cat /var/lib/sizeup-logs/status.json`. The shipper's counts (sent, waiting, dropped and why) are on the hub in
+Settings > Station > Logs.
 
 ## Set up
 
@@ -65,12 +83,13 @@ hub refuses outright (400 / 413) is set aside in `logspool/rejected`, never retr
 | Only these units | all | e.g. `sizeup-station, sizeup-update` |
 | Never these units | none | e.g. `sizeup-ais` |
 | Ship the adapter's own lines | off | asks first: they can hold county CAD details |
-| Keep (days) | 30 | the log group's retention, 7 days to a year (the hub sets it) |
+| Keep (days) | 30 | the log group's retention: 7, 14, 30, 60, 90, 120, 150, 180 or 365 days (the hub sets it) |
 
 ## Querying
 
 The Logs view runs one Logs Insights query when asked: source (station, hub, all), unit, level, text, the last
-15 min to 7 days, or **±5** around a line. At most 7 days and 200 rows per query, one at a time. Insights bills
+15 min to 7 days, or **±5** (minutes) around a line. At most 7 days and 200 rows per query from the view (the API
+takes up to 500), one query at a time. Insights bills
 $0.005 per GB scanned; a day of station logs is a few MB.
 
 The hub's own group (`/ecs/sizeup-hub`) is kept 7 days (step 1).

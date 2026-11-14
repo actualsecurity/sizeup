@@ -37,7 +37,7 @@ A factory is `factory(ctx: SourceContext) -> Adapter | Iterable[Adapter]`. An ad
                          raising. A bad event is skipped on its own; the others still go
     health() -> Health   how the feed is doing now; asked after every poll()
     close() -> None      optional: called once when the station stops
-    reset() -> None      optional: a person asked to start over (Settings > Health "Reset", or `sizeup-station adapter
+    reset() -> None      optional: a person asked to start over (Settings > Station > Health "Reset", or `sizeup-station adapter
                          reset`, #305), e.g. for an adapter that stopped itself. Called on the adapter's own runner
                          thread before its next poll(); its back-off starts over. Raising is logged by type only
     poll_now(reason: str) -> None

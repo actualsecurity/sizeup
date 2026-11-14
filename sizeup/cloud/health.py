@@ -199,7 +199,7 @@ def status_token(station_token: str, configured: str = "") -> str:
 
 
 def context_hints(sq: dict | None, tr: dict | None) -> list[dict]:
-    """Settings > Health hints for another P25 system's police (radio-intel PR 3), never alerts: context clips the
+    """Settings > Station > Health hints for another P25 system's police (radio-intel PR 3), never alerts: context clips the
     station's whisper shed in the last hour (lost recall, not quiet), and the police AWS budget used up (whisper)."""
     out = []
     n = (sq or {}).get("shed_context_h")
@@ -980,7 +980,7 @@ class StationHealth:
         return out
 
     def replicas_panel(self, now: float) -> dict | None:
-        """Settings > Health's Replicas row: each file's last check (result, when, by whom), the last task failures."""
+        """Settings > Station > Health's Replicas row: each file's last check (result, when, by whom), the last task failures."""
         d = self._replica_state()
         if d is None:
             return None

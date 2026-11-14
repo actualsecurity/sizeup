@@ -9,7 +9,7 @@ One model for the FM channels (FG1, FG2, South 2) and every P25 talkgroup, keyed
                  kept. For a talkgroup this is the talkgroup's own Record switch (TalkgroupPrefs:
                  calls dropped on arrival), so it isn't stored here.
     transcribe   run speech-to-text on it at all (off: the clip is kept, no text)
-    engine       "local": whisper.cpp large-v3 on the station (whisper-server, :8179)
+    engine       "local": whisper.cpp on the station (small.en-q5_1 by default) (whisper-server, :8179)
                  "aws":   Amazon Transcribe streaming from the hub (sizeup/transcribe.py); the station
                           skips whisper and forwards the clip with transcript_pending "aws"
                  "both":  whisper on the station and Transcribe on the hub: Transcribe's text is the

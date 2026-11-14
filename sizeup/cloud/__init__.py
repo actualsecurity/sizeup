@@ -1,6 +1,6 @@
 """sizeup in two places ([cloud] in the config, docs/cloud.md).
 
-    station (the Mac with the SDRs, whisper and Kokoro)          hub (the cloud: web UI + CAD, no radios)
+    station (the machine with the SDRs and whisper)               hub (the cloud: web UI + CAD, no radios)
       App, as all-in-one, plus StationLink (station.py)  ──HTTPS──>  HubApp + Hub (hub.py)
         finished pages / transmissions / transcripts /    events    the same App code applies them:
         radio IDs  -> outbox.sqlite (outbox.py) -> in order,         monitor state, CAD comms, 60 Control

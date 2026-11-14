@@ -248,10 +248,10 @@ GET  /api/cad/logs?source=station|hub|all&unit=&level=&q=&start=&end=&limit=
 GET  /api/cad/notify                      Settings > System > Push notifications (sizeup/notify.py Pushes): each kind's
                                           topic in effect and where it came from (Settings / SSM / config / off), the
                                           last push and test; admins only (the names are secret; ADMIN_READS)
-GET  /api/cad/health                      the hub only, served by server.py: Settings > Health (sizeup/cloud/health.py);
+GET  /api/cad/health                      the hub only, served by server.py: Settings > Station > Health (sizeup/cloud/health.py);
                                           admins only (ADMIN_READS, #203: nobody else sees station health)
 GET  /api/cad/perf                        the hub only, served by server.py: where the hub's CPU goes, by thread
-                                          (sizeup/perf.py, #425), on Settings > Health; admins only (ADMIN_READS).
+                                          (sizeup/perf.py, #425), on Settings > Station > Health; admins only (ADMIN_READS).
                                           POST /api/cad/perf/profile {seconds}: a sampled profile (admins; WRITES)
 POST /api/cad/settings/notify             {action: set {key: alerts | status, topic ("" = the default)} | off {key} |
                                           reset {key} | server {value} | test {key}}: admins; audited without the names
@@ -286,7 +286,7 @@ POST /api/cad/intel/<id>/feedback         {verdict: useful | noise | wrong_place
 POST /api/cad/settings/intel              {action: set | pack | category | rule | local | reset, ...}: Settings > System >
                                           Intel; admins; audited
 POST /api/cad/settings/alert_mutes        {action: mute {key: a health alert kind, hours?} | unmute {key}}: shown on
-                                          Settings > Health, not pushed (#340, sizeup/cloud/health.py); admins
+                                          Settings > Station > Health, not pushed (#340, sizeup/cloud/health.py); admins
 """
 
 from __future__ import annotations
@@ -336,12 +336,12 @@ DS_READERS = ("admin", "dispatcher")      # who may see Settings > Data sources 
 # GETs are anyone signed in's (Data sources: DS_READERS). server.py asks the same for the ones it serves itself.
 ADMIN_READS = {
     "/api/cad/notify": "the push topics' names are secret",                  # Settings > System > Push notifications
-    "/api/cad/health": "station health is for admins (Settings > Health)",   # #203: off the header, on an admin tab
+    "/api/cad/health": "station health is for admins (Settings > Station > Health)",   # #203: off the header, on an admin tab
     "/api/reception": "reception tests are the admins' (Settings > Radios)",          # #410 (server.py serves both)
     "/api/reception/sample": "a reception test's audio is for the admin running it",
     "/api/cad/comms/activity": "radio activity (which radios keyed) is for admins",   # #409: encrypted talkgroups
-    "/api/cad/perf": "the hub's CPU and memory are for admins (Settings > Health)",          # #425 (sizeup/perf.py)
-    "/api/cad/perf/profile": "the hub's CPU profile is for admins (Settings > Health)",
+    "/api/cad/perf": "the hub's CPU and memory are for admins (Settings > Station > Health)",          # #425 (sizeup/perf.py)
+    "/api/cad/perf/profile": "the hub's CPU profile is for admins (Settings > Station > Health)",
     "/api/cad/search.csv": "the search export is for admins",                # #403: many calls at once, off the hub
     "/api/cad/preplan.csv": "the pre-plan export is for admins",              # #456: every Knox box at once
     "/api/cad/intel": "the radio pre-alert rules are for admins (Settings > System > Intel)",   # #411: rule phrases

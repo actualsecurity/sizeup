@@ -1,4 +1,4 @@
-"""[cloud] role = "station": the Mac with the SDRs runs everything as all-in-one and also feeds the hub.
+"""[cloud] role = "station": the station (the machine with the SDRs) runs everything as all-in-one and also feeds the hub.
 
     App._emit(kind, data, clip)  -> outbox.sqlite (outbox.py), in order, durable
         page        a page off the air (paging channel), with its clip      (App._segment)
@@ -117,7 +117,7 @@ class StationLink:
     def __init__(self, app, cfg, log: Callable[[str], None] = print,
                  client: Callable[[float], HubClient] | None = None, outbox: Outbox | None = None,
                  updates: Watch | None = None):
-        """outbox: the one already open (Settings > System > Station turns the link off and on
+        """outbox: the one already open (Settings > Station > Hub link turns the link off and on
         again over the same outbox, sizeup/cloud/stationmode.py); updates: the hub's build -> the
         auto-updater (kept across that too)."""
         self.app, self.cfg, self.log = app, cfg, log
@@ -432,7 +432,7 @@ class StationLink:
                 client.close()
 
     def _tts(self, a: dict) -> dict:
-        """A dispatch said by this station's voice (Kokoro here; `say` as its fallback), for the hub."""
+        """A dispatch said by this station's voice (Kokoro here when the station has it, `say` on a Mac as its fallback; the deployed station has no local TTS), for the hub."""
         text, v = a.get("text"), a.get("voice") or {}
         if self.cfg.dispatch_tts_engine == "none":
             return {"ok": False, "error": "station has no voice"}

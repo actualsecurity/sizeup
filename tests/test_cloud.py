@@ -589,7 +589,7 @@ def test_cloud_config(tmp_path, monkeypatch):
     for k in ("SIZEUP_STATION_TOKEN", "SIZEUP_STATE_DIR", "SIZEUP_HUB_URL", "SIZEUP_PORT", "SIZEUP_PUBLIC_URL"):
         monkeypatch.delenv(k, raising=False)
     # No token in the file or the environment: not an error any more (it may be in the Keychain;
-    # without one anywhere Settings > System > Station says so).
+    # without one anywhere Settings > Station > Hub link says so).
     nokey = load(_toml(tmp_path, '[cloud]\nrole = "station"\nhub_url = "https://hub.example.org"\n'))
     assert nokey.cloud_token == "" and nokey.cloud_keychain_token == "sizeup-station-token"
     with pytest.raises(ConfigError, match="hub_url"):

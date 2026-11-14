@@ -1,4 +1,4 @@
-"""Settings > System > Station: station forwarding on and off while the app runs, its persistence,
+"""Settings > Station > Hub link: station forwarding on and off while the app runs, its persistence,
 the secrets (environment, config, macOS Keychain) and Test connection (sizeup/cloud/stationmode.py).
 Real HTTP on ephemeral ports; the Keychain is always a fake `security` (tests/conftest.py)."""
 

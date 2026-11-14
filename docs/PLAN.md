@@ -1,13 +1,41 @@
-# sizeup — plan
+# sizeup: the first plan (2026-10-01)
 
-Fire dispatch situational display for Port Chester FD (PCFD) firehouses. Sibling of
-shortfinal (ADS-B + KHPN ATC); same idea — receive the radio ourselves, transcribe it, put
-it on a map — applied to our own calls.
+Fire dispatch situational display for Port Chester FD (PCFD) firehouses. Sibling of shortfinal (ADS-B + KHPN ATC): the
+same idea (receive the radio ourselves, transcribe it, put it on a map), applied to our own calls.
 
-## What it does (user's scope, 2026-10-01)
+This is the original plan for the radio monitor, kept for history. The app has since become a CAD with the monitor
+feeding it. Current direction: [ROADMAP.md](ROADMAP.md). How it is built now: [architecture.md](architecture.md) and
+[cloud.md](cloud.md). The CAD's own plan: [cad-plan.md](cad-plan.md).
 
-1. **Paging, South 2:** detect the PCFD and Rye Brook alert tones, capture and transcribe the
-   voice page. Later: enrich with IamResponding (IAR) or text dispatch data.
+## Status as of 2026-11-14
+
+Everything in the original scope is built. What differs from the plan below:
+
+| Planned item | Status | Now |
+|---|---|---|
+| South 2 paging: tones, voice page, transcript | Done | `sizeup/radio/tones.py`, `sizeup/radio/page.py`, `sizeup/dispatch.py` (the page parser). Tone pairs are learned from the air and named in Settings > Radios > Tones. |
+| Fire/EMS 15: dispatcher and units transcribed | Done | trunk-recorder as its own service on the station (`sizeup/radio/trunkrecd.py`, `sizeup/radio/p25.py`). |
+| Map: zoom to the incident, show the type | Done | `sizeup/geo/` (offline gazetteer, page geocoding), MapLibre in `sizeup/web/static/cadmap.js`. |
+| Fireground 1 transcribed while the call is on | Done | `sizeup/radio/fm.py`, MDC-1200 and FleetSync IDs (`mdc1200.py`, `fleetsync.py`). Only identified radios attach to an incident. FG2 is a channel too. |
+| Speech-to-text: whisper.cpp only | Changed | Amazon Transcribe on the hub for the main channels, HPN ATC and PD dispatch; whisper.cpp on the station elsewhere and as the fallback ([cloud.md](cloud.md), [stt-vocabulary.md](stt-vocabulary.md)). The engine decision is open (#123). |
+| One dongle for FG1 + FG3 | Changed | One dongle per FM channel (one `rtl_fm` each). Several frequencies on one dongle exist only for airband (`sizeup/radio/channelize.py`). FG3 and FG4 (EMS) are not received. More channels: #119. |
+| Incident = a page; closes on "back in service" or a timeout | Changed | Incidents are CAD events. Ranked sources feed them: external CAD feeds first, paging as the backup (`sizeup/cad/sources.py`). A person closes an event with a disposition; in "60 Control dispatching" mode the feed's reports track it (`sizeup/cad/automode.py`). |
+| Incident data: no external feed | Changed | External incident feeds are read through private adapters that run on the station only and are not in this repo (#297, #301). |
+| IamResponding / text dispatch enrichment (F5) | Still planned | Waiting on the vendor and the department (#43). |
+| Alerts (F5) | Done | Station health and alarm pushes to our own ntfy topics (`sizeup/notify.py`, `sizeup/cloud/health.py`). |
+| Deploy: systemd, over-the-air updates (F5) | Done | The station follows the hub's build (`sizeup/cloud/autoupdate.py`, `deploy/station/`); the hub deploys on a merge to main. |
+| A single box at the firehouse | Changed | Split into a station (the radios, at the South End firehouse) and a hub in the cloud ([cloud.md](cloud.md)). |
+| SDRTrunk / OP25 as P25 fallbacks | Dropped | trunk-recorder decodes the county system; no fallback was needed. |
+| Fine-tune whisper on corrected local clips | Still planned | The corrections and the archive they need: #428, PR #491. |
+
+Added since, outside this plan: the CAD ([cad-plan.md](cad-plan.md)), HPN ATC and airport pre-alerts, a second P25
+system (MTA MRRS, context only), radio pre-alerts (`sizeup/intel/`), and the map layers (cameras, trains, aircraft,
+vessels, weather, county GIS).
+
+## What it does (the scope, 2026-10-01)
+
+1. **Paging, South 2:** detect the PCFD and Rye Brook alert tones, capture and transcribe the voice page. Later: enrich
+   with IamResponding (IAR) or text dispatch data.
 2. **60 Control, Fire/EMS 15:** transcribe the dispatcher and the responding units.
 3. **Map:** zoom to the incident location and show the incident type.
 4. **Fireground 1:** transcribe PCFD / Rye Brook fireground traffic while the call is on.
@@ -33,25 +61,31 @@ RadioReference wiki's Port Chester pair 349.1/311.1 was never heard. sizeup logs
 tone pair with its voice page, so other codes are learned the same way and named in Settings >
 Radios > Tones.
 
-**Incident data:** no public CAD/RSS/PulsePoint. 60 Control's "CAD Times" needs an agency
-login and its guide forbids redistribution, so it is out of scope unless the department gets
-access and agrees. IAR integration: ask the department (user will provide).
+**Incident data (as planned):** no public CAD, RSS or PulsePoint feed exists. A feed that needs an agency login was out
+of scope unless the department got access and agreed. **Now:** such feeds are read only through private adapters on
+the station, and nothing about them is in this repo (#297, #301). IAR integration is
+still to ask the department about (#43).
 
 ## Hardware
 
-All the fire channels are UHF 450–480 MHz: one UHF antenna (or the roof scanner antenna)
-through a splitter/LNA feeds every fire dongle. RTL-SDR V4, one per band:
+All the fire channels are UHF 450–480 MHz: one UHF antenna (or the roof scanner antenna) through a splitter/LNA feeds
+every fire dongle. RTL-SDR V4, one per band. This is the plan's table; the notes column says what changed.
 
-| Dongle | Tuned | Receives |
-|---|---|---|
-| fire-page | 470.2 MHz | South 2 paging (+ 470.2125 if South 1 appears) |
-| fire-p25 | ~477.2 MHz, 2.4–2.56 MS/s | P25 South site: control channel + both voice channels (span 2.24 MHz, at the edge of one dongle; a second dongle is the fallback) |
-| fire-fg | ~453.46 MHz | Fireground 1 453.0375 + FG3 453.8875 (FG2/FG4 at 458 need another dongle) |
-| fire-fg2 | 458.0375 MHz | Fireground 2 (#119): received like FG1; a 4th dongle, or picked by hand on one of the three |
-| hpn-twr | 118.575 MHz AM | HPN Tower (#233): ATC for the airport pre-alerts; a 5th dongle (the NESDR SMArt), picked by hand. Ground 121.825 is 3.25 MHz away: another dongle |
+| Dongle | Tuned | Receives | Now |
+|---|---|---|---|
+| fire-page | 470.2 MHz | South 2 paging (+ 470.2125 if South 1 appears) | As planned |
+| fire-p25 | ~477.2 MHz, 2.4–2.56 MS/s | P25 South site: control channel + both voice channels (span 2.24 MHz, at the edge of one dongle; a second dongle is the fallback) | One dongle, run by trunk-recorder |
+| fire-fg | ~453.46 MHz | Fireground 1 453.0375 + FG3 453.8875 (FG2/FG4 at 458 need another dongle) | Tuned to FG1 only (453.0375); FG3 is not received |
+| fire-fg2 | 458.0375 MHz | Fireground 2 (#119): received like FG1; a 4th dongle, or picked by hand on one of the three | As planned (PR #178) |
+| hpn-twr | 118.575 MHz AM | HPN Tower (#233): ATC for the airport pre-alerts; a 5th dongle, picked by hand. Ground 121.825 is 3.25 MHz away: another dongle | As planned; NY Approach and HPN Ground are channels too (#260, #275) |
 
-Plus shortfinal's three if both run on one firehouse box (7 dongles: USB bandwidth ~5 MB/s
-each — a Pi 5's two USB3 controllers or a mini PC, not one USB2 hub).
+Not in the plan: a dongle for our own ADS-B receiver (#235), one for AIS ([vessels.md](vessels.md), not installed yet)
+and up to two for the MRRS system (#408). Dongles are named by USB serial and given a job in Settings > Radios, or by
+`[radio] auto_assign_order`. shortfinal shares dongles with sizeup through claim files
+([handoff-shortfinal-dongles.md](handoff-shortfinal-dongles.md)).
+
+The plan's note on running both apps on one box: shortfinal's three dongles as well makes seven, at about 5 MB/s of USB
+each, so a Pi 5's two USB3 controllers or a mini PC, not one USB2 hub.
 
 ## Software
 
@@ -65,29 +99,31 @@ P25 South ──► trunk-recorder (per-call WAV + JSON: TG, unit IDs) ──►
         incident = page (+ IAR later) ─► geocode (offline address points) ─► map zoom + type
 ```
 
-- **STT:** whisper.cpp server as in shortfinal. The ATC fine-tune is wrong for fire radio;
-  start with a general English model + an area prompt (streets, units, incident types) and
-  measure. Fine-tune later on corrected local clips.
-- **P25:** trunk-recorder (C++, Pi-friendly, writes a WAV + JSON per call with talkgroup and
-  radio IDs). Simulcast (LSM) can be hard for RTL-SDR decoders; SDRTrunk or OP25 are the
-  fallbacks if trunk-recorder decodes poorly. Record TG 307 (+ 301).
-- **Incident model:** a page opens an incident (type, address, units, time out); Fire/EMS 15
-  and Fireground 1 traffic attaches to the open incident while it is active; it closes on
-  "back in service"/timeout.
-- **Map:** MapLibre web app like shortfinal, home view = Port Chester / Rye Brook; an incident
-  flies the map to the geocoded address with a type badge.
-- **Rules carried over from shortfinal:** nothing fake on screen; self-healing services;
-  alerts never to the Tapout crew ntfy topic.
+As planned (the status table at the top says what changed):
+
+- **STT:** whisper.cpp server as in shortfinal. The ATC fine-tune is wrong for fire radio; start with a general English
+  model + an area prompt (streets, units, incident types) and measure. Fine-tune later on corrected local clips.
+- **P25:** trunk-recorder (C++, Pi-friendly, writes a WAV + JSON per call with talkgroup and radio IDs). Simulcast (LSM)
+  can be hard for RTL-SDR decoders; SDRTrunk or OP25 are the fallbacks if trunk-recorder decodes poorly. Record TG 307
+  (+ 301). Now: every unencrypted talkgroup is recorded unless its Record switch is off (Settings > Radios); TG 307 and
+  333 (Airport Incident) attach to our incidents (`[p25] incident_talkgroups`).
+- **Incident model:** a page opens an incident (type, address, units, time out); Fire/EMS 15 and Fireground 1 traffic
+  attaches to the open incident while it is active; it closes on "back in service"/timeout.
+- **Map:** MapLibre web app like shortfinal, home view = Port Chester / Rye Brook; an incident flies the map to the
+  geocoded address with a type badge.
+- **Rules carried over from shortfinal:** nothing fake on screen; self-healing services; alerts never to the Tapout
+  crew's ntfy topics.
 
 ## Milestones
 
-The first monitor's milestones (2026-10-01), kept for history. F0–F4 are built; the app is now the
-CAD + monitor. Current plan: [ROADMAP.md](ROADMAP.md) and the GitHub issues.
+The first monitor's milestones (2026-10-01), kept for history. The app is now the CAD + monitor. Current plan:
+[ROADMAP.md](ROADMAP.md) and the GitHub issues.
 
-- **F0** ✔ scaffold + two-tone decoder (tests).
-- **F1** paging chain on the bench: 470.2 NFM receiver, squelch, tones → page capture → STT;
-  log every tone pair (learn PCFD / Rye Brook codes from the air).
-- **F2** page parser + offline geocoder + web map with incidents.
-- **F3** P25: trunk-recorder for TG 307/301, ingest calls → STT → incident timeline.
-- **F4** Fireground 1 receiver, attached to the active incident.
-- **F5** IAR / text dispatch enrichment, alerts, deploy (systemd, OTA like Tapout).
+| | Milestone | Status |
+|---|---|---|
+| F0 | Scaffold + two-tone decoder (tests) | Done |
+| F1 | Paging chain on the bench: 470.2 NFM receiver, squelch, tones → page capture → STT; log every tone pair (learn the PCFD / Rye Brook codes from the air) | Done (codes learned, #47) |
+| F2 | Page parser + offline geocoder + web map with incidents | Done |
+| F3 | P25: trunk-recorder for TG 307/301, ingest calls → STT → incident timeline | Done |
+| F4 | Fireground 1 receiver, attached to the active incident | Done |
+| F5 | IAR / text dispatch enrichment, alerts, deploy (systemd, OTA like Tapout) | Alerts and deploy done; external incident feeds done another way (#297); IAR still planned (#43) |

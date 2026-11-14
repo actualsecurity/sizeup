@@ -1,5 +1,5 @@
 """The replicas verified all the time, and a task that fails said at once (sizeup/replicawatch.py, the supervisor's hooks in
-sizeup/handoff.py, Settings > Health's Replicas row, tools/deploy_check.py replicas). 2026-11-13: a corrupt cad.sqlite
+sizeup/handoff.py, Settings > Station > Health's Replicas row, tools/deploy_check.py replicas). 2026-11-13: a corrupt cad.sqlite
 replica sat unnoticed ~110 min, then every new task crash-looped ~35 min. No AWS: the fake S3 of tests/test_handoff.py
 (conditional writes), a local fake ntfy (tests/test_alarms.py), synthetic SQLite files made corrupt on purpose."""
 
@@ -547,7 +547,7 @@ def test_the_status_topic_comes_from_the_env_over_the_config_and_tapouts_are_ref
     assert (w.interval_s, w.leader_interval_s, w.pusher.every_s, w.store.obj) == (300, 0, 3600, None)
 
 
-# -- Settings > Health ---------------------------------------------------------------------------------------------------
+# -- Settings > Station > Health ---------------------------------------------------------------------------------------------------
 
 def test_health_shows_the_replicas_row_and_a_quiet_alert_even_with_the_station_silent():
     from tests.test_health import Rig
