@@ -226,18 +226,27 @@ def test_talking_now_reaches_the_hub_in_well_under_a_second(tmp_path):
         hub.close()
 
 
-def test_a_p25_grant_reaches_the_hub_as_talking_in_well_under_a_second(tmp_path):
+def only_pushed(monkeypatch) -> None:
+    """The station's state goes up when something changes (StationLink.live_changed) and, failing that, every
+    LIVE_REFRESH_S / STATUS_S. With those timers out of reach, what reaches the hub was pushed by the change itself:
+    the proof that it is sent at once. (It was "under 1.0 s on the wall clock" once, and a loaded CI runner took
+    1.85 s over it, #513; and a refresh 2 s later would have passed the 3 s wait all the same.)"""
+    from sizeup.cloud import station as station_mod
+    monkeypatch.setattr(station_mod, "LIVE_REFRESH_S", 600.0)
+    monkeypatch.setattr(station_mod, "STATUS_S", 600.0)
+
+
+def test_a_p25_grant_reaches_the_hub_as_talking_in_well_under_a_second(tmp_path, monkeypatch):
     # The unit script's grant line (deploy/trunk-recorder/unit-event.sh) is the keypress on Fire/EMS 15.
+    only_pushed(monkeypatch)
     hub = HubRun(hub_cfg(tmp_path))
     st = station(station_cfg(tmp_path, hub.url), {})
     try:
-        assert wait(lambda: hub.app.hub.status is not None, 10)
-        t0 = time.time()
+        assert wait(lambda: hub.app.hub.status is not None, 30)
         assert st.live.feed_line("SIZEUP-UNIT westchester 41228 call 307")
-        assert wait(lambda: [(e["radio_id"], e["tg"]) for e in hub.app.live.state()] == [("41228", 307)], 3)
-        assert time.time() - t0 < 1.0
+        assert wait(lambda: [(e["radio_id"], e["tg"]) for e in hub.app.live.state()] == [("41228", 307)], 30)
         st.live.feed_line("SIZEUP-UNIT westchester 600003 call 307")          # the next key-up
-        assert wait(lambda: [e["radio_id"] for e in hub.app.live.state()] == ["600003"], 3)
+        assert wait(lambda: [e["radio_id"] for e in hub.app.live.state()] == ["600003"], 30)
     finally:
         st.link.stop()
         hub.close()
@@ -252,34 +261,33 @@ def test_a_talking_snapshot_from_a_station_that_went_quiet_is_dropped():
     assert live.state() == []
 
 
-def test_a_page_going_out_reaches_the_hub_pair_by_pair_and_ends(tmp_path):
-    # South 2 (#63): each tone pair as it decodes on the station, on the hub's CAD and monitor in well under a
-    # second, then "voice", then ended (handing over to the finished page), then gone.
+def test_a_page_going_out_reaches_the_hub_pair_by_pair_and_ends(tmp_path, monkeypatch):
+    # South 2 (#63): each tone pair as it decodes on the station, on the hub's CAD and monitor at once (pushed by the
+    # decode, never waiting for the refresh), then "voice", then ended (handing over to the finished page), then gone.
+    only_pushed(monkeypatch)
     hub = HubRun(hub_cfg(tmp_path))
     st = station(station_cfg(tmp_path, hub.url), {})
     st.paging.on_change = st.link.live_changed
     try:
-        assert wait(lambda: hub.app.hub.status is not None, 10)
+        assert wait(lambda: hub.app.hub.status is not None, 30)
         since = time.time()
         frames = lambda x: [x[i:i + 800] for i in range(0, len(x) - 799, 800)]
         for f in frames(np.concatenate([tone(349.1, 1.0), tone(311.1, 1.6)])):     # B past any A's length (#115)
             st.paging.feed("South 2", since, f)
-        t0 = time.time()
         names = lambda: [p["names"] for e in hub.app.cad.state()["paging"] for p in e["pairs"]]
-        assert wait(lambda: names() == [["Port Chester · Fire"]], 3)
-        assert time.time() - t0 < 1.0
+        assert wait(lambda: names() == [["Port Chester · Fire"]], 30)
         e = hub.app.state()["paging"][0]                               # the monitor's state too
         assert (e["channel"], e["phase"], e["ours"], e["ended"]) == ("South 2", "tones", True, False)
         for f in frames(np.concatenate([tone(311.1, 1.4), tone(741.3, 1.0), tone(623.7, 3.0), np.zeros(4000), voice(2.0)])):
             st.paging.feed("South 2", since, f)
-        assert wait(lambda: names() == [["Port Chester · Fire"], []], 3)     # an unknown pair: its tones, no name
-        assert wait(lambda: hub.app.cad.state()["paging"][0]["phase"] == "voice", 3)
+        assert wait(lambda: names() == [["Port Chester · Fire"], []], 30)    # an unknown pair: its tones, no name
+        assert wait(lambda: hub.app.cad.state()["paging"][0]["phase"] == "voice", 30)
         assert hub.app.cad.state()["paging"][0]["pairs"][1]["a"] == pytest.approx(741.3, abs=2)
         st.paging.close("South 2")
         st.paging.finished("South 2", "abc123")
-        assert wait(lambda: hub.app.cad.state()["paging"][0]["ended"], 3)
+        assert wait(lambda: hub.app.cad.state()["paging"] and hub.app.cad.state()["paging"][0]["ended"], 30)
         assert hub.app.cad.state()["paging"][0]["page_id"] == "abc123"
-        assert wait(lambda: hub.app.cad.state()["paging"] == [], 8)       # RECENT_S after the page is built
+        assert wait(lambda: hub.app.cad.state()["paging"] == [], 30)      # RECENT_S after the page is built
     finally:
         st.link.stop()
         hub.close()

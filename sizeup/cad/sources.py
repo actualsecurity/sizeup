@@ -84,8 +84,11 @@ sizeup/sources/runner.py (they come here as "source_event" / "source_health" thr
                exactly what it read before, and so does where the call is (lists.event_town, the joint call: never
                a town the address only shows, a jurisdiction or a street list's guess; an unconfirmed page gets no
                guessed town at all). A reading that isn't the same place is never stored (checked_location). A
-               person's address has none. Rows stored before are normalised once, on the incident-sources thread in
-               batches, open ones first (backfill_addresses: never a person's, a failing row marked, counts logged). The addresses a feed put on an
+               person's address has none. Rows stored before are normalised once, in the background: on a thread of
+               their own from BACKFILL_DELAY_S after the start (nothing at start), BACKFILL_BATCH rows at a time,
+               open ones first, the leader only (a refused write, FencedWrite, stops it until this is the leader
+               again), going on where it was after a restart (backfill_run / backfill_addresses: never a person's,
+               a failing row marked, counts logged). The addresses a feed put on an
                incident are recorded (feed_addresses) so a push never carries them (alarms.push_address)
     logs       our incident ids and the source's label only: never the feed's ids, types, locations or an exception's text
     departments a feed's department entries (department_units(): {code: department}, Settings' "department_units"
@@ -118,6 +121,7 @@ from typing import Callable
 from sizeup.cad.fuzzy import STREET_SIM, misread, name_sim, snap
 from sizeup.cad.store import OPEN, TZ
 from sizeup.dispatch import split_joined
+from sizeup.fence import FencedWrite
 from sizeup.sources import EXTRA_SHOWN, HEALTH_STATES, SOURCE_ID, TIME_KEYS, FeedEvent, SourceError
 
 PAGING, PAGING_RANK, PAGING_LABEL = "paging", 1000, "Paging"
@@ -135,8 +139,10 @@ FORGET_S = 24 * 3600.0                 # a feed silent this long is off the tier
 INCOMING_S = 300.0
 COMMENT_REPEAT_S = 600.0               # a feed's comment with the same words this soon after: not a new line
 TICK_S = 5.0
-BACKFILL_BATCH = 50                    # old addresses normalised at a time (backfill_addresses) ...
-BACKFILL_PAUSE_S = 0.05                # ... with this pause between batches: the console's requests come first
+BACKFILL_DELAY_S = 300.0               # old addresses' backfill: nothing until this long after the start ...
+BACKFILL_BATCH = 50                    # ... then this many rows at a time (backfill_addresses) ...
+BACKFILL_PAUSE_S = 0.5                 # ... with this pause between batches: the console's requests come first
+BACKFILL_RETRY_S = 30.0                # ... and, not the leader (FencedWrite): looked at again this often
 PANEL_MAX = 50
 MANUAL_FIELDS = ("type", "location", "pin")
 
@@ -1007,6 +1013,8 @@ class Sources:
         # enriches the incident as for a page that joined it (transcript, cross streets, 60 Control mode's units)
         self.on_page_swept: Callable[[dict, int, dict], None] | None = None
         self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._backfill_thread: threading.Thread | None = None
         with self.store.lock:
             self.store.db.executescript(SCHEMA)
             for table, col in (("source_health", "received REAL"), ("source_reports", "gone_at REAL")):
@@ -2010,19 +2018,50 @@ class Sources:
                 return db.execute("UPDATE incoming SET status = 'expired' WHERE status = 'open' AND until < ?", (now,)).rowcount
 
     def run(self) -> None:
-        try:
-            self.backfill_addresses(pause=BACKFILL_PAUSE_S)  # on this thread, never in the way of start-up
-        except Exception as e:  # noqa: BLE001 - the addresses stay as they were; the feeds go on
-            self.log(f"incident sources: address backfill: {type(e).__name__}")
         while not self._stop.wait(TICK_S):
             try:
                 self.tick()
             except Exception as e:  # noqa: BLE001 - the ticker never dies
                 self.log(f"incident sources: {type(e).__name__}")
 
-    def start(self) -> Sources:
-        threading.Thread(target=self.run, name="incident-sources", daemon=True).start()
+    def start(self, backfill_delay_s: float | None = BACKFILL_DELAY_S) -> Sources:
+        """The ticker, and the old addresses' backfill on a thread of its own, backfill_delay_s after this (None: no
+        backfill): nothing of it at start."""
+        self._thread = threading.Thread(target=self.run, name="incident-sources", daemon=True)
+        self._thread.start()
+        if backfill_delay_s is not None:
+            self._backfill_thread = threading.Thread(target=self.backfill_run, args=(backfill_delay_s,),
+                                                     name="address-backfill", daemon=True)
+            self._backfill_thread.start()
         return self
+
+    def backfill_run(self, delay_s: float = BACKFILL_DELAY_S, retry_s: float = BACKFILL_RETRY_S) -> None:
+        """The backfill's thread: nothing until delay_s after the start (a takeover's start writes nothing of it:
+        docs/cloud.md "Writing a migration"), then backfill_addresses in batches, only while this is the leader
+        (store.may_write, the hub's fence). A write refused on the way (FencedWrite: the lease ran out) stops it,
+        said once; it looks again every retry_s and goes on from the rows still to do once this is the leader again.
+        Ends when no row is left, on stop(), or on an error (the addresses stay as they were; the next start goes on)."""
+        if self._stop.wait(delay_s):
+            return
+        waiting = False
+        while not self._stop.is_set():
+            if self.store.may_write():
+                try:
+                    self.backfill_addresses(pause=BACKFILL_PAUSE_S)
+                    return
+                except FencedWrite:
+                    pass                                     # the lease ran out in this pass: as below
+                except Exception as e:  # noqa: BLE001 - the addresses stay as they were; the feeds go on
+                    self.log(f"incident sources: address backfill: {type(e).__name__}")
+                    return
+            elif waiting:
+                if self._stop.wait(retry_s):
+                    return
+                continue
+            waiting = True
+            self.log("incident sources: address backfill: stopped until this is the leader again")
+            if self._stop.wait(retry_s):
+                return
 
     def backfill_addresses(self, pause: float = 0.0) -> int:
         """The addresses a feed or a page wrote before they were stored normalised (address_raw ''), open ones first,
@@ -2030,32 +2069,51 @@ class Sources:
         the old address kept as address_raw, so matching reads exactly what it read before. Never one a person set
         (manual_edits "location", or an incident a person made), nor one whose normal form isn't the same place
         (checked_location). The address is written only when it changes (the address history's trigger fires on it).
-        A row that fails is marked done as it is (address_raw = its address: never retried). Safe to run again and on
-        an empty database; in batches of BACKFILL_BATCH with pause between them (the incident-sources thread). The log
-        says how many, nothing else. How many changed."""
+        A row that fails is marked done as it is (address_raw = its address: never retried).
+
+        BACKFILL_BATCH rows are read at a time and each row is its own short transaction (the store's lock is never
+        held across rows), with pause between batches. A row done is out of the next read (address_raw set), so a
+        pass cut short (stop(), a restart, FencedWrite) goes on from the rows still to do, and a second pass finds
+        nothing. Only the leader writes: FencedWrite is raised (never swallowed) when this isn't it, before a batch
+        or from a row's write. The log says how many, nothing else. How many changed."""
         self._towns()
-        rows = self.store.q("SELECT i.* FROM incidents i WHERE i.address_raw = '' AND i.address != '' AND i.source IN "
-                            "(?, ?) AND NOT EXISTS (SELECT 1 FROM manual_edits m WHERE m.incident_id = i.id AND "
-                            f"m.field = 'location') ORDER BY i.status IN ({','.join('?' * len(OPEN))}) DESC, i.id DESC",
-                            (FEED_SOURCE, PAGE_SOURCE, *OPEN))
         n = failed = 0
-        for k, inc in enumerate(rows):
-            if pause and k and k % BACKFILL_BATCH == 0 and self._stop.wait(pause):
-                break
-            old = inc["address"]
-            try:
-                n += self._backfill_one(inc)
-            except Exception:  # noqa: BLE001 - one bad row never stops the rest, nor every start after
-                failed += 1
-                try:
-                    with self.store.tx() as db:
-                        db.execute("UPDATE incidents SET address_raw = ? WHERE id = ? AND address = ? AND "
-                                       "address_raw = ''", (old, inc["id"], old))
-                except Exception:  # noqa: BLE001
-                    pass
-        if n or failed:
-            self.log(f"incident sources: {n} stored addresses normalised" + (f", {failed} left as they were (failed)"
-                                                                              if failed else ""))
+        seen: set[int] = set()
+        try:
+            while not self._stop.is_set():
+                if not self.store.may_write():
+                    raise FencedWrite("not the leader: address backfill stopped (nothing written)")
+                rows = self.store.q(
+                    "SELECT i.* FROM incidents i WHERE i.address_raw = '' AND i.address != '' AND i.source IN (?, ?) "
+                    "AND NOT EXISTS (SELECT 1 FROM manual_edits m WHERE m.incident_id = i.id AND m.field = 'location') "
+                    f"ORDER BY i.status IN ({','.join('?' * len(OPEN))}) DESC, i.id DESC LIMIT ?",
+                    (FEED_SOURCE, PAGE_SOURCE, *OPEN, BACKFILL_BATCH))
+                todo = [r for r in rows if r["id"] not in seen]
+                if not todo:                                 # none left (or only rows this pass couldn't mark): done
+                    break
+                for inc in todo:
+                    seen.add(inc["id"])
+                    old = inc["address"]
+                    try:
+                        n += self._backfill_one(inc)
+                    except FencedWrite:
+                        raise
+                    except Exception:  # noqa: BLE001 - one bad row never stops the rest, nor every start after
+                        failed += 1
+                        try:
+                            with self.store.tx() as db:
+                                db.execute("UPDATE incidents SET address_raw = ? WHERE id = ? AND address = ? AND "
+                                           "address_raw = ''", (old, inc["id"], old))
+                        except FencedWrite:
+                            raise
+                        except Exception:  # noqa: BLE001
+                            pass
+                if len(rows) < BACKFILL_BATCH or (pause and self._stop.wait(pause)):
+                    break
+        finally:
+            if n or failed:
+                self.log(f"incident sources: {n} stored addresses normalised"
+                         + (f", {failed} left as they were (failed)" if failed else ""))
         return n
 
     def _backfill_one(self, inc: dict) -> bool:
@@ -2085,8 +2143,13 @@ class Sources:
                 db.execute("INSERT OR IGNORE INTO feed_addresses (incident_id, address) VALUES (?, ?)", (inc["id"], new))
         return bool(cur.rowcount) and new != old
 
-    def stop(self) -> None:
+    def stop(self, wait_s: float = 0.0) -> None:
+        """The ticker ends after its tick, the address backfill after its row; wait_s: each joined for up to that long
+        (Cad.shutdown, before the store closes)."""
         self._stop.set()
+        for t in (self._thread, self._backfill_thread):
+            if wait_s and t is not None and t is not threading.current_thread():
+                t.join(wait_s)
 
     def poke(self, reason: str) -> None:
         """Paging tones, a radio pre-alert, the phone ring: the adapters poll now (never raises)."""

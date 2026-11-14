@@ -21,15 +21,20 @@ const S = {
   toneQ: "", toneShow: "", toneType: "", toneEdit: null, unnamedEdit: null,      // Radios > Tones (#115, #122)
   toneOpen: new Set(), entEdit: null, entMerge: null, toneMove: null, toneAdd: null,
   dsFocus: "", pushScrolled: "",                     // #settings/data/<key>: that row; #settings/system/pushes: that card
+  stab: "", stationShown: false,                     // Settings > Station: the tab (#settings/station/<tab>)
 };
-// Health (#203): the station's health and alerts, its tab shown to admins on the hub only (sHealthTab; the server refuses
-// its data to anyone else).
+// The sections, by what they are about: the CAD's lists and run cards, people, the radios, the station (its health, its
+// logs, its hub link) and the hub's data sources, then System (records, backup, audit, the hub's own switches).
+// Station (sStationTab): Health and Logs are the admins' on the hub (#203: the server refuses their data to anyone
+// else), Hub link this machine's forwarding (not on the hub). #settings/health and #settings/system/health still land
+// on Station > Health (old links in pushes and bookmarks).
 const S_SECTIONS = [["lists", "Lists"], ["runcards", "Run cards"], ["units", "Units"], ["dispatch", "Dispatch"],
-  ["users", "Users"], ["system", "System"], ["health", "Health"], ["radios", "Radios"], ["data", "Data sources"]];
+  ["users", "Users"], ["radios", "Radios"], ["station", "Station"], ["data", "Data sources"], ["system", "System"]];
+const S_STATION_TABS = [["health", "Health"], ["logs", "Logs"], ["link", "Hub link"]];
 // Settings > Radios, one tab per part (#115; the Lists page's tabs): which RadioControls card, the Tones page and the
 // Radio IDs editor each go under (data-rtab on each).
-const S_RADIO_TABS = [["receivers", "Receivers"], ["channels", "Channels"], ["tones", "Tones"], ["ids", "Radio IDs"],
-  ["vocabulary", "Vocabulary"], ["stt", "Speech-to-text"]];
+const S_RADIO_TABS = [["receivers", "Receivers"], ["channels", "Channels"], ["squelch", "Squelch"], ["tones", "Tones"],
+  ["ids", "Radio IDs"], ["vocabulary", "Vocabulary"], ["stt", "Speech-to-text"], ["emergencies", "Emergencies"]];
 const S_RC_TABS = new Set(["receivers", "channels", "vocabulary", "stt"]);    // radio-controls.js's cards
 const S_TONE_TYPES = [["fire", "Fire"], ["ems", "EMS"], ["police", "Police"], ["other", "Other"]];   // the services (#122)
 const S_LISTS = [["event_types", "Event types"], ["event_subtypes", "Event subtypes"], ["type_subtypes", "Subtypes per type"],
@@ -178,9 +183,14 @@ function sRoute() {
   }
   let sec = m[1];
   if (sec === "tones") { sec = "radios"; S.rtab = "tones"; }          // #settings/tones: Radios > Tones
-  if (sec === "system" && m[2] === "health") {                       // the old place (a push's link): Settings > Health
-    sec = "health";
-    history.replaceState(null, "", "#settings/health");
+  if (sec === "health" || (sec === "system" && m[2] === "health")) {  // the old places (a push's link): Station > Health
+    sec = "station";
+    S.stab = "health";
+    history.replaceState(null, "", "#settings/station/health");
+  }
+  if (sec === "station") {
+    if (S_STATION_TABS.some(([k]) => k === m[2])) S.stab = m[2];
+    sStationPick();          // (before the first state: the tab asked for is kept, the hash untouched)
   }
   S.dsFocus = sec === "data" ? m[2] || "" : "";
   if (location.hash !== "#settings/system/pushes") S.pushScrolled = "";
@@ -196,8 +206,8 @@ function sRoute() {
     history.replaceState(null, "", `#settings/${sec}`);
   }
   S.section = sec;
-  if (sec !== "health") store("sizeup.cad.settings", sec);       // (Health is never where Settings opens by itself)
-  sHealthTab();
+  if (sec !== "station") store("sizeup.cad.settings", sec);      // (Station is never where Settings opens by itself)
+  sStationTab();
   for (const a of document.querySelectorAll("#s-sections a")) {
     a.classList.toggle("on", a.dataset.s === sec);
     if (a.dataset.s === sec) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current");
@@ -223,9 +233,9 @@ function sRender(force) {
     return;
   }
   S.deferred = false;
-  sHealthTab();
-  const fn = { lists: sLists, units: sUnits, dispatch: sDispatch, users: sUsers, system: sSystem, health: sHealth, radios: sRadios,
-    data: sData }[S.section];
+  sStationTab();
+  const fn = { lists: sLists, units: sUnits, dispatch: sDispatch, users: sUsers, system: sSystem, station: sStationPanel,
+    radios: sRadios, data: sData }[S.section];
   if (fn) fn(panel);
 }
 
@@ -250,13 +260,46 @@ function sRadioTab() {
   }));
   const rc = $("#settings-radio-controls");
   show(rc, S_RC_TABS.has(S.rtab));
-  if (S_RC_TABS.has(S.rtab) && window.RadioControls) RadioControls.mount(rc);    // receivers, talkgroups, vocabulary
+  // receivers, talkgroups, vocabulary; the reception test card under Receivers only (#436)
+  if (S_RC_TABS.has(S.rtab) && window.RadioControls) RadioControls.mount(rc, { reception: true, tab: S.rtab });
   for (const n of panel.querySelectorAll("[data-rtab]")) show(n, n.dataset.rtab === S.rtab);
+  if (S.rtab === "squelch" && window.SquelchPanel) SquelchPanel.mount($("#settings-squelch"));   // squelch-panel.js
 }
 
 function sRadios() {
   const box = $("#settings-tones");
   if (box && S.rtab === "tones") box.replaceChildren(...sTonePage(S.data.tones));
+  const em = $("#settings-emergencies");
+  if (em && S.rtab === "emergencies" && S.data.radio_emergencies) em.replaceChildren(sEmergencies(S.data.radio_emergencies));
+}
+
+// Settings > Radios > Emergencies: whose emergencies (not ours) stand out on the Radio page: a banner over the list,
+// the row marked, the full chip. Any other service's: a muted EM chip only. Presentation only. Admins, audited.
+const S_EM_LABELS = { fire: "Fire", ems: "EMS", police: "Police", transit: "Transit", air: "Air", other: "Other" };
+function sEmergencies(e) {
+  const card = sCard(sCardHead("Emergencies", "", sHelp("Someone else's emergency button on these services stands out on the "
+    + "Radio page (a banner over the list, the row marked). On any other service (a bus, DOT): a muted EM chip, its "
+    + "detail in the hover. Ours (our fire channels, our rigs, scene safety) and a channel with no known service always "
+    + "stand out. What is recorded, kept, "
+    + "alarmed and pushed doesn't change.")));
+  card.id = "s-radio-emergencies";
+  const row = el("div", "row");
+  row.append(el("span", "s-eta-l", "Prominent"));
+  for (const k of e.choices) {
+    const [lab, cb] = sCheck(S_EM_LABELS[k] || k, e.prominent.includes(k));
+    cb.disabled = !canDo("admin");
+    cb.addEventListener("change", () => {
+      const v = e.choices.filter((x) => (x === k ? cb.checked : e.prominent.includes(x)));
+      sPost("radio_emergencies", { action: "set", key: "prominent", value: v },
+        `Prominent emergencies: ${v.map((x) => S_EM_LABELS[x] || x).join(", ") || "none"}`);
+    });
+    row.append(lab);
+  }
+  row.append(sState(e.edited ? "edited" : "default"), el("span", "spacer"));
+  if (e.edited && canDo("admin")) row.append(sBtn("Reset", `Default: ${e.default.map((x) => S_EM_LABELS[x] || x).join(", ")}`,
+    () => sPost("radio_emergencies", { action: "reset", key: "prominent" }, "Prominent emergencies: default")));
+  card.append(row);
+  return card;
 }
 
 const sHz = (v) => (v ? Number(v).toFixed(1) : "—");
@@ -575,7 +618,8 @@ function sUnnamed(d) {
 }
 
 function sHook() {                 // every render (cad.js): keep up with edits made elsewhere
-  sHealthTab();
+  sStationTab();
+  if (S.section === "station" && cad.state && !S.stationShown && S.data) sRender(true);   // the first state: its tab
   if (!S.section) return;
   if (S.section === "runcards") sRunTools();
   if (cad.state && S.data && cad.state.rev !== S.data.rev && !S.loading) sLoad();
@@ -1606,14 +1650,14 @@ function sSystem(panel) {
   sel.classList.add("ro-ok");
   const audit = el("div", "tscroll");
   audit.id = "s-audit";
-  const station = sCard(null);
-  station.id = "s-station";
-  station.hidden = true;
   const alarms = sCard(null);                  // the emergency alarms' words, channels, drill (alarm.js, #128)
   alarms.id = "s-alarms";
   const pushes = sCard(null);                  // the ntfy topics by kind (sPushes): admins only, the names are secret
   pushes.id = "s-pushes";
   pushes.hidden = true;
+  const intel = sCard(null);                   // radio pre-alerts (intel.js IntelSettings, sizeup/intel): self-contained
+  intel.id = "s-intel";
+  intel.hidden = true;
   // the department, with its patch (static/brand)
   const patch = el("img", "s-patch");
   patch.src = "/static/brand/pcfd-patch.svg";
@@ -1625,7 +1669,7 @@ function sSystem(panel) {
   const about = sCard(patch, dept);
   about.classList.add("s-dept");
   panel.replaceChildren(...sHead("System"),
-    about, station, alarms, pushes,
+    about, alarms, pushes, intel,
     ...(sy && S.data.atc ? [sAtcTalkers(S.data.atc)] : []),
     ...(sy && S.data.hub_errors && sIsHub() ? [sHubErrors(S.data.hub_errors)] : []),
     ...(sy && S.data.map_display ? [sMapDisplay(S.data.map_display)] : []),
@@ -1647,9 +1691,9 @@ function sSystem(panel) {
   if (S.importing) sShowImport();
   sCounts();
   sAudit();
-  sStation();
   if (window.Alarm) Alarm.mountSettings($("#s-alarms"));
   sPushes(pushes);
+  if (window.IntelSettings) IntelSettings.mount(intel);
 }
 
 // Who is talking on HPN Tower (#252, sizeup/atc_talkers.py): the callsign heard on each airband row, matched to ADS-B,
@@ -1692,7 +1736,7 @@ function sHubErrors(e) {
       + `${e.window_min} min, or all errors exceed ${e.total.value}. Names the module and type, never the message. `
       + `At most hourly per error; 'back to normal' after ${e.quiet_min} quiet min.`)));
   card.id = "s-hub-errors";
-  const [lab, cb] = sCheck(e.on.label, e.on.value, "Off: still counted on Settings > Health, nothing pushed");
+  const [lab, cb] = sCheck(e.on.label, e.on.value, "Off: still counted on Settings > Station > Health, nothing pushed");
   cb.disabled = !canDo("admin");
   cb.addEventListener("change", () => sPost("hub_errors", { action: "set", key: "on", value: cb.checked },
     `${e.on.label}: ${cb.checked ? "on" : "off"}`));
@@ -1824,12 +1868,58 @@ function sAudioRetention(r) {
   return card;
 }
 
-// ---- health: the station's health and alerts (health.js, #79), admins only (#203) --------------------------------------
+// ---- station: its health and alerts (health.js, #79), its logs (logs.js), its hub link (hublink.js) --------------------
+// Health and Logs: admins only (#203), on the hub. Hub link: this machine's forwarding, not on the hub. One tab bar (the
+// Radios page's); each tab's part shown, the rest hidden (health.js polls only while its part is on screen).
 
 const sIsHub = () => !!(cad.state && cad.state.cloud && cad.state.cloud.role === "hub");
-function sHealthTab() {            // the tab: an admin's, on the hub
-  const a = document.querySelector('#s-sections a[data-s="health"]');
-  if (a) show(a.parentNode, canDo("admin") && sIsHub());
+function sStationTabs() {
+  const hubAdmin = canDo("admin") && sIsHub();
+  return S_STATION_TABS.filter(([k]) => (k === "link" ? !sIsHub() : hubAdmin));
+}
+// The tab in effect, once the state says whether this is the hub (a cold open of #settings/station/health on the hub
+// runs before cad.state: nothing is chosen or rewritten until then).
+function sStationPick() {
+  if (!cad.state) return false;
+  const tabs = sStationTabs();
+  if (!tabs.some(([k]) => k === S.stab)) S.stab = tabs.length ? tabs[0][0] : "";
+  if (S.section === "station" && S.stab && location.hash !== `#settings/station/${S.stab}`) {
+    history.replaceState(null, "", `#settings/station/${S.stab}`);
+  }
+  return true;
+}
+function sStationTab() {           // the nav item: shown while it has a tab (an admin on the hub; anyone off it)
+  const a = document.querySelector('#s-sections a[data-s="station"]');
+  if (a) show(a.parentNode, sStationTabs().length > 0);
+}
+function sStationPanel(panel) {
+  const bar = $("#s-station-tabs");
+  if (!sStationPick()) {                 // the state isn't in yet: sHook renders again when it is
+    show(bar, false);
+    for (const n of panel.querySelectorAll("[data-stab]")) show(n, false);
+    return;
+  }
+  S.stationShown = true;
+  const tabs = sStationTabs();
+  bar.replaceChildren(...tabs.map(([k, t]) => {
+    const b = sBtn(t, "", () => {
+      S.stab = k;
+      history.replaceState(null, "", `#settings/station/${k}`);
+      sRender(true);
+    }, "tab" + (S.stab === k ? " on" : ""));
+    b.setAttribute("aria-pressed", String(S.stab === k));
+    return b;
+  }));
+  show(bar, tabs.length > 1);
+  for (const n of panel.querySelectorAll("[data-stab]")) show(n, n.dataset.stab === S.stab);
+  if (!tabs.length) {
+    $("#s-station-health").replaceChildren(...sHead("Station"), el("p", "empty", `Admins only. ${askAdmin()}`));
+    show($("#s-station-health"), true);
+    return;
+  }
+  if (S.stab === "health") sHealth($("#s-station-health"));
+  if (S.stab === "logs" && window.StationLogsView) StationLogsView.mount($("#s-station-logs"));
+  if (S.stab === "link") sStation();
 }
 function sHealth(panel) {
   if (!canDo("admin")) {
@@ -1893,23 +1983,24 @@ async function sPushes(card) {
   kids.push(sRow);
   if (S.data.alert_mutes) kids.push(...sMutes(S.data.alert_mutes));
   card.hidden = false;
-  if (location.hash === "#settings/system/pushes" && S.pushScrolled !== location.hash) {     // from Settings > Health
+  if (location.hash === "#settings/system/pushes" && S.pushScrolled !== location.hash) {     // from Settings > Station > Health
     S.pushScrolled = location.hash;
     requestAnimationFrame(() => card.scrollIntoView({ block: "start" }));
   }
   card.replaceChildren(sCardHead("Push notifications", "", sHelp("Pushes go to our own ntfy topics, by kind. Status & health: "
     + "station health (silent, behind, a dongle or program down, the disk, the whisper queue), Amazon Transcribe failing and its "
     + "monthly limit, and their recoveries. Alerts: the emergency buttons, a mayday, an aircraft emergency, their acknowledgements "
-    + "and all clears. Only one topic set: everything goes to it. A name set here wins over SSM and the config file; empty uses "
+    + "and all clears. Pre-alerts (intel): radio pre-alerts (police / fire chatter); not set: the alerts topic. "
+    + "Only one of alerts / status set: everything goes to it. A name set here wins over SSM and the config file; empty uses "
     + `them. Never Tapout's topics (${d.forbidden.join(", ")}): refused. ${d.min_len} to ${d.max_len} letters, digits, - and _; `
     + "ntfy topics are public by name, so make them long and random. Only admins see the names.")), ...kids);
 }
-// Health alerts muted (#340, health.py MUTE_KINDS): still on Settings > Health, not pushed (nor their recovery).
+// Health alerts muted (#340, health.py MUTE_KINDS): still on Settings > Station > Health, not pushed (nor their recovery).
 const S_MUTE_FOR = [["", "Until unmuted"], ["1", "1 h"], ["24", "24 h"], ["168", "7 days"]];
 function sMutes(m) {
   const head = el("div", "row");
   head.append(el("b", "s-eta-l", "Mute alerts"), el("span", "dim small", `${m.kinds.filter((k) => k.muted).length} muted`));
-  if (window.Help && Help.info) head.append(Help.info("A muted alert still shows on Settings > Health, not pushed. One pushed before the mute still gets its recovery."));
+  if (window.Help && Help.info) head.append(Help.info("A muted alert still shows on Settings > Station > Health, not pushed. One pushed before the mute still gets its recovery."));
   const rows = m.kinds.map((k) => {
     const [lab, cb] = sCheck(k.label, k.muted, k.muted ? "Unmute: pushed again" : "Mute: Health only, no push");
     const sel = sSelect(k.timed_only ? S_MUTE_FOR.slice(1) : S_MUTE_FOR, "24", null, `${k.label}: mute for`);
@@ -2008,16 +2099,16 @@ function sCameraWall(w) {
     ...kids);
 }
 
-// ---- system: Station (forwarding to the hub, sizeup/cloud/stationmode.py) ---------------------------
+// ---- station: Hub link (forwarding to the hub, sizeup/cloud/stationmode.py) -------------------------
 // This machine's own switch: on, what it hears also goes to the hub (the CAD of record then); off,
 // all-in-one. Radios keep running either way. Not on the hub (409: hidden). The card is hublink.js's,
 // the same as on the station page; secrets are shown only as where they came from.
 
 function sStation() {
-  const card = $("#s-station");
+  const card = $("#s-hublink");
   if (!card) return;
   HubLink.mount(card, {
-    title: "Station",
+    title: "Hub link",
     operator,
     askOperator: () => ($("#operator-pick").hidden ? $("#operator") : $("#operator-pick")).focus(),
     msg: sMsg,
@@ -2092,7 +2183,7 @@ async function sImportFile(input) {
   try { data = JSON.parse(await f.text()); } catch (e) { sMsg(`${f.name}: not JSON (${e.message})`); return; }
   try {
     const r = await api("POST", "/api/cad/settings/import", { action: "dry_run", settings: data, operator: operator() });
-    S.importing = { name: f.name, data, changes: r.changes, note: r.note };
+    S.importing = { name: f.name, data, changes: r.changes, note: r.note, notes: r.notes || [] };
     sShowImport();
   } catch (e) {
     S.importing = null;
@@ -2125,7 +2216,8 @@ function sShowImport() {
   const row = el("div", "row");
   row.append(el("b", "", `${im.name}: ${im.changes.length ? `${im.changes.length} change${im.changes.length === 1 ? "" : "s"}` : "no changes"}`),
     el("span", "spacer"), cancel, apply);
-  box.replaceChildren(row, el("p", "dim small", im.note || ""), ...(im.changes.length ? [el("div", "tscroll").appendChild(t).parentNode] : []));
+  box.replaceChildren(row, el("p", "dim small", im.note || ""), ...(im.notes || []).map((n) => el("div", "small warn", n)),
+    ...(im.changes.length ? [el("div", "tscroll").appendChild(t).parentNode] : []));
 }
 
 // ---- wiring ---------------------------------------------------------------------------------------

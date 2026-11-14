@@ -191,6 +191,7 @@ class Cfg:
     talkgroups: tuple[int, ...] = (307, 333)
     expire_s: float = EXPIRE_S
     units: dict[str, str] = field(default_factory=dict)
+    kinds: dict[str, str] = field(default_factory=dict)     # code -> kind: a chief's number is guarded (feed.unit_forms)
 
 
 def load_hint_cfg(lists, channels: tuple[str, ...], talkgroups: tuple[int, ...]) -> Cfg:
@@ -219,14 +220,16 @@ def load_hint_cfg(lists, channels: tuple[str, ...], talkgroups: tuple[int, ...])
     on = h.get("enabled", True)
     if not isinstance(on, bool):
         raise ListsError(f"{where}: status_hints.enabled: true or false")
-    return Cfg(on, tuple(c.strip() for c in ch), tuple(tgs), float(exp), load_cfg(lists).units)
+    fc = load_cfg(lists)
+    return Cfg(on, tuple(c.strip() for c in ch), tuple(tgs), float(exp), fc.units, fc.kinds)
 
 
 class Phrases:
     """What a transcript says about our units' statuses: find(text) -> [Found]."""
 
-    def __init__(self, units: dict[str, str], known_numbers=()):
-        self.units = [(c, re.compile(r"(?<![\w])(?:" + "|".join(unit_forms(c, sp)) + r")(?![\w])", re.I))
+    def __init__(self, units: dict[str, str], known_numbers=(), kinds: dict[str, str] | None = None):
+        kinds = kinds or {}
+        self.units = [(c, re.compile(r"(?<![\w])(?:" + "|".join(unit_forms(c, sp, kinds.get(c, ""))) + r")(?![\w])", re.I))
                       for c, sp in units.items()]
         self.codes = set(units)
         self.spoken = dict(units)
@@ -403,7 +406,7 @@ class StatusHints:
                 self.cfg = Cfg(False)
             self.phrases = Phrases(self.cfg.units, {re.sub(r"\D", "", str(n)) for c, u in L.units.items()
                                                     for n in (c, (u.get("spoken") if isinstance(u, dict) else "") or "")
-                                                    if re.fullmatch(r"[\d\s-]+", str(n).strip() or "x")})
+                                                    if re.fullmatch(r"[\d\s-]+", str(n).strip() or "x")}, self.cfg.kinds)
             self._for = L
 
     def decorate(self, rows: list[dict]) -> list[dict]:

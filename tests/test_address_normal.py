@@ -383,21 +383,130 @@ def test_a_reading_that_is_not_the_same_place_is_never_stored(tmp_path, monkeypa
     assert rig.incidents()[0]["address"] == shown_location("12 EXAMPLE AVE") == "12 Example Ave"
 
 
-def test_the_backfill_runs_on_the_sources_thread_and_never_blocks_start(tmp_path, monkeypatch):
+def test_the_backfill_is_on_its_own_thread_and_never_at_start(tmp_path, monkeypatch):
+    """start() returns at once and nothing of the backfill runs for BACKFILL_DELAY_S (minutes): a takeover's start
+    writes none of it. After the delay it runs on a thread of its own, never the ticker's."""
     import threading
+    assert src.BACKFILL_DELAY_S >= 120
     rig = Rig(tmp_path)
-    ran = threading.Event()
+    iid = old_row(rig, "12 EXAMPLE AVE", ref="E1", feed_text="12 EXAMPLE AVE")
+    rig.cad.sources.start()                                        # the real delay: still waiting when stopped
+    assert {t.name for t in threading.enumerate()} >= {"incident-sources", "address-backfill"}
+    threading.Event().wait(0.2)
+    rig.cad.sources.stop(5)
+    assert rig.cad.store.incident(iid)["address_raw"] == ""        # untouched
+    assert not rig.cad.sources._backfill_thread.is_alive()
+    rig = Rig(tmp_path / "second")
+    iid = old_row(rig, "12 EXAMPLE AVE", ref="E1", feed_text="12 EXAMPLE AVE")
     where: list[str] = []
-    monkeypatch.setattr(rig.cad.sources, "backfill_addresses",
-                        lambda pause=0.0: (where.append(threading.current_thread().name), ran.wait(5), 0)[-1])
-    rig.cad.sources.start()                                        # returns at once, the backfill still waiting
-    ran.set()
-    rig.cad.sources.stop()
-    for _ in range(100):
-        if where:
+    one = rig.cad.sources._backfill_one
+    rig.cad.sources._backfill_one = lambda inc: (where.append(threading.current_thread().name), one(inc))[1]
+    monkeypatch.setattr(src, "BACKFILL_PAUSE_S", 0.0)
+    rig.cad.sources.start(backfill_delay_s=0.0)
+    rig.cad.sources._backfill_thread.join(10)
+    assert where == ["address-backfill"] and rig.cad.store.incident(iid)["address"] == "12 Example Ave, Rye Brook"
+    rig.cad.sources.stop(5)
+
+
+def many_old_rows(rig, n: int) -> list[int]:
+    return [old_row(rig, f"{10 + 2 * k} EXAMPLE AVE", ref=f"E{k}", feed_text=f"{10 + 2 * k} EXAMPLE AVE") for k in range(n)]
+
+
+def todo(rig) -> int:
+    return rig.cad.store.one("SELECT count(*) AS n FROM incidents WHERE address_raw = ''")["n"]
+
+
+def test_the_backfill_goes_in_small_batches_with_the_store_free_between_rows(tmp_path, monkeypatch):
+    """BACKFILL_BATCH rows per read, a pause between batches, each row its own transaction: the store's lock is free
+    whenever a row starts, and a pass cut short by stop() leaves the rest for the next one."""
+    monkeypatch.setattr(src, "BACKFILL_BATCH", 4)
+    rig = Rig(tmp_path)
+    ids = many_old_rows(rig, 10)
+    sources = rig.cad.sources
+    reads: list[int] = []
+    q = rig.cad.store.q
+
+    def counted(sql, args=()):
+        rows = q(sql, args)
+        if "FROM incidents i WHERE i.address_raw = ''" in sql:
+            reads.append(len(rows))
+        return rows
+    monkeypatch.setattr(rig.cad.store, "q", counted)
+    free: list[bool] = []
+    one = sources._backfill_one
+
+    def watched(inc):
+        got = rig.cad.store.lock.acquire(blocking=False)           # an RLock: ours only if no one else holds it
+        if got:
+            rig.cad.store.lock.release()
+        free.append(got and not rig.cad.store.db.in_transaction)
+        return one(inc)
+    sources._backfill_one = watched
+    pauses: list[float] = []
+    wait = sources._stop.wait
+    monkeypatch.setattr(sources._stop, "wait", lambda t=None: (pauses.append(t), len(pauses) >= 2)[1])   # stop at the 2nd
+    assert sources.backfill_addresses(pause=0.5) == 8
+    assert reads == [4, 4] and pauses == [0.5, 0.5] and all(free) and todo(rig) == 2
+    monkeypatch.setattr(sources._stop, "wait", wait)
+    assert sources.backfill_addresses(pause=0.0) == 2 and todo(rig) == 0          # the next pass: only what was left
+    assert reads == [4, 4, 2]
+    assert all(rig.cad.store.incident(i)["address"].endswith("Example Ave, Rye Brook") for i in ids)
+
+
+def test_a_fenced_backfill_stops_and_goes_on_when_the_leader_again(tmp_path, monkeypatch):
+    """The lease runs out mid-pass (#509): the write is refused, nothing of that row is kept, the thread stops (said
+    once) and writes nothing more while it isn't the leader; the leader again, it does the rows still to do."""
+    import threading
+    from sizeup.fence import FencedWrite
+    monkeypatch.setattr(src, "BACKFILL_BATCH", 3)
+    monkeypatch.setattr(src, "BACKFILL_PAUSE_S", 0.0)
+    logs: list[str] = []
+    rig = Rig(tmp_path)
+    sources = rig.cad.sources
+    sources.log = logs.append
+    ids = many_old_rows(rig, 8)
+    leader = [True]
+    rig.cad.may_write = lambda: leader[0]
+    done: list[int] = []
+    fenced, tried = threading.Event(), threading.Event()
+    one = sources._backfill_one
+
+    def lease_runs_out(inc):
+        if len(done) == 4 and leader[0] and not fenced.is_set():
+            leader[0] = False                                       # ... as this row is being written
+            fenced.set()
+        elif fenced.is_set():
+            tried.set()
+        changed = one(inc)
+        done.append(inc["id"])
+        return changed
+    sources._backfill_one = lease_runs_out
+    with pytest.raises(FencedWrite):
+        with rig.cad.store.tx() as db:                              # the guard itself, as the App wires it
+            leader[0] = False
+            db.execute("UPDATE incidents SET address_raw = 'x' WHERE id = ?", (ids[0],))
+    leader[0] = True
+    assert todo(rig) == 8
+    t = threading.Thread(target=sources.backfill_run, args=(0.0, 0.02), daemon=True)
+    t.start()
+    assert fenced.wait(10)
+    for _ in range(500):
+        if any("stopped until" in x for x in logs):
             break
         threading.Event().wait(0.01)
-    assert where == ["incident-sources"]
+    threading.Event().wait(0.2)                                     # several retries meanwhile: all refused before a row
+    assert t.is_alive() and not tried.is_set()
+    assert len(done) == 4 and todo(rig) == 4                        # the refused row and the rest: as they were
+    assert logs.count("incident sources: address backfill: stopped until this is the leader again") == 1
+    assert "incident sources: 4 stored addresses normalised" in logs
+    with pytest.raises(FencedWrite):
+        sources.backfill_addresses()                                # a direct call says so too, nothing written
+    assert todo(rig) == 4
+    leader[0] = True                                                # the leader again
+    t.join(10)
+    assert not t.is_alive() and todo(rig) == 0 and sorted(done) == sorted(ids)   # each row once
+    assert all(rig.cad.store.incident(i)["address"].endswith("Example Ave, Rye Brook") for i in ids)
+    assert logs.count("incident sources: 4 stored addresses normalised") == 2
 
 
 def test_the_backfill_does_open_incidents_first_and_writes_only_changes(tmp_path):

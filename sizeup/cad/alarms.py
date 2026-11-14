@@ -509,6 +509,7 @@ class Alarms:
         self.notifier = None                      # sizeup/notify.py Notifier, or None: no pushes
         self.public_url = ""                      # the CAD's address, for the push's link
         self.windows = Windows(clock=self.clock, log=log)
+        self.store.rig_ours = self._ours          # comms.with_alarms: a row keyed by one of our rigs (its em_ours)
         with self.store.lock:
             for stmt in SCHEMA.split(";"):
                 if stmt.strip():
@@ -669,6 +670,7 @@ class Alarms:
                 cur = self.store.one("SELECT * FROM alarms WHERE traffic_id = ?", (key,))
                 if cur is not None:
                     with self.store.tx() as db:
+                        self._touch(key, tid)
                         db.execute("UPDATE alarms SET traffic_id = ?, end = ? WHERE id = ?", (tid, end, cur["id"]))
                     cur = self.store.one("SELECT * FROM alarms WHERE id = ?", (cur["id"],))
             rid = str(t.get("radio_id") or "")
@@ -699,6 +701,7 @@ class Alarms:
                              "not our channel or rig, notices off")
                     return None
                 with self.store.tx() as db:
+                    self._touch(tid)
                     aid = db.execute(
                         "INSERT INTO alarms (traffic_id, at, end, created_at, updated_at, level, emergency, via, keywords, spans, "
                         "text, named, channel, talkgroup, unit, rig, radio_id, drill) "
@@ -727,6 +730,7 @@ class Alarms:
                         and (a["rig"] or not rig) and a["incident_id"]:
                     return a
                 with self.store.tx() as db:
+                    self._touch(aid=a["id"])
                     db.execute("UPDATE alarms SET keywords = ?, spans = ?, text = ?, named = ?, emergency = ?, level = ?, "
                                "updated_at = ?, via = CASE WHEN via = '' THEN ? ELSE via END, "
                                "rig = CASE WHEN rig = '' THEN ? ELSE rig END, "
@@ -771,6 +775,7 @@ class Alarms:
             if cur["stuck"]:
                 return self.get(cur["id"])
             with self.store.tx() as db:
+                self._touch(aid=cur["id"])
                 db.execute("UPDATE alarms SET stuck = ?, updated_at = ? WHERE id = ?", (who_, self.clock(), cur["id"]))
         a = self.get(cur["id"])
         self.log(f"alarms: {a['level']} {a['id']}: emergency flag stuck on {who_}: its later flags are not emergencies")
@@ -792,6 +797,7 @@ class Alarms:
             if cur is not None:
                 return cur["id"]
             with self.store.tx() as db:
+                self._touch(tid)
                 aid = db.execute(
                     "INSERT INTO alarms (traffic_id, at, end, created_at, updated_at, level, emergency, text, channel, unit, "
                     "drill, source, subject) VALUES (?, ?, ?, ?, ?, 'alarm', 0, ?, ?, ?, ?, 'adsb', ?)",
@@ -814,6 +820,7 @@ class Alarms:
                 return None
             if cur["ack_at"] is None:
                 with self.store.tx() as db:
+                    self._touch(aid=aid)
                     db.execute("UPDATE alarms SET ack_by = ?, ack_at = ?, updated_at = ?, end = ? WHERE id = ?",
                                (f"ADS-B: {why}"[:OPERATOR_MAX], now, now, now, aid))
                 a = self.get(aid)
@@ -858,6 +865,7 @@ class Alarms:
         if iid is None:
             return a
         with self.store.tx() as db:
+            self._touch(aid=a["id"])
             db.execute("UPDATE alarms SET incident_id = ? WHERE id = ? AND incident_id IS NULL", (iid, a["id"]))
             self.store._event(db, iid, "alarm", line(a), at=self.clock())
             if acked:
@@ -887,6 +895,7 @@ class Alarms:
                 raise CadError(f"alarm {aid} was already acknowledged by {cur['ack_by']} at {_hms(cur['ack_at'])}")
             now = self.clock()
             with self.store.tx() as db:
+                self._touch(aid=aid)
                 db.execute("UPDATE alarms SET ack_by = ?, ack_at = ?, updated_at = ? WHERE id = ?", (op, now, now, aid))
             a = self.get(aid)
             if a["incident_id"]:
@@ -914,6 +923,7 @@ class Alarms:
                 raise CadError(f"alarm {aid} was already cleared by {cur['clear_by']} at {_hms(cur['clear_at'])}")
             now = self.clock()
             with self.store.tx() as db:
+                self._touch(aid=aid)
                 db.execute("UPDATE alarms SET clear_by = ?, clear_at = ?, ack_by = CASE WHEN ack_at IS NULL THEN ? "
                            "ELSE ack_by END, ack_at = COALESCE(ack_at, ?), updated_at = ? WHERE id = ?",
                            (op, now, op, now, now, aid))
@@ -1008,6 +1018,19 @@ class Alarms:
             out.append(a)
         return out
 
+    def _touch(self, *tids, aid: int | None = None) -> None:
+        """The transmission an alarm is on changed for the Radio page (its chip, who saw it, the all clear): noted for
+        the page's change log (Comms.touch: written after this transaction commits). Never raises."""
+        try:
+            if aid is not None:
+                r = self.store.one("SELECT traffic_id FROM alarms WHERE id = ?", (aid,))
+                tids = (*tids, *([r["traffic_id"]] if r else []))
+            for t in tids:
+                if t:
+                    self.cad.comms.touch(t)
+        except Exception:  # noqa: BLE001
+            pass
+
     def get(self, aid: int) -> dict:
         rows = self._rows("a.id = ?", (aid,), 1)
         if not rows:
@@ -1017,11 +1040,46 @@ class Alarms:
     def state(self, now: float | None = None) -> dict:
         """The screens' part of the CAD state: open alarms (until acknowledged), notices, the just acknowledged."""
         now = self.clock() if now is None else now
+        notices = self._rows("a.ack_at IS NULL AND a.level = 'notice' AND a.created_at >= ?", (now - NOTICE_S,), 10)
+        for a in notices:
+            a["quiet"] = self._quiet(a["traffic_id"])
+        windows = self.windows.state(now)
+        for w in windows:
+            w["quiet"] = not w.get("ours") and self._quiet(alarm_id=w.get("alarm_id"), tg=w.get("talkgroup"))   # (ours: never)
         return {"drill": bool(self.config()["drill"]),   # no clock here: the state has it, and the push sends what changed (#137)
                 "open": self._rows("a.ack_at IS NULL AND a.level = 'alarm'", (), 20),
-                "notices": self._rows("a.ack_at IS NULL AND a.level = 'notice' AND a.created_at >= ?", (now - NOTICE_S,), 10),
+                "notices": notices,
                 "recent": self._rows("a.ack_at >= ?", (now - RECENT_S,), 10),
-                "windows": self.windows.state(now)}
+                "windows": windows}
+
+    def _quiet(self, traffic_id: str = "", alarm_id=None, tg=None) -> bool:
+        """Someone else's emergency on a service Settings > Radios > Emergencies doesn't list (fire and EMS by default:
+        a bus, DOT): the screens show no strip and no toast for it, only the muted EM on its row in Radio (cad.js
+        emLoud, the same rule). By its transmission's row (traffic_id, an alarm's, or the newest on the talkgroup of the
+        county system: a window is the county's). Quiet ONLY when that row's service is known and isn't listed. Never
+        when unsure: the row isn't in the log, its service is blank, it is ours, one of our rigs keyed it, it is a
+        scene-safety row, or its alarm is a full alarm ("Other agency's button: the full alarm"). Presentation only."""
+        try:
+            if alarm_id is not None:
+                a = self.store.one("SELECT traffic_id, level, rig FROM alarms WHERE id = ?", (alarm_id,))
+                if a is not None and (a["level"] == "alarm" or self._ours(a["rig"])):
+                    return False
+                traffic_id = traffic_id or (a or {}).get("traffic_id") or ""
+            cols = "service, ours, safety, rig"
+            if traffic_id:
+                r = self.store.one(f"SELECT {cols} FROM radio_traffic WHERE id = ?", (traffic_id,))
+            elif tg is not None:
+                from sizeup import sourcekeys
+                r = self.store.one(f"SELECT {cols} FROM radio_traffic WHERE talkgroup = ? AND system IN ('', ?) "
+                                   "ORDER BY start DESC LIMIT 1", (tg, sourcekeys.COUNTY))
+            else:
+                r = None
+        except Exception:  # noqa: BLE001 - no log table here: shown as before
+            return False
+        if r is None or not r["service"] or r["ours"] or (r["safety"] and r["safety"] != "dismissed") or self._ours(r["rig"]):
+            return False
+        loud = getattr(self.cad, "em_prominent", None)
+        return r["service"] not in (("fire", "ems", "other") if loud is None else loud)
 
     def history(self, limit: int = 200) -> list[dict]:
         rows = self._rows("1 = 1", (), 100000)

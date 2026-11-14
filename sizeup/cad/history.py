@@ -239,7 +239,7 @@ class AddressHistory:
 
     def _key_rows(self, ids: list[int]) -> int:
         """Key these queued incidents (outside the lock: the gazetteer), then write them in one transaction."""
-        if not ids:
+        if not ids or not self.store.may_write():       # a fenced hub task (#501): keyed by the leader, not here
             return 0
         marks = ",".join("?" * len(ids))
         rows = self.store.q(f"SELECT id, address, address_raw, place_address, geo_label, lat, lon FROM incidents WHERE id IN ({marks})",
@@ -285,7 +285,9 @@ class AddressHistory:
     def catch_up(self, max_rows: int = 2000, transcripts: bool = True) -> dict:
         """Key queued incidents (newest first) and index queued transcripts, at most max_rows of each; what is left.
         History here and Search call it with a small max_rows: what was just written is in, the backfill stays the
-        background thread's."""
+        background thread's. A fenced hub task (#501) writes neither: what is left, as it is."""
+        if not self.store.may_write():
+            return self.left()
         n = 0
         while n < max_rows:
             ids = [r["id"] for r in self.store.q("SELECT id FROM addr_queue ORDER BY id DESC LIMIT ?", (min(BATCH, max_rows),))]
@@ -372,7 +374,7 @@ class AddressHistory:
     def stop(self) -> None:
         self._stop.set()
         t, self._thread = self._thread, None
-        if t is not None:
+        if t is not None and t is not threading.current_thread():
             t.join(timeout=5)
 
     def _bounded_catch_up(self, transcripts: bool = False) -> None:

@@ -36,6 +36,7 @@ from sizeup.cad.api import CadApi
 from sizeup.cad.service import Cad, Settings
 from sizeup.cad.voicequeue import VoiceQueue
 from sizeup.cad.dispatcher import AudioUnavailable
+from sizeup.fence import FencedWrite
 
 STATIC = Path(__file__).resolve().parent.parent / "sizeup" / "web" / "static"
 NODE = shutil.which("node") or shutil.which("node", path="/opt/homebrew/bin:/usr/local/bin")
@@ -279,15 +280,17 @@ def test_a_preview_is_the_text_only_and_its_audio_an_explicit_second_call(voice)
 
 def test_a_voice_not_started_in_time_is_not_rendered_and_one_render_cannot_hold_the_queue(voice):
     cad = make_cad()
-    cad.voice_stale_s = 0.3
     iid = call(cad)
     first = cad.dispatch(iid, {"unit_ids": [uid(cad, "E60")], "operator": "JD"})
-    assert voice.started.wait(2)
+    assert voice.started.wait(30)
+    # Only the second one's deadline is short. (Both were 0.3 s once: on a loaded machine the worker thread, made at
+    # the first dispatch, came to the first job later than that, called it too late too, and nothing was ever said.)
+    cad.voice_stale_s = 0.3
     late = cad.dispatch(iid, {"unit_ids": [uid(cad, "E61")], "operator": "JD"})     # waits behind a slow one
-    time.sleep(0.4)
+    time.sleep(0.4)                                              # past its deadline (longer on a busy machine: later still)
     n = len(voice.said)
     voice.release()
-    assert cad.voice.wait(5)
+    assert cad.voice.wait(30)
     got = rows(cad, iid)
     assert (got[0]["audio"], got[1]["audio"], got[1]["audio_note"]) == ("ready", "failed", service.VOICE_LATE)
     assert len(voice.said) == n + 1                              # the first one's time out; nothing said for the late one
@@ -300,7 +303,7 @@ def test_a_voice_not_started_in_time_is_not_rendered_and_one_render_cannot_hold_
     sid = call(slow)
     voice.gate.clear()
     slow.dispatch(sid, {"unit_ids": [uid(slow, "E60")], "operator": "JD"})
-    assert slow.voice.wait(3) and voice.held()                   # given up while the voice is still at it
+    assert slow.voice.wait(4) and voice.held()                   # given up while the voice is still at it (held 5 s)
     d = rows(slow, sid)[0]
     assert (d["audio"], d["audio_note"]) == ("failed", service.VOICE_SLOW)
 
@@ -375,9 +378,10 @@ def test_a_start_fails_the_rows_left_pending_too_long_ago(voice, tmp_path):
     assert (d["audio"], d["has_audio"], d["audio_note"]) == ("failed", False, service.VOICE_RESTARTED)
     assert any("1 dispatch(es) left waiting for their voice" in m for m in said) and later.resume_voice() == 0
     assert [a["name"] for a in later.store.full(iid)["assignments"]] == ["E60"]   # the dispatch itself: all there
-    # young at the open, too old by the time the voice is wired: failed then, not rendered
-    cad.dispatch(iid, {"unit_ids": [uid(cad, "E61")], "operator": "JD"})
-    now = [time.time()]
+    # young at the open, too old by the time the voice is wired: failed then, not rendered (the fenced process
+    # writes nothing at all, #501: the next one dispatches it)
+    later.dispatch(iid, {"unit_ids": [uid(cad, "E61")], "operator": "JD"})
+    now = [time.time() + 60]                                     # (later's clock)
     third = Cad(Settings(db=str(tmp_path / "cad.sqlite")), log=said.append, clock=lambda: now[0])
     assert rows(third, iid)[1]["audio"] == "pending"
     now[0] += 60
@@ -418,11 +422,22 @@ def test_the_audio_blobs_are_the_writers_only(tmp_path):
     with wave.open(buf, "wb") as w:
         w.setnchannels(1), w.setsampwidth(2), w.setframerate(16000), w.writeframes(b"\0\0" * 1600)
     riff = buf.getvalue()
-    cad.remote_voice = lambda args: (riff, "Voice: Kokoro am_michael")           # the station's voice, as the hub gets it
+    back = threading.Event()
+
+    def remote(args):
+        back.wait(5)
+        return riff, "Voice: Kokoro am_michael"                  # the station's voice, as the hub gets it
+    cad.remote_voice = remote
     iid = call(cad)
-    cad.may_write = lambda: False
-    cad.dispatch(iid, {"unit_ids": [uid(cad, "E60")], "operator": "JD"})
+    cad.dispatch(iid, {"unit_ids": [uid(cad, "E60")], "operator": "JD"})        # logged by the leader ...
+    cad.may_write = lambda: False                                # ... fenced before its voice is back (#501: the
+    back.set()                                                   # fenced process writes nothing at all)
     assert cad.voice.wait(5) and Blobs.puts == [] and rows(cad, iid)[0]["audio"] == "pending"
+    # (the next leader's start renders it while young: resume_voice). A dispatch on the fenced task itself: refused out
+    # loud (the web server's 503: the console sends it again), never logged as sent
+    with pytest.raises(FencedWrite):
+        cad.dispatch(iid, {"unit_ids": [uid(cad, "E61")], "operator": "JD"})
+    assert len(rows(cad, iid)) == 1
     cad.may_write = lambda: True
     cad.dispatch(iid, {"unit_ids": [uid(cad, "E61")], "operator": "JD"})
     assert cad.voice.wait(5) and Blobs.puts == [("dispatch", "Voice: Kokoro am_michael")]

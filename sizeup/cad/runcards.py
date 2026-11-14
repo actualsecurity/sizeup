@@ -274,9 +274,10 @@ def _kinds_text(slot: dict) -> str:
 def estimates(units: list[dict], where: dict | None, inc: dict | None, params: eta.Params | None = None,
               road=None) -> dict[int, dict]:
     """unit id -> {eta_s (None: unknown), eta ("~3 min est." or ''), reason, how ("road" | "line" | "")} for the
-    given units: from where each is now (mapview.locate) to the event's map point. road({code: [lon, lat]}, to, inc) ->
-    {code: (drive s, metres) | None} (sizeup/cad/routes.py Routes.to_one, #360): by road when every one of them is on
-    the roads ("~3 min est. · 1.2 mi · from ..."), plus turnout from quarters; one on the roads with no way (None:
+    given units: from where each is now (mapview.locate) to the event's map point. road({code: [lon, lat]}, to, inc,
+    quarters={code: its station, for those in quarters}) -> {code: (drive s, metres) | None} (sizeup/cad/routes.py
+    Routes.to_one, #360): by road when every one of them is on the roads ("~3 min est. · 1.2 mi · from ..."), plus
+    turnout from quarters; one on the roads with no way (None:
     closed in, only by a parkway, over 30 min) has no estimate and goes after the rest; else the straight-line
     model (eta.py) for all of them (the nearest-first order never compares the two)."""
     p = params or eta.Params()
@@ -284,8 +285,9 @@ def estimates(units: list[dict], where: dict | None, inc: dict | None, params: e
     by_road: dict = {}
     if road is not None and to is not None:
         origins = {u["name"]: (where or {})[u["name"]]["ll"] for u in units if (where or {}).get(u["name"])}
+        quarters = {k: where[k].get("station") or "" for k in origins if not where[k].get("on_road")}
         try:
-            by_road = road(origins, to, inc) or {}
+            by_road = road(origins, to, inc, quarters=quarters) or {}
         except Exception:  # noqa: BLE001 - the straight line then
             by_road = {}
         if any(k not in by_road for k in origins):
