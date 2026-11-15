@@ -1050,11 +1050,12 @@ Incidents come in from ranked sources. The interface is in `sizeup/sources/__ini
 - **How often `poll()` is called:** every `poll_s`, never under 30 s. The one exception is an adapter whose `poll()`
   makes no request at all and only reads a snapshot it keeps in memory (a thread of its own talks to the source at its
   own pace): the runner reads that one every `poll_s` down to 1 s, so a new event reaches the hub within `poll_s` of
-  the adapter having it. The adapter says so itself (`local_poll = True`), or the station's admin does for one that
-  doesn't, with `SIZEUP_INCIDENT_SOURCES_SNAPSHOT="source-id,..."` in `/etc/sizeup/station.env` (off unless set; only
+  the adapter having it. The adapter says so itself (`local_poll = True`; an adapter with `local_poll = False` keeps the
+  floor whatever the station says), or the station's admin does for one without the attribute, with `SIZEUP_INCIDENT_SOURCES_SNAPSHOT="source-id,..."` in `/etc/sizeup/station.env` (off unless set; only
   for an adapter known to ask nothing in `poll()`). Only the reads get faster: `health()` is asked at the 30 s pace,
   `poll_now` comes no sooner or oftener, a `poll()` that raises backs off from 30 s, and a read with nothing new sends
-  and logs nothing. The start-up line in the station's log says the interval really used (`every 30 s (the floor;
+  and logs nothing. Those intervals run on the monotonic clock, so a wall clock stepped back or forward never pauses
+  health reports or triggers; the times sent are the wall clock's. The start-up line in the station's log says the interval really used (`every 30 s (the floor;
   poll_s 5 s)`, `memory read every 5 s (...)`).
 - **Nothing waits.** A page for us makes its incident at once, whatever the feeds' health. An occasional duplicate
   is acceptable; a delay is not. A feed's new event does the same unless it attaches. An event already closed (or in

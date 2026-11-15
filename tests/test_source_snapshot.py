@@ -94,6 +94,17 @@ def test_the_station_s_switch_names_an_adapter_that_does_not_declare_it():
     assert SourceRunner([FakeFeed(poll_s=5.0)], lambda k, d: None).runs[0].every == MIN_POLL_S   # os.environ: not set
 
 
+def test_an_adapter_that_says_local_poll_false_is_never_lifted_by_the_switch():
+    clock = Clock()
+    for says in (False, None, 0, "yes"):
+        feed = FakeFeed(poll_s=5.0, clock=clock)
+        feed.local_poll = says                                 # it has the attribute: it decides, not the station
+        r, run, _, _ = runner(feed, clock, env={ENV_SNAPSHOT: "county"})
+        assert not run.fast and r.step(run) == MIN_POLL_S and "every 30 s (the floor" in pace(feed, {"county"})
+    feed = Snapshot(poll_s=5.0, clock=clock)                   # True: fast with the switch or without
+    assert runner(feed, clock, env={ENV_SNAPSHOT: "county"})[1].fast and runner(feed, clock)[1].fast
+
+
 def test_the_whole_way_a_new_incident_reaches_the_cad_within_the_interval(tmp_path):
     feed = Snapshot(poll_s=2.0)
     rig = Rig(tmp_path, feed)
@@ -359,10 +370,13 @@ def test_a_trigger_waiting_when_the_adapter_goes_bad_is_dropped():
 
 
 def test_the_loop_reads_on_through_a_hold_and_calls_poll_now_once_when_it_ends(monkeypatch):
-    """The threads, with the floor and the hold scaled down to 0.6 s: the memory-read adapter is read all through the
-    hold, the other is not polled at all; each gets one poll_now(), no sooner than the hold after its last poll."""
-    monkeypatch.setattr(runner_mod, "MIN_POLL_S", 0.6)
-    monkeypatch.setattr(runner_mod, "TRIGGER_MIN_S", 0.6)
+    """The threads, with the floor and the hold scaled down to 1 s: the memory-read adapter is read all through the
+    hold, the other is not polled at all; each gets one poll_now(), no sooner than the hold after the poll it is
+    measured from (the runner's own monotonic clock, as the test's). Bounds are one-sided: a slow machine only waits
+    longer."""
+    hold = 1.0
+    monkeypatch.setattr(runner_mod, "MIN_POLL_S", hold)
+    monkeypatch.setattr(runner_mod, "TRIGGER_MIN_S", hold)
     monkeypatch.setattr(runner_mod, "SNAPSHOT_MIN_S", 0.02)
     monkeypatch.setattr(runner_mod, "SNAPSHOT_RECHECK_S", 0.05)
 
@@ -392,6 +406,8 @@ def test_the_loop_reads_on_through_a_hold_and_calls_poll_now_once_when_it_ends(m
             time.sleep(0.005)
         asked = time.monotonic()
         assert r.trigger("paging tones") == 2
+        since = {id(run.a): run.polled for run in r.runs}      # what each hold is measured from (set before: no race)
+        assert all(asked - t < hold for t in since.values())   # both still held when triggered
         while not (fast.pokes and slow.pokes) and time.monotonic() < deadline:
             time.sleep(0.01)
         fast.put("A1", location="12 Example Ave", times={"dispatched": T0})
@@ -401,9 +417,60 @@ def test_the_loop_reads_on_through_a_hold_and_calls_poll_now_once_when_it_ends(m
     assert fast.pokes == ["paging tones"] and slow.pokes == ["paging tones"]
     for feed in (fast, slow):
         now = next(i for i, (k, _) in enumerate(feed.at) if k == "now")
-        polls = [t for k, t in feed.at[:now] if k == "poll"]
-        held = [t for t in polls if t > asked]                 # between the trigger and its poll_now()
+        told = feed.at[now][1]
+        assert told - since[id(feed)] >= hold - 0.01           # told no sooner than the hold after its poll
+        held = [t for k, t in feed.at[:now] if k == "poll" and t > asked]   # polls between the trigger and poll_now()
         if feed is slow:
-            assert held == [] and feed.at[now][1] - polls[-1] >= 0.55     # it waited out the hold, no poll meanwhile
+            assert held == []                                  # it waited out the hold: no poll meanwhile
         else:
-            assert held and feed.at[now][1] - polls[0] >= 0.55            # read on through the hold; told no sooner
+            # read on all through the hold (every 0.02 s; at least one read in each half of it, however slow the box)
+            mid = asked + (told - asked) / 2
+            assert any(t < mid for t in held) and any(t >= mid for t in held) and len(held) >= 4
+        assert [k for k, _ in feed.at].count("now") == 1
+
+
+def test_a_wall_clock_step_back_or_forward_never_silences_health_or_holds_a_trigger():
+    """The station's wall clock stepped back an hour (and later forward a day) mid-run: health is still asked and sent
+    at the 30 s pace and triggers still work, because every interval is on the monotonic clock. The times sent are
+    the wall clock's."""
+    wall, mono = Clock(), Clock(1000.0)
+    feed = Snapshot(poll_s=1.0, clock=wall)
+    out = []
+    r = SourceRunner([feed], lambda k, d: out.append((k, d)), log=lambda m: None, clock=wall, mono=mono, env={})
+    run = r.runs[0]
+
+    def go(seconds):
+        end = mono.t + seconds
+        while mono.t < end:
+            w = r.step(run)
+            mono.t += w
+            wall.t += w
+    go(120)
+    for step in (-3600.0, 86400.0):
+        wall.t += step
+        del out[:]
+        asks = len(feed.asks)
+        go(600)
+        assert 19 <= len(feed.asks) - asks <= 21               # every 30 s through the step (was: none for an hour)
+        health = [d for k, d in out if k == "source_health"]
+        assert 9 <= len(health) <= 11 and all(abs(d["at"] - wall.t) <= 600 for d in health)   # heartbeats, wall times
+        assert 4 <= [k for k, _ in out].count("source_seen") <= 6
+        assert r.trigger("paging tones") == 1 and r.hold(run) <= TRIGGER_MIN_S
+        mono.t += TRIGGER_MIN_S
+        assert r.hold(run) == 0.0 and r._poll_now(run) and feed.pokes[-1] == "paging tones"
+        feed.put("N" + str(step), location="12 Example Ave", times={"dispatched": wall.t})
+        r.step(run)
+        [ev] = [d for k, d in out if k == "source_event"]
+        assert ev["seen_at"] == wall.t == ev["first_seen"]
+
+
+def test_the_monotonic_clock_starting_near_zero_still_sends_at_once():
+    """At boot time.monotonic() may be a few seconds: nothing waits for it to pass 30 s, 60 s or 120 s."""
+    wall, mono = Clock(), Clock(2.0)
+    feed = Snapshot(poll_s=1.0, clock=wall)
+    out = []
+    r = SourceRunner([feed], lambda k, d: out.append((k, d)), log=lambda m: None, clock=wall, mono=mono, env={})
+    r.step(r.runs[0])
+    assert sorted(k for k, _ in out) == ["source_health", "source_seen"] and len(feed.asks) == 1
+    assert r.trigger("paging tones") == 1
+    assert SourceRunner([feed], lambda k, d: None).mono is time.monotonic      # the real clocks: wall sent, mono paces

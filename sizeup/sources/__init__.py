@@ -34,9 +34,10 @@ A factory is `factory(ctx: SourceContext) -> Adapter | Iterable[Adapter]`. An ad
                          I/O at all: it only reads a snapshot the adapter keeps in memory (a thread of its own talks
                          to the source, at its own pace). The runner then calls poll() every poll_s, down to
                          SNAPSHOT_MIN_S, not MIN_POLL_S: a new event reaches the hub that much sooner, and the source
-                         sees nothing more. Only exactly True counts. Everything that could reach the source keeps
-                         the floor's pace whatever this says: health(), poll_now() and its hold, and the back-off
-                         after a poll() that raised
+                         sees nothing more. Only exactly True counts, and an adapter that has the attribute decides
+                         (False keeps the floor even when SIZEUP_INCIDENT_SOURCES_SNAPSHOT names it). Everything that
+                         could reach the source keeps the floor's pace whatever this says: health(), poll_now() and
+                         its hold, and the back-off after a poll() that raised
     poll() -> Iterable[FeedEvent]
                          the events the feed knows now (open ones, and ones that changed lately): a snapshot each time.
                          An event left out is never deleted, but the runner sends the ids of each poll's snapshot every
