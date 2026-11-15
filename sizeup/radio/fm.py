@@ -758,6 +758,20 @@ class NfmReceiver:
         self._proc: subprocess.Popen | None = None
         self.clock: Callable[[], float] = time.time
         self._stuck: float | None = None        # busy_since of the open spell logged as stuck
+        self._gone: float | None = None         # when its dongle went absent (logged once; once again when back, #547)
+
+    def _absent(self, detail: str) -> None:
+        """Its dongle isn't there (looked for again every 15 s): said once, not at every look (#547)."""
+        if self._gone is None:
+            self._gone = self.clock()
+            self.on_event(f"{self.channel.label}: {detail} (looking again every 15 s)")
+        self.state, self.detail = "absent", detail
+
+    def _present(self) -> None:
+        """Audio again after its dongle was absent: said once (#547)."""
+        if self._gone is not None:
+            self.on_event(f"{self.channel.label}: dongle '{self.device_name}' back after {_mmss(self.clock() - self._gone)}")
+            self._gone = None
 
     def new_squelch(self) -> NoiseSquelch:
         # Fresh on every rtl_fm start. (It used to be made here without drop_db, so FG1 ran with none
@@ -795,6 +809,7 @@ class NfmReceiver:
     def stop(self) -> None:
         self._stop.set()
         self._kill()
+        self._gone = None                       # (#547) stopped while its dongle was gone: nothing left to say
 
     def status(self) -> dict:
         sq = self.squelch
@@ -861,8 +876,10 @@ class NfmReceiver:
                 dev = self.device()
                 if dev is None:          # not plugged in, or two dongles share its serial (#242): never a guess
                     why = getattr(self.device, "why", "")
-                    self.state, self.detail = ("ambiguous", f"SDR '{self.device_name}': {why}") if why else (
-                        "absent", f"SDR '{self.device_name}' not plugged in")
+                    if why:
+                        self.state, self.detail = "ambiguous", f"SDR '{self.device_name}': {why}"
+                    else:
+                        self._absent(f"SDR '{self.device_name}' not plugged in")
                     self._stop.wait(15.0)
                     continue
             try:
@@ -877,10 +894,11 @@ class NfmReceiver:
             self.state, self.detail = "ok", self._ok_detail()
             self.squelch = self.new_squelch()
             got = self._pump(self._proc)
+            stalled = self.detail if self.detail in ("rtl_fm stalled", "rtl_sdr stalled") else ""
             # Mid-transmission when the audio stopped: keep what was heard (and say why it ended). Before
             # the kill (up to 3 s for a hung rtl_fm), so RX goes out as soon as the audio is known gone.
             self._flush("stopped" if self._stop.is_set() else
-                        "stall" if self.detail in ("rtl_fm stalled", "rtl_sdr stalled") else "rtl_fm ended")
+                        "stall" if stalled else "rtl_fm ended")
             self._watch_open()
             self._kill()
             if self._stop.is_set():
@@ -890,14 +908,16 @@ class NfmReceiver:
                 continue
             err = " ".join(self._stderr)
             if not got and ("No matching devices" in err or "No supported devices" in err):
-                # Not plugged in (or a different serial): say so, look again every 15 s, stay quiet.
-                self.state, self.detail = "absent", f"dongle '{self.device_name}' not connected"
+                # Not plugged in (or a different serial): say so once, look again every 15 s, stay quiet.
+                self._absent(f"dongle '{self.device_name}' not connected")
                 self._stop.wait(15.0)
                 continue
             self.restarts += 1
             self.state = "down"
             if not got and ("usb_claim_interface" in err or "Failed to open" in err):
                 self.detail = f"dongle '{self.device_name}' busy (in use by another program?)"
+            elif stalled:                # (#547) a stall is not an exit: say which it was
+                self.detail = f"{stalled}: no audio for {STALL_S:g} s"
             else:
                 self.detail = f"{self._program()} stopped" if got else f"no audio from {self._program()}"
             self.on_event(f"{self.channel.label} down: {self.detail}")
@@ -935,6 +955,8 @@ class NfmReceiver:
             chunk = os.read(fd, 8192)
             if not chunk:
                 return got
+            if not got:
+                self._present()
             got, last = True, time.monotonic()
             buf += chunk
             while len(buf) >= need:

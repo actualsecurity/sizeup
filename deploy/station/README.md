@@ -679,6 +679,19 @@ channel, and the Fire/EMS 15 row stays "ok" through the update.
 * **Checking it.** `sizeup-station status` has a `p25:` line (the service, its state, the dongle, trunk-recorder's
   pid); `doctor` checks it runs; `sizeup-station logs` includes it (`journalctl -u sizeup-trunk-recorder`: one line per
   start, stop and exit). `python3 -I /usr/local/lib/sizeup/trunkrecd.py print` shows the command line it would run.
+* **The watchdog** (#547). A trunk-recorder that runs but stops working is restarted, at most 3 times an hour, with a
+  `p25: watchdog: <why>: restarting trunk-recorder` line in the journal each time: no new call file for 10 times the
+  system's own mean gap between calls over the 3 h before the last call (15 min to 3 h; 3 h with fewer than 10 calls;
+  doubled after each restart with no call since), no control channel decode rate logged for 2 min (`config.json` has
+  `"controlWarnRate": -1`: one every 3 s), or the control channel under 2 msg/s for 10 min (doubled after each restart
+  that didn't bring it back, until it has decoded well for 10 min). Durations are on the monotonic clock: a step of
+  the wall clock (NTP, WSL2 after the host slept) is no fault. The hub pushes "no decode rate" only after 5 min, so a
+  decoder the watchdog heals never pages. `[p25] watchdog_min_min`,
+  `watchdog_max_min`, `watchdog_factor` and `watchdog_per_hour` (0: off) in `/etc/sizeup/config.toml` change it (a
+  release from before #547 refuses those keys: add them only once you won't switch back that far).
+* **Its own output in the journal** (#547): the control channel's decode rate (the first, lost / back, and every
+  30 min), and trunk-recorder's error, warning and control channel lines (radio IDs masked, at most 10 different ones
+  per 5 min, then a count). Everything else stays in `trunk-recorder.log`.
 * `sudo sizeup-station restart` restarts sizeup only; `stop` stops trunk-recorder's service too, `start` starts both.
 * **Going back to a release from before this** (the updater's switch back, or `sizeup-station rollback`): the updater
   stops, disables and removes the service first, so that release's sizeup runs trunk-recorder itself, as it did. Going

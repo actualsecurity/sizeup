@@ -229,6 +229,7 @@ class Config:
     alerts_outbox_min: float = 5.0       # the oldest event still waiting on the station this old
     alerts_disk_pct: float = 90.0        # the station's disk this full
     alerts_repeat_min: float = 15.0      # at most one push per condition this often (plus its recovery)
+    alerts_remind_min: float = 180.0     # a critical alert still on is pushed again this often (#547; 0: never)
     # "P25 trunk silent" (sizeup/cloud/health.py, #258): no call on ANY talkgroup this long while trunk-recorder runs
     # (longer when the system's learned gaps say so); one channel or talkgroup silent is only a hint
     alerts_p25_silent_min: float = 20.0
@@ -556,7 +557,7 @@ def _alerts(data: dict, prealert: dict) -> dict:
     from sizeup.notify import server_problem, topic_problem
     al = _take(data.get("alerts", {}), "alerts", {"ntfy_topic", "status_topic", "intel_topic", "ntfy_server", "silent_min",
                                                   "behind_min", "down_min", "outbox_min", "disk_pct", "repeat_min",
-                                                  "p25_silent_min", "p25_silent_night_min",
+                                                  "remind_min", "p25_silent_min", "p25_silent_night_min",
                                                   "main_channels"})   # (#242's, inert since #258: read, ignored)
     tapout = (prealert.get("prealert_ring_topic", ""), prealert.get("prealert_status_topic", ""))   # subscribed: protected
     topics, sources = {}, {}
@@ -574,6 +575,7 @@ def _alerts(data: dict, prealert: dict) -> dict:
         raise ConfigError(f"alerts.ntfy_server: {server_problem(server)}")
     limits = {"silent_min": (3, 1, 120), "behind_min": (15, 5, 1440), "down_min": (2, 0.5, 120),
               "outbox_min": (5, 1, 1440), "disk_pct": (90, 50, 99.9), "repeat_min": (15, 1, 1440),
+              "remind_min": (180, 0, 2880),
               "p25_silent_min": (20, 5, 720), "p25_silent_night_min": (60, 5, 720)}
     out = {}
     for k, (d, lo, hi) in limits.items():
@@ -1395,7 +1397,14 @@ def load(path: str | Path) -> Config:
         aws_stt["stt_aws_channels"] = tuple(dict.fromkeys([*aws_stt["stt_aws_channels"],
                                                            *(c.label for c in channels if c.kind == "airband")]))
     p25 = _take(data.get("p25", {}), "p25", {"capture_dir", "talkgroups", "talkgroups_file", "incident_talkgroups",
-                                             "aliases", "recorder", "recorder_dir", "emergency_window_min"})
+                                             "aliases", "recorder", "recorder_dir", "emergency_window_min",
+                                             "watchdog_min_min", "watchdog_max_min", "watchdog_factor",
+                                             "watchdog_per_hour"})
+    from sizeup.radio.trunkrecd import WATCH_KEYS    # (#547) read by the trunk-recorder service itself; checked here
+    for k, (_d, lo, hi) in WATCH_KEYS.items():
+        v = p25.get(k)
+        if v is not None and (isinstance(v, bool) or not isinstance(v, (int, float)) or not lo <= v <= hi):
+            raise ConfigError(f"p25.{k}: a number from {lo:g} to {hi:g}")
     try:
         em_window = float(p25.get("emergency_window_min", 10))
     except (TypeError, ValueError):
