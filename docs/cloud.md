@@ -2673,8 +2673,9 @@ are not charging for this"*, and *"primary local SDR on ADSB, secondary the abov
   answer within 10 s). A field only one feed has (callsign, type) is kept. Each aircraft says which feed its
   position came from: *our receiver*, *adsb.lol* or *adsb.fi*.
 * **The primary API** is the first *clean* one in a stable preference order: **adsb.fi, then adsb.lol**
-  (`[aircraft] prefer = [...]` changes it, `[aircraft] primary` puts one first; the order of `feeds` no longer
-  decides, and leaving a feed out of `feeds` turns it off). Clean: not resting, its read not stuck, no failure in
+  (`[aircraft] prefer = [...]` changes it, `[aircraft] primary` pins one first; the order of `feeds` no longer
+  decides, leaving a feed out of `feeds` turns it off, and a `prefer` entry not in `feeds` is ignored with one log
+  line). Clean: not resting, its read not stuck, no failure in
   the last 10 min, and a good answer since its last failure. While someone has the layer on: **the primary every
   5 s, the other every 10 s, our receiver every 2 s** (adsb.fi's public limit is 1 request a second; adsb.lol
   limits by load and was fine at 5 s in shortfinal; at most 18 requests a minute to the two together). Nobody
@@ -2682,14 +2683,18 @@ are not charging for this"*, and *"primary local SDR on ADSB, secondary the abov
   probe so that a feed that recovered is proven back and a replacement is known to answer.
 * **Failover:** a feed that errors, times out, trickles past its whole-read deadline or answers 429 **rests** —
   its `Retry-After` when it sends one (capped at 1 h; adsb.lol's 429 sent none in our tests), else 5 s doubling to
-  5 min (a 429 at least 10 s) — and the next API in the order becomes the primary and is read in the same turn.
+  5 min (a 429 at least 10 s) — and the next API in the order becomes the primary and is read at once (unless its
+  last answer is fresher than 5 s). **One provider is never asked twice within 1 s**, whatever the schedule.
   **Hysteresis:** the feed that failed takes the primary back only once it has answered again and 10 min have gone
-  by without a failure, so one that fails now and then never takes it back and forth; with none clean, the primary
-  stays where it is while it answers. Log: one line per change (`primary adsb.lol (was adsb.fi: rate limited …)`,
-  `primary adsb.fi (was adsb.lol: steady again)`).
+  by without a failure, so one that fails now and then never takes it back and forth. With none clean (both failing
+  now and then: a network wobble), the primary stays where it is through a short rest (its first failure in a row,
+  back within 5 s) and moves only when it is stuck or rests longer. Log: a line per change
+  (`primary adsb.lol (was adsb.fi: rate limited …)`, `primary adsb.fi (was adsb.lol: steady again)`), at most one
+  every 5 min, with how many more changes since.
 * **No source answering** — every API feed tried and failed (resting, stuck, or no good answer since its last
   failure) and our receiver silent: one log line (`no source answering (…each one's reason…)`), one row first in
-  Settings > Station > Health (*Aircraft: no source answering*, red; the reasons on hover), the box says
+  Settings > Station > Health (*Aircraft: no source answering*, red; the reasons on hover; *idle* instead while
+  nothing is read: the map closed and alarms off), the box says
   *"no feed answering"*, and the aircraft on the map go stale (hollow, with their age). The emergency watch keeps
   trying each feed as its rest ends; the first to answer carries the map and the watch, and one line says so
   (`adsb.lol answering again after 50 s with no source`). A feed not tried yet (the next one after a primary that

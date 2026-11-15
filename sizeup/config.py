@@ -328,7 +328,7 @@ class Config:
     # (or all-in-one). feeds: "receiver" (our own ADS-B receiver: its positions first), "adsblol" (ODbL) and
     # "adsbfi" (personal, non-commercial use: the user's decision, 2026-10-14), combined; the primary API: the first
     # steady one in the order primary, prefer, then adsb.fi, adsb.lol (adsb.fi first since #542: it failed none in a
-    # week from the hub, adsb.lol ~150 times a day); feeds' own order no longer decides.
+    # week from the hub, adsb.lol ~150 times a day); feeds' order no longer decides (pin one with primary).
     aircraft_enabled: bool = True
     aircraft_feeds: tuple[str, ...] = ("adsbfi", "adsblol")
     aircraft_primary: str = ""        # "" = auto

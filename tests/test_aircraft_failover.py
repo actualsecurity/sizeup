@@ -159,8 +159,9 @@ def test_lol_stalls_while_primary_then_both_down_says_so_once_then_recovers(rig)
     assert ly.feeds[0].st["ok"] == clock.t and ly.primary().key == "adsblol"
     lol.mode = "trickle"                                             # the primary stalls
     t0 = time.monotonic()
-    assert step(ly, clock, 5) == "adsbfi"                            # its read cut at the deadline; adsb.fi (healthy) on
-    assert time.monotonic() - t0 < 4 and "no whole answer" in ly.feeds[1].st["why"]
+    assert step(ly, clock, 5) == "adsblol"                           # cut at the deadline; one failure, a 5 s rest:
+    assert time.monotonic() - t0 < 4 and "no whole answer" in ly.feeds[1].st["why"]   # (none clean) it stays
+    assert step(ly, clock, 5) == "adsbfi"                            # stalls again: adsb.fi (answering) takes over
     assert not ly.all_down() and ly.public()["aircraft"]
     fi.mode = ("429", 120)                                           # and now adsb.fi refuses too: nothing answers
     downs = []
@@ -174,7 +175,10 @@ def test_lol_stalls_while_primary_then_both_down_says_so_once_then_recovers(rig)
     assert rows[0]["key"] == "aircraft:down" and rows[0]["label"] == "Aircraft: no source answering"
     assert rows[0]["state"] == "down" and rows[0]["why"] == "" and "adsb.fi: rate limited" in rows[0]["title"]
     assert sum(1 for r in rows if r["state"] == "down") == 1 and "no feed answering" in ly.public()["error"]
-    lol.mode = "ok"                                                  # adsb.lol comes back first
+    ly.asked, ly.watch = 0.0, False                                  # map closed and alarms off: nothing is asked
+    assert ly.feed_health()[0]["state"] == "idle" and "not reading" in ly.feed_health()[0]["title"]
+    ly.watch = True
+    lol.mode = "ok"                                                # adsb.lol comes back first
     for _ in range(12):
         if step(ly, clock, 5) and ly.down_since is None:
             break
@@ -239,3 +243,102 @@ def test_the_preference_order_and_config():
 def test_health_js_draws_the_down_row_as_bad():
     js = (A.ROOT / "sizeup" / "web" / "static" / "health.js").read_text()
     assert 's === "down" ? "hl-bad"' in js or '|| s === "down"' in js
+
+
+# ---- #573 review -----------------------------------------------------------------------------------------------------------
+
+def test_a_feed_promoted_just_after_a_read_waits_out_the_providers_minimum_gap(rig, monkeypatch):
+    """adsb.lol read as the other feed, then adsb.fi (the primary) refused in the same turn: adsb.lol is promoted but
+    not asked again until MIN_GAP_S after its last request (adsb.fi's limit is 1 a second). PRIMARY_S made 0.2 s:
+    the gap alone holds it (normally its fresh answer makes it due only PRIMARY_S after that read)."""
+    _ly, clock, fi, lol, logs, _alarms = rig
+    monkeypatch.setattr(A, "PRIMARY_S", 0.2)
+    ly = AircraftLayer(feeds=("adsblol", "adsbfi"), adsbfi_url=fi.url(FI_PATH), adsblol_url=lol.url(LOL_PATH),
+                       registry=False, clock=clock, log=logs.append)       # adsb.lol read first in each pass
+    step(ly, clock, 0)
+    fi.mode = ("429", 30)
+    n = len(lol.hits)
+    assert step(ly, clock, A.SECONDARY_S) == "adsblol"                     # both due: adsb.lol read, adsb.fi refused
+    assert len(lol.hits) == n + 1                                         # promoted, but not asked a second time
+    assert step(ly, clock, 0.5) == "adsblol" and len(lol.hits) == n + 1   # still within the gap
+    step(ly, clock, 0.5)
+    assert len(lol.hits) == n + 2                                         # the gap out: read as the primary
+    assert all(b - a >= A.MIN_GAP_S for a, b in zip(lol.hits, lol.hits[1:]))
+    for f in ly.feeds:
+        f.fetch.close()
+
+
+class RealClock:
+    @property
+    def t(self) -> float:
+        return time.time()
+
+
+def test_on_the_layers_thread_no_provider_is_asked_twice_within_the_gap(monkeypatch):
+    """Real time, each feed on its own thread: adsb.fi refuses at once, adsb.lol (just read) is promoted; its next
+    request comes no sooner than MIN_GAP_S after the last (it came 0.15 s after, before the fix). PRIMARY_S is made
+    0.2 s here so that the gap alone holds the requests apart."""
+    monkeypatch.setattr(A, "PRIMARY_S", 0.2)
+    clock = RealClock()
+    fi, lol = Provider(clock), Provider(clock)
+    fi.mode = ("429", 30)
+    ly = AircraftLayer(feeds=("adsblol", "adsbfi"), adsbfi_url=fi.url(FI_PATH), adsblol_url=lol.url(LOL_PATH),
+                       registry=False, log=lambda m: None, watch=False)
+    try:
+        ly.asked = time.time() + 30                                       # someone looking throughout
+        ly.start()
+        time.sleep(3.5)
+        assert ly.primary().key == "adsblol" and len(lol.hits) >= 3
+        assert all(b - a >= A.MIN_GAP_S - 0.05 for a, b in zip(lol.hits, lol.hits[1:])), lol.hits
+        assert len(fi.hits) == 1                                          # resting its Retry-After
+    finally:
+        ly.stop()
+        for p in (fi, lol):
+            p.close()
+
+
+def test_both_feeds_failing_now_and_then_for_an_hour_keeps_the_primary_and_the_log_quiet():
+    """A hub network wobble: each feed fails every 7th request, for an hour, someone looking throughout. None is
+    clean, so the primary stays through each feed's short rests: a handful of changes, the log rate-limited, and no
+    more requests than the schedule's."""
+    from tests.test_aircraft import FI3, FI_URL, LOL3, LOL_URL
+    from urllib.error import URLError
+    clock = Clock(T3)
+    n = {"lol.example": 0, "fi.example": 0}
+
+    def fetch(url, timeout, limit, headers=None):
+        host = url.split("/")[2]
+        n[host] += 1
+        if n[host] % 7 == 0:
+            raise URLError("timed out")
+        return 200, {}, LOL3 if host == "lol.example" else FI3
+
+    logs: list[str] = []
+    ly = AircraftLayer(feeds=("adsbfi", "adsblol"), adsbfi_url=FI_URL, adsblol_url=LOL_URL, registry=False,
+                       fetch=fetch, clock=clock, log=logs.append, watch=False)
+    seq = []
+    for _ in range(3600):
+        seq.append(step(ly, clock, 1.0))
+    switches = len(changes(seq)) - 1
+    said = [m for m in logs if m.startswith("aircraft: primary ")]
+    print(f"wobble: {switches} primary change(s), {len(said)} line(s), requests {n}")
+    assert switches <= 4 and len(said) <= 4, (switches, said)
+    # the schedule's own rate (the primary every 5 s, the other every 10 s), plus at most the one early retry (5 s
+    # back-off) after each failure; no growth from flipping
+    base = 3600 / A.PRIMARY_S + 3600 / A.SECONDARY_S
+    total = n["fi.example"] + n["lol.example"]
+    assert total <= base + total / 7 / 2 and total <= 1.05 * base, n
+
+
+def test_prefer_naming_a_feed_that_is_off_is_said_once():
+    logs: list[str] = []
+    ly = AircraftLayer(feeds=("adsbfi",), prefer=("adsblol", "adsbfi"), adsbfi_url="https://f.example" + FI_PATH,
+                       registry=False, log=logs.append, watch=False)
+    try:
+        ly.start()
+        ly.start()
+        assert sum("prefer names adsblol, not in feeds" in m for m in logs) == 1
+    finally:
+        ly.stop()
+        for f in ly.feeds:
+            f.fetch.close()

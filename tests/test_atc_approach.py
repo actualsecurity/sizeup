@@ -436,6 +436,7 @@ def test_the_layer_widens_for_approach_and_the_map_stays():
     assert fetch.calls[-1].endswith("/15") and ly.wide == []
     ly.widen(atc_scope.APPROACH_NM)
     assert ly.widened() and ly.query_nm() == 40.0
+    clock.t += A.MIN_GAP_S                               # (one provider never asked twice within the gap)
     ly.refresh()
     assert fetch.calls[-1].endswith("/40")
     ly.tracks.update(A.Snapshot(clock.t, (ac(hex="f00001", flight="JBU1234", **NORTH_30, track=180.0),)))
