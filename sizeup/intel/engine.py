@@ -36,8 +36,12 @@ How a row becomes an event, per pack whose scope it is in:
      event: the open one of this pack, category and source still within the window, or the open one at the same place
      (subject = pack:category:place), else a new one;
   4. WHERE: the window's words through locate() (only while not confirmed);
-  5. mode = the lowest of the pack's, the category's and the best contributing rule's (off: no event; shadow: an event
-     only in the store, never shown or pushed); policy.decide() says whether to push, push.compose() + scrub() what.
+  5. mode = the lowest of the pack's, the category's and the rules' rung (off: no event; shadow: an event only in the
+     store, never shown or pushed); policy.decide() says whether to push, push.compose() + scrub() what. The rules'
+     rung is the highest mode M such that the rules at M or above ALONE (their weights, the cues at M or above, every
+     damper) reach the threshold: a rule at a lower mode adds to WHAT but never lifts the event over its own mode, so
+     raising one weak rule to push never makes the strong ones beside it push (#535 review). With every rule of a
+     category at one mode (as shipped) this is that mode, as before.
 Intel never writes incidents, radio_links, incoming or alarms.
 """
 
@@ -408,7 +412,7 @@ class IntelEngine:
         return changed
 
     def _scores(self, pack, win: Window) -> dict:
-        """{category: (WHAT, [(tid, rule, w)], best contributing rule's mode)} over the window."""
+        """{category: (WHAT, [(tid, rule, w)], the rules' rung)} over the window (the rung: step 5 of the module's doc)."""
         best: dict[str, tuple[float, str, object]] = {}      # rule id -> (weight, tid, rule): its strongest in the window
         for tid, e in win.ordered():
             if e.suppressed:
@@ -446,7 +450,9 @@ class IntelEngine:
             what = 1.0 - miss
             for w, _t, _r in damp:
                 what *= 1.0 + max(-1.0, w)
-            top_mode = max((r.mode for _w, _t, r in pos), key=mode_rank)
+            cd = pack.category(cat)
+            thr = cd.get("threshold") if cd.get("threshold") is not None else pack.threshold
+            top_mode = rung(pos + cues, damp, thr)
             out[cat] = (round(what, 4), [(t, r, w) for w, t, r in pos + cues + damp], top_mode)
         return out
 
@@ -850,6 +856,23 @@ class IntelEngine:
     def _span(self, name: str) -> float:
         p = self.pack(name)
         return p.window_s if p is not None else 120.0
+
+
+def rung(evidence: list, damp: list, thr: float) -> str:
+    """The highest mode whose own rules reach thr: evidence [(w, tid, rule)] at that mode or above (noisy-OR), times
+    every damper. The lowest scored mode when none does (the caller checks WHAT against thr anyway)."""
+    modes = sorted({r.mode for _w, _t, r in evidence}, key=mode_rank, reverse=True)
+    for m in modes:
+        miss = 1.0
+        for w, _t, r in evidence:
+            if mode_rank(r.mode) >= mode_rank(m):
+                miss *= 1.0 - min(1.0, w)
+        what = 1.0 - miss
+        for w, _t, _r in damp:
+            what *= 1.0 + max(-1.0, w)
+        if round(what, 4) >= thr:
+            return m
+    return modes[-1] if modes else "off"
 
 
 def _same(a: Event, b: Event) -> bool:

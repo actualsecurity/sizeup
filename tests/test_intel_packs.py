@@ -641,3 +641,58 @@ def test_the_new_packs_never_ask_the_model():
     assert e.infer.calls == ["police"]
     for name in NEW:
         assert e.pack(name).src.get("infer") is False
+
+
+# -- an event's mode is its rules' rung (#535 review) ------------------------------------------------------------------
+
+def test_one_weak_rule_raised_to_push_never_carries_the_strong_ones_with_it():
+    """The review's scenario: the pack, the category and only cpd.mva_word at push. "crash, vehicle rollover" hits
+    cpd.mva_word (push, 0.35) and cpd.mva_serious (log, 0.7): the event is real, but at log, on the rules at log."""
+    snap = {**HOSTILE, "intel_packs": {"county_police": {"mode": "push", "categories": {"mva_injury": {"mode": "push"}}}},
+            "intel_rules": {"cpd.mva_word": {"mode": "push"}}}
+    e, sink = engine(snap)
+    [ev] = e.feed(crow("t1", "crash, vehicle rollover on Sample St", 1000.0))
+    assert ev.category == "mva_injury" and ev.what_score >= 0.7 and ev.mode == "log"
+    assert not any(d.would_push for _e, d in sink.pushes)
+    # the strong rule raised too: now the rules at push alone reach the threshold
+    snap["intel_rules"]["cpd.mva_serious"] = {"mode": "push"}
+    e, sink = engine(snap)
+    [ev] = e.feed(crow("t1", "crash, vehicle rollover on Sample St", 1000.0))
+    assert ev.mode == "push" and [d.would_push for _e, d in sink.pushes] == [True]
+
+
+def test_weak_rules_at_push_that_add_up_to_the_threshold_push_together():
+    """Two rules at push that only reach the threshold together (a crash said, then EMS asked for) push; a log cue
+    beside a push rule adds to WHAT, never to the rung."""
+    snap = {**HOSTILE, "intel_packs": {"county_police": {"mode": "push", "categories": {"mva_injury": {"mode": "push"}}}},
+            "intel_rules": {"cpd.mva_word": {"mode": "push"}, "cpd.mva_ems": {"mode": "push"}}}
+    e, _sink = engine(snap)
+    e.feed(crow("t1", "two car m v a on Sample St", 1000.0))
+    evs = {ev.category: ev for ev in e.feed(crow("t2", "start e m s for the driver", 1010.0))}
+    assert evs["mva_injury"].mode == "push"
+    del snap["intel_rules"]["cpd.mva_ems"]
+    e, _sink = engine(snap)
+    e.feed(crow("t1", "respond to a two car m v a on Sample St", 1000.0))       # mva_word (push) + a dispatch cue (log)
+    evs = {ev.category: ev for ev in e.feed(crow("t2", "start e m s for the driver", 1010.0))}
+    assert evs["mva_injury"].mode == "log"
+
+
+def test_the_police_pack_is_unchanged_with_one_mode_and_fixed_with_mixed_ones():
+    """As shipped (every rule at push) the police pack's events are at push as before. With pd.mva_injury lowered
+    to log and pd.mva left at push, "MVA with injuries" was pushed on pd.mva_injury's strength; now it is at log."""
+    def pd(text, ov):
+        e, _ = engine({**HOSTILE, **ov})
+        return [ev.mode for ev in e.feed(crow("t1", text, 1000.0, "p25:mrrs:9211", "police"))]
+    assert pd("respond for an MVA with injuries at Sample St", {}) == ["push"]
+    assert pd("respond for an MVA with injuries at Sample St", {"intel_rules": {"pd.mva_injury": {"mode": "log"}}}) == ["log"]
+    assert pd("shots fired", {"intel_rules": {"pd.shots": {"mode": "map"}}}) == ["map"]
+
+
+def test_the_rung_by_itself():
+    from sizeup.intel.engine import rung
+    R = lambda mode: rules_mod.Rule("x", 1, "c", 0.5, [], [], mode)      # noqa: E731
+    assert rung([(0.7, "t", R("log")), (0.35, "t", R("push"))], [], 0.6) == "log"
+    assert rung([(0.7, "t", R("push")), (0.35, "t", R("log"))], [], 0.6) == "push"
+    assert rung([(0.4, "t", R("push")), (0.4, "t", R("map")), (0.4, "t", R("log"))], [], 0.6) == "map"
+    assert rung([(0.7, "t", R("push")), (0.7, "t", R("log"))], [(-0.3, "t", R("log"))], 0.6) == "log"      # a damper at every rung
+    assert rung([], [], 0.6) == "off"
