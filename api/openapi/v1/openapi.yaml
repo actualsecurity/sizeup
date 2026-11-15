@@ -1,0 +1,22 @@
+openapi: 3.1.0
+info:
+  title: sizeup mobile API
+  version: "1.0"
+  description: >
+    The API of the sizeup app (docs/mobile-api.md). Additive within v1: new endpoints, new optional fields and new
+    enum values only; clients ignore unknown fields and read an unknown enum value as "other". A breaking change is
+    /api/v2, served beside v1 for at least 12 months. Every error is the Error schema.
+servers:
+  - url: https://hub.example.org
+    description: placeholder; the app is given its hub's address, never this repository
+security:
+  - deviceToken: []
+paths:
+  /api/v1/meta:
+    $ref: ./paths/meta.yaml
+components:
+  securitySchemes:
+    deviceToken:
+      type: http
+      scheme: bearer
+      description: A device's access token (#558).

@@ -1,0 +1,23 @@
+type: object
+required: [api, min_app, features, server_time, epoch]
+properties:
+  api:
+    type: string
+    description: The API's version, major.minor.
+  min_app:
+    type: object
+    description: The oldest app version each platform may run.
+    required: [ios, android]
+    properties:
+      ios: {type: string}
+      android: {type: string}
+  features:
+    type: object
+    description: Feature flags set on the hub. A flag the app does not know is ignored.
+    additionalProperties: {type: boolean}
+  server_time:
+    type: number
+    description: The hub's clock, unix seconds.
+  epoch:
+    type: [string, "null"]
+    description: The change log's epoch (opaque); null until there is one.

@@ -28,6 +28,8 @@ Every POST on the station (and all-in-one; not the hub, behind Cloudflare Access
 it came from another site (#307: Sec-Fetch-Site not same-origin / none, else an Origin not this host): it binds
 127.0.0.1, but a page open in the station PC's browser could still post. Its own page, and tools with neither header
 (tools/airband_ab.py, curl), are unaffected.
+GET  /api/v1/...                the mobile app's versioned API (sizeup/api/v1, spec in api/openapi/v1/, #557): the hub only
+                               (409 on the station), errors always {"error": {"code", "message", "retry_after_s"?}}
 GET  /healthz                   {"ok": true, version, build, role}: cheap, for the container health check
 GET|POST /api/station/...      [cloud] role = "hub" only: the station's ingest and job queue, bearer token
                                (sizeup/cloud/hub.py)
@@ -129,6 +131,8 @@ from urllib.parse import parse_qsl, urlsplit
 
 from sizeup import fence as fence_mod
 from sizeup import sourcekeys
+from sizeup.api.v1 import errors as v1_errors
+from sizeup.api.v1.handler import V1
 
 STATIC_DIR = Path(__file__).parent / "static"
 MAX_CAD_BODY = 65536
@@ -426,6 +430,8 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
     def cad_refused(method: str, path: str) -> bool:
         return station_ui and path.startswith("/api/cad/") and (method, path) not in STATION_CAD
 
+    v1 = V1()          # /api/v1: the mobile app's versioned API (sizeup/api/v1, #557), before /api/cad/
+
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
 
@@ -488,11 +494,20 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                     cad.visit(who, self._client(), f"{self.command} {path}")
                 return True
             self.close_connection = True     # a POST's body is left unread
+            if path.startswith("/api/v1/"):      # the app's API: its one error shape
+                return self._send(*v1_errors.error(401, "unauthorized", "sign in")) or False
             if path.startswith("/api/"):
                 return self._send(401, b'{"error":"sign in through Cloudflare Access"}', "application/json") or False
             return self._send(401, b"<!doctype html><meta charset=utf-8><title>Sign in</title>"
                                    b"<p>Sign in through Cloudflare Access to use sizeup: reload this page.</p>",
                               "text/html; charset=utf-8") or False
+
+        def _v1(self, path: str, query: str) -> None:
+            """/api/v1 (sizeup/api/v1): the hub's. A station has no CAD, so no API for the app: 409 in v1's envelope."""
+            if station_ui:
+                self.close_connection = True     # a POST's body is left unread
+                return self._send(*v1_errors.error(409, "station", "this is the station: the app's API is on the hub"))
+            return self._send(*v1.respond(self.command, path, query, self.headers))
 
         def _doc_file(self, path: str, query: str) -> None:
             """GET /api/cad/preplan/docs/<id>/file | plan (#459): streamed from the store; a client that takes no bytes
@@ -708,6 +723,8 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
             path = url.path
             if not self._admit(path):
                 return
+            if v1.handles(path):
+                return self._v1(path, url.query)
             if station_ui:
                 if path in ("/", "/index.html", "/station", "/monitor"):
                     return self._static("station.html")
@@ -851,6 +868,9 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                 if code >= 400:              # the body may be unread (a refused token): don't reuse the connection
                     self.close_connection = True
                 return self._send(code, body, ctype)
+            if v1.handles(path):
+                self.close_connection = True     # no POST is served yet: the body is left unread
+                return self._v1(path, urlsplit(self.path).query)
             if cad_refused("POST", path):
                 self.close_connection = True     # the body is left unread
                 return self._send(409, station_says(), "application/json")
