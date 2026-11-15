@@ -12,6 +12,7 @@ import json
 import shutil
 import subprocess
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -290,3 +291,84 @@ NODE = shutil.which("node") or shutil.which("node", path="/opt/homebrew/bin:/usr
 def test_the_health_page_still_parses():
     r = subprocess.run([NODE, "--check", str(ROOT / "sizeup/web/static/health.js")], capture_output=True, text=True)
     assert r.returncode == 0, r.stderr
+
+
+# -- forwarding through Settings, a final refusal, the pre-alert feed -------------------------------------------------
+
+
+def test_forwarding_to_a_hub_counts_as_a_station():
+    assert outbound.forwarding(True) == ""                              # not armed: nothing to say
+    outbound.arm("", {})
+    assert outbound.forwarding(True).startswith("outbound: on (forwarding to a hub")
+    assert outbound.status()["on"] is True and outbound.forwarding(True) == ""
+    assert outbound.forwarding(False).startswith("outbound: OFF (all-in-one")
+    outbound.arm("station", {})
+    assert outbound.forwarding(False) == "" and outbound.status()["on"] is True    # a station stays one
+    outbound.arm("hub", {})
+    assert outbound.forwarding(True) == "" and outbound.status()["on"] is False     # a hub's decision never moves
+
+
+def test_an_all_in_one_config_forwarding_by_cloud_json_is_on_and_follows_the_switch(tmp_path, monkeypatch):
+    from sizeup.app import make_app
+    from tests.test_stationmode import cfg_
+    monkeypatch.setenv("SIZEUP_STATION_TOKEN", "example-station-token-0123456789")
+    state = tmp_path / "state"
+    state.mkdir()
+    (state / "cloud.json").write_text(json.dumps({"forward": True, "hub_url": "http://127.0.0.1:9"}))
+    outbound.arm("", {})                                                # main(): an all-in-one config
+    assert outbound.status()["on"] is False
+    app = make_app(cfg_(tmp_path))
+    try:
+        assert app.station.forward is True and outbound.status()["on"] is True
+        assert outbound.status()["why"].startswith("forwarding to a hub")
+        app.station.set({"forward": False, "operator": "Test"})
+        assert outbound.status()["on"] is False
+    finally:
+        app.station.set({"forward": False})
+        app.stop()
+
+
+def test_a_refused_push_is_dropped_at_once_not_retried(off, monkeypatch):
+    nothing_leaves(monkeypatch)
+    slept, logs = [], []
+    n = notify.Notifier("https://ntfy.sh", TOPIC, log=logs.append, sleep=slept.append)
+    assert n.send("Station silent", "invented") and n.flush(5)
+    assert slept == [] and n.failed == 1 and n.sent == 0
+    assert [x for x in logs if x.startswith("notify: not sent")] == [logs[-1]] and "outbound off" in logs[-1]
+    with pytest.raises(notify.NotifyOff):
+        notify.publish("https://ntfy.sh", TOPIC, "x", "y")
+
+
+def test_the_replica_watch_does_not_try_again_either(off, monkeypatch):
+    from sizeup.replicawatch import Pusher, WatchStore
+    nothing_leaves(monkeypatch)
+    slept = []
+    p = Pusher(WatchStore(None), "https://ntfy.sh", TOPIC, log=lambda m: None, sleep=slept.append)
+    assert p.push("failing", "Replica check failed", "invented") is False and slept == []
+
+
+def test_the_phone_pre_alert_does_not_subscribe_while_off(off, tmp_path, monkeypatch):
+    """Off: no request, and quiet. The feed stands for its topic, so the 2 s topic check sees nothing changed: one log
+    line in all, no screen refresh, never "subscribed", never a topic's name (as Settings hands them in, topics())."""
+    from sizeup import prealert
+    from tests.test_cad import make_cad
+    nothing_leaves(monkeypatch)
+    logs, changes = [], []
+    pa = prealert.PreAlerts(make_cad(tmp_path), "https://ntfy.sh", log=logs.append,
+                            topics=lambda: ("example-ring-topic-5678", "example-heartbeat-topic-5678"))
+    pa.on_change = lambda: changes.append(1)
+    try:
+        pa.start()
+        time.sleep(4.5)                                                # past two of the expiry loop's 2 s checks
+        assert changes == [], len(changes)                              # no screen refresh every 2 s
+        assert [x for x in logs if x.startswith("prealert:")] == [
+            "prealert: not subscribed (prealert: outbound off (hub without the supervisor's lease and without "
+            "SIZEUP_ALLOW_OUTBOUND=1))"], logs
+        assert isinstance(pa.ring_stream, prealert.OffFeed) and isinstance(pa.status_stream, prealert.OffFeed)
+        assert not any("example-" in x or "subscribed (read-only)" in x for x in logs)
+        assert pa.ring_stream.state()["error"] == "not subscribed: outbound off"
+    finally:
+        pa.stop()
+    outbound.arm("hub", {"SIZEUP_ALLOW_OUTBOUND": "1"})
+    assert isinstance(prealert.PreAlerts(make_cad(tmp_path / "b"), "https://ntfy.sh", "example-ring-topic-5678",
+                                         log=lambda m: None)._feed("ring", "example-ring-topic-5678"), prealert.NtfyStream)

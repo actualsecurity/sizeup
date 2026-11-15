@@ -655,7 +655,9 @@ tones in front and reads it twice with the time out once, exactly as with Kokoro
   structure fire. Time out 14:32." through the same path (`POST /api/cad/settings/dispatch
   {action: "voice_preview"}`).
 * Stations and all-in-one keep Kokoro (`tts_engine = "kokoro"`); `polly` works there too with AWS
-  credentials in the environment, falling back to macOS `say` like Kokoro does.
+  credentials in the environment, falling back to macOS `say` like Kokoro does. All-in-one also needs
+  `SIZEUP_ALLOW_OUTBOUND=1` for Polly, Transcribe, S3 and pushes (`sizeup/outbound.py`: outbound is off for any
+  `python -m sizeup` that is neither the hub under its supervisor nor a station).
 * **After the answer (#426):** a dispatch, add-on or upgrade is logged and answered at once (a few ms; it
   used to wait 2-3 s for Polly). Its row starts `audio: "pending"`; one worker (`sizeup/cad/voicequeue.py`,
   at most 32 waiting) renders the voices in the order sent, hands each to the transmitter, then writes the
