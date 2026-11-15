@@ -973,7 +973,7 @@ class StationHealth:
             corrupt = c.get("ok") is False
             out[f"replica:{db}"] = {
                 "severity": "critical", "quiet": True,
-                "title": f"Replica {'corrupt' if corrupt else 'not verifiable'}: {db}.sqlite",
+                "title": f"Replica {'corrupt' if corrupt else 'follower failing' if c.get('follow_failed') else 'not verifiable'}: {db}.sqlite",
                 "text": f"{e.get('mode') or 'check'}: {' · '.join(str(e.get('result') or '').splitlines()[:2])[:120]} · {e.get('by') or '?'} "
                         f"{_hhmm(e.get('at'))}" + (" · a fresh restore too" if e.get("confirmed") else "")
                         + " · a takeover from it would fail",

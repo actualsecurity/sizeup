@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import shutil
 import sqlite3
 import time
@@ -89,6 +90,7 @@ def watch_for(s3: FakeS3, who: str, tmp: Path, ntfy, clock=None, logs=None, **kw
     pusher = Pusher(store, ntfy.url, TOPIC, wall=clock or time.time, log=lg)
     kw.setdefault("check", lambda p, full, cancel: integrity(p, full))
     kw.setdefault("standby_first_s", 0.0)
+    kw.setdefault("follow_s", 0.2)                    # (each follower is stopped half a poll past its last: short here)
     kw.setdefault("restorer", _same_restore)          # a fresh restore gives what the followers have (standby())
     return ReplicaWatch(store, pusher, who, tmp / who / "run", tmp / who / "work", wall=clock or time.time, log=lg,
                         poll_s=0.02, **kw)
@@ -232,7 +234,8 @@ class FakeFollower:
 
     started: list = []
 
-    def __init__(self, src: Path | None, out: Path, code=None, err: str = "", hold: bool = False):
+    def __init__(self, src: Path | None, out: Path, code=None, err: str = "", hold: bool = False,
+                 apply_err: Path | None = None):
         self.pid, self.code = None, code
         out.parent.mkdir(parents=True, exist_ok=True)
         if src is not None and code is None and not hold and not Path(f"{out}-txid").exists():   # (else: resumes)
@@ -240,6 +243,13 @@ class FakeFollower:
             Path(f"{out}-txid").write_text(f"{0x2a:016x}\n")
         if err:
             Path(f"{out}.log").write_text(err)
+        if apply_err is not None and code is None:    # a poll that can't apply an LTX file: part of it written
+            shutil.copy(apply_err, out)
+            t = Path(f"{out}-txid").stat().st_mtime_ns
+            os.utime(out, ns=(t + 10**9, t + 10**9))
+            Path(f"{out}.log").write_text(
+                'level=ERROR msg="follow: error applying updates" err="apply ltx file (level=0): decode page: '
+                'checksum mismatch" consecutive_errors=3\n')
         FakeFollower.started.append(out.name)
 
     def poll(self):
@@ -426,14 +436,16 @@ def test_a_drifted_check_copy_is_reseeded_from_a_fresh_restore_not_pushed(tmp_pa
 
 
 def test_a_copy_written_after_its_txid_is_never_checked_as_it_is(tmp_path, ntfy):
-    """A follower stopped part way through a round (pages written, its -txid not yet): the copy holds two positions,
-    so it isn't checked as such; a fresh restore is (here ok: re-seeded, "stopped mid-apply")."""
-    import os
+    """A follower stopped part way through a round (pages written, its -txid not yet; no errors in its log: our
+    SIGTERM): the copy holds two positions, so it isn't checked as such; a fresh restore is (here ok: re-seeded,
+    "stopped mid-apply", silent)."""
     s3, clock, checked = FakeS3(), Clock(), []
     files = {db: make_db(tmp_path / f"{db}.sqlite", 300) for db in rw.DBS}
     w, sup = leader(tmp_path, s3, ntfy, files, clock,
                     check=lambda p, full, cancel: (checked.append(p.name), integrity(p, full))[1])
     w.tend_followers(sup)
+    assert w.leader_round(sup) is False                                       # a first round: all settled, checked
+    checked.clear()
     out = w._out("cad")
     t = Path(f"{out}-txid").stat().st_mtime_ns
     os.utime(out, ns=(t + 10**9, t + 10**9))                                  # written after the sidecar
@@ -465,18 +477,109 @@ def test_the_standby_confirms_a_failing_copy_without_touching_its_followers(tmp_
     before = sup.staged("cad").read_bytes()
     w = watch_for(s3, "B", tmp_path, ntfy, clock, restorer=fake_restorer(good, calls))
     out = w.standby_round(sup)
-    assert out["cad"]["ok"] is True and out["cad"]["reseeded"] and calls == ["cad"] and ntfy.got == []
+    assert out["cad"]["ok"] is None and out["cad"]["follow_failed"] and calls == ["cad"]      # (pushed: see below)
     assert sup.staged("cad").read_bytes() == before                       # the takeover's copy: never ours to change
     w2 = watch_for(s3, "B", tmp_path, ntfy, clock, restorer=fake_restorer({"cad": corrupt(make_db(tmp_path / "c4.sqlite", 300))}))
     assert w2.standby_round(sup)["cad"]["ok"] is False
-    assert [m["title"] for m in ntfy.got] == ["Replica corrupt: cad.sqlite"]
+    assert [m["title"] for m in ntfy.got] == ["Replica follower failing: cad.sqlite", "Replica corrupt: cad.sqlite"]
 
 
-def test_the_leaders_checks_land_between_its_followers_polls():
-    w = ReplicaWatch(WatchStore(None), SimpleNamespace(), "A", Path("/nonexistent"), Path("/nonexistent"), follow_s=60.0)
-    assert w.off_tick(900.0) == 930.0 and w.off_tick(60.0) == 90.0 and w.off_tick(930.0) == 930.0
-    w.follow_s = 45.0
-    assert (w.off_tick(900.0) - 22.5) % 45.0 == 0 and 900 <= w.off_tick(900.0) < 945
+def test_each_follower_is_stopped_half_a_poll_past_its_own_last_poll(tmp_path):
+    """Not the round's delay (that phases only the last follower restarted): each one's own anchor, its -txid's last
+    write when newer than its start (a poll that applied), else its start plus a second."""
+    w = ReplicaWatch(WatchStore(None), SimpleNamespace(), "A", tmp_path, tmp_path / "work", follow_s=60.0)
+    w.work.mkdir()
+    sidecar = Path(f"{w._out('cad')}-txid")
+    sidecar.write_text("2a\n")
+    t = sidecar.stat().st_mtime
+    w.fstate = {"cad": {"started": t - 100.0}, "hub": {"started": t + 5.0}}
+    assert w.phase_delay("cad", t) == pytest.approx(30.0)                   # 30 s past its last poll
+    assert w.phase_delay("cad", t + 50.0) == pytest.approx(40.0)            # (next poll at +60: stop at +90)
+    assert w.phase_delay("hub", t + 5.0) == pytest.approx(31.0)             # no -txid of its own: started + 1 s
+    w.follow_s = 0.0
+    assert w.phase_delay("cad", t) == 0.0
+
+
+def test_the_first_round_after_a_deploy_only_looks_again_at_a_copy_stopped_mid_apply(tmp_path, ntfy):
+    """No full restore in the deploy's minutes for a copy merely stopped mid-apply: looked at again a minute later."""
+    s3, clock, calls = FakeS3(), Clock(), []
+    files = {db: make_db(tmp_path / f"{db}.sqlite", 300) for db in rw.DBS}
+    w, sup = leader(tmp_path, s3, ntfy, files, clock, restorer=fake_restorer(files, calls))
+    w.tend_followers(sup)
+    out = w._out("cad")
+    t = Path(f"{out}-txid").stat().st_mtime_ns
+    os.utime(out, ns=(t + 10**9, t + 10**9))
+    assert w.leader_round(sup) is True and calls == [] and "cad" not in s3.doc(KEY)["checks"]
+    assert s3.doc(KEY)["checks"]["hub"]["ok"] is True and "cad" in w.followers
+
+
+def test_a_follower_with_apply_errors_is_pushed_though_a_fresh_restore_passes(tmp_path, ntfy):
+    """An LTX file the follower can't apply (L1 already covers it, so a fresh restore passes): not a drift."""
+    s3, clock, logs = FakeS3(), Clock(), []
+    files = {db: make_db(tmp_path / f"{db}.sqlite", 300) for db in rw.DBS}
+    torn = corrupt(make_db(tmp_path / "torn.sqlite", 300))
+    w, sup = leader(tmp_path, s3, ntfy, files, clock, logs)
+    w.tend_followers(sup)
+    w.leader_round(sup)
+    w.followers["cad"] = FakeFollower(files["cad"], w._out("cad"), apply_err=torn)    # its next polls fail
+    clock.t += 900
+    w.leader_round(sup)
+    c = s3.doc(KEY)["checks"]["cad"]
+    assert c["ok"] is None and c["follow_failed"] and "follower apply errors; a fresh restore" in c["result"]
+    assert "cad" in s3.doc(KEY)["failing"] and not c.get("reseeded")
+    assert [(m["title"], m["priority"]) for m in ntfy.got] == [("Replica follower failing: cad.sqlite", 4)]
+    assert any(m.startswith("handoff: replica check FAILED: cad.sqlite") and "follower apply errors" in m for m in logs)
+
+
+def test_the_standbys_own_copy_failing_is_pushed_though_a_fresh_restore_passes(tmp_path, ntfy):
+    s3, clock, logs = FakeS3(), Clock(), []
+    good = {db: make_db(tmp_path / f"{db}.sqlite", 300) for db in rw.DBS}
+    sup = standby(tmp_path / "B", dict(good, cad=corrupt(make_db(tmp_path / "c5.sqlite", 300))))
+    w = watch_for(s3, "B", tmp_path, ntfy, clock, logs, restorer=fake_restorer(good))
+    out = w.standby_round(sup)
+    assert out["cad"]["ok"] is None and out["cad"]["follow_failed"] and "restart the standby task" in out["cad"]["result"]
+    assert [(m["title"], m["priority"]) for m in ntfy.got] == [("Replica follower failing: cad.sqlite", 4)]
+    assert "restart the standby task" in ntfy.got[0]["message"]
+    assert any(m.startswith("handoff: replica check FAILED: cad.sqlite (standby") for m in logs)
+
+
+def test_a_restore_failure_writes_the_alarms_line(tmp_path, ntfy):
+    """The CloudWatch metric filter (sizeup-aws 28) matches "replica check FAILED": a fresh restore that fails is
+    said with it, like a follower's failed restore."""
+    s3, clock, logs = FakeS3(), Clock(), []
+    files = {db: make_db(tmp_path / f"{db}.sqlite", 300) for db in rw.DBS}
+    w, sup = leader(tmp_path, s3, ntfy, dict(files, cad=corrupt(make_db(tmp_path / "c6.sqlite", 300))), clock, logs,
+                    s3src=dict(files, cad=RuntimeError("litestream restore exited 1: decode page: unexpected EOF")))
+    w.tend_followers(sup)
+    w.leader_round(sup)
+    line = [m for m in logs if "replica check FAILED: cad.sqlite" in m]
+    assert line and line[0].startswith("handoff: replica check FAILED: cad.sqlite (leader, quick_check")
+    assert ": restore failed (possible corruption): check copy failed" in line[0]
+    assert "a fresh restore failed: litestream restore exited 1" in line[0]
+
+
+def test_a_check_copy_re_seeded_two_rounds_running_is_pushed(tmp_path, ntfy):
+    s3, clock = FakeS3(), Clock()
+    files = {db: make_db(tmp_path / f"{db}.sqlite", 300) for db in rw.DBS}
+    w, sup = leader(tmp_path, s3, ntfy, files, clock)
+    w.tend_followers(sup)
+    w.leader_round(sup)
+
+    def drift():
+        out = w._out("cad")
+        t = Path(f"{out}-txid").stat().st_mtime_ns
+        os.utime(out, ns=(t + 10**9, t + 10**9))
+        clock.t += 900
+        w.leader_round(sup)
+    drift()
+    assert ntfy.got == [] and s3.doc(KEY)["reseeds"]["cad"]["streak"] == 1      # once: a drift, silent
+    clock.t += 900
+    w.leader_round(sup)                                                       # a plain ok round: the streak ends
+    assert s3.doc(KEY)["reseeds"]["cad"]["streak"] == 0
+    drift()
+    drift()
+    assert [(m["title"], m["priority"]) for m in ntfy.got] == [("Replica check copy keeps drifting: cad.sqlite", 4)]
+    assert "re-seeded 2 rounds running" in ntfy.got[0]["message"] and s3.doc(KEY)["failing"] == {}
 
 
 @pytest.mark.skipif(shutil.which("litestream") is None, reason="needs litestream on PATH")

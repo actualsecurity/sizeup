@@ -20,7 +20,11 @@ crash-looped for ~35 min until someone opened a browser). Run by the supervisor 
                  (stopped mid-apply), or failing its check, is checked again from a fresh `litestream restore` from S3
                  (CONFIRM): fresh ok, the copy drifted: "re-seeded" (the fresh copy becomes the follower's, its count
                  in the record), no push; fresh bad, "Replica corrupt" (the fresh restore failed too); the restore
-                 failing, "restore failed (possible corruption)". A takeover never uses these copies.
+                 failing, "restore failed (possible corruption)". Not a drift, though a fresh restore passes: a
+                 follower that logged apply errors (an LTX file it can't apply), or the standby's copy (the takeover's
+                 own) failing: "Replica follower failing". Each follower is stopped half a poll past its own last
+                 poll; the first round after a deploy only looks again at a copy stopped mid-apply (no full restore
+                 in the deploy's minutes). A takeover never uses the leader's copies.
     the check    read-only (not immutable) in a child process at nice 19, killed when the role changes or the task
                  stops: quick_check, integrity_check once each SIZEUP_REPLICA_FULL_H (24) hours per file.
 
@@ -36,6 +40,11 @@ recorded in S3 only once ntfy took it, one retry):
                                                                                       fresh restore from S3 too)
     replica_restore        "Replica restore failed (possible corruption): ..."    5   a follower failed, at once
     replica_unverifiable   "Replica not verifiable: ..."                          4   ERRORS_ALERT rounds can't check
+    replica_follow         "Replica follower failing: ..."                        4   a follower logged apply errors (or
+                                                                                      the standby's copy failed) while a
+                                                                                      fresh restore passes, at once
+    replica_drift          "Replica check copy keeps drifting: ..."               4   re-seeded DRIFT_STREAK rounds
+                                                                                      running, or > DRIFT_DAY_N in 24 h
     replica_ok             "Replica OK again: ..."                                3   (no limit) after one of those
     task                   "Hub takeover failed", ...                             4   a task that ends badly
     task_loop              "Hub crash-looping: N failed tasks in 10 min"          5   LOOP_N in LOOP_WINDOW_S
@@ -100,6 +109,8 @@ CHECK_TIMEOUT_S = 900.0     # one check (a child process)
 CONFIRM_TIMEOUT_S = 900.0   # a fresh restore that confirms a failing copy (a child process)
 SNAPSHOT_TRIES = 5          # copies of a followed file before giving up for this round (it kept moving)
 ERRORS_ALERT = 2            # rounds in a row a file couldn't be checked: "not verifiable"
+DRIFT_STREAK = 2            # leader rounds in a row a file's check copy was re-seeded: pushed ("keeps drifting")
+DRIFT_DAY_N = 4             # ... or more re-seeds than this in 24 h
 FOLLOWER_BACKOFF = (60.0, 900.0)
 EVENTS_MAX = 30
 LOOP_WINDOW_S = 600.0       # task failures within this long ...
@@ -210,7 +221,7 @@ def _kill(p) -> None:
 
 
 def clean(out: Path, txid: bool = True) -> None:
-    for p in (out, Path(f"{out}-wal"), Path(f"{out}-shm"), *([Path(f"{out}-txid")] if txid else [])):
+    for p in (out, Path(f"{out}-wal"), Path(f"{out}-shm"), Path(f"{out}.tmp"), *([Path(f"{out}-txid")] if txid else [])):
         p.unlink(missing_ok=True)
 
 
@@ -444,7 +455,8 @@ class ReplicaWatch:
         self.reported = False
         self.last_full: dict[str, float] = {}
         self.followers: dict[str, object] = {}            # the leader's own (db -> a Popen-like)
-        self.fstate: dict[str, dict] = {}                 # db -> {fails, restart_at, missing}
+        self.fstate: dict[str, dict] = {}                 # db -> {fails, restart_at, missing, started}
+        self.checked: set[str] = set()                    # files this leader's followers have had a check of
         self.serving_at: float | None = None              # monotonic: this task serves since
         self.to_start: list[str] = []                     # the leader's followers not started yet (one at a time)
         self.start_at = 0.0                               # ... from then (monotonic)
@@ -481,7 +493,7 @@ class ReplicaWatch:
                             self.tend_followers(sup)
                             if nxt_leader is not None and now >= nxt_leader:
                                 pending = self.leader_round(sup)
-                                nxt_leader = self.mono() + self.off_tick(LEADER_RETRY_S if pending else self.leader_interval_s)
+                                nxt_leader = self.mono() + (LEADER_RETRY_S if pending else self.leader_interval_s)
                         if now >= nxt_refresh:
                             self.refresh()
                             nxt_refresh = self.mono() + REFRESH_S
@@ -508,12 +520,26 @@ class ReplicaWatch:
         except Exception as e:  # noqa: BLE001
             return {"ok": None, "result": f"{type(e).__name__}: {e}"[:300]}
 
-    def off_tick(self, delay: float) -> float:
-        """delay, stretched to land half a follow interval off the leader's followers' polls: each was started again
-        right after its check, so a delay that is a multiple of follow_s (900 s, 60 s) stops it the moment it polls
-        S3 and applies what it found (2026-11-15: stopped part way through a file, its copy failed its check)."""
+    def phase_delay(self, db: str, now: float) -> float:
+        """How long to wait before stopping db's follower so that it is half a follow interval past a poll (it applies
+        what it finds right after one; 2026-11-15: stopped part way through a file). Each follower's own phase:
+        anchored at its -txid's last write (right after a poll that applied, or its first restore) when that is
+        newer than its start, else its start plus a second (its resume's S3 listings before the first poll)."""
         f = self.follow_s
-        return delay + ((f / 2 - delay) % f) if f > 0 else delay
+        if f <= 0:
+            return 0.0
+        started = float((self.fstate.get(db) or {}).get("started") or 0.0)
+        try:
+            t = Path(f"{self._out(db)}-txid").stat().st_mtime
+        except OSError:
+            t = 0.0
+        anchor = t if t > started else started + 1.0
+        return (anchor + f / 2 - now) % f
+
+    def _wait_phase(self, db: str, gone: Callable[[], bool]) -> None:
+        end = time.time() + self.phase_delay(db, time.time())
+        while not gone() and time.time() < end:
+            self.stop.wait(min(0.5, max(0.0, end - time.time())))
 
     def _litestream_restore(self, db: str, db_path: Path, out: Path, cancel: Callable[[], bool]) -> int | None:
         """A fresh `litestream restore` of the latest into out, at nice 19 in a child process, killed the moment
@@ -586,8 +612,19 @@ class ReplicaWatch:
             raise Cancelled()
         return res, pos, fresh
 
+    def apply_errors(self, db: str) -> str:
+        """What the leader's stopped follower of db logged as errors since it started (its stderr, `<out>.log`):
+        "follow: error applying updates" (an LTX file it can't apply: corrupt, or gone) and the like; "" if none.
+        A copy stopped mid-apply by our SIGTERM logs none ("follow mode stopped")."""
+        try:
+            lines = Path(f"{self._out(db)}.log").read_text(errors="replace").splitlines()
+        except OSError:
+            return ""
+        bad = [x for x in lines if "level=ERROR" in x or "error applying" in x]
+        return " | ".join(bad[-2:])[-300:]
+
     def _decide(self, sup, db: str, copy: dict | None, full: bool, cancel: Callable[[], bool], pos: int | None,
-                how: str, keep: Path | None) -> tuple[dict, int | None, str]:
+                how: str, keep: Path | None, follow_err: str = "", standby: bool = False) -> tuple[dict, int | None, str]:
         """The check copy failed (copy: its result) or was stopped mid-apply (copy None): confirm() decides. Fresh
         ok: the copy drifted, the replica is fine ("reseeded" in the result; keep: the fresh file becomes the
         follower's there, with its -txid). Otherwise the fresh restore's verdict, said as such. (result, position,
@@ -602,9 +639,18 @@ class ReplicaWatch:
                     clean(keep)
                     os.replace(fresh, keep)
                     Path(f"{keep}-txid").write_text(f"{fpos:016x}\n")
+                if follow_err:                       # not our SIGTERM: the follower can't apply what S3 holds
+                    return ({"ok": None, "follow_failed": True,
+                             "result": f"follower apply errors; a fresh restore from S3 at {at} passes: {follow_err}"[:400]},
+                            fpos, f"{how}; check copy {why}")
+                if standby:                          # the takeover's copy is the bad one: re-seeding ours fixes nothing
+                    return ({"ok": None, "follow_failed": True,
+                             "result": (f"the standby's copy (the takeover's) {why}; a fresh restore from S3 at {at} "
+                                        "passes · restart the standby task before deploying: a takeover from this "
+                                        "copy may be refused")[:400]}, pos, f"{how}; a fresh restore ok")
                 self.log(f"replica-watch: {db}.sqlite: the check copy drifted ({why}) at "
                          f"{f'{pos:016x}' if isinstance(pos, int) else '?'}; a fresh restore from S3 at {at} is ok: "
-                         + ("re-seeded" if keep is not None else "the replica is fine"))
+                         "re-seeded")
                 return dict(fres, reseeded=why), fpos, f"{how}; check copy {why}, a fresh restore ok"
             if fres.get("ok") is False:
                 return dict(fres, confirmed=True), fpos, f"{how}; check copy {why}, a fresh restore too"
@@ -646,7 +692,7 @@ class ReplicaWatch:
             how = f"copy {copied:.1f} s"
             if res.get("ok") is False:                 # the copy, or the replica? A fresh restore decides
                 try:
-                    res, pos, how = self._decide(sup, db, res, full, gone, pos, how, keep=None)
+                    res, pos, how = self._decide(sup, db, res, full, gone, pos, how, keep=None, standby=True)
                 except Cancelled:
                     return out
             out[db] = self._result(db, res, full, "standby", pos, self.mono() - t0, how)
@@ -677,6 +723,7 @@ class ReplicaWatch:
         shutil.rmtree(self.work, ignore_errors=True)
         self.work.mkdir(parents=True, exist_ok=True)
         self.fstate.clear()
+        self.checked.clear()
         self.to_start = list(DBS)
         self.start_at = self.mono() if at is None else at
         self.tend_followers(sup)
@@ -688,7 +735,7 @@ class ReplicaWatch:
     def _start_follower(self, sup, db: str) -> None:
         Path(f"{self._out(db)}.log").unlink(missing_ok=True)
         self.followers[db] = self.follower(db, sup.env.db_path(db), self._out(db))
-        self.fstate.setdefault(db, {"fails": 0, "restart_at": None, "missing": False})
+        self.fstate.setdefault(db, {"fails": 0, "restart_at": None, "missing": False})["started"] = time.time()
 
     def stop_followers(self) -> None:
         for p in list(self.followers.values()):
@@ -761,14 +808,26 @@ class ReplicaWatch:
                 out[db] = self._result(db, {"ok": None, "result": f"not restored after {RESTORE_S / 60:g} min"}, False,
                                        "leader", None, 0.0, "")
                 continue
+            if p is not None:
+                self._wait_phase(db, gone)                    # half a poll off its own polls
+                if gone():
+                    return False
             t0, full = self.mono(), self._full(db)
             if p is not None:
                 _stop(p)                                      # (SIGTERM: it stops between two LTX files, or in one)
                 self.followers.pop(db, None)
             pos, how = self.applied(db), "follower paused"
+            err = self.apply_errors(db)
+            if not settled(path) and not err and db not in self.checked and since < RESTORE_S:
+                self.log(f"replica-watch: {db}.sqlite: its follower was stopped mid-apply: looked at again in "
+                         f"{LEADER_RETRY_S:g} s")                # (the deploy's first round: no full restore for it)
+                if p is not None and not gone():
+                    self._start_follower(sup, db)
+                pending = True
+                continue
             try:
                 if not settled(path):                        # stopped part way through a round: two positions
-                    res, pos, how = self._decide(sup, db, None, full, gone, pos, how, keep=path)
+                    res, pos, how = self._decide(sup, db, None, full, gone, pos, how, keep=path, follow_err=err)
                 else:
                     had = {s: Path(f"{path}{s}").exists() for s in ("-wal", "-shm")}
                     try:
@@ -778,7 +837,7 @@ class ReplicaWatch:
                             if not existed:
                                 Path(f"{path}{s}").unlink(missing_ok=True)
                     if res.get("ok") is False and not gone():
-                        res, pos, how = self._decide(sup, db, res, full, gone, pos, how, keep=path)
+                        res, pos, how = self._decide(sup, db, res, full, gone, pos, how, keep=path, follow_err=err)
             except Cancelled:
                 return False
             finally:
@@ -787,6 +846,7 @@ class ReplicaWatch:
             if gone() or res.get("cancelled"):
                 return False
             out[db] = self._result(db, res, full, "leader", pos, self.mono() - t0, how)
+            self.checked.add(db)
         if out:
             self.record(out)
         return pending
@@ -795,7 +855,7 @@ class ReplicaWatch:
         r = {"at": self.wall(), "ok": res.get("ok"), "result": str(res.get("result") or "")[:400],
              "mode": "integrity_check" if full else "quick_check", "by": by, "task": leaderlock.short(self.holder),
              "txid": f"{pos:016x}" if isinstance(pos, int) else None, "secs": round(secs, 1)}
-        for k in ("reseeded", "confirmed", "restore_failed"):      # (_decide's: how the verdict was reached)
+        for k in ("reseeded", "confirmed", "restore_failed", "follow_failed"):      # (_decide's: how the verdict was reached)
             if res.get(k):
                 r[k] = res[k]
         where = f"{db}.sqlite ({by}, {r['mode']}" + (f" at {r['txid']}" if r["txid"] else "") \
@@ -803,6 +863,10 @@ class ReplicaWatch:
         if r["ok"] is True:
             self.log(f"replica-watch: {where}: ok")
         elif r["ok"] is False:
+            self.log(f"handoff: replica check FAILED: {where}: {r['result'][:300]}")
+        elif r.get("restore_failed"):                     # (the CloudWatch metric filter's line, as for corrupt)
+            self.log(f"handoff: replica check FAILED: {where}: restore failed (possible corruption): {r['result'][:300]}")
+        elif r.get("follow_failed"):
             self.log(f"handoff: replica check FAILED: {where}: {r['result'][:300]}")
         else:
             self.log(f"replica-watch: {where}: not verifiable: {r['result'][:300]}")
@@ -816,11 +880,13 @@ class ReplicaWatch:
         corrupt: dict[str, dict] = {}
         restore: dict[str, dict] = {}
         unverif: dict[str, dict] = {}
+        follow: dict[str, dict] = {}
+        drift: dict[str, dict] = {}
         back: list[str] = []
 
         def merge(d: dict) -> None:
             checks, errors, failing = d.setdefault("checks", {}), d.setdefault("errors", {}), d.setdefault("failing", {})
-            for x in (corrupt, restore, unverif):
+            for x in (corrupt, restore, unverif, follow, drift):
                 x.clear()
             back.clear()
             for db, r in results.items():
@@ -830,16 +896,26 @@ class ReplicaWatch:
                     if r.get("restore_failed"):
                         restore[db] = r
                         failing.setdefault(db, r["at"])
+                    elif r.get("follow_failed"):             # a follower can't apply what S3 holds: at once
+                        follow[db] = r
+                        failing.setdefault(db, r["at"])
                     elif errors[db] >= ERRORS_ALERT:
                         unverif[db] = r
                         failing.setdefault(db, r["at"])
                     continue
                 errors.pop(db, None)
+                rs = d.setdefault("reseeds", {})
+                was = rs.get(db) if isinstance(rs.get(db), dict) else {}
                 if r.get("reseeded"):                        # the check copy drifted, the replica is fine: counted
-                    rs = d.setdefault("reseeds", {})
-                    was = rs.get(db) if isinstance(rs.get(db), dict) else {}
+                    day = [float(t) for t in (was.get("day") or []) if r["at"] - float(t) < 86400.0] + [r["at"]]
                     rs[db] = {"n": int(was.get("n") or 0) + 1, "since": was.get("since") or r["at"], "at": r["at"],
-                              "why": str(r["reseeded"])[:200], "task": r["task"]}
+                              "why": str(r["reseeded"])[:200], "task": r["task"],
+                              "streak": int(was.get("streak") or 0) + 1, "day": day[-(DRIFT_DAY_N + 1):]}
+                    if rs[db]["streak"] >= DRIFT_STREAK or len(day) > DRIFT_DAY_N:   # once is a drift; this isn't
+                        drift[db] = dict(r, result=f"re-seeded {rs[db]['streak']} rounds running, {len(day)} in 24 h: "
+                                                   f"{rs[db]['why']}")
+                elif was.get("streak"):
+                    rs[db] = dict(was, streak=0)
                 if r["ok"] is False:
                     failing.setdefault(db, r["at"])
                     checks[db] = dict(r, bad_since=failing[db])
@@ -857,7 +933,8 @@ class ReplicaWatch:
             self.store.last = doc
         self.write_state(doc)
 
-        def say(kind: str, title: str, bad: dict[str, dict], prio: int) -> None:
+        def say(kind: str, title: str, bad: dict[str, dict], prio: int,
+                tail: str = "a takeover or cold start from it would fail: fix before the next deploy") -> None:
             if not bad:
                 return
             first = next(iter(bad.values()))
@@ -865,10 +942,16 @@ class ReplicaWatch:
                              f"{first['mode'] if kind == 'replica_corrupt' else first['by']}"
                              + (f" at {first['txid']}" if first.get("txid") else "") + f": {first['result'][:240]} · "
                              + ("a fresh restore from S3 fails it too · " if first.get("confirmed") else "")
-                             + "a takeover or cold start from it would fail: fix before the next deploy", priority=prio)
+                             + tail, priority=prio)
         say("replica_corrupt", "Replica corrupt", corrupt, 5)
         say("replica_restore", "Replica restore failed (possible corruption)", restore, 5)
         say("replica_unverifiable", "Replica not verifiable", unverif, 4)
+        say("replica_follow", "Replica follower failing", follow, 4,
+            "a follower (a takeover's catch-up) may fail the same way: look at the follower's errors before the next deploy")
+        say("replica_drift", "Replica check copy keeps drifting", drift, 4,
+            "a fresh restore passes each time; a follower that keeps drifting is worth a look (docs/cloud.md Replica checks)")
+        for db in drift:
+            self.log(f"replica-watch: {db}.sqlite: {drift[db]['result'][:300]}")
         for db in back:
             self.pusher.push("replica_ok", f"Replica OK again: {db}.sqlite",
                              f"{results[db]['mode']} ok on the {results[db]['by']}'s copy at {_hhmm(results[db]['at'])}",
@@ -1017,7 +1100,8 @@ class ReplicaWatch:
 
 
 def _stop(p) -> None:
-    """A follower: SIGTERM (it finishes what it applies), then SIGKILL."""
+    """A follower: SIGTERM, then SIGKILL. SIGTERM cancels what it applies, maybe part way through a file (its copy
+    then holds two positions: settled() says so)."""
     try:
         if p.poll() is None:
             try:
