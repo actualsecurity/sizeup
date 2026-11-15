@@ -249,3 +249,6 @@ sizeup-replay/
 stt-corrections*.jsonl
 *.stt-eval.json
 *.intel-replay.json
+
+# a local station config beside config.toml (docs/development.md)
+/config.station.toml
