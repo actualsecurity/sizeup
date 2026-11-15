@@ -133,7 +133,6 @@ SHIP_LEVELS = re.compile(r"\((?:warning|error|fatal)\)", re.I)
 SHIP_SKIP = ("SIZEUP-UNIT", "Unit ID set via Control Channel")     # per transmission, and they name radios
 TR_STAMP = re.compile(r"^\[\d{4}-\d\d-\d\d [\d:.]+\]\s*")
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
-RADIO_ID = re.compile(r"(?<![\d.])\d{5,}(?![\d.])(?!\s*(?:hz|khz|mhz|/\s*sec|sps))", re.I)
 
 
 # -- what to run ----------------------------------------------------------------------------------------------------------
@@ -272,14 +271,33 @@ def _dur(s: float) -> str:
     return f"{s} s" if s < 120 else f"{s // 60} min" if s < 7200 else f"{s // 3600} h {s % 3600 // 60} min"
 
 
-def no_ids(text: str) -> str:
-    """A trunk-recorder line with any long whole number (a radio ID) masked; frequencies and rates stay."""
-    return RADIO_ID.sub("#", text)
+LONG_NUMBER = re.compile(r"(?<![\d.])\d{5,}(?!\d|\.\d)")
+NOT_AN_ID = re.compile(r"(?:rate|freq\w*|center|centre|hz|count|pid)\W*$", re.I)
+
+
+def no_ids(detail) -> str:
+    """trunk-recorder's own output lines can name a radio (its ID), so any long whole number in it is left out,
+    whatever follows it (a full stop, a comma, a bracket); a frequency or a sample rate ("476075000 Hz",
+    "rate: 2400000") stays. The one copy (stdlib: this file is installed on its own): sizeup/cloud/health.py and
+    sizeup/radio/systems.py use it. An ID under 5 digits isn't told from a talkgroup or a count: such lines (unit
+    grants, "Unit ID set via Control Channel") are never shipped (SHIP_SKIP)."""
+    text = str(detail or "")
+
+    def one(m) -> str:
+        after = text[m.end():m.end() + 8].lstrip().lower()
+        if after.startswith(("mhz", "hz", "khz", "/sec", "sps")) or NOT_AN_ID.search(text[:m.start()][-16:]):
+            return m.group(0)                       # a frequency or a rate, by what is written around it
+        return "#"
+    return LONG_NUMBER.sub(one, text)[:200]
 
 
 class Watchdog:
     """Is a running trunk-recorder still working (#547)? scan() the capture directory, line() its output, fault() the
-    reason to restart it now ("" = none), allowed() whether the hour's restarts allow one, restarted() after one."""
+    reason to restart it now ("" = none), allowed() whether the hour's restarts allow one, restarted() after one.
+
+    Two clocks: the call files' times are the wall clock's (their mtimes, against the wall `now`); everything else
+    (its output's lines, the restarts, how long trunk-recorder has run) is time.monotonic()'s `mono`, so a step of the
+    wall clock (NTP, WSL2 resyncing after the host slept) is never a decoder silent for that long."""
 
     def __init__(self):
         self.root = ""
@@ -289,8 +307,10 @@ class Watchdog:
         self.last_call: float | None = None                  # the capture directory's last change: a call file written
         self.scanned: float | None = None
         self._lock = threading.Lock()
-        self.restarts: deque[float] = deque()                # watchdog restarts, the last hour
-        self.quiet = 0                                       # watchdog restarts since the last call
+        self.restarts: deque[float] = deque()                # watchdog restarts, the last hour (mono)
+        self.quiet = 0                                       # call-file restarts since the last new call file
+        self.lost_n = 0                                      # control-channel-lost restarts since it last decoded well
+        self.cc_ok_since: float | None = None                # (mono) decoding at CC_LOW or more since
         self.last: dict | None = None                        # the last restart: {at, why}
         self.capped = False                                  # the cap said (once per stretch)
         self.key = None
@@ -308,14 +328,16 @@ class Watchdog:
             self.root, self.dirs, self.last_call, self.scanned = root, {}, None, None
         if key != self.key:
             self.key, self.cc_all = key, False
-        self.cc_at = self.cc_low_since = self.cc_last_low = None
+        self.cc_at = self.cc_low_since = self.cc_last_low = self.cc_ok_since = None
         self.capped = False
 
     def scan(self, now: float, force: bool = False) -> bool:
         """The capture directory's last change (every WATCH_SCAN_S): its newest call JSON, or the newest change of a
         directory in it. sizeup takes each call's files away seconds after trunk-recorder writes them
         (app.py _drop_recorder_files), so a file is seldom there to see, but its directory changed when it came (and
-        when sizeup took it, seconds later). True: something new since the last look."""
+        when sizeup took it, seconds later). True: something new since the last look. (now: monotonic, for how
+        often; the times found are the wall clock's.) Only a new file ends a run of call-file restarts' doubling: a
+        trunk-recorder that concludes calls but writes no file is not one that works."""
         if not self.root or (not force and self.scanned is not None and now - self.scanned < WATCH_SCAN_S):
             return False
         self.scanned = now
@@ -382,7 +404,6 @@ class Watchdog:
                 self.said = now
                 while self.calls and self.calls[0] < now - WATCH_BASE_S:
                     self.calls.popleft()
-            self.quiet = 0
             return
         m = CC_RATE.search(line) if "ontrol" in line else None
         if not m:
@@ -398,48 +419,64 @@ class Watchdog:
             if self.cc_low_since is None or self.cc_last_low is None or now - self.cc_last_low > CC_RUN_GAP_S:
                 self.cc_low_since = now
             self.cc_last_low = now
+            self.cc_ok_since = None
         else:
             self.cc_low_since = None
+            self.cc_ok_since = self.cc_ok_since or now
+            if now - self.cc_ok_since >= CC_LOST_RESTART_S:
+                self.lost_n = 0                              # it decodes well again: a restart did fix it
 
     # -- the verdict -----------------------------------------------------------------------------------------------------
 
-    def fault(self, now: float, started: float, cfg: dict) -> str:
+    def lost_limit(self) -> float:
+        """How long the control channel may be lost: CC_LOST_RESTART_S, doubled for each restart that didn't bring
+        it back (a dead site or antenna: restarting can't fix that), up to WATCH_DOUBLE_MAX_S."""
+        return min(CC_LOST_RESTART_S * 2 ** self.lost_n, max(WATCH_DOUBLE_MAX_S, CC_LOST_RESTART_S))
+
+    def fault(self, now: float, mono: float, started: float, started_mono: float, cfg: dict) -> tuple[str, str]:
+        """(kind, why) of the reason to restart now; ("", "") for none. now / started: the wall clock (call files);
+        mono / started_mono: time.monotonic() (everything else)."""
         if cfg["per_hour"] <= 0:
-            return ""
+            return "", ""
         if self.cc_all:
-            last = max(self.cc_at or started, started)
-            if now - last >= CC_SILENT_S:
-                return f"no control channel decode rate logged for {_dur(now - last)} (decoder hung?)"
+            last = max(self.cc_at or started_mono, started_mono)
+            if mono - last >= CC_SILENT_S:
+                return "decoder", f"no control channel decode rate logged for {_dur(mono - last)} (decoder hung?)"
         low = self.cc_low_since
-        if low is not None and self.cc_last_low is not None and now - self.cc_last_low <= CC_RUN_GAP_S \
-                and now - max(low, started) >= CC_LOST_RESTART_S:
-            return f"control channel lost (under {CC_LOW:g} msg/s) for {_dur(now - max(low, started))}"
+        if low is not None and self.cc_last_low is not None and mono - self.cc_last_low <= CC_RUN_GAP_S:
+            lost = mono - max(low, started_mono)
+            if lost >= self.lost_limit():
+                return "control", (f"control channel lost (under {CC_LOW:g} msg/s) for {_dur(lost)}"
+                                   + (f" (limit doubled {self.lost_n}×: restarts didn't bring it back)"
+                                      if self.lost_n else ""))
         if self.root:
             since = max(self.last_call or started, started)
             lim, why = self.limit(cfg)
             if now - since >= lim:
-                return f"no new call file for {_dur(now - since)} (limit {_dur(lim)}: {why})"
-        return ""
+                return "calls", f"no new call file for {_dur(now - since)} (limit {_dur(lim)}: {why})"
+        return "", ""
 
-    def allowed(self, now: float, cfg: dict) -> bool:
-        while self.restarts and now - self.restarts[0] >= 3600:
+    def allowed(self, mono: float, cfg: dict) -> bool:
+        while self.restarts and mono - self.restarts[0] >= 3600:
             self.restarts.popleft()
         return len(self.restarts) < cfg["per_hour"]
 
-    def restarted(self, now: float, why: str) -> None:
-        self.restarts.append(now)
+    def restarted(self, now: float, mono: float, kind: str, why: str) -> None:
+        self.restarts.append(mono)
         self.last = {"at": now, "why": why}
-        if not why.startswith(("no control", "control")):
+        if kind == "calls":
             self.quiet += 1
+        elif kind == "control":
+            self.lost_n += 1
 
-    def report(self, now: float, cfg: dict | None) -> dict:
-        """For the status: the last call file, the limit now, the restarts."""
+    def report(self, mono: float, cfg: dict | None) -> dict:
+        """For the status: the last call file (wall clock), the limit now, the restarts."""
         lim = self.limit(cfg)[0] if cfg and self.root else None
         with self._lock:
-            n = sum(1 for t in self.calls if now - t < WATCH_BASE_S)
+            n = sum(1 for t in self.calls if mono - t < WATCH_BASE_S)
         return {"last_call": self.last_call, "limit_s": lim, "calls_3h": n,
-                "restarts_1h": sum(1 for t in self.restarts if now - t < 3600), "last": self.last,
-                "decode_rate_at": self.cc_at}
+                "restarts_1h": sum(1 for t in self.restarts if mono - t < 3600), "last": self.last,
+                "decode_rate_s": round(mono - self.cc_at, 1) if self.cc_at is not None else None}
 
 
 class Shipper:
@@ -659,9 +696,12 @@ class Supervisor:
 
     def __init__(self, config: str = CONFIG, state: str = STATE, status_path: str = STATUS, claims: Path | None = None,
                  popen=subprocess.Popen, found=devices, killpg=os.killpg, pid: int | None = None,
-                 log=lambda m: print(m, flush=True)):
+                 log=lambda m: print(m, flush=True), mono=time.monotonic):
         self.config, self.state, self.status_path, self.claims = config, state, status_path, claims
         self.popen, self.found, self.killpg, self.log = popen, found, killpg, log
+        self.mono = mono                            # time.monotonic: the watchdog's clock (#547)
+        self._m = 0.0                               # its reading at this step
+        self.started_mono: float | None = None
         self.pid = os.getpid() if pid is None else pid
         self.proc: subprocess.Popen | None = None
         self.running: tuple | None = None          # (sdr, argv, workdir) of the trunk-recorder that runs
@@ -686,8 +726,9 @@ class Supervisor:
             self.log(f"{self.tag}: {state}" + (f": {detail}" if detail else ""))
         self.status = {"state": state, "detail": detail, "since": now if changed else self.status.get("since"), **kw}
 
-    def step(self, now: float | None = None) -> dict:
+    def step(self, now: float | None = None, mono: float | None = None) -> dict:
         now = time.time() if now is None else now
+        self._m = self.mono() if mono is None else mono
         r, w = recorder(self.config), wanted(self.state)
         self._wcfg = r.get("watch")
         key = (w["sdr"], tuple(r["argv"]), r["workdir"]) if w["on"] else None
@@ -714,7 +755,7 @@ class Supervisor:
             self._start(now, w, r, key, base)
         else:
             self._watch(now, base)
-        self.status["watchdog"] = self.watchdog.report(now, self._wcfg)
+        self.status["watchdog"] = self.watchdog.report(self._m, self._wcfg)
         self.status["at"] = now
         self._write()
         return self.status
@@ -776,7 +817,7 @@ class Supervisor:
             self.next_start = now + self.backoff
             self._set(now, "down", f"cannot start trunk-recorder: {e}", **dict(base, restarts=self.restarts))
             return
-        self.running, self.started_at = key, now
+        self.running, self.started_at, self.started_mono = key, now, self._m
         self.lines.clear()
         self.said = ""
         self.watchdog.started(now, capture_dir(argv, r["workdir"]), key)
@@ -826,19 +867,19 @@ class Supervisor:
         cfg, wd = self._wcfg, self.watchdog
         if not cfg or self.started_at is None:
             return False
-        wd.scan(now)
-        why = wd.fault(now, self.started_at, cfg)
+        wd.scan(self._m)
+        kind, why = wd.fault(now, self._m, self.started_at, self.started_mono, cfg)
         if not why:
             wd.capped = False
             return False
-        if not wd.allowed(now, cfg):
+        if not wd.allowed(self._m, cfg):
             if not wd.capped:
                 wd.capped = True
                 self.log(f"{self.tag}: watchdog: {why}; not restarted: {cfg['per_hour']} restart(s) in the last hour")
             return False
         self.log(f"{self.tag}: watchdog: {why}: restarting trunk-recorder "
                  f"({len(wd.restarts) + 1} of {cfg['per_hour']} this hour)")
-        wd.restarted(now, why)
+        wd.restarted(now, self._m, kind, why)
         self.stop(f"watchdog: {why}")
         self.restarts += 1
         self.backoff, self.next_start = BACKOFF_S[0], 0.0
@@ -871,7 +912,7 @@ class Supervisor:
                 if any(w in low for w in SAYS):
                     self.said = line[-160:]
                 try:
-                    t = time.time()
+                    t = time.monotonic()
                     self.watchdog.line(line, t)
                     self.shipper.line(line, t)
                 except Exception:  # noqa: BLE001 - the drain must never stop (trunk-recorder would block on its output)
@@ -1133,8 +1174,9 @@ class SystemSupervisor(Supervisor):
         ours = c.get("app") == APP and _pid(c) in (self.pid, handed)
         return None if ours and c.get("mode") == s["mode"] else c
 
-    def step(self, now: float | None = None) -> dict:
+    def step(self, now: float | None = None, mono: float | None = None) -> dict:
         now = time.time() if now is None else now
+        self._m = self.mono() if mono is None else mono
         r, w = self._recorder(), wanted_system(self.state)
         self._wcfg = r.get("watch")
         expired = w["on"] and w["until"] is not None and now >= w["until"]
@@ -1172,7 +1214,7 @@ class SystemSupervisor(Supervisor):
             self._start_system(now, w, r, key, base)
         else:
             self._watch(now, base)
-        self.status["watchdog"] = self.watchdog.report(now, self._wcfg)
+        self.status["watchdog"] = self.watchdog.report(self._m, self._wcfg)
         self.status["at"] = now
         self._write()
         return self.status
@@ -1241,7 +1283,7 @@ class SystemSupervisor(Supervisor):
             self.next_start = now + self.backoff
             self._set(now, "down", f"cannot start trunk-recorder: {e}", **dict(base, restarts=self.restarts))
             return
-        self.running, self.started_at = key, now
+        self.running, self.started_at, self.started_mono = key, now, self._m
         self.lines.clear()
         self.said = ""
         self.watchdog.started(now, capture_dir(argv, r["workdir"]), key)

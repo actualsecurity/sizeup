@@ -66,8 +66,9 @@ class Rig:
         for p in [d, *new]:                                   # (the directories changed at t, as on the station)
             os.utime(p, (t, t))
 
-    def step(self, t: float) -> dict:
-        return self.s.step(t)
+    def step(self, t: float, mono: float | None = None) -> dict:
+        """One step at wall time t (the monotonic clock reads t too unless said: a wall clock step)."""
+        return self.s.step(t, t if mono is None else mono)
 
     @property
     def starts(self) -> int:
@@ -387,3 +388,83 @@ def test_a_stall_is_said_as_a_stall_not_a_stop(tmp_path, monkeypatch):
         assert "stopped" not in down
     finally:
         r.stop()
+
+
+# -- review fixes ----------------------------------------------------------------------------------------------------
+
+def test_radio_ids_are_masked_before_a_full_stop_and_rates_and_frequencies_stay():
+    said: list[str] = []
+    sh = trunkrecd.Shipper(said.append)
+    sh.line(HEAD.format(level="error") + "Failed to open audio file for Unit 1234567.", T0)
+    sh.line(HEAD.format(level="warning") + "source center 477193750 rate: 2400000 · 476075000 Hz · 38/sec", T0)
+    assert said == ["p25: trunk-recorder: (error) [westchester] Failed to open audio file for Unit #.",
+                    "p25: trunk-recorder: (warning) [westchester] source center 477193750 rate: 2400000 · "
+                    "476075000 Hz · 38/sec"]
+    from sizeup.cloud import health
+    from sizeup.radio import systems
+    assert health.no_ids is trunkrecd.no_ids and systems.no_ids is trunkrecd.no_ids          # one copy
+
+
+def test_a_wall_clock_step_is_no_hung_decoder(tmp_path):
+    """NTP, or WSL2 resyncing after the host slept, moves the wall clock 150 s at once: the decoder logged 3 s ago."""
+    r = Rig(tmp_path)
+    r.step(T0)
+    for k in range(20):
+        rate(r, T0 + 3 * k, 38)
+        r.step(T0 + 3 * k)
+    m = T0 + 60
+    rate(r, m, 38)
+    r.step(m + 150, mono=m + 1)                                # the wall clock jumps 150 s; 1 s has really passed
+    for k in range(1, 20):
+        rate(r, m + 3 * k, 38)
+        r.step(m + 150 + 3 * k, mono=m + 3 * k)
+    assert r.starts == 1 and r.watchdog_lines() == []
+
+
+def test_the_control_channel_lost_for_hours_backs_off():
+    """A dead site or antenna: restarting can't fix it. 10 min, then 20, 40, 80, 160: 5 restarts in 6 h, not 18."""
+    wd = trunkrecd.Watchdog()
+    cfg = trunkrecd.watch_settings({})
+    wd.started(T0, "", "k")
+    started, n, t = T0, 0, T0
+    while t < T0 + 6 * 3600:
+        wd.line(HEAD.format(level="error") + "Control Channel Message Decode Rate: 0/sec, count:  0", t)
+        kind, why = wd.fault(t, t, started, started, cfg)
+        if kind and wd.allowed(t, cfg):
+            assert kind == "control"
+            wd.restarted(t, t, kind, why)
+            wd.started(t, "", "k")
+            started, n = t, n + 1
+        t += 3
+    assert n == 5 and wd.lost_limit() == 32 * trunkrecd.CC_LOST_RESTART_S
+    for k in range(250):                                       # it decodes well for over 10 min: back to 10 min
+        wd.line(HEAD.format(level="info") + "Control Channel Message Decode Rate: 38/sec, count:  114", t + 3 * k)
+    assert wd.lost_limit() == trunkrecd.CC_LOST_RESTART_S
+
+
+def test_calls_concluded_but_no_files_written_still_back_off(tmp_path):
+    """trunk-recorder keeps logging "Concluding Recorded Call" but writes no file: each restart doubles the limit
+    (only a new file ends that)."""
+    r = Rig(tmp_path)
+    run(r, T0, T0 + 3 * 3600, calls_every=MIN)
+    lim1, _ = r.s.watchdog.limit(r.s._wcfg)
+    t = T0 + 3 * 3600
+    while not r.watchdog_lines():
+        r.s.watchdog.line(HEAD.format(level="info") + "Concluding Recorded Call - Last Update: 4s", t)   # no file
+        r.step(t)
+        t += 30
+    r.s.watchdog.line(HEAD.format(level="info") + "Concluding Recorded Call - Last Update: 4s", t)
+    lim2, why2 = r.s.watchdog.limit(r.s._wcfg)
+    assert lim2 == 2 * lim1 and "doubled 1×" in why2
+    r.step(t + 30)                                             # (started again)
+    r.call(t + 60)                                             # a file again: back to its limit
+    r.step(t + 60)
+    assert r.s.watchdog.limit(r.s._wcfg)[0] == lim1
+
+
+def test_a_receiver_stopped_while_its_dongle_is_gone_forgets_it():
+    events: list[str] = []
+    r = NfmReceiver("rtl_fm", "", None, Channel(470.2, "South 2"), lambda c, s: None, events.append, **PAGING)
+    r._absent("dongle 'any' not connected")
+    r.stop()
+    assert r._gone is None

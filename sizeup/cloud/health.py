@@ -143,6 +143,8 @@ TRUNK_NIGHT_S = 60 * 60.0   # [alerts] p25_silent_night_min: ... for a silence t
 NIGHT_PART = 0              # the part of the day (00-06) the night window is for
 CC_LOST_S = 120.0           # the control channel decoding under 2 messages / s this long: the trunk alert at once
 CC_WARN = 10.0              # trunk-recorder's default controlWarnRate: a rate at or over it is a healthy one (#547)
+CC_SILENT_NOTIFY_S = 300.0  # "no decode rate" pushed only this long after it began: the station's watchdog restarts a hung
+                            # decoder at 2 min (sizeup/radio/trunkrecd.py), and one it healed is never a page (#547)
 REMIND_S = 3 * 3600.0       # [alerts] remind_min: a pushed critical alert still on is pushed again this often (#547)
 TOD_PARTS = 4               # 6-hour parts of the day for the learned gaps
 NOT_CHANNELS = ("STT", "Voice", "Hub", "Station", "trunk-recorder")
@@ -347,22 +349,8 @@ class Metrics:
                 "mem_total": mem_total, "temp_c": self.temp_c(), "disk_path": str(self.disk_path)[:200], **disk}
 
 
-LONG_NUMBER = re.compile(r"(?<![\d.])\d{5,}(?!\d|\.\d)")
-NOT_AN_ID = re.compile(r"(?:rate|freq\w*|center|centre|hz|count|pid)\W*$", re.I)
-
-
-def no_ids(detail) -> str:
-    """A recorder's detail for the health report: trunk-recorder's own output lines can name a radio (its ID), so
-    any long whole number in it is left out, whatever follows it (a full stop, a comma, a bracket); a frequency or a
-    sample rate ("476075000 Hz", "rate: 2400000") stays."""
-    text = str(detail or "")
-
-    def one(m) -> str:
-        after = text[m.end():m.end() + 8].lstrip().lower()
-        if after.startswith(("mhz", "hz", "khz", "/sec", "sps")) or NOT_AN_ID.search(text[:m.start()][-16:]):
-            return m.group(0)                       # a frequency or a rate, by what is written around it
-        return "#"
-    return LONG_NUMBER.sub(one, text)[:200]
+# A recorder's detail for the health report: trunk-recorder's lines can name a radio (its ID); one copy (#547)
+from sizeup.radio.trunkrecd import LONG_NUMBER, NOT_AN_ID, no_ids  # noqa: E402,F401
 
 
 def station_metrics(app, metrics: Metrics) -> dict:
@@ -1043,7 +1031,8 @@ class StationHealth:
     def _notify_ok(self, a: dict, now: float) -> bool:
         """Old enough to push (NOTIFY_AFTER); the whisper backlog only while it is still that far behind now, not one
         nearly caught up (#300)."""
-        if now - float(a["since"]) < NOTIFY_AFTER.get(a["key"], 0.0) or a.get("quiet"):
+        wait = max(NOTIFY_AFTER.get(a["key"], 0.0), float(a.get("notify_after") or 0.0))
+        if now - float(a["since"]) < wait or a.get("quiet"):
             return False
         return a["key"] != "stt_backlog" or self._stt_oldest >= STT_NOTIFY_S
 
@@ -1130,7 +1119,7 @@ class StationHealth:
             return {"severity": "critical", "title": "P25 trunk silent",
                     "text": f"control channel: no decode rate from trunk-recorder since {_hhmm(cc['silent_since'])} "
                             f"{tail}",
-                    "since": float(cc["silent_since"])}
+                    "since": float(cc["silent_since"]), "notify_after": CC_SILENT_NOTIFY_S}
         active = self.active.get("trunk")
         start = tk["last_call"] or 0.0
         if active is not None and not start:
@@ -1240,6 +1229,10 @@ class StationHealth:
                     a["quiet"] = True                    # the panel only (#410: nothing of ours is affected)
                 else:
                     a.pop("quiet", None)
+                if c.get("notify_after"):
+                    a["notify_after"] = float(c["notify_after"])   # pushed only once this old (#547)
+                else:
+                    a.pop("notify_after", None)
             for key in list(self.active):
                 if key in conds:
                     continue

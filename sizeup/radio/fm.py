@@ -809,6 +809,7 @@ class NfmReceiver:
     def stop(self) -> None:
         self._stop.set()
         self._kill()
+        self._gone = None                       # (#547) stopped while its dongle was gone: nothing left to say
 
     def status(self) -> dict:
         sq = self.squelch

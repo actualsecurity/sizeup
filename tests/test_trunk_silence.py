@@ -306,3 +306,76 @@ def test_config_an_old_main_channels_still_loads_and_the_p25_window(tmp_path):
     p.write_text("[alerts]\np25_silent_min = 1\n")
     with pytest.raises(ConfigError, match="alerts.p25_silent_min: a number from 5 to 720"):
         load(p)
+
+
+# -- #547 review ---------------------------------------------------------------------------------------------------------
+
+def test_a_trunk_recorder_back_after_minutes_off_is_not_silent_since_before_it_stopped():
+    """Fire/EMS 15 off 10 min (a dongle moved and back, shortfinal's hand-over, absent then back), then a new
+    trunk-recorder: before its first rate line (3-8 s) the old last line made it "silent since" 10 min ago, and the
+    hub paged at once. Judged from the new one's start now."""
+    now = [T0]
+    cc = ControlChannel(clock=lambda: now[0])
+    cc.running(T0)
+    for k in range(10):
+        now[0] = T0 + 3 * k
+        cc.feed("[westchester]\tControl Channel Message Decode Rate: 38/sec, count:  114")
+    cc.running(None)                                                     # stopped: never silent while off
+    now[0] = T0 + 600
+    assert cc.status()["silent_since"] is None
+    cc.running(T0 + 600)                                                 # a new one
+    now[0] = T0 + 605
+    st = cc.status()
+    assert st["silent_since"] is None
+    r = Rig()
+    r.at(0, p25(0))
+    r.at(605, p25(600, cc=st))
+    assert r.keys() == [] and r.n.msgs == []
+    now[0] = T0 + 600 + CC_SILENT_S + 1                                  # it really never logs: from its start
+    assert cc.status()["silent_since"] == T0 + 600
+
+
+def test_the_unit_recorder_tells_its_control_channel_when_trunk_recorder_started(tmp_path):
+    import json
+    import time as _t
+    from sizeup.radio.recorder import UnitRecorder
+    st = tmp_path / "status.json"
+    rec = UnitRecorder("no-trunk-recorder --config=x", str(tmp_path), state_path=str(tmp_path / "s.json"),
+                       status_path=str(st))
+    started = _t.time() - 5
+    st.write_text(json.dumps({"at": _t.time(), "state": "ok", "on": True, "sdr": "", "started": started}))
+    rec.status()
+    assert rec.cc.run_start == started
+    st.write_text(json.dumps({"at": _t.time(), "state": "absent", "on": True, "sdr": ""}))
+    rec.status()
+    assert rec.cc.run_start is None
+
+
+def test_a_wall_clock_step_is_no_control_channel_silence():
+    now, mono = [T0], [100.0]
+    cc = ControlChannel(clock=lambda: now[0], mono=lambda: mono[0])
+    cc.feed("[westchester]\tControl Channel Message Decode Rate: 38/sec, count:  114")
+    now[0] += 150                                                        # NTP / WSL2 resync: 1 s really passed
+    mono[0] += 1
+    assert cc.status()["silent_since"] is None
+
+
+def test_no_decode_rate_is_pushed_only_after_the_watchdog_had_its_chance():
+    """The station's watchdog restarts a hung decoder at 2 min: the hub shows the alert then, and pushes it only at
+    CC_SILENT_NOTIFY_S (5 min). One the watchdog healed is never pushed."""
+    healthy = {"rate": 38.0, "low_since": None, "last_low": None, "retunes": 0, "last_retune": None, "silent_since": None}
+    hung = dict(healthy, rate=None, silent_since=T0 + 30)
+    r = Rig()
+    r.at(0, p25(0))
+    r.at(30 + CC_LOST_S, p25(25, cc=hung))
+    assert r.keys() == ["trunk"] and r.n.msgs == []                      # on the panel, not pushed
+    r.at(30 + 200, p25(225, cc=healthy))                                 # restarted, decoding: cleared, never pushed
+    r.at(30 + 200 + healthmod.SETTLE_S + 60, p25(30 + 200 + healthmod.SETTLE_S + 50, cc=healthy))
+    assert r.keys() == [] and r.n.msgs == []
+    r = Rig()
+    r.at(0, p25(0))
+    r.at(30 + CC_LOST_S, p25(25, cc=hung))
+    r.at(30 + healthmod.CC_SILENT_NOTIFY_S - 1, p25(25, cc=hung))
+    assert r.n.msgs == []
+    r.at(30 + healthmod.CC_SILENT_NOTIFY_S, p25(25, cc=hung))
+    assert len(r.n.msgs) == 1 and r.n.msgs[0]["title"].startswith("P25 trunk silent")

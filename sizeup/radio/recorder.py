@@ -68,10 +68,19 @@ class ControlChannel:
     """The control channel's decode rate as trunk-recorder logs it (feed() each line of its output). status():
     {"rate": the last rate it logged (None: none logged: fine), "low_since": the start of the current run under
     CC_LOW (None: not lost), "last_low": that run's last line, "retunes": count, "last_retune": when,
-    "silent_since": every rate is logged and the last came this long ago, over CC_SILENT_S (None: fine)}."""
+    "silent_since": every rate is logged and the last came this long ago, over CC_SILENT_S (None: fine)}.
 
-    def __init__(self, clock: Callable[[], float] = time.time):
+    Silence is judged only while trunk-recorder runs, and from its start at the earliest (running(); #547: a
+    trunk-recorder back after 10 min off was "silent since" its last line before it stopped, a false page). Its
+    length is measured on mono (time.monotonic), so a step of the wall clock is no silence; the times reported are
+    the wall clock's."""
+
+    def __init__(self, clock: Callable[[], float] = time.time, mono: Callable[[], float] | None = None):
         self.clock = clock
+        self.mono = mono or clock
+        self.at_mono: float | None = None
+        self.run_start: float | None = 0.0       # (wall) when the trunk-recorder that runs started; None: none runs
+        self.run_mono = float("-inf")
         self.rate: float | None = None
         self.at: float | None = None             # when the last rate line came
         self.low_since: float | None = None
@@ -90,7 +99,7 @@ class ControlChannel:
                 rate = float(m.group("rate"))
             except ValueError:
                 return
-            self.rate, self.at = rate, now
+            self.rate, self.at, self.at_mono = rate, now, self.mono()
             if rate >= CC_WARN:
                 self.all_logged = True
             if rate < CC_LOW:
@@ -103,15 +112,26 @@ class ControlChannel:
             self.retunes += 1
             self.last_retune = now
 
+    def running(self, start: float | None) -> None:
+        """The trunk-recorder that runs now started at `start` (the wall clock; None: none runs). A new one is given
+        CC_SILENT_S to log its first rate."""
+        if start is None or start != self.run_start:
+            self.run_start = start
+            self.run_mono = self.mono() - max(0.0, self.clock() - start) if start is not None else float("-inf")
+
     def status(self) -> dict:
         now = self.clock()
         lost = self.low_since is not None and self.last_low is not None and now - self.last_low <= CC_RUN_GAP_S
         if not lost:
             self.low_since = None
         recent = self.at is not None and now - self.at <= CC_RUN_GAP_S
-        silent = self.all_logged and self.at is not None and now - self.at > CC_SILENT_S
+        since = None
+        if self.all_logged and self.at is not None and self.run_start is not None:
+            from_mono = max(self.at_mono if self.at_mono is not None else float("-inf"), self.run_mono)
+            if self.mono() - from_mono > CC_SILENT_S:
+                since = self.at if from_mono != self.run_mono else max(self.at, self.run_start)
         return {"rate": self.rate if recent else None, "low_since": self.low_since, "last_low": self.last_low,
-                "retunes": self.retunes, "last_retune": self.last_retune, "silent_since": self.at if silent else None}
+                "retunes": self.retunes, "last_retune": self.last_retune, "silent_since": since}
 
 
 def make_system(name: str, label: str, command: str, workdir: str,
@@ -218,6 +238,7 @@ class TrunkRecorder:
         if self._thread:
             self._thread.join(timeout=10)
         self.state, self.detail = "off", reason
+        self.cc.running(None)
 
     def status(self) -> dict:
         return {"label": "trunk-recorder", "mhz": None, "state": self.state, "detail": self.detail,
@@ -296,6 +317,7 @@ class TrunkRecorder:
                 backoff = min(backoff * 2, 30)
                 continue
             self.state, self.detail = "ok", "trunk-recorder starting"
+            self.cc.running(time.time())           # (#547) its control channel judged from this start
             if self.left_out:
                 self.detail += f" (left out: {'; '.join(self.left_out)})"
                 self.on_event(f"trunk-recorder: source(s) left out: {'; '.join(self.left_out)}")
@@ -306,6 +328,7 @@ class TrunkRecorder:
                 self._stop.wait(1.0)
             if self._stop.is_set():
                 break
+            self.cc.running(None)
             drain.join(2.0)                 # its last words read before we judge them (an unplugged dongle, not a crash)
             tail = " ".join(list(self.last_lines)[-5:])
             if "Wrong rtlsdr device index" in tail or "No supported devices" in tail or "No matching devices" in tail:
@@ -440,6 +463,10 @@ class UnitRecorder(TrunkRecorder):
                 self.restarts = 0
             if self.serial is not None and not st.get("stale") and (not st.get("on") or st.get("sdr") != self.serial):
                 self.state, self.detail = "starting", f"handing Fire/EMS 15 to {trunkrecd.UNIT}"
+        # (#547) the control channel is judged only while trunk-recorder runs, and from its start at the earliest
+        started = st.get("started") if st else None
+        started = float(started) if isinstance(started, (int, float)) and not isinstance(started, bool) else 0.0
+        self.cc.running(started if self.state == "ok" else None)
         return {"label": "trunk-recorder", "mhz": None, "state": self.state, "detail": self.detail,
                 "open": False, "quieting_db": None, "restarts": self.restarts, "last_heard": None}
 
