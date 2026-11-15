@@ -868,6 +868,34 @@ def test_the_deploy_check_reads_only_the_record_and_waits_for_the_new_leaders_ch
     assert v(unv, BUILD)[0] == dc.FAIL and "hub.sqlite: not verifiable" in v(unv, BUILD)[1]   # never "corrupt"
 
 
+def test_the_deploy_check_waits_past_the_old_leaders_failing_record_and_judges_only_the_new_leaders():
+    """2026-11-15: the old leader's "corrupt" (before the deploy) was still in the record; the deploy failed in 0 s
+    while the new leader, serving since, hadn't checked yet (its first check passed 3 min later)."""
+    v = dc.replica_verdict
+    stale = record(failing={"cad": 800.0})
+    stale["checks"]["cad"].update(at=800.0, ok=False, result="wrong # of entries in index made_up_idx", task="t-old")
+    assert v(stale, BUILD) == (dc.WAIT, "the leader (serving since 00:16:40 UTC) hasn't verified cad yet")
+    stale["leader"]["build"] = "d" * 40                                    # (the old build's leader: waited for)
+    assert v(stale, BUILD)[0] == dc.WAIT
+    c = Clock(0.0)
+    passed = record()                                                       # the new leader's first check: ok
+    got = iter([stale, stale, passed] + [passed] * 5)
+    ok, msg = dc.wait_replicas(lambda: next(got), BUILD, timeout=600, every=20, clock=c,
+                               sleep=lambda s: setattr(c, "t", c.t + s), out=lambda m: None)
+    assert ok and "cad.sqlite: ok" in msg
+    still = record(failing={"cad": 800.0})                                  # the new leader finds it corrupt too
+    still["checks"]["cad"].update(ok=False, result="*** in database main ***")
+    got = iter([stale, still] + [still] * 5)
+    ok, msg = dc.wait_replicas(lambda: next(got), BUILD, timeout=600, every=20, clock=c,
+                               sleep=lambda s: setattr(c, "t", c.t + s), out=lambda m: None)
+    assert not ok and msg.startswith("cad.sqlite: corrupt (quick_check by the leader at 00:18:50 UTC)")
+    unv = record(failing={"audio": 1100.0})                                  # not verifiable twice, since it serves
+    unv["checks"]["audio"].update(ok=None, result="not restored after 10 min")
+    assert v(unv, BUILD)[0] == dc.FAIL and "audio.sqlite: not verifiable" in v(unv, BUILD)[1]
+    unv["checks"]["audio"]["at"] = 900.0                                    # ... the old leader's: waited past
+    assert v(unv, BUILD)[0] == dc.WAIT
+
+
 def test_the_deploy_check_polls_until_verified_or_times_out(monkeypatch, capsys):
     c = Clock(0.0)
     seq = [None, record(leader={"build": "d" * 40, "serving_at": 1}), record()]
