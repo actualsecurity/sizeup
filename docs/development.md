@@ -311,6 +311,10 @@ SIZEUP_STATE_DIR=~/sizeup-restore SIZEUP_CACHE_S3=off SIZEUP_STATION_TOKEN=$(ope
   .venv/bin/python -m sizeup --config deploy/hub/config.toml
 ```
 
+A hub started this way (no supervisor lease) also has its outbound guard off (`sizeup/outbound.py`, #541): no push, AWS,
+Polly, Bedrock or pre-alert feed, one log line and `outbound` in `/healthz`; never set `SIZEUP_ALLOW_OUTBOUND=1` on a
+restored copy.
+
 The hub **writes into the copy**: migrations to this build's schema, retention prunes, new rows, the map and GIS
 caches. Copy the restore first if you need it untouched. With the DVR on, the restored open calls and pinned cameras
 would record public highway cameras into the restore folder (up to 6 GB); the local hub config has it off.
