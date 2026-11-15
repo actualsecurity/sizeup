@@ -248,6 +248,14 @@ GET  /api/cad/logs?source=station|hub|all&unit=&level=&q=&start=&end=&limit=
                                           Logs Insights over the station's logs and the hub's (sizeup/cloud/cwlogs.py),
                                           newest first, bounded (7 days, 500 rows); /status: set up or not, today's
                                           volume, the station's shipper. The hub's only; a signed-in admin only
+GET  /api/cad/stations                    Settings > Station > Stations (sizeup/cloud/stations.py): each station (id, name,
+                                          created, rotated, revoked, last used) and the shared token's state; never a hash.
+                                          The hub's only; a signed-in admin only
+POST /api/cad/stations                    {action: add {id, name?} | rename {id, name} | rotate {id} | revoke {id} |
+                                          retire_shared {force?} | restore_shared | shared_id {id: "" = the config's}}:
+                                          a signed-in admin only. add / rotate
+                                          answer {token, status_token} (no-store), the one time they are shown. In the
+                                          Settings audit (System) and the person's activity: the action and id, no token
 GET  /api/cad/notify                      Settings > System > Push notifications (sizeup/notify.py Pushes): each kind's
                                           topic in effect and where it came from (Settings / SSM / config / off), the
                                           last push and test; admins only (the names are secret; ADMIN_READS)
@@ -364,6 +372,7 @@ ADMIN_READS = {
     "/api/cad/stt/corrections": "transcript corrections are for admins",      # the STT reference set (sttfix.py)
     "/api/cad/stt/corrections.jsonl": "the transcript corrections export is for admins",   # #428's JSONL
     "/api/cad/adapter-password": "the station adapter's password is for admins (Settings > Station > Adapter)",   # server.py
+    "/api/cad/stations": "stations and their tokens are for admins (Settings > Station > Stations)",
     "/api/cad/intel": "the radio pre-alert rules are for admins (Settings > System > Intel)",   # #411: rule phrases
 }
 
@@ -397,6 +406,7 @@ WRITES = (
     (re.compile(r"/api/cad/perf/profile"), "admin"),                        # a CPU profile of the hub (#425, server.py)
     (STT_CORRECTION, "admin"),                                              # a hand-corrected transcript (sttfix.py)
     (re.compile(r"/api/cad/adapter-password"), "admin"),                    # the station adapter's password (server.py)
+    (re.compile(r"/api/cad/stations"), "admin"),                            # stations' tokens (sizeup/cloud/stations.py)
     (DVR_PIN, "dispatch"),                                                  # keep recording a camera (#277)
     (DVR_CLIP, "dispatch"),                                                 # save a camera clip on an event (#323)
     (ATTACHMENT, "admin"),                                                  # delete an event's attachment (#323)
@@ -651,6 +661,10 @@ DOES = (
     (re.compile(r"/api/cad/perf/profile"), lambda m, b, o, c: (f"Profiled the hub's CPU ({_clip(b.get('seconds'), 6)} s)", "")),
     # never the body (it held the password): the version SSM gave, from the answer
     (re.compile(r"/api/cad/adapter-password"), lambda m, b, o, c: (f"Saved the station adapter password (v{int(o.get('version') or 0)})", "")),
+    # the action and the id, never the answer (it holds the new token)
+    (re.compile(r"/api/cad/stations"), lambda m, b, o, c: (
+        f"Stations: {_clip(str(b.get('action') or '').replace('_', ' '), 20)}"
+        + (f" {_clip(b.get('id'), 40)}" if b.get("id") else ""), "")),
     (re.compile(r"/api/talkgroup"), lambda m, b, o, c: (f"Talkgroup {b.get('tg')}: {_toggles(b) or 'no change'}", "")),
     (re.compile(r"/api/talkgroup-group"), lambda m, b, o, c: (f"Talkgroups {_clip(b.get('group'), 40)}: {_toggles(b) or 'no change'}", "")),
     (re.compile(r"/api/mode"), lambda m, b, o, c: (f"Radio mode: {_clip(b.get('mode'), 30)}" + (f" ({_clip(b['sdr'], 30)})" if b.get("sdr") else ""), "")),
@@ -1001,6 +1015,25 @@ class CadApi:
         except LogsError as e:
             return _json(e.status, {"error": str(e)})
 
+    def _signed_admin(self, who) -> str | None:
+        """None when who is an admin with a verified sign-in; else why not (the 403's text)."""
+        if who is None or not getattr(who, "email", ""):
+            return "Admins only: sign in"
+        try:
+            return None if self.cad.settings.standing(who.email)["may"] == "admin" else "Admins only"
+        except CadError:
+            return "Admins only"
+
+    def _stations(self, who) -> tuple[int, bytes, str]:
+        """GET /api/cad/stations: Settings > Station > Stations (sizeup/cloud/stations.py). The hub's only, and only for
+        an admin with a verified sign-in (never without one: these are the station link's keys). Never a hash."""
+        reg = getattr(self.cad, "stations", None)
+        if reg is None:
+            return _json(404, {"error": "stations are the hub's"})
+        if (why := self._signed_admin(who)) is not None:
+            return _json(403, {"error": why})
+        return _json(200, reg.panel())
+
     def get(self, path: str, query: str, who=None) -> tuple[int, bytes, str]:
         with sourcekeys.request_context(who):       # another system's traffic: a signed-in person only (#419)
             return self._get(path, query, who)
@@ -1011,6 +1044,8 @@ class CadApi:
         try:
             if path in ("/api/cad/logs", "/api/cad/logs/status"):
                 return self._logs(path, query, who)
+            if path == "/api/cad/stations":
+                return self._stations(who)
             if path == "/api/cad/datasources":
                 return self._datasources(parse_qs(query), who)
             if path == "/api/cad/notify":
@@ -1128,6 +1163,8 @@ class CadApi:
         c = self.cad
         signed = who is not None and bool(who.email)
         body.pop("_may", None)                     # never the page's: what the person may read (premise notes, #403)
+        if path == "/api/cad/stations" and not signed:
+            return _json(403, {"error": "Admins only: sign in"})     # a station's keys: never without a verified admin
         try:
             if signed:                             # signed in: that's the operator, not what the page typed
                 st = c.settings.standing(who.email)
@@ -1159,6 +1196,13 @@ class CadApi:
         c = self.cad
         if m := SETTINGS.fullmatch(path):
             return c.settings_post(m.group(1), body, guard=guard)
+        if path == "/api/cad/stations" and getattr(c, "stations", None) is not None:
+            from sizeup.cloud.stations import StationError
+            op = str(body.get("operator") or "")
+            try:     # in the Settings audit (System): what was done to which station, never a token
+                return c.stations.act(body, op, lambda k, old, new: c.settings.note(op, "system", k, old, new))
+            except StationError as e:
+                raise CadError(str(e)) from None
         if path == "/api/cad/incident":
             return c.create(body)
         if m := INCIDENT.fullmatch(path):

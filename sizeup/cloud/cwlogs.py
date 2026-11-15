@@ -215,8 +215,10 @@ class StationLogs:
 
     # -- the station's batches ---------------------------------------------------------------------------------
 
-    def ingest(self, raw: bytes | None, headers) -> tuple[int, dict]:
-        """POST /api/station/logs: (HTTP status, answer). accepted: the station may delete the batch."""
+    def ingest(self, raw: bytes | None, headers, station: Callable[[object], str] | None = None) -> tuple[int, dict]:
+        """POST /api/station/logs: (HTTP status, answer). accepted: the station may delete the batch. station(claimed):
+        the authenticated station id for the batch's own "station" (sizeup/cloud/hub.py Hub._claim: it raises when they
+        differ); the stream is named after that, never after the claimed id alone."""
         c = self.cfg()
         answer = {"ok": True, "accepted": False, "config": station_config(c)}
         if raw is None:
@@ -235,6 +237,7 @@ class StationLogs:
             return 400, {"error": "not JSON"}
         if not isinstance(d, dict) or not isinstance(d.get("lines"), list):
             return 400, {"error": "{v, station, batch, lines: [[ms, unit, level, msg]]}"}
+        sid = station(d.get("station")) if station is not None else d.get("station")
         if not c["on"]:
             return 200, dict(answer, accepted=True, reason="off in Settings")    # (dropped: the station stops reading)
         if self.configured is not True:
@@ -243,7 +246,7 @@ class StationLogs:
             return 200, dict(answer, retry_s=RETRY_S, reason=f"hub: not configured ({self.reason})")
         events, dropped = self.events(d["lines"], c)
         try:
-            self.put(_safe_station(d.get("station")), events)
+            self.put(_safe_station(sid), events)
         except aws.AwsError as e:
             self.last_error = f"{e.code}"[:200]
             if e.code in ("AccessDeniedException", "NoCredentials") or (
