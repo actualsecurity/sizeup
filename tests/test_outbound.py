@@ -12,6 +12,7 @@ import json
 import shutil
 import subprocess
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -303,6 +304,8 @@ def test_forwarding_to_a_hub_counts_as_a_station():
     assert outbound.forwarding(False).startswith("outbound: OFF (all-in-one")
     outbound.arm("station", {})
     assert outbound.forwarding(False) == "" and outbound.status()["on"] is True    # a station stays one
+    outbound.arm("hub", {})
+    assert outbound.forwarding(True) == "" and outbound.status()["on"] is False     # a hub's decision never moves
 
 
 def test_an_all_in_one_config_forwarding_by_cloud_json_is_on_and_follows_the_switch(tmp_path, monkeypatch):
@@ -345,17 +348,25 @@ def test_the_replica_watch_does_not_try_again_either(off, monkeypatch):
 
 
 def test_the_phone_pre_alert_does_not_subscribe_while_off(off, tmp_path, monkeypatch):
+    """Off: no request, and quiet. The feed stands for its topic, so the 2 s topic check sees nothing changed: one log
+    line in all, no screen refresh, never "subscribed", never a topic's name (as Settings hands them in, topics())."""
     from sizeup import prealert
     from tests.test_cad import make_cad
     nothing_leaves(monkeypatch)
-    logs = []
-    pa = prealert.PreAlerts(make_cad(tmp_path), "https://ntfy.sh", "example-ring-topic-5678", "example-heartbeat-topic-5678",
-                            log=logs.append)
+    logs, changes = [], []
+    pa = prealert.PreAlerts(make_cad(tmp_path), "https://ntfy.sh", log=logs.append,
+                            topics=lambda: ("example-ring-topic-5678", "example-heartbeat-topic-5678"))
+    pa.on_change = lambda: changes.append(1)
     try:
         pa.start()
-        assert isinstance(pa.ring_stream, prealert.NoFeed) and isinstance(pa.status_stream, prealert.NoFeed)
-        assert any("ring feed not subscribed" in x and "outbound off" in x for x in logs), logs
-        assert not any("example-" in x for x in logs)                  # never a topic's name in the log
+        time.sleep(4.5)                                                # past two of the expiry loop's 2 s checks
+        assert changes == [], len(changes)                              # no screen refresh every 2 s
+        assert [x for x in logs if x.startswith("prealert:")] == [
+            "prealert: not subscribed (prealert: outbound off (hub without the supervisor's lease and without "
+            "SIZEUP_ALLOW_OUTBOUND=1))"], logs
+        assert isinstance(pa.ring_stream, prealert.OffFeed) and isinstance(pa.status_stream, prealert.OffFeed)
+        assert not any("example-" in x or "subscribed (read-only)" in x for x in logs)
+        assert pa.ring_stream.state()["error"] == "not subscribed: outbound off"
     finally:
         pa.stop()
     outbound.arm("hub", {"SIZEUP_ALLOW_OUTBOUND": "1"})

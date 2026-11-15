@@ -71,9 +71,10 @@ def arm(role: str, env=None) -> str:
 def forwarding(on: bool) -> str:
     """A config without role = "station" forwarding to a hub anyway (Settings > Station > Hub link, state/cloud.json:
     sizeup/cloud/stationmode.py, at its start and at every switch) is a station here, and back to its own role when
-    switched off. The line to log when that changes the decision, else "" (not armed: always "")."""
+    switched off. The line to log when that changes the decision, else "" (not armed, or a hub: always "", nothing
+    changes)."""
     with _lock:
-        if not _state["armed"]:
+        if not _state["armed"] or _basis["role"] == "hub":     # a hub never forwards: its own decision stands
             return ""
         was = _state["on"]
         now, why = decide("station" if on else _basis["role"], _basis["env"])

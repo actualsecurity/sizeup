@@ -286,6 +286,23 @@ class NoFeed:
                 "down_since": None, "error": ""}
 
 
+class OffFeed(NoFeed):
+    """A topic is set but outbound is off here (sizeup/outbound.py: a hub started by hand, all-in-one): never a request.
+    It keeps the topic it stands for, so sync_topics() sees nothing changed and doesn't make it again every 2 s."""
+
+    def __init__(self, label: str, topic: str, why: str):
+        super().__init__(label)
+        self.topic, self.why = topic, why
+
+    def state(self) -> dict:
+        return dict(super().state(), configured=True, error="not subscribed: outbound off")
+
+
+def _outbound_off(server: str) -> str:
+    from sizeup import outbound
+    return outbound.check("prealert", server)
+
+
 def parse_ring(msg: dict) -> dict:
     """A message on the ring topic -> {at, title, message, test}. Every message there is a ring (the
     topic carries nothing else); "[TEST]" in the title (or the test_tube tag) is a commissioning test."""
@@ -361,10 +378,8 @@ class PreAlerts:
         half: the last heartbeat is still there, so "heartbeat 40 min ago" survives a restart without waiting an hour."""
         if not topic:
             return NoFeed(which)
-        from sizeup import outbound
-        if off := outbound.check("prealert", self.server):     # a hub on a restored copy: not the department's real feed
-            self.log(f"prealert: {which} feed not subscribed ({off})")
-            return NoFeed(which)
+        if off := _outbound_off(self.server):    # a hub on a restored copy: not the department's real feed (logged by
+            return OffFeed(which, topic, off)    # sync_topics / start)
         if which == "ring":
             f = NtfyStream(self.server, topic, self.ring, self.log, label=which)
         else:
@@ -381,15 +396,18 @@ class PreAlerts:
             changed = False
             for which, topic in (("ring", ring), ("status", status)):
                 cur = getattr(self, f"{which}_stream")
-                if cur.topic == topic:
+                if cur.topic == topic and not (isinstance(cur, OffFeed) and not _outbound_off(self.server)):
                     continue
                 cur.stop()
                 new = self._feed(which, topic)
                 setattr(self, f"{which}_stream", new)
                 if self.running:
                     new.start()
-                self.log(f"prealert: {which} feed {'set' if topic else 'cleared'}"
-                         + (f" ({'subscribed' if self.running else 'will subscribe'}, read-only)" if topic else ""))
+                if isinstance(new, OffFeed):
+                    self.log(f"prealert: {which} feed set, not subscribed ({new.why})")
+                else:
+                    self.log(f"prealert: {which} feed {'set' if topic else 'cleared'}"
+                             + (f" ({'subscribed' if self.running else 'will subscribe'}, read-only)" if topic else ""))
                 changed = True
             return changed
 
@@ -415,7 +433,12 @@ class PreAlerts:
             self.status_stream.start()
             self._thread = threading.Thread(target=self._expiry, args=(self._stopping,), name="prealert-expiry", daemon=True)
             self._thread.start()
-        on = [n for n, f in (("rings", self.ring_stream), ("Tapout status", self.status_stream)) if f.topic]
+        feeds = (("rings", self.ring_stream), ("Tapout status", self.status_stream))
+        on = [n for n, f in feeds if f.topic and not isinstance(f, OffFeed)]
+        off = [f for _, f in feeds if isinstance(f, OffFeed)]
+        if off and not on:
+            self.log(f"prealert: not subscribed ({off[0].why})")
+            return self
         self.log(f"prealert: subscribed (read-only) to {self.server}: " + (" and ".join(on) if on else "nothing")
                  + (f"; pre-alerts expire after {self.expire_s / 60:g} min" if on
                     else " (no topic set: Settings > System > Push notifications)"))

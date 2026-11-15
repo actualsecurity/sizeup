@@ -295,10 +295,11 @@ Read-only on S3. Running the hub on that copy talks to nothing outside only if y
 - **A new shell, nothing project-related in it.** No `LITESTREAM_*` (with `LITESTREAM_BUCKET` set and
   `SIZEUP_CACHE_S3` not `off`, the hub uploads its map caches into the production backup bucket,
   `sizeup/cachesync.py`), no `AWS_*` or `AWS_PROFILE`, no `SIZEUP_*_BUCKET`, no `SIZEUP_*_TOPIC`, no
-  `SIZEUP_ALLOW_OUTBOUND`. In doubt (zsh, bash or sh; nothing to clear is fine):
+  `SIZEUP_ALLOW_OUTBOUND` and no `SIZEUP_LEASE_FILE` (a leftover lease variable brings the copy up with outbound on).
+  In doubt (zsh, bash or sh; nothing to clear is fine):
 
   ```sh
-  for v in $(env | grep -oE '^(LITESTREAM_[A-Z0-9_]*|AWS_[A-Z0-9_]*|SIZEUP_[A-Z0-9_]*_(BUCKET|TOPIC)|SIZEUP_ALLOW_OUTBOUND)='); do unset "${v%=}"; done
+  for v in $(env | grep -oE '^(LITESTREAM_[A-Z0-9_]*|AWS_[A-Z0-9_]*|SIZEUP_[A-Z0-9_]*_(BUCKET|TOPIC)|SIZEUP_ALLOW_OUTBOUND|SIZEUP_LEASE_FILE)='); do unset "${v%=}"; done
   ```
 
 - **The local hub config above** (Access, Transcribe, Polly and the DVR off) with the phone pre-alert switched off: it
