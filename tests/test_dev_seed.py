@@ -3,6 +3,7 @@ the station token never leaving this machine (no proxy, no redirect, no other ho
 
 import importlib.util
 import socket
+import urllib.request
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -118,6 +119,9 @@ def test_the_environments_proxy_is_never_used(tmp_path, monkeypatch, capsys):
         monkeypatch.setenv(k, f"http://127.0.0.1:{proxy.port}")
     for k in ("no_proxy", "NO_PROXY"):
         monkeypatch.delenv(k, raising=False)
+    # urllib's global opener (urlopen) is built once, under the environment of its first use: without this an earlier
+    # test's request would have built it proxy-free, and a tool using urlopen would pass here
+    monkeypatch.setattr(urllib.request, "_opener", None)
     seed = load()                                 # imported with the proxy in the environment
     hub = HubRun(hub_cfg(tmp_path))
     try:

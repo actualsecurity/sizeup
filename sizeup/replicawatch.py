@@ -411,8 +411,9 @@ class Pusher:
                 self.publish(self.server, self.topic, title, body, priority=priority, tags=tags, timeout=self.timeout)
                 break
             except notify.NotifyError as e:
-                self.log(f"replica-watch: push not sent ({e}){': again in 1 s' if not attempt else ''}: {title}")
-                if attempt:
+                final = getattr(e, "final", False)      # outbound off here (sizeup/outbound.py): no second try
+                self.log(f"replica-watch: push not sent ({e}){': again in 1 s' if not attempt and not final else ''}: {title}")
+                if attempt or final:
                     return False
                 self.sleep(1.0)
         self.sent.append((kind, title))

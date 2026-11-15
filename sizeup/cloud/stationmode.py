@@ -89,8 +89,17 @@ class StationMode:
         self.updates = Watch(log=log)           # the hub's build -> the auto-updater (autoupdate.py)
         app.station = self
         app.cad.cloud = self.cad_cloud
+        self._outbound()
         if self.forward:
             self._up()                          # app.events set now: nothing heard from here on is missed
+
+    def _outbound(self) -> None:
+        """Forwarding to a hub makes this a station for the outbound guard (sizeup/outbound.py), whatever the config's
+        role; switched off, the config's role decides again."""
+        from sizeup import outbound
+        line = outbound.forwarding(self.forward)
+        if line:
+            self.log(line)
 
     # -- state/cloud.json ------------------------------------------------------------------------------
 
@@ -222,6 +231,7 @@ class StationMode:
             self.source = "settings"
             self._save(operator)
             self._audit(operator, was)
+            self._outbound()
         sync = getattr(self.app, "prealert_sync", None)
         if sync is not None:                    # the phone pre-alert follows: on here only while not forwarding
             sync()
