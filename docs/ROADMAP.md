@@ -162,6 +162,7 @@ left, then closing.
 | Maps | #461 street view (PR #462); #470 CAD header wider than an iPad; #141 hide a wrong county GIS feature; #156 stream gauges; #157 lightning density; #74 Connecticut mile markers; #78 @ cameras in the place search; #308 camera follow-ups |
 | Fireground | #130 benchmarks, elapsed-time notices, PAR prompts; #129 first-due card per address |
 | Hub and station | #447 same-origin check on POSTs; #405 nightly restore drill; #36 rehearse a restore; #337 a draining app answers page loads with JSON; #314 incident-source adapters as their own service and user |
+| Mobile app and `/api/v1` ([mobile-api.md](mobile-api.md)) | #557 the `/api/v1` skeleton, OpenAPI and contract tests; #558 device sign-in (Access hand-off to per-device tokens) |
 | Tests and CI | #513, #500, #449 flaky tests; #457 two tests fail on macOS (`select()`); #445 the 15-minute CI limit; #39 seed-dependent noise test; #338 real aircraft in public fixtures; #40 UI consistency check |
 
 ## Later
@@ -175,6 +176,7 @@ left, then closing.
 | Radio | #450 radio views follow-ups |
 | Station | #42 second station for redundancy; #339 refuse a non-localhost Host |
 | Repo | #296 third-party ntfy topic names out of the public repo |
+| Mobile app and `/api/v1` | #559 staging; #560 read resources; #561 change log and stream; #562 writes; #563 device push (SNS); #564 media; #565 map style and layers; #566 rate limits and rollout; #567 responders and device AVL (also `waiting`, D4/D5) |
 | Tests | #481, #480, #468 flaky tests; #529 a speech-to-text re-run test failed once under parallel pytest |
 | Also `waiting` | #45 station alerting; #43 responder status and location from a vendor; #41 transmit over a PCFD radio |
 
@@ -183,7 +185,7 @@ left, then closing.
 | Blocked on | Issues |
 |---|---|
 | The department | #52 what sizeup is to the department; #50 sign-off on run cards, subtypes and unit facts; #49 radio IDs per rig; #48 PTT-ID at keypress; #45 station alerting; #41 transmit |
-| A decision | #123 Whisper turbo (hosted or our own box) or stay on AWS |
+| A decision | #123 Whisper turbo (hosted or our own box) or stay on AWS; #556 mobile app decisions D1-D11 |
 | A vendor or agreement | #43 responder status and location; #188 road closure sources (keys, agreements); #159 pipelines and Tier II hazmat data; #100 CTDOT cameras (written consent); #98 camera sharing agreements |
 | Not stated in the title | #420 CAD query phase 3: summaries with citations, natural language to search filters |
 
@@ -202,6 +204,7 @@ Only arcs an issue or PR backs. Each row says what exists and what is planned.
 | Transcript corrections and replay | Admin corrections, an export, `tools/stt_eval.py`, the intel replay (PR #491) | Fine-tuning on corrected clips, which needs the audio archive | #487, #428 |
 | Street view | | 360° street imagery in the CAD maps; later a sandboxed iframe | #461, #467; PR #462 |
 | iPad header | | The CAD header fits 820 px | #470 |
+| Mobile app and `/api/v1` | The web console's internal `/api/cad` routes; Cloudflare Access sign-in; ntfy pushes; `Cad.positions` | A versioned `/api/v1` inside the hub with OpenAPI specs and contract tests, per-device sign-in after Access, a shared change log with SSE, device pushes through SNS, signed media URLs ([mobile-api.md](mobile-api.md)). The platform side builds the API; the native app is built against it in a separate repo | #556 (decisions), #557 to #567 |
 | Flaky tests | PR #516 | #513, #500, #449, #481, #480 remain; #503, #468, #457 are named by PR #516 and still open | as listed |
 | Outage follow-up | Replicate before migrate, replica watch, fencing, store safety | The process items in the write-up | #498 |
 
