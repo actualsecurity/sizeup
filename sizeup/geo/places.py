@@ -510,8 +510,19 @@ class PlaceIndex:
                     for r in rows)
         got = getattr(self, "_local_cache", None)
         if got is None or got[0] != sig:
-            aliases = [(tuple(norm_tokens(n)), i) for i, r in enumerate(rows)
-                       for n in [r["name"], *(r.get("aliases") or [])] if norm_tokens(n)]
+            towns = sorted((tuple(norm_tokens(t)) for t in self.priority), key=len, reverse=True)
+            aliases = []
+            for i, r in enumerate(rows):
+                for n in [r["name"], *(r.get("aliases") or [])]:
+                    toks = tuple(norm_tokens(n))
+                    if not toks:
+                        continue
+                    aliases.append((toks, i))
+                    for t in towns:      # "Sample Town Train Station" is "train station" too: then the area ranks it
+                        k = next((j for j in range(len(toks) - len(t) + 1) if t and toks[j:j + len(t)] == t), None)
+                        if k is not None and len(toks) > len(t):
+                            aliases.append((toks[:k] + toks[k + len(t):], i))
+                            break
             got = (sig, rows, NameIndex(aliases), {a for a, _i in aliases})
             self._local_cache = got
         return got[1], got[2], got[3]

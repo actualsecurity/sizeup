@@ -400,6 +400,15 @@ def body_places(body: dict) -> list[str]:
     return tonelist._places({"places": raw}, "")
 
 
+def _without_imported(ov: dict) -> dict:
+    """The overrides without the county's imported place names (section "places", keys "county/..."): the settings
+    file never carries them, and importing one never touches them (Common places has its own import)."""
+    if "places" not in ov:
+        return ov
+    places = {k: v for k, v in ov["places"].items() if not commonplaces.is_imported(k, v if isinstance(v, dict) else None)}
+    return {**{k: v for k, v in ov.items() if k != "places"}, **({"places": places} if places else {})}
+
+
 def _is_admin(o: dict) -> bool:
     return o.get("role") == "admin" and bool(o.get("active")) and bool(o.get("email"))
 
@@ -2888,7 +2897,8 @@ class Editor:
         return {"format": FORMAT, "version": FORMAT_VERSION,
                 "exported_at": datetime.fromtimestamp(self.store.clock(), TZ).isoformat(timespec="seconds"),
                 "data_file": lists_mod._shown_path(str(self.path)), "defaults_version": str(self.defaults.get("version") or ""),
-                "overrides": {k: v for k, v in self.overrides().items() if k not in KEPT_SECTIONS},   # names secret
+                # names secret; the county's place names: their own import, never in this file
+                "overrides": _without_imported({k: v for k, v in self.overrides().items() if k not in KEPT_SECTIONS}),
                 "run_cards": [{"type": c["type"], "spoken": c["spoken"], "is_default": c["is_default"], "slots": c["slots"],
                                "remarks": c["remarks"]} for c in runcards.cards(self.store)],
                 "operators": [{"name": o["name"], "role": o["role"], "active": o["active"], "email": o["email"],
@@ -2903,6 +2913,7 @@ class Editor:
         if not isinstance(ov, dict) or any(s not in PAGE_SECTION or not isinstance(v, dict) for s, v in ov.items()):
             raise CadError(f"overrides: sections from {', '.join(PAGE_SECTION)}")
         ov = {k: v for k, v in ov.items() if k not in KEPT_SECTIONS}    # the push topics, the mode: set here only, kept
+        ov = _without_imported(ov)          # the county's place names: their own import (Common places), kept
         try:
             json.dumps(ov)
         except (TypeError, ValueError):
@@ -3093,7 +3104,7 @@ class Editor:
                                     "email": o["email"]}
             self._keep_an_admin(list(after.values()), "the file leaves no active admin with a sign-in email "
                                 f"({', '.join(a['name'] for a in self.admins())} now): nobody could change Settings after it")
-        cur = {k: v for k, v in self.overrides().items() if k not in KEPT_SECTIONS}
+        cur = _without_imported({k: v for k, v in self.overrides().items() if k not in KEPT_SECTIONS})
         changes = []
         for sec in sorted(set(cur) | set(ov)):
             a, b = cur.get(sec, {}), ov.get(sec, {})
@@ -3128,7 +3139,8 @@ class Editor:
                     "note": "Nothing changed yet. Operators not in the file are kept; run cards and edits are replaced."}
         now = self.store.clock()
         with self.store.tx() as db:
-            db.execute("DELETE FROM settings_overrides WHERE section NOT IN (?, ?)", KEPT_SECTIONS)
+            db.execute("DELETE FROM settings_overrides WHERE section NOT IN (?, ?) AND NOT (section = 'places' AND "
+                       "key LIKE ?)", (*KEPT_SECTIONS, commonplaces.KEY_PREFIX + "%"))
             for sec, kv in ov.items():
                 for k, v in kv.items():
                     db.execute("INSERT INTO settings_overrides (section, key, value, updated_at, operator) VALUES (?, ?, ?, ?, ?)",

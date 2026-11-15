@@ -1271,9 +1271,10 @@ function sCommonPlaces() {
   file.accept = ".xlsx,.csv";
   file.hidden = true;
   file.addEventListener("change", () => sCommonFile(file));
-  const pick = sBtn(im.names ? "Re-import" : "Import", "Address, Common Place, Mun (.xlsx or .csv)", () => file.click(),
-    im.names ? "" : "primary");
-  const remove = im.names ? sBtn("Remove", "", () => sAsk(`Remove the ${im.names} imported names?`,
+  const admin = !cad.who || cad.who.may === "admin";          // the server refuses anyone else
+  const pick = admin ? sBtn(im.names ? "Re-import" : "Import", "Address, Common Place, Mun (.xlsx or .csv)",
+    () => file.click(), im.names ? "" : "primary") : null;
+  const remove = admin && im.names ? sBtn("Remove", "", () => sAsk(`Remove the ${im.names} imported names?`,
     () => sPost("common_places", { action: "remove" }, "Imported names removed"), "Remove"), "danger-quiet") : null;
   const info = im.names ? `${im.located}/${im.names} located · ${im.date}` : "";
   const kids = [];
@@ -1314,13 +1315,17 @@ async function sCommonFile(input) {
 async function sCommonPreview() {
   const c = S.common;
   if (!c) return;
+  const my = c.seq = (c.seq || 0) + 1;                       // only the newest preview is shown
+  let r;
   try {
-    c.r = await api("POST", "/api/cad/settings/common_places", { action: "preview", file: c.file, filename: c.name,
+    r = await api("POST", "/api/cad/settings/common_places", { action: "preview", file: c.file, filename: c.name,
       ...(c.columns ? { columns: c.columns } : {}), operator: operator() });
-    c.columns = c.r.columns;
   } catch (e) {
-    c.r = { error: e.message };
+    r = { error: e.message };
   }
+  if (S.common !== c || c.seq !== my) return;
+  c.r = r;
+  if (r.columns) c.columns = r.columns;
   const box = $("#s-common");
   if (box) sShowCommon(box);
 }

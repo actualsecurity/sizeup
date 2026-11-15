@@ -330,14 +330,19 @@ A name whose address is not found is kept, flagged ("not found" in the card): th
 place it, but a county feed location naming it still gets its address. The imported names are used:
 
 - by the place search (a note's "@", the location box: the name, its address filled in),
-- by the page and radio locators (`sizeup/geo/pagegeo.py`, `sizeup/intel/place.py`: "the Sample Marina", "the
-  community hall in Sample Town"; a name of generic words needs its town said),
-- by the county feed (`sizeup/cad/sources.py`): a location that is only a listed name ("@SAMPLE MARINA") is stored
-  as "<its address> @ <name>", placed at its address and matched against calls there; the feed's own text is kept.
+- by the page and radio locators (`sizeup/geo/pagegeo.py`, `sizeup/intel/place.py`: "the Quillberry Marina", "the
+  community hall in Sample Town"). A name of one word, or of common words only (`sizeup/geo/commonwords.py`), needs
+  its town said beside it; another town said beside it is that town's; a house number said always wins, the name only
+  backs the address near it,
+- by the county feed (`sizeup/cad/sources.py`): a location that is nothing but a listed name ("@SAMPLE MARINA",
+  optionally with that name's own town) is stored as "<its address> @ <name>", placed at its address and matched
+  against calls there; the feed's own text is kept. Never one with an address or intersection before the "@", never
+  another town's name.
 
 The list stays in `cad.sqlite` (`settings_overrides`, section `places`, keys `county/...`), replicated with the
-rest of the CAD and in the settings export. It is never in the repository, its tests or the public gazetteer
-(`data/gazetteer.sqlite`, `tools/fetch_places.py`).
+rest of the CAD. The settings export never carries it and a settings import never touches it (re-import the
+county's file instead). It is never in the repository, its tests or the public gazetteer (`data/gazetteer.sqlite`,
+`tools/fetch_places.py`).
 
 ## Notifications
 

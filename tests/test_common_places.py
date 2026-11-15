@@ -307,49 +307,104 @@ def test_the_location_box_fills_the_place_and_its_address(cad):
 
 # --------------------------------------------------------------------------- (b) a page
 
-ENTRIES = [{"name": "SAMPLE MARINA", "label": "Sample Marina", "lat": LAT + 0.0002, "lon": -73.6834, "muni": PC},
+FAR = (41.03, -73.66)            # ~3 km from Example Ave: where a listed name would wrongly move a call
+ENTRIES = [{"name": "QUILLBERRY MARINA", "label": "Quillberry Marina", "lat": LAT + 0.0002, "lon": -73.6834, "muni": PC},
            {"name": "COMMUNITY HALL - PORT CHESTER", "label": "Community Hall - Port Chester", "lat": LAT + 0.0041,
             "lon": SAMPLE + 0.0002, "muni": PC},
-           {"name": "SAMPLEMART", "lat": LAT + 0.0003, "lon": TEST, "muni": PC},
+           {"name": "QUILLMART", "lat": FAR[0], "lon": FAR[1], "muni": PC},
+           {"name": "GRAND APARTMENTS", "lat": FAR[0], "lon": FAR[1], "muni": PC},
+           {"name": "BLUE WATER TOWER", "lat": FAR[0], "lon": FAR[1], "muni": PC},
+           {"name": "SUNNY DINER", "lat": FAR[0], "lon": FAR[1], "muni": PC},
+           {"name": "PORT CHESTER BUS DEPOT", "lat": FAR[0], "lon": FAR[1], "muni": PC},
+           {"name": "RYE BUS DEPOT", "lat": 40.98, "lon": -73.69, "muni": "Rye"},
+           {"name": "QUILLBERRY YACHT CLUB", "label": "Quillberry Yacht Club", "lat": FAR[0], "lon": FAR[1], "muni": PC},
+           {"name": "QUILLBERRY YACHT CLUB", "label": "Quillberry Yacht Club", "lat": 40.97, "lon": -73.68, "muni": "Rye"},
            {"name": "QUIET GROVE", "lat": None, "lon": None, "muni": PC}]
+OURS = ["Port Chester FD"]
 
 
-def test_a_page_reads_the_departments_names(gaz):
+gaz_now: list = []                # the gazetteer the named fixture set the names on
+
+
+def label(text):
+    """Where a page of ours saying text is placed (its best reading), or None."""
+    g = locate_page(gaz_now[0], text, OURS)
+    return g.best.match.label if g.best else None
+
+
+@pytest.fixture()
+def named(gaz):
     set_local_source(gaz, lambda: ENTRIES)
-    g = locate_page(gaz, "Port Chester Fire, respond to the Sample Marina for a boat fire", ["Port Chester FD"])
-    assert g.best.match.label == "Sample Marina, Port Chester" and g.best.how == "named place" and g.confirmed
+    gaz_now[:] = [gaz]
+    yield gaz
+    gaz_now.clear()
+
+
+def test_a_page_reads_the_departments_names(named):
+    g = locate_page(named, "Port Chester Fire, respond to the Quillberry Marina for a boat fire", OURS)
+    assert g.best.match.label == "Quillberry Marina, Port Chester" and g.best.how == "named place" and g.confirmed
     for said in ("respond to the Port Chester community hall for an alarm",
                  "the community hall in Port Chester, fire alarm", "respond to community hall port chester"):
-        g = locate_page(gaz, said, ["Port Chester FD"])
-        assert g.best is not None and g.best.match.label == "Community Hall - Port Chester, Port Chester", said
-    assert locate_page(gaz, "respond to the community hall for an alarm", ["Port Chester FD"]).best is None   # generic
-    assert locate_page(gaz, "respond to the quiet grove", ["Port Chester FD"]).best is None           # no point
-    g = locate_page(gaz, "respond to the Samples Marina", ["Port Chester FD"])                         # speech-to-text
-    assert g.best is not None and g.best.match.label == "Sample Marina, Port Chester"
-    # a name of one word: where to go, or with its town; never a word in passing
-    for said in ("respond to the Samplemart for a smell of smoke", "Samplemart Port Chester, alarm"):
-        assert locate_page(gaz, said, ["Port Chester FD"]).best.match.label == "SAMPLEMART, Port Chester", said
-    assert locate_page(gaz, "a samplemart bag on fire", ["Port Chester FD"]).best is None
+        assert label(said) == "Community Hall - Port Chester, Port Chester", said
+    assert label("respond to the community hall for an alarm") is None          # generic words: its town said
+    assert label("respond to the quiet grove") is None                          # no point
+    assert label("respond to the Quillberrys Marina") == "Quillberry Marina, Port Chester"     # speech-to-text
+
+
+def test_a_house_number_said_always_beats_a_listed_name(named):
+    """The review's sentences (invented): the address said is where the call is; a name near it only backs it."""
+    for said in ("respond to 120 Example Ave for a smoke condition, caller is at the Quillberry Marina across the street",
+                 "water leak at the blue water tower office, 120 Example Ave",
+                 "respond to the grand apartments, 120 Example Ave"):
+        g = locate_page(named, said, OURS)
+        assert g.best.match.label.startswith("120 Example Ave"), said
+    g = locate_page(named, "respond to 120 Example Ave between Sample St and Test Rd", OURS)
+    h = locate_page(named, "respond to the Quillberry Marina, 120 Example Ave between Sample St and Test Rd", OURS)
+    assert g.confirmed and h.confirmed and h.best.match.label == g.best.match.label
+    assert h.best.score >= g.best.score and h.best.place == "Quillberry Marina"       # backed, never moved
+
+
+def test_common_words_and_one_word_names_need_their_town(named):
+    assert label("accident at the Quillmart vehicle on Test Rd") != "QUILLMART, Port Chester"
+    assert label("respond to the Quillmart for a smell of smoke") is None       # "to the" is no cue
+    assert label("respond to the Quillmart in Port Chester") == "QUILLMART, Port Chester"
+    assert label("respond to the grand apartments for an odor") is None          # common English words only
+    assert label("the blue water tower, report of smoke") is None
+    assert label("grand apartments in Port Chester, alarm") == "GRAND APARTMENTS, Port Chester"
+
+
+def test_a_town_said_picks_that_towns_place_and_never_another(named):
+    assert label("Quillberry Yacht Club, Rye, boat fire") == "Quillberry Yacht Club, Rye"
+    assert label("Quillberry Yacht Club in Port Chester, boat fire") == "Quillberry Yacht Club, Port Chester"
+    assert label("respond to the Quillberry Marina, Rye") is None                 # listed in Port Chester only
 
 
 def test_no_names_pages_as_before(gaz):
-    assert locate_page(gaz, "respond to the Sample Marina", ["Port Chester FD"]).best is None
+    assert locate_page(gaz, "respond to the Quillberry Marina", OURS).best is None
     set_local_source(gaz, lambda: 1 / 0)                             # a failing source: as before, never an error
-    assert locate_page(gaz, "respond to the Sample Marina", ["Port Chester FD"]).best is None
+    assert locate_page(gaz, "respond to the Quillberry Marina", OURS).best is None
     set_local_source(gaz, lambda: ENTRIES)
     loc = PageLocator(gaz)
     assert loc.locals() is loc.locals()                               # built once while the names stay
-    assert loc.local_said("units to the sample marina") and not loc.local_said("units to the corner")
+    assert loc.local_said("units to the quillberry marina") and not loc.local_said("units to the corner")
 
 
 # --------------------------------------------------------------------------- (d) a radio pre-alert
 
+SCOPE = {"system": "mrrs", "service": "police", "pack": "police", "towns": [PC, "Rye", RB]}
+
+
 def test_a_radio_pre_alert_reads_the_departments_names(gaz):
-    scope = {"system": "mrrs", "service": "police", "pack": "police", "towns": [PC, "Rye", RB]}
-    assert P.Locator(gaz)("units to the Sample Marina, report of a fight", scope) is None     # no cue, no names
+    assert P.Locator(gaz)("units to the Quillberry Marina, report of a fight", SCOPE) is None   # no cue, no names
     set_local_source(gaz, lambda: ENTRIES)
-    p = P.Locator(gaz)("units to the Sample Marina, report of a fight", scope)
-    assert p is not None and p.precision == "landmark" and p.label.startswith("Sample Marina") and p.town == PC
+    p = P.Locator(gaz)("units to the Quillberry Marina, report of a fight", SCOPE)
+    assert p is not None and p.precision == "landmark" and p.label.startswith("Quillberry Marina") and p.town == PC
+
+
+def test_routine_radio_traffic_gets_no_place(named):
+    for said in ("out of service at the diner", "returning to quarters from the bus depot",
+                 "back in service, quillmart", "grand apartments all quiet"):
+        assert P.Locator(named)(said, SCOPE) is None, said
 
 
 # --------------------------------------------------------------------------- (c) the county feed
@@ -382,6 +437,16 @@ def test_a_feed_location_that_is_a_common_name_maps_to_its_address(tmp_path):
     assert rig.cad.sources.common_place("120 EXAMPLE AVE") is None
     assert rig.cad.sources.common_place("@OTHER PLACE") is None
     assert rig.cad.sources.common_place("@SAMPLE MARINA - PORT_CHESTER")["address"] == "120 EXAMPLE AVE"
+    assert rig.cad.sources.common_place("SAMPLE MARINA, PORT_CHESTER")["address"] == "120 EXAMPLE AVE"
+    # only a location that is nothing but the name: an intersection or address before the "@" stays as it is
+    assert rig.cad.sources.common_place("EXAMPLE AVE/SAMPLE ST @SAMPLE MARINA") is None
+    assert rig.cad.sources.common_place("EXAMPLE AVE @SAMPLE MARINA") is None
+    # never another town's: a town in the text, or the feed's own town field, must be the name's
+    assert rig.cad.sources.common_place("SAMPLE MARINA, RYE_BROOK") is None
+    assert rig.cad.sources.common_place("SAMPLE MARINA RYE_BROOK") is None
+    assert rig.cad.sources.common_place("@SAMPLE MARINA", {"extra": {"town": "RYE_BROOK"}}) is None
+    assert rig.cad.sources.common_place("@SAMPLE MARINA", {"extra": {"town": "PORT_CHESTER"}}) is not None
+    assert rig.cad.sources.common_place("@SAMPLE MARINA", {"extra": {"town": "SOMEWHERE_ELSE"}}) is not None
 
 
 def test_one_name_at_two_addresses_is_no_place():
@@ -392,6 +457,52 @@ def test_one_name_at_two_addresses_is_no_place():
     assert look.find("@SAMPLE DELI") is None
     assert look.find("SAMPLE PIER")["address"] == "3 SAMPLE ST"                 # no point: still its address
     assert look.find("NOWHERE") is None
+
+
+# --------------------------------------------------------------------------- the settings file, a broken file
+
+def test_the_settings_file_never_carries_or_touches_the_imported_names(cad):
+    post(cad, "places", action="set", name="the Waterfront", place={"label": "Example Park", "lat": 41.002, "lon": -73.68})
+    post(cad, "common_places", action="apply", file=b64(xlsx([HEADER, *ROWS])), filename="list.xlsx")
+    exported = cad.settings_export()
+    assert list(exported["overrides"]["places"]) == ["the waterfront"]           # the county's: their own import
+    assert "QUILLBERRY" not in json.dumps(exported).upper() and "MARINA" not in json.dumps(exported).upper()
+    # an older file that still has them is read without them
+    old = json.loads(json.dumps(exported))
+    old["overrides"]["places"]["county/old name @ 1 example ave"] = {"name": "OLD NAME", "source": cp.SOURCE}
+    before = len(cad.settings.audit_log())
+    dry = post(cad, "import", action="dry_run", settings=old)
+    assert not any(c["store"] == "places" for c in dry["changes"])
+    post(cad, "import", action="apply", settings=old)
+    assert len(imported(cad)) == 6 and "county/old name @ 1 example ave" not in imported(cad)   # kept as they were
+    said = json.dumps(cad.settings.audit_log()[:len(cad.settings.audit_log()) - before]).upper()
+    assert not any(w in said for w in ("MARINA", "EXAMPLE AVE", "COMMUNITY", "OLD NAME"))       # no names audited
+    assert [r["name"] for r in cad.local_places() if not cp.is_imported(r["key"], r)] == ["the Waterfront"]
+
+
+def test_a_broken_or_hostile_file_is_a_clean_error(monkeypatch):
+    big = io.BytesIO()
+    with zipfile.ZipFile(big, "w", zipfile.ZIP_DEFLATED) as z:                      # a small zip, a huge part
+        z.writestr("xl/worksheets/sheet1.xml", "<worksheet>" + " " * (cp.MAX_XML + 1) + "</worksheet>")
+    assert len(big.getvalue()) < 100_000
+    with pytest.raises(cp.TableError, match="too large"):
+        cp.read_table(big.getvalue(), "list.xlsx")
+    with pytest.raises(cp.TableError, match="can't be read"):
+        cp.read_table(("Address,Common Place\n1 EXAMPLE AVE," + "x" * 200_000 + "\n").encode(), "list.csv")   # csv.Error
+    for err in (RuntimeError("encrypted"), NotImplementedError("compression"), zipfile.BadZipFile("bad")):
+        def boom(data, err=err):
+            raise err
+        monkeypatch.setattr(cp, "_read_xlsx", boom)
+        with pytest.raises(cp.TableError, match="can't be read"):
+            cp.read_table(xlsx([HEADER, *ROWS]), "list.xlsx")
+
+
+def test_the_place_search_prefers_our_town_for_a_listed_name(cad):
+    rows = [HEADER, ["120 EXAMPLE AVE", "PORT CHESTER BUS DEPOT", "PORT_CHESTER"],
+            ["3 EXAMPLE AVE EXT", "RYE BROOK BUS DEPOT", "RYE_BROOK"]]
+    post(cad, "common_places", action="apply", file=b64(xlsx(rows)), filename="list.xlsx")
+    hits = json.loads(CadApi(cad).get("/api/cad/places", "q=bus+depot", None)[1])["places"]
+    assert [h["sub"] for h in hits[:2]] == [PC, RB]
 
 
 # --------------------------------------------------------------------------- the Settings card, in the browser

@@ -1198,10 +1198,11 @@ class Sources:
 
     # -- a location that is a place's name (the department's own, the county's common place names among them) ---------
 
-    def common_place(self, loc: str) -> dict | None:
+    def common_place(self, loc: str, data: dict | None = None) -> dict | None:
         """The department's place name a feed's location is, when it is only a name ("@SAMPLE MARINA", "SAMPLE MARINA
-        SAMPLE_VILLAGE": no street address in it) and that name has an address or a point (Settings > Place names, the
-        county's common place names: sizeup/cad/commonplaces.py). None: a street address, or no such name."""
+        SAMPLE_VILLAGE": nothing else in it) and that name has an address or a point (Settings > Place names, the
+        county's common place names: sizeup/cad/commonplaces.py Lookup.find). Never another town's: a town in the text,
+        or the feed's own town field (data), must be the name's. None: an address or intersection, or no such name."""
         if not (loc or "").strip() or re.match(r"\s*\d", loc):       # a numbered address: as it is
             return None
         fn = getattr(self.cad, "local_places", None)
@@ -1216,18 +1217,26 @@ class Sources:
         if sig != self._common[0]:
             self._common = (sig, Lookup(rows))
         self._towns()
-        return self._common[1].find(loc, _strip_town)
 
-    def _match_location(self, loc: str) -> str:
+        def strip(words):                              # a known town at the end, or the whole of it
+            whole = TOWN_OF.get(tuple(words))
+            return ([], whole) if whole else _strip_town(list(words))
+        code = str(((data or {}).get("extra") or {}).get("town") or "")
+        rest, town = strip(re.findall(r"[a-z0-9]+", code.lower().replace("_", " "))) if code else ([], "")
+        if rest or not town:
+            town = ""                                  # no town field, or one we don't know: not held against it
+        return self._common[1].find(loc, strip, town)
+
+    def _match_location(self, loc: str, data: dict | None = None) -> str:
         """What matching reads for a feed's location: a place's name as its address (common_place), else the text."""
-        cp = self.common_place(loc)
+        cp = self.common_place(loc, data)
         return (cp.get("address") or loc) if cp else loc
 
     def _common_fields(self, loc: str, data: dict | None, pin: bool) -> dict | None:
         """A feed's location that is a place's name (common_place): the address "<its address> @ <the name>" with the
         place and its address kept on their own (place, place_address: matching reads that), and its point when
         pin (no person set one). The feed's own text stays address_raw. None: not a place's name."""
-        cp = self.common_place(loc)
+        cp = self.common_place(loc, data)
         if cp is None:
             return None
         name = cp.get("label") or proper_case(cp.get("name") or "")
@@ -1773,7 +1782,8 @@ class Sources:
                 # a match is always the same place (match): attach, whoever made the incident and whatever its status
                 # (open), so a page that beat the feed gets the feed's report, not a duplicate
                 typ, sub = self.cad.map_type(data["type"], label)[:2] if data["type"] else ("", "")
-                inc, similar = self.match_all(ev.source, at, self._match_location(data["location"]), data["units"], typ)
+                inc, similar = self.match_all(ev.source, at, self._match_location(data["location"], data), data["units"],
+                                              typ)
                 lag = PAGE_LAG_S if inc is not None and inc.get("_misheard") else SAME_CALL_S
                 if inc is not None and not self._same_call(inc, data, now, lag):
                     inc, similar = None, [inc]               # another call there (one that ended before, an old one)

@@ -25,10 +25,11 @@ How a page is read here (``PageLocator.locate``):
 4. Named places said ("Corpus Christi School": the gazetteer's landmarks and named places) are readings of their
    own, checked the same way, and back an address within PLACE_NEAR_M. So are the department's own names (Settings >
    Place names, the county's common place names among them: ``set_local_source``, never in the repo): every word of
-   the name but its town said in order ("Sample Marina"); a name of generic words only ("Community Hall - Sample
-   Town", "Sample Town Community Hall") or of one word under LOCAL_ONE_MIN letters needs its town said beside it as
-   well ("sample town community hall", "the community hall in sample town"); any other name of one word needs its
-   town or a word for where to go before it ("respond to the Samplemart", never "the samplemart bag": LOCAL_ONE_CUE).
+   the name but its town said in order ("Quillberry Marina"). A name of one word, or of generic and common English
+   words only (GENERIC, sizeup/geo/commonwords.py: "Community Hall - Sample Town", "Service Station") needs its town
+   said beside it ("sample town community hall", "the community hall in sample town"); another town said beside a
+   name is that town's, never this one. When a house-numbered address is said, a department name is never a reading
+   of its own: it only backs the address near it (PLACE_BONUS).
 5. Jurisdiction: the towns of the page's tones (Port Chester, Rye Brook: DISTRICT) and the towns the page names
    (mutual aid: "... to the Town of Greenwich") are in; a reading anywhere else is halved and never confirmed.
 
@@ -59,6 +60,7 @@ import numpy as np
 
 from .gazetteer import (CROSS_MARKERS, MUNI_PHRASES, MUNI_PRIOR, NOT_HOUSE_NUMBER_AFTER, STREET_STOP, Gazetteer,
                         Match, _latlon, _xy)
+from .commonwords import COMMON_WORDS
 from .normalize import BOUNDARY, TYPE_ABBRS, spaceless, tokenize
 
 DISTRICT = ("Port Chester", "Rye Brook")    # PCFD's district: always in for a page with our tones
@@ -78,10 +80,8 @@ NAME_EXACT = 0.95             # ... and with no cross street said, this well
 W_NAME, W_ALL, W_PARTIAL = 0.45, 0.35, 0.25
 TOWN_NEAR, TOWN_HOME, TOWN_IN = 0.18, 0.12, 0.08
 READ_BONUS, PLACE_BONUS = 0.04, 0.06
-LOCAL_ONE_MIN = 5             # a department name of one word: said exactly and this long, or with its town beside it
-LOCAL_TOWN_GAP = 3            # ... its town said at most this many words before or after it ("hall in sample town")
+LOCAL_TOWN_GAP = 3            # a department name's town said at most this many words before or after it
 LOCAL_FILL = {"the", "of", "a", "an", "at"}
-LOCAL_ONE_CUE = {"at", "to", "from", "behind", "near", "outside", "inside"}   # ... a one-word name said after one of these
 
 # Words that don't name a place on their own ("Corpus Christi School": "corpus christi" does).
 GENERIC = {
@@ -244,10 +244,11 @@ class PageLocator:
                 core = [w for w in words if w not in LOCAL_FILL]
                 if not core:
                     continue
-                own = [w for w in core if w not in GENERIC and w not in TOWN_WORDS and not w.isdigit() and len(w) >= 3]
+                own = [w for w in core if w not in GENERIC and w not in TOWN_WORDS and w not in COMMON_WORDS
+                       and not w.isdigit() and len(w) >= 3]
                 out.append({"name": r.get("label") or r.get("name") or n, "muni": r.get("muni") or town,
                             "lat": r["lat"], "lon": r["lon"], "category": "local name", "core": core, "town": town,
-                            "generic": not own or (len(core) == 1 and len(core[0]) < LOCAL_ONE_MIN)})
+                            "generic": not own or len(core) == 1})
         first: dict[str, list[int]] = collections.defaultdict(list)       # a name's first word -> the names
         for i, p in enumerate(out):
             first[p["core"][0]].append(i)
@@ -278,15 +279,13 @@ class PageLocator:
                 exact = all(tokens[i + x] == core[x] for x in range(k))
                 if k == 1 and not exact:
                     continue                                # one word: as it is spelled
-                want = p["town"] or p["muni"]
-                town_said = any(m == want and (0 <= s - (i + k) <= LOCAL_TOWN_GAP or 0 <= i - e <= LOCAL_TOWN_GAP)
-                                for s, e, m, _near in named)
-                if p["generic"] and not town_said:
-                    continue
-                if k == 1 and not town_said:                # one word ("the target vehicle"): only as where to go
-                    b = i - 1 - (i >= 2 and tokens[i - 1] == "the")
-                    if b < 0 or tokens[b] not in LOCAL_ONE_CUE:
-                        continue
+                said = {m for s, e, m, _near in named
+                        if 0 <= s - (i + k) <= LOCAL_TOWN_GAP or 0 <= i - e <= LOCAL_TOWN_GAP}
+                mine = {p["town"] or p["muni"], p["muni"]}
+                if said and not said & mine:
+                    continue                                # another town said beside it: that town's, not this one
+                if p["generic"] and not said & mine:
+                    continue                                # common words, one word: only with its town said
                 found.append((i, i + k, p, 1.0 if exact else 0.92))
         return found
 
@@ -754,9 +753,10 @@ class PageLocator:
                 cross_tokens.update(range(i, min(len(tokens), i + 8)))
         street_tokens = {k for m in mentions if m.strong for k in range(m.start, m.end)}
         places = [h for h in self._place_hits(tokens, skip | cross_tokens, allowed if only else None)
-                  + self._local_hits(tokens, skip | cross_tokens, named, allowed if only else None)   # the department's
                   if any(k not in street_tokens for k in range(h[0], h[1]))]     # "King Street" is not King Street School
-        for i, j, p, cov in places:
+        ours = [h for h in self._local_hits(tokens, skip | cross_tokens, named, allowed if only else None)
+                if any(k not in street_tokens for k in range(h[0], h[1]))]     # the department's own names
+        for i, j, p, cov in places + ([] if addrs else ours):     # an address said: ours only back it (below)
             checked, names = self._place_check(p["lat"], p["lon"], groups)
             tw = town(p["muni"], (i, j))
             score = W_NAME * cov * 0.85 + cross_part(checked, cov) + (tw or 0.0)
@@ -783,7 +783,7 @@ class PageLocator:
             if n > 1:
                 r.score += READ_BONUS * min(2, n - 1)
             if r.match.kind != "landmark":
-                near = [p for _i, _j, p, _c in places
+                near = [p for _i, _j, p, _c in places + ours
                         if _dist(r.match.lat, r.match.lon, p["lat"], p["lon"]) <= PLACE_NEAR_M]
                 if near:
                     r.score += PLACE_BONUS

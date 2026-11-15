@@ -32,6 +32,7 @@ import csv
 import io
 import re
 import zipfile
+import zlib
 from xml.etree import ElementTree as ET
 
 from sizeup.geo.places import norm_tokens
@@ -40,7 +41,7 @@ SOURCE = "county common places"
 KEY_PREFIX = "county/"
 MAX_BYTES = 3 * 1024 * 1024          # the file as uploaded (an .xlsx of ~1,000 rows is ~50 KB)
 MAX_ROWS = 5000
-MAX_XML = 40 * 1024 * 1024           # an .xlsx part, unpacked (a zip bomb stops here)
+MAX_XML = 4 * 1024 * 1024            # an .xlsx part, unpacked (a zip bomb stops here; 5,000 rows are ~1 MB)
 NS = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
 REL_NS = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
 PKG_NS = "{http://schemas.openxmlformats.org/package/2006/relationships}"
@@ -65,12 +66,18 @@ def read_table(data: bytes, filename: str = "") -> list[list[str]]:
         raise TableError("the file is empty")
     if len(data) > MAX_BYTES:
         raise TableError(f"at most {MAX_BYTES // (1024 * 1024)} MB")
-    if data[:2] == b"PK":
-        rows = _read_xlsx(data)
-    elif filename.lower().endswith((".xlsx", ".xlsm")):
-        raise TableError("not an .xlsx file")
-    else:
-        rows = _read_csv(data)
+    try:
+        if data[:2] == b"PK":
+            rows = _read_xlsx(data)
+        elif filename.lower().endswith((".xlsx", ".xlsm")):
+            raise TableError("not an .xlsx file")
+        else:
+            rows = _read_csv(data)
+    except TableError:
+        raise
+    except (zipfile.BadZipFile, zipfile.LargeZipFile, RuntimeError, NotImplementedError, EOFError, OSError,
+            zlib.error, csv.Error, ValueError) as e:     # encrypted, another compression, a broken zip, a huge field
+        raise TableError(f"the file can't be read ({type(e).__name__})") from None
     rows = [r for r in rows if any(c for c in r)]
     if len(rows) > MAX_ROWS + 1:
         raise TableError(f"at most {MAX_ROWS} rows")
@@ -262,30 +269,44 @@ class Lookup:
                     found[k] = e
         self.names = found
 
-    def find(self, text: str, strip_town=None) -> dict | None:
-        """The entry a location names: its whole text, else the "@" part ("@SAMPLE MARINA"), each with a known town
-        after it taken off (strip_town: words -> (words without the town, town)) and the part before " - " tried too."""
+    def find(self, text: str, strip_town=None, town: str = "") -> dict | None:
+        """The entry a location names, only when the location is nothing but that name: "@SAMPLE MARINA", "SAMPLE
+        MARINA", or with a known town after it ("SAMPLE MARINA, SAMPLE_VILLAGE", "... - SAMPLE VILLAGE", "SAMPLE
+        MARINA SAMPLE_VILLAGE"; strip_town: words -> (words without a known town at the end, that town in lower case)).
+        Never one with anything before its "@" (an address, an intersection), never another town's entry: a town said
+        (or town, the feed's own town field, in lower case) must be the entry's."""
         if not self.names:
             return None
         s = " ".join((text or "").split())
-        tries = [s]
-        m = re.search(r"@\s*([^():;\[\]@]+)", s)
-        if m:
-            tries.insert(0, m.group(1))
-        for t in list(tries):
-            tries += [p for p in re.split(r"\s*,\s*", t)[:1] if p != t]
-        for t in list(tries):
-            tries += [p for p in re.split(r"\s+-\s+", t)[:1] if p != t]
-        for t in tries:
-            k = name_key(t)
-            if not k:
+        at = s.find("@")
+        if at >= 0:
+            if re.search(r"[A-Za-z0-9]", s[:at]):
+                return None                            # "EXAMPLE AVE/SAMPLE ST @SAMPLEMART": the street stays
+            s = s[at + 1:].strip()
+        if not s or "@" in s:
+            return None
+
+        def words(t: str) -> list[str]:
+            return re.findall(r"[a-z0-9]+", t.lower().replace("_", " "))
+        tries = [(s, "")]
+        if strip_town is not None:
+            m = re.match(r"(.+?)(?:\s*,\s*|\s+-\s+)([^,]+)$", s)     # "<name>, <town>" / "<name> - <town>"
+            if m:
+                rest, t = strip_town(words(m.group(2)))
+                if t and not rest:
+                    tries.append((m.group(1), t))
+            rest, t = strip_town(words(s))                         # "<name> <TOWN_CODE>"
+            if t and rest:
+                tries.append((" ".join(rest), t))
+        for name, said in tries:
+            hit = self.names.get(name_key(name))
+            if hit is None:
                 continue
-            hit = self.names.get(k)
-            if hit is None and strip_town is not None:
-                rest, _town = strip_town(k.split())
-                hit = self.names.get(" ".join(rest)) if rest else None
-            if hit is not None:
-                return hit
+            theirs = (hit.get("muni") or "").lower()
+            for t in (said, (town or "").lower()):
+                if t and theirs and t != theirs:
+                    return None                        # another town's place of that name
+            return hit
         return None
 
 
