@@ -7,7 +7,7 @@ const StationsCard = (() => {
   const POLL_MS = 15000;
   const LIVE_S = 30;                       // used this recently: "now"
   let card = null, status = null, form = null, reveal = null, timer = null, busy = false, last = null, said = "";
-  let idIn = null, nameIn = null, addBtn = null, fresh = null, editing = "";
+  let idIn = null, nameIn = null, addBtn = null, hint = null, fresh = null, editing = "";
 
   const when = (t) => (t ? fmtTime(t, true) : "—");
   const isOpen = () => !!card && card.isConnected && !(card.parentNode && card.parentNode.closest("[hidden]")) && !document.hidden;
@@ -58,10 +58,10 @@ const StationsCard = (() => {
     form = el("div", "row");
     const l1 = el("label", "field");
     idIn = el("input");
-    idIn.placeholder = "st-north";
     idIn.maxLength = 40;
     idIn.spellcheck = false;
-    idIn.title = "[station] id in the station's config: lower case, digits, - and _";
+    idIn.title = "[station] id in the station's config: lower case, digits, - and _. Until multi-station, the hub takes "
+      + "only the shared token's station: add that id; another station's posts are refused";
     l1.append("Id", idIn);
     const l2 = el("label", "field");
     nameIn = el("input");
@@ -74,6 +74,9 @@ const StationsCard = (() => {
       idIn.value = ""; nameIn.value = "";
     });
     form.append(l1, l2, addBtn);
+    hint = el("p", "dim small", "One station until multi-station: another id is refused");
+    hint.title = "Per-station state, outbox and jobs come with the multi-station work. Until then the hub takes only the "
+      + "shared token's station; Add is for that station's own token";
   }
 
   function renderReveal() {
@@ -89,7 +92,11 @@ const StationsCard = (() => {
     const row = el("div", "row");
     row.append(btn("Copy token", "primary", () => copy(f.token)), btn("Copy status token", "", () => copy(f.status)),
       btn("Done", "", () => { fresh = null; render(); }));
-    box.append(head, tok, st, row);
+    box.append(head, tok, st);
+    if (f.rotated && f.grace) {
+      box.append(el("p", "small", `New status token too: update GitHub SIZEUP_STATUS_TOKEN within ${Math.round(f.grace / 60)} min`));
+    }
+    box.append(row);
     reveal.replaceChildren(box);
   }
 
@@ -134,7 +141,7 @@ const StationsCard = (() => {
       if (!s.revoked) {
         acts.append(btn("Rename", "sm", () => { editing = s.id; render(); }));
         acts.append(btn("Rotate", "sm", async () => {
-          if (await UI.confirm(`New token for ${s.id}? The old one works ${Math.round((d.grace_s || 600) / 60)} more min.`,
+          if (await UI.confirm(`New token and status token for ${s.id}? The old ones work ${Math.round((d.grace_s || 600) / 60)} more min.`,
             { ok: "Rotate", danger: false })) act({ action: "rotate", id: s.id }, "");
         }));
         acts.append(btn("Revoke", "sm danger", async () => {
@@ -170,8 +177,35 @@ const StationsCard = (() => {
       }
       const tw = el("td", sh.retired ? "dim" : "hl-warn", word);
       tw.title = "SIZEUP_STATION_TOKEN on the hub (SSM). " + (sh.pinned_by === "config" ? "Station from [cloud] legacy_station_id"
-        : sh.station ? "Station: the first id it posted as" : "No station has used it yet");
-      tr.append(el("td", "dim", "Shared token"), el("td", "mono", sh.station || "—"), tw, el("td", "t", ago(sh.last_used)), acts);
+        : sh.pinned_by === "hub.sqlite" ? "Station set here (or learned from its first post)" : "No station has used it yet");
+      // the shared token's station id: fixed here when the config's (or a learned one) is wrong. Empty = back to the
+      // config's, or learned from the next post
+      const idCell = el("td", "mono");
+      if (editing === "\0shared") {
+        const i = el("input");
+        i.value = sh.station || "";
+        i.maxLength = 64;
+        i.spellcheck = false;
+        i.title = "The station's [station] id. Empty: back to [cloud] legacy_station_id" + (sh.config ? ` (${sh.config})` : "");
+        const save = () => { editing = ""; act({ action: "shared_id", id: i.value.trim() }, "Shared token's station set"); };
+        i.addEventListener("keydown", (e) => {
+          if (e.key === "Enter") { e.preventDefault(); save(); }
+          if (e.key === "Escape") { editing = ""; render(); }
+        });
+        idCell.append(i, btn("Save", "sm", save));
+        setTimeout(() => i.focus(), 0);
+      } else {
+        idCell.textContent = sh.station || "—";
+        acts.prepend(btn("Set id", "sm", () => { editing = "\0shared"; render(); }));
+      }
+      tr.append(el("td", "dim", "Shared token"), idCell, tw, el("td", "t", ago(sh.last_used)), acts);
+      t.tBodies[0].append(tr);
+    }
+    for (const [id, at] of Object.entries(d.others || {})) {
+      const tr = el("tr");
+      const w = el("td", "hl-bad", "refused");
+      w.title = "Multi-station isn't on yet: this hub takes one station (the shared token's)";
+      tr.append(el("td", "dim", "Other station"), el("td", "mono", id), w, el("td", "t", ago(at)), el("td", ""));
       t.tBodies[0].append(tr);
     }
     if (!(d.stations || []).length && !sh.configured) {
@@ -183,8 +217,9 @@ const StationsCard = (() => {
     if (said) kids.push(el("p", "dim small", said));
     kids.push(el("p", "dim small", `hub.sqlite · ${when(d.at)}`));
     status.replaceChildren(...kids);
-    // the shared token's station has no own token yet: its id is the one to add (it must be exactly that)
-    idIn.placeholder = sh.station && !sh.own_token && /^[a-z0-9][a-z0-9_-]{0,39}$/.test(sh.station) ? sh.station : "st-north";
+    // the shared token's station has no own token yet: its id is the one to add (it must be exactly that); until
+    // multi-station another id is refused, so nothing else is suggested
+    idIn.placeholder = sh.station && !sh.own_token && /^[a-z0-9][a-z0-9_-]{0,39}$/.test(sh.station) ? sh.station : "";
   }
 
   async function poll(now) {
@@ -208,7 +243,7 @@ const StationsCard = (() => {
       card = el("div", "card s-card");
       card.hidden = true;                    // until the hub answers (not the hub, not an admin: stays hidden)
       build();
-      card.append(status, reveal, form);
+      card.append(status, reveal, form, hint);
       node.replaceChildren(card);
     }
     render();

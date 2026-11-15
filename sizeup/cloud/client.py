@@ -13,7 +13,7 @@ from typing import Callable
 from urllib.parse import urlsplit
 
 
-# The hub's 401 reasons (sizeup/cloud/stations.py REASONS): what to do on this side. The token is SIZEUP_STATION_TOKEN in
+# The hub's 401 / 409 reasons (sizeup/cloud/stations.py REASONS): what to do on this side. The token is SIZEUP_STATION_TOKEN in
 # /etc/sizeup/station.env (`sudo sizeup-station secrets`), the id [station] id in /etc/sizeup/config.toml.
 REFUSED_HINT = {
     "no_token": "set SIZEUP_STATION_TOKEN (sizeup-station secrets)",
@@ -22,6 +22,7 @@ REFUSED_HINT = {
     "token_retired": "the shared token is retired: put this station's own token in SIZEUP_STATION_TOKEN",
     "id_mismatch": "the token is another station's: check [station] id in the config and SIZEUP_STATION_TOKEN",
     "read_only": "that is a status token: the station needs its station token",
+    "multi_station_off": "the hub takes one station until multi-station lands: this one waits (its outbox keeps everything)",
 }
 
 
@@ -145,7 +146,7 @@ class HubClient:
                     reason = str(doc.get("reason") or "")[:40]
                 except (ValueError, AttributeError):
                     msg = raw[:200].decode(errors="replace").strip() or r.reason
-                if r.status == 401 and reason:
+                if (r.status == 401 and reason) or (r.status == 409 and reason == "multi_station_off"):
                     # the hub refused this station's token (sizeup/cloud/stations.py): what and what to do, never the token
                     raise HubError(f"hub refused this station ({reason}): {msg}"
                                    + (f" · {REFUSED_HINT[reason]}" if reason in REFUSED_HINT else ""), r.status)

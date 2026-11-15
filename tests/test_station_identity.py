@@ -164,6 +164,34 @@ def test_the_shared_token_station_from_config_and_an_own_token_never_claims_anot
     assert refused(reg.claim, own, "st-hq") == "id_mismatch"
 
 
+def test_two_first_posts_racing_on_the_shared_token_pin_one_id_and_refuse_the_other(tmp_path):
+    """Both resolved before either pinned (no id yet): the second to claim must not get through as the first's id."""
+    reg, _, _ = registry(tmp_path)
+    p1, p2 = reg.resolve(SHARED), reg.resolve(SHARED)
+    assert p1.id == p2.id == ""
+    assert reg.claim(p1, "st-a") == "st-a"
+    assert refused(reg.claim, p2, "st-b") == "id_mismatch"
+    assert reg.claim(p2, "st-a") == "st-a" and reg.legacy_id() == "st-a"
+
+
+def test_the_shared_token_station_can_be_fixed_without_a_deploy(tmp_path):
+    """A wrong [cloud] legacy_station_id (or a wrongly learned id): set the right one (it outranks the config), or clear
+    it (back to the config's, or learned again)."""
+    reg, _, _ = registry(tmp_path, legacy_id="st-wrong")
+    p = reg.resolve(SHARED)
+    assert refused(reg.claim, p, "st-hq") == "id_mismatch"
+    assert reg.set_shared_id("st-hq", "casey") == ("st-wrong", "st-hq")
+    assert reg.claim(reg.resolve(SHARED), "st-hq") == "st-hq"
+    assert StationRegistry(reg.mdb, shared=SHARED, legacy_id="st-wrong").legacy_id() == "st-hq"   # a restart: kept
+    assert reg.set_shared_id("", "casey") == ("st-hq", "st-wrong")                                  # back to the config's
+    learn, _, _ = registry(tmp_path / "b")
+    learn.claim(learn.resolve(SHARED), "st-typo")
+    learn.set_shared_id("", "casey")                                  # cleared: learned again from the next post
+    assert learn.legacy_id() == "" and learn.claim(learn.resolve(SHARED), "st-hq") == "st-hq"
+    with pytest.raises(StationError):
+        reg.set_shared_id("x" * 65)
+
+
 def test_retiring_the_shared_token_refuses_it_and_its_derived_status_token(tmp_path):
     reg, clock, _ = registry(tmp_path, legacy_id="st-hq")
     assert reg.resolve(status_token(SHARED), read_only=True) == Principal("st-hq", "status", True)
@@ -258,6 +286,41 @@ def test_a_payload_naming_another_station_is_refused_and_logged_once_without_the
         assert call(hub.url + "/api/station/state", "POST", {"at": 1.0, "status": {"name": "x"}}, token=tok)[0] == 200
         assert hub.app.hub.status["id"] == "st-b"
         assert call(hub.url + "/api/station/events", "POST", {"epoch": "e1", "events": []}, token=tok)[0] == 200
+    finally:
+        hub.close()
+
+
+def test_a_second_station_is_refused_until_multi_station_and_said_on_health(tmp_path):
+    """One outbox cursor, one status, one job queue until design A2-A4: a second station's posts would corrupt them, so
+    they are refused (409 multi_station_off); its hello, status and logs (its own stream) still go through."""
+    logs: list[str] = []
+    hub = HubRun(hub_cfg(tmp_path, cloud_legacy_station_id="t"))
+    hub.app.hub.log = logs.append
+    try:
+        assert call(hub.url + "/api/station/state", "POST", {"at": 1.0, "status": {"id": "t", "name": "Test"}})[0] == 200
+        seen = hub.app.hub.last_seen
+        own = hub.app.hub.stations.add("t")               # the same station on its own token: taken
+        assert call(hub.url + "/api/station/jobs?wait=0", token=own)[0] == 200
+        other = hub.app.hub.stations.add("st-b")
+        for method, path, body in (("POST", "/api/station/events", {"epoch": "b", "station": "st-b", "events": []}),
+                                   ("POST", "/api/station/state", {"at": 1.0, "status": {"id": "st-b"}}),
+                                   ("GET", "/api/station/jobs?wait=0", None),
+                                   ("POST", "/api/station/jobs/0123456789abcdef", {}),
+                                   ("POST", "/api/station/aircraft", {}), ("POST", "/api/station/vessels", {})):
+            code, out = call(hub.url + path, method, body, token=other)
+            assert code == 409 and out["reason"] == "multi_station_off", (path, code, out)
+        assert hub.app.hub.status["id"] == "t" and hub.app.hub.last_seen >= seen
+        for method, path in (("GET", "/api/station/hello"), ("GET", "/api/station/status")):
+            assert call(hub.url + path, method, token=other)[0] == 200
+        assert [m for m in logs if "multi_station_off" in m] == ["hub: station request refused: multi_station_off (station st-b)"]
+        hints = hub.app.health.model()["hints"]
+        assert any(h["channel"] == "Stations" and "st-b" in h["text"] for h in hints)
+        assert "st-b" in hub.app.hub.health()["detail"]
+        assert "st-b" in hub.app.hub.stations.panel()["others"]
+        c = HubClient(hub.url, other)
+        with pytest.raises(HubError) as e:
+            c.request("GET", "/api/station/jobs?wait=0")
+        assert e.value.status == 409 and "multi_station_off" in str(e.value) and other.split(".")[2] not in str(e.value)
     finally:
         hub.close()
 
@@ -362,6 +425,28 @@ def test_add_rotate_revoke_rename_are_audited_without_a_token(admin):
     assert any(a["summary"] == "Stations: add st-north" for a in acts)
 
 
+def test_an_admin_sets_or_clears_the_shared_token_station_audited(admin, tmp_path, capsys, monkeypatch):
+    api, cad, reg = admin
+    me = Identity(email=CASEY)
+    assert api.post("/api/cad/stations", json.dumps({"action": "shared_id", "id": "st-x"}).encode(),
+                    Identity(email=JORDAN))[0] == 403
+    code, out = j(api.post("/api/cad/stations", json.dumps({"action": "shared_id", "id": "st-real"}).encode(), me))
+    assert code == 200 and out["station"] == "st-real" and reg.legacy_id() == "st-real"
+    assert j(api.get("/api/cad/stations", "", me))[1]["shared"]["pinned_by"] == "hub.sqlite"
+    code, out = j(api.post("/api/cad/stations", json.dumps({"action": "shared_id", "id": ""}).encode(), me))
+    assert out["station"] == "st-hq"                      # back to the config's ([cloud] legacy_station_id)
+    rows = [(r["key"], r["old"], r["new"]) for r in cad.settings.audit_log("system")]
+    assert ("stations/shared token id", "st-hq", "st-real") in rows and ("stations/shared token id", "st-real", "st-hq") in rows
+    # the CLI, on the leader task
+    state = tmp_path / "state"
+    state.mkdir()
+    MonitorDb(state / "hub.sqlite")
+    lease(cli_env(monkeypatch, tmp_path))
+    assert st_mod.main(["--state", str(state), "reset-shared-id", "--id", "st-real"]) == 0
+    assert "st-real" in capsys.readouterr().out
+    assert StationRegistry(MonitorDb(state / "hub.sqlite"), shared=SHARED, legacy_id="st-hq").legacy_id() == "st-real"
+
+
 def test_the_new_token_answer_is_not_cached(tmp_path):
     cad = make_cad(tmp_path)
     people(cad)
@@ -388,13 +473,76 @@ def test_the_new_token_answer_is_not_cached(tmp_path):
 
 # -- the CLI (inside the hub task, in an emergency) ------------------------------------------------------------------
 
+def cli_env(monkeypatch, tmp_path) -> Path:
+    """The hub task's environment as `aws ecs execute-command` gives it: no SIZEUP_LEASE_FILE (only the supervisor's
+    app child has it), the supervisor's run dir. Returns that run dir (made)."""
+    run = tmp_path / "run"
+    run.mkdir(exist_ok=True)
+    monkeypatch.delenv("SIZEUP_LEASE_FILE", raising=False)
+    monkeypatch.delenv("LITESTREAM_BUCKET", raising=False)
+    monkeypatch.setenv("SIZEUP_RUN_DIR", str(run))
+    monkeypatch.setenv("SIZEUP_CONFIG", str(tmp_path / "no-config.toml"))
+    return run
+
+
+def lease(run: Path, ours: bool = True) -> None:
+    """The supervisor's lease file (sizeup/handoff.py): ours = valid now (the container's monotonic clock)."""
+    import time as _t
+    (run / "lease.json").write_text(json.dumps({"generation": 7, "holder": "task-a",
+                                                "valid_until": _t.monotonic() + (30 if ours else -1)}))
+
+
+def test_the_cli_writes_only_on_the_task_holding_the_lease(tmp_path, capsys, monkeypatch):
+    state = tmp_path / "state"
+    state.mkdir()
+    MonitorDb(state / "hub.sqlite")
+    run = cli_env(monkeypatch, tmp_path)
+    add = ["--state", str(state), "add", "st-x"]
+    assert st_mod.main(add) == 3                                  # the supervisor's run dir, no lease: a standby
+    assert "can't show it is the leader" in capsys.readouterr().err
+    lease(run, ours=False)
+    assert st_mod.main(add) == 3                                  # a lease that isn't current: refused
+    assert "isn't the leader" in capsys.readouterr().err
+    assert st_mod.main(["--state", str(state), "--no-lease", *add[2:]]) == 3   # --no-lease never beats a lease file
+    lease(run)
+    assert st_mod.main(add) == 0                                  # the leader
+    # through SIZEUP_LEASE_FILE too, as the app child has it
+    monkeypatch.setenv("SIZEUP_LEASE_FILE", str(run / "lease.json"))
+    assert st_mod.leader_problem() is None
+    # a hub without the supervisor (one process): only with --no-lease, and never where a supervisor runs
+    monkeypatch.delenv("SIZEUP_LEASE_FILE")
+    monkeypatch.setenv("SIZEUP_RUN_DIR", str(tmp_path / "nothing-here"))
+    assert st_mod.leader_problem() is not None and st_mod.leader_problem(no_lease=True) is None
+    monkeypatch.setenv("LITESTREAM_BUCKET", "made-up-bucket")
+    assert st_mod.leader_problem(no_lease=True) is not None
+    assert st_mod.main(["--state", str(state), "list"]) == 0      # reading needs no lease
+    assert StationRegistry(MonitorDb(state / "hub.sqlite")).row("st-x") is not None
+
+
+def test_the_cli_retire_asks_for_force_when_the_hub_used_the_shared_token_recently(tmp_path, capsys, monkeypatch):
+    """The CLI is another process than the hub: it reads the shared token's last use from hub.sqlite (written at most
+    every TOUCH_S), so a station still on it isn't cut off by accident."""
+    state = tmp_path / "state"
+    state.mkdir()
+    hub_reg = StationRegistry(MonitorDb(state / "hub.sqlite"), shared=SHARED, legacy_id="st-hq")
+    hub_reg.touch(hub_reg.resolve(SHARED))                        # the running hub: written to meta (the first touch)
+    monkeypatch.setenv("SIZEUP_STATION_TOKEN", SHARED)
+    lease(cli_env(monkeypatch, tmp_path))
+    assert st_mod.main(["--state", str(state), "retire-shared"]) == 1
+    assert "s ago: a station still runs on it" in capsys.readouterr().err
+    assert hub_reg.resolve(SHARED).id == "st-hq"
+    assert st_mod.main(["--state", str(state), "retire-shared", "--force"]) == 0
+    assert refused(hub_reg.resolve, SHARED) == "token_retired"
+
+
 def test_the_cli_adds_lists_revokes_and_retires(tmp_path, capsys, monkeypatch):
     state = tmp_path / "state"
     state.mkdir()
     MonitorDb(state / "hub.sqlite")
     cad = make_cad(state)                              # its cad.sqlite: the CLI writes the Settings audit there
     monkeypatch.setenv("SIZEUP_STATION_TOKEN", SHARED)
-    monkeypatch.delenv("SIZEUP_LEASE_FILE", raising=False)
+    run = cli_env(monkeypatch, tmp_path)
+    lease(run)                                         # this is the leader task (the supervisor's lease file)
     assert st_mod.main(["--state", str(state), "--by", "ops", "add", "st-cli", "--name", "CLI"]) == 0
     out = capsys.readouterr().out
     tok = re.search(r"SIZEUP_STATION_TOKEN=(sz1\.st-cli\.\S+)", out).group(1)
@@ -429,7 +577,10 @@ def test_legacy_station_id_config(tmp_path, monkeypatch):
     p.write_text('[cloud]\nrole = "hub"\nlegacy_station_id = "' + "x" * 65 + '"\n')
     with pytest.raises(ConfigError, match="legacy_station_id"):
         load(p)
-    assert load(ROOT / "deploy/hub/config.hub.toml").cloud_legacy_station_id == ""     # learned: the first id it posts as
+    # the hub's shared token is the station deploy/station/config.station.toml installs: no learning in production
+    import tomllib
+    station_id = tomllib.loads((ROOT / "deploy/station/config.station.toml").read_text())["station"]["id"]
+    assert load(ROOT / "deploy/hub/config.hub.toml").cloud_legacy_station_id == station_id
 
 
 # -- the station's side --------------------------------------------------------------------------------------------

@@ -649,10 +649,24 @@ guessed, so a slow password hash or a pepper would add nothing: those protect se
 nothing about the token. The token is shown **once**, when it is issued, and can't be read back: lose it and you
 Rotate.
 
-**The shared token is one station.** `[cloud] legacy_station_id` on the hub names it; left unset (as in
-`deploy/hub/config.hub.toml`), it is the first `[station] id` the shared token posts as after this deploy, kept in
-`hub.sqlite` (meta `station_legacy_id`) and shown in Settings > Station > Stations. The shared token is refused
-for any other id, so a new station can't use it: a new station always gets its own token.
+**The shared token is one station.** `[cloud] legacy_station_id` in `deploy/hub/config.hub.toml` names it: the
+`[station] id` that `deploy/station/config.station.toml` gives the station (a test keeps the two equal). The shared
+token is refused for any other id, so a new station can't use it. An admin can override the id without a deploy
+(Settings > Station > Stations, the shared row's **Set id**, or the CLI's `reset-shared-id --id <id>`; kept in
+`hub.sqlite` meta `station_legacy_id`, which outranks the config). With no config value at all, the hub learns it from
+the first id the shared token posts as.
+
+**Wrong id?** If the station's real `[station] id` differs, its posts on the shared token are refused with
+`id_mismatch` (its log says so, the Station row goes offline; its outbox keeps everything). Fix: **Set id** to the
+station's real id (or `python -m sizeup.cloud.stations reset-shared-id --id <id>` in the hub task). Set id empty goes
+back to the config's (or, with none, learns again from the next post). Then correct `legacy_station_id` in the
+config in a PR.
+
+**One station until multi-station.** Per-station state, outbox cursors and jobs come with design steps A2-A4. Until
+then the hub takes only that station (the shared token's): a second station's events, state, jobs, aircraft and
+vessels are refused with `409` reason `multi_station_off`, logged once an hour, and shown on Settings > Station >
+Health and the Stations card. Its hello, status and logs (its own stream) still go through. A second station is not
+accepted until the multi-station work lands; Add is for the existing station's own token.
 
 ### What happens on each request
 
@@ -685,7 +699,8 @@ route that isn't listed):
 
 **Refusals** (`401`, `reason`): `no_token`, `token_unknown` (wrong, mistyped, or a rotated one past its 10
 minutes), `token_revoked` (said only to the right token, so a guess learns nothing), `token_retired` (the shared
-token after Retire), `read_only` (a status token on a write), `id_mismatch`. The station logs the reason and what to
+token after Retire), `read_only` (a status token on a write), `id_mismatch`; and `409` `multi_station_off` (a
+second station, below). The station logs the reason and what to
 do, once when it starts and again if it changes (`hub link: hub refused this station (token_revoked): ...`;
 `sizeup/cloud/client.py`), never the token. With no shared token and no station added the hub answers `403`
 "station ingest is off".
@@ -699,35 +714,51 @@ token state, last seen) and the shared token's row.
 |---|---|
 | Add | a new id and name; the token and its status token are shown once, with Copy buttons, then never again |
 | Rename | the display name only; the id never changes |
-| Rotate | a new token (shown once); the old one keeps working 10 minutes, time to put the new one on the station |
+| Rotate | a new token **and a new status token** (shown once); the old ones keep working 10 minutes. Within those 10 minutes put the token on the station **and** the status token in the GitHub secret `SIZEUP_STATUS_TOKEN` (the card says so), or the next deploy check is refused |
 | Revoke | refused from the station's next request, its previous token and status token too. New token (Rotate) brings it back with a fresh token |
 | Retire (shared token) | the shared token is refused from now on. It asks again if the shared token was used in the last 2 minutes (a station still runs on it) |
 | Restore (shared token) | undoes Retire (a station put back on the shared token, a rollback) |
+| Set id (shared token) | which station the shared token is; empty: back to the config's ([above](#the-tokens-and-where-each-lives)) |
 
 Each one is in the Settings audit (System, key `stations/<id>`) and the person's activity: who, what, which station;
 never a token. The answer carrying a new token is sent `Cache-Control: no-store`.
 
 **The CLI**, for an emergency inside the hub task (`aws ecs execute-command ... --command "python -m
-sizeup.cloud.stations list"`); it refuses on a task that isn't the leader and writes the same audit:
+sizeup.cloud.stations list"`). Every change checks that **this task holds the leader's lease now**: the supervisor
+writes it to `<SIZEUP_RUN_DIR>/lease.json` (`/tmp/sizeup-run` in the task), and the CLI reads that file itself (only the
+supervisor's app child gets `SIZEUP_LEASE_FILE`). No lease, or one that isn't current (a standby, a task being
+replaced): refused, exit 3; run it in the other task. `--no-lease` is only for a hub without the hot/cold supervisor
+(compose, a Mac) and never overrides a lease file. It writes the same Settings audit:
 
 ```sh
 python -m sizeup.cloud.stations list
-python -m sizeup.cloud.stations add st-north --name "North"   # prints the token and status token once
-python -m sizeup.cloud.stations rotate st-north
-python -m sizeup.cloud.stations revoke st-north
-python -m sizeup.cloud.stations rename st-north "North house"
+python -m sizeup.cloud.stations add st-hq --name "HQ"           # prints the token and status token once
+python -m sizeup.cloud.stations rotate st-hq
+python -m sizeup.cloud.stations revoke st-hq
+python -m sizeup.cloud.stations rename st-hq "Headquarters"
 python -m sizeup.cloud.stations retire-shared [--force] | restore-shared
+python -m sizeup.cloud.stations reset-shared-id [--id <id>]     # the shared token's station: set, or back to the config's
 ```
 
 `--state` defaults to `SIZEUP_STATE_DIR` (`/data` in the task). The running hub reads the table on each request,
-so a CLI revoke takes effect at the station's next request too.
+so a CLI revoke takes effect at the station's next request too. `retire-shared` reads the shared token's last use
+from `hub.sqlite` (written at most every 5 minutes), so it asks for `--force` if the token was used in the last 7.
+
+**After a deploy, check revokes and retires again.** A revoke, retire or Set id made in the seconds before a hot/cold
+handover can be inside the replication lag and missing on the new task. Open Settings > Station > Stations once the
+deploy is done and redo anything that isn't there.
+
+**Revoking a station's own token doesn't stop the shared token.** While the shared token isn't retired, it still
+works as that same station id. To shut a station out completely, revoke its own token **and** retire the shared
+token (and revoke its Access service token).
 
 ### Moving the existing station to its own token
 
 Nothing breaks at any step; the station is never refused in between.
 
 1. **Deploy this.** Nothing else to do: the station keeps posting on the shared token. Settings > Station > Stations
-   shows the shared token's row with the station id it learned, and "now" under Last seen.
+   shows the shared token's row with the station's id, and "now" under Last seen. If it shows the station refused
+   instead (`id_mismatch`: the configured id is wrong), use **Set id** ([above](#the-tokens-and-where-each-lives)).
 2. **Add** a station with **exactly that id** (the station's `[station] id`; never change that id). Copy the token,
    then the status token. (An id must be lower case letters, digits, `-` and `_`.)
 3. **On the station:** `sudo sizeup-station secrets`, paste the new token as the station token, Enter to keep the
@@ -761,8 +792,9 @@ station keeps the service token it has.
 - **The shared token:** the same, as the shared token's station only, until it is retired.
 - **A status token:** builds, update state and alerts from `GET /api/station/status`; nothing else.
 - **A copy of `hub.sqlite`:** hashes only; no token can be made from them.
-- Until per-station jobs (design step A4) there is one job queue: any station token's long poll may take the jobs
-  meant for the existing station.
+- **Another station's token** (one an admin added for an id other than the existing station's): until multi-station
+  its events, state, jobs, aircraft and vessels are refused (`multi_station_off`), so it can't take the existing
+  station's jobs or overwrite its state.
 
 ## The dispatch voice (Amazon Polly)
 

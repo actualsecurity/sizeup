@@ -735,6 +735,11 @@ class StationHealth:
         out["adsb"] = ad
         out["transcribe"] = self._transcribe()
         out["hints"] += context_hints(out["stt_queue"], out["transcribe"])
+        reg = getattr(hub, "stations", None)        # another station refused: the hub takes one until multi-station
+        others = reg.others() if reg is not None and hasattr(reg, "others") else {}
+        if others:
+            out["hints"].append({"channel": "Stations", "level": "warn",
+                                 "text": f"{', '.join(sorted(others))} refused: multi-station isn't on yet"})
         return out
 
     def _usual(self, label: str, heard: float, snow: float, gaps_min: int) -> float | None:

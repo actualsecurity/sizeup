@@ -226,7 +226,7 @@ class StationLink:
             self.log(f"hub link: connected to {self.cfg.cloud_hub_url}")
 
     def _fail(self, e: Exception) -> None:
-        refused = isinstance(e, HubError) and e.status == 401 and str(e).startswith("hub refused this station")
+        refused = isinstance(e, HubError) and e.status in (401, 409) and str(e).startswith("hub refused this station")
         with self._lock:
             first = self.error_since is None
             self.last_error = str(e)[:400 if refused else 200]

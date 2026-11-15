@@ -314,7 +314,9 @@ class Hub:
             detail = (f"{name}: connected" + (f", last seen {ago} s ago" if ago >= 5 else "")
                       + (f" · {q} event(s) still on their way up" if q else "")
                       + (f" · clocks differ by {self.skew:+.0f} s (set both to network time)" if abs(self.skew) > 5 else "")
-                      + (f" · {self.errors} event(s) failed to apply, last: {self.last_error}" if self.errors else ""))
+                      + (f" · {self.errors} event(s) failed to apply, last: {self.last_error}" if self.errors else "")
+                      + (f" · refused (multi-station isn't on yet): {', '.join(sorted(others))}"
+                         if reg is not None and (others := reg.others()) else ""))
             v = self.version()
             word = f"{ago} s" if ago >= 5 else ""
             if v is not None:
@@ -457,6 +459,17 @@ class Hub:
             self.log(f"hub: station request refused: {e.reason}" + (f" (station {sid})" if sid else ""))
         return _json(401, {"error": str(e), "reason": e.reason})
 
+    def _other_station(self, p: Principal) -> tuple[int, bytes, str]:
+        """409 {error, reason: multi_station_off}: a station other than the one this hub takes (sizeup/cloud/stations.py
+        primary), logged once an hour per station and shown on the Station row (Health)."""
+        self.stations.refused_other(p.id)
+        e = Refused("multi_station_off", f"it takes {self.stations.legacy_id()}, not {p.id}")
+        now = time.time()
+        if now - self._refused_said.get((e.reason, p.id), 0.0) >= REFUSAL_LOG_S:
+            self._refused_said[(e.reason, p.id)] = now
+            self.log(f"hub: station request refused: {e.reason} (station {p.id})")
+        return _json(409, {"error": str(e), "reason": e.reason})
+
     def _claim(self, p: Principal, claimed) -> str:
         """The id this request acts as: the token's. Refused (id_mismatch) when the payload names another."""
         try:
@@ -484,6 +497,10 @@ class Hub:
             # not the leader (#501): nothing the station sends is taken here, and no job is handed out whose result
             # couldn't be kept: 503 + Retry-After (sizeup/web/server.py); its outbox sends it again, to the leader
             fence_mod.refuse(f"{method} {path}")
+        if path != "/api/station/logs" and p.id and p.id != self.stations.primary(p):
+            # one station until multi-station (per-station state, cursors, jobs: design A2-A4): a second one would
+            # reset the outbox cursor, overwrite the status and take the first one's jobs. Not "seen"; on Health
+            return self._other_station(p)
         self._seen()
         self.stations.touch(p)
         try:

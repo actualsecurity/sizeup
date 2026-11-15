@@ -76,6 +76,8 @@ def test_an_admin_adds_a_station_sees_the_token_once_then_rotates_and_revokes(si
         card = pg.locator("#s-station-stations .card")
         card.wait_for()
         assert card.locator("tr", has_text="Shared token").locator("td.mono").inner_text() == "st-hq"
+        assert card.get_by_text("One station until multi-station").is_visible()
+        assert card.locator("label", has_text="Id").locator("input").get_attribute("placeholder") == "st-hq"
         shot(pg, "stations-shared")
         card.locator("label", has_text="Id").locator("input").fill("st-hq")
         card.locator("label", has_text="Name").locator("input").fill("Headquarters")
@@ -95,6 +97,8 @@ def test_an_admin_adds_a_station_sees_the_token_once_then_rotates_and_revokes(si
         card.locator(".notice.ok p.mono").first.wait_for()
         rotated = card.locator(".notice.ok p.mono").first.inner_text()
         assert rotated != token and site.reg.resolve(rotated).id == "st-hq"
+        assert card.get_by_text("update GitHub SIZEUP_STATUS_TOKEN within 10 min").is_visible()   # a new status token too
+        shot(pg, "stations-rotated")
         card.get_by_role("button", name="Done").click()
         row.get_by_role("button", name="Revoke").click()
         pg.get_by_role("alertdialog").get_by_role("button", name="Revoke").click()

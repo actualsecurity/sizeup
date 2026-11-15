@@ -249,7 +249,8 @@ GET  /api/cad/stations                    Settings > Station > Stations (sizeup/
                                           created, rotated, revoked, last used) and the shared token's state; never a hash.
                                           The hub's only; a signed-in admin only
 POST /api/cad/stations                    {action: add {id, name?} | rename {id, name} | rotate {id} | revoke {id} |
-                                          retire_shared {force?} | restore_shared}: a signed-in admin only. add / rotate
+                                          retire_shared {force?} | restore_shared | shared_id {id: "" = the config's}}:
+                                          a signed-in admin only. add / rotate
                                           answer {token, status_token} (no-store), the one time they are shown. In the
                                           Settings audit (System) and the person's activity: the action and id, no token
 GET  /api/cad/notify                      Settings > System > Push notifications (sizeup/notify.py Pushes): each kind's

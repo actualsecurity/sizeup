@@ -44,8 +44,14 @@ effect at the next request too. Last used: in memory, written at most every TOUC
     python -m sizeup.cloud.stations [--state DIR] revoke <id>                  refused from its next request
     python -m sizeup.cloud.stations [--state DIR] rename <id> <name>
     python -m sizeup.cloud.stations [--state DIR] retire-shared [--force] | restore-shared
+    python -m sizeup.cloud.stations [--state DIR] reset-shared-id [--id ID]    the shared token's station: set, or cleared
 --state: the hub's state dir (SIZEUP_STATE_DIR, /data in the task). Meant for an emergency inside the hub task (aws ecs
-execute-command): it refuses on a task that isn't the leader (SIZEUP_LEASE_FILE), and writes the Settings audit too.
+execute-command): every change refuses unless this task holds the leader's lease now (leader_problem: the supervisor's
+<SIZEUP_RUN_DIR>/lease.json; --no-lease only on a hub without the supervisor), and writes the Settings audit too.
+
+Until multi-station (per-station state, outbox cursors, jobs: design A2-A4) the hub takes ONE station, the primary
+(legacy_id: the shared token's): another station's events, state, jobs, aircraft and vessels are refused (409, reason
+"multi_station_off") and shown on Health. Its hello, status and logs (its own stream) still go through.
 """
 
 from __future__ import annotations
@@ -72,6 +78,7 @@ NAME_MAX = 60
 ROTATE_GRACE_S = 600.0      # a rotated token still works this long: time to put the new one in the station's env
 TOUCH_S = 300.0             # last used: written to hub.sqlite at most this often per station
 SHARED_BUSY_S = 120.0       # the shared token used this recently: Retire asks for force (a station still on it)
+OTHERS_SHOWN_S = 3600.0     # another station refused (multi-station off): said on Health and the card this long
 META_LEGACY = "station_legacy_id"
 META_RETIRED = "station_shared_retired"
 META_SHARED_USED = "station_shared_used"
@@ -91,6 +98,7 @@ REASONS = {
     "token_retired": "the shared station token was retired: this station needs its own (Settings > Station > Stations)",
     "read_only": "a status token: it opens GET /api/station/status only",
     "id_mismatch": "the token belongs to another station id than the one this request names",
+    "multi_station_off": "multi-station isn't enabled yet: this hub takes one station",
 }
 
 
@@ -144,6 +152,7 @@ class StationRegistry:
         self._used: dict[str, float] = {}         # id -> last used (memory)
         self._written: dict[str, float] = {}      # id -> last used as written to hub.sqlite
         self.shared_last: float | None = None
+        self._others: dict[str, float] = {}       # other stations refused (multi-station off): id -> when
         self._lock = threading.Lock()
 
     # -- the database -------------------------------------------------------------------------------------------
@@ -180,15 +189,39 @@ class StationRegistry:
     # -- the shared token -------------------------------------------------------------------------------------
 
     def legacy_id(self) -> str:
-        """The station the shared token is: [cloud] legacy_station_id, else the id it first posted as ("" until then)."""
-        if self.configured_legacy:
-            return self.configured_legacy
-        if self._pinned is None:
-            v = self.mdb.get(META_LEGACY, "")
-            if not v:
-                return ""
-            self._pinned = v
-        return self._pinned
+        """The station the shared token is, and until multi-station the one station this hub takes (primary): an id an
+        admin set (set_shared_id) or the shared token learned, both in hub.sqlite meta; else [cloud]
+        legacy_station_id; "" until then. Read from hub.sqlite each time, so a change from the CLI counts at once."""
+        return self.mdb.get(META_LEGACY, "") or self.configured_legacy or self._pinned or ""
+
+    def set_shared_id(self, sid: str = "", by: str = "") -> tuple[str, str]:
+        """An admin's fix of the shared token's station: sid sets it (outranking [cloud] legacy_station_id); "" clears a
+        set or learned one, back to the config's or, with none there, learned again from the next post. (old, new)."""
+        sid = str(sid or "").strip()
+        if sid and (len(sid) > 64 or not sid.isprintable()):
+            raise StationError("id: the station's [station] id, at most 64 characters")
+        old = self.legacy_id()
+        with self._lock:
+            self._pinned = None
+            with self.mdb._lock:
+                if sid:
+                    self.mdb.db.execute("INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET "
+                                        "value = excluded.value", (META_LEGACY, sid))
+                else:
+                    self.mdb.db.execute("DELETE FROM meta WHERE key = ?", (META_LEGACY,))
+        new = self.legacy_id()
+        self.log(f"stations: the shared token's station is {new or '(learned from its next post)'} now "
+                 f"(was {old or 'none'}), by {by or 'someone'}")
+        return old, new
+
+    def primary(self, p: Principal) -> str:
+        """The one station this hub takes until multi-station (per-station state, cursors, jobs) lands: the shared
+        token's. A station on its own token with none known yet becomes it (a hub that never had the shared token)."""
+        cur = self.legacy_id()
+        if not cur and p.via == "own" and p.id:
+            self._pin(p.id)
+            cur = self.legacy_id()
+        return cur
 
     def _pin(self, sid: str) -> None:
         with self._lock:
@@ -270,7 +303,9 @@ class StationRegistry:
             if len(c) > 64 or not c.isprintable():
                 raise Refused("id_mismatch", "not a station id")
             self._pin(c)                          # (any id the station has today: own tokens need ID's shape)
-            return self.legacy_id()
+            if c != self.legacy_id():             # another request pinned another id in between: not this one
+                raise Refused("id_mismatch")
+            return c
         if c != p.id:
             raise Refused("id_mismatch")
         return p.id
@@ -380,8 +415,12 @@ class StationRegistry:
             raise StationError("no shared token is configured on this hub")
         if self.retired() is not None:
             raise StationError("the shared token is retired already")
-        used = self.shared_last
-        if used is not None and self.clock() - used < SHARED_BUSY_S and not force:
+        # last used: this process's memory (the hub), else hub.sqlite, written at most every TOUCH_S (the CLI: another
+        # process), so from there "recent" is that much longer
+        used, window = self.shared_last, SHARED_BUSY_S
+        if used is None:
+            used, window = self.shared_used(), SHARED_BUSY_S + TOUCH_S
+        if used is not None and self.clock() - used < window and not force:
             raise StationError(f"the shared token was used {int(self.clock() - used)} s ago: a station still runs on it")
         self.mdb.put(META_RETIRED, f"{self.clock():.0f}")
         self.log(f"stations: the shared token retired by {by or 'someone'}")
@@ -405,17 +444,30 @@ class StationRegistry:
                         "grace_until": r["prev_until"] if (r["prev_until"] or 0) > now else None,
                         **((live or (lambda _sid: {}))(r["id"]))})
         legacy = self.legacy_id()
+        meta = self.mdb.get(META_LEGACY, "")
         own = next((r for r in out if r["id"] == legacy and r["revoked"] is None), None) if legacy else None
         return {"at": now, "stations": out,
                 "shared": {"configured": bool(self.shared), "station": legacy,
-                           "pinned_by": "config" if self.configured_legacy else ("first use" if legacy else ""),
+                           "pinned_by": "hub.sqlite" if meta else ("config" if self.configured_legacy else
+                                                                   ("first use" if legacy else "")),
+                           "config": self.configured_legacy,
                            "retired": self.retired(), "last_used": self.shared_used(),
                            "own_token": own is not None},
+                "others": self.others(),
                 "grace_s": ROTATE_GRACE_S}
+
+    def refused_other(self, sid: str) -> None:
+        """A station other than the primary was refused (multi-station isn't on yet): for Health and the card."""
+        self._others[sid] = self.clock()
+
+    def others(self, within: float = OTHERS_SHOWN_S) -> dict[str, float]:
+        """Other stations refused in the last `within` seconds: id -> when (the last time)."""
+        now = self.clock()
+        return {k: v for k, v in self._others.items() if now - v < within}
 
     def act(self, body: dict, by: str = "", note: Callable[[str, object, object], None] | None = None) -> dict:
         """POST /api/cad/stations {action: add {id, name?} | rename {id, name} | rotate {id} | revoke {id} |
-        retire_shared {force?} | restore_shared}. The answer of add / rotate carries the token and its status
+        retire_shared {force?} | restore_shared | shared_id {id}}. The answer of add / rotate carries the token and its status
         token: the only time they exist outside the station. note(key, old, new): the Settings audit (never a token)."""
         a = str(body.get("action") or "")
         note = note or (lambda k, o, n: None)
@@ -430,8 +482,9 @@ class StationRegistry:
             token = self.rotate(sid, by)
             note(f"stations/{sid}", "revoked" if was and was["revoked"] is not None else "token in use",
                  "new token" + ("" if was and was["revoked"] is not None else f" (old one {int(ROTATE_GRACE_S // 60)} min more)"))
+            # grace_s: the old token and its status token keep working this long (none after a revoke)
             return {"ok": True, "id": sid, "token": token, "status_token": status_token(token),
-                    "grace_s": ROTATE_GRACE_S}
+                    "grace_s": 0 if was and was["revoked"] is not None else ROTATE_GRACE_S}
         if a == "revoke":
             sid = self._id(body.get("id"))
             self.revoke(sid, by)
@@ -450,7 +503,11 @@ class StationRegistry:
             self.restore_shared(by)
             note("stations/shared token", "retired", "restored")
             return {"ok": True}
-        raise StationError("action: add, rename, rotate, revoke, retire_shared or restore_shared")
+        if a == "shared_id":
+            old, new = self.set_shared_id(body.get("id") or "", by)
+            note("stations/shared token id", old or None, new or "(learned from its next post)")
+            return {"ok": True, "station": new}
+        raise StationError("action: add, rename, rotate, revoke, retire_shared, restore_shared or shared_id")
 
 
 # -- the CLI (an emergency, inside the hub task) ----------------------------------------------------------------------
@@ -459,12 +516,48 @@ def _when(t) -> str:
     return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(t)) if t else "-"
 
 
+def leader_problem(no_lease: bool = False, env=None) -> str | None:
+    """None when this process may write the hub's databases, else why not. The hot/cold supervisor (sizeup/handoff.py)
+    writes the leader's lease to <SIZEUP_RUN_DIR>/lease.json (default /tmp/sizeup-run) and hands SIZEUP_LEASE_FILE only
+    to its app child, so a shell from `aws ecs execute-command` has to find the file itself. A lease file: it must be
+    ours now (fence.Fence.ok, the container's monotonic clock). None at all: refused, unless no_lease (--no-lease: a hub
+    without the supervisor, one process, e.g. compose or a Mac) and nothing says this is a supervised task."""
+    from pathlib import Path
+    from sizeup.fence import Fence
+    env = os.environ if env is None else env
+    run = Path(env.get("SIZEUP_RUN_DIR", "").strip() or "/tmp/sizeup-run")
+    for p in [Path(x) for x in (env.get("SIZEUP_LEASE_FILE", "").strip(),) if x] + [run / "lease.json"]:
+        if p.is_file():
+            return None if Fence(p, log=lambda s: None).ok() else \
+                f"this task isn't the leader (its lease {p} isn't current): run this in the task that is"
+    if env.get("LITESTREAM_BUCKET", "").strip() or run.is_dir():
+        return (f"no lease at {run / 'lease.json'}: this task can't show it is the leader (a standby, or the supervisor "
+                "isn't up): run this in the leader task")
+    if not no_lease:
+        return "no lease file found: on a hub without the hot/cold supervisor (one process) add --no-lease"
+    return None
+
+
+def _config_legacy(path: str) -> str:
+    """[cloud] legacy_station_id from the hub's config (the task: /app/deploy/hub/config.hub.toml), "" if none."""
+    try:
+        import tomllib
+        with open(path, "rb") as f:
+            return str((tomllib.load(f).get("cloud") or {}).get("legacy_station_id") or "").strip()
+    except (OSError, ValueError):
+        return ""
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="python -m sizeup.cloud.stations",
                                  description="The hub's station tokens (docs/cloud.md: How station authentication works)")
     ap.add_argument("--state", default=os.environ.get("SIZEUP_STATE_DIR", ""),
                     help="the hub's state dir, with hub.sqlite (default: SIZEUP_STATE_DIR)")
     ap.add_argument("--by", default=os.environ.get("USER", "") or "cli", help="who is doing this (the audit)")
+    ap.add_argument("--config", default=os.environ.get("SIZEUP_CONFIG", "") or "/app/deploy/hub/config.hub.toml",
+                    help="the hub's config, for [cloud] legacy_station_id (default: the task's)")
+    ap.add_argument("--no-lease", action="store_true",
+                    help="a hub without the hot/cold supervisor (one process): no lease file to check")
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("list")
     p = sub.add_parser("add")
@@ -477,6 +570,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("name")
     sub.add_parser("retire-shared").add_argument("--force", action="store_true")
     sub.add_parser("restore-shared")
+    sub.add_parser("reset-shared-id").add_argument("--id", default="",
+                                                    help="set it to this id (else: back to the config's, or learned)")
     a = ap.parse_args(argv)
     if not a.state:
         print("stations: --state DIR (or SIZEUP_STATE_DIR): the hub's state dir", file=sys.stderr)
@@ -486,15 +581,12 @@ def main(argv: list[str] | None = None) -> int:
     if not path.is_file():
         print(f"stations: no hub.sqlite in {a.state}", file=sys.stderr)
         return 2
-    if a.cmd != "list":
-        from sizeup.fence import Fence
-        f = Fence.from_env()
-        if f is not None and not f.ok():
-            print("stations: this task isn't the leader (SIZEUP_LEASE_FILE): run it in the task that is", file=sys.stderr)
-            return 3
+    if a.cmd != "list" and (why := leader_problem(a.no_lease)) is not None:
+        print(f"stations: {why}", file=sys.stderr)
+        return 3
     from sizeup.cloud.hubstore import MonitorDb
     shared = os.environ.get("SIZEUP_STATION_TOKEN", "").strip()
-    reg = StationRegistry(MonitorDb(path), shared=shared, log=lambda s: None)
+    reg = StationRegistry(MonitorDb(path), shared=shared, legacy_id=_config_legacy(a.config), log=lambda s: None)
 
     def note(key, old, new) -> None:
         cad = Path(a.state) / "cad.sqlite"
@@ -521,7 +613,8 @@ def main(argv: list[str] | None = None) -> int:
                   f"{', retired ' + _when(sh['retired']) if sh['retired'] else ''}; station {sh['station'] or '(not yet)'}; "
                   f"last used {_when(sh['last_used'])}")
             return 0
-        body = {"action": {"retire-shared": "retire_shared", "restore-shared": "restore_shared"}.get(a.cmd, a.cmd),
+        body = {"action": {"retire-shared": "retire_shared", "restore-shared": "restore_shared",
+                           "reset-shared-id": "shared_id"}.get(a.cmd, a.cmd),
                 "id": getattr(a, "id", None), "name": getattr(a, "name", None), "force": getattr(a, "force", False)}
         out = reg.act(body, a.by, note)
     except (StationError, sqlite3.Error) as e:
@@ -531,6 +624,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"SIZEUP_STATION_TOKEN={out['token']}")
         print(f"status token (read only, the deploy check): {out['status_token']}")
         print("Shown once: put the token in the station's /etc/sizeup/station.env (sizeup-station secrets).", file=sys.stderr)
+    elif a.cmd == "reset-shared-id":
+        print(f"shared token's station: {out['station'] or '(learned from its next post)'}")
     else:
         print("done")
     return 0
