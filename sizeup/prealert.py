@@ -61,6 +61,7 @@ from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 from sizeup.cad.store import TZ, CadError, OPERATOR_MAX
+from sizeup.netcut import cut, socket_of
 
 SOURCE = "Tapout HQ phone"
 TOPIC = re.compile(r"[-_A-Za-z0-9]{1,64}")
@@ -147,7 +148,7 @@ class NtfyStream:
         self.failures = 0
         self.connects = 0
         self._stop = threading.Event()
-        self._resp = None
+        self._sock = None                      # the open stream's socket (stop() shuts it down)
         self._thread: threading.Thread | None = None
 
     def url(self) -> str:
@@ -159,13 +160,20 @@ class NtfyStream:
         return self
 
     def stop(self) -> None:
+        """Returns at once, whatever the reader is doing (#546). Never resp.close() here: the reader thread is blocked in
+        resp.readline() holding the buffer's lock, and BufferedReader.close() waits for that lock, i.e. for ntfy's next
+        keepalive (~45 s; a deploy's drain was killed at its 30 s limit). The socket is shut down instead: the blocked
+        read wakes with an error or end of stream, the reader sees _stop and ends quietly (no log, no reconnect), and
+        closes the response itself. Idempotent."""
         self._stop.set()
-        resp = self._resp
-        if resp is not None:
-            try:
-                resp.close()
-            except Exception:  # noqa: BLE001 - closing a half-dead socket
-                pass
+        cut(self._sock)
+
+    def join(self, timeout: float | None = None) -> bool:
+        """After stop(): wait for the reader thread to end. True when it has."""
+        t = self._thread
+        if t is not None:
+            t.join(timeout)
+        return t is None or not t.is_alive()
 
     def state(self) -> dict:
         return {"feed": self.label, "configured": True, "connected": self.connected, "connected_at": self.connected_at,
@@ -188,20 +196,22 @@ class NtfyStream:
                 self.failures = 0                 # the server ended a good stream: reconnect at once-ish
             except HTTPError as e:
                 err = e
-                self.last_error = f"HTTP {e.code}" + (" (rate limited)" if e.code == 429 else "")
+                if not self._stop.is_set():
+                    self.last_error = f"HTTP {e.code}" + (" (rate limited)" if e.code == 429 else "")
             except (URLError, OSError, ValueError) as e:
                 err = e
-                self.last_error = f"{type(e).__name__}: {getattr(e, 'reason', None) or e}"
+                if not self._stop.is_set():
+                    self.last_error = f"{type(e).__name__}: {getattr(e, 'reason', None) or e}"
             except Exception as e:  # noqa: BLE001 - e.g. http.client on a socket closed under it
                 # (AttributeError "'NoneType' object has no attribute 'peek'", seen 2026-10-13): never let
                 # the listener thread die, or rings stop arriving until the hub restarts.
                 err = e
-                self.last_error = f"{type(e).__name__}: {e}"
+                if not self._stop.is_set():
+                    self.last_error = f"{type(e).__name__}: {e}"
             if self.connected or self.down_since is None:
                 self.down_since = self.clock()
             self.connected = False
-            self._resp = None
-            if self._stop.is_set():
+            if self._stop.is_set():               # stop() cut the socket under the read: not an error, never retried
                 break
             if err is not None:
                 self.failures += 1
@@ -212,9 +222,9 @@ class NtfyStream:
 
     def _read(self) -> None:
         resp = _get(self.url(), self.CONNECT_TIMEOUT)
-        self._resp = resp
         try:
-            sock = getattr(getattr(getattr(resp, "fp", None), "raw", None), "_sock", None)
+            sock = socket_of(resp)
+            self._sock = sock                      # set before _stop is looked at: a stop() from now on cuts it
             if sock is not None:
                 sock.settimeout(self.READ_TIMEOUT)
             while not self._stop.is_set():
@@ -252,8 +262,9 @@ class NtfyStream:
                         self.connected, self.connected_at, self.down_since = True, now, None
                         self.connects += 1
         finally:
+            self._sock = None
             try:
-                resp.close()
+                resp.close()                       # this thread's own read has returned: never waits on a lock
             except Exception:  # noqa: BLE001
                 pass
 
@@ -418,10 +429,14 @@ class PreAlerts:
         return self
 
     def stop(self) -> None:
+        """Returns at once (#546: first in a deploy's drain). The lock only to mark it stopped and see which streams are
+        running (sync_topics starts no new one after this); the streams are stopped outside it, and each stop() only
+        cuts its socket. Idempotent."""
         with self._lock:
             self._stopping.set()
-            self.ring_stream.stop()
-            self.status_stream.stop()
+            streams = (self.ring_stream, self.status_stream)
+        for s in streams:
+            s.stop()
 
     def _expiry(self, stopping: threading.Event) -> None:
         n = 0
