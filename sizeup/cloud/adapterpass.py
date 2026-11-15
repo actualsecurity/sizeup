@@ -255,8 +255,11 @@ class AdapterPassword:
             c = self.creds()
         except aws.AwsError as e:
             raise SaveRefused("No AWS credentials", 502, code=e.code or "NoCredentials") from None
-        hdrs = aws.sign("POST", url, {"Content-Type": "application/x-amz-json-1.1", "X-Amz-Target": target},
-                        body, c, self.region, "ssm")
+        try:
+            hdrs = aws.sign("POST", url, {"Content-Type": "application/x-amz-json-1.1", "X-Amz-Target": target},
+                            body, c, self.region, "ssm")
+        except aws.AwsError as e:                # outbound off (sizeup/outbound.py): nothing was sent
+            raise SaveRefused("Outbound off here", 503, code=e.code or "OutboundOff") from None
         try:
             status, data = self.send(url, {k: v for k, v in hdrs.items() if k != "Host"}, body, TIMEOUT_S)
         except Exception:  # noqa: BLE001 - a timeout, no route, a dropped connection: never its text

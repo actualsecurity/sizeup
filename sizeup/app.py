@@ -4103,6 +4103,10 @@ class App:
         leader: "active", "fenced" once the lease isn't ours and fresh; a standby task has no app: its supervisor's
         control port says "standby"), that the CAD serves, and what is still loading in the background."""
         out: dict = {"serving": True, "loading": self.loading()}
+        from sizeup import outbound
+        ob = outbound.status()
+        if not ob["on"]:                          # only when off: production's /healthz is as before
+            out["outbound"] = f"off: {ob['why']}"
         if fence is not None:
             out["hub_role"] = "active" if fence.ok() else "fenced"
         return out
@@ -4416,6 +4420,8 @@ def main(argv: list[str] | None = None) -> int:
     except (ConfigError, FileNotFoundError) as e:
         print(f"config: {e}", file=sys.stderr)
         return 2
+    from sizeup import outbound
+    log(outbound.arm(cfg.cloud_role))            # a hub on a restored copy reaches nothing outside (sizeup/outbound.py)
     if args.init_state:
         init_state(cfg)
         log(f"sizeup: databases ready ({cfg.cad_db or 'in memory'})")

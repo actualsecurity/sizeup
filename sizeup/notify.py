@@ -224,6 +224,9 @@ def publish(server: str, topic: str, title: str, body: str, priority: int | str 
     if always_protected(topic):
         raise NotifyError(PROTECTED_WHY)
     server = (server or DEFAULT_SERVER).rstrip("/")
+    from sizeup import outbound
+    if off := outbound.check("ntfy", server):     # a hub on a restored copy never pushes (sizeup/outbound.py)
+        raise NotifyError(off)
     why = server_problem(server) or topic_problem(topic, protected)
     if why:
         raise NotifyError(why)

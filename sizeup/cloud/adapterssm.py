@@ -150,8 +150,11 @@ def get(names: Iterable[str], read: Reader = credential, send: Sender | None = N
         if not PARAM_RE.fullmatch(name or ""):
             raise SsmError("bad name")
         body = json.dumps({"Name": PREFIX + name, "WithDecryption": True}, separators=(",", ":")).encode()
-        hdrs = aws.sign("POST", url, {"Content-Type": "application/x-amz-json-1.1", "X-Amz-Target": TARGET},
-                        body, creds, reg, "ssm")
+        try:
+            hdrs = aws.sign("POST", url, {"Content-Type": "application/x-amz-json-1.1", "X-Amz-Target": TARGET},
+                            body, creds, reg, "ssm")
+        except aws.AwsError as e:              # outbound off (sizeup/outbound.py): nothing was sent
+            raise SsmError(e.code or "OutboundOff") from None
         try:
             status, data = send(url, {k: v for k, v in hdrs.items() if k != "Host"}, body, timeout)
         except Exception:  # noqa: BLE001 - a timeout, no route, a dropped connection: never its text

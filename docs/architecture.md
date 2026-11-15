@@ -395,6 +395,7 @@ Summary only. The detail, with the reasons, is in [`cloud.md`](cloud.md): "Deplo
 | Uploads | A site document's type is taken from its bytes. Photos lose their metadata. A PDF is cleaned and re-checked in a separate process. Documents are served only by the hub behind sign-in: no presigned links (`docfiles.py`, `pdfcheck.py`, `docstore.py`). |
 | Cross-site posts | The station and all-in-one refuse a POST a browser says came from another site (`web/server.py`). |
 | Secrets | AWS SSM on the hub; the macOS Keychain or `/etc/sizeup/station.env` and the systemd credstore on a station. The UI shows only "set" or "missing". |
+| Outbound guard | `python -m sizeup` decides at its start whether it may reach outside services (`outbound.py`): on for the hub under its supervisor (the lease file), a station, or `SIZEUP_ALLOW_OUTBOUND=1`; off for anything else, such as a hub run by hand on a restored copy or all-in-one. Off, ntfy publishes, every AWS request (signed in `aws.py`: S3, Transcribe, CloudWatch Logs, SSM, the Listen links), Polly and Bedrock are refused before anything is sent; this machine's own addresses stay allowed. One log line at the start, `outbound` in `/healthz`, "Outbound off" in Settings > Station > Health. |
 | Public repo | No real incident data, transcripts, topic names or adapter details in code, tests or docs ([`../CLAUDE.md`](../CLAUDE.md)). Real captures for replay tests live outside the repo. |
 
 ## Cost drivers

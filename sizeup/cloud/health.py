@@ -1386,7 +1386,9 @@ class StationHealth:
                 if self.intel is not None else None
         except Exception as e:  # noqa: BLE001 - never in the way of the rest of the panel
             intel = [{"pack": "intel", "label": "Intel", "on": True, "level": "warn", "text": type(e).__name__, "title": ""}]
+        from sizeup import outbound
         return {"health": self.model(now), "sources": sources, "feeds": feeds, "intel": intel, "alerts": [dict(a, pushed=a["key"] in pushed_now) for a in self.alerts()],
+                "outbound": outbound.status(),
                 "history": [{k: h.get(k) for k in ("key", "severity", "title", "text", "since", "cleared", "pushed", "who")}
                             for h in hist],
                 "notify": {"on": bool(n is not None and n.enabled),
