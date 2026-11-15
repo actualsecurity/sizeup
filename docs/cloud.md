@@ -1049,6 +1049,16 @@ Incidents come in from ranked sources. The interface is in `sizeup/sources/__ini
   closure comes from the feed's own in-service or cleared time), gentle (poll every 30 to 60 s; `poll_now` never
   bypasses that), honest (the client's real name as its user agent; no spoofing or anti-detection), and the feed's
   data stays in the department (never in logs beyond receipt, pushes, issues, PRs or CI output).
+- **How often `poll()` is called:** every `poll_s`, never under 30 s. The one exception is an adapter whose `poll()`
+  makes no request at all and only reads a snapshot it keeps in memory (a thread of its own talks to the source at its
+  own pace): the runner reads that one every `poll_s` down to 1 s, so a new event reaches the hub within `poll_s` of
+  the adapter having it. The adapter says so itself (`local_poll = True`; an adapter with `local_poll = False` keeps the
+  floor whatever the station says), or the station's admin does for one without the attribute, with `SIZEUP_INCIDENT_SOURCES_SNAPSHOT="source-id,..."` in `/etc/sizeup/station.env` (off unless set; only
+  for an adapter known to ask nothing in `poll()`). Only the reads get faster: `health()` is asked at the 30 s pace,
+  `poll_now` comes no sooner or oftener, a `poll()` that raises backs off from 30 s, and a read with nothing new sends
+  and logs nothing. Those intervals run on the monotonic clock, so a wall clock stepped back or forward never pauses
+  health reports or triggers; the times sent are the wall clock's. The start-up line in the station's log says the interval really used (`every 30 s (the floor;
+  poll_s 5 s)`, `memory read every 5 s (...)`).
 - **Nothing waits.** A page for us makes its incident at once, whatever the feeds' health. An occasional duplicate
   is acceptable; a delay is not. A feed's new event does the same unless it attaches. An event already closed (or in
   service) when first seen is recorded and never makes an incident. One first seen more than 20 min after its dispatch
@@ -1110,10 +1120,12 @@ Incidents come in from ranked sources. The interface is in `sizeup/sources/__ini
     and gets a note.
   - An adapter's `extra` fields go on the timeline. The incident shows the jurisdiction, run numbers and each
     group's units.
-- **Poll now and reset:** paging tones of ours, a radio pre-alert or the phone ring wakes each adapter. The adapter's
+- **Poll now and reset:** paging tones of ours, a radio pre-alert or an airport alert wakes each adapter. The phone
+  ring (Tapout) never does: it is not a reason to check the feed early, and the runner refuses it before it counts. The adapter's
   own thread then calls its optional `poll_now(reason)` and polls; `trigger()` never runs adapter code. Triggers stay
   gentle: at most one per max(`poll_s`, 30 s), at most 4 in 10 min, never sooner than 30 s after the last poll, and none
-  while an adapter is failing or its health isn't `ok`. A remote reset
+  while an adapter is failing or its health isn't `ok`. For a memory-read adapter "the last poll" is its last read at
+  the 30 s pace, not every read, and the runner reads it once more 2 s after `poll_now` (memory only). A remote reset
   (#305) is queued in the runner's `Resets` (`sizeup/sources/resets.py`) and runs `reset()` on the adapter's own thread before its next poll.
 - **Station only:** the hub refuses to load or run adapters (`HubRefused`). It only applies the station's forwarded
   events. The hub only ever sees an exception's type, never its text.
@@ -1154,7 +1166,8 @@ Incidents come in from ranked sources. The interface is in `sizeup/sources/__ini
   a password already refused (it keeps a "login" stop until SSM has a new version). While its Health says
   "refused versions 24 h: N", the hub's Reset asks for an explicit confirm (409 without `confirm_refused`).
 - **Measurement:** each source's first-seen time per incident, and its lead over paging. Settings > Station > Health
-  shows both.
+  shows both. A feed's first-seen time is the adapter's own (`FeedEvent.first_seen`, the station's clock) when it gives
+  a believable one (not later than the hand-off, at most 15 min before it), else when the runner got the event.
 - **Pre-alerts never make an incident.** These include a dispatcher on the feed's talkgroups opening a call to us,
   "incoming additional alarm" or "stand by for a page" naming us, and the phone ring. They show as "Possible incoming"
   at the top of the 60 Control column.
@@ -2835,7 +2848,7 @@ person ([Listen](#listen-links-and-inference-intel) below).
 | Part | File | What |
 |---|---|---|
 | Packs | `data/intel/*.json` (`police.json`: 11 categories, 17 rules; the log-only `county_police.json`, `ems.json`, `fire.json`, below; generic phrases only), Settings laid over them | which sources a pack reads (source keys or globs, services), its categories (label, priority, time to live, mode), phrase rules with weights, "suppress" phrases ("disregard", "training") |
-| Speech-to-text table | `data/intel/tables/stt.json` (`rules.py` `Normalizer`) | for a pack that says `"normalize": "stt"`: sound-alikes with their context ("order of gas" is "odor of gas"), split and merged words, number words as digits. A phrase is tried on the words as transcribed and on the fixed words, so the table only adds a reading. `police.json` has no table and matches as before |
+| Speech-to-text table | `data/intel/tables/stt.json` (`rules.py` `Normalizer`) | for a pack that says `"normalize": "stt"`: sound-alikes with their context ("order of gas" is "odor of gas"), split and merged words, number words as digits. Each reading (as transcribed, and fixed) is judged on its own, so the table only ever adds hits (below). `police.json` has no table and matches as before |
 | Engine | `engine.py` | a row joins its source's window (`window_s`, 120); per category the rules' weights combine (noisy-OR, dampers); at the threshold (0.6) it is an event: the open one of that pack, category and source, or the one at the same place, else a new one |
 | Place | `place.py` | the window's words through the page locator, held to the source's home towns, after callsigns, car numbers, 10-codes, plates and times are taken out. Also "X and Y" / "corner of" through the intersection search, "the 100 block of X", "rear of / across from" (radius widened), highway exits and mile markers (the place search), and a headquarters callsign said alone narrows to its town. Police text confirms at a higher score than a page (`DOMAIN_PARAMS`). An address confirms by its cross street only within `corner_m` (200 m) of where they meet; a number far from the corner is taken as misheard. Precision: address, intersection, block, landmark or street; unconfirmed is never exact |
 | Policy | `policy.py` | whether a change is pushed: the mode ladder, the kill switch, quiet hours, the caps (below) |
@@ -2858,9 +2871,47 @@ saved before they existed name only `police` and its rules, and change nothing h
 | `ems` | the county system's Fire/EMS talkgroups (EMS is dispatched and worked there) and another system's EMS talkgroups | cardiac arrest / unresponsive / overdose, a serious crash, several patients, the fire department asked for (lift assist, forcible entry, a landing zone), a burn or smoke patient, an exposure / CO with symptoms / electrical contact, water, an elevator or a fall from height, a scene that is not safe |
 | `fire` | every fire source: the county system's Fire/EMS talkgroups and the analog fire channels | a mayday or a firefighter down, evacuate / going defensive, a collapse, people trapped, a working fire, a 2nd alarm or more units, a water supply problem, mutual aid that names Port Chester or Rye Brook |
 
-Each strong phrase family is a rule of its own, at or over the threshold alone; the weaker ones (a bare "MVA", a bare
-"fire alarm", "EMS en route") only add up with another rule in the window. Replay them on a restored copy before
-raising anything (`tools/intel_replay.py`). Tests: `tests/test_intel_packs.py`.
+Each strong phrase family is a rule of its own, at or over the threshold alone. That includes `cpd.ems_request`
+(0.6): on the county police talkgroups "EMS en route" or "ambulance is being sent" is an event by itself, the most
+frequent one there. The weaker ones (a bare "MVA", a bare "fire alarm", a patient's age, extra manpower, a staging
+call) only add up with another rule in the window. Replay them on a restored copy before raising anything
+(`tools/intel_replay.py`; rows stored before the radio log carried a service take it from the talkgroups files, so a
+replay over the history is scoped as live rows are). Tests: `tests/test_intel_packs.py`.
+
+**The three switches, and the mode an event gets.** An event's mode is the lowest of three: the pack's, the
+category's, and the rules' rung. The rung is the highest mode M at which the rules set to M or above, on their own
+(their weights, every cue whatever its mode, every damper), still reach the threshold. So:
+
+- nothing is pushed until an admin raises the pack, the category and enough of its rules;
+- raising one weak rule (`cpd.mva_word`) to push never makes a strong log rule beside it (`cpd.mva_serious`) push:
+  "crash, vehicle rollover" is then an event at log, carried by the rule at log;
+- rules at push that only reach the threshold together (a crash said, then EMS asked for) push together;
+- with every rule of a category at one mode, as every pack ships, the rung is that mode. The police pack behaves as
+  before unless an admin has set its rules to different modes; then an event no longer rises above the rules that
+  carry it.
+
+**Held at log** (`intel_events.suppressed`), whatever the switches say. Only the packs with an `area`: `county_police`,
+`ems` and `fire`. The `police` pack's events are never held or linked. An event already pushed is never held (its mode
+never goes down, so it stays on the map and the console), and when a hold ends (read back at one of our streets) the
+event gets back the mode its rules give.
+
+| Why | When |
+|---|---|
+| `out_of_area` | a pack with an `area` (the three above: Port Chester, Rye Brook, Rye, Harrison with Purchase and West Harrison, Greenwich with Byram; Settings `intel_packs.<pack>.area`, an empty list = the file's): the event is placed in another town, or, with no place, its words say it is in towns and none of the area's: a town after "in", "at", "on" or "the area of", never after "to", "from", "transporting" or "units from" (the hospital, the units coming), and a town before a street word is a street. No place and no such town: not held. A safety category with no place is never held for a town said. The gazetteer holds our area only, so a county-wide source's street read UNCONFIRMED into one of our towns is no place at all (a replay found most such readings were a same-named street elsewhere); a confirmed one places it |
+| `near_incident` | its place is one of our own incidents' (the same gazetteer label, or within 150 m plus half the reading's radius): an emergency incident (never a notification or closure), accepted (never a queued page), opened up to 6 hours before the event or 30 minutes after it, and not closed before it. Linked (`near_incident`), never a new lead. A safety category is linked and NOT held: `county_police` weapons and barricade, `ems` weapons (scene not safe), `fire` mayday, evacuate and collapse. Whether a mayday, evacuation or collapse at our own fireground should be held instead is the user's call; they are not held for now |
+
+The area is set in the pack files and through the API (`POST /api/cad/settings/intel {action: "pack", pack, area:
+[...]}`); Settings > System > Intel does not show it yet. A town name in Settings that no longer compiles drops that
+one override (logged), never the others.
+
+**The address lookup's cost.** The gazetteer is asked only for a row whose hits could carry a category to the
+threshold with the window's (a cue or a damper alone never makes an event), and for a pack with an area only in
+those towns and the towns said (`pagegeo.locate(only=True)`; pages are read as before). Over 4,000 generated
+county rows the engine's CPU per transcript went from 10.7 to 15.5 ms to 1.7 ms.
+
+**The speech-to-text table.** Each reading (as transcribed, and after the table) is judged on its own: a rule hits
+when, in one reading, a phrase is found and none of its "not" phrases is. A table never takes a hit away, and an
+entry that would remove a negation word ("zero" -> "0") is refused.
 
 **How it is fed (the context text hook, #483).** `Comms.record()` and `Comms.retext()` tell one of two hooks once
 the write has committed, on the caller's thread: `on_text` for our channels (the alarms, the status hints, the radio
@@ -3738,11 +3789,29 @@ failed its quick_check. Then every new task crash-looped for ~35 min (Cloudflare
 
 | what | when | how |
 |---|---|---|
-| **Leader check** (the main one: desired count 1, so normally no standby runs) | 2 min after the leader serves, then every `SIZEUP_REPLICA_LEADER_CHECK_MIN` (15); a file not restored yet is looked at again each minute | The leader runs its own low-rate followers of all three files into `/data/.replica-check`, at nice 19: `litestream restore -f -follow-interval SIZEUP_REPLICA_FOLLOW_S` (60 s). They start 2 min after it serves, out of its busiest minute, and one at a time (cad, then hub, then audio): each starts once the one before has done its first restore. Only the first restore is full; after that they apply only new changes. After a retake (the role back to active), they start again from scratch. For each check, a follower is stopped, its file checked and the follower started again (it resumes from its `-txid`), which is the same path a takeover depends on. A follower that exits non-zero with Litestream error output (an LTX checksum mismatch, ...) is reported at once as "restore failed (possible corruption)". One killed by a signal (OOM, a SIGTERM from elsewhere) or exiting silently is "not verifiable". A follower with no file means there is no backup: not verifiable. A file not restored after 10 min is also not verifiable. |
+| **Leader check** (the main one: desired count 1, so normally no standby runs) | 2 min after the leader serves, then every `SIZEUP_REPLICA_LEADER_CHECK_MIN` (15); a file not restored yet is looked at again each minute | The leader runs its own low-rate followers of all three files into `/data/.replica-check`, at nice 19: `litestream restore -f -follow-interval SIZEUP_REPLICA_FOLLOW_S` (60 s). They start 2 min after it serves, out of its busiest minute, and one at a time (cad, then hub, then audio): each starts once the one before has done its first restore. Only the first restore is full; after that they apply only new changes. After a retake (the role back to active), they start again from scratch. For each check, a follower is stopped, its file checked and the follower started again (it resumes from its `-txid`), which is the same path a takeover depends on. Each follower is stopped half a follow interval past its own last poll (see [A drifted check copy](#a-drifted-check-copy-2026-11-15)), and a failing check copy is confirmed from a fresh restore before anything is said; in the first round after a deploy a copy stopped mid-apply is only looked at again a minute later. A follower that exits non-zero with Litestream error output (an LTX checksum mismatch, ...) is reported at once as "restore failed (possible corruption)". One killed by a signal (OOM, a SIGTERM from elsewhere) or exiting silently is "not verifiable". A follower with no file means there is no backup: not verifiable. A file not restored after 10 min is also not verifiable. |
 | **Standby check** (while one runs) | 3 min after its followers restored, then every `SIZEUP_REPLICA_CHECK_MIN` (10); never during a takeover or a drain | It copies each followed file in 8 MB pieces. The copy counts only if the `-txid` sidecar, size and mtime don't change while it is made, so the follow the takeover needs never pauses. The copy stops the moment the role changes. A file the standby's follower found no backup of is not verifiable. |
+| **Confirm** (leader and standby) | a check copy that fails its check, or (leader) one written after its `-txid` (its follower stopped part way through applying) | A fresh `litestream restore` from S3 into the work dir, at nice 19, checked the same way. Fresh ok: the copy drifted, the replica is fine: the result is ok, counted in the record (`reseeds`), no push, no "replica check FAILED" line; on the leader the fresh file becomes the follower's copy (it resumes from its txid). Unless its follower logged apply errors, or (standby) the copy is the takeover's own: then "Replica follower failing", with the FAILED line. Re-seeded 2 rounds running or more than 4 times a day: "keeps drifting". Fresh fails the check: "Replica corrupt" (the push says a fresh restore fails it too). The restore itself fails: "restore failed (possible corruption)". |
 | **The check** | | It runs read-only (not immutable) in a child process at nice 19 and is killed when the role changes or the task stops. It runs `quick_check`, and `integrity_check` once every `SIZEUP_REPLICA_FULL_H` (24) hours per file. |
 | **Task failure** | a takeover fails, the app exits, the task is fenced, a release is unclean, the supervisor crashes | The event goes into S3 and is pushed before the task exits, all within 20 s (DNS included). Three or more failures in 10 min send a separate push, "Hub crash-looping". The next task that serves pushes "Hub serving again". |
-| **Deploy check** | after each deploy (`deploy.yml`) | `tools/deploy_check.py replicas` reads **only** `replica-watch.json`; no database ever reaches a GitHub runner. It waits until the leader of this build has recorded that it serves and every file has a check after that. The job fails if a file is failing (corrupt or not verifiable), or if nothing was verified within 10 min. |
+| **Deploy check** | after each deploy (`deploy.yml`) | `tools/deploy_check.py replicas` reads **only** `replica-watch.json`; no database ever reaches a GitHub runner. It waits until the leader of this build has recorded that it serves and every file has a check after that. The job fails if one of those checks is failing (corrupt or not verifiable), or if nothing was verified within 10 min. An older leader's results still in the record are waited past, never judged (2026-11-15: the old leader's "corrupt" failed a deploy in 0 s while the new leader's first check passed). |
+
+#### A drifted check copy (2026-11-15)
+
+At 16:32 UTC the leader's check of `cad.sqlite` failed ("wrong # of entries in index ...") and "Replica corrupt" was
+pushed, while a fresh restore of the same replica minutes later passed. The replica was fine; the leader's check copy
+was not. Litestream's follower (0.5.18 `restore -f`) applies a round of LTX files page by page, syncs, and only then
+writes its `-txid` sidecar. A SIGTERM cancels its context, which cuts the S3 read of the file it is applying part way:
+the copy is left with some pages of the next position and the rest of the last one, which is exactly an index that
+doesn't match its table. The checks were every 900 s and the followers poll every 60 s, and each follower is started
+again right after its check, so every check stopped its follower within a second or two of a poll, when it applies
+what it found. Reproduced with real Litestream 0.5.18 against a local replica read through an S3 endpoint: 5 of 30
+checks at that phase failed, each one a copy written after its sidecar; every copy whose sidecar was newer passed, and
+the follower healed on its next start (it re-applies from its sidecar). Now: each follower is stopped half a poll past its own last poll, a copy
+written after its sidecar is never checked as it is, and any failing copy is confirmed from a fresh restore (above).
+A takeover never used this copy: `/data` is the task's own (only `/data/dvr` is EFS), a new task's followers restore
+from S3 into `/data/standby`, and the takeover stops them only once they reached the released position (nothing left
+to apply), refuses one that didn't exit 0 and quick_checks what it promotes.
 
 **A red replica check that may be spurious.** The deploy check allows 10 min from the end of the ECS step. The
 leader's followers start 2 min after it serves and restore one at a time, so if the first restore of `cad.sqlite`
@@ -3759,9 +3828,12 @@ may read the record: `python3 tools/deploy_check.py replicas --build <sha>`. A m
   visible to the supervisor: against those only the static hash backstop stands (`notify.always_protected()`), so a
   topic protected only in Settings is not refused here. Each kind has its own slot, so one kind never holds back another, and each is pushed at most
   once per `SIZEUP_REPLICA_PUSH_MIN` (30):
-  * `replica_corrupt` "Replica corrupt: cad.sqlite" (5);
+  * `replica_corrupt` "Replica corrupt: cad.sqlite" (5; a check copy and a fresh restore from S3 both failed);
   * `replica_restore` "Replica restore failed (possible corruption)" (5, on the first occurrence);
   * `replica_unverifiable` "Replica not verifiable" (4, after 2 rounds);
+  * `replica_follow` "Replica follower failing" (4, at once): a fresh restore passes, but the leader's follower logged
+    apply errors (an LTX file it can't apply), or the standby's own copy (the takeover's) failed its check;
+  * `replica_drift` "Replica check copy keeps drifting" (4): re-seeded 2 rounds running, or more than 4 times in 24 h;
   * `litestream` "Hub Litestream restarted" (4: it exited under the serving app and was started again), and
     `replica_suspect` "Replica not verifiable" (4, at once) when that was without a checkpoint of the file
     ([Litestream started again under the app](#litestream-started-again-under-the-app));
@@ -3791,7 +3863,8 @@ may read the record: `python3 tools/deploy_check.py replicas --build <sha>`. A m
   * **CPU:** following costs almost nothing after the first restore. Each `quick_check` reads the whole file at nice
     19, every 15 min; `integrity_check` runs once a day. The check log line gives each one's seconds.
   * **S3:** each follower LISTs its replica every 60 s, roughly 3 × 1,440 polls a day, about $0.65–1.30 a month at
-    $0.005/1,000.
+    $0.005/1,000. A confirming fresh restore, only when a check copy fails: about 10 LISTs and a GET per file of its
+    restore plan (tens of requests, well under a cent) and, on the leader, the follower's usual restart.
   * **Deploy:** one GetObject of a few KB.
 
 ## AWS setup scripts

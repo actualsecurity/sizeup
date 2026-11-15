@@ -500,9 +500,7 @@ class PreAlerts:
                      + (" (received late: expired)" if late else ""))
             if not late and not r["test"]:
                 self._match_recent(pid, r["at"])
-                sources = getattr(self.cad, "sources", None)
-                if sources is not None:
-                    sources.poke("phone pre-alert")    # the station's CAD feed adapters poll now (#297)
+                # Never a reason to check the CAD feed early (the user's decision): the incident sources are not poked
         self.on_change()
         return self.get(pid)
 

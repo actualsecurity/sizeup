@@ -38,8 +38,25 @@ How a row becomes an event, per pack whose scope it is in:
      event: the open one of this pack, category and source still within the window, or the open one at the same place
      (subject = pack:category:place), else a new one;
   4. WHERE: the window's words through locate() (only while not confirmed);
-  5. mode = the lowest of the pack's, the category's and the best contributing rule's (off: no event; shadow: an event
-     only in the store, never shown or pushed); policy.decide() says whether to push, push.compose() + scrub() what.
+  5. mode = the lowest of the pack's, the category's and the rules' rung (off: no event; shadow: an event only in the
+     store, never shown or pushed); policy.decide() says whether to push, push.compose() + scrub() what. The rules'
+     rung is the highest mode M such that the rules at M or above ALONE (their weights, every cue whatever its mode,
+     every damper) reach the threshold: a rule at a lower mode adds to WHAT but never lifts the event over its mode, so
+     raising one weak rule to push never makes the strong ones beside it push (#535 review). With every rule of a
+     category at one mode (as shipped) this is that mode, as before.
+  6. a pack with an area (rules.Pack.area: the county-wide packs; never the police pack) holds an event at log,
+     whatever the switches say (Event.suppressed says why), unless it was already pushed (never lowered then):
+       out_of_area    its place is in another town, or, with no place, its words say it is in towns and none of the
+                      area's (towns_said: after "in / at / on", never "to / from / units from"); a safety category
+                      with no place never is;
+       near_incident  its place is one of our own accepted emergency incidents' (the same label, or within
+                      NEAR_INCIDENT_M) while that incident is open: the job we already have, linked
+                      (Event.near_incident), never a new lead. A safety category is linked and NOT held: a hazard at
+                      our own scene is what a crew most needs to hear.
+     When a hold ends (the place read back at one of our streets), the event gets back its rules' mode.
+     The address lookup (step 4) runs only for a row that could carry a category to the threshold with the window's
+     hits (a cue or a damper alone never makes an event, so it never pays for the gazetteer), and, for a pack with an
+     area, only in those towns.
 Intel never writes incidents, radio_links, incoming or alarms.
 """
 
@@ -75,6 +92,12 @@ DISPATCH_WORDS = re.compile(r"\bdisp\b|dispatch|\bhq\b|headquarters|\bcontrol\b|
 PEOPLE = {"weapons", "edp", "dispute"}   # incidents about a person, who may move ("last seen at")
 SAFETY = {"weapons", "barricade", "water_rescue", "fire_report"}   # never ended by a disregard that names nothing
 SAME_PLACE_M = 150.0                   # two places this close are the same incident's
+NEAR_INCIDENT_M = 150.0                # an event this close to one of our open incidents is that incident
+INCIDENT_BEFORE_S = 6 * 3600.0         # ... an incident opened at most this long before the event's first transmission
+INCIDENT_AFTER_S = 30 * 60.0           # ... or at most this long after its last (the radio heard first, then our call)
+STREET_WORDS = frozenset({"street", "st", "avenue", "ave", "road", "rd", "drive", "dr", "lane", "ln", "place", "pl",
+                          "parkway", "pkwy", "boulevard", "blvd", "turnpike", "tpke", "court", "ct", "way", "terrace",
+                          "circle", "highway", "hwy", "plaza", "square"})
 STOP_WORDS = {"from", "with", "that", "this", "the", "and", "into", "front", "near", "area", "call", "calls", "caller",
               "report", "reported", "respond", "units", "unit", "male", "female", "person", "subject", "someone"}
 QUEUE_MAX = 5000
@@ -162,6 +185,9 @@ class IntelEngine:
         self.notifier = None                  # live: notify.Pushes' INTEL KindNotifier (the app sets it)
         self.listen = None                    # live: listen.Listen, the push's "Listen" link (the app sets it)
         self.infer = None                     # infer.Inference: the model behind the rules (off unless set and on)
+        # incidents(now) -> [{id, lat, lon, label, created_at, closed_at}]: our own open and recent incidents (the CAD
+        # sets it; replay may), for near_incident. None: no incidents, nothing linked.
+        self.incidents = None
         self.windows: dict[tuple[str, str], Window] = {}
         self.packs: list = []
         self.cfg: dict = {}
@@ -202,11 +228,28 @@ class IntelEngine:
                 try:
                     self.packs = rules_mod.load_packs(None, snap)
                 except (ValueError, OSError) as e:
-                    self.log(f"intel: Settings' rule changes not applied ({e}): the pack files alone")
-                    self.packs = rules_mod.load_packs(None, {})
+                    self.packs = self._load_without_bad(snap, e)
             self._hash = rules_mod.ruleset_hash(self.packs)
             self._catwords = {}
         self._watch()                         # a pack or detection turned on: watched from now (counters.py)
+
+    def _load_without_bad(self, snap: dict, err) -> list:
+        """The packs with every Settings override that compiles on its own (one bad or out-of-date key, say a town
+        no longer listed, never drops the others: the police pack's tuning stays); each one left out is logged. If the
+        rest still doesn't compile: the pack files alone."""
+        good = {k: dict(v) for k, v in snap.items()}
+        for sec in ("intel_packs", "intel_rules"):
+            for key, val in list((snap.get(sec) or {}).items()):
+                try:
+                    rules_mod.load_packs(None, {sec: {key: val}})
+                except (ValueError, OSError) as e:
+                    good[sec].pop(key, None)
+                    self.log(f"intel: Settings' {sec}/{key} not applied ({e})")
+        try:
+            return rules_mod.load_packs(None, good)
+        except (ValueError, OSError) as e:
+            self.log(f"intel: Settings' rule changes not applied ({err}; {e}): the pack files alone")
+            return rules_mod.load_packs(None, {})
 
     def ruleset_hash(self) -> str:
         return self._hash
@@ -471,9 +514,10 @@ class IntelEngine:
             units.add(talker.lower())
         entry = Entry(at, hits, text, who, suppressed, talker, frozenset(units), disp)
         if self.locate is not None and not suppressed and (
-                hits or any(not e.confirmed or pack.category(e.category).get("moves")
-                            or (e.category in PEOPLE and MOVE_WORDS.search(text))
-                            for e in self._open_for(pack, None, key, at, self._merge_span(pack)))):
+                self._could_reach(pack, win, tid, hits)
+                or any(not e.confirmed or pack.category(e.category).get("moves")
+                       or (e.category in PEOPLE and MOVE_WORDS.search(text))
+                       for e in self._open_for(pack, None, key, at, self._merge_span(pack)))):
             entry.place = self._where(pack, row, key, [text], list(who))
         win.entries[tid] = entry
         win.prune(max(e.at for e in win.entries.values()), pack.window_s)
@@ -526,8 +570,30 @@ class IntelEngine:
             self.sink.hit(Hit(tid, r.id, r.v, round(float(w), 4), r.category, pack.name, at, ev.id if ev else None))
         return changed
 
+    def _could_reach(self, pack, win: Window, tid: str, hits: list) -> bool:
+        """This row's hits could carry one of the categories it says to the threshold, with the window's strongest
+        hits of that category and the cues (dampers aside: an upper bound). Else no gazetteer work for it."""
+        cues = [w for r, w in hits if r.category == rules_mod.WILD and w > 0]
+        for cat in {r.category for r, w in hits if w > 0 and r.category in pack.categories}:
+            ws = [w for r, w in hits if r.category == cat and w > 0] + cues
+            best: dict[str, float] = {}
+            for t, e in win.entries.items():
+                if t == tid or e.suppressed:
+                    continue
+                for r, w in e.hits:
+                    if r.category == cat and w > 0 and r.mode != "shadow":
+                        best[r.id] = max(best.get(r.id, 0.0), w)
+            miss = 1.0
+            for w in ws + list(best.values()):
+                miss *= 1.0 - min(1.0, w)
+            cd = pack.category(cat)
+            thr = cd.get("threshold") if cd.get("threshold") is not None else pack.threshold
+            if 1.0 - miss >= thr - 1e-9:
+                return True
+        return False
+
     def _scores(self, pack, win: Window) -> dict:
-        """{category: (WHAT, [(tid, rule, w)], best contributing rule's mode)} over the window."""
+        """{category: (WHAT, [(tid, rule, w)], the rules' rung)} over the window (the rung: step 5 of the module's doc)."""
         best: dict[str, tuple[float, str, object]] = {}      # rule id -> (weight, tid, rule): its strongest in the window
         for tid, e in win.ordered():
             if e.suppressed:
@@ -565,7 +631,9 @@ class IntelEngine:
             what = 1.0 - miss
             for w, _t, _r in damp:
                 what *= 1.0 + max(-1.0, w)
-            top_mode = max((r.mode for _w, _t, r in pos), key=mode_rank)
+            cd = pack.category(cat)
+            thr = cd.get("threshold") if cd.get("threshold") is not None else pack.threshold
+            top_mode = rung(pos, damp, thr, cues)
             out[cat] = (round(what, 4), [(t, r, w) for w, t, r in pos + cues + damp], top_mode)
         return out
 
@@ -655,8 +723,76 @@ class IntelEngine:
         return " . ".join(e.text for _t, e in win.ordered() if e.text and not e.suppressed)
 
     def _scope(self, pack, row: dict, key: str) -> dict:
+        own = pack.towns_for(key)
         return {"source_key": key, "system": str(row.get("system") or ""), "service": str(row.get("service") or ""),
-                "towns": pack.towns_for(key), "pack": pack.name}
+                "towns": own or list(pack.area), "only": bool(pack.area) and not own, "pack": pack.name}
+
+    def _outside(self, pack, ev: Event) -> bool:
+        """A pack with an area: the event is elsewhere (its place's town isn't one of the area's; or, with no place,
+        its transmissions name towns and none of the area's). No place and no town said: not known, so not outside."""
+        if not pack.area:
+            return False
+        area = {t.lower() for t in pack.area}
+        if ev.precision != "none" and ev.town:
+            return ev.town.lower() not in area
+        if pack.category(ev.category).get("safety"):
+            return False                      # unplaced: a town said is no reason to hold a hazard back
+        named = towns_said(self._texts(pack, ev.source_key, ev.traffic_ids))
+        return bool(named) and not (named & area)
+
+    def _incident(self, ev: Event) -> int | None:
+        """Our own incident at the event's place, open around its time (same label, or within NEAR_INCIDENT_M)."""
+        if self.incidents is None or ev.precision == "none" or ev.lat is None or ev.lon is None:
+            return None
+        try:
+            incs = self.incidents(self.clock()) or []
+        except Exception as e:  # noqa: BLE001 - no incidents is still a pre-alert
+            self.log(f"intel: incidents: {type(e).__name__}")
+            return None
+        best = None
+        for inc in incs:
+            at = float(inc.get("created_at") or 0.0)
+            closed = inc.get("closed_at")
+            if not at or at < ev.first_at - INCIDENT_BEFORE_S or at > ev.last_at + INCIDENT_AFTER_S:
+                continue
+            if closed is not None and float(closed) < ev.first_at:
+                continue
+            same = bool(ev.label_full) and str(inc.get("label") or "").strip().lower() == ev.label_full.strip().lower()
+            if not same and inc.get("lat") is not None and inc.get("lon") is not None:
+                d = _m(ev.lat, ev.lon, float(inc["lat"]), float(inc["lon"]))
+                same = d <= NEAR_INCIDENT_M + float(ev.radius_m or 0.0) / 2
+            if same and (best is None or at > best[0]):
+                best = (at, int(inc["id"]))
+        return best[1] if best else None
+
+    def _hold(self, pack, ev: Event, mode: str | None = None) -> None:
+        """Out of area, or our own incident's: held at log (the module's doc, step 6). Only a pack with an area (the
+        county-wide packs): the police pack's events are never held or linked. An event already pushed is never held
+        (its mode never goes down: it stays on the map and the console). mode: what the rules say now, given back when
+        a hold ends (a moving event leaving our incident's place)."""
+        if not pack.area:
+            return
+        ev.near_incident = self._incident(ev)
+        why = "out_of_area" if self._outside(pack, ev) else ""
+        if not why and ev.near_incident is not None and not pack.category(ev.category).get("safety"):
+            why = "near_incident"
+        if why and ev.pushed_at is None:
+            ev.mode = lowest(ev.mode, "log")
+            ev.suppressed = why
+        elif ev.suppressed in ("out_of_area", "near_incident"):
+            ev.suppressed = ""
+            if mode is not None:
+                ev.mode = max(ev.mode, mode, key=mode_rank)
+
+    def _rules_mode(self, pack, ev: Event) -> str | None:
+        """The mode the window's rules give the event's category now (pack, category and rung), None: not reached."""
+        win = self.windows.get((pack.name, ev.source_key))
+        got = self._scores(pack, win).get(ev.category) if win is not None else None
+        if got is None:
+            return None
+        cd = pack.category(ev.category)
+        thr = cd.get("threshold") if cd.get("threshold") is not None else pack.threshold
+        return lowest(pack.mode, cd.get("mode", "push"), got[2]) if got[0] >= thr else None
 
     def _where(self, pack, row: dict, key: str, texts: list[str], who=()):
         """The place in these transmissions' words (only the event's own: never another job's in the same window);
@@ -670,6 +806,12 @@ class IntelEngine:
             return None
         if place is not None and push_mod.scrub_label(place.label, who):
             self.log("intel: a place withheld by the scrub")
+            return None
+        if place is not None and pack.area and not place.confirmed and place.town in pack.area:
+            # a county-wide source's street, read unconfirmed into one of our towns: the gazetteer holds our area only,
+            # so a "Main Street" anywhere in the county reads as ours (replay: most such readings were elsewhere).
+            # Only a confirmed reading (a cross street, a read-back) places it here; one in another town still says
+            # it is out of the area
             return None
         return place
 
@@ -746,6 +888,7 @@ class IntelEngine:
             if moved:
                 ev.note = "moved"
         ev.subject = f"{pack.name}:{cat}:{ev.place().key or key}"
+        self._hold(pack, ev, mode)
         if before is not None and _same(before, ev):
             return None                       # idempotent: the same row again changes nothing
         ev.updated_at = now
@@ -771,6 +914,7 @@ class IntelEngine:
         ev.last_at = max(ev.last_at, at)
         ev.traffic_ids = list(dict.fromkeys([*ev.traffic_ids, tid]))
         ev.subject = f"{pack.name}:{ev.category}:{place.key or key}"
+        self._hold(pack, ev, self._rules_mode(pack, ev))
         if _same(before, ev):
             return None
         ev.updated_at = self.clock()
@@ -977,9 +1121,30 @@ class IntelEngine:
         return p.window_s if p is not None else 120.0
 
 
+def rung(evidence: list, damp: list, thr: float, cues: list = ()) -> str:
+    """The highest mode whose own rules reach thr: the category's evidence [(w, tid, rule)] at that mode or above
+    (noisy-OR), with every cue, times every damper. A cue's own mode never moves the rung (as before the rung: a cue
+    is evidence beside a category's rule, never a rule of its own). The lowest scored mode when none reaches thr (the
+    caller checks WHAT against thr anyway)."""
+    modes = sorted({r.mode for _w, _t, r in evidence}, key=mode_rank, reverse=True)
+    for m in modes:
+        miss = 1.0
+        for w, _t, _r in cues:
+            miss *= 1.0 - min(1.0, w)
+        for w, _t, r in evidence:
+            if mode_rank(r.mode) >= mode_rank(m):
+                miss *= 1.0 - min(1.0, w)
+        what = 1.0 - miss
+        for w, _t, _r in damp:
+            what *= 1.0 + max(-1.0, w)
+        if round(what, 4) >= thr:
+            return m
+    return modes[-1] if modes else "off"
+
+
 def _same(a: Event, b: Event) -> bool:
     keys = ("what_score", "level", "rules", "traffic_ids", "mode", "priority", "precision", "lat", "lon", "label_full",
-            "confirmed", "status", "category")
+            "confirmed", "status", "category", "near_incident", "suppressed")
     return all(getattr(a, k) == getattr(b, k) for k in keys)
 
 
@@ -1039,6 +1204,35 @@ class LiveSink:
             by[label] = by.get(label, 0) + 1
         title = f"{len(evs)} more pre-alerts (over the hourly limit)"
         n.send(title, " · ".join(f"{k} {v}" for k, v in sorted(by.items())), 2, ["information_source"], "")
+
+
+LOCATION_BEFORE = frozenset({"in", "at", "on"})              # "... in White Plains", "at Rye", "on Example Ave in Rye"
+AREA_WORDS = frozenset({"area", "vicinity", "village", "town", "city"})   # "the area of Harrison"
+NOT_LOCATION = frozenset({"units", "unit", "from", "to", "toward", "towards", "transporting", "transport", "transported",
+                          "en", "route"})
+
+
+def towns_said(texts) -> set[str]:
+    """The county's towns these transmissions say a call IS in (lower case): a town after "in", "at" or "on" (or "the
+    area / village of"), never after "to", "from", "transporting", "units from" (the hospital, the responding units),
+    and a town before a street word is a street ("Harrison Ave")."""
+    from sizeup.cad.sources import county_towns
+    names = [k for k in county_towns() if k]
+    out = set()
+    for t in texts or ():
+        ws = rules_mod.words(t)
+        for i in range(len(ws)):
+            prev = ws[i - 1] if i else ""
+            prev2 = ws[i - 2] if i > 1 else ""
+            located = (prev in LOCATION_BEFORE and prev2 not in NOT_LOCATION) or (prev == "of" and prev2 in AREA_WORDS)
+            if not located:
+                continue
+            for k in names:
+                n = len(k)
+                if tuple(ws[i:i + n]) == k and not (i + n < len(ws) and ws[i + n] in STREET_WORDS):
+                    out.add(" ".join(k))
+    # "rye" inside "rye brook", "harrison" inside "west harrison": the longer name said is the one meant
+    return {t for t in out if not any(o != t and f" {t} " in f" {o} " for o in out)}
 
 
 def _m(lat1, lon1, lat2, lon2) -> float:
