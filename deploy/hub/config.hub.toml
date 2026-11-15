@@ -1,6 +1,7 @@
 # sizeup HUB: the web UI and the CAD in the cloud, fed by the station (docs/cloud.md).
 # Baked into the image; no secrets here. Environment overrides (sizeup/config.py):
-#   SIZEUP_STATION_TOKEN   the station's bearer token (required: without it the hub refuses the station)
+#   SIZEUP_STATION_TOKEN   the shared station token: one station's, until it has its own (Settings > Station > Stations)
+#                          and an admin retires this one (docs/cloud.md "How station authentication works")
 #   SIZEUP_STATE_DIR       where cad.sqlite, hub.sqlite and audio.sqlite go (the image sets /data)
 #   SIZEUP_PORT, SIZEUP_HOST, SIZEUP_PUBLIC_URL
 #   SIZEUP_ACCESS_TEAM, SIZEUP_ACCESS_AUD   Cloudflare Access identity (below)
@@ -18,6 +19,11 @@ role = "hub"
 public_url = ""                    # e.g. "https://sizeup.example.org" (or SIZEUP_PUBLIC_URL); shown in /healthz
 offline_after_s = 15               # no word from the station this long = "Station offline" on screen
 audio_max_mb = 500                 # received clips' bytes still in audio.sqlite (oldest dropped first; with S3: only those waiting to upload)
+# The station the shared token is, and until multi-station the one station this hub takes: the [station] id in
+# deploy/station/config.station.toml. Any other id with the shared token is refused. Wrong? Settings > Station > Stations
+# (or python -m sizeup.cloud.stations reset-shared-id --id <id>) overrides it without a deploy. Unset: learned from
+# the first id the shared token posts as.
+legacy_station_id = "pcfd-hq"
 # Cloudflare Access identity (sizeup/cloud/access.py, docs/cloud.md "Who is signed in"): with both set,
 # every page and API but /healthz and /api/station/ needs a verified Access token, and the email
 # someone signed in with is the operator (named in Settings > Users). Either empty: off (free-text

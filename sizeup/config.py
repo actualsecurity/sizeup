@@ -192,6 +192,9 @@ class Config:
     # hub: the read-only bearer for GET /api/station/status (the deploy check, sizeup/cloud/health.py);
     # env SIZEUP_STATUS_TOKEN; "" = derived from the station token (health.status_token)
     cloud_status_token: str = ""
+    # hub: the station id the shared token (SIZEUP_STATION_TOKEN) is (sizeup/cloud/stations.py); "" = the first id it
+    # posts as, kept in hub.sqlite. It is refused for any other id, so a new station can't use it
+    cloud_legacy_station_id: str = ""
     # [prealert] (sizeup/prealert.py): Tapout's ntfy feed, read only, on the CAD of record (hub or
     # all-in-one; never a station forwarding to a hub). Off unless the section is in the config.
     prealert_enabled: bool = False
@@ -465,7 +468,8 @@ def _cloud(data: dict) -> dict:
     cl = _take(data.get("cloud", {}), "cloud", {"role", "hub_url", "token", "access_client_id", "access_client_secret",
                                                 "outbox", "outbox_max_mb", "public_url", "offline_after_s", "audio_max_mb",
                                                 "access_team", "access_aud", "keychain_prefix", "keychain_token",
-                                                "keychain_access_id", "keychain_access_secret", "status_token"})
+                                                "keychain_access_id", "keychain_access_secret", "status_token",
+                                                "legacy_station_id"})
     if not cl:
         return {}                      # all-in-one: no environment variable changes anything here
     role = str(cl.get("role", ""))
@@ -484,6 +488,9 @@ def _cloud(data: dict) -> dict:
     status_token = _env("SIZEUP_STATUS_TOKEN", str(cl.get("status_token", "")))
     if status_token and (len(status_token) < 16 or status_token == token):
         raise ConfigError("cloud.status_token / SIZEUP_STATUS_TOKEN: at least 16 characters, not the station token")
+    legacy_id = str(cl.get("legacy_station_id", "")).strip()
+    if len(legacy_id) > 64 or not legacy_id.isprintable():
+        raise ConfigError('cloud.legacy_station_id: the station\'s [station] id (e.g. "st-north"), at most 64 characters')
     team_raw = _env("SIZEUP_ACCESS_TEAM", str(cl.get("access_team", "")))
     team = team_host(team_raw)
     if team_raw and not team:
@@ -505,7 +512,8 @@ def _cloud(data: dict) -> dict:
                 cloud_outbox_max_mb=nums["outbox_max_mb"], cloud_offline_s=nums["offline_after_s"],
                 cloud_audio_max_mb=nums["audio_max_mb"],
                 cloud_public_url=_env("SIZEUP_PUBLIC_URL", str(cl.get("public_url", ""))).rstrip("/"),
-                cloud_access_team=team, cloud_access_aud=aud, cloud_status_token=status_token, **_keychain(cl))
+                cloud_access_team=team, cloud_access_aud=aud, cloud_status_token=status_token,
+                cloud_legacy_station_id=legacy_id, **_keychain(cl))
 
 
 def _prealert(data: dict) -> dict:
