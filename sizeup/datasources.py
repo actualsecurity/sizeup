@@ -212,7 +212,7 @@ class DataSources:
             at = st["tried"]                      # read, though the provider keeps no time of its own
         if st["fails"] and st["tried"] is not None:
             wait = min(BACKOFF_S[1], iv, BACKOFF_S[0] * 2 ** min(st["fails"] - 1, 30))
-            # the provider's own word on when to try again, when later (the FAA registry refused us: a day, #535)
+            # the provider's own word on when to try again, when later (the FAA registry refused us: a day, #542)
             return max(st["tried"] + wait, _num(ps.get("retry_at")) or 0.0)
         if at is None:
             return st["tried"] or self.started    # never fetched: at once (one at a time, in registration order)

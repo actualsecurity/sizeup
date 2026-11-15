@@ -415,7 +415,7 @@ def test_the_aircraft_section(tmp_path):
     p = tmp_path / "config.toml"
     p.write_text("")
     c = load(p)
-    # adsb.fi first since #535 (a tie goes to it; it failed none in a week from the hub, adsb.lol ~150 times a day)
+    # adsb.fi first since #542 (a tie goes to it; it failed none in a week from the hub, adsb.lol ~150 times a day)
     assert c.aircraft_enabled and c.aircraft_feeds == ("adsbfi", "adsblol") and c.aircraft_alarms and not c.aircraft_receiver and c.aircraft_sdr == ""
     assert c.aircraft_radius_nm == 15 and c.aircraft_registry and "adsb" not in c.sdr_ignore
     assert c.aircraft_primary == "" and c.aircraft_registry_url == ""                 # auto; registry.faa.gov

@@ -425,7 +425,7 @@ def test_no_word_from_the_receiver_is_logged_once_then_every_5_minutes_then_back
 
 
 def test_an_api_feed_failing_is_logged_once_then_every_5_minutes_then_back():
-    """#535: adsb.lol's every failure was a line (~280 a day, the hub's error watch counting them); now like our
+    """#542: adsb.lol's every failure was a line (~280 a day, the hub's error watch counting them); now like our
     receiver's: the first, then every FEED_LOG_EVERY_S while it goes on the same way, and its recovery."""
     clock = Clock(T3 + 0.5)
     logs: list[str] = []

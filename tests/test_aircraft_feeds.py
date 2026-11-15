@@ -1,4 +1,4 @@
-"""The aircraft sources' health (#535: "we keep having issues with the plane data").
+"""The aircraft sources' health (#542: "we keep having issues with the plane data").
 
 What the hub's log showed: adsb.lol's TLS handshakes timing out (~230 a day, up to 69 an hour) and 429s with
 Retry-After 1-7 s; adsb.fi never failing; the FAA registry refused (403 from its bot protection) every hour. Each

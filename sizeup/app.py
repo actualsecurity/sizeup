@@ -3309,7 +3309,7 @@ class App:
             d = json.loads(self._adsb_file.read_text()) if self._adsb_file else None
         except (OSError, ValueError):
             d = None
-        # (Settings' "none" ("") falls through to the config, as before, without the line below: #535 found it logged
+        # (Settings' "none" ("") falls through to the config, as before, without the line below: #542 found it logged
         # "Settings named , now the AIS receiver's dongle" on every start when neither had a dongle)
         if isinstance(d, dict) and isinstance(d.get("sdr"), str) and d["sdr"].strip() \
                 and not adsbd.serial_problem(d["sdr"].strip()):

@@ -496,7 +496,7 @@ heartbeat_stale_min = 90             # no heartbeat (or restart) this long: "Tap
 #   else ("auto") the busier of those that haven't failed in the last 10 min, a tie in feeds' order. Each is read on
 #   its own (one hanging never holds up the other or the map: the TLS handshake gets 4 s, the answer 8 s, one
 #   connection kept open); one that errors or is rate-limited rests (at least its Retry-After, else exponential)
-#   and the other carries on. adsb.fi first since #535: from the hub it failed none in a week, adsb.lol ~150 a day.
+#   and the other carries on. adsb.fi first since #542: from the hub it failed none in a week, adsb.lol ~150 a day.
 #   "receiver"  our own ADS-B receiver ([aircraft.receiver] below): when enabled it is always first ("primary local
 #               SDR on ADSB, secondary the above sources").
 # OpenSky is not used (a written agreement for operational use; far too few credits for a 5 s refresh).

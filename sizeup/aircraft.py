@@ -60,9 +60,9 @@ address, the freshest position per aircraft, our receiver's position first for a
   adsbfi    adsb.fi's open data API, same JSON: "personal, non-commercial use only", attribution. The user decided
             (2026-10-14) that this is personal, non-commercial use: the department charges nothing for it. On.
   The two APIs: the PRIMARY is [aircraft] primary when set, else whichever has been giving more aircraft with a
-  fresh position (a running average, SCORE_ALPHA) among those that haven't failed in FLAKY_S (#535), asked every
+  fresh position (a running average, SCORE_ALPHA) among those that haven't failed in FLAKY_S (#542), asked every
   PRIMARY_S while someone looks; the other every SECONDARY_S (its aircraft join the union and its count stays
-  known). Each is read on a thread of its own (tick(parallel=True), #535: adsb.lol's TLS handshakes timing out held
+  known). Each is read on a thread of its own (tick(parallel=True), #542: adsb.lol's TLS handshakes timing out held
   the one thread 10 s at a time, adsb.fi and the map with it) over its own kept-open connection (KeepAlive: 4 s for
   the connect and handshake, 8 s for the answer). A feed that errors, times out or answers 429 rests (at least its
   Retry-After, else 5 s doubling to 5 min) and the other becomes the primary; it comes back on its first good answer.
@@ -1764,7 +1764,7 @@ RECEIVER_LOST_S = 10.0             # an aircraft whose position from our receive
                                    # an API feed's fresher position is used (#235)
 RATE_LIMITED_MIN_S = 10.0          # a 429 without Retry-After: at least this, then doubling
 FLAKY_S = 600.0                    # an API feed that failed this recently is not made the primary while another is fine
-FEED_LOG_EVERY_S = 300.0           # an API feed failing the same way: logged once, then at most this often (#535: one
+FEED_LOG_EVERY_S = 300.0           # an API feed failing the same way: logged once, then at most this often (#542: one
                                    # line per failure, ~280 a day from adsb.lol)
 DETAILS_KEEP_S = 6 * 3600.0        # an aircraft's registration / type / operator from an API feed, kept by its address
 DETAILS_MAX = 5000
@@ -1964,7 +1964,7 @@ class AircraftLayer:
     def primary(self) -> Feed | None:
         """The API feed asked most often. Among those not resting, the steady ones (no failure in FLAKY_S) first:
         [aircraft] primary when it names one of them, else the one giving the most aircraft with fresh positions
-        lately (config order on a tie). #535: adsb.lol timed out or answered 429 ~150 times a day from the hub while
+        lately (config order on a tie). #542: adsb.lol timed out or answered 429 ~150 times a day from the hub while
         adsb.fi failed none in a week, and the busier-feed rule kept handing the primary back to adsb.lol."""
         now = self.clock()
         up = [f for f in self.api_feeds() if f.st["rest_until"] <= now]
@@ -1988,7 +1988,7 @@ class AircraftLayer:
     def tick(self, parallel: bool = False) -> None:
         """Read what is due and combine. parallel (the layer's own thread): each API feed is read on a thread of its
         own and this never waits for one, so a feed that hangs (adsb.lol's TLS handshakes timing out from the hub,
-        #535: the whole layer stood still 10 s at a time, ~11 min in its worst hour) holds up neither the other
+        #542: the whole layer stood still 10 s at a time, ~11 min in its worst hour) holds up neither the other
         feeds nor our receiver nor the map; its answer is combined on the next turn (it wakes the loop)."""
         if not self.configured:
             return
@@ -2085,13 +2085,13 @@ class AircraftLayer:
             # 85 min of no posts every poll raised it and no feed was read: #269)
             exp = min(BACKOFF_S[1], BACKOFF_S[0] * 2 ** min(st["fails"] - 1, 30))
             if isinstance(e, RateLimited):
-                # its Retry-After at least, and longer while it keeps refusing (#535: Retry-After 1-7 s, 429 again)
+                # its Retry-After at least, and longer while it keeps refusing (#542: Retry-After 1-7 s, 429 again)
                 wait = max(e.retry_after_s or RATE_LIMITED_MIN_S, exp if st["fails"] > 1 else 0.0)
             else:
                 wait = min(exp, BACKOFF_S[0]) if f.local else exp      # ours: back the moment it is
             why = str(e) if isinstance(e, RateLimited) else f"{type(e).__name__}: {getattr(e, 'reason', e)}"[:160]
             # Logged when it starts failing or fails another way, then every RECEIVER_LOG_EVERY_S (ours: retried
-            # every few seconds) or FEED_LOG_EVERY_S (an API feed) while it goes on (#262, #535); its words change
+            # every few seconds) or FEED_LOG_EVERY_S (an API feed) while it goes on (#262, #542); its words change
             # with the seconds ("for 35 s", "Retry-After 6 s"), so they are compared without the numbers.
             every = RECEIVER_LOG_EVERY_S if f.local else FEED_LOG_EVERY_S
             kind = re.sub(r"\d+(\.\d+)?", "#", why)
@@ -2108,7 +2108,7 @@ class AircraftLayer:
             return False
         now = self.clock()                       # (when it answered)
         if st["down_since"]:
-            if st["logged"]:                     # its failure was logged: its recovery too (#535)
+            if st["logged"]:                     # its failure was logged: its recovery too (#542)
                 self.log(f"aircraft: {FEEDS[f.key]['label']} back (after {now - st['down_since']:.0f} s, "
                          f"{st['fails']} failure(s))")
             st.update(down_since=None, logged=False)
@@ -2429,7 +2429,7 @@ class AircraftLayer:
         return out
 
     def feed_health(self) -> list[dict]:
-        """Settings > Station > Health's rows (#535), one per source and the FAA registry: state (ok / resting /
+        """Settings > Station > Health's rows (#542), one per source and the FAA registry: state (ok / resting /
         idle / no data), why, the last good read; the rest (failures, back-off, role) on hover."""
         if not self.configured:
             return []
