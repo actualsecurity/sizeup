@@ -38,7 +38,8 @@ const StationLogsView = (() => {
       const n = el("span", "dim", `spool ${kb(st.spool_bytes)} · sent ${(st.sent_lines || 0).toLocaleString()}`);
       n.title = `Since the station started · dropped: ${st.dropped_secret || 0} credential, ${st.dropped_adapter || 0} adapter, `
         + `${st.dropped_level || 0} level, ${st.repeats || 0} repeats, ${st.dropped_error || 0} errors, `
-        + `${st.dropped_spool || 0} batches over the spool cap, ${st.rejected || 0} refused by the hub`;
+        + `${st.dropped_held || 0} held too long, ${st.dropped_spool || 0} batches over the spool cap, `
+        + `${st.rejected || 0} refused by the hub · ${st.held || 0} waiting for the adapters`;
       box.append(c, n);
     } else box.append(el("span", "chip dim", "Station —"));
     if (status.error) box.append(Object.assign(el("span", "warn", "!"), { title: status.error }));

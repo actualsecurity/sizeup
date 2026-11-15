@@ -17,7 +17,8 @@ hub writes it to CloudWatch Logs (sizeup/cloud/cwlogs.py).
               - until those names are complete (no adapter to load, or the load is over: a source id only the runner
                 knows), every entry waits in memory and the hand-off files stay (#548): no adapter line is sent in a
                 start's first minutes. HOLD_MAX_S and HOLD_MAX_LINES at most: then what waited is dropped (kept on the
-                station), counted as dropped_held and said once, and the names known are used. Once complete, always
+                station), counted as dropped_held and said once, and the names known are used. Once complete, they
+                stay complete (a refresh that fails keeps the last complete set)
               - the unit kept (the hub's include / exclude), its level (logscrub.level) at least the hub's threshold
                 (default info: debug dropped)
               - scrubbed (logscrub.scrub: a line with a credential is DROPPED, fail closed; a scrub that raises drops

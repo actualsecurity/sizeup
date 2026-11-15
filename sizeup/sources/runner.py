@@ -32,6 +32,7 @@ from __future__ import annotations
 import importlib
 import math
 import os
+import re
 import sys
 import threading
 import time
@@ -49,6 +50,13 @@ PRUNE_S = 6 * 3600.0          # an event no poll has had this long is forgotten 
 PRUNE_MAX = 5000              # ... and at most this many are remembered per adapter
 SKIP_LOGS = 50                # a memory-read adapter's "event skipped" lines: this many different ones remembered
 NEVER = float("-inf")         # a pacing time not yet set (the monotonic clock may start near 0 at boot)
+LOG_LINE_MAX = 4000           # an adapter's log line is cut in parts this long (journald breaks at 48 KiB: #548)
+_CTRL = re.compile(r"[\x00-\x08\x0a-\x1f\x7f-\x9f]")    # control characters but tab (journald splits at a NUL too)
+
+
+def one_line(s) -> str:
+    """s as one line for the station's log: control characters and runs of white space made one space."""
+    return " ".join(_CTRL.sub(" ", str(s)).split())
 
 
 def snapshot_sources(env: dict | None = None) -> frozenset[str]:
@@ -353,7 +361,9 @@ class SourceRunner:
         if key == r.health and t - r.health_at < HEARTBEAT_S:
             return
         if key != r.health:
-            self.log(f"incident sources: {a.label}: {h.state.replace('_', ' ')}" + (f" ({h.reason})" if h.reason else ""))
+            reason = one_line(h.reason or "")           # one line: a newline in it would be an entry of its own
+            self.log(f"incident sources: {one_line(a.label)}: {h.state.replace('_', ' ')}"
+                     + (f" ({reason})" if reason else ""))
         r.health, r.health_at = key, t
         self.sink("source_health", {"source": a.source, "label": a.label, "rank": a.rank, "state": h.state,
                                     "reason": h.reason[:200], "since": h.since, "at": now, "stopped": stopped})
@@ -481,8 +491,13 @@ def context_for(state_root: str | Path, log: Callable[[str], None], clock: Calla
     """ctx_for(where) for load_adapters: each adapter's state dir under state_root/sources/. Its log lines start
     "[adapter] ": the station's log shipper keeps them on the station (cloud/logship.py ADAPTER_TAG, #548)."""
     def tagged(line: str) -> None:
-        # every line: journald splits a message on its newlines, and each part is an entry of its own
-        log("\n".join(f"[adapter] {x}" for x in (str(line).splitlines() or [""])))
+        # every journal entry starts with the tag: journald makes one of each line (and splits at a NUL, and breaks a
+        # line at 48 KiB), so each line gets it, its control characters go, and a long one is cut in tagged parts
+        out = []
+        for x in str(line).splitlines() or [""]:
+            x = _CTRL.sub(" ", x)
+            out += [f"[adapter] {x[i:i + LOG_LINE_MAX]}" for i in range(0, max(len(x), 1), LOG_LINE_MAX)]
+        log("\n".join(out))
 
     def make(where: str) -> SourceContext:
         safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in where)[:64]

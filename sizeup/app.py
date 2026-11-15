@@ -162,7 +162,9 @@ CATEGORIES = {"fire": "#ff4d3d", "ems": "#4da3ff", "rescue": "#ffb020", "hazard"
 
 
 def log(msg: str) -> None:
-    print(f"{time.strftime('%H:%M:%S')} {msg}", flush=True)
+    # one write per message (print writes the text and the newline apart: another thread's line could fall between)
+    sys.stdout.write(f"{time.strftime('%H:%M:%S')} {msg}\n")
+    sys.stdout.flush()
 
 
 # -- warm before the takeover (GitHub #264) ---------------------------------------------------------------------

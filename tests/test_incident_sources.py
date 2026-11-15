@@ -10,6 +10,8 @@ import sys
 import threading
 import time
 import types
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -915,6 +917,56 @@ def test_a_factory_that_raises_systemexit_or_hangs_never_stops_the_station(tmp_p
     assert not app.sources_loaded.is_set() and not logship.markers_complete(app)
     assert app.sources_loaded.wait(10) and logship.markers_complete(app)
     app.cad.sources.stop()
+
+
+def journald(printed: list[str]) -> list[str]:
+    """What journald makes of a stream's lines: an entry per line, split at a NUL, broken at 48 KiB (LineMax)."""
+    out = []
+    for m in printed:
+        for line in m.split("\n"):
+            for part in line.split("\0"):
+                b = part.encode()
+                out += [b[i:i + 48 * 1024].decode(errors="replace") for i in range(0, max(len(b), 1), 48 * 1024)]
+    return out
+
+
+def test_repro_548_every_journal_entry_of_an_adapter_log_starts_with_the_tag(tmp_path):
+    printed = []
+    ctx = context_for(tmp_path, lambda m: printed.append(f"14:00:00 {m}"))("entry point alpha")
+    ctx.log("a\0E99 at 1 TEST ST")
+    ctx.log("esc \x1b[31m red \x7f del\tand a tab")
+    ctx.log("x" * 60000 + "é" * 30000)
+    ctx.log("one two\x85three\x0bfour")
+    assert printed[0] == "14:00:00 [adapter] a E99 at 1 TEST ST"
+    assert printed[1] == "14:00:00 [adapter] esc  [31m red   del\tand a tab"
+    entries = journald(printed)
+    assert len(entries) == 2 + 23 + 4
+    assert all(e.removeprefix("14:00:00 ").startswith("[adapter] ") for e in entries)
+    assert all(len(e.encode()) < 48 * 1024 for e in entries)
+
+
+def test_repro_548_a_health_reason_is_logged_on_one_line(tmp_path):
+    rig = Rig(tmp_path)
+    lines = []
+    rig.runner.log = lines.append
+    rig.feed.outage("backing_off", "login refused\nE99 at 1 TEST ST\0more")
+    rig.poll()
+    assert any(m.endswith("backing off (login refused E99 at 1 TEST ST more)") for m in lines)
+    assert not any("\n" in m or "\0" in m for m in lines)
+    assert runner_mod.one_line(" a\r\n\tb\x00c  ") == "a b c"
+
+
+def test_repro_548_the_station_log_is_one_write_a_message(monkeypatch):
+    from sizeup import app as app_mod
+    writes = []
+    monkeypatch.setattr(sys, "stdout", SimpleNamespace(write=writes.append, flush=lambda: None))
+    app_mod.log("hub link: connected")
+    assert len(writes) == 1 and writes[0].endswith(" hub link: connected\n")
+
+
+def test_repro_548_the_station_logs_hover_shows_the_held_lines():
+    js = (Path(__file__).parent.parent / "sizeup" / "web" / "static" / "logs.js").read_text()
+    assert "${st.dropped_held || 0} held too long" in js and "${st.held || 0} waiting" in js
 
 
 def test_a_hub_with_adapters_configured_loads_nothing(tmp_path, monkeypatch):
