@@ -328,8 +328,11 @@ def test_the_intel_page_carries_a_line_per_pack(tmp_path):
     cad = make_cad(tmp_path)
     cad.intel.feed(row("x1", "anything", cad.clock(), **ELSEWHERE))
     d = cad.intel_admin.page(gate=False)
-    [p] = d["counters"]["packs"]
-    assert p["pack"] == "police" and p["text"] == "0 in scope / 1 considered · last in scope: never"
+    lines = d["counters"]["packs"]
+    assert [x["pack"] for x in lines] == [p["name"] for p in d["packs"]]          # a line for every pack, in its order
+    p = next(x for x in lines if x["pack"] == "police")
+    assert p["text"] == "0 in scope / 1 considered · last in scope: never"
+    assert all(x["h24"]["considered"] == 1 for x in lines)                     # every pack was handed it
     assert set(C.KEYS) <= set(p["h24"]) and set(C.KEYS) <= set(p["start"]) and d["counters"]["all"]["h24"]["considered"] == 1
     json.dumps(d["counters"])
 
@@ -342,7 +345,9 @@ def test_the_health_panel_has_the_packs_lines_and_survives_a_failing_one():
     e, _sink = engine(clock=clock)
     clock.t += 86400
     r.h.intel = lambda: e.counts()["packs"]
-    [line] = r.h.panel()["intel"]
+    lines = r.h.panel()["intel"]
+    assert [x["pack"] for x in lines] == [p.name for p in e.packs]
+    line = next(x for x in lines if x["pack"] == "police")
     assert line == {"pack": "police", "label": "PD", "on": True, "level": "warn", "title": line["title"],
                     "text": "0 in scope / 0 considered · last in scope: never"}
     assert r.keys() == []                                                     # a line on the panel, never an alert

@@ -325,16 +325,22 @@ def test_each_pack_says_what_it_was_handed_in_its_line(site, browser, width):
     site.cad.intel.feed({"id": "x1", "start": site.cad.clock(), "source": "p25:example:1", "system": "example",
                          "service": "fire", "text": "radio check"})
     pg = open_intel(browser, site, width)
-    stat = pg.locator(f"{CARD} .in-pack .in-stat span").first
+    packs = [p.name for p in site.cad.intel.packs]
+    lines = pg.locator(f"{CARD} .in-pack .in-stat span[data-live^='pack:']")
+    assert lines.count() == len(packs)                                       # one line in each pack's own line
+    assert [lines.nth(i).get_attribute("data-live") for i in range(len(packs))] == [f"pack:{n}" for n in packs]
+    stat = pg.locator(f"{CARD} [data-live='pack:police']")
     assert stat.text_content() == "0 in scope / 1 considered · last in scope: never"
     assert "1 out of scope" in stat.get_attribute("title") and "warn" not in stat.get_attribute("class")
     pg.route("**/api/cad/intel", a_day_of_nothing)
     pg.reload()
     pg.wait_for_selector(f"{CARD} table")
-    stat = pg.locator(f"{CARD} .in-pack .in-stat span").first
-    assert stat.text_content().startswith("0 in scope / 4,012 considered") and "warn" in stat.get_attribute("class")
-    box, card = stat.bounding_box(), pg.locator(CARD).bounding_box()
-    assert box["x"] >= card["x"] - 0.5 and box["x"] + box["width"] <= card["x"] + card["width"] + 0.5
+    card = pg.locator(CARD).bounding_box()
+    for i in range(len(packs)):
+        stat = lines.nth(i)
+        assert stat.text_content().startswith("0 in scope / 4,012 considered") and "warn" in stat.get_attribute("class")
+        box = stat.bounding_box()
+        assert box["x"] >= card["x"] - 0.5 and box["x"] + box["width"] <= card["x"] + card["width"] + 0.5
     assert pg.evaluate("document.querySelector('#s-intel').scrollWidth <= document.querySelector('#s-intel').clientWidth")
     assert pg.errors == []
 
@@ -345,7 +351,8 @@ def test_the_counters_move_with_every_transcript_without_the_card_being_swapped(
     marked data-live is no part of what the card is), so the card's nodes stay, and a checkbox or a button with the
     focus keeps it, and text selected in the rules table stays selected."""
     pg = open_intel(browser, site, 1280)
-    stat = f"{CARD} .in-pack .in-stat span"
+    every = "(t) => { const ns = [...document.querySelectorAll(t[0])]; return ns.length === t[2] && ns.every((n) => n.textContent.includes(t[1])); }"
+    stat, lines, n = f"{CARD} [data-live='pack:police']", f"{CARD} [data-live^='pack:']", len(site.cad.intel.packs)
     pg.evaluate("""() => { window._kids = [...document.querySelector('#s-intel').children]; window._swaps = 0;
       new MutationObserver((ms) => { for (const m of ms) if (m.target.id === 's-intel') window._swaps += 1; })
         .observe(document.querySelector('#s-intel'), { childList: true }); }""")
@@ -361,8 +368,7 @@ def test_the_counters_move_with_every_transcript_without_the_card_being_swapped(
                              "service": "fire", "text": "radio check"})
         site.transmission()
         site.cad.store.rev += 1                                              # (as a recorded transmission moves it)
-        pg.wait_for_function("(t) => document.querySelector(t[0]).textContent.startsWith(t[1])",
-                             arg=[stat, f"0 in scope / {i + 1} considered"], timeout=45000)     # (a busy machine)
+        pg.wait_for_function(every, arg=[lines, f" / {i + 1} considered", n], timeout=45000)   # every pack's line (a busy machine)
     assert f"{4} out of scope" in pg.get_attribute(stat, "title")            # the hover kept up too
     assert pg.evaluate("window._swaps") == 0
     assert pg.evaluate("() => [...document.querySelector('#s-intel').children].every((n, i) => n === window._kids[i])")
