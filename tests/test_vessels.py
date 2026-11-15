@@ -570,6 +570,30 @@ def test_the_ais_dongle_is_never_a_radio_or_a_job(tmp_path, monkeypatch):
         again.stop()
 
 
+def test_settings_none_for_adsb_stays_none_and_no_empty_dongle_is_logged(tmp_path, monkeypatch):
+    """#542 review: an admin's "none" in Settings > Radios ({"sdr": ""}) with an AIS dongle named is no ADS-B dongle
+    (as on main: the config's must not come back on restart); with no AIS dongle either it is the config's, as before,
+    and no "Settings named , now the AIS receiver's dongle" line."""
+    from dataclasses import replace
+
+    from tests.test_adsb_receiver import station_app as fixture
+    appmod, c, _plugged = fixture.__wrapped__(tmp_path, monkeypatch)
+    logs: list[str] = []
+    monkeypatch.setattr(appmod, "log", lambda m: logs.append(m))
+    (tmp_path / "state" / "adsb_receiver.json").write_text(json.dumps({"sdr": "", "by": "settings"}))
+    app = appmod.App(replace(c, vessels_sdr="fire-fg", vessels_receiver=True))
+    try:
+        assert app.adsb_sdr == ""                                          # un-named: never handed back to readsb
+    finally:
+        app.stop()
+    app = appmod.App(c)                                                    # no AIS dongle: the config's, as before
+    try:
+        assert app.adsb_sdr == "adsb1090"
+    finally:
+        app.stop()
+    assert not any("Settings named ," in m for m in logs)
+
+
 def test_the_near_endpoint_for_a_marine_call_and_not_for_another(tmp_path):
     clock = Clock()
     ly = VesselLayer(aisstream_key=KEY, clock=clock, connect=lambda: FakeWS([]))

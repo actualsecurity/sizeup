@@ -3310,11 +3310,15 @@ class App:
         except (OSError, ValueError):
             d = None
         if isinstance(d, dict) and isinstance(d.get("sdr"), str) and not adsbd.serial_problem(d["sdr"].strip()):
-            if d["sdr"].strip() == getattr(self.cfg, "vessels_sdr", ""):     # the AIS receiver's now: never both
-                log(f"ADS-B: Settings named {d['sdr'].strip()}, now the AIS receiver's dongle ([vessels.receiver] sdr): "
-                    "using [aircraft.receiver] sdr instead")
+            sd = d["sdr"].strip()
+            if sd == getattr(self.cfg, "vessels_sdr", ""):     # the AIS receiver's now: never both
+                # (logged only for a dongle: #542 found "Settings named , now the AIS receiver's dongle" on every
+                # start when neither named one; Settings' "none" with no AIS dongle still falls to the config)
+                if sd:
+                    log(f"ADS-B: Settings named {sd}, now the AIS receiver's dongle ([vessels.receiver] sdr): "
+                        "using [aircraft.receiver] sdr instead")
             else:
-                return d["sdr"].strip()
+                return sd
         return self.cfg.aircraft_sdr
 
     def set_adsb_receiver(self, serial: str | None) -> str | None:

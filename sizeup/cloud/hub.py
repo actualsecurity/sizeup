@@ -691,7 +691,9 @@ class HubApp(App):
         # the intel engine's counters, a line per pack: in scope / considered (sizeup/intel/counters.py)
         self.health.intel = lambda: self.cad.intel.counts()["packs"]
         # MTA TrainTime or its fallback (#362); Tapout's phone pre-alert (not configured until an admin sets the topic)
-        self.health.feeds = lambda: [self.trains.feed_health()] + ([self.prealert.feed_health()] if self.prealert is not None else [])
+        # and each aircraft source with the FAA registry (#542: last good read, failures and back-off on hover)
+        self.health.feeds = lambda: [self.trains.feed_health()] + ([self.prealert.feed_health()] if self.prealert is not None else []) \
+            + (self.aircraft.feed_health() if getattr(self, "aircraft", None) is not None else [])
         # the hub's own error spikes (#285, sizeup/errwatch.py): the same status notifier; main() tees the log into it
         from sizeup import errwatch
         pub = (cfg.cloud_public_url or "").rstrip("/")

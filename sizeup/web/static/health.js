@@ -49,7 +49,11 @@ const StationHealth = (() => {
       const row = el("tr");
       for (const c of r) {
         if (c instanceof Node) { const td = el("td"); td.append(c); row.append(td); }
-        else if (Array.isArray(c)) row.append(el("td", c[1] || "", c[0] ?? "—"));
+        else if (Array.isArray(c)) {   // [text, class, hover]
+          const td = el("td", c[1] || "", c[0] ?? "—");
+          if (c[2]) td.title = c[2];
+          row.append(td);
+        }
         else row.append(el("td", "", c === null || c === undefined || c === "" ? "—" : String(c)));
       }
       t.tBodies[0].append(row);
@@ -137,10 +141,10 @@ const StationHealth = (() => {
           i.seen.map((x) => `${x.label} ${when(x.first_seen)}` + (x.gone_at ? " · no longer listed" : "")).join(" · "),
           i.seen.filter((x) => x.lead_s !== null && x.lead_s !== undefined).map((x) => `${x.label} ${lead(x.lead_s)}`).join(" · ")]), ""));
     }
-    if ((d.feeds || []).length) {   // map feeds with a fallback (#362: MTA TrainTime, else GTFS-realtime)
-      const feedCls = (s) => (s === "ok" ? "hl-ok" : s === "fallback" || s === "error" ? "hl-bad" : "dim");
+    if ((d.feeds || []).length) {   // map feeds with a fallback (#362: MTA TrainTime, else GTFS-realtime; #542 aircraft)
+      const feedCls = (s) => (s === "ok" ? "hl-ok" : s === "fallback" || s === "error" ? "hl-bad" : s === "resting" ? "hl-warn" : "dim");
       kids.push(el("h3", "hl-sub", "Feeds"), table(["Feed", "State", "Reason", "Last read", "Fallback"],
-        d.feeds.map((f) => [f.label, [f.state, feedCls(f.state)], f.why || "",
+        d.feeds.map((f) => [f.label, [f.state, feedCls(f.state), f.title || ""], f.why || "",
           f.at ? `${when(f.at)} (${longDur(serverNow() - f.at)} ago)` : "never", f.fallback || ""]), ""));
     }
     if ((d.intel || []).length) {   // radio pre-alerts (sizeup/intel/counters.py): in scope / considered, a line per pack
