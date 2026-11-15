@@ -8,7 +8,8 @@
 Everything is invented: the addresses (Example Ave, Sample St), the remarks and the transcripts. Through the same HTTP
 API the pages use (POST /api/cad/incident, /dispatch, /note, /close) and, with --token, the station's
 POST /api/station/events (sizeup/cloud/hub.py): FG1 transmissions from the units on a call, so they land on its radio
-log. Run it again for more. Only ever to this machine: any other host is refused.
+log. Run it again for more. Only ever to this machine: any other host (or a user:password@) is refused, the
+environment's proxy is never used and a redirect is never followed, so the token can't leave it.
 """
 
 from __future__ import annotations
@@ -44,6 +45,25 @@ CALLS = [
 ]
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """A redirect is an error here, never followed: a POST turned into a GET could carry the token elsewhere."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+# Straight to this machine: no proxy from the environment (http_proxy would get the token), no redirects.
+DIRECT = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
+
+
+def local_base(url: str) -> str:
+    """The base URL when it is http(s) to this machine with no user:password@ in it, else ""."""
+    u = urllib.parse.urlsplit(url)
+    if u.scheme not in ("http", "https") or "@" in u.netloc or (u.hostname or "") not in LOCAL:
+        return ""
+    return url.rstrip("/")
+
+
 def call(base: str, path: str, body: dict | None = None, token: str = "") -> dict:
     req = urllib.request.Request(base + path, method="POST" if body is not None else "GET",
                                  data=json.dumps(body).encode() if body is not None else None,
@@ -51,10 +71,19 @@ def call(base: str, path: str, body: dict | None = None, token: str = "") -> dic
     if token:
         req.add_header("Authorization", f"Bearer {token}")
     try:
-        with urllib.request.urlopen(req, timeout=30) as r:
+        with DIRECT.open(req, timeout=30) as r:
             return json.loads(r.read() or b"{}")
     except urllib.error.HTTPError as e:
-        raise SystemExit(f"{req.method} {path}: HTTP {e.code} {e.read()[:300].decode(errors='replace')}") from None
+        text = e.read()[:300].decode(errors="replace")
+        if e.code == 409 and "this is the station" in text:
+            raise SystemExit(f"{base} is a station (its CAD is on the hub): point --base at the hub") from None
+        if 300 <= e.code < 400:
+            raise SystemExit(f"{req.method} {path}: HTTP {e.code} redirect to {e.headers.get('Location', '?')}: "
+                             "not followed (point --base at sizeup itself)") from None
+        raise SystemExit(f"{req.method} {path}: HTTP {e.code} {text}") from None
+    except (urllib.error.URLError, OSError) as e:
+        why = getattr(e, "reason", e)
+        raise SystemExit(f"{base}: can't reach it ({why}): is sizeup running there?") from None
 
 
 def silence_wav(seconds: float = 1.0, rate: int = 8000) -> str:
@@ -82,10 +111,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--token", default=os.environ.get("SIZEUP_STATION_TOKEN", ""),
                     help="a local hub's station token (default: $SIZEUP_STATION_TOKEN): adds radio traffic")
     args = ap.parse_args(argv)
-    base = args.base.rstrip("/")
-    host = urllib.parse.urlsplit(base).hostname or ""
-    if host not in LOCAL:
-        print(f"refused: {host or base} is not this machine (dev_seed only fills a local instance)", file=sys.stderr)
+    base = local_base(args.base)
+    if not base:
+        print(f"refused: {args.base} is not http(s) to this machine, with no user:password@ "
+              "(dev_seed only fills a local instance)", file=sys.stderr)
         return 2
     role = call(base, "/healthz").get("role", "")
     units = {u["name"]: u["id"] for u in call(base, "/api/cad/state").get("units", [])}

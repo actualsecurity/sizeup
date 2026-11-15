@@ -62,7 +62,7 @@ One entry point, `python -m sizeup --config <file>`. The role comes from the con
 |---|---|---|---|
 | all-in-one | `config.toml` from `config.example.toml`, no `[cloud]` | 8090 | CAD, UI and radios in one process. The main local mode. |
 | hub | `deploy/hub/config.hub.toml` (Access on) or a local copy with it off | 8090 | The CAD of record, fed by a station. No radios. |
-| station | `config.toml` with `[cloud] role = "station"` | 8091 (set it) | Radios and the link to a hub. Its page shows the station only; `/cad` redirects to the hub. |
+| station | `config.toml` with `[cloud] role = "station"` | 8091 (set it) | Radios and the link to a hub. Its page shows the station only; it has no CAD (`/cad` redirects to its own `/?from=cad`). |
 
 Other ports: 8093 Kokoro voice server, 8179 whisper-server, 8089 the hub supervisor (production only).
 `/healthz` answers in every mode; `SIZEUP_PORT` and `SIZEUP_HOST` override `[web]`.
@@ -71,6 +71,7 @@ Other ports: 8093 Kokoro voice server, 8179 whisper-server, 8089 the hub supervi
 
 ```sh
 sed 's/^auto_assign = true/auto_assign = false/' config.example.toml > config.toml
+printf '\n[roads]\ndvr = false\n' >> config.toml     # optional: no camera recording (below)
 .venv/bin/python -m sizeup --config config.toml       # http://127.0.0.1:8090/cad
 ```
 
@@ -78,8 +79,11 @@ sed 's/^auto_assign = true/auto_assign = false/' config.example.toml > config.to
   the config file's folder. It is gitignored.
 - The databases go to `state/` (gitignored); `SIZEUP_STATE_DIR=<dir>` puts them elsewhere. Delete the folder to start
   over.
-- Starts in about 3 s. Without radios it logs that whisper and the voice are down, and that 511NY waits for
-  credentials. All expected.
+- Starts in about 3 s. It logs that 511NY waits for credentials; whisper isn't mentioned until a clip needs it, and
+  the first dispatch logs that the voice server isn't there (falling back to macOS `say`, or text only). All expected.
+- The camera DVR (`[roads] dvr`, on by default) records the public highway cameras near open calls and any camera
+  someone opens, up to `dvr_max_gb` (6 GB) under the state folder. Seeded calls near the map's home start it. Off:
+  `[roads] dvr = false`, as above.
 - `auto_assign = false`: see [shared machines](#radios-on-a-shared-machine).
 
 ### A populated instance
@@ -97,7 +101,8 @@ radio logs:
 .venv/bin/python tools/dev_seed.py --base http://127.0.0.1:8090 --token "$SIZEUP_STATION_TOKEN"
 ```
 
-It refuses any host but this machine.
+It refuses any host but this machine (and a `user:password@` in the URL), never uses the environment's proxy and
+never follows a redirect, so the token stays here. Pointed at a station it says to point `--base` at the hub.
 
 ### Hub and station, both local
 
@@ -106,13 +111,14 @@ exactly that). For a hub you can use, make a local copy without Access, Transcri
 is gitignored and resolves the same relative paths):
 
 ```sh
-sed -e '/^access_team/d' -e '/^access_aud/d' -e 's/^aws = true/aws = false/' \
-    -e 's/^tts_engine = "polly"/tts_engine = "none"/' deploy/hub/config.hub.toml > deploy/hub/config.toml
-export SIZEUP_STATION_TOKEN=$(openssl rand -hex 32)
+perl -ne 'next if /^access_(team|aud) /; s/^aws = true/aws = false/; s/^tts_engine = "polly"/tts_engine = "none"/;
+          s/^\[roads\]$/[roads]\ndvr = false/; print' deploy/hub/config.hub.toml > deploy/hub/config.toml
+export SIZEUP_STATION_TOKEN=$(openssl rand -hex 32); echo "$SIZEUP_STATION_TOKEN"
 SIZEUP_STATE_DIR=/tmp/sizeup-hub SIZEUP_CACHE_S3=off .venv/bin/python -m sizeup --config deploy/hub/config.toml
 ```
 
-A station feeding it, in a second shell with the same `SIZEUP_STATION_TOKEN`:
+The copy also has the camera DVR off. A station feeding it, in a second shell: set `SIZEUP_STATION_TOKEN` there to
+the value the first shell printed (`export SIZEUP_STATION_TOKEN=<that value>`), then:
 
 ```sh
 cp config.toml config.station.toml       # the all-in-one config above
@@ -149,9 +155,9 @@ dongles plugged in:
 ```
 
 - About 5,900 tests. With `-n auto` the suite takes about 3 minutes on a recent Mac, browser tests included (longer
-  on a busy machine). On a clone, 13 to 45 tests skip, each saying why (`-rs`): private replay data, and whichever of
-  Litestream, node and Playwright you haven't installed. CI runs `python -m pytest -q -p no:cacheprovider -n auto --dist loadfile` on
-  Ubuntu, Python 3.14.
+  on a busy machine). Skips say why (`-rs`). On a clone with node installed, 13 to 45 skip: private replay data, and
+  Litestream or Playwright if missing. Without node about 210 skip (the UI script tests). CI runs
+  `python -m pytest -q -p no:cacheprovider -n auto --dist loadfile` on Ubuntu, Python 3.14, with node.
 - Run it in parallel: serially on macOS, two tests fail late in the run with `filedescriptor out of range in
   select()` (#457).
 - The only custom marker is `replay` (private captures; [below](#replay-tests)). Everything else is plain pytest.
@@ -275,17 +281,39 @@ can't show, and:
 
 ```sh
 mkdir -m 700 ~/sizeup-restore
-export LITESTREAM_BUCKET=<your-bucket> LITESTREAM_PATH=<path> LITESTREAM_REGION=<region>
-export SIZEUP_STATE_DIR=/data SIZEUP_LITESTREAM_SYNC_S=30 LITESTREAM_SOCKET=/tmp/sizeup-ls.sock   # the config's ${...}
-for db in cad hub audio; do
-  litestream restore -config deploy/hub/litestream.yml -o ~/sizeup-restore/$db.sqlite /data/$db.sqlite
-done
+(   # a subshell: none of these stays in your shell afterwards
+  export LITESTREAM_BUCKET=<your-bucket> LITESTREAM_PATH=<path> LITESTREAM_REGION=<region>
+  export SIZEUP_STATE_DIR=/data SIZEUP_LITESTREAM_SYNC_S=30 LITESTREAM_SOCKET=/tmp/sizeup-ls.sock   # the config's ${...}
+  for db in cad hub audio; do
+    litestream restore -config deploy/hub/litestream.yml -o ~/sizeup-restore/$db.sqlite /data/$db.sqlite
+  done
+)
 ```
 
-Read-only on S3. To run the hub on that copy, use the local hub config above with `[prealert] enabled = false` and no
-`AWS_*`, `SIZEUP_*_BUCKET` or `SIZEUP_*_TOPIC` in the environment. The copy's own Settings may name real push topics,
-and Settings win over the environment, so clear them in the copy first:
-`sqlite3 ~/sizeup-restore/cad.sqlite "DELETE FROM settings_overrides WHERE section = 'notify'"`.
+Read-only on S3. Running the hub on that copy talks to nothing outside only if you set it up that way:
+
+- **A new shell, nothing project-related in it.** No `LITESTREAM_*` (with `LITESTREAM_BUCKET` set and
+  `SIZEUP_CACHE_S3` not `off`, the hub uploads its map caches into the production backup bucket,
+  `sizeup/cachesync.py`), no `AWS_*` or `AWS_PROFILE`, no `SIZEUP_*_BUCKET`, no `SIZEUP_*_TOPIC`. In doubt:
+  `unset $(env | grep -oE '^(LITESTREAM|AWS)_[A-Z_]*')`.
+- **The local hub config above** (Access, Transcribe, Polly and the DVR off) with `[prealert] enabled = false` added,
+  and **always `SIZEUP_CACHE_S3=off`**.
+- **Role hub only, never all-in-one.** On a machine that has the private incident-source adapter and its
+  credentials, all-in-one would load it and poll the county; the hub refuses to (`sizeup/cloud/adapters.py`
+  `hub_guard`).
+- **Push topics cleared in the copy.** The copy's Settings may name real ntfy topics, and Settings win over the
+  environment: `sqlite3 ~/sizeup-restore/cad.sqlite "DELETE FROM settings_overrides WHERE section = 'notify'"`. That
+  also drops the Settings part of the protected-topic list (the phone pre-alert's topics), which is safe only while no
+  push topic is set anywhere, as here.
+
+```sh
+SIZEUP_STATE_DIR=~/sizeup-restore SIZEUP_CACHE_S3=off SIZEUP_STATION_TOKEN=$(openssl rand -hex 32) \
+  .venv/bin/python -m sizeup --config deploy/hub/config.toml
+```
+
+The hub **writes into the copy**: migrations to this build's schema, retention prunes, new rows, the map and GIS
+caches. Copy the restore first if you need it untouched. With the DVR on, the restored open calls and pinned cameras
+would record public highway cameras into the restore folder (up to 6 GB); the local hub config has it off.
 
 **Replay and evaluation tools.** `tools/intel_replay.py` (the radio-intel rules over a restored `cad.sqlite`) and
 `tools/stt_eval.py` (speech-to-text against hand-corrected transcripts) need only the venv and a restored copy. They

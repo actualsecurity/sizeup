@@ -74,7 +74,7 @@ the station's **system** python3 (3.11+). They must use the standard library onl
 ## Running tests
 
 ```sh
-caffeinate -i perl -e 'alarm 1500; exec @ARGV' .venv/bin/python -m pytest -n auto -q
+caffeinate -i perl -e 'alarm 1800; exec @ARGV' .venv/bin/python -m pytest -n auto -q
 ```
 
 - `caffeinate -i` stops the suite from stalling when the Mac sleeps. The `perl alarm` is the timeout, because there is
