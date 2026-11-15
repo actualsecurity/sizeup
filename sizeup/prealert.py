@@ -42,7 +42,7 @@ log. It ends one of three ways, each also in the event log:
 A "[TEST]" ring is shown as a test and never matched.
 
 Runs on the CAD of record only: the hub, or all-in-one. A station forwarding to a hub doesn't
-subscribe (the hub does; two would double-alert); Settings > System > Station turning forwarding
+subscribe (the hub does; two would double-alert); Settings > Station > Hub link turning forwarding
 off or on starts or stops it (App.prealert_sync).
 """
 
@@ -396,7 +396,7 @@ class PreAlerts:
         return self._thread is not None and not self._stopping.is_set()
 
     def start(self) -> PreAlerts:
-        """Subscribe (again: Settings > System > Station turned forwarding off). A restart resumes
+        """Subscribe (again: Settings > Station > Hub link turned forwarding off). A restart resumes
         each stream after its last message."""
         with self._lock:
             if self.running:
@@ -658,7 +658,7 @@ class PreAlerts:
                 "feeds": [self.ring_stream.state(), self.status_stream.state()]}
 
     def feed_health(self) -> dict:
-        """Settings > Health's row for the pre-alert feed: ok / error, or not configured (no topic set: the first-run hint)."""
+        """Settings > Station > Health's row for the pre-alert feed: ok / error, or not configured (no topic set: the first-run hint)."""
         ring = self.ring_stream
         if not ring.topic:
             return {"key": "prealert", "label": "Phone pre-alert (Tapout)", "state": "not configured",

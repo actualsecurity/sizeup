@@ -1,4 +1,4 @@
-"""Station forwarding on and off while the app runs: Settings > System > Station (user, 2026-10-08:
+"""Station forwarding on and off while the app runs: Settings > Station > Hub link (user, 2026-10-08:
 "how do we turn on and off station mode though? id like that to be easy to do from the ui").
 
     state/cloud.json   {"forward": bool, "hub_url": str, "at", "by"}: written by the first change

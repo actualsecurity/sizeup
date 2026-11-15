@@ -1,4 +1,4 @@
-// Station health (GitHub #79, sizeup/cloud/health.py) on the hub: Settings > Health, an admins' tab (#203: no banner
+// Station health (GitHub #79, sizeup/cloud/health.py) on the hub: Settings > Station > Health, an admins' tab (#203: no banner
 // under the header for anyone, nothing of it in the state push). GET /api/cad/health (admins only: sizeup/cad/api.py
 // ADMIN_READS) has the station's health, the alerts now and 24 h of their history; polled every POLL_MS while the tab is
 // on screen, and not at all otherwise. Self-contained: settings.js mounts it on the section (sHealth).
@@ -513,7 +513,7 @@ const StationHealth = (() => {
     if (again && isOpen()) perfTimer = setTimeout(pollPerf, PERF_POLL_MS);
   }
 
-  // settings.js, every render of Settings > Health (admins): the section in place (once), then the poll.
+  // settings.js, every render of Settings > Station > Health (admins): the section in place (once), then the poll.
   function mount(node) {
     if (panel !== node || !card || !node.contains(card)) {
       panel = node;

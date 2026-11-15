@@ -119,7 +119,7 @@ def test_every_post_the_scripts_make_is_in_the_permission_map():
 
 def test_every_admin_only_get_the_scripts_make_is_in_the_read_map():
     """The admin-only GETs (sizeup/cad/api.py ADMIN_READS, checked by CadApi.get and server.py's /api/cad/health): the push
-    topics (Settings > System), station health (Settings > Health, #203) and the Search page's CSV (#403). A dispatcher or
+    topics (Settings > System), station health (Settings > Station > Health, #203) and the Search page's CSV (#403). A dispatcher or
     viewer gets a 403."""
     scripts = "".join(js(n) for n in JS_FILES)
     for path, literal, script in (("/api/cad/notify", '"/api/cad/notify"', "settings.js"),
@@ -149,7 +149,7 @@ def test_every_admin_only_get_the_scripts_make_is_in_the_read_map():
 def test_no_health_banner_on_the_console_or_the_board_and_health_is_an_admins_tab():
     """#203: station health (silent, behind, update failed, a dongle or job, whisper / trunk-recorder, a stuck channel, the
     outbox, the disk, the whisper queue, Amazon Transcribe and its budget) is never a banner under the header, for anyone;
-    it is Settings > Health, shown to admins on the hub, polled only while open. The NWS banner and the alarms stay."""
+    it is Settings > Station > Health, shown to admins on the hub, polled only while open. The NWS banner and the alarms stay."""
     html = (STATIC / "cad.html").read_text()
     box = re.search(r'<div id="alert-banners"[^>]*>(.*?)\n</div>', html, re.S).group(1)
     assert 'id="wx-banner"' in box and "health" not in re.sub(r"<!--.*?-->", "", box, flags=re.S)

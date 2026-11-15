@@ -1,8 +1,36 @@
 # sizeup CAD: self-dispatch for Port Chester FD
 
-Started 2026-10-07 on branch `cad`. sizeup grows from "listen to 60 Control" into a small
-computer-aided dispatch system that PCFD runs for itself. The radio recording, transcription, and
-map stay as features that feed it.
+Started 2026-10-07 on branch `cad`. sizeup grows from "listen to 60 Control" into a small computer-aided dispatch system
+that PCFD runs for itself. The radio recording, transcription, and map stay as features that feed it.
+
+This is the CAD's original plan, kept for history with its status. Current direction: [ROADMAP.md](ROADMAP.md). How it
+is built now: [architecture.md](architecture.md) and [cloud.md](cloud.md).
+
+## Status as of 2026-11-14
+
+| Planned item | Status | Now |
+|---|---|---|
+| Incidents with a number, type, subtype, location, remarks, chronology (goal 1) | Done | `sizeup/cad/store.py`, `sizeup/cad/service.py`, lists from `data/cad_lists.json`. |
+| Events created from 60 Control pages, accepted by a person | Changed | Ranked incident sources: external CAD feeds first (private, station-only adapters), paging as the backup (`sizeup/cad/sources.py`, #297, #301). In "60 Control dispatching" mode a feed's incident that lists our units is accepted and tracked automatically; in "PCFD dispatching" mode a person does it (`sizeup/cad/automode.py`, #311). |
+| Run cards, editable, skipping unavailable units (goal 2) | Done | `sizeup/cad/runcards.py`, Settings > Run cards. Also full department, "any apparatus", and estimates by road (`sizeup/cad/eta.py`, `routes.py`). Not signed off as policy (#50). |
+| Unit status board, set by a click (goal 3) | Done | The two boards from `data/cad_lists.json`. |
+| Statuses suggested from the radio, a person confirms (goal 3, M3) | Done | `sizeup/cad/statushints.py` (#37, PR #143). |
+| Dispatch: tones, generated voice, preview (goal 4) | Done, voice changed | `sizeup/cad/dispatcher.py`. The voice is Kokoro locally or Amazon Polly on the hub, with macOS `say` only as the fallback (`sizeup/tts.py`, `sizeup/polly.py`), not `say` alone. |
+| Transmit through a real radio (goal 4, M2) | Still planned | `AudioPttTransmitter` in `sizeup/cad/transmit.py` is a stub that refuses to construct. `[dispatch] transmit = true` is refused at startup. Waiting on hardware and authorization (#41). |
+| Incident board and map, radio traffic on the incident (goal 5) | Done | Plus a per-incident radio log (`sizeup/cad/radiolog.py`) and a wall board at `/monitor`. |
+| `/cad` next to the monitor page, on one machine | Changed | `/cad` is the app. It runs all-in-one, or split into a station and a hub in the cloud behind Cloudflare Access ([cloud.md](cloud.md)). |
+| CSV exports with the sheet's columns (M1) | Done | `sizeup/cad/export.py`. |
+| Incident close-out (M3) | Done | Disposition and close; units go back to Available (PR #236). |
+| Reports (M3, M4) | Partly | CSV exports and CAD search with address history (PR #421). A monthly response report is #133. No NFIRS export, and no issue for one. |
+| Pre-plans and hydrants (M4) | Done in part | Hydrants as a county GIS layer (PR #227); pre-plan points and site documents on the call's map (`sizeup/cad/preplan.py`, `preplan_docs.py`, PR #458, #464); premise notes (`premise.py`). Issue #44 is still open; a first-due card is #129. |
+| Mutual aid (M4) | Partly | The "Other / mutual aid" board and joint-response departments exist. Mutual-aid requests as their own workflow are not built; no issue. |
+| Station alerting: lights, printer (M4) | Still planned | #45, waiting. |
+| Member notification bridge, acknowledging from a phone (goal 6) | Still planned | Tied to the vendor question (#43). |
+| Live unit locations (AVL), the map side | Done | `Cad.positions`, follow, routes, estimated motion (#358, #360, #453). |
+| Live unit locations (AVL), a provider | Still planned | No source chosen: IamResponding, Red Alert or our own iPad app (#43). |
+| The iPad app reached over a VPN | Changed | The hub is reached through Cloudflare Access, so no VPN is needed. The app itself is not built. |
+
+The original plan follows, unchanged except where a line says "now" or gives a status.
 
 ## What it does (goal)
 
@@ -61,6 +89,10 @@ map stay as features that feed it.
 
 ## Architecture (in this repo)
 
+As planned. `sizeup/cad/` now has many more modules ([architecture.md](architecture.md) has the module map), the
+store has more tables (radios, radio traffic, settings, operators, activity), and the dispatch voice is Kokoro or
+Polly.
+
 - `sizeup/cad/`: the new domain model.
   - `store.py`: SQLite (`state/cad.sqlite`, not under `captures/`, so the audio cleaner never touches
     it). Tables: units, incidents, assignments (unit × incident with status times), run_cards and
@@ -77,10 +109,10 @@ map stay as features that feed it.
 
 ## Milestones
 
-Order and status now live in [ROADMAP.md](ROADMAP.md) and the GitHub issues; the M numbers below
-are referenced from there. M1 is built.
+Order and status now live in [ROADMAP.md](ROADMAP.md) and the GitHub issues. M1 and the status suggestions of M3 are
+built; M2 is not (see the status table at the top).
 
-- **M1 (started):**
+- **M1 (built):**
   - CAD store; the sheet's lists and unit boards from `data/cad_lists.json`; default run cards
     keyed TYPE or TYPE/SUBTYPE (editable stand-ins, not policy).
   - `/cad` console laid out like the sheet's LIVE CAD tab: Event info (with received via),
@@ -90,20 +122,21 @@ are referenced from there. M1 is built.
   - Incident database tab; CSV exports with the sheet's columns (Incident Database, Call History,
     Unit History, Event Log); admin counts and next event number.
   - Events waiting to be accepted from 60 Control pages for Port Chester.
-- **M2:** transmit through a real radio interface (after hardware and authorization); key-time limits;
-  transmit log.
-- **M3:** radio-derived status suggestions (FG1 MDC IDs, Fire/EMS 15 talkers and phrases); incident
-  close-out; reports.
+- **M2 (not built, #41):** transmit through a real radio interface (after hardware and authorization); key-time
+  limits; transmit log.
+- **M3 (built, except reports):** radio-derived status suggestions (FG1 MDC IDs, Fire/EMS 15 talkers and phrases);
+  incident close-out; reports.
 - **M4+:**
-  - pre-plans and hydrants
-  - mutual aid
-  - station alerting
-  - reports
+  - pre-plans and hydrants (built in part: PR #227, #458, #464; #44 open)
+  - mutual aid (the board exists; requests are not built)
+  - station alerting (#45, waiting)
+  - reports (CSV exports exist; #133)
   - **Live unit and member locations (AVL) and statuses:**
     - **IamResponding:** IAR already tracks responders ("Track Me if I Respond", Incident Map). Ask IAR/RapidSOS for agency API access in both directions: read responder status and locations into sizeup, and push sizeup's dispatched events into IAR through its CAD Incidents API so members get them in the IAR app.
     - **Red Alert (Alpine Software, RedNMX):** ask Alpine for API access to member/apparatus location, and a CAD link so closed events pre-fill Red Alert incident reports.
-    - **An apparatus iPad web app** (ours, no vendor approval): shows the assigned event; GPS every few seconds while open; one-tap status (en route, on scene, available). Needs data access on the iPads and secure remote access to sizeup (VPN such as Tailscale, not exposed to the internet). Background tracking would need a native app.
-  - the user's request (2026-10-07): "could we also pull from RedAlert... to pull location information live of where they are? or maybe we could run an app on the ipads for that... would be nice to use IAR or RedAlert though that already has that info"
+    - **An apparatus iPad web app** (ours, no vendor approval): shows the assigned event; GPS every few seconds while open; one-tap status (en route, on scene, available). Needs data access on the iPads and secure remote access to sizeup (as planned: a VPN; now: the hub behind Cloudflare Access). Background tracking would need a native app.
+  - The request (2026-10-07) was to pull live locations from Red Alert or IAR, which already have them, or else to run
+    an app on the iPads.
   - **The map side is ready (#358); no provider is built until the source is chosen.** `Cad.positions` is the single
     input (`sizeup/cad/mapview.py`). Whichever source we pick hands in one fix per unit in this shape
     (`mapview.ingest()` checks it):
@@ -131,17 +164,22 @@ are referenced from there. M1 is built.
     shut. A call whose address names a highway and whose point is on it (or, naming none, whose point is on one) is
     routed onto that highway's carriageway in its signed direction (NB / SB / EB / WB, else the nearest); a cross
     street naming the highway never does it. Re-routed when a
-    fix is more than 50 m off the path, or after 3 fixes heading away. The recommendation's estimates use the route's time where there
-    is one, else the straight-line model. The numbers are in Settings > Dispatch. No traffic, signals or turn costs.
+    fix is more than 50 m off the path, or after 3 fixes heading away. The recommendation's estimates use the route's
+    time where there is one, else the straight-line model. The numbers are in Settings > Dispatch. No traffic, signals or turn costs.
+  - **Estimated motion (#453).** A rig with no live fix is moved along its route by time, to the call and home after it
+    is released, and is marked as estimated on the map. A live fix replaces the estimate (`sizeup/cad/routes.py`).
 
 ## Open questions for the department
 
-1. **Run cards:** what does PCFD send per call type today? A starting set is seeded in M1 to edit.
-2. **Paging on the PC repeater:** frequency and access tone; which alert tones members' pagers or
-   radios respond to (department-wide vs per station/company). Do members carry pagers (e.g. Minitor)
-   or radios with tone alert on that channel?
-3. **Transmit hardware:** which radio (model, accessory port) is available for a base or desk setup,
-   and where will it sit?
-4. **Who dispatches:** operators and sign-in (members at HQ? the duty officer?).
-5. **Unit and station names** as members say them on the air: are these Engine 60 / Ladder 31 /
-   Rescue 40 and the 239x chiefs, or are there others?
+All five are still open. They are tracked in the issues named.
+
+1. **Run cards:** what does PCFD send per call type today? A starting set is seeded in M1 to edit. (#50)
+2. **Paging on the PC repeater:** frequency and access tone; which alert tones members' pagers or radios respond to
+   (department-wide vs per station/company). Do members carry pagers (e.g. Minitor) or radios with tone alert on that
+   channel? (#41, #119)
+3. **Transmit hardware:** which radio (model, accessory port) is available for a base or desk setup, and where will it
+   sit? (#41)
+4. **Who dispatches:** operators and sign-in (members at HQ? the duty officer?). Sign-in and the admin / dispatcher /
+   viewer roles exist ([cloud.md](cloud.md)); who holds them is the department's decision (#52).
+5. **Unit and station names** as members say them on the air: are these Engine 60 / Ladder 31 / Rescue 40 and the 239x
+   chiefs, or are there others? (#50, #49)

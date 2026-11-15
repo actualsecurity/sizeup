@@ -85,7 +85,7 @@ def test_a_wedging_adsb_decoder_for_hours_is_one_push_then_one_recovery_once_it_
     w.run(3600)
     assert len(adsb(r.n.msgs)) == 2
     hist = [h for h in r.h.panel()["history"] if h["key"] == "adsb"]
-    assert len(hist) == 1 and hist[0]["pushed"]                           # one episode on Settings > Health too
+    assert len(hist) == 1 and hist[0]["pushed"]                           # one episode on Settings > Station > Health too
 
 
 def test_back_after_it_settled_is_a_new_episode():
@@ -121,7 +121,7 @@ def test_a_muted_alert_is_on_health_but_never_pushed_nor_its_recovery():
     r.at(0, status=adsb_down())
     r.at(120, status=adsb_down())
     (a,) = [x for x in r.h.alerts() if x["key"] == "adsb"]
-    assert a["muted"] is True and a["muted_until"] is None                # on Settings > Health, marked muted
+    assert a["muted"] is True and a["muted_until"] is None                # on Settings > Station > Health, marked muted
     assert [x for x in r.h.panel()["alerts"] if x["key"] == "adsb"][0]["muted"]
     r.at(3600, status=adsb_down())
     assert adsb(r.n.msgs) == []

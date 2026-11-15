@@ -19,7 +19,7 @@ crash-looped for ~35 min until someone opened a browser). Run by the supervisor 
 The results go to s3://<bucket>/<prefix>/replica-watch.json (conditional writes, like the lock): each file's last check,
 the files failing, the last task events, push times, and the leader serving now (its task, build, since when; the
 deploy's check reads that: tools/deploy_check.py replicas). The leader mirrors it to $SIZEUP_RUN_DIR/replica-watch.json
-for the app (Settings > Health: the Replicas row and a "Replica corrupt" alert, sizeup/cloud/health.py).
+for the app (Settings > Station > Health: the Replicas row and a "Replica corrupt" alert, sizeup/cloud/health.py).
 
 Pushes to the STATUS topic, each kind with its own slot (at most one per SIZEUP_REPLICA_PUSH_MIN, 30; a push's time is
 recorded in S3 only once ntfy took it, one retry):
@@ -75,7 +75,7 @@ from sizeup.leaderlock import LockError, S3Object
 
 DBS = ("cad", "hub", "audio")
 KEY = "replica-watch.json"
-STATE_FILE = "replica-watch.json"        # in the run dir: what the app's Settings > Health reads
+STATE_FILE = "replica-watch.json"        # in the run dir: what the app's Settings > Station > Health reads
 
 INTERVAL_S = 600.0          # the standby: a check of each followed file this often
 STANDBY_FIRST_S = 180.0     # ... the first this long after its followers restored (never in the deploy's busy minute)

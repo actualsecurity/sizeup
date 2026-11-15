@@ -21,7 +21,7 @@
     [cloud] role = "station": every finished page / transmission / transcript / radio ID heard also
         goes to the hub through a durable outbox (_emit, sizeup/cloud/station.py); role = "hub": no
         radios at all, the same state fed by the station (sizeup/cloud/hub.py). docs/cloud.md
-        Forwarding is switched on and off while running in Settings > System > Station
+        Forwarding is switched on and off while running in Settings > Station > Hub link
         (sizeup/cloud/stationmode.py; state/cloud.json then wins over the role here).
     [roads]: 511NY's cameras, incidents, roadwork and message signs for the maps' Layers, camera
         snapshots proxied by this process (sizeup/roads.py)
@@ -560,7 +560,7 @@ class App:
         # [cloud] role = "station": the hub link (sizeup/cloud/station.py) sets these; None = all-in-one.
         self.events: Callable[[str, dict, str | None], None] | None = None   # (type, data, clip id)
         self.link = None
-        # Settings > System > Station turns that link on and off while running (sizeup/cloud/stationmode.py).
+        # Settings > Station > Hub link turns that link on and off while running (sizeup/cloud/stationmode.py).
         self.station = None
         self._heard_sent: dict[tuple[str, str, str], float] = {}
         self.cad.live = self.live.state
@@ -616,7 +616,7 @@ class App:
             _mark("speech-to-text")
         # The phone pre-alert from Tapout's ntfy feed (sizeup/prealert.py), read only, on the CAD of
         # record: all-in-one or the hub. While this station forwards to a hub it is off here (the hub
-        # subscribes: one alert): prealert_sync() follows Settings > System > Station.
+        # subscribes: one alert): prealert_sync() follows Settings > Station > Hub link.
         self.prealert = None
         self._started = False
         # External incident sources (#297, sizeup/sources/): the station's read-only CAD feed adapters, found and
@@ -4192,7 +4192,7 @@ class App:
 
     def prealert_sync(self) -> None:
         """The phone pre-alert on while this is the CAD of record, off while forwarding to a hub
-        (at start, and on every Settings > System > Station change)."""
+        (at start, and on every Settings > Station > Hub link change)."""
         pa = self.prealert
         if pa is None:
             return
@@ -4280,7 +4280,7 @@ def channels_model() -> str:
 def make_app(cfg: Config, fence=None) -> App:
     """The app for this config's role: the hub (no radios: fed by the station, sizeup/cloud/hub.py),
     or all-in-one, forwarding to the hub as the station when that is on (config.toml's [cloud] role
-    = "station" until Settings > System > Station changes it: sizeup/cloud/stationmode.py)."""
+    = "station" until Settings > Station > Hub link changes it: sizeup/cloud/stationmode.py)."""
     if cfg.cloud_role == "hub":
         from sizeup.cloud.adapters import hub_guard
         from sizeup.cloud.hub import HubApp
@@ -4340,7 +4340,7 @@ def make_server(app: App, fence=None, listener=None) -> WebServer:
 
     def changed() -> None:             # a new talker is pushed at once, not on the next second
         server.poke()
-        link = app.link                # (the hub link comes and goes: Settings > System > Station)
+        link = app.link                # (the hub link comes and goes: Settings > Station > Hub link)
         if link is not None:
             link.live_changed()
     app.live.on_change = changed

@@ -13,8 +13,9 @@ an encrypted talkgroup is `activity` and any other `record` (a new source costs 
 chosen). Settings > Radios changes it per talkgroup (TalkgroupPrefs,
 sizeup/talkgroups.py). An encrypted talkgroup is only ever `activity` or `off`.
 
-Speech-to-text follows the tier (sizeup/stt.py's classes, #300 / #306): `alert` is LIVE, `text` is LOW (shed when
-whisper is behind); neither is ever ahead of the pages, Fire/EMS 15, the firegrounds or the airband.
+Speech-to-text follows the tier (sizeup/stt.py's classes, #300 / #306): `text` is LOW (shed when whisper is
+behind) and another P25 system's `alert` is CONTEXT (shed when it waits);
+neither is ever ahead of the pages, Fire/EMS 15, the firegrounds or the airband.
 
 Retention ([storage] tier_keep_days, docs/cloud.md): how long a tier's audio is kept past the usual
 audio_keep_hours. A clip on a CAD event, with an alarm or an emergency is a record as before.

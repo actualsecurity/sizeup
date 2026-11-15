@@ -176,7 +176,7 @@ class Config:
     cloud_access_id: str = ""         # station: Cloudflare Access service token (env SIZEUP_ACCESS_CLIENT_ID / _SECRET)
     cloud_access_secret: str = ""
     cloud_outbox: str = ""            # station: the durable outbox (SQLite); "" = outbox.sqlite next to cloud_state
-    cloud_state: str = ""             # not the hub: state/cloud.json, Settings > System > Station (sizeup/cloud/stationmode.py)
+    cloud_state: str = ""             # not the hub: state/cloud.json, Settings > Station > Hub link (sizeup/cloud/stationmode.py)
     # not the hub: macOS Keychain services (generic passwords) for the three secrets when the env has none
     cloud_keychain_token: str = "sizeup-station-token"
     cloud_keychain_access_id: str = "sizeup-access-id"
@@ -402,7 +402,7 @@ def _dispatch_voice(dsp: dict) -> tuple[str, str, str]:
 
 
 def hub_url_problem(url: str) -> str:
-    """"" for a usable hub URL, else why not (config and Settings > System > Station)."""
+    """"" for a usable hub URL, else why not (config and Settings > Station > Hub link)."""
     m = re.fullmatch(r"(https?)://([^/:\s]+)(:\d{1,5})?(/\S*)?", url or "")
     if not m:
         return "the hub's URL, https://..."
@@ -456,7 +456,7 @@ def _keychain(cl: dict) -> dict:
 
 def _cloud(data: dict) -> dict:
     """[cloud] -> Config fields. No section = all-in-one (role ""). A section without a role is
-    all-in-one too, with its hub_url / Keychain names ready for Settings > System > Station."""
+    all-in-one too, with its hub_url / Keychain names ready for Settings > Station > Hub link."""
     cl = _take(data.get("cloud", {}), "cloud", {"role", "hub_url", "token", "access_client_id", "access_client_secret",
                                                 "outbox", "outbox_max_mb", "public_url", "offline_after_s", "audio_max_mb",
                                                 "access_team", "access_aud", "keychain_prefix", "keychain_token",
@@ -473,7 +473,7 @@ def _cloud(data: dict) -> dict:
         if why:
             raise ConfigError(f"cloud.hub_url: {why}")
     # The station's token may also come from the Keychain (sizeup/cloud/stationmode.py): without one
-    # anywhere the link waits, and Settings > System > Station says what is missing.
+    # anywhere the link waits, and Settings > Station > Hub link says what is missing.
     if token and len(token) < 16:
         raise ConfigError("cloud.token: at least 16 characters (e.g. `openssl rand -hex 32`)")
     status_token = _env("SIZEUP_STATUS_TOKEN", str(cl.get("status_token", "")))

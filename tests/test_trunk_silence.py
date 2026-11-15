@@ -1,5 +1,5 @@
 """Silence alerts (#258): only the whole P25 trunk system going quiet alerts ("P25 trunk silent"), never one talkgroup
-or one conventional channel (those are hints in Settings > Health, with when they were last heard); the control
+or one conventional channel (those are hints in Settings > Station > Health, with when they were last heard); the control
 channel lost (trunk-recorder's decode rate) alerts at once; an older config with [alerts] main_channels still loads."""
 from __future__ import annotations
 

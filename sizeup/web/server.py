@@ -64,7 +64,7 @@ POST /api/cad/perf/profile {"seconds": 30, "hz": 25}  admins: sample every threa
                                by the CPU each used; the answer is the summary and the folded stacks. One at a time
                                (409), a rest after each (429). Over PROFILE_WAIT_S (or "wait": false): 202 at once
 GET  /api/cad/perf/profile[?format=folded]  the last profile again (folded: its stacks as text, for a flame graph)
-GET  /api/cad/health           the hub only: Settings > Health (sizeup/cloud/health.py, #79, #203): the station's
+GET  /api/cad/health           the hub only: Settings > Station > Health (sizeup/cloud/health.py, #79, #203): the station's
                                health, its alerts and 24 h of their history; admins only (sizeup/cad/api.py
                                ADMIN_READS), polled by the tab while open, never in the state push
 GET  /api/cad/adapter-password the hub only: Settings > Station > Adapter's password card (sizeup/cloud/adapterpass.py):
@@ -393,7 +393,7 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
     small and separate from the monitor's, so neither page carries the other's). station: the hub's
     ingest (sizeup/cloud/hub.py Hub), which checks the station's token before reading any body.
     access: an AccessVerifier (sizeup/cloud/access.py): who signed in, required on the hub.
-    station_mode: Settings > System > Station (sizeup/cloud/stationmode.py StationMode), not on the hub.
+    station_mode: Settings > Station > Hub link (sizeup/cloud/stationmode.py StationMode), not on the hub.
     role: [cloud] role; "station" serves the station page and refuses the CAD's (see the top).
     roads: the highway layers (sizeup/roads.py Roads): /api/cad/roads, /api/cad/cameras..., GET only.
     gis: the county GIS layers (sizeup/gis.py Gis): /api/cad/gis..., GET only (ETag, gzip).

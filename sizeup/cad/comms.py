@@ -1,7 +1,7 @@
 """Communications log: every transmission the monitor transcribed, tied to a rig and to CAD events.
 
     radio_traffic   one row per transmission (the monitor's clip id: its audio plays from
-                    /api/audio/<id>.wav while its audio is kept: 12 h, a year on an event, docs/cloud.md
+                    /api/audio/<id>.wav while its audio is kept: 30 days on the hub (audio_keep_hours = 720), 12 h all-in-one, a year on an event, docs/cloud.md
                     "Audio retention"; the transcript is copied here
                     and kept), with the rig(s) the registry resolved and the raw radio ID(s); an FG1
                     key-up with no ID says why (id_note, #163): none (no ID burst: the radio sent

@@ -6,7 +6,7 @@ sizeup/sources/runner.py (they come here as "source_event" / "source_health" thr
                (PAGING_RANK: below every feed). A feed is healthy while its last report says "ok" and is under
                REPORT_STALE_S old (older: "stale"); paging is healthy while the station is connected (paging_ok). The
                acting primary is the first healthy tier, promoted and demoted automatically (the console's pill and
-               Settings > Health say which). Hysteresis: a feed shown ok goes bad (and the acting primary moves) only
+               Settings > Station > Health say which). Hysteresis: a feed shown ok goes bad (and the acting primary moves) only
                once a bad run has lasted DEMOTE_S (an ok that hasn't held PROMOTE_S doesn't end the run), and is ok
                again only after PROMOTE_S of "ok" (a station restart's "no list yet" for one runner cycle never flips
                it). Shown at once: the adapter's own "failing" (it stopped) and no report for REPORT_STALE_S; a row
@@ -85,7 +85,7 @@ sizeup/sources/runner.py (they come here as "source_event" / "source_health" thr
                call moves onto it and is dismissed (#365, _sweepable): untouched, no "possibly the same" note on
                another open incident, and its page matched again now takes this incident, for the same call
     stale      the station sends the ids still in each feed's snapshot ("source_seen"): an open report the feed no
-               longer lists is noted once on its incident and flagged in Settings > Health
+               longer lists is noted once on its incident and flagged in Settings > Station > Health
     address    a feed's or a page's location is stored normalised (normal_location): its streets as the gazetteer
                spells them, else suffixes and directions abbreviated, in proper case, an intersection "A Rd & B Ave",
                and its town ("12 Example Ave, Sample Village"; out of area too, from the feed's town token). Every
@@ -2545,7 +2545,7 @@ class Sources:
         return [{"kind": "radio", "id": f"r{r['id']}", "at": r["at"], "source": r["source"], "text": r["text"]}
                 for r in self.store.q("SELECT * FROM incoming WHERE status = 'open' AND until >= ? ORDER BY at DESC", (now,))]
 
-    # -- what the console and Settings > Health show --------------------------------------------------------------------
+    # -- what the console and Settings > Station > Health show --------------------------------------------------------------------
 
     def state(self, now: float | None = None) -> dict:
         """The CAD state push: the tiers in short, the acting primary, the possible-incoming notices."""
@@ -2559,7 +2559,7 @@ class Sources:
                 "incoming": self.incoming(now)}
 
     def panel(self, now: float | None = None) -> dict:
-        """Settings > Health: the tiers, and per incident each source's first-seen time and its lead over paging."""
+        """Settings > Station > Health: the tiers, and per incident each source's first-seen time and its lead over paging."""
         now = self.clock() if now is None else now
         rows = self.store.q("SELECT r.incident_id, r.source, r.label, MIN(r.first_seen) AS first, MAX(r.gone_at) AS gone, "
                             "i.number, i.address, i.status, i.created_at FROM source_reports r JOIN incidents i "

@@ -178,7 +178,7 @@ def test_each_kind_has_its_notifier_and_one_topic_serving_both_shares_one_queue(
     assert not none.notifier(notify.ALERTS).enabled and not none.notifier(notify.STATUS).send("x", "y")
 
 
-@pytest.mark.parametrize("ours", [OUR_STATUS, OUR_ALERTS, "pcfd-sizeup-health", "x-example-status-topic", "example-status-topic-2",
+@pytest.mark.parametrize("ours", [OUR_STATUS, OUR_ALERTS, "pcfd-xmpl-health", "x-example-status-topic", "example-status-topic-2",
                                   "example-ring-topic-test", "my-firehouse-ring-xyz"])
 def test_protected_topics_are_refused_by_exact_name_not_by_a_word_in_ours(ours):
     prot = ("example-status-topic", "example-ring-topic", "firehouse-ring-xyz")

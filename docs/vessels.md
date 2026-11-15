@@ -48,7 +48,8 @@ Pluggable, in this order of preference. For each vessel, the newest position win
 
 `sizeup-ais.service` runs `aisd.py`, which runs [AIS-catcher](https://github.com/jvde-github/AIS-catcher) on one
 RTL-SDR named for AIS, with JSON on stdout (`-o 5`). It keeps each vessel's latest messages in
-`/run/sizeup-ais/messages.json`, and sizeup-station posts the vessels to the hub (`POST /api/station/vessels`). The
+`/run/sizeup-ais/messages.json` (positions for 10 min, static data for 6 h), and sizeup-station posts the vessels to
+the hub (`sizeup/cloud/vessellink.py`, `POST /api/station/vessels`). All-in-one, the hub reads the file directly. The
 dongle is claimed through the shared rtl-claims (app `sizeup`, mode `ais`). It is never opened while another app
 (shortfinal) holds it, and it is never one of sizeup's radios. Hardware and steps:
 `deploy/station/README.md` → **AIS receiver**. In short:
@@ -68,14 +69,18 @@ dongle is claimed through the shared rtl-claims (app `sizeup`, mode `ais`). It i
 
 ### 2. aisstream.io (free websocket)
 
-One websocket to `wss://stream.aisstream.io/v0/stream`, subscribed to the box. It is open only while someone has
-the layer on (and 15 min after, since names come in slowly) or while a marine call is open. When it fails it backs
-off from 5 s, doubling to 5 min, and waits 30 min after a refused key. A server close right after the subscription,
-with nothing sent, backs off as usual the first two times in a row and waits as for a refused key from the third
-(at most 5 min while a marine call is open; anything heard resets the count). Any other close with nothing received
-counts as a failure, and every connection waits at least 5 s after the last one. When the box is quiet it reconnects every 10 min. Only the hub's
-lease holder connects: a standby task never does (hot/cold deploys). It identifies as *Port Chester Fire Department - sizeup emergency situational awareness application
-(github.com/actualsecurity/sizeup)*.
+One websocket to `wss://stream.aisstream.io/v0/stream`, subscribed to the box.
+
+| | |
+|---|---|
+| Open | Only while someone has the layer on (and 15 min after, since names come in slowly) or while a marine call is open. |
+| Who connects | Only the hub's lease holder. A standby task never does (hot/cold deploys). |
+| A failure | Backs off from 5 s, doubling to 5 min. Every connection waits at least 5 s after the last one. |
+| A refused key | Waits 30 min. |
+| A close right after subscribing, nothing sent | The usual backoff the first two times in a row; from the third, the wait for a refused key (at most 5 min while a marine call is open). Anything heard resets the count. |
+| Any other close with nothing received | A failure. |
+| A quiet box | Reconnects after 10 min with nothing heard. |
+| User-Agent | *Port Chester Fire Department - sizeup emergency situational awareness application (github.com/actualsecurity/sizeup)* |
 
 **The key** is read from env `SIZEUP_AISSTREAM_KEY`, or `[vessels] aisstream_key` in a local, uncommitted config.
 **With no key, this source is off.** The key is never logged or shown; the API only says `"key": "set"` or `"missing"`.
@@ -100,7 +105,7 @@ AISHub shares its data API with stations that feed it. Once our receiver feeds i
 [vessels]                          # leave out: on, but with no source it shows nothing
 enabled = true
 bbox = [-73.83, 40.78, -73.50, 41.07]   # west, south, east, north (at most 2° a side)
-# aisstream_key: env SIZEUP_AISSTREAM_KEY instead (the hub: SSM /sizeup-hub/aisstream-key)
+# aisstream_key = ""               # 16+ characters; env SIZEUP_AISSTREAM_KEY wins (the hub: SSM, see above)
 
 [vessels.receiver]                 # the station's own receiver (deploy/station/README.md "AIS receiver")
 enabled = false
@@ -109,6 +114,9 @@ gain = "auto"                      # or dB
 ppm = 0                            # a non-TCXO dongle's frequency correction
 # json = ""                        # all-in-one: the decoder's messages file ("" = /run/sizeup-ais/messages.json)
 ```
+
+The config is refused when `[vessels.receiver] sdr` is all digits, is one of `[radio] sdrs`, or is the ADS-B dongle
+(`[aircraft.receiver] sdr`). `gain` is `auto` or dB; `ppm` is a whole number from -150 to 150.
 
 ## API
 

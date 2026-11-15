@@ -415,7 +415,7 @@ def test_status_token_is_read_only_and_the_panel_needs_no_station_token(tmp_path
         # the panel: a person's page (no Access configured here: open like the rest of the CAD API)
         code, p = call(hub.url + "/api/cad/health", token=None)
         assert code == 200 and p["health"]["station"]["name"] == "PCFD station" and "history" in p
-        # no banner's data in the state (#203): the cloud is the connection only, the Station row links Settings > Health
+        # no banner's data in the state (#203): the cloud is the connection only, the Station row links Settings > Station > Health
         assert hub.get("/api/cad/state")["cloud"].keys() == {"role", "state", "word", "detail", "health_url"}
         row = hub.get("/api/state")["radios"][0]
         assert row["label"] == "Station" and row["link"] == "#settings/station/health"
@@ -443,7 +443,7 @@ def test_with_access_the_panel_needs_a_person_and_the_status_a_bearer(keys, acce
 
 
 def test_only_an_admin_sees_station_health_and_it_is_never_in_the_state_push(keys, access_hub):  # noqa: F811
-    """#203: no health banner for anyone; Settings > Health is the admins'. A dispatcher or a viewer gets a 403 from
+    """#203: no health banner for anyone; Settings > Station > Health is the admins'. A dispatcher or a viewer gets a 403 from
     GET /api/cad/health, and nothing of an alert reaches anyone through the CAD state (the stream and its polls) or the
     monitor state: not its title, its text, nor how many there are."""
     h = access_hub
