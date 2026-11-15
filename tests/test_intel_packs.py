@@ -166,9 +166,11 @@ def test_a_fix_only_ever_adds_a_reading():
                    {"id": "t.re", "category": "c", "any": ["re:\\bodor of gas\\b"]}]}
     p = rules_mod.compile_pack(d)
     hit = lambda text: {r.id for r in p.rules if r.hit(text, rules_mod.words(text))}      # noqa: E731
-    assert hit("transmit a second alarm") == {"t.raw", "t.fixed"}           # the words as transcribed still match
-    assert hit("transmit a 2nd alarm") == {"t.fixed"}
-    assert hit("fire alarm") == {"t.not"}                                   # a "not" phrase is tried on both readings
+    # each reading on its own: as transcribed, t.not's "alarm" is found and its "2nd alarm" isn't, so it hits; the
+    # table's reading can't take that away
+    assert hit("transmit a second alarm") == {"t.raw", "t.fixed", "t.not"}
+    assert hit("transmit a 2nd alarm") == {"t.fixed"}                       # its "not" guards the reading it was found in
+    assert hit("fire alarm") == {"t.not"}
     assert hit("order of gas") == {"t.re"}                                  # an expression too, on the fixed words
     assert n.apply(["order", "of", "gas"]) == ["odor", "of", "gas"] and n.apply(["order", "up"]) is None
     assert n.apply(["second", "second"]) == ["2nd", "2nd"]                  # one pass: what a fix wrote is not fixed again
@@ -179,7 +181,52 @@ def test_a_fix_only_ever_adds_a_reading():
     assert rules_mod.ruleset_hash([p]) != rules_mod.ruleset_hash([plain])   # the table is part of what decides a hit
 
 
+def test_the_table_never_takes_a_hit_away_or_beats_a_negation():
+    """The review's two cases: "first alarm" read as "1st alarm" (a "not" phrase of fire.alarm_level) must not remove
+    the hit the words as transcribed have; and "zero injuries" must not become a number that a gap may cross."""
+    def hits(text, source=FG, service="fire"):
+        e, sink = engine()
+        e.feed(crow("t1", text, 1000.0, source, service))
+        return {h.rule_id for h in sink.hits}
+    assert "fire.alarm_level" in hits("transmit the second alarm, first alarm companies stay")
+    assert "fire.alarm_level" in hits("transmit the 2nd alarm first alarm companies")
+    assert "fire.alarm_level" not in hits("no second alarm")                # the fixed reading's own "not" still guards it
+    for text in ("accident with zero injuries", "crash zero injured", "m v a with zero injuries"):
+        assert raised(text, CPD, "police")[0] == set(), text
+        assert not {"cpd.mva_injury"} & hits(text, CPD, "police"), text
+    assert rules_mod.table("stt").apply(["zero"]) is None
+
+
+def test_with_the_table_the_rules_hit_are_a_superset_of_those_without():
+    """A property, over many generated sentences: whatever the table does, every rule that hits the words as
+    transcribed still hits (a fix adds readings, never takes one away)."""
+    import random
+    tab = rules_mod.table("stt")
+    vocab = sorted({w for k, v in tab.map.items() for w in k + v} | set(rules_mod.NEGATORS)
+                   | {"alarm", "fire", "smoke", "gas", "odor", "accident", "injuries", "ems", "en", "route", "not", "breathing",
+                      "elevator", "stuck", "car", "water", "mayday", "units", "additional", "engine", "the", "a", "at",
+                      "Example", "Ave", "100", "for", "with", "from", "in", "on", "shots", "fired", "pd", "fd"})
+    phrase_bits = [" ".join(k) for k in tab.map] + ["odor of gas", "2nd alarm", "1st alarm", "no injuries", "not breathing"]
+    rnd = random.Random(7)
+    packs = [p for p in rules_mod.load_packs() if p.norm is not None]
+    plain = rules_mod.load_packs([{**p.src, "normalize": ""} for p in packs])
+    checked = added = 0
+    for _ in range(3000):
+        parts = [rnd.choice(vocab) if rnd.random() < 0.6 else rnd.choice(phrase_bits) for _ in range(rnd.randint(1, 9))]
+        text = " ".join(parts)
+        ws = rules_mod.words(text)
+        for p, q in zip(packs, plain):
+            with_t = {r.id for r in p.rules if r.hit(text, ws)}
+            without = {r.id for r in q.rules if r.hit(text, ws)}
+            assert without <= with_t, (text, without - with_t)
+            checked += 1
+            added += len(with_t - without)
+    assert checked == 3000 * len(packs) and added > 0                        # (and the table does add hits)
+
+
 @pytest.mark.parametrize("table, why", [
+    ({"numbers": {"zero": "0"}}, "negation"),
+    ({"sound": {"no breathing": "breathing"}}, "negation"),
     ({"sound": {"a b c d e f g": "x"}}, "words"),
     ({"sound": {"": "x"}}, "words"),
     ({"sound": ["a"]}, "object"),
