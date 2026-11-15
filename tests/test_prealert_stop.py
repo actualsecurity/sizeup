@@ -287,7 +287,6 @@ def test_prealerts_with_no_topic_stop_at_once(tmp_path):
     assert timed(pa.stop) < FAST and timed(pa.stop) < FAST and not pa.running
 
 
-@pytest.mark.skipif(not hasattr(prealert_mod, "OffFeed"), reason="the outbound-off feed (OffFeed) is not on this branch")
 def test_prealerts_with_outbound_off_stop_at_once(tmp_path):
     """Outbound off (a hub started by hand): OffFeed stands for each topic, never a request; stop() is as quick."""
     from sizeup import outbound
