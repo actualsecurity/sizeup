@@ -203,6 +203,12 @@ def _aircraft_stays_local(monkeypatch):
         assert host in ("127.0.0.1", "localhost", "::1"), f"a test tried to reach {host} (aircraft: fixtures only)"
         return real(req, *a, **kw)
     monkeypatch.setattr(aircraft, "urlopen", local_only)
+    real_open = aircraft.KeepAlive._open        # the API feeds' own connections (#535): this machine only too
+
+    def open_local(self, u, origin):
+        assert u.hostname in ("127.0.0.1", "localhost", "::1"), f"a test tried to reach {u.hostname} (aircraft: fixtures only)"
+        return real_open(self, u, origin)
+    monkeypatch.setattr(aircraft.KeepAlive, "_open", open_local)
 
 
 @pytest.fixture(autouse=True)

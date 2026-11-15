@@ -3309,7 +3309,10 @@ class App:
             d = json.loads(self._adsb_file.read_text()) if self._adsb_file else None
         except (OSError, ValueError):
             d = None
-        if isinstance(d, dict) and isinstance(d.get("sdr"), str) and not adsbd.serial_problem(d["sdr"].strip()):
+        # (Settings' "none" ("") falls through to the config, as before, without the line below: #535 found it logged
+        # "Settings named , now the AIS receiver's dongle" on every start when neither had a dongle)
+        if isinstance(d, dict) and isinstance(d.get("sdr"), str) and d["sdr"].strip() \
+                and not adsbd.serial_problem(d["sdr"].strip()):
             if d["sdr"].strip() == getattr(self.cfg, "vessels_sdr", ""):     # the AIS receiver's now: never both
                 log(f"ADS-B: Settings named {d['sdr'].strip()}, now the AIS receiver's dongle ([vessels.receiver] sdr): "
                     "using [aircraft.receiver] sdr instead")

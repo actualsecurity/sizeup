@@ -492,8 +492,11 @@ heartbeat_stale_min = 90             # no heartbeat (or restart) this long: "Tap
 #   "adsblol"   adsb.lol, keyless, ODbL (credited on the map)
 #   "adsbfi"    adsb.fi: its terms say personal, non-commercial use only. The user's decision, 2026-10-14: this is
 #               personal, non-commercial use ("we are not charging for this"). Credited on the map.
-#   the busier of the two is primary (every 5 s while the layer is open), the other every 10 s; one that errors or
-#   is rate-limited rests (Retry-After, else exponential) and the other carries on.
+#   the primary (every 5 s while the layer is open; the other every 10 s): primary = "adsbfi" / "adsblol" when set,
+#   else ("auto") the busier of those that haven't failed in the last 10 min, a tie in feeds' order. Each is read on
+#   its own (one hanging never holds up the other or the map: the TLS handshake gets 4 s, the answer 8 s, one
+#   connection kept open); one that errors or is rate-limited rests (at least its Retry-After, else exponential)
+#   and the other carries on. adsb.fi first since #535: from the hub it failed none in a week, adsb.lol ~150 a day.
 #   "receiver"  our own ADS-B receiver ([aircraft.receiver] below): when enabled it is always first ("primary local
 #               SDR on ADSB, secondary the above sources").
 # OpenSky is not used (a written agreement for operational use; far too few credits for a 5 s refresh).
@@ -501,14 +504,21 @@ heartbeat_stale_min = 90             # no heartbeat (or restart) this long: "Tap
 # raises the emergency alarm on every console, and its push through [alerts] ntfy_topic when one is set; the hub
 # then reads the primary feed every 15 s even when nobody has the map open.
 # registry: types (make / model) from the FAA Releasable Aircraft Database, public domain, ~70 MB a week once
-# someone has looked; never the owner's name. Leave the section out: on, both APIs, 15 nm around HPN, alarms on.
+# someone has looked; never the owner's name. registry.faa.gov refuses scripted downloads (403 from its bot
+# protection, 2026-11): then it is tried once a day and the copy we have is kept. registry_url: another https://
+# copy, or the path of a ReleasableAircraft.zip downloaded in a browser; or build it by hand
+# (python -m sizeup.aircraft build-registry ReleasableAircraft.zip faa_registry.sqlite) and put it, gzipped, where
+# the hub restores its caches (sizeup/cachesync.py: <bucket>/<prefix>/cache/aircraft/faa_registry.sqlite.gz).
+# Leave the section out: on, both APIs, 15 nm around HPN, alarms on.
 # [aircraft]
 # enabled = true
-# feeds = ["adsblol", "adsbfi"]
+# feeds = ["adsbfi", "adsblol"]
+# primary = "auto"        # or "adsbfi" / "adsblol"
 # alarms = true
 # radius_nm = 15          # around HPN: the feeds' query, what counts as "in the area", the alarm's area; 3 to 40
 # ceiling_ft = 6000       # MSL: below this inside the radius is "low traffic" (shortfinal's focus); 1000 to 18000
 # registry = true
+# registry_url = ""       # "" = registry.faa.gov's ReleasableAircraft.zip
 # adsblol_url = ""        # "" = the public API; a test server's address with {lat}, {lon} and {radius} in it
 # adsbfi_url = ""
 #

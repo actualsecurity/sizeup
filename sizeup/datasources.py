@@ -212,7 +212,8 @@ class DataSources:
             at = st["tried"]                      # read, though the provider keeps no time of its own
         if st["fails"] and st["tried"] is not None:
             wait = min(BACKOFF_S[1], iv, BACKOFF_S[0] * 2 ** min(st["fails"] - 1, 30))
-            return st["tried"] + wait
+            # the provider's own word on when to try again, when later (the FAA registry refused us: a day, #535)
+            return max(st["tried"] + wait, _num(ps.get("retry_at")) or 0.0)
         if at is None:
             return st["tried"] or self.started    # never fetched: at once (one at a time, in registration order)
         due = at + iv + st["spread"] * min(iv * JITTER, JITTER_MAX_S)
@@ -647,6 +648,7 @@ def aircraft_sources(aircraft) -> list[Source]:
             return {"on": False, "why": "FAA registry off ([aircraft] registry)"}
         size = reg.path.stat().st_size if reg.path and reg.path.is_file() else None
         return {"at": reg.st["at"], "error": reg.st["error"], "n": reg.st["n"], "bytes": size,
+                "retry_at": reg.st.get("retry_at") if reg.st["error"] else None,
                 "note": "N-number, make, model, year (no owners)"}
     watch = f" · emergency watch {a.WATCH_S:g} s" if aircraft.watching() else ""
     return [

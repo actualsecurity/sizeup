@@ -59,10 +59,13 @@ address, the freshest position per aircraft, our receiver's position first for a
             Open Database License (ODbL 1.0): attribution (the map corner and the box name it and the licence).
   adsbfi    adsb.fi's open data API, same JSON: "personal, non-commercial use only", attribution. The user decided
             (2026-10-14) that this is personal, non-commercial use: the department charges nothing for it. On.
-  The two APIs: the PRIMARY is whichever has been giving more aircraft with a fresh position (a running average,
-  SCORE_ALPHA), asked every PRIMARY_S while someone looks; the other every SECONDARY_S (its aircraft join the
-  union and its count stays known). A feed that errors, times out or answers 429 rests (its Retry-After when it
-  sends one, else 5 s doubling to 5 min) and the other becomes the primary; it comes back on its first good answer.
+  The two APIs: the PRIMARY is [aircraft] primary when set, else whichever has been giving more aircraft with a
+  fresh position (a running average, SCORE_ALPHA) among those that haven't failed in FLAKY_S (#535), asked every
+  PRIMARY_S while someone looks; the other every SECONDARY_S (its aircraft join the union and its count stays
+  known). Each is read on a thread of its own (tick(parallel=True), #535: adsb.lol's TLS handshakes timing out held
+  the one thread 10 s at a time, adsb.fi and the map with it) over its own kept-open connection (KeepAlive: 4 s for
+  the connect and handshake, 8 s for the answer). A feed that errors, times out or answers 429 rests (at least its
+  Retry-After, else 5 s doubling to 5 min) and the other becomes the primary; it comes back on its first good answer.
   Both stay well inside their limits (adsb.fi: 1 request a second; adsb.lol: by load, 5 s was fine for shortfinal).
   (OpenSky) not used: its licence needs a written agreement for live operational use, its credits are far too
             few for a 5 s refresh, and it adds nothing over these.
@@ -108,15 +111,19 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import http.client
 import io
 import json
 import math
 import re
+import socket
 import sqlite3
+import ssl
 import threading
 import time
 import traceback
 import zipfile
+import zlib
 from collections import deque
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -162,9 +169,13 @@ DROP_S = 60.0                 # ... and gone after this (shortfinal's drop_after
 FEED_STALE_S = 30.0           # a receiver file whose own clock is older than this: its decoder has stopped
 BACKOFF_S = (5.0, 300.0)      # a feed that fails: 5 s doubling to 5 min (a 429: its Retry-After when it sends one)
 TIMEOUT_S = 10.0
+CONNECT_S = 4.0               # an API feed: the TCP connect and the TLS handshake together (KeepAlive) ...
+READ_S = 8.0                  # ... then the answer (adsb.lol / adsb.fi answer in well under a second)
 MAX_FEED_BYTES = 4 * 1024 * 1024
 REGISTRY_EVERY_S = 7 * 86400.0
 REGISTRY_BACKOFF_S = (600.0, 86400.0)
+REGISTRY_REFUSED_S = 86400.0  # the FAA site refused us (401 / 403 / 451: its bot protection): once a day, not sooner
+REGISTRY_LOG_S = 86400.0      # the same registry error: logged once, then at most this often
 MAX_REGISTRY_BYTES = 200 * 1024 * 1024
 TRAIL_S = 90.0                # trail kept and sent (feed seconds): short (shortfinal keeps 10 min; this map is busier)
 TRAIL_SPACING_M = 60.0        # a trail point after moving this far (shortfinal's TRAIL_SPACING_M) ...
@@ -1133,6 +1144,36 @@ def build_registry(blob: bytes, con: sqlite3.Connection) -> int:
     return n
 
 
+def _build_into(blob: bytes, con: sqlite3.Connection, at: float) -> int:
+    n = build_registry(blob, con)
+    con.executescript("DROP TABLE IF EXISTS meta; CREATE TABLE meta (at REAL, n INTEGER);")
+    con.execute("INSERT INTO meta VALUES (?, ?)", (at, n))
+    con.commit()
+    return n
+
+
+def build_registry_file(blob: bytes, path: str | Path, at: float | None = None) -> int:
+    """ReleasableAircraft.zip -> the registry's SQLite file (aircraft/faa_registry.sqlite in the state folder), built
+    beside it and swapped in. The number of aircraft. Also `python -m sizeup.aircraft build-registry <zip> <out>`:
+    registry.faa.gov refuses scripted downloads (HTTP 403 from its bot protection, 2026-11), so a copy downloaded in
+    a browser can be built by hand and put where the hub restores its caches from (sizeup/cachesync.py)."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.unlink(missing_ok=True)
+    con = sqlite3.connect(str(tmp))
+    try:
+        n = _build_into(blob, con, time.time() if at is None else at)
+    finally:
+        con.close()
+    tmp.replace(path)
+    return n
+
+
+def _span(s: float) -> str:
+    return f"{s / 3600:.0f} h" if s >= 3600 else f"{s / 60:.0f} min" if s >= 60 else f"{s:.0f} s"
+
+
 def _title(s: str) -> str:
     """BOMBARDIER INC -> Bombardier Inc; model codes (CL-600-2B16, ERJ 170-200 LR) as they are."""
     return " ".join(w if any(c.isdigit() for c in w) else w.title() for w in s.split())
@@ -1148,7 +1189,8 @@ class Registry:
         self.fetch, self.log, self.clock = fetch, log, clock
         self._lock = threading.Lock()
         self.con: sqlite3.Connection | None = None
-        self.st = {"at": None, "error": "", "next": 0.0, "fails": 0, "n": 0}
+        self.st = {"at": None, "error": "", "next": 0.0, "fails": 0, "n": 0, "retry_at": None}
+        self._logged: tuple[str, float] | None = None      # the last error logged, and when (REGISTRY_LOG_S)
         self._busy = False
         self._open()
 
@@ -1165,39 +1207,47 @@ class Registry:
         except (sqlite3.Error, TypeError, ValueError) as e:
             self.log(f"aircraft: FAA registry cache not read ({type(e).__name__}); fetching afresh")
 
+    def _can(self) -> bool:
+        return bool(self.url) and (self.fetch is not None or "://" not in self.url)    # (a file needs no fetch)
+
     def due(self) -> bool:
-        return bool(self.url) and self.fetch is not None and not self._busy and self.clock() >= self.st["next"]
+        return self._can() and not self._busy and self.clock() >= self.st["next"]
 
     def refresh(self) -> bool:
         """Fetch and build now. True when read. Never raises."""
-        if not self.url or self.fetch is None or self._busy:
+        if not self._can() or self._busy:
             return False
         self._busy = True
         now = self.clock()
         try:
-            code, _, blob = self.fetch(self.url, 300.0, MAX_REGISTRY_BYTES, {})
-            if code != 200:
-                raise HTTPError(self.url, code, f"HTTP {code}", None, None)
+            if "://" not in self.url:             # [aircraft] registry_url: a zip downloaded by hand (the FAA site
+                blob = Path(self.url).read_bytes()  # refuses scripts: see build_registry_file)
+            else:
+                code, _, blob = self.fetch(self.url, 300.0, MAX_REGISTRY_BYTES, {})
+                if code != 200:
+                    raise HTTPError(self.url, code, f"HTTP {code}", None, None)
             if self.path:
-                self.path.parent.mkdir(parents=True, exist_ok=True)
-                tmp = self.path.with_suffix(".tmp")
-                tmp.unlink(missing_ok=True)
-                con = sqlite3.connect(str(tmp), check_same_thread=False)
+                n = build_registry_file(blob, self.path, now)
+                con = sqlite3.connect(str(self.path), check_same_thread=False)
             else:
                 con = sqlite3.connect(":memory:", check_same_thread=False)
-            n = build_registry(blob, con)
-            con.executescript("DROP TABLE IF EXISTS meta; CREATE TABLE meta (at REAL, n INTEGER);")
-            con.execute("INSERT INTO meta VALUES (?, ?)", (now, n))
-            con.commit()
-            if self.path:
-                con.close()
-                tmp.replace(self.path)
-                con = sqlite3.connect(str(self.path), check_same_thread=False)
+                n = _build_into(blob, con, now)
         except Exception as e:  # network, a bad zip, a full disk: try again later, the layer works without it
             self.st["fails"] += 1
-            wait = min(REGISTRY_BACKOFF_S[1], REGISTRY_BACKOFF_S[0] * 2 ** min(self.st["fails"] - 1, 30))
-            self.st.update(error=f"{type(e).__name__}: {getattr(e, 'reason', e)}"[:160], next=now + wait)
-            self.log(f"aircraft: FAA registry not read: {self.st['error']}; next try in {wait:.0f} s")
+            refused = isinstance(e, HTTPError) and e.code in (401, 403, 451)
+            wait = REGISTRY_REFUSED_S if refused else \
+                min(REGISTRY_BACKOFF_S[1], REGISTRY_BACKOFF_S[0] * 2 ** min(self.st["fails"] - 1, 30))
+            err = f"{type(e).__name__}: {getattr(e, 'reason', e)}"[:160]
+            self.st.update(error=err, next=now + wait, retry_at=now + wait)
+            # The FAA's bot protection refused us every hour for weeks: one line the first time, then once a day
+            # while it goes on (the copy we have, if any, is still used: self.con is kept)
+            if self._logged is None or self._logged[0] != err or now - self._logged[1] >= REGISTRY_LOG_S:
+                kept = f"; using the copy of {tz.clock(self.st['at'], '%Y-%m-%d')}" if self.con is not None and self.st["at"] else \
+                    "; no copy yet: types from the feeds only"
+                self.log(f"aircraft: FAA registry not read: {err}{kept}; next try in {_span(wait)}"
+                         + (" (refused: the FAA site blocks scripted downloads; [aircraft] registry_url can name a "
+                            "copy downloaded by hand)" if refused else ""))
+                self._logged = (err, now)
             return False
         finally:
             self._busy = False
@@ -1208,7 +1258,8 @@ class Registry:
                 old.close()
             except sqlite3.Error:
                 pass
-        self.st.update(at=now, n=n, error="", fails=0, next=now + REGISTRY_EVERY_S)
+        self.st.update(at=now, n=n, error="", fails=0, next=now + REGISTRY_EVERY_S, retry_at=None)
+        self._logged = None
         self.log(f"aircraft: FAA registry: {n} US aircraft")
         return True
 
@@ -1243,6 +1294,17 @@ class Registry:
     def public(self) -> dict:
         return {"at": self.st["at"], "n": self.st["n"], "error": self.st["error"], "credit": REGISTRY_CREDIT if self.st["at"] else ""}
 
+    def health(self) -> dict:
+        """Settings > Station > Health's row: ok (with its date), or why not and when it tries again."""
+        st = self.st
+        state = "off" if not self.url else "error" if st["error"] else "ok" if st["at"] else "starting"
+        why = st["error"] + (" (the copy we have is used)" if st["error"] and self.con is not None else "")
+        title = " · ".join(x for x in (f"{st['n']} US aircraft" if st["at"] else "",
+                                       f"{st['fails']} failure(s) in a row" if st["fails"] else "",
+                                       f"next try {tz.clock(st['retry_at'], '%m-%d %H:%M')}" if st["error"] and st["retry_at"] else "") if x)
+        return {"key": "aircraft:registry", "label": "Aircraft: FAA registry", "state": state, "why": why, "at": st["at"],
+                "fallback": "types from the feeds", "title": title}
+
 
 # ---- the feeds -----------------------------------------------------------------------------------------------------------
 
@@ -1272,31 +1334,118 @@ class Feed:
 class ApiFeed(Feed):
     """adsb.lol or adsb.fi: a point query around HPN (same readsb-like JSON)."""
 
-    def __init__(self, key: str, url_template: str, radius_nm: float, fetch: Callable):
+    def __init__(self, key: str, url_template: str, radius_nm: float, fetch: Callable | None = None):
         self.key = key
         self.template, self.radius_nm = url_template, float(radius_nm)   # radius_nm: the layer widens it (#260)
-        self.fetch = fetch
+        self.fetch = fetch or KeepAlive()        # its own connection, kept open between reads (one TLS handshake)
 
     @property
     def url(self) -> str:
         return self.template.format(lat=f"{ARP[0]:.4f}", lon=f"{ARP[1]:.4f}", radius=int(math.ceil(self.radius_nm)))
+
+    @staticmethod
+    def _retry_after(headers) -> float | None:
+        try:
+            retry = float((headers or {}).get("Retry-After", "") or (headers or {}).get("retry-after", "") or 0)
+        except (TypeError, ValueError, AttributeError):
+            retry = 0.0
+        return retry if retry > 0 else None
 
     def read(self) -> Snapshot:
         try:
             code, headers, body = self.fetch(self.url, TIMEOUT_S, MAX_FEED_BYTES, {"Accept": "application/json"})
         except HTTPError as e:
             if e.code == 429:
-                try:
-                    retry = float((e.headers or {}).get("Retry-After", "") or 0)
-                except (TypeError, ValueError):
-                    retry = 0.0
-                raise RateLimited(retry if retry > 0 else None) from e
+                raise RateLimited(self._retry_after(e.headers)) from e
             raise
         if code == 429:
-            raise RateLimited(None)
+            raise RateLimited(self._retry_after(headers))
         if code != 200:
             raise HTTPError(self.url, code, f"HTTP {code}", None, None)
         return parse_snapshot(json.loads(body))
+
+
+class KeepAlive:
+    """An API feed's HTTP client: one connection kept open between reads (adsb.lol's failures from the hub were TLS
+    handshakes timing out: one handshake now, not one every 5 s), the connect and the handshake bounded by CONNECT_S
+    and the answer by READ_S (urllib gave each step the whole 10 s, and a new handshake every read). A connection
+    the server closed meanwhile is opened again once. GET only; (status, headers lower-cased, body) for any status,
+    errors as URLError (where it failed: "connect" or "read") or OSError. One read at a time: a second caller while
+    one is in flight gets its own one-off connection."""
+
+    def __init__(self, connect_s: float | None = None, read_s: float | None = None, context: ssl.SSLContext | None = None):
+        self.connect_s = CONNECT_S if connect_s is None else connect_s
+        self.read_s = READ_S if read_s is None else read_s
+        self.context = context
+        self.conn: http.client.HTTPConnection | None = None
+        self.origin: tuple | None = None
+        self._lock = threading.Lock()
+        self.opened = 0                          # connections made (the tests: reuse)
+
+    def close(self) -> None:
+        c, self.conn, self.origin = self.conn, None, None
+        if c is not None:
+            try:
+                c.close()
+            except OSError:
+                pass
+
+    def _open(self, u, origin) -> http.client.HTTPConnection:
+        if u.scheme == "https":
+            ctx = self.context or ssl.create_default_context()
+            c = http.client.HTTPSConnection(u.hostname, u.port, timeout=self.connect_s, context=ctx)
+        else:
+            c = http.client.HTTPConnection(u.hostname, u.port, timeout=self.connect_s)
+        try:
+            c.connect()                          # TCP and TLS, both within connect_s
+        except (OSError, http.client.HTTPException) as e:
+            c.close()
+            raise URLError(f"connect: {getattr(e, 'reason', None) or e or type(e).__name__}") from e
+        c.sock.settimeout(self.read_s)
+        self.opened += 1
+        return c
+
+    def __call__(self, url: str, timeout: float, limit: int, headers: dict | None = None) -> tuple[int, dict, bytes]:
+        if not self._lock.acquire(blocking=False):
+            return KeepAlive(self.connect_s, self.read_s, self.context)._get(url, limit, headers, keep=False)
+        try:
+            return self._get(url, limit, headers, keep=True)
+        finally:
+            self._lock.release()
+
+    def _get(self, url: str, limit: int, headers: dict | None, keep: bool) -> tuple[int, dict, bytes]:
+        u = urlsplit(url)
+        if u.scheme not in ("http", "https") or not u.hostname:
+            raise URLError(f"not an http(s) address: {url[:80]}")
+        origin = (u.scheme, u.hostname, u.port)
+        path = (u.path or "/") + (f"?{u.query}" if u.query else "")
+        hdrs = {"User-Agent": UA, "Accept-Encoding": "gzip", **(headers or {})}
+        for attempt in (0, 1):
+            reused = self.conn is not None and self.origin == origin
+            if not reused:
+                self.close()
+                self.conn, self.origin = self._open(u, origin), origin
+            try:
+                self.conn.request("GET", path, headers=hdrs)
+                r = self.conn.getresponse()
+                body = r.read(limit + 1)
+            except (OSError, http.client.HTTPException) as e:
+                self.close()
+                # a kept connection the server had closed (idle): once more on a new one. Not after a timeout.
+                if reused and attempt == 0 and not isinstance(e, TimeoutError) and not isinstance(e, socket.timeout):
+                    continue
+                raise URLError(f"read: {getattr(e, 'reason', None) or e or type(e).__name__}") from e
+            hs = {k.lower(): v for k, v in r.getheaders()}
+            if not keep or r.will_close:
+                self.close()
+            if hs.get("content-encoding", "").lower() == "gzip":
+                d = zlib.decompressobj(16 + zlib.MAX_WBITS)
+                body = d.decompress(body, limit + 1)
+            if len(body) > limit:
+                self.close()
+                raise ValueError(f"more than {limit // (1024 * 1024)} MB")
+            return r.status, hs, body
+        raise URLError("read: no answer")       # (not reached)
 
 
 class ReceiverFeed(Feed):
@@ -1614,6 +1763,9 @@ RECEIVER_KEEP_S = 10.0             # our receiver's: older than this, it is stal
 RECEIVER_LOST_S = 10.0             # an aircraft whose position from our receiver is older than this is "lost" there:
                                    # an API feed's fresher position is used (#235)
 RATE_LIMITED_MIN_S = 10.0          # a 429 without Retry-After: at least this, then doubling
+FLAKY_S = 600.0                    # an API feed that failed this recently is not made the primary while another is fine
+FEED_LOG_EVERY_S = 300.0           # an API feed failing the same way: logged once, then at most this often (#535: one
+                                   # line per failure, ~280 a day from adsb.lol)
 DETAILS_KEEP_S = 6 * 3600.0        # an aircraft's registration / type / operator from an API feed, kept by its address
 DETAILS_MAX = 5000
 PREALERT_UPDATE_S = 15.0           # an open emergency's pre-alert gets its newest altitude / position this often
@@ -1635,9 +1787,11 @@ class AircraftLayer:
                  devices: Callable[[], list] | None = None, holder: Callable[[str], dict | None] | None = None,
                  log: Callable[[str], None] = print, clock: Callable[[], float] = time.time,
                  airlines: dict[str, str] | None = None, procedures: Procedures | None = None, watch: bool = True,
-                 station_feed: bool = False):
+                 station_feed: bool = False, primary: str = ""):
         self.enabled = bool(enabled)
         self.radius_nm, self.ceiling_ft = float(radius_nm), float(ceiling_ft)
+        self.prefer = primary if primary in ("adsblol", "adsbfi") else ""    # [aircraft] primary; "" = auto
+        api_fetch = fetch                        # None: each API feed its own KeepAlive connection
         self.fetch = fetch or http_get
         self.log, self.clock = log, clock
         self.sdr, self.sdr_name = sdr, sdr_name or sdr
@@ -1647,16 +1801,18 @@ class AircraftLayer:
         if self.enabled:
             for key in feeds:
                 if key == "adsblol" and (adsblol_url or ADSBLOL_URL):
-                    self.feeds.append(ApiFeed("adsblol", adsblol_url or ADSBLOL_URL, self.radius_nm, self.fetch))
+                    self.feeds.append(ApiFeed("adsblol", adsblol_url or ADSBLOL_URL, self.radius_nm, api_fetch))
                 elif key == "adsbfi" and (adsbfi_url or ADSBFI_URL):
-                    self.feeds.append(ApiFeed("adsbfi", adsbfi_url or ADSBFI_URL, self.radius_nm, self.fetch))
+                    self.feeds.append(ApiFeed("adsbfi", adsbfi_url or ADSBFI_URL, self.radius_nm, api_fetch))
                 elif key == "receiver" and receiver and (receiver_1090 or receiver_978) and not station_feed:
                     self.feeds.append(ReceiverFeed(receiver_1090, receiver_978, self.fetch, clock))
             if station_feed:                     # the hub: our receiver is the station's, forwarded (#235): first
                 self.feeds.insert(0, StationFeed(clock))
         for f in self.feeds:
             f.st = {"next": 0.0, "fails": 0, "rest_until": 0.0, "why": "", "ok": None, "at": None, "n": 0, "fresh": 0,
-                    "score": None, "snap": None, "reads": 0}
+                    "score": None, "snap": None, "reads": 0, "failures": 0, "failed_at": None, "busy": False,
+                    "down_since": None, "log_kind": "", "log_at": -1e18, "logged": False}
+        self._dirty = False                     # a background read answered (or failed) since the last combine
         url = (registry_url or FAA_URL) if registry and self.enabled else ""
         self.registry = Registry(url, cache_dir, self.fetch if url else None, log, clock)
         self.airlines = load_airlines() if airlines is None else airlines
@@ -1708,9 +1864,11 @@ class AircraftLayer:
                    getattr(cfg, "aircraft_adsblol_url", ""), getattr(cfg, "aircraft_adsbfi_url", ""),
                    getattr(cfg, "aircraft_receiver", False), getattr(cfg, "aircraft_receiver_1090", ""),
                    getattr(cfg, "aircraft_receiver_978", ""), sdr, (getattr(cfg, "sdr_names", {}) or {}).get(sdr, sdr),
-                   getattr(cfg, "aircraft_registry", True), "", (state / "aircraft") if state else None,
+                   getattr(cfg, "aircraft_registry", True), getattr(cfg, "aircraft_registry_url", ""),
+                   (state / "aircraft") if state else None,
                    devices=None if hub else devices, holder=None if hub else claims.holder, log=log,
-                   watch=getattr(cfg, "aircraft_alarms", True), station_feed=hub)
+                   watch=getattr(cfg, "aircraft_alarms", True), station_feed=hub,
+                   primary=getattr(cfg, "aircraft_primary", ""))
 
     @property
     def configured(self) -> bool:
@@ -1734,8 +1892,10 @@ class AircraftLayer:
             self._thread = threading.Thread(target=self._run, name="aircraft", daemon=True)
             self._thread.start()
             self.log(f"aircraft: {' + '.join(FEEDS[f.key]['label'] for f in self.feeds)}, {self.radius_nm:g} nm around HPN; "
+                     f"primary {FEEDS[self.prefer]['label'] if self.prefer else 'auto'}; "
                      f"while the layer is open the primary every {PRIMARY_S:g} s, the other every {SECONDARY_S:g} s"
-                     + (f"; emergency watch every {WATCH_S:g} s" if self.watching() else ""))
+                     + (f"; emergency watch every {WATCH_S:g} s" if self.watching() else "")
+                     + "; each feed read on its own")
         return self
 
     def stop(self) -> None:
@@ -1745,7 +1905,7 @@ class AircraftLayer:
     def _run(self) -> None:
         while not self._stop.is_set():
             try:
-                self.tick()
+                self.tick(parallel=True)
             except Exception as e:  # never let one bad answer stop the layer for good
                 self._error("poll", e)
             self._wake.wait(1.0)
@@ -1796,14 +1956,25 @@ class AircraftLayer:
         out = f.ingest(d, size)
         return dict(out, every=FORWARD_FAST_S if self.demanded() or self.emerg else FORWARD_SLOW_S)
 
+    def flaky(self, f: Feed, now: float | None = None) -> bool:
+        """Failed (timed out, refused, rate-limited) within FLAKY_S."""
+        now = self.clock() if now is None else now
+        return f.st["failed_at"] is not None and now - f.st["failed_at"] < FLAKY_S
+
     def primary(self) -> Feed | None:
-        """The API feed that has been giving the most aircraft with fresh positions lately (config order on a tie),
-        among those not resting."""
+        """The API feed asked most often. Among those not resting, the steady ones (no failure in FLAKY_S) first:
+        [aircraft] primary when it names one of them, else the one giving the most aircraft with fresh positions
+        lately (config order on a tie). #535: adsb.lol timed out or answered 429 ~150 times a day from the hub while
+        adsb.fi failed none in a week, and the busier-feed rule kept handing the primary back to adsb.lol."""
         now = self.clock()
         up = [f for f in self.api_feeds() if f.st["rest_until"] <= now]
         if not up:
             return None
-        return max(up, key=lambda f: (f.st["score"] if f.st["score"] is not None else -1.0, -self.feeds.index(f)))
+        steady = [f for f in up if not self.flaky(f, now)] or up
+        pref = next((f for f in steady if f.key == self.prefer), None)
+        if pref is not None:
+            return pref
+        return max(steady, key=lambda f: (f.st["score"] if f.st["score"] is not None else -1.0, -self.feeds.index(f)))
 
     def interval(self, f: Feed, demanded: bool) -> float | None:
         if isinstance(f, StationFeed):          # in memory, kept fresh by the station's posts: cheap
@@ -1814,7 +1985,11 @@ class AircraftLayer:
             return PRIMARY_S if demanded else WATCH_S
         return SECONDARY_S if demanded else None
 
-    def tick(self) -> None:
+    def tick(self, parallel: bool = False) -> None:
+        """Read what is due and combine. parallel (the layer's own thread): each API feed is read on a thread of its
+        own and this never waits for one, so a feed that hangs (adsb.lol's TLS handshakes timing out from the hub,
+        #535: the whole layer stood still 10 s at a time, ~11 min in its worst hour) holds up neither the other
+        feeds nor our receiver nor the map; its answer is combined on the next turn (it wakes the loop)."""
         if not self.configured:
             return
         demanded = self.demanded()
@@ -1826,14 +2001,33 @@ class AircraftLayer:
             threading.Thread(target=self.registry.refresh, name="aircraft-registry", daemon=True).start()
         read = False
         for f in list(self.feeds):
+            if f.st["busy"]:
+                continue
             iv = self.interval(f, demanded)
             if iv is None or now < f.st["rest_until"] or now < f.st["next"]:
                 continue
+            if parallel and not f.local:
+                f.st["busy"] = True
+                threading.Thread(target=self._read_behind, args=(f, iv), name=f"aircraft-feed-{f.key}", daemon=True).start()
+                continue
             read = self._try_read(f, now, iv) or read
+        if self._dirty:
+            self._dirty = False
+            read = True                          # (_combine says "no feed answering" when none has a fresh answer)
         if read:
             self._combine(now)
-        elif self.st["fetched"] is None or now - self.st["fetched"] > FEED_KEEP_S:
+        elif (self.st["fetched"] is None or now - self.st["fetched"] > FEED_KEEP_S) \
+                and not any(f.st["busy"] for f in self.feeds):      # (one in flight may yet answer)
             self._no_data(now)
+
+    def _read_behind(self, f: Feed, iv: float) -> None:
+        """One API feed's read, on its own thread (tick(parallel=True)); wakes the loop to combine its answer."""
+        try:
+            self._try_read(f, self.clock(), iv)
+        finally:
+            f.st["busy"] = False
+            self._dirty = True
+            self._wake.set()
 
     def refresh(self) -> bool:
         """Read every feed that may be asked now, and combine. True when one answered. Never raises."""
@@ -1842,7 +2036,7 @@ class AircraftLayer:
         now = self.clock()
         read = False
         for f in self.feeds:
-            if now >= f.st["rest_until"]:
+            if now >= f.st["rest_until"] and not f.st["busy"]:
                 read = self._try_read(f, now, self.interval(f, True) or SECONDARY_S) or read
         if read:
             self._combine(now)
@@ -1884,34 +2078,42 @@ class AircraftLayer:
         try:
             snap = f.read()
         except Exception as e:  # network, a 429, a file, JSON: this feed rests, the others carry on
+            now = self.clock()                   # (when it failed: a timeout takes seconds)
             st["fails"] += 1
+            st["failures"] += 1
             # (the exponent capped: 2 ** 1024 times a float is an OverflowError, and ours fails every 5 s, so after
             # 85 min of no posts every poll raised it and no feed was read: #269)
             exp = min(BACKOFF_S[1], BACKOFF_S[0] * 2 ** min(st["fails"] - 1, 30))
             if isinstance(e, RateLimited):
-                wait = e.retry_after_s if e.retry_after_s else max(RATE_LIMITED_MIN_S, exp)
+                # its Retry-After at least, and longer while it keeps refusing (#535: Retry-After 1-7 s, 429 again)
+                wait = max(e.retry_after_s or RATE_LIMITED_MIN_S, exp if st["fails"] > 1 else 0.0)
             else:
                 wait = min(exp, BACKOFF_S[0]) if f.local else exp      # ours: back the moment it is
             why = str(e) if isinstance(e, RateLimited) else f"{type(e).__name__}: {getattr(e, 'reason', e)}"[:160]
-            if not f.local:
-                self.log(f"aircraft: {FEEDS[f.key]['label']}: {why}; resting {wait:.0f} s")
-            else:
-                # Ours is retried every few seconds and its words change with the seconds ("for 35 s"): logged when
-                # it starts failing or fails another way, then every RECEIVER_LOG_EVERY_S while it goes on (#262).
-                kind = re.sub(r"\d+(\.\d+)?", "#", why)
-                if kind != st.get("log_kind") or now - st.get("log_at", 0.0) >= RECEIVER_LOG_EVERY_S:
-                    since = st.get("down_since") or now
-                    self.log(f"aircraft: {FEEDS[f.key]['label']}: {why}; resting {wait:.0f} s"
-                             + (f" (failing since {tz.hhmmss(since)}; logged every {RECEIVER_LOG_EVERY_S / 60:.0f} min)"
-                                if kind == st.get("log_kind") else ""))
-                    st.update(log_kind=kind, log_at=now)
-                if not st.get("down_since"):
-                    st["down_since"] = now
-            st.update(rest_until=now + wait, next=now + wait, why=why)
+            # Logged when it starts failing or fails another way, then every RECEIVER_LOG_EVERY_S (ours: retried
+            # every few seconds) or FEED_LOG_EVERY_S (an API feed) while it goes on (#262, #535); its words change
+            # with the seconds ("for 35 s", "Retry-After 6 s"), so they are compared without the numbers.
+            every = RECEIVER_LOG_EVERY_S if f.local else FEED_LOG_EVERY_S
+            kind = re.sub(r"\d+(\.\d+)?", "#", why)
+            if not st["down_since"]:
+                st["down_since"] = now
+            if kind != st["log_kind"] or now - st["log_at"] >= every:
+                since = st["down_since"]
+                again = kind == st["log_kind"] and since < now
+                self.log(f"aircraft: {FEEDS[f.key]['label']}: {why}; resting {wait:.0f} s"
+                         + (f" (failing since {tz.hhmmss(since)}, {st['fails']} in a row, {st['failures']} in all; "
+                            f"logged every {every / 60:.0f} min)" if again else ""))
+                st.update(log_kind=kind, log_at=now, logged=True)
+            st.update(rest_until=now + wait, next=now + wait, why=why, failed_at=now)
             return False
-        if f.local and st.get("down_since"):
-            self.log(f"aircraft: {FEEDS[f.key]['label']} back (after {now - st['down_since']:.0f} s)")
-            st.update(down_since=None, log_kind="", log_at=0.0)
+        now = self.clock()                       # (when it answered)
+        if st["down_since"]:
+            if st["logged"]:                     # its failure was logged: its recovery too (#535)
+                self.log(f"aircraft: {FEEDS[f.key]['label']} back (after {now - st['down_since']:.0f} s, "
+                         f"{st['fails']} failure(s))")
+            st.update(down_since=None, logged=False)
+            if f.local:
+                st.update(log_kind="", log_at=-1e18)
         fresh = sum(1 for p in snap.planes if p.has_position and (p.seen_pos if p.seen_pos is not None else p.seen) <= STALE_S
                     and nm(ARP[0], ARP[1], p.lat, p.lon) <= self.radius_nm)
         score = fresh if st["score"] is None else (1 - SCORE_ALPHA) * st["score"] + SCORE_ALPHA * fresh
@@ -2226,6 +2428,42 @@ class AircraftLayer:
                                    "healthy": healthy if role == "receiver" else (st["ok"] is not None and now - st["ok"] <= FEED_KEEP_S)})
         return out
 
+    def feed_health(self) -> list[dict]:
+        """Settings > Station > Health's rows (#535), one per source and the FAA registry: state (ok / resting /
+        idle / no data), why, the last good read; the rest (failures, back-off, role) on hover."""
+        if not self.configured:
+            return []
+        now = self.clock()
+        prim = self.primary()
+        out = []
+        for f in self.feeds:
+            st = f.st
+            others = ", ".join(FEEDS[g.key]["label"] for g in self.feeds if g is not f and not g.local)
+            if isinstance(f, StationFeed) and f.last is None:
+                out.append({"key": f"aircraft:{f.key}", "label": "Aircraft: our ADS-B receiver", "state": "no data",
+                            "why": "nothing from the station (no dongle named for ADS-B, or its decoder is off)",
+                            "at": None, "fallback": others, "title": ""})
+                continue
+            resting = st["rest_until"] > now
+            role = "receiver" if f.local else "primary" if f is prim else "secondary"
+            fresh = st["ok"] is not None and now - st["ok"] <= (RECEIVER_KEEP_S if f.local else FEED_KEEP_S)
+            state = "resting" if resting else "ok" if fresh else "idle" if st["ok"] is not None else \
+                ("error" if st["why"] else "idle")
+            title = " · ".join(x for x in (
+                role,
+                f"{st['reads']} reads, {st['failures']} failures since start",
+                f"{st['fails']} failure(s) in a row" if st["fails"] else "",
+                f"resting until {tz.hhmmss(st['rest_until'])}" if resting else "",
+                f"last failure {tz.hhmmss(st['failed_at'])}" if st["failed_at"] else "",
+                f"failing since {tz.hhmmss(st['down_since'])}" if st["down_since"] else "",
+                "not primary while it keeps failing" if not f.local and self.flaky(f, now) else "") if x)
+            out.append({"key": f"aircraft:{f.key}", "label": f"Aircraft: {FEEDS[f.key]['label']}", "state": state,
+                        "why": st["why"] if (resting or state == "error") else "", "at": st["ok"],
+                        "fallback": others if f.local or f is prim else "", "title": title})
+        if self.registry.url:
+            out.append(self.registry.health())
+        return out
+
     def public(self) -> dict:
         with self._lock:
             view = list(self.view)
@@ -2261,3 +2499,20 @@ class AircraftLayer:
         body = json.dumps(self.public(), separators=(",", ":")).encode()
         # The same data -> the same ETag: the page's next ask (If-None-Match) gets a 304, no body.
         return 200, body, JSON_TYPE, {"ETag": '"' + hashlib.sha1(body).hexdigest()[:16] + '"', "Cache-Control": "no-cache"}
+
+
+def main(argv: list[str] | None = None) -> int:
+    """python -m sizeup.aircraft build-registry <ReleasableAircraft.zip> <faa_registry.sqlite> (docs/aircraft.md)."""
+    import sys
+    args = sys.argv[1:] if argv is None else argv
+    if len(args) != 3 or args[0] != "build-registry":
+        print("usage: python -m sizeup.aircraft build-registry <ReleasableAircraft.zip> <faa_registry.sqlite>",
+              file=sys.stderr)
+        return 2
+    n = build_registry_file(Path(args[1]).read_bytes(), args[2])
+    print(f"{args[2]}: {n} US aircraft")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -323,15 +323,19 @@ class Config:
     weather_gauge_station: tuple[str, str] = ("8516945", "Kings Point")
     # [aircraft] (sizeup/aircraft.py, #155): aircraft near HPN, shortfinal's PCFD-focused design, read by the hub
     # (or all-in-one). feeds: "receiver" (our own ADS-B receiver: its positions first), "adsblol" (ODbL) and
-    # "adsbfi" (personal, non-commercial use: the user's decision, 2026-10-14), combined; the busier API is primary.
+    # "adsbfi" (personal, non-commercial use: the user's decision, 2026-10-14), combined; the primary API: primary
+    # ("adsbfi" / "adsblol") when set, else the busier of those that haven't failed lately, a tie in feeds' order
+    # (adsb.fi first since #535: it failed none in a week from the hub, adsb.lol ~150 times a day).
     aircraft_enabled: bool = True
-    aircraft_feeds: tuple[str, ...] = ("adsblol", "adsbfi")
+    aircraft_feeds: tuple[str, ...] = ("adsbfi", "adsblol")
+    aircraft_primary: str = ""        # "" = auto
     aircraft_alarms: bool = True      # a 7500 / 7600 / 7700 squawk near HPN raises the alarm (and the push)
     aircraft_radius_nm: float = 15.0
     aircraft_ceiling_ft: float = 6000.0
     aircraft_adsblol_url: str = ""    # "" = adsb.lol's public API (sizeup/aircraft.py ADSBLOL_URL)
     aircraft_adsbfi_url: str = ""
     aircraft_registry: bool = True    # types from the FAA Releasable Aircraft Database (public domain)
+    aircraft_registry_url: str = ""   # "" = registry.faa.gov's zip; or another https:// copy, or a zip's file path
     # [aircraft.receiver]: our own receiver (readsb / dump1090 1090 MHz, dump978-fa 978 MHz UAT aircraft.json, a path
     # or an http(s) URL); sdr: the dongle meant for ADS-B (exact USB serial), kept out of sizeup's own radios and the
     # only one the station's decoder (sizeup/radio/adsbd.py, sizeup-adsb.service) ever opens; gain / bias_tee: its
@@ -1021,11 +1025,12 @@ AIRCRAFT_FEEDS = ("receiver", "adsblol", "adsbfi")
 
 
 def _aircraft(data: dict, base: Path, sdrs: tuple[str, ...]) -> dict:
-    """[aircraft] and [aircraft.receiver] -> Config fields. No section: on, adsb.lol + adsb.fi, 15 nm around HPN, the
+    """[aircraft] and [aircraft.receiver] -> Config fields. No section: on, adsb.fi + adsb.lol, 15 nm around HPN, the
     emergency alarm on, no receiver. An enabled receiver is always a feed, and its positions come first.
     The receiver's sdr (a dongle for ADS-B) is never one of sizeup's own radios ([radio] sdrs / shared_device)."""
     ac = _take(data.get("aircraft", {}), "aircraft", {"enabled", "feeds", "radius_nm", "ceiling_ft", "adsblol_url",
-                                                      "adsbfi_url", "registry", "receiver", "alarms"})
+                                                      "adsbfi_url", "registry", "receiver", "alarms", "primary",
+                                                      "registry_url"})
     if not isinstance(ac.get("receiver", {}), dict):
         raise ConfigError("aircraft.receiver: a table ([aircraft.receiver])")
     rc = _take(ac.get("receiver", {}), "aircraft.receiver", {"enabled", "sdr", "json_1090", "json_978", "gain", "bias_tee"})
@@ -1038,10 +1043,20 @@ def _aircraft(data: dict, base: Path, sdrs: tuple[str, ...]) -> dict:
     if isinstance(gain, bool) or (why := gain_problem(gain)):
         raise ConfigError(f"aircraft.receiver.gain: {why if not isinstance(gain, bool) else 'auto or a number of dB'}")
     gain = "auto" if str(gain).strip().lower() == "auto" else f"{float(gain):g}"
-    feeds = ac.get("feeds", ["adsblol", "adsbfi"])
+    feeds = ac.get("feeds", ["adsbfi", "adsblol"])
     if not (isinstance(feeds, list) and feeds and all(f in AIRCRAFT_FEEDS for f in feeds) and len(set(feeds)) == len(feeds)):
         raise ConfigError('aircraft.feeds: from "receiver", "adsblol", "adsbfi" (each once; the APIs in the order to '
                           'prefer on a tie)')
+    primary = str(ac.get("primary", "auto")).strip().lower()
+    if primary not in ("auto", "", "adsblol", "adsbfi") or (primary in ("adsblol", "adsbfi") and primary not in feeds):
+        raise ConfigError('aircraft.primary: "auto" (the busier steady API) or one of aircraft.feeds\' APIs ("adsbfi", '
+                          '"adsblol")')
+    primary = "" if primary == "auto" else primary
+    reg_url = str(ac.get("registry_url", "")).strip()
+    if reg_url and "://" in reg_url and not re.fullmatch(r"https://[^\s]+", reg_url):
+        raise ConfigError("aircraft.registry_url: an https:// address of ReleasableAircraft.zip, or a file path to one")
+    if reg_url and "://" not in reg_url and not Path(reg_url).is_absolute():
+        reg_url = str((base / reg_url).resolve())
     try:
         radius, ceiling = float(ac.get("radius_nm", 15)), float(ac.get("ceiling_ft", 6000))
     except (TypeError, ValueError):
@@ -1083,7 +1098,7 @@ def _aircraft(data: dict, base: Path, sdrs: tuple[str, ...]) -> dict:
     return dict(aircraft_enabled=enabled, aircraft_feeds=tuple(feeds), aircraft_alarms=alarms, aircraft_radius_nm=radius,
                 aircraft_ceiling_ft=ceiling,
                 aircraft_registry=registry, aircraft_receiver=receiver, aircraft_sdr=sdr, aircraft_gain=gain,
-                aircraft_bias_tee=bias_tee, **urls, **srcs)
+                aircraft_bias_tee=bias_tee, aircraft_primary=primary, aircraft_registry_url=reg_url, **urls, **srcs)
 
 
 def _weather(data: dict) -> dict:

@@ -415,8 +415,10 @@ def test_the_aircraft_section(tmp_path):
     p = tmp_path / "config.toml"
     p.write_text("")
     c = load(p)
-    assert c.aircraft_enabled and c.aircraft_feeds == ("adsblol", "adsbfi") and c.aircraft_alarms and not c.aircraft_receiver and c.aircraft_sdr == ""
+    # adsb.fi first since #535 (a tie goes to it; it failed none in a week from the hub, adsb.lol ~150 times a day)
+    assert c.aircraft_enabled and c.aircraft_feeds == ("adsbfi", "adsblol") and c.aircraft_alarms and not c.aircraft_receiver and c.aircraft_sdr == ""
     assert c.aircraft_radius_nm == 15 and c.aircraft_registry and "adsb" not in c.sdr_ignore
+    assert c.aircraft_primary == "" and c.aircraft_registry_url == ""                 # auto; registry.faa.gov
     p.write_text('[radio]\nsdrs = ["v4"]\nsdr_ignore = ["x1"]\n[aircraft]\nfeeds = ["receiver", "adsblol"]\n'
                  '[aircraft.receiver]\nenabled = true\nsdr = "adsb"\njson_1090 = "run/aircraft.json"\n'
                  'json_978 = "http://192.168.1.20/skyaware978/data/aircraft.json"\n')
@@ -426,12 +428,19 @@ def test_the_aircraft_section(tmp_path):
     assert c.aircraft_receiver_1090 == str((tmp_path / "run" / "aircraft.json").resolve())
     assert c.aircraft_receiver_978.startswith("http://192.168.1.20/")
     p.write_text('[aircraft.receiver]\nenabled = true\njson_1090 = "/run/readsb/aircraft.json"\n')
-    assert load(p).aircraft_feeds == ("receiver", "adsblol", "adsbfi")     # an enabled receiver comes first by itself
+    assert load(p).aircraft_feeds == ("receiver", "adsbfi", "adsblol")     # an enabled receiver comes first by itself
+    p.write_text('[aircraft]\nprimary = "adsblol"\nregistry_url = "faa/ReleasableAircraft.zip"\n')
+    c = load(p)
+    assert c.aircraft_primary == "adsblol" and c.aircraft_registry_url == str((tmp_path / "faa" / "ReleasableAircraft.zip").resolve())
+    p.write_text('[aircraft]\nprimary = "auto"\nregistry_url = "https://mirror.example/ReleasableAircraft.zip"\n')
+    assert load(p).aircraft_primary == "" and load(p).aircraft_registry_url.startswith("https://mirror.example/")
     for bad in ('[aircraft]\nfeeds = ["opensky"]', '[aircraft]\nfeeds = []', '[aircraft]\nfeeds = ["receiver"]',
                 '[aircraft]\nradius_nm = 200', '[aircraft]\nenabled = "yes"', '[aircraft]\nadsblol_url = "http://x.example/{lat}"',
                 '[aircraft.receiver]\nenabled = true', '[aircraft]\nalarms = "on"',
                 '[aircraft.receiver]\nsdr = "00000001"', '[radio]\nsdrs = ["adsb"]\n[aircraft.receiver]\nsdr = "adsb"',
-                '[aircraft.receiver]\njson_978 = "ftp://x/aircraft.json"', '[aircraft]\ncolour = 1', '[aircraft]\nreceiver = 1'):
+                '[aircraft.receiver]\njson_978 = "ftp://x/aircraft.json"', '[aircraft]\ncolour = 1', '[aircraft]\nreceiver = 1',
+                '[aircraft]\nprimary = "opensky"', '[aircraft]\nfeeds = ["adsblol"]\nprimary = "adsbfi"',
+                '[aircraft]\nregistry_url = "http://faa.example/x.zip"'):
         p.write_text(bad + "\n")
         with pytest.raises(ConfigError):
             load(p)
