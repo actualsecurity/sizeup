@@ -33,8 +33,11 @@ runs on a bare Linux box with Python + numpy.
                                  station's version and last update, the health alerts (sizeup/cloud/health.py).
                                  The station token or the status token, which opens nothing else; not "seen"
 
-Every request needs `Authorization: Bearer <SIZEUP_STATION_TOKEN>` (constant-time compare); with
-no token configured the hub refuses them all. Jobs (the station only connects out):
+Every request needs `Authorization: Bearer <token>`: a station's own token (sz1.<id>.<secret>) or the shared
+SIZEUP_STATION_TOKEN, which is one station (sizeup/cloud/stations.py; docs/cloud.md "How station authentication
+works"). _principal turns it into the station id it proves before any body is read, and the id a payload names must be
+that one (STATION_ROUTES: every route here). With no token configured and no station added the hub refuses them all.
+Jobs (the station only connects out):
     tts    the dispatch voice when the station makes it: [dispatch] tts_engine = "polly" (the
            default here) is rendered on the hub itself (sizeup/polly.py) and comes here only when
            Polly fails; any other engine always. Cad._render_remote -> render_voice() waits up to
@@ -73,7 +76,6 @@ from __future__ import annotations
 
 import base64
 import binascii
-import hmac
 import json
 import os
 import re
@@ -96,6 +98,7 @@ from sizeup.cad.radios import fm_system
 from sizeup.cloud.autoupdate import describe
 from sizeup.cloud.health import StationHealth, status_token
 from sizeup.cloud.hubstore import AudioDb, MonitorDb
+from sizeup.cloud.stations import Principal, Refused, StationRegistry
 from sizeup.incidents import Traffic
 from sizeup.radio.page import page_from_dict
 from sizeup.sources import SourceError
@@ -123,6 +126,13 @@ RECOVER_WAIT_S = 120.0   # ... to whisper: waiting this long for the station to 
 CATCHUP_STATUS_S = 30.0  # shed clips caught up: the station's whisper judged idle only on a report this fresh
 CATCHUP_REFUSED_S = 600.0  # ... and a station that refuses the call (an older build) isn't asked again for this long
 JOB_PATH = re.compile(r"/api/station/jobs/([0-9a-f]{16})")
+# Every route Hub.handle serves, each behind _principal (tests/test_station_identity.py fails on one not listed here)
+STATION_ROUTES = (("GET", "/api/station/status"), ("GET", "/api/station/hello"), ("GET", "/api/station/jobs"),
+                  ("POST", "/api/station/events"), ("POST", "/api/station/state"), ("POST", "/api/station/aircraft"),
+                  ("POST", "/api/station/vessels"), ("POST", "/api/station/logs"),
+                  ("POST", "/api/station/jobs/0123456789abcdef"))
+REFUSAL_LOG_S = 3600.0   # a refused station request: logged once per (reason, station) this often
+TOKEN_ID = re.compile(r"sz1\.([a-z0-9][a-z0-9_-]{0,39})\.")    # the station id a refused own token names (for the log)
 EXTRA = re.compile(r"[a-z][a-z0-9_]{0,30}")      # a transmission's field names, as the station sends them
 
 
@@ -263,6 +273,11 @@ class Hub:
         self.last_state: float | None = None     # the station's last state post (station health: "silent")
         self.status_at: float | None = None      # ... the last one with its status (the catch-up's word on whisper)
         self.status_token = status_token(self.token, getattr(cfg, "cloud_status_token", ""))
+        # who each request is (sizeup/cloud/stations.py): stations' own tokens (hub.sqlite, made on first use) and the
+        # shared token above as one station
+        self.stations = StationRegistry(app.mdb, self.token, getattr(cfg, "cloud_status_token", ""),
+                                        getattr(cfg, "cloud_legacy_station_id", ""), log=log)
+        self._refused_said: dict[tuple[str, str], float] = {}
         self.health_: StationHealth | None = None  # station health and alerts (HubApp sets it)
         self.polling = 0
         self.status: dict | None = None          # the station's last report (state "status")
@@ -287,7 +302,8 @@ class Hub:
         """{state, word, detail}: the "Station" row and the console's header pill."""
         now = time.time()
         name = (self.status or {}).get("name") or "the station"
-        if not self.token:
+        reg = getattr(self, "stations", None)
+        if not (reg.ingest_on() if reg is not None else self.token):
             return {"state": "down", "word": "no token",
                     "detail": "no station token configured on the hub (SIZEUP_STATION_TOKEN): the station can't connect"}
         if self.connected():
@@ -368,7 +384,7 @@ class Hub:
     def call(self, kind: str, args: dict, timeout: float) -> dict:
         """Run a job on the station and wait for its answer. StationOffline when it isn't connected
         (at once: no waiting on a station that isn't there) or didn't answer in time."""
-        if not self.token:
+        if not self.stations.ingest_on():
             raise StationOffline("no station token configured on the hub")
         if not self.connected():
             raise StationOffline(f"station offline since {_hhmm(self.last_seen)}" if self.last_seen
@@ -417,52 +433,72 @@ class Hub:
 
     # -- HTTP --------------------------------------------------------------------------------------------
 
-    def _auth(self, headers, read_only: bool = False) -> tuple[int, bytes, str] | None:
-        """None when the bearer is the station token (or, read_only, the status token); else the refusal."""
-        if not self.token:
+    def _principal(self, headers, read_only: bool = False) -> Principal | tuple[int, bytes, str]:
+        """Who this request is (sizeup/cloud/stations.py), from its bearer alone, before any body is read; else the
+        refusal: 401 {error, reason} (logged once per reason and station, never the token), or 403 with no token
+        configured and no station added. read_only: GET /api/station/status, where a status token counts too."""
+        if not self.stations.ingest_on():
             return _json(403, {"error": "station ingest is off: no station token configured on the hub "
-                                        "(SIZEUP_STATION_TOKEN)"})
+                                        "(SIZEUP_STATION_TOKEN) and no station added (Settings > Station > Stations)",
+                               "reason": "ingest_off"})
         h = (headers.get("Authorization") or "").strip()
         given = h[7:].strip() if h[:7].lower() == "bearer " else ""
-        ok = bool(given) and hmac.compare_digest(given.encode(), self.token.encode())
-        if read_only and given and self.status_token:
-            ok = hmac.compare_digest(given.encode(), self.status_token.encode()) or ok
-        if not ok:
-            return _json(401, {"error": "bad or missing station token"})
-        return None
+        try:
+            return self.stations.resolve(given, read_only)
+        except Refused as e:
+            m = TOKEN_ID.match(given)
+            return self._refuse(e, m.group(1) if m and self.stations.row(m.group(1)) is not None else "")
+
+    def _refuse(self, e: Refused, sid: str = "") -> tuple[int, bytes, str]:
+        """The 401: {error, reason} (fixed text, never the token); in the log once per (reason, station) an hour."""
+        now = time.time()
+        if now - self._refused_said.get((e.reason, sid), 0.0) >= REFUSAL_LOG_S:
+            self._refused_said[(e.reason, sid)] = now
+            self.log(f"hub: station request refused: {e.reason}" + (f" (station {sid})" if sid else ""))
+        return _json(401, {"error": str(e), "reason": e.reason})
+
+    def _claim(self, p: Principal, claimed) -> str:
+        """The id this request acts as: the token's. Refused (id_mismatch) when the payload names another."""
+        try:
+            return self.stations.claim(p, claimed)
+        except Refused as e:
+            said = re.sub(r"[^A-Za-z0-9_.-]", "?", claimed[:40]) if isinstance(claimed, str) else ""
+            raise Refused(e.reason, f"the token is {p.id or 'the shared one'}, the request says {said}") from None
 
     def handle(self, method: str, path: str, query: str, headers, body: Callable[[int], bytes | None] | None):
         if path == "/api/station/status":            # read only (the deploy check): not "seen", nothing changes
-            refused = self._auth(headers, read_only=True)
-            if refused:
-                return refused
+            p = self._principal(headers, read_only=True)
+            if not isinstance(p, Principal):
+                return p
             if method != "GET":
                 return _json(405, {"error": "GET only"})
             return _json(200, self.health_.status() if self.health_ is not None else
                          {"ok": True, "hub_build": self.build, "station": None, "alerts": []})
-        refused = self._auth(headers)
-        if refused:
-            return refused
+        p = self._principal(headers)
+        if not isinstance(p, Principal):
+            return p
         if method == "GET" and path == "/api/station/hello":
-            return _json(200, {"ok": True})    # the station's Test connection: the token works (not "seen")
+            # the station's Test connection: the token works (not "seen"), and as which station
+            return _json(200, {"ok": True, "station": p.id, "token": p.via})
         if not self.app._may_write_audio():
             # not the leader (#501): nothing the station sends is taken here, and no job is handed out whose result
             # couldn't be kept: 503 + Retry-After (sizeup/web/server.py); its outbox sends it again, to the leader
             fence_mod.refuse(f"{method} {path}")
         self._seen()
+        self.stations.touch(p)
         try:
             if method == "GET" and path == "/api/station/jobs":
                 return self._jobs(query)
             if method == "POST" and path == "/api/station/events":
-                return self._events(body(MAX_EVENTS_BODY))
+                return self._events(body(MAX_EVENTS_BODY), p)
             if method == "POST" and path == "/api/station/state":
-                return self._state(body(MAX_STATE_BODY))
+                return self._state(body(MAX_STATE_BODY), p)
             if method == "POST" and path == "/api/station/aircraft":
                 return self._aircraft(body(MAX_AIRCRAFT_BODY), headers)
             if method == "POST" and path == "/api/station/vessels":
                 return self._vessels(body(MAX_VESSELS_BODY), headers)
             if method == "POST" and path == "/api/station/logs":
-                return self._logs(body(MAX_LOGS_BODY), headers)
+                return self._logs(body(MAX_LOGS_BODY), headers, p)
             if method == "POST" and (m := JOB_PATH.fullmatch(path)):
                 raw = body(MAX_RESULT_BODY)
                 if raw is None:
@@ -472,6 +508,8 @@ class Hub:
                     return _json(400, {"error": "a JSON object"})
                 return _json(200, {"ok": True}) if self.jobs.finish(m.group(1), res) else \
                     _json(404, {"error": "no such job (it timed out)"})
+        except Refused as e:
+            return self._refuse(e, p.id)
         except ValueError as e:
             return _json(400, {"error": f"bad request: {e}"})
         return _json(404, {"error": "not found"})
@@ -491,18 +529,23 @@ class Hub:
                 self.polling -= 1          # (not "seen" now: a poll that ran out on a dead connection proves nothing)
         return _json(200, {"jobs": jobs})
 
-    def _state(self, raw: bytes | None) -> tuple[int, bytes, str]:
+    def _state(self, raw: bytes | None, p: Principal | None = None) -> tuple[int, bytes, str]:
+        """p: who sent it (handle passes it always; None only from a caller in this process, e.g. a test)."""
         if raw is None:
             return _json(413, {"error": "too large"})
         d = json.loads(raw or b"{}")
         if not isinstance(d, dict):
             raise ValueError("a JSON object")
+        claimed = d["status"].get("id") if isinstance(d.get("status"), dict) else None
+        sid = self._claim(p, claimed) if p is not None else ""
         now = time.time()
         self.last_state = now
         if isinstance(d.get("at"), (int, float)):
             self.skew = now - float(d["at"])
         if isinstance(d.get("status"), dict):
             st = dict(d["status"])
+            if sid:
+                st["id"] = sid                     # the authenticated id (what Health shows), never only the claimed one
             tgs = st.pop("talkgroups", None)
             if isinstance(tgs, list):
                 self.talkgroups = tgs
@@ -555,13 +598,16 @@ class Hub:
             return _json(404, {"error": "no vessels layer here"})
         return _json(200, layer.station_ingest(json.loads(raw or b"{}")))
 
-    def _logs(self, raw: bytes | None, headers) -> tuple[int, bytes, str]:
-        """The station's journal, scrubbed (sizeup/cloud/logship.py): into CloudWatch (sizeup/cloud/cwlogs.py)."""
+    def _logs(self, raw: bytes | None, headers, p: Principal) -> tuple[int, bytes, str]:
+        """The station's journal, scrubbed (sizeup/cloud/logship.py): into CloudWatch (sizeup/cloud/cwlogs.py), in the
+        authenticated station's stream."""
         sink = getattr(self.app, "station_logs", None)
         if sink is None:
             return _json(404, {"error": "no station logs here"})
         try:
-            code, out = sink.ingest(raw, headers)
+            code, out = sink.ingest(raw, headers, station=lambda claimed: self._claim(p, claimed))
+        except Refused:
+            raise
         except Exception as e:  # noqa: BLE001 - never in the way of the station's link
             self.log(f"station logs: {type(e).__name__}")
             return _json(503, {"error": f"station logs: {type(e).__name__}"})
@@ -575,12 +621,15 @@ class Hub:
         self._failed = (self.epoch, seq, n)
         return n < SOURCE_RETRIES
 
-    def _events(self, raw: bytes | None) -> tuple[int, bytes, str]:
+    def _events(self, raw: bytes | None, p: Principal | None = None) -> tuple[int, bytes, str]:
+        """p: who sent it (handle passes it always; None only from a caller in this process, e.g. a test)."""
         if raw is None:
             return _json(413, {"error": f"too large ({MAX_EVENTS_BODY // 1024 // 1024} MB max): send smaller batches"})
         d = json.loads(raw or b"{}")
         if not isinstance(d, dict) or not isinstance(d.get("events"), list):
             raise ValueError("{epoch, events: [...]}")
+        if p is not None:
+            self._claim(p, d.get("station"))     # (one outbox cursor still: a cursor per station is design step A3)
         epoch = str(d.get("epoch") or "")[:40]
         with self._ingest:
             if epoch != self.epoch:
@@ -751,6 +800,7 @@ class HubApp(App):
         self.station_logs = StationLogs(settings=lambda: self.cad.settings.section(LOGS_SECTION),
                                         station_status=lambda: self.hub.status, log=log)
         self.cad.station_logs = self.station_logs
+        self.cad.stations = self.hub.stations          # Settings > Station > Stations (sizeup/cad/api.py; admins)
         app_mod._mark("hub")
 
     def _perf_sizes(self) -> None:

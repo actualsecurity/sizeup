@@ -13,6 +13,18 @@ from typing import Callable
 from urllib.parse import urlsplit
 
 
+# The hub's 401 reasons (sizeup/cloud/stations.py REASONS): what to do on this side. The token is SIZEUP_STATION_TOKEN in
+# /etc/sizeup/station.env (`sudo sizeup-station secrets`), the id [station] id in /etc/sizeup/config.toml.
+REFUSED_HINT = {
+    "no_token": "set SIZEUP_STATION_TOKEN (sizeup-station secrets)",
+    "token_unknown": "check SIZEUP_STATION_TOKEN (sizeup-station secrets): an admin issues one in Settings > Station > Stations",
+    "token_revoked": "an admin revoked it: ask for a new one (Settings > Station > Stations > Rotate)",
+    "token_retired": "the shared token is retired: put this station's own token in SIZEUP_STATION_TOKEN",
+    "id_mismatch": "the token is another station's: check [station] id in the config and SIZEUP_STATION_TOKEN",
+    "read_only": "that is a status token: the station needs its station token",
+}
+
+
 class HubError(RuntimeError):
     def __init__(self, msg: str, status: int = 0, retry_after: float | None = None):
         super().__init__(msg)
@@ -126,10 +138,17 @@ class HubClient:
                 self.close()
             if not 200 <= r.status < 300:
                 self.close()
+                reason = ""
                 try:
-                    msg = json.loads(raw).get("error") or raw[:200].decode(errors="replace")
+                    doc = json.loads(raw)
+                    msg = doc.get("error") or raw[:200].decode(errors="replace")
+                    reason = str(doc.get("reason") or "")[:40]
                 except (ValueError, AttributeError):
                     msg = raw[:200].decode(errors="replace").strip() or r.reason
+                if r.status == 401 and reason:
+                    # the hub refused this station's token (sizeup/cloud/stations.py): what and what to do, never the token
+                    raise HubError(f"hub refused this station ({reason}): {msg}"
+                                   + (f" · {REFUSED_HINT[reason]}" if reason in REFUSED_HINT else ""), r.status)
                 # Cloudflare Access answers a missing/expired service token with a login page (302/403 HTML)
                 raise HubError(f"hub said {r.status}: {msg}", r.status, retry_after(r.getheader("Retry-After")))
             try:

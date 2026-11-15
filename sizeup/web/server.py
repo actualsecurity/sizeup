@@ -867,7 +867,8 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                     n = -1
                 if not 0 <= n <= MAX_CAD_BODY:
                     return self._send(400, b'{"error":"bad or too large body (64 KB max)"}', "application/json")
-                return self._send(*cad.post(path, self.rfile.read(n), self.who, self._client()))
+                return self._send(*cad.post(path, self.rfile.read(n), self.who, self._client()),
+                                  {"Cache-Control": "no-store"} if path == "/api/cad/stations" else None)   # a new token
             if self.who is not None and cad is not None and (refused := cad.permit(path, self.who, client=self._client())):
                 self.close_connection = True     # the body is left unread
                 return self._send(*refused)

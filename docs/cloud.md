@@ -61,6 +61,13 @@ No `[cloud]` section = today's all-in-one, unchanged.
   - [The alert and status topics (ntfy)](#the-alert-and-status-topics-ntfy)
   - [A deploy that checks itself](#a-deploy-that-checks-itself)
 - [Auth and security](#auth-and-security)
+- [How station authentication works](#how-station-authentication-works)
+  - [The tokens and where each lives](#the-tokens-and-where-each-lives)
+  - [What happens on each request](#what-happens-on-each-request)
+  - [Managing stations](#managing-stations)
+  - [Moving the existing station to its own token](#moving-the-existing-station-to-its-own-token)
+  - [Cloudflare Access: a service token per station (an operator step)](#cloudflare-access-a-service-token-per-station-an-operator-step)
+  - [What a leaked token can and cannot do](#what-a-leaked-token-can-and-cannot-do)
 - [The dispatch voice (Amazon Polly)](#the-dispatch-voice-amazon-polly)
 - [Who is signed in (the operator from Cloudflare Access)](#who-is-signed-in-the-operator-from-cloudflare-access)
   - [Roles: who may change what](#roles-who-may-change-what)
@@ -574,7 +581,8 @@ alert follows. Without the secrets the step is skipped with a warning.
 (with its log line) and the alerts; nothing else. It takes the station token or the **status token**, which
 opens nothing else (posting events, state or jobs with it is a 401). The status token is derived from the
 station token (HMAC-SHA256), so nothing new needs deploying; `SIZEUP_STATUS_TOKEN` / `[cloud] status_token`
-sets another one instead.
+sets another one instead. A station with its own token has its own status token, derived the same way and shown
+with the token when it is issued ([How station authentication works](#how-station-authentication-works)).
 
 **GitHub secrets to add** (Settings → Secrets and variables → Actions → New repository secret):
 
@@ -590,10 +598,11 @@ needed.
 
 ## Auth and security
 
-* Every `/api/station/*` request carries `Authorization: Bearer <token>`. The hub compares it in
-  constant time (`hmac.compare_digest`) and refuses everything when it has no token configured
-  (403). The token comes from `SIZEUP_STATION_TOKEN` (preferred; `[cloud] token` also works), at
-  least 16 characters: `openssl rand -hex 32`. A refused request never has its body read.
+* Every `/api/station/*` request carries `Authorization: Bearer <token>`: the station's own token, or
+  the older shared token. The hub turns it into a station id in constant time and refuses everything
+  when it has neither a shared token nor any station added (403). On the station the token comes from
+  `SIZEUP_STATION_TOKEN` (preferred; `[cloud] token` also works). A refused request never has its body
+  read. All of it: [How station authentication works](#how-station-authentication-works).
 * The station needs `https://` for the hub (plain http only to this machine, for tests) and never
   listens for the hub: no inbound ports, no port forwarding.
 * **Cloudflare Access** in front of the hub's hostname for people (email one-time PIN or the
@@ -611,6 +620,149 @@ needed.
 * With `access_team` + `access_aud` set, the hub itself also checks every person's Access token
   (below): reaching the origin around Access gets a 401, not the CAD.
 * Transmit stays off on both (`NullTransmitter`): the hub has no radio at all.
+
+## How station authentication works
+
+A station proves who it is to the hub twice on every request:
+
+1. **At Cloudflare's edge**, with a Cloudflare Access service token (`CF-Access-Client-Id` / `-Secret`). Only
+   Cloudflare checks it; the hub never sees it. Without it nothing reaches the hub (unless `/api/station/` has a
+   Bypass policy, above).
+2. **At the hub**, with a bearer token (`Authorization: Bearer ...`). The hub turns it into a **station id**,
+   and from then on that request acts as that station and no other. Code: `sizeup/cloud/stations.py` (the
+   registry, the CLI) and `Hub._principal` in `sizeup/cloud/hub.py`.
+
+### The tokens and where each lives
+
+| token | looks like | on the station | on the hub | opens |
+|---|---|---|---|---|
+| A station's own token | `sz1.<id>.<secret>`: the format version, the station id, 43 random characters (256 bits) | `SIZEUP_STATION_TOKEN` in `/etc/sizeup/station.env` (root 0600), as before | only its SHA-256, in `hub.sqlite` table `stations` | every `/api/station/` route, as station `<id>` |
+| Its status token | 64 hex digits: HMAC-SHA256 of the token (`python -m sizeup.cloud.health status-token`) | nowhere: it is the deploy check's GitHub secret `SIZEUP_STATUS_TOKEN` | only its SHA-256, same row | `GET /api/station/status` only |
+| The shared token (the old way) | anything of 16+ characters | `SIZEUP_STATION_TOKEN`, until the station has its own | `SIZEUP_STATION_TOKEN` from SSM `/sizeup-hub/station-token` | every route, as **one** station (below), until an admin retires it |
+| The shared status token | HMAC of the shared token, or `SIZEUP_STATUS_TOKEN` / `[cloud] status_token` | nowhere | derived at start / the env | `GET /api/station/status` only |
+| Cloudflare Access service token | a Client ID and Secret | `SIZEUP_ACCESS_CLIENT_ID` / `_SECRET` in `station.env` | nothing (Cloudflare checks it) | the `/api/station/` path at the edge |
+
+The hub never stores a station's token, only `sha256(token)`. A hash of 256 random bits can't be turned back or
+guessed, so a slow password hash or a pepper would add nothing: those protect secrets a person chose. A copy of
+`hub.sqlite` (or its S3 replica) therefore holds nothing that opens the station path. Every comparison is
+`hmac.compare_digest`, and an unknown station id is compared against a dummy hash, so the time a refusal takes says
+nothing about the token. The token is shown **once**, when it is issued, and can't be read back: lose it and you
+Rotate.
+
+**The shared token is one station.** `[cloud] legacy_station_id` on the hub names it; left unset (as in
+`deploy/hub/config.hub.toml`), it is the first `[station] id` the shared token posts as after this deploy, kept in
+`hub.sqlite` (meta `station_legacy_id`) and shown in Settings > Station > Stations. The shared token is refused
+for any other id, so a new station can't use it: a new station always gets its own token.
+
+### What happens on each request
+
+1. Cloudflare checks the Access service token and passes the request down the tunnel.
+2. `Hub.handle` calls `_principal` **before reading the body**:
+   - a bearer starting `sz1.`: the id from the token picks the row; `sha256(bearer)` must equal the row's hash (or,
+     for 10 minutes after a Rotate, the previous one). A revoked row: refused;
+   - else the shared token: refused once retired, else it is the shared token's station;
+   - else a status token, on `GET /api/station/status` only.
+   Anything else: `401 {"error", "reason"}`.
+3. The body is read. The id the payload names (`station` on events and logs, the status `id` on state) must be the
+   token's, or be absent (an older station leaves it out of some posts): another id is a `401` with reason
+   `id_mismatch`, logged once an hour per station (never the token).
+4. What follows uses the **authenticated** id: the CloudWatch log stream (`<id>-<date>`, `cwlogs.py`), the station
+   id Health shows. A claimed id alone is never trusted.
+5. Last used: kept in memory and written to `hub.sqlite` at most every 5 minutes.
+
+Every route goes through steps 2-3 (`STATION_ROUTES` in `hub.py`; `tests/test_station_identity.py` fails on a
+route that isn't listed):
+
+| route | the payload's id checked |
+|---|---|
+| `POST /api/station/events` (pages, transmissions and their clips, re-runs, alarms, source reports) | `station` |
+| `POST /api/station/state` (talking now, status) | status `id` |
+| `POST /api/station/logs` | `station` (and names the log stream) |
+| `GET /api/station/jobs`, `POST /api/station/jobs/<id>` | none sent |
+| `POST /api/station/aircraft`, `POST /api/station/vessels` | none sent |
+| `GET /api/station/hello` (Test connection; answers `{station, token: own \| shared}`) | none sent |
+| `GET /api/station/status` (the deploy check; status tokens too) | none sent |
+
+**Refusals** (`401`, `reason`): `no_token`, `token_unknown` (wrong, mistyped, or a rotated one past its 10
+minutes), `token_revoked` (said only to the right token, so a guess learns nothing), `token_retired` (the shared
+token after Retire), `read_only` (a status token on a write), `id_mismatch`. The station logs the reason and what to
+do, once when it starts and again if it changes (`hub link: hub refused this station (token_revoked): ...`;
+`sizeup/cloud/client.py`), never the token. With no shared token and no station added the hub answers `403`
+"station ingest is off".
+
+### Managing stations
+
+**Settings > Station > Stations** (admins with a verified sign-in, the hub only): one row per station (name, id,
+token state, last seen) and the shared token's row.
+
+| action | what happens |
+|---|---|
+| Add | a new id and name; the token and its status token are shown once, with Copy buttons, then never again |
+| Rename | the display name only; the id never changes |
+| Rotate | a new token (shown once); the old one keeps working 10 minutes, time to put the new one on the station |
+| Revoke | refused from the station's next request, its previous token and status token too. New token (Rotate) brings it back with a fresh token |
+| Retire (shared token) | the shared token is refused from now on. It asks again if the shared token was used in the last 2 minutes (a station still runs on it) |
+| Restore (shared token) | undoes Retire (a station put back on the shared token, a rollback) |
+
+Each one is in the Settings audit (System, key `stations/<id>`) and the person's activity: who, what, which station;
+never a token. The answer carrying a new token is sent `Cache-Control: no-store`.
+
+**The CLI**, for an emergency inside the hub task (`aws ecs execute-command ... --command "python -m
+sizeup.cloud.stations list"`); it refuses on a task that isn't the leader and writes the same audit:
+
+```sh
+python -m sizeup.cloud.stations list
+python -m sizeup.cloud.stations add st-north --name "North"   # prints the token and status token once
+python -m sizeup.cloud.stations rotate st-north
+python -m sizeup.cloud.stations revoke st-north
+python -m sizeup.cloud.stations rename st-north "North house"
+python -m sizeup.cloud.stations retire-shared [--force] | restore-shared
+```
+
+`--state` defaults to `SIZEUP_STATE_DIR` (`/data` in the task). The running hub reads the table on each request,
+so a CLI revoke takes effect at the station's next request too.
+
+### Moving the existing station to its own token
+
+Nothing breaks at any step; the station is never refused in between.
+
+1. **Deploy this.** Nothing else to do: the station keeps posting on the shared token. Settings > Station > Stations
+   shows the shared token's row with the station id it learned, and "now" under Last seen.
+2. **Add** a station with **exactly that id** (the station's `[station] id`; never change that id). Copy the token,
+   then the status token. (An id must be lower case letters, digits, `-` and `_`.)
+3. **On the station:** `sudo sizeup-station secrets`, paste the new token as the station token, Enter to keep the
+   Access pair. It restarts. Check: the station's row says "now" under Last seen, and the shared row's stops
+   moving; the station page's Hub row is connected.
+4. **The deploy check:** replace the GitHub secret `SIZEUP_STATUS_TOKEN` with the status token from step 2 (or set
+   `SIZEUP_STATUS_TOKEN` on the hub as a separate SSM parameter). The old one is derived from the shared token and
+   stops working when it is retired.
+5. **Wait about a week** with the shared token still configured. A rolled-back hub (a build from before this) knows
+   no `sz1.` tokens and would refuse the station on its own token; the fix then is putting the shared token back in
+   the station's `station.env`.
+6. **Retire** the shared token (its row's Retire). It is refused from then on; Restore undoes it.
+7. **Later, an operator step:** drop `SIZEUP_STATION_TOKEN` from `deploy/aws/taskdef.json` and delete the SSM
+   parameter `/sizeup-hub/station-token` (retired is already enough: the hub refuses it).
+
+### Cloudflare Access: a service token per station (an operator step)
+
+The edge gate is outside this repo. For each station: Zero Trust → Access → Service auth → Create a service token
+named `sizeup-station-<id>`; add it to the Service Auth policy of the `/api/station/` Access application; put its
+Client ID and Secret in that station's `station.env` (`sizeup-station secrets`). Revoking a station then also
+means revoking its Access service token, which shuts it out at the edge before the hub sees anything. The existing
+station keeps the service token it has.
+
+### What a leaked token can and cannot do
+
+- **A station's own token** (with the Access service token, or a Bypass policy): it can post as that station:
+  pages and transmissions (which can open a paging incident), state, logs into that station's stream; take the
+  station's jobs off the long poll and read the station status. It **cannot** post as any other station (the id is
+  checked), sign in to the CAD or read it (that is behind Access for people), or reveal another station's token.
+  Revoke it (immediate), Rotate, put the new one on the station; revoke its Access service token too if that leaked.
+- **The shared token:** the same, as the shared token's station only, until it is retired.
+- **A status token:** builds, update state and alerts from `GET /api/station/status`; nothing else.
+- **A copy of `hub.sqlite`:** hashes only; no token can be made from them.
+- Until per-station jobs (design step A4) there is one job queue: any station token's long poll may take the jobs
+  meant for the existing station.
 
 ## The dispatch voice (Amazon Polly)
 

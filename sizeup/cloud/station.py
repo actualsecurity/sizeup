@@ -226,11 +226,17 @@ class StationLink:
             self.log(f"hub link: connected to {self.cfg.cloud_hub_url}")
 
     def _fail(self, e: Exception) -> None:
+        refused = isinstance(e, HubError) and e.status == 401 and str(e).startswith("hub refused this station")
         with self._lock:
             first = self.error_since is None
-            self.last_error = str(e)[:200]
+            self.last_error = str(e)[:400 if refused else 200]
             self.error_since = self.error_since or time.time()
-        if first:
+            # the hub refusing this station's token (revoked, unknown, another id): said when it starts, even in the
+            # middle of an outage, and again when the reason changes (sizeup/cloud/client.py REFUSED_HINT)
+            again = refused and str(e) != getattr(self, "_refused_said", "")
+            if refused:
+                self._refused_said = str(e)
+        if first or again:
             self.log(f"hub link: {e}")
 
     def connected(self) -> bool:
