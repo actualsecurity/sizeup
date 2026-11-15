@@ -247,7 +247,10 @@ pushed. It never creates an incident.
 
 1. `Comms.on_context_text` hands each context transcript's id to the engine after commit (`cad/service.py`).
 2. A rule pack (`data/intel/police.json`, with Settings over it) scores phrases per category. Rows from one source
-   within a window merge, so a call-out and its read-back are one candidate (`rules.py`, `engine.py`).
+   within a window merge, so a call-out and its read-back are one candidate (`rules.py`, `engine.py`). Three more
+   packs (`county_police.json`, `ems.json`, `fire.json`) read the county system's police and Fire/EMS talkgroups and
+   the analog fire channels through a table of speech-to-text fixes (`data/intel/tables/stt.json`). They are log
+   only: nothing of theirs is pushed, mapped or shown until an admin raises the pack, the category and the rule.
 3. The window's words go through the locator (`place.py`), held to the source's home towns. Beyond what a page says, it
    reads spoken intersections ("X and Y", "corner of"), blocks ("the 100 block of X", never an exact address), relative
    cues ("rear of", "across from": a wider radius), and highway exits and mile markers (the place search). An address

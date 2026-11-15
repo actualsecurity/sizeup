@@ -207,7 +207,8 @@ Only arcs an issue or PR backs. Each row says what exists and what is planned.
 
 Not listed, because no issue or PR of their own backs them yet:
 
-- a fire-chatter rule pack (the engine takes fire-channel rows, and `data/intel/` holds only the police pack);
+- raising any of the log-only intel packs (`county_police`, `ems`, `fire`) above `log`: tune them on replayed traffic
+  first, then an always-alert list of single rules;
 - more Settings > Intel feedback and statistics than the above;
 - marine VHF channel 16.
 

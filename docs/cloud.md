@@ -2832,7 +2832,8 @@ person ([Listen](#listen-links-and-inference-intel) below).
 
 | Part | File | What |
 |---|---|---|
-| Packs | `data/intel/*.json` (`police.json`: 11 categories, 17 rules; generic phrases only), Settings laid over them | which sources a pack reads (source keys or globs, services), its categories (label, priority, time to live, mode), phrase rules with weights, "suppress" phrases ("disregard", "training") |
+| Packs | `data/intel/*.json` (`police.json`: 11 categories, 17 rules; the log-only `county_police.json`, `ems.json`, `fire.json`, below; generic phrases only), Settings laid over them | which sources a pack reads (source keys or globs, services), its categories (label, priority, time to live, mode), phrase rules with weights, "suppress" phrases ("disregard", "training") |
+| Speech-to-text table | `data/intel/tables/stt.json` (`rules.py` `Normalizer`) | for a pack that says `"normalize": "stt"`: sound-alikes with their context ("order of gas" is "odor of gas"), split and merged words, number words as digits. A phrase is tried on the words as transcribed and on the fixed words, so the table only adds a reading. `police.json` has no table and matches as before |
 | Engine | `engine.py` | a row joins its source's window (`window_s`, 120); per category the rules' weights combine (noisy-OR, dampers); at the threshold (0.6) it is an event: the open one of that pack, category and source, or the one at the same place, else a new one |
 | Place | `place.py` | the window's words through the page locator, held to the source's home towns, after callsigns, car numbers, 10-codes, plates and times are taken out. Also "X and Y" / "corner of" through the intersection search, "the 100 block of X", "rear of / across from" (radius widened), highway exits and mile markers (the place search), and a headquarters callsign said alone narrows to its town. Police text confirms at a higher score than a page (`DOMAIN_PARAMS`). An address confirms by its cross street only within `corner_m` (200 m) of where they meet; a number far from the corner is taken as misheard. Precision: address, intersection, block, landmark or street; unconfirmed is never exact |
 | Policy | `policy.py` | whether a change is pushed: the mode ladder, the kill switch, quiet hours, the caps (below) |
@@ -2841,6 +2842,23 @@ person ([Listen](#listen-links-and-inference-intel) below).
 | Inference | `infer.py` | an LLM behind the rules, off by default, capped ([below](#listen-links-and-inference-intel)) |
 | Store | `events.py` | `intel_events` (90 days), `intel_hits` (every hit, 30 days), `intel_feedback` (a year) in `cad.sqlite`: no transcript text, transmissions by id. `intel_infer` (90 days, made on first use by the leader) holds the model's calls |
 | Settings, API, card | `admin.py`, `static/intel.js` | Settings > System > Intel; the 60 Control column's card |
+
+**The log-only packs.** Three more packs read what the hub already transcribes. The pack, every category and every
+rule of each is written at `log`: an event in `intel_events`, its hits in `intel_hits` and a line in the log, and
+never the map's events, the console's card or a push. The engine takes the lowest of the three modes, so no single
+switch turns one on: an admin raises the pack, the category and the rule in Settings > System > Intel. Settings
+saved before they existed name only `police` and its rules, and change nothing here. They never ask the model
+(`"infer": false`).
+
+| Pack | Reads (scope: service and source-key glob, never a talkgroup number) | Raises |
+|---|---|---|
+| `county_police` | the county system's police talkgroups | smoke or fire, the fire department asked for, a fire alarm, gas / wires / CO, a critical patient, EMS asked for with what it is for, a crash with EMS or injuries (rollover, pedestrian struck, entrapment, a vehicle into a building, a pursuit ending in a crash), a person or vehicle in water, an elevator / lock-in / someone trapped, shots or a weapon, a barricade |
+| `ems` | the county system's Fire/EMS talkgroups (EMS is dispatched and worked there) and another system's EMS talkgroups | cardiac arrest / unresponsive / overdose, a serious crash, several patients, the fire department asked for (lift assist, forcible entry, a landing zone), a burn or smoke patient, an exposure / CO with symptoms / electrical contact, water, an elevator or a fall from height, a scene that is not safe |
+| `fire` | every fire source: the county system's Fire/EMS talkgroups and the analog fire channels | a mayday or a firefighter down, evacuate / going defensive, a collapse, people trapped, a working fire, a 2nd alarm or more units, a water supply problem, mutual aid that names Port Chester or Rye Brook |
+
+Each strong phrase family is a rule of its own, at or over the threshold alone; the weaker ones (a bare "MVA", a bare
+"fire alarm", "EMS en route") only add up with another rule in the window. Replay them on a restored copy before
+raising anything (`tools/intel_replay.py`). Tests: `tests/test_intel_packs.py`.
 
 **How it is fed (the context text hook, #483).** `Comms.record()` and `Comms.retext()` tell one of two hooks once
 the write has committed, on the caller's thread: `on_text` for our channels (the alarms, the status hints, the radio

@@ -19,6 +19,15 @@ when any of its phrases is in it and none of its "not" phrases is. "re:" in fron
 
 Scope never names a bare talkgroup or callsign number: sources are source keys (sizeup/sourcekeys.py) or globs of them.
 
+Speech-to-text tolerance (a pack with "normalize": "<table>", data/intel/tables/<table>.json): a rule's phrases are
+tried on the words as transcribed AND on the words after the table's fixes (Normalizer: sound-alikes such as "order of
+gas" -> "odor of gas", split and merged words, number words as digits), so a pack's phrases are written once, in the
+table's own spelling ("2nd alarm", "odor of gas"). A pack without "normalize" matches exactly as before.
+
+"order": where the pack is listed (lowest first, then by file name; 0 when absent). "infer": false: the model behind
+the rules (infer.py) is never asked about this pack's rows. A rule or a category with no "mode" is at "push": a pack
+that must stay quiet writes "mode": "log" on the pack, every category and every rule (the engine takes the lowest).
+
 Settings (sections intel_packs / intel_rules, sizeup/intel/settings.py) lay over the files: a pack's mode, threshold,
 window; a category's mode and priority; a rule's mode, weight, on/off. load_packs() is pure (files or dicts in,
 packs out), so replay can compare two rule sets (--diff A B) without a database.
@@ -31,11 +40,13 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 
 from sizeup.intel.model import MODES
 
 DATA = Path(__file__).resolve().parents[2] / "data" / "intel"
+TABLES = DATA / "tables"        # not packs (read_files reads data/intel/*.json only): the normalisation tables
 GAP = "..."
 GAP_WORDS = 6
 NEGATORS = frozenset({"no", "not", "none", "nobody", "nothing", "negative", "zero", "never"})
@@ -44,6 +55,9 @@ RE_MAX = 200
 PHRASE_MAX = 120
 RULES_MAX = 400
 WILD = "*"                      # a rule for every category (a dispatch cue): counts only beside a real hit
+NORM_SECTIONS = ("split", "sound", "numbers")
+NORM_MAX = 2000                 # entries in one table
+NORM_WORDS = 6                  # words in one entry's key or value
 
 
 def words(text: str) -> list[str]:
@@ -97,6 +111,89 @@ def _match_at(ws: list[str], i: int, items: list) -> bool:
     return False
 
 
+class Normalizer:
+    """A table of speech-to-text fixes, as data (data/intel/tables/<name>.json):
+
+        {"version": 1,
+         "split":   {"roll over": "rollover", "carbonmonoxide": "carbon monoxide"},     split or merged words
+         "sound":   {"order of gas": "odor of gas"},                                    sound-alikes, with their context
+         "numbers": {"two": "2", "second": "2nd"}}                                      number words as digits
+
+    Keys and values are words (case and punctuation aside, as words() reads them), at most NORM_WORDS each. apply() is
+    one pass over a transmission's words, left to right, the longest key first; what a fix wrote is never fixed again.
+    It only ever adds a second reading (Rule.hit tries both), so a table can't take a hit away from a phrase that
+    matched the words as transcribed; a rule's "not" phrases are tried on both readings too."""
+
+    def __init__(self, table: dict, name: str = ""):
+        self.name = str(name or table.get("name") or "")
+        self.version = int(table.get("version") or 1)
+        self.map: dict[tuple, tuple] = {}
+        for sec in NORM_SECTIONS:
+            d = table.get(sec) or {}
+            if not isinstance(d, dict):
+                raise ValueError(f"table {self.name}.{sec}: an object of \"heard\": \"meant\"")
+            for k, v in d.items():
+                kw, vw = tuple(words(str(k))), tuple(words(str(v)))
+                if not kw or not vw or len(kw) > NORM_WORDS or len(vw) > NORM_WORDS:
+                    raise ValueError(f"table {self.name}.{sec} {str(k)[:30]!r}: 1 to {NORM_WORDS} words each side")
+                if kw in self.map and self.map[kw] != vw:
+                    raise ValueError(f"table {self.name}: {' '.join(kw)!r} twice, with two meanings")
+                if kw != vw:
+                    self.map[kw] = vw
+        if len(self.map) > NORM_MAX:
+            raise ValueError(f"table {self.name}: at most {NORM_MAX} entries")
+        self.longest = max((len(k) for k in self.map), default=0)
+        self.first = frozenset(k[0] for k in self.map)
+        self.digest = hashlib.sha256(json.dumps(sorted(self.map.items())).encode()).hexdigest()[:12]
+        self._last: tuple = ((), None)
+
+    def apply(self, ws: list[str]) -> list[str] | None:
+        """The words with the table's fixes, or None when it changes nothing (the usual case: no second reading)."""
+        key = tuple(ws)
+        last = self._last                      # (read once: another thread may compile and ask too)
+        if last[0] == key:                     # every rule of a pack asks about the same transmission
+            return last[1]
+        out: list[str] = []
+        i, n, changed = 0, len(key), False
+        while i < n:
+            if key[i] in self.first:
+                for size in range(min(self.longest, n - i), 0, -1):
+                    got = self.map.get(key[i:i + size])
+                    if got is not None:
+                        out += got
+                        i += size
+                        changed = True
+                        break
+                else:
+                    out.append(key[i])
+                    i += 1
+            else:
+                out.append(key[i])
+                i += 1
+        res = out if changed else None
+        self._last = (key, res)
+        return res
+
+
+@lru_cache(maxsize=8)
+def table(name: str) -> Normalizer:
+    """data/intel/tables/<name>.json, compiled (ValueError with the reason)."""
+    if not re.fullmatch(r"[a-z][a-z0-9_]{0,23}", str(name)):
+        raise ValueError(f"normalize {name!r}: a table's name (lower-case letters, digits, _)")
+    try:
+        return Normalizer(json.loads((TABLES / f"{name}.json").read_text()), name)
+    except OSError:
+        raise ValueError(f"normalize {name!r}: no data/intel/tables/{name}.json") from None
+
+
+def _found(p: "Phrase", text: str, ws: list[str], norm: Normalizer | None) -> bool:
+    """The phrase in the words as transcribed, or in them after the pack's table."""
+    if p.found(text, ws):
+        return True
+    alt = norm.apply(ws) if norm is not None else None
+    return alt is not None and p.found(" ".join(alt), alt)
+
+
 class Phrase:
     """One compiled phrase (or "re:" expression)."""
 
@@ -132,9 +229,11 @@ class Rule:
     mode: str = "push"                # caps what this rule raises (shadow: counted, never scored)
     enabled: bool = True
     src: dict = field(default_factory=dict)
+    norm: Normalizer | None = None    # the pack's table (None: the words as transcribed only)
 
     def hit(self, text: str, ws: list[str]) -> bool:
-        return self.enabled and any(p.found(text, ws) for p in self.any) and not any(p.found(text, ws) for p in self.nots)
+        return (self.enabled and any(_found(p, text, ws, self.norm) for p in self.any)
+                and not any(_found(p, text, ws, self.norm) for p in self.nots))
 
 
 @dataclass
@@ -154,6 +253,7 @@ class Pack:
     rules: list
     suppress: list
     src: dict = field(default_factory=dict)
+    norm: Normalizer | None = None
 
     def in_scope(self, row: dict) -> bool:
         """The row is one this pack reads: its service, its source key (a glob), its tier and system, as listed (an
@@ -180,7 +280,7 @@ class Pack:
         return self.categories.get(name) or {}
 
     def suppressed(self, text: str, ws: list[str]) -> bool:
-        return any(p.found(text, ws) for p in self.suppress)
+        return any(_found(p, text, ws, self.norm) for p in self.suppress)
 
 
 def _num(v, lo: float, hi: float, what: str) -> float:
@@ -211,6 +311,7 @@ def compile_pack(d: dict, packs_ov: dict | None = None, rules_ov: dict | None = 
         raise ValueError(f"pack name {name!r}: lower-case letters, digits, _")
     po = (packs_ov or {}).get(name) or {}
     ro = rules_ov or {}
+    norm = table(str(d["normalize"])) if d.get("normalize") else None
     cats: dict = {}
     for c, cd in (d.get("categories") or {}).items():
         cd = dict(cd or {})
@@ -235,7 +336,7 @@ def compile_pack(d: dict, packs_ov: dict | None = None, rules_ov: dict | None = 
         rules.append(Rule(rid, int(r.get("v") or 1), cat, _num(o.get("w", r.get("w", 0.5)), -1, 1, f"rule {rid} weight"),
                           _phrases(r.get("any") or [], f"rule {rid}"), _phrases(r.get("not") or [], f"rule {rid} not"),
                           _mode(o.get("mode", r.get("mode", "push")), f"rule {rid} mode"),
-                          bool(o.get("enabled", r.get("enabled", True))), dict(r)))
+                          bool(o.get("enabled", r.get("enabled", True))), dict(r), norm))
     for rid, o in ro.items():                           # an admin's own rule (local.*)
         if rid.startswith("local.") and isinstance(o, dict) and o.get("pack") == name and rid not in seen:
             cat = str(o.get("category") or "")
@@ -243,7 +344,8 @@ def compile_pack(d: dict, packs_ov: dict | None = None, rules_ov: dict | None = 
                 continue
             rules.append(Rule(rid, int(o.get("v") or 1), cat, _num(o.get("w", 0.5), -1, 1, f"rule {rid} weight"),
                               _phrases(o.get("any") or [], f"rule {rid}"), _phrases(o.get("not") or [], f"rule {rid} not"),
-                              _mode(o.get("mode", "shadow"), f"rule {rid} mode"), bool(o.get("enabled", True)), dict(o)))
+                              _mode(o.get("mode", "shadow"), f"rule {rid} mode"), bool(o.get("enabled", True)), dict(o),
+                              norm))
     if len(rules) > RULES_MAX:
         raise ValueError(f"{name}: at most {RULES_MAX} rules")
     return Pack(name=name, version=int(d.get("version") or 1), domain=str(d.get("domain") or name),
@@ -253,16 +355,19 @@ def compile_pack(d: dict, packs_ov: dict | None = None, rules_ov: dict | None = 
                 context_factor=_num(d.get("context_factor", 0.5), 0, 1, f"{name}.context_factor"),
                 mode=_mode(po.get("mode", d.get("mode", "push")), f"{name}.mode"),
                 towns=dict(d.get("towns") or {}), categories=cats, rules=rules,
-                suppress=_phrases(d.get("suppress") or [], f"{name}.suppress"), src=dict(d))
+                suppress=_phrases(d.get("suppress") or [], f"{name}.suppress"), src=dict(d), norm=norm)
 
 
 def read_files(paths=None) -> list[dict]:
-    """The pack files (data/intel/*.json by default), as dicts."""
+    """The pack files (data/intel/*.json by default), as dicts: by their "order" (lowest first), then by file name."""
+    given = paths is not None
     if paths is None:
         paths = sorted(DATA.glob("*.json"))
     out = []
     for p in paths:
         out.append(json.loads(Path(p).read_text()))
+    if not given:
+        out.sort(key=lambda d: d.get("order") or 0)      # stable: the file names' order within one "order"
     return out
 
 
@@ -281,5 +386,7 @@ def ruleset_hash(packs: list[Pack]) -> str:
     blob = json.dumps([[p.name, p.version, p.mode, p.threshold, p.window_s, p.categories, p.context_factor, p.towns,
                         p.scope,
                         [[r.id, r.v, r.w, r.mode, r.enabled, r.category, [x.src for x in r.any], [x.src for x in r.nots]]
-                         for r in p.rules], [x.src for x in p.suppress]] for p in packs], sort_keys=True, default=str)
+                         for r in p.rules], [x.src for x in p.suppress],
+                        *([[p.norm.name, p.norm.digest]] if p.norm is not None else [])] for p in packs],
+                      sort_keys=True, default=str)
     return hashlib.sha256(blob.encode()).hexdigest()[:12]

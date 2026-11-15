@@ -90,7 +90,7 @@ def test_a_bad_phrase_says_why(bad):
 
 def test_packs_load_pure_with_overrides_and_the_hash_follows_them():
     base = rules_mod.load_packs()
-    assert [p.name for p in base] == ["police"]
+    assert [p.name for p in base] == ["police", "county_police", "ems", "fire"]     # by "order": the first pack first
     pol = base[0]
     assert pol.accept is False and all(c["mode"] == "push" for c in pol.categories.values())    # user: push from day one
     h0 = rules_mod.ruleset_hash(base)
@@ -99,7 +99,7 @@ def test_packs_load_pure_with_overrides_and_the_hash_follows_them():
     p2 = rules_mod.load_packs(None, ov)[0]
     assert p2.threshold == 0.7 and p2.categories["alarm"]["mode"] == "shadow"
     assert next(r for r in p2.rules if r.id == "pd.smoke_seen").w == 0.9
-    assert rules_mod.ruleset_hash([p2]) != h0 and rules_mod.ruleset_hash(rules_mod.load_packs()) == h0
+    assert rules_mod.ruleset_hash([p2]) != rules_mod.ruleset_hash([pol]) and rules_mod.ruleset_hash(rules_mod.load_packs()) == h0
     with pytest.raises(ValueError, match="mode"):
         rules_mod.load_packs(None, {"intel_rules": {"pd.smoke_seen": {"mode": "loud"}}})
     d = json.loads((rules_mod.DATA / "police.json").read_text())
