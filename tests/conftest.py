@@ -2,6 +2,14 @@ import pytest
 
 
 @pytest.fixture(autouse=True)
+def _outbound_not_armed():
+    """A test that runs sizeup.app.main() arms the outbound guard (sizeup/outbound.py): never past that test."""
+    yield
+    from sizeup import outbound
+    outbound.disarm()
+
+
+@pytest.fixture(autouse=True)
 def _private_claims_dir(tmp_path, monkeypatch):
     """Tests never touch the real ~/.local/state/rtl-claims shared with shortfinal."""
     import sizeup.radio.claims as claims

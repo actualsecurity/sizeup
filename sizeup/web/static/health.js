@@ -100,10 +100,14 @@ const StationHealth = (() => {
     if (mutedEl) mutedEl.title = "Shown here, not pushed (Settings > System > Push notifications)";
     // #278: why it is off and where to set it, behind an "i" (a tap on a tablet; a title alone never shows there)
     if (!n.on && window.Help && Help.info) pushEl.append(" ", Help.info("No status topic in effect. Set one in Settings > System > Push notifications, SSM /sizeup-hub/status-topic or [alerts]"));
+    // sizeup/outbound.py: a hub not under its supervisor (a restored copy run by hand) pushes nothing and reaches no AWS
+    const out = d.outbound || {};
+    const obEl = out.on === false ? el("span", "chip hl-warn", "Outbound off") : null;
+    if (obEl) obEl.title = `${out.why}: no push, no AWS, no Polly, no Bedrock. SIZEUP_ALLOW_OUTBOUND=1 allows it`;
     const head = el("div", "card-head");
     head.append(el("h2", "", "Now"),
       el("span", `chip ${d.alerts.length ? "hl-bad" : "hl-ok"}`, d.alerts.length ? `${d.alerts.length} alert${d.alerts.length === 1 ? "" : "s"}` : "No alerts"),
-      el("span", "spacer"), ...(mutedEl ? [mutedEl] : []), pushEl);
+      el("span", "spacer"), ...(obEl ? [obEl] : []), ...(mutedEl ? [mutedEl] : []), pushEl);
     const kids = [head];
     if (!h.reported) kids.push(el("p", "notice", "No station report yet"));
     else if (!h.health_reported) {

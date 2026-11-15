@@ -194,6 +194,10 @@ def prompt(req: Request) -> str:
             f"Transcript (oldest first, \" . \" between transmissions):\n{req.text}")
 
 
+class OutboundOff(RuntimeError):
+    """This process may not reach Bedrock (sizeup/outbound.py)."""
+
+
 class BedrockProvider:
     """Claude on Amazon Bedrock (the department's own account), through the Anthropic SDK's Mantle client with the
     task role's credentials, CALL_TIMEOUT_S and no retries. The SDK (anthropic[bedrock]) is imported on first use."""
@@ -214,6 +218,9 @@ class BedrockProvider:
         return self._client
 
     def run(self, req: Request) -> Result:
+        from sizeup import outbound
+        if off := outbound.check("bedrock"):        # sizeup/outbound.py: no client made, nothing sent
+            raise OutboundOff(off)
         response = self.client().messages.create(
             model=self.model,
             max_tokens=MAX_TOKENS,
