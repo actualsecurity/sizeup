@@ -660,7 +660,8 @@ the first id the shared token posts as.
 `id_mismatch` (its log says so, the Station row goes offline; its outbox keeps everything). Fix: **Set id** to the
 station's real id (or `python -m sizeup.cloud.stations reset-shared-id --id <id>` in the hub task). Set id empty goes
 back to the config's (or, with none, learns again from the next post). Then correct `legacy_station_id` in the
-config in a PR.
+config in a PR, and once that is deployed **clear the Set id override** (Set id empty, or `reset-shared-id` with no
+`--id`): a stored override outranks the config for good, so a later config change would otherwise never take effect.
 
 **One station until multi-station.** Per-station state, outbox cursors and jobs come with design steps A2-A4. Until
 then the hub takes only that station (the shared token's): a second station's events, state, jobs, aircraft and
