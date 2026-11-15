@@ -102,6 +102,11 @@ class NotifyError(RuntimeError):
     pass
 
 
+class NotifyOff(NotifyError):
+    """Outbound is off in this process (sizeup/outbound.py): never retried, the message is dropped at once."""
+    final = True
+
+
 @dataclass(frozen=True)
 class Who:
     """Who and where a notification is about; every field optional."""
@@ -226,7 +231,7 @@ def publish(server: str, topic: str, title: str, body: str, priority: int | str 
     server = (server or DEFAULT_SERVER).rstrip("/")
     from sizeup import outbound
     if off := outbound.check("ntfy", server):     # a hub on a restored copy never pushes (sizeup/outbound.py)
-        raise NotifyError(off)
+        raise NotifyOff(off)
     why = server_problem(server) or topic_problem(topic, protected)
     if why:
         raise NotifyError(why)
@@ -344,7 +349,7 @@ class Notifier:
             except NotifyError as e:
                 self.last_error = str(e)
                 status = getattr(e, "status", 0)
-                if status and status != 429 and status < 500:      # refused for good (bad topic, too big)
+                if getattr(e, "final", False) or (status and status != 429 and status < 500):   # refused for good
                     break
                 if attempt < len(self.retries):
                     self.sleep(self.retries[attempt])

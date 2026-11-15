@@ -140,7 +140,8 @@ prompt = ""                        # optional vocabulary hint (can make the mode
 talker_prompt = "off"              # "ids": hint each call with who keyed up ("77 Alpha 4, 60 Control"); "ids+time": also its HHMM
 # Amazon Transcribe streaming (docs/cloud.md "Speech-to-text per channel"). It runs on the hub
 # (deploy/hub/config.hub.toml: aws = true); a station forwarding to the hub needs nothing here.
-# All-in-one with AWS credentials in the environment could set aws = true too.
+# All-in-one with AWS credentials in the environment could set aws = true too, and needs SIZEUP_ALLOW_OUTBOUND=1 for it
+# (sizeup/outbound.py: off for all-in-one; on for the hub under its supervisor and for a station).
 # aws = false
 # aws_region = ""                  # "" = AWS_REGION / AWS_DEFAULT_REGION, else us-east-1
 # aws_channels = ["South 2", "FG1", "FG2", 307, "p25:mrrs:9211"]   # engine "aws" by default; Settings > Radios changes
@@ -235,7 +236,8 @@ tones = [[903.2, 1.0], [810.2, 3.0]]
 # down, erroring or slower than 10 s, dispatches use macOS `say` with fallback_voice (noted on each one).
 # tts_engine = "polly": Amazon Polly over the internet (the hub's choice, deploy/hub/config.hub.toml):
 # needs AWS credentials (AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY, or the ECS task role) allowed
-# polly:SynthesizeSpeech; voice = "Matthew" (default), "Stephen", "Gregory", "Joey" (men) or "Joanna",
+# polly:SynthesizeSpeech, and on all-in-one SIZEUP_ALLOW_OUTBOUND=1 (sizeup/outbound.py; else the fallback voice);
+# voice = "Matthew" (default), "Stephen", "Gregory", "Joey" (men) or "Joanna",
 # "Ruth", "Danielle"; best engine first (generative, neural, standard); speed is said as SSML prosody.
 # polly_region = "us-east-1"       # default: AWS_REGION / AWS_DEFAULT_REGION, else us-east-1
 tts_engine = "kokoro"              # "kokoro" | "polly" | "say" (macOS `say` only, with `voice` a `say -v` voice) |
@@ -286,8 +288,9 @@ channels = ["FG1", "PC repeater"]  # labels on the dispatch log only (FG1, or th
 # "test" it: the ring topic is the fire crew's real alert channel and pages their phones. The topic
 # names are not kept in this repo: set them in Settings > System > Push notifications (admins; stored
 # in the database), or with SIZEUP_PREALERT_RING_TOPIC / SIZEUP_PREALERT_STATUS_TOPIC. Unset: feed off.
-# Runs on the CAD of record only: all-in-one, or the hub. While this station forwards to a hub it
-# doesn't subscribe (the hub does; two would double-alert). Leave the section out to turn it off.
+# Runs on the CAD of record only: all-in-one (with SIZEUP_ALLOW_OUTBOUND=1: sizeup/outbound.py), or the hub.
+# While this station forwards to a hub it doesn't subscribe (the hub does; two would double-alert). Leave the section
+# out to turn it off.
 [prealert]
 enabled = true
 server = "https://ntfy.sh"           # or env SIZEUP_PREALERT_SERVER (a local test server)
@@ -332,7 +335,8 @@ heartbeat_stale_min = 90             # no heartbeat (or restart) this long: "Tap
 # `openssl rand -hex 12`). NEVER Tapout's topics (the pre-alert ring pages the fire crew):
 # refused (the protected set: [prealert] topics, env, Settings) here and again before every send. Empty or left out: no pushes. Env
 # SIZEUP_ALERT_TOPIC / SIZEUP_STATUS_TOPIC / SIZEUP_INTEL_TOPIC / SIZEUP_ALERT_SERVER win, and Settings > System > Push
-# notifications (admins) wins over both, live.
+# notifications (admins) wins over both, live. All-in-one pushes only with SIZEUP_ALLOW_OUTBOUND=1 in its environment
+# (sizeup/outbound.py: off for all-in-one; a local ntfy on 127.0.0.1 works either way).
 # [alerts]
 # ntfy_topic = ""
 # status_topic = ""

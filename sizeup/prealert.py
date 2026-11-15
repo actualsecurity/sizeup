@@ -361,6 +361,10 @@ class PreAlerts:
         half: the last heartbeat is still there, so "heartbeat 40 min ago" survives a restart without waiting an hour."""
         if not topic:
             return NoFeed(which)
+        from sizeup import outbound
+        if off := outbound.check("prealert", self.server):     # a hub on a restored copy: not the department's real feed
+            self.log(f"prealert: {which} feed not subscribed ({off})")
+            return NoFeed(which)
         if which == "ring":
             f = NtfyStream(self.server, topic, self.ring, self.log, label=which)
         else:
