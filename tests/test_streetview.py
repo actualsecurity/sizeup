@@ -462,6 +462,18 @@ def test_pick_mode_long_press_and_esc_on_a_fake_page(tmp_path):
     assert out["onMarker"] == 0
 
 
+def test_googles_logo_and_attribution_are_never_covered():
+    """Google's SDK draws its logo and attribution along the panorama's bottom edge: nothing of ours may sit over it."""
+    css = (STATIC / "cadmap.css").read_text()
+    phone = css[css.index("@media (max-width: 1100px), (pointer: coarse)", css.index(".sv-target")):]
+    rule = phone[phone.index(".sv-map {"):phone.index("}", phone.index(".sv-map {"))]
+    assert "inset-block: var(--s-3) auto" in rule      # the inset map hangs from the top, not the bottom
+    assert "auto var(--s-3)" not in rule
+    wide = css[css.index(".sv-body {"):css.index("}", css.index(".sv-body {"))]
+    assert "grid-template-columns" in wide             # wide: the map is its own column beside the panorama
+    assert "gm-style" not in css                       # and nothing restyles or hides Google's own markup
+
+
 def test_the_pre_plan_editor_is_still_seen_by_its_form():
     """streetview.js knows the editor is on by its signal when it gives one, else by a pre-plan form showing: preplan.js
     edit() (gone on cancelEdit) and #464's documents (preplan-docs.js: its upload form and the floor plan's alignment)."""

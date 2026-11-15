@@ -574,7 +574,8 @@
   @media (max-width: 640px) { .cm-big { inline-size: 100vw; block-size: 100%; border-radius: 0; } }
 
   /* ---- street view (streetview.js): the viewer dialog, its map's marks, the map's menu ---------------------------------
-     Wide: the panorama beside a small map. A phone or an iPad (narrow or touch): full-screen, the map inset bottom-left. */
+     Wide: the panorama beside a small map. A phone or an iPad (narrow or touch): full-screen, the map inset top-left (Google's logo and
+     attribution run along the panorama's bottom edge and are never covered). */
   .sv-btn[aria-pressed="true"] { background: var(--pressed); border-color: var(--accent); }
   .sv-menu { min-inline-size: 12rem; }
   .sv-overlay { padding: var(--s-4); }
@@ -619,7 +620,7 @@
     .sv-body { display: block; }
     .sv-pano { position: absolute; inset: 0; }
     .sv-map {
-      position: absolute; inset-block: auto var(--s-3); inset-inline: var(--s-3) auto; inline-size: min(50vw, 20rem);
+      position: absolute; inset-block: var(--s-3) auto; inset-inline: var(--s-3) auto; inline-size: min(50vw, 20rem);
       block-size: 28vh; z-index: var(--z-map); border: var(--bw) solid var(--line-strong); border-radius: var(--radius);
       overflow: hidden; box-shadow: var(--elev-dialog);
     }
