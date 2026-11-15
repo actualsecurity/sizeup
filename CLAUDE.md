@@ -35,9 +35,9 @@ date with the call. Incidents come from ranked sources: external CAD feeds first
   (`/api/station/aircraft`, `/vessels`, `/logs`). The hub answers with its build, and the station follows that build.
 - With no `[cloud]` section it runs all-in-one (local dev).
 
-Details: `docs/architecture.md` (the system analysis and module map), `docs/cloud.md` (flows, handoff, health, every
-layer), `deploy/station/README.md`, `docs/ROADMAP.md`, `docs/cad-plan.md`. Work is tracked in GitHub issues, labelled
-`now` / `next` / `later` / `waiting`.
+Details: `docs/architecture.md` (the system analysis and module map), `docs/development.md` (running it locally and
+the tests), `docs/cloud.md` (flows, handoff, health, every layer), `deploy/station/README.md`, `docs/ROADMAP.md`,
+`docs/cad-plan.md`. Work is tracked in GitHub issues, labelled `now` / `next` / `later` / `waiting`.
 
 ## Where things are
 
@@ -66,7 +66,7 @@ layer), `deploy/station/README.md`, `docs/ROADMAP.md`, `docs/cad-plan.md`. Work 
 | `deploy/station/`, `deploy/trunk-recorder/`, `deploy/hub/`, `deploy/aws/` | station installer and units, trunk-recorder configs (the county's and `systems/<name>/`), hub entrypoint/Litestream/connector, ECS task definition |
 | `data/` | the gazetteer, CAD lists, county departments / apparatus / tones, ATC rules, intel packs, STT profiles |
 | `tests/`, `tests/fixtures/` | pytest; `conftest.py` fakes the dongles, the claims dir and the Keychain; `replay.py` and `test_replay_*.py` use private captures |
-| `tools/` | data fetchers, `deploy_check.py`, `taskdef_params.py`, `reseed_replica.py`, `ltx.py`, `stt_cost.py`, `stt_diag.py`, `ui_consistency.py` (the browser half of `tests/test_design.py`) |
+| `tools/` | data fetchers, `deploy_check.py`, `taskdef_params.py`, `reseed_replica.py`, `ltx.py`, `stt_cost.py`, `stt_diag.py`, `ui_consistency.py` (the browser half of `tests/test_design.py`), `dev_seed.py` (invented calls for a local instance) |
 
 `autoupdate.py`, `configupdate.py`, `logread.py`, `radio/adsbd.py`, `radio/aisd.py` and `radio/trunkrecd.py` run under
 the station's **system** python3 (3.11+). They must use the standard library only (`tests/test_system_python.py`).
@@ -74,11 +74,13 @@ the station's **system** python3 (3.11+). They must use the standard library onl
 ## Running tests
 
 ```sh
-caffeinate -i perl -e 'alarm 1500; exec @ARGV' .venv/bin/python -m pytest -q
+caffeinate -i perl -e 'alarm 1500; exec @ARGV' .venv/bin/python -m pytest -n auto -q
 ```
 
 - `caffeinate -i` stops the suite from stalling when the Mac sleeps. The `perl alarm` is the timeout, because there is
-  no `timeout` command on the Mac.
+  no `timeout` command on the Mac. `-n auto` (pytest-xdist): a serial run on macOS fails two tests late on (#457).
+- Setup, running the app locally (all-in-one, hub, station; `tools/dev_seed.py` for invented data), the optional
+  test tools (Playwright, Litestream, node), the lint and the known flakes: [`docs/development.md`](docs/development.md).
 - **Worktrees have no `.venv`.** Use the main checkout's venv from inside the worktree, e.g.
   `../../../.venv/bin/python -m pytest -q` from `.claude/worktrees/<name>`. First check that it imports **your**
   code: `../../../.venv/bin/python -c 'import sizeup; print(sizeup.__file__)'` must print the worktree's path.
