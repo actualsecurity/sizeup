@@ -337,3 +337,38 @@ def test_each_pack_says_what_it_was_handed_in_its_line(site, browser, width):
     assert box["x"] >= card["x"] - 0.5 and box["x"] + box["width"] <= card["x"] + card["width"] + 0.5
     assert pg.evaluate("document.querySelector('#s-intel').scrollWidth <= document.querySelector('#s-intel').clientWidth")
     assert pg.errors == []
+
+
+@pytest.mark.parametrize("held", ["checkbox", "button", "selection"])
+def test_the_counters_move_with_every_transcript_without_the_card_being_swapped(site, browser, held):
+    """ "considered" moves with every transcript: the pack's line is patched in place (settings.js sCardSwap: what is
+    marked data-live is no part of what the card is), so the card's nodes stay, and a checkbox or a button with the
+    focus keeps it, and text selected in the rules table stays selected."""
+    pg = open_intel(browser, site, 1280)
+    stat = f"{CARD} .in-pack .in-stat span"
+    pg.evaluate("""() => { window._kids = [...document.querySelector('#s-intel').children]; window._swaps = 0;
+      new MutationObserver((ms) => { for (const m of ms) if (m.target.id === 's-intel') window._swaps += 1; })
+        .observe(document.querySelector('#s-intel'), { childList: true }); }""")
+    if held == "checkbox":
+        pg.focus(f"{CARD} label:has-text('Push') input[type=checkbox]")
+    elif held == "button":
+        pg.focus(f"{CARD} button.help")
+    else:
+        pg.evaluate("() => getSelection().selectAllChildren(document.querySelector('#s-intel .in-rules td.in-rule'))")
+    pg.evaluate("() => { window._focus = document.activeElement; window._sel = String(getSelection()); }")
+    for i in range(4):
+        site.cad.intel.feed({"id": f"x{i}", "start": site.cad.clock(), "source": "p25:example:1", "system": "example",
+                             "service": "fire", "text": "radio check"})
+        site.transmission()
+        site.cad.store.rev += 1                                              # (as a recorded transmission moves it)
+        pg.wait_for_function("(t) => document.querySelector(t[0]).textContent.startsWith(t[1])",
+                             arg=[stat, f"0 in scope / {i + 1} considered"])
+    assert f"{4} out of scope" in pg.get_attribute(stat, "title")            # the hover kept up too
+    assert pg.evaluate("window._swaps") == 0
+    assert pg.evaluate("() => [...document.querySelector('#s-intel').children].every((n, i) => n === window._kids[i])")
+    assert pg.evaluate("() => document.activeElement === window._focus && String(getSelection()) === window._sel")
+    if held != "selection":
+        assert pg.evaluate("() => document.activeElement !== document.body")
+    else:
+        assert pg.evaluate("() => String(getSelection()).length > 0")
+    assert pg.errors == []

@@ -238,13 +238,34 @@ function sBusy(root) {
   if (a && root.contains(a) && a.matches("input:not([type=file]):not([type=checkbox]), textarea, select")) return true;
   return [...root.querySelectorAll(S_TEXTY)].some((f) => f._base !== undefined && f.value !== f._base);
 }
+// What only reports and moves with the radio (a node marked data-live="<its name>": Intel's "in scope / considered" per
+// pack, with every transcript) is no part of what the card is: its text, hover and class are left out of the
+// signature and patched in place (sCardLive), so the card isn't swapped under a focused checkbox or a selection for it.
 function sCardSig(card) {
-  return card.innerHTML + JSON.stringify([...card.querySelectorAll("input, textarea, select")].map((f) => (f.type === "checkbox" ? f.checked : f.value)));
+  const live = [...card.querySelectorAll("[data-live]")].map((n) => [n, n.textContent, n.getAttribute("title"), n.className]);
+  for (const [n] of live) { n.textContent = ""; n.removeAttribute("title"); n.className = ""; }
+  const sig = card.innerHTML + JSON.stringify([...card.querySelectorAll("input, textarea, select")].map((f) => (f.type === "checkbox" ? f.checked : f.value)));
+  for (const [n, text, title, cls] of live) {
+    n.textContent = text;
+    n.className = cls;
+    if (title !== null) n.setAttribute("title", title);
+  }
+  return sig;
+}
+function sCardLive(card, next) {
+  const now = new Map([...next.querySelectorAll("[data-live]")].map((n) => [n.dataset.live, n]));
+  for (const n of card.querySelectorAll("[data-live]")) {
+    const to = now.get(n.dataset.live);
+    if (!to) continue;
+    if (n.textContent !== to.textContent) n.textContent = to.textContent;
+    if (n.title !== to.title) n.title = to.title;
+    if (n.className !== to.className) n.className = to.className;
+  }
 }
 function sCardSwap(card, next, must) {
   const sig = sCardSig(next);
   if (card.hidden !== next.hidden) card.hidden = next.hidden;
-  if (card._sig === sig && !must) return false;
+  if (card._sig === sig && !must) { sCardLive(card, next); return false; }
   if (!must && card._sig !== undefined && (sBusy(card) || sPressing())) return false;
   sStamp(next);
   sKeep(card, () => card.replaceChildren(...next.childNodes), false);

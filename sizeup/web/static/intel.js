@@ -164,6 +164,7 @@ window.IntelSettings = (() => {
     const [lab, cb] = sCheck("Push", s.push, "Off: detection and the map go on, nothing is pushed");
     cb.addEventListener("change", () => post({ action: "set", key: "push", value: cb.checked }, cb.checked ? "Intel pushes on" : "Intel pushes off"));
     const counts = el("span", "dim small", `24 h: ${c24.events || 0} events · ${c24.pushed || 0} pushed · ${c24.suppressed || 0} held`);
+    counts.dataset.live = "counts";          // (settings.js sCardSwap: patched in place, never a reason to swap the card)
     counts.title = "The last 24 hours: events made, pushed, and held: not pushed for any reason (shadow mode, pushes off, "
       + "quiet hours, a cap, merged into an earlier push, withheld by the scrub, or unsent)";
     top.append(line(lab, [
@@ -228,6 +229,7 @@ window.IntelSettings = (() => {
       const c = ran.get(p.name);
       const seen = c ? el("span", c.level === "warn" ? "warn small" : "dim small", c.text) : "";
       if (c) seen.title = c.title;
+      if (c) seen.dataset.live = `pack:${p.name}`;          // moves with every transcript: patched in place
       const head = el("div", "in-rows in-pack");
       head.append(line(el("b", "", `${p.label} (${p.name})`), [
         field("mode", modeSel(d.modes, p.mode, pset("mode"), `${p.label} pack mode`), "in-w-mode"),
