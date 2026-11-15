@@ -10,7 +10,9 @@ One ranked list across every kind of place the gazetteer knows, for typed (not s
     milemarker    places (NYSDOT panels and milepoints, Thruway)  287 eastbound mile marker 10   I-287 EB MM 10.0
                   ... or by the name 60 Control gives the spot    rye brook town line        I-287 EB MM 9.1
     exit          places (OSM motorway junctions)                 hutch sb exit 30           Hutch SB exit 30
-    place         the department's own names (Settings, cad.sqlite: Cad.search_places passes them in)
+    place         the department's own names (Settings, cad.sqlite: Cad.search_places passes them in), the county's
+                  common place names among them (sizeup/cad/commonplaces.py: a name whose address was not found has
+                  no point and is not offered)
 
 Ranking: how well the text matches (every typed word must start a word of the name, in any order;
 whole words and the start of the name count more), then our area (Port Chester, Rye Brook, then the
@@ -500,18 +502,30 @@ class PlaceIndex:
                                   route=r["route"], dir=r["dir"], value=r["value"], detail=r["address"]))
         return out
 
-    def _local(self, q: list[str], near, extra) -> list[dict]:
+    def _local_index(self, extra) -> tuple[list[dict], NameIndex, set]:
+        """The department's names with a point, their word index and their whole names: built again only when they
+        change (the county's list is ~1,000 names, searched at every keystroke)."""
         rows = [r for r in (extra or ()) if r.get("lat") is not None and r.get("lon") is not None]
+        sig = tuple((r["name"], tuple(r.get("aliases") or ()), r["lat"], r["lon"], r.get("label"), r.get("muni"))
+                    for r in rows)
+        got = getattr(self, "_local_cache", None)
+        if got is None or got[0] != sig:
+            aliases = [(tuple(norm_tokens(n)), i) for i, r in enumerate(rows)
+                       for n in [r["name"], *(r.get("aliases") or [])] if norm_tokens(n)]
+            got = (sig, rows, NameIndex(aliases), {a for a, _i in aliases})
+            self._local_cache = got
+        return got[1], got[2], got[3]
+
+    def _local(self, q: list[str], near, extra) -> list[dict]:
+        rows, ix, _names = self._local_index(extra)
         if not rows:
             return []
-        ix = NameIndex([(tuple(norm_tokens(n)), i) for i, r in enumerate(rows)
-                        for n in [r["name"], *(r.get("aliases") or [])] if norm_tokens(n)])
         out = []
         for i, quality in ix.match(q):
             r = rows[i]
             out.append(self._item("place", r.get("label") or r["name"], r.get("muni") or "", r["lat"], r["lon"],
                                   "local", quality, near, LOCAL_BONUS, category="local name",
-                                  detail=r.get("note") or ""))
+                                  detail=r.get("note") or r.get("address") or "", address=r.get("address") or ""))
         return out
 
     def _streets(self, q: list[str], near) -> list[dict]:

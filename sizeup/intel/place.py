@@ -233,7 +233,7 @@ class Locator:
     def locate(self, text: str, scope: dict) -> Place | None:
         system, service = str(scope.get("system") or ""), str(scope.get("service") or "")
         clean = strip(text, system, service)
-        if not clean or not has_cue(clean) or self.gaz is None:
+        if not clean or self.gaz is None or not (has_cue(clean) or self._local_said(clean)):
             return None
         towns = list(scope.get("towns") or ())
         hq = [t for t in hq_towns(text, system, service) if not towns or t in towns]
@@ -287,6 +287,20 @@ class Locator:
         best.where_score = round(max(0.0, min(1.0, best.where_score + READBACK_BONUS * max(0, n - 1)
                                               - (RIVAL_PENALTY if best.alts and not best.confirmed else 0.0))), 3)
         return best
+
+    def _local_said(self, clean: str) -> bool:
+        """One of the department's own place names said ("the community hall in Sample Town"): a cue of its own (the page
+        locator reads them as named places: sizeup/geo/pagegeo.py set_local_source)."""
+        from sizeup.geo.pagegeo import locator
+        try:
+            if vars(self.gaz).get("_local_source") is None:      # (never a gazetteer lookup without a cue)
+                return False
+        except TypeError:
+            return False
+        try:
+            return locator(self.gaz).local_said(clean)
+        except Exception:  # noqa: BLE001 - no department names: the other cues as before
+            return False
 
     def _page(self, clean: str, home: tuple, params: dict, only: bool = False) -> Place | None:
         from sizeup.geo.pagegeo import locator

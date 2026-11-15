@@ -14,7 +14,7 @@
 const S = {
   section: null, list: store("sizeup.cad.settings.list") || "event_types",
   data: null, sig: "", sigLive: "", loading: false, again: null, deferred: false, pressDeferred: false, deferFresh: false, pressing: 0, msgT: null,
-  boardsOpen: null, audit: "", auditRows: null, auditFor: "", admin: null, importing: null,
+  boardsOpen: null, audit: "", auditRows: null, auditFor: "", admin: null, importing: null, common: null,
   previewT: null, previewSeq: 0, tsOpen: new Set(),
   saved: "", pressT: null, refreshDue: false,                            // the section a save of ours just changed; the press's time limit
   act: null, actEmail: "", actKind: "", actKey: "", actAt: 0,
@@ -875,9 +875,10 @@ function sLists(panel) {
   else if (S.list === "type_subtypes") body = sTypeMap();
   else body = sListTable(S.list);
   const flow = S.list === "unit_statuses" && S.data.status_flow ? sFlow() : null;
+  const common = S.list === "place_names" ? sCommonPlaces() : null;
   panel.replaceChildren(...sHead("Lists", "Codes don't change: they are on events and in the CSV exports. Names, colors "
     + "and order are yours. Retire what you no longer use: old events keep it, the pick lists drop it."), tabs, body,
-  ...(flow ? [flow] : []));
+  ...(flow ? [flow] : []), ...(common ? [common] : []));
 }
 
 function sListTable(sec) {
@@ -1258,6 +1259,112 @@ function sPlaceNames() {
   return sCard(sCardHead("Place names", d.items.length ? `${d.items.length}` : "",
     sHelp("Your own names for places: \"the Waterfront\", \"Kohl's plaza\". An @ in a note and the location box "
       + "offer them first, at the place picked here.")), ol, f);
+}
+
+// The county's common place names (sizeup/cad/commonplaces.py): its .xlsx / .csv previewed (counts, the addresses not
+// found, the columns), then applied over the last import. Names made above are never touched. Admins (the server).
+function sCommonPlaces() {
+  const im = (S.data.place_names || {}).imported || { names: 0 };
+  const file = el("input");
+  file.type = "file";
+  file.accept = ".xlsx,.csv";
+  file.hidden = true;
+  file.addEventListener("change", () => sCommonFile(file));
+  const pick = sBtn(im.names ? "Re-import" : "Import", "Address, Common Place, Mun (.xlsx or .csv)", () => file.click(),
+    im.names ? "" : "primary");
+  const remove = im.names ? sBtn("Remove", "", () => sAsk(`Remove the ${im.names} imported names?`,
+    () => sPost("common_places", { action: "remove" }, "Imported names removed"), "Remove"), "danger-quiet") : null;
+  const info = im.names ? `${im.located}/${im.names} located · ${im.date}` : "";
+  const kids = [];
+  if (im.unresolved && im.unresolved.length) {
+    const det = el("details", "s-more");
+    det.append(el("summary", "", `${im.names - im.located} not found`));
+    const ol = el("ol", "s-rows");
+    for (const u of im.unresolved) {
+      const li = el("li", "s-row");
+      li.append(el("b", "s-name", u.name), el("span", "dim small", [u.address, u.town].filter(Boolean).join(", ")));
+      ol.append(li);
+    }
+    det.append(ol);
+    kids.push(det);
+  }
+  const pv = el("div", "");
+  pv.id = "s-common";
+  sShowCommon(pv);
+  return sCard(sCardHead("Common places", info, sHelp("The county CAD's common place names. Re-import replaces the last "
+    + "import; your own names stay. Kept in the CAD database only."), remove, pick), file, ...kids, pv);
+}
+
+async function sCommonFile(input) {
+  const f = input.files && input.files[0];
+  input.value = "";
+  if (!f) return;
+  const data = await new Promise((ok) => {
+    const r = new FileReader();
+    r.onload = () => ok(String(r.result || ""));
+    r.onerror = () => ok("");
+    r.readAsDataURL(f);
+  });
+  if (!data) return sMsg(`${f.name}: can't read it`);
+  S.common = { name: f.name, file: data, columns: null, r: null };
+  await sCommonPreview();
+}
+
+async function sCommonPreview() {
+  const c = S.common;
+  if (!c) return;
+  try {
+    c.r = await api("POST", "/api/cad/settings/common_places", { action: "preview", file: c.file, filename: c.name,
+      ...(c.columns ? { columns: c.columns } : {}), operator: operator() });
+    c.columns = c.r.columns;
+  } catch (e) {
+    c.r = { error: e.message };
+  }
+  const box = $("#s-common");
+  if (box) sShowCommon(box);
+}
+
+function sShowCommon(box) {
+  const c = S.common;
+  if (!c) { box.replaceChildren(); return; }
+  const cancel = sBtn("Cancel", "", () => { S.common = null; sShowCommon(box); });
+  const head = el("div", "row");
+  head.append(el("b", "", c.name), el("span", "spacer"), cancel);
+  if (!c.r) { box.replaceChildren(head, el("p", "dim small", "Reading…")); return; }
+  if (c.r.error) { box.replaceChildren(head, el("div", "small warn", c.r.error)); return; }
+  const n = c.r.counts;
+  const cols = el("div", "row");
+  const opts = [["-1", "—"], ...c.r.header.map((h, i) => [String(i), h || `Column ${i + 1}`])];
+  for (const [k, label] of [["address", "Address"], ["name", "Name"], ["town", "Town"]]) {
+    const s = sSelect(opts, String(c.columns[k]), (v) => { c.columns = { ...c.columns, [k]: Number(v) }; sCommonPreview(); }, label);
+    const lab = el("label", "small");
+    lab.append(el("span", "dim", `${label} `), s);
+    cols.append(lab);
+  }
+  const counts = el("p", "small", `${n.rows} rows · ${n.names} names · ${n.new} new · ${n.present} already · `
+    + `${n.removed} removed · ${n.unresolved} not found`
+    + (n.unresolved_addresses !== n.unresolved ? ` (${n.unresolved_addresses} addresses)` : ""));
+  const apply = sBtn(`Apply ${n.names} names`, "", async () => {
+    const r = await sPost("common_places", { action: "apply", file: c.file, filename: c.name, columns: c.columns },
+      `Imported ${n.names} names`);
+    if (r) { S.common = null; const b = $("#s-common"); if (b) sShowCommon(b); }
+  }, "primary");
+  apply.disabled = !n.names;
+  head.append(apply);
+  const kids = [head, cols, counts];
+  if (c.r.unresolved.length) {
+    const det = el("details", "s-more");
+    det.append(el("summary", "", `${n.unresolved} not found`));
+    const ol = el("ol", "s-rows");
+    for (const u of c.r.unresolved) {
+      const li = el("li", "s-row");
+      li.append(el("b", "s-name", u.name), el("span", "dim small", [u.address, u.town].filter(Boolean).join(", ")));
+      ol.append(li);
+    }
+    det.append(ol);
+    kids.push(det);
+  }
+  box.replaceChildren(...kids);
 }
 
 // ---- run cards: the editor is cad.js's; reset buttons here -----------------------------------------

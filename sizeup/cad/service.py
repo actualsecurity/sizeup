@@ -38,7 +38,7 @@ from sizeup.cad.preplan_docs import PreplanDocs
 from sizeup.cad.feed import Feed
 from sizeup.cad.newids import NewIds
 from sizeup.cad.statushints import StatusHints
-from sizeup.cad.sources import PAGING_RANK, Sources
+from sizeup.cad.sources import PAGING_RANK, Sources, proper_case
 from sizeup.cad.radiolog import RadioLog
 from sizeup.cad import scope as scope_mod
 from sizeup.cad.scope import Scope
@@ -2128,7 +2128,9 @@ class Cad:
                "town": h["sub"], "precision": h.get("category") or h["kind"], "confidence": conf}
         if h["kind"] == "place":         # a named place: its name, and its street address from the data (#204)
             out["place"] = h["label"]
-            out["place_address"] = "" if h.get("source") == "local" else (h.get("detail") or "")
+            # the department's own: none, or the county list's address (sizeup/cad/commonplaces.py)
+            out["place_address"] = (proper_case(h.get("address") or "") if h.get("source") == "local"
+                                    else (h.get("detail") or ""))
         return out
 
     def search_places(self, query: dict) -> dict:

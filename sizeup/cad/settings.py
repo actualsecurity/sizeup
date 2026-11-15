@@ -83,6 +83,8 @@ by sizeup/cad/api.py). export() / import: every setting as one JSON file, checke
 
 from __future__ import annotations
 
+import base64
+import binascii
 import copy
 import hashlib
 import json
@@ -93,7 +95,7 @@ from pathlib import Path
 
 from sizeup import channels as channels_mod
 from sizeup.cad import alarms as alarms_mod
-from sizeup.cad import dispatcher, eta, mapview, runcards, tonelist
+from sizeup.cad import commonplaces, dispatcher, eta, mapview, runcards, tonelist
 from sizeup.cad import lists as lists_mod
 from sizeup.cad.lists import CLASSES, CODE, COLOR, LIST_SECTIONS, LONG_CODE, RESPONSES, ROLES, ListsError
 from sizeup.cad.store import OPERATOR_MAX, SCHEMA_VERSION, TZ, CadError
@@ -222,6 +224,10 @@ STT_KEYS = ("vocabulary", "aws_monthly_limit_usd", "aws_context_budget_usd",   #
             "catchup", "catchup_max_age_h")    # shed clips caught up (sizeup/sttcatchup.py): on/off, how far back
 MAX_VOCAB_BYTES = 50_000          # AWS's limit; also keeps the Settings request under its 64 KB
 MAX_PLACE_NAMES = 300
+# The county's "common place names" list (sizeup/cad/commonplaces.py): imported into section "places" under keys
+# "county/...", replaced as a whole on each import; Settings > Lists > Place names (admins), audited as Lists, counts only.
+COMMON_SECTION = "common_places"
+MAX_COMMON_NAMES = commonplaces.MAX_ROWS
 TONES_SECTION, MAX_NAMED_TONES, TONE_HZ = "tones", 400, tonelist.TONE_HZ     # the decoder's band (radio/tones.py)
 
 
@@ -603,7 +609,7 @@ class Editor:
                               "edited": bool(o)}
         out["geo_town_order"] = {"towns": list(L.geo_town_order), "default": list(self.base.geo_town_order),
                                  "edited": "_list" in ov.get("geo_town_order", {})}
-        out["place_names"] = {"items": self.local_places(), "max": MAX_PLACE_NAMES}
+        out["place_names"] = self._place_names_page()
         out["units"] = self._unit_rows(L, ov)
         out["unit_kinds"] = [dict(k) for k in L.unit_kinds]
         out["boards"] = [{"id": b["id"], "title": b["title"], **lists_mod.board_meta(b)} for b in L.unit_boards]
@@ -1098,7 +1104,7 @@ class Editor:
               "dispatch": self._dispatch_op, "users": self._users_op, "runcards": self._cards_op,
               "import": self._import_op, "channels": self._channels_op, "stt": self._stt_op,
               channels_mod.SQUELCH_SECTION: self._squelch_op,
-              "places": self._places_op, TONES_SECTION: self._tones_op, WALL_SECTION: self._wall_op, DS_SECTION: self._ds_op,
+              "places": self._places_op, COMMON_SECTION: self._common_op, TONES_SECTION: self._tones_op, WALL_SECTION: self._wall_op, DS_SECTION: self._ds_op,
               NOTIFY_SECTION: self._notify_op, ATC_SECTION: self._atc_op, ERR_SECTION: self._errors_op, MAPD_SECTION: self._mapd_op, PREMISE_SECTION: self._premise_op, EM_SECTION: self._em_op, RET_SECTION: self._retention_op,
               TRS_SECTION: lambda a, b, o: self._retention_op(a, b, o, TRS_SECTION), MUTE_SECTION: self._mutes_op, LOGS_SECTION: self._logs_op, DEPT_SECTION: self._dept_op, "alarms": lambda a, b, o: self.cad.alarms.settings_op(a, b, o),
               "intel": lambda a, b, o: self.cad.intel_admin.settings_op(a, b, o),
@@ -1333,10 +1339,18 @@ class Editor:
 
     def local_places(self) -> list[dict]:
         rev = self.store.rev
-        if getattr(self, "_places_cache", (None,))[0] != rev:
-            rows = self.store.q("SELECT key, value FROM settings_overrides WHERE section = 'places' ORDER BY key")
-            self._places_cache = (rev, [dict(json.loads(r["value"]), key=r["key"]) for r in rows])
-        return [dict(r) for r in self._places_cache[1]]
+        got = getattr(self, "_places_cache", (None, None, []))
+        if got[0] != rev:        # any write: read the names again only when they changed (the county's are ~1,000)
+            r = self.store.one("SELECT COUNT(*) AS n, MAX(updated_at) AS at, TOTAL(LENGTH(value)) AS size "
+                               "FROM settings_overrides WHERE section = 'places'")
+            ver = (r["n"], r["at"], r["size"]) if r else None
+            if ver != got[1] or got[1] is None:
+                rows = self.store.q("SELECT key, value FROM settings_overrides WHERE section = 'places' ORDER BY key")
+                got = (rev, ver, [dict(json.loads(x["value"]), key=x["key"]) for x in rows])
+            else:
+                got = (rev, ver, got[2])
+            self._places_cache = got
+        return [dict(r) for r in got[2]]
 
     def _places_op(self, action: str, body: dict, op: str) -> dict:
         cur = {r["key"]: {k: v for k, v in r.items() if k != "key"} for r in self.local_places()}
@@ -1367,12 +1381,80 @@ class Editor:
             raise CadError("place: lat and lon") from None
         if not (40.0 <= lat <= 42.0 and -75.0 <= lon <= -72.0):
             raise CadError("place: lat and lon in the area")
-        if key not in cur and len(cur) >= MAX_PLACE_NAMES:
+        if key not in cur and sum(1 for k in cur if not commonplaces.is_imported(k)) >= MAX_PLACE_NAMES:
             raise CadError(f"at most {MAX_PLACE_NAMES} place names")
         val = {"name": name, "aliases": aliases, "label": label, "lat": round(lat, 6), "lon": round(lon, 6),
                "muni": _text(where.get("sub"), "town", 80, required=False),
                "note": _text(body.get("note"), "note", 120, required=False)}
         return self._commit([("places", key, val)], op, [("lists", f"place/{name}", cur.get(key), val)])
+
+    def _place_names_page(self) -> dict:
+        """Settings > Lists > Place names: the names made by hand (items) and the imported list's summary."""
+        made, imported = [], []
+        for r in self.local_places():
+            (imported if commonplaces.is_imported(r["key"], r) else made).append(r)
+        lost = [{"name": r["name"], "address": r.get("address") or "", "town": r.get("muni") or ""}
+                for r in imported if r.get("lat") is None]
+        return {"items": made, "max": MAX_PLACE_NAMES,
+                "imported": {"source": commonplaces.SOURCE, "names": len(imported),
+                             "addresses": len({commonplaces.name_key(r.get("address") or "") for r in imported}),
+                             "located": len(imported) - len(lost), "unresolved": lost[:300],
+                             "date": max((r.get("imported") or "" for r in imported), default="")}}
+
+    def _common_op(self, action: str, body: dict, op: str) -> dict:
+        """The county's common place names (sizeup/cad/commonplaces.py): preview {file (base64), filename, columns?}
+        -> counts and the addresses not found; apply: the same, written (every entry of that source replaced, names
+        made by hand untouched); remove: every imported entry. Audited as counts only (never a name or an address)."""
+        cur = {r["key"]: {k: v for k, v in r.items() if k != "key"} for r in self.local_places()
+               if commonplaces.is_imported(r["key"], r)}
+        if action == "remove":
+            if not cur:
+                raise CadError("no imported place names")
+            return self._commit([("places", k, REMOVE) for k in cur], op,
+                                [("lists", f"place names/{commonplaces.SOURCE}", {"names": len(cur)}, {"names": 0})])
+        if action not in ("preview", "apply"):
+            raise CadError("action: preview, apply or remove")
+        raw = body.get("file")
+        if not isinstance(raw, str) or not raw:
+            raise CadError("file: the spreadsheet (.xlsx or .csv), base64")
+        raw = raw.split("base64,", 1)[-1]
+        if len(raw) > commonplaces.MAX_BYTES * 4 // 3 + 8:
+            raise CadError(f"file: at most {commonplaces.MAX_BYTES // (1024 * 1024)} MB")
+        try:
+            data = base64.b64decode(raw, validate=True)
+        except (ValueError, binascii.Error):
+            raise CadError("file: base64") from None
+        filename = _text(body.get("filename"), "filename", 200, required=False)
+        given = body.get("columns")
+        if given is not None and not isinstance(given, dict):
+            raise CadError("columns: {address, name, town}: column numbers from 0")
+        try:
+            rows = commonplaces.read_table(data, filename)
+            if len(rows) < 2:
+                raise commonplaces.TableError("no rows under the header")
+            cols = commonplaces.find_columns(rows[0], given)
+        except commonplaces.TableError as e:
+            raise CadError(f"{filename or 'file'}: {e}") from None
+        ix = self.cad.place_index()
+        if ix is None:
+            raise CadError("the gazetteer is not loaded: addresses can't be looked up (try again shortly)")
+        town_of = self.cad.lists.town_of
+        today = datetime.fromtimestamp(self.store.clock(), TZ).strftime("%Y-%m-%d")
+        p = commonplaces.plan(rows, cols, lambda a, t: commonplaces.locate_address(ix, a, t, town_of), town_of, today, cur)
+        if p["counts"]["names"] > MAX_COMMON_NAMES:
+            raise CadError(f"at most {MAX_COMMON_NAMES} names")
+        out = {"ok": True, "header": rows[0], "columns": cols, "counts": p["counts"], "source": commonplaces.SOURCE,
+               "unresolved": p["unresolved"][:300]}
+        if action == "preview":
+            return dict(out, dry_run=True)
+        if not p["entries"]:
+            raise CadError("no names in the file")
+        changes = [("places", k, REMOVE) for k in cur if k not in p["entries"]]
+        changes += [("places", k, v) for k, v in p["entries"].items()]
+        c = p["counts"]
+        self._commit(changes, op, [("lists", f"place names/{commonplaces.SOURCE}", {"names": len(cur)},
+                                    {k: c[k] for k in ("rows", "names", "new", "present", "removed", "unresolved")})])
+        return out
 
     def _towns_op(self, action: str, body: dict, op: str) -> dict:
         cur, base = list(self.cad.lists.geo_town_order), list(self.base.geo_town_order)

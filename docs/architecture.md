@@ -309,6 +309,33 @@ schedule per pull, in Settings.
 | County GIS | Westchester County GIS ArcGIS layers: parcels, boundaries, fire districts, hydrants and more, by config | `gis.py` |
 | Weather and water | NWS alerts, conditions and radar; NOAA tides | `weather.py` |
 
+### The department's place names and the county's common places
+
+Settings > Lists > Place names holds the department's own names for places ("the Waterfront"). Its **Common
+places** card imports the county CAD's "common place names" list (`sizeup/cad/commonplaces.py`, admins only):
+
+1. **Import** (or **Re-import**): pick the county's `.xlsx` or `.csv` (one row per name: address, common place, town
+   code such as `PORT_CHESTER`). The headers are found in any case; pick other columns in the preview if they differ.
+2. The preview gives the counts: rows, names, new, already there, removed (in the last import, not in this one), and
+   the names whose address is not in the gazetteer's address points (each address is looked up with the place
+   search's street words, so `1 EXAMPLE AV` is `1 Example Ave`; the row's town first). **Apply** writes them.
+3. A re-import replaces every name of the last import (source "county common places", with the import date). Names
+   made by hand are never touched. **Remove** takes the imported names out. The settings audit log records the
+   counts only, never a name or an address.
+
+A name whose address is not found is kept, flagged ("not found" in the card): the place search and the radio can't
+place it, but a county feed location naming it still gets its address. The imported names are used:
+
+- by the place search (a note's "@", the location box: the name, its address filled in),
+- by the page and radio locators (`sizeup/geo/pagegeo.py`, `sizeup/intel/place.py`: "the Sample Marina", "the
+  community hall in Sample Town"; a name of generic words needs its town said),
+- by the county feed (`sizeup/cad/sources.py`): a location that is only a listed name ("@SAMPLE MARINA") is stored
+  as "<its address> @ <name>", placed at its address and matched against calls there; the feed's own text is kept.
+
+The list stays in `cad.sqlite` (`settings_overrides`, section `places`, keys `county/...`), replicated with the
+rest of the CAD and in the settings export. It is never in the repository, its tests or the public gazetteer
+(`data/gazetteer.sqlite`, `tools/fetch_places.py`).
+
 ## Notifications
 
 `sizeup/notify.py` is the one place sizeup publishes. Pushes go to ntfy, by kind:

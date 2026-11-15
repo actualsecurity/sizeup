@@ -1193,7 +1193,56 @@ class Sources:
         except Exception:  # noqa: BLE001 - only the log's starting point
             pass
         self._streets_loaded = False
+        self._common: tuple[tuple | None, object] = (None, None)
         self._towns()
+
+    # -- a location that is a place's name (the department's own, the county's common place names among them) ---------
+
+    def common_place(self, loc: str) -> dict | None:
+        """The department's place name a feed's location is, when it is only a name ("@SAMPLE MARINA", "SAMPLE MARINA
+        SAMPLE_VILLAGE": no street address in it) and that name has an address or a point (Settings > Place names, the
+        county's common place names: sizeup/cad/commonplaces.py). None: a street address, or no such name."""
+        if not (loc or "").strip() or re.match(r"\s*\d", loc):       # a numbered address: as it is
+            return None
+        fn = getattr(self.cad, "local_places", None)
+        if fn is None:
+            return None
+        try:
+            rows = fn()
+        except Exception:  # noqa: BLE001 - no names: the location as it is
+            return None
+        from sizeup.cad.commonplaces import Lookup
+        sig = tuple((r.get("key"), r.get("address"), r.get("lat"), r.get("lon")) for r in rows)
+        if sig != self._common[0]:
+            self._common = (sig, Lookup(rows))
+        self._towns()
+        return self._common[1].find(loc, _strip_town)
+
+    def _match_location(self, loc: str) -> str:
+        """What matching reads for a feed's location: a place's name as its address (common_place), else the text."""
+        cp = self.common_place(loc)
+        return (cp.get("address") or loc) if cp else loc
+
+    def _common_fields(self, loc: str, data: dict | None, pin: bool) -> dict | None:
+        """A feed's location that is a place's name (common_place): the address "<its address> @ <the name>" with the
+        place and its address kept on their own (place, place_address: matching reads that), and its point when
+        pin (no person set one). The feed's own text stays address_raw. None: not a place's name."""
+        cp = self.common_place(loc)
+        if cp is None:
+            return None
+        name = cp.get("label") or proper_case(cp.get("name") or "")
+        street = self.normal(cp["address"], data) if cp.get("address") else ""
+        f = {"address": (f"{street} @ {name}" if street else f"@ {name}")[:200], "address_raw": loc, "place": name,
+             "place_address": street, "geo_alts": ""}
+        if pin and cp.get("lat") is not None and cp.get("lon") is not None:
+            muni = cp.get("muni") or ""
+            at = cp.get("at") or street or name
+            f.update(lat=cp["lat"], lon=cp["lon"], geo_label=f"{at}, {muni}" if muni and not at.endswith(muni) else at)
+        elif pin:                                    # no point for it (its address not found): the address placed as usual
+            g = {"address": shown_location(cp.get("address") or ""), "lat": None, "lon": None, "geo_label": ""}
+            self.cad._auto_geo(g)
+            f.update(lat=g["lat"], lon=g["lon"], geo_label=g["geo_label"])
+        return f
 
     def _towns(self) -> None:
         """The known towns from the lists, again whenever Settings > Lists replaced them."""
@@ -1608,7 +1657,10 @@ class Sources:
 
     def _location_fields(self, iid: int, loc: str, data: dict | None = None) -> dict:
         """The fields for a feed's location: the address (normalised, with the feed's text it came from), and a new pin
-        only when no person set one."""
+        only when no person set one. A place's name (common_place): its address, the name kept as the place."""
+        named = self._common_fields(loc, data, "pin" not in self.manual(iid))
+        if named is not None:
+            return named
         f = {"address": "", "address_raw": loc, "place": "", "place_address": "", "geo_alts": ""}
         geo = self.store.incident(iid)["geo_label"]
         if "pin" not in self.manual(iid):
@@ -1721,7 +1773,7 @@ class Sources:
                 # a match is always the same place (match): attach, whoever made the incident and whatever its status
                 # (open), so a page that beat the feed gets the feed's report, not a duplicate
                 typ, sub = self.cad.map_type(data["type"], label)[:2] if data["type"] else ("", "")
-                inc, similar = self.match_all(ev.source, at, data["location"], data["units"], typ)
+                inc, similar = self.match_all(ev.source, at, self._match_location(data["location"]), data["units"], typ)
                 lag = PAGE_LAG_S if inc is not None and inc.get("_misheard") else SAME_CALL_S
                 if inc is not None and not self._same_call(inc, data, now, lag):
                     inc, similar = None, [inc]               # another call there (one that ended before, an old one)
@@ -1805,8 +1857,12 @@ class Sources:
         typ, sub, note = self.cad.map_type(data["type"], label)
         loc = data["location"].strip()
         f = {"type": typ, "subtype": sub, "type_note": note, "address": shown_location(loc)}
-        self.cad._auto_geo(f)                                # placed as before: the feed's street part and known town
-        f.update(address=self.normal(loc, data, f.get("geo_label") or ""), address_raw=loc)
+        named = self._common_fields(loc, data, True)         # a place's name: its address, the name as the place
+        if named is not None:
+            f.update(named)
+        else:
+            self.cad._auto_geo(f)                            # placed as before: the feed's street part and known town
+            f.update(address=self.normal(loc, data, f.get("geo_label") or ""), address_raw=loc)
         # the remarks keep the feed's whole text (its unit, floor and named place), as they always have
         f["remarks"] = (f"{label} event {ref}: {data['type'] or 'type not given'} at {proper_case(loc) or '(no location)'}"
                         + (f"; units {', '.join(data['units'])}" if data["units"] else ""))[:4000]
