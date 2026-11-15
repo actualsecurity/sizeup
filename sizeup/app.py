@@ -162,7 +162,9 @@ CATEGORIES = {"fire": "#ff4d3d", "ems": "#4da3ff", "rescue": "#ffb020", "hazard"
 
 
 def log(msg: str) -> None:
-    print(f"{time.strftime('%H:%M:%S')} {msg}", flush=True)
+    # one write per message (print writes the text and the newline apart: another thread's line could fall between)
+    sys.stdout.write(f"{time.strftime('%H:%M:%S')} {msg}\n")
+    sys.stdout.flush()
 
 
 # -- warm before the takeover (GitHub #264) ---------------------------------------------------------------------
@@ -622,6 +624,7 @@ class App:
         # External incident sources (#297, sizeup/sources/): the station's read-only CAD feed adapters, found and
         # started in start() (never on the hub: it has none). Their events go to the hub's outbox, or the CAD here.
         self.sources_runner = None
+        self.sources_loaded = threading.Event()   # their load is over (a runner or none): station logs wait for it (#548)
         # The map caches kept across hub restarts (sizeup/cachesync.py, #229): on a new Fargate task, the county GIS
         # layers, the camera lists, Metro-North's stations and the FAA registry come back from the S3 backups bucket.
         # Since #251 that happens in the background after the CAD serves (start_layers -> _load_layers), and the
@@ -4151,6 +4154,7 @@ class App:
         self.cad.radiolog.start()                 # open calls' units matched again (#370: what a restart left)
         self.cad.addrs.start()                    # address keys and the search index, backfilled and kept up (#403)
         if self.cfg.cloud_role == "hub":         # station only: the hub gets their events through the outbox
+            self.sources_loaded.set()
             return
         from sizeup.sources.runner import SourceRunner, context_for, load_adapters, require_station
         role = self.cfg.cloud_role or ""
@@ -4170,6 +4174,8 @@ class App:
                 raise
             except BaseException as e:  # noqa: BLE001 - never in the way of the station
                 log(f"incident sources: not loaded: {type(e).__name__}")
+            finally:
+                self.sources_loaded.set()          # after sources_runner: the log shipper's markers are complete
         threading.Thread(target=load, name="sources-load", daemon=True).start()
 
     def sources_poll_now(self, reason: str = "") -> int:
