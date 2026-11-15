@@ -208,7 +208,7 @@ window.IntelSettings = (() => {
     const [elab, ecb] = sCheck("Detection", s.enabled, "Off: no transmission is read for pre-alerts at all");
     ecb.addEventListener("change", () => post({ action: "set", key: "enabled", value: ecb.checked }, ecb.checked ? "Intel on" : "Intel off"));
     const hm = (key, label, tip) => {
-      const i = el("input", "in-time");
+      const i = el("input");
       i.type = "time";
       i.value = s[key] || "";
       i.title = tip;
