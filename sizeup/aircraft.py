@@ -113,6 +113,7 @@ import csv
 import hashlib
 import http.client
 import io
+import ipaddress
 import json
 import math
 import re
@@ -130,7 +131,7 @@ from pathlib import Path
 from typing import Callable
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
 
 from sizeup import USER_AGENT as UA
 from sizeup import tz
@@ -1164,10 +1165,60 @@ def build_registry_file(blob: bytes, path: str | Path, at: float | None = None) 
     con = sqlite3.connect(str(tmp))
     try:
         n = _build_into(blob, con, time.time() if at is None else at)
-    finally:
+    except BaseException:
         con.close()
+        tmp.unlink(missing_ok=True)              # never a half-built file left beside it
+        raise
+    con.close()
     tmp.replace(path)
     return n
+
+
+def read_bounded(path: str | Path, limit: int) -> bytes:
+    """A local file, at most `limit` bytes (a FIFO, /dev/zero or a huge file: ValueError, not all of memory)."""
+    with open(path, "rb") as fh:
+        blob = fh.read(limit + 1)
+    if len(blob) > limit:
+        raise ValueError(f"{Path(path).name}: larger than {limit // (1024 * 1024)} MB")
+    return blob
+
+
+class _SafeRedirect(HTTPRedirectHandler):
+    """The registry download's redirects: https only, and never to this machine, a private network or a link-local
+    address (169.254.169.254: the cloud's metadata service)."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        why = unsafe_url(newurl)
+        if why:
+            raise URLError(f"redirect refused: {why}")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def unsafe_url(url: str) -> str:
+    """Why `url` isn't one the registry may be fetched from, "" when it may: https, a public address."""
+    u = urlsplit(url)
+    if u.scheme != "https" or not u.hostname:
+        return f"not https ({url[:80]})"
+    try:
+        addrs = {ai[4][0] for ai in socket.getaddrinfo(u.hostname, u.port or 443, proto=socket.IPPROTO_TCP)}
+    except OSError as e:
+        return f"{u.hostname}: {e}"
+    for a in addrs:
+        ip = ipaddress.ip_address(a.split("%")[0])
+        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast or ip.is_unspecified:
+            return f"{u.hostname} is {a}, not a public address"
+    return ""
+
+
+def registry_get(url: str, timeout: float, limit: int, headers: dict | None = None) -> tuple[int, dict, bytes]:
+    """The FAA registry's download (or [aircraft] registry_url's https copy): like http_get, its redirects checked
+    (_SafeRedirect)."""
+    req = Request(url, headers={"User-Agent": UA, **(headers or {})})
+    with build_opener(_SafeRedirect).open(req, timeout=timeout) as r:
+        body = r.read(limit + 1)
+        if len(body) > limit:
+            raise ValueError(f"more than {limit // (1024 * 1024)} MB")
+        return r.status, {k.lower(): v for k, v in r.headers.items()}, body
 
 
 def _span(s: float) -> str:
@@ -1221,7 +1272,7 @@ class Registry:
         now = self.clock()
         try:
             if "://" not in self.url:             # [aircraft] registry_url: a zip downloaded by hand (the FAA site
-                blob = Path(self.url).read_bytes()  # refuses scripts: see build_registry_file)
+                blob = read_bounded(self.url, MAX_REGISTRY_BYTES)    # refuses scripts: see build_registry_file)
             else:
                 code, _, blob = self.fetch(self.url, 300.0, MAX_REGISTRY_BYTES, {})
                 if code != 200:
@@ -1349,7 +1400,11 @@ class ApiFeed(Feed):
             retry = float((headers or {}).get("Retry-After", "") or (headers or {}).get("retry-after", "") or 0)
         except (TypeError, ValueError, AttributeError):
             retry = 0.0
-        return retry if retry > 0 else None
+        if retry != retry:                       # NaN
+            return None
+        # capped (#542 review): "1e12", "inf" or "1e400" rested a feed for ever, and two such answers stopped the
+        # layer and the emergency watch
+        return min(retry, RETRY_AFTER_MAX_S) if retry > 0 else None
 
     def read(self) -> Snapshot:
         try:
@@ -1420,21 +1475,45 @@ class KeepAlive:
         origin = (u.scheme, u.hostname, u.port)
         path = (u.path or "/") + (f"?{u.query}" if u.query else "")
         hdrs = {"User-Agent": UA, "Accept-Encoding": "gzip", **(headers or {})}
+        # The whole read, connect to last byte, within connect_s + read_s: the socket timeout bounds each recv only,
+        # so a server trickling a byte every few seconds (headers or body) would hold the feed for ever (#542 review:
+        # the emergency watch stuck on a trickling primary). Past the deadline a timer shuts the socket down.
+        total = self.connect_s + self.read_s
+        deadline = time.monotonic() + total
         for attempt in (0, 1):
             reused = self.conn is not None and self.origin == origin
             if not reused:
                 self.close()
                 self.conn, self.origin = self._open(u, origin), origin
+            conn, late = self.conn, threading.Event()
+
+            def cut(conn=conn, late=late) -> None:
+                late.set()
+                try:
+                    if conn.sock is not None:
+                        conn.sock.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+            timer = threading.Timer(max(0.01, deadline - time.monotonic()), cut)
+            timer.daemon = True
+            timer.start()
             try:
                 self.conn.request("GET", path, headers=hdrs)
                 r = self.conn.getresponse()
                 body = r.read(limit + 1)
             except (OSError, http.client.HTTPException) as e:
                 self.close()
+                if late.is_set():
+                    raise URLError(f"read: no whole answer within {total:g} s") from e
                 # a kept connection the server had closed (idle): once more on a new one. Not after a timeout.
                 if reused and attempt == 0 and not isinstance(e, TimeoutError) and not isinstance(e, socket.timeout):
                     continue
                 raise URLError(f"read: {getattr(e, 'reason', None) or e or type(e).__name__}") from e
+            finally:
+                timer.cancel()
+            if late.is_set():                    # cut just as the last byte came: not to be trusted, nor kept
+                self.close()
+                raise URLError(f"read: no whole answer within {total:g} s")
             hs = {k.lower(): v for k, v in r.getheaders()}
             if not keep or r.will_close:
                 self.close()
@@ -1763,6 +1842,7 @@ RECEIVER_KEEP_S = 10.0             # our receiver's: older than this, it is stal
 RECEIVER_LOST_S = 10.0             # an aircraft whose position from our receiver is older than this is "lost" there:
                                    # an API feed's fresher position is used (#235)
 RATE_LIMITED_MIN_S = 10.0          # a 429 without Retry-After: at least this, then doubling
+RETRY_AFTER_MAX_S = 3600.0         # a 429's Retry-After is never taken for longer than this
 FLAKY_S = 600.0                    # an API feed that failed this recently is not made the primary while another is fine
 FEED_LOG_EVERY_S = 300.0           # an API feed failing the same way: logged once, then at most this often (#542: one
                                    # line per failure, ~280 a day from adsb.lol)
@@ -1810,11 +1890,14 @@ class AircraftLayer:
                 self.feeds.insert(0, StationFeed(clock))
         for f in self.feeds:
             f.st = {"next": 0.0, "fails": 0, "rest_until": 0.0, "why": "", "ok": None, "at": None, "n": 0, "fresh": 0,
-                    "score": None, "snap": None, "reads": 0, "failures": 0, "failed_at": None, "busy": False,
+                    "score": None, "snap": None, "reads": 0, "failures": 0, "failed_at": None, "busy": False, "busy_since": None,
                     "down_since": None, "log_kind": "", "log_at": -1e18, "logged": False}
         self._dirty = False                     # a background read answered (or failed) since the last combine
+        self._refresh_asked = False             # refresh() asked the layer's thread for a read of every feed now
+        self._ticks = 0                         # turns of the layer's loop done (refresh() waits on them)
         url = (registry_url or FAA_URL) if registry and self.enabled else ""
-        self.registry = Registry(url, cache_dir, self.fetch if url else None, log, clock)
+        # (its own fetch: redirects only to public https addresses, #542 review; a test's fetch as given)
+        self.registry = Registry(url, cache_dir, (fetch or registry_get) if url else None, log, clock)
         self.airlines = load_airlines() if airlines is None else airlines
         self.procedures = Procedures() if procedures is None else procedures
         self.memory = PhaseMemory(self.procedures, self.ceiling_ft, self.radius_nm)
@@ -1956,6 +2039,12 @@ class AircraftLayer:
         out = f.ingest(d, size)
         return dict(out, every=FORWARD_FAST_S if self.demanded() or self.emerg else FORWARD_SLOW_S)
 
+    def stuck(self, f: Feed, now: float | None = None) -> bool:
+        """Its read in flight longer than a read may take (KeepAlive's whole-answer deadline, and a second): not up,
+        so the primary (and the emergency watch, which reads only the primary) moves on (#542 review)."""
+        now = self.clock() if now is None else now
+        return bool(f.st["busy"]) and f.st["busy_since"] is not None and now - f.st["busy_since"] > CONNECT_S + READ_S + 1.0
+
     def flaky(self, f: Feed, now: float | None = None) -> bool:
         """Failed (timed out, refused, rate-limited) within FLAKY_S."""
         now = self.clock() if now is None else now
@@ -1967,7 +2056,7 @@ class AircraftLayer:
         lately (config order on a tie). #542: adsb.lol timed out or answered 429 ~150 times a day from the hub while
         adsb.fi failed none in a week, and the busier-feed rule kept handing the primary back to adsb.lol."""
         now = self.clock()
-        up = [f for f in self.api_feeds() if f.st["rest_until"] <= now]
+        up = [f for f in self.api_feeds() if f.st["rest_until"] <= now and not self.stuck(f, now)]
         if not up:
             return None
         steady = [f for f in up if not self.flaky(f, now)] or up
@@ -1990,24 +2079,34 @@ class AircraftLayer:
         own and this never waits for one, so a feed that hangs (adsb.lol's TLS handshakes timing out from the hub,
         #542: the whole layer stood still 10 s at a time, ~11 min in its worst hour) holds up neither the other
         feeds nor our receiver nor the map; its answer is combined on the next turn (it wakes the loop)."""
+        try:
+            self._tick(parallel)
+        finally:
+            with self._fresh:
+                self._ticks += 1
+                self._fresh.notify_all()
+
+    def _tick(self, parallel: bool) -> None:
         if not self.configured:
             return
+        force, self._refresh_asked = self._refresh_asked, False     # refresh() from another thread (#542 review)
         demanded = self.demanded()
-        if not demanded and not self.watching():
+        reading = demanded or self.watching() or force
+        if not reading and not self._dirty:     # (a read in flight that answered is still combined)
             return
         now = self.clock()
         if demanded and self.registry.due():      # its own thread (a large download); not again while it runs
             self.registry.st["next"] = now + REGISTRY_BACKOFF_S[0]
             threading.Thread(target=self.registry.refresh, name="aircraft-registry", daemon=True).start()
         read = False
-        for f in list(self.feeds):
+        for f in (list(self.feeds) if reading else []):
             if f.st["busy"]:
                 continue
-            iv = self.interval(f, demanded)
-            if iv is None or now < f.st["rest_until"] or now < f.st["next"]:
+            iv = self.interval(f, demanded) or (SECONDARY_S if force else None)
+            if iv is None or now < f.st["rest_until"] or (now < f.st["next"] and not force):
                 continue
             if parallel and not f.local:
-                f.st["busy"] = True
+                f.st.update(busy=True, busy_since=self.clock())
                 threading.Thread(target=self._read_behind, args=(f, iv), name=f"aircraft-feed-{f.key}", daemon=True).start()
                 continue
             read = self._try_read(f, now, iv) or read
@@ -2017,7 +2116,7 @@ class AircraftLayer:
         if read:
             self._combine(now)
         elif (self.st["fetched"] is None or now - self.st["fetched"] > FEED_KEEP_S) \
-                and not any(f.st["busy"] for f in self.feeds):      # (one in flight may yet answer)
+                and not any(f.st["busy"] and not self.stuck(f, now) for f in self.feeds):   # (one in flight may yet answer)
             self._no_data(now)
 
     def _read_behind(self, f: Feed, iv: float) -> None:
@@ -2025,14 +2124,28 @@ class AircraftLayer:
         try:
             self._try_read(f, self.clock(), iv)
         finally:
-            f.st["busy"] = False
+            f.st.update(busy=False, busy_since=None)
             self._dirty = True
             self._wake.set()
 
     def refresh(self) -> bool:
-        """Read every feed that may be asked now, and combine. True when one answered. Never raises."""
+        """Read every feed that may be asked now, and combine. True when one answered. Never raises.
+        With the layer's thread running (and this called from another: Data sources' Refresh now), the reads and
+        the combine (and the emergency watch after it) are done there, never beside it (#542 review: two combines at
+        once could push one squawk twice); this waits for that turn."""
         if not self.configured:
             return False
+        t = self._thread
+        if t is not None and t.is_alive() and threading.current_thread() is not t:
+            with self._fresh:
+                seq, ticks = self.st["seq"], self._ticks
+            self._refresh_asked = True
+            self._wake.set()
+            with self._fresh:
+                self._fresh.wait_for(lambda: self.st["seq"] != seq or (
+                    not self._refresh_asked and self._ticks > ticks + 1 and not any(f.st["busy"] for f in self.feeds)),
+                    timeout=CONNECT_S + READ_S + 3.0)
+                return self.st["seq"] != seq
         now = self.clock()
         read = False
         for f in self.feeds:
@@ -2441,8 +2554,8 @@ class AircraftLayer:
             others = ", ".join(FEEDS[g.key]["label"] for g in self.feeds if g is not f and not g.local)
             if isinstance(f, StationFeed) and f.last is None:
                 out.append({"key": f"aircraft:{f.key}", "label": "Aircraft: our ADS-B receiver", "state": "no data",
-                            "why": "nothing from the station (no dongle named for ADS-B, or its decoder is off)",
-                            "at": None, "fallback": others, "title": ""})
+                            "why": "", "at": None, "fallback": others,      # (terse: the reason on hover)
+                            "title": "nothing from the station: no dongle named for ADS-B, or its decoder is off"})
                 continue
             resting = st["rest_until"] > now
             role = "receiver" if f.local else "primary" if f is prim else "secondary"
@@ -2509,7 +2622,11 @@ def main(argv: list[str] | None = None) -> int:
         print("usage: python -m sizeup.aircraft build-registry <ReleasableAircraft.zip> <faa_registry.sqlite>",
               file=sys.stderr)
         return 2
-    n = build_registry_file(Path(args[1]).read_bytes(), args[2])
+    try:
+        n = build_registry_file(read_bounded(args[1], MAX_REGISTRY_BYTES), args[2])
+    except (OSError, ValueError, KeyError, zipfile.BadZipFile, sqlite3.Error, UnicodeDecodeError) as e:
+        print(f"build-registry: {args[1]}: {type(e).__name__}: {e}", file=sys.stderr)   # one line (#542 review)
+        return 1
     print(f"{args[2]}: {n} US aircraft")
     return 0
 

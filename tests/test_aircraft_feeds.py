@@ -16,6 +16,7 @@ import json
 import socket
 import threading
 import time
+from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.error import URLError
 
@@ -53,6 +54,28 @@ class Fake:
                 outer.hits.append(self.path)
                 a = outer.plan.pop(0) if len(outer.plan) > 1 else outer.plan[0]
                 code, hdrs, body = 200, {"Content-Type": "application/json"}, b""
+                if isinstance(a, tuple) and a[0] in ("trickle", "trickle-headers"):
+                    try:                         # a byte (or a header line) every a[1] s, never the whole answer
+                        if a[0] == "trickle":
+                            self.send_response(200)
+                            self.send_header("Content-Length", "100000")
+                            self.end_headers()
+                        else:
+                            self.wfile.write(b"HTTP/1.1 200 OK\r\n")
+                        for i in range(1000):
+                            time.sleep(a[1])
+                            self.wfile.write(b"{" if a[0] == "trickle" else f"X-Slow-{i}: 1\r\n".encode())
+                            self.wfile.flush()
+                    except OSError:
+                        pass
+                    self.close_connection = True
+                    return
+                if isinstance(a, tuple) and a[0] == "redirect":
+                    self.send_response(302)
+                    self.send_header("Location", a[1])
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
                 if isinstance(a, bytes):
                     body = a
                 elif a[0] == "gzip":
@@ -349,3 +372,131 @@ def test_the_hubs_health_panel_lists_the_aircraft_sources(tmp_path):
         h.close()
     js = (A.ROOT / "sizeup" / "web" / "static" / "health.js").read_text()
     assert "f.title" in js and "td.title = c[2]" in js and '"resting" ? "hl-warn"' in js
+
+
+# ---- #542 review -----------------------------------------------------------------------------------------------------------
+
+def emergency_body() -> bytes:
+    """One invented aircraft on the ILS 34 at 900 ft squawking 7700, as adsb.fi's JSON, timed now."""
+    return json.dumps({"now": time.time() * 1000, "ac": [{
+        "hex": "a5bf1b", "flight": "TEST77", "alt_baro": 900, "gs": 80.0, "track": 330.0, "baro_rate": -500,
+        "squawk": "7700", "lat": 41.04, "lon": -73.686, "seen": 0.2, "seen_pos": 0.2, "category": "A1"}]}).encode()
+
+
+@pytest.mark.parametrize("kind", ["trickle", "trickle-headers"])
+def test_a_trickled_answer_gives_up_at_the_whole_reads_deadline(servers, monkeypatch, kind):
+    """The socket timeout bounds each recv: a byte (or a header line) every 0.3 s used to keep a read going for ever."""
+    monkeypatch.setattr(A, "CONNECT_S", 0.5)
+    monkeypatch.setattr(A, "READ_S", 1.0)
+    fake = servers(Fake, [(kind, 0.3)])
+    t0 = time.monotonic()
+    with pytest.raises(URLError) as e:
+        KeepAlive()(fake.url("/x"), A.TIMEOUT_S, A.MAX_FEED_BYTES)
+    assert time.monotonic() - t0 < 3.0 and "no whole answer within 1.5 s" in str(e.value.reason)
+
+
+def test_the_emergency_watch_moves_off_a_trickling_primary_and_alarms_from_the_other_feed(servers, monkeypatch):
+    """The map closed, the emergency watch on (it reads only the primary): adsb.lol (the primary by config order)
+    trickles its answer, adsb.fi has a 7700. The read gives up at its deadline, adsb.fi becomes the primary, the alarm
+    fires."""
+    monkeypatch.setattr(A, "CONNECT_S", 0.5)
+    monkeypatch.setattr(A, "READ_S", 1.0)
+    lol, fi = servers(Fake, [("trickle", 0.3)]), servers(Fake, [emergency_body()])
+    alarms: list[dict] = []
+    ly = AircraftLayer(feeds=("adsblol", "adsbfi"), adsblol_url=lol.url(), adsbfi_url=fi.url("/lat/{lat}/lon/{lon}/dist/{radius}"),
+                       registry=False, log=lambda m: None)
+    ly.on_emergency = lambda ev: alarms.append(ev) or len(alarms)
+    assert ly.watching() and not ly.demanded() and ly.primary().key == "adsblol"
+    ly.start()
+    try:
+        deadline = time.monotonic() + 8
+        while not alarms and time.monotonic() < deadline:
+            time.sleep(0.1)
+        assert [a["code"] for a in alarms] == ["7700"] and alarms[0]["src"] == "adsbfi"
+        assert ly.primary().key == "adsbfi" and "no whole answer" in ly.feeds[0].st["why"]
+    finally:
+        ly.stop()
+
+
+def test_a_feed_busy_past_any_reads_deadline_is_not_the_primary():
+    clock = Clock(T3 + 0.5)
+    ly = AircraftLayer(feeds=("adsblol", "adsbfi"), adsblol_url=LOL_URL, adsbfi_url=FI_URL, registry=False,
+                       fetch=Feeds(), clock=clock, log=lambda m: None)
+    lol = ly.feeds[0]
+    lol.st.update(busy=True, busy_since=clock.t)
+    assert ly.primary() is lol                                          # in flight, within a read's time
+    clock.t += A.CONNECT_S + A.READ_S + 1.5
+    assert ly.primary().key == "adsbfi" and ly.stuck(lol)
+
+
+@pytest.mark.parametrize("value", ["1e12", "inf", "1e400", "nan"])
+def test_a_huge_or_odd_retry_after_is_capped(servers, value):
+    clock = Clock(T3 + 0.5)
+    fetch = Feeds(lol=(429,))
+    fetch.retry_after = value
+    ly = AircraftLayer(feeds=("adsblol", "adsbfi"), adsblol_url=LOL_URL, adsbfi_url=FI_URL, registry=False,
+                       fetch=fetch, clock=clock, log=lambda m: None)
+    assert ly._read(ly.feeds[0], clock.t, 5.0) is False
+    rest = ly.feeds[0].st["rest_until"] - clock.t
+    assert rest == (A.RATE_LIMITED_MIN_S if value == "nan" else A.RETRY_AFTER_MAX_S)
+
+
+def test_the_registry_file_is_read_bounded(tmp_path, monkeypatch):
+    big = tmp_path / "ReleasableAircraft.zip"
+    big.write_bytes(b"x" * 2048)
+    monkeypatch.setattr(A, "MAX_REGISTRY_BYTES", 1024)
+    logs: list[str] = []
+    reg = Registry(str(big), tmp_path / "state", None, logs.append, Clock(T3))
+    assert reg.refresh() is False and "larger than" in reg.st["error"]
+    if Path("/dev/zero").exists():
+        assert Registry("/dev/zero", tmp_path / "s2", None, logs.append, Clock(T3)).refresh() is False   # not all of memory
+
+
+def test_the_registry_download_refuses_redirects_to_http_or_private_addresses(servers):
+    for target in ("http://registry.example/ReleasableAircraft.zip", "https://169.254.169.254/latest/meta-data/",
+                   "https://127.0.0.1/ReleasableAircraft.zip", "https://10.0.0.5/x.zip"):
+        fake = servers(Fake, [("redirect", target)])
+        with pytest.raises(URLError) as e:
+            A.registry_get(fake.url("/ReleasableAircraft.zip"), 5.0, 1000)
+        assert "redirect refused" in str(e.value.reason), target
+
+
+def test_build_registry_says_one_line_and_leaves_no_tmp(tmp_path, capsys):
+    out = tmp_path / "built" / "faa_registry.sqlite"
+    notzip = tmp_path / "x.zip"
+    notzip.write_bytes(b"not a zip")
+    empty = tmp_path / "empty.zip"
+    import zipfile
+    with zipfile.ZipFile(empty, "w") as z:
+        z.writestr("README.txt", "nothing")
+    for src in (notzip, empty, tmp_path / "missing.zip"):
+        assert A.main(["build-registry", str(src), str(out)]) == 1
+        err = capsys.readouterr().err
+        assert err.count("\n") == 1 and err.startswith("build-registry: ") and "Traceback" not in err
+        assert not out.exists() and not out.with_suffix(".tmp").exists()
+
+
+def test_refresh_from_another_thread_reads_on_the_layers_thread(servers):
+    """Data sources' Refresh now: the reads and the combine (and the watch) on the layer's own thread, never beside
+    it (two combines at once could push one squawk twice)."""
+    fi = servers(Fake, [emergency_body()])
+    ly = AircraftLayer(feeds=("adsbfi",), adsbfi_url=fi.url("/lat/{lat}/lon/{lon}/dist/{radius}"), registry=False,
+                       watch=False, log=lambda m: None)
+    combined_on: list[str] = []
+    real = ly._combine
+    ly._combine = lambda now: (combined_on.append(threading.current_thread().name), real(now))[1]
+    ly.start()
+    try:
+        time.sleep(0.2)
+        assert not ly.demanded() and fi.hits == []                       # nobody looks, no watch: nothing read
+        assert ly.refresh() is True and len(fi.hits) == 1
+        assert combined_on and set(combined_on) == {"aircraft"}           # never on this (the caller's) thread
+    finally:
+        ly.stop()
+
+
+def test_the_receivers_no_data_row_is_terse():
+    ly = AircraftLayer(feeds=("adsbfi",), adsbfi_url=FI_URL, registry=False, fetch=Feeds(), clock=Clock(T3 + 0.5),
+                       log=lambda m: None, station_feed=True)
+    row = ly.feed_health()[0]
+    assert row["state"] == "no data" and row["why"] == "" and "no dongle named" in row["title"]

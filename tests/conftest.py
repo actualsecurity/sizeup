@@ -209,6 +209,13 @@ def _aircraft_stays_local(monkeypatch):
         assert u.hostname in ("127.0.0.1", "localhost", "::1"), f"a test tried to reach {u.hostname} (aircraft: fixtures only)"
         return real_open(self, u, origin)
     monkeypatch.setattr(aircraft.KeepAlive, "_open", open_local)
+    real_reg = aircraft.registry_get           # the registry's own download (safe redirects): this machine only too
+
+    def reg_local(url, *a, **kw):
+        host = urlsplit(url).hostname
+        assert host in ("127.0.0.1", "localhost", "::1"), f"a test tried to reach {host} (aircraft: fixtures only)"
+        return real_reg(url, *a, **kw)
+    monkeypatch.setattr(aircraft, "registry_get", reg_local)
 
 
 @pytest.fixture(autouse=True)
