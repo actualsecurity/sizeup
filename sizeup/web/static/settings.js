@@ -13,13 +13,15 @@
 
 const S = {
   section: null, list: store("sizeup.cad.settings.list") || "event_types",
-  data: null, loading: false, again: false, deferred: false, msgT: null,
+  data: null, sig: "", sigLive: "", loading: false, again: null, deferred: false, pressDeferred: false, deferFresh: false, pressing: 0, msgT: null,
   boardsOpen: null, audit: "", auditRows: null, auditFor: "", admin: null, importing: null,
   previewT: null, previewSeq: 0, tsOpen: new Set(),
+  saved: "", pressT: null, refreshDue: false,                            // the section a save of ours just changed; the press's time limit
   act: null, actEmail: "", actKind: "", actKey: "", actAt: 0,
   rtab: store("sizeup.cad.settings.radios") || "receivers",        // Settings > Radios: the tab (#settings/radios/<tab>)
   toneQ: "", toneShow: "", toneType: "", toneEdit: null, unnamedEdit: null,      // Radios > Tones (#115, #122)
   toneOpen: new Set(), entEdit: null, entMerge: null, toneMove: null, toneAdd: null,
+  pushSeq: 0, pushErr: {},                           // Push notifications: the newest read; a refusal, by field
   dsFocus: "", pushScrolled: "",                     // #settings/data/<key>: that row; #settings/system/pushes: that card
   stab: "", stationShown: false,                     // Settings > Station: the tab (#settings/station/<tab>)
 };
@@ -130,20 +132,208 @@ function short(v) {
   return t.length > 140 ? t.slice(0, 137) + "…" : t;
 }
 
+// ---- a redraw never takes what someone is in the middle of ----------------------------------------
+// The page's scroll position, the field with the focus (and its selection) and text typed but not saved outlive a
+// redraw (sKeep); a card that only reports (Push notifications) is updated in place, node by node (sMorph).
+
+const S_TEXTY = "input:not([type=file]):not([type=checkbox]):not([type=radio]):not([type=color]):not([type=range]), textarea";
+// key -> field: its data-key; else its row's (data-row: a unit's or a list item's code), its label and which of them it
+// is in that row; with no row, its label and which of them it is in the section (n: how many of each there are).
+function sFields(root) {
+  const out = new Map(), n = {};
+  for (const f of root.querySelectorAll(S_TEXTY)) {
+    let k = f.dataset.key;
+    if (!k) {
+      const row = f.closest("[data-row]");
+      const b = (row && root.contains(row) ? `${row.dataset.row}/` : "") + (f.getAttribute("aria-label") || f.placeholder || f.name || f.type);
+      n[b] = (n[b] || 0) + 1;
+      k = `${b}#${n[b]}`;
+      f._label = b;
+      f._rowed = !!(row && root.contains(row));
+    }
+    out.set(k, f);
+  }
+  out.n = n;
+  return out;
+}
+function sStamp(root) {            // what each field showed when it was drawn: differs = typed, not saved
+  for (const f of root.querySelectorAll(S_TEXTY)) if (f._base === undefined) f._base = f.value;
+}
+function sKeep(root, build, text = true) {
+  const sc = $("#settings .s-content"), page = document.scrollingElement;
+  const top = sc ? sc.scrollTop : 0, ptop = page ? page.scrollTop : 0;
+  const held = [];
+  let was = {};
+  if (text) {
+    const fields = sFields(root);
+    was = fields.n;
+    for (const [k, f] of fields) {
+      const on = f === document.activeElement;
+      if (!on && (f._base === undefined || f.value === f._base)) continue;
+      let a = null, b = null;
+      try { a = f.selectionStart; b = f.selectionEnd; } catch (e) { /* a number field has none */ }
+      held.push({ k, f, value: f.value, base: f._base, on, a, b });
+    }
+  }
+  build();
+  if (held.length) {
+    const now = sFields(root);
+    for (const h of held) {
+      const f = now.get(h.k);
+      if (!f) continue;
+      // The same field: itself, or by its data-key, or by its row. Else by its place among its like, only while there
+      // are as many of them as before and it still shows what it showed: rows that came, went or moved are not guessed
+      // at (the text is dropped rather than put in another row's field).
+      if (!(f === h.f || f.dataset.key || f._rowed) && (was[f._label] !== now.n[f._label] || (h.base !== undefined && f.value !== h.base))) continue;
+      if (f !== h.f) { f._base = f.value; f.value = h.value; }
+      if (h.on && document.activeElement !== f) {
+        f.focus({ preventScroll: true });
+        try { if (h.a !== null) f.setSelectionRange(h.a, h.b); } catch (e) { /* a number field */ }
+      }
+    }
+  }
+  sStamp(root);
+  if (sc && sc.scrollTop !== top) sc.scrollTop = top;
+  if (page && page.scrollTop !== ptop) page.scrollTop = ptop;
+}
+// old becomes neu without being rebuilt: same shape = only the text and attributes that differ change (a field keeps
+// its element, its focus and what was typed in it); another shape = that part's children are replaced (sKeep).
+const S_MORPH_ATTRS = ["class", "title", "placeholder", "aria-label", "aria-invalid", "aria-describedby", "href", "hidden", "data-help"];
+function sMorph(old, neu) {
+  const a = [...old.childNodes], b = [...neu.childNodes];
+  // (a button is the same button only with the same label and the same data-act: the old node keeps its old click)
+  const other = (c, n) => c.nodeType !== n.nodeType || c.nodeName !== n.nodeName || c.type !== n.type
+    || (c.nodeType === 1 && (c.dataset.act !== n.dataset.act || (c.tagName === "BUTTON" && c.textContent !== n.textContent)));
+  if (a.length !== b.length || a.some((c, i) => other(c, b[i]))) {
+    sKeep(old, () => old.replaceChildren(...b));
+    return;
+  }
+  a.forEach((c, i) => {
+    const n = b[i];
+    if (c.nodeType !== 1) { if (c.nodeValue !== n.nodeValue) c.nodeValue = n.nodeValue; return; }
+    for (const at of S_MORPH_ATTRS) {
+      const v = n.getAttribute(at);
+      if (v === null) c.removeAttribute(at); else if (c.getAttribute(at) !== v) c.setAttribute(at, v);
+    }
+    if (c.type === "checkbox" || c.type === "radio") { if (c.checked !== n.checked) c.checked = n.checked; return; }
+    if (c.tagName === "SELECT") {              // its options; the choice made in it stays
+      if (c.innerHTML !== n.innerHTML) { c.replaceChildren(...n.childNodes); c.value = n.value; }
+      return;
+    }
+    if (c.matches(S_TEXTY)) {
+      const typed = c._base !== undefined && c.value !== c._base;
+      c._base = n.value;
+      if (!typed && c !== document.activeElement && c.value !== n.value) c.value = n.value;
+      return;
+    }
+    sMorph(c, n);
+  });
+}
+// A card whose buttons read their own fields and data (Emergency alarms, Intel, Audio retention, Camera wall) is never
+// patched: it is drawn off the page and swapped in whole, only when it differs from what was drawn last, and never
+// while a field in it has the focus or text typed and not saved, or a button of the section is being pressed (must:
+// after a save of its own, which starts it clean).
+function sBusy(root) {
+  const a = document.activeElement;
+  if (a && root.contains(a) && a.matches("input:not([type=file]):not([type=checkbox]), textarea, select")) return true;
+  return [...root.querySelectorAll(S_TEXTY)].some((f) => f._base !== undefined && f.value !== f._base);
+}
+function sCardSig(card) {
+  return card.innerHTML + JSON.stringify([...card.querySelectorAll("input, textarea, select")].map((f) => (f.type === "checkbox" ? f.checked : f.value)));
+}
+function sCardSwap(card, next, must) {
+  const sig = sCardSig(next);
+  if (card.hidden !== next.hidden) card.hidden = next.hidden;
+  if (card._sig === sig && !must) return false;
+  if (!must && card._sig !== undefined && (sBusy(card) || sPressing())) return false;
+  sStamp(next);
+  sKeep(card, () => card.replaceChildren(...next.childNodes), false);
+  card._sig = sig;
+  return true;
+}
+async function sCardMount(card, mount, must) {          // mount(node): reads, then fills node (alarm.js, intel.js)
+  if (!card) return;
+  const seq = card._seq = (card._seq || 0) + 1;
+  if (must) card._must = true;          // (it holds for whichever read lands: a newer one takes this one's place)
+  const next = card.cloneNode(false);
+  next.removeAttribute("id");
+  await mount(next);
+  if (seq !== card._seq) return;          // (a newer read is on its way)
+  if (card._sig !== undefined && next.querySelector(":scope > .error")) return;          // a read that failed: what is shown stays
+  sCardSwap(card, next, card._must);
+  card._must = false;
+}
+
 // ---- load / save ----------------------------------------------------------------------------------
 
-async function sLoad() {
-  if (S.loading) { S.again = true; return; }
+// The settings as they are now. The CAD's rev moves with every call, unit and transmission (sHook), the settings
+// seldom: the section is drawn again only when what it shows changed (or must: a save of ours), and then keeps the
+// scroll position, the focus and typed text (fresh: the form that was just saved starts clean).
+// "What it shows" is by section (S_PART_OF: a part of the settings drawn in one section only; a part not named is
+// everyone's), and without what moves with the calls and the radio (S_LIVE_KEYS: a list item's "used 12×" and "3 now",
+// a unit's status and its call, the clips and bytes kept per channel, the cameras streaming). Those redraw Lists and
+// Units, which show them on every row (S_LIVE); in System their cards are updated in place (sRefresh).
+const S_PART_OF = { lists: "lists", titles: "lists", units: "units", unit_kinds: "units", boards: "units", dispatch: "dispatch",
+  operators: "users", tones: "radios", radio_emergencies: "radios", station_logs: "station",
+  system: "system", audit_sections: "system", atc: "system", hub_errors: "system", map_display: "system",
+  premise_visibility: "system", audio_retention: "system", camera_wall: "system", alert_mutes: "system" };
+const S_LIVE = new Set(["lists", "units"]);
+const S_LIVE_KEYS = { lists: new Set(["used", "now"]), units: new Set(["used", "status", "incident_number"]),
+  audio_retention: new Set(["clips", "bytes", "totals"]), camera_wall: new Set(["n", "streams"]) };
+function sSigs(d, sec) {           // [the section's settings, those and what moves with the calls]
+  const quiet = [], live = [];
+  for (const k of Object.keys(d).sort()) {
+    if (k === "rev" || (S_PART_OF[k] && S_PART_OF[k] !== sec)) continue;
+    let v = d[k];
+    // (the retention rows come largest first: their order moves with the bytes)
+    if (k === "audio_retention" && v && v.rows) v = { ...v, rows: [...v.rows].sort((a, b) => (a.key < b.key ? -1 : 1)) };
+    const all = JSON.stringify(v), drop = S_LIVE_KEYS[k];
+    live.push(k, all);
+    quiet.push(k, drop ? JSON.stringify(v, (f, x) => (drop.has(f) ? undefined : x)) : all);
+  }
+  return [quiet.join("\n"), live.join("\n")];
+}
+async function sLoad(opts = {}) {
+  if (S.loading) {
+    S.again = { must: !!((S.again && S.again.must) || opts.must), fresh: !!((S.again && S.again.fresh) || opts.fresh) };
+    return;
+  }
   S.loading = true;
   try {
-    S.data = await api("GET", "/api/cad/settings");
-    sRender();
+    const d = await api("GET", "/api/cad/settings");
+    const [sig, live] = sSigs(d, S.section);
+    const same = !!S.data && S.sigSec === S.section && sig === S.sig && (live === S.sigLive || !S_LIVE.has(S.section));
+    S.data = d;
+    S.sig = sig;
+    S.sigLive = live;
+    S.sigSec = S.section;
+    if (!same || opts.must) sRender(false, !opts.fresh);
+    if (same || S.deferred || S.pressDeferred) sRefresh();          // (a redraw that waits: what reports doesn't)
   } catch (e) {
     sMsg(`Load failed: ${e.message}`);
   } finally {
     S.loading = false;
-    if (S.again) { S.again = false; sLoad(); }
+    if (S.again) { const again = S.again; S.again = null; sLoad(again); }
   }
+}
+// No redraw (nothing in the section's settings changed, or it waits for a field): what is read apart from the settings
+// or moves with the CAD catches up in place. System: the record counts, the audit log, the pushes sent, Emergency
+// alarms and Intel (their own reads: another admin's change, the 24 h counts), the audio kept and the cameras on the
+// wall. Users: who was seen when, at most every 15 s.
+function sRefresh() {
+  if (sPressing()) { S.refreshDue = true; return; }          // (a row could change under the press: once it is over)
+  S.refreshDue = false;
+  if (S.section === "users") sActivity();
+  if (S.section !== "system") return;
+  sCounts();
+  sAudit();
+  const card = $("#s-pushes");
+  if (card && card.dataset.built) sPushes(card);
+  if (window.Alarm) sCardMount($("#s-alarms"), Alarm.mountSettings);
+  if (window.IntelSettings) sCardMount($("#s-intel"), IntelSettings.mount);
+  const kept = $("#s-audio-retention"), wall = $("#s-camera-wall");
+  if (kept && S.data.audio_retention) sCardSwap(kept, sAudioRetention(S.data.audio_retention));
+  if (wall && S.data.camera_wall) sCardSwap(wall, sCameraWall(S.data.camera_wall));
 }
 
 async function sPost(section, body, done) {
@@ -151,18 +341,19 @@ async function sPost(section, body, done) {
   if (!op) {
     sMsg("Enter operator name (top right)");
     ($("#operator-pick").hidden ? $("#operator") : $("#operator-pick")).focus();
-    sRender(true);
+    sRender(true, true);
     return null;
   }
   try {
     const r = await api("POST", `/api/cad/settings/${section}`, { ...body, operator: op });
     sMsg(done || "Saved", true);
     S.auditFor = "";
-    await sLoad();
+    S.saved = section;          // (its own card starts clean: sSystem)
+    await sLoad({ must: true, fresh: true });
     return r;
   } catch (e) {
     sMsg(e.message);
-    sRender(true);
+    sRender(true, true);          // the switches go back to what is saved; what was typed stays
     return null;
   }
 }
@@ -220,23 +411,45 @@ function sRoute() {
     RadiosPanel.mount($("#settings-radios"), { operator });
   }
   if (sec === "radios") sRadioTab();
-  if (S.data) sRender(true);
+  if (S.data) {
+    sRender(true);
+    [S.sig, S.sigLive] = sSigs(S.data, sec);          // (drawn as it is: the load that follows redraws only what is new)
+    S.sigSec = sec;
+  }
   sLoad();
 }
 
-function sRender(force) {
+// force: now, whatever has the focus (a tab, an edit row, a refusal). keep: the scroll position, the focus and typed
+// text outlive it (sKeep); without it only the scroll position does.
+function sRender(force, keep = !force) {
   if (!S.data || !S.section) return;
   const panel = $(`#s-${S.section}`);
   const a = document.activeElement;
-  if (!force && panel.contains(a) && a.matches("input:not([type=file]):not([type=checkbox]), textarea, select")) {
-    S.deferred = true;          // don't pull the field out from under someone typing
+  if (!force && sPressing()) {          // between a button's press and its click: the button would be gone
+    S.pressDeferred = true;
+    S.deferFresh = S.deferFresh || !keep;
     return;
   }
-  S.deferred = false;
+  if (!force && panel.contains(a) && a.matches("input:not([type=file]):not([type=checkbox]), textarea, select")) {
+    S.deferred = true;          // don't pull the field out from under someone typing
+    S.deferFresh = S.deferFresh || !keep;
+    return;
+  }
+  const fresh = S.deferFresh;
+  S.deferred = S.pressDeferred = S.deferFresh = false;
   sStationTab();
   const fn = { lists: sLists, units: sUnits, dispatch: sDispatch, users: sUsers, system: sSystem, station: sStationPanel,
     radios: sRadios, data: sData }[S.section];
-  if (fn) fn(panel);
+  if (fn) sKeep(panel, () => fn(panel), keep && !(fresh && !force));
+  S.saved = "";
+}
+const S_PRESS_MS = 5000;           // a press with no release (the pointer left the window): over after this long
+function sPressing() { return Date.now() - S.pressing < S_PRESS_MS; }
+function sDeferredNow(pressed) {       // a redraw that waited: once the focus has left the section, or the press is over
+  const p = S.section && $(`#s-${S.section}`);
+  if (!p || sPressing()) return;
+  if ((pressed && S.pressDeferred) || (S.deferred && !p.contains(document.activeElement))) sRender();
+  if (pressed && S.refreshDue) sRefresh();
 }
 
 // ---- radios: the tabs, and Tones (sTonePage, #115; the rest of the section is radios-panel.js, radio-controls.js) ----
@@ -750,6 +963,7 @@ function sTypeMap() {
 function sItemRow(sec, x, i, n) {
   const deleted = x.state === "deleted";
   const li = el("li", "s-row" + (x.retired ? " retired" : "") + (deleted ? " deleted" : ""));
+  li.dataset.row = x.code;
   const ord = el("span", "s-ord");
   const up = sBtn("↑", "Move up", () => sPost(sec, { action: "move", code: x.code, dir: -1 }, `${x.code} up`), "mini");
   const down = sBtn("↓", "Move down", () => sPost(sec, { action: "move", code: x.code, dir: 1 }, `${x.code} down`), "mini");
@@ -1106,6 +1320,7 @@ function sUnits(panel) {
 
 function sUnitRow(u, i, n, kinds, boards) {
   const li = el("li", "s-row unit" + (u.retired ? " retired" : ""));
+  li.dataset.row = u.code;          // (sFields: text typed in this row stays this unit's)
   const edit = (unit, what) => sPost("units", { action: "edit", code: u.code, unit }, `${u.code}: ${what}`);
   if (!u.retired) {
     const ord = el("span", "s-ord");
@@ -1625,7 +1840,10 @@ function sSystem(panel) {
     a.download = "";
     recs.append(a);
   }
-  const counts = el("dl", "admin");
+  // What fills itself after a read (the counts, the audit log, the alarms, the pushes, intel) keeps its node and what
+  // it shows across a redraw: the page keeps its height, so its scroll position, and the pushes their typed text.
+  const kept = (id, make) => panel.querySelector(`#${id}`) || make();
+  const counts = kept("s-counts", () => el("dl", "admin"));
   counts.id = "s-counts";
   const file = el("dl", "admin");
   const edits = Object.entries(sy.overrides).map(([k, v]) => `${k.replace(/_/g, " ")} ${v}`).join(", ") || "None";
@@ -1648,16 +1866,16 @@ function sSystem(panel) {
   const sel = sSelect([["", "All sections"], ...S.data.audit_sections.map((s) => [s, s.charAt(0).toUpperCase() + s.slice(1)])], S.audit,
     (v) => { S.audit = v; S.auditFor = ""; sAudit(); }, "Section");
   sel.classList.add("ro-ok");
-  const audit = el("div", "tscroll");
+  const audit = kept("s-audit", () => el("div", "tscroll"));
   audit.id = "s-audit";
-  const alarms = sCard(null);                  // the emergency alarms' words, channels, drill (alarm.js, #128)
+  const alarms = kept("s-alarms", () => sCard(null));     // the emergency alarms' words, channels, drill (alarm.js, #128)
   alarms.id = "s-alarms";
-  const pushes = sCard(null);                  // the ntfy topics by kind (sPushes): admins only, the names are secret
+  // the ntfy topics by kind (sPushes): admins only, the names are secret
+  const pushes = kept("s-pushes", () => Object.assign(sCard(null), { hidden: true }));
   pushes.id = "s-pushes";
-  pushes.hidden = true;
-  const intel = sCard(null);                   // radio pre-alerts (intel.js IntelSettings, sizeup/intel): self-contained
+  // radio pre-alerts (intel.js IntelSettings, sizeup/intel): self-contained
+  const intel = kept("s-intel", () => Object.assign(sCard(null), { hidden: true }));
   intel.id = "s-intel";
-  intel.hidden = true;
   // the department, with its patch (static/brand)
   const patch = el("img", "s-patch");
   patch.src = "/static/brand/pcfd-patch.svg";
@@ -1692,9 +1910,9 @@ function sSystem(panel) {
   if (S.importing) sShowImport();
   sCounts();
   sAudit();
-  if (window.Alarm) Alarm.mountSettings($("#s-alarms"));
+  if (window.Alarm) sCardMount(alarms, Alarm.mountSettings, S.saved === "alarms");
   sPushes(pushes);
-  if (window.IntelSettings) IntelSettings.mount(intel);
+  if (window.IntelSettings) sCardMount(intel, IntelSettings.mount, S.saved === "intel");
 }
 
 // Who is talking on HPN Tower (#252, sizeup/atc_talkers.py): the callsign heard on each airband row, matched to ADS-B,
@@ -1866,6 +2084,7 @@ function sAudioRetention(r) {
     x.append(el("span", "s-eta-l", "Format"), sel, el("span", "spacer"));
     card.append(x);
   }
+  card._sig = sCardSig(card);          // (as drawn: sCardSwap)
   return card;
 }
 
@@ -1938,19 +2157,72 @@ function sHealth(panel) {
 
 const S_PUSH_FROM = { settings: "Settings", ssm: "SSM", env: "Environment", config: "Config file", default: "Default",
   fallback: "Shared", off: "Turned off", none: "Not set" };
+// A refusal goes under its field and stays until that field is edited or saved again (S.pushErr); what was typed stays.
+function sPushErr(card, key, text) {
+  if (text) S.pushErr[key] = text; else delete S.pushErr[key];
+  const line = card.querySelector(`[data-err="${key}"]`), f = card.querySelector(`[data-key="${key}"]`);
+  if (line) setText(line, text || "");
+  if (f) { if (text) f.setAttribute("aria-invalid", "true"); else f.removeAttribute("aria-invalid"); }
+}
+function sPushErrLine(key) {
+  const e = el("div", "error", S.pushErr[key] || "");
+  e.id = `s-push-err-${key}`;
+  e.dataset.err = key;
+  e.setAttribute("role", "alert");
+  return e;
+}
+function sPushField(card, key, input) {
+  input.dataset.key = key;
+  input.setAttribute("aria-describedby", `s-push-err-${key}`);
+  if (S.pushErr[key]) input.setAttribute("aria-invalid", "true");
+  input.addEventListener("input", () => { if (S.pushErr[key]) sPushErr(card, key, ""); });
+  return input;
+}
+// The server's reason without the field's own name in front (it is under that field); no answer at all: said so.
+function sPushWhy(e, label) {
+  if (e instanceof TypeError) return "no answer from the server";
+  const m = String((e && e.message) || e);
+  return label && m.toLowerCase().startsWith(`${label.toLowerCase()}: `) ? m.slice(label.length + 2) : m;
+}
+// One change to the topics (Save, Use default / Clear, Turn off). Refused or not sent: why, under the field (sPushErr);
+// the card is not redrawn and the field keeps what was typed. Done: the card catches up in place.
+async function sPushPost(card, key, label, body, done, input) {
+  const op = operator();
+  if (!op) {
+    sPushErr(card, key, "Enter operator name (top right)");
+    ($("#operator-pick").hidden ? $("#operator") : $("#operator-pick")).focus();
+    return;
+  }
+  sPushErr(card, key, "");
+  try {
+    await api("POST", "/api/cad/settings/notify", { ...body, operator: op });
+  } catch (e) {
+    sPushErr(card, key, `${body.action === "set" || body.action === "server" ? "Not saved" : "Not changed"}: ${sPushWhy(e, label)}`);
+    return;
+  }
+  sMsg(done, true);
+  if (input) input._base = input.value;          // saved: no longer typed text to keep
+  S.auditFor = "";
+  await sPushes(card);
+  sLoad({ must: true });
+}
 async function sPushes(card) {
   if (!card) return;
   if (!canDo("admin")) { card.hidden = true; return; }
+  const seq = ++S.pushSeq;
   let d;
   try {
     d = await api("GET", "/api/cad/notify");
   } catch (e) {
+    if (seq !== S.pushSeq || card.dataset.built) return;          // (a refresh that failed: what is shown stays)
     card.hidden = false;
     card.replaceChildren(sCardHead("Push notifications"), el("div", "error", `Push notifications: ${e.message}`));
     return;
   }
+  if (seq !== S.pushSeq) return;          // (a newer read is on its way)
   if (!d || !d.configured) { card.hidden = true; return; }
   const when = (t) => (t ? fmtTime(t, true) : "");
+  const act = (what, b) => { b.dataset.act = what; return b; };          // what the button does (sMorph: never another's click)
   const kids = [];
   for (const k of d.kinds) {
     const head = el("div", "row");
@@ -1958,24 +2230,24 @@ async function sPushes(card) {
     const now = el("div", "dim small");
     now.append(k.topic ? el("span", "", "In effect: ") : Object.assign(el("span", "", k.source === "off" ? "Off" : "Not set"), { title: "No pushes of this kind" }),
       ...(k.topic ? [el("span", "mono", k.topic), el("span", "", ` (${k.source_text})`)] : []));
-    const input = sInput(k.settings.topic, d.max_len, `${k.label} (empty: the default)`, null, "mono");
+    const input = sPushField(card, k.kind, sInput(k.settings.topic, d.max_len, `${k.label} (empty: the default)`, null, "mono"));
     input.minLength = d.min_len;
     const row = el("div", "row");
     row.append(input,
-      sBtn("Save", "This topic, from Settings", () => sPost("notify", { action: "set", key: k.kind, topic: input.value.trim() }, `${k.label}: saved`), "primary"),
-      ...(k.settings.topic || k.settings.off ? [sBtn("Use default", `The default: ${k.default.topic ? k.default.source_text : "not set"}`,
-        () => sPost("notify", { action: "reset", key: k.kind }, `${k.label}: back to the default`))] : []),
-      ...(k.settings.off ? [] : [sBtn("Turn off", "No pushes of this kind until it is set again",
+      act("set", sBtn("Save", "This topic, from Settings", () => sPushPost(card, k.kind, k.label, { action: "set", key: k.kind, topic: input.value.trim() }, `${k.label}: saved`, input), "primary")),
+      ...(k.settings.topic || k.settings.off ? [act("reset", sBtn("Use default", `The default: ${k.default.topic ? k.default.source_text : "not set"}`,
+        () => sPushPost(card, k.kind, k.label, { action: "reset", key: k.kind }, `${k.label}: back to the default`)))] : []),
+      ...(k.settings.off ? [] : [act("off", sBtn("Turn off", "No pushes of this kind until it is set again",
         () => sAsk(`Turn off ${k.label.toLowerCase()} pushes? None reach a phone until it is set again.`,
-          () => sPost("notify", { action: "off", key: k.kind }, `${k.label}: off`), "Turn off"), "danger-quiet")]),
+          () => sPushPost(card, k.kind, k.label, { action: "off", key: k.kind }, `${k.label}: off`), "Turn off"), "danger-quiet"))]),
       el("span", "spacer"),
-      sBtn("Send test push", k.topic ? `“sizeup test: ${k.kind} topic” to the topic in effect` : "No topic in effect", () => sPushTest(card, k), k.topic ? "" : "quiet"));
+      act("test", sBtn("Send test push", k.topic ? `“sizeup test: ${k.kind} topic” to the topic in effect` : "No topic in effect", () => sPushTest(card, k), k.topic ? "" : "quiet")));
     const last = el("div", "dim small");
     const lp = k.last;
     last.textContent = [lp ? `Last push ${when(lp.at)} ${lp.ok ? "sent" : `failed (${lp.error})`} · ${lp.sent} sent · ${lp.failed} failed`
       : "No pushes since restart",
     k.test ? `Test ${when(k.test.at)} ${k.test.ok ? "sent" : `failed (${k.test.error})`}` : ""].filter(Boolean).join(" · ");
-    kids.push(head, now, row, last);
+    kids.push(head, now, row, sPushErrLine(k.kind), last);
   }
   // The feeds sizeup SUBSCRIBES to (Tapout's phone pre-alert) and the topics never published to: names only in Settings.
   const pa = d.prealert || {};
@@ -1989,40 +2261,46 @@ async function sPushes(card) {
     if (f.topic) now.append(el("span", "", "Reading: "), el("span", "mono", f.topic), el("span", "", ` (${f.source_text})`));
     else now.append(Object.assign(el("span", f.source === "off" ? "" : "warn", f.source === "off" ? "Off" : "Not set: no pre-alerts yet"),
       { title: "Set it once here: the feed starts within seconds" }));
-    const input = sInput(f.settings, d.max_len, `${label} (read only)`, null, "mono");
+    const input = sPushField(card, key, sInput(f.settings, d.max_len, `${label} (read only)`, null, "mono"));
     const row = el("div", "row");
     row.append(input,
-      sBtn("Save", "Start reading this topic (within seconds)", () => sPost("notify", { action: "set", key, topic: input.value.trim() }, `${label}: saved`), "primary"),
-      ...(f.settings || f.off ? [sBtn("Clear", "Remove the Settings value", () => sPost("notify", { action: "reset", key }, `${label}: cleared`))] : []),
-      ...(f.off ? [] : [sBtn("Turn off", "Stop reading it", () => sPost("notify", { action: "off", key }, `${label}: off`), "danger-quiet")]));
-    kids.push(head, now, row);
+      act("set", sBtn("Save", "Start reading this topic (within seconds)", () => sPushPost(card, key, label, { action: "set", key, topic: input.value.trim() }, `${label}: saved`, input), "primary")),
+      ...(f.settings || f.off ? [act("reset", sBtn("Clear", "Remove the Settings value", () => sPushPost(card, key, label, { action: "reset", key }, `${label}: cleared`)))] : []),
+      ...(f.off ? [] : [act("off", sBtn("Turn off", "Stop reading it", () => sPushPost(card, key, label, { action: "off", key }, `${label}: off`), "danger-quiet"))]));
+    kids.push(head, now, row, sPushErrLine(key));
   }
   const prot = (d.protected && d.protected.listed) || [];
-  const protIn = sInput(prot.join(", "), 1000, "Extra protected topics (comma separated)", null, "mono");
+  const protIn = sPushField(card, "protected", sInput(prot.join(", "), 1000, "Extra protected topics (comma separated)", null, "mono"));
   const protRow = el("div", "row");
   protRow.append(el("b", "s-eta-l", "Protected"), protIn,
-    sBtn("Save", "Topics sizeup never publishes to, besides the ones it reads", () => sPost("notify", { action: "set", key: "protected", topics: protIn.value.trim() }, "Protected topics saved"), "primary"),
+    sBtn("Save", "Topics sizeup never publishes to, besides the ones it reads", () => sPushPost(card, "protected", "Protected", { action: "set", key: "protected", topics: protIn.value.trim() }, "Protected topics saved", protIn), "primary"),
     sHelp(`Never published to: every topic read above, plus these (${d.protected ? d.protected.count : 0} in all). A push topic can't be one of them.`));
-  kids.push(protRow);
-  const srv = sInput(d.server.settings, 200, `ntfy server (empty: ${d.server.default})`, null, "mono");
+  kids.push(protRow, sPushErrLine("protected"));
+  const srv = sPushField(card, "server", sInput(d.server.settings, 200, `ntfy server (empty: ${d.server.default})`, null, "mono"));
   const sRow = el("div", "row");
   sRow.append(el("span", "s-eta-l", "ntfy server"), srv,
-    sBtn("Save", "This server, from Settings (empty: the default)", () => sPost("notify", { action: "server", key: "server", value: srv.value.trim() }, "ntfy server saved"), "primary"),
+    sBtn("Save", "This server, from Settings (empty: the default)", () => sPushPost(card, "server", "ntfy server", { action: "server", key: "server", value: srv.value.trim() }, "ntfy server saved", srv), "primary"),
     el("span", "dim small", `In effect: ${d.server.value} (${S_PUSH_FROM[d.server.source] || d.server.source})`));
-  kids.push(sRow);
+  kids.push(sRow, sPushErrLine("server"));
   if (S.data.alert_mutes) kids.push(...sMutes(S.data.alert_mutes));
   card.hidden = false;
   if (location.hash === "#settings/system/pushes" && S.pushScrolled !== location.hash) {     // from Settings > Station > Health
     S.pushScrolled = location.hash;
     requestAnimationFrame(() => card.scrollIntoView({ block: "start" }));
   }
-  card.replaceChildren(sCardHead("Push notifications", "", sHelp("Pushes go to our own ntfy topics, by kind. Status & health: "
+  // In place (sMorph): a line that changed changes; a field with the focus or typed text is never replaced.
+  const next = el("div");
+  next.append(sCardHead("Push notifications", "", sHelp("Pushes go to our own ntfy topics, by kind. Status & health: "
     + "station health (silent, behind, a dongle or program down, the disk, the whisper queue), Amazon Transcribe failing and its "
     + "monthly limit, and their recoveries. Alerts: the emergency buttons, a mayday, an aircraft emergency, their acknowledgements "
     + "and all clears. Pre-alerts (intel): radio pre-alerts (police / fire chatter); not set: the alerts topic. "
     + "Only one of alerts / status set: everything goes to it. A name set here wins over SSM and the config file; empty uses "
     + `them. Never a protected topic (the ones read for pre-alerts, and the extras listed): refused. ${d.min_len} to ${d.max_len} letters, digits, - and _; `
     + "ntfy topics are public by name, so make them long and random. Only admins see the names.")), ...kids);
+  sStamp(next);
+  if (card.dataset.built) { sMorph(card, next); return; }
+  card.replaceChildren(...next.childNodes);
+  card.dataset.built = "1";
 }
 // Health alerts muted (#340, health.py MUTE_KINDS): still on Settings > Station > Health, not pushed (nor their recovery).
 const S_MUTE_FOR = [["", "Until unmuted"], ["1", "1 h"], ["24", "24 h"], ["168", "7 days"]];
@@ -2048,12 +2326,13 @@ function sMutes(m) {
 }
 async function sPushTest(card, k) {
   const op = operator();
-  if (!op) { sMsg("Enter operator name (top right)"); return; }
+  if (!op) { sPushErr(card, k.kind, "Enter operator name (top right)"); return; }
   try {
     const r = await api("POST", "/api/cad/settings/notify", { action: "test", key: k.kind, operator: op });
-    sMsg(r.test.ok ? `Test push sent to the ${k.label.toLowerCase()}` : `Test push not sent: ${r.test.error}`, r.test.ok);
+    sPushErr(card, k.kind, r.test.ok ? "" : `Test push not sent: ${r.test.error}`);
+    if (r.test.ok) sMsg(`Test push sent to the ${k.label.toLowerCase()}`, true);
   } catch (e) {
-    sMsg(e.message);
+    sPushErr(card, k.kind, `Test push not sent: ${sPushWhy(e, k.label)}`);
   }
   S.auditFor = "";
   sAudit();
@@ -2121,11 +2400,14 @@ function sCameraWall(w) {
     sc.append(t);
     kids.push(sc);
   } else if (w.cameras) kids.push(el("div", "empty", "No cameras from the highway sources yet"));
-  return sCard(sCardHead("Camera wall", w.n != null ? `${w.n} on the wall` : "",
+  const card = sCard(sCardHead("Camera wall", w.n != null ? `${w.n} on the wall` : "",
     sHelp("The Cameras button on the Overview and the wall board shows every camera in our area: inside our fire districts "
       + "(the county's, Port Chester FD's includes Rye Brook) or within the margin around them, so the I-95 and I-287 cameras "
       + "at our edges count. Always and Never put a camera on or take it off by hand. Down cameras stay on, folded into one tile.")),
     ...kids);
+  card.id = "s-camera-wall";
+  card._sig = sCardSig(card);          // (as drawn: sCardSwap)
+  return card;
 }
 
 // ---- station: Hub link (forwarding to the hub, sizeup/cloud/stationmode.py) -------------------------
@@ -2169,6 +2451,9 @@ async function sAudit() {
       return;
     }
   }
+  const sig = JSON.stringify(S.auditRows || []);
+  if (box._sig === sig && box.firstElementChild && box.firstElementChild.matches("table")) return;
+  box._sig = sig;
   const t = el("table", "evtable s-audit");
   const head = el("tr");
   for (const h of ["When", "Who", "Section", "What", "Was", "Now"]) head.append(el("th", "", h));
@@ -2262,9 +2547,15 @@ function sShowImport() {
     return li;
   }));
   for (const p of document.querySelectorAll(".s-panel")) {
-    p.addEventListener("focusout", () => setTimeout(() => {
-      if (S.deferred && !p.contains(document.activeElement)) sRender();
-    }, 0));
+    p.addEventListener("focusout", () => setTimeout(() => sDeferredNow(false), 0));
+    p.addEventListener("pointerdown", () => {
+      S.pressing = Date.now();
+      clearTimeout(S.pressT);          // no pointerup ever comes: what waited for it is drawn all the same
+      S.pressT = setTimeout(() => { S.pressing = 0; sDeferredNow(true); }, S_PRESS_MS + 50);
+    });
+  }
+  for (const ev of ["pointerup", "pointercancel"]) {       // (the click comes right after the pointerup)
+    window.addEventListener(ev, () => { if (S.pressing) setTimeout(() => { S.pressing = 0; sDeferredNow(true); }, 80); });
   }
   cad.hooks.push(sHook);
   window.addEventListener("hashchange", sRoute);
