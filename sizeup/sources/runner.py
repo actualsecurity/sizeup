@@ -478,8 +478,12 @@ class SourceRunner:
 
 
 def context_for(state_root: str | Path, log: Callable[[str], None], clock: Callable[[], float] = time.time):
-    """ctx_for(where) for load_adapters: each adapter's state dir under state_root/sources/."""
+    """ctx_for(where) for load_adapters: each adapter's state dir under state_root/sources/. Its log lines start
+    "[adapter] ": the station's log shipper keeps them on the station (cloud/logship.py ADAPTER_TAG, #548)."""
+    def tagged(line: str) -> None:
+        log(f"[adapter] {line}")
+
     def make(where: str) -> SourceContext:
         safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in where)[:64]
-        return SourceContext(log=log, state_dir=str(Path(state_root) / "sources" / safe), clock=clock)
+        return SourceContext(log=tagged, state_dir=str(Path(state_root) / "sources" / safe), clock=clock)
     return make

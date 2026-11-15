@@ -30,7 +30,12 @@ station journald (sizeup-* units)
   runtime, without case; and its hosts: the host of any URL or host name among its non-secret credentials), the
   runner's `incident sources:` lines, a traceback's exception line after a withheld frame, `sizeup-update` lines naming
   its distribution, `basicConfig`-style `LEVEL:logger:` lines, a third-party Python logger's `[log name]` lines and traceback
-  frames in site-packages. Counted as "adapter" in the drop counts.
+  frames in site-packages, and every line the adapter writes through its context's log (tagged `[adapter]`). Counted
+  as "adapter" in the drop counts.
+- **Nothing is sent until those names are complete** (#548): a source id is known only once the runner exists, a
+  few seconds into a start. Until the adapters' load is over (or at once on a station with no adapter), every entry
+  waits in memory and its hand-off file stays; then each is filtered as above. A load that never ends: after 10 min
+  what waited is dropped (kept on the station, counted as "adapter") and the names known so far are used.
 - **Scrub, fail closed** (on the station, where every credential is known). Text is NFKC-normalised and zero-width
   characters removed first. A line with a known credential value is dropped: the station token, the Access service
   token and the status token (from the environment and the config), and every secret field of the adapter's

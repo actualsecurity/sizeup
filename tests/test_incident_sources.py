@@ -910,6 +910,10 @@ def test_a_factory_that_raises_systemexit_or_hangs_never_stops_the_station(tmp_p
     t0 = time.monotonic()
     app.start_sources()
     assert time.monotonic() - t0 < 1.0
+    # the station's log shipper waits for the load to be over (#548): set only once it is, runner or none
+    from sizeup.cloud import logship
+    assert not app.sources_loaded.is_set() and not logship.markers_complete(app)
+    assert app.sources_loaded.wait(10) and logship.markers_complete(app)
     app.cad.sources.stop()
 
 
@@ -938,7 +942,7 @@ def test_a_hub_with_adapters_configured_loads_nothing(tmp_path, monkeypatch):
     try:
         app.start_sources()
         time.sleep(0.3)
-        assert app.sources_runner is None and not marker.exists() and loaded == []
+        assert app.sources_runner is None and not marker.exists() and loaded == [] and app.sources_loaded.is_set()
         with pytest.raises(HubRefused):
             require_station(app.cfg.cloud_role)
     finally:

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import gzip
 import json
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -332,6 +333,165 @@ def test_repro2_adapter_withholding_gaps(tmp_path):
     s.step()
     assert [m for _, _, _, m in s.pending] == ["Traceback (most recent call last):", "14:00:01 hub link: connected"]
     assert s.dropped_adapter == 8
+
+
+# #548: the adapter's source id is known only once the runner exists, which is after the first lines of a start.
+EP = SimpleNamespace(name="alpha", value="alpha_pkg.adapter:make", module="alpha_pkg.adapter",
+                     dist=SimpleNamespace(name="alpha-adapter"))
+RUNNER = SimpleNamespace(runs=[SimpleNamespace(a=SimpleNamespace(source="feedq-7", label="Feed Q"))])
+
+
+def started(rows_at=T0):
+    """A start: systemd's line, then the station's own and the adapter's (its source id, nothing else, names it)."""
+    st = dict(JOURNAL[0])
+    sd = dict(st, _SYSTEMD_UNIT="init.scope", UNIT="sizeup-station.service", MESSAGE="Started sizeup-station.service")
+    lines = ["14:00:00 hub link: connected", "14:00:01 feedq-7: credential version 3",
+             "14:00:02 FG1: carrier 4.2 s", "14:00:03 feedq-7: layout 9f8e7d", "14:00:04 [adapter] lead 1.2 s",
+             "14:00:05 incident sources: Feed Q (feedq-7, rank 1) from entry point alpha"]
+    return [sd] + [dict(st, MESSAGE=m, __REALTIME_TIMESTAMP=str(int((rows_at + i) * 1e6))) for i, m in enumerate(lines)]
+
+
+def late_shipper(tmp_path, app, eps=(EP,), env=None, rows=None, name="000000000000001.jsonl", now=None):
+    c = FakeClient(())
+    cfg = SimpleNamespace(station_id="pcfd", cloud_outbox=str(tmp_path / "outbox.sqlite"), cloud_token="", cloud_access_id="",
+                          cloud_access_secret="", cloud_status_token="")
+    now = now or [T0 + 100]
+    ho = tmp_path / "handoff"
+    handoff(ho, started() if rows is None else rows, name)
+    calls = []
+
+    def markers():
+        calls.append(now[0])
+        return logship.adapter_markers(app, entry_points=lambda group: list(eps), hosts=set(), env=env or {})
+
+    s = LogShipper(cfg, lambda t: c, log=lambda m: None, clock=lambda: now[0], handoff=ho, app=app, markers=markers,
+                   complete=lambda: logship.markers_complete(app, entry_points=lambda group: list(eps), env=env or {}))
+    s.client_, s.now, s.calls = c, now, calls
+    return s, c
+
+
+def sent_msgs(c):
+    return [m for _, body in c.sent for _, _, _, m in body["lines"]]
+
+
+def run(s, seconds, every=logship.READ_S):
+    """The thread's loop for a while: a step every READ_S."""
+    end = s.now[0] + seconds
+    while s.now[0] < end:
+        s.step()
+        s.now[0] += every
+
+
+def test_repro_548_no_adapter_line_ships_while_the_runner_is_late(tmp_path):
+    app = SimpleNamespace(sources_runner=None, sources_loaded=threading.Event())
+    s, c = late_shipper(tmp_path, app)
+    assert "feedq-7" not in logship.adapter_markers(app, entry_points=lambda group: [EP], hosts=set(), env={})  # the bug's set
+    run(s, 240)                                   # the issue's window: nothing goes, everything waits, files kept
+    assert not c.sent and not s.pending and len(s._held) == 7 and s._handoff_files() and s.stats()["held"] == 7
+    app.sources_runner = RUNNER                   # the load is over (App.start_sources: runner, then the event)
+    app.sources_loaded.set()
+    run(s, logship.BATCH_S + 2 * logship.READ_S)
+    msgs = sent_msgs(c)
+    assert msgs == ["Started sizeup-station.service", "14:00:00 hub link: connected", "14:00:02 FG1: carrier 4.2 s"]
+    assert not any("feedq" in m.lower() or "[adapter]" in m for m in msgs)
+    assert s.dropped_adapter == 4 and not s._held and not s._handoff_files()
+    handoff(s.handoff, [dict(JOURNAL[0], MESSAGE="14:09:00 feedq-7: polled 3"),
+                        dict(JOURNAL[0], MESSAGE="14:09:01 hub link: ok")], "000000000000002.jsonl")
+    run(s, logship.BATCH_S + 2 * logship.READ_S)
+    assert sent_msgs(c)[3:] == ["14:09:01 hub link: ok"] and s.dropped_adapter == 5
+
+
+def test_repro_548_an_incomplete_marker_set_is_never_cached(tmp_path):
+    app = SimpleNamespace(sources_runner=None, sources_loaded=threading.Event())
+    s, c = late_shipper(tmp_path, app)
+    assert "feedq-7" not in s.markers() and not s._complete
+    s.now[0] += logship.INCOMPLETE_S
+    assert "feedq-7" not in s.markers() and len(s.calls) == 2            # made again, not kept for 300 s
+    app.sources_runner = RUNNER                   # a runner without the event: not complete yet (the event says so)
+    s.now[0] += logship.INCOMPLETE_S
+    assert "feedq-7" in s.markers() and not s._complete
+    app.sources_loaded.set()
+    s.now[0] += logship.INCOMPLETE_S
+    assert "feedq-7" in s.markers() and s._complete and len(s.calls) == 4
+    s.now[0] += logship.MARKERS_S - 1
+    s.markers()
+    assert len(s.calls) == 4                      # complete: cached
+    # completeness is read before the set is made: a set made while incomplete is never marked complete
+    app2 = SimpleNamespace(sources_runner=None, sources_loaded=threading.Event())
+    s2, _ = late_shipper(tmp_path / "b", app2)
+    s2._markers_fn = lambda: (app2.sources_loaded.set(), set())[1]     # the load ends while the set is made
+    s2.markers()
+    assert not s2._complete
+
+
+def test_repro_548_a_station_without_an_adapter_ships_from_the_first_line(tmp_path):
+    app = SimpleNamespace(sources_runner=None, sources_loaded=threading.Event())    # never set: nothing to load
+    rows = [dict(JOURNAL[0], MESSAGE="14:00:00 hub link: connected"), dict(JOURNAL[0], MESSAGE="14:00:01 [adapter] x")]
+    s, c = late_shipper(tmp_path, app, eps=(), rows=rows)
+    s.step()
+    assert [m for _, _, _, m in s.pending] == ["14:00:00 hub link: connected"] and not s._held and s._complete
+    s.now[0] += logship.BATCH_S
+    s.step()
+    assert sent_msgs(c) == ["14:00:00 hub link: connected"]
+    # SIZEUP_INCIDENT_SOURCES names one: expected (and its module is a marker without the runner)
+    env = {"SIZEUP_INCIDENT_SOURCES": "beta_mod.x:make"}
+    assert logship.adapters_expected(lambda group: [], env)
+    assert "beta_mod" in logship.adapter_markers(None, lambda group: [], set(), env)
+    assert not logship.markers_complete(None, lambda group: [], env)
+    assert logship.markers_complete(None, lambda group: [], {})
+
+
+def test_repro_548_a_restart_waits_again(tmp_path):
+    now = [T0 + 100]
+    app = SimpleNamespace(sources_runner=None, sources_loaded=threading.Event())
+    s, c = late_shipper(tmp_path, app, now=now)
+    run(s, 60)
+    s.stop()
+    s.spool(force=True)                            # (the thread's last spool)
+    assert not c.sent and s._handoff_files() and not s._batches()    # stopped while waiting: nothing sent, files kept
+    app2 = SimpleNamespace(sources_runner=None, sources_loaded=threading.Event())    # the new process
+    s2, c2 = late_shipper(tmp_path, app2, rows=started(T0 + 200), name="000000000000002.jsonl", now=now)
+    run(s2, 240)
+    assert not c2.sent and len(s2._held) == 14
+    app2.sources_runner = RUNNER
+    app2.sources_loaded.set()
+    run(s2, logship.BATCH_S + 2 * logship.READ_S)
+    msgs = sent_msgs(c2)
+    assert len(msgs) == 6 and not any("feedq" in m.lower() or "[adapter]" in m for m in msgs)
+    assert s2.dropped_adapter == 8 and not s2._handoff_files()
+
+
+def test_repro_548_a_load_that_never_ends_cant_stall_the_logs(tmp_path):
+    app = SimpleNamespace(sources_runner=None, sources_loaded=threading.Event())
+    logged = []
+    s, c = late_shipper(tmp_path, app)
+    s.log = logged.append
+    run(s, logship.HOLD_MAX_S - logship.READ_S)
+    assert not c.sent and s._held
+    run(s, 2 * logship.READ_S)
+    assert not s._held and s.dropped_adapter == 7 and "not loaded" in logged[0]    # what waited: kept here, never sent
+    handoff(s.handoff, [dict(JOURNAL[0], MESSAGE="14:20:00 hub link: ok"),
+                        dict(JOURNAL[0], MESSAGE="14:20:01 [adapter] late line")], "000000000000002.jsonl")
+    run(s, logship.BATCH_S + 2 * logship.READ_S)
+    assert sent_msgs(c) == ["14:20:00 hub link: ok"] and s.dropped_adapter == 8
+
+
+def test_repro_548_adapter_shipping_on_doesnt_wait(tmp_path):
+    app = SimpleNamespace(sources_runner=None, sources_loaded=threading.Event())
+    s, c = late_shipper(tmp_path, app)
+    s._set_config({"adapter": True})
+    s.step()
+    assert not s._held and len(s.pending) == 7
+
+
+def test_repro_548_the_adapters_context_log_is_tagged(tmp_path):
+    from sizeup.sources.runner import context_for
+    lines = []
+    context_for(tmp_path, lines.append)("entry point alpha").log("credential version 3")
+    assert lines == ["[adapter] credential version 3"]
+    s, _ = shipper(tmp_path, rows=[])
+    assert s.is_adapter("sizeup-station", "14:00:00 [adapter] credential version 3")
+    assert s.is_adapter("sizeup-update", "[adapter] x") and not s.is_adapter("sizeup-station", "14:00:00 hub: [adapter]")
 
 
 def test_repro2_basicconfig_handlers_get_the_tag():
