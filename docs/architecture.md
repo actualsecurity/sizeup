@@ -251,8 +251,10 @@ pushed. It never creates an incident.
    packs (`county_police.json`, `ems.json`, `fire.json`) read the county system's police and Fire/EMS talkgroups and
    the analog fire channels through a table of speech-to-text fixes (`data/intel/tables/stt.json`). They are log
    only: nothing of theirs is pushed, mapped or shown until an admin raises the pack, the category and the rules
-   (an event's mode is the rung its own rules reach). Their events outside our area, or at one of our own open
-   incidents, are held at log (`out_of_area`, `near_incident`; docs/cloud.md).
+   (an event's mode is the rung its own rules reach; a cue's mode never moves it). Only these three packs' events
+   are held at log when outside our area or at one of our own accepted emergency incidents (`out_of_area`,
+   `near_incident`; never once pushed; a safety category is linked, not held: docs/cloud.md). The police pack's
+   events are never held or linked; its own safety categories are weapons, barricade, EDP and dispute.
 3. The window's words go through the locator (`place.py`), held to the source's home towns. Beyond what a page says, it
    reads spoken intersections ("X and Y", "corner of"), blocks ("the 100 block of X", never an exact address), relative
    cues ("rear of", "across from": a wider radius), and highway exits and mile markers (the place search). An address

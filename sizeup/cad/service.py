@@ -657,15 +657,17 @@ class Cad:
             self.log(f"CAD: airport pre-alert match: {type(e).__name__}: {e}")
 
     def intel_incidents(self, now: float) -> list[dict]:
-        """Our incidents that an intel event may be (sizeup/intel/engine.py near_incident): placed, not dismissed,
-        opened in the last INCIDENT_BEFORE_S and open, or closed within it. A read on the intel thread, only when an
-        event has a place."""
+        """Our incidents that a county-wide pack's event may be (sizeup/intel/engine.py near_incident): emergency ones
+        (never a notification or a closure), accepted (never a queued page nobody took, nor a dismissed one), placed,
+        opened in the last INCIDENT_BEFORE_S and open, or closed within it. A read on the intel thread, only when such
+        an event has a place; created_at first, so it walks incidents_created (sizeup/cad/history.py), not the table."""
         from sizeup.intel.engine import INCIDENT_BEFORE_S
         since = now - INCIDENT_BEFORE_S
         return [dict(r) for r in self.store.q(
-            "SELECT id, lat, lon, geo_label AS label, created_at, closed_at FROM incidents WHERE status != 'dismissed' "
-            "AND lat IS NOT NULL AND lon IS NOT NULL AND created_at >= ? AND (closed_at IS NULL OR closed_at >= ?) "
-            "ORDER BY id DESC LIMIT 200", (since, since))]
+            "SELECT id, lat, lon, geo_label AS label, created_at, closed_at FROM incidents WHERE created_at >= ? "
+            "AND emergency = 1 AND status NOT IN ('queued', 'dismissed') AND accepted_at IS NOT NULL "
+            "AND lat IS NOT NULL AND lon IS NOT NULL AND (closed_at IS NULL OR closed_at >= ?) "
+            "ORDER BY created_at DESC LIMIT 200", (since, since))]
 
     def intel_state(self, now: float | None = None) -> dict | None:
         """Radio pre-alerts for the console's card (sizeup/intel): signed-in viewers only; never breaks the console."""

@@ -25,8 +25,10 @@ a second READING of a transmission. Each reading is judged on its own: a rule hi
 in the fixed words, one of its phrases is found and none of its "not" phrases is. So the rules a table makes hit are
 always a superset of those hit without it (a fix can add a hit, never take one away), and a "not" phrase still guards
 the reading it was written for. Write phrases in the table's spelling ("2nd alarm", "odor of gas"). A fix may not take
-a negation away ("zero" -> "0" is refused: a negator before a gap must stay one). A pack without "normalize" matches
-exactly as before. Suppress phrases are tried on both readings (a drill said either way is a drill).
+a negation away ("zero" -> "0" is refused: a negator before a gap must stay one). A "not" phrase must already be in the
+table's spelling, every alternative with its fixed form beside it ("(no one|no 1|nobody) inside"): checked when the
+pack compiles, since a "not" written only as heard would miss the fixed reading and let a hit through. A pack
+without "normalize" matches exactly as before. Suppress phrases are tried on both readings (a drill said either way is a drill).
 
 "area": the towns a county-wide pack's events belong to (Settings: intel_packs.<pack>.area; an empty list there is
 the file's). With an area, the address lookup searches those towns (and the towns said), and an event placed outside
@@ -325,6 +327,25 @@ def area(v, what: str) -> tuple:
     return tuple(out)
 
 
+def check_spelling(p: "Phrase", norm: "Normalizer", what: str) -> None:
+    """A "not" phrase is in the table's spelling (ValueError naming the form to add): each alternative's fixed form is
+    one of its alternatives too, and so is the phrase's own fixed form when it is words alone."""
+    if p.items is None:
+        return
+    for item in p.items:
+        if item == GAP:
+            continue
+        for alt in item:
+            fixed = norm.apply(list(alt))
+            if fixed is not None and tuple(fixed) not in item:
+                raise ValueError(f"{what} {p.src!r}: add {' '.join(fixed)!r} beside {' '.join(alt)!r} (the table's spelling)")
+    if all(item != GAP and len(item) == 1 for item in p.items):
+        ws = [w for item in p.items for w in item[0]]
+        fixed = norm.apply(ws)
+        if fixed is not None and fixed != ws:
+            raise ValueError(f"{what} {p.src!r}: write it as {' '.join(fixed)!r} (the table's spelling)")
+
+
 def _num(v, lo: float, hi: float, what: str) -> float:
     if isinstance(v, bool) or not isinstance(v, (int, float)) or not lo <= float(v) <= hi:
         raise ValueError(f"{what}: a number from {lo:g} to {hi:g}")
@@ -388,6 +409,10 @@ def compile_pack(d: dict, packs_ov: dict | None = None, rules_ov: dict | None = 
                               _phrases(o.get("any") or [], f"rule {rid}"), _phrases(o.get("not") or [], f"rule {rid} not"),
                               _mode(o.get("mode", "shadow"), f"rule {rid} mode"), bool(o.get("enabled", True)), dict(o),
                               norm))
+    if norm is not None:                                # a "not" in heard spelling would miss the fixed reading
+        for r in rules:
+            for p in r.nots:
+                check_spelling(p, norm, f"rule {r.id} not")
     if len(rules) > RULES_MAX:
         raise ValueError(f"{name}: at most {RULES_MAX} rules")
     return Pack(name=name, version=int(d.get("version") or 1), domain=str(d.get("domain") or name),

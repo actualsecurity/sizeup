@@ -738,17 +738,34 @@ def test_an_event_placed_outside_the_area_is_held_at_log(town, held):
 
 
 @pytest.mark.parametrize("text, held", [
-    ("shots fired in White Plains", True),
-    ("Yonkers PD reporting shots fired", True),
-    ("shots fired, Port Chester and White Plains units responding", False),   # one of ours named: not held
-    ("shots fired near Harrison Ave", False),                                 # a street of that name: no town said
-    ("shots fired", False),                                                   # nothing said: not known, not held
-    ("shots fired in West Harrison", False),
+    ("odor of gas in White Plains", True),
+    ("odor of gas at the school in the area of Yonkers", True),
+    ("odor of gas in Port Chester, White Plains units responding", False),   # one of ours as the place: not held
+    ("odor of gas near Harrison Ave", False),                                 # a street of that name: no town said
+    ("odor of gas", False),                                                   # nothing said: not known, not held
+    ("odor of gas in West Harrison", False),
+    # the review's: a town that isn't where the call is (the hospital, the units coming)
+    ("c p r in progress transporting to White Plains", False),
+    ("ems en route to New Rochelle for a fall", False),
+    ("odor of gas, units from Valhalla responding", False),
+    ("Yonkers PD reporting odor of gas", False),
 ])
-def test_with_no_place_the_towns_said_decide(text, held):
+def test_with_no_place_only_a_town_said_as_the_place_decides(text, held):
     e, _sink = engine({**HOSTILE, **everything_at("push")})
-    [ev] = e.feed(crow("t1", text, 1000.0))
-    assert (ev.suppressed == "out_of_area") is held and ev.mode == ("log" if held else "push")
+    evs = e.feed(crow("t1", text, 1000.0))
+    assert evs
+    for ev in evs:
+        assert (ev.suppressed == "out_of_area") is held, (text, ev.category)
+        assert ev.mode == ("log" if held else "push")
+
+
+def test_a_safety_event_with_no_place_is_never_held_for_a_town_said():
+    e, _sink = engine({**HOSTILE, **everything_at("push")})
+    [ev] = e.feed(crow("t1", "shots fired in White Plains", 1000.0))
+    assert ev.category == "weapons" and ev.suppressed == "" and ev.mode == "push"
+    e, _sink = engine({**HOSTILE, **everything_at("push")}, locate=place_in("White Plains"))
+    [ev] = e.feed(crow("t1", "respond to 100 Example Ave shots fired", 1000.0))
+    assert ev.suppressed == "out_of_area"                                     # placed elsewhere: held
 
 
 def test_the_lookup_is_held_to_the_area_and_runs_only_for_what_could_raise():
@@ -824,14 +841,23 @@ def test_live_our_incidents_are_read_from_the_cad(tmp_path):
     cad = make_cad(tmp_path)
     now = cad.clock()
     with cad.store.tx() as db:
-        for status, lat, created, closed in (("active", 41.0, now - 600, None), ("dismissed", 41.0, now - 600, None),
-                                             ("closed", 41.0, now - 600, now - 300), ("active", None, now - 600, None),
-                                             ("active", 41.0, now - 7 * 3600, None)):
-            db.execute("INSERT INTO incidents (type, status, source, created_at, closed_at, lat, lon, address, geo_label) "
-                       "VALUES ('FIRE', ?, 'manual', ?, ?, ?, -73.66, '100 Example Ave', '100 Example Ave, Port Chester')",
-                       (status, created, closed, lat))
+        for status, lat, created, closed, emergency, accepted in (
+                ("active", 41.0, now - 600, None, 1, now - 590),           # ours
+                ("closed", 41.0, now - 500, now - 300, 1, now - 490),      # ours, closed since
+                ("dismissed", 41.0, now - 600, None, 1, None),
+                ("queued", 41.0, now - 600, None, 1, None),                # a page nobody took (yet)
+                ("active", 41.0, now - 600, None, 0, now - 590),           # a notification or a closure
+                ("active", None, now - 600, None, 1, now - 590),           # no place
+                ("active", 41.0, now - 7 * 3600, None, 1, now - 7 * 3600)):
+            db.execute("INSERT INTO incidents (type, status, source, created_at, closed_at, lat, lon, address, geo_label, "
+                       "emergency, accepted_at) VALUES ('FIRE', ?, 'manual', ?, ?, ?, -73.66, '100 Example Ave', "
+                       "'100 Example Ave, Port Chester', ?, ?)", (status, created, closed, lat, emergency, accepted))
     got = cad.intel_incidents(now)
     assert [g["closed_at"] is None for g in got] == [False, True]             # newest first: the closed one, the open one
+    plan = " ".join(str(tuple(r)) for r in cad.store.db.execute(
+        "EXPLAIN QUERY PLAN SELECT id FROM incidents WHERE created_at >= ? AND emergency = 1 ORDER BY created_at DESC",
+        (now,)).fetchall())
+    assert "incidents_created" in plan                                        # an index walk, never the whole table
     assert all(g["label"] == "100 Example Ave, Port Chester" and g["lat"] == 41.0 for g in got)
     assert cad.intel.incidents == cad.intel_incidents
 
@@ -850,3 +876,113 @@ def test_a_county_wide_reading_into_our_towns_counts_only_confirmed(town, sure, 
     e, _sink = engine(locate=loc)                         # the first pack (no area): every reading, as before
     [ev] = e.feed(crow("p1", "respond to 100 Example Ave shots fired", 1000.0, "p25:mrrs:9211", "police"))
     assert ev.town == town
+
+
+# -- the #539 review's fixes -----------------------------------------------------------------------------------------
+
+AT_OURS = {"id": 41, "lat": 41.001, "lon": -73.66, "label": "", "created_at": 1000.0 - 3600, "closed_at": None}   # ~110 m
+
+
+@pytest.mark.parametrize("text", ["smoke coming from the roof at 100 Example Ave", "accident with injuries at 100 Example Ave"])
+def test_the_police_pack_is_never_held_or_linked_by_our_incidents(text):
+    e, sink = engine({**HOSTILE}, locate=place_in("Port Chester"))
+    e.incidents = incidents(AT_OURS)
+    [ev] = e.feed(crow("p1", text, 1000.0, "p25:mrrs:9211", "police"))
+    assert ev.mode == "push" and ev.suppressed == "" and ev.near_incident is None
+    assert [d.would_push for _e, d in sink.pushes] == [True]
+    e.incidents = incidents({**AT_OURS, "created_at": 1100.0})                 # one of ours opened after the push
+    e.feed(crow("p2", text.replace("at", "still at"), 1200.0, "p25:mrrs:9211", "police"))
+    [ev] = e.events.open_events()
+    assert ev.mode == "push" and ev.suppressed == "" and ev.near_incident is None
+
+
+def test_a_pushed_event_is_never_lowered_by_a_hold():
+    e, sink = engine({**HOSTILE, **everything_at("push")}, locate=place_in("Port Chester"))
+    e.incidents = incidents()
+    [ev] = e.feed(crow("t1", "respond to 100 Example Ave odor of gas", 1000.0))
+    assert ev.mode == "push" and ev.pushed_at is not None
+    e.incidents = incidents({**OURS, "created_at": 1050.0})
+    e.feed(crow("t2", "odor of gas getting stronger at 100 Example Ave", 1060.0))
+    [ev] = e.events.open_events()
+    assert ev.near_incident == 41 and ev.mode == "push" and ev.suppressed == ""      # linked, still on the map
+
+
+def test_a_hold_that_ends_gives_the_rules_mode_back():
+    """Placed elsewhere at first (held), then read back at one of our streets: the event is ours, at the mode its
+    rules give, not stuck at log."""
+    where = {"town": "White Plains", "sure": False}
+
+    def loc(_text, _scope):
+        return Place("address", 41.0, -73.66, 25.0, f"100 Example Ave, {where['town']}", where["town"], where["sure"], 0.6)
+    e, _sink = engine({**HOSTILE, **everything_at("push")}, locate=loc)
+    [ev] = e.feed(crow("t1", "respond to 100 Example Ave odor of gas", 1000.0, talker="Car 12"))
+    assert ev.suppressed == "out_of_area" and ev.mode == "log"
+    where.update(town="Port Chester", sure=True)
+    [ev] = e.feed(crow("t2", "100 Example Ave at Sample St, copy", 1030.0, talker="Car 12"))
+    assert ev.town == "Port Chester" and ev.suppressed == "" and ev.mode == "push"
+
+
+@pytest.mark.parametrize("text, source, service, pack", [
+    ("stuck elevator no one inside", CPD, "police", "county_police"),
+    ("elevator stuck, no one inside", FIRE_TG, "fire", "ems"),
+    ("people trapped no one trapped", FG, "fire", "fire"),
+    ("vehicle in the water no one in the water", CPD, "police", "county_police"),
+    ("vehicle in the water no one in the water", FIRE_TG, "fire", "ems"),
+])
+def test_a_not_phrase_holds_on_the_tables_reading_too(text, source, service, pack):
+    assert {c for p, c in raised(text, source, service)[0] if p == pack} == set()
+
+
+def test_a_not_phrase_in_heard_spelling_does_not_compile():
+    d = {"name": "t", "normalize": "stt", "categories": {"c": {}},
+         "rules": [{"id": "t.a", "category": "c", "any": ["elevator"], "not": ["(no one|nobody) inside"]}]}
+    with pytest.raises(ValueError, match="add 'no 1' beside 'no one'"):
+        rules_mod.compile_pack(d)
+    d["rules"][0]["not"] = ["first alarm"]
+    with pytest.raises(ValueError, match="add '1st' beside 'first'"):
+        rules_mod.compile_pack(d)
+    d["rules"][0]["not"] = ["(no one|no 1|nobody) inside", "1st alarm"]
+    rules_mod.compile_pack(d)
+    rules_mod.compile_pack({**d, "normalize": "", "rules": [{**d["rules"][0], "not": ["(no one|nobody) inside"]}]})   # no table
+
+
+def test_a_cues_mode_never_moves_an_event():
+    """A cue is evidence beside a category's rule, as before the rung: lowering the dispatch cue never lowers the
+    police pack's events, and raising it never lifts the new packs' ones."""
+    def pd(ov):
+        e, _ = engine({**HOSTILE, **ov})
+        return [ev.mode for ev in e.feed(crow("p1", "respond to Sample St, subject is armed", 1000.0, "p25:mrrs:9211", "police"))]
+    assert pd({}) == ["push"]
+    assert pd({"intel_rules": {"pd.dispatch_cue": {"mode": "map"}}}) == ["push"]
+    assert pd({"intel_rules": {"pd.dispatch_cue": {"mode": "log"}, "pd.urgent_cue": {"mode": "log"}}}) == ["push"]
+    snap = {**HOSTILE, "intel_packs": {"county_police": {"mode": "push", "categories": {"mva_injury": {"mode": "push"}}}},
+            "intel_rules": {"cpd.dispatch_cue": {"mode": "push"}}}
+    e, _ = engine(snap)
+    [ev] = e.feed(crow("t1", "respond to a rollover on Sample St", 1000.0))
+    assert ev.mode == "log"
+
+
+def test_the_place_word_cache_never_answers_for_another_set_of_towns():
+    import random
+    from sizeup.geo.gazetteer import Gazetteer
+    from sizeup.geo.pagegeo import _word_match, locator
+    loc = locator(Gazetteer())
+    munis = sorted({p["muni"] for p in loc.places if p["muni"]})
+    words = sorted({w for w in loc.place_index if len(w) >= 6})[:40]
+    rnd = random.Random(3)
+    for _ in range(200):
+        towns = set(rnd.sample(munis, rnd.randint(1, min(3, len(munis)))))
+        index = loc._index_for(towns)
+        w = rnd.choice(words)
+        assert set(loc._like(towns, index, w)) == {x for x in index if x != w and _word_match(w, x)}, towns
+
+
+def test_one_bad_override_never_drops_the_others():
+    logged = []
+    settings = {"intel_packs": {"ems": {"area": ["Example Town"]}, "police": {"threshold": 0.7}},
+                "intel_rules": {"pd.shots": {"mode": "map"}}}
+    e = IntelEngine(settings=settings, events=MemoryEvents(), sink=RecordingSink(), thread=False, clock=Clock(),
+                    log=logged.append)
+    assert e.pack("police").threshold == 0.7 and next(r for r in e.pack("police").rules if r.id == "pd.shots").mode == "map"
+    assert e.pack("ems").area == rules_mod.load_packs()[2].area                # the file's area
+    assert any("intel_packs/ems not applied" in m for m in logged)

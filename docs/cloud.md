@@ -2865,7 +2865,7 @@ replay over the history is scoped as live rows are). Tests: `tests/test_intel_pa
 
 **The three switches, and the mode an event gets.** An event's mode is the lowest of three: the pack's, the
 category's, and the rules' rung. The rung is the highest mode M at which the rules set to M or above, on their own
-(their weights, the cues at M or above, every damper), still reach the threshold. So:
+(their weights, every cue whatever its mode, every damper), still reach the threshold. So:
 
 - nothing is pushed until an admin raises the pack, the category and enough of its rules;
 - raising one weak rule (`cpd.mva_word`) to push never makes a strong log rule beside it (`cpd.mva_serious`) push:
@@ -2875,12 +2875,19 @@ category's, and the rules' rung. The rung is the highest mode M at which the rul
   before unless an admin has set its rules to different modes; then an event no longer rises above the rules that
   carry it.
 
-**Held at log** (`intel_events.suppressed`), whatever the switches say:
+**Held at log** (`intel_events.suppressed`), whatever the switches say. Only the packs with an `area`: `county_police`,
+`ems` and `fire`. The `police` pack's events are never held or linked. An event already pushed is never held (its mode
+never goes down, so it stays on the map and the console), and when a hold ends (read back at one of our streets) the
+event gets back the mode its rules give.
 
 | Why | When |
 |---|---|
-| `out_of_area` | a pack with an `area` (the three above: Port Chester, Rye Brook, Rye, Harrison with Purchase and West Harrison, Greenwich with Byram; Settings `intel_packs.<pack>.area`, an empty list = the file's): the event is placed in another town, or, with no place, its words name towns and none of the area's. A town name before a street word is a street. No place and no town said: not held. The gazetteer holds our area only, so a county-wide source's street read UNCONFIRMED into one of our towns is no place at all (a replay found most such readings were a same-named street elsewhere); a confirmed one places it |
-| `near_incident` | its place is one of our own incidents' (the same gazetteer label, or within 150 m), opened up to 6 hours before the event or 30 minutes after it, and not closed before it: linked (`near_incident`), never a new lead. A safety category (weapons, a barricade, a mayday, an evacuation, a collapse) is linked and not held |
+| `out_of_area` | a pack with an `area` (the three above: Port Chester, Rye Brook, Rye, Harrison with Purchase and West Harrison, Greenwich with Byram; Settings `intel_packs.<pack>.area`, an empty list = the file's): the event is placed in another town, or, with no place, its words say it is in towns and none of the area's: a town after "in", "at", "on" or "the area of", never after "to", "from", "transporting" or "units from" (the hospital, the units coming), and a town before a street word is a street. No place and no such town: not held. A safety category with no place is never held for a town said. The gazetteer holds our area only, so a county-wide source's street read UNCONFIRMED into one of our towns is no place at all (a replay found most such readings were a same-named street elsewhere); a confirmed one places it |
+| `near_incident` | its place is one of our own incidents' (the same gazetteer label, or within 150 m plus half the reading's radius): an emergency incident (never a notification or closure), accepted (never a queued page), opened up to 6 hours before the event or 30 minutes after it, and not closed before it. Linked (`near_incident`), never a new lead. A safety category is linked and NOT held: `county_police` weapons and barricade, `ems` weapons (scene not safe), `fire` mayday, evacuate and collapse. Whether a mayday, evacuation or collapse at our own fireground should be held instead is the user's call; they are not held for now |
+
+The area is set in the pack files and through the API (`POST /api/cad/settings/intel {action: "pack", pack, area:
+[...]}`); Settings > System > Intel does not show it yet. A town name in Settings that no longer compiles drops that
+one override (logged), never the others.
 
 **The address lookup's cost.** The gazetteer is asked only for a row whose hits could carry a category to the
 threshold with the window's (a cue or a damper alone never makes an event), and for a pack with an area only in

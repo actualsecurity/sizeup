@@ -197,7 +197,7 @@ class PageLocator:
             for w in p["key"]:
                 self.place_index[w].append(i)
         self._town_index: dict[frozenset, dict[str, list[int]]] = {}
-        self._like_cache: dict[tuple[int, str], tuple[str, ...]] = {}
+        self._like_cache: dict[tuple[frozenset | None, str], tuple[str, ...]] = {}
 
     # ------------------------------------------------------------------ data
 
@@ -359,13 +359,15 @@ class PageLocator:
                     got[w] = keep
             if len(self._town_index) >= 16:
                 self._town_index.clear()
+                self._like_cache.clear()          # (keyed by the towns too: never another index's words)
             self._town_index[key] = got
         return got
 
-    def _like(self, index: dict, first: str) -> tuple[str, ...]:
-        """The index's other words a heard word matches (_word_match), worked out once per index and word: a word is
-        heard again and again (read-backs, the same streets and places), and each try is a difflib ratio."""
-        key = (id(index), first)
+    def _like(self, towns, index: dict, first: str) -> tuple[str, ...]:
+        """The index's other words a heard word matches (_word_match), worked out once per set of towns (None: every
+        place) and word: a word is heard again and again (read-backs, the same streets and places), and each try is a
+        difflib ratio."""
+        key = (None if towns is None else frozenset(towns), first)
         got = self._like_cache.get(key)
         if got is None:
             got = tuple(w for w in index if w != first and _word_match(first, w))
@@ -386,7 +388,7 @@ class PageLocator:
             first = tokens[i]
             cands = set(index.get(first, ()))
             if len(first) >= 5:
-                cands |= {pi for w in self._like(index, first) for pi in index[w]}
+                cands |= {pi for w in self._like(towns, index, first) for pi in index[w]}
             for pi in cands:
                 p = self.places[pi]
                 j = i
