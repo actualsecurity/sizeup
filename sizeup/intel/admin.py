@@ -10,7 +10,7 @@ Settings sections (audited as "system", exported like any setting):
 
 POST /api/cad/settings/intel {action, ...}:
     set       {key: a policy key, value}                     the intel section
-    pack      {pack, mode?, threshold?, window_s?}
+    pack      {pack, mode?, threshold?, window_s?, area?: [town, ...] ([]: the pack file's own)}
     category  {pack, category, mode?, priority?, ttl_min?}
     rule      {rule, mode?, w?, enabled?}
     local     {rule: "local.x", pack, category, any: [...], not?: [...], w?, mode?}   (new rules start in shadow)
@@ -79,8 +79,8 @@ class IntelAdmin:
                       "any": [x.src for x in r.any], "not": [x.src for x in r.nots], "edited": r.id in ro,
                       "local": r.id.startswith("local."), **stats.get(r.id, {"hits": 0, "events": 0})} for r in p.rules]
             packs.append({"name": p.name, "label": p.label, "mode": p.mode, "threshold": p.threshold, "window_s": p.window_s,
-                          "accept": p.accept, "scope": p.scope, "categories": cats, "rules": rules,
-                          "edited": {k: k in mine for k in ("mode", "threshold", "window_s")}})
+                          "accept": p.accept, "scope": p.scope, "area": list(p.area), "categories": cats, "rules": rules,
+                          "edited": {k: k in mine for k in ("mode", "threshold", "window_s", "area")}})
         counts = eng.events.counts(now - LIST_S) if hasattr(eng.events, "counts") else {}
         try:        # what the engine did with what it was handed, a line per pack (sizeup/intel/counters.py)
             counters = eng.counts(now)
@@ -142,6 +142,7 @@ class IntelAdmin:
                 "priority": e["priority"], "pushed_at": e["pushed_at"], "suppressed": e["suppressed"],
                 "traffic_ids": e["traffic_ids"][-12:], "rules": e["rules"], "accept": bool(p.accept) if p else False,
                 "dismissed_by": e.get("dismissed_by", ""), "note": e.get("note", ""),
+                "near_incident": e.get("near_incident"),
                 # the model's category when it is the model's alone (not pushed): "model: MVA with injuries?" on the card
                 "suggested": (cat.get("label") or e["category"]) if any(str(r[0]).startswith("infer.") for r in e["rules"] or [])
                 and e["mode"] != "push" else ""}
@@ -240,6 +241,15 @@ class IntelAdmin:
                     if k in body:
                         cur[k] = (_mode(body[k], "mode") if k == "mode" else
                                   _f(body[k], 0, 1, "threshold") if k == "threshold" else _f(body[k], 10, 1800, "window_s"))
+                if "area" in body:
+                    try:
+                        towns = list(rules_mod.area(body["area"], "area"))
+                    except ValueError as e:
+                        raise CadError(str(e)) from None
+                    if towns:
+                        cur["area"] = towns
+                    else:
+                        cur.pop("area", None)           # empty: the pack file's own area
                 audit_key = f"intel_packs/{pname}"
             else:
                 cat = str(body.get("category") or "")

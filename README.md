@@ -49,20 +49,24 @@ and the module map: [`docs/architecture.md`](docs/architecture.md).
 ## Run it locally
 
 ```sh
-/opt/homebrew/bin/python3.14 -m venv .venv && .venv/bin/pip install -e '.[dev]'
-.venv/bin/python -m pytest                              # the suite; CLAUDE.md has the long-run form
-cp config.example.toml config.toml                      # all-in-one: leave [cloud] out
-.venv/bin/python -m sizeup --config config.toml         # http://localhost:8090/
+python3.14 -m venv .venv && .venv/bin/pip install -e '.[dev]'
+.venv/bin/python -m pytest -n auto -q                   # the suite, ~3 min
+sed 's/^auto_assign = true/auto_assign = false/' config.example.toml > config.toml   # all-in-one, no dongle opened
+.venv/bin/python -m sizeup --config config.toml         # http://localhost:8090/cad
+.venv/bin/python tools/dev_seed.py                      # a few invented calls on it
 ```
 
 Python 3.11 or newer; CI runs 3.14. The only runtime dependency is numpy (the `docs` extra adds PDF and image handling
 for site documents). The radios need `rtl_fm`, trunk-recorder and a whisper.cpp server.
-[`config.example.toml`](config.example.toml) lists every option.
+[`config.example.toml`](config.example.toml) lists every option. The developer guide,
+[`docs/development.md`](docs/development.md), covers the hub and station locally, the optional test tools (Playwright,
+Litestream, node), known flakes and the PR checklist.
 
 ## Documentation
 
 | doc | what |
 |---|---|
+| [`docs/development.md`](docs/development.md) | Running it locally without radios or project access, the tests, known flakes, the PR checklist |
 | [`docs/architecture.md`](docs/architecture.md) | The system: components, hub and station, pipelines, data model, security, costs, module map |
 | [`docs/cloud.md`](docs/cloud.md) | Hub and station in operation: flows, health, auth, STT, incident sources, every map layer's source and terms, storage, deploys and the handoff, replica checks |
 | [`deploy/station/README.md`](deploy/station/README.md) | Installing and running a station (Windows + WSL2), its services and commands |

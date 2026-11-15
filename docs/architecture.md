@@ -253,7 +253,11 @@ pushed. It never creates an incident.
    within a window merge, so a call-out and its read-back are one candidate (`rules.py`, `engine.py`). Three more
    packs (`county_police.json`, `ems.json`, `fire.json`) read the county system's police and Fire/EMS talkgroups and
    the analog fire channels through a table of speech-to-text fixes (`data/intel/tables/stt.json`). They are log
-   only: nothing of theirs is pushed, mapped or shown until an admin raises the pack, the category and the rule.
+   only: nothing of theirs is pushed, mapped or shown until an admin raises the pack, the category and the rules
+   (an event's mode is the rung its own rules reach; a cue's mode never moves it). Only these three packs' events
+   are held at log when outside our area or at one of our own accepted emergency incidents (`out_of_area`,
+   `near_incident`; never once pushed; a safety category is linked, not held: docs/cloud.md). The police pack's
+   events are never held or linked; its own safety categories are weapons, barricade, EDP and dispute.
 3. The window's words go through the locator (`place.py`), held to the source's home towns. Beyond what a page says, it
    reads spoken intersections ("X and Y", "corner of"), blocks ("the 100 block of X", never an exact address), relative
    cues ("rear of", "across from": a wider radius), and highway exits and mile markers (the place search). An address
@@ -394,6 +398,7 @@ Summary only. The detail, with the reasons, is in [`cloud.md`](cloud.md): "Deplo
 | Uploads | A site document's type is taken from its bytes. Photos lose their metadata. A PDF is cleaned and re-checked in a separate process. Documents are served only by the hub behind sign-in: no presigned links (`docfiles.py`, `pdfcheck.py`, `docstore.py`). |
 | Cross-site posts | The station and all-in-one refuse a POST a browser says came from another site (`web/server.py`). |
 | Secrets | AWS SSM on the hub; the macOS Keychain or `/etc/sizeup/station.env` and the systemd credstore on a station. The UI shows only "set" or "missing". |
+| Outbound guard | `python -m sizeup` decides at its start whether it may reach outside services (`outbound.py`): on for the hub under its supervisor (the lease file), a station (or a config forwarding to a hub through Settings > Station > Hub link), or `SIZEUP_ALLOW_OUTBOUND=1`; off for anything else, such as a hub run by hand on a restored copy or all-in-one. Off, ntfy publishes, every AWS request (signed in `aws.py`: S3, Transcribe, CloudWatch Logs, SSM, the Listen links), Polly and Bedrock are refused before anything is sent (a refused push is dropped at once, never retried), and the phone pre-alert doesn't subscribe; this machine's own addresses stay allowed. One log line at the start, `outbound` in `/healthz`, "Outbound off" in Settings > Station > Health. |
 | Public repo | No real incident data, transcripts, topic names or adapter details in code, tests or docs ([`../CLAUDE.md`](../CLAUDE.md)). Real captures for replay tests live outside the repo. |
 
 ## Cost drivers

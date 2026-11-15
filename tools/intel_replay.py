@@ -27,6 +27,8 @@ classes: {"types": {"fire": ["STRU", ...]}, "categories": {"fire_report": "fire"
 once transcribed: that row's end + the clip's length + the rows' median speech-to-text latency (as stored), or with
 --stt-delay S its end + S seconds.
 --db never takes the live database (a state directory's file is refused): a restored copy somewhere else.
+Rows stored before the radio log carried a service (an empty one) take it from the talkgroups files
+(deploy/trunk-recorder/talkgroups.csv and systems/*/talkgroups.csv), so --services and the packs scope them as live.
 """
 
 from __future__ import annotations

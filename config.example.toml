@@ -140,7 +140,8 @@ prompt = ""                        # optional vocabulary hint (can make the mode
 talker_prompt = "off"              # "ids": hint each call with who keyed up ("77 Alpha 4, 60 Control"); "ids+time": also its HHMM
 # Amazon Transcribe streaming (docs/cloud.md "Speech-to-text per channel"). It runs on the hub
 # (deploy/hub/config.hub.toml: aws = true); a station forwarding to the hub needs nothing here.
-# All-in-one with AWS credentials in the environment could set aws = true too.
+# All-in-one with AWS credentials in the environment could set aws = true too, and needs SIZEUP_ALLOW_OUTBOUND=1 for it
+# (sizeup/outbound.py: off for all-in-one; on for the hub under its supervisor and for a station).
 # aws = false
 # aws_region = ""                  # "" = AWS_REGION / AWS_DEFAULT_REGION, else us-east-1
 # aws_channels = ["South 2", "FG1", "FG2", 307, "p25:mrrs:9211"]   # engine "aws" by default; Settings > Radios changes
@@ -235,7 +236,8 @@ tones = [[903.2, 1.0], [810.2, 3.0]]
 # down, erroring or slower than 10 s, dispatches use macOS `say` with fallback_voice (noted on each one).
 # tts_engine = "polly": Amazon Polly over the internet (the hub's choice, deploy/hub/config.hub.toml):
 # needs AWS credentials (AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY, or the ECS task role) allowed
-# polly:SynthesizeSpeech; voice = "Matthew" (default), "Stephen", "Gregory", "Joey" (men) or "Joanna",
+# polly:SynthesizeSpeech, and on all-in-one SIZEUP_ALLOW_OUTBOUND=1 (sizeup/outbound.py; else the fallback voice);
+# voice = "Matthew" (default), "Stephen", "Gregory", "Joey" (men) or "Joanna",
 # "Ruth", "Danielle"; best engine first (generative, neural, standard); speed is said as SSML prosody.
 # polly_region = "us-east-1"       # default: AWS_REGION / AWS_DEFAULT_REGION, else us-east-1
 tts_engine = "kokoro"              # "kokoro" | "polly" | "say" (macOS `say` only, with `voice` a `say -v` voice) |
@@ -286,8 +288,9 @@ channels = ["FG1", "PC repeater"]  # labels on the dispatch log only (FG1, or th
 # "test" it: the ring topic is the fire crew's real alert channel and pages their phones. The topic
 # names are not kept in this repo: set them in Settings > System > Push notifications (admins; stored
 # in the database), or with SIZEUP_PREALERT_RING_TOPIC / SIZEUP_PREALERT_STATUS_TOPIC. Unset: feed off.
-# Runs on the CAD of record only: all-in-one, or the hub. While this station forwards to a hub it
-# doesn't subscribe (the hub does; two would double-alert). Leave the section out to turn it off.
+# Runs on the CAD of record only: all-in-one (with SIZEUP_ALLOW_OUTBOUND=1: sizeup/outbound.py), or the hub.
+# While this station forwards to a hub it doesn't subscribe (the hub does; two would double-alert). Leave the section
+# out to turn it off.
 [prealert]
 enabled = true
 server = "https://ntfy.sh"           # or env SIZEUP_PREALERT_SERVER (a local test server)
@@ -332,7 +335,8 @@ heartbeat_stale_min = 90             # no heartbeat (or restart) this long: "Tap
 # `openssl rand -hex 12`). NEVER Tapout's topics (the pre-alert ring pages the fire crew):
 # refused (the protected set: [prealert] topics, env, Settings) here and again before every send. Empty or left out: no pushes. Env
 # SIZEUP_ALERT_TOPIC / SIZEUP_STATUS_TOPIC / SIZEUP_INTEL_TOPIC / SIZEUP_ALERT_SERVER win, and Settings > System > Push
-# notifications (admins) wins over both, live.
+# notifications (admins) wins over both, live. All-in-one pushes only with SIZEUP_ALLOW_OUTBOUND=1 in its environment
+# (sizeup/outbound.py: off for all-in-one; a local ntfy on 127.0.0.1 works either way).
 # [alerts]
 # ntfy_topic = ""
 # status_topic = ""
@@ -492,8 +496,11 @@ heartbeat_stale_min = 90             # no heartbeat (or restart) this long: "Tap
 #   "adsblol"   adsb.lol, keyless, ODbL (credited on the map)
 #   "adsbfi"    adsb.fi: its terms say personal, non-commercial use only. The user's decision, 2026-10-14: this is
 #               personal, non-commercial use ("we are not charging for this"). Credited on the map.
-#   the busier of the two is primary (every 5 s while the layer is open), the other every 10 s; one that errors or
-#   is rate-limited rests (Retry-After, else exponential) and the other carries on.
+#   the primary (every 5 s while the layer is open; the other every 10 s): primary = "adsbfi" / "adsblol" when set,
+#   else ("auto") the busier of those that haven't failed in the last 10 min, a tie in feeds' order. Each is read on
+#   its own (one hanging never holds up the other or the map: the TLS handshake gets 4 s, the answer 8 s, one
+#   connection kept open); one that errors or is rate-limited rests (at least its Retry-After, else exponential)
+#   and the other carries on. adsb.fi first since #542: from the hub it failed none in a week, adsb.lol ~150 a day.
 #   "receiver"  our own ADS-B receiver ([aircraft.receiver] below): when enabled it is always first ("primary local
 #               SDR on ADSB, secondary the above sources").
 # OpenSky is not used (a written agreement for operational use; far too few credits for a 5 s refresh).
@@ -501,14 +508,21 @@ heartbeat_stale_min = 90             # no heartbeat (or restart) this long: "Tap
 # raises the emergency alarm on every console, and its push through [alerts] ntfy_topic when one is set; the hub
 # then reads the primary feed every 15 s even when nobody has the map open.
 # registry: types (make / model) from the FAA Releasable Aircraft Database, public domain, ~70 MB a week once
-# someone has looked; never the owner's name. Leave the section out: on, both APIs, 15 nm around HPN, alarms on.
+# someone has looked; never the owner's name. registry.faa.gov refuses scripted downloads (403 from its bot
+# protection, 2026-11): then it is tried once a day and the copy we have is kept. registry_url: another https://
+# copy, or the path of a ReleasableAircraft.zip downloaded in a browser; or build it by hand
+# (python -m sizeup.aircraft build-registry ReleasableAircraft.zip faa_registry.sqlite) and put it, gzipped, where
+# the hub restores its caches (sizeup/cachesync.py: <bucket>/<prefix>/cache/aircraft/faa_registry.sqlite.gz).
+# Leave the section out: on, both APIs, 15 nm around HPN, alarms on.
 # [aircraft]
 # enabled = true
-# feeds = ["adsblol", "adsbfi"]
+# feeds = ["adsbfi", "adsblol"]
+# primary = "auto"        # or "adsbfi" / "adsblol"
 # alarms = true
 # radius_nm = 15          # around HPN: the feeds' query, what counts as "in the area", the alarm's area; 3 to 40
 # ceiling_ft = 6000       # MSL: below this inside the radius is "low traffic" (shortfinal's focus); 1000 to 18000
 # registry = true
+# registry_url = ""       # "" = registry.faa.gov's ReleasableAircraft.zip
 # adsblol_url = ""        # "" = the public API; a test server's address with {lat}, {lon} and {radius} in it
 # adsbfi_url = ""
 #

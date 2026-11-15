@@ -424,10 +424,33 @@ def test_no_word_from_the_receiver_is_logged_once_then_every_5_minutes_then_back
     assert "no word from the station's receiver" in logs[-1]
 
 
-def test_the_api_feeds_are_logged_as_before():
-    src = (ROOT / "sizeup" / "aircraft.py").read_text()
-    block = src[src.index("            if not f.local:"):src.index("        fresh = sum(")]
-    assert 'self.log(f"aircraft: {FEEDS[f.key][\'label\']}: {why}; resting {wait:.0f} s")' in block.splitlines()[1]
+def test_an_api_feed_failing_is_logged_once_then_every_5_minutes_then_back():
+    """#542: adsb.lol's every failure was a line (~280 a day, the hub's error watch counting them); now like our
+    receiver's: the first, then every FEED_LOG_EVERY_S while it goes on the same way, and its recovery."""
+    clock = Clock(T3 + 0.5)
+    logs: list[str] = []
+    fetch = Feeds(lol=(0,))
+    ly = AircraftLayer(feeds=("adsblol", "adsbfi"), adsblol_url=LOL_URL, adsbfi_url=FI_URL, registry=False,
+                       fetch=fetch, clock=clock, log=logs.append)
+    lol = ly.feeds[0]
+    for _ in range(int(A.FEED_LOG_EVERY_S // 10) - 2):                # a timeout every 10 s for just under 5 min
+        assert ly._read(lol, clock.t, 5.0) is False
+        clock.t += 10.0
+    said = [m for m in logs if "adsb.lol" in m]
+    assert len(said) == 1 and "timed out" in said[0] and "resting" in said[0]
+    clock.t += 30.0
+    ly._read(lol, clock.t, 5.0)
+    said = [m for m in logs if "adsb.lol" in m]
+    assert len(said) == 2 and "failing since" in said[1] and "in a row" in said[1]
+    fetch.answers["lol.example"] = [json.dumps({"now": T3, "ac": []}).encode()]
+    assert ly._read(lol, clock.t, 5.0) is True
+    assert logs[-1].startswith("aircraft: adsb.lol back (after ") and "failure(s)" in logs[-1]
+    n = len(logs)
+    fetch.answers["lol.example"] = [0, b'{"now": 1, "ac": []}']        # it flaps: a failure the same way soon after
+    ly._read(lol, clock.t, 5.0)
+    ly._read(lol, clock.t, 5.0)
+    assert len(logs) == n                                               # not logged again within 5 min, nor its return
+    assert lol.st["failures"] == 1 + int(A.FEED_LOG_EVERY_S // 10) - 2 + 1 and lol.st["reads"] == 2
 
 
 # ---- the station's job manager: never a program on the ADS-B dongle (the root cause) -----------------------------------

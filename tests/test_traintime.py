@@ -607,7 +607,7 @@ def test_the_hubs_health_panel_lists_the_feed(tmp_path):
     from tests.test_cloud import HubRun, hub_cfg
     h = HubRun(hub_cfg(tmp_path, trains_traintime_url="https://tt.example", trains_traintime=False))
     try:
-        feeds = h.app.health.panel()["feeds"]
+        feeds = [f for f in h.app.health.panel()["feeds"] if not f["key"].startswith("aircraft:")]   # (#542's rows)
         assert [f["key"] for f in feeds] == ["traintime"] and feeds[0]["state"] == "off" and feeds[0]["fallback"] == "GTFS-realtime"
         rows = {r["key"]: r for r in h.app.datasources.public()["sources"]}
         assert not rows["trains:traintime"]["on"] and "trains:traintime-routes" in rows

@@ -49,7 +49,11 @@ const StationHealth = (() => {
       const row = el("tr");
       for (const c of r) {
         if (c instanceof Node) { const td = el("td"); td.append(c); row.append(td); }
-        else if (Array.isArray(c)) row.append(el("td", c[1] || "", c[0] ?? "—"));
+        else if (Array.isArray(c)) {   // [text, class, hover]
+          const td = el("td", c[1] || "", c[0] ?? "—");
+          if (c[2]) td.title = c[2];
+          row.append(td);
+        }
         else row.append(el("td", "", c === null || c === undefined || c === "" ? "—" : String(c)));
       }
       t.tBodies[0].append(row);
@@ -100,10 +104,14 @@ const StationHealth = (() => {
     if (mutedEl) mutedEl.title = "Shown here, not pushed (Settings > System > Push notifications)";
     // #278: why it is off and where to set it, behind an "i" (a tap on a tablet; a title alone never shows there)
     if (!n.on && window.Help && Help.info) pushEl.append(" ", Help.info("No status topic in effect. Set one in Settings > System > Push notifications, SSM /sizeup-hub/status-topic or [alerts]"));
+    // sizeup/outbound.py: a hub not under its supervisor (a restored copy run by hand) pushes nothing and reaches no AWS
+    const out = d.outbound || {};
+    const obEl = out.on === false ? el("span", "chip hl-warn", "Outbound off") : null;
+    if (obEl) obEl.title = `${out.why}: no push, no AWS, no Polly, no Bedrock. SIZEUP_ALLOW_OUTBOUND=1 allows it`;
     const head = el("div", "card-head");
     head.append(el("h2", "", "Now"),
       el("span", `chip ${d.alerts.length ? "hl-bad" : "hl-ok"}`, d.alerts.length ? `${d.alerts.length} alert${d.alerts.length === 1 ? "" : "s"}` : "No alerts"),
-      el("span", "spacer"), ...(mutedEl ? [mutedEl] : []), pushEl);
+      el("span", "spacer"), ...(obEl ? [obEl] : []), ...(mutedEl ? [mutedEl] : []), pushEl);
     const kids = [head];
     if (!h.reported) kids.push(el("p", "notice", "No station report yet"));
     else if (!h.health_reported) {
@@ -133,10 +141,10 @@ const StationHealth = (() => {
           i.seen.map((x) => `${x.label} ${when(x.first_seen)}` + (x.gone_at ? " · no longer listed" : "")).join(" · "),
           i.seen.filter((x) => x.lead_s !== null && x.lead_s !== undefined).map((x) => `${x.label} ${lead(x.lead_s)}`).join(" · ")]), ""));
     }
-    if ((d.feeds || []).length) {   // map feeds with a fallback (#362: MTA TrainTime, else GTFS-realtime)
-      const feedCls = (s) => (s === "ok" ? "hl-ok" : s === "fallback" || s === "error" ? "hl-bad" : "dim");
+    if ((d.feeds || []).length) {   // map feeds with a fallback (#362: MTA TrainTime, else GTFS-realtime; #542 aircraft)
+      const feedCls = (s) => (s === "ok" ? "hl-ok" : s === "fallback" || s === "error" ? "hl-bad" : s === "resting" ? "hl-warn" : "dim");
       kids.push(el("h3", "hl-sub", "Feeds"), table(["Feed", "State", "Reason", "Last read", "Fallback"],
-        d.feeds.map((f) => [f.label, [f.state, feedCls(f.state)], f.why || "",
+        d.feeds.map((f) => [f.label, [f.state, feedCls(f.state), f.title || ""], f.why || "",
           f.at ? `${when(f.at)} (${longDur(serverNow() - f.at)} ago)` : "never", f.fallback || ""]), ""));
     }
     if ((d.intel || []).length) {   // radio pre-alerts (sizeup/intel/counters.py): in scope / considered, a line per pack
@@ -267,10 +275,13 @@ const StationHealth = (() => {
       const word = { ok: "ok", corrupt: "corrupt", error: "not verifiable", stale: "stale", none: "not checked", suspect: "unverified" };
       const hd = el("h3", "hl-sub", "Replicas");
       hd.title = "Litestream's S3 copies, read-only: the standby checks a copy of what it follows; else the leader restores "
-        + "one from S3 and checks it. quick_check, integrity_check (full) now and then. Bad: pushed at once";
+        + "one from S3 and checks it. quick_check, integrity_check (full) now and then. A failing check copy is checked "
+        + "again from a fresh restore: fresh ok = the copy drifted (re-seeded, no push); fresh bad = corrupt, pushed at once";
       kids.push(hd, table(["Database", "Result", "Verified", "By"], rp.rows.map((r) => {
-        const res = el("span", rcls(r.state), word[r.state] || r.state);
-        res.title = [r.state !== "ok" && r.result ? r.result : "", r.error ? `last error ${when(r.error_at)}: ${r.error}` : "",
+        const res = el("span", rcls(r.state), (word[r.state] || r.state) + (r.reseeds && r.state === "ok" ? " · re-seeded" : ""));
+        res.title = [r.state !== "ok" && r.result ? r.result : "", r.confirmed ? "a fresh restore from S3 failed it too" : "",
+          r.reseeds ? `check copy drifted, re-seeded from a fresh restore (ok): ${r.reseeds.n}×, last ${when(r.reseeds.at)}: ${r.reseeds.why}` : "",
+          r.error ? `last error ${when(r.error_at)}: ${r.error}` : "",
           r.txid ? `txid ${r.txid}` : "", r.secs !== null && r.secs !== undefined ? `${r.secs} s` : ""].filter(Boolean).join("\n");
         return [r.db, res, r.at ? `${when(r.at)} (${longDur(serverNow() - r.at)} ago)` : "—",
           r.by ? `${r.by} · ${r.mode === "integrity_check" ? "full" : "quick"}` : ""];

@@ -363,7 +363,7 @@ def test_the_updater_runs_the_check_from_the_release(station_ssm, monkeypatch):
     assert u.ssm_check(KEY_ID, SECRET, "us-east-1", "FEED_PASS").startswith("not checked")
     (rel / "sizeup").mkdir(exist_ok=True)
     (rel / "sizeup" / "cloud").mkdir(exist_ok=True)
-    for f in ("__init__.py", "aws.py", "procenv.py", "cloud/__init__.py", "cloud/adapterssm.py"):
+    for f in ("__init__.py", "aws.py", "outbound.py", "procenv.py", "cloud/__init__.py", "cloud/adapterssm.py"):
         (rel / "sizeup" / f).write_text((ROOT / "sizeup" / f).read_text())
     # no network in tests: a region that resolves nowhere would still try DNS, so point the helper at a closed port
     src = (rel / "sizeup" / "cloud" / "adapterssm.py").read_text()

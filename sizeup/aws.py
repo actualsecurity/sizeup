@@ -175,11 +175,21 @@ def _signature(secret: str, day: str, reg: str, service: str, amz: str, creq: st
     return hmac.new(key, sts.encode(), hashlib.sha256).hexdigest()
 
 
+def _outbound(service: str, url: str) -> None:
+    """Every AWS request is signed here first: the guard (sizeup/outbound.py) refuses it before anything leaves."""
+    from sizeup import outbound
+    why = outbound.check(f"aws {service}", url)
+    if why:
+        raise AwsError(why, "OutboundOff")
+
+
 def sign(method: str, url: str, headers: dict[str, str], body: bytes, creds: Credentials, reg: str,
          service: str, at: datetime | None = None, payload_sha: str | None = None) -> dict[str, str]:
     """The request's headers plus Host, X-Amz-Date, X-Amz-Security-Token (temporary credentials) and
     Authorization (AWS Signature Version 4). Every header given is signed. payload_sha: the body's sha256
-    when it isn't in hand (S3: a file streamed up, its hash also in x-amz-content-sha256)."""
+    when it isn't in hand (S3: a file streamed up, its hash also in x-amz-content-sha256).
+    AwsError "OutboundOff" when this process may not reach AWS (sizeup/outbound.py): nothing is signed or sent."""
+    _outbound(service, url)
     amz, day = _stamp(at)
     u = urllib.parse.urlsplit(url)
     out = dict(headers)
@@ -202,7 +212,8 @@ def sign(method: str, url: str, headers: dict[str, str], body: bytes, creds: Cre
 def presign(url: str, creds: Credentials, reg: str, service: str, expires: int = 300, at: datetime | None = None,
             payload_hash: str = EMPTY_SHA256, method: str = "GET") -> str:
     """url with SigV4 query authentication (only `host` signed). The session token goes in the signed
-    query (X-Amz-Security-Token), as Transcribe's WebSocket API and S3 want it."""
+    query (X-Amz-Security-Token), as Transcribe's WebSocket API and S3 want it. AwsError "OutboundOff" as sign()."""
+    _outbound(service, url)
     amz, day = _stamp(at)
     u = urllib.parse.urlsplit(url)
     pairs = urllib.parse.parse_qsl(u.query, keep_blank_values=True)

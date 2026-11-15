@@ -19,10 +19,21 @@ when any of its phrases is in it and none of its "not" phrases is. "re:" in fron
 
 Scope never names a bare talkgroup or callsign number: sources are source keys (sizeup/sourcekeys.py) or globs of them.
 
-Speech-to-text tolerance (a pack with "normalize": "<table>", data/intel/tables/<table>.json): a rule's phrases are
-tried on the words as transcribed AND on the words after the table's fixes (Normalizer: sound-alikes such as "order of
-gas" -> "odor of gas", split and merged words, number words as digits), so a pack's phrases are written once, in the
-table's own spelling ("2nd alarm", "odor of gas"). A pack without "normalize" matches exactly as before.
+Speech-to-text tolerance (a pack with "normalize": "<table>", data/intel/tables/<table>.json): the table's fixes
+(Normalizer: sound-alikes such as "order of gas" -> "odor of gas", split and merged words, number words as digits) make
+a second READING of a transmission. Each reading is judged on its own: a rule hits when, in the words as transcribed or
+in the fixed words, one of its phrases is found and none of its "not" phrases is. So the rules a table makes hit are
+always a superset of those hit without it (a fix can add a hit, never take one away), and a "not" phrase still guards
+the reading it was written for. Write phrases in the table's spelling ("2nd alarm", "odor of gas"). A fix may not take
+a negation away ("zero" -> "0" is refused: a negator before a gap must stay one). A "not" phrase must already be in the
+table's spelling, every alternative with its fixed form beside it ("(no one|no 1|nobody) inside"): checked when the
+pack compiles, since a "not" written only as heard would miss the fixed reading and let a hit through. A pack
+without "normalize" matches exactly as before. Suppress phrases are tried on both readings (a drill said either way is a drill).
+
+"area": the towns a county-wide pack's events belong to (Settings: intel_packs.<pack>.area; an empty list there is
+the file's). With an area, the address lookup searches those towns (and the towns said), and an event placed outside
+them, or whose words name only towns outside them, is out of area: kept at log, never raised (engine.py). No area
+(the police pack, whose sources are local): every place counts, as before.
 
 "order": where the pack is listed (lowest first, then by file name; 0 when absent). "infer": false: the model behind
 the rules (infer.py) is never asked about this pack's rows. A rule or a category with no "mode" is at "push": a pack
@@ -121,8 +132,9 @@ class Normalizer:
 
     Keys and values are words (case and punctuation aside, as words() reads them), at most NORM_WORDS each. apply() is
     one pass over a transmission's words, left to right, the longest key first; what a fix wrote is never fixed again.
-    It only ever adds a second reading (Rule.hit tries both), so a table can't take a hit away from a phrase that
-    matched the words as transcribed; a rule's "not" phrases are tried on both readings too."""
+    It only ever adds a second reading, each judged on its own (Rule.hit): a table can't take a hit away, and a "not"
+    phrase is checked against the reading its rule's phrase was found in. An entry whose heard words hold a negation
+    word (NEGATORS) and whose meaning has none is refused: a fix must never turn "zero injuries" into a number."""
 
     def __init__(self, table: dict, name: str = ""):
         self.name = str(name or table.get("name") or "")
@@ -136,6 +148,8 @@ class Normalizer:
                 kw, vw = tuple(words(str(k))), tuple(words(str(v)))
                 if not kw or not vw or len(kw) > NORM_WORDS or len(vw) > NORM_WORDS:
                     raise ValueError(f"table {self.name}.{sec} {str(k)[:30]!r}: 1 to {NORM_WORDS} words each side")
+                if set(kw) & NEGATORS and not set(vw) & NEGATORS:
+                    raise ValueError(f"table {self.name}.{sec} {' '.join(kw)!r}: takes a negation away")
                 if kw in self.map and self.map[kw] != vw:
                     raise ValueError(f"table {self.name}: {' '.join(kw)!r} twice, with two meanings")
                 if kw != vw:
@@ -186,12 +200,15 @@ def table(name: str) -> Normalizer:
         raise ValueError(f"normalize {name!r}: no data/intel/tables/{name}.json") from None
 
 
-def _found(p: "Phrase", text: str, ws: list[str], norm: Normalizer | None) -> bool:
-    """The phrase in the words as transcribed, or in them after the pack's table."""
-    if p.found(text, ws):
-        return True
+def readings(text: str, ws: list[str], norm: "Normalizer | None") -> list[tuple[str, list[str]]]:
+    """The transmission as transcribed, and after the pack's table when it changes anything."""
     alt = norm.apply(ws) if norm is not None else None
-    return alt is not None and p.found(" ".join(alt), alt)
+    return [(text, ws)] if alt is None else [(text, ws), (" ".join(alt), alt)]
+
+
+def _found(p: "Phrase", text: str, ws: list[str], norm: Normalizer | None) -> bool:
+    """The phrase in either reading (suppress phrases)."""
+    return any(p.found(t, w) for t, w in readings(text, ws, norm))
 
 
 class Phrase:
@@ -232,8 +249,11 @@ class Rule:
     norm: Normalizer | None = None    # the pack's table (None: the words as transcribed only)
 
     def hit(self, text: str, ws: list[str]) -> bool:
-        return (self.enabled and any(_found(p, text, ws, self.norm) for p in self.any)
-                and not any(_found(p, text, ws, self.norm) for p in self.nots))
+        """One reading where a phrase is found and no "not" phrase is (see the module's doc)."""
+        if not self.enabled:
+            return False
+        return any(any(p.found(t, w) for p in self.any) and not any(p.found(t, w) for p in self.nots)
+                   for t, w in readings(text, ws, self.norm))
 
 
 @dataclass
@@ -254,6 +274,7 @@ class Pack:
     suppress: list
     src: dict = field(default_factory=dict)
     norm: Normalizer | None = None
+    area: tuple = ()                  # the towns its events belong to (empty: anywhere)
 
     def in_scope(self, row: dict) -> bool:
         """The row is one this pack reads: its service, its source key (a glob), its tier and system, as listed (an
@@ -281,6 +302,48 @@ class Pack:
 
     def suppressed(self, text: str, ws: list[str]) -> bool:
         return any(_found(p, text, ws, self.norm) for p in self.suppress)
+
+
+def town_names() -> dict[str, str]:
+    """{lower-case name: name as shown} of every town an area may name (data/westchester_towns.txt, the CAD's list)."""
+    from sizeup.cad.sources import county_towns
+    return {v.lower(): v for v in county_towns().values() if v}
+
+
+def area(v, what: str) -> tuple:
+    """A list of town names as an area (ValueError with the reason): each one of the county's towns."""
+    if v is None:
+        return ()
+    if not isinstance(v, (list, tuple)) or len(v) > 40:
+        raise ValueError(f"{what}: a list of at most 40 town names")
+    known = town_names()
+    out = []
+    for t in v:
+        name = known.get(str(t).strip().lower())
+        if name is None:
+            raise ValueError(f"{what}: {str(t)[:40]!r} isn't a town of data/westchester_towns.txt")
+        if name not in out:
+            out.append(name)
+    return tuple(out)
+
+
+def check_spelling(p: "Phrase", norm: "Normalizer", what: str) -> None:
+    """A "not" phrase is in the table's spelling (ValueError naming the form to add): each alternative's fixed form is
+    one of its alternatives too, and so is the phrase's own fixed form when it is words alone."""
+    if p.items is None:
+        return
+    for item in p.items:
+        if item == GAP:
+            continue
+        for alt in item:
+            fixed = norm.apply(list(alt))
+            if fixed is not None and tuple(fixed) not in item:
+                raise ValueError(f"{what} {p.src!r}: add {' '.join(fixed)!r} beside {' '.join(alt)!r} (the table's spelling)")
+    if all(item != GAP and len(item) == 1 for item in p.items):
+        ws = [w for item in p.items for w in item[0]]
+        fixed = norm.apply(ws)
+        if fixed is not None and fixed != ws:
+            raise ValueError(f"{what} {p.src!r}: write it as {' '.join(fixed)!r} (the table's spelling)")
 
 
 def _num(v, lo: float, hi: float, what: str) -> float:
@@ -346,6 +409,10 @@ def compile_pack(d: dict, packs_ov: dict | None = None, rules_ov: dict | None = 
                               _phrases(o.get("any") or [], f"rule {rid}"), _phrases(o.get("not") or [], f"rule {rid} not"),
                               _mode(o.get("mode", "shadow"), f"rule {rid} mode"), bool(o.get("enabled", True)), dict(o),
                               norm))
+    if norm is not None:                                # a "not" in heard spelling would miss the fixed reading
+        for r in rules:
+            for p in r.nots:
+                check_spelling(p, norm, f"rule {r.id} not")
     if len(rules) > RULES_MAX:
         raise ValueError(f"{name}: at most {RULES_MAX} rules")
     return Pack(name=name, version=int(d.get("version") or 1), domain=str(d.get("domain") or name),
@@ -355,7 +422,8 @@ def compile_pack(d: dict, packs_ov: dict | None = None, rules_ov: dict | None = 
                 context_factor=_num(d.get("context_factor", 0.5), 0, 1, f"{name}.context_factor"),
                 mode=_mode(po.get("mode", d.get("mode", "push")), f"{name}.mode"),
                 towns=dict(d.get("towns") or {}), categories=cats, rules=rules,
-                suppress=_phrases(d.get("suppress") or [], f"{name}.suppress"), src=dict(d), norm=norm)
+                suppress=_phrases(d.get("suppress") or [], f"{name}.suppress"), src=dict(d), norm=norm,
+                area=area(po.get("area") or d.get("area"), f"{name}.area"))
 
 
 def read_files(paths=None) -> list[dict]:
@@ -384,7 +452,7 @@ def load_packs(paths_or_dicts=None, overrides: dict | None = None) -> list[Pack]
 def ruleset_hash(packs: list[Pack]) -> str:
     """A short hash of everything that decides a hit (the packs' sources as compiled, with their overrides)."""
     blob = json.dumps([[p.name, p.version, p.mode, p.threshold, p.window_s, p.categories, p.context_factor, p.towns,
-                        p.scope,
+                        p.scope, list(p.area),
                         [[r.id, r.v, r.w, r.mode, r.enabled, r.category, [x.src for x in r.any], [x.src for x in r.nots]]
                          for r in p.rules], [x.src for x in p.suppress],
                         *([[p.norm.name, p.norm.digest]] if p.norm is not None else [])] for p in packs],
