@@ -12,7 +12,7 @@ set -eu
 CONFIG="${SIZEUP_CONFIG:-/app/deploy/hub/config.hub.toml}"
 export SIZEUP_STATE_DIR="${SIZEUP_STATE_DIR:-/data}"
 mkdir -p "$SIZEUP_STATE_DIR"
-[ -n "${SIZEUP_STATION_TOKEN:-}" ] || echo "entrypoint: SIZEUP_STATION_TOKEN is not set: the hub will refuse the station" >&2
+[ -n "${SIZEUP_STATION_TOKEN:-}" ] || echo "entrypoint: SIZEUP_STATION_TOKEN (the shared station token) is not set: only stations with their own token (Settings > Station > Stations) can connect" >&2
 
 if [ -n "${LITESTREAM_BUCKET:-}" ]; then
   export LITESTREAM_PATH="${LITESTREAM_PATH:-sizeup-hub}"
