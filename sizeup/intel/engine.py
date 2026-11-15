@@ -17,6 +17,8 @@
     engine.consider(tid)  live: queue the id (never waits on rules or the gazetteer); the thread loads the row, feed()s it
     engine.tick(now)      expires events past their until, sends a due digest, forgets old windows
     engine.ruleset_hash()
+    engine.counts(now)    what it did with what it was handed, per pack (sizeup/intel/counters.py): Settings > System >
+                          Intel and Settings > Station > Health; one "intel: considered N, ..." log line an hour
 
 The sink (no side effect happens in the engine itself):
 
@@ -53,6 +55,8 @@ import threading
 import time
 from dataclasses import dataclass, field
 
+from sizeup.intel import counters as counters_mod
+from sizeup.intel import policy as policy_mod
 from sizeup.intel import push as push_mod
 from sizeup.intel import rules as rules_mod
 from sizeup.intel.model import Decision, Event, Hit, lowest, mode_rank
@@ -78,6 +82,8 @@ SEEN_MAX = 20000                       # traffic ids remembered with their text 
 ROW_SQL = ("SELECT id, start, end, source, system, service, dept, tier, talkgroup, channel, talker, rig, radio_id, text, "
            "alt_text, model FROM radio_traffic WHERE id = ?")
 SECTIONS = ("intel", "intel_packs", "intel_rules")
+SUMMARY_S = 3600.0                     # one "intel: considered N, in scope M, matched K, events E" line this often
+COUNTERS_META = "intel_counters"       # the counters' hours, kept with that line (never written at startup)
 
 
 @dataclass
@@ -172,6 +178,11 @@ class IntelEngine:
         self._ticked = 0.0
         self._pruned = self.clock() + PRUNE_FIRST_S - PRUNE_S      # the first prune hours after start (#492 review)
         self._catwords: dict[tuple[str, str], set] = {}
+        self.counters = counters_mod.Counters(self.clock)
+        self._summed = self.clock()           # the hourly log line: the first an hour after start
+        self._summed_at: dict = {}            # the overall totals at that line
+        self._led = False                     # the kept counters are read when this one first leads (a handover too)
+        self.count_errors = 0                 # a counter that failed (never the transcript's problem: _count)
         self.reload()
         if sink is None:
             sink = LiveSink(self) if store is not None else RecordingSink()
@@ -195,6 +206,7 @@ class IntelEngine:
                     self.packs = rules_mod.load_packs(None, {})
             self._hash = rules_mod.ruleset_hash(self.packs)
             self._catwords = {}
+        self._watch()                         # a pack or detection turned on: watched from now (counters.py)
 
     def ruleset_hash(self) -> str:
         return self._hash
@@ -271,16 +283,26 @@ class IntelEngine:
 
     def _maybe_tick(self) -> None:
         now = self.clock()
-        if now - self._ticked >= TICK_S and self.leader():
-            self._ticked = now
-            self.tick(now)
-            if self.listen is not None:
-                self.listen.refresh(now)      # later transmissions into the links already pushed
-            if now - self._pruned >= PRUNE_S and hasattr(self.events, "prune"):
-                self._pruned = now
-                self.events.prune(now)
-                if self.infer is not None:
-                    self.infer.prune(now)
+        if now - self._ticked < TICK_S:
+            return
+        if not self.leader():
+            self._led = False
+            return
+        self._ticked = now
+        if not self._led:
+            self._led = True
+            self._watch(now)
+            self._restore_counters(now)
+        self.tick(now)
+        if self.listen is not None:
+            self.listen.refresh(now)          # later transmissions into the links already pushed
+        if now - self._pruned >= PRUNE_S and hasattr(self.events, "prune"):
+            self._pruned = now
+            self.events.prune(now)
+            if self.infer is not None:
+                self.infer.prune(now)
+        if now - self._summed >= SUMMARY_S:
+            self._summary(now)
 
     def _restore(self) -> None:
         if self.store is None:
@@ -289,6 +311,88 @@ class IntelEngine:
             self.policy.restore(json.loads(self.store.meta_get("intel_policy") or "{}"))
         except (ValueError, TypeError):
             pass
+
+    # -- the counters (sizeup/intel/counters.py): never in the way of a transcript -------------------------------------
+
+    def _counting(self) -> bool:
+        """This engine is the one that reads the transcripts: not a station forwarding to a hub, not a standby."""
+        try:
+            return bool(self.active()) and bool(self.leader())
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _watch(self, now: float | None = None) -> None:
+        """Which packs are on and counted here, told to the counters (a pack newly so is watched from now)."""
+        try:
+            on = [p.name for p in self.packs if p.mode != "off"] if self.enabled and self._counting() else []
+            self.counters.watching(self.clock() if now is None else now, on)
+        except Exception:  # noqa: BLE001 - counters are a convenience
+            self.count_errors += 1
+
+    def _count(self, now: float, key: str, names=(), overall: bool = True) -> None:
+        try:
+            self.counters.add(now, key, names, overall)
+        except Exception:  # noqa: BLE001 - a counter never costs an event
+            self.count_errors += 1
+
+    def _count_row(self, row: dict, now: float) -> list[str] | None:
+        """A transcript handed over: considered, and in whose scope it is. The packs' names it is in scope of; None
+        when the counting itself failed (then nothing more is counted for this row, and it is read as ever)."""
+        try:
+            packs = list(self.packs)
+            scoped = [p.name for p in packs if p.in_scope(row)]
+            ct = self.counters
+            ct.add(now, "considered", [p.name for p in packs])
+            ct.add(now, "in_scope", scoped, overall=bool(scoped))
+            ct.add(now, "out_of_scope", [p.name for p in packs if p.name not in scoped], overall=not scoped)
+            if scoped:
+                ct.in_scope(now, scoped)      # when it was handed over, not when it was said (a catch-up is now)
+            return scoped
+        except Exception:  # noqa: BLE001 - a counter never costs an event
+            self.count_errors += 1
+            return None
+
+    def _restore_counters(self, now: float) -> None:
+        """The counters' hours, last-in-scope and watched-since times as last kept (a read; nothing is written here).
+        A kept state too large to be ours is left alone: the counters start fresh, and the next hour's replaces it."""
+        if self.store is None:
+            return
+        try:
+            raw = self.store.meta_get(COUNTERS_META) or "{}"
+            if len(raw) > counters_mod.STATE_MAX:
+                self.log(f"intel: the kept counters are {len(raw)} characters: not read, starting fresh")
+                return
+            self.counters.restore(json.loads(raw), now, [p.name for p in self.packs])
+        except Exception:  # noqa: BLE001 - counters are a convenience
+            self.count_errors += 1
+
+    def _summary(self, now: float) -> None:
+        """The hourly line (the log shows the engine is alive, and whether anything is in scope), and the counters
+        kept: one small meta row an hour, on the leader, never at startup."""
+        self._summed = now
+        try:
+            line, self._summed_at = self.counters.hour_line(self._summed_at)
+            self.log(line)
+            if self.store is not None:
+                raw = json.dumps(self.counters.state(now, [p.name for p in self.packs]))
+                if len(raw) <= counters_mod.STATE_MAX:
+                    self.store.meta_put(COUNTERS_META, raw)
+        except Exception:  # noqa: BLE001 - counters are a convenience
+            self.count_errors += 1
+
+    def counts(self, now: float | None = None) -> dict:
+        """{started, all: {h24, start}, packs: [counters.row() + {h24, start}]}: one terse line per pack."""
+        now = self.clock() if now is None else now
+        packs = list(self.packs)
+        here = self._counting()
+        self._watch(now)
+        snap = self.counters.snapshot(now, [p.name for p in packs])
+        rows = []
+        for p in packs:
+            c = snap["packs"][p.name]
+            rows.append({**counters_mod.row(c, self.enabled and p.mode != "off", snap["started"], now, p.label, p.name,
+                                            here=here), "h24": c["h24"], "start": c["start"]})
+        return {"started": snap["started"], "all": snap["all"], "packs": rows}
 
     def save_policy(self) -> None:
         if self.store is not None:
@@ -311,12 +415,21 @@ class IntelEngine:
         # max_age_min is history, never a pre-alert (a restart must not replay old pushes); the same text again is
         # nothing new (idempotent per traffic id, and cheap)
         start = float(row.get("start") or 0.0)
-        if start and self.clock() - start > float(self.policy.cfg.get("max_age_min", 15)) * 60:
+        now = self.clock()
+        # counted first (counters.py): in whose scope it is, so "nothing matched" and "nothing in scope" read apart
+        scoped = self._count_row(row, now)
+        if start and now - start > float(self.policy.cfg.get("max_age_min", 15)) * 60:
             self.stale += 1
+            if scoped:
+                self._count(now, "too_old", scoped)
             return []
         sig = hash((text, str(row.get("alt_text") or "")))
         if self._seen.get(tid) == sig:
+            if scoped:
+                self._count(now, "repeat", scoped)
             return []
+        if scoped and policy_mod.quiet(self.policy.cfg, now, self.tz):
+            self._count(now, "quiet", scoped)
         self._seen[tid] = sig
         if len(self._seen) > SEEN_MAX:
             for k in list(self._seen)[: SEEN_MAX // 2]:
@@ -370,6 +483,7 @@ class IntelEngine:
         cats = self._scores(pack, win)
         mine = {r.category for r, _w in hits}
         event_of: dict[str, Event] = {}
+        over = False                          # a category this row speaks of reached its threshold
         for cat, (what, contrib, best_mode) in cats.items():
             cd = pack.category(cat)
             thr = cd.get("threshold") if cd.get("threshold") is not None else pack.threshold
@@ -377,6 +491,7 @@ class IntelEngine:
                 continue
             if not (mine & {cat, rules_mod.WILD, "routine"}):
                 continue                      # a candidate this row says nothing about: left as it is
+            over = True
             mode = lowest(pack.mode, cd.get("mode", "push"), best_mode)
             if mode == "off":
                 continue
@@ -384,6 +499,10 @@ class IntelEngine:
             if ev is not None:
                 event_of[cat] = ev
                 changed.append(ev)
+        if hits and pack.mode != "off":
+            self._count(self.clock(), "matched", [pack.name])
+            if not over:
+                self._count(self.clock(), "below", [pack.name])
         if not hits and not suppressed:       # a read-back with no rule words: may still place an open event
             for ev in self._open_for(pack, None, key, at, self._merge_span(pack)):
                 moving = self._moving(pack, ev, win.entries[tid])
@@ -790,6 +909,9 @@ class IntelEngine:
 
     def _after(self, pack, ev: Event, change: str, now: float, before: Event | None, moved: bool = False) -> None:
         self.sink.event(ev, "updated" if change == "reopened" else change)
+        if change == "raised":
+            self._count(now, "events", [pack.name])
+        was = ev.suppressed
         d = self.policy.decide(ev, change, now, before, moved)
         if d.would_push:
             cat = pack.category(ev.category)
@@ -808,10 +930,13 @@ class IntelEngine:
             if ev.id in self.policy.held:
                 self.policy.held.remove(ev.id)
             self.save_policy()
+            self._count(now, "pushed", [pack.name])
         elif d.would_push:
             ev.suppressed = "unsent"
         elif d.suppressed and not ev.pushed_at:
             ev.suppressed = d.suppressed
+        if ev.suppressed and not was:         # held, once per event (as events.counts() has it)
+            self._count(now, "held", [pack.name])
         self.events.save(ev)
 
     def _who(self, pack, ev: Event) -> list[str]:

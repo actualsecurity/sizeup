@@ -315,3 +315,71 @@ def test_the_card_is_still_swapped_in_whole_and_never_under_a_field(site, browse
     pg.wait_for_function("document.querySelector(\"#s-intel [aria-label='Pushes a day']\").value === '323'")
     assert pg.posts[n:] == [] and pg.input_value(field) == str(was)
     assert pg.errors == []
+
+
+@pytest.mark.parametrize("width", [1280, 768, 390])
+def test_each_pack_says_what_it_was_handed_in_its_line(site, browser, width):
+    """The engine's counters (sizeup/intel/counters.py): one terse line at the end of the pack's own line, the whole
+    count in its hover, inside the card at every width; a pack with nothing in scope for a day reads as a warning."""
+    def a_day_of_nothing(route):
+        r = route.fetch()
+        d = r.json()
+        for p in d["counters"]["packs"]:
+            p.update(level="warn", text="0 in scope / 4,012 considered · last in scope: never")
+        route.fulfill(response=r, body=json.dumps(d))
+    site.cad.intel.feed({"id": "x1", "start": site.cad.clock(), "source": "p25:example:1", "system": "example",
+                         "service": "fire", "text": "radio check"})
+    pg = open_intel(browser, site, width)
+    packs = [p.name for p in site.cad.intel.packs]
+    lines = pg.locator(f"{CARD} .in-pack .in-stat span[data-live^='pack:']")
+    assert lines.count() == len(packs)                                       # one line in each pack's own line
+    assert [lines.nth(i).get_attribute("data-live") for i in range(len(packs))] == [f"pack:{n}" for n in packs]
+    stat = pg.locator(f"{CARD} [data-live='pack:police']")
+    assert stat.text_content() == "0 in scope / 1 considered · last in scope: never"
+    assert "1 out of scope" in stat.get_attribute("title") and "warn" not in stat.get_attribute("class")
+    pg.route("**/api/cad/intel", a_day_of_nothing)
+    pg.reload()
+    pg.wait_for_selector(f"{CARD} table")
+    card = pg.locator(CARD).bounding_box()
+    for i in range(len(packs)):
+        stat = lines.nth(i)
+        assert stat.text_content().startswith("0 in scope / 4,012 considered") and "warn" in stat.get_attribute("class")
+        box = stat.bounding_box()
+        assert box["x"] >= card["x"] - 0.5 and box["x"] + box["width"] <= card["x"] + card["width"] + 0.5
+    assert pg.evaluate("document.querySelector('#s-intel').scrollWidth <= document.querySelector('#s-intel').clientWidth")
+    assert pg.errors == []
+
+
+@pytest.mark.parametrize("held", ["checkbox", "button", "selection"])
+def test_the_counters_move_with_every_transcript_without_the_card_being_swapped(site, browser, held):
+    """ "considered" moves with every transcript: the pack's line is patched in place (settings.js sCardSwap: what is
+    marked data-live is no part of what the card is), so the card's nodes stay, and a checkbox or a button with the
+    focus keeps it, and text selected in the rules table stays selected."""
+    pg = open_intel(browser, site, 1280)
+    every = "(t) => { const ns = [...document.querySelectorAll(t[0])]; return ns.length === t[2] && ns.every((n) => n.textContent.includes(t[1])); }"
+    stat, lines, n = f"{CARD} [data-live='pack:police']", f"{CARD} [data-live^='pack:']", len(site.cad.intel.packs)
+    pg.evaluate("""() => { window._kids = [...document.querySelector('#s-intel').children]; window._swaps = 0;
+      new MutationObserver((ms) => { for (const m of ms) if (m.target.id === 's-intel') window._swaps += 1; })
+        .observe(document.querySelector('#s-intel'), { childList: true }); }""")
+    if held == "checkbox":
+        pg.focus(f"{CARD} label:has-text('Push') input[type=checkbox]")
+    elif held == "button":
+        pg.focus(f"{CARD} button.help")
+    else:
+        pg.evaluate("() => getSelection().selectAllChildren(document.querySelector('#s-intel .in-rules td.in-rule'))")
+    pg.evaluate("() => { window._focus = document.activeElement; window._sel = String(getSelection()); }")
+    for i in range(4):
+        site.cad.intel.feed({"id": f"x{i}", "start": site.cad.clock(), "source": "p25:example:1", "system": "example",
+                             "service": "fire", "text": "radio check"})
+        site.transmission()
+        site.cad.store.rev += 1                                              # (as a recorded transmission moves it)
+        pg.wait_for_function(every, arg=[lines, f" / {i + 1} considered", n], timeout=45000)   # every pack's line (a busy machine)
+    assert f"{4} out of scope" in pg.get_attribute(stat, "title")            # the hover kept up too
+    assert pg.evaluate("window._swaps") == 0
+    assert pg.evaluate("() => [...document.querySelector('#s-intel').children].every((n, i) => n === window._kids[i])")
+    assert pg.evaluate("() => document.activeElement === window._focus && String(getSelection()) === window._sel")
+    if held != "selection":
+        assert pg.evaluate("() => document.activeElement !== document.body")
+    else:
+        assert pg.evaluate("() => String(getSelection()).length > 0")
+    assert pg.errors == []
