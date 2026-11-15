@@ -74,6 +74,10 @@ trunk-recorder writes, so its last_heard is the system's last call:
              (sizeup/radio/recorder.py ControlChannel) lasting CC_LOST_S: the alert at once, whatever the window
     clears   at the next call (or the control channel decoding again)
 
+The radio pre-alerts' engine (sizeup/intel) is a line per pack on the panel, never an alert: transcripts in the pack's
+scope / considered in 24 h and when one was last in scope, a warning once a pack that is on has had none for 24 h
+(sizeup/intel/counters.py: no rule can match what is never in scope).
+
 Each alert is logged once when it starts and once when it clears, shown to admins on Settings > Station > Health
 (GET /api/cad/health, static/health.js; never in the state push nor as a banner, #203), and pushed to the
 status topic ([alerts] status_topic, else ntfy_topic: sizeup/notify.py route()): at most one push per condition per repeat_min (15), plus its recovery (only for an episode that was pushed).
@@ -515,6 +519,7 @@ class StationHealth:
         self._adsb_said: tuple | None = None         # (cause, holder) of the station's ADS-B decoder as last logged (#262)
         self.sources: Callable[[], dict] | None = None   # the incident sources' panel (#297, sizeup/cad/sources.py)
         self.feeds: Callable[[], list] | None = None     # map feeds with a fallback (#362: MTA TrainTime -> GTFS-realtime)
+        self.intel: Callable[[], list] | None = None     # the intel engine's line per pack (sizeup/intel/counters.py row())
         self._stt_oldest = 0.0                       # the whisper backlog's oldest clip's wait, as last reported
         self._stt_ok_since: float | None = None      # the whisper backlog under STT_CLEAR_S since (its hysteresis, #300)
         self._clear_at: dict[str, float] = {}        # an alert's real clear time when it clears later than that
@@ -1371,7 +1376,12 @@ class StationHealth:
             feeds = self.feeds() if self.feeds is not None else None
         except Exception as e:  # noqa: BLE001 - never in the way of the rest of the panel
             feeds = [{"label": "feeds", "state": "error", "why": type(e).__name__}]
-        return {"health": self.model(now), "sources": sources, "feeds": feeds, "alerts": [dict(a, pushed=a["key"] in pushed_now) for a in self.alerts()],
+        try:        # radio pre-alerts: what each pack was handed (a pack on with nothing in scope for 24 h: "warn")
+            intel = [{k: r.get(k) for k in ("pack", "label", "on", "level", "text", "title")} for r in self.intel()] \
+                if self.intel is not None else None
+        except Exception as e:  # noqa: BLE001 - never in the way of the rest of the panel
+            intel = [{"pack": "intel", "label": "Intel", "on": True, "level": "warn", "text": type(e).__name__, "title": ""}]
+        return {"health": self.model(now), "sources": sources, "feeds": feeds, "intel": intel, "alerts": [dict(a, pushed=a["key"] in pushed_now) for a in self.alerts()],
                 "history": [{k: h.get(k) for k in ("key", "severity", "title", "text", "since", "cleared", "pushed", "who")}
                             for h in hist],
                 "notify": {"on": bool(n is not None and n.enabled),

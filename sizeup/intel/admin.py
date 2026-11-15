@@ -82,8 +82,13 @@ class IntelAdmin:
                           "accept": p.accept, "scope": p.scope, "area": list(p.area), "categories": cats, "rules": rules,
                           "edited": {k: k in mine for k in ("mode", "threshold", "window_s", "area")}})
         counts = eng.events.counts(now - LIST_S) if hasattr(eng.events, "counts") else {}
+        try:        # what the engine did with what it was handed, a line per pack (sizeup/intel/counters.py)
+            counters = eng.counts(now)
+        except Exception:  # noqa: BLE001 - the counters never keep the card from showing
+            counters = None
         return {"settings": eng.policy.cfg, "defaults": policy_mod.DEFAULTS, "edited": sorted(ov["intel"]),
                 "packs": packs, "modes": list(MODES), "ruleset_hash": eng.ruleset_hash(), "counts_24h": counts,
+                "counters": counters,
                 "verdicts": list(VERDICTS), "queue": {"dropped": eng.dropped, "errors": eng.errors},
                 "listen": eng.listen.status() if eng.listen is not None else {"configured": False, "why": "not here"},
                 "infer": eng.infer.status() if eng.infer is not None else {"on": False, "ready": False, "why": "not here"},

@@ -688,6 +688,8 @@ class HubApp(App):
         self.cad.sources.paging_ok = self.hub.connected
         self.cad.sources.trigger = self._sources_poll_now      # a pre-alert here: the station's adapters poll now
         self.health.sources = self.cad.sources.panel
+        # the intel engine's counters, a line per pack: in scope / considered (sizeup/intel/counters.py)
+        self.health.intel = lambda: self.cad.intel.counts()["packs"]
         # MTA TrainTime or its fallback (#362); Tapout's phone pre-alert (not configured until an admin sets the topic)
         self.health.feeds = lambda: [self.trains.feed_health()] + ([self.prealert.feed_health()] if self.prealert is not None else [])
         # the hub's own error spikes (#285, sizeup/errwatch.py): the same status notifier; main() tees the log into it
