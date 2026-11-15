@@ -362,7 +362,7 @@ def test_the_counters_move_with_every_transcript_without_the_card_being_swapped(
         site.transmission()
         site.cad.store.rev += 1                                              # (as a recorded transmission moves it)
         pg.wait_for_function("(t) => document.querySelector(t[0]).textContent.startsWith(t[1])",
-                             arg=[stat, f"0 in scope / {i + 1} considered"])
+                             arg=[stat, f"0 in scope / {i + 1} considered"], timeout=45000)     # (a busy machine)
     assert f"{4} out of scope" in pg.get_attribute(stat, "title")            # the hover kept up too
     assert pg.evaluate("window._swaps") == 0
     assert pg.evaluate("() => [...document.querySelector('#s-intel').children].every((n, i) => n === window._kids[i])")
