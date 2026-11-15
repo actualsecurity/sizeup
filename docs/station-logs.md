@@ -35,7 +35,9 @@ station journald (sizeup-* units)
 - **Nothing is sent until those names are complete** (#548): a source id is known only once the runner exists, a
   few seconds into a start. Until the adapters' load is over (or at once on a station with no adapter), every entry
   waits in memory and its hand-off file stays; then each is filtered as above. A load that never ends: after 10 min
-  what waited is dropped (kept on the station, counted as "adapter") and the names known so far are used.
+  what waited is dropped (kept on the station, counted as "held too long") and the names known so far are used. Over
+  20,000 waiting lines: the oldest dropped the same way, said once in the station's log. Once the names are complete
+  they stay complete (a failed refresh keeps the last set).
 - **Scrub, fail closed** (on the station, where every credential is known). Text is NFKC-normalised and zero-width
   characters removed first. A line with a known credential value is dropped: the station token, the Access service
   token and the status token (from the environment and the config), and every secret field of the adapter's

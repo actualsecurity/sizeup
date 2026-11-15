@@ -469,11 +469,46 @@ def test_repro_548_a_load_that_never_ends_cant_stall_the_logs(tmp_path):
     run(s, logship.HOLD_MAX_S - logship.READ_S)
     assert not c.sent and s._held
     run(s, 2 * logship.READ_S)
-    assert not s._held and s.dropped_adapter == 7 and "not loaded" in logged[0]    # what waited: kept here, never sent
+    assert not s._held and s.dropped_held == 7 and "not loaded" in logged[0]       # what waited: kept here, never sent
+    assert s.stats()["dropped_held"] == 7 and s.dropped_adapter == 0
     handoff(s.handoff, [dict(JOURNAL[0], MESSAGE="14:20:00 hub link: ok"),
                         dict(JOURNAL[0], MESSAGE="14:20:01 [adapter] late line")], "000000000000002.jsonl")
     run(s, logship.BATCH_S + 2 * logship.READ_S)
-    assert sent_msgs(c) == ["14:20:00 hub link: ok"] and s.dropped_adapter == 8
+    assert sent_msgs(c) == ["14:20:00 hub link: ok"] and s.dropped_adapter == 1 and len(logged) == 1
+
+
+def test_repro_548_too_many_waiting_lines_drop_the_oldest_said_once(tmp_path, monkeypatch):
+    monkeypatch.setattr(logship, "HOLD_MAX_LINES", 3)
+    app = SimpleNamespace(sources_runner=None, sources_loaded=threading.Event())
+    logged = []
+    s, c = late_shipper(tmp_path, app)
+    s.log = logged.append
+    run(s, 60)
+    assert len(s._held) == 3 and s.dropped_held == 4 and s.dropped_adapter == 0
+    assert len(logged) == 1 and "the oldest kept on the station" in logged[0]
+    app.sources_runner = RUNNER
+    app.sources_loaded.set()
+    run(s, logship.BATCH_S + 2 * logship.READ_S)
+    assert not any("feedq" in m.lower() or "[adapter]" in m for m in sent_msgs(c))
+
+
+def test_repro_548_a_failed_refresh_after_the_load_never_holds_again(tmp_path):
+    app = SimpleNamespace(sources_runner=RUNNER, sources_loaded=threading.Event())
+    app.sources_loaded.set()
+    logged = []
+    s, c = late_shipper(tmp_path, app)
+    s.log = logged.append
+    run(s, logship.BATCH_S + 2 * logship.READ_S)
+    assert s._complete and "feedq-7" in s.markers()
+    s._markers_fn = lambda: 1 / 0                  # the refresh fails, well after HOLD_MAX_S
+    s._complete_fn = lambda: 1 / 0
+    s.now[0] += logship.HOLD_MAX_S + logship.MARKERS_S
+    handoff(s.handoff, [dict(JOURNAL[0], MESSAGE="14:30:00 feedq-7: polled"),
+                        dict(JOURNAL[0], MESSAGE="14:30:01 hub link: ok")], "000000000000002.jsonl")
+    run(s, logship.BATCH_S + 2 * logship.READ_S)
+    assert s._complete and not s._gave_up and not s._held and "feedq-7" in s.markers()    # the last complete set
+    assert sent_msgs(c)[-1] == "14:30:01 hub link: ok" and not any("feedq" in m for m in sent_msgs(c))
+    assert s.dropped_held == 0 and logged == []
 
 
 def test_repro_548_adapter_shipping_on_doesnt_wait(tmp_path):
@@ -492,6 +527,23 @@ def test_repro_548_the_adapters_context_log_is_tagged(tmp_path):
     s, _ = shipper(tmp_path, rows=[])
     assert s.is_adapter("sizeup-station", "14:00:00 [adapter] credential version 3")
     assert s.is_adapter("sizeup-update", "[adapter] x") and not s.is_adapter("sizeup-station", "14:00:00 hub: [adapter]")
+
+
+def test_repro_548_every_line_of_a_multiline_adapter_message_is_tagged(tmp_path):
+    """journald makes each line of a message an entry of its own: every one carries the tag, none ships."""
+    from sizeup.sources.runner import context_for
+    printed = []
+    ctx = context_for(tmp_path, lambda m: printed.append(f"14:00:00 {m}"))("entry point alpha")    # app.log's shape
+    ctx.log("login refused\nE99 at 1 TEST ST")
+    ctx.log("a\r\nb\rc\n")
+    ctx.log("")
+    assert printed == ["14:00:00 [adapter] login refused\n[adapter] E99 at 1 TEST ST",
+                       "14:00:00 [adapter] a\n[adapter] b\n[adapter] c", "14:00:00 [adapter] "]
+    rows = [dict(JOURNAL[0], MESSAGE=part) for m in printed for part in m.split("\n")]
+    rows.append(dict(JOURNAL[0], MESSAGE="14:00:01 hub link: ok"))
+    s, c = shipper(tmp_path, rows=rows)                # no markers at all: the tag alone keeps them
+    s.step()
+    assert [m for _, _, _, m in s.pending] == ["14:00:01 hub link: ok"] and s.dropped_adapter == 6
 
 
 def test_repro2_basicconfig_handlers_get_the_tag():

@@ -481,7 +481,8 @@ def context_for(state_root: str | Path, log: Callable[[str], None], clock: Calla
     """ctx_for(where) for load_adapters: each adapter's state dir under state_root/sources/. Its log lines start
     "[adapter] ": the station's log shipper keeps them on the station (cloud/logship.py ADAPTER_TAG, #548)."""
     def tagged(line: str) -> None:
-        log(f"[adapter] {line}")
+        # every line: journald splits a message on its newlines, and each part is an entry of its own
+        log("\n".join(f"[adapter] {x}" for x in (str(line).splitlines() or [""])))
 
     def make(where: str) -> SourceContext:
         safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in where)[:64]

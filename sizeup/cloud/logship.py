@@ -16,8 +16,8 @@ hub writes it to CloudWatch Logs (sizeup/cloud/cwlogs.py).
                 runner.py context_for); counted as dropped_adapter
               - until those names are complete (no adapter to load, or the load is over: a source id only the runner
                 knows), every entry waits in memory and the hand-off files stay (#548): no adapter line is sent in a
-                start's first minutes. HOLD_MAX_S at most: then what waited is dropped (kept on the station), counted
-                as dropped_adapter, and the names known are used
+                start's first minutes. HOLD_MAX_S and HOLD_MAX_LINES at most: then what waited is dropped (kept on the
+                station), counted as dropped_held and said once, and the names known are used. Once complete, always
               - the unit kept (the hub's include / exclude), its level (logscrub.level) at least the hub's threshold
                 (default info: debug dropped)
               - scrubbed (logscrub.scrub: a line with a credential is DROPPED, fail closed; a scrub that raises drops
@@ -222,6 +222,8 @@ class LogShipper:
         self._held: list[dict] = []            # entries waiting for that (#548)
         self._hold_since: float | None = None
         self._gave_up = False
+        self._held_full = False                # said once: the oldest waiting entries dropped
+        self.dropped_held = 0                  # waiting entries dropped (the cap, or HOLD_MAX_S): never sent
         self.config = dict(DEFAULT_CONFIG)
         self.repeats = logscrub.Repeats()
         self.pending: list[list] = []          # [ms, unit, level, msg] not spooled yet
@@ -272,15 +274,15 @@ class LogShipper:
         existed lacks its source ids); until then made again every INCOMPLETE_S."""
         now = self.clock()
         if self._markers_at is None or now - self._markers_at >= (MARKERS_S if self._complete else INCOMPLETE_S):
-            try:
-                done = bool(self._complete_fn())        # first: complete means the set below came after the load
+            try:                                        # first: complete means the set below came after the load
+                done = self._complete or bool(self._complete_fn())     # (once complete, always: the load is over)
             except Exception:  # noqa: BLE001
                 done = False
             try:
                 self._markers = {m.lower() for m in (self._markers_fn() or ()) if m}
                 self._markers_at, self._complete = now, done
-            except Exception:  # noqa: BLE001 - the old set stays, not complete: made again next time
-                self._markers_at, self._complete = now, False
+            except Exception:  # noqa: BLE001 - the old set stays (a complete one stays complete); made again later
+                self._markers_at = now
             if self._thread is not None:
                 install_log_tags()              # (again: an adapter may have called basicConfig since)
         return self._markers
@@ -301,7 +303,7 @@ class LogShipper:
         if now - self._hold_since < HOLD_MAX_S:
             return True
         self._gave_up = True
-        self.dropped_adapter += len(self._held)
+        self.dropped_held += len(self._held)
         self.log(f"station logs: the incident-source adapters not loaded after {HOLD_MAX_S:.0f} s: "
                  f"{len(self._held)} waiting lines kept on the station, not sent")
         self._held = []
@@ -351,9 +353,13 @@ class LogShipper:
         if self.dir is None:
             return
         if self.holding():
-            if len(self._held) >= HOLD_MAX_LINES:
+            if len(self._held) >= HOLD_MAX_LINES:      # the oldest: kept on the station, never sent
                 self._held.pop(0)
-                self.dropped_adapter += 1
+                self.dropped_held += 1
+                if not self._held_full:
+                    self._held_full = True
+                    self.log(f"station logs: over {HOLD_MAX_LINES} lines waiting for the incident-source adapters: "
+                             "the oldest kept on the station, not sent")
             self._held.append(raw)
             return
         self._take(raw)
@@ -653,4 +659,5 @@ class LogShipper:
                 "dropped_unit": self.dropped_unit, "dropped_spool": self.dropped_spool,
                 "dropped_adapter": self.dropped_adapter, "dropped_error": self.dropped_error,
                 "dropped_off": self.dropped_off, "rejected": self.rejected, "held": len(self._held),
+                "dropped_held": self.dropped_held,
                 "repeats": self.repeats.suppressed, "last_ok": self.last_ok, "error": self.last_error}
