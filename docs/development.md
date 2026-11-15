@@ -294,10 +294,17 @@ Read-only on S3. Running the hub on that copy talks to nothing outside only if y
 
 - **A new shell, nothing project-related in it.** No `LITESTREAM_*` (with `LITESTREAM_BUCKET` set and
   `SIZEUP_CACHE_S3` not `off`, the hub uploads its map caches into the production backup bucket,
-  `sizeup/cachesync.py`), no `AWS_*` or `AWS_PROFILE`, no `SIZEUP_*_BUCKET`, no `SIZEUP_*_TOPIC`. In doubt:
-  `unset $(env | grep -oE '^(LITESTREAM|AWS)_[A-Z_]*')`.
-- **The local hub config above** (Access, Transcribe, Polly and the DVR off) with `[prealert] enabled = false` added,
-  and **always `SIZEUP_CACHE_S3=off`**.
+  `sizeup/cachesync.py`), no `AWS_*` or `AWS_PROFILE`, no `SIZEUP_*_BUCKET`, no `SIZEUP_*_TOPIC`, no
+  `SIZEUP_ALLOW_OUTBOUND`. In doubt (zsh, bash or sh; nothing to clear is fine):
+
+  ```sh
+  for v in $(env | grep -oE '^(LITESTREAM_[A-Z0-9_]*|AWS_[A-Z0-9_]*|SIZEUP_[A-Z0-9_]*_(BUCKET|TOPIC)|SIZEUP_ALLOW_OUTBOUND)='); do unset "${v%=}"; done
+  ```
+
+- **The local hub config above** (Access, Transcribe, Polly and the DVR off) with the phone pre-alert switched off: it
+  already says `enabled = true` under `[prealert]`, so set that, don't add a second key:
+  `perl -i -pe '$s = $1 if /^\[([^\]]+)\]/; s/^enabled = true/enabled = false/ if $s eq "prealert"' deploy/hub/config.toml`.
+  And **always `SIZEUP_CACHE_S3=off`**.
 - **Role hub only, never all-in-one.** On a machine that has the private incident-source adapter and its
   credentials, all-in-one would load it and poll the county; the hub refuses to (`sizeup/cloud/adapters.py`
   `hub_guard`).
