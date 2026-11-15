@@ -65,6 +65,9 @@ POST /api/cad/preplan/<id>                {kind?, label?, note?, level?, priorit
                                           Settings audit log (section "preplan")
 GET  /api/cad/streetview                  {provider: "google", key} with a key set ([streetview] google_key: a browser
                                           key restricted by referrer), else {provider: ""}; no-store, never logged
+POST /api/cad/streetview/open             the page asks before it makes a panorama: {ok, used, limit, why?}. Counts one
+                                          (anyone signed in); {ok: false, why: "limit" | "unavailable" | "off"} makes
+                                          none. Fails closed
 GET  /api/cad/preplan/docs?incident=<id> | where=<address>
                                           a building's site documents (#459, sizeup/cad/preplan_docs.py): {docs, gen,
                                           configured}; anyone signed in and active; admin-only ones: admins only
@@ -385,6 +388,7 @@ WRITES = (
     (PREMISE, "dispatch"),                                                  # premise notes: add, edit, expire, seen (#403)
     (PREPLAN, "dispatch"),                                                  # pre-plan points: add, edit, move, delete (#456)
     (DOCS, "dispatch"),                                                     # site documents: upload, edit, align, delete (#459)
+    (re.compile(r"/api/cad/streetview/open"), "read"),                      # a panorama opened: counted against the month's limit
     (re.compile(r"/api/incident/[^/]{1,80}/close"), "dispatch"),            # the monitor's incident list (server.py)
     (UNIT_STATION, "admin"),                                                # a unit's home station: Settings > Units
     (re.compile(r"/api/cad/settings/(?:channels|stt)"), "admin"),           # Settings > Radios: record / transcribe /
@@ -1175,6 +1179,8 @@ class CadApi:
             return c.unit_status(int(m.group(1)), body)
         if path == "/api/cad/dispatch-mode":
             return c.dispatch_mode(body)
+        if path == "/api/cad/streetview/open":
+            return c.streetview_open(body)
         if m := PREALERT.fullmatch(path):
             return c.prealert_dismiss(int(m.group(1)), body)
         if m := AIRPORT_ALERT.fullmatch(path):

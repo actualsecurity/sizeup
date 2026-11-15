@@ -363,6 +363,9 @@ class Config:
     # off (an admin sees "Street view: key not set"). Never logged; the page gets it only from GET /api/cad/streetview.
     streetview_google_key: str = field(default="", repr=False)
     streetview_key_bad: bool = False                # a value that is not a key: off (App logs it once)
+    # [streetview] monthly_limit: panoramas the hub lets people open per month (Google bills each one past its free
+    # 5,000); 0 = no limit. Counted by the hub (POST /api/cad/streetview/open), not by Google.
+    streetview_monthly_limit: int = 4500
     vessels_receiver: bool = False
     vessels_sdr: str = ""
     vessels_gain: str = "auto"
@@ -1023,14 +1026,17 @@ def _streetview(data: dict) -> dict:
     """[streetview] google_key / env SIZEUP_GOOGLE_MAPS_KEY -> streetview_google_key ("" = off). "none" (the SSM
     placeholder before a key exists) is off too, and so is a value that isn't a key's shape (streetview_key_bad: the
     app logs one line, never the value)."""
-    sv = _take(data.get("streetview", {}), "streetview", {"google_key"})
+    sv = _take(data.get("streetview", {}), "streetview", {"google_key", "monthly_limit"})
+    limit = sv.get("monthly_limit", 4500)
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 0 <= limit <= 1_000_000:
+        raise ConfigError("streetview.monthly_limit: a whole number from 0 (no limit) to 1000000")
     key = _env("SIZEUP_GOOGLE_MAPS_KEY", str(sv.get("google_key", ""))).strip()
     if key.lower() in ("none", "off", "-"):
         key = ""
     if key and not re.fullmatch(r"[A-Za-z0-9_-]{20,128}", key):
         # never a ConfigError: a hand-edited SSM value would stop the hub from starting at all; off, said once by the app
-        return dict(streetview_google_key="", streetview_key_bad=True)
-    return dict(streetview_google_key=key)
+        return dict(streetview_google_key="", streetview_key_bad=True, streetview_monthly_limit=limit)
+    return dict(streetview_google_key=key, streetview_monthly_limit=limit)
 
 
 def _bbox(v, what: str, max_deg: float = 3.0) -> tuple[float, float, float, float]:

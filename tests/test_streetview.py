@@ -160,7 +160,7 @@ def test_the_script_wires_the_menu_the_long_press_the_button_and_the_viewer():
     assert '"touchstart"' in src and "LONG_MS" in src and '"touchmove"' in src   # long press (iOS sends no contextmenu)
     assert "this.control.focused" in src                                  # the call's map: at the call
     assert "new this.lib.StreetViewPanorama(" in src and src.count("new this.lib.StreetViewPanorama(") == 1
-    assert "if (!this.pano)" in src                                       # one panorama per page, reused (billed per one)
+    assert "if (this.pano) {" in src and "|| this.pano) return" in src    # one panorama per page, reused (billed per one)
     for ev in ('"pano_changed"', '"position_changed"', '"pov_changed"'):
         assert f"this.pano.addListener({ev}" in src, ev                   # the map marker follows each move and turn
     assert "rotationAlignment: \"map\"" in src and "setRotation(" in src
@@ -536,3 +536,132 @@ console.log(JSON.stringify({ labels: [359.6, 359.4, 360, -0.4, 0, 720.2, -90].ma
                                     timeout=30).stdout)
     assert out["labels"] == ["0°", "359°", "0°", "0°", "0°", "0°", "270°"]
     assert 0 <= out["near"] < 360 and out["near"] in (0, 359.9)
+
+
+# -- the month's limit: the hub counts panoramas opened, and says no past [streetview] monthly_limit ----------------------
+
+def open_one(api, email=None):
+    code, raw, _ = api.post("/api/cad/streetview/open", b"{}", Identity(email=email) if email else None)
+    return code, json.loads(raw)
+
+
+def test_the_limit_comes_from_the_config_and_defaults_to_4500(tmp_path, monkeypatch):
+    monkeypatch.delenv("SIZEUP_GOOGLE_MAPS_KEY", raising=False)
+    p = tmp_path / "c.toml"
+    p.write_text("")
+    assert config_mod.load(p).streetview_monthly_limit == 4500
+    p.write_text("[streetview]\nmonthly_limit = 0\n")
+    assert config_mod.load(p).streetview_monthly_limit == 0
+    assert Cad.from_config(config_mod.load(p)).s.streetview_limit == 0
+    for bad in ("-1", "1000001", '"many"', "true", "12.5"):
+        p.write_text(f"[streetview]\nmonthly_limit = {bad}\n")
+        with pytest.raises(config_mod.ConfigError, match="monthly_limit"):
+            config_mod.load(p)
+
+
+def test_opens_are_counted_and_refused_at_the_limit():
+    api = CadApi(make_cad(streetview_key=KEY, streetview_limit=3))
+    assert [open_one(api)[1]["ok"] for _ in range(3)] == [True, True, True]
+    code, out = open_one(api)
+    assert code == 200 and out == {"ok": False, "why": "limit", "used": 3, "limit": 3}
+    assert open_one(api)[1]["used"] == 3                      # a refusal counts nothing
+
+
+def test_no_limit_counts_but_never_refuses():
+    api = CadApi(make_cad(streetview_key=KEY, streetview_limit=0))
+    assert all(open_one(api)[1]["ok"] for _ in range(50))
+    assert open_one(api)[1]["used"] == 51
+
+
+def test_the_count_starts_over_each_month_pacific_time():
+    now = [1_785_000_000.0]                                    # mid July 2026
+    api = CadApi(make_cad(clock=lambda: now[0], streetview_key=KEY, streetview_limit=2))
+    open_one(api), open_one(api)
+    assert open_one(api)[1]["ok"] is False
+    now[0] += 40 * 86400                                       # into the next month
+    assert open_one(api)[1] == {"ok": True, "used": 1, "limit": 2}
+
+
+def test_the_month_turns_at_midnight_pacific_not_utc():
+    from datetime import datetime, timezone
+    at = lambda s: datetime.fromisoformat(s).replace(tzinfo=timezone.utc).timestamp()   # noqa: E731
+    now = [at("2026-08-01T05:00:00")]                          # 22:00 on Jul 31 in Pacific: still July
+    cad = make_cad(clock=lambda: now[0], streetview_key=KEY, streetview_limit=1)
+    api = CadApi(cad)
+    assert open_one(api)[1]["ok"] is True and open_one(api)[1]["ok"] is False
+    now[0] = at("2026-08-01T08:00:00")                         # 01:00 Aug 1 in Pacific: a new month
+    assert open_one(api)[1]["ok"] is True
+
+
+def test_no_key_means_nothing_is_counted():
+    api = CadApi(make_cad())
+    code, out = open_one(api)
+    assert code == 200 and out["ok"] is False and out["why"] == "off" and out["used"] == 0
+
+
+def test_a_store_that_cannot_write_is_a_no_and_says_so_without_the_key():
+    logged = []
+    cad = make_cad(streetview_key=KEY, streetview_limit=10)
+    cad.log = logged.append
+    cad.store.counter_take = lambda *a: (_ for _ in ()).throw(RuntimeError("disk full " + KEY))
+    code, out = CadApi(cad).post("/api/cad/streetview/open", b"{}")[:2]
+    assert code == 200 and json.loads(out)["ok"] is False and json.loads(out)["why"] == "unavailable"
+    assert logged and all(KEY not in m for m in logged)
+
+
+def test_a_fenced_hub_counts_nothing_and_refuses(tmp_path):
+    from sizeup.fence import FencedWrite
+    cad = make_cad(tmp_path, streetview_key=KEY, streetview_limit=10)
+    api = CadApi(cad)
+    assert open_one(api)[1]["ok"] is True
+    cad.store.may_write = lambda: False                         # the hub lost its lock
+    out = open_one(api)[1]
+    assert out["ok"] is False and out["why"] == "unavailable"
+    cad.store.may_write = lambda: True
+    assert open_one(api)[1]["used"] == 2                        # still the one that was counted, plus this
+    assert FencedWrite                                          # (the exception class a fenced write raises)
+
+
+def test_two_requests_never_take_the_last_one():
+    api = CadApi(make_cad(streetview_key=KEY, streetview_limit=20))
+    got, lock = [], threading.Lock()
+
+    def go():
+        ok = open_one(api)[1]["ok"]
+        with lock:
+            got.append(ok)
+    ts = [threading.Thread(target=go) for _ in range(60)]
+    [t.start() for t in ts]
+    [t.join() for t in ts]
+    assert got.count(True) == 20 and got.count(False) == 40
+
+
+def test_any_signed_in_viewer_may_open_one_but_nobody_unsigned_behind_access(tmp_path, keys, jwks):
+    from tests.test_access import AUD, TEAM, jwt
+    from tests.test_cloud import HubRun, hub_cfg
+    from tests.test_roles import VAL, people
+    h = HubRun(hub_cfg(tmp_path, cloud_access_team=TEAM, cloud_access_aud=AUD, streetview_google_key=KEY))
+    try:
+        h.server.access.certs_url = jwks.url
+        h.server.access.log = lambda m: None
+        people(h.app.cad)
+        req = urllib.request.Request(h.url + "/api/cad/streetview/open", data=b"{}", method="POST",
+                                     headers={"Content-Type": "application/json", "Origin": h.url})
+        with pytest.raises(urllib.error.HTTPError) as e:
+            urllib.request.urlopen(req)
+        assert e.value.code == 401
+        req.add_header("Cf-Access-Jwt-Assertion", jwt(keys[0], email=VAL))
+        with urllib.request.urlopen(req) as r:                  # a viewer may look at street view too
+            assert r.status == 200 and json.loads(r.read())["ok"] is True
+    finally:
+        h.close()
+
+
+def test_the_page_asks_before_the_first_panorama_and_never_for_a_move():
+    js = (STATIC / "streetview.js").read_text()
+    assert js.count("/api/cad/streetview/open") >= 1
+    show = js[js.index("    show(pano, heading) {"):js.index("    panoMoved() {")]
+    assert show.index("takeLease()") < show.index("new this.lib.StreetViewPanorama(")    # asked, then made
+    assert "takeLease()" not in js[js.index("    panoMoved() {"):]                       # never on a move or a jump
+    assert "Street view: monthly limit reached" in js
+    assert "if (!l.ok)" in show                                                           # a no makes no panorama

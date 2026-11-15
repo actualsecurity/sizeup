@@ -13,6 +13,9 @@
 //                {provider: ""}): a browser key restricted by HTTP referrer to the hub's address and to the Maps
 //                JavaScript API, from the hub's config / SSM (sizeup/config.py [streetview]). No key: nothing shows,
 //                except to an admin, whose button and menu item say "Street view: key not set".
+//   The limit    Before the page's first panorama is made it asks POST /api/cad/streetview/open: the hub counts it against
+//                [streetview] monthly_limit and answers no past it ("Street view: monthly limit reached"), or when it
+//                can't count. The panorama is reused, so moving around is not counted again.
 //   Privacy      Nothing goes to Google until someone opens the viewer: the script loads then, once per page, with
 //                an origin-only referrer, and Google is sent coordinates and panorama ids only (never a call's
 //                number, address or notes). One StreetViewPanorama per page, reused (Google bills each one made).
@@ -141,6 +144,22 @@ window.StreetView = (() => {
     return sdkP;
   }
 
+  // ---- the month's limit: asked once per page, before the first panorama is made (Google bills each one made) --------------
+  // POST /api/cad/streetview/open counts it on the hub and says no once [streetview] monthly_limit is reached, and when it
+  // can't count (it fails closed). A yes is kept for the page: the one panorama is reused, so later moves cost nothing.
+  let lease = null;
+  function takeLease() {
+    if (!lease) {
+      lease = fetch("/api/cad/streetview/open", { method: "POST", cache: "no-store", credentials: "same-origin",
+                                                  headers: { "Content-Type": "application/json" }, body: "{}" })
+        .then((r) => (r.ok ? r.json() : { ok: false, why: "unavailable" }))
+        .catch(() => ({ ok: false, why: "unavailable" }))
+        .then((l) => { if (!l || !l.ok) lease = null; return l || { ok: false, why: "unavailable" }; });   // a no is asked again next time
+    }
+    return lease;
+  }
+  const noPanorama = (l) => (l && l.why === "limit" ? "Street view: monthly limit reached" : "Street view unavailable");
+
   // ---- the viewer (one per page) --------------------------------------------------------------------------------------
   const V = {
     ov: null, pano: null, svc: null, lib: null, map: null, mark: null, tgt: null, dates: new Map(), seq: 0, target: null,
@@ -207,7 +226,17 @@ window.StreetView = (() => {
     show(pano, heading) {
       this.empty("");
       const pov = { heading, pitch: 0 };
-      if (!this.pano) {
+      if (this.pano) {
+        this.pano.setPano(pano);
+        this.pano.setPov(pov);
+        this.pano.setVisible(true);
+        this.panoMoved();
+        return;
+      }
+      const seq = this.seq;
+      takeLease().then((l) => {                // the first panorama of the page: the hub counts it, or says no
+        if (seq !== this.seq || this.pano) return;
+        if (!l.ok) { this.empty(noPanorama(l)); return; }
         this.pano = new this.lib.StreetViewPanorama(this.panoEl, {
           pano, pov, zoom: 0, visible: true, addressControl: false, fullscreenControl: false, enableCloseButton: false,
           motionTracking: false, motionTrackingControl: false, showRoadLabels: true, linksControl: true, panControl: true,
@@ -216,12 +245,8 @@ window.StreetView = (() => {
         this.pano.addListener("pano_changed", () => this.panoMoved());
         this.pano.addListener("position_changed", () => this.moved());
         this.pano.addListener("pov_changed", () => this.turned());
-      } else {
-        this.pano.setPano(pano);
-        this.pano.setPov(pov);
-        this.pano.setVisible(true);
-      }
-      this.panoMoved();
+        this.panoMoved();
+      });
     },
     panoMoved() {
       const id = this.pano && this.pano.getPano();
