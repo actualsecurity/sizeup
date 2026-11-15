@@ -144,6 +144,10 @@ def test_the_first_pack_is_untouched_by_the_table():
     ("transmit a second alarm", "transmit a 2nd alarm"),                    # number words as digits
     ("two car m v a", "2 car mva"),
     ("ten seventy five the box", "10 75 the box"),                          # the longest entry first
+    ("f d is around for a fire alarm", "fd is en route for a fire alarm"),  # forms seen after the replay
+    ("c p r on progress", "cpr in progress"),
+    ("two car m b a", "2 car mva"),
+    ("portchester mutual aid", "port chester mutual aid"),
     ("copy that headquarters", None),
     ("", None),
 ])
@@ -224,14 +228,27 @@ COUNTY_PD = [
     ("shots fired", "weapons"),
     ("male with a knife", "weapons"),
     ("barricaded subject inside the house", "barricade"),
+    # after the replay: the kinds of phrasing and mishearing it showed, in invented sentences
+    ("e m s en route to Sample St", "ems_call"),
+    ("ambulance is being sent to 100 Example Ave", "ems_call"),
+    ("70 year old male with chest pain", "ems_call"),
+    ("adult female not feeling well", "ems_call"),
+    ("f d is around for a water leak at 100 Example Ave", "fd_call"),
+    ("fire department is being dispatched to the school", "fd_call"),
+    ("for a residential c o alarm", "hazmat"),
+    ("two car m b a with injuries", "mva_injury"),
+    ("c p r on progress", "aided"),
 ]
 COUNTY_PD_QUIET = [
     "copy", "10-4 headquarters", "barricade", "road barricades are up on Sample St", "traffic stop Sample St",
     "he ran out of gas", "gas station on Example Ave", "burglar alarm commercial", "smoke detector chirping",
-    "no injuries property damage only accident", "the fire department is on scene", "e m s en route",
+    "no injuries property damage only accident", "the fire department is on scene",
     "m v a Sample St", "cancel the ambulance patient refused", "false alarm burnt food", "fire alarm test at the school",
     "place an order for lunch", "elevator is empty nobody inside", "nobody in the water", "not armed",
     "disregard the smoke coming from the roof", "for training shots fired",
+    "we don't need e m s anymore", "dog hit by a car on Sample St", "she fainted but is alert again", "elderly male walking a dog",
+    "negative overdose", "are there any injuries with that crash", "armed one copy",
+    "just smoke from cooking", "female unresponsive now alert",
 ]
 EMS = [
     ("unresponsive male c p r in progress", "aided"),
@@ -256,6 +273,8 @@ EMS_QUIET = [
     "ambulance responding to 10 Sample St for a fall", "responding", "m v a Sample St", "patient refusal r m a",
     "scene is safe", "transporting one to the hospital", "structure fire Example Ave", "odor of gas in the basement",
     "requesting an additional engine", "partial roof collapse", "this is a drill c p r in progress", "back in service",
+    "you're not responding", "clear of the lift assist", "medic 4 patients are stable",
+    "no c o readings, patient feels sick", "holding for police to bring the keys", "going out of service for decon",
 ]
 FIRE = [
     ("may day may day may day", "mayday"),
@@ -274,12 +293,19 @@ FIRE = [
     ("working fire heavy smoke showing", "working_fire"),
     ("ten seventy five the box", "working_fire"),
     ("reports of people trapped on the third floor", "trapped"),
+    ("we'll go with the 1075", "working_fire"),
+    ("responding on a 10-75", "working_fire"),
+    ("portchester mutual aid to cover", "mutual_aid"),
+    ("command to 60 control requesting additional manpower", "more_units"),
 ]
 FIRE_QUIET = [
     "engine 1 responding", "radio check", "this is a drill mayday mayday", "mayday drill tonight", "fire is under control",
     "patient collapsed in the kitchen", "no additional units needed", "hydrant test complete", "mutual aid",
     "nothing showing investigating", "everyone is out of the building", "family member missing", "collapse zone",
     "smoke showing",
+    "engine 2 ladder 3 rescue 4 responding", "responding to 1075 Example Ave", "negative fire showing",
+    "we don't need any additional engines", "additional manpower", "low water pressure alarm at the mill",
+    "port chester mutual aid was cancelled", "engine 9 has the hydrant",
 ]
 
 
@@ -324,12 +350,14 @@ def test_fire_stays_quiet(text):
 def test_a_crash_and_the_ambulance_asked_for_in_the_next_transmission_are_one_event():
     e, sink = engine()
     assert e.feed(crow("t1", "two car m v a at Sample St and Test Rd", 1000.0)) == []       # the word alone: a hit, no event
-    [ev] = e.feed(crow("t2", "start e m s for the driver", 1010.0))
-    assert (ev.category, ev.mode, ev.traffic_ids) == ("mva_injury", "log", ["t1", "t2"])
+    evs = {ev.category: ev for ev in e.feed(crow("t2", "start e m s for the driver", 1010.0))}
+    assert set(evs) == {"mva_injury", "ems_call"}                           # the crash, and EMS asked for
+    assert (evs["mva_injury"].mode, evs["mva_injury"].traffic_ids) == ("log", ["t1", "t2"])
     assert {h.rule_id for h in sink.hits} >= {"cpd.mva_word", "cpd.mva_ems"}                # every hit is counted (recall)
     e2, _ = engine()
     e2.feed(crow("t1", "two car m v a at Sample St and Test Rd", 1000.0))
-    assert e2.feed(crow("t2", "start e m s for the driver", 1000.0 + 300)) == []            # outside the window: not tied
+    late = e2.feed(crow("t2", "start e m s for the driver", 1000.0 + 300))                  # outside the window: not tied
+    assert [ev.category for ev in late] == ["ems_call"]
 
 
 def test_a_resolved_call_is_damped():

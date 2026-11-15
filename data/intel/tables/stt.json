@@ -1,7 +1,7 @@
 {
   "_about": "Speech-to-text fixes for the intel rule packs that say \"normalize\": \"stt\" (sizeup/intel/rules.py Normalizer). Data only: \"heard\": \"meant\", words in order, case and punctuation aside, at most 6 words a side. One pass, the longest entry first; a fix is never fixed again. A pack's phrases are tried on the words as transcribed and on the words after these fixes, so an entry can only add a reading: write each rule phrase once, in the spelling on the right-hand side here (\"odor of gas\", \"rollover\", \"en route\", \"2nd alarm\"). Generic vocabulary only: no street names, people, callsigns or anything heard on the air. Keep a sound-alike with its context (\"order of gas\", never \"order\" alone).",
   "name": "stt",
-  "version": 1,
+  "version": 2,
   "split": {
     "roll over": "rollover",
     "over turned": "overturned",
@@ -40,7 +40,10 @@
     "b l s": "bls",
     "m c i": "mci",
     "c o": "co",
-    "f d": "fd"
+    "f d": "fd",
+    "portchester": "port chester",
+    "ryebrook": "rye brook",
+    "m b a": "mva"
   },
   "sound": {
     "order of gas": "odor of gas",
@@ -61,7 +64,14 @@
     "wire's": "wires",
     "non breathing": "not breathing",
     "narcane": "narcan",
-    "evac": "evacuate"
+    "evac": "evacuate",
+    "a root": "en route",
+    "a route for": "en route for",
+    "is around for": "is en route for",
+    "on progress": "in progress",
+    "mba": "mva",
+    "air bag deployment": "airbag deployment",
+    "airbags deployment": "airbag deployment"
   },
   "numbers": {
     "zero": "0",
