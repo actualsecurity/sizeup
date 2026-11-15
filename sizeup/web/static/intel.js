@@ -164,7 +164,8 @@ window.IntelSettings = (() => {
     const [lab, cb] = sCheck("Push", s.push, "Off: detection and the map go on, nothing is pushed");
     cb.addEventListener("change", () => post({ action: "set", key: "push", value: cb.checked }, cb.checked ? "Intel pushes on" : "Intel pushes off"));
     const counts = el("span", "dim small", `24 h: ${c24.events || 0} events · ${c24.pushed || 0} pushed · ${c24.suppressed || 0} held`);
-    counts.title = "The last 24 hours: events made, pushed, and held back (a cap, quiet hours, pushes off)";
+    counts.title = "The last 24 hours: events made, pushed, and held: not pushed for any reason (shadow mode, pushes off, "
+      + "quiet hours, a cap, merged into an earlier push, withheld by the scrub, or unsent)";
     top.append(line(lab, [
       field("/h", num(s.per_hour, 1, 1000, 1, set("per_hour"), "Pushes an hour", "Pushes an hour, at most")),
       field("/day", num(s.per_day, 1, 10000, 1, set("per_day"), "Pushes a day", "Pushes a day, at most")),
@@ -221,14 +222,18 @@ window.IntelSettings = (() => {
       field("to", hm("quiet_to", "Quiet until", "Quiet hours until, local time"), "in-w-time"),
     ]));
     const kids = [top];
+    const ran = new Map((((d.counters || {}).packs) || []).map((x) => [x.pack, x]));     // what each pack was handed
     for (const p of d.packs) {
       const pset = (key) => (v) => post({ action: "pack", pack: p.name, [key]: v });
+      const c = ran.get(p.name);
+      const seen = c ? el("span", c.level === "warn" ? "warn small" : "dim small", c.text) : "";
+      if (c) seen.title = c.title;
       const head = el("div", "in-rows in-pack");
       head.append(line(el("b", "", `${p.label} (${p.name})`), [
         field("mode", modeSel(d.modes, p.mode, pset("mode"), `${p.label} pack mode`), "in-w-mode"),
         field("threshold", num(p.threshold, 0, 1, 0.05, pset("threshold"), "Threshold: WHAT at least this", "Threshold, 0 to 1: WHAT at least this")),
         field("window s", num(p.window_s, 10, 1800, 10, pset("window_s"), "Seconds of one source merged into one candidate")),
-      ]));
+      ], seen));
       // each category: its name, then its mode (and, once changed, the way back), in columns of one width
       const cats = el("div", "in-cats");
       cats.setAttribute("role", "group");

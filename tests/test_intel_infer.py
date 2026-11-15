@@ -9,6 +9,8 @@ import sys
 import threading
 import types
 
+import pytest
+
 from sizeup.intel import infer as I
 from sizeup.intel.engine import IntelEngine, RecordingSink
 from sizeup.intel.events import MemoryEvents
@@ -194,6 +196,44 @@ def test_what_is_sent_has_no_radio_ids_or_plates_and_no_talkers():
     [req] = p.asked
     assert "7654321" not in req.text and "ABC1234" not in req.text and "ABC 1234" not in req.text
     assert "Officer" not in req.text and set(req.categories) >= {"weapons", "mva_injury"} and "Port Chester" in req.towns
+
+
+@pytest.mark.parametrize("text", [
+    "respond to 123 Example Street for smoke",            # a short word, a house number, a street: the address stays
+    "units go to 4500 Sample Avenue",
+    "now at 123 Example St",
+    "then 123 Example Street",
+    "over 1200 Example Boulevard",
+    "caller is near 300 Test Lane",
+    "from 250 Sample Road, the second floor",
+    "MVA at 250 Sample Rd and Test Ave",
+    "the 4500 block of Sample Avenue",
+    "apartment 304 at 12 Example Court",
+    "NY 120 at Example Ave",                              # a route label, never a plate
+    "exit 123 on the parkway",
+    "the tag is on 123 Example Street",                   # a plate word, then an address
+])
+def test_a_house_number_after_a_short_word_is_kept_for_the_model(text):
+    assert I.clean_text(text) == text
+
+
+@pytest.mark.parametrize("text, kept", [
+    ("plate ABC1234", "plate [plate]"),
+    ("ABC 1234 northbound", "[plate] northbound"),
+    ("ABC-1234", "[plate]"),
+    ("abc-1234 last seen northbound", "[plate] last seen northbound"),
+    ("abc 1234 on the way", "[plate] on the way"),                               # lower case, no street after it
+    ("ABC 1234 parked on Sample Street", "[plate] parked on Sample Street"),     # a street further on is not its street
+    ("ABC 1234 Example Street", "[plate] Example Street"),                       # capitals: a plate, whatever follows
+    ("New York plate XYZ 9876 at 12 Example Ave", "New York plate [plate] at 12 Example Ave"),
+    ("Connecticut tag AB 12345", "Connecticut tag [plate]"),                     # state styles, after a plate word
+    ("New Jersey reg D12 ABC", "New Jersey reg [plate]"),
+    ("registration is 123 ABC", "registration is [plate]"),
+    ("plate D12 on Sample Street", "plate [plate] on Sample Street"),
+    ("radio 7654321 to 123 Example Street", "radio [id] to 123 Example Street"),
+])
+def test_plate_shaped_tokens_are_still_taken_out(text, kept):
+    assert I.clean_text(text) == kept
 
 
 def test_refusals_and_bad_json_are_nothing():

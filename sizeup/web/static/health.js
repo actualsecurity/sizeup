@@ -139,6 +139,15 @@ const StationHealth = (() => {
         d.feeds.map((f) => [f.label, [f.state, feedCls(f.state)], f.why || "",
           f.at ? `${when(f.at)} (${longDur(serverNow() - f.at)} ago)` : "never", f.fallback || ""]), ""));
     }
+    if ((d.intel || []).length) {   // radio pre-alerts (sizeup/intel/counters.py): in scope / considered, a line per pack
+      const box = el("div", "hl-hints");
+      for (const x of d.intel) {
+        const p = el("p", x.level === "warn" ? "notice" : "dim small", `${x.label}: ${x.text}`);
+        p.title = x.title || "";
+        box.append(p);
+      }
+      kids.push(el("h3", "hl-sub", "Intel"), box);
+    }
     kids.push(el("h3", "hl-sub", "Station"), dl([
       ["Station", st.name || st.id],
       ["Connection", st.connected ? "Connected" : st.last_state ? `Offline · ${longDur(serverNow() - st.last_state)}` : "Offline",

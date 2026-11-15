@@ -84,6 +84,8 @@ class IntelAdmin:
         counts = eng.events.counts(now - LIST_S) if hasattr(eng.events, "counts") else {}
         return {"settings": eng.policy.cfg, "defaults": policy_mod.DEFAULTS, "edited": sorted(ov["intel"]),
                 "packs": packs, "modes": list(MODES), "ruleset_hash": eng.ruleset_hash(), "counts_24h": counts,
+                # what the engine did with what it was handed, a line per pack (sizeup/intel/counters.py)
+                "counters": eng.counts(now),
                 "verdicts": list(VERDICTS), "queue": {"dropped": eng.dropped, "errors": eng.errors},
                 "listen": eng.listen.status() if eng.listen is not None else {"configured": False, "why": "not here"},
                 "infer": eng.infer.status() if eng.infer is not None else {"on": False, "ready": False, "why": "not here"},

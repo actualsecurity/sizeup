@@ -310,3 +310,30 @@ def test_the_card_is_still_swapped_in_whole_and_never_under_a_field(site, browse
     pg.wait_for_function("document.querySelector(\"#s-intel [aria-label='Pushes a day']\").value === '323'")
     assert pg.posts[n:] == [] and pg.input_value(field) == str(was)
     assert pg.errors == []
+
+
+@pytest.mark.parametrize("width", [1280, 768, 390])
+def test_each_pack_says_what_it_was_handed_in_its_line(site, browser, width):
+    """The engine's counters (sizeup/intel/counters.py): one terse line at the end of the pack's own line, the whole
+    count in its hover, inside the card at every width; a pack with nothing in scope for a day reads as a warning."""
+    def a_day_of_nothing(route):
+        r = route.fetch()
+        d = r.json()
+        for p in d["counters"]["packs"]:
+            p.update(level="warn", text="0 in scope / 4,012 considered · last in scope: never")
+        route.fulfill(response=r, body=json.dumps(d))
+    site.cad.intel.feed({"id": "x1", "start": site.cad.clock(), "source": "p25:example:1", "system": "example",
+                         "service": "fire", "text": "radio check"})
+    pg = open_intel(browser, site, width)
+    stat = pg.locator(f"{CARD} .in-pack .in-stat span").first
+    assert stat.text_content() == "0 in scope / 1 considered · last in scope: never"
+    assert "1 out of scope" in stat.get_attribute("title") and "warn" not in stat.get_attribute("class")
+    pg.route("**/api/cad/intel", a_day_of_nothing)
+    pg.reload()
+    pg.wait_for_selector(f"{CARD} table")
+    stat = pg.locator(f"{CARD} .in-pack .in-stat span").first
+    assert stat.text_content().startswith("0 in scope / 4,012 considered") and "warn" in stat.get_attribute("class")
+    box, card = stat.bounding_box(), pg.locator(CARD).bounding_box()
+    assert box["x"] >= card["x"] - 0.5 and box["x"] + box["width"] <= card["x"] + card["width"] + 0.5
+    assert pg.evaluate("document.querySelector('#s-intel').scrollWidth <= document.querySelector('#s-intel').clientWidth")
+    assert pg.errors == []
