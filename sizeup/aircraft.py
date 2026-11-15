@@ -1911,7 +1911,8 @@ class AircraftLayer:
         for f in self.feeds:
             f.st = {"next": 0.0, "fails": 0, "rest_until": 0.0, "why": "", "ok": None, "at": None, "n": 0, "fresh": 0,
                     "score": None, "snap": None, "reads": 0, "failures": 0, "failed_at": None, "busy": False, "busy_since": None,
-                    "down_since": None, "log_kind": "", "log_at": -1e18, "logged": False, "sent": None}
+                    "down_since": None, "log_kind": "", "log_at": -1e18, "logged": False, "sent": None,
+                    "slow": False}
         self._prim = ""                         # the primary's key as last chosen (kept while none is steady)
         self._prim_log = {"at": -1e18, "skipped": 0, "since": None}   # its changes logged at most every FEED_LOG_EVERY_S
         have = {f.key for f in self.feeds}
@@ -2106,16 +2107,19 @@ class AircraftLayer:
         it is up, else the up one that answered last (the order on a tie). None up (all resting or stuck): None.
         #542: adsb.lol timed out or answered 429 ~150 times a day from the hub while adsb.fi failed none in a week;
         a busier-feed rule kept handing the primary back to adsb.lol, so the order decides, not the count.
-        None clean and the one chosen last only briefly resting (its first failure in a row, back within PRIMARY_S)
-        and not stuck: it stays (#573 review: both feeds failing now and then, a network wobble, flipped it ~3 times
-        a minute)."""
+        None clean and the one chosen last only briefly resting after a QUICK failure (its first in a row, a 429, a
+        refused or reset connection, an HTTP error: back within PRIMARY_S) and not stuck: it stays (#573 review: both
+        feeds failing now and then, a network wobble, flipped it ~3 times a minute). A slow failure (a stall cut at
+        its deadline, a connect timeout: longer than PRIMARY_S) hands over at once: waiting out a second stall left
+        the emergency watch ~44 s without an update."""
         now = self.clock()
         feeds = self.ordered()
         first = next((f for f in feeds if self.clean(f, now)), None)
         if first is not None:
             return first
         cur = next((f for f in feeds if f.key == self._prim), None)
-        if cur is not None and not self.stuck(cur, now) and cur.st["fails"] <= 1 and cur.st["rest_until"] - now <= PRIMARY_S:
+        if cur is not None and not self.stuck(cur, now) and not cur.st["slow"] and cur.st["fails"] <= 1 \
+                and cur.st["rest_until"] - now <= PRIMARY_S:
             return cur
         up = [f for f in feeds if f.st["rest_until"] <= now and not self.stuck(f, now)]
         if not up:
@@ -2316,7 +2320,10 @@ class AircraftLayer:
                          + (f" (failing since {tz.hhmmss(since)}, {st['fails']} in a row, {st['failures']} in all; "
                             f"logged every {every / 60:.0f} min)" if again else ""))
                 st.update(log_kind=kind, log_at=now, logged=True)
-            st.update(rest_until=now + wait, next=now + wait, why=why, failed_at=now)
+            # slow: the failure took longer than a primary's interval (a stall cut at its deadline, a connect
+            # timeout): the primary hands over at once rather than waiting out another one (primary())
+            slow = st["sent"] is not None and now - st["sent"] > PRIMARY_S
+            st.update(rest_until=now + wait, next=now + wait, why=why, failed_at=now, slow=slow)
             return False
         now = self.clock()                       # (when it answered)
         if st["down_since"]:
@@ -2332,7 +2339,7 @@ class AircraftLayer:
         if not f.local:                          # its role now, not when the read began: promoted meanwhile (the
             iv = self.interval(f, self.demanded()) or iv     # primary refused while this was in flight), its rate
         st.update(fails=0, rest_until=0.0, why="", ok=now, at=snap.now, n=len(snap.planes), fresh=fresh, score=score,
-                  snap=snap, next=now + iv, reads=st["reads"] + 1)
+                  snap=snap, next=now + iv, reads=st["reads"] + 1, slow=False)
         return True
 
     def receiver_healthy(self, now: float | None = None) -> bool:

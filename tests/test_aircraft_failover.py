@@ -342,3 +342,45 @@ def test_prefer_naming_a_feed_that_is_off_is_said_once():
         ly.stop()
         for f in ly.feeds:
             f.fetch.close()
+
+
+def test_a_stalling_primary_hands_over_at_once_when_the_other_is_not_clean():
+    """The map closed, a 7700 in view, adsb.lol failed a few minutes ago (not clean), and adsb.fi (the primary)
+    starts stalling: each read held to its whole-read deadline (12 s), then failing. A slow failure hands over at
+    once, so the watch goes no more than ~30 s without an update (it went ~44 s when a stall was kept through one
+    more rest, like a quick 429), and the alarm fires once."""
+    from urllib.error import URLError
+    clock = Clock(T3)
+    hits = {"fi.example": [], "lol.example": []}
+
+    def fetch(url, timeout, limit, headers=None):
+        host = url.split("/")[2]
+        t = clock.t - T3
+        hits[host].append(t)
+        if host == "fi.example" and t >= 300:
+            clock.t += A.CONNECT_S + A.READ_S                   # held to the deadline, then cut
+            raise URLError("read: no whole answer within 12 s")
+        if host == "lol.example" and 40 <= t < 70:
+            raise URLError("connect: refused")                  # adsb.lol: failed lately, so not clean at 300 s
+        return 200, {}, json.dumps({"now": clock.t * 1000, "ac": TRAFFIC + [MAYDAY]}).encode()
+
+    alarms: list[float] = []
+    ly = AircraftLayer(feeds=("adsbfi", "adsblol"), adsbfi_url="https://fi.example" + FI_PATH,
+                       adsblol_url="https://lol.example" + LOL_PATH, registry=False, fetch=fetch, clock=clock,
+                       log=lambda m: None)
+    ly.on_emergency = lambda ev: alarms.append(clock.t) or len(alarms)
+    updates, lol_clean_at_stall = [], None
+    while clock.t - T3 < 600:
+        if lol_clean_at_stall is None and clock.t - T3 >= 300:
+            lol_clean_at_stall = ly.clean(ly.feeds[1])
+        seq = ly.st["seq"]
+        ly.tick()                                               # nobody looking: the watch alone
+        if ly.st["seq"] != seq:
+            updates.append(clock.t - T3)
+        clock.t += 1.0
+    assert lol_clean_at_stall is False                          # (adsb.lol failed at 40-70 s: flaky until ~670 s)
+    gaps = [b - a for a, b in zip(updates, updates[1:])]
+    assert max(gaps) <= 28, (max(gaps), updates)              # 27 s: the stall, then adsb.lol at once
+    assert ly.primary().key == "adsblol" and len(alarms) == 1
+    first_lol = min(t for t in hits["lol.example"] if t > 300)
+    assert first_lol - 300 <= A.CONNECT_S + A.READ_S + 2         # read right after adsb.fi's first stall
