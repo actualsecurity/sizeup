@@ -5,6 +5,7 @@ record made on first use. A fake provider (no network, no AWS); synthetic text o
 from __future__ import annotations
 
 import json
+import re
 import sys
 import threading
 import types
@@ -199,7 +200,7 @@ def test_what_is_sent_has_no_radio_ids_or_plates_and_no_talkers():
 
 
 @pytest.mark.parametrize("text", [
-    "respond to 123 Example Street for smoke",            # a short word, a house number, a street: the address stays
+    "respond to 123 Example Street for smoke",            # a word a house number follows: the address stays
     "units go to 4500 Sample Avenue",
     "now at 123 Example St",
     "then 123 Example Street",
@@ -208,12 +209,14 @@ def test_what_is_sent_has_no_radio_ids_or_plates_and_no_talkers():
     "from 250 Sample Road, the second floor",
     "MVA at 250 Sample Rd and Test Ave",
     "the 4500 block of Sample Avenue",
-    "apartment 304 at 12 Example Court",
+    "rear of 123 Example Street",
+    "box 4410, Sample Avenue and Test Road",
+    "apt 304 at 12 Example Court",
     "NY 120 at Example Ave",                              # a route label, never a plate
     "exit 123 on the parkway",
     "the tag is on 123 Example Street",                   # a plate word, then an address
 ])
-def test_a_house_number_after_a_short_word_is_kept_for_the_model(text):
+def test_a_house_number_after_a_word_that_comes_before_one_is_kept_for_the_model(text):
     assert I.clean_text(text) == text
 
 
@@ -222,18 +225,53 @@ def test_a_house_number_after_a_short_word_is_kept_for_the_model(text):
     ("ABC 1234 northbound", "[plate] northbound"),
     ("ABC-1234", "[plate]"),
     ("abc-1234 last seen northbound", "[plate] last seen northbound"),
-    ("abc 1234 on the way", "[plate] on the way"),                               # lower case, no street after it
-    ("ABC 1234 parked on Sample Street", "[plate] parked on Sample Street"),     # a street further on is not its street
-    ("ABC 1234 Example Street", "[plate] Example Street"),                       # capitals: a plate, whatever follows
+    ("abc 1234 on the way", "[plate] on the way"),
+    ("ABC 1234 parked on Sample Street", "[plate] parked on Sample Street"),
+    ("ABC 1234 Example Street", "[plate] Example Street"),
     ("New York plate XYZ 9876 at 12 Example Ave", "New York plate [plate] at 12 Example Ave"),
+    ("plate ABC1234 at 12 Example Ave", "plate [plate] at 12 Example Ave"),
     ("Connecticut tag AB 12345", "Connecticut tag [plate]"),                     # state styles, after a plate word
     ("New Jersey reg D12 ABC", "New Jersey reg [plate]"),
     ("registration is 123 ABC", "registration is [plate]"),
     ("plate D12 on Sample Street", "plate [plate] on Sample Street"),
+    ("plate 12345 MK", "plate [plate]"),                                          # five digits first
+    ("commercial plate 12345 MA northbound", "commercial plate [plate] northbound"),
+    ("plate to-123", "plate [plate]"),                                            # a hyphen: never a house number
     ("radio 7654321 to 123 Example Street", "radio [id] to 123 Example Street"),
 ])
 def test_plate_shaped_tokens_are_still_taken_out(text, kept):
     assert I.clean_text(text) == kept
+
+
+# A plate and then where the stop is: the common case. Whatever the capitals (speech-to-text decides those) and
+# whatever follows, the plate goes; its number is never left beside a street. Invented plates and streets.
+@pytest.mark.parametrize("text", [
+    "kbx 4471 Maple Avenue",
+    "Kbx 4471 Maple Avenue",
+    "stop kbx 4471 Maple Ave",
+    "traffic stop New York kbx 4471 Maple Avenue and Example Street",
+    "white sedan abc 1234 Main Street northbound",
+    "check abc 1234 Sample Road please",
+    "abc-1234 Sample St",
+    "kbx-4471 maple ave",
+    "hxm 2210 West Example Street",
+    "abc 1234 old post road",
+    "license abc 1234 Example Court",
+    "lic abc 1234 Sample Pl",
+    "the plate, abc 1234 Example Street",
+    "plate comes back to kbx 4471 Maple Avenue",
+    "plate on that is kbx 4471 Maple Avenue",
+    "tagged kbx 4471 Maple Avenue",
+    "plate: at-1234 Sample St",
+    "licence comes back to AB 12345 on Sample Street",
+    "plate on that is D12 ABC, Maple Avenue",
+])
+def test_a_plate_followed_by_a_street_is_never_let_through(text):
+    out = I.clean_text(text)
+    assert "[plate]" in out, out
+    assert not re.search(r"\d{3,}", out), out                                    # no part of its number is left
+    for letters in ("kbx", "abc", "hxm", "AB ", "D12"):
+        assert letters.lower() not in out.lower().replace("[plate]", ""), out
 
 
 def test_refusals_and_bad_json_are_nothing():

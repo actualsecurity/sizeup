@@ -73,23 +73,32 @@ MAX_TOKENS = 2000
 TEXT_MAX = 4000
 QUEUE_MAX = 50
 RADIO_ID = re.compile(r"\b\d{6,}\b")
-# Plate-shaped tokens. Letters and digits in one token ("ABC1234"): always. Letters, a space or a hyphen, digits
-# ("ABC 1234", "abc-1234"): unless the letters are a common word or a route label ("to 123", "at 4500", "NY 120"), or
-# they are not all capitals and a street's name follows at once ("then 123 Example Street"; never "... 1234 parked on
-# Sample Street"): that is a house number, and the model needs it for the place. After a plate word ("plate", "tag",
-# "registration"), also the shapes too loose to take anywhere else ("AB 12345", "123 ABC", "D12 ABC").
+# Plate-shaped tokens out of what is sent. A plate let through is worse than a house number lost, so nothing here turns
+# on capitals (speech-to-text decides those) or on what follows:
+#   PLATE    letters and digits in one token ("ABC1234"): always
+#   SPACED   2-4 letters, a space or a hyphen, 3-4 digits ("ABC 1234", "abc-1234"): always, except after a space when
+#            the letters are one of the few words that really come before a house number or a route number (HOUSE_WORDS:
+#            "to 123", "at 4500", "then 123", "NY 120"). Any other short word loses its number ("fire 123 Example St").
+#   CUED     after a plate word ("plate", "tag", "tagged", "registration", "license", "lic"), a comma or colon and up to
+#            CUE_GAP words later ("plate comes back to", "plate on that is"): also the shapes too loose to take anywhere
+#            else ("AB 12345", "D12 ABC"; right after the plate word or its filler words: "123 ABC", "12345 MK")
+# Still let through (as before this pattern was tightened): letters spelled out or said phonetically ("A B C 1234",
+# "adam boy charles 1234"), letters and digits apart by a comma ("abc, 1234"), and without a plate word the loose
+# shapes ("12345 MK", "AB 12345", "D12 ABC").
 PLATE = re.compile(r"\b(?=[A-Za-z]*\d)(?=\d*[A-Za-z])[A-Za-z0-9]{5,8}\b")
-SPACED = re.compile(r"\b([A-Za-z]{2,4})[\s-]\d{3,4}\b")
-CUED = re.compile(r"\b((?:plates?|tags?|registration|reg)[\s:]+(?:(?:is|of|number|reads)\s+)*)"
-                  r"(?:([A-Za-z]{1,4})[\s-]\d{1,5}|\d{1,4}[\s-]([A-Za-z]{2,4})"
-                  r"|(?=[A-Za-z]*\d)(?=\d*[A-Za-z])[A-Za-z0-9]{2,8}(?:[\s-]([A-Za-z]{2,4}))?)\b", re.I)
-NOT_PLATE = {"at", "on", "to", "the", "in", "and", "by", "for", "a", "an", "from", "near", "is", "of", "was", "go", "all",
-             "into", "past", "over", "with", "that", "then", "now", "but", "or", "are", "has", "had", "it", "its", "be",
-             "out", "off", "up", "got", "see", "like", "just", "also", "have", "been", "were", "this", "they", "not",
-             # route labels (sizeup/intel/place.py SPACED_PLATE)
-             "ny", "us", "sr", "cr", "rt", "rte", "ct", "nj", "pa", "i", "route", "hwy", "exit", "mm"}
-STREET_NEXT = re.compile(r"\s*((?:[A-Za-z]+\.?\s+){1,2}?)(?:st|street|ave|avenue|av|rd|road|pl|place|ln|lane|dr|drive|blvd|"
-                         r"boulevard|ct|court|pkwy|parkway|ter|terrace|way|hwy|highway|tpke|turnpike|cir|circle)\b", re.I)
+SPACED = re.compile(r"\b([A-Za-z]{2,4})([\s-])\d{3,4}\b")
+CUE_GAP = 4
+CUED = re.compile(r"\b((?:plates?|plated|tags?|tagged|registration|reg|licen[sc]e|lic)\b[\s,:]+((?:[A-Za-z]+[,:]?\s+){0,%d}?))"
+                  r"(?:(?!(?:is|was|of|no|reads?)\s)([A-Za-z]{1,4})([\s-])\d{1,5}|\d{1,5}[\s-]([A-Za-z]{2,4})"
+                  r"|(?=[A-Za-z]*\d)(?=\d*[A-Za-z])([A-Za-z0-9]{2,8})(?:[\s-]([A-Za-z]{2,4}))?)\b" % CUE_GAP, re.I)
+# the words a house number follows ("respond to 123 ...", "rear of 123 ...", "box 4410", "apt 304"), and route labels
+HOUSE_WORDS = {"to", "at", "then", "rear", "box", "side", "near", "of", "on", "from", "and", "by", "in", "the", "for", "is",
+               "was", "go", "into", "past", "over", "now", "or", "apt", "unit", "room", "rm", "ste", "lot", "bldg",
+               "ny", "us", "sr", "cr", "rt", "rte", "ct", "nj", "pa", "hwy", "exit", "mm"}
+# ... and the few of them that still are no plate right after a plate word ("the tag is on 123 Example Street")
+CUE_HOUSE_WORDS = {"to", "at", "of", "on", "from", "and", "by", "in", "the", "for", "is", "was", "near"}
+CUE_FILLER = {"is", "of", "number", "no", "reads", "read", "was", "comes", "came", "back", "to", "on", "that", "it", "as",
+              "new", "york", "ny", "connecticut", "ct", "jersey", "nj", "state", "commercial"}
 SYSTEM = ("You read police and fire radio dispatch transcripts (speech-to-text, often misheard) for a fire department's "
           "pre-alerts. Answer only from the words given. category: one of the listed category names, or \"none\" when "
           "the words don't say one. confidence: 0 to 1. location: the place exactly as said in the transcript (a street "
@@ -147,23 +156,22 @@ def clean_text(text: str) -> str:
 
 
 def _cued(m) -> str:
-    """What a plate word introduces; a common word beside the digits ("tag is on 123 ...") is no part of a plate."""
-    if (m.group(2) or m.group(3) or "").lower() in NOT_PLATE:
-        return m.group(0)
-    if (m.group(4) or "").lower() in NOT_PLATE:           # "plate D12 on ...": the token alone
-        return f"{m.group(1)}[plate]{m.group(0)[m.start(4) - m.start() - 1:]}"
-    return f"{m.group(1)}[plate]"
+    """What a plate word introduces. Letters first: a plate unless they are a word a house number follows ("the tag is
+    on 123 ..."), never across a hyphen. Digits first ("12345 MK"): only right after the plate word and its fillers."""
+    lead, gap, letters, sep, after, token, second = m.groups()
+    if letters is not None:
+        return m.group(0) if sep != "-" and letters.lower() in CUE_HOUSE_WORDS else f"{lead}[plate]"
+    if after is not None:
+        direct = all(w.strip(",:").lower() in CUE_FILLER for w in gap.split())
+        return f"{lead}[plate]" if direct and after.lower() not in CUE_HOUSE_WORDS else m.group(0)
+    if second is not None and (len(token) > 4 or second.lower() in HOUSE_WORDS):
+        return f"{lead}[plate]{m.group(0)[m.end(6) - m.start():]}"       # "plate ABC1234 at ...", "plate D12 on ..."
+    return f"{lead}[plate]"
 
 
 def _spaced(m) -> str:
-    """ "ABC 1234" is a plate; "to 123", "NY 120" and "then 123 Example Street" are not."""
-    w = m.group(1)
-    if w.lower() in NOT_PLATE:
-        return m.group(0)
-    st = None if w.isupper() else STREET_NEXT.match(m.string[m.end():m.end() + 80])
-    if st and not any(x.strip(".").lower() in NOT_PLATE for x in st.group(1).split()):
-        return m.group(0)
-    return "[plate]"
+    """ "ABC 1234", "abc 1234" and "abc-1234" are plates; "to 123" and "NY 120" are not."""
+    return m.group(0) if m.group(2) != "-" and m.group(1).lower() in HOUSE_WORDS else "[plate]"
 
 
 def said(location: str, text: str) -> str:
