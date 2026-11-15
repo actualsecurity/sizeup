@@ -693,6 +693,28 @@ SOURCE_RETRIES = 3          # a source_event that fails to apply (not a malforme
 AUDIO_UPLOAD_S = 5.0        # the audio uploader's round (#414): the clips the ingest couldn't store, then the migration
 AUDIO_UPLOAD_ROWS = (20, 200)   # rows a round: in the day, off-peak
 SWEEP_LEADER_S = 24 * 3600   # the audio orphan sweep: only once this task has held the lease this long (#414)
+STOP_LAYERS_S = 5.0          # HubApp.stop(): the threads' stops get this long, then speech-to-text and the final sync
+                             # go ahead anyway (#546: the 30 s drain once ran out before the sync)
+
+
+def _bounded(steps: list, wait_s: float, log: Callable[[str], None]) -> str:
+    """Run each (name, stop) in turn on a thread of their own, waiting for them at most wait_s. "" when all are done,
+    else the name of the one still running (it carries on, a daemon). One that raises is logged and the rest still run."""
+    at = [""]
+
+    def run() -> None:
+        for name, fn in steps:
+            at[0] = name
+            try:
+                fn()
+            except Exception as e:  # noqa: BLE001 - never keeps the next one from stopping
+                log(f"hub: stop: {name}: {type(e).__name__}: {e}")
+        at[0] = ""
+
+    th = threading.Thread(target=run, name="hub-stop", daemon=True)
+    th.start()
+    th.join(wait_s)
+    return at[0] if th.is_alive() else ""
 
 
 def _our_tg(t) -> int | None:
@@ -1801,13 +1823,14 @@ class HubApp(App):
         from sizeup.timing import Phases
         t = Phases("stop")                             # the drain's share of a deploy (#264): where it goes
         self._stopping.set()
-        self.catchup.stop()
-        self.perf.stop()
+        steps = [("catch-up", self.catchup.stop), ("perf", self.perf.stop)]
         if self.prealert is not None:
-            self.prealert.stop()
-        self.cad.sources.stop()
-        self.stop_layers()
+            steps.append(("pre-alert", self.prealert.stop))
+        steps += [("sources", self.cad.sources.stop), ("layers", self.stop_layers)]
+        late = _bounded(steps, STOP_LAYERS_S, self.hub.log)
         t.mark("layers")
+        if late:                                       # (#546: a slow one never keeps the final sync from happening)
+            self.hub.log(f"hub: stop: {late} still stopping after {STOP_LAYERS_S:g} s: going on without it")
         if self.aws is not None:
             self.aws.stop()
             t.mark("speech-to-text")
