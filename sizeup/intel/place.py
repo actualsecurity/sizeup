@@ -235,7 +235,8 @@ class Locator:
             return None
         towns = list(scope.get("towns") or ())
         hq = [t for t in hq_towns(text, system, service) if not towns or t in towns]
-        params = DOMAIN_PARAMS.get(str(scope.get("pack") or service), {})
+        # the pack's own, else its service's (a second police pack is read as strictly as the first)
+        params = DOMAIN_PARAMS.get(str(scope.get("pack") or service)) or DOMAIN_PARAMS.get(service, {})
         cands: list[Place] = []
         for home in ([hq] if hq else []) + [towns]:
             p = self._page(clean, tuple(home), params)

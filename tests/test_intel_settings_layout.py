@@ -187,8 +187,10 @@ def test_every_control_has_a_name_and_every_label_a_hover(site, browser):
         assert name.strip(), (kind, name, title)
         assert title.strip(), (kind, name, title)                            # (the "?" is help.js's own: it opens its text)
     labels = pg.evaluate("() => [...document.querySelectorAll('#s-intel .in-f')].map((l) => [l.querySelector('.in-l').textContent, l.title, l.querySelector('input, select').title])")
+    packs = len(site.j("GET", "/api/cad/intel")[1]["packs"])
+    assert packs == 4                                                        # the first pack and the three log-only ones
     assert [t for t, _, _ in labels] == ["/h", "/day", "/cat/h", "repush min", "max age min", "expiry min", "before s", "after s", "kbps",
-                                         "model", "/day", "$/month", "sample %", "quiet from", "to", "mode", "threshold", "window s"]
+                                         "model", "/day", "$/month", "sample %", "quiet from", "to"] + ["mode", "threshold", "window s"] * packs
     for text, title, field_title in labels:
         assert len(title) > len(text) and title == field_title, (text, title)
     hovers = {t: h for t, h, _ in labels}
@@ -270,8 +272,11 @@ def test_every_control_posts_what_it_did(site, browser):
         c.querySelectorAll('.in-cats select').length, c.querySelectorAll('.in-rules select').length, c.querySelectorAll('.in-rules input').length,
         c.querySelectorAll('input, select, button:not(.help)').length]; }""") if not REF else None
     if kinds:
-        ncat, nrule = len(pack["categories"]), len(pack["rules"])
-        assert len(d["packs"]) == 1 and kinds[:5] == [4, 18, ncat, nrule, nrule] and kinds[5] == sum(kinds[:5]), kinds
+        ncat, nrule = sum(len(p["categories"]) for p in d["packs"]), sum(len(p["rules"]) for p in d["packs"])
+        assert len(d["packs"]) == 4 and nrule > 80                           # every pack's rows, each with its own controls
+        assert kinds[:5] == [4, 15 + 3 * len(d["packs"]), ncat, nrule, nrule] and kinds[5] == sum(kinds[:5]), kinds
+        names = pg.evaluate("() => [...document.querySelectorAll('#s-intel :is(.in-cats, .in-rules) select')].map((n) => n.getAttribute('aria-label'))")
+        assert len(set(names)) == len(names) == ncat + nrule                 # no two controls of the card share a name
     # and the server took them: the card shows what was saved
     now = site.j("GET", "/api/cad/intel")[1]
     assert now["settings"]["per_hour"] == 31 and now["settings"]["quiet_from"] == "22:30" and now["packs"][0]["window_s"] == 90
