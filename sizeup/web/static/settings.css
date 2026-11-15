@@ -114,6 +114,71 @@
   .s-eta-l { flex: 0 1 24rem; min-inline-size: 12rem; }
   .s-eta select { max-inline-size: 100%; }
 
+  /* System > Intel (intel.js IntelSettings). One grid for its lines: what the line is (a switch, a pack) in a first
+     column of one width, its fields (each under its terse label: .field) in the second, what it reports at the end
+     of the third. Fields are as wide as what goes in them. A pack's categories: columns of one width, the name then
+     its mode, the mode at the end of its cell. Narrow (an iPad upright, a phone): the report goes under the fields,
+     then the name over them. */
+  .in-rows { display: grid; grid-template-columns: 8rem minmax(0, 1fr) auto; column-gap: var(--s-4); }
+  .in-row {
+    display: grid; grid-column: 1 / -1; grid-template-columns: subgrid; align-items: end; row-gap: var(--s-1);
+    padding-block: var(--s-2); border-block-start: var(--bw) solid var(--line);
+  }
+  .in-rows:not(.in-pack) > .in-row:first-child { border-block-start: 0; padding-block-start: 0; }
+  .in-name { min-block-size: var(--ctl); min-inline-size: 0; display: inline-flex; align-items: center; overflow-wrap: anywhere; }
+  label.in-name { font-weight: 600; }
+  .in-fields { display: flex; flex-wrap: wrap; align-items: end; gap: var(--s-2) var(--s-3); min-inline-size: 0; }
+  .in-f { flex: none; inline-size: 4.75rem; }
+  .in-f.in-w-mode { inline-size: 6rem; }
+  .in-f.in-w-time { inline-size: 8rem; }
+  .in-f.in-w-text { inline-size: 15.5rem; max-inline-size: 100%; }
+  .in-l { white-space: nowrap; }
+  .in-stat {
+    display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: var(--s-1) var(--s-2);
+    min-block-size: var(--ctl); min-inline-size: 0; text-align: end;
+  }
+  .in-pack { margin-block-start: var(--s-3); }
+  .in-pack > .in-row { border-block-start-color: var(--line-strong); padding-block-end: var(--s-1); }
+  .in-cats {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(min(15rem, 100%), 1fr)); gap: 0 var(--s-5);
+    margin-block-end: var(--s-3);
+  }
+  .in-cat {
+    display: flex; align-items: center; gap: var(--s-2); min-inline-size: 0;
+    padding-block: var(--s-1); border-block-end: var(--bw) solid var(--line);
+  }
+  .in-cat-l { flex: 1 1 0; min-inline-size: 0; overflow-wrap: anywhere; font-size: var(--fs-sm); line-height: var(--lh-sm); }
+  .in-cat > select { flex: none; inline-size: 6rem; }
+  .in-cat > button { flex: none; }
+  .in-rules :is(th, td).in-c { inline-size: 1%; white-space: nowrap; }
+  .in-rules :is(th, td).in-n { inline-size: 1%; text-align: end; }
+  .in-rules td.in-rule { overflow-wrap: anywhere; }
+  .in-rules :is(th, td):first-child { padding-inline-start: 0; }
+  .in-rules :is(th, td):last-child { padding-inline-end: 0; }
+  .in-rules select { inline-size: 6rem; }
+  .in-rules .in-num { inline-size: 4.75rem; }
+  @container (width < 46rem) {
+    .in-rows { grid-template-columns: 8rem minmax(0, 1fr); }
+    .in-stat { grid-column: 2; justify-content: flex-start; text-align: start; min-block-size: 0; }
+    .in-stat:empty { display: none; }
+  }
+  @container (width < 30rem) {
+    .in-rows { grid-template-columns: minmax(0, 1fr); }
+    .in-stat { grid-column: 1; }
+    /* the rules: two lines a rule (its name and category; its mode, weight and counts, each count after its head) */
+    .in-rules { display: block; }
+    .in-rules tr:has(th) { display: none; }
+    .in-rules tr {
+      display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-1) var(--s-3);
+      padding-block: var(--s-2); border-block-end: var(--bw) solid var(--line);
+    }
+    .in-rules td:is(td, .in-c, .in-n) { display: block; padding: 0; border: 0; inline-size: auto; min-inline-size: 0; }
+    .in-rules td.in-rule { flex: 1 1 55%; }
+    .in-rules td.in-rcat { flex: 1 1 30%; text-align: end; color: var(--text-2); overflow-wrap: anywhere; }
+    .in-rules td[data-l]::before { content: attr(data-l) " "; color: var(--dim); }
+    .in-rules td.in-n:last-child { margin-inline-start: auto; }
+  }
+
   /* Roles (cad.js applyRoles): read-only for anyone but an admin on the hub; "no admin yet" before there is one. */
   .s-role { margin-block-end: var(--s-1); }
   .s-role.boot { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 55%, transparent); border-inline-start-color: var(--ok); }

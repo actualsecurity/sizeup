@@ -113,12 +113,13 @@ window.IntelSettings = (() => {
     return n;
   }
   const post = (body, done) => sPost("intel", body, done || "Saved: intel");
-  function num(value, min, max, step, onSave, label) {
-    const i = el("input", "s-num");
+  // label: the field's name (aria-label); tip: its hover, what it is and its unit (the name, when that says it)
+  function num(value, min, max, step, onSave, label, tip) {
+    const i = el("input", "in-num");
     i.type = "number";
     Object.assign(i, { min: String(min), max: String(max), step: String(step), value: String(value) });
     i.setAttribute("aria-label", label);
-    i.title = label;
+    i.title = tip || label;
     i.addEventListener("change", () => { const v = Number(i.value); if (!Number.isNaN(v)) onSave(v); });
     return i;
   }
@@ -126,6 +127,22 @@ window.IntelSettings = (() => {
     const s = sSelect(modes.map((m) => [m, m]), value, onSave, label);
     s.title = `${label}: off · shadow (counted only) · log · map · push`;
     return s;
+  }
+  // A field under its terse label (style.css .field): the label carries the field's hover. cls: its width (in-w-*).
+  function field(text, ctl, cls) {
+    const l = el("label", "field in-f" + (cls ? ` ${cls}` : ""));
+    l.title = ctl.title;
+    l.append(el("span", "in-l", text), ctl);
+    return l;
+  }
+  // One line of the card's grid (settings.css .in-rows): what it is, its fields, what it reports at the end.
+  function line(lead, fields, ...stat) {
+    const r = el("div", "in-row"), f = el("div", "in-fields"), st = el("div", "in-stat");
+    lead.classList.add("in-name");
+    f.append(...fields);
+    st.append(...stat);
+    r.append(lead, f, st);
+    return r;
   }
   async function mount(card) {
     if (!card) return;
@@ -141,115 +158,113 @@ window.IntelSettings = (() => {
     const admin = typeof canDo !== "function" || canDo("admin");
     const s = d.settings;
     const c24 = d.counts_24h || {};
-    const kids = [];
+    const set = (key) => (v) => post({ action: "set", key, value: v });
+    const top = el("div", "in-rows");
     // the kill switch and the caps
     const [lab, cb] = sCheck("Push", s.push, "Off: detection and the map go on, nothing is pushed");
-    cb.disabled = !admin;
     cb.addEventListener("change", () => post({ action: "set", key: "push", value: cb.checked }, cb.checked ? "Intel pushes on" : "Intel pushes off"));
-    const caps = el("div", "row");
-    caps.append(lab,
-      el("span", "dim small", "/h"), num(s.per_hour, 1, 1000, 1, (v) => post({ action: "set", key: "per_hour", value: v }), "Pushes an hour"),
-      el("span", "dim small", "/day"), num(s.per_day, 1, 10000, 1, (v) => post({ action: "set", key: "per_day", value: v }), "Pushes a day"),
-      el("span", "dim small", "/cat/h"), num(s.per_category_hour, 1, 1000, 1, (v) => post({ action: "set", key: "per_category_hour", value: v }), "Pushes an hour, one category"),
-      el("span", "dim small", "repush min"), num(s.repush_min, 0, 1440, 1, (v) => post({ action: "set", key: "repush_min", value: v }), "Minutes between pushes of one event"),
-      el("span", "dim small", "max age min"), num(s.max_age_min, 1, 1440, 1, (v) => post({ action: "set", key: "max_age_min", value: v }), "A transmission older than this is never a pre-alert (a restart replays nothing)"),
-      el("span", "spacer"),
-      el("span", "dim small", `24 h: ${c24.events || 0} events · ${c24.pushed || 0} pushed · ${c24.suppressed || 0} held`));
-    for (const x of caps.querySelectorAll("input")) x.disabled = !admin;
-    kids.push(caps);
+    const counts = el("span", "dim small", `24 h: ${c24.events || 0} events · ${c24.pushed || 0} pushed · ${c24.suppressed || 0} held`);
+    counts.title = "The last 24 hours: events made, pushed, and held back (a cap, quiet hours, pushes off)";
+    top.append(line(lab, [
+      field("/h", num(s.per_hour, 1, 1000, 1, set("per_hour"), "Pushes an hour", "Pushes an hour, at most")),
+      field("/day", num(s.per_day, 1, 10000, 1, set("per_day"), "Pushes a day", "Pushes a day, at most")),
+      field("/cat/h", num(s.per_category_hour, 1, 1000, 1, set("per_category_hour"), "Pushes an hour, one category", "Pushes an hour for one category, at most")),
+      field("repush min", num(s.repush_min, 0, 1440, 1, set("repush_min"), "Minutes between pushes of one event")),
+      field("max age min", num(s.max_age_min, 1, 1440, 1, set("max_age_min"), "A transmission older than this is never a pre-alert (a restart replays nothing)",
+        "Minutes: a transmission older than this is never a pre-alert (a restart replays nothing)")),
+    ], counts));
     // the push's "Listen" link (sizeup/intel/listen.py): the audio around the alert, behind a short-lived link
     const ls = d.listen || {};
     const [llab, lcb] = sCheck("Listen link", s.listen, "A link in each push that plays the transmissions around it (no sign-in; it expires)");
-    lcb.disabled = !admin;
     lcb.addEventListener("change", () => post({ action: "set", key: "listen", value: lcb.checked }, lcb.checked ? "Listen links on" : "Listen links off"));
-    const lrow = el("div", "row");
-    const lnum = (key, min, max, label) => num(s[key], min, max, 1, (v) => post({ action: "set", key, value: v }), label);
-    lrow.append(llab,
-      el("span", "dim small", "min"), lnum("listen_expiry_min", 1, 720, "Minutes the link plays"),
-      el("span", "dim small", "before s"), lnum("listen_before_s", 0, 600, "Seconds of the same source before the first transmission"),
-      el("span", "dim small", "after s"), lnum("listen_after_s", 0, 600, "Seconds after the last (stitched again as they arrive)"),
-      el("span", "dim small", "kbps"), lnum("listen_kbps", 16, 64, "Bitrate (AAC when ffmpeg is there, else 8 kHz WAV)"),
-      el("span", "spacer"));
+    const lnum = (key, min, max, label, tip) => num(s[key], min, max, 1, set(key), label, tip);
     const lst = el("span", ls.configured ? "chip s-state default" : "chip s-state edited", ls.configured ? "ready" : "not configured");
     if (!ls.configured) lst.title = ls.why || "";
-    lrow.append(lst);
-    for (const x of lrow.querySelectorAll("input")) x.disabled = !admin;
-    kids.push(lrow);
+    top.append(line(llab, [
+      field("expiry min", lnum("listen_expiry_min", 1, 720, "Minutes the link plays", "Minutes the link plays, then it expires")),
+      field("before s", lnum("listen_before_s", 0, 600, "Seconds of the same source before the first transmission")),
+      field("after s", lnum("listen_after_s", 0, 600, "Seconds after the last (stitched again as they arrive)", "Seconds after the last transmission (stitched again as they arrive)")),
+      field("kbps", lnum("listen_kbps", 16, 64, "Bitrate (AAC when ffmpeg is there, else 8 kHz WAV)", "Bitrate, kbit/s (AAC when ffmpeg is there, else 8 kHz WAV)")),
+    ], lst));
     // the model behind the rules (sizeup/intel/infer.py): off until sizeup-aws 26 has run; capped
     const inf = d.infer || {};
     const [ilab, icb] = sCheck("Inference", !!s.infer, "An LLM (Bedrock, the department's account) only where the rules are unsure; its place is checked against the map data");
-    icb.disabled = !admin;
     icb.addEventListener("change", () => post({ action: "set", key: "infer", value: icb.checked }, icb.checked ? "Inference on" : "Inference off"));
-    const irow = el("div", "row");
-    const inum = (key, min, max, step, label) => num(s[key] ?? "", min, max, step, (v) => post({ action: "set", key, value: v }), label);
-    const model = sInput(s.infer_model || "", 120, "Model id", (v) => post({ action: "set", key: "infer_model", value: v }), "mono");
+    const inum = (key, min, max, step, label, tip) => num(s[key] ?? "", min, max, step, set(key), label, tip);
+    const model = sInput(s.infer_model || "", 120, "Model id", set("infer_model"), "mono");
     model.title = "Bedrock model id (default anthropic.claude-haiku-5-5)";
     const spent = "$" + (inf.usd_month || 0).toFixed(2);
-    irow.append(ilab, model,
-      el("span", "dim small", "/day"), inum("infer_daily_cap", 0, 10000, 1, "Calls a day at most"),
-      el("span", "dim small", "$/month"), inum("infer_budget_usd", 0, 500, 1, "Budget a month (from the tokens each call reports)"),
-      el("span", "dim small", "sample %"), inum("infer_sample_pct", 0, 100, 1, "Of rows with a hit: asked and recorded only (evaluation)"),
-      el("span", "spacer"),
-      el("span", "dim small", (inf.calls_today || 0) + " today · " + spent + " this month"));
+    const used = el("span", "dim small", (inf.calls_today || 0) + " today · " + spent + " this month");
+    used.title = "Calls today · what they cost this month (US dollars, from the tokens each call reports)";
     const ist = el("span", inf.ready ? "chip s-state default" : "chip s-state edited", inf.ready ? "ready" : (inf.on ? "held" : "off"));
     if (inf.why) ist.title = inf.why;
-    irow.append(ist);
-    for (const x of irow.querySelectorAll("input")) x.disabled = !admin;
-    kids.push(irow);
+    top.append(line(ilab, [
+      field("model", model, "in-w-text"),
+      field("/day", inum("infer_daily_cap", 0, 10000, 1, "Calls a day at most")),
+      field("$/month", inum("infer_budget_usd", 0, 500, 1, "Budget a month (from the tokens each call reports)", "Budget, US dollars a month (from the tokens each call reports)")),
+      field("sample %", inum("infer_sample_pct", 0, 100, 1, "Of rows with a hit: asked and recorded only (evaluation)", "Percent of rows with a hit: asked and recorded only (evaluation)")),
+    ], used, ist));
     // detection on/off and quiet hours (no pushes in between; the card and the map go on)
     const [elab, ecb] = sCheck("Detection", s.enabled, "Off: no transmission is read for pre-alerts at all");
-    ecb.disabled = !admin;
     ecb.addEventListener("change", () => post({ action: "set", key: "enabled", value: ecb.checked }, ecb.checked ? "Intel on" : "Intel off"));
-    const hm = (key, label) => {
-      const i = el("input", "s-num");
+    const hm = (key, label, tip) => {
+      const i = el("input");
       i.type = "time";
       i.value = s[key] || "";
-      i.title = label;
+      i.title = tip;
       i.setAttribute("aria-label", label);
-      i.disabled = !admin;
       i.addEventListener("change", () => post({ action: "set", key, value: i.value }));
       return i;
     };
-    const qrow = el("div", "row");
-    qrow.append(elab, el("span", "dim small", "quiet"), hm("quiet_from", "Quiet from (no pushes; empty: none)"),
-      el("span", "dim small", "to"), hm("quiet_to", "Quiet until"));
-    kids.push(qrow);
+    top.append(line(elab, [
+      field("quiet from", hm("quiet_from", "Quiet from (no pushes; empty: none)", "Quiet hours from, local time (no pushes; empty: none)"), "in-w-time"),
+      field("to", hm("quiet_to", "Quiet until", "Quiet hours until, local time"), "in-w-time"),
+    ]));
+    const kids = [top];
     for (const p of d.packs) {
-      const ph = el("div", "row");
-      ph.append(el("b", "s-eta-l", `${p.label} (${p.name})`),
-        modeSel(d.modes, p.mode, (v) => post({ action: "pack", pack: p.name, mode: v }), `${p.label} pack mode`),
-        el("span", "dim small", "threshold"), num(p.threshold, 0, 1, 0.05, (v) => post({ action: "pack", pack: p.name, threshold: v }), "Threshold: WHAT at least this"),
-        el("span", "dim small", "window s"), num(p.window_s, 10, 1800, 10, (v) => post({ action: "pack", pack: p.name, window_s: v }), "Seconds of one source merged into one candidate"));
-      kids.push(ph);
-      const cats = el("div", "chips");
+      const pset = (key) => (v) => post({ action: "pack", pack: p.name, [key]: v });
+      const head = el("div", "in-rows in-pack");
+      head.append(line(el("b", "", `${p.label} (${p.name})`), [
+        field("mode", modeSel(d.modes, p.mode, pset("mode"), `${p.label} pack mode`), "in-w-mode"),
+        field("threshold", num(p.threshold, 0, 1, 0.05, pset("threshold"), "Threshold: WHAT at least this", "Threshold, 0 to 1: WHAT at least this")),
+        field("window s", num(p.window_s, 10, 1800, 10, pset("window_s"), "Seconds of one source merged into one candidate")),
+      ]));
+      // each category: its name, then its mode (and, once changed, the way back), in columns of one width
+      const cats = el("div", "in-cats");
+      cats.setAttribute("role", "group");
+      cats.setAttribute("aria-label", `${p.label} categories`);
       for (const c of p.categories) {
-        const box = el("span", "chip");
-        box.append(el("span", "", c.label + " "),
-          modeSel(d.modes, c.mode, (v) => post({ action: "category", pack: p.name, category: c.name, mode: v }), c.label));
-        if (c.edited) box.append(sBtn("↺", "Back to the default", () => post({ action: "reset", what: "category", pack: p.name, category: c.name })));
+        const box = el("div", "in-cat");
+        box.append(el("span", "in-cat-l", c.label));
+        if (c.edited) {
+          const back = sBtn("↺", "Back to the default", () => post({ action: "reset", what: "category", pack: p.name, category: c.name }), "icon quiet");
+          back.setAttribute("aria-label", `${c.label}: back to the default`);
+          box.append(back);
+        }
+        box.append(modeSel(d.modes, c.mode, (v) => post({ action: "category", pack: p.name, category: c.name, mode: v }), c.label));
         cats.append(box);
       }
-      kids.push(cats);
-      const tbl = el("table", "table small");
+      const tbl = el("table", "table small in-rules");
       const hr = el("tr");
-      for (const h of ["Rule", "Category", "Mode", "Weight", "Hits 7 d", "Events"]) hr.append(el("th", "", h));
+      for (const [h, cls] of [["Rule"], ["Category"], ["Mode", "in-c"], ["Weight", "in-c"], ["Hits 7 d", "in-n"], ["Events", "in-n"]]) hr.append(el("th", cls || "", h));
       tbl.append(hr);
       for (const r of p.rules) {
         const tr = el("tr");
-        const name = el("td", "mono", r.id);
+        const name = el("td", "mono in-rule", r.id);
         name.title = `${r.any.join("\n")}${r.not.length ? `\nnot: ${r.not.join(", ")}` : ""}`;
         const w = num(r.w, -1, 1, 0.05, (v) => post({ action: "rule", rule: r.id, w: v }), `${r.id} weight`);
-        const td = (...xs) => { const n = el("td"); n.append(...xs); return n; };
-        tr.append(name, el("td", "", r.category),
+        const td = (...xs) => { const n = el("td", "in-c"); n.append(...xs); return n; };
+        const n = (head, v) => { const x = el("td", "num in-n", String(v || 0)); x.dataset.l = head; return x; };      // (its head, on a phone)
+        tr.append(name, el("td", "in-rcat", r.category),
           td(modeSel(d.modes, r.mode, (v) => post({ action: "rule", rule: r.id, mode: v }), r.id)), td(w),
-          el("td", "num", String(r.hits || 0)), el("td", "num", String(r.events || 0)));
+          n("hits 7 d", r.hits), n("events", r.events));
         tbl.append(tr);
       }
-      for (const x of tbl.querySelectorAll("input, select")) x.disabled = !admin;
-      for (const x of cats.querySelectorAll("select, button")) x.disabled = !admin;
-      for (const x of ph.querySelectorAll("input, select")) x.disabled = !admin;
-      kids.push(tbl);
+      const scroll = el("div", "tscroll");
+      scroll.append(tbl);
+      kids.push(head, cats, scroll);
     }
+    if (!admin) for (const k of kids) for (const x of k.querySelectorAll("input, select, button")) x.disabled = true;
     card.replaceChildren(sCardHead("Intel", s.push ? (s.enabled ? "on" : "detection off") : "pushes off",
       sHelp("Radio pre-alerts: rules over police (and later fire) transcripts. Each event goes off · shadow (counted "
         + "only) · log · map · push, the lowest of its pack, category and rule. Pushes go to the pre-alert (intel) topic "
