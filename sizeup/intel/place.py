@@ -3,7 +3,9 @@ the source's home towns, after the police words that would read as house numbers
 
     Locator(gaz)                          over the gazetteer (read only)
     locator.locate(text, scope) -> Place | None
-        scope: {source_key, system, service, towns: [...]}
+        scope: {source_key, system, service, towns: [...], only: bool}
+               only: the towns are an area (a county-wide pack's, rules.Pack.area): the address lookup searches them,
+               our district and the towns said, never the whole county
 
 What comes out first (strip()):
     callsigns   the system's own (data/pd_units.json, by system and service: police "266" on MRRS is Rye PD HQ,
@@ -239,7 +241,7 @@ class Locator:
         params = DOMAIN_PARAMS.get(str(scope.get("pack") or service)) or DOMAIN_PARAMS.get(service, {})
         cands: list[Place] = []
         for home in ([hq] if hq else []) + [towns]:
-            p = self._page(clean, tuple(home), params)
+            p = self._page(clean, tuple(home), params, only=bool(scope.get("only")))
             if p is not None:
                 cands.append(p)
                 if p.confirmed:
@@ -286,9 +288,9 @@ class Locator:
                                               - (RIVAL_PENALTY if best.alts and not best.confirmed else 0.0))), 3)
         return best
 
-    def _page(self, clean: str, home: tuple, params: dict) -> Place | None:
+    def _page(self, clean: str, home: tuple, params: dict, only: bool = False) -> Place | None:
         from sizeup.geo.pagegeo import locator
-        g = locator(self.gaz).locate(clean, home, params)
+        g = locator(self.gaz).locate(clean, home, params, only=only)
         b = g.best
         if b is None:
             return None

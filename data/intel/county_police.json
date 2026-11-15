@@ -1,7 +1,7 @@
 {
   "_about": "County police talkgroups as fire / EMS pre-alerts (sizeup/intel/engine.py). LOG ONLY: the pack, every category and every rule start at \"log\" (an event in the store and the log; never the map, the console's card or a push) until an admin raises all three in Settings > System > Intel. Scope: the county P25 system's talkgroups whose service is police (the talkgroups file's Tag), never a talkgroup number. Generic phrases only: no real addresses, names, callsigns or slang. Phrases are written in the spelling of data/intel/tables/stt.json (\"odor of gas\", \"rollover\", \"en route\"). Each strong phrase family is a rule of its own, at or over the threshold alone, so a later change can mark single rules always-alert; the weaker ones (*_word, *_nature, *_request) only count beside another rule in the window.",
   "name": "county_police",
-  "version": 1,
+  "version": 2,
   "order": 1,
   "domain": "police",
   "label": "County PD",
@@ -14,6 +14,7 @@
   "normalize": "stt",
   "infer": false,
   "towns": {},
+  "area": ["Port Chester", "Rye Brook", "Rye", "Harrison", "Purchase", "West Harrison", "Greenwich", "Byram"],
   "categories": {
     "fire_report": {"label": "PD: smoke / fire", "ttl_min": 45, "priority": 4, "mode": "log", "tag": "fire"},
     "fd_call": {"label": "PD: fire dept requested", "ttl_min": 30, "priority": 4, "mode": "log", "tag": "fire_engine"},

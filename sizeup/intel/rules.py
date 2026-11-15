@@ -28,6 +28,11 @@ the reading it was written for. Write phrases in the table's spelling ("2nd alar
 a negation away ("zero" -> "0" is refused: a negator before a gap must stay one). A pack without "normalize" matches
 exactly as before. Suppress phrases are tried on both readings (a drill said either way is a drill).
 
+"area": the towns a county-wide pack's events belong to (Settings: intel_packs.<pack>.area; an empty list there is
+the file's). With an area, the address lookup searches those towns (and the towns said), and an event placed outside
+them, or whose words name only towns outside them, is out of area: kept at log, never raised (engine.py). No area
+(the police pack, whose sources are local): every place counts, as before.
+
 "order": where the pack is listed (lowest first, then by file name; 0 when absent). "infer": false: the model behind
 the rules (infer.py) is never asked about this pack's rows. A rule or a category with no "mode" is at "push": a pack
 that must stay quiet writes "mode": "log" on the pack, every category and every rule (the engine takes the lowest).
@@ -267,6 +272,7 @@ class Pack:
     suppress: list
     src: dict = field(default_factory=dict)
     norm: Normalizer | None = None
+    area: tuple = ()                  # the towns its events belong to (empty: anywhere)
 
     def in_scope(self, row: dict) -> bool:
         """The row is one this pack reads: its service, its source key (a glob), its tier and system, as listed (an
@@ -294,6 +300,29 @@ class Pack:
 
     def suppressed(self, text: str, ws: list[str]) -> bool:
         return any(_found(p, text, ws, self.norm) for p in self.suppress)
+
+
+def town_names() -> dict[str, str]:
+    """{lower-case name: name as shown} of every town an area may name (data/westchester_towns.txt, the CAD's list)."""
+    from sizeup.cad.sources import county_towns
+    return {v.lower(): v for v in county_towns().values() if v}
+
+
+def area(v, what: str) -> tuple:
+    """A list of town names as an area (ValueError with the reason): each one of the county's towns."""
+    if v is None:
+        return ()
+    if not isinstance(v, (list, tuple)) or len(v) > 40:
+        raise ValueError(f"{what}: a list of at most 40 town names")
+    known = town_names()
+    out = []
+    for t in v:
+        name = known.get(str(t).strip().lower())
+        if name is None:
+            raise ValueError(f"{what}: {str(t)[:40]!r} isn't a town of data/westchester_towns.txt")
+        if name not in out:
+            out.append(name)
+    return tuple(out)
 
 
 def _num(v, lo: float, hi: float, what: str) -> float:
@@ -368,7 +397,8 @@ def compile_pack(d: dict, packs_ov: dict | None = None, rules_ov: dict | None = 
                 context_factor=_num(d.get("context_factor", 0.5), 0, 1, f"{name}.context_factor"),
                 mode=_mode(po.get("mode", d.get("mode", "push")), f"{name}.mode"),
                 towns=dict(d.get("towns") or {}), categories=cats, rules=rules,
-                suppress=_phrases(d.get("suppress") or [], f"{name}.suppress"), src=dict(d), norm=norm)
+                suppress=_phrases(d.get("suppress") or [], f"{name}.suppress"), src=dict(d), norm=norm,
+                area=area(po.get("area") or d.get("area"), f"{name}.area"))
 
 
 def read_files(paths=None) -> list[dict]:
@@ -397,7 +427,7 @@ def load_packs(paths_or_dicts=None, overrides: dict | None = None) -> list[Pack]
 def ruleset_hash(packs: list[Pack]) -> str:
     """A short hash of everything that decides a hit (the packs' sources as compiled, with their overrides)."""
     blob = json.dumps([[p.name, p.version, p.mode, p.threshold, p.window_s, p.categories, p.context_factor, p.towns,
-                        p.scope,
+                        p.scope, list(p.area),
                         [[r.id, r.v, r.w, r.mode, r.enabled, r.category, [x.src for x in r.any], [x.src for x in r.nots]]
                          for r in p.rules], [x.src for x in p.suppress],
                         *([[p.norm.name, p.norm.digest]] if p.norm is not None else [])] for p in packs],

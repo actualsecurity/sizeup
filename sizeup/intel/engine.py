@@ -42,6 +42,16 @@ How a row becomes an event, per pack whose scope it is in:
      damper) reach the threshold: a rule at a lower mode adds to WHAT but never lifts the event over its own mode, so
      raising one weak rule to push never makes the strong ones beside it push (#535 review). With every rule of a
      category at one mode (as shipped) this is that mode, as before.
+  6. held at log, whatever the switches say (Event.suppressed says why):
+       out_of_area    a pack with an area (rules.Pack.area): the event's place is in another town, or, with no place,
+                      its words name towns and none of the area's (a county-wide talkgroup's call elsewhere);
+       near_incident  its place is one of our own incidents' (the same label, or within NEAR_INCIDENT_M) while that
+                      incident is open: the job we already have, linked (Event.near_incident), never a new lead. A
+                      safety category (weapons, a barricade, a mayday ...) is linked and NOT held: a hazard at our
+                      own scene is what a crew most needs to hear.
+     The address lookup (step 4) runs only for a row that could carry a category to the threshold with the window's
+     hits (a cue or a damper alone never makes an event, so it never pays for the gazetteer), and, for a pack with an
+     area, only in those towns.
 Intel never writes incidents, radio_links, incoming or alarms.
 """
 
@@ -75,6 +85,12 @@ DISPATCH_WORDS = re.compile(r"\bdisp\b|dispatch|\bhq\b|headquarters|\bcontrol\b|
 PEOPLE = {"weapons", "edp", "dispute"}   # incidents about a person, who may move ("last seen at")
 SAFETY = {"weapons", "barricade", "water_rescue", "fire_report"}   # never ended by a disregard that names nothing
 SAME_PLACE_M = 150.0                   # two places this close are the same incident's
+NEAR_INCIDENT_M = 150.0                # an event this close to one of our open incidents is that incident
+INCIDENT_BEFORE_S = 6 * 3600.0         # ... an incident opened at most this long before the event's first transmission
+INCIDENT_AFTER_S = 30 * 60.0           # ... or at most this long after its last (the radio heard first, then our call)
+STREET_WORDS = frozenset({"street", "st", "avenue", "ave", "road", "rd", "drive", "dr", "lane", "ln", "place", "pl",
+                          "parkway", "pkwy", "boulevard", "blvd", "turnpike", "tpke", "court", "ct", "way", "terrace",
+                          "circle", "highway", "hwy", "plaza", "square"})
 STOP_WORDS = {"from", "with", "that", "this", "the", "and", "into", "front", "near", "area", "call", "calls", "caller",
               "report", "reported", "respond", "units", "unit", "male", "female", "person", "subject", "someone"}
 QUEUE_MAX = 5000
@@ -160,6 +176,9 @@ class IntelEngine:
         self.notifier = None                  # live: notify.Pushes' INTEL KindNotifier (the app sets it)
         self.listen = None                    # live: listen.Listen, the push's "Listen" link (the app sets it)
         self.infer = None                     # infer.Inference: the model behind the rules (off unless set and on)
+        # incidents(now) -> [{id, lat, lon, label, created_at, closed_at}]: our own open and recent incidents (the CAD
+        # sets it; replay may), for near_incident. None: no incidents, nothing linked.
+        self.incidents = None
         self.windows: dict[tuple[str, str], Window] = {}
         self.packs: list = []
         self.cfg: dict = {}
@@ -362,9 +381,10 @@ class IntelEngine:
             units.add(talker.lower())
         entry = Entry(at, hits, text, who, suppressed, talker, frozenset(units), disp)
         if self.locate is not None and not suppressed and (
-                hits or any(not e.confirmed or pack.category(e.category).get("moves")
-                            or (e.category in PEOPLE and MOVE_WORDS.search(text))
-                            for e in self._open_for(pack, None, key, at, self._merge_span(pack)))):
+                self._could_reach(pack, win, tid, hits)
+                or any((not e.confirmed or pack.category(e.category).get("moves")
+                        or (e.category in PEOPLE and MOVE_WORDS.search(text))) and e.suppressed != "out_of_area"
+                       for e in self._open_for(pack, None, key, at, self._merge_span(pack)))):
             entry.place = self._where(pack, row, key, [text], list(who))
         win.entries[tid] = entry
         win.prune(max(e.at for e in win.entries.values()), pack.window_s)
@@ -410,6 +430,28 @@ class IntelEngine:
                 ev = next(iter(event_of.values()))
             self.sink.hit(Hit(tid, r.id, r.v, round(float(w), 4), r.category, pack.name, at, ev.id if ev else None))
         return changed
+
+    def _could_reach(self, pack, win: Window, tid: str, hits: list) -> bool:
+        """This row's hits could carry one of the categories it says to the threshold, with the window's strongest
+        hits of that category and the cues (dampers aside: an upper bound). Else no gazetteer work for it."""
+        cues = [w for r, w in hits if r.category == rules_mod.WILD and w > 0]
+        for cat in {r.category for r, w in hits if w > 0 and r.category in pack.categories}:
+            ws = [w for r, w in hits if r.category == cat and w > 0] + cues
+            best: dict[str, float] = {}
+            for t, e in win.entries.items():
+                if t == tid or e.suppressed:
+                    continue
+                for r, w in e.hits:
+                    if r.category == cat and w > 0 and r.mode != "shadow":
+                        best[r.id] = max(best.get(r.id, 0.0), w)
+            miss = 1.0
+            for w in ws + list(best.values()):
+                miss *= 1.0 - min(1.0, w)
+            cd = pack.category(cat)
+            thr = cd.get("threshold") if cd.get("threshold") is not None else pack.threshold
+            if 1.0 - miss >= thr - 1e-9:
+                return True
+        return False
 
     def _scores(self, pack, win: Window) -> dict:
         """{category: (WHAT, [(tid, rule, w)], the rules' rung)} over the window (the rung: step 5 of the module's doc)."""
@@ -542,8 +584,57 @@ class IntelEngine:
         return " . ".join(e.text for _t, e in win.ordered() if e.text and not e.suppressed)
 
     def _scope(self, pack, row: dict, key: str) -> dict:
+        own = pack.towns_for(key)
         return {"source_key": key, "system": str(row.get("system") or ""), "service": str(row.get("service") or ""),
-                "towns": pack.towns_for(key), "pack": pack.name}
+                "towns": own or list(pack.area), "only": bool(pack.area) and not own, "pack": pack.name}
+
+    def _outside(self, pack, ev: Event) -> bool:
+        """A pack with an area: the event is elsewhere (its place's town isn't one of the area's; or, with no place,
+        its transmissions name towns and none of the area's). No place and no town said: not known, so not outside."""
+        if not pack.area:
+            return False
+        area = {t.lower() for t in pack.area}
+        if ev.precision != "none" and ev.town:
+            return ev.town.lower() not in area
+        named = towns_said(self._texts(pack, ev.source_key, ev.traffic_ids))
+        return bool(named) and not (named & area)
+
+    def _incident(self, ev: Event) -> int | None:
+        """Our own incident at the event's place, open around its time (same label, or within NEAR_INCIDENT_M)."""
+        if self.incidents is None or ev.precision == "none" or ev.lat is None or ev.lon is None:
+            return None
+        try:
+            incs = self.incidents(self.clock()) or []
+        except Exception as e:  # noqa: BLE001 - no incidents is still a pre-alert
+            self.log(f"intel: incidents: {type(e).__name__}")
+            return None
+        best = None
+        for inc in incs:
+            at = float(inc.get("created_at") or 0.0)
+            closed = inc.get("closed_at")
+            if not at or at < ev.first_at - INCIDENT_BEFORE_S or at > ev.last_at + INCIDENT_AFTER_S:
+                continue
+            if closed is not None and float(closed) < ev.first_at:
+                continue
+            same = bool(ev.label_full) and str(inc.get("label") or "").strip().lower() == ev.label_full.strip().lower()
+            if not same and inc.get("lat") is not None and inc.get("lon") is not None:
+                d = _m(ev.lat, ev.lon, float(inc["lat"]), float(inc["lon"]))
+                same = d <= NEAR_INCIDENT_M + float(ev.radius_m or 0.0) / 2
+            if same and (best is None or at > best[0]):
+                best = (at, int(inc["id"]))
+        return best[1] if best else None
+
+    def _hold(self, pack, ev: Event) -> None:
+        """Out of area, or our own incident's: held at log (the module's doc, step 6)."""
+        ev.near_incident = self._incident(ev)
+        why = "out_of_area" if self._outside(pack, ev) else ""
+        if not why and ev.near_incident is not None and not pack.category(ev.category).get("safety"):
+            why = "near_incident"
+        if why:
+            ev.mode = lowest(ev.mode, "log")
+            ev.suppressed = why
+        elif ev.suppressed in ("out_of_area", "near_incident"):
+            ev.suppressed = ""
 
     def _where(self, pack, row: dict, key: str, texts: list[str], who=()):
         """The place in these transmissions' words (only the event's own: never another job's in the same window);
@@ -633,6 +724,7 @@ class IntelEngine:
             if moved:
                 ev.note = "moved"
         ev.subject = f"{pack.name}:{cat}:{ev.place().key or key}"
+        self._hold(pack, ev)
         if before is not None and _same(before, ev):
             return None                       # idempotent: the same row again changes nothing
         ev.updated_at = now
@@ -658,6 +750,7 @@ class IntelEngine:
         ev.last_at = max(ev.last_at, at)
         ev.traffic_ids = list(dict.fromkeys([*ev.traffic_ids, tid]))
         ev.subject = f"{pack.name}:{ev.category}:{place.key or key}"
+        self._hold(pack, ev)
         if _same(before, ev):
             return None
         ev.updated_at = self.clock()
@@ -877,7 +970,7 @@ def rung(evidence: list, damp: list, thr: float) -> str:
 
 def _same(a: Event, b: Event) -> bool:
     keys = ("what_score", "level", "rules", "traffic_ids", "mode", "priority", "precision", "lat", "lon", "label_full",
-            "confirmed", "status", "category")
+            "confirmed", "status", "category", "near_incident", "suppressed")
     return all(getattr(a, k) == getattr(b, k) for k in keys)
 
 
@@ -937,6 +1030,23 @@ class LiveSink:
             by[label] = by.get(label, 0) + 1
         title = f"{len(evs)} more pre-alerts (over the hourly limit)"
         n.send(title, " · ".join(f"{k} {v}" for k, v in sorted(by.items())), 2, ["information_source"], "")
+
+
+def towns_said(texts) -> set[str]:
+    """The county's towns these transmissions name (lower case), a town before a street word aside ("Harrison Ave" is
+    a street, not Harrison)."""
+    from sizeup.cad.sources import county_towns
+    names = [k for k in county_towns() if k]
+    out = set()
+    for t in texts or ():
+        ws = rules_mod.words(t)
+        for i in range(len(ws)):
+            for k in names:
+                n = len(k)
+                if tuple(ws[i:i + n]) == k and not (i + n < len(ws) and ws[i + n] in STREET_WORDS):
+                    out.add(" ".join(k))
+    # "rye" inside "rye brook", "harrison" inside "west harrison": the longer name said is the one meant
+    return {t for t in out if not any(o != t and f" {t} " in f" {o} " for o in out)}
 
 
 def _m(lat1, lon1, lat2, lon2) -> float:

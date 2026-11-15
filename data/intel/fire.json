@@ -1,7 +1,7 @@
 {
   "_about": "Fire chatter as pre-alerts (sizeup/intel/engine.py): what on a fire channel says a job is getting bigger or going wrong, ours or a neighbour's. LOG ONLY: the pack, every category and every rule start at \"log\" (an event in the store and the log; never the map, the console's card or a push) until an admin raises all three in Settings > System > Intel. Scope: every source whose service is fire on the county P25 system and on the analog channels (the firegrounds, the paging channel); never a talkgroup number. A dispatch is no signal here (the CAD has its own incident sources): the rules are escalations and trouble. Generic phrases only: no real addresses, people, callsigns or apparatus numbers; the two villages our department answers are named as the towns of a mutual-aid request. Phrases are written in the spelling of data/intel/tables/stt.json (\"2nd alarm\", \"mayday\", \"standby\"). Each strong phrase family is a rule of its own, at or over the threshold alone, so a later change can mark single rules always-alert. \"Disregard\" is everyday talk on a fire channel and ends nothing here.",
   "name": "fire",
-  "version": 1,
+  "version": 2,
   "order": 3,
   "domain": "fire",
   "label": "Fire",
@@ -14,6 +14,7 @@
   "normalize": "stt",
   "infer": false,
   "towns": {},
+  "area": ["Port Chester", "Rye Brook", "Rye", "Harrison", "Purchase", "West Harrison", "Greenwich", "Byram"],
   "categories": {
     "mayday": {"label": "Fire: mayday / firefighter down", "ttl_min": 60, "priority": 5, "mode": "log", "tag": "sos", "safety": true},
     "evacuate": {"label": "Fire: evacuate / going defensive", "ttl_min": 45, "priority": 5, "mode": "log", "tag": "warning", "safety": true},

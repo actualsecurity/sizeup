@@ -1,7 +1,7 @@
 {
   "_about": "EMS traffic as fire pre-alerts (sizeup/intel/engine.py): the calls an engine or a rescue is likely to be sent on, or should know about. LOG ONLY: the pack, every category and every rule start at \"log\" (an event in the store and the log; never the map, the console's card or a push) until an admin raises all three in Settings > System > Intel. Scope: the county P25 system's talkgroups whose service is ems or fire (EMS is dispatched and worked on the Fire/EMS talkgroups) and another system's EMS talkgroups; never a talkgroup number, never our analog fire channels. An ambulance being sent is no signal here (it is every call), so the rules are the patient's state, the crash's mechanism and what is asked of the fire department. Generic phrases only: no real addresses, names, callsigns or slang. Phrases are written in the spelling of data/intel/tables/stt.json. Each strong phrase family is a rule of its own, at or over the threshold alone, so a later change can mark single rules always-alert.",
   "name": "ems",
-  "version": 1,
+  "version": 2,
   "order": 2,
   "domain": "ems",
   "label": "EMS",
@@ -14,6 +14,7 @@
   "normalize": "stt",
   "infer": false,
   "towns": {"p25:mrrs:*": ["Port Chester", "Rye", "Rye Brook"]},
+  "area": ["Port Chester", "Rye Brook", "Rye", "Harrison", "Purchase", "West Harrison", "Greenwich", "Byram"],
   "categories": {
     "aided": {"label": "EMS: cardiac arrest / unresponsive", "ttl_min": 30, "priority": 4, "mode": "log", "tag": "ambulance"},
     "mva_injury": {"label": "EMS: serious crash", "ttl_min": 45, "priority": 4, "mode": "log", "tag": "car"},
