@@ -511,7 +511,7 @@ class IntelEngine:
                     up = self._relocate(pack, ev, row, key, win, tid, at)
                     if up is not None:
                         changed.append(up)
-        if self.infer is not None and hits and not suppressed:
+        if self.infer is not None and hits and not suppressed and pack.src.get("infer", True):   # ("infer": false: rules only)
             try:
                 changed += self._inference(pack, row, key, tid, win, at, cats, mine, event_of, hits)
             except Exception as e:  # noqa: BLE001 - the model never stops the rules
