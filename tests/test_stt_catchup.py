@@ -566,6 +566,9 @@ def test_an_airband_clip_caught_up_later_raises_nothing_and_pushes_nothing(tmp_p
 
     try:
         tid = shed_one(app, monkeypatch, tower, prio=None, after=stt_mod.HIGH_MAX_WAIT_S)     # (airband: shed at 5 min)
+        # (#531) the shed clip's own pass, wordless, reaches the alarms just after its row says "skipped" (App._transcribed_one:
+        # _to_cad, then _alarm): let it, so a slow runner doesn't count it against the catch-up below
+        assert wait(lambda: tid in heard["alarm"], 5), heard
         for k in heard:
             heard[k].clear()
         ready(app, monkeypatch)
