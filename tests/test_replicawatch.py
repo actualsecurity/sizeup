@@ -89,8 +89,19 @@ def watch_for(s3: FakeS3, who: str, tmp: Path, ntfy, clock=None, logs=None, **kw
     pusher = Pusher(store, ntfy.url, TOPIC, wall=clock or time.time, log=lg)
     kw.setdefault("check", lambda p, full, cancel: integrity(p, full))
     kw.setdefault("standby_first_s", 0.0)
+    kw.setdefault("restorer", _same_restore)          # a fresh restore gives what the followers have (standby())
     return ReplicaWatch(store, pusher, who, tmp / who / "run", tmp / who / "work", wall=clock or time.time, log=lg,
                         poll_s=0.02, **kw)
+
+
+def _same_restore(db, db_path, out, cancel):
+    """A fresh restore of what standby()'s followers hold (its db_path + ".sqlite": the staged file)."""
+    src = Path(f"{db_path}.sqlite")
+    if not src.exists():
+        raise RuntimeError("no such replica in this test")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy(src, out)
+    return 0x2b
 
 
 class Proc:
@@ -167,7 +178,7 @@ def test_the_standby_catches_a_corrupt_replica_and_pushes_once_then_ok_again(tmp
     w = watch_for(s3, "B", tmp_path, ntfy, clock, logs)
     out = w.standby_round(sup)
     assert out["cad"]["ok"] is False and out["hub"]["ok"] is True and out["audio"]["ok"] is True
-    assert out["cad"]["by"] == "standby" and out["cad"]["txid"] == f"{100:016x}"
+    assert out["cad"]["by"] == "standby" and out["cad"]["txid"] == f"{0x2b:016x}" and out["cad"]["confirmed"]  # (the fresh restore's)
     assert [m["title"] for m in ntfy.got] == ["Replica corrupt: cad.sqlite"]
     assert ntfy.got[0]["priority"] == 5 and "in database main" in ntfy.got[0]["message"]
     assert any("replica check FAILED: cad.sqlite" in m for m in logs)       # the CloudWatch metric filter's line
@@ -202,8 +213,9 @@ def test_a_standby_supervisor_runs_the_checks_and_pushes_before_any_takeover(wor
     until(lambda: a.sup.role == "active")
     b = Task(world, "B", tmp_path)
     b.sup.watch = watch_for(world.s3, "B", tmp_path, ntfy, leader_interval_s=0,
-                            check=lambda p, full, cancel: {"ok": False, "result": "*** in database main ***"} if p.name == "cad.sqlite"
-                            else {"ok": True, "result": "ok"})
+                            check=lambda p, full, cancel: {"ok": False, "result": "*** in database main ***"} if p.name.startswith("cad.")
+                            else {"ok": True, "result": "ok"},
+                            restorer=lambda db, p, out, cancel: (out.write_bytes(b"made up"), 0x2b)[1])
     b.start()
     until(lambda: len(ntfy.got) >= 1, what="the standby's push")
     assert b.sup.role == "standby" and ntfy.got[0]["title"] == "Replica corrupt: cad.sqlite"
@@ -223,7 +235,7 @@ class FakeFollower:
     def __init__(self, src: Path | None, out: Path, code=None, err: str = "", hold: bool = False):
         self.pid, self.code = None, code
         out.parent.mkdir(parents=True, exist_ok=True)
-        if src is not None and code is None and not hold:
+        if src is not None and code is None and not hold and not Path(f"{out}-txid").exists():   # (else: resumes)
             shutil.copy(src, out)
             Path(f"{out}-txid").write_text(f"{0x2a:016x}\n")
         if err:
@@ -240,8 +252,26 @@ class FakeFollower:
         return self.code
 
 
-def leader(tmp_path, s3, ntfy, src: dict, clock=None, logs=None, **kw):
-    """A watcher on an active Supervisor with FakeFollowers of src ({db: path | None (no backup) | ("fail", text)})."""
+def fake_restorer(s3src: dict, calls: list | None = None):
+    """`litestream restore` (no follow) as the watcher's confirm() sees it: the file "in S3" (s3src[db]) into out at
+    txid 0x2b; None: no backup; an Exception: Litestream failed."""
+    def restore(db, db_path, out, cancel):
+        if calls is not None:
+            calls.append(db)
+        x = s3src.get(db)
+        if isinstance(x, Exception):
+            raise x
+        if x is None:
+            return None
+        out.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy(x, out)
+        return 0x2b
+    return restore
+
+
+def leader(tmp_path, s3, ntfy, src: dict, clock=None, logs=None, s3src: dict | None = None, **kw):
+    """A watcher on an active Supervisor with FakeFollowers of src ({db: path | None (no backup) | ("fail", text)});
+    a fresh restore (confirm) gives s3src (default: what the followers got)."""
     def follower(db, db_path, out):
         x = src.get(db)
         if isinstance(x, tuple) and x[0] == "signal":
@@ -249,6 +279,7 @@ def leader(tmp_path, s3, ntfy, src: dict, clock=None, logs=None, **kw):
         if isinstance(x, tuple):
             return FakeFollower(None, out, code=1, err=x[1])
         return FakeFollower(x, out, code=0 if x is None else None)
+    kw.setdefault("restorer", fake_restorer(s3src if s3src is not None else src))
     w = watch_for(s3, "A", tmp_path, ntfy, clock, logs, follower=follower, **kw)
     sup = SimpleNamespace(role="active", env=SimpleNamespace(db_path=lambda db: tmp_path / "data" / f"{db}.sqlite"))
     w.start_followers(sup)
@@ -267,8 +298,9 @@ def test_the_leader_checks_its_own_followers_files_pausing_each(tmp_path, ntfy):
     assert w.leader_round(sup) is False
     doc = s3.doc(KEY)
     assert doc["checks"]["cad"]["ok"] is False and doc["checks"]["cad"]["by"] == "leader"
-    assert doc["checks"]["cad"]["txid"] == f"{0x2a:016x}" and doc["checks"]["hub"]["ok"] is True
+    assert doc["checks"]["cad"]["txid"] == f"{0x2b:016x}" and doc["checks"]["hub"]["ok"] is True   # (the fresh restore's)
     assert [m["title"] for m in ntfy.got] == ["Replica corrupt: cad.sqlite"] and ntfy.got[0]["priority"] == 5
+    assert "a fresh restore from S3 fails it too" in ntfy.got[0]["message"] and doc["checks"]["cad"]["confirmed"]
     # each follower was stopped for its check and started again (it resumes from its -txid)
     assert FakeFollower.started.count("cad.sqlite") == 2 and set(w.followers) == set(rw.DBS)
     assert not Path(f"{w._out('hub')}-shm").exists()                      # nothing of our read left beside it
@@ -363,6 +395,165 @@ def test_a_follower_killed_by_a_signal_is_not_verifiable_not_corruption(tmp_path
     assert ntfy.got == [] and "cad" not in s3.doc(KEY)["failing"]       # (pushed as "not verifiable" after 2, at 4)
 
 
+def test_a_drifted_check_copy_is_reseeded_from_a_fresh_restore_not_pushed(tmp_path, ntfy):
+    """2026-11-15: the leader's follower copy failed quick_check, a fresh restore of the same replica passed. The copy
+    is replaced by the fresh one (the follower resumes from its txid), the result is ok, counted, never pushed, and
+    no "replica check FAILED" line (the CloudWatch alarm's) is logged."""
+    s3, clock, logs, calls = FakeS3(), Clock(), [], []
+    good = {db: make_db(tmp_path / f"{db}.sqlite", 300) for db in rw.DBS}
+    drifted = corrupt(make_db(tmp_path / "cad-drifted.sqlite", 300))
+    w, sup = leader(tmp_path, s3, ntfy, dict(good, cad=drifted), clock, logs, s3src=good,
+                    restorer=fake_restorer(good, calls))
+    w.tend_followers(sup)
+    assert w.leader_round(sup) is False
+    doc = s3.doc(KEY)
+    c = doc["checks"]["cad"]
+    assert c["ok"] is True and c["txid"] == f"{0x2b:016x}" and "wrong" not in c["result"]
+    assert c["reseeded"].startswith("failed *** in database main") and doc["failing"] == {}
+    assert doc["reseeds"]["cad"]["n"] == 1 and "hub" not in doc.get("reseeds", {})
+    assert ntfy.got == [] and calls == ["cad"]                               # hub and audio: no restore
+    assert not any("FAILED" in m for m in logs)
+    assert any("cad.sqlite: the check copy drifted" in m and "re-seeded" in m for m in logs)
+    out = w._out("cad")
+    assert out.read_bytes() == good["cad"].read_bytes() and w.applied("cad") == 0x2b and rw.settled(out)
+    assert not list(w.work.glob("*.fresh.sqlite*"))
+    state = json.loads((tmp_path / "A" / "run" / rw.STATE_FILE).read_text())
+    assert state["reseeds"]["cad"]["n"] == 1
+    clock.t += 930
+    w.leader_round(sup)                                                       # the next round: the follower's copy, ok
+    assert s3.doc(KEY)["checks"]["cad"]["ok"] is True and calls == ["cad"]
+    assert "reseeded" not in s3.doc(KEY)["checks"]["cad"] and s3.doc(KEY)["reseeds"]["cad"]["n"] == 1
+
+
+def test_a_copy_written_after_its_txid_is_never_checked_as_it_is(tmp_path, ntfy):
+    """A follower stopped part way through a round (pages written, its -txid not yet): the copy holds two positions,
+    so it isn't checked as such; a fresh restore is (here ok: re-seeded, "stopped mid-apply")."""
+    import os
+    s3, clock, checked = FakeS3(), Clock(), []
+    files = {db: make_db(tmp_path / f"{db}.sqlite", 300) for db in rw.DBS}
+    w, sup = leader(tmp_path, s3, ntfy, files, clock,
+                    check=lambda p, full, cancel: (checked.append(p.name), integrity(p, full))[1])
+    w.tend_followers(sup)
+    out = w._out("cad")
+    t = Path(f"{out}-txid").stat().st_mtime_ns
+    os.utime(out, ns=(t + 10**9, t + 10**9))                                  # written after the sidecar
+    assert not rw.settled(out) and rw.settled(w._out("hub"))
+    w.leader_round(sup)
+    assert "cad.sqlite" not in checked and "cad.fresh.sqlite" in checked and "hub.sqlite" in checked
+    c = s3.doc(KEY)["checks"]["cad"]
+    assert c["ok"] is True and c["reseeded"] == "stopped mid-apply" and ntfy.got == []
+    assert rw.settled(out)
+
+
+def test_a_failing_copy_whose_fresh_restore_fails_is_a_restore_failure(tmp_path, ntfy):
+    s3, clock = FakeS3(), Clock()
+    files = {db: make_db(tmp_path / f"{db}.sqlite", 300) for db in rw.DBS}
+    w, sup = leader(tmp_path, s3, ntfy, dict(files, cad=corrupt(make_db(tmp_path / "c2.sqlite", 300))), clock,
+                    s3src=dict(files, cad=RuntimeError("litestream restore exited 1: Error: ltx checksum mismatch")))
+    w.tend_followers(sup)
+    w.leader_round(sup)
+    c = s3.doc(KEY)["checks"]["cad"]
+    assert c["ok"] is None and c["restore_failed"] and "checksum mismatch" in c["result"]
+    assert [(m["title"], m["priority"]) for m in ntfy.got] == [("Replica restore failed (possible corruption): cad.sqlite", 5)]
+    assert "cad" in s3.doc(KEY)["failing"]
+
+
+def test_the_standby_confirms_a_failing_copy_without_touching_its_followers(tmp_path, ntfy):
+    s3, clock, calls = FakeS3(), Clock(), []
+    good = {db: make_db(tmp_path / f"{db}.sqlite", 300) for db in rw.DBS}
+    sup = standby(tmp_path / "B", dict(good, cad=corrupt(make_db(tmp_path / "c3.sqlite", 300))))
+    before = sup.staged("cad").read_bytes()
+    w = watch_for(s3, "B", tmp_path, ntfy, clock, restorer=fake_restorer(good, calls))
+    out = w.standby_round(sup)
+    assert out["cad"]["ok"] is True and out["cad"]["reseeded"] and calls == ["cad"] and ntfy.got == []
+    assert sup.staged("cad").read_bytes() == before                       # the takeover's copy: never ours to change
+    w2 = watch_for(s3, "B", tmp_path, ntfy, clock, restorer=fake_restorer({"cad": corrupt(make_db(tmp_path / "c4.sqlite", 300))}))
+    assert w2.standby_round(sup)["cad"]["ok"] is False
+    assert [m["title"] for m in ntfy.got] == ["Replica corrupt: cad.sqlite"]
+
+
+def test_the_leaders_checks_land_between_its_followers_polls():
+    w = ReplicaWatch(WatchStore(None), SimpleNamespace(), "A", Path("/nonexistent"), Path("/nonexistent"), follow_s=60.0)
+    assert w.off_tick(900.0) == 930.0 and w.off_tick(60.0) == 90.0 and w.off_tick(930.0) == 930.0
+    w.follow_s = 45.0
+    assert (w.off_tick(900.0) - 22.5) % 45.0 == 0 and 900 <= w.off_tick(900.0) < 945
+
+
+@pytest.mark.skipif(shutil.which("litestream") is None, reason="needs litestream on PATH")
+def test_with_real_litestream_a_drifted_copy_is_reseeded_and_a_corrupt_replica_still_alerts(tmp_path, ntfy):
+    """Real `litestream replicate` into a local file replica, the leader's real followers and real fresh restores:
+    the follower's copy damaged locally (the replica fine): re-seeded, ok, no push. Then a replica of a database that is
+    itself corrupt (Litestream replicates what SQLite wrote, damage included): the copy fails, the fresh restore too:
+    "Replica corrupt", pushed (5)."""
+    import subprocess
+    data, rep = tmp_path / "data", tmp_path / "rep"
+    data.mkdir()
+    cfg = tmp_path / "ls.yml"
+    cfg.write_text("logging:\n  stderr: true\ndbs:\n" + "".join(
+        f"  - path: {data}/{db}.sqlite\n    replica:\n      type: file\n      path: {rep}/{db}.sqlite\n" for db in rw.DBS))
+    for db in rw.DBS:
+        make_db(data / f"{db}.sqlite", 3000)
+
+    def replicate():
+        ls = subprocess.Popen(["litestream", "replicate", "-config", str(cfg)], stdout=subprocess.DEVNULL,
+                              stderr=subprocess.DEVNULL)
+        try:
+            until(lambda: all(list((rep / f"{db}.sqlite").rglob("*.ltx")) for db in rw.DBS), timeout=30, what="the replica")
+            time.sleep(2)
+        finally:
+            ls.terminate()
+            ls.wait(30)
+    replicate()
+    s3, clock, logs = FakeS3(), Clock(), []
+    w = watch_for(s3, "A", tmp_path, ntfy, clock, logs, follow_s=1.0, check=rw.run_check, restorer=None)   # (real restores)
+    w.ls_config = str(cfg)
+    sup = SimpleNamespace(role="active", env=SimpleNamespace(db_path=lambda db: data / f"{db}.sqlite"))
+
+    def restored():
+        w.tend_followers(sup)
+        return all(w.applied(db) is not None for db in rw.DBS)
+    w.start_followers(sup)
+    w.serving_at = w.mono()
+    try:
+        until(restored, timeout=60, what="the followers' first restores")
+        rw._stop(w.followers.pop("cad"))
+        out = w._out("cad")
+        b = bytearray(out.read_bytes())                                   # the copy drifts: a b-tree page of it
+        b[4096 * 2 + 8:4096 * 2 + 72] = b"\xa5" * 64
+        out.write_bytes(bytes(b))
+        Path(f"{out}-txid").write_text(Path(f"{out}-txid").read_text())   # (its sidecar after it: a settled copy)
+        assert rw.integrity(out)["ok"] is False
+        w._start_follower(sup, "cad")
+        until(lambda: w.followers["cad"].poll() is None and w.applied("cad") is not None, timeout=30, what="cad resumed")
+        time.sleep(0.5)
+        assert w.leader_round(sup) is False
+        doc = s3.doc(KEY)
+        assert {db: c["ok"] for db, c in doc["checks"].items()} == {db: True for db in rw.DBS}, doc["checks"]["cad"]["result"]
+        assert doc["checks"]["cad"]["reseeded"] and doc["reseeds"]["cad"]["n"] == 1 and ntfy.got == []
+        assert rw.integrity(out)["ok"] is True and not any("FAILED" in m for m in logs)
+
+        w.stop_followers()                                                # a genuinely corrupt replica
+        shutil.rmtree(rep)
+        for db in rw.DBS:
+            for p in data.glob(f"{db}.sqlite*"):
+                p.unlink()
+            make_db(data / f"{db}.sqlite", 3000)
+        corrupt(data / "cad.sqlite", page=3)
+        assert rw.integrity(data / "cad.sqlite")["ok"] is False
+        replicate()
+        w.start_followers(sup)
+        until(restored, timeout=60, what="the followers' restores of the new replica")
+        clock.t += 930
+        w.leader_round(sup)
+    finally:
+        w.stop_followers()
+    c = s3.doc(KEY)["checks"]["cad"]
+    assert c["ok"] is False and c.get("confirmed") and "cad" in s3.doc(KEY)["failing"]
+    assert [m["title"] for m in ntfy.got] == ["Replica corrupt: cad.sqlite"] and ntfy.got[0]["priority"] == 5
+    assert "a fresh restore from S3 fails it too" in ntfy.got[0]["message"]
+    assert any("replica check FAILED: cad.sqlite" in m for m in logs)
+
+
 @pytest.mark.skipif(shutil.which("litestream") is None, reason="needs litestream on PATH")
 def test_with_real_litestream_the_leaders_follower_verifies_then_a_corrupt_ltx_is_possible_corruption(tmp_path, ntfy):
     """A local file replica made by `litestream replicate`, followed by the leader's real `restore -f`: verified; then one
@@ -413,7 +604,8 @@ def test_with_real_litestream_the_leaders_follower_verifies_then_a_corrupt_ltx_i
 def test_each_push_kind_has_its_own_slot(tmp_path, ntfy):
     s3, clock = FakeS3(), Clock()
     w, sup = leader(tmp_path, s3, ntfy, {"cad": None, "hub": make_db(tmp_path / "hub.sqlite", 50),
-                                         "audio": make_db(tmp_path / "audio.sqlite", 50)}, clock)
+                                         "audio": make_db(tmp_path / "audio.sqlite", 50)}, clock,
+                    s3src={"hub": corrupt(make_db(tmp_path / "hub-s3.sqlite"))})      # (read only if hub's copy fails)
     w.tend_followers(sup)
     w.leader_round(sup)
     clock.t += 60

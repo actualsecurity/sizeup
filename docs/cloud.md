@@ -3736,11 +3736,29 @@ failed its quick_check. Then every new task crash-looped for ~35 min (Cloudflare
 
 | what | when | how |
 |---|---|---|
-| **Leader check** (the main one: desired count 1, so normally no standby runs) | 2 min after the leader serves, then every `SIZEUP_REPLICA_LEADER_CHECK_MIN` (15); a file not restored yet is looked at again each minute | The leader runs its own low-rate followers of all three files into `/data/.replica-check`, at nice 19: `litestream restore -f -follow-interval SIZEUP_REPLICA_FOLLOW_S` (60 s). They start 2 min after it serves, out of its busiest minute, and one at a time (cad, then hub, then audio): each starts once the one before has done its first restore. Only the first restore is full; after that they apply only new changes. After a retake (the role back to active), they start again from scratch. For each check, a follower is stopped, its file checked and the follower started again (it resumes from its `-txid`), which is the same path a takeover depends on. A follower that exits non-zero with Litestream error output (an LTX checksum mismatch, ...) is reported at once as "restore failed (possible corruption)". One killed by a signal (OOM, a SIGTERM from elsewhere) or exiting silently is "not verifiable". A follower with no file means there is no backup: not verifiable. A file not restored after 10 min is also not verifiable. |
+| **Leader check** (the main one: desired count 1, so normally no standby runs) | 2 min after the leader serves, then every `SIZEUP_REPLICA_LEADER_CHECK_MIN` (15); a file not restored yet is looked at again each minute | The leader runs its own low-rate followers of all three files into `/data/.replica-check`, at nice 19: `litestream restore -f -follow-interval SIZEUP_REPLICA_FOLLOW_S` (60 s). They start 2 min after it serves, out of its busiest minute, and one at a time (cad, then hub, then audio): each starts once the one before has done its first restore. Only the first restore is full; after that they apply only new changes. After a retake (the role back to active), they start again from scratch. For each check, a follower is stopped, its file checked and the follower started again (it resumes from its `-txid`), which is the same path a takeover depends on. The checks land half a follow interval off the followers' polls (every 15.5 min, not 15: see [A drifted check copy](#a-drifted-check-copy-2026-11-15)), and a failing check copy is confirmed from a fresh restore before anything is said. A follower that exits non-zero with Litestream error output (an LTX checksum mismatch, ...) is reported at once as "restore failed (possible corruption)". One killed by a signal (OOM, a SIGTERM from elsewhere) or exiting silently is "not verifiable". A follower with no file means there is no backup: not verifiable. A file not restored after 10 min is also not verifiable. |
 | **Standby check** (while one runs) | 3 min after its followers restored, then every `SIZEUP_REPLICA_CHECK_MIN` (10); never during a takeover or a drain | It copies each followed file in 8 MB pieces. The copy counts only if the `-txid` sidecar, size and mtime don't change while it is made, so the follow the takeover needs never pauses. The copy stops the moment the role changes. A file the standby's follower found no backup of is not verifiable. |
+| **Confirm** (leader and standby) | a check copy that fails its check, or (leader) one written after its `-txid` (its follower stopped part way through applying) | A fresh `litestream restore` from S3 into the work dir, at nice 19, checked the same way. Fresh ok: the copy drifted, the replica is fine: the result is ok, counted in the record (`reseeds`), no push, no "replica check FAILED" line; on the leader the fresh file becomes the follower's copy (it resumes from its txid). Fresh fails the check: "Replica corrupt" (the push says a fresh restore fails it too). The restore itself fails: "restore failed (possible corruption)". |
 | **The check** | | It runs read-only (not immutable) in a child process at nice 19 and is killed when the role changes or the task stops. It runs `quick_check`, and `integrity_check` once every `SIZEUP_REPLICA_FULL_H` (24) hours per file. |
 | **Task failure** | a takeover fails, the app exits, the task is fenced, a release is unclean, the supervisor crashes | The event goes into S3 and is pushed before the task exits, all within 20 s (DNS included). Three or more failures in 10 min send a separate push, "Hub crash-looping". The next task that serves pushes "Hub serving again". |
 | **Deploy check** | after each deploy (`deploy.yml`) | `tools/deploy_check.py replicas` reads **only** `replica-watch.json`; no database ever reaches a GitHub runner. It waits until the leader of this build has recorded that it serves and every file has a check after that. The job fails if a file is failing (corrupt or not verifiable), or if nothing was verified within 10 min. |
+
+#### A drifted check copy (2026-11-15)
+
+At 16:32 UTC the leader's check of `cad.sqlite` failed ("wrong # of entries in index ...") and "Replica corrupt" was
+pushed, while a fresh restore of the same replica minutes later passed. The replica was fine; the leader's check copy
+was not. Litestream's follower (0.5.18 `restore -f`) applies a round of LTX files page by page, syncs, and only then
+writes its `-txid` sidecar. A SIGTERM cancels its context, which cuts the S3 read of the file it is applying part way:
+the copy is left with some pages of the next position and the rest of the last one, which is exactly an index that
+doesn't match its table. The checks were every 900 s and the followers poll every 60 s, and each follower is started
+again right after its check, so every check stopped its follower within a second or two of a poll, when it applies
+what it found. Reproduced with real Litestream 0.5.18 against a local replica read through an S3 endpoint: 5 of 30
+checks at that phase failed, each one a copy written after its sidecar; every copy whose sidecar was newer passed, and
+the follower healed on its next start (it re-applies from its sidecar). Now: the checks land half a poll off, a copy
+written after its sidecar is never checked as it is, and any failing copy is confirmed from a fresh restore (above).
+A takeover never used this copy: `/data` is the task's own (only `/data/dvr` is EFS), a new task's followers restore
+from S3 into `/data/standby`, and the takeover stops them only once they reached the released position (nothing left
+to apply), refuses one that didn't exit 0 and quick_checks what it promotes.
 
 **A red replica check that may be spurious.** The deploy check allows 10 min from the end of the ECS step. The
 leader's followers start 2 min after it serves and restore one at a time, so if the first restore of `cad.sqlite`
@@ -3757,7 +3775,7 @@ may read the record: `python3 tools/deploy_check.py replicas --build <sha>`. A m
   visible to the supervisor: against those only the static hash backstop stands (`notify.always_protected()`), so a
   topic protected only in Settings is not refused here. Each kind has its own slot, so one kind never holds back another, and each is pushed at most
   once per `SIZEUP_REPLICA_PUSH_MIN` (30):
-  * `replica_corrupt` "Replica corrupt: cad.sqlite" (5);
+  * `replica_corrupt` "Replica corrupt: cad.sqlite" (5; a check copy and a fresh restore from S3 both failed);
   * `replica_restore` "Replica restore failed (possible corruption)" (5, on the first occurrence);
   * `replica_unverifiable` "Replica not verifiable" (4, after 2 rounds);
   * `litestream` "Hub Litestream restarted" (4: it exited under the serving app and was started again), and
@@ -3789,7 +3807,8 @@ may read the record: `python3 tools/deploy_check.py replicas --build <sha>`. A m
   * **CPU:** following costs almost nothing after the first restore. Each `quick_check` reads the whole file at nice
     19, every 15 min; `integrity_check` runs once a day. The check log line gives each one's seconds.
   * **S3:** each follower LISTs its replica every 60 s, roughly 3 × 1,440 polls a day, about $0.65–1.30 a month at
-    $0.005/1,000.
+    $0.005/1,000. A confirming fresh restore, only when a check copy fails: about 10 LISTs and a GET per file of its
+    restore plan (tens of requests, well under a cent) and, on the leader, the follower's usual restart.
   * **Deploy:** one GetObject of a few KB.
 
 ## AWS setup scripts

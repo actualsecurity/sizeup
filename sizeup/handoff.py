@@ -727,8 +727,11 @@ class Supervisor:
                 self.followers[db] = self.env.follower(db, self.staged(db))
 
     def stop_followers(self) -> dict[str, int | None]:
-        """Each follower that was running, stopped: its exit code (0: it stopped cleanly, between two LTX files;
-        -9: SIGKILLed, maybe half way through writing one into the file)."""
+        """Each follower that was running, stopped: its exit code (0: it stopped cleanly; -9: SIGKILLed, maybe half way
+        through writing one into the file). A SIGTERM during a poll that applies files can also stop it part way
+        through one, exit 0 (it cancels the S3 read: the leader's check copies, sizeup/replicawatch.py "a drift"); at
+        a takeover there is nothing left to apply (the replica holds still and each follower reached its position),
+        and the copy is quick_checked before it is promoted."""
         codes: dict[str, int | None] = {}
         for db, p in self.followers.items():
             if p.poll() is None:
