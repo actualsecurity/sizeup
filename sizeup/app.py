@@ -4155,7 +4155,7 @@ class App:
                 adapters = load_adapters(context_for(root, log), log=log, env=env, role=role)
                 if adapters and not self._stopping.is_set():
                     self.sources_runner = SourceRunner(adapters, self._source_out, log=log, role=role,
-                                                       target=self.forwarding).start()
+                                                       target=self.forwarding, env=env).start()
                     self.paging.on_ours = lambda: self.sources_poll_now("paging tones")
                     self.cad.sources.trigger = self.sources_poll_now      # a pre-alert on this CAD (all-in-one)
             except KeyboardInterrupt:

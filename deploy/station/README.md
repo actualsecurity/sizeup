@@ -446,6 +446,18 @@ sudo sizeup-station adapter remove   # key, credentials and [adapter] out; the n
 sudo sizeup-station adapter reset [source]   # a source that stopped itself (e.g. a login it won't retry): its reset()
 ```
 
+**How often it is read.** The station log's start-up line says it: `incident sources: LABEL (SOURCE, rank 1, every
+30 s ...)`. sizeup calls an adapter's `poll()` no more than every 30 s, except for one whose `poll()` asks its source
+nothing and only reads a snapshot the adapter keeps in memory: that one is read every `poll_s` (down to 1 s), so a new
+call reaches the hub that much sooner and the source sees nothing more. An adapter says so itself (`local_poll =
+True`). For one that is known to be so but doesn't say it, add its source id to `/etc/sizeup/station.env` and restart
+(off unless set; the line then reads `memory read every 5 s (SIZEUP_INCIDENT_SOURCES_SNAPSHOT)`):
+
+```sh
+echo 'SIZEUP_INCIDENT_SOURCES_SNAPSHOT=SOURCE' | sudo tee -a /etc/sizeup/station.env >/dev/null
+sudo sizeup-station restart
+```
+
 **What setup asks**, in this order (Enter keeps what is already set):
 
 1. The adapter's repo (`git@github.com:OWNER/REPO.git`).

@@ -1047,6 +1047,15 @@ Incidents come in from ranked sources. The interface is in `sizeup/sources/__ini
   closure comes from the feed's own in-service or cleared time), gentle (poll every 30 to 60 s; `poll_now` never
   bypasses that), honest (the client's real name as its user agent; no spoofing or anti-detection), and the feed's
   data stays in the department (never in logs beyond receipt, pushes, issues, PRs or CI output).
+- **How often `poll()` is called:** every `poll_s`, never under 30 s. The one exception is an adapter whose `poll()`
+  makes no request at all and only reads a snapshot it keeps in memory (a thread of its own talks to the source at its
+  own pace): the runner reads that one every `poll_s` down to 1 s, so a new event reaches the hub within `poll_s` of
+  the adapter having it. The adapter says so itself (`local_poll = True`), or the station's admin does for one that
+  doesn't, with `SIZEUP_INCIDENT_SOURCES_SNAPSHOT="source-id,..."` in `/etc/sizeup/station.env` (off unless set; only
+  for an adapter known to ask nothing in `poll()`). Only the reads get faster: `health()` is asked at the 30 s pace,
+  `poll_now` comes no sooner or oftener, a `poll()` that raises backs off from 30 s, and a read with nothing new sends
+  and logs nothing. The start-up line in the station's log says the interval really used (`every 30 s (the floor;
+  poll_s 5 s)`, `memory read every 5 s (...)`).
 - **Nothing waits.** A page for us makes its incident at once, whatever the feeds' health. An occasional duplicate
   is acceptable; a delay is not. A feed's new event does the same unless it attaches. An event already closed (or in
   service) when first seen is recorded and never makes an incident. One first seen more than 20 min after its dispatch
@@ -1111,7 +1120,8 @@ Incidents come in from ranked sources. The interface is in `sizeup/sources/__ini
 - **Poll now and reset:** paging tones of ours, a radio pre-alert or the phone ring wakes each adapter. The adapter's
   own thread then calls its optional `poll_now(reason)` and polls; `trigger()` never runs adapter code. Triggers stay
   gentle: at most one per max(`poll_s`, 30 s), at most 4 in 10 min, never sooner than 30 s after the last poll, and none
-  while an adapter is failing or its health isn't `ok`. A remote reset
+  while an adapter is failing or its health isn't `ok`. For a memory-read adapter "the last poll" is its last read at
+  the 30 s pace, not every read, and the runner reads it once more 2 s after `poll_now` (memory only). A remote reset
   (#305) is queued in the runner's `Resets` (`sizeup/sources/resets.py`) and runs `reset()` on the adapter's own thread before its next poll.
 - **Station only:** the hub refuses to load or run adapters (`HubRefused`). It only applies the station's forwarded
   events. The hub only ever sees an exception's type, never its text.
@@ -1152,7 +1162,8 @@ Incidents come in from ranked sources. The interface is in `sizeup/sources/__ini
   a password already refused (it keeps a "login" stop until SSM has a new version). While its Health says
   "refused versions 24 h: N", the hub's Reset asks for an explicit confirm (409 without `confirm_refused`).
 - **Measurement:** each source's first-seen time per incident, and its lead over paging. Settings > Station > Health
-  shows both.
+  shows both. A feed's first-seen time is the adapter's own (`FeedEvent.first_seen`, the station's clock) when it gives
+  a believable one (not later than the hand-off, at most 15 min before it), else when the runner got the event.
 - **Pre-alerts never make an incident.** These include a dispatcher on the feed's talkgroups opening a call to us,
   "incoming additional alarm" or "stand by for a page" naming us, and the phone ring. They show as "Possible incoming"
   at the top of the 60 Control column.
