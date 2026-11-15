@@ -307,8 +307,10 @@ class Comms:
                            "voice_at = ?, tone_seq = ?, id_note = ?, emergency = MAX(emergency, ?), "
                            "kept = COALESCE(NULLIF(?, ''), kept), evidence = COALESCE(NULLIF(?, ''), evidence), "
                            "mhz = COALESCE(?, mhz), updated_at = ? WHERE id = ?", (*vals, tid))
+                # (its tier, sizeup/tiers.py: only another P25 system's row has one, and a row recorded again without
+                # it keeps the one it had)
                 db.execute('UPDATE radio_traffic SET source = ?, system = ?, "group" = ?, service = ?, ours = ?, dept = ?, '
-                           "tier = ? WHERE id = ?", (*src, tid))
+                           "tier = COALESCE(NULLIF(?, ''), tier) WHERE id = ?", (*src, tid))
             else:
                 db.execute("INSERT INTO radio_traffic (call_id, turn, start, end, channel, talkgroup, talker, radio_id, rig, "
                            "dispatcher, text, status, model, tones, voice_at, tone_seq, id_note, emergency, kept, evidence, "

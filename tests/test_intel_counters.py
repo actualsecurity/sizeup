@@ -9,10 +9,12 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from sizeup.intel import counters as C
 from sizeup.intel import engine as engine_mod
 from tests.test_health import Rig, station_status
-from tests.test_intel import KEY, Clock, ctx_row, engine, row
+from tests.test_intel import Clock, ctx_row, engine, row
 from tests.test_cad import make_cad
 
 STATIC = Path(__file__).resolve().parent.parent / "sizeup" / "web" / "static"
@@ -112,6 +114,89 @@ def test_a_pack_that_is_on_with_nothing_in_scope_for_a_day_is_a_warning():
     assert pd(e)["level"] == "warn" and "last in scope: never" not in pd(e)["text"]
 
 
+def test_detection_or_a_pack_turned_on_is_watched_from_then_not_from_the_start():
+    """Off for a day, then on: no warning until it has been on for a day with nothing in scope."""
+    for off, on in (({"intel": {"enabled": False}}, {"intel": {}}),
+                    ({"intel_packs": {"police": {"mode": "off"}}}, {"intel_packs": {}})):
+        clock = Clock(1_000_000.0)
+        settings = dict(off)
+        e, _sink = engine(settings=settings, clock=clock)
+        clock.t += 2 * 86400
+        assert pd(e)["level"] == "off"
+        settings.clear()
+        settings.update(on)
+        e.reload()                                                            # (what a change in Settings does)
+        assert pd(e)["level"] == "ok" and pd(e)["on"]
+        clock.t += 23 * 3600
+        assert pd(e)["level"] == "ok"
+        clock.t += 3600
+        assert pd(e)["level"] == "warn"
+
+
+def test_an_engine_that_does_not_count_never_warns():
+    """A station forwarding to its hub, a standby: the transcripts are read elsewhere. Its line says so, with no
+    warning however long it has been up; and one that takes over is watched from then."""
+    clock = Clock(1_000_000.0)
+    e, _sink = engine(clock=clock)
+    e.active = lambda: False                                                  # a station forwarding to a hub
+    clock.t += 3 * 86400
+    p = pd(e)
+    assert p["level"] == "off" and p["text"] == "0 in scope / 0 considered · last in scope: never · not counted here"
+    assert "Not counted here" in p["title"] and "Nothing in scope" not in p["title"]
+    e2, _ = engine(clock=clock)
+    e2.leader = lambda: False                                                 # a standby
+    clock.t += 3 * 86400
+    assert pd(e2)["level"] == "off" and pd(e2)["text"].endswith(" · not counted here")
+    e2.leader = lambda: True                                                  # it takes over: watched from now
+    assert pd(e2)["level"] == "ok"
+    clock.t += 86400
+    assert pd(e2)["level"] == "warn"
+
+
+def test_a_day_old_row_caught_up_now_is_in_scope_now_and_the_line_agrees_with_itself():
+    clock = Clock(1_000_000.0)
+    e, _sink = engine(clock=clock)
+    clock.t += 30 * 3600
+    assert pd(e)["level"] == "warn"
+    e.feed(row("late", "copy that", clock.t - 26 * 3600))                     # said 26 hours ago, handed over now
+    p = pd(e)
+    assert p["h24"]["in_scope"] == 1 and p["h24"]["too_old"] == 1
+    assert p["level"] == "ok" and p["last_in_scope"] == clock.t               # never "1 in scope" beside a warning
+
+
+def test_the_warnings_hover_says_a_quiet_source_looks_the_same():
+    clock = Clock(1_000_000.0)
+    e, _sink = engine(clock=clock)
+    clock.t += 86400
+    assert "simply quiet for a day shows this too" in pd(e)["title"]
+    assert "can differ from the card's 24 h line" in pd(e)["title"]
+
+
+def test_a_pack_that_is_off_counts_what_is_in_its_scope_and_no_match():
+    clock = Clock()
+    e, _sink = engine(settings={"intel_packs": {"police": {"mode": "off"}}}, clock=clock)
+    e.feed(row("t1", "respond to 100 Example Ave, smoke coming from the house", clock.t))
+    h = pd(e)["h24"]
+    assert h["in_scope"] == 1 and h["matched"] == 0 and h["below"] == 0 and h["events"] == 0
+
+
+@pytest.mark.parametrize("broken", ["add", "in_scope", "watching", "snapshot"])
+def test_a_counter_that_fails_never_costs_an_event(broken):
+    clock = Clock()
+    e, sink = engine(clock=clock)
+
+    def fail(*a, **kw):
+        raise RuntimeError("an invented counter fault")
+    setattr(e.counters, broken, fail)
+    e.reload()
+    [ev] = e.feed(row("t1", "respond to 100 Example Ave, smoke coming from the house", clock.t))
+    assert ev.category == "fire_report" and len(sink.pushes) == 1 and sink.pushes[0][1].would_push
+    assert e.feed(row("old", "smoke coming from the house", clock.t - 3600)) == []
+    assert e.feed(row("t1", "respond to 100 Example Ave, smoke coming from the house", clock.t)) == []
+    if broken in ("add", "in_scope", "watching"):
+        assert e.count_errors > 0
+
+
 def test_a_pack_that_is_off_is_never_a_warning():
     clock = Clock(1_000_000.0)
     e, _sink = engine(settings={"intel_packs": {"police": {"mode": "off"}}}, clock=clock)
@@ -128,24 +213,71 @@ def test_a_pack_that_is_off_is_never_a_warning():
 def test_restore_is_idempotent_and_carries_the_day_and_the_last_in_scope():
     clock = Clock(1_000_000.0)
     a = C.Counters(clock)
+    a.watching(clock.t, ["police"])
     a.add(clock.t, "considered", ["police"], n=7)
     a.add(clock.t, "in_scope", ["police"], n=2)
-    a.in_scope(clock.t, clock.t, ["police"])
-    kept = json.loads(json.dumps(a.state(clock.t)))
+    a.in_scope(clock.t, ["police"])
+    kept = json.loads(json.dumps(a.state(clock.t, ["police"])))
     clock.t += 1800
     b = C.Counters(clock)
-    b.restore(kept, clock.t)
-    b.restore(kept, clock.t)                                                  # twice: nothing added
+    b.watching(clock.t, ["police"])
+    b.restore(kept, clock.t, ["police"])
+    b.restore(kept, clock.t, ["police"])                                      # twice: nothing added
     s = b.snapshot(clock.t, ["police"])
     assert s["packs"]["police"]["h24"]["considered"] == 7 and s["packs"]["police"]["start"]["considered"] == 0
-    assert s["packs"]["police"]["last_in_scope"] == 1_000_000.0 and s["since"] == 1_000_000.0 and s["started"] == clock.t
-    b.restore({"hours": {"police": {"x": {"considered": "many"}}}, "last_in_scope": {"police": "soon"}, "since": True}, clock.t)
-    b.restore("nonsense", clock.t)
+    assert s["packs"]["police"]["last_in_scope"] == 1_000_000.0 and s["started"] == clock.t
+    assert s["packs"]["police"]["on_since"] == 1_000_000.0                    # watched since before this process
+    b.restore({"hours": {"police": {"x": {"considered": "many"}}}, "last_in_scope": {"police": "soon"}, "on_since": True},
+              clock.t, ["police"])
+    b.restore("nonsense", clock.t, ["police"])
     assert b.snapshot(clock.t, ["police"])["packs"]["police"]["h24"]["considered"] == 7
     clock.t += 30 * 3600                                                      # older than a day: gone
     c = C.Counters(clock)
-    c.restore(kept, clock.t)
+    c.restore(kept, clock.t, ["police"])
     assert c.snapshot(clock.t, ["police"])["packs"]["police"]["h24"]["considered"] == 0
+
+
+def test_restore_takes_only_these_packs_the_windows_hours_and_real_counts():
+    clock = Clock(1_000_000.0)
+    hour = int(clock.t // 3600)
+    kept = {"hours": {"police": {str(hour): {"considered": 5, "in_scope": 10 ** 12, "invented": 3},
+                                 str(hour + 5): {"considered": 9},            # an hour that has not been
+                                 str(hour - 24): {"considered": 9}},          # ... and one out of the window
+                      "": {str(hour): {"considered": 5}},
+                      **{f"gone{i}": {str(hour): {"considered": 1}} for i in range(3000)}},     # packs that are no more
+            "last_in_scope": {"police": clock.t - 60, "gone1": clock.t - 60, "police2": clock.t + 9e9},
+            "on_since": {"gone2": 5.0}}
+    c = C.Counters(clock)
+    c.watching(clock.t, ["police"])
+    c.restore(kept, clock.t, ["police"])
+    assert set(c.hours) == {"police", ""} and set(c.hours["police"]) == {hour}
+    assert c.hours["police"][hour] == {"considered": 5}                       # no count beyond belief, no key not ours
+    assert c.last_in_scope == {"police": clock.t - 60} and c.on_since == {"police": clock.t}
+    out = c.state(clock.t, ["police"])
+    assert set(out["hours"]) == {"police", ""} and len(json.dumps(out)) < 500
+    c.add(clock.t, "considered", ["renamed"])                                 # a pack since removed is not kept either
+    assert set(c.state(clock.t, ["police"])["hours"]) == {"police", ""}
+    clock.t += 5 * 3600
+    assert c.snapshot(clock.t, ["police"])["packs"]["police"]["h24"]["considered"] == 5       # the future hour never shows
+
+
+def test_live_a_kept_state_too_large_to_be_ours_is_refused_and_replaced(tmp_path):
+    clock = Clock(1_000_000.0)
+    cad = make_cad(tmp_path, clock=clock)
+    hour = str(int(clock.t // 3600))
+    big = json.dumps({"hours": {f"gone{i}": {hour: {"considered": 1}} for i in range(3000)},
+                      "last_in_scope": {"police": clock.t - 60}})
+    assert len(big) > C.STATE_MAX
+    cad.store.meta_put(engine_mod.COUNTERS_META, big)
+    logs = []
+    cad.intel.log = logs.append
+    clock.t += 60
+    cad.intel._maybe_tick()
+    assert pd(cad.intel)["last_in_scope"] is None and set(cad.intel.counters.hours) <= {"", "police"}     # started fresh
+    assert any("not read, starting fresh" in x for x in logs)
+    clock.t += 3600
+    cad.intel._maybe_tick()                                                   # the hour's own, small, in its place
+    assert len(cad.store.meta_get(engine_mod.COUNTERS_META)) < 1000
 
 
 def test_live_one_log_line_an_hour_and_nothing_written_before_it(tmp_path):
@@ -243,3 +375,9 @@ def test_only_another_p25_systems_rows_carry_a_tier(tmp_path):
     tiers = {r["id"]: (r["system"], r["tier"]) for r in cad.store.q("SELECT id, system, tier FROM radio_traffic")}
     assert tiers["a-1"][1] == "" and tiers["b-1"][1] == "" and tiers["c-1"] == ("mrrs", "alert")
     assert set(cad.comms.audio_per_day(1)) == {"alert"}                       # the tiers' storage: the other system's only
+    # recorded again without its tier (a caller that doesn't know it): the tier it had stays
+    cad.comms.record({k: v for k, v in ctx_row("c-1", "radio check, over", at).items() if k != "tier"})
+    r = cad.store.one("SELECT text, tier FROM radio_traffic WHERE id = 'c-1'")
+    assert r == {"text": "radio check, over", "tier": "alert"}
+    cad.comms.record(dict(ctx_row("c-1", "radio check, over", at), tier="text"))        # ... and a new one is taken
+    assert cad.store.one("SELECT tier FROM radio_traffic WHERE id = 'c-1'")["tier"] == "text"
