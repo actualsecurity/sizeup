@@ -84,14 +84,14 @@ def test_edits_persist_across_a_restart_and_survive_a_changed_data_file(tmp_path
 
 def test_every_change_is_in_the_audit_log_with_who_did_it():
     cad = make_cad()
-    post(cad, "event_types", action="edit", code="BRUSH", item={"name": "Brush / grass fire"}, operator="Corey")
+    post(cad, "event_types", action="edit", code="BRUSH", item={"name": "Brush / grass fire"}, operator="Casey")
     post(cad, "units", action="edit", code="E60", unit={"title": "First due"}, operator="Pat")
     cad.save_run_card({"type": "SERVICE/LIFT", "slots": [{"kind": "engine", "count": 1}], "operator": "Pat"})
     post(cad, "users", action="add", name="Dana", role="admin", operator="Pat")
     log = [r for r in cad.settings.audit_log() if r["section"] != "radios"]      # (the radio seed's own rows)
     assert [(r["operator"], r["section"], r["key"]) for r in log] == [
         ("Pat", "users", "Dana"), ("Pat", "run cards", "SERVICE/LIFT"), ("Pat", "units", "E60"),
-        ("Corey", "lists", "event_types/BRUSH")]
+        ("Casey", "lists", "event_types/BRUSH")]
     assert json.loads(log[3]["old"])["name"] == "Brush fire" and json.loads(log[3]["new"])["name"] == "Brush / grass fire"
     assert log[2]["old"] and json.loads(log[2]["new"])["title"] == "First due"
     assert [r["key"] for r in cad.settings_audit_log({"section": ["lists"]})["audit"]] == ["event_types/BRUSH"]
@@ -275,18 +275,18 @@ def test_run_cards_reset_one_or_all_to_the_defaults():
 def test_operators_add_edit_deactivate_and_the_picker():
     cad = make_cad()
     assert cad.state()["operators"] == [] and cad.settings_get()["operators"] == []
-    a = post(cad, "users", action="add", name="Corey Smith", role="admin")
+    a = post(cad, "users", action="add", name="Casey Smith", role="admin")
     b = post(cad, "users", action="add", name="Pat Jones")
     assert (a["role"], a["active"], b["role"]) == ("admin", True, "dispatcher")
     with pytest.raises(CadError, match="already"):
-        post(cad, "users", action="add", name="corey smith")
+        post(cad, "users", action="add", name="casey smith")
     with pytest.raises(CadError, match="role"):
         post(cad, "users", action="add", name="X", role="chief")
     post(cad, "users", action="edit", id=b["id"], role="viewer", name="Pat J.")
     post(cad, "users", action="deactivate", id=a["id"])
     assert cad.state()["operators"] == ["Pat J."]
     assert [(o["name"], o["role"], o["active"]) for o in cad.settings_get()["operators"]] == [
-        ("Pat J.", "viewer", True), ("Corey Smith", "admin", False)]
+        ("Pat J.", "viewer", True), ("Casey Smith", "admin", False)]
     cols = {r["name"] for r in cad.store.q("PRAGMA table_info(operators)")}
     assert cols == {"id", "name", "role", "active", "created_at", "updated_at", "email", "callsign",   # email: Access sign-in
                     "last_seen", "last_ip", "last_ua"}                       # sizeup/cad/activity.py

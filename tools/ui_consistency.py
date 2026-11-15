@@ -30,7 +30,7 @@ from collections import defaultdict
 
 WIDTHS = (1920, 1366, 390)
 SECTIONS = ("lists", "runcards", "units", "dispatch", "users", "system", "radios")
-RADIO_TABS = ("channels", "tones", "ids", "vocabulary", "stt")       # Settings > Radios's tabs (#115; "receivers": radios)
+RADIO_TABS = ("channels", "tones", "ids", "vocabulary", "stt", "emergencies")       # Settings > Radios's tabs (#115; "receivers": radios)
 VIEWS = ([("dispatch", "/cad", "incident"), ("new", "/cad", "new"), ("overview", "/cad", None), ("radio", "/cad#radio", None)]
          + [(f"settings-{s}", f"/cad#settings/{s}", None) for s in SECTIONS]
          + [(f"settings-radios-{t}", f"/cad#settings/radios/{t}", None) for t in RADIO_TABS]
@@ -177,7 +177,7 @@ def measure(base, views, shots=None, prefix="after"):
                 phone = w < 600
                 ctx = b.new_context(viewport={"width": w, "height": 1080 if w == 1920 else 768 if w == 1366 else 844},
                                     is_mobile=phone, has_touch=phone)
-                ctx.add_init_script("try { localStorage.setItem('sizeup.cad.operator', 'Corey'); } catch (e) {}")
+                ctx.add_init_script("try { localStorage.setItem('sizeup.cad.operator', 'Casey'); } catch (e) {}")
                 pg = ctx.new_page()
                 errs = []
                 pg.on("pageerror", lambda e, errs=errs: errs.append(str(e)))

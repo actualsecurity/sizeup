@@ -6,7 +6,12 @@ sizeup/sources/runner.py (they come here as "source_event" / "source_health" thr
                (PAGING_RANK: below every feed). A feed is healthy while its last report says "ok" and is under
                REPORT_STALE_S old (older: "stale"); paging is healthy while the station is connected (paging_ok). The
                acting primary is the first healthy tier, promoted and demoted automatically (the console's pill and
-               Settings > Health say which)
+               Settings > Station > Health say which). Hysteresis: a feed shown ok goes bad (and the acting primary moves) only
+               once a bad run has lasted DEMOTE_S (an ok that hasn't held PROMOTE_S doesn't end the run), and is ok
+               again only after PROMOTE_S of "ok" (a station restart's "no list yet" for one runner cycle never flips
+               it). Shown at once: the adapter's own "failing" (it stopped) and no report for REPORT_STALE_S; a row
+               silent since before this hub started is unknown, its first report taken as it is. The pill's hover has
+               what was reported meanwhile and, when not plainly ok, the last ok report's age
     create     never delayed: a page for us makes its incident at once whatever the feeds' health (an occasional
                duplicate is acceptable, a delay is not), and so does a feed's new event, unless it attaches (below).
                A feed event already closed (or in service) when first seen is recorded and never makes an incident
@@ -63,7 +68,11 @@ sizeup/sources/runner.py (they come here as "source_event" / "source_health" thr
                report makes its own incident, noted "possibly the same as #N" on both
     authority  the best-ranked report's type and location are applied to a field no person has edited, whatever the
                status (manual_edits: type, location, pin); otherwise a timeline note, and the incident view
-               offers "Use <feed>'s <field>" (feed_use). A pin a person set is never cleared
+               offers "Use <feed>'s <field>" (feed_use). A pin a person set is never cleared. An incident with no
+               type at all, on a feed whose type field gives none of ours: a comment that is a type line gives it
+               (dispatch_lines: marked or the first, short, nothing taken back; _comment_type), never over a type
+               already set by anyone; else the page's type fills in (Cad._page_enrich: the backup). The feed's own
+               type field still wins when it says one
     timeline   every change a feed reports is an entry on the incident (kind "feed"): type, location, units, each time
                (per unit too), each new comment at its own time (not an empty one, nor the same words within
                COMMENT_REPEAT_S), closed
@@ -76,11 +85,24 @@ sizeup/sources/runner.py (they come here as "source_event" / "source_health" thr
                call moves onto it and is dismissed (#365, _sweepable): untouched, no "possibly the same" note on
                another open incident, and its page matched again now takes this incident, for the same call
     stale      the station sends the ids still in each feed's snapshot ("source_seen"): an open report the feed no
-               longer lists is noted once on its incident and flagged in Settings > Health
-    address    a feed's location is shown (and said) as its street part and known town, in proper case as the map's
-               labels are ("12 Example Ave, Sample Village": shown_location, proper_case; display only, matching reads
-               lower case). An incident titled before keeps its title until the feed moves it. The addresses a feed put on
-               an incident are recorded (feed_addresses) so a push never carries them (alarms.push_address)
+               longer lists is noted once on its incident and flagged in Settings > Station > Health
+    address    a feed's or a page's location is stored normalised (normal_location): its streets as the gazetteer
+               spells them, else suffixes and directions abbreviated, in proper case, an intersection "A Rd & B Ave",
+               and its town ("12 Example Ave, Sample Village"; out of area too, from the feed's town token). Every
+               view reads that. The text it came from is kept as address_raw and matching reads that (match_address):
+               exactly what it read before, and so does where the call is (lists.event_town, the joint call: never
+               a town the address only shows, a jurisdiction or a street list's guess; an unconfirmed page gets no
+               guessed town at all). A reading that isn't the same place is never stored (checked_location). A
+               person's address has none. A unit, floor and named place beside the street stay in the address
+               (location_extras); a feed's own town is shown as given, known here or not, and nothing is guessed
+               over it. The address keys (addrkey.py) are made from the form stored before (key_address), so no
+               key changes: backfill_key_check counts what would, before a row is touched (0, or nothing is done).
+               Rows stored before are normalised once, in the background: on a thread of
+               their own from BACKFILL_DELAY_S after the start (nothing at start), BACKFILL_BATCH rows at a time,
+               open ones first, the leader only (a refused write, FencedWrite, stops it until this is the leader
+               again), going on where it was after a restart (backfill_run / backfill_addresses: never a person's,
+               a failing row marked, counts logged). The addresses a feed put on an
+               incident are recorded (feed_addresses) so a push never carries them (alarms.push_address)
     logs       our incident ids and the source's label only: never the feed's ids, types, locations or an exception's text
     departments a feed's department entries (department_units(): {code: department}, Settings' "department_units"
                over the data file's; #370) are a whole department paged, never a unit: never a unit in common here,
@@ -112,6 +134,7 @@ from typing import Callable
 from sizeup.cad.fuzzy import STREET_SIM, misread, name_sim, snap
 from sizeup.cad.store import OPEN, TZ
 from sizeup.dispatch import split_joined
+from sizeup.fence import FencedWrite
 from sizeup.sources import EXTRA_SHOWN, HEALTH_STATES, SOURCE_ID, TIME_KEYS, FeedEvent, SourceError
 
 PAGING, PAGING_RANK, PAGING_LABEL = "paging", 1000, "Paging"
@@ -125,10 +148,35 @@ PAGE_LAG_S = 8 * 60.0                  # a "misheard" page this long after the f
 FUZZY_UNITS = 2                        # apparatus a page and a feed's incident share for a misheard street to join
 SAME_CALL_BEFORE_S = 60.0              # ... and an event first seen closed or old: dispatched at most this before it
 REPORT_STALE_S = 180.0
+DEMOTE_S = 90.0                        # a feed shown ok goes bad only after a bad run this long (hysteresis)
+PROMOTE_S = 60.0                       # ... and a bad one is ok again only after this long of "ok"
 FORGET_S = 24 * 3600.0                 # a feed silent this long is off the tiers (taken off the station)
 INCOMING_S = 300.0
+TYPE_COMMENT_WORDS = 5                 # a feed's comment this short may be its type line ("general fire alarm")
+# ... never one that takes something back or reports on it ("NOT A STRUCTURE FIRE", "HOLD FOR MVA", "CANCEL FIRE
+# ALARM", "CAR FIRE EXTINGUISHED", "ALARM RESET PER THE KEYHOLDER")
+COMMENT_NOT_A_LINE = re.compile(r"\b(?:cancel\w*|not|no|hold\w*|out|extinguished|reset|per|disregard\w*)\b", re.I)
+
+
+def dispatch_lines(comments) -> list[str]:
+    """A feed's comments that may be a line of the dispatch itself (its type, who it is for), their leading mark
+    dropped: marked ("~...") or the event's first comment, at most TYPE_COMMENT_WORDS words, and none of
+    COMMENT_NOT_A_LINE's. Any other comment is a narrative or a status note: never read for a type or a scope."""
+    out = []
+    for i, c in enumerate(comments or ()):
+        raw = str(c[1] if isinstance(c, (list, tuple)) and len(c) > 1 else c).strip()
+        words = re.sub(r"^[^A-Za-z0-9]+", "", raw).strip()
+        if not words or not (i == 0 or raw.startswith("~")):
+            continue
+        if len(words.split()) <= TYPE_COMMENT_WORDS and not COMMENT_NOT_A_LINE.search(words):
+            out.append(words)
+    return out
 COMMENT_REPEAT_S = 600.0               # a feed's comment with the same words this soon after: not a new line
 TICK_S = 5.0
+BACKFILL_DELAY_S = 300.0               # old addresses' backfill: nothing until this long after the start ...
+BACKFILL_BATCH = 50                    # ... then this many rows at a time (backfill_addresses) ...
+BACKFILL_PAUSE_S = 0.5                 # ... with this pause between batches: the console's requests come first
+BACKFILL_RETRY_S = 30.0                # ... and, not the leader (FencedWrite): looked at again this often
 PANEL_MAX = 50
 MANUAL_FIELDS = ("type", "location", "pin")
 
@@ -141,7 +189,13 @@ CREATE TABLE IF NOT EXISTS source_health (
   reason TEXT NOT NULL DEFAULT '',
   since REAL,
   at REAL NOT NULL,                     -- when the station reported it (the station's clock)
-  received REAL                         -- when the hub got it (the hub's clock: the stale check's)
+  received REAL,                        -- when the hub got it (the hub's clock: the stale check's)
+  bad_since REAL,                       -- the hub's clock: a bad run's start, cleared once ok has held (hysteresis)
+  ok_since REAL,                        -- ... the current ok run's start
+  held_state TEXT,                      -- ... the bad state shown when it began: shown until the ok run has held
+  held_reason TEXT,
+  ok_at REAL,                           -- the hub's clock: the last "ok" report (the pill's hover)
+  stopped INTEGER                       -- 1: the adapter's own health() said "failing" (shown at once)
 );
 CREATE TABLE IF NOT EXISTS source_reports (
   source TEXT NOT NULL,                 -- the adapter's source id, or 'paging'
@@ -433,6 +487,393 @@ def _town_text(s: str) -> str:
         if words and tuple(w.lower() for w in words) in TOWN_OF:
             return _title_town(words)
     return ""
+
+
+# -- the stored address (normal_location) ----------------------------------------------------------------------------
+# An incident's address is stored normalised; the text it came from is kept beside it (incidents.address_raw) and that
+# is what matching reads (match_address). A county town token's kind: SAMPLE_V a village, SAMPLE_C a city (both the
+# name alone), SAMPLE_T the town ("Town of Sample").
+TOWN_KIND = {"v": (), "c": (), "t": ("town", "of")}
+# words typed after a street's suffix that are never its town: a part of a building, a direction of travel, a kind of
+# place, a unit; and state codes ("... SAMPLE RD OTHERTOWN CT": the town before them)
+NOT_TOWN = {"ext", "extn", "extension", "north", "south", "east", "west", "rear", "front", "side", "back", "top",
+            "bottom", "upper", "lower", "middle", "corner", "roof", "attic", "basement", "bsmt", "cellar", "garage", "yard",
+            "driveway", "porch", "deck", "lobby", "hallway", "hall", "stairs", "stairwell", "elevator", "apt", "apts",
+            "unit", "units", "bldg", "building", "fl", "flr", "floor", "suite", "ste", "rm", "room", "lot", "annex",
+            "office", "offices", "school", "house", "home", "condo", "condos", "complex", "parking", "plaza", "mall",
+            "store", "shop", "church", "park", "field", "bridge", "ramp", "exit", "entrance", "entry", "nb", "sb", "eb",
+            "wb", "northbound", "southbound", "eastbound", "westbound", "inbound", "outbound", "bound", "lane", "shoulder",
+            "median", "overpass", "underpass", "tunnel", "area", "section", "wing", "tower", "vacant", "block", "int",
+            "intersection", "opposite", "opp", "near", "across", "behind", "next", "to", "and", "of", "the", "at", "by"}
+STATE_CODES = {"ny", "ct", "nj", "pa", "ma", "usa"}
+
+
+EXTRA_TOWNS: frozenset = frozenset()          # more towns a location may name (set_known_towns: the joint-response towns)
+COUNTY_TOWNS_FILE = Path(__file__).resolve().parents[2] / "data" / "westchester_towns.txt"
+_COUNTY: dict = {}                            # the county's towns (COUNTY_TOWNS_FILE): {name words: name as shown}
+
+
+def county_towns() -> dict[tuple[str, ...], str]:
+    """Every Westchester municipality, its postal hamlets and Greenwich, CT (data/westchester_towns.txt), read once."""
+    global _COUNTY
+    if not _COUNTY:
+        out = {}
+        try:
+            for line in COUNTY_TOWNS_FILE.read_text().splitlines():
+                name = line.split("#")[0].strip()
+                if name:
+                    out[tuple(re.findall(r"[a-z0-9]+", name.lower()))] = name
+        except OSError:
+            pass
+        _COUNTY = out or {(): ""}
+    return _COUNTY
+
+
+def set_known_towns(names) -> None:
+    global EXTRA_TOWNS
+    EXTRA_TOWNS = frozenset(k for k in (tuple(re.findall(r"[a-z0-9]+", str(n).lower())) for n in names or ()) if k)
+
+
+def known_town(text: str) -> bool:
+    """A town this CAD knows: a listed town or alias (set_towns), a town of the street lists (set_streets: the
+    gazetteer's, neighbours included), a joint-response town (set_known_towns), one of the county's (county_towns: any
+    Westchester municipality or postal hamlet, Greenwich, CT), or "Town of X" for one of those. Words
+    typed after a street, or a feed's town, are a town only then ("12 SAMPLE AVE CLUBHOUSE" never is)."""
+    key = tuple(re.findall(r"[a-z0-9]+", str(text or "").lower().replace("_", " ")))
+    if len(key) >= 2 and key[-1] in TOWN_KIND:          # SAMPLE_V, SAMPLE_T: the county's village / town of Sample
+        key = (*TOWN_KIND[key[-1]], *key[:-1])
+    if not key or any(w in NOT_TOWN for w in key[-1:]):
+        return False
+    streets = {tuple(re.findall(r"[a-z0-9]+", t)) for t in STREETS}
+    known = lambda k: k in TOWN_OF or k in streets or k in EXTRA_TOWNS or k in county_towns()
+    return known(key) or (key[:2] == ("town", "of") and len(key) > 2 and known(key[2:]))
+
+
+def _tail_town(tail: list[str]) -> tuple[str, list[str]]:
+    """(the town a typed location's words after its suffix name, the words that stay on the street): a known town
+    (known_town; "OTHERTOWN CT": the state code dropped); ('', tail) for anything else ("REAR", "MAIN", "REAR
+    OTHERTOWN", "NB", a town this CAD doesn't know)."""
+    words = list(tail)
+    while len(words) > 1 and words[-1].lower() in STATE_CODES:
+        words.pop()
+    if words and all(w.isalpha() for w in words) and known_town(" ".join(words)) \
+            and not any(w.lower() in NOT_TOWN | STATE_CODES for w in words):
+        return town_label(" ".join(words)), []
+    return "", list(tail)
+
+
+def town_label(text: str) -> str:
+    """A town as shown, from any spelling: 'RYE_BROOK' / 'rye brook' -> 'Rye Brook' (a listed town as the list spells
+    it; an alias as its town), 'SAMPLE_V' -> 'Sample', 'SAMPLE_T' -> 'Town of Sample', 'OTHERTOWN' -> 'Othertown' (one
+    not known: its words in proper case); '' for none."""
+    low = [w.lower() for w in re.split(r"[_\s,]+", str(text or "").strip()) if w]
+    if len(low) >= 2 and low[-1] in TOWN_KIND:
+        low = [*TOWN_KIND[low[-1]], *low[:-1]]
+    key = tuple(re.findall(r"[a-z0-9]+", " ".join(low)))
+    if not key:
+        return ""
+    if key in TOWN_OF and key not in LISTED and key[:2] != ("town", "of"):   # an alias: its town ("rye city" -> "Rye";
+        key = tuple(re.findall(r"[a-z0-9]+", TOWN_OF[key]))                  # never a town's own villages' alias)
+    return TOWN_NAME.get(key) or county_towns().get(key) or proper_case(" ".join(key))
+
+
+def _cut(words: list[str]) -> int | None:
+    """The suffix's index in a street's words (ABBR applied), as _street finds it; None for none."""
+    cut = next((i for i, w in enumerate(words) if w in SUFFIXES
+                and any(x not in DIRECTIONS and x not in SUFFIXES for x in words[:i])), None)
+    if cut is None and len(words) >= 2 and words[-1] in SUFFIXES:
+        cut = len(words) - 1
+    return cut
+
+
+def _street_words(piece: str, spell: bool = False) -> tuple[str, list[str], list[str]]:
+    """'12 NORTH EXAMPLE AVENUE EXTENSION OTHERTOWN' -> ('12', ['n', 'EXAMPLE', 'ave', 'ext'], ['OTHERTOWN']): the
+    house number, the street's words with its suffix and directions abbreviated (a direction only beside a name of
+    other words: "NORTH ST" stays), and the words after the suffix that are neither a direction nor EXT (the tail: a
+    typed location's town). A suffix word is abbreviated only after a name ("THE CIRCLE" stays: it is the name).
+    spell: a direction before the name stays a word ("EAST END AVE", a known street written so: _spelled)."""
+    toks = re.findall(r"[A-Za-z0-9]+(?:['\u2019.-][A-Za-z0-9]+)*", piece)
+    num = toks.pop(0) if toks and re.fullmatch(r"\d+[a-z]?", toks[0], re.I) else ""
+    mapped = [ABBR.get(w.lower(), w.lower()) for w in toks]
+    cut = _cut(mapped)
+    end = cut if cut is not None else len(toks)
+    named = any(m not in DIRECTIONS and m not in SUFFIXES for m in mapped[:end])
+    out, tail = [], []
+    for i, (w, m) in enumerate(zip(toks, mapped)):
+        if cut is not None and i > cut:
+            if tail or (m not in DIRECTIONS and w.lower() not in EXT):
+                tail.append(w)
+            else:
+                out.append(EXT.get(w.lower(), m))
+        elif i == cut and w.lower() != "saint" and any(x not in NOISE for x in mapped[:cut]):
+            out.append(m)
+        elif (m in DIRECTIONS and named and not spell and w.lower() != m and (i == 0 or mapped[i - 1] in DIRECTIONS)
+              and (i + 1 >= len(mapped) or mapped[i + 1] not in NOISE)):
+            out.append(m)                                  # NORTH EXAMPLE AVE -> N Example Ave (never "South of ...")
+        else:
+            out.append(w)
+    return num, out, tail
+
+
+_NAMES: tuple = (None, {})                         # (the STREETS it indexes, {name words: [(town, street, as written)]})
+
+
+def _by_name(name: frozenset) -> list[tuple[str, tuple, str]]:
+    """The known streets with these name words, in any town (STREETS indexed once per list, not scanned per call)."""
+    global _NAMES
+    if _NAMES[0] is not STREETS:
+        idx: dict[frozenset, list] = {}
+        for t, rows in STREETS.items():
+            for _, st, w in rows:
+                idx.setdefault(st[2], []).append((t, st, w))
+        _NAMES = (STREETS, idx)
+    return _NAMES[1].get(name, [])
+
+
+def _canonical(num: str, words: list[str], towns: list[str]) -> str:
+    """The gazetteer's spelling of this street (set_streets) in those towns ('Example Ave'), with its house number;
+    '' when it isn't exactly one of their streets (the same name, directions and suffix; never a fuzzy match: a
+    misheard street stays as heard)."""
+    _, pre, suffix, name, post = _street(" ".join(words))
+    if not name:
+        return ""
+    look = set(t for t in towns if t in STREETS) or (set() if not suffix else set(STREETS))
+    got = {w for t, st, w in _by_name(name) if t in look and "(" not in w
+           and st[0] == pre and st[3] == post and (st[1] == suffix or not suffix)}
+    return f"{num} {got.pop()}".strip() if len(got) == 1 else ""
+
+
+def _street_towns(piece: str) -> list[str]:
+    """The towns whose street lists have this street exactly (set_streets)."""
+    k = place_key(piece)
+    if k is None or k[0] != "addr" or not k[3]:
+        return []
+    return sorted({t for t, st, _ in _by_name(k[4]) if st == k[2:]})
+
+
+def _spelled(words: list[str]) -> bool:
+    """A known street (any town's list) with this name, directions and suffix is written with its direction as a word
+    ("East End Ave"): the direction is part of how the street is known, never abbreviated."""
+    _, pre, suffix, name, post = _street(" ".join(words))
+    if not name or not pre:
+        return False
+    return any(st[0] == pre and st[3] == post and (st[1] == suffix or not suffix)
+               and re.match(r"(?:north|south|east|west)\b", w, re.I) for _t, st, w in _by_name(name))
+
+
+FRACTION = re.compile(r"^(\d+)\s+(1/2|\u00bd)(?=\s)")
+UNIT_MAX, HEARD_UNIT_WORDS = 40, 4
+UNIT_SHORT = {"apartment": "Apt", "floor": "Fl", "flr": "Fl", "suite": "Ste", "building": "Bldg", "room": "Rm"}
+NO_TOWN = {"unknown", "unk", "none", "na", "tbd", "other", "county"}     # a feed's town field saying it has none
+
+
+def location_extras(s: str, typed: bool = True) -> tuple[str, str]:
+    """(unit, place) a location names beside its street: '12 EXAMPLE AVE :APT 3B REAR SAMPLE_V' -> ('Apt 3B Rear', '');
+    '12 EXAMPLE AVE : @SAMPLE DINER' -> ('', 'Sample Diner'). The unit: the apartment, floor, suite or building
+    (UNIT_TAIL, FLOOR) and what follows it, else a feed's words after a ':' ("REAR"); no town token, no known town at
+    its end; at most UNIT_MAX characters (heard words: HEARD_UNIT_WORDS words, else none). The place: the name after
+    '@', as shown_location reads it. ('', '') for a place only ("@SAMPLE SCHOOL", "@SAMPLE SCHOOL (12 EXAMPLE AVE)")."""
+    s = " ".join(str(s or "").split())
+    if not s or s.startswith("@") or not street_part(s):
+        return "", ""
+    snake = r"\b[A-Za-z0-9]+(?:_[A-Za-z0-9]+)+\b"
+    m = re.search(r"@\s*([^():;\[\],@]+)", s)
+    place = re.sub(snake, " ", re.split(r"\s+-\s+", m.group(1))[0]) if m else ""
+    place = proper_case(" ".join(place.split()))
+    seg = re.split(r"@|;|\s+-\s+", s)[0]
+    seg = re.sub(snake, " ", re.sub(r"\([^)]*\)|\[[^\]]*\]", " ", seg).split(",")[0])
+    hits = [x for x in (FLOOR.search(seg), UNIT_TAIL.search(seg)) if x]
+    if hits:
+        unit = seg[min(x.start() for x in hits):]
+    else:
+        unit = seg.split(":", 1)[1] if typed and ":" in seg else ""
+    words = _strip_town([""] + re.sub(r"[:#]", lambda x: " #" if x.group(0) == "#" else " ", unit).split())[0][1:] \
+        if unit.strip() else []
+    low = [w.lower() for w in words]
+    for t in TOWNS:                                        # "... APT 3 rye brook": the town isn't the unit's
+        if len(low) > len(t) and tuple(low[-len(t):]) == t:
+            words = words[:-len(t)]
+            break
+    if not words or (not typed and len(words) > HEARD_UNIT_WORDS):
+        return "", place
+    unit = proper_case(" ".join(UNIT_SHORT.get(w.lower(), w) for w in words)).replace("# ", "#")
+    return (unit if len(unit) <= UNIT_MAX else ""), place
+
+
+def _feed_town(town: str) -> list[str]:
+    """A feed's own town field as words, its state code dropped ("STAMFORD CT" -> ["stamford"]); [] when it names no
+    town (empty, numbers, a word that is never a town)."""
+    words = [w.lower() for w in re.split(r"[_\s,]+", str(town or "").strip()) if w]
+    while len(words) > 1 and words[-1] in STATE_CODES - set(TOWN_KIND):
+        words.pop()
+    if not words or not all(re.fullmatch(r"[a-z][a-z'.-]*", w) for w in words) or words[-1] in NOT_TOWN \
+            or (len(words) == 1 and words[0] in NO_TOWN):
+        return []
+    return words
+
+
+def _town_token(x: str) -> bool:
+    """A town in a location's text: a known one ('rye brook'), or the county's town token ('SAMPLE_V', 'OTHER_TOWN')."""
+    key = tuple(w.lower() for w in re.findall(r"[A-Za-z0-9]+", x))
+    return bool(key) and (key in TOWN_OF or "_" in x)
+
+
+def normal_location(s: str, *, town: str = "", geo_label: str = "", within=(), fallback: str = "",
+                    typed: bool = False, guess: bool = True) -> str:
+    """A location as an incident stores it: '12 NORTH EXAMPLE AVENUE RYE_BROOK' -> '12 N Example Ave, Rye Brook';
+    'EXAMPLETON RD/SAMPLE AVE OTHERTOWN' (typed) -> 'Exampleton Rd & Sample Ave, Othertown'. Its street part
+    (street_part: no named place, unit or floor), each street as the gazetteer spells it when it is exactly one of
+    its streets (else its suffix and directions abbreviated), in proper case (proper_case), an intersection's streets
+    joined " & ", then ", " and its town: the one the text names (a known town, a town token), else the feed's (town:
+    its town token), else the words a typed location has after its last street's suffix, else the map's (geo_label
+    "..., Town"), else the one town whose streets have it (among within when given: a page's tones' towns), else
+    fallback (a feed's jurisdiction); guess False: neither of those last two (an unconfirmed page). The town shown is
+    never read as where the call is unless its source text names it (lists.event_town reads address_raw). A named
+    place alone: "@ Sample School, Town". The unit, floor and named place a location has beside its street are kept
+    (location_extras): "12 Example Ave Apt 3B Rear (Sample Diner), Town". A feed's own town (town) is shown as given
+    even when this CAD doesn't know it ("STAMFORD CT" -> "Stamford"), and then nothing is guessed: never a local
+    town for a call the feed put elsewhere. "12 1/2" is a house number, never two streets. Display and search only:
+    matching reads the text it came from (match_address), the address keys the form stored before (key_address)."""
+    s = " ".join(str(s or "").split())
+    if not s:
+        return ""
+    m = re.fullmatch(r"(.+?)\s+between\s+(.+?)\s+and\s+([^,]+?)(,\s*.+)?", s, re.I)
+    if m and not typed:                                    # a block, as the map names it: "A St between B St and C Ave, Town"
+        whole = normal_location(m.group(1) + (m.group(4) or ""), town=town, geo_label=geo_label, within=within,
+                                fallback=fallback)
+        a, _, where = whole.partition(", ")
+        b, c = (normal_location(x).partition(", ")[0] for x in (m.group(2), m.group(3)))
+        return (f"{a} between {b} and {c}" + (f", {where}" if where else ""))[:200]
+    if not typed and "," in s and not _town_token(s.split(",", 1)[1]) and "@" not in s:
+        return proper_case(s)[:200]                        # words after a comma that aren't a town: not an address, as said
+    part = street_part(s)
+    found = ""
+    toks = part.split()
+    for t in TOWNS:                                        # a known town at its end
+        n = len(t)
+        if len(toks) > n and tuple(w.lower() for w in toks[-n:]) == t \
+                and any(not re.fullmatch(r"\d+[a-z]?", w, re.I) for w in toks[:-n]):
+            part, found = " ".join(toks[:-n]), town_label(" ".join(toks[-n:]))
+            if not typed:                                  # heard "... Example Avenue in Rye Brook": no stray "In"
+                part = re.sub(r"[\s,]+in(?:\s+the\s+(?:village|town|city)\s+of)?$", "", part, flags=re.I)
+            break
+    if not found:
+        head = re.split(r"\s:\s|@", s)[0]
+        found = next((town_label(x) for x in [*re.findall(r"\(([^)]*)\)", s), *s.split(",")[1:2],
+                                              *re.findall(r"\b[A-Za-z0-9]+(?:_[A-Za-z0-9]+)+\b", head),
+                                              *re.findall(r"\b[A-Z0-9]+(?:_[A-Z0-9]+)+\s*$", s)]   # "... : @PLACE TOWN_V"
+                      if _town_token(x)), "")
+    hint = _feed_town(town)
+    named_elsewhere = bool(hint) and not known_town(" ".join(hint))    # the feed's own town, one this CAD doesn't know
+    if hint and (not found or named_elsewhere):            # a feed's town: as given, known here or not
+        toks = part.split()
+        while named_elsewhere and len(toks) > len(hint) + 1 and toks[-1].lower() in STATE_CODES \
+                and [w.lower() for w in toks[-len(hint) - 1:-1]] == hint:
+            toks = toks[:-1]                               # "... STAMFORD CT": the state after the town
+        rest = " ".join(toks[:-len(hint)]) if len(toks) > len(hint) else ""
+        if [w.lower() for w in toks[-len(hint):]] == hint and (place_key(rest) or (None,))[0] in ("addr", "x") \
+                and (place_key(rest)[0] == "x" or place_key(rest)[4]):
+            part = rest                                    # the feed's town typed at the end: said once (a named street left)
+        if not found:
+            found = town_label(" ".join(hint)) if named_elsewhere else town_label(town)
+    frac = FRACTION.match(part)                            # "12 1/2 EXAMPLE AVE": a house number, not an intersection
+    if frac:
+        part = f"{frac.group(1)}{part[frac.end():]}"
+    parsed = [_street_words(p) for p in INTERSECTION.split(part) if p.strip()] if part else []
+    parsed = [_street_words(p, spell=True) if w and w[0] in DIRECTIONS and _spelled(w) else (n, w, t)
+              for p, (n, w, t) in zip([p for p in INTERSECTION.split(part) if p.strip()], parsed)]
+    if frac and parsed and parsed[0][0]:
+        parsed[0] = (f"{parsed[0][0]} 1/2", *parsed[0][1:])
+    if not typed and parsed and not any(num or _cut([ABBR.get(w.lower(), w.lower()) for w in words])
+                                        for num, words, _ in parsed):   # heard words with no house number and no
+        return (proper_case(s) + (f", {found}" if found and not s.lower().endswith(found.lower()) else ""))[:200]  # suffix
+    if typed and not found and parsed and parsed[-1][2]:
+        found, rest = _tail_town(parsed[-1][2])            # "... SAMPLE AVE OTHERTOWN": the county types the town last
+        parsed[-1] = (parsed[-1][0], parsed[-1][1], rest)
+    if not found and "," in (geo_label or ""):
+        found = town_label(geo_label.rsplit(",", 1)[1])
+    guess = guess and not named_elsewhere                  # (the feed named its town: nothing is guessed over it)
+    if not found and parsed and guess:
+        inside = {str(t).lower() for t in within or ()}
+        where = [t for t in _street_towns(" ".join(x for x in (parsed[0][0].split(" ")[0], *parsed[0][1]) if x))
+                 if not inside or t in inside]
+        found = town_label(where[0]) if len(where) == 1 else ""
+    if not found and guess and str(fallback or "").strip():
+        found = town_label(fallback)
+    look = [t for t in dict.fromkeys([found.lower(), *(str(t).lower() for t in within or ())]) if t]
+    streets = []
+    for num, words, tail in parsed:
+        if words or num:
+            text = _canonical(num, words, look) or proper_case(" ".join(x for x in (num, *words) if x))
+            streets.append(text + (f" {proper_case(' '.join(tail))}" if tail else ""))
+    if streets:
+        text = " & ".join(streets)
+        unit, place = location_extras(s, typed)
+        more = text + (f" {unit}" if unit else "")
+        if unit and not text.lower().endswith(unit.lower()) and same_place(more, text) \
+                and place_key(more) == place_key(text):
+            text = more                                    # (only a unit that leaves the street what it is)
+        if place and place.lower() not in text.lower():
+            text += f" ({place})"
+    else:
+        m = re.search(r"@\s*([^():;\[\],@]+)", s)
+        name = " ".join(re.split(r"\s+-\s+", m.group(1))[0].split()) if m else ""
+        text = f"@ {proper_case(name)}" if name else proper_case(s)
+    if found and text.lower().endswith(", " + found.lower()):
+        found = ""                                         # it says so already
+    return (text + (f", {found}" if found else ""))[:200]
+
+
+def checked_location(raw: str, normal: str) -> str:
+    """normal_location's result when it is the same place as the text it came from (same_place, or both no place at
+    all) with the same house numbers ("12 1/2" never becomes "12 1 & 2"), else the text as shown_location writes it:
+    a reading that would move the call is never stored."""
+    if normal and (same_place(raw, normal) or (place_key(raw) is None and place_key(normal) is None)) \
+            and _numbers(raw) == _numbers(normal):
+        return normal
+    return shown_location(raw)
+
+
+def _numbers(s: str) -> list[str]:
+    """The house numbers of a location's street part, as written: '12 1/2 EXAMPLE AVE' -> ['12 1/2']; '12A SAMPLE LN &
+    3RD ST' -> ['12a', '']: one per street, '' for none (a street's own digits, "3RD", "US 1", are its name)."""
+    part = street_part(s)
+    for t in TOWNS:
+        toks = part.split()
+        if len(toks) > len(t) and tuple(w.lower() for w in toks[-len(t):]) == t:
+            part = " ".join(toks[:-len(t)])
+            break
+    f = FRACTION.match(part)
+    if f:
+        return [f"{f.group(1)} 1/2"]
+    out = []
+    for piece in INTERSECTION.split(part):
+        m = re.match(r"\s*(\d+[a-z]?)\s+\S", piece, re.I)
+        out.append(m.group(1).lower() if m else "")
+    return out
+
+
+def key_address(inc, fed: bool) -> str:
+    """The location an incident's address keys are made from (sizeup/cad/addrkey.py, AddressHistory.key_of): exactly
+    what its address was before addresses were stored normalised, so no key changes. A feed's (fed): shown_location of
+    its text; a page's: its heard words; a person's (no address_raw): the address itself."""
+    try:
+        raw = inc["address_raw"]
+    except (KeyError, IndexError):
+        raw = ""
+    if not raw:
+        return inc["address"] or ""
+    return shown_location(raw) if fed else raw
+
+
+def match_address(inc) -> str:
+    """The location matching reads for an incident: the text its address was made from (address_raw: a feed's, a
+    page's), else its address (a person's, or one from before address_raw)."""
+    try:
+        raw = inc["address_raw"]
+    except (KeyError, IndexError):
+        raw = ""
+    return raw or inc["address"] or ""
 
 
 # Display casing (proper_case): words kept upper case, a few lower case inside a name, route designators, "Mac" names
@@ -733,13 +1174,24 @@ class Sources:
         # enriches the incident as for a page that joined it (transcript, cross streets, 60 Control mode's units)
         self.on_page_swept: Callable[[dict, int, dict], None] | None = None
         self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._backfill_thread: threading.Thread | None = None
         with self.store.lock:
             self.store.db.executescript(SCHEMA)
-            for table, col in (("source_health", "received REAL"), ("source_reports", "gone_at REAL")):
+            for table, col in (("source_health", "received REAL"), ("source_reports", "gone_at REAL"),
+                               ("source_health", "bad_since REAL"), ("source_health", "ok_since REAL"),
+                               ("source_health", "held_state TEXT"), ("source_health", "held_reason TEXT"),
+                               ("source_health", "ok_at REAL"), ("source_health", "stopped INTEGER")):
                 have = {r[1] for r in self.store.db.execute(f"PRAGMA table_info({table})")}
                 if col.split()[0] not in have:
                     self.store.db.execute(f"ALTER TABLE {table} ADD COLUMN {col}")
         self._towns_for = None
+        self._acting_logged: tuple | None = None   # (source, label) of the acting primary last logged
+        self._started = clock()                    # a row silent since before this: unknown, not bad (on_health)
+        try:
+            self._note_acting()
+        except Exception:  # noqa: BLE001 - only the log's starting point
+            pass
         self._streets_loaded = False
         self._towns()
 
@@ -762,6 +1214,7 @@ class Sources:
                 self.log(f"incident sources: street list: {type(e).__name__}")
         set_unit_aliases(self.feed_unit_aliases())
         set_department_codes(self.department_units())
+        set_known_towns(getattr(L, "joint_response", None) or ())
         set_placeholders(getattr(L, "placeholder", None))
 
     def _data_file(self, name: str, values=str) -> dict:
@@ -816,7 +1269,10 @@ class Sources:
     # -- health and tiers ----------------------------------------------------------------------------------------------
 
     def on_health(self, d: dict) -> None:
-        """A "source_health" from the station: kept when newer than the one we have."""
+        """A "source_health" from the station: kept when newer than the one we have. The hysteresis' clocks (the hub's):
+        bad_since, the start of a bad run, cleared only once "ok" has held PROMOTE_S (an ok that hasn't never resets
+        it); ok_since, the start of the current ok run; held_*, the bad state shown when that ok run began (still shown
+        until it has held). stopped: the adapter's own health() says "failing" (shown at once)."""
         src = str(d.get("source") or "")
         state = str(d.get("state") or "")
         at = d.get("at")
@@ -824,39 +1280,109 @@ class Sources:
             raise SourceError(f"bad source_health {src!r} {state!r}")
         rank = d.get("rank") if isinstance(d.get("rank"), int) and 1 <= d.get("rank") <= 99 else 1
         label = str(d.get("label") or src)[:60]
-        before = self.acting()
-        with self.store.tx() as db:
-            db.execute("INSERT INTO source_health (source, label, rank, state, reason, since, at, received) "
-                       "VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(source) DO UPDATE SET label = excluded.label, "
-                       "rank = excluded.rank, state = excluded.state, reason = excluded.reason, since = excluded.since, "
-                       "at = excluded.at, received = excluded.received WHERE excluded.at >= source_health.at",
-                       (src, label, rank, state, str(d.get("reason") or "")[:200],
-                        d.get("since") if isinstance(d.get("since"), (int, float)) else None, float(at), self.clock()))
-        after = self.acting()
-        if (before or {}).get("source") != (after or {}).get("source"):
-            self.log(f"incident sources: acting primary {(before or {}).get('label', 'none')} -> {(after or {}).get('label', 'none')}")
+        reason = str(d.get("reason") or "")[:200]
+        ok = state == "ok"
+        with self._lock:
+            now = self.clock()
+            old = self.store.one("SELECT *, COALESCE(received, at) AS got FROM source_health WHERE source = ?", (src,))
+            if old is not None and float(at) < old["at"]:
+                return                                       # an older report arriving late: the newer one stands
+            fresh = (None if ok else now - DEMOTE_S), (now if ok else None), None, None   # bad_since, ok_since, held:
+            #                                                                    nothing shown before, so shown as it is
+            if old is None or (now - old["got"] > REPORT_STALE_S and old["got"] < self._started):
+                bad_since, ok_since, held_state, held_reason = fresh   # nothing known (a cold hub): taken as it is
+            elif now - old["got"] > REPORT_STALE_S:          # silent while this hub ran: shown stale, so bad already
+                bad_since = min(x for x in (old["bad_since"], now - DEMOTE_S) if x is not None)
+                ok_since, (held_state, held_reason) = (now if ok else None), (("stale", self._reported(old, now)[1])
+                                                                              if ok else (None, None))
+            else:
+                bad_since, ok_since, held_state, held_reason = (old["bad_since"], old["ok_since"], old["held_state"],
+                                                                old["held_reason"])
+                was_ok = old["state"] == "ok"
+                if ok and not was_ok:                        # an ok run starts: what was shown stays until it holds
+                    shown = self._shown(old, now)
+                    ok_since = now
+                    held_state, held_reason = (shown[0], shown[1]) if shown[0] != "ok" else (None, None)
+                elif ok and bad_since is not None and now - (ok_since or now) >= PROMOTE_S:
+                    bad_since, held_state, held_reason = None, None, None    # ok has held: clean
+                elif not ok and was_ok:
+                    if bad_since is None or (ok_since is not None and now - ok_since >= PROMOTE_S):
+                        bad_since = now                      # a new bad run (an ok that hadn't held keeps the old one)
+                    ok_since, held_state, held_reason = None, None, None
+                if not ok and self._shown(old, now)[0] != "ok":
+                    # bad was on screen already (a stopped "failing" is shown at once): a milder bad report after it
+                    # never flips it back to ok. Only "ok" held for PROMOTE_S does
+                    bad_since = min(now - DEMOTE_S, bad_since if bad_since is not None else now)
+            with self.store.tx() as db:
+                db.execute("INSERT INTO source_health (source, label, rank, state, reason, since, at, received, bad_since, "
+                           "ok_since, held_state, held_reason, ok_at, stopped) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                           "ON CONFLICT(source) DO UPDATE SET label = excluded.label, rank = excluded.rank, "
+                           "state = excluded.state, reason = excluded.reason, since = excluded.since, at = excluded.at, "
+                           "received = excluded.received, bad_since = excluded.bad_since, ok_since = excluded.ok_since, "
+                           "held_state = excluded.held_state, held_reason = excluded.held_reason, ok_at = excluded.ok_at, "
+                           "stopped = excluded.stopped",
+                           (src, label, rank, state, reason, d.get("since") if isinstance(d.get("since"), (int, float))
+                            else None, float(at), now, bad_since, ok_since, held_state, held_reason,
+                            now if ok else (old["ok_at"] if old is not None else None),
+                            1 if state == "failing" and d.get("stopped") is True else 0))
+            self._note_acting(now)
+
+    @staticmethod
+    def _reported(r: dict, now: float) -> tuple[str, str]:
+        """What the station last said, or "stale" when it has said nothing for REPORT_STALE_S (the hub's own clock: a
+        station's skew never hides it)."""
+        if now - r["got"] > REPORT_STALE_S:
+            return "stale", f"no report since {_hm(r['got'])}"
+        return r["state"], r["reason"]
+
+    @staticmethod
+    def _shown(r: dict, now: float) -> tuple[str, str, bool]:
+        """(state, reason, settled) after the hysteresis: bad is shown once the bad run (bad_since) is DEMOTE_S old while
+        the reports still say so, ok again once it has held PROMOTE_S; until then what was shown, its reason saying what
+        was reported. Shown at once: the adapter's own "failing" (stopped) and silence for REPORT_STALE_S. Once bad
+        has been shown, any bad report after it is shown too (on_health dates the bad run back): "failing" (stopped)
+        then "backing_off" stays bad until "ok" has held PROMOTE_S."""
+        state, reason = Sources._reported(r, now)
+        if now - r["got"] > REPORT_STALE_S:
+            return state, reason, True
+        bad_since = r["bad_since"]
+        if state == "ok":
+            ok_for = now - (r["ok_since"] if r["ok_since"] is not None else r["got"])
+            if bad_since is None or ok_for >= PROMOTE_S or not r["held_state"]:
+                return state, reason, True               # shown as reported (a bad run's clock may still be running)
+            return r["held_state"], "; ".join(x for x in (f"ok {_dur(ok_for)}", r["held_reason"] or "") if x)[:200], False
+        if (r["stopped"] and state == "failing") or bad_since is None or now - bad_since >= DEMOTE_S:
+            return state, reason, True
+        return "ok", (f"{state.replace('_', ' ')} {_dur(now - bad_since)}" + (f": {reason}" if reason else ""))[:200], False
 
     def tiers(self, now: float | None = None) -> list[dict]:
-        """Every tier, best first: {source, label, rank, state, reason, at, healthy, acting}."""
+        """Every tier, best first: {source, label, rank, state, reason, at, ok_at, healthy, acting}. A feed's state is
+        _shown()'s (the hysteresis); ok_at: when its last "ok" report came (the hub's clock)."""
         now = self.clock() if now is None else now
         out = []
         for r in self.store.q("SELECT *, COALESCE(received, at) AS got FROM source_health WHERE COALESCE(received, at) >= ? "
                               "ORDER BY rank, source", (now - FORGET_S,)):
-            state, reason = r["state"], r["reason"]
-            if now - r["got"] > REPORT_STALE_S:              # the hub's own clock: a station's skew never hides it
-                state, reason = "stale", f"no report since {_hm(r['got'])}"
+            state, reason, settled = self._shown(r, now)
             out.append({"source": r["source"], "label": r["label"], "rank": r["rank"], "state": state, "reason": reason,
-                        "at": r["at"], "healthy": state == "ok"})
+                        "at": r["at"], "ok_at": r["ok_at"], "settled": settled, "healthy": state == "ok"})
         try:
             pok = bool(self.paging_ok())
         except Exception:  # noqa: BLE001
             pok = False
         out.append({"source": PAGING, "label": PAGING_LABEL, "rank": PAGING_RANK, "state": "ok" if pok else "failing",
-                    "reason": "" if pok else "station offline", "at": now, "healthy": pok})
+                    "reason": "" if pok else "station offline", "at": now, "ok_at": None, "settled": True, "healthy": pok})
         acting = next((t for t in out if t["healthy"]), None)
         for t in out:
             t["acting"] = t is acting
         return out
+
+    def _note_acting(self, now: float | None = None) -> None:
+        """Log the acting primary when it changes (a report, or a flip settling with time: the ticker)."""
+        a = self.acting(now)
+        now_is = ((a or {}).get("source"), (a or {}).get("label", "none"))
+        was, self._acting_logged = self._acting_logged, now_is
+        if was is not None and was[0] != now_is[0]:
+            self.log(f"incident sources: acting primary {was[1]} -> {now_is[1]}")
 
     def acting(self, now: float | None = None) -> dict | None:
         return next((t for t in self.tiers(now) if t["acting"]), None)
@@ -911,7 +1437,7 @@ class Sources:
         rows = [r for r in rows if r["id"] != exclude]       # the report's own incident (rematch_page)
         street = self._on_street(location, at, rows)
         exact = here and any(inc["id"] not in taken and any(same_place(location, x) for x in
-                             (inc["address"], inc["place_address"], inc["geo_label"]) if place_key(x) is not None)
+                             (match_address(inc), inc["place_address"], inc["geo_label"]) if place_key(x) is not None)
                              for inc in rows)
         best = None
         bkey = None
@@ -921,7 +1447,7 @@ class Sources:
         for inc in rows:
             on = split_units(drop_departments(self._units_of(inc["id"])))
             common = units_match(units, on)
-            theirs = [x for x in (inc["address"], inc["place_address"], inc["geo_label"]) if place_key(x) is not None]
+            theirs = [x for x in (match_address(inc), inc["place_address"], inc["geo_label"]) if place_key(x) is not None]
             same = here and bool(theirs) and any(same_place(location, x) for x in theirs)
             heard = inc["source"] == PAGE_SOURCE and not self._has_feed(inc["id"])   # its location is a page's
             half = here and not same and any(same_place_halved(location, x, source == PAGING, heard) for x in theirs)
@@ -1036,7 +1562,7 @@ class Sources:
         for inc in rows:
             if abs(inc["created_at"] - at) > SAME_CALL_S:
                 continue
-            for x in (inc["address"], inc["place_address"], inc["geo_label"]):
+            for x in (match_address(inc), inc["place_address"], inc["geo_label"]):
                 s = street_of(x)
                 if s is not None and s[1] == mine[1] and _towns_agree(location, x):
                     out[inc["id"]] = out.get(inc["id"], False) or s[0] != mine[0]
@@ -1080,15 +1606,27 @@ class Sources:
         return self.store.one("SELECT * FROM source_reports WHERE incident_id = ? AND source != ? AND merged_into = '' "
                               "ORDER BY rank, first_seen LIMIT 1", (iid, PAGING))
 
-    def _location_fields(self, iid: int, loc: str) -> dict:
-        """The fields for a feed's location: the address, and a new pin only when no person set one."""
-        shown = shown_location(loc)
-        f = {"address": shown, "place": "", "place_address": "", "geo_alts": ""}
+    def _location_fields(self, iid: int, loc: str, data: dict | None = None) -> dict:
+        """The fields for a feed's location: the address (normalised, with the feed's text it came from), and a new pin
+        only when no person set one."""
+        f = {"address": "", "address_raw": loc, "place": "", "place_address": "", "geo_alts": ""}
+        geo = self.store.incident(iid)["geo_label"]
         if "pin" not in self.manual(iid):
-            g = {"address": shown, "lat": None, "lon": None, "geo_label": ""}
+            g = {"address": shown_location(loc), "lat": None, "lon": None, "geo_label": ""}
             self.cad._auto_geo(g)
             f.update(lat=g["lat"], lon=g["lon"], geo_label=g["geo_label"])
+            geo = g["geo_label"]
+        f["address"] = self.normal(loc, data, geo)
         return f
+
+    def normal(self, loc: str, data: dict | None = None, geo_label: str = "") -> str:
+        """A feed's location as the incident stores it (normal_location): the town its text names, else the feed's town
+        token, else the words it types after the street, else the map's, else the street lists', else its
+        jurisdiction."""
+        self._towns()
+        x = (data or {}).get("extra") or {}
+        return checked_location(loc, normal_location(loc, town=str(x.get("town") or ""), geo_label=geo_label, typed=True,
+                                                     fallback=str(x.get("jurisdiction") or "")))
 
     def feed_use(self, iid: int, field: str, operator: str = "") -> dict:
         """'Use <feed>'s type / location': the best feed's value over a person's, logged as theirs."""
@@ -1108,7 +1646,7 @@ class Sources:
             loc = (d.get("location") or "").strip()
             if not loc:
                 raise CadError(f"{r['label']} has no location")
-            f = self._location_fields(iid, loc)
+            f = self._location_fields(iid, loc, d)
         inc = self.store.update_incident(iid, f, operator=operator)
         if field == "location":
             self._fed_address(iid)
@@ -1151,6 +1689,7 @@ class Sources:
         now = self.clock()
         seen = float(d.get("first_seen") or d.get("seen_at") or now)
         data = ev.as_dict()
+        self._towns()                                        # the towns and streets the address is written with
         with self._lock:
             rep = self._report(ev.source, ev.event_id)
             if rep and rep["merged_into"]:                   # retired: the feed merged it into another event
@@ -1265,10 +1804,12 @@ class Sources:
     def _create_feed(self, source: str, ref: str, data: dict, label: str) -> int:
         typ, sub, note = self.cad.map_type(data["type"], label)
         loc = data["location"].strip()
-        f = {"type": typ, "subtype": sub, "type_note": note, "address": shown_location(loc),
-             "remarks": (f"{label} event {ref}: {data['type'] or 'type not given'} at {proper_case(loc) or '(no location)'}"
-                         + (f"; units {', '.join(data['units'])}" if data["units"] else ""))[:4000]}
-        self.cad._auto_geo(f)
+        f = {"type": typ, "subtype": sub, "type_note": note, "address": shown_location(loc)}
+        self.cad._auto_geo(f)                                # placed as before: the feed's street part and known town
+        f.update(address=self.normal(loc, data, f.get("geo_label") or ""), address_raw=loc)
+        # the remarks keep the feed's whole text (its unit, floor and named place), as they always have
+        f["remarks"] = (f"{label} event {ref}: {data['type'] or 'type not given'} at {proper_case(loc) or '(no location)'}"
+                        + (f"; units {', '.join(data['units'])}" if data["units"] else ""))[:4000]
         via = ""                     # never "60 Control": the console says the feed's label (the sheet has no code for it)
         iid = self.store.create_incident(**f, received_via=via, source=FEED_SOURCE, source_ref=f"feed:{source}:{ref}",
                                          status="queued")
@@ -1365,15 +1906,23 @@ class Sources:
                 notes.append((now, f"{pre}: type {new['type']}"))
             if auth and differs and "type" not in hand:
                 fields.update(type=typ, subtype=sub, type_note=note)
+        if ("type" not in fields and auth and "type" not in hand and not inc["type"]
+                and not self.cad.map_type(new["type"], label)[0]):
+            # the incident has no type at all and the feed's type field gives none of ours: a comment that is a type
+            # line gives it ("authority"). Never over a type already set, whoever set it
+            typ, sub, note = self._comment_type(new["comments"], label)
+            if typ:
+                fields.update(type=typ, subtype=sub, type_note=note)
         loc = new["location"].strip()
         if loc and (loc != old["location"].strip() or attach):
-            differs = not created and not same_place(loc, inc["address"])
+            differs = not created and not same_place(loc, match_address(inc))
+            shown = self.normal(loc, new, inc["geo_label"])
             if auth and differs and "location" in hand:
-                notes.append((now, f"{label}: location {shown_location(loc)} (kept the location set by hand)"))
+                notes.append((now, f"{label}: location {shown} (kept the location set by hand)"))
             elif not created:
-                notes.append((now, f"{pre}: location {shown_location(loc)}"))
+                notes.append((now, f"{pre}: location {shown}"))
             if auth and differs and "location" not in hand:
-                fields.update(self._location_fields(iid, loc))
+                fields.update(self._location_fields(iid, loc, new))
         if new["units"] != list(old["units"]):
             added = [u for u in new["units"] if u not in old["units"]]
             gone = [u for u in old["units"] if u not in new["units"]]
@@ -1422,6 +1971,15 @@ class Sources:
             with self.store.tx() as db:
                 for at, text in notes:
                     self.store._event(db, iid, "feed", text[:2000], at=at)
+
+    def _comment_type(self, comments, label: str) -> tuple[str, str, str]:
+        """(TYPE, SUBTYPE, note) from a feed's comment that is a type line (dispatch_lines: "~GENERAL FIRE ALARM")
+        and a type of ours as Cad.map_type reads it. ("", "", "") without one."""
+        for words in dispatch_lines(comments):
+            typ, sub, note = self.cad.map_type(words, label)
+            if typ:
+                return typ, sub, note
+        return "", "", ""
 
     def _feed_closed(self, iid: int, source: str, ref: str, label: str) -> bool:
         """The feed closed its event: the queued incident only it made, untouched by anyone, is dismissed. True if so."""
@@ -1629,12 +2187,12 @@ class Sources:
                     continue                                 # possibly another open call: a person decides
                 d = json.loads(rep["data"] or "{}")
                 typ = str((d.get("f") or {}).get("type") or p["type"] or "")
-                best, _ = self.match_all(PAGING, rep["first_seen"], d.get("location") or p["address"],
+                best, _ = self.match_all(PAGING, rep["first_seen"], d.get("location") or match_address(p),
                                          d.get("units") or [], typ, exclude=p["id"], towns=d.get("towns") or ())
                 if best is not None and best["id"] == iid and self._page_same_call(best, rep["first_seen"], typ):
                     out.append(p)
                 elif inc["source"] == ALERT_SOURCE:          # the airport alert level's incident (#369): as page() joins it
-                    al = self.alert_incident(PAGING, rep["first_seen"], typ, d.get("location") or p["address"],
+                    al = self.alert_incident(PAGING, rep["first_seen"], typ, d.get("location") or match_address(p),
                                              str((d.get("f") or {}).get("subtype") or p["subtype"] or ""),
                                              heard_aircraft(d) or str(p.get("acft_type") or ""))
                     if al is not None and al["id"] == iid:
@@ -1714,6 +2272,7 @@ class Sources:
         """Open incoming notices past their time: expired. How many."""
         now = self.clock() if now is None else now
         with self._lock:
+            self._note_acting(now)                       # a flip settling with time (hysteresis) is logged too
             if not self.store.q("SELECT 1 FROM incoming WHERE status = 'open' AND until < ? LIMIT 1", (now,)):
                 return 0
             with self.store.tx() as db:
@@ -1726,15 +2285,172 @@ class Sources:
             except Exception as e:  # noqa: BLE001 - the ticker never dies
                 self.log(f"incident sources: {type(e).__name__}")
 
-    def start(self) -> Sources:
-        threading.Thread(target=self.run, name="incident-sources", daemon=True).start()
+    def start(self, backfill_delay_s: float | None = BACKFILL_DELAY_S) -> Sources:
+        """The ticker, and the old addresses' backfill on a thread of its own, backfill_delay_s after this (None: no
+        backfill): nothing of it at start."""
+        self._thread = threading.Thread(target=self.run, name="incident-sources", daemon=True)
+        self._thread.start()
+        if backfill_delay_s is not None:
+            self._backfill_thread = threading.Thread(target=self.backfill_run, args=(backfill_delay_s,),
+                                                     name="address-backfill", daemon=True)
+            self._backfill_thread.start()
         return self
 
-    def stop(self) -> None:
+    def backfill_run(self, delay_s: float = BACKFILL_DELAY_S, retry_s: float = BACKFILL_RETRY_S) -> None:
+        """The backfill's thread: nothing until delay_s after the start (a takeover's start writes nothing of it:
+        docs/cloud.md "Writing a migration"), then backfill_addresses in batches, only while this is the leader
+        (store.may_write, the hub's fence). A write refused on the way (FencedWrite: the lease ran out) stops it,
+        said once; it looks again every retry_s and goes on from the rows still to do once this is the leader again.
+        Ends when no row is left, on stop(), or on an error (the addresses stay as they were; the next start goes on)."""
+        if self._stop.wait(delay_s):
+            return
+        waiting = False
+        while not self._stop.is_set():
+            if self.store.may_write():
+                try:
+                    self.backfill_addresses(pause=BACKFILL_PAUSE_S)
+                    return
+                except FencedWrite:
+                    pass                                     # the lease ran out in this pass: as below
+                except Exception as e:  # noqa: BLE001 - the addresses stay as they were; the feeds go on
+                    self.log(f"incident sources: address backfill: {type(e).__name__}")
+                    return
+            elif waiting:
+                if self._stop.wait(retry_s):
+                    return
+                continue
+            waiting = True
+            self.log("incident sources: address backfill: stopped until this is the leader again")
+            if self._stop.wait(retry_s):
+                return
+
+    def backfill_addresses(self, pause: float = 0.0) -> int:
+        """The addresses a feed or a page wrote before they were stored normalised (address_raw ''), open ones first,
+        then closed: each normalised (normal_location; a feed's from its report's text, town token and jurisdiction),
+        the old address kept as address_raw, so matching reads exactly what it read before. Never one a person set
+        (manual_edits "location", or an incident a person made), nor one whose normal form isn't the same place
+        (checked_location). The address is written only when it changes (the address history's trigger fires on it).
+        A row that fails is marked done as it is (address_raw = its address: never retried).
+
+        BACKFILL_BATCH rows are read at a time and each row is its own short transaction (the store's lock is never
+        held across rows), with pause between batches. A row done is out of the next read (address_raw set), so a
+        pass cut short (stop(), a restart, FencedWrite) goes on from the rows still to do, and a second pass finds
+        nothing. Only the leader writes: FencedWrite is raised (never swallowed) when this isn't it, before a batch
+        or from a row's write. The log says how many, nothing else. How many changed."""
+        self._towns()
+        n = failed = 0
+        seen: set[int] = set()
+        moved = self.backfill_key_check()                    # read-only, before a row is touched
+        if moved:
+            return 0                                         # (said in the log: nothing is normalised over a moved key)
+        try:
+            while not self._stop.is_set():
+                if not self.store.may_write():
+                    raise FencedWrite("not the leader: address backfill stopped (nothing written)")
+                rows = self.store.q(
+                    "SELECT i.* FROM incidents i WHERE i.address_raw = '' AND i.address != '' AND i.source IN (?, ?) "
+                    "AND NOT EXISTS (SELECT 1 FROM manual_edits m WHERE m.incident_id = i.id AND m.field = 'location') "
+                    f"ORDER BY i.status IN ({','.join('?' * len(OPEN))}) DESC, i.id DESC LIMIT ?",
+                    (FEED_SOURCE, PAGE_SOURCE, *OPEN, BACKFILL_BATCH))
+                todo = [r for r in rows if r["id"] not in seen]
+                if not todo:                                 # none left (or only rows this pass couldn't mark): done
+                    break
+                for inc in todo:
+                    seen.add(inc["id"])
+                    old = inc["address"]
+                    try:
+                        n += self._backfill_one(inc)
+                    except FencedWrite:
+                        raise
+                    except Exception:  # noqa: BLE001 - one bad row never stops the rest, nor every start after
+                        failed += 1
+                        try:
+                            with self.store.tx() as db:
+                                db.execute("UPDATE incidents SET address_raw = ? WHERE id = ? AND address = ? AND "
+                                           "address_raw = ''", (old, inc["id"], old))
+                        except FencedWrite:
+                            raise
+                        except Exception:  # noqa: BLE001
+                            pass
+                if len(rows) < BACKFILL_BATCH or (pause and self._stop.wait(pause)):
+                    break
+        finally:
+            if n or failed:
+                self.log(f"incident sources: {n} stored addresses normalised"
+                         + (f", {failed} left as they were (failed)" if failed else ""))
+        return n
+
+    KEYED = (("premise_notes", "premise notes"), ("preplan_points", "pre-plan points"), ("preplan_docs", "pre-plan documents"))
+
+    def backfill_key_check(self) -> int:
+        """Read-only, before the backfill writes: how many premise notes, pre-plan points and pre-plan documents are
+        stored under the building key of a row still to do whose key would change once it is normalised. The keys are
+        made from the form stored before (key_address), so this is 0; it is counted and logged all the same, and the
+        backfill does nothing while it isn't. Only rows whose building key something is stored under are looked at."""
+        tables = [t for t, _ in self.KEYED
+                  if self.store.one("SELECT 1 AS x FROM sqlite_master WHERE type = 'table' AND name = ?", (t,))]
+        used: dict[str, int] = {}
+        for t in tables:
+            for r in self.store.q(f"SELECT bldg_key AS k, count(*) AS n FROM {t} WHERE bldg_key != '' GROUP BY bldg_key"):
+                used[r["k"]] = used.get(r["k"], 0) + r["n"]
+        moved, rows_seen = set(), 0
+        keys = list(used)
+        for i in range(0, len(keys), 400):
+            part = keys[i:i + 400]
+            for inc in self.store.q(
+                    "SELECT i.* FROM incidents i WHERE i.address_raw = '' AND i.address != '' AND i.source IN (?, ?) "
+                    "AND NOT EXISTS (SELECT 1 FROM manual_edits m WHERE m.incident_id = i.id AND m.field = 'location') "
+                    f"AND i.bldg_key IN ({','.join('?' * len(part))})", (FEED_SOURCE, PAGE_SOURCE, *part)):
+                rows_seen += 1
+                fed = inc["source"] == FEED_SOURCE or self.feed_address(inc["id"], inc["address"])
+                after = {**inc, "address_raw": inc["address"]}
+                if key_address(after, fed) == inc["address"]:
+                    continue                                 # the same input: the same key
+                was, now = self.cad.addrs.key_of(inc), self.cad.addrs.key_of(after, fed=fed)
+                if (was.addr_key, was.bldg_key) != (now.addr_key, now.bldg_key):
+                    moved.add(inc["bldg_key"])
+        count = sum(used[k] for k in moved)
+        self.log(f"incident sources: address backfill: {count} premise notes / pre-plan rows whose address key would "
+                 f"change ({rows_seen} keyed rows checked)" + ("; nothing normalised" if count else ""))
+        return count
+
+    def _backfill_one(self, inc: dict) -> bool:
+        """One old row (backfill_addresses): True when its address changed."""
+        old = inc["address"]
+        fed = inc["source"] == FEED_SOURCE or self.feed_address(inc["id"], old)
+        if fed:
+            r = self._best_feed(inc["id"])
+            d = json.loads(r["data"] or "{}") if r else {}
+            text = (d.get("location") or "").strip()
+            new = self.normal(text if text and same_place(text, old) else old, d, inc["geo_label"])
+        else:
+            rep = self.store.one("SELECT data FROM source_reports WHERE incident_id = ? AND source = ?", (inc["id"], PAGING))
+            towns = (json.loads(rep["data"] or "{}").get("towns") or []) if rep else []
+            sure = inc["lat"] is not None and not inc["geo_alts"]
+            new = normal_location(old, geo_label=inc["geo_label"] if sure else "", within=towns, guess=sure)
+        if not new or not (same_place(old, new) or (place_key(old) is None and place_key(new) is None)):
+            new = old                                        # not sure it is the same place: as it was
+        with self.store.tx() as db:
+            if new != old:
+                cur = db.execute("UPDATE incidents SET address = ?, address_raw = ? WHERE id = ? AND address = ? AND "
+                                 "address_raw = ''", (new, old, inc["id"], old))
+            else:                                            # as it was: marked done, the address left alone
+                cur = db.execute("UPDATE incidents SET address_raw = ? WHERE id = ? AND address = ? AND "
+                                       "address_raw = ''", (old, inc["id"], old))
+            if fed and cur.rowcount:
+                db.execute("INSERT OR IGNORE INTO feed_addresses (incident_id, address) VALUES (?, ?)", (inc["id"], new))
+        return bool(cur.rowcount) and new != old
+
+    def stop(self, wait_s: float = 0.0) -> None:
+        """The ticker ends after its tick, the address backfill after its row; wait_s: each joined for up to that long
+        (Cad.shutdown, before the store closes)."""
         self._stop.set()
+        for t in (self._thread, self._backfill_thread):
+            if wait_s and t is not None and t is not threading.current_thread():
+                t.join(wait_s)
 
     def poke(self, reason: str) -> None:
-        """Paging tones, a radio pre-alert, the phone ring: the adapters poll now (never raises)."""
+        """Paging tones, a radio pre-alert, an airport alert: the adapters poll now (never raises). Not the phone ring."""
         if self.trigger is None:
             return
         try:
@@ -1772,8 +2488,8 @@ class Sources:
                 if typ and (typ, sub) != (inc["type"], inc["subtype"]):
                     use["type"] = d["type"]
             loc = (d.get("location") or "").strip()
-            if "location" in h and loc and not same_place(loc, inc["address"]):
-                use["location"] = shown_location(loc)        # shown (the button's hover): proper case
+            if "location" in h and loc and not same_place(loc, match_address(inc)):
+                use["location"] = self.normal(loc, d)        # shown (the button's hover): as it would be stored
             inc["feed"] = {"label": r["label"], "event_id": r["ref"], **{k: x[k] for k in EXTRA_SHOWN if k in x}, "use": use}
         return incs
 
@@ -1829,19 +2545,21 @@ class Sources:
         return [{"kind": "radio", "id": f"r{r['id']}", "at": r["at"], "source": r["source"], "text": r["text"]}
                 for r in self.store.q("SELECT * FROM incoming WHERE status = 'open' AND until >= ? ORDER BY at DESC", (now,))]
 
-    # -- what the console and Settings > Health show --------------------------------------------------------------------
+    # -- what the console and Settings > Station > Health show --------------------------------------------------------------------
 
     def state(self, now: float | None = None) -> dict:
         """The CAD state push: the tiers in short, the acting primary, the possible-incoming notices."""
         now = self.clock() if now is None else now
         tiers = self.tiers(now)
         acting = next((t for t in tiers if t["acting"]), None)
-        return {"tiers": [{k: t[k] for k in ("source", "label", "rank", "state", "reason", "acting")} for t in tiers],
+        return {"tiers": [dict({k: t[k] for k in ("source", "label", "rank", "state", "reason", "acting")},
+                               ok_s=None if t["ok_at"] is None or (t["state"] == "ok" and t["settled"])
+                               else max(0, round(now - t["ok_at"]))) for t in tiers],
                 "acting": acting["label"] if acting else "", "feeds": sum(1 for t in tiers if t["source"] != PAGING),
                 "incoming": self.incoming(now)}
 
     def panel(self, now: float | None = None) -> dict:
-        """Settings > Health: the tiers, and per incident each source's first-seen time and its lead over paging."""
+        """Settings > Station > Health: the tiers, and per incident each source's first-seen time and its lead over paging."""
         now = self.clock() if now is None else now
         rows = self.store.q("SELECT r.incident_id, r.source, r.label, MIN(r.first_seen) AS first, MAX(r.gone_at) AS gone, "
                             "i.number, i.address, i.status, i.created_at FROM source_reports r JOIN incidents i "

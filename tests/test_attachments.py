@@ -28,7 +28,7 @@ from tests.test_cad import make_cad
 from tests.test_dvr import CAM, setup, step
 from tests.test_radios import Clock as RClock
 from tests.test_radios import _event_with, cad, tx
-from tests.test_roles import COREY, JULIAN, VAL, call, people
+from tests.test_roles import CASEY, JORDAN, VAL, call, people
 
 
 class FakeS3:
@@ -141,12 +141,12 @@ def test_a_dispatcher_saves_a_clip_and_it_is_stored_as_recorded(tmp_path):
     path = f"/api/cad/cameras/{CAM}/dvr/clip"
     assert needs(path) == "dispatch"
     assert call(api, path, {"from": t0, "to": t1, "incident_id": iid}, VAL)[0] == 403        # a viewer: no
-    code, out = call(api, path, {"from": t0, "to": t1, "incident_id": iid, "note": "the approach"}, JULIAN)
+    code, out = call(api, path, {"from": t0, "to": t1, "incident_id": iid, "note": "the approach"}, JORDAN)
     assert code == 200 and out["ok"]
     row = out["attachment"]
     assert row["kind"] == "camera" and row["source"] == CAM and row["status"] == "saving"     # (answered before the upload)
     stored = a.public(a.row(row["id"]))
-    assert stored["status"] == "stored" and stored["note"] == "the approach" and "Julian" in stored["created_by"]
+    assert stored["status"] == "stored" and stored["note"] == "the approach" and "Jordan" in stored["created_by"]
     # the segments that overlap the range, concatenated as they are: no re-encode
     segs = d.segments(CAM, t0, t1)
     want = b"".join(Path(s["path"]).read_bytes() for s in segs)
@@ -159,13 +159,13 @@ def test_a_dispatcher_saves_a_clip_and_it_is_stored_as_recorded(tmp_path):
     assert stored["objects"][0]["sha256"] == hashlib.sha256(want).hexdigest()
     man = json.loads(a.fake.objects[f"attachments/{iid}/{row['id']}/manifest.json"][0])
     assert man["kind"] == "camera" and man["source"]["camera"] == CAM and man["incident"]["id"] == iid
-    assert man["note"] == "the approach" and len(man["segments"]) == len(segs) and "Julian" in man["created_by"]
+    assert man["note"] == "the approach" and len(man["segments"]) == len(segs) and "Jordan" in man["created_by"]
     assert man["objects"][0]["sha256"] == hashlib.sha256(want).hexdigest()
     assert hashlib.sha256(a.fake.objects[f"attachments/{iid}/{row['id']}/manifest.json"][0]).hexdigest() == \
         stored["objects"][1]["sha256"]
     # audited, and in the person's activity
     assert [x["action"] for x in a.audit_rows(iid=iid)] == ["attach"]
-    assert any(x["summary"].startswith(f"Saved a clip of camera {CAM} to ") for x in c.activity.rows(JULIAN, "", None, 20))
+    assert any(x["summary"].startswith(f"Saved a clip of camera {CAM} to ") for x in c.activity.rows(JORDAN, "", None, 20))
     # on the incident
     code, raw, _ = get(api, f"/api/cad/incident/{iid}/attachments", VAL)
     lst = json.loads(raw)
@@ -184,9 +184,9 @@ def test_the_range_is_checked(tmp_path):
                       ({"from": "x", "to": st["to"], "incident_id": iid}, "unix seconds"),
                       ({"from": st["from"], "to": st["to"], "incident_id": 9999}, "no event"),
                       ({"from": st["from"], "to": st["to"]}, "incident_id")):
-        code, out = call(api, path, body, COREY)
+        code, out = call(api, path, body, CASEY)
         assert code == 400 and why in out["error"], (body, out)
-    code, out = call(api, "/api/cad/cameras/nope/dvr/clip", {"from": st["from"], "to": st["to"], "incident_id": iid}, COREY)
+    code, out = call(api, "/api/cad/cameras/nope/dvr/clip", {"from": st["from"], "to": st["to"], "incident_id": iid}, CASEY)
     assert code == 400 and "nothing recorded" in out["error"]
     assert a.fake.objects == {} and a.audit_rows() == []
 
@@ -195,7 +195,7 @@ def test_playback_through_the_hub_and_the_download_as_one_ts(tmp_path, monkeypat
     monkeypatch.setattr(att_mod, "PART_BYTES", 6000)                     # several parts, a segment never split
     api, c, a, d, iid, clock = camera_setup(tmp_path)
     st = d.status(CAM)
-    out = call(api, f"/api/cad/cameras/{CAM}/dvr/clip", {"from": st["from"], "to": st["to"], "incident_id": iid}, JULIAN)[1]
+    out = call(api, f"/api/cad/cameras/{CAM}/dvr/clip", {"from": st["from"], "to": st["to"], "incident_id": iid}, JORDAN)[1]
     aid = out["attachment"]["id"]
     row = a.public(a.row(aid))
     segs = d.segments(CAM, st["from"], st["to"])
@@ -222,22 +222,22 @@ def test_only_an_admin_deletes_and_the_record_stays(tmp_path):
     api, c, a, d, iid, clock = camera_setup(tmp_path)
     st = d.status(CAM)
     aid = call(api, f"/api/cad/cameras/{CAM}/dvr/clip", {"from": st["from"], "to": st["to"], "incident_id": iid},
-               JULIAN)[1]["attachment"]["id"]
+               JORDAN)[1]["attachment"]["id"]
     objs = a.public(a.row(aid))["objects"]
     path = f"/api/cad/attachments/{aid}/delete"
     assert needs(path) == "admin"
-    assert call(api, path, {}, JULIAN)[0] == 403 and call(api, path, {}, VAL)[0] == 403
+    assert call(api, path, {}, JORDAN)[0] == 403 and call(api, path, {}, VAL)[0] == 403
     assert [m for m, _ in a.fake.calls if m == "DELETE"] == []                   # nobody else deletes anything
-    code, out = call(api, path, {}, COREY)
-    assert code == 200 and out["attachment"]["status"] == "deleted" and "Corey" in out["attachment"]["deleted_by"]
+    code, out = call(api, path, {}, CASEY)
+    assert code == 200 and out["attachment"]["status"] == "deleted" and "Casey" in out["attachment"]["deleted_by"]
     # really gone: every version, each by its id past the governance lock
     assert a.fake.objects == {} and a.fake.versions == {} and len(a.fake.bypassed) == len(objs)
     audit = a.audit_rows(aid=aid)
     assert audit[0]["action"] == "delete" and all(o["sha256"] in audit[0]["detail"] for o in objs)
-    assert any(x["summary"].startswith(f"Deleted the camera attachment {aid}") for x in c.activity.rows(COREY, "", None, 20))
+    assert any(x["summary"].startswith(f"Deleted the camera attachment {aid}") for x in c.activity.rows(CASEY, "", None, 20))
     assert a.list(iid) == [] and [x["id"] for x in a.list(iid, deleted=True)] == [aid]
     assert get(api, f"/api/cad/attachments/{aid}/index.m3u8", VAL)[0] == 404
-    assert call(api, path, {}, COREY)[0] == 400                            # deleted already
+    assert call(api, path, {}, CASEY)[0] == 400                            # deleted already
 
 
 def test_not_configured_says_so(tmp_path):
@@ -262,7 +262,7 @@ def test_a_failed_upload_says_why_and_is_audited(tmp_path):
     a.fake.fail = lambda m, k: m == "PUT" and k.endswith("manifest.json")
     st = d.status(CAM)
     aid = call(api, f"/api/cad/cameras/{CAM}/dvr/clip", {"from": st["from"], "to": st["to"], "incident_id": iid},
-               JULIAN)[1]["attachment"]["id"]
+               JORDAN)[1]["attachment"]["id"]
     row = a.row(aid)
     assert row["status"] == "failed" and "InternalError" in row["error"]
     assert [x["action"] for x in a.audit_rows(aid=aid)] == ["failed", "attach"]
@@ -273,7 +273,7 @@ def test_only_the_leader_writes(tmp_path):
     api, c, a, d, iid, clock = camera_setup(tmp_path)
     a.may_write = lambda: False
     st = d.status(CAM)
-    code, out = call(api, f"/api/cad/cameras/{CAM}/dvr/clip", {"from": st["from"], "to": st["to"], "incident_id": iid}, JULIAN)
+    code, out = call(api, f"/api/cad/cameras/{CAM}/dvr/clip", {"from": st["from"], "to": st["to"], "incident_id": iid}, JORDAN)
     assert code == 400 and "leader" in out["error"] and a.fake.calls == []
 
 
@@ -350,7 +350,7 @@ def test_a_deleted_copy_is_never_copied_again_and_a_failed_one_is_tried_again(tm
     clock.t += att_mod.RETRY_S[0] + 1
     assert a.sync_radio() == 1 and {r["status"] for r in a.list(inc["id"])} == {"stored"}
     first = a.list(inc["id"])[0]["id"]
-    a.delete(first, "Corey <corey@example.org>")
+    a.delete(first, "Casey <casey@example.org>")
     assert a.sync_radio() == 0 and len(a.list(inc["id"], deleted=True)) == 2
 
 
@@ -429,7 +429,7 @@ def test_the_server_streams_a_download_and_closes_it(tmp_path):
     api, c, a, d, iid, clock = camera_setup(tmp_path)
     st = d.status(CAM)
     aid = call(api, f"/api/cad/cameras/{CAM}/dvr/clip", {"from": st["from"], "to": st["to"], "incident_id": iid},
-               JULIAN)[1]["attachment"]["id"]
+               JORDAN)[1]["attachment"]["id"]
     closed = []
     real = a.download
 
@@ -479,7 +479,7 @@ def test_a_merged_cameras_old_id_and_a_folder_moved_mid_upload(tmp_path):
     moved = {"to": CAM}
     d.roads.alias = lambda cid: moved["to"] if cid in ("old-id", CAM) else cid
     a._pool = Later()
-    out = call(api, "/api/cad/cameras/old-id/dvr/clip", {"from": st["from"], "to": st["to"], "incident_id": iid}, JULIAN)[1]
+    out = call(api, "/api/cad/cameras/old-id/dvr/clip", {"from": st["from"], "to": st["to"], "incident_id": iid}, JORDAN)[1]
     aid = out["attachment"]["id"]
     assert out["attachment"]["source"] == CAM and d.holding == {CAM: 1}
     want = b"".join(Path(s["path"]).read_bytes() for s in d.segments(CAM, st["from"], st["to"]))
@@ -503,7 +503,7 @@ def test_a_new_stream_mark_is_a_discontinuity_in_the_clip_and_folders_stay_put_w
     monkeypatch.setattr(d, "_new_stream", lambda cid, key: key == third)       # (#324 marks these in the file name)
     a._pool = Later()
     aid = call(api, f"/api/cad/cameras/{CAM}/dvr/clip", {"from": st["from"], "to": st["to"], "incident_id": iid},
-               JULIAN)[1]["attachment"]["id"]
+               JORDAN)[1]["attachment"]["id"]
     assert not d.may_move(CAM, "other") and not d.may_move("other", CAM) and d.may_move("x", "y")
     a._pool.run()
     assert d.may_move(CAM, "other")
@@ -538,12 +538,12 @@ def test_a_delete_removes_every_version_even_a_retrys_and_a_failed_delete_can_be
         return real(method, url, headers, body, timeout)
     a.s3.send = flaky
     with pytest.raises(att_mod.AttachError, match="not deleted"):
-        a.delete(aid, "Corey <corey@example.org>")
+        a.delete(aid, "Casey <casey@example.org>")
     assert a.row(aid)["status"] == "stored" and a.audit_rows(aid=aid)[0]["action"] == "failed"
-    a.delete(aid, "Corey <corey@example.org>")
+    a.delete(aid, "Casey <casey@example.org>")
     assert a.fake.versions == {} and a.fake.objects == {} and a.row(aid)["status"] == "deleted"
     with pytest.raises(att_mod.AttachError, match="deleted already"):
-        a.delete(aid, "Corey <corey@example.org>")
+        a.delete(aid, "Casey <casey@example.org>")
 
 
 def test_without_the_bypass_a_locked_version_stays(tmp_path):
@@ -570,7 +570,7 @@ def test_a_version_whose_put_answer_was_lost_is_deleted_too(tmp_path):
     a._wrote = real
     aid = a.list(inc["id"])[0]["id"]
     assert not any(k.endswith("audio.wav") for k, _ in json.loads(a.row(aid)["versions"]))
-    a.delete(aid, "Corey <corey@example.org>")
+    a.delete(aid, "Casey <casey@example.org>")
     assert a.fake.versions == {} and "3 versions (listed)" in a.audit_rows(aid=aid)[0]["detail"]
 
 
@@ -612,9 +612,9 @@ def test_a_clip_interrupted_by_a_deploy_is_uploaded_again_by_the_next_leader(tmp
     st = d.status(CAM)
     a._pool = Later()                                                      # the old leader: SIGTERM, its queue gone
     aid = call(api, f"/api/cad/cameras/{CAM}/dvr/clip", {"from": st["from"] + 6, "to": st["to"], "incident_id": iid,
-                                                          "note": "approach"}, JULIAN)[1]["attachment"]["id"]
+                                                          "note": "approach"}, JORDAN)[1]["attachment"]["id"]
     gone = call(api, f"/api/cad/cameras/{CAM}/dvr/clip", {"from": st["from"], "to": st["from"] + 3, "incident_id": iid},
-                JULIAN)[1]["attachment"]["id"]
+                JORDAN)[1]["attachment"]["id"]
     assert a.row(aid)["status"] == "saving" and a.fake.objects == {}
     # the new leader (the same store and bucket, the DVR read from the shared disk)
     b = Attachments(c.store, a.s3, log=lambda m: None, clock=clock)
@@ -624,7 +624,7 @@ def test_a_clip_interrupted_by_a_deploy_is_uploaded_again_by_the_next_leader(tmp
     d._remove(CAM, first)                                                  # the short one's range: evicted meanwhile
     assert b.resume() == 1
     row = b.row(aid)
-    assert row["status"] == "stored" and row["note"] == "approach" and "Julian" in row["created_by"]
+    assert row["status"] == "stored" and row["note"] == "approach" and "Jordan" in row["created_by"]
     want = b"".join(Path(s["path"]).read_bytes() for s in d.segments(CAM, row["start"], row["end"]))
     part = a.fake.objects[f"attachments/{iid}/{aid}/part-0000.ts"][0]
     assert part == want                                                    # the same id, the same range

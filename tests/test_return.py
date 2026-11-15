@@ -18,7 +18,7 @@ def test_cleared_unit_goes_back_to_an_open_call(tmp_path):
     row = next(x for x in c.full(a["id"])["assignments"] if x["unit_id"] == e63)
     assert row["cleared_at"] and row["return"] == ["RS", "OL", "ET", "IC"]
     clock.t += 30
-    c.return_unit(a["id"], {"unit_id": e63, "status": "RS", "operator": "Corey"})
+    c.return_unit(a["id"], {"unit_id": e63, "status": "RS", "operator": "Casey"})
     row = next(x for x in c.full(a["id"])["assignments"] if x["unit_id"] == e63)
     assert row["cleared_at"] is None and row["status"] == "RS" and row["return"] == []
     assert row["onscene_at"] == first_on                                # the first times are kept
@@ -49,13 +49,13 @@ def test_board_status_puts_the_unit_on_the_chosen_call_and_off_the_old_one(tmp_p
     e63, e64 = uid(c, "E63"), uid(c, "E64")
     clock.t += 5
     # E64 wasn't on anything: responding to b puts it there.
-    c.unit_status(e64, {"status": "RS", "incident_id": b["id"], "operator": "Corey"})
+    c.unit_status(e64, {"status": "RS", "incident_id": b["id"], "operator": "Casey"})
     on_b = {x["unit_id"]: x for x in c.full(b["id"])["assignments"] if not x["cleared_at"]}
     assert e64 in on_b and on_b[e64]["status"] == "RS" and on_b[e64]["enroute_at"]
     assert c.full(b["id"])["status"] == "active"
     # E63 moves from a to b: off a (noted there), on b.
     clock.t += 5
-    c.unit_status(e63, {"status": "OL", "incident_id": b["id"], "operator": "Corey"})
+    c.unit_status(e63, {"status": "OL", "incident_id": b["id"], "operator": "Casey"})
     assert all(x["cleared_at"] for x in c.full(a["id"])["assignments"] if x["unit_id"] == e63)
     assert any("E63 reassigned" in e["text"] for e in c.full(a["id"])["events"])
     on_b = {x["unit_id"]: x for x in c.full(b["id"])["assignments"] if not x["cleared_at"]}

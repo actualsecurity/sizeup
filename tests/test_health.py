@@ -13,7 +13,7 @@ from sizeup.cloud.hubstore import MonitorDb
 from sizeup.config import ConfigError, load
 from tests.test_access import TEAM, AUD, jwt, keys, jwks, req  # noqa: F401  (fixtures)
 from tests.test_cloud import TOKEN, HubRun, call, hub_cfg
-from tests.test_roles import COREY, DEE, JULIAN, VAL, people
+from tests.test_roles import CASEY, DEE, JORDAN, VAL, people
 
 HUB = "a" * 40
 OLD = "b" * 40
@@ -130,6 +130,29 @@ def test_silent_starts_after_three_minutes_pushes_once_and_clears_with_a_recover
     r.at(t + 300 + 181, post=False)
     assert r.keys() == ["silent"] and r.h.alerts()[0]["since"] == T0 + t + 300
     assert r.n.msgs[-1]["title"] == "Station silent 3 min · PCFD station · last heard " + tz.hhmm(T0 + t + 300)
+
+
+def test_an_old_litestream_on_the_hub_is_a_warning_on_the_panel(monkeypatch):
+    monkeypatch.setenv("SIZEUP_LITESTREAM_WARNING", "Litestream 0.5.17 is older than 0.5.18: made-up detail")
+    r = Rig()
+    r.at(0, status=station_status())
+    (a,) = [a for a in r.h.alerts() if a["key"] == "litestream"]
+    assert a["severity"] == "warning" and "0.5.17" in a["text"]
+    assert "litestream" in [x["key"] for x in r.h.panel()["alerts"]]
+    monkeypatch.delenv("SIZEUP_LITESTREAM_WARNING")
+    r.at(10, status=station_status())
+    assert "litestream" not in r.keys()
+
+
+def test_the_takeover_override_is_a_warning_on_the_panel(monkeypatch):
+    monkeypatch.setenv("SIZEUP_HANDOFF_SKIP_REPLICATION_CHECKS", "1")
+    r = Rig()
+    r.at(0, status=station_status())
+    (a,) = [a for a in r.h.alerts() if a["key"] == "replication_checks"]
+    assert a["severity"] == "warning" and "SIZEUP_HANDOFF_SKIP_REPLICATION_CHECKS=1" in a["text"]
+    monkeypatch.delenv("SIZEUP_HANDOFF_SKIP_REPLICATION_CHECKS")
+    r.at(10, status=station_status())
+    assert "replication_checks" not in r.keys()
 
 
 def test_while_silent_nothing_else_starts_or_clears():
@@ -306,6 +329,20 @@ def test_a_channel_quiet_far_longer_than_usual_is_a_hint_not_an_alert():
     assert r.keys() == [] and r.n.msgs == []
 
 
+
+def test_a_chattering_squelch_is_a_hint_not_an_alert():
+    """An FM channel opening on noise (short opens a minute, sizeup/radio/fm.py): a hint, with the number."""
+    r = Rig()
+    r.at(0, status=station_status(radios=[radio("FG1", short_per_min=0.4), radio("South 2", short_per_min=None)]))
+    assert [c["hint"] for c in r.h.model()["channels"]] == ["", ""]
+    r.at(10, status=station_status(radios=[radio("FG1", short_per_min=4.2, channel_kind="traffic"),
+                                            radio("South 2", short_per_min=3.0, channel_kind="paging")]))
+    m = r.h.model()
+    assert "squelch chattering: 4.2 short opens/min" in m["channels"][0]["hint"] and m["channels"][0]["short_per_min"] == 4.2
+    assert "raise Open" in m["channels"][0]["hint"]
+    assert "raise Open" not in m["channels"][1]["hint"] and "check antenna" in m["channels"][1]["hint"]   # paging: read-only
+    assert m["hints"][0]["channel"] == "FG1" and r.keys() == [] and r.n.msgs == []
+
 def test_the_model_has_what_the_panel_shows():
     r = Rig()
     st = station_status(radios=[radio("FG1", last_heard=T0 - 30, quieting_db=12.5, restarts=1)])
@@ -378,10 +415,10 @@ def test_status_token_is_read_only_and_the_panel_needs_no_station_token(tmp_path
         # the panel: a person's page (no Access configured here: open like the rest of the CAD API)
         code, p = call(hub.url + "/api/cad/health", token=None)
         assert code == 200 and p["health"]["station"]["name"] == "PCFD station" and "history" in p
-        # no banner's data in the state (#203): the cloud is the connection only, the Station row links Settings > Health
+        # no banner's data in the state (#203): the cloud is the connection only, the Station row links Settings > Station > Health
         assert hub.get("/api/cad/state")["cloud"].keys() == {"role", "state", "word", "detail", "health_url"}
         row = hub.get("/api/state")["radios"][0]
-        assert row["label"] == "Station" and row["link"] == "#settings/health"
+        assert row["label"] == "Station" and row["link"] == "#settings/station/health"
     finally:
         hub.close()
 
@@ -406,7 +443,7 @@ def test_with_access_the_panel_needs_a_person_and_the_status_a_bearer(keys, acce
 
 
 def test_only_an_admin_sees_station_health_and_it_is_never_in_the_state_push(keys, access_hub):  # noqa: F811
-    """#203: no health banner for anyone; Settings > Health is the admins'. A dispatcher or a viewer gets a 403 from
+    """#203: no health banner for anyone; Settings > Station > Health is the admins'. A dispatcher or a viewer gets a 403 from
     GET /api/cad/health, and nothing of an alert reaches anyone through the CAD state (the stream and its polls) or the
     monitor state: not its title, its text, nor how many there are."""
     h = access_hub
@@ -418,12 +455,12 @@ def test_only_an_admin_sees_station_health_and_it_is_never_in_the_state_push(key
     h.app.health.tick()
     (a,) = h.app.health.alerts()
     assert a["key"] == "sdr:00000102"
-    for who in (JULIAN, VAL, DEE):
+    for who in (JORDAN, VAL, DEE):
         code, out = req(h.url + "/api/cad/health", headers=as_(who))
         assert code == 403 and out["error"].startswith("Admins only") and a["title"] not in json.dumps(out), who
-    code, p = req(h.url + "/api/cad/health", headers=as_(COREY))
+    code, p = req(h.url + "/api/cad/health", headers=as_(CASEY))
     assert code == 200 and [x["key"] for x in p["alerts"]] == [a["key"]] and p["alerts"][0]["pushed"] is False
-    for who in (COREY, JULIAN, VAL):                               # the state is everyone's: none of it there, admins' too
+    for who in (CASEY, JORDAN, VAL):                               # the state is everyone's: none of it there, admins' too
         for path in ("/api/cad/state", "/api/state"):
             code, s = req(h.url + path, headers=as_(who))
             text = json.dumps(s)
@@ -434,7 +471,7 @@ def test_only_an_admin_sees_station_health_and_it_is_never_in_the_state_push(key
     # an incident-level alarm is not a health banner: an aircraft's 7700 still reaches everyone's state (alarm.js)
     aid = h.app.cad.alarms.on_aircraft({"hex": "a1b2c3", "code": "7700", "at": time.time(), "meaning": "emergency",
                                         "flight": "TST123"})
-    for who in (JULIAN, VAL):
+    for who in (JORDAN, VAL):
         code, s = req(h.url + "/api/cad/state", headers=as_(who))
         assert code == 200 and aid in [x["id"] for x in s["alarms"]["open"]], who
 
@@ -447,17 +484,23 @@ def _toml(tmp_path, text):
     return p
 
 
-@pytest.mark.parametrize("topic", ["pcfd-phone-prealert", "pcfd-status"])
-def test_the_config_refuses_tapouts_topics(tmp_path, monkeypatch, topic):
-    with pytest.raises(ConfigError, match="Tapout"):
-        load(_toml(tmp_path, f'[alerts]\nntfy_topic = "{topic}"\n'))
+@pytest.mark.parametrize("topic", ["example-ring-topic", "example-status-topic"])
+def test_the_config_refuses_the_subscribed_topics(tmp_path, monkeypatch, topic):
+    pa = '[prealert]\nring_topic = "example-ring-topic"\nstatus_topic = "example-status-topic"\n'
+    with pytest.raises(ConfigError, match="protected"):
+        load(_toml(tmp_path, pa + f'[alerts]\nntfy_topic = "{topic}"\n'))
     monkeypatch.setenv("SIZEUP_ALERT_TOPIC", topic)
-    with pytest.raises(ConfigError, match="Tapout"):
-        load(_toml(tmp_path, ""))
+    with pytest.raises(ConfigError, match="protected"):
+        load(_toml(tmp_path, pa))
+    monkeypatch.delenv("SIZEUP_ALERT_TOPIC")
+    # the subscribed topics can come from the env alone (SSM): protected all the same
+    monkeypatch.setenv("SIZEUP_PREALERT_RING_TOPIC", "example-env-ring-topic")
+    with pytest.raises(ConfigError, match="protected"):
+        load(_toml(tmp_path, '[prealert]\n[alerts]\nntfy_topic = "Example-Env-Ring-Topic"\n'))
 
 
 def test_the_config_refuses_the_configured_prealert_topics_too(tmp_path):
-    with pytest.raises(ConfigError, match="Tapout"):
+    with pytest.raises(ConfigError, match="protected"):
         load(_toml(tmp_path, '[prealert]\nring_topic = "firehouse-ring-xyz"\n[alerts]\nntfy_topic = "firehouse-ring-xyz"\n'))
 
 
@@ -501,28 +544,29 @@ def test_the_status_topic_from_the_config_or_the_env_validated_like_the_alert_to
         load(_toml(tmp_path, '[alerts]\nstatus_topic = "short"\n'))
 
 
-@pytest.mark.parametrize("topic", ["pcfd-phone-prealert", "pcfd-status", "PCFD-Status"])
-def test_the_status_topic_refuses_tapouts_topics(tmp_path, monkeypatch, topic):
-    with pytest.raises(ConfigError, match="Tapout"):
-        load(_toml(tmp_path, f'[alerts]\nstatus_topic = "{topic}"\n'))
+@pytest.mark.parametrize("topic", ["example-ring-topic", "example-status-topic", "Example-Status-Topic"])
+def test_the_status_topic_refuses_the_subscribed_topics(tmp_path, monkeypatch, topic):
+    pa = '[prealert]\nring_topic = "example-ring-topic"\nstatus_topic = "example-status-topic"\n'
+    with pytest.raises(ConfigError, match="protected"):
+        load(_toml(tmp_path, pa + f'[alerts]\nstatus_topic = "{topic}"\n'))
     monkeypatch.setenv("SIZEUP_STATUS_TOPIC", topic)
-    with pytest.raises(ConfigError, match="SIZEUP_STATUS_TOPIC: .*Tapout"):
-        load(_toml(tmp_path, ""))
+    with pytest.raises(ConfigError, match="SIZEUP_STATUS_TOPIC: .*protected"):
+        load(_toml(tmp_path, pa))
 
 
 def test_the_status_topic_refuses_the_configured_prealert_topics_too(tmp_path):
-    with pytest.raises(ConfigError, match="Tapout"):
+    with pytest.raises(ConfigError, match="protected"):
         load(_toml(tmp_path, '[prealert]\nstatus_topic = "firehouse-status-xyz"\n[alerts]\nstatus_topic = "firehouse-status-xyz"\n'))
-    with pytest.raises(ConfigError, match="Tapout"):
+    with pytest.raises(ConfigError, match="protected"):
         load(_toml(tmp_path, '[prealert]\nring_topic = "firehouse-ring-xyz"\n[alerts]\nstatus_topic = "firehouse-ring-xyz"\n'))
 
 
 def test_a_topic_of_ours_with_status_in_its_name_is_not_tapouts(tmp_path, monkeypatch):
     """The refusal is the whole name: "status" (or "prealert") inside a name of ours is fine, for either topic."""
-    for name in (OUR_STATUS, "pcfd-status-of-ours", "pcfd-phone-prealert-ours"):
+    for name in (OUR_STATUS, "example-status-topic-of-ours", "example-ring-topic-ours"):
         monkeypatch.setenv("SIZEUP_STATUS_TOPIC", name)
         monkeypatch.setenv("SIZEUP_ALERT_TOPIC", name.replace("status", "alerts"))
-        c = load(_toml(tmp_path, '[prealert]\n'))                     # Tapout's default topics are the ones refused
+        c = load(_toml(tmp_path, '[prealert]\nring_topic = "example-ring-topic"\nstatus_topic = "example-status-topic"\n'))          # the subscribed topics are the ones refused
         assert c.alerts_status_topic == name and c.alerts_ntfy_topic == name.replace("status", "alerts")
 
 

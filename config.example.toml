@@ -7,6 +7,7 @@ name = "Port Chester FD South End"  # shown in Settings, health and alerts
 # receiver's position (readsb --lat/--lon). Leave out for these defaults.
 lat = 40.99600
 lon = -73.66453
+# auto_update = true               # a station forwarding to a hub follows the hub's build (docs/cloud.md "Station updates")
 
 [web]
 host = "127.0.0.1"                 # 0.0.0.0 to serve the firehouse LAN
@@ -34,6 +35,9 @@ start_mode = "South 2"            # first listed SDR at a fresh start; after tha
 # start Off and sizeup never opens one until you pick a mode for it.
 auto_assign = true
 auto_assign_order = ["fg1", "p25", "south2", "fg2", "hpn tower"]
+# tones_file = "data/westchester_tones.csv"   # the county's tone list, read before [[tones]] below ("" = none)
+# shared_device = ""               # bench: one dongle (its serial) for everything, switched in the web app; `sdrs` wins
+# airband_multichannel = false     # true: the airband channels' `also` frequencies share a dongle (#275, see below)
 
 # One rtl_fm per channel, one dongle each (serials set with `rtl_eeprom -s <serial>`).
 [[radio.channels]]
@@ -136,16 +140,20 @@ prompt = ""                        # optional vocabulary hint (can make the mode
 talker_prompt = "off"              # "ids": hint each call with who keyed up ("77 Alpha 4, 60 Control"); "ids+time": also its HHMM
 # Amazon Transcribe streaming (docs/cloud.md "Speech-to-text per channel"). It runs on the hub
 # (deploy/hub/config.hub.toml: aws = true); a station forwarding to the hub needs nothing here.
-# All-in-one with AWS credentials in the environment could set aws = true too.
+# All-in-one with AWS credentials in the environment could set aws = true too, and needs SIZEUP_ALLOW_OUTBOUND=1 for it
+# (sizeup/outbound.py: off for all-in-one; on for the hub under its supervisor and for a station).
 # aws = false
 # aws_region = ""                  # "" = AWS_REGION / AWS_DEFAULT_REGION, else us-east-1
-# aws_channels = ["South 2", "FG1", "FG2", 307, "HPN Tower"]   # engine "aws" by default; Settings > Radios changes any
-#                                  # channel (left out: every airband channel is added, #233)
+# aws_channels = ["South 2", "FG1", "FG2", 307, "p25:mrrs:9211"]   # engine "aws" by default; Settings > Radios changes
+#                                  # any channel. A number is a county talkgroup; "p25:<system>:<tg>" another system's.
+#                                  # Left out: this list plus every airband channel (#233). Given: exactly the list.
 # record_only = []                # e.g. [383, 3127]: recorded, not transcribed unless Settings says so
 # aws_monthly_limit_usd = 25       # until Settings > Radios sets one; reached: AWS channels use whisper
+# aws_context_budget_usd = 15      # another P25 system's talkgroups (police): their own monthly limit, apart from ours
 # aws_idle_s = 120                 # a channel's stream ends this long after its last transmission
 # aws_pace = 2.0                   # audio sent this many times faster than real time
-# aws_vocabulary = "sizeup-pcfd"   # the custom vocabulary (Settings > Radios > Vocabulary, Push)
+# aws_vocabulary = "sizeup-pcfd"   # our channels' custom vocabulary (Settings > Radios > Vocabulary, Push;
+#                                  # docs/stt-vocabulary.md). Airband and police sources have their own, not set here.
 # aws_endpoint = ""                # tests / dev only: a local fake (ws://127.0.0.1:9431)
 # aws_api_endpoint = ""            # tests / dev only: a local fake of the JSON API (http://127.0.0.1:9432)
 
@@ -157,6 +165,9 @@ recorder_dir = "deploy/trunk-recorder"  # its config.json + talkgroups.csv
 talkgroups_file = "deploy/trunk-recorder/talkgroups.csv"   # names for all recorded talkgroups
 incident_talkgroups = [307, 333]   # Fire/EMS 15 (Battalion 15) + Airport Incident attach to our incident
 aliases = {}                       # radio ID -> unit name, e.g. { "2391001" = "2391" }
+# talkgroups = { "307" = "Fire/EMS 15" }   # names without a talkgroups_file (the file's names win)
+# More P25 systems (#409, docs/cloud.md "More P25 systems"): one directory each under <recorder_dir>/systems/<name>/
+# (its own trunk-recorder config.json and talkgroups.csv with a Tier column). No key here: they are found at startup.
 # The emergency button opens a window: every call on that talkgroup, and the radio that pressed it on any
 # talkgroup, is kept this long after its last emergency key-up, even with the talkgroup's Record switched
 # off (sizeup/cad/alarms.py Windows). The alarm's "All clear" ends it early. 0 = keep only the flagged call.
@@ -184,7 +195,8 @@ audio_keep_hours = 12              # every WAV under captures/ (clips, skipped c
 # back only in the off-peak hours [start, end), New York time.
 # audio_keep_event_days = 365
 # tier_keep_days = { alert = 30, text = 0, record = 7 }   # another P25 system's talkgroups, by tier (#409); 0 = audio_keep_hours
-# context_audio_max_mb = 100       # hub: another P25 system's clips at most (their own budget, inside the audio cap)
+# context_audio_max_mb = 8000      # hub: another P25 system's clips at most, wherever kept (S3 too): a runaway bound;
+#                                   tier_keep_days decides (30 days of PD alert audio is ~2-4 GB)
 # audio_prune_batch = 200
 # audio_offpeak = [2, 5]
 
@@ -211,6 +223,8 @@ department = "Port Chester Fire"   # first words of every dispatch, as said on t
 # wording, from the department's sheet ("[TEMPLATE] PCFD ECC OPS"). Replace the file to change them.
 lists = "data/cad_lists.json"
 monitor_departments = ["Port Chester FD", "Rye Brook FD"]   # their tones, or an address in their town -> an event to accept
+                                   # (left out: Port Chester FD only)
+# roster_department: accepted from older configs and ignored (the boards come from `lists`)
 
 [dispatch]
 # Alert tones before the voice: [hz, seconds] in order (two-tone sequential). Port Chester Fire's pair
@@ -222,7 +236,8 @@ tones = [[903.2, 1.0], [810.2, 3.0]]
 # down, erroring or slower than 10 s, dispatches use macOS `say` with fallback_voice (noted on each one).
 # tts_engine = "polly": Amazon Polly over the internet (the hub's choice, deploy/hub/config.hub.toml):
 # needs AWS credentials (AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY, or the ECS task role) allowed
-# polly:SynthesizeSpeech; voice = "Matthew" (default), "Stephen", "Gregory", "Joey" (men) or "Joanna",
+# polly:SynthesizeSpeech, and on all-in-one SIZEUP_ALLOW_OUTBOUND=1 (sizeup/outbound.py; else the fallback voice);
+# voice = "Matthew" (default), "Stephen", "Gregory", "Joey" (men) or "Joanna",
 # "Ruth", "Danielle"; best engine first (generative, neural, standard); speed is said as SSML prosody.
 # polly_region = "us-east-1"       # default: AWS_REGION / AWS_DEFAULT_REGION, else us-east-1
 tts_engine = "kokoro"              # "kokoro" | "polly" | "say" (macOS `say` only, with `voice` a `say -v` voice) |
@@ -256,6 +271,13 @@ channels = ["FG1", "PC repeater"]  # labels on the dispatch log only (FG1, or th
 # outbox_max_mb = 300                # queued audio over this: the oldest clips are dropped (never the transcripts)
 # keychain_prefix = "sizeup"         # Keychain services sizeup-station-token, sizeup-access-id, sizeup-access-secret
 #                                    #   (or keychain_token / keychain_access_id / keychain_access_secret)
+# The hub's own keys (role = "hub"; deploy/hub/config.hub.toml sets them, mostly from the environment):
+# public_url = ""                    # its public URL (env SIZEUP_PUBLIC_URL), shown in /healthz and the log
+# offline_after_s = 15               # no word from the station this long = offline (5 to 300)
+# audio_max_mb = 500                 # received audio kept in audio.sqlite, oldest dropped first
+# access_team = ""                   # the Access team domain, "<team>.cloudflareaccess.com" (env SIZEUP_ACCESS_TEAM)
+# access_aud = ""                    # the Access application's AUD tag, hex (env SIZEUP_ACCESS_AUD)
+# status_token = ""                  # env SIZEUP_STATUS_TOKEN: 16+ characters, never the station token
 
 # [prealert]: the phone pre-alert. Tapout (an ESP32 on the PCFD headquarters phone line, repo
 # firehouse-ring-alerter) posts to ntfy.sh when the station's phone rings; the CAD shows each ring
@@ -263,14 +285,17 @@ channels = ["FG1", "PC repeater"]  # labels on the dispatch log only (FG1, or th
 # Chester or a new emergency event matches it, someone dismisses it, or expire_min passes. Tapout's
 # status topic (hourly heartbeat, restarts, warnings) shows as "Tapout: ok, heartbeat 12 min ago".
 # READ ONLY: sizeup only subscribes (GET). NEVER publish to these topics, from sizeup or by hand to
-# "test" it: pcfd-phone-prealert is the fire crew's real alert channel and pages their phones.
-# Runs on the CAD of record only: all-in-one, or the hub. While this station forwards to a hub it
-# doesn't subscribe (the hub does; two would double-alert). Leave the section out to turn it off.
+# "test" it: the ring topic is the fire crew's real alert channel and pages their phones. The topic
+# names are not kept in this repo: set them in Settings > System > Push notifications (admins; stored
+# in the database), or with SIZEUP_PREALERT_RING_TOPIC / SIZEUP_PREALERT_STATUS_TOPIC. Unset: feed off.
+# Runs on the CAD of record only: all-in-one (with SIZEUP_ALLOW_OUTBOUND=1: sizeup/outbound.py), or the hub.
+# While this station forwards to a hub it doesn't subscribe (the hub does; two would double-alert). Leave the section
+# out to turn it off.
 [prealert]
 enabled = true
 server = "https://ntfy.sh"           # or env SIZEUP_PREALERT_SERVER (a local test server)
-ring_topic = "pcfd-phone-prealert"   # real rings only (Tapout's ntfy_call)
-status_topic = "pcfd-status"         # boot, hourly heartbeat, errors, OTA (Tapout's ntfy_status)
+ring_topic = ""                      # real rings only (Tapout's ntfy_call); set in Settings
+status_topic = ""                    # boot, hourly heartbeat, errors, OTA (Tapout's ntfy_status)
 expire_min = 5                       # an unanswered pre-alert ends after this long
 heartbeat_stale_min = 90             # no heartbeat (or restart) this long: "Tapout: no heartbeat for ..." in warning
 
@@ -305,14 +330,17 @@ heartbeat_stale_min = 90             # no heartbeat (or restart) this long: "Tap
 #                 outbox backing up, its disk filling, its whisper queue behind; Amazon Transcribe failing and
 #                 its monthly budget at 80 % / 100 %; shown as a banner on /cad and /monitor, logged, and pushed
 #                 (at most once per alert per repeat_min, plus its recovery)
-# Only one set: everything goes to it. ntfy topics are public by name: long random ones (e.g.
-# `openssl rand -hex 12`). NEVER Tapout's topics (pcfd-phone-prealert pages the fire crew; pcfd-status):
-# refused (by exact name) here and again before every send. Empty or left out: no pushes. Env
-# SIZEUP_ALERT_TOPIC / SIZEUP_STATUS_TOPIC / SIZEUP_ALERT_SERVER win, and Settings > System > Push
-# notifications (admins) wins over both, live.
+#   intel_topic   radio pre-alerts (sizeup/intel: police / fire chatter, what and where); empty: the alerts topic
+# Only one of ntfy_topic / status_topic set: everything goes to it. ntfy topics are public by name: long random ones (e.g.
+# `openssl rand -hex 12`). NEVER Tapout's topics (the pre-alert ring pages the fire crew):
+# refused (the protected set: [prealert] topics, env, Settings) here and again before every send. Empty or left out: no pushes. Env
+# SIZEUP_ALERT_TOPIC / SIZEUP_STATUS_TOPIC / SIZEUP_INTEL_TOPIC / SIZEUP_ALERT_SERVER win, and Settings > System > Push
+# notifications (admins) wins over both, live. All-in-one pushes only with SIZEUP_ALLOW_OUTBOUND=1 in its environment
+# (sizeup/outbound.py: off for all-in-one; a local ntfy on 127.0.0.1 works either way).
 # [alerts]
 # ntfy_topic = ""
 # status_topic = ""
+# intel_topic = ""
 # ntfy_server = "https://ntfy.sh"
 # silent_min = 3                     # station health: no state post from the station this long
 # behind_min = 15                    # on another build than the hub this long
@@ -332,6 +360,7 @@ heartbeat_stale_min = 90             # no heartbeat (or restart) this long: "Tap
 # for once every 5 minutes at most. Camera snapshots go through this process, never from the browser to a
 # provider. The mileposts and exits are the gazetteer's. Try 511NY's feeds once by hand: tools/ny511_probe.py.
 # [roads]
+# enabled = true                         # false: no highway layers at all
 # thruway = true
 # county = true                          # Westchester County DPW's cameras (no key)
 # ny511 = true                           # 511NY's feeds (signs now; events and CARS-Hub with the credentials)
@@ -390,7 +419,9 @@ heartbeat_stale_min = 90             # no heartbeat (or restart) this long: "Tap
 # area = "Southern Westchester"           # how a spoken warning names us
 # station = "KHPN"                        # NWS observation station: Westchester County Airport
 # tide_station = "8518091"                # CO-OPS predictions: Rye Beach
+# tide_name = "Rye Beach"                 # shown with the tides (another station left unnamed shows its id)
 # gauge_station = "8516945"               # CO-OPS water-level gauge: Kings Point
+# gauge_name = "Kings Point"
 
 # [routing]: the rigs' probable paths on the CAD maps and the arrival estimates by road (sizeup/roadgraph.py, #360):
 # a road graph from OpenStreetMap (one Overpass query, monthly in Settings > Data sources), the firehouses plus
@@ -425,7 +456,13 @@ heartbeat_stale_min = 90             # no heartbeat (or restart) this long: "Tap
 # trains_field = "STATNAME"              # a station layer: the field naming the station; its copies of the stations the
                                         # Trains layer draws (within 250 m, or 1 km by name) are left out while that layer is on
 # minzoom = 13                            # drawn from this zoom ("zoom in" below it)
-# refresh = "monthly"                     # hourly | daily | weekly | monthly
+# kind = "polygon"                       # point | line | polygon (left out: the service says)
+# enabled = true                          # false on a starter key: that dataset is dropped
+# asof = "as of Oct 2015"                 # the data's date as the source states it, shown with the layer
+# ours_field = "NAME"                     # the field naming the department: our departments' features are marked ours
+# drop_ours = false                       # true: our own departments' features are left out (the map draws ours itself)
+# note = ""                               # what the data doesn't say, shown with every feature
+# refresh = "monthly"                     # hourly | daily | weekly | monthly (left out: daily)
 # tiled = false                           # true: served by viewport (a big layer: the parcels, the buildings)
 # simplify_m = 1.0                        # Douglas-Peucker tolerance in metres (0: as drawn)
 # where = "MUN = 'Port Chester'"          # an extra SQL filter; bbox = [...] its own box
@@ -442,6 +479,7 @@ heartbeat_stale_min = 90             # no heartbeat (or restart) this long: "Tap
 # bbox = [-73.845, 40.900, -73.530, 41.060]   # west, south, east, north: the stretch of line the map shows
 # rt_url = ""                                  # "" = the MTA's (sizeup/trains.py RT_URL); a test feed's address
 # gtfs_url = ""                                # "" = the MTA's (GTFS_URL)
+# key = ""                                    # only if the MTA asks for one again; better: env SIZEUP_MTA_KEY
 # rt_every_s = 5                               # the realtime feed this often while someone looks (5 to 300 s)
 # traintime = true                             # MTA TrainTime (undocumented; sizeup/traintime.py, #362): GPS, cars,
 #                                              # load, milepost, track; GTFS-realtime the fallback when it fails
@@ -458,8 +496,11 @@ heartbeat_stale_min = 90             # no heartbeat (or restart) this long: "Tap
 #   "adsblol"   adsb.lol, keyless, ODbL (credited on the map)
 #   "adsbfi"    adsb.fi: its terms say personal, non-commercial use only. The user's decision, 2026-10-14: this is
 #               personal, non-commercial use ("we are not charging for this"). Credited on the map.
-#   the busier of the two is primary (every 5 s while the layer is open), the other every 10 s; one that errors or
-#   is rate-limited rests (Retry-After, else exponential) and the other carries on.
+#   the primary (every 5 s while the layer is open; the other every 10 s): primary = "adsbfi" / "adsblol" when set,
+#   else ("auto") the busier of those that haven't failed in the last 10 min, a tie in feeds' order. Each is read on
+#   its own (one hanging never holds up the other or the map: the TLS handshake gets 4 s, the answer 8 s, one
+#   connection kept open); one that errors or is rate-limited rests (at least its Retry-After, else exponential)
+#   and the other carries on. adsb.fi first since #542: from the hub it failed none in a week, adsb.lol ~150 a day.
 #   "receiver"  our own ADS-B receiver ([aircraft.receiver] below): when enabled it is always first ("primary local
 #               SDR on ADSB, secondary the above sources").
 # OpenSky is not used (a written agreement for operational use; far too few credits for a 5 s refresh).
@@ -467,14 +508,23 @@ heartbeat_stale_min = 90             # no heartbeat (or restart) this long: "Tap
 # raises the emergency alarm on every console, and its push through [alerts] ntfy_topic when one is set; the hub
 # then reads the primary feed every 15 s even when nobody has the map open.
 # registry: types (make / model) from the FAA Releasable Aircraft Database, public domain, ~70 MB a week once
-# someone has looked; never the owner's name. Leave the section out: on, both APIs, 15 nm around HPN, alarms on.
+# someone has looked; never the owner's name. registry.faa.gov refuses scripted downloads (403 from its bot
+# protection, 2026-11): then it is tried once a day and the copy we have is kept. registry_url: another https://
+# copy, or the path of a ReleasableAircraft.zip downloaded in a browser; or build it by hand
+# (python -m sizeup.aircraft build-registry ReleasableAircraft.zip faa_registry.sqlite) and put it, gzipped, where
+# the hub restores its caches (sizeup/cachesync.py: <bucket>/<prefix>/cache/aircraft/faa_registry.sqlite.gz).
+# Leave the section out: on, both APIs, 15 nm around HPN, alarms on.
 # [aircraft]
 # enabled = true
-# feeds = ["adsblol", "adsbfi"]
+# feeds = ["adsbfi", "adsblol"]
+# primary = "auto"        # or "adsbfi" / "adsblol"
 # alarms = true
-# radius_nm = 15          # around HPN: the feeds' query, what counts as "in the area", the alarm's area
-# ceiling_ft = 6000       # MSL: below this inside the radius is "low traffic" (shortfinal's focus)
+# radius_nm = 15          # around HPN: the feeds' query, what counts as "in the area", the alarm's area; 3 to 40
+# ceiling_ft = 6000       # MSL: below this inside the radius is "low traffic" (shortfinal's focus); 1000 to 18000
 # registry = true
+# registry_url = ""       # "" = registry.faa.gov's ReleasableAircraft.zip
+# adsblol_url = ""        # "" = the public API; a test server's address with {lat}, {lon} and {radius} in it
+# adsbfi_url = ""
 #
 # Our own receiver (GitHub #235): the dongle behind a 1090 MHz filter and an LNA, by its exact USB serial (never all
 # digits: rtl_eeprom -d <index> -s adsb1090), named here or in Settings > Radios (admins, with a confirm; that choice
@@ -499,6 +549,8 @@ heartbeat_stale_min = 90             # no heartbeat (or restart) this long: "Tap
 # [vessels]
 # enabled = true
 # bbox = [-73.83, 40.78, -73.50, 41.07]     # west, south, east, north: Throgs Neck to Stamford, CT shore to LI's north shore
+#                                            # (at most 2 degrees a side)
+# aisstream_key = ""                         # a local, uncommitted config only; env SIZEUP_AISSTREAM_KEY wins
 #
 # Our own AIS receiver: AIS-catcher on one RTL-SDR at the station (sizeup-ais.service; deploy/station/README.md
 # "AIS receiver"), by its exact USB serial; never one of sizeup's radios. Off until the dongle and antenna are in.
@@ -506,7 +558,17 @@ heartbeat_stale_min = 90             # no heartbeat (or restart) this long: "Tap
 # enabled = false
 # sdr = ""                                   # e.g. "ais162"
 # gain = "auto"                              # or dB
-# ppm = 0                                    # a non-TCXO dongle's correction
+# ppm = 0                                    # a non-TCXO dongle's correction (-150 to 150)
+# json = ""                                  # all-in-one: the decoder's messages file ("" = /run/sizeup-ais/messages.json)
+
+# [adapter]: the station's private incident-source adapter (#301). Written by `sudo sizeup-station adapter setup` and
+# read only by the station's updater (sizeup/cloud/autoupdate.py); a hub never loads or runs one. The adapter's code
+# lives in a private repository, and its credentials in root-only files on the station (or AWS SSM), never here.
+# [adapter]
+# repo = "git@github.com:OWNER/REPO.git"     # the private repository the adapter is fetched from (a deploy key)
+# ref = "main"                               # the branch or tag to install
+# env = ["FEED_USER", "FEED_PASS"]           # names only: the variables that hold its credentials (kept out of every
+#                                            # other child process's environment)
 
 # [streetview]: 360-degree street imagery in the CAD maps (static/streetview.js; Google Maps JavaScript API). A browser
 # key restricted by HTTP referrer to the hub's address and to the Maps JavaScript API only: env SIZEUP_GOOGLE_MAPS_KEY

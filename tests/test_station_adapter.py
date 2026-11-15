@@ -475,7 +475,7 @@ def test_make_app_on_the_hub_runs_the_guard(monkeypatch):
     seen = []
     monkeypatch.setattr(adapters, "hub_guard", lambda role, log: seen.append(role) or [])
     import sizeup.cloud.hub as hub
-    monkeypatch.setattr(hub, "HubApp", lambda cfg, log: "hub")
+    monkeypatch.setattr(hub, "HubApp", lambda cfg, log, fence=None: "hub")
     cfg = type("C", (), {"cloud_role": "hub"})()
     assert app_mod.make_app(cfg) == "hub" and seen == ["hub"]
 
@@ -540,12 +540,15 @@ def test_the_station_link_adds_each_sources_health_from_the_real_runner():
     assert [h["state"] for h in ad["health"]] == ["starting", "starting"] and ad["state"] == "installed"
     for r in runner.runs:
         runner.step(r)
+    assert StationLink.adapter(fake)["health"][0]["state"] == "backing_off"     # one raise: no outage yet
+    for _ in range(2):                                                        # the third in a row: failing
+        runner.step(runner.runs[0])
     ad = StationLink.adapter(fake)
     assert ad["health"] == [{"source": "feed", "label": "Feed", "state": "failing", "reason": "ConnectionError"},
                             {"source": "other", "label": "Other", "state": "ok", "reason": ""}]
     assert ad["state"] == "failing" and "Feed failing (ConnectionError)" in ad["text"] and "pw@" not in str(ad)
     assert logs == []
-    # the hub: Settings > Health's adapter row, and the Reset button's data (failing sources only)
+    # the hub: Settings > Station > Health's adapter row, and the Reset button's data (failing sources only)
     hub = FakeHub()
     hub.last_state = hub.now
     hub.status = station_status(version={"build": hub.build, "hub": hub.build, "update": {}, "adapter": ad})

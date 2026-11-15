@@ -233,16 +233,27 @@ class AddressHistory:
 
     # -- keying -----------------------------------------------------------------------------------------------------
 
-    def key_of(self, inc: dict) -> addrkey.Key:
+    def key_of(self, inc: dict, fed: bool | None = None) -> addrkey.Key:
+        """An incident's address keys, from what its address was before addresses were stored normalised
+        (sources.key_address: a feed's text as shown_location wrote it, a page's heard words, a person's address), so
+        normalising an address never changes a key: premise notes, pre-plan points and documents stay where they
+        are. fed: the address came from a feed (None: looked up, its source or feed_addresses)."""
+        from sizeup.cad import sources
         L = self.cad.lists
+        if inc.get("address_raw"):
+            if fed is None:
+                fed = inc.get("source") == sources.FEED_SOURCE or (
+                    inc.get("id") is not None and self.cad.sources.feed_address(inc["id"], inc.get("address") or ""))
+            inc = {**inc, "address": sources.key_address(inc, bool(fed)), "address_raw": ""}
         return addrkey.key_incident(inc, L.geo_town_aliases, L.town_of, self.cad.geocoder, L.event_town(inc))
 
     def _key_rows(self, ids: list[int]) -> int:
         """Key these queued incidents (outside the lock: the gazetteer), then write them in one transaction."""
-        if not ids:
+        if not ids or not self.store.may_write():       # a fenced hub task (#501): keyed by the leader, not here
             return 0
         marks = ",".join("?" * len(ids))
-        rows = self.store.q(f"SELECT id, address, place_address, geo_label, lat, lon FROM incidents WHERE id IN ({marks})", ids)
+        rows = self.store.q(f"SELECT id, source, address, address_raw, place_address, geo_label, lat, lon FROM incidents WHERE id IN ({marks})",
+                            ids)
         keyed = [(self.key_of(r).as_dict(), r) for r in rows]
         with self.store.lock:
             db = self.store.db
@@ -284,7 +295,9 @@ class AddressHistory:
     def catch_up(self, max_rows: int = 2000, transcripts: bool = True) -> dict:
         """Key queued incidents (newest first) and index queued transcripts, at most max_rows of each; what is left.
         History here and Search call it with a small max_rows: what was just written is in, the backfill stays the
-        background thread's."""
+        background thread's. A fenced hub task (#501) writes neither: what is left, as it is."""
+        if not self.store.may_write():
+            return self.left()
         n = 0
         while n < max_rows:
             ids = [r["id"] for r in self.store.q("SELECT id FROM addr_queue ORDER BY id DESC LIMIT ?", (min(BATCH, max_rows),))]
@@ -371,7 +384,7 @@ class AddressHistory:
     def stop(self) -> None:
         self._stop.set()
         t, self._thread = self._thread, None
-        if t is not None:
+        if t is not None and t is not threading.current_thread():
             t.join(timeout=5)
 
     def _bounded_catch_up(self, transcripts: bool = False) -> None:

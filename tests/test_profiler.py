@@ -16,7 +16,7 @@ from sizeup.perf import (FIRST_LINE_TICKS, HOUR_TICKS, HTTP, KEEP_TICKS, Busy, P
 from tests.test_access import AUD, TEAM, jwks, jwt, keys, req  # noqa: F401  (fixtures)
 from tests.test_app import wait
 from tests.test_cloud import HubRun, hub_cfg
-from tests.test_roles import COREY, DEE, JULIAN, VAL, people
+from tests.test_roles import CASEY, DEE, JORDAN, VAL, people
 
 ROOT = Path(__file__).resolve().parent.parent
 # Never in anything the profiler says: a topic in a thread's name, a query string, who asked, an address typed in.
@@ -41,10 +41,39 @@ def busy():
           threading.Thread(target=stop.wait, name="sleeper", daemon=True)]
     for t in ts:
         t.start()
+    stop.burner = ts[0]
     yield stop
     stop.set()
     for t in ts:
         t.join(5)
+
+
+def share(out: dict, name: str = "burner") -> float:
+    """What thread `name` used of the CPU this test's own threads used in the profile (the burner, the ones asleep,
+    the test's thread), 0..1. Never of the whole process's: threads earlier tests left behind in it compute too (an
+    xdist worker runs many files; a whole run in one process ends with about 1000 threads), and they took the burner's
+    "over 90% of the process" down to 88%."""
+    ms = {t["thread"]: t["ms"] for t in out["threads"]}
+    mine = sum(ms.get(n, 0.0) for n in ("burner", "sleeper", "waiter", "MainThread"))
+    return ms.get(name, 0.0) / mine if mine else 0.0
+
+
+KERNEL = ThreadClock()             # (one for the tests' own readings: it holds no file open between reads)
+
+
+def cpu_of(t: threading.Thread) -> float:
+    """The CPU seconds thread t has used so far, by the kernel's own count (the clock the accounting reads)."""
+    return KERNEL.read().get(t.native_id, 0.0)
+
+
+def burn(t: threading.Thread, cpu_s: float, timeout: float = 120.0) -> float:
+    """Wait until thread t has used cpu_s more CPU; what it had used by then. Never a sleep of so many seconds: on a
+    loaded machine the burner once got 0.035 s of CPU in a 0.6 s sleep, and anything measured from it was noise."""
+    c0, end = cpu_of(t), time.monotonic() + timeout
+    while (c := cpu_of(t)) - c0 < cpu_s:
+        assert time.monotonic() < end, f"the burner got {c - c0:.3f} s of CPU in {timeout:.0f} s"
+        time.sleep(0.01)
+    return c
 
 
 @pytest.fixture
@@ -64,12 +93,12 @@ def quiet():
 
 @needs_thread_cpu
 def test_a_busy_thread_is_charged_its_cpu_and_a_sleeping_one_next_to_nothing(busy, quiet):
-    p = quiet().start()
     t0 = time.perf_counter()
-    time.sleep(0.6)
+    p = quiet().start()
+    burn(busy.burner, 0.3)                                                    # (not a sleep: see burn)
     rec = p.tick()
     wall = time.perf_counter() - t0
-    assert 0.05 < rec["cpu"]["burner"] <= wall * 1.1, rec["cpu"]
+    assert 0.25 < rec["cpu"]["burner"] <= wall * 1.1, rec["cpu"]              # the 0.3 s it used since the start, counted
     assert rec["cpu"]["burner"] > 0.5 * rec["proc"]                           # most of what the process used (never of the
                                                                               # wall clock: the machine may be busy)
     assert rec["cpu"].get("sleeper", 0.0) < 0.02
@@ -78,7 +107,10 @@ def test_a_busy_thread_is_charged_its_cpu_and_a_sleeping_one_next_to_nothing(bus
     s = p.snapshot()
     rows = {r["name"]: r for r in s["threads"]}
     assert s["threads"][0]["name"] == "burner" and rows["burner"]["live"] == 1
-    assert rows["burner"]["now"] > 5 and rows["sleeper"]["now"] < 3           # % of one core
+    # % of one core, over the tick: what it used of the time that passed (not "over 5%": a machine busy enough gives
+    # the burner less than that of the wall clock, and the 0.3 s above is what says it was counted)
+    assert rows["burner"]["now"] == pytest.approx(100 * rec["cpu"]["burner"] / rec["dt"], abs=0.11)
+    assert rows["burner"]["now"] > 10 * rows["sleeper"]["now"] and rows["sleeper"]["now"] < 3
     assert s["vcpu"] == 0.5 and s["windows"]["now"]["task"] == pytest.approx(2 * s["windows"]["now"]["core"], abs=0.2)
     assert s["process"]["threads"] >= 3 and s["process"]["fds"] and s["process"]["blocks"] > 0
     assert s["process"]["rss"] or s["process"]["rss_peak"]
@@ -86,10 +118,16 @@ def test_a_busy_thread_is_charged_its_cpu_and_a_sleeping_one_next_to_nothing(bus
 
 @needs_thread_cpu
 def test_what_was_used_before_the_start_is_not_counted(busy, quiet):
-    time.sleep(0.3)
+    before = burn(busy.burner, 0.3)                    # 0.3 s of CPU used before the start: never in the first tick
     p = quiet().start()
     rec = p.tick()
-    assert rec["cpu"].get("burner", 0.0) < 0.15, (rec["cpu"], rec["dt"], rec["threads"], rec["os_threads"])
+    after = cpu_of(busy.burner)
+    # The burner goes on computing between the start and the tick. That was "under 0.15 s" once; a loaded runner took
+    # longer than that between the two lines (0.178 s, test_profiler.py:92 on main). The bound that holds on any
+    # machine: no more than the thread used between a reading taken before the start and one taken after the tick,
+    # by the same clock (10 ms for a clock in ticks). Counting what came before the start would add 0.3 s to that.
+    got = rec["cpu"].get("burner", 0.0)
+    assert got <= after - before + 0.011, (got, before, after, rec["cpu"], rec["dt"], rec["threads"], rec["os_threads"])
 
 
 def test_a_thread_gone_between_two_readings_reports_itself(quiet):
@@ -546,18 +584,27 @@ def test_a_profile_charges_the_function_that_computes_not_the_threads_that_wait(
     sleepers = [threading.Thread(target=busy.wait, name=f"waiter-{i}", daemon=True) for i in range(30)]
     for t in sleepers:
         t.start()
+    before = cpu_of(busy.burner)
     out = p.profile(1.0, hz=100)
+    used = cpu_of(busy.burner) - before                    # (from before the profile to after it: at least its share)
     threads = {t["thread"]: t for t in out["threads"]}
-    assert out["threads"][0]["thread"] == "burner" and threads["burner"]["pct"] > 90
+    mine = threads["burner"]["ms"]
+    assert out["threads"][0]["thread"] == "burner" and share(out) > 0.90
     assert threads.get("waiter", {"pct": 0})["pct"] < 2 and threads.get("sleeper", {"pct": 0})["pct"] < 2    # 31 threads asleep
-    assert out["self"][0]["fn"].startswith("spin (tests/test_profiler.py:") and out["self"][0]["pct"] > 85
-    cum = {x["fn"].split(" ")[0]: x["pct"] for x in out["cumulative"]}
-    assert cum["burner"] > 90 and cum["spin"] > 90 and cum["Thread.run"] > 90
+    # of the burner's own CPU (was: 85% and 90% of the process's, with the burner over 90% of it)
+    assert out["self"][0]["fn"].startswith("spin (tests/test_profiler.py:") and out["self"][0]["ms"] > 0.94 * mine
+    cum = {x["fn"].split(" ")[0]: x["ms"] for x in out["cumulative"]}
+    assert cum["burner"] > 0.99 * mine and cum["spin"] > 0.99 * mine and cum["Thread.run"] > 0.99 * mine
     assert out["lines"][0]["at"].startswith("tests/test_profiler.py:") and out["lines"][0]["at"].endswith(" spin")
     heavy = out["folded"].splitlines()[0]
     assert re.fullmatch(r"burner;Thread\._bootstrap \(python3\.\d+/threading\.py:\d+\);.*;burner \(tests/test_profiler\.py:\d+\);"
                         r"spin \(tests/test_profiler\.py:\d+\) \d+", heavy), heavy
-    assert 50_000 < int(heavy.rsplit(" ", 1)[1]) < 2_500_000           # microseconds of CPU
+    # microseconds of CPU: the burner's own over the profile, nearly all of it on this one stack. Against what the
+    # thread really used, and what the profile says it used: never against the wall clock ("over 50 ms of a 1 s
+    # profile" failed with 42 ms on a machine that gave the burner no more).
+    us = int(heavy.rsplit(" ", 1)[1])
+    assert 0 < us <= used * 1e6 * 1.02 + 11_000, (us, used)
+    assert us == pytest.approx(threads["burner"]["ms"] * 1000, rel=0.15), (us, threads["burner"])
     assert 0 < out["cpu_ms"] <= out["process_cpu_ms"] * 1.05
     assert "perf-sampler" not in threads                              # itself: measured apart
     o = out["overhead"]
@@ -626,7 +673,7 @@ def test_with_a_coarse_clock_the_profile_goes_by_the_cpu_since_the_last_sample(b
     assert "error" not in out, (out, logged)
     assert out["method"] == "interval" and out["clock"] == "stat" and out["window_ms"] == 0
     threads = {t["thread"]: t for t in out["threads"]}
-    assert out["threads"][0]["thread"] == "burner" and threads["burner"]["pct"] > 80 and threads["burner"]["caught"] >= 1
+    assert out["threads"][0]["thread"] == "burner" and share(out) > 0.80 and threads["burner"]["caught"] >= 1
     assert out["self"][0]["fn"].startswith("spin (tests/test_profiler.py:") and out["cpu_ms"] > 50
     assert threads.get("sleeper", {"pct": 0})["pct"] < 5
 
@@ -687,21 +734,21 @@ def test_only_an_admin_reads_the_cpu_table_or_runs_a_profile(keys, access_hub): 
     h = access_hub
     people(h.app.cad)
     assert req(h.url + "/api/cad/perf")[0] == 401
-    for who in (JULIAN, VAL, DEE):                                     # a dispatcher, a viewer, a deactivated dispatcher
+    for who in (JORDAN, VAL, DEE):                                     # a dispatcher, a viewer, a deactivated dispatcher
         for path in ("/api/cad/perf", "/api/cad/perf/profile", "/api/cad/perf/profile?format=folded"):
             code, out = req(h.url + path, headers=as_(keys[0], who))
             assert code == 403 and out["error"].startswith("Admins only") and "threads" not in out, (who, path)
         code, out = req(h.url + "/api/cad/perf/profile", "POST", {"seconds": 1}, as_(keys[0], who))
         assert code == 403 and "error" in out and "folded" not in out, who
     assert h.app.perf.last_profile is None and h.app.perf.snapshot()["profile"]["running"] is False     # none ran
-    code, out = req(h.url + "/api/cad/perf", headers=as_(keys[0], COREY))
+    code, out = req(h.url + "/api/cad/perf", headers=as_(keys[0], CASEY))
     assert code == 200 and {"threads", "windows", "process", "routes", "hours", "gauges", "uptime_s"} <= set(out)
-    code, out = req(h.url + "/api/cad/perf/profile", "POST", {"seconds": 1}, as_(keys[0], COREY))
+    code, out = req(h.url + "/api/cad/perf/profile", "POST", {"seconds": 1}, as_(keys[0], CASEY))
     assert code == 200 and out["samples"] > 0 and "folded" in out
     rows = h.app.cad.activity.rows()                                   # who profiled, and who was refused, in the activity
     said = {(r["email"], r["summary"]) for r in rows}
-    assert (COREY, "Profiled the hub's CPU (1.0 s)") in said
-    assert (JULIAN, "Refused: perf/profile (needs admin; dispatcher)") in said
+    assert (CASEY, "Profiled the hub's CPU (1.0 s)") in said
+    assert (JORDAN, "Refused: perf/profile (needs admin; dispatcher)") in said
 
 
 def test_the_hub_counts_its_threads_and_requests_and_says_nothing_of_anyone(keys, access_hub):  # noqa: F811
@@ -709,7 +756,7 @@ def test_the_hub_counts_its_threads_and_requests_and_says_nothing_of_anyone(keys
     the table, a profile and its folded stacks: thread groups, functions, file:line and path families only."""
     h = access_hub
     people(h.app.cad)
-    admin = as_(keys[0], COREY)
+    admin = as_(keys[0], CASEY)
     stop = threading.Event()
     t = threading.Thread(target=burner, args=(stop,), name=f"ntfy-{TOPIC}", daemon=True)
     t.start()
@@ -746,7 +793,7 @@ def test_the_hub_counts_its_threads_and_requests_and_says_nothing_of_anyone(keys
     if ThreadClock().kind != "none":
         assert prof["threads"][0]["thread"] == "ntfy" and prof["self"][0]["fn"].startswith("spin (tests/test_profiler.py:")
     said = json.dumps([prof, table, last]) + folded.decode()
-    for secret in (TOPIC, "s3cr3t", "token=", "q=12", STREET, "Elm", COREY, COREY.lower(), JULIAN, "9001", "?", "Cf-Access",
+    for secret in (TOPIC, "s3cr3t", "token=", "q=12", STREET, "Elm", CASEY, CASEY.lower(), JORDAN, "9001", "?", "Cf-Access",
                    str(Path.home())):
         assert secret not in said, secret
     assert not re.search(r"[\w.+-]+@[\w-]+\.\w+", said)                 # nobody's address
@@ -756,7 +803,7 @@ def test_the_hub_counts_its_threads_and_requests_and_says_nothing_of_anyone(keys
 def test_one_profile_at_a_time_over_http(access_hub, keys):  # noqa: F811
     h = access_hub
     people(h.app.cad)
-    admin = as_(keys[0], COREY)
+    admin = as_(keys[0], CASEY)
     code, out = req(h.url + "/api/cad/perf/profile", "POST", {"seconds": 20, "wait": False}, admin)
     assert code == 202 and out == {"running": True, "seconds": 20.0, "hz": 25.0}        # 25 Hz unless asked
     code, out = req(h.url + "/api/cad/perf/profile", "POST", {"seconds": 1}, admin)

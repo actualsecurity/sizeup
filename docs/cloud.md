@@ -1,9 +1,13 @@
 # sizeup in the cloud: hub and station
 
+The operations and architecture reference for the hub, the station link, the deploys and the cloud features.
+The system in one page: [docs/architecture.md](architecture.md). Installing and running a station:
+[deploy/station/README.md](../deploy/station/README.md).
+
 To try the CAD with firefighters who aren't at the firehouse, sizeup runs in two places from the
 same code and the same entry point (`python -m sizeup --config ...`), chosen by `[cloud] role`:
 
-| | **station** (the Mac with the SDRs) | **hub** (the cloud) |
+| | **station** (the machine with the SDRs) | **hub** (the cloud) |
 |---|---|---|
 | Radios, trunk-recorder, MDC decode | yes | none: nothing opens an SDR or starts a program |
 | whisper (3.8 GB), Kokoro voice (1.4 GB) | yes | none |
@@ -14,7 +18,140 @@ same code and the same entry point (`python -m sizeup --config ...`), chosen by 
 
 No `[cloud]` section = today's all-in-one, unchanged.
 
-### The station page
+```
+ station                                                             hub (Fargate task)
+ ┌──────────────────────────────────────────┐   HTTPS, outbound   ┌──────────────────────────────────┐
+ │ receivers → STT → App (as all-in-one)    │   Bearer token      │ cloudflared ──► sizeup (HubApp)  │
+ │   _emit ─► outbox.sqlite ─► forwarder ───┼──── POST events ───►│   same App code applies events   │
+ │   talking now / status ─────────────────┼──── POST state ────►│   monitor, CAD comms, 60 Control │
+ │   job runner ◄── long poll ─────────────┼──── GET jobs ◄──────│   jobs: switches, re-runs, voice │
+ │     Kokoro: the voice if Polly fails ────┼──── POST result ───►│   SQLite ─► Litestream ─► S3     │
+ └──────────────────────────────────────────┘                     │ dispatch voice ─► Amazon Polly   │
+                                                                  └──────────────────────────────────┘
+```
+
+## At a glance
+
+| | |
+|---|---|
+| Roles | `[cloud] role`: `station`, `hub`, or no `[cloud]` section (all-in-one) |
+| Hub | one Fargate task (0.5 vCPU, 2 GB, arm64), desired count 1; containers `hub` (the supervisor, Litestream, the app) and `cloudflared`. Reached only through Cloudflare Tunnel, behind Cloudflare Access |
+| Station → hub | outbound HTTPS with a bearer token (and an Access service token): events through a durable outbox, state every 5 s, jobs by a 25 s long poll, aircraft / vessels live, logs in batches |
+| Data | `cad.sqlite`, `hub.sqlite`, `audio.sqlite` under `/data`, replicated by Litestream 0.5.18 to S3. Clip and dispatch audio bytes in the audio bucket, incident attachments in their own locked bucket, the camera DVR on EFS, the map caches gzipped in the backups bucket |
+| One writer | the S3 lock `leader.json`: lease 30 s, renewed every 10 s; the holder stops writing 20 s after its last renew, anyone else may take it at 35 s. The app's fence refuses writes without it |
+| Deploy | merge to main → `test` → `deploy`: the SSM guard, the image, a hot/cold handoff (the new task stands by warm, the old one drains), then the replica check and the station check |
+| A takeover | followers caught up → promoted → `litestream replicate` confirmed (120 s a file, 150 s in all) → migrate → confirmed again → serve |
+| Speech-to-text | whisper on the station; Amazon Transcribe on the hub for the channels set to AWS ($0.01 a minute; $25 a month, police $15 on its own budget) |
+| Voice | Amazon Polly on the hub; the station's Kokoro if Polly fails; else text only |
+| Pushes | ntfy, three kinds: alerts, status, intel. Topics from SSM or Settings, never in the repo |
+| Watching it | Settings > Station > Health (admins); the replica watch (every 15 min on the leader, a full check daily); CloudWatch alarms for a hub that can't speak for itself |
+
+## Contents
+
+<!-- contents: start -->
+- [At a glance](#at-a-glance)
+- [Operations runbook](#operations-runbook)
+- [The station page](#the-station-page)
+- [What flows](#what-flows)
+- [On screen](#on-screen)
+- [Failure behaviour](#failure-behaviour)
+- [Station updates: it follows the hub's build](#station-updates-it-follows-the-hubs-build)
+- [Station health and alerts](#station-health-and-alerts)
+  - [What each Health row means](#what-each-health-row-means)
+  - [The alert and status topics (ntfy)](#the-alert-and-status-topics-ntfy)
+  - [A deploy that checks itself](#a-deploy-that-checks-itself)
+- [Auth and security](#auth-and-security)
+- [The dispatch voice (Amazon Polly)](#the-dispatch-voice-amazon-polly)
+- [Who is signed in (the operator from Cloudflare Access)](#who-is-signed-in-the-operator-from-cloudflare-access)
+  - [Roles: who may change what](#roles-who-may-change-what)
+  - [Activity log](#activity-log)
+- [Config](#config)
+- [Speech-to-text per channel: whisper on the station, Amazon Transcribe on the hub](#speech-to-text-per-channel-whisper-on-the-station-amazon-transcribe-on-the-hub)
+- [Phone pre-alert (Tapout)](#phone-pre-alert-tapout)
+- [Incident sources: external CAD feeds, paging as the backup (#297)](#incident-sources-external-cad-feeds-paging-as-the-backup-297)
+  - [Dispatch modes and the per-incident radio log (#311)](#dispatch-modes-and-the-per-incident-radio-log-311)
+- [Highway layers: cameras, incidents, signs, mileposts (the Thruway, 511NY)](#highway-layers-cameras-incidents-signs-mileposts-the-thruway-511ny)
+  - [Sources](#sources)
+  - [Cameras that are down](#cameras-that-are-down)
+  - [Live video](#live-video)
+  - [Camera DVR (#277)](#camera-dvr-277)
+  - [Camera wall (#125)](#camera-wall-125)
+  - [How the highway layers work](#how-the-highway-layers-work)
+- [Road projects & closures (#185)](#road-projects--closures-185)
+- [The airport (HPN): the Airport layer, places, alerts](#the-airport-hpn-the-airport-layer-places-alerts)
+- [County GIS layers (Westchester County GIS)](#county-gis-layers-westchester-county-gis)
+- [Metro-North trains (the MTA)](#metro-north-trains-the-mta)
+  - [Source and terms](#source-and-terms)
+  - [What the feed gives (decoded 2026-10-14)](#what-the-feed-gives-decoded-2026-10-14)
+  - [Real and estimated](#real-and-estimated)
+  - [Positions: what the feed really gives, and what we do with it](#positions-what-the-feed-really-gives-and-what-we-do-with-it)
+  - [How the trains layer works](#how-the-trains-layer-works)
+  - [MTA TrainTime: GPS, cars, load, milepost, track (#362)](#mta-traintime-gps-cars-load-milepost-track-362)
+  - [Numbered tracks, catenary poles, mileposts (#371)](#numbered-tracks-catenary-poles-mileposts-371)
+- [More P25 systems: MTA MRRS (#408, #409)](#more-p25-systems-mta-mrrs-408-409)
+  - [The system (as listed, community-maintained)](#the-system-as-listed-community-maintained)
+  - [How it runs](#how-it-runs)
+  - [Tiers](#tiers)
+  - [Who sees it](#who-sees-it)
+  - [Source keys (#415)](#source-keys-415)
+  - [The Radio page's views and its change log (#415, #441, #484)](#the-radio-pages-views-and-its-change-log-415-441-484)
+  - [Emergencies that aren't ours (#514)](#emergencies-that-arent-ours-514)
+- [Aircraft near HPN (shortfinal's picture)](#aircraft-near-hpn-shortfinals-picture)
+  - [Feeds and their terms](#feeds-and-their-terms)
+  - [Our own receiver on the station (#235)](#our-own-receiver-on-the-station-235)
+  - [How the aircraft layer works](#how-the-aircraft-layer-works)
+  - [Emergency squawks: the alarm and the push](#emergency-squawks-the-alarm-and-the-push)
+  - [The airport pre-alert (#235, in #233's model)](#the-airport-pre-alert-235-in-233s-model)
+- [Vessels (AIS)](#vessels-ais)
+- [Weather and water (NWS alerts, conditions, radar; NOAA tides)](#weather-and-water-nws-alerts-conditions-radar-noaa-tides)
+- [Incident attachments (#323)](#incident-attachments-323)
+- [Radio pre-alerts (intel)](#radio-pre-alerts-intel)
+- [Pre-plan points and site documents (#456, #459)](#pre-plan-points-and-site-documents-456-459)
+- [Station logs (CloudWatch)](#station-logs-cloudwatch)
+- [Where the hub's CPU goes (#425)](#where-the-hubs-cpu-goes-425)
+- [The hub's storage](#the-hubs-storage)
+  - [How often the replica is written](#how-often-the-replica-is-written)
+  - [Litestream started again under the app](#litestream-started-again-under-the-app)
+  - [Audio retention](#audio-retention)
+  - [Audio in S3 (#414)](#audio-in-s3-414)
+  - [Starting: the CAD first (#251)](#starting-the-cad-first-251)
+- [Deploys: the hot/cold handoff](#deploys-the-hotcold-handoff)
+  - [Fenced writes (#501, #509)](#fenced-writes-501-509)
+  - [Fail-safe](#fail-safe)
+  - [Rolling out hot/cold deploys](#rolling-out-hotcold-deploys)
+  - [Back to stop-then-start](#back-to-stop-then-start)
+  - [Replicate before migrate](#replicate-before-migrate)
+  - [Reseeding a replica](#reseeding-a-replica)
+- [Replica checks](#replica-checks)
+- [AWS setup scripts](#aws-setup-scripts)
+- [Packaging and the Fargate task](#packaging-and-the-fargate-task)
+  - [The hub container's environment](#the-hub-containers-environment)
+- [Code](#code)
+<!-- contents: end -->
+
+## Operations runbook
+
+| When | Go to |
+|---|---|
+| Deploying | [A deploy that checks itself](#a-deploy-that-checks-itself) (the four steps and what fails each), [Deploys: the hot/cold handoff](#deploys-the-hotcold-handoff) (what a person sees, the timing lines) |
+| A deploy with a migration | [Writing a migration](#writing-a-migration), [After a takeover: let the first snapshot finish](#after-a-takeover-let-the-first-snapshot-finish) |
+| The deploy's SSM step is red | [A deploy that checks itself](#a-deploy-that-checks-itself): create the parameter (sizeup-aws), then deploy again |
+| The deploy's replica step is red | [Replica checks](#replica-checks): "corrupt" or "not verifiable" is real; "not verified within 10 min" may be a slow first restore |
+| A takeover is refused, the hub crash-loops | [When a new image's takeover fails](#when-a-new-images-takeover-fails): roll the task definition back first; [The operator's override](#the-operators-override) only for a proven false positive |
+| Rolling back | the task definition (the previous image takes over from the replica); [Back to stop-then-start](#back-to-stop-then-start) for code without the lock; [Audio in S3](#audio-in-s3-414) "Rollback" for a release from before #414 |
+| A replica no longer restores | [Reseeding a replica](#reseeding-a-replica) (by hand, the hub stopped) |
+| A push: "Replica corrupt", "Replica not verifiable", "Hub takeover failed", "Hub crash-looping" | [Replica checks](#replica-checks): the push kinds, the record, the CloudWatch alarms |
+| A push: "Hub Litestream restarted", or a replica shown as unverified | [Litestream started again under the app](#litestream-started-again-under-the-app): the TRUNCATE rule, the retries, what an unclean release means |
+| What a killed hub loses; the S3 request bill; `SIZEUP_LITESTREAM_SYNC_S` | [How often the replica is written](#how-often-the-replica-is-written) |
+| Reading Settings > Station > Health | [What each Health row means](#what-each-health-row-means), [the alerts](#station-health-and-alerts) |
+| The station is offline, behind or failed an update | [Failure behaviour](#failure-behaviour), [Station updates](#station-updates-it-follows-the-hubs-build); its logs: [Station logs](#station-logs-cloudwatch) |
+| Setting up or changing the push topics | [The alert and status topics (ntfy)](#the-alert-and-status-topics-ntfy) |
+| The first rollout of hot/cold deploys (a new environment) | [Rolling out hot/cold deploys](#rolling-out-hotcold-deploys) |
+| Which AWS setup step does what | [AWS setup scripts](#aws-setup-scripts) |
+| Where the hub's CPU goes | [Where the hub's CPU goes](#where-the-hubs-cpu-goes-425) |
+
+
+## The station page
 
 With `role = "station"` the station's own web page (http://localhost:8091 on the station PC) is about
 the station only (user, 2026-10-13: "the local system doesnt show the cad bits just things relevant to
@@ -26,7 +163,7 @@ connected" / "Hub unreachable" / "Hub not sending" / "Not forwarding") and a lin
 |---|---|
 | **Radios** (`/`, `#radios`) | the CAD's Settings > Radios (`radio-controls.js`): receivers, speech-to-text and the Hub row; each dongle's job (and who else holds it: shortfinal's claims); the paged incident; Channels (record, transcribe, engine; set on the hub while forwarding, then locked here); vocabulary; re-run speech-to-text; the disk |
 | **Monitor** (`#monitor`, also `/monitor`) | the pages and transmissions this station heard, newest first: play, time, talker (rig and radio ID), channel, the transcript and the model that wrote it ("Transcribed on the hub (AWS)" for channels on AWS); search and a channel filter |
-| **Settings** (`#settings`) | the **Hub link** card (`hublink.js`, the same card as the CAD's Settings → System → Station): Forward to hub on / off, the hub URL, Test connection, the status, the last contact, what waits in the outbox, the last error, where each secret came from (never a value); **This station**: id, name, role, version, build, and the `sizeup-station` commands for the rest (`status`, `doctor`, `logs -f`) |
+| **Settings** (`#settings`) | the **Hub link** card (`hublink.js`, the same card as the CAD's Settings → Station → Hub link): Forward to hub on / off, the hub URL, Test connection, the status, the last contact, what waits in the outbox, the last error, where each secret came from (never a value); **This station**: id, name, role, version, build, and the `sizeup-station` commands for the rest (`status`, `doctor`, `logs -f`) |
 
 What it doesn't have: the dispatch console, events, run cards, the CAD's lists and users, the dispatch
 voice settings, the wall board. `/cad` redirects to the station page (`/?from=cad`, which then says
@@ -43,21 +180,19 @@ The CAD itself still runs inside the station process: its store holds what the s
 it. What doesn't start on a station is the CAD's state push (the whole console rebuilt and sent to
 `/api/cad/stream` once a second), which nothing there would read. Hub and all-in-one are unchanged.
 
-**Station on / off from the UI** (user, 2026-10-08: "how do we turn on and off station mode
-though? id like that to be easy to do from the ui"): on any machine that isn't the hub,
-**Settings → System → Station** (on a station: the station page's **Settings**) has a *Forward to hub* switch, the hub URL, the link's status, where
-each secret came from and *Test connection* (`sizeup/cloud/stationmode.py`). Switching starts or
-stops only the link (forwarder, state, job long poll) and the station-only parts (the "CAD of
-record is the hub" banner, the Hub row and pill): radios, speech-to-text and the voice keep
-running. Off keeps the outbox: what was queued goes up first when it's back on; what is heard while
-off is not queued (all-in-one). The choice is kept in `state/cloud.json` and from the first change
-wins over `[cloud] role` / `hub_url`, which are only the default. Each change is in the Settings
-audit (section system) with the Operator's name. The hub can't be switched (a cloud deployment):
-`GET|POST /api/station-mode` answers 409 there. API: `GET /api/station-mode` → `{forward, hub_url,
-from, running, status: {state, text, detail, waiting, last_error, ...}, secrets: {token, access_id,
-access_secret: {set, source}}, keychain}`; `POST /api/station-mode {forward?, hub_url?, operator}`;
-`POST /api/station-mode/test {hub_url?}` → `{ok, status, text}` (the hub's `/healthz`, then
-`GET /api/station/hello` with the token: nothing sent, the hub doesn't count it as "seen").
+**Station on / off from the UI** (user, 2026-10-08: "how do we turn on and off station mode though? id like that to be
+easy to do from the ui"): on any machine that isn't the hub, **Settings → Station → Hub link** (#493; on a station:
+the station page's **Settings**) has a *Forward to hub* switch, the hub URL, the link's status, where each secret came
+from and *Test connection* (`sizeup/cloud/stationmode.py`). Switching starts or stops only the link (forwarder, state,
+job long poll) and the station-only parts (the "CAD of record is the hub" banner, the Hub row and pill): radios,
+speech-to-text and the voice keep running. Off keeps the outbox: what was queued goes up first when it's back on; what
+is heard while off is not queued (all-in-one). The choice is kept in `state/cloud.json` and from the first change wins
+over `[cloud] role` / `hub_url`, which are only the default. Each change is in the Settings audit (section system)
+with the Operator's name. The hub can't be switched (a cloud deployment): `GET|POST /api/station-mode` answers 409
+there. API: `GET /api/station-mode` → `{forward, hub_url, from, running, status: {state, text, detail, waiting,
+last_error, ...}, secrets: {token, access_id, access_secret: {set, source}}, keychain}`; `POST /api/station-mode
+{forward?, hub_url?, operator}`; `POST /api/station-mode/test {hub_url?}` → `{ok, status, text}` (the hub's
+`/healthz`, then `GET /api/station/hello` with the token: nothing sent, the hub doesn't count it as "seen").
 
 Secrets on the station: the environment, else `[cloud]`, else the **macOS Keychain**
 (`security find-generic-password -s <service> -w`; services `sizeup-station-token`,
@@ -67,18 +202,6 @@ Secrets on the station: the environment, else `[cloud]`, else the **macOS Keycha
 via WSL2, or a Raspberry Pi: `deploy/station/install-windows.ps1` / `install-linux.sh`) has them in
 `/etc/sizeup/station.env`, which its systemd unit loads into the environment; it has no voice
 (`[dispatch] tts_engine = "none"`), so a dispatch Polly can't say is text only.
-
-```
- station (Mac)                                                       hub (Fargate task)
- ┌──────────────────────────────────────────┐   HTTPS, outbound   ┌──────────────────────────────────┐
- │ receivers → STT → App (as all-in-one)    │   Bearer token      │ cloudflared ──► sizeup (HubApp)  │
- │   _emit ─► outbox.sqlite ─► forwarder ───┼──── POST events ───►│   same App code applies events   │
- │   talking now / status ─────────────────┼──── POST state ────►│   monitor, CAD comms, 60 Control │
- │   job runner ◄── long poll ─────────────┼──── GET jobs ◄──────│   jobs: switches, re-runs, voice │
- │     Kokoro: the voice if Polly fails ────┼──── POST result ───►│   SQLite ─► Litestream ─► S3     │
- └──────────────────────────────────────────┘                     │ dispatch voice ─► Amazon Polly   │
-                                                                  └──────────────────────────────────┘
-```
 
 ## What flows
 
@@ -96,6 +219,8 @@ same App code, so the hub's monitor and CAD come out as they would locally.
 | `alt_text` | `_set_alt` | "both" re-run: the station's whisper text as the alternative | `_set_alt`: kept to compare, the text (AWS's) stays |
 | `heard` | `_heard` | a radio ID (and P25 alias) heard on the air | the hub's radio registry learns it |
 | `alarm` | `_call`, `_fm_emergency`, `_segment` (`_alarm_now`) | the emergency button: a P25 key-up trunk-recorder flagged (the call JSON's `emergency`), at the end of its call; an MDC-1200 / FleetSync emergency packet on a fireground channel (FG1, FG2) at the key-up (the live tap; id `FG1-live-<ms>`, no clip yet), then the finished transmission (`alarm_key`: the key-up's) with its clip; before speech-to-text | the emergency alarm at once (sizeup/cad/alarms.py, #128); its `traffic` event follows with the words and updates the same alarm. An older hub ignores it (the `traffic` event still carries `emergency`) |
+| `activity` | another P25 system's ingest (#409) | key-ups on an encrypted talkgroup, per minute, with the radio IDs | counted (`radio_activity`); never a row, nothing recorded or decoded |
+| `source_event`, `source_health`, `source_seen` | the incident-source runner (`sizeup/sources/runner.py`) | an external feed's event, its health, the ids still in its snapshot | [Incident sources](#incident-sources-external-cad-feeds-paging-as-the-backup-297); a `source_event` that couldn't be applied is retried |
 
 Clips go as 8 kHz mono WAV (already band-limited to 300-3300 Hz, so nothing audible changes; half
 the upload). Each event has a `seq` from the station's outbox; the hub remembers the last one applied
@@ -122,6 +247,18 @@ back as `POST /api/station/jobs/<id>`), handed out once, dropped if not picked u
 | `call` `retranscribe` | Re-transcribe on the hub for a channel on the local model (one on "aws" runs Amazon Transcribe on the hub's clip; "both": AWS here, this for the alternative, args `[ids, true]`; AWS unavailable: here, said in the result), or Amazon Transcribe failing for a clip the station didn't run whisper on | queues it; new text comes back as `retext`, then always a `rerun` (changed / same / failed) | refused: speech-to-text runs on the station (a failed AWS clip then says "transcription failed"; a re-run ends "failed: ...") |
 | `call` `set_channel_prefs` | Settings > Radios > Channels on the hub, or the station reporting other choices than the hub's (`channels.sig` in its state) | applies the whole map + whether AWS can take audio now, keeps it (its own Settings overrides, audited as "hub"), reports `{prefs, aws, sig}` | sent when it's back: the Channels card says "Station offline ...: these apply when it's back" |
 | `call` `emergency_all_clear` | an alarm's **All clear** on the hub (`Alarms.all_clear` → `HubApp._all_clear_sent`, in the background) | closes its emergency window for that talkgroup and radio (`App.emergency_all_clear`) | logged on the hub; the station's window then ends on its own (`[p25] emergency_window_min` after the last emergency key-up). A station from before refuses it the same way |
+| `call` `transcribe_now` | Amazon Transcribe couldn't (failed, timed out: #195) | whisper on that clip at live priority | "transcription failed" on the row |
+| `call` `catch_up` | the hub's [catch-up](#speech-to-text-per-channel-whisper-on-the-station-amazon-transcribe-on-the-hub) of shed clips | whisper, under every other class, at most 10 clips a call | counts for nothing; a station that refuses it isn't asked again for 10 min |
+| `call` `set_adsb_receiver` | Settings > Radios on the hub (`POST /api/adsb-receiver`) | names or releases the ADS-B dongle | refused with the reason |
+| `call` `sources_poll_now` | a pre-alert on the hub | its feed adapters poll now, within their own limits | nothing: they poll on their schedule |
+| `call` `reception_post`, `reception_sample_b64` | a reception test from Settings > Radios (#410, [docs/reception-test.md](reception-test.md)) | runs it; a captured call to listen to (never stored on the hub) | refused with the reason |
+| `sources_reset` | an admin's Reset on Settings > Station > Health (`POST /api/sources/reset`, one per source per 5 min) | queues the adapter's `reset()` for its own thread | refused with the reason |
+
+**Station → hub, live, never queued**: `POST /api/station/aircraft` ([our ADS-B
+receiver](#our-own-receiver-on-the-station-235)) and `POST /api/station/vessels` ([docs/vessels.md](vessels.md)). **In
+batches from a spool of its own**: `POST /api/station/logs` ([Station logs](#station-logs-cloudwatch)). `GET
+/api/station/hello` tests the token; `GET /api/station/status` is the deploy check's read-only view. All take the
+station's bearer token.
 
 **The emergency window** (#128, 2026-10-14). trunk-recorder records every talkgroup (`recordUnknown`, every
 row of `talkgroups.csv` mode `T`); the **station** drops the calls of a talkgroup whose Record switch is off
@@ -148,13 +285,13 @@ pages of its own ([the station page](#the-station-page)).
   auto_assign`, deploy/station/README.md) reads "· FG1 · auto" (the row's `set_by`: "person", "auto",
   or missing from an older station, which then shows no "auto").
 * Hub, CAD header: "Station connected" / "Station offline 12:03". No health banner under it, for anyone
-  (#203): the station health alerts are on the admins' Settings → **Health** ([Station health and
+  (#203): the station health alerts are on the admins' Settings → **Station → Health** ([Station health and
   alerts](#station-health-and-alerts)); for an admin the Station row opens it.
 * Station page, Radios, Receivers: a **Hub** row (connected, or offline with how many events are waiting;
   "not sending" when forwarding is on without a token; its version against the hub's, as above). Its header: the "Hub connected" / "Hub
   unreachable" / "Not forwarding" pill and a link to the CAD on the hub. Settings: the last contact
   and what waits in the outbox.
-* An all-in-one machine forwarding from Settings → System → Station: the same Hub row, and on its
+* An all-in-one machine forwarding from Settings → Station → Hub link: the same Hub row, and on its
   `/cad` the pill and the banner with the hub's URL. They go when forwarding is switched off and come
   back when it's on.
 
@@ -168,12 +305,12 @@ pages of its own ([the station page](#the-station-page)).
 | One event can't be applied | Logged and counted in the Station row; the ones behind it still apply. |
 | Station offline during a dispatch | Text-only dispatch with the reason, immediately. |
 | Station slow to render | After 20 s, text only; a late answer is discarded. |
-| Hub redeployed | A hot/cold handoff ([Deploys](#deploys-the-hotcold-handoff)): the new task waits warm beside the old one, which drains, puts its last changes in S3 and hands over. The page shows "Reconnecting… (update in progress)" for roughly 10–20 s and carries on; the station retries within seconds. Nothing written is lost (every change is confirmed in S3 before the lock is released). Lost: the in-memory "talking now" and station status (back within 5 s), a tones-only page waiting for its separate voice transmission. Received clips survive (in `audio.sqlite`: [Audio retention](#audio-retention)). The new app serves the CAD at once and reads the map layers' caches (already restored by the standby) in the background: each layer says "loading" for a few seconds. A hub that crashes: the lease runs out in 35 s and a standby (if any) takes over; else ECS starts a task that restores cold (as before: minutes), losing up to ~1 s of the newest writes. |
+| Hub redeployed | A hot/cold handoff ([Deploys](#deploys-the-hotcold-handoff)): the new task waits warm beside the old one, which drains, puts its last changes in S3 and hands over. The page shows "Reconnecting… (update in progress)" for the drain plus the takeover (about 35–60 s, see "What a person sees" under Deploys) and carries on; the station retries within seconds. Nothing written is lost (every change is confirmed in S3 before the lock is released). Lost: the in-memory "talking now" and station status (back within 5 s), a tones-only page waiting for its separate voice transmission. Received clips survive (in `audio.sqlite`: [Audio retention](#audio-retention)). The new app serves the CAD at once and reads the map layers' caches (already restored by the standby) in the background: each layer says "loading" for a few seconds. A hub that crashes: the lease runs out in 35 s and a standby (if any) takes over; else ECS starts a task that restores cold (as before: minutes). Either way a crash (not a deploy) loses up to ~30 s of the newest writes: [How often the replica is written](#how-often-the-replica-is-written). |
 | Clocks differ | Transmission times are the station's clock; the hub warns in the Station row above 5 s. Keep both on NTP. |
 | Late delivery | Events that arrive after an outage are applied as they arrive: the monitor attaches traffic to whatever incident is active then; the CAD links by the transmission's own time. |
 | A station update doesn't come up | Switched back to the release that ran before within 90 s; that build isn't tried again until the hub moves on. The Station row says "update to ... failed". |
 | A station update fails its preflight | Never switched to: the station keeps running, untouched. Same report. |
-| The station goes quiet, falls behind, a dongle or program stops | An alert: Settings → Health (admins), log, push to the status topic, a recovery notice when it's back ([Station health and alerts](#station-health-and-alerts)). |
+| The station goes quiet, falls behind, a dongle or program stops | An alert: Settings → Station → Health (admins), log, push to the status topic, a recovery notice when it's back ([Station health and alerts](#station-health-and-alerts)). |
 
 ## Station updates: it follows the hub's build
 
@@ -231,6 +368,15 @@ works from the rows alone and the panel says so.
 | P25 trunk silent | trunk-recorder running but no call on **any** talkgroup for `p25_silent_min` (20 min; `p25_silent_night_min`, 60 min, for a silence that reaches 00-06; longer when the system's learned gaps say so), or trunk-recorder losing the control channel (decode rate under 2/s) for 2 min (below) | critical |
 | Station's events backing up | the oldest event waiting on the station is `outbox_min` (5 min) old: it couldn't reach the hub. The hub can't see that while it happens, so it shows when the station is back, from the age of the oldest event it reports, and clears as it drains | warning |
 | Station disk full | over `disk_pct` (90%) full; critical from 97% | warning |
+| Speech-to-text behind | the station's whisper queue: its oldest clip that matters (not a shed context clip) waiting 10 min; one episode until it has been under 2 min for 15 min. Pushed once, when the oldest has waited 20 min | warning |
+| ADS-B receiver down | the station's decoder down for `down_min` ([our receiver](#our-own-receiver-on-the-station-235)) | warning |
+| Amazon Transcribe failing | its breaker on the hub is open (AWS's reason: timed out, AccessDenied, credentials, throttled, billing); the AWS channels run the station's whisper meanwhile | warning |
+| Amazon Transcribe at 80 % of monthly limit / monthly limit reached | this month's cost against `aws_monthly_limit_usd` | warning / critical |
+| Replica corrupt / not verifiable: *file* | the supervisor's last check of a replica ([Replica checks](#replica-checks)); shown here, pushed by the supervisor | critical |
+| Litestream too old | the image's Litestream is older than 0.5.18 | warning |
+| Takeover checks skipped | `SIZEUP_HANDOFF_SKIP_REPLICATION_CHECKS=1` is set ([the override](#the-operators-override)) | warning |
+
+The last five are decided on the hub's own data, whether the station reports or not.
 
 While the station is silent (or before it first reports after a hub restart) the other alerts keep the
 state they had: nothing starts or clears on old data. **Per-channel silence** is a hint, not an alert: each
@@ -263,7 +409,7 @@ it changes nothing.
 
 **Where they show.**
 
-* Settings → **Health**, admins only (#203: "we dont need things like that shown to other people"): one row
+* Settings → **Station → Health**, admins only (#203: "we dont need things like that shown to other people"): one row
   per alert, critical (red) first, with its severity, start time and how long, where, and whether it was
   pushed (a recovery notice follows one that was). Never a banner under the header on `/cad` or `/monitor`,
   and nothing of it in the state push: a dispatcher or a viewer neither sees nor receives it.
@@ -286,8 +432,8 @@ it changes nothing.
   muted kinds in its header); it isn't pushed. One pushed before it was muted still gets its "Recovered". Audited as
   System. Default: none.
 
-**The panel:** Settings → **Health**, a tab of its own shown to admins on the hub (also the Station row in
-Settings → Radios → Receivers, for an admin; the pushes' old link `#settings/system/health` lands there): links
+**The panel:** Settings → **Station → Health**, a tab shown to admins on the hub (also the Station row in
+Settings → Radios → Receivers, for an admin; the old links `#settings/health` and `#settings/system/health` land there): links
 to Push notifications and Amazon Transcribe's row in Data sources, then the alerts now, the hints, then the station (connected, last state post,
 clock difference, sizeup and machine up since), the version (station and hub builds, the state, the last
 update with its timings and log line, failed builds), the outbox and the system (CPU, load, memory, disk,
@@ -297,37 +443,68 @@ and the alert history of the last 24 h (started, recovered, how long, where, whe
 `GET /api/cad/health`: admins only (`sizeup/cad/api.py` `ADMIN_READS`; a 403 for a dispatcher or a viewer),
 polled every 5 s while the tab is open and not otherwise.
 
+### What each Health row means
+
+Settings > Station > Health (`static/health.js`), top to bottom. A row with nothing to show is left out.
+
+| Row | Shows | Look here when |
+|---|---|---|
+| Alerts now | each alert that is on: severity, since when, where, pushed or muted | anything is red |
+| Hints | a channel quiet for longer than usual, a squelch opening on noise, context clips shed, the police budget used up | never pushed: read with the Channels row |
+| Incident sources | each source's tier, state (ok, backing off, failing, stale), reason, last report, which one is the acting primary; each source's lead over paging; reports a feed no longer lists | the console pill says "Paging primary" |
+| Feeds | feeds with a fallback (MTA TrainTime, else GTFS-realtime) and the phone pre-alert (Tapout; "not configured" until its topic is set): ok / fallback and why, last read | the trains look coarse |
+| Station | connected or offline, last state post, clock skew, sizeup and machine up since, host | "Station offline" |
+| Version | station and hub builds, the update state, the last update with its timings and log line, failed builds, the adapter (with Reset when a source is failing) | after a deploy; "Station behind" |
+| Outbox and system | events waiting and the oldest, clips dropped, CPU, load, memory, disk, temperature | "events backing up", "disk full" |
+| Programs | whisper and trunk-recorder: state, restarts, down since | "Speech-to-text down", "trunk-recorder down" |
+| ADS-B receiver (station) | the dongle, the decoder's state and cause, messages a second, aircraft, gain and bias-tee, the forwarding to the hub | "ADS-B receiver down" |
+| Speech-to-text queue (station) | waiting by class, the oldest live clip, the pace, dropped / skipped / shed, and **Catch-up**: "4 waiting · 12 caught up (24 h) · 1 gave up · paused: …" | "Speech-to-text behind"; clips "Skipped: busy" |
+| Amazon Transcribe (hub) | state, last answer, failing since and why, the breaker (closed, open until, half-open), waiting for AWS, counts, this month against the limit | "Amazon Transcribe failing", the budget alerts |
+| Hub errors | the error rate, since the start, whether a push is on, the last notices, the top signatures | a "Hub errors" push |
+| Replicas | each file: ok, corrupt, not verifiable, stale (no check for 3 leader intervals) or not checked (no check yet), when it was verified and by whom; unverified when Litestream was started again without a checkpoint of it; the task events of the last 24 h (failures, and every Litestream restart) | any replica push; before a risky deploy |
+| Dongles | each dongle: plugged in, its job, running, restarts | "SDR gone", "*job* not running" |
+| P25 trunk | the system's last call, the window in effect, the control channel's decode rate | "P25 trunk silent" |
+| Channels | each channel: state, last heard, quiet for, its usual gap, squelch, quieting, restarts, hint | one channel seems dead |
+| Alert history (24 h) | started, recovered, how long, severity, where, pushed | what happened overnight |
+| Hub CPU | CPU by thread now / 1 h / since the start, "Profile 30 s" ([Where the hub's CPU goes](#where-the-hubs-cpu-goes-425)) | the hub is slow |
+
 **The hub's own errors (#285, `sizeup/errwatch.py`):** the hub reads its own log (stdout and stderr, queued and read
-on its own thread): error lines ("aircraft: OverflowError: ...", "aws transcribe ...: Connection: BlockingIOError: ...",
-"ERROR", "error:") and tracebacks (a chained one once). Each is counted under a signature of (source, type), both from
-fixed lists: the source is a sizeup module or a known log prefix (else "hub"), the type a known exception name (else
-"error"), so nothing a request or a message carries can be named in a notice. One signature more than 10 times in
-5 min, or more than 100 error lines of any kind in 5 min, pushes one short notice to the status topic, e.g. "Hub
-errors: aircraft OverflowError ×1,480 in 25 min · since 16:13": at most one per signature (and for the total) an
+on its own thread): error lines ("aircraft: OverflowError: ...", "aws transcribe ...: Connection: BlockingIOError:
+...", "ERROR", "error:") and tracebacks (a chained one once). Each is counted under a signature of (source, type),
+both from fixed lists: the source is a sizeup module or a known log prefix (else "hub"), the type a known exception
+name (else "error"), so nothing a request or a message carries can be named in a notice. One signature more than 10
+times in 5 min, or more than 100 error lines of any kind in 5 min, pushes one short notice to the status topic, e.g.
+"Hub errors: aircraft OverflowError ×1,480 in 25 min · since 16:13": at most one per signature (and for the total) an
 hour, then "Hub errors back to normal" once it has been at or under its threshold 15 minutes. What was pushed is kept
 in `hub.sqlite` (meta "errwatch"), so a redeploy doesn't push a running fault again. Settings → System → **Hub error
-alerts** (admins, the hub): on / off and the two numbers; Settings → Health: **Hub errors**, the rate and the top
-signatures with their last message (admins only). The access log (`http ...` lines) is not counted.
+alerts** (admins, the hub): on / off and the two numbers; Settings → Station → Health: **Hub errors**, the rate and
+the top signatures with their last message (admins only). The access log (`http ...` lines) is not counted.
 
 ### The alert and status topics (ntfy)
 
-Pushes go to **topics of our own** on ntfy.sh, never Tapout's: `pcfd-phone-prealert` pages the fire
-crew's phones and `pcfd-status` is Tapout's own health feed. The config refuses both (and whatever
-`[prealert]` names), and `sizeup/notify.py` refuses them again before any request. The refusal is by
+Pushes go to **topics of our own** on ntfy.sh, never Tapout's: the pre-alert ring topic pages the fire
+crew's phones and the status topic is Tapout's own health feed. The refusal covers a derived **protected set** (the
+`[prealert]` topics, the env topics, the Settings pre-alert topics, plus an admin "Protected" list in Settings > System >
+Push notifications), checked in config, in Settings and by `sizeup/notify.py` before every request against the live set
+(unreadable set: nothing is published). Under the derived set sits a static backstop (`notify.py`
+`PROTECTED_SHA256`, `always_protected()`): the SHA-256 of a few names refused always, whatever was derived (nothing
+yet, Settings unread, a caller that passes no set), in `topic_problem()`, in `publish()` itself, by the Notifier and
+by the replica watch. Only hashes are in the code, never the names; the derived set stays the mechanism. The refusal is by
 exact name: a topic of ours with "status" in it is fine. No topic: no push (banner and log only); that is
 the default.
 
-Two kinds, two topics (`sizeup/notify.py` `route()`):
+Three kinds (`sizeup/notify.py` `route()`):
 
 | Kind | Setting (hub: SSM) | What |
 |---|---|---|
-| alerts | `[alerts] ntfy_topic` / `SIZEUP_ALERT_TOPIC` (`/sizeup-hub/alert-topic`) | Emergency buttons (P25, MDC, FleetSync), the fireground mayday, aircraft emergency squawks; their acknowledgements, all clears and "Ended" notices |
-| status | `[alerts] status_topic` / `SIZEUP_STATUS_TOPIC` (`/sizeup-hub/status-topic`) | Station health (silent, behind, update failed, dongle gone, job / whisper / trunk-recorder down, stuck channel, outbox, disk, whisper queue), "Amazon Transcribe failing", its monthly budget at 80 % / 100 %, the hub's own error spikes (#285), and every recovery notice |
+| alerts | `[alerts] ntfy_topic` / `SIZEUP_ALERT_TOPIC` (`/sizeup-hub/alert-topic`) | Emergency buttons (P25, MDC, FleetSync), the fireground mayday, aircraft emergency squawks; their acknowledgements, all clears and "Ended" notices; the airport pre-alerts (HPN ATC, #233), once each |
+| status | `[alerts] status_topic` / `SIZEUP_STATUS_TOPIC` (`/sizeup-hub/status-topic`) | Station health (silent, behind, update failed, dongle gone, job / whisper / trunk-recorder down, stuck channel, outbox, disk, whisper queue), "Amazon Transcribe failing", its monthly budget at 80 % / 100 %, the hub's own error spikes (#285), the replica and task-failure pushes ([Replica checks](#replica-checks)), and every recovery notice |
+| intel | `[alerts] intel_topic` / `SIZEUP_INTEL_TOPIC` (no SSM parameter yet; set it in Settings) | [Radio pre-alerts](#radio-pre-alerts-intel) (`sizeup/intel`, #486): what police / fire chatter reported and where. No topic of its own: they go where the alerts go |
 
-Only one of the two set: both kinds go to it. The app logs at startup where each kind goes
+Only one of alerts / status set: both kinds go to it; intel follows the alerts unless it has its own. The app logs at startup where each kind goes
 ("notify: alerts → topic set (SSM), status → topic set (SSM)"), never the names.
 
-**Settings > System > Push notifications** (admins only) changes either topic, and the ntfy server, without a
+**Settings > System > Push notifications** (admins only) changes each topic, and the ntfy server, without a
 restart: a value set there wins over SSM / the environment, which win over the config file; empty means "use
 that default"; **Turn off** stops that kind's pushes. Each kind shows the topic in effect, where it came from
 (Settings, SSM, config file, shared with the other kind, off), and its last push and result. **Send test push**
@@ -348,8 +525,8 @@ keeps it), `/api/station/status` and the logs never carry a name. `GET /api/cad/
    and the same for `/sizeup-hub/status-topic`, then, and only then (a task whose secret is missing doesn't
    start), the hub container's `secrets` in `deploy/aws/taskdef.json` (and `sizeup-aws/7-deploy-pr.sh`'s copy)
    name both:
-   `{"name":"SIZEUP_ALERT_TOPIC","valueFrom":"arn:aws:ssm:us-east-1:504804195561:parameter/sizeup-hub/alert-topic"}`,
-   `{"name":"SIZEUP_STATUS_TOPIC","valueFrom":"arn:aws:ssm:us-east-1:504804195561:parameter/sizeup-hub/status-topic"}`.
+   `{"name":"SIZEUP_ALERT_TOPIC","valueFrom":"arn:aws:ssm:us-east-1:<account>:parameter/sizeup-hub/alert-topic"}`,
+   `{"name":"SIZEUP_STATUS_TOPIC","valueFrom":"arn:aws:ssm:us-east-1:<account>:parameter/sizeup-hub/status-topic"}`.
    Elsewhere: `SIZEUP_ALERT_TOPIC=...` / `SIZEUP_STATUS_TOPIC=...` or `[alerts] ntfy_topic` / `status_topic`
    in the config. The health panel says "Push on" once the hub has a topic for status.
 
@@ -369,12 +546,23 @@ repeat_min = 15                    # at most one push per alert this often (plus
 `sizeup/notify.py` is the one place sizeup publishes anything: `publish()` / `Notifier.send()` with a title,
 a body, a priority, tags, a click URL and a `who` (units with their names, the talker, the channel, the
 incident number and address, the station, the dongle, a detail), rendered after the title the same way for
-every caller ("MAYDAY · E64 P1 (Engine 64) on FG1 · 26-000015 100 S Ridge St"). The mayday alarm (#128)
+every caller ("MAYDAY · E64 P1 (Engine 64) on FG1 · 26-000015 1 Main Street"). The mayday alarm (#128)
 uses it too.
 
 ### A deploy that checks itself
 
-After the hub is deployed, `.github/workflows/deploy.yml` waits up to 15 min for the station to report the
+`.github/workflows/deploy.yml` runs after the `test` workflow passes on main (or by hand), one deploy at a time:
+
+| Step | What | Fails when |
+|---|---|---|
+| 1. SSM guard (#469) | `tools/taskdef_params.py` lists every SSM parameter `deploy/aws/taskdef.json` names (each a full ARN in the deploy's region and account); `aws ssm describe-parameters` must find them all. Names only, never a value (`ssm:DescribeParameters`: sizeup-aws `23-deploy-ssm-describe.sh`) | one is missing ("Missing SSM parameter"), or AWS couldn't be asked ("Could not check SSM"): nothing is built or deployed. A task whose secret is missing never starts |
+| 2. Build and roll | the arm64 image to ECR with `SIZEUP_BUILD` = the full sha, both containers rendered, the service updated, waiting for stability | ECS's circuit breaker rolls back |
+| 3. Replicas | `tools/deploy_check.py replicas --build <sha> --timeout 600` ([Replica checks](#replica-checks)) | a replica is corrupt or not verifiable, or nothing was verified in 10 min |
+| 4. Station | `tools/deploy_check.py --url <hub> --build <sha> --timeout 900` (below) | the station's update failed, was rolled back or is paused; the token is refused; 15 min pass |
+
+Tests: `tests/test_deploy_ssm_guard.py`, `tests/test_deploy_check.py`.
+
+**The station step.** After the hub is deployed, the workflow waits up to 15 min for the station to report the
 new build (`tools/deploy_check.py`, polling `GET /api/station/status` every 15 s) and prints the station's
 update log line ("update abc1234 -> def5678: ok in 74 s (built 40 s, waited 0 s for a quiet moment, web back
 6 s after the switch)"). A docs-only deploy counts as soon as the station records it as "no runtime change".
@@ -445,7 +633,8 @@ tones in front and reads it twice with the time out once, exactly as with Kokoro
 * **Voices** (US English, Settings → Dispatch → Voice lists them, men first): Matthew (generative,
   neural, standard), Stephen (generative, neural), Gregory (neural), Joey (neural, standard); also
   Joanna, Ruth, Danielle. A voice is tried on its best engine first; if Polly answers that the
-  engine (or the SSML) isn't supported for it — `EngineNotSupportedException` / `ValidationException`
+  engine (or the SSML) isn't supported for it — `EngineNotSupportedException` / `ValidationException` /
+  `InvalidSsmlException`
   — the next one is used, logged once and remembered (`GET /api/cad/tts/voices` → `polly_engine`).
   Which voices have the generative engine in us-east-1 is Amazon's list and changes; the fallback
   covers an entry here that is off.
@@ -464,7 +653,9 @@ tones in front and reads it twice with the time out once, exactly as with Kokoro
   structure fire. Time out 14:32." through the same path (`POST /api/cad/settings/dispatch
   {action: "voice_preview"}`).
 * Stations and all-in-one keep Kokoro (`tts_engine = "kokoro"`); `polly` works there too with AWS
-  credentials in the environment, falling back to macOS `say` like Kokoro does.
+  credentials in the environment, falling back to macOS `say` like Kokoro does. All-in-one also needs
+  `SIZEUP_ALLOW_OUTBOUND=1` for Polly, Transcribe, S3 and pushes (`sizeup/outbound.py`: outbound is off for any
+  `python -m sizeup` that is neither the hub under its supervisor nor a station).
 * **After the answer (#426):** a dispatch, add-on or upgrade is logged and answered at once (a few ms; it
   used to wait 2-3 s for Polly). Its row starts `audio: "pending"`; one worker (`sizeup/cad/voicequeue.py`,
   at most 32 waiting) renders the voices in the order sent, hands each to the transmitter, then writes the
@@ -506,8 +697,8 @@ Access sends every request it lets through to the origin with a signed JWT
   cards, radio IDs, Settings edits and their audit) records the signed-in person, whatever the page
   sent (`CadApi.post`). The name comes from **Settings → Users**, where an operator can have a
   sign-in email and a callsign; someone signing in for the first time is added under their email,
-  "not named yet", for an admin to name. Recorded as `Corey <corey@example.org>` (just the email
-  until named): the chronology shows "Corey" with the email as its tooltip, the audit log and CSV
+  "not named yet", for an admin to name. Recorded as `Alex <alex@example.org>` (just the email
+  until named): the chronology shows "Alex" with the email as its tooltip, the audit log and CSV
   exports the whole thing.
 * **shows it**: `GET /api/cad/whoami` → `{email, name, callsign, source: "access" | "none", role,
   enforced}` (with Access also `active`, `may`, `bootstrap`, `admins`); the CAD's Operator field then
@@ -516,11 +707,16 @@ Access sends every request it lets through to the origin with a signed JWT
 Without both keys (all-in-one, the station, local dev, a hub not set up yet) nothing changes: the
 Operator field is typed or picked, as before. The hub logs which it is at startup.
 
+**The AUD tag:** Cloudflare dashboard → Zero Trust → Access controls → Applications → **sizeup** →
+Overview → *Application Audience (AUD) Tag* (64 hex digits). Use the `sizeup` application's (the
+hostname's), not the `api/station` service-token application's. Not a secret: it goes in
+`deploy/hub/config.hub.toml` (`access_aud`) or `SIZEUP_ACCESS_AUD`.
+
 ### Roles: who may change what
 
 > "admins should be able to set users, dispatchers should not, but first login should be able to set
-> whatever i guess... now that i added julian and myself, myself as an admin i should only be able to
-> be the one to make changes?" (user, 2026-10-08)
+> whatever i guess... [once there is an admin] i should only be able to be the one to make changes?"
+> (user, 2026-10-08)
 
 Each user in **Settings → Users** has a role. On the hub with Access on, it is **enforced** for the
 signed-in person (their row, by email), server-side, on every POST (`sizeup/cad/api.py` `WRITES`,
@@ -549,7 +745,7 @@ someone else an admin first.
 
 The console shows it (`cad.js` `applyRoles`): for a dispatcher Settings is read-only (every control
 off but the section tabs, filters, records and export) under "Settings are read-only for dispatchers
-— ask an admin (Corey)"; for a viewer or a deactivated user every action on the dispatch screen is
+— ask an admin (Alex)"; for a viewer or a deactivated user every action on the dispatch screen is
 off too, under a banner. Without Access (all-in-one, the station, a hub without the keys) the role is
 recorded, not enforced: a typed or picked name is no proof of who is at the console.
 
@@ -564,8 +760,9 @@ route, the incident number when there is one, the visitor's address (`Cf-Connect
 | Kind | When | Summary, e.g. |
 |---|---|---|
 | `signin` | once per Access login (the token's `jti` / `nonce` / `iat`), not per request | Signed in |
-| `action` | every write that went through (`CadApi.post`, and the monitor's own POSTs) | Created 26-000015 STRU/RESD at 209 Westchester Ave · Dispatched 26-000014: E60, L31 · Set E60 to OS (pump) · Changed settings: users/Julian role · Talkgroup 307: record on |
+| `action` | every write that went through (`CadApi.post`, and the monitor's own POSTs) | Created 26-000015 STRU/RESD at 1 Main Street · Dispatched 26-000014: E60, L31 · Set E60 to OS (pump) · Changed settings: users/Sam role · Talkgroup 307: record on |
 | `refused` | every 403 from the roles above, and the last-admin 409 | Refused: settings/users (needs admin; dispatcher) |
+| `search` | a Search page query or its CSV (#403), the pre-plan CSV | the filters and the count |
 
 Summaries name what changed, never whole bodies or setting values (those stay in the settings
 audit); previews and recommendations change nothing and aren't logged. Each row is also one line in
@@ -579,11 +776,6 @@ without Access record nothing here: the chronology and the settings audit are un
 it; anyone else reads only their own (`403` for someone else's, and for the CSV). **Settings → Users**
 shows "last seen 3 min ago · 203.0.113.9" on each row and an **Activity** list (a kind filter, *All
 users* and CSV for admins; *My activity* for everyone else).
-
-**The AUD tag:** Cloudflare dashboard → Zero Trust → Access controls → Applications → **sizeup** →
-Overview → *Application Audience (AUD) Tag* (64 hex digits). Use the `sizeup` application's (the
-hostname's), not the `api/station` service-token application's. Not a secret: it goes in
-`deploy/hub/config.hub.toml` (`access_aud`) or `SIZEUP_ACCESS_AUD`.
 
 ## Config
 
@@ -608,7 +800,7 @@ role = "hub"
 public_url = ""          # or SIZEUP_PUBLIC_URL
 offline_after_s = 15
 audio_max_mb = 500
-access_team = "yoda.cloudflareaccess.com"   # or SIZEUP_ACCESS_TEAM
+access_team = "<team>.cloudflareaccess.com"   # or SIZEUP_ACCESS_TEAM
 access_aud = ""          # the sizeup Access app's AUD tag (or SIZEUP_ACCESS_AUD); empty = identity off
 
 [cad]
@@ -618,8 +810,10 @@ db = "cad.sqlite"        # under SIZEUP_STATE_DIR (/data in the image)
 Environment overrides (any role): `SIZEUP_HOST`, `SIZEUP_PORT`, `SIZEUP_STATE_DIR` (where relative
 storage paths go: `cad.db`, `storage.clips_dir`, `cloud.outbox`), `SIZEUP_STATION_TOKEN`,
 `SIZEUP_PUBLIC_URL`, `SIZEUP_HUB_URL`, `SIZEUP_ACCESS_CLIENT_ID` / `_SECRET`, `SIZEUP_ACCESS_TEAM` /
-`SIZEUP_ACCESS_AUD`. `[cloud]` values are
-only read with a `[cloud]` section: all-in-one ignores them.
+`SIZEUP_ACCESS_AUD`, `SIZEUP_STATUS_TOKEN`. `[cloud]` values are
+only read with a `[cloud]` section: all-in-one ignores them. Everything the hub's task sets:
+[the hub container's environment](#the-hub-containers-environment). The shipped `deploy/hub/config.hub.toml` carries
+the real `access_team` and `access_aud` (neither is a secret); the block above is the shape.
 
 Run a hub on any machine without radios:
 
@@ -664,12 +858,31 @@ applied at once, AWS only if that machine has `[stt] aws` and credentials.
 **An AWS channel uses whisper whenever AWS can't take audio**: the hub without `[stt] aws`, no
 credentials, or **the monthly limit** (`aws_monthly_limit_usd`, default $25, editable under Vocabulary)
 reached: the station is told (`aws.ok = false`) and runs whisper; the row says "AWS off: local (why)".
-The cost line: *AWS this month: 214 min ≈ $5.14 of $25 limit* (billed seconds per month in the CAD
-database, `meta` `aws_usage:YYYY-MM`; a new month starts at zero).
+The cost line: *AWS this month: 214 min ≈ $2.14 of $25 limit · PD 90 min ≈ $0.90 of $15* (billed seconds per month
+in the CAD database, `meta` `aws_usage:YYYY-MM` with each channel's share; a new month starts at zero).
+
+**Police on another P25 system** (radio-intel PR 3): PD dispatch on MTA MRRS (`p25:mrrs:9211`) defaults to AWS
+(`[stt] aws_channels`; Settings > Radios switches it to Local or Both like any channel). It has **its own monthly
+budget**, `aws_context_budget_usd` (default $15, Settings > Radios > Vocabulary "PD $"), counted apart
+(`meta` `aws_usage_context:YYYY-MM`): police never spends the fire limit or its reserve, and the fire limit running out
+never stops police. Past its own limit the hub tells the station (`aws.deny`), which runs whisper on it (never
+silence), and Settings > Station > Health shows a hint. On whisper for that reason its clips queue in their own class
+(`CONTEXT_FALLBACK`: above the other context clips, still below every fire class and re-runs) and wait 30 min, not 10,
+before they are shed; a shed while its budget is used up is a warning hint. Size the budget from real volumes with
+`tools/stt_cost.py` on a local restore. Each source's profile (`data/stt/profiles.json`) gives whisper a short
+police prompt (phrasing, the headquarters' callsigns from `data/pd_units.json`, the towns and their busiest streets;
+never a talker's name) and AWS its own vocabulary **`sizeup-pd`** (`stt_vocab.police_phrases()`: the headquarters'
+callsigns, 10-codes, police phrasing, the towns, every street of Port Chester, Rye and Rye Brook as said, their public
+landmarks; from the gazetteer at runtime), pushed with the PCFD one (Push to AWS; the task role's `sizeup-*`
+vocabulary permission covers it). The fire vocabulary and its respelling are never used on a police source, nor
+sizeup-pd's on ours: a police "266" never becomes a fire callsign. Context clips the station's whisper sheds
+(`stt_shed_context`, #300) are counted and shown as a Health hint, so lost recall never looks like quiet.
+`tools/stt_cost.py` gives minutes a day and the AWS and S3 cost per source (aggregates only).
 
 **How the hub streams** (`sizeup/transcribe.py`, stdlib: RFC 6455 WebSocket, AWS event-stream framing
-with CRC32, SigV4 query signing in `sizeup/aws.py`): Transcribe bills $0.024 a minute with **15 s
-minimum per stream**, so there is **one long-lived stream per channel** (`wss://transcribestreaming.
+with CRC32, SigV4 query signing in `sizeup/aws.py`): Transcribe streaming bills **$0.01 a minute in us-east-1,
+per second with no minimum** (#423; it was $0.024 with a 15 s minimum per stream when this was built), and there is
+**one long-lived stream per channel** (`wss://transcribestreaming.
 <region>.amazonaws.com:8443/stream-transcription-websocket`, en-US, PCM, 8 kHz = the clips the hub
 gets, `vocabulary-name` once the vocabulary is ready). Transmissions are fed back to back (100 ms
 chunks at 2× real time, `aws_pace`) with 0.3 s of silence between them; each one's place in the
@@ -690,6 +903,42 @@ for AWS's text before its dispatch is parsed. AWS failing: the hub asks the stat
 (`retranscribe`: the station keeps every clip's whisper input); the station unreachable too: the row
 says "Transcription failed" with the reason in its model. "Both": AWS failing leaves whisper's text.
 After a hub redeploy what was still waiting for AWS goes to it again (or to the station).
+
+**Catch-up** (`sizeup/sttcatchup.py`). A context clip that whisper shed while it was busy ("Skipped:
+busy") is run again later. The hub does this (all-in-one: the app itself), on its own thread, a few
+clips at a time. Nothing is read or written for 5 min after the start.
+
+- **Which clips.** The alert tier first, then the newest. Clips older than the max age (6 h by default)
+  stay skipped. Rows that can't go now (given up, not transcribed, too long) are sorted out before the
+  limit, so the clips behind them get their turn.
+- **Fire first.** Nothing is caught up, on whisper or on AWS, while an emergency event is pending or
+  active (or a page was queued in the last 30 min), an alarm is unacknowledged (either one created or
+  updated in the last 12 h, so a forgotten one never starves it), an emergency window is
+  open, a carrier is open or someone is talking. After that, whisper is used only once the station
+  reports no fire, airband, live or alert clip waiting and at most 5 clips in its queue.
+- **On the station** a catch-up clip sits under every other class (`stt.CATCHUP`). It starts only after
+  90 s with no clip of ours heard (a clip that went to AWS counts, and so does the start of the
+  process). It gets one greedy pass, one try, a 20 s timeout and no backoff, and clips over 30 s are
+  refused. A fire clip never waits behind a queued catch-up clip; at most it waits for the one pass
+  already running.
+- **Engine and budget.** A police channel set to AWS goes to AWS on its own budget, up to 80 % of its
+  month, never our budget or its reserve. Everything else goes to the station's whisper (`catch_up`).
+  A catch-up clip failing on AWS never counts toward the breaker.
+- **Quiet.** It uses the re-run path, so the text, model, history and change log behave like any
+  re-run and the result reads `changed; catch-up`. But the words may be hours old, so nothing that
+  alerts hears them: no alarm, ATC or airport pre-alert, status hint, possible incoming or dispatch step
+  (`App._retext(quiet=True)`, `Comms.retext(notify=False)`, `catchup` on the station's `retext` event).
+  The ATC watch also ignores any transcript of a transmission that ended more than 15 min ago.
+- **Tries.** A failed try is written on the row (`failed: why; catch-up try N`), so the count survives
+  a restart and a handover. It is tried again after 15 min, at most twice. A station call that itself
+  failed counts for nothing; a station that refuses the call (an older build) isn't asked again for
+  10 min.
+- **People and updates.** Re-transcribe on a clip the catch-up holds promotes it to a normal re-run.
+  Catch-up work never counts as "busy" for a station update, and the station takes none while an update
+  is waiting.
+- Settings → Radios → Speech-to-text: on/off and the max age. Settings → Station → Health → Speech-to-text
+  queue: waiting, caught up in the last 24 h, given up, and why it is paused (also the perf gauges
+  `stt_catchup_waiting` and `stt_caught_up_24h`).
 
 **Vocabulary** (Settings → Radios → Vocabulary; `sizeup-pcfd`): the phrases AWS should expect —
 seeded from the boards' spoken unit names (Engine 60, Ladder 31, Tower Ladder 2, Rescue 40, 23 98 …),
@@ -726,20 +975,26 @@ line rings it posts to ntfy.sh; sizeup reads that feed (`sizeup/prealert.py`, `[
 config) and shows each ring as a **pre-alert**: a possible incoming call, often before 60 Control
 pages it.
 
-**Read only.** `pcfd-phone-prealert` is the fire crew's real alert channel: sizeup only subscribes
+**Read only.** The ring topic is the fire crew's real alert channel (its name lives in Settings, not in the repo): sizeup only subscribes
 (every request is a `GET`, checked by `tests/test_prealert.py`) and never publishes to it or to any
 ntfy topic. Don't post to it by hand "to test" either: it pages the crew. Tests use a local fake
 ntfy server only.
 
+**Topics live in the database, not the repo.** Admins set them in Settings > System > Push notifications:
+"Pre-alert ring topic" (`prealert_ring`), "Pre-alert status topic" (`prealert_status`) and "Protected" (extra
+topics never published to). Precedence: env `SIZEUP_PREALERT_RING_TOPIC` / `SIZEUP_PREALERT_STATUS_TOPIC`, then
+Settings, then `[prealert]` in the config; a change applies within ~2 s, no restart. Unset: the feed is off (no
+request, no retry), the 60 Control header says "Tapout: not configured" and Health > Feeds shows the same.
+
 | topic | Tapout sends | sizeup does |
 |---|---|---|
-| `ring_topic` (`pcfd-phone-prealert`) | title `STATION PHONE RINGING`, max priority, message `Incoming call on the station line at 2026-10-08 14:03:21 EDT.` (late: `Phone rang ~45s ago at ... (alert delayed by network).`); a commissioning test is `[TEST] STATION PHONE RINGING` | a pre-alert {at, source "Tapout HQ phone", message, ntfy id}; a test is shown as "Test ring" and never matched |
-| `status_topic` (`pcfd-status`) | `Tapout heartbeat` hourly (`... hourly check-in, seq 12 ...`), `Tapout restarted` at boot, warnings (`Detector line STUCK active`, `ALERT DELIVERY FAILED`, `Low memory`), OTA lifecycle | Tapout's health: "Tapout: ok, heartbeat 12 min ago"; over `heartbeat_stale_min` (90) "no heartbeat for 2 h" in warning; never heard: "no heartbeat yet" |
+| `ring_topic` | title `STATION PHONE RINGING`, max priority, message `Incoming call on the station line at 2026-10-08 14:03:21 EDT.` (late: `Phone rang ~45s ago at ... (alert delayed by network).`); a commissioning test is `[TEST] STATION PHONE RINGING` | a pre-alert {at, source "Tapout HQ phone", message, ntfy id}; a test is shown as "Test ring" and never matched |
+| `status_topic` | `Tapout heartbeat` hourly (`... hourly check-in, seq 12 ...`), `Tapout restarted` at boot, warnings (`Detector line STUCK active`, `ALERT DELIVERY FAILED`, `Low memory`), OTA lifecycle | Tapout's health: "Tapout: ok, heartbeat 12 min ago"; over `heartbeat_stale_min` (90) "no heartbeat for 2 h" in warning; never heard: "no heartbeat yet" |
 
-**Where it runs:** the CAD of record only: the **hub**, or all-in-one. While a station forwards to
-a hub it doesn't subscribe (logged): the hub does on its own, so it works whether or not the station
-is connected, and nobody gets two alerts. Switching forwarding (Settings > System > Station, or the station page's Settings) starts
-or stops it at once (`App.prealert_sync`; a restart resumes after the last message).
+**Where it runs:** the CAD of record only: the **hub**, or all-in-one. While a station forwards to a hub it doesn't
+subscribe (logged): the hub does on its own, so it works whether or not the station is connected, and nobody gets two
+alerts. Switching forwarding (Settings > Station > Hub link, or the station page's Settings) starts or stops it at
+once (`App.prealert_sync`; a restart resumes after the last message).
 
 **The stream:** one thread per topic on `GET <server>/<topic>/json` (ntfy's line-per-event JSON:
 `open`, `keepalive` about every 45 s, `message`). A dropped stream reconnects with backoff (1 s
@@ -773,8 +1028,8 @@ its outcome, when, the seconds from ring to outcome and the event number, for re
 [prealert]                       # leave the section out: off
 enabled = true
 server = "https://ntfy.sh"       # SIZEUP_PREALERT_SERVER overrides (a local test server)
-ring_topic = "pcfd-phone-prealert"
-status_topic = "pcfd-status"
+ring_topic = ""                  # set in Settings > System > Push notifications (or env)
+status_topic = ""
 expire_min = 5
 heartbeat_stale_min = 90
 ```
@@ -794,13 +1049,30 @@ Incidents come in from ranked sources. The interface is in `sizeup/sources/__ini
   closure comes from the feed's own in-service or cleared time), gentle (poll every 30 to 60 s; `poll_now` never
   bypasses that), honest (the client's real name as its user agent; no spoofing or anti-detection), and the feed's
   data stays in the department (never in logs beyond receipt, pushes, issues, PRs or CI output).
+- **How often `poll()` is called:** every `poll_s`, never under 30 s. The one exception is an adapter whose `poll()`
+  makes no request at all and only reads a snapshot it keeps in memory (a thread of its own talks to the source at its
+  own pace): the runner reads that one every `poll_s` down to 1 s, so a new event reaches the hub within `poll_s` of
+  the adapter having it. The adapter says so itself (`local_poll = True`; an adapter with `local_poll = False` keeps the
+  floor whatever the station says), or the station's admin does for one without the attribute, with `SIZEUP_INCIDENT_SOURCES_SNAPSHOT="source-id,..."` in `/etc/sizeup/station.env` (off unless set; only
+  for an adapter known to ask nothing in `poll()`). Only the reads get faster: `health()` is asked at the 30 s pace,
+  `poll_now` comes no sooner or oftener, a `poll()` that raises backs off from 30 s, and a read with nothing new sends
+  and logs nothing. Those intervals run on the monotonic clock, so a wall clock stepped back or forward never pauses
+  health reports or triggers; the times sent are the wall clock's. The start-up line in the station's log says the interval really used (`every 30 s (the floor;
+  poll_s 5 s)`, `memory read every 5 s (...)`).
 - **Nothing waits.** A page for us makes its incident at once, whatever the feeds' health. An occasional duplicate
   is acceptable; a delay is not. A feed's new event does the same unless it attaches. An event already closed (or in
   service) when first seen is recorded and never makes an incident. One first seen more than 20 min after its dispatch
   but still open (an outage, a first run) makes its incident, noted "first seen N after its dispatch".
 - **Health:** a feed reports `ok`, `backing_off`, `failing` or `stale`, and a feed with no report for 3 min counts as
   stale (by the hub's clock). Paging is healthy while the station is connected. The first healthy tier is the acting primary. The console
-  pill shows it (`County feed · backing off · Paging primary`), and so does Settings > Health.
+  pill shows it (`County feed · backing off · Paging primary`), and so does Settings > Station > Health. Hysteresis: a feed shown
+  ok goes bad (and the acting primary moves) only once a bad run has lasted 90 s (an `ok` that hasn't held 60 s
+  doesn't end the run), and is ok again only after 60 s of `ok`. Shown at once: `failing` from the adapter itself
+  (it stopped) and no report for 3 min. Once bad has been shown, any bad report after it is shown too: a stopped
+  `failing` followed by `backing_off` stays bad until `ok` has held 60 s. A feed silent since before the hub started is unknown, and its first report
+  is taken as it is. A `poll()` that raises is `backing_off` (the exception's type), `failing` from the third in a
+  row. A station restart's one-cycle "no list yet" never flips it. The pill's hover has what was reported meanwhile
+  and, when the feed isn't plainly ok, the last ok report's age.
 - **Matching:** only an open incident (queued, pending or active) created within 20 min, with nothing on it from the
   same source.
   - Locations are first cut to their street part. A named place after `:` or `@`, `;…`, `(…)`, `[…]`, the town after a
@@ -839,7 +1111,7 @@ Incidents come in from ranked sources. The interface is in `sizeup/sources/__ini
 - **Closure and gone events:** when a feed closes an event, a queued incident that only that event made, and that
   nobody touched, is dismissed. Any other gets a "closed" line. Every 2 min the station sends the ids still in each
   feed's snapshot (`source_seen`); an open report the feed no longer lists gets one "no longer listed" line and is
-  flagged in Settings > Health.
+  flagged in Settings > Station > Health.
 - **Pushes:** an address a feed put on an incident is recorded (`feed_addresses`), and an alarm push names only the
   incident number for it. Logs name our incident id and the source's label only, and exceptions by type.
 - **Merges and extras:**
@@ -848,14 +1120,54 @@ Incidents come in from ranked sources. The interface is in `sizeup/sources/__ini
     and gets a note.
   - An adapter's `extra` fields go on the timeline. The incident shows the jurisdiction, run numbers and each
     group's units.
-- **Poll now and reset:** paging tones of ours, a radio pre-alert or the phone ring wakes each adapter. The adapter's
+- **Poll now and reset:** paging tones of ours, a radio pre-alert or an airport alert wakes each adapter. The phone
+  ring (Tapout) never does: it is not a reason to check the feed early, and the runner refuses it before it counts. The adapter's
   own thread then calls its optional `poll_now(reason)` and polls; `trigger()` never runs adapter code. Triggers stay
   gentle: at most one per max(`poll_s`, 30 s), at most 4 in 10 min, never sooner than 30 s after the last poll, and none
-  while an adapter is failing or its health isn't `ok`. A remote reset
+  while an adapter is failing or its health isn't `ok`. For a memory-read adapter "the last poll" is its last read at
+  the 30 s pace, not every read, and the runner reads it once more 2 s after `poll_now` (memory only). A remote reset
   (#305) is queued in the runner's `Resets` (`sizeup/sources/resets.py`) and runs `reset()` on the adapter's own thread before its next poll.
 - **Station only:** the hub refuses to load or run adapters (`HubRefused`). It only applies the station's forwarded
   events. The hub only ever sees an exception's type, never its text.
-- **Measurement:** each source's first-seen time per incident, and its lead over paging. Settings > Health shows both.
+- **Credentials (#417):** an adapter reads its credentials from systemd's credstore on the station (`sudo
+  sizeup-station adapter setup`). One that changes now and then can instead be a SecureString in the department's SSM,
+  `/sizeup-station/adapter/<NAME>`, under a KMS key of its own (`sizeup/cloud/adapterssm.py`: stdlib, one signed
+  `GetParameter`, the value only in memory). The station reads it with an IAM user of its own, whose access key is
+  itself a credstore credential (`SIZEUP_SSM_KEY_ID`, `SIZEUP_SSM_SECRET`, `SIZEUP_SSM_REGION`). The hub never holds
+  that key, never relays a value, and its roles are denied the prefix and the key. AWS side: sizeup-aws
+  `15-station-adapter.sh` (the key, the user, the parameter, the hub's deny), `16-adapter-password.sh` (change a
+  value), `17-adapter-rotate-key.sh` (rotate the station's access key). How the adapter uses it, and its stop after
+  refused log-ons: [the station's README](../deploy/station/README.md#incident-source-adapter-station-only).
+- **Reset:** an adapter that stopped itself is reset by an admin on Settings > Station > Health (`POST
+  /api/sources/reset`, a `sources_reset` job, at most one per source per 5 min) or on the station (`sudo
+  sizeup-station adapter reset`); it runs on the adapter's own thread before its next poll (`sizeup/cloud/adapters.py`).
+- **The adapter's password, set from the hub (write-only):** Settings > Station > Adapter, admins only
+  (`sizeup/cloud/adapterpass.py`, `POST /api/cad/adapter-password`). A new password typed twice becomes the next
+  version of the station's SSM SecureString (`ssm:PutParameter` with the adapter's own KMS key); the station picks it up
+  as it does any new version (about 5 min). The hub can't read it back: its roles keep an explicit Deny on
+  `GetParameter*`, history, delete and label for `/sizeup-station/*` and on `kms:Decrypt` for the key; it may only
+  `PutParameter` that one parameter, `kms:Encrypt` through SSM for it, and `ssm:DescribeParameters` (metadata: the
+  version and when). It is optional and the task definition doesn't know about it: at first use the hub reads the
+  parameter's name and the key from two plain String parameters of its own, `/sizeup-hub/adapter-password-param` and
+  `/sizeup-hub/adapter-password-key` (names only, `ssm:GetParameter` on exactly those two), cached 10 min; absent or
+  unreadable, the card says "Not configured", a save is refused, and it is asked again at most every 3 min. The real
+  names never appear in the repo. Each save is one log-on attempt on the shared county account, so: at most one save per 5 min (after
+  the last save here or the last change in SSM), and while a source is stopped on refused log-ons ("login ...") only
+  with an explicit confirm. Each save is in the settings audit (who, when, the version) and the person's activity;
+  a save AWS didn't answer is audited as "no answer" and counts. The value is never logged, audited, answered or put
+  in an exception's text (AWS's own error message isn't kept, only its code). A value about to be sent (the gap and the
+  confirm passed; 6 characters or more) is registered with the log scrub (`logscrub.secret`, in memory only), so a log line holding it is
+  dropped from the station's shipped logs and the Logs view. The hub never logs into the county app.
+  The department's CLI script still works the same; the card then shows the version as "not from the hub".
+  No save while SSM can't say the version (DescribeParameters failing, other than "not there yet"): without its
+  last-modified time the gap would count only the hub's own saves. Resets: the station tells the adapter where a
+  reset came from (`reset(origin="hub" | "local")`, through `Resets`); the county adapter keeps the refused SSM versions on
+  a reset from the hub, so 3 refused in 24 h stay MANUAL until a reset AT THE STATION, and a hub reset never resends
+  a password already refused (it keeps a "login" stop until SSM has a new version). While its Health says
+  "refused versions 24 h: N", the hub's Reset asks for an explicit confirm (409 without `confirm_refused`).
+- **Measurement:** each source's first-seen time per incident, and its lead over paging. Settings > Station > Health
+  shows both. A feed's first-seen time is the adapter's own (`FeedEvent.first_seen`, the station's clock) when it gives
+  a believable one (not later than the hand-off, at most 15 min before it), else when the runner got the event.
 - **Pre-alerts never make an incident.** These include a dispatcher on the feed's talkgroups opening a call to us,
   "incoming additional alarm" or "stand by for a page" naming us, and the phone ring. They show as "Possible incoming"
   at the top of the 60 Control column.
@@ -896,11 +1208,19 @@ Incidents come in from ranked sources. The interface is in `sizeup/sources/__ini
 - **Units added later (#370):** when an incident gains units (the feed lists them, the radio or a person puts them on),
   the radio log is matched again for those units from its dispatch (the feed's dispatched time, else the page's, else
   when it was made) less a minute, on a worker. Every guard holds; nothing is linked twice.
-- **Full department or specific units (#370, `sizeup/cad/scope.py`):** the page sets it first (its departments' tones
-  and a call type: "Full department (<dept>)"; apparatus named: "Specific units"). The page is the dispatch: its
-  reading stands on every path, and the latest page wins (an upgrade to the full department widens the radio log's
-  backfill to every unit from the call's dispatch). The feed's unit list is the label only when no page was heard; a
-  disagreement is one timeline line ("Page: all PCFD · feed: units"). A feed's department entries are configured on the hub
+- **Full department or specific units (#370, `sizeup/cad/scope.py`):** the page sets it first. Apparatus named:
+  "Specific units". None named: "Full department (<dept>)" for each department whose tones were heard, when the page
+  gives a call type or says "full department" (as speech-to-text hears it too: "full of pots"), or, with neither, when
+  the tones are a department's own all-call and the words hold a place and nothing of a test, meeting or advisory. The
+  page is the dispatch: its reading stands on every path, and the latest page wins (an upgrade to the full department
+  widens the radio log's backfill to every unit from the call's dispatch). The feed's reading is the label only when
+  the page gave none: a department entry on its unit list, a department's placeholder with no apparatus listed, or a
+  comment that is a line of the dispatch and says so ("full department", "all companies"). Apparatus the page named is
+  never overridden; a disagreement is one timeline line ("Page: all PCFD · feed: units").
+- **Call type from the other source.** A feed incident with no type of ours, whose type field gives none, takes one from
+  a comment that is a type line (marked `~` or the first comment, at most 5 words, none that takes it back such as
+  "not", "cancel", "hold"; `sources.dispatch_lines`), never over a type already set; failing that, the page's type
+  fills in until the feed says one (`Cad._page_enrich`). The feed's own type field still wins. A feed's department entries are configured on the hub
   (`POST /api/cad/settings/department_units {action: set, key: <code>, value: <department>}`, admins; never in the
   repo). They are never a unit: never dispatched (the timeline says "<dept> paged"; our department's accepts the call)
   and never a unit in common between two reports.
@@ -1106,7 +1426,8 @@ through the proxy (a client polling each chunklist every 6 s and fetching each n
 hls.js): 13 segments, 1.15 MB served, 18.7 KB/s; the hub process used 2.7 s of CPU over the 95 s run
 including its feed refreshes and health sweep, about 3% of one core; memory steady around 300 MB
 RSS. Each stream is at most ~26 KB/s (205 kbit/s) each way, so the 4-stream cap is ~105 KB/s out
-and in, well within a 0.25 vCPU Fargate task; the pass-through does no decoding. One stream origin
+and in, well within a 0.25 vCPU Fargate task (the hub's size then; it is 0.5 vCPU now); the pass-through does no
+decoding. One stream origin
 answered 502 at open during the run: that is the fallback path (snapshots) working.
 
 ### Camera DVR (#277)
@@ -1243,20 +1564,19 @@ screen stops its stream at the hub too (`stream/close`), and the whole wall stop
 or the Overview isn't shown (an incident open). At most `streams.per_viewer` live tiles per page: `[roads]
 wall_streams`, or 0 (the default) for every streaming camera in the area (3 today).
 
-**Measured** 2026-10-14 on a Mac (M5 Pro), the hub's `Roads` with the real Thruway origins, a simulated
-player per stream polling its chunklist every 2 s and fetching each new segment, for 60 s
-(`/tmp`-only script, not in the repo): the area's **3 streams**: 0.31 s of CPU (0.5 % of a core; 0.17 % per
-stream for the relay alone), 64 KB/s in from the origins (21 KB/s per stream, the first minute's
-prefetch included), 56 KB/s out to one page; **every streaming Thruway camera in our bbox** (15 listed, 11
-answering; 4 dead at the source got 503 and held no slot): 3.2 % of a core, 608 KB/s in during the first
-minute (the pump's start-up prefetch; ~26 KB/s per stream steady), 308 KB/s out. The earlier #101 figure,
-a whole hub process with its feeds, sweep and HTTP serving, was ~1.4 % of a core per stream; on the hub's
-0.25 vCPU Fargate task that makes 16 streams ~90 % of the task, which is too much, so the cap is **8**
-(~45 % of the task at worst; the area's 3 streams are ~17 %, about 80 KB/s in and 80 KB/s out per page
-watching). Several pages watching the same cameras (the console and the wall board) share the streams: one
-origin session each, the output scales with the pages (~26 KB/s per stream per page).
+**Measured** 2026-10-14 on a Mac (M5 Pro), the hub's `Roads` with the real Thruway origins, a simulated player per
+stream polling its chunklist every 2 s and fetching each new segment, for 60 s (`/tmp`-only script, not in the repo):
+the area's **3 streams**: 0.31 s of CPU (0.5 % of a core; 0.17 % per stream for the relay alone), 64 KB/s in from the
+origins (21 KB/s per stream, the first minute's prefetch included), 56 KB/s out to one page; **every streaming Thruway
+camera in our bbox** (15 listed, 11 answering; 4 dead at the source got 503 and held no slot): 3.2 % of a core, 608
+KB/s in during the first minute (the pump's start-up prefetch; ~26 KB/s per stream steady), 308 KB/s out. The earlier
+#101 figure, a whole hub process with its feeds, sweep and HTTP serving, was ~1.4 % of a core per stream; on the hub's
+0.25 vCPU Fargate task of that time (0.5 vCPU now) that makes 16 streams ~90 % of the task, which is too much, so the
+cap is **8** (~45 % of the task at worst; the area's 3 streams are ~17 %, about 80 KB/s in and 80 KB/s out per page
+watching). Several pages watching the same cameras (the console and the wall board) share the streams: one origin
+session each, the output scales with the pages (~26 KB/s per stream per page).
 
-### How it works
+### How the highway layers work
 
 Each provider fetches its feeds on its own schedule and keeps only our area (`[roads] bbox`: Port
 Chester, Rye Brook and the mutual-aid neighbours with a margin, Greenwich included); one disk cache
@@ -1452,6 +1772,7 @@ PCFD run card, never picked by kind), so a P25 talker alias "AP7" or "Airport 7"
 talkgroup resolves to the unit and the boards say "Airport 7" is talking. Their P25 radio IDs are not known:
 nothing is guessed; a radio heard with such an alias gets a "heard" row in the registry, mapped when a person
 confirms it.
+
 ## County GIS layers (Westchester County GIS)
 
 > "add Westchester County GIS open-data datasets as map layers ... there are a lot of data points,
@@ -1729,7 +2050,7 @@ Decoded 2026-10-14 (the fixtures in `tests/fixtures/mta/`, and 40 minutes of liv
   south), so each train is drawn on its direction's track at its distance along the line (`s`), never two
   directions on one centre line. A train is drawn once (a reported one over an estimate of it).
 
-### How it works
+### How the trains layer works
 
 `sizeup/trains.py` (`Trains`), on the hub (or all-in-one; never a station):
 
@@ -1760,7 +2081,7 @@ needed now"*):
 1. Register at <https://api.mta.info/> and copy the key.
 2. Into SSM: `aws ssm put-parameter --name /sizeup-hub/mta-key --type SecureString --value '<the key>'`.
 3. Add it to the hub's task definition secrets (`deploy/aws/taskdef.json`):
-   `{"name":"SIZEUP_MTA_KEY","valueFrom":"arn:aws:ssm:us-east-1:504804195561:parameter/sizeup-hub/mta-key"}`,
+   `{"name":"SIZEUP_MTA_KEY","valueFrom":"arn:aws:ssm:us-east-1:<account>:parameter/sizeup-hub/mta-key"}`,
    and redeploy. It is sent as the `x-api-key` header.
 
 ```toml
@@ -1873,7 +2194,7 @@ optional value is ignored. An answer that isn't a list of records, or in which m
 fail, is a **change of shape** and counts as a bad poll, like an HTTP error or a timeout. The last good read
 stays merged for up to 90 s; after **3 bad polls in a row** (`FALLBACK_AFTER`) the layer is GTFS-realtime
 alone, exactly as before #362, until a poll reads again. Settings > Data sources (*Metro-North GPS, cars,
-load (MTA TrainTime)*: the reason as its error) and Settings > Health (*Map feeds*: ok / fallback and why)
+load (MTA TrainTime)*: the reason as its error) and Settings > Station > Health (*Feeds*: ok / fallback and why)
 show it. A failure backs off (20 s doubling to 10 min; a 429 5 min; 401 / 403 30 min).
 
 ```toml
@@ -2019,8 +2340,10 @@ shows the expected storage, from the last 7 days of audio per tier.
 
 **It never costs our own audio anything**
 - Hub: a tier only keeps a clip past the usual hours. Context clips have their own budget
-  (`[storage] context_audio_max_mb`, default 100), and over the audio cap every context clip goes before any clip of
-  ours (lowest tier, then oldest, first).
+  (`[storage] context_audio_max_mb`, default 8000), and over the audio cap every context clip goes before any clip of
+  ours (lowest tier, then oldest, first). The budget counts their bytes wherever kept, S3 included, so it is a
+  runaway bound sized for `tier_keep_days`: 30 days of PD alert audio at 1-4 h a day is 1.7-7 GB (about $0.04-0.16
+  a month in S3 Standard). It was 100 MB (about 1.7 h of audio) until radio-intel PR 3.
 - Station outbox: context audio waits in a fifth of the outbox's audio limit and is dropped first, so a hub outage
   never costs a fire clip.
 - Station disk: the janitor cleans each system's capture and temp directories, 200 MB at most per system.
@@ -2062,6 +2385,42 @@ Talkgroup and radio IDs are only unique inside one system, so every source has a
   loads.
 - Another system's radio IDs are never looked up in, or learned into, our radio registry. Its units never link a
   transmission to our incident by the unit, dispatcher or mention rule. A person's own link still does.
+
+### The Radio page's views and its change log (#415, #441, #484)
+
+`sizeup/cad/comms.py` (`Cad.comms_query`, `Cad.comms_sources`), `static/radio-nav.js`, `static/radio-view.js`.
+
+| | |
+|---|---|
+| `GET /api/cad/comms/sources?rev=` | the page's tree: `{live, sources: [{key, system, group, name, service, tier, ours, last, counts, emergency}]}` |
+| `GET /api/cad/comms?view=ours\|police\|ems\|transit\|air\|all` (also `system`, `group`, `source`, `service`, `tier`, `dept`, `safety=1`, `mute`) | one page of one filter: `{rows, older, newer, next, cursor, reload}`. `before=` pages back by a keyset; `changed=<cursor>` returns only what changed since |
+| `GET /api/cad/comms/activity?source=&hours=` | per-minute activity of a source (an encrypted talkgroup's key-ups), a week at most; admins |
+
+- **The change log** is the table `radio_changes` in `cad.sqlite`: one entry per transmission written, re-texted,
+  linked or removed. It is written after the write's transaction has committed, as its own statement
+  (`Store.after_commit`), never as part of it: a change-log failure never fails or delays the write. It waits at most
+  200 ms for the write lock; broken, it is tried again after 60 s and every `changed=` answers `reload` meanwhile.
+- **Bounds:** more than 400 transmissions changed since a cursor, or a cursor older than the 50,000 entries kept:
+  `reload` (the page reads its view again).
+- **Who sees what:** another system's rows only to a viewer who may see them ([Who sees it](#who-sees-it)); each
+  reader's cursor only counts changes that reader may know of.
+- Tests: `tests/test_comms_views.py`, `tests/test_comms_changes.py` (it walks every writer of the radio log and fails
+  for one that leaves no entry), `tests/test_radio_nav.py`.
+
+### Emergencies that aren't ours (#514)
+
+An emergency button on someone else's talkgroup is recorded, kept, alarmed and pushed as before
+(Settings > System > Alarms, `other`: notice, alarm or off). How loud it is **on screen** is a setting: Settings > Radios > Emergencies
+(admins, audited as Radios; section `radio_emergencies`, key `prominent`).
+
+| | |
+|---|---|
+| Prominent services (default) | `fire`, `ems`, `other` (Trunk Ops, Interop, Special Events, OEM: where a mutual-aid firefighter or an unmapped portable of ours could be) |
+| A prominent one | a banner, a highlighted row, the full "Emergency (not ours)" chip, the CAD-wide notice strip and its toast |
+| A quiet one (a known service not listed: police, transit, air) | a muted "EM" chip on its row only: no strip, no toast, no line for its window. Acknowledged and cleared from its row's menu on the Radio page |
+| Never quiet | ours (our fire channels, our rigs, scene safety); a full alarm's window; a window one of our rigs keyed; a row or source whose service isn't known |
+
+Presentation only. Tests: `tests/test_radio_emergency.py`.
 
 ## Aircraft near HPN (shortfinal's picture)
 
@@ -2179,10 +2538,10 @@ restarts it only when its supervisor, readsb or its unit changed. Readsb vs dump
 runs (the lessons came with it), has auto gain and the bias-tee switch built in, the same aircraft.json, and builds
 from one pinned source tree here; dump1090-fa is packaged for FlightAware's own repository.
 
-**Station health** reports it (the hub's Settings > Health, "ADS-B receiver (station)"): the dongle, the decoder's
-state, messages a second, aircraft (with a position), the last message, gain and bias-tee, and how the forwarding
-to the hub is doing. *ADS-B receiver down* is a warning after 2 minutes; a dongle shortfinal holds is shown, not
-alerted (a handover).
+**Station health** reports it (the hub's Settings > Station > Health, "ADS-B receiver (station)"): the dongle, the
+decoder's state, messages a second, aircraft (with a position), the last message, gain and bias-tee, and how the
+forwarding to the hub is doing. *ADS-B receiver down* is a warning after 2 minutes; a dongle shortfinal holds is
+shown, not alerted (a handover).
 
 **Forwarding to the hub** (`sizeup/cloud/aircraftlink.py`, `POST /api/station/aircraft` with the station token;
 `sizeup/aircraft.py` `StationFeed` on the hub). The station reads aircraft.json every second and sends what
@@ -2219,7 +2578,7 @@ point answers carry none, and the adsb.im route lookup stays out (#161: communit
 `json_1090` / `json_978` still read any other decoder's aircraft.json (a path or an http(s) URL), merged by ICAO
 address.
 
-### How it works
+### How the aircraft layer works
 
 `sizeup/aircraft.py` (`AircraftLayer`), on the hub (or all-in-one; never a station):
 
@@ -2244,8 +2603,7 @@ User, 2026-10-14 (#161): *"yes they should"* (raise sizeup's alarm and send a pu
 7700**, or the aircraft's **own emergency status** (minimum fuel, no radio, medical ...), **within 15 nm of HPN
 below 18,000 ft** (or on the ground), from a message no older than 15 s, raises **the emergency alarm**
 (`sizeup/cad/alarms.py`, #128: every console and wall board, the alarm sound, acknowledged by a dispatcher)
-and **its push** to the alerts topic (`[alerts] ntfy_topic`, else `status_topic`) when one is set (never Tapout's `pcfd-phone-prealert` or
-`pcfd-status`: refused in three places; no topic: the alarm only). It works while nobody looks at the map:
+and **its push** to the alerts topic (`[alerts] ntfy_topic`, else `status_topic`) when one is set (never Tapout's pre-alert topics: refused in the protected set, checked in config, Settings and before every send; no topic: the alarm only). It works while nobody looks at the map:
 the emergency watch reads the primary feed every 15 s (`[aircraft] alarms = false` turns it off).
 
 * **One alarm per aircraft per emergency.** Still squawking: the same alarm. Not seen in emergency for a
@@ -2474,6 +2832,219 @@ could delete attachments with the same permission. The app's audit (`attachment_
 CAD store) and S3's own records (CloudTrail data events, if turned on) are what show such a delete. Only the lease holder writes. Without the bucket:
 "Incident attachments not configured", nothing copied, the lists read empty.
 
+## Radio pre-alerts (intel)
+
+`sizeup/intel/` (#411; the INTEL push kind: #486; the core: #492). Rules over radio transcripts raise **pre-alert
+events**: what police or fire chatter said is happening, and where. It runs on the CAD of record (the hub, or
+all-in-one; a station forwarding to a hub queues nothing), on its own `intel` thread, on the leader only. Intel
+never writes incidents, radio links, "possible incoming" or alarms.
+
+**In this tree:** the rule engine, the event store, the place reading (spoken intersections, blocks, relative cues,
+highway exits and markers), the push policy and composer, the Listen link, the inference stage, Settings and the
+console's card. **Not in this tree yet** (planned): a map layer over the events API.
+sizeup-aws `26-intel-bedrock.sh` and `27-listen-links.sh` prepare AWS for inference and Listen; both are run by a
+person ([Listen](#listen-links-and-inference-intel) below).
+
+| Part | File | What |
+|---|---|---|
+| Packs | `data/intel/*.json` (`police.json`: 11 categories, 17 rules; the log-only `county_police.json`, `ems.json`, `fire.json`, below; generic phrases only), Settings laid over them | which sources a pack reads (source keys or globs, services), its categories (label, priority, time to live, mode), phrase rules with weights, "suppress" phrases ("disregard", "training") |
+| Speech-to-text table | `data/intel/tables/stt.json` (`rules.py` `Normalizer`) | for a pack that says `"normalize": "stt"`: sound-alikes with their context ("order of gas" is "odor of gas"), split and merged words, number words as digits. Each reading (as transcribed, and fixed) is judged on its own, so the table only ever adds hits (below). `police.json` has no table and matches as before |
+| Engine | `engine.py` | a row joins its source's window (`window_s`, 120); per category the rules' weights combine (noisy-OR, dampers); at the threshold (0.6) it is an event: the open one of that pack, category and source, or the one at the same place, else a new one |
+| Place | `place.py` | the window's words through the page locator, held to the source's home towns, after callsigns, car numbers, 10-codes, plates and times are taken out. Also "X and Y" / "corner of" through the intersection search, "the 100 block of X", "rear of / across from" (radius widened), highway exits and mile markers (the place search), and a headquarters callsign said alone narrows to its town. Police text confirms at a higher score than a page (`DOMAIN_PARAMS`). An address confirms by its cross street only within `corner_m` (200 m) of where they meet; a number far from the corner is taken as misheard. Precision: address, intersection, block, landmark or street; unconfirmed is never exact |
+| Policy | `policy.py` | whether a change is pushed: the mode ladder, the kill switch, quiet hours, the caps (below) |
+| Push | `push.py` | composed from an allow-list of fields, then scrubbed, failing closed |
+| Listen | `listen.py` | a link in the push to the audio around it ([below](#listen-links-and-inference-intel)) |
+| Inference | `infer.py` | an LLM behind the rules, off by default, capped ([below](#listen-links-and-inference-intel)) |
+| Store | `events.py` | `intel_events` (90 days), `intel_hits` (every hit, 30 days), `intel_feedback` (a year) in `cad.sqlite`: no transcript text, transmissions by id. `intel_infer` (90 days, made on first use by the leader) holds the model's calls |
+| Settings, API, card | `admin.py`, `static/intel.js` | Settings > System > Intel; the 60 Control column's card |
+
+**The log-only packs.** Three more packs read what the hub already transcribes. The pack, every category and every
+rule of each is written at `log`: an event in `intel_events`, its hits in `intel_hits` and a line in the log, and
+never the map's events, the console's card or a push. The engine takes the lowest of the three modes, so no single
+switch turns one on: an admin raises the pack, the category and the rule in Settings > System > Intel. Settings
+saved before they existed name only `police` and its rules, and change nothing here. They never ask the model
+(`"infer": false`).
+
+| Pack | Reads (scope: service and source-key glob, never a talkgroup number) | Raises |
+|---|---|---|
+| `county_police` | the county system's police talkgroups | smoke or fire, the fire department asked for, a fire alarm, gas / wires / CO, a critical patient, EMS asked for with what it is for, a crash with EMS or injuries (rollover, pedestrian struck, entrapment, a vehicle into a building, a pursuit ending in a crash), a person or vehicle in water, an elevator / lock-in / someone trapped, shots or a weapon, a barricade |
+| `ems` | the county system's Fire/EMS talkgroups (EMS is dispatched and worked there) and another system's EMS talkgroups | cardiac arrest / unresponsive / overdose, a serious crash, several patients, the fire department asked for (lift assist, forcible entry, a landing zone), a burn or smoke patient, an exposure / CO with symptoms / electrical contact, water, an elevator or a fall from height, a scene that is not safe |
+| `fire` | every fire source: the county system's Fire/EMS talkgroups and the analog fire channels | a mayday or a firefighter down, evacuate / going defensive, a collapse, people trapped, a working fire, a 2nd alarm or more units, a water supply problem, mutual aid that names Port Chester or Rye Brook |
+
+Each strong phrase family is a rule of its own, at or over the threshold alone. That includes `cpd.ems_request`
+(0.6): on the county police talkgroups "EMS en route" or "ambulance is being sent" is an event by itself, the most
+frequent one there. The weaker ones (a bare "MVA", a bare "fire alarm", a patient's age, extra manpower, a staging
+call) only add up with another rule in the window. Replay them on a restored copy before raising anything
+(`tools/intel_replay.py`; rows stored before the radio log carried a service take it from the talkgroups files, so a
+replay over the history is scoped as live rows are). Tests: `tests/test_intel_packs.py`.
+
+**The three switches, and the mode an event gets.** An event's mode is the lowest of three: the pack's, the
+category's, and the rules' rung. The rung is the highest mode M at which the rules set to M or above, on their own
+(their weights, every cue whatever its mode, every damper), still reach the threshold. So:
+
+- nothing is pushed until an admin raises the pack, the category and enough of its rules;
+- raising one weak rule (`cpd.mva_word`) to push never makes a strong log rule beside it (`cpd.mva_serious`) push:
+  "crash, vehicle rollover" is then an event at log, carried by the rule at log;
+- rules at push that only reach the threshold together (a crash said, then EMS asked for) push together;
+- with every rule of a category at one mode, as every pack ships, the rung is that mode. The police pack behaves as
+  before unless an admin has set its rules to different modes; then an event no longer rises above the rules that
+  carry it.
+
+**Held at log** (`intel_events.suppressed`), whatever the switches say. Only the packs with an `area`: `county_police`,
+`ems` and `fire`. The `police` pack's events are never held or linked. An event already pushed is never held (its mode
+never goes down, so it stays on the map and the console), and when a hold ends (read back at one of our streets) the
+event gets back the mode its rules give.
+
+| Why | When |
+|---|---|
+| `out_of_area` | a pack with an `area` (the three above: Port Chester, Rye Brook, Rye, Harrison with Purchase and West Harrison, Greenwich with Byram; Settings `intel_packs.<pack>.area`, an empty list = the file's): the event is placed in another town, or, with no place, its words say it is in towns and none of the area's: a town after "in", "at", "on" or "the area of", never after "to", "from", "transporting" or "units from" (the hospital, the units coming), and a town before a street word is a street. No place and no such town: not held. A safety category with no place is never held for a town said. The gazetteer holds our area only, so a county-wide source's street read UNCONFIRMED into one of our towns is no place at all (a replay found most such readings were a same-named street elsewhere); a confirmed one places it |
+| `near_incident` | its place is one of our own incidents' (the same gazetteer label, or within 150 m plus half the reading's radius): an emergency incident (never a notification or closure), accepted (never a queued page), opened up to 6 hours before the event or 30 minutes after it, and not closed before it. Linked (`near_incident`), never a new lead. A safety category is linked and NOT held: `county_police` weapons and barricade, `ems` weapons (scene not safe), `fire` mayday, evacuate and collapse. Whether a mayday, evacuation or collapse at our own fireground should be held instead is the user's call; they are not held for now |
+
+The area is set in the pack files and through the API (`POST /api/cad/settings/intel {action: "pack", pack, area:
+[...]}`); Settings > System > Intel does not show it yet. A town name in Settings that no longer compiles drops that
+one override (logged), never the others.
+
+**The address lookup's cost.** The gazetteer is asked only for a row whose hits could carry a category to the
+threshold with the window's (a cue or a damper alone never makes an event), and for a pack with an area only in
+those towns and the towns said (`pagegeo.locate(only=True)`; pages are read as before). Over 4,000 generated
+county rows the engine's CPU per transcript went from 10.7 to 15.5 ms to 1.7 ms.
+
+**The speech-to-text table.** Each reading (as transcribed, and after the table) is judged on its own: a rule hits
+when, in one reading, a phrase is found and none of its "not" phrases is. A table never takes a hit away, and an
+entry that would remove a negation word ("zero" -> "0") is refused.
+
+**How it is fed (the context text hook, #483).** `Comms.record()` and `Comms.retext()` tell one of two hooks once
+the write has committed, on the caller's thread: `on_text` for our channels (the alarms, the status hints, the radio
+log's matching, and intel), `on_context_text` for another P25 system's rows (intel only: `IntelEngine.consider`,
+which queues the id and never waits). A context transcript never reaches our consumers; whatever a hook does or
+raises never reaches the write; a catch-up's quiet re-text tells neither. A transmission older than `max_age_min`
+(15) is never a pre-alert, so a restart or a late re-record replays nothing. Test: `tests/test_context_text_hook.py`.
+
+**Modes**, lowest wins among the pack's, the category's and the best rule's: `off` (no event), `shadow` (stored,
+never shown or pushed), `log`, `map`, `push`. Every shipped category is at `push`; a rule an admin adds starts in
+`shadow`.
+
+**The policy's defaults** (Settings > System > Intel, section `intel`):
+
+| Key | Default | |
+|---|---|---|
+| `enabled` | on | the whole pipeline |
+| `push` | on | the kill switch: off, detection goes on, nothing is pushed |
+| `per_hour` / `per_day` / `per_category_hour` | 30 / 200 / 10 | push caps. Over one: the event is kept with suppressed "rate"; a digest (counts only, priority 2) goes every `digest_min` (15) |
+| `repush_min`, `max_repush` | 10, 2 | an escalation (a higher level, a place found or confirmed) pushes again at most this often, this many times |
+| `place_repush_min` | 5 | the place first heard this soon after the first push pushes once more |
+| `merge_min` | 20 | a new mention joins an open event of the same pack, category and source this recent: updated, not pushed again |
+| `mute_min` | 15 | a new report this soon after an event ended or was dismissed re-opens it |
+| `move_min` | 5 | a moving incident pushes its new place at most this often |
+| `quiet_from`, `quiet_to` | none | local "HH:MM": no pushes in between |
+
+**The push** goes on the INTEL kind ([the topics](#the-alert-and-status-topics-ntfy): its own topic, else the
+alerts'): title "PD · Smoke / fire reported · *town*"; body the gazetteer's address when the words confirm it, else
+the street and block with "(unconfirmed)", else "location not heard", then the time and the level (low, medium,
+high). Never in it: transcript words, a talker, a radio ID, a plate, a date of birth, a person's name; a push that
+fails the scrub is not sent (suppressed "scrub", logged without the text). It opens
+`<public url>/radio?view=police&intel=<id>`, behind Cloudflare Access. With Listen on, the body ends with
+`Listen: <url>` and the push has a "Listen" button (ntfy `view` action, https only).
+
+**Who sees it:** everyone signed in with a verified sign-in (`sourcekeys.may_see_context`, as for context traffic);
+no one on a station page, an all-in-one or a hub without Access.
+
+| | |
+|---|---|
+| `GET /api/cad/intel` | Settings > System > Intel: packs, categories and rules with their modes, weights and 7-day hits, the policy |
+| `GET /api/cad/intel/events?since=&bbox=&mode=&status=open\|all&limit=` | the events (for a map layer) |
+| `POST /api/cad/intel/<id>/dismiss` | a pre-alert that is nothing: dispatchers and admins |
+| `POST /api/cad/intel/<id>/feedback {verdict}` | useful, noise, wrong_place, wrong_type, late, missed: anyone signed in |
+| `POST /api/cad/settings/intel {action: set \| pack \| category \| rule \| local \| reset}` | admins, audited as System; every change is compiled first (a bad phrase: 400) |
+
+The console's card (the 60 Control column): one row per open event at `map` or `push`: category and town, the place
+(a hollow "?" when unconfirmed), play its clips, Useful / Noise, Dismiss. Tests: `tests/test_intel.py`.
+
+### Listen links and inference (intel)
+
+**Listen** (`sizeup/intel/listen.py`; #499). The transmissions of the event, plus every transmission on the same source
+from `listen_before_s` (45) before the first to `listen_after_s` (60) after the last, oldest first with a short gap
+between, stitched into one mono file: AAC in M4A at `listen_kbps` (24) when ffmpeg is there, else 8 kHz 16-bit WAV
+(the hub image has no ffmpeg; about 1 MB a minute). Sources that are record-only, encrypted or activity tier are
+never included, nor a row whose audio is gone.
+
+| | |
+|---|---|
+| Where | the audio bucket (`SIZEUP_AUDIO_BUCKET`), prefix `listen/`, key `listen/<32 random characters>.<ext>`, no metadata. The task role needs Put / Get on `listen/*`; a one-day lifecycle rule removes the objects (`sizeup-aws/27-listen-links.sh`, run by a person) |
+| Link | a presigned GET, valid `listen_expiry_min` (20), **with no sign-in**: the key is unguessable and short-lived. Signed with credentials that outlive it |
+| Updates | while the after-window is open (and 3 min more, transcripts come late) the file is stitched again under the same key whenever the set of transmissions changes, so the link already on a phone plays the newest |
+| Failure | never delays the push (stitching and upload are on the `listen` thread). A 403 (the grant isn't there) shows "not configured" and is retried after an hour; anything else after a minute. No bucket: off |
+| Settings | System > Intel: Listen on / off, minutes, seconds before and after, kbps (`listen`, `listen_expiry_min`, `listen_before_s`, `listen_after_s`, `listen_kbps`) |
+
+**Inference** (`sizeup/intel/infer.py`; #504). Off by default (`infer`, Settings > System > Intel). The rules decide
+first; the model is asked only where they are unsure: a category scoring between `infer_low` (0.3) and its threshold, an
+event whose place is unheard or unconfirmed (at most once per 10 min per event), or a sample (`infer_sample_pct`,
+default 0: asked and recorded, never acted on). It runs on the `infer` thread with a 12 s timeout and no retries, so it
+never holds the engine; a failure is logged by type and the rules carry on.
+
+| | |
+|---|---|
+| Provider | `bedrock`: Amazon Bedrock in the department's own AWS account, through the Anthropic SDK with the hub task role; `infer_model` (default `anthropic.claude-haiku-5-5`), `infer_region` (`us-east-1`). The SDK and boto3 are the image's `intel-llm` extra, pinned in `deploy/hub/constraints-intel-llm.txt`. AWS side: `sizeup-aws/26-intel-bedrock.sh`, run by a person |
+| Sent | the window's transcript (at most 4,000 characters) with radio IDs (6+ digits) and plate-like tokens taken out, the pack's category names and the source's towns. Never talkers or aliases |
+| Category | one more hit, rule `infer.<provider>`, weight confidence x `infer_weight` (0.6). It may push only when it **agrees** with the category the rules were unsure about, their own score is at least `infer_agree_min` (0.5), its confidence at least `infer_agree_conf` (0.8) and `infer_agree_push` is on. Otherwise (a category it alone brings, a stronger one than the rules') it is held to `infer_alone_mode` (`map`): the card shows "model: MVA with injuries?", no push |
+| Place | only if its street words are in the transcript and the gazetteer finds them; always unconfirmed (street and block in the push, never a house number it gave); never over a place the rules confirmed |
+| Summary | kept in `intel_infer` for the console and evaluation; never in a push |
+| Cost | `infer_daily_cap` (200 calls a day) and `infer_budget_usd` ($5 a month), counted from the tokens each call reports at the model's price (known ids in `infer.PRICES`; for another id set `infer_usd_in` / `infer_usd_out` first, or Settings refuses the model). Roughly $0.0003 a call on Haiku, so a full day of calls is about $2 a month |
+| Status | the Settings row shows ready / held / off, calls today and spend this month |
+
+## Pre-plan points and site documents (#456, #459)
+
+What a crew needs to know about a building, on the map of every call there. Both are in `cad.sqlite`; both link to a
+building by its address key and the county's building footprint ([County GIS
+layers](#county-gis-layers-westchester-county-gis)).
+
+**Points** (`sizeup/cad/preplan.py`, `static/preplan.js`; #456, PR #458): the Knox box, the FDC, the shutoffs and
+the like, each exactly placed, with a kind, a label, a note, a level, a priority and a review-by date.
+
+- **The building:** a point inside a county footprint takes its parcel's address key; outside every footprint, the
+  nearest one within 30 m; else the call's building; else it is matched by where it is.
+- **Where it shows:** an open incident's points ride on the state push (only the kinds everyone may see); the
+  restricted kinds (the Knox box, gate access: Settings > System > Address notes) are read per person. The map's
+  *Pre-plan* layer reads a viewport (at most 0.05° a side).
+- `GET /api/cad/preplan?bbox= | incident= | where=` (every point, and `preplan.csv`: admins),
+  `POST /api/cad/preplan`, `POST /api/cad/preplan/<id>` (edit, move, delete; restore: admins): dispatchers and admins. Every
+  change is in the Settings audit log (section `preplan`).
+
+**Site documents** (`sizeup/cad/preplan_docs.py`, `static/preplan-docs.js`; #459, PR #464): floor plans, overlaid
+on the map of every call at the building once aligned to its footprint, and other documents (pre-plan and
+inspection sheets, hazmat / Tier II, contact sheets, photos), opened in the app.
+
+| | |
+|---|---|
+| Stored | `sizeup/docstore.py`: the backups bucket (`SIZEUP_PREPLAN_DOCS_BUCKET`), prefix `preplan-docs/`: `<ref>/original.<pdf\|png\|jpg>` and a plan's `plan.png`. SSE-S3 and checksums on every PUT. Off the hub: a local folder (`SIZEUP_PREPLAN_DOCS_DIR`). No bucket: uploads say "not configured" |
+| AWS | nothing new: the task role's `backups` policy already covers the prefix. sizeup-aws `22-preplan-docs.sh` only checks (read-only) that the bucket blocks public access, is versioned and encrypts by default |
+| Served | by the hub only, streamed in pieces to the person signed in (`GET /api/cad/preplan/docs/<id>/file`, `/plan`): no presigned or public links, `nosniff`, `no-store`, `Content-Disposition`, a CSP that runs nothing; 503 when busy; in the person's activity |
+| Uploads | `POST /api/cad/preplan/docs`: the file as the body, at most 25 MB, PDF, PNG or JPEG **by its first bytes**, never its name (`sizeup/docfiles.py`) |
+| Cleaning | a JPEG without EXIF / GPS (the orientation kept), a PNG's image chunks only, a PDF saved again with only its pages: no actions, scripts, embedded files or metadata; attachments, XFA and encryption are refused. A plan is rendered to a PNG of at most 4096 px a side |
+| Where the parsing runs | a child process with an environment of its own (no secrets), niced, under CPU and memory limits, one at a time, 45 s at most: a malformed file can crash or stall the child, not the hub |
+| **The PDF recheck** | before a cleaned PDF is stored, the hub checks the child's copy again in a second small process (`sizeup/pdfcheck.py`: standard library only, nothing imported from sizeup): a strict, linear parser of exactly the shape pypdf writes. Anything else, or 20 s without an answer, is a refusal |
+| Deleting | the row is marked deleted, then its objects go. The bucket is versioned: the bytes are really gone 30 days later (its lifecycle rule) |
+| Who | anyone signed in sees a building's documents; an admin-only one exists only for admins. Dispatchers and admins upload, edit, align and delete; only an admin makes one admin-only. Audited (section `preplan_docs`); the server log never gets a title, a file name or a corner |
+
+The hub image carries pypdf, PDFium and Pillow for this (the `docs` extra: the `Dockerfile` runs
+`pip install ".[docs,intel-llm]"`); without them a PDF is refused.
+Tests: `tests/test_preplan.py`, `tests/test_preplan_docs.py`.
+
+## Station logs (CloudWatch)
+
+The station's journal goes to CloudWatch Logs in the department's own AWS account, beside the hub's own logs (#494).
+The whole of it is in **[docs/station-logs.md](station-logs.md)**: the path, the scrub, the settings, querying.
+
+| | |
+|---|---|
+| Path | journald → `sizeup-logread` (its own user, no network) → the station's shipper (filter, scrub, cut repeats; `sizeup/cloud/logship.py`) → `POST /api/station/logs` over the link the station already has → the hub scrubs again and writes (`sizeup/cloud/cwlogs.py`) |
+| Where | log group `/sizeup/station` (Infrequent Access class, 30 days by default), streams `<station>-<YYYY-MM-DD>`. The hub's own logs: `/ecs/sizeup-hub` |
+| Keys | none on the station: the hub writes with its task role. No third-party log service |
+| AWS | sizeup-aws `25-station-logs.sh` (the group, the task role's policy). Until it has run the hub answers "not configured" and the station keeps its spool (capped) |
+| Reading | Settings > Station > Logs (admins, #493): `GET /api/cad/logs?source=station\|hub\|all&unit=&level=&q=&start=&end=&limit=`, a bounded Logs Insights query, one at a time |
+| Settings | Settings > Station > Logs (section `station_logs`, audited as System): on / off, the least level, units, retention (7 days to a year), and whether the adapter's own lines are shipped (off by default) |
+| Off | `SIZEUP_LOG_SHIP=off` in the station's `station.env`, or the Settings switch |
+
 ## Where the hub's CPU goes (#425)
 
 `sizeup/perf.py`, the hub only. Three parts, none of them an AWS change:
@@ -2502,8 +3073,8 @@ CAD store) and S3's own records (CloudTrail data events, if turned on) are what 
   `perf 1h: cpu=41.2% of 0.5 vCPU top[broadcast=12.3 http-stream=8.1 ...] gc=0.8% rss_mb=412 threads=53 fds=88 up_h=5.0`
   The top 8 thread groups, as shares of the task's CPU (ECS says how much that is; else of one core).
 
-Admins only (`ADMIN_READS`, `WRITES`), on Settings > Health ("Hub CPU": threads now / 1 h / since start, "Profile
-30 s"). Nothing in any of it but thread groups, function names, file:line and path families.
+Admins only (`ADMIN_READS`, `WRITES`), on Settings > Station > Health ("Hub CPU": threads now / 1 h / since start,
+"Profile 30 s"). Nothing in any of it but thread groups, function names, file:line and path families.
 
 **Reading it.** A thread whose "Now" is above its "Since start" has grown with uptime; the hourly lines show the
 same per thread, hour on hour (`GET /api/cad/perf` → `hours` keeps 72 of them, with the sizes at each). In a
@@ -2516,9 +3087,20 @@ Everything the hub keeps is SQLite under `SIZEUP_STATE_DIR`, so Litestream can r
 
 | file | holds |
 |---|---|
-| `cad.sqlite` | the CAD: events, units, run cards, dispatch log, settings, radio registry, communications log, phone pre-alerts |
+| `cad.sqlite` | the CAD: events, units, run cards, dispatch log, settings and their audit, radio registry, communications log and its change log, phone and airport pre-alerts, alarms, the activity log, attachment records and their audit, pre-plan points and site-document records, intel events |
 | `hub.sqlite` | the monitor: incidents, transmissions, pages (one row each, written only when changed), and the station events applied so far |
 | `audio.sqlite` | received clips ([Audio retention](#audio-retention) below) and the dispatch audio (Polly's or the station's; kept with the dispatch log; unused previews a day). With `SIZEUP_AUDIO_BUCKET` (#414): their metadata only, the bytes in S3 ([Audio in S3](#audio-in-s3-414)) |
+
+Beyond the three files:
+
+| Where | Holds |
+|---|---|
+| The backups bucket (`LITESTREAM_BUCKET`, prefix `LITESTREAM_PATH`) | Litestream's replica of each file (`<db>.sqlite/`), the lock `leader.json`, the replica watch's record `replica-watch.json`, the map caches (`cache/`); and, under their own prefix `preplan-docs/`, [site documents](#pre-plan-points-and-site-documents-456-459). Versioned: old versions go after 30 days |
+| The audio bucket (`SIZEUP_AUDIO_BUCKET`) | clip and dispatch audio bytes ([Audio in S3](#audio-in-s3-414)). Not versioned |
+| The attachments bucket (`SIZEUP_ATTACHMENTS_BUCKET`) | [incident attachments](#incident-attachments-323). Versioned, Object Lock |
+| EFS at `/data/dvr` | the camera DVR's 12 h ([Shared storage](#shared-storage-12-h-of-our-response-area-322)) |
+| The task's own disk | the standby's copies (`/data/standby`), the leader's check copies (`/data/.replica-check`), `dispatch-audio/`, `audio-cache/`, the map caches: gone with the task |
+| CloudWatch Logs | `/ecs/sizeup-hub` (the hub's own log), `/sizeup/station` ([Station logs](#station-logs-cloudwatch)) |
 
 The hub has no `captures/`. Dispatch WAVs are also cached in `dispatch-audio/` on the task's disk; after a
 redeploy they're served from `audio.sqlite` (or its S3 bucket).
@@ -2549,6 +3131,128 @@ sent. A failed upload is logged and tried again later (5 min doubling to 6 h), n
 without `LITESTREAM_BUCKET` (compose, a Mac) or with `SIZEUP_CACHE_S3=off`: the caches are then local only.
 Camera snapshots and the weather's radar tiles are not kept (minutes old at most, fetched again at once).
 
+### How often the replica is written
+
+**Durability.** A deploy or any clean handover loses **nothing**: the draining leader asks Litestream for a sync of
+each file (`litestream sync -wait`), which reads the WAL and uploads everything at once, and releases the lock with
+those exact positions; the new task catches up to them before it promotes anything. A hub that is **killed** (a
+crash, an OOM, a fence, the host gone) loses what it wrote since Litestream's last *successful* sync: **up to
+~30 s while Litestream is healthy** (it was ~1 s). It can be more: after a sync error (S3 unreachable or refusing,
+the disk full) Litestream waits one interval more, then twice that, and so on up to 5 minutes between tries, for
+both the read of the WAL and the upload; and while Litestream itself is down (it exited: the supervisor starts it
+again after 2 s, doubling to 60 s) nothing is replicated at all. Neither loses anything by itself: the next sync
+that works carries everything. Only a hub killed in that stretch loses that much.
+
+**Why.** Every object Litestream writes to S3 and every listing it makes is a billed request (S3's
+"Requests-Tier1": PUT and LIST). At Litestream's defaults it read each database's WAL every second and uploaded one
+small file per read that found changes, around the clock, for three databases, and listed the replica every 15 s
+whether anything had changed or not: the hub ran at about 200,000 such requests a day. Measured against a counting
+stand-in for S3 (two databases written all the time, one idle, 640 s from a fresh start): 1,287 PUTs and listings
+at the defaults (174,000 a day), 163 with the settings below (22,000 a day; start-up aside, about 12,000).
+
+**What is set** (`deploy/hub/litestream.yml`; Litestream 0.5.18, read from its source and measured):
+
+| key | value | default | what it does |
+|---|---|---|---|
+| `monitor-interval` (each database) | `SIZEUP_LITESTREAM_SYNC_S` s (30) | 1 s | How often Litestream reads the WAL into a new L0 LTX file. **This is the cadence**: one file, one PUT, per read that found changes. |
+| `sync-interval` (each replica) | 1 s | 1 s | How soon a finished LTX file is uploaded. Left alone on purpose: every L0 file is uploaded, one PUT each, whenever this fires, so raising it saves nothing (measured: 61 uploads in 65 s at `sync-interval: 30s` alone, 65 at the defaults, 3 with `monitor-interval: 30s`) and would add its length to what a crash can lose. |
+| `levels` | 5 min, 30 min, 1 h | 30 s, 5 min, 1 h | L0 files are merged into L1, L1 into L2, L2 into L3. At 30 s an L1 file would be a copy of each L0 file, and each merge costs a PUT and three or more listings. |
+| `l0-retention-check-interval` | 5 min | 15 s | Looks for merged L0 files older than `l0-retention` (5 min, the default: the followers read L0). Two or more listings per database each time, changes or not; L0 files are also cleared after every L1 merge. |
+
+Unchanged: a full snapshot of each file daily, kept a day (with every level's files since it). A restore, a
+follower and the takeover's plan read whatever files are there, of every level, so replicas written before this
+and after it restore alike, and an older image can follow and restore a replica this one wrote. Restoring to a
+moment in the past (`litestream restore -timestamp` / `-txid`) lands on a file boundary: every 30 s for the last
+5 to 10 minutes, every 5 minutes before that (it was every second, then every 30 s).
+
+`SIZEUP_LITESTREAM_SYNC_S` (whole seconds, 1 to 300) is set to 30 in the image (the `Dockerfile`'s `ENV`, so every
+process in the container has it: Litestream refuses a config whose interval is empty), defaulted again by the
+entrypoint and checked by the supervisor (not a number: 30, said in the log). Put it in the task definition's
+environment to change it: no code change. Smaller: less lost in a crash, more requests (about 2,900 PUTs a day per
+database at 30 s, 86,400 at 1 s).
+
+**Nothing in a handoff waits for the 30 s** (`sizeup/handoff.py`; `tests/test_litestream_takeover.py` runs a drain
+and a takeover against the real Litestream with this very file):
+
+| step | how it gets its answer |
+|---|---|
+| The takeover's two confirms (Litestream's first position of each promoted file; again after the migrations) | `litestream sync`: Litestream reads the file and its WAL when asked. Its budgets (120 s a file, 150 s in all) are for a big file's snapshot. |
+| The drain's last sync (45 s in all) | `litestream sync -wait`: reads the WAL and uploads every file not in S3 yet before it answers. |
+| The standby's catch-up | Its followers ask S3 every second (`-follow-interval 1s`), whatever the leader's cadence; the release's positions are in S3 before the lock says so. |
+| A retake | The replica's position is read (`restore -dry-run`), Litestream confirmed with `litestream sync`. |
+| Litestream started again under the serving app (it exited) | Asked for a sync of each file at once; by itself it would first read the WAL a whole interval later. |
+| A first lock ever in a bucket | The one real wait: 40 s (above), because a writer from before the lock can't be asked. |
+| The fence (20 s to stop writing, 35 s before anyone takes over) | Nothing to do with Litestream's cadence: the app and Litestream are killed. |
+| The replica checks ([below](#replica-checks)) | The followers poll at their own interval and apply whatever is there; nothing compares a replica's age in seconds. |
+
+**By hand.** Any `litestream ... -config /app/deploy/hub/litestream.yml` needs `SIZEUP_LITESTREAM_SYNC_S` in its
+environment, like `LITESTREAM_BUCKET` / `LITESTREAM_PATH` / `LITESTREAM_REGION` (a restore too: the whole file is
+parsed). The image sets it; anywhere else: `SIZEUP_LITESTREAM_SYNC_S=30 litestream restore ...`. Without it
+Litestream stops at once with a YAML error about the duration `s`.
+
+**A canary in the log.** Litestream reads a database for the first time at its first tick, 30 s after it starts,
+unless it is asked sooner; the supervisor always asks (`litestream sync`: at a takeover, a retake, and after it
+starts Litestream again). Litestream's `timeout waiting for db initialization` (repeated by the supervisor as
+`handoff: LITESTREAM NOT READY`) therefore means a database sat unreplicated for 30 s after a start: something
+started Litestream without asking. Worth a CloudWatch metric filter beside "replica check FAILED".
+
+**What a standby costs.** A follower that finds no new L0 file looks through every other level too (nine or more
+listings instead of one). With the leader writing every 30 s that is most of a standby's one-second polls: a few
+thousand listings per deploy (a few cents), only while a standby runs.
+
+### Litestream started again under the app
+
+**The hazard** (found in review of #522, in Litestream 0.5.18; it was there at the 1 s cadence too). While
+Litestream runs, its read lock keeps SQLite from restarting the WAL past what Litestream has read. If Litestream
+exits while the app serves (a crash, an OOM kill, even a clean SIGTERM), that lock is gone: the app's autocheckpoint
+moves the frames written meanwhile into the main file and the WAL starts again from its beginning. A Litestream
+started then can find the frame it last read still lying in the WAL file, past the new and shorter WAL, conclude
+that nothing was missed (`verifyWithExecutor` / `detectFullCheckpoint`) and carry on from the new WAL's start
+**without a snapshot**. Every page written in the gap is then stale in the replica for good, and nothing says so:
+`integrity_check` of a restore is ok, `litestream sync -wait` answers 0, no error is logged. Removing Litestream's
+state (`.cad.sqlite-litestream`) does not help.
+
+**The rule: TRUNCATE before Litestream is started again.** Before the supervisor starts Litestream again on files
+the app has open (`sizeup/handoff.py` `_restart_litestream`), it runs `PRAGMA wal_checkpoint(TRUNCATE)` on each
+(a short-lived connection, a busy timeout, tried again while a reader or writer is in its way, 20 s in all) and
+goes on only when it completed (busy 0). After that the WAL is empty, or its frame at the offset Litestream
+remembers carries a new salt; either way Litestream's first sync of the file is a **full snapshot** in the same
+chain of files the followers apply. Litestream 0.5.18 has no command to force a snapshot from a running
+`replicate` (`-force-snapshot` is for `-once` only and writes a snapshot-level file that followers don't apply);
+this is the way. Then Litestream is asked for a sync at once.
+`tests/test_litestream_takeover.py` kills the real Litestream under an app, lets the WAL restart, and compares a
+restore with the live file: it fails without the checkpoint.
+
+**When the checkpoint can't be done** (20 s of a reader or writer in its way): Litestream is started all the
+same, since no replication at all is worse, and the file is **suspect**:
+
+* the log says `WARNING: REPLICA UNVERIFIED` and `replica check FAILED: not verifiable` (the CloudWatch filter's
+  words); a status push "Replica not verifiable: cad.sqlite" (4); Settings > Station > Health > Replicas shows the file as
+  **unverified**, whatever its last check said (a stale page passes `quick_check`), with a critical alert;
+* the supervisor tries again every minute (doubling to 10 min): Litestream stopped, the checkpoint, started. Once
+  it completes: "Replica OK again";
+* at a drain, with the app stopped, nothing can be in the checkpoint's way: Litestream is stopped, the file
+  checkpointed, Litestream started, and its `sync -wait` uploads the snapshot before the release;
+* a file still suspect after that: the release is **unclean** (no positions, the old task never takes it back,
+  "Hub released unclean"). The next task serves what the replica has; what was written in the gap can then be
+  missing, and the record says so ("took over from a replica not verifiable ...").
+
+**Every restart is said.** Each time Litestream is started again under the serving app: a status push "Hub
+Litestream restarted" (4, its own slot) and a line in Health's Replicas row, also when the checkpoint was done and
+nothing is wrong: it should never happen, and it is the moment to look.
+
+**Where Litestream is started, and on what:**
+
+| where | the files | safe because |
+|---|---|---|
+| A takeover (`_start_writer`) | just promoted, untouched (checked: no `-wal`, the same size, mtime and header), no Litestream state | its first sync is a snapshot of each file |
+| While serving, after it exited (`active`) | the app is writing them | **the TRUNCATE rule above** |
+| A suspect file's retries, and the drain's (`active`, `_heal_at_drain`) | as above; at the drain nothing has them open | the TRUNCATE itself |
+| A retake of our own release (`_retake`) | exactly as Litestream left them: the app had exited before its last sync, and nothing ran since | nothing was written that it didn't read; a release with a suspect file is unclean and never taken back |
+| A retake after a taker's pristine release (`_retake`) | our own, with nothing open | checkpointed (TRUNCATE) and Litestream's state removed: a snapshot |
+| `tools/reseed_replica.py` | a copy in a scratch folder, no state | a snapshot |
+| The followers (`restore -f`: a standby's, the replica checks') | they only read the replica | they never write it |
+
 ### Audio retention
 
 `audio.sqlite` and its S3 bucket (the hub; `sizeup/cloud/hub.py` `_audio_retention`, `hubstore.py`
@@ -2559,6 +3263,7 @@ with the department):
 |---|---|---|
 | a clip on no event | **30 days** on the hub (12 h before #414), or its channel's / talkgroup's days | `audio_keep_hours = 720` (`deploy/hub/config.hub.toml`); **Settings > System > Audio retention** (#414) |
 | a clip that is a record: on a CAD event (any link: unit, dispatcher, airport, manual, page), with an alarm, or with the emergency button / an emergency window's keep | **365 days**, or its channel's days if longer | `audio_keep_event_days = 365` (0..400; 0 = forever, in S3 the bucket's 400-day hard max) |
+| a clip whose transcript an admin corrected (`stt_corrections`, below) | a record like the row above, while **Keep corrected clips** is on (the default) | **Settings > System > Transcript corrections** |
 | a clip attached to an incident | its copy in the attachments bucket: a year ([Incident attachments](#incident-attachments-323)), whatever this says | |
 | dispatch audio (with the dispatch log) | forever (unchanged); unused previews as long as the clips (30 days; the task's disk copy a day) | |
 | the size cap `[cloud] audio_max_mb` (500) | the bytes **still in `audio.sqlite`** (all of them without S3): drops the oldest clips **that aren't records** only; records over it are kept and the log says so | |
@@ -2581,8 +3286,32 @@ days, audited as System, retroactive). A row goes once older than **the longer**
 days, so a transcript can outlive its audio but never goes first. A record (an emergency, a keep, an alarm) is kept as
 long as the audio bucket keeps any clip (400 days); a transmission linked to an event, with its links, always. A row
 whose audio is gone shows **"Audio expired"** (a dash in place of the play button). The hub's monitor history
-(`hub.sqlite`: the live display, `[storage] keep_hours`, 24 h) is the display, not the record: unchanged. The
-speech-to-text corrections (`stt_corrections`) are to follow the same rule.
+(`hub.sqlite`: the live display, `[storage] keep_hours`, 24 h) is the display, not the record: unchanged.
+
+**A corrected clip is a keeper** (#487, the corrections side of #428; `sizeup/cad/sttfix.py`). An admin corrects a
+transmission's transcript from its "⋯" menu on the Radio page (**Correct transcript**: the words as said, tagged
+spans, Reference). The corrected audio with its text is the speech-to-text training and evaluation set, so while
+**Settings > System > Transcript corrections > Keep corrected clips** is on (the default; `POST
+/api/cad/settings/stt_corrections {action: set, key: keep, value}`, admins, audited as System):
+
+- the transmission is **never pruned** from the radio log, whatever its channel's transcript retention
+  (`Comms.prune`), like one linked to an event;
+- its audio is **a record** (`Comms.kept_for_events`): kept as a clip on a CAD event is (`audio_keep_event_days`,
+  and never dropped by the size cap). In S3 the bucket's 400-day hard max still applies: longer needs #428's bundles.
+
+The card shows how many corrected clips are kept. Switched off, a corrected transmission and its audio go by their
+channel's retention again at the next pass (retroactively), and the correction goes with its transmission (`ON
+DELETE CASCADE`). An admin's **Delete** in the dialog removes a correction at once; its clip is then an ordinary one.
+This holds for another system's (police) transmissions too: a corrected one is kept past its tier's retention.
+
+The corrections live in `cad.sqlite` (`stt_corrections`), keyed by the clip id (`traffic_id` = `radio_traffic.id` =
+#428's `clip_id`), not in `hub.sqlite`: the transcripts they correct and both prunes' decisions are there. The table
+is created `IF NOT EXISTS` at open (no schema bump, no backfill). Saves and deletes are admin-only, fenced (a task
+that is not the leader answers 503) and in the Settings audit log under the admin, with counts only: never the
+words nor a hash of them; a correction of another system's transmission is redacted there for a reader without a
+verified sign-in. They leave the hub only through the admin-only JSONL export (`GET
+/api/cad/stt/corrections.jsonl`: #428's line shape plus `system`, `service` and `correction.based_on`; past 50,000
+clips it says so and `?since=` continues), which is recorded in the person's activity.
 
 **What it costs**: the card's first line is what is kept now: the live audio (clips, GB, its S3 Standard storage a
 month at $0.023/GB), the transcripts (rows) and the incident audio (radio clips copied to incidents' attachments:
@@ -2696,13 +3425,13 @@ the bytes in `audio.sqlite` (`SIZEUP_AUDIO_DIR=<folder>` puts them in a local fo
   talkgroup group, 500 rows a transaction: a million rows' first prune (278,000 deleted) 18 s with a CAD write
   meanwhile at most 83 ms; a pass with nothing due, a few ms.
 
-**Deploy** (in order; the taskdef change is a separate follow-up PR, like #344):
+**Deploy** (done: `SIZEUP_AUDIO_BUCKET` is in `deploy/aws/taskdef.json` since #454; the order, for a new environment):
 
-1. Merge this. Without `SIZEUP_AUDIO_BUCKET` nothing changes: the hub keeps the audio in `audio.sqlite`, the new
+1. Merge the code. Without `SIZEUP_AUDIO_BUCKET` nothing changes: the hub keeps the audio in `audio.sqlite`, the new
    columns are added and filled for new clips, and the per-channel retention applies.
 2. Run `bash 18-audio-storage.sh` in sizeup-aws: the bucket, its lifecycle and the task role's `audio-storage`
    policy (S3 Get/Put/Delete on `audio/*` of that bucket only, List on the bucket).
-3. The follow-up PR: `{"name": "SIZEUP_AUDIO_BUCKET", "value": "sizeup-audio-<account>"}` in the hub container's
+3. Then `{"name": "SIZEUP_AUDIO_BUCKET", "value": "sizeup-audio-<account>"}` in the hub container's
    environment in `deploy/aws/taskdef.json`. Once deployed, the log says `audio: bytes in s3://...` and then
    `audio: N clip(s) moved into the store, M still in audio.sqlite` until M is 0, and later (2-5 am)
    `audio: audio.sqlite rewritten small once its audio was in the store (VACUUM, #414)`.
@@ -2773,8 +3502,8 @@ stateDiagram-v2
     STARTING --> STANDBY: lock held by another
     STANDBY --> TAKEOVER: lock released, or expired + 5 s
     STANDBY --> [*]: SIGTERM (lock untouched)
-    TAKEOVER --> ACTIVE: followers caught up, promoted, gate "init" (init-state), litestream replicate, gate "run" (the port answers: leader file), app healthy, connector up, "serving"
-    TAKEOVER --> RELEASED: can't (bad copy, no backup, replica moved) - released, exit 1
+    TAKEOVER --> ACTIVE: followers caught up and stopped cleanly, promoted, litestream replicate (confirmed in S3), gate "init" (init-state), confirmed in S3 again, gate "run" (the port answers: leader file), app healthy, connector up, "serving"
+    TAKEOVER --> RELEASED: can't (bad copy, no backup, replica moved, file written before Litestream, Litestream disagrees) - released, exit 1
     ACTIVE --> DRAINING: SIGTERM (ECS - the new task is healthy)
     ACTIVE --> RELEASED: the app exited - drained, exit 1
     DRAINING --> RELEASED: app exited, litestream sync -wait for each file, Litestream stopped, lock released with positions
@@ -2794,17 +3523,20 @@ stateDiagram-v2
   only once every file is restored and the caches are back: ECS stops the old task only then. That can take
   minutes (`audio.sqlite` is the big one): the health check's start period is 300 s.
 * **TAKEOVER** reads the replica's last position (`litestream restore -dry-run`, the three files at once); the lock
-  is held, so nothing can move it. The followers need only the last few changes: **seconds, not a restore**. A follower that doesn't get
+  is held, so nothing can move it. The followers (asking S3 every second, whatever the leader's cadence) need only the last few changes: **seconds, not a restore**. A follower that doesn't get
   there in 30 s falls back to a full restore. Refused, never promoted: a replica behind the release; no backup at
   all although a leader ran before (an empty start would be replicated over the real data); a replica that moves
-  while this task holds the lock (another writer: e.g. a hub from before the lock). Then the warm app is told
-  "init" through its gate file (it checks the lease file first, like its fence, and opens / migrates the
-  databases), `litestream replicate` starts, the gate says "run": the app's port answers at once ("update in
+  while this task holds the lock (another writer: e.g. a hub from before the lock); a follower that needed a
+  SIGKILL to stop, a `-wal` / `-shm` beside a staged copy, a failed quick_check (a normal read-only open). Then
+  `litestream replicate` starts and each promoted file is confirmed in S3 at a position past the one promoted
+  ([Replicate before migrate](#replicate-before-migrate)); only then is the warm app told "init" through its gate
+  file (it checks the lease file first, like its fence, and opens / migrates the databases); every file is confirmed
+  in S3 again (the migrations included), and the gate says "run": the app's port answers at once ("update in
   progress", 503 + Retry-After), so the `leader` file goes in then and the new connector registers while the app
   is built; the real server takes the same socket over (nothing refused in between). "serving" goes in the lock
   once the app's /healthz is 200 and the connector is up.
-* **DRAINING** confirms every change is in S3 (`litestream sync -wait`: the replica's position must reach the
-  database's) before the lock is released. Port 8090 answers 503 + Retry-After ("update in progress") from the
+* **DRAINING** confirms every change is in S3 (`litestream sync -wait`: Litestream reads the WAL and uploads at
+  once, whatever its intervals; the replica's position must reach the database's) before the lock is released. Port 8090 answers 503 + Retry-After ("update in progress") from the
   moment the draining app lets go of it (it used to refuse connections for ~11 s while the app stopped:
   Cloudflare's 502).
 * **RELEASED**: the old connector stays up (answering "update in progress") until the new leader says "serving"
@@ -2821,68 +3553,384 @@ out, and so does the app's own watchdog from inside (`sizeup/fence.py`, from the
 rewrites at each renew); the web server refuses writes (POST: 503) while the lease isn't fresh; the cache mirror
 uploads nothing. The release happens only after the app and Litestream have exited.
 
+### Fenced writes (#501, #509)
+
+`sizeup/fence.py`: the app's side of the lock. The supervisor rewrites the lease file at each renew
+(`SIZEUP_LEASE_FILE`; without it there is no fence: a station, a Mac, the hub in compose). `Fence.ok()` reads it at
+most every 0.5 s and is sticky: once the lease was ours and then isn't, it stays false for that process (a takeover
+or a retake is a new process).
+
+| Layer | While the lease isn't ours and fresh |
+|---|---|
+| The watchdog (`Fence.watch`) | kills Litestream (its pid is in the lease file) and the app itself (exit 75), even if the supervisor were wedged |
+| The web server (`Gate`) | a POST answers 503 + `Retry-After: 2` ("update in progress") |
+| The databases (`GuardedConnection`: `cad.sqlite`, `hub.sqlite`, `audio.sqlite`) | an INSERT / UPDATE / DELETE / DDL, a writing PRAGMA or an `executescript` raises `FencedWrite`; a COMMIT becomes a ROLLBACK. Reads go on |
+| A request whose write was refused | 503 + Retry-After, also when an `except Exception` on the way swallowed the error (refusals are counted per thread): no data path answers 2xx after a refused write |
+| The station's ingest (`Hub._events`) | acks nothing a refused write touched: the station's outbox keeps the event and sends it to the next leader |
+| A GET's bookkeeping (the activity log, last seen, an attachment view's audit: `with bookkeeping():`) | skipped: no write, nothing raised, said in the log at most once a minute. The page still loads |
+| The cache mirror, the audio uploader and retention, the DVR, attachments, the STT catch-up, the voice queue | write nothing (`may_write`) |
+
+**`Store.tx()`** (`sizeup/cad/store.py`, #497): one transaction under the store's lock (`BEGIN IMMEDIATE`).
+
+- A `BEGIN` that fails (busy past the timeout) gives the lock back: later writes don't wait on it for ever.
+- The caller's error is the one raised: a ROLLBACK that fails too never replaces it.
+- A COMMIT that fails (I/O, disk full, busy, the fence) rolls back what is still open, so the next autocommit write
+  never joins a half-finished transaction.
+- Not the leader any more, or a write in it was refused or skipped: rolled back, no revision bump, and `FencedWrite`
+  to the caller. An end is never a quiet "committed".
+- `after_commit` / `after_rollback` (the Radio page's change log) run once the outcome is known, best effort; the
+  lock is released whatever they do.
+- `Store.shutdown()` closes the connection under the lock, once (`close()` closes an incident, not the store).
+
+Tests: `tests/test_fenced_reads.py`, `tests/test_store_tx_robust.py`, `tests/test_handover_overlap.py`.
+
 **Where the time goes** (#264): one log line each, `handoff: drain timing: app … · sync … · litestream … · release
 … (…; N s since SIGTERM)` on the old task, `handoff: takeover timing: plan … · catch-up … · verify … · promote … ·
-init-state … · litestream … · listen … · app … · connector …` on the new one, and in the app `warm-up timing:`
+litestream … · init-state … · replicated … · listen … · app … · connector …` on the new one, and in the app `warm-up timing:`
 (standby), `startup timing:` (gate to serving, App.__init__'s parts: cad, providers, speech-to-text, hub, …) and
 `stop timing:`.
 
 **What a person sees.** Measured on the first deploys (taskdef 65, 69): about 70 s in all, ~20 s of the old app's
-drain and sync, ~50 s from the takeover to serving, then 5–7 s of Cloudflare error 1033 (no connector) and ~11 s
-of 502s during the drain. Since #264: no 1033 and no 502, a small "Reconnecting… (update in progress)" pill on
-the CAD page for the drain plus the takeover (expected ~35–45 s on 0.25 vCPU; the timing lines above say where it
-goes). The page keeps what it shows; its state stream is opened again (a browser gives up on a 502 / 503 / 530
-answer), it polls meanwhile, and an API call the hub answered "updating" (refused before anything was done) is sent
-again; a write that may have reached the hub is never sent twice. A page loaded during the gap gets a short
-"Reconnecting…" page that reloads itself. The station's link retries 1, 2, 4, 5, 5 … s (the hub's Retry-After
-when it gives one) for the first 3 minutes of a failure, then backs off to 30–60 s; its outbox keeps everything.
+drain and sync, ~50 s from the takeover to serving, then 5–7 s of Cloudflare error 1033 (no connector) and ~11 s of
+502s during the drain. Since #264: no 1033 and no 502, a small "Reconnecting… (update in progress)" pill on the CAD
+page for the drain plus the takeover (expected ~35–45 s on the 0.25 vCPU of that time, before the takeover also waited
+for Litestream: [Replicate before migrate](#replicate-before-migrate); the timing lines above say where it goes). The
+page keeps what it shows; its state stream is opened again (a browser gives up on a 502 / 503 / 530 answer), it polls
+meanwhile, and an API call the hub answered "updating" (refused before anything was done) is sent again; a write that
+may have reached the hub is never sent twice. A page loaded during the gap gets a short "Reconnecting…" page that
+reloads itself. The station's link retries 1, 2, 4, 5, 5 … s (the hub's Retry-After when it gives one) for the first 3
+minutes of a failure, then backs off to 30–60 s; its outbox keeps everything.
 
 **Expected per deploy:** the deploy itself takes longer (the standby restores and warms first, minutes), the
 gap users see is the handoff only.
 
-**Fail-safe.**
+### Fail-safe
 
 | what | what happens |
 |---|---|
 | The new task can't restore / warm | It never reports healthy; ECS never stops the old one; the circuit breaker rolls back. |
 | The new task fails after taking the lock | It hands the lock back (released). Unused: the old task takes it back. Used: ECS's next task (or the rollback's) restores and takes over. |
-| The leader crashes or freezes | Its lease runs out: it has stopped writing 20 s after its last renew; a standby takes over at 35 s, else ECS's replacement starts cold. |
+| The leader crashes or freezes | Its lease runs out: it has stopped writing 20 s after its last renew; a standby takes over at 35 s, else ECS's replacement starts cold. What it wrote since Litestream's last sync (up to ~30 s) isn't in S3: [How often the replica is written](#how-often-the-replica-is-written). |
 | S3 unreachable for the leader | The same: it fences itself (exit 3) after 20 s; nobody else can write either until the lock is readable. |
 | A stale leader (split brain) | Its next renew is refused (412): it is killed at once. Its generation is behind; it can't release or renew. |
-| A cold start (no lock object yet) | Created with `If-None-Match: *` (generation 1); the replica must hold still for 3 s first. |
+| A cold start (no lock object yet) | Created with `If-None-Match: *` (generation 1); the replica must hold still for 40 s first: longer than one Litestream sync interval (`SIZEUP_LITESTREAM_SYNC_S` + 10 s), so a hub from before the lock, still writing, would show. Only ever on the first start in a bucket; a takeover from a release never waits. |
 
-**Rolling out** (the order matters: old code with `maximumPercent=200` would run two writers):
+### Rolling out hot/cold deploys
+
+For a new environment, or after a spell on stop-then-start (sizeup-aws `9-service.sh` creates the service hot/cold).
+The order matters: old code with `maximumPercent=200`
+would run two writers.
+
 1. Deploy this code with the service still at minimum 0 % / maximum 100 % (stop, then start, as before). Check
    the log: `leader: took the lock, generation 1 (created)`, then `handoff: active: serving`.
 2. Then: `aws ecs update-service --cluster sizeup-hub --service sizeup-hub --deployment-configuration
    'minimumHealthyPercent=100,maximumPercent=200,deploymentCircuitBreaker={enable=true,rollback=true}'`
 3. The next deploy is hot/cold.
 
-**Back to stop-then-start**: the same command with `minimumHealthyPercent=0,maximumPercent=100`. The lock-aware
-code works either way (with 0/100 the old task releases, and the new one, started after it stopped, takes the
-lock at once). Set 0/100 **before** deploying any code without the lock.
+### Back to stop-then-start
+
+The command of step 2 above with `minimumHealthyPercent=0,maximumPercent=100` (sizeup-aws `9-service.sh` has both).
+The lock-aware code works either way (with 0/100 the old task releases, and the new one, started after it stopped,
+takes the lock at once). Set 0/100 **before** deploying any code without the lock.
+
+### Replicate before migrate
+
+#### What happened (2026-11)
+
+A deploy carried a schema migration of the radio log: 8 `ALTER TABLE … ADD COLUMN`,
+a new index and 3 full-table `UPDATE`s of the transmissions, in autocommit. The takeover ran it the way every
+takeover then ran `--init-state`: on the promoted copy of the replica, **before** `litestream replicate` started.
+SQLite's WAL autocheckpoints moved the migration's pages into the main file, so Litestream never saw them as
+changes in a WAL: it started with no state of its own (`detected database behind replica db_txid=0`) and had to
+snapshot a file that already differed from the replica's last position. The replica ended up with pre- and
+post-migration pages mixed (an interior b-tree page out of order: a few dozen garbage rows in the radio log). That
+task served on; every later takeover restored the replica, failed quick_check and gave up, so the hub crash-looped
+(Cloudflare 1033) until the replica was repaired by hand. (The exact path inside Litestream was not reproduced
+with a local file replica on 0.5.17 or 0.5.18; 0.5.18 fixes two bugs in exactly this area, litestream#1547 — a
+snapshot taken from a stale WAL position dropped the frames before it — and #1579 — the read lock that keeps
+checkpoints from running under Litestream could be dropped after a `litestream sync` request. The image now pins
+0.5.18.)
+
+#### The rule: Litestream first
+
+**Nothing writes a database before Litestream replicates it** (#507). `sizeup/handoff.py` `_start_writer`:
+
+1. The promoted files must be **untouched** since they were verified: no `-wal` / `-shm` / `-journal` beside them,
+   the same size, mtime and 100-byte header (`fingerprint`). Else `REFUSED: cad.sqlite was written before
+   Litestream replicates it`.
+2. `litestream replicate` starts. For each promoted file `litestream sync` (the control socket, no `-wait`) must
+   answer a position **past** the one promoted: Litestream's own first snapshot of the untouched file, read under
+   its read lock (from here every write goes through the WAL it reads). Else `REFUSED: Litestream's position of …
+   doesn't follow the position promoted`. The upload goes on in the background (a release waits for all of it,
+   `sync -wait`): waiting for it here would add the whole snapshot's upload to every takeover.
+3. Litestream's stderr is watched: one `detected database behind replica` per promoted file is expected (no
+   local state, `db_txid=0`, the replica exactly at the position promoted). Any other (a local position that isn't
+   0, a replica somewhere else) is fatal: `REFUSED: Litestream found … behind its replica`.
+4. Only then does the app migrate (`init`), every page of it through the WAL Litestream reads. Then every file is
+   confirmed again (new files of a very first start included: Litestream's first sync of a file with no replica is
+   a full snapshot from WAL offset 0) before the gate says `run`. Each file has its own budget (`REPLICATING_S`,
+   120 s). All three are needed before `init`: `--init-state` opens hub and audio too (`journal_mode = WAL` on a
+   follower's copy writes its header).
+
+**What it costs.** Litestream snapshotted the promoted files at every takeover before too, only after `run`, beside
+the app's start; now that snapshot comes before `init`. Measured with a local file replica (an M-series Mac, NVMe),
+cad 900 MB + audio 275 MB + hub: **~9 s** until Litestream has all three synced locally, ~9.5 s with the upload.
+The snapshot is the whole file (2.2 GB of LTX for two of them: barely compressed). On Fargate (0.5 vCPU, its
+ephemeral disk, S3 at tens of MB/s) expect **~15–30 s** before `init` (an estimate: not measured there), within the
+old connector's overlap (it stays until the new leader serves, at most until 3 s before ECS's SIGKILL at 120 s;
+the drain takes ~20 s and a takeover ~50 s).
+
+A refusal in 2 or 3 SIGKILLs Litestream (no last sync of a file it disagrees with) and releases the lock unclean;
+the task exits 1 and nothing is served from it. A retake (the old task taking its lock back) confirms its own
+Litestream at its release before its app starts.
+
+#### When a new image's takeover fails
+
+Its Litestream has already put a snapshot in the replica (position + 1)
+before `init`, so the replica has "moved on" from the old leader's release. What happens then:
+
+* **It failed before its app wrote anything** (never told `init`, or its migration raised before writing: every
+  file still at Litestream's first position after the last sync): its release says `"pristine_from": <the
+  positions it promoted>`, and the replica holds nothing but a snapshot of the old leader's own files. The old
+  leader takes the lock back from its own files (each checkpointed, `PRAGMA wal_checkpoint(TRUNCATE)`, and its
+  Litestream state dropped: a fresh snapshot of them on top) and serves until shortly before ECS's SIGKILL, as any
+  retake: **at most ~30–50 s more service** (stopTimeout 120 s, less the drain and the failed takeover).
+* **Otherwise** (its migration wrote: autocommit, part of it applied; or it failed later): the old leader doesn't
+  take it back (its files are behind the replica) and exits as before. ECS starts the new image again, which fails
+  again, until the **circuit breaker rolls the deploy back**; the rolled-back image's task then takes over from the
+  replica normally. The hub is down (Cloudflare 1033) for that time. That image opens the newer build's
+  half-applied migration (extra columns, indexes, tables: `tests/test_startup_writes.py`); it can't open a newer
+  `user_version` (the store refuses a schema newer than its own), so **a migration must not bump `user_version`**
+  unless its rollback is planned.
+
+#### The operator's override
+
+`SIZEUP_HANDOFF_SKIP_REPLICATION_CHECKS=1` in the hub container's environment skips
+the checks above (untouched files, Litestream's positions, "database behind replica", the followers' clean stop),
+said as a `WARNING` at every takeover and in the supervisor's `/healthz` (`"replication_checks": "skipped"`). The
+order itself (Litestream before `init`) stays. Runbook: a takeover refused by one of these checks → **roll the
+task definition back first** (the old image takes over as before); set the override only if a check is
+demonstrably a false positive, and remove it in the next deploy.
+
+The override is also on the app's Health panel while it is set (`replication_checks`, a warning).
+
+**Each takeover's confirmations** have their own budget per file (`REPLICATING_S`, 120 s) and one overall cap
+(`REPLICATION_TOTAL_S`, 150 s, both rounds): a hung Litestream fails the takeover within a few minutes, not
+indefinitely.
+
+#### After a takeover: let the first snapshot finish
+
+At the first rollout of this, and after any takeover: the new leader's first snapshot of every file (the
+whole file: ~1.2 GB) goes to S3 in the background after it serves. **Let it finish before any further deploy**:
+wait ~5 minutes after `active: serving`, or until `litestream restore -dry-run` (read-only) shows the replica past
+the takeover's `its first positions …` line for each file. A drain that logs
+`<db> not confirmed in S3` means its release was **unclean** (no positions): the next takeover still restores what
+the replica has, but nothing vouches that the last changes reached it.
+
+**Litestream's version.** The supervisor says `WARNING: Litestream 0.5.17 is older than 0.5.18 …` at start if the
+image carries an older one, and the Health panel shows it (`litestream`, a warning).
+
+**The staged copy** is checked before it is promoted: its follower must have stopped cleanly (exit 0 on SIGTERM;
+a SIGKILL may have cut an LTX file half-written into it), no `-wal` / `-shm` / `-journal` beside it (a follower
+writes the main file only), and `PRAGMA quick_check` through a normal read-only open (it used to be `immutable=1`,
+which reads the main file alone).
+
+#### Writing a migration
+
+It runs at the takeover, after Litestream has the file: safe for the replica, but it costs
+the takeover its time (`INIT_S` 300 s) and S3 the rewritten pages (`REPLICATING_S`). Keep it one-time (nothing left
+for the next start: `tests/test_startup_writes.py` fails when a start on an up-to-date database writes more than a
+few pages), and keep big backfills out of the start (in the background, in batches, after "run"). Never run
+`--init-state` on a hub's replicated file by hand. Tests: `tests/test_handoff.py` (the order, every refusal, a
+failed migration taken back from, the override),
+`tests/test_litestream_takeover.py` (a takeover with the real Litestream and a #419-sized migration: the replica
+restores to exactly the live files; skipped without `litestream` on PATH), `tests/test_deploy_handoff.py`,
+`tests/test_startup_writes.py`. CI installs the image's Litestream pin, sha256-checked, before the tests
+(`.github/workflows/test.yml`, #511, #512), so the real-Litestream takeover and reseed tests run on every push.
+
+### Reseeding a replica
+
+When a replica no longer restores to a good file (every takeover refuses it), and only then: an operator's
+procedure, never run by the hub or any workflow. `tools/reseed_replica.py` writes **one new full snapshot** of a
+verified file on top of the replica (Litestream's own "database behind replica" path, on a copy with nothing else
+writing): a restore of the latest is then exactly that file. Nothing is deleted or overwritten; the old history
+stays (`litestream restore -txid <old position>` gives the state before), and the bucket is versioned.
+
+1. Stop the hub: `aws ecs update-service --cluster sizeup-hub --service sizeup-hub --desired-count 0`, and wait
+   for its task to stop (the lock says `released`, or expires 35 s after its last renew).
+2. Get a good file: `litestream restore -o /tmp/cad.sqlite -txid <a position from before the damage>` (or the
+   latest, repaired), with the same config the hub uses. Check it: `PRAGMA integrity_check` = ok, the row counts
+   you expect. No `-wal` beside it (checkpoint it into the file on a copy first).
+3. With the hub's `LITESTREAM_BUCKET` / `LITESTREAM_PATH` / `LITESTREAM_REGION` and credentials in the environment
+   (`eval "$(aws configure export-credentials --format env)"`), Litestream 0.5.18 or later on PATH:
+   `python tools/reseed_replica.py --db cad --file /tmp/cad.sqlite`. Read-only: it checks the file again, reads the
+   lock and the replica's position, and prints exactly what it would write: the lock taken (generation + 1), the
+   Litestream config, the new snapshot's key (`<path>/cad.sqlite/ltx/0/<N+1>-<N+1>.ltx`), the lock released with
+   that position.
+4. If that is right: the same with `--apply` (it asks you to type the database's name). It holds the lock while it
+   works, waits for `litestream sync -wait`, restores the replica into its scratch dir and compares it with the
+   file (integrity_check, the content), then releases the lock with the new position. Any failure: the lock is
+   released unclean and it says so; the old history is untouched either way.
+5. Start the hub again (`--desired-count 1`). Its takeover restores the reseeded replica and quick-checks it.
+
+There is no "undo" of a reseed as such: restore the state wanted (`-txid <old position>`), verify it, and reseed
+again from that file (a second new snapshot on top). The old history isn't kept for ever either: Litestream's
+retention (the hub's, from its next start) prunes old LTX files (L0 files once compacted, snapshots past a day);
+then only the bucket's noncurrent versions (30 days, its lifecycle rule) still hold them.
+
+`tests/test_reseed_replica.py` rehearses it against a local file replica (`--file-replica DIR`).
+
+## Replica checks
+
+GitHub #506. On 2026-11-13 a corrupt `cad.sqlite` replica sat unnoticed for ~110 min, until the next deploy's takeover
+failed its quick_check. Then every new task crash-looped for ~35 min (Cloudflare 1033) until someone opened a browser
+([what happened](#what-happened-2026-11), and the rule that came of it). These layers now catch both cases
+(`sizeup/replicawatch.py`, run on a thread of the supervisor; tests `tests/test_replicawatch.py`):
+
+| what | when | how |
+|---|---|---|
+| **Leader check** (the main one: desired count 1, so normally no standby runs) | 2 min after the leader serves, then every `SIZEUP_REPLICA_LEADER_CHECK_MIN` (15); a file not restored yet is looked at again each minute | The leader runs its own low-rate followers of all three files into `/data/.replica-check`, at nice 19: `litestream restore -f -follow-interval SIZEUP_REPLICA_FOLLOW_S` (60 s). They start 2 min after it serves, out of its busiest minute, and one at a time (cad, then hub, then audio): each starts once the one before has done its first restore. Only the first restore is full; after that they apply only new changes. After a retake (the role back to active), they start again from scratch. For each check, a follower is stopped, its file checked and the follower started again (it resumes from its `-txid`), which is the same path a takeover depends on. Each follower is stopped half a follow interval past its own last poll (see [A drifted check copy](#a-drifted-check-copy-2026-11-15)), and a failing check copy is confirmed from a fresh restore before anything is said; in the first round after a deploy a copy stopped mid-apply is only looked at again a minute later. A follower that exits non-zero with Litestream error output (an LTX checksum mismatch, ...) is reported at once as "restore failed (possible corruption)". One killed by a signal (OOM, a SIGTERM from elsewhere) or exiting silently is "not verifiable". A follower with no file means there is no backup: not verifiable. A file not restored after 10 min is also not verifiable. |
+| **Standby check** (while one runs) | 3 min after its followers restored, then every `SIZEUP_REPLICA_CHECK_MIN` (10); never during a takeover or a drain | It copies each followed file in 8 MB pieces. The copy counts only if the `-txid` sidecar, size and mtime don't change while it is made, so the follow the takeover needs never pauses. The copy stops the moment the role changes. A file the standby's follower found no backup of is not verifiable. |
+| **Confirm** (leader and standby) | a check copy that fails its check, or (leader) one written after its `-txid` (its follower stopped part way through applying) | A fresh `litestream restore` from S3 into the work dir, at nice 19, checked the same way. Fresh ok: the copy drifted, the replica is fine: the result is ok, counted in the record (`reseeds`), no push, no "replica check FAILED" line; on the leader the fresh file becomes the follower's copy (it resumes from its txid). Unless its follower logged apply errors, or (standby) the copy is the takeover's own: then "Replica follower failing", with the FAILED line. Re-seeded 2 rounds running or more than 4 times a day: "keeps drifting". Fresh fails the check: "Replica corrupt" (the push says a fresh restore fails it too). The restore itself fails: "restore failed (possible corruption)". |
+| **The check** | | It runs read-only (not immutable) in a child process at nice 19 and is killed when the role changes or the task stops. It runs `quick_check`, and `integrity_check` once every `SIZEUP_REPLICA_FULL_H` (24) hours per file. |
+| **Task failure** | a takeover fails, the app exits, the task is fenced, a release is unclean, the supervisor crashes | The event goes into S3 and is pushed before the task exits, all within 20 s (DNS included). Three or more failures in 10 min send a separate push, "Hub crash-looping". The next task that serves pushes "Hub serving again". |
+| **Deploy check** | after each deploy (`deploy.yml`) | `tools/deploy_check.py replicas` reads **only** `replica-watch.json`; no database ever reaches a GitHub runner. It waits until the leader of this build has recorded that it serves and every file has a check after that. The job fails if one of those checks is failing (corrupt or not verifiable), or if nothing was verified within 10 min. An older leader's results still in the record are waited past, never judged (2026-11-15: the old leader's "corrupt" failed a deploy in 0 s while the new leader's first check passed). |
+
+#### A drifted check copy (2026-11-15)
+
+At 16:32 UTC the leader's check of `cad.sqlite` failed ("wrong # of entries in index ...") and "Replica corrupt" was
+pushed, while a fresh restore of the same replica minutes later passed. The replica was fine; the leader's check copy
+was not. Litestream's follower (0.5.18 `restore -f`) applies a round of LTX files page by page, syncs, and only then
+writes its `-txid` sidecar. A SIGTERM cancels its context, which cuts the S3 read of the file it is applying part way:
+the copy is left with some pages of the next position and the rest of the last one, which is exactly an index that
+doesn't match its table. The checks were every 900 s and the followers poll every 60 s, and each follower is started
+again right after its check, so every check stopped its follower within a second or two of a poll, when it applies
+what it found. Reproduced with real Litestream 0.5.18 against a local replica read through an S3 endpoint: 5 of 30
+checks at that phase failed, each one a copy written after its sidecar; every copy whose sidecar was newer passed, and
+the follower healed on its next start (it re-applies from its sidecar). Now: each follower is stopped half a poll past its own last poll, a copy
+written after its sidecar is never checked as it is, and any failing copy is confirmed from a fresh restore (above).
+A takeover never used this copy: `/data` is the task's own (only `/data/dvr` is EFS), a new task's followers restore
+from S3 into `/data/standby`, and the takeover stops them only once they reached the released position (nothing left
+to apply), refuses one that didn't exit 0 and quick_checks what it promotes.
+
+**A red replica check that may be spurious.** The deploy check allows 10 min from the end of the ECS step. The
+leader's followers start 2 min after it serves and restore one at a time, so if the first restore of `cad.sqlite`
+takes longer than ~8 min (a big file, slow S3), the check times out with "not verified within 10 min … hasn't verified
+cad yet" although nothing is wrong. That message is not a failure of the replica. Look at Settings > Station > Health
+> Replicas: `ok` for all three with a time after the deploy settles it. Don't re-run the deploy job for this: GitHub
+re-runs the whole job, which deploys again. To have the check itself say so, run it by hand with AWS credentials that
+may read the record: `python3 tools/deploy_check.py replicas --build <sha>`. A message naming a file as **corrupt** or
+**not verifiable** is never a timeout: treat it as real.
+
+* **Pushes** go to the STATUS topic, from the env (SSM `/sizeup-hub/status-topic`, else the alerts topic) or the config
+  file. A Settings override is in the CAD database, which the supervisor never opens. The `[prealert]` topics of the env and the
+  config file are refused by exact name. Pre-alert topics and the protected list kept only in Settings are not
+  visible to the supervisor: against those only the static hash backstop stands (`notify.always_protected()`), so a
+  topic protected only in Settings is not refused here. Each kind has its own slot, so one kind never holds back another, and each is pushed at most
+  once per `SIZEUP_REPLICA_PUSH_MIN` (30):
+  * `replica_corrupt` "Replica corrupt: cad.sqlite" (5; a check copy and a fresh restore from S3 both failed);
+  * `replica_restore` "Replica restore failed (possible corruption)" (5, on the first occurrence);
+  * `replica_unverifiable` "Replica not verifiable" (4, after 2 rounds);
+  * `replica_follow` "Replica follower failing" (4, at once): a fresh restore passes, but the leader's follower logged
+    apply errors (an LTX file it can't apply), or the standby's own copy (the takeover's) failed its check;
+  * `replica_drift` "Replica check copy keeps drifting" (4): re-seeded 2 rounds running, or more than 4 times in 24 h;
+  * `litestream` "Hub Litestream restarted" (4: it exited under the serving app and was started again), and
+    `replica_suspect` "Replica not verifiable" (4, at once) when that was without a checkpoint of the file
+    ([Litestream started again under the app](#litestream-started-again-under-the-app));
+  * `task` "Hub takeover failed", ... (4);
+  * `task_loop` "Hub crash-looping" (5);
+  * "Replica OK again" and "Hub serving again" (3, no limit).
+
+  A push's time is recorded in S3 only after ntfy took it (one retry). If S3 is unreadable, the push is sent anyway.
+* **The shared record** is `s3://<bucket>/sizeup-hub/replica-watch.json`: the last check per file, the files failing,
+  the last 30 task events, the push times and the leader serving now (task, build, since). It uses conditional writes,
+  like `leader.json`, under the task role's existing `backups` policy. The leader copies it to
+  `$SIZEUP_RUN_DIR/replica-watch.json` every minute for the app.
+* **Settings > Station > Health** shows the **Replicas** row: each file's result (ok, corrupt, not verifiable, stale), when it
+  was verified and by whom (unverified: Litestream was started again without a checkpoint of it), plus the task
+  events of the last 24 h (failures, and every Litestream restart). A failing file also shows as the critical alert
+  "Replica corrupt" or "Replica not verifiable". The panel only shows that alert: the supervisor has already pushed it.
+* **CloudWatch** is the backstop for a task that dies without pushing (`sizeup-aws/28-replica-watch.sh`). It adds
+  metric filters on `/ecs/sizeup-hub` and alarms on step 13's SNS → `sizeup-hub-alarm-ntfy` path:
+  * `sizeup-hub-replica-bad`: a "replica check FAILED" line in any of the last 8 periods of 15 min, so it pages once
+    per incident;
+  * `sizeup-hub-task-churn`: more than 3 task starts in 10 min.
+
+  The same script lets the deploy role GetObject the record (that one key).
+* **Budget on the leader** (0.5 vCPU, 2 GB, 20 GB ephemeral disk):
+  * **Disk:** a second copy of each file in `/data/.replica-check`, as big as the files.
+  * **Memory:** three `litestream restore -f` processes, tens of MB each.
+  * **CPU:** following costs almost nothing after the first restore. Each `quick_check` reads the whole file at nice
+    19, every 15 min; `integrity_check` runs once a day. The check log line gives each one's seconds.
+  * **S3:** each follower LISTs its replica every 60 s, roughly 3 × 1,440 polls a day, about $0.65–1.30 a month at
+    $0.005/1,000. A confirming fresh restore, only when a check copy fails: about 10 LISTs and a GET per file of its
+    restore plan (tens of requests, well under a cent) and, on the leader, the follower's usual restart.
+  * **Deploy:** one GetObject of a few KB.
+
+## AWS setup scripts
+
+The AWS side is set up by numbered scripts in a private folder, `sizeup-aws/`, outside this repo (they hold the
+account's own values). Each is run by hand, once unless noted, and is safe to run again. There is no step 24.
+
+| Step | Script | Sets up | Used by |
+|---|---|---|---|
+| 1 | `1-base.sh` | the backups bucket's settings, the log group, the ECS cluster, a security group with no inbound rules | [The hub's storage](#the-hubs-storage) |
+| 2 | `2-iam.sh` | the task's two roles (execution: image, logs, `/sizeup-hub/*` secrets; task: its bucket), GitHub's OIDC provider, the deploy role | the task, [the deploy](#a-deploy-that-checks-itself) |
+| 3 | `3-station-token.sh` | the station ↔ hub token, into SSM and the station's Keychain | [Auth and security](#auth-and-security) |
+| 4 | `4-tunnel.sh` | the Cloudflare Tunnel; its token into SSM | the `cloudflared` container |
+| 5 | `5-access-keychain.sh` | the Access service token into the station's Keychain | [Auth and security](#auth-and-security) |
+| 6 | `6-github-vars.sh` | the repository variables the deploy workflow reads | `deploy.yml` |
+| 7 | `7-deploy-pr.sh` | the task definition and the deploy workflow, as a PR | first setup |
+| 8 | `8-first-deploy.sh` | merges it: the first image and task definition | first setup |
+| 9 | `9-service.sh` | the ECS service: minimum healthy 100 %, maximum 200 % | [Rolling out hot/cold deploys](#rolling-out-hotcold-deploys) |
+| 10 | `10-budget.sh` | an email when the month's AWS cost is forecast over its budget | |
+| 11 | `11-polly.sh` | `polly:SynthesizeSpeech` for the task role | [The dispatch voice](#the-dispatch-voice-amazon-polly) |
+| 12 | `12-transcribe.sh` | Transcribe streaming and the `sizeup-*` vocabularies for the task role | [Speech-to-text per channel](#speech-to-text-per-channel-whisper-on-the-station-amazon-transcribe-on-the-hub) |
+| 13 | `13-alarms.sh` | CloudWatch alarms → SNS → a Lambda → the status topic: no running task, no logs at all, an error flood | a hub that can't speak for itself; step 28 builds on it |
+| 14 | `14-dvr-storage.sh` | EFS for the DVR; the attachments bucket (Object Lock) | [Shared storage](#shared-storage-12-h-of-our-response-area-322), [Incident attachments](#incident-attachments-323) |
+| 15 | `15-station-adapter.sh` | the adapter's credential in SSM: its KMS key, the station's IAM user, the hub's deny | [Incident sources](#incident-sources-external-cad-feeds-paging-as-the-backup-297) |
+| 16 | `16-adapter-password.sh` | changes an adapter credential (any time) | the same |
+| 17 | `17-adapter-rotate-key.sh` | rotates the station's access key, in two runs (any time) | the same |
+| 18 | `18-audio-storage.sh` | the audio bucket, its lifecycle, the task role's policy | [Audio in S3](#audio-in-s3-414) |
+| 19 | `19-incident-audio-forever.sh` | the attachments bucket's lifecycle by a `keep` tag, and tagging for the task role | not used by this tree yet: attachments here are kept a year |
+| 20 | `20-hub-password-write.sh` | lets the hub write (never read) the adapter's password | Settings > Station > Adapter (`sizeup/cloud/adapterpass.py`, #465) |
+| 21 | `21-google-maps-key.sh` | a street-view browser key into SSM | not used by this tree yet |
+| 22 | `22-preplan-docs.sh` | changes nothing: checks the backups bucket is fit for site documents | [Pre-plan points and site documents](#pre-plan-points-and-site-documents-456-459) |
+| 23 | `23-deploy-ssm-describe.sh` | `ssm:DescribeParameters` for the deploy role | [the deploy's SSM guard](#a-deploy-that-checks-itself) |
+| 25 | `25-station-logs.sh` | the log group `/sizeup/station`, the task role's policy | [Station logs](#station-logs-cloudwatch) |
+| 26 | `26-intel-bedrock.sh` | a model grant for pre-alert inference | [Listen links and inference](#listen-links-and-inference-intel); inference stays off until Settings turn it on |
+| 27 | `27-listen-links.sh` | a `listen/` prefix in the audio bucket, with a one-day lifecycle rule, for the push's Listen link | [Listen links and inference](#listen-links-and-inference-intel) |
+| 28 | `28-replica-watch.sh` | the deploy role may read `replica-watch.json`; metric filters and alarms for a bad replica and task churn | [Replica checks](#replica-checks) |
+
+Also there: `status.sh` (read-only: where the setup stands) and `env.sh` (the names the steps share). A step that adds a
+secret the task definition names must run **before** the deploy that names it
+([the SSM guard](#a-deploy-that-checks-itself) refuses otherwise).
 
 ## Packaging and the Fargate task
 
-`Dockerfile`: `python:3.14-slim`, linux/arm64 (amd64 builds too), non-root user `sizeup` (uid
-10001), `pip install .`, `data/` included, Litestream 0.5.17 pinned and sha256-checked, health check
-on `/healthz` (a Python one-liner: slim has no curl). `/healthz` answers 200 with
-`{ok, version, build, role, station, public_url}` while the process serves (it doesn't depend on the
-station). Build with `--build-arg SIZEUP_BUILD=$(git rev-parse HEAD)`: the full sha (the deploy
+`Dockerfile`: `python:3.14-slim`, linux/arm64 (amd64 builds too), non-root user `sizeup` (uid 10001), `pip install
+".[docs,intel-llm]"` (pypdf, PDFium and Pillow for [site documents](#pre-plan-points-and-site-documents-456-459); the
+Anthropic SDK with boto3 for the intel inference stage, pinned by `deploy/hub/constraints-intel-llm.txt`), `data/`
+included, Litestream 0.5.18 pinned and sha256-checked, health check on `/healthz` (a Python one-liner: slim has no
+curl). `/healthz` answers 200 with `{ok, version, build, role, station, public_url}` while the process serves (it
+doesn't depend on the station). Build with `--build-arg SIZEUP_BUILD=$(git rev-parse HEAD)`: the full sha (the deploy
 workflow passes it); stations follow it.
 
-One task, desired count 1, ephemeral disk:
+One task (0.5 vCPU, 2 GB, arm64, Fargate's default 20 GB ephemeral disk: `deploy/aws/taskdef.json`), desired count 1:
 
 * **hub** container (this image); its task role may call `polly:SynthesizeSpeech` (`11-polly.sh`). Entrypoint `deploy/hub/entrypoint.sh`:
   * `LITESTREAM_BUCKET` set: `python -m sizeup.handoff`, the supervisor ([Deploys](#deploys-the-hotcold-handoff)):
     the leader lock, the standby's followers, then `litestream replicate` (no `-exec`) and `python -m sizeup` as
     its children, with `deploy/hub/litestream.yml` (bucket from `LITESTREAM_BUCKET`, prefix `LITESTREAM_PATH`
-    default `sizeup-hub`, region `LITESTREAM_REGION` default `AWS_REGION`, a control socket for `litestream sync`;
+    default `sizeup-hub`, region `LITESTREAM_REGION` default `AWS_REGION`, a control socket for `litestream sync`,
+    the WAL read into a file for S3 every `SIZEUP_LITESTREAM_SYNC_S` seconds, default 30, set in the image:
+    [How often the replica is written](#how-often-the-replica-is-written);
     credentials from the **task role**, no keys). Its `/healthz` is on port 8089 (the task's health check).
   * unset: just `python -m sizeup` (local dev).
-  * Environment: `SIZEUP_STATION_TOKEN` (secret from SSM), `SIZEUP_PUBLIC_URL`, `SIZEUP_SHARED_DIR`, optionally
-    `SIZEUP_PORT`, `SIZEUP_511NY_USER` and `SIZEUP_511NY_PASS` (secrets from SSM, [the highway layers](#highway-layers-cameras-incidents-signs-mileposts-the-thruway-511ny));
-    the image sets `SIZEUP_STATE_DIR=/data`, `SIZEUP_CONFIG`.
+  * Environment and secrets: [the table below](#the-hub-containers-environment). The image sets
+    `SIZEUP_STATE_DIR=/data`, `SIZEUP_CONFIG`, `SIZEUP_PORT=8090` and `SIZEUP_BUILD`.
+  * Volumes: `shared` at `/run/sizeup-shared` (both containers) and `dvr`, the EFS access point, at `/data/dvr`
+    ([Shared storage](#shared-storage-12-h-of-our-response-area-322)).
 * **cloudflared** container: the same image, `deploy/hub/connector.sh` (cloudflared 2026.10.7, pinned and
   sha256-checked in the Dockerfile), `TUNNEL_TOKEN` secret from SSM. It starts cloudflared only when the hub's
   supervisor writes `/run/sizeup-shared/leader` (a task volume both mount). awsvpc: it reaches the hub at
@@ -2893,31 +3941,71 @@ One task, desired count 1, ephemeral disk:
 `deploy/hub/compose.yaml` is a local convenience only (hub + cloudflared sharing a network
 namespace, a named volume for `/data`, no Litestream).
 
+### The hub container's environment
+
+What `deploy/aws/taskdef.json` sets (values and SSM names are in that file), and what the code reads beyond it:
+
+| Variable | From | For |
+|---|---|---|
+| `LITESTREAM_BUCKET`, `LITESTREAM_PATH`, `AWS_REGION` | task definition | the backups bucket: Litestream, `leader.json`, `replica-watch.json`, the map caches. Set: the supervisor runs |
+| `SIZEUP_PUBLIC_URL` | task definition | links in pushes, `/healthz` |
+| `SIZEUP_SHARED_DIR` | task definition (both containers) | the `leader` file the connector waits for |
+| `SIZEUP_ATTACHMENTS_BUCKET` | task definition | [Incident attachments](#incident-attachments-323) |
+| `SIZEUP_AUDIO_BUCKET` | task definition (#454) | [Audio in S3](#audio-in-s3-414) |
+| `SIZEUP_PREPLAN_DOCS_BUCKET` | task definition | [site documents](#pre-plan-points-and-site-documents-456-459), prefix `preplan-docs/` |
+| `SIZEUP_STATION_TOKEN` | SSM secret | the station's bearer token |
+| `SIZEUP_ALERT_TOPIC`, `SIZEUP_STATUS_TOPIC` | SSM secrets | [the push topics](#the-alert-and-status-topics-ntfy) |
+| `SIZEUP_511NY_USER`, `SIZEUP_511NY_PASS` | SSM secrets | [511NY](#highway-layers-cameras-incidents-signs-mileposts-the-thruway-511ny) |
+| `SIZEUP_AISSTREAM_KEY` | SSM secret | [Vessels](#vessels-ais) |
+| `TUNNEL_TOKEN` | SSM secret (the cloudflared container) | the Cloudflare Tunnel |
+| `SIZEUP_ACCESS_TEAM`, `SIZEUP_ACCESS_AUD` | optional (the config file has both) | Cloudflare Access identity |
+| `SIZEUP_INTEL_TOPIC`, `SIZEUP_MTA_KEY`, `SIZEUP_STATUS_TOKEN` | optional, not set today | a topic for intel alone; an MTA key; another status token |
+| `SIZEUP_HANDOFF_SKIP_REPLICATION_CHECKS` | optional, an operator's override | [the override](#the-operators-override) |
+| `SIZEUP_REPLICA_CHECK_MIN`, `_LEADER_CHECK_MIN`, `_FOLLOW_S`, `_FULL_H`, `_PUSH_MIN` | optional | [Replica checks](#replica-checks): 10, 15, 60, 24, 30 |
+| `SIZEUP_STATION_LOG_GROUP`, `SIZEUP_HUB_LOG_GROUP` | optional | [station logs](#station-logs-cloudwatch): `/sizeup/station`, `/ecs/sizeup-hub` |
+| `SIZEUP_CACHE_S3=off` | optional | the map caches local only |
+| `SIZEUP_LEASE_FILE`, `SIZEUP_APP_GATE`, `SIZEUP_RUN_DIR`, `SIZEUP_CONTROL_PORT`, `LITESTREAM_SOCKET` | the supervisor and the entrypoint | the fence, the warm app's gate, the run dir (`/tmp/sizeup-run`), the control port (8089) |
+
+A secret named in the task definition must exist in SSM before the deploy: step 1 of
+[the deploy's checks](#a-deploy-that-checks-itself) refuses otherwise.
+
 ## Code
 
-`sizeup/cloud/`: `station.py` (StationLink: outbox, forwarder, state, jobs), `autoupdate.py` (the
-station follows the hub's build: `Watch` in the station, the root updater), `stationmode.py`
-(Settings → System → Station and the station page's hub link: on / off at runtime, state/cloud.json, the Keychain), `outbox.py`,
-`client.py` (kept-alive HTTPS), `hub.py` (Hub: ingest, health, jobs; HubApp; the audio retention and uploader;
-the audio's S3 store is `sizeup/audiostore.py`, tests `tests/test_audio_store.py`), `health.py` (station health:
-the model, the alerts, `/api/cad/health`, `/api/station/status`; `sizeup/notify.py` the pushes, `health.js` /
-`health.css` Settings → Health, `tools/deploy_check.py` the deploy check), `hubstore.py`
-(hub.sqlite, audio.sqlite), `access.py` (Cloudflare Access identity; the gate is in
-`sizeup/web/server.py`, the operator in `sizeup/cad/api.py` and `Settings.person`; the activity log in
-`sizeup/cad/activity.py`). Seams in `sizeup/app.py`: `_emit`, `_heard`, `_page_heard`, `_retext`, `_stt`,
-`_aws_start` / `_aws_done` / `_aws_failed`, `set_channel_prefs`, `make_app`; in `sizeup/cad/service.py`:
-`remote_voice`, `_render_hub`, `audio_blobs`, `cloud`, `radio_ctx`. The voice: `sizeup/polly.py`. Speech-to-text per channel: `sizeup/channels.py`,
-`sizeup/transcribe.py`, `sizeup/aws.py`. The station page: `sizeup/web/static/station.html`, `station.js`,
-`hublink.js`, `station.css`; its routes in `sizeup/web/server.py`. Tests: `tests/test_station_page.py`, `tests/test_polly.py`, `tests/test_cloud.py`, `tests/test_stationmode.py`,
+`sizeup/cloud/`: `station.py` (StationLink: outbox, forwarder, state, jobs), `autoupdate.py` (the station follows the
+hub's build: `Watch` in the station, the root updater), `stationmode.py` (Settings → Station → Hub link and the
+station page's hub link: on / off at runtime, state/cloud.json, the Keychain), `outbox.py`, `client.py` (kept-alive
+HTTPS), `hub.py` (Hub: ingest, health, jobs; HubApp; the audio retention and uploader; the audio's S3 store is
+`sizeup/audiostore.py`, tests `tests/test_audio_store.py`), `health.py` (station health: the model, the alerts,
+`/api/cad/health`, `/api/station/status`; `sizeup/notify.py` the pushes, `health.js` / `health.css` Settings → Station
+→ Health, `tools/deploy_check.py` the deploy check), `hubstore.py` (hub.sqlite, audio.sqlite), `access.py` (Cloudflare
+Access identity; the gate is in `sizeup/web/server.py`, the operator in `sizeup/cad/api.py` and `Settings.person`; the
+activity log in `sizeup/cad/activity.py`). Seams in `sizeup/app.py`: `_emit`, `_heard`, `_page_heard`, `_retext`,
+`_stt`, `_aws_start` / `_aws_done` / `_aws_failed`, `set_channel_prefs`, `make_app`; in `sizeup/cad/service.py`:
+`remote_voice`, `_render_hub`, `audio_blobs`, `cloud`, `radio_ctx`. The voice: `sizeup/polly.py`. Speech-to-text per
+channel: `sizeup/channels.py`, `sizeup/transcribe.py`, `sizeup/aws.py`. The station page:
+`sizeup/web/static/station.html`, `station.js`, `hublink.js`, `station.css`; its routes in `sizeup/web/server.py`.
+Tests: `tests/test_station_page.py`, `tests/test_polly.py`, `tests/test_cloud.py`, `tests/test_stationmode.py`,
 `tests/test_access.py`, `tests/test_roles.py`, `tests/test_activity.py`, `tests/test_channels.py`,
 `tests/test_transcribe.py` (fakes: `tests/fake_transcribe.py`), `tests/test_autoupdate.py`,
 `tests/test_station_install.py`. The county GIS layers: `sizeup/gis.py` (`tests/test_gis.py`, fixtures
 `tests/fixtures/wcgis/`; only what changed: `tests/test_gis_cache.py`), `sizeup/web/static/gislayers.js` (a group in
-maplayers.js's Layers box). The map caches' S3 copies: `sizeup/cachesync.py` (`tests/test_gis_cache.py`). The hot/cold deploy (#247): `sizeup/handoff.py` (the
-supervisor), `sizeup/leaderlock.py` (the S3 lock), `sizeup/fence.py` (the app's side), `deploy/hub/connector.sh`, the
-drain in `sizeup/web/server.py` (`Gate`, `WebServer.drain`), the pill in `sizeup/web/static/live.js` (`LiveConn`), the
-station's `Backoff` in `sizeup/cloud/client.py` (`tests/test_handoff.py`, `tests/test_deploy_handoff.py`). Metro-North's
-trains: `sizeup/trains.py` (`tests/test_trains.py`, fixtures `tests/fixtures/mta/`), `sizeup/web/static/trains.js` (a group in
-the Layers box, and the event's "Trains approaching" panel). Aircraft near HPN: `sizeup/aircraft.py` (`tests/test_aircraft.py`, fixtures
-`tests/fixtures/aircraft/`), `sizeup/web/static/aircraft.js` (a group in the Layers box). Weather and water: `sizeup/weather.py` (`tests/test_weather.py`, fixtures `tests/fixtures/weather/`), `sizeup/web/static/weather.js`
-(the banner, the header, the tides, a group in the Layers box).
+maplayers.js's Layers box). The map caches' S3 copies: `sizeup/cachesync.py` (`tests/test_gis_cache.py`). The hot/cold
+deploy (#247): `sizeup/handoff.py` (the supervisor), `sizeup/leaderlock.py` (the S3 lock), `sizeup/fence.py` (the
+app's side), `deploy/hub/connector.sh`, the drain in `sizeup/web/server.py` (`Gate`, `WebServer.drain`), the pill in
+`sizeup/web/static/live.js` (`LiveConn`), the station's `Backoff` in `sizeup/cloud/client.py`
+(`tests/test_handoff.py`, `tests/test_deploy_handoff.py`). Metro-North's trains: `sizeup/trains.py`
+(`tests/test_trains.py`, fixtures `tests/fixtures/mta/`), `sizeup/web/static/trains.js` (a group in the Layers box,
+and the event's "Trains approaching" panel). Aircraft near HPN: `sizeup/aircraft.py` (`tests/test_aircraft.py`,
+fixtures `tests/fixtures/aircraft/`), `sizeup/web/static/aircraft.js` (a group in the Layers box). Weather and water:
+`sizeup/weather.py` (`tests/test_weather.py`, fixtures `tests/fixtures/weather/`), `sizeup/web/static/weather.js` (the
+banner, the header, the tides, a group in the Layers box).
+
+Since then: the replica watch `sizeup/replicawatch.py` (`tests/test_replicawatch.py`), the reseed tool
+`tools/reseed_replica.py` (`tests/test_reseed_replica.py`), the deploy's checks `tools/taskdef_params.py` and
+`tools/deploy_check.py` (`tests/test_deploy_ssm_guard.py`, `tests/test_deploy_check.py`), the STT catch-up
+`sizeup/sttcatchup.py` (`tests/test_stt_catchup.py`), radio pre-alerts `sizeup/intel/` (`tests/test_intel.py`), the
+station's logs `sizeup/cloud/logread.py`, `logship.py`, `cwlogs.py`, `sizeup/logscrub.py`
+(`tests/test_station_logs.py`), the adapter's SSM credential `sizeup/cloud/adapterssm.py`
+(`tests/test_adapter_ssm.py`), pre-plans `sizeup/cad/preplan.py`, `preplan_docs.py`, `sizeup/docstore.py`,
+`docfiles.py`, `pdfcheck.py`, the audio's S3 store `sizeup/audiostore.py`, incident attachments
+`sizeup/attachments.py`, the hub's CPU `sizeup/perf.py`.

@@ -25,7 +25,7 @@ from sizeup.geo.gazetteer import SCHEMA, Gazetteer
 from sizeup.geo.pagegeo import block_of, location_detail, place_address, what_is_here
 from sizeup.geo.places import PlaceIndex
 from tests.test_cad import make_cad
-from tests.test_roles import COREY, JULIAN, VAL, call, people
+from tests.test_roles import CASEY, JORDAN, VAL, call, people
 
 STATIC = Path(__file__).resolve().parent.parent / "sizeup" / "web" / "static"
 EXTRACT = Path(__file__).parent / "fixtures" / "gazetteer" / "regent_176.json"
@@ -142,9 +142,9 @@ def event(cad, **kw):
 
 def test_an_incident_keeps_the_place_and_its_address_apart(tmp_path):
     cad = make_cad(tmp_path)
-    inc = event(cad, address="575 Boston Post Rd @ Whole Foods Market", place="Whole Foods Market", lat=40.99242, lon=-73.675505)
+    inc = event(cad, address="40 Example Rd @ Sample Market", place="Sample Market", lat=40.99242, lon=-73.675505)
     assert (inc["address"], inc["place"], inc["place_address"]) == \
-        ("575 Boston Post Rd @ Whole Foods Market", "Whole Foods Market", "575 Boston Post Rd")
+        ("40 Example Rd @ Sample Market", "Sample Market", "40 Example Rd")
     # no street address in the data: "@ <place>" at its own point; the dispatcher types the address in front later
     inc = event(cad, address="", place="Lyon Park", lat=41.001, lon=-73.664)
     assert (inc["address"], inc["place"], inc["place_address"], inc["lat"]) == ("@ Lyon Park", "Lyon Park", "", 41.001)
@@ -161,8 +161,8 @@ def test_an_incident_keeps_the_place_and_its_address_apart(tmp_path):
 
 
 def test_said_on_the_air_without_the_at_sign():
-    w = where({"address": "575 Boston Post Rd @ Whole Foods Market", "cross_street": "S Regent St and High St"})
-    assert "@" not in w and "Whole Foods Market" in w and "575" in w and "cross of" in w
+    w = where({"address": "40 Example Rd @ Sample Market", "cross_street": "S Regent St and High St"})
+    assert "@" not in w and "Sample Market" in w and "40" in w and "cross of" in w
     assert where({"address": "@ Lyon Park"}) == "Lyon Park"
 
 
@@ -232,10 +232,10 @@ def test_permissions_are_unchanged(tmp_path, regent):
     api = CadApi(wired(tmp_path, regent))
     people(api.cad)
     assert call(api, "/api/cad/incident", {"type": "STRU", "address": "x @ Y", "place": "Y"}, VAL)[0] == 403
-    code, inc = call(api, "/api/cad/incident", {"type": "STRU", "address": "x @ Y", "place": "Y"}, JULIAN)
+    code, inc = call(api, "/api/cad/incident", {"type": "STRU", "address": "x @ Y", "place": "Y"}, JORDAN)
     assert code == 200 and inc["place"] == "Y"
     assert call(api, f"/api/cad/incident/{inc['id']}", {"address": "z @ Y"}, VAL)[0] == 403
-    assert call(api, f"/api/cad/incident/{inc['id']}", {"address": "z @ Y"}, COREY)[0] == 200
+    assert call(api, f"/api/cad/incident/{inc['id']}", {"address": "z @ Y"}, CASEY)[0] == 200
     # the map's lookups only read: anyone signed in, a viewer too
     for path, q in (("/api/cad/geocode/here", f"lat={REGENT_135[0]}&lon={REGENT_135[1]}"), ("/api/cad/geocode", "q=135+s+regent")):
         assert api.get(path, q, Identity(email=VAL))[0] == 200

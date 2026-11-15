@@ -57,6 +57,8 @@ SURFACE_FILE = ROOT / "data" / "airport" / "khpn_surface.geojson"     # the map'
 OPERATORS_FILE = ROOT / "data" / "atc" / "khpn_operators.csv"
 AIRLINES_FILE = ROOT / "data" / "airport" / "airlines.csv"
 VOCABULARY = "sizeup-atc"          # Amazon Transcribe custom vocabulary for the airband channels
+MAX_AGE_S = 900.0                  # a transcript of a transmission that ended longer ago than this raises no pre-alert:
+                                   # a late text (a re-run, a shed clip caught up hours later) is history, not news
 NM_M = 1852.0
 PROMPT_MAX = 760                   # whisper reads ~224 prompt tokens (shortfinal stt_prompt.MAX_CHARS)
 
@@ -1040,6 +1042,8 @@ class AtcWatch:
         if ch not in self.channels or not text:
             return None
         at = float(t.get("end") or t.get("start") or self.clock())
+        if self.clock() - at > MAX_AGE_S:
+            return None
         norm = normalize(text)
         hits = self.rules.hits(norm)
         with self._lock:

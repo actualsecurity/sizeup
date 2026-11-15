@@ -64,9 +64,15 @@ POST /api/cad/perf/profile {"seconds": 30, "hz": 25}  admins: sample every threa
                                by the CPU each used; the answer is the summary and the folded stacks. One at a time
                                (409), a rest after each (429). Over PROFILE_WAIT_S (or "wait": false): 202 at once
 GET  /api/cad/perf/profile[?format=folded]  the last profile again (folded: its stacks as text, for a flame graph)
-GET  /api/cad/health           the hub only: Settings > Health (sizeup/cloud/health.py, #79, #203): the station's
+GET  /api/cad/health           the hub only: Settings > Station > Health (sizeup/cloud/health.py, #79, #203): the station's
                                health, its alerts and 24 h of their history; admins only (sizeup/cad/api.py
                                ADMIN_READS), polled by the tab while open, never in the state push
+GET  /api/cad/adapter-password the hub only: Settings > Station > Adapter's password card (sizeup/cloud/adapterpass.py):
+                               its SSM version, when and who saved it, the next save, the adapter's state; admins only
+                               (ADMIN_READS); never the value, which the hub can't read
+POST /api/cad/adapter-password {"password", "again", "confirm"?}  admins, JSON with X-Sizeup-Action: adapter-password
+                               only: one new SSM version (write-only). Refused before the body is read for anyone
+                               else; at most one per 5 min; never logged, audited, answered or raised with the value
 GET  /api/cad/datasources, POST /api/cad/datasources/<key>/refresh
                                Settings > Data sources (sizeup/datasources.py, #186): every data pull, Refresh now
                                (sizeup/cad/api.py); polled by the panel while open, never in the state push
@@ -121,11 +127,14 @@ from pathlib import Path
 from typing import Callable
 from urllib.parse import parse_qsl, urlsplit
 
+from sizeup import fence as fence_mod
 from sizeup import sourcekeys
 
 STATIC_DIR = Path(__file__).parent / "static"
 MAX_CAD_BODY = 65536
+MAX_DOC_BODY = 25 * 1024 * 1024      # a site document upload (#459, sizeup/cad/preplan_docs.py MAX_BYTES)
 # role = "station": the only CAD routes served, (method, path): what Settings > Radios (radio-controls.js) uses
+# (not the squelch: set on the CAD of record only, Settings > Radios > Squelch; the station applies what the hub sends)
 STATION_CAD = {("GET", "/api/cad/stt"), ("POST", "/api/cad/settings/channels"), ("POST", "/api/cad/settings/stt")}
 
 # Caching (#137). Static files: the pages name each by its content (/static/cad.js?v=<hash>, rewritten as the
@@ -378,13 +387,13 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                  aircraft=None, roadwork=None, set_adsb: Callable[[str], str | None] | None = None, vessels=None,
                  airband_ab: Callable[..., str | None] | None = None, reception=None,
                  gate: Gate | None = None, health_fn: Callable[[], dict] | None = None, perf=None,
-                 clip_context: Callable[[str], bool] | None = None):
+                 clip_context: Callable[[str], bool] | None = None, adapter_password=None):
     """clip_context(id): the clip is another P25 system's (#419): served only to a signed-in person
     (sizeup/sourcekeys.py may_see_context), a 404 to anyone else. cad: a CadApi (sizeup/cad/api.py) and cad_b its own broadcaster (the console's state is
     small and separate from the monitor's, so neither page carries the other's). station: the hub's
     ingest (sizeup/cloud/hub.py Hub), which checks the station's token before reading any body.
     access: an AccessVerifier (sizeup/cloud/access.py): who signed in, required on the hub.
-    station_mode: Settings > System > Station (sizeup/cloud/stationmode.py StationMode), not on the hub.
+    station_mode: Settings > Station > Hub link (sizeup/cloud/stationmode.py StationMode), not on the hub.
     role: [cloud] role; "station" serves the station page and refuses the CAD's (see the top).
     roads: the highway layers (sizeup/roads.py Roads): /api/cad/roads, /api/cad/cameras..., GET only.
     gis: the county GIS layers (sizeup/gis.py Gis): /api/cad/gis..., GET only (ETag, gzip).
@@ -397,7 +406,8 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
     station_health: the hub's StationHealth (sizeup/cloud/health.py): GET /api/cad/health.
     gate: draining and the hub's single-writer fence (Gate).
     health_fn: more for /healthz, asked on every check (cheap): the role, and what is still loading in the
-        background (#251). /healthz is 200 as soon as this serves the CAD, whatever is still loading."""
+        background (#251). /healthz is 200 as soon as this serves the CAD, whatever is still loading.
+    adapter_password: the hub's (sizeup/cloud/adapterpass.py AdapterPassword): /api/cad/adapter-password."""
     assets = Assets(STATIC_DIR)
     gate = gate or Gate()
     hub_says = json.dumps({"error": "this is the hub: station forwarding is switched on the station"}).encode()
@@ -423,6 +433,8 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
         t0 = 0.0                         # when the request was read (perf_counter): Server-Timing and the log (#284)
         c0 = 0.0                         # ... and this thread's CPU then (thread_time): the request's own CPU (#425)
         code = 0                         # the status last sent
+        refused0 = 0                     # this thread's refused writes when the request began (sizeup/fence.py, #501)
+        answered = False                 # its status line is sent
 
         def parse_request(self) -> bool:
             """Every request, whatever its method and however many on one connection: its clock starts once its
@@ -482,6 +494,78 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                                    b"<p>Sign in through Cloudflare Access to use sizeup: reload this page.</p>",
                               "text/html; charset=utf-8") or False
 
+        def _doc_file(self, path: str, query: str) -> None:
+            """GET /api/cad/preplan/docs/<id>/file | plan (#459): streamed from the store; a client that takes no bytes
+            for DOWNLOAD_WRITE_S is dropped (the store's connection and the download slot are let go: Stream.close)."""
+            from sizeup.cad.preplan_docs import DOWNLOAD_WRITE_S
+            before = self.connection.gettimeout()
+            self.connection.settimeout(DOWNLOAD_WRITE_S)
+            try:
+                return self._send(*cad.get(path, query, self.who))
+            finally:
+                try:
+                    self.connection.settimeout(before)
+                except OSError:
+                    pass
+
+        def _upload_doc(self, path: str) -> None:
+            """POST /api/cad/preplan/docs (#459): a site document, the file itself as the body (at most MAX_DOC_BODY),
+            its details in X-Sizeup-Doc (a header a page elsewhere can't send without a CORS preflight). Who may is
+            checked before the body is read; a refused or oversized one is never read."""
+            if self.who is not None and (refused := cad.permit(path, self.who, client=self._client())):
+                self.close_connection = True     # the body is left unread
+                return self._send(*refused)
+            if not self.headers.get("X-Sizeup-Doc"):
+                self.close_connection = True
+                return self._send(400, b'{"error":"X-Sizeup-Doc: the document\'s details"}', "application/json")
+            try:
+                n = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                n = -1
+            if not 0 < n <= MAX_DOC_BODY:
+                self.close_connection = True
+                return self._send(413, b'{"error":"a file of at most 25 MB"}', "application/json")
+            from sizeup.cad.preplan_docs import UPLOAD_WAIT_S, UPLOADS
+            if not UPLOADS.acquire(timeout=UPLOAD_WAIT_S):  # a slot before the body is read (memory: 2 at most)
+                self.close_connection = True     # the body is left unread
+                return self._send(503, b'{"error":"Busy with other uploads: try again in a moment"}', "application/json",
+                                  {"Retry-After": "5"})
+            try:
+                data = self._read_doc(n)
+                if data is None:                 # stalled or cut short: the slot is let go, the connection closed
+                    self.close_connection = True
+                    return self._send(408, b'{"error":"the upload stalled: try again"}', "application/json")
+                return self._send(*cad.upload(path, self.headers.get("X-Sizeup-Doc") or "", data, self.who,
+                                              self._client()))
+            finally:
+                UPLOADS.release()
+
+        def _read_doc(self, n: int) -> bytes | None:
+            """The upload's n bytes, each read within UPLOAD_READ_S and all of them within UPLOAD_DEADLINE_S; None when
+            the client stalls or stops short (it can't hold one of the two upload slots for long)."""
+            from sizeup.cad.preplan_docs import UPLOAD_DEADLINE_S, UPLOAD_READ_S
+            before = self.connection.gettimeout()
+            self.connection.settimeout(UPLOAD_READ_S)
+            end = time.monotonic() + UPLOAD_DEADLINE_S
+            parts, got = [], 0
+            try:
+                while got < n:
+                    if time.monotonic() > end:
+                        return None
+                    b = self.rfile.read1(min(65536, n - got))     # what has come, up to 64 KB (a read each)
+                    if not b:
+                        return None
+                    parts.append(b)
+                    got += len(b)
+                return b"".join(parts)
+            except (TimeoutError, OSError):
+                return None
+            finally:
+                try:
+                    self.connection.settimeout(before)
+                except OSError:
+                    pass
+
         def _client(self) -> tuple[str, str]:
             """(ip, browser) for the activity log: the visitor's address as Cloudflare saw it."""
             h = self.headers
@@ -496,6 +580,11 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
             """The answer. With an ETag the browser already has (If-None-Match): 304, no body. Text and JSON
             over GZIP_MIN go gzipped to a browser that takes it (gz: already compressed), unless the
             handler did that itself (Content-Encoding)."""
+            if code < 400 and fence_mod.refused() != self.refused0:
+                # a write this request made was refused (not the leader, #501), even if a handler caught it on the
+                # way: never a success for it, a 503 to try again (with the leader)
+                return self._updating()
+            self.answered = True
             h = dict(headers or {})
             if code == 200 and h.get("ETag") and etag_matches(self.headers.get("If-None-Match"), h["ETag"]):
                 code, body = 304, b""
@@ -506,28 +595,32 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                     body = gz if gz is not None else gzip.compress(body, 5)
                     h["Content-Encoding"] = "gzip"
             h.setdefault("Server-Timing", f"app;dur={self._ms():.1f}")     # the time to the answer, gzip included (#284)
-            self.send_response(code)
-            unsized = not isinstance(body, (bytes, bytearray, memoryview)) and getattr(body, "length", 0) is None
-            if code != 304:
-                self.send_header("Content-Type", ctype)
-                if unsized:                       # a body made as it goes (an export, #323): to the end of the connection
-                    h["Connection"] = "close"
-                    self.close_connection = True
-                else:
-                    self.send_header("Content-Length", str(len(body)))
-            for k, v in h.items():
-                self.send_header(k, v)
-            if "Cache-Control" not in h:
-                self.send_header("Cache-Control", "no-store")
-            self.end_headers()
             streamed = not isinstance(body, (bytes, bytearray, memoryview))   # sizeup/attachments.py Stream (#323)
-            try:
+            try:                                  # a streamed body is closed whatever happens from here (#459: the
+                self.send_response(code)          # client gone before its headers too: its slot, its store connection)
+                unsized = streamed and getattr(body, "length", 0) is None
+                if code != 304:
+                    self.send_header("Content-Type", ctype)
+                    if unsized:                   # a body made as it goes (an export, #323): to the end of the connection
+                        h["Connection"] = "close"
+                        self.close_connection = True
+                    else:
+                        self.send_header("Content-Length", str(len(body)))
+                for k, v in h.items():
+                    self.send_header(k, v)
+                if "Cache-Control" not in h:
+                    self.send_header("Cache-Control", "no-store")
+                self.end_headers()
                 if code == 304:
                     return
                 if self.command != "HEAD":
                     try:
                         if streamed:
+                            deadline = getattr(body, "deadline", None)    # a whole download, at most this (#459)
                             for piece in body:
+                                if deadline is not None and time.monotonic() > deadline:
+                                    self.close_connection = True
+                                    break
                                 self.wfile.write(piece)
                         else:
                             self.wfile.write(body)
@@ -564,6 +657,7 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
             return self._send(code, body, ctype, h)
 
         def _redirect(self, where: str) -> None:
+            self.answered = True
             self.send_response(302)
             self.send_header("Location", where)
             self.send_header("Content-Length", "0")
@@ -575,12 +669,24 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
             self._send(503, UPDATING, "application/json", {"Retry-After": "2", "Cache-Control": "no-store",
                                                            "Connection": "close"})
 
+        def _fenced(self, call: Callable[[], None]) -> None:
+            """call (the request's own handler); a write it made refused (FencedWrite: this task isn't the leader any
+            more, sizeup/fence.py, #501): 503 + Retry-After, as the Gate answers (nothing was taken: the station's
+            outbox, the console, send it again)."""
+            self.refused0, self.answered = fence_mod.refused(), False
+            try:
+                call()
+            except fence_mod.FencedWrite:
+                if not self.answered:
+                    return self._updating()
+                self.close_connection = True
+
         def do_GET(self) -> None:
             if gate.refuse(write=False):
                 return self._updating()
             gate.enter()
             try:
-                self._get()
+                self._fenced(self._get)
             finally:
                 gate.leave()
                 if perf is not None:
@@ -591,7 +697,7 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                 return self._updating()
             gate.enter()
             try:
-                self._post()
+                self._fenced(self._post)
             finally:
                 gate.leave()
                 if perf is not None:
@@ -652,6 +758,15 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                                           {"Cache-Control": "no-store"})
                 return self._send(200, json.dumps(out, separators=(",", ":")).encode(), "application/json",
                                   {"Cache-Control": "no-store"})
+            if path == ADAPTER_PASSWORD and adapter_password is not None and cad is not None:
+                if self.who is None:
+                    return self._send(403, b'{"error":"sign in"}', "application/json")
+                if (no := cad.read_refused(path, self.who)) is not None:
+                    return self._send(*no)
+                return self._send(200, json.dumps(adapter_password.status(cad.cad.store), separators=(",", ":")).encode(),
+                                  "application/json", {"Cache-Control": "no-store"})
+            if path.startswith("/api/cad/preplan/docs/") and path.endswith(("/file", "/plan")) and cad is not None:
+                return self._doc_file(path, url.query)
             if path.startswith("/api/cad/") and cad is not None:
                 return self._send(*self._data(path, url.query, cad.get(path, url.query, self.who)))
             if path.startswith("/static/"):
@@ -741,6 +856,10 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                 return self._send(409, station_says(), "application/json")
             if path == "/api/cad/perf/profile" and perf is not None:
                 return self._profile(path)
+            if path == ADAPTER_PASSWORD and adapter_password is not None and cad is not None:
+                return self._adapter_password(path)
+            if path == "/api/cad/preplan/docs" and cad is not None:
+                return self._upload_doc(path)
             if path.startswith("/api/cad/") and cad is not None:
                 try:
                     n = int(self.headers.get("Content-Length") or 0)
@@ -873,6 +992,15 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                         raise ValueError("source: a source id")
                 except ValueError as e:
                     return self._send(400, json.dumps({"error": str(e)}).encode(), "application/json")
+                if station is not None and cad is not None and body.get("confirm_refused") is not True:
+                    # the hub's Reset keeps the refused SSM versions (the private adapter), but while there are any it is one
+                    # more log-on on a shared account: an explicit confirm
+                    from sizeup.cloud.adapterpass import station_sources
+                    refused = max([s["refused"] for s in station_sources(cad.cad.store) if not src or s["source"] == src]
+                                  + [0])
+                    if refused:
+                        return self._send(409, json.dumps({"error": f"{refused} password version(s) refused in 24 h: confirm",
+                                                           "refused": refused}).encode(), "application/json")
                 if (wait_s := reset_limit.take(src)) > 0:
                     return self._send(429, json.dumps({"error": f"reset again in {wait_s / 60:.0f} min (one per 5 min)"})
                                       .encode(), "application/json")
@@ -948,11 +1076,90 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                 return self._send(202, json.dumps({"running": True, **p}).encode(), "application/json")
             self._send(200, json.dumps(out, separators=(",", ":")).encode(), "application/json", {"Cache-Control": "no-store"})
 
+        def _adapter_password(self, path: str) -> None:
+            """POST /api/cad/adapter-password: an admin's new station adapter password, written to SSM (write-only).
+            Who, the header and the length are checked before a byte of the body is read; the body is read into a
+            bytearray, overwritten once parsed (best effort: Python can't wipe the strings it made); the values go on
+            as Hidden and every reference is dropped at the end of the request. Every answer and log line here is fixed
+            text or AWS's error code: never the body, never an exception's text."""
+            from sizeup.cloud.adapterpass import Hidden, SaveRefused
+
+            def no(code: int, msg: str, **more) -> None:
+                self.close_connection = True
+                return self._send(code, json.dumps({"error": msg, **more}).encode(), "application/json",
+                                  {"Cache-Control": "no-store"})
+            ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+            if ctype != "application/json" or self.headers.get("X-Sizeup-Action") != "adapter-password":
+                return no(400, "JSON with X-Sizeup-Action: adapter-password only")
+            if self.who is None:                  # never without a verified person (Cloudflare Access)
+                return no(403, "sign in")
+            if (refused := cad.permit(path, self.who, client=self._client())):
+                self.close_connection = True      # (the body, unread)
+                return self._send(*refused)
+            try:
+                n = int(self.headers.get("Content-Length") or "")
+            except ValueError:
+                n = -1
+            if not 0 < n <= ADAPTER_PASSWORD_BODY:
+                return no(400, "Bad or too large body")
+            raw = bytearray(n)
+            new = again = None
+            try:
+                view, got = memoryview(raw), 0
+                while got < n:
+                    k = self.rfile.readinto(view[got:])
+                    if not k:
+                        break
+                    got += k
+                view.release()
+                if got != n:
+                    return no(400, "Bad body")
+                try:
+                    body = json.loads(raw)
+                except (ValueError, UnicodeDecodeError):
+                    return no(400, "Bad JSON")
+                finally:
+                    raw[:] = bytes(len(raw))
+                if not isinstance(body, dict) or not isinstance(body.get("password"), str) \
+                        or not isinstance(body.get("again"), str):
+                    return no(400, "Bad request")
+                new, again = Hidden(body.pop("password")), Hidden(body.pop("again"))
+                confirm = body.get("confirm") is True
+                body.clear()
+                email = getattr(self.who, "email", "") or ""
+                try:
+                    operator = cad.cad.settings.standing(email)["operator"] if email else ""
+                except Exception:  # noqa: BLE001
+                    operator = ""
+                try:
+                    out = adapter_password.save(new, again, confirm, email, operator, cad.cad.store)
+                except SaveRefused as e:           # (its text is fixed: adapterpass.py)
+                    if e.status in (409, 429):
+                        cad.refused(path, self.who, str(e), self._client())
+                    extra = {"wait_s": round(e.wait_s)} if e.wait_s else {}
+                    if e.maybe_saved:
+                        extra["maybe_saved"] = True
+                    return self._send(e.status, json.dumps({"error": str(e), **extra}).encode(), "application/json",
+                                      {"Cache-Control": "no-store"})
+            except fence_mod.FencedWrite:   # the audit refused (not the leader any more, #509): 503 (_fenced), never
+                raise                       # a quiet "Failed"; SSM's own last-modified still counts for the gap
+            except Exception as e:  # noqa: BLE001 - never its text (a value could be in it)
+                print(f"adapter password: save failed: {type(e).__name__}", flush=True)
+                return no(500, "Failed")
+            finally:
+                for h in (new, again):
+                    if h is not None:
+                        h.drop()
+                new = again = None
+            cad.did(path, self.who, {}, out, self._client())
+            return self._send(200, json.dumps({"ok": True, **out}).encode(), "application/json", {"Cache-Control": "no-store"})
+
         def _stream(self, b: Broadcaster) -> None:
             """SSE: the whole state first (or, with an id from this boot, only what changed since: Last-Event-ID
             when EventSource reconnects, ?since= when the page already has the state from a GET), then each push's changed sections (Broadcaster), each with its id. Nothing
             changed but the clock: {"_delta":1,"time":...}, so the page knows the stream is alive.
             gzip (a browser that takes it): one stream, flushed at each event (Z_SYNC_FLUSH)."""
+            self.answered = True
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "text/event-stream")
             self.send_header("Cache-Control", "no-store, no-transform")
@@ -999,6 +1206,8 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
     return Handler
 
 
+ADAPTER_PASSWORD = "/api/cad/adapter-password"
+ADAPTER_PASSWORD_BODY = 65536   # two values of at most 4 KB each, JSON-escaped
 PROFILE_WAIT_S = 60.0   # POST /api/cad/perf/profile answers with the profile up to this long; longer: 202, then GET
 
 
@@ -1013,7 +1222,7 @@ class WebServer:
                  station_mode=None, role: str = "", roads=None, gis=None, trains=None, weather=None, station_health=None,
                  aircraft=None, roadwork=None, set_adsb=None, fence=None, health_fn: Callable[[], dict] | None = None,
                  airband_ab=None, listener=None, vessels=None, perf=None, reception=None,
-                 clip_context: Callable[[str], bool] | None = None):
+                 clip_context: Callable[[str], bool] | None = None, adapter_password=None):
         """listener: a socket already bound and listening on (host, port) to serve from (sizeup/app.py run_gated: the
         hub's port answered "updating" while the app was built; the connections that came meanwhile are served)."""
         self.access = access
@@ -1043,7 +1252,7 @@ class WebServer:
             roads, gis, trains, weather, station_health, aircraft=aircraft, roadwork=roadwork, set_adsb=set_adsb,
             vessels=vessels,
             airband_ab=airband_ab, reception=reception, gate=self.gate, health_fn=health_fn, perf=perf,
-            clip_context=clip_context))
+            clip_context=clip_context, adapter_password=adapter_password))
         if listener is not None:
             self.httpd.socket.close()                 # (the one TCPServer made, never bound)
             self.httpd.socket = listener

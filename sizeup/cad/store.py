@@ -53,6 +53,7 @@ from pathlib import Path
 from sizeup import tz
 from sizeup.cad import lists as lists_mod
 from sizeup.cad.lists import Lists
+from sizeup.fence import GuardedConnection, refuse
 
 TZ = tz.TZ                  # America/New_York: the console's time zone (sizeup/tz.py)
 # "Name <email>" when the operator signed in through Cloudflare Access (sizeup/cloud/access.py).
@@ -95,12 +96,14 @@ CREATE TABLE incidents (
   received_via TEXT NOT NULL DEFAULT '',   -- PHONE | WALK-IN | RADIO | 60 CONTROL | ... (cad_lists.json)
   until_at REAL,                        -- a closure / hydrant out of service: until when (optional)
   priority INTEGER,
-  address TEXT NOT NULL DEFAULT '',     -- LOCATION, as shown: "575 Boston Post Rd @ Whole Foods Market" for a named place (#204)
-  place TEXT NOT NULL DEFAULT '',       -- the named place picked ("Whole Foods Market"), '' for a plain address
-  place_address TEXT NOT NULL DEFAULT '',   -- that place's street address ("575 Boston Post Rd"), '' when the data has none
+  address TEXT NOT NULL DEFAULT '',     -- LOCATION, as shown: "40 Example Rd @ Sample Market" for a named place (#204)
+  place TEXT NOT NULL DEFAULT '',       -- the named place picked ("Sample Market"), '' for a plain address
+  place_address TEXT NOT NULL DEFAULT '',   -- that place's street address ("40 Example Rd"), '' when the data has none
   cross_street TEXT NOT NULL DEFAULT '',
   lat REAL, lon REAL, geo_label TEXT NOT NULL DEFAULT '',
   geo_alts TEXT NOT NULL DEFAULT '',    -- a page's location not confirmed (#176): JSON [{label, lat, lon, town, confidence, why}] to pick from
+  address_raw TEXT NOT NULL DEFAULT '', -- the text a feed or page gave that address was made from (sources.normal_location):
+                                        -- what matching reads (sources.match_address); '' when a person set the address
   caller_name TEXT NOT NULL DEFAULT '', -- NAME
   caller_address TEXT NOT NULL DEFAULT '',   -- ADDRESS (the caller's)
   phone TEXT NOT NULL DEFAULT '',
@@ -413,13 +416,19 @@ class Store:
         self.lists = lists or lists_mod.load()
         if self.path != ":memory:":
             Path(self.path).parent.mkdir(parents=True, exist_ok=True)
-        self.db = sqlite3.connect(self.path, check_same_thread=False, isolation_level=None)
+        # GuardedConnection (sizeup/fence.py, #501): no write gets through while may_write() says False (the hub's
+        # fence, set by the App), whoever makes it: a GET's side effects on a fenced task are skipped, never written
+        self.db = sqlite3.connect(self.path, check_same_thread=False, isolation_level=None, factory=GuardedConnection)
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA foreign_keys = ON")
         if self.path != ":memory:":
             self.db.execute("PRAGMA journal_mode = WAL")
         self.lock = threading.RLock()
+        self._closed = False
         self.rev = 0          # bumped on every change: the page refetches nothing, it's pushed
+        # after a transaction is committed / rolled back (tx()); touch(id, system): a row of the radio log changed in
+        # the open transaction (the Radio page's change notes: set by Comms, sizeup/cad/comms.py)
+        self.after_commit = self.after_rollback = self.touch = None
         self.migrated: list[str] = []      # what a migration did, for the log
         self.on_assigned = None            # fn(incident id, [unit names]): units just put on it (assign); never raises here
         self.on_unassigned = None          # fn(incident id): a unit just taken off it (cleared, moved); never raises here
@@ -482,6 +491,8 @@ class Store:
         for col in ("place", "place_address"):           # a location's named place and its street address (#204), 2026-11-02
             if icols and col not in icols:
                 self.db.execute(f"ALTER TABLE incidents ADD COLUMN {col} TEXT NOT NULL DEFAULT ''")
+        if icols and "address_raw" not in icols:         # the text a normalised address came from, 2026-11-12: old rows ''
+            self.db.execute("ALTER TABLE incidents ADD COLUMN address_raw TEXT NOT NULL DEFAULT ''")
         tcols = {r["name"] for r in self.db.execute("PRAGMA table_info(radio_traffic)")}
         for col in ("alt_text", "alt_model"):            # the second transcript ("both": whisper next to AWS), 2026-10-08
             if tcols and col not in tcols:
@@ -525,6 +536,13 @@ class Store:
                 self.db.execute(f"ALTER TABLE radio_traffic ADD COLUMN {col} {kind}")
         if tcols:
             self.db.execute("CREATE INDEX IF NOT EXISTS radio_traffic_source_start ON radio_traffic(source, start)")
+            # The Radio page's views (#415), an index walk each: a service's, a system's, a department's and the scene-safety
+            # rows (GET /api/cad/comms ?view= ?service= ?system= ?dept= ?safety=), 2026-11-10.
+            self.db.execute("CREATE INDEX IF NOT EXISTS radio_traffic_service_start ON radio_traffic(service, start)")
+            self.db.execute("CREATE INDEX IF NOT EXISTS radio_traffic_system_start ON radio_traffic(system, start)")
+            self.db.execute("CREATE INDEX IF NOT EXISTS radio_traffic_dept_start ON radio_traffic(dept, start) WHERE dept != ''")
+            self.db.execute("CREATE INDEX IF NOT EXISTS radio_traffic_safety ON radio_traffic(start) "
+                            "WHERE safety != '' AND safety != 'dismissed'")
         if tcols and self.db.execute("SELECT 1 FROM radio_traffic WHERE source = '' LIMIT 1").fetchone():
             # The rows from before (source ''): all the county system's (the only one there was), or an analog
             # channel's (an airband row is the one with its frequency, #260; the airband rows from before that are
@@ -727,6 +745,15 @@ class Store:
 
     # -- plumbing -----------------------------------------------------------------------------------
 
+    @property
+    def may_write(self):
+        """May this process write the file now (the hub's fence, sizeup/fence.py; always True without one)?"""
+        return getattr(self, "_may_write", None) or self.db.may_write
+
+    @may_write.setter
+    def may_write(self, fn) -> None:
+        self._may_write = self.db.may_write = fn
+
     def tx(self):
         """`with store.tx() as db:` one transaction under the lock."""
         store = self
@@ -734,18 +761,78 @@ class Store:
         class _Tx:
             def __enter__(self):
                 store.lock.acquire()
-                store.db.execute("BEGIN IMMEDIATE")
+                try:
+                    store.db.execute("BEGIN IMMEDIATE")
+                except BaseException:
+                    # Busy past the timeout, or a transaction already open: __exit__ never runs for a failed
+                    # __enter__, so the lock is given back here (else every later write waits on it forever).
+                    store.lock.release()
+                    raise
                 return store.db
 
             def __exit__(self, et, e, tb):
+                done = keep = False
                 try:
-                    store.db.execute("ROLLBACK" if et else "COMMIT")
-                    if not et:
+                    if et:
+                        # The caller's error is the one raised: a ROLLBACK that fails too (FULL, IOERR: SQLite may
+                        # have rolled back by itself already) never replaces it.
+                        if store.db.in_transaction:
+                            try:
+                                store.db.execute("ROLLBACK")
+                            except Exception:  # noqa: BLE001
+                                pass
+                    else:
+                        # not ours any more, or a write in it refused or skipped (#501): rolled back, no rev, the
+                        # rollback hook, and FencedWrite to the caller, bookkeeping or not (an end is never a quiet
+                        # "committed"). Raised below, once the lock is given back.
+                        keep = store.may_write() and not getattr(store.db, "tainted", False)
+                        if not keep:
+                            if store.db.in_transaction:
+                                try:
+                                    store.db.execute("ROLLBACK")
+                                except Exception:  # noqa: BLE001
+                                    pass
+                        else:
+                            try:
+                                store.db.execute("COMMIT")
+                            except BaseException:
+                                # IOERR, FULL, BUSY, or the guard's FencedWrite (the lease ran out just now: it has
+                                # rolled back already): a transaction still open on the connection is rolled back
+                                # here, else the next autocommit write (meta_put, a prune) silently joins it after
+                                # the lock is released. The COMMIT's error is the one raised.
+                                if store.db.in_transaction:
+                                    try:
+                                        store.db.execute("ROLLBACK")
+                                    except Exception:  # noqa: BLE001
+                                        pass
+                                raise
+                            done = not store.db.in_transaction       # (a COMMIT that took)
+                    if done:
                         store.rev += 1
                 finally:
-                    store.lock.release()
+                    # What rides on a transaction without being part of it (the Radio page's change notes,
+                    # sizeup/cad/comms.py): told only once the write is committed, or that it was not. Best effort:
+                    # nothing it does or fails at reaches the caller, whose data is stored (or rolled back) by now.
+                    hook = store.after_commit if done else store.after_rollback
+                    try:
+                        if hook is not None:
+                            hook()
+                    except Exception:  # noqa: BLE001
+                        pass
+                    finally:                         # even a KeyboardInterrupt in a hook never keeps the lock
+                        store.lock.release()
+                if not et and not keep:
+                    refuse("a transaction")
                 return False
         return _Tx()
+
+    def shutdown(self) -> None:
+        """The connection closed, under the lock (no write is cut off halfway). Again: nothing. (Not close(): that one
+        closes an incident.)"""
+        with self.lock:
+            if not self._closed:
+                self._closed = True
+                self.db.close()
 
     def meta_get(self, key: str) -> str | None:
         with self.lock:
@@ -932,9 +1019,13 @@ class Store:
         or on location time; ever: cleared since too, else on it now)."""
         L = self.lists
         dept = L.department_of(ph)
-        rows = (db or self.db).execute("SELECT u.name FROM assignments a JOIN units u ON u.id = a.unit_id WHERE a.incident_id = ? "
-                                       "AND (a.enroute_at IS NOT NULL OR a.onscene_at IS NOT NULL)"
-                                       + ("" if ever else " AND a.cleared_at IS NULL"), (iid,)).fetchall()
+        sql = ("SELECT u.name FROM assignments a JOIN units u ON u.id = a.unit_id WHERE a.incident_id = ? "
+               "AND (a.enroute_at IS NOT NULL OR a.onscene_at IS NOT NULL)" + ("" if ever else " AND a.cleared_at IS NULL"))
+        if db is not None:                     # inside the caller's tx(): its lock is held already
+            rows = db.execute(sql, (iid,)).fetchall()
+        else:
+            with self.lock:
+                rows = self.db.execute(sql, (iid,)).fetchall()
         return bool(dept) and any(not L.placeholder(r["name"]) and L.department_of(r["name"]) == dept for r in rows)
 
     def restore_placeholders(self, iid: int, uid: int, operator: str = "") -> list[str]:
@@ -1181,7 +1272,7 @@ class Store:
                         status: str = "pending", operator: str = "", acft_type: str = "", acft_nature: str = "",
                         acft_eta: int | None = None, acft_runway: str = "", acft_souls: int | None = None,
                         acft_level: int | None = None, acft_fuel: str = "", acft_cargo: str = "", geo_alts: str = "",
-                        place: str = "", place_address: str = "") -> int:
+                        place: str = "", place_address: str = "", address_raw: str = "") -> int:
         """ACCEPT EVENT: entered by a person, numbered at once, PENDING until units go (or, a
         non-emergency one, listed under NON-EMERGENCY EVENTS until closed). One from a 60 Control
         page waits as queued, with no number, until someone accepts it. emergency None = from the
@@ -1205,12 +1296,12 @@ class Store:
                 "INSERT INTO incidents (number, type, subtype, type_note, emergency, received_via, until_at, priority, "
                 "address, cross_street, lat, lon, geo_label, caller_name, caller_address, phone, remarks, source, "
                 "source_ref, status, created_at, accepted_at, acft_type, acft_nature, acft_eta, acft_runway, acft_souls, "
-                "acft_level, acft_fuel, acft_cargo, geo_alts, place, place_address) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
-                "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "acft_level, acft_fuel, acft_cargo, geo_alts, place, place_address, address_raw) VALUES (?, ?, ?, ?, ?, ?, ?, ?, "
+                "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (number, type, subtype, type_note, int(bool(emergency)), received_via, until_at, priority, address,
                  cross_street, lat, lon, geo_label, caller_name, caller_address, phone, remarks, source, source_ref,
                  status, now, now if number else None, acft_type, acft_nature, acft_eta, acft_runway, acft_souls,
-                 acft_level, acft_fuel, acft_cargo, geo_alts, place, place_address))
+                 acft_level, acft_fuel, acft_cargo, geo_alts, place, place_address, address_raw if address else ""))
             iid = cur.lastrowid
             L = self.lists
             what = (L.type_label(type, subtype) or "type not set") + (f" at {address}" if address else "")
@@ -1237,9 +1328,10 @@ class Store:
 
     EDITABLE = ("type", "subtype", "type_note", "emergency", "received_via", "until_at", "priority", "address",
                 "cross_street", "lat", "lon", "geo_label", "caller_name", "caller_address", "phone", "remarks",
-                *(c for c, _ in AIRPORT_COLUMNS), "map_layers", "geo_alts", "place", "place_address")
+                *(c for c, _ in AIRPORT_COLUMNS), "map_layers", "geo_alts", "place", "place_address", "address_raw")
     # changed, not spelled out in the log (place / place_address: the location's own line says them, #204)
-    QUIET = ("lat", "lon", "geo_label", "remarks", "type_note", "until_at", "map_layers", "geo_alts", "place", "place_address")
+    QUIET = ("lat", "lon", "geo_label", "remarks", "type_note", "until_at", "map_layers", "geo_alts", "place", "place_address",
+             "address_raw")
 
     def update_incident(self, iid: int, fields: dict, operator: str = "", log: bool = True) -> dict:
         """Edit an open event. A new TYPE/SUBTYPE re-sorts it emergency / non-emergency from the
@@ -1253,6 +1345,8 @@ class Store:
         changes = {k: v for k, v in fields.items() if k in self.EDITABLE and inc[k] != v}
         if ("type" in changes or "subtype" in changes) and changes.get("type", inc["type"]) and "type_note" not in fields:
             changes["type_note"] = ""                 # a person picked the type: the page's doubt is settled
+        if "address" in changes and "address_raw" not in fields and inc["address_raw"]:
+            changes["address_raw"] = ""               # the address is no longer the one that text made (a person's): theirs
         if inc.get("geo_alts") and ("lat" in changes or "address" in changes) and "geo_alts" not in fields:
             changes["geo_alts"] = ""                  # a person placed it: the page's location doubt is settled (#176)
         t, s = changes.get("type", inc["type"]), changes.get("subtype", inc["subtype"])
@@ -1463,6 +1557,8 @@ class Store:
         with self.tx() as db:
             self._event(db, iid, kind, text, operator, units=",".join(units),
                         places=json.dumps(list(places), separators=(",", ":")) if places else "")
+            if units and self.touch is not None:        # a note tagged with a unit is a row of the Radio page
+                self.touch("note-new", "")
 
     def has_dispatch(self, iid: int) -> bool:
         return self.one("SELECT 1 AS x FROM dispatches WHERE incident_id = ? LIMIT 1", (iid,)) is not None

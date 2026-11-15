@@ -151,7 +151,7 @@ function operator() {
   const pick = $("#operator-pick");
   return (pick.hidden ? $("#operator").value : pick.value).trim();
 }
-// "Corey <corey@example.org>": an operator who signed in through Cloudflare Access (the hub,
+// "Casey <casey@example.org>": an operator who signed in through Cloudflare Access (the hub,
 // sizeup/cloud/access.py). Shown by name with the email as the tooltip; a typed name as it is.
 function opParts(s) {
   const m = /^(.*\S) <([^<>\s]+@[^<>\s]+)>$/.exec(s || "");
@@ -624,6 +624,8 @@ function renderPrealert() {
     AirportAlerts.notify(aa);
   }
   show($("#csv-airport-alerts"), !!aa);
+  // radio pre-alerts (intel.js, sizeup/intel #411): signed-in viewers only (the state carries none otherwise)
+  if (window.IntelCard && !BOARD) IntelCard.column($("#q-intel"), cad.state && cad.state.intel, { ...deps, readonly: false });
 }
 function queueExtra(i) {              // what the queue card shows from the call's summary (#217), for its signature
   const o = isOpen(i) ? callSummary(i.id) : null;
@@ -781,6 +783,7 @@ function renderDetail() {
   renderComments(inc);
   renderMap(inc);
   if (window.Preplan) Preplan.card(inc, { readonly: BOARD || !canDo("dispatch") });   // its building's points (#456)
+  if (window.PreplanDocs) PreplanDocs.card(inc, { readonly: BOARD || !canDo("dispatch") });   // its site documents (#459)
   renderOnUnits(inc);
   renderAddUnit(inc);
   show($("#d-attach"), open && inc.status !== "queued");
@@ -1043,38 +1046,60 @@ document.addEventListener("click", (e) => {
 // row): ours (the alarm, alarm_level "alarm") a red EMERGENCY chip (MAYDAY ... for words alone) and a red row;
 // someone else's (a notice) amber "Emergency (not ours)" and an amber edge; then who acknowledged it and when, and
 // the all clear. A flag with no alarm of its own (the same radio again, its alarm still open): amber, "Emergency button".
+// Someone else's emergency on a service Settings > Radios > Emergencies doesn't list (fire, EMS and other by default:
+// so a bus, DOT, transit, another town's police) is quiet: a muted "EM" chip, its detail in the hover, no row mark.
+// Quiet ONLY when the service is known and not listed. Loud whenever unsure: no service on the row, ours (an alarm,
+// our channel, one of our rigs keyed it, its talkgroup's window is ours), scene safety.
+const EM_LOUD = ["fire", "ems", "other"];
+function emLoud(t) {
+  if (t.alarm_level === "alarm" || t.ours || t.em_ours || (t.safety && t.safety !== "dismissed") || !t.service) return true;
+  const st = (typeof cad !== "undefined" && cad.state) || {};
+  if (t.talkgroup !== null && t.talkgroup !== undefined && (!t.system || t.system === "westchester")
+      && ((st.alarms && st.alarms.windows) || []).some((w) => w.ours && w.talkgroup === t.talkgroup)) return true;
+  const set = st.radio_emergencies;
+  return (set && Array.isArray(set.prominent) ? set.prominent : EM_LOUD).includes(t.service);
+}
 function emergencyChip(t) {
   if (!t.emergency && !t.alarm_id) return null;
   const ours = t.alarm_level === "alarm";
+  const quiet = !ours && !emLoud(t);
   const said = (t.keywords || []).map((k) => String(k).replace(/ \.\.\. /g, " … ")).join(", ");
   const stuck = !ours && t.alarm_stuck;            // its flag turned out stuck (#190): said, and quieter
   const text = ours ? (t.emergency ? "EMERGENCY" : (said || "alarm").toUpperCase())
     : stuck ? "Emergency flag stuck" : t.alarm_level === "notice" ? "Emergency (not ours)" : "Emergency button";
-  const c = el("span", `chip emergency${ours ? "" : " em-other"}${stuck ? " em-stuck" : ""}`, `${t.drill ? "DRILL · " : ""}${text}`);
+  const cls = quiet ? "chip em-quiet" : `chip emergency${ours ? "" : " em-other"}${stuck ? " em-stuck" : ""}`;
+  const c = el("span", cls, `${t.drill ? "DRILL · " : ""}${quiet ? "EM" : text}`);
   const how = !t.emergency ? `Heard on the radio: ${said}`
     : t.alarm_via ? `The radio's emergency button (${t.alarm_via})`
     : t.talkgroup !== null && t.talkgroup !== undefined ? "The radio's emergency button (P25: flagged by the system)"
     : "The radio's emergency button";
-  c.title = how + (t.alarm_level === "notice" ? ". Not our talkgroup or radio: a notice"
+  const done = quiet ? alarmDoneText(t) : "";      // quiet: what it was, and who acked it, in the hover only
+  c.title = (quiet ? `${text}. ` : "") + how + (t.alarm_level === "notice" ? ". Not our talkgroup or radio: a notice"
     : t.alarm_level ? "" : ". Its alarm is on an earlier transmission")
     + (stuck ? `. Emergency flag stuck on ${t.alarm_stuck}: it went on flagging routine calls, so its later flags `
-      + "are not emergencies (no new alarm, the emergency window not renewed)" : "");
+      + "are not emergencies (no new alarm, the emergency window not renewed)" : "") + (done ? `. ${done}` : "");
   return c;
 }
-function alarmDone(t) {
+function alarmDoneText(t) {
   const who = (x) => (x || "").replace(/\s*<[^>]*>\s*$/, "");
-  const out = [];
-  if (t.clear_at) out.push(`all clear ${who(t.clear_by)} ${fmtTime(t.clear_at)}`);
-  else if (t.ack_at) out.push(`acked by ${who(t.ack_by)} ${fmtTime(t.ack_at)}`);
-  return out.length ? el("span", "dim small em-ack", `· ${out.join(" · ")}`) : null;
+  if (t.clear_at) return `all clear ${who(t.clear_by)} ${fmtTime(t.clear_at)}`;
+  if (t.ack_at) return `acked by ${who(t.ack_by)} ${fmtTime(t.ack_at)}`;
+  return "";
+}
+function alarmDone(t) {
+  const out = alarmDoneText(t);
+  return out ? el("span", "dim small em-ack", `· ${out}`) : null;
 }
 // What of the emergency a row's redraw depends on (every list's signature: Radio, the feed, an event's Radio card)
-const emSig = (t) => [t.emergency, t.alarm_id, t.alarm_level, t.keywords, t.ack_at, t.clear_at, t.drill, t.kept, t.alarm_stuck];
+const emSig = (t) => [t.emergency, t.alarm_id, t.alarm_level, t.keywords, t.ack_at, t.clear_at, t.drill, t.kept, t.alarm_stuck,
+                      (t.emergency || t.alarm_id || t.kept) && emLoud(t)];
 // A transmission kept only because of an emergency (its talkgroup's Record is off): why it is in the log at all
 function keptChip(t) {
   if (t.kept !== "emergency") return null;
-  const c = el("span", "chip kept", "kept: emergency window");
-  c.title = "Record is off for this talkgroup: kept because of an emergency (the emergency window: its talkgroup and "
+  const loud = emLoud(t);
+  const c = loud ? el("span", "chip kept", "kept: emergency window") : el("span", "em-dot", "•");   // quiet: a dot
+  c.title = (loud ? "" : "Kept: emergency window. ")
+    + "Record is off for this talkgroup: kept because of an emergency (the emergency window: its talkgroup and "
     + "the radio that pressed it, until the alarm's All clear or a few minutes after the last emergency key-up)";
   return c;
 }
@@ -1110,7 +1135,8 @@ function radioRow(t, ctx = {}) {
     meta.append(f);
   }
   const em = emergencyChip(t);                            // the emergency button / a mayday (#128): can't be missed
-  if (em) {
+  if (em && em.className === "chip em-quiet") meta.append(em);       // someone else's, quiet: the chip only
+  else if (em) {
     li.classList.add("emergency", t.alarm_level === "alarm" ? "em-ours" : "em-other");
     meta.append(em);
     const done = alarmDone(t);
@@ -1179,6 +1205,7 @@ function radioRow(t, ctx = {}) {
     const fixes = (t.atc_snaps || []).map((x) => `“${x.from}” → ${x.to} (on ADS-B)`);
     txt.title = `As transcribed: ${t.text}` + (fixes.length ? `\nCallsign matched to ADS-B: ${fixes.join(", ")}` : "");
   }
+  if (!txt.title && t.model && t.status !== "off") txt.title = (shown ? "Transcribed by " : "Speech-to-text: ") + t.model;
   if (t.atc_weak) {                      // a marginal AM carrier (#257): transcribed, but the words may be wrong
     const w = el("span", "atc-weak", "weak signal");
     w.title = `Carrier ${t.carrier_db} dB over the noise floor: transcribed, but the words may be wrong`;
@@ -1227,7 +1254,7 @@ function oursNamed(t) {
 }
 function oursNamedText(t) {
   const why = t.page === "none" ? "no tones decoded" : t.page === "unknown" ? "its tones are unknown" : "its tones aren't ours";
-  return `Names PCFD units (${t.names_ours.join(", ")}); ${why}`;
+  return `Names PCFD/RB units (${t.names_ours.join(", ")}); ${why}`;
 }
 function oursNamedNote(t) {
   if (!oursNamed(t)) return null;
@@ -1463,10 +1490,17 @@ function txMenuItems(t) {
     }
     items.push("-");
   }
+  // a quiet emergency (emLoud: no strip under the header for it, alarm.js): seen / resolved from its row
+  if (canDo("dispatch") && t.alarm_id && !t.clear_at && !emLoud(t)) {
+    if (!t.ack_at) items.push({ label: "Acknowledge emergency", run: () => alarmTx(t, "ack") });
+    if (t.emergency) items.push({ label: "All clear", hint: "ends the emergency window", run: () => alarmTx(t, "clear") });
+    items.push("-");
+  }
   if (canDo("admin")) {
     const waiting = rerunWaiting(t);
     items.push({ label: waiting ? "Re-transcribing…" : "Re-transcribe", disabled: t.has_audio === false || waiting,
                  hint: t.has_audio === false ? "audio expired" : "", run: () => rerunTx(t) });
+    if (window.SttFix) items.push({ label: "Correct transcript", run: () => SttFix.open(t) });   // stt-fix.js
   }
   items.push({ label: "Copy text", disabled: !t.text, run: () => copyText(t) });
   return items;
@@ -1483,6 +1517,15 @@ function addToPage(t) {
     hint: cur && i.id === cur.id ? "current" : "", checked: on.has(i.id), disabled: on.has(i.id),
     run: () => linkTx(t, i),
   }));
+}
+async function alarmTx(t, what) {       // what: "ack" | "clear" (POST /api/cad/alarm/<id>/ack | clear)
+  try {
+    await api("POST", `/api/cad/alarm/${t.alarm_id}/${what}`, { operator: operator() });
+    UI.toast(what === "ack" ? "Acknowledged" : "All clear", "ok");
+  } catch (err) {
+    UI.toast(`${what === "ack" ? "Not acknowledged" : "No all clear"}: ${err.message}`, "err");
+  }
+  txChanged();
 }
 function txChanged() {                   // a link changed: the Radio view asks again now (the feed and the incident: the state push)
   window.dispatchEvent(new CustomEvent("sizeup:tx-changed"));
@@ -1576,7 +1619,12 @@ function repaintTx() {                   // the rows' busy state changed: draw t
   txChanged();
 }
 // What a transmission without text says (its status): sizeup/app.py, sizeup/channels.py.
+// Pending: which engine has it (the row's model, sizeup/app.py _stt_row): AWS, or whisper after AWS failed.
 function sttSaid(t) {
+  const m = t.model || "";
+  if (t.status === "pending" && m.startsWith("whisper")) return m.startsWith("whisper on the station")
+    ? "Transcribing on the station (whisper)" : "Transcribing (whisper)";
+  if (t.status === "pending" && m.startsWith("aws-transcribe")) return "Transcribing (AWS)";
   return { no_speech: "Key-up, no speech", no_voice: "Tones only, no message", pending: "Transcribing", remote: "Transcribing on the hub (AWS)", off: "Not transcribed",
            skipped: "Skipped: busy", error: "Transcription failed" }[t.status] || "—";
 }
@@ -2976,7 +3024,7 @@ async function setUnitStatus(uid, status, note = "", call) {   // call: the inci
 // ---- location box with gazetteer suggestions -------------------------------------------------
 // #204: the keys of a picker: ↑ / ↓ move the highlight, Tab takes the highlighted suggestion and goes on to the next
 // field, Esc closes the list and stays, Enter does what it always did (the form's submit). A named place is shown with
-// its street address ("Whole Foods Market · 575 Boston Post Rd") and taken as "<street address> @ <place>" ("@ <place>"
+// its street address ("Sample Market · 40 Example Rd") and taken as "<street address> @ <place>" ("@ <place>"
 // when the data has no address: type it in front of the @); its cross streets fill the form's Cross streets (unless
 // edited by hand). opts: {cross: the cross street input, map: the new call's map (newcall-map.js) follows}.
 
@@ -2984,7 +3032,7 @@ function locationText(m) {             // what the location field says for a sug
   if (m && m.place) return m.street_address ? `${m.street_address} @ ${m.place}` : `@ ${m.place}`;
   return (m && m.label) || "";
 }
-function placeKept(box, value) {       // the picked place still named at the end of the field ("... @ Whole Foods Market")?
+function placeKept(box, value) {       // the picked place still named at the end of the field ("... @ Sample Market")?
   const p = box.picked && box.picked.place;
   return !!p && value.trim().toLowerCase().endsWith(`@ ${p}`.toLowerCase());
 }
@@ -3021,7 +3069,7 @@ function addressBox(input, geoNote, list, opts = {}) {
       li.setAttribute("role", "option");
       li.setAttribute("aria-selected", String(i === box.idx));
       const meet = m.kind === "intersection" && m.name && m.exact != null;   // two streets typed (#213): where they meet
-      if (m.place) {                    // "Whole Foods Market · 575 Boston Post Rd" (the address from the data, or none)
+      if (m.place) {                    // "Sample Market · 40 Example Rd" (the address from the data, or none)
         li.append(el("b", "", m.place));
         li.append(el("span", m.street_address ? "sg-addr" : "sg-addr dim", m.street_address ? `· ${m.street_address}` : "· no street address"));
       } else li.append(el("b", "", meet ? m.name : m.label));         // "N Main St & Westchester Ave" · its town
@@ -3727,7 +3775,7 @@ function renderCloud() {
     pill.title = c.detail || "";
     return;
   }
-  // (Settings > System > Station switches forwarding on and off: no cloud, no pill and no banner)
+  // (Settings > Station > Hub link switches forwarding on and off: no cloud, no pill and no banner)
   pill.className = "pill " + (c.state === "ok" ? "ok" : "warn");
   setText(pill, c.state === "ok" ? "Hub connected" : c.state === "starting" ? "Hub connecting"
     : c.blocked ? "Hub not sending" : "Hub unreachable");
@@ -3947,7 +3995,7 @@ function focusSearch() {
     .find((n) => n.getClientRects().length && !n.closest("[hidden]"));
   if (here) { here.focus(); here.select(); return; }
   location.hash = "#radio";
-  setTimeout(() => { $("#rv-q").focus(); $("#rv-q").select(); }, 0);
+  setTimeout(() => { const q = window.RadioNav && RadioNav.on ? $("#rn-q") : $("#rv-q"); q.focus(); q.select(); }, 0);
 }
 function escapeView(fromField) {
   if (fromField) return;

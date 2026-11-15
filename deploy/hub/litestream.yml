@@ -3,27 +3,57 @@
 # Run by the supervisor only: `replicate` while this task holds the leader lock, `restore -f` (following the
 # replica) while it stands by. The control socket is for `litestream sync -wait` at a handoff: every last change
 # in S3, and its position, before the lock is released.
+#
+# How often (docs/cloud.md "How often the replica is written"): every S3 write and listing is a billed request, and
+# at Litestream's defaults (the WAL read every second, a file in S3 for each read that found changes, the replica
+# listed every 15 s) the three databases made about 200,000 a day. So:
+#   monitor-interval  how often Litestream reads a database's WAL into a new LTX file: SIZEUP_LITESTREAM_SYNC_S
+#                     seconds (30; the Dockerfile, the entrypoint and the supervisor all default it, and Litestream
+#                     refuses to start on an empty one). THIS is the cadence: one L0 file, one PUT, per read that
+#                     found changes. A crash (not a handoff) loses at most what was written since the last read.
+#   sync-interval     how soon a finished LTX file is uploaded: 1 s, Litestream's default, said here on purpose.
+#                     Raising it would save nothing (every LTX file is still uploaded, one PUT each, only later)
+#                     and would add its length to what a crash can lose.
+#   levels            L0 files are merged into L1 every 5 min (default 30 s: with an L0 file every 30 s that would
+#                     be a copy of each), L1 into L2 every 30 min, L2 into L3 hourly (as before). A restore reads
+#                     the daily snapshot and the newest files of every level, whatever made them.
+#   l0-retention-check-interval   every 5 min (default 15 s: two S3 listings per database each time, changes or
+#                     not). L0 files are also cleared after each L1 merge; they are kept 5 min (l0-retention, the
+#                     default) after they are merged, for the followers.
+# None of this delays a handoff: `litestream sync` (the takeover's confirms) and `sync -wait` (the drain) read the
+# WAL and upload at once, whatever the intervals.
 socket:
   enabled: true
   path: ${LITESTREAM_SOCKET}
 logging:
   stderr: true            # stdout carries only the -json answers the supervisor reads
+l0-retention-check-interval: 5m
+levels:
+  - interval: 5m
+  - interval: 30m
+  - interval: 1h
 dbs:
   - path: ${SIZEUP_STATE_DIR}/cad.sqlite          # the CAD of record: events, units, dispatch log, settings, radio IDs, comms
+    monitor-interval: ${SIZEUP_LITESTREAM_SYNC_S}s
     replica:
       type: s3
+      sync-interval: 1s
       bucket: ${LITESTREAM_BUCKET}
       path: ${LITESTREAM_PATH}/cad.sqlite
       region: ${LITESTREAM_REGION}
   - path: ${SIZEUP_STATE_DIR}/hub.sqlite          # the monitor: pages, incidents, transmissions; station events applied
+    monitor-interval: ${SIZEUP_LITESTREAM_SYNC_S}s
     replica:
       type: s3
+      sync-interval: 1s
       bucket: ${LITESTREAM_BUCKET}
       path: ${LITESTREAM_PATH}/hub.sqlite
       region: ${LITESTREAM_REGION}
   - path: ${SIZEUP_STATE_DIR}/audio.sqlite        # clips and dispatch audio; with SIZEUP_AUDIO_BUCKET their metadata only (docs/cloud.md "Audio in S3")
+    monitor-interval: ${SIZEUP_LITESTREAM_SYNC_S}s
     replica:
       type: s3
+      sync-interval: 1s
       bucket: ${LITESTREAM_BUCKET}
       path: ${LITESTREAM_PATH}/audio.sqlite
       region: ${LITESTREAM_REGION}

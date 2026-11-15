@@ -1,4 +1,4 @@
-"""A 60 Control page whose street speech-to-text misheard joins the County CAD Times incident for the same call
+"""A 60 Control page whose street speech-to-text misheard joins the county feed incident for the same call
 (sizeup/cad/fuzzy.py, sizeup/cad/sources.py heard_place): a misspelled street, a house number with a digit too many,
 another type and run-together engine numbers. Guards: an exactly-right street with another number, a known street in
 another district town, no street list, a missing direction, another town, two near streets, another house with
@@ -167,7 +167,8 @@ def test_the_page_card_shows_the_gazetteer_street_but_keeps_the_heard_one(tmp_pa
     streets({"port chester": ["Sampleworth Pl", "Specimen St"]})
     rig = Rig(tmp_path)
     p = rig.cad.store.incident(rig.page("p1", gas_page())["id"])
-    assert p["address"] == "220 Samplewerth Place"                       # matched as heard
+    assert p["address"] == "220 Samplewerth Pl"                          # as heard, never snapped, no town guessed
+    assert p["address_raw"] == "220 Samplewerth Place"                   # matched as heard
     assert "the map's street: 220 Sampleworth Pl, Port Chester" in p["remarks"]
     assert p["lat"] is None                                              # never a pin by itself
 

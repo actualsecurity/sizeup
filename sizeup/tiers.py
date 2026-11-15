@@ -13,14 +13,23 @@ an encrypted talkgroup is `activity` and any other `record` (a new source costs 
 chosen). Settings > Radios changes it per talkgroup (TalkgroupPrefs,
 sizeup/talkgroups.py). An encrypted talkgroup is only ever `activity` or `off`.
 
-Speech-to-text follows the tier (sizeup/stt.py's classes, #300 / #306): `alert` is LIVE, `text` is LOW (shed when
-whisper is behind); neither is ever ahead of the pages, Fire/EMS 15, the firegrounds or the airband.
+Speech-to-text follows the tier (sizeup/stt.py's classes, #300 / #306): `text` is LOW (shed when whisper is
+behind) and another P25 system's `alert` is CONTEXT (shed when it waits);
+neither is ever ahead of the pages, Fire/EMS 15, the firegrounds or the airband.
 
 Retention ([storage] tier_keep_days, docs/cloud.md): how long a tier's audio is kept past the usual
 audio_keep_hours. A clip on a CAD event, with an alarm or an emergency is a record as before.
 
 The county system's talkgroups have no tier of their own: their Record / Main / Transcribe switches are as before, and
 `derived()` only names what those amount to (for the rows and the API).
+
+In the radio log (radio_traffic.tier, sizeup/cad/comms.py record()) only another P25 system's rows carry a tier: the
+one their talkgroup had when the call was heard (App._call_system). A county talkgroup's row and an analog or airband
+row have "" (App._row_source), on purpose: the column's readers (the tiers' retention and expected storage, the STT
+catch-up's order, the Radio page's tier filter, a pack's scope "tiers") are all about the other systems' rows, and a
+derived tier written on ours would give them a tier's retention. So a hub that has never recorded another P25 system
+has the column empty on every row; nothing is missing and nothing is backfilled. A row recorded again without its
+tier keeps the one it had.
 """
 
 from __future__ import annotations

@@ -107,6 +107,9 @@ class IncidentStore:
                  clock: Callable[[], float] = time.time, path: str | Path | None = None,
                  keep_s: float = 24 * 3600):
         self.ours = ours                    # department names that are "us" (from the tone plan)
+        # text -> text as shown (transcribe.Display: vocabulary phrases without AWS's hyphens); state() only, the
+        # stored text is never rewritten
+        self.display: Callable[[str], str] | None = None
         self.geocode, self.clock = geocode, clock
         # geocode(d) or geocode(d, tone_departments): the page's tones hold its location to their towns (#176)
         try:
@@ -295,5 +298,26 @@ class IncidentStore:
     def state(self) -> dict:
         self.active()  # age out quiet incidents
         with self._lock:
-            return {"incidents": [i.as_dict() for i in reversed(self.incidents)],
-                    "loose_traffic": [t.as_dict() for t in list(self.loose)[-300:]]}
+            out = {"incidents": [i.as_dict() for i in reversed(self.incidents)],
+                   "loose_traffic": [t.as_dict() for t in list(self.loose)[-300:]]}
+        return self._shown(out)
+
+    def _shown(self, out: dict) -> dict:
+        """The transcripts as shown (display): pages and traffic, on the copies state() made."""
+        fn = self.display
+        if fn is None:
+            return out
+        try:
+            for inc in out["incidents"]:
+                inc["page_text"] = [fn(t) for t in inc.get("page_text") or []]
+                for row in [*inc.get("page_entries", []), *inc.get("traffic", [])]:
+                    for k in ("text", "alt_text"):
+                        if isinstance(row.get(k), str):
+                            row[k] = fn(row[k])
+            for row in out["loose_traffic"]:
+                for k in ("text", "alt_text"):
+                    if isinstance(row.get(k), str):
+                        row[k] = fn(row[k])
+        except Exception:  # noqa: BLE001 - as stored
+            pass
+        return out

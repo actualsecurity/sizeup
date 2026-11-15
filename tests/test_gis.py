@@ -419,7 +419,7 @@ def test_the_hub_serves_the_layers_to_a_signed_in_viewer_and_the_browser_never_s
     try:
         h.server.access.certs_url = jwks.url
         h.server.access.log = lambda m: None
-        post(h.app.cad, "users", action="add", name="Corey", email="corey@example.org", role="admin")
+        post(h.app.cad, "users", action="add", name="Casey", email="casey@example.org", role="admin")
         post(h.app.cad, "users", action="add", name="Val", email="val@example.org", role="viewer")
         assert wait_for(lambda: all(h.app.gis.status[k]["at"] for k in BY_KEY))
         assert req(h.url + "/api/cad/gis")[0] == 401                                      # Access: a person only

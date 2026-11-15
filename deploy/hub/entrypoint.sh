@@ -4,7 +4,8 @@
 #     the bucket; as a standby it restores cad / hub / audio .sqlite and the caches and follows the replica; as
 #     the leader it runs `litestream replicate` and sizeup, and hands over on SIGTERM (docs/cloud.md "Deploys:
 #     the hot/cold handoff"). Credentials: the ECS task role (no keys). Optional: LITESTREAM_PATH (prefix in the
-#     bucket, default sizeup-hub), LITESTREAM_REGION (default AWS_REGION).
+#     bucket, default sizeup-hub), LITESTREAM_REGION (default AWS_REGION), SIZEUP_LITESTREAM_SYNC_S (how often
+#     Litestream reads the WAL into a file for S3, default 30; deploy/hub/litestream.yml).
 #   Unset (local dev, compose.yaml): just sizeup.
 # The task's other container, the Cloudflare connector, runs deploy/hub/connector.sh from this image.
 set -eu
@@ -18,6 +19,7 @@ if [ -n "${LITESTREAM_BUCKET:-}" ]; then
   export LITESTREAM_REGION="${LITESTREAM_REGION:-${AWS_REGION:-${AWS_DEFAULT_REGION:-}}}"
   export SIZEUP_RUN_DIR="${SIZEUP_RUN_DIR:-/tmp/sizeup-run}"
   export LITESTREAM_SOCKET="${LITESTREAM_SOCKET:-$SIZEUP_RUN_DIR/litestream.sock}"
+  export SIZEUP_LITESTREAM_SYNC_S="${SIZEUP_LITESTREAM_SYNC_S:-30}"   # (the supervisor checks it is a number)
   mkdir -p "$SIZEUP_RUN_DIR"
   exec python -m sizeup.handoff --config "$CONFIG" --litestream-config /app/deploy/hub/litestream.yml
 fi

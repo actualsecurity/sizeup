@@ -570,6 +570,30 @@ def test_the_ais_dongle_is_never_a_radio_or_a_job(tmp_path, monkeypatch):
         again.stop()
 
 
+def test_settings_none_for_adsb_stays_none_and_no_empty_dongle_is_logged(tmp_path, monkeypatch):
+    """#542 review: an admin's "none" in Settings > Radios ({"sdr": ""}) with an AIS dongle named is no ADS-B dongle
+    (as on main: the config's must not come back on restart); with no AIS dongle either it is the config's, as before,
+    and no "Settings named , now the AIS receiver's dongle" line."""
+    from dataclasses import replace
+
+    from tests.test_adsb_receiver import station_app as fixture
+    appmod, c, _plugged = fixture.__wrapped__(tmp_path, monkeypatch)
+    logs: list[str] = []
+    monkeypatch.setattr(appmod, "log", lambda m: logs.append(m))
+    (tmp_path / "state" / "adsb_receiver.json").write_text(json.dumps({"sdr": "", "by": "settings"}))
+    app = appmod.App(replace(c, vessels_sdr="fire-fg", vessels_receiver=True))
+    try:
+        assert app.adsb_sdr == ""                                          # un-named: never handed back to readsb
+    finally:
+        app.stop()
+    app = appmod.App(c)                                                    # no AIS dongle: the config's, as before
+    try:
+        assert app.adsb_sdr == "adsb1090"
+    finally:
+        app.stop()
+    assert not any("Settings named ," in m for m in logs)
+
+
 def test_the_near_endpoint_for_a_marine_call_and_not_for_another(tmp_path):
     clock = Clock()
     ly = VesselLayer(aisstream_key=KEY, clock=clock, connect=lambda: FakeWS([]))
@@ -668,3 +692,49 @@ def test_the_websocket_client_handshake_frames_ping_and_close():
     srv.close()
     assert got["ua"] == "test-agent" and got["sent"] == '{"hello": 1}' and got["pong"] == bytes([0x8A])
     assert [json.loads(m)["MessageType"] for m in msgs if m] == ["PositionReport"]
+
+
+def test_a_descriptor_numbered_past_1023_can_still_be_waited_on():
+    """#457: late in a long run in one process (and on a hub that has been up a while) a new socket or pipe gets a
+    number of 1024 or more, and select() refuses it whatever is asked ("filedescriptor out of range in select()"). The
+    websocket client and the receivers' pumps wait with poll()."""
+    import fcntl
+    import os
+    import resource
+    import select
+
+    from sizeup.radio.fm import readable
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    want = 1100
+    if soft != resource.RLIM_INFINITY and soft < want:
+        if hard != resource.RLIM_INFINITY and hard < want:
+            pytest.skip(f"no descriptor past 1023 allowed here (limit {hard})")
+        resource.setrlimit(resource.RLIMIT_NOFILE, (want, hard))
+    a, b = socket.socketpair()
+    r, w = os.pipe()
+    high = socket.socket(fileno=fcntl.fcntl(a.fileno(), fcntl.F_DUPFD, 1024))
+    rhigh = fcntl.fcntl(r, fcntl.F_DUPFD, 1024)
+    try:
+        assert high.fileno() >= 1024 and rhigh >= 1024
+        with pytest.raises(ValueError):
+            select.select([rhigh], [], [], 0)                    # what it was
+        ws = WebSocket(high)
+        assert ws._ready(0.0) is False and readable(rhigh, 0.0) is False
+        b.sendall(bytes([0x81, 2]) + b"hi")
+        os.write(w, b"\0" * 8)
+        assert ws._ready(10.0) is True and readable(rhigh, 10.0) is True
+        assert next(ws.messages(idle_s=10)) == b"hi"
+        os.close(w)
+        os.read(rhigh, 64)
+        assert readable(rhigh, 10.0) is True and os.read(rhigh, 64) == b""      # the end of the audio: read, as before
+    finally:
+        if soft != resource.RLIM_INFINITY and soft < want:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))
+        for s in (a, b, high):
+            s.close()
+        for fd in (r, rhigh):
+            os.close(fd)
+        try:
+            os.close(w)
+        except OSError:
+            pass

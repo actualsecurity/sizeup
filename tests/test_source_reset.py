@@ -1,5 +1,5 @@
 """An incident source's remote reset (#301): an adapter that stopped itself ("failing: login (manual reset needed)") is
-reset from the hub's Settings > Health by an admin (a sources_reset job over the station's jobs channel) or on the
+reset from the hub's Settings > Station > Health by an admin (a sources_reset job over the station's jobs channel) or on the
 station (sizeup-station adapter reset); reset() runs on the adapter's own thread; one without reset() is a no-op."""
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ def reset(url, source, headers=None):
             return r.status, json.loads(r.read())
     except urllib.error.HTTPError as e:
         return e.code, json.loads(e.read() or b"{}")
-from tests.test_roles import COREY, JULIAN, VAL, people
+from tests.test_roles import CASEY, JORDAN, VAL, people
 
 
 class Feed:
@@ -75,11 +75,11 @@ def test_reset_runs_on_the_adapters_own_thread_and_is_a_noop_without_reset():
     feed, other = Feed(), NoReset()
     r = Runner(feed, other)
     try:
-        out = request_reset(r, "feed", "corey@example.org", r.logs.append)
+        out = request_reset(r, "feed", "casey@example.org", r.logs.append)
         assert out == {"ok": True, "result": "feed: reset asked (runs before its next poll)"}
         assert wait(lambda: feed.resets, 3)
         assert feed.resets == [r.threads["feed"]] and feed.resets[0] != threading.get_ident()
-        assert any("reset (asked by corey@example.org)" in ln for ln in r.logs)
+        assert any("reset (asked by casey@example.org)" in ln for ln in r.logs)
         out = request_reset(r, "other", "x", r.logs.append)
         assert out["ok"] and out["result"] == "other: no reset(): nothing to do"
         assert not r.resets.pending("other")                       # nothing queued for it
@@ -140,8 +140,8 @@ def test_reset_is_admin_only_and_logs_who_asked(tmp_path):
     api = CadApi(make_cad(tmp_path))
     api.cad.log = lambda m: None
     people(api.cad)
-    assert api.permit("/api/sources/reset", Identity(email=COREY)) is None                    # an admin: yes
-    for who in (JULIAN, VAL):                                                                 # a dispatcher, a viewer
+    assert api.permit("/api/sources/reset", Identity(email=CASEY)) is None                    # an admin: yes
+    for who in (JORDAN, VAL):                                                                 # a dispatcher, a viewer
         code, raw, _ = api.permit("/api/sources/reset", Identity(email=who))
         assert code == 403 and b"Admins only" in raw
     # the hub logs who asked (the Access identity), never more than the source and the answer
@@ -150,9 +150,9 @@ def test_reset_is_admin_only_and_logs_who_asked(tmp_path):
     h = Hub.__new__(Hub)
     h.log = logs.append
     h.call = lambda kind, args, timeout: sent.append((kind, args)) or {"ok": True, "result": "feed: reset asked"}
-    assert h.reset_source("feed", COREY) == {"ok": True, "result": "feed: reset asked"}
-    assert sent == [("sources_reset", {"source": "feed", "by": COREY})]
-    assert logs[0] == f"incident sources: reset of feed asked by {COREY}"
+    assert h.reset_source("feed", CASEY) == {"ok": True, "result": "feed: reset asked"}
+    assert sent == [("sources_reset", {"source": "feed", "by": CASEY})]
+    assert logs[0] == f"incident sources: reset of feed asked by {CASEY}"
 
 
 def test_the_health_panel_has_the_reset_button_only_for_failing_sources():
@@ -207,3 +207,73 @@ def test_a_reset_in_flight_holds_up_another_for_that_source():
     assert lim.take("feed") == 0
     lim.finish("feed", True)
     assert lim.blocked("feed") == 300
+
+
+def test_the_origin_reaches_an_adapter_that_takes_it_and_an_older_one_still_resets():
+    """The private adapter keeps the refused SSM versions on a reset from the hub; only a station reset clears them."""
+    got = []
+
+    class New(Feed):
+        def reset(self, origin=""):
+            got.append(origin)
+
+    class Kw(Feed):
+        def reset(self, **kw):
+            got.append(kw.get("origin"))
+    res = Resets()
+    for origin in ("hub", "local", "", "bogus"):
+        res.request("feed", "x", origin)
+        assert res.run_due(New(), lambda m: None) == "reset"
+    assert got == ["hub", "local", "", ""]                      # (unknown: none, which the adapter takes as the hub's)
+    res.request("feed", "x", "local")
+    res.run_due(Kw(), lambda m: None)
+    old = Feed()
+    res.request("feed", "x", "hub")
+    assert res.run_due(old, lambda m: None) == "reset" and len(old.resets) == 1     # reset() without arguments
+    assert got[-1] == "local"
+    # the fallback Resets (before #304) do the same
+    fb = adapters._Resets()
+    fb.request("feed", "x", "hub")
+    fb.run_due(New(), lambda m: None)
+    assert got[-1] == "hub"
+
+
+def test_the_hub_job_says_hub_and_the_station_cli_says_local(monkeypatch):
+    from sizeup.cloud import adapters as ad
+    seen = []
+    monkeypatch.setattr(ad, "request_reset", lambda runner, source, by="", log=print, origin="": (
+        seen.append(origin) or {"ok": True, "result": "x"}))
+    from sizeup.cloud.stationmode import StationMode
+    sm = StationMode.__new__(StationMode)
+    sm.app, sm.log = None, lambda m: None
+    sm.sources_reset({"source": "feed"})
+    assert seen == ["local"]
+    import inspect
+    from sizeup.cloud import station as st
+    src = inspect.getsource(st)
+    assert 'on the hub", self.log, origin="hub")' in src
+
+
+def test_the_hubs_reset_needs_a_confirm_while_versions_were_refused(tmp_path):
+    hub = HubRun(hub_cfg(tmp_path))
+    st = station(station_cfg(tmp_path, hub.url), {})
+    feed = Feed()
+    st.sources_runner = Runner(feed)
+    try:
+        assert wait(lambda: hub.app.hub.connected(), 5)
+        hub.app.cad.sources.on_health({"source": "feed", "label": "Feed", "rank": 1, "state": "failing",
+                                       "reason": "login (manual reset needed); refused versions 24 h: 2", "at": 1.0})
+        code, body = reset(hub.url, "feed")
+        assert code == 409 and body["refused"] == 2 and "confirm" in body["error"] and feed.resets == []
+        req = urllib.request.Request(hub.url + "/api/sources/reset", method="POST",
+                                     data=json.dumps({"source": "feed", "confirm_refused": True}).encode(),
+                                     headers={"Content-Type": "application/json", "X-Sizeup-Action": "reset"})
+        with urllib.request.urlopen(req, timeout=40) as r:
+            assert r.status == 200
+        assert wait(lambda: feed.resets, 3)
+    finally:
+        st.sources_runner.stop.set()
+        st.link.stop()
+        hub.close()
+    js = (__import__("pathlib").Path(__file__).resolve().parent.parent / "sizeup" / "web" / "static" / "health.js").read_text()
+    assert "confirm_refused: refused > 0" in js and "refused versions 24 h" in js

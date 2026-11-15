@@ -1961,7 +1961,7 @@ class Trains:
             return self._base() | m.approaching(self.view, lat, lon, self.clock(), self.track)
 
     def feed_health(self) -> dict:
-        """Settings > Health's row for MTA TrainTime (#362): ok, or on GTFS-realtime alone (fallback) and why."""
+        """Settings > Station > Health's row for MTA TrainTime (#362): ok, or on GTFS-realtime alone (fallback) and why."""
         s = self.tt.status()
         return {"key": "traintime", "label": "Metro-North: MTA TrainTime", "state": s["state"], "why": s["why"] or s["error"],
                 "at": s["at"], "bad": s["bad"], "dropped": s["dropped_total"], "fallback": "GTFS-realtime"}

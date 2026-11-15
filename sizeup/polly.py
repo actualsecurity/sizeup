@@ -237,6 +237,9 @@ def _error(status: int, headers, data: bytes) -> PollyError:
 def request(text: str, voice: str, engine: str, ssml: bool, reg: str) -> bytes:
     """One SynthesizeSpeech call: the raw PCM (16-bit LE, 16 kHz mono). PollyError."""
     url = endpoint(reg) + "/v1/speech"
+    from sizeup import outbound
+    if off := outbound.check("polly", url):       # sizeup/outbound.py: nothing signed or sent
+        raise PollyError(off, "OutboundOff")
     body = json.dumps({"Engine": engine, "OutputFormat": "pcm", "SampleRate": str(RATE), "Text": text,
                        "TextType": "ssml" if ssml else "text", "VoiceId": voice}).encode()
     headers = sign("POST", url, {"Content-Type": "application/json"}, body, credentials(), reg)

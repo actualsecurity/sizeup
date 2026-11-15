@@ -13,7 +13,7 @@ from tests.test_adsb_diagnose import WEDGED, Station
 from tests.test_adsb_receiver import readsb_output
 from tests.test_health import T0, Rig, station_status
 from tests.test_push_settings import Rig as SettingsRig
-from tests.test_roles import COREY, call
+from tests.test_roles import CASEY, call
 
 TICK = 5
 
@@ -85,7 +85,7 @@ def test_a_wedging_adsb_decoder_for_hours_is_one_push_then_one_recovery_once_it_
     w.run(3600)
     assert len(adsb(r.n.msgs)) == 2
     hist = [h for h in r.h.panel()["history"] if h["key"] == "adsb"]
-    assert len(hist) == 1 and hist[0]["pushed"]                           # one episode on Settings > Health too
+    assert len(hist) == 1 and hist[0]["pushed"]                           # one episode on Settings > Station > Health too
 
 
 def test_back_after_it_settled_is_a_new_episode():
@@ -121,7 +121,7 @@ def test_a_muted_alert_is_on_health_but_never_pushed_nor_its_recovery():
     r.at(0, status=adsb_down())
     r.at(120, status=adsb_down())
     (a,) = [x for x in r.h.alerts() if x["key"] == "adsb"]
-    assert a["muted"] is True and a["muted_until"] is None                # on Settings > Health, marked muted
+    assert a["muted"] is True and a["muted_until"] is None                # on Settings > Station > Health, marked muted
     assert [x for x in r.h.panel()["alerts"] if x["key"] == "adsb"][0]["muted"]
     r.at(3600, status=adsb_down())
     assert adsb(r.n.msgs) == []
@@ -158,7 +158,7 @@ def test_a_mute_until_a_time_pushes_once_it_ends_and_says_it_flapped():
 
 def test_mute_in_settings_audited_exported_and_read_by_health(tmp_path):
     rig = SettingsRig(tmp_path)
-    post = lambda body: call(rig.api, "/api/cad/settings/alert_mutes", body, COREY)       # noqa: E731
+    post = lambda body: call(rig.api, "/api/cad/settings/alert_mutes", body, CASEY)       # noqa: E731
     page = rig.cad.settings_get()["alert_mutes"]
     kinds = {k["key"]: k for k in page["kinds"]}
     assert {"adsb", "whisper", "stt_backlog", "job", "trunk", "silent", "hub_errors"} <= set(kinds)
@@ -187,7 +187,7 @@ def test_mute_in_settings_audited_exported_and_read_by_health(tmp_path):
     ex = rig.cad.settings_export()
     assert set(ex["overrides"]["alert_mutes"]) == {"whisper"}
     ex["overrides"]["alert_mutes"] = {"nope": {"until": None}}
-    code, out = call(rig.api, "/api/cad/settings/import", {"action": "apply", "settings": ex}, COREY)
+    code, out = call(rig.api, "/api/cad/settings/import", {"action": "apply", "settings": ex}, CASEY)
     assert code == 400 and "alert_mutes" in out["error"]
 
 
@@ -213,8 +213,8 @@ def test_the_hub_reads_the_mutes_from_settings(tmp_path):
     app = HubApp(hub_cfg(tmp_path), log=lambda m: None)
     try:
         assert not app.health.muted("adsb") and not app.error_watch.muted()
-        app.cad.settings.post("alert_mutes", {"action": "mute", "key": "adsb", "operator": "Corey"})
-        app.cad.settings.post("alert_mutes", {"action": "mute", "key": "hub_errors", "hours": 1, "operator": "Corey"})
+        app.cad.settings.post("alert_mutes", {"action": "mute", "key": "adsb", "operator": "Casey"})
+        app.cad.settings.post("alert_mutes", {"action": "mute", "key": "hub_errors", "hours": 1, "operator": "Casey"})
         assert app.health.muted("adsb") and app.error_watch.muted() and not app.health.muted("whisper")
     finally:
         app.stop()
@@ -278,7 +278,7 @@ def test_a_pushed_alert_muted_afterwards_still_gets_its_recovery():
 
 def test_mute_values_are_checked_critical_ones_timed_only_and_expired_ones_dropped(tmp_path):
     rig = SettingsRig(tmp_path)
-    post = lambda body: call(rig.api, "/api/cad/settings/alert_mutes", body, COREY)       # noqa: E731
+    post = lambda body: call(rig.api, "/api/cad/settings/alert_mutes", body, CASEY)       # noqa: E731
     now = rig.cad.store.clock()
     for key in ("silent", "trunk", "job"):                                # critical: for a time only
         code, out = post({"action": "mute", "key": key})
@@ -289,7 +289,7 @@ def test_mute_values_are_checked_critical_ones_timed_only_and_expired_ones_dropp
     ex = rig.cad.settings_export()
     imp = lambda mutes: call(rig.api, "/api/cad/settings/import",                      # noqa: E731
                              {"action": "apply", "settings": dict(ex, overrides=dict(ex["overrides"], alert_mutes=mutes))},
-                             COREY)
+                             CASEY)
     for bad in ({"adsb": {"until": float("inf")}}, {"adsb": {"until": 1e300}}, {"adsb": {"until": -5}},
                 {"adsb": {"until": float("nan")}}, {"silent": {"until": None}}, {"adsb": {"until": "soon"}}):
         code, out = imp(bad)

@@ -1,8 +1,15 @@
-// Station health (GitHub #79, sizeup/cloud/health.py) on the hub: Settings > Health, an admins' tab (#203: no banner
+// Station health (GitHub #79, sizeup/cloud/health.py) on the hub: Settings > Station > Health, an admins' tab (#203: no banner
 // under the header for anyone, nothing of it in the state push). GET /api/cad/health (admins only: sizeup/cad/api.py
 // ADMIN_READS) has the station's health, the alerts now and 24 h of their history; polled every POLL_MS while the tab is
 // on screen, and not at all otherwise. Self-contained: settings.js mounts it on the section (sHealth).
 const StationHealth = (() => {
+  // shed clips caught up (Settings > Radios > Speech-to-text, Catch up): "4 waiting · 12 caught up (24 h) · 1 gave up · paused: an event is open"
+  function catchupLine(cu, sq) {
+    if (!cu || cu.on === null || cu.on === undefined) return "";
+    if (!cu.on) return "Off";
+    return `${cu.waiting ?? 0} waiting · ${cu.caught_24h ?? 0} caught up (24 h)` + (cu.gave_up ? ` · ${cu.gave_up} gave up` : "")
+      + (sq && sq.catchup ? ` · ${sq.catchup} queued` : "") + (cu.why && cu.why.startsWith("paused") ? ` · ${cu.why}` : "");
+  }
   const POLL_MS = 5000;
   let panel = null, card = null, timer = null, last = null, busy = false;
 
@@ -42,7 +49,11 @@ const StationHealth = (() => {
       const row = el("tr");
       for (const c of r) {
         if (c instanceof Node) { const td = el("td"); td.append(c); row.append(td); }
-        else if (Array.isArray(c)) row.append(el("td", c[1] || "", c[0] ?? "—"));
+        else if (Array.isArray(c)) {   // [text, class, hover]
+          const td = el("td", c[1] || "", c[0] ?? "—");
+          if (c[2]) td.title = c[2];
+          row.append(td);
+        }
         else row.append(el("td", "", c === null || c === undefined || c === "" ? "—" : String(c)));
       }
       t.tBodies[0].append(row);
@@ -68,6 +79,7 @@ const StationHealth = (() => {
       const r = el("div", `hb-row ${a.severity === "critical" ? "critical" : "warning"}`);
       const where = whoText(a.who);
       const rec = a.muted ? (a.muted_until ? `Muted until ${when(a.muted_until)}` : "Muted")
+        : String(a.key || "").startsWith("replica:") ? "Pushed by the supervisor"   // (sizeup/replicawatch.py, at once)
         : !n.on ? "Not pushed (push off)" : a.pushed ? "Pushed" : "Not pushed yet";
       const flap = th.flap_n && a.flaps >= th.flap_n ? `flapping, back ${a.flaps}× in 1 h` : "";
       const det = el("span", "hb-detail dim small", [where, rec, flap].filter(Boolean).join(" · "));
@@ -92,10 +104,14 @@ const StationHealth = (() => {
     if (mutedEl) mutedEl.title = "Shown here, not pushed (Settings > System > Push notifications)";
     // #278: why it is off and where to set it, behind an "i" (a tap on a tablet; a title alone never shows there)
     if (!n.on && window.Help && Help.info) pushEl.append(" ", Help.info("No status topic in effect. Set one in Settings > System > Push notifications, SSM /sizeup-hub/status-topic or [alerts]"));
+    // sizeup/outbound.py: a hub not under its supervisor (a restored copy run by hand) pushes nothing and reaches no AWS
+    const out = d.outbound || {};
+    const obEl = out.on === false ? el("span", "chip hl-warn", "Outbound off") : null;
+    if (obEl) obEl.title = `${out.why}: no push, no AWS, no Polly, no Bedrock. SIZEUP_ALLOW_OUTBOUND=1 allows it`;
     const head = el("div", "card-head");
     head.append(el("h2", "", "Now"),
       el("span", `chip ${d.alerts.length ? "hl-bad" : "hl-ok"}`, d.alerts.length ? `${d.alerts.length} alert${d.alerts.length === 1 ? "" : "s"}` : "No alerts"),
-      el("span", "spacer"), ...(mutedEl ? [mutedEl] : []), pushEl);
+      el("span", "spacer"), ...(obEl ? [obEl] : []), ...(mutedEl ? [mutedEl] : []), pushEl);
     const kids = [head];
     if (!h.reported) kids.push(el("p", "notice", "No station report yet"));
     else if (!h.health_reported) {
@@ -108,7 +124,7 @@ const StationHealth = (() => {
     if (d.alerts.length) kids[kids.length - 1].append(...alertRows(d.alerts, n, th));
     if ((h.hints || []).length) {
       const box = el("div", "hl-hints");
-      for (const x of h.hints) box.append(el("p", "notice info", `${x.channel}: ${x.text}`));
+      for (const x of h.hints) box.append(el("p", x.level === "warn" ? "notice" : "notice info", `${x.channel}: ${x.text}`));
       kids.push(el("h3", "hl-sub", "Hints"), box);
     }
     const so = d.sources;
@@ -125,11 +141,20 @@ const StationHealth = (() => {
           i.seen.map((x) => `${x.label} ${when(x.first_seen)}` + (x.gone_at ? " · no longer listed" : "")).join(" · "),
           i.seen.filter((x) => x.lead_s !== null && x.lead_s !== undefined).map((x) => `${x.label} ${lead(x.lead_s)}`).join(" · ")]), ""));
     }
-    if ((d.feeds || []).length) {   // map feeds with a fallback (#362: MTA TrainTime, else GTFS-realtime)
-      const feedCls = (s) => (s === "ok" ? "hl-ok" : s === "fallback" || s === "error" ? "hl-bad" : "dim");
-      kids.push(el("h3", "hl-sub", "Map feeds"), table(["Feed", "State", "Reason", "Last read", "Fallback"],
-        d.feeds.map((f) => [f.label, [f.state, feedCls(f.state)], f.why || "",
+    if ((d.feeds || []).length) {   // map feeds with a fallback (#362: MTA TrainTime, else GTFS-realtime; #542 aircraft)
+      const feedCls = (s) => (s === "ok" ? "hl-ok" : s === "fallback" || s === "error" ? "hl-bad" : s === "resting" ? "hl-warn" : "dim");
+      kids.push(el("h3", "hl-sub", "Feeds"), table(["Feed", "State", "Reason", "Last read", "Fallback"],
+        d.feeds.map((f) => [f.label, [f.state, feedCls(f.state), f.title || ""], f.why || "",
           f.at ? `${when(f.at)} (${longDur(serverNow() - f.at)} ago)` : "never", f.fallback || ""]), ""));
+    }
+    if ((d.intel || []).length) {   // radio pre-alerts (sizeup/intel/counters.py): in scope / considered, a line per pack
+      const box = el("div", "hl-hints");
+      for (const x of d.intel) {
+        const p = el("p", x.level === "warn" ? "notice" : "dim small", `${x.label}: ${x.text}`);
+        p.title = x.title || "";
+        box.append(p);
+      }
+      kids.push(el("h3", "hl-sub", "Intel"), box);
     }
     kids.push(el("h3", "hl-sub", "Station"), dl([
       ["Station", st.name || st.id],
@@ -207,6 +232,8 @@ const StationHealth = (() => {
           + (sq.in_fallback_h ? ` · ${sq.in_fallback_h}/h AWS fallback` : "") : "", sq.service_s && sq.in_h > 3600 / sq.service_s ? "hl-warn" : ""],
         ["Dropped / skipped / shed", `${sq.dropped || 0} / ${sq.skipped || 0} / ${sq.shed || 0}` + (sq.last_drop ? ` · last: ${sq.last_drop.why}` : ""),
           sq.dropped || sq.skipped ? "hl-warn" : ""],
+        // shed clips re-run once whisper is idle (sizeup/sttcatchup.py): the backlog, and caught up in the last 24 h
+        ["Catch-up", catchupLine(h.stt_catchup, sq)],
       ]));
     }
     const tr = h.transcribe;
@@ -241,6 +268,27 @@ const StationHealth = (() => {
       if ((er.top || []).length) kids.push(table(["Source", "Type", "Last message (digits stripped)", "Last 5 min", "This spike", "Since", "Last", "Total"],
         er.top.map((s) => [s.source, s.type, s.message, [s.last5, s.last5 > er.per_signature ? "hl-bad" : ""], s.count,
           when(s.first), when(s.last), s.total]), ""));
+    }
+    const rp = d.replicas;
+    if (rp) {             // the replicas as the supervisor last verified them (sizeup/replicawatch.py)
+      const rcls = (s) => (s === "ok" ? "hl-ok" : s === "stale" || s === "none" ? "dim" : "hl-bad");
+      const word = { ok: "ok", corrupt: "corrupt", error: "not verifiable", stale: "stale", none: "not checked", suspect: "unverified" };
+      const hd = el("h3", "hl-sub", "Replicas");
+      hd.title = "Litestream's S3 copies, read-only: the standby checks a copy of what it follows; else the leader restores "
+        + "one from S3 and checks it. quick_check, integrity_check (full) now and then. A failing check copy is checked "
+        + "again from a fresh restore: fresh ok = the copy drifted (re-seeded, no push); fresh bad = corrupt, pushed at once";
+      kids.push(hd, table(["Database", "Result", "Verified", "By"], rp.rows.map((r) => {
+        const res = el("span", rcls(r.state), (word[r.state] || r.state) + (r.reseeds && r.state === "ok" ? " · re-seeded" : ""));
+        res.title = [r.state !== "ok" && r.result ? r.result : "", r.confirmed ? "a fresh restore from S3 failed it too" : "",
+          r.reseeds ? `check copy drifted, re-seeded from a fresh restore (ok): ${r.reseeds.n}×, last ${when(r.reseeds.at)}: ${r.reseeds.why}` : "",
+          r.error ? `last error ${when(r.error_at)}: ${r.error}` : "",
+          r.txid ? `txid ${r.txid}` : "", r.secs !== null && r.secs !== undefined ? `${r.secs} s` : ""].filter(Boolean).join("\n");
+        return [r.db, res, r.at ? `${when(r.at)} (${longDur(serverNow() - r.at)} ago)` : "—",
+          r.by ? `${r.by} · ${r.mode === "integrity_check" ? "full" : "quick"}` : ""];
+      }), ""));
+      if ((rp.events || []).length) kids.push(table(["Task event", "Why", "Exit"],
+        rp.events.map((e) => [when(e.at), [e.why || e.kind, e.kind === "litestream_restarted" ? "" : "hl-bad"],
+          e.code === null || e.code === undefined ? "" : e.code]), ""));
     }
     kids.push(el("h3", "hl-sub", "Dongles"));
     for (const x of h.duplicates || []) {        // two dongles, one serial (#242): neither is opened by it
@@ -308,15 +356,23 @@ const StationHealth = (() => {
     for (const x of failing) {
       const name = x.label || x.source;
       const btn = el("button", "", `Reset ${name}`);
-      btn.title = x.reason || "failing";
+      btn.title = (x.reason || "failing") + (/refused versions 24 h/.test(x.reason || "")
+        ? ". A reset from the hub keeps the refused versions and never resends a refused password; it lifts other "
+          + "stops, or tries a new version once. 3 refused in 24 h: only a reset at the station clears them" : "");
       btn.addEventListener("click", async () => {
-        if (!confirm(`Reset ${name} on the station?\n${x.reason || "failing"}`)) return;
+        // versions the county refused in 24 h (the adapter's Health): a Reset from here keeps them, and is one more
+        // log-on on the shared account: said, and confirmed explicitly (the server asks for it too)
+        const m = /refused versions 24 h: (\d+)/.exec(x.reason || "");
+        const refused = m ? Number(m[1]) : 0;
+        const ask = refused ? `Reset ${name}?\n${refused} refused in 24 h: a refused password isn't resent. Save a new one first.`
+          : `Reset ${name} on the station?\n${x.reason || "failing"}`;
+        if (!confirm(ask)) return;
         btn.disabled = true;
         let msg;
         try {
           const res = await fetch("/api/sources/reset", { method: "POST",
                                                            headers: { "Content-Type": "application/json", "X-Sizeup-Action": "reset" },
-                                                           body: JSON.stringify({ source: x.source }) });
+                                                           body: JSON.stringify({ source: x.source, confirm_refused: refused > 0 }) });
           const d = await res.json().catch(() => ({}));
           msg = res.ok ? (d.result || "Reset asked") : (d.error || `HTTP ${res.status}`);
         } catch (e) { msg = String(e); }
@@ -477,7 +533,7 @@ const StationHealth = (() => {
     if (again && isOpen()) perfTimer = setTimeout(pollPerf, PERF_POLL_MS);
   }
 
-  // settings.js, every render of Settings > Health (admins): the section in place (once), then the poll.
+  // settings.js, every render of Settings > Station > Health (admins): the section in place (once), then the poll.
   function mount(node) {
     if (panel !== node || !card || !node.contains(card)) {
       panel = node;

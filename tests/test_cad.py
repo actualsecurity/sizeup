@@ -311,14 +311,14 @@ def test_numbers_yy_nnnnnn_per_local_year_and_queued_unnumbered(tmp_path):
 
 def test_event_info_fields_and_chronology_wording():
     cad = make_cad()
-    inc = cad.create({"type": "SERVICE", "subtype": "LIFT", "address": "209 Westchester Ave", "caller_name": "COREY",
+    inc = cad.create({"type": "SERVICE", "subtype": "LIFT", "address": "209 Westchester Ave", "caller_name": "CASEY",
                       "caller_address": "1 Main St", "phone": "914-555-0100", "remarks": "boat taking on water",
                       "received_via": "PHONE", "operator": "JD"})
     assert (inc["type"], inc["subtype"], inc["caller_name"], inc["caller_address"], inc["phone"], inc["remarks"],
             inc["received_via"], inc["status"], inc["emergency"]) == (
-        "SERVICE", "LIFT", "COREY", "1 Main St", "914-555-0100", "boat taking on water", "PHONE", "pending", 1)
+        "SERVICE", "LIFT", "CASEY", "1 Main St", "914-555-0100", "boat taking on water", "PHONE", "pending", 1)
     assert texts(cad, inc["id"]) == ["Event created (pending): Service / Lift at 209 Westchester Ave; received via Phone",
-                                     "Caller info: COREY · 1 Main St · 914-555-0100"]
+                                     "Caller info: CASEY · 1 Main St · 914-555-0100"]
     for bad, msg in (({"type": "FIRE"}, "not an event type"), ({"type": "SERVICE", "subtype": "NOPE"}, "subtype"),
                      ({"type": ""}, "Pick a type"), ({"type": "SERVICE", "received_via": "FAX"}, "received_via"),
                      ({"type": "SERVICE", "emergency": "yes"}, "true or false")):
@@ -983,7 +983,7 @@ def test_csv_exports_have_the_sheets_columns_and_codes():
     clock = Clock(local(2026, 10, 7, 18, 58))
     cad = make_cad(clock=clock)
     iid = cad.create({"type": "SERVICE", "subtype": "LIFT", "address": "209 Westchester Ave", "geo_label":
-                      "209 Westchester Ave, Port Chester", "lat": 41.0, "lon": -73.67, "caller_name": "COREY",
+                      "209 Westchester Ave, Port Chester", "lat": 41.0, "lon": -73.67, "caller_name": "CASEY",
                       "remarks": "boat adrift", "operator": "JD"})["id"]
     cad.dispatch(iid, {"unit_ids": [uid(cad, "E63")], "operator": "JD"})
     clock.t += 90
@@ -1134,7 +1134,7 @@ def test_api_event_lifecycle(server):
     assert server.j("POST", "/api/cad/incident", {"type": "SERVICE", "lat": 41.0})[0] == 400
     assert server.call("POST", "/api/cad/incident", raw=b"{nope")[0] == 400
     code, inc = server.j("POST", "/api/cad/incident", {"type": "SERVICE", "subtype": "LIFT", "address": "209 Westchester Avenue",
-                                                       "caller_name": "COREY", "received_via": "PHONE", "operator": "JD"})
+                                                       "caller_name": "CASEY", "received_via": "PHONE", "operator": "JD"})
     assert code == 200 and inc["status"] == "pending" and re.fullmatch(r"\d{2}-000001", inc["number"])
     assert inc["lat"] == 41.0 and inc["geo_label"] == "209 Westchester Ave, Port Chester"   # placed: gazetteer sure
     iid = inc["id"]
@@ -1198,7 +1198,7 @@ def test_api_stream_pushes_cad_state(server):
 
 # -- nothing transmits ---------------------------------------------------------------------------------
 
-def test_only_the_null_transmitter_exists_in_m1(tmp_path):
+def test_only_the_null_transmitter_exists_in_m1(tmp_path, monkeypatch):
     assert isinstance(make_transmitter(False), NullTransmitter)
     with pytest.raises(ValueError):
         make_transmitter(True)
@@ -1215,11 +1215,16 @@ def test_only_the_null_transmitter_exists_in_m1(tmp_path):
     for mod in ("serial", "sounddevice", "pyaudio", "hid", "gpiozero", "RPi", "simpleaudio", "pygame"):
         assert not re.search(rf"^\s*(import|from)\s+{mod}\b", src, re.M), mod
     assert "afplay" not in src
+    # The words, made up: on a Mac the default voice is the real `say` (two runs of it and of afconvert for one
+    # dispatch), and with the machine busy that took longer than the 10 s this waited. What is checked here is the
+    # transmitter, on every machine with audio to send (a Linux runner had none: no `say`).
+    monkeypatch.setattr(dispatcher, "tts", lambda text, voice="", rate_wpm=0: np.full(8000, 0.1, np.float32))
     cad = make_cad()
     iid = cad.create({"type": "ALARM", "subtype": "CO-RESD"})["id"]
     cad.s.tones = ()
     r = cad.dispatch(iid, {"unit_ids": [uid(cad, "E60")], "operator": "JD"})
-    assert r["transmitted"] is False and cad.voice.wait(10) and cad.transmitter.sent[-1][1] == r["text"]
+    assert r["transmitted"] is False and cad.voice.wait(60) and cad.transmitter.sent[-1][1] == r["text"]
+    assert cad.transmitter.sent[-1][2] > 0 and cad.store.full(iid)["dispatches"][0]["transmitted"] is False   # audio, not keyed
 
 
 def test_config_cad_sections(tmp_path):
@@ -1239,8 +1244,8 @@ def test_cad_page_buttons_have_handlers():
     html = (ROOT / "sizeup" / "web" / "static" / "cad.html").read_text()
     js = (ROOT / "sizeup" / "web" / "static" / "cad.js").read_text()
     js_all = js + "".join((ROOT / "sizeup" / "web" / "static" / f).read_text()
-                          for f in ("settings.js", "cadmap.js", "radio-view.js", "radio-controls.js", "board.js", "camwall.js",
-                                    "addr-history.js", "search-view.js", "preplan.js"))
+                          for f in ("settings.js", "cadmap.js", "radio-view.js", "radio-nav.js", "radio-controls.js", "board.js",
+                                    "camwall.js", "addr-history.js", "search-view.js", "preplan.js"))
     for bid, rest in re.findall(r'<button id="([\w-]+)"([^>]*)>', html):
         assert (f'$("#{bid}").addEventListener' in js_all or f'RadioLive.button($("#{bid}")' in js_all
                 or 'type="submit"' in rest), f"#{bid} has no handler"

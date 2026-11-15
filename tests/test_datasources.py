@@ -13,7 +13,7 @@ from sizeup.cad.api import CadApi, needs
 from sizeup.cloud.access import Identity
 from sizeup.datasources import CHOICES, HELD, DataSources, Source, TooSoon
 from tests.test_cad import make_cad
-from tests.test_roles import COREY, JULIAN, VAL, call, people
+from tests.test_roles import CASEY, JORDAN, VAL, call, people
 from tests.test_settings import post
 
 T0 = 1_791_987_600.0                     # 2026-10-14 10:20 EDT (a weekday morning, out of the quiet hours)
@@ -226,7 +226,7 @@ def test_refresh_now_runs_off_the_request_and_resets_the_schedule():
     p = managed(r, every="daily")
     r.tick()
     r.t.t += 3 * 3600
-    row = r.refresh("layer", by="Corey <corey@example.org>")
+    row = r.refresh("layer", by="Casey <casey@example.org>")
     assert row["running"] and p.calls == 1 and started[0][1] == "datasource-layer"
     with pytest.raises(TooSoon, match="refreshing now"):
         r.refresh("layer")                                             # never two at once
@@ -234,7 +234,7 @@ def test_refresh_now_runs_off_the_request_and_resets_the_schedule():
     started[0][0]()
     assert p.calls == 2 and not r.row("layer")["running"]
     assert r.next_due("layer") >= r.t() + 86400                        # the schedule starts again from now
-    assert r.row("layer")["last_run"]["by"] == "Corey <corey@example.org>"
+    assert r.row("layer")["last_run"]["by"] == "Casey <casey@example.org>"
 
 
 def test_at_most_one_manual_refresh_per_source_per_gap_longer_for_heavy_ones():
@@ -485,32 +485,32 @@ def get(api, email=None, q=""):
 
 
 def test_admins_and_dispatchers_read_viewers_dont(api):
-    for who in (COREY, JULIAN):
+    for who in (CASEY, JORDAN):
         code, out = get(api, who)
         assert code == 200 and out["configured"] and out["sources"][0]["key"] == "gis:hydrants"
     code, out = get(api, VAL)
     assert code == 403 and out["error"] == "Admins and dispatchers only"
-    code, out = get(api, COREY, f"rev={get(api, COREY)[1]['rev']}")
+    code, out = get(api, CASEY, f"rev={get(api, CASEY)[1]['rev']}")
     assert out == {"rev": out["rev"], "same": True}                    # nothing changed: the short answer
 
 
 def test_only_admins_refresh_with_a_clear_answer_when_too_soon_and_an_audit_entry(api):
     path = "/api/cad/datasources/gis%3Ahydrants/refresh"
     assert needs(path) == needs("/api/cad/datasources/aircraft:registry/refresh") == "admin"
-    for who in (JULIAN, VAL):
+    for who in (JORDAN, VAL):
         code, out = call(api, path, {}, who)
         assert code == 403 and api.pull.calls == 0
-    code, out = call(api, path, {}, COREY)
+    code, out = call(api, path, {}, CASEY)
     assert code == 200 and out["ok"] and out["source"]["key"] == "gis:hydrants" and api.pull.calls == 1
-    code, out = call(api, path, {}, COREY)
+    code, out = call(api, path, {}, CASEY)
     assert code == 429 and re.search(r"refreshed \d+ s ago; max once per 2 min", out["error"]) and api.pull.calls == 1
-    acts = api.cad.activity.rows(COREY, "", None, 20)
+    acts = api.cad.activity.rows(CASEY, "", None, 20)
     assert any(a["summary"] == "Refreshed data source: Gis:Hydrants" for a in acts)
     assert any(a["kind"] == "refused" and "max once per 2 min" in a["summary"] for a in acts)
     audit = api.cad.settings_audit_log({"section": ["system"]})["audit"]
     row = next(a for a in audit if a["key"] == "datasources/gis:hydrants")
-    assert "Corey" in row["operator"] and row["new"] == "Refresh now" and "never" in row["old"]
-    code, out = call(api, "/api/cad/datasources/nope/refresh", {}, COREY)
+    assert "Casey" in row["operator"] and row["new"] == "Refresh now" and "never" in row["old"]
+    code, out = call(api, "/api/cad/datasources/nope/refresh", {}, CASEY)
     assert code == 400 and "no data source" in out["error"]
 
 
@@ -558,9 +558,9 @@ def test_the_interval_is_a_setting_that_survives_a_restart_and_is_audited(tmp_pa
 
 
 def test_choosing_an_interval_is_admin_only(api):
-    code, out = call(api, "/api/cad/settings/datasources", {"action": "set", "key": "gis:hydrants", "value": "daily"}, JULIAN)
+    code, out = call(api, "/api/cad/settings/datasources", {"action": "set", "key": "gis:hydrants", "value": "daily"}, JORDAN)
     assert code == 403
-    code, out = call(api, "/api/cad/settings/datasources", {"action": "set", "key": "gis:hydrants", "value": "daily"}, COREY)
+    code, out = call(api, "/api/cad/settings/datasources", {"action": "set", "key": "gis:hydrants", "value": "daily"}, CASEY)
     assert code == 200 and api.cad.datasources.row("gis:hydrants")["every"] == "daily"
 
 

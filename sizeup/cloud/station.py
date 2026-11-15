@@ -1,4 +1,4 @@
-"""[cloud] role = "station": the Mac with the SDRs runs everything as all-in-one and also feeds the hub.
+"""[cloud] role = "station": the station (the machine with the SDRs) runs everything as all-in-one and also feeds the hub.
 
     App._emit(kind, data, clip)  -> outbox.sqlite (outbox.py), in order, durable
         page        a page off the air (paging channel), with its clip      (App._segment)
@@ -20,11 +20,15 @@
                        updater's last result go up in the status ("version")
     aircraft thread    POST /api/station/aircraft: our ADS-B receiver's aircraft (#235, aircraftlink.py), read every
                        second, what changed, every 1-5 s as the hub asks; dropped (never queued) while it's offline
+    logs thread        POST /api/station/logs: this station's journal (sizeup-logread hands it over: logread.py),
+                       scrubbed and gzipped, every ~45 s, spooled on disk while the hub is away (logship.py); the hub
+                       writes it to CloudWatch (cwlogs.py)
     vessels thread     POST /api/station/vessels: our AIS receiver's vessels (#402, vessellink.py), only with
                        [vessels.receiver] enabled; the whole list every 5-30 s as the hub asks; never queued
     jobs thread        GET /api/station/jobs?wait=25 (long poll: the station never takes inbound
                        connections): "tts" renders a dispatch with the local voice; "call" runs
                        set_mode / set_talkgroup / set_talkgroup_group / retranscribe / transcribe_now /
+                       catch_up (shed clips caught up, sizeup/sttcatchup.py) /
                        reception_post / reception_sample_b64 (a reception test, #410) / set_channel_prefs
                        (Settings > Radios > Channels, as the hub has them) / emergency_all_clear (an
                        alarm's All clear: the emergency window here, App._call's keep decision) here
@@ -55,6 +59,7 @@ from sizeup.cloud.adapters import request_reset
 from sizeup.cloud.autoupdate import Watch
 from sizeup.cloud.client import Backoff, HubClient, HubError
 from sizeup.cloud.health import Metrics, station_metrics
+from sizeup.cloud.logship import LogShipper
 from sizeup.cloud.outbox import Outbox
 from sizeup.cloud.vessellink import VesselForwarder
 from sizeup.tts import VoiceCfg
@@ -67,6 +72,7 @@ CONNECTED_S = 15.0       # no answer from the hub this long = not connected (the
 CALLS = ("set_mode", "set_talkgroup", "set_talkgroup_group", "retranscribe", "set_channel_prefs",
          "emergency_all_clear",       # an alarm's All clear on the hub: the emergency window here closes (#128)
          "transcribe_now",            # the hub's fallback when Amazon Transcribe can't: whisper at live priority (#195)
+         "catch_up",                  # shed clips caught up (sizeup/sttcatchup.py): whisper, under every other clip
          "set_adsb_receiver",         # Settings > Radios on the hub: the dongle reserved for ADS-B (#235)
          "sources_poll_now",          # a pre-alert on the hub: the CAD feed adapters here poll now (#297)
          "reception_post",            # Settings > Radios on the hub: a reception test here (#410)
@@ -111,7 +117,7 @@ class StationLink:
     def __init__(self, app, cfg, log: Callable[[str], None] = print,
                  client: Callable[[float], HubClient] | None = None, outbox: Outbox | None = None,
                  updates: Watch | None = None):
-        """outbox: the one already open (Settings > System > Station turns the link off and on
+        """outbox: the one already open (Settings > Station > Hub link turns the link off and on
         again over the same outbox, sizeup/cloud/stationmode.py); updates: the hub's build -> the
         auto-updater (kept across that too)."""
         self.app, self.cfg, self.log = app, cfg, log
@@ -145,6 +151,9 @@ class StationLink:
         self.aircraft = AircraftForwarder(app, cfg, self._client, log)
         # our AIS receiver's vessels (#402, sizeup/cloud/vessellink.py): only with [vessels.receiver] enabled
         self.vessels = VesselForwarder(cfg, self._client, log)
+        # the station's journal (handed over by sizeup-logread), scrubbed, to the hub and CloudWatch
+        # (sizeup/cloud/logship.py): spooled on disk; the incident-source adapter's lines stay here unless Settings say
+        self.logs = LogShipper(cfg, self._client, log, app=app)
         app.events, app.link = self.emit, self
         app.cad.cloud = self.cad_cloud
         n, _ = self.outbox.pending()
@@ -187,6 +196,7 @@ class StationLink:
             self._threads.append(t)
         self.aircraft.start()
         self.vessels.start()                  # (idle unless [vessels.receiver] enabled)
+        self.logs.start()
         return self
 
     @property
@@ -204,6 +214,7 @@ class StationLink:
         self._live_wake.set()
         self.aircraft.stop()
         self.vessels.stop()
+        self.logs.stop()
 
     # -- health -------------------------------------------------------------------------------------
 
@@ -321,12 +332,16 @@ class StationLink:
         n, oldest = self.outbox.pending()
         out = {"id": self.cfg.station_id, "name": self.cfg.station_name,
                "radios": [r for r in app.radio_status() if r.get("label") != "Hub"],
-               "sdr": app.sdr(), "rerun": dict(app.rerun, pending=len(app._rerun_ids)),
+               "sdr": app.sdr(), "rerun": dict(app.rerun, pending=len(app._rerun_ids - app._catchup_ids)),
                "channels": app.channels_applied(),
                "p25_systems": app.p25_systems_state(),       # (#409) the other P25 systems: jobs, state, activity
                "reception": app.reception.state(),           # (#410) the reception test: its numbers, the history
                "outbox": {"pending": n, "oldest": oldest, "dropped_audio": self.outbox.dropped_audio},
                "version": self.version()}
+        try:
+            out["logship"] = self.logs.stats()
+        except Exception as e:  # noqa: BLE001 - a report
+            out["logship"] = {"state": "error", "reason": type(e).__name__}
         try:
             out["health"] = station_metrics(app, self.metrics)
         except Exception as e:  # health is a report: never in the way of the status itself
@@ -399,7 +414,7 @@ class StationLink:
             elif kind == "sources_reset":               # an admin on the hub: an incident source's reset() (#301)
                 a = job.get("args") if isinstance(job.get("args"), dict) else {}
                 res = request_reset(getattr(self.app, "sources_runner", None), str(a.get("source") or ""),
-                                    f"{a.get('by') or 'an admin'} on the hub", self.log)
+                                    f"{a.get('by') or 'an admin'} on the hub", self.log, origin="hub")
             else:
                 res = {"ok": False, "error": f"this station doesn't know job {kind!r}"}
         except Exception as e:  # a bad job must never take the station down
@@ -417,7 +432,7 @@ class StationLink:
                 client.close()
 
     def _tts(self, a: dict) -> dict:
-        """A dispatch said by this station's voice (Kokoro here; `say` as its fallback), for the hub."""
+        """A dispatch said by this station's voice (Kokoro here when the station has it, `say` on a Mac as its fallback; the deployed station has no local TTS), for the hub."""
         text, v = a.get("text"), a.get("voice") or {}
         if self.cfg.dispatch_tts_engine == "none":
             return {"ok": False, "error": "station has no voice"}

@@ -102,11 +102,13 @@ def test_pcfd_only_on_a_log_where_every_row_has_a_rig_stays_quick(tmp_path):
         db.executemany("INSERT INTO radio_traffic (id, start, end, channel, talkgroup, rig, updated_at) "
                        "VALUES (?, ?, ?, ?, ?, ?, ?)", rows)
     def took(q) -> float:                                              # the median of 3, never a reused answer
+        # This thread's CPU, not the wall clock: the query runs here, and under xdist a neighbour's burst stretched
+        # one of the two sides of the ratio and not the other (the same log, read whole once per section, costs CPU).
         ts = []
-        for _ in range(3):
-            t = time.perf_counter()
-            assert cad.comms_query(dict(q, nc=[str(t)]))["rows"]
-            ts.append(time.perf_counter() - t)
+        for i in range(3):
+            t = time.thread_time()
+            assert cad.comms_query(dict(q, nc=[f"{t}-{i}"]))["rows"]
+            ts.append(time.thread_time() - t)
         return sorted(ts)[1]
     took({})                                                           # warm
     base = took({})                                                    # the unfiltered view, same log, same machine

@@ -50,9 +50,10 @@ import threading
 import time
 
 from sizeup import sourcekeys as sources
-from sizeup.cad.comms import AUTO_UNSURE, Comms
+from sizeup.cad.comms import AUTO_UNSURE
 from sizeup.cad.feed import unit_forms
-from sizeup.cad.sources import ABBR, INTERSECTION, NOISE, PAGING, SUFFIXES, _street, place_key, same_place, street_part
+from sizeup.cad.sources import (ABBR, INTERSECTION, NOISE, PAGING, SUFFIXES, _street, match_address, place_key, same_place,
+                                street_part)
 
 LEAD_S = 120.0
 MAX_PER_TX = 3
@@ -192,7 +193,7 @@ def addresses_in(text: str) -> list[str]:
 def sent_elsewhere(text: str, inc: dict) -> bool:
     """The transmission sends someone to another place than this incident's: "respond to <somewhere else>", or a
     numbered address (with or without its suffix) that isn't this incident's."""
-    mine = [x for x in (inc["address"], inc["place_address"]) if x]
+    mine = [x for x in (match_address(inc), inc["place_address"]) if x]
 
     def here(frag: str) -> bool:
         return any(address_hit(frag, a) or same_place(frag, street_part(a)) for a in mine) or \
@@ -216,6 +217,8 @@ class RadioLog:
         self._q: queue.Queue | None = None
         self._qlock = threading.Lock()
         self._stopped = False
+        self._closing = False                            # Cad.shutdown: the store is about to close, no new work at all
+        self._threads: list[threading.Thread] = []      # the units worker and backfills running: stop(wait_s) joins them
         with self.store.lock:
             self.store.db.executescript(SCHEMA)
             for table, col in (("radiolog_units", "again INTEGER NOT NULL DEFAULT 0"),
@@ -258,7 +261,9 @@ class RadioLog:
     def _unit_rx(self, code: str, spoken: str) -> re.Pattern:
         k = (code, spoken)
         if k not in self._rx:
-            self._rx[k] = re.compile(r"(?<![\w])(?:" + "|".join(unit_forms(code, spoken)) + r")(?![\w])", re.I)
+            r = self.store.one("SELECT kind FROM units WHERE name = ?", (code,)) if code.isdigit() else None
+            kind = str((r or {}).get("kind") or "")          # a chief's number guarded (feed.unit_forms), an EMS unit's not
+            self._rx[k] = re.compile(r"(?<![\w])(?:" + "|".join(unit_forms(code, spoken, kind)) + r")(?![\w])", re.I)
         return self._rx[k]
 
     def context(self, lo: float, hi: float) -> dict:
@@ -356,7 +361,7 @@ class RadioLog:
         # it says (#163: "only add them if we know it"); only a known fireground channel takes it
         unknown = t["talkgroup"] is None and not paging and not t["rig"]
         if text and not unknown:
-            by_place = [i["id"] for i in incs if any(address_hit(text, a) for a in (i["address"], i["place_address"]) if a)]
+            by_place = [i["id"] for i in incs if any(address_hit(text, a) for a in (match_address(i), i["place_address"]) if a)]
             what = "address"
             if not by_place:
                 by_place = [i["id"] for i in incs if i["place"] and place_hit(text, i["place"])]
@@ -401,7 +406,7 @@ class RadioLog:
                 return []                                # more than that: it isn't about one call
             for iid, (why, unit) in new.items():
                 before = db.total_changes
-                Comms._auto(db, tid, iid, why, unit)
+                self.cad.comms._auto(db, tid, iid, why, unit)
                 if db.total_changes != before:
                     got.append(iid)
                     if backfill:
@@ -446,8 +451,19 @@ class RadioLog:
                 self.cad.log(f"CAD: radio log backfill: {type(e).__name__}")
         if self.inline:
             run()
-        else:
-            threading.Thread(target=run, name="radiolog-backfill", daemon=True).start()
+            return
+        with self._qlock:
+            # A plain stop (the App's) still lets a first report's backfill run, as before: only a shutdown (the store
+            # closing under it) refuses it.
+            if not self._closing:
+                self._spawn_locked(run, "radiolog-backfill")
+
+    def _spawn_locked(self, target, name: str) -> None:
+        """A worker started and kept for stop() to join (under _qlock: stop() never sees one not started yet)."""
+        t = threading.Thread(target=target, name=name, daemon=True)
+        self._threads = [x for x in self._threads if x.is_alive()]
+        self._threads.append(t)
+        t.start()
 
     # -- units added later (#370) ---------------------------------------------------------------------------------------
 
@@ -540,6 +556,7 @@ class RadioLog:
         """Not a full department any more (a later page): the links only widening made that no person kept are taken
         off, and each unit's window is its own again. How many links went."""
         with self.store.tx() as db:
+            self.cad.comms.touch_reset()          # which rows: not listed here: the Radio pages ask afresh
             n = db.execute("DELETE FROM radio_links WHERE incident_id = ? AND why = 'mention' AND traffic_id IN "
                            "(SELECT traffic_id FROM radiolog_backfill WHERE incident_id = ? AND widened = 1) AND NOT EXISTS "
                            "(SELECT 1 FROM radio_link_kept k WHERE k.traffic_id = radio_links.traffic_id "
@@ -560,6 +577,7 @@ class RadioLog:
         """A unit taken off the incident before it went: its mention links there that no person kept are removed (the
         backfill's and the live ones), and it is matched afresh if it comes back. How many links went."""
         with self.store.tx() as db:
+            self.cad.comms.touch_reset()          # which rows: not listed here: the Radio pages ask afresh
             n = db.execute("DELETE FROM radio_links WHERE incident_id = ? AND why = 'mention' AND unit = ? AND NOT EXISTS "
                            "(SELECT 1 FROM radio_link_kept k WHERE k.traffic_id = radio_links.traffic_id "
                            "AND k.incident_id = radio_links.incident_id)", (iid, unit)).rowcount
@@ -639,10 +657,12 @@ class RadioLog:
             self._units_run(iid)
             return
         with self._qlock:
+            if self._stopped:                            # stopped meanwhile
+                return
             if self._q is None:
                 self._q = queue.Queue()
-                threading.Thread(target=self._units_worker, name="radiolog-units", daemon=True).start()
-        self._q.put(iid)
+                self._spawn_locked(self._units_worker, "radiolog-units")
+            self._q.put(iid)
 
     def start(self) -> RadioLog:
         """At start: every open incident's units matched again (a unit put on while the app was down, or work queued
@@ -651,12 +671,21 @@ class RadioLog:
             self.units_soon(r["id"])
         return self
 
-    def stop(self) -> None:
-        """The worker ends after what it is doing (what was queued is picked up again at the next start)."""
-        self._stopped = True
+    def stop(self, wait_s: float = 0.0, closing: bool = False) -> list[threading.Thread]:
+        """The worker ends after what it is doing (what was queued is picked up again at the next start). wait_s: the
+        units worker and the backfills still running are joined for up to that long in all. closing (Cad.shutdown, the
+        store is closed next): no new backfill either. The threads still running after it."""
         with self._qlock:
+            self._stopped = True
+            self._closing = self._closing or closing
             if self._q is not None:
                 self._q.put(None)
+            threads = list(self._threads)
+        deadline = time.monotonic() + wait_s
+        for t in threads:
+            if t is not threading.current_thread():
+                t.join(max(0.0, deadline - time.monotonic()))
+        return [t for t in threads if t.is_alive()]
 
     def _units_worker(self) -> None:
         while True:
@@ -680,6 +709,7 @@ class RadioLog:
             if t is None or not db.execute("SELECT 1 FROM radio_links WHERE traffic_id = ? AND incident_id = ?",
                                            (tid, iid)).fetchone():
                 return {"kept": False, "error": "not on this event"}
+            self.cad.comms.touch(tid)
             if undo:
                 n = db.execute("DELETE FROM radio_link_kept WHERE traffic_id = ? AND incident_id = ?", (tid, iid)).rowcount
             else:

@@ -11,6 +11,7 @@ cache/
 deploy/trunk-recorder/*.log
 deploy/trunk-recorder/westchester/
 deploy/trunk-recorder/config.runtime.json
+deploy/trunk-recorder/systems/probe-*/
 state/
 *.xlsx
 
@@ -242,3 +243,12 @@ deploy/hub/*.sqlite*
 sizeup-replay/
 .sizeup-replay/
 *.ltx
+
+# transcript corrections and intel replay outputs (sizeup/cad/sttfix.py, tools/stt_eval.py, tools/intel_replay.py):
+# private, never committed
+stt-corrections*.jsonl
+*.stt-eval.json
+*.intel-replay.json
+
+# a local station config beside config.toml (docs/development.md)
+/config.station.toml

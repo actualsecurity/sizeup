@@ -1,4 +1,4 @@
-"""Station forwarding on and off while the app runs: Settings > System > Station (user, 2026-10-08:
+"""Station forwarding on and off while the app runs: Settings > Station > Hub link (user, 2026-10-08:
 "how do we turn on and off station mode though? id like that to be easy to do from the ui").
 
     state/cloud.json   {"forward": bool, "hub_url": str, "at", "by"}: written by the first change
@@ -89,8 +89,17 @@ class StationMode:
         self.updates = Watch(log=log)           # the hub's build -> the auto-updater (autoupdate.py)
         app.station = self
         app.cad.cloud = self.cad_cloud
+        self._outbound()
         if self.forward:
             self._up()                          # app.events set now: nothing heard from here on is missed
+
+    def _outbound(self) -> None:
+        """Forwarding to a hub makes this a station for the outbound guard (sizeup/outbound.py), whatever the config's
+        role; switched off, the config's role decides again."""
+        from sizeup import outbound
+        line = outbound.forwarding(self.forward)
+        if line:
+            self.log(line)
 
     # -- state/cloud.json ------------------------------------------------------------------------------
 
@@ -222,6 +231,7 @@ class StationMode:
             self.source = "settings"
             self._save(operator)
             self._audit(operator, was)
+            self._outbound()
         sync = getattr(self.app, "prealert_sync", None)
         if sync is not None:                    # the phone pre-alert follows: on here only while not forwarding
             sync()
@@ -302,10 +312,11 @@ class StationMode:
         if talking:
             out.append(f"{len(talking)} talking")
         stt = getattr(app, "stt", None)
-        n = stt.busy() if stt is not None and hasattr(stt, "busy") else 0
+        # (shed clips being caught up, sizeup/sttcatchup.py, never hold an update up: not counted, here or below)
+        n = stt.busy(catchup=False) if stt is not None and hasattr(stt, "busy") else 0
         if n:
             out.append(f"{n} transcription(s) in flight")
-        rerun = len(getattr(app, "_rerun_ids", ()) or ())
+        rerun = len(set(getattr(app, "_rerun_ids", ()) or ()) - set(getattr(app, "_catchup_ids", ()) or ()))
         if rerun:
             out.append(f"{rerun} re-run(s) pending")
         return ", ".join(out)
@@ -318,7 +329,7 @@ class StationMode:
         if link is not None and not self.problem:
             return link.status_row()
         return {"label": "Hub", "mhz": None, "state": "down", "word": "not sending",
-                "detail": f"forwarding to the hub is on, but {self.problem or 'starting'}: Settings > System > Station",
+                "detail": f"forwarding to the hub is on, but {self.problem or 'starting'}: Settings > Station > Hub link",
                 "open": False, "quieting_db": None, "restarts": 0, "last_heard": None}
 
     def cad_cloud(self) -> dict | None:
@@ -337,7 +348,8 @@ class StationMode:
         """POST /api/sources/reset {source?} here (sudo sizeup-station adapter reset): an incident source's reset() on
         its own thread (#301). ValueError with the reason if not."""
         from sizeup.cloud.adapters import request_reset
-        out = request_reset(getattr(self.app, "sources_runner", None), str(body.get("source") or ""), by, self.log)
+        out = request_reset(getattr(self.app, "sources_runner", None), str(body.get("source") or ""), by, self.log,
+                            origin="local")
         if not out.get("ok"):
             raise ValueError(out.get("error") or "not reset")
         return out

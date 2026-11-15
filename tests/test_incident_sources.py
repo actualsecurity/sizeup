@@ -14,7 +14,8 @@ import types
 import pytest
 
 from sizeup.cad import sources as src
-from sizeup.cad.sources import MATCH_WINDOW_S, PAGING, REPORT_STALE_S, norm_unit, same_place, units_match
+from sizeup.cad.sources import (DEMOTE_S, MATCH_WINDOW_S, PAGING, PROMOTE_S, REPORT_STALE_S, norm_unit, same_place,
+                                units_match)
 from sizeup.dispatch import parse
 from sizeup.incidents import IncidentStore
 from sizeup.sources import FeedEvent, Health, SourceError
@@ -224,6 +225,8 @@ def test_promotion_when_the_primary_fails_and_demotion_when_it_recovers(tmp_path
     rig.feed.recover()
     rig.at(30)
     rig.poll()
+    assert rig.cad.sources.state()["acting"] == "Paging"   # ok again only once it has held PROMOTE_S
+    rig.at(30 + PROMOTE_S)
     assert rig.cad.sources.state()["acting"] == "County feed"
     rig.at(30 + REPORT_STALE_S + 1)                        # no report since: stale, paging acts again
     t = rig.cad.sources.tiers()[0]
@@ -231,6 +234,217 @@ def test_promotion_when_the_primary_fails_and_demotion_when_it_recovers(tmp_path
     assert rig.cad.sources.state()["acting"] == "Paging"
     rig.cad.sources.paging_ok = lambda: False              # the station offline: nothing healthy
     assert rig.cad.sources.acting() is None
+
+
+class _Steps:
+    """A runner driven like its thread: a step every max(MIN_POLL_S, poll_s) on the rig's clock (the hub's too)."""
+
+    def __init__(self, rig):
+        self.rig, self.t = rig, 0.0
+
+    def until(self, t: float) -> None:
+        while self.t <= t:
+            self.rig.at(self.t)
+            self.rig.cad.sources.tick()
+            self.t += self.rig.runner.step(self.rig.runner.runs[0])
+
+
+def test_a_station_restart_s_no_list_yet_never_flips_the_primary(tmp_path):
+    """The flap seen live: each station restart (an auto-update after a hub deploy) reported "stale: no list yet" for
+    one runner cycle (30 s) and the pill went "stale · Paging primary" and back. Now it stays ok, the hover says why."""
+    logs = []
+    rig = Rig(tmp_path)
+    rig.cad.sources.log = logs.append
+    steps = _Steps(rig)
+    steps.until(600)                                       # ok, and nothing new for 10 min: fresh all along (heartbeats)
+    assert rig.cad.sources.acting()["source"] == "county"
+    logs.clear()                                           # (its first report: "Paging -> County feed")
+    rig.feed.outage("stale", "no list yet")                # the restarted adapter before its first list
+    steps.until(645)                                       # the step at 630 reports it
+    t = rig.cad.sources.state()["tiers"][0]
+    assert (t["state"], t["acting"]) == ("ok", True) and t["reason"].startswith("stale ") and "no list yet" in t["reason"]
+    assert t["ok_s"] is not None and 0 < t["ok_s"] <= 60
+    rig.feed.recover()                                     # its first list: ok on the next step
+    steps.until(1200)
+    assert rig.cad.sources.acting()["source"] == "county" and rig.cad.sources.state()["tiers"][0]["reason"] == ""
+    assert not [m for m in logs if "acting primary" in m]
+
+
+def test_a_real_outage_still_shows_within_a_bounded_time_and_recovery_needs_promote_s(tmp_path):
+    logs = []
+    rig = Rig(tmp_path)
+    rig.cad.sources.log = logs.append
+    steps = _Steps(rig)
+    steps.until(300)
+    logs.clear()
+    rig.feed.outage("stale", "no list in 40 s")
+    went = 330.0                                           # the next step reports it
+    steps.until(went + DEMOTE_S - 1)
+    assert rig.cad.sources.acting()["source"] == "county"
+    steps.until(went + DEMOTE_S + 5)                       # the ticker settles it: stale, paging acts, logged once
+    t = rig.cad.sources.state()["tiers"][0]
+    assert (t["state"], t["acting"], rig.cad.sources.state()["acting"]) == ("stale", False, "Paging")
+    assert logs == ["incident sources: acting primary County feed -> Paging"]
+    rig.feed.recover()                                     # one good report, then bad again: Paging never flaps out
+    steps.until(went + DEMOTE_S + 40)
+    assert rig.cad.sources.state()["acting"] == "Paging"
+    assert rig.cad.sources.state()["tiers"][0]["reason"].startswith("ok ")
+    rig.feed.outage("backing_off", "HTTP 503")
+    steps.until(went + DEMOTE_S + 200)
+    assert rig.cad.sources.state()["acting"] == "Paging" and len(logs) == 1
+    rig.feed.recover()
+    back = went + DEMOTE_S + 210                           # the next step after it recovered
+    steps.until(back + PROMOTE_S - 1)
+    assert rig.cad.sources.state()["acting"] == "Paging"
+    steps.until(back + PROMOTE_S + 5)
+    assert rig.cad.sources.state()["acting"] == "County feed"
+    assert logs[-1] == "incident sources: acting primary Paging -> County feed"
+
+
+def test_a_stopped_adapter_and_a_silent_station_show_at_once(tmp_path):
+    rig = Rig(tmp_path)
+    steps = _Steps(rig)
+    steps.until(120)
+    rig.feed.outage("failing", "login")                    # the adapter stopped itself: no grace
+    steps.until(150)
+    assert rig.cad.sources.state()["acting"] == "Paging"
+    rig.feed.recover()
+    steps.until(300)
+    assert rig.cad.sources.state()["acting"] == "County feed"
+    rig.at(300 + REPORT_STALE_S + 31)                      # the station silent (the last report at 270 + ... ): stale now
+    t = rig.cad.sources.tiers()[0]
+    assert (t["state"], t["acting"]) == ("stale", False) and t["reason"].startswith("no report since")
+
+
+class _Flaky(FakeFeed):
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.raises = 0
+
+    def poll(self):
+        if self.raises:
+            self.raises -= 1
+            raise TimeoutError("read timed out")
+        return super().poll()
+
+
+def test_one_poll_exception_never_flips_the_primary_and_three_in_a_row_show_failing(tmp_path):
+    rig = Rig(tmp_path, _Flaky())
+    steps = _Steps(rig)
+    steps.until(300)
+    rig.feed.raises = 1                                    # one timeout: backing off, held as ok
+    steps.until(600)
+    assert all(k != "source_health" or d["state"] in ("ok", "backing_off") for k, d in rig.sent)
+    assert rig.cad.sources.state()["acting"] == "County feed"
+    rig.feed.raises = 3                                    # three in a row: failing, but the runner's (hysteresis)
+    steps.until(1200)
+    states = [d["state"] for k, d in rig.sent if k == "source_health"]
+    assert "failing" in states and not any(d.get("stopped") for k, d in rig.sent if k == "source_health")
+    rig.feed.raises = 10 ** 6                              # it keeps raising: shown failing once the run is DEMOTE_S old
+    steps.until(1200 + DEMOTE_S + 400)
+    t = rig.cad.sources.state()["tiers"][0]
+    assert (t["state"], t["acting"]) == ("failing", False) and t["reason"] == "TimeoutError"
+
+
+H = {"source": "county", "label": "County feed", "rank": 1}
+
+
+def _report(rig, t: float, state: str, reason: str = "", **kw) -> dict:
+    rig.at(t)
+    rig.cad.sources.on_health(dict(H, state=state, reason=reason, at=T0 + t, **kw))
+    return rig.cad.sources.state()["tiers"][0]
+
+
+def test_alternating_ok_and_bad_settles_bad_and_needs_promote_s_clean_to_come_back(tmp_path):
+    rig = Rig(tmp_path)
+    _report(rig, 0, "ok")
+    t = 0.0
+    for i in range(1, 12):                                 # bad, ok, bad, ok ... every 30 s from ok
+        t = 30.0 * i
+        _report(rig, t, "stale" if i % 2 else "ok", "no list in 40 s" if i % 2 else "")
+        if t < 30 + DEMOTE_S:
+            assert rig.cad.sources.acting()["source"] == "county", t
+    assert t >= 30 + DEMOTE_S
+    for dt in (0, 20, 40):                                 # bad from 30 + DEMOTE_S on, whatever the last report said
+        rig.at(t + dt)
+        assert rig.cad.sources.acting()["source"] == PAGING, (t, dt)
+    _report(rig, t + 30, "ok")                             # then clean: back only after PROMOTE_S of ok
+    rig.at(t + 30 + PROMOTE_S - 1)
+    assert rig.cad.sources.acting()["source"] == PAGING
+    rig.at(t + 30 + PROMOTE_S)
+    assert rig.cad.sources.acting()["source"] == "county"
+
+
+def test_mostly_bad_with_an_ok_every_85_s_shows_bad(tmp_path):
+    rig = Rig(tmp_path)
+    _report(rig, 0, "ok")
+    for t in range(30, 600, 5):
+        _report(rig, t, "ok" if t % 85 == 0 else "backing_off", "" if t % 85 == 0 else "HTTP 503")
+        if t >= 30 + DEMOTE_S:
+            assert rig.cad.sources.acting()["source"] == PAGING, t
+
+
+def test_a_cold_hub_takes_the_first_report_after_a_long_silence_as_it_is(tmp_path):
+    rig = Rig(tmp_path)
+    _report(rig, 0, "ok")
+    rig.at(600)                                            # the hub down 10 min: the row is silent, stale
+    assert rig.cad.sources.tiers()[0]["state"] == "stale"
+    rig.cad.sources = src.Sources(rig.cad, clock=rig.clock, log=lambda m: None)   # a hub starting now
+    t = _report(rig, 610, "ok")
+    assert (t["state"], t["acting"]) == ("ok", True)       # unknown, not bad: no PROMOTE_S
+    # silent while this hub ran: it was shown stale, so ok again needs PROMOTE_S
+    rig.at(610 + REPORT_STALE_S + 60)
+    assert rig.cad.sources.tiers()[0]["state"] == "stale"
+    _report(rig, 610 + REPORT_STALE_S + 70, "ok")
+    assert rig.cad.sources.acting()["source"] == PAGING
+    rig.at(610 + REPORT_STALE_S + 70 + PROMOTE_S)
+    assert rig.cad.sources.acting()["source"] == "county"
+
+
+def test_the_hover_s_last_ok_only_when_not_plainly_ok(tmp_path):
+    rig = Rig(tmp_path)
+    assert _report(rig, 0, "ok")["ok_s"] is None
+    t = _report(rig, 30, "stale", "no list yet")           # pending: still ok, the age shown
+    assert (t["state"], t["ok_s"]) == ("ok", 30)
+    assert _report(rig, 60, "ok")["ok_s"] is None          # back before DEMOTE_S: plainly ok again
+    assert _report(rig, 90, "failing", "login", stopped=True)["ok_s"] == 30
+    assert rig.cad.sources.state()["tiers"][-1]["ok_s"] is None                      # paging: never
+
+
+def test_only_the_adapter_s_own_failing_skips_the_hysteresis(tmp_path):
+    rig = Rig(tmp_path)
+    _report(rig, 0, "ok")
+    assert _report(rig, 30, "failing", "x")["state"] == "ok"                    # no "stopped": the hysteresis
+    assert _report(rig, 60, "failing", "x", stopped=True)["state"] == "failing"   # the adapter stopped: at once
+
+
+def test_a_stopped_failing_once_shown_stays_bad_until_ok_has_held(tmp_path):
+    """The adapter stopped ("failing", shown at once), then a milder bad report inside DEMOTE_S: bad stays on screen
+    and paging stays the acting primary. Only "ok" held for PROMOTE_S brings the feed back."""
+    rig = Rig(tmp_path)
+    _report(rig, 0, "ok")
+    assert _report(rig, 30, "failing", "login", stopped=True)["state"] == "failing"
+    t = _report(rig, 60, "backing_off", "TimeoutError")              # 30 s into the bad run: under DEMOTE_S
+    assert (t["state"], t["acting"]) == ("backing_off", False) and rig.cad.sources.acting()["source"] == PAGING
+    assert _report(rig, 80, "stale", "no list yet")["state"] == "stale"
+    # ... and through an ok that hasn't held: failing (stopped) -> ok -> backing_off never shows ok either
+    assert _report(rig, 90, "ok")["state"] == "stale"
+    assert _report(rig, 100, "backing_off", "TimeoutError")["state"] == "backing_off"
+    assert _report(rig, 110, "ok")["state"] == "backing_off"         # held: what was shown
+    rig.at(110 + PROMOTE_S - 1)
+    assert rig.cad.sources.acting()["source"] == PAGING
+    rig.at(110 + PROMOTE_S)
+    assert rig.cad.sources.acting()["source"] == "county" and rig.cad.sources.tiers()[0]["state"] == "ok"
+    # a bad report that was never shown keeps its grace, as before
+    assert _report(rig, 110 + PROMOTE_S + 30, "backing_off", "TimeoutError")["state"] == "ok"
+
+
+def test_a_late_older_health_report_never_overwrites_a_newer_one(tmp_path):
+    rig = Rig(tmp_path)
+    h = {"source": "county", "label": "County feed", "rank": 1}
+    rig.cad.sources.on_health(dict(h, state="ok", at=T0 + 10))
+    rig.cad.sources.on_health(dict(h, state="failing", reason="x", at=T0 + 5))
+    assert rig.cad.sources.tiers()[0]["state"] == "ok"
 
 
 def test_a_feed_event_never_attaches_to_a_closed_incident_sharing_a_unit(tmp_path):
@@ -256,14 +470,14 @@ def test_a_page_never_attaches_to_a_manual_incident(tmp_path):
     rig.at(600)
     got = rig.page()
     assert got["id"] != m["id"] and got["source"] == "60 Control page"
-    assert rig.feed_lines(m["id"]) == [f"Possibly the same as #{got['id']}: 12 Example Avenue"]    # noted, not buried
+    assert rig.feed_lines(m["id"]) == [f"Possibly the same as #{got['id']}: 12 Example Ave"]    # noted, not buried
     # the same place as a manual call: its own incident still, noted on both
     same = rig.cad.create({"type": "ALARM", "subtype": "COMM", "address": "400 Sample Street", "operator": "Lt. Test"})
     rig.at(700)
     p2 = rig.page("p2", OTHER_PAGE, fresh=True)
     assert p2["id"] not in (m["id"], same["id"])
     assert f"Possibly the same as #{same['number']}: 400 Sample Street" in rig.feed_lines(p2["id"])
-    assert rig.feed_lines(same["id"]) == [f"Possibly the same as #{p2['id']}: 400 Sample Street"]
+    assert rig.feed_lines(same["id"]) == [f"Possibly the same as #{p2['id']}: 400 Sample St"]   # the page's address, normalised
 
 
 def test_two_places_are_two_calls_whatever_the_units_and_cleared_units_never_match(tmp_path):
@@ -338,7 +552,8 @@ def test_a_page_that_beats_the_feed_gets_the_feeds_report_after_it_is_accepted(t
     rig.poll()
     [inc] = rig.incidents()
     assert (inc["id"], inc["status"], inc["type"]) == (page["id"], "pending", "STRU")
-    assert inc["address"] == "12 Example Avenue"                    # the same place: the page's wording stays
+    assert inc["address"] == "12 Example Ave"                       # the same place: the page's address stays
+    assert inc["address_raw"] == "12 Example Avenue"                # ... and the words it was made from
     assert rig.cad.store.one("SELECT incident_id FROM source_reports WHERE ref = 'A1'")["incident_id"] == page["id"]
     assert any(x.startswith("County feed attached") for x in rig.feed_lines(inc["id"]))
 
@@ -631,7 +846,11 @@ def test_the_reason_sent_never_carries_the_exceptions_text(tmp_path):
             raise RuntimeError("GET https://user:secret@feed.example/x failed")
     r = SourceRunner([Leaky(clock=clock)], lambda k, d: sent.append((k, d)), log=lambda m: None, clock=clock)
     r.step(r.runs[0])
+    assert sent[-1][1]["state"] == "backing_off" and sent[-1][1]["reason"] == "RuntimeError"   # one raise: no outage yet
+    r.step(r.runs[0])
+    r.step(r.runs[0])
     assert sent[-1][1]["state"] == "failing" and sent[-1][1]["reason"] == "RuntimeError"
+    assert sent[-1][1]["stopped"] is False                 # the runner's, not the adapter's own: the hysteresis applies
     assert "secret" not in json.dumps(sent)
 
 
@@ -745,7 +964,7 @@ def test_triggers_ask_the_adapters_to_poll_now(tmp_path):
     pa.ring({"id": "r1", "time": T0 + 40, "event": "message", "topic": "ring", "title": "STATION PHONE RINGING",
              "message": "Incoming call", "priority": 5})
     rig.poll()
-    assert rig.feed.pokes[-1] == "phone pre-alert" and rig.incidents() == []
+    assert rig.feed.pokes == ["radio pre-alert"] and rig.incidents() == []         # the ring never pokes the feed
 
 
 def test_paging_tones_of_ours_poke_the_station_adapters():
@@ -1212,7 +1431,7 @@ def test_a_feed_location_is_shown_and_said_as_its_street_part(tmp_path):
     rig.feed.put("B1", type="EMS", location="@SAMPLE PARK - SAMPLE VILLAGE", units=("E62",), times={"dispatched": T0})
     rig.poll()
     a, b = rig.incidents()
-    assert (a["address"], b["address"]) == ("12 Example Ave", "@ Sample Park")
+    assert (a["address"], b["address"]) == ("12 Example Ave (Sample School)", "@ Sample Park")   # its place kept
     assert src.shown_location("") == "" and src.shown_location("12-14 EXAMPLE AVE 3RD FL") == "12 Example Ave"
 
 
@@ -1233,7 +1452,7 @@ def test_triggers_are_gentle_floor_cap_and_never_soon_after_a_poll(tmp_path):
             taken.append(dt)
     assert taken == [0.0, 45, 90, 135] and len(taken) == TRIGGER_MAX           # the floor, then the cap
     clock.t = T0 + TRIGGER_WINDOW_S
-    assert r.trigger("phone pre-alert") == 1                                    # the window moved on
+    assert r.trigger("radio pre-alert") == 1                                    # the window moved on
     clock.t = T0 + 10
     run.polled = T0
     assert r.hold(run) == 20.0
@@ -1842,6 +2061,7 @@ def test_a_feed_incident_is_titled_in_proper_case_and_matches_as_before(tmp_path
     [inc] = rig.incidents()
     assert inc["address"] == f"12 Example Ave, {t1}"
     assert f"at 12 Example Ave {t1}" in inc["remarks"] and snake not in inc["remarks"]
+    assert inc["address_raw"] == f"12 EXAMPLE AVE {snake}"         # the feed's text, for matching and audit
     # the same location again (another field changes): no location line, the title stays
     rig.feed.put("A1", type="ALARM/COMM", location=f"12 EXAMPLE AVE {snake}", units=("E60", "L31"),
                  times={"dispatched": T0})

@@ -226,18 +226,27 @@ def test_talking_now_reaches_the_hub_in_well_under_a_second(tmp_path):
         hub.close()
 
 
-def test_a_p25_grant_reaches_the_hub_as_talking_in_well_under_a_second(tmp_path):
+def only_pushed(monkeypatch) -> None:
+    """The station's state goes up when something changes (StationLink.live_changed) and, failing that, every
+    LIVE_REFRESH_S / STATUS_S. With those timers out of reach, what reaches the hub was pushed by the change itself:
+    the proof that it is sent at once. (It was "under 1.0 s on the wall clock" once, and a loaded CI runner took
+    1.85 s over it, #513; and a refresh 2 s later would have passed the 3 s wait all the same.)"""
+    from sizeup.cloud import station as station_mod
+    monkeypatch.setattr(station_mod, "LIVE_REFRESH_S", 600.0)
+    monkeypatch.setattr(station_mod, "STATUS_S", 600.0)
+
+
+def test_a_p25_grant_reaches_the_hub_as_talking_in_well_under_a_second(tmp_path, monkeypatch):
     # The unit script's grant line (deploy/trunk-recorder/unit-event.sh) is the keypress on Fire/EMS 15.
+    only_pushed(monkeypatch)
     hub = HubRun(hub_cfg(tmp_path))
     st = station(station_cfg(tmp_path, hub.url), {})
     try:
-        assert wait(lambda: hub.app.hub.status is not None, 10)
-        t0 = time.time()
+        assert wait(lambda: hub.app.hub.status is not None, 30)
         assert st.live.feed_line("SIZEUP-UNIT westchester 41228 call 307")
-        assert wait(lambda: [(e["radio_id"], e["tg"]) for e in hub.app.live.state()] == [("41228", 307)], 3)
-        assert time.time() - t0 < 1.0
+        assert wait(lambda: [(e["radio_id"], e["tg"]) for e in hub.app.live.state()] == [("41228", 307)], 30)
         st.live.feed_line("SIZEUP-UNIT westchester 600003 call 307")          # the next key-up
-        assert wait(lambda: [e["radio_id"] for e in hub.app.live.state()] == ["600003"], 3)
+        assert wait(lambda: [e["radio_id"] for e in hub.app.live.state()] == ["600003"], 30)
     finally:
         st.link.stop()
         hub.close()
@@ -252,34 +261,33 @@ def test_a_talking_snapshot_from_a_station_that_went_quiet_is_dropped():
     assert live.state() == []
 
 
-def test_a_page_going_out_reaches_the_hub_pair_by_pair_and_ends(tmp_path):
-    # South 2 (#63): each tone pair as it decodes on the station, on the hub's CAD and monitor in well under a
-    # second, then "voice", then ended (handing over to the finished page), then gone.
+def test_a_page_going_out_reaches_the_hub_pair_by_pair_and_ends(tmp_path, monkeypatch):
+    # South 2 (#63): each tone pair as it decodes on the station, on the hub's CAD and monitor at once (pushed by the
+    # decode, never waiting for the refresh), then "voice", then ended (handing over to the finished page), then gone.
+    only_pushed(monkeypatch)
     hub = HubRun(hub_cfg(tmp_path))
     st = station(station_cfg(tmp_path, hub.url), {})
     st.paging.on_change = st.link.live_changed
     try:
-        assert wait(lambda: hub.app.hub.status is not None, 10)
+        assert wait(lambda: hub.app.hub.status is not None, 30)
         since = time.time()
         frames = lambda x: [x[i:i + 800] for i in range(0, len(x) - 799, 800)]
         for f in frames(np.concatenate([tone(349.1, 1.0), tone(311.1, 1.6)])):     # B past any A's length (#115)
             st.paging.feed("South 2", since, f)
-        t0 = time.time()
         names = lambda: [p["names"] for e in hub.app.cad.state()["paging"] for p in e["pairs"]]
-        assert wait(lambda: names() == [["Port Chester · Fire"]], 3)
-        assert time.time() - t0 < 1.0
+        assert wait(lambda: names() == [["Port Chester · Fire"]], 30)
         e = hub.app.state()["paging"][0]                               # the monitor's state too
         assert (e["channel"], e["phase"], e["ours"], e["ended"]) == ("South 2", "tones", True, False)
         for f in frames(np.concatenate([tone(311.1, 1.4), tone(741.3, 1.0), tone(623.7, 3.0), np.zeros(4000), voice(2.0)])):
             st.paging.feed("South 2", since, f)
-        assert wait(lambda: names() == [["Port Chester · Fire"], []], 3)     # an unknown pair: its tones, no name
-        assert wait(lambda: hub.app.cad.state()["paging"][0]["phase"] == "voice", 3)
+        assert wait(lambda: names() == [["Port Chester · Fire"], []], 30)    # an unknown pair: its tones, no name
+        assert wait(lambda: hub.app.cad.state()["paging"][0]["phase"] == "voice", 30)
         assert hub.app.cad.state()["paging"][0]["pairs"][1]["a"] == pytest.approx(741.3, abs=2)
         st.paging.close("South 2")
         st.paging.finished("South 2", "abc123")
-        assert wait(lambda: hub.app.cad.state()["paging"][0]["ended"], 3)
+        assert wait(lambda: hub.app.cad.state()["paging"] and hub.app.cad.state()["paging"][0]["ended"], 30)
         assert hub.app.cad.state()["paging"][0]["page_id"] == "abc123"
-        assert wait(lambda: hub.app.cad.state()["paging"] == [], 8)       # RECENT_S after the page is built
+        assert wait(lambda: hub.app.cad.state()["paging"] == [], 30)      # RECENT_S after the page is built
     finally:
         st.link.stop()
         hub.close()
@@ -534,7 +542,8 @@ def test_the_hub_config_starts_with_no_radio_programs_on_the_path(tmp_path):
     port = free_port()
     env = {"PATH": "/usr/bin:/bin", "HOME": str(tmp_path), "SIZEUP_STATE_DIR": str(tmp_path / "data"),
            "SIZEUP_PORT": str(port), "SIZEUP_STATION_TOKEN": TOKEN, "SIZEUP_PUBLIC_URL": "https://sizeup.example.org",
-           "SIZEUP_PREALERT_SERVER": ntfy.url}
+           "SIZEUP_PREALERT_SERVER": ntfy.url,       # the shipped config has no topic: the env (or Settings) names them
+           "SIZEUP_PREALERT_RING_TOPIC": "example-ring-topic", "SIZEUP_PREALERT_STATUS_TOPIC": "example-status-topic"}
     proc = subprocess.Popen([sys.executable, "-m", "sizeup", "--config", str(ROOT / "deploy/hub/config.hub.toml")],
                             cwd=ROOT, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     try:
@@ -552,7 +561,7 @@ def test_the_hub_config_starts_with_no_radio_programs_on_the_path(tmp_path):
         kids = subprocess.run(["pgrep", "-P", str(proc.pid)], capture_output=True, text=True).stdout.split()
         assert kids == []                                         # no whisper-server, no voice server, no rtl_fm
         # the CAD of record subscribes to the phone pre-alert, read only
-        assert wait(lambda: ntfy.gets("pcfd-phone-prealert") and ntfy.gets("pcfd-status"), 10)
+        assert wait(lambda: ntfy.gets("example-ring-topic") and ntfy.gets("example-status-topic"), 10)
         assert {m for m, _, _ in ntfy.requests} == {"GET"}
     finally:
         proc.terminate()
@@ -581,7 +590,7 @@ def test_cloud_config(tmp_path, monkeypatch):
     for k in ("SIZEUP_STATION_TOKEN", "SIZEUP_STATE_DIR", "SIZEUP_HUB_URL", "SIZEUP_PORT", "SIZEUP_PUBLIC_URL"):
         monkeypatch.delenv(k, raising=False)
     # No token in the file or the environment: not an error any more (it may be in the Keychain;
-    # without one anywhere Settings > System > Station says so).
+    # without one anywhere Settings > Station > Hub link says so).
     nokey = load(_toml(tmp_path, '[cloud]\nrole = "station"\nhub_url = "https://hub.example.org"\n'))
     assert nokey.cloud_token == "" and nokey.cloud_keychain_token == "sizeup-station-token"
     with pytest.raises(ConfigError, match="hub_url"):

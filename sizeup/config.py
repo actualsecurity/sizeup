@@ -93,7 +93,8 @@ class Config:
     # More P25 systems (#409: <recorder_dir or the talkgroups file's folder>/systems/<name>/, sizeup/radio/systems.py)
     p25_systems: tuple = ()
     tier_keep_days: dict = field(default_factory=lambda: {"alert": 30.0, "text": 0.0, "record": 7.0})
-    context_audio_max_mb: float = 100.0      # hub: another system's clips kept at most (their own budget, inside the cap)
+    context_audio_max_mb: float = 8000.0     # hub: another system's clips kept at most, wherever kept (S3 included):
+    #                                          a runaway bound over tier_keep_days, sized for 30 days of PD alert audio
     p25_system_problems: tuple = ()          # a system directory that couldn't be used: said, that system left out
     mdc_aliases: dict[str, str] = field(default_factory=dict)   # MDC-1200 unit ID ("0611") -> name
     unit_departments: dict[str, str] = field(default_factory=dict)  # "Engine 60" -> "Port Chester FD"
@@ -109,7 +110,8 @@ class Config:
     stt_aws_idle_s: float = 120.0     # a channel's stream ends this long after its last transmission
     stt_aws_pace: float = 2.0         # audio sent this many times faster than real time
     stt_aws_limit_usd: float = 25.0   # the monthly limit until Settings > Radios sets one
-    stt_aws_channels: tuple[str, ...] = ("South 2", "FG1", "FG2", "tg:307")   # engine "aws" by default
+    stt_aws_context_limit_usd: float = 15.0   # another P25 system's talkgroups (police): their own monthly AWS limit
+    stt_aws_channels: tuple[str, ...] = ("South 2", "FG1", "FG2", "tg:307", "p25:mrrs:9211")   # engine "aws" by default
     stt_aws_vocabulary: str = "sizeup-pcfd"
     stt_record_only: tuple[str, ...] = ()     # recorded, not transcribed by default ([stt] record_only, #201)
     shared_device: str = ""      # one dongle for everything (bench): switch channel / P25 in the web app
@@ -174,7 +176,7 @@ class Config:
     cloud_access_id: str = ""         # station: Cloudflare Access service token (env SIZEUP_ACCESS_CLIENT_ID / _SECRET)
     cloud_access_secret: str = ""
     cloud_outbox: str = ""            # station: the durable outbox (SQLite); "" = outbox.sqlite next to cloud_state
-    cloud_state: str = ""             # not the hub: state/cloud.json, Settings > System > Station (sizeup/cloud/stationmode.py)
+    cloud_state: str = ""             # not the hub: state/cloud.json, Settings > Station > Hub link (sizeup/cloud/stationmode.py)
     # not the hub: macOS Keychain services (generic passwords) for the three secrets when the env has none
     cloud_keychain_token: str = "sizeup-station-token"
     cloud_keychain_access_id: str = "sizeup-access-id"
@@ -194,8 +196,13 @@ class Config:
     # all-in-one; never a station forwarding to a hub). Off unless the section is in the config.
     prealert_enabled: bool = False
     prealert_server: str = "https://ntfy.sh"
-    prealert_ring_topic: str = "pcfd-phone-prealert"
-    prealert_status_topic: str = "pcfd-status"
+    # The topics are NOT in the repo: unset = that feed is off (Health: "not configured") until an admin sets them in
+    # Settings > System > Push notifications. Env (SIZEUP_PREALERT_RING_TOPIC / _STATUS_TOPIC) overrides Settings,
+    # which overrides [prealert] ring_topic / status_topic. sizeup never publishes to them (notify.py protected()).
+    prealert_ring_topic: str = ""
+    prealert_status_topic: str = ""
+    prealert_ring_source: str = ""        # "env" | "config" | "" (unset)
+    prealert_status_source: str = ""
     prealert_expire_min: float = 5.0
     prealert_heartbeat_stale_min: float = 90.0
     # [alerts] (sizeup/notify.py; docs/cloud.md "Station health and alerts"): our OWN ntfy topics for pushes that
@@ -203,10 +210,12 @@ class Config:
     # emergency buttons, mayday, aircraft squawks; env SIZEUP_ALERT_TOPIC, the hub: SSM /sizeup-hub/alert-topic),
     # status_topic for the system's health (sizeup/cloud/health.py, #79: station health, Amazon Transcribe and its
     # budget; env SIZEUP_STATUS_TOPIC, the hub: SSM /sizeup-hub/status-topic). Only one set: everything goes there;
-    # neither: no pushes. And station health's thresholds. Never Tapout's topics (pcfd-phone-prealert, pcfd-status,
-    # whatever [prealert] names): refused here and in sizeup/notify.py.
+    # neither: no pushes. And station health's thresholds. Never the topics [prealert] subscribes to: refused here and in sizeup/notify.py.
     alerts_ntfy_topic: str = ""
     alerts_status_topic: str = ""
+    # intel_topic: radio-intelligence pre-alerts (sizeup/intel; env SIZEUP_INTEL_TOPIC). "" = the alerts' topic.
+    alerts_intel_topic: str = ""
+    alerts_intel_topic_source: str = ""
     alerts_ntfy_topic_source: str = ""     # where each came from: "env" (the hub: SSM) | "config" | "" (unset)
     alerts_status_topic_source: str = ""   # (Settings > System > Push notifications shows it; Settings win over both)
     alerts_ntfy_server_source: str = "default"
@@ -314,15 +323,19 @@ class Config:
     weather_gauge_station: tuple[str, str] = ("8516945", "Kings Point")
     # [aircraft] (sizeup/aircraft.py, #155): aircraft near HPN, shortfinal's PCFD-focused design, read by the hub
     # (or all-in-one). feeds: "receiver" (our own ADS-B receiver: its positions first), "adsblol" (ODbL) and
-    # "adsbfi" (personal, non-commercial use: the user's decision, 2026-10-14), combined; the busier API is primary.
+    # "adsbfi" (personal, non-commercial use: the user's decision, 2026-10-14), combined; the primary API: primary
+    # ("adsbfi" / "adsblol") when set, else the busier of those that haven't failed lately, a tie in feeds' order
+    # (adsb.fi first since #542: it failed none in a week from the hub, adsb.lol ~150 times a day).
     aircraft_enabled: bool = True
-    aircraft_feeds: tuple[str, ...] = ("adsblol", "adsbfi")
+    aircraft_feeds: tuple[str, ...] = ("adsbfi", "adsblol")
+    aircraft_primary: str = ""        # "" = auto
     aircraft_alarms: bool = True      # a 7500 / 7600 / 7700 squawk near HPN raises the alarm (and the push)
     aircraft_radius_nm: float = 15.0
     aircraft_ceiling_ft: float = 6000.0
     aircraft_adsblol_url: str = ""    # "" = adsb.lol's public API (sizeup/aircraft.py ADSBLOL_URL)
     aircraft_adsbfi_url: str = ""
     aircraft_registry: bool = True    # types from the FAA Releasable Aircraft Database (public domain)
+    aircraft_registry_url: str = ""   # "" = registry.faa.gov's zip; or another https:// copy, or a zip's file path
     # [aircraft.receiver]: our own receiver (readsb / dump1090 1090 MHz, dump978-fa 978 MHz UAT aircraft.json, a path
     # or an http(s) URL); sdr: the dongle meant for ADS-B (exact USB serial), kept out of sizeup's own radios and the
     # only one the station's decoder (sizeup/radio/adsbd.py, sizeup-adsb.service) ever opens; gain / bias_tee: its
@@ -399,7 +412,7 @@ def _dispatch_voice(dsp: dict) -> tuple[str, str, str]:
 
 
 def hub_url_problem(url: str) -> str:
-    """"" for a usable hub URL, else why not (config and Settings > System > Station)."""
+    """"" for a usable hub URL, else why not (config and Settings > Station > Hub link)."""
     m = re.fullmatch(r"(https?)://([^/:\s]+)(:\d{1,5})?(/\S*)?", url or "")
     if not m:
         return "the hub's URL, https://..."
@@ -417,10 +430,13 @@ def hub_url_problem(url: str) -> str:
 #   SIZEUP_PUBLIC_URL, SIZEUP_HUB_URL [cloud] public_url / hub_url
 #   SIZEUP_ACCESS_TEAM / _AUD         [cloud] access_team / access_aud (hub: Cloudflare Access identity)
 #   SIZEUP_PREALERT_SERVER            [prealert] server (a local test server instead of ntfy.sh)
+#   SIZEUP_PREALERT_RING_TOPIC / _STATUS_TOPIC  [prealert] ring_topic / status_topic: the feed sizeup subscribes to
+#                                (read only; wins over Settings; neither set anywhere: that feed is off)
 #   SIZEUP_ALERT_TOPIC / _SERVER [alerts] ntfy_topic / ntfy_server (our alarms' push topic: a name is its only
 #                                secret; the hub: SSM /sizeup-hub/alert-topic)
 #   SIZEUP_STATUS_TOPIC          [alerts] status_topic (our status / health push topic; the hub: SSM
 #                                /sizeup-hub/status-topic)
+#   SIZEUP_INTEL_TOPIC           [alerts] intel_topic (radio pre-alerts; unset: the alerts topic)
 #   SIZEUP_511NY_USER / _PASS         [roads]: 511NY's username and password for the CARS API and CARS-Hub (only
 #                                     ever here; the hub: SSM /sizeup-hub/511ny-user, /sizeup-hub/511ny-pass)
 #   SIZEUP_STATUS_TOKEN               [cloud] status_token: the deploy check's read-only bearer
@@ -452,7 +468,7 @@ def _keychain(cl: dict) -> dict:
 
 def _cloud(data: dict) -> dict:
     """[cloud] -> Config fields. No section = all-in-one (role ""). A section without a role is
-    all-in-one too, with its hub_url / Keychain names ready for Settings > System > Station."""
+    all-in-one too, with its hub_url / Keychain names ready for Settings > Station > Hub link."""
     cl = _take(data.get("cloud", {}), "cloud", {"role", "hub_url", "token", "access_client_id", "access_client_secret",
                                                 "outbox", "outbox_max_mb", "public_url", "offline_after_s", "audio_max_mb",
                                                 "access_team", "access_aud", "keychain_prefix", "keychain_token",
@@ -469,7 +485,7 @@ def _cloud(data: dict) -> dict:
         if why:
             raise ConfigError(f"cloud.hub_url: {why}")
     # The station's token may also come from the Keychain (sizeup/cloud/stationmode.py): without one
-    # anywhere the link waits, and Settings > System > Station says what is missing.
+    # anywhere the link waits, and Settings > Station > Hub link says what is missing.
     if token and len(token) < 16:
         raise ConfigError("cloud.token: at least 16 characters (e.g. `openssl rand -hex 32`)")
     status_token = _env("SIZEUP_STATUS_TOKEN", str(cl.get("status_token", "")))
@@ -509,9 +525,14 @@ def _prealert(data: dict) -> dict:
     m = re.fullmatch(r"(https?)://([^/:?#]+)(:\d+)?", server)
     if not m or (m.group(1) == "http" and m.group(2) not in ("127.0.0.1", "localhost", "::1")):
         raise ConfigError('prealert.server: the ntfy server, "https://ntfy.sh" (plain http only to this machine)')
-    topics = {k: str(pa.get(k, d)) for k, d in (("ring_topic", "pcfd-phone-prealert"), ("status_topic", "pcfd-status"))}
-    if not all(re.fullmatch(r"[-_A-Za-z0-9]{1,64}", t) for t in topics.values()) or len(set(topics.values())) != 2:
-        raise ConfigError("prealert.ring_topic / status_topic: two different ntfy topics (letters, digits, - and _)")
+    topics, tsrc = {}, {}
+    for k, env in (("ring_topic", "SIZEUP_PREALERT_RING_TOPIC"), ("status_topic", "SIZEUP_PREALERT_STATUS_TOPIC")):
+        topics[k] = _env(env, str(pa.get(k, ""))).strip()
+        tsrc[k] = ("env" if os.environ.get(env, "").strip() else "config") if topics[k] else ""
+    given = [t for t in topics.values() if t]
+    if not all(re.fullmatch(r"[-_A-Za-z0-9]{1,64}", t) for t in given) or len({t.lower() for t in given}) != len(given):
+        raise ConfigError("prealert.ring_topic / status_topic: two different ntfy topics (letters, digits, - and _), "
+                          "or empty (set them in Settings > System > Push notifications)")
     try:
         expire, stale = float(pa.get("expire_min", 5)), float(pa.get("heartbeat_stale_min", 90))
     except (TypeError, ValueError):
@@ -522,7 +543,8 @@ def _prealert(data: dict) -> dict:
     if not isinstance(enabled, bool):
         raise ConfigError("prealert.enabled: true or false")
     return dict(prealert_enabled=enabled, prealert_server=server, prealert_ring_topic=topics["ring_topic"],
-                prealert_status_topic=topics["status_topic"], prealert_expire_min=expire,
+                prealert_status_topic=topics["status_topic"], prealert_ring_source=tsrc["ring_topic"],
+                prealert_status_source=tsrc["status_topic"], prealert_expire_min=expire,
                 prealert_heartbeat_stale_min=stale)
 
 
@@ -530,15 +552,16 @@ def _alerts(data: dict, prealert: dict) -> dict:
     """[alerts] -> Config fields: our ntfy topics for pushes (sizeup/notify.py route(): ntfy_topic for the
     emergency alarms, #128; status_topic for station health, #79, and Amazon Transcribe) and station health's
     thresholds (sizeup/cloud/health.py). No section: the defaults, no push unless SIZEUP_ALERT_TOPIC or
-    SIZEUP_STATUS_TOPIC is set. Tapout's topics (and whatever [prealert] names) are refused, by exact name."""
+    SIZEUP_STATUS_TOPIC is set. The topics [prealert] subscribes to are refused, by exact name."""
     from sizeup.notify import server_problem, topic_problem
-    al = _take(data.get("alerts", {}), "alerts", {"ntfy_topic", "status_topic", "ntfy_server", "silent_min",
+    al = _take(data.get("alerts", {}), "alerts", {"ntfy_topic", "status_topic", "intel_topic", "ntfy_server", "silent_min",
                                                   "behind_min", "down_min", "outbox_min", "disk_pct", "repeat_min",
                                                   "p25_silent_min", "p25_silent_night_min",
                                                   "main_channels"})   # (#242's, inert since #258: read, ignored)
-    tapout = (prealert.get("prealert_ring_topic", ""), prealert.get("prealert_status_topic", ""))
+    tapout = (prealert.get("prealert_ring_topic", ""), prealert.get("prealert_status_topic", ""))   # subscribed: protected
     topics, sources = {}, {}
-    for key, env in (("ntfy_topic", "SIZEUP_ALERT_TOPIC"), ("status_topic", "SIZEUP_STATUS_TOPIC")):
+    for key, env in (("ntfy_topic", "SIZEUP_ALERT_TOPIC"), ("status_topic", "SIZEUP_STATUS_TOPIC"),
+                     ("intel_topic", "SIZEUP_INTEL_TOPIC")):
         t = _env(env, str(al.get(key, ""))).strip()
         why = topic_problem(t, tapout) if t else ""
         if why:
@@ -564,6 +587,7 @@ def _alerts(data: dict, prealert: dict) -> dict:
                      "config" if str(al.get("ntfy_server", "")).strip() else "default")
     return dict(alerts_ntfy_topic=topic, alerts_status_topic=topics["status_topic"], alerts_ntfy_server=server,
                 alerts_ntfy_topic_source=sources["ntfy_topic"], alerts_status_topic_source=sources["status_topic"],
+                alerts_intel_topic=topics["intel_topic"], alerts_intel_topic_source=sources["intel_topic"],
                 alerts_ntfy_server_source=server_source, **out)
 
 
@@ -1023,11 +1047,12 @@ AIRCRAFT_FEEDS = ("receiver", "adsblol", "adsbfi")
 
 
 def _aircraft(data: dict, base: Path, sdrs: tuple[str, ...]) -> dict:
-    """[aircraft] and [aircraft.receiver] -> Config fields. No section: on, adsb.lol + adsb.fi, 15 nm around HPN, the
+    """[aircraft] and [aircraft.receiver] -> Config fields. No section: on, adsb.fi + adsb.lol, 15 nm around HPN, the
     emergency alarm on, no receiver. An enabled receiver is always a feed, and its positions come first.
     The receiver's sdr (a dongle for ADS-B) is never one of sizeup's own radios ([radio] sdrs / shared_device)."""
     ac = _take(data.get("aircraft", {}), "aircraft", {"enabled", "feeds", "radius_nm", "ceiling_ft", "adsblol_url",
-                                                      "adsbfi_url", "registry", "receiver", "alarms"})
+                                                      "adsbfi_url", "registry", "receiver", "alarms", "primary",
+                                                      "registry_url"})
     if not isinstance(ac.get("receiver", {}), dict):
         raise ConfigError("aircraft.receiver: a table ([aircraft.receiver])")
     rc = _take(ac.get("receiver", {}), "aircraft.receiver", {"enabled", "sdr", "json_1090", "json_978", "gain", "bias_tee"})
@@ -1040,10 +1065,20 @@ def _aircraft(data: dict, base: Path, sdrs: tuple[str, ...]) -> dict:
     if isinstance(gain, bool) or (why := gain_problem(gain)):
         raise ConfigError(f"aircraft.receiver.gain: {why if not isinstance(gain, bool) else 'auto or a number of dB'}")
     gain = "auto" if str(gain).strip().lower() == "auto" else f"{float(gain):g}"
-    feeds = ac.get("feeds", ["adsblol", "adsbfi"])
+    feeds = ac.get("feeds", ["adsbfi", "adsblol"])
     if not (isinstance(feeds, list) and feeds and all(f in AIRCRAFT_FEEDS for f in feeds) and len(set(feeds)) == len(feeds)):
         raise ConfigError('aircraft.feeds: from "receiver", "adsblol", "adsbfi" (each once; the APIs in the order to '
                           'prefer on a tie)')
+    primary = str(ac.get("primary", "auto")).strip().lower()
+    if primary not in ("auto", "", "adsblol", "adsbfi") or (primary in ("adsblol", "adsbfi") and primary not in feeds):
+        raise ConfigError('aircraft.primary: "auto" (the busier steady API) or one of aircraft.feeds\' APIs ("adsbfi", '
+                          '"adsblol")')
+    primary = "" if primary == "auto" else primary
+    reg_url = str(ac.get("registry_url", "")).strip()
+    if reg_url and "://" in reg_url and not re.fullmatch(r"https://[^\s]+", reg_url):
+        raise ConfigError("aircraft.registry_url: an https:// address of ReleasableAircraft.zip, or a file path to one")
+    if reg_url and "://" not in reg_url and not Path(reg_url).is_absolute():
+        reg_url = str((base / reg_url).resolve())
     try:
         radius, ceiling = float(ac.get("radius_nm", 15)), float(ac.get("ceiling_ft", 6000))
     except (TypeError, ValueError):
@@ -1085,7 +1120,7 @@ def _aircraft(data: dict, base: Path, sdrs: tuple[str, ...]) -> dict:
     return dict(aircraft_enabled=enabled, aircraft_feeds=tuple(feeds), aircraft_alarms=alarms, aircraft_radius_nm=radius,
                 aircraft_ceiling_ft=ceiling,
                 aircraft_registry=registry, aircraft_receiver=receiver, aircraft_sdr=sdr, aircraft_gain=gain,
-                aircraft_bias_tee=bias_tee, **urls, **srcs)
+                aircraft_bias_tee=bias_tee, aircraft_primary=primary, aircraft_registry_url=reg_url, **urls, **srcs)
 
 
 def _weather(data: dict) -> dict:
@@ -1222,11 +1257,14 @@ def _stt_aws(stt: dict) -> dict:
     try:
         idle, pace = float(stt.get("aws_idle_s", 120)), float(stt.get("aws_pace", 2.0))
         limit = float(stt.get("aws_monthly_limit_usd", 25))
+        ctx_limit = float(stt.get("aws_context_budget_usd", 15))
     except (TypeError, ValueError):
-        raise ConfigError("stt.aws_idle_s, aws_pace, aws_monthly_limit_usd: numbers") from None
-    if not 1 <= idle <= 3600 or not 0.5 <= pace <= 10 or not 0 <= limit <= 10000:
-        raise ConfigError("stt.aws_idle_s: 1 to 3600; aws_pace: 0.5 to 10; aws_monthly_limit_usd: 0 to 10000")
-    chans = stt.get("aws_channels", ["South 2", "FG1", "FG2", 307])
+        raise ConfigError("stt.aws_idle_s, aws_pace, aws_monthly_limit_usd, aws_context_budget_usd: numbers") from None
+    if not 1 <= idle <= 3600 or not 0.5 <= pace <= 10 or not 0 <= limit <= 10000 or not 0 <= ctx_limit <= 10000:
+        raise ConfigError("stt.aws_idle_s: 1 to 3600; aws_pace: 0.5 to 10; aws_monthly_limit_usd, aws_context_budget_usd: "
+                          "0 to 10000")
+    # PD dispatch on MTA MRRS (radio-intel PR 3): AWS by default, on its own budget (aws_context_budget_usd)
+    chans = stt.get("aws_channels", ["South 2", "FG1", "FG2", 307, "p25:mrrs:9211"])
     if not isinstance(chans, list):
         raise ConfigError('stt.aws_channels: a list of channel labels and talkgroups, e.g. ["South 2", "FG1", 307]')
     names = tuple(f"tg:{c}" if isinstance(c, int) else str(c) for c in chans)
@@ -1241,6 +1279,7 @@ def _stt_aws(stt: dict) -> dict:
                 stt_aws_endpoint=str(stt.get("aws_endpoint", "")).rstrip("/"),
                 stt_aws_api_endpoint=str(stt.get("aws_api_endpoint", "")).rstrip("/"),
                 stt_aws_idle_s=idle, stt_aws_pace=pace, stt_aws_limit_usd=limit, stt_aws_channels=names,
+                stt_aws_context_limit_usd=ctx_limit,
                 stt_aws_vocabulary=vocab, stt_record_only=record_only)
 
 
@@ -1361,7 +1400,7 @@ def load(path: str | Path) -> Config:
     stt = _take(data.get("stt", {}), "stt", {"server_binary", "model", "port", "threads", "prompt", "talker_prompt", "beam_size",
                                              "aws", "aws_region", "aws_endpoint", "aws_api_endpoint", "aws_idle_s", "aws_pace",
                                              "aws_monthly_limit_usd", "aws_channels", "aws_vocabulary",
-                                             "record_only"})
+                                             "aws_context_budget_usd", "record_only"})
     talker_mode = str(stt.get("talker_prompt", "off"))
     if talker_mode not in ("off", "ids", "ids+time"):
         raise ConfigError('stt.talker_prompt: "off", "ids" or "ids+time"')
@@ -1411,7 +1450,7 @@ def load(path: str | Path) -> Config:
     except ValueError as e:
         raise ConfigError(f"storage.tier_keep_days: {e}") from None
     try:
-        context_mb = float(storage.get("context_audio_max_mb", 100))
+        context_mb = float(storage.get("context_audio_max_mb", 8000))
     except (TypeError, ValueError):
         context_mb = -1.0
     if not 0 <= context_mb <= 100000:

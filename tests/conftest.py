@@ -2,6 +2,14 @@ import pytest
 
 
 @pytest.fixture(autouse=True)
+def _outbound_not_armed():
+    """A test that runs sizeup.app.main() arms the outbound guard (sizeup/outbound.py): never past that test."""
+    yield
+    from sizeup import outbound
+    outbound.disarm()
+
+
+@pytest.fixture(autouse=True)
 def _private_claims_dir(tmp_path, monkeypatch):
     """Tests never touch the real ~/.local/state/rtl-claims shared with shortfinal."""
     import sizeup.radio.claims as claims
@@ -203,6 +211,19 @@ def _aircraft_stays_local(monkeypatch):
         assert host in ("127.0.0.1", "localhost", "::1"), f"a test tried to reach {host} (aircraft: fixtures only)"
         return real(req, *a, **kw)
     monkeypatch.setattr(aircraft, "urlopen", local_only)
+    real_open = aircraft.KeepAlive._open        # the API feeds' own connections (#542): this machine only too
+
+    def open_local(self, u, origin):
+        assert u.hostname in ("127.0.0.1", "localhost", "::1"), f"a test tried to reach {u.hostname} (aircraft: fixtures only)"
+        return real_open(self, u, origin)
+    monkeypatch.setattr(aircraft.KeepAlive, "_open", open_local)
+    real_reg = aircraft.registry_get           # the registry's own download (safe redirects): this machine only too
+
+    def reg_local(url, *a, **kw):
+        host = urlsplit(url).hostname
+        assert host in ("127.0.0.1", "localhost", "::1"), f"a test tried to reach {host} (aircraft: fixtures only)"
+        return real_reg(url, *a, **kw)
+    monkeypatch.setattr(aircraft, "registry_get", reg_local)
 
 
 @pytest.fixture(autouse=True)
@@ -237,6 +258,31 @@ def _module_rng_per_test(request):
     mod.rng = np.random.default_rng([seed, zlib.crc32(request.node.nodeid.encode())])
     yield
     mod.rng = rng
+
+
+@pytest.fixture(autouse=True)
+def _cads_shut_down(monkeypatch):
+    """Every Cad a test makes (its own, an app's, a hub's and a station's) is shut down when the test ends
+    (Cad.shutdown(), #497): its workers joined and its database closed. Left as they were, each kept its threads
+    (the radio log's, the dispatch voice's, the address history's) and its database's descriptors for the rest of the
+    run: a process that ran the whole suite ended with about 1000 threads and 2000 descriptors (#457), and another
+    test's CPU and descriptor numbers were at their mercy. A Cad made by a module's fixture is made before this one
+    and is not touched. The workers get a moment, not seconds: a dispatch voice still being rendered (the real `say`
+    on a Mac) ends by itself, finds the Cad shut and writes nothing."""
+    from sizeup.cad.service import Cad
+    made, init = [], Cad.__init__
+
+    def tracked(self, *a, **kw):
+        made.append(self)
+        init(self, *a, **kw)
+    monkeypatch.setattr(Cad, "__init__", tracked)
+    yield
+    for cad in reversed(made):
+        try:
+            if hasattr(cad, "store"):            # (one whose __init__ raised has nothing to shut down)
+                cad.shutdown(wait_s=0.05)
+        except Exception:  # noqa: BLE001 - a teardown: the test's own result stands
+            pass
 
 
 @pytest.fixture(params=[3, 6, 12, 22, 23], ids=lambda h: f"wall-{h:02d}h")

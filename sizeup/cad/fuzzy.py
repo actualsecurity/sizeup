@@ -1,6 +1,6 @@
 """Speech-to-text misreads of a street and a house number: how close a page's heard street is to a typed one,
 which known street it snaps to, and whether two house numbers are one misheard as the other. Pure string functions,
-no dependencies; sizeup/cad/sources.py uses them to match a page to a County CAD Times incident.
+no dependencies; sizeup/cad/sources.py uses them to match a page to a county feed incident.
 
     name_sim   street names compared after folding case, spaces and doubled letters ("Sampleworth" / "Samplewerth"):
                1 - edit distance / longer length; a sound-alike (the same consonant skeleton) counts as STREET_SIM

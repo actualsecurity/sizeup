@@ -89,13 +89,16 @@ incident_talkgroups = [307, 333]
 # Credentials: the task role (sizeup-aws/12-transcribe.sh adds transcribe:StartStreamTranscription*
 # and the sizeup-* vocabularies); region: the task's AWS_REGION. No whisper here: the station runs it.
 aws = true
-aws_channels = ["South 2", "FG1", "FG2", 307, "HPN Tower", "NY App 126.4/120.8", "NY App 124.65", "HPN Ground"]
-# South 2 paging, FG1, FG2, Fire/EMS 15, HPN ATC (Tower, and #260's Approach and Ground): AWS
+aws_channels = ["South 2", "FG1", "FG2", 307, "HPN Tower", "NY App 126.4/120.8", "NY App 124.65", "HPN Ground",
+                "p25:mrrs:9211"]
+# South 2 paging, FG1, FG2, Fire/EMS 15, HPN ATC (Tower, and #260's Approach and Ground): AWS. PD dispatch on MTA MRRS
+# (p25:mrrs:9211): AWS on its own budget (aws_context_budget_usd), with the sizeup-pd vocabulary (radio-intel PR 3)
 # Recorded, not transcribed, unless Settings > Radios > Channels says otherwise (#201): WCPD Ch 1 (383) and
 # LLT Supervisor 1 (3127), about 1,800 clips a day off the station's whisper. The hub folds this into the
 # channel choices it sends the station (sizeup/channels.py for_station()).
 record_only = [383, 3127]
 aws_monthly_limit_usd = 25               # Settings > Radios can change it; reached: whisper on the station
+aws_context_budget_usd = 15              # another P25 system's (police) own: never ours nor our reserve; reached: whisper
 aws_idle_s = 120
 
 [storage]
@@ -125,11 +128,13 @@ channels = ["FG1", "PC repeater"]
 
 [prealert]
 # The phone pre-alert from Tapout (docs/cloud.md, config.example.toml): the hub is the CAD of record,
-# so it subscribes, read only. NEVER publish to these topics: pcfd-phone-prealert pages the fire crew.
+# so it subscribes, read only. The topics are NOT in this repo: an admin sets them in Settings > System > Push
+# notifications (kept in the CAD database); SIZEUP_PREALERT_RING_TOPIC / _STATUS_TOPIC override. Unset: the feed is
+# off and Health says "not configured". sizeup never publishes to a topic it subscribes to (or one listed as protected).
 enabled = true
 server = "https://ntfy.sh"           # SIZEUP_PREALERT_SERVER overrides (tests: a local fake)
-ring_topic = "pcfd-phone-prealert"
-status_topic = "pcfd-status"
+ring_topic = ""                      # set in Settings > System (not here)
+status_topic = ""                    # set in Settings > System (not here)
 expire_min = 5
 heartbeat_stale_min = 90
 
@@ -153,7 +158,7 @@ bbox = [-73.80, 40.92, -73.56, 41.10]   # west, south, east, north: Port Chester
 # [alerts]: station health (sizeup/cloud/health.py, docs/cloud.md "Station health and alerts"): banner on /cad
 # and /monitor, the log, and a push to our OWN status topic: env SIZEUP_STATUS_TOPIC (SSM /sizeup-hub/status-topic;
 # the alarms go to SIZEUP_ALERT_TOPIC, SSM /sizeup-hub/alert-topic; only one set: everything goes there), never in
-# this file (ntfy topics are public by name). Never Tapout's pcfd-phone-prealert / pcfd-status (refused). No topic:
+# this file (ntfy topics are public by name). Never a topic the app subscribes to, or one listed as protected (refused). No topic:
 # no push. The thresholds below are the defaults.
 [alerts]
 silent_min = 3                     # no state post from the station this long

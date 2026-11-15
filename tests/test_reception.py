@@ -31,7 +31,7 @@ from sizeup.radio.recorder import SystemUnitRecorder
 from tests.test_health import access_hub, call, jwt, keys, jwks, people, req, station_status  # noqa: F401  (fixtures)
 from tests.test_p25 import tr_call
 from tests.test_p25_systems import MRRS, finder, service, system_dir
-from tests.test_roles import COREY, DEE, JULIAN, VAL
+from tests.test_roles import CASEY, DEE, JORDAN, VAL
 from tests.test_trunk_recorder_unit import SERVICE_PID
 
 PD, PD_SECURE, EMS = 9211, 9213, 9570
@@ -522,7 +522,7 @@ def test_who_started_a_test_is_kept_by_the_cad_of_record_never_with_the_test(lab
     assert not [m for m in app.logs if who in m and not m.startswith("CAD activity: ")]   # (the CAD's own activity log)
     acts = app.cad.store.q("SELECT email, kind, summary, ok FROM user_activity WHERE route = 'reception test'")
     assert [(a["email"], a["kind"], a["summary"], a["ok"]) for a in acts] == [
-        (who, "action", "Reception test stopped (stopped by a person): MRRS 770 on SDR air · none · HPN Tower restored", 1)]
+        (who, "action", "Reception test stopped (stopped by a person): MRRS 770 on SDR air · HPN Tower restored", 1)]
     # a refused start keeps nothing; one from the station's own page (nobody signed in) has no row to write
     assert "protected" in app.reception_post({"action": "start", "job": "MRRS 770", "sdr": "page", "pause": "South 2"}, who)
     assert list(json.loads(app.cad.store.meta_get("reception_by"))) == [tid]
@@ -573,7 +573,9 @@ def test_the_paused_job_comes_back_when_the_test_fails(lab):
     h = app.reception.history[0]
     assert (h["status"], h["restored"]) == ("failed", "HPN Tower restored") and "trunk-recorder absent" in h["why"]
     assert app.assign["air"] == "HPN Tower" and app.reception.active is None and rt.probe is None
-    assert h["verdict"]["grade"] == "none"
+    # it never measured anything: no verdict (#436: "None" is a finished side that heard nothing), never "0% decoded"
+    assert h["verdict"] is None and h["halves"][0]["verdict"] is None
+    assert reception.Tests._brief(h)["halves"][0]["decoded_pct"] is None
     # the dongle can't take the test's job at all: its own job is started on it again
     rt.recorder.status = lambda: {"state": "ok", "detail": "", "restarts": 0}
     real = app._start_mode
@@ -917,7 +919,7 @@ def test_stop_is_immediate_during_the_sweep(lab, tmp_path):
     app.reception.inline = False
     (tmp_path / "rtl_power").write_text("#!/bin/sh\n")
     app.cfg = replace(app.cfg, rtl_fm=str(tmp_path / "rtl_fm"))
-    sweeping, killed = threading.Event(), threading.Event()
+    sweeping, killed, let_go = threading.Event(), threading.Event(), threading.Event()
 
     class Proc:
         kill = staticmethod(killed.set)
@@ -925,21 +927,47 @@ def test_stop_is_immediate_during_the_sweep(lab, tmp_path):
     def hanging(binary, index, listed, center, rate, started=None):
         started(Proc())
         sweeping.set()
-        killed.wait(20)
+        killed.wait(60)
+        let_go.wait(60)                        # killed, and still not back: Stop has to answer without it
         return None
     app.reception.sweep_fn = hanging
     assert start(app, "air", pause="HPN Tower") is None
-    assert sweeping.wait(5) and app.reception.active["step"] == "starting" and app.assign["air"] == "Off"
+    assert sweeping.wait(30) and app.reception.active["step"] == "starting" and app.assign["air"] == "Off"
     assert app.reception_state()["active"]["step"] == "starting"            # (the state never waits on the sweep)
-    t0 = time.monotonic()
     assert app.reception_post({"action": "stop"}) is None
-    assert time.monotonic() - t0 < 0.5 and killed.is_set()
-    end = time.time() + 5
-    while time.time() < end and app.reception.active is not None:
+    # No clock (a loaded runner stretched this past 0.5 s): the sweep is still held, so the answer did not wait for
+    # the test's thread; the test is still there, being stopped, and rtl_power was killed.
+    assert killed.is_set() and not let_go.is_set() and app.reception.active is not None
+    assert app.reception_state()["active"]["step"] == "stopping" and app.reception.history == []
+    let_go.set()
+    end = time.monotonic() + 30
+    while time.monotonic() < end and app.reception.active is not None:
         time.sleep(0.02)
-    h = app.reception.history[0]
+    assert app.reception.active is None
+    h = app.reception.history[0]               # (#503) there as soon as the test is not: never a moment with neither
     assert (h["status"], h["restored"], h["halves"]) == ("stopped", "HPN Tower restored", [])
     assert app.assign["air"] == "HPN Tower" and json.loads((claims.DIR / "air.json").read_text())["mode"] == "HPN Tower"
+
+
+def test_an_ended_test_is_in_the_history_before_it_stops_being_the_running_one(lab):
+    """#503: the page reads the state without the lock. A test that ends is never missing from both (its row was
+    written after `active` was cleared, and the modes file and the capture wipe came in between), and never in both."""
+    app = lab
+    running(app)
+    assert start(app, "air", pause="HPN Tower") is None
+    tid = app.reception.active["id"]
+    seen = []
+
+    def look(*a, **k):
+        st = app.reception_state()
+        seen.append(((st["active"] or {}).get("id"), [h["id"] for h in st["history"]]))
+    write, save = app.reception._write, app._save_modes
+    app.reception._write = lambda path, doc: (look(), write(path, doc))[1]      # the history row being written
+    app._save_modes = lambda: (look(), save())[1]                               # the first thing after `active` goes
+    assert app.reception_post({"action": "stop"}) is None
+    assert (tid, []) in seen and (None, [tid]) in seen                          # running, then history
+    assert all(got in ((tid, []), (None, [tid])) for got in seen), seen         # never neither, never both
+    assert [h["id"] for h in app.reception.history] == [tid] and app.reception.active is None
 
 
 def test_an_end_that_raises_is_ended_again_and_stop_always_works(lab):
@@ -1166,9 +1194,16 @@ def test_the_state_says_what_can_be_tested_and_on_which_dongle(lab):
     running(app)
     assert "reception" not in app.state()                      # never in the state everyone gets
     st = app.reception_state()
-    assert st["systems"] == [{"name": "mrrs", "label": "MRRS", "watch": [PD, EMS],
-                              "jobs": [{"job": "MRRS 770", "mhz": 770.3125}, {"job": "MRRS 773", "mhz": 773.08125}],
-                              "caveat": "Some traffic is carried over LTE and never on RF."}]
+    # (#436) the county's P25 site first (probe-only, from its trunk-recorder config), then the systems config's
+    assert st["systems"] == [
+        {"name": "probe-westchester", "label": "County", "kind": "county", "watch": [307, 333],
+         "jobs": [{"job": "County probe", "mhz": 477.19375, "cc": [476.075, 476.1125, 476.2125, 476.2375]}],
+         "alert": [{"tg": 307, "name": "Fire/EMS 15"}, {"tg": 333, "name": "Airport Incident"}], "caveat": ""},
+        {"name": "mrrs", "label": "MRRS", "kind": "system", "watch": [PD, EMS],
+         "jobs": [{"job": "MRRS 770", "mhz": 770.3125, "cc": [769.90625, 770.18125, 770.46875, 770.71875]},
+                  {"job": "MRRS 773", "mhz": 773.08125, "cc": [772.48125, 773.03125, 773.68125]}],
+         "alert": [{"tg": PD, "name": "PD Dispatch"}, {"tg": EMS, "name": "PC-Rye EMS"}],
+         "caveat": "Some traffic is carried over LTE and never on RF."}]
     assert st["durations"] == [15, 60, 240, 0] and st["keep_min"] == 10.0 and st["active"] is None and st["history"] == []
     assert st["alert"] is None
     assert [(d["serial"], d["job"], d["refuse"]) for d in st["dongles"]] == [
@@ -1200,7 +1235,7 @@ def test_the_station_reports_it_and_the_hub_may_ask_for_it(lab):
     h = app.reception_state()["history"][0]
     assert (h["id"], h["status"], h["why"], h["restored"]) == ("0123456789ab", "stopped", "stopped by a person", "Off again")
     assert "by" not in h and "by" not in json.loads(app.reception.history_file.read_text())[0]
-    assert reception.ended_text(h) == "Reception test stopped (stopped by a person): MRRS 770 on SDR spare · none · Off again"
+    assert reception.ended_text(h) == "Reception test stopped (stopped by a person): MRRS 770 on SDR spare · Off again"
     # the POST is an admin's (no rule of its own: admin), the reads an admin's, and the start is in the activity
     assert not any(rx.fullmatch("/api/reception") for rx, _need in WRITES)
     assert {"/api/reception", "/api/reception/sample"} <= set(ADMIN_READS)
@@ -1247,8 +1282,15 @@ def test_the_web_server_starts_stops_and_serves_a_sample(lab):
         sid = app.reception_state()["samples"][0]["id"]
         assert sid not in raw.decode() and "radio_id" not in raw.decode()
         server.poke()
-        time.sleep(0.3)
-        state = json.loads(get("/api/state")[1])
+
+        def lent():                 # the state everyone gets is rebuilt by the server's own thread after the poke: waited
+            state = json.loads(get("/api/state")[1])        # for, not slept for (0.3 s was once too short: "lent" None)
+            row = next((x for x in state["sdr"]["sdrs"] if x["serial"] == "air"), None)
+            return state if row and row.get("lent") else None
+        end = time.monotonic() + 30
+        while (state := lent()) is None and time.monotonic() < end:
+            time.sleep(0.05)
+        assert state is not None, "the lent dongle never reached /api/state"
         assert "reception" not in state and "samples" not in json.dumps(state)
         assert next(x for x in state["sdr"]["sdrs"] if x["serial"] == "air")["lent"]["paused"] == "HPN Tower"
         for q in (sid, "000000000000"):                           # its audio: refused here, whatever the id
@@ -1283,7 +1325,7 @@ def test_on_the_hub_only_an_admin_sees_or_runs_a_reception_test(keys, access_hub
     st = station_status()
     st["reception"] = RX_REPORT
     assert call(h.url + "/api/station/state", "POST", {"at": 1, "status": st})[0] == 200
-    for who in (JULIAN, VAL, DEE):
+    for who in (JORDAN, VAL, DEE):
         for path in ("/api/reception", "/api/reception/sample?id=0123456789ab"):
             code, out = req(h.url + path, headers=as_(who))
             assert code == 403 and out["error"].startswith("Admins only") and "whip" not in json.dumps(out), (who, path)
@@ -1293,14 +1335,14 @@ def test_on_the_hub_only_an_admin_sees_or_runs_a_reception_test(keys, access_hub
         code, state = req(h.url + "/api/state", headers=as_(who))
         assert code == 200 and "reception" not in state and "whip on the roof" not in json.dumps(state)
     assert req(h.url + "/api/reception")[0] == 401             # nobody: not even that
-    code, out = req(h.url + "/api/reception", headers=as_(COREY))
+    code, out = req(h.url + "/api/reception", headers=as_(CASEY))
     assert code == 200 and out["reception"]["history"][0]["note"] == "whip on the roof"
     assert len(out["reception"]["samples"]) == 1 and "samples_at" not in out["reception"]     # signed in: the list
     # ... and the call itself: the hub asks the station for it (its job queue), for a signed-in admin only
     import base64
     asked = []
     h.app.hub.remote = lambda fn, *a, **k: asked.append((fn, a)) or base64.b64encode(b"RIFF-made-up").decode()
-    code, wav = req(h.url + "/api/reception/sample?id=0123456789ab", headers=as_(COREY))
+    code, wav = req(h.url + "/api/reception/sample?id=0123456789ab", headers=as_(CASEY))
     assert code == 200 and wav[:4] == b"RIFF" and asked == [("reception_sample_b64", ("0123456789ab",))]
     assert req(h.url + "/api/reception/sample?id=0123456789ab")[0] == 401 and len(asked) == 1     # nobody: never asked
 
@@ -1313,12 +1355,12 @@ def activity(h) -> list[tuple]:
 def test_the_hub_logs_refused_attempts_and_how_each_test_ended(keys, access_hub):  # noqa: F811
     h = access_hub
     people(h.app.cad)
-    admin = {"Cf-Access-Jwt-Assertion": jwt(keys[0], email=COREY)}
+    admin = {"Cf-Access-Jwt-Assertion": jwt(keys[0], email=CASEY)}
     # refused (here: no station to run it; on the station: a held or protected dongle, its words): logged as refused
     code, out = req(h.url + "/api/reception", "POST", {"action": "start", "job": "MRRS 770", "sdr": "00000101",
                                                        "pause": "South 2"}, headers=admin)
     assert code == 400 and out["error"]
-    assert [(a[0], a[1], a[3]) for a in activity(h)] == [(COREY, "refused", 0)] and "Refused: reception" in activity(h)[0][2]
+    assert [(a[0], a[1], a[3]) for a in activity(h)] == [(CASEY, "refused", 0)] and "Refused: reception" in activity(h)[0][2]
     # a start that goes through: the station is sent the test's id, never who asked; the hub keeps who under it
     sent = []
     h.app._switch = lambda fn, *a: sent.append((fn, a)) and None
@@ -1326,16 +1368,16 @@ def test_the_hub_logs_refused_attempts_and_how_each_test_ended(keys, access_hub)
     assert req(h.url + "/api/reception", "POST", body, headers=admin)[0] == 200
     (fn, (got, by, tid)), = sent
     assert (fn, got, by) == ("reception_post", body, "") and reception.SAMPLE_ID.fullmatch(tid)
-    assert h.app._reception_who(tid) == COREY and COREY not in json.dumps(sent)
-    assert activity(h)[1] == (COREY, "action", "Reception test started: MRRS 770 on SDR 00000104, pausing HPN Tower", 1)
-    h.app._reception_who("aaaaaaaaaaaa", COREY)                # (the made-up report's tests below were his too)
-    h.app._reception_who("bbbbbbbbbbbb", COREY)
+    assert h.app._reception_who(tid) == CASEY and CASEY not in json.dumps(sent)
+    assert activity(h)[1] == (CASEY, "action", "Reception test started: MRRS 770 on SDR 00000104, pausing HPN Tower", 1)
+    h.app._reception_who("aaaaaaaaaaaa", CASEY)                # (the made-up report's tests below were his too)
+    h.app._reception_who("bbbbbbbbbbbb", CASEY)
     # the station's report: a test that ended is a row of who started it, once, with what became of the dongle
     st = station_status()
     st["reception"] = RX_REPORT
     for _ in range(3):
         assert call(h.url + "/api/station/state", "POST", {"at": 1, "status": st})[0] == 200
-    assert activity(h)[2:] == [(COREY, "action", "Reception test done: MRRS 770 on SDR 104 · marginal · HPN Tower restored", 1)]
+    assert activity(h)[2:] == [(CASEY, "action", "Reception test done: MRRS 770 on SDR 104 · marginal · HPN Tower restored", 1)]
     # ... a Stop from here answers before the dongle is back: its outcome arrives the same way, late or not restored
     late = json.loads(json.dumps(RX_REPORT))
     late["history"].insert(0, dict(late["history"][0], id="bbbbbbbbbbbb", status="stopped", restored_ok=False,
@@ -1343,7 +1385,7 @@ def test_the_hub_logs_refused_attempts_and_how_each_test_ended(keys, access_hub)
                                    restored="HPN Tower NOT restored yet (in use by shortfinal (AM 118.575)): retrying"))
     st["reception"] = late
     assert call(h.url + "/api/station/state", "POST", {"at": 2, "status": st})[0] == 200
-    assert activity(h)[3] == (COREY, "action", "Reception test stopped (SDR 104 was switched in Settings > Radios): MRRS 770 "
+    assert activity(h)[3] == (CASEY, "action", "Reception test stopped (SDR 104 was switched in Settings > Radios): MRRS 770 "
                               "on SDR 104 · marginal · HPN Tower NOT restored yet (in use by shortfinal (AM 118.575)): "
                               "retrying", 0)
     late["history"][0].update(restored="HPN Tower restored (after 3 tries)", restored_ok=True)

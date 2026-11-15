@@ -655,7 +655,7 @@ class PreWatch:
         from tests.test_cad import make_cad
         self.cad = make_cad(tmp_path)
         if drill:
-            self.cad.settings_post("alarms", {"action": "set", "key": "drill", "value": True, "operator": "Corey"})
+            self.cad.settings_post("alarms", {"action": "set", "key": "drill", "value": True, "operator": "Casey"})
         self.aa = self.cad.airport_alerts
         self.aa.notifier = self.pushed = PushLog()
         self.clock = Clock(T3)

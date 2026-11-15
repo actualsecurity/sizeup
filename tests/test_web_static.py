@@ -51,7 +51,7 @@ def test_pages_load_only_scripts_that_exist_and_nothing_points_at_the_old_pages(
     html = (STATIC / "cad.html").read_text()
     assert 'id="settings-radios"' in html and 'id="settings-radio-controls"' in html
     assert 'RadiosPanel.mount($("#settings-radios")' in js("settings.js")
-    assert 'const rc = $("#settings-radio-controls");' in js("settings.js") and "RadioControls.mount(rc)" in js("settings.js")
+    assert 'const rc = $("#settings-radio-controls");' in js("settings.js") and "RadioControls.mount(rc, { reception: true, tab: S.rtab })" in js("settings.js")
     # one header: the console's tabs and the board's links on the same bar
     for tab in ("dispatch-open", "overview-open", "radio-open", "settings-open"):
         assert f'id="{tab}" class="tab' in html
@@ -119,13 +119,16 @@ def test_every_post_the_scripts_make_is_in_the_permission_map():
 
 def test_every_admin_only_get_the_scripts_make_is_in_the_read_map():
     """The admin-only GETs (sizeup/cad/api.py ADMIN_READS, checked by CadApi.get and server.py's /api/cad/health): the push
-    topics (Settings > System), station health (Settings > Health, #203) and the Search page's CSV (#403). A dispatcher or
+    topics (Settings > System), station health (Settings > Station > Health, #203) and the Search page's CSV (#403). A dispatcher or
     viewer gets a 403."""
     scripts = "".join(js(n) for n in JS_FILES)
     for path, literal, script in (("/api/cad/notify", '"/api/cad/notify"', "settings.js"),
                                   ("/api/cad/health", '"/api/cad/health"', "health.js"),
                                   ("/api/cad/search.csv", "`/api/cad/search.csv?", "search-view.js"),
-                                  ("/api/cad/preplan.csv", '"/api/cad/preplan.csv"', "preplan.js")):     # (#456)
+                                  ("/api/cad/preplan.csv", '"/api/cad/preplan.csv"', "preplan.js"),      # (#456)
+                                  ("/api/cad/stt/corrections", '"/api/cad/stt/corrections"', "stt-fix.js"),   # the STT
+                                  ("/api/cad/stt/corrections.jsonl", '"/api/cad/stt/corrections.jsonl"', "stt-fix.js"),
+                                  ("/api/cad/intel", '"/api/cad/intel"', "intel.js")):     # the pre-alert rules (#411)
         assert literal in js(script), f"{script} doesn't read {path}"
         assert path in ADMIN_READS, path
     # ... and a reception test's captured audio (#410: served by server.py, played in Settings > Radios)
@@ -133,8 +136,11 @@ def test_every_admin_only_get_the_scripts_make_is_in_the_read_map():
     # (perf: #425; #403: the Search CSV; #456: the pre-plan CSV; + #409: which radios keyed an encrypted talkgroup,
     # which no script reads yet)
     assert set(ADMIN_READS) == {"/api/cad/notify", "/api/cad/health", "/api/cad/perf", "/api/cad/perf/profile",
-                                "/api/cad/search.csv", "/api/cad/preplan.csv", "/api/cad/comms/activity",
-                                "/api/reception", "/api/reception/sample"}
+                                "/api/cad/search.csv", "/api/cad/preplan.csv", "/api/cad/comms/activity", "/api/cad/intel",
+                                "/api/reception", "/api/reception/sample", "/api/cad/adapter-password",   # (+ #460)
+                                "/api/cad/stt/corrections", "/api/cad/stt/corrections.jsonl"}
+    assert '"/api/cad/adapter-password"' in js("adapterpass.js")
+    assert "/api/cad/adapter-password" not in scripts.replace(js("adapterpass.js"), "")   # only its card reads it
     assert '"/api/cad/perf"' in js("health.js") and '"/api/cad/perf/profile' in js("health.js")
     assert "/api/cad/perf" not in scripts.replace(js("health.js"), "")        # only the tab reads it
     assert "/api/cad/health" not in scripts.replace(js("health.js"), "")      # only the tab reads it
@@ -143,7 +149,7 @@ def test_every_admin_only_get_the_scripts_make_is_in_the_read_map():
 def test_no_health_banner_on_the_console_or_the_board_and_health_is_an_admins_tab():
     """#203: station health (silent, behind, update failed, a dongle or job, whisper / trunk-recorder, a stuck channel, the
     outbox, the disk, the whisper queue, Amazon Transcribe and its budget) is never a banner under the header, for anyone;
-    it is Settings > Health, shown to admins on the hub, polled only while open. The NWS banner and the alarms stay."""
+    it is Settings > Station > Health, shown to admins on the hub, polled only while open. The NWS banner and the alarms stay."""
     html = (STATIC / "cad.html").read_text()
     box = re.search(r'<div id="alert-banners"[^>]*>(.*?)\n</div>', html, re.S).group(1)
     assert 'id="wx-banner"' in box and "health" not in re.sub(r"<!--.*?-->", "", box, flags=re.S)
@@ -152,14 +158,20 @@ def test_no_health_banner_on_the_console_or_the_board_and_health_is_an_admins_ta
     health = js("health.js")
     assert "cad.hooks" not in health and "renderBanner" not in health and "alert-banners" not in health
     assert not re.search(r"cloud\)?\.alerts|cloud && c\.alerts", "".join(js(n) for n in JS_FILES))   # nothing reads it
-    # the tab: a section of its own, its nav item an admin's on the hub, its content refused to anyone else
+    # the tab: Settings > Station > Health, an admin's on the hub, its content refused to anyone else
     s = js("settings.js")
-    assert '["health", "Health"]' in s and '<section id="s-health" class="s-panel" data-s="health" hidden>' in html
-    tab = re.search(r"^function sHealthTab\(\) \{(.*?)^\}", s, re.S | re.M).group(1)
-    assert 'canDo("admin")' in tab and "sIsHub()" in tab
+    assert '["station", "Station"]' in s and '["health", "Health"]' in s
+    assert '<section id="s-station" class="s-panel" data-s="station" hidden>' in html
+    assert '<div id="s-station-health" class="s-station-part" data-stab="health" hidden></div>' in html
+    tabs = re.search(r"^function sStationTabs\(\) \{(.*?)^\}", s, re.S | re.M).group(1)
+    assert 'canDo("admin")' in tabs and "sIsHub()" in tabs
     body = re.search(r"^function sHealth\(panel\) \{(.*?)^\}", s, re.S | re.M).group(1)
     assert body.index('canDo("admin")') < body.index("StationHealth.mount(panel)")
-    assert 'm[2] === "health"' in s and '"#settings/health"' in s        # the pushes' old link lands on the tab
+    # the old places (a push's link, a bookmark) land on the tab
+    assert 'sec === "health" || (sec === "system" && m[2] === "health")' in s and '"#settings/station/health"' in s
+    # a cold open of #settings/station/health on the hub routes before the first state: no tab chosen, no hash rewritten
+    pick = re.search(r"^function sStationPick\(\) \{(.*?)^\}", s, re.S | re.M).group(1)
+    assert pick.index("if (!cad.state) return false;") < pick.index("history.replaceState")
     assert "StationHealth.mount" not in re.search(r"^function sSystem\(panel\) \{(.*?)^\}", s, re.S | re.M).group(1)
     # the links to the related Data sources row and Push notifications
     for href in ("#settings/system/pushes", "#settings/data/transcribe"):

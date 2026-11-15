@@ -8,10 +8,13 @@ FROM python:3.14-slim
 ARG TARGETARCH
 ARG SIZEUP_BUILD=""
 # Litestream (continuous SQLite backup to S3, deploy/hub/entrypoint.sh), pinned, checked against the
-# release's checksums.txt: github.com/benbjohnson/litestream/releases/tag/v0.5.17
-ARG LITESTREAM_VERSION=0.5.17
-ARG LITESTREAM_SHA256_ARM64=f8ca4a050095c1efbda2c4365172e61bf9d955ea0d9ac42f448b52e51819baa5
-ARG LITESTREAM_SHA256_AMD64=cfb371176d164437ae869f8351cfde49bd1804ae71c61923f75c9cba9c9c006d
+# release's checksums.txt: github.com/benbjohnson/litestream/releases/tag/v0.5.18. At least 0.5.18: its snapshot
+# after a stale WAL position holds every frame (litestream#1547) and its read lock survives a `litestream sync`
+# request (#1579), which the takeover now sends right after `litestream replicate` starts (docs/cloud.md
+# "Replicate before migrate").
+ARG LITESTREAM_VERSION=0.5.18
+ARG LITESTREAM_SHA256_ARM64=922a09e6a7ac67f2095571894dc6382e94e1dd4cdd9674883ddf1a8e74ab982d
+ARG LITESTREAM_SHA256_AMD64=d3687b9fd0f2e9426bbd3da828429ff3f1dfc5c9b74d54fdf028e4ee510e7dea
 
 # The slim image has no curl: Python fetches the tarball, sha256sum checks it.
 RUN set -eu; \
@@ -53,7 +56,11 @@ RUN groupadd --system --gid 10001 sizeup \
 WORKDIR /app
 COPY pyproject.toml ./
 COPY sizeup ./sizeup
-RUN pip install --no-cache-dir . && rm -rf build
+# [docs]: pypdf, PDFium (pypdfium2) and Pillow for site documents (#459, sizeup/docfiles.py)
+# [intel-llm]: the Anthropic SDK (Bedrock Mantle client + boto3) for radio pre-alert inference (sizeup/intel/infer.py; off
+# until Settings turn it on), at the exact versions of deploy/hub/constraints-intel-llm.txt (reproducible images)
+COPY deploy/hub/constraints-intel-llm.txt ./
+RUN pip install --no-cache-dir -c constraints-intel-llm.txt ".[docs,intel-llm]" && rm -rf build
 COPY data ./data
 COPY deploy/hub ./deploy/hub
 COPY deploy/trunk-recorder/talkgroups.csv ./deploy/trunk-recorder/talkgroups.csv
@@ -62,12 +69,17 @@ COPY deploy/trunk-recorder/systems ./deploy/trunk-recorder/systems
 
 # sizeup finds data/ next to its package (data/gazetteer.sqlite, cad_lists.json, ...), so it runs from
 # /app (PYTHONPATH) rather than the site-packages copy; `pip install .` brings numpy.
+# SIZEUP_LITESTREAM_SYNC_S: how often Litestream reads each database's WAL into a file for S3 (deploy/hub/
+# litestream.yml expands it; docs/cloud.md "How often the replica is written"). Here so that every process in the
+# container has it, an operator's `litestream restore -config ...` in a shell included; the task definition may
+# override it.
 ENV PYTHONPATH=/app \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     SIZEUP_CONFIG=/app/deploy/hub/config.hub.toml \
     SIZEUP_STATE_DIR=/data \
     SIZEUP_PORT=8090 \
+    SIZEUP_LITESTREAM_SYNC_S=30 \
     SIZEUP_BUILD=${SIZEUP_BUILD}
 
 USER sizeup

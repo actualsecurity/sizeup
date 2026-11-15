@@ -25,7 +25,8 @@ Reset to default = drop the override (one item, or a whole section).
     channels                       key "FG1" | "South 2" | "tg:307" -> {record?, transcribe?, engine?}: which channel is
                                    kept, transcribed, and by what (sizeup/channels.py; Settings > Radios)
     stt                            key "vocabulary" -> [phrases] (Amazon Transcribe's custom vocabulary),
-                                   "aws_monthly_limit_usd" -> the monthly AWS limit (sizeup/transcribe.py)
+                                   "aws_monthly_limit_usd" -> the monthly AWS limit (sizeup/transcribe.py),
+                                   "aws_context_budget_usd" -> another P25 system's (police) own monthly AWS limit
     tones                          the tone book (#80, #115, #122; sizeup/cad/tonelist.py): key "A/B" -> a pair named
                                    here {a_hz, b_hz, places, service, role?, confirmed?, page?} (#84/#115: {name, ...});
                                    "A/B@<name in the list>" -> an edit to a row of data/westchester_tones.csv {list,
@@ -34,7 +35,11 @@ Reset to default = drop the override (one item, or a whole section).
                                    list, never written into it (sizeup/app.py _apply_named_tones)
     camera_wall                    key "margin_m" -> metres around our fire districts, "include" / "exclude" -> [camera
                                    ids]: the camera wall's area (#125, Settings > System; sizeup/roads.py Roads.area)
-    notify                         key "alerts" | "status" -> {"topic": name} | {"off": true}, "server" -> the ntfy URL:
+    notify                         key "alerts" | "status" -> {"topic": name} | {"off": true}, "server" -> the ntfy URL;
+                                   "prealert_ring" | "prealert_status" -> {"topic": name} | {"off": true}: the Tapout feed
+                                   sizeup SUBSCRIBES to (env SIZEUP_PREALERT_*_TOPIC wins; none set: that feed is off),
+                                   "protected" -> {"topics": [names]}: more topics never published to (the subscribed
+                                   ones always are). None of these names is in the repo.
                                    the push topics by kind over env / SSM / the config (sizeup/notify.py Pushes;
                                    Settings > System > Push notifications, admins). Secret by name: never exported,
                                    kept through an import, a fingerprint in the audit log
@@ -60,6 +65,8 @@ Reset to default = drop the override (one item, or a whole section).
     datasources                    key a data source ("gis:hydrants", "aircraft:registry") -> off | hourly | daily | weekly |
                                    monthly: how often the registry refreshes it (#186, Settings > Data sources;
                                    sizeup/datasources.py); not set: the source's default
+    station_logs                   key "on" | "level" | "include" | "exclude" | "retention_days": the station's logs into
+                                   CloudWatch (sizeup/cloud/cwlogs.py; Settings > Station > Logs, admins)
     department_units               key a feed's department entry code -> the department it pages ("Port Chester FD"), or
                                    {"name", "accepts": true}: a whole department, never a unit (#370,
                                    sizeup/cad/sources.py; admins, no panel); never a board unit's code
@@ -91,6 +98,7 @@ from sizeup.cad import lists as lists_mod
 from sizeup.cad.lists import CLASSES, CODE, COLOR, LIST_SECTIONS, LONG_CODE, RESPONSES, ROLES, ListsError
 from sizeup.cad.store import OPERATOR_MAX, SCHEMA_VERSION, TZ, CadError
 from sizeup import audiostore, errwatch, polly, sourcekeys
+from sizeup.cloud import cwlogs
 from sizeup.cloud import health as health_mod
 from sizeup.radio.tones import pair_key
 from sizeup.tts import KOKORO_VOICES
@@ -104,7 +112,8 @@ EMAIL = re.compile(r"[^@\s<>]{1,64}@[^@\s<>]{1,190}\.[^@\s<>]{1,63}")
 PAGE_SECTION = {**{s: "lists" for s in LIST_SECTIONS}, "event_class": "lists", "geo_town_order": "lists", "status_flow": "lists",
                 "type_subtypes": "lists",
                 "units": "units", "dispatch_wording": "dispatch", "dispatch_tones": "dispatch", "dispatch": "dispatch",
-                "channels": "radios", "stt": "radios", "places": "lists", "tones": "radios", "alarms": "system"}
+                "channels": "radios", "stt": "radios", "places": "lists", "tones": "radios", "alarms": "system",
+                channels_mod.SQUELCH_SECTION: "radios"}
 # The camera wall's area (#125, sizeup/roads.py Roads.area): Settings > System.
 WALL_SECTION, WALL_KEYS, WALL_MARGIN = "camera_wall", ("margin_m", "include", "exclude"), (0, 5000, 1000)
 PAGE_SECTION[WALL_SECTION] = "system"
@@ -129,6 +138,9 @@ PAGE_SECTION[NOTIFY_SECTION] = "system"
 MODE_SECTION = "dispatch_mode"
 PAGE_SECTION[MODE_SECTION] = "dispatch"
 KEPT_SECTIONS = (NOTIFY_SECTION, MODE_SECTION)
+# Radio pre-alerts (sizeup/intel, #411): Settings > System > Intel, audited as System (sizeup/intel/admin.py).
+INTEL_SECTIONS = ("intel", "intel_packs", "intel_rules")
+PAGE_SECTION.update({k: "system" for k in INTEL_SECTIONS})
 # The hub's own error spikes (#285, sizeup/errwatch.py): Settings > System > Hub error alerts, audited as System.
 ERR_SECTION = errwatch.SECTION
 PAGE_SECTION[ERR_SECTION] = "system"
@@ -143,7 +155,34 @@ PAGE_SECTION[MAPD_SECTION] = "system"
 # audited as System. key a category -> "dispatcher" | "admin" (the least standing); not set: everyone signed in.
 PREMISE_SECTION = "premise_visibility"
 PAGE_SECTION[PREMISE_SECTION] = "system"
+# Which services' emergencies the Radio page shows prominently when they aren't ours (Settings > Radios > Emergencies):
+# a banner, a highlighted row, the full "Emergency (not ours)" chip. Any other service's: a muted "EM" chip only.
+# Ours (our fire channels, our rigs, scene safety) always stand out, and so does a source whose service isn't known
+# (blank): quiet is only for a service that is known and not listed. "other" (Trunk Ops, Interop, Special Events, OEM:
+# where a mutual-aid firefighter or an unmapped portable of ours could be) is prominent by default.
+# Presentation only: what is recorded, kept, alarmed and pushed doesn't change. Admins, audited as Radios.
+# key "prominent" -> [services] (sourcekeys.SERVICES).
+EM_SECTION, EM_DEFAULT = "radio_emergencies", ("fire", "ems", "other")
+PAGE_SECTION[EM_SECTION] = "radios"
 PREMISE_LEVELS = ("everyone", "dispatcher", "admin")
+# The station's logs into CloudWatch (sizeup/cloud/cwlogs.py): Settings > Station > Logs, admins, audited as System.
+LOGS_SECTION = cwlogs.SECTION
+PAGE_SECTION[LOGS_SECTION] = "system"
+
+
+def em_value(v) -> list[str]:
+    """A list of services (sourcekeys.SERVICES), in their order, each once; CadError otherwise. Empty: none stand out."""
+    if not isinstance(v, list) or any(x not in sourcekeys.SERVICES for x in v):
+        raise CadError(f"prominent: a list of {', '.join(sourcekeys.SERVICES)}")
+    return [x for x in sourcekeys.SERVICES if x in v]
+
+
+def em_prominent(e) -> list[str]:
+    """The stored section's services, or the default (fire, EMS, other) when unset or unreadable."""
+    try:
+        return em_value((e or {})["prominent"])
+    except (KeyError, TypeError, CadError):
+        return list(EM_DEFAULT)
 
 
 def _visibility_keys() -> dict[str, str]:
@@ -159,6 +198,9 @@ PAGE_SECTION[RET_SECTION] = "system"
 # ... and its transcripts and metadata (the CAD's radio log, sizeup/cad/comms.py prune): the same keys, longer by default
 TRS_SECTION = audiostore.TRANSCRIPT_SECTION
 PAGE_SECTION[TRS_SECTION] = "system"
+# Hand-corrected transcripts (sizeup/cad/sttfix.py): "keep" (default on): a corrected clip and its audio are keepers.
+FIX_SECTION = "stt_corrections"
+PAGE_SECTION[FIX_SECTION] = "system"
 WALL_ID = re.compile(r"[A-Za-z0-9_.:-]{1,64}")      # sizeup/roads.py CAMERA_ID
 MAX_WALL_IDS = 200
 AUDIT_SECTIONS = ("lists", "run cards", "units", "dispatch", "users", "system", "radios")
@@ -176,6 +218,8 @@ WORDING = (("new", "First dispatch"), ("add_on", "Added to the assignment"), ("u
            ("respond", "Upgrade: more units"))
 MAX_TONES, MAX_GROUPS, MAX_CHANNELS = 8, 4, 8
 MAX_VOCAB, MAX_PHRASE_CHARS = 1500, 100
+STT_KEYS = ("vocabulary", "aws_monthly_limit_usd", "aws_context_budget_usd",   # the "stt" section's keys
+            "catchup", "catchup_max_age_h")    # shed clips caught up (sizeup/sttcatchup.py): on/off, how far back
 MAX_VOCAB_BYTES = 50_000          # AWS's limit; also keeps the Settings request under its 64 KB
 MAX_PLACE_NAMES = 300
 TONES_SECTION, MAX_NAMED_TONES, TONE_HZ = "tones", 400, tonelist.TONE_HZ     # the decoder's band (radio/tones.py)
@@ -420,6 +464,7 @@ class Editor:
         self.cad.atc_vocab_refresh = bool(a.get("vocab", True))
         self.cad.map_display = mapview.display_zooms(ov.get(MAPD_SECTION))     # the maps' rigs by zoom (#376)
         self.cad.premise_visible = dict(ov.get(PREMISE_SECTION) or {})     # premise notes by category (#403)
+        self.cad.em_prominent = em_prominent(ov.get(EM_SECTION))          # the Radio page's loud emergencies
         self.cad._state = None
 
     def _commit(self, changes: list[tuple[str, str, object]], operator: str, audit: list[tuple[str, str, object, object]],
@@ -572,9 +617,43 @@ class Editor:
         out["hub_errors"] = self.errors_page(ov)
         out["map_display"] = self.mapd_page(ov)
         out["premise_visibility"] = self.premise_page(ov)
+        out["radio_emergencies"] = self.em_page(ov)
         out["alert_mutes"] = self.mutes_page(ov)
         out["audio_retention"] = self.retention_page(ov)
+        out["station_logs"] = self.logs_page(ov)
         return out
+
+    def logs_page(self, ov: dict | None = None) -> dict:
+        """Settings > Station > Logs: each setting, its default and whether it is edited."""
+        e = ((self.overrides() if ov is None else ov).get(LOGS_SECTION) or {})
+        c = cwlogs.config(e)
+        return {k: {"label": cwlogs.LABELS[k], "value": c[k], "default": d, "edited": k in e}
+                for k, d in cwlogs.DEFAULTS.items()} | {"levels": list(cwlogs.logscrub.LEVELS),
+                                                         "retention_choices": list(cwlogs.RETENTION_DAYS)}
+
+    def _logs_op(self, action: str, body: dict, op: str) -> dict:
+        """set {key, value} | reset {key}: admins."""
+        key = body.get("key")
+        if key not in cwlogs.DEFAULTS:
+            raise CadError(f"key: one of {', '.join(cwlogs.DEFAULTS)}")
+        d = cwlogs.DEFAULTS[key]
+        cur = cwlogs.config(self.section(LOGS_SECTION))[key]
+        if action == "reset":
+            v = d
+        elif action == "set":
+            try:
+                v = cwlogs.check_value(key, body.get("value"))
+            except ValueError as e:
+                raise CadError(str(e)) from None
+        else:
+            raise CadError("action: set or reset")
+        shown = (lambda x: ("on" if x else "off") if key in ("on", "adapter") else ", ".join(x) or "none" if isinstance(x, list) else str(x))
+        out = self._commit([(LOGS_SECTION, key, REMOVE if v == d and type(v) is type(d) else v)], op,
+                           [("system", f"{LOGS_SECTION}/{key}", shown(cur), shown(v))])
+        sl = getattr(self.cad, "station_logs", None)
+        if key == "retention_days" and sl is not None:
+            sl.checked = 0.0                 # applied at the next look (the Logs view's status, or the next batch)
+        return {**out, "station_logs": self.logs_page()}
 
     def _context_channel(self, channel: str) -> bool:
         """This channel's newest transmission is another P25 system's (#409; one indexed row: (channel, start))."""
@@ -784,7 +863,7 @@ class Editor:
             v = self._errors_value(key, body.get("value"))
         else:
             raise CadError("action: set or reset")
-        shown = (lambda x: ("on" if x else "off") if key == "on" else str(x))
+        shown = (lambda x: ("on" if x else "off") if key in ("on", "adapter") else str(x))
         out = self._commit([(ERR_SECTION, key, REMOVE if v == d and type(v) is type(d) else v)], op,
                            [("system", f"{ERR_SECTION}/{key}", shown(cur), shown(v))])
         return {**out, "hub_errors": self.errors_page()}
@@ -823,6 +902,29 @@ class Editor:
         out = self._commit([(PREMISE_SECTION, key, REMOVE if v == "everyone" else v)], op,
                            [("system", f"{PREMISE_SECTION}/{key}", cur, v)])
         return {**out, "premise_visibility": self.premise_page()}
+
+    def em_page(self, ov: dict | None = None) -> dict:
+        """Settings > Radios > Emergencies: the services whose emergencies (not ours) stand out on the Radio page."""
+        e = ((self.overrides() if ov is None else ov).get(EM_SECTION) or {})
+        return {"prominent": em_prominent(e), "default": list(EM_DEFAULT), "edited": "prominent" in e,
+                "choices": list(sourcekeys.SERVICES)}
+
+    def _em_op(self, action: str, body: dict, op: str) -> dict:
+        """set {key: prominent, value: [services]} | reset {key: prominent}: admins, audited as Radios."""
+        if body.get("key") != "prominent":
+            raise CadError("key: prominent")
+        cur = em_prominent(self.overrides().get(EM_SECTION))
+        if action == "reset":
+            v = list(EM_DEFAULT)
+        elif action == "set":
+            v = em_value(body.get("value"))
+        else:
+            raise CadError("action: set or reset")
+        if v == cur:                                    # nothing changes: nothing written, nothing audited
+            return {"ok": True, "radio_emergencies": self.em_page()}
+        out = self._commit([(EM_SECTION, "prominent", REMOVE if v == list(EM_DEFAULT) else v)], op,
+                           [("radios", f"{EM_SECTION}/prominent", ", ".join(cur) or "none", ", ".join(v) or "none")])
+        return {**out, "radio_emergencies": self.em_page()}
 
     def _mapd_op(self, action: str, body: dict, op: str) -> dict:
         """set {key: detail_zoom | active_zoom | board_detail_zoom | board_active_zoom, value} | reset {key}: admins."""
@@ -995,9 +1097,12 @@ class Editor:
         fn = {"event_class": self._class_op, "status_flow": self._flow_op, "type_subtypes": self._map_op, "geo_town_order": self._towns_op, "units": self._units_op,
               "dispatch": self._dispatch_op, "users": self._users_op, "runcards": self._cards_op,
               "import": self._import_op, "channels": self._channels_op, "stt": self._stt_op,
+              channels_mod.SQUELCH_SECTION: self._squelch_op,
               "places": self._places_op, TONES_SECTION: self._tones_op, WALL_SECTION: self._wall_op, DS_SECTION: self._ds_op,
-              NOTIFY_SECTION: self._notify_op, ATC_SECTION: self._atc_op, ERR_SECTION: self._errors_op, MAPD_SECTION: self._mapd_op, PREMISE_SECTION: self._premise_op, RET_SECTION: self._retention_op,
-              TRS_SECTION: lambda a, b, o: self._retention_op(a, b, o, TRS_SECTION), MUTE_SECTION: self._mutes_op, DEPT_SECTION: self._dept_op, "alarms": lambda a, b, o: self.cad.alarms.settings_op(a, b, o)}.get(section)
+              NOTIFY_SECTION: self._notify_op, ATC_SECTION: self._atc_op, ERR_SECTION: self._errors_op, MAPD_SECTION: self._mapd_op, PREMISE_SECTION: self._premise_op, EM_SECTION: self._em_op, RET_SECTION: self._retention_op,
+              TRS_SECTION: lambda a, b, o: self._retention_op(a, b, o, TRS_SECTION), MUTE_SECTION: self._mutes_op, LOGS_SECTION: self._logs_op, DEPT_SECTION: self._dept_op, "alarms": lambda a, b, o: self.cad.alarms.settings_op(a, b, o),
+              "intel": lambda a, b, o: self.cad.intel_admin.settings_op(a, b, o),
+              FIX_SECTION: lambda a, b, o: self.cad.stt_fix.settings_op(a, b, o)}.get(section)
         if fn is None:
             raise CadError(f"no settings section {section!r}")
         if section in ("users", "import"):
@@ -1750,6 +1855,104 @@ class Editor:
             ctx.channels_changed()
         return out
 
+    # -- an FM channel's squelch (Settings > Radios > Squelch; sizeup/channels.py, sizeup/radio/fm.py) --------------
+
+    def squelch_overrides(self) -> dict:
+        return dict(self.overrides().get(channels_mod.SQUELCH_SECTION) or {})
+
+    def _squelch_op(self, action: str, body: dict, op: str) -> dict:
+        """set {key, open_db?, close_db?, min_open_s?} (null: back to the receiver's default) | reset {key}. Audited."""
+        ctx = self.cad.radio_ctx
+        locked = ctx.channels_locked() if ctx is not None else ""
+        if locked:
+            raise CadError(locked)
+        ov = self.squelch_overrides()
+        key = body.get("key")
+        dflt = ctx.squelch_defaults(key) if ctx is not None and isinstance(key, str) else {}
+        if action == "set":
+            self._squelch_editable(key)
+            try:
+                vals = channels_mod.clean_squelch(key, {f: body.get(f) for f in channels_mod.SQUELCH})
+            except ValueError as e:
+                raise CadError(str(e)) from None
+            cur = dict(ov.get(key) or {})
+            for f in channels_mod.SQUELCH:
+                if f in body and body[f] is None:
+                    cur.pop(f, None)
+            new = {k: v for k, v in {**cur, **vals}.items() if v != dflt.get(k)}
+            eff = {**dflt, **new}
+            if eff.get("open_db") is not None and eff.get("close_db") is not None and eff["close_db"] >= eff["open_db"]:
+                raise CadError(f"close {eff['close_db']:g} dB: under open ({eff['open_db']:g} dB)")
+            if new == (ov.get(key) or {}):
+                return {"ok": True}
+            before = {**dflt, **(ov.get(key) or {})}
+            out = self._commit([(channels_mod.SQUELCH_SECTION, key, new or REMOVE)], op,
+                               [("radios", f"squelch/{key}", before, eff)])
+        elif action == "reset":
+            key = _text(key, "key", 40)
+            if key not in ov:
+                return {"ok": True}
+            out = self._commit([(channels_mod.SQUELCH_SECTION, key, REMOVE)], op,
+                               [("radios", f"squelch/{key}", {**dflt, **ov[key]}, "default")])
+        else:
+            raise CadError("action: set or reset")
+        if ctx is not None:
+            ctx.channels_changed()
+        return out
+
+    def _squelch_editable(self, key) -> None:
+        """Only a traffic channel's squelch is set here, one the station has reported (with its own defaults). A paging
+        channel's (South 2: the tone-outs, 60 Control) is read-only: an Open over the pages' quieting mutes them."""
+        ctx = self.cad.radio_ctx
+        rows = {c["key"]: c for c in ctx.squelch_state()["channels"]} if ctx is not None else {}
+        row = rows.get(key) if isinstance(key, str) else None
+        if row is None:
+            ed = [k for k, c in rows.items() if c.get("editable")]
+            raise CadError(f"key: one of {', '.join(ed)}" if ed else "no traffic channel's squelch reported yet")
+        if not row.get("editable"):
+            raise CadError(f"{key}: {row.get('kind') or 'not a traffic'} channel: its squelch is read-only")
+
+    def _import_squelch(self, sq: dict) -> tuple[dict, list[str]]:
+        """An imported squelch section: invalid entries and a channel the station reports as paging (read-only)
+        skipped; one no station has reported (a fresh hub, a channel gone) kept, left out of the push until a traffic
+        channel by that name is there (channels.fit_squelch). -> (kept, notes)."""
+        ctx = self.cad.radio_ctx
+        rows = {c["key"]: c for c in ctx.squelch_state()["channels"]} if ctx is not None else {}
+        kept, notes = {}, []
+        for k, v in sq.items():
+            try:
+                c = channels_mod.clean_squelch(k, v)
+            except ValueError as e:
+                notes.append(f"squelch {k}: skipped ({e})")
+                continue
+            if not c:
+                continue
+            row = rows.get(k)
+            if row is not None and not row.get("editable"):
+                notes.append(f"squelch {k}: skipped ({row.get('kind') or 'not a traffic'} channel: read-only)")
+                continue
+            if row is None:
+                notes.append(f"squelch {k}: kept, not applied until a traffic channel {k} is reported")
+            kept[k] = c
+        return kept, notes
+
+    def replace_squelch(self, m: dict, operator: str) -> bool:
+        """The whole squelch map as the hub sent it. True when anything changed."""
+        cur = self.squelch_overrides()
+        sec = channels_mod.SQUELCH_SECTION
+        changes = [(sec, k, REMOVE) for k in cur if k not in m]
+        changes += [(sec, k, v) for k, v in m.items() if cur.get(k) != v]
+        if not changes:
+            return False
+        self._commit(changes, operator, [("radios", f"squelch/{k}", cur.get(k), None if v is REMOVE else v)
+                                         for _s, k, v in changes])
+        return True
+
+    def squelch_page(self) -> dict:
+        """GET /api/cad/squelch: each FM channel's squelch as set and as running, the noise floor, the short opens."""
+        ctx = self.cad.radio_ctx
+        return ctx.squelch_state() if ctx is not None else {"channels": [], "sync": {"state": "local", "detail": ""}}
+
     def replace_channels(self, prefs: dict, operator: str) -> bool:
         """The whole channel map as the hub sent it (the station applying the CAD of record's choices).
         True when anything changed."""
@@ -2018,13 +2221,37 @@ class Editor:
         return out
 
     @staticmethod
-    def _limit(v) -> float:
+    def _limit(v, key: str = "aws_monthly_limit_usd") -> float:
         if isinstance(v, bool) or not isinstance(v, (int, float)) or not 0 <= v <= 10000:
-            raise CadError("aws_monthly_limit_usd: 0 to 10000 (dollars)")
+            raise CadError(f"{key}: 0 to 10000 (dollars)")
         return round(float(v), 2)
 
+    @staticmethod
+    def _catchup_value(key: str, v):
+        """catchup: true | false; catchup_max_age_h: hours (sizeup/sttcatchup.py MAX_AGE_RANGE_H)."""
+        from sizeup.sttcatchup import MAX_AGE_RANGE_H
+        if key == "catchup":
+            if not isinstance(v, bool):
+                raise CadError("catchup: true or false")
+            return v
+        lo, hi = MAX_AGE_RANGE_H
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not lo <= v <= hi:
+            raise CadError(f"catchup_max_age_h: {lo:g} to {hi:g} (hours)")
+        return round(float(v), 1)
+
+    def stt_catchup(self) -> tuple[bool, float]:
+        """(on, max age in hours): shed clips caught up (sizeup/sttcatchup.py), on and 6 h unless set here."""
+        from sizeup.sttcatchup import DEFAULT_MAX_AGE_H
+        cur = self.stt_values()
+        on, age = cur.get("catchup", True), cur.get("catchup_max_age_h", DEFAULT_MAX_AGE_H)
+        try:
+            return self._catchup_value("catchup", on), self._catchup_value("catchup_max_age_h", age)
+        except CadError:
+            return True, DEFAULT_MAX_AGE_H
+
     def _stt_op(self, action: str, body: dict, op: str) -> dict:
-        """set {key: vocabulary | aws_monthly_limit_usd, value} | reset {key} | push (the vocabulary to AWS)."""
+        """set {key: vocabulary | aws_monthly_limit_usd | aws_context_budget_usd | catchup | catchup_max_age_h, value} |
+        reset {key} | push (the vocabularies to AWS)."""
         ctx = self.cad.radio_ctx
         cur = self.stt_values()
         if action == "push":
@@ -2038,17 +2265,23 @@ class Editor:
             return {"ok": st.get("state") != "error", "vocabulary": st, **({"error": st["reason"]}
                                                                            if st.get("state") == "error" else {})}
         key = _text(body.get("key"), "key", 40)
-        if key not in ("vocabulary", "aws_monthly_limit_usd"):
-            raise CadError("key: vocabulary or aws_monthly_limit_usd")
+        if key not in STT_KEYS:
+            raise CadError("key: vocabulary, aws_monthly_limit_usd, aws_context_budget_usd, catchup or catchup_max_age_h")
         if action == "set":
             if key == "vocabulary":
                 v = self._vocab_list(body.get("value"))
                 dflt = ctx.vocabulary_suggestions() if ctx is not None else []
                 new = REMOVE if v == dflt else v
                 shown = (f"{len(cur[key])} phrases" if key in cur else "default"), f"{len(v)} phrases"
+            elif key in ("catchup", "catchup_max_age_h"):
+                from sizeup.sttcatchup import DEFAULT_MAX_AGE_H
+                v = self._catchup_value(key, body.get("value"))
+                dflt = True if key == "catchup" else DEFAULT_MAX_AGE_H
+                new = REMOVE if v == dflt else v
+                shown = cur.get(key, dflt), v
             else:
-                v = self._limit(body.get("value"))
-                dflt = ctx.aws_limit_default() if ctx is not None else 25.0
+                v = self._limit(body.get("value"), key)
+                dflt = self._limit_default(key)
                 new = REMOVE if v == dflt else v
                 shown = cur.get(key, dflt), v
             out = self._commit([("stt", key, new)], op, [("radios", f"stt/{key}", *shown)])
@@ -2071,7 +2304,20 @@ class Editor:
         v = self.stt_values().get("aws_monthly_limit_usd")
         if isinstance(v, (int, float)) and not isinstance(v, bool):
             return float(v)
+        return self._limit_default("aws_monthly_limit_usd")
+
+    def aws_context_limit(self) -> float:
+        """Another P25 system's (police) own monthly AWS limit: never ours, nor our reserve (radio-intel PR 3)."""
+        v = self.stt_values().get("aws_context_budget_usd")
+        if isinstance(v, (int, float)) and not isinstance(v, bool):
+            return float(v)
+        return self._limit_default("aws_context_budget_usd")
+
+    def _limit_default(self, key: str) -> float:
         ctx = self.cad.radio_ctx
+        if key == "aws_context_budget_usd":
+            fn = getattr(ctx, "aws_context_limit_default", None)
+            return float(fn()) if fn is not None else 15.0
         return ctx.aws_limit_default() if ctx is not None else 25.0
 
     def stt_page(self) -> dict:
@@ -2088,6 +2334,10 @@ class Editor:
                                "state": ctx.vocabulary_state() if ctx is not None else {"state": "none"}},
                 "limit": {"value": self.aws_limit(), "default": ctx.aws_limit_default() if ctx is not None else 25.0,
                           "edited": "aws_monthly_limit_usd" in cur},
+                "context_limit": {"value": self.aws_context_limit(), "default": self._limit_default("aws_context_budget_usd"),
+                                  "edited": "aws_context_budget_usd" in cur},
+                "catchup": dict(zip(("on", "max_age_h"), self.stt_catchup()),
+                                edited="catchup" in cur or "catchup_max_age_h" in cur),
                 "aws": ctx.aws_status() if ctx is not None else {"enabled": False}}
 
     # -- the camera wall's area (#125): the margin around our fire districts, cameras always / never on it ---------
@@ -2216,7 +2466,7 @@ class Editor:
     # topics are public by name): never in the export, the audit log (a fingerprint there), the activity or the logs.
 
     def _notify_op(self, action: str, body: dict, op: str) -> dict:
-        """set {key: alerts | status, topic} ("" = the default) | off {key} | reset {key} | server {value} ("" = the
+        """set {key: alerts | status | intel, topic} ("" = the default) | off {key} | reset {key} | server {value} ("" = the
         default) | test {key}: a marked test push to the topic in effect. Admins (sizeup/cad/api.py WRITES)."""
         from sizeup import notify
         p = getattr(self.cad, "pushes", None)
@@ -2235,8 +2485,10 @@ class Editor:
                                [("system", f"{NOTIFY_SECTION}/server", old, v or f"default {p.default_server[0]}")])
             self.cad.log(p.line() + " (Settings changed)")
             return out
+        if key in (notify.PREALERT_RING, notify.PREALERT_STATUS, notify.PROTECTED):
+            return self._notify_protected_op(action, body, op, key, p, cur)
         if key not in notify.KINDS:
-            raise CadError("key: alerts or status")
+            raise CadError("key: alerts, status or intel")
         def said(v) -> str:                          # never the name: the audit log is open to everyone signed in
             if not isinstance(v, dict):
                 d, src = p.defaults[key]
@@ -2274,6 +2526,86 @@ class Editor:
         out = self._commit([(NOTIFY_SECTION, key, new)], op,
                            [("system", f"{NOTIFY_SECTION}/{key}", said(old), said(None if new is REMOVE else new))])
         self.cad.log(p.line() + " (Settings changed)")
+        return out
+
+    def _notify_protected_op(self, action: str, body: dict, op: str, key: str, p, cur: dict) -> dict:
+        """The pre-alert topics sizeup subscribes to (prealert_ring / prealert_status: set {topic} | off | reset) and the
+        extra topics never published to (protected: set {topics: [..] | "a, b"} | reset). Never a name in the audit log.
+        A name that is one of our own push topics in effect is refused (it would silence them: protected topics are
+        never published to), and a subscribed topic can't be both feeds."""
+        from sizeup import notify
+        import re as _re
+        label = {notify.PREALERT_RING: "Pre-alert ring topic", notify.PREALERT_STATUS: "Pre-alert status topic",
+                 notify.PROTECTED: "Protected topics"}[key]
+        ours = {p.effective(k)["topic"].lower() for k in notify.KINDS if p.effective(k)["topic"]}
+
+        def check(t: str) -> str:
+            if not notify.TOPIC.fullmatch(t):
+                return f"{t[:20]!r}: letters, digits, - and _ (at most 64)"
+            if t.lower() in ours:
+                return "that is one of our own push topics in effect: it can't also be protected"
+            return ""
+        old = cur.get(key)
+        if key == notify.PROTECTED:
+            if action == "reset" or (action == "set" and not body.get("topics")):
+                new = REMOVE
+            elif action == "set":
+                raw = body["topics"]
+                names = _re.split(r"[\s,;]+", raw) if isinstance(raw, str) else raw
+                if not isinstance(names, list) or len(names) > 50:
+                    raise CadError("topics: a list of up to 50 ntfy topic names")
+                names = list(dict.fromkeys(str(n).strip() for n in names if str(n).strip()))
+                for n in names:
+                    if check(n):
+                        raise CadError(f"{label}: {check(n)}")
+                new = {"topics": names}
+            else:
+                raise CadError("action: set or reset")
+            said = lambda v: (f"{len(v['topics'])} listed" if isinstance(v, dict) else "none")      # noqa: E731
+        else:
+            if action == "set":
+                t = _text(body.get("topic"), "topic", 64, required=False)
+                if t:
+                    if check(t):
+                        raise CadError(f"{label}: {check(t)}")
+                    other = cur.get(notify.PREALERT_STATUS if key == notify.PREALERT_RING else notify.PREALERT_RING)
+                    if isinstance(other, dict) and str(other.get("topic") or "").lower() == t.lower():
+                        raise CadError(f"{label}: the ring and status topics must differ")
+                    new = {"topic": t}
+                else:
+                    new = REMOVE
+            elif action == "off":
+                new = {"off": True}
+            elif action == "reset":
+                if old is None:
+                    raise CadError(f"{label} is on its default already")
+                new = REMOVE
+            else:
+                raise CadError("action: set, off or reset")
+            said = lambda v: ("default" if not isinstance(v, dict) else "off" if v.get("off")      # noqa: E731
+                              else f"Settings: {notify.fingerprint(str(v.get('topic') or ''))}")
+        if (old is None and new is REMOVE) or old == new:
+            return {"ok": True}
+        changes = [(NOTIFY_SECTION, key, new)]
+        audit = [("system", f"{NOTIFY_SECTION}/{key}", said(old), said(None if new is REMOVE else new))]
+        gone = str(old.get("topic") or "").strip() if isinstance(old, dict) and key != notify.PROTECTED else ""
+        newt = str(new.get("topic") or "").strip() if isinstance(new, dict) else ""
+        if gone and gone.lower() != newt.lower():
+            # a topic read until now (it may page people) leaves the feed but stays protected: never a publishable topic
+            listed = list(((cur.get(notify.PROTECTED) or {}).get("topics")) or [])
+            if gone.lower() not in {x.lower() for x in listed}:
+                listed.append(gone)
+                changes.append((NOTIFY_SECTION, notify.PROTECTED, {"topics": listed}))
+                audit.append(("system", f"{NOTIFY_SECTION}/{notify.PROTECTED}", f"{len(listed) - 1} listed",
+                              f"{len(listed)} listed (a retired feed topic)"))
+        out = self._commit(changes, op, audit)
+        self.cad.log(f"notify: {label} changed in Settings")
+        sync = getattr(getattr(self.cad, "prealert", None), "sync_topics", None)
+        if sync is not None:
+            try:
+                sync()
+            except Exception as e:  # noqa: BLE001 - the next tick follows it
+                self.cad.log(f"notify: pre-alert topics: {type(e).__name__}")
         return out
 
     def note(self, operator: str, section: str, key: str, old, new) -> None:
@@ -2315,12 +2647,17 @@ class Editor:
 
     # Signed in through Cloudflare Access (sizeup/cloud/access.py, 2026-10-07): the verified email is
     # who did it. What's recorded as the operator is "Name <email>" (just the email until someone
-    # names it here), so the chronology reads "Corey" (cad.js shows the name, the email as its
+    # names it here), so the chronology reads "Casey" (cad.js shows the name, the email as its
     # tooltip) and the audit can't mix up two people with one name.
 
     @staticmethod
     def recorded(name: str, email: str) -> str:
         return email if not name or name.lower() == email else f"{name} <{email}>"
+
+    def _unlinked(self, email: str) -> dict | None:
+        """An operator entered by hand with this email as its name and no email yet: the leader's person() links it
+        (sets its email); a fenced task (#501) reads it as it would be, its role and active as they are."""
+        return self.store.one("SELECT name, callsign, role, active FROM operators WHERE name = ? AND email = ''", (email,))
 
     def person(self, email: str) -> dict:
         """{email, name, callsign, operator} for a verified email. An email not on the list is added
@@ -2329,7 +2666,12 @@ class Editor:
         if not EMAIL.fullmatch(email):
             raise CadError("not an email address")
         r = self.store.one("SELECT name, callsign FROM operators WHERE email = ?", (email,))
-        if r is None:
+        if r is None and not self.store.may_write():
+            # a fenced hub task (not the leader, sizeup/fence.py, #501): signed in all the same, nothing written: the
+            # row the leader would give them (one entered by hand under this email as its name), else a dispatcher
+            # named by their email; the leader adds them on their next request there
+            r = self._unlinked(email) or {"name": email, "callsign": ""}
+        elif r is None:
             with self.store.tx() as db:
                 row = db.execute("SELECT id, name, callsign, email FROM operators WHERE email = ? OR name = ?",
                                  (email, email)).fetchone()
@@ -2361,7 +2703,9 @@ class Editor:
         """person() plus {role, active, may, bootstrap, admins}: may = what they may do now (admin |
         dispatcher | viewer), bootstrap = no admin yet (anyone signed in may do anything)."""
         p = self.person(email)
-        r = self.store.one("SELECT role, active FROM operators WHERE email = ?", (p["email"],)) or {"role": "dispatcher", "active": 1}
+        r = (self.store.one("SELECT role, active FROM operators WHERE email = ?", (p["email"],))
+             or (None if self.store.may_write() else self._unlinked(p["email"]))      # fenced: as the leader would
+             or {"role": "dispatcher", "active": 1})
         admins = self.admins()
         active = bool(r["active"])
         may = "admin" if not admins else r["role"] if active and r["role"] in OPERATOR_ROLES else "viewer"
@@ -2495,6 +2839,9 @@ class Editor:
                 channels_mod.clean(k, v)
             except ValueError as e:
                 raise CadError(f"overrides.channels.{k}: {e}") from None
+        if channels_mod.SQUELCH_SECTION in ov:
+            # never the whole backup refused over a squelch entry: what can't apply is skipped, said in the notes
+            ov[channels_mod.SQUELCH_SECTION], self._import_notes = self._import_squelch(ov[channels_mod.SQUELCH_SECTION])
         for k, v in (ov.get(TONES_SECTION) or {}).items():
             key, val = self._clean_tone(v, f"overrides.tones.{k}")
             if key != k:
@@ -2507,6 +2854,9 @@ class Editor:
         a = ov.get(ATC_SECTION) or {}
         if set(a) - set(ATC_KEYS) or any(not isinstance(v, bool) for v in a.values()):
             raise CadError("overrides.atc: identify and map, true or false")
+        fx = ov.get(FIX_SECTION) or {}
+        if set(fx) - {"keep"} or any(not isinstance(v, bool) for v in fx.values()):
+            raise CadError(f"overrides.{FIX_SECTION}: keep, true or false")
         for k, v in (ov.get(ERR_SECTION) or {}).items():      # sizeup/errwatch.py (#285)
             if k not in errwatch.DEFAULTS:
                 raise CadError(f"overrides.{ERR_SECTION}: {', '.join(errwatch.DEFAULTS)} only")
@@ -2519,6 +2869,14 @@ class Editor:
                 mapview.display_value(k, v)
             except ValueError as e:
                 raise CadError(f"overrides.{MAPD_SECTION}: {e}") from None
+        e = ov.get(EM_SECTION) or {}                          # Settings > Radios > Emergencies
+        if set(e) - {"prominent"}:
+            raise CadError(f"overrides.{EM_SECTION}: prominent only")
+        if "prominent" in e:
+            try:
+                e["prominent"] = em_value(e["prominent"])
+            except CadError as x:
+                raise CadError(f"overrides.{EM_SECTION}.{x}") from None
         for k, v in (ov.get(PREMISE_SECTION) or {}).items():  # sizeup/cad/premise.py (#403)
             if k not in _visibility_keys() or v not in PREMISE_LEVELS[1:]:
                 raise CadError(f"overrides.{PREMISE_SECTION}: {k!r} -> {v!r} (a category -> dispatcher | admin)")
@@ -2547,12 +2905,17 @@ class Editor:
             except CadError as e:
                 raise CadError(f"overrides.{DEPT_SECTION}.{e}") from None
         st = ov.get("stt") or {}
-        if set(st) - {"vocabulary", "aws_monthly_limit_usd"}:
-            raise CadError("overrides.stt: vocabulary and aws_monthly_limit_usd only")
+        if set(st) - set(STT_KEYS):
+            raise CadError("overrides.stt: vocabulary, aws_monthly_limit_usd, aws_context_budget_usd, catchup and "
+                           "catchup_max_age_h only")
         if "vocabulary" in st:
             self._vocab_list(st["vocabulary"])
-        if "aws_monthly_limit_usd" in st:
-            self._limit(st["aws_monthly_limit_usd"])
+        for k in ("aws_monthly_limit_usd", "aws_context_budget_usd"):
+            if k in st:
+                self._limit(st[k], k)
+        for k in ("catchup", "catchup_max_age_h"):
+            if k in st:
+                self._catchup_value(k, st[k])
         L = self.build(ov)
         for k in eta.KEYS:
             if k in d:
@@ -2634,7 +2997,9 @@ class Editor:
     def _import_op(self, action: str, body: dict, op: str, guard: bool = False) -> dict:
         if action not in ("dry_run", "apply"):
             raise CadError("action: dry_run or apply")
+        self._import_notes = []
         ov, cards, ops, L = self._check_import(body.get("settings"))
+        notes = list(self._import_notes)
         if guard and ops is not None:         # the operators as apply (below) would leave them
             after = {o["name"]: dict(o) for o in self.operators()}
             for o in ops:
@@ -2677,7 +3042,7 @@ class Editor:
                     changes.append({"section": "users", "store": "operators", "key": o["name"],
                                     "change": "added" if h is None else "changed", "old": old, "new": new})
         if action == "dry_run":
-            return {"ok": True, "dry_run": True, "changes": changes,
+            return {"ok": True, "dry_run": True, "changes": changes, "notes": notes,
                     "note": "Nothing changed yet. Operators not in the file are kept; run cards and edits are replaced."}
         now = self.store.clock()
         with self.store.tx() as db:
@@ -2714,8 +3079,9 @@ class Editor:
         self._use(L, ov)
         self.store.sync_units()
         self.store.rev += 1
-        if self.cad.radio_ctx is not None and any(c["store"] in (channels_mod.SECTION, "stt") for c in changes):
+        if self.cad.radio_ctx is not None and any(c["store"] in (channels_mod.SECTION, "stt", channels_mod.SQUELCH_SECTION)
+                                                  for c in changes):
             self.cad.radio_ctx.channels_changed()
         if self.cad.radio_ctx is not None and any(c["store"] == TONES_SECTION for c in changes):
             self.cad.radio_ctx.tones_changed()
-        return {"ok": True, "dry_run": False, "changes": changes}
+        return {"ok": True, "dry_run": False, "changes": changes, "notes": notes}

@@ -1,23 +1,48 @@
 # trunk-recorder for Fire/EMS 15
 
-Westchester County P25 Phase II (system A66 / WACN BEE00), South simulcast site. Records only
-talkgroups 307 (Fire/EMS 15) and 301 (60 Control) as one WAV + JSON per call into
-`captures/p25/`, which sizeup ingests (`[p25] capture_dir`).
+Westchester County P25 Phase II (system A66 / WACN BEE00), South simulcast site. trunk-recorder writes one
+WAV + JSON per call into `captures/p25/`, which sizeup ingests (`[p25] capture_dir`).
+
+| File | What |
+|---|---|
+| `config.json` | The county system: one source, the control channels, `shortName` `westchester`. |
+| `talkgroups.csv` | The county talkgroups (80), in trunk-recorder's format. Fire/EMS 15 is 307, 60 Control 301, Airport Incident 333. |
+| `unit-event.sh` | The unit script: prints every voice grant for sizeup ([below](#who-is-talking-live-sizeups-talking-highlight)). |
+| `systems/<name>/` | Another P25 system with its own trunk-recorder ([below](#more-systems-409)). `systems/mrrs/` is MTA MRRS. |
 
 - `center` 477.19375 MHz at 2.4 MS/s covers the control-channel candidates 476.075 / 476.1125 /
   476.2125 / 476.2375 and the voice channels 478.1875 / 478.3125 (span 2.24 MHz, at the edge of one
   RTL-SDR). Bench check 2026-10-01 on the Mac's V4: 476.2375 +28 dB, 476.1125 +24 dB, 476.075
   +21 dB continuous carriers.
 - `modulation: qpsk` = CQPSK/LSM for the simulcast site.
-- `device`: the dongle serial (bench: `rtl=00000001`; deployment: `rtl=fire-p25`).
+- `device`: `rtl=v4` in the file. sizeup never passes it as written: it runs trunk-recorder on a copy,
+  `config.runtime.json`, whose source says `rtl=<index>`, the current index of the dongle that was given Fire/EMS 15
+  in Settings > Radios (looked up by its exact serial right before each start).
+- `recordUnknown: true`: trunk-recorder records every talkgroup. **sizeup decides what is kept**: each talkgroup has
+  a Record switch (Settings > Radios; off = its calls are dropped on arrival). By default every talkgroup is recorded
+  except encrypted ones, and the Main ones are `[p25] incident_talkgroups` (307 and 333 in the station's config).
 
-Run from this directory (paths are relative to it):
+## How it runs
+
+| Where | Who runs trunk-recorder |
+|---|---|
+| The Linux station | `sizeup-trunk-recorder.service` (`sizeup/radio/trunkrecd.py`), on the dongle sizeup names. It keeps running through a restart or a Python-only update of sizeup. [deploy/station/README.md](../station/README.md#trunk-recorder-its-own-service). |
+| A Mac or a bench | sizeup itself, as its child (`[p25] recorder` and `recorder_dir`), started and stopped with the dongle's job. |
+
+On the station `install-linux.sh` copies `talkgroups.csv` and `unit-event.sh` to `/var/lib/sizeup/trunk-recorder/` and
+makes `config.json` there from this one at every install and update (capture paths absolute, under
+`/var/lib/sizeup/captures`). Change the files here, not there. A change to `config.json` or `talkgroups.csv` restarts
+the trunk-recorder service at the next update; nothing else does.
+
+By hand, from this directory (paths in `config.json` are relative to it), with your own build of trunk-recorder
+5.2.0:
 
 ```sh
-~/.local/src/trunk-recorder/build/trunk-recorder --config=config.json
+trunk-recorder --config=config.json
 ```
 
-On a one-dongle bench, stop sizeup's paging/fireground receivers first (they use the same dongle).
+`rtl=v4` then means the dongle with serial `v4`: edit it to your dongle's serial or index. On a one-dongle bench,
+stop sizeup's paging/fireground receivers first (they use the same dongle).
 
 ## One row per key-up (issue #62)
 
@@ -51,15 +76,15 @@ key-up), on every talkgroup of the system:
 
     unit-event.sh <shortName> <radioID> call <talkgroup> [patches]
 
-The script prints `SIZEUP-UNIT westchester 41228 call 307` to trunk-recorder's stdout, which sizeup
-reads line by line (`sizeup/radio/live.py`): the radio ID is resolved to its rig (CAD radio
+The script prints `SIZEUP-UNIT westchester <radioID> call 307` to trunk-recorder's stdout, which sizeup
+reads line by line (`sizeup/radio/live.py`; on the station, from `trunk-recorder.log`, which the service writes): the radio ID is resolved to its rig (CAD radio
 registry) and pushed to the pages and the hub at once (bench: ~8 ms from the grant to "talking").
 
 sizeup turns it on by itself: the `config.runtime.json` it generates from `config.json` sets
 `"unitScript"` on each system to this directory's `unit-event.sh` by absolute path (`./unit-event.sh`
 if that path is too long for the plugin's 200-byte command line; `"unitScript": ""` in config.json
-turns it off). It takes effect when sizeup (re)starts trunk-recorder: switch the dongle Off and back to
-Fire/EMS 15, or restart sizeup. trunk-recorder's log should then list
+turns it off). It takes effect when trunk-recorder (re)starts: switch the dongle Off and back to
+Fire/EMS 15 (on the station a restart of sizeup alone leaves trunk-recorder running). trunk-recorder's log should then list
 `- [westchester]: /…/unit-event.sh` under PLUGINS, and sizeup's log
 `live p25: Fire/EMS 15 (TG 307) radio … talking via grant: published N ms after the grant` per
 key-up on a main talkgroup.
@@ -73,13 +98,49 @@ shell per unit event on the system (registrations and affiliations too); only gr
 
 ## More systems (#409)
 
-`systems/<name>/` is another P25 system with its own trunk-recorder: `config.json` (plus a `"sizeup"` block:
-`label`, one `jobs` name per source, `site`) and `talkgroups.csv` (plus the `Tier`, `Service` and `Department`
-columns, which sizeup leaves out of the copy it hands trunk-recorder). `systems/mrrs/` is Metro-25 / MTA MRRS,
-Zone 3 Simulcast: two sources, 770.3125 and 773.08125 MHz at 2.4 MS/s, covering the seven listed frequencies. It runs
-only on the sources given a dongle in Settings > Radios. Details: `docs/cloud.md`, "More P25 systems".
+`systems/<name>/` is another P25 system with its own trunk-recorder, its own log and its own capture directory
+(`captures/p25-<name>`). The county's trunk-recorder is never restarted for its sake. `systems/mrrs/` is Metro-25 /
+MTA MRRS, Zone 3 Simulcast: two sources, 770.3125 and 773.08125 MHz at 2.4 MS/s, covering the seven listed control
+channel frequencies.
 
-Before giving MRRS dongles for good, try it with one you have: Settings > Radios > **Reception test**
-(`docs/reception-test.md`, #410). Its `config.json` sets `"controlWarnRate": -1`, so trunk-recorder logs the control
-channel's decode rate every 3 s (the test and the status read it), and `"sizeup"."reception"` names the talkgroups a
-test is about and the antenna advice its verdict gives.
+| File | What |
+|---|---|
+| `config.json` | trunk-recorder's config for the system, plus a `"sizeup"` block trunk-recorder never sees: `label`, `name`, `jobs` (one dongle job per source, in order: `MRRS 770`, `MRRS 773`), `site` (the site as listed) and `reception` (the reception test's: `watch`, `antenna`, `caveat`). |
+| `talkgroups.csv` | trunk-recorder's columns plus `Tier`, `Service` and `Department`, which sizeup leaves out of the copy it hands trunk-recorder. |
+
+Adding a talkgroup is one line in the csv; adding a system is one directory (`sizeup/radio/systems.py`).
+
+**How it runs.** Each source is a job a dongle can be given in Settings > Radios, by a person only (never by
+auto-assign). The system runs only the sources that have a dongle, with the control channels those cover, and
+nothing while none has. On the station it is a second trunk-recorder under `sizeup-trunk-recorder.service`, at a
+lower CPU priority than the county's.
+
+**Tiers** (`sizeup/tiers.py`): the `Tier` column is each talkgroup's default; Settings > Radios changes it.
+
+| Tier | Recorded | Transcribed | Notes |
+|---|---|---|---|
+| `alert` | yes | yes | May raise a pre-alert. Under every class of ours in the whisper queue: fire traffic never waits behind it. |
+| `text` | yes | yes | No alerts. In the lowest live class of the station's whisper queue: skipped when it waits 15 min. |
+| `record` | yes | no | The default for a talkgroup with no tier. |
+| `off` | no | no | Dropped on arrival. |
+| `activity` | no | no | Encrypted: never decoded or recorded. Only that it was active is kept. An encrypted talkgroup is only ever `activity` or `off`. |
+
+**Rules for every such system:**
+
+- Its traffic is context: never Main, never on our incident, never an incident source.
+- Its radio IDs are never looked up in our radio registry.
+- A talkgroup ID must be unique across the systems here (checked when the config loads).
+- A talkgroup granted on the system that isn't in the file is counted as unknown, not recorded
+  (`"recordUnknown": false`).
+
+**Source keys** (`sizeup/sourcekeys.py`): a talkgroup is named with its system, `p25:<system>:<tg>`
+(`p25:mrrs:9211`). The county's keep their older form too, `tg:307`, which is what its settings are saved under.
+
+Details and who may see another system's traffic: [docs/cloud.md](../../docs/cloud.md), "More P25 systems".
+
+Before giving MRRS dongles for good, try it with one you have: Settings > Radios > Receivers > **Reception test**
+([docs/reception-test.md](../../docs/reception-test.md), #410, #436). MRRS's `config.json` sets
+`"controlWarnRate": -1`, so trunk-recorder logs the control channel's decode rate every 3 s (the test and the status
+read it). The county's own system can be tested too, from another dongle: sizeup makes a probe-only copy of its
+config (`systems/probe-<site>/` in the recorder's working directory, never in this repo) that never touches the
+live recorder.
