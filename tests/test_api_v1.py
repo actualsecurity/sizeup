@@ -162,3 +162,18 @@ def test_the_package_never_touches_a_database():
     for f in PKG.rglob("*.py"):
         src = f.read_text()
         assert not re.search(r"^\s*(import|from)\s+\S*(sqlite3|store|sizeup\.cad)", src, re.M), f
+
+
+def test_the_browsers_endpoints_are_not_v1s():
+    """The console keeps its own unversioned API until it is migrated (docs/mobile-api.md section 3.1): v1 claims
+    only /api/v1/, and nothing the console's scripts call is under it."""
+    static = Path(__file__).resolve().parent.parent / "sizeup" / "web" / "static"
+    called = set()
+    for f in static.glob("*.js"):
+        called |= set(re.findall(r"""["'`](/api/[\w/.\-]*)""", f.read_text()))
+    assert "/api/cad/state" in called and "/api/stream" in called, "the scan found nothing: the pattern is stale"
+    v1 = V1()
+    assert not [p for p in called if p.startswith("/api/v1") or v1.handles(p)]
+    for p in ("/api/cad/state", "/api/cad/stream", "/api/state", "/api/stream", "/api/scene", "/api/station/state",
+              "/healthz", "/api/v1", "/api/v10/meta"):
+        assert not v1.handles(p), p
