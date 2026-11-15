@@ -37,7 +37,7 @@ def test_audio_12h_everywhere_records_24h(tmp_path):
     assert st["deleted"] == 7 and st["audio_files"] == 2 and st["bytes"] > 0
 
 
-def test_p25_call_kept_once_and_recorder_log_capped(tmp_path):
+def test_p25_call_kept_once_and_recorder_log_capped(tmp_path, monkeypatch):
     from tests.test_app import App, cfg
     from sizeup.radio.p25 import Call
     from sizeup.radio.fm import RATE
@@ -54,14 +54,18 @@ def test_p25_call_kept_once_and_recorder_log_capped(tmp_path):
     assert app.clip("307-9")[:4] == b"RIFF"                       # ... sizeup's copy plays
 
     import sizeup.radio.recorder as rec
-    rec.LOG_MAX_BYTES = 2000
+    monkeypatch.setattr(rec, "LOG_MAX_BYTES", 2000)
     exe = tmp_path / "chatty"
     exe.write_text("#!/bin/sh\ni=0\nwhile [ $i -lt 200 ]; do echo \"line $i of trunk-recorder output\"; i=$((i+1)); done\n")
     exe.chmod(0o755)
     r = rec.TrunkRecorder(str(exe), str(tmp_path)).start()
-    end = time.time() + 5
-    while time.time() < end and not (tmp_path / "trunk-recorder.log.1").exists():
+    end = time.time() + 5          # both: the rotation renames the log, then opens it again (recorder.py)
+    while time.time() < end and not ((tmp_path / "trunk-recorder.log.1").exists()
+                                     and (tmp_path / "trunk-recorder.log").exists()):
         time.sleep(0.05)
     r.stop()
+    end = time.time() + 5          # (its reader may still be between a rename and the reopen)
+    while time.time() < end and not (tmp_path / "trunk-recorder.log").exists():
+        time.sleep(0.05)
     assert (tmp_path / "trunk-recorder.log.1").exists()
     assert (tmp_path / "trunk-recorder.log").stat().st_size <= 2000 + 200
