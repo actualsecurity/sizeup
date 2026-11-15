@@ -114,7 +114,8 @@ Nothing is pushed by a deploy. Settings > Radios > Vocabulary:
 5. New streams use a vocabulary once it is READY. A stream that is already open keeps what it opened with until it
    ends (`[stt] aws_idle_s` after its last transmission).
 
-A push only works where Amazon Transcribe is set up (`[stt] aws = true`: the hub, or all-in-one with credentials).
+A push only works where Amazon Transcribe is set up (`[stt] aws = true`: the hub, or all-in-one with credentials and
+`SIZEUP_ALLOW_OUTBOUND=1`, `sizeup/outbound.py`).
 
 ## Which channel uses which vocabulary
 
