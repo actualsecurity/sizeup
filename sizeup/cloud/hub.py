@@ -1316,7 +1316,8 @@ class HubApp(App):
         return self._hide_context(st)       # (#419: the station's lists too, where nobody is signed in)
 
     def _sources_poll_now(self, reason: str) -> None:
-        """A radio or phone pre-alert on the hub: the station's adapters poll now (a job; never waits, never raises)."""
+        """A radio pre-alert or an airport alert on the hub: the station's adapters poll now (a job; never waits, never
+        raises). Never the phone ring."""
         def send() -> None:
             try:
                 self.hub.remote("sources_poll_now", reason, timeout=10.0)

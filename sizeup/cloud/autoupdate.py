@@ -126,7 +126,8 @@ ADAPTER_ENV = re.compile(r"[A-Z][A-Z0-9_]{0,63}")
 # the station's own variables (station.env, the unit): never an adapter's credential
 RESERVED_ENV = {"SIZEUP_STATION_TOKEN", "SIZEUP_ACCESS_CLIENT_ID", "SIZEUP_ACCESS_CLIENT_SECRET", "SIZEUP_BUILD",
                 "SIZEUP_STATE_DIR", "SIZEUP_UPDATE_DIR", "SIZEUP_STT_EXTERNAL", "SIZEUP_TRUNK_RECORDER_UNIT",
-                "SIZEUP_INCIDENT_SOURCES", "SIZEUP_INCIDENT_SOURCES_PATH", "HOME", "PATH", "USER", "SHELL", "LANG"}
+                "SIZEUP_INCIDENT_SOURCES", "SIZEUP_INCIDENT_SOURCES_PATH", "SIZEUP_INCIDENT_SOURCES_SNAPSHOT",
+                "HOME", "PATH", "USER", "SHELL", "LANG"}
 RESERVED_PREFIX = ("LD_", "PYTHON", "SYSTEMD_", "GIT_", "SSH_")
 ADAPTER_CHECK_S = 120.0
 HUB_REFUSED = "incident-source adapters run on the station only, never on the hub"

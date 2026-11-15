@@ -2450,7 +2450,7 @@ class Sources:
                 t.join(wait_s)
 
     def poke(self, reason: str) -> None:
-        """Paging tones, a radio pre-alert, the phone ring: the adapters poll now (never raises)."""
+        """Paging tones, a radio pre-alert, an airport alert: the adapters poll now (never raises). Not the phone ring."""
         if self.trigger is None:
             return
         try:

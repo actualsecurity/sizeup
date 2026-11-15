@@ -19,6 +19,9 @@ Discovery (sizeup/sources/runner.py load_adapters), both at once, each factory c
                     separated directories put on sys.path first). Preferred on the station: a release's venv is rebuilt
                     when pyproject.toml changes, and a package installed into the old one is gone; a directory isn't.
                     Not a config.toml key, so switching back to an older release never meets a key it can't read.
+    snapshot reads  SIZEUP_INCIDENT_SOURCES_SNAPSHOT="county,other" (source ids) in the same file: the station's admin
+                    says these adapters' poll() only reads memory (see local_poll below), for an adapter that does not
+                    declare it itself. Off unless set; only ever for an adapter known to make no request in poll()
 
 A factory is `factory(ctx: SourceContext) -> Adapter | Iterable[Adapter]`. An adapter:
 
@@ -27,6 +30,14 @@ A factory is `factory(ctx: SourceContext) -> Adapter | Iterable[Adapter]`. An ad
     rank: int            1 = the primary; 2, 3 ... the next tiers (1..99)
     poll_s: float        how often the runner calls poll(): 30 to 60 s (never under MIN_POLL_S); the adapter paces its
                          own requests too
+    local_poll: bool     optional, False when absent: True declares that poll() makes NO request and does no network
+                         I/O at all: it only reads a snapshot the adapter keeps in memory (a thread of its own talks
+                         to the source, at its own pace). The runner then calls poll() every poll_s, down to
+                         SNAPSHOT_MIN_S, not MIN_POLL_S: a new event reaches the hub that much sooner, and the source
+                         sees nothing more. Only exactly True counts, and an adapter that has the attribute decides
+                         (False keeps the floor even when SIZEUP_INCIDENT_SOURCES_SNAPSHOT names it). Everything that
+                         could reach the source keeps the floor's pace whatever this says: health(), poll_now() and
+                         its hold, and the back-off after a poll() that raised
     poll() -> Iterable[FeedEvent]
                          the events the feed knows now (open ones, and ones that changed lately): a snapshot each time.
                          An event left out is never deleted, but the runner sends the ids of each poll's snapshot every
@@ -35,14 +46,15 @@ A factory is `factory(ctx: SourceContext) -> Adapter | Iterable[Adapter]`. An ad
                          source "backing_off", "failing" from the RAISE_FAILING_AFTER-th raise in a row (the exception's
                          TYPE only as the reason: never its text, which may hold a URL or a credential) and calls it again after poll_s, doubling to MAX_BACKOFF_S while it keeps
                          raising. A bad event is skipped on its own; the others still go
-    health() -> Health   how the feed is doing now; asked after every poll()
+    health() -> Health   how the feed is doing now; asked after every poll() (a local_poll adapter: at most every
+                         MIN_POLL_S, and after a poll() that raised)
     close() -> None      optional: called once when the station stops
     reset() -> None      optional: a person asked to start over (Settings > Station > Health "Reset", or `sizeup-station adapter
                          reset`, #305), e.g. for an adapter that stopped itself. Called on the adapter's own runner
                          thread before its next poll(); its back-off starts over. Raising is logged by type only
     poll_now(reason: str) -> None
                          optional: something just happened that may be a call coming (reason: "paging tones", "radio
-                         pre-alert", "phone pre-alert"). Called on the adapter's own runner thread (never the caller's),
+                         pre-alert", an airport alert). Never the phone ring (NOT_TRIGGERS). Called on the adapter's own runner thread (never the caller's),
                          right before an earlier poll() than poll_s would give. The runner keeps triggered polls gentle:
                          at most one per max(poll_s, TRIGGER_MIN_S) per adapter, at most TRIGGER_MAX per
                          TRIGGER_WINDOW_S, never sooner than TRIGGER_MIN_S after the last poll, and none while the
@@ -78,6 +90,11 @@ A FeedEvent's fields, as the feed says them (never parsed here beyond the checks
                  EXTRA_MAX_BYTES as JSON. Keys the hub shows on the incident (EXTRA_SHOWN): "jurisdiction" (str),
                  "run_numbers" ({group: run number}), "group_units" ({group: [unit, ...]}). Any other key is kept and
                  its changes are on the timeline, nothing more
+    first_seen   optional: when the adapter itself first had the event (epoch seconds on the station's clock, as
+                 SourceContext.clock gives it). It goes to the hub as the report's first-seen time, which the lead over
+                 paging is measured from; without it, or when it is not a time, is later than now or more than
+                 FIRST_SEEN_MAX_S old, that is when the runner first got the event from poll(). Never part of the
+                 event's data: changing it sends nothing
     aliases      external ids of this source merged INTO this event (the feed merged B into A: A's aliases has "B").
                  The hub retires B: its report points at A, a timeline entry on both, and B's incident, if it is a
                  different one still waiting to be accepted, is dismissed as merged (an accepted one only gets the
@@ -97,12 +114,16 @@ from typing import Callable, Iterable, Mapping, Protocol, runtime_checkable
 ENTRY_POINT_GROUP = "sizeup.incident_sources"
 ENV_MODULES = "SIZEUP_INCIDENT_SOURCES"
 ENV_PATH = "SIZEUP_INCIDENT_SOURCES_PATH"
+ENV_SNAPSHOT = "SIZEUP_INCIDENT_SOURCES_SNAPSHOT"   # source ids whose poll() only reads memory (the admin says so)
 
 TIME_KEYS = ("dispatched", "responding", "on_location", "en_route_to", "out_at", "in_service")
 HEALTH_STATES = ("ok", "backing_off", "failing", "stale")
 SOURCE_ID = re.compile(r"[a-z0-9][a-z0-9_-]{0,31}")
 RESERVED = ("paging",)
 MIN_POLL_S = 30.0                      # gentle polling: never more often than this, whatever poll_s says
+SNAPSHOT_MIN_S = 1.0                   # ... except an adapter whose poll() only reads memory (local_poll): this floor
+SNAPSHOT_RECHECK_S = 2.0               # ... which is read again this soon after its poll_now() (what that fetched)
+FIRST_SEEN_MAX_S = 900.0               # an event's own first_seen older than this at its first hand-off: not believed
 MAX_BACKOFF_S = 300.0
 RAISE_FAILING_AFTER = 3                # poll() raising: "backing_off" until this many in a row, then "failing"
 MAX_UNITS, MAX_COMMENTS, MAX_TEXT = 60, 500, 2000
@@ -115,7 +136,8 @@ TRIGGER_MIN_S = 30.0                    # a triggered poll: never sooner than th
 TRIGGER_MAX, TRIGGER_WINDOW_S = 4, 600.0  # ... and at most this many triggered polls per window, per adapter
 SEEN_EVERY_S = 120.0                    # the runner sends the ids still in the feed's snapshot this often ("source_seen")
 MAX_SEEN_IDS = 2000
-TRIGGERS = ("paging tones", "radio pre-alert", "phone pre-alert")
+TRIGGERS = ("paging tones", "radio pre-alert")   # and the airport watch's ("airport alert level N", ...)
+NOT_TRIGGERS = ("phone pre-alert",)     # never a reason to poll early: refused before it counts (an older hub sends it)
 
 
 class SourceError(ValueError):
@@ -148,6 +170,7 @@ class FeedEvent:
     closed: bool = False
     extra: Mapping[str, object] = field(default_factory=dict)
     aliases: tuple[str, ...] = ()
+    first_seen: float | None = None    # when the adapter first had it; not in as_dict() (the runner sends it beside)
 
     def check(self) -> FeedEvent:
         """SourceError when it breaks the interface (any wrong type included); else itself."""
@@ -270,7 +293,7 @@ class Adapter(Protocol):
     def health(self) -> Health: ...
 
     # Optional, so not in the Protocol (an adapter without them is still one): close() -> None, reset() -> None,
-    # poll_now(reason: str) -> None. See the module's docstring.
+    # poll_now(reason: str) -> None, local_poll: bool. See the module's docstring.
 
 
 Factory = Callable[[SourceContext], "Adapter | Iterable[Adapter]"]
