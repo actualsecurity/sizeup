@@ -208,8 +208,58 @@ def read_settings(db: sqlite3.Connection) -> dict:
     return out
 
 
+TALKGROUPS = Path(__file__).resolve().parents[2] / "deploy" / "trunk-recorder"
+
+
+def talkgroup_groups(base: Path | None = None) -> dict[tuple[str, int], tuple[str, str]]:
+    """{(system, talkgroup): (group, service)} from the talkgroups files in the repo: the county's
+    (deploy/trunk-recorder/talkgroups.csv, its "Tag" column) and each other system's (systems/<name>/talkgroups.csv,
+    with its own "Service" column). The service as the live hub names it (sourcekeys.service)."""
+    import csv
+    from sizeup import sourcekeys
+    base = TALKGROUPS if base is None else Path(base)
+    out: dict[tuple[str, int], tuple[str, str]] = {}
+    files = [(sourcekeys.COUNTY, base / "talkgroups.csv")] + [(p.parent.name, p) for p in sorted(base.glob("systems/*/talkgroups.csv"))]
+    for system, path in files:
+        try:
+            rows = list(csv.DictReader(path.read_text().splitlines()))
+        except OSError:
+            continue
+        for r in rows:
+            try:
+                tg = int(r.get("Decimal") or "")
+            except ValueError:
+                continue
+            group = str(r.get("Tag") or "")
+            out[(system, tg)] = (group, sourcekeys.service(group, r.get("Service") or ""))
+    return out
+
+
+def fill_service(rows: list[dict], groups: dict | None = None) -> int:
+    """Rows stored before the radio log carried a service (an empty `service`): their group and service from the
+    talkgroups files, as the live hub derives them now, so a replay over the history is scoped as live rows are.
+    Only a talkgroup's row with an empty service is changed. How many were."""
+    from sizeup import sourcekeys
+    groups = talkgroup_groups() if groups is None else groups
+    n = 0
+    for r in rows:
+        if r.get("service"):
+            continue
+        got = sourcekeys.parse(str(r.get("source") or ""))
+        if got is None and r.get("talkgroup") not in (None, ""):
+            got = (str(r.get("system") or "") or sourcekeys.COUNTY, int(r["talkgroup"]))
+        if got is None or got not in groups:
+            continue
+        r["group"], r["service"] = groups[got]
+        r["system"] = r.get("system") or got[0]
+        n += 1
+    return n
+
+
 def load_rows(db: sqlite3.Connection, since: float | None = None, until: float | None = None,
-              services: Iterable[str] = ()) -> list[dict]:
+              services: Iterable[str] = (), groups: dict | None = None) -> list[dict]:
+    """The radio log's rows in time order, an empty service filled from the talkgroups files (fill_service), then
+    only `services` when given."""
     have = {r[1] for r in db.execute("PRAGMA table_info(radio_traffic)")}
     cols = ", ".join(c if c in have else f"'' AS {c}" for c in ROW_COLUMNS)
     where, args = ["1"], []
@@ -219,12 +269,11 @@ def load_rows(db: sqlite3.Connection, since: float | None = None, until: float |
     if until is not None:
         where.append("start < ?")
         args.append(until)
-    svc = [s for s in services if s]
-    if svc:
-        where.append(f"service IN ({','.join('?' * len(svc))})")
-        args += svc
-    return [dict(r) for r in db.execute(f"SELECT {cols} FROM radio_traffic WHERE {' AND '.join(where)} "
+    rows = [dict(r) for r in db.execute(f"SELECT {cols} FROM radio_traffic WHERE {' AND '.join(where)} "
                                         "ORDER BY start, id", args)]
+    fill_service(rows, groups)
+    svc = {s for s in services if s}
+    return [r for r in rows if r.get("service") in svc] if svc else rows
 
 
 # -- the run -------------------------------------------------------------------------------------------------------------

@@ -151,3 +151,31 @@ def test_an_address_far_from_the_corner_said_is_not_confirmed_by_it(gaz):
     assert "m from" in p.basis
     near = P.Locator(gaz)("shots fired 196 Example Ave at Test Rd", SCOPE)             # the far end: at the corner
     assert near.precision == "address" and near.confirmed
+
+
+def test_only_holds_named_places_to_the_allowed_towns():
+    """A radio pre-alert's lookup (only=True) never reads a named place in a town outside home, our district and the
+    towns said; a page (only=False) still may, as before. The place is picked from the shipped gazetteer at run time
+    (no name is written here)."""
+    import sqlite3
+    from sizeup.geo.gazetteer import Gazetteer
+    from sizeup.geo.pagegeo import locator
+    gaz = Gazetteer()
+    loc = locator(gaz)
+    db = sqlite3.connect(f"file:{gaz.path}?mode=ro", uri=True)
+    try:
+        far = [r[0] for r in db.execute("SELECT name FROM places WHERE kind = 'place' AND muni = 'Mamaroneck' "
+                                        "AND name LIKE '% %' ORDER BY name LIMIT 40")]
+    finally:
+        db.close()
+    tried = 0
+    for name in far:
+        text = f"respond to the {name}"
+        page = loc.locate(text, ("Port Chester",))
+        if page.best is None or page.best.match.municipality != "Mamaroneck":
+            continue
+        tried += 1
+        radio = loc.locate(text, ("Port Chester",), only=True)
+        assert radio.best is None or radio.best.match.municipality != "Mamaroneck", name
+    if not tried:
+        pytest.skip("no named place outside the district that a page reads by name in this gazetteer")

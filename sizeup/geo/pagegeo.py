@@ -41,6 +41,7 @@ name and number match outright), and no reading elsewhere comes within RIVAL of 
 from __future__ import annotations
 
 import collections
+import functools
 import difflib
 import heapq
 import json
@@ -165,7 +166,9 @@ def _ratio(a: str, b: str) -> float:
     return difflib.SequenceMatcher(None, a, b, autojunk=False).ratio()
 
 
+@functools.lru_cache(maxsize=1 << 18)
 def _word_match(heard: str, name: str) -> bool:
+    """A heard word is a name's word (pure: cached, the same pairs come again and again)."""
     if heard == name:
         return True
     if min(len(heard), len(name)) >= 5 and (name.startswith(heard) or heard.startswith(name)):
@@ -193,6 +196,8 @@ class PageLocator:
         for i, p in enumerate(self.places):
             for w in p["key"]:
                 self.place_index[w].append(i)
+        self._town_index: dict[frozenset, dict[str, list[int]]] = {}
+        self._like_cache: dict[tuple[frozenset | None, str], tuple[str, ...]] = {}
 
     # ------------------------------------------------------------------ data
 
@@ -340,18 +345,50 @@ class PageLocator:
             best[sid] = max(best.get(sid, 0.0), sim * pen)
         return sorted(((sid, v) for sid, v in best.items() if v >= 0.8), key=lambda kv: -kv[1])[:8]
 
-    def _place_hits(self, tokens: list[str], skip: set[int]) -> list[tuple[int, int, dict, float]]:
-        """Named places said: a run of words that all belong to a place's name and cover most of what names it."""
+    def _index_for(self, towns) -> dict[str, list[int]]:
+        """The named places' word index, only those in these towns (None: all), built once per set of towns."""
+        if towns is None:
+            return self.place_index
+        key = frozenset(towns)
+        got = self._town_index.get(key)
+        if got is None:
+            got = collections.defaultdict(list)
+            for w, lst in self.place_index.items():
+                keep = [pi for pi in lst if self.places[pi]["muni"] in key]
+                if keep:
+                    got[w] = keep
+            if len(self._town_index) >= 16:
+                self._town_index.clear()
+                self._like_cache.clear()          # (keyed by the towns too: never another index's words)
+            self._town_index[key] = got
+        return got
+
+    def _like(self, towns, index: dict, first: str) -> tuple[str, ...]:
+        """The index's other words a heard word matches (_word_match), worked out once per set of towns (None: every
+        place) and word: a word is heard again and again (read-backs, the same streets and places), and each try is a
+        difflib ratio."""
+        key = (None if towns is None else frozenset(towns), first)
+        got = self._like_cache.get(key)
+        if got is None:
+            got = tuple(w for w in index if w != first and _word_match(first, w))
+            if len(self._like_cache) > 50_000:
+                self._like_cache.clear()
+            self._like_cache[key] = got
+        return got
+
+    def _place_hits(self, tokens: list[str], skip: set[int], towns=None) -> list[tuple[int, int, dict, float]]:
+        """Named places said: a run of words that all belong to a place's name and cover most of what names it.
+        towns: only the places in these (None: every place)."""
         found = []
         n = len(tokens)
+        index = self._index_for(towns)
         for i in range(n):
             if i in skip or tokens[i] == BOUNDARY or tokens[i] in GENERIC:
                 continue
             first = tokens[i]
-            cands = set(self.place_index.get(first, ()))
+            cands = set(index.get(first, ()))
             if len(first) >= 5:
-                cands |= {pi for w, lst in self.place_index.items()
-                          if w != first and _word_match(first, w) for pi in lst}
+                cands |= {pi for w in self._like(towns, index, first) for pi in index[w]}
             for pi in cands:
                 p = self.places[pi]
                 j = i
@@ -455,11 +492,14 @@ class PageLocator:
 
     # ------------------------------------------------------------------ the page
 
-    def locate(self, text: str, home=(), params: dict | None = None) -> PageGeo:
+    def locate(self, text: str, home=(), params: dict | None = None, only: bool = False) -> PageGeo:
         """Every reading of the page's location, best first, and whether the best one is confirmed. home: the towns
         of the page's tones (``home_towns``); none = no jurisdiction to hold it to (the gazetteer's town order).
         params: another domain's thresholds {confirm, rival, rival_m, sound_min} (radio pre-alerts, sizeup/intel/place.py);
-        none: this module's (CONFIRM, RIVAL, RIVAL_M, SOUND_MIN), as pages have always used."""
+        none: this module's (CONFIRM, RIVAL, RIVAL_M, SOUND_MIN), as pages have always used.
+        only (radio pre-alerts over a county-wide source, sizeup/intel): with home, named places and the gazetteer's
+        candidates are looked for in the allowed towns alone (home, our district and the towns said), never the
+        whole county; a page (only False) is read as it always was."""
         prm = {"confirm": CONFIRM, "rival": RIVAL, "rival_m": RIVAL_M, "sound_min": SOUND_MIN, **(params or {})}
         gaz = self.gaz
         tokens = tokenize(text or "")
@@ -541,7 +581,9 @@ class PageLocator:
                     for sid, _sim in m.cands:
                         s = self._name_sim(heard, sid, typed)
                         offer(sid, s, "heard" if s >= NAME_SURE else "sound-alike")
-            if typed and pool is not None:
+            # every street of the allowed towns, for a sound-alike of the name; a radio pre-alert (only) skips it when
+            # the name was heard as it is (the scan is most of its gazetteer time, and finds nothing better then)
+            if typed and pool is not None and not (only and any(s >= NAME_SURE for s, _h in cands.values())):
                 for sid in pool:
                     if sid not in cands:
                         s = self._name_sim(heard, sid, True)
@@ -601,7 +643,7 @@ class PageLocator:
             if t in CROSS_MARKERS:
                 cross_tokens.update(range(i, min(len(tokens), i + 8)))
         street_tokens = {k for m in mentions if m.strong for k in range(m.start, m.end)}
-        places = [h for h in self._place_hits(tokens, skip | cross_tokens)
+        places = [h for h in self._place_hits(tokens, skip | cross_tokens, allowed if only else None)
                   if any(k not in street_tokens for k in range(h[0], h[1]))]     # "King Street" is not King Street School
         for i, j, p, cov in places:
             checked, names = self._place_check(p["lat"], p["lon"], groups)
@@ -614,7 +656,8 @@ class PageLocator:
                         score, cov, checked, names, tw is not None, "named place", set()))
 
         if not addrs:                              # no address said: intersections, landmarks, streets
-            for c in gaz.candidates(text or "")[:8]:
+            for c in [c for c in gaz.candidates(text or "") if not (only and allowed is not None)
+                      or c.municipality in allowed][:8]:
                 tw = town(c.municipality, (0, 0))
                 score = 0.85 * c.confidence + (tw or 0.0)
                 if tw is None:

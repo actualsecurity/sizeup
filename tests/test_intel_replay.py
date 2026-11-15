@@ -602,3 +602,27 @@ def test_the_same_street_past_two_km_is_a_false_place():
 def test_street_id(a, b, same):
     assert (lab.street_id(a) == lab.street_id(b) and lab.street_id(a) != "") is same
     assert "example" not in lab.street_id(a).lower()
+
+
+def test_rows_from_before_the_service_column_are_scoped_as_live_rows_are(tmp_path):
+    """A county police talkgroup's row stored with no service (before the radio log carried one) is read with the
+    talkgroups file's service, so a replay over the history reaches the packs that read it live."""
+    cad = make_cad(tmp_path)
+    row(cad, "old-1", 1000.0, "order of gas outside", service="", system="westchester", tg=383)
+    row(cad, "old-2", 1010.0, "may day may day", service="", system="westchester", tg=105)
+    row(cad, "new-1", 1020.0, "shots fired", service="police", system="mrrs", tg=9211)
+    row(cad, "odd-1", 1030.0, "copy", service="", system="westchester", tg=99999)      # not in any file: left as it is
+    path = tmp_path / "cad.sqlite"
+    cad.store.db.commit()
+    con = rp.open_ro(path)
+    try:
+        rows = {r["id"]: r for r in rp.load_rows(con)}
+        police = {r["id"] for r in rp.load_rows(con, services=["police"])}
+    finally:
+        con.close()
+    assert rows["old-1"]["service"] == "police" and rows["old-2"]["service"] == "fire" and rows["odd-1"]["service"] == ""
+    assert rows["new-1"]["service"] == "police" and police == {"old-1", "new-1"}
+    groups = rp.talkgroup_groups()
+    assert groups[("westchester", 383)] == ("County Police", "police") and groups[("mrrs", 9570)][1] == "ems"
+    run = rp.replay(sorted(rows.values(), key=lambda r: r["start"]))
+    assert {(e["pack"], e["category"]) for e in run.rec.events.values()} >= {("county_police", "hazmat"), ("fire", "mayday")}

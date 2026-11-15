@@ -2846,7 +2846,7 @@ person ([Listen](#listen-links-and-inference-intel) below).
 | Part | File | What |
 |---|---|---|
 | Packs | `data/intel/*.json` (`police.json`: 11 categories, 17 rules; the log-only `county_police.json`, `ems.json`, `fire.json`, below; generic phrases only), Settings laid over them | which sources a pack reads (source keys or globs, services), its categories (label, priority, time to live, mode), phrase rules with weights, "suppress" phrases ("disregard", "training") |
-| Speech-to-text table | `data/intel/tables/stt.json` (`rules.py` `Normalizer`) | for a pack that says `"normalize": "stt"`: sound-alikes with their context ("order of gas" is "odor of gas"), split and merged words, number words as digits. A phrase is tried on the words as transcribed and on the fixed words, so the table only adds a reading. `police.json` has no table and matches as before |
+| Speech-to-text table | `data/intel/tables/stt.json` (`rules.py` `Normalizer`) | for a pack that says `"normalize": "stt"`: sound-alikes with their context ("order of gas" is "odor of gas"), split and merged words, number words as digits. Each reading (as transcribed, and fixed) is judged on its own, so the table only ever adds hits (below). `police.json` has no table and matches as before |
 | Engine | `engine.py` | a row joins its source's window (`window_s`, 120); per category the rules' weights combine (noisy-OR, dampers); at the threshold (0.6) it is an event: the open one of that pack, category and source, or the one at the same place, else a new one |
 | Place | `place.py` | the window's words through the page locator, held to the source's home towns, after callsigns, car numbers, 10-codes, plates and times are taken out. Also "X and Y" / "corner of" through the intersection search, "the 100 block of X", "rear of / across from" (radius widened), highway exits and mile markers (the place search), and a headquarters callsign said alone narrows to its town. Police text confirms at a higher score than a page (`DOMAIN_PARAMS`). An address confirms by its cross street only within `corner_m` (200 m) of where they meet; a number far from the corner is taken as misheard. Precision: address, intersection, block, landmark or street; unconfirmed is never exact |
 | Policy | `policy.py` | whether a change is pushed: the mode ladder, the kill switch, quiet hours, the caps (below) |
@@ -2869,9 +2869,47 @@ saved before they existed name only `police` and its rules, and change nothing h
 | `ems` | the county system's Fire/EMS talkgroups (EMS is dispatched and worked there) and another system's EMS talkgroups | cardiac arrest / unresponsive / overdose, a serious crash, several patients, the fire department asked for (lift assist, forcible entry, a landing zone), a burn or smoke patient, an exposure / CO with symptoms / electrical contact, water, an elevator or a fall from height, a scene that is not safe |
 | `fire` | every fire source: the county system's Fire/EMS talkgroups and the analog fire channels | a mayday or a firefighter down, evacuate / going defensive, a collapse, people trapped, a working fire, a 2nd alarm or more units, a water supply problem, mutual aid that names Port Chester or Rye Brook |
 
-Each strong phrase family is a rule of its own, at or over the threshold alone; the weaker ones (a bare "MVA", a bare
-"fire alarm", "EMS en route") only add up with another rule in the window. Replay them on a restored copy before
-raising anything (`tools/intel_replay.py`). Tests: `tests/test_intel_packs.py`.
+Each strong phrase family is a rule of its own, at or over the threshold alone. That includes `cpd.ems_request`
+(0.6): on the county police talkgroups "EMS en route" or "ambulance is being sent" is an event by itself, the most
+frequent one there. The weaker ones (a bare "MVA", a bare "fire alarm", a patient's age, extra manpower, a staging
+call) only add up with another rule in the window. Replay them on a restored copy before raising anything
+(`tools/intel_replay.py`; rows stored before the radio log carried a service take it from the talkgroups files, so a
+replay over the history is scoped as live rows are). Tests: `tests/test_intel_packs.py`.
+
+**The three switches, and the mode an event gets.** An event's mode is the lowest of three: the pack's, the
+category's, and the rules' rung. The rung is the highest mode M at which the rules set to M or above, on their own
+(their weights, every cue whatever its mode, every damper), still reach the threshold. So:
+
+- nothing is pushed until an admin raises the pack, the category and enough of its rules;
+- raising one weak rule (`cpd.mva_word`) to push never makes a strong log rule beside it (`cpd.mva_serious`) push:
+  "crash, vehicle rollover" is then an event at log, carried by the rule at log;
+- rules at push that only reach the threshold together (a crash said, then EMS asked for) push together;
+- with every rule of a category at one mode, as every pack ships, the rung is that mode. The police pack behaves as
+  before unless an admin has set its rules to different modes; then an event no longer rises above the rules that
+  carry it.
+
+**Held at log** (`intel_events.suppressed`), whatever the switches say. Only the packs with an `area`: `county_police`,
+`ems` and `fire`. The `police` pack's events are never held or linked. An event already pushed is never held (its mode
+never goes down, so it stays on the map and the console), and when a hold ends (read back at one of our streets) the
+event gets back the mode its rules give.
+
+| Why | When |
+|---|---|
+| `out_of_area` | a pack with an `area` (the three above: Port Chester, Rye Brook, Rye, Harrison with Purchase and West Harrison, Greenwich with Byram; Settings `intel_packs.<pack>.area`, an empty list = the file's): the event is placed in another town, or, with no place, its words say it is in towns and none of the area's: a town after "in", "at", "on" or "the area of", never after "to", "from", "transporting" or "units from" (the hospital, the units coming), and a town before a street word is a street. No place and no such town: not held. A safety category with no place is never held for a town said. The gazetteer holds our area only, so a county-wide source's street read UNCONFIRMED into one of our towns is no place at all (a replay found most such readings were a same-named street elsewhere); a confirmed one places it |
+| `near_incident` | its place is one of our own incidents' (the same gazetteer label, or within 150 m plus half the reading's radius): an emergency incident (never a notification or closure), accepted (never a queued page), opened up to 6 hours before the event or 30 minutes after it, and not closed before it. Linked (`near_incident`), never a new lead. A safety category is linked and NOT held: `county_police` weapons and barricade, `ems` weapons (scene not safe), `fire` mayday, evacuate and collapse. Whether a mayday, evacuation or collapse at our own fireground should be held instead is the user's call; they are not held for now |
+
+The area is set in the pack files and through the API (`POST /api/cad/settings/intel {action: "pack", pack, area:
+[...]}`); Settings > System > Intel does not show it yet. A town name in Settings that no longer compiles drops that
+one override (logged), never the others.
+
+**The address lookup's cost.** The gazetteer is asked only for a row whose hits could carry a category to the
+threshold with the window's (a cue or a damper alone never makes an event), and for a pack with an area only in
+those towns and the towns said (`pagegeo.locate(only=True)`; pages are read as before). Over 4,000 generated
+county rows the engine's CPU per transcript went from 10.7 to 15.5 ms to 1.7 ms.
+
+**The speech-to-text table.** Each reading (as transcribed, and after the table) is judged on its own: a rule hits
+when, in one reading, a phrase is found and none of its "not" phrases is. A table never takes a hit away, and an
+entry that would remove a negation word ("zero" -> "0") is refused.
 
 **How it is fed (the context text hook, #483).** `Comms.record()` and `Comms.retext()` tell one of two hooks once
 the write has committed, on the caller's thread: `on_text` for our channels (the alarms, the status hints, the radio
