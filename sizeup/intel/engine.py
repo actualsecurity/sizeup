@@ -649,6 +649,12 @@ class IntelEngine:
         if place is not None and push_mod.scrub_label(place.label, who):
             self.log("intel: a place withheld by the scrub")
             return None
+        if place is not None and pack.area and not place.confirmed and place.town in pack.area:
+            # a county-wide source's street, read unconfirmed into one of our towns: the gazetteer holds our area only,
+            # so a "Main Street" anywhere in the county reads as ours (replay: most such readings were elsewhere).
+            # Only a confirmed reading (a cross street, a read-back) places it here; one in another town still says
+            # it is out of the area
+            return None
         return place
 
     def _raise(self, pack, row, key, cat, cd, what, contrib, mode, win, at, tid) -> Event | None:

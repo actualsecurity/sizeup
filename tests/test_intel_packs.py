@@ -275,6 +275,7 @@ COUNTY_PD = [
     ("shots fired", "weapons"),
     ("male with a knife", "weapons"),
     ("barricaded subject inside the house", "barricade"),
+    ("male armed with a knife on Sample St", "weapons"),
     # after the replay: the kinds of phrasing and mishearing it showed, in invented sentences
     ("e m s en route to Sample St", "ems_call"),
     ("ambulance is being sent to 100 Example Ave", "ems_call"),
@@ -287,6 +288,9 @@ COUNTY_PD = [
     ("c p r on progress", "aided"),
 ]
 COUNTY_PD_QUIET = [
+    # the review's false-alarm candidates (#535), invented sentences
+    "co detector low battery chirping", "natural gas truck blocking the lane", "gas company crew on Sample St",
+    "vehicle parked in the fire lane", "he's armed with a cell phone",
     "copy", "10-4 headquarters", "barricade", "road barricades are up on Sample St", "traffic stop Sample St",
     "he ran out of gas", "gas station on Example Ave", "burglar alarm commercial", "smoke detector chirping",
     "no injuries property damage only accident", "the fire department is on scene",
@@ -317,6 +321,7 @@ EMS = [
     ("patient shot", "weapons"),
 ]
 EMS_QUIET = [
+    "staging for p d at the corner",
     "ambulance responding to 10 Sample St for a fall", "responding", "m v a Sample St", "patient refusal r m a",
     "scene is safe", "transporting one to the hospital", "structure fire Example Ave", "odor of gas in the basement",
     "requesting an additional engine", "partial roof collapse", "this is a drill c p r in progress", "back in service",
@@ -326,6 +331,7 @@ EMS_QUIET = [
 FIRE = [
     ("may day may day may day", "mayday"),
     ("firefighter down second floor", "mayday"),
+    ("member down on the second floor", "mayday"),
     ("command to 60 control transmit a second alarm", "more_units"),
     ("requesting an additional engine and a ladder", "more_units"),
     ("special call a tanker", "more_units"),
@@ -346,6 +352,9 @@ FIRE = [
     ("command to 60 control requesting additional manpower", "more_units"),
 ]
 FIRE_QUIET = [
+    "a second alarm from the alarm company", "second alarm activation at the same address", "member down the block",
+    "Port Chester engine to standby at the game", "additional engine for the parade",
+    "low water pressure in the area per the water department", "out of water in the booster tank, refilling",
     "engine 1 responding", "radio check", "this is a drill mayday mayday", "mayday drill tonight", "fire is under control",
     "patient collapsed in the kitchen", "no additional units needed", "hydrant test complete", "mutual aid",
     "nothing showing investigating", "everyone is out of the building", "family member missing", "collapse zone",
@@ -825,3 +834,19 @@ def test_live_our_incidents_are_read_from_the_cad(tmp_path):
     assert [g["closed_at"] is None for g in got] == [False, True]             # newest first: the closed one, the open one
     assert all(g["label"] == "100 Example Ave, Port Chester" and g["lat"] == 41.0 for g in got)
     assert cad.intel.incidents == cad.intel_incidents
+
+
+@pytest.mark.parametrize("town, sure, want_town, held", [
+    ("Port Chester", True, "Port Chester", False),        # confirmed (a cross street, a read-back): ours
+    ("Port Chester", False, "", False),                   # unconfirmed into our town: no place (a street anywhere)
+    ("White Plains", False, "White Plains", True),        # unconfirmed into another town: still out of the area
+])
+def test_a_county_wide_reading_into_our_towns_counts_only_confirmed(town, sure, want_town, held):
+    def loc(_text, _scope):
+        return Place("address", 41.0, -73.66, 25.0, f"100 Example Ave, {town}", town, sure, 0.7)
+    e, _sink = engine(locate=loc)
+    [ev] = e.feed(crow("t1", "respond to 100 Example Ave shots fired", 1000.0))
+    assert ev.town == want_town and (ev.suppressed == "out_of_area") is held
+    e, _sink = engine(locate=loc)                         # the first pack (no area): every reading, as before
+    [ev] = e.feed(crow("p1", "respond to 100 Example Ave shots fired", 1000.0, "p25:mrrs:9211", "police"))
+    assert ev.town == town
