@@ -71,7 +71,8 @@ trunk-recorder writes, so its last_heard is the system's last call:
     from     its last call, and never before trunk-recorder was seen running (a recorder just back is given the
              window to hear one; down, it is the recorder alert's)
     control  the station's trunk-recorder log: a run of "Control Channel Message Decode Rate" lines under 2/s
-             (sizeup/radio/recorder.py ControlChannel) lasting CC_LOST_S: the alert at once, whatever the window
+             (sizeup/radio/recorder.py ControlChannel) lasting CC_LOST_S: the alert at once, whatever the window; with
+             every rate logged ("controlWarnRate": -1, #547), none for CC_LOST_S is the same (its decoder stopped)
     clears   at the next call (or the control channel decoding again)
 
 The radio pre-alerts' engine (sizeup/intel) is a line per pack on the panel, never an alert: transcripts in the pack's
@@ -80,7 +81,8 @@ scope / considered in 24 h and when one was last in scope, a warning once a pack
 
 Each alert is logged once when it starts and once when it clears, shown to admins on Settings > Station > Health
 (GET /api/cad/health, static/health.js; never in the state push nor as a banner, #203), and pushed to the
-status topic ([alerts] status_topic, else ntfy_topic: sizeup/notify.py route()): at most one push per condition per repeat_min (15), plus its recovery (only for an episode that was pushed).
+status topic ([alerts] status_topic, else ntfy_topic: sizeup/notify.py route()): at most one push per condition per repeat_min (15), plus its recovery (only for an episode that was pushed). A critical
+one still on is pushed again ("Still: ...") every remind_min (180; 0: never), muted or panel-only ones not (#547).
 
 Flapping (#340), for every alert: one that clears is "settling" for SETTLE_S (15 min; SETTLE_FLAPPING_S, 30 min, once it
 has come back FLAP_N (3) times within FLAP_WINDOW_S (1 h)). Back before it settles, it is the same episode: no second
@@ -140,6 +142,8 @@ TRUNK_DAY_S = 20 * 60.0     # [alerts] p25_silent_min: no call on any talkgroup 
 TRUNK_NIGHT_S = 60 * 60.0   # [alerts] p25_silent_night_min: ... for a silence that reaches the night (00-06)
 NIGHT_PART = 0              # the part of the day (00-06) the night window is for
 CC_LOST_S = 120.0           # the control channel decoding under 2 messages / s this long: the trunk alert at once
+CC_WARN = 10.0              # trunk-recorder's default controlWarnRate: a rate at or over it is a healthy one (#547)
+REMIND_S = 3 * 3600.0       # [alerts] remind_min: a pushed critical alert still on is pushed again this often (#547)
 TOD_PARTS = 4               # 6-hour parts of the day for the learned gaps
 NOT_CHANNELS = ("STT", "Voice", "Hub", "Station", "trunk-recorder")
 STATUS_KEY = b"sizeup-status-token-v1"
@@ -502,6 +506,7 @@ class StationHealth:
         self.outbox_s = cfg.alerts_outbox_min * 60
         self.disk_pct = cfg.alerts_disk_pct
         self.repeat_s = cfg.alerts_repeat_min * 60
+        self.remind_s = float(getattr(cfg, "alerts_remind_min", REMIND_S / 60)) * 60   # 0: no reminders
         self.public_url = (cfg.cloud_public_url or "").rstrip("/")
         self.errors = None          # the hub's own error lines (sizeup/errwatch.py ErrorWatch, #285): HubApp sets it
         self._lock = threading.RLock()
@@ -765,11 +770,17 @@ class StationHealth:
         cc = rec.get("cc") if isinstance(rec.get("cc"), dict) else None
         window, usual = self._trunk_window(last if last else snow, snow)
         low = cc.get("low_since") if cc and isinstance(cc.get("low_since"), (int, float)) else None
+        mute = cc.get("silent_since") if cc and isinstance(cc.get("silent_since"), (int, float)) else None
+        rate = cc.get("rate") if cc else None
+        # (#547: every rate is logged now; the panel's "Low" is one under trunk-recorder's default warn rate)
+        rate = rate if isinstance(rate, (int, float)) and rate < CC_WARN else None
         return {"last_call": last + skew if last else None, "quiet_s": round(snow - last, 1) if last else None,
                 "window_s": window, "usual_s": usual, "gaps": len(self.gaps.get(P25_JOB) or []),
                 "up_since": self._trunk_up,
-                "cc": None if cc is None else {"rate": cc.get("rate"), "low_since": low + skew if low else None,
+                "cc": None if cc is None else {"rate": rate, "low_since": low + skew if low else None,
                                                "low_s": round(snow - low, 1) if low else None,
+                                               "silent_since": mute + skew if mute else None,
+                                               "silent_s": round(snow - mute, 1) if mute else None,
                                                "retunes": cc.get("retunes"),
                                                "last_retune": cc["last_retune"] + skew
                                                if isinstance(cc.get("last_retune"), (int, float)) else None}}
@@ -1114,6 +1125,12 @@ class StationHealth:
                             + f" from it since {_hhmm(cc['low_since'])}"
                             + (f", {cc['retunes']} retunes" if cc.get("retunes") else "") + f" {tail}",
                     "since": float(cc["low_since"])}
+        if cc.get("silent_since") and (cc.get("silent_s") or 0) >= CC_LOST_S:
+            # (#547) trunk-recorder logs its decode rate every 3 s; none since: it runs, but decodes nothing
+            return {"severity": "critical", "title": "P25 trunk silent",
+                    "text": f"control channel: no decode rate from trunk-recorder since {_hhmm(cc['silent_since'])} "
+                            f"{tail}",
+                    "since": float(cc["silent_since"])}
         active = self.active.get("trunk")
         start = tk["last_call"] or 0.0
         if active is not None and not start:
@@ -1246,6 +1263,8 @@ class StationHealth:
                 if (not a.get("pushed") and (a.get("escalated") or now - self.last_push.get(a["key"], 0.0) >= self.repeat_s)
                         and self._notify_ok(a, now) and alert_kind(a["key"]) not in mutes):
                     self._push(a, now)
+                elif self._remind_due(a, now, mutes):
+                    self._push(a, now, reminder=True)
             first = {k: v for k, v in self._first.items() if k in self.settling}
             if changes or settled or first != self._first_saved:
                 self._first_saved = first
@@ -1263,6 +1282,13 @@ class StationHealth:
         a["flap_n"] = int(a.get("flap_n") or 0) + 1
         self.active[key] = a
         return a
+
+    def _remind_due(self, a: dict, now: float, mutes: dict) -> bool:
+        """#547: a critical alert pushed and still on (the P25 trunk silent for 22 h was pushed once): pushed again
+        every remind_min (never sooner than repeat_min), unless muted or panel-only."""
+        return (self.remind_s > 0 and bool(a.get("pushed")) and a.get("severity") == "critical" and not a.get("quiet")
+                and now - self.last_push.get(a["key"], 0.0) >= max(self.remind_s, self.repeat_s)
+                and alert_kind(a["key"]) not in mutes)
 
     @staticmethod
     def _escalate(a: dict, c: dict) -> None:
@@ -1318,7 +1344,7 @@ class StationHealth:
         if key is not None or ad.get("state") == "ok":
             self._adsb_said = key
 
-    def _push(self, a: dict, now: float, recovered: bool = False) -> None:
+    def _push(self, a: dict, now: float, recovered: bool = False, reminder: bool = False) -> None:
         n = self.notifier
         if n is None or not n.enabled:
             return
@@ -1327,8 +1353,9 @@ class StationHealth:
         who = a.get("who") or None
         if recovered:
             flap = f", back {a['flap_n']}× before it settled" if a.get("flap_n") else ""
+            told = f", {a['reminders']} reminder(s) sent" if a.get("reminders") else ""
             n.send(f"Recovered: {a['title']}", f"{a['title']} cleared at {_hhmm(a.get('cleared'))} after "
-                                               f"{_dur((a.get('cleared') or now) - a['since'])}{flap}.",
+                                               f"{_dur((a.get('cleared') or now) - a['since'])}{flap}{told}.",
                    priority=3, tags=("white_check_mark", "sizeup"), click=click, who=who)
             return
         if alert_kind(a["key"]) in self._mutes(now):     # muted since the tick began: not now
@@ -1336,10 +1363,14 @@ class StationHealth:
         a["pushed"] = True
         a.pop("escalated", None)
         self.last_push[a["key"]] = now
+        if reminder:
+            a["reminders"] = int(a.get("reminders") or 0) + 1
+            self.log(f"health: still {a['title']} after {_dur(now - a['since'])}: reminder {a['reminders']} pushed")
         long = now - a["since"]
         flaps = self._flaps(a, now)
         flap = f"; flapping, back {flaps}× in 1 h" if flaps >= FLAP_N else ""
-        n.send(a["title"] + (f" {_dur(long)}" if long >= 60 else ""), f"{a['text']} (since {_hhmm(a['since'])}{flap}).",
+        n.send(("Still: " if reminder else "") + a["title"] + (f" {_dur(long)}" if long >= 60 else ""),
+               f"{a['text']} (since {_hhmm(a['since'])}{flap}).",
                priority=4 if a["severity"] == "critical" else 3,
                tags=("rotating_light" if a["severity"] == "critical" else "warning", "sizeup"), click=click, who=who)
         self._save()

@@ -418,7 +418,9 @@ it changes nothing.
   ("Recovered: ..."); an alert that came back within the 15 min shows on screen at once and is pushed when
   the 15 min are up if it is still on. The title says who and where (`sizeup/notify.py` Who), e.g.
   "Station silent 4 min · Port Chester FD · last heard 14:32", "South 2 not running · PCFD · SDR 101 on South 2";
-  the push opens the panel (with `[cloud] public_url` set).
+  the push opens the panel (with `[cloud] public_url` set). A critical alert still on is pushed again every
+  `remind_min` (180 min; 0: never), titled "Still: ..." (#547: "P25 trunk silent" was pushed once in 22 h); a muted
+  one isn't, and its "Recovered" says how many reminders went.
 * Alerts and 24 h of their history are in `hub.sqlite`: a redeploy neither forgets an alert nor pushes it again.
 * **Flapping (#340).** "Recovered" is pushed only once an alert has stayed clear 15 min (30 min once it came back 3
   times within an hour). Back before then, it is the same episode: no second push, no "Recovered", one row in the

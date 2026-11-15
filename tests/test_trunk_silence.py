@@ -10,7 +10,7 @@ import pytest
 from sizeup.cloud import health as healthmod
 from sizeup.cloud.health import CC_LOST_S, StationHealth, station_metrics
 from sizeup.config import ConfigError, load
-from sizeup.radio.recorder import CC_RUN_GAP_S, ControlChannel, TrunkRecorder
+from sizeup.radio.recorder import CC_RUN_GAP_S, CC_SILENT_S, ControlChannel, TrunkRecorder
 from tests.test_health import T0, FakeHub, FakeNotifier, cfg as hcfg, radio, station_status
 
 P25 = "Fire/EMS 15"
@@ -202,7 +202,8 @@ def test_control_channel_from_trunk_recorders_log():
     cc = ControlChannel(clock=lambda: now[0])
     head = "[2026-11-06 13:05:00.000000] (error)   [westchester]\t"
     cc.feed(head + "Unit ID set via Control Channel, ext: 41228\tcurrent: -1\t samples: 0")
-    assert cc.status() == {"rate": None, "low_since": None, "last_low": None, "retunes": 0, "last_retune": None}
+    assert cc.status() == {"rate": None, "low_since": None, "last_low": None, "retunes": 0, "last_retune": None,
+                           "silent_since": None}
     cc.feed(head + "Control Channel Message Decode Rate: 7/sec, count:  21")   # low, not lost
     st = cc.status()
     assert st["rate"] == 7.0 and st["low_since"] is None
@@ -215,6 +216,72 @@ def test_control_channel_from_trunk_recorders_log():
     assert st["rate"] == 0.0 and st["low_since"] == T0 + 3 and st["retunes"] == 1
     now[0] = T0 + 15 + CC_RUN_GAP_S + 1                                    # no low line since: the run is over
     assert cc.status()["low_since"] is None and cc.status()["rate"] is None
+    now[0] = T0 + 3600                       # only the low rates are logged (the default warn rate): none is fine
+    assert cc.status()["silent_since"] is None
+
+
+def test_every_rate_logged_then_none_is_a_hung_decoder_and_alerts():
+    """#547: with "controlWarnRate": -1 trunk-recorder logs a healthy rate every 3 s too; once it has, none for
+    CC_SILENT_S while it runs is a fault (the station's monitor), and the hub's "P25 trunk silent" after CC_LOST_S."""
+    now = [T0]
+    cc = ControlChannel(clock=lambda: now[0])
+    head = "[2026-11-06 13:05:00.000000] (info)    [westchester]\t"
+    for k in range(10):
+        now[0] = T0 + 3 * k
+        cc.feed(head + "Control Channel Message Decode Rate: 38/sec, count:  114")
+    last = now[0]
+    now[0] = last + CC_SILENT_S
+    assert cc.status()["silent_since"] is None and cc.status()["rate"] is None
+    now[0] = last + CC_SILENT_S + 1
+    assert cc.status()["silent_since"] == last
+    r = Rig()
+    r.at(0, p25(0))
+    healthy = {"rate": 38.0, "low_since": None, "last_low": None, "retunes": 0, "last_retune": None, "silent_since": None}
+    r.at(30, p25(25, cc=healthy))
+    assert r.keys() == [] and r.h.model()["trunk"]["cc"]["rate"] is None   # a healthy rate: "Decoding", not "Low"
+    hung = dict(healthy, rate=None, silent_since=T0 + 30)
+    r.at(30 + CC_LOST_S - 1, p25(25, cc=hung))
+    assert r.keys() == []
+    r.at(30 + CC_LOST_S, p25(25, cc=hung))
+    (a,) = r.h.alerts()
+    assert a["title"] == "P25 trunk silent" and a["since"] == T0 + 30
+    assert a["text"].startswith("control channel: no decode rate from trunk-recorder since ")
+    r.at(400, p25(25, cc=dict(healthy, rate=7.0)))                          # decoding again (low, under the warn rate)
+    assert r.keys() == [] and r.h.model()["trunk"]["cc"]["rate"] == 7.0
+
+
+def test_a_critical_alert_still_on_is_pushed_again_every_few_hours_then_recovers():
+    """#547: "P25 trunk silent" was pushed once and never again for 22 h. A pushed critical alert still on is pushed
+    again every remind_min (3 h), never more often; its recovery says it is over."""
+    r = Rig()
+    r.at(0, p25(0))
+    for dt in range(60, 22 * 3600, 60):
+        r.at(dt, p25(0))
+    titles = [m["title"] for m in r.n.msgs]
+    first = [t for t in titles if not t.startswith("Still")]
+    still = [t for t in titles if t.startswith("Still")]
+    assert len(first) == 1 and first[0].startswith("P25 trunk silent 21 min")
+    # first pushed at 21 min, then at 3 h 21 min, 6 h 21 min ... 21 h 21 min: 7 reminders in 22 h, 3 h apart
+    assert len(still) == 7 and still[0].startswith("Still: P25 trunk silent 3 h 21 min")
+    r.at(22 * 3600, p25(22 * 3600 - 5))                                   # a call: clear, then settled
+    r.at(22 * 3600 + healthmod.SETTLE_S, p25(22 * 3600 + healthmod.SETTLE_S - 5))
+    rec = r.n.msgs[-1]
+    assert rec["title"].startswith("Recovered: P25 trunk silent") and "7 reminder(s) sent" in rec["body"]
+    assert len(r.n.msgs) == 9
+
+
+def test_reminders_off_muted_or_warnings_are_not_repeated():
+    r = Rig(alerts_remind_min=0.0)
+    r.at(0, p25(0))
+    for dt in range(60, 8 * 3600, 300):
+        r.at(dt, p25(0))
+    assert len(r.n.msgs) == 1                                             # 0: the first push only, as before
+    r = Rig()
+    r.h.mutes = lambda: {"trunk": {"until": T0 + 30 * 24 * 3600}}
+    r.at(0, p25(0))
+    for dt in range(60, 8 * 3600, 300):
+        r.at(dt, p25(0))
+    assert r.n.msgs == []                                                 # muted: nothing, reminders included
 
 
 def test_the_station_reports_the_control_channel(tmp_path):

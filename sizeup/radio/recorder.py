@@ -25,9 +25,14 @@ checks how many control channel messages it decoded and, under its warn rate (10
 
     [westchester]   Control Channel Message Decode Rate: 0/sec, count:  0
 
-and retunes to the next control channel under 2/sec ("Retuning to Control Channel: ..."). A healthy system logs none
-of these, so a run of them under CC_LOW (2/sec), each within CC_RUN_GAP_S of the last, is the control channel lost:
-its start goes to the hub in the station health (sizeup/cloud/health.py: the "P25 trunk silent" alert).
+and retunes to the next control channel under 2/sec ("Retuning to Control Channel: ..."). A run of them under CC_LOW
+(2/sec), each within CC_RUN_GAP_S of the last, is the control channel lost: its start goes to the hub in the station
+health (sizeup/cloud/health.py: the "P25 trunk silent" alert).
+
+With "controlWarnRate": -1 (deploy/trunk-recorder/config.json, #547) it logs the rate every 3 s, healthy or not. Once
+a line at or over the default warn rate (CC_WARN) shows that, none for CC_SILENT_S is a fault too: trunk-recorder runs
+but its decoder has stopped ("silent_since"; the same alert). With the default warn rate a healthy system logs none,
+and no lines means nothing.
 """
 
 from __future__ import annotations
@@ -55,12 +60,15 @@ CC_RATE = re.compile(r"Control Channel Message Decode Rate:\s*(?P<rate>[\d.]+)\s
 CC_RETUNE = re.compile(r"Retuning to Control Channel", re.I)
 CC_LOW = 2.0                # messages / s under this: trunk-recorder can't hold the control channel (it retunes)
 CC_RUN_GAP_S = 15.0         # it says so every 3 s while it lasts: no such line this long, the run is over
+CC_WARN = trunkrecd.CC_WARN         # a rate logged at or over trunk-recorder's default warn rate: it logs every one
+CC_SILENT_S = trunkrecd.CC_SILENT_S  # ... and none for this long: its decoder has stopped (#547)
 
 
 class ControlChannel:
     """The control channel's decode rate as trunk-recorder logs it (feed() each line of its output). status():
     {"rate": the last rate it logged (None: none logged: fine), "low_since": the start of the current run under
-    CC_LOW (None: not lost), "last_low": that run's last line, "retunes": count, "last_retune": when}."""
+    CC_LOW (None: not lost), "last_low": that run's last line, "retunes": count, "last_retune": when,
+    "silent_since": every rate is logged and the last came this long ago, over CC_SILENT_S (None: fine)}."""
 
     def __init__(self, clock: Callable[[], float] = time.time):
         self.clock = clock
@@ -70,6 +78,7 @@ class ControlChannel:
         self.last_low: float | None = None
         self.retunes = 0
         self.last_retune: float | None = None
+        self.all_logged = False                  # a rate at or over CC_WARN was logged: they all are (#547)
 
     def feed(self, line: str) -> None:
         if "ontrol" not in line:
@@ -82,6 +91,8 @@ class ControlChannel:
             except ValueError:
                 return
             self.rate, self.at = rate, now
+            if rate >= CC_WARN:
+                self.all_logged = True
             if rate < CC_LOW:
                 if self.low_since is None or self.last_low is None or now - self.last_low > CC_RUN_GAP_S:
                     self.low_since = now
@@ -98,8 +109,9 @@ class ControlChannel:
         if not lost:
             self.low_since = None
         recent = self.at is not None and now - self.at <= CC_RUN_GAP_S
+        silent = self.all_logged and self.at is not None and now - self.at > CC_SILENT_S
         return {"rate": self.rate if recent else None, "low_since": self.low_since, "last_low": self.last_low,
-                "retunes": self.retunes, "last_retune": self.last_retune}
+                "retunes": self.retunes, "last_retune": self.last_retune, "silent_since": self.at if silent else None}
 
 
 def make_system(name: str, label: str, command: str, workdir: str,

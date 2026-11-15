@@ -32,6 +32,7 @@
     }
   ],
   "captureDir": "../../captures/p25",
+  "controlWarnRate": -1,
   "logLevel": "info",
   "tempDir": "../../captures/p25-tmp"
 }

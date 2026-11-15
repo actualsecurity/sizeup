@@ -171,6 +171,14 @@ aliases = {}                       # radio ID -> unit name, e.g. { "2391001" = "
 # talkgroup, is kept this long after its last emergency key-up, even with the talkgroup's Record switched
 # off (sizeup/cad/alarms.py Windows). The alarm's "All clear" ends it early. 0 = keep only the flagged call.
 emergency_window_min = 10
+# The trunk-recorder watchdog (#547, sizeup/radio/trunkrecd.py; the station's trunk-recorder service reads these):
+# restart a trunk-recorder with no new call file for watchdog_factor x the system's mean gap between calls (the 3 h
+# before the last call), never sooner than watchdog_min_min nor later than watchdog_max_min; at most
+# watchdog_per_hour restarts an hour (0: no watchdog).
+# watchdog_min_min = 15
+# watchdog_max_min = 180
+# watchdog_factor = 10
+# watchdog_per_hour = 3
 
 [mdc]
 # MDC-1200 PTT-ID (Motorola radios send it on key-up/release): radio ID -> unit name shown on traffic.
@@ -344,6 +352,7 @@ heartbeat_stale_min = 90             # no heartbeat (or restart) this long: "Tap
 # outbox_min = 5                     # the oldest event waiting on the station this old
 # disk_pct = 90                      # the station's disk this full
 # repeat_min = 15                    # at most one push per alert this often (plus its recovery)
+# remind_min = 180                   # a critical alert still on is pushed again this often ("Still: ..."; 0: never)
 # p25_silent_min = 20                # "P25 trunk silent": no call on ANY talkgroup this long (trunk-recorder running;
 # p25_silent_night_min = 60          #  longer when the system's learned gaps say so); 60 min into the night (00-06).
 #                                    # One talkgroup or channel silent is only a hint. (main_channels: no more, ignored)
