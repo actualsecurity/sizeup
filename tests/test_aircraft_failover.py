@@ -1,0 +1,241 @@
+"""Self-healing between the aircraft API feeds: the primary by a stable preference order with hysteresis, a slow probe
+of the others while nobody looks, and "no source answering" said once, only when every source was tried and failed.
+
+Two fake providers on 127.0.0.1 (no real host is ever reached: conftest.py), each answering in adsb.fi / adsb.lol's
+JSON at the layer's own clock, switched between answering, 429 with Retry-After, trickling (a byte at a time, never
+the whole answer) and 503. The layer's clock is a fake one, so the 10-minute clean window takes no time; the HTTP is
+real (KeepAlive, its whole-read deadline shortened). Every aircraft here is invented (hex a0f0xx, callsigns TEST..).
+"""
+
+import json
+import threading
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+import pytest
+
+from sizeup import aircraft as A
+from sizeup.aircraft import AircraftLayer
+from tests.test_aircraft import Clock, T3
+
+FI_PATH = "/lat/{lat}/lon/{lon}/dist/{radius}"
+LOL_PATH = "/v2/point/{lat}/{lon}/{radius}"
+
+
+def plane(hex_, cs, lat, lon, alt=3000, squawk="1200", **kw):
+    return {"hex": hex_, "flight": cs, "alt_baro": alt, "gs": 120.0, "track": 90.0, "baro_rate": 0, "squawk": squawk,
+            "lat": lat, "lon": lon, "seen": 0.2, "seen_pos": 0.2, "category": "A1", **kw}
+
+
+TRAFFIC = [plane("a0f001", "TEST01", 41.10, -73.80), plane("a0f002", "TEST02", 41.00, -73.62)]
+MAYDAY = plane("a0f077", "TEST77", 41.04, -73.686, alt=900, squawk="7700", gs=80.0, track=330.0, baro_rate=-500)
+
+
+class Provider:
+    """One API feed. mode: "ok" | ("429", retry_after) | "trickle" | "503". Answers at clock.t (the layer's)."""
+
+    def __init__(self, clock: Clock):
+        self.clock, self.mode, self.planes = clock, "ok", list(TRAFFIC)
+        self.hits: list[float] = []                   # the layer's clock at each request
+        outer = self
+
+        class H(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                outer.hits.append(outer.clock.t)
+                mode = outer.mode
+                if mode == "trickle":
+                    try:
+                        self.send_response(200)
+                        self.send_header("Content-Length", "100000")
+                        self.end_headers()
+                        for _ in range(100):
+                            time.sleep(0.3)
+                            self.wfile.write(b"{")
+                            self.wfile.flush()
+                    except OSError:
+                        pass
+                    self.close_connection = True
+                    return
+                code, hdrs = 200, {"Content-Type": "application/json"}
+                if mode == "ok":
+                    body = json.dumps({"now": outer.clock.t * 1000, "ac": outer.planes}).encode()
+                else:
+                    code, body = (429 if mode[0] == "429" else 503) if isinstance(mode, tuple) else 503, b'{"error":"no"}'
+                    if isinstance(mode, tuple) and mode[0] == "429":
+                        hdrs["Retry-After"] = str(mode[1])
+                self.send_response(code)
+                for k, v in hdrs.items():
+                    self.send_header(k, v)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.httpd.daemon_threads = True
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+
+    def url(self, path: str) -> str:
+        return f"http://127.0.0.1:{self.httpd.server_address[1]}{path}"
+
+    def close(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+
+
+@pytest.fixture
+def rig(monkeypatch):
+    monkeypatch.setattr(A, "CONNECT_S", 0.5)          # a trickle gives up after 1.5 s of real time
+    monkeypatch.setattr(A, "READ_S", 1.0)
+    clock = Clock(T3)
+    fi, lol = Provider(clock), Provider(clock)
+    logs: list[str] = []
+    alarms: list[dict] = []
+    ly = AircraftLayer(feeds=("adsbfi", "adsblol"), adsbfi_url=fi.url(FI_PATH), adsblol_url=lol.url(LOL_PATH),
+                       registry=False, clock=clock, log=logs.append)
+    ly.on_emergency = lambda ev: alarms.append(ev) or len(alarms)
+    yield ly, clock, fi, lol, logs, alarms
+    for p in (fi, lol):
+        p.close()
+    for f in ly.feeds:
+        f.fetch.close()
+
+
+def step(ly: AircraftLayer, clock: Clock, dt: float, looking: bool = True) -> str:
+    """dt on, a viewer asking (or not), one turn of the layer: the primary's key after it ('' for none)."""
+    clock.t += dt
+    if looking:
+        ly.asked = clock.t
+    ly.tick()
+    p = ly.primary()
+    return p.key if p is not None else ""
+
+
+def changes(seq: list[str]) -> list[str]:
+    return [k for i, k in enumerate(seq) if i == 0 or k != seq[i - 1]]
+
+
+def test_fi_rate_limited_hands_over_to_lol_at_once_and_takes_it_back_once_after_the_clean_window(rig):
+    ly, clock, fi, lol, logs, alarms = rig
+    seq = [step(ly, clock, 0)]
+    assert seq == ["adsbfi"] and len(fi.hits) == 1 and len(lol.hits) == 1
+    fi.mode = ("429", 30)
+    n = len(lol.hits)
+    seq.append(step(ly, clock, 5))                                   # adsb.fi read: 429, Retry-After 30
+    failed_at = ly.feeds[0].st["failed_at"]
+    assert seq[-1] == "adsblol" and ly.feeds[0].st["rest_until"] == failed_at + 30
+    assert len(lol.hits) == n + 1 and lol.hits[-1] == clock.t        # promoted and read in the same turn
+    assert any("primary adsb.lol (was adsb.fi: rate limited (HTTP 429), Retry-After 30 s)" in m for m in logs)
+    lol.planes = TRAFFIC + [MAYDAY]                                  # a 7700 on the feed that answers
+    shown = []
+    while clock.t < failed_at + A.FLAKY_S + 60:
+        if clock.t >= failed_at + 35:
+            fi.mode = "ok"                                           # adsb.fi back (and steady from here on)
+            fi.planes = TRAFFIC + [MAYDAY]                           # ... with the same emergency
+        seq.append(step(ly, clock, 5))
+        shown.append(len(ly.public()["aircraft"]))
+        assert all(fi.hits[i + 1] - fi.hits[i] >= 5 for i in range(len(fi.hits) - 1))   # never faster than 1 a 5 s
+    assert min(shown) >= 3                                           # the map kept its aircraft throughout
+    assert changes(seq) == ["adsbfi", "adsblol", "adsbfi"]           # no flapping
+    back = clock.t - 5 * (len(seq) - 1 - seq.index("adsbfi", 2))     # when adsb.fi took it back ...
+    assert back >= failed_at + A.FLAKY_S                             # ... only once clean for the window
+    assert [a["code"] for a in alarms] == ["7700"] and alarms[0]["src"] == "adsblol"     # once, from the answering feed
+    assert any("primary adsb.fi (was adsb.lol: steady again)" in m for m in logs)
+    assert not any("no source answering" in m for m in logs)
+
+
+def test_lol_stalls_while_primary_then_both_down_says_so_once_then_recovers(rig):
+    ly, clock, fi, lol, logs, alarms = rig
+    fi.mode = ("429", 30)
+    step(ly, clock, 0)
+    assert ly.primary().key == "adsblol"
+    clock.t += 31
+    fi.mode = "ok"                                                   # adsb.fi answers again (failed lately: not first)
+    step(ly, clock, 0)
+    assert ly.feeds[0].st["ok"] == clock.t and ly.primary().key == "adsblol"
+    lol.mode = "trickle"                                             # the primary stalls
+    t0 = time.monotonic()
+    assert step(ly, clock, 5) == "adsbfi"                            # its read cut at the deadline; adsb.fi (healthy) on
+    assert time.monotonic() - t0 < 4 and "no whole answer" in ly.feeds[1].st["why"]
+    assert not ly.all_down() and ly.public()["aircraft"]
+    fi.mode = ("429", 120)                                           # and now adsb.fi refuses too: nothing answers
+    downs = []
+    for _ in range(8):
+        step(ly, clock, 5)
+        downs.append(ly.down_since is not None)
+    assert downs[-1] and ly.all_down()
+    said = [m for m in logs if "no source answering" in m]
+    assert len(said) == 1 and "adsb.fi: rate limited" in said[0] and "adsb.lol: URLError" in said[0]   # once
+    rows = ly.feed_health()
+    assert rows[0]["key"] == "aircraft:down" and rows[0]["label"] == "Aircraft: no source answering"
+    assert rows[0]["state"] == "down" and rows[0]["why"] == "" and "adsb.fi: rate limited" in rows[0]["title"]
+    assert sum(1 for r in rows if r["state"] == "down") == 1 and "no feed answering" in ly.public()["error"]
+    lol.mode = "ok"                                                  # adsb.lol comes back first
+    for _ in range(12):
+        if step(ly, clock, 5) and ly.down_since is None:
+            break
+    assert ly.down_since is None and ly.primary().key == "adsblol" and ly.public()["aircraft"]
+    assert len([m for m in logs if "answering again after" in m]) == 1
+    assert ly.feed_health()[0]["key"] != "aircraft:down" and ly.public()["error"] == ""
+    assert alarms == []
+
+
+def test_an_emergency_on_whichever_feed_answers_fires_once_while_the_primary_moves(rig):
+    ly, clock, fi, lol, logs, alarms = rig
+    fi.planes = lol.planes = TRAFFIC + [MAYDAY]
+    step(ly, clock, 0, looking=False)                                # the map closed: the watch reads on its own
+    assert [a["src"] for a in alarms] in (["adsbfi"], ["adsblol"])
+    fi.mode = ("429", 20)
+    for _ in range(6):
+        step(ly, clock, A.WATCH_S, looking=False)
+    assert ly.primary().key == "adsblol" and len(alarms) == 1        # still one alarm
+
+
+def test_with_the_map_closed_a_recovered_feed_is_probed_slowly_and_proven_back(rig):
+    ly, clock, fi, lol, logs, alarms = rig
+    seq = [step(ly, clock, 0, looking=False)]
+    assert seq == ["adsbfi"] and len(lol.hits) == 1                 # the other's first probe
+    fi.mode = ("429", 30)
+    seq.append(step(ly, clock, A.WATCH_S, looking=False))
+    failed_at = ly.feeds[0].st["failed_at"]
+    assert seq[-1] == "adsblol"
+    fi.mode = "ok"
+    fi_n, lol_n = len(fi.hits), len(lol.hits)
+    t_start = clock.t
+    while clock.t < failed_at + A.FLAKY_S + 2 * A.PROBE_S:
+        seq.append(step(ly, clock, A.WATCH_S, looking=False))
+    span = clock.t - t_start
+    assert changes(seq) == ["adsbfi", "adsblol", "adsbfi"]
+    probes = [t for t in fi.hits[fi_n:] if t < failed_at + A.FLAKY_S]
+    assert 1 <= len(probes) <= A.FLAKY_S / A.PROBE_S + 1             # adsb.fi probed every PROBE_S, no more
+    assert all(b - a >= A.PROBE_S for a, b in zip(probes, probes[1:]))
+    assert ly.feeds[0].st["ok"] > failed_at                         # proven back by a probe, not just quiet
+    assert len(lol.hits) - lol_n <= span / A.WATCH_S + 2            # modest: the watch's own rate at most
+
+
+def test_the_preference_order_and_config():
+    from sizeup.config import ConfigError, _aircraft
+    from pathlib import Path
+    d = _aircraft({"aircraft": {"feeds": ["adsblol", "adsbfi"]}}, Path("."), ())
+    assert d["aircraft_feeds"] == ("adsblol", "adsbfi") and d["aircraft_prefer"] == ()      # a deployed list keeps working
+    assert AircraftLayer(feeds=d["aircraft_feeds"], adsblol_url="https://l.example" + LOL_PATH,
+                         adsbfi_url="https://f.example" + FI_PATH, registry=False, log=lambda m: None).order[0] == "adsbfi"
+    d = _aircraft({"aircraft": {"prefer": ["adsblol", "adsbfi"]}}, Path("."), ())
+    assert d["aircraft_prefer"] == ("adsblol", "adsbfi")
+    ly = AircraftLayer(feeds=("adsbfi", "adsblol"), prefer=d["aircraft_prefer"], adsblol_url="https://l.example" + LOL_PATH,
+                       adsbfi_url="https://f.example" + FI_PATH, registry=False, log=lambda m: None)
+    assert ly.primary().key == "adsblol" and [f.key for f in ly.ordered()] == ["adsblol", "adsbfi"]
+    d = _aircraft({"aircraft": {"feeds": ["adsbfi"]}}, Path("."), ())                    # one provider off
+    assert d["aircraft_feeds"] == ("adsbfi",)
+    for bad in (["opensky"], ["adsbfi", "adsbfi"], "adsbfi", [1]):
+        with pytest.raises(ConfigError):
+            _aircraft({"aircraft": {"prefer": bad}}, Path("."), ())
+
+
+def test_health_js_draws_the_down_row_as_bad():
+    js = (A.ROOT / "sizeup" / "web" / "static" / "health.js").read_text()
+    assert 's === "down" ? "hl-bad"' in js or '|| s === "down"' in js

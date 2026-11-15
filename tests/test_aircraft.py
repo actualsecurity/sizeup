@@ -634,15 +634,16 @@ def test_an_aircraft_only_one_feed_has_is_kept():
         or d["credit"] in ("adsb.lol (ODbL)", "adsb.fi open data")
 
 
-def test_the_feed_giving_more_aircraft_is_primary_and_a_tie_goes_to_the_config_order():
-    ly = dual(fetch=Feeds(lol=(lol_without({"abedb1", "a4fe82", "a12add"}),)))
-    assert ly.primary().key == "adsblol"                                       # nothing read yet: config order
+def test_the_primary_is_the_first_steady_feed_in_the_preference_order_not_the_busier_one():
+    ly = dual(fetch=Feeds(fi=(lol_without({"abedb1", "a4fe82", "a12add"}),)))   # adsb.fi gives 7, adsb.lol 10
+    assert ly.primary().key == "adsbfi"                                        # nothing read yet: adsb.fi first
     ly.refresh()
-    assert ly.primary().key == "adsbfi"                                        # 10 against 7
+    assert ly.primary().key == "adsbfi"                                        # fewer, still first (feeds' order aside)
     assert ly.interval(ly.feeds[1], True) == A.PRIMARY_S == 5 and ly.interval(ly.feeds[0], True) == A.SECONDARY_S == 10
-    tie = dual()
-    tie.refresh()
-    assert tie.primary().key == "adsblol"
+    mine = dual(prefer=("adsblol", "adsbfi"))                                  # [aircraft] prefer
+    mine.refresh()
+    assert mine.primary().key == "adsblol"
+    assert dual(primary="adsblol").primary().key == "adsblol"                  # [aircraft] primary: first of all
 
 
 def test_a_429_rests_that_feed_and_the_other_carries_on_then_it_comes_back():
@@ -694,8 +695,12 @@ def test_while_nobody_looks_only_the_emergency_watch_reads_and_slower():
     assert fetch.calls == []                                                   # no watch: nothing
     ly.on_emergency = lambda ev: 1
     ly.tick()
-    assert fetch.calls == ["lol.example"]                                      # the primary only
-    assert ly.interval(ly.feeds[0], False) == A.WATCH_S == 15 and ly.interval(ly.feeds[1], False) is None
+    assert sorted(fetch.calls) == ["fi.example", "lol.example"]                # the primary, and the other's first probe
+    assert ly.interval(ly.feeds[1], False) == A.WATCH_S == 15 and ly.interval(ly.feeds[0], False) == A.PROBE_S == 60
+    for _ in range(4):                                                         # a minute: the primary 4 times, the other once
+        clock.t += A.WATCH_S
+        ly.tick()
+    assert fetch.calls.count("fi.example") == 5 and fetch.calls.count("lol.example") == 2
     off = dual(clock, Feeds(), watch=False)
     off.on_emergency = lambda ev: 1
     off.tick()

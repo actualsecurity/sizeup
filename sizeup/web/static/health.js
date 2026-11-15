@@ -142,7 +142,7 @@ const StationHealth = (() => {
           i.seen.filter((x) => x.lead_s !== null && x.lead_s !== undefined).map((x) => `${x.label} ${lead(x.lead_s)}`).join(" · ")]), ""));
     }
     if ((d.feeds || []).length) {   // map feeds with a fallback (#362: MTA TrainTime, else GTFS-realtime; #542 aircraft)
-      const feedCls = (s) => (s === "ok" ? "hl-ok" : s === "fallback" || s === "error" ? "hl-bad" : s === "resting" ? "hl-warn" : "dim");
+      const feedCls = (s) => (s === "ok" ? "hl-ok" : s === "fallback" || s === "error" || s === "down" ? "hl-bad" : s === "resting" ? "hl-warn" : "dim");
       kids.push(el("h3", "hl-sub", "Feeds"), table(["Feed", "State", "Reason", "Last read", "Fallback"],
         d.feeds.map((f) => [f.label, [f.state, feedCls(f.state), f.title || ""], f.why || "",
           f.at ? `${when(f.at)} (${longDur(serverNow() - f.at)} ago)` : "never", f.fallback || ""]), ""));

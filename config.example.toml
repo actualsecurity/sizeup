@@ -492,11 +492,14 @@ heartbeat_stale_min = 90             # no heartbeat (or restart) this long: "Tap
 #   "adsblol"   adsb.lol, keyless, ODbL (credited on the map)
 #   "adsbfi"    adsb.fi: its terms say personal, non-commercial use only. The user's decision, 2026-10-14: this is
 #               personal, non-commercial use ("we are not charging for this"). Credited on the map.
-#   the primary (every 5 s while the layer is open; the other every 10 s): primary = "adsbfi" / "adsblol" when set,
-#   else ("auto") the busier of those that haven't failed in the last 10 min, a tie in feeds' order. Each is read on
-#   its own (one hanging never holds up the other or the map: the TLS handshake gets 4 s, the answer 8 s, one
-#   connection kept open); one that errors or is rate-limited rests (at least its Retry-After, else exponential)
-#   and the other carries on. adsb.fi first since #542: from the hub it failed none in a week, adsb.lol ~150 a day.
+#   the primary (every 5 s while the layer is open, the other every 10 s; with the map closed and the emergency
+#   watch on, every 15 s and the other every 60 s): the first steady one in the order primary, prefer, then
+#   adsb.fi, adsb.lol (feeds' own order doesn't decide; leave a feed out of feeds to turn it off). Steady: no
+#   failure in the last 10 min and a good answer since its last one, so a feed that failed takes the primary back
+#   once, after 10 clean minutes. Each is read on its own (one hanging never holds up the other or the map: the TLS
+#   handshake gets 4 s, the answer 8 s, one connection kept open); one that errors or is rate-limited rests (at
+#   least its Retry-After, else exponential) and the next takes over. Every source down: one log line and one row
+#   in Settings > Station > Health. adsb.fi first since #542: from the hub it failed none in a week, adsb.lol ~150.
 #   "receiver"  our own ADS-B receiver ([aircraft.receiver] below): when enabled it is always first ("primary local
 #               SDR on ADSB, secondary the above sources").
 # OpenSky is not used (a written agreement for operational use; far too few credits for a 5 s refresh).
@@ -513,7 +516,8 @@ heartbeat_stale_min = 90             # no heartbeat (or restart) this long: "Tap
 # [aircraft]
 # enabled = true
 # feeds = ["adsbfi", "adsblol"]
-# primary = "auto"        # or "adsbfi" / "adsblol"
+# primary = "auto"        # or "adsbfi" / "adsblol": first whenever it is steady
+# prefer = ["adsbfi", "adsblol"]   # the order the primary is chosen in
 # alarms = true
 # radius_nm = 15          # around HPN: the feeds' query, what counts as "in the area", the alarm's area; 3 to 40
 # ceiling_ft = 6000       # MSL: below this inside the radius is "low traffic" (shortfinal's focus); 1000 to 18000

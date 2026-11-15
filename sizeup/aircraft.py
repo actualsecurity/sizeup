@@ -59,10 +59,13 @@ address, the freshest position per aircraft, our receiver's position first for a
             Open Database License (ODbL 1.0): attribution (the map corner and the box name it and the licence).
   adsbfi    adsb.fi's open data API, same JSON: "personal, non-commercial use only", attribution. The user decided
             (2026-10-14) that this is personal, non-commercial use: the department charges nothing for it. On.
-  The two APIs: the PRIMARY is [aircraft] primary when set, else whichever has been giving more aircraft with a
-  fresh position (a running average, SCORE_ALPHA) among those that haven't failed in FLAKY_S (#542), asked every
-  PRIMARY_S while someone looks; the other every SECONDARY_S (its aircraft join the union and its count stays
-  known). Each is read on a thread of its own (tick(parallel=True), #542: adsb.lol's TLS handshakes timing out held
+  The APIs: the PRIMARY is the first clean one (not resting, not stuck, no failure in FLAKY_S, a good answer since
+  its last failure) in a stable order ([aircraft] primary, [aircraft] prefer, else PREFERENCE: adsb.fi, adsb.lol),
+  asked every PRIMARY_S while someone looks (WATCH_S for the emergency watch); the others every SECONDARY_S (their
+  aircraft join the union), or every PROBE_S while only the watch reads, so a feed that recovered is proven back.
+  None clean: the one chosen last while it is up, else the one that answered last. That is the hysteresis: a feed
+  that failed takes the primary back once only, after FLAKY_S clean. Every API feed tried and failed and our
+  receiver silent: "no source answering", logged once, one Health row, until one answers. Each is read on a thread of its own (tick(parallel=True), #542: adsb.lol's TLS handshakes timing out held
   the one thread 10 s at a time, adsb.fi and the map with it) over its own kept-open connection (KeepAlive: 4 s for
   the connect and handshake, 8 s for the answer). A feed that errors, times out or answers 429 rests (at least its
   Retry-After, else 5 s doubling to 5 min) and the other becomes the primary; it comes back on its first good answer.
@@ -141,6 +144,8 @@ PROCEDURES_FILE = ROOT / "data" / "airport" / "khpn_procedures.geojson"
 AIRLINES_FILE = ROOT / "data" / "airport" / "airlines.csv"
 ADSBLOL_URL = "https://api.adsb.lol/v2/point/{lat}/{lon}/{radius}"
 ADSBFI_URL = "https://opendata.adsb.fi/api/v3/lat/{lat}/lon/{lon}/dist/{radius}"
+API_FEEDS = ("adsbfi", "adsblol")     # the API feeds (another one: here, api_url(), FEEDS, config's AIRCRAFT_FEEDS)
+PREFERENCE = ("adsbfi", "adsblol")    # the primary: the first steady one in this order ([aircraft] prefer / primary)
 FAA_URL = "https://registry.faa.gov/database/ReleasableAircraft.zip"
 FEEDS = {
     "adsblol": {"label": "adsb.lol", "link": "https://adsb.lol", "licence": "ODbL 1.0",
@@ -149,7 +154,14 @@ FEEDS = {
                "terms": "https://github.com/adsbfi/opendata", "credit": "adsb.fi open data"},
     "receiver": {"label": "our ADS-B receiver", "link": "", "licence": "ours", "terms": "", "credit": "our ADS-B receiver"},
 }
-REGISTRY_CREDIT = "Types: FAA aircraft registry (public domain)"
+
+
+def api_url(key: str) -> str:
+    """An API feed's public address (looked up when used: the tests blank them, conftest.py)."""
+    return {"adsbfi": ADSBFI_URL, "adsblol": ADSBLOL_URL}.get(key, "")
+
+
+REGISTRY_CREDIT ="Types: FAA aircraft registry (public domain)"
 
 # HPN (FAA Chart Supplement via shortfinal's data/khpn.toml, checked 2026-09-30)
 ICAO, IATA = "KHPN", "HPN"
@@ -1833,6 +1845,9 @@ RX_KEYS = ("sdr", "name", "state", "detail", "held_by", "present", "messages_per
 PRIMARY_S = 5.0
 SECONDARY_S = 10.0
 WATCH_S = 15.0
+PROBE_S = 60.0                     # nobody looking, the emergency watch on: each other API feed this often, so one that
+                                   # recovered is proven back (and takes the primary back) and a dead primary's
+                                   # replacement is known to answer (well inside every provider's limit)
 SCORE_ALPHA = 0.3                  # the running count of aircraft with a fresh position that picks the primary
 RECEIVER_LOG_EVERY_S = 300.0      # our receiver failing the same way: logged once, then at most this often (#262)
 ERROR_LOG_EVERY_S = 300.0          # the poll itself failing (a bug): its traceback once per distinct error, then one
@@ -1867,10 +1882,14 @@ class AircraftLayer:
                  devices: Callable[[], list] | None = None, holder: Callable[[str], dict | None] | None = None,
                  log: Callable[[str], None] = print, clock: Callable[[], float] = time.time,
                  airlines: dict[str, str] | None = None, procedures: Procedures | None = None, watch: bool = True,
-                 station_feed: bool = False, primary: str = ""):
+                 station_feed: bool = False, primary: str = "", prefer: tuple[str, ...] = ()):
         self.enabled = bool(enabled)
         self.radius_nm, self.ceiling_ft = float(radius_nm), float(ceiling_ft)
-        self.prefer = primary if primary in ("adsblol", "adsbfi") else ""    # [aircraft] primary; "" = auto
+        self.prefer = primary if primary in API_FEEDS else ""    # [aircraft] primary; "" = auto
+        # the order the primary is chosen in: [aircraft] primary, then [aircraft] prefer, then PREFERENCE, then any
+        # other API feed in feeds' order (a provider added later goes last unless named)
+        self.order = tuple(dict.fromkeys([*([self.prefer] if self.prefer else []), *(k for k in prefer if k in API_FEEDS),
+                                          *PREFERENCE, *(k for k in feeds if k in API_FEEDS)]))
         api_fetch = fetch                        # None: each API feed its own KeepAlive connection
         self.fetch = fetch or http_get
         self.log, self.clock = log, clock
@@ -1879,11 +1898,10 @@ class AircraftLayer:
         self.receiver_on = bool(receiver)
         self.feeds: list[Feed] = []
         if self.enabled:
+            given = {"adsblol": adsblol_url, "adsbfi": adsbfi_url}
             for key in feeds:
-                if key == "adsblol" and (adsblol_url or ADSBLOL_URL):
-                    self.feeds.append(ApiFeed("adsblol", adsblol_url or ADSBLOL_URL, self.radius_nm, api_fetch))
-                elif key == "adsbfi" and (adsbfi_url or ADSBFI_URL):
-                    self.feeds.append(ApiFeed("adsbfi", adsbfi_url or ADSBFI_URL, self.radius_nm, api_fetch))
+                if key in API_FEEDS and (given.get(key) or api_url(key)):
+                    self.feeds.append(ApiFeed(key, given.get(key) or api_url(key), self.radius_nm, api_fetch))
                 elif key == "receiver" and receiver and (receiver_1090 or receiver_978) and not station_feed:
                     self.feeds.append(ReceiverFeed(receiver_1090, receiver_978, self.fetch, clock))
             if station_feed:                     # the hub: our receiver is the station's, forwarded (#235): first
@@ -1892,6 +1910,8 @@ class AircraftLayer:
             f.st = {"next": 0.0, "fails": 0, "rest_until": 0.0, "why": "", "ok": None, "at": None, "n": 0, "fresh": 0,
                     "score": None, "snap": None, "reads": 0, "failures": 0, "failed_at": None, "busy": False, "busy_since": None,
                     "down_since": None, "log_kind": "", "log_at": -1e18, "logged": False}
+        self._prim = ""                         # the primary's key as last chosen (kept while none is steady)
+        self.down_since: float | None = None    # no source answering since (every API feed failed, no receiver)
         self._dirty = False                     # a background read answered (or failed) since the last combine
         self._refresh_asked = False             # refresh() asked the layer's thread for a read of every feed now
         self._ticks = 0                         # turns of the layer's loop done (refresh() waits on them)
@@ -1951,7 +1971,7 @@ class AircraftLayer:
                    (state / "aircraft") if state else None,
                    devices=None if hub else devices, holder=None if hub else claims.holder, log=log,
                    watch=getattr(cfg, "aircraft_alarms", True), station_feed=hub,
-                   primary=getattr(cfg, "aircraft_primary", ""))
+                   primary=getattr(cfg, "aircraft_primary", ""), prefer=tuple(getattr(cfg, "aircraft_prefer", ()) or ()))
 
     @property
     def configured(self) -> bool:
@@ -1975,9 +1995,9 @@ class AircraftLayer:
             self._thread = threading.Thread(target=self._run, name="aircraft", daemon=True)
             self._thread.start()
             self.log(f"aircraft: {' + '.join(FEEDS[f.key]['label'] for f in self.feeds)}, {self.radius_nm:g} nm around HPN; "
-                     f"primary {FEEDS[self.prefer]['label'] if self.prefer else 'auto'}; "
-                     f"while the layer is open the primary every {PRIMARY_S:g} s, the other every {SECONDARY_S:g} s"
-                     + (f"; emergency watch every {WATCH_S:g} s" if self.watching() else "")
+                     f"primary: the first steady of {', '.join(FEEDS[f.key]['label'] for f in self.ordered())}; "
+                     f"while the layer is open the primary every {PRIMARY_S:g} s, the others every {SECONDARY_S:g} s"
+                     + (f"; emergency watch every {WATCH_S:g} s, the others every {PROBE_S:g} s" if self.watching() else "")
                      + "; each feed read on its own")
         return self
 
@@ -2050,20 +2070,64 @@ class AircraftLayer:
         now = self.clock() if now is None else now
         return f.st["failed_at"] is not None and now - f.st["failed_at"] < FLAKY_S
 
+    def ordered(self) -> list[Feed]:
+        """The API feeds in the order the primary is chosen in (self.order: [aircraft] primary / prefer, PREFERENCE)."""
+        rank = {k: i for i, k in enumerate(self.order)}
+        return sorted(self.api_feeds(), key=lambda f: (rank.get(f.key, len(rank)), self.feeds.index(f)))
+
+    def failed(self, f: Feed, now: float | None = None) -> bool:
+        """Its last try failed (no good answer since), or it is resting, or its read is stuck."""
+        now = self.clock() if now is None else now
+        st = f.st
+        return self.stuck(f, now) or st["rest_until"] > now or \
+            (st["failed_at"] is not None and (st["ok"] is None or st["failed_at"] >= st["ok"]))
+
+    def clean(self, f: Feed, now: float | None = None) -> bool:
+        """Up (not resting, not stuck), no failure in FLAKY_S, and a good answer since its last failure (proven back,
+        not merely quiet)."""
+        now = self.clock() if now is None else now
+        st = f.st
+        return st["rest_until"] <= now and not self.stuck(f, now) and not self.flaky(f, now) and \
+            (st["failed_at"] is None or (st["ok"] is not None and st["ok"] > st["failed_at"]))
+
     def primary(self) -> Feed | None:
-        """The API feed asked most often. Among those not resting, the steady ones (no failure in FLAKY_S) first:
-        [aircraft] primary when it names one of them, else the one giving the most aircraft with fresh positions
-        lately (config order on a tie). #542: adsb.lol timed out or answered 429 ~150 times a day from the hub while
-        adsb.fi failed none in a week, and the busier-feed rule kept handing the primary back to adsb.lol."""
+        """The API feed asked most often (and the only one the emergency watch reads every WATCH_S): the first clean
+        one in the preference order (ordered(): adsb.fi, adsb.lol by default). That is the hysteresis: a feed that
+        failed takes the primary back only once it has answered since and FLAKY_S has gone by without a failure, so
+        a feed that keeps failing now and then never takes it back and forth. None clean: the one chosen last while
+        it is up, else the up one that answered last (the order on a tie). None up (all resting or stuck): None.
+        #542: adsb.lol timed out or answered 429 ~150 times a day from the hub while adsb.fi failed none in a week;
+        a busier-feed rule kept handing the primary back to adsb.lol, so the order decides, not the count."""
         now = self.clock()
-        up = [f for f in self.api_feeds() if f.st["rest_until"] <= now and not self.stuck(f, now)]
+        up = [f for f in self.ordered() if f.st["rest_until"] <= now and not self.stuck(f, now)]
         if not up:
             return None
-        steady = [f for f in up if not self.flaky(f, now)] or up
-        pref = next((f for f in steady if f.key == self.prefer), None)
-        if pref is not None:
-            return pref
-        return max(steady, key=lambda f: (f.st["score"] if f.st["score"] is not None else -1.0, -self.feeds.index(f)))
+        first = next((f for f in up if self.clean(f, now)), None)
+        if first is not None:
+            return first
+        kept = next((f for f in up if f.key == self._prim), None)
+        if kept is not None:
+            return kept
+        return max(up, key=lambda f: (f.st["ok"] if f.st["ok"] is not None else -1e18, -up.index(f)))
+
+    def _note_primary(self, now: float) -> bool:
+        """The primary chosen now, remembered (primary()'s fallback) and logged when it changes (then True). A feed
+        promoted is due at once (it may have been read last as a slow probe): a dead primary is replaced within one
+        read."""
+        p = self.primary()
+        key = p.key if p is not None else ""
+        if key == self._prim:
+            return False
+        was, self._prim = self._prim, key
+        if p is not None:
+            p.st["next"] = min(p.st["next"], now)
+        if was and key:
+            old = next((f for f in self.feeds if f.key == was), None)
+            why = old.st["why"] if old is not None and self.failed(old, now) else ""
+            self.log(f"aircraft: primary {FEEDS[key]['label']} (was {FEEDS[was]['label']}"
+                     + (f": {why}" if why else ": steady again" if self.order.index(key) < self.order.index(was) else "")
+                     + ")")
+        return True
 
     def interval(self, f: Feed, demanded: bool) -> float | None:
         if isinstance(f, StationFeed):          # in memory, kept fresh by the station's posts: cheap
@@ -2072,7 +2136,9 @@ class AircraftLayer:
             return RECEIVER_POLL_S if demanded else WATCH_S
         if f is self.primary():
             return PRIMARY_S if demanded else WATCH_S
-        return SECONDARY_S if demanded else None
+        if demanded:
+            return SECONDARY_S
+        return PROBE_S if self.watching() else None
 
     def tick(self, parallel: bool = False) -> None:
         """Read what is due and combine. parallel (the layer's own thread): each API feed is read on a thread of its
@@ -2098,18 +2164,24 @@ class AircraftLayer:
         if demanded and self.registry.due():      # its own thread (a large download); not again while it runs
             self.registry.st["next"] = now + REGISTRY_BACKOFF_S[0]
             threading.Thread(target=self.registry.refresh, name="aircraft-registry", daemon=True).start()
+        self._note_primary(now)
         read = False
-        for f in (list(self.feeds) if reading else []):
-            if f.st["busy"]:
-                continue
-            iv = self.interval(f, demanded) or (SECONDARY_S if force else None)
-            if iv is None or now < f.st["rest_until"] or (now < f.st["next"] and not force):
-                continue
-            if parallel and not f.local:
-                f.st.update(busy=True, busy_since=self.clock())
-                threading.Thread(target=self._read_behind, args=(f, iv), name=f"aircraft-feed-{f.key}", daemon=True).start()
-                continue
-            read = self._try_read(f, now, iv) or read
+        for _turn in (0, 1):
+            for f in (list(self.feeds) if reading else []):
+                if f.st["busy"]:
+                    continue
+                iv = self.interval(f, demanded) or (SECONDARY_S if force else None)
+                if iv is None or now < f.st["rest_until"] or (now < f.st["next"] and not force):
+                    continue
+                if parallel and not f.local:
+                    f.st.update(busy=True, busy_since=self.clock())
+                    threading.Thread(target=self._read_behind, args=(f, iv), name=f"aircraft-feed-{f.key}", daemon=True).start()
+                    continue
+                read = self._try_read(f, now, iv) or read
+            # the primary failed in this pass (read here, not on a thread): its successor is read in a second one; on
+            # the layer's thread the failed read wakes the loop, and the next turn reads it
+            if not reading or parallel or not self._note_primary(now):
+                break
         if self._dirty:
             self._dirty = False
             read = True                          # (_combine says "no feed answering" when none has a fresh answer)
@@ -2179,7 +2251,8 @@ class AircraftLayer:
         try:
             return self._read(f, now, iv)
         except Exception as e:  # noqa: BLE001
-            f.st.update(rest_until=now + BACKOFF_S[0], next=now + BACKOFF_S[0], why=f"{type(e).__name__}: {e}"[:160])
+            f.st.update(rest_until=now + BACKOFF_S[0], next=now + BACKOFF_S[0], why=f"{type(e).__name__}: {e}"[:160],
+                        failed_at=now)
             self._error(FEEDS[f.key]["label"], e)
             return False
 
@@ -2288,6 +2361,10 @@ class AircraftLayer:
             self.view = view
             self.st.update(at=snap.now, fetched=done, error="", seq=self.st["seq"] + 1)
             self._fresh.notify_all()
+        if self.down_since is not None:
+            self.log(f"aircraft: {' + '.join(FEEDS[k]['label'] for k, _s in snaps)} answering again after "
+                     f"{done - self.down_since:.0f} s with no source")
+            self.down_since = None
         if self.on_view is not None:
             try:
                 self.on_view(view + wide, done)     # ... and NY Approach's wider set (#260), for the talkers only
@@ -2295,11 +2372,27 @@ class AircraftLayer:
                 self.log(f"aircraft: atc talkers: {type(e).__name__}: {e}")
         self._watch(now)
 
+    def all_down(self, now: float | None = None) -> bool:
+        """No source answering: our receiver not healthy, and every API feed tried and failed (resting, stuck, or no
+        good answer since its last failure). A feed not tried yet (the next one after a primary that just failed)
+        is not down: it is read next."""
+        now = self.clock() if now is None else now
+        api = self.api_feeds()
+        return not self.receiver_healthy(now) and bool(api) and all(self.failed(f, now) for f in api)
+
     def _no_data(self, now: float) -> None:
+        """Nothing fresh to combine. Said ("no feed answering", Health's row, one log line) only once every source
+        was tried and failed (all_down()); until then the next feed is being tried."""
+        api = self.api_feeds()
+        if api and not self.all_down(now):
+            return
         why = "; ".join(f"{FEEDS[f.key]['label']}: {f.st['why']}" for f in self.feeds if f.st["why"])
         with self._fresh:
             self.st["error"] = ("no feed answering: " + why if why else "no feed answering")[:300]
             self._fresh.notify_all()
+        if api and self.down_since is None:
+            self.down_since = now
+            self.log(f"aircraft: no source answering ({why or 'no answer'}); no new positions on the map until one does")
 
     def ask(self) -> None:
         """A viewer looks: keep the feeds coming; wake the read now when the data is stale and wait a moment for it."""
@@ -2549,6 +2642,12 @@ class AircraftLayer:
         now = self.clock()
         prim = self.primary()
         out = []
+        if self.down_since is not None:          # every source tried and failed: one row, first; the reasons on hover
+            out.append({"key": "aircraft:down", "label": "Aircraft: no source answering", "state": "down", "why": "",
+                        "at": self.st["fetched"], "fallback": "",
+                        "title": " · ".join([f"since {tz.hhmmss(self.down_since)}", "no new positions on the map"]
+                                            + [f"{FEEDS[f.key]['label']}: {f.st['why'] or 'no answer'}"
+                                               for f in self.feeds if not (isinstance(f, StationFeed) and f.last is None)])})
         for f in self.feeds:
             st = f.st
             others = ", ".join(FEEDS[g.key]["label"] for g in self.feeds if g is not f and not g.local)
