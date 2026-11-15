@@ -267,10 +267,13 @@ const StationHealth = (() => {
       const word = { ok: "ok", corrupt: "corrupt", error: "not verifiable", stale: "stale", none: "not checked", suspect: "unverified" };
       const hd = el("h3", "hl-sub", "Replicas");
       hd.title = "Litestream's S3 copies, read-only: the standby checks a copy of what it follows; else the leader restores "
-        + "one from S3 and checks it. quick_check, integrity_check (full) now and then. Bad: pushed at once";
+        + "one from S3 and checks it. quick_check, integrity_check (full) now and then. A failing check copy is checked "
+        + "again from a fresh restore: fresh ok = the copy drifted (re-seeded, no push); fresh bad = corrupt, pushed at once";
       kids.push(hd, table(["Database", "Result", "Verified", "By"], rp.rows.map((r) => {
-        const res = el("span", rcls(r.state), word[r.state] || r.state);
-        res.title = [r.state !== "ok" && r.result ? r.result : "", r.error ? `last error ${when(r.error_at)}: ${r.error}` : "",
+        const res = el("span", rcls(r.state), (word[r.state] || r.state) + (r.reseeds && r.state === "ok" ? " · re-seeded" : ""));
+        res.title = [r.state !== "ok" && r.result ? r.result : "", r.confirmed ? "a fresh restore from S3 failed it too" : "",
+          r.reseeds ? `check copy drifted, re-seeded from a fresh restore (ok): ${r.reseeds.n}×, last ${when(r.reseeds.at)}: ${r.reseeds.why}` : "",
+          r.error ? `last error ${when(r.error_at)}: ${r.error}` : "",
           r.txid ? `txid ${r.txid}` : "", r.secs !== null && r.secs !== undefined ? `${r.secs} s` : ""].filter(Boolean).join("\n");
         return [r.db, res, r.at ? `${when(r.at)} (${longDur(serverNow() - r.at)} ago)` : "—",
           r.by ? `${r.by} · ${r.mode === "integrity_check" ? "full" : "quick"}` : ""];

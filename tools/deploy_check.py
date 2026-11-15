@@ -22,7 +22,8 @@ verifies its own replicas (sizeup/replicawatch.py: the new leader's followers, c
 the results in ONE object, s3://<LITESTREAM_BUCKET>/<LITESTREAM_PATH>/replica-watch.json. This reads only that object
 (`aws s3api get-object`: the deploy role may GetObject that one key and nothing else, sizeup-aws step 28; no database
 ever leaves AWS) until the leader of this build has said it serves and every file has a check after that. Exit 1 when a
-file is failing (corrupt, or not verifiable), or nothing was verified in time. It prints SQLite's check lines and the
+file's check since then is failing (corrupt, or not verifiable), or nothing was verified in time; an older leader's
+results in the record are waited past, never judged. It prints SQLite's check lines and the
 times, never anything of the files' contents.
 """
 
@@ -170,13 +171,13 @@ def _what(db: str, c: dict) -> str:
 
 
 def replica_verdict(doc: dict | None, build: str) -> tuple[str, str]:
-    """(OK | WAIT | FAIL, what to say) for the record as read now."""
+    """(OK | WAIT | FAIL, what to say) for the record as read now. Only checks made since this build's leader serves
+    count: the record still holds the old leader's last results until the new one checks (2026-11-15: an old leader's
+    "corrupt", from before the deploy, failed it in 0 s while the new leader's first check, minutes later, passed)."""
     if doc is None:
         return WAIT, f"no {KEY} yet"
     checks = doc.get("checks") if isinstance(doc.get("checks"), dict) else {}
     failing = doc.get("failing") if isinstance(doc.get("failing"), dict) else {}
-    if failing:
-        return FAIL, "; ".join(_what(db, checks.get(db) or {}) for db in sorted(failing))
     lead = doc.get("leader") if isinstance(doc.get("leader"), dict) else {}
     if not same_build(lead.get("build"), build):
         return WAIT, f"the leader of {build[:7]} hasn't said it serves yet (now: {str(lead.get('build') or '?')[:7]})"
@@ -189,6 +190,8 @@ def replica_verdict(doc: dict | None, build: str) -> tuple[str, str]:
         elif c.get("ok") is True:
             good.append(_what(db, c))
         elif c.get("ok") is False:
+            bad.append(_what(db, c))
+        elif db in failing:                           # not verifiable twice running (or a failed restore), since
             bad.append(_what(db, c))
         else:
             waiting.append(db)                        # not verifiable once: the hub says so after two (failing)

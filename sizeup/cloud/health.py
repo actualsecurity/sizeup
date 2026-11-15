@@ -978,9 +978,10 @@ class StationHealth:
             corrupt = c.get("ok") is False
             out[f"replica:{db}"] = {
                 "severity": "critical", "quiet": True,
-                "title": f"Replica {'corrupt' if corrupt else 'not verifiable'}: {db}.sqlite",
+                "title": f"Replica {'corrupt' if corrupt else 'follower failing' if c.get('follow_failed') else 'not verifiable'}: {db}.sqlite",
                 "text": f"{e.get('mode') or 'check'}: {' · '.join(str(e.get('result') or '').splitlines()[:2])[:120]} · {e.get('by') or '?'} "
-                        f"{_hhmm(e.get('at'))} · a takeover from it would fail",
+                        f"{_hhmm(e.get('at'))}" + (" · a fresh restore too" if e.get("confirmed") else "")
+                        + " · a takeover from it would fail",
                 "since": float((d.get("failing") or {}).get(db) or e.get("at") or 0) or self.clock()}
         for db, x in (d.get("suspect") or {}).items():       # Litestream restarted without a checkpoint of the file
             if isinstance(x, dict) and db in ("cad", "hub", "audio"):
@@ -1017,9 +1018,13 @@ class StationHealth:
             if state == "ok" and now - float(c.get("at") or 0) > REPLICA_STALE * every * (4 if db == "audio" else 1):
                 state = "stale"
             le = c.get("last_error") if isinstance(c.get("last_error"), dict) else None
+            rs = (d.get("reseeds") or {}).get(db)               # the check copy drifted, the replica was fine
+            rs = rs if isinstance(rs, dict) and now - float(rs.get("at") or 0) <= HISTORY_S else None
             rows.append({"db": db, "state": state, "at": c.get("at"), "result": str(c.get("result") or "")[:200],
                          "mode": c.get("mode"), "by": c.get("by"), "txid": c.get("txid"), "secs": c.get("secs"),
-                         "error": str(le.get("result") or "")[:200] if le else "", "error_at": le.get("at") if le else None})
+                         "error": str(le.get("result") or "")[:200] if le else "", "error_at": le.get("at") if le else None,
+                         "confirmed": bool(c.get("confirmed")),
+                         "reseeds": {"n": rs.get("n"), "at": rs.get("at"), "why": str(rs.get("why") or "")[:200]} if rs else None})
         events = [{k: e.get(k) for k in ("at", "kind", "why", "code")} for e in (d.get("events") or [])
                   if isinstance(e, dict) and now - float(e.get("at") or 0) <= HISTORY_S]
         return {"rows": rows, "events": events[-5:][::-1]}
