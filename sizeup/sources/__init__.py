@@ -54,7 +54,7 @@ A factory is `factory(ctx: SourceContext) -> Adapter | Iterable[Adapter]`. An ad
                          thread before its next poll(); its back-off starts over. Raising is logged by type only
     poll_now(reason: str) -> None
                          optional: something just happened that may be a call coming (reason: "paging tones", "radio
-                         pre-alert", "phone pre-alert"). Called on the adapter's own runner thread (never the caller's),
+                         pre-alert", an airport alert). Never the phone ring (NOT_TRIGGERS). Called on the adapter's own runner thread (never the caller's),
                          right before an earlier poll() than poll_s would give. The runner keeps triggered polls gentle:
                          at most one per max(poll_s, TRIGGER_MIN_S) per adapter, at most TRIGGER_MAX per
                          TRIGGER_WINDOW_S, never sooner than TRIGGER_MIN_S after the last poll, and none while the
@@ -136,7 +136,8 @@ TRIGGER_MIN_S = 30.0                    # a triggered poll: never sooner than th
 TRIGGER_MAX, TRIGGER_WINDOW_S = 4, 600.0  # ... and at most this many triggered polls per window, per adapter
 SEEN_EVERY_S = 120.0                    # the runner sends the ids still in the feed's snapshot this often ("source_seen")
 MAX_SEEN_IDS = 2000
-TRIGGERS = ("paging tones", "radio pre-alert", "phone pre-alert")
+TRIGGERS = ("paging tones", "radio pre-alert")   # and the airport watch's ("airport alert level N", ...)
+NOT_TRIGGERS = ("phone pre-alert",)     # never a reason to poll early: refused before it counts (an older hub sends it)
 
 
 class SourceError(ValueError):

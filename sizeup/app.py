@@ -4165,7 +4165,8 @@ class App:
         threading.Thread(target=load, name="sources-load", daemon=True).start()
 
     def sources_poll_now(self, reason: str = "") -> int:
-        """Paging tones of ours, a radio or phone pre-alert (here, or the hub's job): the adapters poll now."""
+        """Paging tones of ours, a radio pre-alert, an airport alert (here, or the hub's job): the adapters poll now
+        (never the phone ring: SourceRunner.trigger refuses it)."""
         r = self.sources_runner
         return r.trigger(str(reason or "")[:40]) if r is not None else 0
 

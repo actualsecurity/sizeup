@@ -964,7 +964,7 @@ def test_triggers_ask_the_adapters_to_poll_now(tmp_path):
     pa.ring({"id": "r1", "time": T0 + 40, "event": "message", "topic": "ring", "title": "STATION PHONE RINGING",
              "message": "Incoming call", "priority": 5})
     rig.poll()
-    assert rig.feed.pokes[-1] == "phone pre-alert" and rig.incidents() == []
+    assert rig.feed.pokes == ["radio pre-alert"] and rig.incidents() == []         # the ring never pokes the feed
 
 
 def test_paging_tones_of_ours_poke_the_station_adapters():
@@ -1452,7 +1452,7 @@ def test_triggers_are_gentle_floor_cap_and_never_soon_after_a_poll(tmp_path):
             taken.append(dt)
     assert taken == [0.0, 45, 90, 135] and len(taken) == TRIGGER_MAX           # the floor, then the cap
     clock.t = T0 + TRIGGER_WINDOW_S
-    assert r.trigger("phone pre-alert") == 1                                    # the window moved on
+    assert r.trigger("radio pre-alert") == 1                                    # the window moved on
     clock.t = T0 + 10
     run.polled = T0
     assert r.hold(run) == 20.0

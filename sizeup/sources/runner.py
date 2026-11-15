@@ -40,7 +40,7 @@ from typing import Callable, Iterable
 
 from sizeup.sources import (ENTRY_POINT_GROUP, ENV_MODULES, ENV_PATH, ENV_SNAPSHOT, FIRST_SEEN_MAX_S, MAX_BACKOFF_S,
                             MAX_SEEN_IDS, MIN_POLL_S, RAISE_FAILING_AFTER, RESERVED,
-                            SEEN_EVERY_S, SNAPSHOT_MIN_S, SNAPSHOT_RECHECK_S, SOURCE_ID, TRIGGER_MAX, TRIGGER_MIN_S,
+                            NOT_TRIGGERS, SEEN_EVERY_S, SNAPSHOT_MIN_S, SNAPSHOT_RECHECK_S, SOURCE_ID, TRIGGER_MAX, TRIGGER_MIN_S,
                             TRIGGER_WINDOW_S, Adapter, FeedEvent, Health, SourceContext, SourceError)
 from sizeup.sources.resets import Resets      # #297 owns it; #305's sizeup/cloud/adapters.py imports it from here
 
@@ -361,13 +361,15 @@ class SourceRunner:
     # -- threads ---------------------------------------------------------------------------------------------------
 
     def trigger(self, reason: str) -> int:
-        """Something that may be a call coming (paging tones, a radio or phone pre-alert): each adapter's optional
+        """Something that may be a call coming (paging tones, a radio pre-alert, an airport alert): each adapter's optional
         earlier poll. Gentle whatever wakes it (tone pairs, pre-alerts and phone rings come in bursts): at most one per
         max(poll_s, TRIGGER_MIN_S) per adapter, at most TRIGGER_MAX per TRIGGER_WINDOW_S, the poll itself never sooner
         than TRIGGER_MIN_S after the last one (_loop), and none while it is failing or backing off (the adapter's own
         pacing stands during an outage). Only sets a flag and the reason: never runs adapter code here (the caller may
         hold the paging decoder's lock); the adapter's own thread calls poll_now(reason) before that poll. How many
         were woken."""
+        if str(reason or "").strip() in NOT_TRIGGERS:
+            return 0                           # the phone ring: no trigger, no hold, no slot taken
         now, n = self.mono(), 0
         for r in self.runs:
             if now - r.triggered < max(TRIGGER_MIN_S, float(r.a.poll_s)):

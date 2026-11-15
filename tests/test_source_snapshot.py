@@ -474,3 +474,36 @@ def test_the_monotonic_clock_starting_near_zero_still_sends_at_once():
     assert sorted(k for k, _ in out) == ["source_health", "source_seen"] and len(feed.asks) == 1
     assert r.trigger("paging tones") == 1
     assert SourceRunner([feed], lambda k, d: None).mono is time.monotonic      # the real clocks: wall sent, mono paces
+
+
+# -- the phone ring is not a trigger -----------------------------------------------------------------------------------
+
+
+def test_the_phone_ring_takes_no_trigger_no_hold_and_no_slot_and_paging_tones_still_trigger():
+    from sizeup.sources import TRIGGER_MAX
+    clock = Clock()
+    for cls in (FakeFeed, Snapshot):
+        feed = cls(poll_s=5.0, clock=clock)
+        r, run, _, _ = runner(feed, clock)
+        r.step(run)
+        clock.t += 40
+        for _ in range(TRIGGER_MAX + 2):                       # a burst of rings
+            assert r.trigger("phone pre-alert") == 0 and r.trigger(" phone pre-alert ") == 0
+        assert (run.reason, run.triggers, run.triggered, run.wake.is_set()) == ("", [], runner_mod.NEVER, False)
+        assert r._poll_now(run) is False and feed.pokes == []
+        assert r.trigger("paging tones") == 1 and run.reason == "paging tones"     # right after the rings
+        assert r._poll_now(run) and feed.pokes == ["paging tones"]
+        clock.t += 40
+        assert r.trigger("airport alert level 2") == 1 and r.trigger("radio pre-alert") == 0   # the floor, as ever
+
+
+def test_a_ring_on_the_cad_of_record_pokes_no_source(tmp_path):
+    from sizeup.prealert import PreAlerts
+    rig = Rig(tmp_path)
+    asked = []
+    rig.cad.sources.trigger = lambda reason: asked.append(reason) or rig.runner.trigger(reason)
+    pa = PreAlerts(rig.cad, "http://127.0.0.1:9", "ring", "status", log=lambda m: None)
+    pa.ring({"id": "r1", "time": T0, "event": "message", "topic": "ring", "title": "STATION PHONE RINGING",
+             "message": "Incoming call", "priority": 5})
+    rig.poll()
+    assert asked == [] and rig.feed.pokes == [] and rig.runner.runs[0].triggers == []

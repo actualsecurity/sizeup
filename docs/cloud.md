@@ -1118,7 +1118,8 @@ Incidents come in from ranked sources. The interface is in `sizeup/sources/__ini
     and gets a note.
   - An adapter's `extra` fields go on the timeline. The incident shows the jurisdiction, run numbers and each
     group's units.
-- **Poll now and reset:** paging tones of ours, a radio pre-alert or the phone ring wakes each adapter. The adapter's
+- **Poll now and reset:** paging tones of ours, a radio pre-alert or an airport alert wakes each adapter. The phone
+  ring (Tapout) never does: it is not a reason to check the feed early, and the runner refuses it before it counts. The adapter's
   own thread then calls its optional `poll_now(reason)` and polls; `trigger()` never runs adapter code. Triggers stay
   gentle: at most one per max(`poll_s`, 30 s), at most 4 in 10 min, never sooner than 30 s after the last poll, and none
   while an adapter is failing or its health isn't `ok`. For a memory-read adapter "the last poll" is its last read at
