@@ -1358,6 +1358,9 @@ function sShowCommon(box) {
   apply.disabled = !n.names;
   head.append(apply);
   const kids = [head, cols, counts];
+  if ((c.r.unknown_towns || []).length) {
+    kids.push(el("div", "small warn", `${n.unknown_towns} rows, unknown town: ${c.r.unknown_towns.join(", ")}`));
+  }
   if (c.r.unresolved.length) {
     const det = el("details", "s-more");
     det.append(el("summary", "", `${n.unresolved} not found`));

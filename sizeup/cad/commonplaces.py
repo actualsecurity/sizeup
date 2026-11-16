@@ -325,12 +325,12 @@ EXACT_STREET = 0.99         # the street's every word as typed (sizeup/geo/place
 POINT = {"exact": 1.0, "interpolated": 0.9}     # PlaceIndex._addresses' factor for each precision taken
 
 
-NEAR_TOWN_KM = 1.5          # another town's hit is the row's own place only this close to the row's town's address
+NEAR_TOWN_KM = 0.4          # another town's hit is the row's own place only this close to the row's town's address
                             # points: a village sharing the town's ZIP files some of its addresses (the point is right,
-                            # at or just over the line), while a street of the same name in a town that is not next
-                            # door is several km away
+                            # at or just over the line); two small villages side by side are often under 1.5 km
+                            # across, so a same-named street a block or two into the neighbour is not taken
 # "23.5", "189-1/2", "55 1/2": a fractional house number, found by its whole number (approximate)
-FRACTION = re.compile(r"^\s*(\d+)(\.\d+|\s*-?\s*\d+\s*/\s*\d+)(?=\s)")
+FRACTION = re.compile(r"^\s*(\d+)(\.\d+|\s*-?\s*\d+\s*/\s*\d+)(?=\s|-)")
 _TOWN_POINTS: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
 
 
@@ -371,8 +371,8 @@ def locate_address(ix, address: str, town: str = "", town_of=lambda m: m) -> dic
     hit's), precision} | None."""
     from sizeup.geo.places import NUMBER, _Ctx
     fraction = FRACTION.match(address or "")
-    if fraction:
-        address = fraction.group(1) + address[fraction.end():]
+    if fraction:                                        # "0189-1/2" -> "189"; "12 1/2-14" -> "12-14"
+        address = str(int(fraction.group(1))) + address[fraction.end():]
     q = norm_tokens(address)
     if len(q) < 2 or not NUMBER.match(q[0]):
         return None
@@ -399,7 +399,7 @@ def locate_address(ix, address: str, town: str = "", town_of=lambda m: m) -> dic
     best = max(same, key=lambda h: (h["precision"] == "exact", h["quality"]))
     label, precision = best["label"], best["precision"]
     if fraction:
-        label = " ".join(fraction.group(0).split()) + label[len(fraction.group(1)):]     # "189-1/2 Sample St"
+        label = " ".join(fraction.group(0).split()) + label[len(str(int(fraction.group(1)))):]  # "189-1/2 Sample St"
         precision = "interpolated"                      # the whole number's point: next door, not the door itself
     return {"label": label, "lat": best["lat"], "lon": best["lon"], "muni": town or best["town"],
             "precision": precision}
@@ -410,6 +410,8 @@ def locate_address(ix, address: str, town: str = "", town_of=lambda m: m) -> dic
 SAME_PLACE_KM = 0.15        # one name at located addresses this close: one site (a building listed under "145", "149"
                             # and "149-151" of a street, a school's buildings across the street); a chain's stores are
                             # farther apart than that
+SITE_SPAN_KM = 0.3          # a site's addresses all this close to one another: two buildings next door each way of the
+                            # primary, a campus across a street; the pin (the primary) is never farther off than that
 SAME_PLACE_NUMBERS = 20     # an address of that name with no point joins a site on its street this many numbers off
                             # (likely the next building)
 
@@ -417,7 +419,7 @@ SAME_PLACE_NUMBERS = 20     # an address of that name with no point joins a site
 def house(address: str) -> tuple[int | None, str]:
     """'149-151 EXAMPLE AVE' -> (149, 'example ave'); '55-1/2 SAMPLE ST' -> (55, 'sample st'); no number: (None, ...)."""
     m = FRACTION.match(address or "")
-    q = norm_tokens(m.group(1) + address[m.end():] if m else address)
+    q = norm_tokens(str(int(m.group(1))) + address[m.end():] if m else address)
     num = None
     while q and (q[0].isdigit() or (num is None and re.fullmatch(r"\d+[a-z]?", q[0]))):
         if num is None:
@@ -429,10 +431,11 @@ def house(address: str) -> tuple[int | None, str]:
 def group_sites(entries: dict[str, dict]) -> int:
     """One name at several addresses that are one place -> one site, in place: each of its entries gets site (the
     primary's key), the primary site_addresses (all of them, by street and number). Located entries of a name within
-    SAME_PLACE_KM of one another (chained) are one site; its primary: the lowest number located exactly (a single
-    number before a range), else the first.
-    An entry with no point joins the one site of its name with an address on its street within SAME_PLACE_NUMBERS;
-    otherwise it stays on its own. -> how many sites."""
+    SAME_PLACE_KM of one another are one site, as long as the site spans SITE_SPAN_KM at most (closest first: a name
+    every ~120 m along a street is several places, never one long site); its primary: the lowest number located
+    exactly (a single number before a range), else the first. An entry with no point joins the one site of its name
+    with a located address on its street within SAME_PLACE_NUMBERS, in its town; otherwise it stays on its own (the
+    same whatever the file's order). -> how many sites."""
     from sizeup.geo.places import dist_km
     order = {k: i for i, k in enumerate(entries)}
     by_name: dict[str, list[str]] = {}
@@ -444,19 +447,33 @@ def group_sites(entries: dict[str, dict]) -> int:
     for keys in by_name.values():
         if len(keys) < 2:
             continue
-        clusters: list[list[str]] = []
-        for k in (k for k in keys if entries[k].get("lat") is not None):
-            e = entries[k]
-            near = [c for c in clusters if any(dist_km(e["lat"], e["lon"], entries[o]["lat"], entries[o]["lon"])
-                                               <= SAME_PLACE_KM for o in c)]
-            clusters = [c for c in clusters if c not in near] + [[k] + [o for c in near for o in c]]
+        located = [k for k in keys if entries[k].get("lat") is not None]
+        km = {(a, b): dist_km(entries[a]["lat"], entries[a]["lon"], entries[b]["lat"], entries[b]["lon"])
+              for a in located for b in located}
+        clusters = [[k] for k in located]
+        while True:                  # the closest two whose link is SAME_PLACE_KM at most and span SITE_SPAN_KM at most
+            best = None
+            for i, a in enumerate(clusters):
+                for j in range(i + 1, len(clusters)):
+                    b = clusters[j]
+                    link = min(km[x, y] for x in a for y in b)
+                    if link <= SAME_PLACE_KM and max(km[x, y] for x in a + b for y in a + b) <= SITE_SPAN_KM \
+                            and (best is None or link < best[0]):
+                        best = (link, i, j)
+            if best is None:
+                break
+            _link, i, j = best
+            clusters[i] += clusters.pop(j)
+        bare = [list(c) for c in clusters]               # an entry with no point joins by the located ones alone
         for k in (k for k in keys if entries[k].get("lat") is None):
             num, street = house(entries[k]["address"])
-            homes = [c for c in clusters if num is not None and any(
+            town = (entries[k].get("muni") or "").lower()
+            homes = [i for i, c in enumerate(bare) if num is not None and any(
                 h[1] == street and h[0] is not None and abs(h[0] - num) <= SAME_PLACE_NUMBERS
-                for h in (house(entries[o]["address"]) for o in c))]
+                and (entries[o].get("muni") or "").lower() == town
+                for o in c for h in (house(entries[o]["address"]),))]
             if len(homes) == 1:
-                homes[0].append(k)
+                clusters[homes[0]].append(k)
         for c in clusters:
             if len(c) < 2:
                 continue
@@ -476,13 +493,17 @@ def group_sites(entries: dict[str, dict]) -> int:
 
 # ----------------------------------------------------------------------------------- the plan
 
-def plan(rows: list[list[str]], cols: dict[str, int], locate, town_of, today: str, current: dict[str, dict]) -> dict:
+def plan(rows: list[list[str]], cols: dict[str, int], locate, town_of, today: str, current: dict[str, dict],
+         known: set[str] | None = None) -> dict:
     """What an import would do. rows: the table, header first. locate(address, town) -> {label, lat, lon, muni,
     precision} | None (the gazetteer). town_of(words) -> the CAD's town. current: the entries of SOURCE now {key: value}.
-    -> {entries: {key: value}, counts: {rows, names, new, present, removed, unresolved, skipped, approximate},
-        unresolved: [{name, address, town}]}"""
+    known: the CAD's towns (lower case; None: every town is known). A town code that is none of them: looked up as a
+    row with no town, its muni the point's town (else the code's words), the code listed (unknown_towns).
+    -> {entries: {key: value}, counts: {rows, names, new, present, removed, unresolved, skipped, approximate,
+        unknown_towns (rows)}, unresolved: [{name, address, town}], unknown_towns: [the codes]}"""
     entries: dict[str, dict] = {}
     unresolved: list[dict] = []
+    unknown: dict[str, int] = {}
     skipped = 0
     cache: dict[tuple[str, str], dict | None] = {}
     for r in rows[1:]:
@@ -497,11 +518,15 @@ def plan(rows: list[list[str]], cols: dict[str, int], locate, town_of, today: st
         key = entry_key(name, address)
         if key in entries:
             continue                                   # the same name at the same address twice
-        if (address.lower(), town) not in cache:
-            cache[(address.lower(), town)] = locate(address, town)
-        hit = cache[(address.lower(), town)]
+        mine = town                                    # the town the row is held to (none: an unknown code)
+        if town and known is not None and town.lower() not in known:
+            unknown[code] = unknown.get(code, 0) + 1
+            mine = ""
+        if (address.lower(), mine) not in cache:
+            cache[(address.lower(), mine)] = locate(address, mine)
+        hit = cache[(address.lower(), mine)]
         entries[key] = {"name": name, "aliases": [], "label": proper_name(name), "lat": hit["lat"] if hit else None,
-                        "lon": hit["lon"] if hit else None, "muni": town or (hit or {}).get("muni") or "", "note": "",
+                        "lon": hit["lon"] if hit else None, "muni": mine or (hit or {}).get("muni") or town, "note": "",
                         "address": address, "at": hit["label"] if hit else "", "source": SOURCE, "imported": today,
                         "located": hit["precision"] if hit else ""}
         if not hit:
@@ -515,5 +540,5 @@ def plan(rows: list[list[str]], cols: dict[str, int], locate, town_of, today: st
               "unresolved": len(unresolved),
               "unresolved_addresses": len({name_key(u["address"]) for u in unresolved}),
               "approximate": sum(1 for v in entries.values() if v["located"] == "interpolated"),
-              "skipped": skipped}
-    return {"entries": entries, "counts": counts, "unresolved": unresolved}
+              "skipped": skipped, "unknown_towns": sum(unknown.values())}
+    return {"entries": entries, "counts": counts, "unresolved": unresolved, "unknown_towns": sorted(unknown)}
