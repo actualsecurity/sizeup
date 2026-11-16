@@ -2136,6 +2136,11 @@ class Cad:
         """The department's own names for places (Settings > Places), for the place search."""
         return self.settings.local_places()
 
+    def local_addresses(self) -> tuple:
+        """The department's own address points (Settings > Address points; sizeup/geo/localaddr.py), for the
+        gazetteer: the same tuple while they don't change."""
+        return self.settings.local_addresses()
+
     def _place_hits(self, q: str, near=None, limit: int = 8) -> list[dict]:
         ix = self.place_index()
         if ix is None:

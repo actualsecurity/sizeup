@@ -30,6 +30,7 @@ import re
 import sqlite3
 from dataclasses import dataclass
 
+from .localaddr import split_address
 from .normalize import DIRECTION_WORDS, STREET_TYPES
 
 # ----------------------------------------------------------------------------------- text
@@ -342,6 +343,10 @@ class PlaceIndex:
         towns in order (the CAD's geo_town_order), else gazetteer.TOWN_PRIORITY. Each hit: kind, label,
         sub (its town), lat, lon, source, quality (how well the text matched, 0..1), score (the rank)."""
         near = _Ctx(near, tuple(priority) if priority else self.priority)
+        frac = ""
+        sp = split_address(text)
+        if sp and sp[0].frac:                   # "189-1/2 example": the tokens would read 189 1 and 2
+            frac, text = sp[0].frac, f"{sp[0].num}{sp[0].letter} {sp[1]}"
         q = norm_tokens(text)
         if not q or (len(q) == 1 and len(q[0]) < 2 and not q[0].isdigit()):
             return []
@@ -357,7 +362,7 @@ class PlaceIndex:
         if hw is not None:
             out += self._highway(hw, near)
         if NUMBER.match(q[0]) and len(q) > 1:
-            out += self._addresses(q[0], q[1:], near)
+            out += self._addresses(q[0], q[1:], near, frac)
         cut = next((i for i, t in enumerate(q) if t in SEPARATORS and 0 < i), None)
         if cut is not None:
             out += self._intersections(q[:cut], q[cut + 1:], near)   # "king & arb", "westchester ave &"
@@ -440,24 +445,60 @@ class PlaceIndex:
             return 0.85
         return 0.0
 
-    def _addresses(self, num: str, rest: list[str], near) -> list[dict]:
+    def _addresses(self, num: str, rest: list[str], near, frac: str = "") -> list[dict]:
+        """A house number on the streets the words match: the department's own point first (sizeup/geo/localaddr.py:
+        that number, letter and fraction), else the address points (exact or interpolated); the local points with
+        that integer part ("189 1/2" for "189") after it."""
         digits = int(re.sub(r"\D", "", num) or 0)
         suffix = re.sub(r"\d", "", num)
         if not digits:
             return []
+        local = self.gaz.local_addresses()
         out = []
         for k, sq in self.street_ix.match(rest, limit=6):
-            st = self.gaz.streets[self.street_ids[k]]
-            for muni, lst in st.addrs.items():
-                res = self.gaz._locate_number(lst, st.nums[muni], digits, suffix)
-                if res is None:
-                    continue
-                lat, lon, _q, precision = res
-                f = {"exact": 1.0, "interpolated": 0.9}.get(precision, 0.82)
-                label = f"{digits}{suffix.upper()} {st.name}"
-                out.append(self._item("address", label, muni, lat, lon, "address-points", sq * f, near,
-                                      precision=precision))
+            sid = self.street_ids[k]
+            st = self.gaz.streets[sid]
+            for muni in self.gaz.address_towns(sid, local):
+                res = self.gaz.locate_at(sid, muni, digits, suffix, frac, local)
+                if res is not None:
+                    lat, lon, _q, precision, label_num, source = res
+                    f = {"exact": 1.0, "interpolated": 0.9}.get(precision, 0.82)
+                    out.append(self._item("address", f"{label_num} {st.name}", muni, lat, lon, source, sq * f, near,
+                                          precision=precision))
+                    if source == "local":
+                        continue
+                for p in (local.like(sid, muni, digits) if local else ()):
+                    if p.number.label != (res[4] if res else None):
+                        out.append(self._item("address", f"{p.number.label} {st.name}", muni, p.lat, p.lon, "local",
+                                              sq * 0.97, near, precision="exact"))
         return out
+
+    def local_address(self, address: str, town: str = "", town_of=lambda m: m, near=None) -> dict | None:
+        """An address that is one of the department's own points (sizeup/geo/localaddr.py): that number (its letter
+        and fraction) on a street whose every word was given. The town given first; another town's point only when
+        it is the one town with that point and, with a town given, near(lat, lon) says it is by the town given (the
+        common places import: sizeup/cad/commonplaces.py _km_to_town). -> {label, lat, lon, muni (the town given,
+        else the point's, town_of's), precision "exact", source "local"} | None. Ahead of the address points for
+        the common places import (commonplaces.locate_address)."""
+        sp = split_address(address)
+        local = self.gaz.local_addresses()
+        if not sp or not local:
+            return None
+        hn, rest, _written = sp
+        hits = [h for h in self._addresses(f"{hn.num}{hn.letter}", norm_tokens(rest), _Ctx(None, self.priority), hn.frac)
+                if h["source"] == "local" and h["label"].startswith(hn.label + " ") and h["quality"] >= 0.99]
+        for h in hits:
+            h["town"] = town_of(h["sub"]) or h["sub"]
+        same = [h for h in hits if town and h["town"].lower() == town.lower()]
+        if not same:
+            if town:                            # only the town's own place, filed under a neighbour
+                hits = [h for h in hits if near is not None and near(h["lat"], h["lon"])]
+            if not hits or len({h["town"] for h in hits}) != 1:
+                return None
+            same = hits
+        h = same[0]
+        return {"label": h["label"], "lat": h["lat"], "lon": h["lon"], "muni": town or h["town"], "precision": "exact",
+                "source": "local"}
 
     def _intersections(self, a: list[str], b: list[str], near) -> list[dict]:
         """'king & arbor': where the two meet; 'king &' (nothing after it yet): its cross streets."""

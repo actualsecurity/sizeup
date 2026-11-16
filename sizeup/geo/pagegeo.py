@@ -58,6 +58,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from .localaddr import fraction_of, fractions_in
 from .gazetteer import (CROSS_MARKERS, MUNI_PHRASES, MUNI_PRIOR, NOT_HOUSE_NUMBER_AFTER, STREET_STOP, Gazetteer,
                         Match, _latlon, _xy)
 from .commonwords import COMMON_WORDS
@@ -611,7 +612,9 @@ class PageLocator:
         whole county; a page (only False) is read as it always was."""
         prm = {"confirm": CONFIRM, "rival": RIVAL, "rival_m": RIVAL_M, "sound_min": SOUND_MIN, **(params or {})}
         gaz = self.gaz
-        tokens = tokenize(text or "")
+        plain, fracs = fractions_in(text or "", gaz.streets_at)       # "189-1/2": the local point (sizeup/geo/localaddr.py)
+        local = gaz.local_addresses()
+        tokens = tokenize(plain)
         mentions = gaz._street_mentions(tokens)
         # towns said, but not as a department ("Port Chester Fire Department, ..." is who, not where)
         named = [x for x in gaz._muni_mentions(tokens, mentions)
@@ -705,15 +708,14 @@ class PageLocator:
                         offer(sid, s, "between the cross streets")
             digits = int("".join(c for c in num if c.isdigit()))
             suffix = "".join(c for c in num if c.isalpha())
-            label_num = f"{digits}{suffix.upper()}"
             for sid, (sim, how) in cands.items():
                 st = gaz.streets[sid]
                 placed_all = False
-                for muni, lst in st.addrs.items():
-                    res = gaz._locate_number(lst, st.nums[muni], digits, suffix)
+                for muni in gaz.address_towns(sid, local):
+                    res = gaz.locate_at(sid, muni, digits, suffix, fraction_of(fracs, digits, sid), local)
                     if res is None:
                         continue
-                    lat, lon, q, precision = res
+                    lat, lon, q, precision, label_num, _source = res
                     if not typed and precision == "approximate":
                         continue
                     P = tuple(float(v) for v in _xy(lat, lon))
@@ -1211,16 +1213,23 @@ def what_is_here(gaz: Gazetteer, lat: float, lon: float, places: list[dict] = ()
     P = np.array([float(v) for v in _xy(lat, lon)])
     out: dict = {"address": None, "intersection": None, "place": None, "street": None}
     rows, xy = B.addresses()
+    best_addr = None
     if len(rows):
         d = np.hypot(xy[:, 0] - P[0], xy[:, 1] - P[1])
         k = int(np.argmin(d))
         if d[k] <= HERE_ADDRESS_M:
             sid, num, suf, muni, la, lo = rows[k]
-            st = gaz.streets[sid]
-            hn = f"{num}{suf.upper()}"
-            out["address"] = {"kind": "address", "label": f"{hn} {st.name}, {muni}", "lat": la, "lon": lo,
-                              "municipality": muni, "street": st.name, "house_number": hn, "precision": "exact",
-                              "confidence": 1.0, "metres": round(float(d[k]))}
+            best_addr = (float(d[k]), sid, f"{num}{suf.upper()}", muni, la, lo)
+    lp = gaz.local_addresses().nearest(lat, lon)        # the department's own points (sizeup/geo/localaddr.py) win a tie
+    if lp is not None and lp[0] <= HERE_ADDRESS_M and (best_addr is None or lp[0] <= best_addr[0]):
+        p = lp[1]
+        best_addr = (lp[0], p.sid, p.number.label, p.muni, p.lat, p.lon)
+    if best_addr is not None:
+        dist, sid, hn, muni, la, lo = best_addr
+        st = gaz.streets[sid]
+        out["address"] = {"kind": "address", "label": f"{hn} {st.name}, {muni}", "lat": la, "lon": lo,
+                          "municipality": muni, "street": st.name, "house_number": hn, "precision": "exact",
+                          "confidence": 1.0, "metres": round(dist)}
     rows, xy = B.intersections()
     if len(rows):
         d = np.hypot(xy[:, 0] - P[0], xy[:, 1] - P[1])

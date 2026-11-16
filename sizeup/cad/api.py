@@ -98,6 +98,9 @@ POST /api/cad/settings/<section>          {action, ..., operator?}: event_types 
                                           received_via | unit_statuses | event_class | type_subtypes | geo_town_order | units |
                                           places {action: set, name, aliases?, place: {label, lat, lon, sub?}, note?} |
                                           {action: delete, key}: the department's own place names (#67) |
+                                          local_addresses {action: set, address ("189-1/2 Example St"), lat,
+                                          lon, town?, note?, key? (the point edited)} | {action: delete, key}: the
+                                          department's own address points (sizeup/geo/localaddr.py) |
                                           common_places {action: preview | apply, file (base64 .xlsx / .csv),
                                           filename?, columns?: {address, name, town}} | {action: remove}: the county's
                                           common place names (sizeup/cad/commonplaces.py; the body up to 4.5 MB) |

@@ -557,6 +557,9 @@ class App:
             # locator and the radio's (sizeup/geo/pagegeo.py, sizeup/intel/place.py) as named places
             from sizeup.geo.pagegeo import set_local_source
             set_local_source(self.gaz, self.cad.local_places)
+            # the department's own address points (Settings > Address points): found like the address points' own
+            from sizeup.geo.localaddr import set_local_addresses
+            set_local_addresses(self.gaz, self.cad.local_addresses)
         # Radio ID -> rig, and who is transmitting right now (both pages' "talking").
         self.radios = self.cad.radios
         self.catchup = self._catchup_make()        # shed clips caught up later (sizeup/sttcatchup.py), from start()

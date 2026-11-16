@@ -370,6 +370,11 @@ def locate_address(ix, address: str, town: str = "", town_of=lambda m: m) -> dic
     neighbour), never a same-named street farther off. -> {label, lat, lon, muni (the row's town, when given; else the
     hit's), precision} | None."""
     from sizeup.geo.places import NUMBER, _Ctx
+    own = ix.local_address(address, town, town_of,                  # the department's own point first (Settings)
+                           near=lambda la, lo: _km_to_town(ix, town, town_of, la, lo) <= NEAR_TOWN_KM) \
+        if hasattr(ix, "local_address") else None
+    if own is not None:
+        return own
     fraction = FRACTION.match(address or "")
     if fraction:                                        # "0189-1/2" -> "189"; "12 1/2-14" -> "12-14"
         address = str(int(fraction.group(1))) + address[fraction.end():]

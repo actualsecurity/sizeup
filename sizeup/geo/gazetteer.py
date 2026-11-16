@@ -26,6 +26,7 @@ from pathlib import Path
 
 import numpy as np
 
+from .localaddr import EMPTY as LOCAL_EMPTY, LocalAddresses, fraction_of, fractions_in
 from .normalize import (
     BOUNDARY, DIRECTIONS, TYPE_ABBRS, spaceless, street_aliases, tokenize,
 )
@@ -540,6 +541,89 @@ class Gazetteer:
             return end[2], end[3], 0.5, "approximate"
         return None
 
+    # ------------------------------------------------------------------ local address points (sizeup/geo/localaddr.py)
+
+    def street_id(self, name: str) -> int | None:
+        """The street named exactly so (any case), else None."""
+        by = getattr(self, "_street_by_name", None)
+        if by is None:
+            by = self._street_by_name = {st.name.lower(): sid for sid, st in self.streets.items()}
+        return by.get(" ".join((name or "").split()).lower())
+
+    def local_addresses(self) -> LocalAddresses:
+        """The department's own address points (localaddr.set_local_addresses), indexed again only when they change."""
+        src = getattr(self, "_local_addr_source", None)
+        if src is None:
+            return LOCAL_EMPTY
+        try:
+            rows = src() or ()
+        except Exception:  # noqa: BLE001 - no local points: the address points as before
+            rows = ()
+        got = getattr(self, "_local_addr", None)
+        if got is not None and (got.rows is rows or got.rows == rows):
+            return got
+        got = self._local_addr = LocalAddresses(rows, self.street_id)
+        return got
+
+    def streets_at(self, text: str) -> set[int]:
+        """The streets the text starts with ("Example St, ..."), said as they are (localaddr.fractions_in)."""
+        tokens = tokenize(text)
+        if not tokens or tokens[0] == BOUNDARY:        # "189½, ...": no street right after it
+            return set()
+        m = next((m for m in self._street_mentions(tokens) if m.start == 0), None)
+        return {sid for sid, sim in m.cands if sim >= 0.9} if m else set()
+
+    def street_towns(self, sid: int) -> list[str]:
+        """Every town street sid is in: its address points', its centreline's, its local points'."""
+        return list(dict.fromkeys([*self.address_towns(sid), *(m for m in self.streets[sid].xy_muni if m)]))
+
+    def town_near(self, sid: int, lat: float, lon: float) -> str:
+        """The town of street sid at (lat, lon): its nearest centreline sample's or address point's ('' if none)."""
+        st = self.streets[sid]
+        if st.xy is None or not len(st.xy):
+            return ""
+        x, y = _xy(lat, lon)
+        return st.xy_muni[int(np.argmin(np.hypot(st.xy[:, 0] - x, st.xy[:, 1] - y)))] or ""
+
+    def dist_in_town(self, sid: int, muni: str, lat: float, lon: float) -> float:
+        """Metres from (lat, lon) to street sid's stretch in muni (its centreline and address points there); the whole
+        street when it has none there."""
+        st = self.streets[sid]
+        if st.xy is None or not len(st.xy):
+            return math.inf
+        mask = np.array([m == muni for m in st.xy_muni]) if muni else None
+        pts = st.xy[mask] if mask is not None and mask.any() else st.xy
+        x, y = _xy(lat, lon)
+        return float(np.min(np.hypot(pts[:, 0] - x, pts[:, 1] - y)))
+
+    def address_towns(self, sid: int, local: LocalAddresses | None = None) -> list[str]:
+        """The towns street sid has address points in, its local points' among them."""
+        st = self.streets[sid]
+        extra = (local if local is not None else self.local_addresses()).towns.get(sid, ())
+        return list(st.addrs) + [m for m in extra if m not in st.addrs]
+
+    def locate_at(self, sid: int, muni: str, num: int, suffix: str = "", frac: str = "",
+                  local: LocalAddresses | None = None) -> tuple[float, float, float, str, str, str] | None:
+        """A house number on street sid in muni: a local point first (that number, its letter and fraction), else the
+        address points (a fraction's integer part). -> (lat, lon, quality, precision, the number's label, source:
+        "local" | "address-points")."""
+        local = local if local is not None else self.local_addresses()
+        p = local.get(sid, muni, num, suffix, frac) if local else None
+        if p is not None:
+            return p.lat, p.lon, 0.95, "exact", p.number.label, "local"
+        if frac and local:                  # "189-1/2" not pinned, 189 is: next door, not the door itself
+            p = local.get(sid, muni, num, suffix, "")
+            if p is not None:
+                return p.lat, p.lon, 0.9, "approximate", p.number.label, "local"
+        st = self.streets[sid]
+        lst = st.addrs.get(muni)
+        if not lst:
+            return None
+        res = self._locate_number(lst, st.nums[muni], num, suffix)
+        if res is None:
+            return None
+        return (*res, f"{num}{suffix.upper()}", "address-points")
+
     # ------------------------------------------------------------------ candidates
 
     def _hint_bonus(self, muni: str, mention_span: tuple[int, int],
@@ -556,17 +640,19 @@ class Gazetteer:
         return MUNI_PRIOR.get(muni, 0.0) + said
 
     def _address_cands(self, tokens, m: _Mention, num: str, verify: list[_Mention],
-                       munis) -> list[Match]:
+                       munis, fracs: dict[int, str] | None = None) -> list[Match]:
         digits = int("".join(c for c in num if c.isdigit()))
         suffix = "".join(c for c in num if c.isalpha())
+        local = self.local_addresses()
         out = []
         for sid, sim in m.cands:
             st = self.streets[sid]
-            for muni, lst in st.addrs.items():
-                res = self._locate_number(lst, st.nums[muni], digits, suffix)
+            for muni in self.address_towns(sid, local):
+                frac = fraction_of(fracs or {}, digits, sid)    # "189-1/2": the tokens kept 189
+                res = self.locate_at(sid, muni, digits, suffix, frac, local)
                 if res is None:
                     continue
-                lat, lon, q, precision = res
+                lat, lon, q, precision, label_num, _source = res
                 if not m.strong and precision == "approximate":
                     continue
                 conf = q * sim
@@ -586,7 +672,6 @@ class Gazetteer:
                     elif best_d > 400:
                         conf *= 0.8
                 conf += self._hint_bonus(muni, (m.start, m.end), munis)
-                label_num = f"{digits}{suffix.upper()}"
                 out.append(Match("address", round(lat, 6), round(lon, 6),
                                  f"{label_num} {st.name}, {muni}", muni, conf,
                                  cross_street=cross, street=st.name, house_number=label_num,
@@ -677,6 +762,7 @@ class Gazetteer:
 
     def candidates(self, text: str) -> list[Match]:
         """All location readings of ``text``, best first."""
+        text, fracs = fractions_in(text, self.streets_at)
         tokens = tokenize(text)
         mentions = self._street_mentions(tokens)
         munis = self._muni_mentions(tokens, mentions)
@@ -719,7 +805,7 @@ class Gazetteer:
                 verify.extend(mentions[q] for q in prev)
             num = self._house_number(tokens, m)
             if num:
-                groups.append(self._address_cands(tokens, m, num, verify, munis))
+                groups.append(self._address_cands(tokens, m, num, verify, munis, fracs))
             if p is not None:
                 groups.append(self._intersection_cands(m, mentions[p], munis))
             if crosses.get(k) and not num:
