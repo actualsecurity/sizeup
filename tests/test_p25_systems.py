@@ -309,6 +309,78 @@ def test_a_missing_dongle_or_one_dongle_on_two_sources_starts_nothing(tmp_path):
     assert mrrs.step(200.0)["state"] == "down" and not pop.started
 
 
+def test_dongles_unplugged_under_a_running_system_stop_it_and_their_return_starts_it_again(tmp_path, monkeypatch):
+    # GitHub #592: both MRRS dongles unplugged and plugged back in. trunk-recorder stayed up and said nothing (the fake
+    # one here does the same: it never exits), the status stayed "ok" and nothing restarted it.
+    t0 = float(int(time.time()) - 100)      # the station's side reads the status against the real clock: never stale here
+    usb = [(0, "v4"), (1, "pd-a"), (2, "pd-b")]
+    _county, mrrs, pop, logs, d = service(tmp_path, found=lambda: list(usb))
+    ask_system(tmp_path, {0: "pd-a", 1: "pd-b"})
+    assert mrrs.step(t0 + 100)["state"] == "ok"
+    first = pop.started[0]
+    # the watchdog has used up the hour's restarts: a return must never wait for them
+    mrrs.watchdog.restarts.extend([mrrs._m] * trunkrecd.WATCH_PER_HOUR)
+    mrrs.watchdog.quiet = 2
+    usb[:] = [(0, "v4")]
+    assert mrrs.step(t0 + 106)["state"] == "ok" and first.code is None             # one look: never stopped on it
+    st = mrrs.step(t0 + 107)
+    assert st["state"] == "absent" and st["detail"] == "SDR 'pd-a', 'pd-b' unplugged: trunk-recorder stopped until it is back"
+    assert first.code is not None and not pop.running and "p25 mrrs: absent: SDR 'pd-a', 'pd-b' unplugged" in logs[-1]
+    # the station's side (the Receivers row, Health): not running, never green
+    monkeypatch.setattr(claims, "helpers", claims.helpers)
+    seen = SystemUnitRecorder("mrrs", "MRRS", "/x/trunk-recorder --config=config.json", str(d),
+                              state_path=mrrs.state, status_path=mrrs.status_path)
+    assert seen.status()["state"] == "absent"
+    # while they are out: looked for every UNPLUGGED_S, said once, no restart counted, nothing started
+    n = len(logs)
+    for t in range(108, 300, 5):
+        st = mrrs.step(t0 + t)
+    assert st["state"] == "absent" and "not plugged in" in st["detail"] and st["restarts"] == 0
+    assert len(pop.started) == 1 and len(logs) == n
+    assert seen.status()["state"] == "absent"
+    # one back is not enough: every dongle it was given
+    usb[:] = [(0, "v4"), (1, "pd-b")]
+    assert mrrs.step(t0 + 303)["state"] == "absent" and len(pop.started) == 1
+    usb[:] = [(0, "v4"), (1, "pd-b"), (2, "pd-a")]                              # back, at other indexes
+    st = mrrs.step(t0 + 308)
+    assert st["state"] == "ok" and len(pop.started) == 2 and pop.running == [pop.started[1]]
+    assert [s["device"] for s in json.loads((d / "config.runtime.json").read_text())["sources"]] == ["rtl=2", "rtl=1"]
+    assert logs[-3:-1] == ["p25 mrrs: dongles back after 3:21: restarting trunk-recorder",
+                           f"p25 mrrs: trunk-recorder on pd-a (device #2), pd-b (device #1), pid {pop.started[1].pid}"]
+    assert seen.status()["state"] == "ok" and st["restarts"] == 0
+    assert not mrrs.watchdog.restarts and mrrs.watchdog.quiet == 0               # a fresh start: never capped
+    assert json.loads((claims.DIR / "pd-a.json").read_text())["mode"] == "MRRS 770"   # its claims kept throughout
+
+
+def test_a_dongle_that_stays_or_a_look_that_fails_never_stops_a_running_system(tmp_path):
+    usb: list | None = [(0, "v4"), (1, "pd-a"), (2, "pd-b")]
+    looks = []
+
+    def found():
+        looks.append(1)
+        if usb is None:
+            raise OSError("librtlsdr in a bad way")
+        return list(usb)
+    _county, mrrs, pop, logs, _d = service(tmp_path, found=found)
+    ask_system(tmp_path, {0: "pd-a"})
+    assert mrrs.step(100.0)["state"] == "ok"
+    n = len(looks)
+    for t in range(1, 60):
+        assert mrrs.step(100.0 + t / 10)["state"] == "ok"
+    assert len(looks) - n == 1                                                  # looked at every UNPLUGGED_S, not every step
+    usb = None
+    assert mrrs.step(110.0)["state"] == "ok" and mrrs.step(116.0)["state"] == "ok"
+    usb = [(0, "v4"), (1, "pd-b")]                                               # pd-b isn't its: only pd-a counts
+    usb.append((2, "pd-a"))
+    assert mrrs.step(122.0)["state"] == "ok" and len(pop.started) == 1 and pop.running == pop.started
+    # missing at one look, there at the next (a USB hiccup): never stopped
+    usb[:] = [(0, "v4")]
+    assert mrrs.step(128.0)["state"] == "ok"
+    usb[:] = [(0, "v4"), (1, "pd-a")]
+    assert mrrs.step(129.0)["state"] == "ok" and pop.running == pop.started
+    assert not [m for m in logs if "back after" in m or "absent" in m]
+
+
 def test_the_service_finds_the_systems_by_their_directories(tmp_path):
     d = system_dir(tmp_path)
     assert list(trunkrecd.system_dirs(d.parent.parent)) == ["mrrs"]
