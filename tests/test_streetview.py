@@ -312,10 +312,11 @@ global.document = { body: new El("body"), head: new El("head"), documentElement:
 const toasts = [];
 global.UI = { toast: (t) => toasts.push(t), dialog: { isOpen: () => false, open() {}, close() {} } };
 global.innerHeight = 800;
-global.fetch = async () => ({ ok: true, json: async () => ({ provider: "google", key: "k" }) });
+const OFF = process.argv[3] === "off";             // no key, not an admin: nothing to offer
+global.fetch = async () => ({ ok: true, json: async () => (OFF ? { provider: "" } : { provider: "google", key: "k" }) });
 let VIEW = "overview";
 global.cad = { who: { enforced: false }, sel: 7, hooks: [] };
-global.canDo = () => true;
+global.canDo = () => !OFF;
 global.viewTab = () => VIEW;
 const groups = [];
 global.MapLayers = { addGroup(g) { groups.push(g); } };
@@ -371,6 +372,11 @@ function rightClick(m, x, y, target) {
   const S = window.StreetView, out = {};
   const m = fakeMap();
   await sleep(20);                                  // the key arrives
+  if (OFF) {                                         // the browser's own menu, untouched
+    const ev = rightClick(m, 200, 100);
+    console.log(JSON.stringify({ menus: menus().length, prevented: ev.dp }));
+    process.exit(0);
+  }
   out.btnShown = !m.btn.hidden;
   // pick mode: the armed click is the pick, nobody else's; the cursor as it was before
   m.btn.ls.click[0]({ stopPropagation() {} });
@@ -446,6 +452,26 @@ function rightClick(m, x, y, target) {
   for (const f of docLs.pointerdown || []) f({ clientX: 201, clientY: 101, target: rcItem });
   rcItem.ls.click[0]({ detail: 1, stopPropagation() {} });
   out.rc.opened = menus().length === 0 ? S.lastAt() : null;
+  // Esc with the menu open over a dialog (the Large map): the menu closes, the dialog's own Esc never runs
+  global.UI.dialog.isOpen = () => true; page.discarded = false;
+  rightClick(m, 200, 100);
+  const escOver = key("Escape");
+  out.escOverDialog = { menus: menus().length, taken: escOver.stopped && !!escOver.dp, consoleEsc: page.discarded };
+  const escNoMenu = key("Escape");                                    // no menu: the dialog's, untouched
+  out.escOverDialog.thenDialogs = !escNoMenu.stopped;
+  global.UI.dialog.isOpen = () => false; page.discarded = false;
+  // focus leaving the menu (Tab into the dialog's trap) closes it; a blur to nowhere (Safari's click) does not
+  rightClick(m, 200, 100);
+  const fm = menus()[0];
+  for (const f of fm.ls.focusout || []) f({ relatedTarget: null });
+  out.blurNowhere = menus().length;
+  for (const f of fm.ls.focusout || []) f({ relatedTarget: fm.querySelector(".menu-item") });
+  out.focusInside = menus().length;
+  for (const f of fm.ls.focusout || []) f({ relatedTarget: new El("button") });
+  out.focusAway = menus().length;
+  // a right-click on a mark (a rig, a dragged pre-plan point): no menu, the browser's as ever, like the long press
+  const onMark = rightClick(m, 5, 5, m.chip);
+  out.rcMarker = { menus: menus().length, prevented: onMark.dp };
   console.log(JSON.stringify(out));
   process.exit(0);
 })();
@@ -483,6 +509,18 @@ def test_pick_mode_long_press_and_esc_on_a_fake_page(tmp_path):
     assert rc["menus"] == 1 and rc["prevented"] is True and rc["at"] == ["200px", "100px"]
     assert rc["mapEvent"] is False                                           # not MapLibre's delayed, droppable event
     assert rc["opened"] == {"lat": pytest.approx(41 + 100e-5), "lon": pytest.approx(-73.66 + 200e-5)}
+    assert out["escOverDialog"] == {"menus": 0, "taken": True, "consoleEsc": False, "thenDialogs": True}
+    assert out["blurNowhere"] == 1 and out["focusInside"] == 1 and out["focusAway"] == 0
+    assert out["rcMarker"] == {"menus": 0, "prevented": False}
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_with_nothing_to_offer_a_right_click_keeps_the_browsers_menu(tmp_path):
+    h = tmp_path / "g.js"
+    h.write_text(GESTURES)
+    r = subprocess.run([NODE, str(h), str(STATIC / "streetview.js"), "off"], capture_output=True, text=True, timeout=30)
+    assert r.returncode == 0, r.stderr
+    assert json.loads(r.stdout) == {"menus": 0, "prevented": False}
 
 
 def test_googles_logo_and_attribution_are_never_covered():
