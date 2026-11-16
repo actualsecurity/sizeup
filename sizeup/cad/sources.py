@@ -1213,7 +1213,8 @@ class Sources:
         except Exception:  # noqa: BLE001 - no names: the location as it is
             return None
         from sizeup.cad.commonplaces import Lookup
-        sig = tuple((r.get("key"), r.get("address"), r.get("lat"), r.get("lon")) for r in rows)
+        sig = tuple((r.get("key"), r.get("name"), tuple(r.get("aliases") or ()), r.get("address"), r.get("lat"),
+                     r.get("lon"), r.get("muni"), r.get("label"), r.get("at"), r.get("site")) for r in rows)
         if sig != self._common[0]:
             self._common = (sig, Lookup(rows))
         self._towns()

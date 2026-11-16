@@ -162,7 +162,89 @@ def test_an_address_is_found_in_the_address_points(gaz):
     assert cp.locate_address(ix, "120 EXAMPLE", PC) is None            # never a prefix of a street ("Example Ave Ext")
     assert cp.locate_address(ix, "7 NOWHERE RD", PC) is None
     assert cp.locate_address(ix, "SAMPLE MARINA", PC) is None          # no number
-    assert cp.locate_address(ix, "3 EXAMPLE AVE EXT", PC)["muni"] == RB   # one town has it: that town
+    assert cp.locate_address(ix, "3 EXAMPLE AVE EXT", "")["muni"] == RB    # no town given, one town has it: that town
+    assert cp.locate_address(ix, "3 EXAMPLE AVE EXT", PC) is None         # another town's, ~2.4 km off: not this row's
+
+
+FARTOWN = "Testburg"                 # an invented town ~8 km off
+TOWNS = {"port chester": PC, "rye brook": RB, "testburg": FARTOWN}
+
+
+def town_of(words: str) -> str:
+    return TOWNS.get(words.lower(), words)
+
+
+@pytest.fixture()
+def towns_gaz(tmp_path):
+    """The synthetic gazetteer plus, west of Sample St (Port Chester's westernmost points): Quill Ln, filed under the
+    neighbouring village but ~300 m from them (one ZIP code, its points right); Ember Ln, the neighbour's, ~1 km off;
+    Test Ct, in Port Chester without number 15 (a missing point) and with a 15 in an invented town ~8 km away."""
+    path = synthetic(tmp_path / "towns.sqlite")
+    db = sqlite3.connect(path)
+    db.executemany("INSERT INTO streets VALUES (?,?,?)", [(6, "quill ln", "Quill Ln"), (7, "test ct", "Test Ct"),
+                                                           (8, "ember ln", "Ember Ln")])
+    west = SAMPLE + 0.0002                                    # Sample St's points; 0.001 degree of longitude ~84 m
+    addrs = [(6, n, "", RB, LAT + 0.003 + k * 0.0002, west - 0.0036, 1) for k, n in enumerate(range(1, 20, 2))]
+    addrs += [(8, n, "", RB, LAT + 0.003 + k * 0.0002, west - 0.0119, 1) for k, n in enumerate(range(1, 20, 2))]
+    addrs += [(7, n, "", PC, LAT - 0.002, SAMPLE + k * 0.0002, 1) for k, n in enumerate((2, 4, 6))]
+    addrs += [(7, n, "", FARTOWN, LAT + 0.07 + k * 0.0002, SAMPLE, 1) for k, n in enumerate((11, 13, 15, 17))]
+    db.executemany("INSERT INTO addresses VALUES (?,?,?,?,?,?,?)", addrs)
+    db.commit()
+    db.close()
+    return Gazetteer(path)
+
+
+def test_another_towns_point_only_when_it_is_the_same_place(towns_gaz):
+    ix = PlaceIndex(towns_gaz)
+    hit = cp.locate_address(ix, "7 QUILL LN", PC, town_of)        # filed under the neighbour, next to Port Chester
+    assert (hit["label"], hit["muni"], hit["precision"]) == ("7 Quill Ln", PC, "exact")
+    assert cp.locate_address(ix, "7 QUILL LN", RB, town_of)["muni"] == RB
+    assert cp._km_to_town(ix, PC, town_of, hit["lat"], hit["lon"]) == pytest.approx(0.3, abs=0.03)
+    ember = cp.locate_address(ix, "7 EMBER LN", RB, town_of)
+    assert cp._km_to_town(ix, PC, town_of, ember["lat"], ember["lon"]) == pytest.approx(1.0, abs=0.05)
+    assert cp.locate_address(ix, "7 EMBER LN", PC, town_of) is None      # ~1 km into the neighbour: not the row's
+    assert cp.locate_address(ix, "15 TEST CT", PC, town_of) is None     # a street of that name ~8 km away: never
+    assert cp.locate_address(ix, "15 TEST CT", FARTOWN, town_of)["muni"] == FARTOWN
+    assert cp.locate_address(ix, "15 TEST CT", "", town_of)["muni"] == FARTOWN  # no town given: the one town that has it
+    assert cp.locate_address(ix, "7 QUILL LN", "Elsewhere", town_of) is None     # a town the gazetteer has no point of
+
+
+def test_the_entrys_town_is_the_rows_never_the_gazetteers(towns_gaz):
+    ix = PlaceIndex(towns_gaz)
+    rows = [HEADER, ["7 QUILL LN", "SAMPLE LIBRARY", "PORT_CHESTER"], ["15 TEST CT", "SAMPLE ROW HOUSES", "PORT_CHESTER"],
+            ["120 EXAMPLE AVE", "SAMPLE MARINA", ""]]
+    p = cp.plan(rows, {"address": 0, "name": 1, "town": 2}, lambda a, t: cp.locate_address(ix, a, t, town_of), town_of,
+                "2026-01-01", {})
+    e = p["entries"]
+    lib, houses, marina = (e["county/sample library @ 7 quill ln"], e["county/sample row houses @ 15 test ct"],
+                           e["county/sample marina @ 120 example ave"])
+    assert (lib["muni"], lib["located"], lib["lat"] is not None) == (PC, "exact", True)
+    assert (houses["muni"], houses["located"], houses["lat"]) == (PC, "", None)        # unresolved, still its town
+    assert p["unresolved"] == [{"name": "SAMPLE ROW HOUSES", "address": "15 TEST CT", "town": PC}]
+    assert marina["muni"] == PC                                                        # no town column value: the hit's
+    look = cp.Lookup(list(e.values()))
+    assert look.find("SAMPLE LIBRARY", town="port chester")["address"] == "7 QUILL LN"     # the feed's town: found
+    assert look.find("SAMPLE LIBRARY", town="rye brook") is None
+
+
+@pytest.mark.parametrize("address, label, whole", [("23.5 SAMPLE ST", "23.5 Sample St", "23 SAMPLE ST"),
+                                                   ("55-1/2 SAMPLE ST", "55-1/2 Sample St", "55 SAMPLE ST"),
+                                                   ("55 1/2 SAMPLE ST", "55 1/2 Sample St", "55 SAMPLE ST"),
+                                                   ("189-1/2 EXAMPLE AVE", "189-1/2 Example Ave", "189 EXAMPLE AVE"),
+                                                   ("0189-1/2 EXAMPLE AVE", "0189-1/2 Example Ave", "189 EXAMPLE AVE"),
+                                                   ("13 1/2-15 SAMPLE ST", "13 1/2 Sample St", "13 SAMPLE ST")])
+def test_a_fractional_house_number_is_found_by_its_whole_number(gaz, address, label, whole):
+    ix = PlaceIndex(gaz)
+    hit = cp.locate_address(ix, address, PC)
+    whole = cp.locate_address(ix, whole, PC)
+    assert (hit["label"], hit["precision"], hit["muni"]) == (label, "interpolated", PC)    # approximate, said as typed
+    assert (hit["lat"], hit["lon"]) == (whole["lat"], whole["lon"])
+    rows = [HEADER, [address, "SAMPLE COTTAGE", "PORT_CHESTER"]]
+    p = cp.plan(rows, {"address": 0, "name": 1, "town": 2}, lambda a, t: cp.locate_address(ix, a, t), town_of,
+                "2026-01-01", {})
+    [entry] = p["entries"].values()
+    assert (entry["address"], entry["at"], entry["located"]) == (address, label, "interpolated")   # the file's text kept
+    assert p["counts"]["approximate"] == 1 and p["counts"]["unresolved"] == 0
 
 
 # --------------------------------------------------------------------------- the import
@@ -172,7 +254,7 @@ def test_preview_counts_and_writes_nothing(cad):
     r = post(cad, "common_places", action="preview", file=b64(xlsx([HEADER, *ROWS])), filename="list.xlsx")
     assert r["dry_run"] and r["columns"] == {"address": 0, "name": 1, "town": 2} and r["header"] == HEADER
     assert r["counts"] == {"rows": 6, "names": 6, "addresses": 4, "new": 6, "present": 0, "removed": 0, "unresolved": 1,
-                           "unresolved_addresses": 1, "approximate": 1, "skipped": 0}
+                           "unresolved_addresses": 1, "approximate": 1, "skipped": 0, "unknown_towns": 0}
     assert r["unresolved"] == [{"name": "QUIET GROVE", "address": "7 NOWHERE RD", "town": PC}]
     assert imported(cad) == {} and len(cad.settings.audit_log()) == before
 
@@ -447,6 +529,10 @@ def test_a_feed_location_that_is_a_common_name_maps_to_its_address(tmp_path):
     assert rig.cad.sources.common_place("@SAMPLE MARINA", {"extra": {"town": "RYE_BROOK"}}) is None
     assert rig.cad.sources.common_place("@SAMPLE MARINA", {"extra": {"town": "PORT_CHESTER"}}) is not None
     assert rig.cad.sources.common_place("@SAMPLE MARINA", {"extra": {"town": "SOMEWHERE_ELSE"}}) is not None
+    # a re-import that changes only the town: read again
+    rig.cad.settings._commit([("places", "county/sample marina @ 120 example ave", dict(entry, muni=RB))], "test", [])
+    assert rig.cad.sources.common_place("@SAMPLE MARINA", {"extra": {"town": "PORT_CHESTER"}}) is None
+    assert rig.cad.sources.common_place("@SAMPLE MARINA", {"extra": {"town": "RYE_BROOK"}}) is not None
 
 
 def test_one_name_at_two_addresses_is_no_place():
@@ -457,6 +543,128 @@ def test_one_name_at_two_addresses_is_no_place():
     assert look.find("@SAMPLE DELI") is None
     assert look.find("SAMPLE PIER")["address"] == "3 SAMPLE ST"                 # no point: still its address
     assert look.find("NOWHERE") is None
+
+
+def site_entries(rows: list[tuple]) -> dict[str, dict]:
+    """(name, address, lat, lon, located) rows as the import's entries, grouped into sites."""
+    out = {cp.entry_key(n, a): {"name": n, "aliases": [], "label": n.title(), "address": a, "lat": la, "lon": lo,
+                                "muni": PC, "located": how, "source": cp.SOURCE} for n, a, la, lo, how in rows}
+    cp.group_sites(out)
+    return out
+
+
+M = 0.0001                                                                               # ~11 m north
+
+
+def test_one_name_at_neighbouring_addresses_is_one_site():
+    """A venue that is several buildings at adjacent numbers ("145", "149", "149-151"), across-the-street buildings: one
+    site, found by its name at its primary. A chain's stores far apart, or an address with no point off the site's
+    street, stay apart: the name alone is no place."""
+    e = site_entries([("SAMPLE HALL", "149-151 EXAMPLE AVE", LAT + 4 * M, SAMPLE, "exact"),
+                      ("SAMPLE HALL", "145 EXAMPLE AVE", LAT, SAMPLE, "interpolated"),
+                      ("SAMPLE HALL", "149 EXAMPLE AVE", LAT + 3 * M, SAMPLE, "exact"),
+                      ("SAMPLE HALL", "153 EXAMPLE AVE", None, None, ""),             # no point, next door: joins
+                      ("SAMPLE SCHOOL", "94 SAMPLE ST", LAT, TEST, "interpolated"),
+                      ("SAMPLE SCHOOL", "95 SAMPLE ST", LAT + M, TEST + M, "interpolated"),
+                      ("SAMPLE MART", "1 EXAMPLE AVE", LAT, SAMPLE, "exact"),
+                      ("SAMPLE MART", "199 EXAMPLE AVE", LAT, TEST, "exact"),           # ~840 m away: another store
+                      ("SAMPLE ANNEX", "21 SAMPLE ST", LAT, SAMPLE, "exact"),
+                      ("SAMPLE ANNEX", "4 TEST RD", None, None, "")])                   # no point, another street
+    hall = cp.entry_key("SAMPLE HALL", "149 EXAMPLE AVE")                               # the lowest exact number
+    assert {k for k, v in e.items() if v.get("site") == hall} == {cp.entry_key("SAMPLE HALL", a) for a in (
+        "145 EXAMPLE AVE", "149 EXAMPLE AVE", "149-151 EXAMPLE AVE", "153 EXAMPLE AVE")}
+    assert e[hall]["site_addresses"] == ["145 EXAMPLE AVE", "149 EXAMPLE AVE", "149-151 EXAMPLE AVE", "153 EXAMPLE AVE"]
+    school = cp.entry_key("SAMPLE SCHOOL", "94 SAMPLE ST")                               # none exact: the first
+    assert e[school]["site"] == school and e[cp.entry_key("SAMPLE SCHOOL", "95 SAMPLE ST")]["site"] == school
+    assert not any(v.get("site") for v in e.values() if v["name"] in ("SAMPLE MART", "SAMPLE ANNEX"))
+    first = site_entries([("SAMPLE DOCK", "2 SAMPLE ST", None, None, ""),                # no point, first in the file
+                          ("SAMPLE DOCK", "4 SAMPLE ST", LAT, SAMPLE, "interpolated")])
+    assert {v["site"] for v in first.values()} == {cp.entry_key("SAMPLE DOCK", "4 SAMPLE ST")}   # the primary has a point
+    look = cp.Lookup([dict(v, key=k) for k, v in e.items()])
+    got = look.find("@SAMPLE HALL")
+    assert (got["address"], got["lat"], len(got["site_addresses"])) == ("149 EXAMPLE AVE", LAT + 3 * M, 4)
+    assert look.find("SAMPLE SCHOOL")["address"] == "94 SAMPLE ST"
+    assert look.find("SAMPLE MART") is None and look.find("SAMPLE ANNEX") is None       # never picks one of two places
+    assert cp.Lookup(list(e.values())).find("SAMPLE HALL")["address"] == "149 EXAMPLE AVE"   # without keys: the same
+
+
+def test_a_site_spans_300_m_at_most_and_is_made_again_on_each_import():
+    rows = [("SAMPLE PIER", f"{n} SAMPLE ST", LAT + k * 12 * M, SAMPLE, "exact") for k, n in enumerate((1, 3, 5))]
+    e = site_entries(rows)                                      # each ~130 m from the next, ~265 m end to end: one site
+    assert {v["site"] for v in e.values()} == {cp.entry_key("SAMPLE PIER", "1 SAMPLE ST")}
+    e[cp.entry_key("SAMPLE PIER", "3 SAMPLE ST")].update(lat=LAT + 0.01)        # moved away: 1 and 5 are ~265 m apart
+    cp.group_sites(e)
+    assert not any(v.get("site") or v.get("site_addresses") for v in e.values())
+    rows = [("SAMPLE PIER", f"{n} SAMPLE ST", LAT + k * 12 * M, SAMPLE, "exact") for k, n in enumerate((1, 3, 5, 7, 9))]
+    e = site_entries(rows)                                      # ~530 m end to end: never one long site
+    assert len({v.get("site") for v in e.values()}) > 1
+    assert cp.Lookup(list(e.values())).find("SAMPLE PIER") is None
+    assert cp.house("189-1/2 SAMPLE ST") == (189, "sample st") and cp.house("12A EXAMPLE AVE") == (12, "example ave")
+    assert cp.house("QUILL SAMPLE") == (None, "quill sample") and cp.house("0189-1/2 SAMPLE ST") == (189, "sample st")
+
+
+def test_a_name_every_120_m_along_a_street_is_no_one_place():
+    """A generic name at every ~120 m of a street (a bus shelter, a hydrant row): short sites at most, each spanning
+    300 m or less, so the bare name is several places and never the first address."""
+    from sizeup.geo.places import dist_km
+    rows = [("SAMPLE SHELTER", f"{100 + 4 * k} EXAMPLE AVE", LAT, SAMPLE + k * 0.00143, "exact") for k in range(10)]
+    e = site_entries(rows)                                      # 0.00143 degree of longitude ~120 m
+    sites: dict[str, list[dict]] = {}
+    for k, v in e.items():
+        sites.setdefault(v.get("site") or k, []).append(v)
+    assert len(sites) >= 4
+    for members in sites.values():
+        assert all(dist_km(a["lat"], a["lon"], b["lat"], b["lon"]) <= cp.SITE_SPAN_KM for a in members for b in members)
+    assert cp.Lookup([dict(v, key=k) for k, v in e.items()]).find("SAMPLE SHELTER") is None
+
+
+def test_an_address_with_no_point_joins_by_located_ones_in_its_town_whatever_the_order():
+    rows = [("SAMPLE HALL", "145 EXAMPLE AVE", LAT, SAMPLE, "exact"),
+            ("SAMPLE HALL", "149 EXAMPLE AVE", LAT + M, SAMPLE, "exact"),
+            ("SAMPLE HALL", "163 EXAMPLE AVE", None, None, ""),      # 14 from 149: joins
+            ("SAMPLE HALL", "181 EXAMPLE AVE", None, None, "")]      # 18 from 163 but 32 from 149: never through 163
+    for order in (rows, rows[::-1]):
+        e = site_entries(order)
+        site = {cp.entry_key("SAMPLE HALL", a) for a in ("145 EXAMPLE AVE", "149 EXAMPLE AVE", "163 EXAMPLE AVE")}
+        assert {k for k, v in e.items() if v.get("site")} == site
+        assert "site" not in e[cp.entry_key("SAMPLE HALL", "181 EXAMPLE AVE")]
+    other = site_entries(rows[:2] + [("SAMPLE HALL", "151 EXAMPLE AVE", None, None, "")])
+    other[cp.entry_key("SAMPLE HALL", "151 EXAMPLE AVE")]["muni"] = RB                  # coded another town: apart
+    cp.group_sites(other)
+    assert "site" not in other[cp.entry_key("SAMPLE HALL", "151 EXAMPLE AVE")]
+
+
+def test_a_town_code_the_cad_does_not_know_is_listed_and_the_point_kept(towns_gaz):
+    ix = PlaceIndex(towns_gaz)
+    rows = [HEADER, ["7 QUILL LN", "SAMPLE LIBRARY", "NOWHERE_VILLE"], ["9 QUILL LN", "SAMPLE ANNEX", "NOWHERE_VILLE"],
+            ["120 EXAMPLE AVE", "SAMPLE MARINA", "PORT_CHESTER"]]
+    p = cp.plan(rows, {"address": 0, "name": 1, "town": 2}, lambda a, t: cp.locate_address(ix, a, t, town_of), town_of,
+                "2026-01-01", {}, {PC.lower(), RB.lower(), FARTOWN.lower()})
+    assert p["unknown_towns"] == ["NOWHERE_VILLE"] and p["counts"]["unknown_towns"] == 2
+    lib = p["entries"]["county/sample library @ 7 quill ln"]
+    assert (lib["muni"], lib["located"]) == (RB, "exact")                               # the point's town, as before
+    assert p["entries"]["county/sample marina @ 120 example ave"]["muni"] == PC
+
+
+def test_the_preview_lists_unknown_town_codes(cad):
+    rows = [HEADER, ["120 EXAMPLE AVE", "SAMPLE MARINA", "NOWHERE_VILLE"], ROWS[2]]
+    r = post(cad, "common_places", action="preview", file=b64(xlsx(rows)), filename="list.xlsx")
+    assert r["unknown_towns"] == ["NOWHERE_VILLE"] and r["counts"]["unknown_towns"] == 1
+    assert r["counts"]["unresolved"] == 0
+
+
+def test_a_site_through_the_import_and_the_feed(cad):
+    rows = [HEADER, ["120 EXAMPLE AVE", "SAMPLE HALL", "PORT_CHESTER"], ["124 EXAMPLE AVE", "SAMPLE HALL", "PORT_CHESTER"],
+            ["122 EXAMPLE AVE", "SAMPLE HALL", "PORT_CHESTER"], ["7 NOWHERE RD", "SAMPLE HALL", "PORT_CHESTER"]]
+    post(cad, "common_places", action="apply", file=b64(xlsx(rows)), filename="list.xlsx")
+    got = imported(cad)
+    primary = "county/sample hall @ 120 example ave"
+    assert got[primary]["site_addresses"] == ["120 EXAMPLE AVE", "122 EXAMPLE AVE", "124 EXAMPLE AVE"]
+    assert "site" not in got["county/sample hall @ 7 nowhere rd"]            # no point, another street: apart
+    assert cp.Lookup(list(got.values())).find("SAMPLE HALL") is None          # so the bare name is still two places
+    post(cad, "common_places", action="apply", file=b64(xlsx(rows[:4])), filename="list.xlsx")
+    hit = cp.Lookup(cad.local_places()).find("@SAMPLE HALL", town="port chester")
+    assert (hit["key"], hit["at"]) == (primary, "120 Example Ave")
 
 
 # --------------------------------------------------------------------------- the settings file, a broken file
