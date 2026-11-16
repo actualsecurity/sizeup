@@ -376,6 +376,9 @@ window.StreetView = (() => {
       el.append(b);
     }
     el.addEventListener("keydown", (e) => { if (e.key === "Escape") { e.stopPropagation(); e.preventDefault(); menuClose(); } });
+    // focus moved elsewhere (Tab, into a dialog's focus trap): closed. Not a blur to nowhere: Safari leaves a clicked
+    // button unfocused, so the press on an item itself is one
+    el.addEventListener("focusout", (e) => { if (e.relatedTarget && !el.contains(e.relatedTarget) && MENU.el === el) menuClose(); });
     document.body.append(el);
     const vw = document.documentElement.clientWidth, vh = window.innerHeight;
     const w = el.offsetWidth, hh = el.offsetHeight;
@@ -405,13 +408,14 @@ window.StreetView = (() => {
     for (const m of maps) if (m.armed && m.takeClick(e)) return;
   }, true);
   // Esc, first (the window, capturing): while a pick is armed or our menu is open it is ours alone, so the console's Esc
-  // (UI.keys -> cad.js escapeView: cancel a form, discard a new call being typed) never also runs. A dialog's Esc, or
-  // one already taken, is left alone.
+  // (UI.keys -> cad.js escapeView: cancel a form, discard a new call being typed) never also runs. With the menu open
+  // over a dialog it closes the menu alone; otherwise a dialog's Esc, or one already taken, is left alone.
   window.addEventListener("keydown", (e) => {
     if (e.key !== "Escape" || e.defaultPrevented) return;
+    // the menu first, even over a dialog (the Large map): Esc closes only the menu, the dialog stays
+    if (MENU.el) { menuClose(); e.preventDefault(); e.stopImmediatePropagation(); return; }
     if (window.UI && UI.dialog && UI.dialog.isOpen && UI.dialog.isOpen()) return;
     let mine = false;
-    if (MENU.el) { menuClose(); mine = true; }
     for (const m of maps) if (m.armed) { m.disarm(); mine = true; }
     if (mine) { e.preventDefault(); e.stopImmediatePropagation(); }
   }, true);
@@ -447,11 +451,17 @@ window.StreetView = (() => {
       this.btn.addEventListener("click", (e) => { e.stopPropagation(); this.press(); });
       if (ctrls) ctrls.append(this.btn);
       const map = this.map;
-      map.on("contextmenu", (e) => {
-        if (e.originalEvent) e.originalEvent.preventDefault();
-        const oe = e.originalEvent || {};
+      // a right-click (a two-finger click on a trackpad, Ctrl-click; Android's long press): the browser's own event on the
+      // map, not MapLibre's contextmenu map event, which waits for the button to come up and is dropped when the map
+      // moved meanwhile (a refit for a moved rig or call, the scroll zoom still easing): then no menu at all
+      // (MapLibre's also stays ignored after any refit until the next mousedown, so Android's long press was lost too).
+      // Not on a mark (a rig, a dragged pre-plan point), as the long press; nothing to offer: the browser's menu as ever
+      map.getCanvasContainer().addEventListener("contextmenu", (e) => {
+        if (e.target && e.target.closest && e.target.closest(".maplibregl-marker")) return;
+        if (current() === "off") return;
+        e.preventDefault();
         const r = map.getCanvas().getBoundingClientRect();
-        menuOpen(oe.clientX != null ? oe.clientX : r.left + e.point.x, oe.clientY != null ? oe.clientY : r.top + e.point.y, e.lngLat, this);
+        menuOpen(e.clientX, e.clientY, map.unproject([e.clientX - r.left, e.clientY - r.top]), this);
       });
       map.on("movestart", (e) => { if (e.originalEvent && Date.now() - MENU.at > SWALLOW_MS) menuClose(); });
       this.longPress(map.getCanvasContainer());
