@@ -165,14 +165,14 @@ window.StreetView = (() => {
     ov: null, pano: null, svc: null, lib: null, map: null, mark: null, tgt: null, dates: new Map(), seq: 0, target: null,
     build() {
       if (this.ov) return;
-      const ov = h("div", "overlay sv-overlay");
+      const ov = h("div", "overlay stv-overlay");
       ov.hidden = true;
-      const dlg = h("div", "dialog sv-dialog");
+      const dlg = h("div", "dialog stv-dialog");
       dlg.setAttribute("role", "dialog");
       dlg.setAttribute("aria-modal", "true");
       dlg.setAttribute("aria-label", "Street view");
-      const head = h("div", "sv-head");
-      this.date = h("span", "sv-date");
+      const head = h("div", "stv-head");
+      this.date = h("span", "stv-date");
       const close = h("button", "btn sm icon quiet");
       close.type = "button";
       close.title = "Close (Esc)";
@@ -180,11 +180,11 @@ window.StreetView = (() => {
       close.append(window.Icon ? Icon("x") : "×");
       close.addEventListener("click", () => this.close());
       head.append(this.date, h("span", "spacer"), close);
-      const body = h("div", "sv-body");
-      this.panoEl = h("div", "sv-pano");
-      this.msg = h("div", "sv-empty");
+      const body = h("div", "stv-body");
+      this.panoEl = h("div", "stv-pano");
+      this.msg = h("div", "stv-empty");
       this.msg.hidden = true;
-      this.mapEl = h("div", "sv-map");
+      this.mapEl = h("div", "stv-map");
       body.append(this.panoEl, this.msg, this.mapEl);
       dlg.append(head, body);
       ov.append(dlg);
@@ -292,19 +292,19 @@ window.StreetView = (() => {
       if (!this.map) return;
       if (this.tgt) { this.tgt.remove(); this.tgt = null; }
       if (!this.target) return;
-      const el = h("div", "sv-target");
+      const el = h("div", "stv-target");
       el.title = "The call";
       this.tgt = new maplibregl.Marker({ element: el }).setLngLat([this.target.lon, this.target.lat]).addTo(this.map);
     },
     place(at, heading) {
       if (!this.map) return;
       if (!this.mark) {
-        const el = h("div", "sv-mark");
+        const el = h("div", "stv-mark");
         el.title = "Street view";
         this.mark = new maplibregl.Marker({ element: el, rotationAlignment: "map" }).setLngLat([at.lon, at.lat]).addTo(this.map);
       }
       this.mark.setLngLat([at.lon, at.lat]);
-      this.mark.getElement().classList.toggle("sv-nohead", heading == null);
+      this.mark.getElement().classList.toggle("stv-nohead", heading == null);
       if (heading != null) this.mark.setRotation(heading);
       this.map.easeTo({ center: [at.lon, at.lat], duration: 300 });
     },
@@ -324,7 +324,7 @@ window.StreetView = (() => {
       if (!this.msg) return;
       this.msg.textContent = text;
       this.msg.hidden = !text;
-      this.panoEl.classList.toggle("sv-dim", !!text);
+      this.panoEl.classList.toggle("stv-dim", !!text);
       if (text && this.pano) this.pano.setVisible(false);
     },
     close() {
@@ -352,7 +352,7 @@ window.StreetView = (() => {
     const items = menuItems(current());
     if (!items.length) return false;
     menuClose();
-    const el = h("div", "menu popover sv-menu");
+    const el = h("div", "menu popover stv-menu");
     el.setAttribute("role", "menu");
     el.setAttribute("aria-label", "Map");
     for (const it of items) {
@@ -443,7 +443,7 @@ window.StreetView = (() => {
       // the new call's map (newcall-map.js, manual): its clicks pick the call's location; no pick mode there
       this.manual = !!(control.host && control.host.id === "nc-map");
       const ctrls = control.btn && control.btn.parentNode;
-      this.btn = h("button", "cm-btn sm icon sv-btn");
+      this.btn = h("button", "cm-btn sm icon stv-btn");
       this.btn.type = "button";
       this.btn.hidden = true;
       this.btn.setAttribute("aria-pressed", "false");

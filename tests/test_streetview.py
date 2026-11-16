@@ -358,7 +358,7 @@ function key(k, prevented = false) {
 const touch = (el, t, x = 50, y = 60) => { for (const f of el.ls[t] || []) f({ target: el === undefined ? null : el._t || el,
   touches: t === "touchend" ? [] : [{ clientX: x, clientY: y }] }); };
 function touchOn(m, target, t) { for (const f of m.cc.ls[t] || []) f({ target, touches: t === "touchend" ? [] : [{ clientX: 50, clientY: 60 }] }); }
-const menus = () => document.body.children.filter((c) => c.matches(".sv-menu"));
+const menus = () => document.body.children.filter((c) => c.matches(".stv-menu"));
 // a right-click as the browser sends it: contextmenu on the map's canvas container (a trackpad's two-finger click, Ctrl-click,
 // Android's long press); MapLibre's own map event is never used (it is dropped when the map moves during the press)
 function rightClick(m, x, y, target) {
@@ -526,11 +526,11 @@ def test_with_nothing_to_offer_a_right_click_keeps_the_browsers_menu(tmp_path):
 def test_googles_logo_and_attribution_are_never_covered():
     """Google's SDK draws its logo and attribution along the panorama's bottom edge: nothing of ours may sit over it."""
     css = (STATIC / "cadmap.css").read_text()
-    phone = css[css.index("@media (max-width: 1100px), (pointer: coarse)", css.index(".sv-target")):]
-    rule = phone[phone.index(".sv-map {"):phone.index("}", phone.index(".sv-map {"))]
+    phone = css[css.index("@media (max-width: 1100px), (pointer: coarse)", css.index(".stv-target")):]
+    rule = phone[phone.index(".stv-map {"):phone.index("}", phone.index(".stv-map {"))]
     assert "inset-block: var(--s-3) auto" in rule      # the inset map hangs from the top, not the bottom
     assert "auto var(--s-3)" not in rule
-    wide = css[css.index(".sv-body {"):css.index("}", css.index(".sv-body {"))]
+    wide = css[css.index(".stv-body {"):css.index("}", css.index(".stv-body {"))]
     assert "grid-template-columns" in wide             # wide: the map is its own column beside the panorama
     assert "gm-style" not in css                       # and nothing restyles or hides Google's own markup
 
@@ -538,7 +538,7 @@ def test_googles_logo_and_attribution_are_never_covered():
 def test_the_menu_shows_over_the_large_map_dialog():
     """The menu is appended to the page: over every overlay (the Large map is a dialog), never under its scrim."""
     css = (STATIC / "cadmap.css").read_text()
-    rule = css[css.index(".sv-menu {"):css.index("}", css.index(".sv-menu {"))]
+    rule = css[css.index(".stv-menu {"):css.index("}", css.index(".stv-menu {"))]
     assert re.search(r"z-index:\s*calc\(var\(--z-overlay\) \+ 1\)", rule), rule
     tokens = (STATIC / "style.css").read_text()
     z = {k: int(v) for k, v in re.findall(r"--z-(overlay|popover):\s*(\d+)", tokens)}
