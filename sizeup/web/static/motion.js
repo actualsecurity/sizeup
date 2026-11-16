@@ -17,7 +17,9 @@
 //                 along the track that closes on the prediction (never across it, no steps; back only to where a
 //                 fix says it stopped: eased a few metres, or put there at once and marked). A GPS fix is carried on
 //                 at its speed, slowed only on evidence (braking, its next stop, a fix gone quiet), and the drawn
-//                 train's pace changes no faster than its consist can; a big correction is glided onto (#375, #390).
+//                 train's pace changes no faster than its consist can; a correction over snapM (150 m, or 15 s of its
+//                 travel when less) is eased onto in SNAP_MS, as an aircraft's is, not glided (#375, #390); the box's
+//                 Snap (snapToFix) puts it on its last fix the same way, unpredicted until the next.
 //
 // Nothing fake: the prediction is only ever between a real fix and the next one, at most horizonS after its fix; a
 // fix older than the layer's stale age is drawn where it really was (eased back there), never moved on.
@@ -61,7 +63,10 @@ window.Motion = (() => {
     target(it, now) {
       const age = (now - it.fix.at) / 1000;
       it.stale = age > this.staleS;
-      const p = it.stale ? null : this.predict(it.fix, Math.min(this.horizonS, Math.max(0, age)));
+      // snapped to its last fix by hand (snapToFix): drawn there, not predicted, until a different fix comes
+      const pinned = !!it.pin && it.pin.at === it.fix.at && it.pin.s === it.fix.s && it.pin.lon === it.fix.lon;
+      if (it.pin && !pinned) it.pin = null;
+      const p = it.stale || pinned ? null : this.predict(it.fix, Math.min(this.horizonS, Math.max(0, age)));
       it.moving = !!p && p.moving !== false && age < this.horizonS;
       return p || (this.rest ? this.rest(it.fix) : { lon: it.fix.lon, lat: it.fix.lat, rot: it.fix.rot });
     }
@@ -103,9 +108,19 @@ window.Motion = (() => {
       return p;
     }
     stale(id) { const it = this.items.get(id); return !!(it && it.stale); }
+    // the box's Snap: draw it where its last fix put it (a short ease there), no prediction until the next fix
+    snapToFix(id, now = Date.now()) {
+      const it = this.items.get(id);
+      if (!it) return false;
+      it.pin = { at: it.fix.at, s: it.fix.s, lon: it.fix.lon };
+      it.snapNow = true;
+      if (!this.follow && it.shown) this.rebase(it, this.target(it, now), now);
+      return true;
+    }
+    pinned(id) { const it = this.items.get(id); return !!(it && it.pin); }
     forget(keep) { for (const id of [...this.items.keys()]) if (!keep.has(id)) this.items.delete(id); }
     // anything that moves between frames (predicted or still easing): the caller's animation can rest otherwise
-    busy() { for (const it of this.items.values()) if (it.moving || it.off || it.chase) return true; return false; }
+    busy() { for (const it of this.items.values()) if (it.moving || it.off || it.chase || it.snapTo || it.snapNow) return true; return false; }
   }
 
   // ---- trains: along the track, in s ------------------------------------------------------------------------------
@@ -288,6 +303,13 @@ window.Motion = (() => {
   const GLIDE_AHEAD_M = 400, GLIDE_MIN_S = 3, GLIDE_MAX_S = 20, GLIDE_PEAK_MPS = 25, LIM_SLACK_M = 0.5;
   const GLIDE_ACC = 1.5, GLIDE_BACK_ACC = 3, SHIFT_ACC = 1.5, SHIFT_MPS = 10, GLIDE_BACK_MAX_S = 26, GLIDE_AHEAD_SHARE = 0.25, EASE_SLACK_M = 25;
   const FADE_M = 600, FADE_MS = 800, BRAKE_HARD = 4, JERK_HARD = 12;
+  // Snap-back, as the aircraft do (glide.js snapM: a miss over 0.3 nm or 4 s of its travel is not chased): a new fix more
+  // than snapM(v) from where the train is drawn (SNAP_M, or SNAP_S of its travel when that is less, never under
+  // SNAP_MIN_M: GPS noise) is eased onto over SNAP_MS (the miss shrinking on a cubic, as motion.js eases an aircraft's
+  // correction), not chased at a train's pace for 20 s (#390's glide). The admin, 2026-11-15: "we probably need a
+  // snap-back when the prediction is very wrong". Backwards only that far: a smaller lead is still closed by slowing.
+  const SNAP_M = 150, SNAP_S = 15, SNAP_MIN_M = 40, SNAP_MS = 1200;
+  const snapM = (v) => Math.max(SNAP_MIN_M, Math.min(SNAP_M, SNAP_S * Math.max(0, v || 0)));
   // A glide's offset from the prediction, k (0..1) of the way through T: from off0, changing at m0 (metres per glide),
   // to 0 at rest on it; a quintic Hermite, so its acceleration is 0 at both ends (no jolt starting or ending)
   const H = (k) => [1 - 10 * k ** 3 + 15 * k ** 4 - 6 * k ** 5, k - 6 * k ** 3 + 8 * k ** 4 - 3 * k ** 5];
@@ -329,9 +351,10 @@ window.Motion = (() => {
     it.lastAt = now;
     const d = tg.d, dyn = dynOf(it.fix);
     if (!sh || sh.d !== d || sh.train !== tg.train || !(Math.abs(tg.s - sh.s) <= JUMP_M)) {
-      it.chase = 0; it.u = Math.max(0, tg.v || 0); it.acc = 0; it.glide = null; it.fade = null; return tg;
+      it.chase = 0; it.u = Math.max(0, tg.v || 0); it.acc = 0; it.glide = null; it.fade = null; it.snapTo = null; it.snapNow = false;
+      return tg;
     }
-    if (it.stale) { it.chase = 0; it.u = 0; it.acc = 0; it.glide = null; return { ...sh, v: 0, moving: false }; }
+    if (it.stale) { it.chase = 0; it.u = 0; it.acc = 0; it.glide = null; it.snapTo = null; return { ...sh, v: 0, moving: false }; }
     if (it.fade) {                                                       // faded out where it was, in at the fix
       const k = (now - it.fade.at) / FADE_MS;
       it.chase = 1; it.u = 0;
@@ -339,6 +362,24 @@ window.Motion = (() => {
       if (k >= 1) it.fade = null;
       it.u = Math.max(0, tg.v || 0);
       return tg;
+    }
+    // snap-back (snapM): a new fix far from where it is drawn, or the box's Snap (snapToFix), eased onto in SNAP_MS
+    {
+      const miss = (tg.s - sh.s) * d;
+      // (by the faster of the train's speed and the drawn one's: a train drawn running on past where it stopped is
+      // let off by up to that one's travel, glided back as before; past it, snapped. Mid-glide: only past SNAP_M)
+      const lim = it.glide ? SNAP_M : snapM(Math.max(tg.v || 0, Math.abs(it.u || 0)));
+      if (it.snapNow || (it.fresh && Math.abs(miss) > lim)) {
+        if (Math.abs(miss) > 0.5) { it.snapTo = { off0: -miss, at: now }; it.glide = null; }
+        it.snapNow = false;
+      }
+      if (it.snapTo) {
+        const k = (now - it.snapTo.at) / SNAP_MS;
+        it.acc = 0; it.u = Math.max(0, tg.v || 0);
+        if (k < 1) { it.chase = 1; return { ...tg, s: tg.s + d * it.snapTo.off0 * easeLeft(k), v: it.u }; }
+        it.snapTo = null; it.chase = 0;
+        return tg;
+      }
     }
     const gap = (tg.s - sh.s) * d, v = Math.max(0, tg.v || 0), room = (tg.lim - sh.s) * d;
     let u0 = typeof it.u === "number" ? it.u : v;
@@ -431,7 +472,7 @@ window.Motion = (() => {
     return { ...tg, s, v: u };
   }
   // gliding onto a correction (railFollow's glide): the page marks it, faintly
-  const snapped = (it) => !!(it && it.glide);
+  const snapped = (it) => !!(it && (it.glide || it.snapTo));
   // a correction faded rather than glided: the train's opacity now (1: none), out then in over FADE_MS
   const fadeOf = (it, now) => {
     if (!it || !it.fade) return 1;
@@ -442,9 +483,9 @@ window.Motion = (() => {
   const railTracker = (opts) => new Tracker(rail, { horizonS: Infinity, staleS: 60, ...opts, rest: railRest, follow: railFollow });
 
   return { tracker: (predict, opts) => new Tracker(predict, opts), arc, metres, wrap180,
-           profileS, profileT, rail, railFollow, railTracker, gpsRun, snapped, fadeOf,
+           profileS, profileT, rail, railFollow, railTracker, gpsRun, snapped, fadeOf, snapM,
            RAIL: { JUMP_M, TAU_S, RAMP_S, CATCH_MAX_MPS, SLOW_SHARE, SNUG_M, STOP_ZONE_M, RAIL_CRUISE_S, RAIL_BRAKE_A,
                    SHARE, SHARE_EST, EXTRA_SHARE, CORR_MIN_MPS, BIG_M, JERK_MPS3, GLIDE_AHEAD_M, GLIDE_MIN_S, GLIDE_MAX_S,
                    GLIDE_ACC, GLIDE_BACK_ACC, SHIFT_ACC, GLIDE_BACK_MAX_S, GLIDE_AHEAD_SHARE, EASE_SLACK_M, RAIL_JERK,
-                   GLIDE_PEAK_MPS, FADE_M, FADE_MS, BRAKE_HARD, JERK_HARD, DYN } };
+                   GLIDE_PEAK_MPS, FADE_M, FADE_MS, BRAKE_HARD, JERK_HARD, DYN, SNAP_M, SNAP_S, SNAP_MIN_M, SNAP_MS } };
 })();

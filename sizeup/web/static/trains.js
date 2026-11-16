@@ -818,10 +818,12 @@ window.TrainLayer = (() => {
         const p = pos.get(t.id), stale = motion && pos.has(t.id) ? motion.stale(t.id) : own;
         const s = p ? Math.round(p.s * 10) / 10 : t.s;
         const aged = oldFix(t, d, now), snap = !!motion && Motion.snapped && Motion.snapped(motion.items.get(t.id), now);
+        const snapping = !!motion && !!(motion.items.get(t.id) || {}).snapTo;              // a snap-back's short ease
+        
         const dim = !aged && fixOlder(t, d, now, DIM_FIX_S);
         const op = motion && Motion.fadeOf ? Math.round(Motion.fadeOf(motion.items.get(t.id), now) * 10) / 10 : 1;   // (#390)
         // ahead of the MTA's report while on its way (a stopped train held at its station's mark isn't a prediction)
-        drawn.set(t.id, { s, stale, old: aged, dim, snap, op,
+        drawn.set(t.id, { s, stale, old: aged, dim, snap, snapping, op,
                           ahead: !t.estimated && t.mode !== "stopped" && typeof t.s === "number" && (s - t.s) * t.d > PREDICTED_M });
         key.push(`${t.id}:${s}:${stale ? 1 : 0}${aged ? 1 : 0}${dim ? 1 : 0}${snap ? 1 : 0}:${op}`);
       }
@@ -955,8 +957,8 @@ window.TrainLayer = (() => {
         ? `Track ${tt.next.track} at ${tt.next.name}: ${tt.next.posted ? "posted" : "planned, not posted yet"}${tt.next.track_change ? " (track change)" : ""}` : "" });
       const place = placeRow(t, w, d.railref);
       if (place) rows.push(place);
-      rows.push({ k: "pos", text: [pos.word, w.old ? "" : mph(t), fixAge(t, d)].filter(Boolean).join(" \u00b7 "),   // old: "Predicted · 34 s ago"
-                  title: speedBasis(t) });
+      const posText = [pos.word, w.old ? "" : mph(t), fixAge(t, d)].filter(Boolean).join(" \u00b7 ");   // old: "Predicted · 34 s ago"
+      rows.push({ k: "pos", text: posText, title: speedBasis(t), el: gps && motion && !t.estimated ? () => this.posLine(t, posText) : null });
       if ((tt.car_loads || []).length) rows.push({ k: "bars", sig: JSON.stringify([tt.car_loads, tt.occupancy, tt.pax]), el: () => carBars(tt) });
       // Metro-North's alerts (#385): the hub's plain text (never HTML). Those that name this train as "This train"; the
       // rest as the line's, labelled with the train they name; one line each, the full text and the others on hover
@@ -971,6 +973,26 @@ window.TrainLayer = (() => {
                    "TrainTime is an undocumented MTA API; GTFS-realtime is used when it fails",
                    ...mine.map((a) => `This train. ${alertFull(a)}`), ...line.map((a) => `Line. ${alertFull(a)}`), d.catenary, credit].filter(Boolean).join("\n");
       return { sub, rows, foot, tip };
+    }
+    // the TrainTime box's position line with its Snap (motion.js snapToFix): the train put back where its last GPS fix
+    // was, unpredicted until the next one comes (the prediction gone wrong: the admin, 2026-11-15)
+    posLine(t, text) {
+      const n = h("div", "", "");
+      n.append(h("span", "", text));
+      const pinned = motion.pinned(t.id), b = h("button", "tr-snapfix small", pinned ? "At fix" : "Snap");
+      b.type = "button";
+      b.title = pinned ? "Drawn at its last GPS fix, not predicted, until the next fix"
+        : "Snap to the last GPS fix: draw the train where the MTA last saw it, without prediction, until the next fix";
+      b.addEventListener("click", (e) => {
+        e.stopPropagation();
+        if (!motion.snapToFix(t.id)) return;
+        frame.at = -1;
+        for (const m of maps) { m.sig = ""; m.draw(true); }
+        animate();
+        if (this.live) this.live.refresh();
+      });
+      n.append(" \u00b7 ", b);
+      return n;
     }
     // follow a train (mapfollow.js): centred, zoomed in to its cars, kept centred as it glides; the chip at the foot
     follow(id) {

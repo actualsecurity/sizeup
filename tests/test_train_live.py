@@ -70,7 +70,7 @@ const flush = () => new Promise((r) => setImmediate(r));
     for (const t of timers.filter((x) => x.live && x.at <= now)) { if (t.every) t.at += t.every; else t.live = false; t.fn(); }
     await flush(); await flush();
     const w = m.drawn && m.drawn.get(IN.id);
-    out.frames.push([now / 1000, w ? w.s : null, w ? !!w.old : null, w ? !!w.snap : null, w ? w.op : null]);
+    out.frames.push([now / 1000, w ? w.s : null, w ? !!w.old : null, w ? !!w.snap : null, w ? w.op : null, w ? !!w.snapping : null]);
   }
   console.log(JSON.stringify(out));
 })();
@@ -180,7 +180,7 @@ def test_a_train_on_traintime_glides_at_its_speed_with_no_steps_stalls_or_backwa
 def glides_back(frames):
     """Each run of frames moving back (east) more than 0.05 m a frame, faded frames left out: {s (how long), m (how
     far), peak (m/s), ringed}"""
-    fr = [(t, s, snap) for t, s, _, snap, op in frames if s is not None and (op is None or op >= 1)]
+    fr = [(t, s, snap) for t, s, _, snap, op, sn in frames if s is not None and (op is None or op >= 1) and not sn]
     runs, cur = [], None
     for a, b in zip(fr, fr[1:]):
         back = b[1] - a[1]
@@ -196,17 +196,36 @@ def glides_back(frames):
     return [{"s": r["t1"] - r["t0"], "m": r["m"], "peak": r["peak"], "ringed": r["ringed"]} for r in runs]
 
 
+def snaps(frames):
+    """Each snap-back (motion.js snapM: a fix far from where the train is drawn, eased onto in SNAP_MS): {t0, s (how
+    long), m (how far, + back east)}"""
+    runs, cur, prev = [], None, None
+    for f in frames:
+        if f[5] and f[1] is not None:
+            cur = cur or {"t0": f[0], "s0": prev[1] if prev and prev[1] is not None else f[1]}
+            cur.update(t1=f[0], s1=f[1])
+        elif cur:
+            runs.append(cur | {"s1": f[1] if f[1] is not None else cur["s1"]})
+            cur = None
+        prev = f
+    if cur:
+        runs.append(cur)
+    return [{"t0": r["t0"], "s": r["t1"] - r["t0"], "m": r["s1"] - r["s0"]} for r in runs]
+
+
 def smooth_back(frames, v=V):
     """#390 ("less surgy"): every move back is a glide, never a jump, at most GLIDE_PEAK_MPS or 1.5x the train's speed
     (it takes as long as that needs, to GLIDE_MAX_S), ringed when it is more than a few metres; a correction too big for
     that is faded out and in instead (op), the only place the drawn train moves more than a glide's pace in a frame"""
     peak = 25.0
+    for x in snaps(frames):                                 # a snap-back: a short ease, never a slow chase
+        assert x["s"] <= 1.2 + 0.15
     for g in glides_back(frames):
         assert g["s"] <= 25.5 and g["peak"] <= peak * 1.02 + 0.5
         assert g["m"] <= 3.0 or g["ringed"]
-    fr = [(t, s, op) for t, s, _, _, op in frames if s is not None]
+    fr = [(t, s, op, sn) for t, s, _, _, op, sn in frames if s is not None]
     for a, b in zip(fr, fr[1:]):
-        if not ((a[2] is not None and a[2] < 1) or (b[2] is not None and b[2] < 1)):
+        if not ((a[2] is not None and a[2] < 1) or (b[2] is not None and b[2] < 1) or a[3] or b[3]):   # (a snap's ease aside)
             assert abs(b[1] - a[1]) <= max(peak, 2 * v) * 0.1 * 1.05 + 1.0          # no jump outside a fade
 
 
@@ -269,7 +288,9 @@ def test_a_stop_with_no_sign_of_it_before_the_feed_goes_quiet(tmp_path):
     """#390, the trade-off, measured: a 45 mph train brakes (0.75 m/s^2) right after a moving fix and no fix comes until
     it has stopped. Nothing says it is slowing, so it is drawn on at its speed until its fix is RAIL_CRUISE_S (20 s)
     old, then eased to a stop at its service brake (it was drawn slowing on age alone before: within ~60 m, at the cost
-    of every steady train); then the stopped fix glides it back where it stopped (at most 25 m/s, 3 m/s^2), not a fade."""
+    of every steady train); then the stopped fix, far behind where it is drawn, snaps it back where it stopped (a short
+    ease, as an aircraft's correction: the admin, 2026-11-15, a train "barely moving" drawn at 40+ mph), not a 20 s glide
+    nor a fade."""
     brake = 40
     frames, truth = drive(tmp_path, run=braking_v(V45, brake),
                           run_s=brake + 80, cadence="real", start_m=1000.0, quiet=(brake - 2, brake + V45 / 0.75 + 1))
@@ -278,9 +299,9 @@ def test_a_stop_with_no_sign_of_it_before_the_feed_goes_quiet(tmp_path):
     past = max(stop - s for _, s in fr)
     assert 100 <= past <= 300                                # (45 mph: ~230 m; see #392)
     smooth_back(frames, V45)
-    glided = [g for g in glides_back(frames) if g["m"] > 10]
-    assert 1 <= len(glided) <= 2 and not any(op is not None and op < 1 for *_, op in frames)   # glided back, not faded
-    assert max(g["peak"] for g in glided) <= 25.5
+    back = [x for x in snaps(frames) if x["m"] > 10]
+    assert len(back) == 1 and back[0]["m"] >= 100 and not any(f[4] is not None and f[4] < 1 for f in frames)   # snapped back
+    assert not [g for g in glides_back(frames) if g["m"] > 10]
     assert abs(fr[-1][1] - stop) <= 25 and fr[-1][1] == fr[-20][1]
 
 
@@ -346,7 +367,7 @@ def test_never_drawn_much_faster_than_the_train(tmp_path, mph, gap_s):
     v = mph * 1609.344 / 3600
     frames, truth = drive(tmp_path, run=lambda dt: (v * dt, v), run_s=90, cadence="real", start_m=1000.0,
                           quiet=(30, 30 + gap_s))
-    fr = [(t, s) for t, s, _, _, op in frames if s is not None and (op is None or op >= 1)]
+    fr = [(t, s) for t, s, _, _, op, sn in frames if s is not None and (op is None or op >= 1) and not sn]
     speeds = [(fr[i][1] - fr[i + 10][1]) / (fr[i + 10][0] - fr[i][0]) for i in range(len(fr) - 10) if fr[i + 10][0] - fr[i][0] < 1.05]
     assert max(speeds) <= 1.25 * v + 2 + 0.3
 
@@ -358,5 +379,5 @@ def test_a_stop_seen_in_a_later_fix_glides_back_never_fades(tmp_path, brake_at, 
     (7 of 48 such runs faded on a re-plan)."""
     frames, truth = drive(tmp_path, run=braking_v(V45, brake_at, b), run_s=int(brake_at + V45 / b + 45), cadence="real",
                           start_m=1000.0)
-    assert not any(op is not None and op < 1 for *_, op in frames)
+    assert not any(f[4] is not None and f[4] < 1 for f in frames)
     smooth_back(frames, V45)

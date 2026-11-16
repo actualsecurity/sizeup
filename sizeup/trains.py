@@ -132,6 +132,7 @@ import struct
 import threading
 import time
 import zipfile
+from collections import deque
 from pathlib import Path
 from typing import Callable, Iterator
 from urllib.error import HTTPError, URLError
@@ -195,6 +196,8 @@ VEHICLE_STATUS = {0: "INCOMING_AT", 1: "STOPPED_AT", 2: "IN_TRANSIT_TO"}
 MOVING = ("INCOMING_AT", "IN_TRANSIT_TO")
 # Fixes (Tracker): when the feed's position for a train is refused
 STOP_SLACK_M = 500.0             # outside the stretch between its last stop and its next by more than this
+GPS_PAST_STOP_M = 5000.0         # a TrainTime position past GTFS-realtime's next stop: taken (that feed's stop statuses lag)
+                                 # up to this far past it; further, refused as before (another train's record)
 SPACING_M = 3500.0               # the MTA's reporting points: mostly 1 to 1.6 km apart, 3.3 km at most seen (and a
                                  # point can show up a read late): a jump this long is allowed whatever the time
 MAX_MPS = 45.0                   # faster than this (about 100 mph) once one spacing is allowed for
@@ -901,10 +904,13 @@ class Model:
         the feed says so. A train it doesn't follow has only its predicted times to go by."""
         return bool(t.get("pos") or t.get("vstatus") or any(s["status"] in GONE or s["status"] == "Arrived" for s in t["stops"]))
 
-    def legs(self, t: dict, anchors: list, now: float) -> tuple[int | None, int | None]:
+    def legs(self, t: dict, anchors: list, now: float, at_s: float | None = None, d: int = 0) -> tuple[int | None, int | None]:
         """(last, next): indexes in anchors of the stop the train last left and the one it is going to or standing
         at. The vehicle's stop when it is one of them; else, for a train the feed follows, the first it hasn't
-        left (the MTA's statuses); else the first whose time hasn't passed. next None: beyond its last."""
+        left (the MTA's statuses); else the first whose time hasn't passed. next None: beyond its last.
+        at_s (a TrainTime position's s, going d): GTFS-realtime's stop statuses lag the train by minutes (a train
+        700 m past a stop still "at" it, 2026-11-15), so a stop more than AT_STOP_M behind the position is one it has
+        passed: next moves on to the first ahead of it, by at most GPS_PAST_STOP_M past the feed's next stop."""
         vs = t.get("vstop") or ""
         i = next((k for k, (s, _) in enumerate(anchors) if s["stop_id"] == vs), None) if vs else None
         if i is None:
@@ -912,18 +918,23 @@ class Model:
                 i = next((k for k, (s, _) in enumerate(anchors) if s["status"] not in GONE), None)
             else:
                 i = next((k for k, (s, _) in enumerate(anchors) if (_t_dep(s) or 0) >= now), None)
+        if i is not None and at_s is not None and d and (at_s - anchors[i][1]) * d <= GPS_PAST_STOP_M:
+            while i is not None and (at_s - anchors[i][1]) * d > AT_STOP_M:
+                i = i + 1 if i + 1 < len(anchors) else None
         if i is None:
             return (len(anchors) - 1 if anchors else None), None
         return (i - 1 if i > 0 else None), i
 
-    def judge(self, t: dict, anchors: list, d: int, now: float, dist: float, s: float, last: dict | None, at: float) -> str:
+    def judge(self, t: dict, anchors: list, d: int, now: float, dist: float, s: float, last: dict | None, at: float,
+              gps: bool = False) -> str:
         """Why the feed's position for a train (dist off the line, s along it, in the feed of time at) can't be
         right, or "" when it can: off the line; outside the stretch between the stop it last left and the one it
         is going to; against its last good fix (when that is under RESET_S old): backwards, or faster than a
-        train goes once one reporting point's spacing is allowed for."""
+        train goes once one reporting point's spacing is allowed for. gps: a TrainTime position, which may be past
+        stops GTFS-realtime still has it at (legs at_s)."""
         if dist > MAIN_M:
             return "off the line"
-        p, n = self.legs(t, anchors, now)
+        p, n = self.legs(t, anchors, now, s, d) if gps else self.legs(t, anchors, now)
         if n is not None:
             if (s - anchors[n][1]) * d > STOP_SLACK_M:
                 return "beyond its next stop"
@@ -950,17 +961,28 @@ class Model:
         (that stop's Departed, or the vehicle in transit to the next): never on the timetable alone; a train the
         feed doesn't follow at all (no vehicle, no status) runs on its predicted times. lag_s: how much later
         than that run the train reached its fix (the page shifts the run by it)."""
-        p, n = self.legs(t, anchors, now)
+        # a TrainTime position: its stops by where it is (legs at_s), and GTFS-realtime's STOPPED_AT only while it is at
+        # that stop (that feed lags: "Stopped" with a GPS fix 700 m on at 47 mph, 2026-11-15)
+        tt_fix = fix is not None and fix.get("src") == "traintime"
+        p, n = self.legs(t, anchors, now, fix["s"], d) if tt_fix else self.legs(t, anchors, now)
         prev, nxt = (anchors[p] if p is not None else None), (anchors[n] if n is not None else None)
         vstatus = t.get("vstatus") or ""
-        left = vstatus in MOVING or (prev is not None and prev[0]["status"] in GONE) or not self.tracked(t)
+        if tt_fix and vstatus == "STOPPED_AT" and not (nxt is not None and nxt[0]["stop_id"] == (t.get("vstop") or nxt[0]["stop_id"])
+                                                      and abs(nxt[1] - fix["s"]) <= AT_STOP_M):
+            vstatus = "IN_TRANSIT_TO"
+        left = (vstatus in MOVING or (prev is not None and prev[0]["status"] in GONE) or not self.tracked(t)
+                or (tt_fix and prev is not None and (fix["s"] - prev[1]) * d > AT_STOP_M))
         seg = None
         if prev is not None and nxt is not None and left and vstatus != "STOPPED_AT" and nxt[0]["status"] != "Arrived":
             seg = {"from": prev[0]["stop_id"], "to": nxt[0]["stop_id"]} | segment(prev[1], nxt[1], _t_dep(prev[0]), _t_arr(nxt[0]))
         lag = None
         if fix is not None:
             s = fix["s"]
-            mode = "stopped" if vstatus == "STOPPED_AT" or fix.get("v") == 0.0 else "reported"
+            v_fix = fix.get("v")
+            if tt_fix and isinstance(v_fix, (int, float)):
+                mode = "stopped" if v_fix < STOP_MPS else "reported"     # its own speed says (never "Stopped · 47 mph")
+            else:
+                mode = "stopped" if vstatus == "STOPPED_AT" or v_fix == 0.0 else "reported"
             if seg is not None:
                 lag = fix["fix_at"] - profile_t(s, seg)
         else:
@@ -1068,6 +1090,11 @@ class Model:
                                             "lon": round(p["lon"], DP), "vehicle_status": t.get("vstatus") or "",
                                             "vehicle_stop_id": t.get("vstop") or ""}
                  | ({"cars": t["cars"]} if t.get("cars") else {}) | self.tt_facts(t, p, now))
+            rec = track.fix(t["id"])
+            if rec is not None and rec.get("src") == "traintime" and x.get("pos_src") == "traintime":
+                # what the page predicts this fix on from (the residuals: page_predict)
+                rec["page"] = {"hold": x["hold_s"], "stop": (x.get("next") or {}).get("s"), "until": x.get("predict_until"),
+                               "mode": x["mode"], "dyn": x.get("dyn")}
             other = out.get(x["train"])                  # one train drawn once: a reported one over an estimate of it
             if other is None or other["fix_at"] is None and x["fix_at"] is not None:
                 out[x["train"]] = x
@@ -1272,6 +1299,8 @@ A_PHYS = 1.5                     # m/s^2: no train's speed changes faster (an M7
 MOVED_NOISE_M = 14.0             # two GPS fixes' along-track error (about 10 m each, #375), in the distance moved
 MOVED_MIN_S = 2.0                # fixes closer in time than this: no speed from the distance moved
 SPEED_TOL = 1.5                  # m/s: two readings this close agree (and a speed jump this much over A_PHYS dt is allowed)
+SPEED_HOLD_MAX_S = 30.0          # fixes further apart than this: the new reading stands (a speed over a long gap says
+                                 # little of the speed now: a train that slowed while its fixes were refused kept 47 mph)
 A_CONFIRM = -0.447               # m/s^2 (1 mph/s): one falling reading is braked on only this steep (and the distance moved
                                  # agreeing); gentler, two in a row. (±1 mph of reading noise falls past A_BRAKE about 6 % of
                                  # the time over 5 s; past this, almost never)
@@ -1340,7 +1369,9 @@ def speed_check(last: dict | None, s: float, d: int, t: float, vf: float | None,
     jump = abs(vf - vl) > A_PHYS * dt + SPEED_TOL
     held = last.get("vf_held")                                          # a reading held back last time
     second = isinstance(held, (int, float)) and abs(vf - held) <= SPEED_TOL
-    if moved is not None and not agrees and abs(moved - vl) <= tol and abs(vf - vl) > tol and not second:
+    if dt > SPEED_HOLD_MAX_S:
+        pass                                                            # long gap: the new reading stands
+    elif moved is not None and not agrees and abs(moved - vl) <= tol and abs(vf - vl) > tol and not second:
         out.update(vf=vl, bad="speed")                                  # it ran on at the last reading
     elif jump and not agrees and not second:
         out.update(vf=vl, bad="speed")                                  # faster than any train: wait for a second one
@@ -1397,6 +1428,124 @@ def along_filter(last: dict | None, s: float, d: int, t: float, v_feed: float | 
     return u * d, v, a
 
 
+# How far off the page's prediction is (the admin, 2026-11-15: "do we log how far ahead/behind the predictions are over
+# time, so we can tune the algorithm?"). Each new TrainTime position is set against where the page's predictor
+# (motion.js rail / gpsRun, ported below) put the train at that position's time from its last good fix: the
+# along-track residual, + ahead of the train, - behind it. Kept in memory (the last PRED_KEEP), summarised in a log
+# line every PRED_LOG_S and on Data sources (TrainTime's row); never a line a fix.
+RAIL_CRUISE_S = 20.0             # motion.js: a GPS fix runs on at its speed this long, then eases to a stop (b)
+RAIL_STEP_S = 0.1
+RAIL_JERK = 1.5
+PRED_KEEP = 4000                 # residuals kept (a few hours of the area's trains)
+PRED_LOG_S = 300.0               # the summary line this often (when there were fixes)
+PRED_SHOW_S = 900.0              # Data sources' window
+PRED_GAPS = ((10.0, "≤10 s"), (20.0, "10-20 s"), (40.0, "20-40 s"), (math.inf, ">40 s"))   # time since the last fix
+SNAP_M = 150.0                   # motion.js SNAP_M: a residual bigger than this is snapped onto on the page (counted)
+
+
+def gps_run(v: float, a: float, tau: float, room: float = math.inf, dyn: dict | None = None) -> tuple[float, float]:
+    """motion.js gpsRun, line for line: (distance on, speed now) tau s after a GPS fix at v m/s, its acceleration a,
+    room metres to a scheduled stop ahead (inf: none), dyn the consist."""
+    dyn = dyn if dyn and isinstance(dyn.get("b"), (int, float)) else _EMU
+    brake = a if a < A_BRAKE else 0.0
+    if not brake and not room < math.inf and tau <= RAIL_CRUISE_S:
+        return v * tau, v
+    x = t = 0.0
+    cap = (lambda x_: math.sqrt(2 * dyn["bs"] * max(0.0, room - x_))) if room < math.inf else (lambda x_: math.inf)
+    u = min(v, cap(0.0))
+    while t < tau - 1e-9 and u > 0:
+        h = min(RAIL_STEP_S, tau - t)
+        du = brake * h
+        if not brake and t + h > RAIL_CRUISE_S:
+            du = -min(dyn["b"], RAIL_JERK * (t + h - RAIL_CRUISE_S)) * min(h, t + h - RAIL_CRUISE_S)
+        u1 = max(0.0, min(u + du, cap(x + u * h)))
+        x += (u + u1) * h / 2
+        u = u1
+        t += h
+    if room < math.inf and (x > room or (u == 0 and room - x < 2 * dyn["bs"] * RAIL_STEP_S)):
+        x = room
+    return x, u
+
+
+def page_predict(rec: dict, t: float) -> float:
+    """Where the page draws a train at time t from its last good TrainTime fix rec (motion.js rail's GPS branch), from
+    what the page was given for it (rec["page"]: {hold, stop, until, mode, dyn}; without, the TrainTime defaults)."""
+    s0, d = rec["s"], rec["d"]
+    pg = rec.get("page") or {}
+    v, a = rec.get("v"), rec.get("a") or 0.0
+    if not isinstance(v, (int, float)) or v <= 0 or pg.get("mode", "stopped" if v < STOP_MPS else "reported") == "stopped":
+        return s0
+    lim = pg.get("hold", s0 + d * HOLD_FALLBACK_TT_M)
+    stop = pg.get("stop")
+    if isinstance(stop, (int, float)) and (lim - stop) * d > 0 and (stop - s0) * d >= 0:
+        lim = stop
+    if (lim - s0) * d < 0:
+        lim = s0
+    until = pg.get("until", rec["fix_at"] + TT_HORIZON_S)
+    tau = max(0.0, min(t, until) - rec["fix_at"])
+    room = max(0.0, (stop - s0) * d) if isinstance(stop, (int, float)) and lim == stop else math.inf
+    if a < A_BRAKE:
+        rest = min(room, v * v / (2 * -a))
+        if (s0 + d * rest - lim) * d < 0:
+            lim = s0 + d * rest
+    x, _ = gps_run(v, a, tau, room, pg.get("dyn"))
+    s = s0 + d * x
+    return lim if (s - lim) * d >= 0 else s
+
+
+def _pct(xs: list[float], q: float) -> float:
+    xs = sorted(xs)
+    return xs[min(len(xs) - 1, max(0, math.ceil(q * len(xs)) - 1))]
+
+
+class Residuals:
+    """The page's prediction against each new TrainTime position: (at, residual m, gap s, speed used m/s, group)."""
+
+    def __init__(self, keep: int = PRED_KEEP):
+        self.rows: deque = deque(maxlen=keep)
+        self.total = 0
+
+    def add(self, at: float, res: float, gap: float, v: float, group: str) -> None:
+        self.rows.append((at, res, gap, v, group))
+        self.total += 1
+
+    @staticmethod
+    def _stats(rs: list[float]) -> dict:
+        return {"n": len(rs), "mean": round(sum(rs) / len(rs), 1), "median": round(_pct(rs, 0.5), 1),
+                "p90_abs": round(_pct([abs(r) for r in rs], 0.9), 1)}
+
+    def summary(self, now: float, window: float) -> dict:
+        """{n, mean, median, p90_abs, snaps, window_s, by_gap: {bucket: stats}, by_group: {"NH west": stats}} over the
+        last window seconds; {n: 0, window_s} with none."""
+        rows = [r for r in self.rows if now - r[0] <= window]
+        if not rows:
+            return {"n": 0, "window_s": window}
+        out = self._stats([r[1] for r in rows]) | {"window_s": window, "snaps": sum(1 for r in rows if abs(r[1]) > SNAP_M),
+                                                    "by_gap": {}, "by_group": {}}
+        lo = -math.inf
+        for hi, name in PRED_GAPS:
+            rs = [r[1] for r in rows if lo < r[2] <= hi]
+            if rs:
+                out["by_gap"][name] = self._stats(rs)
+            lo = hi
+        for g in sorted({r[4] for r in rows}):
+            out["by_group"][g] = self._stats([r[1] for r in rows if r[4] == g])
+        return out
+
+    @staticmethod
+    def text(s: dict, short: bool = False) -> str:
+        """"212 fixes · median +8 m · mean +15 m · p90 |err| 62 m · snaps 3 · by gap ≤10 s 150: +4/30, ... · by train
+        NH east 120: +6/50, ..." (each group: count: median/p90 |err|)."""
+        if not s.get("n"):
+            return "no fixes"
+        head = (f"{s['n']} fixes · median {s['median']:+.0f} m · mean {s['mean']:+.0f} m · p90 |err| {s['p90_abs']:.0f} m"
+                f" · snaps {s['snaps']}")
+        if short:
+            return head
+        part = lambda d: ", ".join(f"{k} {v['n']}: {v['median']:+.0f}/{v['p90_abs']:.0f}" for k, v in d.items())
+        return f"{head} · by gap {part(s['by_gap'])} · by train {part(s['by_group'])}"
+
+
 class Tracker:
     """Each train's last good fix across the feed's reads ({lat, lon, s, d, bearing, fix_at, first_read, raw, ok}),
     the refused ones counted (rejected, why), and the reporting points the good ones teach (points). A read
@@ -1412,6 +1561,8 @@ class Tracker:
         self.why: dict[str, int] = {}
         self._logged: float | None = None
         self._key: tuple | None = None
+        self.residuals = Residuals()                     # the page's prediction against each new TrainTime position
+        self._pred_logged: float | None = None
 
     def fix(self, tid: str) -> dict | None:
         """The train's last good fix; None when it has none, or the feed has been giving a refused position, or
@@ -1459,7 +1610,7 @@ class Tracker:
             if last is not None and fix_at <= last["fix_at"]:
                 rec["present"] = True                    # not newer than its last good fix: no change
                 continue
-            why = model.judge(t, anchors, d, now, dist, s, last, fix_at)
+            why = model.judge(t, anchors, d, now, dist, s, last, fix_at, gps=src == "traintime")
             if why:
                 if rec is None or rec["raw"] != raw:     # each refused position counted once, however long it stays
                     self._refused(t, why, raw, s, dist, at)
@@ -1468,6 +1619,9 @@ class Tracker:
                 else:
                     rec.update(raw=raw, ok=False)
                 continue
+            if src == "traintime" and last is not None and isinstance(last.get("v"), (int, float)) \
+                    and 0 < fix_at - last["fix_at"] <= RESET_S:
+                self._residual(t, last, s, d, fix_at, now)
             if last is not None and abs(s - last["s"]) <= CLUSTER_M and src == "gtfs":
                 rec.update(raw=raw, ok=True, present=True)   # back at (or a hair from) its last good fix: the same one
                 continue
@@ -1495,7 +1649,31 @@ class Tracker:
         for tid in [k for k in self.fixes if k not in seen]:
             del self.fixes[tid]
         self.at = at
+        self._pred_log(now)
         return True
+
+    def _residual(self, t: dict, last: dict, s: float, d: int, fix_at: float, now: float) -> None:
+        """A new TrainTime position (s, at fix_at) against where the page had the train then (page_predict)."""
+        try:
+            pred = page_predict(last, fix_at)
+        except (KeyError, TypeError, ValueError):
+            return
+        tt = t.get("tt") or {}
+        group = f"{tt.get('branch') or 'NH'} {'east' if d > 0 else 'west'}"
+        self.residuals.add(now, (pred - s) * d, fix_at - last["fix_at"], last.get("v") or 0.0, group)
+
+    def _pred_log(self, now: float) -> None:
+        """The summary line, every PRED_LOG_S while there were fixes: "trains: prediction 5m: 212 fixes · median +8 m
+        · ..." (+ ahead of the train, - behind)."""
+        if self._pred_logged is None:
+            self._pred_logged = now
+            return
+        if self.log is None or now - self._pred_logged < PRED_LOG_S:
+            return
+        s = self.residuals.summary(now, now - self._pred_logged)
+        self._pred_logged = now
+        if s.get("n"):
+            self.log(f"trains: prediction {PRED_LOG_S / 60:g}m (+ ahead / - behind the GPS fix): {Residuals.text(s)}")
 
     def _refused(self, t: dict, why: str, raw: tuple[float, float], s: float, dist: float, at: float) -> None:
         self.rejected += 1
@@ -1959,6 +2137,11 @@ class Trains:
         self.ask()
         with self._lock:
             return self._base() | m.approaching(self.view, lat, lon, self.clock(), self.track)
+
+    def prediction(self, window: float = PRED_SHOW_S) -> dict:
+        """How far off the page's prediction was over the last window seconds (Residuals.summary)."""
+        with self._lock:
+            return self.track.residuals.summary(self.clock(), window)
 
     def feed_health(self) -> dict:
         """Settings > Station > Health's row for MTA TrainTime (#362): ok, or on GTFS-realtime alone (fallback) and why."""

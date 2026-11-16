@@ -147,7 +147,9 @@ def test_a_clicked_train_is_followed_and_its_box_and_chip_stay_live(tmp_path):
     from tests.test_train_motion import STATIC
     o = run_node(tmp_path, [], f"const STATIC = {json.dumps(str(STATIC) + '/')};\n" + LOAD_TRAINS + r"""
 const flush = () => new Promise((r) => setTimeout(r, 0));
-const rows = () => info.find("ml-lines")[0].children.map((c) => [c.textContent, c.title]);
+// (the position line's Snap button, trains.js posLine, read apart: out.snap)
+const rows = () => info.find("ml-lines")[0].children.map((c) => [c.textContent.replace(/ \u00b7 (Snap|At fix)$/, ""), c.title]);
+const snapBtn = () => info.find("ml-lines")[0].children.map((c) => c.textContent).find((t) => / \u00b7 Snap$/.test(t)) || "";
 (async () => {
   const m = group.attach(control);
   await TrainLayer.load(); await flush();
@@ -156,7 +158,7 @@ const rows = () => info.find("ml-lines")[0].children.map((c) => [c.textContent, 
   await flush(); await flush();
   out.following = m.following; out.ease = rec.eases[0]; out.fired = [...rec.fired];
   out.chip = host.find("ac-follow-t")[0].textContent;
-  out.rows = rows();
+  out.rows = rows(); out.snap = snapBtn();
   out.route = layers["tr-route"].paint;
   const box = m.live, own = box.refresh.bind(box);
   let n = 0; box.refresh = () => { n++; own(); };
@@ -177,6 +179,7 @@ const rows = () => info.find("ml-lines")[0].children.map((c) => [c.textContent, 
     text = [r[0] for r in o["rows"]]
     pos = next(r for r in text if "mph" in r)
     assert pos.split(" · ")[0] in ("Reported", "Predicted") and "from" not in pos and pos.endswith(" s ago")   # no "from ·"
+    assert o["snap"].startswith(pos) and o["snap"].endswith(" · Snap")                       # and its Snap (snapToFix)
     cat = next(r for r in o["rows"] if r[0].startswith("⚡"))
     assert cat[0] == "⚡ 12.5 kV catenary + 3rd rail · treat as live" and "Treat all wires as live" in cat[1]
     assert o["route"]["line-dasharray"] and o["route"]["line-width"][-1] <= 2                 # a route, not a track
@@ -260,7 +263,7 @@ def test_an_old_gps_fix_draws_the_train_hollow_and_says_predicted(tmp_path):
     from tests.test_train_motion import STATIC
     o = run_node(tmp_path, [], f"const STATIC = {json.dumps(str(STATIC) + '/')};\n" + LOAD_TRAINS + r"""
 const flush = () => new Promise((r) => setTimeout(r, 0));
-const rows = () => info.find("ml-lines")[0].children.map((c) => c.textContent);
+const rows = () => info.find("ml-lines")[0].children.map((c) => c.textContent.replace(/ \u00b7 (Snap|At fix)$/, ""));
 let fc = null;
 (async () => {
   const m = group.attach(control);
