@@ -33,6 +33,7 @@ def tt_train(model, s, stops, speed, ts, vstatus="STOPPED_AT", vstop="", n="9960
     lat, lon, _ = model.line.at(s)
     t["pos"] = {"lat": round(lat, 6), "lon": round(lon, 6), "bearing": None, "ts": ts, "src": "traintime", "loc": "GPS",
                 "speed": speed}
+    t["tt"] = {"branch": "NH", "fleet": "M8", "cars": 8}     # (what TrainTime adds: the page then has its GPS speed)
     return t
 
 
@@ -54,12 +55,78 @@ def test_a_gps_fix_past_the_stop_gtfs_realtime_still_has_it_at_is_taken(model):
     for k, ds in enumerate((600.0, 700.0)):                    # 600 then 700 m past Port Chester, 21 m/s (47 mph)
         t = tt_train(model, pc - ds, stops, 21.0, NOW + 5 * k, vstop=st["Port Chester"]["id"])
         tk.update(model, {"timestamp": NOW + 5 * k, "tt_at": NOW + 5 * k, "trains": {t["id"]: t}}, NOW + 5 * k)
-    assert tk.rejected == 0 and tk.fix(t["id"])["ok"]          # before: refused, "beyond its next stop"
+    # the first, with no fix before it, only up to GTFS-realtime's next stop; the second agrees with it: taken (before:
+    # every one refused, "beyond its next stop", while that feed lagged)
+    assert tk.rejected == 1 and tk.fix(t["id"])["ok"]
     [x] = model.trains({"timestamp": NOW + 5, "trains": {t["id"]: t}}, NOW + 5, tk)
     assert x["mode"] == "reported"                             # its own speed says: not "Stopped" at 47 mph
     assert x["next"]["name"] == "Rye" and (x["hold_s"] - rye) * -1 <= 0.1    # on to Rye, never past it
     assert x["segment"] is not None and x["segment"]["to"] == st["Rye"]["id"]
     assert x["v_fix"] == pytest.approx(21.0, abs=1.0)
+
+
+def feed(tk, model, t, at):
+    tk.update(model, {"timestamp": at, "tt_at": at, "trains": {t["id"]: t}}, at)
+    return tk.fix(t["id"])
+
+
+def moving(model, st, stops, s, at, speed=21.0):
+    return tt_train(model, s, stops, speed, at, vstatus="IN_TRANSIT_TO", vstop=st["Rye"]["id"])
+
+
+def test_a_gps_jump_is_refused_and_a_wrong_fix_does_not_lock_the_train_out(model):
+    """Review of #589: a GPS fix 3.3 km on 5 s after the last (the 5 km rule with the MTA reporting points' 3.5 km
+    allowance let it through, and then every right fix was refused "backwards" for minutes): too fast for a GPS fix
+    (GPS_JUMP_M, not SPACING_M). And when the fix taken was wrong, two later fixes agreeing with each other win at once."""
+    st, stops = inbound(model)
+    pc = st["Port Chester"]["ch"]
+    stops = [stops[0], (stops[1][0], "Departed", stops[1][2])] + stops[2:]
+    tk = T.Tracker()
+    assert feed(tk, model, moving(model, st, stops, pc - 600, NOW), NOW)["ok"]
+    f = feed(tk, model, moving(model, st, stops, pc - 600 - 3300, NOW + 5), NOW + 5)
+    assert tk.why == {"too fast": 1} and f["s"] == pytest.approx(pc - 600, abs=1)            # refused: drawn where it was
+    f = feed(tk, model, moving(model, st, stops, pc - 600 - 210, NOW + 10), NOW + 10)
+    assert f["ok"] and f["s"] == pytest.approx(pc - 810, abs=60)                              # the next right one: taken
+    # a wrong fix that looked possible (300 m on in 10 s), then the train where it really is: 1 refused, then back
+    tk = T.Tracker()
+    feed(tk, model, moving(model, st, stops, pc - 600, NOW), NOW)
+    feed(tk, model, moving(model, st, stops, pc - 600 - 300, NOW + 10), NOW + 10)
+    f = feed(tk, model, moving(model, st, stops, pc - 600 - 50, NOW + 15), NOW + 15)
+    assert tk.why == {"backwards": 1} and not f["ok"]
+    f = feed(tk, model, moving(model, st, stops, pc - 600 - 100, NOW + 20), NOW + 20)   # (behind the wrong one: refused,
+    assert f["ok"] and f["s"] == pytest.approx(pc - 700, abs=1)                         # but agreeing with the one before: taken)
+
+
+def test_a_first_gps_fix_is_held_to_the_feeds_next_stop_and_none_runs_past_its_last(model):
+    st, stops = inbound(model)
+    pc = st["Port Chester"]["ch"]
+    tk = T.Tracker()
+    f = feed(tk, model, tt_train(model, pc - 1200, stops, 21.0, NOW, vstop=st["Port Chester"]["id"]), NOW)
+    assert f is None and tk.why == {"beyond its next stop": 1}                                # first: no further
+    # past its last stop (Harrison): never taken past it by more than STOP_SLACK_M, however it got there
+    hs = st["Harrison"]["ch"]
+    last = [(sid, "Departed", t_) for sid, _, t_ in stops[:-1]] + [stops[-1]]
+    tk = T.Tracker()
+    feed(tk, model, moving(model, st, last, hs + 300, NOW), NOW)
+    f = feed(tk, model, moving(model, st, last, hs + 200, NOW + 5), NOW + 5)
+    assert f["ok"]
+    f = feed(tk, model, moving(model, st, last, hs - 700, NOW + 50), NOW + 50)
+    assert not f["ok"] and tk.why == {"beyond its next stop": 2}           # (the first, too: past the feed's next stop)
+    [x] = model.trains({"timestamp": NOW + 50, "trains": {"9960": moving(model, st, last, hs - 700, NOW + 50)}}, NOW + 50, tk)
+    assert (x["hold_s"] - hs) * -1 <= 0.1                                                      # never predicted past it
+
+
+def test_stopped_has_hysteresis_and_gtfs_stopped_at_counts_at_the_stop(model):
+    st, stops = inbound(model)
+    pc = st["Port Chester"]["ch"]
+    a = model.anchors(train_at(model, pc, stops))
+    t = train_at(model, pc - 30, stops, vstatus="STOPPED_AT", vstop=st["Port Chester"]["id"])
+    base = {"s": pc - 30, "d": -1, "fix_at": NOW, "src": "traintime", "bearing": None, "first_read": False}
+    mode = lambda v, prev=None, vs="STOPPED_AT": model.place(dict(t, vstatus=vs), a, -1, NOW, base | {"v": v, "stopped_prev": prev})["mode"]
+    assert mode(0.3) == "stopped" and mode(0.8) == "stopped"                  # at its stop, STOPPED_AT: creeping is stopped
+    assert mode(0.8, vs="IN_TRANSIT_TO") == "reported"                         # not at it: 0.8 m/s is moving ...
+    assert mode(0.8, prev=True, vs="IN_TRANSIT_TO") == "stopped"               # ... unless it was stopped (MOVE_MPS)
+    assert mode(1.2, prev=True) == "reported" and mode(21.0) == "reported"     # never "Stopped · 47 mph"
 
 
 def test_a_gps_fix_far_past_its_next_stop_is_still_refused(model):
@@ -89,6 +156,9 @@ def test_a_speed_reading_after_a_long_gap_stands():
     assert chk["vf"] == 1.5 and chk["bad"] == ""
     chk = T.speed_check(last, 40_000.0 + 21.0 * 5, 1, NOW + 5, 1.5, True)   # 5 s on, the same: a bad reading, held
     assert chk["vf"] == 21.0 and chk["bad"] == "speed"
+    slow = dict(last, vf=5.0)                                                 # after a long gap, an impossible change still
+    chk = T.speed_check(slow, 40_000.0 + 5.0 * 31, 1, NOW + 31, 60.0, True)  # waits for a second reading (A_PHYS)
+    assert chk["vf"] == 5.0 and chk["bad"] == "speed"
 
 
 # ---- the residuals ---------------------------------------------------------------------------------------------------
@@ -141,13 +211,14 @@ def test_residuals_are_signed_ahead_and_summarised_by_gap_and_train():
     assert T.Residuals().summary(NOW, 600) == {"n": 0, "window_s": 600}
 
 
-def test_the_tracker_measures_each_new_gps_fix_and_logs_a_summary_line(model):
+def test_the_tracker_measures_each_new_gps_fix_and_logs_a_summary_line(model, monkeypatch):
+    monkeypatch.setattr(T, "PRED_LOG_S", 60.0)
     st, stops = inbound(model)
     pc = st["Port Chester"]["ch"]
     lines = []
     tk = T.Tracker(log=lines.append)
     # 20 m/s, a fix every 5 s; the train really runs at 16 m/s: each new fix is behind the prediction (+ ahead)
-    for k in range(70):
+    for k in range(13):                                      # (to 1 km on: short of braking for Rye)
         now = NOW + 5 * k
         t = tt_train(model, pc - 1000 - 16.0 * 5 * k, stops, 20.0 if k == 0 else 16.0, now, vstatus="IN_TRANSIT_TO",
                      vstop=st["Rye"]["id"])
@@ -156,10 +227,10 @@ def test_the_tracker_measures_each_new_gps_fix_and_logs_a_summary_line(model):
         tk.update(model, {"timestamp": now, "tt_at": now, "trains": {t["id"]: t}}, now)
         model.trains({"timestamp": now, "trains": {t["id"]: t}}, now, tk)      # a page looks: what it is given is kept
     rows = list(tk.residuals.rows)
-    assert len(rows) >= 60 and all(r[2] == 5 for r in rows)
+    assert len(rows) == 12 and all(r[2] == 5 for r in rows)
     assert rows[0][1] == pytest.approx((20.0 - 16.0) * 5, abs=2)               # the first: 20 m ahead
-    assert all(abs(r[1]) < 25 for r in rows[5:])                                # then the speed is learnt
-    pred = [x for x in lines if x.startswith("trains: prediction 5m")]
+    assert all(abs(r[1]) < 10 for r in rows[3:])                                # then the speed is learnt
+    pred = [x for x in lines if x.startswith("trains: prediction 1m")]
     assert len(pred) == 1 and "fixes · median" in pred[0] and "by train NH west" in pred[0]
 
 
@@ -201,7 +272,8 @@ drive("a", 0, 10);
 out.ok = tk.snapToFix("a", at(10));
 out.pinned = tk.pinned("a");
 out.held = drive("a", 10.1, 14);
-tk.set("a", { ...IN.f, at: at(0) }, at(14.05));                          // the same fix again (a new answer): still held
+tk.set("a", { ...IN.f, at: at(0) + 7 }, at(14.05));                      // the same fix again, a new answer (its at shifted
+                                                                         // by the answer's latency, trains.js fixOf): still held
 out.still = drive("a", 14.1, 16);
 tk.set("a", { ...IN.f, s: IN.f.s + 320, t0: IN.f.t0 + 16, fixAt: IN.f.fixAt + 16, at: at(16) }, at(16.05));   // a new fix
 out.next = drive("a", 16.1, 20);
@@ -213,3 +285,20 @@ out.none = tk.snapToFix("nobody");
     assert all(b <= a + 1e-9 for a, b in zip(out["held"], out["held"][1:]))   # eased back onto the fix ...
     assert out["held"][-1] == pytest.approx(s0, abs=0.01) and set(out["still"]) == {out["held"][-1]}   # ... and kept there
     assert out["next"][-1] > s0 + 320                                        # the next fix: predicted on again
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_only_a_new_gps_fix_snaps(tmp_path):
+    """Review of #589: every answer is "fresh"; a snap-back acts only on one carrying a new fix, and only a GPS one."""
+    out = node(tmp_path, TRACK + """
+tk.set("a", { ...IN.f, at: at(0) }, at(0));
+drive("a", 0, 5);
+tk.items.get("a").shown = { ...tk.items.get("a").shown, s: tk.items.get("a").shown.s + 300 };   // drawn 300 m off
+tk.set("a", { ...IN.f, at: at(0) + 9 }, at(5.05));                      // the same fix re-sent
+tk.where("a", at(5.1));
+out.resent = !!tk.items.get("a").snapTo;
+tk.set("a", { ...IN.f, s: IN.f.s + 100, t0: IN.f.t0 + 5, fixAt: IN.f.fixAt + 5, at: at(5) }, at(5.15));   // a new one
+tk.where("a", at(5.2));
+out.fresh = !!tk.items.get("a").snapTo;
+""", {"f": gps_fix()})
+    assert out["resent"] is False and out["fresh"] is True

@@ -64,7 +64,8 @@ window.Motion = (() => {
       const age = (now - it.fix.at) / 1000;
       it.stale = age > this.staleS;
       // snapped to its last fix by hand (snapToFix): drawn there, not predicted, until a different fix comes
-      const pinned = !!it.pin && it.pin.at === it.fix.at && it.pin.s === it.fix.s && it.pin.lon === it.fix.lon;
+      // (by the fix itself: its time and place; `at` moves by the answer's latency on every answer)
+      const pinned = !!it.pin && it.pin.fixAt === it.fix.fixAt && it.pin.s === it.fix.s;
       if (it.pin && !pinned) it.pin = null;
       const p = it.stale || pinned ? null : this.predict(it.fix, Math.min(this.horizonS, Math.max(0, age)));
       it.moving = !!p && p.moving !== false && age < this.horizonS;
@@ -81,6 +82,8 @@ window.Motion = (() => {
       if (!it) { this.items.set(id, { fix, off: null, easeAt: 0, shown: null, stale: false, moving: false }); return; }
       if (this.follow) {                       // drawn on from where it is now; follow() corrects onto the new fix
         if (it.shown) this.where(id, now);
+        // (every answer is fresh; newFix only one carrying a different fix: what a snap-back may act on)
+        it.newFix = it.newFix || fix.fixAt !== it.fix.fixAt || fix.s !== it.fix.s;
         it.fix = fix;
         it.fresh = true;
         return;
@@ -95,7 +98,7 @@ window.Motion = (() => {
       if (!it) return null;
       if (this.follow) {
         it.shown = this.follow(it, this.target(it, now), now);
-        it.fresh = false;
+        it.fresh = false; it.newFix = false;
         return it.shown;
       }
       const was = it.stale;
@@ -112,7 +115,7 @@ window.Motion = (() => {
     snapToFix(id, now = Date.now()) {
       const it = this.items.get(id);
       if (!it) return false;
-      it.pin = { at: it.fix.at, s: it.fix.s, lon: it.fix.lon };
+      it.pin = { fixAt: it.fix.fixAt, s: it.fix.s };
       it.snapNow = true;
       if (!this.follow && it.shown) this.rebase(it, this.target(it, now), now);
       return true;
@@ -369,7 +372,9 @@ window.Motion = (() => {
       // (by the faster of the train's speed and the drawn one's: a train drawn running on past where it stopped is
       // let off by up to that one's travel, glided back as before; past it, snapped. Mid-glide: only past SNAP_M)
       const lim = it.glide ? SNAP_M : snapM(Math.max(tg.v || 0, Math.abs(it.u || 0)));
-      if (it.snapNow || (it.fresh && Math.abs(miss) > lim)) {
+      // (GPS fixes only, MTA TrainTime: a GTFS-realtime estimate is closed by the band, #392; and only a new fix)
+      const gps = typeof it.fix.v === "number" && it.fix.fixAt != null;
+      if (it.snapNow || (it.newFix && gps && Math.abs(miss) > lim)) {
         if (Math.abs(miss) > 0.5) { it.snapTo = { off0: -miss, at: now }; it.glide = null; }
         it.snapNow = false;
       }
