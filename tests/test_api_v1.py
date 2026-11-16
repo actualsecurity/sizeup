@@ -177,3 +177,43 @@ def test_the_browsers_endpoints_are_not_v1s():
     for p in ("/api/cad/state", "/api/cad/stream", "/api/state", "/api/stream", "/api/scene", "/api/station/state",
               "/healthz", "/api/v1", "/api/v10/meta"):
         assert not v1.handles(p), p
+
+
+def test_every_route_declares_who_may_call_it_and_public_ones_are_few():
+    from sizeup.api.v1.routes import NEEDS, PUBLIC
+    assert all(r.need in NEEDS for r in ROUTES)
+    assert {(r.method, r.path) for r in ROUTES if r.need == "public"} <= PUBLIC
+    # the spec says the same: a public operation has `security: []`, every other one the device token
+    for r in ROUTES:
+        op = DOC["paths"][r.path][r.method.lower()]
+        assert (op.get("security") == []) == (r.need == "public"), (r.method, r.path)
+
+
+@pytest.fixture
+def hub_srv():
+    srv, url = serve(access=Access(), role="hub")
+    yield srv, url
+    srv.shutdown()
+
+
+def test_the_handover_503_is_in_the_envelope_and_the_consoles_is_not(hub_srv):
+    srv, url = hub_srv
+    srv.gate.draining.set()                                   # SIGTERM: draining for the next task
+    status, headers, body = call(url, "/api/v1/meta")
+    assert status == 503 and headers["Retry-After"] == "2"
+    err = json.loads(body)["error"]
+    assert err["code"] == "updating" and err["retry_after_s"] == 2
+    conforms(status, body, "GET", "/api/v1/meta")
+    status, _, body = call(url, "/api/cad/state")
+    assert status == 503 and not isinstance(json.loads(body).get("error"), dict)   # the console's own 503, unchanged
+
+
+def test_other_methods_answer_in_the_envelope_only_under_v1(hub_srv):
+    _, url = hub_srv
+    status, headers, body = call(url, "/api/v1/meta", "PUT", data=b"{}")
+    assert status == 405 and headers["Allow"] == "GET"
+    conforms(status, body, "GET", "/api/v1/meta")
+    assert call(url, "/api/v1/nope", "DELETE")[0] == 404
+    assert call(url, "/api/v1/meta", "PATCH", who=None, data=b"{}")[0] == 401
+    status, _, body = call(url, "/api/cad/state", "PUT", data=b"{}")
+    assert status == 501 and b"Unsupported method" in body       # http.server's answer, as before

@@ -681,6 +681,9 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
 
         def _updating(self) -> None:
             self.close_connection = True
+            if v1.handles(urlsplit(self.path).path):     # the app's API: the same 503, in its one error shape
+                return self._send(*v1_errors.error(503, "updating", "the hub is handing over: try again", 2,
+                                                   {"Connection": "close"}))
             self._send(503, UPDATING, "application/json", {"Retry-After": "2", "Cache-Control": "no-store",
                                                            "Connection": "close"})
 
@@ -855,6 +858,20 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
         # HEAD: what GET would answer, without the body. Netskope's browser isolation checks a page
         # with HEAD before loading it; it got 501 here (ECC workstation, 2026-10-08).
         do_HEAD = do_GET
+
+        def _other_method(self) -> None:
+            """PUT, PATCH, DELETE, OPTIONS: nothing serves them but /api/v1, which answers in its own error shape (a
+            405 or 404 today). Every other path gets the same 501 as before (http.server's own answer)."""
+            url = urlsplit(self.path)
+            if not v1.handles(url.path):
+                return self.send_error(HTTPStatus.NOT_IMPLEMENTED, f"Unsupported method ({self.command!r})")
+            self.close_connection = True     # the body is left unread
+            if gate.refuse(write=True):
+                return self._updating()
+            if self._admit(url.path):
+                self._v1(url.path, url.query)
+
+        do_PUT = do_PATCH = do_DELETE = do_OPTIONS = _other_method
 
         def _post(self) -> None:
             path = urlsplit(self.path).path
