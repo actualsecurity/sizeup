@@ -18,7 +18,7 @@ import re
 import shutil
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Callable
@@ -100,6 +100,8 @@ class Settings:
     airport_talkgroups: tuple[int, ...] = (333,)        # P25 Airport Incident: an open Airport event's (#87)
     airband: tuple[str, ...] = ()                  # HPN ATC channels (#233): never Main in Radio (busy, not ours)
     radio_seed: str = ""                           # "" = data/radio_ids.json
+    streetview_key: str = field(default="", repr=False)   # [streetview] google_key: GET /api/cad/streetview ("" = off)
+    streetview_limit: int = 4500                           # [streetview] monthly_limit: panoramas opened per month (0 = no limit)
 
 
 def _short(why: str, n: int = 160) -> str:
@@ -408,7 +410,8 @@ class Cad:
                             tactical=tuple(c.label for c in cfg.channels if c.kind == "traffic") or ("FG1",),
                             paging=tuple(c.label for c in cfg.channels if c.kind == "paging") or ("South 2",),
                             airband=tuple(c.label for c in cfg.channels if c.kind == "airband"),
-                            incident_talkgroups=tuple(sorted(cfg.p25_incident_talkgroups))),
+                            incident_talkgroups=tuple(sorted(cfg.p25_incident_talkgroups)),
+                            streetview_key=cfg.streetview_google_key, streetview_limit=cfg.streetview_monthly_limit),
                    geocoder=geocoder, log=log)
 
     # -- state ----------------------------------------------------------------------------------
@@ -1015,6 +1018,29 @@ class Cad:
 
     def history(self) -> dict:
         return {"incidents": self.store.history()}
+
+    # -- street view's monthly limit (static/streetview.js; Google bills each panorama opened past its free 5,000) ----------
+    def _streetview_key(self) -> str:
+        """The counter's name: the month, in Pacific time (Google's billing month)."""
+        try:
+            from zoneinfo import ZoneInfo
+            d = datetime.fromtimestamp(self.clock(), ZoneInfo("America/Los_Angeles"))
+        except Exception:                      # no tz database: UTC, a few hours off at a month's edge
+            d = datetime.utcfromtimestamp(self.clock())
+        return f"streetview_opens:{d:%Y-%m}"
+
+    def streetview_open(self, body: dict | None = None) -> dict:
+        """POST /api/cad/streetview/open: the page asks before it makes a panorama. Counts one and says ok, or says no
+        once the month's limit is reached. Fails closed: a store that can't write (a fenced hub, a full disk) is a no."""
+        if not self.s.streetview_key:
+            return {"ok": False, "why": "off", "used": 0, "limit": int(self.s.streetview_limit or 0)}
+        limit = int(self.s.streetview_limit or 0)
+        try:
+            ok, used = self.store.counter_take(self._streetview_key(), limit)
+        except Exception as e:                 # never the key; the class says enough
+            self.log(f"street view: count failed ({type(e).__name__}): no panorama")
+            return {"ok": False, "why": "unavailable", "used": 0, "limit": limit}
+        return {"ok": ok, "used": used, "limit": limit, **({} if ok else {"why": "limit"})}
 
     def admin(self) -> dict:
         return export.admin(self.store)

@@ -583,3 +583,11 @@ heartbeat_stale_min = 90             # no heartbeat (or restart) this long: "Tap
 # ref = "main"                               # the branch or tag to install
 # env = ["FEED_USER", "FEED_PASS"]           # names only: the variables that hold its credentials (kept out of every
 #                                            # other child process's environment)
+
+# [streetview]: 360-degree street imagery in the CAD maps (static/streetview.js; Google Maps JavaScript API). A browser
+# key restricted by HTTP referrer to the hub's address and to the Maps JavaScript API only: env SIZEUP_GOOGLE_MAPS_KEY
+# (the hub: SSM /sizeup-hub/google-maps-key; never in a committed file). No key (or "none"): off; admins see "key not set".
+# monthly_limit: panoramas the hub lets people open per month (the hub counts them; Google bills past its free 5,000), 0 = none.
+# [streetview]
+# google_key = ""
+# monthly_limit = 4500

@@ -845,6 +845,19 @@ class Store:
             self.db.execute("INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
                             (key, value))
 
+    def counter_take(self, key: str, limit: int) -> tuple[bool, int]:
+        """Count one use of `key` unless `limit` (0 = none) is already reached: (taken, the count now). The read and
+        the write are one step under the lock, so two requests never both take the last one. A fenced hub raises
+        FencedWrite (nothing written): the caller treats that as "no"."""
+        with self.lock:
+            r = self.db.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+            n = int(r[0]) if r and str(r[0]).isdigit() else 0
+            if limit and n >= limit:
+                return False, n
+            self.db.execute("INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                            (key, str(n + 1)))
+            return True, n + 1
+
     def q(self, sql: str, args=()) -> list[dict]:
         with self.lock:
             return [dict(r) for r in self.db.execute(sql, args)]
