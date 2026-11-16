@@ -92,7 +92,7 @@ def a_call(tg: int, name: str = "1", secs: float = 4.0, errors: int = 0, signal=
 def test_the_shipped_system_logs_its_decode_rate_and_says_what_a_test_is_about():
     conf = json.loads((Path(MRRS.dir) / "config.json").read_text())
     assert conf["controlWarnRate"] == -1                       # trunk-recorder logs the rate every 3 s, good or bad
-    assert MRRS.reception["watch"] == [PD, EMS] and "Harrison" in MRRS.reception["antenna"]
+    assert MRRS.reception["watch"] == [PD, EMS] and "its own feed" in MRRS.reception["antenna"]
     assert "LTE" in MRRS.reception["caveat"] and conf["systems"][0]["control_channels"][0] == 769906250
 
 
@@ -114,7 +114,7 @@ def test_a_side_measures_the_control_channel_the_site_the_grants_and_the_voice()
     assert (cc["windows"], cc["decoded_pct"], cc["locked_pct"], cc["min"], cc["max"]) == (10, 70.0, 80.0, 0, 41)
     assert cc["dropout_s"] == 6 and cc["lock_s"] == 9.0             # the two windows before it locked; the 4/s one: 3 s
     assert [(f["mhz"], f["windows"], f["decoded_pct"]) for f in cc["per_freq"]] == [(769.90625, 2, 0.0), (770.18125, 8, 87.5)]
-    assert cc["series"] == [28.3] and r["covers"] == [769.90625, 770.18125, 770.46875, 770.71875] and r["mhz"] == 770.3125
+    assert cc["series"] == [28.3] and r["covers"] == [769.90625, 770.18125, 770.46875, 770.71875] and r["mhz"] == 770.52188
     assert r["site"] == {"seen": {"sysid": "26D", "wacn": "91FE8", "nac": "51", "rfss": 81, "site": 81}, "match": True,
                          "differs": []}
     tgs = {t["tg"]: t for t in r["talkgroups"]}
@@ -222,10 +222,10 @@ def test_the_verdict_follows_the_share_of_the_time_the_control_channel_decodes(d
 def test_the_hint_says_what_to_try_in_plain_words():
     v = side([40] * 40 + [0] * 60)["verdict"]
     assert v["grade"] == "marginal" and v["hint"].startswith(
-        "Control channel decodes 40% of the time: try a directional (yagi) antenna toward Harrison")
+        "Control channel decodes 40% of the time: try a 700/800 MHz antenna on its own feed")
     assert "no LNA near the 700 MHz cell bands" in v["hint"]
     v = side([0] * 100, lines=[])["verdict"]
-    assert v["grade"] == "none" and v["hint"].startswith("No control channel on the 770 side: try the other side, then a directional")
+    assert v["grade"] == "none" and v["hint"].startswith("No control channel on the 770 side: try the other side, then a 700/800 MHz antenna")
     v = side([], lines=[])["verdict"]
     assert v["grade"] == "none" and "it didn't run on this dongle" in v["hint"]
     # a control channel that isn't the listed site's: never "good"
@@ -893,8 +893,8 @@ def test_every_side_is_swept_before_trunk_recorder_takes_the_dongle(lab, tmp_pat
     app.reception.sweep_fn = fake_sweep
     assert start(app, "air", pause="HPN Tower", jobs=["MRRS 770", "MRRS 773"], job=None) is None
     # both sides, with the airband job off the dongle and the dongle claimed for the test, and the lock not held
-    assert asked == [(str(power), 3, 4, 770312500.0, "MRRS test", "Off", True),
-                     (str(power), 3, 3, 773081250.0, "MRRS test", "Off", True)]
+    assert asked == [(str(power), 3, 4, 770521875.0, "MRRS test", "Off", True),
+                     (str(power), 3, 3, 772721875.0, "MRRS test", "Off", True)]
     rt = app.systems["mrrs"]
     feed(rt, clock, 769.90625, [40] * 10, lock_lines())
     sig = app.reception_state()["active"]["running"]["signal"]
@@ -1200,8 +1200,8 @@ def test_the_state_says_what_can_be_tested_and_on_which_dongle(lab):
          "jobs": [{"job": "County probe", "mhz": 477.19375, "cc": [476.075, 476.1125, 476.2125, 476.2375]}],
          "alert": [{"tg": 307, "name": "Fire/EMS 15"}, {"tg": 333, "name": "Airport Incident"}], "caveat": ""},
         {"name": "mrrs", "label": "MRRS", "kind": "system", "watch": [PD, EMS],
-         "jobs": [{"job": "MRRS 770", "mhz": 770.3125, "cc": [769.90625, 770.18125, 770.46875, 770.71875]},
-                  {"job": "MRRS 773", "mhz": 773.08125, "cc": [772.48125, 773.03125, 773.68125]}],
+         "jobs": [{"job": "MRRS 770", "mhz": 770.52188, "cc": [769.90625, 770.18125, 770.46875, 770.71875]},
+                  {"job": "MRRS 773", "mhz": 772.72187, "cc": [772.48125, 773.03125, 773.68125]}],
          "alert": [{"tg": PD, "name": "PD Dispatch"}, {"tg": EMS, "name": "PC-Rye EMS"}],
          "caveat": "Some traffic is carried over LTE and never on RF."}]
     assert st["durations"] == [15, 60, 240, 0] and st["keep_min"] == 10.0 and st["active"] is None and st["history"] == []
