@@ -23,7 +23,13 @@ How a page is read here (``PageLocator.locate``):
    between them = "all"; one does (the other misheard) = "partial"; cross streets said but none meets it = "none".
    A street both cross streets meet whose number was not heard (or not found) is placed on the block between them.
 4. Named places said ("Corpus Christi School": the gazetteer's landmarks and named places) are readings of their
-   own, checked the same way, and back an address within PLACE_NEAR_M.
+   own, checked the same way, and back an address within PLACE_NEAR_M. So are the department's own names (Settings >
+   Place names, the county's common place names among them: ``set_local_source``, never in the repo): every word of
+   the name but its town said in order ("Quillberry Marina"). A name of one word, or of generic and common English
+   words only (GENERIC, sizeup/geo/commonwords.py: "Community Hall - Sample Town", "Service Station") needs its town
+   said beside it ("sample town community hall", "the community hall in sample town"); another town said beside a
+   name is that town's, never this one. When a house-numbered address is said, a department name is never a reading
+   of its own: it only backs the address near it (PLACE_BONUS).
 5. Jurisdiction: the towns of the page's tones (Port Chester, Rye Brook: DISTRICT) and the towns the page names
    (mutual aid: "... to the Town of Greenwich") are in; a reading anywhere else is halved and never confirmed.
 
@@ -54,6 +60,7 @@ import numpy as np
 
 from .gazetteer import (CROSS_MARKERS, MUNI_PHRASES, MUNI_PRIOR, NOT_HOUSE_NUMBER_AFTER, STREET_STOP, Gazetteer,
                         Match, _latlon, _xy)
+from .commonwords import COMMON_WORDS
 from .normalize import BOUNDARY, TYPE_ABBRS, spaceless, tokenize
 
 DISTRICT = ("Port Chester", "Rye Brook")    # PCFD's district: always in for a page with our tones
@@ -73,6 +80,8 @@ NAME_EXACT = 0.95             # ... and with no cross street said, this well
 W_NAME, W_ALL, W_PARTIAL = 0.45, 0.35, 0.25
 TOWN_NEAR, TOWN_HOME, TOWN_IN = 0.18, 0.12, 0.08
 READ_BONUS, PLACE_BONUS = 0.04, 0.06
+LOCAL_TOWN_GAP = 3            # a department name's town said at most this many words before or after it
+LOCAL_FILL = {"the", "of", "a", "an", "at"}
 
 # Words that don't name a place on their own ("Corpus Christi School": "corpus christi" does).
 GENERIC = {
@@ -198,6 +207,106 @@ class PageLocator:
                 self.place_index[w].append(i)
         self._town_index: dict[frozenset, dict[str, list[int]]] = {}
         self._like_cache: dict[tuple[frozenset | None, str], tuple[str, ...]] = {}
+        self._local: tuple[tuple, list[dict], dict[str, list[int]]] = ((), [], {})
+
+    # ------------------------------------------------------------------ the department's own names
+
+    def locals(self) -> list[dict]:
+        """The department's place names with a point (set_local_source), each name and alias as {name, muni, lat, lon,
+        category, core (its words but its town and LOCAL_FILL), town (the town its name says, else ''), generic (no
+        word of its own: needs the town said)}. Built again only when they change."""
+        return self._local_state()[1]
+
+    def _local_state(self) -> tuple[tuple, list[dict], dict[str, list[int]]]:
+        """(signature, the names, a name's first word -> its names), swapped in whole."""
+        src = getattr(self.gaz, "_local_source", None)
+        try:
+            rows = [r for r in ((src() or ()) if src is not None else ())
+                    if r.get("lat") is not None and r.get("lon") is not None]
+        except Exception:  # noqa: BLE001 - no department names, pages read as before
+            rows = []
+        sig = tuple((r.get("name"), tuple(r.get("aliases") or ()), r.get("label"), r["lat"], r["lon"], r.get("muni"))
+                    for r in rows)
+        got = self._local
+        if sig == got[0]:
+            return got
+        out = []
+        for r in rows:
+            for n in [r.get("name") or "", *(r.get("aliases") or [])]:
+                words = [w for w in tokenize(n) if w != BOUNDARY]
+                town = ""
+                for phrase, muni, _near in MUNI_PHRASES:            # longest first: the town the name says
+                    k = next((i for i in range(len(words) - len(phrase) + 1)
+                              if tuple(words[i:i + len(phrase)]) == phrase), None)
+                    if k is not None:
+                        town, words = muni, words[:k] + words[k + len(phrase):]
+                        break
+                core = [w for w in words if w not in LOCAL_FILL]
+                if not core:
+                    continue
+                own = [w for w in core if w not in GENERIC and w not in TOWN_WORDS and w not in COMMON_WORDS
+                       and not w.isdigit() and len(w) >= 3]
+                out.append({"name": r.get("label") or r.get("name") or n, "muni": r.get("muni") or town,
+                            "lat": r["lat"], "lon": r["lon"], "category": "local name", "core": core, "town": town,
+                            "generic": not own or len(core) == 1})
+        first: dict[str, list[int]] = collections.defaultdict(list)       # a name's first word -> the names
+        for i, p in enumerate(out):
+            first[p["core"][0]].append(i)
+        self._local = (sig, out, dict(first))
+        return self._local
+
+    def _local_hits(self, tokens: list[str], skip: set[int], named, towns=None) -> list[tuple[int, int, dict, float]]:
+        """The department's names said: every word of a name but its town, in order (speech-to-text's spellings:
+        _word_match); a generic one with its town (the name's, else its own) said within LOCAL_TOWN_GAP words."""
+        found = []
+        n = len(tokens)
+        _sig, loc, first = self._local_state()
+        if not loc:
+            return found
+        for i in range(n):
+            if i in skip or tokens[i] == BOUNDARY:
+                continue
+            t = tokens[i]
+            for pi in (pi for w in self._first_words(t, first) for pi in first[w]):
+                p = loc[pi]
+                if towns is not None and p["muni"] not in towns:
+                    continue
+                core, k = p["core"], len(p["core"])
+                if i + k > n or any(x in skip or tokens[x] == BOUNDARY for x in range(i, i + k)):
+                    continue
+                if not all(_word_match(tokens[i + x], core[x]) for x in range(k)):
+                    continue
+                exact = all(tokens[i + x] == core[x] for x in range(k))
+                if k == 1 and not exact:
+                    continue                                # one word: as it is spelled
+                said = {m for s, e, m, _near in named
+                        if 0 <= s - (i + k) <= LOCAL_TOWN_GAP or 0 <= i - e <= LOCAL_TOWN_GAP}
+                mine = {p["town"] or p["muni"], p["muni"]}
+                if said and not said & mine:
+                    continue                                # another town said beside it: that town's, not this one
+                if p["generic"] and not said & mine:
+                    continue                                # common words, one word: only with its town said
+                found.append((i, i + k, p, 1.0 if exact else 0.92))
+        return found
+
+    @staticmethod
+    def _first_words(t: str, first: dict) -> list[str]:
+        """The names' first words a heard word may be (itself, or alike: _word_match only ever for 5 letters or more)."""
+        out = [t] if t in first else []
+        if len(t) >= 5:
+            out += [w for w in first if w != t and len(w) >= 5 and _word_match(t, w)]
+        return out
+
+    def local_said(self, text: str) -> bool:
+        """A department name is said in text (a cheap first look: sizeup/intel/place.py's cue)."""
+        _sig, loc, first = self._local_state()
+        if not loc:
+            return False
+        tokens = tokenize(text or "")
+        if not any(self._first_words(t, first) for t in set(tokens) if t != BOUNDARY):
+            return False
+        named = self.gaz._muni_mentions(tokens, self.gaz._street_mentions(tokens))
+        return bool(self._local_hits(tokens, set(), named))
 
     # ------------------------------------------------------------------ data
 
@@ -645,7 +754,9 @@ class PageLocator:
         street_tokens = {k for m in mentions if m.strong for k in range(m.start, m.end)}
         places = [h for h in self._place_hits(tokens, skip | cross_tokens, allowed if only else None)
                   if any(k not in street_tokens for k in range(h[0], h[1]))]     # "King Street" is not King Street School
-        for i, j, p, cov in places:
+        ours = [h for h in self._local_hits(tokens, skip | cross_tokens, named, allowed if only else None)
+                if any(k not in street_tokens for k in range(h[0], h[1]))]     # the department's own names
+        for i, j, p, cov in places + ([] if addrs else ours):     # an address said: ours only back it (below)
             checked, names = self._place_check(p["lat"], p["lon"], groups)
             tw = town(p["muni"], (i, j))
             score = W_NAME * cov * 0.85 + cross_part(checked, cov) + (tw or 0.0)
@@ -672,7 +783,7 @@ class PageLocator:
             if n > 1:
                 r.score += READ_BONUS * min(2, n - 1)
             if r.match.kind != "landmark":
-                near = [p for _i, _j, p, _c in places
+                near = [p for _i, _j, p, _c in places + ours
                         if _dist(r.match.lat, r.match.lon, p["lat"], p["lon"]) <= PLACE_NEAR_M]
                 if near:
                     r.score += PLACE_BONUS
@@ -737,6 +848,13 @@ def locator(gaz: Gazetteer) -> PageLocator:
         loc = PageLocator(gaz)
         gaz._page_locator = loc
     return loc
+
+
+def set_local_source(gaz: Gazetteer, source) -> None:
+    """The department's own place names for this gazetteer's page locator (and the radio's, sizeup/intel/place.py):
+    source() -> [{name, aliases?, label?, lat, lon, muni?}] (the CAD's Settings, Cad.local_places; a name without a point
+    is skipped). Read at each page, its index built again only when the names change."""
+    gaz._local_source = source
 
 
 def locate_page(gaz: Gazetteer, text: str, departments=()) -> PageGeo:

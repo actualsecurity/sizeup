@@ -93,6 +93,9 @@ POST /api/cad/settings/<section>          {action, ..., operator?}: event_types 
                                           received_via | unit_statuses | event_class | type_subtypes | geo_town_order | units |
                                           places {action: set, name, aliases?, place: {label, lat, lon, sub?}, note?} |
                                           {action: delete, key}: the department's own place names (#67) |
+                                          common_places {action: preview | apply, file (base64 .xlsx / .csv),
+                                          filename?, columns?: {address, name, town}} | {action: remove}: the county's
+                                          common place names (sizeup/cad/commonplaces.py; the body up to 4.5 MB) |
                                           dispatch | users | runcards | import (dry_run / apply) |
                                           dispatch {action: "voice_preview"} -> {text, audio_url, audio_note}:
                                           a sample said by the voice set now (the same render as a dispatch)
@@ -506,6 +509,11 @@ def _settings(m, b, o, c):
         return None
     if sec == "import":
         return "Changed settings: imported a settings file", ""
+    if sec == "common_places":                     # counts only, never a name or an address
+        if act == "preview":
+            return None
+        n = (o or {}).get("counts", {}).get("names")
+        return f"Changed settings: common places {act}" + (f" ({n} names)" if act == "apply" and n is not None else ""), ""
     if sec == "users":
         who = o.get("name") or b.get("name") or ""
         if act == "add":

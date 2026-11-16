@@ -551,6 +551,10 @@ class App:
             from sizeup.geo.pagegeo import location_detail, what_is_here
             self.cad.detail_source = lambda m: location_detail(self.gaz, m)
             self.cad.here_source = lambda lat, lon, places: what_is_here(self.gaz, lat, lon, places)
+            # the department's own place names (Settings, the county's common places among them): read by a page's
+            # locator and the radio's (sizeup/geo/pagegeo.py, sizeup/intel/place.py) as named places
+            from sizeup.geo.pagegeo import set_local_source
+            set_local_source(self.gaz, self.cad.local_places)
         # Radio ID -> rig, and who is transmitting right now (both pages' "talking").
         self.radios = self.cad.radios
         self.catchup = self._catchup_make()        # shed clips caught up later (sizeup/sttcatchup.py), from start()

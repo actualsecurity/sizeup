@@ -136,6 +136,9 @@ from sizeup.api.v1.handler import V1
 
 STATIC_DIR = Path(__file__).parent / "static"
 MAX_CAD_BODY = 65536
+# Settings > Lists > Place names > Import (sizeup/cad/commonplaces.py): the spreadsheet as base64 in the JSON body
+COMMON_PLACES_PATH = "/api/cad/settings/common_places"
+MAX_COMMON_PLACES_BODY = 4608 * 1024
 MAX_DOC_BODY = 25 * 1024 * 1024      # a site document upload (#459, sizeup/cad/preplan_docs.py MAX_BYTES)
 # role = "station": the only CAD routes served, (method, path): what Settings > Radios (radio-controls.js) uses
 # (not the squelch: set on the CAD of record only, Settings > Radios > Squelch; the station applies what the hub sends)
@@ -898,12 +901,19 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
             if path == "/api/cad/preplan/docs" and cad is not None:
                 return self._upload_doc(path)
             if path.startswith("/api/cad/") and cad is not None:
+                limit = MAX_CAD_BODY
+                if path == COMMON_PLACES_PATH:          # the county's place list, a spreadsheet: admins, checked first
+                    if self.who is not None and (refused := cad.permit(path, self.who, client=self._client())):
+                        self.close_connection = True    # the body is left unread
+                        return self._send(*refused)
+                    limit = MAX_COMMON_PLACES_BODY
                 try:
                     n = int(self.headers.get("Content-Length") or 0)
                 except ValueError:
                     n = -1
-                if not 0 <= n <= MAX_CAD_BODY:
-                    return self._send(400, b'{"error":"bad or too large body (64 KB max)"}', "application/json")
+                if not 0 <= n <= limit:
+                    return self._send(400, b'{"error":"bad or too large body (%d KB max)"}' % (limit // 1024),
+                                      "application/json")
                 return self._send(*cad.post(path, self.rfile.read(n), self.who, self._client()),
                                   {"Cache-Control": "no-store"} if path == "/api/cad/stations" else None)   # a new token
             if self.who is not None and cad is not None and (refused := cad.permit(path, self.who, client=self._client())):
