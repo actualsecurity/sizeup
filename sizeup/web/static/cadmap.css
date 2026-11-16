@@ -586,7 +586,6 @@
     font-size: var(--fs-sm); line-height: var(--lh-sm);
   }
   .sv-date { font-weight: 700; color: var(--text); font-variant-numeric: tabular-nums; }
-  .sv-facing { font-variant-numeric: tabular-nums; }
   .sv-head .spacer { flex: 1; }
   .sv-body { position: relative; flex: 1; min-block-size: 0; display: grid; grid-template-columns: minmax(0, 3fr) minmax(16rem, 2fr); }
   .sv-pano { position: relative; min-block-size: 0; background: var(--bg); }

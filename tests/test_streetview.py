@@ -521,7 +521,7 @@ def test_a_station_refuses_it_like_the_rest_of_the_cad(tmp_path):
 
 
 @pytest.mark.skipif(NODE is None, reason="node not installed")
-def test_headings_stay_in_0_to_359(tmp_path):
+def test_a_bearing_stays_in_0_to_359(tmp_path):
     h = tmp_path / "d.js"
     h.write_text(r"""
 global.window = global;
@@ -530,11 +530,10 @@ global.addEventListener = () => {};
 require(process.argv[2]);
 const S = window.StreetView;
 const near = S.bearing({ lat: 41.0, lon: -73.66 }, { lat: 41.001, lon: -73.66 - 1e-9 });   // a hair west of north
-console.log(JSON.stringify({ labels: [359.6, 359.4, 360, -0.4, 0, 720.2, -90].map(S.degLabel), near }));
+console.log(JSON.stringify({ near }));
 """)
     out = json.loads(subprocess.run([NODE, str(h), str(STATIC / "streetview.js")], capture_output=True, text=True, check=True,
                                     timeout=30).stdout)
-    assert out["labels"] == ["0°", "359°", "0°", "0°", "0°", "0°", "270°"]
     assert 0 <= out["near"] < 360 and out["near"] in (0, 359.9)
 
 

@@ -173,14 +173,13 @@ window.StreetView = (() => {
       dlg.setAttribute("aria-label", "Street view");
       const head = h("div", "sv-head");
       this.date = h("span", "sv-date");
-      this.facing = h("span", "sv-facing dim");
       const close = h("button", "btn sm icon quiet");
       close.type = "button";
       close.title = "Close (Esc)";
       close.setAttribute("aria-label", "Close street view");
       close.append(window.Icon ? Icon("x") : "×");
       close.addEventListener("click", () => this.close());
-      head.append(this.date, this.facing, h("span", "spacer"), close);
+      head.append(this.date, h("span", "spacer"), close);
       const body = h("div", "sv-body");
       this.panoEl = h("div", "sv-pano");
       this.msg = h("div", "sv-empty");
@@ -198,7 +197,6 @@ window.StreetView = (() => {
       const seq = ++this.seq;
       this.target = opts.face || null;
       this.setDate("");
-      this.facing.textContent = "";
       this.empty("");
       if (window.UI && UI.dialog) UI.dialog.open(this.ov, { onClose: () => this.closed(), opener: opts.opener });
       else this.ov.hidden = false;
@@ -272,8 +270,6 @@ window.StreetView = (() => {
       const pov = this.pano && this.pano.getPov();
       if (!pov) return;
       if (this.mark) this.mark.setRotation(pov.heading);
-      this.facing.textContent = degLabel(pov.heading);
-      this.facing.title = "Facing (compass degrees)";
     },
     // the viewer's small map: built on the first open (the dialog must be showing to size it)
     ensureMap(at) {
@@ -433,7 +429,6 @@ window.StreetView = (() => {
   // the view on screen and its call (cad.js viewTab, cad.sel): a pick belongs to the view it was armed in
   const where = () => `${typeof viewTab === "function" ? viewTab() : ""}|${typeof cad !== "undefined" ? cad.sel : ""}`;
   // a degree heading as shown: 0 to 359 (359.6 is 0, never "360")
-  const degLabel = (deg) => `${Math.round(((Number(deg) % 360) + 360) % 360) % 360}°`;
 
   // ---- one map: its button, its menu, its long press ------------------------------------------------------------------
   class SVMap {
@@ -577,7 +572,7 @@ window.StreetView = (() => {
 
 
   if (typeof cad !== "undefined" && cad.hooks) cad.hooks.push(syncAll);   // every render: a pick left behind by a view change
-  return { RADIUS_M, LONG_MS, SWALLOW_MS, degLabel, bearing, centroid, inRing, facePoint, dateLabel, mode, scriptUrl, menuItems, config,
+  return { RADIUS_M, LONG_MS, SWALLOW_MS, bearing, centroid, inRing, facePoint, dateLabel, mode, scriptUrl, menuItems, config,
            lastAt: () => V.lastAt || null,
            open: (at, face) => (current() === "on" ? V.open(at, { face }) : null) };
 })();
