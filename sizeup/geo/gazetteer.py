@@ -26,7 +26,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .localaddr import EMPTY as LOCAL_EMPTY, LocalAddresses, fractions_in
+from .localaddr import EMPTY as LOCAL_EMPTY, LocalAddresses, fraction_of, fractions_in
 from .normalize import (
     BOUNDARY, DIRECTIONS, TYPE_ABBRS, spaceless, street_aliases, tokenize,
 )
@@ -648,7 +648,7 @@ class Gazetteer:
         for sid, sim in m.cands:
             st = self.streets[sid]
             for muni in self.address_towns(sid, local):
-                frac = (fracs or {}).get((digits, sid), "")    # "189-1/2": the tokens kept 189
+                frac = fraction_of(fracs or {}, digits, sid)    # "189-1/2": the tokens kept 189
                 res = self.locate_at(sid, muni, digits, suffix, frac, local)
                 if res is None:
                     continue

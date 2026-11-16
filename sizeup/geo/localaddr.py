@@ -27,7 +27,9 @@ _IN_TEXT = re.compile(r"(?<![\d./])(\d{1,6})(?:([a-z])(?![a-z]))?"
                       re.I)
 # a number after these is no house number ("mm 10.5", "rt 9.5", "box 12.25", "i-95"); nor one before these ("10.5 min")
 _NOT_HOUSE = re.compile(r"\b(?:mm|mile|miles|marker|mp|milepost|post|exit|ref|route|rte|rt|hwy|highway|i|interstate|"
-                        r"pkwy|parkway|box|unit|engine|ladder|car|apt|suite|floor|no|number)[\s#-]*$", re.I)
+                        r"pkwy|parkway|box|unit|engine|ladder|car|apt|suite|floor)[\s#-]*$", re.I)
+_HEADING = re.compile(r"\s*(?:north|south|east|west|[nsew]b|(?:north|south|east|west)bound|of|from|to|and|on|at)\b",
+                      re.I)
 _NOT_STREET = re.compile(r"\s*(?:min|mins|minutes|mi|miles|ft|feet|hours?|hrs?|secs?|seconds|stor(?:y|ies)|"
                          r"floors?|percent|degrees?|%)\b", re.I)
 
@@ -105,11 +107,22 @@ def fractions_in(text: str, street_at) -> tuple[str, dict[tuple[int, int], str]]
             return m.group(0)
         sids = street_at(after) if street_at else ()
         if not sids:
-            return m.group(0)
+            if m.group(8) is not None or not re.match(r"\s*[a-z]{3,}", after, re.I) or _HEADING.match(after):
+                return m.group(0)                # a decimal, or "1/2 north of": only before a street it knows
+            sids = (None,)                       # a misheard street ("Exampel"): whichever street the reader picks
         for sid in sids:
             out.setdefault((int(m.group(1)), sid), f)
         return m.group(1) + (m.group(2) or "")
-    return _IN_TEXT.sub(keep, text or ""), out
+    plain = _IN_TEXT.sub(keep, text or "")
+    for k in [k for k in out if k[1] is None]:   # ... only while that number is said once (never another "189"'s)
+        if len(re.findall(rf"(?<![\d.]){k[0]}(?![\d])", plain)) != 1:
+            del out[k]
+    return plain, out
+
+
+def fraction_of(fracs: dict, num: int, sid: int) -> str:
+    """The fraction said with house number num on street sid (fractions_in), else ''."""
+    return fracs.get((num, sid)) or fracs.get((num, None)) or ""
 
 
 # ----------------------------------------------------------------------------------- the gazetteer's side

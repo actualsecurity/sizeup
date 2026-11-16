@@ -58,7 +58,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from .localaddr import fractions_in
+from .localaddr import fraction_of, fractions_in
 from .gazetteer import (CROSS_MARKERS, MUNI_PHRASES, MUNI_PRIOR, NOT_HOUSE_NUMBER_AFTER, STREET_STOP, Gazetteer,
                         Match, _latlon, _xy)
 from .commonwords import COMMON_WORDS
@@ -712,7 +712,7 @@ class PageLocator:
                 st = gaz.streets[sid]
                 placed_all = False
                 for muni in gaz.address_towns(sid, local):
-                    res = gaz.locate_at(sid, muni, digits, suffix, fracs.get((digits, sid), ""), local)
+                    res = gaz.locate_at(sid, muni, digits, suffix, fraction_of(fracs, digits, sid), local)
                     if res is None:
                         continue
                     lat, lon, q, precision, label_num, _source = res

@@ -159,6 +159,19 @@ def test_a_local_point_beats_the_gazetteers_own_exact_point(gaz):
     assert (m.lat, m.precision) == (BEHIND[0], "exact")
 
 
+def test_a_misheard_street_keeps_the_fraction_for_the_street_the_page_picks(gaz):
+    set_local_addresses(gaz, lambda: rows(("189-1/2", "Example St", EX, BEHIND)))
+    best = locate_page(gaz, "Engine 58 respond 189-1/2 Exampel Street odor").best.match
+    assert (best.lat, best.lon, best.house_number) == (*BEHIND, "189 1/2")
+    # the number said twice: never another 189's fraction
+    assert fractions_in("189 Sample St, 189-1/2 Exampel St", gaz.streets_at)[1] == {}
+
+
+def test_number_before_the_house_number_keeps_the_fraction(gaz):
+    set_local_addresses(gaz, lambda: rows(("189-1/2", "Example St", EX, BEHIND)))
+    assert gaz.geocode("number 189 1/2 Example St").lat == BEHIND[0]
+
+
 def test_a_page_reads_the_fraction(gaz):
     set_local_addresses(gaz, lambda: rows(("189-1/2", "Example St", EX, BEHIND)))
     best = locate_page(gaz, "Engine respond to 189-1/2 Example Street for an odor").best.match
