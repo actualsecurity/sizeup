@@ -83,10 +83,17 @@ def test_numbers_letters_and_what_is_not_one():
     assert split_address("12 1st Ave")[0] == HouseNumber(12)
 
 
-def test_fractions_in_free_text_leave_a_mile_marker_alone():
-    text, fr = fractions_in("Fire at 189-1/2 Example St, 23.5 Sample St")
-    assert text == "Fire at 189 Example St, 23 Sample St" and fr == {189: "1/2", 23: "1/2"}
-    assert fractions_in("I-287 EB MM 10.5 eastbound") == ("I-287 EB MM 10.5 eastbound", {})
+def test_fractions_in_free_text_are_tied_to_the_street_after_them(gaz):
+    text, fr = fractions_in("Fire at 189-1/2 Example St, 23.5 Sample St", gaz.streets_at)
+    ex, sa = gaz.street_id("Example St"), gaz.street_id("Sample St")
+    assert text == "Fire at 189 Example St, 23 Sample St" and fr == {(189, ex): "1/2", (23, sa): "1/2"}
+
+
+@pytest.mark.parametrize("text", ["I-287 EB MM 10.5 eastbound", "10.5 min ago on Example St", "rt 9.5 Example St",
+                                  "16.5 north of the bridge", "Box 12.25 Sample St", "3 1/2 story frame",
+                                  "3.5 min out", "units 2.5 miles away", "189½, Example St"])
+def test_a_decimal_or_fraction_that_is_no_house_number_is_left_alone(gaz, text):
+    assert fractions_in(text, gaz.streets_at) == (text, {})
 
 
 # -- the gazetteer ---------------------------------------------------------------------------------------
@@ -128,6 +135,28 @@ def test_rows_with_an_unknown_street_or_number_are_skipped(gaz):
     assert not gaz.local_addresses()
     set_local_addresses(gaz, lambda: 1 / 0)                         # a broken source: the address points as before
     assert gaz.geocode("3 Sample St").precision == "interpolated"
+
+
+def test_a_fraction_elsewhere_in_the_text_never_hides_a_local_point(gaz):
+    set_local_addresses(gaz, lambda: rows(("3", "Sample St", EX, STATION)))
+    best = locate_page(gaz, "Structure fire 3 Sample St, 3 1/2 story frame").best.match
+    assert (best.lat, best.lon, best.precision) == (*STATION, "exact")
+    m = gaz.geocode("3 Sample St, 3.5 min out")
+    assert (m.lat, m.lon, m.precision) == (*STATION, "exact")
+
+
+def test_a_fraction_not_pinned_takes_the_local_integer_point_next(gaz):
+    set_local_addresses(gaz, lambda: rows(("3", "Sample St", EX, STATION), ("10", "Test Ave", SA, (41.01, -73.675))))
+    m = gaz.geocode("3-1/2 Sample St")
+    assert (m.lat, m.lon, m.house_number, m.precision) == (*STATION, "3", "approximate")
+    m = gaz.geocode("10-1/2 Test Ave")                       # a street with no address points: the local 10
+    assert (m.kind, m.lat, m.house_number, m.precision) == ("address", 41.01, "10", "approximate")
+
+
+def test_a_local_point_beats_the_gazetteers_own_exact_point(gaz):
+    set_local_addresses(gaz, lambda: rows(("189", "Example St", EX, BEHIND)))
+    m = gaz.geocode("189 Example St")
+    assert (m.lat, m.precision) == (BEHIND[0], "exact")
 
 
 def test_a_page_reads_the_fraction(gaz):
@@ -189,6 +218,21 @@ def test_settings_refuses_what_it_cannot_place(cad):
         pin(cad, "3 Sample Street", STATION)
 
 
+def test_on_a_street_through_two_towns_the_pin_is_on_the_typed_towns_stretch(tmp_path):
+    db = sqlite3.connect(synthetic(tmp_path / "two.sqlite"))
+    db.execute("INSERT INTO lines VALUES (1, ?, ?)", (SA, json.dumps([[LON + 0.008, LAT], [LON + 0.02, LAT]])))
+    db.commit()
+    db.close()
+    g = Gazetteer(tmp_path / "two.sqlite")
+    c = make_cad(tmp_path, geocoder=lambda q: [])
+    c.place_source = lambda: PlaceIndex(g)
+    set_local_addresses(g, c.local_addresses)
+    with pytest.raises(CadError, match=f"over 400 m from Example St in {SA}"):
+        pin(c, "189-1/2 Example St", BEHIND, town=SA)                 # on the street, but in the other town
+    assert pin(c, "301 Example St", (LAT, LON + 0.015), town=SA)["key"] == f"301 example st, {SA.lower()}"
+    assert pin(c, "303 Example St", (LAT, LON + 0.015))["key"] == f"303 example st, {SA.lower()}"
+
+
 def test_the_town_comes_from_the_pin_or_the_address(cad):
     assert pin(cad, "10 Test Ave", (41.01, -73.675))["key"] == f"10 test ave, {SA.lower()}"
     assert pin(cad, "12 Test Ave, Sampleville", (41.01, -73.675))["key"] == f"12 test ave, {SA.lower()}"
@@ -205,9 +249,21 @@ def test_exported_and_imported_with_the_rest(cad, tmp_path, gaz):
     data = cad.settings_export()
     assert list(data["overrides"]["local_addresses"]) == [f"189 1/2 example st, {EX.lower()}"]
     bad = json.loads(json.dumps(data))
-    bad["overrides"]["local_addresses"]["x"] = {"number": "x", "street": "Example St", "muni": EX, "lat": 41, "lon": -73.7}
-    with pytest.raises(CadError, match="local_addresses"):
-        post(cad, "import", action="dry_run", settings=bad)
+    pts = bad["overrides"]["local_addresses"]
+    pts["x"] = {"number": "x", "street": "Example St", "muni": EX, "lat": 41, "lon": -73.7}           # no number
+    pts["3 nowhere rd, exampleton"] = {"number": "3", "street": "Nowhere Rd", "muni": EX, "lat": 41, "lon": -73.7}
+    pts["3 sample st, sampleville"] = {"number": "3", "street": "Sample St", "muni": SA, "lat": STATION[0],
+                                       "lon": STATION[1]}                                          # not its town
+    pts["5 sample st, exampleton"] = {"number": "5", "street": "Sample St", "muni": EX, "lat": 40.9, "lon": -73.8}
+    pts["9 sample st, exampleton"] = {"number": "7", "street": "Sample St", "muni": EX, "lat": STATION[0],
+                                      "lon": STATION[1]}                                           # key not its value's
+    pts["1 sample st, exampleton"] = {"number": "1", "street": "Sample St", "muni": EX, "lat": STATION[0],
+                                      "lon": STATION[1], "note": 7}
+    dry = post(cad, "import", action="dry_run", settings=bad)
+    assert "address points: 6 skipped (not placeable here)" in dry["notes"]
+    post(cad, "local_addresses", action="delete", key=f"189 1/2 example st, {EX.lower()}")
+    post(cad, "import", action="apply", settings=bad)
+    assert [i["key"] for i in cad.settings_get()["local_addresses"]["items"]] == [f"189 1/2 example st, {EX.lower()}"]
 
 
 def test_the_common_places_import_takes_the_local_point_first(cad, gaz):

@@ -1443,27 +1443,9 @@ class Editor:
         if not (40.0 <= lat <= 42.0 and -75.0 <= lon <= -72.0):
             raise CadError("pin: lat and lon in the area")
         ix = self.cad.place_index()
-        gaz = getattr(ix, "gaz", None)
-        if gaz is None:
+        if getattr(ix, "gaz", None) is None:
             raise CadError("the gazetteer is not loaded: try again shortly")
-        sid = gaz.street_id(street_text)
-        if sid is None:                      # "Example Street": the street whose every word was typed
-            hits = [k for k, q in ix.street_ix.match(norm_tokens(street_text), limit=6) if q >= 0.99]
-            sids = [ix.street_ids[k] for k in hits]
-            sid = min(sids, key=lambda i: gaz._dist_to_street(i, lat, lon)) if sids else None
-        if sid is None or not norm_tokens(street_text):
-            raise CadError(f"street: {street_text.strip()!r} not in the map data")
-        street = gaz.streets[sid].name
-        towns = gaz.street_towns(sid)
-        town_of = self.cad.lists.town_of
-        if town:
-            muni = next((m for m in towns if town.lower() in (m.lower(), (town_of(m) or "").lower())), None)
-            if muni is None:
-                raise CadError(f"town: {street} is in {', '.join(sorted({town_of(m) or m for m in towns})) or 'no town'}")
-        else:
-            muni = gaz.town_near(sid, lat, lon) or (towns[0] if towns else "")
-        if gaz._dist_to_street(sid, lat, lon) > ADDR_PIN_M:
-            raise CadError(f"pin: over {ADDR_PIN_M} m from {street}")
+        street, muni = self._addr_place(ix, street_text, town, lat, lon)
         hn = sp[0]
         key = f"{hn.label} {street}, {muni}".lower()
         old_key = _text(body.get("key"), "key", 160, required=False)
@@ -1481,6 +1463,60 @@ class Editor:
             changes.insert(0, (ADDR_SECTION, old_key, REMOVE))
             audit.insert(0, ("lists", f"address/{old_key}", cur[old_key], None))
         return dict(self._commit(changes, op, audit), key=key)
+
+    def _addr_place(self, ix, street_text: str, town: str, lat: float, lon: float) -> tuple[str, str]:
+        """The street (the gazetteer's name) and town (its muni) of a pin, checked: a street of the map data, a town it
+        is in, the pin within ADDR_PIN_M of that town's stretch of it. Blank town: the street's town at the pin."""
+        gaz = ix.gaz
+        sid = gaz.street_id(street_text)
+        if sid is None:                      # "Example Street": the street whose every word was typed
+            hits = [k for k, q in ix.street_ix.match(norm_tokens(street_text), limit=6) if q >= 0.99]
+            sids = [ix.street_ids[k] for k in hits]
+            sid = min(sids, key=lambda i: gaz._dist_to_street(i, lat, lon)) if sids else None
+        if sid is None or not norm_tokens(street_text):
+            raise CadError(f"street: {street_text.strip()!r} not in the map data")
+        street = gaz.streets[sid].name
+        towns = gaz.street_towns(sid)
+        town_of = self.cad.lists.town_of
+        if town:
+            muni = next((m for m in towns if town.lower() in (m.lower(), (town_of(m) or "").lower())), None)
+            if muni is None:
+                raise CadError(f"town: {street} is in {', '.join(sorted({town_of(m) or m for m in towns})) or 'no town'}")
+        else:
+            muni = gaz.town_near(sid, lat, lon) or (towns[0] if towns else "")
+        if gaz.dist_in_town(sid, muni, lat, lon) > ADDR_PIN_M:
+            raise CadError(f"pin: over {ADDR_PIN_M} m from {street}" + (f" in {town_of(muni) or muni}" if muni else ""))
+        return street, muni
+
+    def _import_addresses(self, sec: dict) -> tuple[dict, list[str]]:
+        """An imported local_addresses section, each point checked as the form checks it (a known street, its town,
+        the pin on that town's stretch, the key its value's, at most MAX_LOCAL_ADDRESSES): a point that fails is
+        skipped, counted in the notes. Without the gazetteer the streets can't be checked: kept as they are."""
+        ix = self.cad.place_index()
+        kept, bad = {}, 0
+        for k, v in sec.items():
+            try:
+                if not isinstance(v, dict) or set(v) - {"number", "street", "muni", "lat", "lon", "note"}:
+                    raise CadError("fields")
+                hn = parse_number(v.get("number")) if isinstance(v.get("number"), str) else None
+                if hn is None or not isinstance(v.get("street"), str) or not isinstance(v.get("muni"), str) \
+                        or not isinstance(v.get("note", ""), str) or len(v.get("note", "")) > 120:
+                    raise CadError("fields")
+                lat, lon = v.get("lat"), v.get("lon")
+                if any(isinstance(c, bool) or not isinstance(c, (int, float)) for c in (lat, lon)) \
+                        or not (40.0 <= lat <= 42.0 and -75.0 <= lon <= -72.0):
+                    raise CadError("pin")
+                if getattr(ix, "gaz", None) is not None:
+                    street, muni = self._addr_place(ix, v["street"], v["muni"], float(lat), float(lon))
+                    if (street, muni) != (v["street"], v["muni"]):
+                        raise CadError("street")
+                if k != f"{hn.label} {v['street']}, {v['muni']}".lower() or len(kept) >= MAX_LOCAL_ADDRESSES:
+                    raise CadError("key")
+            except CadError:
+                bad += 1
+                continue
+            kept[k] = dict(v)
+        return kept, ([f"address points: {bad} skipped (not placeable here)"] if bad else [])
 
     def _addresses_page(self) -> dict:
         """Settings > Lists > Address points."""
@@ -3037,12 +3073,9 @@ class Editor:
         self._ds_check(ov.get(DS_SECTION) or {})
         for k, v in (ov.get("alarms") or {}).items():         # sizeup/cad/alarms.py (#128)
             ov["alarms"][k] = alarms_mod.clean(k, v)
-        for k, v in (ov.get(ADDR_SECTION) or {}).items():     # sizeup/geo/localaddr.py: what the gazetteer reads
-            ok = (isinstance(v, dict) and isinstance(v.get("number"), str) and parse_number(v["number"]) is not None
-                  and isinstance(v.get("street"), str) and isinstance(v.get("muni"), str)
-                  and all(isinstance(v.get(c), (int, float)) and not isinstance(v.get(c), bool) for c in ("lat", "lon")))
-            if not ok or not (40.0 <= v["lat"] <= 42.0 and -75.0 <= v["lon"] <= -72.0):
-                raise CadError(f"overrides.{ADDR_SECTION}.{k}: {{number, street, muni, lat, lon, note?}}")
+        if ADDR_SECTION in ov:            # sizeup/geo/localaddr.py: a point that can't be placed is skipped, in the notes
+            ov[ADDR_SECTION], more = self._import_addresses(ov[ADDR_SECTION])
+            self._import_notes = list(getattr(self, "_import_notes", None) or []) + more
         a = ov.get(ATC_SECTION) or {}
         if set(a) - set(ATC_KEYS) or any(not isinstance(v, bool) for v in a.values()):
             raise CadError("overrides.atc: identify and map, true or false")

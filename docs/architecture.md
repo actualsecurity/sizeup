@@ -358,17 +358,21 @@ lot), a station or a new building with no point of its own ("3 Sample St"). Sett
   with that address filled in.
 
 Each point is found like one of the gazetteer's own (`sizeup/geo/localaddr.py`, `Gazetteer.locate_at`): precision
-`exact`, source `local`, ahead of an interpolation between two numbers and ahead of a fractional number's integer part.
+`exact`, source `local`, ahead of the gazetteer's point for that number (the admin's pin wins), of an interpolation
+and of a fractional number's integer part. A fraction not pinned ("3-1/2" with only 3 pinned) takes the local integer
+point, `approximate`.
 The place search and the location box, a page (`sizeup/geo/pagegeo.py`), a click on the new call's map
 (`what_is_here`) and the common places import (`PlaceIndex.local_address`, before the address points) all see it.
 
 House numbers are read by one helper (`localaddr.parse_number`): `189-1/2`, `189 1/2`, `189½` and `189.5` are one
-number, shown `189 1/2`; `189A` is a letter suffix, as in the address points. In free text (`fractions_in`) a decimal
-after a mile-marker word ("MM 10.5") is left alone.
+number, shown `189 1/2`; `189A` is a letter suffix, as in the address points. In free text (`fractions_in`) a fraction
+counts only when a street the gazetteer knows follows it, and only for that street: "3 1/2 story", "10.5 min ago",
+"rt 9.5", "Box 12.25" are left alone.
 
 They are kept in `cad.sqlite` (`settings_overrides`, section `local_addresses`, key `<number> <street>, <town>` in
 lower case: `{number, street, muni, lat, lon, note}`), audited as Lists, and exported and imported with the other
-settings.
+settings. An imported point is checked as the form checks it (its street, its town, the pin on that town's stretch,
+its key, the cap); one that fails is skipped and counted in the import's notes.
 
 ## Notifications
 

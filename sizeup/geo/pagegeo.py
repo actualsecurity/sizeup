@@ -612,7 +612,7 @@ class PageLocator:
         whole county; a page (only False) is read as it always was."""
         prm = {"confirm": CONFIRM, "rival": RIVAL, "rival_m": RIVAL_M, "sound_min": SOUND_MIN, **(params or {})}
         gaz = self.gaz
-        plain, fracs = fractions_in(text or "")       # "189-1/2": the local point (sizeup/geo/localaddr.py)
+        plain, fracs = fractions_in(text or "", gaz.streets_at)       # "189-1/2": the local point (sizeup/geo/localaddr.py)
         local = gaz.local_addresses()
         tokens = tokenize(plain)
         mentions = gaz._street_mentions(tokens)
@@ -712,7 +712,7 @@ class PageLocator:
                 st = gaz.streets[sid]
                 placed_all = False
                 for muni in gaz.address_towns(sid, local):
-                    res = gaz.locate_at(sid, muni, digits, suffix, fracs.get(digits, ""), local)
+                    res = gaz.locate_at(sid, muni, digits, suffix, fracs.get((digits, sid), ""), local)
                     if res is None:
                         continue
                     lat, lon, q, precision, label_num, _source = res

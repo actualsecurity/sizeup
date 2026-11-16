@@ -25,7 +25,11 @@ _NUM = re.compile(r"(\d{1,6})(?:([a-z])(?![a-z]))?"
 _IN_TEXT = re.compile(r"(?<![\d./])(\d{1,6})(?:([a-z])(?![a-z]))?"
                       rf"(?:\s*-\s*(\d)\s*/\s*(\d)|\s+(\d)\s*/\s*(\d)|\s*([{_FRAC}])|\.(\d{{1,2}})(?![\d./]))(?=\s*[a-z])",
                       re.I)
-_NOT_HOUSE = re.compile(r"\b(?:mm|mile|miles|marker|mp|milepost|post|exit|ref|route|rte)\s*$", re.I)
+# a number after these is no house number ("mm 10.5", "rt 9.5", "box 12.25", "i-95"); nor one before these ("10.5 min")
+_NOT_HOUSE = re.compile(r"\b(?:mm|mile|miles|marker|mp|milepost|post|exit|ref|route|rte|rt|hwy|highway|i|interstate|"
+                        r"pkwy|parkway|box|unit|engine|ladder|car|apt|suite|floor|no|number)[\s#-]*$", re.I)
+_NOT_STREET = re.compile(r"\s*(?:min|mins|minutes|mi|miles|ft|feet|hours?|hrs?|secs?|seconds|stor(?:y|ies)|"
+                         r"floors?|percent|degrees?|%)\b", re.I)
 
 
 @dataclass(frozen=True)
@@ -85,18 +89,25 @@ def split_address(text: str) -> tuple[HouseNumber, str, str] | None:
     return (HouseNumber(int(m.group(1)), (m.group(2) or "").lower(), frac), rest, m.group(0)) if rest else None
 
 
-def fractions_in(text: str) -> tuple[str, dict[int, str]]:
-    """The fractional house numbers in free text: ("... 189 Example St ...", {189: '1/2'}) for
-    "... 189-1/2 Example St ...". The text comes back with the fraction taken off (the tokenizers in
-    sizeup/geo/normalize.py would read "23.5" as 235); the fraction is what they would drop."""
-    out: dict[int, str] = {}
+def fractions_in(text: str, street_at) -> tuple[str, dict[tuple[int, int], str]]:
+    """The fractional house numbers in free text, each tied to the street right after it: ("... 189 Example St ...",
+    {(189, the street's id): '1/2'}) for "... 189-1/2 Example St ...". street_at(the text after the number) -> the ids
+    of the street it starts with (none: not a house number, left as it is: "3 1/2 story", "10.5 min ago"). The text
+    comes back with those fractions taken off (the tokenizers in sizeup/geo/normalize.py would read "23.5" as 235)."""
+    out: dict[tuple[int, int], str] = {}
 
     def keep(m: re.Match) -> str:
         f = _frac(m, 2)
-        if f is None or (m.group(8) is not None and _NOT_HOUSE.search(m.string[max(0, m.start() - 12):m.start()])):
+        if not f or _NOT_HOUSE.search(m.string[max(0, m.start() - 16):m.start()]):
             return m.group(0)                    # "mm 10.5 eastbound": a mile marker, not a house
-        if f:
-            out.setdefault(int(m.group(1)), f)
+        after = m.string[m.end():m.end() + 80]
+        if _NOT_STREET.match(after):
+            return m.group(0)
+        sids = street_at(after) if street_at else ()
+        if not sids:
+            return m.group(0)
+        for sid in sids:
+            out.setdefault((int(m.group(1)), sid), f)
         return m.group(1) + (m.group(2) or "")
     return _IN_TEXT.sub(keep, text or ""), out
 

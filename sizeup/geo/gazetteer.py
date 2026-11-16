@@ -565,6 +565,14 @@ class Gazetteer:
         got = self._local_addr = LocalAddresses(rows, self.street_id)
         return got
 
+    def streets_at(self, text: str) -> set[int]:
+        """The streets the text starts with ("Example St, ..."), said as they are (localaddr.fractions_in)."""
+        tokens = tokenize(text)
+        if not tokens or tokens[0] == BOUNDARY:        # "189½, ...": no street right after it
+            return set()
+        m = next((m for m in self._street_mentions(tokens) if m.start == 0), None)
+        return {sid for sid, sim in m.cands if sim >= 0.9} if m else set()
+
     def street_towns(self, sid: int) -> list[str]:
         """Every town street sid is in: its address points', its centreline's, its local points'."""
         return list(dict.fromkeys([*self.address_towns(sid), *(m for m in self.streets[sid].xy_muni if m)]))
@@ -576,6 +584,17 @@ class Gazetteer:
             return ""
         x, y = _xy(lat, lon)
         return st.xy_muni[int(np.argmin(np.hypot(st.xy[:, 0] - x, st.xy[:, 1] - y)))] or ""
+
+    def dist_in_town(self, sid: int, muni: str, lat: float, lon: float) -> float:
+        """Metres from (lat, lon) to street sid's stretch in muni (its centreline and address points there); the whole
+        street when it has none there."""
+        st = self.streets[sid]
+        if st.xy is None or not len(st.xy):
+            return math.inf
+        mask = np.array([m == muni for m in st.xy_muni]) if muni else None
+        pts = st.xy[mask] if mask is not None and mask.any() else st.xy
+        x, y = _xy(lat, lon)
+        return float(np.min(np.hypot(pts[:, 0] - x, pts[:, 1] - y)))
 
     def address_towns(self, sid: int, local: LocalAddresses | None = None) -> list[str]:
         """The towns street sid has address points in, its local points' among them."""
@@ -592,6 +611,10 @@ class Gazetteer:
         p = local.get(sid, muni, num, suffix, frac) if local else None
         if p is not None:
             return p.lat, p.lon, 0.95, "exact", p.number.label, "local"
+        if frac and local:                  # "189-1/2" not pinned, 189 is: next door, not the door itself
+            p = local.get(sid, muni, num, suffix, "")
+            if p is not None:
+                return p.lat, p.lon, 0.9, "approximate", p.number.label, "local"
         st = self.streets[sid]
         lst = st.addrs.get(muni)
         if not lst:
@@ -620,12 +643,12 @@ class Gazetteer:
                        munis, fracs: dict[int, str] | None = None) -> list[Match]:
         digits = int("".join(c for c in num if c.isdigit()))
         suffix = "".join(c for c in num if c.isalpha())
-        frac = (fracs or {}).get(digits, "")         # "189-1/2": the tokens kept 189 (localaddr.fractions_in)
         local = self.local_addresses()
         out = []
         for sid, sim in m.cands:
             st = self.streets[sid]
             for muni in self.address_towns(sid, local):
+                frac = (fracs or {}).get((digits, sid), "")    # "189-1/2": the tokens kept 189
                 res = self.locate_at(sid, muni, digits, suffix, frac, local)
                 if res is None:
                     continue
@@ -739,7 +762,7 @@ class Gazetteer:
 
     def candidates(self, text: str) -> list[Match]:
         """All location readings of ``text``, best first."""
-        text, fracs = fractions_in(text)
+        text, fracs = fractions_in(text, self.streets_at)
         tokens = tokenize(text)
         mentions = self._street_mentions(tokens)
         munis = self._muni_mentions(tokens, mentions)
