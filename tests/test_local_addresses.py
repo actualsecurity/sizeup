@@ -145,6 +145,15 @@ def test_a_fraction_elsewhere_in_the_text_never_hides_a_local_point(gaz):
     assert (m.lat, m.lon, m.precision) == (*STATION, "exact")
 
 
+@pytest.mark.parametrize("text", ["3 Sample St, 3 1/2 gallons spilled", "3 1/2 gallons spilled 3 Sample St",
+                                  "3 Sample St, 3.5 years old", "3 Sample St, 3 1/2 blocks", "3 Sample St, 3 1/2 lbs"])
+def test_a_quantity_never_takes_the_fraction(gaz, text):
+    set_local_addresses(gaz, lambda: rows(("3", "Sample St", EX, STATION)))
+    assert fractions_in(text, gaz.streets_at)[1] == {}
+    m = gaz.geocode(text)
+    assert (m.lat, m.lon, m.precision) == (*STATION, "exact")
+
+
 def test_a_fraction_not_pinned_takes_the_local_integer_point_next(gaz):
     set_local_addresses(gaz, lambda: rows(("3", "Sample St", EX, STATION), ("10", "Test Ave", SA, (41.01, -73.675))))
     m = gaz.geocode("3-1/2 Sample St")

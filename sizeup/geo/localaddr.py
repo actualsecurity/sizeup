@@ -30,8 +30,10 @@ _NOT_HOUSE = re.compile(r"\b(?:mm|mile|miles|marker|mp|milepost|post|exit|ref|ro
                         r"pkwy|parkway|box|unit|engine|ladder|car|apt|suite|floor)[\s#-]*$", re.I)
 _HEADING = re.compile(r"\s*(?:north|south|east|west|[nsew]b|(?:north|south|east|west)bound|of|from|to|and|on|at)\b",
                       re.I)
-_NOT_STREET = re.compile(r"\s*(?:min|mins|minutes|mi|miles|ft|feet|hours?|hrs?|secs?|seconds|stor(?:y|ies)|"
-                         r"floors?|percent|degrees?|%)\b", re.I)
+_NOT_STREET = re.compile(r"\s*(?:%|(?:min|mins|minutes|mi|miles|ft|feet|inch|inches|in|hours?|hrs?|secs?|seconds|"
+                         r"days?|weeks?|wks?|months?|mos?|years?|yrs?|stor(?:y|ies)|floors?|percent|degrees?|"
+                         r"gallons?|gal|gals|lbs?|pounds?|tons?|blocks?|acres?|yards?|yds?|meters?|cars?|people|"
+                         r"persons?|patients?|victims?|units?|alarms?|times?)\b)", re.I)
 
 
 @dataclass(frozen=True)
