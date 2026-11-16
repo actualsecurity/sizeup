@@ -551,6 +551,10 @@ def trains_sources(trains) -> list[Source]:
             return off() or {"on": False, "why": "off ([trains] traintime = false)"}
         s = trains.tt.status()
         note = f"{s['dropped']} records dropped (shape)" if s["dropped"] else ""
+        p = trains.prediction()                          # the page's prediction against each new fix (+ ahead, - behind)
+        if p.get("n"):
+            note = "; ".join(x for x in (note, f"prediction {p['window_s'] / 60:g} min: median {p['median']:+.0f} m, "
+                                               f"p90 {p['p90_abs']:.0f} m, {p['n']} fixes") if x)
         err = s["why"] if s["state"] == "fallback" else s["error"]
         if s["big"]:                                     # the size guard (#362): the polylines came back
             err = (err + "; " if err else "") + f"answer over {tt.SMALL_MAX_BYTES // (1024 * 1024)} MB: every {tt.IDLE_S:g} s only"

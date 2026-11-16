@@ -206,8 +206,8 @@ def test_a_new_fix_ahead_is_caught_up_along_the_track_smoothly(tmp_path):
     """#375, #390: no lunge. A GPS fix 120 m ahead of where the train is drawn: caught up within the band (at most SHARE of
     its speed + EXTRA_SHARE beyond BIG_M), its pace changing no faster than its consist can (the M8's 0.89 m/s^2, less
     at speed), not glided. A GTFS-realtime report (no speed) 150 or 300 m ahead: closed by the same band (#392 final
-    check: no fade, no surge). Any fix more than GLIDE_AHEAD_M ahead: glided on to it, never faster than 1.25 v + 2;
-    too far for GLIDE_MAX_S of that: faded out and in at the fix."""
+    check: no fade, no surge). A GPS fix further ahead than snapM (150 m, or 15 s of its travel): snapped on to it in
+    SNAP_MS (aircraft-like, the admin 2026-11-15), not glided for up to 20 s nor faded."""
     out = node(tmp_path, TRACK + GLIDE + """
 const go = (id, f, by) => {
   tk.set(id, { ...f, at: at(0) }, at(0));
@@ -231,10 +231,13 @@ out.est150 = go("est150", IN.est, 150); out.est300 = go("est300", IN.est, 300);
     assert max(abs(b - a) for a, b in zip(speeds, speeds[1:])) <= 0.1 * 0.89 + 0.02   # within the M8's limits
     assert max(speeds) <= 1.25 * 20 + 2 + 0.01                                         # never over 1.25 v + 2: no surge
     assert abs(path[-1] - g["tg"][-1]) < 0.35 * 120                                    # catching up, gently
-    f = out["gpsFar"]                        # 600 m: a glide no faster than 1.25 v + 2 would take over GLIDE_MAX_S: faded
-    assert min(p[3] for p in f["path"][:8]) < 0.2 and f["path"][10][3] == 1 and not f["path"][0][2]
+    f = out["gpsFar"]                        # a GPS fix 600 m ahead: snapped on to it, ringed, in SNAP_MS; no fade
+    assert all(p[3] == 1 for p in f["path"]) and f["path"][0][2]
+    k = next(i for i, p in enumerate(f["path"]) if not p[2])
+    assert f["path"][k][0] - 10 <= 1.2 + 0.15
+    assert all(b[1] >= a[1] for a, b in zip(f["path"], f["path"][1:]))                  # forward only
     for name in ("est150", "est300"):        # GTFS-realtime reports 150 / 300 m ahead: the band closes them, no fade,
-        e = out[name]                        # no glide, never faster than 1.25 v + 2
+        e = out[name]                        # no glide, no snap (GPS fixes only), never faster than 1.25 v + 2
         path = [e["from"]] + [p[1] for p in e["path"]]
         assert all(p[3] == 1 and not p[2] for p in e["path"])
         assert all((b - a) / 0.1 <= 1.25 * e["v"][i] + 2 + 0.05 for i, (a, b) in enumerate(zip(path, path[1:])))
@@ -308,7 +311,8 @@ def test_drawn_beyond_a_new_fixs_limit_it_is_braked_then_glided_back(tmp_path):
     """#375, #390 ("I'm fine with an overshoot if we keep it smooth, and then ... we nudge it back like we did for
     planes" ... "less surgy"): drawn running when a new fix says it stopped behind it, a little or a lot: braked hard to
     rest (as little past the fix as smoothly can be), then glided back along the track onto it (at most 3 m/s^2,
-    25 m/s, 25 s: about 330 m); 450 m back is further than that: faded out and in."""
+    25 m/s, 25 s: about 330 m); 450 m back is further than that: faded out and in. (A GTFS-realtime train: the snap-back
+    is for GPS fixes, test_train_prediction.py.)"""
     f = fix(until=NOW + 300, hold=PC)
     out = node(tmp_path, TRACK + GLIDE + """
 const back = (id, by) => {
@@ -521,7 +525,7 @@ const run = (id, dyn) => {
   const f = { ...IN.f, dyn, v: 5, at: at(0) };
   tk.set(id, f, at(0));
   drive(id, 0, 1);
-  tk.set(id, { ...f, s: f.s + 400, v: 30, t0: f.t0 + 1, fixAt: f.fixAt + 1, at: at(1) }, at(1));   // far ahead and fast
+  tk.set(id, { ...f, s: f.s + 140, v: 30, t0: f.t0 + 1, fixAt: f.fixAt + 1, at: at(1) }, at(1));   // ahead (under SNAP_M) and fast
   const r = []; for (let t = 1.1; t <= 40; t += 0.1) { tk.where(id, at(t)); r.push(tk.items.get(id).u); }
   return r;
 };
@@ -621,8 +625,9 @@ out.path = path;
 """, {"fixes": fixes})
     path = out["path"]
     steps = [b - a for a, b in zip(path, path[1:])]
-    # (its speed reads 0 at once, at 20 m/s, with no fall before: braked on past where it stopped, then glided back)
-    assert min(steps) >= -8.0 and max(steps) < 8.0                                       # no jumps (20 m/s is 2 m a frame)
+    # (its speed reads 0 at once, at 20 m/s, with no fall before: braked on past where it stopped, then snapped back in
+    # SNAP_MS when that is over snapM, else glided back)
+    assert max(steps) < 8.0 and len([x for x in steps if x < -8.0]) <= 12                # no jumps but one snap's ease
     assert min(steps[:450]) >= 0                                                         # never back while it runs
     moving = path[50:450]
     assert (moving[-1] - moving[0]) / 40.0 == pytest.approx(20.0, rel=0.25)              # about the feed's speed

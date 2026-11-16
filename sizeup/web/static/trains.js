@@ -381,7 +381,10 @@ window.TrainLayer = (() => {
   // its speed: the hub's (the GPS reading checked against the distance moved, trains.py speed_check), else the reading
   const mphOf = (t) => (t.pos_src !== "traintime" ? null : typeof t.v === "number" ? t.v / 0.44704
     : t.tt && typeof t.tt.speed_mph === "number" ? t.tt.speed_mph : null);
-  const mph = (t) => { const v = mphOf(t); return v === null ? "" : `${Math.round(v)} mph`; };
+  // (none while it is stopped: never "Stopped · 2 mph", the hub's hysteresis holds it stopped to 1 m/s)
+  const mph = (t) => { const v = t.mode === "stopped" ? null : mphOf(t); return v === null ? "" : `${Math.round(v)} mph`; };
+  // drawn at its last fix by the box's Snap (motion.js snapToFix), until the next fix
+  const pinnedNow = (t) => !!motion && t.pos_src === "traintime" && motion.pinned(t.id);
   // its basis, for the hover (#390): "45 mph (GPS 44 · moved 45)", and which one the hub set aside
   function speedBasis(t) {
     const v = mphOf(t), b = t.v_basis;
@@ -496,7 +499,7 @@ window.TrainLayer = (() => {
   // the follow chip: "Following 9901 · NH west · 67 mph · 3 s ago"; its fix over OLD_FIX_S old: "Following 9901 · NH west ·
   // Predicted · 34 s ago"
   const followText = (t, d) => [`Following ${t.train}`, [t.tt && t.tt.branch, dirWord(t)].filter(Boolean).join(" "),
-                                 oldFix(t, d) ? "Predicted" : mph(t), fixAge(t, d)].filter(Boolean).join(" \u00b7 ");
+                                 pinnedNow(t) ? "At fix" : oldFix(t, d) ? "Predicted" : mph(t), fixAge(t, d)].filter(Boolean).join(" \u00b7 ");
   // the catenary on one line, its full text on hover (and in the box's ⓘ)
   function catenaryLine(d) {
     const n = h("div", "", CATENARY_LINE);
@@ -818,10 +821,12 @@ window.TrainLayer = (() => {
         const p = pos.get(t.id), stale = motion && pos.has(t.id) ? motion.stale(t.id) : own;
         const s = p ? Math.round(p.s * 10) / 10 : t.s;
         const aged = oldFix(t, d, now), snap = !!motion && Motion.snapped && Motion.snapped(motion.items.get(t.id), now);
+        const snapping = !!motion && !!(motion.items.get(t.id) || {}).snapTo;              // a snap-back's short ease
+        
         const dim = !aged && fixOlder(t, d, now, DIM_FIX_S);
         const op = motion && Motion.fadeOf ? Math.round(Motion.fadeOf(motion.items.get(t.id), now) * 10) / 10 : 1;   // (#390)
         // ahead of the MTA's report while on its way (a stopped train held at its station's mark isn't a prediction)
-        drawn.set(t.id, { s, stale, old: aged, dim, snap, op,
+        drawn.set(t.id, { s, stale, old: aged, dim, snap, snapping, op,
                           ahead: !t.estimated && t.mode !== "stopped" && typeof t.s === "number" && (s - t.s) * t.d > PREDICTED_M });
         key.push(`${t.id}:${s}:${stale ? 1 : 0}${aged ? 1 : 0}${dim ? 1 : 0}${snap ? 1 : 0}:${op}`);
       }
@@ -955,8 +960,11 @@ window.TrainLayer = (() => {
         ? `Track ${tt.next.track} at ${tt.next.name}: ${tt.next.posted ? "posted" : "planned, not posted yet"}${tt.next.track_change ? " (track change)" : ""}` : "" });
       const place = placeRow(t, w, d.railref);
       if (place) rows.push(place);
-      rows.push({ k: "pos", text: [pos.word, w.old ? "" : mph(t), fixAge(t, d)].filter(Boolean).join(" \u00b7 "),   // old: "Predicted · 34 s ago"
-                  title: speedBasis(t) });
+      // old: "Predicted · 34 s ago"; snapped to its fix: "At fix · 12 s ago" (no prediction, no speed shown)
+      const pin = pinnedNow(t);
+      const posText = (pin ? ["At fix", fixAge(t, d)] : [pos.word, w.old ? "" : mph(t), fixAge(t, d)]).filter(Boolean).join(" \u00b7 ");
+      rows.push({ k: "pos", text: posText, title: pin ? "Drawn at its last GPS fix, not predicted, until the next fix" : speedBasis(t),
+                  el: gps && motion && !t.estimated && !pin ? () => this.posLine(t, posText) : null });
       if ((tt.car_loads || []).length) rows.push({ k: "bars", sig: JSON.stringify([tt.car_loads, tt.occupancy, tt.pax]), el: () => carBars(tt) });
       // Metro-North's alerts (#385): the hub's plain text (never HTML). Those that name this train as "This train"; the
       // rest as the line's, labelled with the train they name; one line each, the full text and the others on hover
@@ -971,6 +979,26 @@ window.TrainLayer = (() => {
                    "TrainTime is an undocumented MTA API; GTFS-realtime is used when it fails",
                    ...mine.map((a) => `This train. ${alertFull(a)}`), ...line.map((a) => `Line. ${alertFull(a)}`), d.catenary, credit].filter(Boolean).join("\n");
       return { sub, rows, foot, tip };
+    }
+    // the TrainTime box's position line with its Snap (motion.js snapToFix): the train put back where its last GPS fix
+    // was, unpredicted until the next one comes (the prediction gone wrong: the admin, 2026-11-15); then the line says
+    // "At fix" (trainView), without the Snap
+    posLine(t, text) {
+      const n = h("div", "", "");
+      n.append(h("span", "", text));
+      const b = h("button", "tr-snapfix small", "Snap");
+      b.type = "button";
+      b.title = "Snap to the last GPS fix: draw the train where the MTA last saw it, without prediction, until the next fix";
+      b.addEventListener("click", (e) => {
+        e.stopPropagation();
+        if (!motion.snapToFix(t.id)) return;
+        frame.at = -1;
+        for (const m of maps) { m.sig = ""; m.draw(true); }
+        animate();
+        if (this.live) this.live.refresh();
+      });
+      n.append(" \u00b7 ", b);
+      return n;
     }
     // follow a train (mapfollow.js): centred, zoomed in to its cars, kept centred as it glides; the chip at the foot
     follow(id) {
