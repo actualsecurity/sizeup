@@ -58,6 +58,10 @@
   .s-meta { display: inline-flex; align-items: center; flex-wrap: wrap; gap: var(--s-1); }
   .s-add { margin-block-start: var(--s-2); padding-block-start: var(--s-3); border-block-start: var(--bw) solid var(--line); }
   .s-add .s-name { flex: 1 1 10rem; }
+  /* Address points (settings.js sAddressPoints): the map the pin is put on */
+  .s-addr-map { position: relative; block-size: calc(var(--map-h) * 0.8); margin-block-start: var(--s-2); border-radius: var(--radius);
+    border: var(--bw) solid var(--line); overflow: hidden; }
+  .s-row.on { background: var(--hover); }
   .s-email { flex: 1 1 14rem; min-inline-size: 9rem; }
   .s-callsign { inline-size: 6.5rem; }
 

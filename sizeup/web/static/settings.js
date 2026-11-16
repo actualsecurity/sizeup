@@ -877,9 +877,11 @@ function sLists(panel) {
   else body = sListTable(S.list);
   const flow = S.list === "unit_statuses" && S.data.status_flow ? sFlow() : null;
   const common = S.list === "place_names" ? sCommonPlaces() : null;
+  const points = S.list === "place_names" ? sAddressPoints() : null;
   panel.replaceChildren(...sHead("Lists", "Codes don't change: they are on events and in the CSV exports. Names, colors "
     + "and order are yours. Retire what you no longer use: old events keep it, the pick lists drop it."), tabs, body,
-  ...(flow ? [flow] : []), ...(common ? [common] : []));
+  ...(flow ? [flow] : []), ...(points ? [points] : []), ...(common ? [common] : []));
+  if (points) sAddrMapShown();
 }
 
 function sListTable(sec) {
@@ -1262,6 +1264,134 @@ function sPlaceNames() {
       + "offer them first, at the place picked here.")), ol, f);
 }
 
+// The department's own address points (sizeup/geo/localaddr.py): an address the map data lacks ("189-1/2 Example St",
+// a station with no point of its own), typed, then pinned on the map (a click, or drag the pin). Found like the map's
+// own points: pages, the location box, a map click, the common places import. The map is made once (S.addrMap) and
+// moved into each redraw of the card; what is being added or edited is S.addrForm {key?, lat?, lon?}.
+function sAddressPoints() {
+  const d = S.data.local_addresses || { items: [] };
+  const F = S.addrForm || (S.addrForm = {});
+  const ol = el("ol", "s-rows");
+  for (const x of d.items) {
+    const li = el("li", "s-row" + (F.key === x.key ? " on" : ""));
+    li.dataset.row = x.key;
+    li.append(el("b", "s-name", `${x.number} ${x.street}`), el("span", "dim small", [x.town, x.note].filter(Boolean).join(" · ")),
+      el("span", "spacer"),
+      sBtn("Edit", "Move the pin or change the address", () => sAddrEdit({ key: x.key, address: `${x.number} ${x.street}`,
+        town: x.town, note: x.note, lat: x.lat, lon: x.lon })),
+      sBtn("Remove", "", () => sAsk(`Remove ${x.number} ${x.street}?`, () => sPost("local_addresses",
+        { action: "delete", key: x.key }, `${x.number} ${x.street} removed`).then((r) => { if (r && F.key === x.key) sAddrEdit(null); }),
+      "Remove"), "danger-quiet"));
+    ol.append(li);
+  }
+  if (!d.items.length) ol.append(el("li", "s-row dim", "None yet"));
+  const f = el("form", "row s-add");
+  f.id = "s-addr-form";
+  const field = (k, max, ph, cls, title) => {
+    const i = sInput(F[k] || "", max, ph, null, cls);
+    i.dataset.key = `la-${k}`;
+    if (title) i.title = title;
+    i.addEventListener("input", () => { F[k] = i.value; });
+    return i;
+  };
+  const addr = field("address", 120, "189-1/2 Example St", "s-name", "House number and street, as the map data names it");
+  const town = field("town", 60, "Town", "", "Blank: the street's town at the pin");
+  const note = field("note", 120, "Note", "s-name", "");
+  addr.addEventListener("change", () => sAddrFind(addr.value.trim(), town.value.trim()));
+  const at = el("span", "dim small", F.lat != null ? `${(+F.lat).toFixed(5)}, ${(+F.lon).toFixed(5)}` : "No pin");
+  at.id = "s-addr-at";
+  at.title = "Click the map or drag the pin";
+  const save = el("button", "primary", F.key ? "Save" : "Add");
+  save.type = "submit";
+  f.append(addr, town, note, at, save);
+  if (F.key || F.address || F.lat != null) f.append(sBtn("Cancel", "", () => sAddrEdit(null)));
+  f.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    if (!addr.value.trim()) return sMsg("Address: required");
+    if (F.lat == null) return sMsg("Pin: click the map where it is");
+    const r = await sPost("local_addresses", { action: "set", address: addr.value.trim(), town: town.value.trim(),
+      note: note.value.trim(), lat: F.lat, lon: F.lon, ...(F.key ? { key: F.key } : {}) }, `${addr.value.trim()} pinned`);
+    if (r) sAddrEdit(null);
+  });
+  const box = el("div", "s-addr-map");
+  box.id = "s-addr-mapbox";
+  return sCard(sCardHead("Address points", d.items.length ? `${d.items.length}` : "",
+    sHelp("Addresses the map data lacks: a rear building (189-1/2), a station with no point. Type the address, click "
+      + "the map where it is (drag the pin to adjust). Pages, the location box, a map click and the common places "
+      + "import then find it like any address point, ahead of a guess between two numbers.")), ol, f, box);
+}
+// What is being added or edited (null: a clean form), then the card redrawn with it.
+function sAddrEdit(form) {
+  S.addrForm = form ? { ...form } : {};
+  const card = $("#s-addr-form");
+  if (card) for (const i of card.querySelectorAll("input")) i._base = undefined;      // (not text typed: sKeep)
+  sRender(true);
+  if (form) {
+    const f = $("#s-addr-form");
+    if (f) { f.scrollIntoView({ block: "nearest" }); f.querySelector("input").focus({ preventScroll: true }); }
+    if (form.lat != null) sAddrPin(form.lat, form.lon, true);
+    else if (form.address) sAddrFind(form.address, form.town || "");
+  }
+}
+// The address typed: the map goes to where the map data puts it (its street, a guess between two numbers); no pin yet:
+// the pin there, to be moved.
+async function sAddrFind(address, town) {
+  if (!address) return;
+  let m = null;
+  try { m = ((await api("GET", `/api/cad/geocode?q=${encodeURIComponent(town ? `${address}, ${town}` : address)}`)).matches || [])[0]; }
+  catch (e) { m = null; }
+  if (!m || m.lat == null) return;
+  const F = S.addrForm || (S.addrForm = {});
+  if (F.lat == null) sAddrPin(m.lat, m.lon, true);
+  else if (S.addrMap) S.addrMap.map.easeTo({ center: [m.lon, m.lat], zoom: Math.max(17, S.addrMap.map.getZoom()) });
+}
+function sAddrPin(lat, lon, ease) {
+  const F = S.addrForm || (S.addrForm = {});
+  F.lat = Math.round(lat * 1e6) / 1e6;
+  F.lon = Math.round(lon * 1e6) / 1e6;
+  const at = $("#s-addr-at");
+  if (at) setText(at, `${F.lat.toFixed(5)}, ${F.lon.toFixed(5)}`);
+  const M = S.addrMap;
+  if (!M) return;
+  if (!M.pin) {
+    const dot = el("div", "nc-pin");
+    dot.title = "Drag to move";
+    M.pin = new maplibregl.Marker({ element: dot, anchor: "bottom", draggable: true }).setLngLat([F.lon, F.lat]).addTo(M.map);
+    M.pin.on("dragend", () => { const ll = M.pin.getLngLat(); sAddrPin(ll.lat, ll.lng, false); });
+  } else M.pin.setLngLat([F.lon, F.lat]);
+  if (ease) M.map.easeTo({ center: [F.lon, F.lat], zoom: Math.max(17, M.map.getZoom()) });
+}
+// The map (made once, like the pre-plan search's: preplan.js) put into the card just drawn; the saved points as dots.
+function sAddrMapShown() {
+  const box = $("#s-addr-mapbox");
+  if (!box || !window.maplibregl || typeof buildMapStyle !== "function" || !cad.scene || !cad.scene.home) {
+    if (box) box.hidden = true;
+    return;
+  }
+  let M = S.addrMap;
+  if (!M) {
+    const host = el("div", "sv-map");
+    M = S.addrMap = { host, pin: null, dots: [] };
+    box.append(host);
+    M.map = new maplibregl.Map({ container: host, style: buildMapStyle(cad.scene), center: cad.scene.home.center,
+                                 zoom: cad.scene.home.zoom, attributionControl: { compact: true }, maxPitch: 0, dragRotate: false });
+    M.map.addControl(new maplibregl.NavigationControl({ showCompass: false }), "top-right");
+    M.map.on("click", (e) => sAddrPin(e.lngLat.lat, e.lngLat.lng, false));
+  } else {
+    box.append(M.host);
+    M.map.resize();
+  }
+  for (const d of M.dots) d.remove();
+  M.dots = ((S.data.local_addresses || {}).items || []).filter((x) => x.key !== (S.addrForm || {}).key).map((x) => {
+    const dot = el("div", "nc-probe");
+    dot.title = `${x.number} ${x.street}`;
+    return new maplibregl.Marker({ element: dot }).setLngLat([x.lon, x.lat]).addTo(M.map);
+  });
+  const F = S.addrForm || {};
+  if (F.lat == null && M.pin) { M.pin.remove(); M.pin = null; }
+  else if (F.lat != null) sAddrPin(F.lat, F.lon, false);
+}
+
 // The county's common place names (sizeup/cad/commonplaces.py): its .xlsx / .csv previewed (counts, the addresses not
 // found, the columns), then applied over the last import. Names made above are never touched. Admins (the server).
 function sCommonPlaces() {
@@ -1284,7 +1414,8 @@ function sCommonPlaces() {
     const ol = el("ol", "s-rows");
     for (const u of im.unresolved) {
       const li = el("li", "s-row");
-      li.append(el("b", "s-name", u.name), el("span", "dim small", [u.address, u.town].filter(Boolean).join(", ")));
+      li.append(el("b", "s-name", u.name), el("span", "dim small", [u.address, u.town].filter(Boolean).join(", ")),
+        el("span", "spacer"), sAddrPinIt(u));
       ol.append(li);
     }
     det.append(ol);
@@ -1295,6 +1426,11 @@ function sCommonPlaces() {
   sShowCommon(pv);
   return sCard(sCardHead("Common places", info, sHelp("The county CAD's common place names. Re-import replaces the last "
     + "import; your own names stay. Kept in the CAD database only."), remove, pick), file, ...kids, pv);
+}
+
+// "Pin": a common place's address not found, into Address points' form (then a click on the map where it is).
+function sAddrPinIt(u) {
+  return sBtn("Pin", "Add as an address point", () => sAddrEdit({ address: u.address || "", town: u.town || "", note: u.name || "" }));
 }
 
 async function sCommonFile(input) {
@@ -1364,7 +1500,8 @@ function sShowCommon(box) {
     const ol = el("ol", "s-rows");
     for (const u of c.r.unresolved) {
       const li = el("li", "s-row");
-      li.append(el("b", "s-name", u.name), el("span", "dim small", [u.address, u.town].filter(Boolean).join(", ")));
+      li.append(el("b", "s-name", u.name), el("span", "dim small", [u.address, u.town].filter(Boolean).join(", ")),
+        el("span", "spacer"), sAddrPinIt(u));
       ol.append(li);
     }
     det.append(ol);

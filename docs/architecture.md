@@ -344,6 +344,32 @@ rest of the CAD. The settings export never carries it and a settings import neve
 county's file instead). It is never in the repository, its tests or the public gazetteer (`data/gazetteer.sqlite`,
 `tools/fetch_places.py`).
 
+### Local address points
+
+The address points miss some real addresses: a building behind another one ("189-1/2 Example St", in its parking
+lot), a station or a new building with no point of its own ("3 Sample St"). Settings > Lists > Place names has an
+**Address points** card for them (admins, like the place names):
+
+- **Add**: type the address (house number, then the street as the map data names it; "Example Street" is found as
+  `Example St`), then click the map where it is, or drag the pin. Typing the address moves the map to where the data
+  would put it. The town is optional: blank, it is the street's town at the pin. **Edit** moves the pin or changes
+  the address; **Remove** takes it out. A pin more than 400 m from its street is refused.
+- **Pin** on a common place whose address was not found (the import's "not found" list, or its preview) opens the form
+  with that address filled in.
+
+Each point is found like one of the gazetteer's own (`sizeup/geo/localaddr.py`, `Gazetteer.locate_at`): precision
+`exact`, source `local`, ahead of an interpolation between two numbers and ahead of a fractional number's integer part.
+The place search and the location box, a page (`sizeup/geo/pagegeo.py`), a click on the new call's map
+(`what_is_here`) and the common places import (`PlaceIndex.local_address`, before the address points) all see it.
+
+House numbers are read by one helper (`localaddr.parse_number`): `189-1/2`, `189 1/2`, `189½` and `189.5` are one
+number, shown `189 1/2`; `189A` is a letter suffix, as in the address points. In free text (`fractions_in`) a decimal
+after a mile-marker word ("MM 10.5") is left alone.
+
+They are kept in `cad.sqlite` (`settings_overrides`, section `local_addresses`, key `<number> <street>, <town>` in
+lower case: `{number, street, muni, lat, lon, note}`), audited as Lists, and exported and imported with the other
+settings.
+
 ## Notifications
 
 `sizeup/notify.py` is the one place sizeup publishes. Pushes go to ntfy, by kind:

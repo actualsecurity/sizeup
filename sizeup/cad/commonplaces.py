@@ -322,6 +322,9 @@ def locate_address(ix, address: str, town: str = "", town_of=lambda m: m) -> dic
     or interpolated between two points of that street. The row's town first; another town only when the street has
     the number in one town alone. -> {label, lat, lon, muni (the CAD's town), precision} | None."""
     from sizeup.geo.places import NUMBER, _Ctx
+    own = ix.local_address(address, town, town_of) if hasattr(ix, "local_address") else None
+    if own is not None:
+        return own                                      # the department's own point (Settings > Address points) first
     q = norm_tokens(address)
     if len(q) < 2 or not NUMBER.match(q[0]):
         return None
