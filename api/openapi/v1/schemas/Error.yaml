@@ -1,0 +1,21 @@
+type: object
+required: [error]
+properties:
+  error:
+    type: object
+    required: [code, message]
+    properties:
+      code:
+        type: string
+        description: >
+          A machine code, stable. A code the app does not know is handled by the status. Codes so far:
+          unauthorized (401), not_found (404), method_not_allowed (405, with Allow), uri_too_long (414),
+          station (409: this host is a station, not the hub), updating (503 during a deploy handover, with
+          Retry-After). Planned with sign-in (#558): token_expired, device_revoked, user_inactive, invalid_grant,
+          rate_limited, upgrade_required.
+      message:
+        type: string
+        description: Human text.
+      retry_after_s:
+        type: integer
+        description: Try again after this many seconds (also the Retry-After header).

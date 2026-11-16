@@ -1,0 +1,27 @@
+get:
+  operationId: getMeta
+  summary: What the app checks at launch
+  security: []
+  description: >
+    The API version, the oldest app each platform may run (a forced upgrade), server-side feature flags, the server's
+    clock (for skew) and the change log's epoch (null until there is a change log). Needs no token: it reveals
+    nothing beyond versions.
+  responses:
+    "200":
+      description: The hub's meta.
+      content:
+        application/json:
+          schema:
+            $ref: ../schemas/Meta.yaml
+          example:
+            api: "1.0"
+            min_app: {ios: "0.0.0", android: "0.0.0"}
+            features: {}
+            server_time: 1767225600.5
+            epoch: null
+    default:
+      description: An error.
+      content:
+        application/json:
+          schema:
+            $ref: ../schemas/Error.yaml
