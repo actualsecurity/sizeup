@@ -1578,11 +1578,14 @@ class Editor:
             raise CadError("the gazetteer is not loaded: addresses can't be looked up (try again shortly)")
         town_of = self.cad.lists.town_of
         today = datetime.fromtimestamp(self.store.clock(), TZ).strftime("%Y-%m-%d")
-        p = commonplaces.plan(rows, cols, lambda a, t: commonplaces.locate_address(ix, a, t, town_of), town_of, today, cur)
+        L = self.cad.lists
+        known = {x.lower() for x in (*L.geo_town_order, *L.geo_town_aliases.values())}
+        p = commonplaces.plan(rows, cols, lambda a, t: commonplaces.locate_address(ix, a, t, town_of), town_of, today, cur,
+                              known)
         if p["counts"]["names"] > MAX_COMMON_NAMES:
             raise CadError(f"at most {MAX_COMMON_NAMES} names")
         out = {"ok": True, "header": rows[0], "columns": cols, "counts": p["counts"], "source": commonplaces.SOURCE,
-               "unresolved": p["unresolved"][:300]}
+               "unresolved": p["unresolved"][:300], "unknown_towns": p["unknown_towns"][:50]}
         if action == "preview":
             return dict(out, dry_run=True)
         if not p["entries"]:

@@ -81,7 +81,9 @@ def test_the_permission_map():
     assert needs("/api/cad/incident/7/explode") == needs("/api/cad/something-new") == needs("/api/whatever") == "admin"
     # "read": a POST that changes nothing anyone relies on (a radio pre-alert vote, sizeup/intel: anyone signed in)
     assert {need for _, need in WRITES} == {"dispatch", "admin", "read"}
-    assert [p.pattern for p, need in WRITES if need == "read"] == [r"/api/cad/intel/\d{1,9}/feedback"]
+    # ... and a panorama opened (street view's monthly limit counts it: anyone who may look at the map)
+    assert [p.pattern for p, need in WRITES if need == "read"] == [r"/api/cad/intel/\d{1,9}/feedback",
+                                                                  r"/api/cad/streetview/open"]
 
 
 def test_whoami_says_the_role_and_that_it_is_enforced(api):

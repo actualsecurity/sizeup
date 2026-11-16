@@ -296,4 +296,9 @@ def test_the_common_places_import_takes_the_local_point_first(cad, gaz):
     got = cp.locate_address(ix, "3 SAMPLE ST", EX)
     assert (got["lat"], got["precision"], got["muni"]) == (STATION[0], "exact", EX)
     assert cp.locate_address(ix, "189 1/2 EXAMPLE ST", EX)["lat"] == BEHIND[0]
-    assert cp.locate_address(ix, "189 1/2 EXAMPLE ST", SA)["lat"] == BEHIND[0]    # the one town that has it
+    assert cp.locate_address(ix, "189 1/2 EXAMPLE ST")["lat"] == BEHIND[0]        # no town: the one town that has it
+    # another town's row: the point only when it is by that town (#584's NEAR_TOWN_KM); then the row's town
+    assert cp.locate_address(ix, "189 1/2 EXAMPLE ST", SA) is None
+    got = ix.local_address("189 1/2 EXAMPLE ST", SA, near=lambda la, lo: True)
+    assert (got["lat"], got["muni"]) == (BEHIND[0], SA)
+    assert ix.local_address("189 1/2 EXAMPLE ST", SA, near=lambda la, lo: False) is None

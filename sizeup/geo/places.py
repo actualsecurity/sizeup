@@ -473,11 +473,13 @@ class PlaceIndex:
                                               sq * 0.97, near, precision="exact"))
         return out
 
-    def local_address(self, address: str, town: str = "", town_of=lambda m: m) -> dict | None:
+    def local_address(self, address: str, town: str = "", town_of=lambda m: m, near=None) -> dict | None:
         """An address that is one of the department's own points (sizeup/geo/localaddr.py): that number (its letter
-        and fraction) on a street whose every word was given; the town given first, another only when it is the one.
-        -> {label, lat, lon, muni (town_of's), precision "exact", source "local"} | None. Ahead of the address points
-        for the common places import (sizeup/cad/commonplaces.py locate_address)."""
+        and fraction) on a street whose every word was given. The town given first; another town's point only when
+        it is the one town with that point and, with a town given, near(lat, lon) says it is by the town given (the
+        common places import: sizeup/cad/commonplaces.py _km_to_town). -> {label, lat, lon, muni (the town given,
+        else the point's, town_of's), precision "exact", source "local"} | None. Ahead of the address points for
+        the common places import (commonplaces.locate_address)."""
         sp = split_address(address)
         local = self.gaz.local_addresses()
         if not sp or not local:
@@ -487,12 +489,15 @@ class PlaceIndex:
                 if h["source"] == "local" and h["label"].startswith(hn.label + " ") and h["quality"] >= 0.99]
         for h in hits:
             h["town"] = town_of(h["sub"]) or h["sub"]
-        same = [h for h in hits if town and h["town"].lower() == town.lower()] or (
-            hits if len({h["town"] for h in hits}) == 1 else [])
+        same = [h for h in hits if town and h["town"].lower() == town.lower()]
         if not same:
-            return None
+            if town:                            # only the town's own place, filed under a neighbour
+                hits = [h for h in hits if near is not None and near(h["lat"], h["lon"])]
+            if not hits or len({h["town"] for h in hits}) != 1:
+                return None
+            same = hits
         h = same[0]
-        return {"label": h["label"], "lat": h["lat"], "lon": h["lon"], "muni": h["town"], "precision": "exact",
+        return {"label": h["label"], "lat": h["lat"], "lon": h["lon"], "muni": town or h["town"], "precision": "exact",
                 "source": "local"}
 
     def _intersections(self, a: list[str], b: list[str], near) -> list[dict]:
