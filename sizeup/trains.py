@@ -200,7 +200,8 @@ GPS_PAST_STOP_M = 5000.0         # a TrainTime position past GTFS-realtime's nex
                                  # up to this far past it, against a good fix before it or a second fix agreeing with it;
                                  # further, refused as before (another train's record)
 GPS_JUMP_M = 150.0               # a TrainTime GPS fix's "too fast" allowance (two fixes' noise), not SPACING_M
-CONFIRM_S = 60.0                 # two refused GPS fixes this close in time that agree with each other: the train is there
+CONFIRM_S = 60.0                 # two refused GPS fixes this close in time (at least CONFIRM_POLLS TrainTime polls) that
+CONFIRM_POLLS = 2.5              # agree with each other, at different positions (or reading stopped): the train is there
 MOVE_MPS = 1.0                   # a stopped train (GPS) is moving again only over this (stopped under STOP_MPS: hysteresis)
 SPACING_M = 3500.0               # the MTA's reporting points: mostly 1 to 1.6 km apart, 3.3 km at most seen (and a
                                  # point can show up a read late): a jump this long is allowed whatever the time
@@ -930,12 +931,13 @@ class Model:
         return (i - 1 if i > 0 else None), i
 
     def judge(self, t: dict, anchors: list, d: int, now: float, dist: float, s: float, last: dict | None, at: float,
-              gps: bool = False) -> str:
+              gps: bool = False, noise: bool | None = None) -> str:
         """Why the feed's position for a train (dist off the line, s along it, in the feed of time at) can't be
         right, or "" when it can: off the line; outside the stretch between the stop it last left and the one it
         is going to; against its last good fix (when that is under RESET_S old): backwards, or faster than a
         train goes once one reporting point's spacing is allowed for. gps: a TrainTime position, which may be past
-        stops GTFS-realtime still has it at (legs at_s)."""
+        stops GTFS-realtime still has it at (legs at_s). noise: a GPS location (TrainTime "GPS", not "SIGNAL"): only GPS
+        noise (GPS_JUMP_M) allowed for, not a reporting point's spacing (None: as gps)."""
         if dist > MAIN_M:
             return "off the line"
         p, n = self.legs(t, anchors, now, s, d) if gps else self.legs(t, anchors, now)
@@ -949,7 +951,7 @@ class Model:
             if step < -BACK_M:
                 return "backwards"
             # (a GPS fix is anywhere, not at one of the MTA's reporting points: only GPS noise is allowed for)
-            if (abs(step) - (GPS_JUMP_M if gps else SPACING_M)) / (at - last["fix_at"]) > MAX_MPS:
+            if (abs(step) - (GPS_JUMP_M if (gps if noise is None else noise) else SPACING_M)) / (at - last["fix_at"]) > MAX_MPS:
                 return "too fast"
         return ""
 
@@ -1567,9 +1569,11 @@ class Tracker:
     the refused ones counted (rejected, why), and the reporting points the good ones teach (points). A read
     whose header time hasn't moved changes nothing."""
 
-    def __init__(self, points: Points | None = None, log: Callable[[str], None] | None = None):
+    def __init__(self, points: Points | None = None, log: Callable[[str], None] | None = None, tt_every_s: float = 5.0):
         self.points = points if points is not None else Points()
         self.log = log
+        self.confirm_s = max(CONFIRM_S, CONFIRM_POLLS * tt_every_s)   # (slow polls can still confirm)
+        self._gone: dict[str, bool | None] = {}          # trains missing from the last read: their stopped state (one read)
         self.fixes: dict[str, dict] = {}
         self.trk_mem: dict[str, dict] = {}               # train number -> {ev, seen}: its numbered track (#371)
         self.at: float | None = None
@@ -1598,7 +1602,7 @@ class Tracker:
             return False
         self._key = key
         first = self.at is None
-        seen = set()
+        seen, gone = set(), self._gone
         for t in feed.get("trains", {}).values():
             if not model.ours_train(t, now):
                 continue
@@ -1628,19 +1632,25 @@ class Tracker:
                 continue
             # a TrainTime position is judged by where it is (stops GTFS-realtime lags on: legs at_s) only against a good
             # fix of its own before it; a first one only up to GTFS-realtime's next stop (+ STOP_SLACK_M)
-            why = model.judge(t, anchors, d, now, dist, s, last, fix_at, gps=src == "traintime" and last is not None)
+            # (GPS noise is the too-fast allowance only for a GPS location; a SIGNAL one keeps the reporting points')
+            loc_gps = src == "traintime" and p.get("loc", "GPS") == "GPS"
+            why = model.judge(t, anchors, d, now, dist, s, last, fix_at, gps=src == "traintime" and last is not None,
+                              noise=loc_gps)
             cand = rec.get("cand") if rec is not None else None
-            if why and src == "traintime" and cand and 0 < fix_at - cand["fix_at"] <= CONFIRM_S \
+            spd = p.get("speed")
+            if why and src == "traintime" and cand and 0 < fix_at - cand["fix_at"] <= self.confirm_s \
+                    and (cand.get("raw") != raw or (isinstance(spd, (int, float)) and spd < STOP_MPS)) \
                     and (s - cand["s"]) * d >= -BACK_M \
                     and (abs(s - cand["s"]) - GPS_JUMP_M) / (fix_at - cand["fix_at"]) <= MAX_MPS:
+                # (a frozen position re-sent with newer times can't confirm itself: a different one, or a stopped train)
                 # refused, but agreeing with the refused fix before it: two GPS fixes say the train is here (its last good
                 # fix was the wrong one, or GTFS-realtime lags its first): taken afresh, never locked out for minutes
-                if not model.judge(t, anchors, d, now, dist, s, None, fix_at, gps=True):
+                if not model.judge(t, anchors, d, now, dist, s, None, fix_at, gps=True, noise=loc_gps):
                     why, last = "", None
             if why:
                 if rec is None or rec["raw"] != raw:     # each refused position counted once, however long it stays
                     self._refused(t, why, raw, s, dist, at)
-                nc = {"s": s, "fix_at": fix_at} if src == "traintime" else None
+                nc = {"s": s, "fix_at": fix_at, "raw": raw} if src == "traintime" else None
                 if rec is None:
                     self.fixes[tid] = {"raw": raw, "ok": False, "present": False, "s": None, "cand": nc}
                 else:
@@ -1670,13 +1680,14 @@ class Tracker:
                                "v": v, "a": a, "vf": vf, "s_raw": s_raw, "gps": gps, "vf_raw": p.get("speed"),
                                "moved": chk.get("moved"), "bad": chk.get("bad", ""), "fell": chk.get("fell", False),
                                "vf_held": chk.get("held"), "repeat": bool(chk.get("repeat")),
-                               "stopped_prev": rec.get("stopped") if rec is not None else None}
+                               "stopped_prev": rec.get("stopped") if rec is not None else gone.get(tid)}
             if src == "traintime":                       # what the page will predict it on from (the residuals), viewer or not
                 self._page(model, t, anchors, d, now, self.fixes[tid])
             if not first and src == "gtfs":              # one we saw appear: a point of the MTA's (GPS fixes are anywhere)
                 self.points.learn(raw[0], raw[1], s, d, at)
+        self._gone = {}
         for tid in [k for k in self.fixes if k not in seen]:
-            del self.fixes[tid]
+            self._gone[tid] = self.fixes.pop(tid).get("stopped")    # (its stopped state kept over one missed read)
         self.at = at
         self._pred_log(now)
         return True
@@ -1685,7 +1696,7 @@ class Tracker:
         """The page's parameters for a just-accepted TrainTime fix (page_params of what Model.trains sends for it), kept
         on it as "page": a residual is the page's own prediction whether or not anyone has the layer open. One place()
         a new fix."""
-        mem = self.trk_mem.setdefault(t["train"], {})
+        mem = dict(self.trk_mem.get(t["train"]) or {})   # (a scratch copy: never a remembered track of its own)
         try:
             p = model.place(t, anchors, d, now, rec, self.points, mem)
         except (KeyError, TypeError, ValueError, IndexError):
@@ -1787,7 +1798,7 @@ class Trains:
         self.rt = {"at": None, "error": "", "next": 0.0, "fails": 0, "n": 0}
         self.st = {"at": None, "error": "", "next": 0.0, "fails": 0, "modified": ""}
         self.points = Points()
-        self.track = Tracker(self.points, log)
+        self.track = Tracker(self.points, log, tt_every_s)
         self.tracks = self._read_json(tracks) if tracks and self.enabled else None
         self._points_saved = 0.0
         self.geo_at = 0.0                                 # the model last rebuilt with new tracks, poles, mileposts (#371)

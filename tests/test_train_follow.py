@@ -148,7 +148,7 @@ def test_a_clicked_train_is_followed_and_its_box_and_chip_stay_live(tmp_path):
     o = run_node(tmp_path, [], f"const STATIC = {json.dumps(str(STATIC) + '/')};\n" + LOAD_TRAINS + r"""
 const flush = () => new Promise((r) => setTimeout(r, 0));
 // (the position line's Snap button, trains.js posLine, read apart: out.snap)
-const rows = () => info.find("ml-lines")[0].children.map((c) => [c.textContent.replace(/ \u00b7 (Snap|At fix)$/, ""), c.title]);
+const rows = () => info.find("ml-lines")[0].children.map((c) => [c.textContent.replace(/ \u00b7 Snap$/, ""), c.title]);
 const snapBtn = () => info.find("ml-lines")[0].children.map((c) => c.textContent).find((t) => / \u00b7 Snap$/.test(t)) || "";
 (async () => {
   const m = group.attach(control);
@@ -168,6 +168,14 @@ const snapBtn = () => info.find("ml-lines")[0].children.map((c) => c.textContent
   answer = IN.answers[1]; T = IN.answers[1].got;               // the next fix: faster, further on
   await TrainLayer.load(); await flush();
   out.rowsNext = rows(); out.chipNext = host.find("ac-follow-t")[0].textContent; out.chipTip = host.find("ac-follow-t")[0].title || "";
+  // the hub holds it stopped (its hysteresis: under 1 m/s): no speed beside "Stopped", in the box or the chip
+  answer = JSON.parse(JSON.stringify(IN.answers[1]));
+  for (const t of answer.trains) if (t.id === IN.id) { t.mode = "stopped"; t.v = 0.7; }
+  await TrainLayer.load(); await flush(); box.refresh(); m.tick();
+  out.rowsStopped = rows(); out.chipStopped = host.find("ac-follow-t")[0].textContent;
+  // the box's Snap: then the line and the chip say so, no prediction, no Snap
+  info.find("tr-snapfix")[0].fire("click"); box.refresh(); m.tick();
+  out.rowsPinned = rows(); out.chipPinned = host.find("ac-follow-t")[0].textContent; out.snapPinned = snapBtn();
   map.emit("dragstart", { originalEvent: { type: "mousemove" } });                // a mouse drag lets go
   out.afterDrag = [m.following, host.find("ac-follow")[0].hidden];
   console.log(JSON.stringify(out)); process.exit(0);
@@ -190,6 +198,11 @@ const snapBtn = () => info.find("ml-lines")[0].children.map((c) => c.textContent
     assert not any("MP\u00a0" in r[0] for r in o["rowsNext"] if " west" in r[0])            # the headline: no milepost ...
     place = [r for r in o["rowsNext"] if r[0].startswith("MP\u00a0")]
     assert len(place) == 1 and "where the train is drawn" in place[0][1]                   # ... the place row has it
+    stopped = next(r[0] for r in o["rowsStopped"] if r[0].endswith(" s ago"))
+    assert stopped.startswith("Stopped · ") and "mph" not in stopped and "mph" not in o["chipStopped"]   # never "Stopped · 2 mph"
+    pinned = next(r for r in o["rowsPinned"] if r[0].endswith(" s ago"))
+    assert pinned[0].startswith("At fix · ") and "mph" not in pinned[0] and "not predicted" in pinned[1]
+    assert " · At fix · " in o["chipPinned"] and o["snapPinned"] == ""
     assert o["afterDrag"] == ["", True]
     assert o["tickRefreshes"] == 0                                                           # one refresh a second, not two
 
@@ -263,7 +276,7 @@ def test_an_old_gps_fix_draws_the_train_hollow_and_says_predicted(tmp_path):
     from tests.test_train_motion import STATIC
     o = run_node(tmp_path, [], f"const STATIC = {json.dumps(str(STATIC) + '/')};\n" + LOAD_TRAINS + r"""
 const flush = () => new Promise((r) => setTimeout(r, 0));
-const rows = () => info.find("ml-lines")[0].children.map((c) => c.textContent.replace(/ \u00b7 (Snap|At fix)$/, ""));
+const rows = () => info.find("ml-lines")[0].children.map((c) => c.textContent.replace(/ \u00b7 Snap$/, ""));
 let fc = null;
 (async () => {
   const m = group.attach(control);

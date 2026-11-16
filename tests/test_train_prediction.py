@@ -27,11 +27,11 @@ def model():
     return Model(parse_static(GTFS), tracks=json.loads(T.TRACKS_FILE.read_text()))
 
 
-def tt_train(model, s, stops, speed, ts, vstatus="STOPPED_AT", vstop="", n="9960"):
+def tt_train(model, s, stops, speed, ts, vstatus="STOPPED_AT", vstop="", n="9960", loc="GPS"):
     """A train (train_at) whose position is a TrainTime GPS fix at s, speed m/s, taken at ts."""
     t = train_at(model, s, stops, vstatus=vstatus, vstop=vstop, n=n)
     lat, lon, _ = model.line.at(s)
-    t["pos"] = {"lat": round(lat, 6), "lon": round(lon, 6), "bearing": None, "ts": ts, "src": "traintime", "loc": "GPS",
+    t["pos"] = {"lat": round(lat, 6), "lon": round(lon, 6), "bearing": None, "ts": ts, "src": "traintime", "loc": loc,
                 "speed": speed}
     t["tt"] = {"branch": "NH", "fleet": "M8", "cars": 8}     # (what TrainTime adds: the page then has its GPS speed)
     return t
@@ -315,3 +315,63 @@ def test_the_page_params_kept_on_a_fix_are_what_the_list_sends(model):
     [x] = model.trains({"timestamp": NOW, "trains": {t["id"]: t}}, NOW, tk)
     assert rec["page"] == T.page_params(x)
     assert set(rec["page"]) == {"s", "hold", "stop", "until", "mode", "v", "a", "dyn"} and rec["page"]["v"] == x["v"]
+
+
+def test_a_frozen_position_cannot_confirm_itself_and_slow_polls_still_confirm(model):
+    """Re-review of #589: the same refused position re-sent with newer times is no second fix (unless the train reads
+    stopped there); the confirming window scales with TrainTime's poll (CONFIRM_POLLS)."""
+    st, stops = inbound(model)
+    pc = st["Port Chester"]["ch"]
+    first = lambda: tt_train(model, pc - 1200, stops, 21.0, NOW, vstop=st["Port Chester"]["id"])
+    tk = T.Tracker()
+    feed(tk, model, first(), NOW)
+    same = dict(first(), pos=dict(first()["pos"], ts=NOW + 5))
+    assert feed(tk, model, same, NOW + 5) is None                         # the same position again: still refused
+    on = tt_train(model, pc - 1305, stops, 21.0, NOW + 10, vstop=st["Port Chester"]["id"])
+    assert feed(tk, model, on, NOW + 10)["ok"]                             # a different one agreeing: taken
+    tk = T.Tracker()                                                       # standing there, reading stopped: it may
+    feed(tk, model, tt_train(model, pc - 1200, stops, 0.0, NOW, vstop=st["Port Chester"]["id"]), NOW)
+    assert feed(tk, model, tt_train(model, pc - 1200, stops, 0.0, NOW + 5, vstop=st["Port Chester"]["id"]), NOW + 5)["ok"]
+    assert T.Tracker().confirm_s == T.CONFIRM_S and T.Tracker(tt_every_s=60.0).confirm_s == 150.0
+    tk = T.Tracker(tt_every_s=60.0)                                        # polled every 60 s: 120 s apart still confirm
+    feed(tk, model, first(), NOW)
+    on = tt_train(model, pc - 1200 - 21 * 120, stops, 21.0, NOW + 120, vstop=st["Port Chester"]["id"])
+    assert feed(tk, model, on, NOW + 120)["ok"]
+
+
+def test_the_gps_noise_allowance_is_for_gps_locations_only(model):
+    """A SIGNAL location (a fixed point on the line) keeps the reporting points' allowance (SPACING_M)."""
+    st, stops = inbound(model)
+    pc = st["Port Chester"]["ch"]
+    stops = [stops[0], (stops[1][0], "Departed", stops[1][2])] + stops[2:]
+    for loc, ok in (("GPS", False), ("SIGNAL", True)):
+        tk = T.Tracker()
+        feed(tk, model, tt_train(model, pc - 300, stops, 21.0, NOW, vstatus="IN_TRANSIT_TO", vstop=st["Rye"]["id"], loc=loc), NOW)
+        f = feed(tk, model, tt_train(model, pc - 1800, stops, 21.0, NOW + 5, vstatus="IN_TRANSIT_TO", vstop=st["Rye"]["id"], loc=loc), NOW + 5)
+        assert f["ok"] is ok, loc                                          # 1.5 km in 5 s: GPS too fast; SIGNAL allowed
+
+
+def test_working_out_the_page_params_leaves_no_track_memory(model):
+    """Re-review of #589: the residuals' place() (no viewer) never adds a remembered track (an entry with no "seen"
+    would never expire and could carry into the next day's train of that number)."""
+    st, stops = inbound(model)
+    pc = st["Port Chester"]["ch"]
+    stops = [stops[0], (stops[1][0], "Departed", stops[1][2])] + stops[2:]
+    tk = T.Tracker()
+    rec = feed(tk, model, moving(model, st, stops, pc - 600, NOW), NOW)
+    assert rec["page"] and tk.trk_mem == {}
+
+
+def test_stopped_is_kept_over_one_missed_read(model):
+    st, stops = inbound(model)
+    pc = st["Port Chester"]["ch"]
+    stops = [stops[0], (stops[1][0], "Departed", stops[1][2])] + stops[2:]
+    tk = T.Tracker()
+    feed(tk, model, moving(model, st, stops, pc - 600, NOW, speed=0.0), NOW)
+    feed(tk, model, moving(model, st, stops, pc - 600, NOW + 5, speed=0.0), NOW + 5)
+    assert tk.fix("9960")["stopped"]
+    tk.update(model, {"timestamp": NOW + 10, "tt_at": NOW + 10, "trains": {}}, NOW + 10)    # missing from one read
+    t = moving(model, st, stops, pc - 615, NOW + 15, speed=0.8)
+    feed(tk, model, t, NOW + 15)
+    [x] = model.trains({"timestamp": NOW + 15, "trains": {t["id"]: t}}, NOW + 15, tk)
+    assert x["mode"] == "stopped"                                          # 0.8 m/s, but it was stopped: still stopped
