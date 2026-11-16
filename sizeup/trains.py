@@ -1099,12 +1099,6 @@ class Model:
                                             "lon": round(p["lon"], DP), "vehicle_status": t.get("vstatus") or "",
                                             "vehicle_stop_id": t.get("vstop") or ""}
                  | ({"cars": t["cars"]} if t.get("cars") else {}) | self.tt_facts(t, p, now))
-            rec = track.fix(t["id"])
-            if rec is not None and rec.get("src") == "traintime" and x.get("pos_src") == "traintime":
-                # what the page predicts this fix on from (the residuals: page_predict)
-                rec["page"] = {"s": x["s"], "v": x.get("v"), "a": x.get("a", 0.0), "hold": x["hold_s"],
-                               "stop": (x.get("next") or {}).get("s"), "until": x.get("predict_until"), "mode": x["mode"],
-                               "dyn": x.get("dyn")}
             other = out.get(x["train"])                  # one train drawn once: a reported one over an estimate of it
             if other is None or other["fix_at"] is None and x["fix_at"] is not None:
                 out[x["train"]] = x
@@ -1440,9 +1434,10 @@ def along_filter(last: dict | None, s: float, d: int, t: float, v_feed: float | 
 # How far off the page's prediction is (the admin, 2026-11-15: "do we log how far ahead/behind the predictions are over
 # time, so we can tune the algorithm?"). Each new TrainTime position is set against where the page's predictor
 # (motion.js rail / gpsRun, ported below) put the train at that position's time from its last good fix: the
-# along-track residual, + ahead of the train, - behind it; only for a fix a page was given (what it was given:
-# Model.trains keeps it on the fix as "page"), so it is the page's own prediction. Kept in memory (the last PRED_KEEP), summarised in a log
-# line every PRED_LOG_S and on Data sources (TrainTime's row); never a line a fix.
+# along-track residual, + ahead of the train, - behind it. Every accepted TrainTime fix, whether anyone looks or not:
+# the hub works out what a page would be sent for it when it is accepted (Tracker._page, page_params: the same values,
+# rounded as sent), so it is the page's own prediction. Kept in memory (the last PRED_KEEP), summarised in a log line
+# every PRED_LOG_S and on Data sources (TrainTime's row); never a line a fix.
 RAIL_CRUISE_S = 20.0             # motion.js: a GPS fix runs on at its speed this long, then eases to a stop (b)
 RAIL_STEP_S = 0.1
 RAIL_JERK = 1.5
@@ -1451,6 +1446,16 @@ PRED_LOG_S = 300.0               # the summary line this often (when there were 
 PRED_SHOW_S = 900.0              # Data sources' window
 PRED_GAPS = ((10.0, "≤10 s"), (20.0, "10-20 s"), (40.0, "20-40 s"), (math.inf, ">40 s"))   # time since the last fix
 SNAP_M = 150.0                   # motion.js SNAP_M: a residual bigger than this is snapped onto on the page (counted)
+
+
+def page_params(x: dict) -> dict:
+    """What the page's predictor (motion.js rail, via trains.js fixOf) reads of a train as Model.trains sends it (the
+    hub's rounding): {s, v, a, hold, stop, until, mode, dyn}; v / a / dyn only when sent (a GPS fix's)."""
+    out = {"s": x["s"], "hold": x["hold_s"], "stop": (x.get("next") or {}).get("s"), "until": x.get("predict_until"),
+           "mode": x["mode"]}
+    if x.get("pos_src") == "traintime" and isinstance(x.get("v"), (int, float)):
+        out |= {"v": x["v"], "a": x.get("a", 0.0), "dyn": x.get("dyn")}
+    return out
 
 
 def gps_run(v: float, a: float, tau: float, room: float = math.inf, dyn: dict | None = None) -> tuple[float, float]:
@@ -1666,6 +1671,8 @@ class Tracker:
                                "moved": chk.get("moved"), "bad": chk.get("bad", ""), "fell": chk.get("fell", False),
                                "vf_held": chk.get("held"), "repeat": bool(chk.get("repeat")),
                                "stopped_prev": rec.get("stopped") if rec is not None else None}
+            if src == "traintime":                       # what the page will predict it on from (the residuals), viewer or not
+                self._page(model, t, anchors, d, now, self.fixes[tid])
             if not first and src == "gtfs":              # one we saw appear: a point of the MTA's (GPS fixes are anywhere)
                 self.points.learn(raw[0], raw[1], s, d, at)
         for tid in [k for k in self.fixes if k not in seen]:
@@ -1673,6 +1680,18 @@ class Tracker:
         self.at = at
         self._pred_log(now)
         return True
+
+    def _page(self, model: Model, t: dict, anchors: list, d: int, now: float, rec: dict) -> None:
+        """The page's parameters for a just-accepted TrainTime fix (page_params of what Model.trains sends for it), kept
+        on it as "page": a residual is the page's own prediction whether or not anyone has the layer open. One place()
+        a new fix."""
+        mem = self.trk_mem.setdefault(t["train"], {})
+        try:
+            p = model.place(t, anchors, d, now, rec, self.points, mem)
+        except (KeyError, TypeError, ValueError, IndexError):
+            return
+        if p is not None:
+            rec["page"] = page_params(p | model.tt_facts(t, p, now))
 
     def _residual(self, t: dict, last: dict, s: float, d: int, fix_at: float, now: float) -> None:
         """A new TrainTime position (s, at fix_at) against where the page had the train then (page_predict)."""

@@ -225,8 +225,7 @@ def test_the_tracker_measures_each_new_gps_fix_and_logs_a_summary_line(model, mo
         t["stops"][1] = dict(t["stops"][1], status="Departed")
         t["stops"][2] = dict(t["stops"][2], arr=now + 600, dep=now + 600)
         tk.update(model, {"timestamp": now, "tt_at": now, "trains": {t["id"]: t}}, now)
-        model.trains({"timestamp": now, "trains": {t["id"]: t}}, now, tk)      # a page looks: what it is given is kept
-    rows = list(tk.residuals.rows)
+    rows = list(tk.residuals.rows)                           # (nobody fetched the list: no viewer needed)
     assert len(rows) == 12 and all(r[2] == 5 for r in rows)
     assert rows[0][1] == pytest.approx((20.0 - 16.0) * 5, abs=2)               # the first: 20 m ahead
     assert all(abs(r[1]) < 10 for r in rows[3:])                                # then the speed is learnt
@@ -302,3 +301,17 @@ tk.where("a", at(5.2));
 out.fresh = !!tk.items.get("a").snapTo;
 """, {"f": gps_fix()})
     assert out["resent"] is False and out["fresh"] is True
+
+
+def test_the_page_params_kept_on_a_fix_are_what_the_list_sends(model):
+    """The residuals' page parameters (worked out when a fix is accepted) and the list a page fetches: one builder, the
+    same values."""
+    st, stops = inbound(model)
+    pc = st["Port Chester"]["ch"]
+    stops = [stops[0], (stops[1][0], "Departed", stops[1][2])] + stops[2:]
+    tk = T.Tracker()
+    t = moving(model, st, stops, pc - 600, NOW)
+    rec = feed(tk, model, t, NOW)
+    [x] = model.trains({"timestamp": NOW, "trains": {t["id"]: t}}, NOW, tk)
+    assert rec["page"] == T.page_params(x)
+    assert set(rec["page"]) == {"s", "hold", "stop", "until", "mode", "v", "a", "dyn"} and rec["page"]["v"] == x["v"]
