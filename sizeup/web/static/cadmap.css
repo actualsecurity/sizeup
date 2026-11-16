@@ -577,7 +577,7 @@
      Wide: the panorama beside a small map. A phone or an iPad (narrow or touch): full-screen, the map inset top-left (Google's logo and
      attribution run along the panorama's bottom edge and are never covered). */
   .sv-btn[aria-pressed="true"] { background: var(--pressed); border-color: var(--accent); }
-  .sv-menu { min-inline-size: 12rem; }
+  .sv-menu { min-inline-size: 12rem; z-index: calc(var(--z-overlay) + 1); }   /* over the Large map's dialog too */
   .sv-overlay { padding: var(--s-4); }
   .sv-dialog { inline-size: min(96vw, 112rem); block-size: 90vh; }
   .sv-head {

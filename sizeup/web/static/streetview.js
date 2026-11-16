@@ -447,11 +447,13 @@ window.StreetView = (() => {
       this.btn.addEventListener("click", (e) => { e.stopPropagation(); this.press(); });
       if (ctrls) ctrls.append(this.btn);
       const map = this.map;
-      map.on("contextmenu", (e) => {
-        if (e.originalEvent) e.originalEvent.preventDefault();
-        const oe = e.originalEvent || {};
+      // a right-click (a two-finger click on a trackpad, Ctrl-click; Android's long press): the browser's own event on the
+      // map, not MapLibre's contextmenu map event, which waits for the button to come up and is dropped when the map
+      // moved meanwhile (a refit for a moved rig or call, the scroll zoom still easing): then no menu at all
+      map.getCanvasContainer().addEventListener("contextmenu", (e) => {
+        e.preventDefault();
         const r = map.getCanvas().getBoundingClientRect();
-        menuOpen(oe.clientX != null ? oe.clientX : r.left + e.point.x, oe.clientY != null ? oe.clientY : r.top + e.point.y, e.lngLat, this);
+        menuOpen(e.clientX, e.clientY, map.unproject([e.clientX - r.left, e.clientY - r.top]), this);
       });
       map.on("movestart", (e) => { if (e.originalEvent && Date.now() - MENU.at > SWALLOW_MS) menuClose(); });
       this.longPress(map.getCanvasContainer());

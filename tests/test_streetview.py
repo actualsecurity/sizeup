@@ -156,7 +156,10 @@ def test_the_page_loads_the_script_after_the_maps_and_cadmap_js_is_untouched():
 def test_the_script_wires_the_menu_the_long_press_the_button_and_the_viewer():
     src = (STATIC / "streetview.js").read_text()
     assert "MapLayers.addGroup({ attach })" in src                        # every console map, present and future
-    assert 'map.on("contextmenu"' in src                                  # right-click
+    # right-click: the browser's own contextmenu on the map, not MapLibre's map.on("contextmenu"), which waits for the
+    # button to come up and drops the right-click when the map moved meanwhile (a refit, a follower's pan, a zoom easing)
+    assert 'map.getCanvasContainer().addEventListener("contextmenu"' in src
+    assert 'map.on("contextmenu"' not in src
     assert '"touchstart"' in src and "LONG_MS" in src and '"touchmove"' in src   # long press (iOS sends no contextmenu)
     assert "this.control.focused" in src                                  # the call's map: at the call
     assert "new this.lib.StreetViewPanorama(" in src and src.count("new this.lib.StreetViewPanorama(") == 1
@@ -355,6 +358,13 @@ const touch = (el, t, x = 50, y = 60) => { for (const f of el.ls[t] || []) f({ t
   touches: t === "touchend" ? [] : [{ clientX: x, clientY: y }] }); };
 function touchOn(m, target, t) { for (const f of m.cc.ls[t] || []) f({ target, touches: t === "touchend" ? [] : [{ clientX: 50, clientY: 60 }] }); }
 const menus = () => document.body.children.filter((c) => c.matches(".sv-menu"));
+// a right-click as the browser sends it: contextmenu on the map's canvas container (a trackpad's two-finger click, Ctrl-click,
+// Android's long press); MapLibre's own map event is never used (it is dropped when the map moves during the press)
+function rightClick(m, x, y, target) {
+  const ev = { type: "contextmenu", target: target || m.canvas, clientX: x, clientY: y, button: 2, dp: false, preventDefault() { this.dp = true; } };
+  for (const f of m.cc.ls.contextmenu || []) f(ev);
+  return ev;
+}
 
 (async () => {
   require(process.argv[2]);
@@ -412,7 +422,7 @@ const menus = () => document.body.children.filter((c) => c.matches(".sv-menu"));
   item.ls.click[0]({ detail: 1, stopPropagation() {} });
   out.liftOnItem = menus().length === 1 && S.lastAt() === lastBefore;
   // Android's contextmenu for the same press: no second menu
-  for (const f of m.ml.contextmenu) f({ originalEvent: { clientX: 50, clientY: 60, preventDefault() {} }, point: { x: 50, y: 60 }, lngLat: { lat: 41, lng: -73.66 } });
+  rightClick(m, 50, 60);
   out.lpOnce = menus().length === 1 && menus()[0] === first;
   touchOn(m, m.canvas, "touchend");
   const before = m.others; const lift = click(m, m.canvas);
@@ -427,6 +437,15 @@ const menus = () => document.body.children.filter((c) => c.matches(".sv-menu"));
   touchOn(m, m.chip, "touchstart"); await sleep(S.LONG_MS + 100);
   out.onMarker = menus().length;
   touchOn(m, m.chip, "touchend");
+  // a right-click: a menu at the pointer, the browser's own menu kept away; its item opens the viewer at that point
+  await sleep(900);
+  const rc = rightClick(m, 200, 100);
+  out.rc = { menus: menus().length, prevented: rc.dp, at: menus()[0] && [menus()[0].style.left, menus()[0].style.top],
+             mapEvent: !!(m.ml.contextmenu && m.ml.contextmenu.length) };
+  const rcItem = menus()[0].querySelector(".menu-item");
+  for (const f of docLs.pointerdown || []) f({ clientX: 201, clientY: 101, target: rcItem });
+  rcItem.ls.click[0]({ detail: 1, stopPropagation() {} });
+  out.rc.opened = menus().length === 0 ? S.lastAt() : null;
   console.log(JSON.stringify(out));
   process.exit(0);
 })();
@@ -460,6 +479,10 @@ def test_pick_mode_long_press_and_esc_on_a_fake_page(tmp_path):
     assert out["liftOnItem"] is True and out["tapOnItem"] is True
     assert out["lift"] == {"swallowed": True, "others": 0} and out["nextClick"] is True
     assert out["onMarker"] == 0
+    rc = out["rc"]
+    assert rc["menus"] == 1 and rc["prevented"] is True and rc["at"] == ["200px", "100px"]
+    assert rc["mapEvent"] is False                                           # not MapLibre's delayed, droppable event
+    assert rc["opened"] == {"lat": pytest.approx(41 + 100e-5), "lon": pytest.approx(-73.66 + 200e-5)}
 
 
 def test_googles_logo_and_attribution_are_never_covered():
@@ -472,6 +495,16 @@ def test_googles_logo_and_attribution_are_never_covered():
     wide = css[css.index(".sv-body {"):css.index("}", css.index(".sv-body {"))]
     assert "grid-template-columns" in wide             # wide: the map is its own column beside the panorama
     assert "gm-style" not in css                       # and nothing restyles or hides Google's own markup
+
+
+def test_the_menu_shows_over_the_large_map_dialog():
+    """The menu is appended to the page: over every overlay (the Large map is a dialog), never under its scrim."""
+    css = (STATIC / "cadmap.css").read_text()
+    rule = css[css.index(".sv-menu {"):css.index("}", css.index(".sv-menu {"))]
+    assert re.search(r"z-index:\s*calc\(var\(--z-overlay\) \+ 1\)", rule), rule
+    tokens = (STATIC / "style.css").read_text()
+    z = {k: int(v) for k, v in re.findall(r"--z-(overlay|popover):\s*(\d+)", tokens)}
+    assert z["overlay"] > z["popover"]                 # why the plain popover layer is not enough
 
 
 def test_the_pre_plan_editor_is_still_seen_by_its_form():
