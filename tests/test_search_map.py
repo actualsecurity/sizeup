@@ -6,6 +6,8 @@ page, we should be able to drag the map down/up like in other places".
     limits        H_MIN px to 85% of the window, again when the window changes (clampH(), pure)
     remembered    per viewer, localStorage "sizeup.searchMap" {h}, only inside a try
     the map       MapLibre's resize() once a frame while dragging and once after
+    the layout    only cad.css styles the view's .sv-* classes (street view's are .stv-*); in a browser the map sits
+                  above the results at full width with a sized canvas, the Pre-plan tab's too
 Synthetic only: no calls, addresses or units here."""
 import json
 import re
@@ -141,3 +143,94 @@ def test_a_remembered_height_a_bad_one_and_no_storage(tmp_path):
         assert behaviour(tmp_path, bad)["start"] == {}, bad
     out = behaviour(tmp_path, "throw", BEHAVIOUR_MAP)                         # storage refuses: this page view only
     assert out["start"] == {} and out["end"] == {"--sv-map-h": "765px"}
+
+
+# ---- the map's box keeps its layout: no other view's stylesheet restyles the Search view's classes ----------------------
+# Street view (#462) styled its own dialog with .sv-body and .sv-map in cadmap.css, which loads after cad.css in the same
+# layer: the Search view's results went into a 3:2 grid beside the map and the map's own box (position: relative, no
+# height) collapsed to 0 px: an empty dark box with only the resize handle. Same for the Pre-plan tab's map.
+
+def stylesheets():
+    html = text("cad.html")
+    return [m.group(1) for m in re.finditer(r'<link rel="stylesheet" href="/static/([\w.-]+\.css)">', html)]
+
+
+def selectors(css):
+    css = re.sub(r"/\*.*?\*/", "", css, flags=re.S)
+    return re.sub(r"\{[^{}]*\}", "{}", css)          # the declarations go: selectors never hold a brace
+
+
+def test_only_cad_css_styles_the_search_views_classes():
+    sheets = stylesheets()
+    assert sheets.index("cad.css") < sheets.index("cadmap.css")              # why a clash in cadmap.css wins
+    assert "sv-body" in selectors(text("cad.css")) and "sv-map" in selectors(text("cad.css"))
+    for name in sheets:
+        if name == "cad.css":
+            continue
+        found = sorted(set(re.findall(r"\.(sv-[\w-]+)", selectors(text(name)))))
+        assert not found, f"{name} styles the Search view's classes {found} (.sv-* is search-view.js's; cad.css)"
+
+
+def test_street_views_classes_are_its_own():
+    src = text("streetview.js")
+    made = set(re.findall(r'h\("\w+", "([^"]*)"\)', src))
+    classes = {c for s in made for c in s.split()}
+    assert {"stv-body", "stv-map", "stv-menu", "stv-btn"} <= classes
+    assert not [c for c in classes if c.startswith("sv-")]
+    html = text("cad.html")
+    assert not [c for c in classes if c.startswith("stv-") and re.search(rf'class="[^"]*\b{c}\b', html)]
+
+
+@pytest.fixture
+def site(tmp_path):
+    import threading
+
+    from sizeup.cad.api import CadApi
+    from sizeup.web.server import WebServer
+    from tests.test_cad import make_cad
+    scene = {"timezone": "America/New_York", "home": {"center": [-73.5, 41.0], "zoom": 13}}   # no tiles: offline
+    ws = WebServer("127.0.0.1", 0, scene, lambda: {"time": 0}, lambda cid: None, lambda iid: False,
+                   cad=CadApi(make_cad(tmp_path)))
+    threading.Thread(target=ws.serve_forever, daemon=True).start()
+    yield f"http://127.0.0.1:{ws.httpd.server_address[1]}"
+    ws.shutdown()
+
+
+BOX = """(sel) => { const e = document.querySelector(sel); if (!e) return null; const r = e.getBoundingClientRect();
+  const cs = getComputedStyle(e); return { top: r.top, bottom: r.bottom, w: r.width, h: r.height, display: cs.display,
+  dir: cs.flexDirection }; }"""
+
+
+def test_the_search_and_preplan_maps_have_a_size_in_a_browser(site):
+    """The page itself in headless Chromium (skipped without Playwright): the map above the results, full width, as tall
+    as its box, with MapLibre's canvas in it; the Pre-plan tab's map too."""
+    sync_api = pytest.importorskip("playwright.sync_api", reason="needs Playwright")
+    pw = sync_api.sync_playwright().start()
+    try:
+        browser = pw.chromium.launch()
+    except Exception as e:  # noqa: BLE001
+        pw.stop()
+        pytest.skip(f"no Chromium for Playwright: {str(e).splitlines()[0]}")
+    try:
+        pg = browser.new_page(viewport={"width": 1600, "height": 1000})
+        pg.set_default_timeout(15000)
+        pg.route(lambda url: not url.startswith(site), lambda route: route.abort())   # no tiles, no fonts: offline
+        errors = []
+        pg.on("pageerror", lambda e: errors.append(str(e)))
+        pg.goto(site + "/cad#search")
+        pg.wait_for_selector("#sv-map canvas.maplibregl-canvas", state="attached")
+        body, box, m, res = (pg.evaluate(BOX, s) for s in ("#sv-calls", "#sv-mapbox", "#sv-map", "#sv-calls .sv-results"))
+        assert (body["display"], body["dir"]) == ("flex", "column"), body
+        assert box["h"] >= 160 and abs(box["w"] - body["w"]) < 1, (box, body)            # full width, its own height
+        assert m["h"] >= box["h"] - 4 and m["w"] >= box["w"] - 4, (m, box)               # the map fills its box
+        assert res["top"] >= box["bottom"], (res, box)                                   # the results below it
+        canvas = pg.evaluate(BOX, "#sv-map canvas.maplibregl-canvas")
+        assert canvas["h"] >= m["h"] - 2 and canvas["w"] >= m["w"] - 2, (canvas, m)
+        pg.click('#sv-tabs button[data-tab="preplan"]')
+        pg.wait_for_function("() => { const e = document.querySelector('#sv-preplan'); return e && !e.hidden; }")
+        pp, ppm = pg.evaluate(BOX, "#sv-preplan"), pg.evaluate(BOX, "#sv-pp-map")
+        assert pp["display"] == "flex" and ppm["h"] >= 100, (pp, ppm)
+        assert errors == []
+    finally:
+        browser.close()
+        pw.stop()
