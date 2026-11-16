@@ -430,7 +430,7 @@ Top level of `sizeup/`:
 | `stt.py`, `transcribe.py`, `stt_vocab.py`, `sttcatchup.py`, `channels.py`, `talkers.py` | Speech-to-text: whisper queue, Amazon Transcribe, vocabularies, catch-up, per-channel choices, talker hints |
 | `talkgroups.py`, `tiers.py`, `sourcekeys.py` | Talkgroup switches, tiers, one key per radio source and the context visibility rule |
 | `dispatch.py`, `incidents.py` | Page parsing; the monitor's incidents |
-| `notify.py`, `prealert.py`, `errwatch.py` | ntfy pushes, the phone pre-alert reader, hub error spikes |
+| `notify.py`, `prealert.py`, `netcut.py`, `errwatch.py` | ntfy pushes, the phone pre-alert reader (and cutting its stream short on stop), hub error spikes |
 | `polly.py`, `tts.py`, `tts_server.py` | The dispatch voice |
 | `aws.py` | Credentials, SigV4 and JSON APIs with no boto3 |
 | `audiostore.py`, `attachments.py`, `docstore.py`, `docfiles.py`, `pdfcheck.py`, `cachesync.py` | S3 storage: audio, attachments, site documents, map caches |

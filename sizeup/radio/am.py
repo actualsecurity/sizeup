@@ -704,6 +704,8 @@ class AmReceiver(NfmReceiver):
             chunk = os.read(fd, 65536 if multi else 8192)
             if not chunk:
                 return got
+            if not got:
+                self._present()                          # (#547) its dongle back after it was absent: said once
             got, last = True, time.monotonic()
             buf += chunk
             while len(buf) >= need:

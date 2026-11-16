@@ -12,7 +12,13 @@ hub writes it to CloudWatch Logs (sizeup/cloud/cwlogs.py).
                 (county CAD details and its credentials live there): a line that names an installed adapter (its entry
                 point, module, distribution, source id or label), the runner's "incident sources:" lines, a
                 third-party logger's "[log <name>]" line (install_log_tags) and a traceback frame in site-packages
-                (with its source line); counted as dropped_adapter
+                (with its source line), a line the adapter wrote through its context's log ("[adapter] ", sources/
+                runner.py context_for); counted as dropped_adapter
+              - until those names are complete (no adapter to load, or the load is over: a source id only the runner
+                knows), every entry waits in memory and the hand-off files stay (#548): no adapter line is sent in a
+                start's first minutes. HOLD_MAX_S and HOLD_MAX_LINES at most: then what waited is dropped (kept on the
+                station), counted as dropped_held and said once, and the names known are used. Once complete, they
+                stay complete (a refresh that fails keeps the last complete set)
               - the unit kept (the hub's include / exclude), its level (logscrub.level) at least the hub's threshold
                 (default info: debug dropped)
               - scrubbed (logscrub.scrub: a line with a credential is DROPPED, fail closed; a scrub that raises drops
@@ -65,6 +71,11 @@ LOG_TAG = re.compile(r"^\s*(?:\d\d:\d\d:\d\d\s+)?\[log ([\w.-]+)\]")
 BASIC = re.compile(r"^\s*(?:DEBUG|INFO|WARNING|ERROR|CRITICAL):([\w.-]+):")    # logging.basicConfig's own format
 FRAME = re.compile(r'^\s*File "[^"]*(?:site-packages|dist-packages)/')
 TRACEBACK = "Traceback (most recent call last):"
+ADAPTER_TAG = re.compile(r"^\s*(?:\d\d:\d\d:\d\d\s+)?\[adapter\]")    # sources/runner.py context_for's log
+MARKERS_S = 300.0                      # a complete set of adapter markers is looked at again this often
+INCOMPLETE_S = 1.0                     # ... an incomplete one this often (never cached: #548)
+HOLD_MAX_S = 600.0                     # the longest entries wait for the markers to be complete
+HOLD_MAX_LINES = 20000                 # ... and the most that wait (the oldest dropped, kept on the station)
 
 
 def _env_off() -> bool:
@@ -103,7 +114,34 @@ def unit_ok(unit: str, cfg: dict) -> bool:
     return not inc or unit in inc
 
 
-def adapter_markers(app=None, entry_points=None, hosts=None) -> set[str]:
+def adapters_expected(entry_points=None, env=None) -> bool:
+    """Whether this machine has an incident-source adapter to load: an entry point, or a module in
+    SIZEUP_INCIDENT_SOURCES (sources/runner.py _factories). Metadata that can't be read: True (fail closed)."""
+    env = os.environ if env is None else env
+    if (env.get("SIZEUP_INCIDENT_SOURCES") or "").strip():
+        return True
+    try:
+        if entry_points is None:
+            from importlib.metadata import entry_points
+        return any(True for _ in entry_points(group=ADAPTER_GROUP))
+    except Exception:  # noqa: BLE001
+        return True
+
+
+def markers_complete(app=None, entry_points=None, env=None) -> bool:
+    """adapter_markers(app) names every adapter there will be (#548): there is none to load, or the app's load of
+    them is over (App.sources_loaded: the runner, if any, exists, so its source ids and hosts are in the set)."""
+    if app is not None:
+        ev = getattr(app, "sources_loaded", None)
+        if ev is not None:
+            if ev.is_set():
+                return True
+        elif getattr(app, "sources_runner", None) is not None:
+            return True
+    return not adapters_expected(entry_points, env)
+
+
+def adapter_markers(app=None, entry_points=None, hosts=None, env=None) -> set[str]:
     """What names the incident-source adapter in a line (lower case: matched without case): its entry points' names,
     modules (top package) and distributions, the runner's sources (id, label), and its hosts (the host of each URL or
     host name among its non-secret credentials, and of an adapter's base_url / url / host attribute). Read at runtime:
@@ -121,6 +159,9 @@ def adapter_markers(app=None, entry_points=None, hosts=None) -> set[str]:
             out.add(dist.replace("-", "_"))
     except Exception:  # noqa: BLE001 - broken metadata: the other markers still hold
         pass
+    env = os.environ if env is None else env
+    for spec in (env.get("SIZEUP_INCIDENT_SOURCES") or "").split(","):     # module:factory, without the runner
+        out.add(spec.strip().partition(":")[0].split(".")[0])
     runner = getattr(app, "sources_runner", None) if app is not None else None
     from sizeup import procenv
     for r in getattr(runner, "runs", None) or []:
@@ -163,7 +204,8 @@ class LogShipper:
 
     def __init__(self, cfg, client: Callable[[float], object], log: Callable[[str], None] = print,
                  spool: Path | str | None = None, clock: Callable[[], float] = time.time,
-                 handoff: Path | str | None = None, app=None, markers: Callable[[], set[str]] | None = None):
+                 handoff: Path | str | None = None, app=None, markers: Callable[[], set[str]] | None = None,
+                 complete: Callable[[], bool] | None = None):
         self.cfg, self._client, self.log, self.clock, self.app = cfg, client, log, clock, app
         self.station = str(getattr(cfg, "station_id", "") or "station")
         if spool is None:
@@ -172,8 +214,17 @@ class LogShipper:
         self.dir = Path(spool) if spool else None
         self.handoff = Path(handoff or os.environ.get("SIZEUP_LOG_HANDOFF") or HANDOFF)
         self._markers_fn = markers or (lambda: adapter_markers(self.app))
+        if complete is None:
+            complete = (lambda: True) if markers is not None else (lambda: markers_complete(self.app))
+        self._complete_fn = complete
         self._markers: set[str] = set()
-        self._markers_at = 0.0
+        self._markers_at: float | None = None
+        self._complete = False                 # the markers name every adapter (only then are they cached)
+        self._held: list[dict] = []            # entries waiting for that (#548)
+        self._hold_since: float | None = None
+        self._gave_up = False
+        self._held_full = False                # said once: the oldest waiting entries dropped
+        self.dropped_held = 0                  # waiting entries dropped (the cap, or HOLD_MAX_S): never sent
         self.config = dict(DEFAULT_CONFIG)
         self.repeats = logscrub.Repeats()
         self.pending: list[list] = []          # [ms, unit, level, msg] not spooled yet
@@ -220,21 +271,56 @@ class LogShipper:
             return {}
 
     def markers(self) -> set[str]:
+        """What names the adapter in a line. Cached MARKERS_S only once complete (#548: a set made before the runner
+        existed lacks its source ids); until then made again every INCOMPLETE_S."""
         now = self.clock()
-        if now - self._markers_at > 300:
-            self._markers_at = now
+        if self._markers_at is None or now - self._markers_at >= (MARKERS_S if self._complete else INCOMPLETE_S):
+            try:                                        # first: complete means the set below came after the load
+                done = self._complete or bool(self._complete_fn())     # (once complete, always: the load is over)
+            except Exception:  # noqa: BLE001
+                done = False
             try:
                 self._markers = {m.lower() for m in (self._markers_fn() or ()) if m}
-            except Exception:  # noqa: BLE001
-                pass
+                self._markers_at, self._complete = now, done
+            except Exception:  # noqa: BLE001 - the old set stays (a complete one stays complete); made again later
+                self._markers_at = now
             if self._thread is not None:
                 install_log_tags()              # (again: an adapter may have called basicConfig since)
         return self._markers
+
+    def holding(self) -> bool:
+        """Entries wait while the markers may still miss an adapter's names (#548), fail closed: nothing is sent
+        until they are complete. HOLD_MAX_S at most (a load that never ends): what waited is dropped, never sent."""
+        if self.config.get("adapter"):
+            self._release()                             # its lines may go anyway
+            return False
+        self.markers()
+        if self._complete or self._gave_up:
+            self._release()
+            return False
+        now = self.clock()
+        if self._hold_since is None:
+            self._hold_since = now
+        if now - self._hold_since < HOLD_MAX_S:
+            return True
+        self._gave_up = True
+        self.dropped_held += len(self._held)
+        self.log(f"station logs: the incident-source adapters not loaded after {HOLD_MAX_S:.0f} s: "
+                 f"{len(self._held)} waiting lines kept on the station, not sent")
+        self._held = []
+        return False
+
+    def _release(self) -> None:
+        held, self._held = self._held, []
+        for raw in held:
+            self._take(raw)
 
     # -- filter and batch ----------------------------------------------------------------------------------
 
     def is_adapter(self, unit: str, msg: str) -> bool:
         """The incident-source adapter's (or a third-party library's) own line, or the runner's about it."""
+        if ADAPTER_TAG.match(msg):
+            return True                                 # what the adapter wrote through its context's log
         low = msg.lower()
         hit = any(k in low for k in self.markers())
         if unit != "sizeup-station":
@@ -263,7 +349,23 @@ class LogShipper:
         return hit
 
     def take(self, raw: dict) -> None:
-        """One journal entry: kept (into the batch, which is spooled when full) or counted as dropped."""
+        """One journal entry: kept (into the batch, which is spooled when full) or counted as dropped; or, while the
+        adapter markers aren't complete, waiting (holding)."""
+        if self.dir is None:
+            return
+        if self.holding():
+            if len(self._held) >= HOLD_MAX_LINES:      # the oldest: kept on the station, never sent
+                self._held.pop(0)
+                self.dropped_held += 1
+                if not self._held_full:
+                    self._held_full = True
+                    self.log(f"station logs: over {HOLD_MAX_LINES} lines waiting for the incident-source adapters: "
+                             "the oldest kept on the station, not sent")
+            self._held.append(raw)
+            return
+        self._take(raw)
+
+    def _take(self, raw: dict) -> None:
         e = entry(raw)
         if e is None or self.dir is None:             # (no spool: nothing is kept)
             return
@@ -322,6 +424,8 @@ class LogShipper:
 
     def spool(self, force: bool = False) -> Path | None:
         """The batch so far into the spool, when due or forced; then the hand-off files it came from go."""
+        if self._held:                                  # their hand-off files stay until they are batched
+            return None
         now = self.clock()
         for t, u, lvl, m in self.repeats.flush(now):
             self.pending.append([int(t * 1000), u, lvl, m])
@@ -483,8 +587,10 @@ class LogShipper:
                     self.dropped_off += 1
                 except OSError:
                     pass
-            self.pending, self.pending_bytes, self.consumed = [], 0, []
+            self.pending, self.pending_bytes, self.consumed, self._held = [], 0, [], []
             return "off"
+        if self._held:
+            self.holding()                              # complete now (or given up): what waited goes on
         files = [p for p in self._handoff_files() if p not in self.consumed][:MAX_FILES_A_TURN]
         if not files and not self.consumed:
             rs = self.reader_status()
@@ -553,5 +659,6 @@ class LogShipper:
                 "dropped_secret": self.dropped_secret, "dropped_level": self.dropped_level,
                 "dropped_unit": self.dropped_unit, "dropped_spool": self.dropped_spool,
                 "dropped_adapter": self.dropped_adapter, "dropped_error": self.dropped_error,
-                "dropped_off": self.dropped_off, "rejected": self.rejected,
+                "dropped_off": self.dropped_off, "rejected": self.rejected, "held": len(self._held),
+                "dropped_held": self.dropped_held,
                 "repeats": self.repeats.suppressed, "last_ok": self.last_ok, "error": self.last_error}
