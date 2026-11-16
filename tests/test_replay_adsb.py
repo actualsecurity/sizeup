@@ -84,9 +84,11 @@ class Replay:
 
 def layer(rp: Replay, station: bool = False, logs: list | None = None) -> AircraftLayer:
     feeds = tuple(f for f in ("adsblol", "adsbfi") if f in rp.feeds)
+    # adsb.lol primary, as these sets were judged (the old rule's tie went to feeds' order); with adsb.fi primary one
+    # departure in hpn-20261107T154000Z reads "arriving" for a moment: a phase-rule edge, its own issue
     return AircraftLayer(feeds=feeds, adsblol_url=LOL, adsbfi_url=FI, registry=False, fetch=rp.fetch, clock=rp.clock,
                          log=(logs.append if logs is not None else (lambda m: None)), airlines={}, watch=False,
-                         station_feed=station)
+                         station_feed=station, prefer=("adsblol", "adsbfi"))
 
 
 def run(rp: Replay, ly: AircraftLayer, until: float, step: float = 1.0, on_view=None, station_every: float = 0.0,

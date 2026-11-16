@@ -582,7 +582,7 @@ def test_a_forwarding_station_never_reads_the_apis_for_the_watch():
     assert fetch.calls == [] and not ly.watching()
     ly.active = lambda: True
     ly.tick()
-    assert fetch.calls == ["lol.example"]
+    assert sorted(fetch.calls) == ["fi.example", "lol.example"]       # the primary, and the other's first probe
 
 
 def test_the_hub_endpoint_takes_gzip_with_the_station_token_only(tmp_path):

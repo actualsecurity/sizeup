@@ -261,18 +261,18 @@ def test_a_429s_retry_after_is_honoured_and_lengthened_while_it_goes_on(servers)
 
 # ---- the primary: the steady feed, or [aircraft] primary ---------------------------------------------------------------------
 
-def test_a_feed_that_failed_lately_is_not_the_primary_though_it_gives_more():
+def test_a_feed_that_failed_lately_is_not_the_primary_though_it_comes_first():
     clock = Clock(T3 + 0.5)
     few = lol_without({"abedb1", "a4fe82", "a12add"})               # adsb.fi with 7, adsb.lol with 10
     ly = AircraftLayer(feeds=("adsblol", "adsbfi"), adsblol_url=LOL_URL, adsbfi_url=FI_URL, registry=False,
-                       fetch=Feeds(lol=(0, LOL3), fi=(few,)), clock=clock, log=lambda m: None)
-    ly.refresh()                                                     # adsb.lol times out
+                       fetch=Feeds(lol=(0, LOL3), fi=(few,)), clock=clock, log=lambda m: None,
+                       prefer=("adsblol", "adsbfi"))
+    ly.refresh()                                                     # adsb.lol (first by [aircraft] prefer) times out
     clock.t += 11
-    ly.refresh()                                                     # both answer: adsb.lol has more
-    assert ly.feeds[0].st["score"] > ly.feeds[1].st["score"]
+    ly.refresh()                                                     # both answer
     assert ly.primary().key == "adsbfi"                              # but it failed 11 s ago
     clock.t += A.FLAKY_S
-    assert ly.primary().key == "adsblol"                             # steady for FLAKY_S: the busier again
+    assert ly.primary().key == "adsblol"                             # clean for FLAKY_S, answered since: first again
     pinned = AircraftLayer(feeds=("adsblol", "adsbfi"), adsblol_url=LOL_URL, adsbfi_url=FI_URL, registry=False,
                            fetch=Feeds(lol=(LOL3,), fi=(few,)), clock=Clock(T3 + 0.5), log=lambda m: None,
                            primary="adsbfi")
@@ -404,13 +404,13 @@ def test_the_emergency_watch_moves_off_a_trickling_primary_and_alarms_from_the_o
     lol, fi = servers(Fake, [("trickle", 0.3)]), servers(Fake, [emergency_body()])
     alarms: list[dict] = []
     ly = AircraftLayer(feeds=("adsblol", "adsbfi"), adsblol_url=lol.url(), adsbfi_url=fi.url("/lat/{lat}/lon/{lon}/dist/{radius}"),
-                       registry=False, log=lambda m: None)
+                       registry=False, log=lambda m: None, primary="adsblol")
     ly.on_emergency = lambda ev: alarms.append(ev) or len(alarms)
     assert ly.watching() and not ly.demanded() and ly.primary().key == "adsblol"
     ly.start()
     try:
-        deadline = time.monotonic() + 8
-        while not alarms and time.monotonic() < deadline:
+        deadline = time.monotonic() + 8                 # (adsb.fi's first probe may bring the alarm before the cut)
+        while (not alarms or "no whole answer" not in ly.feeds[0].st["why"]) and time.monotonic() < deadline:
             time.sleep(0.1)
         assert [a["code"] for a in alarms] == ["7700"] and alarms[0]["src"] == "adsbfi"
         assert ly.primary().key == "adsbfi" and "no whole answer" in ly.feeds[0].st["why"]
@@ -421,7 +421,7 @@ def test_the_emergency_watch_moves_off_a_trickling_primary_and_alarms_from_the_o
 def test_a_feed_busy_past_any_reads_deadline_is_not_the_primary():
     clock = Clock(T3 + 0.5)
     ly = AircraftLayer(feeds=("adsblol", "adsbfi"), adsblol_url=LOL_URL, adsbfi_url=FI_URL, registry=False,
-                       fetch=Feeds(), clock=clock, log=lambda m: None)
+                       fetch=Feeds(), clock=clock, log=lambda m: None, primary="adsblol")
     lol = ly.feeds[0]
     lol.st.update(busy=True, busy_since=clock.t)
     assert ly.primary() is lol                                          # in flight, within a read's time
