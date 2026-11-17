@@ -112,7 +112,7 @@ const ids = () => st.rows.map((t) => t.id);
   Object.assign(out, {
     fresh: N.prefs(null), stored: N.prefs(stored.v), bad: N.prefs("{not json"),
     wants: [N.wants(""), N.wants("ui=2"), N.wants("ui=1"), N.wants("event=26-000001")],
-    views: m.views, systems: m.systems.map((s) => [s.label, s.groups.map((g) => [g.name, g.service, g.n, g.sources.map((x) => x.name)])]),
+    views: m.views, systems: m.sections.map((s) => [s.label, s.groups.map((g) => [g.name, g.service, g.n, g.sources.map((x) => x.name)])]),
     pinned: m.pinned.map((s) => s.key), rows: Object.fromEntries(m.rows.map((s) => [s.key, [s.n, s.live, s.recent, s.mute, s.code, s.em, s.until]])),
     flaggedKeys: m.flagged.map((s) => s.key), mutesFor: N.mutesFor(p.mutes, SRC),
     unseen: N.unread(SRC[1], undefined, NOW), old: N.unread(SRC[0], NOW - 50 * 60, NOW), later: N.unread(SRC[0], NOW - 30 * 60, NOW),
@@ -121,7 +121,7 @@ const ids = () => st.rows.map((t) => t.id);
     // them, a live key or an emergency window for one (the state push) bring none of it back
     hidden: (() => { const h = N.model(SRC.slice(0, 1), { ...N.prefs(null), pins: ["p25:metro:9001"], mutes: ["p25:metro:9003"],
                                                           seen: seenAll }, NOW, new Set(["p25:metro:9001"]), { "p25:metro:9100": 4242 });
-                     return { views: h.views.map((v) => v.id), systems: h.systems.map((x) => x.label), rows: h.rows.map((x) => x.key),
+                     return { views: h.views.map((v) => v.id), systems: h.sections.map((x) => x.label), rows: h.rows.map((x) => x.key),
                               pinned: h.pinned.map((x) => x.key), flagged: h.flagged.map((x) => x.key) }; })(),
     seenKept: [Object.keys(N.prefs(JSON.stringify({ seen: many })).seen).length, "k1499" in N.prefs(JSON.stringify({ seen: many })).seen, "k0" in N.prefs(JSON.stringify({ seen: many })).seen],
     // the default (fire, EMS, other): someone else's transit / police emergency is quiet; ours never is
@@ -270,11 +270,12 @@ def out(tmp_path_factory):
 @pytest.mark.skipif(NODE is None, reason="node not installed")
 def test_the_rail_is_off_until_a_viewer_turns_it_on_and_remembers(tmp_path):
     out = run(tmp_path, scenario="pure")
-    assert out["fresh"] == {"on": False, "rail": True, "pins": [], "mutes": [], "seen": {}} == out["bad"]
+    assert out["fresh"] == {"on": False, "rail": True, "pins": [], "mutes": [], "seen": {}, "folds": []} == out["bad"]
     assert out["wants"] == [False, True, False, False]            # the page as before unless asked: ?ui=2
     stored = json.dumps({"on": True, "rail": False, "pins": ["fm:FG1"], "mutes": ["air:Tower"], "seen": {"fm:FG1": 5}})
     again = run(tmp_path, stored, "pure")
-    assert again["stored"] == {"on": True, "rail": False, "pins": ["fm:FG1"], "mutes": ["air:Tower"], "seen": {"fm:FG1": 5}}
+    assert again["stored"] == {"on": True, "rail": False, "pins": ["fm:FG1"], "mutes": ["air:Tower"], "seen": {"fm:FG1": 5},
+                               "folds": []}
     assert again["wants"] == [True, True, False, True]            # on: an old link opens in it too; ?ui=1: as before
     assert out["seenKept"] == [1000, True, False]                 # the newest thousand: a busy tree never reads as unseen
 
