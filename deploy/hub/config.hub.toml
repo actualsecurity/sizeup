@@ -142,7 +142,7 @@ server = "https://ntfy.sh"           # SIZEUP_PREALERT_SERVER overrides (tests: 
 ring_topic = ""                      # set in Settings > System (not here)
 status_topic = ""                    # set in Settings > System (not here)
 expire_min = 5
-heartbeat_stale_min = 90
+heartbeat_every_min = 360            # Tapout's heartbeat: every 6 h. Warns after 411 min (period + 10 % + 15 min)
 
 [roads]
 # The maps' highway layers (sizeup/roads.py, docs/cloud.md "Highway layers"). thruway: the NYS Thruway

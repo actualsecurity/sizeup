@@ -307,7 +307,7 @@ schedule per pull, in Settings.
 | Airport | Runways, taxiways, gates, approaches, staging; alert levels and the airport run cards | `cad/airport.py` |
 | Trains | Metro-North GTFS-realtime with a motion model between reporting points; MTA TrainTime for GPS, consist and track when it answers; numbered tracks, catenary pole numbers and mileposts | `trains.py`, `traintime.py`, `railassets.py` |
 | Vessels | AIS: the station's receiver and aisstream.io | `vessels.py`, `wsclient.py`, [`vessels.md`](vessels.md) |
-| Highways | Thruway and 511NY cameras, events, roadwork and signs; live video checked and repaired; a rolling camera DVR; a camera wall | `roads.py`, `hlsseg.py`, `dvr.py`, `camoverlay.py` |
+| Highways | Thruway and 511NY cameras, events, roadwork and signs; live video checked and repaired; a rolling camera DVR; a camera wall | `roads.py`, `hlsseg.py`, `dvr.py`, `httpkeep.py`, `camoverlay.py` |
 | Road projects and closures | Thruway, 511NY, NYSDOT and CTDOT capital projects, village notices, WZDx | `roadprojects.py` |
 | County GIS | Westchester County GIS ArcGIS layers: parcels, boundaries, fire districts, hydrants and more, by config | `gis.py` |
 | Weather and water | NWS alerts, conditions and radar; NOAA tides | `weather.py` |
@@ -330,6 +330,17 @@ A name whose address is not found is kept, flagged ("not found" in the card): th
 place it, but a county feed location naming it still gets its address. The imported names are used:
 
 - by the place search (a note's "@", the location box: the name, its address filled in),
+- by an address typed (the place search, the location box) or clicked on the new call's map: each name at that address
+  is its own suggestion, alphabetical, right before the plain address ("120 Example Ave @ Example Burger", "120
+  Example Ave @ Sample Fitness", "120 Example Ave"). Picked, it is the place as by its name, at the address typed. The
+  address is matched by its house number (letter and fraction too: `localaddr`) and its street's words (the
+  gazetteer's spelling of an entry's address only for that very number: "189 Example St" is not "189-1/2"), then by
+  its point (within 500 m) and its town (the same street across a town line is not it; a name at the very point,
+  within 50 m, counts whatever its town: the import may place a row at a neighbour's point). A site is offered at any
+  of its addresses, once; a range ("132-136", "136-132", "132-36", "199-01") at each number of it on that side of the
+  street when its ends are at most 20 apart (`RANGE_SPAN`), else at its two ends. A name made by hand counts when it
+  was pinned at an address. Only the place search's own answer and the location box get them, never a location typed
+  and not picked (`PlaceIndex.places_at`),
 - by the page and radio locators (`sizeup/geo/pagegeo.py`, `sizeup/intel/place.py`: "the Quillberry Marina", "the
   community hall in Sample Town"). A name of one word, or of common words only (`sizeup/geo/commonwords.py`), needs
   its town said beside it; another town said beside it is that town's; a house number said always wins, the name only
@@ -499,7 +510,7 @@ Top level of `sizeup/`:
 | `janitor.py` | Retention under `captures/` (all-in-one and station) |
 | `atc.py`, `atc_*.py`, `airport_watch.py`, `aircraft.py` | ATC transcription and rules, airport watches, the aircraft layer |
 | `trains.py`, `traintime.py`, `railassets.py`, `vessels.py`, `wsclient.py` | Trains and vessels |
-| `roads.py`, `roadprojects.py`, `roadgraph.py`, `hlsseg.py`, `dvr.py`, `camoverlay.py` | Highways, cameras, closures, routing |
+| `roads.py`, `roadprojects.py`, `roadgraph.py`, `hlsseg.py`, `dvr.py`, `httpkeep.py`, `camoverlay.py` | Highways, cameras, closures, routing |
 | `gis.py`, `weather.py`, `datasources.py` | County GIS, weather, the data-source registry |
 | `perf.py`, `timing.py`, `logscrub.py`, `procenv.py`, `tz.py` | Profiling, timing lines, log scrubbing, the station's process environment, the console time zone |
 

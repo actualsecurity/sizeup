@@ -100,8 +100,9 @@ shell per unit event on the system (registrations and affiliations too); only gr
 
 `systems/<name>/` is another P25 system with its own trunk-recorder, its own log and its own capture directory
 (`captures/p25-<name>`). The county's trunk-recorder is never restarted for its sake. `systems/mrrs/` is Metro-25 /
-MTA MRRS, Zone 3 Simulcast: two sources, 770.3125 and 773.08125 MHz at 2.4 MS/s, covering the seven listed control
-channel frequencies.
+MTA MRRS, Zone 3 Simulcast: two sources, 770.521875 and 772.721875 MHz at 2.4 MS/s, covering the seven listed
+frequencies and the voice channels heard (771.13–773.22 MHz) with at least 150 kHz to spare from each dongle's edge
+(docs/cloud.md, "Tuning"). The jobs keep their names, `MRRS 770` and `MRRS 773`.
 
 | File | What |
 |---|---|
