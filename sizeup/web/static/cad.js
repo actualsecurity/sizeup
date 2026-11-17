@@ -48,6 +48,7 @@ const cad = {
   search: false,             // the Search view is open (#search, search-view.js, #403)
   extra: new Map(),          // incidents opened from Records that aren't in the live state
   rec: null,                 // {iid, units, unfilled, already, card, note, checked:Set, extra:[], error}
+  hand: null,                // the Dispatch card shown at the last render (PCFD dispatching: handDispatch); null: not yet
   map: null, marker: null, mapSig: "",
   listSig: "", rcEditing: null, openUnit: null,
   closedOpen: false,         // the queue's Closed 24h section unfolded (#89; remembered: closedFold)
@@ -688,6 +689,7 @@ function selectIncident(id) {
   cad.sel = id;
   cad.mode = "view";
   cad.rec = null;
+  cad.hand = null;                    // its run card is asked for below, once (renderDispatchCard: only on a switch)
   show($("#edit-form"), false);
   show($("#close-form"), false);
   show($("#upgrade-form"), false);
@@ -791,9 +793,7 @@ function renderDetail() {
   renderAddUnit(inc);
   show($("#d-attach"), open && inc.status !== "queued");
   renderAttach(inc);
-  show($("#d-dispatch"), open && !!inc.emergency);
-  renderDispatchBox(inc);
-  renderDispatches(inc);
+  renderDispatchCard(inc, open);
   renderRadio(inc);
   renderEvents(inc);
 }
@@ -2049,7 +2049,7 @@ function renderComments(inc) {
 
 const DISPATCH_KINDS = { dispatch: "dispatch", "add-on": "add-on", upgrade: "upgrade" };
 function renderDispatches(inc) {
-  show($("#d-dispatches-card"), !!inc.emergency || (inc.dispatches || []).length > 0);
+  show($("#d-dispatches-card"), (!!inc.emergency && handDispatch()) || (inc.dispatches || []).length > 0);
   syncList($("#d-dispatches"), (inc.dispatches || []).slice().reverse(), {
     key: (d) => String(d.id),
     sig: (d) => `${d.id}|${d.audio || ""}|${d.has_audio}|${d.audio_note || ""}|${d.transmitted}`,   // its voice comes after it (#426)
@@ -2082,9 +2082,32 @@ function renderDispatches(inc) {
 
 // ---- recommendation / preview / dispatch / upgrade ----------------------------------------------
 
+// 60 Control dispatching (#311): the county dispatches. The Dispatch card (run card, Preview, Dispatch, Upgrade) shows
+// only in PCFD mode, and the server refuses a dispatch otherwise (automode.hand_dispatch). No mode in the state: hidden.
+function handDispatch() {
+  const st = cad.state && cad.state.dispatch_mode;
+  return !!st && st.mode === "pcfd";
+}
+// The server's refusal (the mode switched before this page heard): a toast, since the card hides with the next push.
+function handRefused(msg) {
+  if (/^60 Control dispatching/.test(msg || "")) UI.toast(msg, "err");
+}
+
+// The Dispatch card and the Dispatches log, on every render: they follow the mode live (the state push), no reload.
+function renderDispatchCard(inc, open) {
+  const hand = handDispatch();
+  if (!hand) show($("#upgrade-form"), false);
+  show($("#d-dispatch"), open && !!inc.emergency && hand);
+  if (hand && cad.hand === false) setTimeout(() => recommend(), 0);   // switched to PCFD: the run card
+  cad.hand = hand;
+  renderDispatchBox(inc);
+  renderDispatches(inc);
+}
+
 async function recommend(typ, sub) {
   // By id, not from the last push: a just-created incident isn't in the state yet.
   const iid = cad.sel, inc = selected();
+  if (!handDispatch()) { cad.rec = null; return; }
   if (iid === null || (inc && (!isOpen(inc) || !inc.emergency))) { cad.rec = null; if (inc) renderDispatchBox(inc); return; }
   const body = typ ? { type: typ, subtype: sub || "" } : {};
   const prev = cad.rec && cad.rec.iid === iid ? cad.rec : null;
@@ -2151,7 +2174,7 @@ function syncRemarks(inc) {
 }
 
 function renderDispatchBox(inc) {
-  if (!inc || !isOpen(inc) || !inc.emergency) return;
+  if (!inc || !isOpen(inc) || !inc.emergency || !handDispatch()) return;
   syncRemarks(inc);
   show($("#r-pending"), inc.status === "queued");
   $("#r-dispatch").disabled = inc.status === "queued";
@@ -2378,7 +2401,7 @@ async function busy(button, label, fn) {
 async function preview() {
   const inc = selected();
   flash($("#r-error"));
-  if (!inc) return;
+  if (!inc || !handDispatch()) return;
   const ids = checkedIds();
   if (!ids.length) return flash($("#r-error"), "Tick a unit");
   await busy($("#r-preview"), "Rendering", async () => {
@@ -2400,7 +2423,7 @@ function needOperator(errNode) {
 async function dispatch() {
   const inc = selected();
   flash($("#r-error"));
-  if (!inc) return;
+  if (!inc || !handDispatch()) return;
   const op = needOperator($("#r-error"));
   if (!op) return;
   const ids = checkedIds();
@@ -2416,6 +2439,7 @@ async function dispatch() {
       setTimeout(() => recommend(), 300);
     } catch (e) {
       flash($("#r-error"), e.message);
+      handRefused(e.message);
     }
   });
 }
@@ -2429,7 +2453,7 @@ async function upgrade(e, previewOnly) {
   if (e) e.preventDefault();
   const inc = selected();
   flash($("#u-error"));
-  if (!inc) return;
+  if (!inc || !handDispatch()) return;
   const body = upgradeBody();
   if (!previewOnly) {
     body.operator = needOperator($("#u-error"));
@@ -2450,6 +2474,7 @@ async function upgrade(e, previewOnly) {
       }
     } catch (err) {
       flash($("#u-error"), err.message);
+      handRefused(err.message);
     }
   });
 }
