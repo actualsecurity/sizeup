@@ -179,6 +179,34 @@ def test_short_names_never_count_on_a_page_and_ems_raises_no_one():
     assert m.match("Port Chester, 60 Control", short=False) == "Port Chester"
 
 
+@pytest.mark.parametrize("talker,why", [
+    ("PC-EMS5-M", ""),                  # the ambulance's radios: another agency, a number after
+    ("PC AMB 1", ""),
+    ("PC AMBO 2", ""),
+    ("PC Medic 3", ""),
+    ("PCPD3", ""),
+    ("PC CAR 1", ""),                   # an alias is never an addressee: only with FD
+    ("PC", ""),
+    ("RB 14", ""),
+    ("PCFD-2391", "PCFD"),
+    ("PC-FD 7", "PCFD"),
+    ("PC FD", "PCFD"),
+    ("RBFD-1", "RBFD"),
+])
+def test_a_talkers_alias_is_ours_only_with_fd(talker, why):
+    cfg = load_cfg(load())
+    for m in (Matcher.of(cfg), Matcher(cfg.phrases, cfg.units)):
+        assert m.match("in service", talker, "") == why, talker
+        assert m.match("60s to PC base", talker, "") == (why or "PC")     # the text still counts
+    assert Matcher.of(cfg).match("on location", "PC AMB 1", "E60") == "E60"  # one of our units: its rig
+
+
+@pytest.mark.parametrize("text", ["PC-EMS5 on scene", "60 Control to PC AMB 1", "PC Ambo 2 transporting",
+                                  "60 Control to PC Medic 3", "PC-PD3 on location"])
+def test_another_agencys_numbered_units_are_not_ours(text):
+    assert Matcher.of(load_cfg(load())).match(text) == ""
+
+
 def test_short_names_and_raise_words_come_from_the_lists(tmp_path):
     d = dict(DATA)
     d["joint_response"] = {"Rye Brook": {**DATA["joint_response"]["Rye Brook"], "tag": "SV"}}

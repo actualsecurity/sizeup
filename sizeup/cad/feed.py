@@ -109,8 +109,10 @@ QUALIFIER_BREAK = re.compile(r"[,;:!?\n]|(?<!\b[A-Za-z])\.")     # never the dot
 WHOSE_WINDOW = 120                       # how far before a base its qualifier is looked for (characters)
 # who a transmission is to: its first words, past 60 Control's own call ("60 Control to ...", "60's to ...", "60, ...")
 ADDRESSEE = re.compile(r"^\W*(?:(?:60|sixty|6[\s-]0)(?:'?s)?(?:\s+control)?[\s,]*(?:to\b\s*)?)?", re.I)
-# another agency of the same town: "PC PD", "RB Police", "PC EMS", "PC Ambulance", "PC Rye EMS" (the ambulance)
-AGENCY_AFTER = re.compile(r"[\s-]*(?:rye\s+)?(?:P\.?\s?D\.?|police|E\.?\s?M\.?\s?S\.?|ambulance|V\.?A\.?C\.?)(?![\w])", re.I)
+# another agency of the same town: "PC PD", "RB Police", "PC EMS", "PC Ambulance", "PC Rye EMS" (the ambulance), and
+# its radios' aliases with a number after ("PC-EMS5-M", "PC AMB 1", "PCPD3")
+AGENCY_AFTER = re.compile(r"[\s-]*(?:rye\s+)?(?:P\.?\s?D\.?|police|E\.?\s?M\.?\s?S\.?|ambulance|ambo|amb|medic|"
+                          r"V\.?A\.?C\.?)(?![A-Za-z])", re.I)
 ADDRESSEE_STREET = re.compile(r"\s*(?:" + STREET_WORDS + r")(?!\w)", re.I)
 # the words an addressee list is made of besides town names: "Rye and headquarters", "16 Rye FD headquarters"
 ADDRESSEE_WORDS = QUALIFIER_FILLER | AGENCY_FILLER | {"and", "head", "headquarters", "quarters", "hq", "h", "q", "base"}
@@ -196,7 +198,7 @@ def _short_re(name: str) -> str:
     """'PC' -> P.C. / P C / PC, with an optional FD after ('PCFD', 'P.C.F.D.', 'PC FD'): capitals only, a token of its
     own (never inside "PCPD", "EPC" or "UPC")."""
     letters = r"\.?\s?".join(re.escape(ch) for ch in name) + r"\.?"
-    return r"(?<![\w.])(?:" + letters + r")(?P<fd>\s?F\.?\s?D\.?)?(?![\w])"
+    return r"(?<![\w.])(?:" + letters + r")(?P<fd>[\s-]?F\.?\s?D\.?)?(?![\w])"
 
 
 def _phrase_re(p: str) -> str:
@@ -429,12 +431,13 @@ class Matcher:
     def of(cls, cfg: FeedCfg) -> "Matcher":
         return cls(cfg.phrases, cfg.units, cfg.kinds, cfg.towns, cfg.ours, cfg.short, cfg.raise_words)
 
-    def _short_ours(self, text: str) -> str:
+    def _short_ours(self, text: str, talker: bool = False) -> str:
         """One of our short names said as 60 Control raising us: "PC" / "RB" (as written or "P.C.", "P C") at the
         addressee ("60 Control to PC", "60s to RB", "PC, 60 Control", "Harrison and PC, 60 Control"), or followed by a
         raise word ("PC base", "P.C. Command", "RB units", "PC Ambulance"); with FD it is ours anywhere ("RBFD", "PC
         FD"). Never inside another word ("PCPD", "UPC"), another town's ("Rye PC base"), nor another agency ("PC PD",
-        "PC EMS", "PC Ambulance", "PC Rye EMS")."""
+        "PC EMS", "PC Ambulance", "PC Rye EMS"). talker: a radio's alias, never an addressee nor raising anyone: ours only
+        with FD ("PCFD-2391", "PC-FD"), never "PC CAR 1" or "PC-EMS5-M" (the unit codes of ours: match's units)."""
         lead = end = None
         for n, rx in self.short:
             for m in rx.finditer(text):
@@ -443,8 +446,12 @@ class Matcher:
                 w = self._whose(text[max(0, m.start() - WHOSE_WINDOW):m.start()])
                 if w and w not in self.ours:
                     continue                                           # another town's ("Rye PC base")
-                if m.group("fd") or (self.raise_re and self.raise_re.match(text, m.end())):
-                    return n + ("FD" if m.group("fd") else "")
+                if m.group("fd"):
+                    return n + "FD"
+                if talker:
+                    continue
+                if self.raise_re and self.raise_re.match(text, m.end()):
+                    return n
                 if lead is None:
                     lead = ADDRESSEE.match(text).end()
                     end = self._addressee_end(text, lead)
@@ -462,8 +469,8 @@ class Matcher:
         for p, rx, base in self.phrases:
             if (any(self._base_ours(s, rx) for s in (talker or "", text or "")) if base else rx.search(hay)):
                 return p
-        for s in (talker or "", text or "") if short else ():
-            if s and (n := self._short_ours(s)):
+        for s, alias in ((talker or "", True), (text or "", False)) if short else ():
+            if s and (n := self._short_ours(s, alias)):
                 return n
         found = [(m.start(), c) for c, rx in self.units if (m := rx.search(hay))]
         return min(found)[1] if found else ""          # the first one named
