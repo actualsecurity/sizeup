@@ -29,12 +29,12 @@ STATION_LL = (40.99600, -73.66453)   # lat, lon: the station PC is at the South 
 PAGING_HANG_S = 1.5        # see ChannelCfg.hang_s / continue_s
 PAGING_CONTINUE_S = 3.0
 # Key-ups (sizeup/radio/fm.py, am.py): a transmission is cut where its carrier dropped and a new key-up came back
-# inside the hang. split_s: the drop (under the close level) that alone makes one, 0: never (paging: a simulcast fades
-# to hiss mid-page); jump_db: the carrier back this far from its own level after 0.1 s gone (paging: upward only).
-# Measured 2026-11 (the PR): FG1 drops inside a key-up 107 of 110 under 0.2 s; South 2 pages 14-31 dB of quieting
-# (10th-90th percentile); HPN Tower carriers 3-17 dB over the floor. Both 0: off (the hang bridges every drop).
+# inside the hang. split_s: the drop (under the close level) that alone makes one, 0: never; jump_db: every frame of
+# the carrier back this far over its own level after 0.1 s gone (upward only). Measured 2026-11 (#645): FG1 drops
+# inside a key-up 107 of 110 under 0.2 s; HPN Tower carriers 3-17 dB over the floor. Both 0: off (the hang bridges
+# every drop). Paging is off: a simulcast page fades and comes back stronger mid-page (opt in with jump_db: radio/fm.py).
 KEYUP_SPLIT_S = {"traffic": 0.2, "paging": 0.0, "airband": 0.15}
-KEYUP_JUMP_DB = {"traffic": 10.0, "paging": 12.0, "airband": 6.0}
+KEYUP_JUMP_DB = {"traffic": 10.0, "paging": 0.0, "airband": 6.0}
 KINDS = ("paging", "traffic", "airband")
 # Airband (#233: HPN ATC, AM): shortfinal's tested receiver settings (sizeup/radio/am.py): the carrier squelch opens
 # 3.5 dB over the noise floor, 36.4 dB of gain. hang_s / drop_db / continue_s are the FM squelch's: not used here.

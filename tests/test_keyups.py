@@ -12,7 +12,7 @@ from tests.test_atc import envelope
 from tests.test_page import PAGING, PLAN, held_pages, hiss, keyed, run_squelch, south2_page, strong, tone, voice_like
 
 TRAFFIC = dict(drop_db=10.0, keyups="traffic", split_s=0.2, jump_db=10.0)      # config defaults, kind = "traffic"
-PAGING_K = dict(PAGING, keyups="paging", jump_db=12.0)                          # ... kind = "paging"
+PAGING_K = dict(PAGING, keyups="paging", jump_db=12.0)       # paging opted in (off by default: jump_db 0)
 AIRBAND = dict(split_s=0.15, jump_db=6.0)                                       # ... kind = "airband"
 A_ID, B_ID = 0x2468, 0x1357                    # invented MDC unit IDs
 PRE, POST = (0x01, 0x80), (0x01, 0x00)         # MDC PTT-ID: pre-ID (key-up), post-ID (release)
@@ -143,6 +143,64 @@ def test_another_transmitter_after_a_short_drop_is_its_own():
     assert len(run_squelch(audio, **TRAFFIC)) == 1
 
 
+def test_a_weaker_carrier_after_a_short_drop_is_not_cut_and_nothing_is_lost():
+    # 22 dB, 0.1 s gone, back at 12 dB for a second, then 22 dB again: no level cut downward, and the 12 dB stretch
+    # (speech) is never dropped as a "background": exactly what the squelch without key-ups keeps
+    audio = np.concatenate([hiss(3.0), unit(2.0, q_db=22.0), hiss(0.1), voice_like(1.0) + quiet(1.0, 12.0),
+                            hiss(0.1), unit(1.5, q_db=22.0), hiss(2.0)])
+    main = run_squelch(audio, drop_db=10.0)
+    new = run_squelch(audio, **TRAFFIC)
+    assert [(s.start, s.end) for s in new] == [(s.start, s.end) for s in main]
+
+
+def test_a_piece_from_a_cut_is_never_dropped_as_a_background():
+    # B (no ID; cut off A by a 0.3 s gap) at 20 dB, then a stronger carrier comes straight up over it: the rise rule
+    # takes what came before for a background and keeps it only with an ID; a piece from a cut is kept, linked
+    b_tx = voice_like(1.5) + quiet(1.5, 20.0)
+    audio = np.concatenate([hiss(3.0), unit(2.0, q_db=20.0), hiss(0.3), b_tx, unit(1.5, q_db=45.0), hiss(2.0)])
+    segs = run_squelch(audio, **TRAFFIC)
+    b = next(s for s in segs if s.split == "gap")
+    assert b.end - b.start > 1.3 and b.prev_start == segs[0].start
+
+
+def flutter(seconds, mean_db, seed, drop_every=1.0):
+    """A key-up whose quieting flutters (sigma 5 dB, frame to frame) with a 0.1 s full drop every drop_every s."""
+    r = np.random.default_rng(seed)
+    out, k = [], 0
+    while k * FRAME < seconds * RATE:
+        if k % int(drop_every * 20) == 10:
+            out += [hiss(0.05), hiss(0.05)]
+            k += 2
+            continue
+        q = max(0.0, r.normal(mean_db, 5.0))
+        out.append(voice_like(0.05) + 0.4 * 10 ** (-q / 20) * r.standard_normal(FRAME))
+        k += 1
+    return np.concatenate(out)
+
+
+@pytest.mark.parametrize("mean_db", [15.0, 22.0, 30.0])
+def test_flutter_with_short_drops_makes_no_new_cuts(mean_db):
+    for seed in range(8):
+        audio = np.concatenate([hiss(3.0), flutter(8.0, mean_db, seed), hiss(2.0)])
+        main = run_squelch(audio, drop_db=10.0)
+        new = run_squelch(audio, **TRAFFIC)
+        assert [(s.start, s.end) for s in new] == [(s.start, s.end) for s in main], (mean_db, seed)
+
+
+def test_dead_carrier_then_a_late_pre_id_is_no_row_of_its_own():
+    # keyed, 0.25 s of dead carrier, a 0.25 s dropout (flutter), then the APX's late pre-ID and the speech: one
+    tx = np.concatenate([quiet(0.25), hiss(0.25), quiet(0.2), mdc(B_ID), quiet(0.15), voice_like(1.5) + quiet(1.5)])
+    segs = run_squelch(np.concatenate([hiss(3.0), tx, hiss(2.0)]), **TRAFFIC)
+    assert len(segs) == 1 and segs[0].first_start is None and ids(segs[0]) == [B_ID]
+
+
+def test_a_kerchunk_after_a_cut_is_no_row():
+    # A talks, 0.3 s gone, 0.2 s of someone else's carrier (under min_open_s): A alone, as a squelch-only open would be
+    audio = np.concatenate([hiss(3.0), unit(2.0), hiss(0.3), quiet(0.2), hiss(2.0)])
+    segs = run_squelch(audio, **TRAFFIC)
+    assert len(segs) == 1 and segs[0].end - segs[0].start == pytest.approx(2.25, abs=0.1)
+
+
 def test_a_back_and_forth_is_every_key_up_with_its_neighbours_linked():
     parts = [hiss(3.0)]
     for k in range(4):
@@ -151,7 +209,7 @@ def test_a_back_and_forth_is_every_key_up_with_its_neighbours_linked():
     assert len(segs) == 4 and [ids(s) for s in segs] == [[A_ID], [B_ID], [A_ID], [B_ID]]
     assert all(s.first_start == segs[0].start for s in segs)
     assert [s.prev_start for s in segs] == [None] + [s.start for s in segs[:-1]]
-    assert [s.reason for s in segs] == ["key-up"] * 3 + ["quiet"]
+    assert [s.reason for s in segs[:3]] == ["key-up"] * 3 and segs[3].reason in ("quiet", "drop")   # (its own end)
 
 
 def test_keyups_off_is_the_old_squelch_frame_for_frame():
@@ -161,19 +219,78 @@ def test_keyups_off_is_the_old_squelch_frame_for_frame():
     assert [(s.start, s.end, s.reason) for s in old] == [(s.start, s.end, s.reason) for s in new]
 
 
+# -- traffic through the live tap (radio/tap.py) ---------------------------------------------------------------------
+
+class _Live:
+    def fm_open(self, label, since):
+        pass
+
+    def fm_ids(self, label, ids):
+        pass
+
+
+def tapped(audio, **kw):
+    """Segments through a squelch with the live tap on it, each with the IDs the tap hands its row (App._segment)."""
+    from sizeup.radio.fm import Channel
+    from sizeup.radio.tap import LiveTap, TapSquelch
+    clock = {"t": 1000.0}
+    tap = LiveTap(lambda _l: "traffic", None, _Live(), clock=lambda: clock["t"],
+                  mdc=lambda a: [(p.unit_hex, False) for p in mdc1200.decode(np.asarray(a, np.float64), RATE)
+                                 if p.kind in ("pre-id", "post-id")])
+    sq = TapSquelch(NoiseSquelch(clock=lambda: clock["t"], **kw), tap, Channel(453.0375, "FG1"))
+    out = []
+    for i in range(0, len(audio) - FRAME + 1, FRAME):
+        clock["t"] += FRAME / RATE
+        if (s := sq.feed(audio[i:i + FRAME])) is not None:
+            out.append((s, [h for h, _e in tap.ids("FG1", s.start, s.end)]))
+    return out
+
+
+def test_the_tap_never_hands_a_cut_piece_the_radio_before_it():
+    audio = np.concatenate([hiss(3.0), unit(2.0, pre=A_ID), hiss(0.3), unit(1.5), hiss(2.0)])
+    (a, ida), (b, idb) = tapped(audio, **TRAFFIC)
+    assert ida == [f"{A_ID:04X}"] and idb == [] and b.split == "gap"
+    audio = np.concatenate([hiss(3.0), unit(2.0, pre=A_ID), hiss(0.3), unit(1.5, pre=B_ID), hiss(2.0)])
+    (a, ida), (b, idb) = tapped(audio, **TRAFFIC)
+    assert ida == [f"{A_ID:04X}"] and idb == [f"{B_ID:04X}"]
+
+
+def test_a_key_up_with_no_id_after_one_with_an_id_takes_none():
+    # (on main too): 3 s after A's key-up with its pre-ID, C keys up with none: C's row has no ID, not A's
+    audio = np.concatenate([hiss(3.0), unit(2.0, pre=A_ID), hiss(3.0), unit(1.5), hiss(2.0)])
+    (a, ida), (c, idc) = tapped(audio, drop_db=10.0)
+    assert ida == [f"{A_ID:04X}"] and idc == []
+
+
 # -- paging (South 2) ------------------------------------------------------------------------------------------------
 
-def test_a_page_with_fades_and_a_re_key_is_never_cut():
-    # a 0.6 s simulcast fade mid-voice, then (another test) the voice keyed again 1 s after the tones: one page each
-    audio = np.concatenate([hiss(4.0), south2_page(), hiss(0.6), keyed(voice_like(6.0)), hiss(6.0)])
-    segs = run_squelch(audio, **PAGING_K)
-    assert len(segs) == 1 and segs[0].first_start is None
-    (page,) = held_pages(segs)
-    assert page.kind == "page" and page.departments == ["Port Chester FD"]
-    audio = np.concatenate([hiss(4.0), keyed(np.concatenate([tone(349.1, 1.0), tone(311.1, 3.0)])), hiss(1.0),
-                            keyed(voice_like(5.0)), hiss(6.0)])
-    (page,) = held_pages(run_squelch(audio, **PAGING_K))
-    assert page.kind == "page" and len(page.voice) / RATE > 5.0
+def at(audio, q_db):
+    """Paging audio on a carrier that reads q_db of quieting against hiss()."""
+    return audio + 0.4 * 10 ** (-q_db / 20) * np.random.default_rng(int(q_db * 10)).standard_normal(len(audio))
+
+
+def page_defaults():
+    """The NoiseSquelch a paging channel gets from its config defaults (App make_receiver)."""
+    from sizeup.config import ChannelCfg
+    c = ChannelCfg("South 2", 470.2, "paging")
+    return dict(hang_s=c.hang_s, continue_s=c.continue_s, keyups=c.keyups, split_s=c.split_s or 0.0,
+                jump_db=c.jump_db or None)
+
+
+TONES = np.concatenate([tone(349.1, 1.0), tone(311.1, 3.0)])
+PAGE_CASES = {
+    # the carrier stepping up across a mid-voice fade (15->28, 18->31, 14->30 dB)
+    **{f"step {a}->{b}": np.concatenate([hiss(4.0), at(np.concatenate([TONES, voice_like(4.0)]), a), hiss(0.6),
+                                         at(voice_like(4.0), b), hiss(6.0)]) for a, b in ((15, 28), (18, 31), (14, 30))},
+    "fade in the B tone": np.concatenate([hiss(4.0), at(np.concatenate([tone(349.1, 1.0), tone(311.1, 1.5)]), 15),
+                                          hiss(0.6), at(np.concatenate([tone(311.1, 1.5), voice_like(5.0)]), 28),
+                                          hiss(6.0)]),
+    "mid-voice fade": np.concatenate([hiss(4.0), south2_page(), hiss(0.6), keyed(voice_like(6.0)), hiss(6.0)]),
+    "2 s continuation +13 dB": np.concatenate([hiss(4.0), at(np.concatenate([TONES, voice_like(5.0)]), 15),
+                                               hiss(2.0), at(voice_like(4.0), 28), hiss(6.0)]),
+    "plain page": np.concatenate([hiss(4.0), south2_page(), hiss(6.0)]),
+    "re-keyed after the tones": np.concatenate([hiss(4.0), keyed(TONES), hiss(1.0), keyed(voice_like(5.0)), hiss(6.0)]),
+}
 
 
 def page_frames(audio, **kw):
@@ -188,21 +305,35 @@ def page_frames(audio, **kw):
     return out
 
 
-def test_a_page_closes_on_the_same_frame_with_key_ups_on():
-    # nothing about a page's own timing changes (the pre-alert waits on it): same segments, same frames
-    for audio in (np.concatenate([hiss(4.0), south2_page(), hiss(6.0)]),
-                  np.concatenate([hiss(4.0), south2_page(), hiss(0.6), keyed(voice_like(6.0)), hiss(6.0)]),
-                  np.concatenate([hiss(4.0), south2_page(), hiss(2.5), voice_like(5.0) + 0.4 * 10 ** (-8 / 20)
-                                  * np.random.default_rng(3).standard_normal(RATE * 5), hiss(6.0)])):
-        old, new = page_frames(audio, **PAGING), page_frames(audio, **PAGING_K)
-        assert [(s.start, s.end, s.reason, s.cont, s.hold_until, k) for s, k in old] == \
-            [(s.start, s.end, s.reason, s.cont, s.hold_until, k) for s, k in new]
+@pytest.mark.parametrize("case", list(PAGE_CASES))
+def test_paging_is_the_squelch_before_key_ups_by_default(case):
+    # off by default: every page closes on the same frame with the same audio and fields (the pre-alert waits on it)
+    kw = page_defaults()
+    assert kw["keyups"] == "" and kw["jump_db"] is None
+    old, new = page_frames(PAGE_CASES[case], **PAGING), page_frames(PAGE_CASES[case], **kw)
+    assert len(old) == len(new)
+    for (o, ko), (n, kn) in zip(old, new):
+        assert (o.start, o.end, o.reason, o.cont, o.hold_until, o.breaks, ko) == \
+            (n.start, n.end, n.reason, n.cont, n.hold_until, n.breaks, kn)
+        assert np.array_equal(o.audio, n.audio) and n.first_start is None and n.split == ""
 
 
-def test_a_unit_answering_inside_the_page_hang_is_cut_off_the_page():
-    # 1 s after the page a unit near the station answers (46 dB of quieting against the page's 26): another radio
+def test_paging_opt_in_never_cuts_a_fade_inside_a_tone_or_a_short_one():
+    # jump_db set on the channel: the B tone stepping up 13 dB across a 0.6 s fade stays one page (a tone rings into
+    # the drop), and so does a fade no longer than the short hang
+    segs = run_squelch(PAGE_CASES["fade in the B tone"], **PAGING_K)
+    assert len(segs) == 1 and segs[0].first_start is None
+    (page,) = held_pages(segs)
+    assert page.kind == "page" and page.departments == ["Port Chester FD"]
+    short = np.concatenate([hiss(4.0), at(np.concatenate([TONES, voice_like(4.0)]), 15), hiss(0.35),
+                            at(voice_like(4.0), 30), hiss(6.0)])
+    assert len(run_squelch(short, **PAGING_K)) == 1
+
+
+def test_paging_opt_in_cuts_a_unit_answering_after_the_page():
+    # 1 s after the page, a unit near the station (46 dB of quieting against the page's 26): another radio
     audio = np.concatenate([hiss(4.0), south2_page(), hiss(1.0), strong(voice_like(2.0)), hiss(6.0)])
-    assert len(run_squelch(audio, **PAGING)) == 1                  # before: one recording, the answer in the page
+    assert len(run_squelch(audio, **PAGING)) == 1                  # off: one recording, the answer in the page
     segs = run_squelch(audio, **PAGING_K)
     assert len(segs) == 2 and segs[0].reason == "key-up" and segs[1].split == "level"
     page, answer = held_pages(segs)
@@ -210,28 +341,13 @@ def test_a_unit_answering_inside_the_page_hang_is_cut_off_the_page():
     assert len(page.voice) / RATE == pytest.approx(6.0, abs=0.5)
     assert answer.kind == "voice" and answer.keyup == {"parent": page.id, "prev": page.id, "split": "level"}
     assert page.keyup == {"parent": page.id, "prev": "", "split": ""}
-
-
-def test_a_unit_with_an_id_in_the_continuation_window_is_not_joined_to_the_page():
-    # the page closed (2 s gap: past the 1.5 s hang); a unit at the page's own level keys up with its pre-ID
-    answer = keyed(np.concatenate([quiet(0.1), mdc(B_ID), quiet(0.15), voice_like(2.0)]))
-    audio = np.concatenate([hiss(4.0), south2_page(), hiss(2.0), answer, hiss(6.0)])
-    old = run_squelch(audio, **PAGING)
-    assert len(old) == 2 and old[1].cont                          # before: joined to the page as more of it
+    # ... and in the continuation window (2 s: past the 1.5 s hang): not joined to the page
+    audio = np.concatenate([hiss(4.0), south2_page(), hiss(2.0), strong(voice_like(2.0)), hiss(6.0)])
+    assert run_squelch(audio, **PAGING)[1].cont                    # off: more of the page
     segs = run_squelch(audio, **PAGING_K)
-    assert len(segs) == 2 and not segs[1].cont and segs[1].split == "id"
+    assert len(segs) == 2 and not segs[1].cont and segs[1].split == "level"
     page, ans = held_pages(segs)
-    assert page.kind == "page" and len(page.parts) == 1 and ans.kind == "voice"
-    assert ans.keyup["parent"] == page.id and ans.keyup["split"] == "id"
-    assert ids(segs[1]) == [B_ID]
-
-
-def test_a_unit_with_an_id_inside_the_hang_is_cut_off_too():
-    answer = keyed(np.concatenate([quiet(0.1), mdc(B_ID), quiet(0.15), voice_like(2.0)]))
-    segs = run_squelch(np.concatenate([hiss(4.0), south2_page(), hiss(0.8), answer, hiss(6.0)]), **PAGING_K)
-    assert len(segs) == 2 and segs[1].split == "id" and ids(segs[1]) == [B_ID]
-    page, _ans = held_pages(segs)
-    assert page.kind == "page" and len(page.voice) / RATE == pytest.approx(6.0, abs=0.5)
+    assert len(page.parts) == 1 and ans.kind == "voice" and ans.keyup["parent"] == page.id
 
 
 # -- airband (HPN, AM) -----------------------------------------------------------------------------------------------
@@ -254,7 +370,8 @@ def test_tower_then_pilot_back_to_back_is_two_transmissions(gap):
 
 
 def test_a_short_drop_into_another_carrier_level_is_two():
-    levels = [(5, 0.01, False), (2.0, 0.08, True), (0.1, 0.01, False), (1.5, 0.025, True), (3, 0.01, False)]
+    # an aircraft (+8 dB), 0.1 s gone, the tower (+18 dB): another, stronger transmitter
+    levels = [(5, 0.01, False), (2.0, 0.025, True), (0.1, 0.01, False), (1.5, 0.08, True), (3, 0.01, False)]
     a, b = am(levels, **AIRBAND)
     assert b.split == "level"
     # the same carrier back after 0.1 s: one
@@ -285,11 +402,25 @@ def test_a_heterodyne_on_the_second_key_up_is_notched_in_that_piece_only():
     assert beat_hz(b) and not beat_hz(a)                          # (the stand-in voice is a 400 Hz tone: notched too)
 
 
-def test_a_short_answer_after_a_cut_is_kept():
-    # "roger": 0.4 s of carrier, under the 0.6 s a fresh open needs, kept once the cut proved the key-up
+def test_a_kerchunk_after_a_cut_is_not_kept_but_an_answer_is():
+    # after a cut, a piece is kept by the same 0.6 s of carrier as any transmission: a 0.4 s kerchunk is no row ...
     levels = [(5, 0.01, False), (2.0, 0.08, True), (0.2, 0.01, False), (0.4, 0.04, True), (3, 0.01, False)]
+    (a,) = am(levels, **AIRBAND)
+    assert a.reason == "key-up" and a.end - a.start == pytest.approx(2.6, abs=0.1)
+    # ... a 0.8 s answer is
+    levels = [(5, 0.01, False), (2.0, 0.08, True), (0.2, 0.01, False), (0.8, 0.04, True), (3, 0.01, False)]
     a, b = am(levels, **AIRBAND)
-    assert b.split == "gap" and 0.5 < b.end - b.start < 1.2
+    assert b.split == "gap"
+
+
+def test_a_fade_recovering_on_a_ramp_is_not_cut():
+    # a strong carrier fades to the floor for 0.1 s and recovers on a ramp (0.02 -> 0.03 -> 0.05): one transmission
+    levels = [(5, 0.01, False), (2.0, 0.05, True), (0.1, 0.01, False), (0.05, 0.02, True), (0.05, 0.03, True),
+              (1.5, 0.05, True), (3, 0.01, False)]
+    assert len(am(levels, **AIRBAND)) == 1
+    # back weaker after 0.1 s (not a full 0.15 s gap): the level rule is upward only
+    levels = [(5, 0.01, False), (2.0, 0.08, True), (0.1, 0.01, False), (1.5, 0.025, True), (3, 0.01, False)]
+    assert len(am(levels, **AIRBAND)) == 1
 
 
 # -- config and the app ----------------------------------------------------------------------------------------------
@@ -298,7 +429,8 @@ def test_kind_defaults_and_config_keys(tmp_path):
     from sizeup.config import ChannelCfg, ConfigError, load
     assert (ChannelCfg("FG1", 453.0375, "traffic").split_s, ChannelCfg("FG1", 453.0375, "traffic").jump_db) == (0.2, 10.0)
     s2 = ChannelCfg("South 2", 470.2, "paging")
-    assert (s2.split_s, s2.jump_db, s2.keyups) == (0.0, 12.0, "paging")
+    assert (s2.split_s, s2.jump_db, s2.keyups) == (0.0, 0.0, "")              # paging: off by default
+    assert ChannelCfg("South 2", 470.2, "paging", jump_db=12.0).keyups == "paging"
     twr = ChannelCfg("HPN Tower", 118.575, "airband")
     assert (twr.split_s, twr.jump_db, twr.keyups) == (0.15, 6.0, "")
     assert ChannelCfg("FG2", 458.0375, "traffic", split_s=0, jump_db=0).keyups == ""
@@ -322,7 +454,7 @@ def test_receivers_get_their_channel_kinds_key_ups():
     sq = fg.new_squelch()
     assert (sq.keyups, sq._split_frames, sq.jump_db) == ("traffic", 4, 10.0)
     s2 = make_receiver(cfg, ChannelCfg("South 2", 470.2, "paging"), "", lambda c, s: None).new_squelch()
-    assert (s2.keyups, s2._split_frames, s2.jump_db) == ("paging", 0, 12.0)
+    assert (s2.keyups, s2._split_frames, s2.jump_db) == ("", 0, None)
     twr = make_receiver(cfg, ChannelCfg("HPN Tower", 118.575, "airband", squelch_db=3.5), "", lambda c, s: None)
     assert (twr.squelch._split_frames, twr.squelch.jump_db) == (3, 6.0)
 
@@ -351,4 +483,19 @@ def test_each_piece_is_its_own_row_with_its_own_id_and_linked(tmp_path):
     assert ta.keyup == {"parent": ta.id, "prev": "", "split": ""}
     assert tb.keyup == {"parent": ta.id, "prev": ta.id, "split": "gap"}
     assert tb.as_dict()["keyup"] == tb.keyup                     # (in the traffic doc the hub gets)
-    assert app.has_clip(ta.id) and app.has_clip(tb.id)
+    # each piece's own files under its own id: the clip people play and the exact audio speech-to-text was given
+    import wave
+    for t, seg in ((ta, a), (tb, b)):
+        assert app.has_clip(t.id)
+        with wave.open(str(app.clips_dir / f"{t.id}.src.wav")) as w:
+            src = np.frombuffer(w.readframes(w.getnframes()), "<i2")
+        assert np.array_equal(src, (np.clip(seg.audio, -1, 1) * 32767).astype(np.int16))
+    # ... and each goes to the hub as its own event with its own clip (the station link: App._emit)
+    sent_events = []
+    app.events = lambda kind, data, clip: sent_events.append((kind, data["id"], data.get("keyup"), clip))
+    for t in (ta, tb):
+        t.raw, t.status = "copy", "done"
+        app._transcribed(t)
+    assert [(k, i, c) for k, i, _l, c in sent_events] == [("traffic", ta.id, ta.id), ("traffic", tb.id, tb.id)]
+    assert sent_events[1][2] == {"parent": ta.id, "prev": ta.id, "split": "gap"}
+    assert app.clip(ta.id) != app.clip(tb.id)

@@ -108,7 +108,7 @@ class LiveTap:
         """One frame, after squelch.feed(frame) (TapSquelch). Never raises."""
         try:
             self._frame(channel.label, frame, bool(squelch.open), float(getattr(squelch, "_start", 0.0)),
-                        bool(getattr(squelch, "keyed", squelch.open)))
+                        bool(getattr(squelch, "keyed", squelch.open)), getattr(squelch, "_frames", None))
         except Exception as e:  # the tap must never stop the receiver
             self._errors += 1
             if self.log is not None and self._errors in (1, 10, 100):
@@ -131,14 +131,20 @@ class LiveTap:
             if self.log is not None and self._errors in (1, 10, 100):
                 self.log(f"live tap error ({self._errors}): {type(e).__name__}: {e}")
 
-    def _frame(self, label: str, frame: np.ndarray, is_open: bool, since: float, keyed: bool = True) -> None:
+    def _frame(self, label: str, frame: np.ndarray, is_open: bool, since: float, keyed: bool = True,
+               frames: list | None = None) -> None:
         kind = self.kind(label)
         with self._lock:
             c = self._ch.setdefault(label, _Chan())
             if is_open and (not c.open or abs(since - c.since) > 0.01):
+                # A new carrier, or the squelch cut a key-up out of the open one (radio/fm.py keyups, the stronger
+                # carrier over a background): the new one's frames so far are the squelch's since its start, never
+                # the pre-roll of the carrier before it.
+                cut = c.open and bool(frames)
                 self._ended(c)
                 c.open, c.since, c.n, c.ids, c.done, c.alarm, c.burst, c.shown = True, since, 0, [], False, "", False, False
-                c.buf = list(c.pre)
+                c.buf = list(frames[:-1]) if cut else list(c.pre)
+                c.n = len(c.buf) if cut else 0
                 c.pre.clear()
             if not is_open:
                 was = c.open
@@ -189,7 +195,9 @@ class LiveTap:
     def _ended(self, c: _Chan) -> None:
         if c.open and not c.done and not c.ids and len(c.buf) >= MDC_MIN_FRAMES and self.mdc is not None:
             c.burst = any(id_burst_frames(np.concatenate(c.buf)))    # closed inside the window (a short key-up)
-        if c.open and (c.ids or c.burst):
+        if c.open:
+            # every carrier, with an ID or none: a transmission's own is always the latest that began before it, so it
+            # can never take the ID of an older one (a key-up with no ID seconds after one with an ID)
             now = self.clock()
             c.last = [x for x in c.last if now - x[2] < KEEP_S] + [(c.since, list(c.ids), now, c.alarm, c.burst)]
 
@@ -213,6 +221,6 @@ class LiveTap:
             c = self._ch.get(label)
             if c is None:
                 return None
-            cands = list(c.last) + ([(c.since, list(c.ids), 0.0, c.alarm, c.burst)] if c.open and (c.ids or c.burst) else [])
+            cands = list(c.last) + ([(c.since, list(c.ids), 0.0, c.alarm, c.burst)] if c.open else [])
         mine = [x for x in cands if x[0] <= start + 1.0 and x[0] < end and start - x[0] < 150]
         return max(mine, key=lambda x: x[0]) if mine else None      # the latest carrier that began before it

@@ -38,10 +38,11 @@ tone decoder's runs and the voice band:
        under NO_MESSAGE_S said after its tones is "tones only, no message" (status no_voice), not merged into
        the next. Speech before the first tones (a continuation's end of the last page) is a piece of its own too.
 
-Key-ups (radio/fm.py keyups = "paging"): a unit keying up on the paging channel inside the page's hang or its
-continuation window (an ID burst at its start, or a carrier jump_db stronger than the page's) is its own transmission:
-the squelch cuts it off (Segment.split) and never marks it a continuation, so it is a piece (a "voice" page) of its own,
-never joined to the page. PageHold links it to the page it was cut from (Page.keyup: parent, prev, split).
+Key-ups (radio/fm.py keyups = "paging", off by default: only with jump_db set on the channel): a carrier back jump_db
+stronger than the page's, across a drop longer than the short hang with no tone ringing into it, is its own
+transmission: the squelch cuts it off (Segment.split) and never marks it a continuation, so it is a piece (a "voice"
+page) of its own, never joined to the page. PageHold links it to the page it was cut from (Page.keyup: parent, prev,
+split).
 
 A page made before #183 (or by a station on an older build) can still hold two groups: Page.message_tones is the
 group its voice answers (the last one; groups apart by STACK_GAP_S, from the tones' times or tone_seq), and only
@@ -80,7 +81,8 @@ _HF = (_F >= HF_BAND[0]) & (_F <= HF_BAND[1])
 REASONS = {"quiet": "quiet after hang", "max length": "max length", "stall": "stall (rtl_fm sent no audio)",
            "stopped": "receiver stopped", "rtl_fm ended": "rtl_fm ended", "tones": "new page's tones",
            "drop": "dropped to a weaker carrier", "background": "background carrier",
-           "steady": "nothing on the carrier for 30 s (noise held the squelch)"}
+           "steady": "nothing on the carrier for 30 s (noise held the squelch)",
+           "key-up": "the next key-up cut it off"}
 TONES_ONLY = "tones only, no message"
 
 

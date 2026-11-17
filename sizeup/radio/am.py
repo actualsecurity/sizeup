@@ -28,13 +28,14 @@ Westchester County Airport (HPN) ATC is AM voice at 118-137 MHz. The receiver an
               kept with 0.2 s, 100% with 0.4 s).
     key-ups   (split_s / jump_db, by the channel: config.ChannelCfg; airband 0.15 s / 6 dB.) The hang bridged a tower /
               pilot exchange keyed back to back into one transmission. A carrier that drops at least FULL_DROP_DB (6
-              dB) under its own level and under the close level for split_s, then comes back over the open level for
-              RETURN_FRAMES (0.15 s), is a new key-up: the transmission is cut there at once (the first piece keeps its
-              TAIL_FRAMES, the next takes the frames before its carrier as its pre-roll, up to PREROLL_FRAMES); so is
-              one that came back after 0.1 s or more jump_db away from the level it had (another transmitter). A
-              weak carrier (under 6 dB) never reads as fully dropped: its dips stay inside the hang, as before. A
-              piece after a cut is kept from RETURN_FRAMES of carrier (not MIN_FRAMES: its key-up is already proven),
-              and is linked to the one before (Segment.split, prev_start, first_start; radio/fm.py).
+              dB) under its own level and under the close level for split_s, then holds over the close level for
+              AM_RETURN_FRAMES (0.2 s) with a frame over the open level, is a new key-up: the transmission is cut there
+              at once (the first piece keeps its TAIL_FRAMES, the next takes the frames before its carrier as its
+              pre-roll, up to PREROLL_FRAMES); so is one fully dropped for 0.1 s or more whose every frame back is
+              jump_db over the level it had (another, stronger transmitter: upward only, a fade recovers on a ramp). A
+              weak carrier (under 6 dB) never reads as fully dropped: its dips stay inside the hang, as before. The
+              piece before a cut needs MIN_FRAMES of carrier (else nothing is cut), the one after is kept by the same
+              rule as any transmission, and they are linked (Segment.split, prev_start, first_start; radio/fm.py).
     lengths   under 0.6 s of carrier (MIN_FRAMES, the carrier's own frames: not the pre-roll) is a blip, not kept;
               anything over 30 s (MAX_FRAMES) is split.
     AGC       the envelope over its own carrier (agc()): the voice as modulation depth, held through a carrier that
@@ -85,7 +86,7 @@ import numpy as np
 from sizeup import atc_hours
 from sizeup.radio import channelize
 from sizeup.radio.amtones import detone, find_tones
-from sizeup.radio.fm import (FRAME, RATE, RETURN_FRAMES, SHORT_GAP_FRAMES, STALL_S, STUCK_S, Channel, NfmReceiver,
+from sizeup.radio.fm import (FRAME, RATE, SHORT_GAP_FRAMES, STALL_S, STUCK_S, Channel, NfmReceiver,
                              Segment, _mmss, readable)
 from sizeup.tz import TZ
 
@@ -118,6 +119,7 @@ DROP_PCT = 97.0                # ... under this percent: logged (rtl_sdr losing 
 DROP_STEP = 1.0                # ... then again only when it moves this many points (#307)
 BACK_PCT = 99.0                # ... and once when it is back at this
 FULL_DROP_DB = 6.0             # key-ups: a carrier gone, this far under its own level (and under the close level)
+AM_RETURN_FRAMES = 4           # ... and back this long before it counts (0.2 s: a fade recovering ramps through it)
 
 
 class Schedule:
@@ -238,7 +240,7 @@ class CarrierSquelch:
         self._quiet = 0 if on else self._quiet + 1
         if on:
             self._levels.append(level)
-        if self._cands and len(self._frames) - self._cands[0][1] >= RETURN_FRAMES:
+        if self._cands and len(self._frames) - self._cands[0][1] >= AM_RETURN_FRAMES:
             cut, seg = self._keyup(self._cands.pop(0))
             if cut:
                 return seg
@@ -264,16 +266,17 @@ class CarrierSquelch:
         """The carrier came back at frame g1 after dropping at g0: a new key-up (module doc)? -> (cut, first piece)."""
         g0, g1 = cand
         lv = [float(np.mean(f)) for f in self._frames]
-        ret = lv[g1:g1 + RETURN_FRAMES]
+        ret = lv[g1:g1 + AM_RETURN_FRAMES]
         before = [x for x in lv[self._npre:g0] if self._over(x, self.close_db)]
-        if not before or not all(self._over(x, self.close_db) for x in ret):
-            return False, None
+        if len(before) < MIN_FRAMES or not all(self._over(x, self.close_db) for x in ret):
+            return False, None                           # (no key-up of its own before it, or a flicker back)
         own = float(np.median(before))
+        if max(lv[g0:g1]) > own * 10 ** (-FULL_DROP_DB / 20):
+            return False, None                           # not fully gone: a fade, the hang's
         why = ""
-        if (self._split_frames and g1 - g0 >= self._split_frames and any(self._over(x, self.open_db) for x in ret)
-                and max(lv[g0:g1]) <= own * 10 ** (-FULL_DROP_DB / 20)):
+        if self._split_frames and g1 - g0 >= self._split_frames and any(self._over(x, self.open_db) for x in ret):
             why = "gap"
-        elif self.jump_db is not None and abs(20 * np.log10(max(float(np.median(ret)), 1e-9) / own)) >= self.jump_db:
+        elif self.jump_db is not None and min(ret[1:]) >= own * 10 ** (self.jump_db / 20):   # (not the first: part gone)
             why = "level"
         if not why:
             return False, None
@@ -307,8 +310,8 @@ class CarrierSquelch:
               reason: str, piece: tuple | None) -> Segment | None:
         """A transmission from its frames (npre of pre-roll, tail after the carrier); piece: it was cut from the one
         before it (a key-up), (the first piece's start, the one before's, why)."""
-        if len(frames) - npre - tail < (MIN_FRAMES if piece is None else RETURN_FRAMES):
-            return None                                  # the carrier itself was up too short: a blip
+        if len(frames) - npre - tail < MIN_FRAMES:       # the carrier itself was up too short: a blip
+            return None
         med = float(np.median(levels or [self.floor_level]))
         carrier = float(20 * np.log10(max(med, 1e-9) / max(self.floor_level, 1e-9)))
         snr = voice_snr_db(frames, npre, len(frames) - tail)     # #270: measured before the AGC, per segment
