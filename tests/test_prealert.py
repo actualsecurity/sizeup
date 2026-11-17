@@ -488,10 +488,57 @@ def test_any_status_message_proves_tapout_is_alive(tmp_path):
     assert "OTA update applied" in t["detail"] and "last heartbeat" in t["detail"]
     pa.status(status_msg("w1", clock.t - 60, "Low memory", "Free heap 9000 B.", ("warning",), 4))
     t = pa.tapout()
-    assert (t["state"], t["word"]) == ("ok", "ok, heard 60 s ago") and t["detail"].count("Low memory") == 1
+    assert (t["state"], t["word"]) == ("warn", "Low memory, 60 s ago") and t["detail"].count("Low memory") == 1
     pa.status(status_msg("h2", clock.t - 30))                               # a heartbeat says so by name again
     assert pa.tapout()["word"] == "ok, heartbeat 30 s ago"
     assert offline(cad).tapout()["word"] == "ok, heartbeat 30 s ago"        # kept across a restart
+
+
+def test_a_device_fault_warns_with_its_title_until_a_heartbeat_or_restart(tmp_path):
+    # the firmware's logStatus(..., "high", "warning"): priority 4+; it is alive, but not well
+    clock = Clock()
+    cad = make_cad(tmp_path, clock=clock)
+    pa = offline(cad)
+    pa.status(status_msg("h1", clock.t - 3600))
+    pa.status(status_msg("w1", clock.t - 180, "ALERT DELIVERY FAILED", "3 tries.", ("warning",), 4))
+    t = pa.tapout()
+    assert (t["state"], t["word"]) == ("warn", "ALERT DELIVERY FAILED, 3 min ago") and "3 tries." in t["detail"]
+    pa.status(status_msg("o1", clock.t - 120, "OTA update available", "v2.5.0.", ("arrow_down",), 3))
+    assert pa.tapout()["word"] == "ALERT DELIVERY FAILED, 3 min ago"          # a normal message doesn't clear it
+    assert offline(cad).tapout()["word"] == "ALERT DELIVERY FAILED, 3 min ago"  # kept across a restart
+    pa.status(status_msg("h2", clock.t - 60))                                    # the next heartbeat: all clear
+    assert pa.tapout()["state"] == "ok" and pa.tapout()["word"] == "ok, heartbeat 60 s ago"
+    pa.status(status_msg("w2", clock.t - 30, "Ring detector NOT armed", "", ("warning",), 5))
+    assert pa.tapout()["word"] == "Ring detector NOT armed, 30 s ago"
+    pa.status(status_msg("w0", clock.t - 7200, "Pre-alert NOT sent (too late)", "", ("warning",), 4))   # replayed, older
+    assert pa.tapout()["word"] == "Ring detector NOT armed, 30 s ago"
+    pa.status(status_msg("b1", clock.t - 10, "Tapout restarted", "Boot #8, last reset: POWERON.", ("white_check_mark",), 2))
+    assert (pa.tapout()["state"], pa.tapout()["word"]) == ("ok", "ok, restarted 10 s ago")    # a restart starts afresh
+    pa.status(status_msg("w3", clock.t, "Detector line STUCK active", "D4 low for 10 min.", ("warning",), 4))
+    clock.t += 7 * 3600                                                          # and then silence: that is worse
+    assert pa.tapout()["word"] == "no heartbeat for 7 h"
+    long = "x" * 150
+    pa.status(status_msg("w4", clock.t, long, "", ("warning",), 4))
+    assert len(pa.tapout()["word"]) < 80                                          # the header stays one short line
+
+
+def test_an_unexpected_restart_is_a_restart_shown_as_a_warning(tmp_path):
+    clock = Clock()
+    cad = make_cad(tmp_path, clock=clock)
+    pa = offline(cad)
+    b = parse_status(status_msg("b1", 1, "Tapout restarted UNEXPECTEDLY", "Boot #9, last reset: TASK_WDT.",
+                                ("rotating_light",), 4))
+    assert (b["kind"], b["seq"], b["unexpected"]) == ("boot", 9, True)
+    assert "unexpected" not in parse_status(status_msg("b0", 1, "Tapout restarted", "Boot #8.", (), 2))
+    pa.status(status_msg("h1", clock.t - 3600))
+    pa.status(status_msg("b1", clock.t - 120, "Tapout restarted UNEXPECTEDLY", "Boot #9, last reset: TASK_WDT.",
+                         ("rotating_light",), 4))
+    t = pa.tapout()
+    assert (t["state"], t["word"]) == ("warn", "restarted unexpectedly 2 min ago") and "TASK_WDT" in t["detail"]
+    assert "warning" not in pa.health                                          # a boot, not an "other" warning
+    pa.status(status_msg("h2", clock.t - 60))
+    t = pa.tapout()
+    assert (t["state"], t["word"]) == ("ok", "ok, heartbeat 60 s ago") and "restarted unexpectedly" in t["detail"]
 
 
 def test_a_fresh_start_finds_a_heartbeat_5_h_old(tmp_path, ntfy):
@@ -634,7 +681,6 @@ def test_off_without_the_section_and_the_config(tmp_path, monkeypatch):
     for bad, why in (('server = "http://ntfy.sh"', "server"), (f'ring_topic = "{RING}"\nstatus_topic = "{RING.upper()}"', "two different"),
                      ('ring_topic = "a/b"', "topic"), ("expire_min = 0", "expire_min"), ("enabled = 1", "enabled"),
                      ("heartbeat_every_min = 0", "heartbeat_every_min"), ('heartbeat_every_min = "6h"', "minutes"),
-                     ("heartbeat_stale_min = 90", "heartbeat_stale_min"),           # below the 6 h period: always warning
                      ("heartbeat_every_min = 60\nheartbeat_stale_min = 3000", "heartbeat_stale_min"),
                      ("topic = 1", "unknown key")):
         p.write_text(f"[prealert]\n{bad}\n")
@@ -644,11 +690,27 @@ def test_off_without_the_section_and_the_config(tmp_path, monkeypatch):
     p.write_text("[prealert]\nheartbeat_every_min = 60\n")
     assert (load(p).prealert_heartbeat_every_min, load(p).prealert_heartbeat_stale_min) == (60.0, 81.0)
     p.write_text("[prealert]\nheartbeat_every_min = 60\nheartbeat_stale_min = 90\n")
-    assert load(p).prealert_heartbeat_stale_min == 90.0                    # set: as given
+    assert (load(p).prealert_heartbeat_stale_min, load(p).prealert_config_note) == (90.0, "")    # set: as given
+    for old in (90, 360, 377):          # an old config (the example said 90), or not above the 6 h period: never fatal
+        p.write_text(f"[prealert]\nheartbeat_stale_min = {old}\n")
+        c = load(p)
+        assert c.prealert_heartbeat_stale_min == 411.0 and f"heartbeat_stale_min = {old} " in c.prealert_config_note
+        assert "using 411" in c.prealert_config_note
+    p.write_text("[prealert]\nheartbeat_stale_min = 378\n")                # 1.05 x the period: as given
+    assert (load(p).prealert_heartbeat_stale_min, load(p).prealert_config_note) == (378.0, "")
     p.write_text("[prealert]\nenabled = false\n")
     c = load(p)
     assert (c.prealert_enabled, c.prealert_server) == (False, "http://127.0.0.1:8999")
     assert load(ROOT / "config.example.toml").prealert_enabled
+    from sizeup.config import Config, heartbeat_stale_min
+    assert Config.prealert_heartbeat_stale_min == heartbeat_stale_min(Config.prealert_heartbeat_every_min) == 411
+
+
+def test_an_old_stale_setting_is_logged_and_the_app_still_starts(tmp_path, capsys):
+    note = "[prealert] heartbeat_stale_min = 90 is not above the 360 min heartbeat period (...): using 411"
+    app = App(base(cad_db=str(tmp_path / "cad.sqlite"), prealert_enabled=True, prealert_config_note=note))
+    assert app.prealert is not None and app.prealert.stale_s == 411 * 60
+    assert f"prealert: config: {note}" in capsys.readouterr().out
 
 
 # -- read only ------------------------------------------------------------------------------------------------

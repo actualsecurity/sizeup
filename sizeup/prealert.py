@@ -13,7 +13,9 @@ incoming call").
                             warnings ("Detector line STUCK active", "ALERT DELIVERY FAILED", "Low memory"),
                             OTA lifecycle. The heartbeat is the silent-failure canary; any message there
                             proves Tapout is alive. Nothing for heartbeat_stale_min (default: the period
-                            + 10 % + 15 min, 411 min) -> "Tapout: no heartbeat for ..." in warning.
+                            + 10 % + 15 min, 411 min) -> "Tapout: no heartbeat for ..." in warning. A
+                            fault (priority 4+) or "Tapout restarted UNEXPECTEDLY" warns with its title
+                            until the next heartbeat or restart (PreAlerts.fault).
 
 The topics' names are not in the repo: they come from Settings > System > Push notifications (the CAD settings, the
 DB), overridden by SIZEUP_PREALERT_RING_TOPIC / _STATUS_TOPIC, else [prealert] ring_topic / status_topic
@@ -121,6 +123,12 @@ def _hms(at: float | None) -> str:
 
 def _ts(at: float | None) -> str:
     return datetime.fromtimestamp(at, TZ).strftime("%m/%d/%Y %H:%M:%S") if at else ""
+
+
+def _short(text: str, n: int = 60) -> str:
+    """A title for the header: one line, at most n characters."""
+    text = " ".join(str(text or "").split())
+    return text if len(text) <= n else text[:n - 1].rstrip() + "…"
 
 
 def _ago(s: float) -> str:
@@ -343,14 +351,17 @@ def parse_ring(msg: dict) -> dict:
 
 
 def parse_status(msg: dict) -> dict:
-    """A message on the status topic -> {kind: heartbeat | boot | other, at, title, message, priority, seq?}."""
+    """A message on the status topic -> {kind: heartbeat | boot | other, at, title, message, priority, seq?,
+    unexpected?}. "Tapout restarted UNEXPECTEDLY" (newer firmware: a crash or watchdog reset) is a boot, unexpected."""
     title = str(msg.get("title") or "")[:200]
     text = str(msg.get("message") or "")[:1000]
     tags = msg.get("tags") if isinstance(msg.get("tags"), list) else []
     kind = ("heartbeat" if title == "Tapout heartbeat" or "green_heart" in tags
-            else "boot" if title == "Tapout restarted" else "other")
+            else "boot" if re.fullmatch(r"Tapout restarted(\s+unexpectedly)?[.!]?", title.strip(), re.I) else "other")
     out = {"kind": kind, "at": float(msg.get("time") or time.time()), "title": title, "message": text,
            "priority": int(msg.get("priority") or 3), "id": str(msg.get("id") or "")}
+    if kind == "boot" and "unexpectedly" in title.lower():
+        out["unexpected"] = True
     m = re.search(r"\bseq (\d+)", text) if kind == "heartbeat" else re.search(r"Boot #(\d+)", text)
     if m:
         out["seq"] = int(m.group(1))
@@ -653,18 +664,33 @@ class PreAlerts:
                     h[s["kind"]] = s
             if not h.get("last") or s["at"] >= h["last"].get("at", 0):
                 h["last"] = s
-            if s["kind"] == "other" and s["priority"] >= 4:
-                h["warning"] = s
+            if s["kind"] == "other" and s["priority"] >= 4 and (not h.get("warning") or s["at"] >= h["warning"].get("at", 0)):
+                h["warning"] = s                    # the firmware's "high" status: a device fault (fault())
             self.health = h
             with self.store.lock:
                 self.store.db.execute("INSERT INTO meta (key, value) VALUES ('tapout_status', ?) "
                                       "ON CONFLICT(key) DO UPDATE SET value = excluded.value", (json.dumps(h),))
         self.on_change()
 
+    def fault(self) -> dict | None:
+        """The device fault in effect: the newest high-priority status message ("ALERT DELIVERY FAILED", "Detector line
+        STUCK active", "Ring detector NOT armed", ...) or an unexpected restart, when no heartbeat or restart came after
+        it. Only those clear it: the heartbeat is the firmware's periodic all-clear and a restart starts afresh, while a
+        normal-priority message (an OTA step) says nothing about the fault."""
+        h = self.health
+        hb, boot, w = h.get("heartbeat"), h.get("boot"), h.get("warning")
+        cleared = max([x["at"] for x in (hb, boot) if x], default=None)
+        if w and (cleared is None or w["at"] > cleared):
+            return w
+        if boot and boot.get("unexpected") and (not hb or boot["at"] > hb["at"]):
+            return boot
+        return None
+
     def tapout(self, now: float | None = None) -> dict:
         """{state: ok | warn | unknown, word, detail}: "Tapout: ok, heartbeat 12 min ago" and the like.
         Only what was heard: never heard -> "no heartbeat yet". Any message on the status topic (a heartbeat, a restart,
-        a warning, OTA) proves Tapout is alive: the newest of them is what goes stale."""
+        a warning, OTA) proves Tapout is alive: the newest of them is what goes stale. A device fault (fault()) warns
+        with its title: "Tapout: ALERT DELIVERY FAILED, 3 min ago", "Tapout: restarted unexpectedly 2 min ago"."""
         now = self.clock() if now is None else now
         h = self.health
         alive = [x for x in (h.get("heartbeat"), h.get("boot"), h.get("last")) if x]
@@ -698,10 +724,18 @@ class PreAlerts:
                                                   else "status topic not set: no heartbeat to watch")}
         age = now - last["at"]
         what = {"heartbeat": "heartbeat", "boot": "restarted"}.get(last["kind"], "heard")
+        b = h.get("boot")
+        if b and b.get("unexpected") and now - b["at"] < LIST_S:
+            detail = "; ".join(["restarted unexpectedly " + _ts(b["at"]) + (f": {b['message']}" if b["message"] else ""),
+                                *([detail] if detail else [])])
         if last["kind"] == "other" and not (w and w.get("id") == last.get("id") and now - w["at"] < LIST_S):
             detail = "; ".join([f"last message {_ts(last['at'])}: {last['title']}", *parts])
         if age > self.stale_s:
             return {"state": "warn", "word": f"no heartbeat for {_ago(age)}", "at": last["at"], "detail": detail}
+        if f := self.fault():
+            word = (f"restarted unexpectedly {_ago(now - f['at'])} ago" if f["kind"] == "boot"
+                    else f"{_short(f['title']) or 'warning'}, {_ago(now - f['at'])} ago")
+            return {"state": "warn", "word": word, "at": last["at"], "detail": detail, "fault": True}
         if self.ring_stream.topic and not self.ring_stream.connected and self.ring_stream.down_since is not None:
             return {"state": "warn", "word": f"ring feed offline since {_hms(self.ring_stream.down_since)}",
                     "at": last["at"], "detail": detail}

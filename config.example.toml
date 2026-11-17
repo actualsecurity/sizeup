@@ -307,7 +307,8 @@ status_topic = ""                    # boot, heartbeat, errors, OTA (Tapout's nt
 expire_min = 5                       # an unanswered pre-alert ends after this long
 heartbeat_every_min = 360            # Tapout's heartbeat period (every 6 h; it was hourly): 5 to 1440
 # heartbeat_stale_min = 411          # nothing on the status topic this long: "Tapout: no heartbeat for ..." in warning;
-#                                    # left out: the period + 10 % + 15 min (360 -> 411); at least the period, at most 2880
+#                                    # left out: the period + 10 % + 15 min (360 -> 411). Set: 1.05 x the period to 2880
+#                                    # (lower, e.g. an old 90: logged at start, the derived value used instead)
 
 # [atc]: airport pre-alerts from HPN ATC (GitHub #233, sizeup/atc.py): every transcript of an airband channel
 # (above: HPN Tower), read with the few transmissions before it, through the rules in data/atc/rules.json

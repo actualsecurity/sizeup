@@ -34,6 +34,15 @@ AIRBAND_SQUELCH_DB = 3.5
 AIRBAND_GAIN_DB = 36.4
 AIRBAND_MHZ = (118.0, 137.0)   # VHF airband voice (AM)
 
+HEARTBEAT_EVERY_MIN = 360.0     # [prealert]: Tapout's status-topic heartbeat, every 6 h (it was hourly)
+STALE_MIN_FACTOR = 1.05         # an explicit heartbeat_stale_min must be at least this x the period (no flapping)
+
+
+def heartbeat_stale_min(every_min: float) -> float:
+    """No heartbeat this long (minutes) -> Tapout's health warns: the period, 10 % for its clock and a slow boot, and
+    15 min for ntfy and the network. 6 h -> 411 min (6 h 51 min): one missed heartbeat warns ~7 h after the last."""
+    return round(every_min * 1.1 + 15)
+
 
 @dataclass(frozen=True)
 class ChannelCfg:
@@ -208,9 +217,11 @@ class Config:
     prealert_status_source: str = ""
     prealert_expire_min: float = 5.0
     # Tapout's heartbeat period (its firmware: every 6 h) and how long without one before "no heartbeat for ..."
-    # (left out: derived from the period, heartbeat_stale_min() below)
-    prealert_heartbeat_every_min: float = 360.0
-    prealert_heartbeat_stale_min: float = 411.0
+    # (heartbeat_stale_min(): 411 for the default period). Only load() derives the stale value from a period read
+    # from the config; a Config built or replace()d by hand with another period must set both.
+    prealert_heartbeat_every_min: float = HEARTBEAT_EVERY_MIN
+    prealert_heartbeat_stale_min: float = heartbeat_stale_min(HEARTBEAT_EVERY_MIN)
+    prealert_config_note: str = ""        # a [prealert] value not used as given (logged by the app at start)
     # [alerts] (sizeup/notify.py; docs/cloud.md "Station health and alerts"): our OWN ntfy topics for pushes that
     # page a person, two kinds (notify.route()): ntfy_topic for the incident alarms (sizeup/cad/alarms.py, #128:
     # emergency buttons, mayday, aircraft squawks; env SIZEUP_ALERT_TOPIC, the hub: SSM /sizeup-hub/alert-topic),
@@ -531,15 +542,6 @@ def _cloud(data: dict) -> dict:
                 cloud_legacy_station_id=legacy_id, **_keychain(cl))
 
 
-HEARTBEAT_EVERY_MIN = 360.0     # Tapout's status-topic heartbeat: every 6 h (it was hourly)
-
-
-def heartbeat_stale_min(every_min: float) -> float:
-    """No heartbeat this long (minutes) -> Tapout's health warns: the period, 10 % for its clock and a slow boot, and
-    15 min for ntfy and the network. 6 h -> 411 min (6 h 51 min): one missed heartbeat warns ~7 h after the last."""
-    return round(every_min * 1.1 + 15)
-
-
 def _prealert(data: dict) -> dict:
     """[prealert] -> Config fields. No section = off. Read only: sizeup never publishes to ntfy."""
     if "prealert" not in data:
@@ -567,16 +569,22 @@ def _prealert(data: dict) -> dict:
         raise ConfigError("prealert.expire_min: 0.5 to 60")
     if not 5 <= every <= 24 * 60:
         raise ConfigError("prealert.heartbeat_every_min: 5 to 1440 (Tapout's heartbeat period)")
-    if not every <= stale <= 2 * 24 * 60:
-        raise ConfigError(f"prealert.heartbeat_stale_min: {every:g} (heartbeat_every_min) to 2880; "
-                          "leave it out to derive it from heartbeat_every_min")
+    note = ""
+    if stale > 2 * 24 * 60:
+        raise ConfigError("prealert.heartbeat_stale_min: at most 2880; leave it out to derive it from heartbeat_every_min")
+    if stale < every * STALE_MIN_FACTOR:
+        # an old config (the example's 90 from when Tapout beat hourly) must not stop the app, nor flap on a late beat
+        derived = heartbeat_stale_min(every)
+        note = (f"[prealert] heartbeat_stale_min = {stale:g} is not above the {every:g} min heartbeat period "
+                f"(needs at least {every * STALE_MIN_FACTOR:g}): using {derived:g}; remove it or raise it")
+        stale = derived
     enabled = pa.get("enabled", True)
     if not isinstance(enabled, bool):
         raise ConfigError("prealert.enabled: true or false")
     return dict(prealert_enabled=enabled, prealert_server=server, prealert_ring_topic=topics["ring_topic"],
                 prealert_status_topic=topics["status_topic"], prealert_ring_source=tsrc["ring_topic"],
                 prealert_status_source=tsrc["status_topic"], prealert_expire_min=expire,
-                prealert_heartbeat_every_min=every, prealert_heartbeat_stale_min=stale)
+                prealert_heartbeat_every_min=every, prealert_heartbeat_stale_min=stale, prealert_config_note=note)
 
 
 def _alerts(data: dict, prealert: dict) -> dict:
