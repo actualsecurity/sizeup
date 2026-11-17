@@ -834,7 +834,8 @@
     "Fire/EMS 15; add 333 during an Airport incident). limit: how many. phrases: a transmission whose",
     "transcript or talker says one of these is marked as talking to us (\"PC\"), as is one naming a PCFD or",
     "Rye Brook unit (from units: E60 / Engine 60, 23 91 ...) and 60 Control's turn right before or after",
-    "such a unit's turn in the same call."
+    "such a unit's turn in the same call. A \"headquarters\" / \"HQ\" / \"base\" phrase counts only bare or named ours",
+    "(\"Port Chester headquarters\"), never another town's (\"Rye headquarters\": the towns below and the county's)."
   ],
   "comms_feed": {
     "title": "60 Control · Fire/EMS 15",

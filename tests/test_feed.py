@@ -6,7 +6,7 @@ import json
 import pytest
 
 from sizeup.cad.api import CadApi
-from sizeup.cad.feed import DEFAULT_PHRASES, Matcher, load_cfg
+from sizeup.cad.feed import DEFAULT_PHRASES, Matcher, load_cfg, read_rye
 from sizeup.cad.lists import ListsError, load
 from sizeup.cad.lists import DEFAULT_PATH
 from tests.test_radios import Clock, _event_with, cad, tx
@@ -68,6 +68,74 @@ def test_data_file_phrases_and_defaults(tmp_path):
 def test_matcher_phrases_unit_codes_and_spoken_forms(text, why):
     cfg = load_cfg(load())
     assert Matcher(cfg.phrases, cfg.units).match(text) == why
+
+
+@pytest.mark.parametrize("text,ours", [
+    # another department's headquarters is never ours (Fire/EMS 15, 2026-11-17: Rye FD's, flagged PC)
+    ("60s to right headquarters right face.", False),           # STT's "right" for Rye: "60's to Rye headquarters, Rye base"
+    ("16 Rye headquarters.", False),
+    ("Harrison headquarters", False),
+    ("Rye FD headquarters", False),
+    ("Rye F.D. headquarters", False),
+    ("Rye's headquarters", False),
+    ("Purchase fire headquarters", False),                      # the CAD's alias: Harrison
+    ("White Plains headquarters", False),                       # the county's towns
+    ("Scarsdale headquarters", False),
+    ("Harrison, 60 Control, contact headquarters", False),      # bare, but to another department
+    ("60 Control to Harrison, call your headquarters", False),
+    ("Rye. Headquarters, 60 Control", False),
+    ("60s to right face.", False),
+    # ours: bare, or named ours
+    ("60 Control to headquarters", True),
+    ("Port Chester headquarters", True),
+    ("Rye Brook headquarters", True),
+    ("PC headquarters", True),
+    ("Rye headquarters, Engine 60 respond", True),              # our unit named
+    ("Engine 60, 60 Control", True),
+    ("Harrison Avenue, 60 Control to headquarters", True),      # a street, not an addressee
+    ("All right headquarters, copy", True),                     # "all right" is never Rye
+    ("Right, headquarters, copy", True),
+    ("60 Control to headquarters, fire alarm in Rye", True),
+])
+def test_another_departments_headquarters_is_not_ours(text, ours):
+    cfg = load_cfg(load())
+    for m in (Matcher(cfg.phrases, cfg.units, cfg.kinds, cfg.towns, cfg.ours), Matcher(cfg.phrases, cfg.units)):
+        assert bool(m.match(text)) is ours, text
+        assert bool(m.match(text, "60 Ctrl OP 1", "")) is ours, text
+
+
+def test_rye_heard_as_right_is_read_for_the_decision_only():
+    assert read_rye("60s to right headquarters right face.") == "60s to Rye headquarters Rye base."
+    assert read_rye("right HQ") == "Rye HQ" and read_rye("right base") == "Rye base"
+    assert read_rye("turn right face the house") == "turn right face the house"     # no base, not the addressee
+    assert read_rye("all right headquarters") == "all right headquarters"
+    assert read_rye("on your right base of the stairs") == "on your right base of the stairs"
+
+
+def test_whose_base_follows_the_lists_towns_and_joint_response(tmp_path):
+    d = dict(DATA)
+    d["geo_town_aliases"] = {**DATA["geo_town_aliases"], "sampleton": "Sampleton"}
+    p = tmp_path / "lists.json"
+    p.write_text(json.dumps(d))
+    cfg = load_cfg(load(p))
+    m = Matcher(cfg.phrases, cfg.units, cfg.kinds, cfg.towns, cfg.ours)
+    assert cfg.ours == {"Port Chester", "Rye Brook"}
+    assert m.match("Sampleton headquarters") == "" and m.match("Rye Brook headquarters") == "Rye Brook"
+
+
+def test_the_feed_row_and_possible_incoming_skip_another_departments_headquarters(tmp_path):
+    clock = Clock()
+    c = cad(tmp_path, clock)
+    t = clock.t
+    c.record_traffic(tx("307-h-call_1-t0", t + 1, "Fire/EMS 15", "", "60 Ctrl OP 1", 307, "60s to right headquarters right face."))
+    c.record_traffic(tx("307-h-call_2-t0", t + 2, "Fire/EMS 15", "", "60 Ctrl OP 1", 307, "16 Rye headquarters."))
+    c.record_traffic(tx("307-h-call_3-t0", t + 3, "Fire/EMS 15", "", "60 Ctrl OP 1", 307, "60 Control to headquarters"))
+    pc = {r["id"]: r["pc"] for r in c.state()["feed"]["rows"]}
+    assert pc == {"307-h-call_3-t0": "headquarters", "307-h-call_2-t0": "", "307-h-call_1-t0": ""}
+    assert c.sources.consider_radio("307-h-call_1-t0") is None and c.sources.consider_radio("307-h-call_2-t0") is None
+    n = c.sources.consider_radio("307-h-call_3-t0")
+    assert n["text"] == "Calling headquarters: 60 Control to headquarters"
+    assert [x["text"] for x in c.sources.state()["incoming"]] == [n["text"]]
 
 
 def test_matcher_talker_and_rig():

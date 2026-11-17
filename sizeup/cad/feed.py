@@ -16,7 +16,13 @@ Settings come from the data file (data/cad_lists.json, "comms_feed"):
 A transmission is "talking to us" (rows[i]["pc"] says why) when its transcript or talker names a
 phrase, or one of PCFD's or Rye Brook's units by code or as said ("E60", "Engine 60", "23 91"),
 or it is 60 Control's turn right before or after such a unit's turn in the same P25 call (looking past
-the key-ups of unknown radios in between).
+the key-ups of unknown radios in between). A base phrase ("headquarters", "HQ", "base") counts only when it is ours:
+bare ("60 Control to headquarters") or named ours ("Port Chester headquarters", "Rye Brook headquarters"), never
+another town's or department's ("Rye headquarters", "Harrison base"; the CAD's towns and aliases and the county's
+towns and departments), nor a bare one in a transmission to another department ("Harrison, 60 Control, contact
+headquarters"). Speech-to-text's "right headquarters" / "right face" are read as Rye's for this (read_rye); the
+transcript stays as heard. The CAD feed's "PC" badge and the 60 Control column's "Possible incoming"
+(sizeup/cad/sources.py consider_radio) both decide by Matcher.match.
 
 A page whose tones aren't ours but whose text names our units (#115, South 2 2026-10-14 07:04: "6462 to rescue
 40, ... Westchester County Airport", tones nobody's code matched) is flagged (rows[i]["names_ours"]: the unit
@@ -32,11 +38,12 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 
 from sizeup.sourcekeys import COUNTY
 from sizeup.cad.comms import _tones, events_of, with_alarms
-from sizeup.cad.lists import Lists, ListsError
+from sizeup.cad.lists import HOME_DEPARTMENT, Lists, ListsError
 from sizeup.cad.radios import PCFD_KINDS
 
 DEFAULT_TITLE = "60 Control · Fire/EMS 15"
@@ -75,6 +82,76 @@ BARE_STREET = re.compile(r"\s*,?\s+" + STREET_NAME + r"(?:" + STREET_WORDS + r"|
 # never right after to / at / respond(ing) to ("responding to 6462": an address)
 SPLIT_NEXT = re.compile(r"\s*(?:to\b|,?\s*(?:engine|ladder|tower|rescue|utility|marine|medic|car|truck)\b|[.;!?]|$)", re.I)
 SPLIT_NOT_AFTER = re.compile(r"\b(?:to|at)$", re.I)
+
+# A "headquarters" phrase ("headquarters", "HQ", "base", "fire headquarters") is ours only when nothing makes it another
+# department's (2026-11-17: 60 Control's "60s to right headquarters right face." and "16 Rye headquarters." were Rye
+# FD's, flagged PC and raised "Possible incoming"): Matcher._base_ours. Bare, it is still ours ("60 Control to
+# headquarters": how 60 Control calls our HQ), unless the transmission is to another department.
+BASE_PHRASE = re.compile(r"(?:fire\s+)?(?:head\s*quarters?|h\.?\s?q\.?|base|quarters)", re.I)
+BASE_WORD = r"(?:fire\s+)?(?:head\s*quarters|h\.?q\.?|base)"
+# between a town and its base: "Rye FD headquarters", "Rye Fire Department base", "Rye's headquarters"
+QUALIFIER_FILLER = {"fire", "fd", "f", "d", "department", "dept", "volunteer", "vol", "s"}
+QUALIFIER_BREAK = re.compile(r"[,;:!?\n]|(?<!\b[A-Za-z])\.")     # never the dots of "F.D.", "H.Q."
+# Speech-to-text hears "Rye" as "right" before a base ("right headquarters", "right HQ", "right base"; "right face" for
+# "Rye base"): read as Rye for this decision only (the stored transcript is never changed). Never "all right" / "the
+# right" / "your right", nor across a comma ("Right, headquarters").
+_NOT_RIGHT = r"(?<!\ball )(?<!\bthe )(?<!\byour )"
+RIGHT_BASE = re.compile(_NOT_RIGHT + r"\bright(?=\s+" + BASE_WORD + r"(?!\w))", re.I)
+RIGHT_FACE = re.compile(_NOT_RIGHT + r"\bright\s+face\b", re.I)
+HAS_BASE = re.compile(r"(?<!\w)" + BASE_WORD + r"(?!\w)", re.I)
+# who a transmission is to: its first words, past 60 Control's own call ("60 Control to ...", "60's to ...", "60, ...")
+ADDRESSEE = re.compile(r"^\W*(?:(?:60|sixty|6[\s-]0)(?:'?s)?(?:\s+control)?[\s,]*(?:to\b\s*)?)?", re.I)
+ADDRESSEE_STREET = re.compile(r"\s*(?:" + STREET_WORDS + r")(?!\w)", re.I)
+
+
+def _words(s: str) -> tuple[str, ...]:
+    return tuple(re.findall(r"[a-z0-9]+", s.lower()))
+
+
+def read_rye(text: str) -> str:
+    """The words as whose-base reads them: "right" before a base is "Rye" ("right headquarters" -> "Rye
+    headquarters"), and "right face" is "Rye base" in a transmission about a base or as its addressee ("60s to right
+    headquarters right face." -> "60s to Rye headquarters Rye base."). For this decision only: the stored
+    transcript is never changed."""
+    out = RIGHT_BASE.sub("Rye", text or "")
+    if RIGHT_FACE.search(out):
+        lead = ADDRESSEE.match(out).end()
+        out = RIGHT_FACE.sub(lambda m: "Rye base" if HAS_BASE.search(out) or m.start() == lead else m.group(0), out)
+    return out
+
+
+@lru_cache(maxsize=1)
+def _county_qualifiers() -> dict[tuple[str, ...], str]:
+    """The county's towns and departments (data/westchester_towns.txt, westchester_departments.csv and the EMS file's
+    places: sizeup/cad/sources.py county_towns, sizeup/cad/tonelist.py county_places): {name words: name}."""
+    from sizeup.cad.sources import county_towns
+    from sizeup.cad.tonelist import county_places
+    out = {k: v for k, v in county_towns().items() if k}
+    for p in county_places():
+        out.setdefault(_words(p), p)
+    return {k: v for k, v in out.items() if k}
+
+
+def qualifiers(lists: Lists | None = None) -> tuple[dict[tuple[str, ...], str], frozenset[str]]:
+    """({name words: town or department}, the ones that are ours) for Matcher._base_ours: the county's, then the CAD's
+    towns and aliases (geo_town_order, geo_town_aliases: "purchase" is Harrison, "rye neck" Mamaroneck, "city of rye"
+    Rye). Ours: the home department's town and the joint-response towns (Port Chester, Rye Brook; "PC", "PCFD")."""
+    home = re.sub(r"\s+(?:FD|Fire(?:\s+Department)?)$", "", HOME_DEPARTMENT).strip()
+    joint = getattr(lists, "joint_response", None) if lists is not None else None
+    ours = {home, *(joint if joint is not None else ("Rye Brook",))}
+    towns = dict(_county_qualifiers())
+    if lists is not None:
+        for t in getattr(lists, "geo_town_order", ()) or ():
+            towns[_words(t)] = t
+        for a, t in (getattr(lists, "geo_town_aliases", None) or {}).items():
+            towns[_words(a)] = t
+    for t in ours:
+        towns[_words(t)] = t
+    initials = "".join(w[0] for w in home.split()).lower()
+    towns[(initials,)] = towns[(initials + "fd",)] = home
+    towns.pop((), None)
+    return towns, frozenset(ours)
+
 
 def _phrase_re(p: str) -> str:
     """'Port Chester' -> Port[\\s-]*Chester ('Portchester', 'Port-Chester'); an acronym 'PCFD' also
@@ -128,6 +205,8 @@ class FeedCfg:
     phrases: tuple[str, ...] = DEFAULT_PHRASES
     units: dict[str, str] = field(default_factory=dict)      # code -> spoken: PCFD's and Rye Brook's units
     kinds: dict[str, str] = field(default_factory=dict)      # code -> kind ("chief", "engine" ...)
+    towns: dict[tuple[str, ...], str] | None = None           # whose base: qualifiers(lists) (None: the county's)
+    ours: frozenset[str] | None = None
 
 
 def load_cfg(lists: Lists) -> FeedCfg:
@@ -163,15 +242,24 @@ def load_cfg(lists: Lists) -> FeedCfg:
              if u.get("kind", "agency") in PCFD_KINDS and not u.get("mutual_aid")
              and (not u.get("department") or u.get("department") in joint)}
     kinds = {c: str(lists.units[c].get("kind") or "") for c in units}
-    return FeedCfg(title.strip(), tuple(dict.fromkeys(tgs)), limit, tuple(p.strip() for p in phrases), units, kinds)
+    towns, ours = qualifiers(lists)
+    return FeedCfg(title.strip(), tuple(dict.fromkeys(tgs)), limit, tuple(p.strip() for p in phrases), units, kinds,
+                   towns, ours)
 
 
 class Matcher:
     """Is a transmission about us? match(text, talker, rig) -> the reason ('Port Chester', 'E60'), or ''."""
 
-    def __init__(self, phrases: tuple[str, ...] | list[str], units: dict[str, str], kinds: dict[str, str] | None = None):
+    def __init__(self, phrases: tuple[str, ...] | list[str], units: dict[str, str], kinds: dict[str, str] | None = None,
+                 towns: dict[tuple[str, ...], str] | None = None, ours: frozenset[str] | None = None):
+        """towns, ours: qualifiers(lists) (None: the county's, Port Chester and Rye Brook ours)."""
         kinds = kinds or {}
-        self.phrases = [(p, re.compile(r"(?<![\w])" + _phrase_re(p) + r"(?![\w])", re.I)) for p in phrases]
+        if towns is None or ours is None:
+            towns, ours = qualifiers(None)
+        self.towns, self.ours = towns, ours
+        self.longest = max((len(k) for k in towns), default=1)
+        self.phrases = [(p, re.compile(r"(?<![\w])" + _phrase_re(p) + r"(?![\w])", re.I),
+                         bool(BASE_PHRASE.fullmatch(p.strip()))) for p in phrases]        # (phrase, regex, a base?)
         self.units = [(c, re.compile(r"(?<![\w])(?:" + "|".join(unit_forms(c, sp, kinds.get(c, ""))) + r")(?![\w])", re.I))
                       for c, sp in units.items()]
         self.codes = set(units)
@@ -211,13 +299,53 @@ class Matcher:
                 out += codes
         return out
 
+    def _whose(self, before: str) -> str:
+        """The town or department named right before a base ("16 Rye headquarters": Rye; "Rye FD headquarters",
+        "Rye's base", "Rye Brook headquarters": Rye Brook, the longest name), '' when none is (across a comma or a
+        sentence's end it never is: "Rye. Headquarters ...")."""
+        cut = max((m.end() for m in QUALIFIER_BREAK.finditer(before)), default=0)
+        w = list(_words(before[cut:]))[-(self.longest + 4):]
+        while w and w[-1] in QUALIFIER_FILLER:
+            w.pop()
+        for n in range(min(self.longest, len(w)), 0, -1):
+            t = self.towns.get(tuple(w[-n:]))
+            if t:
+                return t
+        return ""
+
+    def _addressed_elsewhere(self, text: str) -> bool:
+        """The transmission is to another department: its first words (past "60 Control to", "60's to") name another
+        town or department ("Harrison, 60 Control ...", "60's to Rye ..."), never a street ("Harrison Avenue ...")."""
+        rest = text[ADDRESSEE.match(text).end():]
+        rest = rest[:next((m.start() for m in QUALIFIER_BREAK.finditer(rest)), len(rest))]
+        w = _words(rest)
+        for n in range(min(self.longest, len(w)), 0, -1):
+            t = self.towns.get(w[:n])
+            if t:
+                end = re.match(r"\W*" + r"\W+".join(map(re.escape, w[:n])), rest, re.I)
+                return t not in self.ours and not (end and ADDRESSEE_STREET.match(rest[end.end():]))
+        return False
+
+    def _base_ours(self, text: str, rx: re.Pattern) -> bool:
+        """A base phrase ("headquarters", "HQ", "base") is ours when one is named ours ("Port Chester headquarters",
+        "PC base", "Rye Brook headquarters"), or every one is bare ("60 Control to headquarters") and the transmission
+        isn't to another department. "Rye headquarters", "Harrison base", STT's "right headquarters" (read_rye) and a bare
+        one in a transmission to another department or naming another's base never are."""
+        text = read_rye(text)
+        whose = [self._whose(text[:m.start()]) for m in rx.finditer(text)]
+        if not whose:
+            return False
+        if any(w in self.ours for w in whose):
+            return True
+        return not any(whose) and not self._addressed_elsewhere(text)
+
     def match(self, text: str = "", talker: str = "", rig: str = "") -> str:
         for r in (x.strip() for x in (rig or "").split(",")):
             if r in self.codes:
                 return r
         hay = f"{talker or ''}\n{text or ''}"
-        for p, rx in self.phrases:
-            if rx.search(hay):
+        for p, rx, base in self.phrases:
+            if (any(self._base_ours(s, rx) for s in (talker or "", text or "")) if base else rx.search(hay)):
                 return p
         found = [(m.start(), c) for c, rx in self.units if (m := rx.search(hay))]
         return min(found)[1] if found else ""          # the first one named
@@ -248,7 +376,7 @@ class Feed:
         L = self._lists()
         if L is not self._for:
             self.cfg = load_cfg(L)
-            self.matcher = Matcher(self.cfg.phrases, self.cfg.units, self.cfg.kinds)
+            self.matcher = Matcher(self.cfg.phrases, self.cfg.units, self.cfg.kinds, self.cfg.towns, self.cfg.ours)
             self._for = L
 
     def rows(self, limit: int | None = None, talkgroups: tuple[int, ...] | None = None) -> list[dict]:
