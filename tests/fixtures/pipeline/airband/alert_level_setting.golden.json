@@ -9,29 +9,6 @@
     "tg": 307,
     "text": "60 Control, car 9901, declaring an alert level 2 for a Citation, runway 34"
    },
-   "decisions": [
-    {
-     "raise": {
-      "source": "radio",
-      "kind": "alert_level",
-      "subject": "alert-level",
-      "group": "",
-      "title": "HPN Alert 2 · Citation · RWY 34",
-      "confidence": 1.0,
-      "rank": 6,
-      "push": false,
-      "limit": false,
-      "aircraft": []
-     },
-     "row": "A1",
-     "how": "new"
-    },
-    {
-     "watch": "60 Control",
-     "id": "fire-1",
-     "row": "A1"
-    }
-   ],
    "alerts": [
     {
      "id": "A1",
@@ -44,7 +21,6 @@
      "title": "HPN Alert 2 · Citation · RWY 34",
      "detail": "60 Control: alert level 2",
      "confidence": 1.0,
-     "level": "high",
      "channel": "Fire/EMS 15",
      "count": 1,
      "status": "open",
@@ -110,23 +86,17 @@
     {
      "to": "alerts",
      "title": "HPN Alert 2 · Citation · RWY 34",
-     "body": "“60 Control, car 9901, declaring an alert level 2 for a Citation, runway 34” · alert high 100% · not dispatched · accept or dismiss in the CAD",
+     "message": "“60 Control, car 9901, declaring an alert level 2 for a Citation, runway 34” · alert high 100% · not dispatched · accept or dismiss in the CAD",
      "priority": 5,
      "tags": [
       "airplane",
       "warning"
      ],
-     "click": "https://cad.example.test/cad",
-     "who": null,
-     "actions": []
+     "click": "https://cad.example.test/cad"
     }
    ],
    "county_feed_poll_now": [
     "airport alert level 2"
-   ],
-   "log": [
-    "airport_alerts: airport pre-alert #A1: HPN Alert 2 · Citation · RWY 34 (1.00)",
-    "airport_watch: airport watch: HPN Alert 2 · Citation · RWY 34 (pre-alert #A1)"
    ]
   },
   {
@@ -137,29 +107,6 @@
     "tg": 307,
     "text": "60 Control, car 9901, upgrade to an alert level 3, the aircraft is now reporting smoke"
    },
-   "decisions": [
-    {
-     "add_to": "A1",
-     "alert": {
-      "source": "radio",
-      "kind": "alert_level",
-      "subject": "alert-level",
-      "group": "",
-      "title": "HPN Alert 3 · Citation · smoke · RWY 34",
-      "confidence": 1.0,
-      "rank": 7,
-      "push": true,
-      "limit": false,
-      "aircraft": []
-     },
-     "row": "A1"
-    },
-    {
-     "watch": "60 Control",
-     "id": "fire-2",
-     "row": "A1"
-    }
-   ],
    "alerts": [
     {
      "id": "A1",
@@ -172,7 +119,6 @@
      "title": "HPN Alert 3 · Citation · smoke · RWY 34",
      "detail": "60 Control: alert level 3",
      "confidence": 1.0,
-     "level": "high",
      "channel": "Fire/EMS 15",
      "count": 2,
      "status": "open",
@@ -289,24 +235,17 @@
     {
      "to": "alerts",
      "title": "HPN Alert 3 · Citation · smoke · RWY 34",
-     "body": "“60 Control, car 9901, declaring an alert level 2 for a Citation, runway 34” · “60 Control, car 9901, upgrade to an alert level 3, the aircraft is now reporting smoke” · alert high 100% · not dispatched · accept or dismiss in the CAD",
+     "message": "“60 Control, car 9901, declaring an alert level 2 for a Citation, runway 34” · “60 Control, car 9901, upgrade to an alert level 3, the aircraft is now reporting smoke” · alert high 100% · not dispatched · accept or dismiss in the CAD",
      "priority": 5,
      "tags": [
       "airplane",
       "warning"
      ],
-     "click": "https://cad.example.test/cad",
-     "who": null,
-     "actions": []
+     "click": "https://cad.example.test/cad"
     }
    ],
    "county_feed_poll_now": [
     "airport alert level 3"
-   ],
-   "log": [
-    "airport_watch: airport watch: HPN Alert 3 · Citation · smoke · RWY 34 (pre-alert #A1)",
-    "airport_alerts: airport pre-alert: 1 on event I1",
-    "airport_watch: airport watch: HPN Alert 3 · Citation · smoke · RWY 34: event I1 queued"
    ]
   }
  ]

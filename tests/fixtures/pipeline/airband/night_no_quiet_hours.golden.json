@@ -33,98 +33,6 @@
     "dur": 4,
     "text": "Westchester traffic, November one two three alfa bravo, mayday mayday mayday, engine failure, landing runway three four"
    },
-   "decisions": [
-    {
-     "watch": "atc",
-     "id": "twr-1",
-     "ch": "HPN Tower",
-     "fed": "Westchester traffic, N123AB, mayday mayday mayday, engine failure, landing runway 34",
-     "hits": [
-      [
-       "mayday",
-       "mayday"
-      ],
-      [
-       "engine",
-       "engine failure"
-      ]
-     ],
-     "score": 0.9875,
-     "adsb": null,
-     "context": [],
-     "row": "A1"
-    },
-    {
-     "raise": {
-      "source": "atc",
-      "kind": "emergency",
-      "subject": "acft:N123AB",
-      "group": "HPN Tower",
-      "title": "HPN ATC: MAYDAY: N123AB, runway 34",
-      "confidence": 0.99,
-      "rank": 3,
-      "push": true,
-      "limit": true,
-      "aircraft": [
-       [
-        "N123AB",
-        "a0b1c2",
-        1.0
-       ]
-      ]
-     },
-     "row": "A1",
-     "how": "new"
-    },
-    {
-     "watch": "talkers",
-     "id": "twr-1",
-     "record": {
-      "role": "aircraft",
-      "talker": {
-       "callsign": "N123AB",
-       "hex": "a0b1c2",
-       "status": "confirmed"
-      },
-      "aircraft": {
-       "callsign": "N123AB",
-       "hex": "a0b1c2",
-       "status": "confirmed"
-      },
-      "exchange": {
-       "subject": "N123AB",
-       "hex": "a0b1c2"
-      }
-     }
-    },
-    {
-     "raise": {
-      "source": "atc",
-      "kind": "abnormal",
-      "subject": "acft:N123AB",
-      "group": "",
-      "title": "HPN ATC: abnormal · engine, emergency · N123AB (C68A)",
-      "confidence": 0.7,
-      "rank": 2,
-      "push": true,
-      "limit": true,
-      "aircraft": [
-       [
-        "N123AB",
-        "a0b1c2",
-        1.0
-       ]
-      ]
-     },
-     "row": "A1",
-     "how": "added"
-    },
-    {
-     "watch": "airport_watch",
-     "id": "twr-1",
-     "row": "A1"
-    }
-   ],
    "alerts": [
     {
      "id": "A1",
@@ -137,7 +45,6 @@
      "title": "HPN ATC: MAYDAY: N123AB, runway 34",
      "detail": "aircraft emergency · heard: mayday, engine failure · HPN Tower",
      "confidence": 0.99,
-     "level": "high",
      "channel": "HPN Tower",
      "count": 2,
      "status": "open",
@@ -230,20 +137,14 @@
     {
      "to": "alerts",
      "title": "HPN ATC: MAYDAY: N123AB, runway 34",
-     "body": "“Westchester traffic, N123AB, mayday mayday mayday, engine failure, landing runway 34” · N123AB (C68A) · 3.1 NM from HPN · 1,400 ft · arriving 34 · ADS-B match 100% · location: runway 34 (not enough to place it on the map) · alert high 99% · not dispatched · accept or dismiss in the CAD",
+     "message": "“Westchester traffic, N123AB, mayday mayday mayday, engine failure, landing runway 34” · N123AB (C68A) · 3.1 NM from HPN · 1,400 ft · arriving 34 · ADS-B match 100% · location: runway 34 (not enough to place it on the map) · alert high 99% · not dispatched · accept or dismiss in the CAD",
      "priority": 4,
      "tags": [
       "airplane",
       "warning"
      ],
-     "click": "https://cad.example.test/cad",
-     "who": null,
-     "actions": []
+     "click": "https://cad.example.test/cad"
     }
-   ],
-   "log": [
-    "airport_alerts: airport pre-alert #A1: HPN ATC: MAYDAY: N123AB, runway 34 (0.99)",
-    "airport_watch: airport watch: N123AB: abnormal -> pre-alert #A1 (0.70)"
    ]
   },
   {
@@ -255,68 +156,6 @@
     "dur": 4,
     "text": "November one two three alfa bravo, contact New York approach one two zero point eight"
    },
-   "decisions": [
-    {
-     "watch": "atc",
-     "id": "twr-2",
-     "ch": "HPN Tower",
-     "fed": "N123AB, contact New York approach 120 point eight",
-     "hits": [],
-     "row": null
-    },
-    {
-     "watch": "talkers",
-     "id": "twr-2",
-     "record": {
-      "role": "atc",
-      "talker": {
-       "callsign": "TWR",
-       "status": "probable"
-      },
-      "aircraft": {
-       "callsign": "N123AB",
-       "hex": "a0b1c2",
-       "status": "confirmed"
-      },
-      "addressed": {
-       "callsign": "N123AB",
-       "hex": "a0b1c2",
-       "status": "confirmed"
-      },
-      "exchange": {
-       "subject": "N123AB",
-       "hex": "a0b1c2"
-      }
-     }
-    },
-    {
-     "add_to": "A1",
-     "alert": {
-      "source": "atc",
-      "kind": "abnormal",
-      "subject": "acft:N123AB",
-      "group": "",
-      "title": "",
-      "confidence": 0.99,
-      "rank": 0,
-      "push": true,
-      "limit": true,
-      "aircraft": [
-       [
-        "N123AB",
-        "a0b1c2",
-        1.0
-       ]
-      ]
-     },
-     "row": "A1"
-    },
-    {
-     "watch": "airport_watch",
-     "id": "twr-2",
-     "row": "A1"
-    }
-   ],
    "alerts": [
     {
      "id": "A1",
@@ -329,7 +168,6 @@
      "title": "HPN ATC: MAYDAY: N123AB, runway 34",
      "detail": "aircraft emergency · heard: mayday, engine failure · HPN Tower",
      "confidence": 0.99,
-     "level": "high",
      "channel": "HPN Tower",
      "count": 3,
      "status": "open",
@@ -420,9 +258,6 @@
       ]
      }
     }
-   ],
-   "log": [
-    "airport_watch: airport watch: N123AB: NY App 120.8"
    ]
   },
   {
@@ -456,102 +291,6 @@
     "dur": 4,
     "text": "New York approach, Delta forty five, we are declaring an emergency, smoke in the cabin"
    },
-   "decisions": [
-    {
-     "watch": "atc",
-     "id": "app-1",
-     "ch": "NY App 126.4/120.8",
-     "fed": "New York approach, Delta forty five, we are declaring an emergency, smoke in the cabin",
-     "hits": [
-      [
-       "smoke-aircraft",
-       "smoke in the cabin"
-      ],
-      [
-       "declaring",
-       "declaring an emergency"
-      ]
-     ],
-     "score": 0.9925,
-     "adsb": null,
-     "context": [],
-     "row": "A2"
-    },
-    {
-     "raise": {
-      "source": "atc",
-      "kind": "emergency",
-      "subject": "acft:DAL45",
-      "group": "NY App 126.4/120.8",
-      "title": "HPN ATC: emergency declared: DAL45",
-      "confidence": 0.99,
-      "rank": 3,
-      "push": true,
-      "limit": true,
-      "aircraft": [
-       [
-        "DAL45",
-        "dd0045",
-        1.0
-       ]
-      ]
-     },
-     "row": "A2",
-     "how": "new"
-    },
-    {
-     "watch": "talkers",
-     "id": "app-1",
-     "record": {
-      "role": "aircraft",
-      "talker": {
-       "callsign": "DAL45",
-       "hex": "dd0045",
-       "status": "confirmed"
-      },
-      "aircraft": {
-       "callsign": "DAL45",
-       "hex": "dd0045",
-       "status": "confirmed"
-      },
-      "addressed": {
-       "callsign": "APP",
-       "status": "heard"
-      },
-      "exchange": {
-       "subject": "DAL45",
-       "hex": "dd0045"
-      }
-     }
-    },
-    {
-     "raise": {
-      "source": "atc",
-      "kind": "abnormal",
-      "subject": "acft:DAL45",
-      "group": "",
-      "title": "HPN ATC: abnormal · smoke, emergency · DAL45 (B712)",
-      "confidence": 0.7,
-      "rank": 2,
-      "push": true,
-      "limit": true,
-      "aircraft": [
-       [
-        "DAL45",
-        "dd0045",
-        1.0
-       ]
-      ]
-     },
-     "row": "A2",
-     "how": "added"
-    },
-    {
-     "watch": "airport_watch",
-     "id": "app-1",
-     "row": "A2"
-    }
-   ],
    "alerts": [
     {
      "id": "A2",
@@ -564,7 +303,6 @@
      "title": "HPN ATC: emergency declared: DAL45",
      "detail": "aircraft emergency · heard: smoke in the cabin, declaring an emergency · NY App 126.4/120.8",
      "confidence": 0.99,
-     "level": "high",
      "channel": "NY App 126.4/120.8",
      "count": 2,
      "status": "open",
@@ -649,23 +387,17 @@
     {
      "to": "alerts",
      "title": "HPN ATC: emergency declared: DAL45",
-     "body": "“New York approach, Delta forty five, we are declaring an emergency, smoke in the cabin” · DAL45 (B712) · 30.0 NM from HPN · 9,000 ft · inbound · ADS-B match 100% · alert high 99% · not dispatched · accept or dismiss in the CAD",
+     "message": "“New York approach, Delta forty five, we are declaring an emergency, smoke in the cabin” · DAL45 (B712) · 30.0 NM from HPN · 9,000 ft · inbound · ADS-B match 100% · alert high 99% · not dispatched · accept or dismiss in the CAD",
      "priority": 4,
      "tags": [
       "airplane",
       "warning"
      ],
-     "click": "https://cad.example.test/cad",
-     "who": null,
-     "actions": []
+     "click": "https://cad.example.test/cad"
     }
    ],
    "aircraft_widened_nm": [
     40.0
-   ],
-   "log": [
-    "airport_alerts: airport pre-alert #A2: HPN ATC: emergency declared: DAL45 (0.99)",
-    "airport_watch: airport watch: DAL45: abnormal -> pre-alert #A2 (0.70)"
    ]
   }
  ]

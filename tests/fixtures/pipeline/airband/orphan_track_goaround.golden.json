@@ -47,27 +47,7 @@
     "ch": "HPN Tower",
     "dur": 4,
     "text": "Westchester tower, we're going around, we have a flat"
-   },
-   "decisions": [
-    {
-     "watch": "atc",
-     "id": "twr-1",
-     "ch": "HPN Tower",
-     "fed": "Westchester Tower, we're going around, we have a flat",
-     "hits": [],
-     "row": null
-    },
-    {
-     "watch": "talkers",
-     "id": "twr-1",
-     "record": null
-    },
-    {
-     "watch": "airport_watch",
-     "id": "twr-1",
-     "row": null
-    }
-   ]
+   }
   },
   {
    "step": {
@@ -115,47 +95,7 @@
     "ch": "HPN Tower",
     "dur": 4,
     "text": "November seven eight niner echo foxtrot, continue, number two"
-   },
-   "decisions": [
-    {
-     "watch": "atc",
-     "id": "twr-2",
-     "ch": "HPN Tower",
-     "fed": "N789EF, continue, number two",
-     "hits": [],
-     "row": null
-    },
-    {
-     "watch": "talkers",
-     "id": "twr-2",
-     "record": {
-      "role": "atc",
-      "talker": {
-       "callsign": "TWR",
-       "status": "probable"
-      },
-      "aircraft": {
-       "callsign": "N789EF",
-       "hex": "c1c1c1",
-       "status": "confirmed"
-      },
-      "addressed": {
-       "callsign": "N789EF",
-       "hex": "c1c1c1",
-       "status": "confirmed"
-      },
-      "exchange": {
-       "subject": "N789EF",
-       "hex": "c1c1c1"
-      }
-     }
-    },
-    {
-     "watch": "airport_watch",
-     "id": "twr-2",
-     "row": null
-    }
-   ]
+   }
   },
   {
    "step": {
@@ -166,68 +106,6 @@
     "dur": 4,
     "text": "November one two three alpha bravo, roger, climb and maintain three thousand"
    },
-   "decisions": [
-    {
-     "watch": "atc",
-     "id": "twr-3",
-     "ch": "HPN Tower",
-     "fed": "N123AB, roger, climb and maintain three thousand",
-     "hits": [],
-     "row": null
-    },
-    {
-     "watch": "talkers",
-     "id": "twr-3",
-     "record": {
-      "role": "atc",
-      "talker": {
-       "callsign": "TWR",
-       "status": "probable"
-      },
-      "aircraft": {
-       "callsign": "N123AB",
-       "hex": "a0b1c2",
-       "status": "confirmed"
-      },
-      "addressed": {
-       "callsign": "N123AB",
-       "hex": "a0b1c2",
-       "status": "confirmed"
-      },
-      "exchange": {
-       "subject": "N123AB",
-       "hex": "a0b1c2"
-      }
-     }
-    },
-    {
-     "raise": {
-      "source": "atc",
-      "kind": "abnormal",
-      "subject": "acft:N123AB",
-      "group": "",
-      "title": "HPN ATC: go-around · flaps · N123AB (C68A)",
-      "confidence": 0.85,
-      "rank": 2,
-      "push": true,
-      "limit": true,
-      "aircraft": [
-       [
-        "N123AB",
-        "a0b1c2",
-        1.0
-       ]
-      ]
-     },
-     "row": "A1",
-     "how": "new"
-    },
-    {
-     "watch": "airport_watch",
-     "id": "twr-3",
-     "row": "A1"
-    }
-   ],
    "alerts": [
     {
      "id": "A1",
@@ -240,7 +118,6 @@
      "title": "HPN ATC: go-around · flaps · N123AB (C68A)",
      "detail": "go-around and abnormal phrases · HPN Tower",
      "confidence": 0.85,
-     "level": "high",
      "channel": "HPN Tower",
      "count": 1,
      "status": "open",
@@ -337,23 +214,17 @@
     {
      "to": "alerts",
      "title": "HPN ATC: go-around · flaps · N123AB (C68A)",
-     "body": "“Westchester Tower, we're going around, we have a flat” · “N123AB, roger, climb and maintain three thousand” · N123AB (C68A) · 3.1 NM from HPN · 1,900 ft · near HPN 34 · ADS-B match 100% · alert high 85% · not dispatched · accept or dismiss in the CAD",
+     "message": "“Westchester Tower, we're going around, we have a flat” · “N123AB, roger, climb and maintain three thousand” · N123AB (C68A) · 3.1 NM from HPN · 1,900 ft · near HPN 34 · ADS-B match 100% · alert high 85% · not dispatched · accept or dismiss in the CAD",
      "priority": 4,
      "tags": [
       "airplane",
       "warning"
      ],
-     "click": "https://cad.example.test/cad",
-     "who": null,
-     "actions": []
+     "click": "https://cad.example.test/cad"
     }
    ],
    "county_feed_poll_now": [
     "airport pre-alert (ATC)"
-   ],
-   "log": [
-    "airport_alerts: airport pre-alert #A1: HPN ATC: go-around · flaps · N123AB (C68A) (0.85)",
-    "airport_watch: airport watch: N123AB: goaround -> pre-alert #A1 (0.85)"
    ]
   }
  ]

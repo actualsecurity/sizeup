@@ -461,5 +461,24 @@
  "alarms_notifier": {
   "kind": "alerts",
   "to": "alerts"
+ },
+ "config_file_defaults": {
+  "atc_enabled": true,
+  "atc_rules": "",
+  "atc_context": 4,
+  "atc_context_s": 120.0,
+  "atc_dedupe_min": 5.0,
+  "atc_expire_min": 30.0,
+  "atc_max_per_hour": 8,
+  "atc_alert_level_incident": [
+   2,
+   3
+  ],
+  "atc_airport_names": [
+   "westchester",
+   "west chester",
+   "hpn",
+   "white plains"
+  ]
  }
 }

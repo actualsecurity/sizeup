@@ -3,6 +3,7 @@
   {
    "rule": "brush-fire",
    "expect": "fires",
+   "words": "brush fire",
    "why": "a departure's brush fire off the departure end: fire_off at an approximate point",
    "steps": [
     {
@@ -14,78 +15,6 @@
       "dur": 4,
       "text": "Westchester tower, JetBlue one two three four, we see a brush fire off the departure end of runway one six"
      },
-     "decisions": [
-      {
-       "watch": "atc",
-       "id": "brush-fire-fires-1",
-       "ch": "HPN Tower",
-       "fed": "Westchester Tower, JetBlue 1234, we see a brush fire off the departure end of runway 16",
-       "hits": [
-        [
-         "brush-fire",
-         "brush fire"
-        ],
-        [
-         "fire-on-field",
-         "fire off the departure end of runway"
-        ]
-       ],
-       "score": 0.9775,
-       "adsb": null,
-       "context": [],
-       "row": "A1"
-      },
-      {
-       "raise": {
-        "source": "atc",
-        "kind": "fire_off",
-        "subject": "fire:16",
-        "group": "HPN Tower",
-        "title": "HPN ATC: possible brush fire reported off runway 16 departure",
-        "confidence": 0.98,
-        "rank": 2,
-        "push": true,
-        "limit": true,
-        "aircraft": [
-         [
-          "JBU1234",
-          null,
-          0.0
-         ]
-        ]
-       },
-       "row": "A1",
-       "how": "new"
-      },
-      {
-       "watch": "talkers",
-       "id": "brush-fire-fires-1",
-       "record": {
-        "role": "aircraft",
-        "talker": {
-         "callsign": "JBU1234",
-         "status": "heard"
-        },
-        "aircraft": {
-         "callsign": "JBU1234",
-         "status": "heard"
-        },
-        "addressed": {
-         "callsign": "TWR",
-         "status": "heard"
-        },
-        "exchange": {
-         "subject": "JBU1234",
-         "hex": ""
-        }
-       }
-      },
-      {
-       "watch": "airport_watch",
-       "id": "brush-fire-fires-1",
-       "row": null
-      }
-     ],
      "alerts": [
       {
        "id": "A1",
@@ -98,7 +27,6 @@
        "title": "HPN ATC: possible brush fire reported off runway 16 departure",
        "detail": "fire or smoke off the airport · heard: brush fire, fire off the departure end of runway · HPN Tower",
        "confidence": 0.98,
-       "level": "high",
        "channel": "HPN Tower",
        "count": 1,
        "status": "open",
@@ -164,19 +92,14 @@
       {
        "to": "alerts",
        "title": "HPN ATC: possible brush fire reported off runway 16 departure",
-       "body": "“Westchester Tower, JetBlue 1234, we see a brush fire off the departure end of runway 16” · JBU1234 · heard, not on ADS-B · approx. location: about 1 NM past the departure end of runway 16, on its heading (no distance was said: 1 NM is a guess) · alert high 98% · not dispatched · accept or dismiss in the CAD",
+       "message": "“Westchester Tower, JetBlue 1234, we see a brush fire off the departure end of runway 16” · JBU1234 · heard, not on ADS-B · approx. location: about 1 NM past the departure end of runway 16, on its heading (no distance was said: 1 NM is a guess) · alert high 98% · not dispatched · accept or dismiss in the CAD",
        "priority": 4,
        "tags": [
         "airplane",
         "warning"
        ],
-       "click": "https://cad.example.test/cad",
-       "who": null,
-       "actions": []
+       "click": "https://cad.example.test/cad"
       }
-     ],
-     "log": [
-      "airport_alerts: airport pre-alert #A1: HPN ATC: possible brush fire reported off runway 16 departure (0.98)"
      ]
     }
    ]
@@ -184,6 +107,7 @@
   {
    "rule": "brush-fire",
    "expect": "quiet",
+   "via": "readout",
    "why": "inside an ATIS / NOTAM readout only the 'always' rules count",
    "steps": [
     {
@@ -194,33 +118,14 @@
       "ch": "HPN Tower",
       "dur": 4,
       "text": "Westchester information bravo is current, wind one six zero at eight, visibility one zero, altimeter two niner niner two, notams: brush fire burning north of the field, advise on initial contact you have information bravo"
-     },
-     "decisions": [
-      {
-       "watch": "atc",
-       "id": "brush-fire-quiet-1",
-       "ch": "HPN Tower",
-       "fed": "Westchester information bravo is current, wind 160 at eight, visibility 10, altimeter 2992, notams: brush fire burning north of the field, advise on initial contact you have information bravo",
-       "hits": [],
-       "row": null
-      },
-      {
-       "watch": "talkers",
-       "id": "brush-fire-quiet-1",
-       "record": null
-      },
-      {
-       "watch": "airport_watch",
-       "id": "brush-fire-quiet-1",
-       "row": null
-      }
-     ]
+     }
     }
    ]
   },
   {
    "rule": "fire-on-field",
    "expect": "fires",
+   "words": "fire on the ramp",
    "why": "a fire on the ramp: fire_field",
    "steps": [
     {
@@ -232,74 +137,6 @@
       "dur": 4,
       "text": "Westchester tower, Execjet five twenty one, there's a fire on the ramp by the hangars"
      },
-     "decisions": [
-      {
-       "watch": "atc",
-       "id": "fire-on-field-fires-1",
-       "ch": "HPN Tower",
-       "fed": "Westchester Tower, Execjet five twenty one, there's a fire on the ramp by the hangars",
-       "hits": [
-        [
-         "fire-on-field",
-         "fire on the ramp"
-        ]
-       ],
-       "score": 0.85,
-       "adsb": null,
-       "context": [],
-       "row": "A1"
-      },
-      {
-       "raise": {
-        "source": "atc",
-        "kind": "fire_field",
-        "subject": "fire",
-        "group": "HPN Tower",
-        "title": "HPN ATC: possible fire on the field on the field",
-        "confidence": 0.85,
-        "rank": 2,
-        "push": true,
-        "limit": true,
-        "aircraft": [
-         [
-          "EJA521",
-          null,
-          0.0
-         ]
-        ]
-       },
-       "row": "A1",
-       "how": "new"
-      },
-      {
-       "watch": "talkers",
-       "id": "fire-on-field-fires-1",
-       "record": {
-        "role": "aircraft",
-        "talker": {
-         "callsign": "EJA521",
-         "status": "heard"
-        },
-        "aircraft": {
-         "callsign": "EJA521",
-         "status": "heard"
-        },
-        "addressed": {
-         "callsign": "TWR",
-         "status": "heard"
-        },
-        "exchange": {
-         "subject": "EJA521",
-         "hex": ""
-        }
-       }
-      },
-      {
-       "watch": "airport_watch",
-       "id": "fire-on-field-fires-1",
-       "row": null
-      }
-     ],
      "alerts": [
       {
        "id": "A1",
@@ -312,7 +149,6 @@
        "title": "HPN ATC: possible fire on the field on the field",
        "detail": "fire on the field · heard: fire on the ramp · HPN Tower",
        "confidence": 0.85,
-       "level": "high",
        "channel": "HPN Tower",
        "count": 1,
        "status": "open",
@@ -368,19 +204,14 @@
       {
        "to": "alerts",
        "title": "HPN ATC: possible fire on the field on the field",
-       "body": "“Westchester Tower, Execjet five twenty one, there's a fire on the ramp by the hangars” · EJA521 · heard, not on ADS-B · alert high 85% · not dispatched · accept or dismiss in the CAD",
+       "message": "“Westchester Tower, Execjet five twenty one, there's a fire on the ramp by the hangars” · EJA521 · heard, not on ADS-B · alert high 85% · not dispatched · accept or dismiss in the CAD",
        "priority": 4,
        "tags": [
         "airplane",
         "warning"
        ],
-       "click": "https://cad.example.test/cad",
-       "who": null,
-       "actions": []
+       "click": "https://cad.example.test/cad"
       }
-     ],
-     "log": [
-      "airport_alerts: airport pre-alert #A1: HPN ATC: possible fire on the field on the field (0.85)"
      ]
     }
    ]
@@ -388,6 +219,7 @@
   {
    "rule": "fire-on-field",
    "expect": "quiet",
+   "via": "pattern",
    "why": "fire training: the field's words aren't there and the generic fire rule's 'not' vetoes it",
    "steps": [
     {
@@ -398,33 +230,14 @@
       "ch": "HPN Tower",
       "dur": 4,
       "text": "all aircraft, fire training on the field this afternoon west of the tower"
-     },
-     "decisions": [
-      {
-       "watch": "atc",
-       "id": "fire-on-field-quiet-1",
-       "ch": "HPN Tower",
-       "fed": "All aircraft, fire training on the field this afternoon west of the tower",
-       "hits": [],
-       "row": null
-      },
-      {
-       "watch": "talkers",
-       "id": "fire-on-field-quiet-1",
-       "record": null
-      },
-      {
-       "watch": "airport_watch",
-       "id": "fire-on-field-quiet-1",
-       "row": null
-      }
-     ]
+     }
     }
    ]
   },
   {
    "rule": "smoke-aircraft",
    "expect": "fires",
+   "words": "smoke in the cabin",
    "why": "smoke in the cabin: fire_acft",
    "steps": [
     {
@@ -436,74 +249,6 @@
       "dur": 4,
       "text": "Westchester tower, Endeavor fifty one twenty one, we have smoke in the cabin"
      },
-     "decisions": [
-      {
-       "watch": "atc",
-       "id": "smoke-aircraft-fires-1",
-       "ch": "HPN Tower",
-       "fed": "Westchester Tower, Endeavor fifty one twenty one, we have smoke in the cabin",
-       "hits": [
-        [
-         "smoke-aircraft",
-         "smoke in the cabin"
-        ]
-       ],
-       "score": 0.85,
-       "adsb": null,
-       "context": [],
-       "row": "A1"
-      },
-      {
-       "raise": {
-        "source": "atc",
-        "kind": "fire_acft",
-        "subject": "fire",
-        "group": "HPN Tower",
-        "title": "HPN ATC: smoke on board reported by EDV5121",
-        "confidence": 0.85,
-        "rank": 2,
-        "push": true,
-        "limit": true,
-        "aircraft": [
-         [
-          "EDV5121",
-          null,
-          0.0
-         ]
-        ]
-       },
-       "row": "A1",
-       "how": "new"
-      },
-      {
-       "watch": "talkers",
-       "id": "smoke-aircraft-fires-1",
-       "record": {
-        "role": "aircraft",
-        "talker": {
-         "callsign": "EDV5121",
-         "status": "heard"
-        },
-        "aircraft": {
-         "callsign": "EDV5121",
-         "status": "heard"
-        },
-        "addressed": {
-         "callsign": "TWR",
-         "status": "heard"
-        },
-        "exchange": {
-         "subject": "EDV5121",
-         "hex": ""
-        }
-       }
-      },
-      {
-       "watch": "airport_watch",
-       "id": "smoke-aircraft-fires-1",
-       "row": null
-      }
-     ],
      "alerts": [
       {
        "id": "A1",
@@ -516,7 +261,6 @@
        "title": "HPN ATC: smoke on board reported by EDV5121",
        "detail": "fire or smoke on an aircraft · heard: smoke in the cabin · HPN Tower",
        "confidence": 0.85,
-       "level": "high",
        "channel": "HPN Tower",
        "count": 1,
        "status": "open",
@@ -572,19 +316,14 @@
       {
        "to": "alerts",
        "title": "HPN ATC: smoke on board reported by EDV5121",
-       "body": "“Westchester Tower, Endeavor fifty one twenty one, we have smoke in the cabin” · EDV5121 · heard, not on ADS-B · alert high 85% · not dispatched · accept or dismiss in the CAD",
+       "message": "“Westchester Tower, Endeavor fifty one twenty one, we have smoke in the cabin” · EDV5121 · heard, not on ADS-B · alert high 85% · not dispatched · accept or dismiss in the CAD",
        "priority": 4,
        "tags": [
         "airplane",
         "warning"
        ],
-       "click": "https://cad.example.test/cad",
-       "who": null,
-       "actions": []
+       "click": "https://cad.example.test/cad"
       }
-     ],
-     "log": [
-      "airport_alerts: airport pre-alert #A1: HPN ATC: smoke on board reported by EDV5121 (0.85)"
      ]
     }
    ]
@@ -592,6 +331,7 @@
   {
    "rule": "smoke-aircraft",
    "expect": "quiet",
+   "via": "pattern",
    "why": "the no smoking sign: neither smoke rule",
    "steps": [
     {
@@ -602,47 +342,14 @@
       "ch": "HPN Tower",
       "dur": 4,
       "text": "Endeavor fifty one twenty one, the no smoking sign is on in the cabin"
-     },
-     "decisions": [
-      {
-       "watch": "atc",
-       "id": "smoke-aircraft-quiet-1",
-       "ch": "HPN Tower",
-       "fed": "Endeavor fifty one twenty one, the no smoking sign is on in the cabin",
-       "hits": [],
-       "row": null
-      },
-      {
-       "watch": "talkers",
-       "id": "smoke-aircraft-quiet-1",
-       "record": {
-        "role": "unknown",
-        "talker": {
-         "callsign": "",
-         "status": ""
-        },
-        "aircraft": {
-         "callsign": "EDV5121",
-         "status": "heard"
-        },
-        "exchange": {
-         "subject": "EDV5121",
-         "hex": ""
-        }
-       }
-      },
-      {
-       "watch": "airport_watch",
-       "id": "smoke-aircraft-quiet-1",
-       "row": null
-      }
-     ]
+     }
     }
    ]
   },
   {
    "rule": "engine-fire",
    "expect": "fires",
+   "words": "engine fire",
    "why": "an engine fire light",
    "steps": [
     {
@@ -654,96 +361,6 @@
       "dur": 4,
       "text": "Westchester tower, Brickyard forty five sixty seven has an engine fire light"
      },
-     "decisions": [
-      {
-       "watch": "atc",
-       "id": "engine-fire-fires-1",
-       "ch": "HPN Tower",
-       "fed": "Westchester Tower, Brickyard forty five sixty seven has an engine fire light",
-       "hits": [
-        [
-         "engine-fire",
-         "engine fire"
-        ]
-       ],
-       "score": 0.85,
-       "adsb": null,
-       "context": [],
-       "row": "A1"
-      },
-      {
-       "raise": {
-        "source": "atc",
-        "kind": "fire_acft",
-        "subject": "fire",
-        "group": "HPN Tower",
-        "title": "HPN ATC: engine fire reported by RPA4567",
-        "confidence": 0.85,
-        "rank": 2,
-        "push": true,
-        "limit": true,
-        "aircraft": [
-         [
-          "RPA4567",
-          null,
-          0.0
-         ]
-        ]
-       },
-       "row": "A1",
-       "how": "new"
-      },
-      {
-       "watch": "talkers",
-       "id": "engine-fire-fires-1",
-       "record": {
-        "role": "aircraft",
-        "talker": {
-         "callsign": "RPA4567",
-         "status": "heard"
-        },
-        "aircraft": {
-         "callsign": "RPA4567",
-         "status": "heard"
-        },
-        "addressed": {
-         "callsign": "TWR",
-         "status": "heard"
-        },
-        "exchange": {
-         "subject": "RPA4567",
-         "hex": ""
-        }
-       }
-      },
-      {
-       "raise": {
-        "source": "atc",
-        "kind": "abnormal",
-        "subject": "acft:RPA4567",
-        "group": "",
-        "title": "HPN ATC: abnormal · engine, smoke · RPA4567",
-        "confidence": 0.7,
-        "rank": 2,
-        "push": true,
-        "limit": true,
-        "aircraft": [
-         [
-          "RPA4567",
-          null,
-          0.0
-         ]
-        ]
-       },
-       "row": "A2",
-       "how": "new"
-      },
-      {
-       "watch": "airport_watch",
-       "id": "engine-fire-fires-1",
-       "row": "A2"
-      }
-     ],
      "alerts": [
       {
        "id": "A1",
@@ -756,7 +373,6 @@
        "title": "HPN ATC: engine fire reported by RPA4567",
        "detail": "fire or smoke on an aircraft · heard: engine fire · HPN Tower",
        "confidence": 0.85,
-       "level": "high",
        "channel": "HPN Tower",
        "count": 1,
        "status": "open",
@@ -809,7 +425,6 @@
        "title": "HPN ATC: abnormal · engine, smoke · RPA4567",
        "detail": "abnormal phrases · HPN Tower",
        "confidence": 0.7,
-       "level": "medium",
        "channel": "HPN Tower",
        "count": 1,
        "status": "open",
@@ -887,37 +502,28 @@
       {
        "to": "alerts",
        "title": "HPN ATC: engine fire reported by RPA4567",
-       "body": "“Westchester Tower, Brickyard forty five sixty seven has an engine fire light” · RPA4567 · heard, not on ADS-B · alert high 85% · not dispatched · accept or dismiss in the CAD",
+       "message": "“Westchester Tower, Brickyard forty five sixty seven has an engine fire light” · RPA4567 · heard, not on ADS-B · alert high 85% · not dispatched · accept or dismiss in the CAD",
        "priority": 4,
        "tags": [
         "airplane",
         "warning"
        ],
-       "click": "https://cad.example.test/cad",
-       "who": null,
-       "actions": []
+       "click": "https://cad.example.test/cad"
       },
       {
        "to": "alerts",
        "title": "HPN ATC: abnormal · engine, smoke · RPA4567",
-       "body": "“Westchester Tower, Brickyard forty five sixty seven has an engine fire light” · RPA4567 · heard, not on ADS-B · alert medium 70% · not dispatched · accept or dismiss in the CAD",
+       "message": "“Westchester Tower, Brickyard forty five sixty seven has an engine fire light” · RPA4567 · heard, not on ADS-B · alert medium 70% · not dispatched · accept or dismiss in the CAD",
        "priority": 4,
        "tags": [
         "airplane",
         "warning"
        ],
-       "click": "https://cad.example.test/cad",
-       "who": null,
-       "actions": []
+       "click": "https://cad.example.test/cad"
       }
      ],
      "county_feed_poll_now": [
       "airport pre-alert (ATC)"
-     ],
-     "log": [
-      "airport_alerts: airport pre-alert #A1: HPN ATC: engine fire reported by RPA4567 (0.85)",
-      "airport_alerts: airport pre-alert #A2: HPN ATC: abnormal · engine, smoke · RPA4567 (0.70)",
-      "airport_watch: airport watch: RPA4567: abnormal -> pre-alert #A2 (0.70)"
      ]
     }
    ]
@@ -925,6 +531,7 @@
   {
    "rule": "engine-fire",
    "expect": "quiet",
+   "via": "pattern",
    "why": "'fire up the APU': the generic fire rule's 'not'",
    "steps": [
     {
@@ -935,47 +542,14 @@
       "ch": "HPN Tower",
       "dur": 4,
       "text": "Brickyard forty five sixty seven, fire up the APU when ready"
-     },
-     "decisions": [
-      {
-       "watch": "atc",
-       "id": "engine-fire-quiet-1",
-       "ch": "HPN Tower",
-       "fed": "Brickyard forty five sixty seven, fire up the APU when ready",
-       "hits": [],
-       "row": null
-      },
-      {
-       "watch": "talkers",
-       "id": "engine-fire-quiet-1",
-       "record": {
-        "role": "aircraft",
-        "talker": {
-         "callsign": "RPA4567",
-         "status": "heard"
-        },
-        "aircraft": {
-         "callsign": "RPA4567",
-         "status": "heard"
-        },
-        "exchange": {
-         "subject": "RPA4567",
-         "hex": ""
-        }
-       }
-      },
-      {
-       "watch": "airport_watch",
-       "id": "engine-fire-quiet-1",
-       "row": null
-      }
-     ]
+     }
     }
    ]
   },
   {
    "rule": "fire",
    "expect": "fires",
+   "words": "flames",
    "why": "the generic word with an off-airport cue: fire_off near a landmark",
    "steps": [
     {
@@ -987,68 +561,6 @@
       "dur": 4,
       "text": "Westchester tower, Cessna two three four, I see flames by the highway"
      },
-     "decisions": [
-      {
-       "watch": "atc",
-       "id": "fire-fires-1",
-       "ch": "HPN Tower",
-       "fed": "Westchester Tower, Cessna 234, I see flames by the highway",
-       "hits": [
-        [
-         "fire",
-         "flames"
-        ]
-       ],
-       "score": 0.55,
-       "adsb": null,
-       "context": [],
-       "row": "A1"
-      },
-      {
-       "raise": {
-        "source": "atc",
-        "kind": "fire_off",
-        "subject": "fire",
-        "group": "HPN Tower",
-        "title": "HPN ATC: possible fire reported near The Highway",
-        "confidence": 0.55,
-        "rank": 2,
-        "push": true,
-        "limit": true,
-        "aircraft": []
-       },
-       "row": "A1",
-       "how": "new"
-      },
-      {
-       "watch": "talkers",
-       "id": "fire-fires-1",
-       "record": {
-        "role": "aircraft",
-        "talker": {
-         "callsign": "…234",
-         "status": "heard"
-        },
-        "aircraft": {
-         "callsign": "…234",
-         "status": "heard"
-        },
-        "addressed": {
-         "callsign": "TWR",
-         "status": "heard"
-        },
-        "exchange": {
-         "subject": "…234",
-         "hex": ""
-        }
-       }
-      },
-      {
-       "watch": "airport_watch",
-       "id": "fire-fires-1",
-       "row": null
-      }
-     ],
      "alerts": [
       {
        "id": "A1",
@@ -1061,7 +573,6 @@
        "title": "HPN ATC: possible fire reported near The Highway",
        "detail": "fire or smoke off the airport · heard: flames · HPN Tower",
        "confidence": 0.55,
-       "level": "low",
        "channel": "HPN Tower",
        "count": 1,
        "status": "open",
@@ -1117,19 +628,14 @@
       {
        "to": "alerts",
        "title": "HPN ATC: possible fire reported near The Highway",
-       "body": "“Westchester Tower, Cessna 234, I see flames by the highway” · location: the highway (not enough to place it on the map) · alert low 55% · not dispatched · accept or dismiss in the CAD",
+       "message": "“Westchester Tower, Cessna 234, I see flames by the highway” · location: the highway (not enough to place it on the map) · alert low 55% · not dispatched · accept or dismiss in the CAD",
        "priority": 4,
        "tags": [
         "airplane",
         "warning"
        ],
-       "click": "https://cad.example.test/cad",
-       "who": null,
-       "actions": []
+       "click": "https://cad.example.test/cad"
       }
-     ],
-     "log": [
-      "airport_alerts: airport pre-alert #A1: HPN ATC: possible fire reported near The Highway (0.55)"
      ]
     }
    ]
@@ -1137,6 +643,7 @@
   {
    "rule": "fire",
    "expect": "fires",
+   "words": "flames",
    "why": "the generic word alone: category fire, no place",
    "steps": [
     {
@@ -1148,68 +655,6 @@
       "dur": 4,
       "text": "Westchester tower, Cessna two three four, I see flames"
      },
-     "decisions": [
-      {
-       "watch": "atc",
-       "id": "fire-fires-2",
-       "ch": "HPN Tower",
-       "fed": "Westchester Tower, Cessna 234, I see flames",
-       "hits": [
-        [
-         "fire",
-         "flames"
-        ]
-       ],
-       "score": 0.55,
-       "adsb": null,
-       "context": [],
-       "row": "A1"
-      },
-      {
-       "raise": {
-        "source": "atc",
-        "kind": "fire",
-        "subject": "fire",
-        "group": "HPN Tower",
-        "title": "HPN ATC: possible fire reported",
-        "confidence": 0.55,
-        "rank": 2,
-        "push": true,
-        "limit": true,
-        "aircraft": []
-       },
-       "row": "A1",
-       "how": "new"
-      },
-      {
-       "watch": "talkers",
-       "id": "fire-fires-2",
-       "record": {
-        "role": "aircraft",
-        "talker": {
-         "callsign": "…234",
-         "status": "heard"
-        },
-        "aircraft": {
-         "callsign": "…234",
-         "status": "heard"
-        },
-        "addressed": {
-         "callsign": "TWR",
-         "status": "heard"
-        },
-        "exchange": {
-         "subject": "…234",
-         "hex": ""
-        }
-       }
-      },
-      {
-       "watch": "airport_watch",
-       "id": "fire-fires-2",
-       "row": null
-      }
-     ],
      "alerts": [
       {
        "id": "A1",
@@ -1222,7 +667,6 @@
        "title": "HPN ATC: possible fire reported",
        "detail": "fire or smoke · heard: flames · HPN Tower",
        "confidence": 0.55,
-       "level": "low",
        "channel": "HPN Tower",
        "count": 1,
        "status": "open",
@@ -1271,19 +715,14 @@
       {
        "to": "alerts",
        "title": "HPN ATC: possible fire reported",
-       "body": "“Westchester Tower, Cessna 234, I see flames” · alert low 55% · not dispatched · accept or dismiss in the CAD",
+       "message": "“Westchester Tower, Cessna 234, I see flames” · alert low 55% · not dispatched · accept or dismiss in the CAD",
        "priority": 4,
        "tags": [
         "airplane",
         "warning"
        ],
-       "click": "https://cad.example.test/cad",
-       "who": null,
-       "actions": []
+       "click": "https://cad.example.test/cad"
       }
-     ],
-     "log": [
-      "airport_alerts: airport pre-alert #A1: HPN ATC: possible fire reported (0.55)"
      ]
     }
    ]
@@ -1291,6 +730,7 @@
   {
    "rule": "fire",
    "expect": "quiet",
+   "via": "not",
    "why": "a fire hydrant: the 'not'",
    "steps": [
     {
@@ -1301,33 +741,14 @@
       "ch": "HPN Tower",
       "dur": 4,
       "text": "vehicle two, hold short, the fire hydrant crew is on taxiway bravo"
-     },
-     "decisions": [
-      {
-       "watch": "atc",
-       "id": "fire-quiet-1",
-       "ch": "HPN Tower",
-       "fed": "Vehicle two, hold short, the fire hydrant crew is on taxiway bravo",
-       "hits": [],
-       "row": null
-      },
-      {
-       "watch": "talkers",
-       "id": "fire-quiet-1",
-       "record": null
-      },
-      {
-       "watch": "airport_watch",
-       "id": "fire-quiet-1",
-       "row": null
-      }
-     ]
+     }
     }
    ]
   },
   {
    "rule": "smoke",
    "expect": "fires",
+   "words": "smoke",
    "why": "smoke at weight 0.5 (the threshold) with a compass place: fire_off at a point",
    "steps": [
     {
@@ -1339,74 +760,6 @@
       "dur": 4,
       "text": "tower, Delta forty five, there's smoke off to our right, about two miles south of the field"
      },
-     "decisions": [
-      {
-       "watch": "atc",
-       "id": "smoke-fires-1",
-       "ch": "HPN Tower",
-       "fed": "Tower, Delta forty five, there's smoke off to our right, about two miles south of the field",
-       "hits": [
-        [
-         "smoke",
-         "smoke"
-        ]
-       ],
-       "score": 0.5,
-       "adsb": null,
-       "context": [],
-       "row": "A1"
-      },
-      {
-       "raise": {
-        "source": "atc",
-        "kind": "fire_off",
-        "subject": "fire",
-        "group": "HPN Tower",
-        "title": "HPN ATC: possible smoke reported two miles south of the field",
-        "confidence": 0.5,
-        "rank": 2,
-        "push": true,
-        "limit": true,
-        "aircraft": [
-         [
-          "DAL45",
-          null,
-          0.0
-         ]
-        ]
-       },
-       "row": "A1",
-       "how": "new"
-      },
-      {
-       "watch": "talkers",
-       "id": "smoke-fires-1",
-       "record": {
-        "role": "aircraft",
-        "talker": {
-         "callsign": "DAL45",
-         "status": "heard"
-        },
-        "aircraft": {
-         "callsign": "DAL45",
-         "status": "heard"
-        },
-        "addressed": {
-         "callsign": "TWR",
-         "status": "heard"
-        },
-        "exchange": {
-         "subject": "DAL45",
-         "hex": ""
-        }
-       }
-      },
-      {
-       "watch": "airport_watch",
-       "id": "smoke-fires-1",
-       "row": null
-      }
-     ],
      "alerts": [
       {
        "id": "A1",
@@ -1419,7 +772,6 @@
        "title": "HPN ATC: possible smoke reported two miles south of the field",
        "detail": "fire or smoke off the airport · heard: smoke · HPN Tower",
        "confidence": 0.5,
-       "level": "low",
        "channel": "HPN Tower",
        "count": 1,
        "status": "open",
@@ -1484,19 +836,14 @@
       {
        "to": "alerts",
        "title": "HPN ATC: possible smoke reported two miles south of the field",
-       "body": "“Tower, Delta forty five, there's smoke off to our right, about two miles south of the field” · DAL45 · heard, not on ADS-B · approx. location: “two miles south of the field”: 2 NM from the airport's reference point (miles taken as nautical) · alert low 50% · not dispatched · accept or dismiss in the CAD",
+       "message": "“Tower, Delta forty five, there's smoke off to our right, about two miles south of the field” · DAL45 · heard, not on ADS-B · approx. location: “two miles south of the field”: 2 NM from the airport's reference point (miles taken as nautical) · alert low 50% · not dispatched · accept or dismiss in the CAD",
        "priority": 4,
        "tags": [
         "airplane",
         "warning"
        ],
-       "click": "https://cad.example.test/cad",
-       "who": null,
-       "actions": []
+       "click": "https://cad.example.test/cad"
       }
-     ],
-     "log": [
-      "airport_alerts: airport pre-alert #A1: HPN ATC: possible smoke reported two miles south of the field (0.50)"
      ]
     }
    ]
@@ -1504,6 +851,7 @@
   {
    "rule": "smoke",
    "expect": "quiet",
+   "via": "not",
    "why": "a smoke detector test: the 'not'",
    "steps": [
     {
@@ -1514,51 +862,14 @@
       "ch": "HPN Tower",
       "dur": 4,
       "text": "Delta forty five, caution, smoke detector test in progress at the terminal"
-     },
-     "decisions": [
-      {
-       "watch": "atc",
-       "id": "smoke-quiet-1",
-       "ch": "HPN Tower",
-       "fed": "Delta forty five, caution, smoke detector test in progress at the terminal",
-       "hits": [],
-       "row": null
-      },
-      {
-       "watch": "talkers",
-       "id": "smoke-quiet-1",
-       "record": {
-        "role": "atc",
-        "talker": {
-         "callsign": "TWR",
-         "status": "probable"
-        },
-        "aircraft": {
-         "callsign": "DAL45",
-         "status": "heard"
-        },
-        "addressed": {
-         "callsign": "DAL45",
-         "status": "heard"
-        },
-        "exchange": {
-         "subject": "DAL45",
-         "hex": ""
-        }
-       }
-      },
-      {
-       "watch": "airport_watch",
-       "id": "smoke-quiet-1",
-       "row": null
-      }
-     ]
+     }
     }
    ]
   },
   {
    "rule": "mayday",
    "expect": "fires",
+   "words": "mayday",
    "why": "MAYDAY alone (rank 3)",
    "steps": [
     {
@@ -1570,70 +881,6 @@
       "dur": 4,
       "text": "mayday mayday mayday, November one two three alfa bravo"
      },
-     "decisions": [
-      {
-       "watch": "atc",
-       "id": "mayday-fires-1",
-       "ch": "HPN Tower",
-       "fed": "Mayday mayday mayday, N123AB",
-       "hits": [
-        [
-         "mayday",
-         "mayday"
-        ]
-       ],
-       "score": 0.95,
-       "adsb": null,
-       "context": [],
-       "row": "A1"
-      },
-      {
-       "raise": {
-        "source": "atc",
-        "kind": "emergency",
-        "subject": "acft:N123AB",
-        "group": "HPN Tower",
-        "title": "HPN ATC: MAYDAY: N123AB",
-        "confidence": 0.95,
-        "rank": 3,
-        "push": true,
-        "limit": true,
-        "aircraft": [
-         [
-          "N123AB",
-          null,
-          0.0
-         ]
-        ]
-       },
-       "row": "A1",
-       "how": "new"
-      },
-      {
-       "watch": "talkers",
-       "id": "mayday-fires-1",
-       "record": {
-        "role": "aircraft",
-        "talker": {
-         "callsign": "N123AB",
-         "status": "heard"
-        },
-        "aircraft": {
-         "callsign": "N123AB",
-         "status": "heard"
-        },
-        "exchange": {
-         "subject": "N123AB",
-         "hex": ""
-        }
-       }
-      },
-      {
-       "watch": "airport_watch",
-       "id": "mayday-fires-1",
-       "row": null
-      }
-     ],
      "alerts": [
       {
        "id": "A1",
@@ -1646,7 +893,6 @@
        "title": "HPN ATC: MAYDAY: N123AB",
        "detail": "aircraft emergency · heard: mayday · HPN Tower",
        "confidence": 0.95,
-       "level": "high",
        "channel": "HPN Tower",
        "count": 1,
        "status": "open",
@@ -1702,19 +948,14 @@
       {
        "to": "alerts",
        "title": "HPN ATC: MAYDAY: N123AB",
-       "body": "“Mayday mayday mayday, N123AB” · N123AB · heard, not on ADS-B · alert high 95% · not dispatched · accept or dismiss in the CAD",
+       "message": "“Mayday mayday mayday, N123AB” · N123AB · heard, not on ADS-B · alert high 95% · not dispatched · accept or dismiss in the CAD",
        "priority": 4,
        "tags": [
         "airplane",
         "warning"
        ],
-       "click": "https://cad.example.test/cad",
-       "who": null,
-       "actions": []
+       "click": "https://cad.example.test/cad"
       }
-     ],
-     "log": [
-      "airport_alerts: airport pre-alert #A1: HPN ATC: MAYDAY: N123AB (0.95)"
      ]
     }
    ]
@@ -1722,6 +963,7 @@
   {
    "rule": "mayday",
    "expect": "fires",
+   "words": "mayday",
    "why": "an 'always' rule still counts inside a readout",
    "steps": [
     {
@@ -1733,70 +975,6 @@
       "dur": 4,
       "text": "Westchester information bravo is current, wind one six zero at eight, visibility one zero, altimeter two niner niner two, notams: mayday relay from November one two three alfa bravo, advise on initial contact you have information bravo"
      },
-     "decisions": [
-      {
-       "watch": "atc",
-       "id": "mayday-fires-2",
-       "ch": "HPN Tower",
-       "fed": "Westchester information bravo is current, wind 160 at eight, visibility 10, altimeter 2992, notams: mayday relay from N123AB, advise on initial contact you have information bravo",
-       "hits": [
-        [
-         "mayday",
-         "mayday"
-        ]
-       ],
-       "score": 0.95,
-       "adsb": null,
-       "context": [],
-       "row": "A1"
-      },
-      {
-       "raise": {
-        "source": "atc",
-        "kind": "emergency",
-        "subject": "acft:N123AB",
-        "group": "HPN Tower",
-        "title": "HPN ATC: MAYDAY: N123AB",
-        "confidence": 0.95,
-        "rank": 3,
-        "push": true,
-        "limit": true,
-        "aircraft": [
-         [
-          "N123AB",
-          null,
-          0.0
-         ]
-        ]
-       },
-       "row": "A1",
-       "how": "new"
-      },
-      {
-       "watch": "talkers",
-       "id": "mayday-fires-2",
-       "record": {
-        "role": "aircraft",
-        "talker": {
-         "callsign": "N123AB",
-         "status": "heard"
-        },
-        "aircraft": {
-         "callsign": "N123AB",
-         "status": "heard"
-        },
-        "exchange": {
-         "subject": "N123AB",
-         "hex": ""
-        }
-       }
-      },
-      {
-       "watch": "airport_watch",
-       "id": "mayday-fires-2",
-       "row": null
-      }
-     ],
      "alerts": [
       {
        "id": "A1",
@@ -1809,7 +987,6 @@
        "title": "HPN ATC: MAYDAY: N123AB",
        "detail": "aircraft emergency · heard: mayday · HPN Tower",
        "confidence": 0.95,
-       "level": "high",
        "channel": "HPN Tower",
        "count": 1,
        "status": "open",
@@ -1865,19 +1042,14 @@
       {
        "to": "alerts",
        "title": "HPN ATC: MAYDAY: N123AB",
-       "body": "“Westchester information bravo is current, wind 160 at eight, visibility 10, altimeter 2992, notams: mayday relay from N123AB, advise on initial contact you have” · N123AB · heard, not on ADS-B · alert high 95% · not dispatched · accept or dismiss in the CAD",
+       "message": "“Westchester information bravo is current, wind 160 at eight, visibility 10, altimeter 2992, notams: mayday relay from N123AB, advise on initial contact you have” · N123AB · heard, not on ADS-B · alert high 95% · not dispatched · accept or dismiss in the CAD",
        "priority": 4,
        "tags": [
         "airplane",
         "warning"
        ],
-       "click": "https://cad.example.test/cad",
-       "who": null,
-       "actions": []
+       "click": "https://cad.example.test/cad"
       }
-     ],
-     "log": [
-      "airport_alerts: airport pre-alert #A1: HPN ATC: MAYDAY: N123AB (0.95)"
      ]
     }
    ]
@@ -1885,6 +1057,7 @@
   {
    "rule": "mayday",
    "expect": "quiet",
+   "via": "pattern",
    "why": "'may I': not the word",
    "steps": [
     {
@@ -1895,51 +1068,14 @@
       "ch": "HPN Tower",
       "dur": 4,
       "text": "Westchester tower, November one two three alfa bravo, may I get a different runway"
-     },
-     "decisions": [
-      {
-       "watch": "atc",
-       "id": "mayday-quiet-1",
-       "ch": "HPN Tower",
-       "fed": "Westchester Tower, N123AB, may I get a different runway",
-       "hits": [],
-       "row": null
-      },
-      {
-       "watch": "talkers",
-       "id": "mayday-quiet-1",
-       "record": {
-        "role": "aircraft",
-        "talker": {
-         "callsign": "N123AB",
-         "status": "heard"
-        },
-        "aircraft": {
-         "callsign": "N123AB",
-         "status": "heard"
-        },
-        "addressed": {
-         "callsign": "TWR",
-         "status": "heard"
-        },
-        "exchange": {
-         "subject": "N123AB",
-         "hex": ""
-        }
-       }
-      },
-      {
-       "watch": "airport_watch",
-       "id": "mayday-quiet-1",
-       "row": null
-      }
-     ]
+     }
     }
    ]
   },
   {
    "rule": "pan-pan",
    "expect": "fires",
+   "words": "pan pan",
    "why": "PAN-PAN",
    "steps": [
     {
@@ -1951,70 +1087,6 @@
       "dur": 4,
       "text": "pan pan pan pan, Westchester, Endeavor fifty one twenty one, request priority handling"
      },
-     "decisions": [
-      {
-       "watch": "atc",
-       "id": "pan-pan-fires-1",
-       "ch": "HPN Tower",
-       "fed": "Pan pan pan pan, Westchester, Endeavor fifty one twenty one, request priority handling",
-       "hits": [
-        [
-         "pan-pan",
-         "pan pan"
-        ]
-       ],
-       "score": 0.9,
-       "adsb": null,
-       "context": [],
-       "row": "A1"
-      },
-      {
-       "raise": {
-        "source": "atc",
-        "kind": "emergency",
-        "subject": "acft:EDV5121",
-        "group": "HPN Tower",
-        "title": "HPN ATC: PAN-PAN: EDV5121",
-        "confidence": 0.9,
-        "rank": 3,
-        "push": true,
-        "limit": true,
-        "aircraft": [
-         [
-          "EDV5121",
-          null,
-          0.0
-         ]
-        ]
-       },
-       "row": "A1",
-       "how": "new"
-      },
-      {
-       "watch": "talkers",
-       "id": "pan-pan-fires-1",
-       "record": {
-        "role": "aircraft",
-        "talker": {
-         "callsign": "EDV5121",
-         "status": "heard"
-        },
-        "aircraft": {
-         "callsign": "EDV5121",
-         "status": "heard"
-        },
-        "exchange": {
-         "subject": "EDV5121",
-         "hex": ""
-        }
-       }
-      },
-      {
-       "watch": "airport_watch",
-       "id": "pan-pan-fires-1",
-       "row": null
-      }
-     ],
      "alerts": [
       {
        "id": "A1",
@@ -2027,7 +1099,6 @@
        "title": "HPN ATC: PAN-PAN: EDV5121",
        "detail": "aircraft emergency · heard: pan pan · HPN Tower",
        "confidence": 0.9,
-       "level": "high",
        "channel": "HPN Tower",
        "count": 1,
        "status": "open",
@@ -2083,19 +1154,14 @@
       {
        "to": "alerts",
        "title": "HPN ATC: PAN-PAN: EDV5121",
-       "body": "“Pan pan pan pan, Westchester, Endeavor fifty one twenty one, request priority handling” · EDV5121 · heard, not on ADS-B · alert high 90% · not dispatched · accept or dismiss in the CAD",
+       "message": "“Pan pan pan pan, Westchester, Endeavor fifty one twenty one, request priority handling” · EDV5121 · heard, not on ADS-B · alert high 90% · not dispatched · accept or dismiss in the CAD",
        "priority": 4,
        "tags": [
         "airplane",
         "warning"
        ],
-       "click": "https://cad.example.test/cad",
-       "who": null,
-       "actions": []
+       "click": "https://cad.example.test/cad"
       }
-     ],
-     "log": [
-      "airport_alerts: airport pre-alert #A1: HPN ATC: PAN-PAN: EDV5121 (0.90)"
      ]
     }
    ]
@@ -2103,6 +1169,7 @@
   {
    "rule": "pan-pan",
    "expect": "quiet",
+   "via": "pattern",
    "why": "'Pan Am': not the doubled word",
    "steps": [
     {
@@ -2113,51 +1180,14 @@
       "ch": "HPN Tower",
       "dur": 4,
       "text": "Endeavor fifty one twenty one, taxi to the Pan Am hangar via alfa"
-     },
-     "decisions": [
-      {
-       "watch": "atc",
-       "id": "pan-pan-quiet-1",
-       "ch": "HPN Tower",
-       "fed": "Endeavor fifty one twenty one, taxi to the Pan Am hangar via alfa",
-       "hits": [],
-       "row": null
-      },
-      {
-       "watch": "talkers",
-       "id": "pan-pan-quiet-1",
-       "record": {
-        "role": "atc",
-        "talker": {
-         "callsign": "TWR",
-         "status": "probable"
-        },
-        "aircraft": {
-         "callsign": "EDV5121",
-         "status": "heard"
-        },
-        "addressed": {
-         "callsign": "EDV5121",
-         "status": "heard"
-        },
-        "exchange": {
-         "subject": "EDV5121",
-         "hex": ""
-        }
-       }
-      },
-      {
-       "watch": "airport_watch",
-       "id": "pan-pan-quiet-1",
-       "row": null
-      }
-     ]
+     }
     }
    ]
   },
   {
    "rule": "declaring",
    "expect": "fires",
+   "words": "declaring an emergency",
    "why": "an emergency declared, a return requested",
    "steps": [
     {
@@ -2169,74 +1199,6 @@
       "dur": 4,
       "text": "Endeavor fifty one twenty one is declaring an emergency, request return to the field"
      },
-     "decisions": [
-      {
-       "watch": "atc",
-       "id": "declaring-fires-1",
-       "ch": "HPN Tower",
-       "fed": "Endeavor fifty one twenty one is declaring an emergency, request return to the field",
-       "hits": [
-        [
-         "declaring",
-         "declaring an emergency"
-        ],
-        [
-         "return",
-         "request return"
-        ]
-       ],
-       "score": 0.975,
-       "adsb": null,
-       "context": [],
-       "row": "A1"
-      },
-      {
-       "raise": {
-        "source": "atc",
-        "kind": "emergency",
-        "subject": "acft:EDV5121",
-        "group": "HPN Tower",
-        "title": "HPN ATC: emergency declared: EDV5121",
-        "confidence": 0.97,
-        "rank": 3,
-        "push": true,
-        "limit": true,
-        "aircraft": [
-         [
-          "EDV5121",
-          null,
-          0.0
-         ]
-        ]
-       },
-       "row": "A1",
-       "how": "new"
-      },
-      {
-       "watch": "talkers",
-       "id": "declaring-fires-1",
-       "record": {
-        "role": "aircraft",
-        "talker": {
-         "callsign": "EDV5121",
-         "status": "heard"
-        },
-        "aircraft": {
-         "callsign": "EDV5121",
-         "status": "heard"
-        },
-        "exchange": {
-         "subject": "EDV5121",
-         "hex": ""
-        }
-       }
-      },
-      {
-       "watch": "airport_watch",
-       "id": "declaring-fires-1",
-       "row": null
-      }
-     ],
      "alerts": [
       {
        "id": "A1",
@@ -2249,7 +1211,6 @@
        "title": "HPN ATC: emergency declared: EDV5121",
        "detail": "aircraft emergency · heard: declaring an emergency, request return · HPN Tower",
        "confidence": 0.97,
-       "level": "high",
        "channel": "HPN Tower",
        "count": 1,
        "status": "open",
@@ -2306,19 +1267,14 @@
       {
        "to": "alerts",
        "title": "HPN ATC: emergency declared: EDV5121",
-       "body": "“Endeavor fifty one twenty one is declaring an emergency, request return to the field” · EDV5121 · heard, not on ADS-B · alert high 97% · not dispatched · accept or dismiss in the CAD",
+       "message": "“Endeavor fifty one twenty one is declaring an emergency, request return to the field” · EDV5121 · heard, not on ADS-B · alert high 97% · not dispatched · accept or dismiss in the CAD",
        "priority": 4,
        "tags": [
         "airplane",
         "warning"
        ],
-       "click": "https://cad.example.test/cad",
-       "who": null,
-       "actions": []
+       "click": "https://cad.example.test/cad"
       }
-     ],
-     "log": [
-      "airport_alerts: airport pre-alert #A1: HPN ATC: emergency declared: EDV5121 (0.97)"
      ]
     }
    ]
@@ -2326,6 +1282,7 @@
   {
    "rule": "declaring",
    "expect": "quiet",
+   "via": "pattern",
    "why": "'no emergency': the weak emergency word alone, under the threshold",
    "steps": [
     {
@@ -2336,55 +1293,14 @@
       "ch": "HPN Tower",
       "dur": 4,
       "text": "Endeavor fifty one twenty one, negative, no emergency, just a precaution"
-     },
-     "decisions": [
-      {
-       "watch": "atc",
-       "id": "declaring-quiet-1",
-       "ch": "HPN Tower",
-       "fed": "Endeavor fifty one twenty one, negative, no emergency, just a precaution",
-       "hits": [
-        [
-         "emergency",
-         "emergency"
-        ]
-       ],
-       "score": 0.4,
-       "adsb": null,
-       "context": [],
-       "row": null
-      },
-      {
-       "watch": "talkers",
-       "id": "declaring-quiet-1",
-       "record": {
-        "role": "unknown",
-        "talker": {
-         "callsign": "",
-         "status": ""
-        },
-        "aircraft": {
-         "callsign": "EDV5121",
-         "status": "heard"
-        },
-        "exchange": {
-         "subject": "EDV5121",
-         "hex": ""
-        }
-       }
-      },
-      {
-       "watch": "airport_watch",
-       "id": "declaring-quiet-1",
-       "row": null
-      }
-     ]
+     }
     }
    ]
   },
   {
    "rule": "emergency-aircraft",
    "expect": "fires",
+   "words": "emergency aircraft",
    "why": "an emergency aircraft on final",
    "steps": [
     {
@@ -2396,50 +1312,6 @@
       "dur": 4,
       "text": "all aircraft, emergency aircraft on a five mile final runway three four"
      },
-     "decisions": [
-      {
-       "watch": "atc",
-       "id": "emergency-aircraft-fires-1",
-       "ch": "HPN Tower",
-       "fed": "All aircraft, emergency aircraft on a five mile final runway 34",
-       "hits": [
-        [
-         "emergency-aircraft",
-         "emergency aircraft"
-        ]
-       ],
-       "score": 0.7,
-       "adsb": null,
-       "context": [],
-       "row": "A1"
-      },
-      {
-       "raise": {
-        "source": "atc",
-        "kind": "emergency",
-        "subject": "emergency",
-        "group": "HPN Tower",
-        "title": "HPN ATC: emergency aircraft, runway 34",
-        "confidence": 0.7,
-        "rank": 1,
-        "push": true,
-        "limit": true,
-        "aircraft": []
-       },
-       "row": "A1",
-       "how": "new"
-      },
-      {
-       "watch": "talkers",
-       "id": "emergency-aircraft-fires-1",
-       "record": null
-      },
-      {
-       "watch": "airport_watch",
-       "id": "emergency-aircraft-fires-1",
-       "row": null
-      }
-     ],
      "alerts": [
       {
        "id": "A1",
@@ -2452,7 +1324,6 @@
        "title": "HPN ATC: emergency aircraft, runway 34",
        "detail": "aircraft emergency · heard: emergency aircraft · HPN Tower",
        "confidence": 0.7,
-       "level": "medium",
        "channel": "HPN Tower",
        "count": 1,
        "status": "open",
@@ -2508,19 +1379,14 @@
       {
        "to": "alerts",
        "title": "HPN ATC: emergency aircraft, runway 34",
-       "body": "“All aircraft, emergency aircraft on a five mile final runway 34” · location: runway 34 (not enough to place it on the map) · alert medium 70% · not dispatched · accept or dismiss in the CAD",
+       "message": "“All aircraft, emergency aircraft on a five mile final runway 34” · location: runway 34 (not enough to place it on the map) · alert medium 70% · not dispatched · accept or dismiss in the CAD",
        "priority": 4,
        "tags": [
         "airplane",
         "warning"
        ],
-       "click": "https://cad.example.test/cad",
-       "who": null,
-       "actions": []
+       "click": "https://cad.example.test/cad"
       }
-     ],
-     "log": [
-      "airport_alerts: airport pre-alert #A1: HPN ATC: emergency aircraft, runway 34 (0.70)"
      ]
     }
    ]
@@ -2528,6 +1394,7 @@
   {
    "rule": "emergency-aircraft",
    "expect": "quiet",
+   "via": "pattern",
    "why": "an emergency locator: the emergency rule's 'not'",
    "steps": [
     {
@@ -2538,33 +1405,14 @@
       "ch": "HPN Tower",
       "dur": 4,
       "text": "Westchester tower, emergency locator transmitter heard on guard"
-     },
-     "decisions": [
-      {
-       "watch": "atc",
-       "id": "emergency-aircraft-quiet-1",
-       "ch": "HPN Tower",
-       "fed": "Westchester Tower, emergency locator transmitter heard on guard",
-       "hits": [],
-       "row": null
-      },
-      {
-       "watch": "talkers",
-       "id": "emergency-aircraft-quiet-1",
-       "record": null
-      },
-      {
-       "watch": "airport_watch",
-       "id": "emergency-aircraft-quiet-1",
-       "row": null
-      }
-     ]
+     }
     }
    ]
   },
   {
    "rule": "return",
    "expect": "fires",
+   "words": "need to return",
    "why": "a return to the field at weight 0.5: the threshold",
    "steps": [
     {
@@ -2576,74 +1424,6 @@
       "dur": 4,
       "text": "Westchester tower, November one two three alfa bravo, we need to return to the field"
      },
-     "decisions": [
-      {
-       "watch": "atc",
-       "id": "return-fires-1",
-       "ch": "HPN Tower",
-       "fed": "Westchester Tower, N123AB, we need to return to the field",
-       "hits": [
-        [
-         "return",
-         "need to return"
-        ]
-       ],
-       "score": 0.5,
-       "adsb": null,
-       "context": [],
-       "row": "A1"
-      },
-      {
-       "raise": {
-        "source": "atc",
-        "kind": "emergency",
-        "subject": "acft:N123AB",
-        "group": "HPN Tower",
-        "title": "HPN ATC: returning to the field: N123AB",
-        "confidence": 0.5,
-        "rank": 1,
-        "push": true,
-        "limit": true,
-        "aircraft": [
-         [
-          "N123AB",
-          null,
-          0.0
-         ]
-        ]
-       },
-       "row": "A1",
-       "how": "new"
-      },
-      {
-       "watch": "talkers",
-       "id": "return-fires-1",
-       "record": {
-        "role": "aircraft",
-        "talker": {
-         "callsign": "N123AB",
-         "status": "heard"
-        },
-        "aircraft": {
-         "callsign": "N123AB",
-         "status": "heard"
-        },
-        "addressed": {
-         "callsign": "TWR",
-         "status": "heard"
-        },
-        "exchange": {
-         "subject": "N123AB",
-         "hex": ""
-        }
-       }
-      },
-      {
-       "watch": "airport_watch",
-       "id": "return-fires-1",
-       "row": null
-      }
-     ],
      "alerts": [
       {
        "id": "A1",
@@ -2656,7 +1436,6 @@
        "title": "HPN ATC: returning to the field: N123AB",
        "detail": "aircraft emergency · heard: need to return · HPN Tower",
        "confidence": 0.5,
-       "level": "low",
        "channel": "HPN Tower",
        "count": 1,
        "status": "open",
@@ -2712,19 +1491,14 @@
       {
        "to": "alerts",
        "title": "HPN ATC: returning to the field: N123AB",
-       "body": "“Westchester Tower, N123AB, we need to return to the field” · N123AB · heard, not on ADS-B · alert low 50% · not dispatched · accept or dismiss in the CAD",
+       "message": "“Westchester Tower, N123AB, we need to return to the field” · N123AB · heard, not on ADS-B · alert low 50% · not dispatched · accept or dismiss in the CAD",
        "priority": 4,
        "tags": [
         "airplane",
         "warning"
        ],
-       "click": "https://cad.example.test/cad",
-       "who": null,
-       "actions": []
+       "click": "https://cad.example.test/cad"
       }
-     ],
-     "log": [
-      "airport_alerts: airport pre-alert #A1: HPN ATC: returning to the field: N123AB (0.50)"
      ]
     }
    ]
@@ -2732,6 +1506,7 @@
   {
    "rule": "return",
    "expect": "quiet",
+   "via": "pattern",
    "why": "back to the ramp: not the words",
    "steps": [
     {
@@ -2742,47 +1517,14 @@
       "ch": "HPN Tower",
       "dur": 4,
       "text": "November one two three alfa bravo, return to the ramp via taxiway alfa"
-     },
-     "decisions": [
-      {
-       "watch": "atc",
-       "id": "return-quiet-1",
-       "ch": "HPN Tower",
-       "fed": "N123AB, return to the ramp via taxiway alfa",
-       "hits": [],
-       "row": null
-      },
-      {
-       "watch": "talkers",
-       "id": "return-quiet-1",
-       "record": {
-        "role": "unknown",
-        "talker": {
-         "callsign": "",
-         "status": ""
-        },
-        "aircraft": {
-         "callsign": "N123AB",
-         "status": "heard"
-        },
-        "exchange": {
-         "subject": "N123AB",
-         "hex": ""
-        }
-       }
-      },
-      {
-       "watch": "airport_watch",
-       "id": "return-quiet-1",
-       "row": null
-      }
-     ]
+     }
     }
    ]
   },
   {
    "rule": "souls",
    "expect": "fires",
+   "words": "souls on board",
    "why": "souls on board and fuel remaining asked",
    "steps": [
     {
@@ -2794,78 +1536,6 @@
       "dur": 4,
       "text": "Endeavor fifty one twenty one, say souls on board and fuel remaining"
      },
-     "decisions": [
-      {
-       "watch": "atc",
-       "id": "souls-fires-1",
-       "ch": "HPN Tower",
-       "fed": "Endeavor fifty one twenty one, say souls on board and fuel remaining",
-       "hits": [
-        [
-         "souls",
-         "souls on board"
-        ],
-        [
-         "fuel-remaining",
-         "fuel remaining"
-        ]
-       ],
-       "score": 0.8875,
-       "adsb": null,
-       "context": [],
-       "row": "A1"
-      },
-      {
-       "raise": {
-        "source": "atc",
-        "kind": "emergency",
-        "subject": "acft:EDV5121",
-        "group": "HPN Tower",
-        "title": "HPN ATC: souls on board: EDV5121",
-        "confidence": 0.89,
-        "rank": 1,
-        "push": true,
-        "limit": true,
-        "aircraft": [
-         [
-          "EDV5121",
-          null,
-          0.0
-         ]
-        ]
-       },
-       "row": "A1",
-       "how": "new"
-      },
-      {
-       "watch": "talkers",
-       "id": "souls-fires-1",
-       "record": {
-        "role": "atc",
-        "talker": {
-         "callsign": "TWR",
-         "status": "probable"
-        },
-        "aircraft": {
-         "callsign": "EDV5121",
-         "status": "heard"
-        },
-        "addressed": {
-         "callsign": "EDV5121",
-         "status": "heard"
-        },
-        "exchange": {
-         "subject": "EDV5121",
-         "hex": ""
-        }
-       }
-      },
-      {
-       "watch": "airport_watch",
-       "id": "souls-fires-1",
-       "row": null
-      }
-     ],
      "alerts": [
       {
        "id": "A1",
@@ -2878,7 +1548,6 @@
        "title": "HPN ATC: souls on board: EDV5121",
        "detail": "aircraft emergency · heard: souls on board, fuel remaining · HPN Tower",
        "confidence": 0.89,
-       "level": "high",
        "channel": "HPN Tower",
        "count": 1,
        "status": "open",
@@ -2935,19 +1604,14 @@
       {
        "to": "alerts",
        "title": "HPN ATC: souls on board: EDV5121",
-       "body": "“Endeavor fifty one twenty one, say souls on board and fuel remaining” · EDV5121 · heard, not on ADS-B · alert high 89% · not dispatched · accept or dismiss in the CAD",
+       "message": "“Endeavor fifty one twenty one, say souls on board and fuel remaining” · EDV5121 · heard, not on ADS-B · alert high 89% · not dispatched · accept or dismiss in the CAD",
        "priority": 4,
        "tags": [
         "airplane",
         "warning"
        ],
-       "click": "https://cad.example.test/cad",
-       "who": null,
-       "actions": []
+       "click": "https://cad.example.test/cad"
       }
-     ],
-     "log": [
-      "airport_alerts: airport pre-alert #A1: HPN ATC: souls on board: EDV5121 (0.89)"
      ]
     }
    ]
@@ -2955,6 +1619,7 @@
   {
    "rule": "souls",
    "expect": "quiet",
+   "via": "pattern",
    "why": "how many on board: not the words",
    "steps": [
     {
@@ -2965,47 +1630,14 @@
       "ch": "HPN Tower",
       "dur": 4,
       "text": "Endeavor fifty one twenty one, how many on board for the catering truck"
-     },
-     "decisions": [
-      {
-       "watch": "atc",
-       "id": "souls-quiet-1",
-       "ch": "HPN Tower",
-       "fed": "Endeavor fifty one twenty one, how many on board for the catering truck",
-       "hits": [],
-       "row": null
-      },
-      {
-       "watch": "talkers",
-       "id": "souls-quiet-1",
-       "record": {
-        "role": "unknown",
-        "talker": {
-         "callsign": "",
-         "status": ""
-        },
-        "aircraft": {
-         "callsign": "EDV5121",
-         "status": "heard"
-        },
-        "exchange": {
-         "subject": "EDV5121",
-         "hex": ""
-        }
-       }
-      },
-      {
-       "watch": "airport_watch",
-       "id": "souls-quiet-1",
-       "row": null
-      }
-     ]
+     }
     }
    ]
   },
   {
    "rule": "fuel-remaining",
    "expect": "fires",
+   "words": "fuel remaining",
    "why": "fuel remaining asked, 0.55 alone",
    "steps": [
     {
@@ -3017,74 +1649,6 @@
       "dur": 4,
       "text": "Endeavor fifty one twenty one, say fuel remaining"
      },
-     "decisions": [
-      {
-       "watch": "atc",
-       "id": "fuel-remaining-fires-1",
-       "ch": "HPN Tower",
-       "fed": "Endeavor fifty one twenty one, say fuel remaining",
-       "hits": [
-        [
-         "fuel-remaining",
-         "fuel remaining"
-        ]
-       ],
-       "score": 0.55,
-       "adsb": null,
-       "context": [],
-       "row": "A1"
-      },
-      {
-       "raise": {
-        "source": "atc",
-        "kind": "emergency",
-        "subject": "acft:EDV5121",
-        "group": "HPN Tower",
-        "title": "HPN ATC: fuel remaining asked: EDV5121",
-        "confidence": 0.55,
-        "rank": 1,
-        "push": true,
-        "limit": true,
-        "aircraft": [
-         [
-          "EDV5121",
-          null,
-          0.0
-         ]
-        ]
-       },
-       "row": "A1",
-       "how": "new"
-      },
-      {
-       "watch": "talkers",
-       "id": "fuel-remaining-fires-1",
-       "record": {
-        "role": "atc",
-        "talker": {
-         "callsign": "TWR",
-         "status": "probable"
-        },
-        "aircraft": {
-         "callsign": "EDV5121",
-         "status": "heard"
-        },
-        "addressed": {
-         "callsign": "EDV5121",
-         "status": "heard"
-        },
-        "exchange": {
-         "subject": "EDV5121",
-         "hex": ""
-        }
-       }
-      },
-      {
-       "watch": "airport_watch",
-       "id": "fuel-remaining-fires-1",
-       "row": null
-      }
-     ],
      "alerts": [
       {
        "id": "A1",
@@ -3097,7 +1661,6 @@
        "title": "HPN ATC: fuel remaining asked: EDV5121",
        "detail": "aircraft emergency · heard: fuel remaining · HPN Tower",
        "confidence": 0.55,
-       "level": "low",
        "channel": "HPN Tower",
        "count": 1,
        "status": "open",
@@ -3153,19 +1716,14 @@
       {
        "to": "alerts",
        "title": "HPN ATC: fuel remaining asked: EDV5121",
-       "body": "“Endeavor fifty one twenty one, say fuel remaining” · EDV5121 · heard, not on ADS-B · alert low 55% · not dispatched · accept or dismiss in the CAD",
+       "message": "“Endeavor fifty one twenty one, say fuel remaining” · EDV5121 · heard, not on ADS-B · alert low 55% · not dispatched · accept or dismiss in the CAD",
        "priority": 4,
        "tags": [
         "airplane",
         "warning"
        ],
-       "click": "https://cad.example.test/cad",
-       "who": null,
-       "actions": []
+       "click": "https://cad.example.test/cad"
       }
-     ],
-     "log": [
-      "airport_alerts: airport pre-alert #A1: HPN ATC: fuel remaining asked: EDV5121 (0.55)"
      ]
     }
    ]
@@ -3173,6 +1731,7 @@
   {
    "rule": "fuel-remaining",
    "expect": "quiet",
+   "via": "pattern",
    "why": "the fuel truck: not the words",
    "steps": [
     {
@@ -3183,47 +1742,14 @@
       "ch": "HPN Tower",
       "dur": 4,
       "text": "Endeavor fifty one twenty one, the fuel truck is on its way to the ramp"
-     },
-     "decisions": [
-      {
-       "watch": "atc",
-       "id": "fuel-remaining-quiet-1",
-       "ch": "HPN Tower",
-       "fed": "Endeavor fifty one twenty one, the fuel truck is on its way to the ramp",
-       "hits": [],
-       "row": null
-      },
-      {
-       "watch": "talkers",
-       "id": "fuel-remaining-quiet-1",
-       "record": {
-        "role": "unknown",
-        "talker": {
-         "callsign": "",
-         "status": ""
-        },
-        "aircraft": {
-         "callsign": "EDV5121",
-         "status": "heard"
-        },
-        "exchange": {
-         "subject": "EDV5121",
-         "hex": ""
-        }
-       }
-      },
-      {
-       "watch": "airport_watch",
-       "id": "fuel-remaining-quiet-1",
-       "row": null
-      }
-     ]
+     }
     }
    ]
   },
   {
    "rule": "emergency",
    "expect": "fires",
+   "words": "urgent",
    "why": "the weak word (0.4) with a return (0.5): over the threshold together",
    "steps": [
     {
@@ -3235,78 +1761,6 @@
       "dur": 4,
       "text": "Westchester tower, November one two three alfa bravo, urgent, request to return to the field"
      },
-     "decisions": [
-      {
-       "watch": "atc",
-       "id": "emergency-fires-1",
-       "ch": "HPN Tower",
-       "fed": "Westchester Tower, N123AB, urgent, request to return to the field",
-       "hits": [
-        [
-         "return",
-         "request to return"
-        ],
-        [
-         "emergency",
-         "urgent"
-        ]
-       ],
-       "score": 0.7,
-       "adsb": null,
-       "context": [],
-       "row": "A1"
-      },
-      {
-       "raise": {
-        "source": "atc",
-        "kind": "emergency",
-        "subject": "acft:N123AB",
-        "group": "HPN Tower",
-        "title": "HPN ATC: returning to the field: N123AB",
-        "confidence": 0.7,
-        "rank": 1,
-        "push": true,
-        "limit": true,
-        "aircraft": [
-         [
-          "N123AB",
-          null,
-          0.0
-         ]
-        ]
-       },
-       "row": "A1",
-       "how": "new"
-      },
-      {
-       "watch": "talkers",
-       "id": "emergency-fires-1",
-       "record": {
-        "role": "aircraft",
-        "talker": {
-         "callsign": "N123AB",
-         "status": "heard"
-        },
-        "aircraft": {
-         "callsign": "N123AB",
-         "status": "heard"
-        },
-        "addressed": {
-         "callsign": "TWR",
-         "status": "heard"
-        },
-        "exchange": {
-         "subject": "N123AB",
-         "hex": ""
-        }
-       }
-      },
-      {
-       "watch": "airport_watch",
-       "id": "emergency-fires-1",
-       "row": null
-      }
-     ],
      "alerts": [
       {
        "id": "A1",
@@ -3319,7 +1773,6 @@
        "title": "HPN ATC: returning to the field: N123AB",
        "detail": "aircraft emergency · heard: request to return, urgent · HPN Tower",
        "confidence": 0.7,
-       "level": "medium",
        "channel": "HPN Tower",
        "count": 1,
        "status": "open",
@@ -3376,19 +1829,14 @@
       {
        "to": "alerts",
        "title": "HPN ATC: returning to the field: N123AB",
-       "body": "“Westchester Tower, N123AB, urgent, request to return to the field” · N123AB · heard, not on ADS-B · alert medium 70% · not dispatched · accept or dismiss in the CAD",
+       "message": "“Westchester Tower, N123AB, urgent, request to return to the field” · N123AB · heard, not on ADS-B · alert medium 70% · not dispatched · accept or dismiss in the CAD",
        "priority": 4,
        "tags": [
         "airplane",
         "warning"
        ],
-       "click": "https://cad.example.test/cad",
-       "who": null,
-       "actions": []
+       "click": "https://cad.example.test/cad"
       }
-     ],
-     "log": [
-      "airport_alerts: airport pre-alert #A1: HPN ATC: returning to the field: N123AB (0.70)"
      ]
     }
    ]
@@ -3396,6 +1844,7 @@
   {
    "rule": "emergency",
    "expect": "quiet",
+   "via": "threshold",
    "why": "the weak word alone: under the threshold",
    "steps": [
     {
@@ -3406,59 +1855,14 @@
       "ch": "HPN Tower",
       "dur": 4,
       "text": "Westchester tower, November one two three alfa bravo, we have an urgent request for the FBO"
-     },
-     "decisions": [
-      {
-       "watch": "atc",
-       "id": "emergency-quiet-1",
-       "ch": "HPN Tower",
-       "fed": "Westchester Tower, N123AB, we have an urgent request for the FBO",
-       "hits": [
-        [
-         "emergency",
-         "urgent"
-        ]
-       ],
-       "score": 0.4,
-       "adsb": null,
-       "context": [],
-       "row": null
-      },
-      {
-       "watch": "talkers",
-       "id": "emergency-quiet-1",
-       "record": {
-        "role": "aircraft",
-        "talker": {
-         "callsign": "N123AB",
-         "status": "heard"
-        },
-        "aircraft": {
-         "callsign": "N123AB",
-         "status": "heard"
-        },
-        "addressed": {
-         "callsign": "TWR",
-         "status": "heard"
-        },
-        "exchange": {
-         "subject": "N123AB",
-         "hex": ""
-        }
-       }
-      },
-      {
-       "watch": "airport_watch",
-       "id": "emergency-quiet-1",
-       "row": null
-      }
-     ]
+     }
     }
    ]
   },
   {
    "rule": "emergency",
    "expect": "quiet",
+   "via": "not",
    "why": "the emergency frequency: the 'not'",
    "steps": [
     {
@@ -3469,33 +1873,14 @@
       "ch": "HPN Tower",
       "dur": 4,
       "text": "Westchester tower, emergency frequency check on guard"
-     },
-     "decisions": [
-      {
-       "watch": "atc",
-       "id": "emergency-quiet-2",
-       "ch": "HPN Tower",
-       "fed": "Westchester Tower, emergency frequency check on guard",
-       "hits": [],
-       "row": null
-      },
-      {
-       "watch": "talkers",
-       "id": "emergency-quiet-2",
-       "record": null
-      },
-      {
-       "watch": "airport_watch",
-       "id": "emergency-quiet-2",
-       "row": null
-      }
-     ]
+     }
     }
    ]
   },
   {
    "rule": "hydraulics",
    "expect": "fires",
+   "words": "hydraulic failure",
    "why": "a hydraulic failure",
    "steps": [
     {
@@ -3507,74 +1892,6 @@
       "dur": 4,
       "text": "Westchester tower, Brickyard forty five sixty seven, we have a hydraulic failure"
      },
-     "decisions": [
-      {
-       "watch": "atc",
-       "id": "hydraulics-fires-1",
-       "ch": "HPN Tower",
-       "fed": "Westchester Tower, Brickyard forty five sixty seven, we have a hydraulic failure",
-       "hits": [
-        [
-         "hydraulics",
-         "hydraulic failure"
-        ]
-       ],
-       "score": 0.6,
-       "adsb": null,
-       "context": [],
-       "row": "A1"
-      },
-      {
-       "raise": {
-        "source": "atc",
-        "kind": "emergency",
-        "subject": "acft:RPA4567",
-        "group": "HPN Tower",
-        "title": "HPN ATC: hydraulic problem: RPA4567",
-        "confidence": 0.6,
-        "rank": 1,
-        "push": true,
-        "limit": true,
-        "aircraft": [
-         [
-          "RPA4567",
-          null,
-          0.0
-         ]
-        ]
-       },
-       "row": "A1",
-       "how": "new"
-      },
-      {
-       "watch": "talkers",
-       "id": "hydraulics-fires-1",
-       "record": {
-        "role": "aircraft",
-        "talker": {
-         "callsign": "RPA4567",
-         "status": "heard"
-        },
-        "aircraft": {
-         "callsign": "RPA4567",
-         "status": "heard"
-        },
-        "addressed": {
-         "callsign": "TWR",
-         "status": "heard"
-        },
-        "exchange": {
-         "subject": "RPA4567",
-         "hex": ""
-        }
-       }
-      },
-      {
-       "watch": "airport_watch",
-       "id": "hydraulics-fires-1",
-       "row": null
-      }
-     ],
      "alerts": [
       {
        "id": "A1",
@@ -3587,7 +1904,6 @@
        "title": "HPN ATC: hydraulic problem: RPA4567",
        "detail": "aircraft emergency · heard: hydraulic failure · HPN Tower",
        "confidence": 0.6,
-       "level": "medium",
        "channel": "HPN Tower",
        "count": 1,
        "status": "open",
@@ -3643,19 +1959,14 @@
       {
        "to": "alerts",
        "title": "HPN ATC: hydraulic problem: RPA4567",
-       "body": "“Westchester Tower, Brickyard forty five sixty seven, we have a hydraulic failure” · RPA4567 · heard, not on ADS-B · alert medium 60% · not dispatched · accept or dismiss in the CAD",
+       "message": "“Westchester Tower, Brickyard forty five sixty seven, we have a hydraulic failure” · RPA4567 · heard, not on ADS-B · alert medium 60% · not dispatched · accept or dismiss in the CAD",
        "priority": 4,
        "tags": [
         "airplane",
         "warning"
        ],
-       "click": "https://cad.example.test/cad",
-       "who": null,
-       "actions": []
+       "click": "https://cad.example.test/cad"
       }
-     ],
-     "log": [
-      "airport_alerts: airport pre-alert #A1: HPN ATC: hydraulic problem: RPA4567 (0.60)"
      ]
     }
    ]
@@ -3663,6 +1974,7 @@
   {
    "rule": "hydraulics",
    "expect": "quiet",
+   "via": "pattern",
    "why": "hydraulic checks: not the words",
    "steps": [
     {
@@ -3673,47 +1985,14 @@
       "ch": "HPN Tower",
       "dur": 4,
       "text": "Brickyard forty five sixty seven, hydraulic system checks complete"
-     },
-     "decisions": [
-      {
-       "watch": "atc",
-       "id": "hydraulics-quiet-1",
-       "ch": "HPN Tower",
-       "fed": "Brickyard forty five sixty seven, hydraulic system checks complete",
-       "hits": [],
-       "row": null
-      },
-      {
-       "watch": "talkers",
-       "id": "hydraulics-quiet-1",
-       "record": {
-        "role": "unknown",
-        "talker": {
-         "callsign": "",
-         "status": ""
-        },
-        "aircraft": {
-         "callsign": "RPA4567",
-         "status": "heard"
-        },
-        "exchange": {
-         "subject": "RPA4567",
-         "hex": ""
-        }
-       }
-      },
-      {
-       "watch": "airport_watch",
-       "id": "hydraulics-quiet-1",
-       "row": null
-      }
-     ]
+     }
     }
    ]
   },
   {
    "rule": "ditching",
    "expect": "fires",
+   "words": "ditching",
    "why": "ditching",
    "steps": [
     {
@@ -3725,70 +2004,6 @@
       "dur": 4,
       "text": "November one two three alfa bravo, we're ditching in the reservoir"
      },
-     "decisions": [
-      {
-       "watch": "atc",
-       "id": "ditching-fires-1",
-       "ch": "HPN Tower",
-       "fed": "N123AB, we're ditching in the reservoir",
-       "hits": [
-        [
-         "ditching",
-         "ditching"
-        ]
-       ],
-       "score": 0.85,
-       "adsb": null,
-       "context": [],
-       "row": "A1"
-      },
-      {
-       "raise": {
-        "source": "atc",
-        "kind": "emergency",
-        "subject": "acft:N123AB",
-        "group": "HPN Tower",
-        "title": "HPN ATC: ditching: N123AB",
-        "confidence": 0.85,
-        "rank": 1,
-        "push": true,
-        "limit": true,
-        "aircraft": [
-         [
-          "N123AB",
-          null,
-          0.0
-         ]
-        ]
-       },
-       "row": "A1",
-       "how": "new"
-      },
-      {
-       "watch": "talkers",
-       "id": "ditching-fires-1",
-       "record": {
-        "role": "aircraft",
-        "talker": {
-         "callsign": "N123AB",
-         "status": "heard"
-        },
-        "aircraft": {
-         "callsign": "N123AB",
-         "status": "heard"
-        },
-        "exchange": {
-         "subject": "N123AB",
-         "hex": ""
-        }
-       }
-      },
-      {
-       "watch": "airport_watch",
-       "id": "ditching-fires-1",
-       "row": null
-      }
-     ],
      "alerts": [
       {
        "id": "A1",
@@ -3801,7 +2016,6 @@
        "title": "HPN ATC: ditching: N123AB",
        "detail": "aircraft emergency · heard: ditching · HPN Tower",
        "confidence": 0.85,
-       "level": "high",
        "channel": "HPN Tower",
        "count": 1,
        "status": "open",
@@ -3859,19 +2073,14 @@
       {
        "to": "alerts",
        "title": "HPN ATC: ditching: N123AB",
-       "body": "“N123AB, we're ditching in the reservoir” · N123AB · heard, not on ADS-B · alert high 85% · not dispatched · accept or dismiss in the CAD",
+       "message": "“N123AB, we're ditching in the reservoir” · N123AB · heard, not on ADS-B · alert high 85% · not dispatched · accept or dismiss in the CAD",
        "priority": 4,
        "tags": [
         "airplane",
         "warning"
        ],
-       "click": "https://cad.example.test/cad",
-       "who": null,
-       "actions": []
+       "click": "https://cad.example.test/cad"
       }
-     ],
-     "log": [
-      "airport_alerts: airport pre-alert #A1: HPN ATC: ditching: N123AB (0.85)"
      ]
     }
    ]
@@ -3879,6 +2088,7 @@
   {
    "rule": "ditching",
    "expect": "quiet",
+   "via": "pattern",
    "why": "drainage ditches: not the word",
    "steps": [
     {
@@ -3889,33 +2099,14 @@
       "ch": "HPN Tower",
       "dur": 4,
       "text": "crews are clearing the drainage ditches by taxiway bravo"
-     },
-     "decisions": [
-      {
-       "watch": "atc",
-       "id": "ditching-quiet-1",
-       "ch": "HPN Tower",
-       "fed": "Crews are clearing the drainage ditches by taxiway bravo",
-       "hits": [],
-       "row": null
-      },
-      {
-       "watch": "talkers",
-       "id": "ditching-quiet-1",
-       "record": null
-      },
-      {
-       "watch": "airport_watch",
-       "id": "ditching-quiet-1",
-       "row": null
-      }
-     ]
+     }
     }
    ]
   },
   {
    "rule": "roll-trucks",
    "expect": "fires",
+   "words": "roll the trucks",
    "why": "the tower rolls the trucks",
    "steps": [
     {
@@ -3927,50 +2118,6 @@
       "dur": 4,
       "text": "Westchester tower, roll the trucks, runway one six"
      },
-     "decisions": [
-      {
-       "watch": "atc",
-       "id": "roll-trucks-fires-1",
-       "ch": "HPN Tower",
-       "fed": "Westchester Tower, roll the trucks, runway 16",
-       "hits": [
-        [
-         "roll-trucks",
-         "roll the trucks"
-        ]
-       ],
-       "score": 0.85,
-       "adsb": null,
-       "context": [],
-       "row": "A1"
-      },
-      {
-       "raise": {
-        "source": "atc",
-        "kind": "arff",
-        "subject": "arff",
-        "group": "HPN Tower",
-        "title": "HPN ATC: ARFF called (trucks rolling), runway 16",
-        "confidence": 0.85,
-        "rank": 0,
-        "push": true,
-        "limit": true,
-        "aircraft": []
-       },
-       "row": "A1",
-       "how": "new"
-      },
-      {
-       "watch": "talkers",
-       "id": "roll-trucks-fires-1",
-       "record": null
-      },
-      {
-       "watch": "airport_watch",
-       "id": "roll-trucks-fires-1",
-       "row": null
-      }
-     ],
      "alerts": [
       {
        "id": "A1",
@@ -3983,7 +2130,6 @@
        "title": "HPN ATC: ARFF called (trucks rolling), runway 16",
        "detail": "ARFF called · heard: roll the trucks · HPN Tower",
        "confidence": 0.85,
-       "level": "high",
        "channel": "HPN Tower",
        "count": 1,
        "status": "open",
@@ -4039,19 +2185,14 @@
       {
        "to": "alerts",
        "title": "HPN ATC: ARFF called (trucks rolling), runway 16",
-       "body": "“Westchester Tower, roll the trucks, runway 16” · location: runway 16 (not enough to place it on the map) · alert high 85% · not dispatched · accept or dismiss in the CAD",
+       "message": "“Westchester Tower, roll the trucks, runway 16” · location: runway 16 (not enough to place it on the map) · alert high 85% · not dispatched · accept or dismiss in the CAD",
        "priority": 4,
        "tags": [
         "airplane",
         "warning"
        ],
-       "click": "https://cad.example.test/cad",
-       "who": null,
-       "actions": []
+       "click": "https://cad.example.test/cad"
       }
-     ],
-     "log": [
-      "airport_alerts: airport pre-alert #A1: HPN ATC: ARFF called (trucks rolling), runway 16 (0.85)"
      ]
     }
    ]
@@ -4059,6 +2200,7 @@
   {
    "rule": "roll-trucks",
    "expect": "quiet",
+   "via": "not",
    "why": "a truck check: the 'not'",
    "steps": [
     {
@@ -4069,33 +2211,14 @@
       "ch": "HPN Tower",
       "dur": 4,
       "text": "truck check this morning, equipment is rolling on taxiway alfa"
-     },
-     "decisions": [
-      {
-       "watch": "atc",
-       "id": "roll-trucks-quiet-1",
-       "ch": "HPN Tower",
-       "fed": "Truck check this morning, equipment is rolling on taxiway alfa",
-       "hits": [],
-       "row": null
-      },
-      {
-       "watch": "talkers",
-       "id": "roll-trucks-quiet-1",
-       "record": null
-      },
-      {
-       "watch": "airport_watch",
-       "id": "roll-trucks-quiet-1",
-       "row": null
-      }
-     ]
+     }
     }
    ]
   },
   {
    "rule": "arff",
    "expect": "fires",
+   "words": "arff",
    "why": "ARFF called",
    "steps": [
     {
@@ -4107,50 +2230,6 @@
       "dur": 4,
       "text": "ARFF one, Westchester tower, standby at taxiway alfa"
      },
-     "decisions": [
-      {
-       "watch": "atc",
-       "id": "arff-fires-1",
-       "ch": "HPN Tower",
-       "fed": "ARFF one, Westchester Tower, standby at taxiway alfa",
-       "hits": [
-        [
-         "arff",
-         "arff"
-        ]
-       ],
-       "score": 0.8,
-       "adsb": null,
-       "context": [],
-       "row": "A1"
-      },
-      {
-       "raise": {
-        "source": "atc",
-        "kind": "arff",
-        "subject": "arff",
-        "group": "HPN Tower",
-        "title": "HPN ATC: ARFF called (ARFF)",
-        "confidence": 0.8,
-        "rank": 0,
-        "push": true,
-        "limit": true,
-        "aircraft": []
-       },
-       "row": "A1",
-       "how": "new"
-      },
-      {
-       "watch": "talkers",
-       "id": "arff-fires-1",
-       "record": null
-      },
-      {
-       "watch": "airport_watch",
-       "id": "arff-fires-1",
-       "row": null
-      }
-     ],
      "alerts": [
       {
        "id": "A1",
@@ -4163,7 +2242,6 @@
        "title": "HPN ATC: ARFF called (ARFF)",
        "detail": "ARFF called · heard: arff · HPN Tower",
        "confidence": 0.8,
-       "level": "high",
        "channel": "HPN Tower",
        "count": 1,
        "status": "open",
@@ -4212,19 +2290,14 @@
       {
        "to": "alerts",
        "title": "HPN ATC: ARFF called (ARFF)",
-       "body": "“ARFF one, Westchester Tower, standby at taxiway alfa” · alert high 80% · not dispatched · accept or dismiss in the CAD",
+       "message": "“ARFF one, Westchester Tower, standby at taxiway alfa” · alert high 80% · not dispatched · accept or dismiss in the CAD",
        "priority": 4,
        "tags": [
         "airplane",
         "warning"
        ],
-       "click": "https://cad.example.test/cad",
-       "who": null,
-       "actions": []
+       "click": "https://cad.example.test/cad"
       }
-     ],
-     "log": [
-      "airport_alerts: airport pre-alert #A1: HPN ATC: ARFF called (ARFF) (0.80)"
      ]
     }
    ]
@@ -4232,6 +2305,7 @@
   {
    "rule": "arff",
    "expect": "quiet",
+   "via": "not",
    "why": "the drill: the 'not'",
    "steps": [
     {
@@ -4242,33 +2316,14 @@
       "ch": "HPN Tower",
       "dur": 4,
       "text": "ARFF one, Westchester tower, the drill is complete"
-     },
-     "decisions": [
-      {
-       "watch": "atc",
-       "id": "arff-quiet-1",
-       "ch": "HPN Tower",
-       "fed": "ARFF one, Westchester Tower, the drill is complete",
-       "hits": [],
-       "row": null
-      },
-      {
-       "watch": "talkers",
-       "id": "arff-quiet-1",
-       "record": null
-      },
-      {
-       "watch": "airport_watch",
-       "id": "arff-quiet-1",
-       "row": null
-      }
-     ]
+     }
     }
    ]
   },
   {
    "rule": "crash",
    "expect": "fires",
+   "words": "aircraft down",
    "why": "an aircraft down north of the field",
    "steps": [
     {
@@ -4280,74 +2335,6 @@
       "dur": 4,
       "text": "Westchester tower, November one two three alfa bravo, we saw an aircraft down in the trees north of the field"
      },
-     "decisions": [
-      {
-       "watch": "atc",
-       "id": "crash-fires-1",
-       "ch": "HPN Tower",
-       "fed": "Westchester Tower, N123AB, we saw an aircraft down in the trees north of the field",
-       "hits": [
-        [
-         "crash",
-         "aircraft down"
-        ]
-       ],
-       "score": 0.75,
-       "adsb": null,
-       "context": [],
-       "row": "A1"
-      },
-      {
-       "raise": {
-        "source": "atc",
-        "kind": "accident",
-        "subject": "acft:N123AB",
-        "group": "HPN Tower",
-        "title": "HPN ATC: possible aircraft accident (possible crash): N123AB",
-        "confidence": 0.75,
-        "rank": 2,
-        "push": true,
-        "limit": true,
-        "aircraft": [
-         [
-          "N123AB",
-          null,
-          0.0
-         ]
-        ]
-       },
-       "row": "A1",
-       "how": "new"
-      },
-      {
-       "watch": "talkers",
-       "id": "crash-fires-1",
-       "record": {
-        "role": "aircraft",
-        "talker": {
-         "callsign": "N123AB",
-         "status": "heard"
-        },
-        "aircraft": {
-         "callsign": "N123AB",
-         "status": "heard"
-        },
-        "addressed": {
-         "callsign": "TWR",
-         "status": "heard"
-        },
-        "exchange": {
-         "subject": "N123AB",
-         "hex": ""
-        }
-       }
-      },
-      {
-       "watch": "airport_watch",
-       "id": "crash-fires-1",
-       "row": null
-      }
-     ],
      "alerts": [
       {
        "id": "A1",
@@ -4360,7 +2347,6 @@
        "title": "HPN ATC: possible aircraft accident (possible crash): N123AB",
        "detail": "possible aircraft accident · heard: aircraft down · HPN Tower",
        "confidence": 0.75,
-       "level": "medium",
        "channel": "HPN Tower",
        "count": 1,
        "status": "open",
@@ -4418,19 +2404,14 @@
       {
        "to": "alerts",
        "title": "HPN ATC: possible aircraft accident (possible crash): N123AB",
-       "body": "“Westchester Tower, N123AB, we saw an aircraft down in the trees north of the field” · N123AB · heard, not on ADS-B · alert medium 75% · not dispatched · accept or dismiss in the CAD",
+       "message": "“Westchester Tower, N123AB, we saw an aircraft down in the trees north of the field” · N123AB · heard, not on ADS-B · alert medium 75% · not dispatched · accept or dismiss in the CAD",
        "priority": 4,
        "tags": [
         "airplane",
         "warning"
        ],
-       "click": "https://cad.example.test/cad",
-       "who": null,
-       "actions": []
+       "click": "https://cad.example.test/cad"
       }
-     ],
-     "log": [
-      "airport_alerts: airport pre-alert #A1: HPN ATC: possible aircraft accident (possible crash): N123AB (0.75)"
      ]
     }
    ]
@@ -4438,6 +2419,7 @@
   {
    "rule": "crash",
    "expect": "quiet",
+   "via": "not",
    "why": "the ILS went down: the 'not'",
    "steps": [
     {
@@ -4448,33 +2430,14 @@
       "ch": "HPN Tower",
       "dur": 4,
       "text": "Westchester tower, the ILS went down again on runway three four"
-     },
-     "decisions": [
-      {
-       "watch": "atc",
-       "id": "crash-quiet-1",
-       "ch": "HPN Tower",
-       "fed": "Westchester Tower, the ILS went down again on runway 34",
-       "hits": [],
-       "row": null
-      },
-      {
-       "watch": "talkers",
-       "id": "crash-quiet-1",
-       "record": null
-      },
-      {
-       "watch": "airport_watch",
-       "id": "crash-quiet-1",
-       "row": null
-      }
-     ]
+     }
     }
    ]
   },
   {
    "rule": "lost-radar",
    "expect": "fires",
+   "words": "lost radar contact",
    "why": "radar contact lost (0.6)",
    "steps": [
     {
@@ -4486,74 +2449,6 @@
       "dur": 4,
       "text": "Westchester tower, New York approach, we lost radar contact with November one two three alfa bravo"
      },
-     "decisions": [
-      {
-       "watch": "atc",
-       "id": "lost-radar-fires-1",
-       "ch": "HPN Tower",
-       "fed": "Westchester Tower, New York approach, we lost radar contact with N123AB",
-       "hits": [
-        [
-         "lost-radar",
-         "lost radar contact"
-        ]
-       ],
-       "score": 0.6,
-       "adsb": null,
-       "context": [],
-       "row": "A1"
-      },
-      {
-       "raise": {
-        "source": "atc",
-        "kind": "accident",
-        "subject": "acft:N123AB",
-        "group": "HPN Tower",
-        "title": "HPN ATC: possible aircraft accident (radar contact lost): N123AB",
-        "confidence": 0.6,
-        "rank": 2,
-        "push": true,
-        "limit": true,
-        "aircraft": [
-         [
-          "N123AB",
-          null,
-          0.0
-         ]
-        ]
-       },
-       "row": "A1",
-       "how": "new"
-      },
-      {
-       "watch": "talkers",
-       "id": "lost-radar-fires-1",
-       "record": {
-        "role": "aircraft",
-        "talker": {
-         "callsign": "N123AB",
-         "status": "heard"
-        },
-        "aircraft": {
-         "callsign": "N123AB",
-         "status": "heard"
-        },
-        "addressed": {
-         "callsign": "TWR",
-         "status": "heard"
-        },
-        "exchange": {
-         "subject": "N123AB",
-         "hex": ""
-        }
-       }
-      },
-      {
-       "watch": "airport_watch",
-       "id": "lost-radar-fires-1",
-       "row": null
-      }
-     ],
      "alerts": [
       {
        "id": "A1",
@@ -4566,7 +2461,6 @@
        "title": "HPN ATC: possible aircraft accident (radar contact lost): N123AB",
        "detail": "possible aircraft accident · heard: lost radar contact · HPN Tower",
        "confidence": 0.6,
-       "level": "medium",
        "channel": "HPN Tower",
        "count": 1,
        "status": "open",
@@ -4622,19 +2516,14 @@
       {
        "to": "alerts",
        "title": "HPN ATC: possible aircraft accident (radar contact lost): N123AB",
-       "body": "“Westchester Tower, New York approach, we lost radar contact with N123AB” · N123AB · heard, not on ADS-B · alert medium 60% · not dispatched · accept or dismiss in the CAD",
+       "message": "“Westchester Tower, New York approach, we lost radar contact with N123AB” · N123AB · heard, not on ADS-B · alert medium 60% · not dispatched · accept or dismiss in the CAD",
        "priority": 4,
        "tags": [
         "airplane",
         "warning"
        ],
-       "click": "https://cad.example.test/cad",
-       "who": null,
-       "actions": []
+       "click": "https://cad.example.test/cad"
       }
-     ],
-     "log": [
-      "airport_alerts: airport pre-alert #A1: HPN ATC: possible aircraft accident (radar contact lost): N123AB (0.60)"
      ]
     }
    ]
@@ -4642,6 +2531,7 @@
   {
    "rule": "lost-radar",
    "expect": "quiet",
+   "via": "not",
    "why": "radar service terminated: the 'not'",
    "steps": [
     {
@@ -4652,51 +2542,14 @@
       "ch": "HPN Tower",
       "dur": 4,
       "text": "November one two three alfa bravo, lost radar contact, radar service terminated, squawk VFR, frequency change approved"
-     },
-     "decisions": [
-      {
-       "watch": "atc",
-       "id": "lost-radar-quiet-1",
-       "ch": "HPN Tower",
-       "fed": "N123AB, lost radar contact, radar service terminated, squawk VFR, frequency change approved",
-       "hits": [],
-       "row": null
-      },
-      {
-       "watch": "talkers",
-       "id": "lost-radar-quiet-1",
-       "record": {
-        "role": "atc",
-        "talker": {
-         "callsign": "TWR",
-         "status": "probable"
-        },
-        "aircraft": {
-         "callsign": "N123AB",
-         "status": "heard"
-        },
-        "addressed": {
-         "callsign": "N123AB",
-         "status": "heard"
-        },
-        "exchange": {
-         "subject": "N123AB",
-         "hex": ""
-        }
-       }
-      },
-      {
-       "watch": "airport_watch",
-       "id": "lost-radar-quiet-1",
-       "row": null
-      }
-     ]
+     }
     }
    ]
   },
   {
    "rule": "lost-radar",
    "expect": "quiet",
+   "via": "routine",
    "why": "normal sequencing in the same transmission: the routine factor",
    "steps": [
     {
@@ -4707,59 +2560,14 @@
       "ch": "HPN Tower",
       "dur": 4,
       "text": "November one two three alfa bravo, number two, cleared to land, lost radar contact"
-     },
-     "decisions": [
-      {
-       "watch": "atc",
-       "id": "lost-radar-quiet-2",
-       "ch": "HPN Tower",
-       "fed": "N123AB, number two, cleared to land, lost radar contact",
-       "hits": [
-        [
-         "lost-radar",
-         "lost radar contact"
-        ]
-       ],
-       "score": 0.36,
-       "adsb": null,
-       "context": [],
-       "row": null
-      },
-      {
-       "watch": "talkers",
-       "id": "lost-radar-quiet-2",
-       "record": {
-        "role": "atc",
-        "talker": {
-         "callsign": "TWR",
-         "status": "probable"
-        },
-        "aircraft": {
-         "callsign": "N123AB",
-         "status": "heard"
-        },
-        "addressed": {
-         "callsign": "N123AB",
-         "status": "heard"
-        },
-        "exchange": {
-         "subject": "N123AB",
-         "hex": ""
-        }
-       }
-      },
-      {
-       "watch": "airport_watch",
-       "id": "lost-radar-quiet-2",
-       "row": null
-      }
-     ]
+     }
     }
    ]
   },
   {
    "rule": "lost-contact",
    "expect": "fires",
+   "words": "lost contact with",
    "why": "contact lost (0.45) with the weak emergency word (0.4): over the threshold together",
    "steps": [
     {
@@ -4771,78 +2579,6 @@
       "dur": 4,
       "text": "Westchester tower, we lost contact with November one two three alfa bravo, emergency"
      },
-     "decisions": [
-      {
-       "watch": "atc",
-       "id": "lost-contact-fires-1",
-       "ch": "HPN Tower",
-       "fed": "Westchester Tower, we lost contact with N123AB, emergency",
-       "hits": [
-        [
-         "emergency",
-         "emergency"
-        ],
-        [
-         "lost-contact",
-         "lost contact with"
-        ]
-       ],
-       "score": 0.67,
-       "adsb": null,
-       "context": [],
-       "row": "A1"
-      },
-      {
-       "raise": {
-        "source": "atc",
-        "kind": "accident",
-        "subject": "acft:N123AB",
-        "group": "HPN Tower",
-        "title": "HPN ATC: possible aircraft accident (contact lost): N123AB",
-        "confidence": 0.67,
-        "rank": 2,
-        "push": true,
-        "limit": true,
-        "aircraft": [
-         [
-          "N123AB",
-          null,
-          0.0
-         ]
-        ]
-       },
-       "row": "A1",
-       "how": "new"
-      },
-      {
-       "watch": "talkers",
-       "id": "lost-contact-fires-1",
-       "record": {
-        "role": "aircraft",
-        "talker": {
-         "callsign": "N123AB",
-         "status": "heard"
-        },
-        "aircraft": {
-         "callsign": "N123AB",
-         "status": "heard"
-        },
-        "addressed": {
-         "callsign": "TWR",
-         "status": "heard"
-        },
-        "exchange": {
-         "subject": "N123AB",
-         "hex": ""
-        }
-       }
-      },
-      {
-       "watch": "airport_watch",
-       "id": "lost-contact-fires-1",
-       "row": null
-      }
-     ],
      "alerts": [
       {
        "id": "A1",
@@ -4855,7 +2591,6 @@
        "title": "HPN ATC: possible aircraft accident (contact lost): N123AB",
        "detail": "possible aircraft accident · heard: emergency, lost contact with · HPN Tower",
        "confidence": 0.67,
-       "level": "medium",
        "channel": "HPN Tower",
        "count": 1,
        "status": "open",
@@ -4912,19 +2647,14 @@
       {
        "to": "alerts",
        "title": "HPN ATC: possible aircraft accident (contact lost): N123AB",
-       "body": "“Westchester Tower, we lost contact with N123AB, emergency” · N123AB · heard, not on ADS-B · alert medium 67% · not dispatched · accept or dismiss in the CAD",
+       "message": "“Westchester Tower, we lost contact with N123AB, emergency” · N123AB · heard, not on ADS-B · alert medium 67% · not dispatched · accept or dismiss in the CAD",
        "priority": 4,
        "tags": [
         "airplane",
         "warning"
        ],
-       "click": "https://cad.example.test/cad",
-       "who": null,
-       "actions": []
+       "click": "https://cad.example.test/cad"
       }
-     ],
-     "log": [
-      "airport_alerts: airport pre-alert #A1: HPN ATC: possible aircraft accident (contact lost): N123AB (0.67)"
      ]
     }
    ]
@@ -4932,6 +2662,7 @@
   {
    "rule": "lost-contact",
    "expect": "quiet",
+   "via": "threshold",
    "why": "contact lost alone: under the threshold",
    "steps": [
     {
@@ -4942,41 +2673,14 @@
       "ch": "HPN Tower",
       "dur": 4,
       "text": "Westchester tower, we lost contact with the Cessna that was ahead of us"
-     },
-     "decisions": [
-      {
-       "watch": "atc",
-       "id": "lost-contact-quiet-1",
-       "ch": "HPN Tower",
-       "fed": "Westchester Tower, we lost contact with the Cessna that was ahead of us",
-       "hits": [
-        [
-         "lost-contact",
-         "lost contact with"
-        ]
-       ],
-       "score": 0.45,
-       "adsb": null,
-       "context": [],
-       "row": null
-      },
-      {
-       "watch": "talkers",
-       "id": "lost-contact-quiet-1",
-       "record": null
-      },
-      {
-       "watch": "airport_watch",
-       "id": "lost-contact-quiet-1",
-       "row": null
-      }
-     ]
+     }
     }
    ]
   },
   {
    "rule": "lost-contact",
    "expect": "quiet",
+   "via": "not",
    "why": "lost contact with the traffic: the 'not'",
    "steps": [
     {
@@ -4987,33 +2691,14 @@
       "ch": "HPN Tower",
       "dur": 4,
       "text": "we lost contact with the traffic, looking for it"
-     },
-     "decisions": [
-      {
-       "watch": "atc",
-       "id": "lost-contact-quiet-2",
-       "ch": "HPN Tower",
-       "fed": "We lost contact with the traffic, looking for it",
-       "hits": [],
-       "row": null
-      },
-      {
-       "watch": "talkers",
-       "id": "lost-contact-quiet-2",
-       "record": null
-      },
-      {
-       "watch": "airport_watch",
-       "id": "lost-contact-quiet-2",
-       "row": null
-      }
-     ]
+     }
     }
    ]
   },
   {
    "rule": "disabled",
    "expect": "fires",
+   "words": "disabled aircraft",
    "why": "a disabled aircraft on the runway",
    "steps": [
     {
@@ -5025,50 +2710,6 @@
       "dur": 4,
       "text": "Cessna three alfa bravo, go around, there's a disabled aircraft on runway one six"
      },
-     "decisions": [
-      {
-       "watch": "atc",
-       "id": "disabled-fires-1",
-       "ch": "HPN Tower",
-       "fed": "Cessna three AB, go around, there's a disabled aircraft on runway 16",
-       "hits": [
-        [
-         "disabled",
-         "disabled aircraft"
-        ]
-       ],
-       "score": 0.7,
-       "adsb": null,
-       "context": [],
-       "row": "A1"
-      },
-      {
-       "raise": {
-        "source": "atc",
-        "kind": "runway",
-        "subject": "runway",
-        "group": "HPN Tower",
-        "title": "HPN ATC: disabled aircraft / runway (disabled aircraft), runway 16",
-        "confidence": 0.7,
-        "rank": 1,
-        "push": true,
-        "limit": true,
-        "aircraft": []
-       },
-       "row": "A1",
-       "how": "new"
-      },
-      {
-       "watch": "talkers",
-       "id": "disabled-fires-1",
-       "record": null
-      },
-      {
-       "watch": "airport_watch",
-       "id": "disabled-fires-1",
-       "row": null
-      }
-     ],
      "alerts": [
       {
        "id": "A1",
@@ -5081,7 +2722,6 @@
        "title": "HPN ATC: disabled aircraft / runway (disabled aircraft), runway 16",
        "detail": "disabled aircraft / runway · heard: disabled aircraft · HPN Tower",
        "confidence": 0.7,
-       "level": "medium",
        "channel": "HPN Tower",
        "count": 1,
        "status": "open",
@@ -5137,19 +2777,14 @@
       {
        "to": "alerts",
        "title": "HPN ATC: disabled aircraft / runway (disabled aircraft), runway 16",
-       "body": "“Cessna three AB, go around, there's a disabled aircraft on runway 16” · location: runway 16 (not enough to place it on the map) · alert medium 70% · not dispatched · accept or dismiss in the CAD",
+       "message": "“Cessna three AB, go around, there's a disabled aircraft on runway 16” · location: runway 16 (not enough to place it on the map) · alert medium 70% · not dispatched · accept or dismiss in the CAD",
        "priority": 4,
        "tags": [
         "airplane",
         "warning"
        ],
-       "click": "https://cad.example.test/cad",
-       "who": null,
-       "actions": []
+       "click": "https://cad.example.test/cad"
       }
-     ],
-     "log": [
-      "airport_alerts: airport pre-alert #A1: HPN ATC: disabled aircraft / runway (disabled aircraft), runway 16 (0.70)"
      ]
     }
    ]
@@ -5157,6 +2792,7 @@
   {
    "rule": "disabled",
    "expect": "quiet",
+   "via": "pattern",
    "why": "a disabled vehicle: not the words",
    "steps": [
     {
@@ -5167,33 +2803,14 @@
       "ch": "HPN Tower",
       "dur": 4,
       "text": "the disabled vehicle on the service road has been towed"
-     },
-     "decisions": [
-      {
-       "watch": "atc",
-       "id": "disabled-quiet-1",
-       "ch": "HPN Tower",
-       "fed": "The disabled vehicle on the service road has been towed",
-       "hits": [],
-       "row": null
-      },
-      {
-       "watch": "talkers",
-       "id": "disabled-quiet-1",
-       "record": null
-      },
-      {
-       "watch": "airport_watch",
-       "id": "disabled-quiet-1",
-       "row": null
-      }
-     ]
+     }
     }
    ]
   },
   {
    "rule": "excursion",
    "expect": "fires",
+   "words": "went off the runway",
    "why": "off the runway into the grass",
    "steps": [
     {
@@ -5205,50 +2822,6 @@
       "dur": 4,
       "text": "tower, we went off the runway, we're in the grass at taxiway alfa"
      },
-     "decisions": [
-      {
-       "watch": "atc",
-       "id": "excursion-fires-1",
-       "ch": "HPN Tower",
-       "fed": "Tower, we went off the runway, we're in the grass at taxiway alfa",
-       "hits": [
-        [
-         "excursion",
-         "went off the runway"
-        ]
-       ],
-       "score": 0.75,
-       "adsb": null,
-       "context": [],
-       "row": "A1"
-      },
-      {
-       "raise": {
-        "source": "atc",
-        "kind": "runway",
-        "subject": "runway",
-        "group": "HPN Tower",
-        "title": "HPN ATC: disabled aircraft / runway (aircraft off the runway)",
-        "confidence": 0.75,
-        "rank": 1,
-        "push": true,
-        "limit": true,
-        "aircraft": []
-       },
-       "row": "A1",
-       "how": "new"
-      },
-      {
-       "watch": "talkers",
-       "id": "excursion-fires-1",
-       "record": null
-      },
-      {
-       "watch": "airport_watch",
-       "id": "excursion-fires-1",
-       "row": null
-      }
-     ],
      "alerts": [
       {
        "id": "A1",
@@ -5261,7 +2834,6 @@
        "title": "HPN ATC: disabled aircraft / runway (aircraft off the runway)",
        "detail": "disabled aircraft / runway · heard: went off the runway · HPN Tower",
        "confidence": 0.75,
-       "level": "medium",
        "channel": "HPN Tower",
        "count": 1,
        "status": "open",
@@ -5310,19 +2882,14 @@
       {
        "to": "alerts",
        "title": "HPN ATC: disabled aircraft / runway (aircraft off the runway)",
-       "body": "“Tower, we went off the runway, we're in the grass at taxiway alfa” · alert medium 75% · not dispatched · accept or dismiss in the CAD",
+       "message": "“Tower, we went off the runway, we're in the grass at taxiway alfa” · alert medium 75% · not dispatched · accept or dismiss in the CAD",
        "priority": 4,
        "tags": [
         "airplane",
         "warning"
        ],
-       "click": "https://cad.example.test/cad",
-       "who": null,
-       "actions": []
+       "click": "https://cad.example.test/cad"
       }
-     ],
-     "log": [
-      "airport_alerts: airport pre-alert #A1: HPN ATC: disabled aircraft / runway (aircraft off the runway) (0.75)"
      ]
     }
    ]
@@ -5330,6 +2897,7 @@
   {
    "rule": "excursion",
    "expect": "quiet",
+   "via": "pattern",
    "why": "exit off the runway: not the words",
    "steps": [
     {
@@ -5340,51 +2908,14 @@
       "ch": "HPN Tower",
       "dur": 4,
       "text": "November one two three alfa bravo, exit off the runway at taxiway alfa"
-     },
-     "decisions": [
-      {
-       "watch": "atc",
-       "id": "excursion-quiet-1",
-       "ch": "HPN Tower",
-       "fed": "N123AB, exit off the runway at taxiway alfa",
-       "hits": [],
-       "row": null
-      },
-      {
-       "watch": "talkers",
-       "id": "excursion-quiet-1",
-       "record": {
-        "role": "atc",
-        "talker": {
-         "callsign": "TWR",
-         "status": "probable"
-        },
-        "aircraft": {
-         "callsign": "N123AB",
-         "status": "heard"
-        },
-        "addressed": {
-         "callsign": "N123AB",
-         "status": "heard"
-        },
-        "exchange": {
-         "subject": "N123AB",
-         "hex": ""
-        }
-       }
-      },
-      {
-       "watch": "airport_watch",
-       "id": "excursion-quiet-1",
-       "row": null
-      }
-     ]
+     }
     }
    ]
   },
   {
    "rule": "go-around-disabled",
    "expect": "fires",
+   "words": "debris on the runway",
    "why": "a go-around for debris",
    "steps": [
     {
@@ -5396,74 +2927,6 @@
       "dur": 4,
       "text": "November one two three alfa bravo, go around, debris on the runway"
      },
-     "decisions": [
-      {
-       "watch": "atc",
-       "id": "go-around-disabled-fires-1",
-       "ch": "HPN Tower",
-       "fed": "N123AB, go around, debris on the runway",
-       "hits": [
-        [
-         "go-around-disabled",
-         "debris on the runway"
-        ]
-       ],
-       "score": 0.6,
-       "adsb": null,
-       "context": [],
-       "row": "A1"
-      },
-      {
-       "raise": {
-        "source": "atc",
-        "kind": "runway",
-        "subject": "acft:N123AB",
-        "group": "HPN Tower",
-        "title": "HPN ATC: disabled aircraft / runway (go-around for the runway): N123AB",
-        "confidence": 0.6,
-        "rank": 1,
-        "push": true,
-        "limit": true,
-        "aircraft": [
-         [
-          "N123AB",
-          null,
-          0.0
-         ]
-        ]
-       },
-       "row": "A1",
-       "how": "new"
-      },
-      {
-       "watch": "talkers",
-       "id": "go-around-disabled-fires-1",
-       "record": {
-        "role": "atc",
-        "talker": {
-         "callsign": "TWR",
-         "status": "probable"
-        },
-        "aircraft": {
-         "callsign": "N123AB",
-         "status": "heard"
-        },
-        "addressed": {
-         "callsign": "N123AB",
-         "status": "heard"
-        },
-        "exchange": {
-         "subject": "N123AB",
-         "hex": ""
-        }
-       }
-      },
-      {
-       "watch": "airport_watch",
-       "id": "go-around-disabled-fires-1",
-       "row": null
-      }
-     ],
      "alerts": [
       {
        "id": "A1",
@@ -5476,7 +2939,6 @@
        "title": "HPN ATC: disabled aircraft / runway (go-around for the runway): N123AB",
        "detail": "disabled aircraft / runway · heard: debris on the runway · HPN Tower",
        "confidence": 0.6,
-       "level": "medium",
        "channel": "HPN Tower",
        "count": 1,
        "status": "open",
@@ -5532,19 +2994,14 @@
       {
        "to": "alerts",
        "title": "HPN ATC: disabled aircraft / runway (go-around for the runway): N123AB",
-       "body": "“N123AB, go around, debris on the runway” · N123AB · heard, not on ADS-B · alert medium 60% · not dispatched · accept or dismiss in the CAD",
+       "message": "“N123AB, go around, debris on the runway” · N123AB · heard, not on ADS-B · alert medium 60% · not dispatched · accept or dismiss in the CAD",
        "priority": 4,
        "tags": [
         "airplane",
         "warning"
        ],
-       "click": "https://cad.example.test/cad",
-       "who": null,
-       "actions": []
+       "click": "https://cad.example.test/cad"
       }
-     ],
-     "log": [
-      "airport_alerts: airport pre-alert #A1: HPN ATC: disabled aircraft / runway (go-around for the runway): N123AB (0.60)"
      ]
     }
    ]
@@ -5552,6 +3009,7 @@
   {
    "rule": "go-around-disabled",
    "expect": "quiet",
+   "via": "pattern",
    "why": "a go-around for traffic: not the words",
    "steps": [
     {
@@ -5562,51 +3020,14 @@
       "ch": "HPN Tower",
       "dur": 4,
       "text": "November one two three alfa bravo, go around, traffic on the runway"
-     },
-     "decisions": [
-      {
-       "watch": "atc",
-       "id": "go-around-disabled-quiet-1",
-       "ch": "HPN Tower",
-       "fed": "N123AB, go around, traffic on the runway",
-       "hits": [],
-       "row": null
-      },
-      {
-       "watch": "talkers",
-       "id": "go-around-disabled-quiet-1",
-       "record": {
-        "role": "atc",
-        "talker": {
-         "callsign": "TWR",
-         "status": "probable"
-        },
-        "aircraft": {
-         "callsign": "N123AB",
-         "status": "heard"
-        },
-        "addressed": {
-         "callsign": "N123AB",
-         "status": "heard"
-        },
-        "exchange": {
-         "subject": "N123AB",
-         "hex": ""
-        }
-       }
-      },
-      {
-       "watch": "airport_watch",
-       "id": "go-around-disabled-quiet-1",
-       "row": null
-      }
-     ]
+     }
     }
    ]
   },
   {
    "rule": "runway-closed",
    "expect": "fires",
+   "words": "runway is closed",
    "why": "runway closed (0.4) with a disabled aircraft (0.7)",
    "steps": [
     {
@@ -5618,54 +3039,6 @@
       "dur": 4,
       "text": "Westchester tower, the runway is closed, disabled aircraft on the runway"
      },
-     "decisions": [
-      {
-       "watch": "atc",
-       "id": "runway-closed-fires-1",
-       "ch": "HPN Tower",
-       "fed": "Westchester Tower, the runway is closed, disabled aircraft on the runway",
-       "hits": [
-        [
-         "disabled",
-         "disabled aircraft"
-        ],
-        [
-         "runway-closed",
-         "runway is closed"
-        ]
-       ],
-       "score": 0.82,
-       "adsb": null,
-       "context": [],
-       "row": "A1"
-      },
-      {
-       "raise": {
-        "source": "atc",
-        "kind": "runway",
-        "subject": "runway",
-        "group": "HPN Tower",
-        "title": "HPN ATC: disabled aircraft / runway (disabled aircraft)",
-        "confidence": 0.82,
-        "rank": 1,
-        "push": true,
-        "limit": true,
-        "aircraft": []
-       },
-       "row": "A1",
-       "how": "new"
-      },
-      {
-       "watch": "talkers",
-       "id": "runway-closed-fires-1",
-       "record": null
-      },
-      {
-       "watch": "airport_watch",
-       "id": "runway-closed-fires-1",
-       "row": null
-      }
-     ],
      "alerts": [
       {
        "id": "A1",
@@ -5678,7 +3051,6 @@
        "title": "HPN ATC: disabled aircraft / runway (disabled aircraft)",
        "detail": "disabled aircraft / runway · heard: disabled aircraft, runway is closed · HPN Tower",
        "confidence": 0.82,
-       "level": "high",
        "channel": "HPN Tower",
        "count": 1,
        "status": "open",
@@ -5728,19 +3100,14 @@
       {
        "to": "alerts",
        "title": "HPN ATC: disabled aircraft / runway (disabled aircraft)",
-       "body": "“Westchester Tower, the runway is closed, disabled aircraft on the runway” · alert high 82% · not dispatched · accept or dismiss in the CAD",
+       "message": "“Westchester Tower, the runway is closed, disabled aircraft on the runway” · alert high 82% · not dispatched · accept or dismiss in the CAD",
        "priority": 4,
        "tags": [
         "airplane",
         "warning"
        ],
-       "click": "https://cad.example.test/cad",
-       "who": null,
-       "actions": []
+       "click": "https://cad.example.test/cad"
       }
-     ],
-     "log": [
-      "airport_alerts: airport pre-alert #A1: HPN ATC: disabled aircraft / runway (disabled aircraft) (0.82)"
      ]
     }
    ]
@@ -5748,6 +3115,7 @@
   {
    "rule": "runway-closed",
    "expect": "quiet",
+   "via": "threshold",
    "why": "the field closed alone: under the threshold",
    "steps": [
     {
@@ -5758,41 +3126,14 @@
       "ch": "HPN Tower",
       "dur": 4,
       "text": "attention all aircraft, the field is closed"
-     },
-     "decisions": [
-      {
-       "watch": "atc",
-       "id": "runway-closed-quiet-1",
-       "ch": "HPN Tower",
-       "fed": "Attention all aircraft, the field is closed",
-       "hits": [
-        [
-         "runway-closed",
-         "field is closed"
-        ]
-       ],
-       "score": 0.4,
-       "adsb": null,
-       "context": [],
-       "row": null
-      },
-      {
-       "watch": "talkers",
-       "id": "runway-closed-quiet-1",
-       "record": null
-      },
-      {
-       "watch": "airport_watch",
-       "id": "runway-closed-quiet-1",
-       "row": null
-      }
-     ]
+     }
     }
    ]
   },
   {
    "rule": "runway-closed",
    "expect": "quiet",
+   "via": "not",
    "why": "closed for maintenance: the 'not'",
    "steps": [
     {
@@ -5803,33 +3144,14 @@
       "ch": "HPN Tower",
       "dur": 4,
       "text": "attention all aircraft, the runway will be closed for maintenance"
-     },
-     "decisions": [
-      {
-       "watch": "atc",
-       "id": "runway-closed-quiet-2",
-       "ch": "HPN Tower",
-       "fed": "Attention all aircraft, the runway will be closed for maintenance",
-       "hits": [],
-       "row": null
-      },
-      {
-       "watch": "talkers",
-       "id": "runway-closed-quiet-2",
-       "record": null
-      },
-      {
-       "watch": "airport_watch",
-       "id": "runway-closed-quiet-2",
-       "row": null
-      }
-     ]
+     }
     }
    ]
   },
   {
    "rule": "runway-closed",
    "expect": "quiet",
+   "via": "pattern",
    "why": "a runway number between the words: not the pattern (the written form says 'runway 16 is closed')",
    "steps": [
     {
@@ -5840,33 +3162,14 @@
       "ch": "HPN Tower",
       "dur": 4,
       "text": "attention all aircraft, runway one six is closed"
-     },
-     "decisions": [
-      {
-       "watch": "atc",
-       "id": "runway-closed-quiet-3",
-       "ch": "HPN Tower",
-       "fed": "Attention all aircraft, runway 16 is closed",
-       "hits": [],
-       "row": null
-      },
-      {
-       "watch": "talkers",
-       "id": "runway-closed-quiet-3",
-       "record": null
-      },
-      {
-       "watch": "airport_watch",
-       "id": "runway-closed-quiet-3",
-       "row": null
-      }
-     ]
+     }
     }
    ]
   },
   {
    "rule": "gear",
    "expect": "fires",
+   "words": "unsafe gear",
    "why": "an unsafe gear indication",
    "steps": [
     {
@@ -5878,50 +3181,6 @@
       "dur": 4,
       "text": "we have an unsafe gear indication, request a low pass"
      },
-     "decisions": [
-      {
-       "watch": "atc",
-       "id": "gear-fires-1",
-       "ch": "HPN Tower",
-       "fed": "We have an unsafe gear indication, request a low pass",
-       "hits": [
-        [
-         "gear",
-         "unsafe gear"
-        ]
-       ],
-       "score": 0.75,
-       "adsb": null,
-       "context": [],
-       "row": "A1"
-      },
-      {
-       "raise": {
-        "source": "atc",
-        "kind": "gear",
-        "subject": "gear",
-        "group": "HPN Tower",
-        "title": "HPN ATC: landing gear problem (unsafe gear)",
-        "confidence": 0.75,
-        "rank": 1,
-        "push": true,
-        "limit": true,
-        "aircraft": []
-       },
-       "row": "A1",
-       "how": "new"
-      },
-      {
-       "watch": "talkers",
-       "id": "gear-fires-1",
-       "record": null
-      },
-      {
-       "watch": "airport_watch",
-       "id": "gear-fires-1",
-       "row": null
-      }
-     ],
      "alerts": [
       {
        "id": "A1",
@@ -5934,7 +3193,6 @@
        "title": "HPN ATC: landing gear problem (unsafe gear)",
        "detail": "landing gear problem · heard: unsafe gear · HPN Tower",
        "confidence": 0.75,
-       "level": "medium",
        "channel": "HPN Tower",
        "count": 1,
        "status": "open",
@@ -5983,19 +3241,14 @@
       {
        "to": "alerts",
        "title": "HPN ATC: landing gear problem (unsafe gear)",
-       "body": "“We have an unsafe gear indication, request a low pass” · alert medium 75% · not dispatched · accept or dismiss in the CAD",
+       "message": "“We have an unsafe gear indication, request a low pass” · alert medium 75% · not dispatched · accept or dismiss in the CAD",
        "priority": 4,
        "tags": [
         "airplane",
         "warning"
        ],
-       "click": "https://cad.example.test/cad",
-       "who": null,
-       "actions": []
+       "click": "https://cad.example.test/cad"
       }
-     ],
-     "log": [
-      "airport_alerts: airport pre-alert #A1: HPN ATC: landing gear problem (unsafe gear) (0.75)"
      ]
     }
    ]
@@ -6003,6 +3256,7 @@
   {
    "rule": "gear",
    "expect": "quiet",
+   "via": "pattern",
    "why": "gear down and locked: not the words",
    "steps": [
     {
@@ -6013,47 +3267,14 @@
       "ch": "HPN Tower",
       "dur": 4,
       "text": "gear down and locked, November one two three alfa bravo"
-     },
-     "decisions": [
-      {
-       "watch": "atc",
-       "id": "gear-quiet-1",
-       "ch": "HPN Tower",
-       "fed": "Gear down and locked, N123AB",
-       "hits": [],
-       "row": null
-      },
-      {
-       "watch": "talkers",
-       "id": "gear-quiet-1",
-       "record": {
-        "role": "aircraft",
-        "talker": {
-         "callsign": "N123AB",
-         "status": "heard"
-        },
-        "aircraft": {
-         "callsign": "N123AB",
-         "status": "heard"
-        },
-        "exchange": {
-         "subject": "N123AB",
-         "hex": ""
-        }
-       }
-      },
-      {
-       "watch": "airport_watch",
-       "id": "gear-quiet-1",
-       "row": null
-      }
-     ]
+     }
     }
    ]
   },
   {
    "rule": "engine",
    "expect": "fires",
+   "words": "engine failure",
    "why": "an engine failure",
    "steps": [
     {
@@ -6065,74 +3286,6 @@
       "dur": 4,
       "text": "Westchester tower, November one two three alfa bravo, engine failure"
      },
-     "decisions": [
-      {
-       "watch": "atc",
-       "id": "engine-fires-1",
-       "ch": "HPN Tower",
-       "fed": "Westchester Tower, N123AB, engine failure",
-       "hits": [
-        [
-         "engine",
-         "engine failure"
-        ]
-       ],
-       "score": 0.75,
-       "adsb": null,
-       "context": [],
-       "row": "A1"
-      },
-      {
-       "raise": {
-        "source": "atc",
-        "kind": "engine",
-        "subject": "acft:N123AB",
-        "group": "HPN Tower",
-        "title": "HPN ATC: engine problem (engine failure): N123AB",
-        "confidence": 0.75,
-        "rank": 1,
-        "push": true,
-        "limit": true,
-        "aircraft": [
-         [
-          "N123AB",
-          null,
-          0.0
-         ]
-        ]
-       },
-       "row": "A1",
-       "how": "new"
-      },
-      {
-       "watch": "talkers",
-       "id": "engine-fires-1",
-       "record": {
-        "role": "aircraft",
-        "talker": {
-         "callsign": "N123AB",
-         "status": "heard"
-        },
-        "aircraft": {
-         "callsign": "N123AB",
-         "status": "heard"
-        },
-        "addressed": {
-         "callsign": "TWR",
-         "status": "heard"
-        },
-        "exchange": {
-         "subject": "N123AB",
-         "hex": ""
-        }
-       }
-      },
-      {
-       "watch": "airport_watch",
-       "id": "engine-fires-1",
-       "row": null
-      }
-     ],
      "alerts": [
       {
        "id": "A1",
@@ -6145,7 +3298,6 @@
        "title": "HPN ATC: engine problem (engine failure): N123AB",
        "detail": "engine problem · heard: engine failure · HPN Tower",
        "confidence": 0.75,
-       "level": "medium",
        "channel": "HPN Tower",
        "count": 1,
        "status": "open",
@@ -6201,19 +3353,14 @@
       {
        "to": "alerts",
        "title": "HPN ATC: engine problem (engine failure): N123AB",
-       "body": "“Westchester Tower, N123AB, engine failure” · N123AB · heard, not on ADS-B · alert medium 75% · not dispatched · accept or dismiss in the CAD",
+       "message": "“Westchester Tower, N123AB, engine failure” · N123AB · heard, not on ADS-B · alert medium 75% · not dispatched · accept or dismiss in the CAD",
        "priority": 4,
        "tags": [
         "airplane",
         "warning"
        ],
-       "click": "https://cad.example.test/cad",
-       "who": null,
-       "actions": []
+       "click": "https://cad.example.test/cad"
       }
-     ],
-     "log": [
-      "airport_alerts: airport pre-alert #A1: HPN ATC: engine problem (engine failure): N123AB (0.75)"
      ]
     }
    ]
@@ -6221,6 +3368,7 @@
   {
    "rule": "engine",
    "expect": "quiet",
+   "via": "pattern",
    "why": "engine start: not the words",
    "steps": [
     {
@@ -6231,47 +3379,14 @@
       "ch": "HPN Tower",
       "dur": 4,
       "text": "November one two three alfa bravo, engine start approved"
-     },
-     "decisions": [
-      {
-       "watch": "atc",
-       "id": "engine-quiet-1",
-       "ch": "HPN Tower",
-       "fed": "N123AB, engine start approved",
-       "hits": [],
-       "row": null
-      },
-      {
-       "watch": "talkers",
-       "id": "engine-quiet-1",
-       "record": {
-        "role": "unknown",
-        "talker": {
-         "callsign": "",
-         "status": ""
-        },
-        "aircraft": {
-         "callsign": "N123AB",
-         "status": "heard"
-        },
-        "exchange": {
-         "subject": "N123AB",
-         "hex": ""
-        }
-       }
-      },
-      {
-       "watch": "airport_watch",
-       "id": "engine-quiet-1",
-       "row": null
-      }
-     ]
+     }
     }
    ]
   },
   {
    "rule": "bird",
    "expect": "fires",
+   "words": "hit a couple of birds",
    "why": "birds hit on departure",
    "steps": [
     {
@@ -6283,70 +3398,6 @@
       "dur": 4,
       "text": "JetBlue one two three four, we hit a couple of birds on departure"
      },
-     "decisions": [
-      {
-       "watch": "atc",
-       "id": "bird-fires-1",
-       "ch": "HPN Tower",
-       "fed": "JetBlue 1234, we hit a couple of birds on departure",
-       "hits": [
-        [
-         "bird",
-         "hit a couple of birds"
-        ]
-       ],
-       "score": 0.6,
-       "adsb": null,
-       "context": [],
-       "row": "A1"
-      },
-      {
-       "raise": {
-        "source": "atc",
-        "kind": "bird",
-        "subject": "acft:JBU1234",
-        "group": "HPN Tower",
-        "title": "HPN ATC: bird strike (bird strike): JBU1234",
-        "confidence": 0.6,
-        "rank": 1,
-        "push": true,
-        "limit": true,
-        "aircraft": [
-         [
-          "JBU1234",
-          null,
-          0.0
-         ]
-        ]
-       },
-       "row": "A1",
-       "how": "new"
-      },
-      {
-       "watch": "talkers",
-       "id": "bird-fires-1",
-       "record": {
-        "role": "unknown",
-        "talker": {
-         "callsign": "",
-         "status": ""
-        },
-        "aircraft": {
-         "callsign": "JBU1234",
-         "status": "heard"
-        },
-        "exchange": {
-         "subject": "JBU1234",
-         "hex": ""
-        }
-       }
-      },
-      {
-       "watch": "airport_watch",
-       "id": "bird-fires-1",
-       "row": null
-      }
-     ],
      "alerts": [
       {
        "id": "A1",
@@ -6359,7 +3410,6 @@
        "title": "HPN ATC: bird strike (bird strike): JBU1234",
        "detail": "bird strike · heard: hit a couple of birds · HPN Tower",
        "confidence": 0.6,
-       "level": "medium",
        "channel": "HPN Tower",
        "count": 1,
        "status": "open",
@@ -6415,19 +3465,14 @@
       {
        "to": "alerts",
        "title": "HPN ATC: bird strike (bird strike): JBU1234",
-       "body": "“JetBlue 1234, we hit a couple of birds on departure” · JBU1234 · heard, not on ADS-B · alert medium 60% · not dispatched · accept or dismiss in the CAD",
+       "message": "“JetBlue 1234, we hit a couple of birds on departure” · JBU1234 · heard, not on ADS-B · alert medium 60% · not dispatched · accept or dismiss in the CAD",
        "priority": 4,
        "tags": [
         "airplane",
         "warning"
        ],
-       "click": "https://cad.example.test/cad",
-       "who": null,
-       "actions": []
+       "click": "https://cad.example.test/cad"
       }
-     ],
-     "log": [
-      "airport_alerts: airport pre-alert #A1: HPN ATC: bird strike (bird strike): JBU1234 (0.60)"
      ]
     }
    ]
@@ -6435,7 +3480,8 @@
   {
    "rule": "bird",
    "expect": "quiet",
-   "why": "bird activity: the 'not'",
+   "via": "pattern",
+   "why": "bird activity alone: not the pattern",
    "steps": [
     {
      "step": {
@@ -6445,33 +3491,14 @@
       "ch": "HPN Tower",
       "dur": 4,
       "text": "caution, bird activity in the vicinity of the airport"
-     },
-     "decisions": [
-      {
-       "watch": "atc",
-       "id": "bird-quiet-1",
-       "ch": "HPN Tower",
-       "fed": "Caution, bird activity in the vicinity of the airport",
-       "hits": [],
-       "row": null
-      },
-      {
-       "watch": "talkers",
-       "id": "bird-quiet-1",
-       "record": null
-      },
-      {
-       "watch": "airport_watch",
-       "id": "bird-quiet-1",
-       "row": null
-      }
-     ]
+     }
     }
    ]
   },
   {
    "rule": "fuel",
    "expect": "fires",
+   "words": "leaking fuel",
    "why": "leaking fuel",
    "steps": [
     {
@@ -6483,50 +3510,6 @@
       "dur": 4,
       "text": "we're leaking fuel from the left wing"
      },
-     "decisions": [
-      {
-       "watch": "atc",
-       "id": "fuel-fires-1",
-       "ch": "HPN Tower",
-       "fed": "We're leaking fuel from the left wing",
-       "hits": [
-        [
-         "fuel",
-         "leaking fuel"
-        ]
-       ],
-       "score": 0.7,
-       "adsb": null,
-       "context": [],
-       "row": "A1"
-      },
-      {
-       "raise": {
-        "source": "atc",
-        "kind": "fuel",
-        "subject": "fuel",
-        "group": "HPN Tower",
-        "title": "HPN ATC: fuel problem (fuel problem)",
-        "confidence": 0.7,
-        "rank": 1,
-        "push": true,
-        "limit": true,
-        "aircraft": []
-       },
-       "row": "A1",
-       "how": "new"
-      },
-      {
-       "watch": "talkers",
-       "id": "fuel-fires-1",
-       "record": null
-      },
-      {
-       "watch": "airport_watch",
-       "id": "fuel-fires-1",
-       "row": null
-      }
-     ],
      "alerts": [
       {
        "id": "A1",
@@ -6539,7 +3522,6 @@
        "title": "HPN ATC: fuel problem (fuel problem)",
        "detail": "fuel problem · heard: leaking fuel · HPN Tower",
        "confidence": 0.7,
-       "level": "medium",
        "channel": "HPN Tower",
        "count": 1,
        "status": "open",
@@ -6588,19 +3570,14 @@
       {
        "to": "alerts",
        "title": "HPN ATC: fuel problem (fuel problem)",
-       "body": "“We're leaking fuel from the left wing” · alert medium 70% · not dispatched · accept or dismiss in the CAD",
+       "message": "“We're leaking fuel from the left wing” · alert medium 70% · not dispatched · accept or dismiss in the CAD",
        "priority": 4,
        "tags": [
         "airplane",
         "warning"
        ],
-       "click": "https://cad.example.test/cad",
-       "who": null,
-       "actions": []
+       "click": "https://cad.example.test/cad"
       }
-     ],
-     "log": [
-      "airport_alerts: airport pre-alert #A1: HPN ATC: fuel problem (fuel problem) (0.70)"
      ]
     }
    ]
@@ -6608,6 +3585,7 @@
   {
    "rule": "fuel",
    "expect": "quiet",
+   "via": "pattern",
    "why": "the fuel truck: not the words",
    "steps": [
     {
@@ -6618,33 +3596,14 @@
       "ch": "HPN Tower",
       "dur": 4,
       "text": "the fuel truck is leaving the ramp"
-     },
-     "decisions": [
-      {
-       "watch": "atc",
-       "id": "fuel-quiet-1",
-       "ch": "HPN Tower",
-       "fed": "The fuel truck is leaving the ramp",
-       "hits": [],
-       "row": null
-      },
-      {
-       "watch": "talkers",
-       "id": "fuel-quiet-1",
-       "record": null
-      },
-      {
-       "watch": "airport_watch",
-       "id": "fuel-quiet-1",
-       "row": null
-      }
-     ]
+     }
     }
    ]
   },
   {
    "rule": "medical",
    "expect": "fires",
+   "words": "passenger unresponsive",
    "why": "a passenger unresponsive",
    "steps": [
     {
@@ -6656,50 +3615,6 @@
       "dur": 4,
       "text": "we have a passenger unresponsive, need paramedics at the gate"
      },
-     "decisions": [
-      {
-       "watch": "atc",
-       "id": "medical-fires-1",
-       "ch": "HPN Tower",
-       "fed": "We have a passenger unresponsive, need paramedics at the gate",
-       "hits": [
-        [
-         "medical",
-         "passenger unresponsive"
-        ]
-       ],
-       "score": 0.65,
-       "adsb": null,
-       "context": [],
-       "row": "A1"
-      },
-      {
-       "raise": {
-        "source": "atc",
-        "kind": "medical",
-        "subject": "medical",
-        "group": "HPN Tower",
-        "title": "HPN ATC: medical emergency on board (medical emergency)",
-        "confidence": 0.65,
-        "rank": 1,
-        "push": true,
-        "limit": true,
-        "aircraft": []
-       },
-       "row": "A1",
-       "how": "new"
-      },
-      {
-       "watch": "talkers",
-       "id": "medical-fires-1",
-       "record": null
-      },
-      {
-       "watch": "airport_watch",
-       "id": "medical-fires-1",
-       "row": null
-      }
-     ],
      "alerts": [
       {
        "id": "A1",
@@ -6712,7 +3627,6 @@
        "title": "HPN ATC: medical emergency on board (medical emergency)",
        "detail": "medical emergency on board · heard: passenger unresponsive · HPN Tower",
        "confidence": 0.65,
-       "level": "medium",
        "channel": "HPN Tower",
        "count": 1,
        "status": "open",
@@ -6761,19 +3675,14 @@
       {
        "to": "alerts",
        "title": "HPN ATC: medical emergency on board (medical emergency)",
-       "body": "“We have a passenger unresponsive, need paramedics at the gate” · alert medium 65% · not dispatched · accept or dismiss in the CAD",
+       "message": "“We have a passenger unresponsive, need paramedics at the gate” · alert medium 65% · not dispatched · accept or dismiss in the CAD",
        "priority": 4,
        "tags": [
         "airplane",
         "warning"
        ],
-       "click": "https://cad.example.test/cad",
-       "who": null,
-       "actions": []
+       "click": "https://cad.example.test/cad"
       }
-     ],
-     "log": [
-      "airport_alerts: airport pre-alert #A1: HPN ATC: medical emergency on board (medical emergency) (0.65)"
      ]
     }
    ]
@@ -6781,7 +3690,8 @@
   {
    "rule": "medical",
    "expect": "quiet",
-   "why": "a medical helicopter inbound: the 'not'",
+   "via": "pattern",
+   "why": "a medical helicopter inbound alone: not the pattern",
    "steps": [
     {
      "step": {
@@ -6791,33 +3701,14 @@
       "ch": "HPN Tower",
       "dur": 4,
       "text": "medical helicopter inbound from the north, landing at the hospital"
-     },
-     "decisions": [
-      {
-       "watch": "atc",
-       "id": "medical-quiet-1",
-       "ch": "HPN Tower",
-       "fed": "Medical helicopter inbound from the north, landing at the hospital",
-       "hits": [],
-       "row": null
-      },
-      {
-       "watch": "talkers",
-       "id": "medical-quiet-1",
-       "record": null
-      },
-      {
-       "watch": "airport_watch",
-       "id": "medical-quiet-1",
-       "row": null
-      }
-     ]
+     }
     }
    ]
   },
   {
    "rule": "laser",
    "expect": "fires",
+   "words": "lasered",
    "why": "lasered on final",
    "steps": [
     {
@@ -6829,50 +3720,6 @@
       "dur": 4,
       "text": "we just got lasered on a two mile final, green laser from the ground"
      },
-     "decisions": [
-      {
-       "watch": "atc",
-       "id": "laser-fires-1",
-       "ch": "HPN Tower",
-       "fed": "We just got lasered on a two mile final, green laser from the ground",
-       "hits": [
-        [
-         "laser",
-         "lasered"
-        ]
-       ],
-       "score": 0.55,
-       "adsb": null,
-       "context": [],
-       "row": "A1"
-      },
-      {
-       "raise": {
-        "source": "atc",
-        "kind": "laser",
-        "subject": "laser",
-        "group": "HPN Tower",
-        "title": "HPN ATC: laser strike (laser strike)",
-        "confidence": 0.55,
-        "rank": 1,
-        "push": true,
-        "limit": true,
-        "aircraft": []
-       },
-       "row": "A1",
-       "how": "new"
-      },
-      {
-       "watch": "talkers",
-       "id": "laser-fires-1",
-       "record": null
-      },
-      {
-       "watch": "airport_watch",
-       "id": "laser-fires-1",
-       "row": null
-      }
-     ],
      "alerts": [
       {
        "id": "A1",
@@ -6885,7 +3732,6 @@
        "title": "HPN ATC: laser strike (laser strike)",
        "detail": "laser strike · heard: lasered · HPN Tower",
        "confidence": 0.55,
-       "level": "low",
        "channel": "HPN Tower",
        "count": 1,
        "status": "open",
@@ -6934,27 +3780,59 @@
       {
        "to": "alerts",
        "title": "HPN ATC: laser strike (laser strike)",
-       "body": "“We just got lasered on a two mile final, green laser from the ground” · alert low 55% · not dispatched · accept or dismiss in the CAD",
+       "message": "“We just got lasered on a two mile final, green laser from the ground” · alert low 55% · not dispatched · accept or dismiss in the CAD",
        "priority": 4,
        "tags": [
         "airplane",
         "warning"
        ],
-       "click": "https://cad.example.test/cad",
-       "who": null,
-       "actions": []
+       "click": "https://cad.example.test/cad"
       }
-     ],
-     "log": [
-      "airport_alerts: airport pre-alert #A1: HPN ATC: laser strike (laser strike) (0.55)"
      ]
+    }
+   ]
+  },
+  {
+   "rule": "bird",
+   "expect": "quiet",
+   "via": "not",
+   "why": "birds hit, said with 'bird activity': the 'not' vetoes the whole transmission",
+   "steps": [
+    {
+     "step": {
+      "do": "air",
+      "t": 0,
+      "id": "bird-quiet-2",
+      "ch": "HPN Tower",
+      "dur": 4,
+      "text": "caution, bird activity in the vicinity, a Cessna just hit a bird on the go"
+     }
+    }
+   ]
+  },
+  {
+   "rule": "medical",
+   "expect": "quiet",
+   "via": "not",
+   "why": "a cardiac patient on a medical helicopter inbound: the 'not'",
+   "steps": [
+    {
+     "step": {
+      "do": "air",
+      "t": 0,
+      "id": "medical-quiet-2",
+      "ch": "HPN Tower",
+      "dur": 4,
+      "text": "medical helicopter inbound from the north with a cardiac patient"
+     }
     }
    ]
   },
   {
    "rule": "laser",
    "expect": "quiet",
-   "why": "a laser light show: the 'not'",
+   "via": "not",
+   "why": "a green laser at a laser light show: the 'not'",
    "steps": [
     {
      "step": {
@@ -6963,28 +3841,26 @@
       "id": "laser-quiet-1",
       "ch": "HPN Tower",
       "dur": 4,
+      "text": "laser light show at the stadium tonight, you may see a green laser to the west"
+     }
+    }
+   ]
+  },
+  {
+   "rule": "laser",
+   "expect": "quiet",
+   "via": "pattern",
+   "why": "a laser light show alone: not the pattern",
+   "steps": [
+    {
+     "step": {
+      "do": "air",
+      "t": 0,
+      "id": "laser-quiet-2",
+      "ch": "HPN Tower",
+      "dur": 4,
       "text": "laser light show at the stadium tonight, no impact on arrivals"
-     },
-     "decisions": [
-      {
-       "watch": "atc",
-       "id": "laser-quiet-1",
-       "ch": "HPN Tower",
-       "fed": "Laser light show at the stadium tonight, no impact on arrivals",
-       "hits": [],
-       "row": null
-      },
-      {
-       "watch": "talkers",
-       "id": "laser-quiet-1",
-       "record": null
-      },
-      {
-       "watch": "airport_watch",
-       "id": "laser-quiet-1",
-       "row": null
-      }
-     ]
+     }
     }
    ]
   }

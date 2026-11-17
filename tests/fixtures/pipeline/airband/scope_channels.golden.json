@@ -64,102 +64,6 @@
     "dur": 4,
     "text": "New York approach, Delta forty five, declaring an emergency, smoke in the cabin"
    },
-   "decisions": [
-    {
-     "watch": "atc",
-     "id": "app-1",
-     "ch": "NY App 126.4/120.8",
-     "fed": "New York approach, Delta forty five, declaring an emergency, smoke in the cabin",
-     "hits": [
-      [
-       "smoke-aircraft",
-       "smoke in the cabin"
-      ],
-      [
-       "declaring",
-       "declaring an emergency"
-      ]
-     ],
-     "score": 0.9925,
-     "adsb": null,
-     "context": [],
-     "row": "A1"
-    },
-    {
-     "raise": {
-      "source": "atc",
-      "kind": "emergency",
-      "subject": "acft:DAL45",
-      "group": "NY App 126.4/120.8",
-      "title": "HPN ATC: emergency declared: DAL45",
-      "confidence": 0.99,
-      "rank": 3,
-      "push": true,
-      "limit": true,
-      "aircraft": [
-       [
-        "DAL45",
-        "dd0045",
-        1.0
-       ]
-      ]
-     },
-     "row": "A1",
-     "how": "new"
-    },
-    {
-     "watch": "talkers",
-     "id": "app-1",
-     "record": {
-      "role": "aircraft",
-      "talker": {
-       "callsign": "DAL45",
-       "hex": "dd0045",
-       "status": "confirmed"
-      },
-      "aircraft": {
-       "callsign": "DAL45",
-       "hex": "dd0045",
-       "status": "confirmed"
-      },
-      "addressed": {
-       "callsign": "APP",
-       "status": "heard"
-      },
-      "exchange": {
-       "subject": "DAL45",
-       "hex": "dd0045"
-      }
-     }
-    },
-    {
-     "raise": {
-      "source": "atc",
-      "kind": "abnormal",
-      "subject": "acft:DAL45",
-      "group": "",
-      "title": "HPN ATC: abnormal · smoke, emergency · DAL45 (B712)",
-      "confidence": 0.7,
-      "rank": 2,
-      "push": true,
-      "limit": true,
-      "aircraft": [
-       [
-        "DAL45",
-        "dd0045",
-        1.0
-       ]
-      ]
-     },
-     "row": "A1",
-     "how": "added"
-    },
-    {
-     "watch": "airport_watch",
-     "id": "app-1",
-     "row": "A1"
-    }
-   ],
    "alerts": [
     {
      "id": "A1",
@@ -172,7 +76,6 @@
      "title": "HPN ATC: emergency declared: DAL45",
      "detail": "aircraft emergency · heard: smoke in the cabin, declaring an emergency · NY App 126.4/120.8",
      "confidence": 0.99,
-     "level": "high",
      "channel": "NY App 126.4/120.8",
      "count": 2,
      "status": "open",
@@ -257,23 +160,17 @@
     {
      "to": "alerts",
      "title": "HPN ATC: emergency declared: DAL45",
-     "body": "“New York approach, Delta forty five, declaring an emergency, smoke in the cabin” · DAL45 (B712) · 30.0 NM from HPN · 9,000 ft · inbound · ADS-B match 100% · alert high 99% · not dispatched · accept or dismiss in the CAD",
+     "message": "“New York approach, Delta forty five, declaring an emergency, smoke in the cabin” · DAL45 (B712) · 30.0 NM from HPN · 9,000 ft · inbound · ADS-B match 100% · alert high 99% · not dispatched · accept or dismiss in the CAD",
      "priority": 4,
      "tags": [
       "airplane",
       "warning"
      ],
-     "click": "https://cad.example.test/cad",
-     "who": null,
-     "actions": []
+     "click": "https://cad.example.test/cad"
     }
    ],
    "aircraft_widened_nm": [
     40.0
-   ],
-   "log": [
-    "airport_alerts: airport pre-alert #A1: HPN ATC: emergency declared: DAL45 (0.99)",
-    "airport_watch: airport watch: DAL45: abnormal -> pre-alert #A1 (0.70)"
    ]
   },
   {
@@ -341,7 +238,6 @@
      "title": "HPN ATC: emergency declared: DAL45",
      "detail": "aircraft emergency · heard: smoke in the cabin, declaring an emergency · NY App 126.4/120.8",
      "confidence": 0.99,
-     "level": "high",
      "channel": "NY App 126.4/120.8",
      "count": 2,
      "status": "open",
@@ -427,76 +323,6 @@
     "dur": 4,
     "text": "Westchester ground, Execjet five twenty one, we have smoke in the cabin, request the equipment"
    },
-   "decisions": [
-    {
-     "watch": "atc",
-     "id": "gnd-1",
-     "ch": "HPN Ground",
-     "fed": "Westchester Ground, Execjet five twenty one, we have smoke in the cabin, request the equipment",
-     "hits": [
-      [
-       "smoke-aircraft",
-       "smoke in the cabin"
-      ]
-     ],
-     "score": 0.85,
-     "adsb": null,
-     "context": [],
-     "row": "A2"
-    },
-    {
-     "raise": {
-      "source": "atc",
-      "kind": "fire_acft",
-      "subject": "fire",
-      "group": "HPN Ground",
-      "title": "HPN ATC: smoke on board reported by EJA521",
-      "confidence": 0.85,
-      "rank": 2,
-      "push": true,
-      "limit": true,
-      "aircraft": [
-       [
-        "EJA521",
-        "0dd0dd",
-        1.0
-       ]
-      ]
-     },
-     "row": "A2",
-     "how": "new"
-    },
-    {
-     "watch": "talkers",
-     "id": "gnd-1",
-     "record": {
-      "role": "aircraft",
-      "talker": {
-       "callsign": "EJA521",
-       "hex": "0dd0dd",
-       "status": "confirmed"
-      },
-      "aircraft": {
-       "callsign": "EJA521",
-       "hex": "0dd0dd",
-       "status": "confirmed"
-      },
-      "addressed": {
-       "callsign": "GND",
-       "status": "heard"
-      },
-      "exchange": {
-       "subject": "EJA521",
-       "hex": "0dd0dd"
-      }
-     }
-    },
-    {
-     "watch": "airport_watch",
-     "id": "gnd-1",
-     "row": null
-    }
-   ],
    "alerts": [
     {
      "id": "A2",
@@ -509,7 +335,6 @@
      "title": "HPN ATC: smoke on board reported by EJA521",
      "detail": "fire or smoke on an aircraft · heard: smoke in the cabin · HPN Ground",
      "confidence": 0.85,
-     "level": "high",
      "channel": "HPN Ground",
      "count": 1,
      "status": "open",
@@ -575,19 +400,14 @@
     {
      "to": "alerts",
      "title": "HPN ATC: smoke on board reported by EJA521",
-     "body": "“Westchester Ground, Execjet five twenty one, we have smoke in the cabin, request the equipment” · EJA521 (C68A) · 0.4 NM from HPN · GND · ground · ADS-B match 100% · alert high 85% · not dispatched · accept or dismiss in the CAD",
+     "message": "“Westchester Ground, Execjet five twenty one, we have smoke in the cabin, request the equipment” · EJA521 (C68A) · 0.4 NM from HPN · GND · ground · ADS-B match 100% · alert high 85% · not dispatched · accept or dismiss in the CAD",
      "priority": 4,
      "tags": [
       "airplane",
       "warning"
      ],
-     "click": "https://cad.example.test/cad",
-     "who": null,
-     "actions": []
+     "click": "https://cad.example.test/cad"
     }
-   ],
-   "log": [
-    "airport_alerts: airport pre-alert #A2: HPN ATC: smoke on board reported by EJA521 (0.85)"
    ]
   },
   {
@@ -655,7 +475,6 @@
      "title": "HPN ATC: emergency declared: DAL45",
      "detail": "aircraft emergency · heard: smoke in the cabin, declaring an emergency · NY App 126.4/120.8",
      "confidence": 0.99,
-     "level": "high",
      "channel": "NY App 126.4/120.8",
      "count": 2,
      "status": "open",
@@ -741,100 +560,6 @@
     "dur": 4,
     "text": "Westchester tower, Delta forty five, declaring an emergency, smoke in the cabin"
    },
-   "decisions": [
-    {
-     "watch": "atc",
-     "id": "twr-1",
-     "ch": "HPN Tower",
-     "fed": "Westchester Tower, Delta forty five, declaring an emergency, smoke in the cabin",
-     "hits": [
-      [
-       "smoke-aircraft",
-       "smoke in the cabin"
-      ],
-      [
-       "declaring",
-       "declaring an emergency"
-      ]
-     ],
-     "score": 0.9925,
-     "adsb": null,
-     "context": [],
-     "row": "A1"
-    },
-    {
-     "raise": {
-      "source": "atc",
-      "kind": "emergency",
-      "subject": "acft:DAL45",
-      "group": "HPN Tower",
-      "title": "HPN ATC: emergency declared: DAL45",
-      "confidence": 0.99,
-      "rank": 3,
-      "push": true,
-      "limit": true,
-      "aircraft": [
-       [
-        "DAL45",
-        null,
-        0.0
-       ]
-      ]
-     },
-     "row": "A1",
-     "how": "added"
-    },
-    {
-     "watch": "talkers",
-     "id": "twr-1",
-     "record": {
-      "role": "aircraft",
-      "talker": {
-       "callsign": "DAL45",
-       "status": "heard"
-      },
-      "aircraft": {
-       "callsign": "DAL45",
-       "status": "heard"
-      },
-      "addressed": {
-       "callsign": "TWR",
-       "status": "heard"
-      },
-      "exchange": {
-       "subject": "DAL45",
-       "hex": ""
-      }
-     }
-    },
-    {
-     "add_to": "A1",
-     "alert": {
-      "source": "atc",
-      "kind": "abnormal",
-      "subject": "acft:DAL45",
-      "group": "",
-      "title": "HPN ATC: abnormal · smoke, emergency · DAL45 (B712)",
-      "confidence": 0.8,
-      "rank": 2,
-      "push": true,
-      "limit": true,
-      "aircraft": [
-       [
-        "DAL45",
-        "dd0045",
-        1.0
-       ]
-      ]
-     },
-     "row": "A1"
-    },
-    {
-     "watch": "airport_watch",
-     "id": "twr-1",
-     "row": "A1"
-    }
-   ],
    "alerts": [
     {
      "id": "A1",
@@ -847,7 +572,6 @@
      "title": "HPN ATC: emergency declared: DAL45",
      "detail": "aircraft emergency · heard: smoke in the cabin, declaring an emergency · NY App 126.4/120.8",
      "confidence": 0.99,
-     "level": "high",
      "channel": "NY App 126.4/120.8",
      "count": 4,
      "status": "open",
@@ -939,9 +663,6 @@
       ]
      }
     }
-   ],
-   "log": [
-    "airport_watch: airport watch: DAL45: back on HPN Tower"
    ]
   }
  ]

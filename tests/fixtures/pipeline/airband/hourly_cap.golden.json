@@ -10,70 +10,6 @@
     "dur": 4,
     "text": "mayday mayday mayday, November one zero one alfa alfa"
    },
-   "decisions": [
-    {
-     "watch": "atc",
-     "id": "cap-1",
-     "ch": "HPN Tower",
-     "fed": "Mayday mayday mayday, N101AA",
-     "hits": [
-      [
-       "mayday",
-       "mayday"
-      ]
-     ],
-     "score": 0.95,
-     "adsb": null,
-     "context": [],
-     "row": "A1"
-    },
-    {
-     "raise": {
-      "source": "atc",
-      "kind": "emergency",
-      "subject": "acft:N101AA",
-      "group": "HPN Tower",
-      "title": "HPN ATC: MAYDAY: N101AA",
-      "confidence": 0.95,
-      "rank": 3,
-      "push": true,
-      "limit": true,
-      "aircraft": [
-       [
-        "N101AA",
-        null,
-        0.0
-       ]
-      ]
-     },
-     "row": "A1",
-     "how": "new"
-    },
-    {
-     "watch": "talkers",
-     "id": "cap-1",
-     "record": {
-      "role": "aircraft",
-      "talker": {
-       "callsign": "N101AA",
-       "status": "heard"
-      },
-      "aircraft": {
-       "callsign": "N101AA",
-       "status": "heard"
-      },
-      "exchange": {
-       "subject": "N101AA",
-       "hex": ""
-      }
-     }
-    },
-    {
-     "watch": "airport_watch",
-     "id": "cap-1",
-     "row": null
-    }
-   ],
    "alerts": [
     {
      "id": "A1",
@@ -86,7 +22,6 @@
      "title": "HPN ATC: MAYDAY: N101AA",
      "detail": "aircraft emergency · heard: mayday · HPN Tower",
      "confidence": 0.95,
-     "level": "high",
      "channel": "HPN Tower",
      "count": 1,
      "status": "open",
@@ -142,19 +77,14 @@
     {
      "to": "alerts",
      "title": "HPN ATC: MAYDAY: N101AA",
-     "body": "“Mayday mayday mayday, N101AA” · N101AA · heard, not on ADS-B · alert high 95% · not dispatched · accept or dismiss in the CAD",
+     "message": "“Mayday mayday mayday, N101AA” · N101AA · heard, not on ADS-B · alert high 95% · not dispatched · accept or dismiss in the CAD",
      "priority": 4,
      "tags": [
       "airplane",
       "warning"
      ],
-     "click": "https://cad.example.test/cad",
-     "who": null,
-     "actions": []
+     "click": "https://cad.example.test/cad"
     }
-   ],
-   "log": [
-    "airport_alerts: airport pre-alert #A1: HPN ATC: MAYDAY: N101AA (0.95)"
    ]
   },
   {
@@ -166,70 +96,6 @@
     "dur": 4,
     "text": "mayday mayday mayday, November two zero two bravo bravo"
    },
-   "decisions": [
-    {
-     "watch": "atc",
-     "id": "cap-2",
-     "ch": "HPN Tower",
-     "fed": "Mayday mayday mayday, N202BB",
-     "hits": [
-      [
-       "mayday",
-       "mayday"
-      ]
-     ],
-     "score": 0.95,
-     "adsb": null,
-     "context": [],
-     "row": "A2"
-    },
-    {
-     "raise": {
-      "source": "atc",
-      "kind": "emergency",
-      "subject": "acft:N202BB",
-      "group": "HPN Tower",
-      "title": "HPN ATC: MAYDAY: N202BB",
-      "confidence": 0.95,
-      "rank": 3,
-      "push": true,
-      "limit": true,
-      "aircraft": [
-       [
-        "N202BB",
-        null,
-        0.0
-       ]
-      ]
-     },
-     "row": "A2",
-     "how": "new"
-    },
-    {
-     "watch": "talkers",
-     "id": "cap-2",
-     "record": {
-      "role": "aircraft",
-      "talker": {
-       "callsign": "N202BB",
-       "status": "heard"
-      },
-      "aircraft": {
-       "callsign": "N202BB",
-       "status": "heard"
-      },
-      "exchange": {
-       "subject": "N202BB",
-       "hex": ""
-      }
-     }
-    },
-    {
-     "watch": "airport_watch",
-     "id": "cap-2",
-     "row": null
-    }
-   ],
    "alerts": [
     {
      "id": "A2",
@@ -242,7 +108,6 @@
      "title": "HPN ATC: MAYDAY: N202BB",
      "detail": "aircraft emergency · heard: mayday · HPN Tower",
      "confidence": 0.95,
-     "level": "high",
      "channel": "HPN Tower",
      "count": 1,
      "status": "open",
@@ -298,19 +163,14 @@
     {
      "to": "alerts",
      "title": "HPN ATC: MAYDAY: N202BB",
-     "body": "“Mayday mayday mayday, N202BB” · N202BB · heard, not on ADS-B · alert high 95% · not dispatched · accept or dismiss in the CAD",
+     "message": "“Mayday mayday mayday, N202BB” · N202BB · heard, not on ADS-B · alert high 95% · not dispatched · accept or dismiss in the CAD",
      "priority": 4,
      "tags": [
       "airplane",
       "warning"
      ],
-     "click": "https://cad.example.test/cad",
-     "who": null,
-     "actions": []
+     "click": "https://cad.example.test/cad"
     }
-   ],
-   "log": [
-    "airport_alerts: airport pre-alert #A2: HPN ATC: MAYDAY: N202BB (0.95)"
    ]
   },
   {
@@ -322,70 +182,6 @@
     "dur": 4,
     "text": "mayday mayday mayday, November three zero three charlie charlie"
    },
-   "decisions": [
-    {
-     "watch": "atc",
-     "id": "cap-3",
-     "ch": "HPN Tower",
-     "fed": "Mayday mayday mayday, N303CC",
-     "hits": [
-      [
-       "mayday",
-       "mayday"
-      ]
-     ],
-     "score": 0.95,
-     "adsb": null,
-     "context": [],
-     "row": "A3"
-    },
-    {
-     "raise": {
-      "source": "atc",
-      "kind": "emergency",
-      "subject": "acft:N303CC",
-      "group": "HPN Tower",
-      "title": "HPN ATC: MAYDAY: N303CC",
-      "confidence": 0.95,
-      "rank": 3,
-      "push": true,
-      "limit": true,
-      "aircraft": [
-       [
-        "N303CC",
-        null,
-        0.0
-       ]
-      ]
-     },
-     "row": "A3",
-     "how": "new"
-    },
-    {
-     "watch": "talkers",
-     "id": "cap-3",
-     "record": {
-      "role": "aircraft",
-      "talker": {
-       "callsign": "N303CC",
-       "status": "heard"
-      },
-      "aircraft": {
-       "callsign": "N303CC",
-       "status": "heard"
-      },
-      "exchange": {
-       "subject": "N303CC",
-       "hex": ""
-      }
-     }
-    },
-    {
-     "watch": "airport_watch",
-     "id": "cap-3",
-     "row": null
-    }
-   ],
    "alerts": [
     {
      "id": "A3",
@@ -398,7 +194,6 @@
      "title": "HPN ATC: MAYDAY: N303CC",
      "detail": "aircraft emergency · heard: mayday · HPN Tower",
      "confidence": 0.95,
-     "level": "high",
      "channel": "HPN Tower",
      "count": 1,
      "status": "open",
@@ -454,19 +249,14 @@
     {
      "to": "alerts",
      "title": "HPN ATC: MAYDAY: N303CC",
-     "body": "“Mayday mayday mayday, N303CC” · N303CC · heard, not on ADS-B · alert high 95% · not dispatched · accept or dismiss in the CAD",
+     "message": "“Mayday mayday mayday, N303CC” · N303CC · heard, not on ADS-B · alert high 95% · not dispatched · accept or dismiss in the CAD",
      "priority": 4,
      "tags": [
       "airplane",
       "warning"
      ],
-     "click": "https://cad.example.test/cad",
-     "who": null,
-     "actions": []
+     "click": "https://cad.example.test/cad"
     }
-   ],
-   "log": [
-    "airport_alerts: airport pre-alert #A3: HPN ATC: MAYDAY: N303CC (0.95)"
    ]
   },
   {
@@ -478,70 +268,6 @@
     "dur": 4,
     "text": "mayday mayday mayday, November four zero four delta delta"
    },
-   "decisions": [
-    {
-     "watch": "atc",
-     "id": "cap-4",
-     "ch": "HPN Tower",
-     "fed": "Mayday mayday mayday, N404DD",
-     "hits": [
-      [
-       "mayday",
-       "mayday"
-      ]
-     ],
-     "score": 0.95,
-     "adsb": null,
-     "context": [],
-     "row": "A4"
-    },
-    {
-     "raise": {
-      "source": "atc",
-      "kind": "emergency",
-      "subject": "acft:N404DD",
-      "group": "HPN Tower",
-      "title": "HPN ATC: MAYDAY: N404DD",
-      "confidence": 0.95,
-      "rank": 3,
-      "push": true,
-      "limit": true,
-      "aircraft": [
-       [
-        "N404DD",
-        null,
-        0.0
-       ]
-      ]
-     },
-     "row": "A4",
-     "how": "new"
-    },
-    {
-     "watch": "talkers",
-     "id": "cap-4",
-     "record": {
-      "role": "aircraft",
-      "talker": {
-       "callsign": "N404DD",
-       "status": "heard"
-      },
-      "aircraft": {
-       "callsign": "N404DD",
-       "status": "heard"
-      },
-      "exchange": {
-       "subject": "N404DD",
-       "hex": ""
-      }
-     }
-    },
-    {
-     "watch": "airport_watch",
-     "id": "cap-4",
-     "row": null
-    }
-   ],
    "alerts": [
     {
      "id": "A4",
@@ -554,7 +280,6 @@
      "title": "HPN ATC: MAYDAY: N404DD",
      "detail": "aircraft emergency · heard: mayday · HPN Tower",
      "confidence": 0.95,
-     "level": "high",
      "channel": "HPN Tower",
      "count": 1,
      "status": "open",
@@ -610,19 +335,14 @@
     {
      "to": "alerts",
      "title": "HPN ATC: MAYDAY: N404DD",
-     "body": "“Mayday mayday mayday, N404DD” · N404DD · heard, not on ADS-B · alert high 95% · not dispatched · accept or dismiss in the CAD",
+     "message": "“Mayday mayday mayday, N404DD” · N404DD · heard, not on ADS-B · alert high 95% · not dispatched · accept or dismiss in the CAD",
      "priority": 4,
      "tags": [
       "airplane",
       "warning"
      ],
-     "click": "https://cad.example.test/cad",
-     "who": null,
-     "actions": []
+     "click": "https://cad.example.test/cad"
     }
-   ],
-   "log": [
-    "airport_alerts: airport pre-alert #A4: HPN ATC: MAYDAY: N404DD (0.95)"
    ]
   },
   {
@@ -634,70 +354,6 @@
     "dur": 4,
     "text": "mayday mayday mayday, November five zero five echo echo"
    },
-   "decisions": [
-    {
-     "watch": "atc",
-     "id": "cap-5",
-     "ch": "HPN Tower",
-     "fed": "Mayday mayday mayday, N505EE",
-     "hits": [
-      [
-       "mayday",
-       "mayday"
-      ]
-     ],
-     "score": 0.95,
-     "adsb": null,
-     "context": [],
-     "row": "A5"
-    },
-    {
-     "raise": {
-      "source": "atc",
-      "kind": "emergency",
-      "subject": "acft:N505EE",
-      "group": "HPN Tower",
-      "title": "HPN ATC: MAYDAY: N505EE",
-      "confidence": 0.95,
-      "rank": 3,
-      "push": true,
-      "limit": true,
-      "aircraft": [
-       [
-        "N505EE",
-        null,
-        0.0
-       ]
-      ]
-     },
-     "row": "A5",
-     "how": "new"
-    },
-    {
-     "watch": "talkers",
-     "id": "cap-5",
-     "record": {
-      "role": "aircraft",
-      "talker": {
-       "callsign": "N505EE",
-       "status": "heard"
-      },
-      "aircraft": {
-       "callsign": "N505EE",
-       "status": "heard"
-      },
-      "exchange": {
-       "subject": "N505EE",
-       "hex": ""
-      }
-     }
-    },
-    {
-     "watch": "airport_watch",
-     "id": "cap-5",
-     "row": null
-    }
-   ],
    "alerts": [
     {
      "id": "A5",
@@ -710,7 +366,6 @@
      "title": "HPN ATC: MAYDAY: N505EE",
      "detail": "aircraft emergency · heard: mayday · HPN Tower",
      "confidence": 0.95,
-     "level": "high",
      "channel": "HPN Tower",
      "count": 1,
      "status": "open",
@@ -766,19 +421,14 @@
     {
      "to": "alerts",
      "title": "HPN ATC: MAYDAY: N505EE",
-     "body": "“Mayday mayday mayday, N505EE” · N505EE · heard, not on ADS-B · alert high 95% · not dispatched · accept or dismiss in the CAD",
+     "message": "“Mayday mayday mayday, N505EE” · N505EE · heard, not on ADS-B · alert high 95% · not dispatched · accept or dismiss in the CAD",
      "priority": 4,
      "tags": [
       "airplane",
       "warning"
      ],
-     "click": "https://cad.example.test/cad",
-     "who": null,
-     "actions": []
+     "click": "https://cad.example.test/cad"
     }
-   ],
-   "log": [
-    "airport_alerts: airport pre-alert #A5: HPN ATC: MAYDAY: N505EE (0.95)"
    ]
   },
   {
@@ -790,70 +440,6 @@
     "dur": 4,
     "text": "mayday mayday mayday, November six zero six foxtrot foxtrot"
    },
-   "decisions": [
-    {
-     "watch": "atc",
-     "id": "cap-6",
-     "ch": "HPN Tower",
-     "fed": "Mayday mayday mayday, N606FF",
-     "hits": [
-      [
-       "mayday",
-       "mayday"
-      ]
-     ],
-     "score": 0.95,
-     "adsb": null,
-     "context": [],
-     "row": "A6"
-    },
-    {
-     "raise": {
-      "source": "atc",
-      "kind": "emergency",
-      "subject": "acft:N606FF",
-      "group": "HPN Tower",
-      "title": "HPN ATC: MAYDAY: N606FF",
-      "confidence": 0.95,
-      "rank": 3,
-      "push": true,
-      "limit": true,
-      "aircraft": [
-       [
-        "N606FF",
-        null,
-        0.0
-       ]
-      ]
-     },
-     "row": "A6",
-     "how": "new"
-    },
-    {
-     "watch": "talkers",
-     "id": "cap-6",
-     "record": {
-      "role": "aircraft",
-      "talker": {
-       "callsign": "N606FF",
-       "status": "heard"
-      },
-      "aircraft": {
-       "callsign": "N606FF",
-       "status": "heard"
-      },
-      "exchange": {
-       "subject": "N606FF",
-       "hex": ""
-      }
-     }
-    },
-    {
-     "watch": "airport_watch",
-     "id": "cap-6",
-     "row": null
-    }
-   ],
    "alerts": [
     {
      "id": "A6",
@@ -866,7 +452,6 @@
      "title": "HPN ATC: MAYDAY: N606FF",
      "detail": "aircraft emergency · heard: mayday · HPN Tower",
      "confidence": 0.95,
-     "level": "high",
      "channel": "HPN Tower",
      "count": 1,
      "status": "open",
@@ -922,19 +507,14 @@
     {
      "to": "alerts",
      "title": "HPN ATC: MAYDAY: N606FF",
-     "body": "“Mayday mayday mayday, N606FF” · N606FF · heard, not on ADS-B · alert high 95% · not dispatched · accept or dismiss in the CAD",
+     "message": "“Mayday mayday mayday, N606FF” · N606FF · heard, not on ADS-B · alert high 95% · not dispatched · accept or dismiss in the CAD",
      "priority": 4,
      "tags": [
       "airplane",
       "warning"
      ],
-     "click": "https://cad.example.test/cad",
-     "who": null,
-     "actions": []
+     "click": "https://cad.example.test/cad"
     }
-   ],
-   "log": [
-    "airport_alerts: airport pre-alert #A6: HPN ATC: MAYDAY: N606FF (0.95)"
    ]
   },
   {
@@ -946,70 +526,6 @@
     "dur": 4,
     "text": "mayday mayday mayday, November seven zero seven golf golf"
    },
-   "decisions": [
-    {
-     "watch": "atc",
-     "id": "cap-7",
-     "ch": "HPN Tower",
-     "fed": "Mayday mayday mayday, N707GG",
-     "hits": [
-      [
-       "mayday",
-       "mayday"
-      ]
-     ],
-     "score": 0.95,
-     "adsb": null,
-     "context": [],
-     "row": "A7"
-    },
-    {
-     "raise": {
-      "source": "atc",
-      "kind": "emergency",
-      "subject": "acft:N707GG",
-      "group": "HPN Tower",
-      "title": "HPN ATC: MAYDAY: N707GG",
-      "confidence": 0.95,
-      "rank": 3,
-      "push": true,
-      "limit": true,
-      "aircraft": [
-       [
-        "N707GG",
-        null,
-        0.0
-       ]
-      ]
-     },
-     "row": "A7",
-     "how": "new"
-    },
-    {
-     "watch": "talkers",
-     "id": "cap-7",
-     "record": {
-      "role": "aircraft",
-      "talker": {
-       "callsign": "N707GG",
-       "status": "heard"
-      },
-      "aircraft": {
-       "callsign": "N707GG",
-       "status": "heard"
-      },
-      "exchange": {
-       "subject": "N707GG",
-       "hex": ""
-      }
-     }
-    },
-    {
-     "watch": "airport_watch",
-     "id": "cap-7",
-     "row": null
-    }
-   ],
    "alerts": [
     {
      "id": "A7",
@@ -1022,7 +538,6 @@
      "title": "HPN ATC: MAYDAY: N707GG",
      "detail": "aircraft emergency · heard: mayday · HPN Tower",
      "confidence": 0.95,
-     "level": "high",
      "channel": "HPN Tower",
      "count": 1,
      "status": "open",
@@ -1078,19 +593,14 @@
     {
      "to": "alerts",
      "title": "HPN ATC: MAYDAY: N707GG",
-     "body": "“Mayday mayday mayday, N707GG” · N707GG · heard, not on ADS-B · alert high 95% · not dispatched · accept or dismiss in the CAD",
+     "message": "“Mayday mayday mayday, N707GG” · N707GG · heard, not on ADS-B · alert high 95% · not dispatched · accept or dismiss in the CAD",
      "priority": 4,
      "tags": [
       "airplane",
       "warning"
      ],
-     "click": "https://cad.example.test/cad",
-     "who": null,
-     "actions": []
+     "click": "https://cad.example.test/cad"
     }
-   ],
-   "log": [
-    "airport_alerts: airport pre-alert #A7: HPN ATC: MAYDAY: N707GG (0.95)"
    ]
   },
   {
@@ -1102,70 +612,6 @@
     "dur": 4,
     "text": "mayday mayday mayday, November eight zero eight hotel hotel"
    },
-   "decisions": [
-    {
-     "watch": "atc",
-     "id": "cap-8",
-     "ch": "HPN Tower",
-     "fed": "Mayday mayday mayday, N808HH",
-     "hits": [
-      [
-       "mayday",
-       "mayday"
-      ]
-     ],
-     "score": 0.95,
-     "adsb": null,
-     "context": [],
-     "row": "A8"
-    },
-    {
-     "raise": {
-      "source": "atc",
-      "kind": "emergency",
-      "subject": "acft:N808HH",
-      "group": "HPN Tower",
-      "title": "HPN ATC: MAYDAY: N808HH",
-      "confidence": 0.95,
-      "rank": 3,
-      "push": true,
-      "limit": true,
-      "aircraft": [
-       [
-        "N808HH",
-        null,
-        0.0
-       ]
-      ]
-     },
-     "row": "A8",
-     "how": "new"
-    },
-    {
-     "watch": "talkers",
-     "id": "cap-8",
-     "record": {
-      "role": "aircraft",
-      "talker": {
-       "callsign": "N808HH",
-       "status": "heard"
-      },
-      "aircraft": {
-       "callsign": "N808HH",
-       "status": "heard"
-      },
-      "exchange": {
-       "subject": "N808HH",
-       "hex": ""
-      }
-     }
-    },
-    {
-     "watch": "airport_watch",
-     "id": "cap-8",
-     "row": null
-    }
-   ],
    "alerts": [
     {
      "id": "A8",
@@ -1178,7 +624,6 @@
      "title": "HPN ATC: MAYDAY: N808HH",
      "detail": "aircraft emergency · heard: mayday · HPN Tower",
      "confidence": 0.95,
-     "level": "high",
      "channel": "HPN Tower",
      "count": 1,
      "status": "open",
@@ -1234,19 +679,14 @@
     {
      "to": "alerts",
      "title": "HPN ATC: MAYDAY: N808HH",
-     "body": "“Mayday mayday mayday, N808HH” · N808HH · heard, not on ADS-B · alert high 95% · not dispatched · accept or dismiss in the CAD",
+     "message": "“Mayday mayday mayday, N808HH” · N808HH · heard, not on ADS-B · alert high 95% · not dispatched · accept or dismiss in the CAD",
      "priority": 4,
      "tags": [
       "airplane",
       "warning"
      ],
-     "click": "https://cad.example.test/cad",
-     "who": null,
-     "actions": []
+     "click": "https://cad.example.test/cad"
     }
-   ],
-   "log": [
-    "airport_alerts: airport pre-alert #A8: HPN ATC: MAYDAY: N808HH (0.95)"
    ]
   },
   {
@@ -1258,70 +698,6 @@
     "dur": 4,
     "text": "mayday mayday mayday, November niner zero niner india india"
    },
-   "decisions": [
-    {
-     "watch": "atc",
-     "id": "cap-9",
-     "ch": "HPN Tower",
-     "fed": "Mayday mayday mayday, N909II",
-     "hits": [
-      [
-       "mayday",
-       "mayday"
-      ]
-     ],
-     "score": 0.95,
-     "adsb": null,
-     "context": [],
-     "row": "A8"
-    },
-    {
-     "raise": {
-      "source": "atc",
-      "kind": "emergency",
-      "subject": "acft:N909II",
-      "group": "HPN Tower",
-      "title": "HPN ATC: MAYDAY: N909II",
-      "confidence": 0.95,
-      "rank": 3,
-      "push": true,
-      "limit": true,
-      "aircraft": [
-       [
-        "N909II",
-        null,
-        0.0
-       ]
-      ]
-     },
-     "row": "A8",
-     "how": "added"
-    },
-    {
-     "watch": "talkers",
-     "id": "cap-9",
-     "record": {
-      "role": "aircraft",
-      "talker": {
-       "callsign": "N909II",
-       "status": "heard"
-      },
-      "aircraft": {
-       "callsign": "N909II",
-       "status": "heard"
-      },
-      "exchange": {
-       "subject": "N909II",
-       "hex": ""
-      }
-     }
-    },
-    {
-     "watch": "airport_watch",
-     "id": "cap-9",
-     "row": null
-    }
-   ],
    "alerts": [
     {
      "id": "A8",
@@ -1334,7 +710,6 @@
      "title": "HPN ATC: MAYDAY: N808HH",
      "detail": "aircraft emergency · heard: mayday · HPN Tower",
      "confidence": 0.95,
-     "level": "high",
      "channel": "HPN Tower",
      "count": 2,
      "status": "open",
@@ -1392,9 +767,6 @@
       "pushed": 0.95
      }
     }
-   ],
-   "log": [
-    "airport_alerts: airport pre-alert: 8 from HPN ATC in the last hour: added to #A8: HPN ATC: MAYDAY: N909II"
    ]
   },
   {
@@ -1404,15 +776,12 @@
     "alert": "A1",
     "operator": "Disp One"
    },
-   "decisions": [
-    {
-     "console": "dismiss",
-     "alert": "A1",
-     "status": "dismissed",
-     "acknowledged": false,
-     "incident": null
-    }
-   ],
+   "console": {
+    "dismiss": "A1",
+    "status": "dismissed",
+    "acknowledged": false,
+    "incident": null
+   },
    "alerts": [
     {
      "id": "A1",
@@ -1425,7 +794,6 @@
      "title": "HPN ATC: MAYDAY: N101AA",
      "detail": "aircraft emergency · heard: mayday · HPN Tower",
      "confidence": 0.95,
-     "level": "high",
      "channel": "HPN Tower",
      "count": 1,
      "status": "dismissed",
@@ -1485,15 +853,12 @@
     "alert": "A2",
     "operator": "Disp One"
    },
-   "decisions": [
-    {
-     "console": "dismiss",
-     "alert": "A2",
-     "status": "dismissed",
-     "acknowledged": false,
-     "incident": null
-    }
-   ],
+   "console": {
+    "dismiss": "A2",
+    "status": "dismissed",
+    "acknowledged": false,
+    "incident": null
+   },
    "alerts": [
     {
      "id": "A2",
@@ -1506,7 +871,6 @@
      "title": "HPN ATC: MAYDAY: N202BB",
      "detail": "aircraft emergency · heard: mayday · HPN Tower",
      "confidence": 0.95,
-     "level": "high",
      "channel": "HPN Tower",
      "count": 1,
      "status": "dismissed",
@@ -1566,15 +930,12 @@
     "alert": "A3",
     "operator": "Disp One"
    },
-   "decisions": [
-    {
-     "console": "dismiss",
-     "alert": "A3",
-     "status": "dismissed",
-     "acknowledged": false,
-     "incident": null
-    }
-   ],
+   "console": {
+    "dismiss": "A3",
+    "status": "dismissed",
+    "acknowledged": false,
+    "incident": null
+   },
    "alerts": [
     {
      "id": "A3",
@@ -1587,7 +948,6 @@
      "title": "HPN ATC: MAYDAY: N303CC",
      "detail": "aircraft emergency · heard: mayday · HPN Tower",
      "confidence": 0.95,
-     "level": "high",
      "channel": "HPN Tower",
      "count": 1,
      "status": "dismissed",
@@ -1647,15 +1007,12 @@
     "alert": "A4",
     "operator": "Disp One"
    },
-   "decisions": [
-    {
-     "console": "dismiss",
-     "alert": "A4",
-     "status": "dismissed",
-     "acknowledged": false,
-     "incident": null
-    }
-   ],
+   "console": {
+    "dismiss": "A4",
+    "status": "dismissed",
+    "acknowledged": false,
+    "incident": null
+   },
    "alerts": [
     {
      "id": "A4",
@@ -1668,7 +1025,6 @@
      "title": "HPN ATC: MAYDAY: N404DD",
      "detail": "aircraft emergency · heard: mayday · HPN Tower",
      "confidence": 0.95,
-     "level": "high",
      "channel": "HPN Tower",
      "count": 1,
      "status": "dismissed",
@@ -1728,15 +1084,12 @@
     "alert": "A5",
     "operator": "Disp One"
    },
-   "decisions": [
-    {
-     "console": "dismiss",
-     "alert": "A5",
-     "status": "dismissed",
-     "acknowledged": false,
-     "incident": null
-    }
-   ],
+   "console": {
+    "dismiss": "A5",
+    "status": "dismissed",
+    "acknowledged": false,
+    "incident": null
+   },
    "alerts": [
     {
      "id": "A5",
@@ -1749,7 +1102,6 @@
      "title": "HPN ATC: MAYDAY: N505EE",
      "detail": "aircraft emergency · heard: mayday · HPN Tower",
      "confidence": 0.95,
-     "level": "high",
      "channel": "HPN Tower",
      "count": 1,
      "status": "dismissed",
@@ -1809,15 +1161,12 @@
     "alert": "A6",
     "operator": "Disp One"
    },
-   "decisions": [
-    {
-     "console": "dismiss",
-     "alert": "A6",
-     "status": "dismissed",
-     "acknowledged": false,
-     "incident": null
-    }
-   ],
+   "console": {
+    "dismiss": "A6",
+    "status": "dismissed",
+    "acknowledged": false,
+    "incident": null
+   },
    "alerts": [
     {
      "id": "A6",
@@ -1830,7 +1179,6 @@
      "title": "HPN ATC: MAYDAY: N606FF",
      "detail": "aircraft emergency · heard: mayday · HPN Tower",
      "confidence": 0.95,
-     "level": "high",
      "channel": "HPN Tower",
      "count": 1,
      "status": "dismissed",
@@ -1890,15 +1238,12 @@
     "alert": "A7",
     "operator": "Disp One"
    },
-   "decisions": [
-    {
-     "console": "dismiss",
-     "alert": "A7",
-     "status": "dismissed",
-     "acknowledged": false,
-     "incident": null
-    }
-   ],
+   "console": {
+    "dismiss": "A7",
+    "status": "dismissed",
+    "acknowledged": false,
+    "incident": null
+   },
    "alerts": [
     {
      "id": "A7",
@@ -1911,7 +1256,6 @@
      "title": "HPN ATC: MAYDAY: N707GG",
      "detail": "aircraft emergency · heard: mayday · HPN Tower",
      "confidence": 0.95,
-     "level": "high",
      "channel": "HPN Tower",
      "count": 1,
      "status": "dismissed",
@@ -1971,15 +1315,12 @@
     "alert": "A8",
     "operator": "Disp One"
    },
-   "decisions": [
-    {
-     "console": "dismiss",
-     "alert": "A8",
-     "status": "dismissed",
-     "acknowledged": false,
-     "incident": null
-    }
-   ],
+   "console": {
+    "dismiss": "A8",
+    "status": "dismissed",
+    "acknowledged": false,
+    "incident": null
+   },
    "alerts": [
     {
      "id": "A8",
@@ -1992,7 +1333,6 @@
      "title": "HPN ATC: MAYDAY: N808HH",
      "detail": "aircraft emergency · heard: mayday · HPN Tower",
      "confidence": 0.95,
-     "level": "high",
      "channel": "HPN Tower",
      "count": 2,
      "status": "dismissed",
@@ -2069,74 +1409,7 @@
     "ch": "HPN Tower",
     "dur": 4,
     "text": "mayday mayday mayday, November one one one juliett juliett"
-   },
-   "decisions": [
-    {
-     "watch": "atc",
-     "id": "cap-10",
-     "ch": "HPN Tower",
-     "fed": "Mayday mayday mayday, N111JJ",
-     "hits": [
-      [
-       "mayday",
-       "mayday"
-      ]
-     ],
-     "score": 0.95,
-     "adsb": null,
-     "context": [],
-     "row": null
-    },
-    {
-     "raise": {
-      "source": "atc",
-      "kind": "emergency",
-      "subject": "acft:N111JJ",
-      "group": "HPN Tower",
-      "title": "HPN ATC: MAYDAY: N111JJ",
-      "confidence": 0.95,
-      "rank": 3,
-      "push": true,
-      "limit": true,
-      "aircraft": [
-       [
-        "N111JJ",
-        null,
-        0.0
-       ]
-      ]
-     },
-     "row": null,
-     "how": "dropped"
-    },
-    {
-     "watch": "talkers",
-     "id": "cap-10",
-     "record": {
-      "role": "aircraft",
-      "talker": {
-       "callsign": "N111JJ",
-       "status": "heard"
-      },
-      "aircraft": {
-       "callsign": "N111JJ",
-       "status": "heard"
-      },
-      "exchange": {
-       "subject": "N111JJ",
-       "hex": ""
-      }
-     }
-    },
-    {
-     "watch": "airport_watch",
-     "id": "cap-10",
-     "row": null
-    }
-   ],
-   "log": [
-    "airport_alerts: airport pre-alert: 8 from HPN ATC in the last hour: not raised: HPN ATC: MAYDAY: N111JJ"
-   ]
+   }
   },
   {
    "step": {
@@ -2147,70 +1420,6 @@
     "dur": 4,
     "text": "mayday mayday mayday, November one two one kilo kilo"
    },
-   "decisions": [
-    {
-     "watch": "atc",
-     "id": "cap-11",
-     "ch": "HPN Tower",
-     "fed": "Mayday mayday mayday, N121KK",
-     "hits": [
-      [
-       "mayday",
-       "mayday"
-      ]
-     ],
-     "score": 0.95,
-     "adsb": null,
-     "context": [],
-     "row": "A9"
-    },
-    {
-     "raise": {
-      "source": "atc",
-      "kind": "emergency",
-      "subject": "acft:N121KK",
-      "group": "HPN Tower",
-      "title": "HPN ATC: MAYDAY: N121KK",
-      "confidence": 0.95,
-      "rank": 3,
-      "push": true,
-      "limit": true,
-      "aircraft": [
-       [
-        "N121KK",
-        null,
-        0.0
-       ]
-      ]
-     },
-     "row": "A9",
-     "how": "new"
-    },
-    {
-     "watch": "talkers",
-     "id": "cap-11",
-     "record": {
-      "role": "aircraft",
-      "talker": {
-       "callsign": "N121KK",
-       "status": "heard"
-      },
-      "aircraft": {
-       "callsign": "N121KK",
-       "status": "heard"
-      },
-      "exchange": {
-       "subject": "N121KK",
-       "hex": ""
-      }
-     }
-    },
-    {
-     "watch": "airport_watch",
-     "id": "cap-11",
-     "row": null
-    }
-   ],
    "alerts": [
     {
      "id": "A9",
@@ -2223,7 +1432,6 @@
      "title": "HPN ATC: MAYDAY: N121KK",
      "detail": "aircraft emergency · heard: mayday · HPN Tower",
      "confidence": 0.95,
-     "level": "high",
      "channel": "HPN Tower",
      "count": 1,
      "status": "open",
@@ -2279,19 +1487,14 @@
     {
      "to": "alerts",
      "title": "HPN ATC: MAYDAY: N121KK",
-     "body": "“Mayday mayday mayday, N121KK” · N121KK · heard, not on ADS-B · alert high 95% · not dispatched · accept or dismiss in the CAD",
+     "message": "“Mayday mayday mayday, N121KK” · N121KK · heard, not on ADS-B · alert high 95% · not dispatched · accept or dismiss in the CAD",
      "priority": 4,
      "tags": [
       "airplane",
       "warning"
      ],
-     "click": "https://cad.example.test/cad",
-     "who": null,
-     "actions": []
+     "click": "https://cad.example.test/cad"
     }
-   ],
-   "log": [
-    "airport_alerts: airport pre-alert #A9: HPN ATC: MAYDAY: N121KK (0.95)"
    ]
   }
  ]

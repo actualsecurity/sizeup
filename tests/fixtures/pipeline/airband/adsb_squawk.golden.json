@@ -58,35 +58,6 @@
      "pos_at": 4
     }
    },
-   "decisions": [
-    {
-     "adsb": "start",
-     "alarm": true
-    },
-    {
-     "raise": {
-      "source": "adsb",
-      "kind": "squawk",
-      "subject": "a0b1c2:7700",
-      "group": "",
-      "title": "AIRCRAFT EMERGENCY · N123AB · general emergency",
-      "confidence": 1.0,
-      "rank": 3,
-      "push": false,
-      "limit": false,
-      "aircraft": [
-       [
-        "N123AB",
-        "a0b1c2",
-        1.0
-       ]
-      ],
-      "reopen_s": 1800.0
-     },
-     "row": "A1",
-     "how": "new"
-    }
-   ],
    "alerts": [
     {
      "id": "A1",
@@ -99,7 +70,6 @@
      "title": "AIRCRAFT EMERGENCY · N123AB · general emergency",
      "detail": "ADS-B: our receiver · Public ADS-B data, not official",
      "confidence": 1.0,
-     "level": "high",
      "channel": "",
      "count": 1,
      "status": "open",
@@ -192,28 +162,15 @@
    "pushes": [
     {
      "to": "alerts",
-     "title": "AIRCRAFT EMERGENCY: GENERAL EMERGENCY",
-     "body": "12:00:05 · N123AB, C68A · general emergency · 2,400 ft ↓800 fpm · 3 NM N of HPN · arriving HPN · RWY 34 · 3.0 nm · via our receiver. Public ADS-B data, not official.",
+     "title": "AIRCRAFT EMERGENCY: GENERAL EMERGENCY · N123AB (C68A) on ADS-B (public data)",
+     "message": "12:00:05 · N123AB, C68A · general emergency · 2,400 ft ↓800 fpm · 3 NM N of HPN · arriving HPN · RWY 34 · 3.0 nm · via our receiver. Public ADS-B data, not official.",
      "priority": 5,
      "tags": [
       "airplane",
       "rotating_light"
      ],
-     "click": "https://cad.example.test/cad",
-     "who": {
-      "units": [
-       [
-        "N123AB",
-        "C68A"
-       ]
-      ],
-      "channel": "ADS-B (public data)"
-     },
-     "actions": []
+     "click": "https://cad.example.test/cad"
     }
-   ],
-   "log": [
-    "airport_alerts: airport pre-alert #A1: AIRCRAFT EMERGENCY · N123AB · general emergency (1.00)"
    ]
   },
   {
@@ -225,80 +182,6 @@
     "dur": 4,
     "text": "Westchester tower, November one two three alfa bravo, declaring an emergency, rough running engine"
    },
-   "decisions": [
-    {
-     "watch": "atc",
-     "id": "twr-1",
-     "ch": "HPN Tower",
-     "fed": "Westchester Tower, N123AB, declaring an emergency, rough running engine",
-     "hits": [
-      [
-       "declaring",
-       "declaring an emergency"
-      ],
-      [
-       "engine",
-       "rough running engine"
-      ]
-     ],
-     "score": 0.9875,
-     "adsb": null,
-     "context": [],
-     "row": "A2"
-    },
-    {
-     "raise": {
-      "source": "atc",
-      "kind": "emergency",
-      "subject": "acft:N123AB",
-      "group": "HPN Tower",
-      "title": "HPN ATC: emergency declared: N123AB",
-      "confidence": 0.99,
-      "rank": 3,
-      "push": true,
-      "limit": true,
-      "aircraft": [
-       [
-        "N123AB",
-        "a0b1c2",
-        1.0
-       ]
-      ]
-     },
-     "row": "A2",
-     "how": "new"
-    },
-    {
-     "watch": "talkers",
-     "id": "twr-1",
-     "record": {
-      "role": "aircraft",
-      "talker": {
-       "callsign": "N123AB",
-       "hex": "a0b1c2",
-       "status": "confirmed"
-      },
-      "aircraft": {
-       "callsign": "N123AB",
-       "hex": "a0b1c2",
-       "status": "confirmed"
-      },
-      "addressed": {
-       "callsign": "TWR",
-       "status": "heard"
-      },
-      "exchange": {
-       "subject": "N123AB",
-       "hex": "a0b1c2"
-      }
-     }
-    },
-    {
-     "watch": "airport_watch",
-     "id": "twr-1",
-     "row": null
-    }
-   ],
    "alerts": [
     {
      "id": "A2",
@@ -311,7 +194,6 @@
      "title": "HPN ATC: emergency declared: N123AB",
      "detail": "aircraft emergency · heard: declaring an emergency, rough running engine · HPN Tower",
      "confidence": 0.99,
-     "level": "high",
      "channel": "HPN Tower",
      "count": 1,
      "status": "open",
@@ -378,19 +260,14 @@
     {
      "to": "alerts",
      "title": "HPN ATC: emergency declared: N123AB",
-     "body": "“Westchester Tower, N123AB, declaring an emergency, rough running engine” · N123AB (C68A) · 3.1 NM from HPN · 1,400 ft · arriving 34 · ADS-B match 100% · alert high 99% · not dispatched · accept or dismiss in the CAD",
+     "message": "“Westchester Tower, N123AB, declaring an emergency, rough running engine” · N123AB (C68A) · 3.1 NM from HPN · 1,400 ft · arriving 34 · ADS-B match 100% · alert high 99% · not dispatched · accept or dismiss in the CAD",
      "priority": 4,
      "tags": [
       "airplane",
       "warning"
      ],
-     "click": "https://cad.example.test/cad",
-     "who": null,
-     "actions": []
+     "click": "https://cad.example.test/cad"
     }
-   ],
-   "log": [
-    "airport_alerts: airport pre-alert #A2: HPN ATC: emergency declared: N123AB (0.99)"
    ]
   },
   {
@@ -401,29 +278,6 @@
     "tg": 307,
     "text": "60 Control, car 9901, declaring an alert level 2 for a Citation, runway 34"
    },
-   "decisions": [
-    {
-     "raise": {
-      "source": "radio",
-      "kind": "alert_level",
-      "subject": "alert-level",
-      "group": "",
-      "title": "HPN Alert 2 · Citation · RWY 34",
-      "confidence": 1.0,
-      "rank": 6,
-      "push": false,
-      "limit": false,
-      "aircraft": []
-     },
-     "row": "A3",
-     "how": "new"
-    },
-    {
-     "watch": "60 Control",
-     "id": "fire-1",
-     "row": "A3"
-    }
-   ],
    "alerts": [
     {
      "id": "A1",
@@ -436,7 +290,6 @@
      "title": "AIRCRAFT EMERGENCY · N123AB · general emergency",
      "detail": "ADS-B: our receiver · Public ADS-B data, not official",
      "confidence": 1.0,
-     "level": "high",
      "channel": "",
      "count": 1,
      "status": "open",
@@ -527,7 +380,6 @@
      "title": "HPN Alert 2 · Citation · RWY 34",
      "detail": "60 Control: alert level 2",
      "confidence": 1.0,
-     "level": "high",
      "channel": "Fire/EMS 15",
      "count": 1,
      "status": "open",
@@ -648,26 +500,17 @@
     {
      "to": "alerts",
      "title": "HPN Alert 2 · Citation · RWY 34",
-     "body": "“60 Control, car 9901, declaring an alert level 2 for a Citation, runway 34” · alert high 100% · not dispatched · accept or dismiss in the CAD",
+     "message": "“60 Control, car 9901, declaring an alert level 2 for a Citation, runway 34” · alert high 100% · not dispatched · accept or dismiss in the CAD",
      "priority": 5,
      "tags": [
       "airplane",
       "warning"
      ],
-     "click": "https://cad.example.test/cad",
-     "who": null,
-     "actions": []
+     "click": "https://cad.example.test/cad"
     }
    ],
    "county_feed_poll_now": [
     "airport alert level 2"
-   ],
-   "log": [
-    "airport_alerts: airport pre-alert #A3: HPN Alert 2 · Citation · RWY 34 (1.00)",
-    "airport_watch: airport watch: HPN Alert 2 · Citation · RWY 34 (pre-alert #A3)",
-    "airport_alerts: airport pre-alert: 1 on event I1",
-    "airport_alerts: airport pre-alert: 1 on event I1",
-    "airport_watch: airport watch: HPN Alert 2 · Citation · RWY 34: event I1 queued"
    ]
   },
   {
@@ -715,7 +558,6 @@
      "title": "AIRCRAFT EMERGENCY · N123AB · general emergency",
      "detail": "ADS-B: our receiver · Public ADS-B data, not official",
      "confidence": 1.0,
-     "level": "high",
      "channel": "",
      "count": 1,
      "status": "open",
@@ -843,7 +685,6 @@
      "title": "AIRCRAFT EMERGENCY · N123AB · general emergency",
      "detail": "ADS-B: our receiver · Public ADS-B data, not official",
      "confidence": 1.0,
-     "level": "high",
      "channel": "",
      "count": 1,
      "status": "ended",
@@ -936,24 +777,14 @@
    "pushes": [
     {
      "to": "alerts",
-     "title": "Ended: AIRCRAFT EMERGENCY: GENERAL EMERGENCY",
-     "body": "squawk ended (now 1200) at 12:05:00 · N123AB, C68A · general emergency · 2,400 ft ↓800 fpm · 3 NM N of HPN · arriving HPN · RWY 34 · 3.0 nm · via our receiver. Public ADS-B data, not official.",
+     "title": "Ended: AIRCRAFT EMERGENCY: GENERAL EMERGENCY · N123AB (C68A) on ADS-B (public data)",
+     "message": "squawk ended (now 1200) at 12:05:00 · N123AB, C68A · general emergency · 2,400 ft ↓800 fpm · 3 NM N of HPN · arriving HPN · RWY 34 · 3.0 nm · via our receiver. Public ADS-B data, not official.",
      "priority": 3,
      "tags": [
       "airplane",
       "white_check_mark"
      ],
-     "click": "https://cad.example.test/cad",
-     "who": {
-      "units": [
-       [
-        "N123AB",
-        "C68A"
-       ]
-      ],
-      "channel": "ADS-B (public data)"
-     },
-     "actions": []
+     "click": "https://cad.example.test/cad"
     }
    ]
   },
@@ -990,31 +821,6 @@
      "pos_at": 599
     }
    },
-   "decisions": [
-    {
-     "raise": {
-      "source": "adsb",
-      "kind": "squawk",
-      "subject": "a0b1c2:7700",
-      "group": "",
-      "title": "AIRCRAFT EMERGENCY · N123AB · general emergency",
-      "confidence": 1.0,
-      "rank": 3,
-      "push": false,
-      "limit": false,
-      "aircraft": [
-       [
-        "N123AB",
-        "a0b1c2",
-        1.0
-       ]
-      ],
-      "reopen_s": 1800.0
-     },
-     "row": "A1",
-     "how": "added"
-    }
-   ],
    "alerts": [
     {
      "id": "A1",
@@ -1027,7 +833,6 @@
      "title": "AIRCRAFT EMERGENCY · N123AB · general emergency",
      "detail": "ADS-B: our receiver · Public ADS-B data, not official",
      "confidence": 1.0,
-     "level": "high",
      "channel": "",
      "count": 2,
      "status": "open",

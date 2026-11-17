@@ -1,0 +1,140 @@
+{
+ "unavailable": [],
+ "steps": [
+  {
+   "step": {
+    "do": "radio",
+    "t": 0,
+    "id": "fire-1"
+   },
+   "decisions": [
+    {
+     "watch": "60 Control",
+     "id": "fire-1",
+     "row": null
+    }
+   ]
+  },
+  {
+   "step": {
+    "do": "radio",
+    "t": 20,
+    "id": "fire-2"
+   },
+   "decisions": [
+    {
+     "raise": {
+      "source": "radio",
+      "kind": "alert_level",
+      "subject": "alert-level",
+      "group": "",
+      "title": "HPN Alert 1 · standby · Citation · flaps · 5 mi final RWY 16",
+      "confidence": 1.0,
+      "rank": 5,
+      "push": false,
+      "limit": false,
+      "aircraft": []
+     },
+     "row": "A1",
+     "how": "new"
+    },
+    {
+     "watch": "60 Control",
+     "id": "fire-2",
+     "row": "A1"
+    }
+   ],
+   "log": [
+    "airport_alerts: airport pre-alert #A1: HPN Alert 1 · standby · Citation · flaps · 5 mi final RWY 16 (1.00)",
+    "airport_watch: airport watch: HPN Alert 1 · standby · Citation · flaps · 5 mi final RWY 16 (pre-alert #A1)"
+   ]
+  },
+  {
+   "step": {
+    "do": "accept",
+    "t": 40
+   }
+  },
+  {
+   "step": {
+    "do": "radio",
+    "t": 60,
+    "id": "fire-3"
+   },
+   "decisions": [
+    {
+     "watch": "60 Control",
+     "id": "fire-3",
+     "row": null
+    }
+   ]
+  },
+  {
+   "step": {
+    "do": "radio",
+    "t": 600,
+    "id": "fire-4"
+   },
+   "decisions": [
+    {
+     "add_to": "A1",
+     "alert": {
+      "source": "radio",
+      "kind": "alert_level",
+      "subject": "alert-level",
+      "group": "",
+      "title": "",
+      "confidence": 1.0,
+      "rank": 0,
+      "push": true,
+      "limit": true,
+      "aircraft": []
+     },
+     "row": "A1"
+    },
+    {
+     "watch": "60 Control",
+     "id": "fire-4",
+     "row": "A1"
+    }
+   ],
+   "log": [
+    "airport_alerts: airport pre-alert #A1 ended: 60 Control: 60 Control, car 9901, alert level one is canceled, aircraft landed without incident"
+   ]
+  },
+  {
+   "step": {
+    "do": "radio",
+    "t": 700,
+    "id": "fire-5"
+   },
+   "decisions": [
+    {
+     "raise": {
+      "source": "radio",
+      "kind": "alert_level",
+      "subject": "alert-level",
+      "group": "",
+      "title": "HPN Alert 2 · RWY 16",
+      "confidence": 1.0,
+      "rank": 6,
+      "push": false,
+      "limit": false,
+      "aircraft": []
+     },
+     "row": "A2",
+     "how": "new"
+    },
+    {
+     "watch": "60 Control",
+     "id": "fire-5",
+     "row": "A2"
+    }
+   ],
+   "log": [
+    "airport_alerts: airport pre-alert #A2: HPN Alert 2 · RWY 16 (1.00)",
+    "airport_watch: airport watch: HPN Alert 2 · RWY 16 (pre-alert #A2)"
+   ]
+  }
+ ]
+}

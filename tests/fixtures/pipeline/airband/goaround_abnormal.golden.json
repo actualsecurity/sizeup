@@ -32,47 +32,7 @@
     "ch": "HPN Tower",
     "dur": 4,
     "text": "November one two three alpha bravo, RNAV yankee three four, cleared to land"
-   },
-   "decisions": [
-    {
-     "watch": "atc",
-     "id": "twr-1",
-     "ch": "HPN Tower",
-     "fed": "N123AB, RNAV Yankee 34, cleared to land",
-     "hits": [],
-     "row": null
-    },
-    {
-     "watch": "talkers",
-     "id": "twr-1",
-     "record": {
-      "role": "atc",
-      "talker": {
-       "callsign": "TWR",
-       "status": "probable"
-      },
-      "aircraft": {
-       "callsign": "N123AB",
-       "hex": "a0b1c2",
-       "status": "confirmed"
-      },
-      "addressed": {
-       "callsign": "N123AB",
-       "hex": "a0b1c2",
-       "status": "confirmed"
-      },
-      "exchange": {
-       "subject": "N123AB",
-       "hex": "a0b1c2"
-      }
-     }
-    },
-    {
-     "watch": "airport_watch",
-     "id": "twr-1",
-     "row": null
-    }
-   ]
+   }
   },
   {
    "step": {
@@ -106,64 +66,6 @@
     "dur": 4,
     "text": "November one two three alpha bravo is going around, we have a flat problem"
    },
-   "decisions": [
-    {
-     "watch": "atc",
-     "id": "twr-2",
-     "ch": "HPN Tower",
-     "fed": "N123AB is going around, we have a flat problem",
-     "hits": [],
-     "row": null
-    },
-    {
-     "watch": "talkers",
-     "id": "twr-2",
-     "record": {
-      "role": "aircraft",
-      "talker": {
-       "callsign": "N123AB",
-       "hex": "a0b1c2",
-       "status": "confirmed"
-      },
-      "aircraft": {
-       "callsign": "N123AB",
-       "hex": "a0b1c2",
-       "status": "confirmed"
-      },
-      "exchange": {
-       "subject": "N123AB",
-       "hex": "a0b1c2"
-      }
-     }
-    },
-    {
-     "raise": {
-      "source": "atc",
-      "kind": "abnormal",
-      "subject": "acft:N123AB",
-      "group": "",
-      "title": "HPN ATC: go-around · flaps · N123AB (C68A)",
-      "confidence": 0.7,
-      "rank": 2,
-      "push": true,
-      "limit": true,
-      "aircraft": [
-       [
-        "N123AB",
-        "a0b1c2",
-        1.0
-       ]
-      ]
-     },
-     "row": "A1",
-     "how": "new"
-    },
-    {
-     "watch": "airport_watch",
-     "id": "twr-2",
-     "row": "A1"
-    }
-   ],
    "alerts": [
     {
      "id": "A1",
@@ -176,7 +78,6 @@
      "title": "HPN ATC: go-around · flaps · N123AB (C68A)",
      "detail": "go-around and abnormal phrases · HPN Tower",
      "confidence": 0.7,
-     "level": "medium",
      "channel": "HPN Tower",
      "count": 1,
      "status": "open",
@@ -261,23 +162,17 @@
     {
      "to": "alerts",
      "title": "HPN ATC: go-around · flaps · N123AB (C68A)",
-     "body": "“N123AB is going around, we have a flat problem” · N123AB (C68A) · 3.1 NM from HPN · 1,400 ft · arriving 34 · ADS-B match 100% · alert medium 70% · not dispatched · accept or dismiss in the CAD",
+     "message": "“N123AB is going around, we have a flat problem” · N123AB (C68A) · 3.1 NM from HPN · 1,400 ft · arriving 34 · ADS-B match 100% · alert medium 70% · not dispatched · accept or dismiss in the CAD",
      "priority": 4,
      "tags": [
       "airplane",
       "warning"
      ],
-     "click": "https://cad.example.test/cad",
-     "who": null,
-     "actions": []
+     "click": "https://cad.example.test/cad"
     }
    ],
    "county_feed_poll_now": [
     "airport pre-alert (ATC)"
-   ],
-   "log": [
-    "airport_alerts: airport pre-alert #A1: HPN ATC: go-around · flaps · N123AB (C68A) (0.70)",
-    "airport_watch: airport watch: N123AB: goaround -> pre-alert #A1 (0.70)"
    ]
   },
   {
@@ -289,68 +184,6 @@
     "dur": 4,
     "text": "November one two three alpha bravo, fly runway heading, climb and maintain three thousand"
    },
-   "decisions": [
-    {
-     "watch": "atc",
-     "id": "twr-3",
-     "ch": "HPN Tower",
-     "fed": "N123AB, fly runway heading, climb and maintain three thousand",
-     "hits": [],
-     "row": null
-    },
-    {
-     "watch": "talkers",
-     "id": "twr-3",
-     "record": {
-      "role": "atc",
-      "talker": {
-       "callsign": "TWR",
-       "status": "probable"
-      },
-      "aircraft": {
-       "callsign": "N123AB",
-       "hex": "a0b1c2",
-       "status": "confirmed"
-      },
-      "addressed": {
-       "callsign": "N123AB",
-       "hex": "a0b1c2",
-       "status": "confirmed"
-      },
-      "exchange": {
-       "subject": "N123AB",
-       "hex": "a0b1c2"
-      }
-     }
-    },
-    {
-     "add_to": "A1",
-     "alert": {
-      "source": "atc",
-      "kind": "abnormal",
-      "subject": "acft:N123AB",
-      "group": "",
-      "title": "",
-      "confidence": 0.7,
-      "rank": 0,
-      "push": true,
-      "limit": true,
-      "aircraft": [
-       [
-        "N123AB",
-        "a0b1c2",
-        1.0
-       ]
-      ]
-     },
-     "row": "A1"
-    },
-    {
-     "watch": "airport_watch",
-     "id": "twr-3",
-     "row": "A1"
-    }
-   ],
    "alerts": [
     {
      "id": "A1",
@@ -363,7 +196,6 @@
      "title": "HPN ATC: go-around · flaps · N123AB (C68A)",
      "detail": "go-around and abnormal phrases · HPN Tower",
      "confidence": 0.7,
-     "level": "medium",
      "channel": "HPN Tower",
      "count": 2,
      "status": "open",
@@ -457,48 +289,6 @@
     "dur": 4,
     "text": "yeah we just had a flat fail indication, we have to run a checklist, we may go to a different airport"
    },
-   "decisions": [
-    {
-     "watch": "atc",
-     "id": "twr-4",
-     "ch": "HPN Tower",
-     "fed": "Yeah we just had a flat fail indication, we have to run a checklist, we may go to a different airport",
-     "hits": [],
-     "row": null
-    },
-    {
-     "watch": "talkers",
-     "id": "twr-4",
-     "record": null
-    },
-    {
-     "add_to": "A1",
-     "alert": {
-      "source": "atc",
-      "kind": "abnormal",
-      "subject": "acft:N123AB",
-      "group": "",
-      "title": "HPN ATC: go-around · flaps, checklist, divert · N123AB (C68A)",
-      "confidence": 0.95,
-      "rank": 2,
-      "push": true,
-      "limit": true,
-      "aircraft": [
-       [
-        "N123AB",
-        "a0b1c2",
-        1.0
-       ]
-      ]
-     },
-     "row": "A1"
-    },
-    {
-     "watch": "airport_watch",
-     "id": "twr-4",
-     "row": "A1"
-    }
-   ],
    "alerts": [
     {
      "id": "A1",
@@ -511,7 +301,6 @@
      "title": "HPN ATC: go-around · flaps, checklist, divert · N123AB (C68A)",
      "detail": "go-around and abnormal phrases · HPN Tower",
      "confidence": 0.95,
-     "level": "high",
      "channel": "HPN Tower",
      "count": 3,
      "status": "open",
@@ -643,7 +432,6 @@
      "title": "HPN ATC: go-around · flaps, checklist, divert · N123AB (C68A)",
      "detail": "go-around and abnormal phrases · HPN Tower",
      "confidence": 0.95,
-     "level": "high",
      "channel": "HPN Tower",
      "count": 3,
      "status": "open",
@@ -754,68 +542,6 @@
     "dur": 4,
     "text": "November one two three alpha bravo, contact New York approach one two six point four"
    },
-   "decisions": [
-    {
-     "watch": "atc",
-     "id": "twr-5",
-     "ch": "HPN Tower",
-     "fed": "N123AB, contact New York approach 126 point four",
-     "hits": [],
-     "row": null
-    },
-    {
-     "watch": "talkers",
-     "id": "twr-5",
-     "record": {
-      "role": "atc",
-      "talker": {
-       "callsign": "TWR",
-       "status": "probable"
-      },
-      "aircraft": {
-       "callsign": "N123AB",
-       "hex": "a0b1c2",
-       "status": "confirmed"
-      },
-      "addressed": {
-       "callsign": "N123AB",
-       "hex": "a0b1c2",
-       "status": "confirmed"
-      },
-      "exchange": {
-       "subject": "N123AB",
-       "hex": "a0b1c2"
-      }
-     }
-    },
-    {
-     "add_to": "A1",
-     "alert": {
-      "source": "atc",
-      "kind": "abnormal",
-      "subject": "acft:N123AB",
-      "group": "",
-      "title": "",
-      "confidence": 0.95,
-      "rank": 0,
-      "push": true,
-      "limit": true,
-      "aircraft": [
-       [
-        "N123AB",
-        "a0b1c2",
-        1.0
-       ]
-      ]
-     },
-     "row": "A1"
-    },
-    {
-     "watch": "airport_watch",
-     "id": "twr-5",
-     "row": "A1"
-    }
-   ],
    "alerts": [
     {
      "id": "A1",
@@ -828,7 +554,6 @@
      "title": "HPN ATC: go-around · flaps, checklist, divert · N123AB (C68A)",
      "detail": "go-around and abnormal phrases · HPN Tower",
      "confidence": 0.95,
-     "level": "high",
      "channel": "HPN Tower",
      "count": 4,
      "status": "open",
@@ -936,9 +661,6 @@
       "pushed": 0.7
      }
     }
-   ],
-   "log": [
-    "airport_watch: airport watch: N123AB: NY App 126.4"
    ]
   },
   {
@@ -950,64 +672,6 @@
     "dur": 4,
     "text": "twenty six point four, November one two three alpha bravo"
    },
-   "decisions": [
-    {
-     "watch": "atc",
-     "id": "twr-6",
-     "ch": "HPN Tower",
-     "fed": "Twenty six point four, N123AB",
-     "hits": [],
-     "row": null
-    },
-    {
-     "watch": "talkers",
-     "id": "twr-6",
-     "record": {
-      "role": "aircraft",
-      "talker": {
-       "callsign": "N123AB",
-       "hex": "a0b1c2",
-       "status": "confirmed"
-      },
-      "aircraft": {
-       "callsign": "N123AB",
-       "hex": "a0b1c2",
-       "status": "confirmed"
-      },
-      "exchange": {
-       "subject": "N123AB",
-       "hex": "a0b1c2"
-      }
-     }
-    },
-    {
-     "add_to": "A1",
-     "alert": {
-      "source": "atc",
-      "kind": "abnormal",
-      "subject": "acft:N123AB",
-      "group": "",
-      "title": "",
-      "confidence": 0.95,
-      "rank": 0,
-      "push": true,
-      "limit": true,
-      "aircraft": [
-       [
-        "N123AB",
-        "a0b1c2",
-        1.0
-       ]
-      ]
-     },
-     "row": "A1"
-    },
-    {
-     "watch": "airport_watch",
-     "id": "twr-6",
-     "row": "A1"
-    }
-   ],
    "alerts": [
     {
      "id": "A1",
@@ -1020,7 +684,6 @@
      "title": "HPN ATC: go-around · flaps, checklist, divert · N123AB (C68A)",
      "detail": "go-around and abnormal phrases · HPN Tower",
      "confidence": 0.95,
-     "level": "high",
      "channel": "HPN Tower",
      "count": 5,
      "status": "open",
@@ -1172,7 +835,6 @@
      "title": "HPN ATC: go-around · flaps, checklist, divert · N123AB (C68A)",
      "detail": "go-around and abnormal phrases · HPN Tower",
      "confidence": 0.95,
-     "level": "high",
      "channel": "HPN Tower",
      "count": 5,
      "status": "open",
@@ -1299,68 +961,6 @@
     "dur": 4,
     "text": "New York approach, November one two three alpha bravo, we would like vectors back to Westchester"
    },
-   "decisions": [
-    {
-     "watch": "atc",
-     "id": "app-1",
-     "ch": "NY App 126.4/120.8",
-     "fed": "New York approach, N123AB, we would like vectors back to Westchester",
-     "hits": [],
-     "row": null
-    },
-    {
-     "watch": "talkers",
-     "id": "app-1",
-     "record": {
-      "role": "aircraft",
-      "talker": {
-       "callsign": "N123AB",
-       "hex": "a0b1c2",
-       "status": "confirmed"
-      },
-      "aircraft": {
-       "callsign": "N123AB",
-       "hex": "a0b1c2",
-       "status": "confirmed"
-      },
-      "addressed": {
-       "callsign": "APP",
-       "status": "heard"
-      },
-      "exchange": {
-       "subject": "N123AB",
-       "hex": "a0b1c2"
-      }
-     }
-    },
-    {
-     "add_to": "A1",
-     "alert": {
-      "source": "atc",
-      "kind": "abnormal",
-      "subject": "acft:N123AB",
-      "group": "",
-      "title": "",
-      "confidence": 0.95,
-      "rank": 0,
-      "push": true,
-      "limit": true,
-      "aircraft": [
-       [
-        "N123AB",
-        "a0b1c2",
-        1.0
-       ]
-      ]
-     },
-     "row": "A1"
-    },
-    {
-     "watch": "airport_watch",
-     "id": "app-1",
-     "row": "A1"
-    }
-   ],
    "alerts": [
     {
      "id": "A1",
@@ -1373,7 +973,6 @@
      "title": "HPN ATC: go-around · flaps, checklist, divert · N123AB (C68A)",
      "detail": "go-around and abnormal phrases · HPN Tower",
      "confidence": 0.95,
-     "level": "high",
      "channel": "HPN Tower",
      "count": 6,
      "status": "open",
@@ -1536,7 +1135,6 @@
      "title": "HPN ATC: go-around · flaps, checklist, divert · N123AB (C68A)",
      "detail": "go-around and abnormal phrases · HPN Tower",
      "confidence": 0.95,
-     "level": "high",
      "channel": "HPN Tower",
      "count": 6,
      "status": "ended",
@@ -1669,10 +1267,6 @@
      "text": "Airport pre-alert 12:01:00 ended: ADS-B: landed at HPN",
      "operator": ""
     }
-   ],
-   "log": [
-    "airport_alerts: airport pre-alert #A1 ended: ADS-B: landed at HPN",
-    "airport_watch: airport watch: N123AB: ADS-B: landed at HPN"
    ]
   }
  ]

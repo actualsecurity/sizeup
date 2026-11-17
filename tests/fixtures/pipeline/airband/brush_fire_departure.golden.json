@@ -33,47 +33,7 @@
     "ch": "HPN Tower",
     "dur": 4,
     "text": "JetBlue one two three four, runway one six, cleared for takeoff"
-   },
-   "decisions": [
-    {
-     "watch": "atc",
-     "id": "twr-1",
-     "ch": "HPN Tower",
-     "fed": "JetBlue 1234, runway 16, cleared for takeoff",
-     "hits": [],
-     "row": null
-    },
-    {
-     "watch": "talkers",
-     "id": "twr-1",
-     "record": {
-      "role": "atc",
-      "talker": {
-       "callsign": "TWR",
-       "status": "probable"
-      },
-      "aircraft": {
-       "callsign": "JBU1234",
-       "hex": "a1b2c3",
-       "status": "confirmed"
-      },
-      "addressed": {
-       "callsign": "JBU1234",
-       "hex": "a1b2c3",
-       "status": "confirmed"
-      },
-      "exchange": {
-       "subject": "JBU1234",
-       "hex": "a1b2c3"
-      }
-     }
-    },
-    {
-     "watch": "airport_watch",
-     "id": "twr-1",
-     "row": null
-    }
-   ]
+   }
   },
   {
    "step": {
@@ -108,78 +68,6 @@
     "dur": 5,
     "text": "Westchester tower, JetBlue one two three four, looks like a brush fire off the departure end of one six"
    },
-   "decisions": [
-    {
-     "watch": "atc",
-     "id": "twr-2",
-     "ch": "HPN Tower",
-     "fed": "Westchester Tower, JetBlue 1234, looks like a brush fire off the departure end of 16",
-     "hits": [
-      [
-       "brush-fire",
-       "brush fire"
-      ]
-     ],
-     "score": 0.85,
-     "adsb": null,
-     "context": [
-      "twr-1"
-     ],
-     "row": "A1"
-    },
-    {
-     "raise": {
-      "source": "atc",
-      "kind": "fire_off",
-      "subject": "fire:16",
-      "group": "HPN Tower",
-      "title": "HPN ATC: possible brush fire reported off runway 16 departure",
-      "confidence": 0.85,
-      "rank": 2,
-      "push": true,
-      "limit": true,
-      "aircraft": [
-       [
-        "JBU1234",
-        "a1b2c3",
-        1.0
-       ]
-      ]
-     },
-     "row": "A1",
-     "how": "new"
-    },
-    {
-     "watch": "talkers",
-     "id": "twr-2",
-     "record": {
-      "role": "aircraft",
-      "talker": {
-       "callsign": "JBU1234",
-       "hex": "a1b2c3",
-       "status": "confirmed"
-      },
-      "aircraft": {
-       "callsign": "JBU1234",
-       "hex": "a1b2c3",
-       "status": "confirmed"
-      },
-      "addressed": {
-       "callsign": "TWR",
-       "status": "heard"
-      },
-      "exchange": {
-       "subject": "JBU1234",
-       "hex": "a1b2c3"
-      }
-     }
-    },
-    {
-     "watch": "airport_watch",
-     "id": "twr-2",
-     "row": null
-    }
-   ],
    "alerts": [
     {
      "id": "A1",
@@ -192,7 +80,6 @@
      "title": "HPN ATC: possible brush fire reported off runway 16 departure",
      "detail": "fire or smoke off the airport · heard: brush fire · HPN Tower",
      "confidence": 0.85,
-     "level": "high",
      "channel": "HPN Tower",
      "count": 1,
      "status": "open",
@@ -277,19 +164,14 @@
     {
      "to": "alerts",
      "title": "HPN ATC: possible brush fire reported off runway 16 departure",
-     "body": "“JetBlue 1234, runway 16, cleared for takeoff” · “Westchester Tower, JetBlue 1234, looks like a brush fire off the departure end of 16” · JBU1234 (A320) · 1.2 NM from HPN · 1,800 ft · departing 16 · ADS-B match 100% · approx. location: about 1 NM past the departure end of runway 16, on its heading (no distance was said: 1 NM is a guess) · alert high 85% · not dispatched · accept or dismiss in the CAD",
+     "message": "“JetBlue 1234, runway 16, cleared for takeoff” · “Westchester Tower, JetBlue 1234, looks like a brush fire off the departure end of 16” · JBU1234 (A320) · 1.2 NM from HPN · 1,800 ft · departing 16 · ADS-B match 100% · approx. location: about 1 NM past the departure end of runway 16, on its heading (no distance was said: 1 NM is a guess) · alert high 85% · not dispatched · accept or dismiss in the CAD",
      "priority": 4,
      "tags": [
       "airplane",
       "warning"
      ],
-     "click": "https://cad.example.test/cad",
-     "who": null,
-     "actions": []
+     "click": "https://cad.example.test/cad"
     }
-   ],
-   "log": [
-    "airport_alerts: airport pre-alert #A1: HPN ATC: possible brush fire reported off runway 16 departure (0.85)"
    ]
   },
   {
@@ -301,71 +183,6 @@
     "dur": 4,
     "text": "crash crew, Westchester tower, roll the trucks, brush fire off the departure end of runway one six"
    },
-   "decisions": [
-    {
-     "watch": "atc",
-     "id": "twr-3",
-     "ch": "HPN Tower",
-     "fed": "Crash crew, Westchester Tower, roll the trucks, brush fire off the departure end of runway 16",
-     "hits": [
-      [
-       "brush-fire",
-       "brush fire"
-      ],
-      [
-       "fire-on-field",
-       "fire off the departure end of runway"
-      ],
-      [
-       "roll-trucks",
-       "roll the trucks"
-      ],
-      [
-       "arff",
-       "crash crew"
-      ]
-     ],
-     "score": 0.999612,
-     "adsb": null,
-     "context": [
-      "twr-1",
-      "twr-2"
-     ],
-     "row": "A1"
-    },
-    {
-     "raise": {
-      "source": "atc",
-      "kind": "fire_off",
-      "subject": "fire:16",
-      "group": "HPN Tower",
-      "title": "HPN ATC: possible brush fire reported off runway 16 departure",
-      "confidence": 1.0,
-      "rank": 2,
-      "push": true,
-      "limit": true,
-      "aircraft": [
-       [
-        "JBU1234",
-        "a1b2c3",
-        1.0
-       ]
-      ]
-     },
-     "row": "A1",
-     "how": "added"
-    },
-    {
-     "watch": "talkers",
-     "id": "twr-3",
-     "record": null
-    },
-    {
-     "watch": "airport_watch",
-     "id": "twr-3",
-     "row": null
-    }
-   ],
    "alerts": [
     {
      "id": "A1",
@@ -378,7 +195,6 @@
      "title": "HPN ATC: possible brush fire reported off runway 16 departure",
      "detail": "fire or smoke off the airport · heard: brush fire, fire off the departure end of runway, roll the trucks, crash crew · HPN Tower",
      "confidence": 1.0,
-     "level": "high",
      "channel": "HPN Tower",
      "count": 2,
      "status": "open",
@@ -472,15 +288,12 @@
     "alert": "A1",
     "operator": "Disp One"
    },
-   "decisions": [
-    {
-     "console": "accept",
-     "alert": "A1",
-     "status": "accepted",
-     "acknowledged": false,
-     "incident": "I1"
-    }
-   ],
+   "console": {
+    "accept": "A1",
+    "status": "accepted",
+    "acknowledged": false,
+    "incident": "I1"
+   },
    "alerts": [
     {
      "id": "A1",
@@ -493,7 +306,6 @@
      "title": "HPN ATC: possible brush fire reported off runway 16 departure",
      "detail": "fire or smoke off the airport · heard: brush fire, fire off the departure end of runway, roll the trucks, crash crew · HPN Tower",
      "confidence": 1.0,
-     "level": "high",
      "channel": "HPN Tower",
      "count": 2,
      "status": "accepted",
@@ -626,13 +438,10 @@
     "alert": "A1",
     "operator": "Disp Two"
    },
-   "decisions": [
-    {
-     "console": "accept",
-     "alert": "A1",
-     "error": "CadError: airport pre-alert 1 is already accepted"
-    }
-   ]
+   "console": {
+    "accept": "A1",
+    "error": "CadError: airport pre-alert 1 is already accepted"
+   }
   }
  ]
 }

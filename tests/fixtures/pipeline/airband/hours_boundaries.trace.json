@@ -1,0 +1,553 @@
+{
+ "unavailable": [],
+ "steps": [
+  {
+   "step": {
+    "do": "air",
+    "t": 14390,
+    "id": "tx-14390"
+   },
+   "decisions": [
+    {
+     "watch": "atc",
+     "id": "tx-14390",
+     "ch": "HPN Tower",
+     "fed": "N101AA, going around, we have a flap failure, we have to run a checklist",
+     "hits": [],
+     "row": null
+    },
+    {
+     "watch": "talkers",
+     "id": "tx-14390",
+     "record": {
+      "role": "aircraft",
+      "talker": {
+       "callsign": "N101AA",
+       "status": "heard"
+      },
+      "aircraft": {
+       "callsign": "N101AA",
+       "status": "heard"
+      },
+      "exchange": {
+       "subject": "N101AA",
+       "hex": ""
+      }
+     }
+    },
+    {
+     "raise": {
+      "source": "atc",
+      "kind": "abnormal",
+      "subject": "acft:N101AA",
+      "group": "",
+      "title": "HPN ATC: go-around · flaps, checklist · N101AA",
+      "confidence": 0.75,
+      "rank": 2,
+      "push": true,
+      "limit": true,
+      "aircraft": [
+       [
+        "N101AA",
+        null,
+        0.0
+       ]
+      ]
+     },
+     "row": "A1",
+     "how": "new"
+    },
+    {
+     "watch": "airport_watch",
+     "id": "tx-14390",
+     "row": "A1"
+    }
+   ],
+   "log": [
+    "airport_alerts: airport pre-alert #A1: HPN ATC: go-around · flaps, checklist · N101AA (0.75)",
+    "airport_watch: airport watch: N101AA: goaround -> pre-alert #A1 (0.75)"
+   ]
+  },
+  {
+   "step": {
+    "do": "air",
+    "t": 14391,
+    "id": "tx-14391"
+   },
+   "decisions": [
+    {
+     "watch": "atc",
+     "id": "tx-14391",
+     "ch": "HPN Tower",
+     "fed": "N202BB, going around, we have a flap failure, we have to run a checklist",
+     "hits": [],
+     "row": null
+    },
+    {
+     "watch": "talkers",
+     "id": "tx-14391",
+     "record": {
+      "role": "aircraft",
+      "talker": {
+       "callsign": "N202BB",
+       "status": "heard"
+      },
+      "aircraft": {
+       "callsign": "N202BB",
+       "status": "heard"
+      },
+      "exchange": {
+       "subject": "N202BB",
+       "hex": ""
+      }
+     }
+    },
+    {
+     "raise": {
+      "source": "atc",
+      "kind": "abnormal",
+      "subject": "acft:N202BB",
+      "group": "",
+      "title": "HPN ATC: go-around · flaps, checklist · N202BB",
+      "confidence": 0.75,
+      "rank": 2,
+      "push": true,
+      "limit": true,
+      "aircraft": [
+       [
+        "N202BB",
+        null,
+        0.0
+       ]
+      ]
+     },
+     "row": "A2",
+     "how": "new"
+    },
+    {
+     "watch": "airport_watch",
+     "id": "tx-14391",
+     "row": "A2"
+    }
+   ],
+   "log": [
+    "airport_alerts: airport pre-alert #A2: HPN ATC: go-around · flaps, checklist · N202BB (0.75)",
+    "airport_watch: airport watch: N202BB: goaround -> pre-alert #A2 (0.75)"
+   ]
+  },
+  {
+   "step": {
+    "do": "air",
+    "t": 14399,
+    "id": "ho-0659"
+   },
+   "decisions": [
+    {
+     "watch": "atc",
+     "id": "ho-0659",
+     "ch": "HPN Tower",
+     "fed": "N101AA, contact New York approach 120 point eight",
+     "hits": [],
+     "row": null
+    },
+    {
+     "watch": "talkers",
+     "id": "ho-0659",
+     "record": {
+      "role": "atc",
+      "talker": {
+       "callsign": "TWR",
+       "status": "probable"
+      },
+      "aircraft": {
+       "callsign": "N101AA",
+       "status": "heard"
+      },
+      "addressed": {
+       "callsign": "N101AA",
+       "status": "heard"
+      },
+      "exchange": {
+       "subject": "N101AA",
+       "hex": ""
+      }
+     }
+    },
+    {
+     "add_to": "A1",
+     "alert": {
+      "source": "atc",
+      "kind": "abnormal",
+      "subject": "acft:N101AA",
+      "group": "",
+      "title": "",
+      "confidence": 0.75,
+      "rank": 0,
+      "push": true,
+      "limit": true,
+      "aircraft": [
+       [
+        "N101AA",
+        null,
+        0.0
+       ]
+      ]
+     },
+     "row": "A1"
+    },
+    {
+     "watch": "airport_watch",
+     "id": "ho-0659",
+     "row": "A1"
+    }
+   ],
+   "log": [
+    "airport_watch: airport watch: N101AA: NY App 120.8"
+   ]
+  },
+  {
+   "step": {
+    "do": "air",
+    "t": 14400,
+    "id": "ho-0700"
+   },
+   "decisions": [
+    {
+     "watch": "atc",
+     "id": "ho-0700",
+     "ch": "HPN Tower",
+     "fed": "N202BB, contact New York approach 120 point eight",
+     "hits": [],
+     "row": null
+    },
+    {
+     "watch": "talkers",
+     "id": "ho-0700",
+     "record": {
+      "role": "atc",
+      "talker": {
+       "callsign": "TWR",
+       "status": "probable"
+      },
+      "aircraft": {
+       "callsign": "N202BB",
+       "status": "heard"
+      },
+      "addressed": {
+       "callsign": "N202BB",
+       "status": "heard"
+      },
+      "exchange": {
+       "subject": "N202BB",
+       "hex": ""
+      }
+     }
+    },
+    {
+     "add_to": "A2",
+     "alert": {
+      "source": "atc",
+      "kind": "abnormal",
+      "subject": "acft:N202BB",
+      "group": "",
+      "title": "",
+      "confidence": 0.75,
+      "rank": 0,
+      "push": true,
+      "limit": true,
+      "aircraft": [
+       [
+        "N202BB",
+        null,
+        0.0
+       ]
+      ]
+     },
+     "row": "A2"
+    },
+    {
+     "watch": "airport_watch",
+     "id": "ho-0700",
+     "row": "A2"
+    }
+   ],
+   "log": [
+    "airport_watch: airport watch: N202BB: NY App 120.8 · not on now · tracking by ADS-B"
+   ]
+  },
+  {
+   "step": {
+    "do": "air",
+    "t": 71990,
+    "id": "tx-71990"
+   },
+   "decisions": [
+    {
+     "watch": "atc",
+     "id": "tx-71990",
+     "ch": "HPN Tower",
+     "fed": "N303CC, going around, we have a flap failure, we have to run a checklist",
+     "hits": [],
+     "row": null
+    },
+    {
+     "watch": "talkers",
+     "id": "tx-71990",
+     "record": {
+      "role": "aircraft",
+      "talker": {
+       "callsign": "N303CC",
+       "status": "heard"
+      },
+      "aircraft": {
+       "callsign": "N303CC",
+       "status": "heard"
+      },
+      "exchange": {
+       "subject": "N303CC",
+       "hex": ""
+      }
+     }
+    },
+    {
+     "raise": {
+      "source": "atc",
+      "kind": "abnormal",
+      "subject": "acft:N303CC",
+      "group": "",
+      "title": "HPN ATC: go-around · flaps, checklist · N303CC",
+      "confidence": 0.75,
+      "rank": 2,
+      "push": true,
+      "limit": true,
+      "aircraft": [
+       [
+        "N303CC",
+        null,
+        0.0
+       ]
+      ]
+     },
+     "row": "A3",
+     "how": "new"
+    },
+    {
+     "watch": "airport_watch",
+     "id": "tx-71990",
+     "row": "A3"
+    }
+   ],
+   "log": [
+    "airport_alerts: airport pre-alert #A3: HPN ATC: go-around · flaps, checklist · N303CC (0.75)",
+    "airport_watch: airport watch: N303CC: goaround -> pre-alert #A3 (0.75)"
+   ]
+  },
+  {
+   "step": {
+    "do": "air",
+    "t": 71991,
+    "id": "tx-71991"
+   },
+   "decisions": [
+    {
+     "watch": "atc",
+     "id": "tx-71991",
+     "ch": "HPN Tower",
+     "fed": "N404DD, going around, we have a flap failure, we have to run a checklist",
+     "hits": [],
+     "row": null
+    },
+    {
+     "watch": "talkers",
+     "id": "tx-71991",
+     "record": {
+      "role": "aircraft",
+      "talker": {
+       "callsign": "N404DD",
+       "status": "heard"
+      },
+      "aircraft": {
+       "callsign": "N404DD",
+       "status": "heard"
+      },
+      "exchange": {
+       "subject": "N404DD",
+       "hex": ""
+      }
+     }
+    },
+    {
+     "raise": {
+      "source": "atc",
+      "kind": "abnormal",
+      "subject": "acft:N404DD",
+      "group": "",
+      "title": "HPN ATC: go-around · flaps, checklist · N404DD",
+      "confidence": 0.75,
+      "rank": 2,
+      "push": true,
+      "limit": true,
+      "aircraft": [
+       [
+        "N404DD",
+        null,
+        0.0
+       ]
+      ]
+     },
+     "row": "A4",
+     "how": "new"
+    },
+    {
+     "watch": "airport_watch",
+     "id": "tx-71991",
+     "row": "A4"
+    }
+   ],
+   "log": [
+    "airport_alerts: airport pre-alert #A4: HPN ATC: go-around · flaps, checklist · N404DD (0.75)",
+    "airport_watch: airport watch: N404DD: goaround -> pre-alert #A4 (0.75)"
+   ]
+  },
+  {
+   "step": {
+    "do": "air",
+    "t": 71999,
+    "id": "ho-2259"
+   },
+   "decisions": [
+    {
+     "watch": "atc",
+     "id": "ho-2259",
+     "ch": "HPN Tower",
+     "fed": "N303CC, contact New York approach 120 point eight",
+     "hits": [],
+     "row": null
+    },
+    {
+     "watch": "talkers",
+     "id": "ho-2259",
+     "record": {
+      "role": "atc",
+      "talker": {
+       "callsign": "TWR",
+       "status": "probable"
+      },
+      "aircraft": {
+       "callsign": "N303CC",
+       "status": "heard"
+      },
+      "addressed": {
+       "callsign": "N303CC",
+       "status": "heard"
+      },
+      "exchange": {
+       "subject": "N303CC",
+       "hex": ""
+      }
+     }
+    },
+    {
+     "add_to": "A3",
+     "alert": {
+      "source": "atc",
+      "kind": "abnormal",
+      "subject": "acft:N303CC",
+      "group": "",
+      "title": "",
+      "confidence": 0.75,
+      "rank": 0,
+      "push": true,
+      "limit": true,
+      "aircraft": [
+       [
+        "N303CC",
+        null,
+        0.0
+       ]
+      ]
+     },
+     "row": "A3"
+    },
+    {
+     "watch": "airport_watch",
+     "id": "ho-2259",
+     "row": "A3"
+    }
+   ],
+   "log": [
+    "airport_watch: airport watch: N303CC: NY App 120.8 · not on now · tracking by ADS-B"
+   ]
+  },
+  {
+   "step": {
+    "do": "air",
+    "t": 72000,
+    "id": "ho-2300"
+   },
+   "decisions": [
+    {
+     "watch": "atc",
+     "id": "ho-2300",
+     "ch": "HPN Tower",
+     "fed": "N404DD, contact New York approach 120 point eight",
+     "hits": [],
+     "row": null
+    },
+    {
+     "watch": "talkers",
+     "id": "ho-2300",
+     "record": {
+      "role": "atc",
+      "talker": {
+       "callsign": "TWR",
+       "status": "probable"
+      },
+      "aircraft": {
+       "callsign": "N404DD",
+       "status": "heard"
+      },
+      "addressed": {
+       "callsign": "N404DD",
+       "status": "heard"
+      },
+      "exchange": {
+       "subject": "N404DD",
+       "hex": ""
+      }
+     }
+    },
+    {
+     "add_to": "A4",
+     "alert": {
+      "source": "atc",
+      "kind": "abnormal",
+      "subject": "acft:N404DD",
+      "group": "",
+      "title": "",
+      "confidence": 0.75,
+      "rank": 0,
+      "push": true,
+      "limit": true,
+      "aircraft": [
+       [
+        "N404DD",
+        null,
+        0.0
+       ]
+      ]
+     },
+     "row": "A4"
+    },
+    {
+     "watch": "airport_watch",
+     "id": "ho-2300",
+     "row": "A4"
+    }
+   ],
+   "log": [
+    "airport_watch: airport watch: N404DD: NY App 120.8"
+   ]
+  }
+ ]
+}
