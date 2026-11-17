@@ -190,6 +190,7 @@ class Dvr:
         self._indexed_cams: set[str] = set()      # cameras whose folder has been read since the start
         self._resumed: set[str] = set()           # cameras resumed from the state (their last key known)
         self._rescan: threading.Thread | None = None
+        self._checked_at = -1e18                  # the state last brought up to date (checkpoint)
         self._started_at: float | None = None
         self._rescanned_at = 0.0
         # each camera's last key, end, offset ... (#596): the next leader resumes from it
@@ -939,8 +940,9 @@ class Dvr:
         """Each camera's last key, end, offset, the stream's last media sequence and source, and its bytes on disk
         (once the index is whole) into the state (sizeup/dvrstate.py): written every few seconds, and at once with
         force (a clean stop). Only the leader (the state's may_write), only once recording may go on."""
-        if not self._scanned.is_set() or not (force or self.clock() - self.state.written_at >= self.state.every_s):
+        if not self._scanned.is_set() or not (force or self.clock() - self._checked_at >= self.state.every_s):
             return False
+        self._checked_at = self.clock()
         whole = self._indexed.is_set()
         with self._lock:
             recs = {cid: {"last": c["last"], "end": round(c["end"], 3), "offset": int(c.get("offset", 0)),
