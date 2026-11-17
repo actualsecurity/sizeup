@@ -9,6 +9,7 @@ slept."""
 from __future__ import annotations
 
 import ast
+import os
 import contextlib
 import email.parser
 import email.policy
@@ -17,6 +18,7 @@ import json
 import logging
 import math
 import secrets
+import select
 import socket
 import socketserver
 import struct
@@ -92,7 +94,9 @@ def _serve(handler_cls, port: int = 0):
 
 
 class FakeHub:
-    """The hub's worker API (#639) with in-memory jobs and leases."""
+    """The hub's worker API (#639) with in-memory jobs and leases, answering as sizeup/cloud/sttworkers.py WorkerApi
+    does: extend gives the lease's remaining time (never past the cap) and cap_at; release, complete and extend on a
+    lease that is gone are 409; the audio is 409 for a lost lease and 410 when the hub has no audio for the job."""
 
     def __init__(self, token: str = TOKEN):
         self.token = token
@@ -104,6 +108,9 @@ class FakeHub:
         self.fail_503, self.retry_after = 0, "7"
         self.claim_max_wait = 0.2
         self.cap_s = 30.0
+        self.fail_complete: list[int] = []      # statuses the next completes get
+        self.claim_answer = None                 # a claim answer to send once instead (a broken hub)
+        self.takeback_on_hold = False            # as #651: a worker gone gaming / paused loses its pre-alert jobs
         self.conns: set = set()
         self.gen = 0                             # bumped by stop(): a long poll of the old server takes no job
         self.port = 0
@@ -148,9 +155,11 @@ class FakeHub:
                 c.close()
         self.conns.clear()
 
-    def add_job(self, clip_id: str, wav: bytes, cls: str = "URGENT", lease_s: float = 6.0, prompt: str = "") -> None:
+    def add_job(self, clip_id: str, wav: bytes | None, cls: str = "URGENT", lease_s: float = 6.0, prompt: str = "",
+                fast: bool | None = None, audio: str | None = None) -> None:
         with self.cv:
-            self.pending.append({"id": clip_id, "wav": wav, "class": cls, "lease_s": lease_s, "prompt": prompt})
+            self.pending.append({"id": clip_id, "wav": wav, "class": cls, "lease_s": lease_s, "prompt": prompt,
+                                 "fast": fast, "audio": audio})
             self.cv.notify_all()
 
     def calls(self, route: str) -> list:
@@ -195,8 +204,15 @@ class FakeHub:
             return self.send(req, 200, {"ok": True, "worker": "gpu-test", "poll_s": 25,
                                         "classes": ["URGENT", "HIGH", "LIVE", "CATCHUP"]})
         if path == f"{API}/state":
+            if self.takeback_on_hold and body.get("state") != "online":
+                with self.cv:
+                    for lv in self.leases.values():
+                        lv["closed"] = True
             return self.send(req, 200, {"ok": True, "pool_on": True})
         if path == f"{API}/claim":
+            if self.claim_answer is not None:
+                answer, self.claim_answer = self.claim_answer, None
+                return self.send(req, 200, answer)
             if body.get("state") != "online":
                 return self.send(req, 200, {"job": None})
             with self.cv:
@@ -210,10 +226,12 @@ class FakeHub:
                     now = time.monotonic()
                     self.leases[lease] = {"job": j, "expires": now + j["lease_s"], "cap": now + self.cap_s,
                                           "closed": False}
-                    job = {"lease": lease, "id": j["id"], "kind": "catchup" if j["class"] == "CATCHUP" else "aws",
-                           "channel": "test-channel", "class": j["class"], "prompt": j["prompt"],
-                           "seconds": round(len(j["wav"]) / 32000, 2), "lease_s": j["lease_s"],
-                           "cap_at": round(time.time() + self.cap_s, 3), "audio": f"{API}/jobs/{lease}/audio"}
+                    job = {"lease": lease, "id": j["id"], "kind": "traffic", "channel": "test-channel",
+                           "class": j["class"], "prompt": j["prompt"], "seconds": round(len(j["wav"] or b"") / 32000, 2),
+                           "lease_s": j["lease_s"], "cap_at": round(time.time() + self.cap_s, 3),
+                           "audio": j["audio"] or f"{API}/jobs/{lease}/audio"}
+                    if j["fast"] is not None:
+                        job["fast"] = j["fast"]
             return self.send(req, 200, {"job": job})
         parts = path.split("/")
         if len(parts) == 7 and path.startswith(f"{API}/jobs/"):
@@ -221,23 +239,32 @@ class FakeHub:
             with self.cv:
                 live = self._live(lease)
                 if action == "audio" and method == "GET":
-                    return self.send(req, 200, live["job"]["wav"]) if live else self.send(req, 409, {"error": "lease lost"})
-                if action == "extend":
-                    now = time.monotonic()
-                    if not live or now >= live["cap"]:
-                        return self.send(req, 409, {"error": "lease lost"})
-                    live["expires"] = min(now + live["job"]["lease_s"], live["cap"])
-                    return self.send(req, 200, {"ok": True, "lease_s": live["job"]["lease_s"],
-                                                "cap_at": round(time.time() + live["cap"] - now, 3)})
-                if action == "complete":
                     if not live:
                         return self.send(req, 409, {"error": "lease lost"})
+                    if not live["job"]["wav"]:
+                        live["closed"] = True      # the hub gives it to the next engine
+                        return self.send(req, 410, {"error": "no audio for this job: it went to another engine"})
+                    return self.send(req, 200, live["job"]["wav"])
+                if action == "extend":
+                    now = time.monotonic()
+                    if not live:
+                        return self.send(req, 409, {"error": "lease lost"})
+                    live["expires"] = min(now + live["job"]["lease_s"], live["cap"])
+                    return self.send(req, 200, {"ok": True, "lease_s": round(max(0.0, live["expires"] - now), 1),
+                                                "cap_at": round(time.time() + live["cap"] - now, 3)})
+                if action == "complete":
+                    if self.fail_complete:
+                        status = self.fail_complete.pop(0)
+                        return self.send(req, status, {"error": "nope"}, {"Retry-After": self.retry_after})
+                    if not live:
+                        return self.send(req, 409, {"error": "lease lost: the job went to another engine"})
                     live["closed"] = True
                     live["result"] = body
                     return self.send(req, 200, {"ok": True})
                 if action == "release":
-                    if lease in self.leases:
-                        self.leases[lease]["closed"] = True
+                    if not live:
+                        return self.send(req, 409, {"error": "lease lost"})
+                    live["closed"] = True
                     return self.send(req, 200, {"ok": True})
         return self.send(req, 404, {"error": "not found"})
 
@@ -253,6 +280,7 @@ class FakeWhisper:
         self.delay = 0.0
         self.fail: int | None = None
         self.before = None                       # called before answering (a test's hook)
+        self.aborted = 0                         # requests whose client went away while "decoding"
         self.requests: list[dict] = []
         self.lock = threading.Lock()
         whisper = self
@@ -278,8 +306,18 @@ class FakeWhisper:
                     whisper.requests.append({"path": self.path, "fields": fields})
                 if whisper.before:
                     whisper.before(fields)
-                if whisper.delay:
-                    time.sleep(whisper.delay)
+                health = len(fields.get("file", b"")) == len(W.silence_wav(1.0))
+                end = time.monotonic() + (0.0 if health else whisper.delay)   # the delay: a job's decoding
+                while time.monotonic() < end:    # whisper-server stops decoding when the client goes away
+                    if select.select([self.connection], [], [], 0.01)[0]:
+                        try:
+                            gone = self.connection.recv(1, socket.MSG_PEEK) == b""
+                        except OSError:
+                            gone = True
+                        if gone:
+                            with whisper.lock:
+                                whisper.aborted += 1
+                            return
                 status, doc = (whisper.fail, {"error": "failed"}) if whisper.fail else (200, VERBOSE)
                 data = json.dumps(doc).encode()
                 self.send_response(status)
@@ -643,6 +681,7 @@ def test_gaming_mid_job_releases_when_the_lease_runs_short(tmp_path, hub, whispe
         wait_for(lambda: hub.calls("/release"), what="released")
     assert "gaming" in hub.calls("/release")[0][3]["why"]
     assert not hub.calls("/extend") and not hub.calls("/complete")
+    wait_for(lambda: whisper.aborted == 1, what="the inference aborted")
 
 
 # --- the link: refused, standby, gone ------------------------------------------------------------------------------
@@ -719,6 +758,8 @@ def test_shutdown_releases_the_job_and_says_paused(tmp_path, hub, whisper):
     with running(w):
         wait_for(lambda: whisper.jobs(), what="inference running")
     assert hub.calls("/release")[0][3]["why"] == "shutdown"
+    wait_for(lambda: whisper.aborted == 1, what="whisper-server saw the client go")
+    assert w.counts["failed"] == 0
     assert hub.calls("/state")[-1][3] | {"gpu": None} == {"state": "paused", "reason": "shutdown", "gpu": None,
                                                          "model": "large-v3-turbo-q5_0", "version": W.VERSION}
 
@@ -743,7 +784,7 @@ def test_config_json_and_env(tmp_path):
                                 "SIZEUP_STT_CF_CLIENT_SECRET": CF_SECRET})
     W.validate(cfg)
     assert cfg.worker_id == "gpu-test" and cfg.model == "large-v3-turbo"
-    assert cfg.gaming_util_pct == 55.0 and cfg.auto_gaming is False and cfg.heartbeat_s == 10
+    assert cfg.gaming_util_pct == 55.0 and cfg.auto_gaming is False and cfg.heartbeat_s == 5
     assert cfg.whisper_server == ["C:/w/whisper-server.exe", "-m", "m.bin", "--port", "8179"]
     assert cfg.whisper_url == "http://127.0.0.1:8179/inference"
     assert SECRET not in repr(cfg) and CF_SECRET not in repr(cfg)
@@ -858,5 +899,383 @@ def test_the_readme_example_config_loads(tmp_path):
     p.write_text(example)
     cfg = W.load_config(p, env={"SIZEUP_STT_WORKER_TOKEN": TOKEN})
     W.validate(cfg)
-    assert cfg.whisper_server[0] == r"C:\sizeup-stt\whisper\whisper-server.exe"
+    assert cfg.whisper_server[0] == r"whisper\Release\whisper-server.exe"
     assert cfg.whisper_server[cfg.whisper_server.index("--host") + 1] == "127.0.0.1"
+
+
+# --- review fixes (#649) --------------------------------------------------------------------------------------------
+
+def test_busy_samples_neither_count_nor_reset_the_load():
+    """1: steady work. 90 % with [N/A] memory (Windows): samples taken while we infer say nothing, so a game that
+    keeps the GPU busy between our jobs is still seen, and a quiet spell isn't restarted by our own load."""
+    smi, clock = FakeSmi(gpu="90, 7000, 12282", apps="7000, [N/A]"), Clock()
+    busy = [False]
+    m = monitor(smi, clock, busy=lambda: busy[0])
+    for b in (False, True, True, False):                     # idle (hot), busy, busy, idle (hot): 2 in a row
+        busy[0] = b
+        m.sample()
+        clock.t += 5
+    assert m.gaming and "90%" in m.why
+    smi.gpu = "5, 1200, 12282"                               # the game ends; our jobs come back
+    busy[0] = False
+    m.sample()                                               # quiet from here
+    for b in (True, False, True):
+        clock.t += 20
+        busy[0] = b
+        smi.gpu = "92, 7000, 12282" if b else "5, 1200, 12282"   # our own inference: busy and loud
+        m.sample()
+    assert m.gaming
+    clock.t += 20
+    busy[0] = False
+    smi.gpu = "5, 1200, 12282"
+    m.sample()
+    assert not m.gaming                                      # 75 s of quiet: the busy samples didn't reset it
+
+
+def test_windows_fullscreen_is_gaming_even_while_busy():
+    smi, clock = FakeSmi(gpu="20, 3000, 12282", apps="7000, [N/A]"), Clock()
+    full = ["a full-screen Direct3D game"]
+    m = W.GpuMonitor(W.Config(), run=smi, clock=clock, busy=lambda: True, fullscreen=lambda: full[0])
+    m.sample()
+    m.sample()
+    assert m.gaming and m.why == "a full-screen Direct3D game"
+    full[0] = ""
+    m.sample()
+    clock.t += 60
+    m.sample()
+    assert not m.gaming
+    # without nvidia-smi (or on a Mac) the full-screen check alone still works
+    m2 = W.GpuMonitor(W.Config(), run=no_smi, clock=clock, fullscreen=lambda: "a full-screen app")
+    m2.sample()
+    m2.sample()
+    assert m2.gaming and m2.available is False
+    m3 = W.GpuMonitor(W.Config(fullscreen_gaming=False), run=no_smi, clock=clock, fullscreen=lambda: "a full-screen app")
+    m3.sample()
+    m3.sample()
+    assert not m3.gaming
+
+
+def test_windows_fullscreen_is_quiet_elsewhere():
+    assert W.windows_fullscreen() == "" or sys.platform == "win32"
+    assert W.QUNS == {2: "a full-screen app", 3: "a full-screen Direct3D game"}
+
+
+def test_gaming_mid_job_hands_back_at_once_when_much_lease_is_left(tmp_path, hub, whisper):
+    """2: gaming with seconds of lease left: released now, and whisper-server stops decoding (the client went)."""
+    cfg = make_cfg(tmp_path, hub, whisper)
+    whisper.delay = 2.0
+    started = []
+
+    def gaming_now(f):
+        if len(f["file"]) > 40000:
+            started.append(time.monotonic())
+            W.Control(cfg.control_path).set(gaming=True)
+
+    whisper.before = gaming_now
+    hub.add_job("clip-long", tone_wav(1.5), lease_s=6.0)
+    w = W.Worker(cfg, run=no_smi)
+    with running(w):
+        wait_for(lambda: hub.calls("/release"), what="released")
+        released = time.monotonic()
+        wait_for(lambda: whisper.aborted == 1, what="the inference aborted")
+    assert released - started[0] < 0.5
+    assert "gaming" in hub.calls("/release")[0][3]["why"] and not hub.calls("/complete")
+    assert w.counts == {"done": 0, "released": 1, "lost": 0, "failed": 0}
+
+
+def test_gaming_mid_job_hands_back_a_long_class_at_once(tmp_path, hub, whisper):
+    cfg = make_cfg(tmp_path, hub, whisper)
+    whisper.delay = 1.0
+    whisper.before = lambda f: W.Control(cfg.control_path).set(gaming=True) if len(f["file"]) > 40000 else None
+    hub.add_job("clip-catchup", tone_wav(1.5), cls="CATCHUP", lease_s=2.0)      # 2 s left: short, but a long class
+    w = W.Worker(cfg, run=no_smi)
+    with running(w):
+        wait_for(lambda: hub.calls("/release"), timeout=0.8, what="released at once")
+        wait_for(lambda: whisper.aborted == 1, what="the inference aborted")
+
+
+def test_pause_mid_job_also_hands_back(tmp_path, hub, whisper):
+    cfg = make_cfg(tmp_path, hub, whisper)
+    whisper.delay = 1.0
+    whisper.before = lambda f: W.Control(cfg.control_path).set(paused=True) if len(f["file"]) > 40000 else None
+    hub.add_job("clip-p", tone_wav(1.5), lease_s=6.0)
+    with running(W.Worker(cfg, run=no_smi)):
+        wait_for(lambda: hub.calls("/release"), timeout=0.8, what="released")
+    assert hub.calls("/release")[0][3]["why"] == "paused: manual"
+
+
+def test_stop_interrupts_a_long_poll_at_once(tmp_path, hub, whisper):
+    """8: Ctrl-C / stop doesn't wait out a 25 s claim."""
+    hub.claim_max_wait = 10.0
+    w = W.Worker(make_cfg(tmp_path, hub, whisper, claim_wait_s=25), run=no_smi)
+    t = threading.Thread(target=w.run, daemon=True)
+    t.start()
+    wait_for(lambda: hub.calls("/claim"), what="a long poll")
+    time.sleep(0.1)
+    t0 = time.monotonic()
+    w.stop()
+    t.join(5)
+    assert not t.is_alive() and time.monotonic() - t0 < 1.0
+
+
+def test_ctrl_c_stops_the_worker(tmp_path, hub, whisper):
+    import _thread
+    hub.claim_max_wait = 10.0
+    w = W.Worker(make_cfg(tmp_path, hub, whisper, claim_wait_s=25), run=no_smi)
+    timer = threading.Timer(0.5, _thread.interrupt_main)
+    timer.start()
+    t0 = time.monotonic()
+    w.run()                                                  # in this (the main) thread, as `worker.py run` does
+    assert time.monotonic() - t0 < 2.0
+    assert hub.calls("/state")[-1][3]["reason"] == "shutdown"
+    assert W.read_json(w.cfg.status_path)["state"] == "stopped"
+
+
+def test_unexpected_errors_are_logged_and_survived(tmp_path, hub, whisper, caplog, monkeypatch):
+    """3: a bug in the jobs loop, the hub sending a JSON list, the monitor's command blowing up: logged, carried on."""
+    real = W.result_body
+    calls = []
+
+    def flaky(*a, **kw):
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("a bug")
+        return real(*a, **kw)
+
+    monkeypatch.setattr(W, "result_body", flaky)
+    hub.claim_answer = ["not", "an", "object"]
+
+    def smi_bug(argv):
+        raise RuntimeError("nvidia-smi bug") if argv[0] == "nvidia-smi" else FileNotFoundError(argv[0])
+
+    sleeps = Sleeps()
+    w = W.Worker(make_cfg(tmp_path, hub, whisper), run=smi_bug, sleep=sleeps)
+    hub.add_job("clip-bug", tone_wav(1.5))
+    with running(w):
+        wait_for(lambda: len(calls) == 1, what="the bug")
+        hub.add_job("clip-ok", tone_wav(1.5))
+        wait_for(lambda: hub.accepted(), what="a job after the bug")
+        assert w._threads[0].is_alive() and w._threads[1].is_alive()
+    assert "isn't a JSON object" in caplog.text
+    assert "unexpected error" in caplog.text and "a bug" in caplog.text
+    assert "monitor: unexpected error" in caplog.text
+
+
+def test_audio_not_on_the_hub_is_handed_back_without_a_reconnect(tmp_path, hub, whisper):
+    sleeps = Sleeps()
+    hub.add_job("clip-x", tone_wav(1.0), audio="https://elsewhere.example.net/a.wav")
+    w = W.Worker(make_cfg(tmp_path, hub, whisper), run=no_smi, sleep=sleeps)
+    with running(w):
+        wait_for(lambda: hub.calls("/release"), what="released")
+        hub.add_job("clip-y", tone_wav(1.5))
+        wait_for(lambda: hub.accepted(), what="the next job")
+    assert hub.calls("/release")[0][3]["why"] == "audio isn't on the hub"
+    assert sleeps == [] and len(hub.calls("/hello")) == 1
+    assert not any("elsewhere" in r[1] for r in hub.requests)
+
+
+def test_no_audio_on_the_hub_410(tmp_path, hub, whisper):
+    hub.add_job("clip-gone", None)
+    w = W.Worker(make_cfg(tmp_path, hub, whisper), run=no_smi)
+    with running(w):
+        wait_for(lambda: w.counts["lost"] == 1, what="the 410")
+    assert not hub.calls("/release") and not whisper.jobs()
+
+
+def test_release_of_a_lost_lease_is_not_an_error(tmp_path, hub, whisper, caplog):
+    whisper.before = lambda f: hub.expire_all() if len(f["file"]) > 40000 else None
+    w = W.Worker(make_cfg(tmp_path, hub, whisper), run=no_smi)
+    with running(w):
+        wait_for(lambda: "online" in states(hub), what="online")
+        whisper.fail = 500
+        hub.add_job("clip-e", tone_wav(1.5))
+        wait_for(lambda: hub.calls("/release"), what="the release try")
+        wait_for(lambda: w.counts["lost"] == 1, what="counted lost")
+    assert "already taken the job back" in caplog.text and "release failed" not in caplog.text
+
+
+def test_extend_stops_at_the_cap_and_frees_the_gpu(tmp_path, hub, whisper):
+    """6: the hub's extend answers the remaining time; once it stops growing (the cap) the worker stops asking, and
+    when the lease runs out it drops the job and stops whisper-server (the hub already gave it to the next engine)."""
+    hub.cap_s = 0.6
+    whisper.delay = 2.0
+    hub.add_job("clip-cap", tone_wav(1.5), lease_s=0.2)
+    w = W.Worker(make_cfg(tmp_path, hub, whisper, lease_margin_s=0.05), run=no_smi)
+    with running(w):
+        wait_for(lambda: w.counts["lost"] == 1, what="dropped at the cap")
+        wait_for(lambda: whisper.aborted == 1, what="the inference aborted")
+        extends = len(hub.calls("/extend"))
+        time.sleep(0.2)
+        assert len(hub.calls("/extend")) == extends
+    assert 2 <= extends <= 8
+    assert not hub.calls("/complete") and not hub.calls("/release")
+
+
+def test_complete_retried_on_503(tmp_path, hub, whisper):
+    """7: a 503 (a deploy's standby) or a 5xx: complete again while the lease lasts."""
+    hub.fail_complete, hub.retry_after = [503, 502], "0.1"
+    hub.add_job("clip-r", tone_wav(1.5))
+    w = W.Worker(make_cfg(tmp_path, hub, whisper), run=no_smi)
+    with running(w):
+        wait_for(lambda: hub.accepted(), what="accepted on the third try")
+    assert len(hub.calls("/complete")) == 3 and w.counts["done"] == 1
+
+
+def test_complete_refused_400_hands_the_job_back(tmp_path, hub, whisper):
+    hub.fail_complete = [400]
+    hub.add_job("clip-400", tone_wav(1.5))
+    w = W.Worker(make_cfg(tmp_path, hub, whisper), run=no_smi)
+    with running(w):
+        wait_for(lambda: hub.calls("/release"), what="released")
+    assert hub.calls("/release")[0][3]["why"] == "complete refused: 400"
+    assert len(hub.calls("/complete")) == 1
+
+
+@pytest.mark.parametrize("fast, field", [(True, b"0.0"), (False, None), (None, None)])
+def test_fast_jobs_decode_greedily(tmp_path, hub, whisper, fast, field):
+    """9: the hub's fast flag (short-lease classes) -> temperature_inc=0.0, as WhisperClient(fast=True); an older hub
+    sends none: the full decode."""
+    hub.add_job("clip-fast", tone_wav(1.5), fast=fast)
+    with running(W.Worker(make_cfg(tmp_path, hub, whisper), run=no_smi)):
+        wait_for(lambda: hub.accepted(), what="done")
+    (req,) = whisper.jobs()
+    assert req["fields"].get("temperature_inc") == field
+    assert req["fields"]["temperature"] == b"0.0"
+
+
+def test_no_health_inference_while_gaming(tmp_path, hub, whisper):
+    """5: gaming or paused: whisper-server only checked for being there, never given work."""
+    cfg = make_cfg(tmp_path, hub, whisper)
+    W.Control(cfg.control_path).set(gaming=True)
+    with running(W.Worker(cfg, run=no_smi)):
+        wait_for(lambda: hub.calls("/state"), what="a heartbeat")
+        time.sleep(0.4)
+        assert whisper.requests == [] and states(hub)[-1] == "gaming"
+        W.Control(cfg.control_path).set(gaming=False)
+        wait_for(lambda: states(hub)[-1] == "online", what="online after the check")
+    assert len(whisper.requests) == 1
+
+
+class FakeProc:
+    n = 0
+
+    def __init__(self, argv, **kw):
+        FakeProc.n += 1
+        self.argv, self.kw, self.pid, self.code = argv, kw, 9000 + FakeProc.n, None
+        self.stdout = io.BytesIO(b"whisper_init_from_file: loading model\nmain: server is listening\n")
+
+    def poll(self):
+        return self.code
+
+    def terminate(self):
+        self.code = 1
+
+    def wait(self, timeout=None):
+        return self.code
+
+    def kill(self):
+        self.code = -9
+
+
+def test_whisper_server_stopped_after_a_long_game(tmp_path, hub):
+    dead = socket.socket()
+    dead.bind(("127.0.0.1", 0))
+    port = dead.getsockname()[1]
+    dead.close()
+    cfg = W.Config(hub_url=hub.url, token=TOKEN, whisper_url=f"http://127.0.0.1:{port}/inference",
+                   whisper_server=["whisper-server", "-m", "m.bin"], state_dir=str(tmp_path / "state"), log_file="-",
+                   heartbeat_s=0.05, claim_wait_s=0.2, tick_s=0.02, gaming_stop_whisper_min=0.005)
+    procs = []
+    w = W.Worker(cfg, run=no_smi, popen=lambda argv, **kw: procs.append(FakeProc(argv, **kw)) or procs[-1])
+    with running(w):
+        wait_for(lambda: procs, what="whisper-server started")
+        W.Control(cfg.control_path).set(gaming=True)
+        wait_for(lambda: procs[0].code == 1, what="stopped after the game went on")
+        assert w.whisper_err == "stopped while gaming"
+        time.sleep(0.2)
+        assert len(procs) == 1                               # not started again while gaming
+    log = (tmp_path / "state" / "whisper-server.log").read_text()
+    assert "server is listening" in log
+
+
+def test_children_get_no_secrets(tmp_path, monkeypatch):
+    """8: whisper-server, nvidia-smi and tasklist run without the token or the Cloudflare secret."""
+    monkeypatch.setenv("SIZEUP_STT_WORKER_TOKEN", TOKEN)
+    monkeypatch.setenv("SIZEUP_STT_CF_CLIENT_SECRET", CF_SECRET)
+    monkeypatch.setenv("SIZEUP_STT_CF_CLIENT_ID", CF_ID)
+    out = W.run_cmd([sys.executable, "-c", "import os; print(sorted(k for k in os.environ if k.startswith('SIZEUP_STT')))"])
+    assert out.strip() == "[]"
+    procs = []
+    wp = W.WhisperProcess(["whisper-server"], tmp_path / "whisper-server.log",
+                          popen=lambda argv, **kw: procs.append(FakeProc(argv, **kw)) or procs[-1], clock=Clock())
+    wp.ensure(port_alive=False)
+    env = procs[0].kw["env"]
+    assert not any(k.startswith("SIZEUP_STT") for k in env) and "PATH" in env
+    assert procs[0].kw["stdout"] is W.subprocess.PIPE
+
+
+def test_whisper_server_relative_to_the_config(tmp_path):
+    (tmp_path / "whisper" / "Release").mkdir(parents=True)
+    exe = tmp_path / "whisper" / "Release" / "whisper-server.exe"
+    exe.write_bytes(b"")
+    p = tmp_path / "worker.json"
+    p.write_text(json.dumps({"hub_url": "https://hub.example.org", "state_dir": "state",
+                             "whisper_server": ["whisper/Release/whisper-server.exe", "-m", "models/m.bin"]}))
+    cfg = W.load_config(p, env={})
+    assert cfg.state_dir == str(tmp_path / "state")
+    procs = []
+    wp = W.WhisperProcess(cfg.whisper_server, tmp_path / "w.log", clock=Clock(), base_dir=cfg.base_dir,
+                          popen=lambda argv, **kw: procs.append(FakeProc(argv, **kw)) or procs[-1])
+    wp.ensure(port_alive=False)
+    assert procs[0].argv == [str(exe), "-m", "models/m.bin"] and procs[0].kw["cwd"] == str(tmp_path)
+
+
+@pytest.mark.parametrize("doc, msg", [
+    ({"whisper_url": "http://192.0.2.10:8179/inference"}, "this PC only"),
+    ({"whisper_server": ["whisper-server", "-m", "m.bin", "--host", "0.0.0.0", "--port", "8179"]}, "--host must be"),
+    ({"whisper_server": ["whisper-server", "--host"]}, "--host must be"),
+])
+def test_whisper_server_must_stay_on_loopback(tmp_path, doc, msg):
+    """8: whisper-server answers with CORS *: on the network any web page could use it."""
+    p = tmp_path / "worker.json"
+    p.write_text(json.dumps({"hub_url": "https://hub.example.org", **doc}))
+    with pytest.raises(W.ConfigError, match=msg):
+        W.validate(W.load_config(p, env={"SIZEUP_STT_WORKER_TOKEN": TOKEN}))
+
+
+def test_one_worker_per_state_dir(tmp_path, capsys):
+    cfg = W.Config(state_dir=str(tmp_path))
+    W.write_json(cfg.status_path, {"pid": os.getpid() + 1, "updated": time.time() - 3, "state": "online"})
+    assert W.another_worker(cfg) == os.getpid() + 1
+    W.write_json(cfg.status_path, {"pid": os.getpid() + 1, "updated": time.time() - 3, "state": "stopped"})
+    assert W.another_worker(cfg) == 0
+    W.write_json(cfg.status_path, {"pid": os.getpid() + 1, "updated": time.time() - 60, "state": "online"})
+    assert W.another_worker(cfg) == 0
+
+
+def test_tasklist_parsing():
+    out = ('"whisper-server.exe","4321","Console","1","612,004 K"\r\n'
+           '"whisper-server.exe","4400","Console","1","1,024 K"\r\n')
+    assert W.parse_tasklist(out) == {4321, 4400}
+    assert W.parse_tasklist("INFO: No tasks are running which match the specified criteria.\r\n") == set()
+
+
+def test_hub_takes_back_on_gaming_and_heartbeats_go_on_while_decoding(tmp_path, hub, whisper, caplog):
+    """#651: the hub takes back a worker's pre-alert jobs when it goes gaming (the release then gets 409: a lost
+    lease, not an error), and it drops a worker it hasn't heard from for 12 s, so the heartbeat runs during a decode."""
+    cfg = make_cfg(tmp_path, hub, whisper)
+    hub.takeback_on_hold = True
+    whisper.delay = 0.8
+    hub.add_job("clip-slow", tone_wav(1.5), lease_s=6.0)
+    w = W.Worker(cfg, run=no_smi)
+    with running(w):
+        wait_for(lambda: whisper.jobs(), what="decoding")
+        beats = len(hub.calls("/state"))
+        time.sleep(0.3)
+        assert len(hub.calls("/state")) >= beats + 3              # heartbeats while whisper-server decodes
+        W.Control(cfg.control_path).set(gaming=True)
+        wait_for(lambda: hub.calls("/release"), what="the release try")
+        # the heartbeat and the release race: the hub took it back first (409, lost) or took the release (released)
+        wait_for(lambda: w.counts["lost"] + w.counts["released"] == 1, what="handed back or lost")
+    assert ("already taken the job back" in caplog.text) == (w.counts["lost"] == 1)
+    assert "release failed" not in caplog.text and not hub.accepted()
