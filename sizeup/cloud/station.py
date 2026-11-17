@@ -38,9 +38,12 @@
                        alarm's All clear: the emergency window here, App._call's keep decision) here
 
 Clips go as 8 kHz WAV: they are already band-limited to 300-3300 Hz (stt.radio_voice), so
-halving the rate halves the upload and changes nothing you can hear. A transmission's or a page's event also carries
-its speech-to-text input ("stt": the exact audio the station's whisper transcribes, FLAC at 16 kHz,
-sizeup/cloud/sttinput.py), so the hub's engines transcribe what whisper does; the outbox drops it before any clip.
+halving the rate halves the upload and changes nothing you can hear.
+
+    stt-input threads  each transmission's / page's speech-to-text input (the exact audio the station's whisper
+                       transcribes, FLAC at 16 kHz, sizeup/cloud/sttinput.py): made by one low-priority thread
+                       ("hub-stt-input") off the radio path, kept in the outbox's own lane, and sent by "hub-stt"
+                       to POST /api/station/stt, gzipped, only while no event waits and only to a hub that takes them
 """
 
 from __future__ import annotations
@@ -165,8 +168,11 @@ class StationLink:
         self.logs = LogShipper(cfg, self._client, log, app=app)
         # the signal metrics (sizeup/cloud/metrics.py): sampled here, to the hub on their own thread, never the outbox
         self.metrics_link = MetricsLink(app, cfg, self._client, log)
-        # each transmission's / page's speech-to-text input, from App._stt until its event takes it (sttinput.py)
-        self.stt_stash = sttinput.Stash()
+        # each transmission's / page's speech-to-text input: made off the radio path, into the outbox's own lane
+        self.stt_encoder = sttinput.Encoder(self._stt_made, log)
+        self._stt_wake = threading.Event()
+        self.stt_refused = 0                    # the hub refused them for good (a bad one: never sent again)
+        self.stt_sent = 0
         app.events, app.link = self.emit, self
         app.cad.cloud = self.cad_cloud
         n, _ = self.outbox.pending()
@@ -191,28 +197,28 @@ class StationLink:
         # Another P25 system's (#409): a hub from before it would file the row as the county's talkgroup of that
         # number, so it is not sent there (the station's own page still has it); its audio waits in its own budget.
         context = kind == "activity" or (kind in ("traffic", "alarm") and bool(data.get("system")))
-        stt = self.stt_stash.take(clip) if clip and kind in sttinput.STT_KINDS else None
         if context and "p25_systems" not in self.hub_caps:
             return
         audio = clip_8k(self.app.clip(clip)) if clip else None
-        self.outbox.add(kind, data, audio, context=context, stt=stt)
+        self.outbox.add(kind, data, audio, context=context)
         self._wake.set()
 
     def stt_input(self, item, audio) -> None:
-        """App: this transmission / page goes to speech-to-text now with `audio` (App._stt's): its exact whisper input
-        is kept for the event that carries its clip (once per id: a page's, made before its event, isn't made again)."""
-        if self.stt_stash.has(item.id):
-            return
-        try:
-            got = sttinput.blob(item, audio)
-        except Exception as e:  # noqa: BLE001 - never in the radio path's way: the hub falls back to the clip
-            self.stt_stash.failed += 1
-            if getattr(self, "_stt_said", "") != type(e).__name__:
-                self._stt_said = type(e).__name__
-                self.log(f"hub link: speech-to-text input not made: {type(e).__name__}: {e}")
-            return
-        if got is not None:
-            self.stt_stash.put(item.id, got)
+        """App._stt: this transmission / page goes to speech-to-text now with `audio`. Queued (a reference, nothing
+        made here: the radio threads never wait); its FLAC is made on the encoder's thread and goes up on its own."""
+        self.stt_encoder.submit(item, audio)
+
+    def _stt_made(self, data: dict, flac: bytes, meta: dict) -> None:
+        self.outbox.add_stt(data, flac, meta)
+        self._stt_wake.set()
+
+    def stt_stats(self) -> dict:
+        """The STT inputs: waiting (to be made, to go up), sent, and dropped by reason."""
+        enc = self.stt_encoder.stats()
+        n, b = self.outbox.stt_pending()
+        dropped = dict(enc["dropped"], outbox=self.outbox.dropped_stt, refused=self.stt_refused)
+        return {"queued": enc["queued"], "waiting": n, "bytes": b, "made": enc["made"], "sent": self.stt_sent,
+                "dropped": dropped, "hub_takes": sttinput.CAP in self.hub_caps}
 
     def live_changed(self) -> None:
         self._live_wake.set()
@@ -220,7 +226,8 @@ class StationLink:
     def start(self) -> StationLink:
         if self._threads:
             return self
-        for name, fn in (("hub-forward", self._forward), ("hub-state", self._state), ("hub-jobs", self._jobs)):
+        for name, fn in (("hub-forward", self._forward), ("hub-state", self._state), ("hub-jobs", self._jobs),
+                         ("hub-stt", self._stt_forward)):
             t = threading.Thread(target=fn, name=name, daemon=True)
             t.start()
             self._threads.append(t)
@@ -243,6 +250,8 @@ class StationLink:
         self._stop.set()
         self._wake.set()
         self._live_wake.set()
+        self._stt_wake.set()
+        self.stt_encoder.stop()
         self.aircraft.stop()
         self.vessels.stop()
         self.logs.stop()
@@ -292,8 +301,9 @@ class StationLink:
                       "it goes up when the hub is back")
         if self.outbox.dropped_audio:
             detail += f" · {self.outbox.dropped_audio} clip(s) dropped to keep the outbox under its limit"
-        if self.outbox.dropped_stt:
-            detail += f" · {self.outbox.dropped_stt} STT input(s) dropped (the hub used the clip)"
+        lost = sum(self.stt_stats()["dropped"].values())
+        if lost:
+            detail += f" · {lost} STT input(s) dropped (the hub used the clip)"
         v = self.updates.status()
         detail += f" · version: {v['text']}"
         ad = self.adapter(v)
@@ -351,7 +361,6 @@ class StationLink:
                 continue
             body = {"epoch": self.outbox.epoch, "station": self.cfg.station_id,
                     "events": [dict(r, audio=base64.b64encode(r["audio"]).decode() if r["audio"] else None)
-                               | ({"stt": sttinput.to_wire(*r["stt"])} if r.get("stt") else {})
                                for r in rows]}
             try:
                 r = client.request("POST", "/api/station/events", body, timeout=60.0)
@@ -366,6 +375,36 @@ class StationLink:
                 self._ok()
             backoff.ok()
 
+    # -- the STT inputs (their own lane, under the events) -----------------------------------------------------
+
+    def _stt_forward(self) -> None:
+        """POST /api/station/stt: the STT inputs, gzipped, a few hundred KB at a time, only to a hub that takes them and
+        only while no event waits in the outbox (a page or a transmission never queues behind one)."""
+        client = self._client(60.0)
+        backoff = Backoff(first=2.0, fast_cap=10.0, cap=120.0)
+        while not self._stop.is_set():
+            if sttinput.CAP not in self.hub_caps or self.outbox.pending()[0] or not self.outbox.stt_pending()[0]:
+                self._stt_wake.wait(2.0)
+                self._stt_wake.clear()
+                continue
+            rows = self.outbox.stt_batch()
+            body = {"v": 1, "station": self.cfg.station_id,
+                    "items": [dict(r["data"], n=r["n"], stt=sttinput.to_wire(r["flac"], r["meta"])) for r in rows]}
+            try:
+                r = client.request("POST", sttinput.PATH, body, timeout=60.0, gzip_body=True)
+                stored = [int(n) for n in r.get("stored") or []]
+                refused = [int(n) for n in r.get("refused") or []]
+            except (HubError, TypeError, ValueError, AttributeError) as e:
+                if isinstance(e, HubError) and e.status == 404:          # a hub without the route after all
+                    self._set_caps(self.hub_caps - {sttinput.CAP})
+                self._stop.wait(backoff.fail(e))
+                continue
+            sent = {r["n"] for r in rows}
+            self.outbox.stt_ack([n for n in stored + refused if n in sent])
+            self.stt_sent += sum(1 for n in stored if n in sent)
+            self.stt_refused += sum(1 for n in refused if n in sent)
+            backoff.ok()
+
     # -- talking now + status (latest wins) ------------------------------------------------------------
 
     def status(self, talkgroups: bool = True) -> dict:
@@ -377,8 +416,8 @@ class StationLink:
                "channels": app.channels_applied(),
                "p25_systems": app.p25_systems_state(),       # (#409) the other P25 systems: jobs, state, activity
                "reception": app.reception.state(),           # (#410) the reception test: its numbers, the history
-               "outbox": {"pending": n, "oldest": oldest, "dropped_audio": self.outbox.dropped_audio,
-                          "dropped_stt": self.outbox.dropped_stt, "stt": self.stt_stash.stats()},
+               "outbox": {"pending": n, "oldest": oldest, "dropped_audio": self.outbox.dropped_audio},
+               "stt_input": self.stt_stats(),                # (each clip's STT input: waiting, sent, dropped by reason)
                "version": self.version()}
         try:
             out["logship"] = self.logs.stats()

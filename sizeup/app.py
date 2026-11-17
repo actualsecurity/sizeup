@@ -1426,8 +1426,6 @@ class App:
         page.stt = eng if eng in ("aws", "both") else ""  # type: ignore[attr-defined]
         if eng == "aws" and self.forwarding():
             page.status = "remote"          # the hub transcribes it (Amazon Transcribe)
-        if heard and eng != "off":
-            self._stt_input(page, page.voice)   # (station) its whisper input goes up with the page itself
         self._emit("page", self._page_doc(page), page.id)
         if not heard:
             return
@@ -2647,8 +2645,7 @@ class App:
             item.raw, item.confidence, item.status = "", None, "off"
             item.model = ""
             return self._transcribed(item)
-        if not isinstance(item, Page):         # (a page's was made before its event: _page_done)
-            self._stt_input(item, audio)
+        self._stt_input(item, audio)           # (station) the same audio for the hub's engines, queued, never made here
         if eng == "aws" and self.forwarding():
             # The hub runs Amazon Transcribe on the clip it gets: no whisper here.
             item.raw, item.confidence, item.status, item.model = "", None, "remote", channels_model()
@@ -2665,8 +2662,9 @@ class App:
         self.stt.submit(item, audio, self._stt_priority(item, key), key)    # (dropped: _stt_dropped says so on it)
 
     def _stt_input(self, item, audio: np.ndarray | None) -> None:
-        """(station) The audio this transmission or page gets from speech-to-text, to the hub with its clip, whichever
-        engine takes it (sizeup/cloud/sttinput.py): the hub's engines then transcribe exactly what whisper does here."""
+        """(station) The audio this transmission or page gets from speech-to-text, to the hub on its own lane, whichever
+        engine takes it (sizeup/cloud/sttinput.py): the hub's engines then transcribe exactly what whisper does here.
+        Only a reference is queued: the FLAC is made on the link's own low-priority thread."""
         link = self.link
         if link is None or audio is None or not hasattr(link, "stt_input"):
             return

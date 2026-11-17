@@ -10,6 +10,18 @@ Bounded: queued audio over max_audio_bytes drops the OLDEST audio first (the eve
 audio_dropped); metadata (transcripts, pages, radio IDs) is never dropped. Context audio (#409: another P25
 system's clips, add(context=True)) has its own smaller budget (CONTEXT_SHARE of the limit) and goes first when the
 whole is over: a hub outage never costs a fire clip for a police one.
+
+The speech-to-text inputs (sizeup/cloud/sttinput.py: the exact audio the station's whisper transcribes, FLAC) are a
+lane of their own: the stt_inputs table, sent by their own thread to POST /api/station/stt only while no event waits
+here, so a page or a transmission never queues behind one. They are not events (no seq, never in the hub's cursor:
+the hub keeps each one by its clip id, whenever it comes, so the order doesn't matter and a resend is harmless).
+
+    add_stt(data, flac, meta)  one, committed at once
+    stt_batch()                the oldest, up to a size; stt_ack(ns) deletes the ones the hub answered for
+
+They have their own budget (STT_SHARE of max_audio_bytes) and count toward the limit with the clips, and go before any
+of them: over their budget, or the whole over the limit, the oldest STT inputs are dropped first (dropped_stt counts
+them), only then context audio, then our clips. The hub then transcribes the listening clip and says so.
 """
 
 from __future__ import annotations
@@ -22,6 +34,7 @@ import time
 from pathlib import Path
 
 CONTEXT_SHARE = 0.2
+STT_SHARE = 0.3
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS outbox (
@@ -33,6 +46,13 @@ CREATE TABLE IF NOT EXISTS outbox (
     audio_dropped INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS stt_inputs (
+    n INTEGER PRIMARY KEY AUTOINCREMENT,
+    at REAL NOT NULL,
+    data TEXT NOT NULL,
+    flac BLOB NOT NULL,
+    meta TEXT NOT NULL
+);
 """
 
 
@@ -62,6 +82,62 @@ class Outbox:
         self.audio_bytes = int(self.db.execute("SELECT COALESCE(SUM(LENGTH(audio)), 0) FROM outbox").fetchone()[0])
         self.dropped_audio = 0          # this run: events whose audio was dropped to stay under the limit
         self.context_bytes = int(self.db.execute("SELECT COALESCE(SUM(LENGTH(audio)), 0) FROM outbox WHERE context = 1").fetchone()[0])
+        self.stt_bytes = int(self.db.execute("SELECT COALESCE(SUM(LENGTH(flac)), 0) FROM stt_inputs").fetchone()[0])
+        self.dropped_stt = 0            # this run: STT inputs dropped to stay under the limit (their clips kept)
+
+    def _drop_stt(self) -> None:
+        """STT inputs, oldest first, until they are inside their own budget and the whole is inside the limit."""
+        limit = int(self.max_audio_bytes * STT_SHARE)
+        while self.stt_bytes > limit or (self.stt_bytes > 0 and self.audio_bytes + self.stt_bytes > self.max_audio_bytes):
+            old = self.db.execute("SELECT n, LENGTH(flac) FROM stt_inputs ORDER BY n LIMIT 20").fetchall()
+            if not old:
+                self.stt_bytes = 0
+                return
+            for n, size in old:
+                self.db.execute("DELETE FROM stt_inputs WHERE n = ?", (n,))
+                self.stt_bytes -= size
+                self.dropped_stt += 1
+                if self.stt_bytes <= limit and self.audio_bytes + self.stt_bytes <= self.max_audio_bytes:
+                    return
+
+    def add_stt(self, data: dict, flac: bytes, meta: dict, at: float | None = None) -> int:
+        """One clip's STT input (data: its id and where it was heard, sizeup/cloud/sttinput.py)."""
+        with self._lock:
+            cur = self.db.execute("INSERT INTO stt_inputs (at, data, flac, meta) VALUES (?, ?, ?, ?)",
+                                  (time.time() if at is None else at, json.dumps(data, separators=(",", ":"), default=_plain),
+                                   flac, json.dumps(meta, separators=(",", ":"), default=_plain)))
+            self.stt_bytes += len(flac)
+            self._drop_stt()
+            return int(cur.lastrowid)
+
+    def stt_batch(self, max_bytes: int = 512 * 1024, max_items: int = 50) -> list[dict]:
+        """The oldest STT inputs, at least one, up to max_bytes of FLAC."""
+        out, size = [], 0
+        with self._lock:
+            rows = self.db.execute("SELECT n, at, data, flac, meta FROM stt_inputs ORDER BY n LIMIT ?",
+                                   (max_items,)).fetchall()
+        for n, at, data, flac, meta in rows:
+            if out and size + len(flac) > max_bytes:
+                break
+            out.append({"n": n, "at": at, "data": json.loads(data), "flac": bytes(flac), "meta": json.loads(meta)})
+            size += len(flac)
+        return out
+
+    def stt_ack(self, ns) -> int:
+        """The hub has answered for these (kept, or refused for good): gone from here."""
+        ns = [int(n) for n in ns]
+        if not ns:
+            return 0
+        with self._lock:
+            k = self.db.execute(f"DELETE FROM stt_inputs WHERE n IN ({','.join('?' * len(ns))})", ns).rowcount
+            self.stt_bytes = int(self.db.execute("SELECT COALESCE(SUM(LENGTH(flac)), 0) FROM stt_inputs").fetchone()[0])
+            return k
+
+    def stt_pending(self) -> tuple[int, int]:
+        """(STT inputs waiting, their bytes)."""
+        with self._lock:
+            n, b = self.db.execute("SELECT COUNT(*), COALESCE(SUM(LENGTH(flac)), 0) FROM stt_inputs").fetchone()
+        return int(n), int(b)
 
     def _drop_context(self, limit: int, whole: bool) -> None:
         """Context audio, oldest first, until it is inside its own budget (whole: until the whole outbox is too)."""
@@ -87,6 +163,7 @@ class Outbox:
             self.audio_bytes += len(audio or b"")
             if context:
                 self.context_bytes += len(audio or b"")
+            self._drop_stt()                    # (first: the STT inputs go before any clip)
             self._drop_context(int(self.max_audio_bytes * CONTEXT_SHARE), whole=True)
             while self.audio_bytes > self.max_audio_bytes:
                 old = self.db.execute("SELECT seq, LENGTH(audio) FROM outbox WHERE audio IS NOT NULL "

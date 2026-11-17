@@ -640,7 +640,7 @@ class AudioDb:
             marks = ",".join("?" * len(old))
             named = {r[0] for r in self._scan(f"SELECT key FROM audio WHERE key IN ({marks})", old)}
             unnamed = {k: key_id(k) for k in old if k not in named}
-            still = known(list(unnamed.values())) if unnamed else {}
+            still = _paired(known, list(unnamed.values())) if unnamed else {}     # (an STT input: as its clip)
             for k, aid in unnamed.items():
                 if aid in still:
                     self._restore_row(aid, k, *still[aid])
