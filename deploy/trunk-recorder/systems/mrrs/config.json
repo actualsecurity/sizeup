@@ -16,13 +16,13 @@
     },
     "reception": {
       "watch": [9211, 9570],
-      "antenna": "a directional (yagi) antenna toward Harrison, the nearest subsite; no LNA near the 700 MHz cell bands",
+      "antenna": "a 700/800 MHz antenna on its own feed (no shared UHF splitting): about +20 dB over the floor on the control channel at gain 40 decodes reliably, under about +12 dB it does not; no LNA near the 700 MHz cell bands",
       "caveat": "Some traffic is carried over LTE and never on RF."
     }
   },
   "sources": [
     {
-      "center": 770312500,
+      "center": 770521875,
       "rate": 2400000,
       "error": 0,
       "gain": 40,
@@ -31,7 +31,7 @@
       "device": "rtl=mrrs-770"
     },
     {
-      "center": 773081250,
+      "center": 772721875,
       "rate": 2400000,
       "error": 0,
       "gain": 40,

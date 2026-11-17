@@ -252,3 +252,65 @@ def test_health_shows_the_parked_cameras(tmp_path):
     assert '"Camera DVR"' in js and "next check ${hm(p.next)}" in js
     ml = (Path(dvr_mod.__file__).parent / "web" / "static" / "maplayers.js").read_text()
     assert 'd.parked ? "Parked"' in ml
+
+
+def test_the_check_uses_the_recordings_kept_alive_fetch_with_its_short_timeout(tmp_path, monkeypatch):
+    from sizeup import httpkeep
+    from sizeup.roads import http_get
+    r, d, f, clock, up = park(tmp_path)
+    asked = []
+
+    def keep(url, timeout, limit, headers=None):
+        asked.append((url, timeout))
+        raise URLError(TimeoutError("timed out"))
+    monkeypatch.setattr(httpkeep, "get", keep)
+    r.fetch = http_get                                                             # the hub's own client: kept alive
+    clock.t = d.parked[DEAD]["next"] + 1
+    d.tick()
+    assert asked == [(r.camera(DEAD)["video"], dvr_mod.PROBE_TIMEOUT_S)] and DEAD in d.parked
+
+
+def test_a_check_that_never_answers_leaves_no_connection_in_the_pool(tmp_path, monkeypatch):
+    import socket
+    import threading
+    from sizeup import httpkeep
+    srv = socket.socket()
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(4)
+    held = []
+    threading.Thread(target=lambda: held.append(srv.accept()), daemon=True).start()
+    pool = httpkeep.Pool()
+    monkeypatch.setattr(httpkeep, "POOL", pool)
+    monkeypatch.setattr(dvr_mod, "PROBE_TIMEOUT_S", 0.2)
+    r, d, f, clock, up = park(tmp_path)
+    from sizeup.roads import http_get
+    r.fetch = http_get
+    cam = dict(r.camera(DEAD), video=f"http://127.0.0.1:{srv.getsockname()[1]}/rtplive/TA_057/playlist.m3u8")
+    try:
+        assert d._check(DEAD, cam) is False                                        # TLS-like: connects, never answers
+        assert pool._idle == {} or all(not v for v in pool._idle.values())         # nothing dead kept for the next one
+        assert DEAD in d.parked and d.logs[-1].startswith(f"dvr: {DEAD} parked")   # and still quiet
+    finally:
+        srv.close()
+        for c, _ in held:
+            c.close()
+
+
+def test_back_from_parked_takes_its_slot_on_the_next_tick_with_an_open_event(tmp_path):
+    r, d, f, clock, up = rig(tmp_path, max_cameras=1, near_m=5000)
+    cam = r.camera(DEAD)
+    d.incidents = lambda: [{"lat": cam["lat"] + 0.001, "lon": cam["lon"], "address": ""}]   # its incident cameras cached
+    assert list(d.wanted())[0] == DEAD
+    up.down[DEAD] = "timeout"
+    run(d, f, clock, PARK_AFTER_S + dvr_mod.SESSION_RETRY_S + 30)
+    assert DEAD in d.parked and DEAD not in d.wanted()                             # excluded after the cached incident set
+    other = list(d.wanted())
+    assert other and other[0] != DEAD                                              # the slot: the next one near it
+    up.down.pop(DEAD)
+    clock.t = d.parked[DEAD]["next"] + 1
+    d.tick()                                                                       # the check: back
+    assert DEAD not in d.parked
+    f.advance()
+    clock.t += 4
+    d.tick()
+    assert list(d._wanted) == [DEAD] and d.status(DEAD)["recording"]

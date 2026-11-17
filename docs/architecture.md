@@ -307,7 +307,7 @@ schedule per pull, in Settings.
 | Airport | Runways, taxiways, gates, approaches, staging; alert levels and the airport run cards | `cad/airport.py` |
 | Trains | Metro-North GTFS-realtime with a motion model between reporting points; MTA TrainTime for GPS, consist and track when it answers; numbered tracks, catenary pole numbers and mileposts | `trains.py`, `traintime.py`, `railassets.py` |
 | Vessels | AIS: the station's receiver and aisstream.io | `vessels.py`, `wsclient.py`, [`vessels.md`](vessels.md) |
-| Highways | Thruway and 511NY cameras, events, roadwork and signs; live video checked and repaired; a rolling camera DVR; a camera wall | `roads.py`, `hlsseg.py`, `dvr.py`, `camoverlay.py` |
+| Highways | Thruway and 511NY cameras, events, roadwork and signs; live video checked and repaired; a rolling camera DVR; a camera wall | `roads.py`, `hlsseg.py`, `dvr.py`, `httpkeep.py`, `camoverlay.py` |
 | Road projects and closures | Thruway, 511NY, NYSDOT and CTDOT capital projects, village notices, WZDx | `roadprojects.py` |
 | County GIS | Westchester County GIS ArcGIS layers: parcels, boundaries, fire districts, hydrants and more, by config | `gis.py` |
 | Weather and water | NWS alerts, conditions and radar; NOAA tides | `weather.py` |
@@ -499,7 +499,7 @@ Top level of `sizeup/`:
 | `janitor.py` | Retention under `captures/` (all-in-one and station) |
 | `atc.py`, `atc_*.py`, `airport_watch.py`, `aircraft.py` | ATC transcription and rules, airport watches, the aircraft layer |
 | `trains.py`, `traintime.py`, `railassets.py`, `vessels.py`, `wsclient.py` | Trains and vessels |
-| `roads.py`, `roadprojects.py`, `roadgraph.py`, `hlsseg.py`, `dvr.py`, `camoverlay.py` | Highways, cameras, closures, routing |
+| `roads.py`, `roadprojects.py`, `roadgraph.py`, `hlsseg.py`, `dvr.py`, `httpkeep.py`, `camoverlay.py` | Highways, cameras, closures, routing |
 | `gis.py`, `weather.py`, `datasources.py` | County GIS, weather, the data-source registry |
 | `perf.py`, `timing.py`, `logscrub.py`, `procenv.py`, `tz.py` | Profiling, timing lines, log scrubbing, the station's process environment, the console time zone |
 
