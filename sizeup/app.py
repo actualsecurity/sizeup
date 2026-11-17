@@ -826,7 +826,7 @@ class App:
                       "status": (cfg.prealert_status_topic, cfg.prealert_status_source)}, log=log)
         self.cad.pushes = self.pushes
         self.cad.alarms.notifier = self.pushes.notifier(notify.ALERTS)
-        # Radio pre-alerts (sizeup/intel, #411): pushed on the INTEL kind (no topic of its own: the alerts topic), by the
+        # Radio pre-alerts (sizeup/intel, #411): pushed on the INTEL kind (its own topic only: none, no push), by the
         # CAD of record holding the lease only; located over the gazetteer (read only). Its thread starts in start().
         intel = self.cad.intel
         intel.notifier, intel.public_url, intel.leader = self.pushes.notifier(notify.INTEL), cfg.cloud_public_url, self._atc_leader
@@ -835,6 +835,8 @@ class App:
             from sizeup.intel.place import Locator
             intel.locate = Locator(self.gaz, places=self.cad.place_index)      # exits and markers too
         intel.listen = self._intel_listen(intel)
+        if cfg.alerts_config_note:
+            log(f"notify: config: {cfg.alerts_config_note}")
         log(self.pushes.line())
         _mark("prealert + pushes")
         self.cad.alarms.public_url = cfg.cloud_public_url

@@ -402,7 +402,7 @@ its key, the cap); one that fails is skipped and counted in the import's notes.
 |---|---|
 | alerts | Emergency buttons, mayday, aircraft emergency squawks, airport pre-alerts, their acknowledgements and all clears |
 | status | Station health, Amazon Transcribe failing or over budget, hub error spikes, replica and takeover failures |
-| intel | Radio-intelligence pre-alerts, with a Listen button. Falls back to the alerts topic until it has its own. |
+| intel | Radio-intelligence pre-alerts, with a Listen button. Its own topic only: none set, no intel pushes (never the alerts or status topic). |
 
 Topic names are secrets: set by env / SSM or Settings, shown to admins only, never logged or exported. sizeup never
 publishes to a **protected** topic: the set is derived, not listed in code (every topic the app subscribes to for the
