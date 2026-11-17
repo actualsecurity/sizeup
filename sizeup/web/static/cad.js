@@ -3034,7 +3034,7 @@ function locationText(m) {             // what the location field says for a sug
 }
 // A suggestion's words (the location box, a note's "@" list): a name at the address typed, "120 Example Ave @ Sample
 // Fitness" (the server's at_address / at); a place by its name, "Sample Market · 40 Example Rd" (the address from the
-// data, or none); else its label ("N Main St & Westchester Ave": meet, two streets typed, where they meet).
+// data, or none); else its label ("Example Ave & Sample St": meet, two streets typed, where they meet).
 function suggestionHead(m, meet) {
   const at = m.at_address || m.at;
   if (at) return [el("b", "", m.street_address || at), el("span", "sg-at", `@ ${m.place || m.label}`)];

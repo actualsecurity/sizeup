@@ -2039,7 +2039,8 @@ class Cad:
                     extra = self.local_places()
                 address = f"{m['house_number']} {m['street']}"
                 have = {((o.get("place") or "").lower(), o["lat"], o["lon"]) for o in out}
-                for h in ix.places_at(address, m["lat"], m["lon"], extra)[:limit - 1 - len(out)]:
+                for h in ix.places_at(address, m["lat"], m["lon"], extra, town=m.get("town") or "",
+                                      town_of=self.lists.town_of)[:limit - 1 - len(out)]:
                     h["sub"] = self.lists.town_of(h["sub"]) or m.get("town") or ""
                     pm = dict(self._as_match(h), confidence=m["confidence"], at_address=address)
                     if (pm["place"].lower(), pm["lat"], pm["lon"]) not in have:
@@ -2148,7 +2149,8 @@ class Cad:
         a, got["at_address"] = got.get("address"), []
         if a and a.get("house_number") and a.get("street") and ix is not None and hasattr(ix, "places_at"):
             address = f"{a['house_number']} {a['street']}"
-            for h in ix.places_at(address, a["lat"], a["lon"], self.local_places()):
+            for h in ix.places_at(address, a["lat"], a["lon"], self.local_places(), town=a.get("town") or "",
+                                  town_of=L.town_of):
                 h["sub"] = L.town_of(h["sub"]) or a.get("town") or ""
                 got["at_address"].append(self._detailed(dict(self._as_match(h), at_address=address)))
             p = got.get("place")
@@ -2179,12 +2181,15 @@ class Cad:
         gazetteer: the same tuple while they don't change."""
         return self.settings.local_addresses()
 
-    def _place_hits(self, q: str, near=None, limit: int = 8) -> list[dict]:
+    def _place_hits(self, q: str, near=None, limit: int = 8, at_address: bool = False) -> list[dict]:
+        """The place search's hits, towns as the CAD names them. at_address: the names at an address typed before it
+        (the place search's own answer only: GET /api/cad/places; the location box puts its own, _places_at)."""
         ix = self.place_index()
         if ix is None:
             return []
         L = self.lists
-        hits = ix.search(q, near=near, limit=limit, extra=self.local_places(), priority=tuple(L.geo_town_order))
+        hits = ix.search(q, near=near, limit=limit, extra=self.local_places(), priority=tuple(L.geo_town_order),
+                         **({"at_address": True, "town_of": L.town_of} if at_address else {}))
         for h in hits:
             h["sub"] = L.town_of(h["sub"])
         return hits
@@ -2232,7 +2237,7 @@ class Cad:
             raise CadError("limit: a number") from None
         if self.place_index() is None:
             return {"places": [], "error": "place search unavailable"}
-        return {"places": [{k: h[k] for k in PLACE_FIELDS if k in h} for h in self._place_hits(q, near, limit)]}
+        return {"places": [{k: h[k] for k in PLACE_FIELDS if k in h} for h in self._place_hits(q, near, limit, at_address=True)]}
 
     # -- the bridge from the monitor ----------------------------------------------------------------
 
