@@ -1345,4 +1345,5 @@ def test_an_incident_deleted_outright_is_dropped_from_the_heads_without_an_entry
         db.execute("DELETE FROM events WHERE incident_id = ?", (inc["id"],))
         db.execute("DELETE FROM assignments WHERE incident_id = ?", (inc["id"],))
         db.execute("DELETE FROM incidents WHERE id = ?", (inc["id"],))
-    assert rig.settle() == [] and key not in rig.log.heads() and rig.log.head() == head   # no "gone" entry for incidents
+    # dropped, and no "gone" entry (an incident that leaves the list is not a deletion)
+    assert rig.settle() == [] and key not in rig.log.heads() and rig.log.head() == head
