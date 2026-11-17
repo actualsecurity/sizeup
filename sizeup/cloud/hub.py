@@ -929,6 +929,11 @@ class HubApp(App):
                                         log=log, audit=self._metrics_audit, backup=S3Copies.from_env() if state else None)
         self.cad.station_metrics = self.metric_store
         self.health.metrics = self.metric_store.health     # Settings > Station > Health: a warning if copies stall
+        # #606: the suggested squelch, Health's sparks (GET /api/cad/metrics?view=) and the shift warnings (Health hints)
+        from sizeup.cloud.metricsinsight import SECTION as SIGNAL_SECTION, Insight
+        self.metric_insight = Insight(self.metric_store, section=lambda: self.cad.settings.section(SIGNAL_SECTION), log=log)
+        self.cad.station_metrics_insight = self.metric_insight
+        self.health.shifts = self.metric_insight.hints
         self._renaming = threading.Lock()                  # apply_station_renames: one at a time
         app_mod._mark("hub")
 
@@ -1913,6 +1918,9 @@ class HubApp(App):
                 m = store.rename_station(old, new, before=at)     # (only its rows from before the rename)
                 if m:
                     self.hub.log(f"stations: station metrics: {m} row(s) moved from {old} to {new}")
+                    ins = getattr(self, "metric_insight", None)     # #606: its suggestions / sparks / shifts follow
+                    if ins is not None:
+                        ins.renamed(old, new)
                 n += m
             if n:
                 store.copy_soon()
@@ -1943,6 +1951,10 @@ class HubApp(App):
                 self.metrics_turn()
             except Exception as e:  # noqa: BLE001 - never takes anything down
                 self.hub.log(f"metrics: maintenance error: {type(e).__name__}: {e}")
+            try:                                  # ... then the shift checks (#606): Health's warnings, never a push
+                self.metric_insight.turn()
+            except Exception as e:  # noqa: BLE001 - never takes anything down
+                self.hub.log(f"metrics: shift check error: {type(e).__name__}: {e}")
 
     def metrics_turn(self) -> dict | None:
         """The janitor's station-metrics turn: the renames, then the rollups and retention (maintain), which wait for
