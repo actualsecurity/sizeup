@@ -236,6 +236,7 @@ class Cad:
         self.radio_services: dict[str, str] = {}             # the admins' service per source (Settings > Radios)
         self._retag_lock = threading.Lock()                  # one re-tag at a time (retag_services)
         self.retag_thread: threading.Thread | None = None    # the last one started
+        self._retag_waiting = False                          # a re-tag waits for the station's talkgroups
         self._clears: tuple[int, dict] | None = None         # (rev, Store.recent_clears): returning rigs
         self.settings = settings_mod.Editor(self)           # the Settings page's edits over the data file
         # Per-person activity on the hub (sizeup/cad/activity.py): who signed in, did and was refused what.
@@ -1938,6 +1939,10 @@ class Cad:
             except Exception:  # noqa: BLE001 - a hover's detail, never in the way of the tree
                 freqs = {}
             seen = {r["source"]: r for r in self.comms.sources_seen()}
+            try:                                   # a source still to re-tag: its rows' tag is not its automatic one
+                stale = {r["key"] for r in self.store.q("SELECT key FROM radio_retag_pending")} | set(self.radio_services)
+            except Exception:  # noqa: BLE001
+                stale = set(self.radio_services)
             counts = self.comms.minute_counts(now)
             ems = self.comms.emergencies(now)
             out = []
@@ -1960,8 +1965,11 @@ class Cad:
                 group = str(i.get("group") or s.get("group") or ("Airband" if kind == "airband" else "Analog" if not got else ""))
                 em = ems.get(key) or {}
                 # automatic (the station's row, the log's while no admin chose one, the words), the admins' over it
-                auto = self.auto_service(key, i, group, kind, "" if key in self.radio_services else str(s.get("service") or ""))
-                svc = sourcekeys.overridden(key, auto)
+                # (not known yet: no "Auto (...)" label, the row's tag for its service)
+                auto = self.auto_service(key, i, group, kind, "" if key in stale else str(s.get("service") or ""),
+                                         bool(info))
+                svc = sourcekeys.overridden(key, auto or str(s.get("service") or ""))
+                auto = auto or ""
                 out.append({"key": key, "system": system, "system_label": labels.get(system, system), "group": group,
                             "name": name, "service": svc, "service_auto": auto,
                             "tier": tier, "ours": ours, "encrypted": bool(i.get("encrypted")),
@@ -1985,13 +1993,16 @@ class Cad:
                 "services": self.settings.services_page()}
 
     def auto_service(self, key: str, row: dict | None = None, group: str = "", kind: str | None = None,
-                     logged: str = "") -> str:
+                     logged: str = "", listed: bool | None = None) -> str | None:
         """A source's service with no admin's choice: the station's talkgroup row (its talkgroups file's column, else
         its group's words: service_auto, or service from a station before that), an FM channel's fire, an airband
-        channel's air; else `logged` (its newest row's tag, when that is no admin's), else the words of its group (as
-        given, or its newest row's)."""
+        channel's air. A talkgroup the station doesn't list: `logged` (its newest row's tag, when that is no admin's),
+        else its group's words (as given, or its newest row's), as the station would. None: not known yet (a
+        talkgroup while no station has said what it lists: a hub just started, the station away) - never a guess."""
+        rows = None
         if row is None:
-            row = next((r for r in self.source_rows() if str(r.get("source") or "") == key), None) or {}
+            rows = self.source_rows()
+            row = next((r for r in rows if str(r.get("source") or "") == key), None) or {}
         if row.get("service_auto") or row.get("service"):
             return str(row.get("service_auto") or row.get("service"))
         got = sourcekeys.parse(key)
@@ -2001,35 +2012,52 @@ class Cad:
             return sourcekeys.service(kind=kind)
         if logged in sourcekeys.SERVICES:
             return logged
+        if not (listed if listed is not None else rows if rows is not None else self.source_rows()):
+            return None
         if not group:
             r = self.store.one('SELECT "group" AS grp FROM radio_traffic WHERE source = ? ORDER BY start DESC LIMIT 1',
                                (key,)) or {}
             group = str(r.get("grp") or "")
         return sourcekeys.service(group)
 
-    def retag_services(self, keys, operator: str = "", wait: bool = False) -> threading.Thread | None:
-        """A source's service chosen or put back (settings radio_services): its rows of the last RETAG_DAYS tagged
-        with the service it has now (the admins', else automatic), off the caller's thread, one source at a time
-        (whatever was chosen last is what each run applies), the count audited (radio_services/<key>/retag). Only the
-        CAD of record writes (a fenced hub task: nothing). wait: in this thread (tests)."""
-        keys = [str(k) for k in keys if k]
-        if not keys:
-            return None
-
+    def retag_services(self, keys=None, operator: str = "", wait: bool = False) -> threading.Thread | None:
+        """The sources whose service was chosen or put back (radio_retag_pending, written with the setting): each one's
+        rows of the last RETAG_DAYS tagged with the service it has now (the admins', else automatic), off the
+        caller's thread, one source at a time; its mark taken off and the count audited (radio_services/<key>/retag)
+        once done. A talkgroup whose automatic service isn't known yet (no station has said what it lists) waits,
+        marked, for its rows (retag_resume). Only the CAD of record writes: a fenced hub task leaves the marks for the
+        task that takes over. keys, operator: (older callers; the marks say both). wait: in this thread (tests)."""
         def run() -> None:
             with self._retag_lock:
-                for key in keys:
+                try:
+                    todo = self.store.q("SELECT key, at, operator FROM radio_retag_pending ORDER BY at, key")
+                except Exception as e:  # noqa: BLE001
+                    self.log(f"CAD: service re-tags not read ({type(e).__name__}: {e})")
+                    return
+                for p in todo:
+                    key = p["key"]
                     if not self.may_write():
                         return
                     try:
-                        want = sourcekeys.overridden(key, self.auto_service(key))
+                        chosen = self.radio_services.get(key)
+                        auto = chosen or self.auto_service(key)          # (a choice needs no automatic service)
+                        if auto is None:
+                            self._retag_waiting = True
+                            self.log(f"CAD: {key}: re-tag waits for the station's talkgroups (its automatic service)")
+                            continue
+                        want = chosen or auto
                         since = self.clock() - RETAG_DAYS * 86400
+                        self.log(f"CAD: {key} is {want}: re-tagging its transmissions of the last {RETAG_DAYS} days")
                         n = self.comms.retag(key, want, since, pause=RETAG_PAUSE_S)
                         with self.store.tx() as db:
-                            self.settings._audit(db, self.clock(), operator, "radios", f"{settings_mod.SVC_SECTION}/{key}/retag",
-                                                 None, {"service": want, "rows": n, "days": RETAG_DAYS})
-                        self.log(f"CAD: {key} is {want}: {n} transmission(s) of the last {RETAG_DAYS} days re-tagged")
-                    except Exception as e:  # noqa: BLE001 - the setting is saved; its old rows keep their tag
+                            self.settings._audit(db, self.clock(), p["operator"], "radios",
+                                                 f"{settings_mod.SVC_SECTION}/{key}/retag", None,
+                                                 {"service": want, "rows": n, "days": RETAG_DAYS})
+                            # (marked again meanwhile, a newer choice: kept for the run that follows it)
+                            db.execute("DELETE FROM radio_retag_pending WHERE key = ? AND at = ?", (key, p["at"]))
+                        self.store.rev += 1                 # (the tree's Auto label: known again)
+                        self.log(f"CAD: {key} is {want}: {n} transmission(s) re-tagged")
+                    except Exception as e:  # noqa: BLE001 - the setting is saved; its mark stays for the next start
                         self.log(f"CAD: {key}: rows not re-tagged ({type(e).__name__}: {e})")
         if wait:
             run()
@@ -2037,6 +2065,19 @@ class Cad:
         t = self.retag_thread = threading.Thread(target=run, name="cad-retag", daemon=True)
         t.start()
         return t
+
+    def retag_resume(self, rows_came: bool = False) -> threading.Thread | None:
+        """The re-tags left marked: at the start of the CAD of record (a restart, a hub task that took over), and when
+        the station's talkgroups arrive for one that waited for them (rows_came). Nothing marked: nothing started."""
+        if rows_came and not self._retag_waiting:
+            return None
+        self._retag_waiting = False
+        try:
+            if not self.store.one("SELECT 1 AS x FROM radio_retag_pending LIMIT 1"):
+                return None
+        except Exception:  # noqa: BLE001
+            return None
+        return self.retag_services()
 
     def context_labels(self) -> list[str]:
         """The other P25 systems' labels ("Metro"): a heading named so is not shown to a reader who may not see them."""

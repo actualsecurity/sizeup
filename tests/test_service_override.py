@@ -214,23 +214,96 @@ def test_a_change_retags_the_last_30_days_in_batches_and_back_to_automatic(tmp_p
     assert got[0] == {"service": "transit", "rows": 7, "days": 30}
 
 
-def test_retag_runs_off_the_request_and_never_on_a_fenced_hub(tmp_path):
+def pending(cad):
+    return [r["key"] for r in cad.store.q("SELECT key FROM radio_retag_pending ORDER BY key")]
+
+
+def test_retag_runs_off_the_request_is_marked_with_the_setting_and_resumed_by_the_next_leader(tmp_path):
     clock = Clock()
     cad = clocked_cad(tmp_path, clock)
     cad.comms.context_broadcast = True
+    cad.source_rows = lambda: [{"source": MINE, "service": "transit", "service_auto": "transit"}]
     cad.record_traffic(p25_row("b-1", clock.t - 60, PD, "mrrs", "transit"))
-    cad.may_write = lambda: False                          # a task that lost the lock
-    t = cad.retag_services([MINE], "x")
-    t.join(10)
-    assert services(cad, MINE) == ["transit"]
-    cad.may_write = lambda: True
-    started = []
-    cad.comms.retag = lambda *a, **k: (started.append(1), time.sleep(0.3), 0)[2]
-    t0 = time.monotonic()
+    # the setting and its mark in one transaction; the process gone before its re-tag ran
+    cad.retag_services = lambda *a, **k: None
     post(cad, action="set", key=MINE, service="fire")
+    assert services(cad, MINE) == ["transit"] and pending(cad) == [MINE]
+    # a task that lost the lock leaves the mark
+    del cad.retag_services
+    cad.may_write = lambda: False
+    cad.retag_services(wait=True)
+    assert services(cad, MINE) == ["transit"] and pending(cad) == [MINE]
+    assert not [r for r in cad.settings.audit_log("radios") if r["key"].endswith("/retag")]
+    # the next start of the CAD of record (a restart, a task that took over): what is marked runs, then the mark goes
+    again = clocked_cad(tmp_path, clock)
+    again.comms.context_broadcast = True
+    again.source_rows = cad.source_rows
+    assert again.radio_services == {MINE: "fire"}
+    again.retag_resume().join(10)
+    assert services(again, MINE) == ["fire"] and pending(again) == []
+    (a,) = [r for r in again.settings.audit_log("radios") if r["key"] == f"radio_services/{MINE}/retag"]
+    assert json.loads(a["new"])["rows"] == 1 and a["operator"] == "Lt. Test"
+    assert again.retag_resume() is None                               # nothing marked: nothing started
+    # off the request's thread
+    started = []
+    again.comms.retag = lambda *a, **k: (started.append(1), time.sleep(0.3), 0)[2]
+    t0 = time.monotonic()
+    post(again, action="set", key=MINE, service="ems")
     assert time.monotonic() - t0 < 0.3                   # the request didn't wait for it
+    again.retag_thread.join(10)
+    assert started == [1] and pending(again) == []
+
+
+def test_back_to_automatic_waits_for_the_stations_talkgroups_never_guesses(tmp_path):
+    """A hub just started (or its station away) has no talkgroup rows: the words of "Brigade" would say fire, the
+    station's file says transit. The re-tag waits, marked, until the rows come; the tree shows no Auto label."""
+    clock = Clock()
+    cad = clocked_cad(tmp_path, clock)
+    cad.comms.context_broadcast = True
+    cad.source_systems = lambda: {"westchester": "County", "mrrs": "MRRS"}
+    rows: list[dict] = []
+    cad.source_rows = lambda: rows
+    logs = []
+    cad.log = logs.append
+    cad.record_traffic(p25_row("b-1", clock.t - 60, PD, "mrrs", "transit"))
+    post(cad, action="set", key=MINE, service="ems")
     cad.retag_thread.join(10)
-    assert started == [1]
+    assert services(cad, MINE) == ["ems"]                     # a choice needs no automatic service
+    post(cad, action="set", key=MINE, service="automatic")
+    cad.retag_thread.join(10)
+    assert services(cad, MINE) == ["ems"] and pending(cad) == [MINE]
+    assert any("waits for the station's talkgroups" in m for m in logs)
+    src = {s["key"]: s for s in cad.comms_sources()["sources"]}
+    assert src[MINE]["service_auto"] == ""                    # "Auto", no guess
+    assert cad.retag_resume(rows_came=False) is not None      # (a start: tried again, still waits)
+    cad.retag_thread.join(10)
+    assert pending(cad) == [MINE]
+    # the station's rows come (the hub's _state): what waited runs
+    rows.append({"source": MINE, "system": "mrrs", "group": "Brigade", "service": "transit", "service_auto": "transit"})
+    cad.retag_resume(rows_came=True).join(10)
+    assert services(cad, MINE) == ["transit"] and pending(cad) == []
+    assert cad.retag_resume(rows_came=True) is None           # nothing waited since
+
+
+def test_an_import_retags_the_rows_and_a_file_without_choices_keeps_them(tmp_path):
+    clock = Clock()
+    cad = clocked_cad(tmp_path, clock)
+    cad.comms.context_broadcast = True
+    cad.source_rows = lambda: [{"source": MINE, "service": "transit", "service_auto": "transit"}]
+    cad.record_traffic(p25_row("b-1", clock.t - 60, PD, "mrrs", "transit"))
+    old = cad.settings_export()                                     # (no radio_services: a file from before them)
+    assert "radio_services" not in old["overrides"]
+    post(cad, action="set", key=MINE, service="fire")
+    cad.retag_thread.join(10)
+    exp = cad.settings_export()
+    cad.settings_post("import", {"action": "apply", "settings": old, "operator": "Lt. Test"})
+    assert cad.radio_services == {MINE: "fire"} and services(cad, MINE) == ["fire"]     # kept, not cleared
+    # a file that says otherwise: the choice and the rows follow it
+    other = json.loads(json.dumps(exp))
+    other["overrides"]["radio_services"] = {MINE: "police"}
+    cad.settings_post("import", {"action": "apply", "settings": other, "operator": "Lt. Test"})
+    cad.retag_thread.join(10)
+    assert cad.radio_services == {MINE: "police"} and services(cad, MINE) == ["police"] and pending(cad) == []
 
 
 def test_another_systems_retag_tells_only_readers_who_may_see_it(tmp_path):
@@ -505,3 +578,37 @@ def test_the_rails_save_sends_only_what_changed_before_the_folders(nav):
     assert s["editing"] is None and s["services"] == {"p25:metro:9001": "other"}
     assert nav["unchanged"] == ["/api/cad/settings/radio_folders"]
     assert nav["pushed"] >= 1
+
+
+def test_a_row_queued_under_a_choice_since_put_back_is_recorded_automatic(tmp_path, two):
+    """The station tags a row under the hub's choice (fire) and queues it; the admin puts the source back to automatic
+    before it is delivered. The row carries service_auto (its file's), and the hub records the choice it has then."""
+    from sizeup.cloud.hub import HubApp
+    from tests.test_cloud import hub_cfg
+    app, _said, _logs = two
+    sourcekeys.set_service_overrides({MINE: "fire"}, hub=True)              # the station: the hub's choice then
+    app._call_system(app.systems["mrrs"], a_call(app, "1-call_1", PD, "mrrs", label="PD Dispatch"))
+    assert wait(lambda: rows(app).get(f"{PD}-1-call_1", {}).get("status") not in (None, "pending"))
+    t = next(t for t in app.store.loose if t.id == f"{PD}-1-call_1")
+    sent = json.loads(json.dumps(t.as_dict()))                              # the outbox's event, as it went
+    assert (sent["service"], sent["service_auto"]) == ("fire", "police")
+    # the hub, where the choice is gone by the time the event arrives (another process: its own map)
+    sourcekeys._service_over, sourcekeys._service_from_hub = {}, False
+    hub = HubApp(hub_cfg(tmp_path / "hub"))
+    hub.cad.comms.context_broadcast = True
+    hub.apply("traffic", sent, None)
+    got = hub.cad.store.one("SELECT service FROM radio_traffic WHERE id = ?", (sent["id"],))
+    assert got["service"] == "police"
+    # the same row recorded again (its words re-read: Comms.record's update of a row it has): automatic still
+    ht = next(x for x in hub.store.loose if x.id == sent["id"])
+    hub._to_cad(ht, replace=True)
+    assert hub.cad.store.one("SELECT service FROM radio_traffic WHERE id = ?", (sent["id"],))["service"] == "police"
+    # and with a choice on the hub, the hub's choice
+    hub.cad.settings_post("radio_services", {"action": "set", "key": MINE, "service": "ems", "operator": "Lt. Test"})
+    hub.cad.retag_thread.join(10)
+    hub._to_cad(ht, replace=True)
+    assert hub.cad.store.one("SELECT service FROM radio_traffic WHERE id = ?", (sent["id"],))["service"] == "ems"
+    # a station from before this sends its service alone (it never had a choice): taken as automatic
+    old = {k: v for k, v in sent.items() if k != "service_auto"} | {"id": f"{PD}-2-call_2", "service": "police"}
+    hub.apply("traffic", old, None)
+    assert hub.cad.store.one("SELECT service FROM radio_traffic WHERE id = ?", (old["id"],))["service"] == "ems"

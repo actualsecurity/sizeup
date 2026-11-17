@@ -294,7 +294,9 @@ class Comms:
             system = system or (sources.COUNTY if p25 else "airband" if mhz is not None else "analog")
             # no service given (a caller from before #415): an airband row is air, an analog channel is ours: fire.
             # The admins' service for the source wins over either (sourcekeys.overridden: Settings > Radios > Channels)
-            given = str(t.get("service") or "") or ("" if p25 else "air" if mhz is not None else "fire")
+            # (service_auto: what the source is with no choice, as the sender worked it out: a row tagged under a choice
+            # since put back to automatic arrives right; a sender from before this sends only its service)
+            given = str(t.get("service_auto") or t.get("service") or "") or ("" if p25 else "air" if mhz is not None else "fire")
             given = sources.overridden(skey, given)
             src = (skey, system, str(t.get("group") or "")[:60], given[:16],
                    int(bool(t.get("ours")) and not other), str(t.get("dept") or "")[:60], str(t.get("tier") or "")[:16])
@@ -387,32 +389,39 @@ class Comms:
 
     def retag(self, source: str, service: str, since: float, batch: int = RETAG_BATCH, pause: float = 0.0) -> int:
         """A source's rows since `since` given `service` (an admin chose it, or put it back to automatic): only the rows
-        that differ, `batch` at a time, each batch its own transaction (the store's lock is let go between them). The
-        Radio page's readers who may know of that source ask afresh (another P25 system's: only those who may see it).
-        The number changed."""
+        that differ, walked along radio_traffic_source_start `batch` at a time (each batch its own transaction, carrying
+        on after the last (start, rowid): the store's lock is let go between them). Once done, the Radio page's readers
+        who may know of that source ask afresh, once (another P25 system's: only those who may see it). The number
+        changed."""
         if not source or service not in sources.SERVICES:
             return 0
         got = sources.parse(source)
         system = got[0] if got else "airband" if source.startswith("air:") else "analog"
-        context = sources.is_context({"system": system})
-        total = 0
+        total, after = 0, (float(since), -1)
         while True:
             with self.store.tx() as db:
-                n = db.execute("UPDATE radio_traffic SET service = ? WHERE id IN (SELECT id FROM radio_traffic "
-                               "WHERE source = ? AND start >= ? AND service != ? LIMIT ?)",
-                               (service, source, float(since), service, int(batch))).rowcount
-                if n:
-                    if context:
-                        self.touch("reset", system)      # (that system's readers only: rev_for, the change log)
-                        self.quiet()
-                    else:
-                        self.touch_reset()
-                    self.rev += 1
-            total += n
-            if n < batch:
-                return total
+                rows = db.execute("SELECT rowid, start FROM radio_traffic WHERE source = ? AND start >= ? "
+                                  "AND (start, rowid) > (?, ?) ORDER BY start, rowid LIMIT ?",
+                                  (source, float(since), after[0], after[1], int(batch))).fetchall()
+                if rows:
+                    self.quiet()                         # (no reader's rev moves batch by batch: once, at the end)
+                    ids = [r[0] for r in rows]
+                    total += db.execute(f"UPDATE radio_traffic SET service = ? WHERE rowid IN ({','.join('?' * len(ids))}) "
+                                        "AND service != ?", (service, *ids, service)).rowcount
+                    after = (rows[-1][1], rows[-1][0])
+            if len(rows) < batch:
+                break
             if pause:
                 time.sleep(pause)
+        if total:
+            with self.store.tx():
+                if sources.is_context({"system": system}):
+                    self.touch("reset", system)          # (that system's readers only: rev_for, the change log)
+                    self.quiet()
+                else:
+                    self.touch_reset()
+                self.rev += 1
+        return total
 
     def activity(self, source: str, minute: int, calls: int, radios=(), seconds: float = 0.0) -> None:
         """Key-ups on a source that leaves no transmission rows (an encrypted talkgroup, #409): {source, minute,

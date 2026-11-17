@@ -582,6 +582,8 @@ class Hub:
                 # Record / Main / Transcribe) as its own page has it (App.talkgroups_state), from the tier each carries
                 self.talkgroups = [dict(r, tier_set=r.get("tier") is not None) if isinstance(r, dict) and "tier_set" not in r
                                    else r for r in tgs]
+                if self.talkgroups:     # a source's re-tag that waited for what the station lists (its automatic service)
+                    getattr(getattr(self.app, "cad", None), "retag_resume", lambda **k: None)(rows_came=True)
             self.status, self.status_at = st, now
             if self.health_ is not None:
                 self.health_.observe(st)           # each channel's gaps, for the silence hints

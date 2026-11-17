@@ -57,6 +57,7 @@ window.RadioNav = (() => {
   const MARK = { fire: "F", police: "P", ems: "E", transit: "T", air: "A" };
   const SERVICE = { fire: "Fire", police: "Police", ems: "EMS", transit: "Transit", air: "Air", other: "Other" };
   const SERVICES = Object.keys(SERVICE);                 // (sizeup/sourcekeys.py SERVICES)
+  const OURS_SYSTEMS = ["westchester", "analog", "airband"];   // (sizeup/sourcekeys.py OURS_SYSTEMS): a fire one of ours is never muted
   const TIER = { alert: ["PA", "Transcribe + pre-alert"], text: ["TX", "Record + transcribe"], record: ["REC", "Record only"],
                  off: ["OFF", "Ignored"], activity: ["ENC", "Encrypted: activity only"] };
   const KEPT = ["event", "unit", "q", "channel", "emergency", "type", "pcfd", "since", "until"];   // in the address
@@ -708,7 +709,7 @@ window.RadioNav = (() => {
         svc.value = e.services[k] || "";
         svc.setAttribute("aria-label", `Service of ${shown}`);
         svc.title = `Service: its view, filters and intel${auto ? `\nAuto: ${SERVICE[auto] || auto} (its talkgroup file or name)` : ""}`
-          + "\nA change re-tags its last 30 days";
+          + "\nA change re-tags its last 30 days" + (OURS_SYSTEMS.includes(s.system) ? "\nFire here: never muted" : "");
         const row = el("div", "rn-edi");
         row.dataset.k = k;
         const g = el("span", "rn-grip", "⠿");

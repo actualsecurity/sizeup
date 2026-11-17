@@ -192,6 +192,19 @@ LOGS_SECTION = cwlogs.SECTION
 PAGE_SECTION[LOGS_SECTION] = "system"
 
 
+def services_moved(before: dict, after: dict) -> list[str]:
+    """The source keys whose service choice differs between two sets of overrides (settings radio_services)."""
+    a, b = sourcekeys.clean_services(before.get(SVC_SECTION)), sourcekeys.clean_services(after.get(SVC_SECTION))
+    return sorted(k for k in set(a) | set(b) if a.get(k) != b.get(k))
+
+
+def mark_retag(db, keys, at: float, operator: str) -> None:
+    """In the setting's own transaction: these sources' recent rows are still to re-tag (Cad.retag_services clears it)."""
+    for k in keys:
+        db.execute("INSERT INTO radio_retag_pending (key, at, operator) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET "
+                   "at = excluded.at, operator = excluded.operator", (k, at, operator or ""))
+
+
 def em_value(v) -> list[str]:
     """A list of services (sourcekeys.SERVICES), in their order, each once; CadError otherwise. Empty: none stand out."""
     if not isinstance(v, list) or any(x not in sourcekeys.SERVICES for x in v):
@@ -529,7 +542,10 @@ class Editor:
         if check:
             check(L)
         now = self.store.clock()
+        # a source's service chosen or put back (here, or by an import): its recent rows to re-tag, marked with it
+        moved = services_moved(ov, trial)
         with self.store.tx() as db:
+            mark_retag(db, moved, now, operator)
             for sec, key, val in changes:
                 if val is REMOVE:
                     db.execute("DELETE FROM settings_overrides WHERE section = ? AND key = ?", (sec, key))
@@ -544,11 +560,8 @@ class Editor:
         self._use(L, trial)
         self.store.sync_units()          # new / retired / moved units, statuses: on the boards now
         self.store.rev += 1
-        # a source's service chosen or put back (here, or by an import): its recent rows re-tagged, off this thread
-        was, now_s = sourcekeys.clean_services(ov.get(SVC_SECTION)), sourcekeys.clean_services(trial.get(SVC_SECTION))
-        moved = sorted(k for k in set(was) | set(now_s) if was.get(k) != now_s.get(k))
         if moved:
-            self.cad.retag_services(moved, operator)
+            self.cad.retag_services()                   # (off this thread)
         return {"ok": True}
 
     @staticmethod
@@ -3391,6 +3404,11 @@ class Editor:
             self._keep_an_admin(list(after.values()), "the file leaves no active admin with a sign-in email "
                                 f"({', '.join(a['name'] for a in self.admins())} now): nobody could change Settings after it")
         cur = _without_imported({k: v for k, v in self.overrides().items() if k not in KEPT_SECTIONS})
+        if SVC_SECTION not in ov and cur.get(SVC_SECTION):
+            # a file with no service choices (one from before them): the ones here are kept, not cleared (Auto, one
+            # by one, clears them)
+            ov = {**ov, SVC_SECTION: dict(cur[SVC_SECTION])}
+        svc_moved = services_moved(cur, ov)
         changes = []
         for sec in sorted(set(cur) | set(ov)):
             a, b = cur.get(sec, {}), ov.get(sec, {})
@@ -3456,9 +3474,12 @@ class Editor:
                 self._audit(db, now, op, c["section"], f"{c['store']}/{c['key']}" if c["store"] not in ("run_cards", "operators")
                             else c["key"], c["old"], c["new"])
             self._audit(db, now, op, "system", "import", None, f"{len(changes)} changes")
+            mark_retag(db, svc_moved, now, op)
         self._use(L, ov)
         self.store.sync_units()
         self.store.rev += 1
+        if svc_moved:
+            self.cad.retag_services()          # a source's service the file changed: its recent rows (off this thread)
         if self.cad.radio_ctx is not None and any(c["store"] in (channels_mod.SECTION, "stt", channels_mod.SQUELCH_SECTION)
                                                   for c in changes):
             self.cad.radio_ctx.channels_changed()

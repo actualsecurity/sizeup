@@ -1614,9 +1614,12 @@ class App:
                 # the row's source (#415): its system, never a talkgroup number alone; context, so never "ours"
                 t.system, t.tier, t.ours = name, tier, False  # type: ignore[attr-defined]
                 t.source_key = sources.p25(name, tg)  # type: ignore[attr-defined]
-                # its service: the admins' for this source (Settings > Radios > Channels), else its file's (#409)
+                # its service: the admins' for this source (Settings > Radios > Channels; its speech-to-text profile
+                # and this station's page), else its file's (#409); service_auto, the file's, goes to the hub with it
+                # (the hub applies the choice it has then: one put back to automatic meanwhile is not the row's)
                 t.group = info.get("group") or ""  # type: ignore[attr-defined]
-                t.service = sources.overridden(t.source_key, info.get("service") or "other")  # type: ignore[attr-defined]
+                t.service_auto = info.get("service") or "other"  # type: ignore[attr-defined]
+                t.service = sources.overridden(t.source_key, t.service_auto)  # type: ignore[attr-defined]
                 t.dept = info.get("department") or ""  # type: ignore[attr-defined]
                 self._keep_clip(t.id, radio_voice(pc.audio, deemph=False), processed=True)
                 self._keep_source(t.id, pc.audio)
@@ -2069,9 +2072,11 @@ class App:
         service, ours, dept, tier}. Another P25 system's row carries its own (App._call_system); the county's
         talkgroups and the analog channels are worked out here."""
         if getattr(t, "system", ""):
-            # (its service as the station tagged it, the admins' choice over it: a station that hasn't the hub's yet)
+            # its service with no choice (service_auto; a station before that: its service, which never had one) and
+            # the admins' choice of now over it (Comms.record applies it)
+            auto = getattr(t, "service_auto", "") or getattr(t, "service", "")
             return {"source_key": getattr(t, "source_key", ""), "system": t.system, "group": getattr(t, "group", ""),
-                    "service": sources.overridden(getattr(t, "source_key", ""), getattr(t, "service", "")),
+                    "service": sources.overridden(getattr(t, "source_key", ""), auto), "service_auto": auto,
                     "ours": False, "dept": getattr(t, "dept", ""),
                     "tier": getattr(t, "tier", "")}
         if t.talkgroup is None:
@@ -2080,11 +2085,13 @@ class App:
             return {"source_key": sources.fm(t.source, kind), "system": "airband" if air else "analog",
                     "group": "Airband" if air else "Analog",
                     "service": sources.service(kind=kind or "traffic", key=sources.fm(t.source, kind)),
+                    "service_auto": sources.service(kind=kind or "traffic"),
                     "ours": not air, "dept": "", "tier": ""}
         info = self.tg.info.get(t.talkgroup, {})
         return {"source_key": sources.p25(self.tg.county, t.talkgroup), "system": self.tg.county,
                 "group": info.get("group") or "",
                 "service": sources.service(info.get("group") or "", key=sources.p25(self.tg.county, t.talkgroup)),
+                "service_auto": sources.service(info.get("group") or ""),
                 "ours": bool(getattr(t, "ours", self.tg.main(t.talkgroup))), "dept": "", "tier": ""}
 
     def _backfill(self) -> None:
@@ -4879,6 +4886,7 @@ def make_server(app: App, fence=None, listener=None) -> WebServer:
     app.cad.alarms.on_change = server.poke               # and an emergency alarm (#128)
     app.cad.on_dispatch = server.poke                    # and a dispatch, then its voice once rendered (#426)
     app.cad.resume_voice()                               # ... and the voices a restart cut short, now that all is wired
+    app.cad.retag_resume()                               # ... and a source's rows a restart left to re-tag (its service)
     app.cad.airport_alerts.on_change = server.poke       # and an airport pre-alert (#233)
     app.trains.on_change = server.poke                   # and Metro-North's trains, each TrainTime read (#362)
     return server

@@ -1728,7 +1728,7 @@ window.RadioControls = (() => {
               if (svc.value !== chosen) svc.value = chosen;
               svc.disabled = st.svcPending.has(nk);
               svc.title = `Service: its view, filters and intel${auto ? `\nAuto: ${SERVICE_NAME[auto] || auto} (its talkgroup file or name)` : ""}`
-                + "\nA change re-tags its last 30 days";
+                + "\nA change re-tags its last 30 days" + (r.fm || !r.tier_set ? "\nFire here: never muted" : "");
             }
             show(badge, !!r.main);
             setText(heard, r.fm ? (r.kind === "paging" ? "60 Control pages" : r.kind === "airband" ? "HPN ATC (airport pre-alerts)" : "Fireground") : heardText(r));
