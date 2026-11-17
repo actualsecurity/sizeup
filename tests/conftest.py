@@ -77,6 +77,14 @@ def _roads_stay_local(monkeypatch):
         assert host in ("127.0.0.1", "localhost", "::1"), f"a test tried to reach {host} (roads: fixtures only)"
         return real(req, *a, **kw)
     monkeypatch.setattr(roads, "urlopen", local_only)
+    from sizeup import httpkeep                          # the DVR's kept-alive fetches (#446): the same
+    real_get = httpkeep.Pool.get
+
+    def local_get(self, url, *a, **kw):
+        host = urlsplit(url).hostname
+        assert host in ("127.0.0.1", "localhost", "::1"), f"a test tried to reach {host} (roads: fixtures only)"
+        return real_get(self, url, *a, **kw)
+    monkeypatch.setattr(httpkeep.Pool, "get", local_get)
 
 
 @pytest.fixture(autouse=True)
