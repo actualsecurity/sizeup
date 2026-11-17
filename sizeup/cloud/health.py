@@ -10,6 +10,10 @@ and checks it every TICK_S for these conditions, each with a text, a severity, a
 notice when it clears:
 
     silent        no state post for [alerts] silent_min (3)                                critical
+    id_mismatch   "Station rejected: id mismatch (station says X, token is Y)": the        critical
+                  station's posts refused (401 id_mismatch) in the last MISMATCH_HOLD_S
+                  (sizeup/cloud/stations.py): it is up and trying, but the hub won't take
+                  it (its [station] id isn't its token's). Decided on the hub's own data
     behind        on another build than the hub's for behind_min (15)                      warning
     update        the update to the hub's build failed or was rolled back                  warning (critical:
                                                                                            the rollback failed too)
@@ -165,7 +169,7 @@ SETTLE_S = 15 * 60.0        # #340: "Recovered" only once an alert has stayed cl
 SETTLE_FLAPPING_S = 30 * 60.0   # ... this long for one flapping:
 FLAP_N = 3                  # back this many times ...
 FLAP_WINDOW_S = 3600.0      # ... within this long
-HUB_OWN = ("silent", "transcribe", "aws_budget80", "aws_budget")   # decided on the hub's own data, the station silent or not
+HUB_OWN = ("silent", "id_mismatch", "transcribe", "aws_budget80", "aws_budget")   # decided on the hub's own data, the station silent or not
 REPLICA_STALE = 3.0         # the Replicas row says "stale" when the last check is this many leader intervals old
 
 
@@ -177,12 +181,12 @@ MUTE_SECTION = "alert_mutes"    # the CAD settings section of the mutes (sizeup/
 MUTE_KINDS = {"adsb": "ADS-B receiver down", "whisper": "Speech-to-text down", "stt_backlog": "Speech-to-text behind",
               "job": "Channel not running", "sdr": "SDR gone", "group": "Antenna group short", "dup": "Duplicate dongle serial",
               "recorder": "trunk-recorder down", "trunk": "P25 trunk silent", "stuck": "Channel stuck open",
-              "silent": "Station silent", "behind": "Station behind the hub", "update": "Station update failed",
+              "silent": "Station silent", "id_mismatch": "Station rejected (id mismatch)", "behind": "Station behind the hub", "update": "Station update failed",
               "outbox": "Station's events backing up", "disk": "Station disk full",
               "transcribe": "Amazon Transcribe failing", "aws_budget": "Amazon Transcribe monthly limit",
               "hub_errors": "Hub errors", "litestream": "Litestream too old",
               "replication_checks": "Takeover checks skipped"}
-MUTE_TIMED_ONLY = ("silent", "trunk", "job")   # critical ones: muted for a time only, never until unmuted
+MUTE_TIMED_ONLY = ("silent", "id_mismatch", "trunk", "job")   # critical ones: muted for a time only, never until unmuted
 
 
 def alert_kind(key: str) -> str:
@@ -871,11 +875,20 @@ class StationHealth:
                 "severity": "warning", "title": "Takeover checks skipped",
                 "text": "SIZEUP_HANDOFF_SKIP_REPLICATION_CHECKS=1: the replica's checks at a takeover are off · remove "
                         "it in the next deploy", "since": self.__dict__.setdefault("_skip_since", now)}
+        reg = getattr(self.hub, "stations", None)               # the hub's own: its posts refused as another id
+        mm = reg.mismatch() if reg is not None and hasattr(reg, "mismatch") else None
+        if mm:
+            out["id_mismatch"] = {
+                "severity": "critical",
+                "title": f"Station rejected: id mismatch (station says {mm['said'] or '?'}, token is {mm['token']})",
+                "text": f"its posts refused since {_hhmm(mm['since'])} · Settings > Station > Stations, or its [station] id",
+                "since": float(mm["since"])}
         silent, since = self._silent(now)
         if silent:
             out["silent"] = {"severity": "critical", "title": "Station silent",
                              "text": (f"no word from {name} since {_hhmm(since)} · radios and transcripts not reaching the hub"
-                                      if self.hub.last_state else f"no station report since the hub started ({_hhmm(since)})"),
+                                      if self.hub.last_state else f"no station report since the hub started ({_hhmm(since)})")
+                                     + (" · its posts are refused: id mismatch" if mm else ""),
                              "since": since}
         if silent is None:
             out["silent"] = None                         # undecided: keep as it is

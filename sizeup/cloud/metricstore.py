@@ -337,6 +337,43 @@ class MetricStore:
             out["resend_from"] = self.resend_from          # this store lost what came after: again, please
         return out
 
+    def rename_station(self, old: str, new: str) -> int:
+        """A station renamed on the hub (sizeup/cloud/stations.py set_shared_id): its rows move from `old` to `new`, in one
+        transaction, so its graphs go on with their history under the new id. Rows the new id has already (it posted
+        under both) are kept once (raw and events: the same key is the same record); a series spans both; an hour both
+        had rolled up is rolled again from raw at the janitor's next turn. The rows moved; fence.FencedWrite when this
+        task isn't the leader. Nothing kept yet: 0, and no file made."""
+        old, new = _text(old, 64), _text(new, 64)
+        if not old or not new or old == new or not self._exists():
+            return 0
+        if not self.may_write():
+            fence_mod.refuse("station metrics")
+        with self._lock:
+            db = self._open()
+            db.execute("BEGIN")
+            try:
+                both = db.execute("SELECT DISTINCT o.subject, o.hour FROM hourly o JOIN hourly n ON n.station = ? AND "
+                                  "n.subject = o.subject AND n.hour = o.hour WHERE o.station = ?", (new, old)).fetchall()
+                n = 0
+                for table, cols in (("raw", "subject, kind, at, doc"), ("events", "subject, at, ev, detail"),
+                                    ("hourly", "subject, metric, hour, n, lo, p50, p90, hi")):
+                    n += db.execute(f"INSERT OR IGNORE INTO {table} (station, {cols}) SELECT ?, {cols} FROM {table} "
+                                    "WHERE station = ?", (new, old)).rowcount
+                    db.execute(f"DELETE FROM {table} WHERE station = ?", (old,))
+                db.execute("INSERT INTO series (station, subject, kind, first, last) SELECT ?, subject, kind, first, last "
+                           "FROM series WHERE station = ? ON CONFLICT(station, subject, kind) DO UPDATE SET "
+                           "first = MIN(first, excluded.first), last = MAX(last, excluded.last)", (new, old))
+                db.execute("DELETE FROM series WHERE station = ?", (old,))
+                db.execute("COMMIT")
+            except Exception:
+                if db.in_transaction:
+                    db.execute("ROLLBACK")
+                raise
+            self._dirty = {(new if st == old else st, s, h) for st, s, h in self._dirty} | {(new, s, h) for s, h in both}
+        if old in self._told:
+            self._told.add(new)
+        return n
+
     # -- the rollups, the retention ---------------------------------------------------------------------------------
 
     def roll(self, keys) -> int:
