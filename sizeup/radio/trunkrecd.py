@@ -781,6 +781,10 @@ class Supervisor:
         if self.claimed and self.claimed != (w["sdr"] if w["on"] else ""):
             release(self.claimed, self.pid, self.claims)
             self.claimed = ""
+        if self.proc is None and key is not None and getattr(self, "asked_sdr", None) not in (None, w["sdr"]):
+            # Fire/EMS 15 given another dongle while it waited (absent: ABSENT_S): the old one's wait isn't this one's
+            self.backoff, self.next_start = BACKOFF_S[0], 0.0
+        self.asked_sdr = w["sdr"] if key is not None else getattr(self, "asked_sdr", None)
         base = {"on": w["on"], "sdr": w["sdr"], "name": w["name"], "seq": w["seq"], "pid": self.pid,
                 "restarts": self.restarts, "workdir": r["workdir"]}
         if not w["on"]:
@@ -1115,7 +1119,8 @@ def wanted_system(path: str) -> dict:
         w = json.loads(Path(path).read_text())
     except (OSError, ValueError):
         w = None
-    off = {"on": False, "sources": {}, "label": "", "pid": None, "seq": None, "problem": "", "until": None}
+    off = {"on": False, "sources": {}, "label": "", "pid": None, "seq": None, "problem": "", "until": None,
+           "group": False}
     if not isinstance(w, dict):
         return off
     pid = w.get("pid") if isinstance(w.get("pid"), int) and not isinstance(w.get("pid"), bool) else None
@@ -1133,7 +1138,9 @@ def wanted_system(path: str) -> dict:
     until = w.get("until")
     until = float(until) if isinstance(until, (int, float)) and not isinstance(until, bool) and until > 0 else None
     return {"on": w.get("on") is True and bool(sources or problem), "sources": sources,
-            "label": str(w.get("label") or "")[:60], "pid": pid, "seq": seq, "problem": problem, "until": until}
+            "label": str(w.get("label") or "")[:60], "pid": pid, "seq": seq, "problem": problem, "until": until,
+            # an antenna group's automatic move (sizeup/radio/groups.py), not a person's or a reception test's switch
+            "group": w.get("group") is True}
 
 
 _SIGS: dict[str, tuple] = {}      # path -> ((mtime, size), its content's digest)
@@ -1255,9 +1262,13 @@ class SystemSupervisor(Supervisor):
         base = {"on": w["on"], "sdr": sdr, "name": label, "system": self.name, "seq": w["seq"], "pid": self.pid,
                 "restarts": self.restarts, "workdir": r["workdir"]}
         if self.ran_key is not None and key != self.ran_key and self.proc is None:
-            # (#592) another assignment or config: whatever went before is not this one's to come back, nor to wait for
-            self.ran_key, self.gone_since, self.back_list, self.back_first, self.back_at, self.flaps, \
-                self.hold_until = None, None, None, None, None, 0, 0.0
+            # (#592) another assignment or config: whatever went before is not this one's to come back, nor to wait for.
+            # An antenna group's move (the wish says "group") keeps a flapping dongle's record (flaps, hold_until,
+            # back_at): moving to a stand-in and back is no way around its hold. A person's switch or a reception
+            # test's loan starts fresh.
+            self.ran_key, self.gone_since, self.back_list, self.back_first = None, None, None, None
+            if not w.get("group"):
+                self.back_at, self.flaps, self.hold_until = None, 0, 0.0
             self.backoff, self.next_start = BACKOFF_S[0], 0.0
         if expired:
             self._set(now, "off", f"{label}: its reception test's time is up: stopped, its dongle let go", expired=True,
@@ -1359,6 +1370,12 @@ class SystemSupervisor(Supervisor):
                           held_by={"app": c.get("app"), "mode": c.get("mode")}, **base)
                 return
             self.claims_held[s["sdr"]] = s["mode"]
+        if self.gone_since is None and now < self.hold_until:
+            # a flapping dongle's hold (_went) holds a start on other dongles too (an antenna group's stand-in)
+            self.next_start = min(self.hold_until, now + UNPLUGGED_S)
+            self._set(now, "absent", f"held back {_dur(self.hold_until - now)} more: a dongle of it went soon after it "
+                                     "came back", **dict(base, restarts=self.restarts))
+            return
         if now < self.next_start:
             self.status.update(base)
             return

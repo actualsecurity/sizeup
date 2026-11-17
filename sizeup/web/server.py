@@ -16,6 +16,9 @@ POST /api/mode {"mode": ...}  one shared dongle: hand it to a channel or trunk-r
 POST /api/adsb-receiver {"sdr": serial | "", "confirm": true}  admins: name (or unname) the station's ADS-B dongle
                         (#235; App.set_adsb_receiver; the hub sends it to the station): reserved for its decoder,
                         never one of the radios (state "sdr".adsb). Without "confirm": true it is refused
+POST /api/antenna-groups {"groups": [{"name", "sdrs": [serial], "jobs": [job, highest priority first]}], "confirm"?: the ask confirmed}  admins: the
+                        station's antenna groups, all of them ([]: none) (App.set_antenna_groups, sizeup/radio/groups.py;
+                        the hub sends it to the station): a grouped dongle runs only its group's jobs (state "sdr".groups)
 POST /api/reception {"action": "start" | "stop" | "note", ...}  admins: a reception test (#410, sizeup/radio/reception.py:
                         one dongle lent to one side of another P25 system; state "reception"); the hub sends it to
                         the station
@@ -392,6 +395,7 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                  access=None, access_log: Callable[[str], None] | None = None, station_mode=None,
                  role: str = "", roads=None, gis=None, trains=None, weather=None, station_health=None, stream_gzip: bool = True,
                  aircraft=None, roadwork=None, set_adsb: Callable[[str], str | None] | None = None, vessels=None,
+                 set_groups: Callable[..., str | None] | None = None,
                  airband_ab: Callable[..., str | None] | None = None, reception=None,
                  gate: Gate | None = None, health_fn: Callable[[], dict] | None = None, perf=None,
                  clip_context: Callable[[str], bool] | None = None, adapter_password=None, mobile=None,
@@ -1017,6 +1021,23 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                     return self._send(400, json.dumps({"error": err}).encode(), "application/json")
                 self._did(path, body)
                 return self._send(200, b'{"ok":true}', "application/json")
+            if path == "/api/antenna-groups" and set_groups is not None:
+                try:
+                    n = int(self.headers.get("Content-Length") or 0)
+                    body = json.loads(self.rfile.read(min(n, 16384)) or b"{}")
+                    if not isinstance(body, dict) or not isinstance(body.get("groups"), list):
+                        raise ValueError("{groups: [{name, sdrs, jobs}]}")
+                    # "confirm": the station's ask as the person confirmed it, word for word (a changed one is refused)
+                    if body.get("confirm") is not None and not isinstance(body.get("confirm"), str):
+                        raise ValueError("confirm: the text of the ask that was confirmed")
+                    err = set_groups(body["groups"], confirm=body["confirm"][:1000]) if body.get("confirm") else \
+                        set_groups(body["groups"])
+                except (ValueError, TypeError) as e:
+                    err = f"bad request: {e}"
+                if err:
+                    return self._send(400, json.dumps({"error": err}).encode(), "application/json")
+                self._did(path, body)
+                return self._send(200, b'{"ok":true}', "application/json")
             if path == "/api/retranscribe" and retranscribe is not None:
                 # {"ids": ["307-...", ...]} re-runs those; {"all": true} every recording still on disk
                 try:
@@ -1281,8 +1302,8 @@ class WebServer:
                  station_mode=None, role: str = "", roads=None, gis=None, trains=None, weather=None, station_health=None,
                  aircraft=None, roadwork=None, set_adsb=None, fence=None, health_fn: Callable[[], dict] | None = None,
                  airband_ab=None, listener=None, vessels=None, perf=None, reception=None,
-                 clip_context: Callable[[str], bool] | None = None, adapter_password=None, mobile=None,
-                 mobile_resolver=None):
+                 clip_context: Callable[[str], bool] | None = None, adapter_password=None, set_groups=None,
+                 mobile=None, mobile_resolver=None):
         """listener: a socket already bound and listening on (host, port) to serve from (sizeup/app.py run_gated: the
         hub's port answered "updating" while the app was built; the connections that came meanwhile are served)."""
         self.access = access
@@ -1310,7 +1331,7 @@ class WebServer:
             set_talkgroup, set_talkgroup_group, retranscribe, cad, self.cad_broadcaster, station,
             json.dumps(health or {"ok": True}, separators=(",", ":")).encode(), access, access_log, station_mode, role,
             roads, gis, trains, weather, station_health, aircraft=aircraft, roadwork=roadwork, set_adsb=set_adsb,
-            vessels=vessels,
+            vessels=vessels, set_groups=set_groups,
             airband_ab=airband_ab, reception=reception, gate=self.gate, health_fn=health_fn, perf=perf,
             clip_context=clip_context, adapter_password=adapter_password, mobile=mobile,
             mobile_resolver=mobile_resolver))
