@@ -83,8 +83,8 @@ def scrub(text, radio_ids: bool = False, identity: bool = False) -> str:
     with no name, into event lines and alarm words). The text is read up to SCRUB_MAX_CHARS characters (the rest is cut
     and the output ends with an ellipsis, so a reader can tell), then: compatibility forms of "@" and "<" are
     normalised (NFKC: full-width, small) and format characters (zero width, direction marks) dropped; any angle-bracket
-    part goes (a "<5 min>" in a note too: deliberate, fail-safe); every whitespace-delimited token holding an "@", in any
-    email form, becomes ONE "an operator" (a standalone "@" stays). radio_ids (an alarm's own words): "radio 41228",
+    part goes (a "<5 min>" in a note too: deliberate, fail-safe); every whitespace-delimited token holding an "@", in
+    any email form, becomes ONE "an operator" (a standalone "@" stays). radio_ids (an alarm's own words): "radio 41228",
     "rid 41228", "ID 41228", "Radio No. 41228", "talker 41228", "tg 41228" and the like become "an unidentified radio".
     identity (an identity field: an alarm's `who`, a radio row's `unit`): also any standalone number of 4 or more
     digits. Digits in addresses, remarks and transcripts are never touched. Every step is one linear pass."""
