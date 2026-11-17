@@ -387,6 +387,7 @@ window.RadioNav = (() => {
         st.srcRev = d.rev || "";
         st.layout = d.folders || null;                // the admins' folders (#607), null: the automatic grouping
         st.services = d.services || {};               // the admins' service per channel (none: automatic)
+        st.retagWaiting = new Set(d.retag_waiting || []);   // ... a re-tag waiting for the station's talkgroups
         st.clock = { hub: d.now || Date.now() / 1000, at: Date.now() };
         let changed = false;                          // a source first met: nothing of it is unread
         for (const s of st.src) if (!st.p.seen[s.key]) { st.p.seen[s.key] = now(); changed = true; }
@@ -709,7 +710,8 @@ window.RadioNav = (() => {
         svc.value = e.services[k] || "";
         svc.setAttribute("aria-label", `Service of ${shown}`);
         svc.title = `Service: its view, filters and intel${auto ? `\nAuto: ${SERVICE[auto] || auto} (its talkgroup file or name)` : ""}`
-          + "\nA change re-tags its last 30 days" + (OURS_SYSTEMS.includes(s.system) ? "\nFire here: never muted" : "");
+          + "\nA change re-tags its last 30 days" + (OURS_SYSTEMS.includes(s.system) ? "\nFire here: never muted" : "")
+          + (st.retagWaiting && st.retagWaiting.has(k) ? "\nRe-tag waits for the station" : "");
         const row = el("div", "rn-edi");
         row.dataset.k = k;
         const g = el("span", "rn-grip", "⠿");

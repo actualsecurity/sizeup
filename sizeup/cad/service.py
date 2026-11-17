@@ -236,7 +236,7 @@ class Cad:
         self.radio_services: dict[str, str] = {}             # the admins' service per source (Settings > Radios)
         self._retag_lock = threading.Lock()                  # one re-tag at a time (retag_services)
         self.retag_thread: threading.Thread | None = None    # the last one started
-        self._retag_waiting = False                          # a re-tag waits for the station's talkgroups
+        self.retag_waiting: set[str] = set()                 # sources whose re-tag waits for the station's talkgroups
         self._clears: tuple[int, dict] | None = None         # (rev, Store.recent_clears): returning rigs
         self.settings = settings_mod.Editor(self)           # the Settings page's edits over the data file
         # Per-person activity on the hub (sizeup/cad/activity.py): who signed in, did and was refused what.
@@ -1990,7 +1990,9 @@ class Cad:
         return {"rev": rev, "now": now, "minutes": COUNT_MINUTES, "live": live_keys, "sources": hit[1],
                 "folders": radiofolders.for_viewer(folders, sees_context=bool(context),
                                                    hidden_labels=self.context_labels()),
-                "services": self.settings.services_page()}
+                "services": self.settings.services_page(),
+                # a source's re-tag waiting for the station's talkgroups (its automatic service not known yet)
+                "retag_waiting": sorted(k for k in self.retag_waiting if context or not radiofolders.context_key(k))}
 
     def auto_service(self, key: str, row: dict | None = None, group: str = "", kind: str | None = None,
                      logged: str = "", listed: bool | None = None) -> str | None:
@@ -2042,9 +2044,12 @@ class Cad:
                         chosen = self.radio_services.get(key)
                         auto = chosen or self.auto_service(key)          # (a choice needs no automatic service)
                         if auto is None:
-                            self._retag_waiting = True
-                            self.log(f"CAD: {key}: re-tag waits for the station's talkgroups (its automatic service)")
+                            if key not in self.retag_waiting:
+                                self.log(f"CAD: {key}: re-tag waits for the station's talkgroups (its automatic service)")
+                                self.retag_waiting.add(key)
+                                self.store.rev += 1         # (the pages: its hover says so)
                             continue
+                        self.retag_waiting.discard(key)
                         want = chosen or auto
                         since = self.clock() - RETAG_DAYS * 86400
                         self.log(f"CAD: {key} is {want}: re-tagging its transmissions of the last {RETAG_DAYS} days")
@@ -2069,9 +2074,8 @@ class Cad:
     def retag_resume(self, rows_came: bool = False) -> threading.Thread | None:
         """The re-tags left marked: at the start of the CAD of record (a restart, a hub task that took over), and when
         the station's talkgroups arrive for one that waited for them (rows_came). Nothing marked: nothing started."""
-        if rows_came and not self._retag_waiting:
+        if rows_came and not self.retag_waiting:
             return None
-        self._retag_waiting = False
         try:
             if not self.store.one("SELECT 1 AS x FROM radio_retag_pending LIMIT 1"):
                 return None

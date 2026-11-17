@@ -48,7 +48,7 @@ const S_RC_NAMES = {
 };
 // ... and each source's service (fire, police, ...: the settings section radio_services), the rail's Edit sets it too
 const S_RC_SERVICES = {
-  load: async () => (await api("GET", "/api/cad/comms/sources")).services || {},
+  load: async () => { const s = await api("GET", "/api/cad/comms/sources"); return { services: s.services || {}, waiting: s.retag_waiting || [] }; },
   save: async (key, service) => (await api("POST", "/api/cad/settings/radio_services", { action: "set", key, service, operator: operator() }))
     .radio_services || {},
 };

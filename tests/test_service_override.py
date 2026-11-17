@@ -273,8 +273,13 @@ def test_back_to_automatic_waits_for_the_stations_talkgroups_never_guesses(tmp_p
     cad.retag_thread.join(10)
     assert services(cad, MINE) == ["ems"] and pending(cad) == [MINE]
     assert any("waits for the station's talkgroups" in m for m in logs)
-    src = {s["key"]: s for s in cad.comms_sources()["sources"]}
+    tree = cad.comms_sources()
+    src = {s["key"]: s for s in tree["sources"]}
     assert src[MINE]["service_auto"] == ""                    # "Auto", no guess
+    assert tree["retag_waiting"] == [MINE]                     # (the select's hover says so)
+    cad.comms.context_broadcast = False
+    assert cad.comms_sources()["retag_waiting"] == []          # (another system's: only for who may see it)
+    cad.comms.context_broadcast = True
     assert cad.retag_resume(rows_came=False) is not None      # (a start: tried again, still waits)
     cad.retag_thread.join(10)
     assert pending(cad) == [MINE]
@@ -283,6 +288,7 @@ def test_back_to_automatic_waits_for_the_stations_talkgroups_never_guesses(tmp_p
     cad.retag_resume(rows_came=True).join(10)
     assert services(cad, MINE) == ["transit"] and pending(cad) == []
     assert cad.retag_resume(rows_came=True) is None           # nothing waited since
+    assert cad.comms_sources()["retag_waiting"] == []
 
 
 def test_an_import_retags_the_rows_and_a_file_without_choices_keeps_them(tmp_path):
@@ -291,8 +297,9 @@ def test_an_import_retags_the_rows_and_a_file_without_choices_keeps_them(tmp_pat
     cad.comms.context_broadcast = True
     cad.source_rows = lambda: [{"source": MINE, "service": "transit", "service_auto": "transit"}]
     cad.record_traffic(p25_row("b-1", clock.t - 60, PD, "mrrs", "transit"))
-    old = cad.settings_export()                                     # (no radio_services: a file from before them)
-    assert "radio_services" not in old["overrides"]
+    old = cad.settings_export()
+    assert old["overrides"]["radio_services"] == {}                 # always written, {} with no choices
+    del old["overrides"]["radio_services"]                          # a file from before them
     post(cad, action="set", key=MINE, service="fire")
     cad.retag_thread.join(10)
     exp = cad.settings_export()
@@ -304,6 +311,23 @@ def test_an_import_retags_the_rows_and_a_file_without_choices_keeps_them(tmp_pat
     cad.settings_post("import", {"action": "apply", "settings": other, "operator": "Lt. Test"})
     cad.retag_thread.join(10)
     assert cad.radio_services == {MINE: "police"} and services(cad, MINE) == ["police"] and pending(cad) == []
+
+
+def test_an_export_with_no_choices_clears_them_on_import(tmp_path):
+    clock = Clock()
+    cad = clocked_cad(tmp_path, clock)
+    cad.comms.context_broadcast = True
+    cad.source_rows = lambda: [{"source": MINE, "service": "transit", "service_auto": "transit"}]
+    cad.record_traffic(p25_row("b-1", clock.t - 60, PD, "mrrs", "transit"))
+    none = cad.settings_export()                                     # no choices: radio_services {}
+    post(cad, action="set", key=MINE, service="police")
+    cad.retag_thread.join(10)
+    assert services(cad, MINE) == ["police"]
+    dry = cad.settings_post("import", {"action": "dry_run", "settings": none, "operator": "Lt. Test"})
+    assert [(c["store"], c["key"], c["change"]) for c in dry["changes"]] == [("radio_services", MINE, "removed")]
+    cad.settings_post("import", {"action": "apply", "settings": none, "operator": "Lt. Test"})
+    cad.retag_thread.join(10)
+    assert cad.radio_services == {} and services(cad, MINE) == ["transit"] and pending(cad) == []
 
 
 def test_another_systems_retag_tells_only_readers_who_may_see_it(tmp_path):
@@ -388,7 +412,7 @@ const asked = [];
 global.fetch = async () => ({ ok: false, status: 503, headers: { get: () => "" }, json: async () => ({}) });
 let services = { "p25:mrrs:9300": "fire" }, refuse = false;
 const SERVICES = {                                  // settings.js S_RC_SERVICES, its hub a stand-in
-  load: async () => ({ ...services }),
+  load: async () => ({ services: { ...services }, waiting: ["p25:mrrs:9300"] }),
   save: async (key, service) => {
     asked.push({ key, service });
     if (refuse) throw new Error("Admins only");
@@ -477,6 +501,8 @@ def test_the_channels_page_has_a_service_select_beside_the_pencil(channels_page)
     assert (b["fm:FG1"]["auto"], b["air:Tower"]["auto"]) == ("Auto (Fire)", "Auto (Air)")
     # terse: the explanation only in the hover
     assert b["p25:mrrs:9211"]["title"].startswith("Service: ") and "30 days" in b["p25:mrrs:9211"]["title"]
+    assert "Re-tag waits for the station" in b["p25:mrrs:9300"]["title"] and "waits" not in b["p25:mrrs:9211"]["title"]
+    assert "never muted" in b["fm:FG1"]["title"] and "never muted" not in b["p25:mrrs:9211"]["title"]
     o = channels_page["order"]
     assert o.index("tg-svc") == o.index("tg-ren") + 1
 
@@ -515,7 +541,7 @@ NAV_SCENARIO = r"""
     if (method === "POST") { posted.push([path, body]); current = body.action === "reset" ? null : { rev: "r2", folders: body.folders };
                              return Promise.resolve({ ok: true, radio_folders: current }); }
     if (path.startsWith("/api/cad/comms/sources")) { calls.push(path); return Promise.resolve({ rev: "s" + calls.length, now: NOW, minutes: 60, live: [],
-      sources: SRC2, folders: current, services: { ...services } }); }
+      sources: SRC2, folders: current, services: { ...services }, retag_waiting: ["p25:metro:9001"] }); }
     return real(method, path, body);
   };
   global.canDo = (need) => need === "admin";
@@ -528,6 +554,8 @@ NAV_SCENARIO = r"""
   const svc = (k) => tree().find((c) => c.dataset && c.dataset.chsvc === k);
   out.field = { rail: [svc("p25:metro:9100").value, svc("p25:metro:9100").children[0].text, svc("p25:metro:9100").title],
                 pd: [svc("p25:metro:9001").value, svc("p25:metro:9001").children.map((o) => o.text)],
+                waits: [svc("p25:metro:9001").title.includes("Re-tag waits for the station"), svc("p25:metro:9100").title.includes("waits"),
+                        svc("fm:FG1").title.includes("never muted"), svc("p25:metro:9100").title.includes("never muted")],
                 rowOrder: tree().find((c) => c.className === "rn-edi" && c.dataset.k === "fm:FG1").children.map((c) => c.className) };
   const pick = (k, v) => { const n = svc(k); n.value = v; $("#rn-tree").fire("change", { target: n }); };
   pick("p25:metro:9001", "other"); pick("p25:metro:9100", ""); pick("fm:FG1", "fire"); pick("fm:FG1", "");
@@ -568,6 +596,7 @@ def test_the_rails_edit_has_each_channels_service(nav):
     value, auto, title = nav["field"]["rail"]
     assert (value, auto) == ("fire", "Auto (Transit)") and title.startswith("Service: ") and "30 days" in title
     assert nav["field"]["pd"] == ["", ["Auto (Police)", "Fire", "Police", "EMS", "Transit", "Air", "Other"]]
+    assert nav["field"]["waits"] == [True, False, True, False]
     assert nav["field"]["rowOrder"][:2] == ["rn-grip", "rn-edch"] and nav["field"]["rowOrder"][-1] == "rn-edsvc"   # after Move to
 
 

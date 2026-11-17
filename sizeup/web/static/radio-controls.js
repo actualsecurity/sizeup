@@ -33,7 +33,7 @@ window.RadioControls = (() => {
                rerunBusy: false, rerunMsg: "", confirm: null, confirmTimer: 0, closing: null, closeTimer: 0, n: {},
                stt: null, sttTimer: 0, vocabMsg: "", vocabBusy: false, vocabDirty: false,
                names: null, namesRev: null, namesBusy: false, renaming: "", namePending: new Map(),
-               services: null, servicesRev: null, servicesBusy: false, svcPending: new Map() };
+               services: null, servicesRev: null, servicesBusy: false, svcPending: new Map(), svcWaiting: new Set() };
   const ENGINES = [["local", "Local"], ["aws", "AWS"], ["both", "Both"]];
   // Another P25 system's talkgroup has a tier instead of Record / Main / Transcribe (#409, sizeup/tiers.py)
   const TIERS = [["alert", "Alert"], ["text", "Transcribe"], ["record", "Record only"], ["off", "Off"], ["activity", "Activity only"]];
@@ -1534,7 +1534,10 @@ window.RadioControls = (() => {
     if (!st.servicesApi) return;
     st.servicesBusy = true;
     try {
-      st.services = (await st.servicesApi.load()) || {};
+      const got = (await st.servicesApi.load()) || {};
+      // {services, waiting}: the choices, and the sources whose re-tag waits for the station (a bare map: choices alone)
+      st.services = got.services && typeof got.services === "object" ? got.services : got;
+      st.svcWaiting = new Set(Array.isArray(got.waiting) ? got.waiting : []);
       st.servicesRev = typeof cad !== "undefined" && cad && cad.state && typeof cad.state.radio_services === "string" ? cad.state.radio_services : "";
     } catch (_) { /* the next push asks again */ }
     st.servicesBusy = false;
@@ -1635,7 +1638,8 @@ window.RadioControls = (() => {
     const rowSig = (r) => JSON.stringify([shownName(r), r.record, r.main, r.encrypted, r.count, r.last, r.dropped, !!r.pending, fmtTime(r.last),
                                          st.confirm === r.src, lock, r.transcribe, r.engine, r.effective, !!r.cpending, channelNote(r), r.tier,
                                          r.tier_set, (((st.state && st.state.channels) || {}).sync || {}).state,
-                                         nameable, st.renaming === nameKey(r), servable, chosenService(r), autoService(r)]);
+                                         nameable, st.renaming === nameKey(r), servable, chosenService(r), autoService(r),
+                                         st.svcWaiting.has(nameKey(r))]);
     syncList(n.groups, items, {
       key: (x) => (x.head ? `s:${x.id}` : `g:${x.g}`),
       sig: (x) => (x.head ? JSON.stringify([x.label, x.n, x.heard])
@@ -1728,7 +1732,8 @@ window.RadioControls = (() => {
               if (svc.value !== chosen) svc.value = chosen;
               svc.disabled = st.svcPending.has(nk);
               svc.title = `Service: its view, filters and intel${auto ? `\nAuto: ${SERVICE_NAME[auto] || auto} (its talkgroup file or name)` : ""}`
-                + "\nA change re-tags its last 30 days" + (r.fm || !r.tier_set ? "\nFire here: never muted" : "");
+                + "\nA change re-tags its last 30 days" + (r.fm || !r.tier_set ? "\nFire here: never muted" : "")
+                + (st.svcWaiting.has(nk) ? "\nRe-tag waits for the station" : "");
             }
             show(badge, !!r.main);
             setText(heard, r.fm ? (r.kind === "paging" ? "60 Control pages" : r.kind === "airband" ? "HPN ATC (airport pre-alerts)" : "Fireground") : heardText(r));

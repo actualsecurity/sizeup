@@ -3175,7 +3175,10 @@ class Editor:
                 "exported_at": datetime.fromtimestamp(self.store.clock(), TZ).isoformat(timespec="seconds"),
                 "data_file": lists_mod._shown_path(str(self.path)), "defaults_version": str(self.defaults.get("version") or ""),
                 # names secret; the county's place names: their own import, never in this file
-                "overrides": _without_imported({k: v for k, v in self.overrides().items() if k not in KEPT_SECTIONS}),
+                # (radio_services always, {} with none: an import of this file sets them as it says; only a file from
+                # before them, without the section, keeps the ones here)
+                "overrides": {SVC_SECTION: {}, **_without_imported({k: v for k, v in self.overrides().items()
+                                                                   if k not in KEPT_SECTIONS})},
                 "run_cards": [{"type": c["type"], "spoken": c["spoken"], "is_default": c["is_default"], "slots": c["slots"],
                                "remarks": c["remarks"]} for c in runcards.cards(self.store)],
                 "operators": [{"name": o["name"], "role": o["role"], "active": o["active"], "email": o["email"],
