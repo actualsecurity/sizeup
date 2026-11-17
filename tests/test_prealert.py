@@ -564,6 +564,34 @@ def test_a_recovery_message_ends_its_own_fault_only(tmp_path):
     assert t["state"] == "ok" and "doesn't prove the detector is armed" in t["detail"]   # ... and says so
 
 
+def test_only_the_exact_recovery_title_ends_a_fault():
+    from sizeup.prealert import _recovers
+    stuck, unarmed = "Detector line STUCK active", "Ring detector NOT armed"
+    assert _recovers("Detector line recovered", stuck) and _recovers("  detector   LINE recovered. ", stuck)
+    assert _recovers("Ring detector armed", unarmed) and _recovers("RING DETECTOR  ARMED", "Ring detector NOT  armed")
+    for title in ("Detector line not recovered", "Detector line recovered? no", "Detector line STUCK, recovered",
+                  "Detector line recovered but STUCK again"):
+        assert not _recovers(title, stuck), title
+    for title in ("Ring detector un-armed", "Ring detector unarmed", "Ring detector disarmed",
+                  "Ring detector not  armed",
+                  "Ring detector NOT armed", "Ring detector armed?", "Detector armed"):
+        assert not _recovers(title, unarmed), title
+    assert not _recovers("Ring detector armed", stuck) and not _recovers("Detector line recovered", unarmed)
+
+
+def test_a_title_that_reads_as_both_is_a_fault(tmp_path):
+    clock = Clock()
+    cad = make_cad(tmp_path, clock=clock)
+    pa = offline(cad)
+    pa.status(status_msg("w1", clock.t - 120, "Ring detector NOT armed", "", ("warning",), 4))
+    pa.status(status_msg("w2", clock.t - 60, "Ring detector un-armed", "", ("warning",), 4))   # not a recovery: a fault
+    assert pa.tapout()["word"] == "Ring detector un-armed, 60 s ago" and "recovered" not in pa.health
+    pa.status(status_msg("o1", clock.t - 30, "Ring detector not  armed", "", (), 3))     # normal priority: no end
+    assert pa.tapout()["word"] == "Ring detector un-armed, 60 s ago"
+    pa.status(status_msg("a1", clock.t - 10, "Ring detector armed", "", (), 3))
+    assert pa.tapout()["state"] == "ok"
+
+
 def test_the_ring_feed_offline_outranks_a_device_fault(tmp_path):
     clock = Clock()
     cad = make_cad(tmp_path, clock=clock)

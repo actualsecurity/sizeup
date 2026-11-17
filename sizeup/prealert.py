@@ -81,11 +81,14 @@ KEEP_S = 90 * 24 * 3600        # kept in the database (the CSV export)
 MATCH_BEFORE_S = 120           # an event made this long before the ring still matches it
 # Tapout's high-priority status messages that are not faults (it is fine): an OTA image no newer than what runs
 NOT_A_FAULT = re.compile(r"\bOTA REJECTED\b.*\bnot newer than\b.*\brunning\b", re.I | re.S)
-# A fault -> the message that ends it: (the fault's title, the recovery's title). A recovery never matches its fault.
-# A heartbeat or a restart also ends any fault, though a heartbeat doesn't (yet) say the detector is armed.
+# A fault -> the message that ends it: (the fault's title, searched; the recovery's title, matched whole). Titles are
+# compared case-insensitively with their whitespace collapsed, and a recovery is exactly the firmware's title (a full
+# stop allowed), so "Detector line not recovered" or "Ring detector un-armed" never ends a fault. A title that matches
+# any fault pattern is a fault, never a recovery (the safer reading). A heartbeat or a restart also ends any fault,
+# though a heartbeat doesn't (yet) say the detector is armed (#608).
 RECOVERIES = (
-    (re.compile(r"\bdetector line\b.*\bstuck\b", re.I), re.compile(r"\bdetector line\b.*\brecovered\b", re.I)),
-    (re.compile(r"\bnot armed\b", re.I), re.compile(r"\barmed\b", re.I)),
+    (re.compile(r"\bdetector line\b.*\bstuck\b", re.I), re.compile(r"detector line recovered\.?", re.I)),
+    (re.compile(r"\b(?:not\s+|un-?|dis)armed\b", re.I), re.compile(r"ring detector armed\.?", re.I)),
 )
 from sizeup import USER_AGENT
 UA = USER_AGENT + " ntfy read-only subscriber"
@@ -136,8 +139,12 @@ def _ts(at: float | None) -> str:
 
 
 def _recovers(title: str, fault: str) -> bool:
-    """Does a status message with this title end that fault (RECOVERIES)?"""
-    return any(f.search(fault) and r.search(title) and not f.search(title) for f, r in RECOVERIES)
+    """Does a status message with this title end that fault (RECOVERIES)? Only the exact recovery title, and never a
+    title that also reads as a fault."""
+    title, fault = " ".join(title.split()), " ".join(fault.split())
+    if any(f.search(title) for f, _ in RECOVERIES):
+        return False
+    return any(f.search(fault) and r.fullmatch(title) for f, r in RECOVERIES)
 
 
 def _short(text: str, n: int = 60) -> str:
