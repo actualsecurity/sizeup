@@ -1209,7 +1209,7 @@ class SystemSupervisor(Supervisor):
         self.back_at: float | None = None            # its last start after a return
         self.flaps = 0                               # returns in a row it went again soon after (FLAP_S)
         self.hold_until = 0.0                        # a flapping dongle's: no start before this
-        self.county_wait: tuple | None = None        # (#637) (a group move's key, since when) waiting for the county
+        self.county_wait: tuple | None = None        # (#637) (a group move's wish seq, since when): the county first
 
     def _recorder(self) -> dict:
         r = recorder(self.config)
@@ -1386,7 +1386,7 @@ class SystemSupervisor(Supervisor):
         if now < self.next_start:
             self.status.update(base)
             return
-        if w.get("group") and self._county_first(now, key, base):
+        if w.get("group") and self._county_first(now, w, base):
             return
         try:
             found = self.found()
@@ -1434,6 +1434,7 @@ class SystemSupervisor(Supervisor):
         self.lines.clear()
         self.said = ""
         self.ran_key = key
+        self.county_wait = None                      # (#637) the next group move waits for the county again
         if self.gone_since is not None:
             # (#592) as an rtl_fm channel's "dongle '…' back after m:ss"; never one of the watchdog's capped restarts
             self.log(f"{self.tag}: dongles back after {_mmss(now - self.gone_since)}: restarting trunk-recorder")
@@ -1456,18 +1457,19 @@ class SystemSupervisor(Supervisor):
         """(#637) A flapping dongle's hold, said as the time it ends: a held start is no fault (Receivers, Health)."""
         return f"held back until {_hhmm(self.hold_until)} after dropouts"
 
-    def _county_first(self, now: float, key: tuple, base: dict) -> bool:
+    def _county_first(self, now: float, w: dict, base: dict) -> bool:
         """(#637) An antenna group's move (the wish says "group"): when the county's trunk-recorder should run, it
         starts first, as at a return (_coming_back): this system's start waits until the county's status is "ok" on
         the dongle its wish names and it has run COUNTY_SETTLE_S, at most COUNTY_WAIT_S from the move (the county
         down for its own reasons). A group restore that gives the county its dongle back in the same step as this
-        system's therefore opens the county's first. A county already up waits for nothing. True while it waits."""
+        system's therefore opens the county's first. A county already up waits for nothing. Each move (its wish's seq)
+        waits on its own: a later restore of the same dongles waits again. True while it waits."""
         county = wanted(self.county_state)
         if not county["on"] or not county["sdr"]:
             self.county_wait = None
             return False
-        if self.county_wait is None or self.county_wait[0] != key:
-            self.county_wait = (key, now)
+        if self.county_wait is None or self.county_wait[0] != w["seq"]:
+            self.county_wait = (w["seq"], now)
         if now - self.county_wait[1] >= COUNTY_WAIT_S:
             return False
         st = read_status(self.county_status, now) or {}

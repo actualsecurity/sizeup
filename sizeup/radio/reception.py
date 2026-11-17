@@ -977,7 +977,8 @@ class Tests:
             if row["refuse"]:
                 return f"SDR {name}: {row['refuse']}"
             locked = getattr(app, "_locked", None)          # antenna groups: a test stays on the dongle's own antenna
-            if locked is not None and (why := next((w for j in plan if (w := locked(j, sdr))), "")):
+            parked = getattr(app, "_parked", None) or (lambda j: "")   # ... and never runs a job parked there (#637)
+            if locked is not None and (why := next((w for j in plan if (w := locked(j, sdr) or parked(j))), "")):
                 return why
             if getattr(app, "adsb_sdr", "") == sdr:
                 return f"SDR {name} is reserved for the ADS-B receiver"

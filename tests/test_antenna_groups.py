@@ -986,3 +986,42 @@ def test_a_held_system_says_until_when_on_receivers_and_health(tmp_path, monkeyp
     assert "held to ${fmtTime(x.hold_until)}" in (root / "health.js").read_text()
     js = (root / "radio-controls.js").read_text()
     assert "held to ${fmtTime(r.hold_until)}" in js and "held to ${fmtTime(x.hold_until)}" in js
+
+
+def test_a_reception_test_never_runs_a_parked_job(rig):
+    plugged, logs, make = rig
+    app = grouped(make)
+    for sd in ("m700-a", "m700-b"):
+        assert app.set_mode("Off", sd) is None
+    assert app.set_antenna_groups([GROUPS[0], {**GROUPS[1], "parked": ["MRRS 773"]}]) is None
+    err = app.reception.start({"system": "mrrs", "jobs": ["MRRS 773"], "sdr": "m700-b", "minutes": 15})
+    assert err == "MRRS 773 is parked in 700: unpark it first"
+
+
+def test_every_group_restore_waits_for_the_county_not_only_the_first(tmp_path):
+    # review: the wait was keyed on the start key, so a second restore of the same dongles found it long expired
+    from sizeup.radio import trunkrecd
+    from tests.test_p25_systems import ask_county, ask_system, run
+    usb = [(0, "v4"), (1, "pd-a"), (2, "pd-b"), (3, "c3")]
+    county, mrrs, pop, logs, d = _group_restore_service(tmp_path, usb)
+    run([mrrs, county], lambda t: None, 100.0, 110.0)
+    gaps = []
+    for k, t0 in enumerate((110.0, 400.0)):
+        if k:                                                            # a second shortage: back on the stand-ins
+            ask_county(tmp_path, sdr="c3", seq=10)
+            ask_system(tmp_path, {}, on=False, seq=10)
+            run([mrrs, county], lambda t: None, t0 - 60, t0)
+        _ask_restore(tmp_path, True)
+        if k:                                                            # (a new wish: as SystemUnitRecorder writes one)
+            from pathlib import Path
+            for p in (tmp_path / "state" / "p25_recorder.json",
+                      Path(trunkrecd.system_state_path("mrrs", str(tmp_path / "state" / "p25_recorder.json")))):
+                p.write_text(json.dumps({**json.loads(p.read_text()), "seq": 11}))
+        n, at = len(pop.started), {}
+
+        def watch(t):
+            for p in pop.started[n:]:
+                at.setdefault("county" if p.kw["cwd"] != str(d) else "mrrs", t)
+        run([mrrs, county], watch, t0, t0 + 30)
+        gaps.append(at["mrrs"] - at["county"])
+    assert all(g >= trunkrecd.COUNTY_SETTLE_S for g in gaps), gaps
