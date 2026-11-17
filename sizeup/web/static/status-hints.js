@@ -93,10 +93,11 @@
       if (!byTx.has(h.traffic_id)) byTx.set(h.traffic_id, []);
       byTx.get(h.traffic_id).push(h);
     }
-    // the units board: li.urow keyed by unit id
+    // the units board: li.urow keyed by unit id; an out-of-service unit's row is its notice's (oos-notices.js)
+    const oos = window.OosNotices ? OosNotices.units() : new Set();
     for (const li of document.querySelectorAll("#units li.urow")) {
       const name = li.querySelector(".uh > b.un");
-      place(li.querySelector(".uh"), name ? byUnit.get(name.textContent) : null);
+      place(li.querySelector(".uh"), name && !oos.has(name.textContent) ? byUnit.get(name.textContent) : null);
     }
     // the event's Assigned panel: only a suggestion for this event (or one with no event)
     const inc = typeof selected === "function" ? selected() : null;

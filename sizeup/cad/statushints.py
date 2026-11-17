@@ -62,7 +62,8 @@ from sizeup import sourcekeys
 from sizeup.cad.feed import load_cfg, unit_forms
 from sizeup.cad.lists import ListsError
 from sizeup.cad.statusrepair import repair
-from sizeup.cad.store import TZ, CadError
+from sizeup.cad.oos import cause as oos_cause
+from sizeup.cad.store import AUTO, TZ, CadError
 
 EXPIRE_S = 300
 SAID_MAX = 120
@@ -655,18 +656,22 @@ class StatusHints:
                             "withdrawn": "the transcript no longer says it"}.get(h["outcome"], h["outcome"]))
         return h
 
-    def accept(self, hid: int, operator: str = "") -> dict:
+    def accept(self, hid: int, operator: str = "", by: str = AUTO) -> dict:
         """✓: the unit's status set as suggested (on the event it is for: put on it when it isn't), with where it came
-        from in the chronology: "E64 on location. Status from radio (heard 14:32:10 “Engine 64 on location”)"."""
+        from in the chronology: "E64 on location. Status from radio (heard 14:32:10 “Engine 64 on location”)".
+        by: PERSON for a person's ✓; else the automation taking it (60 Control dispatching), refused on an
+        out-of-service unit (OosLocked, with its notice: sizeup/cad/oos.py), the suggestion left pending."""
         with self._lock:
             h = self._pending(hid)
             why = f"Status from radio (heard {_hms(h['heard_at'])} “{h['said']}”)"
             L = self._lists()
             u = self.store.unit(h["unit_id"])
+            c = oos_cause("radio", f"radio heard “{h['phrase']}”", h["intent"], h["traffic_id"], h["incident_id"])
             if h["incident_id"] and u["incident_id"] != h["incident_id"] and L.role(h["status"]) not in ("free", "oos"):
-                out = self.store.set_unit_status_on(h["unit_id"], h["status"], h["incident_id"], operator, why=why)
+                out = self.store.set_unit_status_on(h["unit_id"], h["status"], h["incident_id"], operator, why=why, by=by,
+                                                    cause=c)
             else:
-                out = self.store.set_unit_status(h["unit_id"], h["status"], operator, why=why)
+                out = self.store.set_unit_status(h["unit_id"], h["status"], operator, why=why, by=by, cause=c)
             with self.store.tx() as db:
                 db.execute("UPDATE status_hints SET outcome = 'accepted', decided_at = ?, operator = ? WHERE id = ?",
                            (self.store.clock(), operator, hid))

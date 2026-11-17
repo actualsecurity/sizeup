@@ -219,6 +219,9 @@ POST /api/cad/hint/<id>/accept            {operator?}  a unit status suggested f
                                           status_hints; sizeup/cad/statushints.py): set, with "Status from radio
                                           (heard 14:32:10 “...”)" in the chronology; dispatchers and admins
 POST /api/cad/hint/<id>/dismiss           {operator?}  not so: that transmission never suggests it again
+POST /api/cad/oos-notice/<id>/service   {operator?}  an automation refused on an out-of-service unit (the state's
+                                          oos_notices; sizeup/cad/oos.py): the unit back in service (its free status);
+                                          /dismiss: left out of service. Dispatchers and admins
 GET  /api/cad/export/status-hints.csv     every suggestion and how it ended (accepted / dismissed / expired ...)
 GET  /api/cad/alarms                      the emergency alarms (sizeup/cad/alarms.py, #128): {open, notices, recent, drill,
                                           settings: {keywords, channels, other, drill, defaults, edited, push}, history}
@@ -354,6 +357,7 @@ SETTINGS = re.compile(r"/api/cad/settings/([a-z_]{1,30})")
 PREALERT = re.compile(r"/api/cad/prealert/(\d{1,9})/dismiss")
 AIRPORT_ALERT = re.compile(r"/api/cad/airport-alert/(\d{1,9})/(accept|dismiss)")
 HINT = re.compile(r"/api/cad/hint/(\d{1,9})/(accept|dismiss)")
+OOS_NOTICE = re.compile(r"/api/cad/oos-notice/(\d{1,9})/(service|dismiss)")      # automation refused (sizeup/cad/oos.py)
 INTEL_EVENT = re.compile(r"/api/cad/intel/(\d{1,9})/(dismiss|feedback)")        # radio pre-alerts (sizeup/intel)
 ALARM_ACK = re.compile(r"/api/cad/alarm/(\d{1,9})/ack")
 ALARM_CLEAR = re.compile(r"/api/cad/alarm/(\d{1,9})/clear")
@@ -395,6 +399,7 @@ WRITES = (
     (PREALERT, "dispatch"),                                                 # a phone pre-alert that is nothing
     (AIRPORT_ALERT, "dispatch"),                                            # an airport pre-alert: an event, or nothing
     (HINT, "dispatch"),                                                     # a status suggested from the radio (#37)
+    (OOS_NOTICE, "dispatch"),                                               # an out-of-service unit back in service
     (re.compile(r"/api/cad/intel/\d{1,9}/dismiss"), "dispatch"),             # a radio pre-alert that is nothing
     (re.compile(r"/api/cad/intel/\d{1,9}/feedback"), "read"),                # ... a vote on it: anyone signed in
     (ALARM_ACK, "dispatch"),                                                # an emergency alarm seen (#128)
@@ -636,6 +641,9 @@ DOES = (
     (HINT, lambda m, b, o, c: (f"{'Accepted' if m.group(2) == 'accept' else 'Dismissed'} the radio's "
                                f"{o.get('name') or o.get('unit') or ''} {o.get('status', '')}".replace("  ", " ")
                                + (f" on {o['incident_number']}" if o.get("incident_number") else ""), o.get("incident_number") or "")),
+    (OOS_NOTICE, lambda m, b, o, c: ((f"Put {o.get('name', '')} in service" if m.group(2) == "service"
+                                      else f"Kept {o.get('name', '')} out of service")
+                                     + f" ({_clip(o.get('what'), 60)})", "")),
     (ALARM_ACK, lambda m, b, o, c: (f"Acknowledged the emergency alarm: {_clip(o.get('who'), 30)} {o.get('what', '')} "
                                     f"on {o.get('channel', '')}".rstrip(), o.get("incident_number") or "")),
     (ALARM_CLEAR, lambda m, b, o, c: (f"All clear on the emergency alarm: {_clip(o.get('who'), 30)} {o.get('what', '')} "
@@ -1242,6 +1250,8 @@ class CadApi:
             return c.airport_alert(int(m.group(1)), m.group(2), body)
         if m := HINT.fullmatch(path):
             return c.hint(int(m.group(1)), m.group(2), body)
+        if m := OOS_NOTICE.fullmatch(path):
+            return c.oos_notice(int(m.group(1)), m.group(2), body)
         if m := INTEL_EVENT.fullmatch(path):
             if not sourcekeys.may_see_context(c.comms.context_broadcast):
                 raise CadError("radio pre-alerts need a sign-in (Cloudflare Access)")
