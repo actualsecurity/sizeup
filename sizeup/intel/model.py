@@ -97,7 +97,7 @@ class Event:
     priority: int = 3
     pushed_at: float | None = None
     push_count: int = 0
-    suppressed: str = ""               # rate | quiet | shadow | merged | scrub | off | out_of_area | near_incident | ""
+    suppressed: str = ""               # rate | quiet | shadow | merged | scrub | off | out_of_area | near_incident | unplaced | ""
     updated_at: float = 0.0
     note: str = ""                     # "possibly cancelled" (a nameless disregard of a safety call), "moved", "re-opened"
     near_incident: int | None = None   # our own incident at its place (engine._incident): linked, never a radio link

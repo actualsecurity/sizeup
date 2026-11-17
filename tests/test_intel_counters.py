@@ -57,7 +57,7 @@ def test_the_age_gate_a_repeat_a_match_below_threshold_an_event_a_push_and_a_hel
     assert h["matched"] == 1 and h["below"] == 0 and h["events"] == 1 and h["pushed"] == 1 and h["held"] == 0
     assert len(sink.pushes) == 1 and e.stale == 2
     clock.t += 600
-    e.feed(row("t2", "caller reports an odor of smoke", clock.t, source="p25:mrrs:9212"))      # a rule, under the threshold
+    e.feed(row("t2", "an odor of smoke", clock.t, source="p25:mrrs:9212"))      # a rule, under the threshold (no cue)
     h = pd(e)["h24"]
     assert h["matched"] == 2 and h["below"] == 1 and h["events"] == 1
 
