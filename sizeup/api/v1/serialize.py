@@ -15,37 +15,97 @@ number that a human or a transcript put there; the server does NOT filter them):
 `place` and address; the dispatches' text; the operators' notes and the dispatch remarks in the chronology; `status`
 events (a unit's radio transcript, "E60 on scene: <said>"); `tones` events (paging-feed lines of up to 2000 characters
 from outside the CAD); an alarm's `text`, `what`, `who` and `subject`; the radio rows' `text` in a detail (transcripts);
-a premise note's `text`. The CAD does not write the caller's details into these fields itself, but a human or a
-transcript can. Every free text goes through scrub(): an operator's sign-in email never leaves (a "<email>" is dropped,
-a bare email becomes "an operator") and a bare radio ID in an alarm's words is masked ("an unidentified radio").
+a premise note's `text`; a pre-plan point's `note`. The CAD does not write the caller's details into these fields
+itself, but a human or a transcript can. Every free text goes through scrub(): an operator's sign-in email never
+leaves (any "<...>" part is dropped, anywhere in the text: a "<5 min>" in a note loses it,
+deliberately; any other token holding an "@" becomes "an operator"). The radio-ID mask ("radio 41228", "rid
+41228", ...) applies to an alarm's `what`/`text`/`subject`, the
+`alarm`-kind chronology lines and the identity fields only (an alarm's `who`, a radio row's `unit`, which also lose any
+standalone number of 4+ digits): a "radio 41228" in `status`/`tones` events, radio-row transcripts, notes, addresses and
+remarks is NOT masked (they are sent as written). Not scrubbed at all: unit names, pre-plan `label`, `geo_label`,
+`town`. scrub() reads at most SCRUB_MAX_CHARS characters of a text (the rest is cut and the output ends with an
+ellipsis) and normalises compatibility forms of "@" and "<" (NFKC, zero-width and direction marks dropped)
+first. Residual: an email written to defeat a pattern ("a%40x.org", "a&#64;x.org", "a (at) x.org") and a radio ID
+written
+with letters or split into groups the pattern does not read.
 Ids are strings (docs/mobile-api.md section 3.2), times unix seconds."""
 from __future__ import annotations
 
 import re
+import unicodedata
 
 from sizeup import sourcekeys
 
 from .rev import rev_of
 
 EVENT_MAX, DISPATCH_MAX, RADIO_MAX = 300, 50, 100        # a detail's lists are bounded (the CAD keeps 300 events)
-_EMAIL = re.compile(r"\s*<[^<>]*>\s*$")                   # "Casey <casey@example.org>" -> "Casey"
-_ANGLE = re.compile(r"\s*<[^>]*>")
-_BARE_EMAIL = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9\-]+(?:\.[A-Za-z0-9\-]+)+")
-_RADIO_ID = re.compile(r"\bradio \d{3,}\b", re.I)          # alarms.who(): "radio 41228" for a talker with no alias
+SCRUB_MAX_CHARS = 20000       # the longest text scrub() reads: the rest is cut and the output ends with ELLIPSIS
+ELLIPSIS = "\u2026"
+_TOKEN = re.compile(r"\S+")
+# A talker's ID in an alarm's words: "radio 41228", "rid-41228", "Radio  41228", "radio #41228", "radio_41228",
+# "ID 41228",
+# "Radio No. 41228", "talker 41228", "tg 41228", digits split by a space or comma ("radio 41 228"): a keyword, a run of
+# non-word characters and an optional "no", then digits. Linear: no nested quantifier, and each run of separators is
+# read once. At least 3 digits in all (see _mask_id).
+_RADIO_ID = re.compile(r"\b(?:radio|rid|id|unit|talker|tg)(?![A-Za-z])[\W_]*(?:no(?![A-Za-z])[\W_]*)?\d(?:[\d ,]*\d)?",
+                       re.I)
+_BARE_ID = re.compile(r"\b\d{4,}\b")
+UNIDENTIFIED = "an unidentified radio"
 
 
-def scrub(text, radio_ids: bool = False) -> str:
+def _drop_angles(s: str) -> str:
+    """Every "<...>" part gone, in one pass: from a "<" to the next ">" (inclusive) or, with no ">", to the end of the
+    text; the white space before the "<" goes with it. No regex, so no backtracking on a text full of "<"."""
+    out, i = [], 0
+    while True:
+        j = s.find("<", i)
+        if j < 0:
+            out.append(s[i:])
+            return "".join(out)
+        out.append(s[i:j].rstrip())
+        k = s.find(">", j + 1)
+        if k < 0:
+            return "".join(out)
+        i = k + 1
+
+
+def _token(m: re.Match) -> str:
+    t = m.group(0)
+    # (a standalone " @ " is a place's: "40 Example Rd @ Sample Market")
+    return "an operator" if "@" in t and t != "@" else t
+
+
+def _mask_id(m: re.Match) -> str:
+    return UNIDENTIFIED if sum(c.isdigit() for c in m.group(0)) >= 3 else m.group(0)
+
+
+def scrub(text, radio_ids: bool = False, identity: bool = False) -> str:
     """A free text with no operator sign-in email in it (the CAD writes "Name <email>", or the bare email of a person
-    with no name, into event lines and alarm words): an angle-bracket part goes, a bare email becomes "an operator".
-    radio_ids: also a bare "radio 41228" (an unidentified talker's ID) becomes "an unidentified radio"."""
-    out = _BARE_EMAIL.sub("an operator", _ANGLE.sub("", str(text or "")))
-    return _RADIO_ID.sub("an unidentified radio", out) if radio_ids else out
+    with no name, into event lines and alarm words). The text is read up to SCRUB_MAX_CHARS characters (the rest is cut
+    and the output ends with an ellipsis, so a reader can tell), then: compatibility forms of "@" and "<" are
+    normalised (NFKC: full-width, small) and format characters (zero width, direction marks) dropped; any angle-bracket
+    part goes (a "<5 min>" in a note too: deliberate, fail-safe); every whitespace-delimited token holding an "@", in
+    any email form, becomes ONE "an operator" (a standalone "@" stays). radio_ids (an alarm's own words): "radio 41228",
+    "rid 41228", "ID 41228", "Radio No. 41228", "talker 41228", "tg 41228" and the like become "an unidentified radio".
+    identity (an identity field: an alarm's `who`, a radio row's `unit`): also any standalone number of 4 or more
+    digits. Digits in addresses, remarks and transcripts are never touched. Every step is one linear pass."""
+    s = str(text or "")
+    cut = len(s) > SCRUB_MAX_CHARS
+    s = unicodedata.normalize("NFKC", s[:SCRUB_MAX_CHARS])
+    s = "".join(c for c in s if unicodedata.category(c) != "Cf")
+    out = _TOKEN.sub(_token, _drop_angles(s))
+    if radio_ids or identity:
+        out = _RADIO_ID.sub(_mask_id, out)
+    if identity:
+        out = _BARE_ID.sub(UNIDENTIFIED, out)
+    return out + ELLIPSIS if cut else out
 
 
 def name_of(operator) -> str:
-    """An operator as the people see them: the name, never the sign-in email."""
-    s = _EMAIL.sub("", str(operator or "")).strip()
-    return "" if re.fullmatch(r"\S+@\S+", s) else s          # (a bare email is no name)
+    """An operator as the people see them: the name, never the sign-in email (see scrub: nothing with an "@" is left).
+    A bare email is no name: "" ."""
+    s = scrub(operator).strip()
+    return "" if s == "an operator" else s
 
 
 def sid(v) -> str | None:
@@ -86,7 +146,7 @@ _CALLER = re.compile(r"caller|phone", re.I)       # "caller: ", "caller address:
 
 def event_text(kind: str, text: str) -> str:
     """The chronology line as the app may read it (see the module docstring)."""
-    return scrub(_event_text(kind, text), kind == "alarm")
+    return scrub(_event_text(kind, text), kind == "alarm", identity=kind == "alarm")   # (CAD-worded lines)
 
 
 def _event_text(kind: str, text: str) -> str:
@@ -123,7 +183,8 @@ def _preplan(p: dict) -> dict:
 def radio_row(r: dict) -> dict:
     """A radio-log row on a call: its words and channel, the talker only as its alias says (never the radio ID)."""
     return {"id": str(r.get("id")), "at": r.get("start"), "channel": r.get("channel") or "",
-            "text": scrub(r.get("text")), "unit": scrub(r.get("unit")), "emergency": bool(r.get("emergency")),
+            "text": scrub(r.get("text")), "unit": scrub(r.get("unit"), identity=True),
+            "emergency": bool(r.get("emergency")),
             "has_audio": bool(r.get("has_audio"))}
 
 
@@ -166,7 +227,8 @@ def alarm(a: dict, state: str) -> dict:
     """An emergency alarm or notice (no rev yet). `who` is the label the console shows (never a separate radio ID).
     state: open | notice | recent."""
     return {"id": sid(a["id"]), "state": state, "level": a.get("level") or "", "at": a.get("at"),
-            "created_at": a.get("created_at"), "what": scrub(a.get("what"), True), "who": scrub(a.get("who"), True),
+            "created_at": a.get("created_at"), "what": scrub(a.get("what"), True),
+            "who": scrub(a.get("who"), identity=True),
             "channel": a.get("channel") or "", "text": scrub(a.get("text"), True),
             "emergency": bool(a.get("emergency")),
             "drill": bool(a.get("drill")), "source": a.get("source") or "", "subject": scrub(a.get("subject"), True),

@@ -7,6 +7,7 @@ import hashlib
 import itertools
 import json
 import math
+import threading
 import time
 
 import pytest
@@ -17,7 +18,7 @@ from sizeup.api.v1.handler import V1
 from sizeup.api.v1.limits import Limits
 from sizeup.api.v1.principal import Principal
 from sizeup.api.v1.rev import rev_of
-from sizeup.api.v1.serialize import name_of, radio_rows
+from sizeup.api.v1.serialize import SCRUB_MAX_CHARS, name_of, radio_rows, scrub
 from sizeup.api.v1.switches import Switches
 from sizeup.cad.api import CadApi
 from sizeup.cloud.access import Identity
@@ -723,3 +724,137 @@ def test_the_404_and_503_bodies_are_the_specs_error(cad):
         assert s == 503 and h["Retry-After"] == "5"
         conforms(body, "GET", spec, 503)
         assert "503" in DOC["paths"][spec]["get"]["responses"]
+
+
+# -- the reviewers' probes, as given (operator strings, emails of every shape, a talker's ID) ----------------
+
+EMAIL_PROBES = ["Casey <a@x", "Casey <a@x.org> note", "Casey <a@x.org> and Bob", "Casey@Example.ORG;",
+                "Casey <casey@example.org>", "casey@example.org", "josé@example.org", "a@exämple.org", "a@localhost",
+                "a@[10.0.0.1]", "x@y.org@z.org", "Reopened by <a@b.org>@c.org; was closed", "a@b a@b a@b"]
+ID_PROBES = ["rid 41228", "Radio  41228", "radio-41228", "radio\t41228", "radio #41228", "unit 41228", "ID 41228",
+             "radio 41228"]
+
+
+@pytest.mark.parametrize("probe", EMAIL_PROBES)
+def test_no_email_form_survives_scrub_or_name_of(probe):
+    for out in (scrub(probe), name_of(probe), scrub(probe, True), scrub(probe, identity=True),
+                name_of(f"{probe} <x@y.org>")):
+        assert "@" not in out, (probe, out)
+
+
+@pytest.mark.parametrize("probe, scrubbed, name", [
+    ("Casey <a@x", "Casey", "Casey"), ("Casey <a@x.org> note", "Casey note", "Casey note"),
+    ("Casey <a@x.org> and Bob", "Casey and Bob", "Casey and Bob"), ("Casey@Example.ORG;", "an operator", ""),
+    ("Casey <casey@example.org>", "Casey", "Casey"), ("casey@example.org", "an operator", ""),
+    ("josé@example.org", "an operator", ""), ("a@localhost", "an operator", ""), ("a@[10.0.0.1]", "an operator", ""),
+    ("x@y.org@z.org", "an operator", ""), ("Lt. Ruiz", "Lt. Ruiz", "Lt. Ruiz"),
+    ("40 Example Rd @ Sample Market", "40 Example Rd @ Sample Market", "40 Example Rd @ Sample Market"),
+    ("note <5 min> more", "note more", "note more")])
+def test_scrub_and_name_of_exact_outputs(probe, scrubbed, name):
+    assert scrub(probe) == scrubbed and name_of(probe) == name
+
+
+@pytest.mark.parametrize("probe", ID_PROBES)
+def test_every_radio_id_form_is_masked_in_an_alarms_words_and_identity_fields(probe):
+    for out in (scrub(probe, True), scrub(probe, identity=True), scrub(f"EMERGENCY: {probe} mayday on FG1", True)):
+        assert "41228" not in out and "unidentified radio" in out, (probe, out)
+
+
+def test_the_mask_is_for_identity_fields_and_alarm_words_only():
+    assert scrub("41228", identity=True) == "an unidentified radio" and scrub("41228", True) == "41228"
+    assert scrub("12345 Example Ave, radio 41228 said", False) == "12345 Example Ave, radio 41228 said"   # as written
+    assert scrub("E64 (77A4)", identity=True) == "E64 (77A4)"
+
+
+N = 200_000
+ADVERSARIAL = {"<": "<" * N, "a<": "a<" * (N // 2), "<a@": "<a@" * (N // 3), "a@": "a@" * (N // 2), "@": "@" * N,
+               ".": "." * N, " ": " " * N, "-": "-" * N, "<+spaces+@": "<" + " " * N + "@",
+               "radio ": "radio " * (N // 6),
+               "radio 12345 ": "radio 12345 " * (N // 12), "radio+spaces": "radio" + " " * N + "x",
+               "digits": "radio " + "1 " * (N // 2), "<a ": "<a " * (N // 3), "a.": "a." * (N // 2)}
+
+
+def finishes(fn, arg):
+    """fn(arg) on a thread: its result, and that it was done inside a generous 20 s (no tight clock)."""
+    box = []
+    t = threading.Thread(target=lambda: box.append(fn(arg)), daemon=True)
+    t.start()
+    t.join(timeout=20)
+    assert not t.is_alive(), "still running after 20 s"
+    return box[0]
+
+
+@pytest.mark.parametrize("name", sorted(ADVERSARIAL))
+def test_200_kb_of_adversarial_input_completes_and_is_capped(name):
+    text = ADVERSARIAL[name]
+    for fn in (scrub, lambda t: scrub(t, True, True), name_of):
+        out = finishes(fn, text)
+        assert "@" not in out.replace(" @ ", "") or set(out) <= {"@"}, name        # (a standalone "@" stays)
+        assert len(out) <= 6 * SCRUB_MAX_CHARS + 1                    # the cap bounds the work and the size
+
+
+def test_the_cap_cuts_with_a_marker_and_short_text_has_none():
+    long = "Smoke showing. " * 5000
+    out = scrub(long)
+    assert out.endswith("\u2026") and len(out) == len(long[:SCRUB_MAX_CHARS]) + 1
+    assert scrub("Smoke showing") == "Smoke showing"
+    assert scrub("x" * SCRUB_MAX_CHARS) == "x" * SCRUB_MAX_CHARS                    # exactly the cap: not cut
+    assert scrub("x" * (SCRUB_MAX_CHARS + 1)).endswith("\u2026")
+
+
+@pytest.mark.parametrize("form", ["a\uff20example.org", "a\uff20b", "a\ufe6b x.org", "a\u200b\uff20x", "<a\uff20x",
+                                  "a\u200b@x", "a@\u202ex.org", "a\uff20b\uff20c", "\uff1ca@x\uff1e Casey",
+                                  "Casey \uff1ca\uff20x.org\uff1e note"])
+def test_compatibility_forms_of_the_at_sign_are_normalised_first(form):
+    for out in (scrub(form), name_of(form), scrub(form, identity=True)):
+        assert "@" not in out and "\uff20" not in out and "\ufe6b" not in out and "\u200b" not in out, (form, out)
+
+
+@pytest.mark.parametrize("form", ["Radio No. 41228", "talker 41228", "tg 41228", "radio_41228", "radio no 41228",
+                                  "radio 41 228", "radio 41,228", "RID-41228", "Rid:41228", "unit #41228"])
+def test_more_radio_id_forms_are_masked_in_an_alarms_words(form):
+    out = scrub(f"EMERGENCY: {form} mayday", True)
+    assert not any(c.isdigit() for c in out) and "an unidentified radio mayday" in out, (form, out)
+
+
+def test_the_radio_mask_leaves_small_numbers_and_other_words_alone():
+    for text in ("radio 5 to command", "tg 3", "identity 41228 confirmed", "Radio check 5", "tgs 12345"):
+        assert scrub(text, True) == text, text
+
+
+def test_odd_operator_strings_and_a_bare_numeric_talker_never_reach_the_api(tmp_path):
+    c, ids = seed(tmp_path, calls=4)
+    c.ids = ids
+    v1 = v1_for(c)
+    ops = ["Casey <a@x", "Casey <casey@example.org> note", "Casey@Example.ORG;"]
+    for n, op in enumerate(ops):
+        t = tx(f"FG1-{n}", "Engine 60 mayday", rig="E60", unit="E60 P1", radio_id="6401", at=c.clock() - 1)
+        c.record_traffic(t)
+        a = c.alarms.on_traffic(t)
+        for step in (lambda: c.alarm_ack(a["id"], {"operator": op}),
+                     lambda: c.alarm_clear(a["id"], {"operator": op}),
+                     lambda: c.close(ids[1 + n], {"operator": op, "disposition": "NO ACTION"}),
+                     lambda: c.reopen(ids[1 + n], {"operator": op})):
+            try:
+                step()
+            except Exception:  # noqa: BLE001 - the CAD may refuse an odd operator: what it did write is what is checked
+                pass
+        c.clock.t += 2
+    t = tx("FG1-ID", "mayday mayday", rig="", unit="41228", radio_id="41228", at=c.clock() - 1)     # who() = "41228"
+    c.record_traffic(t)
+    a = c.alarms.on_traffic(t)
+    assert c.alarms.get(a["id"])["who"] == "41228"                                      # (the CAD says it bare)
+    c.clock.t += 2
+    for who in ("val", "jordan", "casey"):
+        text = whole_api(v1, c, who)
+        assert "@" not in text and "41228" not in text, who
+    assert get(v1, "/api/v1/alarms")[1]["items"][0]["who"] == "an unidentified radio"
+
+
+def test_a_named_places_at_sign_survives(tmp_path):
+    c, ids = seed(tmp_path, calls=1)
+    c.ids = ids
+    c.update(ids[0], {"address": "40 Example Rd @ Sample Market", "place": "Sample Market", "operator": "Casey"})
+    c.clock.t += 2
+    v1 = v1_for(c)
+    assert "40 Example Rd @ Sample Market" in whole_api(v1, c, "val")

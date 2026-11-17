@@ -688,16 +688,25 @@ writes. `/me` is PR 2's.
   (a device is a signed-in person). **Never sent:** the caller's name, address and phone as fields, nor in the
   chronology (the "Caller info: ..." line is dropped; an "Edited ..." line that names a caller field is dropped whole,
   and the match is deliberately broad: any edit line containing "caller" or "phone" becomes "Edited caller details",
-  which can hide an unrelated edit that mentions a phone); operators' sign-in emails (an "<email>" is dropped, a bare
-  email becomes "an operator", in every free text); every radio ID, rig and talker beyond a row's alias (a bare
-  "radio 41228" in an alarm becomes "an unidentified radio"). **Chronology text is an allow-list:** only the kinds in
+  which can hide an unrelated edit that mentions a phone); operators' sign-in emails (any `<...>` part is dropped, anywhere in a free text, so a "<5 min>" in a note loses
+  it: deliberate, fail-safe; any other whitespace-delimited token holding an "@", in any email form, becomes "an
+  operator"; a standalone " @ " in a named place's address stays); a talker's radio ID: the mask ("radio 41228", "rid
+  41228", "ID 41228" ...) applies to the alarm fields, the `alarm`-kind chronology lines and the identity fields (an
+  alarm's `who`, a radio row's `unit`, which also lose any standalone number of 4+ digits) ONLY: a "radio 41228" in
+  `status`/`tones` events, radio-row transcripts, notes, addresses and remarks is not masked (sent as written, below).
+  `scrub` reads at most 20000 characters of a text (`SCRUB_MAX_CHARS`; the rest is cut and the output ends with an
+  ellipsis), first normalises compatibility forms of "@" and "<" (NFKC; zero-width and direction marks dropped), and is
+  one linear pass per step (no backtracking regex), so a long note cannot stall a cache rebuild. Residual, not
+  addresses a client would link: an email written to defeat a pattern ("a%40x.org", "a&#64;x.org", "a (at) x.org"), and a
+  radio ID written with letters or split into digit groups the mask does not read.
+  **Chronology text is an allow-list:** only the kinds in
   `serialize.EVENT_TEXT_KINDS` carry text; every other kind (system, feed, radio, prealert, any added later) is sent as
   kind, time and operator with an empty text. **Sent as written, unfiltered:** an incident's `remarks`, `type_note`,
   `place` and address; the dispatches' text; operators' notes; `status` events (a unit's radio transcript, "E60 on
   scene: <said>"); `tones` events (paging-feed lines up to 2000 characters from outside the CAD); an alarm's `text`,
-  `what`, `who` and `subject`; the radio rows' `text` in a detail (transcripts); a premise note's `text`. ANY of these
+  `what`, `who` and `subject`; the radio rows' `text` in a detail (transcripts); a premise note's `text`; a pre-plan point's `note`. ANY of these
   can contain a name, address or phone number that a human or a transcript put there, and the server does not filter
-  them: the CAD does not write the caller's details into these fields itself, but a human or a transcript can. Site
+  them: the CAD does not write the caller's details into these fields itself, but a human or a transcript can. Unit names, the pre-plan `label`, `geo_label` and `town` are not scrubbed. Site
   documents and the radio log are not served by these routes. The snapshot and the lists are the same for every role;
   premise, pre-plan and radio are only in an incident's detail.
 - **Source of truth.** `reads.py` and `serialize.py` define the shapes and `rev` (`rev_of` over the serialized object,
