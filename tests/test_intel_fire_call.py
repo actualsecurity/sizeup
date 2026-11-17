@@ -604,3 +604,39 @@ def test_unit_and_a_number_is_a_police_unit_not_an_apartment(gaz):
     e.feed(row("c1-t2", "That's 40 Example Place, unit 3.", clock(), **TALK))
     [ev] = e.events.open_events()
     assert ev.suppressed == "unplaced" and not any(d.would_push for _p, d in sink.pushes)
+
+
+# -- final check of #670: one rule per phrase (no double count); the narrow exclusion stays in its clause ----------------
+
+def test_wires_burning_alone_is_one_rule_and_stays_under_the_threshold(gaz):
+    e, sink = engine(gaz)
+    assert fire_call_hits(e, "Wires burning on the pole.") == {"pd.appliance_smoking"}       # never both rules
+    e.feed(row("c1-t1", "Wires burning on the pole.", e.clock(), **TALK))
+    assert not any(d.would_push for _p, d in sink.pushes)
+    assert all(ev.what_score < 0.6 for ev in e.events.open_events())
+
+
+@pytest.mark.parametrize("text", [
+    "Respond to 40 Example Place, someone reports an outlet smoking, smell of something burning, notifying the FD.",
+    "Respond to 40 Example Place, they are reporting the wiring is smoking, burning smell, FD notified.",
+    "Respond to 40 Example Place, wires burning in the basement, notifying the FD.",
+])
+def test_outlet_and_wiring_calls_still_push_once(gaz, text):
+    e, sink = engine(gaz)
+    e.feed(row("c1-t1", text, e.clock(), **TALK))
+    assert [p.category for p, d in sink.pushes if d.would_push] == ["fire_call"]
+
+
+@pytest.mark.parametrize("text", [
+    "She was home with the kids, smoking coming from the kitchen, smell of something burning.",
+    "Caller says a man. Smoking from the basement, smell of something burning.",
+])
+def test_the_narrow_person_exclusion_never_crosses_a_comma_or_a_sentence(gaz, text):
+    e, _sink = engine(gaz)
+    assert "pd.fire_complaint" in fire_call_hits(e, text)
+
+
+def test_a_hyphenated_panel_truck_is_no_panel(gaz):
+    e, _sink = engine(gaz)
+    assert fire_call_hits(e, "a panel-truck parked out front is smoking") == set()
+    assert fire_call_hits(e, "the electrical panel - it's sparking") == {"pd.appliance_smoking"}
