@@ -73,7 +73,7 @@ VOICE_SAMPLE = "Engine 60, respond to 1 Main Street, structure fire. Time out 14
 GEO_WINDOW = 0.25        # suggestions this close to the best one are ordered by town first
 PLACE_KINDS = ("address", "intersection", "street", "place", "milemarker", "exit")     # a note's "@" places
 PLACE_FIELDS = ("kind", "label", "sub", "lat", "lon", "source", "category", "detail", "route", "dir", "value",
-                "precision", "score")
+                "precision", "score", "at")
 
 
 @dataclass
@@ -2026,7 +2026,8 @@ class Cad:
 
     def geocode(self, q: str) -> dict:
         """The location box. The gazetteer's readings, plus the place search's highway mile markers and
-        exits (first: the gazetteer has none) and named places it doesn't know (#67)."""
+        exits (first: the gazetteer has none) and named places it doesn't know (#67); an address with the department's
+        names at it: each name first ("12 Example Ave @ Sample Fitness"), then the address (``_places_at``)."""
         q = (q or "").strip()
         if not q or len(q) > 200:
             raise CadError("q: 1 to 200 characters")
@@ -2039,9 +2040,37 @@ class Cad:
         hits = self._place_hits(q, limit=8) if len(q) <= 120 else []
         highway = [self._as_match(h) for h in hits if h["kind"] in ("milemarker", "exit")]
         known = {(m["label"].split(",")[0].strip().lower()) for m in ms}
-        named = [self._as_match(h) for h in hits if h["kind"] == "place" and h["label"].lower() not in known]
+        named = [self._as_match(h) for h in hits if h["kind"] == "place" and not h.get("at")
+                 and h["label"].lower() not in known]
         rest = sorted(ms + named, key=lambda m: -m["confidence"]) if named else ms
-        return {"matches": [self._detailed(m) for m in (highway + rest)[:6]]}
+        return {"matches": [self._detailed(m) for m in self._places_at(highway + rest, 6)]}
+
+    def _places_at(self, ms: list[dict], limit: int) -> list[dict]:
+        """Location suggestions with the department's names at each address right before it (the county's common
+        places, a hand-made name pinned at an address: PlaceIndex.places_at), alphabetical; the rest in their order,
+        limit in all. Each name: a place suggestion as by its name (place, place_address: the address typed, its point),
+        at_address: that address."""
+        ix = self.place_index()
+        if ix is None or not hasattr(ix, "places_at"):
+            return ms[:limit]
+        extra, out = None, []
+        for m in ms:
+            if m.get("kind") == "address" and m.get("house_number") and m.get("street") and len(out) < limit - 1 \
+                    and m.get("lat") is not None:
+                if extra is None:
+                    extra = self.local_places()
+                address = f"{m['house_number']} {m['street']}"
+                have = {((o.get("place") or "").lower(), o["lat"], o["lon"]) for o in out}
+                for h in ix.places_at(address, m["lat"], m["lon"], extra, town=m.get("town") or "",
+                                      town_of=self.lists.town_of)[:limit - 1 - len(out)]:
+                    h["sub"] = self.lists.town_of(h["sub"]) or m.get("town") or ""
+                    pm = dict(self._as_match(h), confidence=m["confidence"], at_address=address)
+                    if (pm["place"].lower(), pm["lat"], pm["lon"]) not in have:
+                        out.append(pm)
+            out.append(m)
+        mine = {(o["place"].lower(), o["lat"], o["lon"]) for o in out if o.get("at_address")}
+        return [o for o in out if o.get("at_address") or not o.get("place")
+                or ((o.get("place") or "").lower(), o["lat"], o["lon"]) not in mine][:limit]
 
     def _crossings(self, q: str) -> dict | None:
         """Two streets typed ("N Main St / Westchester Ave", "n main & west": #213): where they meet in our area,
@@ -2138,6 +2167,17 @@ class Cad:
             if m:
                 m["town"] = L.town_of(m.get("municipality") or "")
                 got[k] = self._detailed(m)
+        # the department's names at that address point (the county's common places): each a choice of its own
+        a, got["at_address"] = got.get("address"), []
+        if a and a.get("house_number") and a.get("street") and ix is not None and hasattr(ix, "places_at"):
+            address = f"{a['house_number']} {a['street']}"
+            for h in ix.places_at(address, a["lat"], a["lon"], self.local_places(), town=a.get("town") or "",
+                                  town_of=L.town_of):
+                h["sub"] = L.town_of(h["sub"]) or a.get("town") or ""
+                got["at_address"].append(self._detailed(dict(self._as_match(h), at_address=address)))
+            p = got.get("place")
+            if p and (p.get("place") or "").lower() in {x["place"].lower() for x in got["at_address"]}:
+                got["place"] = None                   # the nearest named place is one of them: listed there
         return got
 
     # -- the place search: a note's "@", the location box (#67) -------------------------------------
@@ -2163,12 +2203,15 @@ class Cad:
         gazetteer: the same tuple while they don't change."""
         return self.settings.local_addresses()
 
-    def _place_hits(self, q: str, near=None, limit: int = 8) -> list[dict]:
+    def _place_hits(self, q: str, near=None, limit: int = 8, at_address: bool = False) -> list[dict]:
+        """The place search's hits, towns as the CAD names them. at_address: the names at an address typed before it
+        (the place search's own answer only: GET /api/cad/places; the location box puts its own, _places_at)."""
         ix = self.place_index()
         if ix is None:
             return []
         L = self.lists
-        hits = ix.search(q, near=near, limit=limit, extra=self.local_places(), priority=tuple(L.geo_town_order))
+        hits = ix.search(q, near=near, limit=limit, extra=self.local_places(), priority=tuple(L.geo_town_order),
+                         **({"at_address": True, "town_of": L.town_of} if at_address else {}))
         for h in hits:
             h["sub"] = L.town_of(h["sub"])
         return hits
@@ -2216,7 +2259,7 @@ class Cad:
             raise CadError("limit: a number") from None
         if self.place_index() is None:
             return {"places": [], "error": "place search unavailable"}
-        return {"places": [{k: h[k] for k in PLACE_FIELDS if k in h} for h in self._place_hits(q, near, limit)]}
+        return {"places": [{k: h[k] for k in PLACE_FIELDS if k in h} for h in self._place_hits(q, near, limit, at_address=True)]}
 
     # -- the bridge from the monitor ----------------------------------------------------------------
 

@@ -25,13 +25,15 @@ GET  /api/cad/geocode?q=209 westchester   location suggestions, Port Chester / R
                                           each with place, street_address, cross (the streets at each end of its block)
                                           and block (for the map), #204; two streets typed ("N Main St / Westchester
                                           Ave", "n main & west", #213): where they meet in our towns, at most 25 (total,
-                                          more), cross = both streets; a street under two letters: error
+                                          more), cross = both streets; a street under two letters: error; an address
+                                          with the department's names at it: each name first (place, at_address)
 GET  /api/cad/geocode/here?lat=&lon=      the new call's map (#204): the address point, intersection and named place
-                                          nearest a click (each a suggestion as above), and the street under it; read only
+                                          nearest a click (each a suggestion as above), the names at that address
+                                          (at_address: [...]) and the street under it; read only
 GET  /api/cad/places?q=287 eb mm 10&near=lat,lon&iid=&limit=
                                           place search (#67: a note's "@"): {places: [{kind (address | intersection |
                                           street | place | milemarker | exit), label, sub (town), lat, lon, source,
-                                          category?, detail?, route?, dir?, value?, score}]}, our towns first, then
+                                          category?, detail?, route?, dir?, value?, at?, score}]}, our towns first, then
                                           nearest to near (else the event iid's point); read only: viewers too
 GET  /api/cad/runcards                    run cards
 GET  /api/cad/airport                     the Airport map layer (#87): data/khpn_airport.geojson, with "airport" (where the
