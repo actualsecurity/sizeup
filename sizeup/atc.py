@@ -436,19 +436,24 @@ def number_words(words: Sequence[str]) -> tuple[set[int], dict[int, str]]:
     return covered, rest
 
 
-def _on_final(words: Sequence[str], i: int) -> bool:
-    """The distance unit at words[i] is a distance on final or out ("4 mile final", "5 miles out", "2 miles on final")."""
-    return words[i + 1:i + 2] in (["final"], ["out"]) or words[i + 1:i + 3] == ["on", "final"]
+def _on_final(words: Sequence[str], i: int) -> str:
+    """The distance unit at words[i] is a distance on final ("4 mile final", "2 miles on final": 'final') or out ("5
+    miles out": 'out'), else ''."""
+    if words[i + 1:i + 2] == ["final"] or words[i + 1:i + 3] == ["on", "final"]:
+        return "final"
+    return "out" if words[i + 1:i + 2] == ["out"] else ""
 
 
 def _number_words(words: Sequence[str]) -> tuple[set[int], dict[int, str], dict[int, int], set[int]]:
     """number_words; the words read as a distance ("4 mile final"): {index: the unit word's index}; and the number
-    words that may be the end of a callsign before them (_readings): one too big to be a distance on final ("Xyzair
-    1234 mile final", "JetBlue 12 34 mile final"), or one before a unit's own number ("JetBlue 12 34 3 thousand")."""
+    words that may be the end of a callsign before them (_readings), {index: True when that is the reading to use
+    first}: one too big to be a distance on final ("Xyzair 1234 mile final", "JetBlue 12 34 mile final") or out ("Xyzair
+    1234 miles out"), or one before a unit's own number ("JetBlue 12 34 3 thousand"); False: 21 to 99 miles out, a
+    check-in's distance, a callsign's end only when an aircraft around says so ("Xyzair 12 25 miles out": XYZ12)."""
     covered: set[int] = set()
     rest: dict[int, str] = {}
     dist: dict[int, int] = {}
-    join: set[int] = set()
+    join: dict[int, bool] = {}
     n = len(words)
 
     def take(i: int, width: int) -> int:
@@ -560,13 +565,19 @@ def _number_words(words: Sequence[str]) -> tuple[set[int], dict[int, str], dict[
         elif w in _UNITS or w in _ALT_UNITS or (w == "clock" and i > 0 and words[i - 1] == "o"):
             k = i - (2 if w == "clock" else 1)
             got = ""
-            final = w in _DIST_UNITS and _on_final(words, i)
+            final = _on_final(words, i) if w in _DIST_UNITS else ""
             while k >= 0 and _dig(words[k]) and len(got) < 3 and (not got or w in _ALT_UNITS or len(words[k]) == 1):
-                if final and not got and FINAL_MAX_MI < int(_dig(words[k])) < 10_000:
-                    join.add(k)    # no one is 1234 miles out on final: a callsign's number ("Xyzair 1234 mile final")
+                q = int(_dig(words[k]))
+                if final and not got and FINAL_MAX_MI < q < 10_000 and (final == "final" or q >= 100):
+                    join[k] = True     # no one is 1234 miles out: a callsign's number ("Xyzair 1234 mile final")
                     break
+                if final == "out" and not got and FINAL_MAX_MI < q < 100:
+                    join[k] = False    # 25 miles out: a check-in's distance, maybe a callsign's end ("Xyzair 12 25")
+                    covered.add(k)
+                    dist[k] = i
+                    break              # the whole distance: the digits before it are the callsign's ("November 1 2 3 25")
                 if got and len(_dig(words[k])) > 1:
-                    join.add(k)    # a whole number before the unit's own ("34 3 thousand"): maybe a callsign's end
+                    join[k] = True     # a whole number before the unit's own ("34 3 thousand"): maybe a callsign's end
                 got = _dig(words[k]) + got
                 covered.add(k)
                 if w in _DIST_UNITS:
@@ -593,7 +604,7 @@ AFTER_NUMBER_CONF = 0.35   # a tail's end heard right after an ATC number matche
 _PLAIN_TAIL = re.compile(r"[1-9]\d{0,4}[A-Z]{0,2}")      # an N-number's characters after the N (FAA: 1-5, no leading 0)
 
 
-def _readings(words: Sequence[str], i: int, numbers: set[int], dist: dict[int, int], join: set[int], most: int,
+def _readings(words: Sequence[str], i: int, numbers: set[int], dist: dict[int, int], join: dict[int, bool], most: int,
               written: str = "") -> list[tuple[str, int]]:
     """The callsign characters from words[i] (_suffix, at most `most`), the reading to use first, then the others
     (reading). written: the digits of a flight written by its designator ("XYZ1234", one word each): exactly those
@@ -602,16 +613,17 @@ def _readings(words: Sequence[str], i: int, numbers: set[int], dist: dict[int, i
     stays within `most` (JBU1234; "Xyzair 123 25 miles out" stays XYZ123), the reading without it the other. Else, when
     the callsign runs into a distance, each further single-digit word given to it ("Xyzair 12 4 mile final": XYZ124
     too) is another reading, for an aircraft around to pick, never the first."""
-    stop = numbers | {k for k in join if k > i}
+    stop = numbers | {k for k, first in join.items() if first and k > i}
     suf, j = _suffix(words, i, stop=stop, most=most)
     if written:
         whole, e = _suffix(words, i, limit=len(written), stop=stop - set(range(i, i + len(written))))
         if whole == written and not (suf.startswith(whole) and suf[len(whole):].isalpha()):
             return [(whole, e)]
         return [(suf, j)]
-    if suf and j in join and suf[-1].isdigit() and len(suf) + len(_dig(words[j])) <= most:
+    joined = suf and j in join and suf[-1].isdigit() and len(suf) + len(_dig(words[j])) <= most
+    if joined and join[j]:
         return [(suf + _dig(words[j]), j + 1), (suf, j)]
-    out = [(suf, j)]
+    out = [(suf, j)] + ([(suf + _dig(words[j]), j + 1)] if joined else [])
     if suf and j in dist:
         k = j
         while k < dist[j] and len(_dig(words[k])) == 1 and len(suf) < most:

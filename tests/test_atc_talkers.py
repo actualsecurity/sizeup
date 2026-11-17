@@ -256,7 +256,13 @@ def heard_as(text, ix=XIX):
     ("Xyzair 123, 25 miles out", "XYZ123"),
     ("Xyzair 1 2 3 25 miles out", "XYZ123"),
     ("Xyzair 123 25 mile final", "XYZ123"),
-    ("Xyzair 12 25 miles out", "XYZ1225"),                     # within a flight number's 4: joined (XYZ12 the other)
+    ("Xyzair 12 25 mile final", "XYZ1225"),                    # within a flight number's 4: joined (XYZ12 the other)
+    # 21 to 99 miles out: a check-in's distance (XYZ1225 only an aircraft around can make it)
+    ("Xyzair 12 25 miles out", "XYZ12"),
+    ("Xyzair 12 30 miles out", "XYZ12"),
+    ("Xyzair 12 21 miles out", "XYZ12"),
+    ("Xyzair 1 25 miles out", "XYZ1"),
+    ("Xyzair 1234 miles out", "XYZ1234"),                       # a 3-4 digit number: no distance out, the callsign's
     # a whole number before the distance or the unit's own number: the flight number's end ("JetBlue 12 34")
     ("Xyzair 12 34 mile final", "XYZ1234"),
     ("Xyzair 12 34 3 thousand", "XYZ1234"),
@@ -298,7 +304,8 @@ def test_no_number_word_on_final_is_over_twenty_miles():
     def dist(text):
         words = atc.words_of(text)
         return [words[k] for k in sorted(atc.number_words(words)[0])]
-    assert dist("1234 mile final") == [] and dist("34 miles out") == [] and dist("25 miles on final") == []
+    assert dist("1234 mile final") == [] and dist("25 miles on final") == [] and dist("1234 miles out") == []
+    assert dist("34 miles out") == ["34"] and dist("99 miles out") == ["99"]     # out: a check-in's distance
     assert dist("20 miles out") == ["20"] and dist("1 8 mile final") == ["1", "8"] and dist("twelve mile final") == ["twelve"]
     assert dist("2 1 miles on final") == ["2", "1"]                  # digits said one by one: as before
     assert dist("traffic 1 2 3 miles south") == ["1", "2", "3"] and dist("traffic 25 miles south") == ["25"]
@@ -385,6 +392,34 @@ def test_a_flight_number_said_in_groups_then_a_comma():
     # the talker keeps the comma (clauses); the pre-alert's raw words never did, before #650 too: not changed here
     r = rec(atc_normalize("JetBlue 12 34, 3 thousand"), [JBU1234])["aircraft"]
     assert (r["callsign"], r["status"]) == ("JBU1234", "confirmed")
+
+
+X1225 = plane("x1225", "XYZ1225")
+
+
+@pytest.mark.parametrize("text, planes, known, callsign", [
+    ("Xyzair 12 25 miles out", [], [], "XYZ12"),
+    ("Xyzair 12 25 miles out", [X12, X1225], [], "XYZ12"),           # the distance read first
+    ("Xyzair 12 25 miles out", [X1225], [], "XYZ1225"),              # ... unless only XYZ1225 is around
+    ("Xyzair 12 25 miles out", [], ["XYZ1225"], "XYZ1225"),          # ... or just talked
+    ("Xyzair 12 25 miles out", [X12], ["XYZ1225"], "XYZ12"),
+    ("Xyzair 12 25 mile final", [X12, X1225], [], "XYZ1225"),        # on final: no one is 25 miles out on final
+    ("Xyzair 12 25 mile final", [X12], [], "XYZ12"),
+])
+def test_miles_out_is_a_distance_unless_an_aircraft_says_otherwise(text, planes, known, callsign):
+    m, = atc.find_mentions(T.clauses(text), XIX)
+    assert atc.reading(m, planes, known).text == callsign
+    if planes:
+        a = atc.attribute(text, XIX, planes)
+        assert (a.callsign, a.confidence) == (callsign, 1.0)
+        r = rec_x(text, planes)["aircraft"]
+        assert (r["callsign"], r["status"]) == (callsign, "confirmed")
+
+
+def test_a_tail_before_a_check_in_distance():
+    m, = atc.find_mentions("November 1 2 3 25 miles out", XIX)
+    assert (m.text, [a[0] for a in m.alts]) == ("N123", ["12325"])
+    assert atc.attribute("November 1 2 3 25 miles out", XIX, [plane("n1", "N123", "N123")]).confidence == 1.0
 
 
 def test_adsb_ranks_above_a_recent_talker():

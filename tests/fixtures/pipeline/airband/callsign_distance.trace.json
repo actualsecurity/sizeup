@@ -436,8 +436,61 @@
   },
   {
    "step": {
+    "do": "picture",
+    "t": 350
+   }
+  },
+  {
+   "step": {
+    "do": "air",
+    "t": 360,
+    "id": "twr-7"
+   },
+   "decisions": [
+    {
+     "watch": "atc",
+     "id": "twr-7",
+     "ch": "HPN Tower",
+     "fed": "Westchester Tower, JetBlue 12 25 miles out, with you for runway 34",
+     "hits": [],
+     "row": null
+    },
+    {
+     "watch": "talkers",
+     "id": "twr-7",
+     "record": {
+      "role": "aircraft",
+      "talker": {
+       "callsign": "JBU12",
+       "hex": "b00012",
+       "status": "confirmed"
+      },
+      "aircraft": {
+       "callsign": "JBU12",
+       "hex": "b00012",
+       "status": "confirmed"
+      },
+      "addressed": {
+       "callsign": "TWR",
+       "status": "heard"
+      },
+      "exchange": {
+       "subject": "JBU12",
+       "hex": "b00012"
+      }
+     }
+    },
+    {
+     "watch": "airport_watch",
+     "id": "twr-7",
+     "row": null
+    }
+   ]
+  },
+  {
+   "step": {
     "do": "read",
-    "t": 320
+    "t": 380
    }
   }
  ]
