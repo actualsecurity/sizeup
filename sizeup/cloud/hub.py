@@ -2185,6 +2185,9 @@ class HubApp(App):
         threading.Thread(target=self._aws_watch, name="aws-sweep", daemon=True).start()
         self.sttpool.start()                      # the GPU workers' queue (#639): empty, nothing written
         self.catchup.start()                      # its first look minutes from now: no writes at start
+        # radio pre-alerts (sizeup/intel): the "intel" thread, as App.start() starts it. Without it every transcript
+        # handed to the engine waited in its queue unread: no rule was ever tried on the hub
+        self.cad.intel.start()
         self.perf.start()
         self._started = True                      # the phone pre-alert: the hub's own subscription
         self.prealert_sync()
@@ -2202,6 +2205,7 @@ class HubApp(App):
         from sizeup.timing import Phases
         t = Phases("stop")                             # the drain's share of a deploy (#264): where it goes
         self._stopping.set()
+        self.cad.intel.stop()                          # (a flag: the thread ends at its next wait)
         left = self.sttpool.stop(fall_back=False)   # (what a GPU worker had stays "pending": the next start routes it)
         if left:
             self.hub.log(f"stt pool: stopping with {left} clip(s) still out: the next start sends them the AWS way")
