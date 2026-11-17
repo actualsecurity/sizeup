@@ -25,7 +25,8 @@ standalone number of 4+ digits): a "radio 41228" in `status`/`tones` events, rad
 remarks is NOT masked (they are sent as written). Not scrubbed at all: unit names, pre-plan `label`, `geo_label`,
 `town`. scrub() reads at most SCRUB_MAX_CHARS characters of a text (the rest is cut and the output ends with an
 ellipsis) and normalises compatibility forms of "@" and "<" (NFKC, zero-width and direction marks dropped)
-first. Residual: an email written to defeat a pattern ("a%40x.org", "a&#64;x.org", "a (at) x.org") and a radio ID written
+first. Residual: an email written to defeat a pattern ("a%40x.org", "a&#64;x.org", "a (at) x.org") and a radio ID
+written
 with letters or split into groups the pattern does not read.
 Ids are strings (docs/mobile-api.md section 3.2), times unix seconds."""
 from __future__ import annotations
