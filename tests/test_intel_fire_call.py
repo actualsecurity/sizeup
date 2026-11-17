@@ -337,3 +337,28 @@ def test_stop_ends_the_thread_within_a_second():
     t0 = time.monotonic()
     e.stop()
     assert time.monotonic() - t0 < 1.5 and not e._thread.is_alive()
+
+
+def test_no_intel_topic_holds_every_fire_call_push(tmp_path, gaz):
+    """#641: no intel topic of its own, nothing is pushed (never the alerts topic); a placed call says "unsent", a held
+    one stays "unplaced"."""
+    from tests.test_cad import make_cad
+    from tests.test_notify import FakeNtfy
+    ntfy = FakeNtfy()
+    try:
+        cad = make_cad(tmp_path)
+        p = notify.Pushes(ntfy.url, "pcfd-xmpl-alerts", "pcfd-xmpl-status", log=lambda m: None)
+        cad.intel.notifier, cad.intel.locate = p.notifier(notify.INTEL), place_mod.Locator(gaz)
+        base = {"start": cad.clock(), "end": cad.clock() + 17, "source": "MRRS PD", "talkgroup": 9211, "system": "mrrs",
+                "source_key": KEY, "service": "police", "tier": "alert", "unit": "", "status": "done",
+                "model": "aws-transcribe"}
+        cad.comms.record({**base, "id": "c1-t1", "text": CALL})
+        cad.comms.record({**base, "id": "c3-t1", "source_key": "p25:mrrs:9212", "text": UNPLACED})
+        cad.intel.drain()
+        cad.intel.notifier.flush(2)
+        assert ntfy.got == []
+        by = {e.source_key: e for e in cad.intel.events.open_events()}
+        assert by[KEY].category == "fire_call" and by[KEY].suppressed == "unsent" and by[KEY].label_full.startswith("40 ")
+        assert by["p25:mrrs:9212"].suppressed == "unplaced"
+    finally:
+        ntfy.close()
