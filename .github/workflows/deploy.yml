@@ -15,10 +15,15 @@ name: deploy
 # keeps only the newest waiting run and cancels an older waiting one, which is fine because of what comes next). The
 # first job, pick, chooses what to deploy when the run actually starts: the NEWEST commit on main (from the one that
 # started this run up to main's tip) whose test push run passed, or nothing when that commit or a newer one is already
-# on ECS (tools/deploy_check.py pick). So three quick merges deploy the first and then the third, never an older commit
-# after a newer one, and a merge whose run was cancelled from the queue still reaches ECS with a later run. The deploy
-# job is named "deploy <sha>": that is how the next pick knows what is deployed. By hand (workflow_dispatch): deploys
-# exactly the chosen ref (a rollback too), no pick.
+# deployed (tools/deploy_check.py pick, GitHub reads only). So three quick merges deploy the first and then the third,
+# and a merge whose run was cancelled from the queue still reaches ECS with a later run. The deploy job is named
+# "deploy <sha>": that is how the next pick knows what was deployed. Then, with the AWS credentials, the guard reads
+# what ECS actually runs and deploys only that commit or a descendant of it (git ancestry): never an older commit over
+# a newer one, whatever the run history says (a re-run of an old run, for one). Fails closed.
+# By hand (workflow_dispatch): deploys exactly the chosen ref, no pick and no guard: that is the rollback.
+# Pause: the repository variable DEPLOY_PAUSED = true (Settings > Secrets and variables > Actions > Variables) skips
+# every automatic deploy, e.g. after a rollback; a deploy by hand still works. Delete it (or set false) to resume: the
+# next merge that passes deploys the newest tested commit.
 on:
   workflow_run:
     workflows: [test]
@@ -30,15 +35,16 @@ permissions:
   id-token: write
   contents: read
 
-# Only runs that may deploy share the queue: a run for a failed or cancelled test run (skipped below) gets a group of
-# its own, so it never pushes a waiting deploy out of the queue.
+# Only runs that may deploy share the queue: a run for a failed or cancelled test run, or one while deploys are paused
+# (skipped below), gets a group of its own, so it never pushes a waiting deploy out of the queue. Automatic deploys come
+# only from a push run on main.
 concurrency:
-  group: ${{ (github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')) && 'deploy' || format('deploy-skipped-{0}', github.run_id) }}
+  group: ${{ (github.event_name == 'workflow_dispatch' || (vars.DEPLOY_PAUSED != 'true' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')) && 'deploy' || format('deploy-skipped-{0}', github.run_id) }}
   cancel-in-progress: false
 
 jobs:
   pick:
-    if: github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')
+    if: github.event_name == 'workflow_dispatch' || (vars.DEPLOY_PAUSED != 'true' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -70,7 +76,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 50
     permissions:
-      actions: read     # the re-run guard below
       id-token: write
       contents: read
     env:
@@ -79,16 +84,18 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ env.SHA }}
-      # A re-run of an old run's failed deploy job keeps that run's pick: it must not put an older commit back on ECS.
-      - name: Nothing newer is deployed
-        if: github.event_name != 'workflow_dispatch'
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: python3 tools/deploy_check.py pick --guard --repo "$GITHUB_REPOSITORY" --sha "$SHA" --run-id "$GITHUB_RUN_ID"
       - uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ vars.AWS_DEPLOY_ROLE }}
           aws-region: ${{ vars.AWS_REGION }}
+      # What ECS runs (the service's PRIMARY deployment → task definition → the hub image's sha tag; ecs:DescribeServices
+      # and ecs:DescribeTaskDefinition, sizeup-aws/2-iam.sh): this commit must be it or a descendant of it, by git
+      # ancestry (the GitHub compare API). Fails closed when ECS or GitHub can't be read. Not for a deploy by hand.
+      - name: Nothing newer is deployed
+        if: github.event_name != 'workflow_dispatch'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 tools/deploy_check.py pick --guard --repo "$GITHUB_REPOSITORY" --sha "$SHA" --cluster sizeup-hub --service sizeup-hub
       # Every SSM parameter the task definition names must exist before anything is built or ECS touched: a task whose
       # secret is missing never starts, and the service would roll to it. Names only (ssm:DescribeParameters: metadata,
       # never a value; sizeup-aws/23-deploy-ssm-describe.sh grants it).

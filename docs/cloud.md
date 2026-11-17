@@ -575,7 +575,7 @@ First it picks the commit: the newest one on main that passed `test` ([Back-to-b
 
 | Step | What | Fails when |
 |---|---|---|
-| 0. Pick | `tools/deploy_check.py pick`: the newest commit on main that passed `test`, or nothing if it (or a newer one) is already on ECS; the deploy job is named `deploy <sha>`. Then `pick --guard`: nothing newer is on ECS (a re-run of an old run) | GitHub can't be asked: nothing is deployed, the next deploy catches up. The guard: a newer commit is already deployed |
+| 0. Pick and guard | `tools/deploy_check.py pick`: the newest commit on main that passed `test`, or nothing if it (or a newer one) was the last deploy; the deploy job is named `deploy <sha>`. Then, with the AWS credentials, `pick --guard`: what ECS runs (the PRIMARY deployment's hub image tag) must be this commit or an ancestor of it | GitHub or ECS can't be read, or a commit is unknown: nothing is deployed (red). The guard: ECS runs something newer, or a commit off main |
 | 1. SSM guard (#469) | `tools/taskdef_params.py` lists every SSM parameter `deploy/aws/taskdef.json` names (each a full ARN in the deploy's region and account); `aws ssm describe-parameters` must find them all. Names only, never a value (`ssm:DescribeParameters`: sizeup-aws `23-deploy-ssm-describe.sh`) | one is missing ("Missing SSM parameter"), or AWS couldn't be asked ("Could not check SSM"): nothing is built or deployed. A task whose secret is missing never starts |
 | 2. Build and roll | the arm64 image to ECR with `SIZEUP_BUILD` = the full sha, both containers rendered, the service updated, waiting for stability | ECS's circuit breaker rolls back |
 | 3. Replicas | `tools/deploy_check.py replicas --build <sha> --timeout 600` ([Replica checks](#replica-checks)) | a replica is corrupt or not verifiable, or nothing was verified in 10 min |
@@ -595,13 +595,22 @@ PRs can be merged one after another without waiting for each deploy (about 9 min
   it never pushes a waiting deploy out.
 * **A deploy deploys the newest tested commit, when it starts.** Its first job, `pick`, takes main from the commit
   that started it up to the tip and chooses the newest commit whose `test` push run passed (`tools/deploy_check.py
-  pick`, GitHub API reads only). Nothing, when that commit or a newer one is already on ECS: the last deploy run whose
-  `deploy <sha>` job got past "Roll the ECS service" (even if its replica or station check failed after). So an older
-  commit is never deployed after a newer one, and no commit twice in a row.
-* **Re-running an old deploy** ("Re-run failed jobs") keeps that run's pick: its first step, `pick --guard`, stops
-  it if something newer is on ECS. Re-run all jobs to pick again.
-* **By hand** (Actions → deploy → Run workflow): deploys exactly that ref, no pick and no guard. This is how to roll
-  back; the next merge that passes deploys main again.
+  pick`, GitHub API reads only). Nothing, when that commit or a newer one was the last deploy: the last deploy run whose
+  `deploy <sha>` job got past "Roll the ECS service" (even if its replica or station check failed after). Automatic
+  deploys come only from a push run on main.
+* **The guard reads ECS, not the run history.** Before anything is built, `pick --guard` reads what ECS runs (the
+  service's PRIMARY deployment → task definition → the hub image's sha tag) and lets the deploy go on only if the
+  picked commit is that one or a descendant of it, by git ancestry (GitHub's compare API). So an older commit never
+  goes over a newer one, whatever order runs, re-runs or attempts happen in ("Re-run failed jobs" on an old run keeps
+  its old pick: the guard stops it; re-run all jobs to pick again). It fails closed: if ECS or GitHub can't be read,
+  or the image isn't tagged with a sha, nothing is deployed and the run is red.
+* **By hand** (Actions → deploy → Run workflow): deploys exactly that ref, no pick and no guard. This is the rollback.
+  The next merge that passes would deploy main again, so pause first.
+* **Pause after a rollback.** The repository variable `DEPLOY_PAUSED` = `true` (Settings → Secrets and variables →
+  Actions → Variables) skips every automatic deploy; a deploy by hand still works. Delete it (or set `false`) to
+  resume: nothing deploys at once, the next merge that passes deploys the newest tested commit (or run deploy by hand
+  on main). After a by-hand deploy of a commit that isn't on main, the guard refuses automatic deploys (not a
+  descendant) until main is deployed by hand once.
 
 Three merges a minute apart: the first deploys; the second's run waits; the third's run replaces it in the queue and,
 when the first is done, deploys the third. If the third's tests are still running then, the second's run deploys the

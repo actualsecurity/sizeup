@@ -26,17 +26,20 @@ file's check since then is failing (corrupt, or not verifiable), or nothing was 
 results in the record are waited past, never judged. It prints SQLite's check lines and the
 times, never anything of the files' contents.
 
-    python3 tools/deploy_check.py pick --repo <owner/name> --sha <the tested commit> [--run-id <this run>] [--guard]
+    python3 tools/deploy_check.py pick --repo <owner/name> --sha <the tested commit> [--run-id <this run>]
+    python3 tools/deploy_check.py pick --guard --repo <owner/name> --sha <the commit about to be deployed>
 
 Before anything is built: WHICH commit to deploy, so PRs can be merged back to back (docs/cloud.md "Back-to-back
 merges"). The deploy run was started by one `test` run on main, but a newer commit on main may have passed its tests
-too (main's test runs are never cancelled, so they finish in any order). It picks the newest commit on main, from this
-one up to main's tip, that has a successful `test` push run; and nothing when that commit, or a newer one, is what the
-last deploy put on ECS (the newest deploy run whose "deploy <sha>" job got past "Roll the ECS service"). So an older
-commit is never deployed after a newer one, and no commit twice in a row. --guard (the deploy job's first step, for
-a re-run of an old run): exit 1 when a commit newer than --sha is already on ECS. GitHub API reads only (GITHUB_TOKEN
-or GH_TOKEN: contents and actions read). Writes `sha=<sha or empty>` to $GITHUB_OUTPUT when set. Exit 1 when GitHub
-can't be asked: nothing is deployed (the next deploy catches up).
+too (main's test runs are never cancelled, so they finish in any order). pick chooses the newest commit on main, from
+this one up to main's tip, that has a successful `test` push run; and nothing when that commit, or a newer one, is what
+the last deploy run rolled out (its "deploy <sha>" job got past "Roll the ECS service"). GitHub API reads only
+(GITHUB_TOKEN or GH_TOKEN: contents and actions read); writes `sha=<sha or empty>` to $GITHUB_OUTPUT when set.
+--guard (the deploy job, after the AWS credentials): reads what ECS runs (the service's PRIMARY deployment → task
+definition → the hub image's sha tag; ecs:DescribeServices and ecs:DescribeTaskDefinition, which the deploy role has)
+and exits 1 unless --sha is that commit or a descendant of it, by git ancestry: nothing older ever goes over what runs,
+whatever the run history says (a re-run of an old run, for one). Both fail closed (exit 1, nothing deployed) when
+GitHub or AWS can't be asked, or a commit is unknown.
 """
 
 from __future__ import annotations
@@ -269,44 +272,71 @@ class GitHubError(Exception):
     pass
 
 
-def github_get(token: str, timeout: float = 20.0, tries: int = 3) -> Callable[[str], dict]:
-    """GET api.github.com/<path> → JSON; 404 → {} (an unknown commit); else, after `tries`, GitHubError."""
+def github_get(token: str, timeout: float = 20.0, tries: int = 5,
+               sleep: Callable[[float], None] = time.sleep) -> Callable[[str], dict]:
+    """GET api.github.com/<path> → JSON object. Every failure raises GitHubError, a 404 too (an unknown commit or run
+    is never "nothing there": pick and the guard fail closed). A 5xx, a 429 or a 403 rate limit (primary or
+    secondary) is retried with backoff (Retry-After when given), up to `tries` times."""
     def get(path: str) -> dict:
         req = urllib.request.Request(f"https://api.github.com/{path}", headers={
             "Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28",
             "User-Agent": "sizeup-deploy-check", **({"Authorization": f"Bearer {token}"} if token else {})})
         last = ""
         for i in range(tries):
+            wait = 2.0 * (i + 1)
             try:
                 with urllib.request.urlopen(req, timeout=timeout) as r:
                     d = json.loads(r.read())
-                    return d if isinstance(d, dict) else {}
+                if not isinstance(d, dict):
+                    raise GitHubError(f"not a JSON object for {path}")
+                return d
             except urllib.error.HTTPError as e:
-                if e.code == 404:
-                    return {}
                 last = f"HTTP {e.code} for {path}"
-                if e.code < 500 and e.code != 429:
-                    break
+                try:
+                    body = e.read(4096).decode("utf-8", "replace").lower()
+                except Exception:  # noqa: BLE001 - only to tell a rate limit from a refusal
+                    body = ""
+                hdr = e.headers or {}
+                limited = e.code == 429 or (e.code == 403 and bool("rate limit" in body or hdr.get("retry-after")
+                                                                     or hdr.get("x-ratelimit-remaining") == "0"))
+                if e.code < 500 and not limited:
+                    break                                 # 401, 403 (no permission), 404, 422: final
+                if limited:
+                    last += " (rate limited)"
+                    try:
+                        wait = float(hdr.get("retry-after") or 0) or min(60.0, 10.0 * (i + 1))
+                    except ValueError:
+                        wait = min(60.0, 10.0 * (i + 1))
             except (urllib.error.URLError, OSError, ValueError) as e:
                 last = f"{getattr(e, 'reason', e)} for {path}"
-            time.sleep(2 * (i + 1))
+            if i < tries - 1:
+                sleep(min(wait, 120.0))
         raise GitHubError(last)
     return get
 
 
 def compare(get: Callable[[str], dict], repo: str, base: str, head: str) -> str:
-    """GitHub's compare status of head against base: "identical", "ahead" (head is a descendant of base), "behind",
-    "diverged", or "" (unknown commit)."""
-    return get(f"repos/{repo}/compare/{base}...{head}?per_page=1").get("status") or ""
+    """GitHub's compare status of head against base: "identical", "ahead" (head is a descendant of base), "behind" or
+    "diverged". This ANCESTRY answer is what keeps an older commit from going over a newer one; the order compare lists
+    commits in (commit date) is only used to choose among commits already known to be on main. No status (an unknown
+    commit): GitHubError, so the caller fails closed."""
+    status = get(f"repos/{repo}/compare/{base}...{head}?per_page=1").get("status") or ""
+    if status not in ("identical", "ahead", "behind", "diverged"):
+        raise GitHubError(f"no compare status for {base[:7]}...{head[:7]}")
+    return status
 
 
 def newer_on(get: Callable[[str], dict], repo: str, sha: str, tip: str) -> list[str] | None:
-    """The commits after `sha` up to `tip`, oldest first; None when `sha` isn't `tip` or an ancestor of it."""
+    """The commits after `sha` up to `tip` (compare's order: commit date, oldest first; each one a descendant of `sha`
+    and an ancestor of `tip`), or None when `sha` isn't `tip` or an ancestor of it. No status: GitHubError."""
     out: list[str] = []
     for page in range(1, 50):
         c = get(f"repos/{repo}/compare/{sha}...{tip}?per_page=100&page={page}")
-        if c.get("status") not in ("ahead", "identical"):
+        status = c.get("status") or ""
+        if status in ("behind", "diverged"):
             return None
+        if status not in ("ahead", "identical"):
+            raise GitHubError(f"no compare status for {sha[:7]}...{tip[:7]}")
         got = [x["sha"] for x in c.get("commits") or []]
         out += got
         if not got or len(out) >= int(c.get("total_commits") or 0):
@@ -317,8 +347,9 @@ def newer_on(get: Callable[[str], dict], repo: str, sha: str, tip: str) -> list[
 def last_deployed(get: Callable[[str], dict], repo: str, workflow: str = "deploy.yml", skip_run: str = "",
                   runs: int = 30) -> tuple[str, str]:
     """(sha, run id) of the newest deploy run whose "deploy <sha>" job rolled the ECS service (whatever its later checks
-    said: that is what ECS runs), or ("", ""). Deploy runs share one concurrency group, so they run in the order they
-    were created, and a re-run of an old one is refused by --guard when something newer is deployed."""
+    said), or ("", ""). Only pick's "already deployed" shortcut uses it, and it assumes runs execute in the order they
+    were created (one concurrency group), which a re-run of an old run or attempt breaks. So the deploy job's guard
+    never trusts it: it reads what ECS runs (ecs_running) and checks ancestry."""
     listing = get(f"repos/{repo}/actions/workflows/{workflow}/runs?status=completed&per_page={runs}")
     for run in listing.get("workflow_runs") or []:
         if str(run.get("id")) == str(skip_run) or run.get("conclusion") == "skipped":   # (skipped: no job ran)
@@ -332,7 +363,8 @@ def last_deployed(get: Callable[[str], dict], repo: str, workflow: str = "deploy
 
 def pick(get: Callable[[str], dict], repo: str, sha: str, branch: str = "main", tests: str = "test.yml",
          deploys: str = "deploy.yml", run_id: str = "") -> tuple[str, str]:
-    """(the commit to deploy, or "" for none; why). `sha`: the commit whose `test` run just passed on `branch`."""
+    """(the commit to deploy, or "" for none; why). `sha`: the commit whose `test` run just passed on `branch`.
+    GitHub reads only; the deploy job's guard then checks the choice against what ECS runs."""
     tip = (get(f"repos/{repo}/branches/{branch}").get("commit") or {}).get("sha") or ""
     if not SHA40.fullmatch(tip):
         raise GitHubError(f"no tip for {branch}")
@@ -341,6 +373,8 @@ def pick(get: Callable[[str], dict], repo: str, sha: str, branch: str = "main", 
         return "", f"{sha[:7]} is not on {branch} (tip {tip[:7]}): nothing to deploy"
     passed = {r.get("head_sha") for r in get(f"repos/{repo}/actions/workflows/{tests}/runs?branch={branch}&event=push"
                                              f"&status=success&per_page=100").get("workflow_runs") or []}
+    # The push runs on main are for its first-parent merge commits, each a descendant of the one before, and compare
+    # lists them in that order: the last one that passed is the newest. (The guard re-checks ancestry against ECS.)
     target = next(s for s in reversed([sha, *after]) if s == sha or s in passed)
     why = f"{target[:7]}: the newest commit on {branch} that passed `test`" + (
         f" ({after.index(target) + 1} commit(s) after {sha[:7]}, which started this run)" if target != sha else "")
@@ -352,13 +386,56 @@ def pick(get: Callable[[str], dict], repo: str, sha: str, branch: str = "main", 
     return target, why
 
 
-def guard(get: Callable[[str], dict], repo: str, sha: str, deploys: str = "deploy.yml", run_id: str = "") -> tuple[bool, str]:
-    """(False, why) when a commit newer than `sha` is already deployed: a re-run of an old deploy run never rolls back."""
-    done, run = last_deployed(get, repo, deploys, run_id)
-    if done and done != sha and compare(get, repo, sha, done) == "ahead":
-        return False, (f"{done[:7]}, newer than {sha[:7]}, is already deployed (deploy run {run}): this run won't roll "
-                       "back (re-run the whole workflow to pick the newest commit, or run deploy by hand on a ref)")
-    return True, f"nothing newer than {sha[:7]} is deployed" + (f" (last: {done[:7]}, run {run})" if done else "")
+class EcsError(Exception):
+    pass
+
+
+def _aws_json(args: list[str], timeout: float = 60.0) -> dict:
+    try:
+        r = subprocess.run(["aws", *args, "--output", "json"], capture_output=True, text=True, timeout=timeout)
+    except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+        raise EcsError(f"aws {args[0]} {args[1]}: {type(e).__name__}") from None
+    if r.returncode != 0:
+        tail = (r.stderr or r.stdout).strip().splitlines()
+        raise EcsError(f"aws {args[0]} {args[1]}: {tail[-1][:200] if tail else 'failed'}")
+    try:
+        d = json.loads(r.stdout)
+    except ValueError:
+        raise EcsError(f"aws {args[0]} {args[1]}: not JSON") from None
+    return d if isinstance(d, dict) else {}
+
+
+def ecs_running(cluster: str, service: str, container: str = "hub",
+                aws: Callable[[list[str]], dict] = _aws_json) -> str | None:
+    """The git sha ECS runs (or is rolling to): the service's PRIMARY deployment → its task definition → `container`'s
+    image tag. None: no active service (nothing runs yet). EcsError when it can't be read or the tag isn't a full sha."""
+    d = aws(["ecs", "describe-services", "--cluster", cluster, "--services", service])
+    svc = [x for x in d.get("services") or [] if x.get("status") == "ACTIVE"]
+    if not svc:
+        return None
+    td = next((x.get("taskDefinition") for x in svc[0].get("deployments") or [] if x.get("status") == "PRIMARY"), "")
+    if not td:
+        raise EcsError(f"{service}: no PRIMARY deployment")
+    t = aws(["ecs", "describe-task-definition", "--task-definition", td]).get("taskDefinition") or {}
+    image = next((c.get("image") or "" for c in t.get("containerDefinitions") or [] if c.get("name") == container), "")
+    tag = image.rsplit("/", 1)[-1].partition(":")[2]
+    if not SHA40.fullmatch(tag):
+        raise EcsError(f"{td.rsplit('/', 1)[-1]}: the {container} image is {image or 'missing'}, not tagged with a full sha")
+    return tag
+
+
+def guard(get: Callable[[str], dict], repo: str, sha: str, running: str | None) -> tuple[bool, str]:
+    """(ok, why): `sha` may be deployed only if it is what ECS runs (`running`) or a descendant of it, by git ancestry.
+    A re-run of an old run, or a pick made from stale run history, never rolls ECS back."""
+    if running is None:
+        return True, "no ECS service runs yet"
+    if running == sha:
+        return True, f"ECS runs {sha[:7]} already: deploying it again"
+    status = compare(get, repo, running, sha)
+    if status == "ahead":
+        return True, f"{sha[:7]} is newer than {running[:7]}, what ECS runs"
+    return False, (f"ECS runs {running[:7]}; {sha[:7]} is {'older than' if status == 'behind' else 'not a descendant of'} "
+                   "it: not deployed (a rollback is a deploy by hand: Actions > deploy > Run workflow)")
 
 
 def pick_main(argv: list[str]) -> int:
@@ -367,18 +444,23 @@ def pick_main(argv: list[str]) -> int:
     ap.add_argument("--sha", required=True, help="the commit whose test run started this deploy (with --guard: the one about to be deployed)")
     ap.add_argument("--branch", default="main")
     ap.add_argument("--run-id", default="", help="this deploy run (never counted as the last deploy)")
-    ap.add_argument("--guard", action="store_true", help="only check that nothing newer than --sha is deployed")
+    ap.add_argument("--guard", action="store_true", help="only check --sha against what ECS runs (needs AWS credentials)")
+    ap.add_argument("--cluster", default="sizeup-hub")
+    ap.add_argument("--service", default="sizeup-hub")
     a = ap.parse_args(argv)
     if not SHA40.fullmatch(a.sha):
         print("pick: --sha must be a full 40-digit commit", file=sys.stderr)
         return 2
     gh = os.environ.get("GITHUB_ACTIONS") == "true"
     get = github_get((os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN") or "").strip())
+    if a.guard:
+        try:
+            ok, why = guard(get, a.repo, a.sha, ecs_running(a.cluster, a.service))
+        except (EcsError, GitHubError, KeyError, TypeError) as e:
+            ok, why = False, f"could not check what ECS runs: {e}; nothing was deployed"
+        print(why if ok else (f"::error title=Not deployed::{why}" if gh else f"refused: {why}"))
+        return 0 if ok else 1
     try:
-        if a.guard:
-            ok, why = guard(get, a.repo, a.sha, run_id=a.run_id)
-            print(why if ok else (f"::error title=A newer commit is deployed::{why}" if gh else f"refused: {why}"))
-            return 0 if ok else 1
         sha, why = pick(get, a.repo, a.sha, a.branch, run_id=a.run_id)
     except (GitHubError, KeyError, TypeError, ValueError) as e:
         print(f"::error title=Could not ask GitHub::{e}; nothing was deployed (the next deploy catches up)" if gh

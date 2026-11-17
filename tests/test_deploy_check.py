@@ -161,8 +161,9 @@ class FakeGitHub:
     """The GitHub API as pick reads it: main's first-parent chain (oldest first), the commits whose `test` push run
     passed, and the deploy runs, newest first: (run id, conclusion, the sha its "deploy <sha>" job named, rolled)."""
 
-    def __init__(self, chain, passed=(), deploys=()):
+    def __init__(self, chain, passed=(), deploys=(), side=()):
         self.chain, self.passed, self.deploys, self.paths = list(chain), set(passed), list(deploys), []
+        self.side = set(side)                                              # commits off main (a branch's): diverged
 
     def __call__(self, path):
         from urllib.parse import parse_qs, urlsplit
@@ -174,8 +175,10 @@ class FakeGitHub:
             return {"commit": {"sha": self.chain[-1]}}
         if parts[3] == "compare":
             a, b = parts[4].split("...")
+            if {a, b} & self.side:
+                return {"status": "diverged", "total_commits": 1, "commits": [{"sha": b}]}
             if a not in self.chain or b not in self.chain:
-                return {}                                                  # 404: an unknown commit
+                raise dc.GitHubError(f"HTTP 404 for {path}")               # github_get: an unknown commit
             ia, ib = self.chain.index(a), self.chain.index(b)
             status = "identical" if ia == ib else "ahead" if ib > ia else "behind"
             between = self.chain[ia + 1:ib + 1] if ib > ia else []
@@ -236,10 +239,16 @@ def test_the_last_deploy_is_what_ecs_runs_whatever_the_checks_after_said():
     assert dc.last_deployed(gh, REPO) == ("", "") and dc.pick(gh, REPO, C[3])[0] == C[3]
 
 
-def test_pick_deploys_nothing_that_is_not_on_main():
-    gh = FakeGitHub(C, passed=set(C))
-    sha, why = dc.pick(gh, REPO, "e" * 40)                             # a fork's "main", a force-pushed-away commit
+def test_pick_deploys_nothing_that_is_not_on_main_and_fails_closed_on_an_unknown_commit():
+    gh = FakeGitHub(C, passed=set(C), side={"e" * 40})
+    sha, why = dc.pick(gh, REPO, "e" * 40)                             # a commit off main (force-pushed away)
     assert sha == "" and "is not on main" in why
+    with pytest.raises(dc.GitHubError):                                # unknown to GitHub: red, never "nothing"
+        dc.pick(gh, REPO, "f" * 40)
+    with pytest.raises(dc.GitHubError, match="no compare status"):     # an answer without a status: the same
+        dc.compare(lambda path: {}, REPO, C[0], C[1])
+    with pytest.raises(dc.GitHubError, match="no compare status"):
+        dc.newer_on(lambda path: {"commits": []}, REPO, C[0], C[1])
 
 
 def test_pick_reads_every_page_of_a_long_compare():
@@ -249,13 +258,64 @@ def test_pick_reads_every_page_of_a_long_compare():
     assert sum("page=" in p and "/compare/" in p for p in gh.paths) == 3
 
 
-def test_the_guard_refuses_a_rerun_that_would_roll_back():
-    gh = FakeGitHub(C, deploys=[(9, "success", C[4], True)])
-    ok, why = dc.guard(gh, REPO, C[2], run_id="7")
-    assert not ok and "newer than" in why and "won't roll back" in why
-    assert dc.guard(gh, REPO, C[4], run_id="7")[0]                     # the same commit again: fine
-    assert dc.guard(gh, REPO, C[5], run_id="7")[0]
-    assert dc.guard(gh, REPO, C[2], run_id="9")[0]                     # its own earlier attempt doesn't count
+def test_the_guard_deploys_only_what_ecs_runs_or_a_descendant_of_it():
+    # whatever the run history says (it says C[1] here): ECS runs C[4]
+    gh = FakeGitHub(C, deploys=[(9, "success", C[1], True)], side={"e" * 40})
+    ok, why = dc.guard(gh, REPO, C[2], C[4])
+    assert not ok and f"ECS runs {C[4][:7]}; {C[2][:7]} is older than it" in why
+    assert dc.guard(gh, REPO, C[4], C[4])[0]                           # the same commit again (a re-run): fine
+    assert dc.guard(gh, REPO, C[5], C[4])[0]
+    assert dc.guard(gh, REPO, C[2], None)[0]                           # no service yet: nothing to roll back
+    ok, why = dc.guard(gh, REPO, C[5], "e" * 40)                       # ECS runs a branch's commit (by hand)
+    assert not ok and "not a descendant of" in why
+    with pytest.raises(dc.GitHubError):
+        dc.guard(gh, REPO, C[5], "f" * 40)                             # unknown: fails closed (pick_main: exit 1)
+    assert not any("actions" in p for p in gh.paths)                   # never the run history
+
+
+def ecs(services, image=None, primary="arn:aws:ecs:r:1:task-definition/sizeup-hub:42"):
+    """A fake `aws ecs ...` (the guard's two reads) and the calls it was asked."""
+    asked = []
+
+    def aws(args):
+        asked.append(args)
+        if args[1] == "describe-services":
+            return {"services": services if services is not None else [
+                {"status": "ACTIVE", "deployments": [{"status": "ACTIVE", "taskDefinition": "old:41"},
+                                                     {"status": "PRIMARY", "taskDefinition": primary}]}]}
+        assert args[1] == "describe-task-definition" and args[3] == primary
+        return {"taskDefinition": {"containerDefinitions": [{"name": "cloudflared", "image": "x/y:" + "0" * 40},
+                                                            {"name": "hub", "image": image}]}}
+    return aws, asked
+
+
+def test_ecs_running_reads_the_primary_deployments_hub_image_tag():
+    aws, asked = ecs(None, f"123.dkr.ecr.us-east-1.amazonaws.com/sizeup-hub:{C[3]}")
+    assert dc.ecs_running("sizeup-hub", "sizeup-hub", aws=aws) == C[3]
+    assert [a[1] for a in asked] == ["describe-services", "describe-task-definition"]
+    assert dc.ecs_running("c", "s", aws=ecs([])[0]) is None                                   # no service yet
+    assert dc.ecs_running("c", "s", aws=ecs([{"status": "INACTIVE"}])[0]) is None
+    for image in ("123.dkr.ecr.us-east-1.amazonaws.com/sizeup-hub:latest", None, "host:5000/repo"):
+        with pytest.raises(dc.EcsError, match="not tagged with a full sha"):              # fails closed
+            dc.ecs_running("c", "s", aws=ecs(None, image)[0])
+    with pytest.raises(dc.EcsError, match="no PRIMARY"):
+        dc.ecs_running("c", "s", aws=ecs([{"status": "ACTIVE", "deployments": []}])[0])
+
+
+def test_the_guard_fails_closed_when_aws_cannot_be_read(monkeypatch, capsys):
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    gh = FakeGitHub(C)
+    monkeypatch.setattr(dc, "github_get", lambda token: gh)
+
+    def refused(cluster, service):
+        raise dc.EcsError("aws ecs describe-services: AccessDeniedException")
+    monkeypatch.setattr(dc, "ecs_running", refused)
+    assert dc.main(["pick", "--guard", "--repo", REPO, "--sha", C[5]]) == 1
+    assert "::error title=Not deployed::could not check what ECS runs" in capsys.readouterr().out
+    monkeypatch.setattr(dc, "ecs_running", lambda cluster, service: C[4])
+    assert dc.main(["pick", "--guard", "--repo", REPO, "--sha", C[5]]) == 0
+    assert dc.main(["pick", "--guard", "--repo", REPO, "--sha", C[3]]) == 1
+    assert "is older than it" in capsys.readouterr().out
 
 
 def test_pick_main_writes_the_output_and_says_why(monkeypatch, tmp_path, capsys):
@@ -269,8 +329,6 @@ def test_pick_main_writes_the_output_and_says_why(monkeypatch, tmp_path, capsys)
     gh.deploys = [(4, "success", C[3], True)]
     assert dc.main(["pick", "--repo", REPO, "--sha", C[1], "--run-id", "5"]) == 0
     assert out.read_text().endswith("sha=\n") and "::notice title=Not deploying::" in capsys.readouterr().out
-    assert dc.main(["pick", "--guard", "--repo", REPO, "--sha", C[1], "--run-id", "5"]) == 1
-    assert "::error title=A newer commit is deployed::" in capsys.readouterr().out
 
     def down(path):
         raise dc.GitHubError(f"HTTP 502 for {path}")
@@ -287,9 +345,63 @@ def test_the_deploy_workflow_picks_first_and_names_the_job_after_the_commit():
     assert "name: deploy ${{ needs.pick.outputs.sha }}" in wf and "if: needs.pick.outputs.sha != ''" in wf
     assert f"name: {dc.ROLL_STEP}" in wf
     guard = wf.index("deploy_check.py pick --guard")
-    assert wf.index("needs: pick") < guard < wf.index("aws-actions/configure-aws-credentials")
+    assert wf.index("needs: pick") < wf.index("aws-actions/configure-aws-credentials") < guard   # it reads ECS
+    for later in ("taskdef_params.py", "amazon-ecr-login", "docker/build-push-action", "amazon-ecs-deploy-task-definition"):
+        assert guard < wf.index(later), later
     assert "github.event.workflow_run.event == 'push'" in wf and "cancel-in-progress: false" in wf
     assert "&& 'deploy' || format('deploy-skipped-{0}', github.run_id)" in wf   # skipped runs: their own group
+    # paused: no automatic deploy (pick's if and the queue's group); by hand still deploys
+    assert wf.count("vars.DEPLOY_PAUSED != 'true' && github.event.workflow_run.conclusion == 'success'") == 2
+    assert "github.event_name == 'workflow_dispatch' || (vars.DEPLOY_PAUSED" in wf
+
+
+class FakeResponse:
+    def __init__(self, body):
+        self.body = body
+
+    def read(self, *a):
+        return self.body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+def http_error(code, body=b"", headers=None):
+    import email.message
+    import io
+    import urllib.error
+    h = email.message.Message()
+    for k, v in (headers or {}).items():
+        h[k] = v
+    return urllib.error.HTTPError("https://api.github.com/x", code, "x", h, io.BytesIO(body))
+
+
+def test_github_get_retries_rate_limits_and_server_errors_and_fails_on_the_rest(monkeypatch):
+    answers, slept = [], []
+
+    def urlopen(req, timeout=None):
+        a = answers.pop(0)
+        if isinstance(a, Exception):
+            raise a
+        return FakeResponse(a)
+    monkeypatch.setattr(dc.urllib.request, "urlopen", urlopen)
+    get = dc.github_get("tok", sleep=slept.append)
+    answers[:] = [http_error(403, b'{"message":"You have exceeded a secondary rate limit"}'),
+                  http_error(403, b"{}", {"Retry-After": "7"}), http_error(502), b'{"ok": 1}']
+    assert get("repos/o/r") == {"ok": 1} and slept == [10.0, 7.0, 6.0]
+    for refusal in (http_error(404), http_error(403, b'{"message":"Resource not accessible by integration"}'),
+                    http_error(401)):
+        answers[:], slept[:] = [refusal], []
+        with pytest.raises(dc.GitHubError, match=f"HTTP {refusal.code}"):                  # final at once
+            get("repos/o/r/compare/a...b")
+        assert slept == []
+    answers[:], slept[:] = [http_error(429)] * 5, []
+    with pytest.raises(dc.GitHubError, match="rate limited"):
+        get("repos/o/r")
+    assert len(slept) == 4
 
 
 def test_main_test_runs_are_never_cancelled_only_a_prs():
