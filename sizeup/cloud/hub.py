@@ -841,6 +841,8 @@ class HubApp(App):
         from sizeup.cloud.health import MUTE_SECTION
         self.health.mutes = lambda: self.cad.settings.section(MUTE_SECTION)
         self.health.errors = self.error_watch
+        # the camera DVR (#550): Health's Camera DVR lines (how many record, the cameras parked as dead upstream)
+        self.health.dvr = lambda: self.roads.dvr.panel() if getattr(self.roads, "dvr", None) is not None else None
         # the replicas as the supervisor last verified them (sizeup/replicawatch.py): Health's Replicas row and alert
         if os.environ.get("LITESTREAM_BUCKET", "").strip():
             from sizeup import replicawatch
