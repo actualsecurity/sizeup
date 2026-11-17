@@ -859,3 +859,30 @@ def test_a_named_places_at_sign_survives(tmp_path):
     c.clock.t += 2
     v1 = v1_for(c)
     assert "40 Example Rd @ Sample Market" in whole_api(v1, c, "val")
+
+
+def test_a_note_moves_the_incidents_rev_and_last_event_id_in_the_list_and_the_detail(cad):
+    v1 = v1_for(cad)
+    row = lambda: {i["id"]: i for i in get(v1, "/api/v1/incidents")[1]["items"]}          # noqa: E731
+    before = row()
+    d0 = get(v1, f"/api/v1/incidents/{cad.ids[0]}")[1]
+    assert isinstance(before[str(cad.ids[0])]["last_event_id"], int)
+    assert d0["last_event_id"] == before[str(cad.ids[0])]["last_event_id"]
+    cad.note(cad.ids[0], {"text": "Second alarm struck", "operator": "Casey <casey@example.org>"})
+    cad.clock.t += 1.5                                                                  # past the list floor
+    after = row()
+    a0, b0 = after[str(cad.ids[0])], before[str(cad.ids[0])]
+    assert a0["last_event_id"] > b0["last_event_id"] and a0["rev"] != b0["rev"]
+    for other in cad.ids[1:]:                                                           # an untouched incident: same
+        assert after[str(other)] == before[str(other)]
+    assert get(v1, "/api/v1/snapshot")[1]["incidents"][-1]["last_event_id"] >= 0
+    d1 = get(v1, f"/api/v1/incidents/{cad.ids[0]}")
+    assert d1[0] == 200 and d1[1]["last_event_id"] == a0["last_event_id"] and d1[1]["rev"] != d0["rev"]
+    assert [e["kind"] for e in d1[1]["events"]][-1] == "note"
+    assert max(int(e["id"]) for e in d1[1]["events"]) == a0["last_event_id"]
+
+
+def test_an_incident_with_no_events_has_a_null_last_event_id():
+    from sizeup.api.v1.serialize import incident_summary
+    assert incident_summary({"id": 1, "events": []})["last_event_id"] is None
+    assert incident_summary({"id": 1, "events": [{"id": 4}, {"id": 9}, {"id": 7}]})["last_event_id"] == 9
