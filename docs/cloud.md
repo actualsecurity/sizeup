@@ -1684,11 +1684,16 @@ With `dvr_dir` on storage shared between tasks (EFS: `[roads] dvr_shared = "auto
   for the area;
 - only the lease holder writes or deletes (the app's fence, `sizeup/fence.py`), and a camera merge's folder rename
   (`follow()`, #324) only on it and never while a clip of either camera is being saved (`may_move`); the standby's
-  warm app never makes a DVR. A new leader reads the index in the background (the file names carry the size,
-  `key_t0_dur_bytes[_n].ts`, so no stat per file over NFS; the older forms still read; recording waits for it),
-  then appends after each camera's last segment. For 5 min after the start it lists the folders again every 30 s,
-  taking in what the draining leader wrote after the first look and dropping what it evicted; another writer's temp
-  file is left alone unless it is 10 min old;
+  warm app never makes a DVR. The leader keeps each camera's last key, end and sequence offset in a small state
+  file beside the recordings (`.dvr-state.json`, `sizeup/dvrstate.py`, #596: written whole every 5 s and on a clean
+  stop). A new leader resumes from it and records at once; it reads the index in the background (the file names
+  carry the size, `key_t0_dur_bytes[_n].ts`, so no stat per file over NFS; the older forms still read). Until that
+  is done a camera's own folder is read when its recording is asked for (playback, a clip, Keep), nothing is evicted
+  and the cap is weighed against the bytes the state counted (2 % over at most). No state, or one over 10 min old:
+  the index is read first, as before (measured on EFS: ~11-20 s for ~128,000 files). For 5 min after the start it
+  lists the folders again every 30 s, off the recording's thread, taking in what the draining leader wrote after
+  the first look and dropping what it evicted; another writer's temp file (temp names carry the writer's token) is
+  left alone until it is 60 s old;
 - without shared storage nothing changes: local disk, 2 h, the on-demand cameras only.
 
 The infra is sizeup-aws `14-dvr-storage.sh` (EFS, encrypted, General Purpose, **Bursting** throughput, no lifecycle,
