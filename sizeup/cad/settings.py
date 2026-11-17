@@ -2733,7 +2733,8 @@ class Editor:
 
     def _notify_op(self, action: str, body: dict, op: str) -> dict:
         """set {key: alerts | status | intel, topic} ("" = the default) | off {key} | reset {key} | server {value} ("" = the
-        default) | test {key}: a marked test push to the topic in effect. Admins (sizeup/cad/api.py WRITES)."""
+        default) | test {key}: a marked test push to the topic in effect. Admins (sizeup/cad/api.py WRITES). An intel topic
+        that is an alerts or status topic, or the reverse, is refused (notify.INTEL_SAME_WHY: intel's channel is its own)."""
         from sizeup import notify
         p = getattr(self.cad, "pushes", None)
         if p is None:
@@ -2776,6 +2777,10 @@ class Editor:
                 why = p.problem(t)
                 if why:
                     raise CadError(f"{notify.LABELS[key]}: {why}")
+                # intel goes to a channel of its own (admin, 2026-11-17): never the alerts' or status' topic, either way
+                theirs = (notify.ALERTS, notify.STATUS) if key == notify.INTEL else (notify.INTEL,)
+                if notify.same_topic(t, p.named(theirs)):
+                    raise CadError(f"{notify.LABELS[key]}: {notify.INTEL_SAME_WHY}")
                 new = {"topic": t}
             else:
                 new = REMOVE

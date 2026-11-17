@@ -4,7 +4,9 @@
 //   IntelCard.column(list, state, deps)   the console's 60 Control column: one row per open event at map or push
 //                                         (the state's "intel": {open}; only for a signed-in viewer). Category · town,
 //                                         the place (hollow "?" when unconfirmed), WHAT / WHERE, play its clips,
-//                                         Useful / Noise, Dismiss (dispatchers). deps: {api, operator, time, readonly}
+//                                         Useful / Noise, Dismiss (dispatchers), More info (its page,
+//                                         /cad#prealert/intel/<id>: prealert-info.js). deps: {api, operator, time,
+//                                         readonly, more}
 //   IntelSettings.mount(card)             Settings > System > Intel: the kill switch, caps, each pack's mode and
 //                                         threshold, each category's mode, each rule's mode and weight with its
 //                                         7-day hits. Terse; the why is in the hovers. Admins edit (sPost, settings.js)
@@ -60,8 +62,19 @@ window.IntelCard = (() => {
       src.append(" ", b);
     }
     li.append(src);
-    if (deps.readonly) return li;
+    const more = () => {
+      const m = el("a", "nav mini aa-more", "More info");
+      m.href = window.PrealertInfo ? PrealertInfo.href("intel", e.id) : `#prealert/intel/${e.id}`;
+      m.title = "Its page: the full transcripts and their audio, the place, site history, the outcome";
+      m.addEventListener("click", (ev) => ev.stopPropagation());
+      return m;
+    };
+    if (deps.readonly) {
+      if (deps.more) { const r = el("div", "aa-btns"); r.append(more()); li.append(r); }
+      return li;
+    }
     const row = el("div", "aa-btns");
+    if (deps.more) row.append(more());
     const busy = st.busy.has(e.id);
     const act = (path, body, ok) => async (ev) => {
       ev.stopPropagation();
@@ -276,11 +289,18 @@ window.IntelSettings = (() => {
       kids.push(head, cats, scroll);
     }
     if (!admin) for (const k of kids) for (const x of k.querySelectorAll("input, select, button")) x.disabled = true;
-    card.replaceChildren(sCardHead("Intel", s.push ? (s.enabled ? "on" : "detection off") : "pushes off",
+    // intel pushes go to their own topic only (sizeup/notify.py): none in effect, they are held (counted, not sent)
+    const pt = d.push_topic, held = !!(pt && !pt.set);
+    const pushState = held ? (pt.source === "same" ? "pushes held: intel topic refused" : pt.source === "off" ? "pushes held: intel topic off"
+      : "pushes held: no intel topic") : "on";
+    card.replaceChildren(sCardHead("Intel", s.push ? (s.enabled ? pushState : "detection off") : "pushes off",
       sHelp("Radio pre-alerts: rules over police (and later fire) transcripts. Each event goes off · shadow (counted "
         + "only) · log · map · push, the lowest of its pack, category and rule. Pushes go to the pre-alert (intel) topic "
-        + "in Push notifications, else the alerts topic. Push off: detection and the map go on. Hits and events: 7 days. "
+        + "in Push notifications only, never the alerts or status topic: none set, pushes are held (counted, not sent). "
+        + "Push off: detection and the map go on. Hits and events: 7 days. "
         + `Rule set ${d.ruleset_hash}.`)), ...kids);
+    const info = card.querySelector(".card-head > .dim.small");
+    if (info && held && s.push && s.enabled) { info.className = "warn small"; info.title = "Set one in Push notifications"; }
   }
   return { mount };
 })();

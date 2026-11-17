@@ -127,9 +127,11 @@ of a new or changed transcript:
 | Dispatch parse and geocode | A page with our tones becomes a queued CAD event with type, address, cross street and point | `dispatch.py`, `geo/pagegeo.py`, `incidents.py` |
 | Radio log links | Puts the transmission on an event: by unit radio ID, dispatcher turn, airport talkgroup, page, mention, fireground channel, or by hand | `cad/comms.py`, `cad/radiolog.py` |
 | Status hints | "E64 on location?": a suggestion a dispatcher accepts or dismisses, never a status change by itself | `cad/statushints.py`, `cad/statusrepair.py` |
+| Out-of-service lock | Automation never changes an out-of-service unit's status or puts it on a call: a notice with "In service?" instead | `cad/oos.py`, `cad/store.py` |
 | Alarms | Emergency button (P25, MDC, FleetSync) and mayday keywords on our fire channels | `cad/alarms.py` |
 | Airport pre-alerts | ATC rules on airband transcripts; multi-transmission watches; "alert level N" on the fire radio | `atc.py`, `airport_watch.py`, `cad/airport_alerts.py` |
 | Radio intelligence | Rule packs over other systems' transcripts (`Comms.on_context_text`) | `sizeup/intel/` |
+| Pre-alert context | One read-only bundle per pre-alert (why, transmissions and audio, before / after, place, site history, now, outcome): the More info page (`/cad#prealert/<kind>/<id>`) and, later, inference | `context_bundle.py`, `static/prealert-info.js` |
 | Search | FTS5 index over incidents, the chronology and the radio log | `cad/history.py` |
 
 The radio log has a change log (`radio_changes`) so pages fetch only what changed, named views (`ours`, `police`,
@@ -222,7 +224,7 @@ On the hub everything durable is SQLite under the state dir, replicated by Lites
 
 | database | what lives there |
 |---|---|
-| `cad.sqlite` | The CAD of record: units, incidents, assignments, run cards, the chronology, unit history, dispatches, the radio registry, the radio log (`radio_traffic`, `radio_links`, `radio_changes`, `radio_activity`), alarms, settings overrides and audit, operators and their activity, source reports and health, dispatch-mode steps, status hints, premise notes, pre-plan points and document records, attachments and their audit, phone pre-alerts, airport alerts, intel events / hits / feedback, the STT usage meter, the FTS5 search index |
+| `cad.sqlite` | The CAD of record: units, incidents, assignments, run cards, the chronology, unit history, dispatches, the radio registry, the radio log (`radio_traffic`, `radio_links`, `radio_changes`, `radio_activity`), alarms, settings overrides and audit, operators and their activity, source reports and health, dispatch-mode steps, status hints, out-of-service notices, premise notes, pre-plan points and document records, attachments and their audit, phone pre-alerts, airport alerts, intel events / hits / feedback, the STT usage meter, the FTS5 search index |
 | `hub.sqlite` | The monitor's state: incidents, transmissions and pages (one row each, written only on change), and how far each station outbox has been applied |
 | `audio.sqlite` | Metadata of received clips and rendered dispatch audio. With an audio bucket configured the bytes are in S3 (`sizeup/audiostore.py`); otherwise in the database. |
 | `outbox.sqlite` (station) | Events waiting for the hub |
@@ -402,7 +404,7 @@ its key, the cap); one that fails is skipped and counted in the import's notes.
 |---|---|
 | alerts | Emergency buttons, mayday, aircraft emergency squawks, airport pre-alerts, their acknowledgements and all clears |
 | status | Station health, Amazon Transcribe failing or over budget, hub error spikes, replica and takeover failures |
-| intel | Radio-intelligence pre-alerts, with a Listen button. Falls back to the alerts topic until it has its own. |
+| intel | Radio-intelligence pre-alerts, with a Listen button. Its own topic only: none set, no intel pushes (never the alerts or status topic). |
 
 Topic names are secrets: set by env / SSM or Settings, shown to admins only, never logged or exported. sizeup never
 publishes to a **protected** topic: the set is derived, not listed in code (every topic the app subscribes to for the

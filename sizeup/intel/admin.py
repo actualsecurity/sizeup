@@ -134,7 +134,20 @@ class IntelAdmin:
                 "verdicts": list(VERDICTS), "queue": {"dropped": eng.dropped, "errors": eng.errors},
                 "listen": eng.listen.status() if eng.listen is not None else {"configured": False, "why": "not here"},
                 "infer": eng.infer.status() if eng.infer is not None else {"on": False, "ready": False, "why": "not here"},
-                "may_edit": True}
+                "push_topic": self._push_topic(), "may_edit": True}
+
+    def _push_topic(self) -> dict | None:
+        """Whether intel pushes have a topic in effect (sizeup/notify.py: their own only), never its name: {set, source}.
+        None: no pushes here (no Pushes, or Settings unreadable)."""
+        p = getattr(self.cad, "pushes", None)
+        if p is None:
+            return None
+        try:
+            from sizeup.notify import INTEL
+            e = p.effective(INTEL)
+        except Exception:  # noqa: BLE001 - never keeps the card from showing
+            return None
+        return {"set": bool(e["topic"]), "source": e["source"]}
 
     def events(self, q: dict, admin: bool = False) -> dict:
         """GET /api/cad/intel/events?since=&bbox=w,s,e,n&mode=map,push&status=open|all&limit=: the map layer's. The
