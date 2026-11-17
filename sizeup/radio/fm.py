@@ -327,6 +327,8 @@ class NoiseSquelch:
         self._content = 0                   # frames with tones / speech in this transmission
         self._recent: deque[bool] = deque(maxlen=20)   # STEADY_DB content in the last 20 frames
         self._said: list[bool] = []
+        self._idlike: list[bool] = []
+        self._idb = (f >= ID_BAND[0]) & (f <= ID_BAND[1])
         self._last_content = -1             # frame index (in _frames) of the last dense content, -1: none yet
         self._live = False                  # ... enough of them: the long hang applies
         self._breaks: list[tuple[int, int]] = []   # (first quiet frame, frame the carrier came back)
@@ -499,6 +501,8 @@ class NoiseSquelch:
         vband = float(spec[self._vb].mean())
         self._recent.append(vband >= lvl * 10 ** (STEADY_DB / 10))
         self._said.append(self._recent[-1] and q >= self.close_db)   # something on the carrier (_worth)
+        if self.keyups == "traffic":    # most of the voice band in the ID band: worth a look for a burst (_idish)
+            self._idlike.append(float(spec[self._idb].sum()) >= ID_SHARE * float(spec[self._vb].sum()))
         if self._recent[-1] and sum(self._recent) >= DENSE_FRAMES:
             self._last_content = len(self._frames) - 1
         if self._paging and self._content < CONTENT_FRAMES and q >= self.close_db:
@@ -552,7 +556,8 @@ class NoiseSquelch:
     def _worth(self, g0: int) -> bool:
         """What came before the drop at g0 is a key-up of its own: speech on it, or an ID burst. (Dead carrier, or
         flutter before a late pre-ID, stays with what follows: no row that is only a click.)"""
-        return sum(self._said[:g0]) >= CONTENT_FRAMES or bool(self._id_runs(self._frames[max(0, g0 - EDGE_SEARCH):g0]))
+        return sum(self._said[:g0]) >= CONTENT_FRAMES or (self._idish(g0 - EDGE_SEARCH, g0) and bool(
+            self._id_runs(self._frames[max(0, g0 - EDGE_SEARCH):g0])))
 
     def _ringing(self, g0: int) -> bool:
         """Paging: a tone (alert tone, a held single tone) ringing into the drop at g0, in the last 0.2 s of carrier
@@ -568,6 +573,13 @@ class NoiseSquelch:
             return False
         peak = f[band][np.argmax(S[band])]
         return float(S[band & (np.abs(f - peak) <= 25)].sum() / S[band].sum()) >= TONE_SHARE
+
+    def _idish(self, a: int, b: int) -> bool:
+        """Frames a..b could hold an ID burst (a frame mostly in the ID band): a cheap look before _id_runs. True when
+        it can't tell (frames added without _track)."""
+        if len(self._idlike) != len(self._frames):
+            return True
+        return any(self._idlike[max(0, a):b])
 
     def _id_runs(self, frames: list[np.ndarray]) -> list[tuple[int, int]]:
         """The ID bursts in these frames: (first, last frame), ID_RUN id_burst_frames in a row or more."""
@@ -590,7 +602,7 @@ class NoiseSquelch:
     def _pre_id(self, g1: int, k: int) -> bool:
         """An ID burst at the start of what came back at frame g1, nothing said before it: a radio keyed there
         (traffic channels only)."""
-        if k - g1 < ID_RUN or self.keyups != "traffic":
+        if k - g1 < ID_RUN or self.keyups != "traffic" or not self._idish(g1, k):
             return False
         body = self._frames[g1:k]
         runs = self._id_runs(body)
@@ -601,6 +613,8 @@ class NoiseSquelch:
 
     def _post_id(self, g0: int) -> bool:
         """An ID burst just before the drop at frame g0, nothing said after it: a radio unkeyed there."""
+        if not self._idish(g0 - EDGE_SEARCH, g0):
+            return False
         body = self._frames[max(0, g0 - EDGE_SEARCH):g0]
         runs = self._id_runs(body)
         if not runs:
@@ -661,6 +675,7 @@ class NoiseSquelch:
         self._content, self._live, self._breaks, self.continuing = 0, False, [], False
         self._recent.clear()
         self._said = [False]                # per frame: tones / speech on the carrier (the voice band over its hiss)
+        self._idlike = [False]              # per frame: ID-band heavy (traffic key-ups only)
         self._last_content = -1
         self._cont_left, self._cont_run = 0, []
         self._cands, self._piece = [], None
