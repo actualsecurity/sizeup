@@ -573,7 +573,9 @@ function fillQueueItem(li, inc) {
   if (inc.status === "queued") {
     if (inc.type_note) li.append(el("div", "qs warn", inc.type_note));
     if (unconfirmed(inc)) li.append(el("div", "qs warn", "Location unconfirmed: pick it on the event"));   // (#176; #278: an instruction, on screen)
-    li.append(el("div", "qs dim", "Accept or Dismiss"));
+    const mo = inc.merge_offer;          // the CAD feed's event this page may be (sizeup/cad/pagematch.py): one tap
+    if (mo && !BOARD && canDo("dispatch")) li.append(mergeRow(inc, "qs q-merge"));
+    else li.append(el("div", "qs dim", mo ? `Same call as ${mo.ref}?` : "Accept or Dismiss"));
   } else if (!inc.emergency && isOpen(inc)) {
     if (inc.until_at) li.append(el("div", "qs dim", `Until ${fmtTime(inc.until_at)}`));
   } else if (!isOpen(inc)) {
@@ -647,7 +649,8 @@ function renderQueue() {
   const byAge = (a, b) => a.created_at - b.created_at;        // oldest first
   const sig = (i) => JSON.stringify([i.status, i.number, i.type, i.subtype, i.address, i.id === cad.sel, i.emergency,
     i.until_at, i.disposition, i.type_note, unconfirmed(i), i.joint_call, openAssignments(i).map((a) => [a.name, a.status, txNow(a.name)]),
-    i.closed_at, cad.listSig.length, canDo("dispatch"), airportLine(i), i.scope && [i.scope.short, i.scope.label, i.scope.source, i.scope.feed], queueExtra(i)]);
+    i.closed_at, cad.listSig.length, canDo("dispatch"), airportLine(i), i.scope && [i.scope.short, i.scope.label, i.scope.source, i.scope.feed],
+    i.merge_offer && [i.merge_offer.into, i.merge_offer.ref, i.merge_offer.why], i.merged_into && i.merged_into.into, queueExtra(i)]);
   const opts = { key: (i) => String(i.id), sig, make: queueItem, fill: fillQueueItem };
   syncList($("#q-queued"), all.filter((i) => i.status === "queued").sort(byAge), { ...opts, empty: "None" });
   syncList($("#q-pending"), all.filter((i) => i.status === "pending" && i.emergency).sort(byAge),
@@ -676,7 +679,28 @@ function closedFold(open) {
 }
 // The closed row's "⋯" (the queue, Records): Reopen (#89)
 function closedMenuItems(inc) {
-  return [{ label: "Reopen", hint: inc.status === "dismissed" ? "to 60 Control" : "", run: () => reopenIncident(inc.id) }];
+  const m = inc.merged_into;           // a page merged into the feed's event by a person: undone here
+  return [...(m ? [{ label: "Undo merge", hint: `out of ${m.ref}`, run: () => mergeIncident(inc.id, { undo: true }) }] : []),
+    { label: "Reopen", hint: inc.status === "dismissed" ? "to 60 Control" : "", run: () => reopenIncident(inc.id) }];
+}
+// A page's own card merged into the CAD feed's event it is (POST merge; the card's "Merge into #N"), or undone.
+async function mergeIncident(iid, body) {
+  try {
+    await api("POST", `/api/cad/incident/${iid}/merge`, { operator: operator(), ...body });
+    UI.toast(body.undo ? "Merge undone: back in the queue" : "Merged");
+  } catch (e) {
+    UI.toast(e.message, "err");
+  }
+}
+// "Same call as #N?  [Merge into #N]": the evidence in the hover (concise on screen).
+function mergeRow(inc, cls) {
+  const mo = inc.merge_offer, row = el("div", cls);
+  const b = el("button", "sm primary", `Merge into ${mo.ref}`);
+  b.type = "button";
+  b.title = `${mo.address ? `${mo.ref}: ${mo.address}\n` : ""}${mo.why || ""}`;
+  b.addEventListener("click", (e) => { e.stopPropagation(); b.disabled = true; mergeIncident(inc.id, { into: mo.into }).finally(() => { b.disabled = false; }); });
+  row.append(el("span", "", `Same call as ${mo.ref}?`), " ", b);
+  return row;
 }
 // A closed event back on the boards (POST reopen): Active if a unit was ever on it, else Pending; a dismissed
 // page back to 60 Control. The disposition goes into the chronology; the dispatcher adds units again.
@@ -753,6 +777,16 @@ function renderDetail() {
     const qsrc = inc.feed && inc.source === "CAD feed" ? inc.feed.label : inc.source === "60 Control radio" ? "60 Control radio" : "60 Control page";
     setText($("#d-qhead"), `${qsrc}: set type, then Accept or Dismiss`);
     setText($("#d-qnote"), inc.type_note || "");
+    const mbox = $("#d-qmerge"), mo = inc.merge_offer;
+    show(mbox, !!mo);
+    if (mo) {
+      const sig = JSON.stringify([inc.id, mo, BOARD || !canDo("dispatch")]);
+      if (mbox._sig !== sig) {
+        mbox._sig = sig;
+        if (BOARD || !canDo("dispatch")) mbox.replaceChildren(el("span", "", `Same call as ${mo.ref}?`));
+        else mbox.replaceChildren(...mergeRow(inc, "").childNodes);
+      }
+    }
     const ts = $("#d-acc-type");
     const key = `${inc.type || ""}/${inc.subtype || ""}`;
     // follow the incident's type (a CAD feed may change it while queued) until a person picks another one here
@@ -4124,7 +4158,7 @@ function askAdmin() {
   return a.length ? `Ask an admin (${a.join(", ")})` : "Ask an admin";
 }
 // What a viewer can't press on the dispatch screen (reading, filtering, playing, the maps stay).
-const RO_DISPATCH = "#new-incident, #new-form :is(input, select, textarea, #new-create), #d-accept, #d-dismiss, #d-edit, "
+const RO_DISPATCH = "#new-incident, #new-form :is(input, select, textarea, #new-create), #d-accept, #d-dismiss, #d-qmerge button, #d-edit, "
   + "#d-close, #d-reopen, #d-queued select, #close-form :is(select, #c-close), #edit-form :is(input, select, textarea, #edit-save), "
   + "#d-attach :is(select, button:not(.help)), #o-open, #o-form :is(input, button:not(#o-cancel)), #d-dispatch :is(input, select, textarea, button:not(#u-cancel):not(.help)), #note-text, #note-add, "
   + ".ubtns button, .pa-dismiss";        // (a transmission's menu leaves out what the role can't do: txMenuItems)

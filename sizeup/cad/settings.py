@@ -65,9 +65,10 @@ Reset to default = drop the override (one item, or a whole section).
     signal_metrics                 key "margin_db" | "miss_pct" | "shift_db" | "opens_x" | "rate_x" | "cc_drop_pct" -> a
                                    number: the suggested squelch's margin and the shift warnings' thresholds (#606,
                                    sizeup/cloud/metricsinsight.py; Settings > Radios > Signal, admins)
-    radio_folders                  key "layout" -> {folders: [{id, name, section, items: [source keys]}]}: the Radio page
-                                   rail's folders, set for the department (#607, sizeup/cad/radiofolders.py; admins, from
-                                   the rail's Edit); not set: the automatic grouping
+    radio_folders                  key "layout" -> {folders: [{id, name, section, items: [source keys]}], names?: {source
+                                   key: name}}: the Radio page rail's folders, set for the department, and the channels'
+                                   display names (#607, sizeup/cad/radiofolders.py; admins, from the rail's Edit or a
+                                   name from Settings > Radios > Channels); not set: the automatic grouping
     datasources                    key a data source ("gis:hydrants", "aircraft:registry") -> off | hourly | daily | weekly |
                                    monthly: how often the registry refreshes it (#186, Settings > Data sources;
                                    sizeup/datasources.py); not set: the source's default
@@ -1001,28 +1002,38 @@ class Editor:
         return {**out, "radio_emergencies": self.em_page()}
 
     def _folders_op(self, action: str, body: dict, op: str) -> dict:
-        """set {folders: [{id, name, section, items}], names?: {key: name}, base?} | reset {base?}: the Radio page's
-        folders and channel names (#607), admins,
+        """set {folders: [{id, name, section, items}], names?: {key: name}, base?} | name {key, name, base?} | reset
+        {base?}: the Radio page's folders and channel names (#607; name: one channel's alone, Settings > Radios >
+        Channels; blank: its own again), admins,
         audited as Radios. base: the rev the edit started from (radiofolders.rev; "" the default): someone else saved
         meanwhile -> refused, nothing written."""
         cur = radiofolders.stored(self.overrides())
         base = body.get("base")
         if base is not None and base != radiofolders.rev(cur):
             raise CadError("the folders were changed meanwhile: reload them and edit again")
+        audit_key, old_s = f"{FOLDERS_SECTION}/{radiofolders.KEY}", None
         if action == "reset":
             v = None
         elif action == "set":
             v = radiofolders.clean({"folders": body.get("folders"), "names": body.get("names")})
             if not self.cad.comms._sees_context():
                 v = radiofolders.merge_hidden(v, cur)
+        elif action == "name":
+            # one channel's or talkgroup's name (Settings > Radios > Channels): the folders as they are; display only
+            key = radiofolders.name_key(body.get("key"))
+            if radiofolders.context_key(key) and not self.cad.comms._sees_context():
+                raise CadError("key: another system's talkgroup (sign in to name it)")
+            v = radiofolders.named(cur, key, body.get("name"))
+            audit_key = f"{FOLDERS_SECTION}/names/{key}"
+            old_s = ((cur or {}).get("names") or {}).get(key) or "default"
         else:
-            raise CadError("action: set or reset")
+            raise CadError("action: set, name or reset")
         if v == cur:                                    # nothing changes: nothing written, nothing audited
             return {"ok": True, "radio_folders": radiofolders.for_viewer(cur, sees_context=self.cad.comms._sees_context(),
                                                        hidden_labels=self.cad.context_labels())}
         out = self._commit([(FOLDERS_SECTION, radiofolders.KEY, REMOVE if v is None else v)], op,
-                           [("radios", f"{FOLDERS_SECTION}/{radiofolders.KEY}", radiofolders.summary(cur),
-                             radiofolders.summary(v))])
+                           [("radios", audit_key, radiofolders.summary(cur), radiofolders.summary(v)) if old_s is None
+                            else ("radios", audit_key, old_s, ((v or {}).get("names") or {}).get(key) or "default")])
         return {**out, "radio_folders": radiofolders.for_viewer(v, sees_context=self.cad.comms._sees_context(),
                                                        hidden_labels=self.cad.context_labels())}
 
@@ -2131,7 +2142,9 @@ class Editor:
                 vals = {k: channels_mod.clean(k, {f: body.get(f) for f in channels_mod.FIELDS}) for k in keys}
             except ValueError as e:
                 raise CadError(str(e)) from None
-            changes, audit = [], []
+            changes, audit, applied = [], [], []
+            # A talkgroup's Record first, all of them (its own switch, on the station): one refused stops the rest,
+            # and those already applied are on the record (audited) before the refusal is said
             for key, v in vals.items():
                 if channels_mod.is_tg(key) and "record" in v:
                     rec = v.pop("record")
@@ -2139,7 +2152,11 @@ class Editor:
                     err = "no talkgroups here" if ctx is None else (
                         ctx.set_talkgroup(tgn, rec, None, None, tsys) if tsys else ctx.set_talkgroup(tgn, rec))
                     if err:
-                        raise CadError(err)
+                        if applied:
+                            self._commit([], op, applied)
+                        raise CadError(f"{key}: {err}" + (f" ({len(applied)} before it applied)" if applied else ""))
+                    applied.append(("radios", f"channel/{key}", None, {"record": rec}))
+            for key, v in vals.items():
                 if not v:
                     continue
                 cur = ov.get(key) or {}
@@ -2149,9 +2166,9 @@ class Editor:
                 if before != after:
                     changes.append((channels_mod.SECTION, key, new))
                     audit.append(("radios", f"channel/{key}", {k: before[k] for k in v}, {k: after[k] for k in v}))
-            if not changes:
+            if not changes and not applied:
                 return {"ok": True}
-            out = self._commit(changes, op, audit)
+            out = self._commit(changes, op, applied + audit)
         elif action == "reset":
             key = _text(body.get("key"), "key", 40)
             if key not in ov:

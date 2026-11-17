@@ -396,6 +396,7 @@ class MetricsLink:
     def __init__(self, app, cfg, client: Callable[[float], object], log: Callable[[str], None] = print,
                  clock: Callable[[], float] = time.time):
         self.app, self.cfg, self.log, self.clock = app, cfg, log, clock
+        self.station = str(getattr(cfg, "station_id", "") or "")   # the id the hub assigns, once it has (StationLink.adopt)
         if getattr(app, "metrics", None) is None:
             app.metrics = Collector(clock=clock)
         self.c: Collector = app.metrics
@@ -453,7 +454,7 @@ class MetricsLink:
         if not recs:
             self._next = now + SEND_S
             return SEND_S
-        body = {"v": 1, "station": self.cfg.station_id, "records": recs}
+        body = {"v": 1, "station": self.station or self.cfg.station_id, "records": recs}
         try:
             answer = client.request("POST", PATH, body, timeout=20.0, gzip_body=True)
         except HubError as e:

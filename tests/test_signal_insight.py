@@ -558,3 +558,18 @@ def test_apply_is_refused_unless_the_squelch_it_was_for_still_runs_and_a_reset_f
     assert app._receiver("FG1").open_db == 13.0 and forgot == ["FG1"]
     app.cad.settings.post("squelch", {"action": "reset", "key": "FG1", "operator": "admin@example.org"})
     assert forgot == ["FG1", "FG1"]
+
+
+def test_a_renamed_station_keys_its_suggestions_and_shifts_under_its_new_id(tmp_path):
+    t = NOW - 3 * 3600
+    s, _ = store(tmp_path)
+    put(s, "FG1", stepped(t, 5.0, 9.2), station="old-id")
+    put(s, "FG1", [ev("FG1", t, "sdr", "SDR 00000102 -> 00000105")], station="old-id")
+    ins = mi.Insight(s, clock=lambda: NOW, log=lambda m: None)
+    assert [f["station"] for f in ins.turn()] == ["old-id"]
+    assert ins.squelch(NOW)["channels"][0]["station"] == "old-id"
+    assert s.rename_station("old-id", "new-id") > 0
+    ins.renamed("old-id", "new-id")
+    assert [f["station"] for f in ins.found] == ["new-id"]                          # the hint follows at once
+    assert [c["station"] for c in ins.squelch(NOW)["channels"]] == ["new-id"]       # looked up again under the new id
+    assert [f["station"] for f in ins.turn()] == ["new-id"]

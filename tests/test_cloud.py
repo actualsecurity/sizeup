@@ -292,6 +292,7 @@ def test_a_talking_snapshot_from_a_station_that_went_quiet_is_dropped():
     assert live.state() == []
 
 
+@pytest.mark.flaky(issue=513)
 def test_a_page_going_out_reaches_the_hub_pair_by_pair_and_ends(tmp_path, monkeypatch):
     # South 2 (#63): each tone pair as it decodes on the station, on the hub's CAD and monitor at once (pushed by the
     # decode, never waiting for the refresh), then "voice", then ended (handing over to the finished page), then gone.

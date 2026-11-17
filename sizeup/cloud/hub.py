@@ -10,8 +10,9 @@ runs on a bare Linux box with Python + numpy.
     POST /api/station/state       {at, talking?, paging?, status?}: who is talking now and a page going
                                   out now (latest wins; paging: sizeup/radio/livepage.py) and the
                                   station's radio / SDR / STT / voice rows, talkgroups, re-run
-                                  progress, outbox size, its version -> {ok, build}: the hub's own
-                                  build (SIZEUP_BUILD), which the station follows (autoupdate.py)
+                                  progress, outbox size, its version -> {ok, build, caps, station}: the
+                                  hub's own build (SIZEUP_BUILD), which the station follows (autoupdate.py),
+                                  and the id it took the post as, which the station adopts (stations.py)
     GET  /api/station/jobs?wait=25   long poll: jobs for the station -> {jobs: [{id, type, args}]}
     POST /api/station/jobs/<id>   the station's answer {ok, error?, result?, label?, audio?}
                                   (jobs: tts, call, sources_reset: an incident source's reset(), #301)
@@ -139,6 +140,7 @@ STATION_ROUTES = (("GET", "/api/station/status"), ("GET", "/api/station/hello"),
                   ("POST", "/api/station/vessels"), ("POST", "/api/station/logs"), ("POST", "/api/station/metrics"),
                   ("POST", "/api/station/jobs/0123456789abcdef"))
 REFUSAL_LOG_S = 3600.0   # a refused station request: logged once per (reason, station) this often
+MISMATCH_LOG_S = 60.0    # ... an id_mismatch this often (a live station locked out: its log says who it says it is)
 TOKEN_ID = re.compile(r"sz1\.([a-z0-9][a-z0-9_-]{0,39})\.")    # the station id a refused own token names (for the log)
 EXTRA = re.compile(r"[a-z][a-z0-9_]{0,30}")      # a transmission's field names, as the station sends them
 
@@ -284,6 +286,7 @@ class Hub:
         # shared token above as one station
         self.stations = StationRegistry(app.mdb, self.token, getattr(cfg, "cloud_status_token", ""),
                                         getattr(cfg, "cloud_legacy_station_id", ""), log=log)
+        self.stations.on_rename = self._station_renamed
         self._refused_said: dict[tuple[str, str], float] = {}
         self.health_: StationHealth | None = None  # station health and alerts (HubApp sets it)
         self.polling = 0
@@ -459,11 +462,15 @@ class Hub:
             return self._refuse(e, m.group(1) if m and self.stations.row(m.group(1)) is not None else "")
 
     def _refuse(self, e: Refused, sid: str = "") -> tuple[int, bytes, str]:
-        """The 401: {error, reason} (fixed text, never the token); in the log once per (reason, station) an hour."""
+        """The 401: {error, reason} (fixed text, never the token); in the log once per (reason, station) an hour, an
+        id_mismatch once a minute with the two ids (Health's "Station rejected" too: StationRegistry.mismatch)."""
         now = time.time()
-        if now - self._refused_said.get((e.reason, sid), 0.0) >= REFUSAL_LOG_S:
+        every = MISMATCH_LOG_S if e.reason == "id_mismatch" else REFUSAL_LOG_S
+        if now - self._refused_said.get((e.reason, sid), 0.0) >= every:
             self._refused_said[(e.reason, sid)] = now
-            self.log(f"hub: station request refused: {e.reason}" + (f" (station {sid})" if sid else ""))
+            m = self.stations.mismatch() if e.reason == "id_mismatch" else None
+            self.log(f"hub: station request refused: {e.reason}" + (f" (station {sid})" if sid else "")
+                     + (f": the station says {m['said'] or '?'}, the token is {m['token']}" if m else ""))
         return _json(401, {"error": str(e), "reason": e.reason})
 
     def _other_station(self, p: Principal) -> tuple[int, bytes, str]:
@@ -483,7 +490,20 @@ class Hub:
             return self.stations.claim(p, claimed)
         except Refused as e:
             said = re.sub(r"[^A-Za-z0-9_.-]", "?", claimed[:40]) if isinstance(claimed, str) else ""
+            if e.reason == "id_mismatch":
+                self.stations.mismatched(said, p.id or "the shared one")
             raise Refused(e.reason, f"the token is {p.id or 'the shared one'}, the request says {said}") from None
+
+    def _station_renamed(self, old: str, new: str) -> None:
+        """The shared token's station renamed (StationRegistry.set_shared_id): what the hub keys by the id moves with
+        it. Its status now (the next post says so too); the station's signal metrics in the background, never on the
+        admin's request (HubApp.apply_station_renames: chunked, from the renames kept in hub.sqlite). Its CloudWatch
+        streams are named per id and day: new ones get the new id, the old ones stay in the group the Logs view reads."""
+        if isinstance(self.status, dict) and self.status.get("id") == old:
+            self.status = dict(self.status, id=new)
+        move = getattr(self.app, "apply_station_renames", None)
+        if move is not None:
+            threading.Thread(target=move, name="station-rename", daemon=True).start()
 
     def handle(self, method: str, path: str, query: str, headers, body: Callable[[int], bytes | None] | None):
         if path == "/api/station/status":            # read only (the deploy check): not "seen", nothing changes
@@ -575,9 +595,14 @@ class Hub:
             st = dict(d["status"])
             if sid:
                 st["id"] = sid                     # the authenticated id (what Health shows), never only the claimed one
+            if p is not None and p.via == "shared":
+                self.stations.reconfigured(claimed, st.get("config_id"))   # posting as the current id from its config
             tgs = st.pop("talkgroups", None)
             if isinstance(tgs, list):
-                self.talkgroups = tgs
+                # the station's rows are TalkgroupPrefs.state(): "tier_set" (another system's talkgroup: a tier, never
+                # Record / Main / Transcribe) as its own page has it (App.talkgroups_state), from the tier each carries
+                self.talkgroups = [dict(r, tier_set=r.get("tier") is not None) if isinstance(r, dict) and "tier_set" not in r
+                                   else r for r in tgs]
             self.status, self.status_at = st, now
             if self.health_ is not None:
                 self.health_.observe(st)           # each channel's gaps, for the silence hints
@@ -588,7 +613,9 @@ class Hub:
                 self.log(f"hub: reception test not logged: {type(e).__name__}: {e}")
         if isinstance(d.get("talking"), list):
             self.live.update(d["talking"], now, d.get("paging") if isinstance(d.get("paging"), list) else None)
-        return _json(200, {"ok": True, "build": self.build, "caps": ["p25_systems"]})   # (#409: what this hub knows)
+        # station: the id the hub took it as (the station adopts it: StationLink.adopt; a rename never locks it out)
+        return _json(200, {"ok": True, "build": self.build, "caps": ["p25_systems"],      # (#409: what this hub knows)
+                           **({"station": sid or p.id} if p is not None and (sid or p.id) else {})})
 
     def _aircraft(self, raw: bytes | None, headers) -> tuple[int, bytes, str]:
         """Our receiver's aircraft, forwarded by the station (#235): into the aircraft layer, nothing else."""
@@ -907,6 +934,7 @@ class HubApp(App):
         self.metric_insight = Insight(self.metric_store, section=lambda: self.cad.settings.section(SIGNAL_SECTION), log=log)
         self.cad.station_metrics_insight = self.metric_insight
         self.health.shifts = self.metric_insight.hints
+        self._renaming = threading.Lock()                  # apply_station_renames: one at a time
         app_mod._mark("hub")
 
     def _perf_sizes(self) -> None:
@@ -1558,6 +1586,8 @@ class HubApp(App):
 
     def set_talkgroup(self, tg: int, record: bool | None = None, main: bool | None = None,
                       tier: str | None = None, system: str = "") -> str | None:
+        if system == sourcekeys.COUNTY and tier is None and "p25_systems" not in (self.hub.status or {}):
+            system = ""                                # the county's, to a station from before #409: as it always went
         if tier is not None or system:                 # (#409: a station from before this refuses the extra arguments)
             return self._switch("set_talkgroup", int(tg), record, main, tier, str(system or ""))
         return self._switch("set_talkgroup", int(tg), record, main)
@@ -1872,13 +1902,42 @@ class HubApp(App):
                                 "key IN (?, ?) AND at >= ? AND at < ? ORDER BY at LIMIT 500",
                                 (f"squelch/{subject}", f"channel/{subject}", t0, t1))
 
+    def apply_station_renames(self) -> int:
+        """The shared token's renames (hub.sqlite meta "station_renames", StationRegistry.moves) applied to the station's
+        signal metrics: each former id's rows from before its rename moved to the id it is now (a later row under it is
+        another station's), in chunks, never on an admin's request. Run after a rename, at the janitor's turn, and once
+        the store settles (a takeover restores a copy that may be from before a rename: metrics.sqlite isn't
+        replicated). The janitor's rollups wait while it runs (_renaming). Moved anything: a copy goes up soon. The
+        rows moved."""
+        store = getattr(self, "metric_store", None)
+        if store is None or not store.settled or not self._renaming.acquire(blocking=False):
+            return 0
+        try:
+            n = 0
+            for old, (new, at) in self.hub.stations.moves().items():
+                m = store.rename_station(old, new, before=at)     # (only its rows from before the rename)
+                if m:
+                    self.hub.log(f"stations: station metrics: {m} row(s) moved from {old} to {new}")
+                    ins = getattr(self, "metric_insight", None)     # #606: its suggestions / sparks / shifts follow
+                    if ins is not None:
+                        ins.renamed(old, new)
+                n += m
+            if n:
+                store.copy_soon()
+            return n
+        except fence_mod.FencedWrite:
+            return 0                               # not the leader now: the next one does it
+        finally:
+            self._renaming.release()
+
     def _metrics_backup(self) -> None:
         """The station metrics' copies (sizeup/cloud/metricstore.py backup_turn): settle from the bucket, then a copy
         every 3 h. The leader's only (the store checks); never takes anything down."""
         from sizeup.cloud.metricstore import BACKUP_TURN_S
         while not self._stopping.wait(BACKUP_TURN_S):
             try:
-                self.metric_store.backup_turn()
+                if self.metric_store.backup_turn() in ("restored", "none"):
+                    self.apply_station_renames()   # settled from a copy: a rename since it was made, again
             except Exception as e:  # noqa: BLE001
                 self.hub.log(f"metrics: backup error: {type(e).__name__}: {e}")
 
@@ -1888,14 +1947,25 @@ class HubApp(App):
                 self._clean_hub(background=True)
             except Exception as e:  # cleanup must never take the display down
                 self.hub.log(f"hub: cleanup error: {type(e).__name__}: {e}")
-            try:                                  # the station metrics: rollups, retention
-                self.metric_store.maintain()
+            try:                                  # the station metrics: renames, rollups, retention
+                self.metrics_turn()
             except Exception as e:  # noqa: BLE001 - never takes anything down
                 self.hub.log(f"metrics: maintenance error: {type(e).__name__}: {e}")
             try:                                  # ... then the shift checks (#606): Health's warnings, never a push
                 self.metric_insight.turn()
             except Exception as e:  # noqa: BLE001 - never takes anything down
                 self.hub.log(f"metrics: shift check error: {type(e).__name__}: {e}")
+
+    def metrics_turn(self) -> dict | None:
+        """The janitor's station-metrics turn: the renames, then the rollups and retention (maintain), which wait for
+        the next turn while a move runs (a rollup of a move half done would be wrong). None: skipped for a move."""
+        self.apply_station_renames()
+        if not self._renaming.acquire(blocking=False):
+            return None
+        try:
+            return self.metric_store.maintain()
+        finally:
+            self._renaming.release()
 
     def start(self) -> HubApp:
         threading.Thread(target=self._hub_janitor, name="hub-janitor", daemon=True).start()

@@ -267,6 +267,18 @@ def plan_text(c) -> str:
     return " + ".join([head, *(AmExtra(f, label, a, b).describe() for f, a, b, label in getattr(c, "also", ()))])
 
 
+def keyup_link(label: str, seg) -> dict | None:
+    """A piece of a recording cut at key-ups (radio/fm.py, am.py): {parent: the clip id of the recording's first piece
+    (the first piece: its own), prev: the piece before's ("" for the first), split: why it was cut (gap | id | level; ""
+    for the first)}. None for a transmission that wasn't cut."""
+    first = getattr(seg, "first_start", None)
+    if first is None:
+        return None
+    cid = lambda t: f"{label.replace(' ', '')}-{int(t * 1000)}"     # noqa: E731  (as the transmission's own id)
+    prev = getattr(seg, "prev_start", None)
+    return {"parent": cid(first), "prev": cid(prev) if prev is not None else "", "split": getattr(seg, "split", "")}
+
+
 def make_receiver(cfg: Config, c, device, on_segment, covered=None) -> NfmReceiver:
     """The receiver for one [[radio.channels]] entry: AM with the carrier squelch on an airband channel (HPN ATC, #233:
     sizeup/radio/am.py), else NFM with the noise squelch."""
@@ -276,9 +288,11 @@ def make_receiver(cfg: Config, c, device, on_segment, covered=None) -> NfmReceiv
                           schedule=getattr(c, "schedule", ()) or None,
                           also=[AmExtra(f, label, a, b) for f, a, b, label in getattr(c, "also", ())],
                           owner=lambda mhz: airband_owner(cfg.channels, mhz), covered=covered,
-                          multichannel=getattr(cfg, "airband_multichannel", False))
+                          multichannel=getattr(cfg, "airband_multichannel", False),
+                          split_s=getattr(c, "split_s", 0.0) or 0.0, jump_db=getattr(c, "jump_db", None) or None)
     return NfmReceiver(cfg.rtl_fm, device, c.gain_db, Channel(c.mhz, c.label), on_segment, log, open_db=c.squelch_db,
-                       drop_db=c.drop_db, hang_s=c.hang_s, continue_s=c.continue_s)
+                       drop_db=c.drop_db, hang_s=c.hang_s, continue_s=c.continue_s, keyups=getattr(c, "keyups", ""),
+                       split_s=getattr(c, "split_s", 0.0) or 0.0, jump_db=getattr(c, "jump_db", None) or None)
 
 
 def whisper_threads() -> int:
@@ -460,6 +474,10 @@ class App:
         for t in list(self.store.loose) + [t for i in self.store.incidents for t in i.traffic]:
             if t.talkgroup is not None:
                 self.tg.seed(t.talkgroup, t.end, getattr(t, "system", ""))
+        # (after the seed: a county talkgroup heard in the history is the county's, whatever another system lists)
+        for tg, owner, was in self.tg.drop_orphans(cfg.p25_tg_file_rows > 0):   # the old page's, by number alone (once)
+            log(f"talkgroups: county choice for {tg} dropped ({', '.join(f'{k}={v}' for k, v in sorted(was.items()))}; "
+                f"kept in talkgroups_migrated.json): {tg} is {owner}'s talkgroup, never heard on the county")
         self._last_tones_only: Page | None = None
         self.pagehold = PageHold(self.plan)   # paging: a page waits out its continuation window
         self.receivers = [make_receiver(cfg, c, c.device, self._segment, self._heard_elsewhere) for c in cfg.channels]
@@ -1011,6 +1029,9 @@ class App:
                  read_twice=page.read_twice)
         if getattr(page, "alt_model", ""):
             d.update(alt_text=getattr(page, "alt_text", ""), alt_model=page.alt_model)  # type: ignore[attr-defined]
+        for k in ("keyup", "radio_id", "unit"):          # a unit's key-up cut from a page (radio/page.py PageHold)
+            if getattr(page, k, None):
+                d[k] = getattr(page, k)
         return d
 
     def _save_page(self, page: Page) -> None:
@@ -1338,6 +1359,8 @@ class App:
         t = Traffic(f"{ch.label.replace(' ', '')}-{int(seg.start * 1000)}", ch.label, seg.start, seg.end,
                     "", status="pending", unit=", ".join(units), rig=self.radios.rig_mdc(ids), radio_id=", ".join(ids))
         t.low_energy = low_energy  # type: ignore[attr-defined]
+        if (link := keyup_link(ch.label, seg)) is not None:
+            t.keyup = link         # type: ignore[attr-defined]  (a piece of a recording cut at key-ups, radio/fm.py)
         if id_note:
             t.id_note = id_note    # type: ignore[attr-defined]
         self._keep_bursts(t.id, seg)
@@ -1364,6 +1387,8 @@ class App:
         t.fm = False                                      # type: ignore[attr-defined]
         t.mhz = round(float(ch.mhz), 4)                   # type: ignore[attr-defined]  (the frequency it was heard on: #260)
         t.carrier_db = round(float(seg.quieting_db), 1)   # type: ignore[attr-defined]  (the tower's is steady: #252)
+        if (link := keyup_link(ch.label, seg)) is not None:
+            t.keyup = link                                # type: ignore[attr-defined]  (cut at a key-up, radio/am.py)
         # #270: the level, the floor and the voice's SNR of each transmission, sent to the hub with it (its traffic doc),
         # so a weak transmitter can be told from a missing one there; and one line here
         for k in ("carrier_dbfs", "snr_db", "opened"):
@@ -1401,6 +1426,17 @@ class App:
                 "(Record is off in Settings > Radios)")
             return
         done, touched = self.pagehold.add(ch.label, ch.mhz, seg)
+        if seg.split and touched and not touched[0][1]:
+            # a unit's key-up cut from a page (radio/fm.py keyups): who keyed it, as on a traffic channel
+            found = self.tap.ids(ch.label, seg.start, seg.end)
+            found += [x for x in self._mdc(*seg.bursts) if x not in found]
+            ids = list(dict.fromkeys(h for h, _e in found))
+            if ids:
+                page = touched[0][0]
+                page.radio_id = ", ".join(ids)          # type: ignore[attr-defined]
+                page.unit = ", ".join(self._units(seg, found))   # type: ignore[attr-defined]
+                for h in ids:
+                    self._heard(fm_system(h), h, at=seg.end, channel=ch.label)
         finished = {id(p) for p in done}
         for page, joined in touched:
             self._keep_clip(page.id, page.audio)        # joined: the clip grows with the page
@@ -1487,7 +1523,8 @@ class App:
         own = page.message_tones
         try:
             self.cad.record_traffic({"id": page.id, "start": page.start, "end": page.end, "source": page.label,
-                                     "talkgroup": None, "unit": "60 Control" if page.tones else "", "rig": "", "radio_id": "",
+                                     "talkgroup": None, "unit": getattr(page, "unit", "") or ("60 Control" if page.tones else ""),
+                                     "rig": "", "radio_id": getattr(page, "radio_id", ""),
                                      "text": page.raw, "status": page.status, "model": getattr(page, "model", ""),
                                      "tones": [{"a_hz": round(t.a_hz, 1), "b_hz": round(t.b_hz, 1) if t.b_hz else None,
                                                 "names": list(t.names), "ours": self.paging.is_ours(t.names)}
@@ -4299,11 +4336,16 @@ class App:
         talkgroup (#409: `system`, "" = the county's): tier = alert | text | record | off | activity."""
         if not self.p25:
             return "no P25 configured"
+        qualified = system == self.tg.county             # sent as the county's source ("p25:westchester:<n>"): no doubt
         system = "" if system == self.tg.county else str(system or "")
         if system and not self.tg.known(int(tg), system):
             return f"no talkgroup {tg} on {system}"
         if tier is not None:
             return self.set_talkgroup_tier(tg, tier, system)
+        if not system and not qualified and (owners := self.tg.elsewhere(int(tg))):
+            # a bare number is the county's: this one is another system's talkgroup (its Main / Record would have
+            # landed on a county talkgroup that doesn't exist, an "Unknown" card): never written
+            return f"talkgroup {tg} is {owners[0]}'s, not the county's: send its source (p25:{owners[0]}:{int(tg)})"
         self.tg.set(int(tg), record, main, system)
         if system:
             log(f"talkgroup {system}:{tg} ({self.tg.name(int(tg), system)}): tier={self.tg.tier(int(tg), system)}")
@@ -4317,7 +4359,8 @@ class App:
         return "; ".join(on) if on else ("SDRs released (Off)" if many else "SDR released (Off)")
 
     def set_talkgroup_group(self, group: str, record: bool | None = None, main: bool | None = None) -> str | None:
-        """POST /api/talkgroup-group: a whole section on/off in one go."""
+        """POST /api/talkgroup-group: a whole section of the county's on/off in one go (never another system's section
+        of the same name: those have a tier each)."""
         if not self.p25:
             return "no P25 configured"
         n = self.tg.set_group(str(group), record, main)

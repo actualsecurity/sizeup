@@ -20,7 +20,8 @@ REFUSED_HINT = {
     "token_unknown": "check SIZEUP_STATION_TOKEN (sizeup-station secrets): an admin issues one in Settings > Station > Stations",
     "token_revoked": "an admin revoked it: ask for a new one (Settings > Station > Stations > Rotate)",
     "token_retired": "the shared token is retired: put this station's own token in SIZEUP_STATION_TOKEN",
-    "id_mismatch": "the token is another station's: check [station] id in the config and SIZEUP_STATION_TOKEN",
+    "id_mismatch": "the token is another station's: check [station] id in the config, SIZEUP_STATION_TOKEN and the "
+                   "shared token's id on the hub (Settings > Station > Stations)",
     "read_only": "that is a status token: the station needs its station token",
     "multi_station_off": "the hub takes one station until multi-station lands: this one waits (its outbox keeps everything)",
 }

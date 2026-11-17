@@ -493,6 +493,16 @@ class Insight:
             for k in [k for k in self._sugg if k[1] == subject]:
                 del self._sugg[k]
 
+    def renamed(self, old: str, new: str) -> None:
+        """A station renamed (its rows moved to `new`, sizeup/cloud/hub.py apply_station_renames): what was worked out
+        under `old` is dropped (looked up again under `new`), and the shifts in force say `new`."""
+        with self._lock:
+            for k in [k for k in self._sugg if k[0] == old]:
+                del self._sugg[k]
+            self._spark = None
+            self.found = [dict(f, station=new) if f.get("station") == old else f for f in self.found]
+            self._drift = [dict(f, station=new) if f.get("station") == old else f for f in self._drift]
+
     def squelch(self, now: float | None = None) -> dict:
         """view=squelch: each FM / AM channel's suggestion (Settings > Radios > Squelch and Signal)."""
         now = self.clock() if now is None else now

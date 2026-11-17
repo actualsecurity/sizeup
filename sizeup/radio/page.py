@@ -38,6 +38,12 @@ tone decoder's runs and the voice band:
        under NO_MESSAGE_S said after its tones is "tones only, no message" (status no_voice), not merged into
        the next. Speech before the first tones (a continuation's end of the last page) is a piece of its own too.
 
+Key-ups (radio/fm.py keyups = "paging", off by default: only with jump_db set on the channel): a carrier back jump_db
+stronger than the page's, across a drop longer than the short hang with no tone ringing into it, is its own
+transmission: the squelch cuts it off (Segment.split) and never marks it a continuation, so it is a piece (a "voice"
+page) of its own, never joined to the page. PageHold links it to the page it was cut from (Page.keyup: parent, prev,
+split).
+
 A page made before #183 (or by a station on an older build) can still hold two groups: Page.message_tones is the
 group its voice answers (the last one; groups apart by STACK_GAP_S, from the tones' times or tone_seq), and only
 those make it ours (App._transcribed), never a neighbouring page's tones.
@@ -75,7 +81,8 @@ _HF = (_F >= HF_BAND[0]) & (_F <= HF_BAND[1])
 REASONS = {"quiet": "quiet after hang", "max length": "max length", "stall": "stall (rtl_fm sent no audio)",
            "stopped": "receiver stopped", "rtl_fm ended": "rtl_fm ended", "tones": "new page's tones",
            "drop": "dropped to a weaker carrier", "background": "background carrier",
-           "steady": "nothing on the carrier for 30 s (noise held the squelch)"}
+           "steady": "nothing on the carrier for 30 s (noise held the squelch)",
+           "key-up": "the next key-up cut it off"}
 TONES_ONLY = "tones only, no message"
 
 
@@ -156,6 +163,11 @@ def page_from_dict(d: dict) -> Page:
     p.history = d.get("history") or []  # type: ignore[attr-defined]
     p.rerun_at = d.get("rerun_at")  # type: ignore[attr-defined]
     p.model = d.get("model", "")  # type: ignore[attr-defined]
+    if isinstance(d.get("keyup"), dict):    # a piece cut from a recording at a key-up (PageHold), and who keyed it
+        p.keyup = dict(d["keyup"])  # type: ignore[attr-defined]
+    for k in ("radio_id", "unit"):
+        if d.get(k):
+            setattr(p, k, str(d[k]))
     p.stt = d.get("stt", "")  # type: ignore[attr-defined]   (aws | both: Amazon Transcribe on the hub)
     if d.get("alt_model"):
         p.alt_text, p.alt_model = d.get("alt_text", ""), d["alt_model"]  # type: ignore[attr-defined]
@@ -397,6 +409,8 @@ class PageHold:
     def __init__(self, plan: TonePlan):
         self.plan = plan
         self.held: dict[str, tuple[Page, float]] = {}    # channel -> (page, squelch's window end)
+        # key-ups: channel -> {a piece's start: (its first page's id, its last page's id)}, for the pieces after it
+        self._pieces: dict[str, dict[float, tuple[str, str]]] = {}
         self._lock = threading.Lock()
 
     def add(self, label: str, mhz: float, seg: Segment) -> tuple[list[Page], list[tuple[Page, bool]]]:
@@ -406,6 +420,7 @@ class PageHold:
         pieces = split_pages(seg, tones, seq)
         done: list[Page] = []
         touched: list[tuple[Page, bool]] = []
+        link = self._keyup(label, seg)
         for pc in pieces:
             piece = pc.seg
             page = assemble(label, mhz, piece, self.plan, pc.tones, pc.seq)
@@ -426,7 +441,28 @@ class PageHold:
                 else:
                     done.append(page)
             touched.append((page, joined))
+        if touched:
+            with self._lock:
+                known = self._pieces.setdefault(label, {})
+                known[seg.start] = (touched[0][0].id, touched[-1][0].id)
+                while len(known) > 8:               # (the last few transmissions: a key-up links to one just before)
+                    del known[next(iter(known))]
+        if seg.first_start is not None and touched:
+            if link is not None and not touched[0][1]:
+                touched[0][0].keyup = link  # type: ignore[attr-defined]
+            if link is None and seg.split == "":
+                touched[0][0].keyup = {"parent": touched[0][0].id, "prev": "", "split": ""}  # type: ignore[attr-defined]
         return done, touched
+
+    def _keyup(self, label: str, seg: Segment) -> dict | None:
+        """A piece cut from a recording at a key-up (radio/fm.py): {parent: the page id of the recording's first
+        piece, prev: the page before it, split: gap | id | level}; None for anything else."""
+        if not seg.split:
+            return None
+        with self._lock:
+            known = self._pieces.get(label, {})
+            first, prev = known.get(seg.first_start), known.get(seg.prev_start)
+        return {"parent": first[0] if first else "", "prev": prev[1] if prev else "", "split": seg.split}
 
     def due(self, now: float, busy: Callable[[str], bool] = lambda label: False) -> list[Page]:
         """Pages whose window has passed. busy(label): that channel's squelch is open on a continuation
