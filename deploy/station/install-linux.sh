@@ -964,7 +964,10 @@ builds() {
       tr_patch | git -C "$src" apply - || die "trunk-recorder: our patch (#638) doesn't apply to $TR_TAG"
       say "trunk-recorder: patched (#638: a new talker on the voice channel can end the transmission)"
     fi
-    cmake -S "$src" -B "$src/build" -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$TR_B"
+    # CMAKE_C(XX)_FLAGS set empty each time: 5.2.0's CMakeLists appends its flags to the cached ones (CACHE FORCE), so
+    # every configure of a kept build directory would change the flags and compile everything again (#638)
+    cmake -S "$src" -B "$src/build" -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_FLAGS= -DCMAKE_CXX_FLAGS= \
+      -DCMAKE_INSTALL_PREFIX="$TR_B"
     # at a low priority: on an update it builds beside the trunk-recorder that is recording
     low=(nice -n 10)
     if command -v ionice >/dev/null; then low+=(ionice -c 2 -n 7); fi

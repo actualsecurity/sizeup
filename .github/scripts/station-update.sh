@@ -251,10 +251,25 @@ say "F: trunk-recorder's patch (#638) taken out: stock 5.2.0, built in the same 
 tr_link() { readlink -f /opt/sizeup/trunk-recorder; }
 mtime() { stat -c %Y "$1"; }
 obj=/opt/sizeup/src/trunk-recorder/build/CMakeFiles/trunk_recorder_library.dir/trunk-recorder
+f_why() {      # what F/G saw, when a check fails
+  echo "--- trunk-recorder link: $(tr_link) (patched: $patched)"
+  ls -la /opt/sizeup/builds | grep trunk-recorder || true
+  stat -c '%Y %n' "$obj/talkgroup.cc.o" "$obj/gr_blocks/transmission_sink.cc.o" || true
+  grep -c "Building CXX" /var/log/sizeup-install.log || true
+  tail -n 40 /var/log/sizeup-install.log || true
+  tail -n 5 /var/log/sizeup-update.log || true
+}
+check() {      # check WHAT CMD...: say it, run it, and on failure say why
+  local what=$1
+  shift
+  if "$@"; then echo "ok: $what"; else echo "FAILED: $what" >&2; f_why >&2; return 1; fi
+}
 patched=$(tr_link)
-[[ "$patched" =~ -p[0-9a-f]{8}$ ]] || { echo "not a patched build: $patched" >&2; exit 1; }
+check "the running build is the patched one ($patched)" grep -Eq -- '-p[0-9a-f]{8}$' <<<"$patched"
 untouched=$(mtime "$obj/talkgroup.cc.o")
 sink0=$(mtime "$obj/gr_blocks/transmission_sink.cc.o")
+built0=$(grep -c "Building CXX" /var/log/sizeup-install.log || true)
+echo "before F: talkgroup.o $untouched, transmission_sink.o $sink0, $built0 objects compiled so far"
 gitc reset -q --hard "$A"
 python3 - "$SRC/deploy/station/install-linux.sh" <<'PY'
 import re, sys
@@ -267,26 +282,29 @@ PY
 F=$(push F)
 trpid=$(tr_pid)
 hub_runs "$F"
-wait_for 1200 state_is current "$F"
-test "$(current)" = "$F"
-test "$(tr_link)" = "${patched%-p*}"                                    # stock, in its own build directory
-test "$(mtime "$obj/talkgroup.cc.o")" = "$untouched"                    # an incremental build: this one untouched
-test "$(mtime "$obj/gr_blocks/transmission_sink.cc.o")" -gt "$sink0"     # ... the patched file compiled again
-test "$(tr_pid)" != "$trpid"                                            # what it runs changed: restarted
-test -d "$patched"                                                      # the patched build stays for A
+echo "F is $F: waiting for the station to build and switch to it"
+check "the station switched to F" wait_for 1200 state_is current "$F"
+check "F is current" test "$(current)" = "$F"
+check "the stock build runs: $(tr_link)" test "$(tr_link)" = "${patched%-p*}"
+built=$(( $(grep -c "Building CXX" /var/log/sizeup-install.log || true) - built0 ))
+echo "F compiled $built objects"
+check "an incremental build: talkgroup.o untouched" test "$(mtime "$obj/talkgroup.cc.o")" = "$untouched"
+check "transmission_sink.o compiled again" test "$(mtime "$obj/gr_blocks/transmission_sink.cc.o")" -gt "$sink0"
+check "trunk-recorder's service restarted (it runs another build)" test "$(tr_pid)" != "$trpid"
+check "the patched build stays for A" test -d "$patched"
 
 say "G: the patch back: its build reused, nothing compiled"
 gitc checkout -q "$A" -- deploy/station/install-linux.sh
 G=$(push G)
 built=$(mtime "$obj/gr_blocks/transmission_sink.cc.o")
 hub_runs "$G"
-wait_for 600 state_is current "$G"
-test "$(tr_link)" = "$patched"
-test "$(mtime "$obj/gr_blocks/transmission_sink.cc.o")" = "$built"
-grep -q "trunk-recorder: up to date" /var/log/sizeup-install.log
+check "the station switched to G" wait_for 600 state_is current "$G"
+check "the patched build runs again" test "$(tr_link)" = "$patched"
+check "nothing compiled for G" test "$(mtime "$obj/gr_blocks/transmission_sink.cc.o")" = "$built"
+check "trunk-recorder: up to date" grep -q "trunk-recorder: up to date" /var/log/sizeup-install.log
 
 say "rollback: stock again"
 sizeup-station rollback
-test "$(current)" = "$F"
-test "$(tr_link)" = "${patched%-p*}"
+check "back on F" test "$(current)" = "$F"
+check "the stock build runs" test "$(tr_link)" = "${patched%-p*}"
 say "ok"
