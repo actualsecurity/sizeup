@@ -273,14 +273,14 @@ def test_the_guard_deploys_only_what_ecs_runs_or_a_descendant_of_it():
     assert not any("actions" in p for p in gh.paths)                   # never the run history
 
 
-def ecs(services, image=None, primary="arn:aws:ecs:r:1:task-definition/sizeup-hub:42"):
+def ecs(services, image=None, primary="arn:aws:ecs:r:1:task-definition/sizeup-hub:42", failures=()):
     """A fake `aws ecs ...` (the guard's two reads) and the calls it was asked."""
     asked = []
 
     def aws(args):
         asked.append(args)
         if args[1] == "describe-services":
-            return {"services": services if services is not None else [
+            return {"failures": list(failures), "services": services if services is not None else [
                 {"status": "ACTIVE", "deployments": [{"status": "ACTIVE", "taskDefinition": "old:41"},
                                                      {"status": "PRIMARY", "taskDefinition": primary}]}]}
         assert args[1] == "describe-task-definition" and args[3] == primary
@@ -293,8 +293,14 @@ def test_ecs_running_reads_the_primary_deployments_hub_image_tag():
     aws, asked = ecs(None, f"123.dkr.ecr.us-east-1.amazonaws.com/sizeup-hub:{C[3]}")
     assert dc.ecs_running("sizeup-hub", "sizeup-hub", aws=aws) == C[3]
     assert [a[1] for a in asked] == ["describe-services", "describe-task-definition"]
-    assert dc.ecs_running("c", "s", aws=ecs([])[0]) is None                                   # no service yet
-    assert dc.ecs_running("c", "s", aws=ecs([{"status": "INACTIVE"}])[0]) is None
+    missing = [{"arn": "arn:aws:ecs:r:1:service/c/s", "reason": "MISSING"}]
+    assert dc.ecs_running("c", "s", aws=ecs([], failures=missing)[0]) is None                 # no service yet
+    for gone in ("DRAINING", "INACTIVE"):
+        assert dc.ecs_running("c", "s", aws=ecs([{"status": gone}])[0]) is None
+    for odd in (ecs([])[0], ecs([], failures=[{"reason": "ACCESS_DENIED"}])[0], lambda args: {},
+                ecs([{"status": "PENDING"}])[0]):
+        with pytest.raises(dc.EcsError):                               # never "nothing runs" by default
+            dc.ecs_running("c", "s", aws=odd)
     for image in ("123.dkr.ecr.us-east-1.amazonaws.com/sizeup-hub:latest", None, "host:5000/repo"):
         with pytest.raises(dc.EcsError, match="not tagged with a full sha"):              # fails closed
             dc.ecs_running("c", "s", aws=ecs(None, image)[0])
@@ -350,9 +356,47 @@ def test_the_deploy_workflow_picks_first_and_names_the_job_after_the_commit():
         assert guard < wf.index(later), later
     assert "github.event.workflow_run.event == 'push'" in wf and "cancel-in-progress: false" in wf
     assert "&& 'deploy' || format('deploy-skipped-{0}', github.run_id)" in wf   # skipped runs: their own group
-    # paused: no automatic deploy (pick's if and the queue's group); by hand still deploys
-    assert wf.count("vars.DEPLOY_PAUSED != 'true' && github.event.workflow_run.conclusion == 'success'") == 2
-    assert "github.event_name == 'workflow_dispatch' || (vars.DEPLOY_PAUSED" in wf
+    # paused: pick still runs (to warn), outside the deploy queue
+    assert wf.count("vars.DEPLOY_PAUSED != 'true' && github.event.workflow_run.conclusion == 'success'") == 1
+    group = wf[wf.index("concurrency:"):wf.index("jobs:")]
+    assert "github.event_name == 'workflow_dispatch' || (vars.DEPLOY_PAUSED != 'true'" in group
+    assert "DEPLOY_PAUSED" not in wf[wf.index("  pick:"):wf.index("    runs-on:", wf.index("  pick:"))]
+
+
+def pick_step(tmp_path, **env):
+    """Runs the pick step's own shell script from deploy.yml (python3 there: a stub that records it was asked)."""
+    import os
+    import subprocess
+
+    import yaml
+    wf = yaml.safe_load((ROOT / ".github" / "workflows" / "deploy.yml").read_text())
+    step = next(s for s in wf["jobs"]["pick"]["steps"] if s.get("id") == "pick")
+    assert set(step["env"]) == {"GITHUB_TOKEN", "TESTED", "DEPLOY_PAUSED"}
+    assert step["env"]["DEPLOY_PAUSED"] == "${{ vars.DEPLOY_PAUSED }}"
+    stub = tmp_path / "bin"
+    stub.mkdir(exist_ok=True)
+    (stub / "python3").write_text("#!/bin/sh\necho \"python3 $*\" >> \"$CALLS\"\necho sha=PICKED >> \"$GITHUB_OUTPUT\"\n")
+    (stub / "python3").chmod(0o755)
+    out, calls = tmp_path / "out", tmp_path / "calls"
+    out.write_text(""), calls.write_text("")
+    r = subprocess.run(["bash", "-e", "-c", step["run"]], capture_output=True, text=True, timeout=30, env={
+        "PATH": f"{stub}:{os.environ['PATH']}", "GITHUB_OUTPUT": str(out), "CALLS": str(calls),
+        "GITHUB_REPOSITORY": REPO, "GITHUB_RUN_ID": "5", "GITHUB_SHA": C[6], "GITHUB_REF_NAME": "main",
+        "TESTED": C[3], **env})
+    assert r.returncode == 0, r.stderr
+    return r.stdout, out.read_text(), calls.read_text()
+
+
+def test_paused_pick_warns_and_deploys_nothing_and_by_hand_still_deploys(tmp_path):
+    said, out, calls = pick_step(tmp_path, GITHUB_EVENT_NAME="workflow_run", DEPLOY_PAUSED="true")
+    assert said.startswith("::warning title=Deploys paused::DEPLOY_PAUSED is true: " + C[3][:7]) and "nothing was deployed" in said
+    assert out == "sha=\n" and calls == ""                            # no sha: the deploy job is skipped
+    said, out, calls = pick_step(tmp_path, GITHUB_EVENT_NAME="workflow_dispatch", DEPLOY_PAUSED="true")
+    assert out == f"sha={C[6]}\n" and "by hand" in said and calls == ""
+    for unpaused in ("", "false"):
+        said, out, calls = pick_step(tmp_path, GITHUB_EVENT_NAME="workflow_run", DEPLOY_PAUSED=unpaused)
+        assert "paused" not in said and out == "sha=PICKED\n"
+        assert calls == f'python3 tools/deploy_check.py pick --repo {REPO} --sha {C[3]} --run-id 5\n'
 
 
 class FakeResponse:

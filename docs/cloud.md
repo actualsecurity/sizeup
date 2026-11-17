@@ -604,13 +604,17 @@ PRs can be merged one after another without waiting for each deploy (about 9 min
   goes over a newer one, whatever order runs, re-runs or attempts happen in ("Re-run failed jobs" on an old run keeps
   its old pick: the guard stops it; re-run all jobs to pick again). It fails closed: if ECS or GitHub can't be read,
   or the image isn't tagged with a sha, nothing is deployed and the run is red.
-* **By hand** (Actions → deploy → Run workflow): deploys exactly that ref, no pick and no guard. This is the rollback.
-  The next merge that passes would deploy main again, so pause first.
-* **Pause after a rollback.** The repository variable `DEPLOY_PAUSED` = `true` (Settings → Secrets and variables →
-  Actions → Variables) skips every automatic deploy; a deploy by hand still works. Delete it (or set `false`) to
-  resume: nothing deploys at once, the next merge that passes deploys the newest tested commit (or run deploy by hand
-  on main). After a by-hand deploy of a commit that isn't on main, the guard refuses automatic deploys (not a
-  descendant) until main is deployed by hand once.
+* **By hand** (Actions → deploy → Run workflow, on main): deploys main's tip now, with no pick (the guard doesn't
+  run either). The deploy role trusts only `refs/heads/main`, so this can't deploy an older commit: it is not a
+  rollback.
+* **Pause.** The repository variable `DEPLOY_PAUSED` = `true` (Settings → Secrets and variables → Actions →
+  Variables) stops automatic deploys. Each passing merge still starts `pick`, outside the deploy queue, which warns
+  "Deploys paused" and deploys nothing, so a forgotten pause shows on every merge. A deploy by hand still works.
+  Delete the variable (or set it to `false`) to resume: nothing deploys at once; the next merge that passes deploys
+  the newest tested commit (or run deploy by hand).
+* **Rollback.** Set the `DEPLOY_PAUSED` variable to `true`, then either merge a revert PR (tested, deploys normally)
+  or have an admin run `aws ecs update-service --task-definition <previous revision>`; unpause once main is good. A
+  deploy run already past pick when you pause still deploys: cancel it in Actions.
 
 Three merges a minute apart: the first deploys; the second's run waits; the third's run replaces it in the queue and,
 when the first is done, deploys the third. If the third's tests are still running then, the second's run deploys the

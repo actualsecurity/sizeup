@@ -20,10 +20,14 @@ name: deploy
 # "deploy <sha>": that is how the next pick knows what was deployed. Then, with the AWS credentials, the guard reads
 # what ECS actually runs and deploys only that commit or a descendant of it (git ancestry): never an older commit over
 # a newer one, whatever the run history says (a re-run of an old run, for one). Fails closed.
-# By hand (workflow_dispatch): deploys exactly the chosen ref, no pick and no guard: that is the rollback.
-# Pause: the repository variable DEPLOY_PAUSED = true (Settings > Secrets and variables > Actions > Variables) skips
-# every automatic deploy, e.g. after a rollback; a deploy by hand still works. Delete it (or set false) to resume: the
-# next merge that passes deploys the newest tested commit.
+# By hand (workflow_dispatch, on main: the deploy role only trusts refs/heads/main): deploys main's tip now, no pick.
+# It can't roll back.
+# Pause: the repository variable DEPLOY_PAUSED = true (Settings > Secrets and variables > Actions > Variables). Each
+# automatic run still starts pick, which warns "Deploys paused" and deploys nothing, so a forgotten pause shows on every
+# merge; a deploy by hand still works.
+# Rollback: set the DEPLOY_PAUSED variable to true, then either merge a revert PR (tested, deploys normally) or have an
+# admin run aws ecs update-service --task-definition <previous revision>; unpause once main is good. A deploy run
+# already past pick when you pause still deploys: cancel it in Actions.
 on:
   workflow_run:
     workflows: [test]
@@ -44,7 +48,8 @@ concurrency:
 
 jobs:
   pick:
-    if: github.event_name == 'workflow_dispatch' || (vars.DEPLOY_PAUSED != 'true' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')
+    # (paused too: pick then only warns, outside the deploy queue, see the concurrency group above)
+    if: github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -61,10 +66,16 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
           TESTED: ${{ github.event.workflow_run.head_sha }}
+          DEPLOY_PAUSED: ${{ vars.DEPLOY_PAUSED }}
         run: |
           if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
             echo "::notice title=Deploying::$GITHUB_SHA ($GITHUB_REF_NAME, by hand)"
             echo "sha=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$DEPLOY_PAUSED" = true ]; then
+            echo "::warning title=Deploys paused::DEPLOY_PAUSED is true: ${TESTED:0:7} passed its tests but nothing was deployed. Unpause (Settings > Secrets and variables > Actions > Variables) once main is good: the next merge that passes deploys the newest tested commit."
+            echo "sha=" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           python3 tools/deploy_check.py pick --repo "$GITHUB_REPOSITORY" --sha "$TESTED" --run-id "$GITHUB_RUN_ID"
@@ -90,7 +101,7 @@ jobs:
           aws-region: ${{ vars.AWS_REGION }}
       # What ECS runs (the service's PRIMARY deployment → task definition → the hub image's sha tag; ecs:DescribeServices
       # and ecs:DescribeTaskDefinition, sizeup-aws/2-iam.sh): this commit must be it or a descendant of it, by git
-      # ancestry (the GitHub compare API). Fails closed when ECS or GitHub can't be read. Not for a deploy by hand.
+      # ancestry (the GitHub compare API). Fails closed when ECS or GitHub can't be read. Not for a deploy by hand (main's tip).
       - name: Nothing newer is deployed
         if: github.event_name != 'workflow_dispatch'
         env:

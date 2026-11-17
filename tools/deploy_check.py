@@ -402,18 +402,30 @@ def _aws_json(args: list[str], timeout: float = 60.0) -> dict:
         d = json.loads(r.stdout)
     except ValueError:
         raise EcsError(f"aws {args[0]} {args[1]}: not JSON") from None
-    return d if isinstance(d, dict) else {}
+    if not isinstance(d, dict) or not d:
+        raise EcsError(f"aws {args[0]} {args[1]}: not a JSON object")
+    return d
 
 
 def ecs_running(cluster: str, service: str, container: str = "hub",
                 aws: Callable[[list[str]], dict] = _aws_json) -> str | None:
     """The git sha ECS runs (or is rolling to): the service's PRIMARY deployment → its task definition → `container`'s
-    image tag. None: no active service (nothing runs yet). EcsError when it can't be read or the tag isn't a full sha."""
+    image tag. None only when nothing runs: ECS lists the service as MISSING, or it is DRAINING or INACTIVE (deleted).
+    EcsError on anything else: an empty or odd answer, no PRIMARY deployment, a tag that isn't a full sha."""
     d = aws(["ecs", "describe-services", "--cluster", cluster, "--services", service])
-    svc = [x for x in d.get("services") or [] if x.get("status") == "ACTIVE"]
-    if not svc:
+    if not isinstance(d, dict):
+        raise EcsError("describe-services: not a JSON object")
+    services = [x for x in d.get("services") or [] if isinstance(x, dict)]
+    if not services:
+        if any(isinstance(f, dict) and f.get("reason") == "MISSING" for f in d.get("failures") or []):
+            return None
+        raise EcsError(f"describe-services: no {service} and no MISSING failure ({str(d)[:200]})")
+    svc = services[0]
+    if svc.get("status") in ("DRAINING", "INACTIVE"):
         return None
-    td = next((x.get("taskDefinition") for x in svc[0].get("deployments") or [] if x.get("status") == "PRIMARY"), "")
+    if svc.get("status") != "ACTIVE":
+        raise EcsError(f"{service}: status {svc.get('status')!r}")
+    td = next((x.get("taskDefinition") for x in svc.get("deployments") or [] if x.get("status") == "PRIMARY"), "")
     if not td:
         raise EcsError(f"{service}: no PRIMARY deployment")
     t = aws(["ecs", "describe-task-definition", "--task-definition", td]).get("taskDefinition") or {}
@@ -435,7 +447,9 @@ def guard(get: Callable[[str], dict], repo: str, sha: str, running: str | None) 
     if status == "ahead":
         return True, f"{sha[:7]} is newer than {running[:7]}, what ECS runs"
     return False, (f"ECS runs {running[:7]}; {sha[:7]} is {'older than' if status == 'behind' else 'not a descendant of'} "
-                   "it: not deployed (a rollback is a deploy by hand: Actions > deploy > Run workflow)")
+                   "it: not deployed. Rollback: set the DEPLOY_PAUSED variable to true, then either merge a revert PR (tested, "
+                   "deploys normally) or have an admin run aws ecs update-service --task-definition <previous revision>; "
+                   "unpause once main is good")
 
 
 def pick_main(argv: list[str]) -> int:
