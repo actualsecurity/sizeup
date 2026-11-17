@@ -147,6 +147,21 @@ const StationHealth = (() => {
         d.feeds.map((f) => [f.label, [f.state, feedCls(f.state), f.title || ""], f.why || "",
           f.at ? `${when(f.at)} (${longDur(serverNow() - f.at)} ago)` : "never", f.fallback || ""]), ""));
     }
+    const dv = d.dvr;
+    if (dv && !dv.error) {          // the camera DVR (#550, sizeup/dvr.py panel()): its slots, and the cameras parked
+      const hm = (t) => (t ? fmtTime(t) : "—");
+      const hd = el("h3", "hl-sub", "Camera DVR");
+      hd.title = `A camera failing ${dv.park_min} min without a break (${dv.park_404_min} min of master-playlist 404s) is `
+        + `parked: no recording, its slot goes to the next camera. Looked at every ${dv.check_min} min; back on its own when it answers`;
+      const rows = [["Recording", `${dv.recording} of ${dv.max}` + (dv.stopped ? ` · ${dv.stopped}` : ""), dv.stopped ? "hl-bad" : ""]];
+      for (const p of dv.parked || []) rows.push(["Parked", `${p.id} · ${p.why} since ${hm(p.since)} · next check ${hm(p.next)}`, "hl-warn"]);
+      const box = dl(rows);
+      box.querySelectorAll("dd.hl-warn").forEach((x, i) => {
+        const p = dv.parked[i];
+        x.title = `Parked ${hm(p.at)}, last looked at ${hm(p.checked)}. ${hd.title}`;
+      });
+      kids.push(hd, box);
+    }
     if ((d.intel || []).length) {   // radio pre-alerts (sizeup/intel/counters.py): in scope / considered, a line per pack
       const box = el("div", "hl-hints");
       for (const x of d.intel) {

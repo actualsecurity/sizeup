@@ -519,6 +519,7 @@ class StationHealth:
         self.settling: dict[str, dict] = {}          # cleared, not yet settled (#340): back before SETTLE_S, one episode
         self.mutes: Callable[[], dict] | None = None   # the mutes' settings section (#340): HubApp sets it
         self.replicas: Callable[[], dict | None] | None = None   # the supervisor's replica checks (sizeup/replicawatch.py)
+        self.dvr: Callable[[], dict | None] | None = None        # the camera DVR's recording and parked cameras (#550)
         self._load()
         self._first_saved = {k: v for k, v in self._first.items() if k in self.settling}
 
@@ -1427,6 +1428,7 @@ class StationHealth:
                            "muted": [{"kind": k, "label": MUTE_KINDS[k], "until": u} for k, u in self._mutes(now).items()]},
                 "errors": self.errors.panel() if self.errors is not None else None,
                 "replicas": self.replicas_panel(now),
+                "dvr": self._dvr(),
                 "thresholds": {"silent_min": self.silent_s / 60, "behind_min": self.behind_s / 60,
                                "down_min": self.down_s / 60, "outbox_min": self.outbox_s / 60,
                                "disk_pct": self.disk_pct, "repeat_min": self.repeat_s / 60,
@@ -1436,6 +1438,13 @@ class StationHealth:
                                          "factor": QUIET_FACTOR, "gaps_min": QUIET_GAPS_MIN,
                                          "cc_lost_min": CC_LOST_S / 60},
                                "hint": {"factor": HINT_FACTOR, "min_min": HINT_MIN_S / 60}}}
+
+    def _dvr(self) -> dict | None:
+        """The camera DVR (sizeup/dvr.py panel(), #550): how many record, and the cameras parked (dead upstream)."""
+        try:
+            return self.dvr() if self.dvr is not None else None
+        except Exception as e:  # noqa: BLE001 - never in the way of the rest of the panel
+            return {"error": type(e).__name__}
 
     def status(self) -> dict:
         """GET /api/station/status: what the deploy check needs, nothing else (no names of people, no audio). The deploy
