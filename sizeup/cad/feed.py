@@ -12,9 +12,12 @@ Settings come from the data file (data/cad_lists.json, "comms_feed"):
     talkgroups   P25 talkgroups shown (default [307] Fire/EMS 15; add 333 for an Airport incident)
     limit        how many transmissions (default 6)
     phrases      words that mean a transmission is about us ("Port Chester", "PCFD", "headquarters" ...)
+    raise_words  the words after a short name of ours that make it 60 Control raising us ("base", "command" ...)
+    short_names  more short names of ours besides the home town's initials and the joint-response tags (PC, RB)
 
 A transmission is "talking to us" (rows[i]["pc"] says why) when its transcript or talker names a
-phrase, or one of PCFD's or Rye Brook's units by code or as said ("E60", "Engine 60", "23 91"),
+phrase, one of our short names raising us ("PC", "RB": Matcher._short_ours; at the addressee, "60 Control to PC", or
+before a raise word, "PC base", "RB units"; comms_feed.raise_words), or one of PCFD's or Rye Brook's units by code or as said ("E60", "Engine 60", "23 91"),
 or it is 60 Control's turn right before or after such a unit's turn in the same P25 call (looking past
 the key-ups of unknown radios in between). A base phrase ("headquarters", "HQ", "base") counts only when it is ours:
 bare ("60 Control to headquarters") or named ours ("Port Chester headquarters", "Rye Brook headquarters"), never
@@ -54,6 +57,11 @@ DEFAULT_TGS = (307,)
 DEFAULT_LIMIT = 6
 MAX_LIMIT = 50
 DEFAULT_PHRASES = ("Port Chester", "Rye Brook", "PC dispatch", "Port Chester dispatch", "PCFD", "headquarters")
+# The words after one of our short names ("PC", "RB": short_names) that make it 60 Control raising us ("60s to PC base",
+# "PC Command", "RB units"); the data file's comms_feed.raise_words replaces them.
+DEFAULT_RAISE_WORDS = ("base", "field", "fire", "FD", "F.D.", "department", "command", "units", "headquarters", "HQ",
+                       "quarters", "station", "firehouse", "house", "dispatch", "central", "EMS", "ambulance", "alarm",
+                       "desk", "chief", "chiefs", "duty officer", "engine", "ladder", "rescue", "tower")
 PREALERT_BEFORE_S, PREALERT_AFTER_S = 10 * 60, 60      # a ring this long before (after) a flagged page goes with it
 # A chief's code (all digits, "2391") heard as a number is never a house number read out before a street ("2391 Example
 # Drive", unless a command or status word follows: "2391 Example Drive command" is the chief naming his command), a
@@ -100,6 +108,7 @@ QUALIFIER_BREAK = re.compile(r"[,;:!?\n]|(?<!\b[A-Za-z])\.")     # never the dot
 WHOSE_WINDOW = 120                       # how far before a base its qualifier is looked for (characters)
 # who a transmission is to: its first words, past 60 Control's own call ("60 Control to ...", "60's to ...", "60, ...")
 ADDRESSEE = re.compile(r"^\W*(?:(?:60|sixty|6[\s-]0)(?:'?s)?(?:\s+control)?[\s,]*(?:to\b\s*)?)?", re.I)
+AGENCY_AFTER = re.compile(r"[\s-]*(?:P\.?\s?D\.?|police)(?![\w])", re.I)    # "PC PD", "RB Police": not a fire dept's
 ADDRESSEE_STREET = re.compile(r"\s*(?:" + STREET_WORDS + r")(?!\w)", re.I)
 # the words an addressee list is made of besides town names: "Rye and headquarters", "16 Rye FD headquarters"
 ADDRESSEE_WORDS = QUALIFIER_FILLER | AGENCY_FILLER | {"and", "head", "headquarters", "quarters", "hq", "h", "q", "base"}
@@ -172,6 +181,22 @@ def qualifiers(lists: Lists | None = None) -> tuple[dict[tuple[str, ...], str], 
     return towns, frozenset(ours)
 
 
+def short_names(lists: Lists | None = None, extra=()) -> tuple[str, ...]:
+    """Our departments' short names: the home department's town's initials ("PC") and each joint-response town's tag
+    (joint_response.<town>.tag, "RB"), then the data file's comms_feed.short_names."""
+    home = re.sub(r"\s+(?:FD|Fire(?:\s+Department)?)$", "", HOME_DEPARTMENT).strip()
+    joint = getattr(lists, "joint_response", None) if lists is not None else None
+    tags = [str(j.get("tag") or "") for j in joint.values()] if joint is not None else ["RB"]
+    return tuple(dict.fromkeys(n.upper() for n in ["".join(w[0] for w in home.split()), *tags, *extra] if n))
+
+
+def _short_re(name: str) -> str:
+    """'PC' -> P.C. / P C / PC, with an optional FD after ('PCFD', 'P.C.F.D.', 'PC FD'): capitals only, a token of its
+    own (never inside "PCPD", "EPC" or "UPC")."""
+    letters = r"\.?\s?".join(re.escape(ch) for ch in name) + r"\.?"
+    return r"(?<![\w.])(?:" + letters + r")(?P<fd>\s?F\.?\s?D\.?)?(?![\w])"
+
+
 def _phrase_re(p: str) -> str:
     """'Port Chester' -> Port[\\s-]*Chester ('Portchester', 'Port-Chester'); an acronym 'PCFD' also
     matches 'P.C.F.D.' / 'P C F D'."""
@@ -226,6 +251,8 @@ class FeedCfg:
     kinds: dict[str, str] = field(default_factory=dict)      # code -> kind ("chief", "engine" ...)
     towns: dict[tuple[str, ...], str] | None = None           # whose base: qualifiers(lists) (None: the county's)
     ours: frozenset[str] | None = None
+    short: tuple[str, ...] | None = None                      # our short names: short_names(lists) ("PC", "RB")
+    raise_words: tuple[str, ...] = DEFAULT_RAISE_WORDS
 
 
 def load_cfg(lists: Lists) -> FeedCfg:
@@ -256,6 +283,12 @@ def load_cfg(lists: Lists) -> FeedCfg:
     title = f.get("title", DEFAULT_TITLE)
     if not isinstance(title, str) or not title.strip():
         raise ListsError(f"{where}: comms_feed.title: text")
+    raise_words = f.get("raise_words", list(DEFAULT_RAISE_WORDS))
+    if not isinstance(raise_words, list) or not all(isinstance(p, str) and p.strip() for p in raise_words):
+        raise ListsError(f"{where}: comms_feed.raise_words: a list of words or phrases (\"base\", \"command\" ...)")
+    extra = f.get("short_names", [])
+    if not isinstance(extra, list) or not all(isinstance(n, str) and re.fullmatch(r"[A-Za-z]{2,6}", n) for n in extra):
+        raise ListsError(f"{where}: comms_feed.short_names: a list of 2-6 letter names (\"PC\")")
     joint = set(lists.joint_response)
     units = {c: str(u.get("spoken") or "") for c, u in lists.units.items()
              if u.get("kind", "agency") in PCFD_KINDS and not u.get("mutual_aid")
@@ -263,21 +296,28 @@ def load_cfg(lists: Lists) -> FeedCfg:
     kinds = {c: str(lists.units[c].get("kind") or "") for c in units}
     towns, ours = qualifiers(lists)
     return FeedCfg(title.strip(), tuple(dict.fromkeys(tgs)), limit, tuple(p.strip() for p in phrases), units, kinds,
-                   towns, ours)
+                   towns, ours, short_names(lists, extra), tuple(w.strip() for w in raise_words))
 
 
 class Matcher:
     """Is a transmission about us? match(text, talker, rig) -> the reason ('Port Chester', 'E60'), or ''."""
 
     def __init__(self, phrases: tuple[str, ...] | list[str], units: dict[str, str], kinds: dict[str, str] | None = None,
-                 towns: dict[tuple[str, ...], str] | None = None, ours: frozenset[str] | None = None):
-        """towns, ours: qualifiers(lists) (None: the county's, Port Chester and Rye Brook ours)."""
+                 towns: dict[tuple[str, ...], str] | None = None, ours: frozenset[str] | None = None,
+                 short: tuple[str, ...] | None = None, raise_words: tuple[str, ...] | list[str] = DEFAULT_RAISE_WORDS):
+        """towns, ours: qualifiers(lists) (None: the county's, Port Chester and Rye Brook ours); short: short_names(lists)
+        (None: PC, RB); raise_words: the words after a short name that make it ours."""
         kinds = kinds or {}
         if towns is None or ours is None:
             towns, ours = qualifiers(None)
         self.towns, self.ours = towns, ours
         self.longest = max((len(k) for k in towns), default=1)
-        self.town_words = {w for k in towns for w in k}
+        short = short_names(None) if short is None else short
+        self.short = [(n, re.compile(_short_re(n))) for n in short]
+        self.town_words = {w for k in towns for w in k} | {x for n in short for x in (n.lower(), *n.lower())}
+        words = sorted((w.strip() for w in raise_words if w.strip()), key=len, reverse=True)
+        self.raise_re = re.compile(r"[\s-]*(?:" + "|".join(_phrase_re(w) for w in words) + r")(?![\w])", re.I) \
+            if words else None
         self.phrases = [(p, re.compile(r"(?<![\w])" + _phrase_re(p) + r"(?![\w])", re.I),
                          bool(BASE_PHRASE.fullmatch(p.strip()))) for p in phrases]        # (phrase, regex, a base?)
         self.units = [(c, re.compile(r"(?<![\w])(?:" + "|".join(unit_forms(c, sp, kinds.get(c, ""))) + r")(?![\w])", re.I))
@@ -383,6 +423,32 @@ class Matcher:
             return not all(addressed)
         return not any(whose) and not self._addressed_elsewhere(text)
 
+    @classmethod
+    def of(cls, cfg: FeedCfg) -> "Matcher":
+        return cls(cfg.phrases, cfg.units, cfg.kinds, cfg.towns, cfg.ours, cfg.short, cfg.raise_words)
+
+    def _short_ours(self, text: str) -> str:
+        """One of our short names said as 60 Control raising us: "PC" / "RB" (as written or "P.C.", "P C") at the
+        addressee ("60 Control to PC", "60s to RB", "PC, 60 Control", "Harrison and PC, 60 Control"), or followed by a
+        raise word ("PC base", "P.C. Command", "RB units", "PC Ambulance"); with FD it is ours anywhere ("RBFD", "PC
+        FD"). Never inside another word ("PCPD", "UPC"), another town's ("Rye PC base"), nor police ("PC PD")."""
+        lead = end = None
+        for n, rx in self.short:
+            for m in rx.finditer(text):
+                if AGENCY_AFTER.match(text, m.end()):
+                    continue                                           # "PC PD": the police
+                w = self._whose(text[max(0, m.start() - WHOSE_WINDOW):m.start()])
+                if w and w not in self.ours:
+                    continue                                           # another town's ("Rye PC base")
+                if m.group("fd") or (self.raise_re and self.raise_re.match(text, m.end())):
+                    return n + ("FD" if m.group("fd") else "")
+                if lead is None:
+                    lead = ADDRESSEE.match(text).end()
+                    end = self._addressee_end(text, lead)
+                if lead <= m.start() < max(end, lead + 1):
+                    return n
+        return ""
+
     def match(self, text: str = "", talker: str = "", rig: str = "") -> str:
         for r in (x.strip() for x in (rig or "").split(",")):
             if r in self.codes:
@@ -391,6 +457,9 @@ class Matcher:
         for p, rx, base in self.phrases:
             if (any(self._base_ours(s, rx) for s in (talker or "", text or "")) if base else rx.search(hay)):
                 return p
+        for s in (talker or "", text or ""):
+            if s and (n := self._short_ours(s)):
+                return n
         found = [(m.start(), c) for c, rx in self.units if (m := rx.search(hay))]
         return min(found)[1] if found else ""          # the first one named
 
@@ -420,7 +489,7 @@ class Feed:
         L = self._lists()
         if L is not self._for:
             self.cfg = load_cfg(L)
-            self.matcher = Matcher(self.cfg.phrases, self.cfg.units, self.cfg.kinds, self.cfg.towns, self.cfg.ours)
+            self.matcher = Matcher.of(self.cfg)
             self._for = L
 
     def rows(self, limit: int | None = None, talkgroups: tuple[int, ...] | None = None) -> list[dict]:

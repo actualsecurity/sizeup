@@ -6,7 +6,7 @@ import json
 import pytest
 
 from sizeup.cad.api import CadApi
-from sizeup.cad.feed import DEFAULT_PHRASES, Matcher, load_cfg, read_rye
+from sizeup.cad.feed import DEFAULT_PHRASES, DEFAULT_RAISE_WORDS, Matcher, load_cfg, read_rye
 from sizeup.cad.lists import ListsError, load
 from sizeup.cad.lists import DEFAULT_PATH
 from tests.test_radios import Clock, _event_with, cad, tx
@@ -29,6 +29,7 @@ def test_data_file_phrases_and_defaults(tmp_path):
     cfg = load_cfg(load())
     assert cfg.talkgroups == (307,) and cfg.limit == 6 and cfg.title == "60 Control · Fire/EMS 15"
     assert cfg.phrases == ("Port Chester", "Rye Brook", "PC dispatch", "Port Chester dispatch", "PCFD", "headquarters")
+    assert cfg.short == ("PC", "RB") and cfg.raise_words == DEFAULT_RAISE_WORDS
     # PCFD's and Rye Brook's fire units, not Rye's mutual aid, PD, EMS or agencies
     assert {"E60", "L31", "TL2", "R40", "2391", "2398", "2662", "E14", "L30"} <= set(cfg.units)
     assert not {"E191", "L25", "77A4", "PCPD", "60CAD", "DPW"} & set(cfg.units)
@@ -37,7 +38,7 @@ def test_data_file_phrases_and_defaults(tmp_path):
     two = load_cfg(load(lists_with(tmp_path, {"talkgroups": [307, 333], "phrases": ["Port Chester", "Kingsland"]})))
     assert two.talkgroups == (307, 333) and two.phrases == ("Port Chester", "Kingsland")
     for bad in ({"talkgroups": []}, {"talkgroups": ["307"]}, {"limit": 0}, {"phrases": "Port Chester"},
-                {"phrases": [""]}, [307]):
+                {"phrases": [""]}, [307], {"raise_words": "base"}, {"raise_words": [""]}, {"short_names": ["P C"]}):
         with pytest.raises(ListsError, match="comms_feed"):
             load_cfg(load(lists_with(tmp_path, bad)))
 
@@ -125,6 +126,61 @@ def test_another_departments_headquarters_is_not_ours(text, ours):
         assert bool(m.match(text, "60 Ctrl OP 1", "")) is ours, text
 
 
+@pytest.mark.parametrize("text,why", [
+    # our short names at the addressee, or followed by a raise word: 60 Control raising us
+    ("60s to PC base", "PC"),
+    ("60 Control to PC base", "PC"),
+    ("60 Control to PC field", "PC"),
+    ("60 Control to PC", "PC"),
+    ("60 Control to PC fire", "PC"),
+    ("60s to PC Command", "PC"),
+    ("60 Control to PC Ambulance", "PC"),
+    ("60 Control to RB", "RB"),
+    ("60 Control, P.C. base", "PC"),
+    ("60s to P C base", "PC"),
+    ("60s to PC central", "PC"),
+    ("PC, 60 Control", "PC"),
+    ("RB, 60 Control", "RB"),
+    ("Rye Brook, 60 Control", "Rye Brook"),
+    ("Harrison and PC, 60 Control, mutual aid", "PC"),
+    ("RB units respond", "RB"),
+    ("60 Control to R.B. chiefs", "RB"),
+    ("contact the PC duty officer", "PC"),
+    ("RBFD, call the desk", "RBFD"),                      # with FD: ours anywhere
+    ("PC FD on the way", "PCFD"),
+    # never inside another word, another town's, the police, nor a bare PC that raises no one
+    ("EpiPen administered PC", ""),
+    ("UPC code on the box", ""),
+    ("EPC base", ""),
+    ("PCPD on scene", ""),
+    ("RBPD 1 on location", ""),
+    ("60 Control to PC PD", ""),
+    ("60 Control to RB police", ""),
+    ("Rye PC base", ""),
+    ("Harrison base", ""),
+    ("the pc base", ""),                                  # capitals only
+    ("60 Control to Harrison, RB", ""),
+])
+def test_our_short_names_at_the_addressee_or_before_a_raise_word(text, why):
+    cfg = load_cfg(load())
+    assert Matcher.of(cfg).match(text) == why
+    assert Matcher(cfg.phrases, cfg.units).match(text) == why          # the defaults: PC, RB, DEFAULT_RAISE_WORDS
+
+
+def test_short_names_and_raise_words_come_from_the_lists(tmp_path):
+    d = dict(DATA)
+    d["joint_response"] = {"Rye Brook": {**DATA["joint_response"]["Rye Brook"], "tag": "SV"}}
+    d["comms_feed"] = {**DATA["comms_feed"], "raise_words": ["garage"], "short_names": ["PCV"]}
+    p = tmp_path / "lists.json"
+    p.write_text(json.dumps(d))
+    cfg = load_cfg(load(p))
+    m = Matcher.of(cfg)
+    assert cfg.short == ("PC", "SV", "PCV") and cfg.raise_words == ("garage",)
+    assert m.match("60 Control to SV") == "SV" and m.match("send it to SV garage") == "SV"
+    assert m.match("PCV garage") == "PCV" and m.match("send it to PC base") == ""      # base isn't a raise word here
+    assert m.match("60 Control to RB") == ""                                           # the tag is SV now
+
+
 def test_rye_heard_as_right_is_read_for_the_decision_only():
     assert read_rye("60s to right headquarters right face.") == "60s to Rye headquarters Rye base."
     assert read_rye("right HQ") == "Rye HQ" and read_rye("right base") == "Rye base"
@@ -173,6 +229,9 @@ def test_the_feed_row_and_possible_incoming_skip_another_departments_headquarter
     n = c.sources.consider_radio("307-h-call_3-t0")
     assert n["text"] == "Calling headquarters: 60 Control to headquarters"
     assert [x["text"] for x in c.sources.state()["incoming"]] == [n["text"]]
+    c.record_traffic(tx("307-h-call_4-t0", t + 4, "Fire/EMS 15", "", "60 Ctrl OP 1", 307, "60s to PC base"))
+    assert c.state()["feed"]["rows"][0]["pc"] == "PC"
+    assert c.sources.consider_radio("307-h-call_4-t0")["text"] == "Calling PC: 60s to PC base"
 
 
 def test_matcher_talker_and_rig():
