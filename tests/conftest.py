@@ -1,4 +1,61 @@
+import json
+import os
+import threading
+from collections import Counter
+
 import pytest
+
+# -- threads that outlive their test (#665): SIZEUP_TEST_THREAD_REPORT=1 reports them at the end, never a failure ---
+# A thread a test starts and leaves running goes on inside the next tests in that process (pytest-xdist runs many files
+# per worker): an earlier hub answered a station's long poll 25 s late, inside the intel replay's network guard. Each
+# test's new threads still alive when the next test starts are listed under "threads that outlived their test".
+# Opt-in: today about 1,500 (apps tests start and never stop: intel, janitor, stt, broadcast), too many for every run.
+
+_REPORT = os.environ.get("SIZEUP_TEST_THREAD_REPORT", "") not in ("", "0")
+_threads: dict = {"test": None, "before": set()}
+_leaks: dict[str, list[str]] = {}
+
+
+def _note_leaks(now: str | None) -> None:
+    if not _REPORT:
+        return
+    if _threads["test"] is not None:
+        left = sorted(t.name for t in threading.enumerate() if t not in _threads["before"])
+        if left:
+            _leaks[_threads["test"]] = left
+    _threads["test"], _threads["before"] = now, set(threading.enumerate())
+
+
+def pytest_runtest_setup(item):
+    _note_leaks(item.nodeid)                 # (before this test's fixtures: the last one's teardown is done)
+
+
+def pytest_sessionfinish(session):
+    _note_leaks(None)
+    if hasattr(session.config, "workeroutput"):                     # an xdist worker: to the controller
+        session.config.workeroutput["thread_leaks"] = json.dumps(_leaks)
+
+
+@pytest.hookimpl(optionalhook=True)
+def pytest_testnodedown(node, error):
+    _leaks.update(json.loads(getattr(node, "workeroutput", {}).get("thread_leaks") or "{}"))
+
+
+def pytest_terminal_summary(terminalreporter):
+    if not _leaks or hasattr(terminalreporter.config, "workeroutput"):
+        return
+    tr = terminalreporter
+    tr.write_sep("-", f"threads that outlived their test: {sum(map(len, _leaks.values()))} from {len(_leaks)} test(s)")
+    for test, names in sorted(_leaks.items(), key=lambda x: (-len(x[1]), x[0]))[:20]:
+        tr.write_line(f"{len(names):3d}  {test}: " + ", ".join(f"{n} x{c}" if c > 1 else n for n, c in
+                                                             Counter(_name(n) for n in names).most_common()))
+    if len(_leaks) > 20:
+        tr.write_line(f"     ... and {len(_leaks) - 20} more test(s)")
+
+
+def _name(n: str) -> str:
+    """'Thread-12 (serve_forever)' -> 'serve_forever': the same kind counts together."""
+    return n[n.index("(") + 1:-1] if n.startswith("Thread-") and n.endswith(")") and "(" in n else n
 
 
 @pytest.fixture(autouse=True)

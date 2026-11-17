@@ -437,31 +437,98 @@ def test_tool_json_never_inside_the_repo(restored):
     assert not (intel_replay.ROOT / "x.intel-replay.json").exists()
 
 
-def test_a_replay_sends_nothing_and_opens_nothing_writable(restored, monkeypatch):
-    """The real engine and the gazetteer over a read-only copy: no socket call is ever made (recorded, not raised: the
-    engine's own `except Exception` would swallow a raise), the engine has no notifier, no listen links and no model
-    behind it, and every SQLite connection is read-only (or in memory). The file is the same bytes afterwards, with
-    nothing beside it."""
+def net_guard(monkeypatch) -> list[tuple]:
+    """Records every reach for the network (socket connect/send/bind/listen, create_connection, getaddrinfo, urlopen)
+    made by this test's own thread or by a thread it starts (or one those start, and so on), and answers it with
+    nothing: recorded, not raised (the engine's own `except Exception` would swallow a raise). A thread already
+    running before (pytest-xdist runs many test files in one process: an earlier test's hub answering a station's
+    25 s long poll late, #665) is not this test's: its calls go through to the real socket, unrecorded. (So work the
+    replay handed to a pool thread started before it would not be seen: the replay starts no pool.)"""
     import socket
-    opened, real = [], sqlite3.connect
+    import threading
+    import urllib.request
     net: list[tuple] = []
+    ours = {threading.current_thread()}
+    start = threading.Thread.start
+
+    def started(self, *a, **kw):
+        if threading.current_thread() in ours:
+            ours.add(self)
+        return start(self, *a, **kw)
+
+    def spy(owner, name, answer=None):
+        real = getattr(owner, name)
+        label = f"socket.{name}" if owner is socket.socket else name
+
+        def call(*a, **kw):
+            if threading.current_thread() not in ours:
+                return real(*a, **kw)
+            net.append((label, a[1:] if owner is socket.socket else a))
+            return answer
+        monkeypatch.setattr(owner, name, call)
+    monkeypatch.setattr(threading.Thread, "start", started)
+    for name in ("connect", "connect_ex", "send", "sendall", "sendto", "bind", "listen"):
+        spy(socket.socket, name, 0)
+    spy(socket, "create_connection")
+    spy(socket, "getaddrinfo", [])
+    spy(urllib.request, "urlopen")
+    return net
+
+
+def test_the_network_guard_counts_the_replays_own_reaches_and_no_other_threads(restored, monkeypatch):
+    """net_guard catches a send from the replay's own thread and from threads the replay starts (and theirs), and
+    lets a thread that was already running (an earlier test's, #665) send for real, unrecorded."""
+    import socket
+    import threading
+    import urllib.request
+    a, b = socket.socketpair()
+    go, done = threading.Event(), threading.Event()
+
+    def leftover():
+        go.wait(10)
+        a.sendall(b'{"jobs":[]}')                        # what the leftover hub request thread sent in #665
+        done.set()
+    threading.Thread(target=leftover, daemon=True).start()
+    net = net_guard(monkeypatch)
+    go.set()
+    assert done.wait(10) and b.recv(64) == b'{"jobs":[]}'      # through for real
+    a.close()
+    b.close()
+
+    class Leaky(Toy):
+        def feed(self, row):
+            super().feed(row)
+            if row["id"] != "r1":
+                return
+            socket.create_connection(("192.0.2.1", 443))                 # the replay's own thread (TEST-NET-1)
+            s = socket.socket()
+
+            def child():
+                s.sendall(b"from a thread the replay started")
+                grandchild = threading.Thread(target=lambda: urllib.request.urlopen("http://192.0.2.1/"))
+                grandchild.start()
+                grandchild.join()
+            t = threading.Thread(target=child)
+            t.start()
+            t.join()
+            s.close()
+    con = rp.open_ro(restored)
+    rp.replay(rp.load_rows(con), factory=lambda sink, rules, clock: Leaky(sink, rules, clock))
+    con.close()
+    assert [x[0] for x in net] == ["create_connection", "socket.sendall", "urlopen"]
+
+
+def test_a_replay_sends_nothing_and_opens_nothing_writable(restored, monkeypatch):
+    """The real engine and the gazetteer over a read-only copy: no socket call is ever made from the replay's thread
+    or one it starts (net_guard), the engine has no notifier, no listen links and no model behind it, and every
+    SQLite connection is read-only (or in memory). The file is the same bytes afterwards, with nothing beside it."""
+    opened, real = [], sqlite3.connect
 
     def connect(*a, **kw):
         opened.append((str(a[0]), kw.get("uri", False)))
         return real(*a, **kw)
-
-    def spy(name, answer=None):
-        def call(*a, **kw):
-            net.append((name, a[1:] if name.startswith("socket.") else a))
-            return answer
-        return call
     monkeypatch.setattr(sqlite3, "connect", connect)
-    for name in ("connect", "connect_ex", "send", "sendall", "sendto", "bind", "listen"):
-        monkeypatch.setattr(socket.socket, name, spy(f"socket.{name}", 0))
-    monkeypatch.setattr(socket, "create_connection", spy("create_connection"))
-    monkeypatch.setattr(socket, "getaddrinfo", spy("getaddrinfo", []))
-    import urllib.request
-    monkeypatch.setattr(urllib.request, "urlopen", spy("urlopen"))
+    net = net_guard(monkeypatch)
     before, beside = restored.read_bytes(), sorted(p.name for p in restored.parent.iterdir())
     assert intel_replay.main(["--db", str(restored), "--labels"]) == 0
     con = rp.open_ro(restored)
