@@ -205,8 +205,10 @@ class StationLink:
 
     def stt_input(self, item, audio) -> None:
         """App._stt: this transmission / page goes to speech-to-text now with `audio`. Queued (a reference, nothing
-        made here: the radio threads never wait); its FLAC is made on the encoder's thread and goes up on its own."""
-        self.stt_encoder.submit(item, audio)
+        made here: the radio threads never wait); its FLAC is made on the encoder's thread and goes up on its own.
+        Not even queued for a hub that doesn't take them (an older one): no encoding for nothing."""
+        if sttinput.CAP in self.hub_caps:
+            self.stt_encoder.submit(item, audio)
 
     def _stt_made(self, data: dict, flac: bytes, meta: dict) -> None:
         self.outbox.add_stt(data, flac, meta)

@@ -245,7 +245,7 @@ its tones) goes to the hub too, as lossless FLAC (`sizeup/cloud/flac.py`, numpy 
   counted.
 - The FLAC waits in the outbox's `stt_inputs` table. It has its own budget (30 % of `outbox_max_mb`) and is dropped
   before any clip.
-- The `hub-stt` thread posts it to `POST /api/station/stt`, gzipped, about 512 KB at a time. It posts only while no
+- The `hub-stt` thread posts it to `POST /api/station/stt`, gzipped, about 256 KB at a time (small: a post already on its way when a page starts shares the uplink with it). It posts only while no
   event waits, so a page or a transmission never queues behind one. It posts only to a hub whose state answer lists
   `stt_input` in its caps; an older hub never gets them.
 

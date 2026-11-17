@@ -137,6 +137,59 @@ def test_flac_refuses_a_stream_that_would_decode_to_gigabytes():
                             "audio": base64.b64encode(bomb).decode()})
 
 
+def _fixed0(us: list[int], k: int, tail: bytes = b"", n: int | None = None) -> bytes:
+    """One FIXED order-0 frame of n (default len(us)) samples whose residuals are Rice codes (parameter k) of the
+    folded values `us`, then `tail`; STREAMINFO says n samples, with the MD5 of what `us` decode to (never zero)."""
+    import hashlib
+    n = n or len(us)
+    fields = [(0b11111111111110, 14), (0, 1), (0, 1), (0b0111, 4), (5, 4), (0, 4), (0b100, 3), (0, 1)]
+    fields += flac._utf8(0) + [(n - 1, 16)]
+    head = flac._pack(np.array([v for v, _ in fields], np.uint64), np.array([w for _, w in fields]))
+    head += bytes([flac.crc8(head)])
+    vals = [0, 0b001000, 0, 0, 0, k] + [(1 << k) | (u & ((1 << k) - 1)) for u in us]
+    widths = [1, 6, 1, 2, 4, 4] + [(u >> k) + 1 + k for u in us]
+    frame = head + flac._pack(np.array(vals, np.uint64), np.array(widths))
+    frame += flac.crc16(frame).to_bytes(2, "big")
+    x = np.array([-((u + 1) >> 1) if u & 1 else u >> 1 for u in us], "<i2")
+    info = (b"\x10\x00\x10\x00" + bytes(6) + ((16000 << 44) | (15 << 36) | n).to_bytes(8, "big")
+            + hashlib.md5(x.tobytes()).digest())
+    return b"fLaC" + bytes([0x80, 0, 0, 34]) + info + frame + tail
+
+
+def test_flac_refuses_a_run_of_zero_bits_fast_and_in_bounded_memory():
+    """8 MB of zero bits after one Rice code start: a unary run no 16-bit residual needs. Refused at once, without a
+    window (or arrays) the size of the blob."""
+    import tracemalloc
+    bomb = _fixed0([], 0, tail=bytes(8 << 20), n=1024)          # header totals match, MD5 non-zero, then zeros
+    small = _fixed0([], 0, tail=bytes(1 << 20), n=1024)
+    assert flac.info(bomb)[1] == 1024 and flac.info(bomb)[2] != bytes(16)
+    # its header checks out, so the hub's ingest keeps it: decoding it (read_stt_audio) must defend itself
+    data, _ = sttinput.from_wire({"format": "flac", "input": "stt-src", "rate": 16000, "samples": 1024,
+                                  "audio": base64.b64encode(small).decode()})
+    assert data == small
+    for data in (small, bomb):
+        tracemalloc.start()
+        t0 = time.monotonic()
+        with pytest.raises(flac.FlacError):
+            flac.decode(data)
+        peak = tracemalloc.get_traced_memory()[1]
+        tracemalloc.stop()
+        assert time.monotonic() - t0 < 2.0 and peak < 160 * 2 ** 20      # (64 MB of it: the blob's own bits)
+
+
+def test_flac_decodes_a_long_but_valid_rice_code_in_a_bigger_window():
+    """A residual near the 16-bit limit with k = 0 is a unary run of ~60000 bits: longer than the first window."""
+    us = [0, 60000, 3, 0, 65535, 1] + [2] * 200
+    out, _ = flac.decode(_fixed0(us, 0))
+    assert out.tolist() == [-((u + 1) >> 1) if u & 1 else u >> 1 for u in us]
+    out, _ = flac.decode(_fixed0([7, 65000, 9], 3))
+    assert out.tolist() == [-4, 32500, -5]
+    long_run = _fixed0([0, 2], 0)                       # then the second code's run made longer than any residual
+    head = long_run[:-4]                                 # (its frame without the last code bits / CRC)
+    with pytest.raises(flac.FlacError, match="longer than any"):
+        flac.decode(head + bytes((flac.MAX_QUOTIENT >> 3) + 16))
+
+
 # -- the station: made off the radio path, sent on its own lane ------------------------------------------------------
 
 
@@ -151,10 +204,12 @@ class RecordingWhisper:
         return self.texts.get(round(len(audio) / RATE), "Engine 60 responding"), 0.9
 
 
-def offline_station(tmp_path, texts=None, client=None):
-    """A station whose hub isn't there (or is `client`): everything waits in its outbox, where the test reads it."""
+def offline_station(tmp_path, texts=None, client=None, caps=("p25_systems", "stt_input")):
+    """A station whose hub isn't there (or is `client`): everything waits in its outbox, where the test reads it.
+    caps: what the hub last said it takes (a station encodes STT inputs only for a hub that takes them)."""
     from sizeup.app import make_app
     app = make_app(station_cfg(tmp_path, f"http://127.0.0.1:{free_port()}"))
+    app.link._set_caps(caps)
     if client is not None:
         app.link._client = client
     app.stt.client = RecordingWhisper(texts or {})
@@ -387,15 +442,16 @@ def test_stt_inputs_wait_while_any_event_waits_and_go_gzipped_after(tmp_path):
         st.link.stop()
 
 
-def test_an_older_hub_never_gets_them_and_they_stay_bounded(tmp_path):
+def test_an_older_hub_never_gets_them_and_nothing_is_encoded_for_it(tmp_path):
     hub = FakeHub(["p25_systems"])
     hub.down = False
-    st = offline_station(tmp_path, client=hub)
+    st = offline_station(tmp_path, client=hub, caps=("p25_systems",))
     try:
         t = _transmission(st, "FG1-1790000000556", "FG1", voice(2.0), True, eng="aws")
-        assert wait(lambda: stt_rows(st, t.id) and not st.link.outbox.pending()[0], 10)
+        assert wait(lambda: not st.link.outbox.pending()[0], 10)
         time.sleep(1.0)
-        assert hub.stt_posts == [] and st.link.stt_stats()["hub_takes"] is False
+        assert hub.stt_posts == [] and stt_rows(st, t.id) == [] and st.link.stt_stats()["hub_takes"] is False
+        assert st.link.stt_encoder.stats() == {"queued": 0, "made": 0, "dropped": {"queue": 0, "too_big": 0, "failed": 0}}
     finally:
         st.link.stop()
 
@@ -658,4 +714,39 @@ def test_station_to_hub_the_engines_get_exactly_what_the_station_whisper_got(tmp
         assert got.whisper_wav() == posted
     finally:
         st.link.stop()
+        hub.close()
+
+
+def test_the_stt_post_claims_its_station_and_one_bad_item_never_fails_it(tmp_path, monkeypatch):
+    hub = HubRun(hub_cfg(tmp_path))
+    try:
+        a = voice(1.0, seed=6)
+        assert call(hub.url + "/api/station/state", "POST", {"at": time.time(), "status": {"id": "t"}})[0] == 200
+        code, r = call(hub.url + "/api/station/stt", "POST", {"station": "st-elsewhere", "items": [_item(1, "FG1-1790000000031", a)]})
+        assert code in (401, 409) and not hub.app.audio.has("FG1-1790000000031.src")      # another station's id: refused
+        real, woke = hub.app.put_stt_input, []
+
+        def flaky(it):
+            if it["id"] == "FG1-1790000000032":
+                raise KeyError("boom")
+            return real(it)
+        monkeypatch.setattr(hub.app, "put_stt_input", flaky)
+        monkeypatch.setattr(hub.app, "stt_stored", lambda: woke.append(1))
+        items = [_item(1, "FG1-1790000000031", a), _item(2, "FG1-1790000000032", a), _item(3, "FG1-1790000000033", a)]
+        code, r = call(hub.url + "/api/station/stt", "POST", {"station": "t", "items": items})
+        assert code == 200 and r["stored"] == [1, 3] and r["refused"] == [2]
+        assert woke == [1]                                                    # the waiters: woken once per post
+    finally:
+        hub.close()
+
+
+def test_read_stt_audio_waits_at_most_its_cap(tmp_path, monkeypatch):
+    from sizeup.cloud import hub as hub_mod
+    hub = HubRun(hub_cfg(tmp_path))
+    try:
+        monkeypatch.setattr(hub_mod, "STT_WAIT_MAX_S", 0.3)
+        t0 = time.monotonic()
+        assert hub.app.read_stt_audio("FG1-1790000000041", wait_s=1e9) is None
+        assert time.monotonic() - t0 < 2.0
+    finally:
         hub.close()

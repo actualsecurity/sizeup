@@ -19,6 +19,10 @@ import numpy as np
 BLOCK = 1024
 MAX_ORDER = 4
 MAX_RICE = 14                       # 4-bit Rice parameters; 15 is the escape code
+# decode(): no FIXED (order <= 4) residual of 16-bit audio is over 16 * 2^15 = 2^19, folded under 2^20: a Rice code's
+# unary run (u >> k) is never longer; RICE_WINDOW (bits a window of codes looks at once) is well over that
+MAX_QUOTIENT = 1 << 20
+RICE_WINDOW = 1 << 21
 RATE_CODES = {88200: 1, 176400: 2, 192000: 3, 8000: 4, 16000: 5, 22050: 6, 24000: 7, 32000: 8, 44100: 9,
               48000: 10, 96000: 11}
 
@@ -205,37 +209,54 @@ class _Reader:
     def rice(self, count: int, k: int) -> np.ndarray:
         """count Rice codes with parameter k -> their signed values. Vectorized: in a window of the stream, f(p) is
         where the code starting at bit p ends + 1 (its unary run's 1, then k bits); the codes' starts are f's orbit
-        from here, found by doubling (f, f∘f, f∘f∘f∘f, ...). A window too short for them is made bigger."""
+        from here, found by doubling (f, f∘f, f∘f∘f∘f, ...). Bounded: the window is at most RICE_WINDOW bits (the codes
+        that fit in it are taken, then the next window), and a unary run longer than any 16-bit FIXED residual needs
+        (MAX_QUOTIENT >> k) is refused: a few MB of zero bits can't make it scan or allocate the whole blob."""
         if count == 0:
             return np.zeros(0, np.int64)
+        out: list[np.ndarray] = []
         n_all = len(self.bits)
-        width = max(256, count * (k + 4))
-        while True:
-            lo, hi = self.pos, min(n_all, self.pos + width)
+        max_q = MAX_QUOTIENT >> k
+        left, grow = count, 1
+        while left:
+            lo = self.pos
+            hi = min(n_all, lo + min(RICE_WINDOW, max(256, left * (k + 4)) * grow))
             seg = self.bits[lo:hi]
             size = hi - lo
-            at = np.where(seg == 1, np.arange(size), size)
-            nxt = np.append(np.minimum.accumulate(at[::-1])[::-1], size)     # the first 1 at or after p (size: none)
-            f = np.minimum(nxt + 1 + k, size)                               # size: out of the window (stays there)
-            starts = np.zeros(count, np.int64)
+            at = np.where(seg == 1, np.arange(size, dtype=np.int32), np.int32(size))
+            nxt = np.append(np.minimum.accumulate(at[::-1])[::-1], np.int32(size))   # first 1 at or after p (size: none)
+            f = np.minimum(nxt + (1 + k), size).astype(np.int32)                     # size: out of the window (stays)
+            starts = np.zeros(left, np.int64)
             jump, m = f, 1
-            while m < count:
-                take = min(m, count - m)
+            while m < left:
+                take = min(m, left - m)
                 starts[m:m + take] = jump[starts[:take]]
-                if m + take >= count:
+                if m + take >= left:
                     break
                 jump, m = jump[jump], m * 2
-            ends = nxt[starts]
-            if ends[-1] + 1 + k <= size:
-                break
-            if hi == n_all:
-                raise FlacError("truncated")
-            width *= 4
-        u = (ends - starts) << k
-        for b in range(k):
-            u |= seg[ends + 1 + b].astype(np.int64) << (k - 1 - b)
-        self.pos = lo + int(ends[-1]) + 1 + k
-        return np.where(u & 1, -((u + 1) >> 1), u >> 1)
+            del jump, f
+            ends = nxt[starts].astype(np.int64)
+            fit = int(np.count_nonzero(ends + 1 + k <= size))       # (ends only grow: the ones that fit come first)
+            q = ends[:fit] - starts[:fit]
+            if fit and int(q.max()) > max_q:
+                raise FlacError("a Rice code longer than any 16-bit residual")
+            if not fit:
+                run = int(nxt[0])                                   # the first code's unary run, as far as it is seen
+                if run > max_q:
+                    raise FlacError("a Rice code longer than any 16-bit residual")
+                if hi == n_all or size >= RICE_WINDOW:
+                    raise FlacError("truncated")
+                grow *= 4                                           # a long code in a short window: a bigger one
+                continue
+            grow = 1
+            e = ends[:fit]
+            u = q << k
+            for b in range(k):
+                u |= seg[e + 1 + b].astype(np.int64) << (k - 1 - b)
+            out.append(np.where(u & 1, -((u + 1) >> 1), u >> 1))
+            self.pos = lo + int(e[-1]) + 1 + k
+            left -= fit
+        return out[0] if len(out) == 1 else np.concatenate(out)
 
 
 def _residual(r: _Reader, n: int, order: int) -> np.ndarray:

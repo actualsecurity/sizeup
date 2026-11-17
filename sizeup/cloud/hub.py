@@ -125,8 +125,9 @@ MAX_VESSELS_BODY = 512 * 1024         # 500 vessel records as JSON are ~150 KB; 
 MAX_LOGS_BODY = 4 * 1024 * 1024       # a station log batch, gzipped (sizeup/cloud/logship.py: ~512 KB before gzip)
 MAX_METRICS_BODY = 2 * 1024 * 1024    # a metrics batch, gzipped (sizeup/cloud/metrics.py: 2000 records, ~250 KB before gzip)
 MAX_METRICS_JSON = 4 * 1024 * 1024    # ... and unpacked
-MAX_STT_BODY = 12 * 1024 * 1024       # STT inputs, gzipped (the station sends ~512 KB of FLAC a post; one may be 8 MB)
+MAX_STT_BODY = 12 * 1024 * 1024       # STT inputs, gzipped (the station sends ~256 KB of FLAC a post; one may be 8 MB)
 MAX_STT_JSON = 16 * 1024 * 1024       # ... and unpacked (base64)
+STT_WAIT_MAX_S = 30.0                 # read_stt_audio's wait_s at most this
 LIVE_STALE_S = 8.0       # a "talking now" snapshot older than this is dropped (the station resends every 2 s)
 TTS_WAIT_S = 20.0        # the dispatch voice: the station renders it; longer than this = text only
 CALL_WAIT_S = 12.0       # an SDR / talkgroup switch (the monitor's switch gives up at 15 s)
@@ -538,7 +539,7 @@ class Hub:
             if method == "POST" and path == "/api/station/metrics":
                 return self._metrics(body(MAX_METRICS_BODY), headers, p)
             if method == "POST" and path == "/api/station/stt":           # (sttinput.PATH)
-                return self._stt_inputs(body(MAX_STT_BODY), headers)
+                return self._stt_inputs(body(MAX_STT_BODY), headers, p)
             if method == "POST" and (m := JOB_PATH.fullmatch(path)):
                 raw = body(MAX_RESULT_BODY)
                 if raw is None:
@@ -654,9 +655,10 @@ class Hub:
             return _json(503, {"error": f"station logs: {type(e).__name__}"})
         return _json(code, out)
 
-    def _stt_inputs(self, raw: bytes | None, headers) -> tuple[int, bytes, str]:
+    def _stt_inputs(self, raw: bytes | None, headers, p: Principal | None = None) -> tuple[int, bytes, str]:
         """The station's STT inputs (sizeup/cloud/sttinput.py): each kept beside its clip. stored / refused (a bad one,
-        never sent again); a write the fence refused fails the whole post (503: the station sends it to the leader)."""
+        never sent again: whatever went wrong with one item, the rest still go); a write the fence refused fails the
+        whole post (503: the station sends it to the leader)."""
         if raw is None:
             return _json(413, {"error": "too large"})
         if (headers.get("Content-Encoding") or "").strip().lower() == "gzip":
@@ -673,12 +675,26 @@ class Hub:
         d = json.loads(raw or b"{}")
         if not isinstance(d, dict) or not isinstance(d.get("items"), list):
             raise ValueError("{items: [...]}")
+        if p is not None:
+            self._claim(p, d.get("station"))         # (the station a payload names must be the one its token proves)
         stored, refused = [], []
-        for it in d["items"][:200]:
-            n = it.get("n") if isinstance(it, dict) else None
-            if not isinstance(n, int) or isinstance(n, bool):
-                continue
-            (stored if self.app.put_stt_input(it) else refused).append(n)
+        try:
+            for it in d["items"][:200]:
+                n = it.get("n") if isinstance(it, dict) else None
+                if not isinstance(n, int) or isinstance(n, bool):
+                    continue
+                fenced = fence_mod.refused()
+                try:
+                    ok = self.app.put_stt_input(it)
+                except Exception as e:  # noqa: BLE001 - one malformed item never fails the post (nor stalls the lane)
+                    if isinstance(e, fence_mod.FencedWrite) or fence_mod.refused() != fenced:
+                        raise
+                    self.app._stt_say(f"hub: speech-to-text input refused: {type(e).__name__}")
+                    ok = False
+                (stored if ok else refused).append(n)
+        finally:
+            if stored:
+                self.app.stt_stored()               # the waiters (read_stt_audio's wait_s): once per post
         return _json(200, {"ok": True, "stored": stored, "refused": refused})
 
     def _metrics(self, raw: bytes | None, headers, p: Principal) -> tuple[int, bytes, str]:
@@ -1521,9 +1537,12 @@ class HubApp(App):
                 raise
             self._stt_say(f"hub: speech-to-text input for {cid} not stored: {type(e).__name__}: {str(e)[:120]}")
             return False
+        return True
+
+    def stt_stored(self) -> None:
+        """STT inputs were stored: wake read_stt_audio's waiters (once per post)."""
         with self._stt_cond:
             self._stt_cond.notify_all()
-        return True
 
     def _stt_say(self, msg: str) -> None:
         now = time.monotonic()
@@ -1544,6 +1563,7 @@ class HubApp(App):
             with self._lock:
                 page = next((p for p in self.pages if p.id == cid), None)
             voice_offset_s = float(page.voice_offset_s) if page is not None else 0.0
+        wait_s = min(max(0.0, float(wait_s or 0.0)), STT_WAIT_MAX_S)
         if wait_s > 0:
             with self._stt_cond:
                 self._stt_cond.wait_for(lambda: self.audio.has(sttinput.src_id(cid)), timeout=wait_s)

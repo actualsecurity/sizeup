@@ -110,8 +110,9 @@ class Outbox:
             self._drop_stt()
             return int(cur.lastrowid)
 
-    def stt_batch(self, max_bytes: int = 512 * 1024, max_items: int = 50) -> list[dict]:
-        """The oldest STT inputs, at least one, up to max_bytes of FLAC."""
+    def stt_batch(self, max_bytes: int = 256 * 1024, max_items: int = 50) -> list[dict]:
+        """The oldest STT inputs, at least one, up to max_bytes of FLAC (small: a post already on its way when a page
+        starts shares the uplink with it)."""
         out, size = [], 0
         with self._lock:
             rows = self.db.execute("SELECT n, at, data, flac, meta FROM stt_inputs ORDER BY n LIMIT ?",
