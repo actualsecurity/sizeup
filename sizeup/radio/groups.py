@@ -8,6 +8,9 @@ an admin can lock some dongles to some jobs:
 
     sdrs   the dongles on that feed (exact serials)
     jobs   the jobs that feed carries, highest priority first
+    parked (optional) jobs of the list switched off on purpose (#637: a fireground left off for coverage reasons):
+           shown as parked, never "no dongle has it"; no dongle may run one, and no fallback or auto-assign starts one.
+           It keeps its place in the order for when it is unparked.
 
 Rules (sizeup/app.py applies them):
     - a grouped dongle only runs its group's jobs (or Off);
@@ -57,9 +60,13 @@ class Group:
     name: str
     sdrs: tuple[str, ...]
     jobs: tuple[str, ...]            # highest priority first
+    parked: tuple[str, ...] = ()     # jobs of the list switched off on purpose (#637), in the list's order
 
     def row(self) -> dict:
-        return {"name": self.name, "sdrs": list(self.sdrs), "jobs": list(self.jobs)}
+        out = {"name": self.name, "sdrs": list(self.sdrs), "jobs": list(self.jobs)}
+        if self.parked:                                  # (none: the file as before parking existed)
+            out["parked"] = list(self.parked)
+        return out
 
 
 def parse(raw) -> tuple[list[Group], str]:
@@ -102,7 +109,13 @@ def parse(raw) -> tuple[list[Group], str]:
             if j in job_in:
                 return [], f"{j} is in {job_in[j]} and {name}: one group each"
             job_in[j] = name
-        out.append(Group(name, tuple(sdrs), tuple(jobs)))
+        parked = g.get("parked", [])
+        if not isinstance(parked, list) or not all(isinstance(x, str) for x in parked):
+            return [], f"{name}: parked is a list of its jobs"
+        parked = {p.strip() for p in parked}
+        if parked - set(jobs):
+            return [], f"{name}: {sorted(parked - set(jobs))[0]} parked but not one of its jobs"
+        out.append(Group(name, tuple(sdrs), tuple(jobs), tuple(j for j in jobs if j in parked)))
     return out, ""
 
 
@@ -158,10 +171,10 @@ def plan(group: Group, own: dict[str, str], usable: Iterable[str], spares: Itera
     fire      a fire job: its dongle never goes to a job that isn't one
     runnable  runnable(job, jobs that would run with it): a job that can run on what it would have
 
-    The wanted jobs are the group's jobs that are some dongle's own. A usable dongle runs its own job, unless a
+    The wanted jobs are the group's jobs (never a parked one) that are some dongle's own. A usable dongle runs its own job, unless a
     higher-priority wanted job has no usable dongle: then the lowest-priority job runs no more and its dongle runs that
     one (a spare first, if there is one). Every dongle back: each runs its own job again."""
-    prio = {j: k for k, j in enumerate(group.jobs)}
+    prio = {j: k for k, j in enumerate(group.jobs) if j not in group.parked}   # a parked job: never run (#637)
     usable = [s for s in group.sdrs if s in set(usable)]
     current = current or {}
     out = {s: (own.get(s, OFF) if own.get(s, OFF) in prio else OFF) for s in usable}

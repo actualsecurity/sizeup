@@ -386,7 +386,7 @@ def test_health_says_a_group_is_short_and_where_its_job_runs():
     m = r.h.model()
     assert m["groups"] == [{"name": "UHF", "sdrs": ["101", "102", "103"], "usable": 2,
                             "jobs": ["Fire/EMS 15", "South 2", "FG1"], "short": ["FG1"], "unowned": [],
-                            "conflicts": {}}]
+                            "parked": [], "conflicts": {}}]
     assert [(d["name"], d["group"], d["own"], d["on"]) for d in m["dongles"]] == [
         ("101", "UHF", "", "00000102"), ("102", "UHF", "FG1", ""), ("103", "UHF", "", "")]
     (a,) = r.h.alerts()
@@ -719,3 +719,270 @@ def test_the_stations_recorder_marks_a_group_move_in_the_systems_wish(rig, tmp_p
     rec.group_move = True
     rec._write_state(True)
     assert json.loads((tmp_path / "w.json").read_text())["group"] is True
+
+
+# -- #637: parked jobs, the county first on a group's restore, a P25 system's flap hold shown --------------------------
+
+GP = antenna.Group("UHF", ("a", "b", "c", "d"), (P25, "South 2", "FG1", "FG2"), ("FG2",))
+
+
+def test_a_parked_job_is_never_wanted_short_or_run_by_the_plan():
+    # (a dongle can't have a parked job as its own on the station; the plan alone never runs one anyway)
+    own = {"a": P25, "b": "South 2", "c": "FG1", "d": "FG2"}
+    assert antenna.plan(GP, own, ["a", "b", "c", "d"]) == ({"a": P25, "b": "South 2", "c": "FG1", "d": "Off"}, [])
+    got, short = antenna.plan(GP, {**own, "d": "Off"}, ["a", "c", "d"], spares=["d"], fire=FIRE)
+    assert got == {"a": P25, "c": "FG1", "d": "South 2"} and short == [] and "FG2" not in got.values()
+
+
+@pytest.mark.parametrize("parked, why", [
+    ("FG1", "parked is a list"),
+    ([1], "parked is a list"),
+    (["FG2"], "FG2 parked but not one of its jobs"),
+])
+def test_parse_refuses_a_parked_job_that_isnt_the_groups(parked, why):
+    got, err = antenna.parse([{"name": "UHF", "sdrs": ["a"], "jobs": ["FG1"], "parked": parked}])
+    assert got == [] and why in err
+
+
+def test_parked_jobs_keep_the_lists_order_and_none_leaves_the_file_as_before():
+    (g,), err = antenna.parse([{"name": "UHF", "sdrs": ["a"], "jobs": [P25, "FG2", "FG1"], "parked": ["FG1", "FG2"]}])
+    assert err == "" and g.parked == ("FG2", "FG1") and g.row()["parked"] == ["FG2", "FG1"]
+    (g,), _ = antenna.parse([{"name": "UHF", "sdrs": ["a"], "jobs": ["FG1"]}])
+    assert g.parked == () and "parked" not in g.row()
+
+
+UHF4 = [*UHF, "spare-1"]
+
+
+def uhf4(parked=()):
+    return [{"name": "UHF", "sdrs": UHF4, "jobs": [P25, "South 2", "FG1", "FG2"], **({"parked": list(parked)} if parked else {})},
+            GROUPS[1]]
+
+
+def group_alerts(app):
+    from sizeup.cloud.health import JOB_GRACE_S
+    from tests.test_health import Rig, station_status
+    r = Rig()
+    st = station_status()
+    st["sdr"]["groups"] = app.sdr()["groups"]
+    r.at(0, status=st)
+    r.at(JOB_GRACE_S + 1, status=st)
+    return r.h.model()["groups"], [a for a in r.h.alerts() if a["key"].startswith("group:")]
+
+
+def test_a_parked_job_says_no_check_is_never_picked_auto_assigned_or_stood_in_and_is_audited(rig, tmp_path):
+    plugged, logs, make = rig
+    app = make().start()
+    mapped(app)
+    # parking a job a dongle runs never stops it: refused, that dongle switched Off first
+    assert app.set_antenna_groups(uhf4(["FG2"])) == "SDR spare-1 runs FG2: switch it Off before parking FG2"
+    assert app.set_mode("Off", "spare-1") is None
+    # unparked, a job no dongle has is a check warning (#609) ...
+    assert app.set_antenna_groups(uhf4()) is None
+    assert app.sdr()["groups"][0]["unowned"] == ["FG2"]
+    _rows, alerts = group_alerts(app)
+    assert [(a["title"], a["text"]) for a in alerts] == [("Antenna group UHF check", "no dongle has FG2")]
+    # ... parked, it is off on purpose: shown as parked, no warning
+    assert app.set_antenna_groups(uhf4(["FG2"])) is None
+    g = app.sdr()["groups"][0]
+    assert (g["unowned"], g["parked"], g["short"], g["conflicts"]) == ([], ["FG2"], [], {})
+    rows, alerts = group_alerts(app)
+    assert alerts == [] and rows[0]["parked"] == ["FG2"] and rows[0]["unowned"] == []
+    assert any(x.endswith("· Fire/EMS 15 > South 2 > FG1 > FG2 · parked FG2; 700: SDR m700-a, m700-b · MRRS 770 > MRRS 773")
+               for x in logs)
+    from sizeup.cad.api import summarize
+    s, _ = summarize("/api/antenna-groups", {"groups": uhf4(["FG2"])}, {}, None)
+    assert s.startswith("Antenna groups: UHF (4 SDRs: Fire/EMS 15 > South 2 > FG1 > FG2; parked FG2); 700 (")
+    # never picked, by a person or auto-assign
+    assert app.set_mode("FG2", "spare-1") == "FG2 is parked in UHF: unpark it first"
+    assert app.set_mode("FG2", "uhf-c") == "FG2 is parked in UHF: unpark it first"
+    app.set_by.pop("spare-1")                                            # an Off nobody picked: a spare
+    spare = next(d for d in DONGLES if d[2] == "spare-1")
+    plugged.remove(spare)
+    app._sdr_arrivals()
+    plugged.append(spare)
+    app._sdr_arrivals()                                                  # back: the group's free job would be FG2
+    assert app.assign.get("spare-1", "Off") == "Off" and on(app, "FG2") is None
+    # a fallback stands the spare in for South 2, never runs FG2
+    plugged[:] = [d for d in plugged if d[2] != "uhf-b"]
+    app._sdr_arrivals()
+    assert (on(app, "South 2"), on(app, "FG1"), on(app, "FG2")) == ("spare-1", "uhf-c", None)
+    plugged.insert(1, DONGLES[1])
+    app._sdr_arrivals()
+    assert on(app, "South 2") == "uhf-b" and app.assign.get("spare-1", "Off") == "Off" and on(app, "FG2") is None
+    # kept across a restart; unparked, the spare's next arrival gets FG2 again
+    assert json.loads((tmp_path / "antenna_groups.json").read_text())["groups"][0]["parked"] == ["FG2"]
+    app.stop()
+    again = make().start()
+    assert again.groups[0].parked == ("FG2",) and again.assign.get("spare-1", "Off") == "Off"
+    assert again.set_antenna_groups(uhf4()) is None
+    again.set_by.pop("spare-1", None)
+    plugged.remove(spare)
+    again._sdr_arrivals()
+    plugged.append(spare)
+    again._sdr_arrivals()
+    assert on(again, "FG2") == "spare-1"
+
+
+def test_a_parked_fire_job_saved_on_a_dongle_keeps_running_and_is_a_check(rig, tmp_path):
+    plugged, logs, make = rig
+    app = make().start()
+    mapped(app)
+    assert app.set_mode("Off", "spare-1") is None
+    assert app.set_antenna_groups(uhf4(["FG2"])) is None
+    app.stop()
+    modes = json.loads((tmp_path / "sdr_modes.json").read_text())
+    modes["spare-1"] = "FG2"                                             # put back by hand
+    (tmp_path / "sdr_modes.json").write_text(json.dumps(modes))
+    again = make().start()
+    again._sdr_arrivals()
+    assert on(again, "FG2") == "spare-1"                                 # a fire job: never stopped by a lock
+    assert any(x.startswith("sdr: CRITICAL") and "FG2 is parked in UHF" in x for x in logs)
+    assert again.sdr()["groups"][0]["conflicts"] == {"spare-1": "FG2"}
+    _rows, alerts = group_alerts(again)
+    assert [a["title"] for a in alerts] == ["Antenna group UHF check"]
+
+
+def test_a_restore_of_both_systems_asks_for_the_county_first_whatever_the_groups_order(rig, monkeypatch):
+    plugged, logs, make = rig
+    app = make().start()
+    mapped(app)
+    assert app.set_antenna_groups([GROUPS[1], GROUPS[0]]) is None       # MRRS's group listed first
+    plugged[:] = [d for d in plugged if d[2] not in ("uhf-a", "m700-a")]   # a hub with the county's and MRRS's
+    app._sdr_arrivals()
+    assert on(app, P25) == "uhf-c" and app.systems["mrrs"].recorder.source_on(0) == "m700-b"
+    started: list[str] = []
+    real = app._start_mode
+    monkeypatch.setattr(app, "_start_mode", lambda job, sd: (started.append(job), real(job, sd))[1])
+    plugged[:] = list(DONGLES)                                            # both back in the same step
+    app._sdr_arrivals()
+    assert (on(app, P25), app.systems["mrrs"].recorder.source_on(0)) == ("uhf-a", "m700-a")
+    assert started[0] == P25 and "MRRS 770" in started, started
+
+
+def _group_restore_service(tmp_path, usb):
+    """The station's service as an antenna group's fallback left it: the county on a stand-in (c3), MRRS's 770 side
+    on its 773 dongle (pd-b); then the restore: the county back on v4, MRRS on pd-a and pd-b, both asked at once."""
+    from tests.test_p25_systems import ask_county, ask_system, service
+    county, mrrs, pop, logs, d = service(tmp_path, found=lambda: list(usb))
+    ask_county(tmp_path, sdr="c3")
+    ask_system(tmp_path, {0: "pd-b"})
+    return county, mrrs, pop, logs, d
+
+
+def _ask_restore(tmp_path, group: bool):
+    from pathlib import Path
+    from sizeup.radio import trunkrecd
+    from tests.test_p25_systems import ask_county, ask_system
+    ask_county(tmp_path, sdr="v4", seq=2)
+    ask_system(tmp_path, {0: "pd-a", 1: "pd-b"}, seq=2)
+    if group:                                                            # as SystemUnitRecorder writes a group move
+        p = Path(trunkrecd.system_state_path("mrrs", str(tmp_path / "state" / "p25_recorder.json")))
+        p.write_text(json.dumps({**json.loads(p.read_text()), "group": True}))
+
+
+@pytest.mark.parametrize("group", [True, False])
+def test_a_group_restore_starts_the_county_first_and_the_other_system_once_it_is_up(tmp_path, group):
+    from sizeup.radio import trunkrecd
+    from tests.test_p25_systems import run
+    usb = [(0, "v4"), (1, "pd-a"), (2, "pd-b"), (3, "c3")]
+    county, mrrs, pop, logs, d = _group_restore_service(tmp_path, usb)
+    run([mrrs, county], lambda t: None, 100.0, 110.0)                   # (MRRS's thread first: the race)
+    assert county.status["state"] == "ok" and mrrs.status["state"] == "ok" and len(pop.started) == 2
+    _ask_restore(tmp_path, group)
+    starts: dict[int, tuple[float, str]] = {}
+    details: list[str] = []
+
+    def watch(t):
+        for p in pop.started[2:]:
+            starts.setdefault(p.pid, (t, "county" if p.kw["cwd"] != str(d) else "mrrs"))
+        details.append(mrrs.status.get("detail", ""))
+    run([mrrs, county], watch, 110.0, 140.0)
+    (tc, who_c), (tm, who_m) = sorted(starts.values())
+    assert county.status["state"] == "ok" and mrrs.status["state"] == "ok" and county.status["sdr"] == "v4"
+    if group:
+        assert (who_c, who_m) == ("county", "mrrs") and tm - tc >= trunkrecd.COUNTY_SETTLE_S, starts
+        assert f"not started yet ({trunkrecd.MODE} starts first)" in details
+    else:                                                                # a person's switch: as before #637
+        assert tm - tc < trunkrecd.COUNTY_SETTLE_S and not any("starts first" in x for x in details)
+
+
+def test_a_group_move_waits_for_the_county_a_minute_at_most_and_not_at_all_when_it_is_up(tmp_path):
+    from sizeup.radio import trunkrecd
+    from tests.test_p25_systems import run
+    usb = [(1, "pd-a"), (2, "pd-b"), (3, "c3")]                         # the county's v4 isn't back: it never starts
+    county, mrrs, pop, logs, d = _group_restore_service(tmp_path, usb)
+    run([mrrs, county], lambda t: None, 100.0, 110.0)
+    _ask_restore(tmp_path, True)
+    n = len(pop.started)
+    at: list[float] = []
+    run([mrrs, county], lambda t: at.append(t) if len(pop.started) > n and len(at) == 0 else None, 110.0, 200.0)
+    assert county.status["state"] == "absent" and mrrs.status["state"] == "ok"
+    assert 110.0 + trunkrecd.COUNTY_WAIT_S <= at[0] <= 110.0 + trunkrecd.COUNTY_WAIT_S + 2, at
+    # the county up for long: a group move of MRRS waits for nothing
+    usb[:] = [(0, "v4"), (1, "pd-a"), (2, "pd-b"), (3, "c3")]
+    run([mrrs, county], lambda t: None, 200.0, 230.0)
+    assert county.status["state"] == "ok"
+    from tests.test_p25_systems import ask_system
+    ask_system(tmp_path, {0: "pd-b"}, seq=3)
+    from pathlib import Path
+    p = Path(trunkrecd.system_state_path("mrrs", str(tmp_path / "state" / "p25_recorder.json")))
+    p.write_text(json.dumps({**json.loads(p.read_text()), "group": True}))
+    n = len(pop.started)
+    run([mrrs, county], lambda t: None, 230.0, 231.0)
+    assert len(pop.started) == n + 1 and mrrs.status["sdr"] == "0=pd-b"
+
+
+def test_a_held_system_says_until_when_on_receivers_and_health(tmp_path, monkeypatch):
+    import time as _time
+    from types import SimpleNamespace
+    from sizeup.radio import trunkrecd
+    from sizeup.radio.recorder import SystemUnitRecorder
+    from tests.test_p25_systems import ask_system, service
+    usb = [(0, "v4"), (1, "pd-a"), (2, "pd-b")]
+    _county, mrrs, pop, _logs, _d = service(tmp_path, found=lambda: list(usb))
+    ask_system(tmp_path, {0: "pd-a", 1: "pd-b"})
+    assert mrrs.step(100.0)["state"] == "ok"
+    # a return held back (_coming_back): the status says until when, and keeps it as hold_until
+    usb.remove((1, "pd-a"))
+    for t in (106.0, 107.0):
+        mrrs.step(t)
+    assert mrrs.status["state"] == "absent" and "hold_until" not in mrrs.status       # gone: not a hold
+    mrrs.hold_until = 700.0
+    usb.insert(1, (1, "pd-a"))
+    for t in range(108, 120):
+        st = mrrs.step(float(t))
+    hhmm = _time.strftime("%H:%M", _time.localtime(700.0))
+    assert (st["state"], st["hold_until"]) == ("absent", 700.0)
+    assert st["detail"] == f"SDR 'pd-a', 'pd-b' back: not started yet (held back until {hhmm} after dropouts)"
+    assert mrrs.step(701.0)["state"] == "ok" and "hold_until" not in mrrs.status
+    # the station side passes it on (SystemUnitRecorder -> Runtime -> Receivers row, station health -> Health)
+    sp = tmp_path / "s.json"
+    rec = SystemUnitRecorder("mrrs", "MRRS", "trunk-recorder --config=config.json", str(tmp_path),
+                             state_path=str(tmp_path / "w.json"), status_path=str(sp), wait_s=0.0)
+    until = _time.time() + 600
+    sp.write_text(json.dumps({"state": "absent", "detail": "held back until 14:32 after dropouts", "hold_until": until,
+                              "at": _time.time(), "on": True}))
+    assert rec.status()["hold_until"] == until
+    rt = object.__new__(systems.Runtime)
+    rt.system, rt.recorder = MRRS, rec
+    rt.ingest = SimpleNamespace(status=lambda: {"label": "MRRS", "state": "ok", "detail": ""})
+    row = rt.status(["MRRS 770"])
+    assert (row["state"], row["hold_until"]) == ("absent", until)
+    from sizeup.cloud.health import station_metrics
+    app = SimpleNamespace(shared=True, assign={"m700-a": "MRRS 770"}, receivers=[], systems={"mrrs": rt})
+    jobs = station_metrics(app, SimpleNamespace(sample=lambda: {}))["jobs"]
+    assert jobs["MRRS 770"]["hold_until"] == until and "hold_until" not in jobs["MRRS 773"]
+    from tests.test_health import Rig, station_status
+    r = Rig()
+    st = station_status()
+    st["sdr"]["sdrs"][0].update(mode="MRRS 770")
+    st["health"]["jobs"] = {"MRRS 770": dict(jobs["MRRS 770"])}
+    r.at(0, status=st)
+    d = next(x for x in r.h.model()["dongles"] if x["job"] == "MRRS 770")
+    assert d["hold_until"] == until and not d["running"]
+    assert not any(a["key"] == "job:MRRS 770" for a in r.h.alerts())   # (another system's: never an alert)
+    root = appmod.ROOT / "sizeup" / "web" / "static"
+    assert "held to ${fmtTime(x.hold_until)}" in (root / "health.js").read_text()
+    js = (root / "radio-controls.js").read_text()
+    assert "held to ${fmtTime(r.hold_until)}" in js and "held to ${fmtTime(x.hold_until)}" in js

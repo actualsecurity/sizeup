@@ -3562,7 +3562,7 @@ class App:
         if g is not None:            # a grouped dongle: its group's first job no dongle of the group has as its own
             mine = {self._own_of(s) for s in g.sdrs if s != sd}
             return next((j for j in g.jobs if j in self.modes and j not in mine and j not in have
-                         and self._group_runnable(j, have | {j})), None)
+                         and j not in g.parked and self._group_runnable(j, have | {j})), None)
         for job in self.cfg.sdr_auto_order:
             if job == OFF_MODE or job not in self.modes or job in have or antenna.of_job(self.groups, job):
                 continue                # (a group's job: only ever on its own dongles)
@@ -3742,7 +3742,7 @@ class App:
         file put back): a fire job runs where it was saved, said loudly and shown (groups_state "conflicts", Health);
         any other starts Off, said once. A fire job is never turned off by a lock."""
         for sd, m in list(self.assign.items()):
-            why = self._locked(m, sd) if m != OFF_MODE else ""
+            why = (self._locked(m, sd) or self._parked(m)) if m != OFF_MODE else ""
             if why and self.fire_job(m):
                 log(f"sdr: CRITICAL {self._sdr_tag(sd)} runs {m} against the antenna groups ({why}): kept running; "
                     "fix the group in Settings > Radios > Receivers")
@@ -3770,8 +3770,8 @@ class App:
             g = antenna.of_sdr(self.groups, sd)
             own = self.assign.get(sd, OFF_MODE)
             owners = [o for o in (g.sdrs if g else ()) if o != sd and self.assign.get(o) == job]
-            if g is None or job not in g.jobs or not owners or (own != OFF_MODE and own not in g.jobs) or \
-                    any(o in self._own for o in owners):
+            if g is None or job not in g.jobs or job in g.parked or not owners or \
+                    (own != OFF_MODE and own not in g.jobs) or any(o in self._own for o in owners):
                 continue
             self._own[sd], self.assign[sd] = own, job
             for o in owners:
@@ -3802,6 +3802,11 @@ class App:
         if gj is not None and sdr not in gj.sdrs:
             return f"{mode} is locked to {gj.name}: SDR {', '.join(self.sdr_name(s) for s in gj.sdrs)}"
         return ""
+
+    def _parked(self, mode: str, gs: list | None = None) -> str:
+        """Why `mode` may run on no dongle: parked in its antenna group (#637: switched off there on purpose), or ""."""
+        g = antenna.of_job(self.groups if gs is None else gs, mode) if mode != OFF_MODE else None
+        return f"{mode} is parked in {g.name}: unpark it first" if g is not None and mode in g.parked else ""
 
     def _group_runnable(self, job: str, on: set[str]) -> bool:
         """A job a group may give a dongle, beside the jobs `on`: the county's trunk-recorder only when one dongle
@@ -3890,8 +3895,9 @@ class App:
                 for s in [s for s in g.sdrs if s not in usable and s in self._own and not (lent and lent[0] == s)]:
                     self._settle_own(s)             # a stand-in gone: back on its own job, where it waits
                 own = {s: self._own_of(s) for s in g.sdrs if not (lent and lent[0] == s)}
-                # a dongle on a job outside its group (kept at startup, _lock_saved): left as it is, never planned
-                for s in [s for s, m in own.items() if m != OFF_MODE and m not in g.jobs]:
+                # a dongle on a job outside its group or parked there (kept at startup, _lock_saved): left as it is,
+                # never planned
+                for s in [s for s, m in own.items() if m != OFF_MODE and (m not in g.jobs or m in g.parked)]:
                     own.pop(s)
                     usable = [x for x in usable if x != s]
                 # (a group is the admin's consent to moves inside it: spares with auto_assign off too)
@@ -3943,7 +3949,10 @@ class App:
                 self._stop_mode(job, f"antenna group: {job} off SDR {self.sdr_name(sd)}", sd)
             if stops:
                 time.sleep(SWITCH_PAUSE_S)         # let the dongles go before the next programs open them
-            for sd, job in moves.items():
+            # (#637) the county's trunk-recorder is asked for first: another system's start in the same step then
+            # finds it on and waits until it is up (trunkrecd.SystemSupervisor._county_first), whatever the order
+            # of the groups
+            for sd, job in sorted(moves.items(), key=lambda m: m[1] != P25_MODE):
                 old = self.assign.get(sd, OFF_MODE)
                 ok = job == OFF_MODE or self._start_mode(job, sd)
                 self.assign[sd] = job if ok else OFF_MODE
@@ -3997,7 +4006,7 @@ class App:
         for g in gs:
             own = {s: self._own_of(s) for s in g.sdrs if not (lent and lent[0] == s)}
             usable = [s for s in g.sdrs if s in here and self._gusable.get(s, True) and own.get(s, OFF_MODE) in
-                      (OFF_MODE, *g.jobs)]
+                      (OFF_MODE, *g.jobs) and own.get(s, OFF_MODE) not in g.parked]
             spares = [s for s in usable if own.get(s) == OFF_MODE and self.set_by.get(s) != "person"]
             plan, _ = antenna.plan(g, own, usable, spares, dict(self.assign), self.fire_job, self._group_runnable)
             out |= set(plan.values()) - {OFF_MODE}
@@ -4039,6 +4048,8 @@ class App:
                     return f"SDR {self.sdr_name(sd)} runs {m}: add {m} to {g.name}, or switch SDR {self.sdr_name(sd)} first"
                 if gj is not None and sd not in gj.sdrs:
                     return f"{m} runs on SDR {self.sdr_name(sd)}: add it to {gj.name}, or switch it first"
+                if gj is not None and m in gj.parked:       # (#637) parking never stops a job: Off first
+                    return f"SDR {self.sdr_name(sd)} runs {m}: switch it Off before parking {m}"
             asks = [f"{w}: in a fallback the higher one takes the other's dongle"
                     for g in gs if (w := antenna.fire_order(g, self._fire_rank))]
             here = {s for _i, _p, s in sdr_lookup.devices(self.cfg.rtl_fm) if s}
@@ -4063,7 +4074,8 @@ class App:
                 self._gseen.pop(s, None)
                 self._gusable.pop(s, None)
             log("sdr: antenna groups: " + ("; ".join(
-                f"{g.name}: SDR {', '.join(self.sdr_name(s) for s in g.sdrs)} · {' > '.join(g.jobs)}" for g in gs)
+                f"{g.name}: SDR {', '.join(self.sdr_name(s) for s in g.sdrs)} · {' > '.join(g.jobs)}"
+                + (f" · parked {', '.join(g.parked)}" if g.parked else "") for g in gs)
                 or "none"))
             self._groups_reconcile()
         if self.groups and self._started:
@@ -4089,17 +4101,19 @@ class App:
 
     def groups_state(self) -> list[dict]:
         """sdr()["groups"]: each group, its dongles that can run now, its wanted jobs without a dongle ("short"), the
-        jobs it lists that are no dongle's own anywhere ("unowned"), and the dongles that run a job against it
-        ("conflicts": {serial: job}, kept at startup: _lock_saved)."""
+        jobs it lists that are no dongle's own anywhere and not parked ("unowned"), its parked jobs ("parked", only
+        when there are), and the dongles that run a job against it ("conflicts": {serial: job}, kept at startup:
+        _lock_saved)."""
         owns = {self._own_of(s) for s in set(self.assign) | set(self._own)}
         out = []
         for g in self.groups:
             conf = {s: m for s in set(self.assign) | set(self._own)
-                    if (m := self._own_of(s)) != OFF_MODE and self._locked(m, s)
+                    if (m := self._own_of(s)) != OFF_MODE and (self._locked(m, s) or self._parked(m))
                     and (s in g.sdrs or m in g.jobs)}
             out.append({**g.row(), "usable": [s for s in g.sdrs if self._gusable.get(s)],
                         "short": list(self._gshort.get(g.name, [])),
-                        "unowned": [j for j in g.jobs if j not in owns], "conflicts": conf})
+                        # (#637) a parked job is switched off on purpose: never "no dongle has it"
+                        "unowned": [j for j in g.jobs if j not in owns and j not in g.parked], "conflicts": conf})
         return out
 
     def _start_watch(self) -> None:
@@ -4271,8 +4285,8 @@ class App:
             return f"no SDR {sdr!r} plugged in" + (f"; one of {', '.join(rows)}" if rows else "")
         if mode not in self.modes:
             return f"unknown mode {mode!r}; one of {', '.join(self.modes)}"
-        if why := self._locked(mode, sdr):         # antenna groups: never a job off its own antenna
-            return why
+        if why := self._locked(mode, sdr) or self._parked(mode):   # antenna groups: never off its own antenna,
+            return why                             # never a job parked there (#637)
         # (#410) a dongle lent to a reception test: any switch of it ends the test and its paused job comes back
         # (said in the answer); one still owed its job: that job picked is "restore now"
         lent = self.reception.person_switch(mode, sdr)
