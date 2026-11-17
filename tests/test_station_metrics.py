@@ -587,6 +587,106 @@ def test_copies_go_round_robin_over_the_oldest_and_an_unreadable_newest_falls_ba
     assert third.backup_turn() == "failed" and not third.settled and third.backup_turn() == ""   # (backing off)
 
 
+class GzCopies(FakeCopies):
+    """As S3Copies keeps them: gzipped, unpacked on the way back (a torn one raises from gzip / zlib)."""
+
+    def get(self, slot):
+        return gzip.decompress(super().get(slot))
+
+    def put(self, slot, raw):
+        return super().put(slot, gzip.compress(raw))
+
+
+def test_a_deflate_corrupt_newest_copy_settles_from_an_older_one(tmp_path):
+    import zlib
+    clock = Clock(T0)
+    bucket = GzCopies(clock)
+    a, _ = store(tmp_path / "a", clock, backup=bucket)
+    a.ingest("t", floors(T0, [1.0, 2.0]))
+    a.backup_turn()
+    for _ in range(3):
+        clock.t += FIRST_UPLOAD_S + SNAPSHOT_S
+        a.backup_turn()
+    newest = bucket.list()[0]["slot"]
+    at, gz = bucket.slots[newest]
+    torn = gz[:20] + bytes(b ^ 0x5A for b in gz[20:60]) + gz[60:]          # the deflate stream broken, the header fine
+    with pytest.raises(zlib.error):
+        gzip.decompress(torn)
+    bucket.slots[newest] = (at, torn)
+    b, _ = store(tmp_path / "b", clock, backup=bucket)
+    assert b.backup_turn() == "restored" and raw_count(b) == 2 and b.settled
+
+
+def copy_with(tmp_path, clock, sql: list[str]) -> bytes:
+    """A copy of a store with two floor records, changed by sql (another release's schema)."""
+    s, _ = store(tmp_path, clock)
+    s.ingest("t", floors(T0, [1.0, 2.0]) + [{"k": "ev", "s": "FG1", "at": T0 + 5, "ev": "gain", "d": "x"}])
+    s.maintain()
+    p = tmp_path / "copy.sqlite"
+    p.write_bytes(s.snapshot_bytes())
+    with sqlite3.connect(p) as db:
+        for q in sql:
+            db.execute(q)
+    return p.read_bytes()
+
+
+def test_a_copy_with_a_column_more_or_less_still_merges(tmp_path):
+    clock = Clock(T0 + 3600)
+    newer = copy_with(tmp_path / "n", clock, ["ALTER TABLE raw ADD COLUMN extra TEXT", "ALTER TABLE series ADD COLUMN note TEXT"])
+    older = copy_with(tmp_path / "o", clock, [
+        "CREATE TABLE h2 (station TEXT NOT NULL, subject TEXT NOT NULL, metric TEXT NOT NULL, hour INTEGER NOT NULL, "
+        "n INTEGER NOT NULL, lo REAL, p50 REAL, hi REAL, PRIMARY KEY (station, subject, metric, hour)) WITHOUT ROWID",
+        "INSERT INTO h2 SELECT station, subject, metric, hour, n, lo, p50, hi FROM hourly", "DROP TABLE hourly",
+        "ALTER TABLE h2 RENAME TO hourly", "ALTER TABLE events DROP COLUMN detail"])
+    no_key = copy_with(tmp_path / "k", clock, [
+        "CREATE TABLE e2 (station TEXT NOT NULL, subject TEXT NOT NULL, at REAL NOT NULL, detail TEXT, "
+        "PRIMARY KEY (station, subject, at)) WITHOUT ROWID", "INSERT INTO e2 SELECT station, subject, at, detail FROM events",
+        "DROP TABLE events", "ALTER TABLE e2 RENAME TO events"])
+    for name, data in (("newer", newer), ("older", older), ("no_key", no_key)):
+        s, _ = store(tmp_path / name, clock)
+        n, _at = s.merge(data)
+        assert raw_count(s) == 2 and s.index()["series"][0]["first"] == T0, name
+        events = s._read("SELECT COUNT(*) FROM events")[0][0]
+        assert events == (0 if name == "no_key" else 1), name      # a table lacking a key column: left out, the rest in
+        if name == "older":
+            assert s._read("SELECT p90 FROM hourly LIMIT 1")[0][0] is None and s._read("SELECT detail FROM events")[0][0] == ""
+
+
+def test_health_warns_when_the_copies_stall(tmp_path):
+    clock = Clock(T0)
+    bucket = FakeCopies(clock)
+    s, _ = store(tmp_path, clock, backup=bucket)
+    assert s.health() is None                                    # not led yet
+    bucket.fail_list = OSError("S3 GET 500")
+    s.backup_turn()
+    h = s.health()
+    assert h["settled"] is False and h["unsettled_since"] == T0 and h["warn"] == "" and "500" in h["error"]
+    clock.t += 7 * 3600
+    assert s.health()["warn"].startswith("metrics copies not restored for 7 h: OSError: S3 GET 500")
+    bucket.fail_list = None
+    s.backup_turn(now=clock.t + 3600)                            # (past its backoff)
+    clock.t += 3600
+    assert s.health()["settled"] and s.health()["warn"] == ""
+    clock.t += 13 * 3600                                         # uploads failing since
+    bucket.put = lambda slot, raw: (_ for _ in ()).throw(OSError("S3 PUT 403"))
+    s.backup_turn()
+    assert s.health()["warn"].startswith("no metrics copy kept for 13 h")
+
+
+def test_the_copies_warning_is_a_health_hint_on_the_hub(tmp_path):
+    hub = HubRun(hub_cfg(tmp_path))
+    try:
+        st = hub.app.metric_store
+        st.backup = FakeCopies(st.clock)
+        st.backup.fail_list = OSError("S3 GET 500")
+        st.backup_turn(now=time.time() - 7 * 3600)
+        hints = hub.app.health.model()["hints"]
+        assert [h["level"] for h in hints if h["channel"] == "Metrics"] == ["warn"]
+        assert hub.app.health.model()["metrics_backup"]["settled"] is False
+    finally:
+        hub.close()
+
+
 def test_a_restart_in_place_is_settled_and_asks_for_nothing(tmp_path):
     clock = Clock(T0)
     bucket = FakeCopies(clock)

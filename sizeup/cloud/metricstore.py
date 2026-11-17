@@ -64,6 +64,8 @@ SNAPSHOT_S = 3 * 3600.0         # a copy to the bucket this often, once settled
 FIRST_UPLOAD_S = 900.0          # ... the first this long after settling
 BACKOFF_S = (30.0, 1800.0)      # settling or an upload failed: again in 30 s, doubling to 30 min
 BACKUP_TURN_S = 30.0            # the backup thread's look
+UNSETTLED_WARN_S = 6 * 3600.0   # Health warns: not settled this long (the stations keep 6 h to resend) ...
+COPY_WARN_S = 12 * 3600.0       # ... or no good copy this long
 REROLL_S = 48 * 3600.0          # the first maintain() after a start rolls this far back again
 KINDS = ("floor", "tx", "cc")
 MAX_RECORDS = 5000              # a post
@@ -156,6 +158,20 @@ def _clean_doc(rec: dict) -> dict:
     return out
 
 
+def _common_columns(db: sqlite3.Connection, table: str) -> list[str] | None:
+    """The columns of `table` both this store (main) and an attached copy (snap) have, in this store's order; None when
+    the copy hasn't the table, or lacks a key column or one here that must have a value (NOT NULL, no default)."""
+    def info(schema: str) -> list[tuple]:
+        return db.execute(f"PRAGMA {schema}.table_info({table})").fetchall()
+    mine, theirs = info("main"), {r[1] for r in info("snap")}
+    if not theirs:
+        return None
+    for _cid, name, _type, notnull, default, pk in mine:
+        if name not in theirs and (pk or (notnull and default is None)):
+            return None
+    return [r[1] for r in mine if r[1] in theirs]
+
+
 class MetricStore:
     def __init__(self, path: str | Path, may_write: Callable[[], bool] = lambda: True,
                  log: Callable[[str], None] = print, clock: Callable[[], float] = time.time,
@@ -180,6 +196,8 @@ class MetricStore:
         self._fails = 0
         self._next_upload: float | None = None
         self.backup_status = {"state": "unsettled", "error": "", "uploaded": None, "restored": None}
+        self._unsettled_since: float | None = None   # (clock) the first leader turn that found it unsettled
+        self._copy_at: float | None = None         # (clock) the last good copy: uploaded here, or the one merged in
         self._retained_day = -1
         self.ingested = 0
 
@@ -407,8 +425,12 @@ class MetricStore:
         """The backup thread's turn (the leader's, every BACKUP_TURN_S): settle (merge the newest copy, or see there is
         none), then a copy every SNAPSHOT_S. What it did, for the log and the tests."""
         now = self.clock() if now is None else now
-        if self.backup is None or not self.may_write() or now < self._next_try:
+        if self.backup is None or not self.may_write():
             return ""                              # (no copies: settled as it is when the file opens)
+        if not self.settled and self._unsettled_since is None:
+            self._unsettled_since = now
+        if now < self._next_try:
+            return ""
         with self._lock:
             self._open()
         try:
@@ -435,6 +457,7 @@ class MetricStore:
             self._fails = 0
             with self._lock:
                 self._settle(0.0, "none")
+            self._copy_at = now                    # (none to have: the clock for "no copy since" starts here)
             self.log("metrics: no copies in the bucket: starting from what comes in")
             return "none"
         pick = [copies[0]] + ([c] if (c := max(copies, key=lambda c: c["size"])) is not copies[0] else [])
@@ -444,7 +467,7 @@ class MetricStore:
                 break                              # the newest (and largest) are in: enough
             try:
                 n, at = self.merge(self.backup.get(c["slot"]))
-            except (OSError, ValueError, EOFError, sqlite3.Error, RuntimeError) as e:
+            except Exception as e:  # noqa: BLE001 - a torn copy (zlib.error, a bad file, ...): the next one is tried
                 last_err = e
                 self.log(f"metrics: copy {c['slot']} not read ({type(e).__name__}: {e})")
                 continue
@@ -457,13 +480,17 @@ class MetricStore:
         with self._lock:
             self._settle(snap_at or 0.0, "restored")
         self.backup_status["restored"] = now
+        self._copy_at = snap_at or now
         return "restored"
 
     def merge(self, data: bytes) -> tuple[int, float | None]:
         """A copy (an SQLite file's bytes) merged in: INSERT OR IGNORE (what is here stays), the series by min / max.
-        (rows added, its snapshot_at)."""
+        Column by column (the columns both have): a copy from a release with a column more or less still merges, as
+        long as it has every key column and every column here that must have a value. (rows added, its snapshot_at)."""
         if data[:16] != b"SQLite format 3\x00":
             raise ValueError("not an SQLite file")
+        with self._lock:
+            self._open()                           # (its folder made: the copy is written beside it)
         fd, tmp = tempfile.mkstemp(prefix=".metrics-copy.", suffix=".sqlite",
                                    dir=None if self.path == ":memory:" else str(Path(self.path).parent))
         try:
@@ -474,12 +501,25 @@ class MetricStore:
                 db = self._open()
                 db.execute("ATTACH DATABASE ? AS snap", (tmp,))
                 try:
-                    v = db.execute("SELECT value FROM snap.meta WHERE key = 'snapshot_at'").fetchone()
+                    try:
+                        v = db.execute("SELECT value FROM snap.meta WHERE key = 'snapshot_at'").fetchone()
+                    except sqlite3.Error:
+                        v = None
                     db.execute("BEGIN")
-                    for t in ("raw", "events", "hourly"):
-                        n += db.execute(f"INSERT OR IGNORE INTO main.{t} SELECT * FROM snap.{t}").rowcount
-                    db.execute("INSERT INTO main.series SELECT * FROM snap.series WHERE true ON CONFLICT(station, subject, "
-                               "kind) DO UPDATE SET first = MIN(first, excluded.first), last = MAX(last, excluded.last)")
+                    for t in ("raw", "events", "hourly", "series"):
+                        cols = _common_columns(db, t)
+                        if cols is None:
+                            self.log(f"metrics: a copy's {t} doesn't fit this release's: left out")
+                            continue
+                        names = ", ".join(cols)
+                        if t == "series":
+                            upd = ", ".join(f"{c} = {'MIN' if c == 'first' else 'MAX'}({c}, excluded.{c})"
+                                            for c in ("first", "last") if c in cols)
+                            n += db.execute(f"INSERT INTO main.series ({names}) SELECT {names} FROM snap.series WHERE true "
+                                            "ON CONFLICT(station, subject, kind) DO " + (f"UPDATE SET {upd}" if upd else
+                                                                                         "NOTHING")).rowcount
+                        else:
+                            n += db.execute(f"INSERT OR IGNORE INTO main.{t} ({names}) SELECT {names} FROM snap.{t}").rowcount
                     db.execute("COMMIT")
                 except Exception:
                     if db.in_transaction:
@@ -529,8 +569,27 @@ class MetricStore:
         self._fails = 0
         self._next_upload = now + SNAPSHOT_S
         self.backup_status.update(uploaded=now, error="", slot=slot, bytes=size)
+        self._copy_at = now
         self.log(f"metrics: copy {slot} kept ({size / 1e6:.2f} MB gzip)")
         return "uploaded"
+
+    def health(self, now: float | None = None) -> dict | None:
+        """Settings > Station > Health: the copies' state, and a warning ("warn") when the store hasn't settled for
+        UNSETTLED_WARN_S (nothing is uploaded meanwhile) or no copy has been kept for COPY_WARN_S. None without copies
+        (a local hub) or before this task has led."""
+        now = self.clock() if now is None else now
+        if self.backup is None or (self._unsettled_since is None and not self.settled):
+            return None
+        st = self.backup_status
+        out = {"settled": self.settled, "how": st.get("how") or "", "unsettled_since": None if self.settled else
+               self._unsettled_since, "copy_at": self._copy_at, "error": st.get("error") or "", "warn": ""}
+        why = f": {out['error'][:120]}" if out["error"] else ""
+        if not self.settled and now - (self._unsettled_since or now) > UNSETTLED_WARN_S:
+            out["warn"] = (f"metrics copies not restored for {(now - self._unsettled_since) / 3600:.0f} h{why} "
+                           "(nothing uploaded until they are)")
+        elif self.settled and self._copy_at is not None and now - self._copy_at > COPY_WARN_S:
+            out["warn"] = f"no metrics copy kept for {(now - self._copy_at) / 3600:.0f} h{why}"
+        return out
 
     # -- out (GET /api/cad/metrics, admins) -------------------------------------------------------------------------
 

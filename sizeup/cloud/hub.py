@@ -898,6 +898,7 @@ class HubApp(App):
         self.metric_store = MetricStore(state / "metrics.sqlite" if state else ":memory:", may_write=self._may_write_audio,
                                         log=log, audit=self._metrics_audit, backup=S3Copies.from_env() if state else None)
         self.cad.station_metrics = self.metric_store
+        self.health.metrics = self.metric_store.health     # Settings > Station > Health: a warning if copies stall
         app_mod._mark("hub")
 
     def _perf_sizes(self) -> None:
