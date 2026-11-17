@@ -214,6 +214,7 @@ def test_the_pages_use_it():
     assert "li.append(...suggestionHead(m, meet));" in box
     note = js[js.index("function suggestNote("):js.index("function takeItem(")]
     assert "li.append(...suggestionHead(p));" in note
+    assert "li.append(...suggestionHead(p));" in (STATIC / "settings.js").read_text()      # Settings' place picker
     nc = (STATIC / "newcall-map.js").read_text()
     assert "for (const p of r.at_address || [])" in nc
     assert ".sg-at" in (STATIC / "cad.css").read_text()
