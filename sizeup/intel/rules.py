@@ -35,6 +35,13 @@ the file's). With an area, the address lookup searches those towns (and the town
 them, or whose words name only towns outside them, is out of area: kept at log, never raised (engine.py). No area
 (the police pack, whose sources are local): every place counts, as before.
 
+A category with "place": true (the police pack's fire_call) is held at log until its event has a place a crew can
+drive to (an address, intersection, block or landmark) in the source's towns ("towns"), else the pack's area: a
+burning smell with no address is no pre-alert yet; the read-back that places it lets it go (engine.py: only its own
+words, or a read-back by the call's talker or units within minutes). "words": the words that tie a later transmission
+to a category's event (default: every word of four letters or more in its rules' phrases). "defer_to": another
+category of the pack that wins when both would raise for one call (fire_call defers to fire_report).
+
 "order": where the pack is listed (lowest first, then by file name; 0 when absent). "infer": false: the model behind
 the rules (infer.py) is never asked about this pack's rows. A rule or a category with no "mode" is at "push": a pack
 that must stay quiet writes "mode": "log" on the pack, every category and every rule (the engine takes the lowest).
@@ -384,7 +391,12 @@ def compile_pack(d: dict, packs_ov: dict | None = None, rules_ov: dict | None = 
                    "priority": int(_num(cd.get("priority", 3), 1, 5, f"{name}.{c}.priority")),
                    "mode": _mode(cd.get("mode", "push"), f"{name}.{c}.mode"),
                    "tag": str(cd.get("tag") or ""), "safety": bool(cd.get("safety")), "moves": bool(cd.get("moves")),
+                   "place": bool(cd.get("place")), "defer_to": str(cd.get("defer_to") or ""),
+                   "words": [w for x in (cd.get("words") or []) for w in words(str(x))],
                    "threshold": (_num(cd["threshold"], 0, 1, f"{name}.{c}.threshold") if cd.get("threshold") is not None else None)}
+    for c, cd in cats.items():
+        if cd["defer_to"] and (cd["defer_to"] not in cats or cd["defer_to"] == c):
+            raise ValueError(f"{name}.{c}.defer_to: another of {name}'s categories")
     rules = []
     seen = set()
     for r in d.get("rules") or []:
