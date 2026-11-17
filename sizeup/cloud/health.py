@@ -762,6 +762,9 @@ class StationHealth:
         out["metrics_backup"] = mb
         if mb and mb.get("warn"):
             out["hints"].append({"channel": "Metrics", "level": "warn", "text": mb["warn"]})
+        sc = (out.get("stt_pool") or {}).get("copies") if isinstance(out.get("stt_pool"), dict) else None
+        if sc and sc.get("warn"):                   # the transcripts-as-written copies (#639): a warning, never an alert
+            out["hints"].append({"channel": "Transcripts", "level": "warn", "text": sc["warn"]})
         return out
 
     def _usual(self, label: str, heard: float, snow: float, gaps_min: int) -> float | None:

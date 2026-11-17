@@ -284,6 +284,9 @@ const StationHealth = (() => {
         ["Queue", `${sp.queued || 0} waiting · ${sp.leased || 0} out`
           + Object.entries(sp.queued_by_class || {}).map(([k, n]) => ` · ${n} ${k}`).join("")],
         ["Done (queued → text)", `${sp.done_h || 0}/h · p50 ${sec(sp.p50_s)} · p90 ${sec(sp.p90_s)}`],
+        ["Transcript copies", !sp.copies ? "" : sp.copies.settled
+          ? (sp.copies.copy_at ? `${when(sp.copies.copy_at)} · ${longDur(serverNow() - sp.copies.copy_at)} ago` : "none yet")
+          : `unsettled since ${when(sp.copies.unsettled_since)}`, sp.copies && sp.copies.warn ? "hl-warn" : ""],
         ["Fallbacks", fbn ? Object.entries(fb).filter(([, n]) => n).map(([k, n]) => `${n} ${k.replace("_", " ")}`).join(" · ")
           + (sp.refused_late ? ` · ${sp.refused_late} late refused` : "") : "none", fbn ? "hl-warn" : ""],
       ]));

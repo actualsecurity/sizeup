@@ -1591,10 +1591,11 @@ class HubApp(App):
         None while no worker was ever added and no transcript timed (nothing to show)."""
         lat = self.stt_latency.table()
         active = self.hub.workers.any()
-        if not active and not self.sttpool.workers and not lat:
+        if not active and not self.sttpool.workers and not lat and self.stt_runs.health() is None:
             return None
         return {"active": active, "settings": self.hub.workers.pool_settings(), **self.sttpool.stats(),
-                "latency": lat, "target": {"p50_s": sttruns.TARGET_P50_S, "p95_s": sttruns.TARGET_P95_S}}
+                "latency": lat, "target": {"p50_s": sttruns.TARGET_P50_S, "p95_s": sttruns.TARGET_P95_S},
+                "copies": self.stt_runs.health()}      # (stt.sqlite's copies in the bucket: unsettled since, last copy)
 
     # -- Settings > Radios > Channels on the station ----------------------------------------------------
 
@@ -2204,8 +2205,7 @@ class HubApp(App):
         left = self.sttpool.stop(fall_back=False)   # (what a GPU worker had stays "pending": the next start routes it)
         if left:
             self.hub.log(f"stt pool: stopping with {left} clip(s) still out: the next start sends them the AWS way")
-        steps = [("catch-up", self.catchup.stop), ("perf", self.perf.stop),
-                 ("stt runs copy", lambda: self.stt_runs.backup_turn(force=True))]   # (what came since the last copy)
+        steps = [("catch-up", self.catchup.stop), ("perf", self.perf.stop)]
         if self.prealert is not None:
             steps.append(("pre-alert", self.prealert.stop))
         steps += [("sources", self.cad.sources.stop), ("layers", self.stop_layers)]

@@ -244,6 +244,8 @@ def test_a_pre_alert_clip_has_an_absolute_deadline_and_a_lost_or_gaming_worker_g
     assert job.expires - job.claimed_at == lease_s and job.cap_at - job.claimed_at == cap_s
     clock.t += lease_s                                        # a dead worker holds it 4 s, not 16 s
     assert p.tick() == 1 and p.drain() == 1 and "page" in j.fell
+    assert p.ready(URGENT)[1].startswith("slow on pre-alert")  # a lost one counts as its whole cap: no more pre-alerts
+    p._fast.clear()
     online(p)
     assert p.submit(j.job("long", LOW, seconds=0.0))
     long = p.claim("gpu-1", 0)
@@ -491,7 +493,7 @@ def test_a_ready_worker_transcribes_an_aws_clip_and_the_run_is_kept_with_its_wor
         import wave
         with wave.open(io.BytesIO(wav)) as f:                 # what whisper-server takes: 16 kHz, padded 0.5 s each side
             assert f.getframerate() == 16000 and abs(f.getnframes() / 16000 - 4.0) < 0.05
-        assert w.answers[0][0] == 200
+        assert wait(lambda: w.answers, 5) and w.answers[0][0] == 200     # (the text lands before the worker hears back)
         assert hub.app.aws.health()["done"] == 0             # AWS never asked
         assert wait(lambda: hub.app.stt_runs.of("FG1-2"), 5)
         (run,) = hub.app.stt_runs.of("FG1-2")
@@ -953,7 +955,7 @@ class FakeCopies:
     def get(self, slot):
         return self.slots[slot][1]
 
-    def put(self, slot, raw):
+    def put(self, slot, raw, level=6):
         self.puts += 1
         self.slots[slot] = (time.time() + self.puts, raw)
         return len(raw)
@@ -965,7 +967,9 @@ def test_runs_live_in_their_own_file_with_copies_a_new_task_merges(tmp_path):
     old = sttruns.Runs(tmp_path / "old" / "stt.sqlite", backup=copies, clock=clock, log=lambda m: None)
     assert old.backup_turn() == "settled"                      # nothing there yet
     old.add("FG1-1", "aws", text="before the deploy", done_at=clock.t - 60)
-    assert old.backup_turn(force=True) == "uploaded" and copies.puts == 1     # (the hub stopping: a last copy)
+    clock.t += sttruns.FIRST_UPLOAD_S
+    assert old.backup_turn() == "uploaded" and copies.puts == 1     # (a little after settling: the first copy)
+    clock.t -= sttruns.FIRST_UPLOAD_S
     new = sttruns.Runs(tmp_path / "new" / "stt.sqlite", backup=copies, clock=clock, log=lambda m: None)
     new.add("FG1-2", "gpu-worker", text="after the deploy", done_at=clock.t)   # written before it settled
     assert new.backup_turn() == "settled"
@@ -982,3 +986,110 @@ def test_runs_live_in_their_own_file_with_copies_a_new_task_merges(tmp_path):
         assert Path(hub.app.stt_runs.path).parent == Path(hub.app.cfg.cad_db).parent
     finally:
         hub.close()
+
+
+# -- the #651 re-review: copies that can't all be read, lost pre-alerts, the heartbeat, a busy worker ----------------
+
+
+def _copy_bytes(tmp_path, name, schema, rows):
+    path = tmp_path / name
+    db = sqlite3.connect(path)
+    db.executescript(schema)
+    for r in rows:
+        db.execute(f"INSERT INTO stt_runs ({', '.join(r)}) VALUES ({', '.join('?' * len(r))})", tuple(r.values()))
+    db.commit()
+    db.close()
+    return path.read_bytes()
+
+
+def test_a_torn_newest_copy_falls_back_to_an_older_one_and_a_copy_a_column_short_still_merges(tmp_path):
+    clock = Clock(2_000_000_000.0)
+    copies = FakeCopies()
+    full = _copy_bytes(tmp_path, "full.sqlite", sttruns.SCHEMA,
+                       [{"clip_id": "FG1-1", "engine": "aws", "text": "older copy", "done_at": clock.t - 100}])
+    copies.slots[0] = (1.0, full)                                  # an older copy, good
+    copies.slots[1] = (2.0, b"SQLite format 3\x00" + b"\x00" * 100)  # the newest, torn
+    runs = sttruns.Runs(tmp_path / "a" / "stt.sqlite", backup=copies, clock=clock, log=lambda m: None)
+    assert runs.backup_turn() == "settled" and [r["text"] for r in runs.of("FG1-1")] == ["older copy"]
+    # a copy from a release without call_id / turn / keyup (and with a column this one hasn't): merged by what both have
+    old_schema = sttruns.SCHEMA.replace(", keyup TEXT NOT NULL DEFAULT '', call_id TEXT NOT NULL DEFAULT '',\n  turn INTEGER",
+                                        ", extra_old TEXT")
+    assert "call_id" not in old_schema
+    short = _copy_bytes(tmp_path, "short.sqlite", old_schema,
+                        [{"clip_id": "FG1-2", "engine": "aws", "text": "older release", "done_at": clock.t - 50,
+                          "extra_old": "x"}])
+    c2 = FakeCopies()
+    c2.slots[0] = (1.0, short)
+    runs2 = sttruns.Runs(tmp_path / "b" / "stt.sqlite", backup=c2, clock=clock, log=lambda m: None)
+    assert runs2.backup_turn() == "settled"
+    got = runs2.of("FG1-2")[0]
+    assert got["text"] == "older release" and got["call_id"] == "" and got["turn"] is None
+    # nothing readable at all: unsettled, said on Health, never an upload, tried again after a back-off
+    c3 = FakeCopies()
+    c3.slots[0] = (1.0, b"not sqlite")
+    runs3 = sttruns.Runs(tmp_path / "c" / "stt.sqlite", backup=c3, clock=clock, log=lambda m: None)
+    assert runs3.backup_turn() == "failed" and runs3.backup_turn() == "" and c3.puts == 0
+    clock.t += sttruns.UNSETTLED_WARN_S + 1
+    h = runs3.health()
+    assert h["settled"] is False and h["unsettled_since"] and "not restored" in h["warn"]
+
+
+def test_the_metrics_store_restores_through_the_same_helper(tmp_path):
+    from sizeup.cloud import metricsbackup, metricstore
+    assert metricstore._common_columns is metricsbackup.common_columns and metricstore.merge_copies is metricsbackup.merge_copies
+
+
+def test_lost_pre_alert_leases_close_the_quick_gate_and_repeated_cooldowns_grow():
+    clock, j = Clock(), Jobs()
+    p = pool(clock)
+    online(p)
+    for i in range(2):                                         # claims and never answers
+        assert p.submit(j.job(f"page{i}", URGENT, seconds=0.0)), i
+        p.claim("gpu-1", 0)
+        clock.t += BUDGETS[URGENT][1]
+        p.tick()
+        online(p)
+        if i == 0:
+            assert p.ready(URGENT)[1].startswith("slow on pre-alert")   # one lost: its cap (8 s) > 3 s already
+            p._fast.clear()
+    p.drain()
+    assert len(j.fell) == 2
+    w = p.workers["gpu-1"]
+    cools = []
+    for _round in range(3):                                    # three losses in a row, three times over: 60, 120, 240 s
+        for k in range(sttpool.FAIL_N):
+            p._failed("gpu-1", clock.t)
+        cools.append(round(w.cool_until - clock.t))
+        clock.t = w.cool_until
+    assert cools[-3:] == [60, 120, 240]
+    assert p.submit(j.job("live", LIVE, seconds=0.0))
+    job = p.claim("gpu-1", 0)
+    p.complete("gpu-1", job.lease, {"text": "x"})
+    assert w.cools == 0                                        # a job done: back to the first length
+
+
+def test_a_heartbeat_every_few_seconds_keeps_a_long_lease_and_silence_loses_it():
+    clock, j = Clock(), Jobs()
+    p = pool(clock)
+    online(p)
+    p.submit(j.job("low", LOW, seconds=30.0))
+    job = p.claim("gpu-1", 0)
+    for _ in range(4):                                         # 20 s of decoding, a heartbeat every 5 s
+        clock.t += 5.0
+        p.seen("gpu-1", "online")
+        assert p.tick() == 0
+    assert job.lease in p._leases
+    clock.t += sttpool.LOST_S                                  # then silence
+    assert p.tick() == 1
+
+
+def test_a_worker_busy_on_a_job_never_wins_a_pre_alert_clip():
+    clock, j = Clock(), Jobs()
+    p = pool(clock)
+    online(p)
+    online(p, "gpu-2")
+    p.submit(j.job("low", LOW, seconds=0.0))
+    assert p.claim("gpu-1", 0).id == "low"                     # gpu-1 busy now (one lease of two)
+    assert p.submit(j.job("page", URGENT, seconds=0.0))        # (gpu-2 is idle: the pool may take it)
+    assert p.claim("gpu-1", 0) is None                         # never the busy one ...
+    assert p.claim("gpu-2", 0).id == "page"                    # ... the idle one

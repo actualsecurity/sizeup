@@ -18,9 +18,13 @@ import gzip
 import hashlib
 import os
 import re
+import sqlite3
+import tempfile
 import urllib.parse
 import xml.etree.ElementTree as ET
+from contextlib import contextmanager
 from datetime import datetime
+from pathlib import Path
 from typing import Callable
 
 from sizeup import aws
@@ -33,6 +37,7 @@ TIMEOUT_S = 120.0
 LIST_TIMEOUT_S = 15.0
 MAX_BYTES = 512 * 1024 * 1024
 NS = "{http://s3.amazonaws.com/doc/2006-03-01/}"
+SQLITE_HEADER = b"SQLite format 3\x00"
 
 
 class S3Copies:
@@ -95,9 +100,9 @@ class S3Copies:
             raise ValueError("too big")
         return gzip.decompress(data)
 
-    def put(self, slot: int, raw: bytes) -> int:
-        """The file's bytes, gzipped, into that slot. The bytes sent."""
-        gz = gzip.compress(raw, 6, mtime=0)
+    def put(self, slot: int, raw: bytes, level: int = 6) -> int:
+        """The file's bytes, gzipped (level: 1 quick ... 9 small), into that slot. The bytes sent."""
+        gz = gzip.compress(raw, level, mtime=0)
         self._call("PUT", f"{self.endpoint}/{urllib.parse.quote(self.key(slot))}", gz,
                    headers={"Content-Type": "application/gzip", "Content-Length": str(len(gz))})
         return len(gz)
@@ -110,3 +115,60 @@ def next_slot(copies: list[dict]) -> int:
     if free:
         return free[0]
     return min(copies, key=lambda c: c["at"])["slot"]
+
+
+# -- restoring from the copies: shared by the station metrics (sizeup/cloud/metricstore.py) and the transcripts as written
+# (sizeup/sttruns.py, #639) ------------------------------------------------------------------------------------------------
+
+def common_columns(db: sqlite3.Connection, table: str) -> list[str] | None:
+    """The columns of `table` both this store (main) and an attached copy (snap) have, in this store's order; None when
+    the copy hasn't the table, or lacks a key column or one here that must have a value (NOT NULL, no default)."""
+    def info(schema: str) -> list[tuple]:
+        return db.execute(f"PRAGMA {schema}.table_info({table})").fetchall()
+    mine, theirs = info("main"), {r[1] for r in info("snap")}
+    if not theirs:
+        return None
+    for _cid, name, _type, notnull, default, pk in mine:
+        if name not in theirs and (pk or (notnull and default is None)):
+            return None
+    return [r[1] for r in mine if r[1] in theirs]
+
+
+@contextmanager
+def attached(db: sqlite3.Connection, data: bytes, folder: str | None, prefix: str):
+    """A copy's bytes (an SQLite file) attached to db as "snap" while the block runs (ValueError: not an SQLite file),
+    in a temporary file in `folder` (None: the system's), gone afterwards."""
+    if data[:16] != SQLITE_HEADER:
+        raise ValueError("not an SQLite file")
+    fd, tmp = tempfile.mkstemp(prefix=prefix, suffix=".sqlite", dir=folder)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+        db.execute("ATTACH DATABASE ? AS snap", (tmp,))
+        try:
+            yield
+        finally:
+            db.execute("DETACH DATABASE snap")
+    finally:
+        Path(tmp).unlink(missing_ok=True)
+
+
+def merge_copies(copies: list[dict], get: Callable[[int], bytes], merge: Callable[[bytes], object],
+                 log: Callable[[str], None], label: str) -> list:
+    """The copies merged in: the newest (and the largest, if that is another one); and when neither can be read, the
+    next ones, newest first, until one can. Each copy's trouble (torn: zlib.error, not SQLite, a table that doesn't fit)
+    is said and the next is tried. merge(data)'s answers; RuntimeError when no copy could be read (tried again later,
+    never taken for "nothing there")."""
+    pick = [copies[0]] + ([c] if (c := max(copies, key=lambda c: c["size"])) is not copies[0] else [])
+    out, last = [], None
+    for c in pick + [c for c in copies if c not in pick]:
+        if out and c not in pick:
+            break                              # the newest (and largest) are in: enough
+        try:
+            out.append(merge(get(c["slot"])))
+        except Exception as e:  # noqa: BLE001 - a torn or misfit copy: the next one is tried
+            last = e
+            log(f"{label}: copy {c['slot']} not read ({type(e).__name__}: {e})")
+    if not out:
+        raise RuntimeError(f"no copy could be read ({type(last).__name__ if last else 'none'})")
+    return out

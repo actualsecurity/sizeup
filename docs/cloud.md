@@ -1195,7 +1195,10 @@ clip waits for one only as long as its class allows. After that the clip goes th
     - a job handed back (`release`);
     - a worker that starts gaming or pauses (its pre-alert jobs);
     - a revoked worker.
-  - A worker holds at most 2 jobs at once.
+  - A worker holds at most 2 jobs at once, and a pre-alert job only when it holds none.
+  - The heartbeat contract: a worker sends a request (state, extend or claim) at least every 6 s, during a decode too.
+  - A pre-alert lease that is lost or handed back counts in the "quick" gate as its whole cap.
+  - Repeated cooldowns double, up to 30 min, until a job is done.
   - A late `complete` gets 409 and is counted. It is never applied.
   - The queue lives in memory on the leader. After a restart, an AWS-channel clip is still `pending` on its row, and `_aws_recover` routes it.
 - **States:**
@@ -1207,7 +1210,9 @@ clip waits for one only as long as its class allows. After that the clip goes th
 - **Cloudflare:** each worker needs a Cloudflare Access service token. The recommended setup is a Cloudflare Access application of its own, scoped to `/api/station/stt/*`, so that token reaches nothing of the station's. This is an operator step.
 - **Every transcript is kept:** the hub appends each one to `stt_runs`, from every engine (the GPU worker, AWS, the station's whisper).
   - The table lives in its own file, `stt.sqlite`, which is not in cad.sqlite and not in Litestream, so the handover never carries it.
-  - Copies go to `s3://<backups>/<path>/stt/`, by the station metrics' scheme: one every 3 h and one when the hub stops. A new task merges them in.
+  - Copies go to `s3://<backups>/<path>/stt/`, by the station metrics' scheme, every hour. They are not made at the hub's stop, because a deploy's drain has no seconds to spare.
+  - A new task restores the same way the metrics store does (a shared helper): the newest copy, or the next readable one, merged column by column. Until that works it uploads nothing; Health shows "Transcript copies" and warns after 6 h.
+  - A deploy can lose at most the last hour of run records. The transcripts themselves are in cad.sqlite.
   - A run goes with its radio log row (that channel's transcript retention), and is kept 90 days at most.
 
   Each row holds:

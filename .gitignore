@@ -252,3 +252,7 @@ stt-corrections*.jsonl
 
 # a local station config beside config.toml (docs/development.md)
 /config.station.toml
+
+# test leftovers that never belong in the repo: an object passed as a file path, the DVR state of a run in the checkout
+/<*
+/dvr/

@@ -47,7 +47,8 @@ MAX_LEASES = 2            # jobs one worker holds at once at most
 PREALERT_MAX_SERVICE_S = 3.0   # a pre-alert clip goes to the pool only to an idle worker (in a claim now) whose recent
                                # claim -> text on these classes is this quick (AWS answers them in seconds)
 FAIL_N = 3                # leases lost or handed back in a row: the worker cools down ...
-COOLDOWN_S = 60.0         # ... this long (no new jobs)
+COOLDOWN_S = 60.0         # ... this long (no new jobs), doubling each time it happens again before a job is done ...
+COOLDOWN_MAX_S = 1800.0   # ... up to this
 SERVICE_DEFAULT_S = 2.0   # a job's claim -> done before any was measured (the estimate of the wait)
 CLAIM_WAIT_MAX_S = 25.0   # a claim's long poll at most
 TICK_S = 0.25             # how often waits and leases are looked at
@@ -118,6 +119,7 @@ class Worker:
     polling: int = 0
     fails: int = 0
     cool_until: float = 0.0
+    cools: int = 0                              # cooldowns in a row (no job done since): each one twice as long
     done: int = 0
     lost: int = 0
     last_job: float | None = None
@@ -147,6 +149,8 @@ class Pool:
         self._open: set[str] = set()              # clip ids queued or leased
         self.workers: dict[str, Worker] = {}
         self._done: deque = deque()               # (at, class, channel, queued -> done s, claim -> done s, worker)
+        self._fast: deque = deque(maxlen=50)      # claim -> text of the pre-alert classes' last jobs; one lost or handed
+                                                  # back counts as its whole cap (the quick-worker gate)
         self.fallbacks = {r: 0 for r in REASONS}
         self.refused_late = 0
         self.submitted = 0
@@ -285,7 +289,9 @@ class Pool:
         return w.state
 
     def _service_s(self, fast: bool | None = None) -> float:
-        """The median claim -> text of the last 50 jobs (fast: of the pre-alert classes only)."""
+        """The median claim -> text of the last 50 jobs (fast: of the pre-alert classes, a lost one counted as its cap)."""
+        if fast:
+            return pct(list(self._fast), 50) or SERVICE_DEFAULT_S
         took = [x[4] for x in self._done if x[4] is not None and (fast is None or (x[1] in FAST_CLASSES) == fast)][-50:]
         return pct(took, 50) or SERVICE_DEFAULT_S
 
@@ -344,8 +350,11 @@ class Pool:
             self._cv.notify_all()
         return True
 
-    def _best(self) -> Job | None:
-        return min(self._queue, key=lambda j: (j.cls, j.queued_at), default=None)
+    def _best(self, w: Worker | None = None) -> Job | None:
+        """The next job for this worker: a pre-alert one only to a worker holding none (never one busy already)."""
+        busy = w is not None and bool(w.leases)
+        return min((j for j in self._queue if not (busy and j.cls in FAST_CLASSES)),
+                   key=lambda j: (j.cls, j.queued_at), default=None)
 
     def claim(self, wid: str, wait: float = 0.0, state: str | None = None, model: str | None = None) -> Job | None:
         """A worker's long poll: the best job (leased to it) or None after `wait`. Only an online worker gets one."""
@@ -363,7 +372,7 @@ class Pool:
                     if wid not in self.workers:          # revoked meanwhile
                         return None
                     if self._ready(w, now) and len(w.leases) < MAX_LEASES:
-                        job = self._best()
+                        job = self._best(w)
                         if job is not None:
                             self._queue.remove(job)
                             return self._lease(job, w, now)
@@ -408,7 +417,11 @@ class Pool:
             job.expires = min(job.cap_at, now + lease_s + _extra(job))
             return job
 
-    def _end_lease(self, job: Job) -> None:
+    def _end_lease(self, job: Job, took: float | None = None) -> None:
+        """The lease over. A pre-alert job's claim -> end goes to the quick-worker gate: took (its text came), else its
+        whole cap (lost, handed back, taken back)."""
+        if job.cls in FAST_CLASSES and job.lease in self._leases:
+            self._fast.append(took if took is not None else BUDGETS[job.cls][2])
         self._leases.pop(job.lease, None)
         w = self.workers.get(job.worker)
         if w is not None:
@@ -420,8 +433,9 @@ class Pool:
             w.fails += 1
             w.lost += 1
             if w.fails >= FAIL_N:
-                w.cool_until, w.fails = now + COOLDOWN_S, 0
-                self.log(f"stt pool: GPU worker {wid}: {FAIL_N} jobs lost in a row: no new ones for {COOLDOWN_S:.0f} s")
+                cool = min(COOLDOWN_MAX_S, COOLDOWN_S * 2 ** w.cools)
+                w.cool_until, w.fails, w.cools = now + cool, 0, w.cools + 1
+                self.log(f"stt pool: GPU worker {wid}: {FAIL_N} jobs lost in a row: no new ones for {cool:.0f} s")
 
     def complete(self, wid: str, lease: str, result: dict) -> bool:
         """The worker's text for a live lease it holds: on_done (True). A lease gone (expired, handed on): refused,
@@ -431,12 +445,12 @@ class Pool:
             if job is None:
                 self.refused_late += 1
                 return False
-            self._end_lease(job)
-            self._open.discard(job.id)
             now = self.clock()
+            self._end_lease(job, now - job.claimed_at if job.claimed_at is not None else None)
+            self._open.discard(job.id)
             w = self.workers.get(wid)
             if w is not None:
-                w.fails, w.done = 0, w.done + 1
+                w.fails, w.cools, w.done = 0, 0, w.done + 1
             self._done.append((now, job.cls, job.channel, now - job.queued_at,
                                now - job.claimed_at if job.claimed_at is not None else None, wid))
             while self._done and now - self._done[0][0] > WINDOW_S:

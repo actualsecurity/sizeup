@@ -5,8 +5,8 @@ works as before; this is next to it, keyed by the same clip id.
 
     stt.sqlite "stt_runs"   its own file next to the hub's databases, made by the first write. Not cad.sqlite and not in
                             Litestream (the handover never carries it): copies in the backups bucket (s3://.../stt/, the
-                            station metrics' scheme), merged in when a new task settles, a copy every SNAPSHOT_S and when
-                            the hub stops. One row a transcript:
+                            station metrics' scheme and restore: the newest copy, else the next readable one, column by
+                            column), merged in when a new task settles, a copy every SNAPSHOT_S. One row a transcript:
                             clip_id, engine (gpu-worker | aws | station-whisper), model, worker, prompt_v (a short hash of
                             the prompt, "" when none was sent), role (text | alt | late | rerun | catchup), text (the
                             engine's raw words, before the no-speech rule), status, confidence, words (JSON [[word, p,
@@ -53,9 +53,13 @@ KEEP_DAYS = 90.0
 PRUNE_BATCH = 500
 PRUNE_BUDGET_S = 2.0       # a janitor pass prunes for this long at most (batch after batch: what came in goes out)
 ORPHAN_AFTER_S = 3600.0    # a run whose radio log row is gone, looked for once this old
-SNAPSHOT_S = 3 * 3600.0    # a copy to the bucket this often (and when the hub stops) ...
+SNAPSHOT_S = 3600.0        # a copy to the bucket this often (not at the hub's stop: Runs.backup_turn) ...
 FIRST_UPLOAD_S = 900.0     # ... the first this long after settling
-SETTLE_RETRY_S = 60.0
+GZIP_LEVEL = 1             # (quick: a month's file in a second or two, the copy a little larger)
+SETTLE_RETRY_S = 30.0      # a failed restore or copy: again in 30 s, doubling ...
+SETTLE_RETRY_MAX_S = 1800.0   # ... to 30 min
+UNSETTLED_WARN_S = 6 * 3600.0   # Health warns: not restored this long ...
+COPY_WARN_S = 3 * 3600.0        # ... or no copy kept this long
 WINDOW_S = 7200.0
 TARGET_P50_S, TARGET_P95_S = 5.0, 15.0
 TARGET_CLASSES = (URGENT, HIGH, CONTEXT, CONTEXT_FALLBACK)   # pages, Fire/EMS dispatch, the airband, police dispatch
@@ -107,6 +111,10 @@ class Runs:
         self._lock = threading.Lock()
         self.settled = backup is None              # the copies looked at (merged, or none there)
         self._settle_at = 0.0                      # (a failed look: again then)
+        self._fails = 0
+        self._unsettled_since: float | None = None
+        self._settled_at = clock()
+        self._copy_at: float | None = None
         self._uploaded = 0.0
         self._sweep_from = 0                       # the orphan sweep's place (row id)
         self.status = {"state": "settled" if backup is None else "unsettled", "error": "", "uploaded": None}
@@ -208,66 +216,94 @@ class Runs:
             self._say(f"stt runs: prune: {type(e).__name__}: {e}")
         return n
 
-    # -- the copies (like the station metrics': sizeup/cloud/metricsbackup.py) ------------------------------------------
+    # -- the copies (like the station metrics': sizeup/cloud/metricsbackup.py, the same restore) ------------------------
 
-    def backup_turn(self, now: float | None = None, force: bool = False) -> str:
-        """The leader's turn: settle (the newest copy's rows from before ours merged in), then a copy every
-        SNAPSHOT_S (force: now, the hub stopping). What it did ("" nothing)."""
+    def backup_turn(self, now: float | None = None) -> str:
+        """The leader's turn (the hub's backup thread): settle (the copies' rows from before ours merged in: the newest
+        copy, else the next one that can be read), then a copy every SNAPSHOT_S. Nothing is uploaded until settled.
+        Not at the hub's stop: a copy of a month's file takes seconds a deploy's drain hasn't got (what came since the
+        last copy, SNAPSHOT_S at most, is the runs' records only: the transcripts themselves are in cad.sqlite).
+        What it did ("" nothing; "failed": again after a back-off)."""
         if self.backup is None or not self.may_write():
             return ""
         now = self.clock() if now is None else now
+        if not self.settled and self._unsettled_since is None:
+            self._unsettled_since = now
+        if now < self._settle_at:
+            return ""
         try:
             if not self.settled:
-                if now < self._settle_at:
-                    return ""
-                return self._settle()
-            if force or now - self._uploaded >= SNAPSHOT_S:
-                if not self._exists():
-                    return ""
+                return self._settle(now)
+            if now - self._uploaded >= SNAPSHOT_S and self._exists():
                 self._upload(now)
                 return "uploaded"
-        except Exception as e:  # noqa: BLE001 - again later
-            self._settle_at = now + SETTLE_RETRY_S
-            self.status["error"] = f"{type(e).__name__}: {e}"[:200]
-            self._say(f"stt runs: copies: {self.status['error']}")
+        except Exception as e:  # noqa: BLE001 - again later; never taken for "nothing there"
+            self._fails += 1
+            self._settle_at = now + min(SETTLE_RETRY_MAX_S, SETTLE_RETRY_S * 2 ** min(self._fails - 1, 10))
+            why = f"{type(e).__name__}: {e}"[:200]
+            if why != self.status.get("error"):
+                self.log(f"stt runs: {'restore' if not self.settled else 'copy'} failed ({why}); again later")
+            self.status["error"] = why
+            return "failed"
         return ""
 
-    def _settle(self) -> str:
-        import os
-        import tempfile
-        from sizeup.cloud.metricsbackup import next_slot
+    def _settle(self, now: float) -> str:
+        from sizeup.cloud.metricsbackup import merge_copies
         copies = self.backup.list()               # (raises when the listing fails: never "none" for no answer)
         if copies:
-            raw = self.backup.get(copies[0]["slot"])
-            fd, tmp = tempfile.mkstemp(suffix=".sqlite")
-            try:
-                with os.fdopen(fd, "wb") as f:
-                    f.write(raw)
-                with self._lock:
-                    db = self._open()
-                    db.execute("ATTACH DATABASE ? AS copy", (tmp,))
-                    try:
-                        first = db.execute("SELECT MIN(done_at) FROM stt_runs").fetchone()[0]
-                        cols = ", ".join(COLUMNS)
-                        db.execute(f"INSERT INTO stt_runs ({cols}) SELECT {cols} FROM copy.stt_runs WHERE done_at < ?",
-                                   (first if first is not None else float("inf"),))
-                    finally:
-                        db.execute("DETACH DATABASE copy")
-            finally:
-                os.unlink(tmp)
-        self.settled, self._next_slot = True, next_slot(copies)
-        self._uploaded = self.clock() - SNAPSHOT_S + FIRST_UPLOAD_S     # (the first copy a little after settling)
-        self.status.update(state="settled", error="")
+            merge_copies(copies, self.backup.get, self._merge, self.log, "stt runs")   # (raises: none could be read)
+        self.settled, self._fails = True, 0
+        self._uploaded = now - SNAPSHOT_S + FIRST_UPLOAD_S     # (the first copy a little after settling)
+        self.status.update(state="settled", error="", how="restored" if copies else "none")
         return "settled"
+
+    def _merge(self, data: bytes) -> int:
+        """A copy's rows from before our first one merged in, column by column (a copy from a release with a column
+        more or less still merges). ValueError: not an SQLite file, or its table doesn't fit."""
+        from sizeup.cloud.metricsbackup import attached, common_columns
+        with self._lock:
+            db = self._open()
+            with attached(db, data, None if self.path == ":memory:" else str(Path(self.path).parent), ".stt-copy."):
+                cols = common_columns(db, "stt_runs")
+                if cols is None:
+                    raise ValueError("its stt_runs doesn't fit this release's")
+                first = db.execute("SELECT MIN(done_at) FROM main.stt_runs").fetchone()[0]
+                names = ", ".join(c for c in cols if c != "id")
+                db.execute("BEGIN")
+                try:
+                    n = db.execute(f"INSERT INTO main.stt_runs ({names}) SELECT {names} FROM snap.stt_runs WHERE done_at < ?",
+                                   (first if first is not None else float("inf"),)).rowcount
+                    db.execute("COMMIT")
+                except Exception:
+                    db.execute("ROLLBACK")
+                    raise
+        self.log(f"stt runs: {n} run(s) merged in from a copy")
+        return n
 
     def _upload(self, now: float) -> None:
         from sizeup.cloud.metricsbackup import next_slot
         with self._lock:
             raw = self._open().serialize()
         slot = next_slot(self.backup.list())
-        self.backup.put(slot, raw)
-        self._uploaded = now
+        self.backup.put(slot, raw, level=GZIP_LEVEL)
+        self._uploaded = self._copy_at = now
         self.status.update(uploaded=now, error="")
+
+    def health(self, now: float | None = None) -> dict | None:
+        """Settings > Station > Health: the copies' state (settled, unsettled since, the last copy) and a warning when
+        unsettled for UNSETTLED_WARN_S or no copy kept for COPY_WARN_S. None without copies, or before this task led."""
+        now = self.clock() if now is None else now
+        if self.backup is None or (self._unsettled_since is None and not self.settled):
+            return None
+        why = f": {self.status['error'][:120]}" if self.status.get("error") else ""
+        out = {"settled": self.settled, "unsettled_since": None if self.settled else self._unsettled_since,
+               "copy_at": self._copy_at, "error": self.status.get("error") or "", "warn": ""}
+        if not self.settled and now - (self._unsettled_since or now) > UNSETTLED_WARN_S:
+            out["warn"] = (f"transcript history copies not restored for {(now - self._unsettled_since) / 3600:.0f} h{why} "
+                           "(nothing uploaded until they are)")
+        elif self.settled and now - (self._copy_at or self._settled_at) > COPY_WARN_S:
+            out["warn"] = f"no transcript history copy kept for {(now - (self._copy_at or self._settled_at)) / 3600:.0f} h{why}"
+        return out
 
 
 class LatencyBook:

@@ -28,6 +28,12 @@ token_revoked); 409 {error} for a lease that is gone.
     POST /api/station/stt/jobs/<lease>/complete   {text, segments: [{start, end, text, words: [{word, start, end,
                                                   probability}]}], model, timing: {fetch_ms, infer_ms}} -> {ok}
     POST /api/station/stt/jobs/<lease>/release    {why} -> {ok}: the next engine takes it now
+
+The heartbeat contract: while it runs, a worker sends a request (state, extend or claim) at least every 6 s, during a
+decode too. One unheard for 12 s (sttpool.LOST_S) loses every lease it holds, catch-up ones included, and those clips go
+to the next engine. A pre-alert job (fast) is leased 4 s, renewable by extend to 8 s from the claim; a worker that goes
+gaming or paused has its pre-alert jobs taken back at once (their complete / extend then answer 409). A worker holds two
+leases at most, and a pre-alert job only when it holds none.
 """
 
 from __future__ import annotations
