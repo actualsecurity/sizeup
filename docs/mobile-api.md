@@ -397,10 +397,11 @@ change, at-least-once delivery deduplicated by `(kind, id, rev)`. `/api/feed/v1/
   (`incident_summary`, `unit` through `rev_of`), never a raw row, so a log entry's `(kind, id, rev)` is the `rev` of that
   object in `GET /api/v1/incidents` (list items and the snapshot) and `GET /api/v1/units`. A column the API does not show
   (a unit's notes, a caller's name) is not a change. The single-incident GET serves a bigger object (chronology, building
-  notes, the person's role view), so its `rev` is its own; a note alone does not change the summary and is not a log
-  entry. The reads' lists are rebuilt at most once a second, so the log can announce a change up to about a second before a
-  list GET shows it: a client that gets a change event refetches the single object (`GET /units`, `/incidents/{id}`
-  are served from the same cache floor, so a list refetch may be one rebuild late; the detail GET is not cached).
+  notes, the person's role view), so its `rev` is its own: the app treats a log entry as "refetch the detail" and never
+  compares revs across the two. The summary carries the newest chronology event's id (`last_event_id`), so a note or any
+  other event on a call is a log entry for that incident. The reads' lists have a 1 s rebuild floor, so the log can
+  announce a change up to about a second before a list GET shows it: a client that gets a change event refetches the
+  single object (the detail GET is not cached; a list refetch may be one rebuild late).
   **Not built:** the `wait=` long poll, `/api/v1/snapshot` (PR 4), the machine feed's view (the log takes kinds per
   consumer for it), `meta.epoch` (still null), and per-person filtering: `Feed.visible` fails closed, so `changes` and
   `stream` answer 503 `unavailable` until PR 2's resolver supplies a predicate from the person's role and sourcekeys (and
@@ -703,9 +704,9 @@ writes. `/me` is PR 2's.
 - **Freshness.** A list is rebuilt at most once a second, so after a write a list can be up to 1 s stale:
   read-your-writes is not guaranteed on lists, and a client must not treat a stale list as a conflict. The single
   incident read is uncached.
-- **Cost.** The lists come from caches keyed on `store.rev` (incidents and units at most 30 s old, alarms 1 s), rebuilt
-  by one request at a time and at most once a second (a burst of writes costs one rebuild a second; a failed build is
-  remembered for that second); role-dependent parts (premise, pre-plan, radio) are built per request for one incident
+- **Cost.** The lists come from caches keyed on `store.rev` with a 1 s rebuild floor (also rebuilt without a write when
+  an incident or unit list is 30 s old, for the closed-in-the-last-day window, and alarms after 1 s), rebuilt by one
+  request at a time (a burst of writes costs one rebuild a second; a failed build is remembered for that second); role-dependent parts (premise, pre-plan, radio) are built per request for one incident
   only. `Cad.state()` is not used: it builds the console's shared stream and must not be called from a request thread.
 
 ---

@@ -1217,7 +1217,11 @@ def test_the_logs_rev_is_the_rev_the_reads_serve_for_units_and_incidents(hub):
     assert changed[("unit", str(e63))] == next(u["rev"] for u in units["items"] if u["id"] == str(e63))
     # the snapshot's items carry the same revs
     status, snap = read(hub, "/api/v1/snapshot")
-    assert {i["rev"] for i in snap["incidents"]} <= {i["rev"] for i in incs["items"]}
+    assert status == 200 and snap["incidents"] and snap["units"]
+    for i in snap["incidents"]:
+        assert heads[("incident", i["id"])] == i["rev"]
+    for u in snap["units"]:
+        assert heads[("unit", u["id"])] == u["rev"]
 
 
 def test_a_field_the_api_does_not_show_is_not_a_change_and_the_log_never_hashes_a_raw_row(hub):
@@ -1274,7 +1278,7 @@ def test_a_new_log_records_the_rev_definition_without_a_reset(tmp_path):
     r = Rig(tmp_path)
     r.settle()
     epoch = r.log.epoch
-    assert r.log._meta("rev_def") == "reads-serializers-v1"
+    assert r.log._meta("rev_def") == "reads-serializers-v2"
     r.feed.close()
     r.log.close()
     try:
@@ -1282,3 +1286,63 @@ def test_a_new_log_records_the_rev_definition_without_a_reset(tmp_path):
         assert r.log.epoch == epoch
     finally:
         r.close()
+
+
+def test_a_note_on_a_seeded_incident_is_a_new_log_entry_with_the_reads_rev(hub):
+    hub.box.flags["reads"] = True
+    first = hub.cad.create({"type": "STRU", "address": "209 Westchester Ave", "operator": "Lt. Ruiz"})
+    other = hub.cad.create({"type": "ALARM", "address": "8 Example Rd", "operator": "Lt. Ruiz"})
+    assert quiet(hub)
+    seen = len(hub.feed.log.since(0, 1000))
+    hub.cad.store.note(first["id"], "Primary search under way", "Lt. Ruiz")
+    assert quiet(hub)
+    hub.clock.t += 2.0                                                       # past reads' 1 s list-cache floor
+    new = hub.feed.log.since(0, 1000)[seen:]
+    assert [(c.kind, c.id) for c in new] == [("incident", str(first["id"]))]  # that incident only, and one entry
+    status, incs = read(hub, "/api/v1/incidents")
+    revs = {i["id"]: i["rev"] for i in incs["items"]}
+    assert status == 200 and new[0].rev == revs[str(first["id"])]
+    assert hub.feed.log.heads()[("incident", str(other["id"]))] == revs[str(other["id"])]
+
+
+def test_a_rev_definition_of_the_first_reads_build_resets_to_a_new_epoch(tmp_path):
+    r = Rig(tmp_path)
+    r.settle()
+    epoch = r.log.epoch
+    r.feed.close()
+    r.log.close()
+    db = sqlite3.connect(tmp_path / "hub.sqlite")
+    db.execute("UPDATE mobile_changelog_meta SET value = 'reads-serializers-v1' WHERE key = 'rev_def'")
+    db.commit()
+    db.close()
+    try:
+        next_task(r)
+        assert r.log.epoch != epoch and r.log._meta("rev_def") == "reads-serializers-v2"
+    finally:
+        r.close()
+
+
+def test_an_unwritten_log_without_a_rev_definition_keeps_its_epoch(tmp_path):
+    r = Rig(tmp_path)
+    epoch = r.log.epoch                                    # made, never baselined, no head, no rev_def
+    assert r.log._meta("rev_def") is None and not r.log.baselined() and r.log.head() == 0
+    r.feed.close()
+    r.log.close()
+    try:
+        next_task(r)
+        assert r.log.epoch == epoch
+    finally:
+        r.close()
+
+
+def test_an_incident_deleted_outright_is_dropped_from_the_heads_without_an_entry(rig):
+    inc = rig.cad.create({"type": "STRU", "address": "209 Westchester Ave", "operator": "Lt. Ruiz"})
+    rig.settle()
+    key = ("incident", str(inc["id"]))
+    assert key in rig.log.heads()
+    head = rig.log.head()
+    with rig.store.tx() as db:                             # (not a CAD operation: the rows are simply gone)
+        db.execute("DELETE FROM events WHERE incident_id = ?", (inc["id"],))
+        db.execute("DELETE FROM assignments WHERE incident_id = ?", (inc["id"],))
+        db.execute("DELETE FROM incidents WHERE id = ?", (inc["id"],))
+    assert rig.settle() == [] and key not in rig.log.heads() and rig.log.head() == head   # no "gone" entry for incidents

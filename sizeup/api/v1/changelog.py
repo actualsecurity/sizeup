@@ -80,7 +80,7 @@ MOBILE_KINDS = frozenset({"incident", "unit"})
 
 # What a `rev` is: the hash of the reads' serializers' output (cad_follow). Phase A of #561 hashed raw rows ("" in the
 # meta: no rev_def): a log written under another definition is reset at its first run (check_rev_definition).
-REV_DEFINITION = "reads-serializers-v1"
+REV_DEFINITION = "reads-serializers-v2"
 
 MARK_EPOCH, MARK_CLEAN = "mobile_log_epoch", "mobile_log_clean"       # the CAD's meta keys (see check_anchor)
 
