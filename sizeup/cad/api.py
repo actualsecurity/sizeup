@@ -271,8 +271,9 @@ GET  /api/cad/stations                    Settings > Station > Stations (sizeup/
                                           created, rotated, revoked, last used) and the shared token's state; never a hash.
                                           The hub's only; a signed-in admin only
 POST /api/cad/stations                    {action: add {id, name?} | rename {id, name} | rotate {id} | revoke {id} |
-                                          retire_shared {force?} | restore_shared | shared_id {id: "" = the config's}}:
-                                          a signed-in admin only. add / rotate
+                                          retire_shared {force?} | restore_shared | shared_id {id: "" = the config's,
+                                          confirm?}}: a signed-in admin only. shared_id while its station is live:
+                                          409 {error: the question, confirm: true} until sent with confirm. add / rotate
                                           answer {token, status_token} (no-store), the one time they are shown. In the
                                           Settings audit (System) and the person's activity: the action and id, no token
 GET  /api/cad/metrics?subject=&station=&from=&to=&res=raw|hour|auto&kind=&metric=
@@ -359,6 +360,12 @@ from sizeup.cad.service import Cad
 from sizeup.cad.settings import LastAdmin
 from sizeup.cad.store import TZ, CadError
 from sizeup.datasources import TooSoon
+
+
+class NeedsConfirm(CadError):
+    """A change that affects something live (sizeup/cloud/stations.py ConfirmNeeded): 409 {error, confirm: true}; the
+    page asks the question (the error) and sends it again with confirm: true."""
+
 
 JSON = "application/json"
 MAX_BODY = 65536
@@ -1267,6 +1274,8 @@ class CadApi:
             if signed:
                 self.refused(path, who, "the last admin", client)
             return _json(409, {"error": str(e)})
+        except NeedsConfirm as e:              # live: the page asks (the error is the question), then sends confirm
+            return _json(409, {"error": str(e), "confirm": True})
         except TooSoon as e:                   # a data source's Refresh now, refused (#186): rate limit, running, resting
             if signed:
                 self.refused(path, who, str(e), client)
@@ -1284,10 +1293,12 @@ class CadApi:
         if m := SETTINGS.fullmatch(path):
             return c.settings_post(m.group(1), body, guard=guard)
         if path == "/api/cad/stations" and getattr(c, "stations", None) is not None:
-            from sizeup.cloud.stations import StationError
+            from sizeup.cloud.stations import ConfirmNeeded, StationError
             op = str(body.get("operator") or "")
             try:     # in the Settings audit (System): what was done to which station, never a token
                 return c.stations.act(body, op, lambda k, old, new: c.settings.note(op, "system", k, old, new))
+            except ConfirmNeeded as e:
+                raise NeedsConfirm(str(e)) from None
             except StationError as e:
                 raise CadError(str(e)) from None
         if path == "/api/cad/incident":
