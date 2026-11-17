@@ -1067,7 +1067,7 @@ window.RadioControls = (() => {
     return form;
   }
 
-  async function postGroups(groups) {
+  async function postGroups(groups, confirm) {
     if (ag.busy || ro()) return;
     ag.busy = true;
     ag.error = "";
@@ -1077,9 +1077,21 @@ window.RadioControls = (() => {
     const timer = setTimeout(() => ctl.abort(), 15000);
     try {
       const r = await fetch("/api/antenna-groups", { method: "POST", headers: { "Content-Type": "application/json" },
-                                                     body: JSON.stringify({ groups }), signal: ctl.signal });
+                                                     body: JSON.stringify({ groups, ...(confirm ? { confirm: true } : {}) }),
+                                                     signal: ctl.signal });
       if (r.ok) ag.edit = null;
-      else ag.error = ((await r.json().catch(() => ({}))).error) || `refused (${r.status})`;
+      else {
+        const why = ((await r.json().catch(() => ({}))).error) || `refused (${r.status})`;
+        // a save that stops a running fire job, or ranks fire jobs against the pinned order: the person says so
+        if (!confirm && why.startsWith("confirm: ")) {
+          clearTimeout(timer);
+          ag.busy = false;
+          if (await UI.confirm(why.slice(9), { ok: "Save anyway", danger: true })) return postGroups(groups, true);
+          ag.key = "";
+          return renderGroups();
+        }
+        ag.error = why;
+      }
     } catch (e) {
       ag.error = e.name === "AbortError" ? "no answer from the server, try again" : "couldn't reach the server";
     } finally {

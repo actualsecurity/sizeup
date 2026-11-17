@@ -1483,10 +1483,11 @@ class HubApp(App):
         """Settings > Radios here: the station's ADS-B dongle is named (or unnamed) on the station (#235)."""
         return self._switch("set_adsb_receiver", serial or "")
 
-    def set_antenna_groups(self, groups) -> str | None:
+    def set_antenna_groups(self, groups, confirm: bool = False) -> str | None:
         """Settings > Radios > Receivers here: the station's antenna groups, kept and applied on the station like a
-        dongle's job (sizeup/radio/groups.py); what it runs comes back in its sdr state."""
-        return self._switch("set_antenna_groups", groups)
+        dongle's job (sizeup/radio/groups.py); what it runs comes back in its sdr state. confirm: said twice (a save
+        that stops a running fire job, or ranks fire jobs against the pinned order)."""
+        return self._switch("set_antenna_groups", groups, True) if confirm else self._switch("set_antenna_groups", groups)
 
     def set_talkgroup(self, tg: int, record: bool | None = None, main: bool | None = None,
                       tier: str | None = None, system: str = "") -> str | None:

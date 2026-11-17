@@ -146,6 +146,8 @@ SDR_FAILING_RESTARTS = 3   # an auto job that has restarted this often and is do
 SDR_SETTLE_S = 60.0        # after startup, Off dongles wait this long for the ones that had jobs (USB attach order)
 GROUP_HOLD_S = 10.0        # antenna groups: a dongle gone (or back) this long before its job moves (or comes back)
 GROUP_RETRY_S = 60.0       # ... a stand-in that didn't start: that dongle isn't tried again for this long
+GROUP_FLAP_S = 1800.0      # ... gone again this soon after it came back: a flapping dongle, and its next return
+GROUP_BACK_HOLD_S = (120.0, 600.0, 1800.0)   # ... counts only once it has stayed this long (per flap in a row)
 EVIDENCE_LIST = 200        # an emergency call's record (App._p25_evidence): at most this many srcList / freqList entries
 # Speech-to-text first on the station's whisper (#195): pages, Fire/EMS 15 and our firegrounds, ahead of the rest.
 STT_FIRST = ("tg:307", "FG1", "FG2")
@@ -518,14 +520,19 @@ class App:
         self._load_modes()
         # Antenna groups (sizeup/radio/groups.py): dongles locked to jobs, by priority. None saved: as before.
         self._groups_file = self._mode_file.with_name(antenna.FILE) if self._mode_file and self.shared else None
-        self.groups: list[antenna.Group] = antenna.load(self._groups_file)
+        self.groups, self._groups_problem = antenna.load(self._groups_file)
+        if self._groups_problem:               # never silently: the dongles run unlocked until the groups are saved
+            log(f"sdr: CRITICAL antenna groups dropped: {self._groups_problem}; every dongle runs unlocked until "
+                "they are saved again (Settings > Radios > Receivers)")
         self._own: dict[str, str] = {}        # a grouped dongle standing in for another's job: its own (saved instead)
         self._gseen: dict[str, tuple[bool, float]] = {}   # each grouped dongle: usable at the last look, since when
         self._gusable: dict[str, bool] = {}   # ... as the plan takes it (a change counts once held GROUP_HOLD_S)
         self._gfail: dict[str, float] = {}    # a stand-in that didn't start there: not tried again until then
         self._gshort: dict[str, list[str]] = {}   # each group's wanted jobs that have no dongle now
+        self._gflap: dict[str, tuple[int, float | None]] = {}   # each grouped dongle: (flaps in a row, back since)
         self._watching = False                # the sdr-watch thread runs
         self._lock_saved()
+        self._load_standins()
         # Each serial's product while it was the only dongle with it (#242): {serial: product}. When a second dongle
         # turns up with the same serial (a factory 00000001), the one whose product differs is the newcomer: the
         # alert suggests renaming that one, and sizeup-station sdr-serial knows which physical dongle a job meant.
@@ -3440,6 +3447,7 @@ class App:
                     if lent[2]:
                         by[lent[0]] = lent[2]
                 self._mode_file.write_text(json.dumps({**modes, "_set_by": by}))
+                self._save_standins()
             except OSError:
                 pass
 
@@ -3641,14 +3649,54 @@ class App:
         return self._own.get(sd, self.assign.get(sd, OFF_MODE))
 
     def _lock_saved(self) -> None:
-        """At startup: a saved job the groups don't allow there (a job renamed since, a groups file put back by hand)
-        starts Off, said once."""
+        """At startup: a saved job the groups don't allow there (a dongle renamed by hand, a job renamed since, a groups
+        file put back): a fire job runs where it was saved, said loudly and shown (groups_state "conflicts", Health);
+        any other starts Off, said once. A fire job is never turned off by a lock."""
         for sd, m in list(self.assign.items()):
             why = self._locked(m, sd) if m != OFF_MODE else ""
-            if why:
+            if why and self.fire_job(m):
+                log(f"sdr: CRITICAL {self._sdr_tag(sd)} runs {m} against the antenna groups ({why}): kept running; "
+                    "fix the group in Settings > Radios > Receivers")
+            elif why:
                 log(f"sdr: {self._sdr_tag(sd)}: {m} not started: {why}")
                 self.assign[sd] = OFF_MODE
                 self.set_by.pop(sd, None)
+
+    def _load_standins(self) -> None:
+        """At startup: the stand-ins that ran when sizeup stopped (antenna_standins.json, _save_standins) run again
+        where they ran, before anything else starts: an update or a restart in a shortage never gives the job back to
+        the dongle that is still gone (the county's trunk-recorder service keeps running on the stand-in, #71). Its
+        owner counts as gone until it has been back GROUP_HOLD_S. One that no longer fits the groups is dropped."""
+        p = self._mode_file.with_name(antenna.STANDINS) if self._mode_file else None
+        try:
+            d = json.loads(p.read_text()) if p and p.is_file() else {}
+        except (OSError, ValueError):
+            d = {}
+        mono = time.monotonic()
+        for sd, job in (d.items() if isinstance(d, dict) else ()):
+            g = antenna.of_sdr(self.groups, sd)
+            own = self.assign.get(sd, OFF_MODE)
+            owners = [o for o in (g.sdrs if g else ()) if o != sd and self.assign.get(o) == job]
+            if g is None or job not in g.jobs or not owners or (own != OFF_MODE and own not in g.jobs) or \
+                    any(o in self._own for o in owners):
+                continue
+            self._own[sd], self.assign[sd] = own, job
+            for o in owners:
+                self._gusable[o], self._gseen[o] = False, (False, mono)
+            log(f"sdr: group {g.name}: SDR {self.sdr_name(sd)} runs {job} again for SDR "
+                f"{', '.join(self.sdr_name(o) for o in owners)} (as when sizeup stopped)")
+
+    def _save_standins(self) -> None:
+        p = self._mode_file.with_name(antenna.STANDINS) if self._mode_file else None
+        if p is None:
+            return
+        cur = {sd: self.assign.get(sd, OFF_MODE) for sd in getattr(self, "_own", {})}
+        if cur:
+            tmp = p.with_name(f".{p.name}.{os.getpid()}")
+            tmp.write_text(json.dumps(cur))
+            os.replace(tmp, p)
+        else:
+            p.unlink(missing_ok=True)
 
     def _locked(self, mode: str, sdr: str, gs: list | None = None) -> str:
         """Why `mode` may not run on `sdr` under the antenna groups `gs` (default: the groups now), or ""."""
@@ -3681,19 +3729,47 @@ class App:
         lent = self.reception.lent()
         if lent is not None and lent[0] == sd:
             return False
-        if self._gfail.get(sd, 0.0) > time.monotonic():
+        if self._gfail.get(sd, 0.0) > time.monotonic() or claims.other(sd):
             return False
-        return not claims.other(sd) and not self._ambiguity(sd, devs)
+        if self._ambiguity(sd, devs):
+            # #242: a program already running keeps the dongle it opened; only one that can't start there is moved
+            job = self.assign.get(sd, OFF_MODE)
+            return job != OFF_MODE and self._program_on(job) == sd and self._job_state(job) == "ok"
+        return True
+
+    def _job_state(self, job: str) -> str:
+        r = self.recorder if job == P25_MODE else self._sys_jobs[job][0].recorder if job in self._sys_jobs \
+            else self._receiver(job)
+        try:
+            return str((r.status() if r is not None else {}).get("state") or "")
+        except Exception:  # noqa: BLE001 - a look, never in the way
+            return ""
 
     def _group_view(self, sd: str, now: bool) -> bool:
-        """Usable as the plan takes it: a change (gone, back) counts once it has held GROUP_HOLD_S, so a dongle
-        that drops off USB for a moment moves nothing. The first look counts at once."""
+        """Usable as the plan takes it. The first look takes it as usable (a dongle still attaching moves nothing);
+        a change counts once it has held: gone GROUP_HOLD_S; back GROUP_HOLD_S, or longer for a dongle that went
+        again soon after it came back (GROUP_BACK_HOLD_S per flap in a row, GROUP_FLAP_S): a flapping dongle's
+        job stays on its working stand-in instead of moving back and forth."""
         mono = time.monotonic()
+        if sd not in self._gusable:
+            self._gusable[sd], self._gseen[sd] = True, (True, mono)
         was = self._gseen.get(sd)
         if was is None or was[0] != now:
             self._gseen[sd] = was = (now, mono)
-        if sd not in self._gusable or mono - was[1] >= GROUP_HOLD_S:
+        flaps, back_at = self._gflap.get(sd, (0, None))
+        hold = GROUP_HOLD_S if not now or not flaps else max(
+            GROUP_HOLD_S, GROUP_BACK_HOLD_S[min(flaps, len(GROUP_BACK_HOLD_S)) - 1])
+        if self._gusable[sd] != now and mono - was[1] >= hold:
             self._gusable[sd] = now
+            if now:
+                self._gflap[sd] = (flaps, mono)
+            else:
+                flaps = flaps + 1 if back_at is not None and mono - back_at < GROUP_FLAP_S else 0
+                self._gflap[sd] = (flaps, None)
+                if flaps:
+                    nxt = max(GROUP_HOLD_S, GROUP_BACK_HOLD_S[min(flaps, len(GROUP_BACK_HOLD_S)) - 1])
+                    log(f"sdr: SDR {self.sdr_name(sd)} gone again {mono - back_at:.0f} s after it came back: its job "
+                        f"comes back to it only once it has stayed {nxt:.0f} s")
         return self._gusable[sd]
 
     def _groups_reconcile(self, settling: bool = False) -> None:
@@ -3721,6 +3797,10 @@ class App:
                 for s in [s for s in g.sdrs if s not in usable and s in self._own and not (lent and lent[0] == s)]:
                     self._settle_own(s)             # a stand-in gone: back on its own job, where it waits
                 own = {s: self._own_of(s) for s in g.sdrs if not (lent and lent[0] == s)}
+                # a dongle on a job outside its group (kept at startup, _lock_saved): left as it is, never planned
+                for s in [s for s, m in own.items() if m != OFF_MODE and m not in g.jobs]:
+                    own.pop(s)
+                    usable = [x for x in usable if x != s]
                 # (a group is the admin's consent to moves inside it: spares with auto_assign off too)
                 spares = [s for s in usable if own.get(s) == OFF_MODE and self.set_by.get(s) != "person"
                           and s not in self._auto_skip]
@@ -3798,11 +3878,41 @@ class App:
             self.switching = False
         self._save_modes()
 
-    def set_antenna_groups(self, raw) -> str | None:
-        """Settings > Radios > Receivers (POST /api/antenna-groups {groups: [{name, sdrs, jobs}]}; admins; the hub sends
-        it here as a job): the antenna groups, all of them ([]: none, as before). Refused while what is picked now
-        wouldn't fit them (a grouped dongle on a job outside its group, a group's job on a dongle outside it): the
-        person switches that first, nothing is stopped by a save. None, or why not (like set_mode)."""
+    def _fire_rank(self, job: str) -> int | None:
+        """The pinned order of fire jobs within a group: the county's trunk-recorder, paging, a fireground."""
+        if job == P25_MODE:
+            return 0
+        kind = self._kind.get(job)
+        return 1 if kind == "paging" else 2 if kind == "traffic" else None
+
+    def _running_after(self, gs: list) -> set[str]:
+        """The jobs that would run on the dongles there now under the groups `gs` (each group's plan as it would be
+        made now; a dongle in no group: its own job)."""
+        devs = sdr_lookup.devices(self.cfg.rtl_fm)
+        here = {s for _i, _p, s in devs if s}
+        lent = self.reception.lent()
+        out = set()
+        for sd in sorted(set(self.assign) | set(self._own)):
+            m = self._own_of(sd)
+            if sd in here and antenna.of_sdr(gs, sd) is None and m != OFF_MODE and not (lent and lent[0] == sd) \
+                    and not self._locked(m, sd, gs):
+                out.add(m)
+        for g in gs:
+            own = {s: self._own_of(s) for s in g.sdrs if not (lent and lent[0] == s)}
+            usable = [s for s in g.sdrs if s in here and self._gusable.get(s, True) and own.get(s, OFF_MODE) in
+                      (OFF_MODE, *g.jobs)]
+            spares = [s for s in usable if own.get(s) == OFF_MODE and self.set_by.get(s) != "person"]
+            plan, _ = antenna.plan(g, own, usable, spares, dict(self.assign), self.fire_job, self._group_runnable)
+            out |= set(plan.values()) - {OFF_MODE}
+        return out
+
+    def set_antenna_groups(self, raw, confirm: bool = False) -> str | None:
+        """Settings > Radios > Receivers (POST /api/antenna-groups {groups: [{name, sdrs, jobs}], confirm?}; admins; the
+        hub sends it here as a job): the antenna groups, all of them ([]: none, as before). Refused while what is
+        picked now wouldn't fit them (a grouped dongle on a job outside its group, a group's job on a dongle outside
+        it): the person switches that first. Without confirm, a save is asked again ("confirm: ...") when it would stop
+        a running fire job (in a shortage: a group deleted, a stand-in taken out) or ranks fire jobs against the pinned
+        order (the county's trunk-recorder, paging, firegrounds). None, or why not (like set_mode)."""
         if not self.shared:
             return "each channel has its own dongle: nothing to group"
         if self._groups_file is None:
@@ -3831,11 +3941,20 @@ class App:
                     return f"SDR {self.sdr_name(sd)} runs {m}: add {m} to {g.name}, or switch SDR {self.sdr_name(sd)} first"
                 if gj is not None and sd not in gj.sdrs:
                     return f"{m} runs on SDR {self.sdr_name(sd)}: add it to {gj.name}, or switch it first"
+            asks = [f"{w}: in a fallback the higher one takes the other's dongle"
+                    for g in gs if (w := antenna.fire_order(g, self._fire_rank))]
+            here = {s for _i, _p, s in sdr_lookup.devices(self.cfg.rtl_fm) if s}
+            now = {m for sd, m in self.assign.items() if m != OFF_MODE and sd in here and self._program_on(m) == sd}
+            stops = sorted(j for j in now - self._running_after(gs) if self.fire_job(j))
+            if stops:
+                asks.insert(0, f"Saving stops {', '.join(stops)} (a dongle of its group is gone)")
+            if asks and not confirm:
+                return self.CONFIRM + ". ".join(asks) + "."
             try:
                 antenna.save(self._groups_file, gs)
             except OSError as e:
                 return f"couldn't keep the groups: {e}"
-            self.groups = gs
+            self.groups, self._groups_problem = gs, ""
             self._gshort = {k: v for k, v in self._gshort.items() if any(g.name == k for g in gs)}
             for s in [s for s in self._gseen if antenna.of_sdr(gs, s) is None]:
                 self._gseen.pop(s, None)
@@ -3866,9 +3985,19 @@ class App:
         return out
 
     def groups_state(self) -> list[dict]:
-        """sdr()["groups"]: each group, its dongles that can run now, and its wanted jobs without a dongle."""
-        return [{**g.row(), "usable": [s for s in g.sdrs if self._gusable.get(s)],
-                 "short": list(self._gshort.get(g.name, []))} for g in self.groups]
+        """sdr()["groups"]: each group, its dongles that can run now, its wanted jobs without a dongle ("short"), the
+        jobs it lists that are no dongle's own anywhere ("unowned"), and the dongles that run a job against it
+        ("conflicts": {serial: job}, kept at startup: _lock_saved)."""
+        owns = {self._own_of(s) for s in set(self.assign) | set(self._own)}
+        out = []
+        for g in self.groups:
+            conf = {s: m for s in set(self.assign) | set(self._own)
+                    if (m := self._own_of(s)) != OFF_MODE and self._locked(m, s)
+                    and (s in g.sdrs or m in g.jobs)}
+            out.append({**g.row(), "usable": [s for s in g.sdrs if self._gusable.get(s)],
+                        "short": list(self._gshort.get(g.name, [])),
+                        "unowned": [j for j in g.jobs if j not in owns], "conflicts": conf})
+        return out
 
     def _start_watch(self) -> None:
         """The sdr-watch thread, once: auto-assign's, and the antenna groups' (also with auto_assign off)."""
@@ -4179,7 +4308,8 @@ class App:
                           "held_by": ({"app": c.get("app"), "mode": c.get("mode")} if (c := claims.other(sd)) else None),
                           **self._group_row(sd)}
                          for sd in rows],
-                "groups": self.groups_state()}       # antenna groups: [] when there are none
+                "groups": self.groups_state(),       # antenna groups: [] when there are none
+                "groups_problem": self._groups_problem}   # the groups file dropped (unreadable): "" when fine
 
     def radio_status(self) -> list[dict]:
         out = []
@@ -4328,6 +4458,9 @@ class App:
             self._booting = True
             try:
                 for sd, m in list(self.assign.items()):  # each dongle runs what was picked for it
+                    if m != OFF_MODE and sd not in self._own and any(
+                            self.assign.get(o) == m for o in self._own if o != sd):
+                        continue                            # an antenna group's stand-in runs it (_load_standins)
                     if not self._start_mode(m, sd):         # held by shortfinal now: don't fight for it
                         self.assign[sd] = OFF_MODE
                         self.set_by.pop(sd, None)

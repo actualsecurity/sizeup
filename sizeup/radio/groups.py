@@ -106,16 +106,30 @@ def parse(raw) -> tuple[list[Group], str]:
     return out, ""
 
 
-def load(path: Path | None) -> list[Group]:
-    """The groups saved (none: [], as before groups existed). A file that doesn't read: none, said by the caller."""
+def load(path: Path | None) -> tuple[list[Group], str]:
+    """(the groups saved, ""): none saved, [] as before groups existed. A file that doesn't read or doesn't parse:
+    ([], why), which the caller says loudly (the dongles run unlocked until the groups are saved again)."""
     if path is None or not path.is_file():
-        return []
+        return [], ""
     try:
         d = json.loads(path.read_text())
-    except (OSError, ValueError):
-        return []
-    groups, _why = parse(d.get("groups") if isinstance(d, dict) else None)
-    return groups
+    except (OSError, ValueError) as e:
+        return [], f"{path.name} unreadable ({type(e).__name__})"
+    groups, why = parse(d.get("groups") if isinstance(d, dict) else None)
+    return groups, (f"{path.name}: {why}" if why else "")
+
+
+def fire_order(group: Group, rank: Callable[[str], int | None]) -> str:
+    """"" when the group's fire jobs are in the pinned order (rank: 0 the county's trunk-recorder, 1 paging, 2 a
+    fireground, None not a fire job), else which one is ranked above which."""
+    fire = [(j, rank(j)) for j in group.jobs if rank(j) is not None]
+    for (a, ra), (b, rb) in zip(fire, fire[1:]):
+        if rb < ra:
+            return f"{group.name} ranks {b} below {a}"
+    return ""
+
+
+STANDINS = "antenna_standins.json"     # the stand-ins running ({serial: job}): resumed by the next start
 
 
 def save(path: Path, groups: Iterable[Group]) -> None:
