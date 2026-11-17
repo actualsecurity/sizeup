@@ -57,16 +57,35 @@ that ran into the next talker's (no terminator decoded: trunk-recorder credits i
 radio) is cut where the live grants say the next radio keyed. Each piece is its own clip
 (`<call>-t0`, `-t1`, ...), transcript and comms row.
 
-**The station's trunk-recorder is patched for that last case (#397).** In 5.2.0 a transmission ends only on a
+**The station's trunk-recorder is patched for that last case (#638).** In 5.2.0 a transmission ends only on a
 terminator: Phase 1's TDU, or on Phase 2 (MRRS) `MAC_HANGTIME` (it leaves `MAC_END_PTT` alone). When the terminator
 isn't decoded and the next radio keys up on the same voice channel, stock 5.2.0 goes on writing the same
 transmission and the new radio's ID (from the voice channel's link control, or Phase 2's `MAC_PTT`) only replaces the
 old one, so both talkers end up in one `srcList` entry credited to the later radio, and the live grants can't help
-when the next radio keyed without one. `install-linux.sh` (`tr_patch`) changes `gr_blocks/transmission_sink.cc` so a
-new radio ID on the voice channel of a trunked call ends the transmission at that sample: the call JSON then lists
-each talker at its own `pos`, and trunk-recorder logs `Unit ID changed on Voice Channel, ext: <id>` (sizeup shows that
-radio as talking at once). A bench's own unpatched build still works: such transmissions stay merged unless a grant
-names the next radio.
+when the next radio keyed without one. `install-linux.sh` (`tr_patch`) patches `gr_blocks/transmission_sink.*`; what
+it does is set per system, in that system's `config.json`:
+
+```json
+"sizeup": {"split": "log"}
+```
+
+| `split` | trunk-recorder |
+|---|---|
+| `off` | stock 5.2.0 |
+| `log` (default) | stock, and it logs `sizeup split (log): would split: prev <id> -> new <id>, <n> samples into transmission` where it would cut, plus `ID flip` / `ID alias` where one key-up showed two IDs |
+| `on` | ends the transmission where the new talker's ID came in: the call JSON lists each talker at its own `pos`, and it logs `Unit ID changed on Voice Channel, ext: <id>` (sizeup names that radio as talking at once) |
+
+A new ID counts as a new talker only when the current talker's ID came from the voice channel (a grant alone
+doesn't count: grant and voice IDs can differ), at least 1 s into its turn, and the new ID is heard again (or 1 s
+passes) with no flip back to the current talker's ID. A flip back is one radio's two IDs (a roaming radio's home
+and local IDs on Phase 2), never a cut. sizeup's supervisor passes the mode as `SIZEUP_TR_SPLIT` when it starts that
+system's trunk-recorder, so a change takes effect at the next update that restarts it. CI tests the patch on the
+real sink (`.github/scripts/tr_split_test.cc`) and switches between patched and stock builds.
+
+Rollout (#638): `log` on every system for about a week. Then count, per system, the `would split` lines, the short
+leading pieces (a cut under ~1.5 s into a transmission) and the `ID flip` / `ID alias` pairs. If they look like real
+turns, MRRS goes `on` first, then the county. A bench's own unpatched build ignores the setting: such transmissions
+stay merged unless a grant names the next radio.
 
 `pos` (both lists) is the sum of the earlier transmissions' lengths, each from its sample count: exactly where the
 transmission starts in the call WAV, which ffmpeg makes by concatenating them. 5.2.0 runs the call WAV through

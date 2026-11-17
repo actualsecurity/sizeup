@@ -1,4 +1,4 @@
-"""One row per transmission when several radios key up on one trunk-recorder call (#397).
+"""One row per transmission when several radios key up on one trunk-recorder call (#638).
 
 trunk-recorder writes one WAV + JSON per call; srcList / freqList place each transmission in it ("pos": the sum of
 the earlier transmissions' lengths). The station's build is patched (deploy/station/install-linux.sh tr_patch) so a
@@ -197,9 +197,10 @@ def the_patch() -> str:
     return m.group(1)
 
 
-def test_the_patch_is_one_well_formed_diff_of_the_transmission_sink():
+def test_the_patch_is_a_well_formed_diff_of_the_transmission_sink():
     patch = the_patch()
-    assert re.findall(r"^diff --git a/(\S+)", patch, re.M) == ["trunk-recorder/gr_blocks/transmission_sink.cc"]
+    assert re.findall(r"^diff --git a/(\S+)", patch, re.M) == ["trunk-recorder/gr_blocks/transmission_sink.cc",
+                                                              "trunk-recorder/gr_blocks/transmission_sink.h"]
     lines = patch.splitlines()
     k = 0
     hunks = 0
@@ -218,9 +219,12 @@ def test_the_patch_is_one_well_formed_diff_of_the_transmission_sink():
             old -= tag in " -"
             new -= tag in " +"
             assert old >= 0 and new >= 0
-    assert hunks == 3
-    assert "Unit ID changed on Voice Channel, ext: " in patch and "end_transmission();" in patch
-    assert "!d_conventional" in patch      # a conventional system keeps its own handling
+    assert hunks == 8
+    assert not re.search(r"^-", patch.replace("--- a/", ""), re.M)       # it only adds: stock code paths stay as they are
+    for want in ('std::getenv("SIZEUP_TR_SPLIT")', "Unit ID changed on Voice Channel, ext: ",
+                 "would split: prev ", "if ((d_split_mode == 2) && !d_conventional)", "#638"):
+        assert want in patch, want
+    assert "#397" not in patch
 
 
 def test_the_installer_applies_the_patch_before_the_build_and_names_the_build_by_it():
@@ -228,10 +232,50 @@ def test_the_installer_applies_the_patch_before_the_build_and_names_the_build_by
     build = sh[sh.index('step "trunk-recorder $TR_TAG"'):sh.index('step "whisper.cpp $WHISPER_TAG"')]
     assert build.index("fetch_source trunk-recorder") < build.index('tr_patch | git -C "$src" apply -') < \
         build.index("cmake -S")
-    assert 'want="trunk-recorder $TR_TAG $TR_COMMIT patch $TR_PATCH_ID"' in build
-    assert 'TR_B="$TR_PLAIN_B-p$TR_PATCH_ID"' in sh and "TR_PATCH_ID=$(tr_patch | sha256sum | cut -c1-8)" in sh
-    # the hash is of the patch as written
+    assert 'want="trunk-recorder $TR_TAG $TR_COMMIT${TR_PATCH_ID:+ patch $TR_PATCH_ID}"' in build
+    assert '"${low[@]}" cmake --build "$src/build"' in build and "low=(nice -n 10)" in build
+    assert 'TR_B="$TR_PLAIN_B${TR_PATCH_ID:+-p$TR_PATCH_ID}"' in sh
     out = subprocess.run(["bash", "-c", 'eval "$(awk \'/^tr_patch\\(\\) \\{/{on=1} on{print} on&&/^}$/{exit}\' "$1")";'
                           ' tr_patch', "-", str(ROOT / "deploy" / "station" / "install-linux.sh")],
                          capture_output=True, text=True, check=True).stdout
     assert out == the_patch()
+
+
+def test_ci_tests_the_patch_on_the_real_sink_and_switches_between_builds():
+    ci = (ROOT / ".github" / "scripts" / "station-update.sh").read_text()
+    assert ".github/scripts/tr-split-test.sh" in ci or "tr-split-test.sh" in ci
+    harness = (ROOT / ".github" / "scripts" / "tr_split_test.cc").read_text()
+    for case in ("split mid-window", "new ID then terminate, one window", "terminate then new ID, one window",
+                 "same ID again", "grant-only ID replaced", "ID flip back", "group mismatch", "conventional: stock",
+                 "log: stock, logged", "off: stock"):
+        assert f'"{case}"' in harness, case
+
+
+# -- which systems cut: SIZEUP_TR_SPLIT from each system's config.json ------------------------------------------------------
+
+
+def test_each_system_starts_its_trunk_recorder_with_its_own_split_mode(tmp_path):
+    from sizeup.radio import trunkrecd
+    from tests.test_p25_systems import ask_county, ask_system, service
+    county, mrrs, pop, _logs, d = service(tmp_path)
+    ask_county(tmp_path)
+    county.step(100.0)
+    ask_system(tmp_path, {0: "pd-a"})
+    mrrs.step(101.0)
+    assert [p.kw["env"][trunkrecd.SPLIT_ENV] for p in pop.started] == ["log", "log"]       # the repo's: log everywhere
+    assert "sizeup" not in json.loads((d.parent.parent / "config.runtime.json").read_text())
+    c = json.loads((d / "config.json").read_text())
+    c["sizeup"]["split"] = "on"
+    (d / "config.json").write_text(json.dumps(c))
+    assert trunkrecd.split_mode(["t", "--config=config.json"], d) == "on"
+    assert trunkrecd.split_mode(["t", "--config=config.json"], d.parent.parent) == "log"
+    c["sizeup"]["split"] = "yes"
+    (d / "config.json").write_text(json.dumps(c))
+    assert trunkrecd.split_mode(["t"], d) == "log"                                           # not a mode: the default
+    assert trunkrecd.split_mode(["t"], tmp_path / "nowhere") == "log"
+
+
+def test_the_repo_starts_every_system_in_log():
+    tr = ROOT / "deploy" / "trunk-recorder"
+    for conf in [tr / "config.json", *sorted((tr / "systems").glob("*/config.json"))]:
+        assert json.loads(conf.read_text())["sizeup"]["split"] == "log", conf

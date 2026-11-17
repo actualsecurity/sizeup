@@ -10,6 +10,9 @@
 #   E  an incident-source adapter (#301) from a local repo standing in for the private one: set up, installed into a
 #      copy of A's release, a new adapter commit alone rebuilds, a broken one is never switched to, a rollback brings
 #      the previous adapter back, removed: A without it
+#   F  trunk-recorder's patch (#638) taken out: stock 5.2.0 built in the same source tree (only what the patch touches
+#      compiled again), switched to; G  the patch back: its build reused, nothing compiled; rollback: stock again
+# Before A: the patch tested on the real transmission_sink (tr-split-test.sh), against the build install-linux.sh made.
 set -euo pipefail
 
 WORK=/srv/sizeup-ci
@@ -39,6 +42,9 @@ tr_pid() { systemctl show -p MainPID --value sizeup-trunk-recorder.service; }
 state_is() { [ "$(field 'd.get("state")')" = "$1" ] && [ "$(field 'd.get("hub")')" = "$2" ]; }
 push() { gitc commit -q -am "$1"; gitc push -q --force "$BARE" main; gitc rev-parse HEAD; }
 hub_runs() { echo "$1" > "$WANT"; }      # what the station writes when the hub reports that build
+
+say "trunk-recorder's patch (#638) on the real transmission_sink"
+"$here/.github/scripts/tr-split-test.sh" /opt/sizeup/src/trunk-recorder
 
 say "A: a local repo, and the station on git"
 rm -rf "$WORK"
@@ -240,4 +246,47 @@ wait_for 600 release_is "$A"
 wait_for 300 idle
 wait_for 60 is_build "$A"
 test ! -e /opt/sizeup/current/ADAPTER.json && test -z "$(in_venv /opt/sizeup/current)"
+
+say "F: trunk-recorder's patch (#638) taken out: stock 5.2.0, built in the same source tree"
+tr_link() { readlink -f /opt/sizeup/trunk-recorder; }
+mtime() { stat -c %Y "$1"; }
+obj=/opt/sizeup/src/trunk-recorder/build/CMakeFiles/trunk_recorder_library.dir/trunk-recorder
+patched=$(tr_link)
+[[ "$patched" =~ -p[0-9a-f]{8}$ ]] || { echo "not a patched build: $patched" >&2; exit 1; }
+untouched=$(mtime "$obj/talkgroup.cc.o")
+sink0=$(mtime "$obj/gr_blocks/transmission_sink.cc.o")
+gitc reset -q --hard "$A"
+python3 - "$SRC/deploy/station/install-linux.sh" <<'PY'
+import re, sys
+p = sys.argv[1]
+s = open(p).read()
+t = re.sub(r"(tr_patch\(\) \{\n)  cat <<'PATCH'\n.*?\nPATCH\n\}", lambda m: m.group(1) + "  :\n}", s, count=1, flags=re.S)
+assert t != s
+open(p, "w").write(t)
+PY
+F=$(push F)
+trpid=$(tr_pid)
+hub_runs "$F"
+wait_for 1200 state_is current "$F"
+test "$(current)" = "$F"
+test "$(tr_link)" = "${patched%-p*}"                                    # stock, in its own build directory
+test "$(mtime "$obj/talkgroup.cc.o")" = "$untouched"                    # an incremental build: this one untouched
+test "$(mtime "$obj/gr_blocks/transmission_sink.cc.o")" -gt "$sink0"     # ... the patched file compiled again
+test "$(tr_pid)" != "$trpid"                                            # what it runs changed: restarted
+test -d "$patched"                                                      # the patched build stays for A
+
+say "G: the patch back: its build reused, nothing compiled"
+gitc checkout -q "$A" -- deploy/station/install-linux.sh
+G=$(push G)
+built=$(mtime "$obj/gr_blocks/transmission_sink.cc.o")
+hub_runs "$G"
+wait_for 600 state_is current "$G"
+test "$(tr_link)" = "$patched"
+test "$(mtime "$obj/gr_blocks/transmission_sink.cc.o")" = "$built"
+grep -q "trunk-recorder: up to date" /var/log/sizeup-install.log
+
+say "rollback: stock again"
+sizeup-station rollback
+test "$(current)" = "$F"
+test "$(tr_link)" = "${patched%-p*}"
 say "ok"

@@ -40,81 +40,357 @@ RTLSDR_COMMIT="240bd0e1e6d9f64361b6949047468958cd08aa31"
 TR_REPO="https://github.com/TrunkRecorder/trunk-recorder.git"
 TR_TAG="v5.2.0"
 TR_COMMIT="7f9e21ecfa445e568371cef3153a07887c36b380"
-# ... with one change of ours (#397), applied to the pinned source before the build. 5.2.0 ends a transmission only on a
+# ... with one change of ours (#638), applied to the pinned source before the build. 5.2.0 ends a transmission only on a
 # terminator: P25 Phase 1's TDU, or on Phase 2 MAC_HANGTIME (MAC_END_PTT doesn't end one). When that isn't decoded and
 # the next radio keys up on the same voice channel, the new radio's ID only replaces the transmission's (all of it is
-# then the later radio's, one srcList entry). Patched, the transmission ends where the new ID came in, so the call
-# JSON lists each talker at its own pos and logs "Unit ID changed on Voice Channel, ext: <id>" (sizeup/radio/live.py).
-# The build's name and its .sizeup-build carry the patch's hash: a change to it is a new build (an older release keeps
-# the one it ran with), made from the same source tree (only the patched file is compiled again).
+# then the later radio's: one srcList entry). The patch (gr_blocks/transmission_sink.*) can end the transmission where
+# the new talker's ID came in, per system: SIZEUP_TR_SPLIT in trunk-recorder's environment, which sizeup's supervisor
+# sets from the system's config.json ("sizeup": {"split": "off" | "log" | "on"}; deploy/trunk-recorder/README.md):
+#   off   stock 5.2.0
+#   log   stock, and it logs "sizeup split (log): would split: prev <id> -> new <id>, <n> samples into transmission"
+#         (and "ID flip" / "ID alias" where a radio's IDs differ on one key-up)
+#   on    the cut: the call JSON lists each talker at its own pos; it logs "Unit ID changed on Voice Channel, ext: <id>"
+#         (sizeup/radio/live.py names that talker at once)
+# A new ID is a new talker only when the current one's ID came from the voice channel (not a grant alone), at least a
+# second into its turn, and the new ID is heard again (or a second passes) with no flip back to the current one's.
+# .github/scripts/tr_split_test.cc tests it on the real sink (CI, station-update.sh). The build's name and its
+# .sizeup-build carry the patch's hash: a change to it is a new build (an older release keeps the one it ran with), made
+# in the same source tree (only what the patch touches is compiled again). An empty tr_patch builds stock 5.2.0.
 tr_patch() {
   cat <<'PATCH'
 diff --git a/trunk-recorder/gr_blocks/transmission_sink.cc b/trunk-recorder/gr_blocks/transmission_sink.cc
-index 4e8c2ba..a677b79 100644
+index 4e8c2ba..c6b4384 100644
 --- a/trunk-recorder/gr_blocks/transmission_sink.cc
 +++ b/trunk-recorder/gr_blocks/transmission_sink.cc
-@@ -401,6 +401,11 @@ int transmission_sink::work(int noutput_items, gr_vector_const_void_star &input_
-   // get_tags_in_range(tags, 0, nitems_read(0), nitems_read(0) + noutput_items);
-   get_tags_in_window(tags, 0, 0, noutput_items);
-   unsigned pos = 0;
-+  // sizeup: a new talker on a trunked call's voice channel with no terminator between (a lost Phase 1 TDU; on
-+  // Phase 2 only MAC_HANGTIME ends a transmission) ends the transmission where the new radio's ID came in, so
-+  // the call JSON lists that radio in srcList at its own pos instead of crediting all of it to the last radio.
-+  int split_at = -1;
-+  long split_src = -1;
-   // long curr_src_id = 0;
+@@ -35,6 +35,8 @@
+ #include <stdexcept>
+ #include <stdio.h>
+ #include <chrono>
++#include <algorithm>
++#include <cstdlib>
  
-   for (unsigned int i = 0; i < tags.size(); i++) {
-@@ -456,7 +461,13 @@ int transmission_sink::work(int noutput_items, gr_vector_const_void_star &input_
- 
-         curr_src_id = src_id;
-       } else if (src_id != curr_src_id) {
--        if (state == RECORDING) {
-+        if ((state == RECORDING) && !d_conventional && (d_sample_count > 0) && !d_termination_flag) {
-+          if (split_at < 0) {
-+            split_at = (int)(tags[i].offset - nitems_read(0));
-+            BOOST_LOG_TRIVIAL(info) << loghdr << "Unit ID changed on Voice Channel, ext: " << src_id << "\tprevious: " << curr_src_id << "\t samples: " << d_sample_count;
-+          }
-+          split_src = src_id;
-+        } else if (state == RECORDING) {
- 
-           // BOOST_LOG_TRIVIAL(info) << "ENDING TRANSMISSION from TAGS Voice Channel mismatch source id - current: "<< curr_src_id << " new: " << src_id << " pos: " << pos << " offset: " << tags[i].offset - nitems_read(0);
-           /*
-@@ -502,6 +513,31 @@ int transmission_sink::work(int noutput_items, gr_vector_const_void_star &input_
-   }
-   tags.clear();
- 
-+  // sizeup: the samples before the new talker's ID are the earlier talker's; the rest start a new transmission.
-+  if (split_at >= 0) {
-+    int before = (split_at < noutput_items) ? split_at : noutput_items;
-+    int n_in_chans = input_items.size();
-+    if (d_fp) {
-+      for (int k = 0; k < before; k++) {
-+        for (int chan = 0; chan < d_nchans; chan++) {
-+          short int sample = (chan < n_in_chans) ? ((const int16_t *)input_items[chan])[k] : 0;
-+          wav_write_sample(d_fp, sample, d_bytes_per_sample);
-+          d_sample_count++;
-+        }
-+      }
+ // win32 (mingw/msvc) specific
+ #ifdef HAVE_IO_H
+@@ -77,6 +79,228 @@ transmission_sink::transmission_sink(int n_channels, unsigned int sample_rate, i
+   d_slot = -1;
+   d_termination_flag = false;
+   state = AVAILABLE;
++  const char *split = std::getenv("SIZEUP_TR_SPLIT");
++  d_split_mode = (split && !std::strcmp(split, "on")) ? 2 : ((split && !std::strcmp(split, "log")) ? 1 : 0);
++  d_cand_src = -1;
++  d_cand_pos = 0;
++  d_cand_seen = 0;
++  d_talker_start = 0;
++  d_split_drop = false;
++  d_conventional = false;
++}
++
++// sizeup (#638). trunk-recorder ends a transmission only on a terminator (Phase 1 TDU; Phase 2 MAC_HANGTIME). When
++// none is decoded and the next radio keys up on the same voice channel, stock 5.2.0 only swaps in its ID: both
++// talkers in one transmission, credited to the later one. SIZEUP_TR_SPLIT=on ends the transmission where the new
++// talker's ID came in; =log keeps stock behaviour and logs where it would have; unset or off: stock.
++// A new ID is a new talker only when the current talker's ID came from the voice channel (not only from a grant), it
++// comes SPLIT_EARLY_S or more into the current talker's turn, and it is heard again (or SPLIT_HOLD_S passes, or the
++// transmission ends) with no flip back to the current talker's ID in between. Its samples are held back until then;
++// a flip back (a roaming radio's two IDs) makes it the same talker.
++static const double SPLIT_EARLY_S = 1.0;
++static const double SPLIT_HOLD_S = 1.0;
++
++int transmission_sink::split_on_src(long src, long pos) {
++  std::string loghdr = log_header(d_current_call_short_name, d_current_call_num, d_current_call_talkgroup_display, d_current_call_freq);
++  if (std::find(d_talker_ids.begin(), d_talker_ids.end(), src) != d_talker_ids.end()) {
++    if (d_cand_src != -1) {
++      BOOST_LOG_TRIVIAL(info) << loghdr << "sizeup split: ID flip " << d_cand_src << " ~ " << src << ", the same talker";
++      d_talker_ids.push_back(d_cand_src);
++      d_cand_src = -1;
++      split_keep();
 +    }
-+    end_transmission();
-+    curr_src_id = split_src;
-+    if (before > 0) {
-+      gr_vector_const_void_star rest(input_items.size());
-+      for (unsigned int chan = 0; chan < input_items.size(); chan++) {
-+        rest[chan] = (const void *)(((const int16_t *)input_items[chan]) + before);
-+      }
-+      dowork(noutput_items - before, rest, output_items);
-+      return noutput_items;
++    return 0;
++  }
++  if (d_talker_ids.empty()) { // the current ID came from a grant, or there is none: the voice channel's replaces it
++    d_talker_ids.push_back(src);
++    return 0;
++  }
++  if ((d_cand_src == -1) && (pos - d_talker_start < (long)(SPLIT_EARLY_S * d_sample_rate * d_nchans))) {
++    BOOST_LOG_TRIVIAL(info) << loghdr << "sizeup split: ID alias " << d_talker_ids.back() << " ~ " << src << ", " << (pos - d_talker_start) << " samples into the talker's turn";
++    d_talker_ids.push_back(src);
++    return 0;
++  }
++  if (d_cand_src == -1) {
++    d_cand_src = src;
++    d_cand_pos = pos;
++    d_cand_seen = 1;
++    return 0;
++  }
++  if (d_cand_src == src) {
++    return (++d_cand_seen >= 2) ? 1 : 0;
++  }
++  d_cand_src = src; // a third ID: the change still began at d_cand_pos
++  d_cand_seen = 1;
++  return 0;
++}
++
++// The new talker settled. on: the earlier talker's transmission ends where the new ID came in, the held samples start
++// the new one. log: only said.
++void transmission_sink::split_cut() {
++  std::string loghdr = log_header(d_current_call_short_name, d_current_call_num, d_current_call_talkgroup_display, d_current_call_freq);
++  long next = d_cand_src;
++  long prev = d_talker_ids.empty() ? curr_src_id : d_talker_ids.back();
++  if (d_split_mode != 2) {
++    BOOST_LOG_TRIVIAL(info) << loghdr << "sizeup split (log): would split: prev " << prev << " -> new " << next << ", " << d_cand_pos << " samples into transmission";
++    d_talker_ids.assign(1, next);
++    d_talker_start = d_cand_pos;
++    d_cand_src = -1;
++    return;
++  }
++  BOOST_LOG_TRIVIAL(info) << loghdr << "Unit ID changed on Voice Channel, ext: " << next << "\tprevious: " << prev << "\t samples: " << d_cand_pos;
++  std::vector<int16_t> held;
++  held.swap(d_pending);
++  d_cand_src = -1;
++  end_transmission_now(); // the earlier talker's
++  curr_src_id = next;
++  d_talker_ids.assign(1, next);
++  if (!held.empty() && begin_transmission((long)held.size())) {
++    for (size_t k = 0; k < held.size(); k++) {
++      wav_write_sample(d_fp, held[k], d_bytes_per_sample);
++      d_sample_count++;
 +    }
 +  }
++}
 +
-   // if the System for this call is in Transmission Mode, and we have a recording and we got a flag that a Transmission ended...
-   int nwritten = dowork(noutput_items, input_items, output_items);
++// The new ID was the same talker after all: the held samples are its.
++void transmission_sink::split_keep() {
++  if (d_fp) {
++    for (size_t k = 0; k < d_pending.size(); k++) {
++      wav_write_sample(d_fp, d_pending[k], d_bytes_per_sample);
++      d_sample_count++;
++    }
++  }
++  d_pending.clear();
++}
++
++// (as dowork's IDLE branch) a new transmission file; its start set back by the samples held for it
++bool transmission_sink::begin_transmission(long held) {
++  if (d_fp) {
++    close_wav(false);
++  }
++  auto now_sys = std::chrono::system_clock::now();
++  d_start_time_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now_sys.time_since_epoch()).count() -
++                    (std::int64_t)(1000.0 * held / ((double)d_sample_rate * (double)d_nchans));
++  d_start_time = static_cast<time_t>(d_start_time_ms / 1000);
++  create_filename();
++  if (!open_internal(current_filename.c_str())) {
++    BOOST_LOG_TRIVIAL(error) << "can't open file";
++    return false;
++  }
++  state = RECORDING;
++  return true;
++}
++
++void transmission_sink::write_span(gr_vector_const_void_star &input_items, int a, int b) {
++  if ((b <= a) || d_split_drop || ((state != IDLE) && (state != RECORDING))) {
++    return; // IGNORE, STOPPED, AVAILABLE: dropped, as stock does
++  }
++  if ((state == IDLE) && !begin_transmission(0)) {
++    return;
++  }
++  if (!d_fp) {
++    return;
++  }
++  int n_in_chans = input_items.size();
++  long hold = (long)(SPLIT_HOLD_S * d_sample_rate * d_nchans);
++  for (int k = a; k < b; k++) {
++    for (int chan = 0; chan < d_nchans; chan++) {
++      int16_t sample = (chan < n_in_chans) ? ((const int16_t *)input_items[chan])[k] : 0;
++      if (d_cand_src != -1) {
++        d_pending.push_back(sample);
++      } else {
++        wav_write_sample(d_fp, sample, d_bytes_per_sample);
++        d_sample_count++;
++      }
++    }
++    if ((d_cand_src != -1) && ((long)d_pending.size() >= hold)) {
++      split_cut(); // neither heard again nor flipped back: the new talker
++    }
++  }
++  d_last_write_time = std::chrono::steady_clock::now();
++}
++
++// A terminator's chunk is over: the transmission ends (an ignored stretch is over: back to idle).
++void transmission_sink::split_terminate() {
++  d_split_drop = false;
++  if (state == IGNORE) {
++    state = IDLE;
++    return;
++  }
++  if ((d_sample_count > 0) || !d_pending.empty()) {
++    end_transmission();
++  }
++}
++
++// SIZEUP_TR_SPLIT=on, a trunked call: the window is cut at its tags and each tag acts where it is. A terminator comes
++// at the start of the chunk holding the last voice: the transmission ends at the next tag, or the window's end.
++int transmission_sink::work_split(int noutput_items, gr_vector_const_void_star &input_items) {
++  gr::thread::scoped_lock guard(d_mutex);
++  std::string loghdr = log_header(d_current_call_short_name, d_current_call_num, d_current_call_talkgroup_display, d_current_call_freq);
++  if (!d_current_call || (state == STOPPED) || (state == AVAILABLE)) {
++    return noutput_items;
++  }
++  std::vector<gr::tag_t> tags;
++  get_tags_in_window(tags, 0, 0, noutput_items);
++  std::stable_sort(tags.begin(), tags.end(), [](const gr::tag_t &x, const gr::tag_t &y) { return x.offset < y.offset; });
++  pmt::pmt_t src_id_key(pmt::intern("src_id"));
++  pmt::pmt_t grp_id_key(pmt::intern("grp_id"));
++  pmt::pmt_t terminate_key(pmt::intern("terminate"));
++  pmt::pmt_t spike_count_key(pmt::intern("spike_count"));
++  pmt::pmt_t error_count_key(pmt::intern("error_count"));
++  int cursor = 0;
++  bool term = false;
++  int term_at = 0;
++  for (unsigned int i = 0; i < tags.size(); i++) {
++    int rel = (int)(tags[i].offset - nitems_read(0));
++    if (rel > cursor) {
++      write_span(input_items, cursor, rel);
++      cursor = rel;
++    }
++    if (term && (rel > term_at)) {
++      split_terminate();
++      term = false;
++    }
++    if (pmt::eq(grp_id_key, tags[i].key)) {
++      long grp_id = pmt::to_long(tags[i].value);
++      if (((state == RECORDING) || (state == IDLE)) && (d_current_call_talkgroup_encoded != grp_id)) {
++        BOOST_LOG_TRIVIAL(info) << loghdr << "GROUP MISMATCH -  Recorder TG: " << d_current_call_talkgroup_encoded << " Received TG: " << grp_id << " Recorder state: " << format_state(state) << " incoming: " << noutput_items;
++        if ((d_sample_count > 0) || !d_pending.empty()) {
++          BOOST_LOG_TRIVIAL(info) << loghdr << "Ending Transmission and IGNORING Rest - count: " << d_sample_count;
++          end_transmission();
++        }
++        state = IGNORE;
++      }
++    } else if (pmt::eq(src_id_key, tags[i].key)) {
++      long src_id = pmt::to_long(tags[i].value);
++      if ((state == RECORDING) || (state == IDLE)) {
++        if (split_on_src(src_id, d_sample_count + (long)d_pending.size()) == 1) {
++          split_cut();
++        } else if (d_cand_src == -1) {
++          curr_src_id = src_id; // the latest ID heard (stock), while no new talker is pending
++        }
++      } else if (curr_src_id == -1) {
++        curr_src_id = src_id;
++      }
++    } else if (pmt::eq(terminate_key, tags[i].key)) {
++      if (!term) {
++        term = true;
++        term_at = rel;
++        d_split_drop = (state != IGNORE) && (d_sample_count == 0) && d_pending.empty();
++      }
++    } else if (state == RECORDING) {
++      if (pmt::eq(spike_count_key, tags[i].key)) {
++        d_spike_count = pmt::to_long(tags[i].value);
++      } else if (pmt::eq(error_count_key, tags[i].key)) {
++        d_error_count = pmt::to_long(tags[i].value);
++      }
++    }
++  }
++  write_span(input_items, cursor, noutput_items);
++  if (term) {
++    split_terminate();
++  }
++  return noutput_items;
+ }
  
+ void transmission_sink::create_filename() {
+@@ -257,6 +481,13 @@ void transmission_sink::set_source(long src) {
+ }
+ 
+ void transmission_sink::end_transmission() {
++  if ((d_split_mode != 0) && (d_cand_src != -1) && (d_sample_count > 0)) {
++    split_cut(); // the new ID was the last one heard: its own transmission
++  }
++  end_transmission_now();
++}
++
++void transmission_sink::end_transmission_now() {
+   std::string loghdr = log_header(d_current_call_short_name,d_current_call_num,d_current_call_talkgroup_display,d_current_call_freq);
+   
+   if (d_sample_count > 0) {
+@@ -320,6 +551,11 @@ void transmission_sink::end_transmission() {
+   } else {
+     BOOST_LOG_TRIVIAL(error) << "Trying to end a Transmission, but the sample_count is 0" << std::endl;
+   }
++  d_talker_ids.clear(); // sizeup (#638)
++  d_cand_src = -1;
++  d_cand_seen = 0;
++  d_talker_start = 0;
++  d_pending.clear();
+ }
+ 
+ void transmission_sink::stop_recording() {
+@@ -358,6 +594,9 @@ State transmission_sink::get_state() {
+ }
+ 
+ int transmission_sink::work(int noutput_items, gr_vector_const_void_star &input_items, gr_vector_void_star &output_items) {
++  if ((d_split_mode == 2) && !d_conventional) {
++    return work_split(noutput_items, input_items); // sizeup (#638)
++  }
+ 
+   gr::thread::scoped_lock guard(d_mutex); // hold mutex for duration of this function
+   std::string loghdr = log_header(d_current_call_short_name,d_current_call_num,d_current_call_talkgroup_display,d_current_call_freq);
+@@ -450,6 +689,14 @@ int transmission_sink::work(int noutput_items, gr_vector_const_void_star &input_
+     if (pmt::eq(src_id_key, tags[i].key)) {
+       long src_id = pmt::to_long(tags[i].value);
+       pos = d_sample_count + (tags[i].offset - nitems_read(0));
++      if ((d_split_mode == 1) && !d_conventional && ((state == RECORDING) || (state == IDLE))) { // sizeup (#638): log only
++        if ((d_cand_src != -1) && ((long)pos - d_cand_pos >= (long)(SPLIT_HOLD_S * d_sample_rate * d_nchans))) {
++          split_cut();
++        }
++        if (split_on_src(src_id, pos) == 1) {
++          split_cut();
++        }
++      }
+ 
+       if (curr_src_id == -1) {
+         // BOOST_LOG_TRIVIAL(info) << "Updated Voice Channel source id: " << src_id << " pos: " << pos << " offset: " << tags[i].offset - nitems_read(0);
+diff --git a/trunk-recorder/gr_blocks/transmission_sink.h b/trunk-recorder/gr_blocks/transmission_sink.h
+index e82819c..4724c03 100644
+--- a/trunk-recorder/gr_blocks/transmission_sink.h
++++ b/trunk-recorder/gr_blocks/transmission_sink.h
+@@ -33,6 +33,7 @@
+ #include <gnuradio/blocks/api.h>
+ #include <gnuradio/sync_block.h>
+ #include <chrono>
++#include <vector>
+ 
+ class Call;
+ struct Transmission;
+@@ -60,6 +61,23 @@ private:
+   long d_error_count;
+   long curr_src_id;
+   long cached_src_id;
++  // sizeup (#638): a new talker on a trunked call's voice channel with no terminator between
++  int d_split_mode;                 // SIZEUP_TR_SPLIT: 0 off (stock), 1 log (stock; logs where it would cut), 2 on
++  std::vector<long> d_talker_ids;   // the IDs the voice channel gave the current talker (more than one: aliases)
++  long d_cand_src;                  // a new ID not settled yet (-1: none)
++  long d_cand_pos;                  // where it came in: samples into the transmission
++  int d_cand_seen;
++  long d_talker_start;              // samples into the transmission where the current talker began
++  std::vector<int16_t> d_pending;   // (on) the samples since d_cand_pos, held back until the new ID is settled
++  bool d_split_drop;                // (on) a terminator with nothing recorded: the rest of its chunk is dropped
++  int split_on_src(long src, long pos);
++  void split_cut();
++  void split_keep();
++  void split_terminate();
++  bool begin_transmission(long held);
++  void end_transmission_now();
++  void write_span(gr_vector_const_void_star &input_items, int a, int b);
++  int work_split(int noutput_items, gr_vector_const_void_star &input_items);
+   unsigned int d_current_color_code;
+   std::string current_filename;
+   Call *d_current_call;
 PATCH
 }
-TR_PATCH_ID=$(tr_patch | sha256sum | cut -c1-8)
+TR_PATCH_ID=""
+if [ -n "$(tr_patch)" ]; then TR_PATCH_ID=$(tr_patch | sha256sum | cut -c1-8); fi
 # whisper.cpp: whisper-server, the same release the Mac station runs
 WHISPER_REPO="https://github.com/ggml-org/whisper.cpp.git"
 WHISPER_TAG="v1.9.4"
@@ -150,8 +426,8 @@ MODELS=$OPT/models
 LEGACY_APP=$OPT/app                # before #58: a git checkout run in place (and its venv)
 LEGACY_VENV=$OPT/venv
 RTLSDR_B="$BUILDS/rtl-sdr-blog-$RTLSDR_TAG-${RTLSDR_COMMIT:0:12}"
-TR_PLAIN_B="$BUILDS/trunk-recorder-$TR_TAG-${TR_COMMIT:0:12}"   # (before #397: unpatched)
-TR_B="$TR_PLAIN_B-p$TR_PATCH_ID"
+TR_PLAIN_B="$BUILDS/trunk-recorder-$TR_TAG-${TR_COMMIT:0:12}"   # stock (before #638, or no tr_patch)
+TR_B="$TR_PLAIN_B${TR_PATCH_ID:+-p$TR_PATCH_ID}"
 WHISPER_B="$BUILDS/whisper.cpp-$WHISPER_TAG-${WHISPER_COMMIT:0:12}-native"
 READSB_B="$BUILDS/readsb-$READSB_TAG-${READSB_COMMIT:0:12}"
 STATE=/var/lib/sizeup
@@ -643,15 +919,20 @@ builds() {
   fi
 
   step "trunk-recorder $TR_TAG"
-  want="trunk-recorder $TR_TAG $TR_COMMIT patch $TR_PATCH_ID"
+  want="trunk-recorder $TR_TAG $TR_COMMIT${TR_PATCH_ID:+ patch $TR_PATCH_ID}"
   if up_to_date "$TR_B/bin/trunk-recorder" "$TR_B/.sizeup-build" "$want"; then
     say "trunk-recorder: up to date"
   else
     src=$(fetch_source trunk-recorder "$TR_REPO" "$TR_TAG" "$TR_COMMIT")
-    tr_patch | git -C "$src" apply - || die "trunk-recorder: our patch (#397) doesn't apply to $TR_TAG"
-    say "trunk-recorder: patched (#397: a new talker on the voice channel ends the transmission)"
+    if [ -n "$TR_PATCH_ID" ]; then
+      tr_patch | git -C "$src" apply - || die "trunk-recorder: our patch (#638) doesn't apply to $TR_TAG"
+      say "trunk-recorder: patched (#638: a new talker on the voice channel can end the transmission)"
+    fi
     cmake -S "$src" -B "$src/build" -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$TR_B"
-    cmake --build "$src/build" -j "$JOBS"
+    # at a low priority: on an update it builds beside the trunk-recorder that is recording
+    low=(nice -n 10)
+    if command -v ionice >/dev/null; then low+=(ionice -c 2 -n 7); fi
+    "${low[@]}" cmake --build "$src/build" -j "$JOBS"
     rm -rf "$TR_B"
     cmake --install "$src/build"
     echo "$want" > "$TR_B/.sizeup-build"

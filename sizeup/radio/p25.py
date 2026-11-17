@@ -32,9 +32,10 @@ level, never the length, though a short call comes out at 192 kHz: read_wav_16k 
 A transmission ends on a terminator only: Phase 1's TDU, or on Phase 2 (TDMA) MAC_HANGTIME (5.2.0 leaves MAC_END_PTT
 alone). When the terminator isn't decoded and the next radio keys up on the same voice channel, stock 5.2.0 keeps
 writing the same transmission and the new radio ID only replaces the old one: one srcList entry, credited to the later
-radio. The station's build is patched (#397, deploy/station/install-linux.sh tr_patch) to end the transmission where
-the new ID came in, so each talker is its own srcList entry at its own "pos". Without the patch (a bench's own
-trunk-recorder), apply_grants() below still cuts such a transmission where a live grant names the next radio.
+radio. The station's build is patched (#638, deploy/station/install-linux.sh tr_patch): with a system's config.json
+"sizeup": {"split": "on"} it ends the transmission where the new ID came in, so each talker is its own srcList entry at
+its own "pos" ("log", the default for now, only logs where it would cut). Until then, or with a bench's own
+trunk-recorder, apply_grants() below still cuts such a transmission where a live grant names the next radio.
 
 "src" is -1 when no radio ID was decoded for that transmission ("time" is whole seconds). Each
 entry is its own Turn: the same radio keying twice is two turns, and an entry with no ID is a turn
