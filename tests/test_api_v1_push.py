@@ -134,17 +134,29 @@ def test_an_oversize_body_is_a_413_not_a_400_at_the_routes_cap_and_at_the_server
     assert rig.fake.calls == [] and not rig.db.exists()
 
 
-def test_a_client_that_sends_the_headers_and_no_body_cannot_hold_the_slot(rig, monkeypatch):
+def raw_put(rig, head: str, wait: float = 5.0) -> str:
     import socket
-    from sizeup.web import server as web_server
-    monkeypatch.setattr(web_server, "V1_BODY_S", 0.3)
     host, port = rig.url.rsplit("//", 1)[1].split(":")
-    s = socket.create_connection((host, int(port)), timeout=5)
-    s.sendall(f"PUT {PATH} HTTP/1.1\r\nHost: x\r\nAuthorization: {BEARER['Authorization']}\r\n"
-              f"Content-Length: 200\r\n\r\n".encode())            # ...and never the 200 bytes
-    out = s.recv(4096).decode()
-    s.close()
-    assert out.startswith("HTTP/1.1 413") and "body_too_large" in out
+    s = socket.create_connection((host, int(port)), timeout=wait)
+    s.sendall(f"PUT {PATH} HTTP/1.1\r\nHost: x\r\nAuthorization: {BEARER['Authorization']}\r\n{head}\r\n".encode())
+    try:
+        return s.recv(4096).decode()
+    finally:
+        s.close()
+
+
+def test_a_client_that_sends_the_headers_and_no_body_cannot_hold_the_slot(rig, monkeypatch):
+    from sizeup.web import server as web_server
+    monkeypatch.setattr(web_server, "V1_BODY_TIMEOUT_S", 0.3)
+    out = raw_put(rig, "Content-Length: 200\r\n")            # ...and never the 200 bytes
+    assert out.startswith("HTTP/1.1 408") and "request_timeout" in out
+
+
+def test_a_put_without_a_length_or_chunked_is_a_411(rig):
+    for head in ("", "Transfer-Encoding: chunked\r\n"):
+        out = raw_put(rig, head)
+        assert out.startswith("HTTP/1.1 411") and "length_required" in out
+    assert rig.fake.calls == [] and not rig.db.exists()
 
 
 def test_push_not_set_up_is_a_503_and_stores_nothing(rig):

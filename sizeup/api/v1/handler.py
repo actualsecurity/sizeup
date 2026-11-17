@@ -30,7 +30,20 @@ from .switches import Switches
 
 PREFIX = "/api/v1/"
 MAX_PATH = 512
+# The request-body hook, shared by every v1 route with a body (writes now, push and the others reuse it verbatim):
+# the server hands respond() a reader `body(limit) -> bytes | None` (None: over the limit or an unusable length: 413;
+# it raises BodyRefused for a missing length or a body that stalls). The handler sees the bytes as Ctx.body.
 MAX_BODY = 16 * 1024                  # a v1 write is a few fields: never more than this is read (#562)
+BODY_METHODS = ("POST", "PUT", "PATCH", "DELETE")      # the verbs the hook reads a body for
+
+
+class BodyRefused(Exception):
+    """The server's body reader refusing a request: 411 length_required (no Content-Length, or chunked), 408
+    request_timeout (the client stalled), 400 bad_body (it stopped short). The connection is closed."""
+
+    def __init__(self, status: int, code: str, message: str):
+        super().__init__(message)
+        self.status, self.code, self.message = status, code, message
 
 
 def _pattern(template: str) -> re.Pattern:
@@ -57,8 +70,8 @@ class V1:
                 body=None) -> tuple[int, bytes, str, dict]:
         """(status, body, content type, headers). HEAD is a GET without its body (the server drops it). Never
         raises (but FencedWrite, the console's handover signal, which the server answers as a 503). body: reads the
-        request body up to a limit (None: missing or too big); called only for a POST or PUT that got past the token,
-        the limits and the busy check."""
+        request body up to a limit (None: missing or too big); called only for a POST that got past the token, the
+        limits and the busy check."""
         try:
             return self._respond(method, path, query, headers, peer, body)
         except FencedWrite:
@@ -117,12 +130,16 @@ class V1:
             return error(503, "busy", "the hub is busy: try again", 1)
         try:
             raw = b""
-            if route.method in ("POST", "PUT") and body is not None:     # a write's body: bounded, read only now (#562)
-                raw = body(MAX_BODY)
+            if route.method in BODY_METHODS and body is not None:   # a body: bounded, read only now (#562)
+                try:
+                    raw = body(MAX_BODY)
+                except BodyRefused as e:
+                    return error(e.status, e.code, e.message)
                 if raw is None:
-                    return error(413, "body_too_large", f"the body is missing a length or over {MAX_BODY // 1024} KB")
+                    return error(413, "body_too_large", f"the body is over {MAX_BODY // 1024} KB")
             ctx = Ctx(parse_qs(query), headers, params, principal, self.switches.features(), raw)
-            status, obj = route.handler(ctx)
-            return status, json.dumps(obj, separators=(",", ":")).encode(), JSON, {"Cache-Control": "no-store"}
+            status, obj, *extra = route.handler(ctx)             # extra: optional response headers (writes.py)
+            return status, json.dumps(obj, separators=(",", ":")).encode(), JSON, \
+                {"Cache-Control": "no-store", **(extra[0] if extra else {})}
         finally:
             self.limits.leave()
