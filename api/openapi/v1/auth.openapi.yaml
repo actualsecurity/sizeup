@@ -1,0 +1,153 @@
+openapi: 3.1.0
+info:
+  title: sizeup mobile sign-in
+  version: "1.0"
+  description: >
+    The app's device sign-in (#558, docs/mobile-api.md section 3.3): OAuth 2.0 authorization code + PKCE (RFC 6749, 7636,
+    7009, native-app rules of RFC 8252), so AppAuth works unchanged. Not under /api/v1, so it is specified here and not
+    in openapi.yaml (the route-table parity test covers /api/v1 only). All of it answers 404 while the hub's `[mobile]`
+    switch or its `auth` feature is off. Errors of /auth/v1/token and /auth/v1/revoke are OAuth's
+    ({"error": code, "error_description"}), not the /api/v1 envelope, because that is what AppAuth parses.
+servers:
+  - url: https://hub.example.org
+    description: placeholder; the app is given its hub's address, never this repository
+paths:
+  /auth/v1/authorize:
+    get:
+      operationId: authorize
+      summary: Sign in through Cloudflare Access and hand a one-time code back to the app
+      description: >
+        Opened by the app in a system browser sheet (ASWebAuthenticationSession with prefersEphemeralWebBrowserSession,
+        or a Custom Tab). This path is under the hub's Cloudflare Access application: the person signs in there, and the
+        hub verifies Access's own token (never given to the app). client_id and redirect_uri must match the hub's
+        configuration exactly. An unknown or deactivated person, a fourth device or a bad request is an HTML page, never
+        a redirect. Success is a 302 to redirect_uri with `code` (60 s, single use, bound to the PKCE challenge) and the
+        app's `state`.
+      security: []
+      parameters:
+        - {name: response_type, in: query, required: true, schema: {const: code}}
+        - {name: client_id, in: query, required: true, schema: {type: string}, example: sizeup-ios}
+        - {name: redirect_uri, in: query, required: true, schema: {type: string}, example: "https://hub.example.org/app/callback"}
+        - {name: code_challenge, in: query, required: true, schema: {type: string, minLength: 43, maxLength: 43}, description: base64url(SHA-256(code_verifier))}
+        - {name: code_challenge_method, in: query, required: true, schema: {const: S256}}
+        - {name: state, in: query, required: true, schema: {type: string, maxLength: 512}}
+        - {name: device_name, in: query, schema: {type: string, maxLength: 60}, example: Casey's phone}
+        - {name: device_id, in: query, schema: {type: string}, description: "A device this person already has (signing in again at the 180-day limit keeps its slot)."}
+      responses:
+        "302":
+          description: Back to the app.
+          headers:
+            Location: {schema: {type: string}, description: "redirect_uri?code=...&state=..."}
+        "400": {description: "An HTML page. The app or its return address is not known, or the request is not valid."}
+        "401": {description: "An HTML page. No verified Cloudflare Access sign-in."}
+        "403": {description: "An HTML page. The person is unknown or deactivated, or already has 3 devices."}
+        "404": {description: "The sign-in is off (the /api/v1 error envelope)."}
+  /auth/v1/token:
+    post:
+      operationId: token
+      summary: Trade a code or a refresh token for tokens
+      description: >
+        `authorization_code`: the code, its PKCE verifier, the client and redirect_uri trade for a device (at most 3
+        active per person) and its tokens. `refresh_token`: silent, no browser; the refresh token is ROTATED on every use
+        (store the new one), and one already exchanged revokes the device. Access token: 15 minutes. Refresh token: 30
+        days idle, 180 days absolute. 10 requests a minute per address.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema: {$ref: "#/components/schemas/TokenRequest"}
+          application/json:
+            schema: {$ref: "#/components/schemas/TokenRequest"}
+      responses:
+        "200":
+          description: The tokens.
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/TokenResponse"}
+              example:
+                access_token: eyJhbGciOiJIUzI1NiIsImtpZCI6ImsxIiwidHlwIjoiYXQrand0In0.eyJzdWIiOiJjYXNleUBleGFtcGxlLm9yZyJ9.c2lnbmF0dXJl
+                token_type: Bearer
+                expires_in: 900
+                refresh_token: Zm9yLWV4YW1wbGUtb25seS1ub3QtYS1yZWFsLXRva2Vu
+                device_id: dv0123456789abcdef
+        "400": {description: "invalid_request, invalid_grant (unknown, expired, used or mismatched code or refresh token; wipe and sign in again), unsupported_grant_type.", content: {application/json: {schema: {$ref: "#/components/schemas/OAuthError"}}}}
+        "401": {description: "invalid_client, device_revoked or user_inactive: wipe local data and sign in again.", content: {application/json: {schema: {$ref: "#/components/schemas/OAuthError"}}}}
+        "403": {description: "device_limit: 3 devices are signed in; sign one out first.", content: {application/json: {schema: {$ref: "#/components/schemas/OAuthError"}}}}
+        "426": {description: "upgrade_required: the app is older than the hub accepts.", content: {application/json: {schema: {$ref: "#/components/schemas/OAuthError"}}}}
+        "429": {description: "rate_limited, with Retry-After.", content: {application/json: {schema: {$ref: "#/components/schemas/OAuthError"}}}}
+        "404": {description: "The sign-in is off (the /api/v1 error envelope)."}
+  /auth/v1/revoke:
+    post:
+      operationId: revoke
+      summary: Sign this device out (RFC 7009)
+      description: >
+        The device of the refresh token (or access token) presented is signed out: its refresh tokens are deleted and its
+        push endpoint removed. Always 200, whether or not the token was good.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema: {$ref: "#/components/schemas/RevokeRequest"}
+          application/json:
+            schema: {$ref: "#/components/schemas/RevokeRequest"}
+      responses:
+        "200": {description: "Done", content: {application/json: {schema: {type: object}}}}
+        "400": {description: "invalid_request", content: {application/json: {schema: {$ref: "#/components/schemas/OAuthError"}}}}
+        "429": {description: "rate_limited, with Retry-After", content: {application/json: {schema: {$ref: "#/components/schemas/OAuthError"}}}}
+        "404": {description: "The sign-in is off (the /api/v1 error envelope)."}
+  /.well-known/apple-app-site-association:
+    get:
+      operationId: appleAppSiteAssociation
+      summary: Universal Links association (Apple)
+      description: From the hub's config (team id, bundle ids, the https redirect paths). 404 until configured. Public values.
+      security: []
+      responses:
+        "200": {description: "The association", content: {application/json: {schema: {type: object}}}}
+        "404": {description: "Not configured, or the sign-in is off."}
+  /.well-known/assetlinks.json:
+    get:
+      operationId: assetLinks
+      summary: App Links association (Android)
+      description: From the hub's config (package and signing-certificate SHA-256). 404 until configured. Public values.
+      security: []
+      responses:
+        "200": {description: "The association", content: {application/json: {schema: {type: array}}}}
+        "404": {description: "Not configured, or the sign-in is off."}
+components:
+  schemas:
+    TokenRequest:
+      type: object
+      required: [grant_type]
+      properties:
+        grant_type: {enum: [authorization_code, refresh_token]}
+        code: {type: string, description: "authorization_code"}
+        code_verifier: {type: string, minLength: 43, maxLength: 128}
+        client_id: {type: string}
+        redirect_uri: {type: string}
+        refresh_token: {type: string, description: "refresh_token"}
+        app_version: {type: string, maxLength: 32}
+        device_id: {type: string, description: "authorization_code: keep this device's slot (signing in again)."}
+    TokenResponse:
+      type: object
+      required: [access_token, token_type, expires_in, refresh_token, device_id]
+      properties:
+        access_token: {type: string}
+        token_type: {const: Bearer}
+        expires_in: {type: integer, description: "Seconds. Refresh at 80%, or on 401 token_expired."}
+        refresh_token: {type: string, description: "Rotated on every use, so always store the new one."}
+        device_id: {type: string}
+    RevokeRequest:
+      type: object
+      required: [token]
+      properties:
+        token: {type: string}
+        token_type_hint: {enum: [refresh_token, access_token]}
+        client_id: {type: string}
+    OAuthError:
+      type: object
+      required: [error]
+      properties:
+        error: {type: string}
+        error_description: {type: string}

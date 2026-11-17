@@ -12,8 +12,9 @@ properties:
           unauthorized (401), not_found (404), method_not_allowed (405, with Allow), uri_too_long (414),
           station (409: this host is a station, not the hub), updating (503 during a deploy handover, with
           Retry-After), internal (500: the handler failed), busy (503: v1's share of concurrent requests is used
-          up, with Retry-After), rate_limited (429, with Retry-After). Planned with sign-in (#558): token_expired,
-          device_revoked, user_inactive, invalid_grant, upgrade_required.
+          up, with Retry-After), rate_limited (429, with Retry-After), forbidden (403: the person's role may not do this).
+          Sign-in (#558), all 401: token_expired (refresh silently), device_revoked and user_inactive (wipe local data,
+          sign in again). /auth/v1/token's own errors are OAuth's ({"error": "invalid_grant"}, see auth.openapi.yaml).
       message:
         type: string
         description: Human text.

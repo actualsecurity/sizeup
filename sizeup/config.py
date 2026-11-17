@@ -211,6 +211,12 @@ class Config:
     mobile_enabled: bool = False
     mobile_max_requests: int = DEFAULT_MAX_REQUESTS      # v1's share of concurrent requests
     mobile_max_streams: int = DEFAULT_MAX_STREAMS      # ... and of open streams (none yet)
+    # the app's sign-in (#558): the apps and their exact return addresses, and the link-association values (public)
+    mobile_clients: tuple = ()                         # ((client id, platform, (redirect uri, ...)), ...)
+    mobile_apple_team_id: str = ""
+    mobile_apple_bundle_ids: tuple = ()
+    mobile_android_package: str = ""
+    mobile_android_sha256: tuple = ()
     # [prealert] (sizeup/prealert.py): Tapout's ntfy feed, read only, on the CAD of record (hub or
     # all-in-one; never a station forwarding to a hub). Off unless the section is in the config.
     prealert_enabled: bool = False
@@ -560,7 +566,8 @@ def _mobile(data: dict, role: str) -> dict:
         return {}
     if role == "station":
         raise ConfigError("[mobile]: the hub's section, not a station's")
-    mo = _take(data["mobile"], "mobile", {"enabled", "max_requests", "max_streams"})
+    mo = _take(data["mobile"], "mobile", {"enabled", "max_requests", "max_streams", "clients", "apple_team_id",
+                                          "apple_bundle_ids", "android_package", "android_sha256"})
     enabled = mo.get("enabled", False)
     if not isinstance(enabled, bool):
         raise ConfigError("mobile.enabled: true or false")
@@ -572,7 +579,53 @@ def _mobile(data: dict, role: str) -> dict:
         return v
     return dict(mobile_enabled=enabled,
                 mobile_max_requests=whole("max_requests", DEFAULT_MAX_REQUESTS, MOBILE_REQUESTS_RANGE),
-                mobile_max_streams=whole("max_streams", DEFAULT_MAX_STREAMS, MOBILE_STREAMS_RANGE))
+                mobile_max_streams=whole("max_streams", DEFAULT_MAX_STREAMS, MOBILE_STREAMS_RANGE),
+                **_mobile_signin(mo))
+
+
+MOBILE_CLIENT_ID = re.compile(r"[a-z0-9][a-z0-9._-]{0,39}")
+MOBILE_SCHEME_URI = re.compile(r"[a-z][a-z0-9+.-]*\.[a-z0-9+.-]*:/[^\s#*]*")       # a reverse-domain scheme (RFC 8252 7.1)
+MOBILE_HTTPS_URI = re.compile(r"https://[A-Za-z0-9.-]+(:[0-9]{1,5})?/[^\s#*?]*")    # an app link: no wildcard, no query
+MOBILE_STRINGS = {"apple_team_id": re.compile(r"[A-Z0-9]{10}"), "android_package": re.compile(r"[A-Za-z][A-Za-z0-9_.]{0,150}")}
+MOBILE_LISTS = {"apple_bundle_ids": re.compile(r"[A-Za-z0-9][A-Za-z0-9.-]{0,150}"),
+                "android_sha256": re.compile(r"([0-9A-F]{2}:){31}[0-9A-F]{2}")}
+
+
+def _mobile_signin(mo: dict) -> dict:
+    """[mobile] clients, apple_team_id, apple_bundle_ids, android_package, android_sha256 (#558): public values, exact
+    strings: a client's redirect uris are an allow-list matched whole (an https app link or a reverse-domain scheme)."""
+    out: dict = {}
+    clients = mo.get("clients", [])
+    if not isinstance(clients, list) or len(clients) > 8:
+        raise ConfigError("mobile.clients: a list of {id, platform, redirect_uris} tables")
+    seen: set[str] = set()
+    parsed = []
+    for c in clients:
+        if not isinstance(c, dict) or set(c) - {"id", "platform", "redirect_uris"}:
+            raise ConfigError("mobile.clients: each is {id, platform, redirect_uris}")
+        cid, platform, uris = c.get("id"), c.get("platform"), c.get("redirect_uris")
+        if not isinstance(cid, str) or not MOBILE_CLIENT_ID.fullmatch(cid) or cid in seen:
+            raise ConfigError("mobile.clients.id: a short unique name, like sizeup-ios")
+        if platform not in ("ios", "android"):
+            raise ConfigError("mobile.clients.platform: ios or android")
+        if (not isinstance(uris, list) or not 1 <= len(uris) <= 8 or not all(
+                isinstance(u, str) and (MOBILE_HTTPS_URI.fullmatch(u) or MOBILE_SCHEME_URI.fullmatch(u)) for u in uris)):
+            raise ConfigError("mobile.clients.redirect_uris: 1 to 8 exact addresses: https://host/path or a "
+                              "reverse-domain scheme (org.example.app:/callback)")
+        seen.add(cid)
+        parsed.append((cid, platform, tuple(uris)))
+    out["mobile_clients"] = tuple(parsed)
+    for key, rx in MOBILE_STRINGS.items():
+        v = mo.get(key, "")
+        if not isinstance(v, str) or (v and not rx.fullmatch(v)):
+            raise ConfigError(f"mobile.{key}: not a valid value")
+        out[f"mobile_{key}"] = v
+    for key, rx in MOBILE_LISTS.items():
+        v = mo.get(key, [])
+        if not isinstance(v, list) or len(v) > 8 or not all(isinstance(x, str) and rx.fullmatch(x) for x in v):
+            raise ConfigError(f"mobile.{key}: a list of valid values (at most 8)")
+        out[f"mobile_{key}"] = tuple(v)
+    return out
 
 
 def _prealert(data: dict) -> dict:

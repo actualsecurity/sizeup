@@ -565,15 +565,90 @@ the dispatchers use. Every change stays inert or harmless to the browser console
 | A v1 failure stays in v1 | `handler.respond` runs every route inside one try/except: the exception class is logged (never a token, header or body) and the answer is a 500 in v1's envelope |
 | Caps | v1's share of concurrent requests (503 busy), per-principal token buckets (reads 10/s burst 30, writes 2/s burst 10: 429 + `Retry-After`; no principal: per address), 2 streams per device and a cap on all (enforced when streaming lands; none yet); in memory, no thread, no database work |
 | Console unchanged | `tests/test_console_pin.py` pins the `/api/cad`, `/api/station` and `/healthz` route tables and sample responses |
-| Fail closed | `principal.py` is the resolver seam (section 1.4): a route that needs a `device` is a 401 until #558; v1 never hands a handler a `CadApi`; a bearer is refused on `/api/cad/*`; Access is not v1's door (a cookie never makes a principal) |
+| Fail closed | `principal.py` is the resolver seam (section 1.4): a route that needs a `device` is a 401 unless the sign-in (#558, below) resolves the token; v1 never hands a handler a `CadApi`; a bearer is refused on `/api/cad/*`; Access is not v1's door (a cookie never makes a principal) |
 
 Rollback: an older release refuses a config file that has `[mobile]`, so a rollback reverts the code and the config together. Turn it off: `[mobile] enabled = false` and a restart (`meta.features` then reads all false: no app release). Undo: revert
 the pull request; a table a feature created lazily may stay, nothing reads it once the flag is off. The Cloudflare Bypass
 for `/api/v1/` is added by a person only after these tests are merged, and checked with `curl` (no cookie on
 `/api/cad/state` still gets Access's login; none on `/api/v1/meta` reaches the hub).
 
-For the sign-in PR (#558): when the first device route lands, add a test that a principal below the route's `role` is
-refused, and run the route-table assertions (flag, role, need) over every route it adds.
+### Device sign-in (#558): what shipped
+
+Built, inert until switched on (`[mobile] enabled`, the `auth` feature, and the token key below). Code in `sizeup/api/v1/`:
+`tokens.py` (HMAC tokens, opaque codes and refresh tokens), `devices.py` (the `hub.sqlite` tables), `auth.py` (the
+endpoints and the resolver), `people.py` (who a person is now), `devadmin.py` (Settings), `wire.py` (builds it from the
+hub's config); spec in `api/openapi/v1/auth.openapi.yaml` (the `/auth/v1` and `/.well-known/` paths) and `paths/me.yaml`.
+
+| Endpoint | Door | Notes |
+|---|---|---|
+| `GET /auth/v1/authorize` | Cloudflare Access (the main application) | Verifies Access's JWT with the console's `AccessVerifier`. Unknown or deactivated person, unknown client or redirect, a fourth device, a bad request: an HTML page, never a redirect. Success: `302 <redirect_uri>?code=&state=` |
+| `POST /auth/v1/token` | none (the code or token is the credential) | `authorization_code` + PKCE S256, and `refresh_token` (rotated; reuse revokes the device). 10 a minute per address, on top of v1's per-address bucket |
+| `POST /auth/v1/revoke` | none | RFC 7009: the refresh or access token presented signs its device out; always 200 |
+| `GET /.well-known/apple-app-site-association`, `/assetlinks.json` | none | From config; 404 until set |
+| `GET /api/v1/me` | device token | `{email, name, role, device_id}`; flag `auth`, role `read` |
+
+Everything above answers 404 while `[mobile] enabled` or the `auth` feature is off, goes through the same catch-all,
+caps and rate limits as `/api/v1`, and never reaches `CadApi`. The token and revoke endpoints speak OAuth's error shape
+(`{"error": "invalid_grant", "error_description"}`) because AppAuth parses that; every `/api/v1` error is the envelope.
+
+**Decisions and deviations from the design text** (say so in review):
+
+- **Unknown is refused.** `authorize` does not use `settings.standing()`, which ADDS an operator for an unseen email. A
+  device token must never create a person (an admin editing someone's email would otherwise let the old email mint a new
+  dispatcher). The lookup is read only (`people.py`): a person not on Settings > Users, or deactivated, is refused with a
+  page ("open the console once, or ask an admin"). Role = their role now; no "no admin yet, everyone is admin" bootstrap.
+- **`Principal` gained `role` and `name`** (defaults: viewer, no name). A route's `role` is enforced in the handler: a
+  person below it is a `403 forbidden`. A resolver that sets no role is a viewer, so tests of other pull requests that
+  inject a bare `Principal` against a `dispatch` or `admin` route must pass `role=`. A resolver may also return a
+  `Refusal(code, message)` for a reasoned 401: `token_expired`, `device_revoked`, `user_inactive`.
+- **A code is spent on first presentation**, whatever else is wrong (wrong verifier, client or redirect). A replay of a
+  spent code revokes the device it made. Refresh-token reuse revokes the device; the thief's copy and the app's die
+  together (the app gets `invalid_grant`: wipe and sign in again). A refresh whose response was lost in transit is
+  therefore a reuse: the app must refresh single-flight and store the new token before using the new access token.
+- **Re-sign-in keeps its slot:** `authorize` and `token` accept the app's own `device_id`, so signing in again at the
+  180-day limit does not use a fourth slot. Revoked devices stay listed 30 days, then drop out of the list (rows stay).
+- **No per-request database work beyond one indexed read** of the device (and the person from a cache keyed by the
+  settings rev). `last_seen` is written at most every 5 minutes; a deactivation or email change in Settings revokes the
+  person's devices at once (`Editor.on_deactivate`), and the resolver revokes any it finds belonging to an inactive person.
+- `/api/cad/devices` (GET, POST `{action: revoke, id}`) is the console's side (Settings > Users: devices, and "My devices"
+  for anyone). `AuthService.on_revoke` is a list of hooks called with the device when it is revoked: the push pull request
+  adds the removal of the device's SNS endpoint there.
+- The activity log gains kinds `device_enrolled`, `refresh` (once a day per device), `revoked`; refusals are `refused`.
+  Each carries the device id, address and browser (the app's version is in the device row and the summary).
+
+**Config** (`[mobile]`, in `deploy/hub/config.hub.toml`, commented; unknown keys stay refused, so a rollback reverts the
+code and the config together): `clients = [{ id, platform = "ios"|"android", redirect_uris = [...] }]` (exact strings:
+`https://host/path` or a reverse-domain scheme, never a wildcard or http), `apple_team_id`, `apple_bundle_ids`,
+`android_package`, `android_sha256`. The apple and android values are public, not secrets.
+
+**Manual steps (a person; nothing here blocks a deploy):**
+
+1. **The signing key.** Create an SSM SecureString parameter (for example `/sizeup-hub/mobile-token-keys`) holding
+   `k1:<43 random characters>` (`python3 -c "import secrets;print('k1:' + secrets.token_urlsafe(32))"`), then add one line
+   to the container's `secrets` in `deploy/aws/taskdef.json`: `{"name": "SIZEUP_MOBILE_TOKEN_KEYS", "valueFrom": "<that
+   parameter's ARN>"}`. Create the parameter FIRST: a secret naming a parameter that does not exist blocks every deploy
+   (this pull request deliberately does not touch the task definition). Rotation: put `k2:<new>,k1:<old>` (the first signs,
+   both verify), deploy, wait 15 minutes (the longest access token), then drop `k1`.
+2. **Turn it on:** `[mobile] enabled = true` plus `clients` in the hub's config, a restart, and the `auth` feature. Features
+   have no production source yet (`meta.features` reads all false): a later pull request wires one. Until then nothing in
+   production changes.
+3. **Cloudflare Bypass (only after the tests here are merged and proven; a person makes it in the dashboard):** one more
+   Access application on the hub's hostname with a Bypass policy for the paths `/auth/v1/token`, `/auth/v1/revoke`,
+   `/api/v1/` and `/.well-known/`. `/auth/v1/authorize` stays under the main application (the one place a person meets
+   Access). Then verify with `curl`: no cookie on `/api/cad/state` still gets Access's login; no cookie on `/api/v1/meta`
+   reaches the hub's 200; no cookie on `/api/v1/me` is the hub's `401 unauthorized`; no cookie on `/auth/v1/authorize` still
+   gets Access's login. Add a WAF rate-limit rule on `/auth/v1/token` if the plan has one (unverified).
+4. **Link association:** from the app developer: the Apple Team ID and bundle id(s), the Android package and the signing
+   certificate's SHA-256, into `apple_team_id`, `apple_bundle_ids`, `android_package`, `android_sha256`. The
+   association file lists the `https` redirect paths of the iOS client, so use an https app link as the redirect when
+   the app can (iOS 17.4+ with `ASWebAuthenticationSession`'s https callback), else the reverse-domain scheme.
+
+**Off and undo.** Turn off: `[mobile] enabled = false` and a restart (every route above is a 404; no key is read); or remove
+the key (the sign-in refuses to start, no token verifies). Undo: revert the pull request; the three `mobile_*` tables in
+`hub.sqlite` may stay (nothing reads them). A person's or a device's access is revoked in Settings > Users.
+
+For the next pull requests: a route that needs a device sets its `role`; the route-table test
+(`tests/test_api_v1_safeguards.py`) and `tests/test_api_v1_auth.py` check flag, role and need over every route.
 
 ---
 

@@ -2901,6 +2901,7 @@ class Editor:
     # last_seen / last_ip / last_ua (sizeup/cad/activity.py) are left out: where someone was is their
     # activity, an admin's to see (GET /api/cad/activity), not every reader of the Settings page's.
     OPERATOR_COLUMNS = "id, name, role, active, created_at, updated_at, email, callsign"
+    on_deactivate = staticmethod(lambda email: None)    # fn(email): the app's device sign-in revokes their devices (#558)
 
     def operators(self) -> list[dict]:
         rows = self.store.q(f"SELECT {self.OPERATOR_COLUMNS} FROM operators ORDER BY active DESC, name COLLATE NOCASE")
@@ -3057,6 +3058,8 @@ class Editor:
             db.execute("UPDATE operators SET name = ?, role = ?, active = ?, email = ?, callsign = ?, updated_at = ? WHERE id = ?",
                        (new["name"], new["role"], int(new["active"]), new["email"], new["callsign"], now, oid))
             self._audit(db, now, op, "users", cur["name"], {k: a for k, (a, _) in diff.items()}, {k: b for k, (_, b) in diff.items()})
+        if cur["email"] and ("active" in diff and not new["active"] or "email" in diff):
+            self.on_deactivate(cur["email"])         # deactivated, or the sign-in email changed: devices of the old one go
         return self._operator(oid)
 
     def _operator(self, oid: int) -> dict:

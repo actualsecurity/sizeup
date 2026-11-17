@@ -1,0 +1,16 @@
+type: object
+required: [email, name, role, device_id]
+properties:
+  email:
+    type: string
+    description: The sign-in email, lower case.
+  name:
+    type: string
+    description: The name in Settings > Users (the email until someone names them).
+  role:
+    type: string
+    enum: [admin, dispatcher, viewer]
+    description: The console role now. A client reads an unknown value as viewer.
+  device_id:
+    type: string
+    description: This device's id (also `did` in the access token and `device_id` of the token response).

@@ -295,6 +295,15 @@ channels = ["FG1", "PC repeater"]  # labels on the dispatch log only (FG1, or th
 enabled = false
 # max_requests = 8
 # max_streams = 16
+# The app's sign-in (#558, docs/mobile-api.md section 3.3): needs the `auth` feature and a token key, which is NOT in
+# this file: SIZEUP_MOBILE_TOKEN_KEYS (`kid:secret`, a second entry during a rotation) from an SSM secret, set by a person.
+# Unset, the sign-in stays off. clients: the apps and their EXACT return addresses (an https app link, or a
+# reverse-domain scheme); apple_* and android_* fill the /.well-known/ association files (public values).
+# clients = [{ id = "sizeup-ios", platform = "ios", redirect_uris = ["https://hub.example.org/app/callback"] }]
+# apple_team_id = "ABCDE12345"
+# apple_bundle_ids = ["org.example.sizeup"]
+# android_package = "org.example.sizeup"
+# android_sha256 = ["AA:BB:...:FF"]   # the signing certificate's SHA-256, 32 colon-separated hex pairs
 
 # [prealert]: the phone pre-alert. Tapout (an ESP32 on the PCFD headquarters phone line, repo
 # firehouse-ring-alerter) posts to ntfy.sh when the station's phone rings; the CAD shows each ring

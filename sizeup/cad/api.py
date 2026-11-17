@@ -270,6 +270,11 @@ POST /api/cad/stations                    {action: add {id, name?} | rename {id,
                                           a signed-in admin only. add / rotate
                                           answer {token, status_token} (no-store), the one time they are shown. In the
                                           Settings audit (System) and the person's activity: the action and id, no token
+GET  /api/cad/devices                     Settings > Users: devices (the app's sign-in, sizeup/api/v1/devadmin.py, #558): name,
+                                          platform, app version, last seen; an admin sees everyone's, anyone their own.
+                                          The hub's only (404 elsewhere); never a token
+POST /api/cad/devices                     {action: revoke, id}: an admin any device, anyone their own; in the person's
+                                          activity (kind "revoked") by the sign-in itself
 GET  /api/cad/metrics?subject=&station=&from=&to=&res=raw|hour|auto&kind=&metric=
                                           the station's signal metrics (sizeup/cloud/metricstore.py): a channel's ("FG1")
                                           or a P25 system's ("p25", "p25:<system>") floor / tx / cc series, raw (a week at
@@ -431,6 +436,7 @@ WRITES = (
     (STT_CORRECTION, "admin"),                                              # a hand-corrected transcript (sttfix.py)
     (re.compile(r"/api/cad/adapter-password"), "admin"),                    # the station adapter's password (server.py)
     (re.compile(r"/api/cad/stations"), "admin"),                            # stations' tokens (sizeup/cloud/stations.py)
+    (re.compile(r"/api/cad/devices"), "read"),                              # revoke a device: anyone's own, an admin's anyone's (#558)
     (DVR_PIN, "dispatch"),                                                  # keep recording a camera (#277)
     (DVR_CLIP, "dispatch"),                                                 # save a camera clip on an event (#323)
     (ATTACHMENT, "admin"),                                                  # delete an event's attachment (#323)
@@ -1059,6 +1065,23 @@ class CadApi:
         except CadError:
             return "Admins only"
 
+    def _devices(self, who, body: dict | None = None) -> tuple[int, bytes, str]:
+        """GET /api/cad/devices, POST {action: revoke, id}: Settings > Users: devices (the app's sign-in, #558,
+        sizeup/api/v1/devadmin.py). An admin sees and revokes anyone's, anyone signed in their own. The hub's only."""
+        svc = getattr(self.cad, "devices", None)
+        if svc is None or who is None or not who.email:
+            return _json(404, {"error": "the app's devices are the hub's, for a signed-in person"})
+        from sizeup.api.v1 import devadmin
+        admin = self.cad.settings.standing(who.email)["may"] == "admin"
+        if body is None:
+            return _json(200, devadmin.listing(svc, who.email, admin))
+        try:
+            return _json(200, devadmin.act(svc, body, who.email, admin))
+        except PermissionError as e:
+            return _json(403, {"error": str(e)})
+        except ValueError as e:
+            return _json(400, {"error": str(e)})
+
     def _stations(self, who) -> tuple[int, bytes, str]:
         """GET /api/cad/stations: Settings > Station > Stations (sizeup/cloud/stations.py). The hub's only, and only for
         an admin with a verified sign-in (never without one: these are the station link's keys). Never a hash."""
@@ -1095,6 +1118,8 @@ class CadApi:
                 return self._logs(path, query, who)
             if path == "/api/cad/stations":
                 return self._stations(who)
+            if path == "/api/cad/devices":
+                return self._devices(who)
             if path == "/api/cad/metrics":
                 return self._metrics(query, who)
             if path == "/api/cad/datasources":
@@ -1229,6 +1254,8 @@ class CadApi:
                 body["operator"] = st["operator"]
                 if PREMISE.fullmatch(path) or PREPLAN.fullmatch(path) or DOCS.fullmatch(path):
                     body["_may"] = st["may"]
+                if path == "/api/cad/devices":     # the app's devices (#558): its own role check, its own activity
+                    return self._devices(who, body)
             elif DOCS.fullmatch(path):
                 body["_may"] = "dispatcher"            # all-in-one: an editor of site documents, never an admin (#459)
             out = self._write(path, body, signed)
