@@ -29,7 +29,7 @@ def test_a_device_marked_inactive_gets_nothing_of_any_kind(rig, fake):
     rig.service.device_active = lambda device_id: device_id != "dev-0001"       # #558: dev-0001 is revoked
     for kind in ("alerts", "intel", "status", "dispatch"):
         rig.now[0] += 100
-        assert rig.targets(kind, "Working fire", "100 Example Ave") == {"dev-0002"}, kind
+        assert rig.targets(kind, "MAYDAY", "100 Example Ave") == {"dev-0002"}, kind
 
 
 def test_without_a_predicate_every_registered_device_is_active(rig):
@@ -41,12 +41,12 @@ def test_without_a_predicate_every_registered_device_is_active(rig):
 def test_a_task_that_is_not_the_leader_queues_and_publishes_nothing(rig, fake):
     rig.device(1, "admin@example.org")
     rig.service.devices._may_write = lambda: False                      # the old task of a handover overlap
-    rig.service.offer("alerts", "Working fire", "100 Example Ave")
+    rig.service.offer("alerts", "MAYDAY", "100 Example Ave")
     assert rig.service.flush() and fake.published() == []
-    assert rig.service.deliver("alerts", "Working fire", "100 Example Ave") == 0
+    assert rig.service.deliver("alerts", "MAYDAY", "100 Example Ave") == 0
     assert fake.published() == [] and rig.service.stats["skipped"] == 1
     rig.service.devices._may_write = lambda: True
-    rig.service.offer("alerts", "Working fire", "100 Example Ave")
+    rig.service.offer("alerts", "MAYDAY", "100 Example Ave")
     assert rig.service.flush() and len(fake.published()) == 1
 
 
@@ -55,7 +55,7 @@ def test_one_message_has_one_deadline_for_the_serial_publishes(rig, fake):
         rig.device(n, "admin@example.org")
     ticks = iter(range(0, 10_000, 12))                                  # the clock moves 12 s per look
     rig.service.mono = lambda: next(ticks)
-    sent = rig.service.deliver("alerts", "Working fire", "100 Example Ave")
+    sent = rig.service.deliver("alerts", "MAYDAY", "100 Example Ave")
     assert 1 <= sent < 6 and len(fake.published()) == sent               # the rest were not tried
     assert any("ran out of time" in m for m in rig.logs)
 
@@ -67,7 +67,7 @@ def test_one_message_has_one_deadline_for_the_serial_publishes(rig, fake):
 def test_only_a_gone_or_disabled_endpoint_is_removed(rig, fake, code, kept):
     row = rig.device(1, "admin@example.org")
     fake.fail["Publish"] = (400, code)
-    rig.service.deliver("alerts", "Working fire", "100 Example Ave")
+    rig.service.deliver("alerts", "MAYDAY", "100 Example Ave")
     assert (rig.service.devices.get("dev-0001") is not None) is kept
     assert (row["endpoint"] in fake.endpoints) is kept                  # and its SNS endpoint with it
 
@@ -80,7 +80,7 @@ def test_a_stale_endpoint_on_a_fenced_task_is_kept_for_the_leader(rig, fake):
     def fenced(device_id):
         raise FencedWrite("not the leader")
     rig.service.unregister = fenced
-    rig.service.deliver("alerts", "Working fire", "100 Example Ave")
+    rig.service.deliver("alerts", "MAYDAY", "100 Example Ave")
     assert rig.service.devices.get("dev-0001") is not None and any("stale endpoint kept" in m for m in rig.logs)
     rig.service.unregister = real
 
@@ -196,7 +196,12 @@ def test_a_hub_start_wires_push_and_writes_nothing_of_its_own(tmp_path):
         s = h.app.pushes.devices
         assert s is not None and svc.installed() is s and s.active() is False       # the `push` flag: off
         assert s.devices.path.endswith("hub.sqlite") and s.role_of("nobody@example.org") is None
-        s.offer("alerts", "Working fire", "100 Example Ave")                # flag off: nothing queued
+        # the live wiring's role_of and unit_of read the hub's own CAD store (not role_for / unit_for called directly)
+        people(h.app.cad)                                               # Casey admin, Jordan dispatcher, Val viewer, Dee off
+        assert [s.role_of(e) for e in (CASEY, JORDAN, VAL, "dee@example.org", "x@example.org")] == [
+            "admin", "dispatcher", "viewer", None, None]
+        assert s.unit_of("E64") is not None and s.unit_of("4821") is None and s.unit_of("J. Doe") is None
+        s.offer("alerts", "MAYDAY", "100 Example Ave")                # flag off: nothing queued
         assert s._q.qsize() == 0
         db = sqlite3.connect(s.devices.path)
         assert db.execute("SELECT 1 FROM sqlite_master WHERE name = 'push_devices'").fetchone() is None
@@ -208,7 +213,7 @@ def test_a_hub_start_wires_push_and_writes_nothing_of_its_own(tmp_path):
 
 # -- caps over an hour and a day, and every kind ----------------------------------------------------------------------
 
-@pytest.mark.parametrize("kind,title,body", [("alerts", "Working fire", "100 Example Ave"),
+@pytest.mark.parametrize("kind,title,body", [("alerts", "MAYDAY", "100 Example Ave"),
                                               ("intel", "PD · Smoke reported", "100 Example Ave · 14:32 · high"),
                                               ("status", "Station silent", "x"), ("dispatch", "Structure fire", "x")])
 def test_the_hour_and_day_caps_hold_for_every_kind(rig, fake, kind, title, body):

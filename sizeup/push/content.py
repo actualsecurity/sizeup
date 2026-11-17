@@ -8,12 +8,34 @@ can tell a name from a word. So the phone's text is built from an ALLOW-LIST, pe
                       structured Who: units, channel, the CAD event number, the address (notify.compose);
                       body = the address, else a generic line. Never the caller's body, the talker, the radio ID,
                       the dongle, the detail.
-    status            title as above (a system sentence the code wrote); body is always the generic line.
+    status            the alert's fixed sentence without its configured names (STATUS_TITLES); body always generic.
     intel             title (the rule pack's and category's labels, the town); body: only the pieces of the engine's
                       composed body (sizeup/intel/push.py: place, time, level; never a transcript) that look like what
                       they should: a time, a level word, "location not heard", a place with a number or a street word.
                       Anything else, and its Listen link, is dropped. (A place is the gazetteer's label: a street named
                       after a person passes, which ntfy says too.)
+
+Where each title comes from (read in the code; the device title is rebuilt from FIXED words, never copied):
+    alarms       sizeup/cad/alarms.py `_push`: `what(a).upper()` = "EMERGENCY BUTTON (<via>)" and the matched
+    KEYWORDS (config,
+                 never the transcript), or "AIRCRAFT EMERGENCY: SQUAWK ..." (adsb), with DRILL / Ended / Acknowledged.
+                 headline() keeps only the segments it knows; the rest is dropped.
+    airport      sizeup/cad/airport_alerts.py `_push` sends `r["title"]`: built by sizeup/atc.py `_title`,
+    airport_watch.py
+                 `level_title` and `_alert`, airport_alerts.py `describe` from ATC speech (callsigns, a place), the rule
+                 packs and ADS-B; `update()` takes `title[:200]` from those same sources (no dispatcher edits it).
+                 Only the
+                 fixed lead is kept ("HPN ATC pre-alert", "HPN Alert N", "AIRCRAFT EMERGENCY"): never the callsign,
+                 type or
+                 place.
+    status       sizeup/cloud/health.py `_push`: `a["title"]` is a fixed sentence in code plus configured names (channel
+                 labels, dongle names, jobs, groups, databases); STATUS_TITLES keeps the fixed sentence and drops the
+                 name, and the Who (station name, detail) is not sent at all.
+    intel        sizeup/intel/push.py `compose`: the rule pack's and category's labels and the town: title_ok() too.
+    dispatch     no producer yet; title_ok().
+Units: only a configured unit (the CAD's units list, `unit_of`) survives, by its first token and with the list's own
+name: an alias, a radio ID, a talker or a person-style name is dropped. The address: place_ok() (an incident's address
+is typed by a dispatcher, sizeup/cad/service.py, up to 200 characters of free text).
 
 Then the intel `scrub()` (radio IDs of 6+ digits, plate-like tokens, dates) runs over what is left, as a last net
 under the allow-list: a text that still fails is replaced by the generic one (a mayday must still page), never sent.
@@ -67,14 +89,100 @@ def _priority(p) -> int:
         return 3
 
 
-def _who(kind: str, who):
-    """The Who a phone may be told about: the units, channel, event number and address (and, for status only, the
-    station). Never the talker, the dongle, the detail."""
+PLAIN = re.compile(r"[A-Za-z0-9 .,:;'\u2019()/#+&%\u00b7\u00d7\u2013\u2014\u2026-]{1,100}")
+LOWER_OK = frozenset({"and", "of", "block", "blk"})        # in an address, besides capitalised words and numbers
+# alarms.KEYWORDS, upper-cased, "..." as the ellipsis
+FIXED_KEYWORDS = ("MAYDAY", "MAY DAY MAY DAY", "EMERGENCY TRAFFIC", "FIREFIGHTER DOWN", "FIRE FIGHTER DOWN",
+                  "MEMBER DOWN", "LOST FIREFIGHTER", "LOST FIRE FIGHTER",
+                  "PAR \u2026 MISSING", "PAR \u2026 UNACCOUNTED")
+VIAS = ("MDC", "P25", "FLEETSYNC")
+FLAGS = re.compile(r"^(DRILL: )?(Ended: |Acknowledged: )?")
+# sizeup/cloud/health.py: each title it builds, with the configured name in it (a channel label, a dongle name, a job, a
+# group, a database) left out. (regex on the title, text sent). Anything not here is the generic status title.
+STATUS_TITLES = (
+    (r"Station silent", "Station silent"), (r"Station update failed( and its rollback too)?", "Station update failed"),
+    (r"Station behind the hub", "Station behind the hub"), (r"Takeover checks skipped", "Takeover checks skipped"),
+    (r"Litestream too old", "Litestream too old"), (r"Speech-to-text (down|behind)", "Speech-to-text problem"),
+    (r"ADS-B receiver down", "ADS-B receiver down"), (r"trunk-recorder down", "trunk-recorder down"),
+    (r"Station disk full", "Station disk full"), (r"Station's events backing up", "Station's events backing up"),
+    (r"P25 trunk silent", "P25 trunk silent"), (r"Amazon Transcribe failing", "Amazon Transcribe failing"),
+    (r"Amazon Transcribe at \d{1,3}% of monthly limit", "Amazon Transcribe near its monthly limit"),
+    (r"Amazon Transcribe monthly limit reached", "Amazon Transcribe monthly limit reached"),
+    (r"Reception test: job not restored", "Reception test: job not restored"),
+    (r"Antenna groups dropped", "Antenna groups dropped"),
+    (r"Antenna group .+ (short|check)", "Antenna group needs a check"),
+    (r"Duplicate dongle serial .+", "Duplicate dongle serial"), (r"SDR .+ gone", "An SDR is gone"),
+    (r".+ not running", "A radio job is not running"), (r".+ stuck open", "A radio is stuck open"),
+    (r"Replica (corrupt|follower failing|not verifiable): .+", "Replica problem"),
+    (r"Replica not verifiable: .+", "Replica problem"),
+)
+
+
+def title_ok(title: str) -> bool:
+    """A title written by code (a health alert, an intel label): plain characters, a sane length, no link."""
+    return bool(PLAIN.fullmatch(title or "")) and not URL.search(title)
+
+
+def headline(kind: str, title: str) -> str | None:
+    """The fixed headline for a title, or None (then the generic one). alerts: rebuilt from known words only (module
+    doc);
+    other kinds: the title as is when title_ok()."""
+    title = str(title or "").strip()
+    if kind == "status":
+        m = re.match(r"^(Still: |Recovered: )?(.*?)( \d+ s| \d+ min| \d+ h \d+ min)?$", title)
+        for pat, out in STATUS_TITLES:
+            if m and re.fullmatch(pat, m.group(2)):
+                return f"{m.group(1) or ''}{out}{m.group(3) or ''}"
+        return None
+    if kind != "alerts":
+        return title if title_ok(title) else None
+    m = FLAGS.match(title)
+    flags, rest = m.group(0), title[m.end():]
+    if rest.upper().startswith("AIRCRAFT EMERGENCY"):
+        squawk = re.search(r"SQUAWK (7500|7600|7700)\b", rest.upper())
+        return flags + "AIRCRAFT EMERGENCY" + (f": SQUAWK {squawk.group(1)}" if squawk else "")
+    if rest.startswith("HPN ATC"):
+        return flags + "HPN ATC pre-alert"
+    lv = re.match(r"HPN Alert ([123])\b", rest)
+    if lv:
+        return flags + f"HPN Alert {lv.group(1)}"
+    known = []
+    for seg in rest.split(" + "):
+        seg = seg.strip().upper()
+        via = re.fullmatch(r"EMERGENCY BUTTON(?: \(([A-Z0-9]+)\))?", seg)
+        if via and (via.group(1) in (None, *VIAS)):
+            known.append(seg)
+        elif seg in FIXED_KEYWORDS:
+            known.append(seg)
+    return (flags + " + ".join(known)) if known else None
+
+
+def place_ok(address: str) -> bool:
+    """An address a phone may be told: at most 80 characters of letters, digits and address punctuation, led by a house
+    number or holding a street word, every word a number or capitalised (or and / of / block): not a sentence."""
+    a = (address or "").strip()
+    if not a or len(a) > 80 or not re.fullmatch(r"[A-Za-z0-9 .,'&/#-]+", a) or not PLACE.search(a) or PHONE.search(a):
+        return False
+    return all(w[0].isupper() or w[0].isdigit() or w in "&/" or w in LOWER_OK for w in a.replace(",", " ").split())
+
+
+def _who(kind: str, who, unit_of=None):
+    """The Who a phone may be told about: the units that are really on the CAD's list, the channel, the event number and
+    the address that passes place_ok. Never the talker, the dongle, the station, the detail, a radio ID or an alias.
+    unit_of(code) -> the list's own name, or None for a code that is not a unit (None: no unit passes)."""
     w = notify.Who.of(who)
     if w is None:
         return None, ""
-    keep = w.station if kind == "status" else ""
-    return dataclasses.replace(w, talker="", dongle="", detail="", station=keep), w.talker.strip()
+    units = []
+    for u in w.units:
+        token = (u[0] if u else "").split()[:1]
+        code = token[0] if token else ""
+        name = unit_of(code) if unit_of is not None and code and not code.isdigit() else None
+        if name is not None and (code, name) not in units:
+            units.append((code, name))
+    addr = w.address if place_ok(w.address) else ""
+    return (dataclasses.replace(w, talker="", dongle="", detail="", station="", units=tuple(units), address=addr),
+            w.talker.strip())
 
 
 def _intel_body(body: str) -> str:
@@ -83,11 +191,14 @@ def _intel_body(body: str) -> str:
     return " \u00b7 ".join(x for x in segs if x and not URL.search(x) and (INTEL_FIXED.match(x) or PLACE.search(x)))
 
 
-def device_text(kind: str, title: str, body: str, who=None) -> tuple[str, str, str]:
+def device_text(kind: str, title: str, body: str, who=None, unit_of=None) -> tuple[str, str, str]:
     """(title, body, why): the text a phone may get, from the allow-list in the module doc. why is "" when it passed
     the scrub, else a category (never the text) and the text is the generic one."""
-    w, talker = _who(kind, who)
-    t = URL.sub("", notify.compose(str(title), w)).strip()[:TITLE_MAX]
+    w, talker = _who(kind, who, unit_of)
+    head = headline(kind, title)
+    if head is None:
+        return GENERIC[kind][0], GENERIC[kind][1], "title"
+    t = URL.sub("", notify.compose(head, w)).strip()[:TITLE_MAX]
     if kind == "intel":
         b = _intel_body(body)[:BODY_MAX]
     elif kind in ("alerts", "dispatch") and w is not None and w.address.strip():

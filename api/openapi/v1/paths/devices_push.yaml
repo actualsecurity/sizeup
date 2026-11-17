@@ -41,11 +41,14 @@ put:
             updated: 1767225600.5
     default:
       description: >
-        An error: 400 `bad_request` (also a missing or malformed body), 401, 403 `forbidden` (not this device's id),
+        An error: 400 `bad_request` (a missing or malformed body) or `bad_body` (a body shorter than its
+        Content-Length), 401, 403 `forbidden` (not this device's id),
         404 `not_found` (the `push` feature is off), 408 `request_timeout`, 409 `push_full`, 411 `length_required`, 413
         `body_too_large` (over 4096 bytes), 429
         `rate_limited`, 502 `push_failed` (the push service refused it), 503 `push_unavailable` (push is not set up
-        for this platform, or this hub does not push) or `busy`.
+        for this platform, or this hub does not push) or `busy`. A 429 and a `busy` 503 carry `Retry-After` (seconds, also
+        `retry_after_s` in the body). A request with no `Content-Length` or a chunked body is a 411 `length_required`, an
+        oversize one a 413 `body_too_large`.
       content:
         application/json:
           schema:
@@ -78,7 +81,7 @@ delete:
     default:
       description: >
         An error (401, 403 `forbidden`, 404 `not_found` when the `push` feature is off, 429 `rate_limited`, 503
-        `push_unavailable` or `busy`).
+        `push_unavailable` or `busy`; `Retry-After` on 429 and `busy`). A DELETE needs no body.
       content:
         application/json:
           schema:

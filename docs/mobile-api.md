@@ -457,15 +457,22 @@ No UI change.
 | Revoked devices | `PushService.device_active(device_id) -> bool` (default: every device is active) is asked for every device on every send. #558 wires it to its devices table, so a revoked device of an active person gets nothing even while its endpoint row remains |
 | SNS client | `sizeup/push/sns.py`: CreatePlatformEndpoint, SetEndpointAttributes, DeleteEndpoint, Publish over `aws.sign` (outbound guard) |
 | Fan-out | `notify.Pushes.fan_out`, called by `KindNotifier.send` before ntfy's own "is there a topic" check, on purpose (devices get a kind's pushes even when it has no ntfy topic); it never raises, so ntfy always sends. One worker thread, one Publish per endpoint, at most 40 devices, one 30 s deadline per message; only the leader publishes (a handover overlap never pages a phone twice) |
-| Content | `sizeup/push/content.py`: an **allow-list, never the caller's free text**. alerts and dispatch: the headline, the units, channel, event number and address (the body is the address); status: the headline, a generic body; intel: the headline and only the place, time and level of its body. No transcript, name, talker, radio ID, operator, plate, phone, link or Listen line. The intel `scrub()` still runs as a net, and a failing text becomes a generic one (a mayday still pages). Payload `{kind, id, title, body}` only. ntfy's text is unchanged |
+| Content | `sizeup/push/content.py`: an **allow-list, never the caller's free text**. alerts: a headline rebuilt from fixed words (the matched emergency keywords, "EMERGENCY BUTTON (MDC)", "HPN ATC pre-alert", "HPN Alert N", "AIRCRAFT EMERGENCY: SQUAWK 7700"), only units that are on the CAD's units list (by the list's own name: an alias, a radio ID or a person-style name is dropped), the channel, the event number and an address that looks like one (a dispatcher types it: free text fails and the body is generic); status: the alert's fixed sentence without its configured names, a generic body; intel: the rule pack's headline and only the place, time and level of its body; dispatch: the same as alerts. No transcript, name, talker, radio ID, operator, plate, phone, link or Listen line. The intel `scrub()` still runs as a net, and a failing text becomes a generic one (a mayday still pages). Payload `{kind, id, title, body}` only. ntfy's text is unchanged |
 
 Who gets what: alerts, intel, dispatch: every active signed-in person's subscribed device; status: admins. A device's
 `prefs` (alerts, intel, status on by default, **dispatch off**) and `quiet` hours (`{from, to, tz}`) are stored
 server-side; quiet hours hold intel and status, never alerts or dispatch. A person who is deactivated or not an operator
 gets nothing. The role comes from the `operators` table, read only (`push/wire.py role_for`): it differs from
 `Settings.standing` on purpose (a deactivated person is a viewer there, nobody here; with no admin yet nobody is elevated, so
-status reaches nobody). **For #558:** the `operators` row is made by `Settings.person()`, which only a console request
-calls, so the app's sign-in must make it too or that person's devices get no pushes.
+status reaches nobody). The app's sign-in refuses anyone without an `operators` row (#558 / PR 2), so every signed-in person
+has one; `role_for` is read-only on purpose.
+
+**Wiring with sign-in (#558 / PR 2).** PR 2 exposes `AuthService.device_active(device_id)` (revoked device or inactive
+person) and `AuthService.add_revoke_hook(fn(device))`. At integration, one line each: `device_active=auth.device_active`
+in `push/wire.py wire()` and `auth.add_revoke_hook(drop_device)`. **Until then push stays off**: the `push` flag has no
+production source and no registration path exists without the sign-in. Registering a device while `device_active` is not
+wired logs `push: device_active not wired: revoked devices keep receiving pushes` once, and the hub start logs it too; the
+default stays "every device is active" (changing it to deny would leave every test and the fan-out dead until #558).
 
 Interruption level: `time-sensitive` by default; `critical` plus the `sound` dictionary only for dispatch and an
 emergency alert (priority 5) **and** when `SIZEUP_PUSH_CRITICAL=1` (Apple granted the entitlement). Message attributes

@@ -71,7 +71,7 @@ def test_the_real_alarm_pushes_carry_the_names_the_ntfy_body_has_and_the_phone_g
     assert first["id"] == num and set(first) == {"aps", "kind", "id"}
     # still a useful page: what, which unit, where, and the address as the body
     title = first["aps"]["alert"]["title"]
-    assert title.startswith("MAYDAY") and "E64 P1 (Engine 64)" in title
+    assert title.startswith("MAYDAY") and "E64 (Engine 64)" in title
     assert num in first["aps"]["alert"]["title"] and first["aps"]["alert"]["body"] == "100 S Ridge St"
     assert second["aps"]["alert"]["title"].startswith("Acknowledged: MAYDAY")
 
@@ -87,12 +87,12 @@ def test_a_mayday_with_nothing_structured_is_still_a_generic_page(rig, fake):
 
 def test_status_never_carries_the_callers_body(rig, fake):
     rig.device(1, "admin@example.org")
-    rig.service.deliver("status", "FG1 not running · Port Chester FD",
+    rig.service.deliver("status", "FG1 not running",
                         "FG1 not running · SDR 00000102 on FG1\nlast keyed by Jordan Example, radio 4821", 3,
                         {"talker": "Jordan Example", "dongle": "SDR 00000102", "station": "Port Chester FD",
                          "detail": "last heard 14:32"})
     a = fake.published()[0]["message"]["APNS_SANDBOX"]["aps"]["alert"]
-    assert a["body"] == "Open sizeup for details" and a["title"].startswith("FG1 not running")
+    assert a == {"title": "A radio job is not running", "body": "Open sizeup for details"}
     assert_clean(fake)
 
 

@@ -11,9 +11,9 @@ Who gets a kind (docs/mobile-api.md section 4): alerts, intel and dispatch: ever
 subscribed to it; status: admins. A device that never subscribed to a kind does not get it (dispatch is opt-in). The
 person's role is looked up when the push goes out (`role_of(email)`: admin | dispatcher | viewer | None for an
 unknown or deactivated person, who gets nothing). `device_active(device_id)` is asked for EVERY device on every send
-(default: all devices are active): #558 wires it to its devices table, so a revoked device of an active person gets nothing even if
-its endpoint row is still here. Quiet hours (the device's own, in its zone) hold intel and status, never alerts or
-dispatch.
+(default: all devices are active): #558 wires it to its devices table, so a revoked device of an active person gets
+nothing even if its endpoint row is still here. Quiet hours (the device's own, in its zone) hold intel and status,
+never alerts or dispatch.
 
 Policy per kind, the intel `policy` pattern (the settings' section "notify", key "devices": {"off": true,
 "<kind>": {"on", "per_minute", "per_hour", "per_day"}}, set by an admin: sizeup/cad/settings.py, checked by
@@ -139,13 +139,16 @@ class PushService:
                  settings: Callable[[], dict] | None = None, active: Callable[[], bool] | None = None,
                  role_of: Callable[[str], str | None] | None = None,
                  device_active: Callable[[str], bool] | None = None, clock=time.time, log=print,
-                 mono: Callable[[], float] = time.monotonic):
+                 mono: Callable[[], float] = time.monotonic, unit_of: Callable[[str], str | None] | None = None):
         self.devices, self.apps, self.sns = devices, apps, sns
         self.settings = settings or (lambda: {})
         self.active = active or (lambda: True)
         self.role_of = role_of or (lambda email: None)       # no way to tell a role: nobody gets anything
         # #558 wires its devices table here (a revoked device: False)
         self.device_active = device_active or (lambda device_id: True)
+        self.device_active_wired = device_active is not None      # not wired: registering warns once (register())
+        # a unit code -> the CAD list's own name, None when it is not a unit; none given: no unit is named on a phone
+        self.unit_of = unit_of or (lambda code: None)
         self.clock, self.log, self.mono = clock, log, mono
         self._sent: dict[str, deque] = {k: deque() for k in content.KINDS}
         self._q: queue.Queue = queue.Queue(maxsize=QUEUE_MAX)
@@ -179,6 +182,8 @@ class PushService:
             raise PushError(503, "push_unavailable", "push is not set up for this platform on this hub")
         if not self.devices.writable():              # not the leader: refuse before SNS makes an endpoint nobody keeps
             raise FencedWrite("push: not the leader")
+        if not self.device_active_wired:
+            self._say("device-active", "push: device_active not wired: revoked devices keep receiving pushes")
         old = self.devices.get(device_id)
         if old is None and self.devices.count() >= MAX_DEVICES:
             raise PushError(409, "push_full", "too many devices are registered for push")
@@ -337,7 +342,7 @@ class PushService:
         rows = self._audience(kind, self.clock())
         if not rows:
             return 0
-        t, b, why = content.device_text(kind, title, body, who)
+        t, b, why = content.device_text(kind, title, body, who, self.unit_of)
         if why:
             self._say(f"scrub-{kind}", f"push: {kind}: text held back ({why}): generic push")
         mid = content.message_id(kind, click, who, ref)

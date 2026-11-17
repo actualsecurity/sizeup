@@ -4,6 +4,7 @@ answered back. The SNS is a fake on this machine; every value is invented."""
 from __future__ import annotations
 
 import json
+import re
 import urllib.error
 import urllib.request
 
@@ -134,15 +135,33 @@ def test_an_oversize_body_is_a_413_not_a_400_at_the_routes_cap_and_at_the_server
     assert rig.fake.calls == [] and not rig.db.exists()
 
 
-def raw_put(rig, head: str, wait: float = 5.0) -> str:
+def raw_request(rig, method: str, head: str, wait: float = 5.0) -> str:
+    """The whole answer to a request sent by hand (read until the server closes, or the answer is complete)."""
     import socket
     host, port = rig.url.rsplit("//", 1)[1].split(":")
     s = socket.create_connection((host, int(port)), timeout=wait)
-    s.sendall(f"PUT {PATH} HTTP/1.1\r\nHost: x\r\nAuthorization: {BEARER['Authorization']}\r\n{head}\r\n".encode())
+    s.sendall(f"{method} {PATH} HTTP/1.1\r\nHost: x\r\nAuthorization: {BEARER['Authorization']}\r\n{head}\r\n".encode())
+    out = b""
     try:
-        return s.recv(4096).decode()
+        while True:
+            chunk = s.recv(4096)
+            if not chunk:
+                break
+            out += chunk
+            head_end = out.find(b"\r\n\r\n")
+            if head_end >= 0:
+                m = re.search(rb"Content-Length: (\d+)", out[:head_end], re.I)
+                if m and len(out) >= head_end + 4 + int(m.group(1)):
+                    break
+    except OSError:
+        pass
     finally:
         s.close()
+    return out.decode()
+
+
+def raw_put(rig, head: str, wait: float = 5.0) -> str:
+    return raw_request(rig, "PUT", head, wait)
 
 
 def test_a_client_that_sends_the_headers_and_no_body_cannot_hold_the_slot(rig, monkeypatch):
@@ -157,6 +176,13 @@ def test_a_put_without_a_length_or_chunked_is_a_411(rig):
         out = raw_put(rig, head)
         assert out.startswith("HTTP/1.1 411") and "length_required" in out
     assert rig.fake.calls == [] and not rig.db.exists()
+
+
+def test_a_delete_with_no_body_and_no_length_succeeds_over_a_raw_socket(rig):
+    call(rig, body=GOOD)
+    out = raw_request(rig, "DELETE", "")                                # no Content-Length at all: no 411 for a DELETE
+    assert out.startswith("HTTP/1.1 200") and '"removed":true' in out
+    assert rig.service.devices.get("dev-0001") is None
 
 
 def test_push_not_set_up_is_a_503_and_stores_nothing(rig):
