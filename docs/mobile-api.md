@@ -134,7 +134,8 @@ every viewer (one shared `Broadcaster`), so they cannot be filtered per role or 
 - **sizeup does not push dispatches to the crew today.** The department's paging and the third-party app do that. An app
   that pushes dispatches would be a new responsibility (D3).
 - Intel pushes are composed from an allow-list (`intel/push.py`): no transcript words, talkers or radio IDs among the
-  fields. Since 2026-11-17 the scrub runs only with `push_pii` off (Settings > System > Intel; on by default). Caps (`intel/policy.py:39`): 30 an hour, 200 a day, 10 per category an hour, with quiet hours and a digest.
+  fields. Since 2026-11-17 the scrub runs only with `push_pii` off (Settings > System > Intel; on by default). Caps
+  (`intel/policy.py` `DEFAULTS`): 30 an hour, 200 a day, 10 per category an hour, with quiet hours and a digest.
 - Listen links (`intel/listen.py`) are random S3 keys behind a presigned GET for 20 min. Audio is AAC/M4A at 24 kbit/s
   where ffmpeg exists, else 8 kHz WAV. The hub image has no ffmpeg, so production serves WAV at about 1 MB a minute.
 - The outbound guard (`sizeup/outbound.py`, PR #541; follow-ups #545): `notify.publish`, `aws.sign/presign`, Polly and

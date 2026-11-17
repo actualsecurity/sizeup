@@ -725,6 +725,51 @@ def test_push_pii_is_an_admins_setting_audited_and_exported(rig):
     assert cad.intel.policy.cfg["push_pii"] is False
 
 
+@pytest.mark.parametrize("key, value, why", [
+    ("push_pii", "no", "true or false"),
+    ("push", "false", "true or false"),            # the kill switch: never read as "on" from a bad file
+    ("enabled", 0, "true or false"),
+    ("per_hour", 0, "a number from 1 to 1000"),
+    ("per_day", "200", "a number from 1 to 10000"),
+    ("quiet_from", "25:00", "HH:MM, or empty"),
+    ("infer_mode", "loud", "off | shadow | log | map | push"),
+    ("infer_model", "example.unknown-model", "no known price"),
+    ("nope", True, "not an intel setting"),
+])
+def test_an_import_with_a_bad_intel_value_is_refused_whole(rig, key, value, why):
+    """The settings import checks the "intel" section as Settings > System > Intel does (admin.clean_value): one bad
+    value refuses the whole file (400, the field named), dry run or apply, and nothing of it is applied."""
+    cad, api = rig
+    post = lambda b: call(api, "/api/cad/settings/intel", b, CASEY)      # noqa: E731
+    assert post({"action": "set", "key": "per_hour", "value": 60})[0] == 200
+    ex = cad.settings_export()
+    good = json.loads(json.dumps(ex))
+    good["overrides"]["intel"]["per_hour"] = 70                         # a good change beside the bad one: not applied
+    bad = json.loads(json.dumps(good))
+    bad["overrides"]["intel"][key] = value
+    audit = len(cad.settings_audit_log({})["audit"])
+    for action in ("dry_run", "apply"):
+        code, out = call(api, "/api/cad/settings/import", {"action": action, "settings": bad}, CASEY)
+        assert code == 400 and out["error"].startswith(f"overrides.intel.{key}: ") and why in out["error"], out
+    assert cad.settings.section("intel") == {"per_hour": 60} and cad.intel.policy.cfg["per_hour"] == 60
+    assert cad.intel.policy.cfg["push"] is True and cad.intel.policy.cfg["push_pii"] is True
+    assert len(cad.settings_audit_log({})["audit"]) == audit
+    code, out = call(api, "/api/cad/settings/import", {"action": "apply", "settings": good}, CASEY)      # the good file
+    assert code == 200, out
+    assert cad.intel.policy.cfg["per_hour"] == 70
+
+
+def test_an_import_with_good_intel_values_applies_them_live(rig):
+    cad, api = rig
+    ex = cad.settings_export()
+    ex["overrides"]["intel"] = {"push": False, "push_pii": False, "per_hour": 12, "quiet_from": "22:00",
+                                "quiet_to": "", "infer_sample_pct": 5}
+    code, out = call(api, "/api/cad/settings/import", {"action": "apply", "settings": ex}, CASEY)
+    assert code == 200, out
+    cfg = cad.intel.policy.cfg
+    assert (cfg["push"], cfg["push_pii"], cfg["per_hour"], cfg["quiet_from"]) == (False, False, 12, "22:00")
+
+
 def test_airport_alert_pushes_are_byte_identical_whatever_push_pii_says(tmp_path):
     """push_pii is the INTEL kind's only: the airport pre-alerts (ALERTS) were never scrubbed and send the same bytes
     with it on or off. Invented transmission, plate and name."""
