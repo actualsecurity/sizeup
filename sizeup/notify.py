@@ -424,7 +424,10 @@ class KindNotifier:
 
     def send(self, title: str, body: str, priority: int | str = 3, tags: Iterable[str] = (), click: str = "",
              who=None, actions=()) -> bool:
-        self.pushes.fan_out(self.kind, title, body, priority, who, click)     # the app's devices (#563); ntfy below, as before
+        try:      # the app's devices (#563), on purpose before ntfy's "is there a topic" check; ntfy as before
+            self.pushes.fan_out(self.kind, title, body, priority, who, click)
+        except Exception:  # noqa: BLE001 - whatever it does, the ntfy push below is sent
+            pass
         n = self.current()
         return n.send(title, body, priority, tags, click, who=who, actions=actions) if n is not None else False
 
@@ -460,7 +463,7 @@ class Pushes:
         self.prealert_defaults = {k: ((pa.get(k) or ("", ""))[0].strip(), (pa.get(k) or ("", ""))[1] or "config")
                                   for k in ("ring", "status")}
         self.log, self.kw = log, kw
-        self.devices = None                       # sizeup.push.service.PushService: the app's registered phones (#563); None: none
+        self.devices = None         # sizeup.push.service.PushService: the app's registered phones (#563); None: none
         self.publish = publish                    # the test push (tests: a fake)
         self.tests: dict[str, dict] = {}          # kind -> the last test push {at, ok, error}
         # one Notifier (one queue, one thread) per (server, topic, lane): radio pre-alerts (INTEL) have a lane of their
@@ -610,8 +613,8 @@ class Pushes:
 
     def fan_out(self, kind: str, title: str, body: str, priority: int | str = 3, who=None, click: str = "",
                 ref: str = "") -> None:
-        """The same message to the app's devices that subscribe to the kind (sizeup/push/service.py, #563): queued, never
-        blocking, never raising, and never through an ntfy topic. kind may also be "dispatch" (off until switched on)."""
+        """The same message to the app's devices that subscribe to the kind (sizeup/push/service.py, #563): queued,
+        never blocking, never raising, never through an ntfy topic. kind may also be "dispatch" (off until on)."""
         d = self.devices
         if d is not None:
             d.offer(kind, title, body, priority, who, click, ref)

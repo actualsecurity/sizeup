@@ -45,7 +45,7 @@ class Ctx(NamedTuple):
     params: dict
     principal: object = None
     features: dict | None = None
-    body: bytes = b""           # a PUT's request body, already read and capped by the server (server.py _other_method)
+    body: bytes = b""          # a POST's body (at most handler.MAX_BODY), read after the token and the limits (#562)
 
 
 def meta(ctx: Ctx) -> tuple[int, dict]:

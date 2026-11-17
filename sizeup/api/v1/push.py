@@ -1,23 +1,27 @@
-"""PUT and DELETE /api/v1/devices/{id}/push (#563, docs/mobile-api.md section 4): a device registers (or replaces) its own
-push endpoint, and removes it. The app sends its platform token and, for iOS, which Apple environment the build is for
+"""PUT and DELETE /api/v1/devices/{id}/push (#563, docs/mobile-api.md section 4): a device registers (or replaces) its
+own push endpoint, and removes it. The app sends its platform token and, for iOS, which Apple environment the build is for
 (`sandbox` for debug builds, `production` for TestFlight and the store): the hub keeps the SNS endpoint made for it, per
 kind preferences and quiet hours (sizeup/push/). The token and the endpoint are never answered back.
 
 Needs a signed-in device (need "device", flag "push", role "read"), and a device registers only ITSELF: the {id} must be
 the principal's own device id (another's: 403). Push not set up on the hub (no SNS platform application for that
 platform): 503 push_unavailable, nothing stored. The service is installed by the hub's start (sizeup/push/wire.py); none
-installed answers the same 503. This module imports no database: the store is sizeup/push/devices.py."""
+installed answers the same 503. A body over MAX_BODY (this route's own cap, below the server's) is a 413. This module
+imports no database: the store is sizeup/push/devices.py."""
 from __future__ import annotations
 
 import json
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from sizeup.push import service as svc
+from sizeup.push.service import HM
 
 MAX_BODY = 4096
 KEYS = {"platform", "token", "environment", "prefs", "quiet"}
 
 
 def _err(status: int, code: str, message: str) -> tuple[int, dict]:
+    """A handler answers (status, object): the envelope as a dict (errors.body makes the bytes the server sends)."""
     return status, {"error": {"code": code, "message": message}}
 
 
@@ -38,19 +42,17 @@ def _quiet(q):
         return None
     if not isinstance(q, dict) or set(q) != {"from", "to", "tz"} or not all(isinstance(v, str) for v in q.values()):
         raise ValueError("quiet: {from, to, tz} or null")
-    if not (svc.HM.fullmatch(q["from"]) and svc.HM.fullmatch(q["to"])):
+    if not (HM.fullmatch(q["from"]) and HM.fullmatch(q["to"])):
         raise ValueError("quiet: from and to are HH:MM")
     try:
-        svc.ZoneInfo(q["tz"])
-    except (svc.ZoneInfoNotFoundError, ValueError, OSError):
+        ZoneInfo(q["tz"])
+    except (ZoneInfoNotFoundError, ValueError, OSError):
         raise ValueError("quiet: tz is an IANA zone name") from None
     return {"from": q["from"], "to": q["to"], "tz": q["tz"]}
 
 
 def parse(raw: bytes) -> dict:
     """The registration body, checked: {platform, environment, token, prefs, quiet}. ValueError(message)."""
-    if len(raw or b"") > MAX_BODY:
-        raise ValueError("body too large")
     try:
         d = json.loads(raw or b"")
     except ValueError:
@@ -70,7 +72,8 @@ def parse(raw: bytes) -> dict:
     if prefs is not None and (not isinstance(prefs, dict) or set(prefs) - set(svc.DEFAULT_PREFS)
                               or not all(isinstance(v, bool) for v in prefs.values())):
         raise ValueError("prefs: true or false for alerts, intel, status, dispatch")
-    return {"platform": platform, "environment": env or "", "token": token, "prefs": prefs, "quiet": _quiet(d.get("quiet"))}
+    return {"platform": platform, "environment": env or "", "token": token, "prefs": prefs,
+            "quiet": _quiet(d.get("quiet"))}
 
 
 def _shown(row: dict) -> dict:
@@ -85,6 +88,8 @@ def put_push(ctx) -> tuple[int, dict]:
     service = svc.installed()
     if service is None:
         return _unavailable()
+    if len(ctx.body) > MAX_BODY:
+        return _err(413, "body_too_large", f"the body is over {MAX_BODY} bytes")
     try:
         d = parse(ctx.body)
     except ValueError as e:
@@ -103,4 +108,5 @@ def delete_push(ctx) -> tuple[int, dict]:
     service = svc.installed()
     if service is None:
         return _unavailable()
-    return 200, {"device": ctx.principal.device, "registered": False, "removed": service.unregister(ctx.principal.device)}
+    device = ctx.principal.device
+    return 200, {"device": device, "registered": False, "removed": service.unregister(device)}

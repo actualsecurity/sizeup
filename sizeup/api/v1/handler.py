@@ -30,6 +30,7 @@ from .switches import Switches
 
 PREFIX = "/api/v1/"
 MAX_PATH = 512
+MAX_BODY = 16 * 1024                  # a v1 write is a few fields: never more than this is read (#562)
 
 
 def _pattern(template: str) -> re.Pattern:
@@ -53,9 +54,11 @@ class V1:
         return path.startswith(PREFIX)
 
     def respond(self, method: str, path: str, query: str, headers, peer: str = "",
-                body=b"") -> tuple[int, bytes, str, dict]:
+                body=None) -> tuple[int, bytes, str, dict]:
         """(status, body, content type, headers). HEAD is a GET without its body (the server drops it). Never
-        raises (but FencedWrite, the console's handover signal, which the server answers as a 503)."""
+        raises (but FencedWrite, the console's handover signal, which the server answers as a 503). body: reads the
+        request body up to a limit (None: missing or too big); called only for a POST or PUT that got past the token,
+        the limits and the busy check."""
         try:
             return self._respond(method, path, query, headers, peer, body)
         except FencedWrite:
@@ -67,7 +70,7 @@ class V1:
                 pass
             return error(500, "internal", "something went wrong: try again")
 
-    def _respond(self, method, path, query, headers, peer, body=b"") -> tuple[int, bytes, str, dict]:
+    def _respond(self, method, path, query, headers, peer, body=None) -> tuple[int, bytes, str, dict]:
         if len(path) > MAX_PATH:
             return error(414, "uri_too_long", "path too long")
         if not self.switches.enabled() and not (method in ("GET", "HEAD") and path == "/api/v1/meta"):
@@ -96,7 +99,8 @@ class V1:
     def _absent() -> tuple[int, bytes, str, dict]:
         return error(404, "not_found", "no such endpoint")
 
-    def _serve(self, route: Route, params: dict, query: str, headers, peer: str, body=b"") -> tuple[int, bytes, str, dict]:
+    def _serve(self, route: Route, params: dict, query: str, headers, peer: str,
+               body=None) -> tuple[int, bytes, str, dict]:
         principal = None
         if route.need == "device":
             principal = self.resolver(headers)
@@ -112,9 +116,12 @@ class V1:
         if not self.limits.enter():
             return error(503, "busy", "the hub is busy: try again", 1)
         try:
-            if callable(body):                  # the body is read only now: past the token, the limits and the cap
-                body = body()
-            ctx = Ctx(parse_qs(query), headers, params, principal, self.switches.features(), body)
+            raw = b""
+            if route.method in ("POST", "PUT") and body is not None:     # a write's body: bounded, read only now (#562)
+                raw = body(MAX_BODY)
+                if raw is None:
+                    return error(413, "body_too_large", f"the body is missing a length or over {MAX_BODY // 1024} KB")
+            ctx = Ctx(parse_qs(query), headers, params, principal, self.switches.features(), raw)
             status, obj = route.handler(ctx)
             return status, json.dumps(obj, separators=(",", ":")).encode(), JSON, {"Cache-Control": "no-store"}
         finally:

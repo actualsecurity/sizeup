@@ -41,8 +41,10 @@ put:
             updated: 1767225600.5
     default:
       description: >
-        An error: 400 `bad_request`, 401, 403 `forbidden` (not this device's id), 409 `push_full`, 502 `push_failed`
-        (the push service refused it), 503 `push_unavailable`.
+        An error: 400 `bad_request` (also a missing or malformed body), 401, 403 `forbidden` (not this device's id),
+        404 `not_found` (the `push` feature is off), 409 `push_full`, 413 `body_too_large` (over 4096 bytes), 429
+        `rate_limited`, 502 `push_failed` (the push service refused it), 503 `push_unavailable` (push is not set up
+        for this platform, or this hub does not push) or `busy`.
       content:
         application/json:
           schema:
@@ -73,7 +75,9 @@ delete:
               removed: {type: boolean}
           example: {device: dev-0001, registered: false, removed: true}
     default:
-      description: An error (401, 403 `forbidden`, 503 `push_unavailable`).
+      description: >
+        An error (401, 403 `forbidden`, 404 `not_found` when the `push` feature is off, 429 `rate_limited`, 503
+        `push_unavailable` or `busy`).
       content:
         application/json:
           schema:

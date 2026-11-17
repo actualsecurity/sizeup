@@ -1,8 +1,8 @@
-"""Amazon SNS mobile push over the existing stdlib SigV4 (sizeup/aws.py `sign`: the outbound guard refuses a hand-started
-or local hub before anything leaves). The Query API (form POST, XML answers), no boto3.
+"""Amazon SNS mobile push over the existing stdlib SigV4 (sizeup/aws.py `sign`: the outbound guard refuses a
+hand-started or local hub before anything leaves). The Query API (form POST, XML answers), no boto3.
 
     Sns(region, endpoint="")                          endpoint: another base URL (tests: a fake on this machine)
-    sns.create_endpoint(app_arn, token, user_data)    -> the endpoint's ARN (SNS returns the same one for the same token)
+    sns.create_endpoint(app_arn, token, user_data)    -> the endpoint's ARN (the same one for the same token)
     sns.set_attributes(endpoint_arn, {...})           Token / Enabled
     sns.delete_endpoint(endpoint_arn)
     sns.publish(endpoint_arn, message, attributes)    message: {"APNS": "<json>"} etc. (MessageStructure=json)
@@ -13,13 +13,14 @@ are not in this repository; the hub's task definition is not changed for them, s
     SIZEUP_SNS_APNS_SANDBOX_ARN   arn:aws:sns:<region>:<account>:app/APNS_SANDBOX/<name>   debug builds
     SIZEUP_SNS_APNS_ARN           arn:aws:sns:<region>:<account>:app/APNS/<name>           TestFlight / store builds
     SIZEUP_SNS_FCM_ARN            arn:aws:sns:<region>:<account>:app/GCM/<name>            Android (FCM)
-    SIZEUP_PUSH_CRITICAL          1 = the Apple Critical Alerts entitlement is granted: dispatch / emergency pushes use it
+    SIZEUP_PUSH_CRITICAL          1 = the Critical Alerts entitlement is granted: dispatch / emergency pushes use it
     SIZEUP_SNS_ENDPOINT           a loopback URL only (a local fake for a demo); never an outside host
 
 A variable that is empty, missing or not an ARN of the right platform leaves that platform off: a registration for it is
 refused, so a sandbox token can never go to the production application (and the reverse)."""
 from __future__ import annotations
 
+import json
 import os
 import re
 import urllib.error
@@ -28,15 +29,19 @@ import urllib.request
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 
+from typing import Callable
+
 from sizeup import aws
 
 VERSION = "2010-03-31"
-ARN = re.compile(r"^arn:aws:sns:(?P<region>[a-z0-9-]{4,20}):\d{12}:app/(?P<platform>APNS_SANDBOX|APNS|GCM)/[\w.-]{1,256}$")
+ARN = re.compile(r"^arn:aws:sns:(?P<region>[a-z0-9-]{4,20}):\d{12}:app/(?P<platform>APNS_SANDBOX|APNS|GCM)/"
+                 r"[\w.-]{1,256}$")
 LOCAL = ("127.0.0.1", "::1", "localhost")
 
 
 class SnsError(aws.AwsError):
-    """SNS refused or couldn't be reached. code: SNS's own ("EndpointDisabled", "NotFound", "OutboundOff", "Network")."""
+    """SNS refused or couldn't be reached. code: SNS's own ("EndpointDisabled", "NotFound") or ours ("OutboundOff",
+    "Network")."""
 
 
 def _local(name: str) -> str:
@@ -54,7 +59,10 @@ def _xml(raw: bytes) -> ET.Element:
 
 
 class Sns:
-    def __init__(self, region: str, endpoint: str = "", creds: aws.Credentials | None = None, timeout: float = 8.0):
+    def __init__(self, region: str, endpoint: str = "", creds: Callable[[], aws.Credentials] = aws.credentials,
+                 timeout: float = 8.0):
+        """creds: the credentials to sign with, fetched per call (the task role's, cached in sizeup/aws.py): the same
+        seam as sizeup/attachments.py and sizeup/audiostore.py."""
         self.region, self.creds, self.timeout = aws.region(region), creds, timeout
         self.endpoint = (endpoint or f"https://sns.{self.region}.amazonaws.com").rstrip("/") + "/"
 
@@ -62,7 +70,7 @@ class Sns:
         form = {"Action": action, "Version": VERSION, **params}
         data = urllib.parse.urlencode(sorted(form.items())).encode()
         try:
-            c = self.creds or aws.credentials()
+            c = self.creds()
             hdrs = aws.sign("POST", self.endpoint, {"Content-Type": "application/x-www-form-urlencoded; charset=utf-8"},
                             data, c, self.region, "sns")
         except aws.AwsError as e:                       # OutboundOff, NoCredentials: nothing was sent
@@ -73,7 +81,7 @@ class Sns:
             with urllib.request.urlopen(req, timeout=self.timeout) as r:
                 raw = r.read(1 << 20)
         except urllib.error.HTTPError as e:
-            if e.code == 403 and self.creds is None:
+            if e.code == 403 and self.creds is aws.credentials:
                 aws.forget_credentials()
             code, msg = "", ""
             try:
@@ -107,8 +115,8 @@ class Sns:
     def publish(self, endpoint_arn: str, message: dict[str, str], attributes: dict[str, str] | None = None) -> str:
         """One Publish to one endpoint. message: platform key -> its JSON string (MessageStructure=json needs a
         "default" too: the title). attributes: SNS message attributes (String), e.g. AWS.SNS.MOBILE.APNS.PRIORITY."""
-        import json
-        p = {"TargetArn": endpoint_arn, "MessageStructure": "json", "Message": json.dumps(message, separators=(",", ":"))}
+        p = {"TargetArn": endpoint_arn, "MessageStructure": "json",
+             "Message": json.dumps(message, separators=(",", ":"))}
         for i, (k, v) in enumerate(sorted((attributes or {}).items()), 1):
             p[f"MessageAttributes.entry.{i}.Name"] = k
             p[f"MessageAttributes.entry.{i}.Value.DataType"] = "String"
@@ -157,4 +165,5 @@ class Apps:
 def endpoint_platform(endpoint_arn: str) -> str:
     """APNS_SANDBOX | APNS | GCM from an endpoint ARN (arn:aws:sns:r:a:endpoint/APNS/<app>/<id>), else ""."""
     parts = endpoint_arn.split(":", 5)[-1].split("/")
-    return parts[1] if len(parts) >= 3 and parts[0] == "endpoint" and parts[1] in ("APNS_SANDBOX", "APNS", "GCM") else ""
+    ok = len(parts) >= 3 and parts[0] == "endpoint" and parts[1] in ("APNS_SANDBOX", "APNS", "GCM")
+    return parts[1] if ok else ""

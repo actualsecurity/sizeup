@@ -4832,7 +4832,8 @@ def adapter_password(cfg: Config):
 
 def make_server(app: App, fence=None, listener=None) -> WebServer:
     cfg = app.cfg
-    mobile = Switches(lambda: cfg.mobile_enabled, max_requests=cfg.mobile_max_requests, max_streams=cfg.mobile_max_streams)
+    mobile = Switches(lambda: cfg.mobile_enabled, max_requests=cfg.mobile_max_requests,
+                      max_streams=cfg.mobile_max_streams)
     if cfg.cloud_role != "station" and cfg.cad_db:       # device push (#563): nothing sent or written until it is on
         from sizeup.push.wire import wire as wire_push
         wire_push(app.pushes, Path(cfg.cad_db).parent, mobile, app.cad.store,

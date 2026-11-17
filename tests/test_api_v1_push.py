@@ -28,11 +28,13 @@ GOOD = {"platform": "ios", "environment": "sandbox", "token": IOS_TOKEN}
 def rig(tmp_path):
     fake = FakeSns()
     flags = {"push": True}
-    service = svc.PushService(PushDevices(tmp_path / "hub.sqlite"), APPS, snsmod.Sns("us-east-1", fake.url, CREDS),
+    client = snsmod.Sns("us-east-1", fake.url, lambda: CREDS)
+    service = svc.PushService(PushDevices(tmp_path / "hub.sqlite"), APPS, client,
                               role_of=lambda e: "viewer", log=lambda m: None)
     svc.install(service)
     switches = Switches(lambda: True, lambda: flags)
-    srv, url = serve(role="hub", mobile=switches, mobile_resolver=lambda h: ME if h.get("Authorization") == BEARER["Authorization"] else None)
+    who = lambda h: ME if h.get("Authorization") == BEARER["Authorization"] else None      # noqa: E731
+    srv, url = serve(role="hub", mobile=switches, mobile_resolver=who)
     yield type("Rig", (), {"url": url, "fake": fake, "service": service, "flags": flags, "db": tmp_path / "hub.sqlite"})
     srv.shutdown()
     svc.install(None)
@@ -61,7 +63,8 @@ def test_the_routes_need_a_device_the_push_flag_and_the_read_role():
 
 
 def test_register_answers_the_device_and_never_the_token_or_the_endpoint(rig):
-    status, body = call(rig, body={**GOOD, "prefs": {"status": False}, "quiet": {"from": "22:00", "to": "06:00", "tz": "America/New_York"}})
+    quiet = {"from": "22:00", "to": "06:00", "tz": "America/New_York"}
+    status, body = call(rig, body={**GOOD, "prefs": {"status": False}, "quiet": quiet})
     assert status == 200
     conforms(status, body, "PUT", "/api/v1/devices/{id}/push")
     d = json.loads(body)
@@ -96,8 +99,10 @@ def test_no_token_a_wrong_token_flag_off_or_master_off_is_refused_before_anythin
 
 def test_the_body_is_checked():
     from sizeup.api.v1.push import parse
-    bad = [{**GOOD, "environment": None}, {**GOOD, "environment": "staging"}, {k: v for k, v in GOOD.items() if k != "environment"},
-           {**GOOD, "platform": "windows"}, {**GOOD, "token": "short"}, {**GOOD, "token": "not a token with spaces " * 2},
+    no_env = {k: v for k, v in GOOD.items() if k != "environment"}
+    bad = [{**GOOD, "environment": None}, {**GOOD, "environment": "staging"}, no_env,
+           {**GOOD, "platform": "windows"}, {**GOOD, "token": "short"},
+           {**GOOD, "token": "not a token with spaces " * 2},
            {**GOOD, "extra": 1}, {**GOOD, "prefs": {"alerts": "yes"}}, {**GOOD, "prefs": {"emergency": True}},
            {**GOOD, "quiet": {"from": "25:00", "to": "06:00", "tz": "UTC"}},
            {**GOOD, "quiet": {"from": "22:00", "to": "06:00", "tz": "Not/AZone"}},
@@ -109,15 +114,37 @@ def test_the_body_is_checked():
         with pytest.raises(ValueError):
             parse(raw)
     ok = parse(json.dumps({**GOOD, "quiet": None, "prefs": {"dispatch": True}}).encode())
-    assert ok == {"platform": "ios", "environment": "sandbox", "token": IOS_TOKEN, "prefs": {"dispatch": True}, "quiet": None}
+    assert ok == {"platform": "ios", "environment": "sandbox", "token": IOS_TOKEN, "prefs": {"dispatch": True},
+                  "quiet": None}
 
 
 def test_a_bad_body_over_http_is_a_400_in_the_envelope_and_nothing_is_stored(rig):
-    for raw in (b"", b"{not json", json.dumps({**GOOD, "environment": "staging"}).encode(), b" " * 5000):
+    for raw in (b"", b"{not json", json.dumps({**GOOD, "environment": "staging"}).encode()):
         r = call(rig, raw=raw)
         assert (r[0], code(r)) == (400, "bad_request")
         conforms(r[0], r[1], "PUT", "/api/v1/devices/{id}/push")
     assert rig.fake.calls == [] and not rig.db.exists()
+
+
+def test_an_oversize_body_is_a_413_not_a_400_at_the_routes_cap_and_at_the_servers(rig):
+    for size in (4097, 20_000):                  # over this route's 4096; over the server's 16 KB (never read)
+        r = call(rig, raw=b" " * size)
+        assert (r[0], code(r)) == (413, "body_too_large"), size
+        conforms(r[0], r[1], "PUT", "/api/v1/devices/{id}/push")
+    assert rig.fake.calls == [] and not rig.db.exists()
+
+
+def test_a_client_that_sends_the_headers_and_no_body_cannot_hold_the_slot(rig, monkeypatch):
+    import socket
+    from sizeup.web import server as web_server
+    monkeypatch.setattr(web_server, "V1_BODY_S", 0.3)
+    host, port = rig.url.rsplit("//", 1)[1].split(":")
+    s = socket.create_connection((host, int(port)), timeout=5)
+    s.sendall(f"PUT {PATH} HTTP/1.1\r\nHost: x\r\nAuthorization: {BEARER['Authorization']}\r\n"
+              f"Content-Length: 200\r\n\r\n".encode())            # ...and never the 200 bytes
+    out = s.recv(4096).decode()
+    s.close()
+    assert out.startswith("HTTP/1.1 413") and "body_too_large" in out
 
 
 def test_push_not_set_up_is_a_503_and_stores_nothing(rig):
@@ -147,7 +174,8 @@ def test_unregister_removes_the_endpoint_and_is_idempotent(rig):
 def test_replace_is_a_put_again_and_a_get_is_a_405(rig):
     call(rig, body=GOOD)
     status, body = call(rig, body={**GOOD, "environment": "production", "prefs": {"dispatch": True}})
-    assert status == 200 and json.loads(body)["environment"] == "production" and json.loads(body)["prefs"]["dispatch"] is True
+    got = json.loads(body)
+    assert status == 200 and got["environment"] == "production" and got["prefs"]["dispatch"] is True
     assert rig.service.devices.count() == 1
     assert call(rig, "GET")[0] == 405 and call(rig, "POST", body=GOOD)[0] == 405
 

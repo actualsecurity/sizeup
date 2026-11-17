@@ -1,6 +1,6 @@
 """Device push (#563): the SNS client against a fake SNS on this machine, registration, the fan-out by kind and role,
-quiet hours, caps and kill switches, the scrub, the outbound guard, stale endpoints, and the ntfy path left alone. No real
-AWS, Apple or Google call: every ARN, token, account and address here is invented."""
+quiet hours, caps and kill switches, the scrub, the outbound guard, stale endpoints, and the ntfy path left alone.
+No real AWS, Apple or Google call: every ARN, token, account and address here is invented."""
 from __future__ import annotations
 
 import json
@@ -87,8 +87,9 @@ class FakeSns:
             else:
                 arn = f"arn:aws:sns:us-east-1:{ACCT}:endpoint/{plat}/{app.split('/')[2]}/{uuid.uuid4()}"
                 self.endpoints[arn] = {"app": app, "token": tok, "enabled": True}
-            return 200, (f"<CreatePlatformEndpointResponse {ns}><CreatePlatformEndpointResult><EndpointArn>{arn}</EndpointArn>"
-                         f"</CreatePlatformEndpointResult></CreatePlatformEndpointResponse>")
+            return 200, (f"<CreatePlatformEndpointResponse {ns}><CreatePlatformEndpointResult>"
+                         f"<EndpointArn>{arn}</EndpointArn></CreatePlatformEndpointResult>"
+                         f"</CreatePlatformEndpointResponse>")
         if act == "SetEndpointAttributes":
             self.endpoints[f["EndpointArn"]]["enabled"] = f.get("Attributes.entry.1.value") != "false"
             return 200, f"<SetEndpointAttributesResponse {ns}/>"
@@ -99,7 +100,8 @@ class FakeSns:
             arn = f["TargetArn"]
             if arn in self.disabled:
                 return self._err("EndpointDisabled", 400, "Endpoint is disabled")
-            return 200, f"<PublishResponse {ns}><PublishResult><MessageId>m-{len(self.calls)}</MessageId></PublishResult></PublishResponse>"
+            return 200, (f"<PublishResponse {ns}><PublishResult><MessageId>m-{len(self.calls)}</MessageId>"
+                         f"</PublishResult></PublishResponse>")
         return self._err("InvalidAction")
 
     def published(self) -> list[dict]:
@@ -134,12 +136,13 @@ class Rig:
         self.fake = fake
         self.db = tmp_path / "hub.sqlite"
         self.service = svc.PushService(PushDevices(self.db, clock=lambda: self.now[0]), apps,
-                                       snsmod.Sns("us-east-1", fake.url, CREDS), settings=lambda: self.policy,
+                                       snsmod.Sns("us-east-1", fake.url, lambda: CREDS), settings=lambda: self.policy,
                                        role_of=self.PEOPLE.get, clock=lambda: self.now[0], log=self.logs.append)
 
     def device(self, n: int, email: str, platform="ios", env="sandbox", prefs=None, quiet=None):
         token = IOS_TOKEN[:-2] + f"{n:02d}" if platform == "ios" else FCM_TOKEN + str(n)
-        return self.service.register(f"dev-{n:04d}", email, platform, env if platform == "ios" else "", token, prefs, quiet)
+        return self.service.register(f"dev-{n:04d}", email, platform, env if platform == "ios" else "", token, prefs,
+                                     quiet)
 
     def targets(self, kind="alerts", title="Working fire", body="100 Example Ave", **kw) -> set[str]:
         before = len(self.fake.published())
@@ -156,13 +159,14 @@ def rig(tmp_path, fake):
 # -- the SNS client ------------------------------------------------------------------------------------------------
 
 def test_the_client_signs_every_call_and_never_sends_the_token_in_a_header(fake):
-    c = snsmod.Sns("us-east-1", fake.url, CREDS)
+    c = snsmod.Sns("us-east-1", fake.url, lambda: CREDS)
     arn = c.create_endpoint(SANDBOX_APP, IOS_TOKEN, "dev-0001")
     c.set_attributes(arn, {"Token": IOS_TOKEN, "Enabled": "true"})
     c.publish(arn, {"default": "t", "APNS_SANDBOX": "{}"}, {"AWS.SNS.MOBILE.APNS.PRIORITY": "10"})
     c.delete_endpoint(arn)
     assert fake.actions() == ["CreatePlatformEndpoint", "SetEndpointAttributes", "Publish", "DeleteEndpoint"]
-    assert all(h["Authorization"].startswith("AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/") and "/sns/aws4_request" in h["Authorization"]
+    assert all(h["Authorization"].startswith("AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/")
+               and "/sns/aws4_request" in h["Authorization"]
                for h in fake.headers)
     assert all(IOS_TOKEN not in json.dumps(h) for h in fake.headers)
     assert fake.calls[0]["Version"] == "2010-03-31" and fake.calls[0]["CustomUserData"] == "dev-0001"
@@ -171,7 +175,7 @@ def test_the_client_signs_every_call_and_never_sends_the_token_in_a_header(fake)
 def test_an_sns_refusal_is_an_error_with_its_code(fake):
     fake.fail["Publish"] = (400, "EndpointDisabled")
     with pytest.raises(snsmod.SnsError) as e:
-        snsmod.Sns("us-east-1", fake.url, CREDS).publish("arn:x", {"default": "t"})
+        snsmod.Sns("us-east-1", fake.url, lambda: CREDS).publish("arn:x", {"default": "t"})
     assert e.value.code == "EndpointDisabled" and e.value.status == 400
 
 
@@ -184,7 +188,8 @@ def test_the_platform_applications_come_from_optional_variables_and_fail_closed(
     assert (a.apns_sandbox, a.apns, a.fcm, a.critical, a.endpoint) == ("", PROD_APP, "", True, "")
     assert a.app("ios", "sandbox") == "" and a.app("ios", "production") == PROD_APP and a.app("android") == ""
     assert snsmod.Apps.from_env({"SIZEUP_SNS_ENDPOINT": "http://127.0.0.1:9"}).endpoint == "http://127.0.0.1:9"
-    assert snsmod.endpoint_platform(f"arn:aws:sns:us-east-1:{ACCT}:endpoint/APNS_SANDBOX/example-ios-dev/abc") == "APNS_SANDBOX"
+    sandbox = f"arn:aws:sns:us-east-1:{ACCT}:endpoint/APNS_SANDBOX/example-ios-dev/abc"
+    assert snsmod.endpoint_platform(sandbox) == "APNS_SANDBOX"
     assert snsmod.endpoint_platform(SANDBOX_APP) == ""
 
 
@@ -303,7 +308,8 @@ def fleet(rig):
 def test_alerts_and_intel_reach_everyone_signed_in_status_only_admins(rig):
     fleet(rig)
     assert rig.targets("alerts") == {"dev-0001", "dev-0002", "dev-0003"}
-    assert rig.targets("intel", "PD · Smoke reported · Port Chester", "100 Example Ave · 14:32 · high") == {"dev-0001", "dev-0002", "dev-0003"}
+    three = {"dev-0001", "dev-0002", "dev-0003"}
+    assert rig.targets("intel", "PD · Smoke reported · Port Chester", "100 Example Ave · 14:32 · high") == three
     assert rig.targets("status", "Station silent 4 min") == {"dev-0001"}
 
 
@@ -328,7 +334,8 @@ def test_quiet_hours_hold_intel_and_status_never_alerts_or_dispatch(rig):
     rig.now[0] = NIGHT
     assert rig.targets("intel", "PD · Smoke reported", "100 Example Ave") == set()
     assert rig.targets("status", "Station silent") == set()
-    assert rig.targets("alerts") == {"dev-0001"} and rig.targets("dispatch", "Structure fire", "100 Example Ave") == {"dev-0001"}
+    assert rig.targets("alerts") == {"dev-0001"}
+    assert rig.targets("dispatch", "Structure fire", "100 Example Ave") == {"dev-0001"}
     rig.now[0] = NOON                                                   # 07:00 there: quiet hours are over
     assert rig.targets("intel", "PD · Smoke reported", "100 Example Ave") == {"dev-0001"}
 
@@ -409,7 +416,8 @@ def test_critical_needs_the_entitlement_and_an_emergency_or_a_dispatch(tmp_path,
         r.service.deliver(kind, title, "100 Example Ave", priority=prio)
         return fake.published()[-1]["message"]["APNS_SANDBOX"]["aps"]
     crit = last("alerts", 5)
-    assert crit["interruption-level"] == "critical" and crit["sound"] == {"critical": 1, "name": "default", "volume": 1.0}
+    assert crit["interruption-level"] == "critical"
+    assert crit["sound"] == {"critical": 1, "name": "default", "volume": 1.0}
     assert last("alerts", 4)["interruption-level"] == "time-sensitive"
     assert last("dispatch", 3, "Structure fire")["interruption-level"] == "critical"
     assert last("intel", 5, "PD · Smoke reported")["interruption-level"] == "time-sensitive"
@@ -420,30 +428,32 @@ def test_critical_needs_the_entitlement_and_an_emergency_or_a_dispatch(tmp_path,
 
 def test_android_gets_a_high_priority_data_message_with_the_same_four_fields(rig, fake):
     rig.device(1, "view@example.org", platform="android")
-    rig.service.deliver("alerts", "Working fire", "100 Example Ave", priority=5)
+    rig.service.deliver("alerts", "Working fire", "heard: anything", priority=5, who={"address": "100 Example Ave"})
     p = fake.published()[0]
     msg = p["message"]["GCM"]["fcmV1Message"]["message"]
-    assert msg["data"] == {"kind": "alerts", "id": msg["data"]["id"], "title": "Working fire", "body": "100 Example Ave"}
+    assert msg["data"] == {"kind": "alerts", "id": msg["data"]["id"], "title": "Working fire \u00b7 100 Example Ave",
+                           "body": "100 Example Ave"}
     assert msg["android"]["priority"] == "high" and "notification" not in msg and p["attrs"] == {}
 
 
-def test_the_text_is_scrubbed_like_ntfy_and_a_failing_one_becomes_the_generic_push(rig, fake):
+def test_a_title_that_fails_the_scrub_becomes_the_generic_push(rig, fake):
     rig.device(1, "admin@example.org")
-    cases = [("Unit down", "Radio 4412090 keyed up"),                    # a radio ID
-             ("Vehicle", "plate ABC1234 near 100 Example Ave"),          # a plate
-             ("Caller", "born 03/04/1980 at 100 Example Ave")]           # a date of birth
-    for i, (t, b) in enumerate(cases):
+    cases = [("Unit down radio 4412090", "x"),                    # a radio ID
+             ("Vehicle ABC1234", "x"),                            # a plate
+             ("Caller born 03/04/1980", "x"),                     # a date of birth
+             ("Call 914-555-0123", "x")]                          # a phone number
+    for t, b in cases:
         rig.now[0] += 100
         rig.service.deliver("alerts", t, b)
         a = fake.published()[-1]["message"]["APNS_SANDBOX"]["aps"]["alert"]
-        assert a == {"title": "sizeup alert", "body": "Open sizeup for details"}, (t, b)
-    assert not any("4412090" in json.dumps(p) or "ABC1234" in json.dumps(p) for p in fake.published())
+        assert a == {"title": "sizeup alert", "body": "Open sizeup for details"}, t
+    assert not any(x in json.dumps(p) for p in fake.published() for x in ("4412090", "ABC1234", "555-0123"))
 
 
 def test_the_talker_the_dongle_and_every_link_stay_out_and_the_event_number_stays_in(rig, fake):
     rig.device(1, "admin@example.org")
     rig.service.deliver("intel", "PD · Smoke reported · Port Chester",
-                        "100 Example Ave · 14:32 · high\nListen: https://bucket.example.org/listen/abc.m4a?X-Amz-Signature=zz",
+                        "100 Example Ave · 14:32 · high\nListen: https://bucket.example.org/listen/abc.m4a?sig=zz",
                         click="https://hub.example.org/radio?view=all&intel=77",
                         who={"talker": "Jordan Example", "dongle": "SDR 00000102", "incident": "26-000015"})
     pay = fake.published()[0]["message"]["APNS_SANDBOX"]
@@ -454,7 +464,8 @@ def test_the_talker_the_dongle_and_every_link_stay_out_and_the_event_number_stay
 
 def test_the_id_is_the_event_the_intel_link_names_else_a_random_reference():
     assert content.message_id("intel", "https://h.example.org/radio?view=all&intel=77") == "intel:77"
-    assert content.message_id("status").startswith("status:") and content.message_id("status") != content.message_id("status")
+    first, second = content.message_id("status"), content.message_id("status")
+    assert first.startswith("status:") and first != second
     assert content.message_id("alerts", ref="inc-9") == "inc-9"
 
 
@@ -463,7 +474,8 @@ def test_the_id_is_the_event_the_intel_link_names_else_a_random_reference():
 def test_a_disabled_endpoint_is_removed_with_its_row(rig, fake):
     a, b = rig.device(1, "admin@example.org"), rig.device(2, "disp@example.org")
     fake.disabled.add(a["endpoint"])
-    assert rig.targets("alerts") == {"dev-0002"}                        # the disabled one was tried, refused, and removed
+    # the disabled one was tried, refused, and removed
+    assert rig.targets("alerts") == {"dev-0002"}
     assert rig.service.devices.get("dev-0001") is None and rig.service.devices.get("dev-0002") is not None
     assert a["endpoint"] not in fake.endpoints and rig.service.stats["removed"] == 1
     assert rig.targets("alerts", "Second", "100 Example Ave") == {"dev-0002"}
@@ -479,7 +491,8 @@ def test_another_sns_failure_keeps_the_device_and_goes_on_to_the_next(rig, fake)
 
 def test_an_endpoint_of_the_other_platform_is_never_published_to(rig, fake):
     row = rig.device(1, "admin@example.org", env="sandbox")
-    rig.service.devices.put("dev-0001", row["email"], "ios", "production", row["endpoint"], PROD_APP, row["prefs"], None)
+    rig.service.devices.put("dev-0001", row["email"], "ios", "production", row["endpoint"], PROD_APP, row["prefs"],
+                            None)
     assert rig.service.deliver("alerts", "Working fire", "100 Example Ave") == 0 and fake.published() == []
 
 
@@ -495,12 +508,15 @@ def test_a_hand_started_hub_never_pushes_to_real_phones(tmp_path, monkeypatch):
     r = Rig.__new__(Rig)
     r.now, r.policy, r.logs = [NOON], {}, []
     r.service = svc.PushService(PushDevices(tmp_path / "hub.sqlite", clock=lambda: NOON), APPS,
-                                snsmod.Sns("us-east-1", creds=CREDS),         # the real SNS address, no override
+                                # the real SNS address, no override
+                                snsmod.Sns("us-east-1", creds=lambda: CREDS),
                                 role_of=Rig.PEOPLE.get, clock=lambda: NOON, log=r.logs.append)
     r.service.devices.put("dev-0001", "admin@example.org", "ios", "production",
-                          f"arn:aws:sns:us-east-1:{ACCT}:endpoint/APNS/example-ios/abc", PROD_APP, dict(svc.DEFAULT_PREFS), None)
+                          f"arn:aws:sns:us-east-1:{ACCT}:endpoint/APNS/example-ios/abc", PROD_APP,
+                          dict(svc.DEFAULT_PREFS), None)
     r.service.devices.put("dev-0002", "disp@example.org", "ios", "production",
-                          f"arn:aws:sns:us-east-1:{ACCT}:endpoint/APNS/example-ios/def", PROD_APP, dict(svc.DEFAULT_PREFS), None)
+                          f"arn:aws:sns:us-east-1:{ACCT}:endpoint/APNS/example-ios/def", PROD_APP,
+                          dict(svc.DEFAULT_PREFS), None)
     assert r.service.deliver("alerts", "Working fire", "100 Example Ave") == 0
     assert r.service.stats["sent"] == 0 and any("outbound" in m.lower() for m in r.logs)
     with pytest.raises(svc.PushError) as e:                            # registration is refused the same way
@@ -556,7 +572,8 @@ def test_a_device_push_never_touches_an_ntfy_topic_and_the_dispatch_kind_has_non
     p.fan_out("dispatch", "Structure fire", "100 Example Ave")
     rig.service.flush()
     assert len(rig.fake.published()) == 1 and ntfy.sent == []
-    assert notify.KINDS == ("alerts", "status", "intel")                # no ntfy topic, Settings page or fallback for it
+    # no ntfy topic, Settings page or fallback for it
+    assert notify.KINDS == ("alerts", "status", "intel")
 
 
 def test_a_broken_device_path_never_changes_what_ntfy_does(monkeypatch):
@@ -566,8 +583,10 @@ def test_a_broken_device_path_never_changes_what_ntfy_does(monkeypatch):
         def offer(self, *a, **kw):
             raise RuntimeError("boom")
     p.devices = Boom()
-    with pytest.raises(RuntimeError):                                  # fan_out is the seam: the service itself never raises
-        p.notifier(notify.ALERTS).send("MAYDAY", "x")
+    assert p.notifier(notify.ALERTS).send("MAYDAY", "x") is True        # a device path that raises: ntfy still sends
+    p.notifier(notify.ALERTS).flush()
+    assert len(ntfy.sent) == 1
+    ntfy.sent.clear()
     p.devices = svc.PushService(PushDevices(Path("/nonexistent/x/hub.sqlite")), APPS, role_of=lambda e: "admin")
     assert p.notifier(notify.ALERTS).send("MAYDAY", "x") is True        # nothing registered, nothing wrong
     p.notifier(notify.ALERTS).flush()

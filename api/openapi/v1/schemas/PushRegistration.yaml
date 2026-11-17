@@ -3,7 +3,12 @@ required: [platform, token]
 additionalProperties: false
 properties:
   platform: {type: string, enum: [ios, android]}
-  token: {type: string, minLength: 16, maxLength: 1024, description: The APNs device token or the FCM registration token.}
+  token:
+    type: string
+    minLength: 16
+    maxLength: 1024
+    pattern: '^[A-Za-z0-9:_.=-]+$'
+    description: The APNs device token or the FCM registration token.
   environment:
     type: string
     enum: [sandbox, production]

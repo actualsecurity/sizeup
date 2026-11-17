@@ -2753,6 +2753,8 @@ class Editor:
             return out
         if key in (notify.PREALERT_RING, notify.PREALERT_STATUS, notify.PROTECTED):
             return self._notify_protected_op(action, body, op, key, p, cur)
+        if key == "devices":
+            return self._notify_devices_op(action, body, op, cur)
         if key not in notify.KINDS:
             raise CadError("key: alerts, status or intel")
         def said(v) -> str:                          # never the name: the audit log is open to everyone signed in
@@ -2793,6 +2795,33 @@ class Editor:
                            [("system", f"{NOTIFY_SECTION}/{key}", said(old), said(None if new is REMOVE else new))])
         self.cad.log(p.line() + " (Settings changed)")
         return out
+
+    def _notify_devices_op(self, action: str, body: dict, op: str, cur: dict) -> dict:
+        """set {policy: {off?, <kind>: {on?, per_minute?, per_hour?, per_day?}}} (replaces all of it) | reset: the
+        app's device pushes (sizeup/push/service.py, #563): the kill switch per kind and its caps, range-checked there.
+        Admins. Dispatch stays off until `{"dispatch": {"on": true}}` is set here."""
+        from sizeup.push.service import validate_policy
+        old = cur.get("devices")
+        if action == "set":
+            try:
+                new = validate_policy(body.get("policy"))
+            except ValueError as e:
+                raise CadError(str(e)) from None
+            if not new:
+                raise CadError("devices: nothing to set")
+        elif action == "reset":
+            if old is None:
+                raise CadError("device pushes are on their defaults already")
+            new = REMOVE
+        else:
+            raise CadError("action: set or reset")
+        if old == new or (old is None and new is REMOVE):
+            return {"ok": True}
+
+        def said(v) -> str:
+            return json.dumps(v, sort_keys=True) if isinstance(v, dict) else "defaults"
+        return self._commit([(NOTIFY_SECTION, "devices", new)], op,
+                            [("system", f"{NOTIFY_SECTION}/devices", said(old), said(None if new is REMOVE else new))])
 
     def _notify_protected_op(self, action: str, body: dict, op: str, key: str, p, cur: dict) -> dict:
         """The pre-alert topics sizeup subscribes to (prealert_ring / prealert_status: set {topic} | off | reset) and the

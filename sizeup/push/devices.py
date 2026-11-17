@@ -72,7 +72,8 @@ class PushDevices:
     def get(self, device_id: str) -> dict | None:
         with self._lock:
             db = self._conn(False)
-            r = db.execute(f"SELECT {COLUMNS} FROM {TABLE} WHERE device_id = ?", (device_id,)).fetchone() if db else None
+            r = (db.execute(f"SELECT {COLUMNS} FROM {TABLE} WHERE device_id = ?", (device_id,)).fetchone()
+                 if db else None)
         return self._row(r) if r else None
 
     def rows(self) -> list[dict]:
@@ -90,7 +91,9 @@ class PushDevices:
 
     def put(self, device_id: str, email: str, platform: str, env: str, endpoint: str, app: str, prefs: dict,
             quiet: dict | None) -> dict:
-        """Register or replace. Full when this would be device number MAX_DEVICES + 1. FencedWrite when not the leader."""
+        """Register or replace. Full when this would be device number MAX_DEVICES + 1; FencedWrite when not the
+        leader. The count and the insert are two steps under this lock, but the lock is this process's: the fence
+        keeps a second writer out, so the race the count could lose is only between two threads here."""
         now = self.clock()
         with self._lock:
             db = self._conn(True)
