@@ -547,3 +547,45 @@ def plan(rows: list[list[str]], cols: dict[str, int], locate, town_of, today: st
               "approximate": sum(1 for v in entries.values() if v["located"] == "interpolated"),
               "skipped": skipped, "unknown_towns": sum(unknown.values())}
     return {"entries": entries, "counts": counts, "unresolved": unresolved, "unknown_towns": sorted(unknown)}
+
+
+# ----------------------------------------------------------------------------------- the maps' layer
+
+def map_points(entries: list[dict]) -> dict:
+    """The department's located names for the maps' "Common places" layer (static/common-places.js; GET
+    /api/cad/places/map) as GeoJSON: one point per spot. A site once, at its primary (every address of it listed); an
+    entry with no point never; names at one point (two businesses at one address) one feature together. Each feature:
+    id (its number), properties {label: the first name, "+N" for more, places: [{name, addresses, town, hand}]} (hand:
+    made by hand in Settings, its addresses: where it was picked when that is not its name). Alphabetical by name."""
+    from sizeup.cad.sources import proper_case
+    spots: dict[tuple[float, float], list[dict]] = {}
+    for e in entries:
+        if e.get("lat") is None or e.get("lon") is None:
+            continue
+        if e.get("site") and e.get("site") != e.get("key") and not e.get("site_addresses"):
+            continue                                   # one of a site's other addresses: the primary stands for it
+        hand = not is_imported(e.get("key") or "", e)
+        if hand:
+            name = e.get("name") or ""
+            at = e.get("label") or ""
+            addresses = [at] if at and name_key(at) != name_key(name) else []
+        else:
+            name = e.get("label") or proper_name(e.get("name") or "")
+            addresses = [proper_case(a) for a in (e.get("site_addresses") or [e.get("address") or ""]) if a]
+        if not name_key(name):
+            continue
+        spot = (round(float(e["lat"]), 5), round(float(e["lon"]), 5))
+        spots.setdefault(spot, []).append({"name": name, "addresses": addresses, "town": e.get("muni") or "", "hand": hand})
+    features = []
+    for (lat, lon), places in sorted(spots.items(), key=lambda kv: min(p["name"].lower() for p in kv[1])):
+        places.sort(key=lambda p: (p["name"].lower(), p["hand"]))
+        seen, one = set(), []
+        for p in places:                               # one name twice at one spot (made by hand and the county's)
+            if name_key(p["name"]) not in seen:
+                seen.add(name_key(p["name"]))
+                one.append(p)
+        label = one[0]["name"] + (f" +{len(one) - 1}" if len(one) > 1 else "")
+        features.append({"type": "Feature", "id": len(features),
+                         "geometry": {"type": "Point", "coordinates": [lon, lat]},
+                         "properties": {"label": label, "places": one}})
+    return {"type": "FeatureCollection", "features": features}

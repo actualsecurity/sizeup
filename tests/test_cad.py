@@ -23,7 +23,7 @@ import pytest
 from sizeup.cad import dispatcher, export, lists, runcards
 from sizeup.cad.api import CadApi
 from sizeup.cad.service import Cad, Settings
-from sizeup.cad.store import SCHEMA_VERSION, TZ, CadError, Store
+from sizeup.cad.store import CLOSED_HOURS, CLOSED_MAX, SCHEMA_VERSION, TZ, CadError, Store
 from sizeup.cad.transmit import AudioPttTransmitter, NullTransmitter, make_transmitter
 from sizeup.config import ConfigError, load
 from sizeup.dispatch import parse
@@ -510,7 +510,24 @@ def test_open_non_emergency_events_survive_restarts_however_old(tmp_path):
     cad2 = make_cad(tmp_path, clock=clock)
     listed = {i["id"]: i for i in cad2.store.incidents()}
     assert iid in listed and listed[iid]["emergency"] is False and listed[iid]["until_at"] == local(2026, 10, 9, 17, 0)
-    assert closed not in listed                          # closed ones drop off after 12 h
+    assert closed not in listed                          # closed ones drop off after 24 h
+
+
+def test_the_queue_keeps_closed_events_for_24_hours_the_newest_40(tmp_path):
+    clock = Clock(local(2026, 10, 7, 8, 0))
+    cad = make_cad(tmp_path, clock=clock)
+    ids = []
+    for _ in range(CLOSED_MAX + 1):
+        ids.append(cad.create({"type": "NOTIF"})["id"])
+        cad.close(ids[-1], {"disposition": "COMPLETE"})
+        clock.t += 60
+    listed = [i["id"] for i in cad.store.incidents()]
+    assert listed == ids[::-1][:CLOSED_MAX]                # newest first, capped: the oldest one left off
+    assert CLOSED_HOURS == 24 and cad.state()["closed_hours"] == 24       # the header's "Closed 24h"
+    clock.t = local(2026, 10, 8, 7, 59)                  # 23 h later: the newest still there
+    assert ids[-1] in [i["id"] for i in cad.store.incidents()]
+    clock.t = local(2026, 10, 8, 8, 42)                  # 24 h after the newest closed
+    assert cad.store.incidents() == []
 
 
 # -- dispatch wording and audio ------------------------------------------------------------------------------

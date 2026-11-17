@@ -63,6 +63,10 @@ record (the hub, or all-in-one), on top of the incident sources (sizeup/cad/sour
                incident a person reopened ("close"), are left alone by automation from then on. A person can always
                work the call by hand in either mode
     PCFD       nothing automatic: feed incidents arrive queued (sources.py), as before
+    by hand    a dispatch or an upgrade sent from this CAD (tones and voice: POST .../dispatch, .../upgrade) only in PCFD
+               mode: in 60 Control mode the county dispatches, the page hides the Dispatch card and the server refuses
+               them (hand_dispatch(); fails closed: a mode that can't be read is 60 Control's). The rest of working the
+               call by hand stays: accepting, notes, units' statuses, Add unit (heard responding), attaching
 """
 
 from __future__ import annotations
@@ -81,6 +85,8 @@ from sizeup.cad.store import OPEN, PERSON, TZ, CadError, OosLocked
 MODES = {"60control": "60 Control dispatching", "pcfd": "PCFD dispatching"}
 SHORT = {"60control": "60 Control", "pcfd": "PCFD"}
 DEFAULT = "60control"
+HAND_DISPATCH = "pcfd"            # the one mode a person dispatches in from this CAD
+NOT_HERE = "60 Control dispatching: switch to PCFD to dispatch"
 SECTION, KEY = "dispatch_mode", "mode"
 ASSIGN_WINDOW_S = 20 * 60.0
 SOURCES = ("county", "radio")
@@ -179,6 +185,11 @@ class AutoDispatch:
             raise CadError(f"mode: {' or '.join(MODES)}")
         with self._lock:
             return self._set_mode(mode, operator)
+
+    def hand_dispatch(self) -> None:
+        """A dispatch or an upgrade by hand: refused unless in PCFD mode (CadError, the operator's 400)."""
+        if self.mode() != HAND_DISPATCH:
+            raise CadError(NOT_HERE)
 
     def _set_mode(self, mode: str, operator: str) -> dict:
         old = self.mode()

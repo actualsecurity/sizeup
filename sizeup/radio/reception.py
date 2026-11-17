@@ -764,6 +764,8 @@ class Tests:
                 refuse = "protected: not lendable"
             elif owed and owed["sdr"] == x["serial"]:
                 refuse = f"{owed['was']} not restored yet"
+            elif x.get("own"):                     # an antenna group's stand-in (sizeup/radio/groups.py)
+                refuse = "standing in (antenna group)"
             out.append({"serial": x["serial"], "name": x.get("name") or x["serial"], "job": job,
                         "present": bool(x.get("present")), "held_by": x.get("held_by"), "protected": why,
                         "refuse": refuse})
@@ -974,6 +976,9 @@ class Tests:
                         "Lend a spare or an airband dongle")
             if row["refuse"]:
                 return f"SDR {name}: {row['refuse']}"
+            locked = getattr(app, "_locked", None)          # antenna groups: a test stays on the dongle's own antenna
+            if locked is not None and (why := next((w for j in plan if (w := locked(j, sdr))), "")):
+                return why
             if getattr(app, "adsb_sdr", "") == sdr:
                 return f"SDR {name} is reserved for the ADS-B receiver"
             if was != OFF and o.get("pause") != was:

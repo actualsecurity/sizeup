@@ -65,6 +65,10 @@ OPERATOR_MAX = 320
 SCHEMA_VERSION = 10        # 6-9 unused (other branches); v10: the department's own codes
 
 OPEN = ("queued", "pending", "active")
+# The queue's Closed section: closed or dismissed in the last CLOSED_HOURS, the newest CLOSED_MAX of them (a day
+# here is well under that; the cap also bounds the radio links the state fetches for them, comms.for_incidents).
+CLOSED_HOURS = 24
+CLOSED_MAX = 40
 SOURCES = ("manual", "60 Control page", "CAD feed", "60 Control radio")    # CAD feed: an external incident source (#297);
 # 60 Control radio: an airport alert level declared on the fire radio (#369, sizeup/airport_watch.py)
 ON_TIMES = {"dispatched": "dispatched_at", "enroute": "enroute_at", "onscene": "onscene_at"}
@@ -1830,7 +1834,7 @@ class Store:
             r["joint_call"] = self.lists.joint_call(r)      # "Rye Brook": their call (their units first)
         return list(by.values())
 
-    def incidents(self, closed_s: float = 12 * 3600, closed_max: int = 20) -> list[dict]:
+    def incidents(self, closed_s: float = CLOSED_HOURS * 3600, closed_max: int = CLOSED_MAX) -> list[dict]:
         """Every open one (queued, pending, active: however old, a road closure can last days),
         plus those closed or dismissed in the last closed_s."""
         cutoff = self.clock() - closed_s

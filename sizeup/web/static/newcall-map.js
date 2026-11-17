@@ -12,8 +12,9 @@
 //                  map eases to it as ↑ / ↓ move.
 //   A click        what is there (GET /api/cad/geocode/here): the nearest address point, intersection and named place,
 //                  each with "Use this location" (it fills Location, "address @ place" for a place, and the cross
-//                  streets); the street under it with "Add as cross street"; or "Use this point" (the pin there, the
-//                  location as typed). A click on another layer's mark (a camera, a hydrant) is that layer's.
+//                  streets), each name the department has at that address too (at_address: "Place here"); the
+//                  street under it with "Add as cross street"; or "Use this point" (the pin there, the location as
+//                  typed). A click on another layer's mark (a camera, a hydrant) is that layer's.
 //   Dragging the pin  moves the point and keeps the address as typed; then asks: the nearest address point's address
 //                  instead, or keep. The address never changes by itself.
 //   Layers         the map's usual Layers box, the "incident" set (maplayers.js, #111): what a viewer sees on an event's
@@ -246,8 +247,9 @@ window.NewCallMap = (() => {
   async function clicked(e) {
     if (!isOpen() || !st.rm) return;
     const map = st.rm.map;
-    // another layer's mark (a camera, a hydrant, a firehouse) has its own box
-    const marks = map.queryRenderedFeatures(e.point).filter((f) => f.source !== "base" && !String(f.layer.id).startsWith("nc-")
+    // another layer's mark (a camera, a hydrant, a firehouse) has its own box; a common place's (common-places.js) is
+    // what is here, as any point
+    const marks = map.queryRenderedFeatures(e.point).filter((f) => f.source !== "base" && !/^(nc|cp)-/.test(String(f.layer.id))
       && (f.layer.type === "symbol" || f.layer.type === "circle"));
     if (marks.length) return;
     const { lat, lng } = e.lngLat;
@@ -264,6 +266,9 @@ window.NewCallMap = (() => {
       if (!m) continue;
       any = true;
       choice(box, m, what, "Use this location", () => use(m));
+      if (k === "address") {             // the names at that address (the county's common places): "120 Example Ave @ ..."
+        for (const p of r.at_address || []) choice(box, p, "Place here", "Use this location", () => use(p));
+      }
     }
     if (r.street && r.street.name) {
       any = true;
