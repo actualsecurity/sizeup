@@ -490,7 +490,7 @@ def analyze(tx: Tx, index: atc.TelephonyIndex, planes: Sequence[dict], before: S
     # matched on the channel, has (atc.reading), else the whole callsign
     known = [(r.get("aircraft") or {}).get("callsign", "") for r in before
              if (r.get("aircraft") or {}).get("status") in ("confirmed", "probable")]
-    mentions = [atc.reading(m, planes, known) for m in atc.find_mentions(text, index)]
+    mentions = [r for m in atc.find_mentions(text, index) if (r := atc.reading(m, planes, known)).alone]
     if not mentions:
         return None
     norm = atc.normalize(tx.text)
