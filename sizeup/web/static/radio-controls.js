@@ -1067,7 +1067,7 @@ window.RadioControls = (() => {
     return form;
   }
 
-  async function postGroups(groups, confirm) {
+  async function postGroups(groups, confirm) {    // confirm: the station's ask, word for word, as confirmed
     if (ag.busy || ro()) return;
     ag.busy = true;
     ag.error = "";
@@ -1077,16 +1077,18 @@ window.RadioControls = (() => {
     const timer = setTimeout(() => ctl.abort(), 15000);
     try {
       const r = await fetch("/api/antenna-groups", { method: "POST", headers: { "Content-Type": "application/json" },
-                                                     body: JSON.stringify({ groups, ...(confirm ? { confirm: true } : {}) }),
+                                                     body: JSON.stringify({ groups, ...(confirm ? { confirm } : {}) }),
                                                      signal: ctl.signal });
       if (r.ok) ag.edit = null;
       else {
         const why = ((await r.json().catch(() => ({}))).error) || `refused (${r.status})`;
-        // a save that stops a running fire job, or ranks fire jobs against the pinned order: the person says so
-        if (!confirm && why.startsWith("confirm: ")) {
+        // a save that stops a running fire job, or ranks fire jobs against the pinned order: the person says so to
+        // that very ask; if the station's ask changed meanwhile (a dongle dropped) it comes back and is asked again
+        if (why.startsWith("confirm: ") && why.slice(9) !== confirm) {
           clearTimeout(timer);
           ag.busy = false;
-          if (await UI.confirm(why.slice(9), { ok: "Save anyway", danger: true })) return postGroups(groups, true);
+          const ask = why.slice(9);
+          if (await UI.confirm((confirm ? "Changed since: " : "") + ask, { ok: "Save anyway", danger: true })) return postGroups(groups, ask);
           ag.key = "";
           return renderGroups();
         }

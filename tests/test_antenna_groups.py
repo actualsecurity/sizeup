@@ -440,7 +440,7 @@ def test_a_group_deleted_during_a_shortage_its_job_waits_on_its_own_dongle_again
     assert app.set_antenna_groups([GROUPS[1]]) == "confirm: Saving stops South 2 (a dongle of its group is gone)."
     assert app.groups == [antenna.Group("UHF", tuple(UHF), (P25, "South 2", "FG1")), antenna.Group(
         "700", tuple(M700), ("MRRS 770", "MRRS 773"))]                     # nothing saved without the confirm
-    assert app.set_antenna_groups([GROUPS[1]], confirm=True) is None      # UHF deleted
+    assert app.set_antenna_groups([GROUPS[1]], confirm="Saving stops South 2 (a dongle of its group is gone).") is None
     assert on(app, "FG1") == "uhf-c" and on(app, "South 2") == "uhf-b" and not app._own   # waits for V4, as before
     assert "sdr: South 2 waits on SDR V4 again (no antenna group)" in logs
 
@@ -565,23 +565,6 @@ def test_a_flapping_dongle_gets_its_job_back_only_after_staying_longer_each_time
     assert any("gone again" in x and "stayed 120 s" in x for x in logs)
 
 
-def test_a_group_move_never_resets_a_flapping_systems_hold(tmp_path):
-    from tests.test_p25_systems import ask_system, service
-    usb = [(0, "v4"), (1, "pd-a"), (2, "pd-b")]
-    _county, mrrs, pop, logs, _d = service(tmp_path, found=lambda: list(usb))
-    ask_system(tmp_path, {0: "pd-a", 1: "pd-b"})
-    assert mrrs.step(100.0)["state"] == "ok"
-    usb.remove((1, "pd-a"))
-    for t in (106.0, 107.0, 108.0, 109.0):
-        mrrs.step(t)
-    assert mrrs.status["state"] == "absent" and mrrs.proc is None
-    mrrs.flaps, mrrs.hold_until, mrrs.back_at = 2, 400.0, None              # as a flapping dongle left it
-    ask_system(tmp_path, {0: "pd-b"}, seq=2)                                # an antenna group: the stand-in
-    st = mrrs.step(120.0)
-    assert st["state"] == "absent" and "held back" in st["detail"] and mrrs.flaps == 2 and len(pop.started) == 1
-    assert mrrs.step(401.0)["state"] == "ok" and len(pop.started) == 2
-
-
 def test_the_county_given_another_dongle_while_it_waits_starts_at_once(tmp_path):
     from tests.test_p25_systems import ask_county, service
     county, _mrrs, pop, _logs, _d = service(tmp_path)
@@ -599,7 +582,7 @@ def test_a_save_that_would_stop_a_running_fire_job_or_ranks_fire_jobs_wrong_is_a
     why = app.set_antenna_groups(swapped)
     assert why == ("confirm: UHF ranks Fire/EMS 15 below South 2: in a fallback the higher one takes the other's "
                    "dongle.") and app.groups[0].jobs == (P25, "South 2", "FG1")
-    assert app.set_antenna_groups(swapped, confirm=True) is None and app.groups[0].jobs == ("South 2", P25, "FG1")
+    assert app.set_antenna_groups(swapped, confirm=why[9:]) is None and app.groups[0].jobs == ("South 2", P25, "FG1")
     assert app.set_antenna_groups(GROUPS) is None
     plugged[:] = [d for d in plugged if d[2] != "uhf-a"]
     app._sdr_arrivals()
@@ -641,3 +624,98 @@ def test_a_corrupt_groups_file_is_said_loudly_and_shown(rig, tmp_path):
     r.at(0, status=st)
     (a,) = r.h.alerts()
     assert a["key"] == "group" and a["title"] == "Antenna groups dropped" and "every dongle unlocked" in a["text"]
+
+
+
+# -- the re-review (#609 at ec0e5fd): a confirm for one ask only, stale stand-ins, a person's switch starts fresh --------
+
+def test_a_confirm_is_for_the_ask_confirmed_and_a_changed_ask_comes_back(rig):
+    plugged, logs, make = rig
+    app = grouped(make)
+    swapped = [{**GROUPS[0], "jobs": ["South 2", P25, "FG1"]}, GROUPS[1]]
+    first = app.set_antenna_groups(swapped)[9:]
+    assert first == "UHF ranks Fire/EMS 15 below South 2: in a fallback the higher one takes the other's dongle."
+    plugged[:] = [d for d in plugged if d[2] != "uhf-b"]                   # meanwhile South 2's dongle drops
+    app._sdr_arrivals()
+    assert on(app, "South 2") == "uhf-c"
+    reorder = [{**GROUPS[0], "jobs": [P25, "FG1", "South 2"]}, GROUPS[1]]
+    ask = app.set_antenna_groups(reorder)[9:]
+    assert ask.startswith("Saving stops South 2")
+    # the person confirmed an earlier, other ask: refused, with the ask as it is now
+    assert app.set_antenna_groups(reorder, confirm="UHF ranks South 2 below FG1: in a fallback the higher one takes "
+                                                   "the other's dongle.") == "confirm: " + ask
+    assert app.set_antenna_groups(reorder, confirm=True) == "confirm: " + ask        # (no blanket yes)
+    assert on(app, "South 2") == "uhf-c" and app.groups[0].jobs == (P25, "South 2", "FG1")
+    assert app.set_antenna_groups(reorder, confirm=ask) is None and on(app, "South 2") is None
+    assert f"sdr: antenna groups saved with a confirm: {ask}" in logs
+    from sizeup.cad.api import summarize
+    s, _ = summarize("/api/antenna-groups", {"groups": reorder, "confirm": ask}, {}, None)
+    assert s.endswith(f"· confirmed: {ask}") and s.startswith("Antenna groups: UHF (3 SDRs: Fire/EMS 15 > FG1 > South 2)")
+
+
+def test_the_station_page_sends_the_ask_back_word_for_word(rig, monkeypatch):
+    from tests.test_p25_systems import _post, _serve
+    plugged, logs, make = rig
+    app = grouped(make)
+    server, url = _serve(app, monkeypatch, access=False)
+    try:
+        swapped = [{**GROUPS[0], "jobs": ["South 2", P25, "FG1"]}, GROUPS[1]]
+        code, body = _post(url + "/api/antenna-groups", {"groups": swapped})
+        ask = json.loads(body)["error"]
+        assert code == 400 and ask.startswith("confirm: UHF ranks")
+        assert _post(url + "/api/antenna-groups", {"groups": swapped, "confirm": True})[0] == 400
+        assert _post(url + "/api/antenna-groups", {"groups": swapped, "confirm": ask[9:]}) == (200, b'{"ok":true}')
+    finally:
+        server.shutdown()
+    js = (appmod.ROOT / "sizeup" / "web" / "static" / "radio-controls.js").read_text()
+    assert "postGroups(groups, ask)" in js and "{ confirm }" in js
+
+
+def test_a_stale_stand_in_is_not_resumed_when_it_isnt_plugged_in(rig, tmp_path):
+    plugged, logs, make = rig
+    app = grouped(make)
+    app.stop()
+    (tmp_path / antenna.STANDINS).write_text(json.dumps({"uhf-c": P25}))    # it stood in for V3 #1 when sizeup stopped
+    plugged[:] = [d for d in DONGLES if d[2] != "uhf-c"]                  # now the stand-in is gone, V3 #1 is back
+    again = make().start()
+    assert on(again, P25) == "uhf-a" and not again._own                     # at once, on its own dongle
+    assert not any("runs Fire/EMS 15 again" in x for x in logs)
+
+
+@pytest.mark.parametrize("group, held", [(False, False), (True, True)])
+def test_a_persons_switch_starts_a_flapping_system_fresh_and_a_group_move_keeps_its_hold(tmp_path, group, held):
+    from tests.test_p25_systems import ask_system, service
+    base = tmp_path
+    usb = [(0, "v4"), (1, "pd-a"), (2, "pd-b")]
+    _county, mrrs, pop, _logs, _d = service(base, found=lambda usb=usb: list(usb))
+    ask_system(base, {0: "pd-a", 1: "pd-b"})
+    assert mrrs.step(100.0)["state"] == "ok"
+    usb.remove((1, "pd-a"))
+    for t in (106.0, 107.0, 108.0, 109.0):
+        mrrs.step(t)
+    mrrs.flaps, mrrs.hold_until = 2, 400.0                              # as a flapping dongle left it
+    from pathlib import Path
+    from sizeup.radio import trunkrecd
+    p = Path(trunkrecd.system_state_path("mrrs", str(base / "state" / "p25_recorder.json")))
+    ask_system(base, {0: "pd-b"}, seq=2)
+    if group:                                                            # as SystemUnitRecorder writes a group move
+        w = json.loads(p.read_text())
+        p.write_text(json.dumps({**w, "group": True}))
+    st = mrrs.step(120.0)
+    assert (st["state"] == "absent" and "held back" in st["detail"]) == held, st
+    assert mrrs.flaps == (2 if group else 0)
+    if group:
+        assert mrrs.step(401.0)["state"] == "ok" and len(pop.started) == 2
+
+
+def test_the_stations_recorder_marks_a_group_move_in_the_systems_wish(rig, tmp_path):
+    from sizeup.radio.recorder import SystemUnitRecorder
+    plugged, logs, make = rig
+    rec = SystemUnitRecorder("mrrs", "MRRS", "trunk-recorder --config=config.json", str(tmp_path),
+                             state_path=str(tmp_path / "w.json"), status_path=str(tmp_path / "s.json"), wait_s=0.0)
+    rec.sources = {0: (type("F", (), {"serial": "m700-b", "label": "x"})(), "MRRS 770")}
+    rec._write_state(True)
+    assert "group" not in json.loads((tmp_path / "w.json").read_text())
+    rec.group_move = True
+    rec._write_state(True)
+    assert json.loads((tmp_path / "w.json").read_text())["group"] is True

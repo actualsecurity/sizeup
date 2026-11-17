@@ -685,7 +685,8 @@ DOES = (
                                                             if b.get("sdr") else "Unnamed the ADS-B receiver's SDR"), "")),
     (re.compile(r"/api/antenna-groups"), lambda m, b, o, c: ("Antenna groups: " + (_clip("; ".join(
         f"{g.get('name')} ({len(g.get('sdrs') or [])} SDRs: {' > '.join(map(str, g.get('jobs') or []))})"
-        for g in b.get("groups") or [] if isinstance(g, dict)), 300) or "none"), "")),
+        for g in b.get("groups") or [] if isinstance(g, dict)), 300) or "none")
+        + (f" · confirmed: {_clip(b.get('confirm'), 300)}" if isinstance(b.get("confirm"), str) and b.get("confirm") else ""), "")),
     (re.compile(r"/api/retranscribe"), lambda m, b, o, c: ("Retranscribe: every recording" if b.get("all")
                                                            else f"Retranscribe: {len(b.get('ids') or [])} recordings", "")),
 )

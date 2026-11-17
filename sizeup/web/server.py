@@ -16,7 +16,7 @@ POST /api/mode {"mode": ...}  one shared dongle: hand it to a channel or trunk-r
 POST /api/adsb-receiver {"sdr": serial | "", "confirm": true}  admins: name (or unname) the station's ADS-B dongle
                         (#235; App.set_adsb_receiver; the hub sends it to the station): reserved for its decoder,
                         never one of the radios (state "sdr".adsb). Without "confirm": true it is refused
-POST /api/antenna-groups {"groups": [{"name", "sdrs": [serial], "jobs": [job, highest priority first]}], "confirm"?}  admins: the
+POST /api/antenna-groups {"groups": [{"name", "sdrs": [serial], "jobs": [job, highest priority first]}], "confirm"?: the ask confirmed}  admins: the
                         station's antenna groups, all of them ([]: none) (App.set_antenna_groups, sizeup/radio/groups.py;
                         the hub sends it to the station): a grouped dongle runs only its group's jobs (state "sdr".groups)
 POST /api/reception {"action": "start" | "stop" | "note", ...}  admins: a reception test (#410, sizeup/radio/reception.py:
@@ -1016,7 +1016,10 @@ def make_handler(scene: bytes, b: Broadcaster, clip: Callable[[str], bytes | Non
                     body = json.loads(self.rfile.read(min(n, 16384)) or b"{}")
                     if not isinstance(body, dict) or not isinstance(body.get("groups"), list):
                         raise ValueError("{groups: [{name, sdrs, jobs}]}")
-                    err = set_groups(body["groups"], confirm=True) if body.get("confirm") is True else \
+                    # "confirm": the station's ask as the person confirmed it, word for word (a changed one is refused)
+                    if body.get("confirm") is not None and not isinstance(body.get("confirm"), str):
+                        raise ValueError("confirm: the text of the ask that was confirmed")
+                    err = set_groups(body["groups"], confirm=body["confirm"][:1000]) if body.get("confirm") else \
                         set_groups(body["groups"])
                 except (ValueError, TypeError) as e:
                     err = f"bad request: {e}"

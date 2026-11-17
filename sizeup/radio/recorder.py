@@ -645,6 +645,8 @@ class SystemUnitRecorder(SystemRecorder, UnitRecorder):
              "at": time.time()}
         if on and srcs and self.until:
             w["until"] = float(self.until)
+        if on and srcs and getattr(self, "group_move", False):
+            w["group"] = True          # an antenna group's move (App._groups_apply): its flap hold carries over
         p = self.state_path
         p.parent.mkdir(parents=True, exist_ok=True)
         tmp = p.with_name(f".{p.name}.{os.getpid()}")

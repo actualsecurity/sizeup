@@ -3666,14 +3666,18 @@ class App:
         """At startup: the stand-ins that ran when sizeup stopped (antenna_standins.json, _save_standins) run again
         where they ran, before anything else starts: an update or a restart in a shortage never gives the job back to
         the dongle that is still gone (the county's trunk-recorder service keeps running on the stand-in, #71). Its
-        owner counts as gone until it has been back GROUP_HOLD_S. One that no longer fits the groups is dropped."""
+        owner counts as gone until it has been back GROUP_HOLD_S. One whose stand-in dongle isn't plugged in now, or
+        that no longer fits the groups, is dropped."""
         p = self._mode_file.with_name(antenna.STANDINS) if self._mode_file else None
         try:
             d = json.loads(p.read_text()) if p and p.is_file() else {}
         except (OSError, ValueError):
             d = {}
         mono = time.monotonic()
+        here = {s for _i, _p, s in sdr_lookup.devices(self.cfg.rtl_fm) if s} if d else set()
         for sd, job in (d.items() if isinstance(d, dict) else ()):
+            if sd not in here:                 # the stand-in itself gone now: the owner runs its own job, as saved
+                continue
             g = antenna.of_sdr(self.groups, sd)
             own = self.assign.get(sd, OFF_MODE)
             owners = [o for o in (g.sdrs if g else ()) if o != sd and self.assign.get(o) == job]
@@ -3843,6 +3847,8 @@ class App:
                 if x is not None and x not in stops:
                     stops.append(x)
         self.switching = True
+        for rt in self.systems.values():           # (trunkrecd: a group's move keeps a flapping system's hold)
+            rt.recorder.group_move = True
         try:
             for job, sd in stops:
                 self._stop_mode(job, f"antenna group: {job} off SDR {self.sdr_name(sd)}", sd)
@@ -3876,6 +3882,8 @@ class App:
                     log(f"sdr: {job} waits on SDR {self.sdr_name(o)} again (no antenna group)")
         finally:
             self.switching = False
+            for rt in self.systems.values():
+                rt.recorder.group_move = False
         self._save_modes()
 
     def _fire_rank(self, job: str) -> int | None:
@@ -3906,13 +3914,14 @@ class App:
             out |= set(plan.values()) - {OFF_MODE}
         return out
 
-    def set_antenna_groups(self, raw, confirm: bool = False) -> str | None:
+    def set_antenna_groups(self, raw, confirm: str = "") -> str | None:
         """Settings > Radios > Receivers (POST /api/antenna-groups {groups: [{name, sdrs, jobs}], confirm?}; admins; the
         hub sends it here as a job): the antenna groups, all of them ([]: none, as before). Refused while what is
         picked now wouldn't fit them (a grouped dongle on a job outside its group, a group's job on a dongle outside
-        it): the person switches that first. Without confirm, a save is asked again ("confirm: ...") when it would stop
-        a running fire job (in a shortage: a group deleted, a stand-in taken out) or ranks fire jobs against the pinned
-        order (the county's trunk-recorder, paging, firegrounds). None, or why not (like set_mode)."""
+        it): the person switches that first. A save that would stop a running fire job (in a shortage: a group deleted,
+        a stand-in taken out) or ranks fire jobs against the pinned order (the county's trunk-recorder, paging,
+        firegrounds) is asked ("confirm: <ask>") and goes through only with confirm = that very <ask>: if what it
+        would stop changed in between (a dongle dropped), the new ask comes back instead. None, or why not."""
         if not self.shared:
             return "each channel has its own dongle: nothing to group"
         if self._groups_file is None:
@@ -3948,8 +3957,13 @@ class App:
             stops = sorted(j for j in now - self._running_after(gs) if self.fire_job(j))
             if stops:
                 asks.insert(0, f"Saving stops {', '.join(stops)} (a dongle of its group is gone)")
-            if asks and not confirm:
-                return self.CONFIRM + ". ".join(asks) + "."
+            ask = ". ".join(asks) + "." if asks else ""
+            if ask and confirm != ask:
+                if confirm:
+                    log(f"sdr: antenna groups not saved: confirmed {confirm!r}, the station now asks {ask!r}")
+                return self.CONFIRM + ask
+            if ask:
+                log(f"sdr: antenna groups saved with a confirm: {ask}")
             try:
                 antenna.save(self._groups_file, gs)
             except OSError as e:
