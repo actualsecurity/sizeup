@@ -1,30 +1,35 @@
 """A page against the county feed's incident it may be: a scored decision, after the strict rules (sizeup/cad/sources.py
 match_all: "match", "street only", "doubled", "misheard") found nothing to join. The feed is the primary, paging the
-backup: the page's own card is the duplicate. The strict rules' guards stand: this only adds evidence they don't read.
+backup. A false join hides a real call, which is far worse than a duplicate card: a join needs the place itself, and
+anything weaker is only a button for a person.
 
     candidates  every open incident a feed has whose feed event is still open (not closed, not in service), dispatched
                 (else first seen) at most WINDOW_S before the page and AFTER_S after it
-    strong      the page joins that incident (no card of its own; "Page hh:mm matched by: ..." on its timeline) when:
+    strong      the page joins that incident (no card of its own; "Page hh:mm matched by: ..." on its timeline) only
+                when ALL of:
                   - unique: it is the only such incident (two open county calls in the window: a person picks)
                   - no page is on it yet
-                  - the page's street is exactly the feed's (name, directions before and after, suffix; no two
-                    different known towns). A street the page misheard ("snapped") is the strict "misheard" rule's,
-                    with its apparatus bar: weak at most here
-                  - the same call by time: the page within STRONG_S (sources.SAME_CALL_S) of the feed's dispatch
+                  - the street exactly the feed's (exact_street: the same name, directions before and after, and the
+                    same suffix, said on both); a street the page misheard ("snapped") is weak at most
+                  - the feed's location has a house number
+                  - the feed is fresh: its last report "ok" and recent (the page's own event may simply be late)
+                  - the page within STRONG_S (sources.SAME_CALL_S) of the feed's dispatch
                   - nothing against it (below)
-                  - and at least one of: the same named place (the feed's "@NAME", the department's common place at
-                    the feed's address or its aliases, #575/#584/#612) said on the page; a cross street the page says
-                    is one of the feed's block's; the house number the same, or said twice and run together ("412412"
-                    for 412); the same family of call (gas, CO, a building fire or alarm, a vehicle, ...)
-    against     the house number another one ("88" for 412; a digit in or out on an exactly right street is another
-                house too, as the "misheard" rule has it: only a misheard street's number may be misread); the page
-                names another of the department's places on that street; both have cross streets and none in common;
-                both types known and of no common family; both name apparatus and none in common (one building, two
-                calls); another known town
+                  - and the PLACE ITSELF: the named place (the feed's "@NAME", the department's common place at the
+                    feed's address or its aliases, #575/#584/#612) said on the page, or the house number the same or
+                    said twice and run together ("412412" for 412). A cross street, the family of call or being the
+                    only open call are supporting evidence only (shown), never enough
+    against     on the street as typed, any house number but the same or doubled (one digit off, "418" or "413" for
+                412, is the house next door); on a misheard street another number ("near" stays neutral there, a digit
+                in or out is for it); another of the department's places on that street named; cross streets with none
+                in common; types of no common family; apparatus on both sides, none in common (one building, two
+                calls); another town named; a mutual-aid page ("mutual aid", "to the City of ...") against an event
+                that is not mutual aid
     weak        the street the same (or snapped), not strong, at most one thing against it and never another house
-                number or another town: the page makes its own card, which offers "Merge into #N" (a person decides,
-                Sources.merge_page; undone by unmerge_page)
-    none        anything else: the strict rules' "possibly the same" notes, as before
+                number, another town or mutual aid: the page makes its own card exactly as before (its notes, the
+                dispatch mode's handling unchanged), and the card shows "Merge into #N" (a person decides,
+                Sources.merge_page; unmerge_page undoes it). Kept in page_merges only: never a "possibly the same" note
+    none        anything else
 
 Only ever a page's location (speech-to-text) against a feed's typed one. Pure: Sources gathers the incidents."""
 
@@ -114,14 +119,17 @@ def says_name(text_words: list[str], name: str) -> bool:
 class Evidence:
     """One feed incident against the page: for (what joins it), against (what says another call), and the verdict."""
     inc: dict
-    street: str = ""                                  # "" | "same" | "snapped" (a misheard street: the map's spelling)
+    street: str = ""                                  # "" | "same" (exact_street) | "snapped" (misheard: the map's)
     number: str = ""                                  # number_fit's
+    feed_numbered: bool = False                       # the feed's location has a house number
     place: str = ""                                   # the named place said on the page (for)
     other_place: str = ""                             # another place on that street said on the page (against)
     cross: str = ""                                   # "" | "match" | "differ"
     family: str = ""                                  # "" | "same" | "differ"
     units: str = ""                                   # "" | "differ" (both name apparatus, none in common)
     town: str = ""                                    # "" | "differ"
+    mutual: str = ""                                  # "" | "differ" (a mutual-aid page, an event that isn't)
+    fresh: bool = False                               # the feed's last report ok and recent
     taken: bool = False                               # a page is on it already
     lag_s: float = 0.0                                # the page's time - the feed's dispatch
     decision: str = "none"
@@ -131,25 +139,31 @@ class Evidence:
         return self.number in ("exact", "doubled") or (self.number == "misread" and self.street == "snapped")
 
     def _number_against(self) -> bool:
-        return self.number == "other" or (self.number == "misread" and self.street == "same")
+        if self.street == "same":
+            return self.number in ("misread", "near", "other")
+        return self.number == "other"
+
+    def _the_place(self) -> bool:
+        """The place itself: its name said, or its house number (the same, or said twice)."""
+        return bool(self.place) or self.number in ("exact", "doubled")
 
     def pros(self) -> list[str]:
         out = []
         if self.place:
             out.append(f"place {self.place}")
-        if self.cross == "match":
-            out.append("cross street")
         if self._number_for():
             out.append({"exact": "house number", "doubled": "house number said twice",
                         "misread": "house number (a digit misheard)"}[self.number])
+        if self.cross == "match":
+            out.append("cross street")
         if self.family == "same":
             out.append("type family")
         return out
 
     def kinds(self) -> list[str]:
         """The evidence's kinds, for the log (never a location or a name)."""
-        return ["street", *(k for k, on in (("place", self.place), ("cross", self.cross == "match"),
-                                             ("number", self._number_for()), ("type", self.family == "same")) if on)]
+        return ["street", *(k for k, on in (("place", self.place), ("number", self._number_for()),
+                                             ("cross", self.cross == "match"), ("type", self.family == "same")) if on)]
 
     def cons(self) -> list[str]:
         out = []
@@ -165,6 +179,8 @@ class Evidence:
             out.append("other units")
         if self.town == "differ":
             out.append("another town")
+        if self.mutual == "differ":
+            out.append("mutual aid")
         return out
 
 
@@ -175,9 +191,11 @@ def decide(evs: list[Evidence]) -> Evidence | None:
     for e in evs:
         pros, cons = e.pros(), e.cons()
         timely = -STRONG_S <= e.lag_s <= STRONG_S
-        if not e.street or e.town == "differ" or e._number_against() or len(cons) > 1:
+        if (not e.street or e.town == "differ" or e.mutual == "differ" or e._number_against()
+                or len(cons) > 1):
             e.decision = "none"
-        elif unique and not e.taken and e.street == "same" and timely and not cons and pros:
+        elif (unique and not e.taken and e.street == "same" and e.feed_numbered and e.fresh and timely and not cons
+              and e._the_place()):
             e.decision = "strong"
         else:
             e.decision = "weak"
@@ -188,10 +206,26 @@ def decide(evs: list[Evidence]) -> Evidence | None:
             e.why = [street, *pros] + [f"not joined: {x}" for x in (
                 *([] if unique else ["another open county call"]), *(["a page is on it"] if e.taken else []),
                 *([] if e.street == "same" else ["the street misheard"]),
+                *([] if e.feed_numbered else ["no house number from the county"]),
+                *([] if e.fresh else ["the county feed not fresh"]),
                 *([] if timely else [f"{round(abs(e.lag_s) / 60)} min from the county's dispatch"]),
-                *cons, *([] if pros else ["nothing else in common"]))]
+                *cons, *([] if e._the_place() else ["neither the place's name nor its number"]))]
     strong = [e for e in evs if e.decision == "strong"]
     if strong:
         return strong[0]
     weak = sorted((e for e in evs if e.decision == "weak"), key=lambda e: abs(e.lag_s))
     return weak[0] if weak else None
+
+
+def exact_street(a: tuple, b: tuple) -> bool:
+    """(pre, suffix, name, post) twice, strictly: the same name, the same directions before and after, and the same
+    suffix said on both ("Sample Rd" is never "Sample", nor "N Sample Rd")."""
+    return a[2] == b[2] and a[0] == b[0] and a[3] == b[3] and bool(a[1]) and a[1] == b[1]
+
+
+MUTUAL = re.compile(r"\bmutual\s*aid\b", re.I)
+
+
+def mutual_aid(text: str, typ: str = "") -> bool:
+    """A mutual-aid call: its type MA, or the words "mutual aid"."""
+    return str(typ or "").upper() == "MA" or bool(MUTUAL.search(text or ""))
