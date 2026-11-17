@@ -1032,6 +1032,32 @@ enabled = false      # the master switch: off, /api/v1/* is a 404 in v1's envelo
   address for requests with no device token.
 - The console refuses a device bearer on `/api/cad/*`, and `/api/v1/*` ignores Access: a device token is its only door.
 
+### The app's change log, `/api/v1/changes` and `/api/v1/stream` (#561)
+
+One append-only log of references `(seq, epoch, kind, id, rev, at)` (no payload, no position, no transcript) in
+`hub.sqlite`, behind the `stream` flag; the app's two views are the cursor read and the SSE stream
+([mobile-api.md](mobile-api.md#34-live-updates-for-mobile)).
+
+- **Tables** (`mobile_changelog`, `_head`, `_meta`), made on the first use while the flag is on, never in `cad.sqlite`;
+  a start writes nothing and an older release opens the file as before (`tests/test_startup_writes.py`, and a test in
+  `tests/test_api_v1_changes.py`). With mobile or the flag off nothing creates them.
+- **One line into the CAD:** `Store.commit_listeners`, called after each committed transaction, only sets an Event. A
+  thread (`v1-changelog`, started by the first poke with the flag on, no timer) waits one second so a burst of commits
+  is one transaction, compares the open incidents and the board with the last rev it logged for each (`rev_of`, the
+  content hash) and appends what differs. Request threads never write; the first reader makes the baseline once.
+- **Epoch and cursor are in the database**, so a reconnect after a handoff resumes: the new task reads the same
+  epoch and seq, and its first batch finds what changed meanwhile through the heads. A drain writes the last batch.
+  A fenced task answers the existing 503 and writes nothing.
+- **Retention:** 7 days and at most 100,000 rows, pruned hourly; an older cursor is a 410 (`oldest`), another
+  epoch (or a cursor ahead of the log) a 409. Reset: `ChangeLog.reset()` (new epoch; every app resnapshots).
+- **Streams:** 2 per device and `[mobile] max_streams` overall (429 `too_many_streams`), 15 s heartbeats, a bounded queue
+  per stream (a slow client is closed and resumes from the database), a 10 s write timeout, and each ends on a drain, a
+  lost lease, the flag or the switch going off, an epoch change or the client closing.
+- **Cost** (measured on a seeded `hub.sqlite`, `tests/test_api_v1_changes.py`): 100 changes in one batch are 4 WAL
+  frames; one transaction per change about 3 frames each (the log page, the head page, the sequence), and the batch window
+  makes the usual case the first. First use is about 10 frames (three small tables).
+- **Off / undo:** the `stream` flag (off in production: no source wires it yet). The tables may stay.
+
 ## Speech-to-text per channel: whisper on the station, Amazon Transcribe on the hub
 
 > "lets try it [AWS Transcribe], but lets make it configurable, which channel in the settings gets

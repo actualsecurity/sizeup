@@ -12,11 +12,14 @@ properties:
           unauthorized (401), not_found (404), method_not_allowed (405, with Allow), uri_too_long (414),
           station (409: this host is a station, not the hub), updating (503 during a deploy handover, with
           Retry-After), internal (500: the handler failed), busy (503: v1's share of concurrent requests is used
-          up, with Retry-After), rate_limited (429, with Retry-After). Planned with sign-in (#558): token_expired,
+          up, with Retry-After), rate_limited (429, with Retry-After). Change log (#561): bad_cursor, bad_limit (400), epoch_changed (409, with `epoch`),
+          cursor_too_old (410, with `oldest`), too_many_streams (429), unavailable (503). Planned with sign-in (#558): token_expired,
           device_revoked, user_inactive, invalid_grant, upgrade_required.
       message:
         type: string
         description: Human text.
+      oldest: {type: integer, description: "cursor_too_old: the smallest cursor still served."}
+      epoch: {type: string, description: "epoch_changed: the log's current epoch."}
       retry_after_s:
         type: integer
         description: Try again after this many seconds (also the Retry-After header).

@@ -26,6 +26,7 @@ from .errors import JSON, error
 from .limits import Limits
 from .principal import Resolver, none_yet, person
 from .routes import ROUTES, Ctx, Route
+from .stream import Body, StreamPlan
 from .switches import Switches
 
 PREFIX = "/api/v1/"
@@ -42,12 +43,13 @@ def _stderr(msg: str) -> None:
 
 class V1:
     def __init__(self, routes: list[Route] | None = None, switches: Switches | None = None,
-                 resolver: Resolver | None = None, limits: Limits | None = None, log=None):
+                 resolver: Resolver | None = None, limits: Limits | None = None, log=None, changes=None):
         self.routes = [(r, _pattern(r.path)) for r in (ROUTES if routes is None else routes)]
         self.switches = switches or Switches()
         self.resolver = resolver or none_yet
         self.limits = limits or Limits(self.switches.max_requests, self.switches.max_streams)
         self.log = log or _stderr
+        self.changes = changes            # the change log's Feed (#561): /changes and /stream; None: not on this host
 
     def handles(self, path: str) -> bool:
         return path.startswith(PREFIX)
@@ -111,8 +113,20 @@ class V1:
         if not self.limits.enter():
             return error(503, "busy", "the hub is busy: try again", 1)
         try:
-            ctx = Ctx(parse_qs(query), headers, params, principal, self.switches.features())
+            ctx = Ctx(parse_qs(query), headers, params, principal, self.switches.features(), self.changes)
             status, obj = route.handler(ctx)
+            if isinstance(obj, StreamPlan):                # SSE (#561): its own slot, and the server runs the body
+                return self._stream(obj, principal)
             return status, json.dumps(obj, separators=(",", ":")).encode(), JSON, {"Cache-Control": "no-store"}
         finally:
             self.limits.leave()
+
+    def _stream(self, plan: StreamPlan, principal) -> tuple[int, Body, str, dict]:
+        """2 streams per device and the global cap (limits.open_stream): over it a 429 in the envelope. The body ends
+        itself when mobile or the `stream` flag goes off (read as it runs), and gives its slot back when it ends."""
+        if not self.limits.open_stream(principal.device):
+            return error(429, "too_many_streams", "too many open streams: close one", 10)
+        device = principal.device
+        body = Body(plan, lambda: self.limits.close_stream(device),
+                    lambda: not (self.switches.enabled() and self.switches.allows("stream")))
+        return 200, body, "text/event-stream", {"Cache-Control": "no-store, no-transform", "X-Accel-Buffering": "no"}

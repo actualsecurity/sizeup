@@ -16,7 +16,7 @@ from __future__ import annotations
 import time
 from typing import Callable, NamedTuple
 
-from . import API_VERSION
+from . import API_VERSION, changes, stream
 
 # The oldest app each platform may run (forced upgrades, #566 enforces it). 0.0.0: nothing is refused yet.
 MIN_APP = {"ios": "0.0.0", "android": "0.0.0"}
@@ -45,6 +45,7 @@ class Ctx(NamedTuple):
     params: dict
     principal: object = None
     features: dict | None = None
+    changes: object = None       # the change log's Feed (#561), None where there is none
 
 
 def meta(ctx: Ctx) -> tuple[int, dict]:
@@ -56,4 +57,6 @@ def meta(ctx: Ctx) -> tuple[int, dict]:
 
 ROUTES: list[Route] = [
     Route("GET", "/api/v1/meta", meta, "public"),
+    Route("GET", "/api/v1/changes", changes.handle, "device", "stream", "read"),
+    Route("GET", "/api/v1/stream", stream.handle, "device", "stream", "read"),
 ]

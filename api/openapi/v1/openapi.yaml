@@ -14,6 +14,10 @@ security:
 paths:
   /api/v1/meta:
     $ref: ./paths/meta.yaml
+  /api/v1/changes:
+    $ref: ./paths/changes.yaml
+  /api/v1/stream:
+    $ref: ./paths/stream.yaml
 components:
   securitySchemes:
     deviceToken:

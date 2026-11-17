@@ -433,6 +433,7 @@ class Store:
         # after a transaction is committed / rolled back (tx()); touch(id, system): a row of the radio log changed in
         # the open transaction (the Radio page's change notes: set by Comms, sizeup/cad/comms.py)
         self.after_commit = self.after_rollback = self.touch = None
+        self.commit_listeners: list = []   # fn() after each committed transaction (the mobile change log, #561): never raises here
         self.migrated: list[str] = []      # what a migration did, for the log
         self.on_assigned = None            # fn(incident id, [unit names]): units just put on it (assign); never raises here
         self.on_unassigned = None          # fn(incident id): a unit just taken off it (cleared, moved); never raises here
@@ -817,6 +818,12 @@ class Store:
                     # What rides on a transaction without being part of it (the Radio page's change notes,
                     # sizeup/cad/comms.py): told only once the write is committed, or that it was not. Best effort:
                     # nothing it does or fails at reaches the caller, whose data is stored (or rolled back) by now.
+                    if done:
+                        for fn in store.commit_listeners:    # (a poke: it sets an Event and returns)
+                            try:
+                                fn()
+                            except Exception:  # noqa: BLE001
+                                pass
                     hook = store.after_commit if done else store.after_rollback
                     try:
                         if hook is not None:

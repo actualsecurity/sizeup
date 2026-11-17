@@ -386,6 +386,12 @@ change, at-least-once delivery deduplicated by `(kind, id, rev)`. `/api/feed/v1/
 
 - The epoch lives in the database, not the process, so it survives handoffs.
 - Writes to it are batched off the request path, and none happen at startup (the startup-writes rule, PR #507).
+- **As built (#561):** `sizeup/api/v1/changelog.py` (the log, the recorder, the feed), `changes.py`, `stream.py`, `rev.py`.
+  The log lives in `hub.sqlite`; kinds so far are `incident` and `unit` (the radio log, alarms and positions are not
+  logged); a deletion is a row with an empty `rev`. `410 cursor_too_old` carries `oldest` (the smallest cursor still
+  served), `409 epoch_changed` the new `epoch`. SSE ids are `<epoch>-<seq>`, so `Last-Event-ID` carries the epoch.
+  Events: `hello`, `change`, `heartbeat`, `close`. Not built: the `wait=` long poll, `/snapshot` and the machine feed's
+  view (a `Scope` per consumer is in place for it). Details: [cloud.md](cloud.md#the-apps-change-log-apiv1changes-and-apiv1stream-561).
 - **Unverified:** which sources besides `radio_changes.seq` already have a monotonic sequence.
 
 ---
