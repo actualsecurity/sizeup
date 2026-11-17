@@ -14,6 +14,8 @@ from tests.test_dispatch_modes import AutoRig
 from tests.test_incident_sources import T0
 from tests.test_radios import tx
 
+pytestmark = pytest.mark.hand_dispatch_gate     # the real gate: in 60 Control a person puts units on (rig.put_on)
+
 
 @pytest.fixture
 def rig(tmp_path):
@@ -55,7 +57,7 @@ def test_a_person_accepting_a_hint_marks_the_call_the_unit_was_on(rig):
 
 def test_no_automatic_close_over_a_unit_a_person_dispatched(rig):
     rig.created(units=("E60",))
-    rig.cad.dispatch(rig.iid(), {"unit_ids": [rig.uid("E62")], "operator": "Lt. Test"})
+    rig.put_on(rig.iid(), "E62")
     rig.cad.unit_status(rig.uid("E62"), {"status": "OL", "operator": "Lt. Test"})
     rig.at(900)
     rig.change(times={"in_service": T0 + 890})
@@ -69,7 +71,7 @@ def test_no_automatic_close_over_a_unit_a_person_dispatched(rig):
 
 def test_undoing_a_close_puts_back_the_units_it_released(rig):
     rig.created(units=("E60",))
-    rig.cad.dispatch(rig.iid(), {"unit_ids": [rig.uid("E62")], "operator": "Lt. Test"})
+    rig.put_on(rig.iid(), "E62")
     rig.cad.unit_status(rig.uid("E62"), {"status": "CN", "operator": "Lt. Test"})  # cancelled: left Cancelled from it
     rig.at(900)
     rig.change(unit_times={"E60": {"in_service": T0 + 880}}, times={"in_service": T0 + 890})
@@ -101,7 +103,7 @@ def test_a_possible_duplicate_of_an_accepted_call_is_left_for_a_person(rig):
     rig.page()
     first = rig.incidents()[0]["id"]
     rig.cad.accept(first, {"operator": "Lt. Test"})
-    rig.cad.dispatch(first, {"unit_ids": [rig.uid("E60")], "operator": "Lt. Test"})
+    rig.put_on(first, "E60")
     rig.at(30)
     rig.created()
     incs = rig.incidents()
@@ -313,7 +315,7 @@ def test_a_unit_the_feed_doesnt_list_holds_the_close_until_the_radio_clears_it(r
 
 def test_a_person_clearing_the_last_unit_lets_the_pending_close_go(rig):
     rig.created(units=("E60",))
-    rig.cad.dispatch(rig.iid(), {"unit_ids": [rig.uid("E62")], "operator": "Lt. Test"})
+    rig.put_on(rig.iid(), "E62")
     rig.at(900)
     rig.change(times=_times(in_service=T0 + 890))
     assert rig.inc()["status"] == "active" and rig.here("E62")
@@ -344,7 +346,7 @@ def test_possibly_the_same_is_a_relation_not_text(rig):
     rig.page()
     first = rig.incidents()[0]["id"]
     rig.cad.accept(first, {"operator": "Lt. Test"})
-    rig.cad.dispatch(first, {"unit_ids": [rig.uid("E60")], "operator": "Lt. Test"})
+    rig.put_on(first, "E60")
     rig.at(30)
     rig.created()
     if rig.iid() != first:
@@ -409,12 +411,12 @@ def test_undoing_a_release_on_a_closed_call_says_undo_the_close_first(rig):
 
 def test_moving_the_last_unit_to_another_call_lets_the_pending_close_go(rig):
     rig.created(units=("E60",))
-    rig.cad.dispatch(rig.iid(), {"unit_ids": [rig.uid("E62")], "operator": "Lt. Test"})
+    rig.put_on(rig.iid(), "E62")
     rig.at(300)
     rig.change(times=_times(in_service=T0 + 295))
     assert rig.inc()["status"] == "active" and rig.inc()["auto"]["close_pending"]
     other = rig.cad.create({"type": "STRU", "address": "400 Sample St", "operator": "Lt. Test"})
-    rig.cad.dispatch(other["id"], {"unit_ids": [rig.uid("E62")], "operator": "Lt. Test"})
+    rig.put_on(other["id"], "E62")
     assert rig.inc()["status"] == "closed"
 
 

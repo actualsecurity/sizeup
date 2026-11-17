@@ -120,8 +120,18 @@ def main(argv: list[str] | None = None) -> int:
     state = call(base, "/api/cad/state")
     units = {u["name"]: u["id"] for u in state.get("units", [])}
     mode = (state.get("dispatch_mode") or {}).get("mode", "")
-    if mode and mode != "pcfd":                   # 60 Control dispatching refuses a dispatch from here: PCFD meanwhile
+    switch = bool(mode) and mode != "pcfd"         # 60 Control dispatching refuses a dispatch from here: PCFD meanwhile
+    if switch:
         call(base, "/api/cad/dispatch-mode", {"mode": "pcfd", "operator": OPERATOR})
+    try:
+        return seed(base, args.token, role, units)
+    finally:                                      # put back, whatever happened
+        if switch:
+            call(base, "/api/cad/dispatch-mode", {"mode": mode, "operator": OPERATOR})
+
+
+def seed(base: str, token: str, role: str, units: dict) -> int:
+    """The calls, their dispatches, notes and closes; with a local hub's token, their radio traffic."""
     radio_ids: dict[str, str] = {}                # unit -> an MDC radio ID of its (confirmed ones first)
     for r in sorted(call(base, "/api/cad/radios").get("radios", []), key=lambda r: r.get("source") != "confirmed"):
         if r.get("system") == "mdc" and r.get("unit"):
@@ -143,9 +153,9 @@ def main(argv: list[str] | None = None) -> int:
         if c["close"]:
             closes.append((iid, c["close"]))
         print(f"incident {iid}: {c['type']}/{c['subtype']} {c['address']}" + (f" · {', '.join(c['units'])}" if ids else ""))
-    if radio and args.token and role == "hub":
+    if radio and token and role == "hub":
         r = call(base, "/api/station/events", {"epoch": f"dev-seed-{secrets.token_hex(4)}",
-                                               "events": [ev for _, ev in radio]}, token=args.token)
+                                               "events": [ev for _, ev in radio]}, token=token)
         for iid, ev in radio:                     # a rig with no radio ID in the registry: put on its call by hand
             if not ev["data"]["radio_id"]:
                 call(base, f"/api/cad/incident/{iid}/link", {"traffic_id": ev["data"]["id"], "operator": OPERATOR})
@@ -155,8 +165,6 @@ def main(argv: list[str] | None = None) -> int:
     for iid, disposition in closes:
         call(base, f"/api/cad/incident/{iid}/close", {"disposition": disposition, "operator": OPERATOR})
         print(f"incident {iid}: closed {disposition}")
-    if mode and mode != "pcfd":
-        call(base, "/api/cad/dispatch-mode", {"mode": mode, "operator": OPERATOR})
     print(f"open {base}/cad")
     return 0
 

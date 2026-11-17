@@ -48,7 +48,7 @@ const cad = {
   search: false,             // the Search view is open (#search, search-view.js, #403)
   extra: new Map(),          // incidents opened from Records that aren't in the live state
   rec: null,                 // {iid, units, unfilled, already, card, note, checked:Set, extra:[], error}
-  hand: false,               // the Dispatch card shown at the last render (PCFD dispatching: handDispatch)
+  hand: null,                // the Dispatch card shown at the last render (PCFD dispatching: handDispatch); null: not yet
   map: null, marker: null, mapSig: "",
   listSig: "", rcEditing: null, openUnit: null,
   closedOpen: false,         // the queue's Closed 12h section unfolded (#89; remembered: closedFold)
@@ -686,6 +686,7 @@ function selectIncident(id) {
   cad.sel = id;
   cad.mode = "view";
   cad.rec = null;
+  cad.hand = null;                    // its run card is asked for below, once (renderDispatchCard: only on a switch)
   show($("#edit-form"), false);
   show($("#close-form"), false);
   show($("#upgrade-form"), false);
@@ -2084,13 +2085,17 @@ function handDispatch() {
   const st = cad.state && cad.state.dispatch_mode;
   return !!st && st.mode === "pcfd";
 }
+// The server's refusal (the mode switched before this page heard): a toast, since the card hides with the next push.
+function handRefused(msg) {
+  if (/^60 Control dispatching/.test(msg || "")) UI.toast(msg, "err");
+}
 
 // The Dispatch card and the Dispatches log, on every render: they follow the mode live (the state push), no reload.
 function renderDispatchCard(inc, open) {
   const hand = handDispatch();
   if (!hand) show($("#upgrade-form"), false);
   show($("#d-dispatch"), open && !!inc.emergency && hand);
-  if (hand && !cad.hand) setTimeout(() => recommend(), 0);     // switched to PCFD: the run card
+  if (hand && cad.hand === false) setTimeout(() => recommend(), 0);   // switched to PCFD: the run card
   cad.hand = hand;
   renderDispatchBox(inc);
   renderDispatches(inc);
@@ -2431,6 +2436,7 @@ async function dispatch() {
       setTimeout(() => recommend(), 300);
     } catch (e) {
       flash($("#r-error"), e.message);
+      handRefused(e.message);
     }
   });
 }
@@ -2465,6 +2471,7 @@ async function upgrade(e, previewOnly) {
       }
     } catch (err) {
       flash($("#u-error"), err.message);
+      handRefused(err.message);
     }
   });
 }

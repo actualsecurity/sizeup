@@ -312,7 +312,9 @@ def any_hour(request, monkeypatch):
 from tests.replay import pytest_collection_modifyitems, pytest_configure, replay_sets  # noqa: E402,F401
 
 
-def pytest_configure(config):
+def pytest_configure(config):            # replay's markers (imported above) and this one
+    from tests import replay
+    replay.pytest_configure(config)
     config.addinivalue_line("markers", "hand_dispatch_gate: keep the 60 Control refusal of a dispatch by hand (automode)")
 
 

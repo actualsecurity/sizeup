@@ -128,12 +128,15 @@ const nodes = {};
 const $ = (id) => nodes[id] || (nodes[id] = { id, hidden: false, textContent: "", value: "", checked: false, disabled: false });
 const show = (n, on) => { n.hidden = !on; };
 const posts = [], timers = [];
-const api = async (method, path, body) => { posts.push(path); return { units: [], unfilled: [], already: [], card: null, dispatch_id: 1, moved: [] }; };
+const api = async (method, path, body) => { posts.push(path); if (refuse && !path.endsWith("/recommend")) throw new Error(refuse); return { units: [], unfilled: [], already: [], card: null, dispatch_id: 1, moved: [] }; };
 globalThis.setTimeout = (f) => { timers.push(f); };
 const flush = async () => { while (timers.length) await timers.shift()(); };
 const isOpen = (i) => i.status === "pending" || i.status === "active";
 const inc = { id: 3, status: "active", emergency: true, dispatches: [] };
-const cad = { state: null, sel: 3, rec: null, hand: false };
+const cad = { state: null, sel: 3, rec: null, hand: null };
+const toasts = [];
+const UI = { toast: (m, k) => toasts.push([m, k]) };
+let refuse = "";                                                        // the server's answer to a dispatch
 const selected = () => inc;
 let boxes = 0, lists = 0;
 const renderDispatchBox = () => { boxes++; };
@@ -148,6 +151,9 @@ const look = () => ({ card: !$("#d-dispatch").hidden, log: !$("#d-dispatches-car
 const press = async () => { posts.length = 0; await dispatch(); await preview(); await upgrade(null, false); await upgrade(null, true); return posts.slice(); };
 (async () => {
   const out = {};
+  mode("pcfd"); renderDispatchCard(inc, true); await flush();          // a page loaded in PCFD, an incident opened:
+  out.loaded = posts.slice();                                           // selectIncident asks for its run card, not this
+  cad.hand = null; posts.length = 0;
   mode("60control"); renderDispatchCard(inc, true); await flush();
   out.sixty = { ...look(), posts: posts.slice(), rec: cad.rec, pressed: await press() };
   await recommend(); out.sixtyRec = posts.slice();
@@ -156,6 +162,9 @@ const press = async () => { posts.length = 0; await dispatch(); await preview();
   renderDispatchCard(inc, true); await flush();
   out.again = posts.slice();                                            // no second recommendation on the next push
   out.pcfdPressed = await press();
+  refuse = "60 Control dispatching: switch to PCFD to dispatch";       // switched on the hub, this page not told yet
+  await dispatch(); await upgrade(null, false);
+  out.toasts = toasts.slice(); refuse = "";
   $("#upgrade-form").hidden = false;                                    // the upgrade form open when it switches back
   mode("60control"); renderDispatchCard(inc, true); await flush();
   out.back = { ...look(), pressed: await press() };
@@ -173,11 +182,12 @@ const press = async () => { posts.length = 0; await dispatch(); await preview();
 def test_the_page_hides_the_dispatch_card_in_60_control_and_shows_it_in_pcfd_live(tmp_path):
     js = (STATIC / "cad.js").read_text()
     code = "\n".join(js_function(js, n) for n in ("handDispatch", "renderDispatchCard", "renderDispatches", "recommend",
-                                                   "preview", "dispatch", "upgrade"))
+                                                   "handRefused", "preview", "dispatch", "upgrade"))
     h = tmp_path / "page.js"
     h.write_text(PAGE)
     out = json.loads(subprocess.run([NODE, str(h), code], capture_output=True, text=True, check=True, timeout=30).stdout)
     # 60 Control: no card, no empty log, no run card asked for; Dispatch / Preview / Upgrade send nothing
+    assert out["loaded"] == []
     assert out["sixty"] == {"card": False, "log": False, "upgrade": False, "posts": [], "rec": None, "pressed": []}
     assert out["sixtyRec"] == []
     # PCFD: the card and its log, the run card asked for once, at the switch
@@ -185,6 +195,8 @@ def test_the_page_hides_the_dispatch_card_in_60_control_and_shows_it_in_pcfd_liv
     assert out["again"] == ["/api/cad/incident/3/recommend"]
     assert out["pcfdPressed"] == ["/api/cad/incident/3/dispatch", "/api/cad/incident/3/preview",
                                   "/api/cad/incident/3/upgrade", "/api/cad/incident/3/upgrade"]
+    # refused by the server (a stale page): said in a toast, since the card hides with the next push
+    assert out["toasts"] == [["60 Control dispatching: switch to PCFD to dispatch", "err"]] * 2
     # back to 60 Control: hidden again, the open upgrade form too, nothing sent
     assert out["back"] == {"card": False, "log": False, "upgrade": False, "pressed": []}
     assert out["logged"] == {"card": False, "log": True, "upgrade": False}
@@ -194,6 +206,8 @@ def test_the_page_hides_the_dispatch_card_in_60_control_and_shows_it_in_pcfd_liv
 def test_the_card_is_drawn_on_every_render_and_holds_every_dispatch_control():
     js = (STATIC / "cad.js").read_text()
     assert "renderDispatchCard(inc, open);" in js_function(js, "renderDetail")
+    sel = js_function(js, "selectIncident")
+    assert sel.index("cad.hand = null;") < sel.index("render();") < sel.index("recommend();")   # one run card asked for
     assert 'show($("#d-dispatch")' not in js_function(js, "renderDetail")
     html = (STATIC / "cad.html").read_text()
     card = html[html.index('<div id="d-dispatch" class="card">'):html.index('<div id="d-dispatches-card"')]

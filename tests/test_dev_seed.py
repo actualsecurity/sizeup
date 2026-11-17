@@ -50,6 +50,22 @@ def test_a_local_hub_gets_the_calls_their_units_and_their_radio_traffic(tmp_path
         hub.close()
 
 
+@pytest.mark.hand_dispatch_gate
+def test_the_mode_is_put_back_when_the_seed_fails(tmp_path, monkeypatch):
+    hub = HubRun(hub_cfg(tmp_path))
+
+    def broken(*a, **kw):
+        raise SystemExit("the hub went away")
+    monkeypatch.setattr(dev_seed, "seed", broken)
+    try:
+        with pytest.raises(SystemExit):
+            dev_seed.main(["--base", hub.url])
+        assert hub.app.cad.auto.mode() == "60control"
+        assert len(hub.app.cad.settings.audit_log("dispatch")) == 2             # to PCFD and back
+    finally:
+        hub.close()
+
+
 @pytest.mark.parametrize("base", ["https://sizeup.example.org", "http://10.0.0.5:8090", "ftp://127.0.0.1:8090",
                                   "http://user:secret@127.0.0.1:8090", "http://127.0.0.1@sizeup.example.org"])
 def test_only_this_machine(base, capsys):
