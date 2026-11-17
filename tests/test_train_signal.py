@@ -85,7 +85,9 @@ def test_an_amtrak_train_on_signal_locations_stays_on_the_map_and_moves_block_to
         assert x["agency"] == "Amtrak" and x["pos_src"] == "traintime" and not x["stale"] and not x["estimated"]
         assert x["mode"] == "reported" and x["fix_at"] == t0 + k * BLOCK_M / V    # its time: when it got to that signal
         assert x["next"]["name"] == "New Rochelle" and (x["hold_s"] - x["next"]["s"]) * -1 <= 0.1   # never past it
-        assert 0 <= (x["s"] - x["hold_s"]) <= T.HOLD_FALLBACK_M + 0.1  # carried on no further than that
+        # carried on to the end of its block, as long as the last, and SIGNAL_LATE_S of its travel (the next fix's
+        # lateness); HOLD_FALLBACK_M before a block is known
+        assert 0 <= (x["s"] - x["hold_s"]) <= (BLOCK_M + T.SIGNAL_LATE_S * V if k else T.HOLD_FALLBACK_M) + 0.1
         if k == 0:
             assert "v" not in x                                        # no speed yet: held at its signal, unpredicted
         else:
@@ -221,3 +223,97 @@ tr.where("sig", 181000);
 out.at181 = tr.stale("sig");
 """)
     assert out["at90"] == [False, True] and out["at181"] is True
+
+
+def page_fix(x):
+    """What trains.js fixOf makes of a TrainTime train in the hub's answer (its own fix time on the page's clock)."""
+    return {"s": x["s"], "d": x["d"], "train": x["train"], "mode": x["mode"], "t0": x["fix_at"], "at": x["fix_at"] * 1000,
+            "fixAt": x["fix_at"], "hold": x["hold_s"], "stop": (x.get("next") or {}).get("s"), "until": x["predict_until"],
+            "seg": None, "lag": x.get("lag_s"), "v": x.get("v"), "a": x.get("a", 0.0), "dyn": x.get("dyn"),
+            "staleS": x.get("stale_s"), "cruiseS": x.get("cruise_s"), "signal": True}
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_steady_signal_train_is_drawn_on_smoothly_through_each_block(hub, tmp_path):
+    """Review of #633: with a GPS fix's 20 s cruise the drawn train eased to a stop about 950 m into each 1.8 km block, then
+    snapped 850 m on when the next signal came. Now: on at its block speed to the end of the block (block_m, cruise_s),
+    no snap-back: never stalled mid-block, never more than a few metres a frame."""
+    tr, clock, fetch = hub
+    s0, t0 = stations(tr)["Greenwich"]["ch"], clock.t
+    answers = []
+    for step in range(60):                                             # 5 min: a block every 60 s
+        clock.t = t0 + 5 * step
+        k = int(5 * step * V // BLOCK_M)
+        x = poll(tr, clock, fetch, [record(tr.model, s0 - BLOCK_M * k, t0 + k * BLOCK_M / V)])[TID]
+        answers.append({"t": clock.t, "fix": page_fix(x)})
+    assert answers[-1]["fix"]["cruiseS"] == T.TT_HORIZON_S and tr.track.fixes[TID]["block_m"] == pytest.approx(BLOCK_M, abs=1)
+    out = node(tmp_path, """
+const tk = Motion.railTracker({ staleS: 60 });
+const A = IN.answers, frames = [];
+let i = 0;
+for (let t = A[0].t; t <= A[A.length - 1].t + 4.9; t = Math.round((t + 0.1) * 10) / 10) {
+  while (i < A.length && A[i].t <= t + 1e-9) { tk.set("a", A[i].fix, A[i].t * 1000); i++; }
+  const p = tk.where("a", t * 1000);
+  frames.push([t, p.s]);
+}
+out.frames = frames;
+""", {"answers": answers})
+    frames = [(t - t0, (s0 - s)) for t, s in out["frames"]]             # (s, metres on from Greenwich, westbound)
+    on = [(t, x) for t, x in frames if t >= 65]                        # from the second block's speed on
+    steps = [b[1] - a[1] for a, b in zip(on, on[1:])]
+    assert max(steps) < 10 and min(steps) > -0.01                      # never a jump, never back (30 m/s: 3 m a frame)
+    for t, x in on:
+        assert abs(x - V * t) <= 150, (t, x)                           # with the train all the way, block to block
+    for a in range(0, len(on) - 50):                                   # never stalled: on at least 100 m every 5 s
+        assert on[a + 50][1] - on[a][1] >= 100, on[a]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_signal_train_held_at_a_red_signal_overshoots_a_little_and_is_glided_back(hub, tmp_path):
+    """The trade-off of not braking for the end of the block: a train that stops there (a red signal, no new fix) is
+    drawn on through it by about SIGNAL_LATE_S of its travel plus a hard stop, then glided back, never a jump."""
+    tr, clock, fetch = hub
+    s0, t0 = stations(tr)["Greenwich"]["ch"], clock.t
+    answers = []
+    for step in range(50):                                             # two blocks, then stuck at the third signal
+        clock.t = t0 + 5 * step
+        k = min(2, int(5 * step * V // BLOCK_M))
+        x = poll(tr, clock, fetch, [record(tr.model, s0 - BLOCK_M * k, t0 + k * BLOCK_M / V)])[TID]
+        answers.append({"t": clock.t, "fix": page_fix(x)})
+    out = node(tmp_path, """
+const tk = Motion.railTracker({ staleS: 60 });
+const A = IN.answers, frames = [];
+let i = 0;
+for (let t = A[0].t; t <= A[A.length - 1].t + 4.9; t = Math.round((t + 0.1) * 10) / 10) {
+  while (i < A.length && A[i].t <= t + 1e-9) { tk.set("a", A[i].fix, A[i].t * 1000); i++; }
+  frames.push([t, tk.where("a", t * 1000).s]);
+}
+out.frames = frames;
+""", {"answers": answers})
+    on = [(t - t0, s0 - s) for t, s in out["frames"] if t - t0 >= 125]
+    end = 2 * BLOCK_M + BLOCK_M + T.SIGNAL_LATE_S * V                  # its hold: the end of the third block, and the slack
+    assert max(x for _, x in on) <= end + 200                          # on past it at most a hard stop's way
+    assert all(abs(b[1] - a[1]) < 10 for a, b in zip(on, on[1:]))     # glided, never a jump
+    assert on[-1][1] <= end + 1                                         # back at the end of its block
+
+
+def test_the_page_says_at_signal_not_stale_for_an_old_signal_fix():
+    js = (T.ROOT / "sizeup" / "web" / "static" / "trains.js").read_text()
+    assert "const sigOld = held && signalOf(t), stale = held && !sigOld;" in js     # dimmed, no "Stale" row
+    assert "sigOld || (!aged && fixOlder(t, d, now, DIM_FIX_S))" in js
+    assert 'sig ? "At signal"' in js and "signal: signalOf(t)" in js and "cruiseS:" in js
+
+
+def test_a_signal_location_ages_from_when_the_train_got_there_not_its_newest_time(hub):
+    """Review of #633: a record re-stamped at the same signal (a train that never moves on, or a dead record) leaves the
+    map SIGNAL_MAX_AGE_S after it first had that signal, not never."""
+    tr, clock, fetch = hub
+    s0, t0 = stations(tr)["Greenwich"]["ch"], clock.t
+    for k in range(0, int(TT.SIGNAL_MAX_AGE_S) + 60, 30):              # the same signal, its time re-stamped every read
+        clock.t = t0 + k
+        out = poll(tr, clock, fetch, [record(tr.model, s0, clock.t)])
+        assert (TID in out) == (k <= TT.SIGNAL_MAX_AGE_S), k
+        assert tr.tt.records[0]["loc_since"] == t0
+    clock.t += 30                                                      # it moves on: a new signal, a new time
+    assert TID in poll(tr, clock, fetch, [record(tr.model, s0 - BLOCK_M, clock.t)])
+    assert tr.tt.records[0]["loc_since"] == clock.t

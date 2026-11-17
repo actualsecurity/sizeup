@@ -697,8 +697,9 @@ def match(t: dict, by_num: dict[str, list[dict]], misses: list | None = None) ->
 def usable_position(rec: dict, now: float, alone: bool = False) -> bool:
     """A location good enough to draw now: GPS or SIGNAL, under POS_MAX_AGE_S old; for a train only this source has
     (alone: nothing else to place it by) a SIGNAL one under SIGNAL_MAX_AGE_S (it is as old as the block it entered)."""
-    age = SIGNAL_MAX_AGE_S if alone and rec["loc_src"] == "SIGNAL" else POS_MAX_AGE_S
-    return rec["loc_src"] in POS_SOURCES and now - rec["loc_at"] <= age
+    if alone and rec["loc_src"] == "SIGNAL":            # (from when it got to that signal: TrainTime._sig_since)
+        return now - min(rec["loc_at"], rec.get("loc_since") or rec["loc_at"]) <= SIGNAL_MAX_AGE_S
+    return rec["loc_src"] in POS_SOURCES and now - rec["loc_at"] <= POS_MAX_AGE_S
 
 
 def merge(feed: dict, records: list[dict], now: float, at: float | None = None, stations: dict[str, str] | None = None,
@@ -847,6 +848,7 @@ class TrainTime:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self.records: list[dict] = []
+        self._sig_seen: dict[tuple, tuple] = {}         # (train, run date) -> (its SIGNAL location, when we first saw it there)
         self.alerts: list[dict] = []
         self.branch_alerts: dict[str, list[dict]] = {}   # each branch's, for a train's box: its own branch's (#385)
         self.st = {"at": None, "error": "", "next": 0.0, "last": None, "fails": 0, "bad": 0, "n": 0, "total": 0, "dropped": 0,
@@ -1006,6 +1008,7 @@ class TrainTime:
             self.st["last"] = self.clock()
         now = self.clock()
         keep = [r for r in doc["records"] if ours(r, self.bbox)]
+        self._sig_since(keep)
         with self.lock:
             self.records = keep
             self.alerts = branch_alerts(doc["records"])
@@ -1019,6 +1022,21 @@ class TrainTime:
             self.log(f"trains: TrainTime: {doc['dropped']} of {doc['total']} records not in the known shape, dropped")
         self._changed()
         return True
+
+    def _sig_since(self, recs: list[dict]) -> None:
+        """Each SIGNAL location's "loc_since": when the train first had it (its own time then), so a record re-stamped
+        at the same signal (a train that never moves on, or a dead record) ages from when it got there (merge's
+        SIGNAL_MAX_AGE_S), not from its newest time."""
+        seen = {}
+        for r in recs:
+            if r["loc_src"] != "SIGNAL":
+                continue
+            k, where = (r["train"], r["run_date"]), (r["lat"], r["lon"])
+            old = self._sig_seen.get(k)
+            since = min(old[1], r["loc_at"]) if old is not None and old[0] == where else r["loc_at"]
+            r["loc_since"] = since
+            seen[k] = (where, since)
+        self._sig_seen = seen
 
     def _bad(self, code: int, why: str, was: bool) -> bool:
         self.st["bad"] += 1

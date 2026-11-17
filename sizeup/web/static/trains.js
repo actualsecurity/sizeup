@@ -182,7 +182,9 @@ window.TrainLayer = (() => {
              v: t.pos_src === "traintime" && typeof t.v === "number" ? t.v : null,    // GPS speed, m/s (MTA TrainTime, #362)
              a: t.pos_src === "traintime" && typeof t.a === "number" ? t.a : 0,       // and its change, m/s^2 (#375)
              dyn: t.dyn || null,                                                     // what its consist can do (#390)
-             staleS: typeof t.stale_s === "number" ? t.stale_s : null };             // its own (a signal's block: the hub's)
+             staleS: typeof t.stale_s === "number" ? t.stale_s : null,               // its own (a signal's block: the hub's)
+             cruiseS: typeof t.cruise_s === "number" ? t.cruise_s : null,            // ... and how long it runs on at v
+             signal: signalOf(t) };                                                  // a SIGNAL fix: never snapped back
   }
   function moved(d, got) {
     if (!d) return;
@@ -830,15 +832,17 @@ window.TrainLayer = (() => {
                                 && !((now - store.feedAt) / 1000 <= ((d.profile && d.profile.stale_s) || 60)));
       for (const t of d.trains || []) {
         const own = t.pos_src === "traintime" ? !!t.stale : old;              // each train by its own freshest source (#362)
-        const p = pos.get(t.id), stale = motion && pos.has(t.id) ? motion.stale(t.id) : own;
+        const p = pos.get(t.id), held = motion && pos.has(t.id) ? motion.stale(t.id) : own;
+        // a SIGNAL fix past its stale age: still at that signal as far as anyone knows (a red one), held there and dimmed,
+        // "At signal · 4 min ago", not the feed's "Stale" (the feed is fine)
+        const sigOld = held && signalOf(t), stale = held && !sigOld;
         const s = p ? Math.round(p.s * 10) / 10 : t.s;
         const aged = oldFix(t, d, now), snap = !!motion && Motion.snapped && Motion.snapped(motion.items.get(t.id), now);
         const snapping = !!motion && !!(motion.items.get(t.id) || {}).snapTo;              // a snap-back's short ease
-        
-        const dim = !aged && fixOlder(t, d, now, DIM_FIX_S);
+        const dim = sigOld || (!aged && fixOlder(t, d, now, DIM_FIX_S));
         const op = motion && Motion.fadeOf ? Math.round(Motion.fadeOf(motion.items.get(t.id), now) * 10) / 10 : 1;   // (#390)
         // ahead of the MTA's report while on its way (a stopped train held at its station's mark isn't a prediction)
-        drawn.set(t.id, { s, stale, old: aged, dim, snap, snapping, op,
+        drawn.set(t.id, { s, stale, sigOld, old: aged, dim, snap, snapping, op,
                           ahead: !t.estimated && t.mode !== "stopped" && typeof t.s === "number" && (s - t.s) * t.d > PREDICTED_M });
         key.push(`${t.id}:${s}:${stale ? 1 : 0}${aged ? 1 : 0}${dim ? 1 : 0}${snap ? 1 : 0}:${op}`);
       }
@@ -877,6 +881,7 @@ window.TrainLayer = (() => {
       if (!t.estimated && sig) {                // a signal's block: at it, or carried on from it at its speed between signals
         say = pred ? `Predicted from signal ${at}` : `At signal ${at}`;
         why = pred ? `Predicted: carried on from its last signal at its speed between signals, ${upTo}`
+          : w.sigOld ? "At signal: no new signal for a few minutes (held at a red signal, or no longer reported); drawn there, dimmed"
           : "At signal: where Metro-North's signals last placed it (the block it entered then); it moves on block to block";
       } else if (!t.estimated) {
         say = pred ? (at ? `Predicted from ${at}` : "Predicted") : `Reported ${at}${t.mode === "stopped" ? " · stopped" : ""}`;

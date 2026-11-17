@@ -203,18 +203,19 @@ window.Motion = (() => {
   const dynOf = (f) => (f && f.dyn && typeof f.dyn.b === "number" ? f.dyn : DYN);
   const accelAt = (dyn, v) => Math.min(dyn.a0, dyn.pw / Math.max(1, v));      // tapering at speed: power / mass
   // [distance on, speed now] tau seconds after a GPS fix at speed v (m/s), its acceleration a (m/s^2, the hub's), room
-  // metres to a scheduled stop ahead (Infinity: none), dyn the consist (dynOf)
-  function gpsRun(v, a, tau, room = Infinity, dyn = DYN) {
+  // metres to a scheduled stop ahead (Infinity: none), dyn the consist (dynOf), cruise how long it runs on at v before
+  // the no-news ease (RAIL_CRUISE_S; a SIGNAL fix's own, the hub's cruise_s: a minute between signals is no "no news")
+  function gpsRun(v, a, tau, room = Infinity, dyn = DYN, cruise = RAIL_CRUISE_S) {
     const brake = a < RAIL_BRAKE_A ? a : 0;
-    if (!brake && !(room < Infinity) && tau <= RAIL_CRUISE_S) return [v * tau, v];   // the usual case: steady
+    if (!brake && !(room < Infinity) && tau <= cruise) return [v * tau, v];          // the usual case: steady
     let x = 0, t = 0, u = v;
     const cap = (x_) => (room < Infinity ? Math.sqrt(2 * dyn.bs * Math.max(0, room - x_)) : Infinity);
     u = Math.min(u, cap(0));
     while (t < tau - 1e-9 && u > 0) {
       const h = Math.min(RAIL_STEP_S, tau - t);
       let du = brake * h;
-      if (!brake && t + h > RAIL_CRUISE_S)                                 // (braking already: on so) eased in at RAIL_JERK
-        du = -Math.min(dyn.b, RAIL_JERK * (t + h - RAIL_CRUISE_S)) * Math.min(h, t + h - RAIL_CRUISE_S);
+      if (!brake && t + h > cruise)                                        // (braking already: on so) eased in at RAIL_JERK
+        du = -Math.min(dyn.b, RAIL_JERK * (t + h - cruise)) * Math.min(h, t + h - cruise);
       const u1 = Math.max(0, Math.min(u + du, cap(x + u * h)));
       x += (u + u1) * h / 2;
       u = u1;
@@ -244,12 +245,13 @@ window.Motion = (() => {
       const tau = Math.max(0, Math.min(T, until) - fix.fixAt);
       const room = typeof fix.stop === "number" && lim === fix.stop ? Math.max(0, (fix.stop - s0) * d) : Infinity;
       const a = typeof fix.a === "number" ? fix.a : 0, dyn = dynOf(fix);
+      const cruise = typeof fix.cruiseS === "number" ? fix.cruiseS : RAIL_CRUISE_S;
       if (a < RAIL_BRAKE_A) {                                         // braking: where it comes to rest is its limit
         const rest = Math.min(room, (fix.v * fix.v) / (2 * -a));
         if ((s0 + d * rest - lim) * d < 0) out.lim = lim = s0 + d * rest;
       }
-      out.eased = !(a < RAIL_BRAKE_A) && tau > RAIL_CRUISE_S;        // slowed for want of news, not on any data
-      let [x, v] = gpsRun(fix.v, a, tau, room, dyn);
+      out.eased = !(a < RAIL_BRAKE_A) && tau > cruise;               // slowed for want of news, not on any data
+      let [x, v] = gpsRun(fix.v, a, tau, room, dyn, cruise);
       let s = s0 + d * x;
       if ((s - lim) * d >= 0) { s = lim; v = 0; }                     // held at its limit
       out.s = s;
@@ -373,8 +375,9 @@ window.Motion = (() => {
       // (by the faster of the train's speed and the drawn one's: a train drawn running on past where it stopped is
       // let off by up to that one's travel, glided back as before; past it, snapped. Mid-glide: only past SNAP_M)
       const lim = it.glide ? SNAP_M : snapM(Math.max(tg.v || 0, Math.abs(it.u || 0)));
-      // (GPS fixes only, MTA TrainTime: a GTFS-realtime estimate is closed by the band, #392; and only a new fix)
-      const gps = typeof it.fix.v === "number" && it.fix.fixAt != null;
+      // (GPS fixes only, MTA TrainTime: a GTFS-realtime estimate is closed by the band, #392; and only a new fix. Not a
+      // SIGNAL fix: the next block is where it was always going, its gap closed by the band or glided, never snapped)
+      const gps = typeof it.fix.v === "number" && it.fix.fixAt != null && !it.fix.signal;
       if (it.snapNow || (it.newFix && gps && Math.abs(miss) > lim)) {
         if (Math.abs(miss) > 0.5) { it.snapTo = { off0: -miss, at: now }; it.glide = null; }
         it.snapNow = false;
@@ -447,7 +450,10 @@ window.Motion = (() => {
     // itself is): over that, at most the speed it is drawn at now (it slows into a held train, never surges)
     const cap = Math.min((1 + GLIDE_AHEAD_SHARE) * vref + 2, Math.max(dyn.vmax || Infinity, vref + CORR_MIN_MPS));
     if (want > cap) want = Math.max(cap, Math.min(want, Math.max(0, u0)));
-    const rest = tg.moving ? room : Math.min(room, gap);                // where it comes to rest: lim, or a held train's s
+    // where it comes to rest: lim, or a held train's s. (A SIGNAL fix's lim is the end of its block, where the next
+    // signal's fix is due, not a stop: not braked for while its prediction runs; past it with no fix, braked hard and
+    // glided back, as any train drawn past its limit. Its next stop, when that is its lim, is braked into as ever.)
+    const rest = tg.moving && it.fix.signal && it.fix.stop !== tg.lim ? Infinity : tg.moving ? room : Math.min(room, gap);
     let u = Math.max(0, u0), acc = typeof it.acc === "number" ? it.acc : 0;
     // braked into it as a train stops (less the way it runs while its braking builds up: JERK_MPS3)
     want = Math.max(0, Math.min(want, Math.sqrt(2 * dyn.bs * Math.max(0, rest - u * (dyn.bs / JERK_MPS3) / 2))));

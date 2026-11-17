@@ -2386,10 +2386,16 @@ GPS filter drew it halfway between two signals); the same signal again is the tr
 stays when it got there); a jump to the next block is expected (a block, 3.5 km, plus 100 mph over the time since is
 allowed; further, or back, is refused). Its speed is the feed's when it gives one, else the mean over the block it
 just ran (*~45 mph* on the box, *between its last two signals* on hover), else none: then it is held at the signal,
-*At signal · 42 s ago*, unpredicted. With a speed it is carried on as a GPS fix is, but no further than 1.5 km and
-never past its next stop. Stale (faded) only after 3 min with no new signal; a train TrainTime alone has keeps its
-signal location 10 min (a GPS location: 40 s, as before), so it no longer drops off the map 40 s after each signal
-(#589's GPS rules are unchanged; signal fixes add nothing to the prediction residuals). The train's box: one data line (e.g. *NH west · 6 cars (M8) · 11 min late · MP 23.0 · next Rye trk
+*At signal · 42 s ago*, unpredicted. With a speed it is carried on at that speed with no "no news" ease, to the end
+of its block (as long as the block it just ran, plus 10 s of its travel for the next fix's lateness; 1.5 km before a
+block is known), never past its next stop, and not braked for the block's end: the next signal's fix normally comes as
+it gets there, and is closed smoothly, never snapped back. Held at a red signal, it is drawn on through the block's end
+by about that slack and a hard stop, then glided back. After 3 min with no new signal it is drawn dimmed, *At signal ·
+4 min ago* (not the feed's *Stale*). A train TrainTime alone has keeps its signal location 10 min from when it first
+had that signal (however often TrainTime re-stamps it; a GPS location: 40 s, as before), so it no longer drops off the
+map 40 s after each signal. A Metro-North train reporting SIGNAL takes the same path while its TrainTime position is
+used (under 40 s old and as new as GTFS-realtime's), which is rare. #589's GPS rules are unchanged; signal fixes add
+nothing to the prediction residuals. The train's box: one data line (e.g. *NH west · 6 cars (M8) · 11 min late · MP 23.0 · next Rye trk
 3*), then *Predicted · 52 mph · 3 s ago* (or *Reported*, *Stopped*), the cars as load bars (each car on hover),
 source and time in the footer; its route is drawn thin and dashed while the box is open (TrainTime's line is a few
 metres off the rails: a route, not a track; the tracks themselves are #371). Port Chester's and Rye's boxes list their next departures.
