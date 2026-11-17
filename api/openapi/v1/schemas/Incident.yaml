@@ -3,7 +3,7 @@ description: >
   An incident as a list shows it. Left out on purpose: the caller's name, address and phone, radio IDs, the console's
   draw hints. Additive within v1 (clients ignore fields they do not know).
 required: [id, number, status, type, subtype, emergency, received_via, priority, address, cross_street, place, lat, lon,
-  remarks, disposition, source, created_at, accepted_at, closed_at, until_at, units, rev]
+  remarks, disposition, source, created_at, accepted_at, closed_at, until_at, last_event_id, units, rev]
 properties:
   id: {type: string}
   number: {type: [string, "null"], description: "The incident number (26-000123); null while queued."}
@@ -25,6 +25,12 @@ properties:
   accepted_at: {type: [number, "null"]}
   closed_at: {type: [number, "null"]}
   until_at: {type: [number, "null"]}
+  last_event_id:
+    type: [integer, "null"]
+    description: >
+      The largest id in the incident's chronology (a note or any other event raises it, so the incident's rev moves
+      with the chronology); null only for an incident with no events. An id, never a count: the chronology keeps its
+      last 300 events.
   units:
     type: array
     items:

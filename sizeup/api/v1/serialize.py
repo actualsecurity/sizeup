@@ -133,6 +133,9 @@ def incident_summary(i: dict) -> dict:
             "remarks": scrub(i.get("remarks")), "disposition": scrub(i.get("disposition")),
             "source": i.get("source") or "", "created_at": i.get("created_at"), "accepted_at": i.get("accepted_at"),
             "closed_at": i.get("closed_at"), "until_at": i.get("until_at"),
+            # moves with the chronology (a note adds an event): the change log hashes this summary, which shows
+            # nothing of the events themselves. The largest id, not a count: the CAD keeps only the last 300 events.
+            "last_event_id": max((e["id"] for e in i.get("events") or [] if e.get("id") is not None), default=None),
             "units": [_assignment(a) for a in i.get("assignments") or []]}
 
 
