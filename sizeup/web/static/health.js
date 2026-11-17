@@ -150,11 +150,14 @@ const StationHealth = (() => {
     const dv = d.dvr;
     if (dv && !dv.error) {          // the camera DVR (#550, sizeup/dvr.py panel()): its slots, and the cameras parked
       const hm = (t) => (t ? fmtTime(t) : "—");
+      // over 24 h ago: always with its date ("11/08 20:01"; fmtTime leaves it out only for today)
+      const day = (t) => (t && serverNow() - t > 86400 && typeof fmtRecv === "function" ? fmtRecv(t).slice(0, 11) : hm(t));
       const hd = el("h3", "hl-sub", "Camera DVR");
       hd.title = `A camera failing ${dv.park_min} min without a break (${dv.park_404_min} min of master-playlist 404s) is `
-        + `parked: no recording, its slot goes to the next camera. Looked at every ${dv.check_min} min; back on its own when it answers`;
+        + `parked (only while other cameras record): no recording, its slot goes to the next camera. Looked at after `
+        + `${dv.first_check_min} min, then less often up to every ${dv.check_min} min, and a real recording round once a day; back on its own when it answers`;
       const rows = [["Recording", `${dv.recording} of ${dv.max}` + (dv.stopped ? ` · ${dv.stopped}` : ""), dv.stopped ? "hl-bad" : ""]];
-      for (const p of dv.parked || []) rows.push(["Parked", `${p.id} · ${p.why} since ${hm(p.since)} · next check ${hm(p.next)}`, "hl-warn"]);
+      for (const p of dv.parked || []) rows.push(["Parked", `${p.id} · ${p.why} since ${day(p.since)} · next check ${hm(p.next)}`, "hl-warn"]);
       const box = dl(rows);
       box.querySelectorAll("dd.hl-warn").forEach((x, i) => {
         const p = dv.parked[i];
