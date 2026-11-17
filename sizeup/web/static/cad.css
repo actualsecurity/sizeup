@@ -141,6 +141,11 @@
   .qs { font-size: var(--fs-xs); line-height: var(--lh-xs); }
   .qnote { font-weight: 700; margin-block: var(--s-1); }
   .qnote:empty { display: none; }
+  /* a page that may be the CAD feed's event (sizeup/cad/pagematch.py): "Same call as #N?" and its one-tap merge */
+  .q-merge, .qmerge { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-1) var(--s-2); }
+  .q-merge { margin-block-start: var(--s-1); font-weight: 700; }
+  .qmerge { margin-block: var(--s-1); font-weight: 700; }
+  .qmerge[hidden] { display: none; }
   .qi .chips { margin-block-start: var(--s-1); }
   /* from the Overview's old cards (#217): a rig on the call talking now lights the card and rings its chip, with a TX
      line; the call's newest transmission and note, one line each, on the Overview only */

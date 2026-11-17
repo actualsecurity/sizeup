@@ -17,7 +17,11 @@
                        (sizeup/cloud/health.py: CPU, memory, disk, uptime, each radio program; also the heartbeat)
                        The hub answers with its build: Watch (autoupdate.py) passes it to the
                        station's auto-updater once it holds still; this station's version and the
-                       updater's last result go up in the status ("version")
+                       updater's last result go up in the status ("version"). And with the id it took
+                       the post as ("station"): the hub is the source of truth for this station's id,
+                       which it adopts (adopt(): its events, status, logs and metrics say it from then
+                       on), so an admin's rename on the hub (Settings > Station > Stations) never locks
+                       it out. Its config's [station] id goes up too ("config_id")
                        ... and the admins' service per source ("services": sizeup/sourcekeys.py), kept beside the
                        outbox (hub_services.json) so a station starting while the hub is away tags as it did
     aircraft thread    POST /api/station/aircraft: our ADS-B receiver's aircraft (#235, aircraftlink.py), read every
@@ -129,6 +133,7 @@ class StationLink:
         again over the same outbox, sizeup/cloud/stationmode.py); updates: the hub's build -> the
         auto-updater (kept across that too)."""
         self.app, self.cfg, self.log = app, cfg, log
+        self.station_id = cfg.station_id        # the id the hub assigns this station, once it says (adopt)
         self.updates = updates or Watch(log=log)
         self.outbox = outbox or Outbox(cfg.cloud_outbox or ":memory:", int(cfg.cloud_outbox_max_mb * 1024 * 1024))
         # what the hub last said it knows (#409), kept beside the outbox: a station starting while the hub is away
@@ -207,6 +212,18 @@ class StationLink:
             except OSError:
                 pass
         self.log(f"hub link: service per source from the hub: {len(m)} chosen")
+
+    def adopt(self, sid) -> None:
+        """The id the hub took this station's post as ("station" in its state answer): this station's id from now on,
+        in its events, status, logs and metrics. Memory only, never written to the config: the hub keeps taking a
+        renamed station's former id from the shared token (sizeup/cloud/stations.py aliases), so a restart, or an
+        older release after a switch back, that starts with the config's id still works, and is told again."""
+        if not isinstance(sid, str) or not sid or len(sid) > 64 or not sid.isprintable() or sid == self.station_id:
+            return
+        self.log(f"hub link: the hub names this station {sid} (was {self.station_id}; [station] id: {self.cfg.station_id})")
+        self.station_id = sid
+        self.logs.station = sid
+        self.metrics_link.station = sid
 
     def emit(self, kind: str, data: dict, clip: str | None = None) -> None:
         # Another P25 system's (#409): a hub from before it would file the row as the county's talkgroup of that
@@ -351,7 +368,7 @@ class StationLink:
                 self._wake.wait(5.0)
                 self._wake.clear()
                 continue
-            body = {"epoch": self.outbox.epoch, "station": self.cfg.station_id,
+            body = {"epoch": self.outbox.epoch, "station": self.station_id,
                     "events": [dict(r, audio=base64.b64encode(r["audio"]).decode() if r["audio"] else None)
                                for r in rows]}
             try:
@@ -372,7 +389,7 @@ class StationLink:
     def status(self, talkgroups: bool = True) -> dict:
         app = self.app
         n, oldest = self.outbox.pending()
-        out = {"id": self.cfg.station_id, "name": self.cfg.station_name,
+        out = {"id": self.station_id, "config_id": self.cfg.station_id, "name": self.cfg.station_name,
                "radios": [r for r in app.radio_status() if r.get("label") != "Hub"],
                "sdr": app.sdr(), "rerun": dict(app.rerun, pending=len(app._rerun_ids - app._catchup_ids)),
                "channels": app.channels_applied(),
@@ -417,6 +434,7 @@ class StationLink:
                 if isinstance(r, dict):
                     self._set_caps(r.get("caps"))
                     self._set_services(r.get("services"))      # (a hub before this sends none: kept as they were)
+                    self.adopt(r.get("station"))
                 if "status" in body:
                     last_status, self._status_now = now, False
                     if "talkgroups" in body["status"]:

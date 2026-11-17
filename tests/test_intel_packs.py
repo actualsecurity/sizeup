@@ -17,6 +17,7 @@ Synthetic only (this repository is public): invented, short, fragmentary radio t
 from __future__ import annotations
 
 import json
+import time
 
 import pytest
 
@@ -986,3 +987,89 @@ def test_one_bad_override_never_drops_the_others():
     assert e.pack("police").threshold == 0.7 and next(r for r in e.pack("police").rules if r.id == "pd.shots").mode == "map"
     assert e.pack("ems").area == rules_mod.load_packs()[2].area                # the file's area
     assert any("intel_packs/ems not applied" in m for m in logged)
+
+
+# -- every "re:" expression of every pack runs in linear time on hostile texts (#670's review) ----------------------------
+
+HOSTILE_TEXTS = [
+    "dryer" + "'" * 20000 + " x",                    # a run of apostrophes: once both a separator and a word
+    "outlet" + "." * 20000 + "x",                    # a run of dots: the ellipsis
+    "dryer " + ". " * 10000 + "x",
+    "outlet " + "..x " * 5000,
+    "outlet" + " " * 20000 + "x",
+    "man" + " ," * 10000 + " x",
+    "panel " + "a " * 25000,
+    "the dryer " + "it's " * 10000,
+    "the man " + "a' " * 10000,
+    "x" * 50000,
+    "the dryer in the ' basement is... " * 1500,   # a 50k-character transcript of near misses
+    "!?.'-, " * 8000,
+]
+HARD_STOP_S = 0.5                                    # a match still running then has hung: the test fails, never hangs
+
+
+def found_within(src: str, text: str, limit: float) -> float:
+    """Phrase(src).found(text): its time, or AssertionError past limit. SIGALRM interrupts `re` (it checks for
+    signals while it backtracks); without it (no setitimer, or not the main thread), a child process with a timeout."""
+    import signal
+    import threading
+    if hasattr(signal, "setitimer") and threading.current_thread() is threading.main_thread():
+        def stop(_sig, _frame):
+            raise TimeoutError
+        before = signal.signal(signal.SIGALRM, stop)
+        signal.setitimer(signal.ITIMER_REAL, limit)
+        t0 = time.perf_counter()
+        try:
+            rules_mod.Phrase(src).found(text, [])
+        except TimeoutError:
+            raise AssertionError(f"{src[:60]!r} still running after {limit} s on {text[:20]!r}…") from None
+        finally:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+            signal.signal(signal.SIGALRM, before)
+        return time.perf_counter() - t0
+    import multiprocessing
+    ctx = multiprocessing.get_context("spawn")
+    t0 = time.perf_counter()
+    proc = ctx.Process(target=_found, args=(src, text))
+    proc.start()
+    proc.join(limit + 5)                            # the child's own start-up is not the expression's time
+    if proc.is_alive():
+        proc.terminate()
+        proc.join()
+        raise AssertionError(f"{src[:60]!r} still running on {text[:20]!r}…")
+    return 0.0 if proc.exitcode == 0 else float("inf")
+
+
+def _found(src: str, text: str) -> None:
+    rules_mod.Phrase(src).found(text, [])
+
+
+def test_every_re_expression_runs_fast_on_hostile_texts():
+    exprs = {p.src for pack in rules_mod.load_packs() for r in pack.rules for p in [*r.any, *r.nots] if p.rx is not None}
+    assert len(exprs) >= 4                                         # the police pack's own, at least
+    for src in sorted(exprs):
+        for text in HOSTILE_TEXTS:
+            took = found_within(src, text, HARD_STOP_S)
+            assert took < 0.05, f"{src[:60]!r} took {took:.3f} s on {text[:20]!r}…"
+
+
+def test_a_hung_expression_fails_the_timing_test_instead_of_hanging_it():
+    """The pattern #670's review found: "\\W+" beside "[\\w']+" backtracks without bound on a run of apostrophes."""
+    bad = r"re:\b(dryer|stove)(\W+(?!(no|not)\b)[\w']+){0,3}\W+(smoking|sparking)\b"
+    t0 = time.perf_counter()
+    with pytest.raises(AssertionError, match="still running"):
+        found_within(bad, "dryer" + "'" * 4000 + " x", 0.2)
+    assert time.perf_counter() - t0 < 10
+
+
+def test_an_expression_reads_at_most_re_text_max_characters():
+    p = rules_mod.Phrase("re:smoking")
+    assert p.found("x " * 100 + "smoking", [])
+    assert not p.found("x" * rules_mod.RE_TEXT_MAX + " smoking", [])
+
+
+def test_an_expression_is_at_most_re_max_characters():
+    assert rules_mod.RE_MAX == 300
+    rules_mod.Phrase("re:" + "a" * rules_mod.RE_MAX)
+    with pytest.raises(rules_mod.PhraseError, match="1 to 300 characters"):
+        rules_mod.Phrase("re:" + "a" * (rules_mod.RE_MAX + 1))

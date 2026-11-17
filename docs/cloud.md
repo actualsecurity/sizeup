@@ -60,6 +60,7 @@ No `[cloud]` section = today's all-in-one, unchanged.
   - [What each Health row means](#what-each-health-row-means)
   - [The alert and status topics (ntfy)](#the-alert-and-status-topics-ntfy)
   - [A deploy that checks itself](#a-deploy-that-checks-itself)
+  - [Back-to-back merges](#back-to-back-merges)
 - [Auth and security](#auth-and-security)
 - [How station authentication works](#how-station-authentication-works)
   - [The tokens and where each lives](#the-tokens-and-where-each-lives)
@@ -144,7 +145,7 @@ No `[cloud]` section = today's all-in-one, unchanged.
 
 | When | Go to |
 |---|---|
-| Deploying | [A deploy that checks itself](#a-deploy-that-checks-itself) (the four steps and what fails each), [Deploys: the hot/cold handoff](#deploys-the-hotcold-handoff) (what a person sees, the timing lines) |
+| Deploying | [A deploy that checks itself](#a-deploy-that-checks-itself) (the four steps and what fails each), [Back-to-back merges](#back-to-back-merges) (which commit a deploy picks), [Deploys: the hot/cold handoff](#deploys-the-hotcold-handoff) (what a person sees, the timing lines) |
 | A deploy with a migration | [Writing a migration](#writing-a-migration), [After a takeover: let the first snapshot finish](#after-a-takeover-let-the-first-snapshot-finish) |
 | The deploy's SSM step is red | [A deploy that checks itself](#a-deploy-that-checks-itself): create the parameter (sizeup-aws), then deploy again |
 | The deploy's replica step is red | [Replica checks](#replica-checks): "corrupt" or "not verifiable" is real; "not verified within 10 min" may be a slow first restore |
@@ -571,16 +572,65 @@ uses it too.
 
 ### A deploy that checks itself
 
-`.github/workflows/deploy.yml` runs after the `test` workflow passes on main (or by hand), one deploy at a time:
+`.github/workflows/deploy.yml` runs after the `test` workflow passes on main (or by hand), one deploy at a time.
+First it picks the commit: the newest one on main that passed `test` ([Back-to-back merges](#back-to-back-merges)).
 
 | Step | What | Fails when |
 |---|---|---|
+| 0. Pick and guard | `tools/deploy_check.py pick`: the newest commit on main that passed `test`, or nothing if it (or a newer one) was the last deploy; the deploy job is named `deploy <sha>`. Then, with the AWS credentials, `pick --guard`: what ECS runs (the PRIMARY deployment's hub image tag) must be this commit or an ancestor of it | GitHub or ECS can't be read, or a commit is unknown: nothing is deployed (red). The guard: ECS runs something newer, or a commit off main |
 | 1. SSM guard (#469) | `tools/taskdef_params.py` lists every SSM parameter `deploy/aws/taskdef.json` names (each a full ARN in the deploy's region and account); `aws ssm describe-parameters` must find them all. Names only, never a value (`ssm:DescribeParameters`: sizeup-aws `23-deploy-ssm-describe.sh`) | one is missing ("Missing SSM parameter"), or AWS couldn't be asked ("Could not check SSM"): nothing is built or deployed. A task whose secret is missing never starts |
 | 2. Build and roll | the arm64 image to ECR with `SIZEUP_BUILD` = the full sha, both containers rendered, the service updated, waiting for stability | ECS's circuit breaker rolls back |
 | 3. Replicas | `tools/deploy_check.py replicas --build <sha> --timeout 600` ([Replica checks](#replica-checks)) | a replica is corrupt or not verifiable, or nothing was verified in 10 min |
 | 4. Station | `tools/deploy_check.py --url <hub> --build <sha> --timeout 900` (below) | the station's update failed, was rolled back or is paused; the token is refused; 15 min pass |
 
 Tests: `tests/test_deploy_ssm_guard.py`, `tests/test_deploy_check.py`.
+
+### Back-to-back merges
+
+PRs can be merged one after another without waiting for each deploy (about 9 min, plus up to 15 for the station):
+
+* **Every merge is tested to the end.** `test` runs on main are never cancelled or queued behind each other
+  (`.github/workflows/test.yml`: each has its own concurrency group). A PR's own runs still cancel each other.
+* **Deploys queue, one at a time.** Each `test` run that passes on main starts a `deploy` run. They share the `deploy`
+  concurrency group, and GitHub keeps only the newest waiting run: an older waiting one shows as cancelled. That loses
+  nothing, because of the next point. A run for a failed or cancelled `test` run is skipped in a group of its own, so
+  it never pushes a waiting deploy out.
+* **A deploy deploys the newest tested commit, when it starts.** Its first job, `pick`, takes main from the commit
+  that started it up to the tip and chooses the newest commit whose `test` push run passed (`tools/deploy_check.py
+  pick`, GitHub API reads only). Nothing, when that commit or a newer one was the last deploy: the last deploy run whose
+  `deploy <sha>` job got past "Roll the ECS service" (even if its replica or station check failed after). Automatic
+  deploys come only from a push run on main.
+* **The guard reads ECS, not the run history.** Before anything is built, `pick --guard` reads what ECS runs (the
+  service's PRIMARY deployment → task definition → the hub image's sha tag) and lets the deploy go on only if the
+  picked commit is that one or a descendant of it, by git ancestry (GitHub's compare API). So an older commit never
+  goes over a newer one, whatever order runs, re-runs or attempts happen in ("Re-run failed jobs" on an old run keeps
+  its old pick: the guard stops it; re-run all jobs to pick again). It fails closed: if ECS or GitHub can't be read,
+  or the image isn't tagged with a sha, nothing is deployed and the run is red.
+* **By hand** (Actions → deploy → Run workflow, on main): deploys main's tip now, with no pick (the guard doesn't
+  run either). The deploy role trusts only `refs/heads/main`, so this can't deploy an older commit: it is not a
+  rollback.
+* **Pause.** The repository variable `DEPLOY_PAUSED` = `true` (Settings → Secrets and variables → Actions →
+  Variables) stops automatic deploys. Each passing merge still starts `pick`, outside the deploy queue, which warns
+  "Deploys paused" and deploys nothing, so a forgotten pause shows on every merge. A deploy by hand still works.
+  Delete the variable (or set it to `false`) to resume: nothing deploys at once; the next merge that passes deploys
+  the newest tested commit (or run deploy by hand).
+* **Rollback.** Set the `DEPLOY_PAUSED` variable to `true`, then either merge a revert PR (tested, deploys normally)
+  or have an admin run `aws ecs update-service --task-definition <previous revision>`; unpause once main is good. A
+  deploy run already past pick when you pause still deploys: cancel it in Actions.
+
+Three merges a minute apart: the first deploys; the second's run waits; the third's run replaces it in the queue and,
+when the first is done, deploys the third. If the third's tests are still running then, the second's run deploys the
+second and the third's deploys it after. A merge whose test failed (a flake, then re-run): when the re-run passes, its
+deploy picks the newest tested commit; if something newer is already on ECS it does nothing.
+
+**Flaky tests.** Known flakes are marked `@pytest.mark.flaky(issue=NNN)` and retried once when they fail
+(`tests/conftest.py`; docs/development.md "Known failures and flakes"), so one doesn't hold back a deploy. Any other
+failure is final.
+
+**The merge queue (not enabled).** `test.yml` already has the `merge_group` trigger (inert without a ruleset). To
+turn it on: Settings → Rules → Rulesets (or Branches → the rule for `main`): "Require merge queue" (merge method,
+build concurrency, "Only merge non-failing pull requests"), with `pytest` and `image` as required status checks. The
+queue then tests each PR on top of the ones ahead of it before merging; the deploy still starts from the push to main.
 
 **The station step.** After the hub is deployed, the workflow waits up to 15 min for the station to report the
 new build (`tools/deploy_check.py`, polling `GET /api/station/status` every 15 s) and prints the station's
@@ -692,8 +742,11 @@ accepted until the multi-station work lands; Add is for the existing station's o
    - else a status token, on `GET /api/station/status` only.
    Anything else: `401 {"error", "reason"}`.
 3. The body is read. The id the payload names (`station` on events and logs, the status `id` on state) must be the
-   token's, or be absent (an older station leaves it out of some posts): another id is a `401` with reason
-   `id_mismatch`, logged once an hour per station (never the token).
+   token's, or be absent (an older station leaves it out of some posts), or, on the shared token, one of its former
+   ids (a renamed station's: [Renaming the shared token's station](#renaming-the-shared-tokens-station)). Another id
+   is a `401` with reason `id_mismatch`, logged at most once a minute with both ids (never the token), and Health
+   raises **Station rejected: id mismatch (station says X, token is Y)** (critical) while it goes on (from the second
+   refusal; pushed once it has gone on 45 s).
 4. What follows uses the **authenticated** id: the CloudWatch log stream (`<id>-<date>`, `cwlogs.py`), the station
    id Health shows. A claimed id alone is never trusted.
 5. Last used: kept in memory and written to `hub.sqlite` at most every 5 minutes.
@@ -732,7 +785,7 @@ token state, last seen) and the shared token's row.
 | Revoke | refused from the station's next request, its previous token and status token too. New token (Rotate) brings it back with a fresh token |
 | Retire (shared token) | the shared token is refused from now on. It asks again if the shared token was used in the last 2 minutes (a station still runs on it) |
 | Restore (shared token) | undoes Retire (a station put back on the shared token, a rollback) |
-| Set id (shared token) | which station the shared token is; empty: back to the config's ([above](#the-tokens-and-where-each-lives)) |
+| Set id (shared token) | renames the shared token's station; empty: back to the config's ([above](#the-tokens-and-where-each-lives)). Never a lockout: [below](#renaming-the-shared-tokens-station). While its station is connected (seen in the last 10 minutes) it asks first; the audit says it was confirmed |
 
 Each one is in the Settings audit (System, key `stations/<id>`) and the person's activity: who, what, which station;
 never a token. The answer carrying a new token is sent `Cache-Control: no-store`.
@@ -751,7 +804,8 @@ python -m sizeup.cloud.stations rotate st-hq
 python -m sizeup.cloud.stations revoke st-hq
 python -m sizeup.cloud.stations rename st-hq "Headquarters"
 python -m sizeup.cloud.stations retire-shared [--force] | restore-shared
-python -m sizeup.cloud.stations reset-shared-id [--id <id>]     # the shared token's station: set, or back to the config's
+python -m sizeup.cloud.stations reset-shared-id [--id <id>] [--force]   # the shared token's station: set, or back to
+                                                                         # the config's; --force while it's connected
 ```
 
 `--state` defaults to `SIZEUP_STATE_DIR` (`/data` in the task). The running hub reads the table on each request,
@@ -765,6 +819,50 @@ deploy is done and redo anything that isn't there.
 **Revoking a station's own token doesn't stop the shared token.** While the shared token isn't retired, it still
 works as that same station id. To shut a station out completely, revoke its own token **and** retire the shared
 token (and revoke its Access service token).
+
+### Renaming the shared token's station
+
+The hub is the source of truth for a station's id. Renaming the shared token's station (e.g. naming the station for
+where it is: `station-a` to `station-b`) is one step and never refuses it:
+
+1. **Settings > Station > Stations > Set id** on the shared token's row: the new id, Save. If the station is
+   connected the card asks: "station-a is connected with this token right now. It becomes station-b: the hub keeps
+   taking station-a from it and moves its history. Change anyway?" Change.
+2. That's it. From the station's next state post (seconds) the hub answers with `station: station-b` and the station
+   adopts it (`StationLink.adopt`): its events, status, logs and metrics say `station-b`, and log batches spooled
+   before are stamped `station-b` when they go up. Health and the card show `station-b`; the row says "was
+   station-a". The station's own page shows `station-b (config station-a)`.
+3. **Optional, any time later:** set `[station] id = "station-b"` in the station's `/etc/sizeup/config.toml` and restart
+   it. The station reports its config's id (`config_id`); once it has posted as `station-b` with its config saying
+   so for an hour, the hub stops taking `station-a` (logged). Until then anything still stamped `station-a` (in
+   flight, spooled) is taken.
+
+The card also asks first when the new id has **its own token** (the shared token's station becomes that station; its
+history isn't moved into it, and the shared token takes no former id any more, so a shared-token machine still saying
+the old id is rejected rather than becoming that station), and when a rename would forget a former id (at most 8 are kept). Renaming to the id of
+an own-token station that is connected while the shared token's station is connected too is refused: two machines
+can't share an id. Each confirmed change says why in the Settings audit.
+
+What moves with the id, and how:
+
+| keyed by the id | after a rename |
+|---|---|
+| who the shared token is (`hub.sqlite` meta `station_legacy_id`) | the new id; the old one kept as an alias (`station_legacy_aliases`): still taken from the shared token, as the new id. They were that token's ids already, so nothing new can use it; an id it never had is still refused |
+| the station's status (Health) | the new id at once |
+| signal metrics (`metrics.sqlite`: raw, events, hourly, series) | moved by the hub in the background, in chunks (`MetricStore.rename_station`), from the renames kept in `hub.sqlite` (meta `station_renames`, replicated): after the rename, at each janitor turn and once a takeover has restored its copy (`metrics.sqlite` isn't replicated, so a copy from before the rename is moved again); a copy goes up soon after. Only rows from **before** the rename move: after it the station's posts are filed under the new id, so a later row under the old id is another station's (an own token reusing the id) and stays. Never from the current id or an id with its own token; none once the id is cleared to learned. An hour both ids had, and the rename's hour, are rolled up again; rollups wait while a move runs. Not when the new id is an own-token station's |
+| CloudWatch log streams (`<id>-<date>`) | new streams get the new id; the old ones stay in `/sizeup/station`, which the Logs view reads whole |
+| the station's own token (`sz1.<id>.…`) | can't be renamed (the id is in the token). A station on its own token under the old id is refused (`multi_station_off`) after the rename until it has a token for the new id: the confirm says so ("... will be rejected until it's reconfigured to station-b") |
+
+Why aliases and adoption, not a station config change: a station's `/etc/sizeup/config.toml` is never rewritten,
+and an older release after a switch back still starts with the config's id. The adopted id is memory only; a
+restart starts with the config's, which the alias still takes, and is told again. Clearing the id (empty: learned
+from the next post) drops the aliases. The CLI (`reset-shared-id --id ... [--force]`) does the same; it never writes
+`metrics.sqlite` (the hub moves them at its next turn).
+
+A station only adopts an id from a post the hub **took**. One refused as another id (`id_mismatch`) is never told
+the id to post as: otherwise a second machine given the shared token would quietly become the station. Health raises
+**Station rejected: id mismatch (station says X, token is Y)** instead (from the second refusal, pushed once it has
+gone on 45 s): Set id to the one the station says, or fix its `[station] id`.
 
 ### Moving the existing station to its own token
 
@@ -3194,7 +3292,7 @@ person ([Listen](#listen-links-and-inference-intel) below).
 
 | Part | File | What |
 |---|---|---|
-| Packs | `data/intel/*.json` (`police.json`: 11 categories, 17 rules; the log-only `county_police.json`, `ems.json`, `fire.json`, below; generic phrases only), Settings laid over them | which sources a pack reads (source keys or globs, services), its categories (label, priority, time to live, mode), phrase rules with weights, "suppress" phrases ("disregard", "training") |
+| Packs | `data/intel/*.json` (`police.json`: 12 categories, 19 rules; the log-only `county_police.json`, `ems.json`, `fire.json`, below; generic phrases only), Settings laid over them | which sources a pack reads (source keys or globs, services), its categories (label, priority, time to live, mode), phrase rules with weights, "suppress" phrases ("disregard", "training") |
 | Speech-to-text table | `data/intel/tables/stt.json` (`rules.py` `Normalizer`) | for a pack that says `"normalize": "stt"`: sound-alikes with their context ("order of gas" is "odor of gas"), split and merged words, number words as digits. Each reading (as transcribed, and fixed) is judged on its own, so the table only ever adds hits (below). `police.json` has no table and matches as before |
 | Engine | `engine.py` | a row joins its source's window (`window_s`, 120); per category the rules' weights combine (noisy-OR, dampers); at the threshold (0.6) it is an event: the open one of that pack, category and source, or the one at the same place, else a new one |
 | Place | `place.py` | the window's words through the page locator, held to the source's home towns, after callsigns, car numbers, 10-codes, plates and times are taken out. Also "X and Y" / "corner of" through the intersection search, "the 100 block of X", "rear of / across from" (radius widened), highway exits and mile markers (the place search), and a headquarters callsign said alone narrows to its town. Police text confirms at a higher score than a page (`DOMAIN_PARAMS`). An address confirms by its cross street only within `corner_m` (200 m) of where they meet; a number far from the corner is taken as misheard. Precision: address, intersection, block, landmark or street; unconfirmed is never exact |
@@ -3238,7 +3336,7 @@ category's, and the rules' rung. The rung is the highest mode M at which the rul
   carry it.
 
 **Held at log** (`intel_events.suppressed`), whatever the switches say. Only the packs with an `area`: `county_police`,
-`ems` and `fire`. The `police` pack's events are never held or linked. An event already pushed is never held (its mode
+`ems` and `fire`; and a `"place": true` category of any pack (the `police` pack's `fire_call`), which is held while it has no address. The `police` pack's events are never linked. An event already pushed is never held (its mode
 never goes down, so it stays on the map and the console), and when a hold ends (read back at one of our streets) the
 event gets back the mode its rules give.
 
@@ -3246,6 +3344,7 @@ event gets back the mode its rules give.
 |---|---|
 | `out_of_area` | a pack with an `area` (the three above: Port Chester, Rye Brook, Rye, Harrison with Purchase and West Harrison, Greenwich with Byram; Settings `intel_packs.<pack>.area`, an empty list = the file's): the event is placed in another town, or, with no place, its words say it is in towns and none of the area's: a town after "in", "at", "on" or "the area of", never after "to", "from", "transporting" or "units from" (the hospital, the units coming), and a town before a street word is a street. No place and no such town: not held. A safety category with no place is never held for a town said. The gazetteer holds our area only, so a county-wide source's street read UNCONFIRMED into one of our towns is no place at all (a replay found most such readings were a same-named street elsewhere); a confirmed one places it |
 | `near_incident` | its place is one of our own incidents' (the same gazetteer label, or within 150 m plus half the reading's radius): an emergency incident (never a notification or closure), accepted (never a queued page), opened up to 6 hours before the event or 30 minutes after it, and not closed before it. Linked (`near_incident`), never a new lead. A safety category is linked and NOT held: `county_police` weapons and barricade, `ems` weapons (scene not safe), `fire` mayday, evacuate and collapse. Whether a mayday, evacuation or collapse at our own fireground should be held instead is the user's call; they are not held for now |
+| `unplaced` | a category with `"place": true` (the `police` pack's `fire_call`: a burning smell or smoke complaint, the FD being notified): no place a crew can drive to yet (an address, intersection, block or landmark; a street or a town alone is not one). Only its own words place it, or a read-back of the held call within 5 minutes: no other job's cue (no other category's rule, no dispatch cue, no unit the call never named), said by the call's talker (the dispatcher repeating the address) or a unit it named, and the address alone (with "copy", "that's going to be", "correction"); never the talker's next job. Placed within 5 minutes of the call-out it gets back the mode its rules raised it at and pushes; later, `placed_late`: updated at log, never pushed. Placed outside the source's towns (`towns`, else the pack's `area`): `out_of_area`. One pre-alert per call: `fire_call` defers to `fire_report` (`"defer_to"`): not raised beside it at the same place (or where either has none), and taken over by it; an open `fire_report` with no place takes the `fire_call`'s address (its place-found push) |
 
 The area is set in the pack files and through the API (`POST /api/cad/settings/intel {action: "pack", pack, area:
 [...]}`); Settings > System > Intel does not show it yet. A town name in Settings that no longer compiles drops that

@@ -9,6 +9,25 @@ name: deploy
 # without SIZEUP_STATUS_TOKEN the check is skipped with a warning. vars.SIZEUP_HUB_URL overrides the URL.
 # Before that, the replicas: the new leader's own check of each must pass (tools/deploy_check.py replicas reads its
 # record, replica-watch.json, and nothing else: sizeup-aws/28-replica-watch.sh).
+#
+# Back-to-back merges (docs/cloud.md "Back-to-back merges"): main's test runs are never cancelled (test.yml), so each
+# merge that passes starts a run here, in any order. Runs wait in one queue (the "deploy" group: one at a time; GitHub
+# keeps only the newest waiting run and cancels an older waiting one, which is fine because of what comes next). The
+# first job, pick, chooses what to deploy when the run actually starts: the NEWEST commit on main (from the one that
+# started this run up to main's tip) whose test push run passed, or nothing when that commit or a newer one is already
+# deployed (tools/deploy_check.py pick, GitHub reads only). So three quick merges deploy the first and then the third,
+# and a merge whose run was cancelled from the queue still reaches ECS with a later run. The deploy job is named
+# "deploy <sha>": that is how the next pick knows what was deployed. Then, with the AWS credentials, the guard reads
+# what ECS actually runs and deploys only that commit or a descendant of it (git ancestry): never an older commit over
+# a newer one, whatever the run history says (a re-run of an old run, for one). Fails closed.
+# By hand (workflow_dispatch, on main: the deploy role only trusts refs/heads/main): deploys main's tip now, no pick.
+# It can't roll back.
+# Pause: the repository variable DEPLOY_PAUSED = true (Settings > Secrets and variables > Actions > Variables). Each
+# automatic run still starts pick, which warns "Deploys paused" and deploys nothing, so a forgotten pause shows on every
+# merge; a deploy by hand still works.
+# Rollback: set the DEPLOY_PAUSED variable to true, then either merge a revert PR (tested, deploys normally) or have an
+# admin run aws ecs update-service --task-definition <previous revision>; unpause once main is good. A deploy run
+# already past pick when you pause still deploys: cancel it in Actions.
 on:
   workflow_run:
     workflows: [test]
@@ -20,17 +39,58 @@ permissions:
   id-token: write
   contents: read
 
+# Only runs that may deploy share the queue: a run for a failed or cancelled test run, or one while deploys are paused
+# (skipped below), gets a group of its own, so it never pushes a waiting deploy out of the queue. Automatic deploys come
+# only from a push run on main.
 concurrency:
-  group: deploy
+  group: ${{ (github.event_name == 'workflow_dispatch' || (vars.DEPLOY_PAUSED != 'true' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')) && 'deploy' || format('deploy-skipped-{0}', github.run_id) }}
   cancel-in-progress: false
 
 jobs:
+  pick:
+    # (paused too: pick then only warns, outside the deploy queue, see the concurrency group above)
+    if: github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: read     # the test and deploy runs (GitHub API, read only)
+      contents: read
+    outputs:
+      sha: ${{ steps.pick.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: tools
+      - id: pick
+        name: The newest tested commit on main
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          TESTED: ${{ github.event.workflow_run.head_sha }}
+          DEPLOY_PAUSED: ${{ vars.DEPLOY_PAUSED }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
+            echo "::notice title=Deploying::$GITHUB_SHA ($GITHUB_REF_NAME, by hand)"
+            echo "sha=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$DEPLOY_PAUSED" = true ]; then
+            echo "::warning title=Deploys paused::DEPLOY_PAUSED is true: ${TESTED:0:7} passed its tests but nothing was deployed. Unpause (Settings > Secrets and variables > Actions > Variables) once main is good: the next merge that passes deploys the newest tested commit."
+            echo "sha=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          python3 tools/deploy_check.py pick --repo "$GITHUB_REPOSITORY" --sha "$TESTED" --run-id "$GITHUB_RUN_ID"
+
   deploy:
-    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    needs: pick
+    if: needs.pick.outputs.sha != ''
+    name: deploy ${{ needs.pick.outputs.sha }}
     runs-on: ubuntu-latest
     timeout-minutes: 50
+    permissions:
+      id-token: write
+      contents: read
     env:
-      SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+      SHA: ${{ needs.pick.outputs.sha }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -39,6 +99,14 @@ jobs:
         with:
           role-to-assume: ${{ vars.AWS_DEPLOY_ROLE }}
           aws-region: ${{ vars.AWS_REGION }}
+      # What ECS runs (the service's PRIMARY deployment → task definition → the hub image's sha tag; ecs:DescribeServices
+      # and ecs:DescribeTaskDefinition, sizeup-aws/2-iam.sh): this commit must be it or a descendant of it, by git
+      # ancestry (the GitHub compare API). Fails closed when ECS or GitHub can't be read. Not for a deploy by hand (main's tip).
+      - name: Nothing newer is deployed
+        if: github.event_name != 'workflow_dispatch'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 tools/deploy_check.py pick --guard --repo "$GITHUB_REPOSITORY" --sha "$SHA" --cluster sizeup-hub --service sizeup-hub
       # Every SSM parameter the task definition names must exist before anything is built or ECS touched: a task whose
       # secret is missing never starts, and the service would roll to it. Names only (ssm:DescribeParameters: metadata,
       # never a value; sizeup-aws/23-deploy-ssm-describe.sh grants it).
@@ -97,6 +165,7 @@ jobs:
       - id: svc
         run: echo "exists=$(aws ecs describe-services --cluster sizeup-hub --services sizeup-hub --query 'length(services[?status==`ACTIVE`])' --output text)" >> "$GITHUB_OUTPUT"
       - id: deploy
+        name: Roll the ECS service   # this name: the next pick reads "deployed" from it (tools/deploy_check.py ROLL_STEP)
         if: steps.svc.outputs.exists == '1'
         uses: aws-actions/amazon-ecs-deploy-task-definition@v2
         with:

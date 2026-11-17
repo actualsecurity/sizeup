@@ -1,4 +1,66 @@
+import json
+import os
+import threading
+from collections import Counter
+
 import pytest
+
+# -- threads that outlive their test (#665): SIZEUP_TEST_THREAD_REPORT=1 reports them at the end, never a failure ---
+# A thread a test starts and leaves running goes on inside the next tests in that process (pytest-xdist runs many files
+# per worker): an earlier hub answered a station's long poll 25 s late, inside the intel replay's network guard. Each
+# test's new threads still alive when the next test starts are listed under "threads that outlived their test".
+# Opt-in: today about 1,500 (apps tests start and never stop: intel, janitor, stt, broadcast), too many for every run.
+
+_REPORT = os.environ.get("SIZEUP_TEST_THREAD_REPORT", "") not in ("", "0")
+_threads: dict = {"test": None, "before": set()}
+_leaks: dict[str, list[str]] = {}
+
+
+def _note_leaks(now: str | None) -> None:
+    if not _REPORT:
+        return
+    if _threads["test"] is not None:
+        left = sorted(t.name for t in threading.enumerate() if t not in _threads["before"])
+        if left:
+            _leaks[_threads["test"]] = left
+    _threads["test"], _threads["before"] = now, set(threading.enumerate())
+
+
+def pytest_runtest_setup(item):
+    _note_leaks(item.nodeid)                 # (before this test's fixtures: the last one's teardown is done)
+
+
+def pytest_sessionfinish(session):
+    _note_leaks(None)
+    if hasattr(session.config, "workeroutput"):                     # an xdist worker: to the controller
+        session.config.workeroutput["thread_leaks"] = json.dumps(_leaks)
+
+
+@pytest.hookimpl(optionalhook=True)
+def pytest_testnodedown(node, error):
+    _leaks.update(json.loads(getattr(node, "workeroutput", {}).get("thread_leaks") or "{}"))
+
+
+def pytest_terminal_summary(terminalreporter):         # the one summary hook: both reports (a second def would replace this)
+    _thread_report(terminalreporter)
+    _flaky_report(terminalreporter)
+
+
+def _thread_report(terminalreporter):
+    if not _leaks or hasattr(terminalreporter.config, "workeroutput"):
+        return
+    tr = terminalreporter
+    tr.write_sep("-", f"threads that outlived their test: {sum(map(len, _leaks.values()))} from {len(_leaks)} test(s)")
+    for test, names in sorted(_leaks.items(), key=lambda x: (-len(x[1]), x[0]))[:20]:
+        tr.write_line(f"{len(names):3d}  {test}: " + ", ".join(f"{n} x{c}" if c > 1 else n for n, c in
+                                                             Counter(_name(n) for n in names).most_common()))
+    if len(_leaks) > 20:
+        tr.write_line(f"     ... and {len(_leaks) - 20} more test(s)")
+
+
+def _name(n: str) -> str:
+    """'Thread-12 (serve_forever)' -> 'serve_forever': the same kind counts together."""
+    return n[n.index("(") + 1:-1] if n.startswith("Thread-") and n.endswith(")") and "(" in n else n
 
 
 @pytest.fixture(autouse=True)
@@ -309,13 +371,69 @@ def any_hour(request, monkeypatch):
 
 # Private real-data replay (#283, tests/replay.py): the "replay" marker and the replay_sets fixture; a replay test is
 # skipped, with the reason, when the local cache (~/.cache/sizeup-replay or $SIZEUP_REPLAY_DIR) has no data of its kind.
-from tests.replay import pytest_collection_modifyitems, pytest_configure, replay_sets  # noqa: E402,F401
+from tests.replay import pytest_configure, replay_sets  # noqa: E402,F401
+
+
+def pytest_collection_modifyitems(config, items):        # replay's skips, then every flaky mark names its issue
+    from tests import replay
+    replay.pytest_collection_modifyitems(config, items)
+    bare = [i.nodeid for i in items if (m := i.get_closest_marker("flaky")) is not None and not m.kwargs.get("issue")]
+    if bare:
+        raise pytest.UsageError("@pytest.mark.flaky needs issue=<the GitHub issue that fixes it>: " + ", ".join(bare))
 
 
 def pytest_configure(config):            # replay's markers (imported above) and this one
     from tests import replay
     replay.pytest_configure(config)
     config.addinivalue_line("markers", "hand_dispatch_gate: keep the 60 Control refusal of a dispatch by hand (automode)")
+    config.addinivalue_line("markers", "flaky(issue): a known flaky test (its GitHub issue): one retry when its call fails")
+
+
+# Known flaky tests: @pytest.mark.flaky(issue=NNN) (the open issue that fixes it; a mark without one is a usage error).
+# One retry when the test itself fails (its call; a setup error is final), and the retry says so: "R" in the progress
+# line, "N rerun" in the totals, a list at the end, and a GitHub warning annotation in CI. The first try's other reports
+# are logged as they are: a teardown error after the failed call is an error even when the retry passes. Every other
+# test fails at once, as before. Under pytest-xdist the worker retries and the controller reports (the reports carry the
+# outcome "rerun").
+def pytest_runtest_protocol(item, nextitem):
+    mark = item.get_closest_marker("flaky")
+    if mark is None:
+        return None                                   # pytest's own protocol
+    from _pytest.runner import runtestprotocol
+    item.ihook.pytest_runtest_logstart(nodeid=item.nodeid, location=item.location)
+    reports = runtestprotocol(item, nextitem=nextitem, log=False)
+    if any(r.when == "call" and r.failed for r in reports):
+        issue = mark.kwargs.get("issue")
+        for r in reports:                             # the first try, all of it (its teardown too)
+            if r.when == "call":
+                r.outcome = "rerun"                   # its failed call: reported, not counted as a failure
+                r.user_properties.append(("flaky_issue", issue))
+            item.ihook.pytest_runtest_logreport(report=r)
+        reports = runtestprotocol(item, nextitem=nextitem, log=False)
+    for r in reports:
+        item.ihook.pytest_runtest_logreport(report=r)
+    item.ihook.pytest_runtest_logfinish(nodeid=item.nodeid, location=item.location)
+    return True
+
+
+def pytest_report_teststatus(report, config):
+    if report.outcome == "rerun":
+        return "rerun", "R", ("RERUN", {"yellow": True})
+    return None
+
+
+def _flaky_report(terminalreporter):                  # (from pytest_terminal_summary at the top)
+    reruns = terminalreporter.stats.get("rerun", [])
+    if not reruns:
+        return
+    terminalreporter.section("flaky tests retried once (@pytest.mark.flaky)", yellow=True)
+    for r in reruns:
+        issue = dict(r.user_properties).get("flaky_issue")
+        where = f"#{issue}" if issue else "no issue"
+        crash = getattr(getattr(r.longrepr, "reprcrash", None), "message", "") or "failed"
+        terminalreporter.line(f"RERUN {r.nodeid} ({where}): {crash.splitlines()[0][:200]}")
+        if os.environ.get("GITHUB_ACTIONS") == "true":
+            terminalreporter.line(f"::warning title=Flaky test retried ({where})::{r.nodeid} failed once and was retried")
 
 
 @pytest.fixture(autouse=True)
