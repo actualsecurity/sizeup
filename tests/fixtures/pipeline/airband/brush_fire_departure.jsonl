@@ -1,0 +1,8 @@
+{"do": "scenario", "t0": "day", "why": "A departure reports a brush fire off the departure end; the tower rolls the trucks in the same exchange (one pre-alert, one push); a dispatcher accepts it (a pending BRUSH event at the approximate point, never dispatched); a second accept is refused."}
+{"do": "picture", "t": 0, "planes": [{"hex": "a1b2c3", "flight": "JBU1234", "reg": "N123JB", "type": "A320", "lat": 41.05, "lon": -73.69, "alt": 1800, "gs": 160, "trk": 150, "vr": 1500, "phase": "departing", "rwy": "16", "dist": 1.2, "age": 1.0}]}
+{"do": "air", "t": 10, "id": "twr-1", "ch": "HPN Tower", "dur": 4, "text": "JetBlue one two three four, runway one six, cleared for takeoff"}
+{"do": "picture", "t": 55, "planes": [{"hex": "a1b2c3", "flight": "JBU1234", "reg": "N123JB", "type": "A320", "lat": 41.05, "lon": -73.69, "alt": 1800, "gs": 160, "trk": 150, "vr": 1500, "phase": "departing", "rwy": "16", "dist": 1.2, "age": 1.0}]}
+{"do": "air", "t": 60, "id": "twr-2", "ch": "HPN Tower", "dur": 5, "text": "Westchester tower, JetBlue one two three four, looks like a brush fire off the departure end of one six"}
+{"do": "air", "t": 75, "id": "twr-3", "ch": "HPN Tower", "dur": 4, "text": "crash crew, Westchester tower, roll the trucks, brush fire off the departure end of runway one six"}
+{"do": "accept", "t": 200, "alert": "A1", "operator": "Disp One"}
+{"do": "accept", "t": 210, "alert": "A1", "operator": "Disp Two"}

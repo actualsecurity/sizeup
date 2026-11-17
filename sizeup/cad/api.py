@@ -221,10 +221,15 @@ POST /api/cad/airport-alert/<id>/accept   {operator?}  an airport pre-alert (HPN
                                           sizeup/cad/airport_alerts.py) made into a PENDING event: never a dispatch
 POST /api/cad/airport-alert/<id>/dismiss  {operator?, reason?}  ... that is nothing; dispatchers and admins
 GET  /api/cad/export/airport-alerts.csv   every airport pre-alert kept (90 days), ATC and ADS-B, with its outcome
-POST /api/cad/hint/<id>/accept            {operator?}  a unit status suggested from the radio (#37, the state's
+POST /api/cad/hint/<id>/accept            {operator?, confirm?}  a unit status suggested from the radio (#37, the state's
                                           status_hints; sizeup/cad/statushints.py): set, with "Status from radio
-                                          (heard 14:32:10 “...”)" in the chronology; dispatchers and admins
+                                          (heard 14:32:10 “...”)" in the chronology; dispatchers and admins; a unit out of
+                                          service (oos: true): 400 unless confirm: true (sizeup/cad/oos.py)
 POST /api/cad/hint/<id>/dismiss           {operator?}  not so: that transmission never suggests it again
+POST /api/cad/oos-notice/<id>/service   {operator?}  an automation refused on an out-of-service unit (the state's
+                                          oos_notices; sizeup/cad/oos.py): the unit back in service (its free status);
+                                          /dismiss: left out of service. Dispatchers and admins; 400 once it lapsed
+                                          (5 min, or its call closed)
 GET  /api/cad/export/status-hints.csv     every suggestion and how it ended (accepted / dismissed / expired ...)
 GET  /api/cad/alarms                      the emergency alarms (sizeup/cad/alarms.py, #128): {open, notices, recent, drill,
                                           settings: {keywords, channels, other, drill, defaults, edited, push}, history}
@@ -327,6 +332,11 @@ GET  /api/cad/intel/events?since=&bbox=w,s,e,n&mode=map,push&status=open|all&lim
                                           mode, status, first_at, last_at, until, traffic_ids ...}], now}. Both: anyone
                                           signed in (sourcekeys.may_see_context), 403 otherwise
 POST /api/cad/intel/<id>/dismiss          {verdict?}  a pre-alert that is nothing (dispatchers and admins)
+GET  /api/cad/prealerts/<kind>/<id>       a pre-alert's More info (kind airport | intel; /cad#prealert/<kind>/<id>): its
+                                          context bundle (sizeup/context_bundle.py: why, the transmissions and their
+                                          audio, before / after, the place, site history, now, the outcome). Anyone
+                                          signed in (403 otherwise, as the radio pre-alerts); 404 when there is none
+                                          (or it is a shadow / log one and the reader no admin)
 POST /api/cad/intel/<id>/feedback         {verdict: useful | noise | wrong_place | wrong_type | late | missed, category?}
                                           anyone signed in
 POST /api/cad/settings/intel              {action: set | pack | category | rule | local | reset, ...}: Settings > System >
@@ -368,7 +378,9 @@ SETTINGS = re.compile(r"/api/cad/settings/([a-z_]{1,30})")
 PREALERT = re.compile(r"/api/cad/prealert/(\d{1,9})/dismiss")
 AIRPORT_ALERT = re.compile(r"/api/cad/airport-alert/(\d{1,9})/(accept|dismiss)")
 HINT = re.compile(r"/api/cad/hint/(\d{1,9})/(accept|dismiss)")
+OOS_NOTICE = re.compile(r"/api/cad/oos-notice/(\d{1,9})/(service|dismiss)")      # automation refused (sizeup/cad/oos.py)
 INTEL_EVENT = re.compile(r"/api/cad/intel/(\d{1,9})/(dismiss|feedback)")        # radio pre-alerts (sizeup/intel)
+PREALERT_INFO = re.compile(r"/api/cad/prealerts/(airport|intel)/(\d{1,9})")      # a pre-alert's More info page
 ALARM_ACK = re.compile(r"/api/cad/alarm/(\d{1,9})/ack")
 ALARM_CLEAR = re.compile(r"/api/cad/alarm/(\d{1,9})/clear")
 DISPATCH_MODE = re.compile(r"/api/cad/dispatch-mode")
@@ -410,6 +422,7 @@ WRITES = (
     (PREALERT, "dispatch"),                                                 # a phone pre-alert that is nothing
     (AIRPORT_ALERT, "dispatch"),                                            # an airport pre-alert: an event, or nothing
     (HINT, "dispatch"),                                                     # a status suggested from the radio (#37)
+    (OOS_NOTICE, "dispatch"),                                               # an out-of-service unit back in service
     (re.compile(r"/api/cad/intel/\d{1,9}/dismiss"), "dispatch"),             # a radio pre-alert that is nothing
     (re.compile(r"/api/cad/intel/\d{1,9}/feedback"), "read"),                # ... a vote on it: anyone signed in
     (ALARM_ACK, "dispatch"),                                                # an emergency alarm seen (#128)
@@ -651,6 +664,9 @@ DOES = (
     (HINT, lambda m, b, o, c: (f"{'Accepted' if m.group(2) == 'accept' else 'Dismissed'} the radio's "
                                f"{o.get('name') or o.get('unit') or ''} {o.get('status', '')}".replace("  ", " ")
                                + (f" on {o['incident_number']}" if o.get("incident_number") else ""), o.get("incident_number") or "")),
+    (OOS_NOTICE, lambda m, b, o, c: ((f"Put {o.get('name', '')} in service" if m.group(2) == "service"
+                                      else f"Kept {o.get('name', '')} out of service")
+                                     + f" ({_clip(o.get('what'), 60)})", "")),
     (ALARM_ACK, lambda m, b, o, c: (f"Acknowledged the emergency alarm: {_clip(o.get('who'), 30)} {o.get('what', '')} "
                                     f"on {o.get('channel', '')}".rstrip(), o.get("incident_number") or "")),
     (ALARM_CLEAR, lambda m, b, o, c: (f"All clear on the emergency alarm: {_clip(o.get('who'), 30)} {o.get('what', '')} "
@@ -979,6 +995,19 @@ class CadApi:
             pass
         return _json(403, {"error": f"Admins only: {why}"})
 
+    def _prealert_info(self, kind: str, pid: int, who) -> tuple[int, bytes, str]:
+        """GET /api/cad/prealerts/<kind>/<id>: the context bundle (sizeup/context_bundle.py). Fails closed: a verified
+        sign-in (or a CAD that broadcasts context on purpose), as the radio pre-alerts and their transcripts."""
+        from sizeup import context_bundle
+        if not sourcekeys.may_see_context(self.cad.comms.context_broadcast):
+            return _json(403, {"error": "pre-alert details need a sign-in (Cloudflare Access)"})
+        try:
+            out = context_bundle.build(self.cad, kind, pid, admin=self._admin(who),
+                                       may=self._may(who))
+        except context_bundle.NotFound as e:
+            return _json(404, {"error": str(e)})
+        return 200, json.dumps(out, separators=(",", ":"), default=str).encode(), JSON, {"Cache-Control": "no-store"}
+
     def _admin(self, who) -> bool:
         """A verified admin (with nobody verified: no, the shadow and log pre-alerts stay hidden)."""
         if who is None or not who.email:
@@ -1152,6 +1181,8 @@ class CadApi:
                     return _json(403, {"error": "radio pre-alerts need a sign-in (Cloudflare Access)"})
                 ia = self.cad.intel_admin
                 return _json(200, ia.page() if path == "/api/cad/intel" else ia.events(parse_qs(query), self._admin(who)))
+            if m := PREALERT_INFO.fullmatch(path):
+                return self._prealert_info(m.group(1), int(m.group(2)), who)
             if path == "/api/cad/feed":
                 return _json(200, self.cad.feed_query(parse_qs(query)))
             if path == "/api/cad/rigs":
@@ -1280,6 +1311,8 @@ class CadApi:
             return c.airport_alert(int(m.group(1)), m.group(2), body)
         if m := HINT.fullmatch(path):
             return c.hint(int(m.group(1)), m.group(2), body)
+        if m := OOS_NOTICE.fullmatch(path):
+            return c.oos_notice(int(m.group(1)), m.group(2), body)
         if m := INTEL_EVENT.fullmatch(path):
             if not sourcekeys.may_see_context(c.comms.context_broadcast):
                 raise CadError("radio pre-alerts need a sign-in (Cloudflare Access)")

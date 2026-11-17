@@ -700,6 +700,7 @@ class App:
         self.roads.ours = tuple(cfg.cad_monitor_departments)
         self.roads.wall_settings = lambda: self.cad.settings.overrides().get("camera_wall") or {}
         self.cad.camera_area = self.roads.settings_rows
+        self.cad.cameras_near = lambda lat, lon: self.roads.nearest(lat, lon, n=3)   # a pre-alert's More info (context_bundle)
         # The camera DVR (#277, sizeup/dvr.py): live cameras' segments on this task's disk, on demand (the always list,
         # pins, an open event's cameras, the ones watched); the pins in the CAD store so a deploy keeps them.
         # On shared storage (#322: EFS mounted at the DVR's folder, or [roads] dvr_shared = true) the recording outlives a
@@ -825,7 +826,7 @@ class App:
                       "status": (cfg.prealert_status_topic, cfg.prealert_status_source)}, log=log)
         self.cad.pushes = self.pushes
         self.cad.alarms.notifier = self.pushes.notifier(notify.ALERTS)
-        # Radio pre-alerts (sizeup/intel, #411): pushed on the INTEL kind (no topic of its own: the alerts topic), by the
+        # Radio pre-alerts (sizeup/intel, #411): pushed on the INTEL kind (its own topic only: none, no push), by the
         # CAD of record holding the lease only; located over the gazetteer (read only). Its thread starts in start().
         intel = self.cad.intel
         intel.notifier, intel.public_url, intel.leader = self.pushes.notifier(notify.INTEL), cfg.cloud_public_url, self._atc_leader
@@ -834,6 +835,8 @@ class App:
             from sizeup.intel.place import Locator
             intel.locate = Locator(self.gaz, places=self.cad.place_index)      # exits and markers too
         intel.listen = self._intel_listen(intel)
+        if cfg.alerts_config_note:
+            log(f"notify: config: {cfg.alerts_config_note}")
         log(self.pushes.line())
         _mark("prealert + pushes")
         self.cad.alarms.public_url = cfg.cloud_public_url

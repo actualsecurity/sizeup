@@ -1,0 +1,77 @@
+{
+ "unavailable": [],
+ "steps": [
+  {
+   "step": {
+    "do": "picture",
+    "t": 0
+   }
+  },
+  {
+   "step": {
+    "do": "air",
+    "t": 5,
+    "id": "twr-1"
+   },
+   "decisions": [
+    {
+     "watch": "talkers",
+     "id": "twr-1",
+     "record": {
+      "role": "aircraft",
+      "talker": {
+       "callsign": "N123AB",
+       "hex": "a0b1c2",
+       "status": "confirmed"
+      },
+      "aircraft": {
+       "callsign": "N123AB",
+       "hex": "a0b1c2",
+       "status": "confirmed"
+      },
+      "exchange": {
+       "subject": "N123AB",
+       "hex": "a0b1c2"
+      }
+     }
+    }
+   ]
+  },
+  {
+   "step": {
+    "do": "radio",
+    "t": 60,
+    "id": "fire-1"
+   },
+   "decisions": [
+    {
+     "raise": {
+      "source": "radio",
+      "kind": "alert_level",
+      "subject": "alert-level",
+      "group": "",
+      "title": "HPN Alert 2 · Citation · RWY 34",
+      "confidence": 1.0,
+      "rank": 6,
+      "push": false,
+      "limit": false,
+      "aircraft": []
+     },
+     "row": "A1",
+     "how": "new"
+    },
+    {
+     "watch": "60 Control",
+     "id": "fire-1",
+     "row": "A1"
+    }
+   ],
+   "log": [
+    "airport_alerts: airport pre-alert #A1: HPN Alert 2 · Citation · RWY 34 (1.00)",
+    "airport_watch: airport watch: HPN Alert 2 · Citation · RWY 34 (pre-alert #A1)",
+    "airport_alerts: airport pre-alert: 1 on event I1",
+    "airport_watch: airport watch: HPN Alert 2 · Citation · RWY 34: event I1 queued"
+   ]
+  }
+ ]
+}

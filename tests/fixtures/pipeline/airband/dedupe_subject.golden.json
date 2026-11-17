@@ -1,0 +1,348 @@
+{
+ "why": "The same subject (acft:N123AB, heard, no aircraft picture) on another channel: added to the open pre-alert up to dedupe_s (300 s, inclusive) after its last addition, a new one 301 s after; additions never push and name it only when they rank higher or are more confident.",
+ "steps": [
+  {
+   "step": {
+    "do": "air",
+    "t": 5,
+    "id": "twr-1",
+    "ch": "HPN Tower",
+    "dur": 4,
+    "text": "Westchester tower, November one two three alfa bravo, we hit a couple of birds on departure"
+   },
+   "alerts": [
+    {
+     "id": "A1",
+     "source": "atc",
+     "kind": "bird",
+     "subject": "acft:N123AB",
+     "group": "HPN Tower",
+     "at": 5.0,
+     "updated_at": 5.0,
+     "title": "HPN ATC: bird strike (bird strike): N123AB",
+     "detail": "bird strike · heard: hit a couple of birds · HPN Tower",
+     "confidence": 0.6,
+     "channel": "HPN Tower",
+     "count": 1,
+     "status": "open",
+     "outcome_at": null,
+     "incident": null,
+     "operator": "",
+     "note": "",
+     "data": {
+      "snippets": [
+       {
+        "id": "twr-1",
+        "at": 5.0,
+        "channel": "HPN Tower",
+        "text": "Westchester Tower, N123AB, we hit a couple of birds on departure",
+        "hits": [
+         "hit a couple of birds"
+        ],
+        "context": false
+       }
+      ],
+      "aircraft": [
+       {
+        "callsign": "N123AB",
+        "hex": null,
+        "spoken": "N123AB",
+        "match": 0.0
+       }
+      ],
+      "location": null,
+      "phrases": [],
+      "kinds": [
+       "bird"
+      ],
+      "event": {
+       "type": "AIRPORT",
+       "subtype": ""
+      },
+      "rank": 1,
+      "pushed": 0.6
+     }
+    }
+   ],
+   "cad_log": [
+    {
+     "incident": null,
+     "at": 5.0,
+     "kind": "prealert",
+     "text": "Airport pre-alert (HPN ATC): HPN ATC: bird strike (bird strike): N123AB (alert medium 60%)",
+     "operator": ""
+    }
+   ],
+   "pushes": [
+    {
+     "to": "alerts",
+     "title": "HPN ATC: bird strike (bird strike): N123AB",
+     "message": "“Westchester Tower, N123AB, we hit a couple of birds on departure” · N123AB · heard, not on ADS-B · alert medium 60% · not dispatched · accept or dismiss in the CAD",
+     "priority": 4,
+     "tags": [
+      "airplane",
+      "warning"
+     ],
+     "click": "https://cad.example.test/cad"
+    }
+   ]
+  },
+  {
+   "step": {
+    "do": "air",
+    "t": 200,
+    "id": "app-1",
+    "ch": "NY App 126.4/120.8",
+    "dur": 4,
+    "text": "New York approach, November one two three alfa bravo, we just got lasered, green laser from the ground"
+   },
+   "alerts": [
+    {
+     "id": "A1",
+     "source": "atc",
+     "kind": "bird",
+     "subject": "acft:N123AB",
+     "group": "HPN Tower",
+     "at": 5.0,
+     "updated_at": 200.0,
+     "title": "HPN ATC: bird strike (bird strike): N123AB",
+     "detail": "bird strike · heard: hit a couple of birds · HPN Tower",
+     "confidence": 0.6,
+     "channel": "HPN Tower",
+     "count": 2,
+     "status": "open",
+     "outcome_at": null,
+     "incident": null,
+     "operator": "",
+     "note": "",
+     "data": {
+      "snippets": [
+       {
+        "id": "twr-1",
+        "at": 5.0,
+        "channel": "HPN Tower",
+        "text": "Westchester Tower, N123AB, we hit a couple of birds on departure",
+        "hits": [
+         "hit a couple of birds"
+        ],
+        "context": false
+       },
+       {
+        "id": "app-1",
+        "at": 200.0,
+        "channel": "NY App 126.4/120.8",
+        "text": "New York approach, N123AB, we just got lasered, green laser from the ground",
+        "hits": [
+         "lasered"
+        ],
+        "context": false
+       }
+      ],
+      "aircraft": [
+       {
+        "callsign": "N123AB",
+        "hex": null,
+        "spoken": "N123AB",
+        "match": 0.0
+       }
+      ],
+      "location": null,
+      "phrases": [],
+      "kinds": [
+       "bird",
+       "laser"
+      ],
+      "event": {
+       "type": "AIRPORT",
+       "subtype": ""
+      },
+      "rank": 1,
+      "pushed": 0.6
+     }
+    }
+   ],
+   "aircraft_widened_nm": [
+    40.0
+   ]
+  },
+  {
+   "step": {
+    "do": "air",
+    "t": 500,
+    "id": "app-2",
+    "ch": "NY App 126.4/120.8",
+    "dur": 4,
+    "text": "November one two three alfa bravo, that laser again, green laser off the left side"
+   },
+   "alerts": [
+    {
+     "id": "A1",
+     "source": "atc",
+     "kind": "bird",
+     "subject": "acft:N123AB",
+     "group": "HPN Tower",
+     "at": 5.0,
+     "updated_at": 500.0,
+     "title": "HPN ATC: bird strike (bird strike): N123AB",
+     "detail": "bird strike · heard: hit a couple of birds · HPN Tower",
+     "confidence": 0.6,
+     "channel": "HPN Tower",
+     "count": 3,
+     "status": "open",
+     "outcome_at": null,
+     "incident": null,
+     "operator": "",
+     "note": "",
+     "data": {
+      "snippets": [
+       {
+        "id": "twr-1",
+        "at": 5.0,
+        "channel": "HPN Tower",
+        "text": "Westchester Tower, N123AB, we hit a couple of birds on departure",
+        "hits": [
+         "hit a couple of birds"
+        ],
+        "context": false
+       },
+       {
+        "id": "app-1",
+        "at": 200.0,
+        "channel": "NY App 126.4/120.8",
+        "text": "New York approach, N123AB, we just got lasered, green laser from the ground",
+        "hits": [
+         "lasered"
+        ],
+        "context": false
+       },
+       {
+        "id": "app-2",
+        "at": 500.0,
+        "channel": "NY App 126.4/120.8",
+        "text": "N123AB, that laser again, green laser off the left side",
+        "hits": [
+         "green laser"
+        ],
+        "context": false
+       }
+      ],
+      "aircraft": [
+       {
+        "callsign": "N123AB",
+        "hex": null,
+        "spoken": "N123AB",
+        "match": 0.0
+       }
+      ],
+      "location": null,
+      "phrases": [
+       "off the left side"
+      ],
+      "kinds": [
+       "bird",
+       "laser"
+      ],
+      "event": {
+       "type": "AIRPORT",
+       "subtype": ""
+      },
+      "rank": 1,
+      "pushed": 0.6
+     }
+    }
+   ],
+   "aircraft_widened_nm": [
+    40.0
+   ]
+  },
+  {
+   "step": {
+    "do": "air",
+    "t": 801,
+    "id": "app-3",
+    "ch": "NY App 126.4/120.8",
+    "dur": 4,
+    "text": "November one two three alfa bravo, lasered again, green laser from the ground"
+   },
+   "alerts": [
+    {
+     "id": "A2",
+     "source": "atc",
+     "kind": "laser",
+     "subject": "acft:N123AB",
+     "group": "NY App 126.4/120.8",
+     "at": 801.0,
+     "updated_at": 801.0,
+     "title": "HPN ATC: laser strike (laser strike): N123AB",
+     "detail": "laser strike · heard: lasered · NY App 126.4/120.8",
+     "confidence": 0.55,
+     "channel": "NY App 126.4/120.8",
+     "count": 1,
+     "status": "open",
+     "outcome_at": null,
+     "incident": null,
+     "operator": "",
+     "note": "",
+     "data": {
+      "snippets": [
+       {
+        "id": "app-3",
+        "at": 801.0,
+        "channel": "NY App 126.4/120.8",
+        "text": "N123AB, lasered again, green laser from the ground",
+        "hits": [
+         "lasered"
+        ],
+        "context": false
+       }
+      ],
+      "aircraft": [
+       {
+        "callsign": "N123AB",
+        "hex": null,
+        "spoken": "N123AB",
+        "match": 0.0
+       }
+      ],
+      "location": null,
+      "phrases": [],
+      "kinds": [
+       "laser"
+      ],
+      "event": {
+       "type": "INVEST",
+       "subtype": ""
+      },
+      "rank": 1,
+      "pushed": 0.55
+     }
+    }
+   ],
+   "cad_log": [
+    {
+     "incident": null,
+     "at": 801.0,
+     "kind": "prealert",
+     "text": "Airport pre-alert (HPN ATC): HPN ATC: laser strike (laser strike): N123AB (alert low 55%)",
+     "operator": ""
+    }
+   ],
+   "pushes": [
+    {
+     "to": "alerts",
+     "title": "HPN ATC: laser strike (laser strike): N123AB",
+     "message": "“N123AB, lasered again, green laser from the ground” · N123AB · heard, not on ADS-B · alert low 55% · not dispatched · accept or dismiss in the CAD",
+     "priority": 4,
+     "tags": [
+      "airplane",
+      "warning"
+     ],
+     "click": "https://cad.example.test/cad"
+    }
+   ],
+   "aircraft_widened_nm": [
+    40.0
+   ]
+  }
+ ]
+}

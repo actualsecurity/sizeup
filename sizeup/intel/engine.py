@@ -1179,6 +1179,9 @@ class LiveSink:
             return False
         if n is None or not self.engine.leader():
             return False
+        if not getattr(n, "enabled", True):       # no intel topic in effect: held, and no Listen clip made for nothing
+            self.engine.log(f"intel: event {ev.id}: no pre-alert topic in effect: not pushed")
+            return False
         m = dict(d.message)
         actions = []
         lk = self.engine.listen

@@ -1,0 +1,163 @@
+{
+ "unavailable": [],
+ "steps": [
+  {
+   "step": {
+    "do": "picture",
+    "t": 0
+   }
+  },
+  {
+   "step": {
+    "do": "air",
+    "t": 60,
+    "id": "twr-1"
+   },
+   "decisions": [
+    {
+     "watch": "atc",
+     "id": "twr-1",
+     "ch": "HPN Tower",
+     "fed": "Mayday mayday mayday, N123AB",
+     "hits": [
+      [
+       "mayday",
+       "mayday"
+      ]
+     ],
+     "score": 0.95,
+     "adsb": null,
+     "context": [],
+     "row": "A1"
+    },
+    {
+     "raise": {
+      "source": "atc",
+      "kind": "emergency",
+      "subject": "acft:N123AB",
+      "group": "HPN Tower",
+      "title": "HPN ATC: MAYDAY: N123AB",
+      "confidence": 0.95,
+      "rank": 3,
+      "push": true,
+      "limit": true,
+      "aircraft": [
+       [
+        "N123AB",
+        "a0b1c2",
+        1.0
+       ]
+      ]
+     },
+     "row": "A1",
+     "how": "new"
+    },
+    {
+     "watch": "talkers",
+     "id": "twr-1",
+     "record": {
+      "role": "aircraft",
+      "talker": {
+       "callsign": "N123AB",
+       "hex": "a0b1c2",
+       "status": "confirmed"
+      },
+      "aircraft": {
+       "callsign": "N123AB",
+       "hex": "a0b1c2",
+       "status": "confirmed"
+      },
+      "exchange": {
+       "subject": "N123AB",
+       "hex": "a0b1c2"
+      }
+     }
+    },
+    {
+     "watch": "airport_watch",
+     "id": "twr-1",
+     "row": null
+    }
+   ],
+   "log": [
+    "airport_alerts: airport pre-alert #A1: HPN ATC: MAYDAY: N123AB (0.95)"
+   ]
+  },
+  {
+   "step": {
+    "do": "air",
+    "t": 61,
+    "id": "app-1"
+   },
+   "decisions": [
+    {
+     "watch": "atc",
+     "id": "app-1",
+     "ch": "NY App 126.4/120.8",
+     "fed": "Mayday mayday mayday, N456CD",
+     "hits": [
+      [
+       "mayday",
+       "mayday"
+      ]
+     ],
+     "score": 0.95,
+     "adsb": null,
+     "context": [],
+     "row": "A2"
+    },
+    {
+     "raise": {
+      "source": "atc",
+      "kind": "emergency",
+      "subject": "acft:N456CD",
+      "group": "NY App 126.4/120.8",
+      "title": "HPN ATC: MAYDAY: N456CD",
+      "confidence": 0.95,
+      "rank": 3,
+      "push": true,
+      "limit": true,
+      "aircraft": [
+       [
+        "N456CD",
+        null,
+        0.0
+       ]
+      ]
+     },
+     "row": "A2",
+     "how": "new"
+    },
+    {
+     "watch": "talkers",
+     "id": "app-1",
+     "record": {
+      "role": "aircraft",
+      "talker": {
+       "callsign": "N456CD",
+       "hex": "b0b0b0",
+       "status": "confirmed"
+      },
+      "aircraft": {
+       "callsign": "N456CD",
+       "hex": "b0b0b0",
+       "status": "confirmed"
+      },
+      "exchange": {
+       "subject": "N456CD",
+       "hex": "b0b0b0"
+      }
+     }
+    },
+    {
+     "watch": "airport_watch",
+     "id": "app-1",
+     "row": null
+    }
+   ],
+   "log": [
+    "airport_alerts: airport pre-alert #A2: HPN ATC: MAYDAY: N456CD (0.95)"
+   ]
+  }
+ ]
+}
