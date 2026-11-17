@@ -27,6 +27,10 @@
 // the list in every view (folded rail and phone too), and marks its channel, its view and the phone's Sources button;
 // "Recording until" while a talkgroup's emergency window is open (#128).
 // On a phone the rail is a sheet behind Sources (Escape closes it).
+// Its width: dragged at its right edge (Panels.separator: the pointer, the arrow keys; a double-click or Home: the
+// layout's own), remembered per viewer (st.p.w px, 0: the layout's own). At least the layout's own minimum (17.5rem),
+// at most 60% of the window, the list never under 20rem: cad.css clamps the same, so a narrower window reflows. No
+// handle while the rail is folded or a sheet.
 //
 // Folders (#607): the tree is headings and folders. By default the automatic grouping: a heading per system (County,
 // another P25 system, Analog, Airband), a folder per group (the talkgroup's Tag; Analog, Airband), the hub's order.
@@ -58,6 +62,7 @@ window.RadioNav = (() => {
   const KEPT = ["event", "unit", "q", "channel", "emergency", "type", "pcfd", "since", "until"];   // in the address
   const EXTRA = ["channel", "emergency", "type", "pcfd", "since", "until"];   // an old link's: a chip each, gone with the view
   const FOLD_MAX = 300;                                  // folded folders remembered (their ids)
+  const W_MIN = 17.5, W_VW = 0.6, LIST_MIN = 20, W_CAP = 4000;   // the rail's width: rem, the window's share, rem, px
   const BLANK = () => ({ view: "ours", source: "", event: "", unit: "", q: "", channel: "", emergency: "", type: "", pcfd: "", since: "", until: "" });
 
   // ---- pure: what the rail shows -----------------------------------------------------------------------
@@ -71,8 +76,16 @@ window.RadioNav = (() => {
     const seen = Object.fromEntries(Object.entries(v.seen && typeof v.seen === "object" ? v.seen : {}).filter(([, t]) => t > 0)
       .sort((a, b) => b[1] - a[1]).slice(0, SEEN_MAX).map(([k, t]) => [k, +t]));
     const folds = Array.isArray(v.folds) ? v.folds.map(String).slice(-FOLD_MAX) : [];
-    return { on: !!v.on, rail: v.rail !== false, pins: keys(v.pins), mutes: keys(v.mutes), seen, folds };
+    const w = Number.isFinite(v.w) && v.w > 0 ? Math.round(Math.min(v.w, W_CAP)) : 0;
+    return { on: !!v.on, rail: v.rail !== false, pins: keys(v.pins), mutes: keys(v.mutes), seen, folds, w };
   }
+  // The rail's width limits [min, max] in px: vw the window's width, box the rail layout's (#rn), gap between the
+  // columns, rem in px. A width dragged is kept in them (0: the layout's own)
+  function widthLimits(vw, box, gap, rem) {
+    const lo = Math.round(W_MIN * rem);
+    return [lo, Math.round(Math.max(lo, Math.min(vw * W_VW, box - gap - LIST_MIN * rem)))];
+  }
+  const clampW = (px, lo, hi) => (Number.isFinite(px) && px > 0 ? Math.round(Math.max(lo, Math.min(hi, px))) : 0);
   // The folders, in order (#607): the admins' (custom: {folders: [{id, name, section, items}]} | null), then every
   // source in none of them in its default folder ("d:<system>:<group>": there if listed, else made again after the
   // last folder under its heading). Each source once (the first folder that lists it wins). Empty folders kept (Edit
@@ -246,7 +259,7 @@ window.RadioNav = (() => {
   const st = { open: false, p: prefs(null), src: [], srcRev: "", srcLive: [], srcAt: 0, clock: null, rows: [], cursor: 0, next: "",
                older: false, deep: false, rev: "", busy: false, want: "", timer: 0, error: "", f: BLANK(), ours: [], railSig: "",
                flagSig: "", sheet: false, qTimer: 0, facets: "", shown: null, hash: null, offered: [],
-               layout: null, layoutAsked: null, edit: null, drag: null };
+               layout: null, layoutAsked: null, edit: null, drag: null, sizer: null };
   const dom = typeof document !== "undefined" && typeof $ === "function";
   const load = () => { try { st.p = prefs(localStorage.getItem(KEY)); } catch (_) { st.p = prefs(null); } };
   const save = () => { try { localStorage.setItem(KEY, JSON.stringify(st.p)); } catch (_) { /* not remembered */ } };
@@ -479,7 +492,9 @@ window.RadioNav = (() => {
     const b = el("button", "rn-name quiet");
     b.type = "button";
     b.dataset.source = s.key;
-    b.title = [`${s.orig || s.name}${idOf(s) ? ` (${idOf(s)})` : ""}`, `${s.system_label || s.system} › ${s.group || "Other"}`, s.tip,
+    // the name in full (a narrow rail cuts it short); an admin's name: the channel's own and its number beside it
+    const real = s.orig && s.orig !== s.name ? [s.orig, idOf(s)].filter(Boolean).join(", ") : idOf(s);
+    b.title = [`${s.name}${real ? ` (${real})` : ""}`, `${s.system_label || s.system} › ${s.group || "Other"}`, s.tip,
                s.department].filter(Boolean).join(" · ");
     b.append(dot(s), el("span", "trunc", s.name));
     if (s.code) b.append(el("span", "rn-tier", s.code));
@@ -513,7 +528,7 @@ window.RadioNav = (() => {
     b.type = "button";
     b.dataset.fold = g.id;
     b.setAttribute("aria-expanded", String(!shut));
-    b.title = shut ? "Show all" : "Minimize";
+    b.title = `${g.name} · ${shut ? "Show all" : "Minimize"}`;      // its name in full: a narrow rail cuts it short
     b.append(el("span", "caret", shut ? "▸" : "▾"));
     if (!solo) {
       const mk = mark(g.service);
@@ -932,6 +947,8 @@ window.RadioNav = (() => {
     $("#radio-view").classList.add("nav-on");
     $("#rv-nav").setAttribute("aria-pressed", "true");
     show($("#rn"), true);
+    sizer();
+    sizeRail();
     render();
     page();
   }
@@ -945,6 +962,36 @@ window.RadioNav = (() => {
     $("#rv-nav").setAttribute("aria-pressed", "false");
     show($("#rn"), false);
   }
+  // ---- the rail's width: the handle on its right edge ---------------------------------------------------------------
+
+  const phone = () => typeof matchMedia === "function" && matchMedia("(max-width: 640px)").matches;
+  function limits() {
+    const rn = $("#rn"), css = typeof getComputedStyle === "function" ? getComputedStyle : () => ({});
+    return widthLimits(innerWidth, rn.clientWidth, parseFloat(css(rn).columnGap) || 0, parseFloat(css(document.documentElement).fontSize) || 16);
+  }
+  function sizeRail() {                               // the width remembered on the layout (cad.css keeps it in its limits)
+    if (!dom) return;
+    const rn = $("#rn");
+    if (st.p.w) rn.style.setProperty("--rn-w", `${st.p.w}px`); else rn.style.removeProperty("--rn-w");
+    rn.classList.toggle("sized", !!st.p.w);
+    if (st.sizer && st.open) st.sizer.sync();
+  }
+  function sizer() {                                  // panels.js loads after this file: made on the first open, or once loaded
+    if (st.sizer || !dom || !window.Panels || !Panels.separator) return;
+    st.sizer = Panels.separator($("#rn-size"), {
+      orient: "vertical", grow: 1, label: "Resize the rail", controls: "rn-rail",
+      min: () => limits()[0], max: () => limits()[1], value: () => Math.round($("#rn-rail").getBoundingClientRect().width),
+      enabled: () => st.open && st.p.rail && !st.sheet && !phone(),
+      set: (px, done) => {
+        const [lo, hi] = limits();
+        st.p.w = clampW(px, lo, hi);
+        sizeRail();
+        if (done) save();
+      },
+      reset: () => { st.p.w = 0; sizeRail(); save(); },
+    });
+  }
+
   function toggle(list, key) {
     const i = list.indexOf(key);
     if (i >= 0) list.splice(i, 1); else list.push(key);
@@ -1066,6 +1113,8 @@ window.RadioNav = (() => {
       if (b) set({ event: b.dataset.event, view: st.f.view === "ours" ? "all" : st.f.view });
     });
     document.addEventListener("keydown", (e) => { if (e.key === "Escape" && st.open && st.sheet) { e.stopPropagation(); sheet(false); } }, true);
+    document.addEventListener("DOMContentLoaded", sizer);
+    addEventListener("resize", () => { if (st.sizer && st.open) st.sizer.sync(); });     // its limits (the hover's values)
     cad.hooks.push(onPush);
     let drawn = -1;
     cad.hooks.push(() => { if (st.open && drawn !== cad.txRev) { drawn = cad.txRev; render(); } });
@@ -1076,9 +1125,10 @@ window.RadioNav = (() => {
   }
 
   const out = { wants, open, close, prefs, inView, unread, mutesFor, model, merged, folders, draftOf, moveItem, moveFolder, step,
+                widthLimits, clampW,
                 get on() { return st.open; } };
   // its insides, for tests/test_radio_nav.py only (the harness sets this before the script runs): never on the page
   if (window.RADIO_NAV_TEST === true) out.test = { st, page, delta, older, sources, ours, set, onPush, query, fromHash, hashOf, render,
-                                                  editStart, editDo, editSave, renderEdit };
+                                                  editStart, editDo, editSave, renderEdit, sizer, sizeRail };
   return out;
 })();

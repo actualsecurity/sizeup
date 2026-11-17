@@ -21,7 +21,9 @@ const stored = { v: process.argv[3] === "-" ? null : process.argv[3] };
 class El {
   constructor(tag, cls, text) { this.tagName = String(tag || "div").toUpperCase(); this.className = cls || "";
     this.textContent = text === undefined || text === null ? "" : String(text); this.children = []; this.dataset = {}; this.attrs = {};
-    this.hidden = false; this.handlers = {}; this.parentElement = null; this.value = ""; this.title = ""; this.tabIndex = 0; this.focused = 0; }
+    this.hidden = false; this.handlers = {}; this.parentElement = null; this.value = ""; this.title = ""; this.tabIndex = 0; this.focused = 0;
+    this.style = { props: {}, setProperty(k, v) { this.props[k] = v; }, removeProperty(k) { delete this.props[k]; } }; this.clientWidth = 0; this.rectW = 0; }
+  getBoundingClientRect() { return { width: this.rectW }; }
   get childNodes() { return this.children; }
   get classList() { const n = this; const has = () => new Set(n.className.split(/\s+/).filter(Boolean));
     return { toggle(c, on) { const s = has(); if (on === undefined ? !s.has(c) : on) s.add(c); else s.delete(c); n.className = [...s].join(" "); },
@@ -44,10 +46,16 @@ global.Option = class { constructor(t, v) { this.text = t; this.value = v; } };
 global.window = global; global.addEventListener = () => {}; global.dispatchEvent = () => {};
 global.HashChangeEvent = class {};
 const docKeys = [];
-global.document = { visibilityState: "visible", activeElement: null, addEventListener(t, f) { if (t === "keydown") docKeys.push(f); } };
+global.document = { visibilityState: "visible", activeElement: null, documentElement: { root: true }, addEventListener(t, f) { if (t === "keydown") docKeys.push(f); } };
+// the window: 1600 px wide, 16 px type, 12 px between the rail and the list; PHONE: under 641 px
+global.innerWidth = 1600; global.PHONE = false;
+global.matchMedia = (q) => ({ matches: q === "(max-width: 640px)" && global.PHONE });
+global.getComputedStyle = (n) => (n.root ? { fontSize: "16px" } : { columnGap: "12px" });
 global.location = { hash: "#radio" };
 global.history = { replaceState(a, b, h) { location.hash = h; } };
-global.localStorage = { getItem: () => stored.v, setItem: (k, v) => { stored.v = v; } };
+// "THROW": storage refused (a private window, site data blocked)
+global.localStorage = { getItem: () => { if (stored.v === "THROW") throw new Error("denied"); return stored.v; },
+                        setItem: (k, v) => { if (stored.v === "THROW") throw new Error("denied"); stored.v = v; } };
 global.setTimeout = () => 1; global.clearTimeout = () => {};
 global.syncList = (box, items, o) => { box.replaceChildren(...items.map((it) => { const n = o.make(it); n.dataset.key = o.key(it); o.fill(n, it); return n; })); };
 global.setText = (n, t) => { n.textContent = t; };
@@ -136,6 +144,31 @@ const ids = () => st.rows.map((t) => t.id);
     merged: N.merged([{ id: "c", start: 3 }, { id: "b", start: 2 }], [{ id: "b", start: 2 }, { id: "a", start: 1 }, { id: "z", start: 9 }]).map((t) => t.id),
   });
   if (process.argv[4] === "pure") return console.log(JSON.stringify(out));
+  if (process.argv[4] === "size") {                 // the rail's width: panels.js's separator stood in for
+    const seps = [], rn = $("#rn"), rail = $("#rn-rail");
+    global.Panels = { separator(hd, o) { seps.push([hd, o]); return { sync() { o.synced = (o.synced || 0) + 1; } }; } };
+    rn.clientWidth = 1200; rail.rectW = 280;        // the middle column, the rail at the layout's own width
+    const w = () => (stored.v === "THROW" ? st.p.w : N.prefs(stored.v).w);
+    const looks = () => [rn.style.props["--rn-w"] || null, rn.classList.contains("sized")];
+    N.open(""); await drain();
+    const r = { opened: looks() };
+    N.open(""); N.close(); N.open(""); await drain();
+    const [hd, o] = seps[0];
+    Object.assign(r, { seps: seps.length, handle: hd === $("#rn-size"), opts: [o.orient, o.grow, o.label, o.controls],
+                       limits: [o.min(), o.max()], value: o.value(), enabled: o.enabled() });
+    o.set(500.4, false); r.dragging = [...looks(), w()];       // during the drag: on the layout, not yet remembered
+    o.set(500.4, true); r.dropped = [...looks(), w()];
+    o.set(5000, true); r.wide = w();                          // 60% of 1600 = 960; the list's 20rem: 1200 - 12 - 320 = 868
+    rn.clientWidth = 2400; r.wider = o.max();                 // a wider middle: 60% of the window
+    rn.clientWidth = 1200;
+    o.set(10, true); r.narrow = w();                          // 17.5rem
+    st.p.rail = false; r.folded = o.enabled(); st.p.rail = true;
+    st.sheet = true; r.sheet = o.enabled(); st.sheet = false;
+    global.PHONE = true; r.phone = o.enabled(); global.PHONE = false;
+    o.reset(); r.reset = [...looks(), w()];
+    N.close(); r.closed = o.enabled();
+    return console.log(JSON.stringify(r));
+  }
 
   // ---- the page: first page, Older, the 30 s page keeps what Older loaded ----
   N.open(""); await drain();
@@ -270,12 +303,12 @@ def out(tmp_path_factory):
 @pytest.mark.skipif(NODE is None, reason="node not installed")
 def test_the_rail_is_off_until_a_viewer_turns_it_on_and_remembers(tmp_path):
     out = run(tmp_path, scenario="pure")
-    assert out["fresh"] == {"on": False, "rail": True, "pins": [], "mutes": [], "seen": {}, "folds": []} == out["bad"]
+    assert out["fresh"] == {"on": False, "rail": True, "pins": [], "mutes": [], "seen": {}, "folds": [], "w": 0} == out["bad"]
     assert out["wants"] == [False, True, False, False]            # the page as before unless asked: ?ui=2
     stored = json.dumps({"on": True, "rail": False, "pins": ["fm:FG1"], "mutes": ["air:Tower"], "seen": {"fm:FG1": 5}})
     again = run(tmp_path, stored, "pure")
     assert again["stored"] == {"on": True, "rail": False, "pins": ["fm:FG1"], "mutes": ["air:Tower"], "seen": {"fm:FG1": 5},
-                               "folds": []}
+                               "folds": [], "w": 0}
     assert again["wants"] == [True, True, False, True]            # on: an old link opens in it too; ?ui=1: as before
     assert out["seenKept"] == [1000, True, False]                 # the newest thousand: a busy tree never reads as unseen
 
@@ -417,3 +450,70 @@ def test_someone_elses_emergency_off_the_prominent_services_is_quiet(out):
     assert d["flags"] == [True, 0] and d["views"] == [] and d["button"] == [""]
     assert d["tree"] == [["chip em-quiet", "EM", "Emergency (not ours)"]]          # the detail in the hover
     assert out["loudDom"]["flags"] == [["chip emergency em-other", "Emergency (not ours): Rail Ops"]]
+
+
+# ---- the rail's width (dragged at its right edge) ----------------------------------------------------------------
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_the_rail_is_dragged_wider_and_remembered_per_viewer(tmp_path):
+    """Admin, 2026-11-17: "we also need to be able to drag the radio rail out to the right if we want" (channel names
+    were cut short beside their badges). panels.js's separator on the rail's right edge: at least the layout's own
+    minimum (17.5rem), at most 60% of the window and never the list under 20rem; this viewer's width remembered in
+    this browser only; a double-click (or Home) back to the layout's own."""
+    r = run(tmp_path, scenario="size")
+    assert r["opened"] == [None, False]                                      # nothing dragged: the layout's own width
+    assert r["seps"] == 1 and r["handle"] is True                            # made once, on the handle in the page
+    assert r["opts"] == ["vertical", 1, "Resize the rail", "rn-rail"]
+    assert r["limits"] == [280, 868] and r["value"] == 280 and r["enabled"] is True
+    assert r["dragging"] == ["500px", True, 0]                              # follows the pointer, kept once let go
+    assert r["dropped"] == ["500px", True, 500]
+    assert r["wide"] == 868 and r["wider"] == 960 and r["narrow"] == 280
+    assert r["folded"] is False and r["sheet"] is False and r["phone"] is False   # no side column: no drag
+    assert r["reset"] == [None, False, 0] and r["closed"] is False
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_a_remembered_width_comes_back_and_storage_refused_still_drags(tmp_path):
+    back = run(tmp_path, json.dumps({"on": True, "w": 640}), "size")
+    assert back["opened"] == ["640px", True]
+    refused = run(tmp_path, "THROW", "size")                                # a private window: this page view only
+    assert refused["opened"] == [None, False] and refused["dropped"] == ["500px", True, 500]
+    assert refused["reset"] == [None, False, 0]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not installed")
+def test_width_limits_and_a_stored_width_checked(tmp_path):
+    lim = subprocess.run([NODE, "-e", f"""
+      global.window = global; eval(require("fs").readFileSync({json.dumps(str(STATIC / "radio-nav.js"))}, "utf8"));
+      const N = window.RadioNav;
+      console.log(JSON.stringify({{
+        limits: [N.widthLimits(1600, 1200, 12, 16), N.widthLimits(1000, 500, 12, 16), N.widthLimits(2560, 2000, 12, 20)],
+        clamp: [N.clampW(500, 280, 868), N.clampW(9000, 280, 868), N.clampW(100, 280, 868), N.clampW(0, 280, 868), N.clampW(NaN, 280, 868)],
+        stored: [N.prefs('{{"w": 512.6}}').w, N.prefs('{{"w": -5}}').w, N.prefs('{{"w": "wide"}}').w, N.prefs('{{"w": 1e9}}').w],
+      }}));"""], capture_output=True, text=True, timeout=30)
+    assert lim.returncode == 0, lim.stderr
+    out = json.loads(lim.stdout)
+    # [min, max]: 17.5rem; 60% of the window or what leaves the list 20rem, whichever is less; never under the min
+    assert out["limits"] == [[280, 868], [280, 280], [350, 1536]]
+    assert out["clamp"] == [500, 868, 280, 0, 0]                            # 0: the layout's own
+    assert out["stored"] == [513, 0, 0, 4000]
+
+
+def test_the_handle_is_in_the_page_and_only_beside_a_side_rail():
+    html = (STATIC / "cad.html").read_text()
+    rail, handle, main = (html.index(s) for s in ('<aside id="rn-rail"', '<div id="rn-size" class="rn-size"></div>', '<div class="rn-main">'))
+    assert rail < handle < main
+    assert html.index('src="/static/radio-nav.js"') < html.index('src="/static/panels.js"')   # hence made on open / load
+    css = (STATIC / "cad.css").read_text()
+    assert ".rn-size { display: none; }" in css                              # folded, a sheet, a phone: no handle
+    wide = css[css.index("@media (min-width: 641px) {"):]
+    wide = wide[:wide.index("\n  }\n")]
+    assert ".rn.sized:not(.mini) { grid-template-columns: max(17.5rem, min(var(--rn-w), 60vw, 100% - 20rem - var(--gutter))) minmax(0, 1fr); }" in wide
+    handle_rule = re.search(r"\.rn:not\(\.mini\) > \.rn-size \{(.*?)\}", wide, re.S).group(1)
+    for d in ("cursor: col-resize", "touch-action: none", "pointer-events: auto", "inline-size: var(--s-6)", "align-self: stretch"):
+        assert d in handle_rule, d
+    phone = css[css.index("@media (max-width: 640px) {", css.index(".rn-size")):]
+    assert ".rn > .rn-main { grid-area: 1 / 1; }" in phone[:phone.index("\n  }\n")]
+    nav = (STATIC / "radio-nav.js").read_text()
+    assert "W_MIN = 17.5, W_VW = 0.6, LIST_MIN = 20" in nav                  # the same limits as the CSS
+    assert 'document.addEventListener("DOMContentLoaded", sizer)' in nav

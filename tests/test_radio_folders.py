@@ -432,7 +432,8 @@ def test_a_channels_name_on_the_rail_is_display_only(nav):
     assert p["action"] == "set" and p["names"] == {"p25:metro:9001": "Dispatch North"}       # trimmed; blank: its own
     n = nav["named"]
     assert "Dispatch North" in n["rail"] and "PD Dispatch" not in n["rail"]
-    assert n["title"].startswith("PD Dispatch (TG 9001)") and n["fgTitle"].startswith("FG1 (154.1 MHz)")
+    # the hover: the name in full (a narrow rail cuts it short), the channel's own name and number beside it
+    assert n["title"].startswith("Dispatch North (PD Dispatch, TG 9001) · ") and n["fgTitle"].startswith("FG1 (154.1 MHz) · ")
     # the list's channel chip: the name shown, the real one in the hover; the row itself (filters, links) untouched
     assert n["chips"] and all(c == ["Dispatch North", "p25:metro:9001"] for c in n["chips"])
     assert n["kept"] == "p25:metro:9001" and n["asked"] == "police"
