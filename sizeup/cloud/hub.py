@@ -599,7 +599,10 @@ class Hub:
                 self.stations.reconfigured(claimed, st.get("config_id"))   # posting as the current id from its config
             tgs = st.pop("talkgroups", None)
             if isinstance(tgs, list):
-                self.talkgroups = tgs
+                # the station's rows are TalkgroupPrefs.state(): "tier_set" (another system's talkgroup: a tier, never
+                # Record / Main / Transcribe) as its own page has it (App.talkgroups_state), from the tier each carries
+                self.talkgroups = [dict(r, tier_set=r.get("tier") is not None) if isinstance(r, dict) and "tier_set" not in r
+                                   else r for r in tgs]
             self.status, self.status_at = st, now
             if self.health_ is not None:
                 self.health_.observe(st)           # each channel's gaps, for the silence hints
@@ -1578,6 +1581,8 @@ class HubApp(App):
 
     def set_talkgroup(self, tg: int, record: bool | None = None, main: bool | None = None,
                       tier: str | None = None, system: str = "") -> str | None:
+        if system == sourcekeys.COUNTY and tier is None and "p25_systems" not in (self.hub.status or {}):
+            system = ""                                # the county's, to a station from before #409: as it always went
         if tier is not None or system:                 # (#409: a station from before this refuses the extra arguments)
             return self._switch("set_talkgroup", int(tg), record, main, tier, str(system or ""))
         return self._switch("set_talkgroup", int(tg), record, main)

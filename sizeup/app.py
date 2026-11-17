@@ -474,6 +474,10 @@ class App:
         for t in list(self.store.loose) + [t for i in self.store.incidents for t in i.traffic]:
             if t.talkgroup is not None:
                 self.tg.seed(t.talkgroup, t.end, getattr(t, "system", ""))
+        # (after the seed: a county talkgroup heard in the history is the county's, whatever another system lists)
+        for tg, owner, was in self.tg.drop_orphans(cfg.p25_tg_file_rows > 0):   # the old page's, by number alone (once)
+            log(f"talkgroups: county choice for {tg} dropped ({', '.join(f'{k}={v}' for k, v in sorted(was.items()))}; "
+                f"kept in talkgroups_migrated.json): {tg} is {owner}'s talkgroup, never heard on the county")
         self._last_tones_only: Page | None = None
         self.pagehold = PageHold(self.plan)   # paging: a page waits out its continuation window
         self.receivers = [make_receiver(cfg, c, c.device, self._segment, self._heard_elsewhere) for c in cfg.channels]
@@ -4332,11 +4336,16 @@ class App:
         talkgroup (#409: `system`, "" = the county's): tier = alert | text | record | off | activity."""
         if not self.p25:
             return "no P25 configured"
+        qualified = system == self.tg.county             # sent as the county's source ("p25:westchester:<n>"): no doubt
         system = "" if system == self.tg.county else str(system or "")
         if system and not self.tg.known(int(tg), system):
             return f"no talkgroup {tg} on {system}"
         if tier is not None:
             return self.set_talkgroup_tier(tg, tier, system)
+        if not system and not qualified and (owners := self.tg.elsewhere(int(tg))):
+            # a bare number is the county's: this one is another system's talkgroup (its Main / Record would have
+            # landed on a county talkgroup that doesn't exist, an "Unknown" card): never written
+            return f"talkgroup {tg} is {owners[0]}'s, not the county's: send its source (p25:{owners[0]}:{int(tg)})"
         self.tg.set(int(tg), record, main, system)
         if system:
             log(f"talkgroup {system}:{tg} ({self.tg.name(int(tg), system)}): tier={self.tg.tier(int(tg), system)}")
@@ -4350,7 +4359,8 @@ class App:
         return "; ".join(on) if on else ("SDRs released (Off)" if many else "SDR released (Off)")
 
     def set_talkgroup_group(self, group: str, record: bool | None = None, main: bool | None = None) -> str | None:
-        """POST /api/talkgroup-group: a whole section on/off in one go."""
+        """POST /api/talkgroup-group: a whole section of the county's on/off in one go (never another system's section
+        of the same name: those have a tier each)."""
         if not self.p25:
             return "no P25 configured"
         n = self.tg.set_group(str(group), record, main)

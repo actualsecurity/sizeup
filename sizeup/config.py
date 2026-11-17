@@ -117,6 +117,7 @@ class Config:
     tones_file: str = ""                       # the tone list file read into tones ([radio] tones_file), "" for none
     p25_incident_talkgroups: frozenset[int] = frozenset({307, 333})
     p25_tg_info: dict[int, dict] = field(default_factory=dict)   # tg -> {name, group, encrypted}  # attach to our incident (others: context)
+    p25_tg_file_rows: int = 0      # rows the county's talkgroups file gave (0: no file; the [p25] talkgroups only)
     p25_aliases: dict[str, str] = field(default_factory=dict)
     p25_emergency_window_min: float = 10.0   # the emergency button keeps its talkgroup and radio this long (#128)
     # More P25 systems (#409: <recorder_dir or the talkgroups file's folder>/systems/<name>/, sizeup/radio/systems.py)
@@ -1521,6 +1522,7 @@ def load(path: str | Path) -> Config:
         raise ConfigError("p25.emergency_window_min: minutes from 0 to 120 (10: the default)")
     p25_tgs = {int(k): v for k, v in p25.get("talkgroups", {"307": "Fire/EMS 15"}).items()}
     p25_info: dict[int, dict] = {k: {"name": v, "group": "", "encrypted": False} for k, v in p25_tgs.items()}
+    p25_tg_rows = 0
     if p25.get("talkgroups_file"):  # trunk-recorder's talkgroups.csv: one list for both programs
         import csv
         tf = Path(p25["talkgroups_file"])
@@ -1528,6 +1530,7 @@ def load(path: str | Path) -> Config:
         if not tf.is_file():
             raise ConfigError(f"p25.talkgroups_file: {tf} not found")
         for r in csv.DictReader(tf.read_text().splitlines()):
+            p25_tg_rows += 1
             p25_tgs[int(r["Decimal"])] = r["Alpha Tag"]
             p25_info[int(r["Decimal"])] = {"name": r["Alpha Tag"], "group": r.get("Tag") or "",
                                            "encrypted": "E" in (r.get("Mode") or "").upper()}
@@ -1657,7 +1660,7 @@ def load(path: str | Path) -> Config:
         stt_port=int(stt.get("port", 8179)), stt_threads=int(stt.get("threads", 8)), stt_prompt=stt.get("prompt", ""),
         stt_talker_prompt=talker_mode, stt_beam_size=int(stt.get("beam_size", 0)), **aws_stt,
         p25_dir=rel(p25.get("capture_dir", "")),
-        p25_talkgroups=p25_tgs, p25_tg_info=p25_info,
+        p25_talkgroups=p25_tgs, p25_tg_info=p25_info, p25_tg_file_rows=p25_tg_rows,
         p25_incident_talkgroups=frozenset(int(x) for x in p25.get("incident_talkgroups", [307, 333])),
         p25_aliases={str(k): v for k, v in p25.get("aliases", {}).items()}, p25_emergency_window_min=em_window,
         p25_systems=more_systems, tier_keep_days=tier_days, context_audio_max_mb=context_mb,
