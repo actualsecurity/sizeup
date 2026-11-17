@@ -68,9 +68,12 @@ is) never locks it out. The hub is the source of truth for the id:
                 machine refused as another id never learns the id to pose as (Health says both ids instead)
     history     the hub's status moves at once (on_rename). The station's signal metrics (metrics.sqlite, not
                 replicated) move in the background, in chunks (sizeup/cloud/metricstore.py rename_station), from the
-                renames kept in hub.sqlite (meta "station_renames", renames()), after each rename and at each janitor
-                turn, so a takeover's copy restored from before a rename moves too. Not when the new id is a station's
-                own token's (then it is that station: nothing merged). The CloudWatch streams are <id>-<date>: new ones
+                renames kept in hub.sqlite (meta "station_renames", moves()), after each rename and at each janitor
+                turn, so a takeover's copy restored from before a rename moves too. Only rows from before the rename
+                (a later one under a former id is another station's), never from the current id or an id with its own
+                token, and none once the id is cleared to "learned". Not when the new id is a station's own token's
+                (then it is that station: nothing merged, and no former id kept, so no second machine becomes it).
+                The CloudWatch streams are <id>-<date>: new ones
                 get the new id, the old ones stay in the same group (the Logs view reads the group)
     confirm     rename_question: a rename while the old id was live (RENAME_LIVE_S), to an id that has its own token,
                 or that forgets a former id is refused unless the request says confirm (the card asks; the CLI's
@@ -287,21 +290,25 @@ class StationRegistry:
             return None
         to = new or "the id it posts next"
         how = self.live(old) if old else None
+        own_new = bool(new) and self._own(new)
         bits = []
-        if new and self._own(new):
+        if own_new:
             if how is not None and how[0] == "shared" and (other := self.live(new)) is not None and other[0] == "own":
                 raise StationError(f"{new} is connected with its own token and {old} with the shared one: two stations "
                                    "can't share an id (revoke one, or rename to another id)")
             bits.append(f"{new} has its own token: the shared token's station becomes that station (its history isn't "
-                        "moved).")
+                        "moved), and the shared token takes no former id any more.")
         if how is not None and how[0] == "own":
             bits.append(f"{old} is connected with its own token right now and will be rejected until it's reconfigured "
                         f"to {to} (a token for {to}).")
+        elif how is not None and own_new:
+            bits.append(f"{old} is connected with this token right now and will be rejected until it uses {new}'s "
+                        "token.")
         elif how is not None:
             bits.append(f"{old} is connected with this token right now. It becomes {to}: the hub keeps taking {old} "
-                        f"from it" + ("." if new and self._own(new) else " and moves its history.") if new else
+                        f"from it and moves its history." if new else
                         f"{old} is connected with this token right now. Its id is learned again from its next post.")
-        if new and old:
+        if new and old and not own_new:
             kept = [a for a in self.aliases() + [old] if a != new]
             if len(kept) > ALIASES_MAX:
                 gone = kept[:-ALIASES_MAX]
@@ -309,27 +316,39 @@ class StationRegistry:
                             "former ids).")
         return " ".join(bits) + " Change anyway?" if bits else None
 
-    def renames(self) -> dict[str, str]:
+    def moves(self) -> dict[str, tuple[str, float]]:
         """The shared token's renames whose history moves (hub.sqlite meta "station_renames", replicated): each former
-        id -> the id it is now, chains followed (a -> b -> c: a and b -> c), a rename back undone (a -> b -> a: b -> a
-        only). The hub applies them to metrics.sqlite (not replicated) after each rename and after a takeover's
-        settle, so a copy restored from before a rename still ends up under the current id."""
+        id -> (the id it is now, when it was renamed away from). Chains followed (a -> b -> c: a and b -> c), a rename
+        back undone (a -> b -> a: b -> a only). Never the current id, nor an id a station has its own token for (its
+        rows are that station's). Only rows from before that time move (MetricStore.rename_station before): after it
+        the hub files the station's posts under the new id, so a later row under the old id is another station's. The
+        hub applies them to metrics.sqlite (not replicated) after each rename, at its janitor's turns and after a
+        takeover's settle, so a copy restored from before a rename still ends up under the current id."""
         try:
             log = json.loads(self.mdb.get(META_RENAMES, "") or "[]")
         except ValueError:
             return {}
-        out: dict[str, str] = {}
+        out: dict[str, tuple[str, float]] = {}
         for e in log if isinstance(log, list) else []:
             if not isinstance(e, dict):
                 continue
             f, t = str(e.get("from") or ""), str(e.get("to") or "")
+            try:
+                at = float(e.get("at"))
+            except (TypeError, ValueError):
+                continue
             if not f or not t:
                 continue
-            for k, v in list(out.items()):
+            for k, (v, when) in list(out.items()):
                 if v == f:
-                    out[k] = t
-            out[f] = t
-        return {k: v for k, v in out.items() if k != v}
+                    out[k] = (t, when)
+            out[f] = (t, at)
+        cur = self.legacy_id()
+        return {k: v for k, v in out.items() if k != v[0] and k != cur and not self._own(k)}
+
+    def renames(self) -> dict[str, str]:
+        """moves(): each former id -> the id its history moves to."""
+        return {k: v for k, (v, _at) in self.moves().items()}
 
     def _log_rename(self, old: str, new: str) -> None:
         try:
@@ -368,14 +387,18 @@ class StationRegistry:
                 else:
                     self.mdb.db.execute("DELETE FROM meta WHERE key = ?", (META_LEGACY,))
             new = self.legacy_id()
-            # the old id stays the shared token's (an alias); cleared to "learned", the next post's id is it: none kept
-            kept = [a for a in self.aliases() + [old] if a != new] if new else []
+            # the old id stays the shared token's (an alias); cleared to "learned", the next post's id is it: none kept.
+            # Renamed to a station with its own token: none either (a former id would make a second machine that one)
+            kept = [a for a in self.aliases() + [old] if a != new] if new and not own_new else []
             if len(kept) > ALIASES_MAX:
                 self.log(f"stations: {', '.join(kept[:-ALIASES_MAX])} no longer taken from the shared token "
                          f"(at most {ALIASES_MAX} former ids)")
             self._set_aliases(kept)
             if old and new and old != new and not own_new:
                 self._log_rename(old, new)
+            elif not new:
+                with self.mdb._lock:                 # cleared to "learned": whatever it posts as next is it
+                    self.mdb.db.execute("DELETE FROM meta WHERE key = ?", (META_RENAMES,))
         self._others.pop(new, None)
         self.log(f"stations: the shared token's station is {new or '(learned from its next post)'} now "
                  f"(was {old or 'none'}{', an override cleared' if old == new else ''}), by {by or 'someone'}"

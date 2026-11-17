@@ -786,7 +786,8 @@ where it is: `station-a` to `station-b`) is one step and never refuses it:
    flight, spooled) is taken.
 
 The card also asks first when the new id has **its own token** (the shared token's station becomes that station; its
-history isn't moved into it), and when a rename would forget a former id (at most 8 are kept). Renaming to the id of
+history isn't moved into it, and the shared token takes no former id any more, so a shared-token machine still saying
+the old id is rejected rather than becoming that station), and when a rename would forget a former id (at most 8 are kept). Renaming to the id of
 an own-token station that is connected while the shared token's station is connected too is refused: two machines
 can't share an id. Each confirmed change says why in the Settings audit.
 
@@ -796,7 +797,7 @@ What moves with the id, and how:
 |---|---|
 | who the shared token is (`hub.sqlite` meta `station_legacy_id`) | the new id; the old one kept as an alias (`station_legacy_aliases`): still taken from the shared token, as the new id. They were that token's ids already, so nothing new can use it; an id it never had is still refused |
 | the station's status (Health) | the new id at once |
-| signal metrics (`metrics.sqlite`: raw, events, hourly, series) | moved by the hub in the background, in chunks (`MetricStore.rename_station`), from the renames kept in `hub.sqlite` (meta `station_renames`, replicated): after the rename, at each janitor turn and once a takeover has restored its copy (`metrics.sqlite` isn't replicated, so a copy from before the rename is moved again); a copy goes up soon after. An hour both ids had is rolled up again. Not when the new id is an own-token station's |
+| signal metrics (`metrics.sqlite`: raw, events, hourly, series) | moved by the hub in the background, in chunks (`MetricStore.rename_station`), from the renames kept in `hub.sqlite` (meta `station_renames`, replicated): after the rename, at each janitor turn and once a takeover has restored its copy (`metrics.sqlite` isn't replicated, so a copy from before the rename is moved again); a copy goes up soon after. Only rows from **before** the rename move: after it the station's posts are filed under the new id, so a later row under the old id is another station's (an own token reusing the id) and stays. Never from the current id or an id with its own token; none once the id is cleared to learned. An hour both ids had, and the rename's hour, are rolled up again; rollups wait while a move runs. Not when the new id is an own-token station's |
 | CloudWatch log streams (`<id>-<date>`) | new streams get the new id; the old ones stay in `/sizeup/station`, which the Logs view reads whole |
 | the station's own token (`sz1.<id>.…`) | can't be renamed (the id is in the token). A station on its own token under the old id is refused (`multi_station_off`) after the rename until it has a token for the new id: the confirm says so ("... will be rejected until it's reconfigured to station-b") |
 

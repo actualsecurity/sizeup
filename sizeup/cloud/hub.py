@@ -1893,17 +1893,19 @@ class HubApp(App):
                                 (f"squelch/{subject}", f"channel/{subject}", t0, t1))
 
     def apply_station_renames(self) -> int:
-        """The shared token's renames (hub.sqlite meta "station_renames", StationRegistry.renames) applied to the station's
-        signal metrics: each former id's rows moved to the id it is now, in chunks, never on an admin's request. Run
-        after a rename, at the janitor's turn, and once the store settles (a takeover restores a copy that may be from
-        before a rename: metrics.sqlite isn't replicated). Moved anything: a copy goes up soon. The rows moved."""
+        """The shared token's renames (hub.sqlite meta "station_renames", StationRegistry.moves) applied to the station's
+        signal metrics: each former id's rows from before its rename moved to the id it is now (a later row under it is
+        another station's), in chunks, never on an admin's request. Run after a rename, at the janitor's turn, and once
+        the store settles (a takeover restores a copy that may be from before a rename: metrics.sqlite isn't
+        replicated). The janitor's rollups wait while it runs (_renaming). Moved anything: a copy goes up soon. The
+        rows moved."""
         store = getattr(self, "metric_store", None)
         if store is None or not store.settled or not self._renaming.acquire(blocking=False):
             return 0
         try:
             n = 0
-            for old, new in self.hub.stations.renames().items():
-                m = store.rename_station(old, new)
+            for old, (new, at) in self.hub.stations.moves().items():
+                m = store.rename_station(old, new, before=at)     # (only its rows from before the rename)
                 if m:
                     self.hub.log(f"stations: station metrics: {m} row(s) moved from {old} to {new}")
                 n += m
@@ -1933,10 +1935,20 @@ class HubApp(App):
             except Exception as e:  # cleanup must never take the display down
                 self.hub.log(f"hub: cleanup error: {type(e).__name__}: {e}")
             try:                                  # the station metrics: renames, rollups, retention
-                self.apply_station_renames()
-                self.metric_store.maintain()
+                self.metrics_turn()
             except Exception as e:  # noqa: BLE001 - never takes anything down
                 self.hub.log(f"metrics: maintenance error: {type(e).__name__}: {e}")
+
+    def metrics_turn(self) -> dict | None:
+        """The janitor's station-metrics turn: the renames, then the rollups and retention (maintain), which wait for
+        the next turn while a move runs (a rollup of a move half done would be wrong). None: skipped for a move."""
+        self.apply_station_renames()
+        if not self._renaming.acquire(blocking=False):
+            return None
+        try:
+            return self.metric_store.maintain()
+        finally:
+            self._renaming.release()
 
     def start(self) -> HubApp:
         threading.Thread(target=self._hub_janitor, name="hub-janitor", daemon=True).start()

@@ -319,7 +319,7 @@ def test_renaming_to_an_own_token_station_asks_and_two_live_machines_are_refused
     own = reg.resolve(reg.add("station-b"))
     q = reg.rename_question("station-a", "station-b")                # neither live: still asked (it merges them)
     assert q == ("station-b has its own token: the shared token's station becomes that station (its history isn't "
-                 "moved). Change anyway?")
+                 "moved), and the shared token takes no former id any more. Change anyway?")
     reg.touch(reg.resolve(SHARED))
     reg.touch(own)                                                   # both connected: two machines
     with pytest.raises(StationError, match="two stations can't share an id"):
@@ -332,6 +332,8 @@ def test_renaming_to_an_own_token_station_asks_and_two_live_machines_are_refused
         reg.set_shared_id("station-b")
     reg.set_shared_id("station-b", confirm=True)                     # the same machine moving to its own token
     assert reg.legacy_id() == "station-b" and reg.renames() == {}    # nothing merged into the own-token station's
+    # no former id kept: a shared-token machine still saying station-a is rejected, never made station-b
+    assert reg.aliases() == [] and refused(reg.claim, reg.resolve(SHARED), "station-a") == "id_mismatch"
 
 
 def test_a_rename_that_would_forget_a_former_id_asks(tmp_path):
@@ -392,5 +394,87 @@ def test_the_metrics_move_in_chunks_and_again_after_a_takeover_restores_an_older
         assert hub.app.apply_station_renames() == 1
         assert {x["station"] for x in ms.index()["series"]} == {"station-b"} and ms._next_upload <= time.time()
         assert hub.app.apply_station_renames() == 0                   # nothing left: an index lookup per table
+    finally:
+        hub.close()
+
+
+# -- the re-review's cases -----------------------------------------------------------------------------------------------
+
+def test_only_rows_from_before_the_rename_move_and_a_later_one_under_the_old_id_stays(tmp_path):
+    s, clock = store(tmp_path)
+    cut = T0 + 1800                                                  # renamed half way through the hour
+    s.ingest("station-a", floors(T0, [1.0, 2.0, 3.0]) + floors(cut + 60, [7.0, 8.0])     # (the later ones: another
+             + [{"k": "ev", "s": "FG1", "at": T0 + 30, "ev": "gain", "d": "x"},          # token reusing station-a)
+                {"k": "ev", "s": "FG1", "at": cut + 90, "ev": "gain", "d": "y"}]
+             + floors(T0 - 3600, [4.0]))
+    s.maintain()
+    assert s.rename_station("station-a", "station-b", chunk=2, before=cut) > 0
+    s.maintain()
+    raw = lambda st: [r["at"] for r in s.query({"subject": "FG1", "station": st, "from": T0 - 3600, "to": T0 + 3600,
+                                                "res": "raw", "kind": "floor"})["rows"]]
+    assert raw("station-a") == [cut + 60, cut + 120]                 # after the rename: stays where it was posted
+    assert raw("station-b") == [T0 - 3600, T0, T0 + 60, T0 + 120]
+    ev = lambda st: [e["detail"] for e in s.query({"subject": "FG1", "station": st, "from": T0 - 3600, "to": T0 + 3600,
+                                              "res": "raw"})["events"] if e.get("ev") == "gain"]
+    assert ev("station-a") == ["y"] and ev("station-b") == ["x"]
+    hour = lambda st: {r["hour"] if "hour" in r else r["at"]: r["n"] for r in s.query(
+        {"subject": "FG1", "station": st, "from": T0 - 3600, "to": T0 + 3600, "res": "hour", "metric": "idle_q90"})["rows"]}
+    assert sum(hour("station-a").values()) == 2 and sum(hour("station-b").values()) == 4   # the split hour rolled again
+    spans = {(x["station"], x["kind"]): (x["first"], x["last"]) for x in s.index()["series"]}
+    assert spans[("station-a", "floor")][0] == cut + 60 and spans[("station-b", "floor")] == (T0 - 3600, T0 + 120)
+    assert s.rename_station("station-a", "station-b", before=cut) == 0   # again (every janitor turn): nothing more
+
+
+def test_the_moves_skip_the_current_id_an_own_token_id_and_go_when_cleared_to_learned(tmp_path):
+    reg, clock, _ = registry(tmp_path)
+    reg.claim(reg.resolve(SHARED), "station-a")                       # learned station-a
+    reg.set_shared_id("station-b")
+    at = clock.t
+    assert reg.moves() == {"station-a": ("station-b", at)}
+    reg.add("station-a")                                             # an own-token station reuses the old id later
+    assert reg.moves() == {}                                         # its rows are its own: never moved away
+    reg.revoke("station-a")
+    assert reg.moves() == {"station-a": ("station-b", at)}
+    reg.set_shared_id("")                                            # cleared to learned: no renames kept
+    assert reg.moves() == {} and reg.aliases() == []
+    reg.claim(reg.resolve(SHARED), "station-a")                      # learned station-a again: its rows stay its own
+    assert reg.legacy_id() == "station-a" and reg.renames() == {}
+    reg2, clock2, _ = registry(tmp_path / "b", legacy_id="station-a")
+    reg2.set_shared_id("station-b")
+    reg2.set_shared_id("")                                           # back to the config's: a rename back
+    assert reg2.renames() == {"station-b": "station-a"}              # (never the current id station-a)
+
+
+def test_an_own_token_station_reusing_a_former_id_keeps_its_metrics(tmp_path):
+    hub = HubRun(hub_cfg(tmp_path, cloud_legacy_station_id="station-a"))
+    try:
+        reg, ms = hub.app.hub.stations, hub.app.metric_store
+        h0 = (time.time() // 3600 - 3) * 3600
+        ms.ingest("station-a", floors(h0, [1.0, 2.0]))
+        reg.set_shared_id("station-b")
+        assert wait(lambda: {x["station"] for x in ms.index()["series"]} == {"station-b"}, 10)
+        (_, at), = reg.moves().values()
+        later = at + 1                                               # posted after the rename under station-a: not
+        assert ms.ingest("station-a", [{"k": "floor", "s": "FG1", "at": later, "hiss": 2.0, "q90": 5.0}])["accepted"]
+        # (the shared token's station: those are filed under station-b; so this is another token's, its own)
+        for _ in range(2):                                           # every janitor turn
+            hub.app.metrics_turn()
+        assert ("station-a", "floor") in {(x["station"], x["kind"]) for x in ms.index()["series"]}
+        reg.add("station-a")
+        hub.app.metrics_turn()
+        assert ("station-a", "floor") in {(x["station"], x["kind"]) for x in ms.index()["series"]}
+    finally:
+        hub.close()
+
+
+def test_the_rollups_wait_while_a_move_runs(tmp_path):
+    hub = HubRun(hub_cfg(tmp_path, cloud_legacy_station_id="station-a"))
+    try:
+        hub.app._renaming.acquire()                                  # a move in progress
+        try:
+            assert hub.app.metrics_turn() is None                    # no maintain() on half-moved rows
+        finally:
+            hub.app._renaming.release()
+        assert hub.app.metrics_turn() is not None
     finally:
         hub.close()
