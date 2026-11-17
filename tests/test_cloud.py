@@ -81,7 +81,12 @@ class HubRun:
         self.app = make_app(cfg).start()
         assert isinstance(self.app, HubApp)
         self.server = make_server(self.app)
-        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.serve()
+
+    def serve(self) -> None:
+        """self.server, on its own thread (close() waits for it)."""
+        self._serving = threading.Thread(target=self.server.serve_forever, name="hubrun-serve", daemon=True)
+        self._serving.start()
         self.url = f"http://127.0.0.1:{self.server.httpd.server_address[1]}"
 
     def get(self, path):
@@ -90,7 +95,12 @@ class HubRun:
         return body
 
     def close(self):
+        """Nothing of this hub outlives the test: the station's 25 s long poll ends now (WebServer.shutdown), the
+        requests in flight finish and the server thread ends. Left waiting, a request thread answered the poll up to
+        25 s later, inside the next test in this process (#665: the intel replay's network guard caught it)."""
         self.server.shutdown()
+        self.server.gate.wait_idle(5.0)
+        self._serving.join(5.0)
         self.app.stop()
 
 

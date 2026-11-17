@@ -1373,6 +1373,11 @@ class WebServer:
         threading.Thread(target=run, name="drain", daemon=True).start()
 
     def shutdown(self) -> None:
+        """Stop serving (tests; a deploy drains instead). The station's long poll ends now, empty, as in drain():
+        left waiting, its request thread would answer up to 25 s later, after the server was gone (#665)."""
+        jobs = getattr(self.station, "jobs", None)
+        if jobs is not None and hasattr(jobs, "close"):
+            jobs.close()
         self.broadcaster.stop()
         if self.cad_broadcaster:
             self.cad_broadcaster.stop()
