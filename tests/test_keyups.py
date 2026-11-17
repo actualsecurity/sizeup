@@ -12,6 +12,18 @@ from tests.test_atc import envelope
 from tests.test_page import PAGING, PLAN, held_pages, hiss, keyed, run_squelch, south2_page, strong, tone, voice_like
 
 TRAFFIC = dict(drop_db=10.0, keyups="traffic", split_s=0.2, jump_db=10.0)      # config defaults, kind = "traffic"
+
+
+@pytest.fixture(autouse=True)
+def own_noise(request, monkeypatch):
+    """Each test (each parameter set) its own fixed noise. hiss() and keyed() draw from tests.test_page.rng, one stream
+    for the whole process, so a result here depended on which tests ran before it (the order, xdist's split): some
+    cases sit near what the decoders and the "ID not decoded" check can take."""
+    import zlib
+
+    import tests.test_page as page
+    monkeypatch.setattr(page, "rng", np.random.default_rng(zlib.crc32(request.node.name.encode())))
+
 PAGING_K = dict(PAGING, keyups="paging", jump_db=12.0)       # paging opted in (off by default: jump_db 0)
 AIRBAND = dict(split_s=0.15, jump_db=6.0)                                       # ... kind = "airband"
 A_ID, B_ID = 0x2468, 0x1357                    # invented MDC unit IDs
@@ -696,3 +708,250 @@ def test_the_next_radios_emergency_is_its_rows_with_the_live_alarm(tmp_path):
     assert ta.radio_id == "" and not getattr(ta, "emergency", False) and getattr(ta, "id_note", "") != "undecoded"
     assert tb.radio_id == f"{B_ID:04X}" and tb.emergency and tb.alarm_key == live.id
     assert [t.id for t in alarms] == [live.id, tb.id]   # the row's own alarm carries the live one's key
+
+
+# -- an ID burst on a slowly rising carrier (#694) -------------------------------------------------------------------
+
+RAMPS = (0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4)
+EMERGENCY = (0x00, 0x80)                        # MDC emergency (the radio's button)
+CONFIGS = [pytest.param(dict(drop_db=10.0), id="plain"), pytest.param(TRAFFIC, id="keyups")]
+
+
+def idle(s, seed=0):
+    """hiss() with its own noise, the same whatever ran before (these cases sit near what the decoders can take)."""
+    return 0.4 * np.random.default_rng(1000 + seed).standard_normal(int(RATE * s))
+
+
+def weak_start(burst, hold_s, q_db=8.0):
+    """A radio keying up weak for hold_s (q_db of quieting: under open_db, the squelch stays shut), its ID burst at
+    once, and then fully up."""
+    n = int(RATE * hold_s)
+    burst = np.concatenate([burst, np.zeros(max(0, n - len(burst)))])
+    weak = burst + 0.4 * 10 ** (-q_db / 20) * np.random.default_rng(11).standard_normal(len(burst))
+    return np.concatenate([weak, quiet(0.15), voice_like(1.5) + quiet(1.5), quiet(0.1)])
+
+
+def fs(kind):
+    return fleetsync.encode(100, 2001, kind)    # invented fleet / unit
+
+
+def one_row(audio, kw, unit_id, emergency):
+    """A single key-up through the live tap: its row names unit_id, and an emergency is alarmed once, with that row."""
+    rows, alarms = tap_run(audio, mdc=both_ids, **kw)
+    (_s, ids_, burst, key, em), = rows
+    assert ids_ == [unit_id] and not burst
+    if emergency:
+        assert len(alarms) == 1 and alarms[0][1] == [(unit_id, True)] and key == "alarm-1" and em
+    else:
+        assert alarms == [] and key == "" and not em
+
+
+@pytest.mark.parametrize("kw", CONFIGS)
+@pytest.mark.parametrize("op", [PRE, EMERGENCY], ids=["pre-id", "emergency"])
+@pytest.mark.parametrize("ramp", RAMPS)
+def test_an_mdc_burst_on_a_slowly_rising_carrier_names_the_row_and_alarms_once(ramp, op, kw):
+    # The burst begins with the carrier, which takes up to 0.4 s to quiet the hiss: the squelch opens up to ~0.3 s
+    # into the burst, past the 0.2 s pre-roll (main: no ID from 0.35 s, and no alarm for the emergency button)
+    one_row(np.concatenate([idle(3.0), ramped(mdc(B_ID, op), ramp), idle(2.0, 1)]), kw, f"{B_ID:04X}", op != PRE)
+
+
+@pytest.mark.parametrize("kw", CONFIGS)
+@pytest.mark.parametrize("kind", ["pre-id", "emergency"])
+@pytest.mark.parametrize("ramp", RAMPS)
+def test_a_fleetsync_burst_on_a_slowly_rising_carrier(ramp, kind, kw):
+    # A FleetSync burst is short (45-90 ms): from a 0.2 s ramp on it is all in the worst of the hiss, and can't be
+    # decoded from any of the audio. Then nothing is named and nothing alarmed (never a false one)
+    tx = ramped(fs(kind), ramp)
+    audio = np.concatenate([idle(3.0), tx, idle(2.0, 1)])
+    if both_ids(tx):
+        one_row(audio, kw, "100-2001", kind == "emergency")
+    else:
+        assert ramp >= 0.2
+        rows, alarms = tap_run(audio, mdc=both_ids, **kw)
+        assert [(i, k) for _s, i, _b, k, _e in rows] == [([], "")] and alarms == []
+
+
+@pytest.mark.parametrize("kw", CONFIGS)
+@pytest.mark.parametrize("burst", [mdc(B_ID, EMERGENCY), fs("emergency")], ids=["mdc", "fleetsync"])
+@pytest.mark.parametrize("hold", [0.1, 0.2, 0.3, 0.4, 0.5])
+def test_an_emergency_on_a_weak_start_before_the_squelch_opens_alarms_once_with_the_row(hold, burst, kw):
+    # The radio comes up weak (8 dB of quieting, under open_db) for up to 0.5 s with its emergency packet at once:
+    # the burst ends up to 0.3 s before the pre-roll (main: no alarm from 0.3 s)
+    unit_id = "100-2001" if len(burst) < len(mdc(B_ID)) else f"{B_ID:04X}"
+    one_row(np.concatenate([idle(3.0), weak_start(burst, hold), idle(2.0, 1)]), kw, unit_id, True)
+
+
+@pytest.mark.parametrize("talk", [0.6, 2.0])
+@pytest.mark.parametrize("op", [PRE, EMERGENCY], ids=["pre-id", "emergency"])
+@pytest.mark.parametrize("ramp", RAMPS)
+def test_after_a_key_up_the_next_radios_burst_on_a_rising_carrier_is_its_rows(ramp, op, talk):
+    # A (no ID) unkeys, B keys up 0.2 s later on a slowly rising carrier with its pre-ID / emergency: cut at the key-up
+    # (or closed and opened again), B's row has B's ID, an emergency is alarmed once with B's row, A's row has neither.
+    # (main: B unnamed from a 0.05 s ramp with A at 0.6 s, #695; from 0.1 s with A at 2 s, past its window; no alarm)
+    audio = np.concatenate([idle(3.0), unit(talk), idle(0.2, 1), ramped(mdc(B_ID, op), ramp), idle(2.0, 2)])
+    rows, alarms = tap_run(audio, mdc=both_ids, **TRAFFIC)
+    *a_rows, (_b, idb, _bb, key_b, em_b) = rows
+    assert a_rows and all(i == [] and k == "" for _s, i, _b, k, _e in a_rows)
+    assert idb == [f"{B_ID:04X}"]
+    if op == PRE:
+        assert alarms == [] and key_b == "" and not em_b
+    else:
+        assert len(alarms) == 1 and key_b == "alarm-1" and em_b
+
+
+@pytest.mark.parametrize("op", [PRE, EMERGENCY], ids=["pre-id", "emergency"])
+@pytest.mark.parametrize("burst", ["mdc", "fleetsync"])
+def test_the_rise_rules_piece_with_no_row_hands_its_id_on(burst, op):
+    # #695: after a key-up cut, the next radio's carrier comes up fast (0.05 s) with its ID at once; the rise rule cuts
+    # its first ~0.2 s off as a background with no row. What the tap decoded there is the next piece's (its row)
+    b = mdc(B_ID, op) if burst == "mdc" else fs("pre-id" if op == PRE else "emergency")
+    unit_id = f"{B_ID:04X}" if burst == "mdc" else "100-2001"
+    audio = np.concatenate([idle(3.0), unit(0.6), idle(0.2, 1), ramped(b, 0.05), idle(2.0, 2)])
+    rows, alarms = tap_run(audio, mdc=both_ids, **TRAFFIC)
+    ((_a, ida, _ba, key_a, _ea), (_b, idb, _bb, key_b, em_b)) = rows
+    assert ida == [] and key_a == "" and idb == [unit_id]
+    assert (len(alarms), key_b, em_b) == ((0, "", False) if op == PRE else (1, "alarm-1", True))
+
+
+@pytest.mark.parametrize("kw", CONFIGS)
+@pytest.mark.parametrize("seed", range(6))
+def test_slow_carriers_and_hiss_make_no_id_and_no_alarm(seed, kw):
+    # The look-back reads 0.4 s more hiss and rising carrier before each key-up: packets are CRC-checked, nothing in
+    # it is an ID, and the "ID not decoded" flag is unchanged (only the pre-roll and the carrier are looked at)
+    rng = np.random.default_rng(seed)
+    parts = [idle(3.0, seed)]
+    for ramp in (0.0, 0.1, 0.2, 0.3, 0.4):
+        n = int(RATE * ramp)
+        parts += [0.4 * np.linspace(1.0, 10 ** (-45 / 20), n) * rng.standard_normal(n), quiet(0.3),
+                  voice_like(1.2) + quiet(1.2), quiet(0.1), idle(1.5, seed + 10)]
+    rows, alarms = tap_run(np.concatenate(parts), mdc=both_ids, **kw)
+    assert len(rows) == 5 and alarms == []
+    assert all(i == [] and not b and k == "" for _s, i, b, k, _e in rows)
+
+
+@pytest.mark.parametrize("op", [POST, PRE], ids=["post-id", "pre-id"])
+def test_a_weak_radios_id_well_before_the_key_up_is_not_its(op):
+    # A weak radio (6-8 dB of quieting: the squelch stays shut) sends its ID and unkeys; 0.3 s later another radio keys
+    # up with no ID. That burst is in the look-back but ended before the pre-roll: not the key-up's
+    weak = mdc(A_ID, op) + 0.4 * 10 ** (-7 / 20) * np.random.default_rng(5).standard_normal(len(mdc(A_ID, op)))
+    audio = np.concatenate([idle(3.0), weak, idle(0.3, 1), unit(1.0), idle(2.0, 2)])
+    for kw in (dict(drop_db=10.0), TRAFFIC):
+        rows, alarms = tap_run(audio, mdc=both_ids, **kw)
+        assert [i for _s, i, *_ in rows] == [[]] and alarms == []
+
+
+def test_a_slow_emergency_is_its_rows_with_the_live_alarm(tmp_path):
+    # through App (App._mdc, App._fm_emergency, App._segment): an emergency on a 0.4 s ramp, alarmed at the key-up,
+    # once; the row is the emergency and keeps that alarm's key
+    from sizeup.app import App
+    from sizeup.radio.fm import Channel
+    from sizeup.radio.tap import TapSquelch
+    from tests.test_app import cfg
+    app = App(cfg(tmp_path))
+    app._kind = {"FG1": "traffic"}
+    alarms, rows = [], []
+    app._alarm_now = lambda t: alarms.append(t)
+    app._stt = lambda t, audio, engine, label: rows.append(t)
+    clock = {"t": 1000.0}
+    sq = TapSquelch(NoiseSquelch(clock=lambda: clock["t"], **TRAFFIC), app.tap, Channel(453.0375, "FG1"))
+    audio = np.concatenate([idle(3.0), ramped(mdc(B_ID, EMERGENCY), 0.4), idle(2.0, 1)])
+    for i in range(0, len(audio) - FRAME + 1, FRAME):
+        clock["t"] += FRAME / RATE
+        if (s := sq.feed(audio[i:i + FRAME])) is not None:
+            app._segment(Channel(453.0375, "FG1"), s)
+    (t,) = rows
+    live = alarms[0]                                    # raised by the tap at the key-up
+    assert t.radio_id == f"{B_ID:04X}" and t.emergency and t.alarm_key == live.id
+    assert getattr(t, "id_note", "") == ""
+    assert [a.id for a in alarms] == [live.id, t.id]   # the row's own alarm carries the live one's key
+
+
+def a_then(a_tx, gap, b_tx):
+    rows, alarms = tap_run(np.concatenate([idle(3.0), a_tx, idle(gap, 1), b_tx, idle(2.0, 2)]), mdc=both_ids, **TRAFFIC)
+    return [(i, k) for _s, i, _b, k, _e in rows], alarms
+
+
+@pytest.mark.parametrize("gap", [0.1, 0.12])
+@pytest.mark.parametrize("b_id", [B_ID, None])
+def test_the_look_back_never_hands_the_radio_befores_post_id_to_the_next(b_id, gap):
+    # A's post-ID right before a short drop, B keying up at once: the drop alone is B's pre-roll, never A's tail
+    a_tx = np.concatenate([quiet(0.15), voice_like(0.8) + quiet(0.8), quiet(0.1), mdc(A_ID, POST), quiet(0.05)])
+    rows, alarms = a_then(a_tx, gap, unit(1.5, pre=b_id))
+    assert rows[0] == ([f"{A_ID:04X}"], "") and rows[-1][0] == ([f"{B_ID:04X}"] if b_id else []) and alarms == []
+
+
+def test_the_radio_befores_emergency_is_not_the_next_ones_and_the_next_ones_own_is_raised():
+    # A's emergency-only key-up, then B 0.1 s later: with no ID B's row is clean; with its own emergency it is raised
+    # (a second alarm, B's, never under A's key)
+    a_tx = np.concatenate([quiet(0.15), mdc(A_ID, EMERGENCY), quiet(0.15)])
+    rows, alarms = a_then(a_tx, 0.1, unit(1.5))
+    assert len(alarms) == 1 and rows[0] == ([f"{A_ID:04X}"], "alarm-1") and rows[-1] == ([], "")
+    b_tx = np.concatenate([quiet(0.15), mdc(B_ID, EMERGENCY), quiet(0.15), voice_like(1.5) + quiet(1.5), quiet(0.1)])
+    rows, alarms = a_then(a_tx, 0.1, b_tx)
+    assert [a[1] for a in alarms] == [[(f"{A_ID:04X}", True)], [(f"{B_ID:04X}", True)]]
+    assert rows[0] == ([f"{A_ID:04X}"], "alarm-1") and rows[-1] == ([f"{B_ID:04X}"], "alarm-2")
+
+
+def test_an_emergency_at_the_end_of_the_radio_befores_transmission_stays_its():
+    # A long transmission ending in an emergency packet (past the tap's window: its row alarms from the segment), B
+    # 0.15 s later: the packet is in B's look-back, in A's carrier, never B's
+    a_tx = np.concatenate([quiet(0.15), voice_like(2.0) + quiet(2.0), quiet(0.1), mdc(A_ID, EMERGENCY)])
+    rows, alarms = a_then(a_tx, 0.15, unit(1.5))
+    assert rows[-1] == ([], "") and alarms == []
+
+
+C_ID = 0x3579                                   # invented
+
+
+@pytest.mark.parametrize("kw", CONFIGS)
+@pytest.mark.parametrize("c_id", [C_ID, None, B_ID])
+def test_a_weak_radios_emergency_is_alarmed_on_its_own_and_never_names_the_radio_that_opens(c_id, kw):
+    # B's emergency while its carrier is too weak to open the squelch (7 dB), then C keys up 0.3 s later. B's button is
+    # alarmed once, at once, as B's. C's row is C's alone when C sends its own ID; with no ID (or B itself coming up
+    # strong) the key-up is B's, and its row carries the emergency and that alarm
+    weak = mdc(B_ID, EMERGENCY) + 0.4 * 10 ** (-7 / 20) * np.random.default_rng(5).standard_normal(len(mdc(B_ID)))
+    rows, alarms = tap_run(np.concatenate([idle(3.0), weak, idle(0.3, 1), unit(1.5, pre=c_id), idle(2.0, 2)]),
+                           mdc=both_ids, **kw)
+    (_s, ids_, _b, key, em), = rows
+    assert [a[1] for a in alarms] == [[(f"{B_ID:04X}", True)]]
+    assert alarms[0][0] < _s.start - 0.2                  # keyed to the burst, not to C's carrier
+    if c_id == C_ID:
+        assert ids_ == [f"{C_ID:04X}"] and key == "" and not em
+    else:
+        assert f"{B_ID:04X}" in ids_ and key == "alarm-1" and em
+
+
+@pytest.mark.parametrize("op", [POST, EMERGENCY], ids=["post-id", "emergency"])
+@pytest.mark.parametrize("gap", [0.12, 0.2, 0.3])
+@pytest.mark.parametrize("talk", [0.8, 3.0])
+def test_a_burst_sent_to_the_last_moment_stays_with_its_radio(talk, gap, op):
+    # A's post-ID / emergency is the very last thing on its carrier (no dead air after it), B keys up after the gap:
+    # the burst's last partial frame is the drop's first. A's row has A (the tap and its segment's cut burst), B's
+    # never has A's ID or A's alarm. (#690: B's row took them while A's key-up window was open; the cut burst lost its
+    # last frame and didn't decode by itself)
+    def seg_ids(seg):           # as App._mdc: each cut burst and the audio decoded on its own
+        return [h for b in [*seg.bursts, seg.audio] for h, _e in both_ids(b)]
+    a = np.concatenate([quiet(0.15), voice_like(talk) + quiet(talk), quiet(0.1), mdc(A_ID, op)])
+    rows, alarms = tap_run(np.concatenate([idle(3.0), a, idle(gap, 1), unit(1.5, pre=B_ID), idle(2.0, 2)]),
+                           mdc=both_ids, **TRAFFIC)
+    (sa, ida, _ba, key_a, _ea), (sb, idb, _bb, key_b, _eb) = rows
+    assert f"{A_ID:04X}" in ida and f"{A_ID:04X}" in seg_ids(sa) if talk < 1.0 else f"{A_ID:04X}" in seg_ids(sa)
+    assert idb == [f"{B_ID:04X}"] and key_b == "" and f"{A_ID:04X}" not in seg_ids(sb)
+    assert key_a == ("alarm-1" if op == EMERGENCY and talk < 1.0 else "")
+    # and without a key-up after it, the segment still holds it (the long transmission's tap window is long past)
+    rows, _ = tap_run(np.concatenate([idle(3.0), a, idle(2.0, 2)]), mdc=both_ids, **TRAFFIC)
+    (s, *_), = rows
+    assert f"{A_ID:04X}" in seg_ids(s)
+
+
+@pytest.mark.parametrize("gap", [0.12, 0.3])
+def test_a_second_press_right_after_is_its_own_alarm(gap):
+    # A presses the button, then again 0.12 / 0.3 s after unkeying, the second burst on a slowly rising carrier (found
+    # only with the look-back): two presses, two alarms; one burst across two carriers stays one alarm
+    a = np.concatenate([quiet(0.15), mdc(A_ID, EMERGENCY), quiet(0.15), voice_like(0.5) + quiet(0.5), quiet(0.1)])
+    rows, alarms = tap_run(np.concatenate([idle(3.0), a, idle(gap, 1), ramped(mdc(A_ID, EMERGENCY), 0.35),
+                                           idle(2.0, 2)]), mdc=both_ids, **TRAFFIC)
+    assert len(alarms) == 2 and rows[0][3] == "alarm-1" and rows[-1][3] == "alarm-2"
+    rows, alarms = tap_run(np.concatenate([idle(3.0), unit(0.6), idle(0.1, 1), ramped(mdc(B_ID, EMERGENCY), 0.35),
+                                           idle(2.0, 2)]), mdc=both_ids, **TRAFFIC)
+    assert len(alarms) == 1 and rows[-1][1] == [f"{B_ID:04X}"] and rows[-1][3] == "alarm-1"
