@@ -260,10 +260,11 @@ class Runs:
     def _merge(self, data: bytes) -> int:
         """A copy's rows from before our first one merged in, column by column (a copy from a release with a column
         more or less still merges). ValueError: not an SQLite file, or its table doesn't fit."""
-        from sizeup.cloud.metricsbackup import attached, common_columns
-        with self._lock:
+        from sizeup.cloud.metricsbackup import attached, common_columns, copy_file
+        with copy_file(data, None if self.path == ":memory:" else str(Path(self.path).parent), ".stt-copy.") as tmp, \
+                self._lock:                        # (the file written first: add() never waits on the disk)
             db = self._open()
-            with attached(db, data, None if self.path == ":memory:" else str(Path(self.path).parent), ".stt-copy."):
+            with attached(db, tmp):
                 cols = common_columns(db, "stt_runs")
                 if cols is None:
                     raise ValueError("its stt_runs doesn't fit this release's")
@@ -287,6 +288,7 @@ class Runs:
         slot = next_slot(self.backup.list())
         self.backup.put(slot, raw, level=GZIP_LEVEL)
         self._uploaded = self._copy_at = now
+        self._fails = 0
         self.status.update(uploaded=now, error="")
 
     def health(self, now: float | None = None) -> dict | None:

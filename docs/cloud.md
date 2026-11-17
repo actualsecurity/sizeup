@@ -1213,6 +1213,7 @@ clip waits for one only as long as its class allows. After that the clip goes th
   - Copies go to `s3://<backups>/<path>/stt/`, by the station metrics' scheme, every hour. They are not made at the hub's stop, because a deploy's drain has no seconds to spare.
   - A new task restores the same way the metrics store does (a shared helper): the newest copy, or the next readable one, merged column by column. Until that works it uploads nothing; Health shows "Transcript copies" and warns after 6 h.
   - A deploy can lose at most the last hour of run records. The transcripts themselves are in cad.sqlite.
+  - Runbook, when Health keeps saying "not restored" because every copy is unreadable: delete the bad copies with an admin's credentials (`aws s3 rm s3://<backups>/<path>/stt/copy-<n>.sqlite.gz`; for the metrics, `.../metrics/copy-<n>.sqlite.gz`). With no copy left, the next turn settles empty and copies start again.
   - A run goes with its radio log row (that channel's transcript retention), and is kept 90 days at most.
 
   Each row holds:

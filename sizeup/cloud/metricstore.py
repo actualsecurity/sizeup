@@ -56,7 +56,8 @@ from pathlib import Path
 from typing import Callable
 
 from sizeup import fence as fence_mod
-from sizeup.cloud.metricsbackup import attached, common_columns as _common_columns, merge_copies   # (shared, #639)
+from sizeup.cloud.metricsbackup import (attached, common_columns as _common_columns, copy_file,   # (shared, #639)
+                                        merge_copies)
 
 RAW_DAYS = 30
 HOURLY_DAYS = 365
@@ -471,9 +472,10 @@ class MetricStore:
         Column by column (the columns both have): a copy from a release with a column more or less still merges, as
         long as it has every key column and every column here that must have a value. (rows added, its snapshot_at)."""
         n = 0
-        with self._lock:
-            db = self._open()                      # (its folder made: the copy is written beside it)
-            with attached(db, data, None if self.path == ":memory:" else str(Path(self.path).parent), ".metrics-copy."):
+        with copy_file(data, None if self.path == ":memory:" else str(Path(self.path).parent), ".metrics-copy.") as tmp, \
+                self._lock:                        # (the file written first: ingest never waits on the disk)
+            db = self._open()
+            with attached(db, tmp):
                 try:
                     try:
                         v = db.execute("SELECT value FROM snap.meta WHERE key = 'snapshot_at'").fetchone()

@@ -244,9 +244,9 @@ def test_a_pre_alert_clip_has_an_absolute_deadline_and_a_lost_or_gaming_worker_g
     assert job.expires - job.claimed_at == lease_s and job.cap_at - job.claimed_at == cap_s
     clock.t += lease_s                                        # a dead worker holds it 4 s, not 16 s
     assert p.tick() == 1 and p.drain() == 1 and "page" in j.fell
-    assert p.ready(URGENT)[1].startswith("slow on pre-alert")  # a lost one counts as its whole cap: no more pre-alerts
-    p._fast.clear()
     online(p)
+    assert p.ready(URGENT)[1].startswith("slow on pre-alert")  # a lost one counts as its whole cap: no more for now
+    clock.t += sttpool.PROBE_S                                # ... until its probe is due
     assert p.submit(j.job("long", LOW, seconds=0.0))
     long = p.claim("gpu-1", 0)
     clock.t += sttpool.LOST_S                                 # its worker unheard (no extend, no heartbeat) ...
@@ -1051,7 +1051,8 @@ def test_lost_pre_alert_leases_close_the_quick_gate_and_repeated_cooldowns_grow(
         online(p)
         if i == 0:
             assert p.ready(URGENT)[1].startswith("slow on pre-alert")   # one lost: its cap (8 s) > 3 s already
-            p._fast.clear()
+            clock.t += sttpool.PROBE_S                                   # (its probe: the second page)
+            online(p)
     p.drain()
     assert len(j.fell) == 2
     w = p.workers["gpu-1"]
@@ -1093,3 +1094,58 @@ def test_a_worker_busy_on_a_job_never_wins_a_pre_alert_clip():
     assert p.submit(j.job("page", URGENT, seconds=0.0))        # (gpu-2 is idle: the pool may take it)
     assert p.claim("gpu-1", 0) is None                         # never the busy one ...
     assert p.claim("gpu-2", 0).id == "page"                    # ... the idle one
+
+
+def test_the_pre_alert_gate_is_per_worker_reopens_by_probe_or_window_and_ignores_gaming_take_backs():
+    clock, j = Clock(), Jobs()
+    p = pool(clock)
+    online(p, "gpu-1")
+    assert p.submit(j.job("page", URGENT, seconds=0.0))
+    p.claim("gpu-1", 0)
+    clock.t += BUDGETS[URGENT][1]
+    p.tick()                                                   # lost: gpu-1 slow on pre-alerts now
+    online(p, "gpu-1")
+    assert p.ready(URGENT)[1].startswith("slow on pre-alert")
+    online(p, "gpu-2")                                         # another worker isn't held to gpu-1's record
+    assert p.ready(URGENT)[0] and p.submit(j.job("air", HIGH, seconds=0.0))
+    assert p.claim("gpu-1", 0) is None and p.claim("gpu-2", 0).id == "air"     # (the slow one never gets it)
+    p.forget("gpu-2")
+    p.drain()
+    # a probe after PROBE_S: one clip, and a quick answer opens the gate again
+    clock.t += sttpool.PROBE_S
+    online(p, "gpu-1")
+    assert p.ready(URGENT)[0] and p.submit(j.job("probe", URGENT, seconds=0.0))
+    probe = p.claim("gpu-1", 0)
+    assert probe.id == "probe"
+    online(p, "gpu-1")
+    assert p.submit(j.job("next", URGENT, seconds=0.0)) is False   # (one probe at a time: the next waits for its answer)
+    clock.t += 0.5
+    assert p.complete("gpu-1", probe.lease, {"text": "x"})
+    online(p, "gpu-1")
+    assert p.ready(URGENT)[1].startswith("slow on pre-alert")  # (median of [8, 0.5] is still 8: not quick yet)
+    for i in range(2):
+        clock.t += sttpool.PROBE_S
+        online(p, "gpu-1")
+        assert p.submit(j.job(f"probe{i}", URGENT, seconds=0.0))
+        q = p.claim("gpu-1", 0)
+        clock.t += 0.5
+        assert p.complete("gpu-1", q.lease, {"text": "x"})
+    online(p, "gpu-1")
+    assert p.ready(URGENT)[0]                                  # quick again: the gate is open
+    # the window: a slow record older than FAST_WINDOW_S is forgotten
+    w = p.workers["gpu-1"]
+    w.fast.clear()
+    w.fast.append((clock.t, 8.0))
+    online(p, "gpu-1")
+    assert not p.ready(URGENT)[0]
+    clock.t += sttpool.FAST_WINDOW_S + 1
+    online(p, "gpu-1")
+    assert p.ready(URGENT)[0] and not w.fast
+    # gaming or a pause takes a pre-alert job back: that isn't slowness
+    assert p.submit(j.job("g", URGENT, seconds=0.0))
+    p.claim("gpu-1", 0)
+    p.seen("gpu-1", "gaming")
+    p.drain()
+    assert "went gaming" in j.fell["g"] and not w.fast
+    online(p, "gpu-1")
+    assert p.ready(URGENT)[0]

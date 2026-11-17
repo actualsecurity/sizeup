@@ -135,22 +135,30 @@ def common_columns(db: sqlite3.Connection, table: str) -> list[str] | None:
 
 
 @contextmanager
-def attached(db: sqlite3.Connection, data: bytes, folder: str | None, prefix: str):
-    """A copy's bytes (an SQLite file) attached to db as "snap" while the block runs (ValueError: not an SQLite file),
-    in a temporary file in `folder` (None: the system's), gone afterwards."""
+def copy_file(data: bytes, folder: str | None, prefix: str):
+    """A copy's bytes (an SQLite file) written to a temporary file in `folder` (None: the system's) while the block runs
+    (ValueError: not an SQLite file): the path. Written before the store's lock is taken, so nothing waits on the disk."""
     if data[:16] != SQLITE_HEADER:
         raise ValueError("not an SQLite file")
+    if folder is not None:
+        Path(folder).mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(prefix=prefix, suffix=".sqlite", dir=folder)
     try:
         with os.fdopen(fd, "wb") as f:
             f.write(data)
-        db.execute("ATTACH DATABASE ? AS snap", (tmp,))
-        try:
-            yield
-        finally:
-            db.execute("DETACH DATABASE snap")
+        yield tmp
     finally:
         Path(tmp).unlink(missing_ok=True)
+
+
+@contextmanager
+def attached(db: sqlite3.Connection, tmp: str):
+    """A copy's file (copy_file) attached to db as "snap" while the block runs."""
+    db.execute("ATTACH DATABASE ? AS snap", (tmp,))
+    try:
+        yield
+    finally:
+        db.execute("DETACH DATABASE snap")
 
 
 def merge_copies(copies: list[dict], get: Callable[[int], bytes], merge: Callable[[bytes], object],
