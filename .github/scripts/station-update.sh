@@ -253,7 +253,7 @@ mtime() { stat -c %Y "$1"; }
 obj=/opt/sizeup/src/trunk-recorder/build/CMakeFiles/trunk_recorder_library.dir/trunk-recorder
 f_why() {      # what F/G saw, when a check fails
   echo "--- trunk-recorder link: $(tr_link) (patched: $patched)"
-  ls -la /opt/sizeup/builds | grep trunk-recorder || true
+  ls -ld /opt/sizeup/builds/trunk-recorder* || true
   stat -c '%Y %n' "$obj/talkgroup.cc.o" "$obj/gr_blocks/transmission_sink.cc.o" || true
   grep -c "Building CXX" /var/log/sizeup-install.log || true
   tail -n 40 /var/log/sizeup-install.log || true
