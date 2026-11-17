@@ -178,6 +178,17 @@ def radio_voice(audio: np.ndarray, rate: int = 16000, deemph: bool = True, nr: b
 voice_band = radio_voice  # older name
 
 
+def judge(raw: str, seconds: float, low_energy: bool = False) -> tuple[str, str]:
+    """whisper's words -> (text, status): "" and "no_speech" for a noise label, nothing said ("." = a squelch tail) or
+    a stock hallucination on a short or quiet clip; else (raw, "done"). The station's whisper and the GPU workers
+    (sizeup/sttpool.py) judge alike."""
+    said = re.sub(r"[^a-z0-9 ]", "", raw.lower()).strip()
+    if (not raw or NOISE_LABEL.match(raw) or not said
+            or (said in HALLUCINATIONS and (seconds < SHORT_S or low_energy))):
+        return "", "no_speech"
+    return raw, "done"
+
+
 class WhisperClient:
     def __init__(self, url: str, timeout_s: float = 60.0):
         self.url, self.timeout_s = url, timeout_s
@@ -441,6 +452,8 @@ class Transcriber:
         self._working = False
         self._prio = LIVE                         # the class of the item being transcribed
         self._took: deque = deque(maxlen=50)      # (finished at, seconds) of the last transcriptions: whisper's pace
+        self._queued: dict[int, float] = {}       # id(item) -> when it was queued (its wait, #639)
+        self.timed: deque = deque(maxlen=2000)    # (done at, class, wait s, run s) of each transcript (station metrics)
 
     def busy(self, catchup: bool = True) -> int:
         """Transcriptions queued or running (the station's auto-update waits for none before a restart;
@@ -461,6 +474,7 @@ class Transcriber:
                fallback: bool = False) -> bool:
         """Queue it. False: it was dropped at once (the queue full of better items): on_drop has it already.
         fallback: the hub asked for it because Amazon Transcribe couldn't (counted: the backlog's cause)."""
+        self._queued[id(item)] = time.time()
         return self._q.put((priority, None, item, audio, channel), fallback=fallback)
 
     def stats(self) -> dict:
@@ -474,10 +488,23 @@ class Transcriber:
 
     def _dropped(self, item, why: str) -> None:
         """on_drop on its own thread: never in the context of submit(), whose caller may hold its own locks."""
+        self._queued.pop(id(item), None)
         self._drops.put((item, why))
         if self._drop_thread is None:
             self._drop_thread = threading.Thread(target=self._drop_loop, name="stt-drops", daemon=True)
             self._drop_thread.start()
+
+    def _timing(self, item, prio, queued: float | None, began: float) -> None:
+        """Its wait in the queue and its run (#639: what the hub keeps with each transcript, and the station metrics'
+        minute): on the item (stt_wait_s, stt_run_s, stt_class: sent with a transmission) and in `timed`."""
+        done = time.time()
+        wait = round(began - queued, 2) if queued is not None else None
+        run = round(done - began, 2)
+        self.timed.append((done, prio, wait, run))
+        try:
+            item.stt_wait_s, item.stt_run_s, item.stt_class = wait, run, CLASS_NAMES.get(prio, str(prio))
+        except AttributeError:      # (an item that takes no attributes: the numbers are in `timed` all the same)
+            pass
 
     def _drop_loop(self) -> None:
         while True:
@@ -496,6 +523,8 @@ class Transcriber:
             self._working = False
             prio, _n, item, audio = self._q.get()
             self._prio, self._working = prio, True
+            began = time.time()
+            queued = self._queued.pop(id(item), None)
             # behind: a context talkgroup's clip gets one greedy pass (no temperature fallback), #300
             fast = {"fast": True} if prio in (LOW, *CONTEXT_CLASSES) and self._q.behind() else {}
             tries = 3
@@ -519,13 +548,8 @@ class Transcriber:
                 item.status = "error"
                 self.on_done(item)
                 continue
-            said = re.sub(r"[^a-z0-9 ]", "", raw.lower()).strip()
-            if (not raw or NOISE_LABEL.match(raw) or not said  # "." = squelch tail
-                    or (said in HALLUCINATIONS
-                        and (len(audio) / 16000 < SHORT_S or getattr(item, "low_energy", False)))):
-                raw, status = "", "no_speech"
-            else:
-                status = "done"
+            raw, status = judge(raw, len(audio) / 16000, getattr(item, "low_energy", False))
+            self._timing(item, prio, queued, began)
             item.raw, item.confidence = raw, conf
             item.status = status                # last: a reader that sees "done" sees its text (and read_twice)
             self.on_done(item)

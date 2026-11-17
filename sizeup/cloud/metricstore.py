@@ -67,7 +67,7 @@ BACKUP_TURN_S = 30.0            # the backup thread's look
 UNSETTLED_WARN_S = 6 * 3600.0   # Health warns: not settled this long (the stations keep 6 h to resend) ...
 COPY_WARN_S = 12 * 3600.0       # ... or no good copy this long
 REROLL_S = 48 * 3600.0          # the first maintain() after a start rolls this far back again
-KINDS = ("floor", "tx", "cc")
+KINDS = ("floor", "tx", "cc", "stt")
 MAX_RECORDS = 5000              # a post
 MAX_DOC = 2048                  # one record's numbers, as JSON
 MAX_FUTURE_S = 86400.0          # a station clock this far ahead: refused
@@ -108,6 +108,14 @@ METRICS: dict[str, tuple[str, Callable[[dict], bool], Callable[[dict], float | N
     "noise_q":      ("tx", lambda d: d.get("kind") == "noise", lambda d: d.get("q")),
     "cc_rate":      ("cc", lambda d: True, lambda d: d.get("rate")),
     "cc_lo":        ("cc", lambda d: True, lambda d: d.get("lo")),
+    # the station's whisper queue, each minute (#639, sizeup/cloud/metrics.py "stt")
+    "stt_queued":   ("stt", lambda d: True, lambda d: d.get("queued")),
+    "stt_oldest_s": ("stt", lambda d: True, lambda d: d.get("oldest")),
+    "stt_shed":     ("stt", lambda d: True, lambda d: d.get("shed")),
+    "stt_done":     ("stt", lambda d: True, lambda d: d.get("done")),
+    "stt_wait_p50": ("stt", lambda d: True, lambda d: d.get("wait50")),
+    "stt_wait_p95": ("stt", lambda d: True, lambda d: d.get("wait95")),
+    "stt_run_p50":  ("stt", lambda d: True, lambda d: d.get("run50")),
     "cc_uncovered": ("cc", lambda d: True, lambda d: sum((d.get("unc") or {}).values()) if d.get("n") or d.get("unc")
                      else None),
 }

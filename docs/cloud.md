@@ -1154,6 +1154,49 @@ folds it into the channel map of the `set_channel_prefs` job (`channels.for_stat
 `{"transcribe": false}` per channel unless a Settings choice says otherwise), so any station,
 including one on an older build, applies it as a plain choice and reports the same signature.
 
+### GPU speech-to-text workers (#639)
+
+GPU workers connect **out** to the hub, never the other way: a long poll for jobs, then the clip's audio, then the
+text. The admin's gaming PC is the first worker, a dedicated box later. Each worker comes and goes as it likes, so a
+clip waits for one only as long as its class allows. After that the clip goes the way it went before.
+
+| file | what it does |
+|---|---|
+| `sizeup/sttpool.py` | the queue, with the whisper queue's strict classes; leases; the per-class budgets; the numbers |
+| `sizeup/cloud/sttworkers.py` | the workers' tokens (`sw1.<id>.<secret>`, hash only, made on first use); the pool's switches; the API under `/api/station/stt/` |
+| `sizeup/cloud/hub.py` | the routing (`_pool_first`, `_pool_done`, `_pool_fallback`, the catch-up's `pool` route) |
+| `sizeup/sttruns.py` | every transcript as written, plus the latency per channel |
+
+- **Which clips:**
+  - AWS-channel clips go to a ready worker first, then AWS, then the station's whisper.
+  - Shed clips go to a ready worker first, before the station's whisper idles. Fire work doesn't pause them; they stay quiet (old words alert nothing). A clip the pool hands back is routed again next tick, with no try burnt.
+- **When the pool is off:** with no worker added, or the pool switched off, nothing changes. The pool is also skipped when its estimated wait (work ahead × the median service time) is over the class's budget.
+- **Budgets per class:** `sttpool.BUDGETS` sets three limits for each class: how long a clip waits for a claim, the first lease, and the lease cap.
+  - The pages, Fire/EMS 15, the firegrounds, the airband and the police alert talkgroups wait 2.5 s, with a 6 s lease and a 10 s cap.
+  - The pre-alert target is p50 ≤ 5 s and p95 ≤ 15 s, from the end of the transmission to its text.
+- **Leases:**
+  - A lease that runs out, a job handed back (`release`), or a revoked worker sends the job to the next engine at once.
+  - A late `complete` gets 409 and is counted. It is never applied.
+  - The queue lives in memory on the leader. After a restart, an AWS-channel clip is still `pending` on its row, and `_aws_recover` routes it.
+- **States:**
+  - `online`: takes jobs.
+  - `gaming` and `paused`: no new jobs. A clip waiting with no other worker ready falls back at once.
+  - `offline`: no word for 30 s.
+  - `cooling`: three jobs lost in a row, so no new jobs for 60 s.
+- **Admin:** Settings > Station > STT workers manages tokens and the switches (Add, Rotate, Revoke, Pool on/off, per class). Every change goes to the Settings audit (System). Settings > Station > Health has a "GPU workers (hub)" row and "Speech-to-text latency" by channel.
+- **Cloudflare:** each worker also needs a Cloudflare Access service token on the policy that lets `/api/station/*` through. This is an operator step, as for a station.
+- **Every transcript is kept:** the hub appends each one to cad.sqlite `stt_runs`, from every engine (the GPU worker, AWS, the station's whisper). The table is made on the first write and kept 90 days. Each row holds:
+  - the engine, model, worker and prompt hash;
+  - the role (`text`, `alt`, `late`, `rerun` or `catchup`);
+  - the raw text, the confidence and the words;
+  - the class;
+  - the clip's end, when it was queued, when the engine started and when it finished;
+  - the wait and the run time.
+
+  The station's whisper measures its own wait and run (`Transcriber._timing`) and sends them with the transmission. `radio_traffic.text_at` is when a row's first text landed (`updated_at` moves with every edit).
+- **Station metrics:** each minute the station sends an `stt` record (sizeup/cloud/metrics.py, into metrics.sqlite: `stt_queued`, `stt_oldest_s`, `stt_shed`, `stt_done`, `stt_wait_p50` / `p95`, `stt_run_p50`). It holds the whisper queue's depth by class, its oldest waits, the clips shed, and the transcripts' wait and run.
+- **AWS denied:** the hub logs when a channel loses AWS to the budget or the breaker, and when it gets AWS back.
+
 ## Phone pre-alert (Tapout)
 
 > "can we bake in the ntfy.sh feed from tapout into this? lets receive that feed as a possible
