@@ -109,7 +109,7 @@ def parse(raw) -> tuple[list[Group], str]:
             if j in job_in:
                 return [], f"{j} is in {job_in[j]} and {name}: one group each"
             job_in[j] = name
-        parked = g.get("parked", [])
+        parked = g.get("parked") if g.get("parked") is not None else []
         if not isinstance(parked, list) or not all(isinstance(x, str) for x in parked):
             return [], f"{name}: parked is a list of its jobs"
         parked = {p.strip() for p in parked}
@@ -171,9 +171,9 @@ def plan(group: Group, own: dict[str, str], usable: Iterable[str], spares: Itera
     fire      a fire job: its dongle never goes to a job that isn't one
     runnable  runnable(job, jobs that would run with it): a job that can run on what it would have
 
-    The wanted jobs are the group's jobs (never a parked one) that are some dongle's own. A usable dongle runs its own job, unless a
-    higher-priority wanted job has no usable dongle: then the lowest-priority job runs no more and its dongle runs that
-    one (a spare first, if there is one). Every dongle back: each runs its own job again."""
+    The wanted jobs are the group's jobs that are some dongle's own (never a parked one). A usable dongle runs its own
+    job, unless a higher-priority wanted job has no usable dongle: then the lowest-priority job runs no more and its
+    dongle runs that one (a spare first, if there is one). Every dongle back: each runs its own job again."""
     prio = {j: k for k, j in enumerate(group.jobs) if j not in group.parked}   # a parked job: never run (#637)
     usable = [s for s in group.sdrs if s in set(usable)]
     current = current or {}

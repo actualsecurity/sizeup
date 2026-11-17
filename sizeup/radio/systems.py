@@ -327,7 +327,7 @@ class Runtime:
         elif rs["state"] != "ok":
             st.update(state=rs["state"], detail=no_ids(rs["detail"]))
             if rs.get("hold_until"):
-                st["hold_until"] = rs["hold_until"]   # (#637) held back after dropouts: Receivers and Health say until when
+                st["hold_until"] = rs["hold_until"]   # (#637) held back after dropouts: Receivers, Health say until
         else:
             part = "" if len(on) == len(self.system.sources) else f"{len(on)} of {len(self.system.sources)} dongles · "
             st["state"] = "ok"

@@ -755,8 +755,8 @@ UHF4 = [*UHF, "spare-1"]
 
 
 def uhf4(parked=()):
-    return [{"name": "UHF", "sdrs": UHF4, "jobs": [P25, "South 2", "FG1", "FG2"], **({"parked": list(parked)} if parked else {})},
-            GROUPS[1]]
+    return [{"name": "UHF", "sdrs": UHF4, "jobs": [P25, "South 2", "FG1", "FG2"],
+             **({"parked": list(parked)} if parked else {})}, GROUPS[1]]
 
 
 def group_alerts(app):
@@ -788,8 +788,8 @@ def test_a_parked_job_says_no_check_is_never_picked_auto_assigned_or_stood_in_an
     assert (g["unowned"], g["parked"], g["short"], g["conflicts"]) == ([], ["FG2"], [], {})
     rows, alerts = group_alerts(app)
     assert alerts == [] and rows[0]["parked"] == ["FG2"] and rows[0]["unowned"] == []
-    assert any(x.endswith("· Fire/EMS 15 > South 2 > FG1 > FG2 · parked FG2; 700: SDR m700-a, m700-b · MRRS 770 > MRRS 773")
-               for x in logs)
+    assert any(x.endswith("· Fire/EMS 15 > South 2 > FG1 > FG2 · parked FG2; 700: SDR m700-a, m700-b · "
+                          "MRRS 770 > MRRS 773") for x in logs)
     from sizeup.cad.api import summarize
     s, _ = summarize("/api/antenna-groups", {"groups": uhf4(["FG2"])}, {}, None)
     assert s.startswith("Antenna groups: UHF (4 SDRs: Fire/EMS 15 > South 2 > FG1 > FG2; parked FG2); 700 (")

@@ -680,7 +680,8 @@ class StationHealth:
                           "sdrs": [names.get(str(s), str(s))[:64] for s in g.get("sdrs") or []][:16],
                           "usable": len(g.get("usable") or []), "jobs": [str(j)[:40] for j in g.get("jobs") or []][:24],
                           "short": [str(j)[:40] for j in g.get("short") or []][:24],
-                          "unowned": [str(j)[:40] for j in g.get("unowned") or [] if j not in (g.get("parked") or [])][:24],
+                          "unowned": [str(j)[:40] for j in g.get("unowned") or []
+                                      if j not in (g.get("parked") or [])][:24],
                           "parked": [str(j)[:40] for j in g.get("parked") or []][:24],     # (#637) off on purpose
                           "conflicts": {names.get(str(s), str(s))[:64]: str(j)[:40]
                                         for s, j in list((g.get("conflicts") or {}).items())[:16]}

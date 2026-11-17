@@ -1209,7 +1209,7 @@ class SystemSupervisor(Supervisor):
         self.back_at: float | None = None            # its last start after a return
         self.flaps = 0                               # returns in a row it went again soon after (FLAP_S)
         self.hold_until = 0.0                        # a flapping dongle's: no start before this
-        self.county_wait: tuple | None = None        # (#637) (the key of a group move, since when) the county is waited for
+        self.county_wait: tuple | None = None        # (#637) (a group move's key, since when) waiting for the county
 
     def _recorder(self) -> dict:
         r = recorder(self.config)
