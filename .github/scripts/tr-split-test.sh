@@ -22,5 +22,6 @@ c++ -std=c++17 -O1 -pthread "${defs[@]}" -I"$src" -I"$src/trunk-recorder" "${inc
   "$here/tr_split_test.cc" -o "$out/tr_split_test" \
   "$build/libtrunk-recorder.a" \
   $(pkg-config --libs gnuradio-runtime gnuradio-blocks 2>/dev/null || echo -lgnuradio-runtime -lgnuradio-blocks -lgnuradio-pmt) \
+  $(pkg-config --libs spdlog fmt 2>/dev/null || echo -lfmt) \
   ${LDFLAGS:-} -lboost_log -lboost_log_setup -lboost_thread -lboost_filesystem -lpthread
 "$out/tr_split_test"

@@ -176,6 +176,36 @@ static void expect(const char *name, const Got &got, const std::vector<std::pair
   }
 }
 
+static std::string slurp(const std::string &path) {
+  std::FILE *f = std::fopen(path.c_str(), "rb");
+  std::string out;
+  if (!f) {
+    return "(missing)";
+  }
+  char buf[8192];
+  size_t n;
+  while ((n = std::fread(buf, 1, sizeof buf, f)) > 0) {
+    out.append(buf, n);
+  }
+  std::fclose(f);
+  return out;
+}
+
+// log must be stock: the same transmissions, the same bytes in each WAV
+static void same_as_stock(const char *name, const std::vector<Tag> &tags, int n) {
+  Got off = run("off", false, RA, n, tags);
+  Got log = run("log", false, RA, n, tags);
+  bool ok = off.txs.size() == log.txs.size() && !off.txs.empty();
+  for (size_t i = 0; ok && i < off.txs.size(); i++) {
+    ok = off.txs[i].source == log.txs[i].source && off.txs[i].sample_count == log.txs[i].sample_count &&
+         slurp(off.txs[i].filename) == slurp(log.txs[i].filename);
+  }
+  std::cout << (ok ? "ok    " : "FAIL  ") << name << ": " << off.txs.size() << " transmission(s), byte for byte" << std::endl;
+  if (!ok) {
+    failures++;
+  }
+}
+
 // a talker the voice channel names every 2880 samples (360 ms: P25 Phase 1's LDU1), from `from` up to `to`
 static void every(std::vector<Tag> &tags, long src, long from, long to) {
   for (long at = from; at < to; at += 2880) {
@@ -209,6 +239,14 @@ int main() {
   t.clear(); every(t, RA, 0, 10000); t.push_back({10000, "terminate", 1}); every(t, RB, 10200, 14000);
   expect("terminate then new ID, next window", run("on", false, RA, 14000, t), {{RA, 10200}, {RB, 3800}});
 
+  // a terminator and the next talker's ID at one offset: the earlier transmission ended there, the next goes on
+  t.clear(); every(t, RA, 0, 10000); t.push_back({10050, "src_id", RB}); t.push_back({10050, "terminate", 1});
+  every(t, RB, 12930, 20000);
+  expect("terminate and new ID at one offset", run("on", false, RA, 20000, t), {{RA, 10050}, {RB, 9950}});
+  // ... and its own ID with the terminator: the last chunk is still its own, to the window's end
+  t.clear(); every(t, RA, 0, 10000); t.push_back({10050, "src_id", RA}); t.push_back({10050, "terminate", 1});
+  expect("terminate with its own ID", run("on", false, RA, 10200, t), {{RA, 10200}});
+
   // the same radio all along: one transmission
   t.clear(); every(t, RA, 0, 20000);
   expect("same ID again", run("on", false, RA, 20000, t), {{RA, 20000}});
@@ -234,6 +272,16 @@ int main() {
   // a conventional channel keeps its own (stock) handling
   t.clear(); every(t, RA, 0, 10000); every(t, RB, 10050, 20000);
   expect("conventional: stock", run("on", true, RA, 20000, t), {{RB, 20000}}, nullptr, "Unit ID changed");
+
+  // log is stock, byte for byte: a cut, terminators, a group mismatch
+  t.clear(); every(t, RA, 0, 10000); every(t, RB, 10050, 20000);
+  same_as_stock("log = off: new talker", t, 20000);
+  t.clear(); every(t, RA, 0, 10000); t.push_back({10020, "terminate", 1}); t.push_back({10050, "src_id", RB});
+  every(t, RB, 12930, 16000); t.push_back({14100, "terminate", 1}); every(t, RA, 14400, 20000);
+  same_as_stock("log = off: terminators", t, 20000);
+  t.clear(); every(t, RA, 0, 9000); t.push_back({4000, "grp_id", 9211}); t.push_back({9050, "grp_id", 4321});
+  t.push_back({12000, "terminate", 1}); every(t, RB, 12200, 16000);
+  same_as_stock("log = off: group mismatch", t, 16000);
 
   std::cout << (failures ? "FAILED" : "all ok") << " (" << failures << " failed)" << std::endl;
   return failures ? 1 : 0;

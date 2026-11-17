@@ -59,7 +59,7 @@ TR_COMMIT="7f9e21ecfa445e568371cef3153a07887c36b380"
 tr_patch() {
   cat <<'PATCH'
 diff --git a/trunk-recorder/gr_blocks/transmission_sink.cc b/trunk-recorder/gr_blocks/transmission_sink.cc
-index 4e8c2ba..c6b4384 100644
+index 4e8c2ba..a7b12e7 100644
 --- a/trunk-recorder/gr_blocks/transmission_sink.cc
 +++ b/trunk-recorder/gr_blocks/transmission_sink.cc
 @@ -35,6 +35,8 @@
@@ -71,7 +71,7 @@ index 4e8c2ba..c6b4384 100644
  
  // win32 (mingw/msvc) specific
  #ifdef HAVE_IO_H
-@@ -77,6 +79,228 @@ transmission_sink::transmission_sink(int n_channels, unsigned int sample_rate, i
+@@ -77,6 +79,251 @@ transmission_sink::transmission_sink(int n_channels, unsigned int sample_rate, i
    d_slot = -1;
    d_termination_flag = false;
    state = AVAILABLE;
@@ -211,6 +211,9 @@ index 4e8c2ba..c6b4384 100644
 +    }
 +    if ((d_cand_src != -1) && ((long)d_pending.size() >= hold)) {
 +      split_cut(); // neither heard again nor flipped back: the new talker
++      if (!d_fp) {
++        return; // its file couldn't be opened: nothing to write to
++      }
 +    }
 +  }
 +  d_last_write_time = std::chrono::steady_clock::now();
@@ -238,12 +241,19 @@ index 4e8c2ba..c6b4384 100644
 +  }
 +  std::vector<gr::tag_t> tags;
 +  get_tags_in_window(tags, 0, 0, noutput_items);
-+  std::stable_sort(tags.begin(), tags.end(), [](const gr::tag_t &x, const gr::tag_t &y) { return x.offset < y.offset; });
 +  pmt::pmt_t src_id_key(pmt::intern("src_id"));
 +  pmt::pmt_t grp_id_key(pmt::intern("grp_id"));
 +  pmt::pmt_t terminate_key(pmt::intern("terminate"));
 +  pmt::pmt_t spike_count_key(pmt::intern("spike_count"));
 +  pmt::pmt_t error_count_key(pmt::intern("error_count"));
++  // at one offset: the ending transmission's error counts, then its terminator, then the rest (a new ID there is the
++  // next transmission's)
++  auto rank = [&](const gr::tag_t &t) {
++    return (pmt::eq(spike_count_key, t.key) || pmt::eq(error_count_key, t.key)) ? 0 : (pmt::eq(terminate_key, t.key) ? 1 : 2);
++  };
++  std::stable_sort(tags.begin(), tags.end(), [&](const gr::tag_t &x, const gr::tag_t &y) {
++    return (x.offset != y.offset) ? (x.offset < y.offset) : (rank(x) < rank(y));
++  });
 +  int cursor = 0;
 +  bool term = false;
 +  int term_at = 0;
@@ -279,7 +289,20 @@ index 4e8c2ba..c6b4384 100644
 +        curr_src_id = src_id;
 +      }
 +    } else if (pmt::eq(terminate_key, tags[i].key)) {
-+      if (!term) {
++      // a new talker's ID at the terminator's own offset: the transmission ended before this chunk, which is the
++      // new talker's (no short piece of it on the earlier one)
++      bool next_here = false;
++      for (unsigned int j = i + 1; j < tags.size() && tags[j].offset == tags[i].offset; j++) {
++        if (pmt::eq(src_id_key, tags[j].key)) {
++          long id = pmt::to_long(tags[j].value);
++          next_here = next_here || (!d_talker_ids.empty() &&
++                                    std::find(d_talker_ids.begin(), d_talker_ids.end(), id) == d_talker_ids.end());
++        }
++      }
++      if (next_here) {
++        split_terminate();
++        term = false;
++      } else if (!term) {
 +        term = true;
 +        term_at = rel;
 +        d_split_drop = (state != IGNORE) && (d_sample_count == 0) && d_pending.empty();
@@ -300,7 +323,20 @@ index 4e8c2ba..c6b4384 100644
  }
  
  void transmission_sink::create_filename() {
-@@ -257,6 +481,13 @@ void transmission_sink::set_source(long src) {
+@@ -170,6 +417,12 @@ bool transmission_sink::start_recording(Call *call) {
+   curr_src_id = d_current_call->get_current_source_id();
+   cached_src_id = -1;
+   d_sample_count = 0;
++  d_talker_ids.clear(); // sizeup (#638): a new call, nobody heard yet
++  d_cand_src = -1;
++  d_cand_seen = 0;
++  d_talker_start = 0;
++  d_pending.clear();
++  d_split_drop = false;
+ 
+   // when a wav_sink first gets associated with a call, set its lifecycle to idle;
+   state = IDLE;
+@@ -257,6 +510,13 @@ void transmission_sink::set_source(long src) {
  }
  
  void transmission_sink::end_transmission() {
@@ -314,7 +350,7 @@ index 4e8c2ba..c6b4384 100644
    std::string loghdr = log_header(d_current_call_short_name,d_current_call_num,d_current_call_talkgroup_display,d_current_call_freq);
    
    if (d_sample_count > 0) {
-@@ -320,6 +551,11 @@ void transmission_sink::end_transmission() {
+@@ -320,6 +580,11 @@ void transmission_sink::end_transmission() {
    } else {
      BOOST_LOG_TRIVIAL(error) << "Trying to end a Transmission, but the sample_count is 0" << std::endl;
    }
@@ -326,7 +362,7 @@ index 4e8c2ba..c6b4384 100644
  }
  
  void transmission_sink::stop_recording() {
-@@ -358,6 +594,9 @@ State transmission_sink::get_state() {
+@@ -358,6 +623,9 @@ State transmission_sink::get_state() {
  }
  
  int transmission_sink::work(int noutput_items, gr_vector_const_void_star &input_items, gr_vector_void_star &output_items) {
@@ -336,7 +372,7 @@ index 4e8c2ba..c6b4384 100644
  
    gr::thread::scoped_lock guard(d_mutex); // hold mutex for duration of this function
    std::string loghdr = log_header(d_current_call_short_name,d_current_call_num,d_current_call_talkgroup_display,d_current_call_freq);
-@@ -450,6 +689,14 @@ int transmission_sink::work(int noutput_items, gr_vector_const_void_star &input_
+@@ -450,6 +718,14 @@ int transmission_sink::work(int noutput_items, gr_vector_const_void_star &input_
      if (pmt::eq(src_id_key, tags[i].key)) {
        long src_id = pmt::to_long(tags[i].value);
        pos = d_sample_count + (tags[i].offset - nitems_read(0));

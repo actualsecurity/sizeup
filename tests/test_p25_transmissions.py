@@ -219,7 +219,7 @@ def test_the_patch_is_a_well_formed_diff_of_the_transmission_sink():
             old -= tag in " -"
             new -= tag in " +"
             assert old >= 0 and new >= 0
-    assert hunks == 8
+    assert hunks == 9
     assert not re.search(r"^-", patch.replace("--- a/", ""), re.M)       # it only adds: stock code paths stay as they are
     for want in ('std::getenv("SIZEUP_TR_SPLIT")', "Unit ID changed on Voice Channel, ext: ",
                  "would split: prev ", "if ((d_split_mode == 2) && !d_conventional)", "#638"):
@@ -247,7 +247,8 @@ def test_ci_tests_the_patch_on_the_real_sink_and_switches_between_builds():
     harness = (ROOT / ".github" / "scripts" / "tr_split_test.cc").read_text()
     for case in ("split mid-window", "new ID then terminate, one window", "terminate then new ID, one window",
                  "same ID again", "grant-only ID replaced", "ID flip back", "group mismatch", "conventional: stock",
-                 "log: stock, logged", "off: stock"):
+                 "log: stock, logged", "off: stock", "terminate and new ID at one offset", "log = off: terminators",
+                 "log = off: group mismatch"):
         assert f'"{case}"' in harness, case
 
 
