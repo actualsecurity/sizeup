@@ -1642,7 +1642,8 @@ whole (temp file, rename); the index is the file names (an app restart finds the
 The viewer: ● Rec (why, in the tooltip), the timeline, the time showing, **Live**, **Keep**.
 
 A segment's time is when it first appears in the chunklist, less the durations listed after it; after the first,
-each begins where the one before ended. It can be off by up to a segment (4-8 s) from the camera's own clock.
+each begins where the one before ended, as long as that lies between the earliest and the latest it can have begun
+(#597). It can be off by up to a round (4-8 s) from the camera's own clock, never more.
 
 **Network**: the service runs in the default VPC's subnets with a public IP (sizeup-aws `9-service.sh`:
 `assignPublicIp=ENABLED`), so the recording's ~1.6 GB a day per camera comes in through the internet gateway, not a
@@ -1680,7 +1681,9 @@ With `dvr_dir` on storage shared between tasks (EFS: `[roads] dvr_shared = "auto
   (`follow()`, #324) only on it and never while a clip of either camera is being saved (`may_move`); the standby's
   warm app never makes a DVR. The leader keeps each camera's last key, end and sequence offset in a small state
   file beside the recordings (`.dvr-state.json`, `sizeup/dvrstate.py`, #596: written whole every 5 s and on a clean
-  stop). A new leader resumes from it and records at once; it reads the index in the background (the file names
+  stop). The offset outlives the task (#597): with it a restart or a short handover neither says "started over" again
+  nor records the chunklist's segments a second time; with no state at all, only the entries that begin after the
+  recording's end are taken as new. A new leader resumes from it and records at once; it reads the index in the background (the file names
   carry the size, `key_t0_dur_bytes[_n].ts`, so no stat per file over NFS; the older forms still read). Until that
   is done a camera's own folder is read when its recording is asked for (playback, a clip, Keep), nothing is evicted
   and the cap is weighed against the bytes the state counted (2 % over at most). No state, or one over 10 min old:

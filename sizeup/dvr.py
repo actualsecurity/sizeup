@@ -27,10 +27,13 @@ Where a segment came from: the camera's own HLS session (fetched, checked and re
 viewers' cache), or the live stream's when one is open (Roads._streams: the same segments, fetched once). A few
 workers record the cameras side by side. Segments are keyed by the stream's media sequence (Wowza's counter runs on
 across sessions), so neither a new session nor the two sources ever double one; a counter that starts over
-(the origin restarted) is carried on from the last key. A chunklist that fails is asked again at once with a new
+(the origin restarted) is carried on from the last key, and that offset is kept in the state (#597, below), so a restart
+or a handover carries on with it. A chunklist that fails is asked again at once with a new
 session; only after repeated failures does the camera wait (15 s doubling to SESSION_RETRY_S). Its time: when it first appears in the
 chunklist (Wowza lists a segment once it is whole), less the durations of those after it, carried on from the one
-before when they follow each other.
+before when they follow each other, as far as that is possible (#597: between the earliest and the latest it can have
+begun, so the timeline stays within a round of the clock). A segment whose time span is recorded already is never
+written again.
 
 HTTP (behind Cloudflare Access with the rest of /api/cad; nothing here is public, no share links):
   GET  /api/cad/cameras/<id>/dvr                   {recording, why: [always | pinned | incident | open], pinned,
@@ -106,6 +109,9 @@ RESCAN_S = 30.0                       # shared storage: the folder read again th
 RESCAN_FOR_S = 300.0                  # ... for this long after the start (the old leader draining)
 MAX_WORKERS = 24
 AREA_EVERY_S = 60.0                   # the response area's cameras: worked out again this often
+SNAP_AHEAD_S = 0.5                    # a segment's start carried on from the one before at most this past its latest
+SNAP_BACK_S = 1.0                     # ... and at most this before the one before ends (under GAP_S: no discontinuity)
+STATE_LAG_KEYS = 8                    # the state's last key at most this far behind the folder's: its offset holds
 INDEXING_SLACK = 0.02                 # before the index is whole: the cap may be overshot this much (evicted after)
 STOP_WAIT_S = 3.0                     # a clean stop: rounds under way get this long before the last checkpoint
 
@@ -216,6 +222,7 @@ class Dvr:
         self.holding: dict[str, int] = {}         # cid -> clips of it being saved (never renamed meanwhile)
         if not self.shared:
             self._scan()                          # (shared: in the background, before the first round: start())
+            self._offsets()
             self._scanned.set()
             self._indexed.set()
 
@@ -740,22 +747,29 @@ class Dvr:
         for k, (name, _) in enumerate(items):
             m = SEQ_RE.search(name)
             seqs.append(int(m.group(1)) if m else first + k)
-        with self._lock:
-            last, offset = c["last"], c.get("offset", 0)
-        if last is not None and seqs[-1] + offset + 3 < last:
-            # the origin's counter started over (a restart): carry the keys on from the last one
-            offset = last + 1 - seqs[0]
-            with self._lock:
-                c["offset"] = offset
-            c["restarted"] = True                              # a discontinuity before the next one kept
-            c.pop("hstate", None)
-            self.log(f"dvr: {cid}: the stream's sequence started over (now {seqs[-1]}); carried on from {last}")
+        # (#597) this task's first round of the camera (a takeover, a restart); the last own chunklist and its newest
+        fresh, polled, top = "top" not in c, c.get("polled"), c.get("top")
+        c["polled"], c["top"] = (None if live else now), seqs[-1]
         # each one's end: now, less the durations of those after it (a segment is listed once it is whole)
         ends, t = [], now
         for _, dur in reversed(items):
             ends.append(t)
             t -= dur
         ends.reverse()
+        with self._lock:
+            last, offset, end = c["last"], c.get("offset", 0), c["end"]
+        if last is not None and seqs[-1] + offset + 3 < last:
+            # the origin's counter started over (a restart): carry the keys on from the last one. A camera's first round
+            # here (its offset not known: no state) may list what the leader before wrote: only what can have begun
+            # at its end or after is new (#597; SNAP_AHEAD_S: how far the recording's end may run ahead)
+            new = next((k for k in range(len(items))
+                        if not fresh or end is None or ends[k] - items[k][1] >= end - SNAP_AHEAD_S - 1e-3), len(items))
+            offset = last + 1 - (seqs[new] if new < len(items) else seqs[-1] + 1)
+            with self._lock:
+                c["offset"] = offset
+            c["restarted"] = True                              # a discontinuity before the next one kept
+            c.pop("hstate", None)
+            self.log(f"dvr: {cid}: the stream's sequence started over (now {seqs[-1]}); carried on from {last}")
         n = 0
         for k, (name, dur) in enumerate(items):
             key = seqs[k] + offset
@@ -766,9 +780,17 @@ class Dvr:
                 continue
             if self._stop.is_set() or (self.stopped and not self._room(1 << 20)) or not self.may_write():
                 break
-            t0 = ends[k] - dur
-            if last is not None and key == last + 1 and end is not None and abs(end - t0) < 3 * dur + 2:
-                t0 = end                                       # the one before ends where this begins
+            t0 = ends[k] - dur                                 # (the latest it can have begun)
+            if last is not None and key == last + 1 and end is not None:
+                # the one before ends where this begins, as far as that is possible (#597): never after the latest it
+                # can have begun, never before the earliest (the newest, new since our last chunklist: it was listed
+                # since then; else a segment before), so the timeline stays within a round of the clock; and never
+                # more than SNAP_BACK_S before the one before ends (the playlist's dates only go on, no discontinuity)
+                newest = polled is not None and k == len(items) - 1 and top is not None and seqs[k] > top
+                earliest = t0 - (now - polled if newest else dur)
+                t0 = max(min(max(end, earliest), t0 + SNAP_AHEAD_S), end - min(dur / 2, SNAP_BACK_S))
+            elif end is not None and t0 + dur <= end:
+                continue                                       # its whole span is recorded already: never twice
             if live:
                 try:
                     hit = self.roads._segment(cid, base, name)    # the viewers' copy: fetched once for both
@@ -883,12 +905,29 @@ class Dvr:
             return
         t = time.monotonic()
         self._scan()
+        self._offsets()
         self._rescanned_at = self.clock()
         self._scanned.set()
         self._indexed.set()
         with self._lock:
             n, cams = sum(len(c["segs"]) for c in self._cams.values()), len(self._cams)
         self.log(f"dvr: {n} segments of {cams} cameras found on shared storage in {time.monotonic() - t:.1f} s: appending")
+
+    def _offsets(self) -> int:
+        """(#597) The file names give each camera's last key, not the offset its keys carry on from the origin's
+        sequence with (it started over): that from the state, even an old one, when it describes the same recording's
+        end (its last key the folder's, or up to STATE_LAG_KEYS before it: written after the state). The cameras."""
+        self.state.load()
+        n = 0
+        with self._lock:
+            for cid in self.state.cameras():
+                s, c = self.state.get(cid), self._cams.get(cid)
+                if c is None or c["last"] is None or type(s.get("last")) is not int or type(s.get("offset")) is not int:
+                    continue
+                if 0 <= c["last"] - s["last"] <= STATE_LAG_KEYS:
+                    c["offset"] = s["offset"]
+                    n += 1
+        return n
 
     def resume(self) -> bool:
         """Shared storage, a new leader (#596): each camera's last key, end and offset from the state the leader before

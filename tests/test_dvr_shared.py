@@ -13,6 +13,7 @@ import os
 import re
 import threading
 import time
+from datetime import datetime
 
 import pytest
 
@@ -480,3 +481,119 @@ def test_a_killed_writers_temp_files_go_once_they_are_stale(tmp_path):
     new._started_at, new._rescanned_at = clock.t, clock.t - dvr_mod.RESCAN_S
     new.tick(wait_all=True)                                      # the rescans: off the recording's thread
     assert not dead.exists() and mine.exists()
+
+
+# -- each camera's sequence offset outlives the task (#597) ------------------------------------------------------------
+
+def pdts(d, cid=CAM):
+    """The VOD playlist's segments: [(start, duration)], in its order."""
+    out, t = [], None
+    for line in d.playlist(cid).decode().splitlines():
+        if line.startswith("#EXT-X-PROGRAM-DATE-TIME:"):
+            t = datetime.fromisoformat(line.split(":", 1)[1].replace("Z", "+00:00")).timestamp()
+        elif line.startswith("#EXTINF:"):
+            out.append((t, float(line[8:].split(",")[0])))
+    return out
+
+
+def started_over(tmp_path, offset=None):
+    """The leader before: recording, the origin restarted (its counter from 10: an offset), recording on, a clean stop.
+    offset: that offset set from the start instead."""
+    r, d, f, clock = setup(tmp_path, area=None)
+    old = leader(r, tmp_path, clock)
+    old.scan_now()
+    if offset is not None:
+        old._cam(CAM)["offset"] = offset
+    step(old, f, clock, 3)
+    if offset is None:
+        f.seq = 10
+        step(old, f, clock, 6)                                   # (its timeline back on the clock: below)
+        assert sum("started over" in m for m in old.logs) == 1
+    old.stop()
+    return r, f, clock, old
+
+
+def take_over(r, tmp_path, clock, how):
+    new = leader(r, tmp_path, clock)
+    if how == "resume":
+        assert new.resume()
+        new.index_rest()
+    else:                                                        # no state to resume from (stale): the folder first
+        clock.t += dvrstate.MAX_AGE_S + 1
+        assert not new.resume()
+        new.scan_now()
+    return new
+
+
+@pytest.mark.parametrize("how", ["resume", "full scan"])
+def test_a_short_handover_after_the_origin_started_over_records_nothing_twice(tmp_path, how):
+    """The handover shorter than the chunklist's span: the new leader's first chunklist still lists what the leader
+    before wrote. With its offset known: none of it again, no "started over", the playlist's dates only going on."""
+    r, f, clock, old = started_over(tmp_path)
+    keys_before = set(old._cams[CAM]["segs"])
+    f.advance()                                                  # one new segment; the other two: written already
+    new = take_over(r, tmp_path, clock, how)
+    clock.t += 4
+    new.tick()
+    step(new, f, clock, 2)
+    assert not any("started over" in m for m in new.logs)
+    segs = sorted(new._cams[CAM]["segs"].items())
+    added = [k for k, _ in segs if k not in keys_before]
+    assert added == [max(keys_before) + 1, max(keys_before) + 2, max(keys_before) + 3]
+    listed = pdts(new)
+    assert len(listed) == len(segs) and all(b[0] > a[0] for a, b in zip(listed, listed[1:]))   # the dates only go on
+    since = listed[len(keys_before) - 1:]                        # from the last one the leader before wrote: no overlap
+    assert all(b[0] >= a[0] + a[1] - 1e-3 for a, b in zip(since, since[1:]))
+    assert {p.name for p in (tmp_path / "efs" / CAM).iterdir()} == {new._file(CAM, k).name for k, _ in segs}
+
+
+@pytest.mark.parametrize("how", ["resume", "full scan", "own disk"])
+def test_an_offset_of_a_few_is_kept_so_nothing_is_skipped(tmp_path, how):
+    if how == "own disk":
+        r, d, f, clock = setup(tmp_path)
+        d.pins = {CAM}
+        d._cam(CAM)["offset"] = 2
+        step(d, f, clock, 3)
+        d.stop()
+        last = d._cams[CAM]["last"]
+        new = Dvr(r, tmp_path / "dvr", clock=clock, log=lambda m: None, free_floor=0)
+        new.pins = {CAM}
+    else:
+        r, f, clock, old = started_over(tmp_path, offset=2)
+        last = old._cams[CAM]["last"]
+        new = take_over(r, tmp_path, clock, how)
+    assert new._cams[CAM]["offset"] == 2
+    step(new, f, clock, 1)
+    assert max(new._cams[CAM]["segs"]) == last + 1                  # the new one, not taken for one already kept
+
+
+@pytest.mark.parametrize("dt", [4.4, 3.6])
+def test_the_timeline_stays_within_a_round_of_the_clock(tmp_path, dt):
+    """The stream's segments last longer (or shorter) than its chunklist says: each one carried on from the one before
+    would drift off the clock without bound; it is kept between the earliest and the latest each can have begun."""
+    r, d, f, clock = setup(tmp_path)
+    d.pins = {CAM}
+    d.tick()
+    for _ in range(40):
+        step(d, f, clock, 1, dt=dt)
+        to = d.status(CAM)["to"]
+        assert clock.t - dt - 1e-3 <= to <= clock.t + dvr_mod.SNAP_BACK_S + dvr_mod.SNAP_AHEAD_S + 1e-3
+    listed = pdts(d)
+    assert all(b[0] > a[0] for a, b in zip(listed, listed[1:]))
+
+
+def test_with_no_state_at_all_what_the_leader_before_wrote_is_still_not_recorded_again(tmp_path):
+    """No state (a release before it, a lost file): the offset isn't known, the counter looks started over. Only the
+    entries that begin after the recording's end are new: nothing written twice, the dates only going on."""
+    r, f, clock, old = started_over(tmp_path)
+    (tmp_path / "efs" / STATE_FILE).unlink(missing_ok=True)
+    keys_before, end = set(old._cams[CAM]["segs"]), old._cams[CAM]["end"]
+    new = leader(r, tmp_path, clock)
+    assert not new.resume()
+    new.scan_now()
+    step(new, f, clock, 2)                                       # a short handover: two written already still listed
+    added = sorted(set(new._cams[CAM]["segs"]) - keys_before)
+    assert added == [max(keys_before) + 1, max(keys_before) + 2]
+    assert all(new._cams[CAM]["segs"][k][0] >= end - dvr_mod.SNAP_BACK_S for k in added)
+    listed = pdts(new)
+    assert all(b[0] > a[0] for a, b in zip(listed, listed[1:]))
