@@ -16,7 +16,7 @@ get:
           example:
             api: "1.0"
             min_app: {ios: "0.0.0", android: "0.0.0"}
-            features: {}
+            features: {auth: false, reads: false, stream: false, writes: false, push: false, media: false, responders: false}
             server_time: 1767225600.5
             epoch: null
     default:

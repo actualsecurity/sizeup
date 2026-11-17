@@ -132,6 +132,15 @@ repeat = 2
 transmit = false                   # transmission stays on the station (M2): the hub sends it this WAV to play
 channels = ["FG1", "PC repeater"]
 
+# [mobile]: the app's API, /api/v1 (docs/mobile-api.md "Sharing the production hub"). The hub's own section: never a
+# station's (a station's config refuses it). Off: /api/v1 answers 404 beside `GET /api/v1/meta`, and nothing reads a
+# token key, creates a table or sends a push. Read on every request; to turn it off again set false and restart.
+# max_requests: v1's share of concurrent requests (1 to 64); max_streams: of open streams, 2 a device (0 to 64).
+[mobile]
+enabled = false
+# max_requests = 8
+# max_streams = 16
+
 [prealert]
 # The phone pre-alert from Tapout (docs/cloud.md, config.example.toml): the hub is the CAD of record,
 # so it subscribes, read only. The topics are NOT in this repo: an admin sets them in Settings > System > Push

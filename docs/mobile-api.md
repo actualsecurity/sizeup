@@ -46,7 +46,7 @@ For the app developer.
 - **Public repo:** this repo is public ([CLAUDE.md](../CLAUDE.md), "Public repo rules"). Specs, fixtures, issues and
   PRs here use synthetic data only: `example.org` hosts, made-up units and addresses. No hostnames, account IDs, keys
   or real incident data.
-- **Never point a prototype at production.** Use a local hub, then staging once it exists (PR 3).
+- **Never point a prototype at production.** Use a local hub (staging is deferred, D8; the production hub is shared only behind [the safeguards](#sharing-the-production-hub)).
 
 ---
 
@@ -547,9 +547,30 @@ documents → cameras. Settings and admin are **never** in v1: admins use the we
 | Observability | `perf.py` path families gain a client dimension `(via, app_version)`. Health tile: active devices, versions in the wild, push success and failure (SNS delivery logs), stream count |
 | Backward compatibility | v1 additive only; `min_app` forces upgrades; the last two app releases keep working. App store review and rollout take 1-7 days and users update late |
 | Feature flags | Server-side in `meta.features` (from Settings), so a feature can be turned off without an app release. No third-party flag service |
-| Staging | **Needed before the first external build** (D8). A second small hub task (0.25-0.5 vCPU, about $11-21 a month) on its own hostname and Access app, synthetic data only, outbound guard on except SNS to a sandbox app. App review needs a working demo login: give Apple and Google a **review account on staging**, never production |
+| Staging | **Deferred** (D8, 2026-11-16): mobile is built on the production hub behind [the safeguards](#sharing-the-production-hub). Still needed before the first external build: a second small hub task (0.25-0.5 vCPU, about $11-21 a month) on its own hostname and Access app, synthetic data only, outbound guard on except SNS to a sandbox app. App review needs a working demo login: give Apple and Google a **review account on staging**, never production |
 | Distribution | TestFlight (internal: up to 100 team members without review; external: beta review) and Play internal testing (up to 100 testers). Then a public listing, or Apple Business Manager custom apps for a private listing (**unverified** fit for volunteers' own phones) (D10) |
 | Repos | The hub, the spec and the contract tests stay in this **public** repo. The app goes in a **private** repo (proposed, D10). The app binary holds no secrets: only the hub URL; everything else comes from enrollment |
+
+---
+
+## Sharing the production hub
+
+Plan change 2026-11-16 (#619): no staging for now (D8 deferred), so the mobile code is merged and deployed to the hub
+the dispatchers use. Every change stays inert or harmless to the browser console until it is switched on. What exists:
+
+| Safeguard | Where |
+|---|---|
+| Master switch, off by default | `[mobile] enabled = false` ([cloud.md](cloud.md#the-apps-api-switches-mobile-619)). Off: every `/api/v1/*` path but `GET /api/v1/meta` is a 404 in v1's envelope; no database, token key or push is touched. Read on every request |
+| Per-feature flags | `meta.features`: auth, reads, stream, writes, push, media, responders, each off until proven. A route names its flag (`routes.py`); flag off = as if absent. A test enforces that every route declares its flag and who may call it |
+| A v1 failure stays in v1 | `handler.respond` runs every route inside one try/except: the exception class is logged (never a token, header or body) and the answer is a 500 in v1's envelope |
+| Caps | v1's share of concurrent requests (503 busy), per-principal token buckets (reads 10/s burst 30, writes 2/s burst 10: 429 + `Retry-After`; no principal: per address), 2 streams per device and a cap on all; in memory, no thread, no database work |
+| Console unchanged | `tests/test_console_pin.py` pins the `/api/cad`, `/api/station` and `/healthz` route tables and sample responses |
+| Fail closed | `principal.py` is the resolver seam (section 1.4): a route that needs a `device` is a 401 until #558; v1 never hands a handler a `CadApi`; a bearer is refused on `/api/cad/*`; Access is not v1's door (a cookie never makes a principal) |
+
+Turn it off: `[mobile] enabled = false` and a restart (`meta.features` then reads all false: no app release). Undo: revert
+the pull request; a table a feature created lazily may stay, nothing reads it once the flag is off. The Cloudflare Bypass
+for `/api/v1/` is added by a person only after these tests are merged, and checked with `curl` (no cookie on
+`/api/cad/state` still gets Access's login; none on `/api/v1/meta` reaches the hub).
 
 ---
 
