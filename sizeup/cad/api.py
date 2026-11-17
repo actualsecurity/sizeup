@@ -215,13 +215,15 @@ POST /api/cad/airport-alert/<id>/accept   {operator?}  an airport pre-alert (HPN
                                           sizeup/cad/airport_alerts.py) made into a PENDING event: never a dispatch
 POST /api/cad/airport-alert/<id>/dismiss  {operator?, reason?}  ... that is nothing; dispatchers and admins
 GET  /api/cad/export/airport-alerts.csv   every airport pre-alert kept (90 days), ATC and ADS-B, with its outcome
-POST /api/cad/hint/<id>/accept            {operator?}  a unit status suggested from the radio (#37, the state's
+POST /api/cad/hint/<id>/accept            {operator?, confirm?}  a unit status suggested from the radio (#37, the state's
                                           status_hints; sizeup/cad/statushints.py): set, with "Status from radio
-                                          (heard 14:32:10 “...”)" in the chronology; dispatchers and admins
+                                          (heard 14:32:10 “...”)" in the chronology; dispatchers and admins; a unit out of
+                                          service (oos: true): 400 unless confirm: true (sizeup/cad/oos.py)
 POST /api/cad/hint/<id>/dismiss           {operator?}  not so: that transmission never suggests it again
 POST /api/cad/oos-notice/<id>/service   {operator?}  an automation refused on an out-of-service unit (the state's
                                           oos_notices; sizeup/cad/oos.py): the unit back in service (its free status);
-                                          /dismiss: left out of service. Dispatchers and admins
+                                          /dismiss: left out of service. Dispatchers and admins; 400 once it lapsed
+                                          (5 min, or its call closed)
 GET  /api/cad/export/status-hints.csv     every suggestion and how it ended (accepted / dismissed / expired ...)
 GET  /api/cad/alarms                      the emergency alarms (sizeup/cad/alarms.py, #128): {open, notices, recent, drill,
                                           settings: {keywords, channels, other, drill, defaults, edited, push}, history}

@@ -624,11 +624,12 @@ class StatusHints:
     def active(self) -> list[dict]:
         """The suggestions to show now, newest first: {id, unit, unit_id, status, status_name, incident_id,
         incident_number, onto (accepting puts the unit on that event), traffic_id, heard_at, said, text, phrase,
-        channel, who, expires_at}."""
+        channel, who, expires_at, oos (the unit is out of service now: a person's ✓ asks first, sizeup/cad/oos.py)}."""
         self.sweep()
         L = self._lists()
-        rows = self.store.q("SELECT h.*, i.number AS incident_number, a.incident_id AS on_incident FROM status_hints h "
-                            "LEFT JOIN incidents i ON i.id = h.incident_id "
+        rows = self.store.q("SELECT h.*, i.number AS incident_number, a.incident_id AS on_incident, u.status AS unit_status "
+                            "FROM status_hints h LEFT JOIN incidents i ON i.id = h.incident_id "
+                            "LEFT JOIN units u ON u.id = h.unit_id "
                             "LEFT JOIN assignments a ON a.unit_id = h.unit_id AND a.cleared_at IS NULL "
                             "WHERE h.outcome = 'pending' ORDER BY h.heard_at DESC, h.id DESC")
         out = []
@@ -639,7 +640,8 @@ class StatusHints:
                         "incident_number": r["incident_number"] or "",
                         "onto": bool(r["incident_id"] and r["on_incident"] != r["incident_id"] and role not in ("free", "oos")),
                         "traffic_id": r["traffic_id"], "heard_at": r["heard_at"], "said": r["said"], "text": r["text"],
-                        "phrase": r["phrase"], "channel": r["channel"], "who": r["who"], "expires_at": r["expires_at"]})
+                        "phrase": r["phrase"], "channel": r["channel"], "who": r["who"], "expires_at": r["expires_at"],
+                        "oos": L.role(r["unit_status"] or "") == "oos"})
         return out
 
     # -- decided -------------------------------------------------------------------------------------------------

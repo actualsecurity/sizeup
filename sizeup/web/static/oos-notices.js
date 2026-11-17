@@ -1,7 +1,7 @@
 /* Out of service is a person's to end (sizeup/cad/oos.py): the state's oos_notices, what automation was refused on an
    out-of-service unit ("radio heard “responding”"), shown under the unit's row of the units board as a chip
-   "Radio heard “responding” · In service? ✓ ✕" with the whole notice on hover (a status suggestion's chip is left
-   off that row: status-hints.js). ✓ puts the unit in service (its free status;
+   "Radio heard “responding” · In service? ✓ ✕" with the whole notice on hover. Shown 5 min after its last repeat,
+   only while its call is open (the server's oos_notices says which); then it lapses and the unit stays as it was. ✓ puts the unit in service (its free status;
    dispatchers and admins), ✕ leaves it out of service. A viewer, and the wall board, see it and nothing to press.
    Drawn after every render (cad.hooks) over what cad.js drew. */
 (function () {
@@ -70,7 +70,7 @@
     return c;
   }
 
-  // its own line at the foot of the row; replaced only when the notice changes, so a focused ✓ keeps its focus across
+  // its own line at the foot of the row (a status suggestion's chip stays in the row's head); replaced only when the notice changes, so a focused ✓ keeps its focus across
   // the state push (cad.js redraws a row only when the unit changes: the line is put back after)
   function place(li, n) {
     const have = li.querySelector(":scope > .oos-line");
@@ -94,9 +94,6 @@
     }
   }
 
-  // the units with a notice shown now (status-hints.js draws no chip on their board row)
-  const units = () => new Set(all().map((n) => n.unit));
-
-  window.OosNotices = { draw, units };
+  window.OosNotices = { draw };
   if (hasCad() && Array.isArray(cad.hooks)) cad.hooks.push(draw);
 })();

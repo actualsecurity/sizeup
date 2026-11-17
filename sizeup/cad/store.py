@@ -1184,7 +1184,7 @@ class Store:
         (sizeup/cad/oos.py). The caller holds the lock (_oos_gated)."""
         L = self.lists
         for uid in uids:
-            u = self.db.execute("SELECT id, name, status, board FROM units WHERE id = ?", (uid,)).fetchone()
+            u = self.db.execute("SELECT id, name, status, status_at, board FROM units WHERE id = ?", (uid,)).fetchone()
             if u is None or L.role(u["status"]) != "oos":
                 continue
             with self.tx() as db:

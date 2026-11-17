@@ -605,7 +605,15 @@ class Cad:
         op = _text(body, "operator", OPERATOR_MAX)
         if action != "accept":
             return self.hints.dismiss(hid, op)
-        h = self.store.one("SELECT unit_id, incident_id FROM status_hints WHERE id = ?", (hid,))
+        h = self.store.one("SELECT unit_id, incident_id, status FROM status_hints WHERE id = ?", (hid,))
+        if h is not None:                                # out of service: only once the person said so (sizeup/cad/oos.py)
+            u = self.store.unit(h["unit_id"])
+            if self.lists.role(u["status"]) == "oos" and not _bool(body, "confirm"):
+                L = self.lists
+                onto = h["incident_id"] and u["incident_id"] != h["incident_id"] and L.role(h["status"]) not in ("free", "oos")
+                raise CadError(f"{u['name']} is {L.status_phrase(u['status'])}: "
+                               + ("put it on the call anyway?" if onto else f"set it {L.status_phrase(h['status'])} anyway?")
+                               + " (confirm: true)")
         if h is not None:                                # a person's, before the write (#311 L4): where it was and goes
             was = self.store.unit(h["unit_id"])["incident_id"]
             for i in {was, h["incident_id"]}:
