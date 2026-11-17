@@ -727,3 +727,42 @@ def test_with_no_state_at_all_what_the_leader_before_wrote_is_still_not_recorded
     assert all(new._cams[CAM]["segs"][k][0] >= end - dvr_mod.SNAP_BACK_S for k in added)
     listed = pdts(new)
     assert all(b[0] > a[0] for a, b in zip(listed, listed[1:]))
+
+
+def test_a_segment_whose_span_is_recorded_already_is_never_written_again(tmp_path):
+    """Keys that jump past the last one (an offset that no longer fits) but whose time is recorded already: not
+    written; the first that ends after the recording's end is."""
+    r, d, f, clock = setup(tmp_path)
+    d.pins = {CAM}
+    d.tick()
+    step(d, f, clock, 2)
+    last, end = d._cams[CAM]["last"], d._cams[CAM]["end"]
+    f.seq += 4                                                  # the next keys skip one, no time has passed
+    assert d.tick() == 0 and d._cams[CAM]["last"] == last
+    step(d, f, clock, 1)
+    added = sorted(set(d._cams[CAM]["segs"]) - set(range(last + 1)))
+    assert added == [last + 5] and d._cams[CAM]["segs"][last + 5][0] >= end - 1e-3
+    listed = pdts(d)
+    assert all(b[0] >= a[0] + a[1] - 1e-3 for a, b in zip(listed, listed[1:]))
+
+
+def test_a_live_viewers_chunklist_is_timed_when_it_was_read(tmp_path):
+    """The live pump's copy can be up to 10 s old: its segments' times come from when it was read, not from now."""
+    r, d, f, clock = setup(tmp_path)
+    assert r.get(f"/api/cad/cameras/{CAM}/stream/playlist.m3u8", "")[0] == 200
+    r.pump_once(CAM)                                            # read now ...
+    read_at = r._streams[CAM]["list_at"]
+    clock.t += 8                                                # ... used 8 s later (the pump stalled)
+    assert d.tick() == 3
+    assert d.status(CAM)["to"] == pytest.approx(read_at, abs=1e-3)
+
+
+def test_a_handover_on_the_same_stream_is_no_discontinuity(tmp_path):
+    r, f, clock, old = recorded(tmp_path)
+    last = old._cams[CAM]["last"]
+    f.advance()
+    clock.t += 4
+    new = leader(r, tmp_path, clock)
+    assert new.resume()
+    new.tick()
+    assert sorted(k for k in new._cams[CAM]["segs"]) == [last + 1] and not new._new_stream(CAM, last + 1)

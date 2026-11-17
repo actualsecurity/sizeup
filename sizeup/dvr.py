@@ -923,8 +923,14 @@ class Dvr:
         # (#597) this task's first round of the camera (a takeover, a restart); the last own chunklist and its newest
         fresh, polled, top = "top" not in c, c.get("polled"), c.get("top")
         c["polled"], c["top"] = (None if live else now), seqs[-1]
-        # each one's end: now, less the durations of those after it (a segment is listed once it is whole)
-        ends, t = [], now
+        # each one's end: when the chunklist was read (a live viewer's: the pump's copy, up to 10 s old), less the
+        # durations of those after it (a segment is listed once it is whole)
+        listed = now
+        if live:
+            at = (self.roads._streams.get(cid) or {}).get("list_at")
+            if isinstance(at, (int, float)) and now - 10 <= at <= now:
+                listed = at
+        ends, t = [], listed
         for _, dur in reversed(items):
             ends.append(t)
             t -= dur
@@ -960,7 +966,7 @@ class Dvr:
                 # since then; else a segment before), so the timeline stays within a round of the clock; and never
                 # more than SNAP_BACK_S before the one before ends (the playlist's dates only go on, no discontinuity)
                 newest = polled is not None and k == len(items) - 1 and top is not None and seqs[k] > top
-                earliest = t0 - (now - polled if newest else dur)
+                earliest = t0 - (listed - polled if newest else dur)
                 t0 = max(min(max(end, earliest), t0 + SNAP_AHEAD_S), end - min(dur / 2, SNAP_BACK_S))
             elif end is not None and t0 + dur <= end:
                 continue                                       # its whole span is recorded already: never twice
@@ -1129,6 +1135,8 @@ class Dvr:
                     continue
                 c = self._cams.setdefault(cid, {"segs": _Segs(), "last": None, "end": None, "offset": 0, "breaks": set()})
                 c["last"], c["end"], c["offset"] = last, float(end), offset
+                if isinstance(s.get("src"), str):
+                    c["src"] = s["src"]                   # (#597: the same stream after a handover, no discontinuity)
                 self._resumed.add(cid)
                 n += 1
         self._scanned.set()
